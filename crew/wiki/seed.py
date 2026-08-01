@@ -6,9 +6,12 @@
 建成 kb_id 为 ``tutorial`` 的知识库。
 
 特性：
-- 幂等：通过标记文件 ``<owner_home>/.tutorial_kb_seeded`` 保证只初始化一次。
-- 尊重删除：用户主动删除教程库后（标记仍在、目录已删）不再重建。
-- 容错：任何失败只记日志，绝不抛出，不影响核心对话功能。
+- 一次复制：通过标记文件 ``<owner_home>/.tutorial_kb_seeded`` 保证只导入一次。
+- 可编辑：复制后的页面属于用户知识库存储，可正常修改。
+- 预置概览：``SUMMARY.md`` / ``INTRO.md`` 是手写的知识库概览与 Home 导读，
+  初始化时直接写入 KB 元数据（status=ready），新用户无需 LLM 调用即可看到。
+- 懒加载：仅在读取知识库列表时执行，不进入 Crew 启动链路。
+- 容错：任何失败只记日志，绝不影响 Wiki 列表接口。
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ TUTORIAL_KB_ID = "tutorial"
 TUTORIAL_KB_NAME = "LLM Wiki 使用教程"
 
 _SEED_DIR = Path(__file__).parent / "seed" / "tutorial"
-_PAGE_SUBDIRS = ("topics", "concepts", "entities")
+_PAGE_SUBDIRS = ("topics", "entities")
 _MARKER_NAME = ".tutorial_kb_seeded"
 
 # index.md 的分组顺序：按页面第一个标签归类
@@ -34,7 +37,7 @@ _INDEX_SECTIONS = ("入门", "理论", "界面功能", "对话交互", "案例")
 
 
 def ensure_tutorial_kb(store: Any, owner_account_id: str = "") -> bool:
-    """如果教程知识库不存在就创建它；已存在或曾被用户删除则什么都不做。
+    """如果教程知识库不存在就复制一份；已存在则不覆盖用户修改。
 
     返回 True 表示本次执行了初始化。任何异常都被吞掉并记日志。
     """
@@ -53,7 +56,7 @@ def _ensure(store: Any, owner_account_id: str) -> bool:
     marker = kb_root.parent / _MARKER_NAME
     kb_dir = kb_root / TUTORIAL_KB_ID
     if marker.exists():
-        # 已初始化过；若用户之后删掉了教程库，也尊重删除、不重建
+        # 已复制过，不覆盖用户后续对教程页面的修改。
         return False
     if kb_dir.exists():
         # 目录已存在（例如用户手动建了同名库）：不覆盖，只补标记
@@ -68,20 +71,67 @@ def _ensure(store: Any, owner_account_id: str) -> bool:
         if not sub_dir.exists():
             continue
         for path in sorted(sub_dir.glob("*.md")):
-            # ``concept`` 已不再是可持久化的页面类型；种子目录仍按内容性质
-            # 分类维护，但导入时统一落到受支持的 topics/ 路径。
-            target_sub = "topics" if sub == "concepts" else sub
-            rel = f"{target_sub}/{path.name}"
+            rel = f"{sub}/{path.name}"
             page = deserialize_page(path.read_text(encoding="utf-8"), rel)
             store.save_page(page, owner_account_id=owner_account_id, kb_id=TUTORIAL_KB_ID)
             pages.append(page)
 
     _write_schema(kb_dir)
     _write_index(kb_dir, pages)
+    _seed_summary(store, pages, owner_account_id)
+    store.update_home(owner_account_id, TUTORIAL_KB_ID)
     _append_log(kb_dir, len(pages))
     _write_marker(marker)
     log.info("教程知识库已初始化: %s（%d 个页面）", kb_dir, len(pages))
     return True
+
+
+def _seed_summary(store: Any, pages: list[Any], owner_account_id: str) -> None:
+    """把手写的知识库概览与 Home 导读写入 KB 元数据，无需 LLM 即可展示。
+
+    content_hash 按教程页面内容计算，与 WikiSummarizer 的刷新判定一致：
+    教程页面未被修改时不会触发重生成，用户改动内容后才由后台刷新接管。
+    """
+    summary_file = _SEED_DIR / "SUMMARY.md"
+    if not summary_file.exists():
+        return
+    from crew.wiki.schemas import HomeIntro, KBSummary
+    from crew.wiki.summary import WikiSummarizer
+
+    # 落盘后的页面内容经 serde 规范化，hash 必须按读回的页面计算，
+    # 与 WikiSummarizer 刷新时看到的内容保持一致。
+    stored_pages = store.list_all(owner_account_id=owner_account_id, kb_id=TUTORIAL_KB_ID, limit=10000)
+    content_hash = WikiSummarizer._compute_content_hash(stored_pages, [])
+    now = time.time()
+    store.set_kb_summary(
+        KBSummary(
+            summary=summary_file.read_text(encoding="utf-8").strip(),
+            page_count=len(pages),
+            source_count=0,
+            content_hash=content_hash,
+            generated_at=now,
+            status="ready",
+        ),
+        owner_account_id,
+        TUTORIAL_KB_ID,
+    )
+    intro_file = _SEED_DIR / "INTRO.md"
+    if intro_file.exists():
+        from crew.wiki.summary import _split_home_intro
+
+        # INTRO.md 与 LLM 输出同构（导读 + ---推荐问题--- + 问题列表），复用同一解析。
+        intro_text, questions = _split_home_intro(intro_file.read_text(encoding="utf-8"))
+        store.set_home_intro(
+            HomeIntro(
+                text=intro_text,
+                questions=questions,
+                content_hash=content_hash,
+                generated_at=now,
+                status="ready",
+            ),
+            owner_account_id,
+            TUTORIAL_KB_ID,
+        )
 
 
 def _write_marker(marker: Path) -> None:

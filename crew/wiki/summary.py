@@ -157,7 +157,8 @@ class WikiSummarizer:
             self._locks[key] = asyncio.Lock()
         return self._locks[key]
 
-    def _compute_content_hash(self, pages: list[WikiPage], raws: list[Any]) -> str:
+    @staticmethod
+    def _compute_content_hash(pages: list[WikiPage], raws: list[Any]) -> str:
         """基于页面标题+类型+截断内容 + source 标题计算稳定 hash。"""
         parts: list[str] = [_SUMMARY_PROMPT_VERSION]
         for page in pages[:_SUMMARY_MAX_PAGES]:
