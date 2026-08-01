@@ -1,0 +1,469 @@
+# =============================================================================
+# Crew 一体化 .deb 打包 Dockerfile
+# -----------------------------------------------------------------------------
+# 产物：crew-desktop_${BUILD_VERSION}_amd64.deb
+# 特性：
+#   - 采用 Systemd User Service 架构，完全摆脱 sudo 权限依赖
+#   - 配置文件 (~/.Crew/) 在用户首次双击运行时动态初始化
+#   - 原生支持 Linux 多用户环境，服务与数据相互隔离
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: crew-gateway 二进制构建
+# -----------------------------------------------------------------------------
+FROM docker.m.daocloud.io/library/python:3.11-slim-buster AS gateway-builder
+
+ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
+    ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ \
+    NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+# Debian Buster 已 EOL，常规镜像已移除，改用阿里云归档镜像
+# 必须同时包含 buster-security，否则 base 镜像中已更新的 libbz2 (deb10u2)
+# 与主仓库中未更新的 bzip2 (deb10u1) 之间版本不匹配，导致 apt 依赖解析失败
+RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
+
+# Electron 43 的构建工具要求 Node 22.12+。NodeSource 在国内不稳定，
+# 改为直接从 npmmirror 下载固定的 Node.js 22 LTS 二进制。
+RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends \
+        binutils \
+        curl \
+        ca-certificates \
+        xz-utils \
+    && curl -fsSL "https://npmmirror.com/mirrors/node/v22.18.0/node-v22.18.0-linux-x64.tar.xz" -o /tmp/node.tar.xz \
+    && tar -xf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && node --version \
+    && npm --version \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# 缓存优化：先安装第三方依赖（仅 pyproject.toml 变更时重建），再拷贝源码。
+# 避免 crew/ 下任何代码改动触发全量 pip 依赖重新下载（这是构建从几分钟
+# 变成半小时的根因）。
+# ---------------------------------------------------------------------------
+COPY pyproject.toml README.md ./
+RUN pip install --no-cache-dir \
+    "openai>=1.30" \
+    "fastapi>=0.110" \
+    "uvicorn>=0.29" \
+    "pyyaml>=6.0" \
+    "python-dotenv>=1.0" \
+    "prompt_toolkit>=3.0" \
+    "rich>=13.0" \
+    "websockets>=12.0" \
+    "psutil>=5.9" \
+    "apscheduler>=3.11.2" \
+    "mcp>=1.0" \
+    "httpx>=0.27,<1.0" \
+    "requests>=2.34.2" \
+    "wcmatch>=8.4" \
+    "jsonschema>=4.0" \
+    pyinstaller
+
+# 源码拷贝（代码变更只影响这一层及以下，依赖层保持缓存）
+COPY crew ./crew
+RUN pip install --no-cache-dir --no-deps .
+
+COPY web ./web
+COPY config ./config
+COPY plugins ./plugins
+
+COPY web/package.json web/package-lock.json ./web/
+RUN cd web && npm install --no-audit --no-fund
+RUN cd web && npm run build
+
+RUN pyinstaller --name crew-gateway \
+    --onedir \
+    --add-data "web/dist:web/dist" \
+    --add-data "config:config" \
+    --add-data "crew/skills:crew/skills" \
+    --add-data "crew/scenarios:crew/scenarios" \
+    --add-data "crew/mcp_servers:crew/mcp_servers" \
+    --add-data "crew/agent/subagent/presets:crew/agent/subagent/presets" \
+    --add-data "plugins:plugins" \
+    crew/gateway/server.py
+
+# 兜底修复：PyInstaller --add-data 在某些环境下未完整递归复制 config 子目录，
+# 显式复制关键配置子目录到 _internal/config/ 以确保运行时路径解析正确
+RUN for subdir in prompts; do \
+        src="config/$subdir"; \
+        dst="dist/crew-gateway/_internal/config/$subdir"; \
+        if [ -d "$src" ]; then \
+            mkdir -p "$dst"; \
+            cp -r "$src"/* "$dst"/ 2>/dev/null || true; \
+            count=$(find "$dst" -type f 2>/dev/null | wc -l); \
+            echo "✓ config/$subdir -> _internal/config/$subdir ($count files)"; \
+        else \
+            echo "⚠ config/$subdir not found, skipping"; \
+        fi; \
+    done
+
+# 额外兜底：同时确保 exe 同级 config/ 中也存在（兼容多种路径解析方式）
+RUN for subdir in prompts; do \
+        src="config/$subdir"; \
+        dst="dist/crew-gateway/config/$subdir"; \
+        if [ -d "$src" ]; then \
+            mkdir -p "$dst"; \
+            cp -r "$src"/* "$dst"/ 2>/dev/null || true; \
+        fi; \
+    done
+
+# 安装包只携带可发布的配置模板；本地配置和真实密钥绝不进入发布产物
+RUN mkdir -p dist/crew-gateway/config \
+    && cp config/.env.example dist/crew-gateway/config/.env.example \
+    && cp config/config.yaml.example dist/crew-gateway/config/config.yaml.example \
+    && test -f dist/crew-gateway/config/.env.example \
+    && test -f dist/crew-gateway/config/config.yaml.example \
+    && echo "✓ 配置 example 已预置到安装包中，首次运行时生成用户私有配置"
+
+
+# -----------------------------------------------------------------------------
+# Stage 2: crew-desktop Electron 客户端打包
+# -----------------------------------------------------------------------------
+FROM docker.m.daocloud.io/library/python:3.11-slim-buster AS desktop-builder
+
+ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
+    ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ \
+    NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+# Debian Buster 已 EOL，常规镜像已移除，改用阿里云归档镜像
+# 必须同时包含 buster-security，否则 base 镜像中已更新的 libbz2 (deb10u2)
+# 与主仓库中未更新的 bzip2 (deb10u1) 之间版本不匹配，导致 apt 依赖解析失败
+RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
+
+# Electron 43 的构建工具要求 Node 22.12+。NodeSource 在国内不稳定，
+# 改为直接从 npmmirror 下载固定的 Node.js 22 LTS 二进制。
+RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        xz-utils \
+        imagemagick \
+        file \
+    && curl -fsSL "https://npmmirror.com/mirrors/node/v22.18.0/node-v22.18.0-linux-x64.tar.xz" -o /tmp/node.tar.xz \
+    && tar -xf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && node --version \
+    && npm --version \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY desktop/package.json desktop/package-lock.json ./
+ARG BUILD_PLATFORM=UOS amd64
+RUN npm ci --no-audit --no-fund
+
+COPY desktop/esbuild.config.mjs desktop/tsconfig.json desktop/electron-builder.yml ./
+COPY desktop/src ./src
+COPY desktop/assets ./assets
+
+# 注入版本号与平台标识到 package.json，使 Electron 客户端版本标签与 .deb 包版本一致
+# 必须在 npm ci 之后执行，避免 npm ci 根据 lockfile 校验 package.json 时覆盖修改
+ARG BUILD_VERSION=0.1.0
+RUN node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${BUILD_VERSION}';p.platform='${BUILD_PLATFORM}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n');" \
+    && echo "✓ version=${BUILD_VERSION}, platform=${BUILD_PLATFORM} injected"
+
+RUN npm run build \
+    && npx electron-builder --linux --config electron-builder.yml
+
+
+# -----------------------------------------------------------------------------
+# Stage 3: Debian 安装包组装
+# -----------------------------------------------------------------------------
+FROM docker.m.daocloud.io/library/debian:buster-slim AS packager
+
+ARG BUILD_VERSION=0.1.0
+
+# Debian Buster 已 EOL，常规镜像已移除，改用阿里云归档镜像
+# 必须同时包含 buster-security，否则 base 镜像中已更新的 libbz2 (deb10u2)
+# 与主仓库中未更新的 bzip2 (deb10u1) 之间版本不匹配，导致 apt 依赖解析失败
+RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
+
+RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends \
+        dpkg-dev \
+        bzip2 \
+        imagemagick \
+        curl \
+        ca-certificates \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# ----- 0) 下载内嵌运行时 (Python standalone + Node.js portable) -----
+# 与 Windows pack_exe.ps1 对齐：技能脚本需要 python/node，
+# 目标 UOS/信创系统可能未预装或版本过旧，打包内嵌运行时确保开箱即用。
+ARG BUNDLED_PYTHON_VERSION=3.11.9
+ARG BUNDLED_NODE_VERSION=20.18.3
+
+# Python standalone (indygreg/python-build-standalone) — 自包含，无系统依赖
+# 直接从官方发布地址下载；如构建环境需要代理，由调用方通过标准代理环境变量配置。
+RUN mkdir -p /tmp/runtimes/python \
+    && echo "Downloading Python ${BUNDLED_PYTHON_VERSION} standalone..." \
+    && PYTHON_REL="indygreg/python-build-standalone/releases/download/20240415/cpython-${BUNDLED_PYTHON_VERSION}+20240415-x86_64-unknown-linux-gnu-install_only.tar.gz" \
+
+    && PYTHON_URL="https://github.com/${PYTHON_REL}" \
+    && echo "  downloading: ${PYTHON_URL}" \
+    && curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180 "$PYTHON_URL" -o /tmp/python.tar.gz \
+
+    && test -s /tmp/python.tar.gz \
+    && tar -xzf /tmp/python.tar.gz -C /tmp/runtimes/python --strip-components=1 \
+    && rm /tmp/python.tar.gz \
+    && /tmp/runtimes/python/bin/python3 --version \
+    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir \
+       requests lxml python-pptx openpyxl xlsxwriter beautifulsoup4 markdown charset-normalizer \
+    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir --no-deps markitdown \
+    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir "mcp==1.28.0" \
+    && ln -sf python3 /tmp/runtimes/python/bin/python \
+    && /tmp/runtimes/python/bin/python3 -c "from mcp.server.fastmcp import FastMCP; print('✓ mcp.server.fastmcp importable')" \
+    && echo "✓ Python ${BUNDLED_PYTHON_VERSION} standalone ready"
+
+# Node.js portable (npmmirror) — 与 Stage 1/2 同源
+RUN mkdir -p /tmp/runtimes/node \
+    && echo "Downloading Node.js v${BUNDLED_NODE_VERSION}..." \
+    && curl -fsSL "https://npmmirror.com/mirrors/node/v${BUNDLED_NODE_VERSION}/node-v${BUNDLED_NODE_VERSION}-linux-x64.tar.xz" \
+       -o /tmp/node.tar.xz \
+    && tar -xf /tmp/node.tar.xz -C /tmp/runtimes/node --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && /tmp/runtimes/node/bin/node --version \
+    && echo "✓ Node.js v${BUNDLED_NODE_VERSION} portable ready"
+
+WORKDIR /deb-build
+
+# 创建 Debian 标准目录结构（注意新增了 usr/lib/systemd/user）
+RUN mkdir -p DEBIAN \
+    opt/crew-gateway opt/crew-desktop \
+    usr/bin \
+    usr/share/applications \
+    usr/share/icons/hicolor/48x48/apps \
+    usr/share/icons/hicolor/128x128/apps \
+    usr/share/icons/hicolor/256x256/apps \
+    usr/share/icons/hicolor/512x512/apps \
+    usr/lib/systemd/user
+
+# ----- 1) 拷贝应用本体 -----
+COPY --from=gateway-builder /app/dist/crew-gateway ./opt/crew-gateway
+COPY --from=desktop-builder /app/release/linux-unpacked ./opt/crew-desktop
+RUN chmod +x ./opt/crew-desktop/crew-desktop \
+    && chmod -R 755 ./opt/crew-gateway \
+    && chmod -R 755 ./opt/crew-desktop \
+    && if [ -f ./opt/crew-desktop/chrome-sandbox ]; then chown root:root ./opt/crew-desktop/chrome-sandbox && chmod 4755 ./opt/crew-desktop/chrome-sandbox; fi \
+    && desktop_sandbox=./opt/crew-desktop/chrome-sandbox \
+    && test -f "$desktop_sandbox" \
+    && test "$(stat -c %u "$desktop_sandbox")" = "0" \
+    && test "$(stat -c %a "$desktop_sandbox")" = "4755"
+
+# ----- 1b) 拷贝内嵌运行时到 _internal/runtimes/ -----
+# Python standalone + Node.js portable，确保技能脚本在无系统 Python/Node 时也能执行
+RUN cp -r /tmp/runtimes ./opt/crew-gateway/_internal/runtimes \
+    && chmod -R 755 ./opt/crew-gateway/_internal/runtimes \
+    && echo "✓ Bundled runtimes (Python + Node.js) copied to _internal/runtimes/"
+
+# ----- 2) 桌面菜单项 (.desktop) -----
+# 使用 printf 代替 echo 确保跨 shell 可移植的换行处理
+RUN printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    'Name=Crew' \
+    'Name[zh_CN]=Crew 桌面端' \
+    'Comment=Crew Desktop - Multi-Agent GUI Client' \
+    'Comment[zh_CN]=Crew 桌面端 - 多智能体平台 GUI 客户端' \
+    'Exec=/usr/bin/crew-desktop' \
+    'Icon=crew-desktop' \
+    'Terminal=false' \
+    'Categories=Utility;Office;Network;' \
+    'StartupNotify=true' \
+    'StartupWMClass=Crew Desktop' \
+    '' > usr/share/applications/crew-desktop.desktop
+# UOS/Deepin 桌面环境要求 .desktop 文件具有可执行权限才能被桌面信任并显示图标
+RUN chmod +x usr/share/applications/crew-desktop.desktop
+
+# ----- 3) 图标处理 -----
+# UOS/Deepin 需要多尺寸图标，补充 48x48 和 128x128 常见桌面显示尺寸
+COPY --from=desktop-builder /app/assets/icon.png /tmp/icon-source.png
+RUN mkdir -p usr/share/icons/hicolor/48x48/apps \
+    usr/share/icons/hicolor/128x128/apps \
+    && convert /tmp/icon-source.png -resize 48x48 usr/share/icons/hicolor/48x48/apps/crew-desktop.png \
+    && convert /tmp/icon-source.png -resize 128x128 usr/share/icons/hicolor/128x128/apps/crew-desktop.png \
+    && convert /tmp/icon-source.png -resize 256x256 usr/share/icons/hicolor/256x256/apps/crew-desktop.png \
+    && convert /tmp/icon-source.png -resize 512x512 usr/share/icons/hicolor/512x512/apps/crew-desktop.png \
+    && rm /tmp/icon-source.png
+
+# ----- 4) Gateway 不再使用 systemd user service -----
+# 改由 desktop 子进程托管：desktop 启动时 spawn /opt/crew-gateway/crew-gateway，
+# 退出时随之消亡。废弃原因：多用户机器上各用户 systemd 服务 enable-linger + Restart=always
+# 会抢同一个 8000 端口，且跨用户 instance key 不一致导致桌面端验签失败连不上。
+# 故不再生成 crew-gateway.service，postinst 也不 enable/linger。
+
+# ----- 5) Gateway 快捷软链 -----
+# 让喜欢用终端的高级用户可以直接执行 crew-gateway
+RUN ln -sf /opt/crew-gateway/crew-gateway usr/bin/crew-gateway
+
+# ----- 6) 核心：启动包装脚本 (crew-desktop) -----
+# 在打包阶段直接生成，负责：初始化用户目录 -> 启动 UI（UI 内部 spawn gateway）
+RUN cat > usr/bin/crew-desktop << 'WRAPPER_EOF'
+#!/bin/sh
+set -e
+
+# 1. 自动初始化普通用户的配置文件目录 (以双击桌面的真实用户身份运行)
+CREW_HOME="$HOME/.Crew"
+if [ ! -d "$CREW_HOME" ]; then
+    echo "首次运行，正在为您初始化配置目录: $CREW_HOME"
+    mkdir -p "$CREW_HOME"
+    chmod 700 "$CREW_HOME"
+fi
+
+# 2. 拉起 Electron 桌面端（gateway 由 desktop 子进程 spawn 托管，不再用 systemd）
+#    desktop 启动时会扫描 8000-8009 空闲端口 spawn /opt/crew-gateway/crew-gateway，
+#    退出时随之消亡。这样彻底消除多用户 systemd 服务抢 8000 + 跨用户 key 不一致的问题。
+exec /opt/crew-desktop/crew-desktop "$@"
+WRAPPER_EOF
+RUN chmod +x usr/bin/crew-desktop
+
+# ----- 7) Debian 控制文件 (control) -----
+RUN echo "Package: crew-desktop\n\
+Version: ${BUILD_VERSION}\n\
+Section: utils\n\
+Priority: optional\n\
+Architecture: amd64\n\
+Maintainer: Crew Contributors <maintainers@example.com>\n\
+Depends: ca-certificates, fonts-liberation, libasound2 (>= 1.0.17), libatk-bridge2.0-0 (>= 2.5.3), libatk1.0-0 (>= 2.11.90), libatspi2.0-0 (>= 2.9.90), libc6 (>= 2.25), libcairo2 (>= 1.6.0), libcups2 (>= 1.6.0), libcurl3-gnutls | libcurl4 | libcurl3, libdbus-1-3 (>= 1.9.14), libexpat1, libgbm1, libgcc1, libglib2.0-0, libgtk-3-0, libnspr4, libnss3, libpango-1.0-0, libudev1, libvulkan1, libx11-6, libxcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxi6, libxkbcommon0, libxrandr2, xdg-utils\n\
+Description: Crew - 多智能体平台（网关服务与桌面客户端）\n 本软件包包含 Crew gateway 和基于 Electron 的桌面客户端。\n" > DEBIAN/control
+
+# ----- 8) 安装后脚本 (postinst) -----
+# 负责：刷新 systemd 缓存 → 为已登录用户启动服务 → 刷新桌面缓存
+RUN cat << 'POSTINST_EOF' > DEBIAN/postinst
+#!/bin/sh
+set -e
+
+# 1. chrome-sandbox 需要 root:root + 4755（Electron Linux 必需）
+for sandbox in /opt/crew-desktop/chrome-sandbox; do
+    if [ -f "$sandbox" ]; then
+        chown root:root "$sandbox"
+        chmod 4755 "$sandbox"
+    fi
+done
+
+# 2. 清理旧版本遗留的 systemd user service 自启（本版起 gateway 改由 desktop 子进程托管）
+#    旧版 postinst 给所有用户 enable-linger + 全局软链 + enable crew-gateway.service，
+#    升级到本版后必须拆除，否则旧 systemd 服务仍会自启抢 8000 端口。
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    rm -f /etc/systemd/user/default.target.wants/crew-gateway.service 2>/dev/null || true
+fi
+if command -v loginctl >/dev/null 2>&1; then
+    for uid in $(loginctl list-users --no-legend 2>/dev/null | awk '$1 >= 1000 {print $1}'); do
+        [ -n "$uid" ] || continue
+        username=$(id -nu "$uid" 2>/dev/null || true)
+        [ -n "$username" ] && [ -d "/run/user/$uid" ] || continue
+        su -s /bin/sh "$username" -c "
+            export XDG_RUNTIME_DIR=/run/user/$uid
+            export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus
+            systemctl --user stop crew-gateway.service 2>/dev/null || true
+            systemctl --user disable crew-gateway.service 2>/dev/null || true
+        " 2>/dev/null || true
+    done
+fi
+# 杀掉残留的旧 gateway 进程（旧 systemd 实例或手动启动的），释放 8000
+pkill -f /opt/crew-gateway/crew-gateway 2>/dev/null || true
+
+# 3. 刷新桌面缓存
+command -v update-desktop-database >/dev/null 2>&1 \
+    && update-desktop-database -q /usr/share/applications || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 \
+    && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+
+# 4. 为已登录用户创建桌面快捷方式
+#    复用菜单 .desktop (/usr/share/applications/crew-desktop.desktop) 作为唯一源：
+#    复制到各用户桌面目录并 chmod +x。UOS/Deepin 下 ~/Desktop 的 .desktop 默认不被信任、
+#    双击无效，故还需以用户身份 gio set metadata::trusted true 标记信任（需该用户 DBus 会话，
+#    因此整个块在 su -s /bin/sh 内执行，复用上面 XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS 模式）。
+#    桌面目录优先 xdg-user-dir（返回本地化名「桌面」），不可用时回退 $HOME/桌面 / $HOME/Desktop。
+#    各步失败仅影响对应用户，不阻断安装（2>/dev/null || true）。
+if [ -f /usr/share/applications/crew-desktop.desktop ] && command -v loginctl >/dev/null 2>&1; then
+    for uid in $(loginctl list-users --no-legend 2>/dev/null | awk '$1 >= 1000 {print $1}'); do
+        [ -n "$uid" ] || continue
+        username=$(id -nu "$uid" 2>/dev/null || true)
+        [ -n "$username" ] && [ -d "/run/user/$uid" ] || continue
+        su -s /bin/sh "$username" -c "
+            export XDG_RUNTIME_DIR=/run/user/$uid
+            export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus
+            DESKTOP_DIR=\$(xdg-user-dir DESKTOP 2>/dev/null || true)
+            if [ -z \"\$DESKTOP_DIR\" ]; then
+                if [ -d \"\$HOME/桌面\" ]; then DESKTOP_DIR=\"\$HOME/桌面\"; else DESKTOP_DIR=\"\$HOME/Desktop\"; fi
+            fi
+            mkdir -p \"\$DESKTOP_DIR\"
+            cp /usr/share/applications/crew-desktop.desktop \"\$DESKTOP_DIR/crew-desktop.desktop\"
+            chmod +x \"\$DESKTOP_DIR/crew-desktop.desktop\"
+            gio set \"\$DESKTOP_DIR/crew-desktop.desktop\" metadata::trusted true 2>/dev/null || true
+        " 2>/dev/null || true
+    done
+fi
+
+echo "=========================================================="
+echo " Crew @@BUILD_VERSION@@ 安装完成！"
+echo ""
+echo " 🎉 Gateway 由桌面端子进程托管："
+echo "   - 双击 'Crew' 启动时自动拉起 gateway，退出时自动关闭"
+echo "   - 配置文件位于 ~/.Crew/ 目录"
+echo "=========================================================="
+POSTINST_EOF
+RUN sed -i -e 's/\r$//' -e "s/@@BUILD_VERSION@@/${BUILD_VERSION}/g" DEBIAN/postinst \
+    && chmod 755 DEBIAN/postinst
+
+# ----- 9) 卸载前脚本 (prerm) -----
+RUN cat << 'PRERM_EOF' > DEBIAN/prerm
+#!/bin/sh
+set -e
+
+# 卸载前先通知 systemd 停止当前服务，防止 pkill 后复活
+if command -v systemctl >/dev/null 2>&1; then
+    for uid in $(ls -d /run/user/* 2>/dev/null | sed 's|/run/user/||' | grep -E '^[0-9]+$'); do
+        username=$(id -nu "$uid" 2>/dev/null || true)
+        [ -n "$username" ] && su -s /bin/sh "$username" -c "
+            export XDG_RUNTIME_DIR=/run/user/$uid
+            export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus
+            systemctl --user stop crew-gateway.service 2>/dev/null || true
+            systemctl --user disable crew-gateway.service 2>/dev/null || true
+        " 2>/dev/null || true
+    done
+fi
+
+# 暴力终止所有运行中的相关进程
+pkill -f /opt/crew-desktop/crew-desktop 2>/dev/null || true
+pkill -f /opt/crew-gateway/crew-gateway 2>/dev/null || true
+sleep 1
+
+# 移除各普通用户桌面上的快捷方式（与 postinst 第 4 步创建对应）
+# 用 getent passwd 枚举全部真实用户(uid≥1000)，比 loginctl 更全：安装时建过快捷方式的
+# 用户在卸载时未必仍登录。桌面目录可能叫 Desktop 或 桌面(本地化)，两个都清理。
+getent passwd 2>/dev/null | awk -F: '$3 >= 1000 && $3 < 65534 {print $6}' | while IFS= read -r home; do
+    [ -d "$home" ] || continue
+    rm -f "$home/Desktop/crew-desktop.desktop" \
+          "$home/桌面/crew-desktop.desktop" 2>/dev/null || true
+done
+PRERM_EOF
+RUN chmod 755 DEBIAN/prerm
+
+# ----- 10) 卸载后脚本 (postrm) -----
+RUN printf '#!/bin/sh\n\
+set -e\n\
+command -v update-desktop-database >/dev/null 2>&1 \\\n\
+    && update-desktop-database -q /usr/share/applications || true\n\
+command -v gtk-update-icon-cache >/dev/null 2>&1 \\\n\
+    && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true\n' > DEBIAN/postrm \
+    && chmod 755 DEBIAN/postrm
+
+# ----- 11) 清理行尾符并构建 .deb -----
+RUN for f in usr/bin/crew-desktop DEBIAN/prerm DEBIAN/postrm; do \
+        sed -i 's/\r$//' "$f"; \
+    done
+RUN dpkg-deb --build /deb-build /crew-desktop_${BUILD_VERSION}_amd64.deb
+RUN printf 'electron_desktop_bytes=%s\ngateway_bytes=%s\ninstalled_tree_bytes=%s\ndeb_bytes=%s\n' \
+      "$(du -sb /deb-build/opt/crew-desktop | cut -f1)" \
+      "$(du -sb /deb-build/opt/crew-gateway | cut -f1)" \
+      "$(du -sb /deb-build | cut -f1)" \
+      "$(stat -c %s /crew-desktop_${BUILD_VERSION}_amd64.deb)" \
+      > /package-size-report-linux.txt

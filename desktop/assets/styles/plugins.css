@@ -1,0 +1,188 @@
+/**
+ * 插件样式
+ * @module styles/plugins
+ */
+
+.plugins-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.plugin-item {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 18px;
+    background: var(--surface);
+    border: 1px solid rgba(71, 125, 247, 0.12);
+    border-radius: 18px;
+    box-shadow: 0 14px 28px rgba(26, 34, 51, 0.06);
+    transition: all .15s;
+    overflow: hidden;
+}
+
+.plugin-item:hover {
+    border-color: rgba(71, 125, 247, 0.32);
+    transform: translateY(-1px);
+}
+
+.plugin-card-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.plugin-info {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+}
+
+.plugin-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.plugin-name {
+    font-size: var(--font-md);
+    font-weight: 700;
+    color: var(--tx);
+}
+
+.plugin-version {
+    font-size: var(--font-xs);
+    color: var(--tx3);
+    font-family: var(--mono);
+}
+
+.plugin-desc {
+    font-size: var(--font-sm);
+    color: var(--tx2);
+    line-height: 1.6;
+    word-break: break-word;
+}
+
+.plugin-path {
+    font-size: var(--font-xs);
+    color: var(--tx3);
+    font-family: var(--mono);
+    word-break: break-all;
+    padding-top: 8px;
+    border-top: 1px dashed rgba(71, 125, 247, 0.14);
+}
+
+.plugin-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: var(--font-xs);
+    font-weight: 700;
+}
+
+.plugin-chip.is-online {
+    color: var(--green);
+    background: var(--green-dim);
+}
+
+.plugin-chip.is-offline {
+    color: var(--tx2);
+    background: rgba(154, 163, 178, 0.14);
+}
+
+.plugin-chip.is-neutral {
+    color: var(--accent);
+    background: rgba(71, 125, 247, 0.12);
+}
+
+.plugin-chip.is-warn {
+    color: #b87300;
+    background: rgba(255, 184, 0, 0.14);
+}
+
+.plugin-chip.is-danger {
+    color: var(--red);
+    background: var(--red-dim);
+}
+
+.plugin-uninstall-btn {
+    color: var(--red);
+}
+
+.plugin-uninstall-btn:hover {
+    background: var(--red-dim);
+}
+
+.plugins-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    text-align: center;
+}
+
+.plugins-empty-icon {
+    font-size: var(--font-3xl);
+    margin-bottom: 12px;
+}
+
+.plugins-empty-text {
+    font-size: var(--font-sm);
+    color: var(--tx3);
+}
+
+.plugin-install-section {
+    margin-top: 24px;
+    padding: 16px;
+    background: var(--bg1);
+    border-radius: var(--r2);
+}
+
+.plugin-install-title {
+    font-size: var(--font-md);
+    font-weight: 600;
+    color: var(--tx);
+    margin-bottom: 12px;
+}
+
+.plugin-install-actions {
+    display: flex;
+    gap: 12px;
+}
+
+.plugin-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: var(--font-xs);
+    font-weight: 500;
+}
+
+.plugin-status-badge.active {
+    background: var(--green-dim);
+    color: var(--green);
+}
+
+.plugin-status-badge.inactive {
+    background: var(--bg2);
+    color: var(--tx3);
+}
+
+.plugin-status-badge.error {
+    background: var(--red-dim);
+    color: var(--red);
+}
+
+.plugin-note {
+    color: #b87300;
+}

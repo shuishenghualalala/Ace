@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <defs>
+    <clipPath id="coverClip">
+      <rect x="44" y="36" width="152" height="168" rx="22"/>
+    </clipPath>
+  </defs>
+
+  <g id="book-icon" transform="translate(0,7.25)">
+    <path d="M140 12 L176 12 L176 62 L158 48 L140 62 Z"
+          fill="var(--skill-icon-secondary, #B7C3A6)" stroke="#4B463C" stroke-width="9"
+          stroke-linejoin="round"/>
+    <rect x="30" y="22" width="180" height="196" rx="34" fill="#4B463C"/>
+    <rect x="44" y="36" width="152" height="168" rx="22"
+          fill="var(--skill-icon-primary, #C5D4DF)"/>
+    <g clip-path="url(#coverClip)">
+      <rect x="44" y="36" width="30" height="168"
+            fill="var(--skill-icon-secondary, #B7C3A6)"/>
+      <rect x="74" y="36" width="8" height="168" fill="#4B463C"/>
+    </g>
+    <path d="M100 54 q34 -8 66 -2"
+          stroke="#FFFFFF" stroke-opacity="0.75" stroke-width="8"
+          stroke-linecap="round" fill="none"/>
+    <rect x="96" y="78" width="88" height="86" rx="15"
+          fill="#F5F1E6" stroke="#4B463C" stroke-width="9"/>
+  </g>
+</svg>

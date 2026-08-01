@@ -1,0 +1,12 @@
+{
+  "extends": [],
+  "rules": {
+    "color-no-invalid-hex": true,
+    "no-empty-source": true
+  },
+  "ignoreFiles": [
+    "node_modules/**/*",
+    "dist/**/*",
+    "tests/visual/baselines/**/*"
+  ]
+}

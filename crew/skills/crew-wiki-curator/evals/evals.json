@@ -1,0 +1,38 @@
+{
+  "skill_name": "crew-wiki-curator",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "把我刚上传的产品规范整理进当前 Wiki。",
+      "expected_output": "先 capture/parse/orient，再生成 create/update/skip 计划；默认 auto_apply=true 时自动应用并汇报实际结果，配置关闭时才停下等待确认。",
+      "files": [],
+      "assertions": [
+        "优先匹配并更新已有页面",
+        "遵循 wiki.ingest.auto_apply 决定自动应用或等待确认",
+        "不调用兼容 wiki_ingest 或内部收尾工具"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "新版资料和 Wiki 里原来的结论冲突，直接把旧内容覆盖掉。",
+      "expected_output": "比较时间、权威性和事实范围，维护 provenance/confidence/contested，并在覆盖前展示影响和确认。",
+      "files": [],
+      "assertions": [
+        "不会因为来源较新就静默覆盖",
+        "保留冲突与溯源",
+        "影响核心结论时要求确认"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "深度检查这个知识库并把能修的都修掉。",
+      "expected_output": "orient 后 lint，按严重级别生成修复计划；批量修复使用一次性确认，优先阻断和高严重问题。",
+      "files": [],
+      "assertions": [
+        "先 lint 再修复",
+        "给出严重级别与修复顺序",
+        "批量应用前等待一次性确认"
+      ]
+    }
+  ]
+}

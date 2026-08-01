@@ -1,0 +1,101 @@
+
+
+/* Dark-theme component overrides and the shared html/body base. */
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+}
+
+body {
+  font-size: var(--base-font-size);
+}
+
+.md-body,
+.chat-markdown,
+.chat-messages.web-flow .msg__text,
+.chat-messages.web-flow .md-body,
+#chat-messages.web-flow .msg__text,
+#chat-messages.web-flow .md-body,
+.chat-bubble,
+.process-timeline__content,
+.process-timeline__thinking {
+  font-size: var(--content-font-size);
+}
+
+input,
+select,
+textarea,
+button,
+.set-v2-select,
+.chat-toolbar-btn,
+.composer-popover-option,
+.cron-field input,
+.cron-field textarea,
+.system-logs-search,
+.audit-input,
+.skill-search input {
+  font-size: var(--base-font-size);
+}
+
+textarea,
+.input-container textarea,
+.chat-composer textarea,
+.chat-input-container textarea,
+.cron-field textarea {
+  font-size: var(--editor-font-size) !important;
+}
+
+code,
+pre,
+kbd,
+.chat-markdown code,
+.chat-markdown .chat-md-code,
+.line-tool,
+.inspector-msg__json,
+.inspector-msg__json-gutter,
+.system-logs-feed,
+.cron-drawer__query {
+  font-size: var(--terminal-font-size) !important;
+}
+
+.set-v2-range-wrap__head {
+  display: flex;
+  justify-content: flex-end;
+  width: 180px;
+  margin-bottom: 4px;
+}
+
+.set-v2-range-wrap__value {
+  font-size: var(--ui-copy-meta);
+  font-family: var(--mono);
+  color: var(--text-muted);
+}
+
+:root[data-theme='dark'] .composer-chip__badge,
+.theme-dark .composer-chip__badge {
+  background: #e8e8e8;
+  color: #111;
+}
+
+:root[data-theme='dark'] .composer-select-item__icon--tone-0,
+.theme-dark .composer-select-item__icon--tone-0 { background: #1e2a44; color: #8ab4ff; }
+:root[data-theme='dark'] .composer-select-item__icon--tone-1,
+.theme-dark .composer-select-item__icon--tone-1 { background: #2e2a22; color: #d4b483; }
+:root[data-theme='dark'] .composer-select-item__icon--tone-2,
+.theme-dark .composer-select-item__icon--tone-2 { background: #3a2430; color: #f0a0c0; }
+:root[data-theme='dark'] .composer-select-item__icon--tone-3,
+.theme-dark .composer-select-item__icon--tone-3 { background: #1f2e24; color: #7fd4a0; }
+:root[data-theme='dark'] .composer-select-item__icon--tone-4,
+.theme-dark .composer-select-item__icon--tone-4 { background: #2a2a2a; color: #aaa; }
+
+/* Most surfaces use var(--bg) directly; title-bar and chat-messages retain
+ * component-specific dark treatments below. */
+
+:root[data-theme='dark'] .chat-messages.web-flow .msg.user .msg__text,
+:root[data-theme='dark'] .chat-messages.web-flow .msg.user .msg__bubble,
+.theme-dark .chat-messages.web-flow .msg.user .msg__text,
+.theme-dark .chat-messages.web-flow .msg.user .msg__bubble {
+  --user-bubble-bg: #2a2a2a;
+}

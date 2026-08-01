@@ -1,0 +1,76 @@
+# Docker 构建上下文优化
+# 防止把本地开发态产物（可能数百 MB）打进 build context，
+# 这些目录都会在镜像内重新生成。
+
+# Python 开发产物
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+crew_data/
+uv.lock
+verify_cython_protection.py
+
+# Node 开发产物（全局排除，包括 skills 下的 node_modules）
+node_modules/
+web/node_modules/
+web/dist/
+
+# Desktop 开发产物
+desktop/node_modules/
+desktop/dist/
+desktop/release/
+
+# .deb 构建产物
+*.deb
+
+# Gateway 预编译二进制（Windows pack_exe.ps1 产物）
+crew-gateway/
+
+# 个人备忘 / Agent 配置（运行时不需要）
+AGENTS.md
+CLAUDE.md
+.claude/
+.superpowers/
+.Crew/
+.*Work/
+.crew/
+.git-commands.md
+
+# 环境与系统（真实 .env 永不进入构建上下文；.env.example 仍会保留）
+.env
+.env.*
+**/.env
+**/.env.*
+!config/.env.example
+config/.env
+config/config.yaml
+.DS_Store
+*.log
+
+# 文档与测试（构建不需要）
+docs/
+tests/
+TODO/
+scripts/
+walkthrough.md
+task.md
+CONTEXT.md
+CRITIQUE-Linus.md
+wiki-agent-optimization-plan.md
+code_metrics_api.py
+crew-gateway.spec
+crew-gateway-test.spec
+package-size-report*.txt
+
+# 版本控制
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/

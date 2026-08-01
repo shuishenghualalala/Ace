@@ -1,0 +1,22 @@
+# Docker 构建上下文优化：让 desktop/ 作为构建上下文时保持干净，
+# 避免把开发态产物 / 缓存拷进镜像，加快构建并防止污染。
+
+# 开发态构建产物（Docker 内会重新生成）
+dist/
+release/
+node_modules/
+
+# IDE / 系统文件
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# 源码（Docker 只需要 package.json + esbuild config + src + assets，
+# 但 .dockerignore 是黑名单模式，所以这里只排除明确不需要的）
+tests/
+*.test.ts
+*.spec.ts
+
+# 文档（运行时不需要）
+README.md

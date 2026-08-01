@@ -1,0 +1,581 @@
+/**
+ * 历史侧栏 v2 — 项目 / 工作空间 / 对话
+ *
+ * 唯一样式来源：字体与颜色全部走 variables.css 中的 --history-* token，
+ * 随设置里的 UI 字号（--base-font-size）与主题（--text-* / --border-subtle）联动。
+ * 勿在 shell-v2 / integration-pages 再写同名全局规则。
+ */
+
+#history-list.history-sidebar-v2 {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0;
+  font-family: var(--sans);
+  font-size: var(--history-row-size);
+  line-height: 1.35;
+  /* 与顶部搜索框 .history-search-container 的左右 margin(4px) 对齐 */
+  padding: 0 4px 16px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#history-list.history-sidebar-v2 .history-section {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+#history-list.history-sidebar-v2 .history-section + .history-section {
+  margin-top: 6px;
+}
+
+/* ── 分区：项目 / 对话 ── */
+#history-list.history-sidebar-v2 .history-section-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin: 0;
+  padding: 4px 4px 4px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--history-section-size);
+  font-weight: var(--history-section-weight);
+  color: var(--history-section-color);
+  letter-spacing: 0.01em;
+  border-radius: 4px;
+  transition: color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+#history-list.history-sidebar-v2 .history-section-header:hover {
+  color: var(--history-row-color);
+  background: var(--history-row-bg-hover);
+}
+
+#history-list.history-sidebar-v2 .history-section-header.collapsed {
+  color: var(--history-section-color);
+}
+
+#history-list.history-sidebar-v2 .history-section--conversations .history-section-header {
+  /* padding-top: 8px; */
+}
+
+#history-list.history-sidebar-v2 .history-section-caret {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--history-section-color);
+  opacity: 0.72;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+#history-list.history-sidebar-v2 .history-section-caret svg {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+#history-list.history-sidebar-v2 .history-section-header:not(.collapsed) .history-section-caret {
+  transform: rotate(90deg);
+}
+
+#history-list.history-sidebar-v2 .history-section-header.collapsed .history-section-caret {
+  transform: rotate(0deg);
+}
+
+#history-list.history-sidebar-v2 .history-section-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+#history-list.history-sidebar-v2 .history-folders.is-collapsed,
+#history-list.history-sidebar-v2 .conversations-list.is-collapsed {
+  display: none;
+}
+
+#history-list.history-sidebar-v2 .history-folders {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── 工作空间行 ── */
+#history-list.history-sidebar-v2 .project-block {
+  margin: 0;
+}
+
+#history-list.history-sidebar-v2 .project-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  margin: 1px 0;
+  min-height: 28px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--history-row-size);
+  font-weight: var(--history-row-weight);
+  color: var(--history-row-color-active);
+  transition: background var(--duration-fast) ease;
+}
+
+#history-list.history-sidebar-v2 .project-chevron {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--history-section-color);
+  opacity: 0.72;
+  line-height: 1;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+#history-list.history-sidebar-v2 .project-chevron svg {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+#history-list.history-sidebar-v2 .project-row.expanded .project-chevron {
+  transform: rotate(90deg);
+}
+
+#history-list.history-sidebar-v2 .project-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+#history-list.history-sidebar-v2 .project-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--history-section-color);
+  opacity: 0.88;
+}
+
+#history-list.history-sidebar-v2 .project-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+#history-list.history-sidebar-v2 .project-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  color: inherit;
+}
+
+#history-list.history-sidebar-v2 .project-row:hover {
+  background: var(--history-row-bg-hover);
+}
+
+#history-list.history-sidebar-v2 .project-row.is-active-workspace:not(:hover) {
+  background: transparent;
+}
+
+#history-list.history-sidebar-v2 .project-row.is-active-workspace:hover {
+  background: var(--history-row-bg-hover);
+}
+
+#history-list.history-sidebar-v2 .project-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-left: auto;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-fast) ease;
+}
+
+#history-list.history-sidebar-v2 .project-row:hover .project-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#history-list.history-sidebar-v2 .project-action-btn {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--history-section-color);
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+#history-list.history-sidebar-v2 .project-action-btn:hover {
+  background: var(--history-row-bg-hover);
+  color: var(--history-row-color-active);
+}
+
+#history-list.history-sidebar-v2 .project-action-btn svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 2;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#history-list.history-sidebar-v2 .project-action-btn--new-chat svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* ── 嵌套对话列表（纯缩进，无竖向引导线） ── */
+#history-list.history-sidebar-v2 {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.15s ease;
+}
+
+#history-list.history-sidebar-v2:hover {
+  scrollbar-color: var(--scrollbar-thumb, rgba(0,0,0,0.18)) transparent;
+}
+
+#history-list.history-sidebar-v2::-webkit-scrollbar {
+  width: 4px;
+}
+
+#history-list.history-sidebar-v2::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 2px;
+  transition: background 0.15s ease;
+}
+
+#history-list.history-sidebar-v2:hover::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb, rgba(0,0,0,0.18));
+}
+
+#history-list.history-sidebar-v2::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#history-list.history-sidebar-v2 .project-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 2px 18px;
+  padding: 2px 0 0;
+}
+
+#history-list.history-sidebar-v2 .conversations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+}
+
+/* ── 对话行（覆盖 history.css 的左侧蓝条与蓝色选中底） ──
+ * 选中/悬浮灰色底铺满行宽，与顶部搜索框左右对齐（由列表 padding 控制）。
+ */
+#history-list.history-sidebar-v2 .history-item.history-item--compact {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  min-height: 26px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: default;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--history-row-size);
+  font-weight: var(--history-row-weight);
+  color: var(--history-row-color);
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+#history-list.history-sidebar-v2 .history-item-main {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
+}
+
+#history-list.history-sidebar-v2 .history-item-menu-btn {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--history-section-color);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-fast) ease, background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+#history-list.history-sidebar-v2 .history-item:hover .history-item-menu-btn,
+#history-list.history-sidebar-v2 .history-item-menu-btn:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#history-list.history-sidebar-v2 .history-item-menu-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--history-row-color-active);
+}
+
+#history-list.history-sidebar-v2 .history-item.history-item--compact::before {
+  display: none;
+  content: none;
+}
+
+#history-list.history-sidebar-v2 .history-item.history-item--compact:hover .history-item-main {
+  background: var(--history-row-bg-hover);
+  color: var(--history-row-color-active);
+}
+
+#history-list.history-sidebar-v2 .history-item.history-item--compact.active .history-item-main {
+  background: var(--history-row-bg-active);
+  color: var(--history-row-color-active);
+}
+
+#history-list.history-sidebar-v2 .history-item.history-item--compact:hover {
+  background: transparent;
+  color: inherit;
+}
+
+#history-list.history-sidebar-v2 .history-item.history-item--compact.active {
+  background: transparent;
+  color: inherit;
+}
+
+#history-list.history-sidebar-v2 .history-item--compact .history-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+/* 行尾槽位：时间 / 运行 spinner / 错误点 / 未读绿点（互斥） */
+#history-list.history-sidebar-v2 .history-item-trailing {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 2.25rem;
+  max-width: 7rem;
+  margin-left: 4px;
+  transition: padding-right var(--duration-fast) ease;
+}
+
+#history-list.history-sidebar-v2 .history-item:hover .history-item-trailing {
+  padding-right: 24px;
+}
+
+#history-list.history-sidebar-v2 .history-item--compact .history-item-time {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: var(--history-meta-size);
+  font-weight: var(--history-row-weight);
+  line-height: 1.35;
+  color: var(--history-section-color);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* 置顶会话：左侧加金色竖条，与其他普通会话区分；不改变字号/字重保持列表整洁。 */
+#history-list.history-sidebar-v2 .history-item.history-item--pinned {
+  position: relative;
+  padding-left: calc(var(--history-row-px, 10px) + 4px);
+}
+#history-list.history-sidebar-v2 .history-item.history-item--pinned::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 20%;
+  bottom: 20%;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent, #f0a020);
+  opacity: 0.75;
+}
+
+#history-list.history-sidebar-v2 .history-item-leading {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#history-list.history-sidebar-v2 .session__agent-badge {
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--history-section-color);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--history-section-color);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+#history-list.history-sidebar-v2 .history-item:hover .session__agent-badge,
+#history-list.history-sidebar-v2 .history-item.active .session__agent-badge {
+  border-color: var(--history-row-color-active);
+  color: var(--history-row-color-active);
+}
+
+/* Team Session 共用 Logo；侧栏与聊天区使用同一 DOM/CSS，聊天区仅等比缩放。 */
+.session__team-logo {
+  position: relative;
+  width: 17px;
+  height: 17px;
+  display: inline-block;
+  flex: 0 0 17px;
+}
+
+.session__team-logo i {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background:
+    linear-gradient(currentColor 0 0) 2px 3px / 1px 3px no-repeat,
+    linear-gradient(currentColor 0 0) 7px 3px / 1px 3px no-repeat;
+}
+
+.session__team-logo i:first-child {
+  left: 1px;
+  bottom: 1px;
+  z-index: 2;
+  color: var(--surface, #fff);
+  border-color: var(--history-row-color-active);
+  background-color: var(--history-row-color-active);
+}
+
+.session__team-logo i:last-child {
+  right: 1px;
+  top: 1px;
+  color: var(--history-section-color);
+  background-color: transparent;
+}
+
+#history-list.history-sidebar-v2 .history-item-status-spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--color-accent-18);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: history-sidebar-status-spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+#history-list.history-sidebar-v2 .history-item-status-spinner--queued {
+  border-top-color: var(--history-section-color);
+  opacity: 0.85;
+}
+
+#history-list.history-sidebar-v2 .history-item-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+#history-list.history-sidebar-v2 .history-item-status-dot--error {
+  background: #ef4444;
+}
+
+#history-list.history-sidebar-v2 .history-item-status-dot--unread {
+  background: #22c55e;
+}
+
+@keyframes history-sidebar-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+#history-list.history-sidebar-v2 .history-empty,
+#history-list.history-sidebar-v2 .history-empty--inline {
+  height: auto;
+  min-height: 0;
+  display: block;
+  padding: 6px 8px;
+  font-size: var(--history-expand-size);
+  color: var(--history-section-color);
+  text-align: left;
+}
+
+#history-list.history-sidebar-v2 .ws-block__expand,
+#history-list.history-sidebar-v2 .ws-block__collapse {
+  display: block;
+  width: 100%;
+  margin: 4px 0 2px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--history-section-color);
+  font-family: inherit;
+  font-size: var(--history-expand-size);
+  font-weight: var(--history-row-weight);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--duration-fast) ease;
+}
+
+#history-list.history-sidebar-v2 .ws-block__expand:hover,
+#history-list.history-sidebar-v2 .ws-block__collapse:hover {
+  color: var(--history-row-color);
+}

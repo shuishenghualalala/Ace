@@ -1,0 +1,18 @@
+name: feishu
+version: "0.1.0"
+description: "Feishu/Lark document and drive comment tools."
+author: "Crew"
+kind: standalone
+requires_env:
+  - name: FEISHU_APP_ID
+    description: "Feishu/Lark app ID"
+    secret: false
+  - name: FEISHU_APP_SECRET
+    description: "Feishu/Lark app secret"
+    secret: true
+provides_tools:
+  - feishu_doc_read
+  - feishu_drive_list_comments
+  - feishu_drive_list_comment_replies
+  - feishu_drive_reply_comment
+  - feishu_drive_add_comment

@@ -1,0 +1,6 @@
+# Playwright / visual test artifacts
+/specs/**/test-results/
+/specs/**/blob-report/
+/specs/**/playwright-report/
+/specs/**/playwright/.cache/
+# Actual screenshot baselines are checked in (NOT ignored)

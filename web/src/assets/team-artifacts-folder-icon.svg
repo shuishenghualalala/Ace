@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="产物文件夹">
+  <g fill="none" stroke="#2D2E2C" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8">
+    <path d="M4.5 8.2h5l1.5 1.7h8.5v7.9c0 1-.7 1.7-1.7 1.7H6.2c-1 0-1.7-.7-1.7-1.7z" fill="#F4F4F1"/>
+    <path d="M4.5 8.2V6.7c0-1 .7-1.7 1.7-1.7H9l1.5 1.7h5.3c1 0 1.7.7 1.7 1.5v1.7"/>
+    <path d="M8.2 13.3h.1" stroke-width="2.5"/>
+    <path d="M11.2 13.3h5"/>
+    <path d="M8.2 16.3h.1" stroke-width="2.5"/>
+    <path d="M11.2 16.3h3.8" stroke="#8A9188"/>
+  </g>
+  <rect x="17.8" y="4.4" width="1.4" height="1.4" fill="#8FA79A"/>
+  <rect x="19.7" y="6.3" width="1" height="1" fill="#8FA79A" opacity=".7"/>
+</svg>

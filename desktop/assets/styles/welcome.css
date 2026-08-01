@@ -1,0 +1,493 @@
+
+
+#welcome-tab {
+    position: relative;
+    background: var(--bg);
+    min-width: 0;
+}
+
+#welcome-tab::before,
+#welcome-tab::after {
+    display: none;
+}
+
+.welcome-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    padding: 24px 20px;
+    overflow-y: auto;
+    text-align: center;
+    position: relative;
+    z-index: 1;
+    box-sizing: border-box;
+    background: var(--bg);
+
+    border-radius: 14px 0 14px 0;
+}
+
+.welcome-header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 0;
+    width: 100%;
+    max-width: 720px;
+    margin-bottom: 20px;
+}
+
+.welcome-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 18px;
+}
+
+.welcome-logo {
+    width: 64px;
+    height: 64px;
+    object-fit: cover;
+    border-radius: 50%;
+    background: #fff;
+    border: 1px solid var(--line);
+    box-shadow: 0 2px 8px rgba(17, 24, 39, 0.05);
+}
+
+.welcome-title {
+    margin: 0;
+    font-size: clamp(28px, 4.5vw, 42px);
+    line-height: 1.12;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--text-primary);
+}
+
+.welcome-title__brand {
+    display: inline-block;
+    margin-left: 0.12em;
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    color: var(--text-primary);
+}
+
+.welcome-subtitle {
+    margin-top: 14px;
+    font-size: var(--font-lg);
+    font-weight: 500;
+    color: var(--tx2);
+}
+
+.welcome-caption {
+    margin-top: 8px;
+    max-width: 560px;
+    font-size: var(--font-base);
+    line-height: 1.65;
+    color: var(--tx2);
+}
+
+.feature-cards {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    width: 100%;
+    max-width: min(920px, 100%);
+    margin-top: 10px;
+    align-items: stretch;
+}
+
+.feature-card {
+    width: 100%;
+    min-width: 0;
+    min-height: 92px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px solid transparent;
+    background: color-mix(in srgb, var(--tx1) 4%, transparent);
+    box-shadow: none;
+    cursor: pointer;
+    transition: transform 0.12s ease-out, background 0.16s ease, border-color 0.16s ease;
+    text-align: left;
+    position: relative;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+.feature-card::before {
+    display: none;
+}
+.feature-card::after {
+    display: none;
+}
+.feature-card > * { position: relative; z-index: 1; }
+
+.feature-card:hover {
+    background: color-mix(in srgb, var(--tx1) 8%, transparent);
+}
+.feature-card:active {
+    transform: scale(0.985);
+}
+
+.card-text-area {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    width: 100%;
+}
+
+.card-title {
+    font-size: clamp(var(--font-md), 1.8vw, var(--font-lg));
+    font-weight: 700;
+    color: var(--tx1);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.card-subtitle {
+    font-size: var(--font-sm);
+    color: var(--tx2);
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.card-icon-area {
+    display: flex;
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    align-items: center;
+    justify-content: center;
+    margin-top: 0;
+}
+
+.card-svg {
+    width: 34px;
+    height: 34px;
+    display: block;
+}
+.card-glyph { stroke: var(--tx1); }
+
+.feature-card__chevron {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    margin-left: auto;
+    fill: none;
+    stroke: var(--tx3);
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.card-lightning {
+    font-size: var(--font-base);
+    line-height: 1;
+    opacity: 0.7;
+}
+
+/* ---------------- 场景化推荐 ---------------- */
+/* 守卫：.scenario-* 设了 display 会盖过 [hidden] 的 display:none，必须显式还原 */
+.scenario-chip[hidden],
+.scenario-items[hidden] { display: none; }
+/* 场景卡片去掉渐变叠层，保持纯色背景 */
+#scenario-cards .feature-card::before { display: none; }
+.feature-card.scenario-card--active {
+    background: color-mix(in srgb, var(--tx1) 10%, transparent);
+}
+.scenario-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    max-width: min(920px, 100%);
+    margin-top: 8px;
+}
+.scenario-heading__title {
+    font-size: var(--font-sm);
+    font-weight: 650;
+    letter-spacing: 0.01em;
+    color: var(--tx2);
+}
+.scenario-refresh {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 4px 9px;
+    border-radius: 9px;
+    border: 0;
+    background: transparent;
+    color: var(--tx2);
+    font-size: var(--font-sm);
+    cursor: pointer;
+    transition: color 0.16s ease, background 0.16s ease, transform 0.12s ease-out;
+}
+.scenario-refresh:hover { background: var(--color-black-overlay-1); color: var(--tx1); }
+.scenario-refresh:active { transform: scale(0.97); }
+.scenario-items {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 10px;
+    width: 100%;
+    max-width: 920px;
+    margin-top: 12px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+.scenario-item {
+    min-height: 34px;
+    padding: 7px 11px;
+    min-width: 0;
+    border-radius: 10px;
+    border: 0;
+    background: transparent;
+    color: var(--tx1);
+    font-size: var(--font-sm);
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+    box-shadow: none;
+    transition: color 0.16s ease, background 0.16s ease, transform 0.12s ease-out;
+}
+.scenario-item:hover {
+    background: color-mix(in srgb, var(--tx1) 7%, transparent);
+}
+.scenario-item:active {
+    transform: scale(0.97);
+}
+
+.scenario-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    margin: 0 0 6px;
+    padding: 4px 10px;
+    border-radius: 8px;
+    background: var(--accent, #122547);
+    color: #fff;
+    font-size: var(--font-sm);
+    font-weight: 600;
+}
+.scenario-chip__clear {
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: var(--font-sm);
+    opacity: 0.85;
+    padding: 0 2px;
+    line-height: 1;
+}
+.scenario-chip__clear:hover { opacity: 1; }
+
+.welcome-inputbar {
+    padding: 0 20px 18px 0;
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.welcome-input-container {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 14px;
+    background: white;
+    border: 1px solid rgba(98, 118, 155, 0.12);
+    border-radius: 14px;
+    box-shadow: 0 10px 28px rgba(17, 24, 39, 0.04);
+}
+
+.welcome-input-container textarea {
+    min-height: 20px;
+    font-size: var(--font-sm);
+    line-height: 1.5;
+}
+
+.welcome-input-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-top: 5px;
+}
+
+.welcome-model-picker-slot {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    flex: 1;
+}
+
+.welcome-inputbar .input-controls {
+    margin-top: 0;
+}
+
+body.welcome-active .welcome-model-picker-slot .chat-model-picker {
+    padding: 4px 8px 4px 10px;
+    border-radius: 16px;
+    background: white;
+    border-color: rgba(98, 118, 155, 0.12);
+    box-shadow: none;
+}
+
+body.welcome-active .welcome-model-picker-slot .chat-model-label {
+    display: none;
+}
+
+body.welcome-active .welcome-model-picker-slot .chat-model-select {
+    width: auto;
+    min-width: 180px;
+    max-width: min(260px, 54vw);
+    padding-left: 0;
+}
+
+
+.coming-soon-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    text-align: center;
+}
+
+.coming-soon-icon {
+    font-size: var(--webview-font-5xl);
+    margin-bottom: 24px;
+}
+
+.coming-soon-title {
+    font-size: var(--webview-font-xl);
+    font-weight: 600;
+    color: var(--tx);
+    margin-bottom: 12px;
+}
+
+.coming-soon-desc {
+    font-size: var(--webview-font-sm);
+    color: var(--tx3);
+    max-width: 300px;
+}
+
+body.inspector-open .tab-pane#chat-tab.active.chat-mode #welcome-panel .welcome-container,
+body.inspector-open .tab-pane#chat-tab.active.chat-mode #welcome-panel .feature-cards {
+    max-width: 100%;
+}
+
+body.inspector-open .tab-pane#chat-tab.active.chat-mode #welcome-panel .feature-cards {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
+}
+
+@media (max-width: 1100px) {
+    .welcome-container {
+        justify-content: flex-start;
+        padding-top: 16px;
+    }
+
+    .feature-cards {
+        max-width: 720px;
+    }
+
+    .welcome-inputbar {
+        padding: 0 20px 20px;
+    }
+}
+
+@media (max-width: 900px) {
+    .feature-cards {
+        grid-template-columns: 1fr;
+        max-width: 420px;
+    }
+}
+
+@media (max-width: 600px) {
+    .welcome-container {
+        padding: 12px 16px;
+    }
+
+    .welcome-header {
+        margin-bottom: 14px;
+    }
+
+    .welcome-title {
+        font-size: clamp(24px, 8vw, 32px);
+    }
+
+    .welcome-subtitle {
+        font-size: var(--font-base);
+        margin-top: 8px;
+    }
+
+    .feature-cards {
+        grid-template-columns: 1fr;
+        gap: 10px;
+        margin-top: 12px;
+    }
+
+    .feature-card {
+        min-height: 0;
+        padding: 14px;
+        border-radius: 14px;
+    }
+
+    .welcome-input-footer {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    body.welcome-active .welcome-model-picker-slot .chat-model-select {
+        width: 100%;
+        max-width: 100%;
+    }
+}
+
+@media (max-height: 720px) {
+    .welcome-container {
+        justify-content: flex-start;
+        padding-top: 10px;
+    }
+
+    .welcome-icon {
+        display: none;
+    }
+
+    .welcome-header {
+        margin-bottom: 12px;
+    }
+
+    .welcome-title {
+        font-size: clamp(24px, 4vh, 32px);
+    }
+
+    .welcome-subtitle {
+        font-size: var(--font-base);
+        margin-top: 6px;
+    }
+
+    .feature-cards {
+        margin-top: 10px;
+    }
+
+    .feature-card {
+        min-height: 0;
+        padding: 12px;
+    }
+
+    .card-icon-area {
+        margin-top: 0;
+    }
+}

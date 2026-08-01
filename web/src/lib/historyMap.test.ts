@@ -1,0 +1,515 @@
+import { describe, expect, it } from "vitest";
+import {
+  mapHistoryItems,
+  mergeHistoryWithLiveMessages,
+  preserveLocalProcessDetails,
+  type BackendHistoryItem,
+} from "./historyMap";
+import { mergeTeamInternalMessage } from "./teamMessageMerge";
+import type { UiMessage } from "../types";
+
+describe("preserveLocalProcessDetails", () => {
+  it("keeps thinking and tools when an immediate history reload trails persistence", () => {
+    const history: UiMessage[] = [
+      { id: "h1", role: "assistant", text: "最终回答" },
+    ];
+    const local: UiMessage[] = [
+      {
+        id: "live1",
+        role: "assistant",
+        text: "最终回答",
+        thinking: "先检查项目结构。",
+        toolCalls: [{
+          toolCallId: "t1",
+          name: "file_read",
+          status: "done",
+          startedAt: 0,
+        }],
+      },
+    ];
+
+    const merged = preserveLocalProcessDetails(history, local);
+
+    expect(merged[0].thinking).toBe("先检查项目结构。");
+    expect(merged[0].toolCalls?.[0].name).toBe("file_read");
+  });
+
+  it("prefers canonical process details once persistence has completed", () => {
+    const history: UiMessage[] = [
+      { id: "h1", role: "assistant", text: "最终回答", thinking: "已落库思考" },
+    ];
+    const local: UiMessage[] = [
+      { id: "live1", role: "assistant", text: "最终回答", thinking: "本地思考" },
+    ];
+
+    expect(preserveLocalProcessDetails(history, local)[0].thinking).toBe("已落库思考");
+  });
+});
+
+describe("mapHistoryItems", () => {
+  it("appends streaming thinking chunks without inserting blank lines between every delta", () => {
+    const first: UiMessage = {
+      id: "m1",
+      role: "team_internal" as const,
+      text: "",
+      sourceSessionId: "web_demo::turn::req_1::crew::builtin",
+      agentId: "crew::builtin",
+      eventType: "team_stream",
+      nodeId: "qa_plan",
+      displayMode: "stream",
+      thinking: "先",
+    };
+    const second = {
+      ...first,
+      id: "m2",
+      thinking: "确认测试范围。",
+    };
+
+    const messages = mergeTeamInternalMessage([first], second, { append: true });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].thinking).toBe("先确认测试范围。");
+  });
+
+  it("updates planning progress in a single collapsible bubble", () => {
+    const first: UiMessage = {
+      id: "planning-1",
+      role: "team_internal" as const,
+      text: "正在理解任务目标",
+      sourceSessionId: "web_demo::turn::req_1::planning",
+      agentId: "crew::builtin",
+      eventType: "team_planning_progress",
+      nodeId: "workflow_planning",
+      displayMode: "collapsible",
+      collapsedTitle: "Crew 正在规划团队协作",
+      processText: "- 理解任务目标：进行中",
+    };
+    const second: UiMessage = {
+      ...first,
+      id: "planning-2",
+      text: "正在推演任务拆分",
+      collapsedTitle: "Crew 正在规划团队协作 · 8s",
+      processText: "- 理解任务目标：完成\n- 识别工作单元：进行中",
+    };
+
+    const messages = mergeTeamInternalMessage([first], second);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe("planning-2");
+    expect(messages[0].text).toBe("正在推演任务拆分");
+    expect(messages[0].collapsedTitle).toBe("Crew 正在规划团队协作 · 8s");
+    expect(messages[0].processText).toContain("识别工作单元：进行中");
+  });
+
+  it("keeps a completed team node as one summary bubble with folded process text", () => {
+    const items: BackendHistoryItem[] = [
+      {
+        role: "team_internal",
+        content: "让我先看一下相关代码。",
+        source_session_id: "web_demo::turn::req_1::kk",
+        agent_id: "kk",
+        agent_name: "kk",
+        agent_role: "测试方案：测试一下团队协作",
+        event_type: "team_stream",
+        node_id: "qa_engineer_plan_1",
+        display_mode: "collapsible",
+        collapsed_title: "测试方案：测试一下团队协作 的执行过程",
+        timestamp: 1,
+      },
+      {
+        role: "team_internal",
+        content: "测试方案：测试一下团队协作提交 Leader 审阅。\n\n测试方案初稿已完成。",
+        source_session_id: "web_demo::turn::req_1::kk",
+        agent_id: "kk",
+        agent_name: "kk",
+        agent_role: "测试方案：测试一下团队协作",
+        event_type: "team_submit",
+        node_id: "qa_engineer_plan_1",
+        display_mode: "chat",
+        timestamp: 2,
+      },
+    ];
+
+    const messages = mapHistoryItems(items);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].displayMode).toBe("chat");
+    expect(messages[0].eventType).toBe("team_submit");
+    expect(messages[0].text).toContain("测试方案初稿已完成");
+    expect(messages[0].processText).toContain("让我先看一下相关代码");
+  });
+
+  it("does not merge same node id across different team turns", () => {
+    const items: BackendHistoryItem[] = [
+      {
+        role: "team_internal",
+        content: "第一轮 Leader 正在汇总。",
+        source_session_id: "web_demo::turn::req_1::leader",
+        agent_id: "leader",
+        event_type: "team_stream",
+        node_id: "leader_summary",
+        display_mode: "collapsible",
+      },
+      {
+        role: "team_internal",
+        content: "第二轮 Leader 已汇总。",
+        source_session_id: "web_demo::turn::req_2::leader",
+        agent_id: "leader",
+        event_type: "team_submit",
+        node_id: "leader_summary",
+        display_mode: "chat",
+      },
+    ];
+
+    const messages = mapHistoryItems(items);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0].text).toBe("第一轮 Leader 正在汇总。");
+    expect(messages[1].text).toBe("第二轮 Leader 已汇总。");
+    expect(messages[0].processText).toBeUndefined();
+  });
+
+  it("does not let completion without source session overwrite an existing node", () => {
+    const items: BackendHistoryItem[] = [
+      {
+        role: "team_internal",
+        content: "已有执行过程。",
+        source_session_id: "web_demo::turn::req_1::kk",
+        agent_id: "kk",
+        event_type: "team_stream",
+        node_id: "qa_engineer_plan_1",
+        display_mode: "collapsible",
+      },
+      {
+        role: "team_internal",
+        content: "缺少来源的完成消息。",
+        agent_id: "kk",
+        event_type: "team_submit",
+        node_id: "qa_engineer_plan_1",
+        display_mode: "chat",
+      },
+    ];
+
+    const messages = mapHistoryItems(items);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0].text).toBe("已有执行过程。");
+    expect(messages[1].text).toBe("缺少来源的完成消息。");
+  });
+
+  it("keeps team internal thinking and tool calls for the agent timeline", () => {
+    const items: BackendHistoryItem[] = [
+      {
+        role: "team_internal",
+        content: "我完成了检查。",
+        source_session_id: "web_demo::turn::req_1::kk",
+        agent_id: "kk",
+        agent_name: "kk",
+        thinking: "先确认运行环境。",
+        tool_calls: [
+          {
+            id: "tool_1",
+            name: "terminal",
+            ui_label: "运行 node --version",
+            arguments: { command: "node --version" },
+            result: "v20.0.0",
+            status: "done",
+          },
+        ],
+      },
+    ];
+
+    const messages = mapHistoryItems(items);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].thinking).toBe("先确认运行环境。");
+    expect(messages[0].toolCalls).toHaveLength(1);
+    expect(messages[0].toolCalls?.[0].uiLabel).toBe("运行 node --version");
+  });
+
+  it("merges live team stream timeline events into the same node bubble", () => {
+    const items: BackendHistoryItem[] = [
+      {
+        role: "team_internal",
+        content: "",
+        source_session_id: "web_demo::turn::req_1::kk",
+        agent_id: "kk",
+        agent_role: "实现：2048",
+        event_type: "team_stream",
+        node_id: "build_1",
+        display_mode: "stream",
+        thinking: "先确认要生成单文件游戏。",
+        timestamp: 1,
+      },
+      {
+        role: "team_internal",
+        content: "",
+        source_session_id: "web_demo::turn::req_1::kk",
+        agent_id: "kk",
+        agent_role: "实现：2048",
+        event_type: "team_stream",
+        node_id: "build_1",
+        display_mode: "stream",
+        tool_calls: [
+          {
+            id: "tool_write",
+            name: "file_write",
+            ui_label: "写入 index.html",
+            arguments: { path: "index.html" },
+            status: "done",
+          },
+        ],
+        timestamp: 2,
+      },
+      {
+        role: "team_internal",
+        content: "已生成 `index.html`。",
+        source_session_id: "web_demo::turn::req_1::kk",
+        agent_id: "kk",
+        agent_role: "实现：2048",
+        event_type: "team_stream",
+        node_id: "build_1",
+        display_mode: "stream",
+        timestamp: 3,
+      },
+      {
+        role: "team_internal",
+        content: "@leader 实现：2048 已完成。",
+        source_session_id: "web_demo::turn::req_1::kk",
+        agent_id: "kk",
+        agent_role: "实现：2048",
+        event_type: "team_submit",
+        node_id: "build_1",
+        display_mode: "chat",
+        timestamp: 4,
+      },
+    ];
+
+    const messages = mapHistoryItems(items);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].eventType).toBe("team_submit");
+    expect(messages[0].processText).toContain("已生成 `index.html`");
+    expect(messages[0].thinking).toContain("先确认要生成单文件游戏");
+    expect(messages[0].toolCalls).toHaveLength(1);
+    expect(messages[0].toolCalls?.[0].uiLabel).toBe("写入 index.html");
+  });
+
+  it("merges direct leader stream into one result without duplicate process text", () => {
+    const items: BackendHistoryItem[] = [
+      {
+        role: "team_internal",
+        content: "你好，",
+        source_session_id: "web_demo::turn::req_1::leader",
+        agent_id: "leader",
+        agent_name: "hh",
+        agent_role: "leader",
+        is_leader: true,
+        event_type: "team_stream",
+        node_id: "direct_leader_req_1",
+        display_mode: "stream",
+        collapsed_title: "Leader 的回复过程",
+        timestamp: 1,
+      },
+      {
+        role: "team_internal",
+        content: "我是 hh，可以继续帮你处理团队任务。",
+        source_session_id: "web_demo::turn::req_1::leader",
+        agent_id: "leader",
+        agent_name: "hh",
+        agent_role: "leader",
+        is_leader: true,
+        event_type: "team_stream",
+        node_id: "direct_leader_req_1",
+        display_mode: "stream",
+        timestamp: 2,
+      },
+      {
+        role: "team_internal",
+        content: "你好，我是 hh，可以继续帮你处理团队任务。",
+        source_session_id: "web_demo::turn::req_1::leader",
+        agent_id: "leader",
+        agent_name: "hh",
+        agent_role: "leader",
+        is_leader: true,
+        event_type: "team_summary",
+        node_id: "direct_leader_req_1",
+        display_mode: "chat",
+        collapsed_title: "Leader 的回复过程",
+        thinking: "判断为轻量团队聊天。",
+        timestamp: 3,
+      },
+    ];
+
+    const messages = mapHistoryItems(items);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].eventType).toBe("team_summary");
+    expect(messages[0].text).toBe("你好，我是 hh，可以继续帮你处理团队任务。");
+    expect(messages[0].processText).toBeUndefined();
+    expect(messages[0].thinking).toBe("判断为轻量团队聊天。");
+    expect(messages[0].isLeader).toBe(true);
+  });
+
+  it("folds leader review tools into the review bubble instead of showing a standalone tool bubble", () => {
+    const items: BackendHistoryItem[] = [
+      {
+        role: "team_internal",
+        content: "",
+        source_session_id: "web_demo::turn::req_1::leader",
+        agent_id: "leader",
+        agent_name: "hh",
+        agent_role: "leader",
+        is_leader: true,
+        event_type: "team_stream",
+        node_id: "leader_review_qa_plan",
+        display_mode: "stream",
+        tool_calls: [
+          {
+            id: "tool_review_1",
+            name: "delegate",
+            ui_label: "审阅测试方案",
+            arguments: { node_id: "qa_plan" },
+            status: "done",
+          },
+        ],
+        timestamp: 1,
+      },
+      {
+        role: "team_internal",
+        content: "@kk @crew 方案已通过 Leader 审阅，开始验证。",
+        source_session_id: "web_demo::turn::req_1::leader",
+        agent_id: "leader",
+        agent_name: "hh",
+        agent_role: "leader",
+        is_leader: true,
+        event_type: "team_review",
+        node_id: "leader_review_qa_plan",
+        display_mode: "chat",
+        timestamp: 2,
+      },
+    ];
+
+    const messages = mapHistoryItems(items);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].eventType).toBe("team_review");
+    expect(messages[0].text).toBe("@kk @crew 方案已通过 Leader 审阅，开始验证。");
+    expect(messages[0].toolCalls).toHaveLength(1);
+    expect(messages[0].toolCalls?.[0].uiLabel).toBe("审阅测试方案");
+  });
+
+  it("suppresses generic approve decision when the same leader review already says it passed", () => {
+    const items: BackendHistoryItem[] = [
+      {
+        role: "team_internal",
+        content: "@kk @crew 方案已通过 Leader 审阅，开始验证。",
+        source_session_id: "web_demo::turn::req_1::leader",
+        agent_id: "leader",
+        agent_name: "hh",
+        agent_role: "leader",
+        is_leader: true,
+        event_type: "team_review",
+        node_id: "leader_review_qa_plan",
+        display_mode: "chat",
+        timestamp: 1,
+      },
+      {
+        role: "team_internal",
+        content: "审阅通过，继续后续流程。",
+        source_session_id: "web_demo::turn::req_1::leader",
+        agent_id: "leader",
+        agent_name: "hh",
+        agent_role: "leader",
+        is_leader: true,
+        event_type: "team_decision",
+        node_id: "leader_review_qa_plan",
+        mention_intent: "approve",
+        display_mode: "chat",
+        timestamp: 2,
+      },
+    ];
+
+    const messages = mapHistoryItems(items);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].eventType).toBe("team_review");
+    expect(messages[0].text).toBe("@kk @crew 方案已通过 Leader 审阅，开始验证。");
+  });
+
+  it("prefers team summary over a duplicate assistant final bubble", () => {
+    const assistant: UiMessage = {
+      id: "assistant-final",
+      role: "assistant",
+      text: "项目总共用了 11 分钟 21 秒。",
+    };
+    const summary: UiMessage = {
+      id: "team-summary",
+      role: "team_internal",
+      text: "项目总共用了 11 分钟 21 秒。",
+      eventType: "team_summary",
+      nodeId: "leader_summary",
+      sourceSessionId: "web_demo::turn::req_1::leader",
+      agentId: "leader",
+    };
+
+    const messages = mergeTeamInternalMessage([assistant], summary);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("team_internal");
+    expect(messages[0].eventType).toBe("team_summary");
+  });
+});
+
+describe("mergeHistoryWithLiveMessages", () => {
+  it("drops websocket replay copies already present in Team history", () => {
+    const history = mapHistoryItems([
+      {
+        role: "team_internal",
+        content: "审阅未通过，@kk 请继续修订。",
+        event_type: "team_decision",
+        node_id: "leader_review",
+        agent_id: "leader",
+        source_session_id: "session::leader",
+      },
+    ]);
+    const replay = { ...history[0], id: "live-copy" };
+    const laterDecision = {
+      ...history[0],
+      id: "live-approve",
+      text: "审阅通过，继续后续流程。",
+    };
+
+    const merged = mergeHistoryWithLiveMessages(history, [replay, laterDecision]);
+
+    expect(merged).toHaveLength(2);
+    expect(merged.map((message) => message.text)).toEqual([
+      "审阅未通过，@kk 请继续修订。",
+      "审阅通过，继续后续流程。",
+    ]);
+  });
+
+  it("drops a live assistant final when history already has the team summary", () => {
+    const history = mapHistoryItems([
+      {
+        role: "team_internal",
+        content: "项目总共用了 11 分钟 21 秒。",
+        event_type: "team_summary",
+        node_id: "leader_summary",
+        agent_id: "leader",
+        source_session_id: "web_demo::turn::req_1::leader",
+      },
+    ]);
+    const liveFinal: UiMessage = {
+      id: "assistant-final",
+      role: "assistant",
+      text: "项目总共用了 11 分钟 21 秒。",
+    };
+
+    const merged = mergeHistoryWithLiveMessages(history, [liveFinal]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].role).toBe("team_internal");
+    expect(merged[0].eventType).toBe("team_summary");
+  });
+});

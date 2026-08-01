@@ -1,0 +1,124 @@
+/**
+ * 后端服务启动中全局遮罩
+ *
+ * 当 Electron 主进程检测到 Gateway 尚未就绪时，渲染进程展示此遮罩
+ * 阻断用户操作，直到后端健康检查通过（connected=true）后自动隐藏。
+ */
+
+.backend-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  transition: opacity 0.3s ease;
+}
+
+.backend-loading-overlay[hidden] {
+  display: none !important;
+}
+
+.backend-loading-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  padding: 40px 56px;
+  border-radius: 16px;
+  background: var(--surface-elevated, #fff);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+[data-theme="dark"] .backend-loading-card {
+  background: var(--surface-elevated, #1a1d24);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.backend-loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border-default, #e0e0e0);
+  border-top-color: var(--v2-primary, #2563eb);
+  border-radius: 50%;
+  animation: backend-spin 0.8s linear infinite;
+}
+
+@keyframes backend-spin {
+  to { transform: rotate(360deg); }
+}
+
+.backend-loading-text {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-primary, #1a1a1a);
+  letter-spacing: 0.02em;
+}
+
+[data-theme="dark"] .backend-loading-text {
+  color: var(--text-primary, #e8e8e8);
+}
+
+.backend-loading-elapsed {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary, #666);
+}
+
+[data-theme="dark"] .backend-loading-elapsed {
+  color: var(--text-secondary, #9aa0a6);
+}
+
+.backend-loading-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.backend-loading-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+  border: 1px solid var(--border-default, #d0d0d0);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary, #1a1a1a);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.backend-loading-btn:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.05));
+}
+
+.backend-loading-btn-primary {
+  border-color: var(--v2-primary, #2563eb);
+  color: var(--v2-primary, #2563eb);
+}
+
+[data-theme="dark"] .backend-loading-btn {
+  color: var(--text-primary, #e8e8e8);
+  border-color: var(--border-default, #3a3f47);
+}
+
+[data-theme="dark"] .backend-loading-btn:hover {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+}
+
+.backend-loading-hint {
+  margin: 0;
+  max-width: 460px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary, #666);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+[data-theme="dark"] .backend-loading-hint {
+  color: var(--text-secondary, #9aa0a6);
+}

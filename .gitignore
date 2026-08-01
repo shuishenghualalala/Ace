@@ -1,0 +1,89 @@
+# Local agent and personal workspace files
+AGENTS.md
+CLAUDE.md
+.claude/
+.git-commands.md
+CONTEXT.md
+.codebase-memory/
+
+# Runtime data and user-generated content
+.crew/
+.Crew/
+/crew_data/
+/logs/
+/outputs/
+/tmp/
+*.log
+*.pid
+*.pid.lock
+*.tmp
+
+# Environment files and local credentials
+.env
+.env.*
+!.env.example
+!config/.env.example
+/config/config.yaml
+
+# Python environments, caches, and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+build/
+dist/
+
+# Node, Vite, and Electron output
+**/node_modules/
+web/dist/
+desktop/dist/
+desktop/release/
+**/test-results/
+**/playwright-report/
+.vite/
+*.tsbuildinfo
+.eslintcache
+.npm/
+
+# Release and packaging artifacts
+/crew-gateway
+/crew-gateway.exe
+/crew-gateway.spec
+/crew-gateway-test.spec
+crew_*.deb
+package-size-report-*.txt
+*.bundle
+*.zip
+*.tar.gz
+
+# IDE, editor, and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local planning and non-release documentation
+/TODO/
+/SPEC*.md
+/spec/
+/tasks/
+/wiki-agent-optimization-plan.md
+/desktop/design-qa-assets/
+
+# Local-only source trees
+/crew-tui/

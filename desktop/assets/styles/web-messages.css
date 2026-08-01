@@ -1,0 +1,832 @@
+
+
+
+.composer-edit-banner {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin: 0 0 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--accent-light, rgba(71, 125, 247, 0.22));
+  border-radius: 10px;
+  background: var(--accent-soft, rgba(71, 125, 247, 0.08));
+  color: var(--accent2, #3568d8);
+  font-size: 12.5px;
+}
+.composer-edit-banner.show { display: flex; }
+.composer-edit-banner__icon { display: inline-flex; color: var(--accent, #4f7eff); }
+.composer-edit-banner__text { flex: 1; min-width: 0; }
+.composer-edit-banner__cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tx2, #667085);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.composer-edit-banner__cancel:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--tx1, var(--tx1));
+}
+
+.chat-messages.web-flow {
+  flex: 1;
+  min-height: 0;
+  padding: 20px 0;
+  display: block;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg);
+  gap: 0;
+}
+
+.chat-messages.web-flow .messages__inner {
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.chat-messages.web-flow .empty {
+  text-align: center;
+  color: var(--tx3);
+  margin-top: 80px;
+}
+
+.chat-messages.web-flow .empty h2 {
+  color: var(--tx2);
+  font-weight: 600;
+  margin-bottom: 6px;
+  font-size: var(--font-xl);
+}
+
+.chat-messages.web-flow .msg {
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+}
+
+/* agent 消息右侧留出用户头像+间距的宽度，与用户消息头像左边缘对齐 */
+.chat-messages.web-flow .msg:not(.user) {
+  padding-right: calc(var(--msg-avatar-size, 38px) + 12px);
+}
+
+.chat-messages.web-flow .msg__avatar {
+  --msg-avatar-size: 38px;
+  position: relative;
+  width: var(--msg-avatar-size);
+  height: var(--msg-avatar-size);
+  border-radius: 22%;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: none;
+  /* 黑色 PNG 描边：浅色透明，深色用 --msg-avatar-plate 托底 */
+  background: var(--msg-avatar-plate, transparent);
+  box-shadow: var(--msg-avatar-plate-ring, none);
+}
+
+.chat-messages.web-flow .msg__avatar-media {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.chat-messages.web-flow .msg__avatar-symbol {
+  width: 34px;
+  height: 34px;
+  display: block;
+  overflow: visible;
+}
+
+.chat-messages.web-flow .msg__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.chat-messages.web-flow .msg__avatar.bot img {
+  width: 28.8px;
+  height: 28.8px;
+  object-fit: contain;
+}
+
+.chat-messages.web-flow .msg__avatar--external {
+  width: 32px;
+  height: 32px;
+  margin: 3px;
+  border: 1.5px solid var(--tx1, #172033);
+  border-radius: 9px;
+  background: var(--bg, #fff);
+  color: var(--tx1, #172033);
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.chat-messages.web-flow .msg__avatar--team {
+  overflow: visible;
+}
+
+.chat-messages.web-flow .msg__avatar--team .session__team-logo {
+  transform: scale(1.75);
+  transform-origin: center;
+}
+
+
+.chat-messages.web-flow .msg__body {
+  min-width: 0;
+  flex: 1;
+  max-width: 100%;
+}
+
+.chat-messages.web-flow .msg:not(.user):not(.agent-role):not(.workflow-progress-card) .msg__body {
+  flex: 0 1 760px;
+  width: min(100%, 760px);
+  max-width: min(100%, 760px);
+}
+
+.chat-messages.web-flow .msg__name {
+  font-weight: 600;
+  font-size: var(--font-sm);
+  margin-bottom: 3px;
+  color: var(--tx1, var(--tx1));
+}
+
+.chat-messages.web-flow .msg.user .msg__body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: 0 1 auto;
+  /* 预留右侧头像+间距，避免窄抽屉把头像挤出 overflow-x:hidden 裁切区 */
+  max-width: min(80%, calc(100% - var(--msg-avatar-size, 28px) - 8px));
+  min-width: 0;
+  text-align: right;
+}
+
+.chat-messages.web-flow .msg.user .msg__name {
+  margin-bottom: 3px;
+  flex: initial;
+  max-width: fit-content;
+  text-align: right;
+}
+
+.chat-messages.web-flow .msg.user .msg__text {
+  width: fit-content;
+  max-width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: left;
+}
+
+.chat-messages.web-flow .msg__text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.chat-messages.web-flow .msg__foldable,
+.chat-messages.web-flow .process-timeline {
+  max-width: 100%;
+  min-width: 0;
+}
+
+
+.chat-messages.web-flow .msg__footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.chat-messages.web-flow .msg:not(.user) .msg__footer {
+  opacity: 1;
+}
+.chat-messages.web-flow .msg.user .msg__footer {
+  justify-content: flex-end;
+}
+.chat-messages.web-flow .msg:hover .msg__footer {
+  opacity: 1;
+}
+
+.chat-messages.web-flow .msg__meta {
+  font-size: var(--font-xs);
+  color: var(--tx3, #98a2b3);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.chat-messages.web-flow .msg__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+
+.chat-messages.web-flow .msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tx3, #98a2b3);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.chat-messages.web-flow .msg-action-btn:hover {
+  background: var(--accent-soft, rgba(71, 125, 247, 0.1));
+  border-color: var(--accent-light, rgba(71, 125, 247, 0.18));
+  color: var(--accent, #4f7eff);
+}
+.chat-messages.web-flow .chat-edit-btn:hover {
+  background: var(--red-dim, rgba(220, 38, 38, 0.1));
+  border-color: rgba(220, 38, 38, 0.2);
+  color: var(--red, var(--color-error));
+}
+
+
+.chat-messages.web-flow .msg__foldable {
+  margin: 0;
+  padding: 0;
+}
+
+.chat-messages.web-flow .msg__foldable > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 4px;
+  margin: 0 0 6px 0;
+  border-radius: 6px;
+  font-size: var(--font-sm);
+  color: var(--tx2, #667085);
+  transition: background 0.15s, color 0.15s;
+}
+.chat-messages.web-flow .msg__foldable > summary::-webkit-details-marker { display: none; }
+.chat-messages.web-flow .msg__foldable > summary::marker { display: none; content: ''; }
+.chat-messages.web-flow .msg__foldable > summary:hover {
+  background: var(--bg2, #f7f8fb);
+  color: var(--tx1, var(--tx1));
+}
+.chat-messages.web-flow .msg__foldable > summary:focus-visible {
+  outline: 2px solid var(--accent-light, rgba(71, 125, 247, 0.3));
+  outline-offset: 1px;
+}
+
+.chat-messages.web-flow .msg__fold-caret {
+  flex-shrink: 0;
+  transition: transform 0.18s var(--ease-out, ease);
+}
+.chat-messages.web-flow .msg__foldable[open] > summary > .msg__fold-caret {
+  transform: rotate(90deg);
+}
+
+.chat-messages.web-flow .msg__fold-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(59, 130, 246, 0.25);
+  border-top-color: var(--accent, #3b82f6);
+  border-radius: 50%;
+  animation: msg-fold-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes msg-fold-spin {
+  to { transform: rotate(360deg); }
+}
+
+.chat-messages.web-flow .msg__fold-summary--live {
+  color: var(--accent, #3b82f6);
+  font-weight: 500;
+}
+
+.chat-messages.web-flow .msg__fold-content {
+  display: grid;
+  gap: 6px;
+}
+
+.chat-messages.web-flow .msg__text {
+  word-break: break-word;
+  font-size: var(--font-base);
+  line-height: 1.65;
+  color: var(--tx1, var(--tx1));
+}
+
+.chat-messages.web-flow .msg.user {
+  justify-content: flex-end;
+}
+
+
+.chat-messages.web-flow .msg.user .msg__bubble,
+.chat-messages.web-flow .msg.user .msg__text {
+  background: var(--user-bubble-bg, #f0f0f0);
+  padding: 10px 16px;
+  border-radius: 18px;
+  width: fit-content;
+  max-width: fit-content;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-messages.web-flow .msg__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.chat-messages.web-flow .msg.user .msg__attachments {
+  justify-content: flex-end;
+}
+
+.chat-messages.web-flow .msg__attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.chat-messages.web-flow .msg__attachment--image {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg2);
+}
+
+.chat-messages.web-flow .msg__attachment-image-view {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+  border-radius: 10px 10px 0 0;
+  overflow: hidden;
+}
+
+.chat-messages.web-flow .msg__attachment--image .msg__attachment-image {
+  max-width: 260px;
+  max-height: 260px;
+  width: auto;
+  height: auto;
+  object-fit: cover;
+  display: block;
+}
+
+.chat-messages.web-flow .msg__attachment--image .chat-image-actions {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 0 0 10px 10px;
+}
+
+.chat-messages.web-flow .msg__attachment--file {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  color: var(--tx1);
+  text-decoration: none;
+  font-size: var(--font-sm);
+}
+
+.chat-messages.web-flow .msg__attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.chat-messages.web-flow .line-tool {
+  font-family: var(--mono);
+  font-size: var(--font-sm);
+  color: var(--tx3);
+  border-left: 2px solid var(--line);
+  padding: 2px 0 2px 12px;
+  margin-left: 40px;
+}
+
+.chat-messages.web-flow .md-body {
+  font-size: var(--font-base);
+  line-height: 1.7;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.chat-messages.web-flow .md-body p {
+  margin: 0.2em 0;
+}
+
+.chat-messages.web-flow .md-body code {
+  background: var(--color-gray-overlay-1);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 0.88em;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.chat-messages.web-flow .md-body a {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.chat-messages.web-flow .chat-markdown h2 {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+.chat-messages.web-flow .chat-markdown h2 {
+  margin-top: calc(0.85em + 10px);
+  margin-bottom: calc(0.35em + 10px);
+}
+
+.chat-messages.web-flow .md-body hr,
+.chat-messages.web-flow .chat-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle, var(--line));
+  margin: 10px 0;
+  margin-top: 20px;
+  max-width: 100%;
+}
+
+.chat-messages.web-flow .md-body pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+  font-size: var(--font-sm);
+}
+
+.chat-messages.web-flow .md-body pre code {
+  background: none;
+  padding: 0;
+}
+
+.chat-messages.web-flow .md-body .chat-md-table,
+.chat-messages.web-flow .md-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.6em 0;
+  font-size: var(--font-sm);
+  display: block;
+  overflow-x: auto;
+}
+
+.chat-messages.web-flow .md-body .chat-md-table th,
+.chat-messages.web-flow .md-body .chat-md-table td,
+.chat-messages.web-flow .md-body .chat-markdown th,
+.chat-messages.web-flow .md-body .chat-markdown td,
+.chat-messages.web-flow .md-body table th,
+.chat-messages.web-flow .md-body table td {
+  border: 1px solid var(--border-subtle, var(--line));
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  color: var(--text-primary);
+}
+
+.chat-messages.web-flow .md-body .chat-md-table th,
+.chat-messages.web-flow .md-body .chat-markdown th,
+.chat-messages.web-flow .md-body table th {
+  background: var(--surface-2, var(--bg2));
+  font-weight: 600;
+}
+
+.chat-messages.web-flow .md-body .chat-md-table tbody tr:nth-child(odd) td,
+.chat-messages.web-flow .md-body .chat-markdown tbody tr:nth-child(odd) td,
+.chat-messages.web-flow .md-body table tbody tr:nth-child(odd) td {
+  background: var(--surface, var(--bg1));
+}
+
+.chat-messages.web-flow .md-body .chat-md-table tbody tr:nth-child(even) td,
+.chat-messages.web-flow .md-body .chat-markdown tbody tr:nth-child(even) td,
+.chat-messages.web-flow .md-body table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-2, var(--bg2)) 82%, var(--color-accent, #477df7) 8%);
+}
+
+.chat-messages.web-flow .md-body .chat-md-hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle, var(--line));
+  margin: 0.9em 0;
+}
+
+.chat-messages.web-flow .gateway-hint {
+  text-align: center;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--color-warning-soft);
+  border: 1px solid var(--color-warning);
+  color: var(--color-warning);
+  font-size: var(--font-sm);
+}
+
+/* Team Session 成员消息：对齐 Web TeamAgentTurnBubble，保持 Desktop TypeScript DOM。 */
+.chat-messages.web-flow .team-internal {
+  align-items: flex-start;
+}
+
+.chat-messages.web-flow .team-internal__avatar {
+  --msg-avatar-size: 32px;
+}
+
+.chat-messages.web-flow .team-internal__name {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  color: var(--text-2, #6f6a63);
+  font-weight: 500;
+}
+
+.chat-messages.web-flow .team-internal__name strong {
+  color: #3f342a;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.chat-messages.web-flow .team-internal__name em {
+  color: #82786b;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.chat-messages.web-flow .team-internal__bubble {
+  display: inline-block;
+  min-width: 0;
+  max-width: min(680px, 100%);
+  padding: 10px 14px;
+  color: var(--text-primary, #2d2e2c);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  background: rgb(255 255 255 / 58%);
+  border: 1px solid rgb(125 141 113 / 14%);
+  border-radius: 14px;
+  box-shadow: 0 4px 14px rgb(60 50 38 / 3%);
+}
+
+.chat-messages.web-flow .team-internal .msg__foldable,
+.chat-messages.web-flow .team-internal .msg__fold-content,
+.chat-messages.web-flow .team-internal .thinking-block,
+.chat-messages.web-flow .team-internal .thinking-block__body {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-messages.web-flow .team-internal .thinking-block__body {
+  max-height: none;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+
+.chat-messages.web-flow .team-internal__bubble > :first-child { margin-top: 0; }
+.chat-messages.web-flow .team-internal__bubble > :last-child { margin-bottom: 0; }
+
+.chat-messages.web-flow .team-internal__bubble.is-crew {
+  display: block;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.chat-messages.web-flow .team-internal--planning .team-internal__name,
+.chat-messages.web-flow .team-internal--planning .team-internal__name strong,
+.chat-messages.web-flow .team-internal--planning .team-internal__name em {
+  color: #9a958d;
+  font-weight: 500;
+}
+
+.chat-messages.web-flow .team-internal__bubble.is-planning.is-crew {
+  display: block;
+  width: min(520px, 100%);
+  padding: 8px 10px;
+  color: #7d776f;
+  font-size: 13px;
+  background: rgb(250 249 246 / 66%);
+  border: 1px solid rgb(134 129 119 / 14%);
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.chat-messages.web-flow .team-internal__collapse {
+  max-width: min(780px, 100%);
+}
+
+.chat-messages.web-flow .team-internal__collapse summary {
+  padding: 8px 10px;
+  color: #8b877f;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chat-messages.web-flow .team-internal__collapse[open] > summary {
+  margin-bottom: 4px;
+}
+
+.chat-messages.web-flow .team-internal__collapse--embedded {
+  margin-top: 10px;
+}
+
+.chat-messages.web-flow .team-internal__process {
+  padding-top: 10px;
+  margin-top: 8px;
+  color: var(--text-secondary, #82786b);
+  border-top: 1px solid rgb(129 151 118 / 18%);
+}
+
+.chat-messages.web-flow .agent-avatar--message {
+  display: grid;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 750;
+  background: #2d2e2c;
+  border: 1px solid #2d2e2c;
+  border-radius: 10px;
+}
+
+.chat-messages.web-flow .agent-avatar--message.agent-tone-1 { color: #2d2e2c; background: #fffaf1; }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-2 { color: #43563b; background: #dbe8cf; border-color: #7f9871; }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-3 { color: #6b4b22; background: #f5d7a8; border-color: #b88a42; }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-4 { color: #51456d; background: #e7e2f4; border-color: #8c80a7; }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-5 { color: #405c76; background: #dfe9f4; border-color: #7e98b2; }
+
+.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew) { background: rgb(45 46 44 / 3.5%); border-color: rgb(45 46 44 / 9%); }
+.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew) { background: rgb(242 234 220 / 28%); border-color: rgb(105 91 72 / 9%); }
+.chat-messages.web-flow .team-internal__bubble--tone-2:not(.is-crew) { background: rgb(219 232 207 / 26%); border-color: rgb(127 152 113 / 10%); }
+.chat-messages.web-flow .team-internal__bubble--tone-3:not(.is-crew) { background: rgb(245 215 168 / 24%); border-color: rgb(184 138 66 / 10%); }
+.chat-messages.web-flow .team-internal__bubble--tone-4:not(.is-crew) { background: rgb(231 226 244 / 26%); border-color: rgb(140 128 167 / 10%); }
+.chat-messages.web-flow .team-internal__bubble--tone-5:not(.is-crew) { background: rgb(223 233 244 / 26%); border-color: rgb(126 152 178 / 10%); }
+
+.chat-messages.web-flow .team-artifacts {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chat-messages.web-flow .team-artifact {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  width: min(360px, 100%);
+  padding: 8px 10px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  appearance: none;
+  background: rgb(255 255 255 / 72%);
+  border: 1px solid rgb(131 124 113 / 18%);
+  border-radius: 8px;
+}
+
+.chat-messages.web-flow .team-artifact:hover {
+  background: rgb(255 255 255 / 90%);
+  border-color: rgb(93 125 80 / 35%);
+}
+
+.chat-messages.web-flow .team-artifact__icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  color: #586754;
+  font-size: 10px;
+  font-weight: 700;
+  background: #eef1ea;
+  border-radius: 7px;
+}
+
+.chat-messages.web-flow .team-artifact__body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-messages.web-flow .team-artifact__body strong,
+.chat-messages.web-flow .team-artifact__body em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-messages.web-flow .team-artifact__body strong { font-size: 13px; font-weight: 650; }
+.chat-messages.web-flow .team-artifact__body em { color: #8b877f; font-size: 12px; font-style: normal; }
+
+/* 对话内容统一边界：任何 Agent 子内容都不能突破用户消息的右侧基准线。 */
+.chat-messages.web-flow .messages__inner,
+.chat-messages.web-flow .msg,
+.chat-messages.web-flow .msg__body,
+.chat-messages.web-flow .msg__text,
+.chat-messages.web-flow .md-body,
+.chat-messages.web-flow .chat-markdown {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-messages.web-flow .msg:not(.user) {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.chat-messages.web-flow .msg:not(.user) .msg__body {
+  overflow: hidden;
+}
+
+.chat-messages.web-flow .msg:not(.user) .msg__text,
+.chat-messages.web-flow .msg:not(.user) .md-body,
+.chat-messages.web-flow .msg:not(.user) .chat-markdown {
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* 表格只在自身范围横向滚动，普通文本和长单词优先换行。 */
+.chat-messages.web-flow .md-body .chat-md-table,
+.chat-messages.web-flow .md-body table {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.chat-messages.web-flow .md-body .chat-md-table th,
+.chat-messages.web-flow .md-body .chat-md-table td,
+.chat-messages.web-flow .md-body table th,
+.chat-messages.web-flow .md-body table td {
+  max-width: min(420px, 55vw);
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 代码、图表和成果组件在内部处理溢出，不能撑宽整条消息。 */
+.chat-messages.web-flow .chat-markdown .code-block-wrapper,
+.chat-messages.web-flow .chat-markdown .chat-md-code,
+.chat-messages.web-flow .chat-markdown .mermaid,
+.chat-messages.web-flow .md-body pre,
+.chat-messages.web-flow .msg__artifact-card,
+.chat-messages.web-flow .msg__file-changes,
+.chat-messages.web-flow .plan-review-card {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-messages.web-flow .chat-markdown .code-block-wrapper,
+.chat-messages.web-flow .chat-markdown .chat-md-code,
+.chat-messages.web-flow .chat-markdown .mermaid,
+.chat-messages.web-flow .md-body pre {
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.chat-messages.web-flow .msg__artifact-card,
+.chat-messages.web-flow .msg__file-changes,
+.chat-messages.web-flow .plan-review-card {
+  overflow: hidden;
+}
+
+.chat-messages.web-flow .msg__artifact-copy,
+.chat-messages.web-flow .msg__file-changes__head,
+.chat-messages.web-flow .msg__file-changes__lead,
+.chat-messages.web-flow .msg__file-changes__list,
+.chat-messages.web-flow .msg__file-changes__item,
+.chat-messages.web-flow .msg__file-changes__row,
+.chat-messages.web-flow .msg__file-changes__path {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-messages.web-flow .msg__file-changes__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

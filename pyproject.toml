@@ -1,0 +1,97 @@
+[project]
+name = "crew"
+version = "0.1.0"
+description = "Crew - 可独立部署的本地多智能体工作台"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "Crew Contributors" },
+]
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "prompt_toolkit>=3.0",
+    "rich>=13.0",
+    "websockets>=12.0",
+    "psutil>=5.9",
+    "apscheduler>=3.11.2",
+    "mcp>=1.0",
+    "httpx>=0.27,<1.0",
+    "requests>=2.34.2",
+    "wcmatch>=8.4",
+    "jsonschema>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+# MCP 已是核心依赖；该 extra 让 `.[mcp]` 安装形式继续有效。
+mcp = [
+    "mcp>=1.0",
+]
+# 飞书/Lark 渠道（lark-oapi WebSocket 长连接）。未安装则 feishu 平台显示 unavailable。
+feishu = [
+    "lark-oapi==1.5.3",
+]
+# Wiki 文件上传解析：HTML 需要 markdownify，PDF 需要 pymupdf，DOCX 需要 python-docx，
+# XLSX 需要 openpyxl，PPTX 需要 python-pptx，文本编码探测需要 charset-normalizer。
+# 旧版 DOC/XLS/PPT 在运行期通过系统 LibreOffice 转换，不额外引入 Python 包。
+# 不加入核心依赖以避免基础包体积过大；完整 wiki 体验请安装 `.[wiki]`。
+wiki = [
+    "charset-normalizer>=3.4.0",
+    "markdownify>=0.13.1",
+    "pymupdf>=1.28.0",
+    "python-docx>=1.2.0",
+    "openpyxl>=3.1.0",
+    "python-pptx>=1.0.0",
+    "youtube-transcript-api>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/shuishenghualalala/Ace"
+Repository = "https://github.com/shuishenghualalala/Ace"
+Issues = "https://github.com/shuishenghualalala/Ace/issues"
+
+[project.scripts]
+crew = "crew.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["crew"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# e2e = 真实 LLM/网络的端到端测试，慢，默认跳过；`pytest -m e2e` 单独运行。
+markers = [
+    "e2e: end-to-end / real-LLM tests (slow); skipped by default, run with `pytest -m e2e`",
+]
+# 默认只跑快测试（跳过 e2e）；跑全量用 `pytest -m ""`，只跑 e2e 用 `pytest -m e2e`。
+addopts = "-m 'not e2e'"
+
+# ── ruff：最低限度的风格/静态门禁 ──────────────────────────────────────────
+# 起步用 ruff 默认规则集（E4 / E7 / E9 / F：语法错误、未定义名、未用导入等高信号），
+# 刻意不选 E5（行长）等噪音规则，避免 day-1 全线飘红让门禁形同虚设。
+# 业务技能包（crew/skills）暂不强制；规则集待基线干净后增量收紧。
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["crew/skills"]
+
+[tool.ruff.lint]
+# 不显式 select 即为 ruff 默认集（E4/E7/E9/F）。后续可加 I / UP / B 等。
+ignore = []
+
+[dependency-groups]
+dev = []

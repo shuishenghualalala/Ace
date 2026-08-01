@@ -1,0 +1,15 @@
+name: feishu-platform
+label: 飞书
+version: "0.1.0"
+description: "Feishu/Lark channel adapter plugin for Crew gateway."
+author: "Crew"
+kind: platform
+requires_env:
+  - name: FEISHU_APP_ID
+    description: "Feishu/Lark app ID"
+    secret: false
+  - name: FEISHU_APP_SECRET
+    description: "Feishu/Lark app secret"
+    secret: true
+provides_platforms:
+  - feishu

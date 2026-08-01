@@ -1,0 +1,385 @@
+
+
+
+
+:root {
+    --bg: #FAFAF8;
+    --bg1: #FAFAF8;
+    --bg2: #F5F7F7;
+    --bg3: #E3EBF0;
+    --bg4: #d7dde8;
+    --line: rgba(82, 101, 140, 0.12);
+    --line2: rgba(82, 101, 140, 0.2);
+    --accent: #607D90;
+    --accent2: #4F6D80;
+    --accent-hover: #4F6D80;
+    --accent-soft: rgba(96, 125, 144, 0.14);
+    --accent-dim: rgba(96, 125, 144, 0.08);
+    --accent-light: rgba(96, 125, 144, 0.18);
+    --accent-glow: rgba(96, 125, 144, 0.16);
+    --green: var(--color-success);
+    --green-dim: rgba(22, 163, 74, 0.1);
+    --amber: var(--color-warning);
+    --amber-dim: rgba(217, 119, 6, 0.1);
+    --red: var(--color-error);
+    --red-dim: rgba(220, 38, 38, 0.1);
+    --purple: #7c5cff;
+    --purple-light: rgba(124, 92, 255, 0.1);
+    --tx: #2E3336;
+    --tx1: #2E3336;
+    --tx2: #5E686E;
+    --tx3: #858D91;
+    --tx4: #475467;
+    --tx5: #191929;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC",
+        "Microsoft YaHei", "Segoe UI Emoji", "Segoe UI Symbol", "Apple Color Emoji",
+        "Noto Color Emoji", emoji, sans-serif;
+    --base-font-size: 14px;
+    --content-font-size: var(--base-font-size);
+    --editor-font-size: var(--base-font-size);
+    --terminal-font-size: var(--font-sm);
+    --font-xs: calc(var(--base-font-size) * 0.75);
+    --font-sm: calc(var(--base-font-size) * 0.875);
+    --font-md: calc(var(--base-font-size) * 0.9375);
+    --font-base: var(--base-font-size);
+    --font-lg: calc(var(--base-font-size) * 1.125);
+    --font-xl: calc(var(--base-font-size) * 1.5);
+    --font-2xl: calc(var(--base-font-size) * 1.5);
+    --font-3xl: calc(var(--base-font-size) * 2.125);
+    --font-4xl: calc(var(--base-font-size) * 2.75);
+    --font-5xl: calc(var(--base-font-size) * 4);
+    --ui-copy-compact: calc(var(--base-font-size) * 0.6875);
+    --ui-copy-meta: var(--font-xs);
+    --ui-copy-label: calc(var(--base-font-size) * 0.8125);
+    --ui-copy-body: var(--font-sm);
+    --ui-copy-title: var(--font-md);
+
+    /* 历史侧栏（项目 / 工作空间 / 对话）— 随 UI 字号与主题缩放 */
+    --history-section-size: var(--ui-copy-meta);
+    --history-section-weight: 500;
+    --history-row-size: var(--ui-copy-body);
+    --history-row-weight: 400;
+    --history-meta-size: var(--ui-copy-meta);
+    --history-expand-size: var(--ui-copy-meta);
+    --history-section-color: var(--text-muted);
+    --history-row-color: var(--text-secondary);
+    --history-row-color-active: var(--text-primary);
+    --history-row-bg-hover: var(--color-black-overlay-1);
+    --history-row-bg-active: var(--color-black-overlay-1);
+    --history-nested-guide: var(--border-subtle);
+    --webview-font-delta: -1px;
+    --webview-font-xs: calc(var(--font-xs) - var(--webview-font-delta));
+    --webview-font-sm: calc(var(--font-sm) - var(--webview-font-delta));
+    --webview-font-md: calc(var(--font-md) - var(--webview-font-delta));
+    --webview-font-base: calc(var(--font-base) - var(--webview-font-delta));
+    --webview-font-lg: calc(var(--font-lg) - var(--webview-font-delta));
+    --webview-font-xl: calc(var(--font-xl) - var(--webview-font-delta));
+    --webview-font-2xl: calc(var(--font-2xl) - var(--webview-font-delta));
+    --webview-font-3xl: calc(var(--font-3xl) - var(--webview-font-delta));
+    --webview-font-4xl: calc(var(--font-4xl) - var(--webview-font-delta));
+    --webview-font-5xl: calc(var(--font-5xl) - var(--webview-font-delta));
+    --sidebar-menu-font-size: var(--font-lg);
+    --sidebar-w: 308px;
+    --sidebar-w-collapsed: 68px;
+    --sidebar-nav-title-padding-y: 8px;
+    --sidebar-nav-title-padding-x: 12px;
+    --sidebar-nav-item-padding-y: 10px;
+    --sidebar-nav-item-padding-x: 14px;
+    --sidebar-sub-item-padding-y: 10px;
+    --sidebar-sub-item-padding-x: 14px;
+    --sidebar-nav-item-radius: 12px;
+    --sidebar-submenu-indent: 0px;
+    --sidebar-collapsed-item-padding-y: 10px;
+    --shell-header-height: 64px;
+    --sidebar-logo-size: 30px;
+    --r: 12px;
+    --r2: 18px;
+    --r3: 24px;
+    --radius-sm: 12px;
+    --radius-md: 18px;
+    --radius-lg: 24px;
+    --radius-xl: 28px;
+    --radius-full: 9999px;
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+    --duration-fast: 120ms;
+    --duration-normal: 220ms;
+    --duration-slow: 320ms;
+    --press-scale: 0.98;
+    --control-radius: 10px;
+    --control-radius-lg: 14px;
+    --floating-radius: 24px;
+    --material-bg: rgba(250, 250, 248, 0.86);
+    --material-border: rgba(174, 187, 194, 0.58);
+    --material-shadow: 0 12px 36px rgba(46, 51, 54, 0.08);
+
+    /* ── z-index scale (X6) ──────────────────────────────────────────
+     * Coordinated stacking tokens. Values are byte-identical to the
+     * magic numbers they replace, so the swap is a 1:1 no-op on computed
+     * stacking. Group tiers from low → high:
+     *   base     : local stacking-context helpers (position: relative bumps)
+     *   sticky   : in-flow sticky headers / pinned bars
+     *   dropdown : legacy dropdown layer
+     *   overlay  : full-viewport modal/overlay backdrops (base tier)
+     *   modal    : modal dialogs sitting above their overlay
+     *   popover  : floating popovers / confirm dialogs above modals
+     *   busy     : app-busy / global spinner, above popovers
+     *   toast    : transient toasts, top of the app chrome stack
+     *   debug    : ui-preview / dev-only floating panel
+     * The 9000/9999 tier is reserved for context menus / title bar / stats
+     * overlay so they reliably sit above all app chrome.
+     */
+    --z-base: 1;
+    --z-raised: 10;
+    --z-sticky: 100;
+    --z-dropdown: 1000;
+    --z-overlay: 2000;
+    --z-overlay-high: 2100;
+    --z-modal: 2500;
+    --z-popover: 3000;
+    --z-busy: 3500;
+    --z-toast: 4000;
+    --z-toast-high: 4200;
+    --z-context-menu: 9000;
+    --z-chrome-top: 9999;
+    --z-debug: 99999;
+    --theme-switch-x: 50%;
+    --theme-switch-y: 50%;
+    --card: white;
+    --card-highlight: rgba(255, 255, 255, 0.7);
+    --shadow-sm: 0 4px 14px rgba(46, 51, 54, 0.05);
+    --shadow-md: 0 10px 28px rgba(46, 51, 54, 0.07);
+    --shadow-lg: 0 18px 46px rgba(46, 51, 54, 0.09);
+    --shadow-xl: 0 24px 64px rgba(46, 51, 54, 0.12);
+    --shadow-glow: 0 0 0 4px var(--accent-glow);
+    color-scheme: light;
+}
+
+
+:root {
+    --color-border: #D3DADC;
+    --color-surface-alt: #f8fafc;
+}
+
+
+:root {
+    --color-white-overlay-1: rgba(255, 255, 255, 0.06);
+    --color-white-overlay-2: rgba(255, 255, 255, 0.14);
+    --color-white-overlay-3: rgba(255, 255, 255, 0.32);
+    --color-white-overlay-4: rgba(255, 255, 255, 0.6);
+    --color-white-overlay-5: rgba(255, 255, 255, 0.88);
+    --color-black-overlay-1: rgba(0, 0, 0, 0.04);
+    --color-black-overlay-2: rgba(0, 0, 0, 0.12);
+    --color-black-overlay-3: rgba(0, 0, 0, 0.22);
+    --color-black-overlay-4: rgba(0, 0, 0, 0.4);
+    --color-black-overlay-5: rgba(0, 0, 0, 0.6);
+
+    /* Slate gray series (used heavily in dark mode for borders /
+     * dividers / muted text; mirrors --line / --line2 in dark mode
+     * which were 148,163,184,0.18 / 0.28). */
+    --color-gray-overlay-1: rgba(148, 163, 184, 0.10);
+    --color-gray-overlay-2: rgba(148, 163, 184, 0.22);
+    --color-gray-overlay-3: rgba(148, 163, 184, 0.36);
+
+    --color-accent-12:  color-mix(in srgb, var(--color-accent) 12%, transparent);
+    --color-accent-18:  color-mix(in srgb, var(--color-accent) 18%, transparent);
+    --color-accent-22:  color-mix(in srgb, var(--color-accent) 22%, transparent);
+    --color-accent-32:  color-mix(in srgb, var(--color-accent) 32%, transparent);
+    --color-accent-soft:  color-mix(in srgb, var(--color-accent) 14%, transparent);
+    --color-accent-dim:   color-mix(in srgb, var(--color-accent)  8%, transparent);
+    --color-accent-light: color-mix(in srgb, var(--color-accent) 18%, transparent);
+    --color-accent-glow:  color-mix(in srgb, var(--color-accent) 16%, transparent);
+
+    --color-success-soft: color-mix(in srgb, var(--color-success) 14%, transparent);
+    --color-warning-soft: color-mix(in srgb, var(--color-warning) 14%, transparent);
+    --color-error-soft:   color-mix(in srgb, var(--color-error)   14%, transparent);
+    --color-info-soft:    color-mix(in srgb, var(--color-info)    14%, transparent);
+
+    --color-accent: #607D90;
+    --color-success: #809786;
+    --color-warning: #B59B6C;
+    --color-error:   #A66E6E;
+    --color-info:    #607D90;
+
+    /* Soft Pixel 规范补充 token（浅色主题） */
+    --color-selected: #D5E2EA;
+    --color-border-strong: #AEBBC2;
+    --color-primary-hover: #4F6D80;
+    --color-primary-pressed: #405F72;
+
+    /* Slate palette tokens.
+     * Used in 200+ raw hex literals across the bundle. The values
+     * are byte-identical to the most common Tailwind slate literals
+     * (--text-muted-1 = slate-500, --text-muted-2 = slate-600,
+     * --bg-soft-2 = slate-100) so the swap is visually a no-op. */
+    --text-muted-1: #64748b;   /* slate-500 */
+    --text-muted-2: #475569;   /* slate-600 */
+    --bg-soft-2:    #f1f5f9;   /* slate-100 */
+}
+
+:root[data-theme="dark"] {
+    --text-muted-1: #94a3b8;   /* slate-400 (dark mode equivalent) */
+    --text-muted-2: #cbd5e1;   /* slate-300 */
+    /* --bg-soft-2 uses --surface-3 so it tracks the dark surface ramp. */
+    --bg-soft-2: var(--surface-3);
+}
+
+:root[data-theme="dark"] {
+    --color-white-overlay-1: rgba(255, 255, 255, 0.04);
+    --color-white-overlay-2: rgba(255, 255, 255, 0.10);
+    --color-white-overlay-3: rgba(255, 255, 255, 0.18);
+    --color-white-overlay-4: rgba(255, 255, 255, 0.30);
+    --color-white-overlay-5: rgba(255, 255, 255, 0.72);
+    --color-black-overlay-1: rgba(0, 0, 0, 0.10);
+    --color-black-overlay-2: rgba(0, 0, 0, 0.22);
+    --color-black-overlay-3: rgba(0, 0, 0, 0.34);
+    --color-black-overlay-4: rgba(0, 0, 0, 0.5);
+    --color-black-overlay-5: rgba(0, 0, 0, 0.7);
+    --color-info: #60a5fa;
+    --color-accent: #60a5fa;
+    --color-success: #22c55e;
+    --color-warning: #f59e0b;
+    --color-error:   #f87171;
+}
+
+
+:root {
+    --accent:      var(--color-accent);
+    --accent2:     var(--color-accent);
+    --v2-primary:  var(--color-accent);
+    --mm-accent:   var(--color-accent);
+}
+
+/* ── Semantic surface / text / v2 tokens (single source of truth) ──
+ * Ex-_dark-overrides.css top blocks. Light defaults here; dark overrides
+ * below. Components must reference these, never the raw --bg or --tx primitives.
+ */
+:root {
+    --surface: var(--bg1);
+    --surface-2: var(--bg2);
+    --surface-3: var(--bg3);
+    --surface-overlay: var(--color-white-overlay-5);
+    --text-primary: var(--tx1);
+    --text-secondary: var(--tx2);
+    --text-muted: var(--tx3);
+    --border-subtle: var(--line);
+    /* 对话头像底托：浅色主题透明；深色主题用浅底托住黑色 PNG 描边 */
+    --msg-avatar-plate: transparent;
+    --msg-avatar-plate-ring: none;
+    --v2-bg-page: #EEF2F4;
+    --v2-card-bg: var(--surface);
+    --v2-card-border: rgba(148, 163, 184, 0.16);
+    --v2-card-border-hover: rgba(96, 125, 144, 0.28);
+    --v2-text-1: var(--text-primary);
+    --v2-text-2: var(--text-muted-2);
+    --v2-text-3: var(--text-muted-1);
+    --v2-text-4: var(--tx3);
+}
+
+:root[data-theme="dark"],
+:root[data-theme-mode="dark"] {
+    --bg: var(--bg1);
+    --bg1: #0f172a;
+    --bg2: #1e293b;
+    --bg3: #334155;
+    --bg4: #475569;
+    --line: var(--color-gray-overlay-2);
+    --line2: var(--color-gray-overlay-3);
+    --accent-soft: var(--color-accent-18);
+    --accent-dim: var(--color-accent-12);
+    --accent-light: var(--color-accent-22);
+    --accent-glow: rgba(96, 165, 250, 0.2);
+    --green-dim: rgba(34, 197, 94, 0.14);
+    --amber-dim: rgba(245, 158, 11, 0.14);
+    --red-dim: rgba(248, 113, 113, 0.14);
+    --purple-light: rgba(167, 139, 250, 0.14);
+    --tx: #e5e7eb;
+    --tx1: #e5e7eb;
+    --tx2: #cbd5e1;
+    --tx3: #94a3b8;
+    --tx4: #f1f5f9;
+    --tx5: #f8fafc;
+    --card: #1e293b;
+    --card-highlight: rgba(30, 41, 59, 0.82);
+    --shadow-sm: 0 10px 24px var(--color-black-overlay-2);
+    --shadow-md: 0 18px 40px var(--color-black-overlay-3);
+    --shadow-lg: 0 28px 64px var(--color-black-overlay-3);
+    --shadow-xl: 0 36px 96px var(--color-black-overlay-3);
+    color-scheme: dark;
+}
+
+/* Dark semantic overrides (ex-_dark-overrides.css) */
+:root[data-theme="dark"] {
+    --surface: var(--bg1);
+    --surface-2: var(--bg2);
+    --surface-3: #273449;
+    --surface-overlay: rgba(15, 23, 42, 0.96);
+    --text-primary: var(--tx1);
+    --text-secondary: var(--tx2);
+    --text-muted: var(--tx3);
+    --border-subtle: var(--color-gray-overlay-2);
+    --msg-avatar-plate: #f8fafc;
+    --msg-avatar-plate-ring: 0 0 0 1px var(--color-gray-overlay-3);
+    --v2-bg-page: linear-gradient(180deg, var(--bg1) 0%, var(--bg2) 100%);
+    --v2-card-bg: var(--bg1);
+    --v2-card-border: var(--color-gray-overlay-2);
+    --v2-card-border-hover: rgba(96, 165, 250, 0.34);
+    --v2-text-1: var(--tx1);
+    --v2-text-2: var(--text-muted-2);
+    --v2-text-3: var(--text-muted-1);
+    --v2-text-4: var(--text-muted-1);
+    --v2-shadow-sm: 0 1px 2px var(--color-black-overlay-3), 0 4px 14px var(--color-black-overlay-2);
+    --v2-shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3);
+    --v2-shadow-lg: 0 18px 42px rgba(0, 0, 0, 0.36);
+}
+
+
+:root[data-theme="sepia"] {
+    --bg: #faf3e0;
+    --bg1: #f5ecd5;
+    --bg2: #ede1c1;
+    --bg3: #d9c89a;
+    --bg4: #b89a5e;
+    --line: rgba(92, 75, 26, 0.12);
+    --line2: rgba(92, 75, 26, 0.2);
+    --tx: #5c4b1a;
+    --tx1: #5c4b1a;
+    --tx2: #7d6a3a;
+    --tx3: #9e8a5a;
+    --tx4: #7d6a3a;
+    --tx5: #5c4b1a;
+    --card: #fff5dd;
+    --card-highlight: rgba(255, 250, 230, 0.7);
+    --color-accent: #c2410c;
+    --color-success: #4d7c0f;
+    --color-warning: #b45309;
+    --color-error:   #b91c1c;
+    --color-info:    #c2410c;
+    color-scheme: light;
+}
+
+:root[data-theme="hc"] {
+    --bg: white;
+    --bg1: white;
+    --bg2: #f0f0f0;
+    --bg3: #e0e0e0;
+    --bg4: #d0d0d0;
+    --line: black;
+    --line2: black;
+    --tx: black;
+    --tx1: black;
+    --tx2: #1a1a1a;
+    --tx3: #404040;
+    --tx4: #1a1a1a;
+    --tx5: black;
+    --card: white;
+    --card-highlight: white;
+    --color-accent: #0000ee;
+    --color-success: #008000;
+    --color-warning: #cc6600;
+    --color-error:   #cc0000;
+    --color-info:    #0000ee;
+    color-scheme: light;
+}

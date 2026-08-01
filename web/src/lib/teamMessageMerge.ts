@@ -1,0 +1,185 @@
+import type { UiMessage } from "../types";
+import { mergeAgentToolCalls, mergeStreamingText } from "./agentTurnState";
+
+function mergeThinking(existing?: string, incoming?: string, append = false): string | undefined {
+  if (!incoming) return existing;
+  return mergeStreamingText(existing, incoming, append ? "append" : "snapshot");
+}
+
+function isTeamNodeResult(message: UiMessage): boolean {
+  return [
+    "team_submit",
+    "team_summary",
+    "team_review",
+    "team_decision",
+  ].includes(message.eventType || "");
+}
+
+function compactText(value?: string): string {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+export function isDuplicateAssistantOfTeamResult(existing: UiMessage, incoming: UiMessage): boolean {
+  const assistant = existing.role === "assistant" ? existing : incoming.role === "assistant" ? incoming : null;
+  const team = existing.role === "team_internal" ? existing : incoming.role === "team_internal" ? incoming : null;
+  if (!assistant || !team || !isTeamNodeResult(team)) return false;
+  const assistantText = compactText(assistant.text);
+  const teamText = compactText(team.text);
+  if (!assistantText || !teamText) return false;
+  return assistantText === teamText || assistantText.includes(teamText) || teamText.includes(assistantText);
+}
+
+function isTeamStream(message: UiMessage): boolean {
+  return message.eventType === "team_stream";
+}
+
+function isTeamPlanningProgress(message: UiMessage): boolean {
+  return message.eventType === "team_planning_progress";
+}
+
+function isDuplicateTeamEvent(existing: UiMessage, incoming: UiMessage): boolean {
+  return existing.role === "team_internal"
+    && incoming.role === "team_internal"
+    && !isTeamStream(existing)
+    && !isTeamStream(incoming)
+    && existing.eventType === incoming.eventType
+    && existing.nodeId === incoming.nodeId
+    && (existing.agentId || existing.mentionFrom) === (incoming.agentId || incoming.mentionFrom)
+    && existing.sourceSessionId === incoming.sourceSessionId
+    && existing.text.trim() === incoming.text.trim();
+}
+
+function isApproveDecision(message: UiMessage): boolean {
+  if (message.eventType !== "team_decision") return false;
+  if (message.mentionIntent === "approve") return true;
+  const text = (message.text || "").trim();
+  return text === "审阅通过，继续后续流程。" || text === "审阅通过，开始后续流程。";
+}
+
+function shouldSuppressApproveDecision(existing: UiMessage, incoming: UiMessage): boolean {
+  if (!isApproveDecision(incoming)) return false;
+  if (existing.eventType !== "team_review") return false;
+  return Boolean(existing.nodeId && incoming.nodeId && existing.nodeId === incoming.nodeId);
+}
+
+function teamTurnKey(message: UiMessage): string {
+  const source = String(message.sourceSessionId || "").trim();
+  if (!source) return "";
+  const marker = "::turn::";
+  if (!source.includes(marker)) return source;
+  const [parent, rest] = source.split(marker, 2);
+  const requestId = rest.split("::", 1)[0];
+  return requestId ? `${parent}${marker}${requestId}` : source;
+}
+
+function matchesTeamNode(existing: UiMessage, incoming: UiMessage): boolean {
+  if (existing.role !== "team_internal") return false;
+  if (!isTeamStream(existing) && !isTeamNodeResult(existing) && !isTeamPlanningProgress(existing)) return false;
+  if (incoming.nodeId && existing.nodeId === incoming.nodeId) {
+    const existingTurn = teamTurnKey(existing);
+    const incomingTurn = teamTurnKey(incoming);
+    return Boolean(existingTurn && incomingTurn && existingTurn === incomingTurn);
+  }
+  return Boolean(
+    !incoming.nodeId &&
+    existing.sourceSessionId &&
+    incoming.sourceSessionId &&
+    existing.sourceSessionId === incoming.sourceSessionId &&
+    existing.agentId === incoming.agentId,
+  );
+}
+
+function findMatchingTeamNode(messages: UiMessage[], incoming: UiMessage): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (matchesTeamNode(messages[index], incoming)) return index;
+  }
+  return -1;
+}
+
+export function mergeTeamInternalMessage(
+  messages: UiMessage[],
+  incoming: UiMessage,
+  options: { append?: boolean } = {},
+): UiMessage[] {
+  if (incoming.role !== "team_internal") return [...messages, incoming];
+  const withoutDuplicateAssistant = isTeamNodeResult(incoming)
+    ? messages.filter((message) => !isDuplicateAssistantOfTeamResult(message, incoming))
+    : messages;
+  if (withoutDuplicateAssistant.some((message) => isDuplicateTeamEvent(message, incoming))) {
+    return withoutDuplicateAssistant;
+  }
+  const matchingIndex = findMatchingTeamNode(withoutDuplicateAssistant, incoming);
+
+  if (isTeamPlanningProgress(incoming) && matchingIndex >= 0) {
+    return [
+      ...withoutDuplicateAssistant.slice(0, matchingIndex),
+      {
+        ...withoutDuplicateAssistant[matchingIndex],
+        ...incoming,
+      },
+      ...withoutDuplicateAssistant.slice(matchingIndex + 1),
+    ];
+  }
+
+  if (isTeamNodeResult(incoming) && matchingIndex >= 0) {
+    const matched = withoutDuplicateAssistant[matchingIndex];
+    if (shouldSuppressApproveDecision(matched, incoming)) {
+      return withoutDuplicateAssistant;
+    }
+    if (!isTeamStream(matched)) return [...withoutDuplicateAssistant, incoming];
+    const displayMode = incoming.displayMode || "chat";
+    const matchedProcessText = (matched.processText || matched.text || "").trim();
+    const incomingText = (incoming.text || "").trim();
+    const incomingProcessText = (incoming.processText || "").trim();
+    const preservedProcessText = matchedProcessText && matchedProcessText !== incomingText
+      ? (matched.processText || matched.text)
+      : incomingProcessText && incomingProcessText !== incomingText
+        ? incoming.processText
+        : undefined;
+    const replacement = ["stream", "collapsible"].includes(matched.displayMode || "") && (matched.text || "").trim()
+      ? {
+          ...matched,
+          ...incoming,
+          displayMode,
+          collapsedTitle: matched.collapsedTitle || incoming.collapsedTitle || `${matched.agentRole || "当前节点"} 的执行过程`,
+          processText: preservedProcessText,
+          thinking: mergeThinking(matched.thinking, incoming.thinking),
+          toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+        }
+      : {
+          ...matched,
+          ...incoming,
+          displayMode,
+          thinking: mergeThinking(matched.thinking, incoming.thinking),
+          toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+        };
+    return [
+      ...withoutDuplicateAssistant.slice(0, matchingIndex),
+      replacement,
+      ...withoutDuplicateAssistant.slice(matchingIndex + 1),
+    ];
+  }
+
+  if (
+    options.append &&
+    matchingIndex >= 0 &&
+    isTeamStream(incoming) &&
+    isTeamStream(withoutDuplicateAssistant[matchingIndex]) &&
+    ["collapsible", "stream"].includes(withoutDuplicateAssistant[matchingIndex].displayMode || "")
+  ) {
+    const matched = withoutDuplicateAssistant[matchingIndex];
+    return [
+      ...withoutDuplicateAssistant.slice(0, matchingIndex),
+      {
+        ...matched,
+        text: `${matched.text ?? ""}${incoming.text ?? ""}`,
+        thinking: mergeThinking(matched.thinking, incoming.thinking, true),
+        toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+        timestamp: incoming.timestamp,
+      },
+      ...withoutDuplicateAssistant.slice(matchingIndex + 1),
+    ];
+  }
+
+  return [...withoutDuplicateAssistant, incoming];
+}

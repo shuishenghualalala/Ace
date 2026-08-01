@@ -1,0 +1,193 @@
+/**
+ * 基础样式重置
+ * @module styles/base
+ */
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body {
+    height: 100%;
+    font-family: var(--sans);
+    font-size: var(--base-font-size);
+    line-height: 1.4;
+    color: var(--tx);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+    background: var(--surface);
+}
+
+button,
+[role="button"],
+input,
+textarea,
+select {
+    -webkit-tap-highlight-color: transparent;
+}
+
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+    touch-action: manipulation;
+}
+
+button:not(:disabled):active,
+[role="button"]:not([aria-disabled="true"]):active {
+    /* 用独立 scale 属性而非 transform: scale()：与按钮自身的 transform（如
+       translateY(-50%) 垂直居中）叠加而非覆盖，避免按下瞬间按钮跳走导致 click 落空。 */
+    scale: var(--press-scale);
+    transition-duration: 80ms;
+}
+
+::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg2);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--bg3);
+    border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--bg4);
+}
+
+/* 动画关键帧 */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        max-height: 0;
+    }
+
+    to {
+        opacity: 1;
+        max-height: 200px;
+    }
+}
+
+@keyframes shimmer {
+
+    0%,
+    100% {
+        background-position: 0% 50%;
+    }
+
+    50% {
+        background-position: 100% 50%;
+    }
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+}
+
+@keyframes bounce {
+
+    0%,
+    100% {
+        transform: translateY(0);
+    }
+
+    50% {
+        transform: translateY(-4px);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 1ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 1ms !important;
+        transition-delay: 0ms !important;
+    }
+
+    button:not(:disabled):active,
+    [role="button"]:not([aria-disabled="true"]):active {
+        scale: none !important;
+    }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+    :root {
+        --material-bg: var(--surface);
+    }
+
+    *,
+    *::before,
+    *::after {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+    }
+}
+
+@media (prefers-contrast: more) {
+    :root {
+        --line: rgba(46, 51, 54, 0.42);
+        --line2: rgba(46, 51, 54, 0.62);
+        --material-border: rgba(46, 51, 54, 0.58);
+    }
+
+    button,
+    input,
+    textarea,
+    select {
+        border-color: var(--line2) !important;
+    }
+}

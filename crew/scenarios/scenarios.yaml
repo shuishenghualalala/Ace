@@ -1,0 +1,98 @@
+# 场景化推荐数据
+#
+# 顶层 = 经典场景（首页卡片）；items = 细分玩法。
+# 字段说明：
+#   id              唯一标识（顶层 / 细分各自唯一）
+#   title           展示名
+#   icon            emoji 或前端图标 key
+#   description     一句话简介
+#   category        分类，前端可用于分组
+#   items[].query   点击后预填进输入框的提示词（用户可编辑）
+#   items[].skills  本玩法需要的 Skill slug；空列表表示不强制依赖 Skill
+#   items[].inject  注入给模型的任务说明；可省略
+#   items[].mode    运行模式；可选，默认 agent
+
+- id: writing
+  title: 写作与整理
+  icon: 📝
+  description: 起草文稿、整理会议记录和提炼行动项
+  category: office
+  items:
+    - id: report-draft
+      title: 起草工作文稿
+      query: "请根据【背景、目标和要点】起草一份结构清晰的文稿，并标出仍需我补充的信息。"
+      skills: []
+      inject: "先梳理目标、受众和关键事实，再输出可直接编辑的结构化草稿；不要虚构缺失信息。"
+    - id: meeting-summary
+      title: 整理会议纪要
+      query: "请把【会议记录或附件】整理成会议纪要，包含议题、结论、负责人、截止时间和待确认事项。"
+      skills: []
+      inject: "区分已确认结论与待确认内容；无法从材料中确定的负责人或日期请明确标注。"
+
+- id: research
+  title: 调研与分析
+  icon: 🔎
+  description: 比较方案、整理证据并形成可追溯结论
+  category: research
+  items:
+    - id: topic-research
+      title: 主题调研
+      query: "请调研【主题】，说明关键事实、不同观点、风险和结论，并列出信息来源。"
+      skills: []
+      inject: "优先使用当前可用的检索工具；区分来源事实与推断，并标注信息日期。"
+    - id: option-comparison
+      title: 方案对比
+      query: "请比较【方案 A】和【方案 B】，从成本、能力、风险、维护和适用场景给出建议。"
+      skills: []
+      inject: "先明确比较标准和假设，再给出对比结果；证据不足时说明不确定性。"
+
+- id: file-work
+  title: 文件与数据
+  icon: 📁
+  description: 阅读文件、提取信息和生成结构化结果
+  category: productivity
+  items:
+    - id: file-summary
+      title: 总结文件
+      query: "请阅读【附件或工作空间中的文件】，总结核心内容、关键数据、风险和后续行动。"
+      skills: []
+      inject: "仅基于用户授权访问的文件作答，并在结果中注明使用了哪些文件。"
+    - id: data-check
+      title: 检查数据
+      query: "请检查【数据文件】中的缺失值、异常值和口径问题，并给出修复建议。"
+      skills: []
+      inject: "先说明数据范围和检查规则；不要在未经确认的情况下覆盖原文件。"
+
+- id: software
+  title: 软件开发
+  icon: 💻
+  description: 理解代码、定位问题和实施可验证的修改
+  category: development
+  items:
+    - id: code-review
+      title: 审查代码
+      query: "请审查【文件、提交或分支】，重点检查功能缺陷、安全风险、兼容性和测试缺口。"
+      skills: []
+      inject: "先给出有证据的发现并按影响排序；除非用户要求，否则不要直接修改代码。"
+    - id: implement-change
+      title: 实现修改
+      query: "请在当前项目中实现【需求】，保持现有功能兼容，并运行与风险相匹配的测试。"
+      skills: []
+      inject: "先检查项目约定和现有实现；保存用户已有改动，完成后报告修改与验证结果。"
+
+- id: schedule
+  title: 定时任务
+  icon: ⏰
+  description: 创建单次提醒或周期任务
+  category: schedule
+  items:
+    - id: schedule-once
+      title: 单次提醒
+      query: "请在【日期和时间】提醒我【事项】。"
+      skills: []
+      inject: "使用内置 cron 工具创建单次任务；创建前确认时间、时区、任务内容和投递目标。"
+    - id: schedule-recurring
+      title: 周期提醒
+      query: "请按【周期和时间】提醒我【事项】。"
+      skills: []
+      inject: "使用内置 cron 工具创建周期任务；创建前确认时区、重复规则、任务内容和投递目标。"

@@ -1,0 +1,129 @@
+import type { TeamMemberView, UiMessage } from "../types";
+import { buildAgentTurnState } from "../lib/agentTurnState";
+import { openLocalPath } from "../lib/localPath";
+import AgentTurnBubble from "./AgentTurnBubble";
+import MarkdownContent from "./MarkdownContent";
+
+interface Props {
+  message: UiMessage;
+  isStreaming?: boolean;
+  teamMembers?: TeamMemberView[];
+}
+
+function isCrewAgent(message: UiMessage): boolean {
+  return String(message.agentId || "").trim() === "crew::builtin";
+}
+
+function resolveIdentity(message: UiMessage, teamMembers: TeamMemberView[] = []) {
+  const member = (message.agentId ? teamMembers.find((item) => item.agentId === message.agentId) : undefined)
+    || (message.agentName ? teamMembers.find((item) => item.name === message.agentName) : undefined)
+    || (message.isLeader ? teamMembers.find((item) => item.isLeader) : undefined);
+  const crewLogo = isCrewAgent(message) || member?.agentId === "crew::builtin";
+  return {
+    name: crewLogo ? "Crew" : (member?.name || message.agentName || "Agent"),
+    badge: member?.displayBadge || "?",
+    role: member?.isLeader ? "leader" : (message.isLeader ? "leader" : (message.agentRole || member?.role || "").trim()),
+    tone: member?.tone ?? message.agentTone ?? 0,
+    crewLogo,
+  };
+}
+
+function artifactIcon(artifact: NonNullable<UiMessage["artifacts"]>[number]): string {
+  const source = `${artifact.kind || ""} ${artifact.mime_type || ""} ${artifact.content_type || ""} ${artifact.path || ""} ${artifact.title || ""}`.toLowerCase();
+  const ext = source.match(/\.([a-z0-9]+)(?:\?|#|\s|$)/)?.[1] || "";
+  if (artifact.content_type === "inode/directory") return "DIR";
+  if (artifact.kind === "image" || ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext)) return "IMG";
+  if (artifact.kind === "html" || ["html", "htm"].includes(ext)) return "HTML";
+  if (artifact.kind === "spreadsheet" || ["xlsx", "xls", "csv", "tsv"].includes(ext)) return "XLS";
+  if (artifact.kind === "presentation" || ["pptx", "ppt"].includes(ext)) return "PPT";
+  if (["docx", "doc"].includes(ext)) return "DOC";
+  if (ext === "pdf") return "PDF";
+  if (["md", "markdown"].includes(ext)) return "MD";
+  if (["json", "yaml", "yml"].includes(ext)) return "DATA";
+  if (artifact.kind === "text" || ["txt", "log"].includes(ext)) return "TXT";
+  return "FILE";
+}
+
+function ArtifactCards({ artifacts }: { artifacts?: UiMessage["artifacts"] }) {
+  const list = artifacts?.filter((item) => item.title || item.path) || [];
+  if (list.length === 0) return null;
+  return (
+    <div className="team-artifacts" aria-label="产物">
+      {list.map((artifact, index) => {
+        const title = artifact.title || artifact.path || "产物";
+        const body = artifact.summary || artifact.path || artifact.mime_type || artifact.content_type || "";
+        const content = (
+          <>
+            <span className="team-artifact__icon" aria-hidden="true">{artifactIcon(artifact)}</span>
+            <span className="team-artifact__body">
+              <strong>{title}</strong>
+              {body && <em>{body}</em>}
+            </span>
+          </>
+        );
+        return artifact.path ? (
+          <button
+            className="team-artifact"
+            type="button"
+            title={artifact.path}
+            key={`${title}_${index}`}
+            onClick={() => void openLocalPath(artifact.path || "")}
+          >
+            {content}
+          </button>
+        ) : (
+          <div className="team-artifact" title={title} key={`${title}_${index}`}>{content}</div>
+        );
+      })}
+    </div>
+  );
+}
+
+function highlightMentionMarkdown(text: string): string {
+  return String(text || "").replace(
+    /(^|[\s([{（【,，。.!！?？;；:：])@([A-Za-z0-9_\-\u4e00-\u9fa5][A-Za-z0-9_\-\u4e00-\u9fa5:.：]*)/g,
+    "$1**@$2**",
+  );
+}
+
+export default function TeamAgentTurnBubble({ message, isStreaming = false, teamMembers }: Props) {
+  const identity = resolveIdentity(message, teamMembers);
+  const state = buildAgentTurnState([{
+    ...message,
+    text: highlightMentionMarkdown(message.text),
+  }], isStreaming);
+  const processText = (message.processText || "").trim();
+  const isCollapsible = message.displayMode === "collapsible";
+  const isPlanningProgress = message.eventType === "team_planning_progress";
+  const afterContent = (
+    <>
+      <ArtifactCards artifacts={message.artifacts} />
+      {processText && !isCollapsible && (
+        <details className="team-internal__collapse team-internal__collapse--embedded">
+          <summary>{message.collapsedTitle || "执行过程"}</summary>
+          <div className="team-internal__process md-body">
+            <MarkdownContent content={processText} />
+          </div>
+        </details>
+      )}
+    </>
+  );
+  const bubbleClassName = `team-internal__bubble team-internal__bubble--tone-${identity.tone}`
+    + (identity.crewLogo ? " is-crew" : "")
+    + (isPlanningProgress ? " is-planning" : "")
+    + " md-body";
+
+  return (
+    <AgentTurnBubble
+      identity={identity}
+      state={state}
+      isStreaming={isStreaming}
+      id={`message-${message.id}`}
+      className={`team-internal${isPlanningProgress ? " team-internal--planning" : ""}`}
+      bubbleClassName={bubbleClassName}
+      processClassName="team-internal__agent-process"
+      collapsibleTitle={isCollapsible ? (message.collapsedTitle || "执行过程") : undefined}
+      afterContent={afterContent}
+    />
+  );
+}
