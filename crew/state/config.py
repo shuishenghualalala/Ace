@@ -163,6 +163,18 @@ class ModelProfile:
         }
 
 
+def is_placeholder_model_profile(profile: ModelProfile | None) -> bool:
+    """判断 profile 是否仍是开源模板中的模型占位配置。"""
+    if profile is None:
+        return False
+    model = str(profile.model or "").strip().lower()
+    base_url = str(profile.base_url or "").strip().lower().rstrip("/")
+    return model == "your-model-name" or base_url in {
+        "https://api.example.com",
+        "https://api.example.com/v1",
+    }
+
+
 @dataclass
 class Config:
     # --- LLM ---
@@ -413,16 +425,44 @@ class Config:
         profiles = self.owner_model_profiles(owner_account_id)
         if not profiles:
             return self.active_model_id
+
+        # 开源模板自带的 default 只用于说明配置结构。owner 已经配置真实可用
+        # 模型后，不能再让这个占位项因为 CREW_API_KEY 的兼容回落而被误判为
+        # 可用默认模型，否则辅助规划会请求 api.example.com/your-model-name。
+        ready_model_id = next(
+            (
+                model_id
+                for model_id in sorted(profiles)
+                if profiles[model_id].loaded
+                and profiles[model_id].has_key
+                and not is_placeholder_model_profile(profiles[model_id])
+            ),
+            "",
+        )
+
+        def _resolved_candidate(model_id: str) -> str:
+            profile = profiles.get(model_id)
+            if profile is None or not profile.loaded:
+                return ""
+            if is_placeholder_model_profile(profile) and ready_model_id:
+                return ready_model_id
+            return model_id
+
         overlay = self.owner_overlay_data(owner_account_id)
         llm = overlay.get("llm") if isinstance(overlay.get("llm"), dict) else {}
         candidate = str((llm or {}).get("default") or (llm or {}).get("active") or "").strip()
-        if candidate and candidate in profiles and profiles[candidate].loaded:
-            return candidate
+        resolved = _resolved_candidate(candidate)
+        if resolved:
+            return resolved
         global_default = str(self.default_model_id or "").strip()
-        if global_default in profiles and profiles[global_default].loaded:
-            return global_default
-        if self.active_model_id in profiles and profiles[self.active_model_id].loaded:
-            return self.active_model_id
+        resolved = _resolved_candidate(global_default)
+        if resolved:
+            return resolved
+        resolved = _resolved_candidate(self.active_model_id)
+        if resolved:
+            return resolved
+        if ready_model_id:
+            return ready_model_id
         for model_id in sorted(profiles):
             profile = profiles[model_id]
             if profile.loaded and profile.has_key:

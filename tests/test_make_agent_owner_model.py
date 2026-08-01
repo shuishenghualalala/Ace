@@ -18,6 +18,38 @@ from crew.state.config import load_config
 from crew.state.home import get_owner_runtime_home, owner_path_segment
 
 
+def _write_placeholder_config(tmp_path: Path, crew_home: Path) -> Path:
+    config_yaml = tmp_path / "placeholder-config.yaml"
+    config_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "llm": {
+                    "active": "default",
+                    "models": {
+                        "default": {
+                            "name": "Default",
+                            "api_key_env": "CREW_MODEL_API_KEY",
+                            "base_url": "https://api.example.com/v1",
+                            "model": "your-model-name",
+                        }
+                    },
+                },
+                "runtime": {
+                    "crew_home": str(crew_home),
+                    "db_path": str(tmp_path / "placeholder.db"),
+                    "memory_db_path": str(tmp_path / "placeholder-memory.db"),
+                    "log_level": "WARNING",
+                    "llm_trace": False,
+                },
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return config_yaml
+
+
 @pytest.fixture
 def owner_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """全局内置 alpha + owner 私有 MiniMax-M3（有 key）。"""
@@ -130,6 +162,73 @@ def test_unbound_session_inherits_owner_default_model(owner_app):
     assert app._default_agent_config()["model_profile_id"] == "inherit"
     assert getattr(agent.provider, "model", None) == "MiniMax-M3"
     assert binding["model_profile_id"] == "MiniMax-M3"
+
+
+def test_existing_owner_profile_replaces_placeholder_default_at_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """旧 overlay 仍写 default 时，也应解析到已经可用的真实 owner 模型。"""
+    crew_home = tmp_path / ".Crew"
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    cfg = load_config(config_path=str(_write_placeholder_config(tmp_path, crew_home)))
+    owner = "dev:dev"
+    owner_home = get_owner_runtime_home(owner)
+    owner_home.mkdir(parents=True, exist_ok=True)
+    (owner_home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "llm": {
+                    "active": "default",
+                    "models": {
+                        "deepseek": {
+                            "name": "DeepSeek",
+                            "api_key_env": "CREW_API_KEY",
+                            "base_url": "https://api.deepseek.com",
+                            "model": "deepseek-chat",
+                            "loaded": True,
+                        }
+                    },
+                }
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (owner_home / ".env").write_text("CREW_API_KEY=sk-owner\n", encoding="utf-8")
+
+    assert cfg.owner_default_model_id(owner) == "deepseek"
+    assert cfg.owner_default_model_profile(owner).model == "deepseek-chat"
+
+
+def test_first_ready_owner_model_replaces_and_persists_placeholder_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """新增首个可用真实模型时，应立即写成 owner 默认模型。"""
+    crew_home = tmp_path / ".Crew"
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    cfg = load_config(config_path=str(_write_placeholder_config(tmp_path, crew_home)))
+    app = build_app(config=cfg, enable_team=False)
+    owner = "dev:dev"
+
+    app.add_model(
+        {
+            "id": "deepseek",
+            "name": "DeepSeek",
+            "api_key_env": "CREW_API_KEY",
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-chat",
+            "api_key": "sk-owner",
+        },
+        owner_account_id=owner,
+    )
+
+    overlay = yaml.safe_load((get_owner_runtime_home(owner) / "config.yaml").read_text(encoding="utf-8"))
+    assert overlay["llm"]["active"] == "deepseek"
+    assert overlay["llm"]["default"] == "deepseek"
+    assert cfg.owner_default_model_id(owner) == "deepseek"
 
 
 @pytest.mark.asyncio

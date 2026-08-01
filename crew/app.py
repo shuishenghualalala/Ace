@@ -39,6 +39,7 @@ from crew.state.config import (
     Config,
     ModelProfile,
     _build_profile_from_payload,
+    is_placeholder_model_profile,
     load_config,
     remove_env_key,
     resolve_writable_env_path,
@@ -1872,6 +1873,8 @@ class CrewApp:
         existing = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         if model_id in existing:
             raise ValueError(f"模型 id 已存在: {model_id}")
+        current_default_id = cfg.owner_active_model_id(owner) if owner else cfg.active_model_id
+        current_default_is_placeholder = is_placeholder_model_profile(existing.get(current_default_id))
 
         api_key_env = _validate_model_api_key_env(payload.get("api_key_env") or "CREW_API_KEY")
         payload = {**payload, "api_key_env": api_key_env, "builtin": False}
@@ -1888,8 +1891,18 @@ class CrewApp:
             profile.api_key = api_key or cfg.owner_env_map(owner).get(api_key_env, "")
             profiles = cfg.owner_model_profiles(owner)
             profiles[model_id] = profile
-            cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
+            activate_new_model = bool(
+                current_default_is_placeholder
+                and profile.loaded
+                and profile.has_key
+                and not is_placeholder_model_profile(profile)
+            )
+            next_default_id = model_id if activate_new_model else cfg.owner_active_model_id(owner)
+            cfg.persist_owner_model_profiles(owner, profiles, active_model_id=next_default_id)
             self.agents.drop_owner(owner)
+            if activate_new_model:
+                self._invalidate_owner_team_provider(owner)
+                log.info("首个可用模型已自动设为 owner 默认模型: %s", model_id)
         else:
             profile = cfg.add_model(payload)
             cfg.persist_model_profiles()
