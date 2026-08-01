@@ -46,7 +46,7 @@ uv pip install -e ".[dev,wiki]"
 
 # 创建本地配置和环境变量文件；两者均已被 Git 忽略
 cp config/config.yaml.example config/config.yaml  # Windows: Copy-Item config/config.yaml.example config/config.yaml
-cp config/.env.example .env     # Windows PowerShell: Copy-Item config/.env.example .env
+cp config/.env.example config/.env     # Windows PowerShell: Copy-Item config/.env.example .env
 ```
 
 `wiki` 额外依赖用于解析 PDF、DOCX、XLSX、PPTX 等上传文件；旧格式 DOC、XLS、PPT 还需要
