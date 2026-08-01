@@ -20,6 +20,8 @@ from crew.wiki.search import SQLiteFTS5SearchIndex, WikiSearchIndex
 from crew.wiki.store._base import WikiStore
 from crew.wiki.store._ids import (
     _DEFAULT_KB_ID,
+    _DEFAULT_KB_NAME,
+    _PROTECTED_KB_IDS,
     normalize_kb_id,
     page_file_path,
     page_id,
@@ -241,7 +243,7 @@ class FileSystemWikiStore(WikiStore):
                             summary.status = "ready"
                     kbs[kb_id] = KnowledgeBase(
                         id=kb_id,
-                        name=meta.get("name") or kb_id,
+                        name=meta.get("name") or (_DEFAULT_KB_NAME if kb_id == _DEFAULT_KB_ID else kb_id),
                         created_at=float(meta.get("created_at", 0.0) or sub.stat().st_ctime),
                         updated_at=float(meta.get("updated_at", 0.0) or sub.stat().st_mtime),
                         summary=summary,
@@ -255,7 +257,7 @@ class FileSystemWikiStore(WikiStore):
                 page_count, raw_count = self._quick_count(legacy, legacy_raw)
                 kbs[_DEFAULT_KB_ID] = KnowledgeBase(
                     id=_DEFAULT_KB_ID,
-                    name="默认知识库",
+                    name=_DEFAULT_KB_NAME,
                     created_at=legacy.stat().st_ctime,
                     updated_at=legacy.stat().st_mtime,
                     summary=KBSummary(
@@ -294,8 +296,8 @@ class FileSystemWikiStore(WikiStore):
 
     def delete_kb(self, kb_id: str, owner_account_id: str = "") -> bool:
         kb_id = normalize_kb_id(kb_id)
-        if kb_id == _DEFAULT_KB_ID:
-            raise ValueError("禁止删除 default 知识库")
+        if kb_id in _PROTECTED_KB_IDS:
+            raise ValueError(f"禁止删除 {kb_id} 知识库")
         base = self._kb_root(owner_account_id) / kb_id
         if not base.exists():
             return False
@@ -1338,7 +1340,7 @@ class FileSystemWikiStore(WikiStore):
         base = self._dir(owner_account_id, kb_id)
         pages = list(self._iter_pages(owner_account_id, kb_id))
         raws = self.list_raws(owner_account_id, kb_id)
-        kb_name = kb_id
+        kb_name = _DEFAULT_KB_NAME if kb_id == _DEFAULT_KB_ID else kb_id
         meta = self._read_kb_meta(base)
         if meta.get("name"):
             kb_name = str(meta["name"])
@@ -1638,6 +1640,9 @@ _HOME_MAP_MAX_PAGES = 6
 _HOME_RECENT_MAX_PAGES = 8
 # 知识地图单个页面介绍的最大长度
 _HOME_EXCERPT_MAX_CHARS = 300
+# Home.md 推荐问题小节标题：桌面端渲染时按此标题把该节转成可点击的提问按钮
+# （见 desktop wiki-page.ts 的推荐问题后处理），改名需要前后端同步。
+_HOME_QUESTIONS_HEADING = "推荐问题"
 
 _EMPTY_HOME_MD = """# 知识库概览
 
@@ -1666,18 +1671,22 @@ def _build_home_markdown(
     for page in pages:
         by_type[page.page_type] = by_type.get(page.page_type, 0) + 1
     intro_text = intro.text.strip() if intro is not None else ""
+    questions = [q.strip() for q in (intro.questions if intro is not None else []) if q.strip()]
     lines = [
         "# 知识库概览",
         "",
         f"> {kb_name} · 共 {len(pages)} 个页面 · {len(raws)} 份素材",
         "",
-        "## 关于这个知识库",
-        "",
+        # 导读直接跟在元信息行后（不加「内容导读」小标题），仿 NotebookLM 首页版式；
+        # 知识地图 / 快速导航 / 最近更新固定在页面底部。
         intro_text or _HOME_INTRO_PLACEHOLDER,
         "",
-        "## 知识地图",
-        "",
     ]
+    if questions:
+        lines.extend([f"## {_HOME_QUESTIONS_HEADING}", ""])
+        lines.extend(f"- {q}" for q in questions)
+        lines.append("")
+    lines.extend(["## 知识地图", ""])
     map_pages = _home_map_pages(pages)
     if map_pages:
         for page in map_pages:

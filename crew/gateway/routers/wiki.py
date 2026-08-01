@@ -15,7 +15,7 @@ from crew.gateway.auth import account_from_request
 from crew.state.logging import get_logger
 from crew.wiki._utils import is_wiki_agent_session
 from crew.wiki.parser import MissingDependencyError, guess_mime_type, parse_document_from_bytes
-from crew.wiki.schemas import RawSource
+from crew.wiki.schemas import RawSource, WikiRelation
 from crew.wiki.sources import classify_file
 from crew.wiki.store import normalize_kb_id
 from crew.wiki.store._ids import filename_from_title
@@ -47,6 +47,71 @@ def create_wiki_router(crew) -> APIRouter:
         if store is None or not page.sources:
             return {}
         return store.get_source_titles(page.sources, owner, kb_id)
+
+    def _source_pages_for_page(page, owner: str, kb_id: str) -> list[dict[str, Any]]:
+        """按稳定页面 ID 返回可跳转的来源摘要页，并去除重复来源。"""
+        store = getattr(crew, "_wiki_store", None)
+        if store is None:
+            return []
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for source_id in page.sources:
+            source_page = store.get_source_page(source_id, owner, kb_id)
+            if source_page is None or source_page.id in seen:
+                continue
+            seen.add(source_page.id)
+            result.append({
+                "id": source_page.id,
+                "title": source_page.title,
+                "page_type": source_page.page_type,
+            })
+        return result
+
+    def _relation_pages_for_page(page, owner: str, kb_id: str) -> list[dict[str, Any]]:
+        """返回页面的正向与反向结构化关系，供详情页直接展示和跳转。
+
+        Ace 的 WikiRelation.target 按标题存储（编译管线如此），这里同时兼容
+        按页面 ID 写入的关系：先按 ID 命中，再按标题命中。
+        """
+        store = getattr(crew, "_wiki_store", None)
+        if store is None:
+            return []
+        all_pages = store.list_all(
+            owner_account_id=owner,
+            kb_id=kb_id,
+            limit=10000,
+        )
+        by_id = {p.id: p for p in all_pages}
+        by_title = {p.title: p for p in all_pages}
+
+        def _resolve(raw_target: str):
+            return by_id.get(raw_target) or by_title.get(raw_target)
+
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        def _append(target, relation: str, direction: str) -> None:
+            key = (target.id, relation.casefold(), direction)
+            if target.id == page.id or key in seen:
+                return
+            seen.add(key)
+            result.append({
+                "id": target.id,
+                "title": target.title,
+                "page_type": target.page_type,
+                "relation": relation,
+                "direction": direction,
+            })
+
+        for relation in page.relations:
+            target = _resolve(relation.target)
+            if target is not None:
+                _append(target, relation.relation, "outgoing")
+        for candidate in all_pages:
+            for relation in candidate.relations:
+                if relation.target in (page.id, page.title):
+                    _append(candidate, relation.relation, "incoming")
+        return result
 
     def _resolve_original_path(raw, owner: str, kb_id: str) -> Path | None:
         """根据 RawSource 元数据定位真实原始文件路径。
@@ -360,6 +425,8 @@ def create_wiki_router(crew) -> APIRouter:
             "page": page.to_dict(),
             "source_titles": _source_titles_for_page(page, owner, kb_id),
             "source_files": _source_files_for_page(page, owner, kb_id),
+            "source_pages": _source_pages_for_page(page, owner, kb_id),
+            "relation_pages": _relation_pages_for_page(page, owner, kb_id),
         }
 
     @router.put("/pages/{page_id}")
@@ -375,8 +442,14 @@ def create_wiki_router(crew) -> APIRouter:
         existing.title = str(data.get("title", existing.title))
         existing.content = str(data.get("content", existing.content))
         existing.tags = list(data.get("tags", existing.tags))
-        existing.related = list(data.get("related", existing.related))
-        existing.aliases = list(data.get("aliases", existing.aliases))
+        existing.sources = list(data.get("sources", existing.sources))
+        if "relations" in data:
+            existing.relations = [
+                WikiRelation.from_dict(item)
+                for item in data["relations"]
+                if isinstance(item, dict)
+            ]
+        existing.related = []
         owner = _owner(request)
         updated = store.update(existing, owner, kb_id)
         result_page = updated or existing
@@ -386,6 +459,8 @@ def create_wiki_router(crew) -> APIRouter:
             "page": result_page.to_dict(),
             "source_titles": _source_titles_for_page(result_page, owner, kb_id),
             "source_files": _source_files_for_page(result_page, owner, kb_id),
+            "source_pages": _source_pages_for_page(result_page, owner, kb_id),
+            "relation_pages": _relation_pages_for_page(result_page, owner, kb_id),
         }
 
     @router.delete("/pages/{page_id}")

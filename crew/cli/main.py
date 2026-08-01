@@ -199,6 +199,10 @@ def main() -> None:
     if sys.argv[1:3] == ["migrate", "claim-legacy"]:
         _claim_legacy(sys.argv[3:])
         return
+    if sys.argv[1:2] == ["weixin-login"]:
+        from crew.cli.weixin_login import main as weixin_login_main
+        weixin_login_main()
+        return
 
     try:
         asyncio.run(_run())

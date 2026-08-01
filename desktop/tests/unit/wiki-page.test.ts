@@ -165,6 +165,8 @@ describe('KB 加载与渲染', () => {
     // 进入 KB 默认打开 Home.md，并以中文名称展示。
     expect(text).toContain('知识库概览');
     expect(text).toContain('暂无页面');
+    expect(document.querySelector('.wiki-detail.wiki-home-document')).not.toBeNull();
+    expect(document.querySelector('.wiki-home-document .wiki-detail__badges')?.textContent).toContain('概览');
     expect(api.wikiVaultDocument).toHaveBeenCalledWith('Home.md', 'default');
     expect(api.wikiInit).toHaveBeenCalledWith('default');
     expect(api.wikiPages).toHaveBeenCalledWith({ limit: 200, offset: 0, kb_id: 'default', brief: true });
@@ -199,6 +201,68 @@ describe('KB 加载与渲染', () => {
     document.querySelector('[data-tab="wiki"]')?.dispatchEvent(new Event('click'));
     expect(onTab).toHaveBeenCalled();
     await vi.waitFor(() => expect(api.wikiKBs).toHaveBeenCalled(), { timeout: 10000, interval: 20 });
+  });
+});
+
+describe('Home.md 推荐问题', () => {
+  const HOME_WITH_QUESTIONS = [
+    '# 知识库概览',
+    '',
+    '> default · 共 2 个页面 · 1 份素材',
+    '',
+    '这个知识库聚焦多智能体协作。',
+    '',
+    '## 推荐问题',
+    '',
+    '- 如何从零配置一个多智能体团队？',
+    '- SubAgent 和 Agent Teams 有什么区别？',
+    '',
+    '## 知识地图',
+    '',
+    '暂无关键词或话题页面。',
+  ].join('\n');
+
+  it('推荐问题小节渲染为提问按钮，点击后发给 Wiki Agent', async () => {
+    api.wikiVaultDocument.mockImplementation(async (name: 'Home.md' | 'index.md') => ({
+      ok: true,
+      document: {
+        name,
+        path: name,
+        content: name === 'Home.md' ? HOME_WITH_QUESTIONS : '# 知识导航',
+        updated_at: NOW,
+      },
+    }));
+    const entry = vi.fn();
+    setWikiAgentEntryHandler(entry);
+
+    await refreshWikiData();
+    await flush();
+
+    const chips = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.wiki-home-document .wiki-ask-chip'),
+    );
+    expect(chips.map((c) => c.textContent)).toEqual([
+      '如何从零配置一个多智能体团队？',
+      'SubAgent 和 Agent Teams 有什么区别？',
+    ]);
+    // 原「推荐问题」h2 + ul 已被替换为按钮组
+    const headings = Array.from(document.querySelectorAll('.wiki-home-document h2'))
+      .map((h) => h.textContent?.trim());
+    expect(headings).not.toContain('推荐问题');
+    expect(headings).toContain('知识地图');
+
+    chips[0].click();
+    expect(entry).toHaveBeenCalledWith({
+      kbId: 'default',
+      kbName: '默认知识库',
+      prompt: '如何从零配置一个多智能体团队？',
+    });
+  });
+
+  it('没有推荐问题小节时不生成按钮组', async () => {
+    await refreshWikiData();
+    await flush();
+    expect(document.querySelector('.wiki-ask-chips')).toBeNull();
   });
 });
 
@@ -373,7 +437,7 @@ describe('错误处理', () => {
     await refreshWikiData();
     expect(api.wikiKBs).toHaveBeenCalledTimes(2);
     const text = document.querySelector('#wiki-page-root')?.textContent ?? '';
-    expect(text).toContain('该知识库暂无 Wiki 页面');
+    expect(text).toContain('知识库还没有内容');
 
     // 成功后 loaded 置位：再次切入 tab 只重渲染，不再打请求
     await refreshWikiData();
@@ -537,6 +601,7 @@ describe('删除知识库', () => {
     kbs: [
       { id: 'default', name: '默认知识库', created_at: 0, updated_at: 0 },
       { id: 'work', name: '工作笔记', created_at: 0, updated_at: 0 },
+      { id: 'tutorial', name: 'LLM Wiki 使用教程', created_at: 0, updated_at: 0 },
     ],
   };
   const kbs1 = { ok: true, kbs: [{ id: 'default', name: '默认知识库', created_at: 0, updated_at: 0 }] };

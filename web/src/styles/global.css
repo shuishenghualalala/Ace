@@ -6387,6 +6387,41 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 13px;
   color: var(--text-2);
 }
+.wiki-page-view__relations {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.wiki-page-view__relation {
+  min-width: 0;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+.wiki-page-view__relation:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+.wiki-page-view__relation span,
+.wiki-page-view__relation small {
+  display: block;
+}
+.wiki-page-view__relation span {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wiki-page-view__relation small {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 11px;
+}
 .wiki-page-view__source-id {
   color: var(--text-3);
   font-size: 12px;

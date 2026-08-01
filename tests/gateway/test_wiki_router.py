@@ -83,6 +83,56 @@ def test_wiki_init_and_pages_crud(tmp_path, auth_headers):
     assert res.status_code == 404
 
 
+def test_wiki_page_detail_returns_outgoing_and_incoming_relations(tmp_path, auth_headers):
+    client, _app = _client(tmp_path)
+    client.post("/api/wiki/init", headers=auth_headers)
+
+    def create(page_type: str, title: str) -> str:
+        response = client.post(
+            "/api/wiki/pages",
+            headers={**auth_headers, "Content-Type": "application/json"},
+            json={"page_type": page_type, "title": title, "content": title},
+        )
+        assert response.status_code == 200
+        return response.json()["page"]["id"]
+
+    keyword_id = create("entity", "罗马")
+    topic_id = create("topic", "意大利城市旅行")
+    source_id = create("source", "意大利旅行行程单")
+
+    response = client.put(
+        f"/api/wiki/pages/{keyword_id}",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={
+            "relations": [
+                {"target_page_id": topic_id, "relation": "part_of"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    response = client.put(
+        f"/api/wiki/pages/{source_id}",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={
+            "relations": [
+                {"target_page_id": keyword_id, "relation": "describes"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+
+    detail = client.get(f"/api/wiki/pages/{keyword_id}", headers=auth_headers)
+    assert detail.status_code == 200
+    relations = detail.json()["relation_pages"]
+    assert {
+        (item["id"], item["relation"], item["direction"])
+        for item in relations
+    } == {
+        (topic_id, "part_of", "outgoing"),
+        (source_id, "describes", "incoming"),
+    }
+
+
 def test_wiki_summary_read_does_not_implicitly_call_llm(tmp_path, auth_headers):
     from crew.wiki.schemas import KBSummary
 
@@ -246,6 +296,17 @@ def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):
         RawSource(id="src_doc", title="产品文档.docx", source_type="upload", parsed_path=""),
         owner_account_id=OWNER,
     )
+    source_res = client.post(
+        "/api/wiki/pages",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={
+            "page_type": "source",
+            "title": "产品文档摘要",
+            "content": "产品文档来源摘要。",
+            "sources": ["src_doc"],
+        },
+    )
+    source_page_id = source_res.json()["page"]["id"]
 
     # 创建引用该 source 的页面
     res = client.post(
@@ -255,7 +316,7 @@ def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):
             "page_type": "topic",
             "title": "产品分析",
             "content": "基于产品文档整理。",
-            "sources": ["src_doc"],
+            "sources": ["src_doc", "src_doc"],
         },
     )
     assert res.status_code == 200
@@ -266,6 +327,11 @@ def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):
     # 详情
     res = client.get(f"/api/wiki/pages/{page_id}", headers=auth_headers)
     assert res.json()["source_titles"]["src_doc"] == "产品文档.docx"
+    assert res.json()["source_pages"] == [{
+        "id": source_page_id,
+        "title": "产品文档摘要",
+        "page_type": "source",
+    }]
 
     # 列表
     res = client.get("/api/wiki/pages", headers=auth_headers)
@@ -282,6 +348,7 @@ def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):
         json={"content": "更新后内容"},
     )
     assert res.json()["source_titles"]["src_doc"] == "产品文档.docx"
+    assert res.json()["source_pages"][0]["id"] == source_page_id
 
 
 def test_wiki_page_response_includes_source_files(tmp_path, auth_headers):
@@ -711,6 +778,9 @@ def test_wiki_kb_crud(tmp_path, auth_headers):
 
     # cannot delete default
     res = client.delete("/api/wiki/kbs/default", headers=auth_headers)
+    assert res.status_code == 400
+    # built-in tutorial is also protected
+    res = client.delete("/api/wiki/kbs/tutorial", headers=auth_headers)
     assert res.status_code == 400
 
 

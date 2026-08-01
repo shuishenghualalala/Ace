@@ -17,7 +17,9 @@
  *      单条删除按钮；批量管理模式下条目变 checkbox 选择；
  *      「图谱」视图下左栏替换为图谱画布（features/wiki-graph.ts，本文件只注入容器 + 回调）
  *   3.5 分栏把手：列表 | 详情 | 对话之间可拖拽调宽（localStorage 持久化，双击复位；图谱模式无列表把手）
- *   4. 右栏详情：标题 + 元信息 + Markdown 正文；未选中时显示 KB 概览 / 空态
+ *   4. 右栏详情：标题 + 元信息 + Markdown 正文；未选中时显示 KB 概览 / 空态；
+ *      Home.md（知识库概览）的「推荐问题」小节会被后处理成提问按钮，
+ *      点击直接把问题发给右栏 Wiki Agent（decorateHomeQuestions + [data-wiki-ask] 委托）
  *   5. 最右栏：Wiki Agent 对话面板（features/wiki-agent.ts 挂载，常驻）
  *
  * 边界态：未登录显示登录引导态（不发请求）；没有任何 KB 时自动初始化 default
@@ -32,6 +34,8 @@ import {
   type WikiKB,
   type WikiPage,
   type WikiPageType,
+  type WikiRelationPage,
+  type WikiSourcePage,
   type WikiSourceTitles,
   type WikiVaultDocument,
 } from '../backend-client';
@@ -57,6 +61,8 @@ export interface WikiAgentEntryRequest {
   kbName: string;
   /** 反向注入：上传/编译失败上下文，存在时交给专用 Wiki Agent 处理。 */
   assist?: WikiAgentAssist;
+  /** 直接发往 Wiki Agent 的提问（Home.md 推荐问题点击）。 */
+  prompt?: string;
   /** 聚焦右栏并打开标准 Composer 附件选择。 */
   openAttachment?: boolean;
 }
@@ -95,6 +101,13 @@ function fireWikiAgentEntry(assist?: WikiAgentAssist, openAttachment = false): v
   });
 }
 
+/** Home.md 推荐问题点击：把问题直接发给右栏 Wiki Agent。 */
+function fireWikiAgentPrompt(prompt: string): void {
+  const text = prompt.trim();
+  if (!view.kbId || !text) return;
+  wikiAgentEntryHandler?.({ kbId: view.kbId, kbName: currentKbName(), prompt: text });
+}
+
 /** 列表视图：时间线 / 文件树 / 类型 / 图谱（对齐 web 端 WikiViewMode）。 */
 export type WikiListView = 'timeline' | 'tree' | 'type' | 'graph';
 
@@ -102,6 +115,7 @@ const PAGE_LIMIT = 200;
 const DEFAULT_EXPANDED_PATHS = ['wiki', 'wiki/sources'] as const;
 /** 后端预置的默认知识库 id（不可删除；无 KB 时自动初始化；缺省选中）。 */
 const DEFAULT_KB_ID = 'default';
+const TUTORIAL_KB_ID = 'tutorial';
 
 // ── 与 web/src/lib/wikiTree.ts 对应的纯逻辑 ──
 
@@ -407,9 +421,13 @@ interface WikiViewState {
   detailLoading: boolean;
   /** 已加载完整正文的页面（pageId → WikiPage）；列表接口只返回 brief。 */
   pageDetails: Record<string, WikiPage>;
+  /** 页面详情接口返回的来源摘要页（pageId → 可跳转来源）。 */
+  sourcePages: Record<string, WikiSourcePage[]>;
+  /** 页面详情接口返回的正向与反向结构化关系。 */
+  relationPages: Record<string, WikiRelationPage[]>;
   sourceTitles: WikiSourceTitles;
   /** KB 概览（/api/wiki/summary）；未生成或加载失败时为 null。 */
-  kbSummary: string | null;
+  kbSummary: { summary: string; page_count?: number | undefined; source_count?: number | undefined; generated_at?: number | undefined; status: string } | null;
   /** 文件树已展开目录路径。 */
   expandedPaths: Set<string>;
   /** 是否已完成首次加载（避免每次切 tab 都打满量请求）。仅加载成功后置位。 */
@@ -437,6 +455,8 @@ function initialViewState(): WikiViewState {
     vaultDocument: null,
     detailLoading: false,
     pageDetails: {},
+    sourcePages: {},
+    relationPages: {},
     sourceTitles: {},
     kbSummary: null,
     expandedPaths: new Set<string>(DEFAULT_EXPANDED_PATHS),
@@ -851,15 +871,49 @@ export function mountWikiDetailFold(
   return mountFoldedMarkdown(target, page.content);
 }
 
+/** Home.md「推荐问题」小节标题（与后端 store/_filesystem.py 的 _HOME_QUESTIONS_HEADING 同步）。 */
+const HOME_QUESTIONS_HEADING = '推荐问题';
+
+/**
+ * 把 Home.md 渲染结果里的「推荐问题」h2+ul 替换成可点击的提问按钮组
+ * （仿 NotebookLM 首页版式）；按钮点击经 [data-wiki-ask] 委托发给 Wiki Agent。
+ * 该小节紧贴导读、位于文档前部，mountFoldedMarkdown 首屏渲染后即可同步处理。
+ */
+export function decorateHomeQuestions(container: HTMLElement): void {
+  const heading = Array.from(container.querySelectorAll('h2'))
+    .find((h) => h.textContent?.trim() === HOME_QUESTIONS_HEADING);
+  if (!heading) return;
+  const list = heading.nextElementSibling;
+  const items = list?.tagName === 'UL'
+    ? Array.from(list.querySelectorAll('li'))
+        .map((li) => li.textContent?.trim() ?? '')
+        .filter(Boolean)
+    : [];
+  if (items.length === 0) return;
+  const box = document.createElement('div');
+  box.className = 'wiki-ask-chips';
+  for (const question of items) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wiki-ask-chip';
+    btn.dataset.wikiAsk = question;
+    btn.textContent = question;
+    box.appendChild(btn);
+  }
+  heading.replaceWith(box);
+  list?.remove();
+}
+
 function detailHtml(): string {
   if (view.selectedDocumentName) {
     if (view.detailLoading || !view.vaultDocument) {
       return `<div class="wiki-detail__empty"><p class="wiki-detail__empty-hint">加载文档中…</p></div>`;
     }
+    const isHome = view.vaultDocument.name === 'Home.md';
     return `
-      <article class="wiki-detail">
+      <article class="wiki-detail${isHome ? ' wiki-home-document' : ''}">
         <header class="wiki-detail__header">
-          <div class="wiki-detail__badges"><span class="wiki-badge">文件</span></div>
+          <div class="wiki-detail__badges"><span class="wiki-badge">${isHome ? '概览' : '文件'}</span></div>
           <h2 class="wiki-detail__title">${escapeHtml(vaultDocumentLabel(view.vaultDocument.name))}</h2>
           <div class="wiki-detail__meta">
             <span>更新于 ${escapeHtml(formatWikiTime(view.vaultDocument.updated_at))}</span>
@@ -872,7 +926,10 @@ function detailHtml(): string {
     const summary = view.kbSummary
       ? `<div class="wiki-overview">
           <div class="wiki-overview__title">知识库概览</div>
-          <div class="md-body chat-markdown wiki-overview__body">${renderMarkdownHtml(view.kbSummary)}</div>
+          <div class="md-body chat-markdown wiki-overview__body">${renderMarkdownHtml(view.kbSummary.summary)}</div>
+          ${view.kbSummary.page_count != null || view.kbSummary.source_count != null
+            ? `<div class="wiki-overview__meta">${view.kbSummary.page_count != null ? `${view.kbSummary.page_count} 个页面` : ''}${view.kbSummary.page_count != null && view.kbSummary.source_count != null ? ' · ' : ''}${view.kbSummary.source_count != null ? `${view.kbSummary.source_count} 个来源` : ''}</div>`
+            : ''}
         </div>`
       : '';
     return `
@@ -902,7 +959,7 @@ interface DetailSig {
   selectedId: string | null;
   page: WikiPage | null;
   sourceTitles: WikiSourceTitles;
-  kbSummary: string | null;
+  kbSummary: { summary: string; page_count?: number | undefined; source_count?: number | undefined; generated_at?: number | undefined; status: string } | null;
   loading: boolean;
 }
 
@@ -922,7 +979,9 @@ function sameDetailSig(a: DetailSig, b: DetailSig): boolean {
     a.selectedId === b.selectedId &&
     a.page === b.page &&
     a.sourceTitles === b.sourceTitles &&
-    a.kbSummary === b.kbSummary &&
+    a.kbSummary?.summary === b.kbSummary?.summary &&
+    a.kbSummary?.page_count === b.kbSummary?.page_count &&
+    a.kbSummary?.source_count === b.kbSummary?.source_count &&
     a.loading === b.loading
   );
 }
@@ -984,7 +1043,18 @@ function renderShell(): void {
       : view.loading && view.pages.length === 0
         ? '<div class="wiki-list__loading">页面加载中…</div>'
         : view.pages.length === 0 && view.view !== 'tree'
-          ? '<div class="wiki-list__empty">该知识库暂无 Wiki 页面。</div>'
+          ? `<div class="wiki-list__empty wiki-list__empty--guide">
+              <div class="wiki-list__empty-art" aria-hidden="true">
+                <svg class="wiki-list__empty-arc" viewBox="0 0 120 90" fill="none">
+                  <path d="M14 84 C 30 40, 66 26, 104 16" stroke="currentColor" stroke-width="1.5" stroke-dasharray="5 5" stroke-linecap="round"/>
+                </svg>
+                <svg class="wiki-list__empty-plane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/>
+                </svg>
+              </div>
+              <p class="wiki-list__empty-text">知识库还没有内容</p>
+              <p class="wiki-list__empty-hint">点击右上角「上传」，或直接拖拽文件到右侧问答栏</p>
+            </div>`
           : `${listViewHtml()}${loadMoreHtml()}`;
     body = `
       <div class="wiki-body${graphMode ? ' wiki-body--graph' : ''}">
@@ -1025,7 +1095,7 @@ function renderShell(): void {
         <div class="page-header__actions">
           <select id="wiki-kb-select" class="wiki-kb-select" title="选择知识库" aria-label="选择知识库"${view.kbs.length === 0 ? ' disabled' : ''}>${kbOptions}</select>
           <button type="button" class="hub-refresh-btn" data-kb-create-toggle title="新建知识库">新建</button>
-          <button type="button" class="hub-refresh-btn" data-kb-delete title="删除当前知识库、原始素材及专属 Wiki 问答历史（default 不可删）"${!view.kbId || view.kbId === DEFAULT_KB_ID ? ' disabled' : ''}>删除</button>
+          <button type="button" class="hub-refresh-btn" data-kb-delete title="删除当前知识库、原始素材及专属 Wiki 问答历史（内置知识库不可删）"${!view.kbId || view.kbId === DEFAULT_KB_ID || view.kbId === TUTORIAL_KB_ID ? ' disabled' : ''}>删除</button>
           <button type="button" class="hub-refresh-btn" data-upload title="上传文件到知识库"${uploadDisabled ? ' disabled' : ''}>上传</button>
           ${batchToggle}
           <button type="button" class="hub-refresh-btn hub-refresh-btn--help" data-wiki-tour title="使用导览" aria-label="使用导览">?</button>
@@ -1060,7 +1130,10 @@ function renderShell(): void {
       detailFoldHandle = mountWikiDetailFold(root, page);
     } else if (view.vaultDocument?.content) {
       const target = root.querySelector<HTMLElement>('[data-wiki-fold-content]');
-      if (target) detailFoldHandle = mountFoldedMarkdown(target, view.vaultDocument.content);
+      if (target) {
+        detailFoldHandle = mountFoldedMarkdown(target, view.vaultDocument.content);
+        if (view.vaultDocument.name === 'Home.md') decorateHomeQuestions(target);
+      }
     }
   }
   lastDetailSig = detailPlaceholder ? detailSigNow : null;
@@ -1196,6 +1269,8 @@ async function loadPageDetail(pageId: string): Promise<void> {
   try {
     const res = await backendApi.wikiPage(pageId, view.kbId);
     view.pageDetails = { ...view.pageDetails, [pageId]: res.page };
+    view.sourcePages = { ...view.sourcePages, [pageId]: res.source_pages ?? [] };
+    view.relationPages = { ...view.relationPages, [pageId]: res.relation_pages ?? [] };
     view.sourceTitles = { ...view.sourceTitles, ...(res.source_titles || {}) };
   } catch (err) {
     notify(`加载页面详情失败：${errMsg(err)}`);
@@ -1258,7 +1333,7 @@ async function loadKbSummary(): Promise<void> {
   try {
     const res = await backendApi.wikiSummary(view.kbId);
     if (seq !== loadSeq) return;
-    view.kbSummary = res.status === 'ready' && res.summary ? res.summary : null;
+    view.kbSummary = res.status === 'ready' && res.summary ? { summary: res.summary, page_count: res.page_count, source_count: res.source_count, generated_at: res.generated_at, status: res.status } : null;
     if (!view.selectedId) renderShell();
   } catch {
     /* 概览加载失败不提示 */
@@ -1276,6 +1351,8 @@ async function reloadAll(): Promise<void> {
   view.vaultDocument = null;
   view.detailLoading = false;
   view.pageDetails = {};
+  view.sourcePages = {};
+  view.relationPages = {};
   view.kbSummary = null;
   view.expandedPaths = new Set<string>(DEFAULT_EXPANDED_PATHS);
   loadingDetails.clear();
@@ -1337,7 +1414,7 @@ async function handleCreateKbSubmit(): Promise<void> {
 /** 删除当前选中的 KB（后端禁止删 default，按钮已前置禁用兜底）：确认后整页重载，选中回落 default/第一个。 */
 async function handleDeleteKb(): Promise<void> {
   const kbId = view.kbId;
-  if (!kbId || kbId === DEFAULT_KB_ID) return;
+  if (!kbId || kbId === DEFAULT_KB_ID || kbId === TUTORIAL_KB_ID) return;
   const kbName = view.kbs.find((k) => k.id === kbId)?.name || kbId;
   const confirmed = await showConfirmDialog({
     title: '删除知识库',
@@ -1574,18 +1651,27 @@ function bindEvents(): void {
     renderShell();
   });
 
-  // 事件委托：markdown 正文中的 [[名称]] 按钮在 mountWikiDetailFold
-  // 之后才加入 DOM，直接绑定会漏掉，改用委托捕获。
-  root.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest('[data-rel-title]') as HTMLElement | null;
-    if (!btn) return;
-    const title = btn.getAttribute('data-rel-title') ?? '';
-    const target = view.pages.find((p) => p.title === title);
-    if (!target) return;
-    view.selectedDocumentName = null;
-    view.vaultDocument = null;
-    selectWikiPage(target.id);
-  });
+  // 事件委托：markdown 正文中的 [[名称]] 按钮与 Home.md 推荐问题按钮在
+  // mountFoldedMarkdown 之后才加入 DOM，直接绑定会漏掉，改用委托捕获。
+  // bindEvents 随 renderShell 反复执行，root 复用时用标记位防重复绑定。
+  if (root.dataset.wikiRelBound !== 'true') {
+    root.dataset.wikiRelBound = 'true';
+    root.addEventListener('click', (e) => {
+      const askBtn = (e.target as HTMLElement).closest('[data-wiki-ask]') as HTMLElement | null;
+      if (askBtn) {
+        fireWikiAgentPrompt(askBtn.getAttribute('data-wiki-ask') ?? '');
+        return;
+      }
+      const btn = (e.target as HTMLElement).closest('[data-rel-title]') as HTMLElement | null;
+      if (!btn) return;
+      const title = btn.getAttribute('data-rel-title') ?? '';
+      const target = view.pages.find((p) => p.title === title);
+      if (!target) return;
+      view.selectedDocumentName = null;
+      view.vaultDocument = null;
+      selectWikiPage(target.id);
+    });
+  }
 }
 
 // ── 对外入口 ──

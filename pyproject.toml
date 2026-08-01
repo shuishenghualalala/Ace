@@ -41,6 +41,12 @@ mcp = [
 feishu = [
     "lark-oapi==1.5.3",
 ]
+# 微信（个人号 iLink Bot API 长轮询）渠道：aiohttp 收发 + cryptography 加密 CDN。
+# 未安装则 weixin 平台显示 unavailable。
+weixin = [
+    "aiohttp>=3.9",
+    "cryptography>=42",
+]
 # Wiki 文件上传解析：HTML 需要 markdownify，PDF 需要 pymupdf，DOCX 需要 python-docx，
 # XLSX 需要 openpyxl，PPTX 需要 python-pptx，文本编码探测需要 charset-normalizer。
 # 旧版 DOC/XLS/PPT 在运行期通过系统 LibreOffice 转换，不额外引入 Python 包。

@@ -22,6 +22,8 @@ import type {
   WikiGraph,
   WikiKB,
   WikiPage,
+  WikiRelationPage,
+  WikiSourcePage,
   WikiVaultDocument,
   WikiSource,
   WikiSourceFiles,
@@ -435,7 +437,14 @@ export const api = {
       }).toString()}`,
     ),
   wikiPage: (id: string, kbId?: string) =>
-    getJSON<{ ok: boolean; page: WikiPage; source_titles: WikiSourceTitles; source_files: WikiSourceFiles }>(
+    getJSON<{
+      ok: boolean;
+      page: WikiPage;
+      source_titles: WikiSourceTitles;
+      source_files: WikiSourceFiles;
+      source_pages: WikiSourcePage[];
+      relation_pages: WikiRelationPage[];
+    }>(
       withKb(`/api/wiki/pages/${encodeURIComponent(id)}`, kbId),
     ),
   wikiDeletePage: (id: string, kbId?: string) =>

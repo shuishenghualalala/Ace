@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 from typing import Any, Callable
 
@@ -28,15 +29,22 @@ _SUMMARY_PAGE_SNIPPET_CHARS = 800
 _SUMMARY_MAX_PAGES = 30
 # 摘要状态 TTL（秒），超过认为陈旧
 _SUMMARY_TTL_SECONDS = 24 * 3600
+# 生成规则变化时更新版本，使旧缓存按新提示词自动失效。
+_SUMMARY_PROMPT_VERSION = "2026-07-31-home-questions-v1"
 
-_SUMMARY_PROMPT = """你负责整理知识库。请根据下面 Wiki 知识库的页面列表与内容片段，
-用 200-400 字中文生成一段整体摘要，用于向用户介绍这个知识库讲了什么。
+_SUMMARY_PROMPT = """你是一位知识库整理专家。请根据下面 Wiki 知识库的页面列表与内容片段，
+用 180-300 字中文生成一段整体摘要，让读者快速理解这个知识库讲了什么、解决什么问题。
 
 摘要应包含：
 1. 知识库主题/核心内容。
-2. 主要实体、概念或主题（列举 3-7 个）。
-3. 来源文件概况（多少 source、来自哪些文档）。
-4. 用户可进一步追问的方向（给出 2-3 个示例问题）。
+2. 主要内容板块及其关系。
+3. 最值得关注的知识、结论或实际价值。
+
+写作限制：
+- 不要提供建议追问、示例问题或操作建议。
+- 不要说明引用了哪些页面、文件或来源，也不要罗列页面标题。
+- 不要写“欢迎打开”“你可以”等产品引导语。
+- 使用紧凑、客观、自然的说明文字，避免堆砌细节。
 
 知识库页面（共 {page_count} 个页面，{source_count} 个来源）：
 ---
@@ -47,24 +55,64 @@ _SUMMARY_PROMPT = """你负责整理知识库。请根据下面 Wiki 知识库�
 
 _EMPTY_SUMMARY_TEXT = "这个知识库还没有页面。上传文档或粘贴文字后，AI 会自动整理并生成摘要。"
 
-# Home.md「关于这个知识库」导读：与 KBSummary 相互独立，专为首页撰写，
+# Home.md「内容导读」：与 KBSummary 相互独立，专为首页撰写，
 # 只在页面/来源内容 hash 变化时重新生成（见 generate_home_intro）。
-_HOME_INTRO_PROMPT = """你是一位知识库策展人。请为知识库「{kb_name}」写一段首页导读，
-读者是第一次打开这个库的用户。
+_HOME_INTRO_PROMPT = """你是一位知识库策展人。请为知识库「{kb_name}」写一段首页内容导读，
+帮助第一次打开这个库的读者迅速建立整体认知。
 
-根据下方页面清单与内容片段，写 300-500 字中文导读，要求：
-1. 开头一句话点明这个知识库覆盖的领域和核心价值；
-2. 中间按内容板块组织：把库内知识归纳成 2-4 个方向，说明每个方向讲了什么、有哪些关键页面；
-3. 把最重要的 3-7 个页面用 [[页面标题]] 内联进导读（必须从下方清单中精确选择标题，不得杜撰）；
-4. 结尾给 1-2 个可以深入的方向或示例问题；
-5. 自然散文，不要分点列表、不要标题、不要 emoji。
+根据下方页面清单与内容片段，写 180-320 字中文导读，要求：
+1. 开头直接点明知识库覆盖的领域、目标和核心价值；
+2. 将内容归纳为 2-4 个彼此连贯的板块，概括各板块的重点；
+3. 提炼最值得关注的知识、结论或可复用信息；
+4. 使用自然、客观、紧凑的说明文字，不要分点列表、不要标题、不要 emoji。
+
+导读写作限制：
+- 导读正文里不要建议用户继续问什么，不要给示例问题或后续操作建议；
+- 不要说明引用、参考或整合了哪些页面、文件、素材和来源；
+- 不要使用 [[页面标题]] 或其他链接，不要逐个罗列页面名称；
+- 不要写“欢迎打开”“你可以”等产品引导语。
+
+导读之后，再给出 3 个推荐问题，帮助读者基于这个知识库继续提问，要求：
+- 问题必须结合本库的具体内容（涉及库里的主题、概念或结论），不要泛泛的“主要内容是什么”；
+- 每个问题一句话，15-40 字，以问号结尾；
+- 每个问题单独一行，不要编号、不要引号、不要任何前后缀。
 
 知识库页面（共 {page_count} 个页面，{source_count} 个来源）：
 ---
 {context}
 ---
 
-请直接输出导读文本，不要 JSON、不要 markdown 代码块、不要标题编号。"""
+输出格式（严格遵守）：
+先输出导读文本，然后单独一行输出分隔符 {questions_marker}，再逐行输出 3 个推荐问题。
+不要 JSON、不要 markdown 代码块、不要标题编号。"""
+
+# 导读与推荐问题之间的分隔符（见 _HOME_INTRO_PROMPT 输出格式约定）。
+_HOME_QUESTIONS_MARKER = "---推荐问题---"
+# 推荐问题数量与长度约束（解析时兜底过滤）。
+_HOME_QUESTIONS_COUNT = 3
+_HOME_QUESTION_MAX_CHARS = 60
+
+
+def _split_home_intro(raw: str) -> tuple[str, list[str]]:
+    """把 LLM 输出拆成 (导读文本, 推荐问题列表)。
+
+    没有分隔符时整段视为导读、问题为空；问题行做保守清洗
+    （去编号/引号/空行，限长限量），不合格的输出不至于污染首页。
+    """
+    text, sep, tail = raw.partition(_HOME_QUESTIONS_MARKER)
+    intro = text.strip()
+    if not sep:
+        return intro, []
+    questions: list[str] = []
+    for line in tail.splitlines():
+        q = line.strip().strip('"“”\'').strip()
+        q = re.sub(r"^[-*\d]+[.、)）]?\s*", "", q).strip()
+        if not q or len(q) > _HOME_QUESTION_MAX_CHARS:
+            continue
+        questions.append(q)
+        if len(questions) >= _HOME_QUESTIONS_COUNT:
+            break
+    return intro, questions
 
 
 def _strip_code_fence(text: str) -> str:
@@ -111,7 +159,7 @@ class WikiSummarizer:
 
     def _compute_content_hash(self, pages: list[WikiPage], raws: list[Any]) -> str:
         """基于页面标题+类型+截断内容 + source 标题计算稳定 hash。"""
-        parts: list[str] = []
+        parts: list[str] = [_SUMMARY_PROMPT_VERSION]
         for page in pages[:_SUMMARY_MAX_PAGES]:
             parts.append(page.title)
             parts.append(page.page_type)
@@ -249,17 +297,6 @@ class WikiSummarizer:
             self.store.set_kb_summary(new_summary, owner_account_id, kb_id)
             return new_summary
 
-    async def maybe_refresh(
-        self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> None:
-        """文档变化后调用：后台异步评估并刷新摘要（不阻塞调用方）。"""
-        try:
-            await self.generate_kb_summary(owner_account_id, kb_id, force=False)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Wiki summary 后台刷新失败 %s: %s", self._key(owner_account_id, kb_id), exc)
-
     def get_summary(
         self,
         owner_account_id: str = "",
@@ -323,8 +360,9 @@ class WikiSummarizer:
                     page_count=len(pages),
                     source_count=len(raws),
                     context=context,
+                    questions_marker=_HOME_QUESTIONS_MARKER,
                 )
-                text = _strip_code_fence(
+                raw_text = _strip_code_fence(
                     (
                         await chat_text(
                             self._provider_for_owner(owner_account_id),
@@ -332,10 +370,12 @@ class WikiSummarizer:
                         )
                     ).strip()
                 )
+                text, questions = _split_home_intro(raw_text)
                 if not text:
                     return current, False
                 intro = HomeIntro(
                     text=text,
+                    questions=questions,
                     content_hash=new_hash,
                     generated_at=time.time(),
                     status="ready",
@@ -344,6 +384,7 @@ class WikiSummarizer:
                 log.warning("生成 Home 导读失败 %s: %s", key, exc)
                 fallback = HomeIntro(
                     text=current.text,
+                    questions=current.questions,
                     content_hash=current.content_hash,
                     generated_at=current.generated_at,
                     status="stale" if current.text else "empty",

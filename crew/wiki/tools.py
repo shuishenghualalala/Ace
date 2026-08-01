@@ -67,11 +67,12 @@ from .store import WikiStore
 # 3. 附件只能经 wiki_capture_attachment 读取当前 owner 本轮上传目录。
 # 4. wiki_list_sources 用于在 ingest 前列出当前知识库的 raw sources。
 
-# 共享 schema 片段：kb_id 参数（目标知识库，未指定时使用当前活跃知识库）
+# 共享 schema 片段：kb_id 参数（仅跨库操作时显式传入；常规操作省略，跟随当前活跃知识库。
+# 描述必须抑制模型按惯性填字面量 "default"——显式值优先级最高，填错会整条入库链错库）
 _KB_ID_PARAM: dict[str, dict[str, str]] = {
     "kb_id": {
         "type": "string",
-        "description": "目标知识库 ID；未指定时使用当前活跃知识库",
+        "description": "目标知识库 ID。仅当用户明确要求操作其他知识库时才传入；常规操作必须省略此参数，系统会自动使用当前活跃知识库（active_kb_id），不要自行猜测或填写",
     },
 }
 

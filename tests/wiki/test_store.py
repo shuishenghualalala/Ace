@@ -137,6 +137,7 @@ def test_update_home_writes_overview_sections(store: FileSystemWikiStore):
     store.set_home_intro(
         HomeIntro(
             text="这个知识库聚焦大语言模型，涵盖架构原理与训练方法。",
+            questions=["Transformer 的自注意力机制是怎么工作的？", "指令微调解决了什么问题？"],
             content_hash="h1",
             generated_at=1.0,
             status="ready",
@@ -148,9 +149,14 @@ def test_update_home_writes_overview_sections(store: FileSystemWikiStore):
     store.update_home()
     home = (store._dir() / "Home.md").read_text(encoding="utf-8")
 
-    # 关于这个知识库：使用缓存导读
-    assert "## 关于这个知识库" in home
+    # 导读：紧跟元信息行，不再有「内容导读」小标题
+    assert "## 内容导读" not in home
     assert "这个知识库聚焦大语言模型" in home
+    # 推荐问题：位于导读之后、知识地图之前
+    assert "## 推荐问题" in home
+    assert "- Transformer 的自注意力机制是怎么工作的？" in home
+    assert home.index("## 推荐问题") < home.index("## 知识地图")
+    assert home.index("这个知识库聚焦大语言模型") < home.index("## 推荐问题")
     # 知识地图：话题页排在关键词页之前，带来源数与较长介绍
     assert "## 知识地图" in home
     assert home.index("### [[大语言模型]]") < home.index("### [[Transformer]]")
@@ -185,6 +191,8 @@ def test_update_home_uses_placeholder_when_intro_missing(store: FileSystemWikiSt
     home = (store._dir() / "Home.md").read_text(encoding="utf-8")
 
     assert "导读整理中" in home
+    # 没有推荐问题时不生成该小节
+    assert "## 推荐问题" not in home
 
 
 def test_init_kb_under_wiki_lib_default(store: FileSystemWikiStore):
@@ -215,6 +223,22 @@ def test_list_kbs_includes_default_after_init(store: FileSystemWikiStore):
     store.init_kb()
     kbs = store.list_kbs()
     assert any(kb.id == "default" for kb in kbs)
+
+
+def test_list_kbs_default_kb_display_name(store: FileSystemWikiStore):
+    """默认知识库展示名为「我的工作」，kb_id 标识符仍为 default。"""
+    store.init_kb()
+    kbs = store.list_kbs()
+    default_kb = next(kb for kb in kbs if kb.id == "default")
+    assert default_kb.name == "我的工作"
+
+
+def test_update_home_uses_default_kb_display_name(store: FileSystemWikiStore):
+    """空默认知识库的 Home.md 头部应展示「我的工作」。"""
+    store.init_kb()
+    store.update_home()
+    home = (store._dir() / "Home.md").read_text(encoding="utf-8")
+    assert "我的工作" in home
 
 
 def test_create_and_delete_kb(store: FileSystemWikiStore):

@@ -48,7 +48,7 @@ WIKI_CREATE_KB_PROMPT = """创建一个新的 Wiki 知识库。
 
 参数 kb_id 是知识库的唯一标识，支持中文、其他语言的字母、数字、下划线和连字符；name 是显示名称。创建成功后可以往里添加页面或上传文件。default 知识库已存在，无需创建。"""
 
-WIKI_DELETE_KB_PROMPT = """预检或删除指定 Wiki 知识库。首次调用返回影响范围和一次性 confirmation_id；仅在用户后续确认回合传回同一 ID 才执行。禁止删除 default，且不可恢复。"""
+WIKI_DELETE_KB_PROMPT = """预检或删除指定 Wiki 知识库。首次调用返回影响范围和一次性 confirmation_id；仅在用户后续确认回合传回同一 ID 才执行。禁止删除内置的 default 与 tutorial，其他知识库删除后不可恢复。"""
 
 WIKI_DELETE_SOURCE_PROMPT = """预检或删除 raw source 及其关联页面。首次调用返回影响范围和一次性 confirmation_id；仅在用户后续确认回合传回同一 ID、source 和 KB 时执行。该操作不可恢复。"""
 
@@ -117,7 +117,7 @@ WIKI_AGENT_CONTEXT_REMINDER = """[Wiki Agent 当前上下文]
 - 当前活跃知识库名称：{active_kb_name}
 - 可用知识库列表：{kb_list}
 
-本轮约束：默认操作活跃知识库；跨库时显式传入 `kb_id`。附件默认 capture → parse → orient → plan；parse 先发布全文 Source 页面，plan 再生成实体/主题/关系的创建、更新和跳过计划。概念统一归入实体。plan 工具遵循 wiki.ingest.auto_apply：默认自动应用，配置为 false 时展示计划并停止等待确认。本轮消息已附带的文件路径在用户文本开头给出，需要入库时直接逐个 `wiki_capture_attachment`，不要让用户重新上传。
+本轮约束：默认操作活跃知识库；跨库时显式传入 `kb_id`。不要猜测或自行填写 `kb_id`（包括字面量 "default"）：用户未明确要求跨库时，所有工具调用都必须省略 `kb_id` 参数，由系统按活跃知识库处理。附件默认 capture → parse → orient → plan；parse 先发布全文 Source 页面，plan 再生成实体/主题/关系的创建、更新和跳过计划。概念统一归入实体。plan 工具遵循 wiki.ingest.auto_apply：默认自动 apply，配置关闭时才展示计划并停止等待确认。本轮消息已附带的文件路径在用户文本开头给出，需要入库时直接逐个 `wiki_capture_attachment`，不要让用户重新上传。
 """
 
 # --------------------------------------------------------------------------- #

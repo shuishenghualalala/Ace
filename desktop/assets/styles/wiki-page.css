@@ -278,6 +278,35 @@
   color: var(--text-muted);
 }
 
+.wiki-agent-pane__void-hint {
+  margin: 0;
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  opacity: 0.75;
+}
+
+/* ── 拖拽上传高亮：文件拖入面板时显示虚线框 + 提示（类由 attachments.ts bindFileDrop 切换） ── */
+
+.wiki-agent-pane.is-drag-over {
+  border-color: var(--color-accent);
+}
+
+.wiki-agent-pane.is-drag-over::after {
+  content: '松开以上传到知识库';
+  position: absolute;
+  inset: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px dashed var(--color-accent);
+  border-radius: calc(var(--radius-md) - 4px);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  color: var(--color-accent);
+  font-size: var(--font-sm);
+  pointer-events: none;
+}
+
 /* 卡片式 Composer：复用主对话 composer-chip / chat-action-btn / send-btn 全局样式 */
 .wiki-agent-pane__composer {
   flex: 0 0 auto;
@@ -632,6 +661,54 @@
   color: var(--text-muted);
 }
 
+/* ── 空知识库引导（ima 风格：纸飞机 + 虚线弧线指向右上「上传」入口） ── */
+
+.wiki-list__empty--guide {
+  padding: 48px 16px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.wiki-list__empty-art {
+  position: relative;
+  width: 120px;
+  height: 90px;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.wiki-list__empty-arc {
+  width: 100%;
+  height: 100%;
+}
+
+/* 纸飞机落在弧线末端（右上），机头朝向右上方「上传」按钮方向 */
+.wiki-list__empty-plane {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 22px;
+  height: 22px;
+  color: var(--color-accent);
+  opacity: 0.85;
+}
+
+.wiki-list__empty-text {
+  margin: 0;
+  font-size: var(--font-sm);
+  color: var(--text-primary);
+}
+
+.wiki-list__empty-hint {
+  margin: 0;
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
 /* ── 详情栏 ── */
 
 .wiki-detail__empty {
@@ -704,6 +781,126 @@
 
 .wiki-detail__content {
   margin-bottom: 20px;
+}
+
+/* Home.md 是阅读型首页，不沿用聊天消息的紧凑 Markdown 排版。 */
+.wiki-home-document {
+  max-width: 860px;
+  margin: 0 auto;
+  padding-bottom: 72px;
+}
+
+.wiki-home-document .wiki-detail__header {
+  max-width: 760px;
+  margin-bottom: 22px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wiki-home-document .wiki-detail__title {
+  padding-top: 4px;
+  font-size: clamp(32px, 3vw, 42px);
+}
+
+.wiki-home-document .wiki-detail__content {
+  max-width: 760px;
+  margin: 0 auto;
+  color: var(--text-primary);
+  font-size: var(--font-sm);
+  line-height: 1.85;
+}
+
+.wiki-home-document .wiki-detail__content > h1:first-child {
+  display: none;
+}
+
+.wiki-home-document .wiki-detail__content h2 {
+  margin: 40px 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 21px;
+  line-height: 1.35;
+  letter-spacing: -0.015em;
+}
+
+.wiki-home-document .wiki-detail__content h3 {
+  margin: 24px 0 8px;
+  font-size: 17px;
+  line-height: 1.45;
+}
+
+.wiki-home-document .wiki-detail__content p {
+  margin: 0 0 14px;
+}
+
+/* Home.md 的 blockquote 是 KB 元信息行（「default · 共 N 个页面 · M 份素材」），
+   渲染成标题下的轻量副标题，不用卡片样式，避免粗糙的盒感。 */
+.wiki-home-document .wiki-detail__content blockquote {
+  margin: 0 0 20px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: var(--font-sm);
+  letter-spacing: 0.01em;
+}
+
+/* 紧贴 H1 的元信息行向上收一点，形成「标题 + 副标题」的视觉组。 */
+.wiki-home-document .wiki-detail__content h1 + blockquote {
+  margin-top: -6px;
+  margin-bottom: 28px;
+}
+
+.wiki-home-document .wiki-detail__content blockquote p {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+/* Home.md 推荐问题：由「推荐问题」小节转换来的整行提问按钮（仿 NotebookLM 首页）。 */
+.wiki-home-document .wiki-ask-chips {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 20px 0 28px;
+}
+
+.wiki-home-document .wiki-ask-chip {
+  max-width: 100%;
+  padding: 11px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  font-size: var(--font-sm);
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.wiki-home-document .wiki-ask-chip:hover {
+  background: color-mix(in srgb, var(--tx) 6%, var(--surface-2));
+  border-color: var(--line);
+}
+
+.wiki-home-document .wiki-detail__content table {
+  margin: 12px 0 24px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
+}
+
+.wiki-home-document .wiki-detail__content a,
+.wiki-home-document .wiki-detail__content .wiki-detail__rel-link {
+  font-size: inherit;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.wiki-home-document .wiki-detail__content a:hover,
+.wiki-home-document .wiki-detail__content .wiki-detail__rel-link:hover {
+  text-decoration: underline;
 }
 
 /* 长文增量渲染：底部加载触发点（对齐 web markdown.css 的 .md-sentinel） */

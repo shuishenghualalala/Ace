@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import type { WikiIngestProgress, WikiKB, WikiPage, WikiSourceFiles, WikiSourceTitles, WikiVaultDocument, WikiViewMode } from "../types";
+import type { WikiIngestProgress, WikiKB, WikiPage, WikiRelationPage, WikiSourceFiles, WikiSourceTitles, WikiVaultDocument, WikiViewMode } from "../types";
 import WikiPageView from "./WikiPageView";
 import WikiFileTree from "./WikiFileTree";
 import WikiTimelineView from "./WikiTimelineView";
@@ -64,6 +64,7 @@ export default function WikiHub({
   const [pages, setPages] = useState<WikiPage[]>([]);
   /** 已加载完整正文的页面（pageId -> WikiPage），列表只返回 brief。 */
   const [pageDetails, setPageDetails] = useState<Record<string, WikiPage>>({});
+  const [relationPages, setRelationPages] = useState<Record<string, WikiRelationPage[]>>({});
   const [pageOffset, setPageOffset] = useState(0);
   const [hasMorePages, setHasMorePages] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -341,6 +342,7 @@ export default function WikiHub({
     setVaultDocument(null);
     setSelectedIds(new Set());
     setPageDetails({});
+    setRelationPages({});
     setExpandedPaths(new Set(["wiki", "wiki/sources"]));
   };
 
@@ -363,8 +365,8 @@ export default function WikiHub({
   };
 
   const handleDeleteKb = async () => {
-    if (kbId === "default") {
-      setMessage("默认知识库不可删除");
+    if (kbId === "default" || kbId === "tutorial") {
+      setMessage("内置知识库不可删除");
       return;
     }
     if (!window.confirm(
@@ -603,6 +605,7 @@ export default function WikiHub({
       try {
         const res = await api.wikiPage(pageId, kbId);
         setPageDetails((prev) => ({ ...prev, [pageId]: res.page }));
+        setRelationPages((prev) => ({ ...prev, [pageId]: res.relation_pages ?? [] }));
       } catch (err) {
         setMessage(`加载页面详情失败：${err instanceof Error ? err.message : String(err)}`);
       } finally {
@@ -756,7 +759,7 @@ export default function WikiHub({
             className="wiki-card__btn"
             onClick={handleDeleteKb}
             type="button"
-            disabled={kbId === "default"}
+            disabled={kbId === "default" || kbId === "tutorial"}
           >
             删除知识库
           </button>
@@ -1001,6 +1004,7 @@ export default function WikiHub({
                 inline
                 onNavigate={(pageId) => setSelectedId(pageId)}
                 pages={pages}
+                relationPages={relationPages[selectedPage.id] ?? []}
               />
             ) : (
               <div className="wiki-panel__empty">

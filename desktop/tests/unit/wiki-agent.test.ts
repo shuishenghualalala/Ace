@@ -444,15 +444,61 @@ describe('wiki-page 入口挂点', () => {
     });
   });
 
+  it('切换知识库时立即切换右栏会话，消息和发送目标不串库', async () => {
+    const otherSessionId = `wiki-other-${wikiSidSeq}`;
+    api.wikiKBs.mockResolvedValue({
+      ok: true,
+      kbs: [
+        { id: 'default', name: '默认知识库', created_at: 0, updated_at: 0 },
+        { id: 'other', name: '新知识库', created_at: 0, updated_at: 0 },
+      ],
+    });
+    api.wikiAgentSession.mockImplementation(async (kbId: string) => ({
+      ok: true,
+      session_id: kbId === 'other' ? otherSessionId : WIKI_SID,
+      kb_id: kbId,
+    }));
+
+    uiStore.set({ activeTab: 'wiki' });
+    await refreshWikiData();
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+    appendMessage(WIKI_SID, 'assistant', '只属于默认知识库的旧消息');
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-wiki-agent-messages]')?.textContent)
+        .toContain('只属于默认知识库的旧消息');
+    });
+
+    const select = document.querySelector<HTMLSelectElement>('#wiki-kb-select')!;
+    select.value = 'other';
+    select.dispatchEvent(new Event('change'));
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-wiki-agent-panel]')?.getAttribute('data-kb-id')).toBe('other');
+      expect(mockLoadBackendHistory).toHaveBeenCalledWith(otherSessionId);
+      expect(document.querySelector('.wiki-agent-pane__title')?.textContent).toContain('新知识库');
+    });
+    expect(document.querySelector('[data-wiki-agent-messages]')?.textContent)
+      .not.toContain('只属于默认知识库的旧消息');
+
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
+    input.value = '查询新知识库';
+    document.querySelector<HTMLFormElement>('[data-wiki-agent-form]')!.requestSubmit();
+    await vi.waitFor(() => expect(socket().send).toHaveBeenCalled());
+    const payload = socket().send.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(payload.session_id).toBe(otherSessionId);
+    expect(payload.wiki_kb_id).toBe('other');
+  });
+
   it('右栏 Composer 接线粘贴 / 拖拽上传（复用 attachments 通用绑定）', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
     await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-input]')).not.toBeNull());
 
     const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
-    const form = document.querySelector<HTMLFormElement>('[data-wiki-agent-form]')!;
+    const panel = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
     expect(vi.mocked(bindFilePaste)).toHaveBeenCalledWith(input, expect.any(Function));
-    expect(vi.mocked(bindFileDrop)).toHaveBeenCalledWith(form, expect.any(Function));
+    // 拖拽热区是整个问答面板（拖到消息区也能传），且重复挂载不重复绑定
+    expect(vi.mocked(bindFileDrop)).toHaveBeenCalledWith(panel, expect.any(Function));
   });
 
   it('运行中只显示停止按钮，点击后停止当前 Wiki 会话并恢复发送按钮', async () => {

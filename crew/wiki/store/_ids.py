@@ -26,6 +26,10 @@ _PAGE_TYPE_DIR = {
 }
 
 _DEFAULT_KB_ID = "default"
+_TUTORIAL_KB_ID = "tutorial"
+_PROTECTED_KB_IDS = frozenset({_DEFAULT_KB_ID, _TUTORIAL_KB_ID})
+# 默认知识库的展示名（kb_id 标识符保持 "default" 不变，仅影响显示）
+_DEFAULT_KB_NAME = "我的工作"
 
 
 def filename_from_title(title: str) -> str:

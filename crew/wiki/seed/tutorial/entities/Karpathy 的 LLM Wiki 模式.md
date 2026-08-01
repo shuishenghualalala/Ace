@@ -1,9 +1,8 @@
 ---
-page_type: topic
+page_type: entity
 title: Karpathy 的 LLM Wiki 模式
-file_path: topics/Karpathy 的 LLM Wiki 模式.md
+file_path: entities/Karpathy 的 LLM Wiki 模式.md
 sources: []
-related: [LLM Wiki 是什么, LLM Wiki 与 RAG 的区别, 人机分工原则]
 tags: [理论]
 aliases: [Karpathy Wiki, LLM Wiki 模式]
 ---
@@ -29,9 +28,9 @@ Crew 的 LLM Wiki 功能源自 Andrej Karpathy 提出的一个模式：用 LLM �
 
 在 Crew 里的具体落地见 [[人机分工原则]]。
 
-## 文件即数据库
+## Markdown 是可审计的知识载体
 
-整个 Wiki 就是一个 Markdown 文件目录：没有数据库，没有专用工具锁。页面用 YAML frontmatter 存元数据，用双方括号 wikilink 表达关系，可以用任何编辑器打开。Crew 在此之上提供了 WikiHub 界面和对话式操作，见 [[WikiHub 界面导览]]。
+Crew 将知识正文保存为带 YAML frontmatter 的 Markdown，并额外维护全文检索索引和知识库元数据。Markdown 让内容可读、可编辑、可审计；索引负责提高检索效率。界面和对话操作见 [[WikiHub 界面导览]]。
 
 ## 对 Crew 的启发
 

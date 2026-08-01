@@ -1314,6 +1314,20 @@ export interface WikiSource {
 /** source_id -> 人类可读标题 的映射 */
 export type WikiSourceTitles = Record<string, string>;
 
+export interface WikiRelationPage {
+  id: string;
+  title: string;
+  page_type: WikiPageType;
+  relation: string;
+  direction: 'outgoing' | 'incoming';
+}
+
+export interface WikiSourcePage {
+  id: string;
+  title: string;
+  page_type: WikiPageType;
+}
+
 /** source_id -> 原始文件元信息 的映射 */
 export type WikiSourceFiles = Record<string, { original_path: string; file_type?: string; title?: string }>;
 
@@ -1369,15 +1383,6 @@ export interface WikiUploadResult {
   message?: string;
   pages?: WikiPage[];
   issues?: string[];
-}
-
-export interface WikiSummary {
-  summary: string;
-  kb_id: string;
-  page_count?: number;
-  source_count?: number;
-  generated_at?: number;
-  status: 'ready' | 'generating' | 'empty' | 'stale';
 }
 
 export const backendApi = {
@@ -1831,9 +1836,11 @@ export const backendApi = {
       page: WikiPage;
       source_titles: WikiSourceTitles;
       source_files: WikiSourceFiles;
+      source_pages: WikiSourcePage[];
+      relation_pages: WikiRelationPage[];
     }>(withKb(`/api/wiki/pages/${encodeURIComponent(id)}`, kbId)),
-  wikiSummary: (kbId?: string) =>
-    getJSON<{ ok: boolean } & WikiSummary>(withKb('/api/wiki/summary', kbId)),
+  wikiSummary: (kbId?: string, force?: boolean) =>
+    getJSON<{ ok: boolean; summary: string; kb_id: string; page_count?: number; source_count?: number; generated_at?: number; status: 'ready' | 'generating' | 'empty' | 'stale' }>(withKb(`/api/wiki/summary${force ? '?force=true' : ''}`, kbId)),
   /** 知识图谱：全量节点 + 关系边，不走分页。 */
   wikiGraph: (kbId?: string) =>
     getJSON<{ ok: boolean; graph: WikiGraph }>(withKb('/api/wiki/graph', kbId)),

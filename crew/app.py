@@ -2455,11 +2455,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         WikiSummarizer,
     )
     from crew.wiki.tools import register_wiki_tools
-    from crew.wiki.seed import ensure_tutorial_kb
-
     wiki_storage_root = cfg.wiki.storage.resolved_root() if cfg.wiki else None
     app._wiki_store = FileSystemWikiStore(storage_root=wiki_storage_root)
-    ensure_tutorial_kb(app._wiki_store)
     if wiki_storage_root is not None:
         log.info("Wiki 独立存储根目录: %s", wiki_storage_root)
     app.wiki_manager = WikiSessionManager(store=app._wiki_store)

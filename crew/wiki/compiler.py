@@ -1071,8 +1071,8 @@ class WikiCompiler:
 
         await _notify_progress(progress, "done", {"source_id": source_id, "page_count": len(pages)})
 
-        # 页面变化只标记摘要过期；是否调用 LLM 重新分析由 Agent 明确决定。
-        self._mark_summary_stale(owner_account_id, kb_id)
+        # 页面变化后台刷新知识库摘要（内容 hash 未变时不触发 LLM）
+        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
 
         # 追加操作日志
         try:
@@ -1332,8 +1332,8 @@ class WikiCompiler:
 
         await _notify_progress(progress, "done", {"source_id": source_id, "page_count": len(applied_pages)})
 
-        # 页面变化只标记摘要过期；是否调用 LLM 重新分析由 Agent 明确决定。
-        self._mark_summary_stale(owner_account_id, kb_id)
+        # 页面变化后台刷新知识库摘要（内容 hash 未变时不触发 LLM）
+        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
 
         # 追加操作日志
         try:
@@ -1701,7 +1701,7 @@ class WikiCompiler:
         self._update_index(owner_account_id, kb_id)
         self.store.append_log([message], owner_account_id=owner_account_id, kb_id=kb_id)
         self.store.update_home(owner_account_id=owner_account_id, kb_id=kb_id)
-        self._mark_summary_stale(owner_account_id, kb_id)
+        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
         self._schedule_home_intro_refresh(owner_account_id, kb_id)
 
     def _schedule_home_intro_refresh(
@@ -1742,15 +1742,42 @@ class WikiCompiler:
                 exc,
             )
 
-    def _mark_summary_stale(
+    def _schedule_kb_summary_refresh(
         self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
+        owner_account_id: str,
+        kb_id: str,
     ) -> None:
-        """确定性标记摘要过期，不在写入路径中隐式调用 LLM。"""
-        summary = self.store.get_kb_summary(owner_account_id=owner_account_id, kb_id=kb_id)
-        summary.status = "stale"
-        self.store.set_kb_summary(summary, owner_account_id=owner_account_id, kb_id=kb_id)
+        """后台 fire-and-forget 刷新知识库摘要；无事件循环的环境直接跳过。
+
+        摘要只在内容 hash 变化时重新生成（见 generate_kb_summary），
+        不阻塞当前写入流程。
+        """
+        if self.summarizer is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._refresh_kb_summary(owner_account_id, kb_id))
+
+    async def _refresh_kb_summary(
+        self,
+        owner_account_id: str,
+        kb_id: str,
+    ) -> None:
+        try:
+            await self.summarizer.generate_kb_summary(
+                owner_account_id,
+                kb_id,
+                force=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "知识库摘要后台刷新失败 %s:%s: %s",
+                owner_account_id,
+                kb_id,
+                exc,
+            )
 
     async def compile_all(
         self,
@@ -1891,7 +1918,7 @@ class WikiCompiler:
             next_cursor = None
         if apply and selected:
             self._update_index(owner_account_id, kb_id)
-            self._mark_summary_stale(owner_account_id, kb_id)
+            self._schedule_kb_summary_refresh(owner_account_id, kb_id)
             self.store.append_log(
                 [
                     "批量 ingest 完成："
