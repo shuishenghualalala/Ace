@@ -194,7 +194,7 @@ async def test_source_count_excludes_unparsed_raws(summarizer, store, provider):
 
 
 @pytest.mark.asyncio
-async def test_maybe_refresh_is_safe_when_provider_fails(store):
+async def test_generate_kb_summary_is_safe_when_provider_fails(store):
     class FailingProvider(FakeProvider):
         async def chat(self, messages: list[Message], tools=None, *, max_tokens=None):
             raise RuntimeError("boom")
@@ -211,7 +211,8 @@ async def test_maybe_refresh_is_safe_when_provider_fails(store):
         "",
         "default",
     )
-    await summarizer.maybe_refresh("", "default")
+    summary = await summarizer.generate_kb_summary("", "default")
+    assert summary.status == "stale"
     cached = store.get_kb_summary("", "default")
     assert cached.status == "stale"
 

@@ -762,8 +762,8 @@ def test_blocked_hosts_use_dns_idna_canonicalization():
     ):
         with pytest.raises(BrowserNetworkDenied, match="管理员策略"):
             policy.validate_hostname(hostname)
-    assert policy.validate_ip("mapped.example", "::ffff:127.0.0.1") == (
-        "::ffff:127.0.0.1"
+    assert policy.validate_ip("mapped.example", "::ffff:127.0.0.1") == str(
+        ipaddress.ip_address("::ffff:127.0.0.1")
     )
     assert policy.validate_navigation_url(
         "https://user:password@example.com/"

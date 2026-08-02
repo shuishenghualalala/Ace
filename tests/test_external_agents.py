@@ -1393,6 +1393,7 @@ def test_scan_codex_runtime_uses_desktop_bundle_when_not_on_path(tmp_path, monke
     codex = _fake_cli(tmp_path, "codex-bundle", "codex 0.42.0")
     monkeypatch.delenv("CREW_CODEX_PATH", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(detector, "_platform_search_dirs", lambda **_: ())
     monkeypatch.setattr(detector, "codex_desktop_app_bundle_paths", lambda: [str(codex)])
 
     runtime = scan_codex_runtime()
@@ -3748,7 +3749,6 @@ def _fake_codex_app_server(tmp_path):
                                 "threadId": "thread-1",
                                 "turnId": "turn-1",
                                 "callId": "dynamic-1",
-                                "namespace": "crew_interaction",
                                 "tool": "ask_followup_question",
                                 "arguments": {"questions": [{"id": "q1", "question": "Pick"}]},
                             },
@@ -3915,15 +3915,10 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
                 "EMIT_DYNAMIC_TOOL": "1",
             },
             dynamic_tools=[{
-                "type": "namespace",
-                "name": "crew_interaction",
-                "description": "Crew controls",
-                "tools": [{
-                    "type": "function",
-                    "name": "ask_followup_question",
-                    "description": "Ask",
-                    "inputSchema": {"type": "object"},
-                }],
+                "type": "function",
+                "name": "ask_followup_question",
+                "description": "Ask",
+                "inputSchema": {"type": "object"},
             }],
             dynamic_tool_handler=handle,
             permission_handler=allow,
@@ -3932,7 +3927,7 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
     ]
 
     assert calls == [(
-        "crew_interaction",
+        "",
         "ask_followup_question",
         {"questions": [{"id": "q1", "question": "Pick"}]},
     )]
@@ -3946,7 +3941,7 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
         ("ask_followup_question", "result", "ALPHA"),
     ]
     thread_params = json.loads(thread_params_file.read_text(encoding="utf-8"))
-    assert thread_params["dynamicTools"][0]["name"] == "crew_interaction"
+    assert thread_params["dynamicTools"][0]["name"] == "ask_followup_question"
 
 
 @pytest.mark.asyncio
@@ -4235,7 +4230,7 @@ async def test_codex_dynamic_control_profile_resets_legacy_native_session_once(t
     binding = store.get_runtime_session_binding(**binding_key)
     assert binding is not None
     assert binding["native_session_id"] == "thread-1"
-    assert binding["session_profile"] == "codex-app-server:crew-dynamic-tools-v1"
+    assert binding["session_profile"] == "codex-app-server:crew-dynamic-tools-v2"
 
 
 def test_legacy_acp_bindings_migrate_to_protocol_neutral_session_table(tmp_path):

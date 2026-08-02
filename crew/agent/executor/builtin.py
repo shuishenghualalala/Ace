@@ -281,6 +281,15 @@ class BuiltinExecutor(AgentExecutor):
             tool_search_schemas=tool_search_assembly.original_tool_schemas,
             tool_search_config=tool_search_assembly.config,
             authorized_tool_names=ctx.authorized_tool_names,
+            allowed_tool_names=(
+                {
+                    str((schema.get("function") or {}).get("name") or "")
+                    for schema in tool_search_assembly.original_tool_schemas
+                    if str((schema.get("function") or {}).get("name") or "")
+                }
+                if ctx.enforce_tool_scope
+                else None
+            ),
             direct_tool_names=(
                 {
                     str((schema.get("function") or {}).get("name") or "")

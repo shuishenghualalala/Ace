@@ -1,8 +1,20 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from crew.state.config import load_config
+
+
+@pytest.fixture(autouse=True)
+def _isolate_repo_env_files(monkeypatch):
+    """隔离仓库里的本地开发 .env。
+
+    本文件验证的是「显式设置的环境变量 Key 生效」，但 load_config 会用
+    load_dotenv(override=True) 加载仓库根的 config/.env，本机开发时其中
+    可能存有真实 Key，会覆盖测试显式设置的环境变量。
+    """
+    monkeypatch.setattr("crew.state.config._load_env_files", lambda: None)
 
 
 def _write_config(tmp_path: Path, *, dev_mode: bool = False) -> Path:

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -115,9 +116,7 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
     compiler.summarizer = MagicMock()
-    compiler.summarizer.maybe_refresh = AsyncMock(
-        side_effect=AssertionError("ingest 不得隐式触发第二次 LLM 摘要")
-    )
+    compiler.summarizer.generate_kb_summary = AsyncMock(return_value=None)
 
     store.save_raw(
         RawSource(
@@ -131,8 +130,12 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
     result = await compiler.ingest("src_1", source_content=source_content)
 
     assert not result.issues
-    compiler.summarizer.maybe_refresh.assert_not_awaited()
-    assert store.get_kb_summary().status == "stale"
+    # 摘要走后台 fire-and-forget 刷新（_schedule_kb_summary_refresh），不阻塞 ingest；
+    # 等事件循环把后台任务跑完再断言。
+    await asyncio.sleep(0)
+    compiler.summarizer.generate_kb_summary.assert_awaited()
+    # mock 的 summarizer 不落盘，摘要状态保持初始 empty
+    assert store.get_kb_summary().status == "empty"
     assert len(result.pages) == 3
     titles = {p.title for p in result.pages}
     assert "原始文档" in titles
