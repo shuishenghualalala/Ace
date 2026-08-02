@@ -752,7 +752,7 @@ async def test_browser_host_routes_popup_download_by_logical_session_hash(monkey
             return None
 
         def session_for_hash(self, owner: str, value: str) -> str | None:
-            return "session" if (owner, value) == ("staff:42", "a" * 32) else None
+            return "session" if (owner, value) == ("local", "a" * 32) else None
 
         def session_for_target(self, _owner: str, _target: str) -> None:
             # A newly opened popup legitimately has not reached Manager's tab
@@ -788,10 +788,6 @@ async def test_browser_host_routes_popup_download_by_logical_session_hash(monkey
         await callbacks["on_event"](event)
 
     monkeypatch.setattr(
-        "crew.gateway.routers.browser.read_session_access_token",
-        lambda _owner: "expected-token",
-    )
-    monkeypatch.setattr(
         "crew.gateway.routers.browser.electron_browser_bridge.request",
         request,
     )
@@ -803,15 +799,13 @@ async def test_browser_host_routes_popup_download_by_logical_session_hash(monkey
     endpoint = next(route.endpoint for route in router.routes if route.path == "/ws/browser-host")
     socket = _HostSocket(
         {
-            "x-MobileWork-staff-code": "staff",
-            "x-MobileWork-staff-uid": "42",
             "authorization": "Bearer expected-token",
         }
     )
 
     await endpoint(socket)
 
-    assert published == [("staff:42", "session", event)]
+    assert published == [("local", "session", event)]
 
 
 async def test_browser_host_debug_event_rechecks_browser_use_policy(monkeypatch):
