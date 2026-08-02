@@ -71,7 +71,6 @@ class ToolRunner:
         tool_search_schemas: list[dict[str, Any]] | None = None,
         tool_search_config: ToolSearchConfig | None = None,
         authorized_tool_names: frozenset[str] | None = None,
-        allowed_tool_names: set[str] | frozenset[str] | None = None,
         direct_tool_names: set[str] | frozenset[str] | None = None,
         discovered_tool_names: set[str] | frozenset[str] | None = None,
     ) -> None:
@@ -86,9 +85,6 @@ class ToolRunner:
         self.tool_search_schemas = list(tool_search_schemas or [])
         self.tool_search_config = tool_search_config
         self.authorized_tool_names = authorized_tool_names
-        self.allowed_tool_names = (
-            frozenset(allowed_tool_names) if allowed_tool_names is not None else None
-        )
         # Names actually sent to the provider this turn. Deferred catalog
         # entries become direct-callable only after tool_search discovers them;
         # a provider must not bypass progressive disclosure by guessing a name.
@@ -653,18 +649,6 @@ class ToolRunner:
                     is_error=True,
                 )
 
-            # Schema filtering is the model-facing boundary; this is the execution boundary.
-            # Some providers can still hallucinate a hidden tool name, so never dispatch a
-            # call that was not part of this Agent's effective per-turn tool scope.
-            if self.allowed_tool_names is not None and tc.name not in self.allowed_tool_names:
-                log.warning("拒绝执行未暴露给当前 Agent 的工具: %s", tc.name)
-                return ToolResult(
-                    tc.id,
-                    tc.name,
-                    "工具不在当前 Agent 的允许范围内，已拒绝执行。",
-                    is_error=True,
-                )
-
             if not self._is_authorized(tc):
                 log.warning(
                     "拒绝未授权工具调用 session=%s tool=%s",
@@ -872,7 +856,11 @@ class ToolRunner:
             "ui_label": ui_label,
         }
         if authorized:
-            trace_payload["arguments"] = tc.arguments
+            # The start event, UI card and durable trace must share one
+            # presentation-safe projection.  Sending the runtime arguments here
+            # would retain browser form values even though the visible event was
+            # already redacted.
+            trace_payload["arguments"] = ui_args
         llm_trace("tool_start", trace_payload)
         return ResponseChunk.tool_event(
             rid, tc.name, "start", str(ui_args), next_seq(),
@@ -906,7 +894,11 @@ class ToolRunner:
             "name": tc.name,
             "status": status,
             "is_error": result.is_error,
-            "content": "<browser_content_redacted>" if str(tc.name).startswith("browser_") else result.content,
+            "content": (
+                "<browser_content_redacted>"
+                if str(tc.name).startswith("browser_") or tc.name == "record_replay"
+                else result.content
+            ),
         })
         detail = tool_result_detail_for_ui(tc.name, result.content)
         return ResponseChunk.tool_event(

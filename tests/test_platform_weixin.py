@@ -396,6 +396,85 @@ async def test_start_requires_account_and_token(monkeypatch):
         await ch2.start(handler)
 
 
+async def test_start_probe_marks_connected(tmp_path, monkeypatch):
+    """启动握手成功：status_detail 报 connected，stop 后回落。"""
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+
+    async def fake_get_updates(session, *, base_url, token, sync_buf, timeout_ms):
+        return {"ret": 0, "get_updates_buf": sync_buf or "buf_1", "msgs": []}
+
+    monkeypatch.setattr(ilink, "get_updates", fake_get_updates)
+    ch = _channel()
+
+    async def handler(env):  # pragma: no cover
+        if False:
+            yield
+
+    assert ch.status_detail()["connected"] is False
+    await ch.start(handler)
+    try:
+        detail = ch.status_detail()
+        assert detail["connected"] is True
+        assert detail["last_error"] == ""
+        assert detail["running"] is True
+    finally:
+        await ch.stop()
+    assert ch.status_detail()["connected"] is False
+
+
+async def test_start_probe_session_expired_raises(tmp_path, monkeypatch):
+    """握手发现会话过期：启动直接报错，提示重新扫码。"""
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+
+    async def fake_get_updates(session, *, base_url, token, sync_buf, timeout_ms):
+        return {"ret": ilink.SESSION_EXPIRED_ERRCODE, "errcode": 0, "errmsg": "session expired"}
+
+    monkeypatch.setattr(ilink, "get_updates", fake_get_updates)
+    ch = _channel()
+
+    async def handler(env):  # pragma: no cover
+        if False:
+            yield
+
+    with pytest.raises(RuntimeError, match="重新扫码登录"):
+        await ch.start(handler)
+    assert ch.status_detail()["connected"] is False
+    await ch.stop()
+
+
+async def test_poll_failure_marks_disconnected(tmp_path, monkeypatch):
+    """长轮询持续失败：connected 回落并记录 last_error。"""
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    calls = {"n": 0}
+
+    async def fake_get_updates(session, *, base_url, token, sync_buf, timeout_ms):
+        calls["n"] += 1
+        if calls["n"] == 1:  # 启动握手
+            return {"ret": 0, "get_updates_buf": "buf_1", "msgs": []}
+        return {"ret": -1, "errcode": 0, "errmsg": "boom"}
+
+    monkeypatch.setattr(ilink, "get_updates", fake_get_updates)
+    monkeypatch.setattr(ilink, "RETRY_DELAY_SECONDS", 0)
+    ch = _channel()
+
+    async def handler(env):  # pragma: no cover
+        if False:
+            yield
+
+    await ch.start(handler)
+    try:
+        assert ch.status_detail()["connected"] is True
+        for _ in range(50):
+            await asyncio.sleep(0.05)
+            if not ch.status_detail()["connected"]:
+                break
+        detail = ch.status_detail()
+        assert detail["connected"] is False
+        assert "boom" in detail["last_error"]
+    finally:
+        await ch.stop()
+
+
 # --------------------------------------------------------------------------- #
 # 扫码登录接口
 # --------------------------------------------------------------------------- #

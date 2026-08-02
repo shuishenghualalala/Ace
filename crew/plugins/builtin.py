@@ -27,7 +27,7 @@ class LoggingPlugin(Plugin):
     name = "logging"
 
     async def pre_tool_call(self, tool_call: ToolCall) -> None:
-        if tool_call.name.startswith("browser_"):
+        if tool_call.name.startswith("browser_") or tool_call.name == "record_replay":
             # Browser arguments may contain passwords, prompt text, signed
             # URLs, upload paths, or other page secrets. Tool-specific safe
             # labels are emitted elsewhere; raw browser values never belong in
@@ -38,7 +38,7 @@ class LoggingPlugin(Plugin):
 
     async def post_tool_call(self, tool_call: ToolCall, result: ToolResult) -> None:
         flag = "ERR" if result.is_error else "OK"
-        if tool_call.name.startswith("browser_"):
+        if tool_call.name.startswith("browser_") or tool_call.name == "record_replay":
             # Snapshot, Console, URLs and form validation errors are all
             # untrusted page content and can contain credentials.
             log.info("[工具结果:%s] %s -> <browser_result_redacted>", flag, tool_call.name)

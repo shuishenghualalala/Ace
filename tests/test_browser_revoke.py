@@ -8,8 +8,6 @@ import pytest
 
 from crew.browser.driver import BrowserDriverError
 from crew.browser.manager import BrowserManager
-from crew.core.runctx import current_tool_call_id
-
 from tests.test_browser_use import FakeBrowserDriver
 
 
@@ -39,7 +37,7 @@ async def test_revoke_without_owner_instance_bumps_generation(browser):
     assert manager.capability_generation("owner-a") == 2
 
 
-async def test_renew_capability_clears_approvals_and_page_observations(browser):
+async def test_renew_capability_clears_page_observations_without_approval_state(browser):
     manager, _driver = browser
     await manager.navigate("owner-a", "session-a", "https://example.com")
     owner = manager._owners["owner-a"]
@@ -47,26 +45,18 @@ async def test_renew_capability_clears_approvals_and_page_observations(browser):
     assert session.refs
     tab_ids = set(session.tabs)
 
-    token = current_tool_call_id.set("renew-call")
-    try:
-        pending = manager._issue_approval(
-            "browser_download", {"ref": "p1:e5"}, "owner-a", "session-a"
-        )
-        assert manager.confirm_approval(
-            pending.token,
-            "browser_download",
-            {"ref": "p1:e5"},
-            "owner-a",
-            "session-a",
-        )
-    finally:
-        current_tool_call_id.reset(token)
+    assert manager.permission_for(
+        "browser_download",
+        {"ref": "p1:e5"},
+        "owner-a",
+        "session-a",
+    ) is None
 
     generation = manager.renew_capability("owner-a")
 
     assert generation == 1
-    assert not manager._pending_approvals
-    assert not manager._granted_approvals
+    assert not hasattr(manager, "_pending_approvals")
+    assert not hasattr(manager, "_granted_approvals")
     assert not session.refs
     assert session.screenshot_id == ""
     assert session.page_marker == ""
@@ -95,44 +85,24 @@ async def test_capability_runtime_state_reports_fail_closed_tombstones(browser):
     }
 
 
-async def test_revoke_clears_pending_and_granted_approvals(browser):
+async def test_revoke_keeps_functional_build_free_of_approval_tokens(browser):
     manager, _driver = browser
     await manager.navigate("owner-a", "session-a", "https://example.com")
     await manager.navigate("owner-b", "session-a", "https://example.com/b")
 
-    token_a = current_tool_call_id.set("call-a")
-    try:
-        approval_a = manager._issue_approval(
-            "browser_download", {"ref": "p1:e5"}, "owner-a", "session-a"
-        )
-    finally:
-        current_tool_call_id.reset(token_a)
-    token_b = current_tool_call_id.set("call-b")
-    try:
-        approval_b = manager._issue_approval(
-            "browser_download", {"ref": "p1:e5"}, "owner-b", "session-a"
-        )
-    finally:
-        current_tool_call_id.reset(token_b)
-    assert approval_a.token in manager._pending_approvals
-    assert approval_b.token in manager._pending_approvals
+    assert manager.permission_for(
+        "browser_download", {"ref": "p1:e5"}, "owner-a", "session-a"
+    ) is None
+    assert manager.permission_for(
+        "browser_download", {"ref": "p1:e5"}, "owner-b", "session-a"
+    ) is None
+    assert not hasattr(manager, "_pending_approvals")
+    assert not hasattr(manager, "_granted_approvals")
 
     await manager.revoke_owner("owner-a")
 
-    assert approval_a.token not in manager._pending_approvals
-    assert approval_b.token in manager._pending_approvals
-    assert all(key[0] != "owner-a" for key in manager._granted_approvals)
-    # 旧 token 无法再确认
-    token_c = current_tool_call_id.set("call-a")
-    try:
-        assert (
-            manager.confirm_approval(
-                approval_a.token, "browser_download", {"ref": "p1:e5"}, "owner-a", "session-a"
-            )
-            is False
-        )
-    finally:
-        current_tool_call_id.reset(token_c)
+    assert not hasattr(manager, "_pending_approvals")
+    assert not hasattr(manager, "_granted_approvals")
 
 
 async def test_revoke_blocks_actions_and_removes_owner(browser):

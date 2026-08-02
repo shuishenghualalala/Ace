@@ -17,14 +17,18 @@ directories:
   output: release
   buildResources: build
 
-# 只打包运行时必需的产物与 package.json 声明的生产依赖；Electron 本体由
-# electron-builder 使用对应平台的预编译二进制提供，无需我们额外复制浏览器内核。
+# 只打包运行时必需的产物与 package.json 声明的生产依赖。Electron 本体（含其
+# 内置 Chromium）由 electron-builder 提供——浏览器自动化走 ElectronCdpTransport
+# 驱动应用自己的 WebContentsView，不需要另一个 Chromium 二进制。
 files:
   - dist/**/*
   - package.json
   - "!**/.DS_Store"
 
-# 显式排除源码与开发产物，避免进包
+# 不再打包任何 Playwright-managed Chromium（约 500MB/平台）：运行时用 Electron
+# 自带的 Chromium，那 500MB 从来没被执行过。曾经打包它的 ManagedChromiumEngine
+# 没接线，已整体移除。将来若真要 managed 引擎，在此重新声明 extraResources 并
+# 恢复 browser:stage 步骤。
 extraResources: []
 
 # Linux target：dir 即"未打包目录"。
@@ -68,7 +72,8 @@ win:
 # - 开发构建默认不做代码签名；正式发布时再配置 Apple Developer 证书，
 #   首次运行需用户右键 → 打开 以绕过 Gatekeeper
 # - 直接使用仓库内的通用 PNG 图标，由 electron-builder 生成平台图标
-# - arch 同时配置 x64 与 arm64，electron-builder 会产出 universal 目录
+# - 默认只构建当前 host arch；双架构发布分别在对应架构 runner 执行
+#   dist:mac:x64 / dist:mac:arm64。
 mac:
   icon: assets/icon.png
   category: public.app-category.productivity
@@ -76,6 +81,8 @@ mac:
   gatekeeperAssess: false
   target:
     - target: dir
-      arch:
-        - x64
-        - arm64
+
+# Electron 二进制下载镜像（中国大陆 Docker 构建环境友好）
+# 在 Dockerfile.pack 里也会通过 ENV 再次设置
+# electronBuilderMirror: https://npmmirror.com/mirrors/electron-builder/
+

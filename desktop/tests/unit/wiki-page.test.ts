@@ -107,7 +107,7 @@ beforeEach(() => {
   __resetWikiViewForTest();
   setWikiAgentEntryHandler(null);
   setWikiAgentKbDeletedHandler(null);
-  (window as unknown as { MobileWork: unknown }).MobileWork = { selectFile: mockSelectFile };
+  (window as unknown as { Crew: unknown }).Crew = { selectFile: mockSelectFile };
   document.body.innerHTML = `
     <button class="nav-item" data-tab="wiki">Wiki</button>
     <section id="wiki-tab" class="tab-pane"><div id="wiki-page-root"></div></section>

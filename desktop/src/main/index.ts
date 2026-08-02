@@ -273,16 +273,33 @@ function currentCrewFileOwnerSegment(): string | null {
   return `acct_${digest}`;
 }
 
+/**
+ * 背压熔断阈值。
+ *
+ * **按帧体积拒发是错的**（原来那样做过）：会静默丢掉完整快照和录制步骤，而
+ * 那两样都是"少一条就对不上"的数据，本机 loopback 上按体积拒发纯粹是自找失败。
+ * 所以正常一律发，不看单帧多大。
+ *
+ * 但缓冲无限积压同样不行：对端卡住（渲染进程忙、面板没在读）时 `socket.send`
+ * 会一直往内存里堆，堆到主进程 OOM。阈值定得很高——只有对端真的停止消费才会
+ * 撞到，一次正常的大快照（几百 KB）碰不到。
+ */
+const BROWSER_HOST_BACKPRESSURE_BYTES = 64 * 1024 * 1024;
+
 function sendBrowserHostFrame(
   socket: WebSocket,
   value: Record<string, unknown>,
-  maxBytes: number,
-  maxBufferedBytes: number,
+  _maxBytes?: number,
+  _maxBufferedBytes?: number,
 ): boolean {
-  if (socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > maxBufferedBytes) return false;
+  if (socket.readyState !== WebSocket.OPEN) return false;
+  // 只在缓冲严重积压时熔断：这不是"帧太大"，是"对端已经不读了"。
+  if (socket.bufferedAmount > BROWSER_HOST_BACKPRESSURE_BYTES) return false;
   try {
     const payload = JSON.stringify(value);
-    if (Buffer.byteLength(payload, 'utf8') > maxBytes) return false;
+    // ws.send queues frames in call order. Rejecting on payload size
+    // silently dropped exact snapshots/recording steps and made
+    // large Playwright responses fail despite a healthy local connection.
     socket.send(payload);
     return true;
   } catch {
@@ -301,6 +318,41 @@ function ensureBrowserHost(): BrowserHost {
       const socket = browserHostSocket;
       if (!socket) return;
       sendBrowserHostFrame(socket, { type: 'event', event: record }, 64 * 1024, 256 * 1024);
+    });
+    browserHost.on('download', (event: unknown) => {
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
+      const record = event as Record<string, unknown>;
+      const runtimeKey = currentBrowserRuntimeKey();
+      if (!runtimeKey || record.runtimeKey !== runtimeKey) return;
+      const socket = browserHostSocket;
+      if (!socket) return;
+      sendBrowserHostFrame(socket, { type: 'event', event: record });
+    });
+    browserHost.on('recording', (event: unknown) => {
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
+      const record = event as Record<string, unknown>;
+      const markIncomplete = (): void => {
+        browserHost?.markRecordingIncomplete(
+          typeof record.targetId === 'string' ? record.targetId : '',
+          typeof record.recordingId === 'string' ? record.recordingId : '',
+        );
+      };
+      const runtimeKey = currentBrowserRuntimeKey();
+      const v11 = record.schemaVersion === 11;
+      if (
+        !runtimeKey
+        || (!v11 && record.runtimeKey !== runtimeKey)
+        || (v11 && typeof record.runtimeKey === 'string' && record.runtimeKey !== runtimeKey)
+      ) {
+        markIncomplete();
+        return;
+      }
+      const socket = browserHostSocket;
+      if (!socket) {
+        markIncomplete();
+        return;
+      }
+      if (!sendBrowserHostFrame(socket, { type: 'event', event: record })) markIncomplete();
     });
     browserHost.on('tab-updated', (event: unknown) => {
       if (!event || typeof event !== 'object' || Array.isArray(event)) return;
@@ -400,17 +452,13 @@ async function connectBrowserHost(): Promise<void> {
         Authorization: `Bearer ${accessToken}`,
         ...(sessionCookie ? { Cookie: sessionCookie } : {}),
       },
-      maxPayload: 2 * 1024 * 1024,
+      maxPayload: 0,
     });
     browserHostSocket = socket;
 
     socket.on('message', (raw) => {
       if (socket !== browserHostSocket) return;
       const text = raw.toString();
-      if (Buffer.byteLength(text, 'utf8') > 2 * 1024 * 1024) {
-        socket.close(1009, 'browser-host-request-too-large');
-        return;
-      }
       let request: Record<string, unknown>;
       try {
         const value: unknown = JSON.parse(text);
@@ -455,11 +503,14 @@ async function connectBrowserHost(): Promise<void> {
           type: 'response',
           id,
           ok: false,
-          error: message.slice(0, 1000),
+          error: message,
           // 传 code：Python 侧需要据此区分「ref 失效」这类可恢复失败与真正的故障，
           // 靠匹配中文错误文本太脆。
           code: failure?.code ?? '',
           uncertain: failure?.uncertain ?? false,
+          phase: failure?.phase ?? '',
+          partial: failure?.partial ?? false,
+          completed_count: failure?.completed_count ?? 0,
           browser_stopped: failure?.browser_stopped ?? false,
           stop_unconfirmed: failure?.stop_unconfirmed ?? false,
         }, 2 * 1024 * 1024, 4 * 1024 * 1024);
@@ -861,7 +912,15 @@ function createWindow() {
     if (isQuitting) return;
     if (!mainWindow) return;
     if (!mainWindow.isVisible()) return;
-    if (shouldPreventClose()) event.preventDefault();
+    if (shouldPreventClose()) {
+      event.preventDefault();
+      return;
+    }
+    // AutomationHost owns a hidden BrowserWindow, so closing the visible main
+    // window no longer makes Electron emit window-all-closed. A user-selected
+    // "quit" must explicitly enter the app quit path and dispose hidden hosts.
+    isQuitting = true;
+    app.quit();
   });
 }
 
@@ -2831,7 +2890,9 @@ async function bootstrap() {
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    // Hidden AutomationHost windows are implementation details and must not
+    // suppress recreation of the user-facing window on macOS.
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
     else showMainWindow();
   });
 }

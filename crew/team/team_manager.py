@@ -385,6 +385,16 @@ class InProcessTeamManager(TeamManager):
         owner_account_id: str = "",
         tool_filter: list[str] | None = None,
     ) -> SingleAgent:
+        # Wiki 工具只属于专用 Wiki Agent。Team 使用独立 Registry，但不能因此
+        # 绕过全局的 Wiki 能力边界。
+        from crew.tools.policy import exclude_toolsets
+
+        base_tools = registry.names() if tool_filter is None else tool_filter
+        tool_filter = exclude_toolsets(
+            registry,
+            base_tools,
+            exact={"wiki.read", "wiki.manage"},
+        )
         provider = self._provider_for_owner(owner_account_id)
         executor_kind = "external" if spec.executor in {"acp", "cli", "external"} else spec.executor
         executor = create_executor(

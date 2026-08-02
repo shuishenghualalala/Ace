@@ -1,4 +1,4 @@
-"""Network policy and authenticated loopback proxy for Electron BrowserHost."""
+"""Network compatibility helpers and authenticated loopback proxy."""
 
 from __future__ import annotations
 
@@ -60,31 +60,27 @@ class ResolvedTarget:
 class BrowserNetworkPolicy:
     def __init__(self, config: BrowserConfig) -> None:
         self.config = config
-        self._allowed_hosts = {_normalized_host(item) for item in config.allowed_private_hosts}
         self._blocked_hosts = {_normalized_host(item) for item in config.blocked_hosts}
-        self._allowed_cidrs = []
-        for item in config.allowed_private_cidrs:
-            try:
-                self._allowed_cidrs.append(ipaddress.ip_network(item, strict=False))
-            except ValueError as exc:
-                raise ValueError(f"无效的 browser allowed_private_cidrs: {item}") from exc
 
     def validate_navigation_url(self, url: str) -> str:
-        raw = str(url or "").strip()
-        if not raw:
+        """Return the caller's navigation target without applying a URL policy.
+
+        Navigation semantics belong to Playwright/Chromium.  In particular,
+        ``about:``, ``data:``, ``file:``, extension/custom schemes and URLs
+        containing credentials are all meaningful in real browser workflows.
+        Rejecting them here made the Python facade a smaller, subtly different
+        browser than the engine it wraps.
+
+        The policy object remains available to the legacy opt-in loopback
+        proxy, but it is no longer an authorization boundary for ordinary
+        browser navigation.
+        """
+        raw = str(url or "")
+        if not raw.strip():
             raise BrowserNetworkDenied("URL 不能为空")
-        parsed = urlsplit(raw)
-        if parsed.scheme == "file":
-            if not self.config.allow_file_urls:
-                raise BrowserNetworkDenied("默认禁止 file:// URL")
-            return raw
-        if parsed.scheme not in {"http", "https"}:
-            raise BrowserNetworkDenied("仅允许 http/https URL")
-        if not parsed.hostname:
-            raise BrowserNetworkDenied("URL 缺少主机名")
-        if parsed.username is not None or parsed.password is not None:
-            raise BrowserNetworkDenied("URL 不允许内嵌用户名或密码")
-        self.validate_hostname(parsed.hostname)
+        # ``urlsplit`` is intentionally not used as a validator.  Its accepted
+        # grammar is not Chromium's URL parser (and it rejects otherwise useful
+        # custom-scheme inputs such as malformed-looking opaque payloads).
         return raw
 
     def validate_hostname(self, hostname: str) -> str:
@@ -93,60 +89,19 @@ class BrowserNetworkPolicy:
             raise BrowserNetworkDenied("主机名不能为空")
         if host in self._blocked_hosts or any(host.endswith(f".{item}") for item in self._blocked_hosts):
             raise BrowserNetworkDenied("该主机已被管理员策略阻止")
-        if host == "localhost" or host.endswith(".localhost"):
-            if host not in self._allowed_hosts:
-                raise BrowserNetworkDenied("默认禁止访问 localhost")
         return host
 
     def validate_ip(self, hostname: str, value: str) -> str:
-        host = self.validate_hostname(hostname)
+        # Browser automation must preserve Chromium's reachability. Localhost,
+        # RFC1918, link-local, metadata, IPv4-mapped and transition addresses
+        # are therefore accepted by default. ``blocked_hosts`` remains an
+        # explicit deployment override, not an implicit product denylist.
+        self.validate_hostname(hostname)
         try:
             ip = ipaddress.ip_address(value)
         except ValueError as exc:
             raise BrowserNetworkDenied("DNS 返回了无效 IP") from exc
-        if self._is_public(ip) or host in self._allowed_hosts:
-            return str(ip)
-        if any(ip in network for network in self._allowed_cidrs):
-            return str(ip)
-        raise BrowserNetworkDenied("默认禁止访问私网、链路本地、保留地址或云元数据地址")
-
-    @staticmethod
-    def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-        # is_global already excludes RFC1918, loopback, link-local, multicast,
-        # documentation/reserved ranges and the common 169.254.169.254 metadata IP.
-        if (
-            not ip.is_global
-            or ip.is_multicast
-            or ip.is_reserved
-            or bool(getattr(ip, "is_site_local", False))
-        ):
-            return False
-        if isinstance(ip, ipaddress.IPv6Address):
-            # Reject public-looking IPv6 transition addresses that embed a
-            # private IPv4 destination, including the well-known NAT64 prefix.
-            if ip in ipaddress.ip_network("64:ff9b::/96"):
-                embedded = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-                return BrowserNetworkPolicy._is_public(embedded)
-            # RFC 8215's local-use NAT64 space and legacy/translatable IPv4
-            # forms are not safe without an administrator-supplied translation
-            # policy. Some kernels/network appliances translate these into
-            # RFC1918, loopback, link-local or metadata destinations even
-            # though Python classifies the outer IPv6 address as global.
-            if (
-                ip in ipaddress.ip_network("64:ff9b:1::/48")
-                or ip in ipaddress.ip_network("::ffff:0:0/96")
-                or ip in ipaddress.ip_network("::/96")
-            ):
-                return False
-            embedded_candidates = [ip.ipv4_mapped, ip.sixtofour]
-            if ip.teredo:
-                embedded_candidates.extend(ip.teredo)
-            if any(
-                value is not None and not BrowserNetworkPolicy._is_public(value)
-                for value in embedded_candidates
-            ):
-                return False
-        return True
+        return str(ip)
 
     async def resolve(self, hostname: str, port: int) -> ResolvedTarget:
         candidates = await self.resolve_candidates(hostname, port)
@@ -176,11 +131,14 @@ class BrowserNetworkPolicy:
 
 
 class LoopbackPolicyProxy:
-    """Small HTTP CONNECT proxy that resolves, validates and pins every target.
+    """Small HTTP CONNECT proxy that resolves and pins every target.
 
-    Chromium is forced through this listener. HTTPS and WebSocket CONNECT
-    tunnels are opened to the validated numeric address, so a later DNS change
-    cannot redirect an already-approved connection to a private address.
+    This is a legacy opt-in compatibility component; normal BrowserHost traffic
+    uses Chromium's native network stack. The proxy accepts every syntactically
+    valid destination by default and only applies an explicitly configured
+    ``blocked_hosts`` deployment override. HTTPS and WebSocket CONNECT tunnels
+    are opened to the resolved numeric address so one request uses one DNS
+    result consistently.
     """
 
     def __init__(self, policy: BrowserNetworkPolicy) -> None:
@@ -390,8 +348,6 @@ class LoopbackPolicyProxy:
             if re.fullmatch(r"[0-9]+", value) is None:
                 raise BrowserNetworkDenied("无效 Content-Length")
             length = int(value)
-            if length > self.policy.config.max_transfer_bytes:
-                raise BrowserNetworkDenied("请求体超过浏览器传输上限")
             return ("content-length", length) if length else ("none", 0)
         if transfer_encodings:
             if transfer_encodings[0].strip().lower() != "chunked":
@@ -482,7 +438,6 @@ class LoopbackPolicyProxy:
                 remaining -= len(chunk)
             return
 
-        transferred = 0
         trailer_bytes = 0
         while True:
             line = await reader.readuntil(b"\r\n")
@@ -492,9 +447,6 @@ class LoopbackPolicyProxy:
             if re.fullmatch(rb"[0-9a-fA-F]+", raw_size) is None:
                 raise BrowserNetworkDenied("无效 chunked 请求体")
             size = int(raw_size, 16)
-            transferred += size
-            if transferred > self.policy.config.max_transfer_bytes:
-                raise BrowserNetworkDenied("请求体超过浏览器传输上限")
             writer.write(line)
             if size:
                 data = await reader.readexactly(size + 2)
@@ -562,8 +514,6 @@ class LoopbackPolicyProxy:
             if re.fullmatch(r"[0-9]+", value) is None:
                 raise BrowserNetworkDenied("上游返回了无效 Content-Length")
             length = int(value)
-            if length > self.policy.config.max_transfer_bytes:
-                raise BrowserNetworkDenied("上游响应超过浏览器传输上限")
             return ("content-length", length) if length else ("none", 0)
         return "close", 0
 
@@ -671,7 +621,6 @@ class LoopbackPolicyProxy:
             )
             return
 
-        transferred = 0
         while True:
             chunk = await self._read_with_deadline(
                 reader,
@@ -681,9 +630,6 @@ class LoopbackPolicyProxy:
             )
             if not chunk:
                 return
-            transferred += len(chunk)
-            if transferred > self.policy.config.max_transfer_bytes:
-                raise BrowserNetworkDenied("上游响应超过浏览器传输上限")
             writer.write(chunk)
             await writer.drain()
 
@@ -695,7 +641,6 @@ class LoopbackPolicyProxy:
         idle_timeout: float,
         deadline: float,
     ) -> None:
-        transferred = 0
         trailer_bytes = 0
         while True:
             line = await self._read_with_deadline(
@@ -710,9 +655,6 @@ class LoopbackPolicyProxy:
             if re.fullmatch(rb"[0-9a-fA-F]+", raw_size) is None:
                 raise BrowserNetworkDenied("上游返回了无效 chunked 响应")
             size = int(raw_size, 16)
-            transferred += size
-            if transferred > self.policy.config.max_transfer_bytes:
-                raise BrowserNetworkDenied("上游响应超过浏览器传输上限")
             writer.write(line)
             if size:
                 amount = size + 2

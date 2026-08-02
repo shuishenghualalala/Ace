@@ -17,10 +17,11 @@ import json
 import logging
 import re
 import shutil
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from crew.core.types import ChatResponse
 from crew.evolution.log_store import EvolutionLogStore
@@ -32,7 +33,24 @@ from crew.evolution.models import (
     TrajectoryLog,
 )
 
+if TYPE_CHECKING:  # 仅用于类型注解，避免运行时导入开销与循环依赖
+    from crew.core.types import ChatResponse
+
 logger = logging.getLogger(__name__)
+
+
+def _current_owner_for_audit() -> str | None:
+    """取当前 owner 记入技能审计。
+
+    自动生成同样是 Gateway 级变更，审计里必须能看出是谁的会话触发的。
+    取不到就返回 None，由审计层记成 `system`——与 install_skill 的语义一致。
+    """
+    try:
+        from crew.core.runctx import current_owner_account_id
+
+        return str(current_owner_account_id.get() or "") or None
+    except Exception:
+        return None
 
 
 class QueryCluster:
@@ -932,6 +950,7 @@ class SkillGenerator:
         """
         from crew.agent.skills import (
             get_user_skills_dir,
+            install_skill_from_dir,
             _slugify,
         )
 
@@ -965,15 +984,35 @@ class SkillGenerator:
             logger.warning("无法生成有效 slug")
             return None
 
-        skill_dir = get_user_skills_dir() / slug
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_md = skill_dir / "SKILL.md"
-
-        if skill_md.exists():
-            logger.warning("skill %s 已存在: %s", slug, skill_md)
+        published = get_user_skills_dir() / slug
+        if (published / "SKILL.md").exists():
+            logger.warning("skill %s 已存在: %s", slug, published / "SKILL.md")
             return None
 
-        skill_md.write_text(content, encoding="utf-8")
+        # 走受治理的发布路径：互斥锁 + 路径 containment + 审计日志 + 失败回滚。
+        #
+        # 技能目录是本机全局共享的（技能页安装提示明说「对本机所有登录账号生效」），
+        # 写进去就是 Gateway 级变更。此前这里是裸 write_text，三样治理全绕过——
+        # 自动生成的技能静默出现、无审计记录、与并发的 install/uninstall 无互斥。
+        owner_account_id = _current_owner_for_audit()
+        staging = Path(tempfile.mkdtemp(prefix="crew-evolution-"))
+        try:
+            staged_dir = staging / slug
+            staged_dir.mkdir(parents=True)
+            (staged_dir / "SKILL.md").write_text(content, encoding="utf-8")
+            if not install_skill_from_dir(
+                staged_dir,
+                slug=slug,
+                operator_account_id=owner_account_id,
+                source="crew.evolution",
+            ):
+                logger.warning("skill %s 发布失败（审计或事务未通过）", slug)
+                return None
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+        skill_dir = published
+        skill_md = skill_dir / "SKILL.md"
 
         # 将结构化内容以 JSON 格式持久化到 skill 目录下的 evolution_log 文件夹
         # 使用会话ID组合命名（{conversation_id}_{session_id}_{timestamp}.json），
@@ -3719,7 +3758,19 @@ class SkillGenerator:
             logger.warning("拼接进化后的 SKILL.md 失败")
             return None
 
-        skill_md_path.write_text(new_content, encoding="utf-8")
+        # 受治理的原地更新：互斥锁 + containment（内置技能不可改）+ 审计 + 原子替换。
+        # 进化改的是**已存在的**技能，与发布新技能是两条路：install_skill_from_dir
+        # 对目标已存在是 fail-closed，这里要用 update_skill_markdown。
+        from crew.agent.skills import update_skill_markdown
+
+        if not update_skill_markdown(
+            skill_md_path.parent.name,
+            new_content,
+            operator_account_id=_current_owner_for_audit(),
+            source="crew.evolution.evolve",
+        ):
+            logger.warning("SKILL.md 更新被拒绝: %s", skill_md_path)
+            return None
         logger.info("SKILL.md 已更新: %s", skill_md_path)
 
         evo_log_dir = skill_dir / "evolution_log"

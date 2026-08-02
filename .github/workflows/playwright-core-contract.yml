@@ -1,0 +1,131 @@
+name: Playwright core compatibility
+
+on:
+  pull_request:
+    paths:
+      - "desktop/package.json"
+      - "desktop/package-lock.json"
+      - "desktop/esbuild.config.mjs"
+      - "desktop/src/main/browser/**"
+      - "desktop/src/main/browser-host.ts"
+      - "desktop/scripts/pw-contract.ts"
+      - "desktop/scripts/fixtures/**"
+      - "desktop/scripts/check-playwright-boundary.mjs"
+      - "desktop/scripts/resolve-playwright-candidates.mjs"
+      - "desktop/electron-builder.yml"
+      - ".github/workflows/playwright-core-contract.yml"
+  schedule:
+    # Detect both stable and prerelease breakage before a dependency-upgrade PR.
+    - cron: "17 3 * * 2"
+  workflow_dispatch:
+    inputs:
+      playwright_version:
+        description: "Optional exact candidate version; empty tests npm latest and next"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playwright-core-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pinned:
+    name: ${{ matrix.os }} / pinned
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm run check:playwright-boundary
+      - run: npm run typecheck
+      - run: npm test
+      - name: Install Chromium host dependencies
+        if: runner.os == 'Linux'
+        run: sudo node node_modules/playwright-core/cli.js install-deps chromium
+      - run: npm run browser:stage
+      - name: Real hidden Electron contract (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run test:pw-contract
+      - name: Real hidden Electron contract
+        if: runner.os != 'Linux'
+        run: npm run test:pw-contract
+
+  discover-candidates:
+    name: Resolve forward-compatibility versions
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      versions: ${{ steps.resolve.outputs.versions }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - id: resolve
+        working-directory: desktop
+        env:
+          REQUESTED_VERSION: ${{ inputs.playwright_version }}
+        shell: bash
+        run: |
+          versions="$(node scripts/resolve-playwright-candidates.mjs "$REQUESTED_VERSION")"
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  forward-compatible:
+    name: ${{ matrix.os }} / candidate ${{ matrix.version }}
+    needs: discover-candidates
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        version: ${{ fromJSON(needs.discover-candidates.outputs.versions) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CREW_PLAYWRIGHT_CANDIDATE_VERSION: ${{ matrix.version }}
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - name: Install candidate without changing the dependency lock
+        shell: bash
+        run: >-
+          npm install --no-save --package-lock=false --ignore-scripts
+          "playwright-core@${CREW_PLAYWRIGHT_CANDIDATE_VERSION}"
+          "@playwright/test@${CREW_PLAYWRIGHT_CANDIDATE_VERSION}"
+      - run: npm run check:playwright-boundary
+      - run: npm run typecheck
+      - run: npm test
+      - name: Install Chromium host dependencies
+        if: runner.os == 'Linux'
+        run: sudo node node_modules/playwright-core/cli.js install-deps chromium
+      - run: npm run browser:stage
+      - name: Real hidden Electron contract (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run test:pw-contract
+      - name: Real hidden Electron contract
+        if: runner.os != 'Linux'
+        run: npm run test:pw-contract

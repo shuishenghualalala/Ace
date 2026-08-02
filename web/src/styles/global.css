@@ -5859,6 +5859,7 @@ button { font-family: inherit; cursor: pointer; }
   border-radius: 5px; font-weight: 800;
 }
 .hub-badge--builtin { background: var(--bg-soft); color: var(--text-3); border: 1px solid var(--border); }
+.hub-badge--local { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; }
 
 /* Category filter */
 .hub__cats {

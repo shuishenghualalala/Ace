@@ -660,6 +660,10 @@
   justify-content: center;
 }
 
+.channel-connect-qr__image-wrap[hidden] {
+  display: none;
+}
+
 .channel-connect-qr__image {
   width: 200px;
   height: 200px;

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -13,6 +14,90 @@ Role = Literal["system", "user", "assistant", "tool"]
 
 
 _FILE_WRITE_UI_ARG_KEYS = ("path", "file_path", "append")
+_BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:[es][1-9]\d*$")
+_FORM_FIELD_TYPES = ("textbox", "combobox", "checkbox", "radio", "slider")
+
+
+def _record_replay_arguments_for_display(
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose replay structure without retaining runtime form values."""
+
+    workflow_id = arguments.get("workflow_id")
+    inputs = arguments.get("inputs")
+    safe_inputs: dict[str, dict[str, Any]] = {}
+    if isinstance(inputs, dict):
+        for index, (key, value) in enumerate(inputs.items()):
+            if index >= 32:
+                break
+            if (
+                not isinstance(key, str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) is None
+            ):
+                continue
+            if isinstance(value, list):
+                safe_inputs[key] = {"type": "list", "count": len(value)}
+            elif isinstance(value, str):
+                safe_inputs[key] = {"type": "text"}
+            elif isinstance(value, bool):
+                safe_inputs[key] = {"type": "boolean"}
+            else:
+                safe_inputs[key] = {"type": type(value).__name__}
+    result: dict[str, Any] = {}
+    if isinstance(workflow_id, str) and re.fullmatch(
+        r"[0-9a-f]{64}",
+        workflow_id,
+    ):
+        result["workflow_id"] = workflow_id
+    result["inputs"] = safe_inputs
+    return result
+
+
+def _safe_browser_ref(value: Any) -> str:
+    return value if isinstance(value, str) and _BROWSER_REF_RE.fullmatch(value) else ""
+
+
+def _fill_form_arguments_for_display(fields: Any) -> dict[str, Any]:
+    """Project a form batch to structure only; runtime values never enter events/history."""
+
+    if not isinstance(fields, list):
+        return {"field_count": 0, "fields": [], "field_types": {}}
+    projected: list[dict[str, Any]] = []
+    counts = {field_type: 0 for field_type in _FORM_FIELD_TYPES}
+    for index, raw in enumerate(fields[:32]):
+        item: dict[str, Any] = {"index": index}
+        if isinstance(raw, dict):
+            field_type = raw.get("type")
+            if field_type in counts:
+                item["type"] = field_type
+                counts[field_type] += 1
+            ref = _safe_browser_ref(raw.get("ref"))
+            if ref:
+                item["ref"] = ref
+            select_by = raw.get("select_by")
+            if field_type == "combobox" and select_by in {"label", "value"}:
+                item["select_by"] = select_by
+        projected.append(item)
+    result: dict[str, Any] = {
+        "field_count": min(len(fields), 32),
+        "fields": projected,
+        "field_types": {key: count for key, count in counts.items() if count},
+    }
+    if len(fields) > 32:
+        result["truncated"] = True
+    return result
+
+
+def _select_arguments_for_display(arguments: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    ref = _safe_browser_ref(arguments.get("ref"))
+    if ref:
+        result["ref"] = ref
+    values = arguments.get("values")
+    result["value_count"] = min(len(values), 32) if isinstance(values, list) else 0
+    if isinstance(values, list) and len(values) > 32:
+        result["truncated"] = True
+    return result
 
 
 def tool_arguments_for_ui(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
@@ -21,10 +106,27 @@ def tool_arguments_for_ui(name: str, arguments: dict[str, Any] | None) -> dict[s
         return {}
     if name in {"file_write", "write_file"}:
         return {key: arguments[key] for key in _FILE_WRITE_UI_ARG_KEYS if key in arguments}
+    if name == "record_replay":
+        return _record_replay_arguments_for_display(arguments)
     if name in {"browser_type", "browser_dialog"}:
         return {key: value for key, value in arguments.items() if key not in {"text", "value", "password"}}
+    if name == "browser_fill_form":
+        return _fill_form_arguments_for_display(arguments.get("fields"))
+    if name == "browser_select":
+        return _select_arguments_for_display(arguments)
     if name == "browser_use":
         # 单一 browser_use 同时承载 url（navigate/tab_new）与 text（type/dialog_accept）。
+        action = arguments.get("action")
+        if action == "fill_form":
+            return {
+                "action": "fill_form",
+                **_fill_form_arguments_for_display(arguments.get("fields")),
+            }
+        if action == "select":
+            return {
+                "action": "select",
+                **_select_arguments_for_display(arguments),
+            }
         safe = {key: value for key, value in arguments.items() if key != "text"}
         if "url" in safe:
             from crew.tools.redact import redact_url_for_display
@@ -51,7 +153,16 @@ def tool_arguments_for_history(name: str, arguments: dict[str, Any] | None) -> d
     """
     if not isinstance(arguments, dict):
         return {}
-    if name in {"browser_type", "browser_dialog", "browser_navigate", "browser_tabs", "browser_use"}:
+    if name in {
+        "browser_type",
+        "browser_dialog",
+        "browser_fill_form",
+        "browser_navigate",
+        "browser_select",
+        "browser_tabs",
+        "browser_use",
+        "record_replay",
+    }:
         return tool_arguments_for_ui(name, arguments)
     return arguments
 

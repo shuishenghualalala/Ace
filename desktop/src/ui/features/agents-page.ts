@@ -1787,6 +1787,9 @@ function changeAgentsTab(next: AgentsTab): void {
   render();
 }
 
+/** 面板滚动记忆：render 全量重建后按标签页恢复 scrollTop，避免点击团队卡片/开关详情弹窗时滚动条跳回顶部。 */
+let panelScrollMemory: { tab: AgentsTab; top: number } | null = null;
+
 function renderShell(): string {
   const body = activeTab === 'runtime'
     ? renderRuntime()
@@ -1818,7 +1821,12 @@ function render(): void {
   closeAgentsSelect();
   const root = $('#agents-page-root');
   if (!root) return;
+  const livePanel = root.querySelector<HTMLElement>('.agents-panel');
+  if (livePanel && panelScrollMemory) panelScrollMemory.top = livePanel.scrollTop;
   root.innerHTML = renderShell();
+  const panel = root.querySelector<HTMLElement>('.agents-panel');
+  if (panel && panelScrollMemory?.tab === activeTab) panel.scrollTop = panelScrollMemory.top;
+  panelScrollMemory = { tab: activeTab, top: panel?.scrollTop ?? 0 };
   renderAgentsGuidePortal();
   bind();
 }

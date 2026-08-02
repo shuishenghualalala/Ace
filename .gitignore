@@ -50,10 +50,17 @@ dist/
 web/dist/
 desktop/dist/
 desktop/release/
+# Playwright-managed Chromium 已整体移除（运行时用 Electron 自带的 Chromium）。
+# 这个目录若还在本机（历史遗留约 500MB），整个忽略，绝不入 git。可安全删除。
+desktop/playwright-browsers/
 **/test-results/
 **/playwright-report/
 .vite/
 *.tsbuildinfo
+# AX 快照探针的构建产物（源码是 scripts/ax-probe.ts，用 ax-probe.build.mjs 生成）
+desktop/scripts/ax-probe.mjs
+# Playwright 契约测试的构建产物（源码是 scripts/pw-contract.ts）
+desktop/scripts/pw-contract.mjs
 .eslintcache
 .npm/
 

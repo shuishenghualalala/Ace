@@ -85,6 +85,38 @@ def test_file_write_tool_event_omits_content_from_frontend_payload():
     assert "content" not in chunk.body["detail"]
 
 
+def test_browser_fill_form_envelope_reprojects_nested_private_values():
+    private = "nested-private-form-value"
+    raw = {
+        "action": "fill_form",
+        "fields": [
+            {"type": "textbox", "ref": "p3:e1", "value": private},
+            {
+                "type": "combobox",
+                "ref": "p3:e2",
+                "value": "private-label",
+                "select_by": "label",
+            },
+            {"type": "slider", "ref": "p3:e3", "value": "88"},
+        ],
+    }
+    chunk = ResponseChunk.tool_event(
+        "req_x",
+        "browser_use",
+        "start",
+        json.dumps(raw, ensure_ascii=False),
+        args=json.dumps(raw, ensure_ascii=False),
+    )
+    args = json.loads(chunk.body["args"])
+    assert args["action"] == "fill_form"
+    assert args["field_count"] == 3
+    assert args["field_types"]["slider"] == 1
+    encoded = json.dumps(chunk.body, ensure_ascii=False)
+    assert private not in encoded
+    assert "private-label" not in encoded
+    assert '"88"' not in encoded
+
+
 @pytest.mark.asyncio
 async def test_fake_provider_stream_chat_splits_text():
     """FakeProvider.stream_chat 把预设响应拆成字符块发出。"""

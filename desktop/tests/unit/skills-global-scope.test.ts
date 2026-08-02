@@ -16,6 +16,13 @@ describe('global Skill management copy', () => {
     expect(source).toContain("confirmText: '全局卸载'");
   });
 
+  it('surfaces local skills with a local badge and symlink install note', () => {
+    expect(source).toContain("source: 'local'");
+    expect(source).toContain('skill-card-v3__badge--local');
+    expect(source).toContain('~/.agents/skills');
+    expect(source).toContain('将以软链方式安装');
+  });
+
   it('creates a stable letter avatar from Chinese, English, numeric, and empty names', () => {
     expect(skillInitial('通用 PPT 模板助手')).toBe('通');
     expect(skillInitial('browser control')).toBe('B');

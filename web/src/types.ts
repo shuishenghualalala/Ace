@@ -23,12 +23,14 @@ export interface OptionalSkill {
   description_zh?: string;
   query_examples?: string[];
   category: string;
-  source: "optional";
+  source: "optional" | "local";
 }
 
 export interface SkillStore {
   installed: Skill[];
   optional: OptionalSkill[];
+  /** ~/.agents/skills 中未安装的本地 skill（跨 agent 共享，软链安装）。 */
+  local?: OptionalSkill[];
 }
 
 export interface SubScenario {

@@ -297,13 +297,13 @@ async def test_dedicated_wiki_agent_disables_tool_search_in_execution_context():
         FakeProvider(),
         executor=executor,
         tool_filter=["terminal"],
-        disable_tool_search=True,
+        tool_disclosure_mode="direct",
     )
 
     _ = [chunk async for chunk in agent.run(Envelope.of("运行命令", session_id="wiki-scope"))]
 
     assert executor.context is not None
-    assert executor.context.disable_tool_search is True
+    assert executor.context.tool_disclosure_mode == "direct"
     assert executor.context.authorized_tool_names == frozenset({"terminal"})
 
 

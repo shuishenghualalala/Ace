@@ -174,6 +174,11 @@ def should_defer_schema(schema: dict[str, Any], config: ToolSearchConfig) -> boo
         return False
     if _private_bool(schema, "_crew_always_load") is True:
         return False
+    # 工具自身声明比全局 Toolset 默认值更具体。此前 core_toolsets=["*"]
+    # 抢先返回，导致 MCP、Web、Subagent 的 should_defer=True 名存实亡。
+    explicit = _private_bool(schema, "_crew_should_defer")
+    if explicit is not None:
+        return explicit
     if toolset in config.deferred_toolsets:
         return True
     if name in config.core_tools:
@@ -182,9 +187,6 @@ def should_defer_schema(schema: dict[str, Any], config: ToolSearchConfig) -> boo
         return False
     if _private_bool(schema, "_crew_is_mcp") is True:
         return True
-    explicit = _private_bool(schema, "_crew_should_defer")
-    if explicit is not None:
-        return explicit
     return True
 
 

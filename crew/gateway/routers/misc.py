@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from crew.agent.skills import (
     install_skill,
+    list_local_skills,
     list_optional_skills,
     list_skills,
     uninstall_skill,
@@ -92,6 +93,7 @@ def create_misc_router(crew) -> APIRouter:
         return JSONResponse({
             "installed": list_skills(),
             "optional": list_optional_skills(),
+            "local": list_local_skills(),
             "evolution": {
                 "auto_trigger": cfg.evolution_auto_trigger,
                 "auto_full_cycle": cfg.evolution_auto_full_cycle,

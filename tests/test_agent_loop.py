@@ -981,6 +981,49 @@ def test_browser_tool_label_uses_redacted_arguments():
     assert "keywords" in event.body["ui_label"]
 
 
+def test_browser_fill_form_start_event_and_trace_use_same_safe_projection(monkeypatch):
+    reg = Registry()
+    reg.register(
+        name="browser_use",
+        toolset="browser",
+        schema={"name": "browser_use", "parameters": {}},
+        handler=lambda _args: "ok",
+        ui_label_template="浏览器 {action}",
+    )
+    traced: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "crew.agent.loop.tool_runner.llm_trace",
+        lambda direction, payload: traced.append((direction, payload)),
+    )
+    runner = _runner(reg)
+    call = ToolCall(
+        "fill-form",
+        "browser_use",
+        {
+            "action": "fill_form",
+            "fields": [
+                {
+                    "type": "textbox",
+                    "ref": "p9:e1",
+                    "value": "must-never-enter-event-or-trace",
+                },
+                {"type": "slider", "ref": "p9:e2", "value": "91"},
+            ],
+        },
+    )
+
+    event = runner._start_event(call, "rid", _seq_counter())
+
+    material = repr({"event": event.body, "trace": traced})
+    assert "must-never-enter-event-or-trace" not in material
+    assert "'91'" not in material
+    assert '"field_count": 2' in event.body["args"]
+    assert traced[0][1]["arguments"]["field_types"] == {
+        "textbox": 1,
+        "slider": 1,
+    }
+
+
 def test_segment_consecutive_safe_grouping():
     calls = [
         ToolCall("r1", "file_read", {"path": "/tmp/a"}),
@@ -1033,7 +1076,7 @@ async def test_deferred_tool_rejects_direct_guess_but_accepts_direct_call_after_
         reg,
         tool_search_schemas=original,
         tool_search_config=ToolSearchConfig(enabled="on"),
-        allowed_tool_names={"cron_create"},
+        authorized_tool_names=frozenset({"cron_create"}),
         direct_tool_names=set(),
     )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -12,6 +13,8 @@ from crew.browser.electron_bridge import (
     electron_browser_bridge,
 )
 from crew.browser.types import BrowserConfig
+
+_HOST_RESPONSE_GRACE_SECONDS = 2.0
 
 
 class ElectronBrowserDriver(BrowserDriver):
@@ -27,13 +30,25 @@ class ElectronBrowserDriver(BrowserDriver):
 
     @staticmethod
     def _raise(exc: ElectronBridgeError) -> None:
-        raise BrowserDriverError(
+        code = str(getattr(exc, "code", "") or "")
+        error = BrowserDriverError(
             str(exc),
             uncertain=exc.uncertain,
             browser_stopped=exc.browser_stopped,
             stop_unconfirmed=exc.stop_unconfirmed,
-            code=getattr(exc, "code", ""),
-        ) from None
+            code=code,
+            phase=getattr(exc, "phase", ""),
+            partial=getattr(exc, "partial", False),
+            completed_count=getattr(exc, "completed_count", 0),
+        )
+        if code in {"dialog_pending", "file_chooser_pending"}:
+            error.next_state = {  # type: ignore[attr-defined]
+                "status": "blocked",
+                "recoverable": True,
+                "reason": code,
+                "retry_original_action": False,
+            }
+        raise error from None
 
     async def _request(
         self,
@@ -71,7 +86,7 @@ class ElectronBrowserDriver(BrowserDriver):
     def _provably_readonly(command: str, args: Sequence[str]) -> bool:
         command = str(command or "")
         values = [str(item) for item in args]
-        if command in {"snapshot", "get"}:
+        if command in {"snapshot", "find", "get"}:
             return True
         if command == "tab":
             return values == ["list"]
@@ -81,6 +96,8 @@ class ElectronBrowserDriver(BrowserDriver):
             return "--clear" not in values
         if command == "network":
             return bool(values and values[0] == "requests" and "--clear" not in values)
+        if command in {"network_requests", "network_request"}:
+            return True
         return False
 
     async def prepare(self) -> bool:
@@ -100,10 +117,150 @@ class ElectronBrowserDriver(BrowserDriver):
         download_dir: Path | None = None,
         mutating: bool = False,
     ) -> dict[str, Any]:
+        return await self._execute_rpc(
+            owner_session,
+            profile_dir,
+            command,
+            args,
+            target_id="",
+            timeout=timeout,
+            proxy_url=proxy_url,
+            download_dir=download_dir,
+            mutating=mutating,
+        )
+
+    async def execute_targeted(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        command: str,
+        args: Sequence[str] = (),
+        *,
+        target_id: str,
+        timeout: float | None = None,
+        proxy_url: str = "",
+        download_dir: Path | None = None,
+        mutating: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(target_id, str) or not target_id:
+            raise BrowserDriverError("目标标签页无效", code="invalid_target")
+        return await self._execute_rpc(
+            owner_session,
+            profile_dir,
+            command,
+            args,
+            target_id=target_id,
+            timeout=timeout,
+            proxy_url=proxy_url,
+            download_dir=download_dir,
+            mutating=mutating,
+        )
+
+    async def capabilities(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        *,
+        timeout: float | None = None,
+        proxy_url: str = "",
+        download_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        """Read the Electron Host's versioned browser protocol contract."""
+        del profile_dir, proxy_url, download_dir
+        operation_timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(self.config.command_timeout_seconds)
+        )
+        result = await self._request(
+            owner_session,
+            "capabilities",
+            {},
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
+            mutating=False,
+            retry_readonly=True,
+        )
+        if not isinstance(result, dict):
+            raise BrowserDriverError(
+                "桌面浏览器返回了无效能力声明",
+                code="replay_v3_capabilities_invalid",
+            )
+        return result
+
+    async def execute_transaction(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        transaction: dict[str, Any],
+        *,
+        timeout: float | None = None,
+        proxy_url: str = "",
+        download_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        """Send one replay.v3 action/effect transaction to Electron."""
+        if (
+            not isinstance(transaction, dict)
+            or any(
+                key in {"profile_dir", "proxy_url", "download_dir"}
+                for key in transaction
+            )
+        ):
+            raise BrowserDriverError(
+                "原子回放事务字段冲突",
+                code="replay_transaction_invalid",
+            )
+        operation_timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(self.config.command_timeout_seconds)
+        )
+        result = await self._request(
+            owner_session,
+            "execute_transaction",
+            {
+                "profile_dir": str(profile_dir.resolve()),
+                **transaction,
+                "proxy_url": proxy_url,
+                "download_dir": (
+                    str(download_dir.resolve()) if download_dir else ""
+                ),
+            },
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
+            mutating=True,
+            retry_readonly=False,
+        )
+        if not isinstance(result, dict):
+            raise BrowserDriverError(
+                "桌面浏览器返回了无效原子回放结果",
+                uncertain=True,
+                partial=True,
+                code="replay_transaction_response_invalid",
+            )
+        return result
+
+    async def _execute_rpc(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        command: str,
+        args: Sequence[str],
+        *,
+        target_id: str,
+        timeout: float | None,
+        proxy_url: str,
+        download_dir: Path | None,
+        mutating: bool,
+    ) -> dict[str, Any]:
         # Caller annotations are advisory only. Any command outside the strict
         # read-only whitelist is a mutation for cancellation, uncertainty and
         # Host bookkeeping purposes.
         effective_mutating = bool(mutating or not self._provably_readonly(command, args))
+        operation_timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(self.config.command_timeout_seconds)
+        )
+        deadline_ms = int(time.time() * 1000 + operation_timeout * 1000)
         result = await self._request(
             owner_session,
             "execute",
@@ -111,16 +268,177 @@ class ElectronBrowserDriver(BrowserDriver):
                 "profile_dir": str(profile_dir.resolve()),
                 "command": str(command),
                 "args": [str(item) for item in args],
+                **({"target_id": target_id} if target_id else {}),
+                "command_timeout_ms": max(1, int(operation_timeout * 1000)),
+                "command_deadline_ms": deadline_ms,
                 "proxy_url": proxy_url,
                 "download_dir": str(download_dir.resolve()) if download_dir else "",
                 "mutating": effective_mutating,
             },
-            timeout=timeout,
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
             mutating=effective_mutating,
             retry_readonly=not effective_mutating,
         )
         if not isinstance(result, dict):
             raise BrowserDriverError("桌面浏览器返回了无效结果")
+        return result
+
+    async def execute_with_dialogs(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        command: str,
+        args: Sequence[str] = (),
+        *,
+        target_id: str,
+        expected_dialogs: list[dict[str, Any]],
+        payload: dict[str, Any] | None = None,
+        timeout: float | None = None,
+        proxy_url: str = "",
+        download_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(target_id, str) or not target_id:
+            raise BrowserDriverError("目标标签页无效", code="invalid_target")
+        structured = dict(payload or {})
+        if any(
+            key
+            in {
+                "profile_dir",
+                "command",
+                "args",
+                "target_id",
+                "expected_dialogs",
+                "command_timeout_ms",
+                "command_deadline_ms",
+                "proxy_url",
+                "download_dir",
+                "mutating",
+            }
+            for key in structured
+        ):
+            raise BrowserDriverError(
+                "原子对话框回放 payload 字段冲突",
+                code="invalid_expected_dialogs",
+            )
+        operation_timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(self.config.command_timeout_seconds)
+        )
+        result = await self._request(
+            owner_session,
+            "execute",
+            {
+                "profile_dir": str(profile_dir.resolve()),
+                "command": str(command),
+                "args": [str(item) for item in args],
+                "target_id": target_id,
+                "expected_dialogs": [dict(item) for item in expected_dialogs],
+                "command_timeout_ms": max(
+                    1,
+                    int(1000 * operation_timeout),
+                ),
+                "command_deadline_ms": int(
+                    time.time() * 1000 + operation_timeout * 1000
+                ),
+                **structured,
+                "proxy_url": proxy_url,
+                "download_dir": str(download_dir.resolve()) if download_dir else "",
+                "mutating": True,
+            },
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
+            mutating=True,
+            retry_readonly=False,
+        )
+        if not isinstance(result, dict):
+            raise BrowserDriverError("桌面浏览器返回了无效原子对话框结果")
+        return result
+
+    async def fill_form(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        fields: list[dict[str, Any]],
+        *,
+        target_id: str,
+        timeout: float,
+        proxy_url: str = "",
+        download_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        # 与本文件其它动作方法一致：拒绝空/非法 targetId。宿主按不可伪造的
+        # targetId 路由动作，空串会静默落到"当前活动标签页"，可能是另一个页面
+        # ——批量填表填到错误的窗口是最难排查的一类故障。
+        if not isinstance(target_id, str) or not target_id:
+            raise BrowserDriverError("目标标签页无效", code="invalid_target")
+        operation_timeout = float(timeout)
+        result = await self._request(
+            owner_session,
+            "execute",
+            {
+                "profile_dir": str(profile_dir.resolve()),
+                "command": "fill_form",
+                "args": [],
+                # Keep private values in a typed RPC field. They are never
+                # rendered into argv, permission prompts or diagnostic text.
+                "fields": fields,
+                "target_id": str(target_id or ""),
+                "command_timeout_ms": max(1, int(operation_timeout * 1000)),
+                "command_deadline_ms": int(
+                    time.time() * 1000 + operation_timeout * 1000
+                ),
+                "proxy_url": proxy_url,
+                "download_dir": str(download_dir.resolve()) if download_dir else "",
+                "mutating": True,
+            },
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
+            mutating=True,
+            retry_readonly=False,
+        )
+        if not isinstance(result, dict):
+            raise BrowserDriverError("桌面浏览器返回了无效批量表单结果")
+        return result
+
+    async def upload_with_trigger(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        *,
+        target_id: str,
+        trigger_selector: str,
+        input_selector: str,
+        files: list[str],
+        timeout: float,
+        proxy_url: str = "",
+        download_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(target_id, str) or not target_id:
+            raise BrowserDriverError("目标标签页无效", code="invalid_target")
+        operation_timeout = float(timeout)
+        result = await self._request(
+            owner_session,
+            "execute",
+            {
+                "profile_dir": str(profile_dir.resolve()),
+                "command": "upload_with_trigger",
+                "args": [],
+                "trigger_selector": trigger_selector,
+                "input_selector": input_selector,
+                "files": list(files),
+                "target_id": target_id,
+                "command_timeout_ms": max(1, int(operation_timeout * 1000)),
+                "command_deadline_ms": int(
+                    time.time() * 1000 + operation_timeout * 1000
+                ),
+                "proxy_url": proxy_url,
+                "download_dir": str(download_dir.resolve()) if download_dir else "",
+                "mutating": True,
+            },
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
+            mutating=True,
+            retry_readonly=False,
+        )
+        if not isinstance(result, dict):
+            raise BrowserDriverError("桌面浏览器返回了无效原子上传结果")
         return result
 
     async def close(self, owner_session: str, profile_dir: Path) -> bool | None:
@@ -212,7 +530,7 @@ class ElectronBrowserDriver(BrowserDriver):
         state_token: str,
         reset: bool,
         timeout: float,
-        include_security: bool = True,
+        include_security: bool = False,
         proxy_url: str = "",
         download_dir: Path | None = None,
     ) -> str | None:
@@ -226,6 +544,7 @@ class ElectronBrowserDriver(BrowserDriver):
                 "state_token": state_token,
                 "reset": bool(reset),
                 "include_security": bool(include_security),
+                "command_timeout_ms": max(1, int(float(timeout) * 1000)),
                 "proxy_url": proxy_url,
                 "download_dir": str(download_dir.resolve()) if download_dir else "",
             },
@@ -251,6 +570,7 @@ class ElectronBrowserDriver(BrowserDriver):
             {
                 "profile_dir": str(profile_dir.resolve()),
                 "target_id": target_id,
+                "command_timeout_ms": max(1, int(float(timeout) * 1000)),
                 "proxy_url": proxy_url,
                 "download_dir": str(download_dir.resolve()) if download_dir else "",
             },
@@ -259,7 +579,7 @@ class ElectronBrowserDriver(BrowserDriver):
         )
         if not isinstance(result, list):
             raise BrowserDriverError("桌面浏览器返回了无效图片列表")
-        return [item for item in result if isinstance(item, dict)][:100]
+        return [item for item in result if isinstance(item, dict)]
 
     async def close_target(
         self,
@@ -295,6 +615,8 @@ class ElectronBrowserDriver(BrowserDriver):
         download_dir: Path | None = None,
         expected_epoch: str = "",
     ) -> dict[str, Any] | None:
+        operation_timeout = float(timeout)
+        deadline_ms = int(time.time() * 1000 + operation_timeout * 1000)
         result = await self._request(
             owner_session,
             "coordinate_click",
@@ -304,9 +626,12 @@ class ElectronBrowserDriver(BrowserDriver):
                 "x": int(x),
                 "y": int(y),
                 "proxy_url": proxy_url,
+                "download_dir": str(download_dir.resolve()) if download_dir else "",
                 "expected_epoch": expected_epoch,
+                "command_timeout_ms": max(1, int(operation_timeout * 1000)),
+                "command_deadline_ms": deadline_ms,
             },
-            timeout=timeout,
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
             mutating=True,
         )
         if not isinstance(result, dict):
@@ -326,6 +651,8 @@ class ElectronBrowserDriver(BrowserDriver):
         proxy_url: str = "",
         download_dir: Path | None = None,
     ) -> dict[str, Any]:
+        operation_timeout = float(timeout)
+        deadline_ms = int(time.time() * 1000 + operation_timeout * 1000)
         result = await self._request(
             owner_session,
             "download",
@@ -335,13 +662,13 @@ class ElectronBrowserDriver(BrowserDriver):
                 "ref": native_ref,
                 "target": str(target.resolve()),
                 "max_bytes": int(max_bytes),
-                # The Host expires its grant before this bridge-side deadline,
-                # leaving time for the error response to cross the WebSocket.
-                "timeout_ms": max(1000, int(timeout * 1000) - 1000),
+                "timeout_ms": max(1, int(operation_timeout * 1000)),
+                "command_timeout_ms": max(1, int(operation_timeout * 1000)),
+                "command_deadline_ms": deadline_ms,
                 "proxy_url": proxy_url,
                 "download_dir": str(download_dir.resolve()) if download_dir else "",
             },
-            timeout=timeout,
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
             mutating=True,
         )
         if not isinstance(result, dict):
@@ -365,6 +692,36 @@ class ElectronBrowserDriver(BrowserDriver):
                 "mode": mode,
             },
             timeout=self.config.command_timeout_seconds,
+            mutating=True,
+        )
+
+    async def set_recording(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        *,
+        target_id: str,
+        action: str,
+        recording_id: str = "",
+    ) -> dict:
+        """录制开关。action ∈ start | pause | resume | stop。"""
+        operation_timeout = float(self.config.command_timeout_seconds)
+        deadline_ms = int(time.time() * 1000 + operation_timeout * 1000)
+        return await self._request(
+            owner_session,
+            "set_recording",
+            {
+                "profile_dir": str(profile_dir.resolve()),
+                "target_id": target_id,
+                "action": action,
+                "recording_id": recording_id,
+                "command_timeout_ms": max(
+                    1,
+                    int(operation_timeout * 1000),
+                ),
+                "command_deadline_ms": deadline_ms,
+            },
+            timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
             mutating=True,
         )
 

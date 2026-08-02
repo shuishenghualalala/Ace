@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -44,11 +47,32 @@ SESSION = "session-plugin"
 _OLD_BROWSER_TOOLS = {
     "browser_navigate",
     "browser_snapshot",
+    "browser_find",
     "browser_click",
+    "browser_drag",
+    "browser_mouse_move_xy",
+    "browser_mouse_down",
+    "browser_mouse_up",
+    "browser_mouse_wheel",
+    "browser_mouse_click_xy",
+    "browser_mouse_drag_xy",
+    "browser_resize",
+    "browser_drop",
+    # 回放入口：把技能里存盘的稳定选择器解析成当前页面的 ref
+    "browser_locate",
     "browser_type",
+    "browser_fill_form",
+    "browser_select",
+    "browser_check",
+    "browser_hover",
     "browser_scroll",
     "browser_back",
+    "browser_forward",
+    "browser_reload",
     "browser_press",
+    "browser_keydown",
+    "browser_keyup",
+    "browser_wait",
     "browser_get_images",
     "browser_vision",
     "browser_console",
@@ -110,7 +134,14 @@ def test_build_app_exposes_only_browser_use(tmp_path):
     schemas = crew.registry.list_schemas(enabled_toolsets=["*"])
     browser_schemas = [s for s in schemas if s.get("_crew_toolset") == "browser"]
     browser_names = [(s.get("function") or {}).get("name") for s in browser_schemas]
-    assert browser_names == ["browser_use"]
+    # 两阶段发布：record_compile 只生成 owner-private immutable draft；
+    # record_install 必须一次性审批并在安装前复核 trace/draft 摘要。
+    assert sorted(browser_names) == [
+        "browser_use",
+        "record_compile",
+        "record_install",
+        "record_replay",
+    ]
     # browser_use 直接进入主 schema（不 deferred）；deferred catalog 中无 browser_*
     assert browser_schemas[0].get("_crew_should_defer") is False
     deferred_names = {
@@ -131,6 +162,34 @@ def test_plugin_loaded_and_skill_root_registered(tmp_path):
     assert loaded is not None and loaded.enabled
     assert any("browser" in str(root) for root in crew.plugins.plugin_skill_roots())
     assert "/browser-use" in scan_skills()
+
+
+def test_record_publish_tools_reuse_browser_hot_disable_gate(tmp_path):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=False)
+    crew.plugin_prefs.set_enabled(OWNER, "browser", False)
+    tokens = [
+        (current_owner_account_id, current_owner_account_id.set(OWNER)),
+        (current_session_id, current_session_id.set(SESSION)),
+        (current_user_type, current_user_type.set("internal")),
+        (current_tool_call_id, current_tool_call_id.set("publish-call")),
+    ]
+    try:
+        compile_decision = crew.registry.get("record_compile").permission_resolver({})
+        install_decision = crew.registry.get("record_install").permission_resolver({})
+        replay_decision = crew.registry.get("record_replay").permission_resolver({})
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+
+    assert compile_decision.behavior == "deny"
+    assert install_decision.behavior == "deny"
+    assert replay_decision.behavior == "deny"
+    assert "BROWSER_CAPABILITY_DISABLED" in compile_decision.reason
+    assert "BROWSER_CAPABILITY_DISABLED" in install_decision.reason
+    assert "BROWSER_CAPABILITY_DISABLED" in replay_decision.reason
+    assert compile_decision.allow_always is False
+    assert install_decision.allow_always is False
 
 
 # ---- 四态一致：system && role && user ----
@@ -180,20 +239,59 @@ def test_role_layer_overrides_user_optin(tmp_path):
         {},
         {"action": "nope"},
         {"action": "navigate"},
+        {"action": "find"},
+        {"action": "find", "text": "x", "regex": "x"},
+        {"action": "find", "text": ""},
+        {"action": "find", "regex": ""},
+        {"action": "find", "text": 1},
         {"action": "type", "ref": "p1:e1"},
         {"action": "type", "text": "hello"},
+        {"action": "drag", "start_ref": "p1:e1"},
+        {"action": "drag", "end_ref": "p1:e2"},
+        {"action": "mouse_move", "x": 1},
+        {"action": "mouse_move", "x": True, "y": 2},
+        {"action": "mouse_move", "x": 10**400, "y": 2},
+        {"action": "mouse_down", "button": "primary"},
+        {"action": "mouse_wheel", "delta_x": float("inf")},
+        {"action": "mouse_click", "x": 1},
+        {"action": "mouse_click", "x": 1, "y": 2, "click_count": 0},
+        {"action": "mouse_click", "x": 1, "y": 2, "delay_ms": float("nan")},
+        {"action": "mouse_drag", "start_x": 1, "start_y": 2, "end_x": 3},
+        {"action": "resize", "width": 1280},
+        {"action": "resize", "width": 1280, "height": False},
+        {"action": "drop", "ref": "p1:e1"},
+        {"action": "drop", "ref": "p1:e1", "paths": []},
+        {"action": "drop", "ref": "p1:e1", "data": None},
+        {"action": "drop", "ref": "p1:e1", "data": {"text/plain": 1}},
+        {"action": "select", "ref": "p1:e1"},
+        {"action": "select", "values": ["one"]},
+        {"action": "select", "ref": "p1:e1", "values": [1]},
+        {"action": "check", "ref": "p1:e1"},
+        {"action": "check", "checked": True},
+        {"action": "check", "ref": "p1:e1", "checked": "true"},
+        {"action": "hover"},
         {"action": "scroll"},
         {"action": "press"},
+        {"action": "keydown"},
+        {"action": "keyup"},
+        {"action": "wait"},
         {"action": "tab_select"},
-        {"action": "tab_close"},
-        {"action": "upload", "ref": "p1:e1"},
-        {"action": "upload", "paths": ["a.txt"]},
-        {"action": "upload", "ref": "p1:e1", "paths": []},
+        {"action": "upload", "paths": [""]},
         {"action": "download"},
         {"action": "vision"},
+        {"action": "console", "level": "trace"},
+        {"action": "console", "all": 1},
+        {"action": "console", "clear": "yes"},
+        {"action": "console", "filename": 7},
+        {"action": "console", "clear": True, "all": True},
+        {"action": "console", "kind": "network", "filename": "network.log"},
         {"action": "click"},
         {"action": "click", "screenshot_id": "s1"},
         {"action": "click", "screenshot_id": "s1", "x": 1},
+        # type 带 submit 但 text 为空/纯空白：清空字段后回车提交不是任何合法意图，
+        # 弱模型漏传 text 时最容易发。text="" 单独仍是合法的（清空字段）。
+        {"action": "type", "ref": "p1:e1", "text": "", "submit": True},
+        {"action": "type", "ref": "p1:e1", "text": "   ", "submit": True},
     ],
 )
 def test_validate_args_rejects_invalid_combinations(args):
@@ -203,14 +301,100 @@ def test_validate_args_rejects_invalid_combinations(args):
 @pytest.mark.parametrize(
     "args",
     [
+        # text="" 且不提交 —— 清空字段，合法
+        {"action": "type", "ref": "p1:e1", "text": "", "submit": False},
+        # 有内容 + 提交 —— 正常的搜索
+        {"action": "type", "ref": "p1:e1", "text": "工单", "submit": True},
+    ],
+)
+def test_type_empty_text_is_only_rejected_together_with_submit(args):
+    assert validate_args(args) is None
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
         {"action": "navigate", "url": "https://example.com"},
         {"action": "snapshot"},
+        {"action": "find", "text": "Search"},
+        {"action": "find", "regex": "/error/gi"},
+        {"action": "locate", "selector": "#search"},
         {"action": "click", "ref": "p1:e1"},
+        {
+            "action": "click",
+            "ref": "p1:e1",
+            "button": "right",
+            "click_count": 2,
+            "modifiers": ["ControlOrMeta", "Shift"],
+            "delay_ms": 25,
+        },
         {"action": "click", "screenshot_id": "s1", "x": 1, "y": 2},
+        {"action": "drag", "start_ref": "p1:e1", "end_ref": "p1:e2"},
+        {"action": "mouse_move", "x": -1.25, "y": 2.5},
+        {"action": "mouse_down"},
+        {"action": "mouse_down", "button": "right"},
+        {"action": "mouse_up", "button": "middle"},
+        {"action": "mouse_wheel"},
+        {"action": "mouse_wheel", "delta_x": -3.5, "delta_y": 4.25},
+        {
+            "action": "mouse_click",
+            "x": -1.5,
+            "y": 2.25,
+            "button": "right",
+            "click_count": 2,
+            "delay_ms": 0.5,
+        },
+        {
+            "action": "mouse_drag",
+            "start_x": -1.5,
+            "start_y": 2.25,
+            "end_x": 300.75,
+            "end_y": -4,
+        },
+        {"action": "resize", "width": 1280.5, "height": 720},
+        {"action": "drop", "ref": "p1:e1", "paths": ["a.txt"]},
+        {"action": "drop", "ref": "p1:e1", "data": {}},
+        {
+            "action": "drop",
+            "ref": "p1:e1",
+            "paths": [],
+            "data": {"text/plain": "hello"},
+        },
         {"action": "type", "ref": "p1:e1", "text": "hello"},
+        {
+            "action": "type",
+            "ref": "p1:e1",
+            "text": "hello",
+            "slowly": True,
+            "submit": True,
+        },
         {"action": "type", "ref": "p1:e1", "text": ""},
+        {"action": "select", "ref": "p1:e1", "values": ["one", "two"]},
+        {"action": "select", "ref": "p1:e1", "values": []},
+        {"action": "select", "ref": "p1:e1", "values": [""]},
+        {
+            "action": "fill_form",
+            "fields": [
+                {
+                    "type": "combobox",
+                    "ref": "p1:e1",
+                    "value": "",
+                    "select_by": "value",
+                }
+            ],
+        },
+        {"action": "check", "ref": "p1:e1", "checked": True},
+        {"action": "hover", "ref": "p1:e1"},
         {"action": "scroll", "direction": "down"},
-        {"action": "press", "ref": "p1:e1", "key": "Tab"},
+        {"action": "forward"},
+        {"action": "reload"},
+        {"action": "press", "key": "Enter"},
+        {"action": "press", "ref": "p1:e1", "key": "ControlOrMeta+A"},
+        {"action": "keydown", "key": "Shift"},
+        {"action": "keyup", "key": "Shift"},
+        {"action": "wait", "time_seconds": 0.25},
+        {"action": "wait", "text": "Ready"},
+        {"action": "wait", "text_gone": "Loading"},
         {"action": "screenshot"},
         {"action": "screenshot", "filename": "home.png"},
         {"action": "screenshot", "settled": False},
@@ -219,9 +403,21 @@ def test_validate_args_rejects_invalid_combinations(args):
         {"action": "tab_select", "tab_id": "t1"},
         {"action": "tab_close", "tab_id": "t1"},
         {"action": "upload", "ref": "p1:e1", "paths": ["a.txt"]},
+        {"action": "upload", "paths": ["a.txt"]},
+        {"action": "upload", "ref": "p1:e1"},
+        {"action": "upload"},
+        {"action": "upload", "ref": "p1:e1", "paths": []},
+        {"action": "upload", "paths": []},
         {"action": "download", "ref": "p1:e1"},
         {"action": "vision", "question": "图里有什么"},
         {"action": "console"},
+        {
+            "action": "console",
+            "level": "debug",
+            "all": True,
+            "filename": "browser.log",
+        },
+        {"action": "console", "clear": True},
         {"action": "dialog_status"},
         {"action": "dialog_accept"},
         {"action": "dialog_dismiss"},
@@ -235,14 +431,160 @@ def test_validate_args_accepts_every_supported_action(args):
 
 def test_public_schema_exposes_action_specific_required_fields():
     validator = Draft202012Validator(BROWSER_USE_SCHEMA["parameters"])
+    assert not list(validator.iter_errors({"action": "find", "text": "Search"}))
+    assert not list(validator.iter_errors({"action": "find", "regex": "/error/i"}))
+    assert list(validator.iter_errors({"action": "find"}))
+    assert list(
+        validator.iter_errors(
+            {"action": "find", "text": "Search", "regex": "/Search/"}
+        )
+    )
     assert not list(validator.iter_errors({"action": "type", "ref": "p1:e1", "text": "q"}))
     assert list(validator.iter_errors({"action": "type", "ref": "p1:e1"}))
-    assert list(validator.iter_errors({"action": "press", "key": "Enter"}))
+    assert not list(validator.iter_errors({"action": "press", "key": "Enter"}))
+    assert list(validator.iter_errors({"action": "press"}))
     assert not list(
         validator.iter_errors({"action": "press", "ref": "p1:e1", "key": "Enter"})
     )
+    assert not list(
+        validator.iter_errors(
+            {
+                "action": "click",
+                "ref": "p1:e1",
+                "button": "middle",
+                "click_count": 3,
+                "modifiers": ["Alt"],
+                "delay_ms": 10,
+            }
+        )
+    )
+    assert not list(
+        validator.iter_errors(
+            {"action": "drag", "start_ref": "p1:e1", "end_ref": "p1:e2"}
+        )
+    )
+    assert not list(
+        validator.iter_errors(
+            {
+                "action": "mouse_click",
+                "x": -1.25,
+                "y": 2.5,
+                "delay_ms": 0.5,
+            }
+        )
+    )
+    assert not list(
+        validator.iter_errors(
+            {
+                "action": "mouse_drag",
+                "start_x": 1,
+                "start_y": 2,
+                "end_x": 3,
+                "end_y": 4,
+            }
+        )
+    )
+    assert not list(
+        validator.iter_errors(
+            {"action": "drop", "ref": "p1:e1", "data": {}}
+        )
+    )
+    assert list(
+        validator.iter_errors(
+            {"action": "drop", "ref": "p1:e1"}
+        )
+    )
+    assert list(
+        validator.iter_errors(
+            {"action": "mouse_click", "x": 1, "y": 2, "click_count": 1.5}
+        )
+    )
+    # Legacy screenshot coordinates remain integer/non-negative even though
+    # the direct Playwright mouse surface accepts arbitrary finite numbers.
+    assert list(
+        validator.iter_errors(
+            {"action": "click", "screenshot_id": "s1", "x": 1.5, "y": 2}
+        )
+    )
+    assert not list(validator.iter_errors({"action": "wait", "text": "Ready"}))
+    assert list(validator.iter_errors({"action": "wait"}))
+    assert not list(
+        validator.iter_errors({"action": "locate", "selector": "#search"})
+    )
+    assert list(validator.iter_errors({"action": "locate"}))
     assert not list(validator.iter_errors({"action": "screenshot", "settled": False}))
     assert list(validator.iter_errors({"action": "screenshot", "settled": "false"}))
+    assert not list(
+        validator.iter_errors(
+            {
+                "action": "console",
+                "level": "warning",
+                "all": True,
+                "filename": "console.log",
+            }
+        )
+    )
+    assert list(
+        validator.iter_errors({"action": "console", "level": "trace"})
+    )
+    assert list(
+        validator.iter_errors({"action": "console", "all": "true"})
+    )
+    assert not list(
+        validator.iter_errors(
+            {"action": "select", "ref": "p1:e1", "values": ["one", "two"]}
+        )
+    )
+    assert not list(
+        validator.iter_errors(
+            {"action": "select", "ref": "p1:e1", "values": [""]}
+        )
+    )
+    assert not list(
+        validator.iter_errors(
+            {
+                "action": "fill_form",
+                "fields": [
+                    {
+                        "type": "combobox",
+                        "ref": "p1:e1",
+                        "value": "",
+                        "select_by": "value",
+                    }
+                ],
+            }
+        )
+    )
+    assert not list(
+        validator.iter_errors({"action": "select", "ref": "p1:e1", "values": []})
+    )
+    assert not list(
+        validator.iter_errors(
+            {
+                "action": "select",
+                "ref": "p1:e1",
+                "values": ["x" * 4097] * 33,
+            }
+        )
+    )
+    assert list(
+        validator.iter_errors(
+            {"action": "check", "ref": "p1:e1", "checked": "true"}
+        )
+    )
+    assert not list(
+        validator.iter_errors(
+            {"action": "upload", "ref": "p1:e1", "paths": []}
+        )
+    )
+    assert not list(
+        validator.iter_errors({"action": "upload", "paths": ["report.pdf"]})
+    )
+    assert not list(validator.iter_errors({"action": "upload", "paths": []}))
+    assert not list(
+        validator.iter_errors({"action": "upload", "ref": "p1:e1"})
+    )
+    assert not list(validator.iter_errors({"action": "upload"}))
 
 
 def test_click_schema_keeps_ref_and_coordinate_modes_mutually_exclusive():
@@ -263,7 +605,13 @@ def test_click_schema_keeps_ref_and_coordinate_modes_mutually_exclusive():
 
 def test_action_mapping_covers_all_logical_tools():
     logical_names = {logical for logical, _sub in _ACTION_LOGICAL.values()}
-    assert logical_names == _OLD_BROWSER_TOOLS | {"browser_screenshot"}
+    assert logical_names == _OLD_BROWSER_TOOLS | {
+        "browser_evaluate",
+        "browser_network_request",
+        "browser_network_requests",
+        "browser_run_code_unsafe",
+        "browser_screenshot",
+    }
     # tabs/dialog/takeover 三个逻辑工具按子 action 展开
     assert _logical_call({"action": "tab_new", "url": "https://x"}) == (
         "browser_tabs",
@@ -290,6 +638,59 @@ async def test_resolver_forwards_to_manager_when_enabled(plugin_tool, ctx_vars):
     assert decision is None or decision.behavior == "allow"
 
 
+async def test_console_forwards_playwright_filters_and_returns_complete_text(
+    plugin_tool, ctx_vars
+):
+    tool, manager, driver, _prefs = plugin_tool
+    await manager.navigate(OWNER, SESSION, "https://example.com")
+    exact = (
+        "Total messages: 2 (Errors: 1, Warnings: 1)\n\n"
+        "[WARNING] 完整🚀 @ https://example.com/app.js:7\n"
+        + ("x" * 40_000)
+    )
+    original_execute = driver.execute
+
+    async def console_execute(
+        owner_session,
+        profile_dir,
+        command,
+        values=(),
+        **kwargs,
+    ):
+        if command == "console":
+            driver.calls.append(
+                (command, tuple(str(value) for value in values))
+            )
+            return {
+                "success": True,
+                "data": {
+                    "text": "" if tuple(values) == ("--clear",) else exact,
+                },
+            }
+        return await original_execute(
+            owner_session,
+            profile_dir,
+            command,
+            values,
+            **kwargs,
+        )
+
+    driver.execute = console_execute
+    output = await tool.handler(
+        {"action": "console", "level": "warning", "all": True}
+    )
+    # 内容完整（不截断、UTF-8 不变形），但落在不可信包裹里：
+    # 控制台文本是页面自己写的，与快照同等不可信。
+    assert output == (
+        "<untrusted_browser_console>\n" + exact + "\n</untrusted_browser_console>"
+    )
+    assert ("console", ("--level", "warning", "--all")) in driver.calls
+
+    cleared = await tool.handler({"action": "console", "clear": True})
+    assert cleared == ""
+    assert ("console", ("--clear",)) in driver.calls
+
+
 async def test_mutation_result_declares_that_snapshot_is_already_fresh(plugin_tool, ctx_vars):
     tool, _manager, driver, _prefs = plugin_tool
     result = await tool.handler({"action": "navigate", "url": "https://example.com"})
@@ -298,6 +699,448 @@ async def test_mutation_result_declares_that_snapshot_is_already_fresh(plugin_to
     assert "fresh_snapshot: true" in result
     assert "不要立刻调用 snapshot" in result
     assert sum(command == "snapshot" for command, _args in driver.calls) == 1
+
+
+async def test_find_dispatches_once_and_returned_ref_is_immediately_executable(
+    plugin_tool, ctx_vars
+):
+    tool, _manager, driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+    snapshot_calls = sum(command == "snapshot" for command, _args in driver.calls)
+
+    found = await tool.handler({"action": "find", "text": "search"})
+
+    assert "Found 1 match" in found
+    assert "p2:e18" in found
+    assert ("find", ("--text", "search")) in driver.calls
+    assert sum(command == "snapshot" for command, _args in driver.calls) == snapshot_calls
+
+    clicked = await tool.handler({"action": "click", "ref": "p2:e18"})
+    assert "fresh_snapshot: true" in clicked
+    assert ("click", ("@e18",)) in driver.calls
+
+
+async def test_find_invalid_regex_preserves_host_error_code(plugin_tool, ctx_vars):
+    tool, _manager, _driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+
+    with pytest.raises(BrowserDriverError) as caught:
+        await tool.handler({"action": "find", "regex": "["})
+
+    assert caught.value.code == "invalid_find_query"
+    assert "Invalid regular expression" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("action", "kind", "args", "expected_command", "approval_required"),
+    [
+        (
+            "select",
+            "select",
+            {"action": "select", "ref": "p1:e18", "values": ["one", "two"]},
+            ("select", ("@e18", "one", "two")),
+            False,
+        ),
+        (
+            "select",
+            "select",
+            {"action": "select", "ref": "p1:e18", "values": []},
+            ("select", ("@e18",)),
+            False,
+        ),
+        (
+            "check",
+            "toggle",
+            {"action": "check", "ref": "p1:e18", "checked": False},
+            ("check", ("@e18", "false")),
+            False,
+        ),
+        (
+            "hover",
+            "input",
+            {"action": "hover", "ref": "p1:e18"},
+            ("hover", ("@e18",)),
+            False,
+        ),
+    ],
+)
+async def test_playwright_form_actions_dispatch_and_return_fresh_snapshot(
+    plugin_tool,
+    ctx_vars,
+    action,
+    kind,
+    args,
+    expected_command,
+    approval_required,
+):
+    tool, manager, driver, _prefs = plugin_tool
+    token = current_tool_call_id.set(f"plugin-{action}")
+    try:
+        await manager.navigate(OWNER, SESSION, "https://example.com")
+
+        decision = tool.permission_resolver(args)
+        if approval_required:
+            assert decision is not None and decision.behavior == "ask"
+            assert tool.permission_approver(decision.approval_token, args)
+        else:
+            assert decision is None
+
+        result = await tool.handler(args)
+
+        assert result.startswith("<browser_action_result>")
+        assert f"action: {action}" in result
+        assert "fresh_snapshot: true" in result
+        assert expected_command in driver.calls
+    finally:
+        current_tool_call_id.reset(token)
+
+
+async def test_click_options_dispatch_real_locator_click_without_href_shortcut(
+    plugin_tool, ctx_vars
+):
+    tool, manager, driver, _prefs = plugin_tool
+    await manager.navigate(OWNER, SESSION, "https://example.com")
+    # Even a known link destination must not turn click into an `open`: doing
+    # so loses click handlers, right-click, modifiers and click-count semantics.
+    open_calls = sum(command == "open" for command, _args in driver.calls)
+    args = {
+        "action": "click",
+        "ref": "p1:e18",
+        "button": "right",
+        "click_count": 2,
+        "modifiers": ["ControlOrMeta", "Shift"],
+        "delay_ms": 40,
+    }
+
+    assert tool.permission_resolver(args) is None
+    result = await tool.handler(args)
+
+    assert "fresh_snapshot: true" in result
+    assert (
+        "click",
+        (
+            "@e18",
+            "--button",
+            "right",
+            "--click-count",
+            "2",
+            "--delay-ms",
+            "40",
+            "--modifier",
+            "ControlOrMeta",
+            "--modifier",
+            "Shift",
+        ),
+    ) in driver.calls
+    assert sum(command == "open" for command, _args in driver.calls) == open_calls
+
+
+async def test_plugin_click_keeps_automatic_download_in_public_session_state(
+    plugin_tool,
+    ctx_vars,
+):
+    tool, manager, driver, _prefs = plugin_tool
+    await manager.navigate(OWNER, SESSION, "https://example.com")
+    session = manager._owners[OWNER].sessions[SESSION]
+    tab = session.tabs[session.active_label]
+    original_execute = driver.execute
+
+    async def click_download(owner_session, profile_dir, command, args=(), **kwargs):
+        result = await original_execute(
+            owner_session,
+            profile_dir,
+            command,
+            args,
+            **kwargs,
+        )
+        if command != "click":
+            return result
+        root = Path(kwargs["download_dir"])
+        result["data"]["downloads"] = [
+            {
+                "downloadId": "plugin-download",
+                "targetId": tab.target_id,
+                "sessionHash": tab.label[1:].split("-", 1)[0],
+                "path": str(root / "export.xlsx"),
+                "name": "export.xlsx",
+                "suggestedFilename": "export.xlsx",
+                "url": "https://example.com/export.xlsx",
+                "state": "completed",
+                "receivedBytes": 123,
+                "totalBytes": 123,
+                "createdAt": 1_700_000_000_000,
+                "completedAt": 1_700_000_000_100,
+                "error": "",
+            }
+        ]
+        return result
+
+    driver.execute = click_download
+    args = {"action": "click", "ref": "p1:e18"}
+    assert tool.permission_resolver(args) is None
+
+    result = await tool.handler(args)
+    public_state = manager.state(OWNER, SESSION)
+
+    assert "fresh_snapshot: true" in result
+    assert public_state["downloads"] == [
+        {
+            "id": "plugin-download",
+            "name": "export.xlsx",
+            "suggested_filename": "export.xlsx",
+            "path": str(Path(public_state["downloads"][0]["path"])),
+            "url": "https://example.com/export.xlsx",
+            "state": "completed",
+            "received_bytes": 123,
+            "total_bytes": 123,
+            "created_at": 1_700_000_000.0,
+            "completed_at": 1_700_000_000.1,
+            "error": "",
+            "source": "automatic",
+        }
+    ]
+    assert public_state["downloads"][0]["path"].endswith(
+        "/downloads/browser/export.xlsx"
+    )
+
+
+async def test_drag_and_slow_type_dispatch_typed_playwright_commands(
+    plugin_tool, ctx_vars
+):
+    tool, manager, driver, _prefs = plugin_tool
+    await manager.navigate(OWNER, SESSION, "https://example.com")
+
+    dragged = await tool.handler(
+        {"action": "drag", "start_ref": "p1:e17", "end_ref": "p1:e18"}
+    )
+    assert "fresh_snapshot: true" in dragged
+    assert ("drag", ("@e17", "@e18")) in driver.calls
+
+    typed = await tool.handler(
+        {
+            "action": "type",
+            "ref": "p2:e18",
+            "text": "abc",
+            "slowly": True,
+            "submit": True,
+        }
+    )
+    assert "fresh_snapshot: true" in typed
+    assert ("fill", ("@e18", "abc", "--slowly", "--submit")) in driver.calls
+
+
+async def test_keyboard_navigation_and_wait_actions_return_post_snapshots(
+    plugin_tool, ctx_vars
+):
+    tool, manager, driver, _prefs = plugin_tool
+    await manager.navigate(OWNER, SESSION, "https://example.com")
+
+    for args, expected in (
+        ({"action": "press", "key": "Enter"}, ("press", ("Enter",))),
+        ({"action": "keydown", "key": "Shift"}, ("keydown", ("Shift",))),
+        ({"action": "keyup", "key": "Shift"}, ("keyup", ("Shift",))),
+        ({"action": "forward"}, ("forward", ())),
+        ({"action": "reload"}, ("reload", ())),
+        (
+            {
+                "action": "wait",
+                "time_seconds": 0.25,
+                "text": "Ready",
+                "text_gone": "Loading",
+            },
+            (
+                "wait",
+                (
+                    "--time-seconds",
+                    "0.25",
+                    "--text",
+                    "Ready",
+                    "--text-gone",
+                    "Loading",
+                ),
+            ),
+        ),
+    ):
+        result = await tool.handler(args)
+        assert "fresh_snapshot: true" in result
+        assert expected in driver.calls
+
+
+async def test_official_mouse_resize_and_drop_actions_dispatch_exact_wire(
+    plugin_tool, ctx_vars, tmp_path
+):
+    tool, _manager, driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+
+    lean_actions = (
+        (
+            {"action": "mouse_move", "x": -1.25, "y": 2.5},
+            ("mouse", ("move", "-1.25", "2.5")),
+        ),
+        (
+            {"action": "mouse_down", "button": "right"},
+            ("mouse", ("down", "right")),
+        ),
+        (
+            {"action": "mouse_up", "button": "right"},
+            ("mouse", ("up", "right")),
+        ),
+        (
+            {"action": "mouse_wheel", "delta_x": -3.5, "delta_y": 4},
+            ("mouse", ("wheel", "-3.5", "4")),
+        ),
+        (
+            {"action": "resize", "width": 1280.5, "height": 720},
+            ("resize", ("1280.5", "720")),
+        ),
+    )
+    for args, expected_wire in lean_actions:
+        result = await tool.handler(args)
+        assert "fresh_snapshot" not in result
+        assert expected_wire in driver.calls
+
+    clicked = await tool.handler(
+        {
+            "action": "mouse_click",
+            "x": -10.5,
+            "y": 22.25,
+            "button": "middle",
+            "click_count": 2,
+            "delay_ms": 0.5,
+        }
+    )
+    assert "fresh_snapshot: true" in clicked
+    assert (
+        "mouse",
+        ("click", "-10.5", "22.25", "middle", "2", "0.5"),
+    ) in driver.calls
+
+    dragged = await tool.handler(
+        {
+            "action": "mouse_drag",
+            "start_x": 1,
+            "start_y": 2.5,
+            "end_x": 300.75,
+            "end_y": -4,
+        }
+    )
+    assert "fresh_snapshot: true" in dragged
+    assert (
+        "mouse",
+        ("drag", "1", "2.5", "300.75", "-4"),
+    ) in driver.calls
+
+    upload = tmp_path / "--payload.txt"
+    upload.write_text("payload", encoding="utf-8")
+    latest_ref = re.findall(r"\[ref=(p\d+:e18)\]", dragged)[-1]
+    dropped = await tool.handler(
+        {
+            "action": "drop",
+            "ref": latest_ref,
+            "paths": [str(upload)],
+            "data": {
+                "text/plain": "--path",
+                "text/uri-list": "https://example.com/item",
+            },
+        }
+    )
+    assert "fresh_snapshot: true" in dropped
+    assert (
+        "drop",
+        (
+            "@e18",
+            "--path",
+            str(upload),
+            "--data",
+            "text/plain",
+            "--path",
+            "--data",
+            "text/uri-list",
+            "https://example.com/item",
+        ),
+    ) in driver.calls
+
+    latest_ref = re.findall(r"\[ref=(p\d+:e18)\]", dropped)[-1]
+    await tool.handler({"action": "drop", "ref": latest_ref, "data": {}})
+    assert ("drop", ("@e18", "--empty-data")) in driver.calls
+
+
+def test_new_action_arguments_are_typed_without_product_caps():
+    invalid = (
+        {"action": "click", "ref": "p1:e1", "modifiers": ["Shift", "Shift"]},
+        {
+            "action": "click",
+            "screenshot_id": "s1",
+            "x": 1,
+            "y": 2,
+            "button": "right",
+        },
+        {"action": "type", "ref": "p1:e1", "text": "x", "slowly": "yes"},
+        {"action": "keydown", "key": "Shift", "ref": "p1:e1"},
+    )
+    for args in invalid:
+        assert validate_args(args) is not None, args
+
+    valid_unbounded = (
+        {"action": "click", "ref": "p1:e1", "click_count": 4},
+        {"action": "click", "ref": "p1:e1", "delay_ms": 5001},
+        {"action": "wait", "time_seconds": 31},
+        {"action": "wait", "text": "x" * 4097},
+        {"action": "type", "ref": "p1:e1", "text": "x" * 100_001},
+        {"action": "select", "ref": "p1:e1", "values": ["x" * 4097] * 33},
+        {"action": "upload", "paths": ["a.txt"] * 257},
+        {"action": "mouse_move", "x": -1e300, "y": 1e300},
+        {
+            "action": "mouse_click",
+            "x": 1e300,
+            "y": -1e300,
+            "click_count": 10_000,
+            "delay_ms": 1e12,
+        },
+        {
+            "action": "drop",
+            "ref": "p1:e1",
+            "data": {f"application/x-{index}": "x" * 10_000 for index in range(300)},
+        },
+    )
+    for args in valid_unbounded:
+        assert validate_args(args) is None, args
+
+
+async def test_plugin_preserves_uncertain_phase_and_partial_for_select(
+    plugin_tool, ctx_vars
+):
+    tool, manager, driver, _prefs = plugin_tool
+    token = current_tool_call_id.set("plugin-select-uncertain")
+    try:
+        await manager.navigate(OWNER, SESSION, "https://example.com")
+        args = {"action": "select", "ref": "p1:e18", "values": ["one"]}
+        decision = tool.permission_resolver(args)
+        assert decision is None
+        original_execute = driver.execute
+
+        async def uncertain_select(owner_session, profile_dir, command, values=(), **kwargs):
+            if command == "select":
+                raise BrowserDriverError(
+                    "mutation acknowledgement lost",
+                    uncertain=True,
+                    phase="after_dispatch",
+                    partial=True,
+                )
+            return await original_execute(
+                owner_session, profile_dir, command, values, **kwargs
+            )
+
+        driver.execute = uncertain_select
+        with pytest.raises(BrowserDriverError) as captured:
+            await tool.handler(args)
+
+        assert captured.value.uncertain is True
+        assert captured.value.phase == "after_dispatch"
+        assert captured.value.partial is True
+        assert "status: uncertain" in str(captured.value)
+    finally:
+        current_tool_call_id.reset(token)
 
 
 def test_action_result_does_not_fake_success_on_dialog_pending():
@@ -381,6 +1224,89 @@ async def test_stale_ref_failure_returns_fresh_observation_without_replaying(
     assert "page_generation: p" in message
     # 关键边界：click 只被尝试过一次，绝不自动重放（重放一个可能有副作用的动作是另一回事）。
     assert click_attempts == 1
+
+
+async def test_failure_carries_classification_evidence(plugin_tool, ctx_vars):
+    """失败要带判断依据，不能只给一句错误信息。
+
+    只给错误信息，模型能做的只有盲目重试或放弃。它真正需要知道的是：这属于
+    哪一类失败、该不该改技能。把环境问题（没登录、通道不可用）当成技能缺陷去
+    改代码，是这类系统最典型也最昂贵的错误。
+    """
+    tool, _manager, driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+
+    original_execute = driver.execute
+
+    async def blocked(owner_session, profile_dir, command, args=(), **kwargs):
+        if command == "click":
+            raise BrowserDriverError(
+                "人工接管或暂停期间禁止浏览器自动化与页面观察",
+                code="control_mode_blocked",
+            )
+        return await original_execute(owner_session, profile_dir, command, args, **kwargs)
+
+    driver.execute = blocked
+    with pytest.raises(BrowserDriverError) as captured:
+        await tool.handler({"action": "click", "ref": "p1:e18"})
+
+    message = str(captured.value)
+    assert "status: failed" in message
+    # 分类为「用户状态」，并明确写出这不是技能缺陷
+    assert "failure_class: user_state" in message
+    assert "不是技能缺陷" in message
+    assert "consecutive_failures: 1" in message
+
+
+async def test_repeated_failures_keep_evidence_without_a_fixed_halt_threshold(
+    plugin_tool, ctx_vars
+):
+    """失败计数持续提供证据，但不以拍脑袋次数强制终止通用自动化。"""
+    tool, _manager, driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+
+    original_execute = driver.execute
+
+    async def always_fail(owner_session, profile_dir, command, args=(), **kwargs):
+        if command == "click":
+            raise BrowserDriverError("标签页已停止", code="tab_stopped")
+        return await original_execute(owner_session, profile_dir, command, args, **kwargs)
+
+    driver.execute = always_fail
+
+    messages = []
+    for _ in range(10):
+        with pytest.raises(BrowserDriverError) as captured:
+            await tool.handler({"action": "click", "ref": "p1:e18"})
+        messages.append(str(captured.value))
+
+    assert "halt:" not in messages[0]
+    assert "consecutive_failures: 1" in messages[0]
+    assert "consecutive_failures: 10" in messages[-1]
+    assert "halt:" not in messages[-1]
+
+
+async def test_success_resets_the_failure_streak(plugin_tool, ctx_vars):
+    """成功一次就清零，否则一次早期失败会让后面所有失败都显得「连续」。"""
+    tool, manager, driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+    original_execute = driver.execute
+
+    async def fail_once(owner_session, profile_dir, command, args=(), **kwargs):
+        if command == "click":
+            raise BrowserDriverError("标签页已停止", code="tab_stopped")
+        return await original_execute(owner_session, profile_dir, command, args, **kwargs)
+
+    driver.execute = fail_once
+    with pytest.raises(BrowserDriverError):
+        await tool.handler({"action": "click", "ref": "p1:e18"})
+
+    driver.execute = original_execute
+    await tool.handler({"action": "snapshot"})
+
+    evidence = manager.failure_evidence(OWNER, SESSION, "click", "tab_stopped")
+    assert evidence["consecutive_failures"] == 0
+    assert evidence["last_success"] == "snapshot"
 
 
 def test_model_facing_schema_rejects_stop_action():
@@ -483,13 +1409,14 @@ async def test_screenshot_exports_png_to_task_downloads(plugin_tool, ctx_vars):
     assert "--settled" in next(
         args for command, args in reversed(driver.calls) if command == "screenshot"
     )
-    from pathlib import Path
-
     assert Path(path).is_file()
 
     # 默认文件名自动生成且补 .png 后缀
     auto = await tool.handler({"action": "screenshot"})
-    assert auto.endswith(".png") and "downloads/browser" in auto
+    assert auto.content.endswith(".png")
+    assert "downloads/browser" in auto.content
+    assert auto.media[0].mime_type == "image/png"
+    assert auto.media[0].path == auto.content
 
     current = await tool.handler(
         {"action": "screenshot", "filename": "interaction", "settled": False}
@@ -498,6 +1425,108 @@ async def test_screenshot_exports_png_to_task_downloads(plugin_tool, ctx_vars):
     assert "--settled" not in next(
         args for command, args in reversed(driver.calls) if command == "screenshot"
     )
+
+    jpeg = await tool.handler(
+        {
+            "action": "screenshot",
+            "filename": "hero.jpg",
+            "type": "jpeg",
+            "scale": "device",
+            "full_page": True,
+        }
+    )
+    assert jpeg.endswith("hero.jpg")
+    assert Path(jpeg).read_bytes()[:3] == b"\xff\xd8\xff"
+    screenshot_args = next(
+        args for command, args in reversed(driver.calls) if command == "screenshot"
+    )
+    assert "--type" in screenshot_args
+    assert screenshot_args[screenshot_args.index("--type") + 1] == "jpeg"
+    assert screenshot_args[screenshot_args.index("--scale") + 1] == "device"
+    assert "--full-page" in screenshot_args
+
+    assert (
+        validate_args(
+            {
+                "action": "screenshot",
+                "ref": "p1:e1",
+                "full_page": True,
+            }
+        )
+        is not None
+    )
+    assert (
+        validate_args(
+            {
+                "action": "screenshot",
+                "filename": "mismatch.jpg",
+                "type": "png",
+            }
+        )
+        is not None
+    )
+    with pytest.raises(
+        BrowserDriverError,
+        match="type.*扩展名不一致",
+    ):
+        await manager.save_screenshot(
+            OWNER,
+            SESSION,
+            "mismatch.jpg",
+            image_type="png",
+        )
+
+
+async def test_evaluate_filename_preserves_full_json_and_undefined(
+    plugin_tool,
+    ctx_vars,
+):
+    tool, manager, _driver, _prefs = plugin_tool
+    manager.config.max_output_chars = 256
+    await manager.navigate(OWNER, SESSION, "https://example.com")
+
+    result = await tool.handler(
+        {
+            "action": "evaluate",
+            "function": "() => window.__largeEvaluation",
+            "filename": "evaluation",
+        }
+    )
+    path_line = result.split("evaluation_result_file:\n", 1)[1].splitlines()[0]
+    data = Path(path_line).read_text(encoding="utf-8")
+    assert data == json.dumps(
+        {"payload": "雪🙂" * 40_000},
+        ensure_ascii=False,
+        indent=2,
+    )
+    assert len(data) > manager.config.max_output_chars
+
+    undefined = await tool.handler(
+        {
+            "action": "evaluate",
+            "function": "() => undefined",
+            "filename": "undefined.json",
+        }
+    )
+    undefined_path = undefined.split(
+        "evaluation_result_file:\n",
+        1,
+    )[1].splitlines()[0]
+    assert Path(undefined_path).read_text(encoding="utf-8") == "undefined"
+
+
+async def test_tab_close_without_id_closes_current_active(plugin_tool, ctx_vars):
+    tool, manager, _driver, _prefs = plugin_tool
+    await manager.navigate(OWNER, SESSION, "https://example.com")
+    await tool.handler({"action": "tab_new", "url": "https://example.com/second"})
+    before = manager.state(OWNER, SESSION)
+    active_before = before["tab_id"]
+
+    await tool.handler({"action": "tab_close"})
+
+    after = manager.state(OWNER, SESSION)
+    assert after["tab_id"] != active_before
+    assert after["tab_id"]
 
 
 async def test_close_tab_then_new_tab_in_same_manager(plugin_tool):
@@ -517,26 +1546,29 @@ async def test_close_tab_then_new_tab_in_same_manager(plugin_tool):
     assert "example.com/2" not in str(listed)
 
 
-async def test_revoke_during_approval_invalidates_token(plugin_tool, ctx_vars):
+async def test_functional_build_never_accepts_approval_tokens(plugin_tool, ctx_vars):
     tool, manager, _driver, _prefs = plugin_tool
     await manager.navigate(OWNER, SESSION, "https://example.com")
 
     token_call = current_tool_call_id.set("call-approval")
     try:
-        approval = manager._issue_approval(
-            "browser_download", {"ref": "p1:e5"}, OWNER, SESSION
+        assert (
+            tool.permission_approver(
+                "unissued-token", {"action": "download", "ref": "p1:e5"}
+            )
+            is False
         )
     finally:
         current_tool_call_id.reset(token_call)
-    assert approval.token in manager._pending_approvals
 
-    # 关闭发生在审批期间：token 失效，approver 拒绝
+    # Revocation does not need to clear a token store because no such store
+    # exists in the functional build.
     await manager.revoke_owner(OWNER)
     token_call = current_tool_call_id.set("call-approval")
     try:
         assert (
             tool.permission_approver(
-                approval.token, {"action": "download", "ref": "p1:e5"}
+                "unissued-token", {"action": "download", "ref": "p1:e5"}
             )
             is False
         )

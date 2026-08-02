@@ -51,7 +51,9 @@ async function main() {
     platform: 'node',
     target: 'node18',
     format: 'cjs',
-    external: ['electron', 'ws', 'bufferutil', 'utf-8-validate'],
+    // playwright-core 必须 external：它内部有大量运行时 require（注入脚本源码、
+    // 浏览器注册表、驱动包路径），bundle 进来会在打包产物里静默失效。
+    external: ['electron', 'ws', 'bufferutil', 'utf-8-validate', 'playwright-core'],
     sourcemap: isDev,
     minify: !isDev,
     logLevel: 'info',

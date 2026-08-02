@@ -44,6 +44,12 @@ current_model_capabilities: ContextVar[tuple[str, ...] | None] = ContextVar(
     "current_model_capabilities", default=None
 )
 
+# 当前 Agent 本轮最终授权工具快照。子 Agent 必须在此基础上继续收窄，
+# 不能仅凭 user_type 重新计算，否则会绕过父 Agent 的 Expert/会话级限制。
+current_authorized_tool_names: ContextVar[frozenset[str] | None] = ContextVar(
+    "current_authorized_tool_names", default=None
+)
+
 # 当前 agent 生效的 skill 范围 (enabled, disabled)。主 agent 运行时写入，
 # 供 delegate_task 子 agent 继承父级的真实 skill 范围，而非只看 access_control 基线。
 # (None, None) 表示不限制。

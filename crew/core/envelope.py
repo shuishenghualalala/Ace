@@ -32,7 +32,11 @@ def _new_id(prefix: str) -> str:
 
 
 def _tool_event_args_for_ui(name: str, args: str) -> str:
-    if not args or name not in {"file_write", "write_file"}:
+    needs_projection = (
+        name in {"file_write", "write_file", "record_replay"}
+        or name.startswith("browser_")
+    )
+    if not args or not needs_projection:
         return args
     try:
         parsed = json.loads(args)
@@ -106,7 +110,10 @@ class ResponseChunk:
               file_write/write_file 不透传完整 content）。
         """
         args = _tool_event_args_for_ui(name, args)
-        if phase in {"generating", "start"} and name in {"file_write", "write_file"}:
+        if phase in {"generating", "start"} and (
+            name in {"file_write", "write_file", "record_replay"}
+            or name.startswith("browser_")
+        ):
             detail = args
         body: dict[str, Any] = {"name": name, "phase": phase, "detail": detail}
         if tool_call_id:

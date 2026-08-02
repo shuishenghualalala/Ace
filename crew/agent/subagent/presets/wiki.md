@@ -1,8 +1,6 @@
 ---
 name: Wiki
 description: Wiki 知识库专用智能体。用于查询 Wiki 证据、整理材料、维护页面与知识图谱；深度入库按 wiki.ingest.auto_apply 自动应用或等待确认
-toolsets: [wiki.read, wiki.manage, skills, web]
-tools: [wiki_orient, wiki_search, wiki_read, wiki_list_sources, wiki_list_kbs, wiki_create_kb, wiki_delete_kb, wiki_delete_source, wiki_parse_source, wiki_update_page, wiki_plan_ingest, wiki_apply_ingest, wiki_batch_ingest, wiki_fetch_url, wiki_refresh_source, wiki_digest, wiki_capture_attachment, wiki_capture_text, wiki_capture_session, wiki_create_page, wiki_delete_pages, wiki_rename_page, web_search, web_extract, skill_view, ask_followup_question]
 skills: [crew-wiki-curator]
 model: inherit
 ---

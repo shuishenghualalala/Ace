@@ -141,6 +141,9 @@ class WeixinChannel(Channel):
         self._dedup_persist_task: asyncio.Task[None] | None = None
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._recent_downloads: dict[str, float] = {}
+        self._connected = False
+        self._last_error = ""
+        self._initial_updates: dict[str, Any] | None = None
 
         # account_id 命中已持久化账号但未显式给 token 时，从账号文件补全凭证。
         if self._account_id and not self._token:
@@ -178,15 +181,51 @@ class WeixinChannel(Channel):
         )
         self._token_store.restore(self._account_id)
         self._load_dedup()
+        await self._probe_connection()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="weixin-poll")
         for warning in self.settings.collect_warnings():
             log.warning("Weixin 配置提示: %s", warning)
         log.info("Weixin 通道已启动 account=%s base=%s",
                  ilink._safe_id(self._account_id), self._base_url)
 
+    async def _probe_connection(self) -> None:
+        """启动握手：短超时 getUpdates 验证凭证可用，成功即标记 connected。
+
+        首轮长轮询最长 35s 才返回，不探测的话 gateway 的连通等待（15s）会误判超时；
+        探测超时被 get_updates 视为正常空结果，只有真实错误（会话过期等）才会拦截启动。
+        """
+        sync_buf = ilink.load_sync_buf(self.settings.sync_buf_path())
+        try:
+            response = await ilink.get_updates(
+                self._poll_session,
+                base_url=self._base_url,
+                token=self._token,
+                sync_buf=sync_buf,
+                timeout_ms=ilink.CONNECT_PROBE_TIMEOUT_MS,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"微信连接失败：{exc}") from exc
+        ret = response.get("ret", 0)
+        errcode = response.get("errcode", 0)
+        if ret not in {0, None} or errcode not in {0, None}:
+            if (
+                ret == ilink.SESSION_EXPIRED_ERRCODE
+                or errcode == ilink.SESSION_EXPIRED_ERRCODE
+                or ilink.is_stale_session_ret(ret, errcode, response.get("errmsg"))
+            ):
+                raise RuntimeError("微信会话已过期，请重新扫码登录")
+            raise RuntimeError(
+                f"微信连接失败 ret={ret} errcode={errcode} errmsg={response.get('errmsg', '')}"
+            )
+        self._connected = True
+        self._last_error = ""
+        # 探测响应交给首轮轮询消费，避免丢弃 sync_buf 与消息。
+        self._initial_updates = response
+
     async def stop(self) -> None:
         """停止逻辑入口：取消轮询任务并关闭会话。物理断连仍由 Gateway 受控重启完成。"""
         self._stopped = True
+        self._connected = False
         self._handler = None
         poll_task = self._poll_task
         if poll_task and not poll_task.done():
@@ -216,6 +255,8 @@ class WeixinChannel(Channel):
             "dm_policy": self.settings.dm_policy,
             "group_policy": self.settings.group_policy,
             "running": bool(self._poll_task and not self._poll_task.done() and not self._stopped),
+            "connected": self._connected,
+            "last_error": self._last_error,
         }
 
     # -- Owner 门禁（与其它渠道一致）--------------------------------------- #
@@ -259,6 +300,9 @@ class WeixinChannel(Channel):
         sync_buf = ilink.load_sync_buf(self.settings.sync_buf_path())
         timeout_ms = ilink.LONG_POLL_TIMEOUT_MS
         consecutive_failures = 0
+        # 启动握手拿到的首个响应，首轮直接消费，不再重复请求。
+        pending = self._initial_updates
+        self._initial_updates = None
 
         while not self._stopped:
             session = self._poll_session
@@ -266,13 +310,17 @@ class WeixinChannel(Channel):
                 await asyncio.sleep(1)
                 continue
             try:
-                response = await ilink.get_updates(
-                    session,
-                    base_url=self._base_url,
-                    token=self._token,
-                    sync_buf=sync_buf,
-                    timeout_ms=timeout_ms,
-                )
+                if pending is not None:
+                    response = pending
+                    pending = None
+                else:
+                    response = await ilink.get_updates(
+                        session,
+                        base_url=self._base_url,
+                        token=self._token,
+                        sync_buf=sync_buf,
+                        timeout_ms=timeout_ms,
+                    )
                 suggested_timeout = response.get("longpolling_timeout_ms")
                 if isinstance(suggested_timeout, int) and suggested_timeout > 0:
                     timeout_ms = suggested_timeout
@@ -285,11 +333,17 @@ class WeixinChannel(Channel):
                         or errcode == ilink.SESSION_EXPIRED_ERRCODE
                         or ilink.is_stale_session_ret(ret, errcode, response.get("errmsg"))
                     ):
+                        self._connected = False
+                        self._last_error = "微信会话已过期，请重新扫码登录"
                         log.error("weixin: 会话已过期，暂停 10 分钟等待重新登录")
                         await asyncio.sleep(600)
                         consecutive_failures = 0
                         continue
                     consecutive_failures += 1
+                    self._connected = False
+                    self._last_error = (
+                        f"getUpdates 失败 ret={ret} errcode={errcode}: {response.get('errmsg', '')}"
+                    )
                     log.warning(
                         "weixin: getUpdates 失败 ret=%s errcode=%s errmsg=%s (%d/%d)",
                         ret, errcode, response.get("errmsg", ""),
@@ -305,6 +359,8 @@ class WeixinChannel(Channel):
                     continue
 
                 consecutive_failures = 0
+                self._connected = True
+                self._last_error = ""
                 new_sync_buf = str(response.get("get_updates_buf") or "")
                 if new_sync_buf:
                     sync_buf = new_sync_buf
@@ -316,6 +372,8 @@ class WeixinChannel(Channel):
                 break
             except Exception as exc:  # noqa: BLE001 - 单次轮询失败不能终止通道
                 consecutive_failures += 1
+                self._connected = False
+                self._last_error = str(exc)
                 log.error(
                     "weixin: 轮询异常 (%d/%d): %s",
                     consecutive_failures, ilink.MAX_CONSECUTIVE_FAILURES, exc,

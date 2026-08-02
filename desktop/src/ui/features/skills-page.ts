@@ -26,12 +26,12 @@ interface SkillViewItem {
   name: string;
   description: string;
   category: string;
-  source: Skill['source'] | 'optional';
+  source: Skill['source'] | 'optional' | 'local';
   status: SkillStatus;
   canInstall: boolean;
   canUninstall: boolean;
   tone: string;
-  badges: ('featured' | 'new' | 'builtin')[];
+  badges: ('featured' | 'new' | 'builtin' | 'local')[];
   aliases?: string[];
 }
 
@@ -52,6 +52,8 @@ let searchQ = '';
 let category = '全部';
 let modalSkill: SkillViewItem | null = null;
 let modalPlugin: PluginItem | null = null;
+/** 弹窗滚动记忆：打开弹窗时记录列表 scrollTop，关闭弹窗全量重建后恢复，避免滚动条跳回顶部。 */
+let modalScrollMemory: number | null = null;
 let escListenerAttached = false;
 /** 技能分类栏是否处于展开状态（分类过多时折叠为单行）。 */
 let categoryRailExpanded = false;
@@ -178,6 +180,22 @@ function buildSkillItems(data: SkillStore): SkillViewItem[] {
       aliases: o.aliases ?? [],
     });
   }
+  for (const o of data.local ?? []) {
+    rememberSkillCategory(o.slug, o.category);
+    items.push({
+      slug: o.slug,
+      name: o.display_name || o.name,
+      description: o.description_zh || o.description,
+      category: o.category || '通用办公',
+      source: 'local',
+      status: 'available',
+      canInstall: true,
+      canUninstall: false,
+      tone: toneFor(o.slug),
+      badges: ['local'],
+      aliases: o.aliases ?? [],
+    });
+  }
   return items;
 }
 
@@ -186,7 +204,7 @@ function itemsForSubview(items: SkillViewItem[]): SkillViewItem[] {
   if (skillSubview === 'installed') {
     return items.filter((s) => s.status === 'builtin' || s.status === 'installed');
   }
-  return items.filter((s) => s.source === 'optional');
+  return items.filter((s) => s.source === 'optional' || s.source === 'local');
 }
 
 function filterSkills(items: SkillViewItem[]): SkillViewItem[] {
@@ -229,6 +247,7 @@ function skillCard(s: SkillViewItem): string {
       if (b === 'featured') return '<span class="skill-card-v3__badge skill-card-v3__badge--featured">推荐</span>';
       if (b === 'new') return '<span class="skill-card-v3__badge skill-card-v3__badge--new">新</span>';
       if (b === 'builtin') return '<span class="skill-card-v3__badge skill-card-v3__badge--builtin">内置</span>';
+      if (b === 'local') return '<span class="skill-card-v3__badge skill-card-v3__badge--local">本地</span>';
       return '';
     })
     .join('');
@@ -649,10 +668,14 @@ async function installSkill(slug: string): Promise<void> {
     // 技能落盘在 get_crew_home()/skills（机器级单一目录，不带 owner 维度），审计日志
     // 也叫 global-skills-audit.jsonl——装一个技能会影响本机所有登录账号，不是「我的」
     // 账号内行为。安装前必须把这个作用域说清楚。
+    const isLocal = item?.source === 'local';
+    const localNote = isLocal
+      ? '该技能来自本地共享目录（~/.agents/skills），将以软链方式安装，源目录更新后自动同步。'
+      : '';
     const agreed = await showConfirmDialog({
       title: '确认全局安装技能',
       message:
-        `技能是本机全局共享能力，安装结果对本机所有登录账号生效。`
+        `技能是本机全局共享能力，安装结果对本机所有登录账号生效。${localNote}`
         + `确定安装「${item?.name || slug}」吗？`,
       confirmText: '全局安装',
       cancelText: '取消',
@@ -750,12 +773,14 @@ async function togglePlugin(key: string, enabled: boolean): Promise<void> {
 }
 
 function openSkillModal(slug: string, items: SkillViewItem[]): void {
+  modalScrollMemory = $('#skills-page-root')?.scrollTop ?? null;
   modalSkill = items.find((s) => s.slug === slug) ?? null;
   modalPlugin = null;
   renderShell();
 }
 
 function openPluginModal(name: string): void {
+  modalScrollMemory = $('#skills-page-root')?.scrollTop ?? null;
   modalPlugin = plugins.find((p) => p.name === name) ?? null;
   modalSkill = null;
   renderShell();
@@ -765,6 +790,9 @@ function closeModal(): void {
   modalSkill = null;
   modalPlugin = null;
   renderShell();
+  const root = $('#skills-page-root');
+  if (root && modalScrollMemory != null) root.scrollTop = modalScrollMemory;
+  modalScrollMemory = null;
 }
 
 let togglingEvolution = false;

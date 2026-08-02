@@ -169,7 +169,7 @@ access_control:
   external:
     prompt_profile: "external"
     enabled_toolsets: ["*"]
-    disabled_toolsets: ["mcp:cua-driver", "browser"]
+    disabled_toolsets: ["mcp:cua-driver"]
     enabled_tools: ["*"]
     disabled_tools: []
     enabled_plugins:
@@ -178,17 +178,6 @@ access_control:
     enabled_skills:
     - '*'
     disabled_skills: ["browser-use"]   # browser-use skill 依赖内置浏览器；external 的 browser toolset 已在 disabled_toolsets 里禁用，避免展示无法使用的“死 skill”
-  internal:
-    prompt_profile: "internal"
-    enabled_toolsets: ["*"]
-    disabled_toolsets: ["web", "subagent.preset"]  # Browser Use 对内部用户开放；subagent.preset 保留 delegate_task
-    enabled_tools: ["*"]
-    disabled_tools: ["web_search","vision_analyze"]
-    enabled_plugins: ["*"]
-    disabled_plugins: []
-    enabled_skills:
-    - '*'
-    disabled_skills: []
 
 wiki:
   ingest:

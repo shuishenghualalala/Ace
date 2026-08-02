@@ -747,7 +747,10 @@ function renderList(): string {
 function renderListOnly(): void {
   const list = document.querySelector('.cron-list');
   if (!list) return;
+  const scrollTop = list.querySelector<HTMLElement>('.cron-list__scroll')?.scrollTop ?? 0;
   list.innerHTML = renderList();
+  const listScroll = list.querySelector<HTMLElement>('.cron-list__scroll');
+  if (listScroll && scrollTop > 0) listScroll.scrollTop = scrollTop;
   bindListEvents();
   bindTemplateCards();
 }
@@ -929,6 +932,9 @@ function renderCreateDrawer(): string {
   <div class="cron-drawer-backdrop" id="cron-drawer-backdrop"></div>`;
 }
 
+/** 列表滚动记忆：renderTasksTab 全量重建后按 范围+筛选 恢复 scrollTop，避免点击任务行/开关时滚动条跳回顶部。 */
+let listScrollMemory: { key: string; top: number } | null = null;
+
 function renderTasksTab(): void {
   const root = $('#cron-page-root');
   if (!root) return;
@@ -939,6 +945,9 @@ function renderTasksTab(): void {
       ? renderDetailDrawer()
       : '';
 
+  const rootScrollTop = root.scrollTop;
+  const liveListScroll = root.querySelector<HTMLElement>('.cron-list__scroll');
+  if (liveListScroll && listScrollMemory) listScrollMemory.top = liveListScroll.scrollTop;
   root.innerHTML = `
       <div class="page-shell page-shell--cron">
       <header class="cron-page__head page-header page-header--hub">
@@ -955,6 +964,11 @@ function renderTasksTab(): void {
     </div>
     ${drawerHtml}
   `;
+  root.scrollTop = rootScrollTop;
+  const listScrollKey = `${view.scope}:${view.filter}`;
+  const listScroll = root.querySelector<HTMLElement>('.cron-list__scroll');
+  if (listScroll && listScrollMemory?.key === listScrollKey) listScroll.scrollTop = listScrollMemory.top;
+  listScrollMemory = { key: listScrollKey, top: listScroll?.scrollTop ?? 0 };
   bindEvents();
 }
 
@@ -1156,9 +1170,10 @@ function bindListEvents(): void {
   });
 }
 
-/** 测试钩子：重置委托绑定状态（用于单测）。 */
+/** 测试钩子：重置委托绑定状态与滚动记忆（用于单测）。 */
 export function __resetCronListEventsForTest(): void {
   listEventsBound = false;
+  listScrollMemory = null;
 }
 
 /** 测试钩子：覆盖 view 的可过滤状态（用于 filteredJobs 单测）。 */

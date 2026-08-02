@@ -65,7 +65,8 @@ def test_wiki_prompt_only_documents_exposed_ingest_workflow():
         "wiki_migrate_layout",
         "wiki_archive_page",
     }
-    assert removed.isdisjoint(definition.tools)
+    # Wiki 预设不再维护静态 tools 白名单（None），工具范围由统一策略计算。
+    assert removed.isdisjoint(definition.tools or [])
     assert "wiki_ingest(source_id)" not in WIKI_LIST_SOURCES_PROMPT
     assert "wiki_ingest(source_id)" not in WIKI_PARSE_SOURCE_PROMPT
     assert "wiki_plan_ingest" in WIKI_LIST_SOURCES_PROMPT

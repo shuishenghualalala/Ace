@@ -178,6 +178,158 @@ body.browser-workbench-open .task-board-toggle { color: var(--text-secondary, va
 }
 .browser-url[readonly] { color: var(--text-secondary); }
 
+/* 工具栏里的录制控件组。
+   录制会把用户看到的页面内容写进磁盘，所以指示必须持续可见——但「持续可见」
+   不等于「常驻一整行」。录制贯穿整段演示，是长期状态，把它折进工具栏后纵向
+   占用为 0，页面区多出一整行。 */
+.browser-rec-slot { display: flex; align-items: center; }
+.browser-rec {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-danger, #e5484d) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-danger, #e5484d) 34%, transparent);
+}
+.browser-rec.is-paused {
+  background: var(--color-black-overlay-1);
+  border-color: var(--border-subtle);
+}
+/* 预备录制：还没真的在录，用中性描边，不能用录制中的红——那会谎报状态。 */
+.browser-rec.is-armed {
+  background: var(--color-black-overlay-1);
+  border-style: dashed;
+  border-color: var(--border-subtle);
+}
+.browser-rec.is-armed .browser-rec__dot {
+  background: var(--text-secondary);
+  box-shadow: none;
+}
+.browser-rec.is-armed .browser-rec__count { color: var(--text-secondary); }
+.browser-rec__pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 25px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.browser-rec__dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--color-danger, #e5484d);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger, #e5484d) 25%, transparent);
+  animation: browser-recording-pulse 1.6s ease-in-out infinite;
+}
+.browser-rec.is-paused .browser-rec__dot {
+  background: var(--text-muted);
+  box-shadow: none;
+  animation: none;
+}
+.browser-rec__count { color: var(--text-primary); }
+.browser-rec.is-paused .browser-rec__count { color: var(--text-secondary); }
+/* 状态词只给读屏与检索用：视觉上由颜色+脉动+计数表达，读屏要有明确的那句话。 */
+.browser-rec__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.browser-rec__btn { width: 25px; height: 25px; border-radius: 6px; }
+.browser-rec__btn svg { width: 14px; height: 14px; }
+.browser-rec__btn--stop { color: var(--color-danger, #e5484d); }
+.browser-rec__btn--stop:hover:not(:disabled) {
+  color: #fff;
+  background: var(--color-danger, #e5484d);
+}
+
+/* 标注输入与「录完待决定」都借用地址栏那一格：短暂、互斥、要宽度，
+   而工具栏里本来就有一格宽的。录制 UI 因此一行都不占。 */
+.browser-note,
+.browser-recording {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.browser-note[hidden],
+.browser-recording[hidden] { display: none; }
+
+.browser-note__input {
+  flex: 1;
+  min-width: 0;
+  height: 29px;
+  padding: 0 10px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.browser-note__input::placeholder { color: var(--text-muted); }
+.browser-note__input:focus { outline: none; }
+
+.browser-recording__label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+}
+
+.browser-note__btn,
+.browser-recording__btn {
+  height: 25px;
+  padding: 0 12px;
+  flex: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.browser-note__btn:hover,
+.browser-recording__btn:hover { color: var(--text-primary); background: var(--color-black-overlay-1); }
+/* 「生成技能」「保存」是各自那一屏唯一的主动作，用强调色；旁边的保持次级。 */
+.browser-note__btn--primary,
+.browser-recording__btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg, #fff);
+}
+.browser-note__btn--primary:hover,
+.browser-recording__btn--primary:hover {
+  background: var(--accent-hover, var(--accent));
+  border-color: var(--accent-hover, var(--accent));
+  color: var(--accent-fg, #fff);
+}
+
+@keyframes browser-recording-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+/* 录制指示靠颜色+文字双通道表达，动画只是强化。关掉动画不损失任何信息。 */
+@media (prefers-reduced-motion: reduce) {
+  .browser-rec__dot { animation: none; }
+}
+
 .browser-stage {
   position: relative;
   display: grid;

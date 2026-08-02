@@ -8,6 +8,7 @@ import {
   openBrowserArtifact,
   openUserBrowser,
   renderBrowserPanel,
+  sendRecordingControl,
   syncBrowserPanelSession,
 } from '../../src/ui/features/browser-panel';
 import { setActiveSessionId } from '../../src/ui/state';
@@ -454,6 +455,114 @@ describe('browser panel control recovery', () => {
       expect(document.querySelector<HTMLInputElement>('[data-browser-url]')?.value).toBe('https://example.com/final');
     });
     expect(document.querySelector<HTMLButtonElement>('[data-browser-action="back"]')?.disabled).toBe(false);
+  });
+
+  it('re-enables the record button once a real page loads', async () => {
+    // 真 bug 复现：面板在空白页时渲染，录制按钮 disabled。导航到真实页后，状态更新
+    // 走 patchChrome 增量刷新——它只刷 [data-browser-action]（后退/前进/刷新），
+    // 漏了 [data-browser-record]，于是录制按钮永远停在"空白页"那一刻的 disabled，
+    // 用户加载了页面也点不动。这条钉住：真实页加载后录制按钮必须一起解禁。
+    const loaded = pageState({
+      tab_id: 'tab-loaded',
+      tab_label: 'session-tab-loaded',
+      url: 'https://www.baidu.com/s?wd=1321',
+      title: '1321年_百度搜索',
+      mode: 'human',
+      running: true,
+      tabs: [{
+        id: 'tab-loaded',
+        label: 'session-tab-loaded',
+        url: 'https://www.baidu.com/s?wd=1321',
+        title: '1321年_百度搜索',
+      }],
+    });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        browserViewHide: vi.fn().mockResolvedValue({ ok: true }),
+        onBrowserWsEvent: vi.fn(() => () => undefined),
+        onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
+      },
+    });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: loaded });
+    setActiveSessionId('session-record-enable');
+
+    document.body.innerHTML = renderBrowserPanel();
+
+    bindBrowserPanel();
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLInputElement>('[data-browser-url]')?.value)
+        .toBe('https://www.baidu.com/s?wd=1321');
+    });
+
+    // patchChrome 只刷新 [data-browser-action] 那批按钮，录制控件是
+    // [data-browser-record]，必须被单独重刷——漏刷过一次，后果是录制入口一直
+    // 停在面板首次渲染那一刻的状态，页面加载了也不跟着变。
+    expect(document.querySelector<HTMLButtonElement>('[data-browser-action="reload"]')?.disabled).toBe(false);
+    const start = document.querySelector<HTMLButtonElement>('[data-browser-record="start"]');
+    expect(start).not.toBeNull();
+    expect(start?.disabled).toBe(false);
+  });
+
+  it('starts an armed recording when navigation arrives outside applyPageState', async () => {
+    // 真机复现：空白页按下录制 → 打开网站 → 指示条永久停在「预备录制」。
+    // 根因是页面内导航走 refreshPanelNavigation——它直接改 pageState 再调
+    // patchChrome，**不经过 applyPageState**，而预备录制的落地点当初只挂在后者上。
+    const navigationEvents: Array<(event: { tabLabel: string }) => void> = [];
+    const blank = pageState({
+      tab_id: 'tab-armed',
+      tab_label: 'session-tab-armed',
+      url: 'about:blank',
+      mode: 'human',
+      running: true,
+      tabs: [{ id: 'tab-armed', label: 'session-tab-armed', url: 'about:blank', title: '' }],
+    });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        browserViewHide: vi.fn().mockResolvedValue({ ok: true }),
+        browserViewGetNavigation: vi.fn().mockResolvedValue({
+          ok: true,
+          navigation: {
+            url: 'https://www.baidu.com/s?wd=x',
+            title: 'x_百度搜索',
+            can_go_back: true,
+            can_go_forward: false,
+          },
+        }),
+        onBrowserViewNavigationChanged: vi.fn((callback) => {
+          navigationEvents.push(callback);
+          return () => undefined;
+        }),
+        onBrowserWsEvent: vi.fn(() => () => undefined),
+        onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
+      },
+    });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: blank });
+    const control = vi.spyOn(backendApi, 'browserControl')
+      .mockResolvedValue({ ok: true, state: blank });
+    setActiveSessionId('session-armed-nav');
+    document.body.innerHTML = renderBrowserPanel();
+    bindBrowserPanel();
+    await vi.waitFor(() => expect(navigationEvents).toHaveLength(1));
+
+    // 空白页按下录制 → 预备态，不发 record_start
+    await sendRecordingControl('start');
+    expect(control).not.toHaveBeenCalledWith('session-armed-nav', 'record_start');
+    expect(document.querySelector('.browser-rec.is-armed')).not.toBeNull();
+
+    // 页面内导航提交（只走 refreshPanelNavigation → patchChrome）
+    navigationEvents[0]({ tabLabel: 'session-tab-armed' });
+
+    await vi.waitFor(() => {
+      expect(control).toHaveBeenCalledWith('session-armed-nav', 'record_start');
+    });
   });
 
   it('closes the browser workbench after the last tab is deleted', async () => {

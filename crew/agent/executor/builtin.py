@@ -43,6 +43,7 @@ from crew.core.interfaces import LLMProvider, ToolRegistry
 from crew.core.types import Message, ToolResult
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger
+from crew.tools.policy import ToolDisclosureMode
 from crew.tools.tool_search import (
     ToolSearchConfig,
     assemble_tool_schemas,
@@ -220,10 +221,12 @@ class BuiltinExecutor(AgentExecutor):
 
         system_msg = Message.system(ctx.system_prompt)
         original_tools = ctx.tool_schemas or []
-        # Wiki 会话关闭渐进披露：wiki_* 工具全部直接暴露，模型直接调用而非经
-        # tool_search，前端工具时间线直接显示真实工具中文名。
+        # 披露模式不改变授权范围。DIRECT 直接发送全部已授权 schema；
+        # PROGRESSIVE 才按全局 ToolSearch 配置装配。
         ts_config = (
-            ToolSearchConfig(enabled="off") if ctx.disable_tool_search else None
+            ToolSearchConfig(enabled="off")
+            if ctx.tool_disclosure_mode is ToolDisclosureMode.DIRECT
+            else None
         )
         tool_search_assembly = assemble_tool_schemas(original_tools, config=ts_config)
         deferred_tools_message = available_deferred_tools_message(tool_search_assembly)
@@ -278,15 +281,6 @@ class BuiltinExecutor(AgentExecutor):
             tool_search_schemas=tool_search_assembly.original_tool_schemas,
             tool_search_config=tool_search_assembly.config,
             authorized_tool_names=ctx.authorized_tool_names,
-            allowed_tool_names=(
-                {
-                    str((schema.get("function") or {}).get("name") or "")
-                    for schema in tool_search_assembly.original_tool_schemas
-                    if str((schema.get("function") or {}).get("name") or "")
-                }
-                if ctx.enforce_tool_scope
-                else None
-            ),
             direct_tool_names=(
                 {
                     str((schema.get("function") or {}).get("name") or "")
