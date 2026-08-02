@@ -1010,20 +1010,6 @@ class WikiCompiler:
         pages: list[WikiPage] = []
         created_titles: set[str] = set()
 
-        # source 页面：保存原始内容
-        source_page = self._ensure_source_page(
-            source_id,
-            raw,
-            source_content,
-            owner_account_id,
-            kb_id,
-            source_summary=analysis.get("source_summary"),
-            entities=analysis.get("entities") or [],
-            topics=analysis.get("topics") or [],
-        )
-        pages.append(source_page)
-        created_titles.add(source_page.title)
-
         # entities
         _check_cancelled(cancel_event)
         for ent in analysis.get("entities", []):
@@ -1058,6 +1044,22 @@ class WikiCompiler:
             if page and page.title not in created_titles:
                 pages.append(page)
                 created_titles.add(page.title)
+
+        # source 摘要只引用本轮实际生成或更新成功的知识页面，避免展示无法跳转的链接。
+        entity_pages = [page for page in pages if page.page_type == "entity"]
+        topic_pages = [page for page in pages if page.page_type == "topic"]
+        source_page = self._ensure_source_page(
+            source_id,
+            raw,
+            source_content,
+            owner_account_id,
+            kb_id,
+            source_summary=analysis.get("source_summary"),
+            entities=[{"name": page.title} for page in entity_pages],
+            topics=[{"name": page.title} for page in topic_pages],
+        )
+        pages.insert(0, source_page)
+        created_titles.add(source_page.title)
 
         # 将分析结果编译为基于页面 ID 的有类型关系。
         _check_cancelled(cancel_event)
@@ -1174,34 +1176,6 @@ class WikiCompiler:
         # 干跑：计算计划而不写入
         planned: list[PlannedPage] = []
 
-        # source page
-        source_title = raw.title or source_id
-        source_page_content = _build_source_page_content(
-            source_title,
-            raw,
-            source_content,
-            analysis.get("source_summary"),
-            analysis.get("entities") or [],
-            analysis.get("topics") or [],
-        )
-        existing_source = self.store.get_source_page(source_id, owner_account_id, kb_id)
-        if existing_source is not None:
-            planned.append(PlannedPage(
-                title=source_title, page_type="source", action="update",
-                content=source_page_content,
-                is_new=False,
-                target_page_id=existing_source.id,
-                target_content_sha256=hashlib.sha256(
-                    existing_source.content.encode("utf-8")
-                ).hexdigest(),
-            ))
-        else:
-            planned.append(PlannedPage(
-                title=source_title, page_type="source", action="create",
-                content=source_page_content,
-                is_new=True,
-            ))
-
         # entities
         for e in analysis.get("entities", []):
             pp = self._plan_page(
@@ -1219,6 +1193,45 @@ class WikiCompiler:
             pp = self._plan_topic(t, source_id, owner_account_id, kb_id)
             if pp:
                 planned.append(pp)
+
+        # source page 只引用通过规划门槛、确实会被写入的知识页面。
+        source_title = raw.title or source_id
+        planned_entities = [
+            {"name": page.title}
+            for page in planned
+            if page.page_type == "entity"
+        ]
+        planned_topics = [
+            {"name": page.title}
+            for page in planned
+            if page.page_type == "topic"
+        ]
+        source_page_content = _build_source_page_content(
+            source_title,
+            raw,
+            source_content,
+            analysis.get("source_summary"),
+            planned_entities,
+            planned_topics,
+        )
+        existing_source = self.store.get_source_page(source_id, owner_account_id, kb_id)
+        if existing_source is not None:
+            source_plan = PlannedPage(
+                title=source_title, page_type="source", action="update",
+                content=source_page_content,
+                is_new=False,
+                target_page_id=existing_source.id,
+                target_content_sha256=hashlib.sha256(
+                    existing_source.content.encode("utf-8")
+                ).hexdigest(),
+            )
+        else:
+            source_plan = PlannedPage(
+                title=source_title, page_type="source", action="create",
+                content=source_page_content,
+                is_new=True,
+            )
+        planned.insert(0, source_plan)
 
         total_new = sum(1 for p in planned if p.action == "create")
         total_update = sum(1 for p in planned if p.action == "update")
@@ -1298,35 +1311,67 @@ class WikiCompiler:
             ]
 
         applied_pages: list[WikiPage] = []
+        linked_pages: list[WikiPage] = []
         skipped_titles: list[str] = []
 
         await _notify_progress(progress, "analyze", {"source_id": source_id})
 
+        source_plan = next(
+            (page for page in pages_to_apply if page.page_type == "source"),
+            None,
+        )
         for planned in pages_to_apply:
             _check_cancelled(cancel_event)
             if planned.page_type == "source":
-                page = self._ensure_source_page(
-                    source_id,
-                    raw,
-                    source_content,
+                continue
+            if planned.action == "skip":
+                existing = self.store.resolve_page(
+                    planned.title,
+                    planned.page_type,
+                    planned.aliases,
                     owner_account_id,
                     kb_id,
-                    prepared_content=planned.content,
                 )
+                if existing is not None:
+                    linked_pages.append(existing)
+                continue
             else:
                 page = self._apply_plan(planned, source_id, owner_account_id, kb_id)
 
             if page is not None:
                 applied_pages.append(page)
+                linked_pages.append(page)
             else:
                 skipped_titles.append(planned.title)
+
+        if source_plan is not None:
+            entity_titles = [
+                page.title for page in linked_pages if page.page_type == "entity"
+            ]
+            topic_titles = [
+                page.title for page in linked_pages if page.page_type == "topic"
+            ]
+            source_content_filtered = _replace_source_page_links(
+                source_plan.content,
+                entity_titles,
+                topic_titles,
+            )
+            source_page = self._ensure_source_page(
+                source_id,
+                raw,
+                source_content,
+                owner_account_id,
+                kb_id,
+                prepared_content=source_content_filtered,
+            )
+            applied_pages.insert(0, source_page)
 
         # 应用关系（只在实际写入的页面间）
         _check_cancelled(cancel_event)
         self._apply_relationships(applied_pages, plan.relationships, owner_account_id, kb_id)
         source_page = next((page for page in applied_pages if page.page_type == "source"), None)
-        knowledge_pages = [page for page in applied_pages if page.page_type in {"entity", "topic"}]
-        if source_page is not None and knowledge_pages:
+        knowledge_pages = [page for page in linked_pages if page.page_type in {"entity", "topic"}]
+        if source_page is not None:
             source_page.relations = [
                 WikiRelation(
                     target_page_id=page.id,
@@ -2683,6 +2728,35 @@ def _page_index_summary(content: str, max_len: int = 120) -> str:
         if plain:
             return plain if len(plain) <= max_len else f"{plain[: max_len - 3].rstrip()}..."
     return "暂无摘要"
+
+
+def _replace_source_page_links(
+    content: str,
+    entity_titles: list[str],
+    topic_titles: list[str],
+) -> str:
+    """按实际写入的页面重建来源摘要中的三个关联区块。"""
+    sections = {
+        "关键词": ([f"- [[{title}]]" for title in entity_titles] or ["- _暂无独立关键词_"]),
+        "相关话题": ([f"- [[{title}]]" for title in topic_titles] or ["- _暂无独立话题_"]),
+        "相关页面": (
+            [
+                f"- [[{title}]]"
+                for title in dict.fromkeys(entity_titles + topic_titles)
+            ]
+            or ["- _暂无关联页面_"]
+        ),
+    }
+    updated = content
+    for heading, lines in sections.items():
+        replacement = f"## {heading}\n\n" + "\n".join(lines) + "\n\n"
+        updated = re.sub(
+            rf"(?ms)^## {re.escape(heading)}\n.*?(?=^## |^---$)",
+            replacement,
+            updated,
+            count=1,
+        )
+    return updated
 
 
 def _build_source_page_content(
