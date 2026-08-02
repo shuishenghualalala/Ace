@@ -421,6 +421,37 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     return api
 
 
+def _write_gateway_discovery_file(host: str, port: int) -> None:
+    """把网关实际监听地址写入 {CREW_HOME}/run/gateway.json，进程退出时清理。
+
+    本地客户端（web dev server 的 vite proxy 等）读这个文件即可事先知道端口，
+    无需扫描候选端口。读侧仍会先探测 /api/health 再采信，容忍崩溃后的残留文件。
+    """
+    import atexit
+    import json
+    import os
+    import time
+
+    from crew.state.home import get_crew_home
+
+    try:
+        run_dir = get_crew_home() / "run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / "gateway.json"
+        path.write_text(
+            json.dumps({
+                "host": host,
+                "port": port,
+                "pid": os.getpid(),
+                "started_at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+        atexit.register(lambda: path.unlink(missing_ok=True))
+    except OSError:
+        log.warning("Gateway 发现文件写入失败", exc_info=True)
+
+
 def run() -> None:
     # 忽略 SIGPIPE：MCP stdio 子进程的 stdout 管道断开时不应杀死网关主进程。
     # 没有此处理时，BrokenPipeError 通过 anyio TaskGroup 冒泡到 uvicorn 事件循环，
@@ -440,4 +471,5 @@ def run() -> None:
     # 不在 gateway 侧做 fuser-k / 端口扫描 / 退让重试——那些曾导致 sibling 互杀循环和
     # 静默换端口（Linux 桌面端写死 8000，回退即失联）。
     log.info("Gateway 启动: http://%s:%s", cfg.gateway_host, cfg.gateway_port)
+    _write_gateway_discovery_file(cfg.gateway_host, cfg.gateway_port)
     uvicorn.run(api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning")

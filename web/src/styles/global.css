@@ -2993,6 +2993,9 @@ button { font-family: inherit; cursor: pointer; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* 窄栏（如 Wiki 右栏对话）放不下时允许整体换行，避免右侧按钮溢出卡片 */
+  flex-wrap: wrap;
+  row-gap: 6px;
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--border);
@@ -3002,12 +3005,16 @@ button { font-family: inherit; cursor: pointer; }
   align-items: center;
   gap: 4px;
   flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .composer__toolbar-right {
   display: flex;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  /* 换行到第二行时仍靠右对齐 */
+  margin-left: auto;
 }
 .toolbar-btn {
   display: inline-flex;
@@ -6640,7 +6647,9 @@ button { font-family: inherit; cursor: pointer; }
   border-right: 1px solid var(--border);
   background: var(--bg-soft);
   overflow-y: auto;
-  padding: 12px;
+  /* 顶部不留 padding：sticky 的视图切换栏 top:0 对齐内容盒，
+     上 padding 会在切换栏上方留一条缝，滚动时列表内容会从缝里露出来。 */
+  padding: 0 12px 12px;
 }
 
 .wiki-tree__empty {
@@ -6865,8 +6874,11 @@ button { font-family: inherit; cursor: pointer; }
 /* View switcher for WikiHub left panel */
 .wiki-view-switcher {
   display: flex;
+  align-items: center;
   gap: 4px;
-  padding: 10px 12px 8px;
+  /* 固定高度，时间线分组头（sticky top 与此对齐）才能严丝合缝地吸在它下方。 */
+  height: 48px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-soft);
   position: sticky;
@@ -6975,12 +6987,45 @@ button { font-family: inherit; cursor: pointer; }
   font-family: inherit;
 }
 
-.wiki-list-item__icon {
-  flex: 0 0 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
+.wiki-list-item__title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wiki-list-item__title-row .wiki-list-item__title {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* 类型徽标：对齐桌面端 wiki-badge */
+.wiki-list-item__type-badge {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  background: var(--bg-hover);
   color: var(--text-3);
+}
+
+.wiki-list-item__type-badge--entity {
+  background: #eef4ff;
+  color: #314ad6;
+}
+
+.wiki-list-item__type-badge--topic,
+.wiki-list-item__type-badge--comparison,
+.wiki-list-item__type-badge--synthesis {
+  background: #e8f6ee;
+  color: #1a7f4b;
+}
+
+.wiki-list-item__type-badge--source {
+  background: #fdf3e3;
+  color: #b26a00;
 }
 
 .wiki-list-item__title-wrap {
@@ -7405,7 +7450,8 @@ button { font-family: inherit; cursor: pointer; }
 
 .wiki-timeline-group__header {
   position: sticky;
-  top: 0;
+  /* 吸顶在视图切换栏（固定高 48px）下方，避免被它盖住。 */
+  top: 48px;
   z-index: 1;
   padding: 8px 12px 6px;
   font-size: 12px;
