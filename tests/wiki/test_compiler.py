@@ -539,6 +539,10 @@ async def test_apply_ingest_uses_saved_plan_and_respects_approved_titles(store, 
     assert "计划文档" in titles  # source 页面始终写入
 
     assert store.get_by_title("EntityB") is None
+    source_page = store.get_by_title("计划文档")
+    assert source_page is not None
+    assert "[[EntityA]]" in source_page.content
+    assert "[[EntityB]]" not in source_page.content
 
 
 @pytest.mark.asyncio
@@ -866,6 +870,10 @@ async def test_plan_ingest_uses_compact_units_and_page_threshold(store, compiler
     assert "核心机制" in titles
     assert "辅助实践" in titles
     assert "路过名称" not in titles
+    source_plan = next(page for page in plan.planned_pages if page.page_type == "source")
+    assert "[[核心机制]]" in source_plan.content
+    assert "[[辅助实践]]" in source_plan.content
+    assert "[[路过名称]]" not in source_plan.content
     core = next(page for page in plan.planned_pages if page.title == "核心机制")
     assert core.claims[0].evidence[0].locator == "第一节"
     assert plan.relationships == [
