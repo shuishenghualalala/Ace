@@ -385,9 +385,12 @@ def create_wiki_router(crew) -> APIRouter:
             content=data.get("content", ""),
             file_path="",
             sources=list(data.get("sources") or []),
-            related=list(data.get("related") or []),
             tags=list(data.get("tags") or []),
-            aliases=list(data.get("aliases") or []),
+            relations=[
+                WikiRelation.from_dict(item)
+                for item in data.get("relations", [])
+                if isinstance(item, dict)
+            ],
         )
         owner = _owner(request)
         saved = store.save_page(page, owner, kb_id)
