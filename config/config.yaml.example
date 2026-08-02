@@ -153,6 +153,7 @@ plugins:
   - security_guidance
   - crew_disk_cleanup
   - feishu
+  - weixin
   disabled:
 
 channels: {}

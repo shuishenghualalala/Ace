@@ -15,11 +15,13 @@ import { reconcileSessionModelsAfterDelete } from './session-model';
 const CHANNEL_MAP: Record<string, string> = {
   feishu: 'feishu',
   lark: 'feishu',
+  weixin: 'weixin',
 };
 
 /** 设置页渠道卡片与弹窗使用的展示名（覆盖插件注册 label）。 */
 const CHANNEL_DISPLAY_LABELS: Record<string, string> = {
   feishu: '飞书',
+  weixin: '微信',
 };
 
 function channelDisplayLabel(apiName: string, fallback?: string): string {
@@ -31,11 +33,16 @@ const CHANNEL_FIELDS: Record<string, Array<{ key: string; label: string; secret?
     { key: 'appId', label: 'App ID', required: true, placeholder: 'App ID' },
     { key: 'appSecret', label: 'App Secret', secret: true, required: true, placeholder: 'App Secret' },
   ],
+  // token 由扫码登录持久化到账号文件，这里只需 accountId。
+  weixin: [
+    { key: 'accountId', label: '账号 ID', required: true, placeholder: '扫码登录后自动填充' },
+  ],
 };
 
 /** 与卡片列表一致的头像资源（`index.html` conn-row）。 */
 const CHANNEL_ICON_SRC: Record<string, string> = {
   feishu: './image/channels/feishu-icon.png',
+  weixin: './image/channels/weixin-icon.png',
 };
 
 /** 渠道功能开关（checkbox）：configured 状态下也可切换，切换即保存并即时生效。 */
@@ -509,6 +516,92 @@ function modelStatusLabel(models: ModelOption[], modelId: string): string {
   return model?.name || model?.model || modelId;
 }
 
+/** 微信扫码登录区域 HTML（仅在 weixin 渠道弹窗内渲染）。 */
+function weixinQrAreaHtml(apiName: string): string {
+  if (apiName !== 'weixin') return '';
+  return `
+    <div class="channel-connect-qr" id="weixin-qr-area">
+      <button type="button" class="set-v2-btn set-v2-btn--primary" id="weixin-qr-start">扫码登录</button>
+      <div class="channel-connect-hint" id="weixin-qr-status"></div>
+      <div class="channel-connect-qr__image-wrap" id="weixin-qr-image-wrap" hidden>
+        <img class="channel-connect-qr__image" id="weixin-qr-image" alt="微信登录二维码" />
+      </div>
+    </div>
+  `;
+}
+
+/** 绑定微信扫码登录：拉取二维码 → 轮询状态 → 确认后保存 accountId 并自动连接。 */
+function bindWeixinQrLogin(apiName: string): void {
+  if (apiName !== 'weixin') return;
+  const startBtn = document.getElementById('weixin-qr-start') as HTMLButtonElement | null;
+  const statusEl = document.getElementById('weixin-qr-status');
+  const imageWrap = document.getElementById('weixin-qr-image-wrap');
+  const image = document.getElementById('weixin-qr-image') as HTMLImageElement | null;
+  if (!startBtn || !statusEl || !imageWrap || !image || startBtn.dataset.bound === '1') return;
+  startBtn.dataset.bound = '1';
+
+  startBtn.addEventListener('click', () => {
+    void (async (): Promise<void> => {
+      startBtn.disabled = true;
+      startBtn.textContent = '等待扫码…';
+      statusEl.textContent = '正在获取二维码…';
+      imageWrap.hidden = true;
+      try {
+        const start = await backendApi.qrLoginStart('weixin');
+        if (!start.ok || !start.qr_id) {
+          statusEl.textContent = start.error || '获取二维码失败，请重试';
+          return;
+        }
+        image.src = start.qr_image || '';
+        imageWrap.hidden = !start.qr_image;
+        statusEl.textContent = '请用微信扫一扫上面的二维码';
+
+        const deadline = Date.now() + 480_000;
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          const st = await backendApi.qrLoginStatus('weixin', start.qr_id);
+          if (st.status === 'confirmed' && st.account_id) {
+            statusEl.textContent = '登录成功，正在连接…';
+            const platforms = await backendApi.platforms();
+            const current = platforms.find((x) => x.name === 'weixin');
+            await backendApi.savePlatformConfig('weixin', {
+              enabled: current?.enabled ?? false,
+              config: { accountId: st.account_id },
+            });
+            const result = await backendApi.connectPlatform('weixin');
+            if (!result.ok) {
+              await backendApi.deletePlatformAccount('weixin').catch(() => undefined);
+              statusEl.textContent = `连接失败：${result.error || ''}`;
+              return;
+            }
+            notify('微信已连接');
+            await renderPlatforms();
+            await openChannelConfigModal('weixin');
+            return;
+          }
+          if (st.status === 'expired') {
+            statusEl.textContent = '二维码已过期，请重新点击「扫码登录」';
+            return;
+          }
+          if (st.status === 'error') {
+            statusEl.textContent = st.error || '登录失败，请重试';
+            return;
+          }
+          statusEl.textContent = st.status === 'scaned'
+            ? '已扫码，请在手机上确认…'
+            : '请用微信扫一扫上面的二维码';
+        }
+        statusEl.textContent = '扫码超时，请重新点击「扫码登录」';
+      } catch (error) {
+        statusEl.textContent = `扫码登录失败：${(error as Error).message}`;
+      } finally {
+        startBtn.disabled = false;
+        startBtn.textContent = '扫码登录';
+      }
+    })();
+  });
+}
+
 export async function openChannelConfigModal(channel: string): Promise<void> {
   const apiName = CHANNEL_MAP[channel] ?? channel;
   console.debug('[openChannelConfigModal] start', { channel, apiName });
@@ -560,7 +653,7 @@ export async function openChannelConfigModal(channel: string): Promise<void> {
       </label>
     `
     : '';
-  form.innerHTML = envField + fields.map((field) => {
+  form.innerHTML = weixinQrAreaHtml(apiName) + envField + fields.map((field) => {
     const value = config.config[field.key];
     const hasSecret = field.secret && channelFieldHasSecret(apiName, field.key, config.has_secret);
     const requiredMark = field.required ? '<span class="channel-connect-required">*</span>' : '';
@@ -597,6 +690,7 @@ export async function openChannelConfigModal(channel: string): Promise<void> {
   });
   if (button) button.disabled = false;
   setChannelFormMode(configured);
+  bindWeixinQrLogin(apiName);
   overlay.hidden = false;
 }
 
