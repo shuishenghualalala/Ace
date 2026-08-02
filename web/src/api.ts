@@ -478,6 +478,10 @@ export const api = {
     ),
   wikiQuery: (q: string, kbId?: string) =>
     getJSON<{ ok: boolean; text: string; pages: WikiPage[] }>(withKb(`/api/wiki/query?q=${encodeURIComponent(q)}`, kbId)),
+  wikiSearch: (query: string, kbId?: string, topK = 5) =>
+    getJSON<{ ok: boolean; pages: WikiPage[]; source_titles: WikiSourceTitles; source_files: WikiSourceFiles }>(
+      withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId),
+    ),
   wikiGraph: (kbId?: string) =>
     getJSON<{ ok: boolean; graph: WikiGraph }>(withKb("/api/wiki/graph", kbId)),
   wikiCompile: (kbId?: string) =>

@@ -15,6 +15,8 @@ interface Props {
   onClose?: () => void;
   /** 点击来源或相关页面时导航到目标页面 */
   onNavigate?: (pageId: string) => void;
+  /** 点击正文 [[Wiki 双链]] 时回调链接标题（由上层解析为页面并跳转） */
+  onWikiLink?: (title: string) => void;
   /** 所有页面列表，用于将相关页面标题解析为页面 ID */
   pages?: WikiPage[];
   relationPages?: WikiRelationPage[];
@@ -46,7 +48,7 @@ function relationLabel(item: WikiRelationPage): string {
   }[item.relation] || `反向${label}`;
 }
 
-function WikiPageView({ page, sourceTitles, sourceFiles, kbId, inline, onClose, onNavigate, pages, relationPages = [] }: Props) {
+function WikiPageView({ page, sourceTitles, sourceFiles, kbId, inline, onClose, onNavigate, onWikiLink, pages, relationPages = [] }: Props) {
   const visibleRelations = page.page_type === "source"
     ? []
     : relationPages.filter((relation) => relation.page_type !== "source");
@@ -76,7 +78,7 @@ function WikiPageView({ page, sourceTitles, sourceFiles, kbId, inline, onClose, 
 
       <div className="wiki-page-view__content">
         {page.content ? (
-          <MarkdownContent content={page.content} fold />
+          <MarkdownContent content={page.content} fold onWikiLink={onWikiLink} />
         ) : (
           <div className="wiki-panel__empty">加载页面正文中…</div>
         )}

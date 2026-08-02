@@ -10,7 +10,7 @@ import ChatPanel from "./ChatPanel";
 import WikiIcon from "./WikiIcon";
 import type { Props as ChatPanelProps } from "./ChatPanel";
 import { ResizablePanels } from "./ResizablePanels";
-import { ancestorPaths, buildFileTree, vaultDocumentLabel } from "../lib/wikiTree";
+import { ancestorPaths, buildFileTree, findPageByTitle, splitHomeQuestions, vaultDocumentLabel } from "../lib/wikiTree";
 import MarkdownContent from "./MarkdownContent";
 
 type UploadJobStatus = "uploading" | "ingesting" | "done" | "error" | "cancelled";
@@ -628,6 +628,41 @@ export default function WikiHub({
     }
   }, [kbId]);
 
+  /**
+   * 点击正文 [[Wiki 双链]]：先按标题/别名在已加载页面里精确匹配，
+   * 找不到再走搜索接口兜底（对齐桌面端 resolveAndOpenWikiPage）。
+   */
+  const handleWikiLink = useCallback(
+    async (title: string) => {
+      const openPage = (pageId: string) => {
+        setSelectedDocumentName(null);
+        setVaultDocument(null);
+        setSelectedId(pageId);
+      };
+      const local = findPageByTitle(pages, title);
+      if (local) {
+        openPage(local.id);
+        return;
+      }
+      try {
+        const res = await api.wikiSearch(title, kbId, 8);
+        const target = findPageByTitle(res.pages, title);
+        if (!target) {
+          setMessage(`未找到 Wiki 页面：${title}`);
+          return;
+        }
+        setPages((prev) => (prev.some((p) => p.id === target.id) ? prev : [...prev, target]));
+        setPageDetails((prev) => ({ ...prev, [target.id]: target }));
+        setSourceTitles((prev) => ({ ...prev, ...(res.source_titles || {}) }));
+        setSourceFiles((prev) => ({ ...prev, ...(res.source_files || {}) }));
+        openPage(target.id);
+      } catch (err) {
+        setMessage(`打开 Wiki 页面失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    [pages, kbId],
+  );
+
   useEffect(() => {
     if (initializedKbId === kbId) {
       void loadVaultDocument("Home.md");
@@ -989,7 +1024,37 @@ export default function WikiHub({
                     <h2 className="wiki-page-view__title">{vaultDocumentLabel(vaultDocument.name)}</h2>
                   </div>
                   <div className="wiki-page-view__content">
-                    <MarkdownContent content={vaultDocument.content} fold />
+                    {(() => {
+                      // Home.md 的「推荐问题」小节渲染成可点击的提问按钮（对齐桌面端），
+                      // 其余文档按普通 markdown 渲染；正文 [[双链]] 均可点击跳转。
+                      const sections =
+                        vaultDocument.name === "Home.md" ? splitHomeQuestions(vaultDocument.content) : null;
+                      if (!sections) {
+                        return <MarkdownContent content={vaultDocument.content} fold onWikiLink={handleWikiLink} />;
+                      }
+                      return (
+                        <>
+                          {sections.before.trim() && (
+                            <MarkdownContent content={sections.before} fold onWikiLink={handleWikiLink} />
+                          )}
+                          <div className="wiki-ask-chips">
+                            {sections.questions.map((question) => (
+                              <button
+                                key={question}
+                                className="wiki-ask-chip"
+                                type="button"
+                                onClick={() => askAI(question)}
+                              >
+                                {question}
+                              </button>
+                            ))}
+                          </div>
+                          {sections.after.trim() && (
+                            <MarkdownContent content={sections.after} fold onWikiLink={handleWikiLink} />
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
               ) : (
@@ -1003,6 +1068,7 @@ export default function WikiHub({
                 kbId={kbId}
                 inline
                 onNavigate={(pageId) => setSelectedId(pageId)}
+                onWikiLink={handleWikiLink}
                 pages={pages}
                 relationPages={relationPages[selectedPage.id] ?? []}
               />
