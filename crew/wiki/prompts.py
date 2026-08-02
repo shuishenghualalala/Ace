@@ -70,8 +70,8 @@ WIKI_PARSE_SOURCE_PROMPT = """解析指定 RawSource 并生成 parsed markdown�
 一个可搜索的
 全文 Source 页面。默认上传流程必须继续 wiki_orient → wiki_plan_ingest；plan 使用有界的原子
 知识单元提取主张和证据，再确定性聚合为实体、主题和关系的创建/更新/跳过/争议计划。
-成功分块会持久化缓存，重试只处理失败块。wiki_plan_ingest 会遵循 wiki.ingest.auto_apply：
-默认自动应用；配置为 false 时展示计划并停止等待确认。
+成功分块会持久化缓存，重试只处理失败块。wiki_plan_ingest 会遵循 wiki.ingest.auto_apply：默认自动应用；
+配置关闭时才展示计划并停止等待确认，由后续确认回合调用 wiki_apply_ingest。
 
 如果仍失败，保留 RawSource，并依据工具返回的错误与恢复建议处理；不得读取用户未提供的其他本地路径。"""
 

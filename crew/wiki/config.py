@@ -77,7 +77,7 @@ class WikiMultimodalConfig:
 class WikiIngestConfig:
     """Wiki 深度整理流程配置。"""
 
-    auto_apply: bool = True  # plan 成功后默认自动应用
+    auto_apply: bool = True  # plan 成功后是否自动应用；关闭时恢复计划展示与人工确认
 
     @classmethod
     def from_raw(cls, raw: Any) -> "WikiIngestConfig":

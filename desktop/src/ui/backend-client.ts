@@ -403,7 +403,17 @@ export interface BrowserPageState {
   can_go_back: boolean;
   can_go_forward: boolean;
   tabs: Array<{ id: string; label: string; url: string; title: string }>;
-  downloads: Array<{ name: string; path: string; created_at: number }>;
+  downloads: Array<{
+    id?: string;
+    name: string;
+    path: string;
+    created_at: number;
+    state?: string;
+    received_bytes?: number;
+    total_bytes?: number;
+    completed_at?: number;
+    error?: string;
+  }>;
 }
 
 export interface BackendConfig {
@@ -460,7 +470,7 @@ export interface OptionalSkill {
   aliases?: string[];
   description: string;
   category: string;
-  source: 'optional';
+  source: 'optional' | 'local';
   /** 中文名（来自 metadata.zh_name，后端 display_name 字段）；缺省回退 name。 */
   display_name?: string;
   /** 中文描述（来自 metadata.zh_description，后端 description_zh 字段）；缺省回退 description。 */
@@ -476,6 +486,8 @@ export interface EvolutionConfig {
 export interface SkillStore {
   installed: Skill[];
   optional: OptionalSkill[];
+  /** ~/.agents/skills 中未安装的本地 skill（跨 agent 共享，软链安装）。 */
+  local?: OptionalSkill[];
   evolution?: EvolutionConfig;
 }
 
@@ -1550,8 +1562,36 @@ export const backendApi = {
     getJSON<{ used_tokens: number; max_tokens: number; ratio: number }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
   browserState: (sessionId: string) =>
     getJSON<{ ok: boolean; state: BrowserPageState }>(`/api/browser/${encodeURIComponent(sessionId)}/state`),
+  // record_* 动作返回 `recording` 而不是 `state`：录制态与页面控制态是正交的
+  // 两件事，录制不改变 ControlMode，所以不复用 state 字段。
   browserControl: (sessionId: string, action: string, value = '') =>
-    getJSON<{ ok: boolean; state: BrowserPageState; result?: string }>(`/api/browser/${encodeURIComponent(sessionId)}/control`, {
+    getJSON<{
+      ok: boolean;
+      state: BrowserPageState;
+      result?: string;
+      // record_discard 的返回：是否真的删掉了轨迹文件
+      discarded?: boolean;
+      recording?: {
+        recording: boolean;
+        paused: boolean;
+        steps: number;
+        incomplete?: boolean;
+        dropped_steps?: number;
+        recording_id?: string;
+        note?: string;
+        // 停止录制时一并返回：用户点「生成技能」之前要能看到自己要交出什么。
+        summary?: {
+          steps: number;
+          hosts: string[];
+          notes: string[];
+          masked_fields: number;
+          handoff_fields: number;
+          pages_captured: number;
+          incomplete?: boolean;
+          dropped_steps?: number;
+        };
+      };
+    }>(`/api/browser/${encodeURIComponent(sessionId)}/control`, {
       method: 'POST',
       ...jsonBody({ action, value }),
     }),
@@ -1736,6 +1776,16 @@ export const backendApi = {
     getJSON<{ ok: boolean; status: PlatformRow; error?: string }>(`/api/platforms/${encodeURIComponent(name)}/reconnect`, {
       method: 'POST',
     }),
+  qrLoginStart: (name: string) =>
+    getJSON<{ ok: boolean; qr_id: string; qr_image: string; qrcode_url: string; error?: string }>(
+      `/api/platforms/${encodeURIComponent(name)}/qr-login/start`,
+      { method: 'POST' },
+    ),
+  qrLoginStatus: (name: string, qrId: string) =>
+    getJSON<{ ok: boolean; status: string; account_id?: string; token?: string; error?: string }>(
+      `/api/platforms/${encodeURIComponent(name)}/qr-login/status`,
+      { method: 'POST', ...jsonBody({ qr_id: qrId }) },
+    ),
   deletePlatformAccount: (name: string) =>
     getJSON<PlatformConfigResponse & { deleted: boolean; status: PlatformRow; error?: string }>(
       `/api/platforms/${encodeURIComponent(name)}/account`,
@@ -1839,6 +1889,29 @@ export const backendApi = {
       source_pages: WikiSourcePage[];
       relation_pages: WikiRelationPage[];
     }>(withKb(`/api/wiki/pages/${encodeURIComponent(id)}`, kbId)),
+  wikiSearch: (query: string, kbId?: string, topK = 5) =>
+    getJSON<{
+      ok: boolean;
+      pages: WikiPage[];
+      source_titles: WikiSourceTitles;
+      source_files: WikiSourceFiles;
+    }>(withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId)),
+  wikiUpdatePage: (
+    id: string,
+    payload: Pick<WikiPage, 'title' | 'content' | 'tags' | 'sources' | 'relations'>,
+    kbId?: string,
+  ) =>
+    getJSON<{
+      ok: boolean;
+      page: WikiPage;
+      source_titles: WikiSourceTitles;
+      source_files: WikiSourceFiles;
+      source_pages: WikiSourcePage[];
+      relation_pages: WikiRelationPage[];
+    }>(withKb(`/api/wiki/pages/${encodeURIComponent(id)}`, kbId), {
+      method: 'PUT',
+      ...jsonBody(payload),
+    }),
   wikiSummary: (kbId?: string, force?: boolean) =>
     getJSON<{ ok: boolean; summary: string; kb_id: string; page_count?: number; source_count?: number; generated_at?: number; status: 'ready' | 'generating' | 'empty' | 'stale' }>(withKb(`/api/wiki/summary${force ? '?force=true' : ''}`, kbId)),
   /** 知识图谱：全量节点 + 关系边，不走分页。 */

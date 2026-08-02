@@ -156,9 +156,11 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
     assert entity_page is not None
     assert entity_page.page_type == "entity"
     # relationship 被应用
-    assert "ModeManager" in entity_page.related
+    mode_page = store.get_by_title("ModeManager")
+    assert mode_page is not None
+    assert entity_page.related == []
     assert any(
-        relation.target == "ModeManager" and relation.relation == "uses"
+        relation.target_page_id == mode_page.id and relation.relation == "uses"
         for relation in entity_page.relations
     )
 
@@ -1155,8 +1157,7 @@ def test_update_index_contains_navigation_quality_metadata(store, compiler):
     assert "## 概念" not in index_text
     assert "[[知识编译]]" in index_text
     assert "来源 2" in index_text
-    assert "置信度 high" in index_text
-    assert "存在争议" in index_text
+    assert "关系 0" in index_text
 
 
 def test_document_limits_apply_after_all_chunks_are_merged():
@@ -1339,7 +1340,7 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
     existing.content = "# AgentRuntime\n\n已被外部修改的新内容"
     store.update(existing)
 
-    await compiler.apply_ingest("s1")
+    result = await compiler.apply_ingest("s1")
     page_after = store.get(existing.id)
     assert "已被外部修改的新内容" in page_after.content
     assert "运行时描述" not in page_after.content  # 计划内容未覆盖

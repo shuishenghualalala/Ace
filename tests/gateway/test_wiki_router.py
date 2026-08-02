@@ -217,11 +217,11 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
 
     definition = app.subagent_registry.get("Wiki")
     run_agent_wiki = app._make_subagent(build_preset_spec(definition))
-    expected = app._subagent_tool_filter(
-        definition.toolsets,
-        definition.tools,
-        user_type="internal",
+    main_expected = app._single_agent_tool_filter(
+        "builtin",
+        app.config.access_control.resolve_for("internal"),
     )
+    expected = app._wiki_agent_tool_filter(main_expected)
 
     assert not any(name.startswith("wiki_") for name in main_agent.tool_filter)
     assert main_agent.wiki_manager is None
@@ -230,17 +230,17 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
     assert run_agent_wiki.system_prompt == wiki_agent.system_prompt
     assert run_agent_wiki.enabled_skills == wiki_agent.enabled_skills
     assert run_agent_wiki.wiki_manager is wiki_agent.wiki_manager
-    assert run_agent_wiki.disable_tool_search is wiki_agent.disable_tool_search
+    assert run_agent_wiki.tool_disclosure_mode == wiki_agent.tool_disclosure_mode
     assert "wiki_search" in wiki_agent.tool_filter
     assert "wiki_apply_ingest" in wiki_agent.tool_filter
-    assert "web_search" in wiki_agent.tool_filter
-    assert "web_extract" in wiki_agent.tool_filter
-    assert "terminal" not in wiki_agent.tool_filter
-    assert "file_read" not in wiki_agent.tool_filter
+    assert ("web_search" in wiki_agent.tool_filter) == ("web_search" in main_expected)
+    assert ("web_extract" in wiki_agent.tool_filter) == ("web_extract" in main_expected)
+    assert "terminal" in wiki_agent.tool_filter
+    assert "file_read" in wiki_agent.tool_filter
     assert "wiki_compile" not in wiki_agent.tool_filter
     assert wiki_agent.wiki_manager is app.wiki_manager
     assert wiki_agent.agent_id == "subagent_Wiki"
-    assert wiki_agent.disable_tool_search is True
+    assert wiki_agent.tool_disclosure_mode == "direct"
     assert "crew-wiki-curator" in (main_agent.disabled_skills or [])
     assert wiki_agent.enabled_skills == ["crew-wiki-curator"]
     assert "crew-wiki-curator" not in (wiki_agent.disabled_skills or [])
@@ -256,7 +256,7 @@ def test_legacy_wiki_session_flag_does_not_grant_wiki_tools(tmp_path):
 
     assert not any(name.startswith("wiki_") for name in agent.tool_filter)
     assert agent.wiki_manager is None
-    assert agent.disable_tool_search is False
+    assert agent.tool_disclosure_mode == "progressive"
 
 
 def test_cancel_confirmation_is_owner_and_session_scoped(tmp_path, auth_headers):
@@ -977,7 +977,6 @@ def test_wiki_graph(tmp_path, auth_headers):
             "page_type": "topic",
             "title": "部署规范",
             "content": "参考 [[CI/CD 流水线]]。",
-            "related": ["CI/CD 流水线"],
             "sources": ["upload_abc"],
         },
     )
@@ -1007,7 +1006,6 @@ def test_wiki_graph(tmp_path, auth_headers):
     assert any(n["id"].startswith("source:") and "upload_abc" in n["id"] for n in graph["nodes"])
 
     relations = {(e["source"], e["target"], e["relation"]) for e in graph["edges"]}
-    assert (deploy_id, cicd_id, "related") in relations
     assert (deploy_id, cicd_id, "mentions") in relations
     assert any(e["source"] == deploy_id and e["relation"] == "source_of" for e in graph["edges"])
 

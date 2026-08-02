@@ -1,4 +1,4 @@
-/* Wiki 知识库页（只读浏览、上传任务面板、批量选择、条目删除和知识图谱视图）
+/* Wiki 知识库页（Phase 1：只读浏览；Phase 2：上传任务面板 / 批量选择 / 条目删除；Phase 3：知识图谱视图）
  * 布局：页头 + 三栏（时间/目录/类型/图谱 | 页面详情 | Wiki Agent）。
  * 颜色全部走 variables.css 语义 token（--surface* / --text-* / --border-subtle / --color-accent*），
  * dark / sepia 主题自动适配，无需额外覆盖。
@@ -8,7 +8,7 @@
   overflow: hidden;
 }
 
-/* 根容器必须撑满 tab-pane 并把高度约束传下去（对齐 skills 根的 height:100% 处理）：
+/* 根容器必须撑满 tab-pane 并把高度约束传下去（对齐 skills/expert 根的 height:100% 处理）：
  * 否则 .page-shell → .wiki-body → 三栏全是内容高度，消息区不滚、Composer 被顶出可视区且无滚动条可达。 */
 #wiki-page-root {
   flex: 1 1 auto;
@@ -572,6 +572,13 @@
   white-space: nowrap;
 }
 
+.wiki-tree__folder-count {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+}
+
 .wiki-tree__label {
   display: flex;
   align-items: center;
@@ -748,7 +755,13 @@
 }
 
 .wiki-detail__header {
-  margin-bottom: 16px;
+  margin: 0 auto 28px;
+  max-width: 760px;
+}
+
+.wiki-detail__meta {
+  color: var(--text-muted);
+  font-size: var(--font-sm);
 }
 
 .wiki-detail__badges {
@@ -758,29 +771,108 @@
 }
 
 .wiki-detail__title {
-  margin: 0 0 8px;
-  font-size: var(--font-xl);
-  line-height: 30px;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 8px 2px 10px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  font-size: 36px;
+  font-weight: 720;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
   color: var(--text-primary);
 }
 
-.wiki-detail__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+.wiki-detail__title:focus {
+  box-shadow: inset 0 -1px 0 var(--border-subtle);
+}
+
+.wiki-detail__save-state {
+  min-height: 18px;
+  margin: 0 2px 18px;
+  color: var(--text-muted);
   font-size: var(--font-xs);
+}
+
+.wiki-detail__save-state[data-state="saving"],
+.wiki-detail__save-state[data-state="dirty"] {
+  color: var(--amber);
+}
+
+.wiki-detail__save-state[data-state="error"] {
+  color: var(--red);
+}
+
+.wiki-properties {
+  padding: 8px 0 14px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wiki-property {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: center;
+  min-height: 38px;
+  gap: 18px;
+  color: var(--text-secondary);
+}
+
+.wiki-property__name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--font-sm);
   color: var(--text-muted);
 }
 
-.wiki-detail__tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 8px;
+.wiki-property__name > span {
+  width: 18px;
+  text-align: center;
+  color: var(--text-muted);
 }
 
-.wiki-detail__content {
-  margin-bottom: 20px;
+.wiki-property__value {
+  min-width: 0;
+  font-size: var(--font-sm);
+}
+
+.wiki-property__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wiki-property__empty {
+  color: var(--text-muted);
+}
+
+.wiki-source-pill {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  line-height: 16px;
+}
+
+.wiki-source-pill:hover {
+  filter: brightness(0.96);
+  text-decoration: underline;
+}
+
+.wiki-source-pill:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.wiki-editor {
+  max-width: 760px;
+  min-height: 320px;
+  margin: 0 auto;
+  cursor: text;
 }
 
 /* Home.md 是阅读型首页，不沿用聊天消息的紧凑 Markdown 排版。 */
@@ -901,6 +993,134 @@
 .wiki-home-document .wiki-detail__content a:hover,
 .wiki-home-document .wiki-detail__content .wiki-detail__rel-link:hover {
   text-decoration: underline;
+}
+
+.wiki-editor__content {
+  min-height: 320px;
+  padding: 4px 2px 100px;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+.wiki-editor__content > *:first-child {
+  margin-top: 0;
+}
+
+.wiki-editor__content p {
+  margin: 4px 0 10px;
+}
+
+.wiki-editor__content h1,
+.wiki-editor__content h2,
+.wiki-editor__content h3 {
+  letter-spacing: -0.015em;
+}
+
+.wiki-editor__content h1 {
+  margin: 32px 0 12px;
+  font-size: 30px;
+}
+
+.wiki-editor__content h2 {
+  margin: 28px 0 10px;
+  font-size: 24px;
+}
+
+.wiki-editor__content h3 {
+  margin: 22px 0 8px;
+  font-size: 19px;
+}
+
+.wiki-editor__content blockquote {
+  margin: 16px 0;
+  padding-left: 16px;
+  border-left: 3px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.wiki-editor__content pre {
+  overflow-x: auto;
+  padding: 14px 16px;
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.wiki-editor__content code {
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.wiki-editor__wikilink {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.wiki-editor__content .is-editor-empty:first-child::before {
+  height: 0;
+  float: left;
+  color: var(--text-muted);
+  content: "输入 / 开始写作，支持 Markdown 快捷语法…";
+  pointer-events: none;
+}
+
+.wiki-related-pages {
+  max-width: 760px;
+  margin: 32px auto 72px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wiki-related-pages h3 {
+  margin: 0 0 14px;
+  color: var(--text-primary);
+  font-size: 17px;
+}
+
+.wiki-related-pages__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.wiki-relation-card {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.wiki-relation-card:hover {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.wiki-relation-card__title,
+.wiki-relation-card__meta {
+  display: block;
+}
+
+.wiki-relation-card__title {
+  overflow: hidden;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-relation-card__meta {
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
 }
 
 /* 长文增量渲染：底部加载触发点（对齐 web markdown.css 的 .md-sentinel） */
@@ -1058,8 +1278,22 @@
   color: var(--red);
 }
 
+/* 文件树条目：删除按钮绝对定位到文件名左侧的缩进空隙（--tree-indent 由模板注入），
+   隐藏时禁用 pointer-events，避免挡住条目点击。 */
+.wiki-tree__item {
+  position: relative;
+}
+
 .wiki-tree__item .wiki-item__delete {
-  margin-left: auto;
+  position: absolute;
+  left: max(2px, calc(var(--tree-indent, 6px) - 22px));
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.wiki-tree__item:hover .wiki-item__delete {
+  pointer-events: auto;
 }
 
 /* ── 上传 / 编译任务面板 ── */
@@ -1252,7 +1486,7 @@
   word-break: break-all;
 }
 
-/* ── 图谱视图（对齐 web WikiGraphView） ── */
+/* ── 图谱视图（Phase 3，对齐 web WikiGraphView） ── */
 
 /* 图谱模式下列表栏加宽（默认 340px 太窄，画布需要空间），详情栏仍在右侧。 */
 .wiki-list-pane--graph {
@@ -1567,7 +1801,7 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════
- * Wiki Agent 对话
+ * Phase 4：Wiki Agent 对话
  * - .wiki-cards-panel / .wiki-card：对话流 wiki_cards 帧的「Wiki 结果」卡片网格
  * ══════════════════════════════════════════════════════════════════ */
 

@@ -1,7 +1,7 @@
 /**
  * @vitest-environment happy-dom
  *
- * Wiki 图谱视图单测。
+ * Wiki 图谱视图单测（Phase 3）。
  * 覆盖：布局纯函数（computeWikiGraphLayout，worker 壳不测）、图谱数据加载渲染、
  *       节点点击选中 + 右栏详情、隐藏来源开关、滚轮缩放 / 拖拽平移 / 重置、
  *       加载失败重试与空态。
@@ -264,7 +264,7 @@ describe('节点交互', () => {
     await vi.waitFor(
       () => {
         expect(api.wikiPage).toHaveBeenCalledWith('p1', 'default');
-        expect(root().querySelector('.wiki-detail__title')?.textContent).toBe('React 笔记');
+        expect((root().querySelector('.wiki-detail__title') as HTMLInputElement | null)?.value).toBe('React 笔记');
       },
       { timeout: 10000, interval: 20 },
     );

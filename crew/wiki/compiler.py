@@ -1059,7 +1059,7 @@ class WikiCompiler:
                 pages.append(page)
                 created_titles.add(page.title)
 
-        # 更新 related 关系
+        # 将分析结果编译为基于页面 ID 的有类型关系。
         _check_cancelled(cancel_event)
         relationships = analysis.get("relationships", [])
         self._apply_relationships(pages, relationships, owner_account_id, kb_id)
@@ -1324,6 +1324,17 @@ class WikiCompiler:
         # 应用关系（只在实际写入的页面间）
         _check_cancelled(cancel_event)
         self._apply_relationships(applied_pages, plan.relationships, owner_account_id, kb_id)
+        source_page = next((page for page in applied_pages if page.page_type == "source"), None)
+        knowledge_pages = [page for page in applied_pages if page.page_type in {"entity", "topic"}]
+        if source_page is not None and knowledge_pages:
+            source_page.relations = [
+                WikiRelation(
+                    target_page_id=page.id,
+                    relation="describes" if page.page_type == "entity" else "covers",
+                )
+                for page in knowledge_pages
+            ]
+            self.store.update(source_page, owner_account_id, kb_id)
 
         # 更新 index.md；批处理会在全部来源完成后统一更新一次。
         _check_cancelled(cancel_event)
@@ -2090,7 +2101,11 @@ class WikiCompiler:
             existing.content = content
             existing.summary = summary
             existing.sources = source_ids
-            existing.related = [page.title for page in seeds[:12]]
+            existing.related = []
+            existing.relations = [
+                WikiRelation(target_page_id=seed.id, relation="references")
+                for seed in seeds[:12]
+            ]
             page = self.store.update(existing, owner_account_id, kb_id) or existing
         else:
             page = self.store.save_page(
@@ -2101,7 +2116,10 @@ class WikiCompiler:
                     content=content,
                     file_path="",
                     sources=source_ids,
-                    related=[page.title for page in seeds[:12]],
+                    relations=[
+                        WikiRelation(target_page_id=seed.id, relation="references")
+                        for seed in seeds[:12]
+                    ],
                     tags=[suffix],
                     summary=summary,
                 ),
@@ -2324,25 +2342,6 @@ class WikiCompiler:
             str((source_summary or {}).get("one_sentence") or "").strip()
             or _page_index_summary(page_content, max_len=180)
         )
-        related = list(dict.fromkeys(
-            [
-                *[
-                    str(item.get("name") or "").strip()
-                    for item in (entities or [])
-                    if str(item.get("name") or "").strip()
-                ],
-                *[
-                    str(item.get("name") or "").strip()
-                    for item in (topics or [])
-                    if str(item.get("name") or "").strip()
-                ],
-                *[
-                    value.strip()
-                    for value in re.findall(r"\[\[([^\]|]+)", page_content)
-                    if value.strip() and value.strip() != title
-                ],
-            ]
-        ))
         source_dir = SOURCE_DIRS.get(
             str(raw.source_kind if raw else "asset"),
             "assets",
@@ -2364,7 +2363,7 @@ class WikiCompiler:
                 existing.file_path = str(target_path.relative_to(base))
             existing.content = page_content
             existing.summary = summary
-            existing.related = related
+            existing.related = []
             existing.updated_at = time.time()
             # 自愈 legacy 合并页：旧版按标题合并多来源，现以 source_id 为身份，
             # 收敛为单源，避免误删其他来源时连带删除本页。
@@ -2381,7 +2380,6 @@ class WikiCompiler:
                 unique_file_path(target_dir, filename_from_title(title)).relative_to(base)
             ),
             sources=[source_id],
-            related=related,
             tags=[],
             summary=summary,
             created_at=time.time(),
@@ -2436,7 +2434,6 @@ class WikiCompiler:
             content=description,
             file_path="",
             sources=[source_id],
-            related=[],
             tags=[],
             created_at=time.time(),
             updated_at=time.time(),
@@ -2506,7 +2503,6 @@ class WikiCompiler:
             content=content,
             file_path="",
             sources=[source_id],
-            related=list(top.get("related", [])) or [],
             tags=[],
             created_at=time.time(),
             updated_at=time.time(),
@@ -2560,28 +2556,22 @@ class WikiCompiler:
             if src is None:
                 continue
             target = _resolve(tgt_title)
-            canonical_target = target.title if target else tgt_title
-            if canonical_target not in src.related:
-                src.related.append(canonical_target)
-                touched[src.id] = src
+            if target is None:
+                continue
             relation_type = str(rel.get("relation", "related")).strip() or "related"
-            relation_key = (normalize_page_key(canonical_target), relation_type.casefold())
+            relation_key = (target.id, relation_type.casefold())
             existing_relation_keys = {
-                (normalize_page_key(item.target), item.relation.casefold())
+                (item.target_page_id, item.relation.casefold())
                 for item in src.relations
             }
             if relation_key not in existing_relation_keys:
                 src.relations.append(
                     WikiRelation(
-                        target=canonical_target,
+                        target_page_id=target.id,
                         relation=relation_type,
                     )
                 )
                 touched[src.id] = src
-            # 同时反向也加入，简化双向链接
-            if target and src.title not in target.related:
-                target.related.append(src.title)
-                touched[target.id] = target
 
         # 写回
         for page in touched.values():
@@ -2620,12 +2610,9 @@ class WikiCompiler:
                 summary = page.summary or _page_index_summary(page.content)
                 quality: list[str] = [
                     f"来源 {len(page.sources)}",
+                    f"关系 {len(page.relations)}",
                     f"更新 {time.strftime('%Y-%m-%d', time.localtime(page.updated_at)) if page.updated_at else '-'}",
                 ]
-                if page.confidence:
-                    quality.append(f"置信度 {page.confidence}")
-                if page.contested:
-                    quality.append("存在争议")
                 lines.append(
                     f"- [[{page.title}]] — {summary} "
                     f"（{'；'.join(quality)}）"

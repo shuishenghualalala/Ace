@@ -68,25 +68,10 @@ def create_wiki_router(crew) -> APIRouter:
         return result
 
     def _relation_pages_for_page(page, owner: str, kb_id: str) -> list[dict[str, Any]]:
-        """返回页面的正向与反向结构化关系，供详情页直接展示和跳转。
-
-        Ace 的 WikiRelation.target 按标题存储（编译管线如此），这里同时兼容
-        按页面 ID 写入的关系：先按 ID 命中，再按标题命中。
-        """
+        """返回页面的正向与反向结构化关系，供详情页直接展示和跳转。"""
         store = getattr(crew, "_wiki_store", None)
         if store is None:
             return []
-        all_pages = store.list_all(
-            owner_account_id=owner,
-            kb_id=kb_id,
-            limit=10000,
-        )
-        by_id = {p.id: p for p in all_pages}
-        by_title = {p.title: p for p in all_pages}
-
-        def _resolve(raw_target: str):
-            return by_id.get(raw_target) or by_title.get(raw_target)
-
         result: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str]] = set()
 
@@ -104,12 +89,16 @@ def create_wiki_router(crew) -> APIRouter:
             })
 
         for relation in page.relations:
-            target = _resolve(relation.target)
+            target = store.get(relation.target_page_id, owner, kb_id)
             if target is not None:
                 _append(target, relation.relation, "outgoing")
-        for candidate in all_pages:
+        for candidate in store.list_all(
+            owner_account_id=owner,
+            kb_id=kb_id,
+            limit=10000,
+        ):
             for relation in candidate.relations:
-                if relation.target in (page.id, page.title):
+                if relation.target_page_id == page.id:
                     _append(candidate, relation.relation, "incoming")
         return result
 

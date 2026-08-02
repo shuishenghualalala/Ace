@@ -24,7 +24,6 @@ def serialize_page(page: WikiPage) -> str:
         "title": page.title,
         "file_path": page.file_path,
         "sources": page.sources,
-        "related": page.related,
         "tags": page.tags,
         "created_at": page.created_at,
         "updated_at": page.updated_at,

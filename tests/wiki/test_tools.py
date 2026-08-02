@@ -627,13 +627,17 @@ async def test_wiki_update_page_uses_active_kb(wiki_mocks):
 
     _set_context()
     tool = registry.get("wiki_update_page")
-    result = await tool.run({"page_id": "p1", "content": "新内容", "related": ["关联页"]})
+    result = await tool.run({
+        "page_id": "p1",
+        "content": "新内容",
+        "relations": [{"target_page_id": "p2", "relation": "related"}],
+    })
 
     store.get.assert_called_once_with("p1", owner_account_id="owner", kb_id="kb_active")
     store.update.assert_called_once()
     call_page = store.update.call_args.args[0]
     assert call_page.content == "新内容"
-    assert call_page.related == ["关联页"]
+    assert call_page.relations[0].target_page_id == "p2"
     assert "page" in result
 
 
@@ -1171,8 +1175,7 @@ async def test_rename_and_delete_pages_repair_all_inbound_reference_forms(tmp_pa
             title="引用页",
             content="参见 [[旧标题]]",
             file_path="",
-            related=["旧标题"],
-            relations=[WikiRelation(target="旧标题", relation="mentions")],
+            relations=[WikiRelation(target_page_id=target.id, relation="mentions")],
         ),
         owner_account_id="owner",
     )
@@ -1191,8 +1194,8 @@ async def test_rename_and_delete_pages_repair_all_inbound_reference_forms(tmp_pa
         owner_account_id="owner",
         kb_id="default",
     )
-    assert renamed_referrer.related == ["新标题"]
-    assert renamed_referrer.relations[0].target == "新标题"
+    assert renamed_referrer.related == []
+    assert renamed_referrer.relations[0].target_page_id == target.id
     assert "[[新标题]]" in renamed_referrer.content
 
     manager.consume_confirmation.return_value = {"page_ids": [target.id]}

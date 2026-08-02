@@ -996,9 +996,9 @@ def test_get_neighbors_empty_for_unknown_page(store: FileSystemWikiStore):
 def test_get_neighbors_returns_related_pages(store: FileSystemWikiStore):
     """related 字段中的页面应出现在邻居列表中。"""
     a = store.save_page(WikiPage(id="", page_type="topic", title="页面A", content="内容", file_path=""))
-    store.save_page(WikiPage(id="", page_type="topic", title="页面B", content="内容", file_path=""))
+    b = store.save_page(WikiPage(id="", page_type="topic", title="页面B", content="内容", file_path=""))
     # 页面A 显式关联 页面B
-    a.related = ["页面B"]
+    a.relations = [WikiRelation(target_page_id=b.id)]
     store.update(a)
 
     neighbors = store.get_neighbors(a.id)
@@ -1018,9 +1018,9 @@ def test_get_neighbors_from_wikilinks(store: FileSystemWikiStore):
 
 def test_get_neighbors_combines_related_and_wikilinks(store: FileSystemWikiStore):
     """related 和 [[wikilinks]] 应合并去重。"""
-    a = store.save_page(WikiPage(id="", page_type="topic", title="中心页", content="参见 [[页面B]] 和 [[页面C]]", file_path="", related=["页面B"]))
-    store.save_page(WikiPage(id="", page_type="topic", title="页面B", content="", file_path=""))
+    b = store.save_page(WikiPage(id="", page_type="topic", title="页面B", content="", file_path=""))
     store.save_page(WikiPage(id="", page_type="topic", title="页面C", content="", file_path=""))
+    a = store.save_page(WikiPage(id="", page_type="topic", title="中心页", content="参见 [[页面B]] 和 [[页面C]]", file_path="", relations=[WikiRelation(target_page_id=b.id)]))
 
     neighbors = store.get_neighbors(a.id)
     assert len(neighbors) == 2
@@ -1030,9 +1030,9 @@ def test_get_neighbors_combines_related_and_wikilinks(store: FileSystemWikiStore
 
 def test_get_neighbors_related_ranked_before_mentions(store: FileSystemWikiStore):
     """related 关系的邻居应排在 mentions（wikilinks）前面。"""
-    a = store.save_page(WikiPage(id="", page_type="topic", title="中心页", content="[[仅提及]]", file_path="", related=["显式关联"]))
-    store.save_page(WikiPage(id="", page_type="topic", title="显式关联", content="", file_path=""))
+    explicit = store.save_page(WikiPage(id="", page_type="topic", title="显式关联", content="", file_path=""))
     store.save_page(WikiPage(id="", page_type="topic", title="仅提及", content="", file_path=""))
+    a = store.save_page(WikiPage(id="", page_type="topic", title="中心页", content="[[仅提及]]", file_path="", relations=[WikiRelation(target_page_id=explicit.id)]))
 
     neighbors = store.get_neighbors(a.id)
     assert len(neighbors) == 2
@@ -1242,7 +1242,7 @@ def test_typed_relations_roundtrip_graph_and_neighbors(store: FileSystemWikiStor
             title="知识问答",
             content="# 知识问答",
             file_path="",
-            relations=[WikiRelation(target="RAG", relation="uses")],
+            relations=[WikiRelation(target_page_id=target.id, relation="uses")],
         )
     )
 

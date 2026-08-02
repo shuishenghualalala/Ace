@@ -360,20 +360,22 @@ _WIKI_UPDATE_PAGE_SCHEMA = {
                 "type": "string",
                 "description": "页面 Markdown 内容（可选，传入则完全替换）",
             },
-            "related": {
+            "relations": {
                 "type": "array",
-                "items": {"type": "string"},
-                "description": "相关页面标题列表（可选，传入则覆盖）",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "target_page_id": {"type": "string"},
+                        "relation": {"type": "string"},
+                    },
+                    "required": ["target_page_id", "relation"],
+                },
+                "description": "基于稳定页面 ID 的有类型关系（可选，传入则覆盖）",
             },
             "tags": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "标签列表（可选，传入则覆盖）",
-            },
-            "aliases": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "别名列表（可选，传入则覆盖）",
             },
             **_KB_ID_PARAM,
         },
@@ -551,8 +553,17 @@ _WIKI_CREATE_PAGE_SCHEMA = {
                 "enum": ["entity", "topic", "source", "comparison", "synthesis"],
             },
             "tags": {"type": "array", "items": {"type": "string"}},
-            "aliases": {"type": "array", "items": {"type": "string"}},
-            "related": {"type": "array", "items": {"type": "string"}},
+            "relations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "target_page_id": {"type": "string"},
+                        "relation": {"type": "string"},
+                    },
+                    "required": ["target_page_id", "relation"],
+                },
+            },
             **_KB_ID_PARAM,
         },
         "required": ["title", "content"],
@@ -575,7 +586,7 @@ _WIKI_DELETE_PAGES_SCHEMA = {
 
 _WIKI_RENAME_PAGE_SCHEMA = {
     "name": "wiki_rename_page",
-    "description": "重命名页面并修复其他页面中的 related 与 wikilink 引用。",
+    "description": "重命名页面并修复正文 wikilink；结构化关系使用页面 ID，无需改写。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1463,7 +1474,7 @@ def register_wiki_tools(
         )
 
     def _handle_create_page(args: dict[str, Any]) -> str:
-        from .schemas import WikiPage
+        from .schemas import WikiPage, WikiRelation
 
         title = str(args.get("title") or "").strip()
         content = str(args.get("content") or "").strip()
@@ -1480,8 +1491,11 @@ def register_wiki_tools(
             content=content,
             file_path="",
             tags=[str(item) for item in args.get("tags") or []],
-            aliases=[str(item) for item in args.get("aliases") or []],
-            related=[str(item) for item in args.get("related") or []],
+            relations=[
+                WikiRelation.from_dict(item)
+                for item in args.get("relations") or []
+                if isinstance(item, dict)
+            ],
         )
         saved = store.save_page(page, owner_account_id=_owner(), kb_id=kb_id)
         _finish_write(kb_id, f"创建页面 {saved.id} ({saved.title})", "page_created", page_ids=[saved.id])
@@ -1511,7 +1525,7 @@ def register_wiki_tools(
             1
             for page in remaining
             if any(value in deleted_titles for value in page.related)
-            or any(relation.target in deleted_titles for relation in page.relations)
+            or any(relation.target_page_id in target_ids for relation in page.relations)
             or any(f"[[{value}]]" in page.content for value in deleted_titles)
         )
         confirmed = _consume_confirmation(args, action="delete_pages", kb_id=kb_id)
@@ -1545,7 +1559,7 @@ def register_wiki_tools(
                 relations = [
                     relation
                     for relation in other.relations
-                    if relation.target not in deleted_titles
+                    if relation.target_page_id not in target_ids
                 ]
                 if len(relations) != len(other.relations):
                     other.relations = relations
@@ -1594,14 +1608,6 @@ def register_wiki_tools(
             if other.id == page.id:
                 continue
             changed = False
-            if old_title in other.related:
-                other.related = [new_title if value == old_title else value for value in other.related]
-                changed = True
-            if any(relation.target == old_title for relation in other.relations):
-                for relation in other.relations:
-                    if relation.target == old_title:
-                        relation.target = new_title
-                changed = True
             if old_link in other.content:
                 other.content = other.content.replace(old_link, new_link)
                 changed = True
@@ -1623,15 +1629,19 @@ def register_wiki_tools(
         if "content" in args:
             page.content = str(args["content"])
             changed_fields.append("content")
-        if "related" in args:
-            page.related = [str(t) for t in args["related"] if t is not None]
-            changed_fields.append("related")
+        if "relations" in args:
+            from .schemas import WikiRelation
+
+            page.relations = [
+                WikiRelation.from_dict(item)
+                for item in args["relations"]
+                if isinstance(item, dict)
+            ]
+            page.related = []
+            changed_fields.append("relations")
         if "tags" in args:
             page.tags = [str(t) for t in args["tags"] if t is not None]
             changed_fields.append("tags")
-        if "aliases" in args:
-            page.aliases = [str(a) for a in args["aliases"] if a is not None]
-            changed_fields.append("aliases")
 
         updated = store.update(page, owner_account_id=_owner(), kb_id=_kb_id(args))
         if updated is None:

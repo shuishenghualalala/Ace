@@ -249,17 +249,17 @@ class WikiClaim:
 class WikiRelation:
     """从当前页面指向另一规范页面的有类型关系。"""
 
-    target: str
+    target_page_id: str
     relation: str = "related"
 
     def to_dict(self) -> dict[str, str]:
-        return {"target": self.target, "relation": self.relation}
+        return {"target_page_id": self.target_page_id, "relation": self.relation}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WikiRelation":
         return cls(
-            # 兼容按页面 ID 写入的关系（``target_page_id``），Ace 内部仍按标题存储。
-            target=str(data.get("target", "") or data.get("target_page_id", "")),
+            # ``target`` 只在 KB 初始化迁移前用于读取旧 frontmatter。
+            target_page_id=str(data.get("target_page_id") or data.get("target", "")),
             relation=str(data.get("relation", "related")) or "related",
         )
 
@@ -359,7 +359,8 @@ class WikiPage:
             relations=[
                 WikiRelation.from_dict(item)
                 for item in raw_relations
-                if isinstance(item, dict) and str(item.get("target", "") or item.get("target_page_id", "")).strip()
+                if isinstance(item, dict)
+                and str(item.get("target_page_id") or item.get("target", "")).strip()
             ],
             stale=bool(data.get("stale", False)),
         )

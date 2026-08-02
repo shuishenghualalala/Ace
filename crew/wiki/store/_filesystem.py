@@ -13,7 +13,7 @@ from typing import Any
 
 from crew.state.home import get_owner_runtime_home, owner_path_segment
 from crew.state.logging import get_logger
-from crew.wiki.schemas import HomeIntro, KBSummary, KnowledgeBase, LintIssue, RawSource, WikiGraph, WikiOrientation, WikiPage
+from crew.wiki.schemas import HomeIntro, KBSummary, KnowledgeBase, LintIssue, RawSource, WikiGraph, WikiOrientation, WikiPage, WikiRelation
 from crew.wiki.sources import SOURCE_DIRS
 from crew.wiki._utils import normalize_page_key, query_terms
 from crew.wiki.search import SQLiteFTS5SearchIndex, WikiSearchIndex
@@ -200,6 +200,48 @@ class FileSystemWikiStore(WikiStore):
             home_text = home_path.read_text(encoding="utf-8", errors="replace")
             if _is_legacy_generated_empty_home(home_text):
                 home_path.write_text(_build_home_markdown(kb_id, [], []), encoding="utf-8")
+        self._migrate_page_relations(owner_account_id, kb_id)
+
+    def _migrate_page_relations(self, owner_account_id: str, kb_id: str) -> None:
+        """把旧标题关系一次性迁移为稳定 page id；正常业务只使用 relations。"""
+        base = self._dir(owner_account_id, kb_id)
+        meta = self._read_kb_meta(base)
+        if int(meta.get("relation_schema_version", 0)) >= 2:
+            return
+        pages = list(self._iter_pages(owner_account_id, kb_id))
+        page_by_id = {page.id: page for page in pages}
+        page_by_title = {
+            normalize_page_key(value): page
+            for page in pages
+            for value in [page.title, *page.aliases]
+            if normalize_page_key(value)
+        }
+        for page in pages:
+            migrated: list[WikiRelation] = []
+            seen: set[tuple[str, str]] = set()
+            legacy = [
+                *[(value, "related") for value in page.related],
+                *[(item.target_page_id, item.relation) for item in page.relations],
+            ]
+            for target_value, relation_type in legacy:
+                target = page_by_id.get(target_value) or page_by_title.get(
+                    normalize_page_key(target_value)
+                )
+                if target is None or target.id == page.id:
+                    continue
+                key = (target.id, relation_type.casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
+                migrated.append(WikiRelation(target.id, relation_type))
+            if page.related or migrated != page.relations:
+                page.related = []
+                page.relations = migrated
+                path = base / page.file_path
+                path.write_text(serialize_page(page), encoding="utf-8")
+                self._search_index(owner_account_id, kb_id).sync_page(page)
+        meta["relation_schema_version"] = 2
+        self._kb_meta_path(base).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
     def _quick_count(self, base: Path, raw_dir: Path) -> tuple[int, int]:
         """快速统计 KB 的页面数和 source 数（只数文件，不解序列化）。"""
@@ -974,10 +1016,13 @@ class FileSystemWikiStore(WikiStore):
             }
             for p in pages
         ]
-        title_to_id: dict[str, str] = {}
-        for page in pages:
-            for value in [page.title, *page.aliases]:
-                title_to_id[normalize_page_key(value)] = page.id
+        page_ids = {page.id for page in pages}
+        title_to_id = {
+            normalize_page_key(value): page.id
+            for page in pages
+            for value in [page.title, *page.aliases]
+            if normalize_page_key(value)
+        }
         # 预加载所有 RawSource，用于 source 节点显示标题
         raw_by_id = {raw.id: raw for raw in self.list_raws(owner_account_id, kb_id)}
         # source 页面本身就是该 raw source 的节点：建立 raw_id -> source 页面 id 的映射，
@@ -998,13 +1043,8 @@ class FileSystemWikiStore(WikiStore):
 
         for page in pages:
             for typed_relation in page.relations:
-                target_id = title_to_id.get(normalize_page_key(typed_relation.target))
-                if target_id and target_id != page.id:
-                    _add_edge(page.id, target_id, typed_relation.relation)
-            for related in page.related:
-                target_id = title_to_id.get(normalize_page_key(related))
-                if target_id:
-                    _add_edge(page.id, target_id, "related")
+                if typed_relation.target_page_id in page_ids and typed_relation.target_page_id != page.id:
+                    _add_edge(page.id, typed_relation.target_page_id, typed_relation.relation)
             for src in page.sources:
                 target_id = raw_to_page_id.get(src, f"source:{src}")
                 if target_id == page.id:
@@ -1047,13 +1087,8 @@ class FileSystemWikiStore(WikiStore):
         for candidate in pages:
             for value in [candidate.title, *candidate.aliases]:
                 title_to_page[normalize_page_key(value)] = candidate
+        neighbor_ids = {relation.target_page_id for relation in page.relations}
         neighbor_titles: set[str] = set()
-
-        # 显式 related 与有类型关系
-        for t in page.related:
-            neighbor_titles.add(t.strip())
-        for relation in page.relations:
-            neighbor_titles.add(relation.target.strip())
 
         # 正文 [[wikilinks]]
         for link in re.findall(r"\[\[([^\]]+)\]\]", page.content):
@@ -1064,6 +1099,12 @@ class FileSystemWikiStore(WikiStore):
         # 收集邻居页面（排除自身）
         neighbors: list[WikiPage] = []
         seen: set[str] = {page.id}
+        page_by_id = {candidate.id: candidate for candidate in pages}
+        for target_id in neighbor_ids:
+            neighbor = page_by_id.get(target_id)
+            if neighbor and neighbor.id not in seen:
+                neighbors.append(neighbor)
+                seen.add(neighbor.id)
         for title in neighbor_titles:
             neighbor = title_to_page.get(normalize_page_key(title))
             if neighbor and neighbor.id not in seen:
@@ -1088,11 +1129,7 @@ class FileSystemWikiStore(WikiStore):
                 for link in re.findall(r"\[\[([^\]]+)\]\]", candidate.content)
             }
             has_inbound = (
-                page.title in candidate.related
-                or any(
-                    normalize_page_key(relation.target) == normalize_page_key(page.title)
-                    for relation in candidate.relations
-                )
+                any(relation.target_page_id == page.id for relation in candidate.relations)
                 or page.title in links
                 or bool(page_sources & set(candidate.sources))
             )
@@ -1103,12 +1140,7 @@ class FileSystemWikiStore(WikiStore):
         # 按关系亲密度排序：related > mentions > source_of
         def _rank(p: WikiPage) -> int:
             score = 0
-            if p.title in page.related:
-                score += 100
-            if any(
-                normalize_page_key(relation.target) == normalize_page_key(p.title)
-                for relation in page.relations
-            ):
+            if any(relation.target_page_id == p.id for relation in page.relations):
                 score += 120
             if re.findall(r"\[\[([^\]]+)\]\]", page.content):
                 for link in re.findall(r"\[\[([^\]]+)\]\]", page.content):
@@ -1149,15 +1181,13 @@ class FileSystemWikiStore(WikiStore):
             re.IGNORECASE,
         )
 
-        # 预先收集所有被引用的标题（用于断链和孤立检测，O(n) 替代 O(n²)）
+        # 预先收集正文链接与结构化关系目标（用于孤立检测）。
         all_linked: set[str] = set()
         for p in pages:
             for link in re.findall(r"\[\[([^\]]+)\]\]", p.content):
                 all_linked.add(link.strip())
-            for related_title in p.related:
-                all_linked.add(related_title)
             for relation in p.relations:
-                all_linked.add(relation.target)
+                all_linked.add(relation.target_page_id)
 
         for page in pages:
             # 1. 断链
@@ -1199,11 +1229,10 @@ class FileSystemWikiStore(WikiStore):
 
             # 4. 孤立页面：无出链且无入链（source 页面除外）
             has_out = (
-                bool(page.related)
-                or bool(page.relations)
+                bool(page.relations)
                 or bool(re.findall(r"\[\[([^\]]+)\]\]", page.content))
             )
-            has_in = page.title in all_linked
+            has_in = page.id in all_linked or page.title in all_linked
             if not has_out and not has_in and page.page_type != "source":
                 issues.append(
                     LintIssue(
@@ -1226,14 +1255,14 @@ class FileSystemWikiStore(WikiStore):
                     )
 
             for relation in page.relations:
-                if normalize_page_key(relation.target) not in normalized_title_keys:
+                if relation.target_page_id not in {item.id for item in pages}:
                     issues.append(
                         LintIssue(
                             kind="broken_link",
                             page_id=page.id,
-                            message=f"关系目标不存在: {relation.target}",
+                            message=f"关系目标不存在: {relation.target_page_id}",
                             details={
-                                "target": relation.target,
+                                "target_page_id": relation.target_page_id,
                                 "relation": relation.relation,
                             },
                         )

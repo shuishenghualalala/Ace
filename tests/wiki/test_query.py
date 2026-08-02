@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from crew.wiki.schemas import WikiPage
+from crew.wiki.schemas import WikiPage, WikiRelation
 from crew.wiki.query import WikiQuerier
 from crew.wiki.store import FileSystemWikiStore
 
@@ -122,16 +122,6 @@ def test_query_context_format(querier, store):
 
 
 def test_query_expands_one_hop_graph_neighbors(querier, store):
-    seed = store.save_page(
-        WikiPage(
-            id="",
-            page_type="topic",
-            title="Crew Wiki",
-            content="Crew Wiki 使用知识编译流程。",
-            file_path="",
-            related=["知识编译"],
-        )
-    )
     neighbor = store.save_page(
         WikiPage(
             id="",
@@ -139,7 +129,16 @@ def test_query_expands_one_hop_graph_neighbors(querier, store):
             title="知识编译",
             content="把来源整理成长期知识。",
             file_path="",
-            related=["Crew Wiki"],
+        )
+    )
+    seed = store.save_page(
+        WikiPage(
+            id="",
+            page_type="topic",
+            title="Crew Wiki",
+            content="Crew Wiki 使用知识编译流程。",
+            file_path="",
+            relations=[WikiRelation(neighbor.id, "related")],
         )
     )
 
@@ -159,16 +158,6 @@ def test_query_fuses_index_and_full_text_before_graph_expansion(querier, store):
             file_path="",
         )
     )
-    indexed = store.save_page(
-        WikiPage(
-            id="",
-            page_type="topic",
-            title="架构导航",
-            content="# 架构导航\n\n正文没有查询词。",
-            file_path="",
-            related=["证据链"],
-        )
-    )
     neighbor = store.save_page(
         WikiPage(
             id="",
@@ -176,7 +165,16 @@ def test_query_fuses_index_and_full_text_before_graph_expansion(querier, store):
             title="证据链",
             content="# 证据链\n\n连接结论与来源。",
             file_path="",
-            related=["架构导航"],
+        )
+    )
+    indexed = store.save_page(
+        WikiPage(
+            id="",
+            page_type="topic",
+            title="架构导航",
+            content="# 架构导航\n\n正文没有查询词。",
+            file_path="",
+            relations=[WikiRelation(neighbor.id, "related")],
         )
     )
     store.init_kb()

@@ -3,7 +3,7 @@
  *
  * wiki-page 单测：三栏浏览与 Agent-first 上传边界（对齐 web WikiHub，无页面编辑/新建入口）。
  * 覆盖：KB 加载渲染、三种视图切换、分页加载更多、点击条目加载详情、错误 notify、
- *       首次加载失败重试、上传队列、视频确认、进度帧、单条/批量删除。
+ *       首次加载失败重试（Phase 2 修复）、上传队列、视频确认、进度帧、单条/批量删除。
  * mock 方式与现有页面单测一致（vi.mock backend-client + happy-dom 容器）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,6 +38,8 @@ vi.mock('../../src/ui/backend-client', () => ({
     wikiGraph: vi.fn(),
     wikiPages: vi.fn(),
     wikiPage: vi.fn(),
+    wikiSearch: vi.fn(),
+    wikiUpdatePage: vi.fn(),
     wikiVaultDocument: vi.fn(),
     wikiSummary: vi.fn(),
     wikiUpload: vi.fn(),
@@ -60,6 +62,8 @@ const api = backendApi as unknown as {
   wikiGraph: ReturnType<typeof vi.fn>;
   wikiPages: ReturnType<typeof vi.fn>;
   wikiPage: ReturnType<typeof vi.fn>;
+  wikiSearch: ReturnType<typeof vi.fn>;
+  wikiUpdatePage: ReturnType<typeof vi.fn>;
   wikiVaultDocument: ReturnType<typeof vi.fn>;
   wikiSummary: ReturnType<typeof vi.fn>;
   wikiUpload: ReturnType<typeof vi.fn>;
@@ -103,7 +107,7 @@ beforeEach(() => {
   __resetWikiViewForTest();
   setWikiAgentEntryHandler(null);
   setWikiAgentKbDeletedHandler(null);
-  (window as unknown as { Crew: unknown }).Crew = { selectFile: mockSelectFile };
+  (window as unknown as { MobileWork: unknown }).MobileWork = { selectFile: mockSelectFile };
   document.body.innerHTML = `
     <button class="nav-item" data-tab="wiki">Wiki</button>
     <section id="wiki-tab" class="tab-pane"><div id="wiki-page-root"></div></section>
@@ -121,6 +125,13 @@ beforeEach(() => {
   api.wikiGraph.mockResolvedValue({ ok: true, graph: { nodes: [], edges: [] } });
   api.wikiPages.mockResolvedValue(pagesResult([]));
   api.wikiPage.mockResolvedValue({ ok: true, page: makePage({}), source_titles: {}, source_files: {} });
+  api.wikiSearch.mockResolvedValue(pagesResult([]));
+  api.wikiUpdatePage.mockImplementation(async (_id: string, payload: Partial<WikiPage>) => ({
+    ok: true,
+    page: makePage({ id: 'p1', ...payload }),
+    source_titles: {},
+    source_files: {},
+  }));
   api.wikiVaultDocument.mockImplementation(async (name: 'Home.md' | 'index.md') => ({
     ok: true,
     document: {
@@ -306,6 +317,34 @@ describe('三种视图切换', () => {
     expect(document.querySelectorAll('.wiki-tree__item').length).toBe(2);
   });
 
+  it('文件树视图：文件夹显示笔记数量，空文件夹不显示', () => {
+    clickView('tree');
+    const root = document.querySelector('#wiki-page-root');
+    const entitiesToggle = root?.querySelector('[data-tree-path="wiki/entities"]');
+    expect(entitiesToggle?.querySelector('.wiki-tree__folder-count')?.textContent).toBe('2');
+    // 递归统计：根「知识库」文件夹同样显示总数
+    const rootToggle = root?.querySelector('[data-tree-path="wiki"]');
+    expect(rootToggle?.querySelector('.wiki-tree__folder-count')?.textContent).toBe('2');
+    // 无笔记的文件夹不渲染数量
+    const topicsToggle = root?.querySelector('[data-tree-path="wiki/topics"]');
+    expect(topicsToggle?.querySelector('.wiki-tree__folder-count')).toBeNull();
+  });
+
+  it('点击卡片后列表滚动位置保持，切换视图后归零', async () => {
+    const scrollEl = () => document.querySelector<HTMLElement>('.wiki-list-scroll');
+    const list = scrollEl();
+    expect(list).not.toBeNull();
+    if (list) list.scrollTop = 321;
+
+    document.querySelector('[data-page-id="p1"]')?.dispatchEvent(new Event('click'));
+    await flush();
+    await flush();
+    expect(scrollEl()?.scrollTop).toBe(321);
+
+    clickView('tree');
+    expect(scrollEl()?.scrollTop).toBe(0);
+  });
+
   it('文件树中的知识库概览可以打开并渲染 Home.md 正文', async () => {
     clickView('tree');
     document.querySelector('[data-vault-document="Home.md"]')?.dispatchEvent(new Event('click'));
@@ -383,14 +422,155 @@ describe('点击条目加载详情', () => {
       () => {
         expect(api.wikiPage).toHaveBeenCalledWith('p1', 'default');
         const root = document.querySelector('#wiki-page-root');
-        expect(root?.querySelector('.wiki-detail__title')?.textContent).toBe('React 笔记');
-        expect(root?.querySelector('.wiki-detail__content')?.innerHTML).toContain('<strong>粗体正文</strong>');
+        expect((root?.querySelector('.wiki-detail__title') as HTMLInputElement | null)?.value).toBe('React 笔记');
+        expect(root?.querySelector('.wiki-editor')?.innerHTML).toContain('<strong>粗体正文</strong>');
       },
       { timeout: 10000, interval: 20 },
     );
     const root = document.querySelector('#wiki-page-root');
     // 选中态
     expect(root?.querySelector('.wiki-item.is-active')).not.toBeNull();
+  });
+
+  it('正文与标题直接编辑并自动保存 Markdown', async () => {
+    vi.useFakeTimers();
+    api.wikiPages.mockResolvedValue(pagesResult([makePage({ id: 'p1', title: 'React 笔记' })]));
+    api.wikiPage.mockResolvedValue({
+      ok: true,
+      page: makePage({ id: 'p1', title: 'React 笔记', content: '初始正文', tags: ['前端'] }),
+      source_titles: {},
+      source_files: {},
+    });
+
+    await refreshWikiData();
+    document.querySelector('[data-page-id="p1"]')?.dispatchEvent(new Event('click'));
+    await vi.runAllTimersAsync();
+
+    const title = document.querySelector<HTMLInputElement>('[data-wiki-title]');
+    expect(title?.value).toBe('React 笔记');
+    expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain('初始正文');
+    if (title) {
+      title.value = 'React Hooks';
+      title.dispatchEvent(new Event('input'));
+    }
+    await vi.advanceTimersByTimeAsync(701);
+
+    expect(api.wikiUpdatePage).toHaveBeenCalledWith(
+      'p1',
+      expect.objectContaining({ title: 'React Hooks', content: '初始正文', tags: ['前端'], sources: [] }),
+      'default',
+    );
+    vi.useRealTimers();
+  });
+
+  it('来源显示为只读胶囊并按 Source Page ID 直接跳转', async () => {
+    api.wikiPages.mockResolvedValue(pagesResult([makePage({ id: 'p1', title: '入口页' })]));
+    api.wikiPage.mockImplementation(async (id: string) => ({
+      ok: true,
+      page: makePage({ id, title: id === 'p1' ? '入口页' : '目标页', content: '正文' }),
+      source_titles: {},
+      source_files: {},
+      source_pages: id === 'p1'
+        ? [{ id: 'src_p2', title: '意大利-法国旅行行程单', page_type: 'source' }]
+        : [],
+      relation_pages: [],
+    }));
+
+    await refreshWikiData();
+    document.querySelector('[data-page-id="p1"]')?.dispatchEvent(new Event('click'));
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-source-page-id="src_p2"]')?.textContent)
+        .toContain('意大利-法国旅行行程单');
+    });
+    expect(document.querySelector('[data-wiki-tags]')).toBeNull();
+    expect(document.querySelector('[data-wiki-sources]')).toBeNull();
+
+    document.querySelector('[data-source-page-id="src_p2"]')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    await vi.waitFor(() => {
+      expect(api.wikiPage).toHaveBeenCalledWith('src_p2', 'default');
+      expect((document.querySelector('[data-wiki-title]') as HTMLInputElement | null)?.value).toBe('目标页');
+    });
+    expect(api.wikiSearch).not.toHaveBeenCalled();
+  });
+
+  it('展示知识节点关系并过滤已由来源区承载的摘要页', async () => {
+    api.wikiPages.mockResolvedValue(pagesResult([makePage({ id: 'p1', title: '罗马' })]));
+    api.wikiPage.mockImplementation(async (id: string) => ({
+      ok: true,
+      page: makePage({ id, title: id === 'p1' ? '罗马' : '意大利城市旅行', content: '正文' }),
+      source_titles: {},
+      source_files: {},
+      source_pages: [],
+      relation_pages: id === 'p1'
+        ? [
+            { id: 'topic_1', title: '意大利城市旅行', page_type: 'topic', relation: 'part_of', direction: 'outgoing' },
+            { id: 'source_1', title: '意大利旅行行程单', page_type: 'source', relation: 'describes', direction: 'incoming' },
+          ]
+        : [],
+    }));
+
+    await refreshWikiData();
+    document.querySelector('[data-page-id="p1"]')?.dispatchEvent(new Event('click'));
+    await vi.waitFor(() => {
+      const related = document.querySelector('.wiki-related-pages')?.textContent ?? '';
+      expect(related).toContain('意大利城市旅行');
+      expect(related).toContain('话题 · 属于');
+      expect(related).not.toContain('意大利旅行行程单');
+    });
+
+    document.querySelector('[data-related-page-id="topic_1"]')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => {
+      expect(api.wikiPage).toHaveBeenCalledWith('topic_1', 'default');
+    });
+  });
+
+  it('只浏览不编辑时不触发自动保存（不刷 updated_at）', async () => {
+    api.wikiPages.mockResolvedValue(
+      pagesResult([makePage({ id: 'p1', title: '页面一' }), makePage({ id: 'p2', title: '页面二' })]),
+    );
+    api.wikiPage.mockImplementation(async (id: string) => ({
+      ok: true,
+      page: makePage({ id, title: id === 'p1' ? '页面一' : '页面二', content: '正文' }),
+      source_titles: {},
+      source_files: {},
+    }));
+
+    await refreshWikiData();
+    document.querySelector('[data-page-id="p1"]')?.dispatchEvent(new Event('click'));
+    await vi.waitFor(() => {
+      expect(document.querySelector('[contenteditable="true"]')).not.toBeNull();
+    });
+    // 未编辑直接切到另一页：不应有任何保存请求
+    document.querySelector('[data-page-id="p2"]')?.dispatchEvent(new Event('click'));
+    await flush();
+    expect(api.wikiUpdatePage).not.toHaveBeenCalled();
+  });
+
+  it('正文 WikiLink 不在首批列表时通过搜索解析并打开', async () => {
+    api.wikiPages.mockResolvedValue(pagesResult([makePage({ id: 'p1', title: '入口页' })]));
+    api.wikiPage.mockResolvedValue({
+      ok: true,
+      page: makePage({ id: 'p1', title: '入口页', content: '参见 [[目标页]]' }),
+      source_titles: {},
+      source_files: {},
+    });
+    api.wikiSearch.mockResolvedValue(
+      pagesResult([makePage({ id: 'p999', title: '目标页', aliases: ['目标别名'], content: '目标正文' })]),
+    );
+
+    await refreshWikiData();
+    document.querySelector('[data-page-id="p1"]')?.dispatchEvent(new Event('click'));
+    await vi.waitFor(() => expect(document.querySelector('a[href="wiki:%E7%9B%AE%E6%A0%87%E9%A1%B5"]')).not.toBeNull());
+    document.querySelector('a[href="wiki:%E7%9B%AE%E6%A0%87%E9%A1%B5"]')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(api.wikiSearch).toHaveBeenCalledWith('目标页', 'default', 8);
+      expect((document.querySelector('[data-wiki-title]') as HTMLInputElement | null)?.value).toBe('目标页');
+    });
   });
 
   it('详情加载失败时 notify 提示', async () => {
@@ -445,7 +625,7 @@ describe('错误处理', () => {
   });
 });
 
-describe('边界态（无 KB 自动初始化）', () => {
+describe('边界态（未登录 / 无 KB 自动初始化）', () => {
   it('没有任何 KB 时自动初始化 default 并选中加载（对齐 web WikiHub）', async () => {
     api.wikiKBs
       .mockResolvedValueOnce({ ok: true, kbs: [] })
@@ -737,7 +917,7 @@ describe('分栏拖拽', () => {
 describe('Wiki Agent 对话面板（三栏布局）', () => {
   it('列表 | 详情 | 对话三栏：面板容器常驻，页头无「问 Wiki」按钮', async () => {
     await refreshWikiData();
-    // Desktop 路线：右栏是 wiki-agent.ts 挂载的 .wiki-agent-pane，常驻不拖拽。
+    // cmcc 路线：右栏是 wiki-agent.ts 挂载的 .wiki-agent-pane，常驻不拖拽。
     const pane = document.querySelector('.wiki-agent-pane') as HTMLElement;
     expect(pane).not.toBeNull();
     expect(pane.getAttribute('data-wiki-agent-panel')).not.toBeNull();
