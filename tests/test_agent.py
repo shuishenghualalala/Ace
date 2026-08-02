@@ -605,6 +605,26 @@ async def test_new_session_title_generated_and_readable():
     assert titles["st"] and titles["st"] != "帮我查一下天气"
 
 
+async def test_channel_session_title_generated():
+    """渠道会话（agent:main:*）首轮结束后同样生成自动摘要标题。
+
+    复现 bug：_session_needs_title 走 list_sessions 默认排除渠道会话，
+    渠道会话永远拿不到摘要标题，侧栏一直显示占位「新对话」。
+    """
+    store = InMemorySessionStore()
+    agent = _agent(FakeProvider(), session_store=store, enable_title=True)
+    sid = "agent:main:weixin:dm:u1"
+    async for _ in agent.run(Envelope.of("帮我查一下天气", session_id=sid)):
+        pass
+    if agent._title_tasks:
+        await asyncio.gather(*agent._title_tasks)
+    titles = {
+        s["session_id"]: s["title"]
+        for s in store.list_sessions(owner_account_id="local", exclude_channel_sessions=False)
+    }
+    assert titles[sid] and titles[sid] != "帮我查一下天气"
+
+
 async def test_title_generation_does_not_block_final():
     """标题生成后台化：final 不被阻塞，消费者随即关闭流也不能丢标题。
 

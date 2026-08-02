@@ -1145,7 +1145,10 @@ class SingleAgent(Agent):
     def _session_needs_title(self, session_id: str, owner: str) -> bool:
         """占位标题的会话在首轮结束后仍应尝试生成摘要标题。"""
         try:
-            rows = self.session_store.list_sessions(owner_account_id=owner)
+            # 不排除渠道会话（agent:main:*）：它们同样需要首轮后的自动摘要标题。
+            rows = self.session_store.list_sessions(
+                owner_account_id=owner, exclude_channel_sessions=False
+            )
         except Exception:  # noqa: BLE001
             return False
         from crew.state.session_store import is_placeholder_title

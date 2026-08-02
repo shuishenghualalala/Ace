@@ -1681,12 +1681,13 @@ export function applyChunk(chunk: ChatChunk): void {
       // 渠道入站的用户消息不作为 WS 帧广播，先把原文补插到本地，
       // 否则实时流出的回答会直接接在上一轮尾部，看起来像「串轮」。
       // 去重：桌面本地发送的渠道会话消息已有乐观用户消息，不重复补插。
+      // 注意本地发送时尾部是乐观 assistant 占位，要向前找最后一条 user 消息比较。
       const query = typeof body.query === 'string' ? body.query.trim() : '';
       if (query) {
         const msgs = getMessages(sid);
-        const last = msgs[msgs.length - 1];
-        const alreadyLocal = last?.role === 'user'
-          && (last.content === query || last.content.startsWith(query));
+        const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+        const alreadyLocal = !!lastUser
+          && (lastUser.content === query || lastUser.content.startsWith(query));
         if (!alreadyLocal) {
           appendSessionMessage(sid, {
             id: newMessageId('user'),
