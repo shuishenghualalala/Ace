@@ -13,7 +13,7 @@ describe('global Skill management copy', () => {
     expect(source).toContain('安装结果对本机所有登录账号生效');
     expect(source).toContain('本机所有账号都将无法再通过');
     expect(source).toContain("confirmText: '全局安装'");
-    expect(source).toContain("confirmText: '全局卸载'");
+    expect(source).toContain(": '全局卸载'");
   });
 
   it('surfaces local skills with a local badge and symlink install note', () => {
@@ -21,6 +21,9 @@ describe('global Skill management copy', () => {
     expect(source).toContain('skill-card-v3__badge--local');
     expect(source).toContain('~/.agents/skills');
     expect(source).toContain('将以软链方式安装');
+    expect(source).toContain('确认从 Crew 中移除技能');
+    expect(source).toContain('不会删除电脑中全局共享目录里的原始技能');
+    expect(source).toContain("confirmText: isLocalShared ? '从 Crew 中移除'");
   });
 
   it('creates a stable letter avatar from Chinese, English, numeric, and empty names', () => {

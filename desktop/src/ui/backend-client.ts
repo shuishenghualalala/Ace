@@ -456,6 +456,8 @@ export interface Skill {
   aliases?: string[];
   description: string;
   source: 'builtin' | 'user';
+  /** 是否从本机共享 Skill 目录接入；移除时保留原始 Skill。 */
+  is_local_shared?: boolean;
   /** SKILL.md frontmatter category；缺省为「通用」。 */
   category?: string;
   /** 中文名（来自 metadata.zh_name，后端 display_name 字段）；缺省回退 name。 */

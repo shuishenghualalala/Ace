@@ -27,6 +27,7 @@ interface SkillViewItem {
   description: string;
   category: string;
   source: Skill['source'] | 'optional' | 'local';
+  isLocalShared?: boolean | undefined;
   status: SkillStatus;
   canInstall: boolean;
   canUninstall: boolean;
@@ -156,6 +157,7 @@ function buildSkillItems(data: SkillStore): SkillViewItem[] {
       description: s.description_zh || s.description,
       category: resolveSkillCategory(s.slug, s.category),
       source: s.source,
+      isLocalShared: s.is_local_shared,
       status: isBuiltin ? 'builtin' : 'installed',
       canInstall: false,
       canUninstall: !isBuiltin,
@@ -706,18 +708,22 @@ async function uninstallSkill(slug: string): Promise<void> {
   installing = true;
   try {
     // 卸载同样是机器级：不是只从「我的」账号移除，本机所有账号都会一起失去该技能。
+    // 本地共享 Skill 只移除 Crew 中的接入入口，原始 Skill 仍保留在本机共享目录。
+    const isLocalShared = item?.isLocalShared === true;
     const ok = await showConfirmDialog({
-      title: '确认全局卸载技能',
-      message:
-        `技能是本机全局共享能力。卸载「${item?.name || slug}」后本地技能文件将被移除，`
-        + `本机所有账号都将无法再通过 /${slug} 调用。确定卸载吗？`,
-      confirmText: '全局卸载',
+      title: isLocalShared ? '确认从 Crew 中移除技能' : '确认全局卸载技能',
+      message: isLocalShared
+        ? `移除「${item?.name || slug}」后，本机所有账号都无法再通过 Crew 调用该技能，`
+          + '但不会删除电脑中全局共享目录里的原始技能，之后仍可重新添加。确定移除吗？'
+        : `技能是本机全局共享能力。卸载「${item?.name || slug}」后本地技能文件将被移除，`
+          + `本机所有账号都将无法再通过 /${slug} 调用。确定卸载吗？`,
+      confirmText: isLocalShared ? '从 Crew 中移除' : '全局卸载',
       cancelText: '取消',
     });
     if (!ok) return;
     const res = await backendApi.uninstallSkill(slug);
     if (!res.ok) throw new Error('uninstall failed');
-    notify(`已卸载 ${slug}`);
+    notify(isLocalShared ? `已从 Crew 中移除 ${slug}` : `已卸载 ${slug}`);
     closeModal();
     skillCategoryMemory.delete(slug);
     persistSkillCategoryMemory();

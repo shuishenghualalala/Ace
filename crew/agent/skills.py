@@ -1831,6 +1831,9 @@ def list_skills(
             "category": str(info.get("category") or "通用办公").strip(),
             "featured": bool(info.get("featured", False)),
             "source": "user" if is_user else "builtin",
+            # 本地共享 Skill 以链接接入 Crew；前端卸载时需明确只移除 Crew 入口，
+            # 不会删除 ~/.agents/skills 中的原始 Skill。
+            "is_local_shared": is_user and _is_trusted_local_link(Path(skill_dir)),
             "version": info.get("version") or "",
             "state": "installed" if is_user else "builtin",
             "path": skill_dir,
