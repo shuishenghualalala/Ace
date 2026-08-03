@@ -13,7 +13,13 @@
   
 </div>
 
-Crew 是一个可在本机独立运行的开源多智能体协作平台，你可以在Crew中自由创建团队实现大项目，也可以把Crew当成你的个人助手完成电脑上的各种dirty work，如文件整理、内容创作、知识管理。
+Crew 是一个可在本机独立运行的开源多智能体协作平台，你可以在 Crew 中自由创建团队实现大项目，也可以把 Crew 当成你的个人助手完成电脑上的各种 dirty work，如文件整理、内容创作、知识管理。
+
+> 每天在 ChatGPT 和 Claude 之间来回切，文件散落各处，Agent 做完就忘，换个会话又要重新交代一遍——于是我们决定做一个能常驻本机、记住一切、还能组队干活的工作台。Crew 的名字就是这么来的：一群 Agent 像船员一样各司其职，你当船长。
+
+### 能做什么
+
+早上打开 Crew，跟 Agent 说"帮我把下载文件夹按日期整理"，它直接动手。Wiki 里存着上周的会议纪要，Agent 能随时检索引用。想写一个需求文档？拉上 Explore Agent 做调研、Plan Agent 拆任务、Wiki Agent 归档，你只需要审核——Team 模式让多个 Agent 像真实团队一样并行协作。
 
 <img src="assets/screenshot_web.png" alt="Crew Web UI" width="700">
 
@@ -370,3 +376,15 @@ pytest -m e2e
 ## 开源许可
 
 本项目采用 [Apache License 2.0](LICENSE) 开源许可。项目致谢见 [NOTICE](NOTICE)。
+
+---
+
+<p align="center">
+  <a href="https://star-history.com/#shuishenghualalala/Ace&Date">
+    <img src="https://api.star-history.com/svg?repos=shuishenghualalala/Ace&type=Date" alt="Star History" width="500">
+  </a>
+</p>
+
+<p align="center">
+  Made with 🦞 by <a href="https://github.com/shuishenghualalala">@shuishenghualalala</a> and contributors
+</p>
