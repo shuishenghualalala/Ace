@@ -10,10 +10,14 @@
     <img src="https://img.shields.io/badge/python-%3E%3D3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
     <img src="https://img.shields.io/badge/node-%3E%3D22.12-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js">
   </p>
-  <img src="assets/screenshot.png" alt="Crew Web UI" width="700">
+  
 </div>
 
 Crew 是一个可在本机独立运行的开源多智能体协作平台，你可以在Crew中自由创建团队实现大项目，也可以把Crew当成你的个人助手完成电脑上的各种dirty work，如文件整理、内容创作、知识管理。
+
+<img src="assets/screenshot_web.png" alt="Crew Web UI" width="700">
+
+<img src="assets/screenshot_desktop.png" alt="Crew Web UI" width="700">
 
 > [!NOTE]
 > 发布状态：源码预览版。接口和数据格式不承诺稳定，暂不建议直接用于关键生产环境。
