@@ -1,0 +1,106 @@
+[
+  {
+    "name": "DislikeIcon",
+    "file": "Dislike.svg",
+    "category": "social",
+    "aliases": [
+      "dislike",
+      "踩",
+      "不喜欢",
+      "差评"
+    ],
+    "use_for": [
+      "thumbs down",
+      "disapprove"
+    ],
+    "avoid_for": [
+      "delete",
+      "report",
+      "block"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "GroupIcon",
+    "file": "Group.svg",
+    "category": "social",
+    "aliases": [
+      "group",
+      "群组",
+      "分组"
+    ],
+    "use_for": [
+      "social related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "LikeIcon",
+    "file": "Like.svg",
+    "category": "social",
+    "aliases": [
+      "like",
+      "赞",
+      "喜欢",
+      "好评"
+    ],
+    "use_for": [
+      "thumbs up",
+      "approve",
+      "favorite"
+    ],
+    "avoid_for": [
+      "bookmark",
+      "star",
+      "collect"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "MessageIcon",
+    "file": "Message.svg",
+    "category": "social",
+    "aliases": [
+      "message",
+      "消息",
+      "私信"
+    ],
+    "use_for": [
+      "direct message",
+      "chat",
+      "inbox"
+    ],
+    "avoid_for": [
+      "comment",
+      "notification",
+      "announcement"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "ShareIcon",
+    "file": "Share.svg",
+    "category": "social",
+    "aliases": [
+      "share",
+      "分享"
+    ],
+    "use_for": [
+      "share content",
+      "share to external"
+    ],
+    "avoid_for": [
+      "export to file",
+      "copy link"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

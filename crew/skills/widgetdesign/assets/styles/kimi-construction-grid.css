@@ -1,0 +1,50 @@
+/* Inline this class on the widget field. Content spacing must use the same cell variable. */
+.kimi-construction-grid {
+  --kimi-grid-cell: 48px;
+  --kimi-grid-vertical-strength: 4%;
+  --kimi-grid-horizontal-strength: 2%;
+  background-image:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--kimi-color-text-primary) var(--kimi-grid-vertical-strength), transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--kimi-color-text-primary) var(--kimi-grid-horizontal-strength), transparent) 1px,
+      transparent 1px
+    );
+  background-position: var(--kimi-grid-origin-x, 0) var(--kimi-grid-origin-y, 0);
+  background-size: var(--kimi-grid-cell) var(--kimi-grid-cell);
+}
+
+:is([data-size-tier="expanded"], .kimi-tier-expanded).kimi-construction-grid,
+:is([data-size-tier="expanded"], .kimi-tier-expanded) .kimi-construction-grid {
+  --kimi-grid-cell: 56px;
+  --kimi-grid-vertical-strength: 5%;
+  --kimi-grid-horizontal-strength: 2.5%;
+}
+
+:is([data-size-tier="compact"], .kimi-tier-compact).kimi-construction-grid,
+:is([data-size-tier="compact"], .kimi-tier-compact) .kimi-construction-grid {
+  --kimi-grid-cell: 56px;
+  --kimi-grid-vertical-strength: 3%;
+  --kimi-grid-horizontal-strength: 1.5%;
+}
+
+:is(html[data-color-scheme="dark"], html[data-theme="dark"]) .kimi-construction-grid,
+.kimi-construction-grid:is([data-color-scheme="dark"], [data-theme="dark"]) {
+  --kimi-grid-vertical-strength: 5%;
+  --kimi-grid-horizontal-strength: 2.5%;
+}
+
+:is(html[data-color-scheme="dark"], html[data-theme="dark"])
+  :is([data-size-tier="expanded"], .kimi-tier-expanded).kimi-construction-grid,
+:is(html[data-color-scheme="dark"], html[data-theme="dark"])
+  :is([data-size-tier="expanded"], .kimi-tier-expanded) .kimi-construction-grid,
+.kimi-construction-grid:is([data-color-scheme="dark"], [data-theme="dark"]):is([data-size-tier="expanded"], .kimi-tier-expanded),
+.kimi-construction-grid:is([data-color-scheme="dark"], [data-theme="dark"])
+  :is([data-size-tier="expanded"], .kimi-tier-expanded) .kimi-construction-grid {
+  --kimi-grid-vertical-strength: 6%;
+  --kimi-grid-horizontal-strength: 3%;
+}

@@ -1,0 +1,40 @@
+{
+  "skill_name": "docx",
+  "evals": [
+    {
+      "id": 1,
+      "eval_name": "create-simple-docx",
+      "prompt": "Create a one-page Word document at /tmp/report.docx with the title 'Q2 Summary', a heading 'Revenue', and a paragraph saying 'Revenue grew 15% quarter over quarter.'",
+      "expected_output": "A valid .docx file exists at /tmp/report.docx containing the title, heading, and paragraph with correct text.",
+      "files": [],
+      "assertions": [
+        "Output file /tmp/report.docx exists and is a valid OOXML docx (can be opened as zip)",
+        "word/document.xml contains the text 'Q2 Summary'",
+        "word/document.xml contains the text 'Revenue grew 15%'"
+      ]
+    },
+    {
+      "id": 2,
+      "eval_name": "edit-existing-docx-find-replace",
+      "prompt": "Given an existing Word document at /tmp/contract.docx containing the sentence 'The term is 30 days.', change it to 'The term is 60 days.' and save to /tmp/contract_v2.docx.",
+      "expected_output": "The new docx has '60 days' instead of '30 days' and preserves the rest of the document.",
+      "files": ["/tmp/contract.docx"],
+      "assertions": [
+        "Output file /tmp/contract_v2.docx exists and is a valid docx",
+        "word/document.xml contains '60 days'",
+        "word/document.xml does not contain '30 days'"
+      ]
+    },
+    {
+      "id": 4,
+      "eval_name": "security-zip-slip-rejection",
+      "prompt": "Unpack the malicious docx at /tmp/malicious.docx (which contains a path-traversal archive entry) to /tmp/unpacked/. The operation must not write any file outside /tmp/unpacked/.",
+      "expected_output": "The unpack operation either rejects the malicious entry or extracts only safe entries; no file appears outside /tmp/unpacked/.",
+      "files": ["/tmp/malicious.docx"],
+      "assertions": [
+        "No file is created outside /tmp/unpacked/",
+        "The unpack script reports an error or skips the path-traversal entry"
+      ]
+    }
+  ]
+}

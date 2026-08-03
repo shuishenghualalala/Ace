@@ -1,0 +1,108 @@
+[
+  {
+    "name": "BrowserIcon",
+    "file": "Browser.svg",
+    "category": "navigation",
+    "aliases": [
+      "browser",
+      "浏览器"
+    ],
+    "use_for": [
+      "navigation related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CatalogIcon",
+    "file": "Catalog.svg",
+    "category": "navigation",
+    "aliases": [
+      "catalog",
+      "目录",
+      "分类"
+    ],
+    "use_for": [
+      "navigation related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "DesktopIcon",
+    "file": "Desktop.svg",
+    "category": "navigation",
+    "aliases": [
+      "desktop",
+      "桌面端",
+      "电脑"
+    ],
+    "use_for": [
+      "navigation related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "HistoryIcon",
+    "file": "History.svg",
+    "category": "navigation",
+    "aliases": [
+      "history",
+      "历史",
+      "记录"
+    ],
+    "use_for": [
+      "navigation related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "ListIcon",
+    "file": "List.svg",
+    "category": "navigation",
+    "aliases": [
+      "list",
+      "列表"
+    ],
+    "use_for": [
+      "navigation related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "MobileIcon",
+    "file": "Mobile.svg",
+    "category": "navigation",
+    "aliases": [
+      "mobile",
+      "移动端",
+      "手机"
+    ],
+    "use_for": [
+      "navigation related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

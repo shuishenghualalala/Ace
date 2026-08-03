@@ -1,0 +1,267 @@
+[
+  {
+    "name": "ChangeIcon",
+    "file": "Change.svg",
+    "category": "arrows",
+    "aliases": [
+      "change",
+      "交换",
+      "切换",
+      "转换"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CollapseIcon",
+    "file": "Collapse.svg",
+    "category": "arrows",
+    "aliases": [
+      "collapse",
+      "收起",
+      "折叠"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "DownIcon",
+    "file": "Down.svg",
+    "category": "arrows",
+    "aliases": [
+      "down",
+      "向下",
+      "下降",
+      "下载"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "EnterIcon",
+    "file": "Enter.svg",
+    "category": "arrows",
+    "aliases": [
+      "enter",
+      "回车",
+      "进入"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "ExpandIcon",
+    "file": "Expand.svg",
+    "category": "arrows",
+    "aliases": [
+      "expand",
+      "展开",
+      "放大"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "GoBackIcon",
+    "file": "GoBack.svg",
+    "category": "arrows",
+    "aliases": [
+      "goback",
+      "返回",
+      "后退"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "LeftIcon",
+    "file": "Left.svg",
+    "category": "arrows",
+    "aliases": [
+      "left",
+      "向左",
+      "左箭头"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "LeftRightIcon",
+    "file": "LeftRight.svg",
+    "category": "arrows",
+    "aliases": [
+      "leftright"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "NextIcon",
+    "file": "Next.svg",
+    "category": "arrows",
+    "aliases": [
+      "next",
+      "下一步",
+      "下一个"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "PreviousIcon",
+    "file": "Previous.svg",
+    "category": "arrows",
+    "aliases": [
+      "previous",
+      "上一步",
+      "上一个"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "RightIcon",
+    "file": "Right.svg",
+    "category": "arrows",
+    "aliases": [
+      "right",
+      "向右",
+      "右箭头"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "UnfoldIcon",
+    "file": "Unfold.svg",
+    "category": "arrows",
+    "aliases": [
+      "unfold",
+      "展开",
+      "打开"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "UpIcon",
+    "file": "Up.svg",
+    "category": "arrows",
+    "aliases": [
+      "up"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "UpDownIcon",
+    "file": "UpDown.svg",
+    "category": "arrows",
+    "aliases": [
+      "updown"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "UpperRightIcon",
+    "file": "UpperRight.svg",
+    "category": "arrows",
+    "aliases": [
+      "upperright",
+      "右上箭头"
+    ],
+    "use_for": [
+      "arrows related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

@@ -1,0 +1,27 @@
+/* Inline after the host protocol and mark semantic regions with data-kimi-priority. */
+[data-kimi-root] {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow: visible;
+}
+
+[data-kimi-root] * {
+  box-sizing: border-box;
+  min-inline-size: 0;
+}
+
+/* Compact is a semantic P0 recomposition. Hidden regions reflow; they are never replaced by a
+   scroll pane or clipped inside the host frame. */
+html[data-daimon-size-tier="compact"] [data-kimi-priority="p1"],
+html[data-daimon-size-tier="compact"] [data-kimi-priority="p2"],
+html[data-daimon-size-tier="compact"] [data-kimi-priority="p3"] {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-kimi-root] * {
+    scroll-behavior: auto;
+  }
+}

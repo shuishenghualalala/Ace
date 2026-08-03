@@ -1,0 +1,206 @@
+/* Inline the selectors a widget uses. Daimon owns every --kimi-glass-* token. */
+.kimi-glass-stage {
+  position: relative;
+  isolation: isolate;
+}
+
+.kimi-glass-backdrop,
+[data-kimi-glass-backdrop] {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.kimi-glass-stage .kimi-glass,
+.kimi-glass-stage .kimi-glass-panel {
+  z-index: 1;
+}
+
+.kimi-glass,
+.kimi-glass-panel,
+.kimi-glass-button,
+.kimi-glass-icon-button,
+.kimi-glass-segmented {
+  box-sizing: border-box;
+  border: 1px solid var(--kimi-color-border);
+  border-radius: 8px;
+  background: var(--kimi-color-surface-raised);
+  color: var(--kimi-color-text-primary);
+}
+
+.kimi-glass,
+.kimi-glass-panel {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+/* The reference material uses two quiet construction rails instead of a heavy chrome. */
+.kimi-glass-panel::before,
+.kimi-glass::before {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  z-index: 2;
+  block-size: 1px;
+  content: '';
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--kimi-glass-highlight),
+    transparent
+  );
+  pointer-events: none;
+}
+
+.kimi-glass-panel::after,
+.kimi-glass::after {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  z-index: 2;
+  inline-size: 1px;
+  content: '';
+  background: linear-gradient(
+    180deg,
+    var(--kimi-glass-highlight),
+    transparent,
+    var(--kimi-glass-lowlight)
+  );
+  pointer-events: none;
+}
+
+.kimi-glass-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+}
+
+.kimi-glass-button,
+.kimi-glass-icon-button {
+  min-height: 28px;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease, opacity 140ms ease;
+}
+
+.kimi-glass-button {
+  padding: 6px 10px;
+}
+
+.kimi-glass-icon-button {
+  inline-size: 28px;
+  padding: 5px;
+  aspect-ratio: 1;
+}
+
+.kimi-glass-button:hover,
+.kimi-glass-icon-button:hover,
+.kimi-glass-button[aria-pressed="true"],
+.kimi-glass-icon-button[aria-pressed="true"],
+.kimi-glass-button[data-selected="true"],
+.kimi-glass-icon-button[data-selected="true"] {
+  border-color: var(--kimi-color-accent);
+  background: var(--kimi-color-surface-strong);
+}
+
+.kimi-glass-button:focus-visible,
+.kimi-glass-icon-button:focus-visible,
+.kimi-glass-slider:focus-visible {
+  outline: 2px solid var(--kimi-color-accent);
+  outline-offset: 2px;
+}
+
+.kimi-glass-button:disabled,
+.kimi-glass-icon-button:disabled,
+.kimi-glass-slider:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.kimi-glass-slider {
+  inline-size: 100%;
+  min-block-size: 28px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  color: var(--kimi-color-accent);
+}
+
+.kimi-glass-slider::-webkit-slider-runnable-track {
+  block-size: 4px;
+  border-radius: 4px;
+  background: var(--kimi-color-border);
+}
+
+.kimi-glass-slider::-webkit-slider-thumb {
+  inline-size: 16px;
+  block-size: 16px;
+  margin-block-start: -6px;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--kimi-glass-border);
+  border-radius: 50%;
+  background: var(--kimi-color-accent);
+  box-shadow: 0 2px 8px var(--kimi-glass-shadow);
+}
+
+.kimi-glass-slider::-moz-range-track {
+  block-size: 4px;
+  border-radius: 4px;
+  background: var(--kimi-color-border);
+}
+
+.kimi-glass-slider::-moz-range-thumb {
+  inline-size: 16px;
+  block-size: 16px;
+  border: 1px solid var(--kimi-glass-border);
+  border-radius: 50%;
+  background: var(--kimi-color-accent);
+  box-shadow: 0 2px 8px var(--kimi-glass-shadow);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .kimi-glass,
+  .kimi-glass-panel,
+  .kimi-glass-button,
+  .kimi-glass-icon-button,
+  .kimi-glass-segmented {
+    border-color: var(--kimi-glass-border);
+    background: var(--kimi-glass-surface);
+    box-shadow:
+      inset 0 1px 0 var(--kimi-glass-highlight),
+      inset 0 -1px 0 var(--kimi-glass-lowlight);
+  }
+
+  .kimi-glass,
+  .kimi-glass-panel {
+    box-shadow:
+      0 8px 32px var(--kimi-glass-shadow),
+      inset 0 1px 0 var(--kimi-glass-highlight),
+      inset 0 -1px 0 var(--kimi-glass-lowlight);
+    backdrop-filter: blur(var(--kimi-glass-blur));
+    -webkit-backdrop-filter: blur(var(--kimi-glass-blur));
+  }
+
+  :is(.kimi-glass-button, .kimi-glass-icon-button, .kimi-glass-segmented)[data-kimi-glass-standalone="true"] {
+    backdrop-filter: blur(var(--kimi-glass-blur));
+    -webkit-backdrop-filter: blur(var(--kimi-glass-blur));
+  }
+}
+
+/* Compact edits information density, not the material. This keeps the widget coherent while
+   allowing the host to use the same five-pixel blur at every tier. */
+
+@media (prefers-reduced-motion: reduce) {
+  .kimi-glass-button,
+  .kimi-glass-icon-button,
+  .kimi-glass-slider,
+  .kimi-glass-segmented {
+    transition: none;
+  }
+}

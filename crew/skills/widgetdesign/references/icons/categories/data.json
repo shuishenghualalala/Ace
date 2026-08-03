@@ -1,0 +1,105 @@
+[
+  {
+    "name": "DataIcon",
+    "file": "Data.svg",
+    "category": "data",
+    "aliases": [
+      "data",
+      "数据"
+    ],
+    "use_for": [
+      "data related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "DiagramIcon",
+    "file": "Diagram.svg",
+    "category": "data",
+    "aliases": [
+      "diagram",
+      "图表",
+      "关系图"
+    ],
+    "use_for": [
+      "data related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "HistogramIcon",
+    "file": "Histogram.svg",
+    "category": "data",
+    "aliases": [
+      "histogram",
+      "柱状图"
+    ],
+    "use_for": [
+      "data related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "LinechartIcon",
+    "file": "Linechart.svg",
+    "category": "data",
+    "aliases": [
+      "linechart",
+      "折线图"
+    ],
+    "use_for": [
+      "data related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "TabularIcon",
+    "file": "Tabular.svg",
+    "category": "data",
+    "aliases": [
+      "tabular",
+      "表格"
+    ],
+    "use_for": [
+      "data related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "ViewAllIcon",
+    "file": "ViewAll.svg",
+    "category": "data",
+    "aliases": [
+      "viewall",
+      "查看全部"
+    ],
+    "use_for": [
+      "data related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

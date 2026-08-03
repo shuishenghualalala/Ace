@@ -1,0 +1,58 @@
+[
+  {
+    "name": "FullScreenIcon",
+    "file": "FullScreen.svg",
+    "category": "image",
+    "aliases": [
+      "fullscreen",
+      "全屏"
+    ],
+    "use_for": [
+      "image related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "MagnifyIcon",
+    "file": "Magnify.svg",
+    "category": "image",
+    "aliases": [
+      "magnify",
+      "放大",
+      "放大镜"
+    ],
+    "use_for": [
+      "zoom in",
+      "enlarge image"
+    ],
+    "avoid_for": [
+      "search",
+      "find text"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "MinifyIcon",
+    "file": "Minify.svg",
+    "category": "image",
+    "aliases": [
+      "minify",
+      "缩小"
+    ],
+    "use_for": [
+      "zoom out",
+      "shrink image"
+    ],
+    "avoid_for": [
+      "search",
+      "compress file"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]
