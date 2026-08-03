@@ -24,7 +24,7 @@ describe('detectUpdatePlatform', () => {
   it('win32/linux/darwin 分类', () => {
     expect(detectUpdatePlatform('win32')).toBe('windows');
     expect(detectUpdatePlatform('linux')).toBe('linux');
-    expect(detectUpdatePlatform('darwin')).toBe('unsupported');
+    expect(detectUpdatePlatform('darwin')).toBe('mac');
   });
 });
 
@@ -42,6 +42,12 @@ describe('buildUpdateUrl', () => {
   it('Linux → deb 模板（UOS/麒麟/标准 Debian 共用）', () => {
     expect(buildUpdateUrl('0.23.59', 'linux')).toBe(
       `${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_amd64.deb`,
+    );
+  });
+
+  it('macOS → dmg 模板（仅 Apple Silicon）', () => {
+    expect(buildUpdateUrl('0.23.59', 'mac')).toBe(
+      `${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_arm64.dmg`,
     );
   });
 
