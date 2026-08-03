@@ -5,7 +5,7 @@
  *   - 行为审计：7 天趋势 + KPI 卡片 + 7 列事件表 + 行内详情侧栏
  *   - 会话审计：会话卡片列表 + 会话详情 + 对话日志
  *
- * 当前展示本地演示数据，后续可接入通用审计数据源。
+ * 当前为空壳：数据源未接入时显示空状态，后续接通用审计数据源时灌入即可。
  */
 
 import { $, escapeHtml, notify } from '../state';
@@ -27,8 +27,6 @@ interface BehaviorEvent {
   actor: string;
   target: string;
   meta: { ip?: string; location?: string; device?: string };
-  /** 数据来源：'mock' = 演示数据，'live' = 来自后端审计日志。I-12 / S-20。 */
-  source?: 'mock' | 'live';
 }
 
 interface SessionMessage {
@@ -67,9 +65,6 @@ interface SessionAudit {
   lastUserMessage: string;
 }
 
-const TODAY = Math.floor(Date.now() / 1000); // mock 用今天时间，保持相对新鲜
-const HOUR = 3600;
-
 const RISK_LABELS: Record<RiskLevel, string> = {
   none: '正常',
   low: '低危',
@@ -84,200 +79,11 @@ const RESULT_LABELS: Record<ActionResult, string> = {
   review: '待复核',
 };
 
-const CATEGORIES = ['文件读取', '文件写入', '网络请求', '命令执行', '数据查询', '内容生成'];
-
-let behaviorIdSeq = 0;
-
-function mkBehavior(
-  offsetHrs: number,
-  category: string,
-  summary: string,
-  risk: RiskLevel,
-  result: ActionResult,
-  opts: Partial<BehaviorEvent> = {},
-): BehaviorEvent {
-  behaviorIdSeq += 1;
-  return {
-    id: opts.id ?? `bh_${behaviorIdSeq.toString(16).padStart(4, '0')}`,
-    type: '行为检测',
-    category,
-    summary,
-    hitRule: '--',
-    risk,
-    result,
-    timestamp: TODAY - offsetHrs * HOUR,
-    actor: 'Crew',
-    target: 'unknown',
-    meta: { ip: '192.0.2.42', location: '上海', device: 'macOS 15.4' },
-    source: 'mock',
-    ...opts,
-  };
-}
-
-const BEHAVIOR_SEED: BehaviorEvent[] = [
-  mkBehavior(0.2, '文件读取', '读取后检查', 'none', 'pass', { hitRule: 'file-read.after-check', meta: { ip: '192.0.2.42', location: '上海', device: 'macOS 15.4' } }),
-  mkBehavior(0.2, '文件读取', '读取前检查', 'none', 'pass', { hitRule: 'file-read.pre-check' }),
-  mkBehavior(1.2, '文件读取', '读取后检查', 'none', 'pass', { hitRule: 'file-read.after-check' }),
-  mkBehavior(1.2, '文件读取', '读取前检查', 'none', 'pass', { hitRule: 'file-read.pre-check' }),
-  mkBehavior(2.5, '文件读取', '读取后检查', 'none', 'pass', { hitRule: 'file-read.after-check' }),
-  mkBehavior(2.5, '文件读取', '读取前检查', 'none', 'pass', { hitRule: 'file-read.pre-check' }),
-  mkBehavior(3.5, '文件读取', '读取后检查', 'none', 'pass'),
-  mkBehavior(3.5, '文件读取', '读取前检查', 'none', 'pass'),
-  mkBehavior(5.0, '文件写入', '写入前检查', 'none', 'pass', { hitRule: 'file-write.pre-check', actor: '林岚' }),
-  mkBehavior(5.5, '网络请求', '外发文件 DLP 检查', 'high', 'review', { hitRule: 'dlp.outbound-file', actor: '韩彻', summary: '外发邮件附带客户名单 CSV，命中 DLP' }),
-  mkBehavior(7.2, '命令执行', '禁用命令拦截', 'critical', 'block', { hitRule: 'shell.deny.rm-rf', summary: '尝试执行 rm -rf /', actor: '外部' }),
-  mkBehavior(8.0, '数据查询', 'PII 字段脱敏', 'medium', 'pass', { hitRule: 'pii.masking', summary: '查询用户表含身份证号，已脱敏', actor: 'Marcus Wei' }),
-  mkBehavior(12, '内容生成', '敏感词扫描', 'medium', 'review', { hitRule: 'content.keyword-scan', summary: '回复含「工资」相关关键词', actor: '李冉' }),
-  mkBehavior(18, '文件写入', '写入审计日志', 'none', 'pass', { hitRule: 'audit.append' }),
-  mkBehavior(24, '权限校验', '权限降级复核', 'medium', 'review', { summary: 'Agent 申请 export_dataset 权限', hitRule: 'perm.escalation' }),
-  mkBehavior(36, '网络请求', '公网域名解析', 'none', 'pass', { hitRule: 'dns.public' }),
-  mkBehavior(48, '数据查询', '跨表关联', 'none', 'pass', { hitRule: 'sql.cross-table' }),
-  mkBehavior(72, '文件读取', '配置文件读取', 'none', 'pass', { hitRule: 'config.read' }),
-];
-
-/** 扩充 mock 体量，便于验证分页交互 */
-const BEHAVIORS: BehaviorEvent[] = [
-  ...BEHAVIOR_SEED,
-  ...Array.from({ length: 48 }, (_, i) =>
-    mkBehavior(
-      80 + i * 0.5,
-      CATEGORIES[i % CATEGORIES.length],
-      `批量审计事件 #${i + 1}`,
-      i % 11 === 0 ? 'medium' : 'none',
-      i % 17 === 0 ? 'review' : 'pass',
-      { hitRule: `mock.rule.${i + 1}`, actor: i % 3 === 0 ? '外部' : 'Crew' },
-    ),
-  ),
-];
-
-const SESSION_SEED: SessionAudit[] = [
-  {
-    id: 'sess_92a3f1',
-    name: 'Crew',
-    agent: 'Crew',
-    user: 'Crew',
-    startTime: TODAY - 18 * HOUR,
-    endTime: TODAY - 18 * HOUR,
-    turns: 1,
-    tokens: 12,
-    risk: 'none',
-    key: 'a05e3280-c4c2-49ac-9e48-6237c9bcbb1b',
-    messages: [
-      { ts: TODAY - 18 * HOUR, role: 'assistant', seq: 0, content: 'HEARTBEAT_OK' },
-    ],
-    detections: [],
-    lastUserMessage: '',
-  },
-  {
-    id: 'sess_77b2ce',
-    name: 'Crew',
-    agent: 'Crew',
-    user: 'Crew',
-    startTime: TODAY - 42 * HOUR,
-    endTime: TODAY - 42 * HOUR,
-    turns: 1,
-    tokens: 8,
-    risk: 'none',
-    key: 'b8d3a771-22e1-4f01-9b22-7a4f1ed02bbd',
-    messages: [
-      { ts: TODAY - 42 * HOUR, role: 'assistant', seq: 0, content: 'HEARTBEAT_OK' },
-    ],
-    detections: [],
-    lastUserMessage: '',
-  },
-  {
-    id: 'sess_55e1d2',
-    name: 'Crew',
-    agent: 'Crew',
-    user: 'Crew',
-    startTime: TODAY - 3 * 24 * HOUR,
-    endTime: TODAY - 3 * 24 * HOUR,
-    turns: 1,
-    tokens: 14,
-    risk: 'none',
-    key: 'f0e1a8a3-c9d2-4c12-9a55-21c4bb3c2bb1',
-    messages: [
-      { ts: TODAY - 3 * 24 * HOUR, role: 'assistant', seq: 0, content: 'HEARTBEAT_OK' },
-    ],
-    detections: [],
-    lastUserMessage: '',
-  },
-  {
-    id: 'sess_44c0fa',
-    name: 'Crew',
-    agent: 'Crew',
-    user: 'Crew',
-    startTime: TODAY - 4 * 24 * HOUR,
-    endTime: TODAY - 4 * 24 * HOUR,
-    turns: 1,
-    tokens: 9,
-    risk: 'none',
-    key: '92d9c0e1-7f31-4d28-aa23-91bbf1e3a4c7',
-    messages: [
-      { ts: TODAY - 4 * 24 * HOUR, role: 'assistant', seq: 0, content: 'HEARTBEAT_OK' },
-    ],
-    detections: [],
-    lastUserMessage: '',
-  },
-  {
-    id: 'sess_chat_demo',
-    name: 'Crew',
-    agent: 'Crew',
-    user: 'Crew',
-    startTime: TODAY - 8 * 24 * HOUR,
-    endTime: TODAY - 8 * 24 * HOUR + 15 * 60,
-    turns: 2,
-    tokens: 59,
-    risk: 'none',
-    key: 'ca19e6b2-d227-4640-99d2-e91e1c42aa72',
-    messages: [
-      { ts: TODAY - 8 * 24 * HOUR, role: 'user', seq: 0, content: 'hi' },
-      { ts: TODAY - 8 * 24 * HOUR + 16, role: 'assistant', seq: 0, content: 'Hey! 👋 How\'s it going? What can I help you with today?' },
-      { ts: TODAY - 8 * 24 * HOUR + 15 * 60, role: 'user', seq: 0, content: 'hi' },
-    ],
-    detections: [],
-    lastUserMessage: 'hi',
-  },
-];
-
-const SESSIONS: SessionAudit[] = [
-  ...SESSION_SEED,
-  ...Array.from({ length: 22 }, (_, i) => ({
-    id: `sess_gen_${i}`,
-    name: 'Crew',
-    agent: 'Crew',
-    user: i % 4 === 0 ? '林岚' : 'Crew',
-    startTime: TODAY - (10 + i) * 24 * HOUR,
-    endTime: TODAY - (10 + i) * 24 * HOUR + 600,
-    turns: 1 + (i % 5),
-    tokens: 10 + i * 3,
-    risk: (i % 9 === 0 ? 'medium' : 'none') as RiskLevel,
-    key: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
-    messages: [{ ts: TODAY - (10 + i) * 24 * HOUR, role: 'assistant' as const, seq: 0, content: `HEARTBEAT_OK #${i + 1}` }],
-    detections: [],
-    lastUserMessage: '',
-  })),
-];
-
-/** 预留实时数据状态；未接入数据源时使用 mock。 */
-const liveBehaviors: BehaviorEvent[] | null = null;
-const liveSessions: SessionAudit[] | null = null;
-const liveTrend: DayBucket[] | null = null;
-const liveKPIs: { total: number; pass: number; block: number; review: number } | null = null;
-
-function effectiveBehaviors(): BehaviorEvent[] {
-  return liveBehaviors ?? BEHAVIORS;
-}
-
-function effectiveSessions(): SessionAudit[] {
-  return liveSessions ?? SESSIONS;
-}
-
 let activeTab: AuditTab = 'behavior';
 let behaviorFilter: 'all' | ActionResult = 'all';
 let searchQ = '';
-let selectedBehaviorId: string | null = BEHAVIOR_SEED[0].id;
-let selectedSessionId: string = SESSION_SEED[0].id;
+let selectedBehaviorId: string | null = null;
+let selectedSessionId: string = '';
 let behaviorPage = 1;
 let behaviorPageSize = 10;
 let sessionPage = 1;
@@ -296,13 +102,13 @@ function fmtTimeAgo(unix: number): string {
   const diff = now - unix;
   if (diff < 0) return '刚刚';
   if (diff < 60) return `${diff} 秒前`;
-  if (diff < HOUR) return `${Math.floor(diff / 60)} 分钟前`;
-  if (diff < 24 * HOUR) return `${Math.floor(diff / HOUR)} 小时前`;
-  const d = Math.floor(diff / (24 * HOUR));
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  const d = Math.floor(diff / 86400);
   return `${d} 天前`;
 }
 
-// ─────────────── 7 天趋势 mock ───────────────
+// ─────────────── 7 天趋势 ───────────────
 
 interface DayBucket {
   dayLabel: string; // 周一
@@ -310,26 +116,19 @@ interface DayBucket {
   block: number;
 }
 
+/** 趋势数据。接入审计数据源前返回空，趋势图显示空状态。 */
 function buildTrend(): DayBucket[] {
-  const labels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  const today = new Date(TODAY * 1000);
-  const start = new Date(today);
-  start.setHours(0, 0, 0, 0);
-  // 找到今天是周几（0=周日），回退到本周一
-  const dow = (start.getDay() + 6) % 7; // 0=周一
-  start.setDate(start.getDate() - dow);
+  return [];
+}
 
-  const pass = [120, 98, 142, 156, 134, 88, 76];
-  const block = [2, 1, 4, 6, 3, 1, 0];
-  const buckets: DayBucket[] = [];
-  for (let i = 0; i < 7; i += 1) {
-    buckets.push({
-      dayLabel: labels[i],
-      pass: pass[i] ?? 0,
-      block: block[i] ?? 0,
-    });
-  }
-  return buckets;
+/** 行为审计事件列表。接入审计数据源前返回空。 */
+function effectiveBehaviors(): BehaviorEvent[] {
+  return [];
+}
+
+/** 会话审计列表。接入审计数据源前返回空。 */
+function effectiveSessions(): SessionAudit[] {
+  return [];
 }
 
 // ─────────────── 行为审计 ───────────────
@@ -347,7 +146,6 @@ function visibleBehaviors(): BehaviorEvent[] {
 }
 
 function behaviorKPIs(): { total: number; pass: number; block: number; review: number } {
-  if (liveKPIs) return liveKPIs;
   return effectiveBehaviors().reduce(
     (acc, b) => {
       acc.total += 1;
@@ -479,9 +277,6 @@ function categoryTone(category: string): string {
 
 function behaviorRow(b: BehaviorEvent): string {
   const isSelected = b.id === selectedBehaviorId;
-  const mockBadge = b.source === 'mock'
-    ? '<span class="audit-pill audit-pill--mock" title="演示数据">Mock</span>'
-    : '';
   const tone = categoryTone(b.category);
   return `
     <tr class="audit-row${isSelected ? ' is-selected' : ''}" data-behavior-id="${b.id}">
@@ -489,7 +284,7 @@ function behaviorRow(b: BehaviorEvent): string {
       <td><span class="audit-cell-clip audit-cell-clip--summary" title="${escapeHtml(b.summary)}">${escapeHtml(b.summary)}</span></td>
       <td><span class="audit-cell-clip audit-cell-clip--mono" title="${escapeHtml(b.hitRule)}">${escapeHtml(b.hitRule)}</span></td>
       <td><span class="audit-pill audit-pill--${b.risk}">${RISK_LABELS[b.risk]}</span></td>
-      <td><div class="audit-cell-inline"><span class="audit-pill audit-pill--${b.result}">${RESULT_LABELS[b.result]}</span>${mockBadge}</div></td>
+      <td><div class="audit-cell-inline"><span class="audit-pill audit-pill--${b.result}">${RESULT_LABELS[b.result]}</span></div></td>
       <td class="audit-row__time" style="white-space:nowrap">${fmtAbsolute(b.timestamp)}</td>
     </tr>
   `;
@@ -526,7 +321,7 @@ function behaviorDetail(): string {
 
 function renderBehavior(): string {
   const kpis = behaviorKPIs();
-  const buckets = liveTrend ?? buildTrend();
+  const buckets = buildTrend();
   const events = visibleBehaviors();
   const pageItems = paginate(events, behaviorPage, behaviorPageSize);
   if (pageItems.length && !pageItems.some((b) => b.id === selectedBehaviorId)) {
@@ -854,7 +649,7 @@ function bindEvents(): void {
     b.addEventListener('click', () => {
       const act = b.getAttribute('data-audit-action');
       if (act === 'refresh') {
-        notify('已刷新审计数据（mock）');
+        notify('已刷新审计数据');
         render();
       } else if (act === 'trace') {
         notify('完整链路视图（即将上线）');
@@ -866,7 +661,7 @@ function bindEvents(): void {
 
   // 兼容历史：data-refresh 旧按钮（行为 / 会话页内仍可能存在）
   document.querySelectorAll<HTMLButtonElement>('[data-refresh]').forEach((b) => {
-    b.addEventListener('click', () => notify('已刷新（mock）'));
+    b.addEventListener('click', () => notify('已刷新'));
   });
 
   const resultSel = document.getElementById('audit-behavior-result') as HTMLSelectElement | null;
