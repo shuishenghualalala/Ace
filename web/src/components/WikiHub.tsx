@@ -996,8 +996,19 @@ export default function WikiHub({
               ))}
             </div>
             {pages.length === 0 && viewMode !== "tree" ? (
-              <div className="wiki-tree__empty">
-                还没有 Wiki 页面。上传文档或粘贴一段文字，AI 会自动整理成可检索的笔记。
+              <div className="wiki-tree__empty wiki-tree__empty--guide">
+                {/* 空知识库引导：纸飞机 + 虚线弧线指向右上「上传」入口（对齐桌面端） */}
+                <div className="wiki-tree__empty-art" aria-hidden="true">
+                  <svg className="wiki-tree__empty-arc" viewBox="0 0 120 90" fill="none">
+                    <path d="M14 84 C 30 40, 66 26, 104 16" stroke="currentColor" strokeWidth="1.5" strokeDasharray="5 5" strokeLinecap="round" />
+                  </svg>
+                  <svg className="wiki-tree__empty-plane" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 2 11 13" />
+                    <path d="M22 2 15 22l-4-9-9-4 20-7z" />
+                  </svg>
+                </div>
+                <p className="wiki-tree__empty-text">知识库还没有内容</p>
+                <p className="wiki-tree__empty-hint">点击右上角「上传」，或直接拖拽文件到右侧问答栏</p>
               </div>
             ) : (
               renderLeftView()
