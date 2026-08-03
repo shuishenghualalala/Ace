@@ -212,6 +212,19 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         # until a verified Active Owner is activated after Crew startup.
         await channel_manager.stop_all(reason="login_required")
 
+        # 从旧版 local 免登录切换到 email/remote 登录时，SQLite 里可能仍保留
+        # local 的排他租约。该租约没有可恢复的登录凭据，却会阻止新账号接管，
+        # 因此在所有渠道已断开、业务请求尚未放行的启动边界安全释放它。
+        auth_mode = str(getattr(crew.config, "auth_mode", "local") or "local").strip().lower()
+        legacy_lease = crew.active_owner.current()
+        if (
+            auth_mode in {"email", "remote"}
+            and legacy_lease is not None
+            and legacy_lease.owner_account_id == "local"
+            and crew.active_owner.release("local")
+        ):
+            log.info("认证模式已切换为 %s，释放遗留 local Owner 租约", auth_mode)
+
         # Keep remote early-health startup, but fence every business request
         # until MCP/Cron and Owner lifecycle services are ready.
         async def _deferred_startup() -> None:

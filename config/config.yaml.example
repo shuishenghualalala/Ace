@@ -63,9 +63,9 @@ gateway:
   admin_accounts: []
   max_active_runs: 4
   max_queue_depth_per_session: 20
-# 默认保持本机免登录。改为 remote 后，Web/Desktop 会显示验证码登录流程。
+# 默认使用邮箱区分本机租户（不验证邮箱所有权）。local 为免登录，remote 为验证码登录。
 auth:
-  mode: local  # local | remote
+  mode: email  # local | email | remote
   remote:
     provider_id: custom
     # 占位地址不会被请求；请改成自己的认证服务，或用 CREW_AUTH_BASE_URL 覆盖。

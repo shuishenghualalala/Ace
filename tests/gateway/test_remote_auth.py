@@ -37,6 +37,28 @@ def remote_api(tmp_path, monkeypatch):
             platform_registry.register(entry)
 
 
+@pytest.fixture
+def email_api(tmp_path, monkeypatch):
+    old_entries = list(platform_registry.all_entries())
+    platform_registry._entries.clear()
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    config = Config(
+        db_path=str(tmp_path / "crew.db"),
+        auth_mode="email",
+        plugins_enabled=[],
+    )
+    try:
+        crew = build_app(config=config, enable_team=False)
+        platform_registry._entries.clear()
+        api = create_app(crew)
+        api.state.crew = crew
+        yield api
+    finally:
+        platform_registry._entries.clear()
+        for entry in old_entries:
+            platform_registry.register(entry)
+
+
 @pytest.mark.asyncio
 async def test_remote_mode_requires_login(remote_api):
     transport = ASGITransport(app=remote_api, client=("127.0.0.1", 12345))
@@ -52,6 +74,51 @@ async def test_remote_mode_requires_login(remote_api):
         "providerId": "example",
     }
     assert sessions.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_email_mode_normalizes_email_and_scopes_owner(email_api):
+    transport = ASGITransport(app=email_api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        config = await client.get("/api/auth/config")
+        before = await client.get("/api/sessions")
+        logged_in = await client.post(
+            "/api/auth/login",
+            json={"email": "  Tenant.User@Example.COM  "},
+        )
+        sessions = await client.get("/api/sessions")
+        owner = email_api.state.crew.active_owner.current()
+        logged_out = await client.post("/api/auth/logout")
+        after_logout = await client.get("/api/sessions")
+
+    assert config.json() == {
+        "ok": True,
+        "mode": "email",
+        "configured": True,
+        "providerId": "email",
+    }
+    assert before.status_code == 401
+    assert logged_in.status_code == 200
+    assert logged_in.json()["user"] == {
+        "userId": "tenant.user@example.com",
+        "email": "tenant.user@example.com",
+        "phoneNumber": "",
+    }
+    assert sessions.status_code == 200
+    assert owner is not None
+    assert owner.owner_account_id == "email:tenant.user@example.com"
+    assert logged_out.status_code == 200
+    assert after_logout.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("email", ["", "missing-at.example.com", "a@b", "a b@example.com"])
+async def test_email_mode_rejects_invalid_email(email_api, email):
+    transport = ASGITransport(app=email_api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/auth/login", json={"email": email})
+
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -157,3 +224,12 @@ def test_auth_base_url_environment_override(tmp_path, monkeypatch):
     assert config.auth_mode == "remote"
     assert config.auth_provider_id == "example"
     assert config.auth_base_url == "https://login.example"
+
+
+def test_email_auth_mode_loads_from_config(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("auth:\n  mode: email\n", encoding="utf-8")
+
+    config = load_config(config_path=config_path)
+
+    assert config.auth_mode == "email"

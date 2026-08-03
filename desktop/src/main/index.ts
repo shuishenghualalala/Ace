@@ -123,6 +123,12 @@ let browserHostConnectionGeneration = 0;
 let browserHostConnectPending = false;
 let browserHostDisposePromise: Promise<void> | null = null;
 let tray: Tray | null = null;
+let rendererInitialStateReady = false;
+let nativeWindowReady = false;
+let windowShowRequested = true;
+let rendererReadyFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+const RENDERER_READY_FALLBACK_MS = 15_000;
 
 let isQuitting = false;
 // Gateway 重建代际：每次主动重试/重建递增。在途 ensureGateway 流程启动时记下
@@ -221,6 +227,7 @@ const MANAGED_GATEWAY_PORT = 28180;
 const MANAGED_GATEWAY_URL = `http://127.0.0.1:${MANAGED_GATEWAY_PORT}`;
 const AUTOSTART_ARG = '--autostart';
 const IS_DEV_LAUNCH = process.argv.includes('--dev');
+const RENDERER_LAUNCH_SEARCH = `?launchMode=${IS_DEV_LAUNCH ? 'dev' : 'account'}`;
 const gatewayIdentityMode: GatewayIdentityMode = resolveGatewayIdentityMode(IS_DEV_LAUNCH);
 
 /**
@@ -689,12 +696,39 @@ function resolveTrayIcon(): Electron.NativeImage {
   return image;
 }
 
-function showMainWindow(): void {
-  if (!mainWindow) return;
+function revealMainWindowIfReady(): void {
+  if (!mainWindow || !rendererInitialStateReady || !nativeWindowReady || !windowShowRequested) return;
   mainWindow.setSkipTaskbar(false);
   if (!mainWindow.isVisible()) mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
+}
+
+function resetRendererRevealGate(): void {
+  rendererInitialStateReady = false;
+  if (rendererReadyFallbackTimer) clearTimeout(rendererReadyFallbackTimer);
+  rendererReadyFallbackTimer = setTimeout(() => {
+    rendererReadyFallbackTimer = null;
+    rendererInitialStateReady = true;
+    console.warn('[main] renderer auth readiness timed out; showing fallback UI');
+    revealMainWindowIfReady();
+  }, RENDERER_READY_FALLBACK_MS);
+  mainWindow?.hide();
+}
+
+function markRendererInitialStateReady(): void {
+  rendererInitialStateReady = true;
+  if (rendererReadyFallbackTimer) {
+    clearTimeout(rendererReadyFallbackTimer);
+    rendererReadyFallbackTimer = null;
+  }
+  revealMainWindowIfReady();
+}
+
+function showMainWindow(): void {
+  if (!mainWindow) return;
+  windowShowRequested = true;
+  revealMainWindowIfReady();
 }
 
 function hideMainWindowToTray(): void {
@@ -802,6 +836,9 @@ function resolveWindowBackgroundColor(): string {
 
 function createWindow() {
   const launchHidden = shouldLaunchHidden();
+  nativeWindowReady = false;
+  windowShowRequested = !launchHidden;
+  resetRendererRevealGate();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -812,7 +849,7 @@ function createWindow() {
     icon: resolveAppIcon(),
     backgroundColor: resolveWindowBackgroundColor(),
     title: 'Crew Desktop',
-    show: !launchHidden,
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -826,19 +863,22 @@ function createWindow() {
   });
   if (!browserHostDisposePromise) ensureBrowserHost();
 
-  mainWindow.loadFile(path.join(__dirname, '../assets/index.html'));
+  mainWindow.loadFile(path.join(__dirname, '../assets/index.html'), {
+    query: { launchMode: IS_DEV_LAUNCH ? 'dev' : 'account' },
+  });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const expected = path.join(__dirname, '../assets/index.html');
-    if (!isTrustedRendererFileUrl(url, expected)) event.preventDefault();
+    if (!isTrustedRendererFileUrl(url, expected, RENDERER_LAUNCH_SEARCH)) event.preventDefault();
   });
 
   mainWindow.once('ready-to-show', () => {
+    nativeWindowReady = true;
     if (launchHidden) {
       hideMainWindowToTray();
       return;
     }
-    mainWindow?.show();
+    revealMainWindowIfReady();
   });
 
   if (process.argv.includes('--dev')) {
@@ -894,7 +934,10 @@ function createWindow() {
       tryAutoReload(`did-fail-load: ${code} ${desc}`);
     }
   });
-  mainWindow.webContents.on('did-start-loading', () => browserHost?.hidePanel());
+  mainWindow.webContents.on('did-start-loading', () => {
+    browserHost?.hidePanel();
+    resetRendererRevealGate();
+  });
   mainWindow.webContents.on('did-finish-load', () => {
     // Push current backend health status on load so the renderer knows immediately
     mainWindow?.webContents.send('backend:status', backendStatusPayload(backendConnected));
@@ -905,6 +948,10 @@ function createWindow() {
     mainWindow?.webContents.send('browser-view:layout-invalidated');
   });
   mainWindow.on('closed', () => {
+    if (rendererReadyFallbackTimer) {
+      clearTimeout(rendererReadyFallbackTimer);
+      rendererReadyFallbackTimer = null;
+    }
     browserHost?.hidePanel();
     mainWindow = null;
   });
@@ -1643,7 +1690,7 @@ function assertTrustedRenderer(event: TrustedIpcEvent): void {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: untrusted IPC sender`);
   }
   const expectedFile = path.join(__dirname, '../assets/index.html');
-  if (!isTrustedRendererFileUrl(senderFrame.url, expectedFile)) {
+  if (!isTrustedRendererFileUrl(senderFrame.url, expectedFile, RENDERER_LAUNCH_SEARCH)) {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: IPC sender must be the packaged renderer`);
   }
 }
@@ -2248,6 +2295,13 @@ function registerIpc() {
     }
     return saveDesktopPrefs({ closeBehavior: behavior });
   });
+  trustedHandle('app:get-system-locale', () => {
+    return app.getLocale();
+  });
+  trustedHandle('app:renderer-initial-state-ready', () => {
+    markRendererInitialStateReady();
+    return { ok: true };
+  });
 
   trustedHandle('auth:get-state', async () => {
     const ensured = await ensureGateway();
@@ -2268,14 +2322,19 @@ function registerIpc() {
   });
   trustedHandle('auth:login', async (_e, raw: unknown) => {
     const record = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
-    const phoneNumber = typeof record.phoneNumber === 'string' ? record.phoneNumber.trim() : '';
+    const identifier = typeof record.identifier === 'string' ? record.identifier.trim() : '';
     const code = typeof record.code === 'string' ? record.code.trim() : '';
-    if (!phoneNumber || phoneNumber.length > 32 || !code || code.length > 32) {
+    if (!identifier || identifier.length > 128 || code.length > 32) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid login input`);
     }
     const ensured = await ensureGateway();
-    await desktopAuthSession.refreshConfig(ensured.baseUrl);
-    const result = await desktopAuthSession.login(ensured.baseUrl, phoneNumber, code);
+    const state = await desktopAuthSession.refreshConfig(ensured.baseUrl);
+    if (state.mode === 'remote' && !code) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid login input`);
+    }
+    const result = state.mode === 'email'
+      ? await desktopAuthSession.loginWithEmail(ensured.baseUrl, identifier)
+      : await desktopAuthSession.login(ensured.baseUrl, identifier, code);
     if (result.ok === true) {
       closeGatewaySockets('login-changed');
       await resetBrowserHost('login-changed');
@@ -2540,6 +2599,7 @@ function registerIpc() {
   });
 
   trustedHandle('gateway:ensure', async () => ensureGateway());
+  trustedHandle('gateway:get-status', () => backendStatusPayload(backendConnected));
 
   // 冷启动/卡死时 renderer「重试」按钮调用。
   // 协作式作废（generation++）+ 等旧实例真正退出后才重建，保证同一时刻至多一个

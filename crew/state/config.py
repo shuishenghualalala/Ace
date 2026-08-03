@@ -258,7 +258,7 @@ class Config:
     gateway_max_queue_depth_per_session: int = 20  # 单 session 等待队列上限
 
     # --- authentication ---
-    # local：本机免登录；remote：通过用户配置的认证服务登录。
+    # local：本机免登录；email：本机邮箱租户入口；remote：通过用户配置的认证服务登录。
     # 显式 remote 优先于 gateway.dev_mode，便于在开发启动方式下联调登录。
     auth_mode: str = "local"
     auth_provider_id: str = "custom"
@@ -1414,7 +1414,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         auth = data.get("auth", {})
         if isinstance(auth, dict):
             mode = str(auth.get("mode", cfg.auth_mode) or cfg.auth_mode).strip().lower()
-            cfg.auth_mode = mode if mode in {"local", "remote"} else "local"
+            cfg.auth_mode = mode if mode in {"local", "email", "remote"} else "local"
             remote = auth.get("remote", {})
             if isinstance(remote, dict):
                 cfg.auth_provider_id = (

@@ -46,12 +46,15 @@ const api = {
   setAutoLaunchEnabled: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-launch-enabled', enabled),
   getCloseBehavior: () => ipcRenderer.invoke('app:get-close-behavior'),
   setCloseBehavior: (behavior: 'tray' | 'quit' | 'ask') => ipcRenderer.invoke('app:set-close-behavior', behavior),
+  getSystemLocale: () => ipcRenderer.invoke('app:get-system-locale') as Promise<string>,
+  rendererInitialStateReady: (): Promise<{ ok: true }> =>
+    ipcRenderer.invoke('app:renderer-initial-state-ready'),
 
   authGetState: (): Promise<AuthStateSnapshot> => ipcRenderer.invoke('auth:get-state'),
   authSendCode: (phoneNumber: string): Promise<Record<string, unknown>> =>
     ipcRenderer.invoke('auth:send-code', { phoneNumber }),
-  authLogin: (phoneNumber: string, code: string): Promise<Record<string, unknown>> =>
-    ipcRenderer.invoke('auth:login', { phoneNumber, code }),
+  authLogin: (identifier: string, code = ''): Promise<Record<string, unknown>> =>
+    ipcRenderer.invoke('auth:login', { identifier, code }),
   authLogout: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('auth:logout'),
   onAuthSessionState: (cb: (state: AuthStateSnapshot) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, state: AuthStateSnapshot) => cb(state);
@@ -69,6 +72,12 @@ const api = {
   // Gateway REST 桥接（webSecurity:true 下 renderer 不直连 127.0.0.1）
   // path 必须在主进程白名单内（/api/ 前缀），不允许指向外部主机
   ensureGateway: () => ipcRenderer.invoke('gateway:ensure'),
+  getBackendStatus: (): Promise<{
+    connected: boolean;
+    baseUrl?: string;
+    logPath?: string;
+    components?: Record<string, { status: string; message?: string }>;
+  }> => ipcRenderer.invoke('gateway:get-status'),
   retryGateway: () => ipcRenderer.invoke('gateway:retry'),
   gatewayFetch: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) =>
     ipcRenderer.invoke('gateway:fetch', { url, init: init || {} }),

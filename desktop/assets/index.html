@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval' 'sha256-yTrLWdb1XFUEm6eOqrK5SXS8qXDXcRXWnOw85HNNsjk='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: crew-file:; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self' file:; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval' 'sha256-B/M+BVh7RFhMt9kxztiRcOxDpEVniaftLwTWFZi8KT8='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: crew-file:; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self' file:; base-uri 'none'; form-action 'none'">
   <title>Crew</title>
   <!--
     FOUC guard: runs synchronously BEFORE the
@@ -22,6 +22,8 @@
   <script>
     (function () {
       try {
+        var launchMode = new URLSearchParams(window.location.search).get('launchMode');
+        document.documentElement.dataset.launchMode = launchMode === 'dev' ? 'dev' : 'account';
         var raw = localStorage.getItem('crew.settings');
         var s = raw ? JSON.parse(raw) : {};
         var themeMode = s.themeMode === 'light' || s.themeMode === 'dark' ||
@@ -43,7 +45,7 @@
   <link rel="stylesheet" href="./styles/index.css" />
 </head>
 
-<body class="welcome-active">
+<body class="welcome-active auth-wall-active">
 <!-- 智能体运行环境准备中全局遮罩（由 backend-status-guard 控制显隐） -->
   <div id="backend-loading-overlay" class="backend-loading-overlay" style="display:none;">
     <div class="backend-loading-card">
@@ -230,6 +232,15 @@
               </svg>
             </span>
           </button>
+        </div>
+        <div class="user-info" id="user-section" hidden>
+          <button type="button" class="user-avatar-btn" aria-label="查看账户信息" title="账户信息">
+            <span class="user-avatar" id="sidebar-user-avatar">我</span>
+          </button>
+          <div class="user-details">
+            <div class="user-name" id="sidebar-user-name">—</div>
+            <div class="user-email" id="sidebar-user-email">—</div>
+          </div>
         </div>
       </div>
       <div class="sidebar-resize-handle" id="sidebar-resize-handle" title="拖拽调整导航宽度" aria-hidden="true"></div>
@@ -742,17 +753,17 @@
     </div>
   </div>
 
-  <div class="modal-overlay" id="login-modal" style="display: none;">
+  <div class="modal-overlay" id="login-modal" style="display: flex;">
     <div class="modal-content">
       <div class="modal-header">
-        <h3 class="modal-title"><span>登录 Crew</span></h3>
+        <h3 class="modal-title"><span id="login-title">使用邮箱进入 Ace</span></h3>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label class="form-label" for="login-phone">手机号</label>
-          <input type="tel" class="form-input" id="login-phone" placeholder="请输入手机号" maxlength="32" autocomplete="tel" />
+          <label class="form-label" id="login-identifier-label" for="login-phone">邮箱</label>
+          <input type="email" class="form-input" id="login-phone" placeholder="请输入邮箱" maxlength="128" autocomplete="email" />
         </div>
-        <div class="form-group">
+        <div class="form-group" id="login-code-group" hidden>
           <label class="form-label" for="login-code">验证码</label>
           <div class="form-input-with-btn">
             <input type="text" class="form-input" id="login-code" placeholder="请输入验证码" maxlength="32" autocomplete="one-time-code" />
@@ -763,7 +774,7 @@
       </div>
       <div class="modal-footer">
         <button class="btn-cancel" id="login-quit" type="button">退出程序</button>
-        <button class="btn-primary" id="login-submit" type="button">登录</button>
+        <button class="btn-primary" id="login-submit" type="button">进入 Ace</button>
       </div>
     </div>
   </div>
@@ -944,46 +955,46 @@
     <div class="modal-content">
       <div class="modal-body">
         <nav class="set-v2-nav" id="settings-nav">
-          <div class="set-v2-nav__title">设置</div>
+          <div class="set-v2-nav__title" data-i18n="settings.nav.title">设置</div>
           <button type="button" class="set-v2-nav__item" data-settings-pane="account">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            <span>账户信息</span>
+            <span data-i18n="settings.nav.account">账户信息</span>
           </button>
           <button type="button" class="set-v2-nav__item is-active" data-settings-pane="general">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            <span>通用设置</span>
+            <span data-i18n="settings.nav.general">通用设置</span>
           </button>
           <button type="button" class="set-v2-nav__item" data-settings-pane="model">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 0-4 4v1H6a3 3 0 0 0-3 3v9a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3v-9a3 3 0 0 0-3-3h-2V6a4 4 0 0 0-4-4Zm-2 5V6a2 2 0 1 1 4 0v1h-4Z"/></svg>
-            <span>模型</span>
+            <span data-i18n="settings.nav.models">模型</span>
           </button>
           <button type="button" class="set-v2-nav__item" data-settings-pane="channel">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-            <span>渠道</span>
+            <span data-i18n="settings.nav.channels">渠道</span>
           </button>
           <button type="button" class="set-v2-nav__item" data-settings-pane="mcp">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/><path d="M6 6h.01M6 18h.01"/></svg>
-            <span>MCP 服务</span>
+            <span data-i18n="settings.nav.mcp">MCP 服务</span>
           </button>
           <button type="button" class="set-v2-nav__item" data-settings-pane="sys-logs">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
-            <span>运行日志</span>
+            <span data-i18n="settings.nav.logs">运行日志</span>
           </button>
           <button type="button" class="set-v2-nav__item" data-settings-pane="sys-usage">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><circle cx="12" cy="12" r="10"/></svg>
-            <span>使用统计</span>
+            <span data-i18n="settings.nav.usage">使用统计</span>
           </button>
           <button type="button" class="set-v2-nav__item" data-settings-pane="library">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span>项目与会话</span>
+            <span data-i18n="settings.nav.library">项目与会话</span>
           </button>
           <button type="button" class="set-v2-nav__item" data-settings-pane="data">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.66 4.03 3 9 3s9-1.34 9-3V5M3 11v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6"/></svg>
-            <span>数据管理</span>
+            <span data-i18n="settings.nav.data">数据管理</span>
           </button>
           <button type="button" class="set-v2-nav__item" data-settings-pane="about">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 10v6M12 7.5h.01"/></svg>
-            <span>关于我们</span>
+            <span data-i18n="settings.nav.about">关于我们</span>
           </button>
         </nav>
 
@@ -1008,7 +1019,7 @@
                   <div class="set-account-card__value" id="set-account-user-id">—</div>
                 </div>
                 <div class="set-account-card__row">
-                  <div class="set-account-card__label">手机号</div>
+                  <div class="set-account-card__label" id="set-account-contact-label">手机号</div>
                   <div class="set-account-card__value" id="set-account-phone">—</div>
                 </div>
               </div>
@@ -1020,52 +1031,65 @@
               <div class="set-account-empty__icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               </div>
-              <div class="set-account-empty__title" id="set-account-empty-title">本地模式</div>
-              <div class="set-account-empty__desc" id="set-account-empty-desc">当前无需登录。</div>
-              <button type="button" class="set-v2-btn set-v2-btn--primary" id="set-account-go-login" hidden>前往登录</button>
+              <div class="set-account-empty__title" id="set-account-empty-title" data-i18n="account.localMode">本地模式</div>
+              <div class="set-account-empty__desc" id="set-account-empty-desc" data-i18n="account.noLoginNeeded">当前无需登录。</div>
+              <button type="button" class="set-v2-btn set-v2-btn--primary" id="set-account-go-login" hidden data-i18n="account.goLogin">前往登录</button>
             </div>
           </div>
         </div>
 
         <div class="set-v2-pane" id="settings-pane-general">
-          <div class="set-v2-pane__title">通用设置</div>
-          <div class="set-v2-pane__desc">调整界面外观、输入习惯与启动行为。</div>
+          <div class="set-v2-pane__title" data-i18n="settings.general">通用设置</div>
+          <div class="set-v2-pane__desc" data-i18n="settings.general.desc">调整界面外观、输入习惯与启动行为。</div>
 
           <div class="set-v2-section">
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">外观模式</div>
-                <div class="set-v2-row__desc">跟随系统切换，或手动指定浅色/深色主题。</div>
+                <div class="set-v2-row__label" data-i18n="settings.language">界面语言</div>
+                <div class="set-v2-row__desc" data-i18n="settings.language.desc">切换界面显示语言，跟随系统将自动检测操作系统语言。</div>
+              </div>
+              <div class="set-v2-row__control">
+                <select class="set-v2-select" id="set-language">
+                  <option value="system" data-i18n="settings.language.system">跟随系统</option>
+                  <option value="zh-CN" data-i18n="settings.language.zhCN">简体中文</option>
+                  <option value="en" data-i18n="settings.language.en">English</option>
+                </select>
+              </div>
+            </div>
+            <div class="set-v2-row">
+              <div class="set-v2-row__copy">
+                <div class="set-v2-row__label" data-i18n="settings.themeMode">外观模式</div>
+                <div class="set-v2-row__desc" data-i18n="settings.themeMode.desc">跟随系统切换，或手动指定浅色/深色主题。</div>
               </div>
               <div class="set-v2-row__control">
                 <select class="set-v2-select" id="set-theme-mode">
-                  <option value="system">跟随系统</option>
-                  <option value="light">浅色（默认蓝）</option>
-                  <option value="dark">深色（默认蓝）</option>
-                  <option value="sepia">护眼米色</option>
-                  <option value="sidebar-gray">侧栏灰色</option>
-                  <option value="hc">高对比度</option>
+                  <option value="system" data-i18n="settings.themeMode.system">跟随系统</option>
+                  <option value="light" data-i18n="settings.themeMode.light">浅色（默认蓝）</option>
+                  <option value="dark" data-i18n="settings.themeMode.dark">深色（默认蓝）</option>
+                  <option value="sepia" data-i18n="settings.themeMode.sepia">护眼米色</option>
+                  <option value="sidebar-gray" data-i18n="settings.themeMode.sidebarGray">侧栏灰色</option>
+                  <option value="hc" data-i18n="settings.themeMode.hc">高对比度</option>
                 </select>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">强调色</div>
-                <div class="set-v2-row__desc">主按钮、选中态与链接的颜色。</div>
+                <div class="set-v2-row__label" data-i18n="settings.accent">强调色</div>
+                <div class="set-v2-row__desc" data-i18n="settings.accent.desc">主按钮、选中态与链接的颜色。</div>
               </div>
               <div class="set-v2-row__control">
                 <select class="set-v2-select" id="set-accent">
-                  <option value="blue">科技蓝</option>
-                  <option value="indigo">商务靛蓝</option>
-                  <option value="violet">活力紫</option>
-                  <option value="cyan">清亮青</option>
+                  <option value="blue" data-i18n="settings.accent.blue">科技蓝</option>
+                  <option value="indigo" data-i18n="settings.accent.indigo">商务靛蓝</option>
+                  <option value="violet" data-i18n="settings.accent.violet">活力紫</option>
+                  <option value="cyan" data-i18n="settings.accent.cyan">清亮青</option>
                 </select>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">界面字号</div>
-                <div class="set-v2-row__desc">控制导航、按钮、表格、设置项等 UI 文本。</div>
+                <div class="set-v2-row__label" data-i18n="settings.uiFontSize">界面字号</div>
+                <div class="set-v2-row__desc" data-i18n="settings.uiFontSize.desc">控制导航、按钮、表格、设置项等 UI 文本。</div>
               </div>
               <div class="set-v2-row__control">
                 <div class="set-v2-range-wrap">
@@ -1074,17 +1098,17 @@
                   </div>
                   <input type="range" class="set-v2-range" id="set-ui-font-size" min="12" max="18" step="1" value="14" />
                   <div class="set-v2-range__markers">
-                    <span>小</span>
-                    <span>默认</span>
-                    <span>大</span>
+                    <span data-i18n="common.small">小</span>
+                    <span data-i18n="common.default">默认</span>
+                    <span data-i18n="common.large">大</span>
                   </div>
                 </div>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">正文字号</div>
-                <div class="set-v2-row__desc">控制对话消息、Markdown 正文和长文本阅读区。</div>
+                <div class="set-v2-row__label" data-i18n="settings.contentFontSize">正文字号</div>
+                <div class="set-v2-row__desc" data-i18n="settings.contentFontSize.desc">控制对话消息、Markdown 正文和长文本阅读区。</div>
               </div>
               <div class="set-v2-row__control">
                 <div class="set-v2-range-wrap">
@@ -1093,17 +1117,17 @@
                   </div>
                   <input type="range" class="set-v2-range" id="set-content-font-size" min="12" max="20" step="1" value="14" />
                   <div class="set-v2-range__markers">
-                    <span>小</span>
-                    <span>默认</span>
-                    <span>大</span>
+                    <span data-i18n="common.small">小</span>
+                    <span data-i18n="common.default">默认</span>
+                    <span data-i18n="common.large">大</span>
                   </div>
                 </div>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">编辑器字号</div>
-                <div class="set-v2-row__desc">控制输入框、表单文本框和可编辑内容。</div>
+                <div class="set-v2-row__label" data-i18n="settings.editorFontSize">编辑器字号</div>
+                <div class="set-v2-row__desc" data-i18n="settings.editorFontSize.desc">控制输入框、表单文本框和可编辑内容。</div>
               </div>
               <div class="set-v2-row__control">
                 <div class="set-v2-range-wrap">
@@ -1112,17 +1136,17 @@
                   </div>
                   <input type="range" class="set-v2-range" id="set-editor-font-size" min="12" max="20" step="1" value="14" />
                   <div class="set-v2-range__markers">
-                    <span>小</span>
-                    <span>默认</span>
-                    <span>大</span>
+                    <span data-i18n="common.small">小</span>
+                    <span data-i18n="common.default">默认</span>
+                    <span data-i18n="common.large">大</span>
                   </div>
                 </div>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">终端/代码字号</div>
-                <div class="set-v2-row__desc">控制代码块、日志、工具参数和等宽文本。</div>
+                <div class="set-v2-row__label" data-i18n="settings.terminalFontSize">终端/代码字号</div>
+                <div class="set-v2-row__desc" data-i18n="settings.terminalFontSize.desc">控制代码块、日志、工具参数和等宽文本。</div>
               </div>
               <div class="set-v2-row__control">
                 <div class="set-v2-range-wrap">
@@ -1131,23 +1155,23 @@
                   </div>
                   <input type="range" class="set-v2-range" id="set-terminal-font-size" min="11" max="18" step="1" value="12" />
                   <div class="set-v2-range__markers">
-                    <span>小</span>
-                    <span>默认</span>
-                    <span>大</span>
+                    <span data-i18n="common.small">小</span>
+                    <span data-i18n="common.default">默认</span>
+                    <span data-i18n="common.large">大</span>
                   </div>
                 </div>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">字体</div>
-                <div class="set-v2-row__desc">系统已默认安装 PingFang SC / Microsoft YaHei。</div>
+                <div class="set-v2-row__label" data-i18n="settings.fontFamily">字体</div>
+                <div class="set-v2-row__desc" data-i18n="settings.fontFamily.desc">系统已默认安装 PingFang SC / Microsoft YaHei。</div>
               </div>
               <div class="set-v2-row__control">
                 <select class="set-v2-select" id="set-font-family">
-                  <option value="system">系统默认</option>
-                  <option value="noto">思源黑体</option>
-                  <option value="inter">Inter</option>
+                  <option value="system" data-i18n="settings.fontFamily.system">系统默认</option>
+                  <option value="noto" data-i18n="settings.fontFamily.noto">思源黑体</option>
+                  <option value="inter" data-i18n="settings.fontFamily.inter">Inter</option>
                 </select>
               </div>
             </div>
@@ -1165,8 +1189,8 @@
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">开机自启</div>
-                <div class="set-v2-row__desc">登录系统时自动启动 Crew。</div>
+                <div class="set-v2-row__label" data-i18n="settings.autoStart">开机自启</div>
+                <div class="set-v2-row__desc" data-i18n="settings.autoStart.desc">登录系统时自动启动 Crew。</div>
               </div>
               <div class="set-v2-row__control">
                 <label class="set-v2-switch"><input type="checkbox" id="set-auto-start"><span class="set-v2-switch__track"></span></label>
@@ -1174,21 +1198,21 @@
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">关闭窗口</div>
-                <div class="set-v2-row__desc">关闭窗口时是隐藏到托盘还是直接退出。</div>
+                <div class="set-v2-row__label" data-i18n="settings.closeBehavior">关闭窗口</div>
+                <div class="set-v2-row__desc" data-i18n="settings.closeBehavior.desc">关闭窗口时是隐藏到托盘还是直接退出。</div>
               </div>
               <div class="set-v2-row__control">
                 <select class="set-v2-select" id="set-close-behavior">
-                  <option value="tray">最小化到托盘</option>
-                  <option value="quit">直接退出应用</option>
-                  <option value="ask">询问我</option>
+                  <option value="tray" data-i18n="settings.closeBehavior.tray">最小化到托盘</option>
+                  <option value="quit" data-i18n="settings.closeBehavior.quit">直接退出应用</option>
+                  <option value="ask" data-i18n="settings.closeBehavior.ask">询问我</option>
                 </select>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">Enter 发送消息</div>
-                <div class="set-v2-row__desc">关闭后，Enter 仅换行，发送需用 Cmd/Ctrl + Enter。</div>
+                <div class="set-v2-row__label" data-i18n="settings.enterToSend">Enter 发送消息</div>
+                <div class="set-v2-row__desc" data-i18n="settings.enterToSend.desc">关闭后，Enter 仅换行，发送需用 Cmd/Ctrl + Enter。</div>
               </div>
               <div class="set-v2-row__control">
                 <label class="set-v2-switch"><input type="checkbox" id="set-enter-send" checked><span class="set-v2-switch__track"></span></label>
@@ -1196,8 +1220,8 @@
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">流式输出</div>
-                <div class="set-v2-row__desc">实时显示 Agent 输出（关闭后一次性返回）。</div>
+                <div class="set-v2-row__label" data-i18n="settings.streaming">流式输出</div>
+                <div class="set-v2-row__desc" data-i18n="settings.streaming.desc">实时显示 Agent 输出（关闭后一次性返回）。</div>
               </div>
               <div class="set-v2-row__control">
                 <label class="set-v2-switch"><input type="checkbox" id="set-streaming" checked><span class="set-v2-switch__track"></span></label>
@@ -1205,7 +1229,7 @@
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">右侧检查器（默认显示）</div>
+                <div class="set-v2-row__label" data-i18n="settings.inspectorOpen">右侧检查器（默认显示）</div>
                 <div class="set-v2-row__desc">对话页右侧的文件改动 / 上下文 / 计划三 Tab 面板。</div>
               </div>
               <div class="set-v2-row__control">
@@ -1360,29 +1384,29 @@
         </div>
 
         <div class="set-v2-pane" id="settings-pane-data" hidden>
-          <div class="set-v2-pane__title">数据管理</div>
-          <div class="set-v2-pane__desc">清除缓存、导出/导入工作空间与会话。</div>
+          <div class="set-v2-pane__title" data-i18n="settings.data.title">数据管理</div>
+          <div class="set-v2-pane__desc" data-i18n="settings.data.desc">清除缓存、导出/导入工作空间与会话。</div>
           <div class="set-v2-section">
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">清除缓存</div>
-                <div class="set-v2-row__desc">清空本地草稿与未发送的附件。</div>
+                <div class="set-v2-row__label" data-i18n="settings.clearCache.label">清除缓存</div>
+                <div class="set-v2-row__desc" data-i18n="settings.clearCache.desc">清空本地草稿与未发送的附件。</div>
               </div>
-              <div class="set-v2-row__control"><button class="set-v2-btn" type="button" id="set-clear-cache">清除</button></div>
+              <div class="set-v2-row__control"><button class="set-v2-btn" type="button" id="set-clear-cache" data-i18n="settings.clearCache.btn">清除</button></div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">导出全部会话</div>
-                <div class="set-v2-row__desc">导出所有会话的元数据与完整消息正文（JSON，可能较慢）。</div>
+                <div class="set-v2-row__label" data-i18n="settings.exportSessions.label">导出全部会话</div>
+                <div class="set-v2-row__desc" data-i18n="settings.exportSessions.desc">导出所有会话的元数据与完整消息正文（JSON，可能较慢）。</div>
               </div>
-              <div class="set-v2-row__control"><button class="set-v2-btn" type="button" id="set-export-sessions">导出</button></div>
+              <div class="set-v2-row__control"><button class="set-v2-btn" type="button" id="set-export-sessions" data-i18n="settings.exportSessions">导出</button></div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">重置全部设置</div>
-                <div class="set-v2-row__desc">恢复默认设置，会话与登录态保持不变。</div>
+                <div class="set-v2-row__label" data-i18n="settings.resetAll.label">重置全部设置</div>
+                <div class="set-v2-row__desc" data-i18n="settings.resetAll.desc">恢复默认设置，会话与登录态保持不变。</div>
               </div>
-              <div class="set-v2-row__control"><button class="set-v2-btn set-v2-btn--danger" type="button" id="set-reset-all">重置</button></div>
+              <div class="set-v2-row__control"><button class="set-v2-btn set-v2-btn--danger" type="button" id="set-reset-all" data-i18n="settings.resetAll.btn">重置</button></div>
             </div>
           </div>
         </div>

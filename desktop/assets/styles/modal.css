@@ -85,6 +85,11 @@ body.auth-wall-active #login-modal {
     z-index: var(--z-modal);
 }
 
+/* dev 启动由主进程在首帧标记，不展示账户登录墙。 */
+html[data-launch-mode='dev'] body.auth-wall-active #login-modal {
+  display: none !important;
+}
+
 body.auth-wall-active #login-modal .modal-content {
     box-shadow: var(--shadow-xl);
 }

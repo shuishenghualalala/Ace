@@ -9,7 +9,7 @@ const PREFS_KEY = 'authSession';
 
 interface AuthConfigPayload {
   ok?: boolean;
-  mode?: 'local' | 'remote' | 'dev';
+  mode?: 'local' | 'email' | 'remote' | 'dev';
   configured?: boolean;
   providerId?: string;
 }
@@ -37,10 +37,12 @@ function normalizedUser(raw: unknown): AuthUserSnapshot | null {
   const userId = typeof record.userId === 'string' ? record.userId.trim() : '';
   const phoneNumber = typeof record.phoneNumber === 'string' ? record.phoneNumber.trim() : '';
   const displayName = typeof record.displayName === 'string' ? record.displayName.trim() : '';
+  const email = typeof record.email === 'string' ? record.email.trim() : '';
   if (!userId) return null;
   return {
     userId,
     phoneNumber,
+    ...(email ? { email } : {}),
     ...(displayName ? { displayName } : {}),
   };
 }
@@ -81,14 +83,14 @@ export class DesktopAuthSession {
     if (!response.ok || payload.ok !== true) {
       throw new Error('无法读取认证配置');
     }
-    this.mode = payload.mode === 'remote' || payload.mode === 'dev' ? payload.mode : 'local';
+    this.mode = payload.mode === 'remote' || payload.mode === 'email' || payload.mode === 'dev' ? payload.mode : 'local';
     this.configured = payload.configured !== false;
     this.providerId = typeof payload.providerId === 'string' && payload.providerId.trim()
       ? payload.providerId.trim()
       : 'custom';
-    if (this.mode === 'remote') {
+    if (this.mode === 'remote' || this.mode === 'email') {
       if (
-        previousMode !== 'remote'
+        previousMode !== this.mode
         || previousProviderId !== this.providerId
         || !this.cookie
         || !this.user
@@ -115,11 +117,12 @@ export class DesktopAuthSession {
   }
 
   state(): AuthStateSnapshot {
+    const requiresSession = this.mode === 'remote' || this.mode === 'email';
     return {
       mode: this.mode,
       configured: this.configured,
       providerId: this.providerId,
-      isLoggedIn: this.mode !== 'remote' || Boolean(this.cookie && this.user),
+      isLoggedIn: !requiresSession || Boolean(this.cookie && this.user),
       user: this.user,
     };
   }
@@ -132,7 +135,7 @@ export class DesktopAuthSession {
   }
 
   cookieHeader(): string {
-    return this.mode === 'remote' ? this.cookie : '';
+    return this.mode === 'remote' || this.mode === 'email' ? this.cookie : '';
   }
 
   private restoreRemoteSession(): void {
@@ -208,8 +211,31 @@ export class DesktopAuthSession {
     return { ok: true, status: response.status, user };
   }
 
+  async loginWithEmail(baseUrl: string, email: string): Promise<Record<string, unknown>> {
+    const response = await fetch(this.endpoint(baseUrl, '/api/auth/login'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+      redirect: 'error',
+    });
+    const payload = parseJson(await response.text());
+    const user = normalizedUser(payload.user);
+    const cookie = cookiePair(response.headers.get('set-cookie'));
+    if (!response.ok || payload.ok !== true || !user || !cookie) {
+      return { ...payload, ok: false, status: response.status };
+    }
+    this.cookie = cookie;
+    this.user = user;
+    this.persistRemoteSession();
+    const verified = await this.refreshConfig(baseUrl);
+    if (!verified.isLoggedIn) {
+      return { ok: false, status: 401, error: '邮箱会话验证失败，请重试' };
+    }
+    return { ok: true, status: response.status, user: verified.user };
+  }
+
   async logout(baseUrl: string): Promise<Record<string, unknown>> {
-    if (this.mode !== 'remote' || !this.cookie) {
+    if ((this.mode !== 'remote' && this.mode !== 'email') || !this.cookie) {
       this.cookie = '';
       this.user = null;
       this.clearPersistedSession();

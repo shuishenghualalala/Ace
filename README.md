@@ -111,13 +111,27 @@ cp config/.env.example config/.env     # Windows PowerShell: Copy-Item config/.e
 
 ### 2A. 启动桌面端
 
+需要测试邮箱租户登录时，使用普通模式启动：
+
 ```bash
 cd desktop
 npm install
+npm start
+```
+
+`npm start` 会构建 Desktop、自动启动托管 Gateway，并读取仓库根目录的
+`config/config.yaml`。默认配置为 `auth.mode: email`，首次打开会要求填写邮箱；不发送
+验证码，邮箱仅用于区分本机租户。登录后可进入“设置 → 模型 → 添加模型”配置真实模型。
+
+日常开发且不需要测试登录流程时，可使用：
+
+```bash
+cd desktop
 npm run dev
 ```
 
-`npm run dev` 会自动启动隔离的开发 Gateway，不需要再手动启动后端。首次打开后，可进入“设置 → 模型 → 添加模型”配置真实模型。
+`npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，因此不会显示
+邮箱登录页。两种命令都不需要另外手动启动 Gateway。
 
 ### 2B. 启动 Web 端
 
@@ -182,9 +196,11 @@ MY_MODEL_API_KEY=your-api-key
 保存配置后重启 Crew Gateway。不要把真实 API Key 写入 `config/config.yaml`、源码、测试或 README；
 本地 `config/config.yaml` 和 `.env` 均不应提交。
 
-## 可选的账号登录
+## 账号与租户登录
 
-Crew 默认使用 `auth.mode: local`，本机免登录并使用 `local` 作为数据 owner，不影响快速开始。
+Ace 默认使用 `auth.mode: email`：首次启动只需填写邮箱，不发送验证码，邮箱会规范化为小写并生成 `email:<邮箱>` 数据 owner。该模式用于本机多租户数据隔离，不验证邮箱所有权；同一台电脑上的使用者可以输入其他邮箱切换租户。
+
+如需保留单机免登录行为，可改为 `auth.mode: local`，此时使用 `local` 作为数据 owner。
 如需接入自己的手机号验证码认证服务，在本地 `config/config.yaml` 中启用远程模式：
 
 ```yaml
