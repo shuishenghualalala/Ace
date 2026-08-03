@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Crew 文档总览</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box} body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px} h1{font-size:28px;font-weight:800;margin:0 0 4px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}.sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+  ul{padding-left:0;list-style:none}ul li{padding:6px 0}ul li .d{color:var(--t3);font-size:13px;margin-left:8px}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  .note{color:var(--t3);font-size:13px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Crew / 文档总览</div>
+  <h1><span class="logo">C</span>Crew 文档总览</h1>
+  <div class="sub">按功能模块分类，点击进入对应文档。后端模块进入「后端模块索引」可下钻到单个模块。</div>
+
+  <h2>后端模块</h2>
+  <ul>
+    <li><a href="backend/modules/index.html"><code>backend/modules/index.html</code></a><span class="d">后端模块索引，按搭建顺序列出 20 个模块（core / state / agent / gateway / skills / team …）</span></li>
+    <li><a href="backend/weixin-channel.html"><code>backend/weixin-channel.html</code></a><span class="d">微信渠道（weixin）设计文档</span></li>
+  </ul>
+
+  <h2>前端</h2>
+  <ul>
+    <li><a href="frontend/web-frontend.html"><code>frontend/web-frontend.html</code></a><span class="d">Web 前端设计文档</span></li>
+    <li><a href="frontend/desktop-frontend.html"><code>frontend/desktop-frontend.html</code></a><span class="d">桌面端前端设计文档</span></li>
+    <li><a href="frontend/tool-execution-two-phase.html"><code>frontend/tool-execution-two-phase.html</code></a><span class="d">Tool 执行两阶段前端渲染</span></li>
+  </ul>
+
+  <h2>浏览器自动化</h2>
+  <ul>
+    <li><a href="browser/playwright-engine-design.md"><code>browser/playwright-engine-design.md</code></a><span class="d">内置 playwright-core 引擎设计决策</span></li>
+    <li><a href="browser/record-to-skill-design.md"><code>browser/record-to-skill-design.md</code></a><span class="d">录制 → trace v11 → Playwright Replay 回放契约</span></li>
+    <li><a href="browser/record-to-skill-landscape.md"><code>browser/record-to-skill-landscape.md</code></a><span class="d">录制→技能：六个项目的做法与差异对比</span></li>
+  </ul>
+
+  <h2>桌面端</h2>
+  <p class="note">待补充。Electron 桌面端相关文档后续在此分类下补充。</p>
+
+  <div class="nav">Crew · 开源版本 Ace 的开发文档索引</div>
+</div>
+</body>
+</html>

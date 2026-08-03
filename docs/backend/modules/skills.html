@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Skill 子系统 · 后端模块文档</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:26px;font-weight:800;letter-spacing:-.5px;margin:0 0 6px}
+  .sub{color:var(--t3);margin-bottom:40px}
+  h2{font-size:20px;font-weight:700;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;font-weight:700;margin:22px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;border:none;padding:0}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  ul{padding-left:20px}
+  .warn{border-left:3px solid #d97706;background:#fffbeb;padding:12px 16px;margin:14px 0;border-radius:4px}
+  .ok{border-left:3px solid #16a34a;background:#f0fdf4;padding:12px 16px;margin:14px 0;border-radius:4px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+  .nav{margin-top:44px;color:var(--t3);font-size:13px;padding-top:16px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Skill 子系统</h1>
+  <div class="sub">crew/agent/skills.py · 目录发现、加载、安装与安全校验 · 2026-08-02 建立</div>
+
+  <h2>1. 定位</h2>
+  <p>Skill 是封装在目录（含 <code>SKILL.md</code>）中的可复用 Agent 能力。对话中通过 <code>/skill名</code> 激活，由 <code>resolve_skill</code> 解析、<code>build_skill_activation</code> 构建指令注入当前轮。</p>
+  <p>系统分两层：<b>扫描层</b>决定对话中可调用；<b>可安装源</b>仅在技能页展示，未安装不可调用。</p>
+
+  <h2>2. 目录分层</h2>
+  <h3>2.1 扫描层（scan_skills，决定可调用）</h3>
+  <table>
+    <thead><tr><th>层</th><th>目录</th><th>常量</th></tr></thead>
+    <tbody>
+      <tr><td>内置</td><td>&lt;repo&gt;/crew/skills/</td><td>get_builtin_skills_dir()</td></tr>
+      <tr><td>插件</td><td>插件声明的 skills/ 根</td><td>get_plugin_skill_roots()</td></tr>
+      <tr><td>用户</td><td>get_crew_home()/skills/</td><td>get_user_skills_dir()</td></tr>
+    </tbody>
+  </table>
+  <p>覆盖优先级：user &gt; plugin &gt; builtin（用户覆盖同名插件/内置）。</p>
+
+  <h3>2.2 可安装源（仅展示，未安装不可调用）</h3>
+  <table>
+    <thead><tr><th>源</th><th>目录</th><th>常量</th><th>安装方式</th></tr></thead>
+    <tbody>
+      <tr><td>Optional</td><td>&lt;repo&gt;/optional-skills/</td><td>get_optional_skills_dir()</td><td>原子复制（copytree）</td></tr>
+      <tr><td>本地</td><td>~/.agents/skills/</td><td>get_local_skills_dir()</td><td>软链（symlink）</td></tr>
+    </tbody>
+  </table>
+  <p>本地源是跨 agent 共享的 skill 仓库（如 <code>npx skills add larksuite/cli</code> 安装的飞书 skills），默认 <code>~/.agents/skills</code>，可用 env <code>CREW_LOCAL_SKILLS_DIR</code> 覆盖。不扫 <code>~/.claude/skills</code>（其内容为软链到 <code>~/.agents/skills</code>，会重复）。</p>
+
+  <h2>3. 安装机制</h2>
+  <h3>3.1 Optional（仓库随附）</h3>
+  <p><code>install_skill</code> 从 <code>list_optional_skills()</code> 解析源，<code>_install_skill_tree</code> 在 user dir 内分阶段 <code>copytree</code> + <code>_validate_skill_tree</code> 校验后同文件系统 <code>rename</code> 原子发布。失败回滚 tombstone。</p>
+  <h3>3.2 本地（软链）</h3>
+  <p>optional 找不到时 fallback <code>list_local_skills()</code>。<code>_install_local_skill_link</code> 在 user dir 建 <code>os.symlink</code> 指向 <code>~/.agents/skills/&lt;name&gt;</code>，源更新自动同步；卸载仅 <code>os.unlink</code> 软链，<b>不递归删源</b>。</p>
+  <pre><code>get_crew_home()/skills/lark-doc  --symlink-->  ~/.agents/skills/lark-doc</code></pre>
+  <p><code>list_skills</code> 的 <code>is_user</code> 判定用 <code>resolve_skill_path</code>：软链 skill 因受信任根放行通过，正确标记 <code>source=user</code>（不误判 builtin）。</p>
+
+  <h2>4. 安全校验（核心）</h2>
+  <p><code>resolve_skill_path(path, allowed_root)</code> 解析路径（跟随软链），证明最终目标在 allowed_root 内，越界则抛 <code>SkillPathError</code>。被 <code>scan_skills</code> / <code>_scan_dir</code> / <code>_iter_skill_files</code> / <code>_validate_skill_tree</code> / <code>read_skill_text</code> / <code>uninstall</code> 全链路调用。</p>
+  <div class="warn">
+    <b>软链放行边界（本地 skill 关键）</b>：本地 skill 软链指向 <code>~/.agents/skills</code>（在 user dir 外），默认会被判越界、全链路加载失败。为此引入 <code>_trusted_link_target_roots()</code>（返回 <code>[~/.agents/skills]</code>），<code>resolve_skill_path</code> 越界时追加检查——resolved 落在受信任根内则放行。
+    <ul>
+      <li><code>resolve</code> 递归跟随所有软链到最终真实路径，<code>~/.agents/skills</code> 内的二级逃逸软链（如指向 <code>/etc</code>、<code>~/.ssh</code>）最终 resolved 落在外部仍被拒。</li>
+      <li>skill 内部若有越界软链，<code>_walk_contained</code> 记录 finding，<code>_validate_skill_tree</code> 失败，安装被拒、已建软链由调用方清理。</li>
+      <li>卸载时 <code>_is_trusted_local_link</code> 区分本地软链（<code>os.unlink</code> 删链）与普通目录 / 不受信软链（拒绝，防 <code>rmtree</code> 删源）。</li>
+    </ul>
+  </div>
+  <div class="ok">
+    <b>一处改动打通全链路</b>：仅在 <code>resolve_skill_path</code> 加受信任根放行，scan/validate/view/uninstall 自动接受本地软链 skill，无需逐点打补丁。安全边界由"只放行 <code>~/.agents/skills</code> 这一个根"保证。
+  </div>
+
+  <h2>5. API（crew/gateway/routers/misc.py）</h2>
+  <table>
+    <thead><tr><th>路由</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>GET /api/skills</td><td>已安装 + 内置（list_skills）</td></tr>
+      <tr><td>GET /api/skills/store</td><td>{installed, optional, <b>local</b>, evolution}</td></tr>
+      <tr><td>POST /api/skills/{slug}/install</td><td>安装（optional 复制 / 本地软链）</td></tr>
+      <tr><td>DELETE /api/skills/{slug}</td><td>卸载（目录 rmtree / 软链 unlink）</td></tr>
+    </tbody>
+  </table>
+  <p>审计日志 <code>get_crew_home()/logs/global-skills-audit.jsonl</code> 记录所有 install/uninstall（<code>source</code> 字段自由字符串，本地安装传 <code>desktop-api</code> 等，无需 schema 改动）。</p>
+
+  <h2>6. 数据流</h2>
+  <pre><code>~/.agents/skills/&lt;name&gt;/SKILL.md
+   │  list_local_skills()（_parse_listing_skill，source=local）
+   ▼
+/api/skills/store { local[] }  ──►  技能页「可安装」视图（本地徽章）
+   │  install_skill(slug)  ──►  _install_local_skill_link
+   ▼
+get_crew_home()/skills/&lt;name&gt;  --symlink-->  ~/.agents/skills/&lt;name&gt;
+   │  scan_skills() 加载（resolve_skill_path 放行受信任软链）
+   ▼
+对话中 /&lt;name&gt;  ──►  resolve_skill  ──►  build_skill_activation</code></pre>
+
+  <h2>7. 测试</h2>
+  <p><code>tests/test_local_skills.py</code>（8 例）：扫描发现、软链安装、scan 加载、source 判定（user 不误判 builtin）、卸载删链不删源、安全边界（软链到白名单外被拒）、已安装不重复、slug 不存在。</p>
+  <p><code>tests/gateway/test_global_skills_api.py</code>：store 路由响应含 <code>local</code> 字段。</p>
+  <p><code>desktop/tests/unit/skills-global-scope.test.ts</code>：本地徽章、软链文案、<code>~/.agents/skills</code> 文案断言。</p>
+
+  <div class="nav">返回：<a href="index.html">后端模块索引</a> · <a href="../../index.html">Crew 文档总览</a></div>
+</div>
+</body>
+</html>

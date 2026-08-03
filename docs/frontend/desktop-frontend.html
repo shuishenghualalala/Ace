@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Crew 桌面端设计文档</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:30px;font-weight:800;letter-spacing:-.5px;margin:0 0 6px}
+  .sub{color:var(--t3);margin-bottom:40px}
+  h2{font-size:20px;font-weight:700;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;font-weight:700;margin:22px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;border:none;padding:0}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  .logo{width:30px;height:30px;border-radius:8px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:10px}
+  ul{padding-left:20px}
+  .tree{font-family:var(--mono);font-size:13px;white-space:pre;color:var(--t2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="logo">C</span>Crew 桌面端设计文档</h1>
+  <div class="sub">Electron + Vanilla TypeScript + esbuild · 对接 crew.gateway · 2026-06-29 建立</div>
+
+  <h2>1. 定位</h2>
+  <ul>
+    <li>桌面端是 <code>crew.gateway</code> 的本地外壳：维护会话、WebSocket 流、任务板，复用后端契约，不发明新协议。</li>
+    <li>技术栈与 <code>web/</code>（React + Vite）<b>不同</b>：纯 TypeScript + esbuild，无框架、无虚拟 DOM，靠 <code>diffRenderUnits</code> 做局部 DOM 更新。</li>
+    <li>设计参考 <code>hermes-agent/apps/desktop</code> 的<b>交互理念</b>（stickyBottom 滚动、折叠持久化、流式 markdown），但实现按本仓库 vanilla TS 形态重写，不搬运 React 代码。</li>
+  </ul>
+  <h3>1.1 开发与交付规则</h3>
+  <ul>
+    <li>每次功能开发完成后，必须先完成可执行验证，再交付；若无法运行某项测试，需在交付说明中明确原因和剩余风险。</li>
+    <li>每次功能更新必须同步记录到对应模块文档；桌面端前端功能优先记录在本文，涉及后端协议时再更新对应 <code>docs/backend/modules/*.html</code>。</li>
+    <li>开发文档和测试记录集中放在对应模块文档或既有 <code>docs/desktop/</code> 专题文档中；除非形成独立设计主题，避免为了单次小改新增零散文件。</li>
+    <li>代码结构以模块边界为先：同一功能尽量收敛在已有 feature 子模块、样式模块和 typed API 封装内，避免临时脚本式调用和跨层循环依赖。</li>
+    <li>可以参考 Hermes 等架构的交互和分层，但实现需按本仓库 Electron + Vanilla TypeScript 结构落地，不直接堆叠不合栈的代码。</li>
+  </ul>
+
+  <h2>2. 关键文件</h2>
+  <table>
+    <thead><tr><th>文件</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td>2026-08-03</td><td>新增 <b>macOS (Apple Silicon) 打包与自动更新</b>：<code>deb-package/pack_mac.sh</code> 在 Mac arm64 主机上全流程产出 <code>crew-desktop_{ver}_arm64.dmg</code>（web 前端构建 → PyInstaller 打包 crew-gateway → 内嵌 Python standalone/Node portable 运行时 → electron-builder 出 .app → gateway 嵌入 <code>Contents/Resources/crew-gateway</code> → hdiutil 出 DMG，含版本注入与 version.txt 自动递增）。<code>update-url.ts</code> 新增 <code>mac</code> 平台：darwin 下载地址模板为 <code>{base}/crew-desktop_{ver}_arm64.dmg</code>，配合既有 darwin+.dmg 安装分支（open DMG 后退出）打通侧边栏更新按钮全链路；Release 附件名必须与该模板一致。</td><td>deb-package/pack_mac.sh、main/update/update-url.ts、tests/unit/update-url.test.ts。</td></tr>
+      <tr><td>2026-08-02</td><td>技能页「可安装」视图新增<b>本地 skill</b>来源：扫描 <code>~/.agents/skills</code>（跨 agent 共享，如 <code>npx skills add</code> 安装的飞书 skills），以「本地」徽章与仓库 optional 区分；安装时在 <code>get_crew_home()/skills</code> 建软链指向源目录，源更新自动同步，卸载仅删软链不动源。后端 <code>list_local_skills</code> + <code>/api/skills/store</code> 增 <code>local</code> 字段；<code>resolve_skill_path</code> 放行受信任软链根（<code>~/.agents/skills</code>）保证全链路加载，软链到白名单外仍被拒。</td><td>skills-page.ts、backend-client.ts、crew/agent/skills.py、routers/misc.py、tests/test_local_skills.py。</td></tr>
+      <tr><td>2026-07-22</td><td>统一 Desktop 专家与技能模块 UI，以专家页为视觉基准：技能/插件分段改为雾蓝选中态，二级视图与分类筛选改为浅蓝圆角矩形；技能卡对齐专家卡的中性表面、轻边框、低幅悬停与间距；安装、卸载、内置操作改为常显的图标文字按钮，并统一焦点、按压反馈和 reduced-motion 降级。技能书本图标与分类识别色继续保留。</td><td>skills-page.ts、hub-premium.css、技能市场页面。</td></tr>
+      <tr><td>2026-07-21</td><td>收紧 Desktop 专家页筛选控件圆角：分类按钮由胶囊形改为 9px 圆角矩形；专家视图与排序切换器外层统一为 11px、内部按钮统一为 8px，保留原有配色、尺寸和即时按压反馈。</td><td>hub-premium.css、专家页筛选与切换控件。</td></tr>
+      <tr><td>2026-07-21</td><td>继续收敛 Desktop 专家页视觉：专家卡片改为轻边框中性表面与低幅悬停，识别色仅用于头像容器、标签和召唤按钮；召唤按钮默认常显并按专家色调轻量区分，已召唤与取消召唤使用克制的蓝色/红色状态；补充键盘焦点、按压反馈与 reduced-motion 降级。</td><td>hub-premium.css、专家广场卡片及操作反馈。</td></tr>
+      <tr><td><code>desktop/src/ui/markdown.ts</code></td><td>Markdown → HTML 渲染入口。基于 <code>micromark</code> + <code>micromark-extension-gfm</code> 解析（旧正则实现已整体废弃），<code>DOMPurify</code> 做 XSS 白名单 sanitize。postProcess 只做 micromark 不输出但 UI/Electron 需要的适配：代码块语言标签头 wrapper、外部链接 <code>target=_blank</code>；<code>table</code> / <code>hr</code> 直出，由 CSS 元素选择器覆盖。导出 <code>renderMarkdownHtml</code> 与 <code>renderMarkdownHtmlStreaming</code>。</td></tr>
+      <tr><td><code>desktop/src/ui/markdown-stream.ts</code></td><td>流式 Markdown 预处理：在 micromark 解析前<b>自动闭合未完成的语法</b>（未配对的 <code>**</code>/<code>*</code>/<code>__</code>/<code>_</code>、未闭合的 <code>```</code> 围栏），消除「先看到源码再渲染成样式」的闪烁。导出 <code>preprocessStreamMarkdown</code>。</td></tr>
+      <tr><td><code>desktop/src/ui/features/scroll-anchor.ts</code></td><td>滚动锚点模块，实现 <code>stickyBottom</code>：用户在底部时随流式自动跟随；用户向上滚/滚轮上滑/触屏上移即 disarm；<code>jumpToBottom</code> 重新 armed；内置程序滚动 guard 区分用户滚动与程序滚动，避免误 disarm。导出 <code>attachScrollAnchor</code>。</td></tr>
+      <tr><td><code>desktop/src/ui/features/fold-state.ts</code></td><td>折叠状态持久化：回合级 <code>turnFold</code> 与工具卡片级 <code>toolFold</code> 双 Map，写入 <code>localStorage</code>（<code>mm.desktop.turnFold.v1</code> / <code>mm.desktop.toolFold.v1</code>），上限 240 条 LRU。提供 <code>getTurnFold/setTurnFold</code>、<code>getToolFold/setToolFold</code>、<code>hydrateTurnFoldFromStorage</code>、<code>clearFoldMemoryCache</code>。</td></tr>
+      <tr><td><code>desktop/src/ui/chat-render.ts</code></td><td>消息 → DOM 渲染。过程区（thinking / 工具 / 旁白 / 状态 / 错误）统一渲染为 <code>.process-timeline</code> 时间线（图标列 + 虚线连接，结构对齐 web <code>AgentProcessTimeline</code>）。<code>renderToolCard</code> 产出工具时间线项：标题走 <code>toolDisplayTitle</code>（语义化带参数，如「运行 ls -lah」），<code>messageId</code> 构造 <code>toolFoldKey</code>，<code>open</code> 优先取用户偏好，默认折叠；展开后为 Request/Response 代码块。<code>delegate_task</code>/<code>run_agent</code> 走 <code>renderSubagentCard</code> 专属卡片（对齐 Hermes Task 卡）：单人图标 + 中文标题（<code>子智能体 {agent_type}：{goal 摘要}</code>，批量为「N 个并行任务」），展开体显示任务描述（goal/context，批量按序编号）、子智能体最终回复（<code>max-height</code> 块内滚动）与执行摘要行（N 次工具调用、耗时；timeout/error 异常态标红）；底部留白仅展开时保留，折叠态为单行，后台启动显示「已转后台运行（任务 ID）」；折叠行为与其他工具卡一致。流式消息走 <code>renderMarkdownHtmlStreaming</code>。</td></tr>
+      <tr><td><code>desktop/src/ui/render-utils.ts</code></td><td>渲染工具函数；新增 <code>applyToolFoldState</code> 对齐 <code>applyFoldState</code>。</td></tr>
+      <tr><td><code>desktop/src/ui/features/agents-page.ts</code></td><td>桌面端外援中心：本机外援发现、外部 Agent 添加/移除/派活、外部 Team 组建/智能组队/派活，以及首次使用状态引导。该模块复用 <code>backend-client.ts</code> typed API，不复用 Web React 组件；派活通过注入的 <code>ensureChatSession</code> 回调创建新会话并切回对话页，避免反向 import <code>index.ts</code> 造成循环依赖。</td></tr>
+      <tr><td><code>desktop/src/ui/features/team-collaboration-board.ts</code></td><td>Team Session「协作」看板：将 Gateway task、DAG 依赖、FormationPlan 成员、execution events、产物和 runtime concurrency 投影为 Desktop 原生 TypeScript DOM；信息结构、状态文案和视觉规格逐项对齐 Web <code>TaskBoard</code>，但不引入 React 或复制 Web 运行时。</td></tr>
+      <tr><td><code>desktop/assets/styles/agents-page.css</code></td><td>外援中心独立样式。页面、状态引导气泡、卡片、智能组队、冲突确认弹窗和成员职责编辑均收敛在该样式文件，避免散落到全局样式。</td></tr>
+      <tr><td><code>desktop/src/ui/backend-client.ts</code></td><td>桌面端 Gateway typed API 封装。外部 runtime / agent / team / team role / team suggestion 等接口从这里进入 UI，避免 feature 模块直接拼 URL。</td></tr>
+      <tr><td><code>desktop/src/ui/tool-labels.ts</code></td><td>工具展示名：<code>formatToolDisplayName</code> 静态中文名映射；<code>toolDisplayTitle</code> 过程时间线标题（对齐 web <code>processDisplay</code>），<code>uiLabel</code> 优先，按工具语义拼 path/command/query 参数，未知工具回退静态名。</td></tr>
+      <tr><td><code>desktop/src/ui/features/chat-controller.ts</code></td><td>对话主控：<code>scrollChatToBottom</code> 改用 <code>pinToBottomIfSticky</code>，新增 <code>jumpChatToBottom</code>；<code>ensureFoldDelegation</code> 委托 <code>details.process-timeline__details</code>（带 <code>data-fold-key</code> 的工具项）toggle 写 <code>setToolFold</code>、<code>details.msg__foldable</code> 写 <code>setTurnFold</code>；发消息后 <code>jumpChatToBottom</code>。</td></tr>
+      <tr><td><code>desktop/src/ui/features/session-busy.ts</code></td><td>会话生成态统一入口：<code>applyBusyUi</code> 驱动 Composer 停止按钮和 running intro；<code>syncSessionLiveFromBackend</code> 对齐后端 live，但会拒绝已封口同 <code>request_id</code> 的 stale running 状态，等待追问/澄清/Plan 审批时也保持 UI idle。</td></tr>
+      <tr><td><code>desktop/src/ui/features/history-merge.ts</code></td><td>后端历史与本地消息合并：运行中以后端历史为基底，按共同前缀保留本地在途尾部，避免刷新/重连时当前用户消息或流式片段被重排、覆盖。</td></tr>
+      <tr><td><code>desktop/src/ui/features/session-controller.ts</code></td><td>会话控制：加载历史后 <code>hydrateTurnFoldFromStorage</code> 应用持久化折叠；切会话 <code>jumpChatToBottom</code> 重置滚动。</td></tr>
+      <tr><td><code>desktop/src/ui/features/login.ts</code></td><td>登录态：登出时 <code>clearFoldMemoryCache</code> 清掉上一用户的折叠记忆。</td></tr>
+      <tr><td><code>desktop/src/main/preload.ts</code></td><td>暴露 <code>MobileWork</code> IPC：含 <code>readTextFile</code>（读内容）与 <code>pathExists</code>（静默存在性探测，不抛 ENOENT）。幽灵文件过滤必须用后者。另有 <code>gatewayFetch</code>（REST 桥）与 <code>gatewayUpload</code>（本地文件 multipart 上传桥，Phase 2）。</td></tr>
+      <tr><td><code>desktop/src/main/index.ts</code>（gateway 通道）</td><td><code>gateway:fetch</code> handler：hostname 钳制到本地 gateway + JWT/身份头注入 + header 黑名单过滤。<code>gateway:upload</code> handler（Phase 2）：renderer 传文件绝对路径数组，主进程 stat（isFile / 非空 / ≤200MB）→ 读文件 → Node 内置 FormData/Blob 逐文件组 multipart POST，认证与 host 钳制逻辑与 fetch 完全一致；本地失败合成 4xx JSON 错误体，逐文件返回结果。</td></tr>
+      <tr><td><code>desktop/src/shared/ipc-schemas.ts</code> / <code>constants.ts</code></td><td>IPC 参数手写 validator（零依赖）。<code>GatewayUploadArgs</code>（Phase 2）：hostname 白名单 + pathname 精确匹配 <code>GATEWAY_UPLOAD_ALLOWED_PATHS</code>（仅 /api/wiki/upload，不走 /api/ 前缀）+ files 绝对路径数组（≤32 个、单路径 ≤1024 字符、禁 NUL）；单文件上限 <code>GATEWAY_UPLOAD_MAX_FILE_BYTES</code>（200MB，后端未设限，主进程自限防内存打满）。</td></tr>
+      <tr><td><code>desktop/src/main/index.ts</code> / <code>gateway-restart-controller.ts</code> / <code>gateway-instance-auth.ts</code></td><td>主进程 Gateway 监督：认证组件健康探测，以及托管进程退出/启动错误后的串行自动重拉与指数退避；重拉期间重复退出信号会合并但不丢失，退出软件时停止待执行重拉。</td></tr>
+      <tr><td><code>desktop/src/ui/features/backend-status-guard.ts</code></td><td>基础健康控制环境准备遮罩；组件失败不重新阻塞界面，Cron <code>failed</code> 状态只显示一次明确 toast。</td></tr>
+      <tr><td><code>desktop/src/ui/features/history-mapping.ts</code> / <code>turn-file-counts.ts</code></td><td>历史「已编辑」卡：<code>filterExistingTurnFileChanges</code> 用 <code>pathExists</code> 剔除磁盘已不存在的临时路径；<code>hydrateMissingTurnFileCounts</code> 补全 +/- 后触发重绘。</td></tr>
+      <tr><td><code>desktop/src/ui/features/wiki-page.ts</code></td><td>Wiki 三栏页：左侧时间线/文件树/类型/图谱，中间 Markdown 页面详情，右侧挂载持久化 Wiki Agent；KB 选择、上传/编译进度、分页、单删与批量管理继续复用既有实现。Wiki Agent 返回的页面引用经 <code>openWikiPageInHub</code> 在中栏打开。</td></tr>
+      <tr><td><code>desktop/src/ui/features/wiki-graph.ts</code></td><td>Wiki 知识图谱视图（Phase 3，对齐 web WikiGraphView）：<code>backendApi.wikiGraph</code> 拉全量节点/边 → SVG 渲染（节点按 page_type 着色、deprecated 置灰、source_of 边带箭头、原生 <code>&lt;text&gt;</code> 标签截断 + <code>&lt;title&gt;</code> 全文）；滚轮缩放 / 拖拽平移 / 双击适应 / 缩放条（+ − 适应 1:1）/「显示来源节点」开关；布局在 Web Worker 计算（无 Worker 环境回退同步纯函数）。模块自管数据/布局/视口状态，wiki-page 每次 renderShell 重挂载不丢状态。</td></tr>
+      <tr><td><code>desktop/src/ui/wiki-graph-layout.worker.ts</code></td><td>图谱力导向布局 Worker（零依赖，移植自 <code>web/src/components/wikiGraphLayout.worker.ts</code>：斥力/弹簧/碰撞/居中度 tick 迭代）。esbuild 独立 iife 产物 <code>dist/assets/wiki-graph-layout.worker.js</code>，renderer 以 <code>new Worker('./wiki-graph-layout.worker.js')</code> 加载（file:// + CSP script-src 'self' 下实测可用）。<code>computeWikiGraphLayout</code> 纯函数导出供单测与无 Worker 回退共用；onmessage 壳仅在 Worker 全局挂载。</td></tr>
+      <tr><td><code>desktop/assets/styles/wiki-page.css</code></td><td>Wiki 页三栏响应式样式（目录 | 详情 | Agent）；宽屏固定三栏，窄屏时 Agent 落到下方完整宽度。保留列表、图谱、上传任务、Wiki 卡片与 overlay 的主题适配。</td></tr>
+      <tr><td><code>desktop/src/ui/features/wiki-agent.ts</code></td><td>Wiki Agent 双入口：Wiki 页面内嵌右栏优先，按 kb_id 创建/复用独立 session，复用现有 WebSocket、消息 store、history mapping 与对话渲染，不切换全局 activeSessionId；没有 Wiki 面板时保留旧主聊天入口作兼容回退。页面引用在中栏打开，失败任务可直接把上下文发送给右栏 Agent。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 交互行为约定</h2>
+  <h3>3.1 折叠</h3>
+  <ul>
+    <li>用户手动折叠/展开后状态写入 <code>localStorage</code>，<b>跨重启保留</b>。</li>
+    <li>新工具调用到达 / 模型继续输出文字时，<b>不再自动展开</b>已被用户折叠的卡片或回合。</li>
+    <li>无用户偏好时：工具时间线项默认折叠（仅展示标题与耗时）；思考项流式中默认展开、完成后默认收起；流式回合默认展开，完成默认折叠。</li>
+  </ul>
+  <h3>3.2 滚动</h3>
+  <ul>
+    <li>流式输出过程中<b>不强制跟随</b>（no_follow）：用户在底部才跟随，向上滚即停。</li>
+    <li>提交新消息 / 切换会话 / 重连后用 <code>jumpChatToBottom</code> 显式跳底。</li>
+    <li>程序滚动不 disarm <code>stickyBottom</code>，只有真实 wheel/touch 上滑才 disarm。</li>
+  </ul>
+  <h3>3.3 Markdown</h3>
+  <ul>
+    <li>引擎 <code>micromark + gfm</code>：支持表格、删除线、任务列表、autolink、嵌套列表、引用块等完整 GFM 语法。</li>
+    <li>流式：先 <code>preprocessStreamMarkdown</code> 闭合半截语法，再解析，避免源码闪烁。</li>
+    <li>正文与过程旁白统一由 <code>chat-render.ts</code> 按消息 <code>streaming/interrupted</code> 状态选择 <code>renderMarkdownHtmlStreaming</code>；有序列表项里的半截粗体（如 <code>2. **F2. Fork...</code>）也会在流式中临时闭合。</li>
+    <li>安全：<code>DOMPurify</code> 白名单 sanitize；外链强制 <code>target="_blank" rel="noopener noreferrer"</code>。</li>
+  </ul>
+  <h3>3.4 会话级模型（Composer）</h3>
+  <ul>
+    <li>设计手册：<code>docs/desktop/per-session-model.md</code>。</li>
+    <li>Composer <code>#chat-model-picker-inline-btn</code> 浮层走 <code>PUT /api/session/{id}/model</code>，仅影响当前会话；session busy 时 pending，UI 提示下条消息生效。</li>
+    <li>设置页模型列表仅 CRUD，已移除「切换」；<code>active_model_id</code> 表示新建会话默认种子。</li>
+    <li>模块：<code>features/session-model.ts</code>（<code>setSessionModel</code>、<code>syncSessionModelUi</code>、草稿种子）。</li>
+  </ul>
+  <h3>3.5 对话 busy 状态</h3>
+  <ul>
+    <li>Composer 是否显示「对话中」只读 <code>busySessions</code>，不直接等同于后端 <code>live=running</code>。</li>
+    <li><code>final/error</code> 后保留 <code>activeRequestId</code> 用于拒收旧帧；如果状态同步又返回同一 <code>request_id</code> 的 <code>running</code>，视为 stale live，不复活 busy。</li>
+    <li>追问、澄清、Plan 审批属于等待用户输入，后端可能仍持锁 running，但 UI 必须保持 idle，用户提交后再由 <code>resumeSessionGeneration</code> 恢复 busy。</li>
+    <li>细节文档：<code>docs/desktop/conversation-busy-state-review.md</code>。</li>
+  </ul>
+  <h3>3.6 同步状态机基准</h3>
+  <ul>
+    <li>Desktop 当前以 <code>session_id</code> 路由会话、<code>request_id</code> 划分回合、<code>gateway_sequence</code> 做 replay 去重，重连时读取 <code>/api/session/{id}/status.active_request_id</code> 绑定正在执行的回合。</li>
+    <li>Assistant 正文 delta 以 <code>body.delta_start</code>/<code>body.delta_end</code> 作为文本顺序 span；<code>chat-reducer.ts</code> 在 <code>Bookkeeping.deltaSpans</code> 中按 span 排序重建正文，避免实时/回放交错时后到低序号文本被追加到尾部。旧后端无 span 的帧进入 <code>legacyDeltaText</code>，按原到达顺序兼容。</li>
+    <li><code>chat-reducer.ts</code> 的 turn gate 必须先于消息写入执行：旧 <code>request_id</code> 的生成帧、等待帧、todo/file/task 附属帧不得污染当前会话状态。</li>
+    <li><code>followup_question</code>、<code>plan_review</code> 属于等待用户输入；它们会封住当前流式回合并解除 busy，用户提交后再由原回合身份继续。</li>
+  </ul>
+
+  <h3>3.7 Composer 输入（IME 合成拦截）</h3>
+  <ul>
+    <li><code>#chat-input</code> 的 Enter 发送需先经过 IME 合成状态判定，避免中文/日文/韩文输入法选字时误发送。</li>
+    <li>实现位于 <code>features/composer-input.ts</code>，三层拦截：
+      <ul>
+        <li><code>event.isComposing === true</code> 或本地 composition 状态为 true 时忽略 Enter。</li>
+        <li><code>event.keyCode === 229</code> 时忽略（Chrome IME 事件特征）。</li>
+        <li>Safari 中 <code>compositionend</code> 先于 <code>keydown</code> 触发，用 <code>justComposed</code> 标记拦截确认选字后的那一次 Enter，下一宏任务自动清零。</li>
+      </ul>
+    </li>
+    <li>Shift+Enter 始终用于换行，不影响发送判定。</li>
+  </ul>
+
+  <h3>3.8 工具生成中状态</h3>
+  <ul>
+    <li>Desktop 独立适配后端 <code>tool/generating</code>，不复用 Web 渲染实现。<code>chat-reducer.ts</code> 将 <code>generating/start</code> 按同一 <code>tool_call_id</code> 聚合，避免生成中和执行中出现两张工具卡。</li>
+    <li><code>chat-render.ts</code> 对 <code>generating</code> 使用 running 时间线项样式（图标脉冲动画），标题优先展示 <code>uiLabel</code>，因此长 <code>file_write</code> content 生成期间可以显示「正在写入 path」。</li>
+    <li>运行中工具项通过 250ms 轮询实时更新已运行时长（<code>data-started-at</code> + <code>.process-timeline__duration[data-active]</code>），改善写文件等长耗时操作的感知性能。</li>
+    <li>后端实时帧与历史回放都会裁剪 <code>file_write</code> 参数，Desktop 只接收 <code>path/file_path/append</code> 等展示字段，不接收完整 <code>content</code>。</li>
+    <li><code>pet-gateway-schema.ts</code> 将 <code>generating</code> 映射为宠物侧 tool start 信号，并优先使用 <code>ui_label</code>，保持桌面宠物反馈不晚于主窗口。</li>
+  </ul>
+
+  <h3>3.9 看板 / Inspector 视觉</h3>
+  <ul>
+    <li>右侧入口 <code>#task-board-toggle</code>：图标 + 竖排「看板」标签；颜色走 <code>--shell-primary</code> / <code>--surface</code> / <code>--border-subtle</code>，随亮暗主题切换。</li>
+    <li><code>--shell-primary*</code> 映射到主题 <code>--accent*</code>，避免硬编码浅蓝在 dark/sepia 下失配。</li>
+    <li>展开壳 Tab、会话信息网格、用量条、空态统一用语义 token；去掉虚线堆砌与紫渐变进度条。</li>
+    <li>Inspector 新增「协作」Tab，仅在 <code>provider=team</code> 或存在外源 Team 绑定的 Team Session 显示；普通 MobileWork 与外部单 Agent Session 不展示。Team Session 打开看板时默认进入「协作」。</li>
+    <li>「协作」用 Desktop TypeScript DOM 重现 Web TaskBoard：协作看板标题 / Team Flow、产物文件抽屉、团队 DAG Hero、成员与 Leader、回合与依赖分层、节点状态与摘要、产物、执行详情、取消节点、错误提示和运行态均使用同一信息结构和视觉参数。</li>
+    <li>成员说明复用 Web 的职责摘要规则：优先提取 Markdown「职责」区块，过滤工作原则、协作关系、输出格式和工作安排，只保留一条简短业务职责。Desktop 内置 Leader 按桌面产品身份显示为 <code>MobileWork</code>，头像复用 <code>crew-ui-symbols.svg#avatar-headphones</code> Q 版耳机机器人；这是相对 Web「Crew 内置智能体」的有意桌面端差异。</li>
+    <li>看板每 2 秒读取当前 Session 的 task 与 runtime 快照；只在「协作」Tab 激活时轮询，离开 Tab、切换非 Team Session 或关闭 Inspector 后立即停止，避免后台冗余请求。</li>
+    <li>既有 Kanban / Files / Context / Plan / Browser Tab 保持原实现；协作样式全部收敛在 <code>.team-collaboration-board</code> 作用域，避免影响 Desktop 其他页面。</li>
+  </ul>
+  <h3>3.10 Team Session 成员消息</h3>
+  <ul>
+    <li>Desktop 直接消费 Gateway 既有 <code>team_internal</code> 协议，不增加 Desktop 专用后端接口；<code>chat-reducer.ts</code> 将该帧纳入 request gate 与 replay 去重，避免旧回合成员消息污染当前回合。</li>
+    <li>实时流与 Web 使用同一合并语义：相同 Team turn、相同 DAG node 的 <code>team_stream</code> 增量合并为一张成员卡；<code>team_submit/team_review/team_summary/team_decision</code> 到达后替换过程卡，同时保留 thinking、工具时间线和可折叠执行过程。</li>
+    <li><code>history-mapping.ts</code> 保留成员身份、角色、tone、mention、node、display mode、过程和产物字段；历史回放与实时消息走同一个合并函数，不再把 <code>team_internal</code> 降级为普通 status。</li>
+    <li><code>chat-render.ts</code> 使用原生 TypeScript DOM 重现 Web <code>TeamAgentTurnBubble</code>：成员名/角色、低饱和 tone 气泡、执行过程折叠、工具调用、产物卡和流式状态保持同一信息层级，不引入 React。内置成员按 Desktop 身份显示为 <code>MobileWork</code> 并复用 <code>crew-ui-symbols.svg#avatar-headphones</code>，外部成员使用团队 tone 头像。</li>
+    <li>Team 不新建第二套回合组件：<code>team_internal</code> 先转成 Agent Turn 渲染数据，然后复用 <code>renderAgentTurn()</code>、<code>resolveTurnDurationMs()</code> 和现有每秒 ticker。单 Agent 与专家团的原分支不改。</li>
+    <li>规划运行中默认展开过程区，折叠标题以本地 ticker 实时更新“已等待”；规划完成后固化最终耗时并自动折叠。规划使用 Team Logo，成员/Leader 正式发言继续按真实身份显示。</li>
+    <li>Team transport <code>status</code> 仅更新 Session 运行态，不进入普通 assistant 气泡；需要呈现的规划、thinking、工具和节点过程统一由结构化 <code>team_internal</code> 进入同一 Agent Turn Timeline，避免 Leader 结论后多出独立思考气泡。</li>
+    <li>Team 实时分片沿用主聊天的 sticky-bottom 软追随：用户上滑后不再被后续分片拉回底部；Team thinking 取消独立内滚动并复用单 Agent 的增量/累计文本合并，避免重复和横向溢出。</li>
+    <li>团队身份在首发前从现有 Team 配置预热：规划 Turn 展示团队名称与黑白 Team Logo，不显示 Leader 角色；逻辑 <code>leader</code> 从第一帧起映射为真实成员。协作看板轮询内容不变时不重建 DOM，保留用户滚动操作。</li>
+  </ul>
+  <h3>3.11 外援中心（原智能体 Hub）</h3>
+  <ul>
+    <li>桌面端外援中心使用 Electron 原生 DOM/TypeScript 实现，复用后端外部智能体接口，不直接复用 <code>web/src/components/AgentsHub.tsx</code>，也没有新增 Gateway API、数据库表或核心模块。</li>
+    <li>页面入口在左侧导航 <code>data-tab="agents"</code>，用户名称统一为“外援”，内容挂载到 <code>#agents-page-root</code>；初始化由 <code>initAgentsPage()</code> 延迟加载，点击 tab 时刷新运行时、Agent 和团队列表。</li>
+    <li>页面标题与四个 Tab 统一为“外援中心 / 我的阵容 / 发现外援 / 添加外援 / 组建团队”；创建表单使用“可用外援 / 外援称呼 / 使用模型 / 加入我的外援”，内置 Leader 显示为“MobileWork”并带“内置”小标签，约束成员入口统一使用“选择外援”。“使用”只保留在尚未加入阵容的 Runtime 上，已保存外援和团队的动作统一叫“派活”。</li>
+    <li>首次进入只展示一只“第一次来外援中心？用 30 秒认识一下”的轻量邀请，用户可选择“开始看看 / 稍后再说”。开始或点击页头“?”都会从固定 1/3 重播：第一步切到“发现外援”并标记“再找找”，第二步切到“添加外援”并标记可用外援选择器，第三步回到“我的阵容”并标记首个“派活”；尚无已加入外援时改为标记“添加外援”Tab。步骤只负责认位置，不触发扫描或创建，Runtime 扫描结果、创建成功等业务消息不再改变引导进度。</li>
+    <li>引导提供“上一步 / 下一步 / 完成 / 跳过 / 定位到操作”。浮层通过 <code>renderAgentsGuidePortal()</code> 挂到 <code>document.body</code>，每一步固定在左下或右下，不监听内容滚动、不按目标位置重排，也不再回退成占据文档流的 <code>.is-inline</code>。浮层主体允许滚轮穿透；落在按钮上的滚轮事件转交给 <code>.agents-panel</code>，页面仍可顺畅下滑；“定位到操作”才按需执行 <code>scrollIntoView()</code>。目标仅增加低强度像素脉冲描边，窄窗口保持固定底部 Dock。视觉沿用 Desktop 既有 soft-pixel 体系：暖白底、低饱和橄榄绿、8px 内圆角、单个像素星标与克制像素阴影，不增加图片资产。</li>
+    <li>“我的阵容”空态取消虚线大卡，改为无边框轻提示和单一下一步动作；“发现外援”卡片不展示 ACP、adapter、可执行路径、探测来源、探测耗时、能力枚举或原始错误，也不保留“技术详情”折叠区，只展示名称、提供方、可读状态、版本和“使用”。首次目录为空时自动扫描一次，同一页面生命周期内重复加载不会反复扫描。</li>
+    <li>外部 Agent 派活语义：点击“派活”会新建一个默认工作空间下的 chat session，切回对话页，然后写入 <code>session_agent_config.executor=external</code>、<code>external_agent_id</code> 与 <code>external.external_agent_id</code>。旧 <code>executor=acp</code> 只由后端兼容读取，不再由 Desktop 新写。不会污染用户原本正在查看的会话。</li>
+    <li>外部 Team 派活语义：点击团队“派活”同样新建 chat session，写入 <code>executor=team</code> 和 <code>team.external_team_id</code>，并清空 expert / expert team / external team 旧绑定。</li>
+    <li>新建会话统一由 <code>createSessionInWorkspace()</code> 清理旧专家、专家团和外源 Team 绑定，保证 session 之间不串状态。</li>
+    <li>外援导航入口复用 Web/MobileWork 的小机器人线稿；“我的阵容”页外援和团队卡片复用 Web 的首字母像素头像 / badge 格式。</li>
+    <li>创建团队页按 Web 两步结构实现：定义团队时只展示目标、Leader 和可折叠组队约束；智能组队后进入阵容确认区，显示约束采纳、能力覆盖、成员职责和工作流。</li>
+    <li>“我的团队”卡片与 Web 保持同一详情交互：点击卡片或键盘 Enter/空格打开组队明细，展示团队描述、工作流、Leader 和按顺序排列的成员职责；点击“派活/删除”会阻止卡片冒泡，不会误开详情。弹层支持关闭按钮、点击遮罩和 Escape 退出。</li>
+    <li>外部 ACP 会话的历史侧栏图标与 Web 保持一致：普通 MobileWork 会话继续使用原对话气泡和原消息头像；外部智能体使用首字母 badge，外部 Team 使用黑白双 agent logo。外部绑定先写入 draft session，并在首条发送提交时继承；绑定 API 成功后立即刷新会话列表，因此无需等待用户发送才出现外部图标。</li>
+    <li>Gateway 的 <code>agent_label</code> 为 ACP 会话附带外部 <code>model</code>；外部 agent 未显式配置 model 时按 <code>provider/name</code> 回退。Desktop 将它作为消息 footer 与 Composer 的展示模型，且 draft 的展示模型优先于首发时持久化的 Crew 内部模型绑定。</li>
+    <li>外部单 Agent 复用 Composer 底部 Model 按钮和现有弹层样式，但选项来自其 RuntimeProfile 模型目录；空闲时切换当前 Session 的 <code>external.model</code>，运行/排队/等待交互时按钮置灰禁用、关闭已展开弹层，后端同样拒绝。GET/PUT 使用同一字段恢复，避免 Codex 实际执行 5.5 而刷新后显示 Agent 默认模型。会话列表刷新不会再用 MobileWork 模型摘要覆盖已加载的外部 Runtime 目录；MobileWork 的模型目录、pending 切换和视觉样式保持原逻辑。</li>
+    <li>外部单 Agent 复用 Composer 底部 Model 按钮和现有弹层样式，但选项来自其 RuntimeProfile 模型目录；空闲时切换当前 Session 的 <code>external.model</code>，运行/排队/等待交互时按钮置灰禁用、关闭已展开弹层，后端同样拒绝。GET/PUT 使用同一字段恢复，避免 Codex 实际执行 5.5 而刷新后显示 Agent 默认模型。Claude Code 不再展示笼统的“CLI 默认模型”：目录提供 <code>Claude Sonnet（当前）</code> 与固定版本项，气泡由消息 model id 在同一 Runtime 目录映射 label，不读取回答正文。会话列表刷新不会再用 MobileWork 模型摘要覆盖已加载的外部 Runtime 目录；MobileWork 的模型目录、pending 切换和视觉样式保持原逻辑。</li>
+    <li>外部 Team Session 不展示 Composer 模型按钮：团队成员模型由团队配置分别决定，聊天区不提供含义不明确的会话级统一切换；切回普通或外部单 Agent Session 时按钮恢复原逻辑。</li>
+    <li>Composer 模式按钮标签与展开菜单使用同一选中优先级：当前会话显式选择的专家或专家团优先于历史保留的外援 <code>agent_binding</code>；因此从外援会话改选专家团后，按钮名称与菜单勾选都会落在“专家”，不会残留勾选“外援”。</li>
+    <li>历史气泡优先展示消息自身持久化的实际模型：MobileWork 记录真正成功的 Provider 模型（包含 fallback），外部 Agent 记录 Session 生效模型；旧消息没有该字段时才回退当前 Session 模型。</li>
+    <li>消息回合渲染采用真实发言者身份：外部单 Agent 使用 Agent 名称和头像；Team 内 <code>crew::builtin</code> Leader 使用 Q 版耳机机器人 SVG + <code>MobileWork</code>，Hermes 等成员使用各自成员头像。唯一例外是团队规划 Turn：它表示整个 Team 的 DAG 规划阶段，固定复用侧栏同款黑白双 Agent Logo，聊天区只等比缩放。</li>
+    <li>Codex provider 的外部 Agent 图标统一展示为 <code>X</code>，覆盖会话侧栏 badge、我的外援卡片和团队成员 badge。</li>
+    <li>点击桌面端侧边栏“外援”默认进入“我的阵容”，但组建团队页的草稿状态保留在模块内，用户返回“组建团队”时仍可继续编辑。</li>
+    <li>Desktop 创建团队已接入 <code>/api/external-teams/draft/description</code>：输入团队名称后自动生成团队目标参考；中文输入法组合期间不发请求，组合完成并稳定 600ms 后才生成；用户手动编辑目标时会取消自动覆盖。</li>
+    <li>Desktop 流式 thinking 与 Web 对齐，按增量/累计快照合并，不再只保留最后一个 token。</li>
+    <li>Runtime 卡片使用统一三态：<code>ready</code> 绿点、<code>degraded</code> 黄点、<code>unavailable</code> 红点；只有 ready Runtime 可进入创建流程。</li>
+    <li>Runtime 安装路径变化时，后端以稳定 <code>descriptor_id</code> 对账唯一替换实例并迁移 Agent；Desktop 默认过滤 <code>lifecycle_status=replaced</code> 的旧路径记录，避免 Hermes 更新后同时展示红点旧路径和绿点新路径。无法唯一判断替换对象时仍显示 unavailable 诊断，不自动改绑。</li>
+    <li>Codex app-server 的增量正文、reasoning summary、工具和 usage 统一进入既有消息 Reducer；Crew 以平衡的 medium effort 请求 concise summary，只保存 app-server 返回的可展示摘要，不暴露原始思维链。思考与工具保存到消息后复用普通单 Agent 的 process timeline，历史重开仍可恢复；若 Runtime 没有返回 reasoning，Desktop 不生成虚假内容。</li>
+    <li>创建外部智能体的模型字段固定为下拉框，不提供手工输入；选 Runtime 后按后端 <code>default_model_id</code> 或目录默认项自动选择。服务端仍执行目录归属校验。</li>
+    <li>外援中心不使用浏览器原生 <code>select</code>：添加外援的 Runtime/模型、组建 Team 的 Leader/约束成员/角色统一复用 Composer 底部 Model Picker 的 <code>composer-select-popover + composer-select-item</code> 视觉与交互；弹层挂到 <code>document.body</code>，避免被页面滚动容器裁切。</li>
+    <li>创建 Team 的自定义能力输入会即时同步“添加”按钮状态；有非空内容时既可点击添加，也可按 Enter 添加，两条路径复用同一个提交函数。</li>
+    <li>创建 Team 的统一“智能组队”入口在内部显式使用 <code>formation_mode=fast|ai</code>；先展示 Fast 草案再做一次结构化 AI 检查。Leader 和必选成员下拉只展示最新 AgentProfile 为 ready 且模型绑定有效的 Agent，团队详情及排除逻辑仍可识别已有 Agent。</li>
+  </ul>
+
+  <h3>3.10 过程时间线（process-timeline）</h3>
+  <ul>
+    <li>回合折叠区（<code>.msg__fold-content</code>）内的过程内容统一挂进一条 <code>.process-timeline</code>：每项 28px 圆角图标格，项与项之间左侧虚线连接，结构与样式对齐 web <code>AgentProcessTimeline</code>（Kimi 风格）。</li>
+    <li>图标按语义分类（<code>toolIconKind</code>，参考 Kimi）：写入/修改=笔、读取=书、grep/glob=放大镜、web/browser=地球、todo=清单、memory=数据库、team/delegate/agent=双人、skills=星、cron=时钟、其余=终端；思考=灯泡（流式中脉冲）、状态=时钟、错误=叹号、旁白=ghost 占位。</li>
+    <li>工具项标题语义化带参数（<code>tool-labels.ts</code> 的 <code>toolDisplayTitle</code>，对齐 web <code>processDisplay</code>）：<code>terminal</code>→「运行 command」、<code>file_write</code>→「写入 basename」、<code>grep/glob</code>→「搜索 query」；<code>uiLabel</code> 优先，未知工具回退 <code>formatToolDisplayName</code>（中文别名，比 web 的裸名回退覆盖更全）。</li>
+    <li>可展开项用 <code>&lt;details class="process-timeline__details"&gt;</code>：工具项带 <code>data-fold-key</code> 持久化折叠（默认折叠），展开为 Request（args pretty JSON）/ Response（<code>formatToolResultDisplay</code>）两个 <code>.process-code-block</code>；思考项不持久化（流式中展开、完成后收起）。无参数无结果的工具渲染为静态行（不可展开）。</li>
+    <li>折叠条完成态文案：有工具调用 →「已执行 Xs，已调用 N 个工具」；纯思考回合 →「已思考 Xs」；执行中仍是「正在思考/正在执行 · 已等待 Xs」。</li>
+    <li>回合底部行时间取<b>回合完成时间</b>（末段 assistant 的 <code>timestamp</code>，final 时由 finalReducer patch；历史回放全段统一为 <code>turn_finished_at</code>）。取批次首条会停在回合开始时刻（多段回合曾因此显示错误）。</li>
+    <li>旧 <code>.tool-card*</code> / <code>.thinking-block*</code> / <code>.msg__tools</code> / <code>.line-status</code> / <code>.line-error</code> / <code>.msg__text--narration</code> 类名已全部移除；工作室（pet-studio）羊皮纸主题与 dark 模式对时间线有专门覆盖。</li>
+  </ul>
+
+  <h3>3.11 Wiki 知识库（只读浏览）</h3>
+  <ul>
+    <li>模块结构：单文件功能页 <code>features/wiki-page.ts</code>（模块级 view 状态 + render 拼 HTML 写 <code>#wiki-page-root</code> + bind 事件，与 skills/cron 页同构）；样式 <code>assets/styles/wiki-page.css</code>；入口 <code>index.html</code> 侧边栏 <code>data-tab="wiki"</code>（技能之后、任务之前）+ <code>#wiki-tab</code> 容器，<code>index.ts</code> 经 <code>bindWikiTab(() =&gt; setTab('wiki'))</code> 绑定，切入 tab 时首次刷新数据。</li>
+    <li>数据链路：renderer 不直连后端——<code>backendApi.wikiKBs / wikiPages / wikiPage / wikiSummary</code> → <code>getJSON()</code> → IPC <code>gateway:fetch</code>（主进程注入 JWT，<code>/api/</code> 前缀白名单内）→ crew gateway <code>/api/wiki/*</code>。列表走 <code>limit/offset/brief=1</code> 分页，详情按 <code>GET /api/wiki/pages/{id}</code> 懒加载并缓存于 <code>view.pageDetails</code>。</li>
+    <li>三视图语义（行为对齐 web 端，vanilla TS 重写）：<b>时间线</b>按更新时间分桶（今天/昨天/本周/本月/更早）；<b>文件树</b>按 <code>file_path</code> 构目录树（逻辑移植自 <code>web/src/lib/wikiTree.ts</code>），目录可折叠/展开；<b>类型</b>按 <code>page_type</code> 分组（人物/对象 → 术语/概念 → 主题/话题 → 原始资料）。</li>
+    <li>详情栏：类型/状态徽标 + 更新时间 + <code>file_path</code> + 标签 + Markdown 正文（<code>renderMarkdownHtml</code>，自带 DOMPurify）；来源经 <code>source_titles</code> 解析为标题；相关页面按标题匹配列表页并可点击跳转。未选中页面时显示 KB 概览（<code>/api/wiki/summary</code> 只读缓存，不因打开/刷新页面调用 LLM，失败静默）+ 空态提示。</li>
+    <li>分栏把手：列表 | 详情之间 <code>.wiki-sash</code> 可拖拽调宽（对齐 web <code>ResizablePanels</code>，实现模式同 inspector 宽度拖拽）——宽度存 <code>localStorage</code>（<code>mm.desktop.wikiListWidth.v1</code>，240–640px 钳制 + 50vw 上限），拖动中只改 DOM 样式不重渲染，mouseup 才持久化，双击复位 340px；图谱模式无把手（图谱占整栏）。</li>
+    <li>Phase 1 边界：只读——上传、删除、编译进度见 3.12；不含图谱与 Wiki Agent 对话；刷新按钮前走 <code>requireRendererLogin</code> 拦截，加载失败统一 <code>notify()</code> 提示。</li>
+    <li>边界态（2026-07-20 断点修复）：未登录显示登录引导态、<b>不发任何请求</b>（登录成功且当前停在 Wiki tab 时自动拉取）；没有任何 KB 时<b>自动初始化 default</b>（<code>backendApi.wikiInit('default')</code> → POST /api/wiki/init，对齐 web WikiHub，后端幂等；只自动试一次，失败落入失败空态由「刷新」手动重试）。</li>
+    <li>KB 管理：页头「新建」展开内联表单（Electron 不支持 window.prompt，替代 web WikiHub 的 prompt 流程）——kb_id 即磁盘目录名（<code>crew/wiki/store/_filesystem.py</code>），后端 <code>normalize_kb_id</code> 只 trim 不限字符集，故前端校验对齐后端 <code>filename_from_title</code> 的非法字符集（<code>\ / : * ? " &lt; &gt; |</code> 与控制字符，<b>支持中文</b>），另拦 <code>.</code>/<code>..</code>；name 缺省同 id（<code>backendApi.wikiCreateKB</code> → POST /api/wiki/kbs）；创建成功后刷新列表并选中新 KB；Enter 提交 / Escape 取消；草稿存模块级状态，renderShell 重建不丢。页头「删除」删除当前 KB（<code>backendApi.wikiDeleteKB</code> → DELETE /api/wiki/kbs/{id}）：<code>showConfirmDialog</code> 确认「及其全部页面、不可恢复」后执行，选中回落 default/第一个；选中 default 时按钮禁用（后端同样 400 拦截）。</li>
+  </ul>
+
+  <h3>3.12 Wiki 知识库（Phase 2：上传 / 编译进度 / 删除）</h3>
+  <ul>
+    <li>上传链路（新增 IPC 通道，不动 gateway:fetch 桥）：页头「上传」（<code>requireRendererLogin</code> 拦截）→ 复用既有 <code>dialog:selectFile</code>（multiSelect + 扩展名过滤，对齐 web WikiHub 的 accept 列表）拿绝对路径 → <code>backendApi.wikiUpload</code> → preload <code>gatewayUpload</code> → 主进程 <code>gateway:upload</code> handler（trustedHandle + <code>GatewayUploadArgs</code> 校验）读文件组 multipart POST <code>/api/wiki/upload</code>。gateway:fetch 桥只透传 string body，FormData 走不通，故单开此通道；pathname 精确白名单（仅 /api/wiki/upload），单文件 ≤200MB、单次 ≤32 个。</li>
+    <li>上传队列（对齐 web WikiHub，vanilla TS）：多文件串行处理；任务状态机 <code>uploading → ingesting → done/error/cancelled</code>；文本/文档上传成功自动触发 <code>wikiIngest</code>；图片/视频按后端响应分支（已自动 ingest / <code>needs_confirmation</code> 视频经 <code>showConfirmDialog</code> 确认风险后再 ingest / 失败展示 issues）。每次编译成功自动刷新页面列表与 KB 概览。</li>
+    <li>进度帧路由：<code>wikiIngest</code> 传当前活跃会话 id，后端编译时经 WS 推 <code>wiki_ingest_progress</code> 到该会话；桌面端单一 <code>BackendChatSocket</code>（登录即连，订阅活跃会话）收到后进 <code>applyChunk</code>——chat-controller 把它当作与 <code>session_title</code> 同级的带外帧：规范化（percent 钳制 0-100、label 回落 stage、error 透传）后经 <code>setWikiIngestProgressCallback</code> 注册的回调转发，不进 reducer、不写消息；index.ts 组合根把它接到 wiki-page 的 <code>handleWikiIngestProgress</code>（chat 侧不 import wiki-page）。无活跃会话时后端不推送，任务仅以 HTTP 最终结果更新（优雅降级）。</li>
+    <li>删除：条目悬停「×」单删（<code>showConfirmDialog</code> 确认）；页头「批量管理」进入选择模式——条目变勾选框（点击条目切换选中而非打开详情），操作条提供全选 / 取消全选 / 删除选中（<code>DELETE /api/wiki/pages</code>，body <code>page_ids</code>）/ 完成退出。删除后刷新列表与概览；删的是当前选中页则清空详情栏。</li>
+    <li>Phase 1 遗留修复：<code>refreshWikiData()</code> 改为首次加载<b>成功</b>才置 <code>view.loaded</code>（失败保持 false，下次切 tab 自动重试）；KB 加载失败与「真空」空态文案分开（失败引导刷新重试）；修复 KB 为空/失败时 <code>loading</code> 卡 true 导致空态停在「加载中」的问题。</li>
+    <li>安全约束：上传通道复用 trustedHandle（sender 校验）+ schema 校验 + hostname 钳制 + 主进程独占注入 JWT/身份头（renderer 不提供任何 header）；所有后端字符串插值一律 <code>escapeHtml</code>。后端（crew/）零改动。</li>
+  </ul>
+
+  <h3>3.13 Wiki 知识库（Phase 3：知识图谱视图）</h3>
+  <ul>
+    <li>模块拆分：wiki 模块首个子功能拆分——<code>features/wiki-graph.ts</code>（图谱视图：数据拉取 / SVG 渲染 / 视口交互）+ <code>src/ui/wiki-graph-layout.worker.ts</code>（力导向布局 Worker，零 import 自包含）。wiki-page.ts 只负责：① <code>WikiListView</code> 加 <code>'graph'</code>（tab 顺序 时间线/文件树/类型/图谱，与 web 对齐）；② graph 视图下列表栏内容替换为 <code>[data-graph-mount]</code> 挂载点，renderShell 末尾调 <code>mountWikiGraph(container, kbId, callbacks)</code>；③ 注入 <code>onSelectPage</code>（选中页面 + 右栏详情，复用 selectedId / loadPageDetail）与 <code>getSelectedId</code>。wiki-graph 不 import wiki-page，单向依赖。</li>
+    <li>Worker 构建链路：esbuild.config.mjs 新增第 3 个 JS 入口产物——<code>src/ui/wiki-graph-layout.worker.ts</code> 打成独立 iife（零依赖，~2KB）落盘 <code>dist/wiki-graph-layout.worker.js</code>，再复制到 <code>dist/assets/wiki-graph-layout.worker.js</code>（与 index.html 同目录，同 renderer.js 模式）；renderer 侧 <code>new Worker('./wiki-graph-layout.worker.js')</code> 相对 <code>loadFile(dist/assets/index.html)</code> 的 document URL 解析。实测 Electron 43 + <code>webSecurity:true</code> + file:// + CSP <code>script-src 'self'</code>（worker-src 未声明回落 script-src）下 file Worker 可用，无需动 CSP / 主进程 / preload。布局算法同时以纯函数 <code>computeWikiGraphLayout</code> 导出：happy-dom 无 Worker 时视图回退主线程同步调用同一函数（Worker 创建/运行失败同样回退），worker 壳（onmessage）仅在无 window 的 Worker 全局挂载，import 无副作用。</li>
+    <li>数据与渲染：<code>backendApi.wikiGraph</code>（GET /api/wiki/graph，/api/ 白名单内，主进程零改动）拉全量节点 + 关系边，不走分页；渲染为 SVG（viewBox 1600×1100）。节点按 page_type 着色（与列表类型徽标同一套语义 token：entity=accent / concept=purple / topic=green / source=amber 虚线框）；<code>source_of</code> 边带箭头 marker，mentions 长虚线；节点标签用原生 <code>&lt;text&gt;</code>（按节点宽度截断，全文进 <code>&lt;title&gt;</code>），刻意不用 web 的 foreignObject（happy-dom 兼容与转义更稳）；所有后端字符串插值一律 <code>escapeHtml</code>。</li>
+    <li>交互语义（对齐 web WikiGraphView）：滚轮以光标为中心缩放（0.25×–5×）、按住空白处拖拽平移、双击空白适应画布、右下缩放条（+ / − / 适应 / 1:1）、「显示来源节点」开关（隐藏后 source 节点与关联边一并过滤，统计栏显示隐藏数）、加载/过滤变化后自动适应一次画布；缩放/平移只改 <code>&lt;g&gt;</code> transform 属性不重渲染（不丢事件绑定）。点击页面节点选中并在右栏显示详情（source 节点不可点）；图谱是全量数据，节点可能不在已分页列表里——选中逻辑不依赖 view.pages，详情一律经 <code>loadPageDetail</code> 懒加载。视口状态存于 wiki-graph 模块，wiki-page 每次 renderShell 重挂载不丢（pan/zoom 保持）。</li>
+    <li>边界：图谱视图下隐藏批量管理条与「批量管理」按钮（选择状态保留，切回列表视图恢复）；页头「刷新」/ 切 KB 经 <code>invalidateWikiGraph()</code> 一并失效图谱数据；登录态变化同样失效。后端零改动，不加第三方依赖（无 d3）。</li>
+  </ul>
+
+  <h3>3.14 Wiki Agent 对话（Phase 4：仅 Wiki 右栏专用入口）</h3>
+  <ul>
+    <li>主形态：Wiki 页固定三栏。<code>wiki-page.ts</code> 通过注册口挂载右侧 Agent，<code>wiki-agent.ts</code> 调用 <code>POST /api/wiki/agent-session?kb_id=...</code>，按 owner + kb_id 获取持久化 Wiki 预设 Agent 会话；加载历史、订阅 WS、发送消息时均不修改全局 <code>activeSessionId</code>，用户始终留在 Wiki 页面。</li>
+    <li>复用链路：右栏直接复用现有 <code>loadBackendHistory</code>、message store、<code>dispatchWs</code>、<code>BackendChatSocket</code> 与 <code>renderConversationPreview</code>。chat-controller 对任意会话消息 upsert 派发 <code>messages:changed</code>，右栏按 session 过滤并按动画帧合并刷新；发送仍带 <code>wiki_kb_id</code> 和可选 <code>web_search_enabled</code>。</li>
+    <li>知识联动：Wiki 卡片的页面引用调用 <code>openWikiPageInHub</code>，直接更新中栏详情；不再保留主聊天 overlay 回退。确认操作与上传失败「让 AI 处理」都发送给当前 Wiki session，不会误发给主聊天活跃会话。</li>
+    <li>多对话管理：右栏标题区提供「新建对话」和「查看历史」。新建调用 <code>POST /api/wiki/agent-session?kb_id=...&amp;force_new=true</code>，保留旧 session 并切换到空白会话；历史调用 <code>GET /api/wiki/agent-sessions?kb_id=...</code>，只展示当前 owner + KB 的会话。切换历史会话后重新执行订阅、history 回填和会话级模型加载，不改变全局 <code>activeSessionId</code>。</li>
+    <li>边界：Desktop 不再提供 <code>openSession + wiki_enter/wiki_exit</code> 主聊天模式、Composer 标识条或普通会话发送参数注入；调用入口必须位于 Wiki 页面右栏。登录态变化清除本地专用会话映射，后端持久历史不受影响。</li>
+  </ul>
+
+  <h2>4. 变更记录</h2>
+  <p><b>当前配置：</b><code>external_agents.enabled=true</code>，Desktop 与 Web 的“外援”入口保持开放。</p>
+  <p><b>2026-07-30：</b>Desktop 将 Sidebar“智能体”正式收敛为“外援”，外援管理页同步改名“外援中心”，四个 Tab 调整为“我的阵容 / 发现外援 / 添加外援 / 组建团队”。Runtime 仍保留明确动作“使用”，已加入阵容的 Agent/Team 改为“派活”；扫描改为“再找找”，表单改为“可用外援 / 外援称呼 / 使用模型”，内置 Leader 显示为“MobileWork”并带“内置”小标签，约束成员改为“选择外援”。首次使用引导收敛为轻量邀请和固定三步导览，开始或页头“?”均从 1/3 重播；进度不再由 Runtime/Agent 业务状态推导。导览作为 <code>document.body</code> 固定浮层停靠窗口底部，不随滚动定位、不进入文档流，滚轮可继续驱动内容区；目标通过轻描边提示，用户需要时才点“定位到操作”。我的阵容空态取消大卡边框；“发现外援”卡片移除 ACP、adapter、路径、探测信息及整个“技术详情”折叠区，首次目录为空只自动扫描一次。Composer 外援浮层的“智能体”分区及跳转提示同步改为“外援”。本次只改 Electron renderer、样式、测试和本文档，没有新增 Gateway API、数据库或九大模块。</p>
+  <p><b>2026-07-24：</b>主对话 Composer 的「智能体」选择器新增「外援」入口，与专家模式并列。入口复用智能体 Hub 的外部 Agent/Team 目录与绑定动作，按“智能体 / 外援团队”分区并支持搜索；每次选择都创建新的 Session，再写入对应的外部 Agent 或 Team 配置，不覆盖当前对话。“外援”使用左侧 Sidebar“智能体”的同款机器人图标；目录中的单 Agent 统一使用智能体 Hub 同款像素按钮头像，并按 Agent ID 稳定映射低饱和、低透明度配色。头像文字、Sidebar 和消息气泡统一读取 Gateway 返回的 <code>display_badge</code>：Kimi 为 K、Codex 为 X、Hermes 为 H、Claude Code 为 C；Desktop 不再根据 provider 或 Agent 名称推断，缺字段仅显示 <code>?</code>。团队直接使用放大的 Team Session 黑白双智能体 Logo，不增加头像外框。团队条目只显示“成员数 · Leader”摘要，不在快捷浮层铺陈团队目标。Gateway 会话摘要新增精确 <code>agent_binding={kind,id}</code> 投影，Desktop 不再依靠 provider 文案猜测会话类型。<code>external_agents.enabled=false</code> 时左侧管理页仍隐藏，但 Composer 保留锁定的「外援 · 未开放」，点击只提示“外援功能暂未开放，请联系管理员开启。”，不请求 Runtime/Agent/Team API；后端继续执行 Owner、资源存在性和 Runtime 可用性校验。外援目录由异步加载态切换到长列表后会重新按实际高度定位，浮层限制在窗口内并由列表内部滚动，避免向下溢出 Composer/窗口。同期修复 Wiki 内嵌会话初始化的模型缓存竞争，避免标签已更新但模型浮层丢失高亮 ID。</p>
+  <p><b>2026-07-27：</b>统一 <code>external_agents.enabled</code> 产品门禁。只有 Gateway 明确返回 <code>true</code> 才展示左侧“智能体”和 Composer“外援”；关闭、加载中或配置失败时完全移除入口，不显示锁定占位，也不请求外部目录。历史列表使用精确 <code>agent_binding.kind</code> 隐藏外部 Agent/Team Session，数据不删除；开关恢复后重新渲染即可恢复。若关闭时正停留在智能体页或外部会话，Desktop 返回普通对话页。显隐 CSS 对 <code>hidden</code> 增加显式约束，避免 <code>.nav-item {display:flex}</code> 覆盖浏览器默认规则。</p>
+  <p><b>2026-07-27：</b>修复运行中工具 Timeline 耗时闪动。顶部回合耗时和工具耗时继续实时读秒：工具时钟每 250ms 校时，仅在格式化显示值变化时原地更新文字；回合结构签名不再包含动态秒数，整秒边界不会触发 <code>replaceChild()</code> 重建气泡。由此保留同一个 Timeline、运行图标、折叠状态和滚动位置，工具完成后以最终 duration 冻结。MobileWork、外部单 Agent 和外部 Team 共用同一渲染与计时实现。</p>
+  <p><b>2026-07-23：</b>Wiki 右栏 Composer 修复与主对话能力对齐：① 停止按钮常驻不去——它复用的全局 <code>.chat-stop-btn { display:flex }</code> 压过 <code>hidden</code> 属性的 UA 规则，wiki-page.css 补 <code>.wiki-agent-pane__composer .chat-stop-btn[hidden] { display:none }</code> 让显隐生效（主对话不受影响，它靠 <code>#chat-stop-btn</code> ID 规则 + <code>.composer-controls--busy</code> 类切换）；② 右栏此前只有附件按钮一条上传路径——attachments.ts 把主对话的粘贴/拖拽绑定抽成通用 <code>bindFilePaste(target, onFiles)</code> / <code>bindFileDrop(zone, onFiles)</code>（剪贴板 files/items 去重、depth 计数防拖拽抖动逻辑原样保留），主对话 <code>bindAttachments()</code> 与 Wiki 右栏各自传入上传回调共用，右栏拖拽文件到 Composer 或粘贴截图即走 <code>addEmbeddedFiles</code>。新增通用绑定器与右栏接线单测。</p>
+  <p><b>2026-07-23：</b>Wiki 对话附件的默认后端语义调整为 Agent 驱动的 <code>capture → parse + 质量检查 → 完整 Source 发布 → orient → plan → apply</code>。Source 立即进入全文检索，随后默认生成并自动应用实体、概念、主题和关系的深度整理计划。<code>wiki.ingest.auto_apply=false</code> 时前端才展示确认卡并等待后续确认；删除、归档和视频外传仍必须确认。Wiki Agent 同时获得当前账号已授权的主 Agent 工具与 Skills，解析失败可在本轮附件/RawSource 范围内调用对应工具救援。</p>
+  <p><b>2026-07-23：</b>Wiki 右栏新增新建对话与历史记录入口。每个知识库支持多个持久化 Wiki Agent session；历史浮层展示自动生成的会话标题、更新时间和消息数，切换时复用现有消息 store、WebSocket 订阅和模型绑定链路。数据继续存入桌面运行目录的 <code>crew.db</code>，不新增前端缓存数据库。</p>
+  <p><b>2026-07-22：</b>技能页与插件页替换为新版精装书、叠层拼图图标；技能/插件名称首字按 SVG 中间米白标签框的真实几何中心定位。图标复用专家广场的 8 档稳定 tone，根据条目名称散列为低饱和蓝、紫、青、琥珀、绿、玫瑰、靛、橙配色，同一条目在卡片和详情弹窗中保持一致，深色轮廓与米白标签框保持统一。</p>
+  <p><b>2026-07-22：</b>Wiki 桌面页升级为三栏：左侧时间/目录/类型/图谱，中间页面详情，右侧持久化 Wiki Agent。右栏按知识库隔离会话，复用现有 WebSocket、history、message store 和渲染链路，不再通过切换 activeSessionId 离开 Wiki；Agent 引用页直接在中栏打开。新增响应式布局与嵌入式发送回归测试。</p>
+  <p><b>2026-07-21：</b>统一专家广场按钮体系：页面主操作继续使用高饱和 Crew 蓝；专家/专家团分段控件使用雾蓝选中态；分类筛选使用更浅的天空蓝；最热/最新使用暖灰轨道与白色选中层。四类控件统一边界、圆角、键盘焦点和按下缩放反馈，但保持不同的视觉权重。普通 MobileWork 对话头像同时由旧 <code>assistant.png</code> 替换为专家广场已使用的 <code>crew-ui-symbols.svg#avatar-headphones</code> Q 版耳机机器人，正式回复与等待首片响应共用同一资产。</p>
+  <p><b>2026-07-18：</b>增加 MoMA 工具规划即时反馈：后端在收到首个 reasoning、但尚无具体 tool call 时发送高优先级 <code>status(activity=tool_planning)</code>；Desktop <code>statusReducer</code> 将“正在规划工具调用…”立即写入当前回合过程时间线，真实工具事件到达后继续显示具体 generating/start/result 状态。该状态不猜测工具名，也不会触发工具执行。</p>
+  <p><b>2026-07-17（三）：</b>修复时间线上两个工具项之间出现大间距的问题：模型在工具 loop 之间常吐仅含空白（换行/空格）的 content，被当成「过程旁白」渲染成看不见的占位项（min-height + markdown 段落边距）。现在空白 content 一律视为无内容（旁白/正文/lastTextIdx/hasVisibleAnswerText 统一 trim 判定），空白 thinking 同样跳过；旁白/思考块内 markdown 段落去首尾边距，时间线更紧凑。</p>
+  <p><b>2026-07-17（二）：</b>① 折叠条完成态改为「已执行 Xs，已调用 N 个工具」（无工具时仍「已思考 Xs」）；② 修复回合底部时间取批次首条导致多段回合停在回合开始时刻的问题，改取末段 assistant（=完成时间）；③ 时间线工具图标按语义分类（<code>toolIconKind</code>：笔/书/放大镜/地球/清单/数据库/双人/星/时钟/终端）；④ 修复 <code>renderChat</code> 复用已脱离文档的 wrapper（容器重建后内容渲染进游离节点）；⑤ 测试基建：新增 <code>tests/setup-happy-dom-storage.ts</code> 垫片修复 happy-dom 20 + vitest 1.6 下 localStorage 无 Storage API 导致的 19 文件/69 用例失败；<code>chat-controller</code> 模块级 window 赋值与 <code>chat-render</code> 耗时轮询加 node 环境守卫，修复 6 个 node-env 测试文件加载失败；套件 726/795 → 897/898。另排查「file_write 生成中工具卡不显示」：两阶段机制（provider <code>tool_call_generating</code> → executor → gateway 广播 → desktop reducer/渲染）在本分支全链路完好（后端单测 + desktop 复现测试证明即时渲染），根因是 MoMA/minimax 网关不增量流式下发 tool_calls（name/args 到流末尾才给），非代码缺陷；验证方式：跑长写任务后 <code>grep tool_generating logs/llm.jsonl</code>。</p>
+  <p><b>2026-07-17：</b>对话过程区整体改造为 web 同款过程时间线（process-timeline）：工具/思考/旁白/状态/错误统一为图标时间线项，工具标题带参数（「运行 ls -lah」），展开为 Request/Response 代码块；保留工具折叠持久化与运行中实时耗时；<code>tool-labels.ts</code> 新增 <code>toolDisplayTitle</code>。旧 <code>.tool-card</code>/<code>.thinking-block</code> 等类名移除，pet-studio/dark/web-messages/session-preview 样式同步适配。专家团（团队视图）渲染不在本次范围。</p>
+  <p><b>2026-07-16：</b>MCP 设置页的 CUA Driver 安装进度改用 DOM API 和 <code>textContent</code> 渲染步骤、日志及错误，不再把后端返回文本拼入 <code>innerHTML</code>；新增恶意 HTML 文本回归测试，阻止安装输出形成 XSS。</p>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>2026-07-30</td><td>Desktop 外援中心活人感优化：Sidebar 与页面统一“外援”语言；四个 Tab、Runtime 状态、表单和派活动作文案重写；内置 Leader 显示为“MobileWork + 内置”标签，组队约束统一“选择外援”；新手提示采用首次轻邀请和固定三步浮层，关闭持久化、问号从头重播、滚动不重排、窄窗口固定底部 Dock；空态降噪，Runtime 技术诊断折叠，空目录首次只自动寻找一次；Composer 外援浮层同步术语。</td><td>仅 <code>desktop/assets/index.html</code>、<code>agents-page.ts</code>、<code>composer-toolbar.ts</code>、<code>storage-keys.ts</code>、<code>agents-page.css</code>、既有 Desktop 单测与本文档；无后端、数据库、API 或新模块。</td></tr>
+      <tr><td>2026-07-22</td><td>Wiki 页分栏拖拽：列表 | 详情之间新增 <code>.wiki-sash</code> 把手（对齐 web <code>ResizablePanels</code>，实现模式同 inspector 宽度拖拽）——宽度存 <code>localStorage</code>（<code>mm.desktop.wikiListWidth.v1</code>，240–640px + 50vw 上限钳制），拖动中只改 DOM 样式不重渲染、mouseup 才持久化，双击复位 340px；图谱模式无把手。</td><td>desktop wiki-page.ts、wiki-page.css、desktop 单测（wiki-page +3）、本文档。</td></tr>
+      <tr><td>2026-07-22</td><td>全链路删除 Wiki 页面 status（published/deprecated）体系：该字段后端从无代码会置为 deprecated，唯一读取处是展示，属死重。后端 <code>WikiPage</code> schema / 序列化（页面 .md frontmatter 不再写 status，旧数据多余键 from_dict 直接忽略、无需迁移）、compiler 三处构造与 index.md 已发布/已弃用分组（改平铺列表）、gateway POST/PUT /pages 的 status 参数、store 图节点/orientation 的 status、_DEFAULT_SCHEMA_MD「状态」小节全部移除；web 与 desktop 的 WikiPageStatus 类型、详情/卡片状态徽标、图谱 deprecated 置灰、WikiEditor 状态选择器同步删净。KBSummary.status（ready/generating/empty/stale）与 RawSource.parse_status 是不同字段，不受影响。</td><td>crew wiki（schemas/compiler/store/prompts/query/__init__）、gateway routers/wiki.py、web（types、WikiCard、WikiPageView、WikiEditor、global.css、测试）、desktop（backend-client、wiki-page、wiki-graph、chat-render、chat-reducer、chat-controller、wiki-page.css、单测）、tests/wiki/、本文档与 web/wiki 模块文档。</td></tr>
+      <tr><td>2026-07-22</td><td>Wiki KB 管理补全：① 删除知识库——页头「删除」经 <code>showConfirmDialog</code> 确认（「及其全部页面、不可恢复」）后走 <code>backendApi.wikiDeleteKB</code>（DELETE /api/wiki/kbs/{id}），选中回落 default/第一个，选中 default 时按钮禁用（后端同样 400 拦截）；② 新建 KB 的 kb_id 放开字符限制——后端 <code>normalize_kb_id</code> 只 trim 不限字符集（kb_id 即磁盘目录名），前端校验由英文/数字/下划线改为对齐后端 <code>filename_from_title</code> 的非法字符集（<code>\ / : * ? " &lt; &gt; |</code> 与控制字符，支持中文），另拦 <code>.</code>/<code>..</code>；输入占位文案同步更新。③ 修正合并错位：master 合入的两行 2026-07-21 专家页变更记录此前误入「2. 关键文件」表，已移回本表。</td><td>desktop wiki-page.ts、backend-client（wikiDeleteKB）、desktop 单测（wiki-page +5）、本文档。</td></tr>
+      <tr><td>2026-07-21</td><td>收紧 Desktop 专家页筛选控件圆角：分类按钮由胶囊形改为 9px 圆角矩形；专家视图与排序切换器外层统一为 11px、内部按钮统一为 8px，保留原有配色、尺寸和即时按压反馈。</td><td>hub-premium.css、专家页筛选与切换控件。</td></tr>
+      <tr><td>2026-07-21</td><td>继续收敛 Desktop 专家页视觉：专家卡片改为轻边框中性表面与低幅悬停，识别色仅用于头像容器、标签和召唤按钮；召唤按钮默认常显并按专家色调轻量区分，已召唤与取消召唤使用克制的蓝色/红色状态；补充键盘焦点、按压反馈与 reduced-motion 降级。</td><td>hub-premium.css、专家广场卡片及操作反馈。</td></tr>
+      <tr><td>2026-07-22</td><td>修复 Team 实时交互：运行中可上滑历史；规划头部使用团队名称；Leader 首帧即显示真实 MobileWork/外部成员身份；thinking 去重并取消内层滚动；协作看板无变化时不重绘；规划完成后四个步骤全部进入完成态。</td><td>仅 Team Session 的 chat-controller、Team Turn adapter、history merge、协作看板与 Team planning 状态；普通单 Agent、专家团和 Desktop 其他页面不变。</td></tr>
+      <tr><td>2026-07-22</td><td>Team 回合收敛到现有 Agent Turn：规划过程运行中展开、秒数实时更新，完成后自动折叠；成员 thinking/工具/对话合并到同一 Timeline，Team transport status 不再生成多余气泡。规划 Turn 固定使用黑白 Team Logo。</td><td>Team-only adapter、既有 Agent Turn timer/renderer 复用、历史合并与定向测试；单 Agent 和专家团原渲染分支不改。</td></tr>
+      <tr><td>2026-07-22</td><td>对齐 Web Team 回合收口与成员解析：Desktop 增加 <code>hadTeamInternal</code> 状态，第一条成员消息到达时移除空乐观 assistant，根 <code>final</code> 只结束回合、不再生成 Team 自身总结气泡；逻辑 ID <code>leader</code> 会通过团队成员配置解析为真实 Leader，内置 Leader 使用 MobileWork Q 版耳机机器人 SVG，消息顺序保持“规划 DAG → @成员派活 → 成员提交 → Leader 总结”。</td><td>state、session-busy、chat-controller、chat-reducer、session-controller、team-collaboration-board 与相关单测；不修改 Team Runtime、DAG、Web React 或 Hermes 模型。</td></tr>
+      <tr><td>2026-07-21</td><td>补齐 Desktop Team Session 成员聊天：接入 <code>team_internal</code> 实时分片与历史投影，按 Web 语义合并同节点 thinking、工具、正文和正式提交结果，并以 Desktop TypeScript DOM 重现成员气泡、执行折叠与产物卡。</td><td>backend-client、chat-reducer、chat-controller、history-mapping、session-controller、chat-render、web-messages.css 与定向单测；后端 Team/DAG 协议和 Web React 均未修改。</td></tr>
+      <tr><td>2026-07-21</td><td>修正协作看板成员卡：职责说明改用 Web 同款 Markdown 职责摘要，不再展示“工作原则”等整段配置；Desktop 内置 Leader 名称改为 MobileWork，头像复用 <code>crew-ui-symbols.svg#avatar-headphones</code>。</td><td>team-collaboration-board、kanban-board.css、协作看板单测与 Desktop 前端文档；仅影响 Team Session 协作成员区。</td></tr>
+      <tr><td>2026-07-21</td><td>Team Session Inspector 新增「协作」Tab，以 Desktop 原生 TypeScript DOM 一比一重现 Web TaskBoard 的视觉与交互：文件清单、DAG 阶段、团队成员、节点摘要/日志/产物、取消和运行态；仅 Team Session 可见且默认打开。</td><td>team-collaboration-board、inspector、backend-client、session-model、kanban-board.css、index.html 与定向单测；不改变 Web React、普通 MobileWork Session 或外部单 Agent。</td></tr>
+      <tr><td>2026-07-21</td><td>外部 Team Session 聊天头像与侧栏统一复用同一黑白双 Agent Logo（含眼睛），聊天区仅等比缩放；团队会话隐藏 Composer 模型按钮，切回普通/单 Agent 会话自动恢复。</td><td>chat-render、session-model、history-sidebar.css、web-messages.css 与定向单测；不改变 Web、后端 Team 执行或单 Agent 模型切换。</td></tr>
+      <tr><td>2026-07-21</td><td>Formation Fast 第 1/2 步：智能组队契约改为显式 <code>formation_mode</code>，Leader/必选成员选择过滤不可用 Agent；响应类型增加请求/采用模式、分段耗时、警告和失败原因。</td><td>backend-client、agents-page；仅影响 ACP Agent/Team Hub，不改变 MobileWork 会话。</td></tr>
+      <tr><td>2026-07-21</td><td>修复团队目标草案在中文输入过程中为拼音和半成品名称重复调用 LLM：增加 IME composition 门禁，将稳定输入等待调整为 600ms；保留原 AbortController、请求序号、缓存和本地草案兜底。</td><td>agents-page；仅影响 Team 创建页。</td></tr>
+      <tr><td>2026-07-21</td><td>修复创建 Team 自定义能力输入后“添加”仍保持禁用的问题：输入事件即时更新按钮状态，点击与 Enter 继续复用同一添加逻辑。</td><td>agents-page；仅影响 ACP Agent/Team Hub，不改变 MobileWork 会话。</td></tr>
+      <tr><td>2026-07-21</td><td>单 Agent Session 模型切换与逐回合模型持久化：外部 Agent 从 RuntimeProfile 目录切换，仅 idle 可操作；Composer 复用原 Model Picker；运行中置灰并自动关闭弹层；会话列表刷新保留外部目录；共享消息字段修复 MobileWork/外部历史气泡模型漂移。</td><td>session-model、composer-toolbar、session-busy、session-controller、history-mapping、backend-client、agents-page；MobileWork 分支保留既有 pending 行为。</td></tr>
+      <tr><td>2026-07-21</td><td>修复 Desktop 管理 Gateway 下 Codex 一直“正在生成”并在 120 秒超时：参数式 CLI 显式断开继承 stdin，避免 Electron 保持打开的管道被 Codex 当作追加 Prompt 输入等待 EOF。智能体 Hub 全部原生下拉统一为 Composer Model Picker 风格弹层，MobileWork 会话样式与模型选择器不变。</td><td>cli-adapter、agents-page、agents-page.css、Agent/Desktop 文档与测试。</td></tr>
+      <tr><td>2026-07-21</td><td>桌面端智能体 Hub 接入统一 RuntimeProfile：运行时显示红黄绿三态；创建 Agent 模型改为结构化目录下拉且自动选默认模型，移除手写入口；非 ready Runtime 禁止创建。刷新期间按钮显示“刷新中…”并保留卡片，完成后显示数量与耗时。改动只在 ACP Agent/Team Hub，MobileWork 普通会话样式与身份分支不变。</td><td>backend-client、agents-page、agents-page.css、Agent External API、Desktop 文档。</td></tr>
+      <tr><td>2026-07-20</td><td>修复外部身份只写 <code>state.sessions</code>、但新建对话仍是 draft 导致写入落空的问题：draft 保存 agent/team 身份及展示模型，首发提交完整继承；绑定后立即刷新后端会话；ACP 回复和等待态显示外部身份，Gateway 空 model 按 provider 回退。MobileWork 内置会话保留原头像、名称、模型和侧栏气泡。</td><td>gateway helpers、backend-client/state、agents-page、workspaces、session-model、chat-render、chat-controller、web-messages.css、单测。</td></tr>
+      <tr><td>2026-07-20</td><td>外部 ACP agent session 的模型展示改为前端展示覆盖：派活时记录 <code>externalAgent.model || externalAgent.provider || externalAgent.name</code>，气泡 footer、乐观 assistant、历史回放和 Composer 底部标签统一读取 session 展示模型；回退此前尝试在 Gateway session model 接口覆盖 <code>model_label</code> 的后端修改。</td><td>session-model、chat-controller、session-busy、history-mapping、workspaces；无后端协议变更。</td></tr>
+      <tr><td>2026-07-17</td><td>桌面端创建团队接入后端团队目标参考生成：团队名称输入后 debounce 调用 <code>/api/external-teams/draft/description</code>，展示生成中状态并填充团队目标；用户手写团队目标时取消自动覆盖；同时修复团队名称输入后“智能组队”按钮状态不刷新的问题。</td><td>backend-client、agents-page、agents-page.css、desktop 前端文档。</td></tr>
+      <tr><td>2026-07-17</td><td>Web/Desktop 创建团队文案统一：团队目标旁标签从“系统参考”改为“系统生成参考”；桌面端侧边栏进入智能体 Hub 默认落到“我的”，创建团队草稿不随页面切换清空。</td><td>web AgentsHub、desktop agents-page、desktop 前端文档。</td></tr>
+      <tr><td>2026-07-17</td><td>桌面端智能体 Hub 视觉细化：Codex provider 图标统一映射为 <code>X</code>；创建团队页保留 Desktop 内容区铺满宽度，标题区补齐 Web 的像素框、浅网格背景、阴影和步骤胶囊样式。</td><td>agents-page、agents-page.css、workspaces、desktop 前端文档。</td></tr>
+      <tr><td>2026-07-17</td><td>桌面端智能体 Hub 继续对齐 Web：创建团队改为两步式目标/约束/确认布局；“我的智能体/团队”改为小卡片网格；外部 ACP session 侧栏图标使用首字母 badge，Team session 使用双 agent logo；ACP 会话模型标签由前端展示层改为外部 agent 自身模型；修复 Desktop thinking 流式 token 被覆盖。</td><td>agents-page、agents-page.css、workspaces、session-model、chat-reducer、backend-client、history-sidebar.css、单测。</td></tr>
+      <tr><td>2026-07-17</td><td>桌面端智能体 Hub UI 修正：sidebar 智能体入口改为蓝灰色小机器人线稿且脸部透明；“我的”页智能体/团队卡片恢复 Web 同款首字母像素头像与成员 badge；创建智能体/创建团队表单改为适配 desktop 内容区宽度；移除页面右上角无意义刷新按钮；创建团队标题区补回黑白双 agent 小图标和外框。</td><td>agents-page、agents-page.css、index.html。</td></tr>
+      <tr><td>2026-07-17</td><td>新增桌面端智能体 Hub：在 Electron 左侧导航增加“智能体”页，支持 runtime 扫描、外部智能体创建/删除/派活、外部 Team 智能组队/创建/使用；派活改为新建 chat session 后绑定对应 ACP agent 或 external Team 并切回对话页。同步修复 inline FOUC guard CSP hash。</td><td>agents-page、backend-client、index、workspaces、chat-controller、state/expert-store、agents-page.css、index.html。</td></tr>
+      <tr><td>2026-07-22</td><td>托管 Gateway 异常退出或 spawn error 后自动串行重拉，失败按 500ms～30s 指数退避；重拉中再次退出会排队下一次尝试，退出软件时取消。认证健康探测同步读取组件状态：基础健康通过立即解除环境准备遮罩，不等待 Cron；Cron 启动失败以一次非阻塞 toast 展示。</td><td>main/index、gateway-restart-controller、gateway-instance-auth、preload、backend-status-guard、Desktop 单测。</td></tr>
+      <tr><td>2026-07-22</td><td>根治 gateway 重建并发：① <code>ensureGateway</code> 引入 <code>gatewayGeneration</code> 代际——<code>waitForHealthApi</code> 每轮校验代际，用户点重试即递增，旧 wait 立即中止让位（协作式取消，不阻塞）；② <code>gateway:retry</code> 改为：递增代际 → 清缓存 → 等旧实例真正退出（3s 宽限后 SIGKILL）→ 再重建，同一时刻至多一个重建流程；③ 三个 start* 的 exit handler 仅当 <code>managedGateway</code> 仍指向该实例时才清缓存，避免旧实例退出抹掉 retry 已设置的新代际状态；④ <code>logSupervisorDecision</code> 把重试/复用/退出决策持久化到 <code>gateway-startup.log</code>（复盘报告 B5）。</td><td>main/index、Desktop 重建稳定性、排查可观测性。</td></tr>
+      <tr><td>2026-07-22</td><td>修复运行中「环境准备中」死循环（复盘报告故障模式）：<code>ensureGateway</code> 缓存重证明单次 health 失败即全量重建时，旧 gateway 占 8000 → 端口扫描选出 8001 → <code>startWindowsPackagedGateway</code> 因 <code>managedGateway</code> 非空短路 → 空等无进程端口、遮罩永不消失。改为：缓存路径连续 3 次重证明失败才重建；Win/mac 打包分支托管实例存活时直接复用并等待，不再扫端口；<code>resolveCrewHome</code> 缓存 crew_home（原热路径每秒多次同步读不存在的 <code>resources/config/config.yaml</code>）。</td><td>main/index、crew-session-file、Desktop 运行稳定性。</td></tr>
+      <tr><td>2026-07-21</td><td>修复打包安装后冷启动假阴性：Windows 安全软件对 <code>cacert.pem</code> 病态扫描可使 gateway 就绪超过 60s。主进程 <code>waitForHealthApi</code> 去掉冷启动时间天花板，一直等到 health 通过 / 子进程退出 / 用户关应用（仅 Linux 外部服务保留 180s 诊断上限、仅 logout 重启带 deadline）；Windows/macOS/managed 启动时先写 <code>resolvedGatewayBaseUrl</code> 再 wait；托管 gateway stdout/stderr 落盘 <code>userData/logs/gateway-startup.log</code>。渲染层 <code>BackendChatSocket</code> proxy connect 失败退避重连；<code>backend-status-guard</code> 在 health false→true 时补连 WS 并在专家列表为空时重拉 <code>/api/experts</code>；遮罩持续 &gt;20s 升级为「仍在准备中（已等 Ns）+ 查看日志 / 重试 / 继续等待」。</td><td>main/index、preload、backend-client、backend-status-guard、index.html、backend-loading.css、Desktop 冷启动体验。</td></tr>
+      <tr><td>2026-07-20</td><td>Wiki 新建知识库：页头「新建」内联表单（Electron 无 window.prompt，替代 web WikiHub 的 prompt 流程）——kb_id 限英文/数字/下划线（前端校验 + 后端 400 兜底），name 缺省同 id；<code>backendApi</code> 新增 <code>wikiCreateKB</code>（POST /api/wiki/kbs）；成功后刷新列表并选中新 KB；Enter 提交 / Escape 取消；草稿模块级持久，renderShell 重建不丢；登录态变化重置表单。删除 KB 入口未做（后端端点存在，需要时再补）。</td><td>desktop wiki-page.ts、backend-client（wikiCreateKB）、wiki-page.css、desktop 单测（wiki-page +4）、本文档。</td></tr>
+      <tr><td>2026-07-20</td><td>Wiki 交互断点修复：① 无 KB 死路——对齐 web WikiHub，知识库为空时自动初始化 default（<code>backendApi</code> 新增 <code>wikiInit</code>；后端幂等，只自动试一次，失败进失败空态引导「刷新」重试），移除原「后端尚未创建任何知识库」静态死路空态；② 未登录死路——Wiki 页未登录时显示登录引导态、不发请求（此前依赖按钮 toast + 401 报错），登录成功且停在 Wiki tab 时自动拉取；③ 提问入口可发现性——页头「Wiki 问答」改名「问 Wiki」并注明行为（切换到对话页向 Wiki Agent 提问），详情空态加入口引导文案；④ 单测根治僵尸 toast flake：<code>notify()</code> 的 16ms 节流计时器在高负载下跨用例迟到，三处 toast 断言改为「存在目标文案的 toast」而非取第一个匹配。</td><td>desktop wiki-page.ts、backend-client（wikiInit）、desktop 单测（wiki-page）、本文档。</td></tr>
+      <tr><td>2026-07-20</td><td>Wiki 知识库 Phase 4（Wiki Agent 对话）：① 复用主聊天区的 Wiki 模式（不做 web 内嵌右栏 ChatPanel）——Wiki 页页头「Wiki 问答」→ POST /api/wiki/agent-session 拿独立会话 → openSession → WS wiki_enter；② 新增子模块 <code>features/wiki-agent.ts</code>：本地内存 Map 模式状态（切会话显隐、登录态重置）、Composer 上方「Wiki 模式 · KB 名」标识条（联网搜索开关 + 退出，<code>#chat-wiki-slot</code>）、「查看」页面详情 overlay（复用 wiki-page 导出的 wikiDetailArticleHtml）、buildWikiAssistPrompt；③ <code>ChunkKind</code> 新增 <code>wiki_cards</code>/<code>wiki_summary</code> + chat-reducer 两个 reducer（wiki_cards patch 本回合 assistant、wiki_summary 追加概览消息），chat-render 渲染「Wiki 结果」卡片网格与概览卡（建议追问 chips 点击直接发送），sigAgentTurn 纳入新字段；④ 发送 payload 带 wiki_kb_id / web_search_enabled——chat-controller 新增 setWikiSendExtrasResolver 注册口，wiki-agent 注入（与 Phase 2 带外帧回调同一解耦模式）；BackendChatSocket 新增 wikiEnter/wikiExit（主进程/preload 零改动——gateway-ws:send 无 action 白名单）；⑤ 反向注入：上传失败任务「让 AI 处理」→ 进入 Wiki 模式自动发送携带失败上下文的 prompt（wiki-page 经 setWikiAgentEntryHandler 回调，index.ts 组合根接线）。后端零改动，无新增依赖；历史回填不含 wiki 卡片（后端历史不带这两类帧，与 web 一致，仅实时流渲染）。</td><td>desktop wiki-agent.ts、wiki-page.ts、backend-client、chat-controller、chat-render、chat-reducer、index.ts、index.html、wiki-page.css、desktop 单测（wiki-agent）、本文档。</td></tr>
+      <tr><td>2026-07-20</td><td>Wiki 知识库 Phase 3（知识图谱视图）：① 图谱成为第四种列表视图（时间线/文件树/类型/图谱，与 web 对齐），左栏列表区域替换为 SVG 图谱画布，详情仍在右栏，点击节点选中页面并懒加载详情；② wiki 模块首个子功能拆分——新增 <code>features/wiki-graph.ts</code>（数据 / 渲染 / 视口交互，经参数 + 回调与 wiki-page 协作，不反向依赖）与 <code>src/ui/wiki-graph-layout.worker.ts</code>（零依赖力导向布局，移植自 web，<code>computeWikiGraphLayout</code> 纯函数导出供单测与无 Worker 回退）；③ esbuild 新增 worker 独立 iife 产物并复制到 dist/assets（<code>new Worker('./wiki-graph-layout.worker.js')</code>，file:// + CSP 'self' 实测可用），主进程 / preload 零改动；④ <code>backendApi</code> 新增 <code>wikiGraph</code> GET 方法；⑤ 交互对齐 web：滚轮缩放 / 拖拽平移 / 双击适应 / 缩放条 / 隐藏来源开关 / 按类型着色 + deprecated 置灰 + source_of 箭头；节点标签用原生 <code>&lt;text&gt;</code> 替代 foreignObject（happy-dom 兼容）。后端零改动，无新增依赖。</td><td>desktop wiki-graph.ts、wiki-graph-layout.worker.ts、wiki-page.ts、backend-client、esbuild.config.mjs、wiki-page.css、desktop 单测（wiki-graph）、本文档。</td></tr>
+      <tr><td>2026-07-20</td><td>Wiki 知识库 Phase 2（上传 / 编译进度 / 删除）：① 新增上传链路——复用 <code>dialog:selectFile</code> 多选文件，新增 IPC <code>gateway:upload</code>（renderer 传绝对路径，主进程读文件组 multipart POST /api/wiki/upload；<code>GatewayUploadArgs</code> 校验：pathname 精确白名单、绝对路径、≤32 个、单文件 ≤200MB），<code>backendApi</code> 新增 <code>wikiUpload/wikiIngest/wikiCancelIngest/wikiDeletePage/wikiDeletePages</code>；② 上传/编译任务面板（进度条 + 阶段文案 + 错误态 + 取消/全部取消/清除，行为对齐 web WikiHub），进度经 WS <code>wiki_ingest_progress</code> 帧——<code>ChunkKind</code> 新增该类型，chat-controller 作为带外帧规范化后经 <code>setWikiIngestProgressCallback</code> 回调转发给 wiki-page（组合根注入，互不 import）；视频 <code>needs_confirmation</code> 走确认对话框后再编译；③ 条目单删 + 批量管理模式（勾选 + 批量删除）；④ Phase 1 修复：首次加载成功才置 loaded（失败自动重试）、加载失败空态文案区分、KB 为空/失败时 loading 卡死问题。</td><td>desktop wiki-page.ts、backend-client、chat-controller、index.ts、main/index.ts、preload、shared/ipc-schemas + constants、wiki-page.css、desktop 单测（wiki-page/ipc-schemas/wiki-ingest-progress）、本文档。</td></tr>
+      <tr><td>2026-07-20</td><td>新增 Wiki 知识库页（Phase 1 只读浏览）：侧边栏新 tab「Wiki」（技能之后、任务之前），页头 KB 选择器 + 刷新，时间线 / 文件树 / 类型三种列表视图，分页「加载更多」，右栏 Markdown 详情 + KB 概览。<code>backendApi</code> 新增 <code>wikiKBs/wikiPages/wikiPage/wikiSummary</code> 四个只读方法与全套 Wiki 类型（对齐 web，为后续上传/图谱铺路）；文件树逻辑移植自 <code>web/src/lib/wikiTree.ts</code>，行为对齐 web 端但不搬运 React 代码。</td><td>desktop wiki-page.ts、backend-client、state（TabKey）、index.ts、index.html、wiki-page.css、styles/index.css、desktop 单测、本文档。</td></tr>
+      <tr><td>2026-07-14</td><td>技能页明确 Global Skill Set 的宿主级共享语义：页头提示任一账号的安装/修复/卸载影响本机所有账号；安装和卸载均使用全局影响确认文案，成功提示同步标明“本机所有账号”。</td><td>skills-page、Global Skills 管理交互、Desktop 单测。</td></tr>
+      <tr><td>2026-07-15</td><td>技能市场适配 SkillPackage：后端将商旅 skills 组织为 <code>business-travel</code> package，canonical slug 变为 <code>business-travel/query-flights</code> 等，旧 slug 作为 <code>aliases</code> 保留。<code>backend-client.ts</code> 的 <code>Skill</code> / <code>OptionalSkill</code> 新增 <code>aliases?: string[]</code>；<code>skills-page.ts</code> 的 <code>SkillViewItem</code> 同步扩展，搜索过滤函数同时匹配 <code>aliases</code>，使用户搜 <code>query-flights</code> 仍能命中 <code>business-travel/query-flights</code>。</td><td>desktop 技能页、类型定义、搜索过滤。</td></tr>
+      <tr><td>2026-07-15</td><td>工具两阶段执行渲染优化：为 Desktop 工具卡增加运行中旋转动画图标与实时耗时显示；补充 <code>chat-reducer.test.ts</code> 锁定 generating → start → result 状态流转与 duration 计算。Desktop 原有 reducer 逻辑已正确区分 generating/running，本次未改状态映射。</td><td>chat-render.ts、stream-chat.css、chat-reducer.test.ts。</td></tr>
+      <tr><td>2026-07-09</td><td>「已处理」过程区折叠：① 工具前 delta 标 <code>process</code>（实时进思考区，不触发自动折）；工具后切段 / final 无工具才升 <code>answer</code>；② 有硬确认正文后过程区默认折并保持到结束；③ 推理中手动展开仅 ephemeral，正文到来仍自动折；正文后手动展开/折叠才持久化。</td><td>chat-reducer、chat-render、chat-controller、fold-state、单测。</td></tr>
+      <tr><td>2026-07-09</td><td>Files 看板 diff：去掉单文件 <code>max-height: 22rem</code>，内容纵向撑开由看板外层滚动；文件卡折叠时清除该路径 unmodified 临时展开进度（再展开回到默认折叠）。</td><td>pages-v2.css、inspector.ts、diff-lines.ts、单测。</td></tr>
+      <tr><td>2026-07-09</td><td>修复幽灵临时文件仍占「已编辑」卡 + 主进程刷 <code>shell:readTextFile</code> ENOENT：① 新增静默 IPC <code>shell:pathExists</code>，存在性探测不再用会抛错的 <code>readTextFile</code>；② <code>sigAgentTurn</code> 补入 <code>turnFileChanges</code>，hydrate 剔除后增量渲染才会重建文件卡 DOM（此前消息已改但 sig 不变 → 卡片不刷新）。</td><td>main/index、preload、history-mapping、inspector、chat-controller、单测。</td></tr>
+      <tr><td>2026-07-09</td><td>修复流式旁白阶段折叠条闪没：live 回合始终保留「正在思考/正在执行」折叠条（计划模式先吐旁白、工具未到时不再消失）；有正文或过程时文案用「正在执行」。</td><td>chat-render、render-agent-turn 单测。</td></tr>
+      <tr><td>2026-07-09</td><td>看板 Files diff 对齐 Codex：未改动行折叠为「N unmodified lines」条，左右上下箭头每次展开 20 行；增删行显示 +/- 标记；计划文档（.crew/plans/.../plan_*.md）从 Files 与对话改动卡排除。</td><td>diff-lines、inspector、chat-render、history-mapping、chat-reducer、pages-v2.css、plan-document-path、单测。</td></tr>
+      <tr><td>2026-07-09</td><td>对话「已编辑文件」卡补全单文件与合计红绿计数（旧历史 0 时从 book/磁盘 hydrate）；看板 Files diff 横向滚动条加粗更易见。</td><td>turn-file-counts.ts、session-controller、chat-render、pages-v2.css、单测。</td></tr>
+      <tr><td>2026-07-09</td><td>看板 Files「本次会话改动」：文件卡改为可多开独立展开/折叠（不再手风琴互斥）；diff 长行由整块区域统一横向滚动，可滑动查看。</td><td>inspector.ts、diff-lines.ts、pages-v2.css。</td></tr>
+      <tr><td>2026-07-09</td><td>消息卡「查看」打开看板 Files 时自动展开对应文件 diff（点文件行展开该文件；点「查看」/标题展开本轮首个文件）；无指定路径时若尚无展开项则展开列表第一项。</td><td>inspector.openInspectorToTab、chat-render、chat-controller。</td></tr>
+      <tr><td>2026-07-09</td><td>文件改动卡交互修复与视觉加强：补回消息卡点击委托（查看 / 打开资源管理器）；「查看」与行悬停有明确反馈；看板 Files 的 reveal/展开箭头改为常显并加强悬停态，不再「看不见才悬停才出现」。</td><td>chat-controller、chat.css、inspector、pages-v2.css。</td></tr>
+      <tr><td>2026-07-09</td><td>「已编辑文件」卡与看板 Files 视觉对齐 Codex：消息卡带头图/绿红计数/「查看」按钮，点击打开看板 Files；行末悬停显示「在资源管理器中显示」；看板 Files 列表悬停同样露出精致 reveal 按钮，并适配亮暗主题。</td><td>chat-render、chat.css、inspector、pages-v2.css、chat-controller、单测。</td></tr>
+      <tr><td>2026-07-09</td><td>「已编辑文件」卡历史持久化：后端落库 <code>turn_file_changes</code>；<code>mapBackendHistoryItem</code> 映射回消息；旧会话从 <code>file_write</code> 路径兜底（计数为 0 时不显示 +0 -0）。规格见 <code>docs/desktop/persist-turn-file-changes.md</code>。</td><td>history-mapping、backend-client、chat-render、Gateway/Agent/Core、单测。</td></tr>
+      <tr><td>2026-07-09</td><td>看板 / Inspector 视觉整理：入口竖条按钮改为图标+竖排标签并走主题 token；展开壳 Tab / 会话信息网格 / 用量条 / 空态去掉硬编码色与虚线堆砌，适配亮暗主题。任务 DAG 看板本体未改。</td><td>kanban-board.css、shell-v2.css、pages-v2.css、index.html、inspector.ts。</td></tr>
+      <tr><td>2026-07-09</td><td>发送瞬间乐观 Assistant：<code>openTurnForRequest</code> 挂 streaming 占位，计时从发送起算；空流式显示「正在思考 · 已等待」；首包 patch 同一气泡；send 失败丢弃空占位。规格见 <code>docs/desktop/optimistic-assistant-turn.md</code>。</td><td>session-busy、chat-render、chat-controller、Desktop 单测、桌面文档。</td></tr>
+      <tr><td>2026-07-07</td><td>桌面端独立适配工具生成中协议：<code>chat-reducer.ts</code> 新增 <code>generating</code> 状态与 <code>uiLabel</code> 聚合，<code>chat-render.ts</code> 用 active 样式展示「正在写入 path」，<code>pet-gateway-schema.ts</code> 对宠物侧同步透传生成中工具信号。该实现不复用 Web 组件，后续可继续分割桌面端代码。</td><td>Desktop reducer、渲染、Pet gateway、单测。</td></tr>
+      <tr><td>2026-07-07</td><td>移除桌面端各页面标题（技能 / 专家 / 审计 / 定时任务 / 系统总览）中 <code>.accent</code> 的紫粉渐变，统一改为品牌蓝色纯色 <code>var(--color-accent)</code>，与 Codex 稳重风格对齐，同时保留 dark 模式自动适配。涉及 <code>assets/styles/pages-v2.css</code> 与 <code>assets/styles/hub-premium.css</code>。</td><td>桌面端页面头部视觉样式。</td></tr>
+      <tr><td>2026-07-03</td><td>修复桌面端 Plan 按钮在新建/草稿会话首条消息不生效：发送消息 payload 对齐 Web，Composer 处于 Plan 时携带 <code>plan_active:true</code>；排队消息记录入队时的 Plan 状态与 <code>subScenario</code>，出队/立即发送时沿用该状态，避免用户后续切换模式导致排队消息语义漂移。</td><td>chat-controller、PendingMessage、Desktop 单测。</td></tr>
+      <tr><td>2026-07-02</td><td>补充桌面端流式 Markdown 回归测试：验证有序列表项中的半截粗体 <code>2. **F2. Fork...</code> 会通过现有 <code>renderMarkdownHtmlStreaming</code> 自动闭合，不露出原始 <code>**F2</code>。</td><td>markdown 单测、文档；Desktop 渲染逻辑无需变更。</td></tr>
+      <tr><td>2026-07-02</td><td>修复桌面端流式正文乱序：<code>Bookkeeping</code> 新增 <code>deltaSpans</code>/<code>legacyDeltaText</code>，<code>deltaReducer</code> 按 Gateway 下发的 <code>delta_start</code>/<code>delta_end</code> 排序重建 assistant 正文，并对合并帧覆盖旧单帧去重；<code>resolveFinalContent</code> 增加单轮乱序 final 纠偏。同步补 <code>cron_session_created</code> ChunkKind 类型。</td><td>chat-reducer、state、session-busy、chat-controller、backend-client、Desktop 单测。</td></tr>
+      <tr><td>2026-07-01</td><td>移除 <code>ask_user</code>（clarify）工具及全部关联代码：删除 <code>clarify-dialog.ts</code>、<code>ClarifyRequestChunk</code>、<code>clarifyRequestReducer</code>、<code>PendingClarify</code> / <code>pendingClarify</code> 状态、<code>clarify_reply</code> WS action、<code>ClarifyQuestion</code> 接口、<code>clarify-dialog</code> mock 与相关单测。<code>ask_followup_question</code> 工具保留不变。</td><td>chat-reducer、chat-controller、backend-client、state、session-busy、ws.py、Desktop 单测、文档。</td></tr>
+      <tr><td>2026-07-01</td><td>修复桌面端 Composer 中文 IME 回车误发送：新增 <code>features/composer-input.ts</code> 统一处理 Enter 与 IME 合成状态，三层拦截（isComposing、keyCode 229、justComposed Safari 兼容）；<code>desktop/src/ui/index.ts</code> 改用 <code>shouldComposerSend</code> 判定，并在页面卸载时解绑 composition 事件。</td><td>Composer 键盘交互、IME 兼容性、desktop UI 事件绑定。</td></tr>
+      <tr><td>2026-06-30</td><td>Desktop 同步显示修复：补齐 <code>clarify_request</code> 类型、normalize、reducer、<code>pendingClarify</code> book 状态与弹窗副作用；<code>session-busy</code> 将澄清等待纳入用户等待态；<code>history-merge</code> 按共同前缀保留运行中本地尾部，减少刷新/重连导致的文本顺序和 Markdown 流式错乱。</td><td>chat-reducer、chat-controller、clarify-dialog、session-busy、history-merge、Desktop 单测。</td></tr>
+      <tr><td>2026-06-30</td><td>修复 Agent 已输出完毕但 Composer 仍 busy：<code>syncSessionLiveFromBackend</code> 拒绝已封口同 request 的 stale running；等待追问/Plan 审批时后端 live=running 不再把 UI 拉回 busy。</td><td>session-busy、busy 状态机、session-busy 单测。</td></tr>
+      <tr><td>2026-06-30</td><td>历史侧栏视觉对齐：折叠箭头移至标题/文件夹名右侧；嵌套列表去掉竖向引导线；运行 spinner、错误点、未读绿点改到行尾原时间位；后台完成且未打开的会话显示绿点。</td><td>history-sidebar.css、workspaces.ts、session-store、state.ts。</td></tr>
+      <tr><td>2026-06-30</td><td>「项目与会话」改为折叠面板；归档预览弹窗置顶 + 双边对话布局（web-flow）；预览隐藏工具链只留对话。</td><td>settings-library、session-preview、web-messages.css。</td></tr>
+      <tr><td>2026-06-30</td><td>修复欢迎页切换模型/工作空间：无会话时自动建 Composer 草稿；工作空间条在已有消息或非草稿会话时隐藏；修复工作空间点击无下拉。</td><td>workspaces、session-model、composer-toolbar、chat-controller。</td></tr>
+      <tr><td>2026-06-30</td><td>修复「新建工作空间」：点击侧栏 folder-plus 先调 <code>selectFolder</code> 选本地目录，再 <code>POST /api/workspaces</code> 创建并展开侧栏项目；编辑弹窗仅用于已有项目的项目提示词/隐藏/删除。</td><td>desktop workspaces、Electron dialog。</td></tr>
+      <tr><td>2026-06-30</td><td>渠道历史侧栏：新增 <code>channel-sessions.ts</code>；<code>workspaces.ts</code> 增加「渠道」分区（按平台文件夹，有消息才显示）；<code>channel_session_updated</code> WS 事件触发轻量刷新；渠道会话可完整续聊。</td><td>desktop 侧栏、session-controller、backend-client、chat-controller。</td></tr>
+      <tr><td>2026-06-30</td><td>会话级模型：Composer 模型浮层改走会话 API；新增 <code>session-model.ts</code>；设置页移除模型「切换」；<code>openSession</code> 恢复 Composer 标签；新建草稿继承当前所选模型。</td><td>desktop Composer、config-panes、session-controller、backend-client。</td></tr>
+      <tr><td>2026-06-29</td><td>建立桌面端设计文档；同步本轮三处改进（折叠持久化、滚动锚点、micromark 重构）。</td><td>desktop UI 交互、依赖、测试。</td></tr>
+      <tr><td>2026-06-29</td><td>折叠：新增 <code>features/fold-state.ts</code>（turn+tool 双 Map，localStorage 持久化）；<code>chat-render.ts</code> 的 <code>renderToolCard</code> 改为受控折叠，<code>open</code> 优先级改为「用户偏好 &gt; 运行中默认」；<code>chat-controller.ts</code> <code>ensureFoldDelegation</code> 委托两类 <code>details</code> 写持久化；<code>session-controller.ts</code> 加载历史后 hydrate；<code>login.ts</code> 登出清缓存。语义变化：新内容到达不再自动展开用户已折叠的卡片/回合。</td><td>折叠交互行为、渲染 open 判定、登录态清理。</td></tr>
+      <tr><td>2026-06-29</td><td>滚动：新增 <code>features/scroll-anchor.ts</code>（stickyBottom + wheel/touch disarm + 程序滚动 guard）；<code>chat-controller.ts</code> <code>scrollChatToBottom</code> 改为 <code>pinToBottomIfSticky</code>，新增 <code>jumpChatToBottom</code>，提交消息/切会话后显式跳底。语义变化：流式不再强制跟随，用户上滑可停留。</td><td>滚动行为、提交/切会话调用点。</td></tr>
+      <tr><td>2026-06-29</td><td>Markdown：引入 <code>micromark</code> / <code>micromark-extension-gfm</code> / <code>dompurify</code> 依赖；<code>markdown.ts</code> 从正则实现重构为 micromark + DOMPurify + 自定义 class 后处理；新增 <code>markdown-stream.ts</code> 流式预处理（自动闭合未配对 emphasis 与未闭合围栏）。<code>chat-render.ts</code> 流式消息改走 <code>renderMarkdownHtmlStreaming</code>。新增 GFM 语法（blockquote/ol/嵌套列表/删除线/任务列表/autolink）支持。</td><td>渲染管线、依赖、markdown 单测。</td></tr>
+      <tr><td>2026-06-29</td><td>测试：新增 <code>tests/unit/markdown-stream.test.ts</code>、<code>tests/unit/scroll-anchor.test.ts</code>；扩展 <code>tests/unit/markdown.test.ts</code>（GFM + 流式）；调整 <code>tests/unit/render-agent-turn.test.ts</code>（折叠新语义：执行中尊重用户手动折叠）。全量 422/422 通过。</td><td>测试覆盖。</td></tr>
+      <tr><td>2026-06-29</td><td>清理：移除 <code>markdown.ts</code> 里 <code>chat-md-table</code> / <code>chat-md-hr</code> 两处死代码 class 注入（CSS 用 <code>.chat-markdown table</code> 元素选择器，未引用这两个 class）；修正文件头与 <code>addCustomClasses</code> 注释，不再误称"保留旧实现"。postProcess 仅保留必要适配（代码块 wrapper、外部链接 target=_blank）。markdown 单测 23/23 通过。</td><td>markdown.ts 死代码清理、注释准确性。</td></tr>
+    </tbody>
+  </table>
+
+  <section><h2>3.15 Wiki Agent-first Desktop 收敛（2026-07-22）</h2><ul>
+    <li>保留左侧浏览、中间详情/新建/编辑、右侧独立 Wiki Agent 三栏。</li>
+    <li>右栏是无标题、无连接状态、无助手身份行的清爽对话框；复用共享 Conversation Surface 的消息、Markdown、过程时间线、工具结果和滚动，并保留附件、发送、停止。容器使用主对话 <code>chat-messages web-flow</code> 布局，头像尺寸、用户消息对齐和内容边界保持一致；隐藏专家、Craft、Workflow 和工作空间选择器。</li>
+    <li>上传只打开右栏附件选择；Agent 执行 capture/parse/plan/confirm/apply。移除页面上传队列、自动 ingest、编译/取消、单删、批量删除和失败转发。</li>
+    <li>确认卡位于消息流；确认 ID 以隐藏 WS 参数进入后续回合，取消立即使后端记录失效。<code>wiki_changed</code> 刷新当前 KB 列表、详情、图谱和概览。</li>
+    <li>直接新建与编辑继续使用 Wiki store/compiler 的统一收尾服务。</li>
+  </ul></section>
+  <section><h2>3.16 Wiki Vault 根文件与 KB 删除隔离（2026-07-28）</h2><ul>
+    <li>文件树中的 <code>Home.md</code> 与 <code>index.md</code> 改为可点击节点，正文在详情区按 Markdown 展示；即使 KB 尚无 Wiki 页面，文件树仍可使用。每个 KB 在本次登录中首次选中时执行一次幂等初始化，自动补齐旧 KB 缺失的根文件。</li>
+    <li>文件树目录全部使用中文显示名；Entity/Topic 显示为“关键词/话题”，根文档显示为“知识库概览/知识导航”。进入或切换 KB 后默认打开知识库概览。</li>
+    <li>空库概览只显示“暂无页面”，不展示产品名称、内部路径或维护说明。</li>
+    <li>删除 KB 的确认文案明确包含页面、原始素材和专属 Wiki 问答历史；删除成功后清除该 KB 的内嵌 Wiki 会话、加载 Promise、附件、草稿、模型和展开状态缓存。</li>
+    <li>验证：Desktop TypeScript 类型检查通过，Wiki page、graph、agent 三个测试文件共 <code>87 passed</code>。</li>
+  </ul></section>
+  <p><b>2026-07-22：</b>Wiki 右栏进一步收敛为纯对话框：移除 Wiki Agent 标题、KB 副标题和连接状态，嵌入式 Conversation Surface 隐藏助手名称；补齐主对话容器 class，修复机器人头像异常放大、用户消息未对齐和 Composer 被内容挤出视口的问题。</p>
+  <section>
+    <h2>Formation AI 双阶段组队与临时补员（2026-07-28）</h2>
+    <ul>
+      <li>创建 Team 只提供一个“智能组队”入口，不向用户暴露 Fast/AI 内部模式；内部仍先渲染 Fast 草案，再继续检查需求、分工与缺员，整个实现保持 Desktop TypeScript DOM，不引入 React/Web 组件。</li>
+      <li>复用既有时长格式，在阵容上方展示“生成初步方案 → 智能检查优化 → 方案已就绪”三阶段和真实秒数；进度卡不重复展示 Team Logo。AI 检查期间成员职责、返回修改和创建操作保持禁用。</li>
+      <li>AI 检查完成或 Provider 失败回退后，“智能检查优化”阶段仍保留本次运行秒数；内部仅走 Fast 的恢复路径不显示虚假的 AI 耗时。</li>
+      <li>Crew 不再限制 AI 检查时长，会持续等待 Provider 返回；Provider/网络自身失败时保留 Fast 草案，以用户语言提示当前方案仍可使用，并提供“重新检查”；请求序号会阻止迟到响应覆盖用户的新输入。</li>
+      <li>AI 检查运行态使用橙色左侧强调线、状态说明、阶段卡和圆点；初步方案与完成态继续沿用既有中性/完成色，状态区分更明显。</li>
+      <li>缺员确认复用 <code>team-modal-backdrop</code>、<code>agents-decision-modal</code>、<code>renderAgentsSelect()</code> 与既有 Team 黑白 Logo；以团队名称发出提示，并允许用户切换已就绪 Runtime/model。</li>
+      <li>用户确认后只保存 pending 配置；最终创建 Team 时才发送 <code>temporary_members</code>。团队目标、Leader、约束或成员变化会清除旧建议，取消仅缺员型优化时恢复 Fast 方案。</li>
+      <li>本功能只修改 <code>agents-page.ts</code>、<code>backend-client.ts</code> 和 <code>agents-page.css</code> 的 External Team 创建路径；不改变 MobileWork、专家团、普通单 Agent 会话或聊天渲染。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>Formation Auto 单请求实时流与补员风险确认（2026-07-28）</h2>
+    <ul>
+      <li>“智能组队”只发送一个 Auto NDJSON 请求；Fast 快照到达即更新现有 TypeScript DOM，后端质量门需要 AI 时再切换橙色检查状态。</li>
+      <li>为避免既有 <code>gateway:fetch</code> 全文缓冲，Desktop Gateway 桥增加可取消的文本流通道；主进程继续负责本地 URL 钳制、认证头注入和敏感请求头过滤，renderer 只消费当前 request id 的 Team Formation 事件。</li>
+      <li>目标、Leader 或约束变化会同时 abort 后端流、递增 request sequence 并忽略迟到事件；不影响普通 REST、WebSocket、聊天或文件上传通道。</li>
+      <li>补员标题按建议数量展示；“仍使用当前团队”不再额外请求 Fast，并保留 FormationPlan 中未覆盖能力、warning 与风险提示。</li>
+      <li>继续复用既有 Team 进度 DOM、弹层、选择器和状态计时；不修改 MobileWork、专家、专家团、单 External Agent 或 Team Runtime。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>邮箱租户登录（2026-08-03）</h2>
+    <ul>
+      <li>正式配置默认启用 <code>auth.mode: email</code>。首次启动显示邮箱入口，不发送验证码；开发命令的 <code>--dev</code> 仍优先使用隔离的 <code>dev:dev</code> owner。</li>
+      <li>Gateway 将邮箱去除首尾空格并转为小写，签发沿用现有 HMAC HttpOnly 会话 Cookie，owner 为 <code>email:&lt;normalized-email&gt;</code>。Desktop 继续通过系统 <code>safeStorage</code> 加密保存 Cookie，不以邮箱作为文件夹名称。</li>
+      <li>邮箱模式用于本机多租户隔离，不验证邮箱所有权；同机用户可输入其他邮箱切换租户。<code>local</code> 免登录和 <code>remote</code> 手机验证码模式继续兼容。</li>
+      <li>登录 UI 复用同一个 modal：邮箱模式隐藏验证码区域并显示“进入 Ace”，账号设置页显示规范化邮箱并支持退出切换租户。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>外援空状态、Runtime 路径归并与账号接管恢复（2026-07-30）</h2>
+    <ul>
+      <li>“我的外援/我的团队”无数据时恢复既有虚线空状态引导区；保留简短活泼文案与跳转动作，但不再用 <code>agents-empty--plain</code> 抹掉边框。该 UI 与账号无关，账号切换只决定是否进入空状态。</li>
+      <li>Gateway 从断连变为可用时，Desktop 除了补连 WebSocket 和专家目录，还会重新加载 <code>/api/config</code>；模型标签与“外援”功能开关不会停留在冷启动失败时的空值。</li>
+      <li>登录下发的内置模型 Key 遇到 Active Owner 冲突、Gateway 初始化中或临时网络错误时，由主进程在当前 JWT/账号仍一致的前提下分段重试；成功后通过仅本地 IPC 通知 renderer 刷新模型与功能配置，Key 不进入 renderer。</li>
+    </ul>
+  </section>
+  <h2>5. 测试记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>范围</th><th>验证</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>2026-08-03</td><td>邮箱租户登录、Owner 隔离、会话持久化与既有认证兼容。</td><td>后端轻量集成验证覆盖邮箱规范化、Cookie 签发、<code>email:&lt;邮箱&gt;</code> Owner 解析及非法邮箱拒绝；Desktop <code>auth-session.test.ts</code> 3 项通过；TypeScript typecheck、production build、Python 语法编译与 <code>git diff --check</code> 通过。完整 Gateway pytest 因系统默认 Python 3.9 低于项目要求的 Python 3.11，未能进入收集。</td><td>本次范围通过；正式配置默认邮箱入口，<code>--dev</code>、<code>local</code>、<code>remote</code> 保持兼容。</td></tr>
+      <tr><td>2026-07-30</td><td>阵容虚线空状态、Gateway 恢复配置补拉、登录模型 Key 延迟重试。</td><td><code>composer-external-assistance.test.ts</code> 覆盖两个阵容空状态使用虚线 actionable 结构；<code>backend-status-guard.test.ts</code> 覆盖断连转可用时补拉模型/功能配置；Desktop 全量 <code>117 files / 1222 passed</code>，TypeScript typecheck、CSS lint、production build、范围 ESLint（0 error）、重复 selector 检查与 <code>git diff --check</code> 通过。External Agent 路径归并定向用例 <code>3 passed</code>；全文件已报告 <code>99 passed</code>，但进程停留在 asyncio 清理阶段未自行退出，手动中断。</td><td>功能与前端回归通过；模型 Key 只保留在主进程当前登录生命周期，不持久化到 renderer。后端测试清理未退出问题单独保留，不计作完整命令成功。</td></tr>
+      <tr><td>2026-07-30</td><td>Desktop 外援术语、固定三步浮层、滚动解耦、关闭/重播、首次扫描、发现外援卡片降噪与窄窗口固定 Dock。</td><td><code>composer-external-assistance.test.ts</code> 7 项通过，覆盖首次邀请、从 1/3 开始、三步显式切页、目标描边、完成/跳过持久化、页头重播、<code>body</code> Portal、按钮区域滚轮转交、四 Tab、表单、只扫描一次，以及卡片不再渲染 ACP 和可执行路径；Desktop 全量 <code>117 files / 1221 passed</code>。TypeScript typecheck、CSS lint、production build、变更范围 ESLint（0 error）、重复 selector 检查与 <code>git diff --check</code> 通过。</td><td>通过；全量测试首次在沙箱内被本机监听权限拦截，允许监听 <code>127.0.0.1</code> 后原命令全量通过；无后端改动。</td></tr>
+      <tr><td>2026-07-28</td><td>Formation Auto 单请求、Desktop 可取消 Gateway 文本流、最小补员风险确认。</td><td>External Team 相关 <code>2 files / 8 passed</code>；流式桥用例覆盖 Fast → AI 状态 → final 增量顺序；TypeScript typecheck 与 production build 通过。</td><td>通过；普通 Gateway REST/WebSocket、聊天、MobileWork、专家和专家团未改。</td></tr>
+      <tr><td>2026-07-28</td><td>智能组队单入口、双阶段真实进度、AI 无主动超时、橙色运行强调与迟到响应保护。</td><td>Gateway Formation <code>47 passed</code>；Desktop 相关 3 个测试文件 <code>22 passed</code>；新增 DOM 用例覆盖隐藏内部模式、Fast 草案进入 AI 检查、Provider 失败回退与重新检查。TypeScript typecheck、production build、范围 ESLint、CSS lint 和重复选择器检查通过。</td><td>通过；只修改 External Team 创建页，不改变聊天、MobileWork、专家、专家团或单 External Agent。</td></tr>
+      <tr><td>2026-07-28</td><td>Formation AI 双阶段组队、质量回退与确认式临时补员。</td><td>Gateway Formation <code>47 passed</code>；Web Agent Hub <code>7 passed</code>；Desktop 外援/入口 <code>6 passed</code>；Web production build、Desktop typecheck、Python Ruff/compileall 与 diff check 通过。</td><td>通过；Runtime 动态补员未纳入，MobileWork、专家和专家团路径未修改。</td></tr>
+      <tr><td>2026-07-24</td><td>Hermes Runtime 路径替换、Codex app-server 流式/思考时间线与外部草稿模型保持。</td><td>真实 Electron 运行时页只显示新的 <code>~/.hermes/hermes-agent/venv/bin/hermes</code>，旧 <code>~/.local/bin/hermes</code> replaced 记录不再显示；Codex GPT-5.5 新会话发送前后保持 GPT-5.5，观察到 11 个正文快照；GPT-5.6-Sol 观察到 52 个正文快照与“已思考 20s”，历史 API 保存 reasoning summary。相关 Vitest 6 个文件 <code>96 passed</code>，typecheck、CSS lint、重复 selector 检查与 production build 通过。</td><td>通过；MobileWork、专家、专家团与外部 Team 身份链路未改。</td></tr>
+      <tr><td>2026-07-22</td><td>Team Agent Turn 复用与 External Owner 隔离回归。</td><td>Team planning/member/leader 继续复用现有 Agent Turn renderer、duration 和每秒 ticker；规划运行中自动展开、终态自动折叠并使用黑白 Team Logo。External Runtime 全局共享，External Agent/Team 按 Owner 私有。Desktop 定向 4 个文件 <code>58 passed</code>，typecheck、ESLint 0 error 与 production build 通过。</td><td>通过；普通单 Agent 与专家团分支未修改。</td></tr>
+      <tr><td>2026-07-22</td><td>Desktop Team 聊天真实成员头像、Team 自身气泡清理与消息时序。</td><td>控制器/Reducer/历史/DOM/成员配置定向 5 个测试文件共 <code>111 passed</code>；TypeScript typecheck 与 production build 通过。真实 Electron 回放贪吃蛇 Team Session：聊天 Team Logo=0、团队消息=11、MobileWork 内置头像=8、最终总结=1，首段顺序为 Leader 规划 → Leader @Hermes → Hermes 执行。</td><td>通过。</td></tr>
+      <tr><td>2026-07-21</td><td>Desktop <code>team_internal</code> 实时流、历史合并、成员 DOM 气泡、MobileWork/Hermes 头像、执行过程和产物卡。</td><td>定向 4 个测试文件共 <code>104 passed</code>；TypeScript typecheck、CSS lint、安全检查、重复 selector 检查和 production build 通过。全量 Vitest 为 <code>782 passed / 20 failed / 4 环境错误</code>，失败保持既有 mock、技能文案和沙箱监听端口基线，未涉及本次 Team 消息模块。</td><td>本次范围通过。</td></tr>
+      <tr><td>2026-07-21</td><td>协作看板成员职责降噪与 Desktop MobileWork 身份/头像。</td><td>协作看板测试覆盖职责区块提取、工作原则过滤、MobileWork 名称及 Q 版耳机机器人 SVG；TypeScript typecheck、范围 ESLint、CSS lint、production build 与 <code>git diff --check</code> 通过。</td><td>通过。</td></tr>
+      <tr><td>2026-07-21</td><td>Team Session「协作」Tab、Web TaskBoard 等价 DOM、DAG 分层、成员/产物/日志/运行态，以及仅 Team 可见。</td><td>新增协作看板单测 3 项 + 相关 Team/模型测试 13 项全部通过；TypeScript typecheck、ESLint（0 error，41 个存量 warning）、CSS lint、重复 selector 检查、production build、<code>git diff --check</code> 通过。Desktop 全量为 775 passed / 20 failed / 4 环境错误，失败维持既有 mock/沙箱端口基线且不涉及本次模块。Computer Use 服务未启动且本机未安装 Playwright Chromium，因此未把自动截图计入验收。</td><td>本次范围通过；待真实 Electron 人工视觉确认。</td></tr>
+      <tr><td>2026-07-21</td><td>外部 Team 聊天/等待态 Logo 复用、Composer 模型按钮隐藏及普通会话恢复。</td><td>相关 2 个 Desktop 测试文件 46 项通过；TypeScript typecheck、CSS lint 与 production build 通过。</td><td>通过。</td></tr>
+      <tr><td>2026-07-21</td><td>Formation Fast 契约、可用 Agent 过滤与紧凑开发角色。</td><td>Gateway 组队测试 56 passed；Desktop typecheck 通过，范围 ESLint 0 error（1 个既有未使用 import warning）；production build 通过。</td><td>通过。</td></tr>
+      <tr><td>2026-07-21</td><td>外部单 Agent 空闲模型切换、刷新后目录保持、运行态禁用、ACP 标准/旧协议兼容、MobileWork/外部逐回合模型历史。</td><td>后端相关 62 项通过；Desktop typecheck、范围 ESLint（0 error）、CSS lint、重复 selector 检查、production build 通过，4 个相关测试文件 104 项通过。Desktop 全量为 767 passed / 20 failed / 4 环境错误；宽后端组合另有既有延迟工具测试失败和默认数据库只读环境错误。</td><td>本次范围通过；全量失败维持既有非本项基线。</td></tr>
+      <tr><td>2026-07-21</td><td>Codex Desktop stdin 修复与智能体 Hub 统一弹层下拉。</td><td><code>.venv/bin/python -m pytest tests/test_external_agents.py -q</code>：53 passed；Desktop typecheck、ESLint、CSS lint、build、重复 selector 检查；真实 Electron 端到端选择现有 Codex/gpt-5.5 并发送消息，17 秒内返回 <code>DESKTOP_CODEX_FIXED_OK</code>，模型发送前后保持 gpt-5.5；创建 Agent 页原生 select=0、自定义选择器=2，并截图验收模型目录弹层。</td><td>通过。Desktop 全量 Vitest 仍为既有 760 passed / 20 failed，与本项无关。</td></tr>
+      <tr><td>2026-07-21</td><td>RuntimeProfile 三态、模型目录下拉、外部身份隔离与创建校验。</td><td><code>npm run typecheck</code>；4 个相关测试文件 <code>108 passed</code>；范围内 ESLint；<code>npm run lint:css</code>；重复 selector 检查；<code>npm run build</code>。全量 Vitest 的非本项存量结果为 760 passed / 20 failed，失败集中在测试 mock、无 window 环境和沙箱端口权限。</td><td>本次范围通过；存量全量失败未越界修改。</td></tr>
+      <tr><td>2026-07-20</td><td>ACP/外部 Team draft 会话身份、首发提交、外部模型优先级与 MobileWork 样式隔离。</td><td><code>git diff --check</code>；<code>cd desktop &amp;&amp; npm run typecheck</code>；新增 6 项定向 Vitest，相关 4 个测试文件合计 108 项通过；<code>npm run build</code>；<code>npm run lint:css</code>；重复 selector 检查；<code>python -m py_compile crew/gateway/helpers.py tests/test_external_agents.py</code>；独立调用 <code>session_agent_label</code> 验证空 model 回退为 <code>kimi</code>。后端 pytest 在当前 Python 环境启动即 exit 139、无测试输出，禁用第三方插件后现象相同。</td><td>桌面端、Python 语法与 helper 行为验证通过；记录 pytest 环境异常。</td></tr>
+      <tr><td>2026-07-20</td><td>外部 ACP agent session 模型前端展示覆盖与后端覆盖回退。</td><td><code>git diff --check</code>；<code>cd desktop &amp;&amp; npm run typecheck</code>；<code>cd desktop &amp;&amp; npm run build</code>；确认 <code>crew/gateway/helpers.py</code> 与 <code>crew/gateway/routers/sessions.py</code> 无本项 diff。</td><td>通过。</td></tr>
+      <tr><td>2026-07-17</td><td>桌面端创建团队后端目标参考生成链路。</td><td><code>git diff --check</code>；<code>cd desktop &amp;&amp; npm run typecheck</code>；<code>cd desktop &amp;&amp; npm run lint:css</code>；<code>cd desktop &amp;&amp; npm run build</code>。</td><td>通过。</td></tr>
+      <tr><td>2026-07-17</td><td>创建团队文案、智能体 Hub 默认入口和创建团队草稿保留。</td><td><code>git diff --check</code>；<code>cd desktop &amp;&amp; npm run typecheck</code>；<code>cd desktop &amp;&amp; npm run build</code>。</td><td>通过。</td></tr>
+      <tr><td>2026-07-17</td><td>Codex provider 图标映射、创建团队页宽度和标题区 Web 样式对齐。</td><td><code>git diff --check</code>；<code>cd desktop &amp;&amp; npm run typecheck</code>；<code>cd desktop &amp;&amp; npm run lint:css</code>；<code>cd desktop &amp;&amp; npm run build</code>。</td><td>通过。</td></tr>
+      <tr><td>2026-07-17</td><td>桌面端智能体 Hub Web 对齐、ACP 会话图标/模型标签、thinking 流式合并。</td><td><code>git diff --check</code>；<code>cd desktop &amp;&amp; npm run typecheck</code>；<code>cd desktop &amp;&amp; npm test -- tests/unit/chat-reducer.test.ts</code>；<code>cd desktop &amp;&amp; npm run build</code>；<code>python -m py_compile crew/gateway/helpers.py crew/gateway/routers/sessions.py</code>；<code>cd desktop &amp;&amp; npm run lint:css</code>；<code>cd desktop &amp;&amp; node scripts/detect-duplicate-selectors.mjs --fail-on-different-value</code>。</td><td>通过。</td></tr>
+      <tr><td>2026-07-17</td><td>桌面端智能体 Hub、派活新会话、外源 Team 会话绑定、CSP hash。</td><td><code>git diff --check</code>；<code>cd desktop &amp;&amp; npm run build</code>；脚本校验 <code>desktop/assets/index.html</code> inline script 实际 sha256 与 CSP 允许值一致。</td><td>通过。<code>npm run build</code> 完成 esbuild 打包；当前环境缺少 <code>tsc</code> 时不使用 <code>npm run typecheck</code> 作为交付门禁，后续安装完整 devDependencies 后需补跑。</td></tr>
+      <tr><td>2026-07-17</td><td>桌面端智能体 Hub UI 调整：sidebar 图标、卡片首字母头像、表单宽度、刷新按钮移除、创建团队双 agent 图标。</td><td><code>git diff --check</code>；<code>cd desktop &amp;&amp; npm run build</code>；脚本检查关键选择器和右上角刷新按钮移除。</td><td>通过。</td></tr>
+      <tr><td>2026-07-22</td><td>Team 草稿首屏模型入口、首次消息标题与 Leader 产物闭环。</td><td>选择团队后在后端绑定返回前即写入外源 Team 身份并同步隐藏 Composer 模型入口，失败时回滚；提前由后端创建的占位 Session 在首次发送时继续复用单 Agent 的 <code>makeSessionTitle()</code> 命名链路，不使用“团队名 · 团队任务”特例；协作看板继续消费后端统一 <code>artifact_paths</code>。</td><td>仅影响外源 Team 草稿和 Team 产物展示；普通 MobileWork、外部单 Agent 与专家团不变。</td></tr>
+      <tr><td>2026-07-22</td><td>ACP 权限审批卡与 Team 控制面身份。</td><td>Desktop 继续复用 Followup 卡片 DOM；<code>origin.type=team_control</code> 时显示黑白 Team Logo 与团队名称，单 External Agent 显示 Agent 身份。权限卡只有“仅本次允许/拒绝”，不提供自定义业务输入。</td><td>仅渲染真实 ACP 权限请求；不改变普通业务 Followup、Team 聊天气泡、单 MobileWork 或专家团。</td></tr>
+    </tbody>
+  </table>
+
+</div>
+</body>
+</html>
