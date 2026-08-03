@@ -1,26 +1,69 @@
-# Crew — 本地多智能体工作台
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo.svg">
+    <img src="assets/logo.svg" alt="Crew Logo" width="180">
+  </picture>
+  <h1>Crew — 本地多智能体工作台</h1>
+  <p>
+    <a href="https://github.com/shuishenghualalala/Ace/stargazers"><img src="https://img.shields.io/github/stars/shuishenghualalala/Ace?style=flat-square&color=F4D98B" alt="Stars"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
+    <img src="https://img.shields.io/badge/python-%3E%3D3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
+    <img src="https://img.shields.io/badge/node-%3E%3D22.12-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js">
+  </p>
+</div>
 
-Crew 是一个可在本机独立运行的开源 AI Agent 工作台，提供 Desktop、Web 和 CLI。接入自己的 OpenAI 兼容或 Anthropic 模型后，Agent 可以在权限边界内使用文件、终端、浏览器、Wiki、Skill、插件和 MCP 工具，完成对话、知识整理、后台任务与定时任务。
-
-在单 Agent 对话之外，Crew 支持将独立任务委派给隔离的子智能体、组织本地 Team，并按需接入外部 Runtime、Agent 和 Team。配置、会话、知识库与模型密钥默认保存在本机，远程账号认证为可选能力。后端 Python 包与 CLI 命令均使用 `crew`。
+Crew 是一个可在本机独立运行的开源多智能体协作平台，你可以在Crew中自由创建团队实现大项目，也可以把Crew当成你的个人助手完成电脑上的各种dirty work，如文件整理、内容创作、知识管理。
 
 > [!NOTE]
 > 发布状态：源码预览版。接口和数据格式不承诺稳定，暂不建议直接用于关键生产环境。
 > 本版本以 Git 源码检出方式交付；尚未发布 PyPI/wheel 或正式安装器，`pyproject.toml`
 > 的构建产物不代表包含桌面端与 Web 端的完整发行包。
 
+## 目录
+
+- [核心能力](#核心能力)
+- [为什么选择 Crew？](#为什么选择-crew)
+- [环境要求](#环境要求)
+- [快速开始](#快速开始)
+- [配置模型](#配置模型)
+- [可选的账号登录](#可选的账号登录)
+- [技能与插件](#技能与插件)
+- [其他启动方式](#其他启动方式)
+- [构建桌面发行包](#构建桌面发行包可选)
+- [验证安装](#验证安装)
+- [配置与本地数据](#配置与本地数据)
+- [代码结构](#代码结构)
+- [参与贡献](#参与贡献)
+- [安全提示](#安全提示)
+- [开源许可](#开源许可)
+
 ## 核心能力
 
 | 模块 | 能力 |
 |------|------|
-| 对话与上下文 | 流式对话、thinking、工具调用、附件与工作空间、会话模型切换、上下文压缩和本地记忆 |
-| 智能体协作 | 主 Agent 可并发委派临时或预设子智能体；支持本地 Team、动态看板，以及可选的外部 Runtime、Agent 和 Team 接入 |
+| 自定义模型接入 | 支持 OpenAI 兼容及 Anthropic 协议，自带 API Key 即可使用，密钥本地加密存储 |
+| 对话与上下文管理 | 流式对话、thinking、工具调用、附件与工作空间、会话模型切换、上下文压缩和本地记忆 |
+| 异构智能体协作 | 接入或创建不同来源不同架构的智能体并持久化；主 Agent 可并发委派临时或预设子智能体；支持本地 Team、动态看板，以及可选的外部 Runtime、Agent 和 Team 接入 |
 | 任务与自动化 | 后台任务、状态与心跳、定时任务、并发和超时控制 |
-| 知识与扩展 | 本地 LLM Wiki、文件与多模态入库、Skill、插件、MCP Server 和渐进式工具发现 |
+| 知识管理 | 本地 LLM Wiki、文件与多模态入库 |
+| 扩展工具 | Skill、插件、MCP Server 和渐进式工具发现 |
 | 浏览器与桌面操作 | 可接管的应用内浏览器；通过可选 CUA Driver MCP 操作本机原生应用 |
-| 客户端与渠道 | Desktop、Web、CLI、本地 WebSocket，以及需要额外依赖和账号配置的飞书/Lark 渠道 |
+| 客户端与多渠道 | 支持 Desktop、Web、CLI、本地 WebSocket，以及需要额外依赖和账号配置的飞书/Lark 渠道 |
 | Skill 自进化（实验性） | 从会话提取轨迹、分析 Skill 使用情况，并生成优化建议或新 Skill；默认关闭，完整周期可能写入用户 Skill，详见[自进化说明](crew/evolution/README.md) |
 | 安全与数据边界 | 默认仅监听本机、可选远程认证、owner 级数据隔离、本地密钥存储、工具访问控制与审批、浏览器网络/文件边界，以及 Desktop IPC 安全门禁 |
+
+## 为什么选择 Crew？
+
+| | Crew | OpenClaw | CodeBuddy Code |
+|---|:---:|:---:|:---:|
+| **定位** | 本地多 Agent 工作台 | 个人 AI 助理 | AI 编程 CLI |
+| **开源** | ✅ Apache 2.0 | ✅ MIT | 部分 |
+| **客户端** | Desktop + Web + CLI | CLI + macOS/iOS/Android | CLI |
+| **多 Agent 协作** | ✅ Team + 看板 + 子 Agent | 临时子 Agent |  临时子 Agent |
+| **本地知识库** | ✅ LLM Wiki（结构化 + 多模态） | ✅ 向量记忆 | ❌ |
+| **桌面自动化** | ✅ CUA Driver（操作原生应用） | ❌ | ❌ |
+| **浏览器** | ✅ 内置接管式浏览器 | ✅ 标签页 Copilot | ❌ |
+| **任务调度** | ✅ 后台任务 + 定时 | ✅ Cron | ❌ |
 
 ## 环境要求
 
