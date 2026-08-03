@@ -419,10 +419,11 @@ def build_agent_profile(
     agent: dict[str, Any],
     *,
     runtime: dict[str, Any] | None = None,
+    observations: list[dict[str, Any]] | None = None,
 ) -> AgentProfile:
     """Build AgentProfile from declared facts; user assignment is never evidence."""
 
-    if runtime is None and isinstance(agent.get("profile"), dict) and agent["profile"]:
+    if runtime is None and observations is None and isinstance(agent.get("profile"), dict) and agent["profile"]:
         persisted = AgentProfile.from_dict(agent["profile"])
         if persisted is not None:
             return persisted
@@ -509,7 +510,7 @@ def build_agent_profile(
                 f"{source} implies {implied}",
                 round(implied_confidence, 4),
             ))
-    return AgentProfile(
+    profile = AgentProfile(
         agent_id=agent_id,
         capabilities={
             capability: CapabilityAssessment(
@@ -528,6 +529,104 @@ def build_agent_profile(
             "capabilities": list(selected_model.capabilities) if selected_model else [],
             "thinking_levels": list(selected_model.thinking_levels) if selected_model else [],
         },
+    )
+    return apply_execution_observations(profile, observations or [])
+
+
+def apply_execution_observations(
+    profile: AgentProfile,
+    observations: list[dict[str, Any]],
+) -> AgentProfile:
+    """Blend settled execution facts into a static profile without one-shot drift."""
+
+    if not observations:
+        return profile
+    stats: dict[str, dict[str, Any]] = {
+        capability: {
+            "positive": 0.0,
+            "negative": 0.0,
+            "success": 0,
+            "revise": 0,
+            "failure": 0,
+            "neutral": 0,
+            "last_observed_at": "",
+        }
+        for capability in CAPABILITIES
+    }
+    for observation in observations:
+        if not isinstance(observation, dict):
+            continue
+        capabilities = normalize_capabilities(observation.get("capabilities") or [])
+        if not capabilities:
+            continue
+        outcome = str(observation.get("outcome") or "neutral").strip().lower()
+        if outcome not in {"success", "revise", "failure", "neutral"}:
+            continue
+        weight = _clamp_score(observation.get("quality_weight"), 0.0) / len(capabilities)
+        observed_at = str(observation.get("observed_at") or "")
+        for capability in capabilities:
+            stat = stats[capability]
+            stat[outcome] += 1
+            stat["last_observed_at"] = max(stat["last_observed_at"], observed_at)
+            if outcome == "success":
+                stat["positive"] += weight
+            elif outcome in {"revise", "failure"}:
+                stat["negative"] += weight
+
+    capabilities: dict[str, CapabilityAssessment] = {}
+    for capability, assessment in profile.capabilities.items():
+        stat = stats[capability]
+        total_observations = sum(
+            int(stat[key])
+            for key in ("success", "revise", "failure", "neutral")
+        )
+        if total_observations == 0:
+            capabilities[capability] = assessment
+            continue
+        sample_count = int(stat["success"]) + int(stat["revise"]) + int(stat["failure"])
+        effective_weight = float(stat["positive"]) + float(stat["negative"])
+        blend = (
+            min(0.5, effective_weight / (effective_weight + 6.0))
+            if sample_count >= 3 and effective_weight > 0
+            else 0.0
+        )
+        empirical_score = (
+            (2.0 + float(stat["positive"])) / (4.0 + effective_weight)
+            if effective_weight > 0
+            else 0.5
+        )
+        score = assessment.score * (1.0 - blend) + empirical_score * blend
+        confidence = min(
+            0.95,
+            max(
+                assessment.confidence,
+                assessment.confidence + blend * (1.0 - assessment.confidence),
+            ),
+        )
+        summary = (
+            f"samples={sample_count}; success={stat['success']}; revise={stat['revise']}; "
+            f"failure={stat['failure']}; neutral={stat['neutral']}; "
+            f"last={stat['last_observed_at'] or 'unknown'}"
+        )
+        capabilities[capability] = CapabilityAssessment(
+            score=_clamp_score(score, assessment.score),
+            confidence=_clamp_score(confidence, assessment.confidence),
+            evidence=[
+                *assessment.evidence,
+                CapabilityEvidence(
+                    source="execution_observation",
+                    value=summary,
+                    weight=round(blend, 4),
+                ),
+            ],
+        )
+    return AgentProfile(
+        version=profile.version,
+        agent_id=profile.agent_id,
+        availability=profile.availability,
+        runtime=profile.runtime,
+        model=dict(profile.model),
+        capabilities=capabilities,
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -74,6 +75,27 @@ class ExternalAgentStore:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL,
                   FOREIGN KEY(runtime_id) REFERENCES external_runtime(id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS external_agent_profile_observation (
+                  id TEXT PRIMARY KEY,
+                  owner_account_id TEXT NOT NULL DEFAULT '',
+                  external_agent_id TEXT NOT NULL,
+                  source_run_id TEXT NOT NULL,
+                  source_node_id TEXT NOT NULL,
+                  source_attempt_id TEXT NOT NULL,
+                  capabilities_json TEXT NOT NULL DEFAULT '[]',
+                  assessment_source TEXT NOT NULL,
+                  outcome TEXT NOT NULL,
+                  quality_weight REAL NOT NULL DEFAULT 0,
+                  failure_kind TEXT NOT NULL DEFAULT '',
+                  observed_at TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(external_agent_id) REFERENCES external_agent(id),
+                  UNIQUE(owner_account_id, external_agent_id, source_attempt_id)
                 )
                 """
             )
@@ -158,6 +180,12 @@ class ExternalAgentStore:
             self._ensure_column(conn, "external_team", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_external_agent_owner ON external_agent(owner_account_id, created_at)"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_external_agent_profile_observation_agent
+                ON external_agent_profile_observation(owner_account_id, external_agent_id, observed_at)
+                """
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_external_team_owner ON external_team(owner_account_id, archived_at, created_at)"
@@ -598,30 +626,194 @@ class ExternalAgentStore:
     ) -> dict[str, Any]:
         """Rebuild and persist the current AgentProfile snapshot."""
 
+        with self._conn() as conn:
+            return self._refresh_agent_profile_in_conn(
+                conn,
+                agent_id,
+                runtime=runtime,
+                owner_account_id=owner_account_id,
+            )
+
+    def _refresh_agent_profile_in_conn(
+        self,
+        conn: sqlite3.Connection,
+        agent_id: str,
+        *,
+        runtime: dict[str, Any] | None = None,
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        """Rebuild one AgentProfile using the caller's transaction."""
+
         from crew.team.formation import build_agent_profile
 
-        agent = self.get_agent(agent_id, owner_account_id=owner_account_id)
-        runtime_payload = runtime or self.get_runtime(str(agent.get("runtime_id") or ""))
-        profile = build_agent_profile(agent, runtime=runtime_payload).to_dict()
+        row = conn.execute(
+            "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
+            (agent_id, owner_account_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(agent_id)
+        agent = self._agent_dict(row)
+        runtime_payload = runtime
+        if runtime_payload is None:
+            runtime_row = conn.execute(
+                "SELECT * FROM external_runtime WHERE id = ?",
+                (str(agent.get("runtime_id") or ""),),
+            ).fetchone()
+            if runtime_row is None:
+                raise KeyError(str(agent.get("runtime_id") or ""))
+            runtime_payload = self._runtime_dict(runtime_row)
+        observation_rows = conn.execute(
+            """
+            SELECT *
+            FROM external_agent_profile_observation
+            WHERE owner_account_id = ? AND external_agent_id = ?
+            ORDER BY observed_at ASC, id ASC
+            """,
+            (owner_account_id, agent_id),
+        ).fetchall()
+        observations = [self._profile_observation_dict(item) for item in observation_rows]
+        profile = build_agent_profile(
+            agent,
+            runtime=runtime_payload,
+            observations=observations,
+        ).to_dict()
         if agent.get("profile") == profile:
             return agent
         now = _now()
+        conn.execute(
+            """
+            UPDATE external_agent
+            SET profile_json = ?, profile_version = ?, profile_updated_at = ?, updated_at = ?
+            WHERE id = ? AND owner_account_id = ?
+            """,
+            (
+                json.dumps(profile, ensure_ascii=False),
+                int(profile.get("version") or 1),
+                now,
+                now,
+                agent_id,
+                owner_account_id,
+            ),
+        )
+        refreshed = conn.execute(
+            "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
+            (agent_id, owner_account_id),
+        ).fetchone()
+        if refreshed is None:
+            raise KeyError(agent_id)
+        return self._agent_dict(refreshed)
+
+    def record_agent_profile_observation(
+        self,
+        *,
+        owner_account_id: str = "",
+        external_agent_id: str,
+        source_run_id: str,
+        source_node_id: str,
+        source_attempt_id: str,
+        capabilities: list[str],
+        assessment_source: str,
+        outcome: str,
+        quality_weight: float,
+        failure_kind: str = "",
+        observed_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Insert one final execution fact and atomically refresh its AgentProfile."""
+
+        agent_id = str(external_agent_id or "").strip()
+        attempt_id = str(source_attempt_id or "").strip()
+        normalized_capabilities = normalize_capabilities(capabilities)
+        normalized_outcome = str(outcome or "").strip().lower()
+        normalized_source = str(assessment_source or "").strip().lower()
+        if not agent_id or not attempt_id:
+            raise ValueError("external_agent_id 和 source_attempt_id 不能为空")
+        if not normalized_capabilities:
+            raise ValueError("capabilities 不能为空")
+        if normalized_outcome not in {"success", "revise", "failure", "neutral"}:
+            raise ValueError(f"不支持的 observation outcome: {outcome}")
+        if not normalized_source:
+            raise ValueError("assessment_source 不能为空")
+        try:
+            weight = max(0.0, min(float(quality_weight), 1.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("quality_weight 必须是 0 到 1 之间的数字") from exc
+        identity = f"{owner_account_id}\x1f{agent_id}\x1f{attempt_id}"
+        observation_id = f"profile_obs_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}"
+        now = _now()
+        observed = str(observed_at or now)
         with self._conn() as conn:
-            conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
                 """
-                UPDATE external_agent
-                SET profile_json = ?, profile_version = ?, profile_updated_at = ?, updated_at = ?
-                WHERE id = ?
+                INSERT OR IGNORE INTO external_agent_profile_observation (
+                  id, owner_account_id, external_agent_id,
+                  source_run_id, source_node_id, source_attempt_id,
+                  capabilities_json, assessment_source, outcome, quality_weight,
+                  failure_kind, observed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    json.dumps(profile, ensure_ascii=False),
-                    int(profile.get("version") or 1),
-                    now,
-                    now,
+                    observation_id,
+                    owner_account_id,
                     agent_id,
+                    str(source_run_id or ""),
+                    str(source_node_id or ""),
+                    attempt_id,
+                    json.dumps(normalized_capabilities, ensure_ascii=False),
+                    normalized_source,
+                    normalized_outcome,
+                    weight,
+                    str(failure_kind or "").strip().lower(),
+                    observed,
+                    now,
                 ),
             )
-        return self.get_agent(agent_id, owner_account_id=owner_account_id)
+            inserted = cursor.rowcount == 1
+            if inserted:
+                agent = self._refresh_agent_profile_in_conn(
+                    conn,
+                    agent_id,
+                    owner_account_id=owner_account_id,
+                )
+            else:
+                row = conn.execute(
+                    "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
+                    (agent_id, owner_account_id),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(agent_id)
+                agent = self._agent_dict(row)
+            observation = conn.execute(
+                """
+                SELECT * FROM external_agent_profile_observation
+                WHERE owner_account_id = ? AND external_agent_id = ? AND source_attempt_id = ?
+                """,
+                (owner_account_id, agent_id, attempt_id),
+            ).fetchone()
+        if observation is None:
+            raise RuntimeError("AgentProfile observation 写入失败")
+        return {
+            "inserted": inserted,
+            "observation": self._profile_observation_dict(observation),
+            "agent": agent,
+        }
+
+    def list_agent_profile_observations(
+        self,
+        external_agent_id: str,
+        *,
+        owner_account_id: str = "",
+    ) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM external_agent_profile_observation
+                WHERE owner_account_id = ? AND external_agent_id = ?
+                ORDER BY observed_at ASC, id ASC
+                """,
+                (owner_account_id, external_agent_id),
+            ).fetchall()
+        return [self._profile_observation_dict(row) for row in rows]
 
     def list_runtimes(self) -> list[dict[str, Any]]:
         with self._conn() as conn:
@@ -717,6 +909,13 @@ class ExternalAgentStore:
             ).fetchone()
             if used_by_team is not None:
                 raise ValueError("智能体已在团队中，暂不能删除")
+            conn.execute(
+                """
+                DELETE FROM external_agent_profile_observation
+                WHERE owner_account_id = ? AND external_agent_id = ?
+                """,
+                (owner_account_id, agent_id),
+            )
             conn.execute(
                 "DELETE FROM external_agent WHERE id = ? AND owner_account_id = ?",
                 (agent_id, owner_account_id),
@@ -1105,6 +1304,16 @@ class ExternalAgentStore:
             item["profile"] = json.loads(item.pop("profile_json") or "{}")
         except json.JSONDecodeError:
             item["profile"] = {}
+        return item
+
+    @staticmethod
+    def _profile_observation_dict(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        try:
+            item["capabilities"] = json.loads(item.pop("capabilities_json") or "[]")
+        except json.JSONDecodeError:
+            item["capabilities"] = []
+        item["quality_weight"] = float(item.get("quality_weight") or 0.0)
         return item
 
     @staticmethod

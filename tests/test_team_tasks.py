@@ -26,9 +26,11 @@ from crew.tasks.runtime import TaskRuntime
 from crew.tasks.task_manager import InMemoryTaskManager, LegacyTaskManagerAdapter
 from crew.agent.executor import BuiltinExecutor
 from crew.agent.executor.external import AcpExecutor
+from crew.agent.external.store import ExternalAgentStore
 from crew.core.runctx import current_agent_id
 from crew.team.team_manager import (
     InProcessTeamManager,
+    NodeExecutionAssessment,
     _join_stream_fragments,
     _normalize_legacy_chunked_thinking,
 )
@@ -1088,6 +1090,131 @@ def test_leader_review_revise_reopens_member_then_approve_releases_review():
     assert approved["action"] == "approve"
     assert review.status == "completed"
     assert InProcessTeamManager._node_ready(plan, summary) is True
+
+
+def test_external_agent_profile_observation_uses_final_leader_review_attempt(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "profile-runtime",
+        "provider": "custom",
+        "name": "Profile Runtime",
+        "executable_path": "/bin/sh",
+    })
+    agent = store.create_agent(
+        owner_account_id="owner-a",
+        name="Worker A",
+        runtime_id=runtime["id"],
+    )
+    external_team = store.create_team(
+        owner_account_id="owner-a",
+        name="Profile Team",
+        leader_agent_id=CREW_BUILTIN_AGENT_ID,
+        members=[
+            {"agent_id": CREW_BUILTIN_AGENT_ID, "role": "Leader"},
+            {"agent_id": agent["id"], "role": "负责实现"},
+        ],
+    )
+    baseline = agent["profile"]["capabilities"]["backend"]["score"]
+    tm, _ = _team(config=Config(max_iterations=3))
+    tm.external_store = store
+    team = tm._build_team(
+        "profile-review",
+        external_team_id=external_team["id"],
+        owner_account_id="owner-a",
+    )
+    tm._teams[tm._key("profile-review", "owner-a")] = team
+    member_id = next(iter(team.members))
+    plan = TeamPlan(team_session_id="profile-review", goal="实现接口")
+    builds = [
+        TeamPlanNode(
+            node_id=f"build-{index}",
+            title=f"实现接口 {index}",
+            assignee=member_id,
+            status="completed",
+            delegate_task_id=f"task-{index}-first",
+            metadata={"required_capabilities": ["backend"]},
+        )
+        for index in range(1, 4)
+    ]
+    review = TeamPlanNode(node_id="leader-review", title="Leader 审阅", assignee="leader")
+    plan.nodes = {node.node_id: node for node in [*builds, review]}
+    plan.edges = [TeamPlanEdge(parent_id=node.node_id, child_id=review.node_id) for node in builds]
+    tm._plans[tm._key(plan.team_session_id, "owner-a")] = plan
+
+    tm._apply_leader_review_decision(
+        plan,
+        review,
+        {"action": "revise", "target_node_id": builds[0].node_id, "message": "补齐错误处理"},
+        owner_account_id="owner-a",
+    )
+    builds[0].update(status="completed", delegate_task_id="task-1-second", result_summary="错误处理已补齐")
+    tm._apply_leader_review_decision(
+        plan,
+        review,
+        {"action": "approve", "message": "通过"},
+        owner_account_id="owner-a",
+    )
+
+    observations = store.list_agent_profile_observations(agent["id"], owner_account_id="owner-a")
+    by_attempt = {item["source_attempt_id"]: item for item in observations}
+    assert set(by_attempt) == {
+        "task-1-first",
+        "task-1-second",
+        "task-2-first",
+        "task-3-first",
+    }
+    assert by_attempt["task-1-first"]["outcome"] == "revise"
+    assert by_attempt["task-1-first"]["quality_weight"] == 0.5
+    assert all(by_attempt[attempt]["outcome"] == "success" for attempt in set(by_attempt) - {"task-1-first"})
+    assert all(by_attempt[attempt]["quality_weight"] == 1.0 for attempt in set(by_attempt) - {"task-1-first"})
+    profile = store.get_agent(agent["id"], owner_account_id="owner-a")["profile"]
+    assert profile["capabilities"]["backend"]["score"] > baseline
+    assert any(
+        item["source"] == "execution_observation" and "samples=4" in item["value"]
+        for item in profile["capabilities"]["backend"]["evidence"]
+    )
+
+    tm._apply_leader_review_decision(
+        plan,
+        review,
+        {"action": "approve", "message": "重复消费"},
+        owner_account_id="owner-a",
+    )
+    assert len(store.list_agent_profile_observations(agent["id"], owner_account_id="owner-a")) == 4
+
+
+def test_agent_profile_execution_outcome_weights_material_evidence():
+    material_pass = NodeExecutionAssessment(
+        execution_status="completed",
+        acceptance_status="pass",
+        reason="有产物",
+        changed_file_count=1,
+    )
+    text_only_pass = NodeExecutionAssessment(
+        execution_status="completed",
+        acceptance_status="pass",
+        reason="文本结果",
+    )
+    acceptance_failure = NodeExecutionAssessment(
+        execution_status="completed",
+        acceptance_status="fail",
+        reason="验收失败",
+    )
+    runtime_failure = NodeExecutionAssessment(
+        execution_status="failed",
+        acceptance_status="unknown",
+        reason="运行时失败",
+        failed_tools=("terminal",),
+    )
+
+    assert InProcessTeamManager._profile_outcome_from_execution(material_pass) == ("success", 0.8, "")
+    assert InProcessTeamManager._profile_outcome_from_execution(text_only_pass) == ("success", 0.4, "")
+    assert InProcessTeamManager._profile_outcome_from_execution(acceptance_failure) == (
+        "failure",
+        0.8,
+        "acceptance",
+    )
+    assert InProcessTeamManager._profile_outcome_from_execution(runtime_failure) == ("neutral", 0.0, "tool")
 
 
 def test_leader_review_revise_infers_target_from_multi_parent_feedback():
