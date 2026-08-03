@@ -1,7 +1,7 @@
 """MCP Server：把 Crew 的会话能力对外暴露成 MCP tools。
 
 让任何标准 MCP 客户端都能列会话、读历史、发消息。
-用官方 FastMCP + @mcp.tool()。
+用官方 MCPServer + @mcp.tool()。
 
 运行：``crew mcp serve``（stdio）。
 """
@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from crew import __version__
 from crew.app import CrewApp
 from crew.core.envelope import Envelope
 from crew.state.logging import get_logger
@@ -30,10 +31,10 @@ def _require_owner(owner_account_id: str) -> str:
 
 
 def build_mcp_server(crew: CrewApp) -> Any:
-    """构建并返回 FastMCP server。未安装 mcp 包则抛 ImportError。"""
-    from mcp.server.fastmcp import FastMCP
+    """构建并返回 MCPServer。未安装 mcp 包则抛 ImportError。"""
+    from mcp.server import MCPServer
 
-    mcp = FastMCP("crew")
+    mcp = MCPServer("crew", version=__version__)
 
     @mcp.tool()
     async def sessions_list(owner_account_id: str, workspace_id: str | None = None) -> str:
@@ -131,7 +132,7 @@ def build_mcp_server(crew: CrewApp) -> Any:
         return json.dumps(result, ensure_ascii=False)
 
     @mcp.tool()
-    def team_plan_create(
+    async def team_plan_create(
         session_id: str,
         owner_account_id: str,
         goal: str,
@@ -160,7 +161,7 @@ def build_mcp_server(crew: CrewApp) -> Any:
         return json.dumps(result, ensure_ascii=False)
 
     @mcp.tool()
-    def team_plan_read(session_id: str, owner_account_id: str) -> str:
+    async def team_plan_read(session_id: str, owner_account_id: str) -> str:
         """Read the current TeamPlan for a Crew team session. Returns JSON."""
         if crew.team is None:
             return json.dumps({"ok": False, "error": "Team 模式未启用"}, ensure_ascii=False)
@@ -174,7 +175,7 @@ def build_mcp_server(crew: CrewApp) -> Any:
         return json.dumps(result, ensure_ascii=False)
 
     @mcp.tool()
-    def team_plan_update(
+    async def team_plan_update(
         session_id: str,
         owner_account_id: str,
         node_id: str,
@@ -239,7 +240,7 @@ def build_interaction_mcp_server(
     team_role: str = "",
 ) -> Any:
     """按服务端 Binding 场景构建最小 External Interaction MCP 工具面。"""
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server import MCPServer
 
     if not gateway_url or not token:
         raise ValueError("interaction proxy 缺少 Gateway URL 或交互令牌")
@@ -248,7 +249,7 @@ def build_interaction_mcp_server(
     if context_type == "team" and team_role not in {"leader", "member"}:
         raise ValueError(f"未知 team role: {team_role or '<empty>'}")
 
-    mcp = FastMCP("crew-interaction")
+    mcp = MCPServer("crew-interaction", version=__version__)
 
     if context_type == "standalone" or team_role == "leader":
         @mcp.tool()

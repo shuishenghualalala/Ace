@@ -2,13 +2,14 @@
 
 agent 即可像调内置工具一样调用它们（工具名 ``{server}__{tool}``）。
 
-连接模型：每个 server 一个常驻 worker task，task 内打开传输 + ClientSession 并保持，
+连接模型：每个 server 一个常驻 worker task，task 内打开传输 + MCP 2 Client 并保持，
 然后从 asyncio.Queue 取 (tool_name, args, future)，在**本 task** 内 call_tool 后回填 future。
 工具 handler 只负责入队 + await future——所有 session I/O 都在持有它的 task 里，
 单事件循环下正确，且避免 Crew 那套专用事件循环/跨 loop 编组（其 mcp_tool.py 达 3915 行）。
 
-仅复用 MCP SDK 的调用范式（stdio_client / streamablehttp_client / sse_client +
-ClientSession.initialize/list_tools/call_tool）。OAuth / 自动重试一律不做；生命周期采用有界预算。
+仅复用 MCP SDK 的调用范式（stdio_client / streamable_http_client / sse_client +
+Client.list_tools/call_tool）。Client 使用 ``mode="auto"``，优先协商 MCP 2 的现代协议，
+并自动回退旧服务端。OAuth / 自动重试一律不做；生命周期采用有界预算。
 未安装 mcp 包或连接失败 → 跳过该 server，不影响主流程。
 """
 
@@ -25,8 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from crew.tools.registry import Registry, tool_error
+from crew.core.errors import ToolError
 from crew.state.logging import get_logger
+from crew.tools.registry import Registry, tool_error
 
 log = get_logger("tools.mcp")
 
@@ -94,15 +96,13 @@ def _resolve_junction(path: str) -> str:
             except (OSError, ValueError):
                 break  # 父目录也不是 junction，current 即真实路径
             # 父目录是 junction：用 target 替换父目录，重新拼 current 继续穿透
-            if parent_target.startswith("\\\\?\\"):
-                parent_target = parent_target[4:]
+            parent_target = parent_target.removeprefix("\\\\?\\")
             if not os.path.isabs(parent_target):
                 parent_target = os.path.join(os.path.dirname(parent), parent_target)
             current = os.path.normpath(os.path.join(parent_target, os.path.basename(current)))
             continue
         # current 本身是 junction
-        if target.startswith("\\\\?\\"):
-            target = target[4:]
+        target = target.removeprefix("\\\\?\\")
         if not os.path.isabs(target):
             target = os.path.join(os.path.dirname(current), target)
         current = os.path.normpath(target)
@@ -241,7 +241,7 @@ def _extract_text(result: Any) -> str:
                 text_parts.append(str(text))
 
     joined = "\n".join(text_parts)
-    if getattr(result, "isError", False):
+    if getattr(result, "is_error", False):
         return tool_error(joined or "MCP 工具返回错误")
 
     if not image_parts:
@@ -280,7 +280,7 @@ class _ServerWorker:
         self._closing = False
 
     async def _open(self, stack: AsyncExitStack):
-        from mcp import ClientSession, StdioServerParameters
+        from mcp import Client, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
         cfg = _resolve_paths(self.cfg)
@@ -289,32 +289,37 @@ class _ServerWorker:
             params = StdioServerParameters(
                 command=cfg["command"], args=cfg.get("args", []), env=child_env
             )
-            read, write = await stack.enter_async_context(stdio_client(params))
+            transport = stdio_client(params)
         elif cfg.get("url"):
-            transport = str(cfg.get("transport") or "http").lower()
-            if transport == "sse":
+            transport_name = str(cfg.get("transport") or "http").lower()
+            if transport_name == "sse":
                 from mcp.client.sse import sse_client
 
-                read, write = await stack.enter_async_context(
-                    sse_client(cfg["url"], headers=cfg.get("headers"))
-                )
+                transport = sse_client(cfg["url"], headers=cfg.get("headers"))
             else:
-                from mcp.client.streamable_http import streamablehttp_client
+                import httpx2
+                from mcp.client.streamable_http import streamable_http_client
 
-                read, write, _ = await stack.enter_async_context(
-                    streamablehttp_client(cfg["url"], headers=cfg.get("headers"))
+                http_client = await stack.enter_async_context(
+                    httpx2.AsyncClient(
+                        headers=cfg.get("headers"),
+                        timeout=httpx2.Timeout(30.0, read=300.0),
+                        follow_redirects=True,
+                    )
+                )
+                transport = streamable_http_client(
+                    cfg["url"],
+                    http_client=http_client,
                 )
         else:
             raise ValueError("MCP server 配置需要 'command'（stdio）或 'url'（http/sse）")
 
-        session = await stack.enter_async_context(ClientSession(read, write))
-        return session
+        return await stack.enter_async_context(Client(transport, mode="auto"))
 
     async def _run(self) -> None:
         try:
             async with AsyncExitStack() as stack:
                 session = await self._open(stack)
-                await session.initialize()
                 resp = await session.list_tools()
                 self._tools = list(resp.tools)
                 self._ready.set()
@@ -337,7 +342,15 @@ class _ServerWorker:
                     try:
                         async with asyncio.timeout_at(request.deadline):
                             result = await session.call_tool(request.tool_name, request.args or {})
-                        self._complete(request, _extract_text(result))
+                        extracted = _extract_text(result)
+                        if getattr(result, "is_error", False):
+                            try:
+                                message = str(json.loads(extracted).get("error") or extracted)
+                            except (AttributeError, json.JSONDecodeError):
+                                message = extracted
+                            self._fail(request, message)
+                        else:
+                            self._complete(request, extracted)
                     except TimeoutError:
                         self._complete(
                             request,
@@ -352,7 +365,7 @@ class _ServerWorker:
                         # CancelledError 会直接离开本层；保留 current 给外层 finally 完成 Future。
                         if request.future.done():
                             self._current = None
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._error = exc
             # 打完整 traceback 到日志，便于定位连接失败根因（如 WinError 448
             # 不受信任挂载点——需看调用栈确认是 which/resolve/open_process 哪步抛的）。
@@ -380,6 +393,12 @@ class _ServerWorker:
         if not request.future.done():
             request.future.set_result(result)
 
+    @staticmethod
+    def _fail(request: _CallRequest, message: str) -> None:
+        """把远端 MCP 错误保留为 Crew ToolResult.is_error，而非成功文本。"""
+        if not request.future.done():
+            request.future.set_exception(ToolError(message))
+
     def _drain_queue(self, reason: str) -> None:
         """完成所有尚未执行的排队请求，明确保证远端未被调用。"""
         while True:
@@ -396,7 +415,7 @@ class _ServerWorker:
             schema = {
                 "name": qualified,
                 "description": getattr(tool, "description", "") or "",
-                "parameters": getattr(tool, "inputSchema", None) or {"type": "object", "properties": {}},
+                "parameters": getattr(tool, "input_schema", None) or {"type": "object", "properties": {}},
             }
             self.registry.register(
                 name=qualified,
@@ -428,7 +447,12 @@ class _ServerWorker:
     # _run() task 内或 start()/stop()（由 manager 在同一 loop 串行调度）中改写。
     @property
     def is_connected(self) -> bool:
-        return self._task is not None and not self._task.done() and self._error is None
+        return (
+            self._task is not None
+            and not self._task.done()
+            and self._ready.is_set()
+            and self._error is None
+        )
 
     @property
     def error(self) -> str:
@@ -519,7 +543,7 @@ class _ServerWorker:
                 await task
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("关闭 MCP server %s 异常", self.name)
         self._task = None
         self._drain_queue(f"MCP server {self.name} 正在关闭")
@@ -588,14 +612,14 @@ class MCPClientManager:
             return
         try:
             await asyncio.wait_for(self._start_task, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("等待 MCP 后台启动超时，取消剩余连接任务")
             self._start_task.cancel()
             try:
                 await self._start_task
             except asyncio.CancelledError:
                 pass
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("等待 MCP 后台启动结束异常")
         self._start_task = None
 
@@ -651,7 +675,7 @@ class MCPClientManager:
                     await self._start_task
             except (TimeoutError, asyncio.CancelledError):
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("取消 MCP 后台启动异常")
             self._start_task = None
 
@@ -726,20 +750,28 @@ class MCPClientManager:
         若已存在同名 worker，返回 False（调用方应先 remove 或 reload）。
         start() 未就绪（registry 未注入或后台 start 未完成）时拒绝并返回 False。
         """
-        if self._registry is None:
+        if self._registry is None or self._closing:
             return False
         # 等后台初始 start 跑完，避免与 _start_blocking 同时写 _workers / _config。
         await self.await_started()
+        if self._closing:
+            return False
         if self._worker_for(name) is not None:
             return False
         self._config[name] = dict(cfg)
-        worker = _ServerWorker(name, cfg, self._registry)
+        worker = _ServerWorker(
+            name,
+            cfg,
+            self._registry,
+            queue_capacity=self._queue_capacity,
+            call_timeout=self._call_timeout,
+            startup_timeout=self._startup_timeout,
+        )
+        # 启动前登记，确保并发 aclose() 能发现并关闭尚在握手的 worker。
+        self._workers.append(worker)
         try:
-            if await worker.start():
-                self._workers.append(worker)
-                return True
-            return False
-        except Exception:  # noqa: BLE001
+            return bool(await worker.start())
+        except Exception:
             log.exception("新增 MCP server %s 启动异常", name)
             return False
 
@@ -771,9 +803,11 @@ class MCPClientManager:
         停掉旧 worker（注销工具）→ 用新 cfg 起新 worker（注册工具）。
         其他 server 不受影响。配置里不存在该 name 返回 False。
         """
-        if self._registry is None:
+        if self._registry is None or self._closing:
             return False
         await self.await_started()
+        if self._closing:
+            return False
         if cfg is not None:
             self._config[name] = dict(cfg)
         if name not in self._config:
@@ -783,12 +817,21 @@ class MCPClientManager:
             old._unregister_tools()
             await old.stop()
             self._workers = [w for w in self._workers if w.name != name]
-        worker = _ServerWorker(name, self._config[name], self._registry)
-        try:
-            if await worker.start():
-                self._workers.append(worker)
-                return True
+        # aclose() 可能在等待旧 worker 关闭期间开始；此时不得再创建新连接。
+        if self._closing:
             return False
-        except Exception:  # noqa: BLE001
+        worker = _ServerWorker(
+            name,
+            self._config[name],
+            self._registry,
+            queue_capacity=self._queue_capacity,
+            call_timeout=self._call_timeout,
+            startup_timeout=self._startup_timeout,
+        )
+        # 与 add_server 一致，避免后台重连与 manager 关闭竞态泄漏 MCP 协程。
+        self._workers.append(worker)
+        try:
+            return bool(await worker.start())
+        except Exception:
             log.exception("重连 MCP server %s 异常", name)
             return False

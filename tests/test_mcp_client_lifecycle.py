@@ -22,9 +22,6 @@ class _FakeSession:
         self.call_started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def initialize(self) -> None:
-        return None
-
     async def list_tools(self) -> SimpleNamespace:
         return SimpleNamespace(tools=[])
 
@@ -32,7 +29,7 @@ class _FakeSession:
         self.calls.append(name)
         self.call_started.set()
         await self.release.wait()
-        return SimpleNamespace(content=[SimpleNamespace(text=name)], isError=False)
+        return SimpleNamespace(content=[SimpleNamespace(text=name)], is_error=False)
 
 
 async def _started_worker(

@@ -19,13 +19,12 @@ from crew.core.types import Message, ToolCall
 from crew.tools.mcp_client import _extract_text
 from crew.tools.registry import Registry
 
-
 # ---------------------------------------------------------------------------
 # _extract_text 单元测试
 # ---------------------------------------------------------------------------
 
 def _make_result(*blocks: Any, is_error: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(content=list(blocks), isError=is_error)
+    return SimpleNamespace(content=list(blocks), is_error=is_error)
 
 
 def _text_block(text: str) -> SimpleNamespace:
@@ -33,7 +32,7 @@ def _text_block(text: str) -> SimpleNamespace:
 
 
 def _image_block(data: str, mime_type: str = "image/png") -> SimpleNamespace:
-    return SimpleNamespace(type="image", data=data, mimeType=mime_type)
+    return SimpleNamespace(type="image", data=data, mime_type=mime_type)
 
 
 def test_extract_text_plain_still_returns_text():
@@ -76,7 +75,7 @@ def test_extract_text_dict_blocks_are_tolerated():
     """某些 transport 可能把 block 序列化为 dict，需兼容。"""
     result = SimpleNamespace(
         content=[{"type": "text", "text": "hi"}, {"type": "image", "data": "x", "mimeType": "image/png"}],
-        isError=False,
+        is_error=False,
     )
     out = json.loads(_extract_text(result))
     assert out["text"] == "hi"
