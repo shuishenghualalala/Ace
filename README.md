@@ -19,9 +19,13 @@
 
 早上打开 Crew，跟 Agent 说"帮我把下载文件夹按日期整理"，它直接动手。Wiki 里存着上周的会议纪要，Agent 能随时检索引用。想写一个需求文档？拉上 Explore Agent 做调研、Plan Agent 拆任务、Wiki Agent 归档，你只需要审核——Team 模式让多个 Agent 像真实团队一样并行协作。
 
-<img src="assets/screenshot_web.png" alt="Crew Web UI" width="700">
+<div align="center">
+  <img src="assets/screenshot_web.png" alt="Crew Web UI" width="700">
+</div>
 
-<img src="assets/screenshot_desktop.png" alt="Crew Web UI" width="700">
+<div align="center">
+  <img src="assets/screenshot_desktop.png" alt="Crew Desktop UI" width="700">
+</div>
 
 > [!NOTE]
 > 发布状态：源码预览版。接口和数据格式不承诺稳定，暂不建议直接用于关键生产环境。
@@ -383,6 +387,3 @@ pytest -m e2e
   </a>
 </p>
 
-<p align="center">
-  Made with 🦞 by <a href="https://github.com/shuishenghualalala">@shuishenghualalala</a> and contributors
-</p>
