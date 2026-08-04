@@ -100,6 +100,7 @@ class WikiConfig:
 
     enabled: bool = True          # 是否启用 Wiki 与相关 API
     model: str = ""               # 编译/摘要使用的模型档案 id（llm.models 下的 key）；空 = 跟随主模型
+    capture_attachments: bool = True  # 聊天附件上传后是否自动收入 default 知识库
     storage: WikiStorageConfig = field(default_factory=WikiStorageConfig)
     ingest: WikiIngestConfig = field(default_factory=WikiIngestConfig)
     multimodal: WikiMultimodalConfig = field(default_factory=WikiMultimodalConfig)
@@ -123,6 +124,7 @@ class WikiConfig:
         return cls(
             enabled=_bool(raw.get("enabled"), True),
             model=str(raw.get("model") or "").strip(),
+            capture_attachments=_bool(raw.get("capture_attachments"), True),
             storage=WikiStorageConfig.from_raw(storage_raw),
             ingest=WikiIngestConfig.from_raw(ingest_raw),
             multimodal=WikiMultimodalConfig.from_raw(mm_raw) if isinstance(mm_raw, dict) else WikiMultimodalConfig(),

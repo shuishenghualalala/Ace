@@ -180,6 +180,10 @@ access_control:
     disabled_skills: ["browser-use"]   # browser-use skill 依赖内置浏览器；external 的 browser toolset 已在 disabled_toolsets 里禁用，避免展示无法使用的“死 skill”
 
 wiki:
+  # 聊天中上传的附件是否自动收入 default 知识库。
+  # true（默认）：保存原文件并解析成 markdown（不做 LLM 深度整理）；
+  # 图片/视频是否自动理解并 ingest 由 wiki.multimodal 配置决定。
+  capture_attachments: true
   ingest:
     # 是否在深度整理计划生成成功后自动应用计划。
     # true（默认）：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
