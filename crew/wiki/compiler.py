@@ -188,7 +188,10 @@ _SHORT_SOURCE_THRESHOLD = 1_000
 _LONG_SOURCE_ENTITY_LIMIT = 5
 _LONG_SOURCE_TOPIC_LIMIT = 3
 _SHORT_SOURCE_ENTITY_LIMIT = 3
-_ANALYSIS_MAX_TOKENS = 2_500
+# 推理型模型（如 deepseek-v4 系列）会先烧掉一笔不可见的推理 token，2500 的
+# 上限会让正文一个字都吐不出来（实测空返回）；8000 只是上限而非目标，
+# 非推理模型不受影响。
+_ANALYSIS_MAX_TOKENS = 20_000
 
 
 def _split_into_semantic_chunks(content: str, max_size: int = _CHUNK_SIZE_CHARS) -> list[str]:

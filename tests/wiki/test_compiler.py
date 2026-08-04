@@ -16,6 +16,7 @@ import pytest
 from crew.core.mocks import FakeProvider
 from crew.core.types import ChatResponse
 from crew.wiki.compiler import WikiCompiler
+from crew.wiki import compiler as compiler_mod
 from crew.wiki.schemas import RawSource, WikiPage
 from crew.wiki.store import FileSystemWikiStore
 
@@ -906,7 +907,7 @@ async def test_analyze_chunk_uses_compact_output_budget(monkeypatch, compiler):
     assert result["format"] == "knowledge-units-v7"
     assert result["entities"] == []
     assert result["topics"] == []
-    assert chat.await_args.kwargs["max_tokens"] == 2_500
+    assert chat.await_args.kwargs["max_tokens"] == compiler_mod._ANALYSIS_MAX_TOKENS
 
 
 @pytest.mark.asyncio
