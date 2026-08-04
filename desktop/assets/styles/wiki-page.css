@@ -90,6 +90,15 @@
 .wiki-view-tabs {
   margin: 8px 8px 0;
   flex-shrink: 0;
+  /* 目录窄栏（240px）内四个标签等分拉伸，避免「图谱」被挤出 */
+  display: flex;
+}
+
+.wiki-view-tabs .hub-segment__item {
+  flex: 1 1 0;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 6px;
 }
 
 .wiki-list-scroll {

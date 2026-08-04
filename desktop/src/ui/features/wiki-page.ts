@@ -566,9 +566,9 @@ export function bindPaneSash(
 
 const WIKI_BROWSER_DEFAULT_WIDTH = 500;
 /** 右侧知识库面板（目录+详情）宽度：可拖拽 + 持久化。 */
-const browserWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiBrowserWidth.v1', min: 340, max: 1000, vwFactor: 0.7 });
+const browserWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiBrowserWidth.v2', min: 340, max: 1000, vwFactor: 0.7 });
 /** 图谱视图下面板宽度（仅图谱视图）：null = 沿用 browserWidth；拖拽后固定为像素值并持久化，双击复位。 */
-const graphWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphWidth.v1', min: 280, vwFactor: 0.7 });
+const graphWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphWidth.v2', min: 280, vwFactor: 0.7 });
 
 let browserWidth = browserWidthStore.load() ?? WIKI_BROWSER_DEFAULT_WIDTH;
 let graphWidth: number | null = graphWidthStore.load();

@@ -1000,7 +1000,7 @@ export default function WikiHub({
         <div className="wiki-hub__empty">加载中…</div>
       ) : (
         <ResizablePanels
-          storageKey="wiki-hub-layout"
+          storageKey="wiki-hub-layout-v2"
           className="wiki-hub-layout__body"
         >
           {/* 对话为主区域（flexible，不传 defaultWidth），知识库目录+详情收进右侧扩展面板 */}
