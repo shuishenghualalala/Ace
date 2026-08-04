@@ -988,6 +988,17 @@ describe('Wiki Agent 对话面板（左对话 / 右知识库面板布局）', ()
 });
 
 describe('移植的纯逻辑（wikiTree）', () => {
+  it('buildFileTree 兼容旧版无 wiki/ 前缀的页面路径', () => {
+    const root = buildFileTree([
+      makePage({ id: 'legacy', title: '旧页面', file_path: 'entities/旧页面.md', page_type: 'entity' }),
+    ]);
+    const wiki = root.children[0];
+    if (wiki.kind !== 'folder') throw new Error('expected folder');
+    const entities = wiki.children.find((node) => node.kind === 'folder' && node.name === 'entities');
+    if (entities?.kind !== 'folder') throw new Error('expected entities folder');
+    expect(entities.children.map((node) => (node.kind === 'page' ? node.page.title : node.name))).toContain('旧页面');
+  });
+
   it('buildFileTree 只展示 Wiki Vault，并预置来源类型与根文档', () => {
     const root = buildFileTree([
       makePage({ id: 'p1', title: '论文', file_path: 'wiki/sources/pdfs/论文.md', page_type: 'source' }),

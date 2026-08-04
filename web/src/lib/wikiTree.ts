@@ -45,6 +45,23 @@ const FOLDER_ORDER = new Map<string, number>(
   VISIBLE_VAULT_FOLDERS.map((path, index) => [path, index]),
 );
 
+const VAULT_PAGE_DIRS = new Set(["entities", "topics", "sources", "comparisons", "synthesis"]);
+
+/**
+ * 归一化 Vault 相对路径：旧版种子/历史页面的 file_path 可能没有 wiki/ 前缀
+ * （如 entities/xxx.md），统一补成 wiki/ 前缀，保证文件树能识别。
+ */
+export function normalizeVaultPath(filePath: string): string {
+  const parts = (filePath || "")
+    .split("/")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length > 0 && parts[0] !== "wiki" && VAULT_PAGE_DIRS.has(parts[0])) {
+    return ["wiki", ...parts].join("/");
+  }
+  return parts.join("/");
+}
+
 const TYPE_ORDER: Record<WikiPageType, number> = {
   entity: 0,
   topic: 1,
@@ -81,10 +98,7 @@ export function buildFileTree(pages: WikiPage[]): WikiTreeFolder {
   );
 
   for (const page of pages) {
-    const parts = (page.file_path || "")
-      .split("/")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const parts = normalizeVaultPath(page.file_path).split("/").filter(Boolean);
     if (parts[0] !== "wiki") continue;
     let current = root;
 
@@ -142,10 +156,7 @@ function sortTree(node: WikiTreeFolder): void {
 }
 
 export function ancestorPaths(filePath: string): string[] {
-  const parts = (filePath || "")
-    .split("/")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const parts = normalizeVaultPath(filePath).split("/").filter(Boolean);
   const paths: string[] = [];
   for (let i = 1; i < parts.length; i++) {
     paths.push(parts.slice(0, i).join("/"));
