@@ -90,7 +90,7 @@ async def _capture(
         await _capture_media(store, compiler, config, raw, source_type, owner_account_id, kb_id)
         return raw
 
-    await _capture_document(store, raw, content, filename, owner_account_id, kb_id)
+    await _capture_document(store, compiler, raw, content, filename, owner_account_id, kb_id)
     return raw
 
 
@@ -145,13 +145,14 @@ async def _capture_media(
 
 async def _capture_document(
     store,
+    compiler,
     raw: RawSource,
     content: bytes,
     filename: str,
     owner_account_id: str,
     kb_id: str,
 ) -> None:
-    """文档/文本：解析成 markdown 保存，不做 LLM 深度整理。"""
+    """文档/文本：解析成 markdown 保存并发布全文来源页（不做 LLM 深度整理）。"""
     try:
         # 解析是 CPU 密集型同步调用，丢线程池避免阻塞事件循环。
         text = await asyncio.to_thread(parse_document_from_bytes, content, filename)
@@ -171,3 +172,12 @@ async def _capture_document(
     raw.parsed_path = store.save_parsed_markdown(raw.id, text, owner_account_id, kb_id)
     raw.parse_status = "parsed"
     store.save_raw(raw, owner_account_id, kb_id)
+
+    # 发布来源页让附件在 Wiki 文件树「来源摘要」中可见：Wiki 树只渲染 page，
+    # 仅落 raw source 的附件在桌面端/ Web 端都无处可见。publish_source_page
+    # 不做 LLM 结构化分析，与 capture 的轻量定位一致；失败不阻断 capture。
+    if compiler is not None:
+        try:
+            compiler.publish_source_page(raw.id, owner_account_id, kb_id)
+        except Exception:  # noqa: BLE001
+            log.warning("聊天附件发布来源页失败 source=%s", raw.id, exc_info=True)

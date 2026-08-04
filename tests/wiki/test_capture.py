@@ -118,6 +118,36 @@ async def test_capture_skips_empty_content(store):
     assert store.list_raws("A:uid-a", "default") == []
 
 
+async def test_capture_document_publishes_source_page(store):
+    """文档解析成功后发布全文来源页：Wiki 树只渲染 page,仅落 raw source 不可见。"""
+    from crew.core.mocks import FakeProvider
+    from crew.wiki.compiler import WikiCompiler
+
+    compiler = WikiCompiler(store=store, provider=FakeProvider())
+    raw = await capture_upload_to_wiki(
+        store, compiler, WikiConfig(), "note.txt", b"hello wiki", owner_account_id="A:uid-a"
+    )
+    assert raw is not None
+    assert raw.parse_status == "parsed"
+
+    page = store.get_source_page(raw.id, "A:uid-a", "default")
+    assert page is not None
+    assert page.page_type == "source"
+    assert "hello wiki" in page.content
+
+
+async def test_capture_document_publish_failure_does_not_break_capture(store):
+    """来源页发布失败不影响 capture 主链路：raw 仍为 parsed。"""
+    compiler = SimpleNamespace(
+        publish_source_page=Mock(side_effect=RuntimeError("index broken"))
+    )
+    raw = await capture_upload_to_wiki(
+        store, compiler, WikiConfig(), "note.txt", b"hello wiki", owner_account_id="A:uid-a"
+    )
+    assert raw is not None
+    assert raw.parse_status == "parsed"
+
+
 async def test_capture_never_raises(store, monkeypatch):
     """底层异常（如磁盘错误）被吞掉并返回 None，不影响上传主链路。"""
     monkeypatch.setattr(store, "_source_dir", Mock(side_effect=RuntimeError("disk full")))
