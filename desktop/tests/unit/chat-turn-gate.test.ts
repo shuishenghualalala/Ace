@@ -24,7 +24,10 @@ vi.mock('../../src/ui/features/workspaces', () => ({
   getSessionAgentDisplay: vi.fn(() => null),
 }));
 
-vi.mock('../../src/ui/features/running-intro', () => ({ syncRunningIntroSlot: vi.fn() }));
+vi.mock('../../src/ui/features/running-intro', () => ({
+  setContextCompactionActive: vi.fn(),
+  syncRunningIntroSlot: vi.fn(),
+}));
 vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
 vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));
 vi.mock('../../src/ui/features/kanban-board', () => ({
@@ -137,6 +140,63 @@ describe('applyChunk turn identity gate', () => {
 
     expect(document.querySelector('.msg__fold-spinner')).toBe(spinner);
     expect(document.querySelector('.process-timeline__thinking')?.textContent).toBe('第一段思考第二段思考');
+  });
+
+  it('连续正文分片只更新正文并保留气泡、头像和模型信息节点', async () => {
+    vi.useFakeTimers();
+    openTurn('req-delta-stable');
+    patchBook('sid-1', { assistantId: 'turn-delta-stable' });
+    appendSessionMessage('sid-1', {
+      id: 'turn-delta-stable',
+      role: 'assistant',
+      content: '第一段正文',
+      model: 'deepseek-v4-flash-ark',
+      timestamp: Date.now(),
+      turnStartedAt: Date.now() - 1_000,
+      streaming: true,
+      segmentRole: 'answer',
+    });
+    renderChat();
+    const bubble = document.querySelector('.msg[data-streaming="true"]');
+    const avatar = bubble?.querySelector('.msg__avatar');
+    const model = bubble?.querySelector('.msg__meta');
+
+    applyChunk(chunk('delta', 'req-delta-stable', { text: '第二段正文' }));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(document.querySelector('.msg[data-streaming="true"]')).toBe(bubble);
+    expect(document.querySelector('.msg[data-streaming="true"] .msg__avatar')).toBe(avatar);
+    expect(document.querySelector('.msg[data-streaming="true"] .msg__meta')).toBe(model);
+    expect(document.querySelector('.msg__text')?.textContent).toContain('第二段正文');
+  });
+
+  it('流式 thinking 在内部滚动区位于底部时继续跟随新增内容', async () => {
+    vi.useFakeTimers();
+    openTurn('req-thinking-scroll');
+    patchBook('sid-1', { assistantId: 'turn-thinking-scroll' });
+    appendSessionMessage('sid-1', {
+      id: 'turn-thinking-scroll',
+      role: 'assistant',
+      content: '',
+      thinking: '第一段思考',
+      timestamp: Date.now(),
+      turnStartedAt: Date.now() - 1_000,
+      streaming: true,
+    });
+    renderChat();
+    const thinking = document.querySelector<HTMLElement>('.process-timeline__thinking')!;
+    Object.defineProperty(thinking, 'clientHeight', { configurable: true, value: 100 });
+    Object.defineProperty(thinking, 'scrollHeight', {
+      configurable: true,
+      get: () => (thinking.textContent?.length ?? 0) * 20,
+    });
+    thinking.scrollTop = thinking.scrollHeight - thinking.clientHeight;
+
+    applyChunk(chunk('thinking', 'req-thinking-scroll', { text: '第二段思考' }));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(thinking.textContent).toBe('第一段思考第二段思考');
+    expect(thinking.scrollTop).toBe(thinking.scrollHeight);
   });
 
   it('tool/generating 分片到达后立即渲染运行中时间线项（不等到 result）', () => {

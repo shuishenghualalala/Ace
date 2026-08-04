@@ -1496,37 +1496,6 @@ async def test_ready_tool_call_emits_visible_start_before_stream_continues():
     assert [c.body["tool_call_id"] for c in results] == ["r1"]
 
 
-async def test_reasoning_with_available_tools_emits_planning_status_first():
-    """模型只流 reasoning、尚未揭晓 tool_calls 时，先给 UI 可见反馈。"""
-    class ReasoningProvider:
-        async def stream_chat(self, messages, tools=None, **kwargs):
-            yield StreamChunk(reasoning_content="正在判断应使用哪个工具")
-            yield StreamChunk(delta_text="直接回答")
-            yield StreamChunk(done=True, finish_reason="stop")
-
-    executor = _executor(ReasoningProvider())
-    seq = 0
-
-    def next_seq():
-        nonlocal seq
-        seq += 1
-        return seq
-
-    tools = [{"type": "function", "function": {"name": "file_write", "parameters": {}}}]
-    chunks = [
-        c async for c in executor._call_model(
-            [Message.user("hi")], tools, "r", next_seq, {}, session_id="s",
-        )
-    ]
-    planning_idx = next(
-        i for i, c in enumerate(chunks)
-        if c.kind == "status" and c.body.get("activity") == "tool_planning"
-    )
-    thinking_idx = next(i for i, c in enumerate(chunks) if c.kind == "thinking")
-    assert chunks[planning_idx].body["message"] == "正在规划工具调用…"
-    assert planning_idx < thinking_idx
-
-
 async def test_unsafe_ready_tool_call_emits_visible_start_before_stream_continues():
     """unsafe 工具（file_write）ready 时也立即显示 start。
 

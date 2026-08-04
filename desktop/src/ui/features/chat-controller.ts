@@ -66,7 +66,7 @@ import { showFileOpenMenu } from './file-open-menu';
 import { openBrowserArtifact, openUserBrowser } from './browser-panel';
 import { shouldAutoOpenBrowserWorkbench } from './browser-auto-open';
 import { htmlArtifactPathFromHref, httpUrlFromHref } from '../artifact-links';
-import { syncRunningIntroSlot } from './running-intro';
+import { setContextCompactionActive, syncRunningIntroSlot } from './running-intro';
 import {
   applyBusyUi,
   discardEmptyOptimisticAssistant,
@@ -818,7 +818,11 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
   }
   const thinkingEl = turnEl.querySelector<HTMLElement>(`[data-thinking-for="${assistantId}"] .process-timeline__thinking`);
   if (thinkingEl && msg.thinking != null) {
+    const followThinkingOutput = (
+      thinkingEl.scrollHeight - thinkingEl.scrollTop - thinkingEl.clientHeight
+    ) <= 24;
     thinkingEl.textContent = msg.thinking;
+    if (followThinkingOutput) thinkingEl.scrollTop = thinkingEl.scrollHeight;
   }
   // 实时计时：以整回合 batch 为准（工具阶段可能无正文 data-text-for，但仍需刷新 label）。
   patchStreamingTurnLabel(sid, assistantId);
@@ -1666,6 +1670,13 @@ export function applyChunk(chunk: ChatChunk): void {
   if (state.suppressChunks.has(sid)) {
     logStream('apply-chunk', 'drop-suppressed', { sid, kind: chunk.kind });
     return;
+  }
+  if (chunk.kind === 'status') {
+    const body = (chunk.body ?? {}) as { activity?: string; active?: boolean };
+    if (body.activity === 'context_compaction') {
+      setContextCompactionActive(sid, body.active === true);
+      return;
+    }
   }
   if (chunk.kind === 'session_title') {
     const title = String((chunk.body as { title?: string })?.title || '').trim();

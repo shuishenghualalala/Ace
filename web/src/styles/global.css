@@ -2234,6 +2234,31 @@ button { font-family: inherit; cursor: pointer; }
   margin-left: 40px; /* 与 .msg__avatar(28px) + gap(12px) 对齐 */
 }
 .line-status { font-family: var(--sans); font-style: italic; }
+
+.context-compaction-notice {
+  --context-compaction-accent: #965858;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 20px 10px;
+  min-height: 28px;
+  color: var(--text, #252632);
+  font-size: 13px;
+  line-height: 1.45;
+  animation: context-compaction-in .22s ease-out;
+}
+.context-compaction-notice__logo { flex: 0 0 18px; color: var(--context-compaction-accent); animation: context-compaction-breathe 1.4s ease-in-out infinite; }
+.context-compaction-notice__logo .nav-agent-logo__blob { fill: color-mix(in srgb, var(--context-compaction-accent) 14%, transparent); stroke: currentColor; }
+.context-compaction-notice strong { flex: 0 0 auto; color: var(--context-compaction-accent); font-weight: 650; }
+.context-compaction-notice > span { min-width: 0; color: var(--muted, #737683); }
+@keyframes context-compaction-breathe { 50% { opacity: .55; transform: translateY(-1px); } }
+@keyframes context-compaction-in { from { opacity: 0; transform: translateY(5px); } }
+@media (prefers-reduced-motion: reduce) {
+  .context-compaction-notice, .context-compaction-notice__logo { animation: none; }
+}
+@media (prefers-color-scheme: dark) {
+  .context-compaction-notice { --context-compaction-accent: #c77b7b; }
+}
 .line-error {
   font-size: 13px; color: #a0703c;
   border: 1px solid #e8ddd0; background: #faf6f1; border-radius: 8px;

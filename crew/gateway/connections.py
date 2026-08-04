@@ -392,9 +392,6 @@ class ConnectionManager:
         if kind == "tool":
             body = payload.get("body") or {}
             return body.get("phase") in {"generating", "start"}
-        if kind == "status":
-            body = payload.get("body") or {}
-            return body.get("activity") == "tool_planning"
         return kind in {"followup_question", "plan_review"}
 
     async def push(self, session_id: str, chunk: Any, *, owner_account_id: str = "") -> None:

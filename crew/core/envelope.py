@@ -177,14 +177,15 @@ class ResponseChunk:
         return ResponseChunk(request_id, kind="status", body={"message": message}, sequence=sequence)
 
     @staticmethod
-    def tool_planning_event(request_id: str, sequence: int = 0) -> "ResponseChunk":
-        """模型已开始推理工具选择，但 provider 尚未给出具体 tool call。"""
+    def compaction_event(request_id: str, active: bool, sequence: int = 0) -> "ResponseChunk":
+        """上下文摘要的瞬时状态，供输入框上方提示条展示。"""
         return ResponseChunk(
             request_id,
             kind="status",
             body={
-                "message": "正在规划工具调用…",
-                "activity": "tool_planning",
+                "message": "正在压缩上下文" if active else "上下文压缩完成",
+                "activity": "context_compaction",
+                "active": active,
             },
             sequence=sequence,
         )
