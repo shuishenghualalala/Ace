@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 from urllib.parse import urljoin, urlparse
+import re
 
 import httpx
 from fastapi import APIRouter, Request
@@ -12,6 +13,9 @@ from fastapi.responses import JSONResponse
 from crew.gateway.auth import REMOTE_AUTH_COOKIE, account_from_request, create_remote_session_token
 
 _PLACEHOLDER_HOSTS = {"xxxxx", "xxxxx.example"}
+_EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
+)
 
 
 def _effective_mode(config: Any) -> str:
@@ -20,6 +24,8 @@ def _effective_mode(config: Any) -> str:
         return "remote"
     if bool(getattr(config, "gateway_dev_mode", False)):
         return "dev"
+    if mode == "email":
+        return "email"
     return "local"
 
 
@@ -101,7 +107,7 @@ def create_remote_auth_router(config: Any) -> APIRouter:
             "ok": True,
             "mode": mode,
             "configured": mode != "remote" or bool(_remote_base_url(config)),
-            "providerId": str(getattr(config, "auth_provider_id", "custom") or "custom"),
+            "providerId": "email" if mode == "email" else str(getattr(config, "auth_provider_id", "custom") or "custom"),
         }
 
     @router.get("/api/auth/session")
@@ -144,7 +150,8 @@ def create_remote_auth_router(config: Any) -> APIRouter:
 
     @router.post("/api/auth/login")
     async def login(request: Request) -> JSONResponse:
-        if _effective_mode(config) != "remote":
+        mode = _effective_mode(config)
+        if mode not in {"remote", "email"}:
             return JSONResponse(
                 {"ok": False, "error": "当前未启用远程认证"},
                 status_code=409,
@@ -153,6 +160,29 @@ def create_remote_auth_router(config: Any) -> APIRouter:
             body = await request.json()
         except ValueError:
             body = {}
+        if mode == "email":
+            email = str(body.get("email") or "").strip().lower() if isinstance(body, dict) else ""
+            if len(email) > 128 or not _EMAIL_RE.fullmatch(email):
+                return JSONResponse({"ok": False, "error": "请输入有效邮箱"}, status_code=400)
+            try:
+                token = create_remote_session_token(
+                    "email",
+                    email,
+                    ttl_seconds=int(getattr(config, "auth_session_ttl_seconds", 604800)),
+                )
+            except (ValueError, RuntimeError) as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+            response = JSONResponse({"ok": True, "user": {"userId": email, "email": email, "phoneNumber": ""}})
+            response.set_cookie(
+                REMOTE_AUTH_COOKIE,
+                token,
+                max_age=int(getattr(config, "auth_session_ttl_seconds", 604800)),
+                httponly=True,
+                samesite="strict",
+                secure=False,
+                path="/",
+            )
+            return response
         phone = str(body.get("phoneNumber") or "").strip() if isinstance(body, dict) else ""
         code = str(body.get("code") or "").strip() if isinstance(body, dict) else ""
         if not phone or len(phone) > 32 or not code or len(code) > 32:

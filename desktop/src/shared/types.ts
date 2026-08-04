@@ -38,11 +38,12 @@ export interface DesktopPrefs {
 export interface AuthUserSnapshot {
   userId: string;
   phoneNumber: string;
+  email?: string | undefined;
   displayName?: string | undefined;
 }
 
 export interface AuthStateSnapshot {
-  mode: 'unknown' | 'local' | 'remote' | 'dev';
+  mode: 'unknown' | 'local' | 'email' | 'remote' | 'dev';
   configured: boolean;
   providerId: string;
   isLoggedIn: boolean;

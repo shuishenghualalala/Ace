@@ -22,6 +22,41 @@ beforeEach(() => {
 });
 
 describe('DesktopAuthSession', () => {
+  it('logs into email mode and restores the encrypted tenant session', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/auth/config')) {
+        return new Response(JSON.stringify({ ok: true, mode: 'email', configured: true, providerId: 'email' }));
+      }
+      if (url.endsWith('/api/auth/login')) {
+        expect(init?.body).toBe(JSON.stringify({ email: 'tenant@example.com' }));
+        return new Response(JSON.stringify({
+          ok: true,
+          user: { userId: 'tenant@example.com', email: 'tenant@example.com', phoneNumber: '' },
+        }), { headers: { 'set-cookie': 'crew_auth_session=email-token; HttpOnly; SameSite=Strict' } });
+      }
+      if (url.endsWith('/api/auth/session')) {
+        return new Response(JSON.stringify({ ok: true, mode: 'email' }));
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const first = new DesktopAuthSession();
+    const initialState = await first.refreshConfig('http://127.0.0.1:8000');
+    expect(initialState.isLoggedIn).toBe(false);
+    expect(initialState.user).toBeNull();
+    expect(first.ownerAccountId()).toBeNull();
+    const login = await first.loginWithEmail('http://127.0.0.1:8000', 'tenant@example.com');
+    expect(login.ok).toBe(true);
+    expect(first.ownerAccountId()).toBe('email:tenant@example.com');
+
+    const restored = new DesktopAuthSession();
+    const state = await restored.refreshConfig('http://127.0.0.1:8000');
+    expect(state.isLoggedIn).toBe(true);
+    expect(state.user).toEqual({ userId: 'tenant@example.com', email: 'tenant@example.com', phoneNumber: '' });
+  });
+
   it('uses a signed gateway cookie and provider:userId owner without persisting phone in it', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);

@@ -17,6 +17,10 @@
     position: relative;
 }
 
+.user-info[hidden] {
+    display: none;
+}
+
 .user-info:hover {
     transform: translateY(-1px);
 }

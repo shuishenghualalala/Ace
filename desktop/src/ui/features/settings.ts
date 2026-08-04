@@ -328,6 +328,11 @@ function openSettingsModal(): void {
   void syncCloseBehaviorFromMain();
 }
 
+function openAccountPane(): void {
+  openSettingsModal();
+  setActivePane('account');
+}
+
 function closeSettingsModal(): void {
   const modal = document.getElementById('settings-modal');
   if (!modal) return;
@@ -582,7 +587,10 @@ function onSettingsPaneOpened(pane: string): void {
 }
 
 export function bindSettingsUi(): void {
-  $('#settings-btn')?.addEventListener('click', openSettingsModal);
+  $('#settings-btn')?.addEventListener('click', () => {
+    openSettingsModal();
+    setActivePane('general');
+  });
   document.getElementById('settings-modal-close')?.addEventListener('click', closeSettingsModal);
   document.getElementById('settings-modal')?.addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeSettingsModal();
@@ -594,6 +602,7 @@ export function bindSettingsUi(): void {
   bindControls();
   setActivePane('general');
   window.addEventListener('settings:open-projects', () => openProjectsPane());
+  window.addEventListener('user:open-account', () => openAccountPane());
   // 启动时应用持久化的设置
   applyAll();
   void syncAutoStartFromSystem();

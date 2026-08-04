@@ -1,0 +1,24 @@
+/* Inline this utility when Daimon host controls overlay the Widget's top-right corner. */
+:root {
+  --daimon-widget-host-safe-inline-end: 190px;
+  --daimon-widget-host-safe-block-start: 44px;
+}
+
+.kimi-host-safe-context {
+  container-type: inline-size;
+}
+
+.kimi-host-safe-header {
+  box-sizing: border-box;
+  min-block-size: var(--daimon-widget-host-safe-block-start, 44px);
+  padding-inline-end: var(--daimon-widget-host-safe-inline-end, 190px);
+}
+
+/* A narrow Widget moves semantic content below host chrome instead of squeezing it beside it. */
+@container (max-width: 419px) {
+  .kimi-host-safe-header {
+    min-block-size: 0;
+    padding-block-start: var(--daimon-widget-host-safe-block-start, 44px);
+    padding-inline-end: 0;
+  }
+}

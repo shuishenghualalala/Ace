@@ -63,7 +63,7 @@ async def test_mcp_tools_callable_when_mcp_installed(tmp_path, monkeypatch):
 
     crew = build_app(enable_team=False)
     mcp = build_mcp_server(crew)
-    # 直接调底层函数：FastMCP 把装饰前的原函数挂在 tool.func
+    # 直接检查 MCPServer 的工具注册表。
     tools = {t.name: t for t in await mcp.list_tools()} if hasattr(mcp, "list_tools") else {}
     # 行为兜底：即便拿不到 func，工具至少注册成功
     assert tools  # 至少注册了若干工具

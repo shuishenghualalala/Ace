@@ -57,7 +57,7 @@ RUN pip install --no-cache-dir \
     "websockets>=12.0" \
     "psutil>=5.9" \
     "apscheduler>=3.11.2" \
-    "mcp>=1.0" \
+    "mcp>=2.0,<3.0" \
     "httpx>=0.27,<1.0" \
     "requests>=2.34.2" \
     "wcmatch>=8.4" \
@@ -215,9 +215,9 @@ RUN mkdir -p /tmp/runtimes/python \
     && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir \
        requests lxml python-pptx openpyxl xlsxwriter beautifulsoup4 markdown charset-normalizer \
     && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir --no-deps markitdown \
-    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir "mcp==1.28.0" \
+    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir "mcp==2.0.0" \
     && ln -sf python3 /tmp/runtimes/python/bin/python \
-    && /tmp/runtimes/python/bin/python3 -c "from mcp.server.fastmcp import FastMCP; print('✓ mcp.server.fastmcp importable')" \
+    && /tmp/runtimes/python/bin/python3 -c "from mcp.server import MCPServer; print('✓ mcp.server.MCPServer importable')" \
     && echo "✓ Python ${BUNDLED_PYTHON_VERSION} standalone ready"
 
 # Node.js portable (npmmirror) — 与 Stage 1/2 同源

@@ -175,6 +175,16 @@ def test_gateway_restart_completes_pending_logout_before_readiness(api):
         assert crew.active_owner.pending_restart_logout() is None
 
 
+def test_login_required_mode_releases_legacy_local_owner_on_startup(api):
+    crew = api.state.crew
+    crew.config.auth_mode = "email"
+    crew.active_owner.claim("local")
+
+    with TestClient(api) as client:
+        assert client.get("/api/health").status_code == 200
+        assert crew.active_owner.current() is None
+
+
 def test_health_is_ready_while_business_requests_wait_for_deferred_startup(api):
     crew = api.state.crew
     startup_entered = threading.Event()

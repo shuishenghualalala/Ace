@@ -1,0 +1,44 @@
+[
+  {
+    "name": "CommentIcon",
+    "file": "Comment.svg",
+    "category": "chat",
+    "aliases": [
+      "comment",
+      "评论",
+      "留言"
+    ],
+    "use_for": [
+      "comment",
+      "reply",
+      "discussion"
+    ],
+    "avoid_for": [
+      "chat",
+      "message",
+      "note"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "Send_aIcon",
+    "file": "Send_a.svg",
+    "category": "chat",
+    "aliases": [
+      "send_a",
+      "发送"
+    ],
+    "use_for": [
+      "send message",
+      "submit"
+    ],
+    "avoid_for": [
+      "share",
+      "forward",
+      "export"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

@@ -69,7 +69,8 @@ desktop/scripts/pw-contract.mjs
 /crew-gateway.exe
 /crew-gateway.spec
 /crew-gateway-test.spec
-crew_*.deb
+*.deb
+*.dmg
 package-size-report-*.txt
 *.bundle
 *.zip
@@ -94,6 +95,3 @@ Thumbs.db
 
 # Local-only source trees
 /crew-tui/
-
-# doc
-/docs/

@@ -1,0 +1,58 @@
+[
+  {
+    "name": "ClipIcon",
+    "file": "Clip.svg",
+    "category": "input",
+    "aliases": [
+      "clip",
+      "回形针",
+      "附件"
+    ],
+    "use_for": [
+      "input related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "TranslateIcon",
+    "file": "Translate.svg",
+    "category": "input",
+    "aliases": [
+      "translate",
+      "翻译"
+    ],
+    "use_for": [
+      "input related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "UploadIcon",
+    "file": "Upload.svg",
+    "category": "input",
+    "aliases": [
+      "upload",
+      "上传"
+    ],
+    "use_for": [
+      "file upload",
+      "asset import",
+      "upload from local device"
+    ],
+    "avoid_for": [
+      "download",
+      "export",
+      "cloud sync"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

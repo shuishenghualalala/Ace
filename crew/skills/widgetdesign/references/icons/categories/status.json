@@ -1,0 +1,324 @@
+[
+  {
+    "name": "AllSelectedIcon",
+    "file": "AllSelected.svg",
+    "category": "status",
+    "aliases": [
+      "allselected",
+      "全选"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "BadIcon",
+    "file": "Bad.svg",
+    "category": "status",
+    "aliases": [
+      "bad",
+      "差评",
+      "不好"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CheckboxEmptyIcon",
+    "file": "CheckboxEmpty.svg",
+    "category": "status",
+    "aliases": [
+      "checkboxempty",
+      "空复选框",
+      "未勾选"
+    ],
+    "use_for": [
+      "multi-select",
+      "form checkbox"
+    ],
+    "avoid_for": [
+      "radio button",
+      "toggle switch"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CheckboxInIcon",
+    "file": "CheckboxIn.svg",
+    "category": "status",
+    "aliases": [
+      "checkboxin",
+      "复选框选中",
+      "已勾选"
+    ],
+    "use_for": [
+      "multi-select",
+      "form checkbox"
+    ],
+    "avoid_for": [
+      "radio button",
+      "toggle switch"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CompletedIcon",
+    "file": "Completed.svg",
+    "category": "status",
+    "aliases": [
+      "completed",
+      "完成",
+      "成功"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "ErrorIcon",
+    "file": "Error.svg",
+    "category": "status",
+    "aliases": [
+      "error",
+      "错误",
+      "失败"
+    ],
+    "use_for": [
+      "error state",
+      "failure",
+      "something went wrong"
+    ],
+    "avoid_for": [
+      "warning",
+      "caution",
+      "missing"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "InfoIcon",
+    "file": "Info.svg",
+    "category": "status",
+    "aliases": [
+      "info",
+      "信息",
+      "提示"
+    ],
+    "use_for": [
+      "information",
+      "help tip",
+      "details"
+    ],
+    "avoid_for": [
+      "warning",
+      "error",
+      "notification"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "LoadingDoneIcon",
+    "file": "LoadingDone.svg",
+    "category": "status",
+    "aliases": [
+      "loadingdone",
+      "加载完成"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "LoadingRightIcon",
+    "file": "LoadingRight.svg",
+    "category": "status",
+    "aliases": [
+      "loadingright",
+      "加载中",
+      "转圈"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "MultiSelectedIcon",
+    "file": "MultiSelected.svg",
+    "category": "status",
+    "aliases": [
+      "multiselected",
+      "多选"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "NormalIcon",
+    "file": "Normal.svg",
+    "category": "status",
+    "aliases": [
+      "normal",
+      "一般",
+      "普通"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "PauseIcon",
+    "file": "Pause.svg",
+    "category": "status",
+    "aliases": [
+      "pause",
+      "暂停"
+    ],
+    "use_for": [
+      "pause playback",
+      "pause process"
+    ],
+    "avoid_for": [
+      "stop",
+      "end",
+      "terminate"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "SafeIcon",
+    "file": "Safe.svg",
+    "category": "status",
+    "aliases": [
+      "safe",
+      "安全",
+      "保险箱"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "SelectIcon",
+    "file": "Select.svg",
+    "category": "status",
+    "aliases": [
+      "select",
+      "选择"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "SmileIcon",
+    "file": "Smile.svg",
+    "category": "status",
+    "aliases": [
+      "smile",
+      "微笑",
+      "满意"
+    ],
+    "use_for": [
+      "status related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "StopIcon",
+    "file": "Stop.svg",
+    "category": "status",
+    "aliases": [
+      "stop",
+      "停止"
+    ],
+    "use_for": [
+      "stop process",
+      "halt generation"
+    ],
+    "avoid_for": [
+      "pause",
+      "cancel",
+      "close"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "WarningIcon",
+    "file": "Warning.svg",
+    "category": "status",
+    "aliases": [
+      "warning",
+      "警告",
+      "提醒"
+    ],
+    "use_for": [
+      "alert",
+      "caution",
+      "needs attention"
+    ],
+    "avoid_for": [
+      "error",
+      "blocked",
+      "success"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

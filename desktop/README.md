@@ -15,10 +15,22 @@ uv pip install -e ".[dev,wiki]"
 
 cd desktop
 npm install
+npm start
+```
+
+`npm start` 会构建 Desktop 并自动启动托管 Gateway，无需另开后端进程。它读取仓库根目录的
+`config/config.yaml`；默认 `auth.mode: email`，首次打开会显示邮箱登录页。邮箱不需要验证码，
+仅用于生成相互隔离的本机租户 Owner。
+
+如果只进行日常开发、不测试邮箱登录流程，使用：
+
+```bash
+cd desktop
 npm run dev
 ```
 
-`npm run dev` 会构建 Desktop 并自动启动隔离的开发 Gateway，无需另开后端进程。开发 Gateway 使用托管端口 `28180`；连接成功后，渲染层会记录实际地址。
+`npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，不显示邮箱登录页。
+普通模式和开发模式都使用托管端口 `28180`；连接成功后，渲染层会记录实际地址。
 
 首次打开后，在“设置 → 模型”中添加模型并将其设为默认。API Key 写入当前用户的本地环境文件，不会返回给渲染层。
 
@@ -44,8 +56,9 @@ npm run dev
 ## Gateway 与身份
 
 - `npm run dev` 使用隔离的托管 Gateway 和 `dev:dev` 开发 owner。
+- `npm start` 使用普通托管 Gateway，并按 `config/config.yaml` 的 `auth.mode` 进入邮箱、免登录或远程验证码模式。
 - 独立启动 `python -m crew.gateway.server` 时，Gateway 默认监听 `127.0.0.1:8000`。
-- Crew 默认使用本机 `local` 身份；启用 `auth.mode: remote` 后，Desktop 在主进程安全存储 Gateway 会话 Cookie。
+- Ace 正式配置默认使用 `email` 身份：用户填写邮箱后生成隔离 owner，不校验邮箱所有权；`local` 仍可配置为本机免登录模式。启用 `auth.mode: remote` 后，Desktop 使用手机号验证码，并在主进程安全存储 Gateway 会话 Cookie。
 - Browser 控制接口除登录会话外，还使用安装实例密钥派生的 Bearer Token。
 
 ## 代码结构
