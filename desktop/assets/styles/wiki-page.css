@@ -1277,6 +1277,24 @@
 
 /* ── 条目删除按钮 ── */
 
+/* 时间线条目：× 绝对定位悬浮在条目右侧（不占文档流，否则会单起一行挤占列表高度），
+   默认禁用 pointer-events，悬停条目时才可点。 */
+.wiki-item {
+  position: relative;
+}
+
+.wiki-item .wiki-item__delete {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.wiki-item:hover .wiki-item__delete {
+  pointer-events: auto;
+}
+
 .wiki-item__delete {
   flex-shrink: 0;
   width: 20px;
