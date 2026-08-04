@@ -6638,8 +6638,35 @@ button { font-family: inherit; cursor: pointer; }
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  background: var(--bg);
+}
+
+/* 右侧知识库扩展面板：目录（固定宽）+ 详情（弹性） */
+.wiki-browser {
+  display: flex;
+  min-width: 0;
   border-left: 1px solid var(--border);
   background: var(--bg);
+}
+
+.wiki-browser__catalog {
+  flex: 0 0 260px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 图谱视图：目录区与详情区 1.2:1 弹性分配，给图谱更大空间 */
+.wiki-browser--graph .wiki-browser__catalog {
+  flex: 1.2 1 0;
+}
+
+.wiki-browser--graph .wiki-browser__detail {
+  flex: 1 1 0;
+}
+
+.wiki-browser__detail {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .wiki-tree {
@@ -7876,18 +7903,32 @@ button { font-family: inherit; cursor: pointer; }
     display: flex;
     flex-direction: column;
   }
-  .wiki-tree {
+  .wiki-hub__chat {
+    height: 40vh;
+    min-height: 280px;
+    border-bottom: 1px solid var(--border);
+  }
+  .wiki-browser {
+    flex: 1;
+    min-height: 0;
+    border-left: none;
+    flex-direction: column;
+  }
+  .wiki-browser__catalog {
+    flex: 0 0 auto;
     width: 100%;
     max-width: none;
     border-right: none;
     border-bottom: 1px solid var(--border);
     max-height: 35vh;
   }
-  .wiki-hub__chat {
-    border-left: none;
-    border-top: 1px solid var(--border);
-    height: 40vh;
-    min-height: 280px;
+  .wiki-browser--graph .wiki-browser__catalog {
+    flex: 0 0 auto;
+    max-height: none;
+  }
+  .wiki-browser__detail {
+    flex: 1;
+    min-height: 0;
   }
   .wiki-tree__actions {
     opacity: 1;

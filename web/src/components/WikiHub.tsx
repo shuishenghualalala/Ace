@@ -84,6 +84,25 @@ export default function WikiHub({
   const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
   const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
   const [uploadJobsExpanded, setUploadJobsExpanded] = useState(true);
+  // 右侧知识库面板（目录+详情）展开/收起，持久化到 localStorage。
+  const [browserOpen, setBrowserOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem("crew:wiki-browser-open") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggleBrowser = () => {
+    setBrowserOpen((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("crew:wiki-browser-open", next ? "1" : "0");
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
 
   const { activeCount, hasDoneJobs } = useMemo(() => {
     const activeCount = uploadJobs.filter((j) => j.status === "uploading" || j.status === "ingesting").length;
@@ -823,6 +842,14 @@ export default function WikiHub({
           >
             上传文件
           </button>
+          <button
+            className={`wiki-card__btn ${browserOpen ? "wiki-card__btn--primary" : ""}`}
+            onClick={toggleBrowser}
+            type="button"
+            title={browserOpen ? "收起知识库面板" : "展开知识库面板"}
+          >
+            知识库面板
+          </button>
           <input
             ref={fileRef}
             type="file"
@@ -976,13 +1003,24 @@ export default function WikiHub({
           storageKey="wiki-hub-layout"
           className="wiki-hub-layout__body"
         >
+          {/* 对话为主区域（flexible，不传 defaultWidth），知识库目录+详情收进右侧扩展面板 */}
+          <ResizablePanels.Panel id="chat" className="wiki-hub__chat">
+            {sessionId ? (
+              <ChatPanel {...chatProps} />
+            ) : (
+              <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
+            )}
+          </ResizablePanels.Panel>
+
+          {browserOpen && (
           <ResizablePanels.Panel
-            id="tree"
-            defaultWidth={320}
-            minWidth={180}
-            maxWidth={900}
-            className="wiki-tree"
+            id="browser"
+            defaultWidth={620}
+            minWidth={420}
+            maxWidth={1100}
+            className={`wiki-browser ${viewMode === "graph" ? "wiki-browser--graph" : ""}`}
           >
+          <div className="wiki-browser__catalog wiki-tree">
             <div className="wiki-view-switcher">
               {viewTabs.map((tab) => (
                 <button
@@ -1008,7 +1046,7 @@ export default function WikiHub({
                   </svg>
                 </div>
                 <p className="wiki-tree__empty-text">知识库还没有内容</p>
-                <p className="wiki-tree__empty-hint">点击右上角「上传」，或直接拖拽文件到右侧问答栏</p>
+                <p className="wiki-tree__empty-hint">点击右上角「上传」，或直接拖拽文件到左侧问答栏</p>
               </div>
             ) : (
               renderLeftView()
@@ -1022,9 +1060,9 @@ export default function WikiHub({
                 {loadingMore ? "加载中…" : "滚动加载更多"}
               </div>
             )}
-          </ResizablePanels.Panel>
+          </div>
 
-          <ResizablePanels.Panel id="main" className="wiki-panel">
+          <div className="wiki-browser__detail wiki-panel">
             {selectedDocumentName ? (
               vaultDocument ? (
                 <div className="wiki-page-view wiki-page-view--inline">
@@ -1088,21 +1126,9 @@ export default function WikiHub({
                 <p>选择左侧页面查看详情</p>
               </div>
             )}
+          </div>
           </ResizablePanels.Panel>
-
-          <ResizablePanels.Panel
-            id="chat"
-            defaultWidth={360}
-            minWidth={260}
-            maxWidth={600}
-            className="wiki-hub__chat"
-          >
-            {sessionId ? (
-              <ChatPanel {...chatProps} />
-            ) : (
-              <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
-            )}
-          </ResizablePanels.Panel>
+          )}
         </ResizablePanels>
       )}
 

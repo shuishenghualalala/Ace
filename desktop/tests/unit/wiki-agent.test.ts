@@ -673,77 +673,33 @@ describe('wiki-page 入口挂点', () => {
     expect(mockOpenSession).not.toHaveBeenCalled();
   });
 
-  it('展开/收窄按钮切换宽栏档位，renderShell 重建面板后保持', async () => {
+  it('面板头按钮收起/展开知识库面板，renderShell 重建后面板活节点保留', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
     await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-expand]')).not.toBeNull());
 
     const panel = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
-    expect(panel.classList.contains('wiki-agent-pane--wide')).toBe(false);
+    expect(document.querySelector('.page-shell--wiki')?.classList.contains('wiki-browser-collapsed')).toBe(false);
 
     document.querySelector<HTMLElement>('[data-wiki-agent-expand]')!.click();
-    expect(panel.classList.contains('wiki-agent-pane--wide')).toBe(true);
+    expect(document.querySelector('.page-shell--wiki')?.classList.contains('wiki-browser-collapsed')).toBe(true);
 
-    // wiki 页重渲染保留面板活节点（KB 未变）：宽档位直接存活
-    renderWikiPage();
+    // wiki 页重渲染保留面板活节点（KB 未变）：按钮仍在同一面板上
     const rebuilt = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
     expect(rebuilt).toBe(panel);
-    expect(rebuilt.classList.contains('wiki-agent-pane--wide')).toBe(true);
 
     rebuilt.querySelector<HTMLElement>('[data-wiki-agent-expand]')!.click();
-    expect(rebuilt.classList.contains('wiki-agent-pane--wide')).toBe(false);
+    expect(document.querySelector('.page-shell--wiki')?.classList.contains('wiki-browser-collapsed')).toBe(false);
   });
 
-  it('对话栏宽度可拖拽调整并持久化，双击手柄复位，展开按钮清除自定义宽度', async () => {
-    // beforeEach 把 localStorage 换成恒 null 的 stub；本用例换成 Map 实现以验证持久化链路
-    const store = new Map<string, string>();
-    Object.defineProperty(window, 'localStorage', {
-      configurable: true,
-      writable: true,
-      value: {
-        getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
-        setItem: (k: string, v: string) => { store.set(k, v); },
-        removeItem: (k: string) => { store.delete(k); },
-        clear: () => { store.clear(); },
-      },
-    });
+  it('对话面板为弹性主区：无独立宽度手柄与内联宽度', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-sash]')).not.toBeNull());
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel]')).not.toBeNull());
 
     const panel = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
-    const sash = document.querySelector<HTMLElement>('[data-wiki-agent-sash]')!;
     expect(panel.style.width).toBe('');
-
-    // happy-dom 的 getBoundingClientRect 恒为 0：startX=500 → move 到 100 即加宽 400px
-    sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 500 }));
-    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 100 }));
-    expect(panel.style.width).toBe('400px');
-    document.dispatchEvent(new MouseEvent('mouseup', {}));
-    expect(localStorage.getItem('crew.desktop.wikiAgentWidth.v1')).toBe('400');
-
-    // wiki 页重渲染保留面板活节点：内联自定义宽度天然存活
-    renderWikiPage();
-    const rebuilt = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
-    expect(rebuilt).toBe(panel);
-    expect(rebuilt.style.width).toBe('400px');
-
-    // 展开/收窄按钮回退到 CSS 档位：清除内联宽度与持久化值
-    rebuilt.querySelector<HTMLElement>('[data-wiki-agent-expand]')!.click();
-    expect(rebuilt.style.width).toBe('');
-    expect(localStorage.getItem('crew.desktop.wikiAgentWidth.v1')).toBeNull();
-    expect(rebuilt.classList.contains('wiki-agent-pane--wide')).toBe(true);
-    rebuilt.querySelector<HTMLElement>('[data-wiki-agent-expand]')!.click();
-
-    // 再次拖出自定义宽度后，双击手柄复位
-    const rebuiltSash = document.querySelector<HTMLElement>('[data-wiki-agent-sash]')!;
-    rebuiltSash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 500 }));
-    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 200 }));
-    document.dispatchEvent(new MouseEvent('mouseup', {}));
-    expect(rebuilt.style.width).toBe('300px');
-    rebuiltSash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-    expect(rebuilt.style.width).toBe('');
-    expect(localStorage.getItem('crew.desktop.wikiAgentWidth.v1')).toBeNull();
+    expect(document.querySelector('[data-wiki-agent-sash]')).toBeNull();
   });
 
   it('输入草稿在 renderShell 后保留', async () => {
