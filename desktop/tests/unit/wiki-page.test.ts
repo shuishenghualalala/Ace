@@ -909,6 +909,48 @@ describe('分栏拖拽', () => {
     expect(pane.style.width).toBe('500px');
     expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v2')).toBe('500');
   });
+
+  it('目录内层把手：默认 240，往右拖变宽，钳制 200/480，双击复位', async () => {
+    await refreshWikiData();
+    const pane = document.querySelector('.wiki-list-pane') as HTMLElement;
+    expect(pane.style.flex).toBe('0 0 240px');
+
+    const sash = document.querySelector('[data-wiki-catalog-sash]') as HTMLElement;
+    expect(sash).not.toBeNull();
+    // 把手在目录右缘（sign=+1）：往右拖目录变宽
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 560, bubbles: true }));
+    expect(pane.style.flex).toBe('0 0 300px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('300');
+
+    // 大幅左拖超过下限 → 钳到 200
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: -5000, bubbles: true }));
+    expect(pane.style.flex).toBe('0 0 200px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('200');
+
+    // 大幅右拖超过上限 → 钳到 480
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
+    expect(pane.style.flex).toBe('0 0 480px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('480');
+
+    // 双击复位默认目录宽度
+    sash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    const reset = document.querySelector('.wiki-list-pane') as HTMLElement;
+    expect(reset.style.flex).toBe('0 0 240px');
+    expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('240');
+  });
+
+  it('图谱模式：无内层目录把手，目录不内联宽度', async () => {
+    await refreshWikiData();
+    document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
+    expect(document.querySelector('[data-wiki-catalog-sash]')).toBeNull();
+    expect((document.querySelector('.wiki-list-pane') as HTMLElement).style.flex).toBe('');
+  });
 });
 
 describe('知识库面板收起/展开', () => {

@@ -6678,6 +6678,33 @@ button { font-family: inherit; cursor: pointer; }
   min-width: 0;
 }
 
+/* 目录↔详情 分隔把手：8px 隐形命中区骑在目录的 1px 边线上，悬停显示 */
+.wiki-browser__sash {
+  flex: 0 0 8px;
+  align-self: stretch;
+  margin: 0 -4px;
+  position: relative;
+  cursor: col-resize;
+  z-index: 6;
+}
+
+.wiki-browser__sash::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 14px;
+  bottom: 14px;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: transparent;
+  transition: background-color 0.12s;
+}
+
+.wiki-browser__sash:hover::after {
+  background: var(--border-strong);
+}
+
 .wiki-tree {
   min-width: 0;
   border-right: 1px solid var(--border);

@@ -1824,6 +1824,11 @@
     min-height: 520px;
   }
 
+  /* 上下堆叠模式下目录占整行，竖向内层把手无意义，隐藏 */
+  .wiki-sash--inner {
+    display: none;
+  }
+
   .wiki-detail-pane {
     min-height: 520px;
     border-left: none;
@@ -2072,6 +2077,11 @@
 .wiki-sash:hover::after,
 .wiki-sash.is-dragging::after {
   background: var(--color-accent);
+}
+
+/* 目录↔详情的内层把手：复用 .wiki-sash 几何，命中区 16px 骑缝（margin -8） */
+.wiki-sash--inner {
+  margin: 0 -8px;
 }
 
 body.wiki-resizing {

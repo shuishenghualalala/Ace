@@ -84,6 +84,60 @@ export default function WikiHub({
   const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
   const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
   const [uploadJobsExpanded, setUploadJobsExpanded] = useState(true);
+  // 知识库面板内 目录列宽（目录↔详情 分隔线可拖拽），localStorage 持久化。
+  const CATALOG_MIN = 200;
+  const CATALOG_MAX = 480;
+  const CATALOG_DEFAULT = 240;
+  const [catalogWidth, setCatalogWidth] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem("crew:wiki-catalog-width");
+      const n = raw ? Number(raw) : NaN;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 200), 480) : 240;
+    } catch {
+      return 240;
+    }
+  });
+  const catalogDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  // onUp 闭包里拿不到最新 state，用 ref 镜像当前目录宽度用于拖拽结束时持久化。
+  const catalogWidthRef = useRef(catalogWidth);
+  catalogWidthRef.current = catalogWidth;
+
+  const handleCatalogSashDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    catalogDragRef.current = { startX: e.clientX, startWidth: catalogWidth };
+    const onMove = (ev: MouseEvent) => {
+      const start = catalogDragRef.current;
+      if (!start) return;
+      const next = Math.min(Math.max(start.startWidth + (ev.clientX - start.startX), CATALOG_MIN), CATALOG_MAX);
+      setCatalogWidth(next);
+    };
+    const onUp = () => {
+      catalogDragRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      // 拖拽结束时持久化一次，避免拖动过程中频繁写 storage
+      try {
+        window.localStorage.setItem("crew:wiki-catalog-width", String(catalogWidthRef.current));
+      } catch {
+        // ignore storage errors
+      }
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
+  const handleCatalogSashReset = () => {
+    setCatalogWidth(CATALOG_DEFAULT);
+    try {
+      window.localStorage.setItem("crew:wiki-catalog-width", String(CATALOG_DEFAULT));
+    } catch {
+      // ignore storage errors
+    }
+  };
   // 右侧知识库面板（目录+详情）展开/收起，持久化到 localStorage。
   const [browserOpen, setBrowserOpen] = useState(() => {
     try {
@@ -1020,7 +1074,10 @@ export default function WikiHub({
             maxWidth={1100}
             className={`wiki-browser ${viewMode === "graph" ? "wiki-browser--graph" : ""}`}
           >
-          <div className="wiki-browser__catalog wiki-tree">
+          <div
+            className="wiki-browser__catalog wiki-tree"
+            style={viewMode === "graph" ? undefined : { flex: `0 0 ${catalogWidth}px` }}
+          >
             <div className="wiki-view-switcher">
               {viewTabs.map((tab) => (
                 <button
@@ -1061,6 +1118,18 @@ export default function WikiHub({
               </div>
             )}
           </div>
+
+          {viewMode !== "graph" && (
+            <div
+              className="wiki-browser__sash"
+              onMouseDown={handleCatalogSashDown}
+              onDoubleClick={handleCatalogSashReset}
+              role="separator"
+              aria-label="调整目录宽度"
+              aria-orientation="vertical"
+              title="拖拽调整目录宽度，双击复位"
+            />
+          )}
 
           <div className="wiki-browser__detail wiki-panel">
             {selectedDocumentName ? (

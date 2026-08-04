@@ -567,10 +567,14 @@ export function bindPaneSash(
 const WIKI_BROWSER_DEFAULT_WIDTH = 500;
 /** 右侧知识库面板（目录+详情）宽度：可拖拽 + 持久化。 */
 const browserWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiBrowserWidth.v2', min: 340, max: 1000, vwFactor: 0.7 });
+const WIKI_CATALOG_DEFAULT_WIDTH = 240;
+/** 面板内目录宽度：可拖拽 + 持久化（仅列表/树/类型视图；图谱模式目录走 1.5:1 比例分配，不内联宽度）。 */
+const catalogWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiCatalogWidth.v1', min: 200, max: 480, vwFactor: 0.5 });
 /** 图谱视图下面板宽度（仅图谱视图）：null = 沿用 browserWidth；拖拽后固定为像素值并持久化，双击复位。 */
 const graphWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphWidth.v2', min: 280, vwFactor: 0.7 });
 
 let browserWidth = browserWidthStore.load() ?? WIKI_BROWSER_DEFAULT_WIDTH;
+let catalogWidth = catalogWidthStore.load() ?? WIKI_CATALOG_DEFAULT_WIDTH;
 let graphWidth: number | null = graphWidthStore.load();
 
 const WIKI_BROWSER_OPEN_KEY = 'crew.desktop.wikiBrowserOpen.v1';
@@ -1160,6 +1164,13 @@ function browserPaneStyleAttr(): string {
   return ` style="width: ${browserWidth}px"`;
 }
 
+/** 目录内联宽度（仅列表/树/类型视图）：用 flex 简写输出，压过 CSS 里 240px/窄窗口 220px 的 flex-basis 档位；
+ * 图谱模式目录走 1.5:1 比例分配，不内联。 */
+function catalogPaneStyleAttr(): string {
+  if (view.view === 'graph') return '';
+  return ` style="flex: 0 0 ${catalogWidth}px"`;
+}
+
 function renderShell(): void {
   const root = $('#wiki-page-root');
   if (!root) return;
@@ -1227,11 +1238,12 @@ function renderShell(): void {
         <aside class="wiki-agent-pane" data-wiki-agent-panel aria-label="Wiki Agent 对话"></aside>
         <div class="wiki-sash" data-wiki-browser-sash role="separator" aria-orientation="vertical" title="拖拽调整知识库面板宽度，双击复位"></div>
         <div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
-          <div class="wiki-list-pane">
+          <div class="wiki-list-pane"${catalogPaneStyleAttr()}>
             ${batchBarHtml()}
             <nav class="hub-segment wiki-view-tabs" aria-label="列表视图">${tabs}</nav>
             <div class="wiki-list-scroll${graphMode ? ' wiki-list-scroll--graph' : ''}">${listBody}</div>
           </div>
+          ${graphMode ? '' : '<div class="wiki-sash wiki-sash--inner" data-wiki-catalog-sash role="separator" aria-orientation="vertical" title="拖拽调整目录宽度，双击复位"></div>'}
           <div class="wiki-detail-pane">${detailHtml()}</div>
         </div>
       </div>`;
@@ -1809,6 +1821,26 @@ function bindEvents(): void {
           browserWidth = WIKI_BROWSER_DEFAULT_WIDTH;
           browserWidthStore.persist(browserWidth);
         }
+        renderShell();
+      },
+    });
+  });
+
+  // ── 目录内层把手（在目录右缘，sign=+1）：往右拖目录变宽；仅列表/树/类型视图渲染（图谱模式目录走比例分配） ──
+  $$w('[data-wiki-catalog-sash]').forEach((sash) => {
+    const pane = root.querySelector<HTMLElement>('.wiki-list-pane');
+    if (!pane) return;
+    bindPaneSash(sash, {
+      startWidth: () => catalogWidth,
+      onDrag: (w) => {
+        catalogWidth = catalogWidthStore.clamp(w);
+        pane.style.flex = `0 0 ${catalogWidth}px`;
+      },
+      onCommit: () => catalogWidthStore.persist(catalogWidth),
+      // 双击复位默认目录宽度
+      onReset: () => {
+        catalogWidth = WIKI_CATALOG_DEFAULT_WIDTH;
+        catalogWidthStore.persist(catalogWidth);
         renderShell();
       },
     });
