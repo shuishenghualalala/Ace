@@ -48,7 +48,8 @@
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
-  gap: 6px;
+  /* 面板间不留缝：分隔由单边 1px 发丝线承担（VSCode 风格，避免两条边框线并行） */
+  gap: 0;
   padding: 16px 20px 20px;
 }
 
@@ -56,9 +57,11 @@
 .wiki-browser-pane {
   flex: 0 0 auto;
   display: flex;
-  gap: 6px;
+  gap: 0;
   min-width: 0;
   min-height: 0;
+  /* 与对话主区之间唯一的分隔线 */
+  border-left: 1px solid var(--border-subtle);
 }
 
 /* 收起知识库面板：DOM 保留（编辑器/详情保活不受影响），仅 CSS 隐藏 */
@@ -72,8 +75,6 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
   background: var(--surface);
   overflow: hidden;
   /* 窄栏（≤240px）时列表项退化为紧凑行：隐藏摘要与标签，对齐 VSCode 侧栏体感 */
@@ -113,8 +114,8 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  /* 与目录之间唯一的分隔线 */
+  border-left: 1px solid var(--border-subtle);
   background: var(--surface);
   padding: 16px 20px;
 }
@@ -127,8 +128,6 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
   background: var(--surface);
   overflow: hidden;
 }
@@ -1815,6 +1814,9 @@
   .wiki-browser-pane {
     flex: 1 1 100%;
     flex-wrap: wrap;
+    /* 上下堆叠后分隔线改为横向 */
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
   }
 
   .wiki-browser-pane .wiki-list-pane {
@@ -1824,6 +1826,8 @@
 
   .wiki-detail-pane {
     min-height: 520px;
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
   }
 }
 
@@ -2045,7 +2049,8 @@
   flex: 0 0 auto;
   align-self: stretch;
   width: 16px;
-  margin: 0 -11px;
+  /* 栏间距为 0：把手 16px 命中区正好骑在 1px 分隔线上，不额外占视觉空间 */
+  margin: 0 -8px;
   z-index: 5;
   background: transparent;
   cursor: col-resize;

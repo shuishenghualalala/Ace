@@ -6641,11 +6641,11 @@ button { font-family: inherit; cursor: pointer; }
   background: var(--bg);
 }
 
-/* 右侧知识库扩展面板：目录（固定宽）+ 详情（弹性） */
+/* 右侧知识库扩展面板：目录（固定宽）+ 详情（弹性）；
+   与对话区的分隔线由 ResizablePanels 的 sash 发丝线承担，这里不再加 border，避免两条线并行 */
 .wiki-browser {
   display: flex;
   min-width: 0;
-  border-left: 1px solid var(--border);
   background: var(--bg);
 }
 
