@@ -6650,9 +6650,18 @@ button { font-family: inherit; cursor: pointer; }
 }
 
 .wiki-browser__catalog {
-  flex: 0 0 260px;
+  flex: 0 0 240px;
   display: flex;
   flex-direction: column;
+  /* 窄栏（≤240px）时列表项退化为紧凑行：隐藏摘要与标签，对齐 VSCode 侧栏体感 */
+  container-type: inline-size;
+}
+
+@container (max-width: 240px) {
+  .wiki-browser__catalog .wiki-list-item__summary,
+  .wiki-browser__catalog .wiki-list-item__tags {
+    display: none;
+  }
 }
 
 /* 图谱视图：目录区与详情区 1.2:1 弹性分配，给图谱更大空间 */

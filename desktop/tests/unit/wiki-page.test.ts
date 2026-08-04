@@ -853,7 +853,7 @@ describe('分栏拖拽', () => {
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
     const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
     // 未拖拽：沿用知识库面板默认宽度
-    expect(pane.style.width).toBe('620px');
+    expect(pane.style.width).toBe('500px');
 
     const sash = document.querySelector('[data-wiki-browser-sash]') as HTMLElement;
     // happy-dom 的 getBoundingClientRect 恒为 0：startX=500 → move 到 0，sign=-1 即拖出 500px
@@ -872,29 +872,29 @@ describe('分栏拖拽', () => {
     // 双击复位回默认面板宽度
     document.querySelector('[data-wiki-browser-sash]')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     const reset = document.querySelector('.wiki-browser-pane') as HTMLElement;
-    expect(reset.style.width).toBe('620px');
+    expect(reset.style.width).toBe('500px');
     expect(localStorage.getItem('crew.desktop.wikiGraphWidth.v1')).toBeNull();
   });
 
   it('拖拽调宽并持久化，超过下限被钳制', async () => {
     await refreshWikiData();
     const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
-    expect(pane.style.width).toBe('620px');
+    expect(pane.style.width).toBe('500px');
 
     const sash = document.querySelector('[data-wiki-browser-sash]') as HTMLElement;
     // 把手在面板左缘（sign=-1）：向右拖变窄
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 560, bubbles: true }));
-    expect(pane.style.width).toBe('560px');
+    expect(pane.style.width).toBe('440px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v1')).toBe('560');
+    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v1')).toBe('440');
 
-    // 大幅右拖超过下限 → 钳到 420
+    // 大幅右拖超过下限 → 钳到 340
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
-    expect(pane.style.width).toBe('420px');
+    expect(pane.style.width).toBe('340px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v1')).toBe('420');
+    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v1')).toBe('340');
   });
 
   it('双击复位默认宽度并持久化', async () => {
@@ -906,8 +906,8 @@ describe('分栏拖拽', () => {
 
     sash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
-    expect(pane.style.width).toBe('620px');
-    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v1')).toBe('620');
+    expect(pane.style.width).toBe('500px');
+    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v1')).toBe('500');
   });
 });
 

@@ -1015,8 +1015,8 @@ export default function WikiHub({
           {browserOpen && (
           <ResizablePanels.Panel
             id="browser"
-            defaultWidth={620}
-            minWidth={420}
+            defaultWidth={500}
+            minWidth={360}
             maxWidth={1100}
             className={`wiki-browser ${viewMode === "graph" ? "wiki-browser--graph" : ""}`}
           >
