@@ -666,6 +666,7 @@ export interface PlatformRow {
   running?: boolean;
   live_connected?: boolean;
   error?: string;
+  error_kind?: 'network' | string;
   description?: string;
   install_hint?: string;
   detail?: Record<string, unknown>;

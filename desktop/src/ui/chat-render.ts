@@ -115,7 +115,7 @@ export interface ChatMessage {
   collapsedTitle?: string | undefined;
   processText?: string | undefined;
   artifacts?: TeamArtifactCard[] | undefined;
-  /** status 消息的瞬时活动标记（如 tool_planning）：这类「正在…」进度提示
+  /** status 消息的瞬时活动标记：这类「正在…」进度提示
    *  会被后续事件取代——渲染时 live 回合只保留最新一条，回合结束后全部隐藏。 */
   activity?: string | undefined;
   /** Dynamic Kanban 工作流进度面板数据。 */
@@ -989,7 +989,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
   // liveness 只看 per-turn 自有信号（isStreaming），不引用 session 全局 busy。
   const isLive = options.isStreaming;
 
-  // 瞬时活动状态（带 activity 的 status，如「正在规划工具调用…」）是会被后续事件
+  // 瞬时活动状态（带 activity 的 status）会被后续事件
   // 取代的进度提示：live 回合只保留最新一条，回合结束后全部隐藏，避免残留/重复。
   let lastActivityIdx = -1;
   messages.forEach((m, i) => {

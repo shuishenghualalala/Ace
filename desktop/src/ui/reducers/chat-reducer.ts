@@ -68,7 +68,7 @@ export interface StatusChunk {
     agent_avatar?: string;
     detail?: string;
     control?: boolean;
-    activity?: 'tool_planning' | string;
+    activity?: string;
   };
   sequence: number;
   session_id?: string;
@@ -850,7 +850,7 @@ export function statusReducer(chunk: StatusChunk, snapshot: ReducerSnapshot): Re
       timestamp: snapshot.now,
       agentName: typeof chunk.body.agent_name === 'string' ? chunk.body.agent_name : undefined,
       agentAvatar: typeof chunk.body.agent_avatar === 'string' ? chunk.body.agent_avatar : undefined,
-      // 瞬时活动提示（如 tool_planning「正在规划工具调用…」）：渲染层据此做
+      // 瞬时活动提示：渲染层据此做
       // 「live 只留最新、完成即隐藏」的过滤，避免进度提示在回合结束后残留。
       activity: typeof chunk.body.activity === 'string' ? chunk.body.activity : undefined,
     },

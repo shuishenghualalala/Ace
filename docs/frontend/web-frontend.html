@@ -666,9 +666,8 @@ cd web && npm run build
   <p>构建验证：<code>npm run typecheck</code> 与 <code>npm test</code> 通过；66 个测试全部通过。</p>
   <p>详细文档：<a href="./tool-execution-two-phase.html">docs/frontend/tool-execution-two-phase.html</a>。</p>
 
-  <h2>56. MoMA 工具规划状态即时反馈（2026-07-18）</h2>
-  <p>当 MoMA 已开始输出 reasoning、但尚未揭晓具体 <code>tool_calls</code> 时，Gateway 会发送高优先级 <code>status(activity=tool_planning)</code>。Web 复用回合过程时间线立即显示“正在规划工具调用…”，随后收到真实 generating/start 事件再显示具体工具；前端不根据 reasoning 猜测工具名。</p>
-  <p>测试：<code>AgentTurn.test.tsx</code> 覆盖规划状态进入实时过程时间线。</p>
+  <h2>56. 移除工具规划占位状态（2026-08-04）</h2>
+  <p>模型仅开始输出 reasoning 时不再发送或展示工具规划占位状态；Web 过程时间线只在收到真实 generating/start/result 事件后展示工具信息。</p>
 
   <h2>57. 权限卡专用交互与确认回执（2026-07-23）</h2>
   <ul>

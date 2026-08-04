@@ -160,6 +160,32 @@ class ContextCompactor:
         owner, sid = base
         return owner, f"__view__::{sid}"
 
+    def will_compact_view(
+        self,
+        messages: list[Message],
+        session_id: str | None = None,
+        owner_account_id: str | None = None,
+    ) -> bool:
+        """返回本轮是否会调用摘要模型，用于发送准确的前端活动提示。"""
+        if not self.enabled:
+            return False
+        view = micro_compact(
+            messages,
+            self.keep_recent_tools,
+            max_tool_result_chars=self.max_tool_result_chars,
+        )
+        if estimate_tokens(view) <= self.token_budget:
+            return False
+        vkey = self._view_key(session_id, owner_account_id)
+        failure_key = vkey or ("", "")
+        if self._failure_counts.get(failure_key, 0) >= _MAX_CONSECUTIVE_FAILURES:
+            return False
+        state = self._view_mem.get(vkey) if vkey is not None else None
+        if state is not None and state.ineffective_count >= _MAX_INEFFECTIVE:
+            return False
+        split = self._safe_split(view, self.keep_recent)
+        return split >= _MIN_OLD_FOR_SUMMARY
+
     async def compact_view(
         self,
         messages: list[Message],

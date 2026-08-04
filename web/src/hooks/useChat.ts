@@ -340,6 +340,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
   const [statusMap, setStatusMap] = useState<Record<string, SessionStatus>>({});
   const [pendingQueueMap, setPendingQueueMap] = useState<Record<string, PendingMessage[]>>({});
   const [todoMap, setTodoMap] = useState<Record<string, TodoItem[]>>({});
+  const [compactionMap, setCompactionMap] = useState<Record<string, boolean>>({});
   // Plan 模式：每会话 { active 是否处于只读 plan 态; review 待审批的计划 }
   const [planMap, setPlanMap] = useState<Record<string, PlanState>>({});
   // 追问选择框：每会话当前展示的问题
@@ -350,6 +351,8 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
   const [connected, setConnected] = useState(false);
 
   const sockRef = useRef<ChatSocket | null>(null);
+  const compactionStartedAtRef = useRef<Record<string, number>>({});
+  const compactionTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const afterFinalRef = useRef(onAfterFinal);
   afterFinalRef.current = onAfterFinal;
 
@@ -736,6 +739,28 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
         });
       } else if (c.kind === "status") {
         const msg = c.body.message ?? "";
+        if (c.body.activity === "context_compaction") {
+          const timer = compactionTimersRef.current[sid];
+          if (timer) {
+            clearTimeout(timer);
+            delete compactionTimersRef.current[sid];
+          }
+          if (c.body.active === true) {
+            compactionStartedAtRef.current[sid] = Date.now();
+            setCompactionMap((prev) => ({ ...prev, [sid]: true }));
+          } else {
+            const elapsed = Date.now() - (compactionStartedAtRef.current[sid] ?? 0);
+            const hide = () => {
+              setCompactionMap((prev) => ({ ...prev, [sid]: false }));
+              delete compactionStartedAtRef.current[sid];
+              delete compactionTimersRef.current[sid];
+            };
+            const remaining = Math.max(0, 800 - elapsed);
+            if (remaining > 0) compactionTimersRef.current[sid] = setTimeout(hide, remaining);
+            else hide();
+          }
+          return;
+        }
         // 队列状态 → 小卡片；其它状态（如 Team 派发进度）仍走消息气泡
         if (msg.includes("排队")) {
           setQueue(sid, msg);
@@ -1328,6 +1353,10 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
 
   /** 删除/清理某会话的本地缓存（删除会话时调用）。 */
   const clearSession = useCallback((sessionId: string) => {
+    const compactionTimer = compactionTimersRef.current[sessionId];
+    if (compactionTimer) clearTimeout(compactionTimer);
+    delete compactionTimersRef.current[sessionId];
+    delete compactionStartedAtRef.current[sessionId];
     bookRef.current.delete(sessionId);
     subscribedSessionsRef.current.delete(sessionId);
     suppressChunksRef.current.delete(sessionId);
@@ -1346,6 +1375,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     setPendingQueueMap(drop);
     updatePlanMap(drop);
     setTodoMap(drop);
+    setCompactionMap(drop);
     setWikiProgressMap((prev) => {
       const next: Record<string, WikiIngestProgress> = {};
       for (const [sourceId, p] of Object.entries(prev)) {
@@ -1365,6 +1395,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     queueHint: queueMap[currentSessionId] ?? "",
     pendingQueue: pendingQueueMap[currentSessionId] ?? [],
     todos: todoMap[currentSessionId] ?? [],
+    compactingContext: compactionMap[currentSessionId] ?? false,
     sessionStatus: statusMap,
     connected,
     planActive: plan.active,
@@ -1380,6 +1411,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
       planActive: (planMap[sid] ?? { active: false, review: null }).active,
       followupQuestion: followupMap[sid] ?? null,
       todos: todoMap[sid] ?? [],
+      compactingContext: compactionMap[sid] ?? false,
     }),
     send,
     stop,
