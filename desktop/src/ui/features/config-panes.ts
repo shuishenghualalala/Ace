@@ -185,7 +185,8 @@ function setModelCapabilities(capabilities?: string[]): void {
   });
 }
 
-function platformStatusText(p: PlatformRow): string {
+export function platformStatusText(p: PlatformRow): string {
+  if (p.error_kind === 'network') return '网络异常，请检查网络';
   if (p.error) return `错误：${p.error}`;
   if (p.reason === 'login_required') return '未连接（请先登录）';
   if (isPlatformLiveConnected(p)) return '已连接';
@@ -932,9 +933,10 @@ export async function renderPlatforms(): Promise<void> {
     if (statusEl) statusEl.textContent = p ? platformStatusText(p) : '未注册';
     if (chipEl) {
       const live = isPlatformLiveConnected(p);
+      const hasError = !!p?.error || p?.error_kind === 'network';
       chipEl.classList.toggle('is-online', live);
-      chipEl.classList.toggle('is-configured', !!(p?.has_account || p?.configured) && !live && !p?.running && !p?.error);
-      chipEl.classList.toggle('is-error', !!p?.error);
+      chipEl.classList.toggle('is-configured', !!(p?.has_account || p?.configured) && !live && !p?.running && !hasError);
+      chipEl.classList.toggle('is-error', hasError);
     }
     if (btn && p) {
       const live = isPlatformLiveConnected(p);

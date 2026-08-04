@@ -15,10 +15,21 @@ from crew.app import build_app
 from crew.core.interfaces import Channel, MessageHandler
 from crew.gateway import channel_config
 from crew.gateway.platform_registry import PlatformConfig, PlatformEntry, platform_registry
+from crew.gateway.routers.channels import _platform_error_kind
 from crew.gateway.server import create_app
 from crew.state.config import load_config, owner_overlay_config_path, resolve_writable_env_path, write_env_key
 
 OWNER_A = "A:uid-a"
+
+
+def test_weixin_network_error_is_classified_for_frontend():
+    error = (
+        "Cannot connect to host ilinkai.weixin.qq.com:443 ssl:default "
+        "[nodename nor servname provided, or not known]"
+    )
+    assert _platform_error_kind("weixin", error) == "network"
+    assert _platform_error_kind("weixin", "微信会话已过期") == ""
+    assert _platform_error_kind("feishu", error) == ""
 
 
 def _owner_overlay_path(_tmp_path: Path, owner_account_id: str = OWNER_A) -> Path:
