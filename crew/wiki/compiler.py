@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+import urllib.parse
 from collections.abc import Awaitable
 from contextvars import ContextVar
 from pathlib import Path
@@ -1216,6 +1217,7 @@ class WikiCompiler:
             analysis.get("source_summary"),
             planned_entities,
             planned_topics,
+            kb_id=kb_id,
         )
         existing_source = self.store.get_source_page(source_id, owner_account_id, kb_id)
         if existing_source is not None:
@@ -2387,6 +2389,7 @@ class WikiCompiler:
             source_summary,
             entities or [],
             topics or [],
+            kb_id=kb_id,
         )
         summary = (
             str((source_summary or {}).get("one_sentence") or "").strip()
@@ -2771,6 +2774,7 @@ def _build_source_page_content(
     source_summary: dict[str, Any] | None = None,
     entities: list[dict[str, Any]] | None = None,
     topics: list[dict[str, Any]] | None = None,
+    kb_id: str = "default",
 ) -> str:
     summary_data = source_summary if isinstance(source_summary, dict) else {}
     summary = (
@@ -2799,16 +2803,9 @@ def _build_source_page_content(
         if raw.source_url:
             original_ref = raw.source_url
         elif raw.original_path:
-            original_path = Path(raw.original_path)
-            parts = original_path.parts
-            if "raw" in parts:
-                raw_index = parts.index("raw")
-                relative = Path(*parts[raw_index:]).as_posix()
-                # Source Summary 位于 wiki/sources/{source_kind}/，回到 Vault 根目录
-                # 需要三级相对路径。
-                original_ref = f"[打开原始文件](../../../{relative})"
-            else:
-                original_ref = raw.original_ref or original_path.name
+            # 统一使用 Gateway 下载接口，避免相对路径在前端/桌面端解析不一致。
+            encoded_kb = urllib.parse.quote(kb_id, safe="")
+            original_ref = f"[打开原始文件](/api/wiki/sources/{raw.id}/file?kb_id={encoded_kb})"
         else:
             original_ref = raw.original_ref
     lines = [

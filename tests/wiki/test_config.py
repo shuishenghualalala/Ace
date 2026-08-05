@@ -10,7 +10,9 @@ from crew.wiki.config import WikiConfig
 def test_wiki_config_model_defaults_to_empty():
     cfg = WikiConfig.from_raw({})
     assert cfg.model == ""
-    assert cfg.ingest.auto_apply is True
+    assert cfg.ingest.auto_apply is False
+    assert cfg.ingest.auto_summarize is True
+    assert cfg.ingest.auto_ingest is False
 
 
 def test_wiki_config_model_from_raw():

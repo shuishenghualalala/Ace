@@ -37,7 +37,9 @@ def test_wiki_ingest_requires_confirmation_when_auto_apply_disabled():
 
 
 def test_default_upload_plans_deep_structure_after_searchable_source_page():
-    assert "默认继续 `wiki_orient`" in WIKI_AGENT_SYSTEM_PROMPT
+    assert "附件会被自动捕获到 default 知识库" in WIKI_AGENT_SYSTEM_PROMPT
+    assert "自动对所有附件做深度整理" in WIKI_AGENT_SYSTEM_PROMPT
+    assert "wiki_list_inbox" in WIKI_AGENT_SYSTEM_PROMPT
     assert "wiki_plan_ingest" in WIKI_AGENT_SYSTEM_PROMPT
     assert "全文 Source 页面" in WIKI_PARSE_SOURCE_PROMPT
     assert "图片" in WIKI_PARSE_SOURCE_PROMPT

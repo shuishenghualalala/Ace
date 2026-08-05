@@ -76,8 +76,8 @@ async def test_capture_image_multimodal_disabled_only_saves_original(store, monk
     assert saved.original_path and Path(saved.original_path).exists()
 
 
-async def test_capture_image_auto_describes_and_ingests(store, monkeypatch):
-    """auto_image 开启：图片自动多模态理解并 ingest（与 /api/wiki/upload 一致）。"""
+async def test_capture_image_auto_describes_but_not_auto_ingests(store, monkeypatch):
+    """auto_image 开启：图片自动多模态理解并生成轻量元数据，但默认不自动深度 ingest。"""
     describe = Mock(return_value="一张截图的描述")
     monkeypatch.setattr("crew.wiki.capture.describe_media", describe)
     compiler = SimpleNamespace(ingest=AsyncMock())
@@ -87,13 +87,29 @@ async def test_capture_image_auto_describes_and_ingests(store, monkeypatch):
     )
     assert raw is not None
     describe.assert_called_once()
-    compiler.ingest.assert_awaited_once_with(
-        raw.id, owner_account_id="A:uid-a", kb_id="default"
-    )
+    compiler.ingest.assert_not_awaited()
     saved = store.load_raw(raw.id, "A:uid-a", "default")
     assert saved is not None
     assert saved.parse_status == "parsed"
     assert "一张截图的描述" in Path(saved.parsed_path).read_text(encoding="utf-8")
+
+
+async def test_capture_image_auto_ingests_when_explicitly_enabled(store, monkeypatch):
+    """显式开启 auto_ingest：图片多模态理解后自动深度 ingest。"""
+    describe = Mock(return_value="一张截图的描述")
+    monkeypatch.setattr("crew.wiki.capture.describe_media", describe)
+    compiler = SimpleNamespace(ingest=AsyncMock())
+    cfg = WikiConfig()
+    cfg.ingest.auto_ingest = True
+
+    raw = await capture_upload_to_wiki(
+        store, compiler, cfg, "shot.png", b"\x89PNG-fake", owner_account_id="A:uid-a"
+    )
+    assert raw is not None
+    describe.assert_called_once()
+    compiler.ingest.assert_awaited_once_with(
+        raw.id, owner_account_id="A:uid-a", kb_id="default"
+    )
 
 
 async def test_capture_image_describe_failure_marks_failed(store, monkeypatch):
