@@ -217,14 +217,22 @@
 .wiki-agent-history__item {
   width: 100%;
   display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+.wiki-agent-history__item-switch {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 3px;
   padding: 9px 10px;
   border: none;
-  border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-primary);
+  color: inherit;
   text-align: left;
   cursor: pointer;
 }
@@ -236,6 +244,32 @@
 
 .wiki-agent-history__item.is-active {
   box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+.wiki-agent-history__item-delete {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-right: 6px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.wiki-agent-history__item:hover .wiki-agent-history__item-delete,
+.wiki-agent-history__item-delete:focus-visible {
+  opacity: 1;
+}
+
+.wiki-agent-history__item-delete:hover {
+  color: var(--color-danger, #e5484d);
+  background: var(--surface);
 }
 
 .wiki-agent-history__item-title {

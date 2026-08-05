@@ -1,6 +1,20 @@
 import type { SVGProps } from "react";
 
-type IconName = "source" | "entity" | "topic" | "folder" | "caret" | "sparkles";
+type IconName =
+  | "source"
+  | "entity"
+  | "topic"
+  | "folder"
+  | "caret"
+  | "sparkles"
+  | "plus"
+  | "trash"
+  | "upload"
+  | "checks"
+  | "panel-right"
+  | "history"
+  | "tags"
+  | "graph";
 
 interface Props extends SVGProps<SVGSVGElement> {
   name: IconName;
@@ -69,8 +83,72 @@ export default function WikiIcon({ name, size = 16, className = "", ...rest }: P
           <path d="M17 19h4" />
         </svg>
       );
-    default:
-      return null;
+    case "plus":
+      return (
+        <svg {...svgProps}>
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      );
+    case "trash":
+      return (
+        <svg {...svgProps}>
+          <path d="M3 6h18" />
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+          <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          <line x1="10" y1="11" x2="10" y2="17" />
+          <line x1="14" y1="11" x2="14" y2="17" />
+        </svg>
+      );
+    case "upload":
+      return (
+        <svg {...svgProps}>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
+        </svg>
+      );
+    case "checks":
+      return (
+        <svg {...svgProps}>
+          <path d="m3 17 2 2 4-4" />
+          <path d="m3 7 2 2 4-4" />
+          <path d="M13 6h8" />
+          <path d="M13 12h8" />
+          <path d="M13 18h8" />
+        </svg>
+      );
+    case "panel-right":
+      return (
+        <svg {...svgProps}>
+          <rect width="18" height="18" x="3" y="3" rx="2" />
+          <path d="M15 3v18" />
+        </svg>
+      );
+    case "history":
+      return (
+        <svg {...svgProps}>
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+          <path d="M3 3v5h5" />
+          <path d="M12 7v5l4 2" />
+        </svg>
+      );
+    case "tags":
+      return (
+        <svg {...svgProps}>
+          <path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" />
+          <circle cx="7.5" cy="7.5" r=".5" fill="currentColor" />
+        </svg>
+      );
+    case "graph":
+      return (
+        <svg {...svgProps}>
+          <circle cx="18" cy="5" r="3" />
+          <circle cx="6" cy="12" r="3" />
+          <circle cx="18" cy="19" r="3" />
+          <line x1="8.59" x2="15.42" y1="13.51" y2="17.49" />
+          <line x1="15.41" x2="8.59" y1="6.51" y2="10.49" />
+        </svg>
+      );
   }
 }
 
