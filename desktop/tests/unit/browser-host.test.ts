@@ -4179,6 +4179,55 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
+  it('does not treat mouse wheel over a mounted AI page as a takeover gesture', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    host.setPanel({
+      runtimeKey: RUNTIME_KEY,
+      sessionId: SESSION_ID,
+      tabLabel: TAB_LABEL,
+      mode: 'ai',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+      visible: true,
+    });
+    const requested = vi.fn();
+    host.on('user-interaction-requested', requested);
+    const blocked = { preventDefault: vi.fn() };
+
+    electron.views[0].webContents.emit('before-mouse-event', blocked, { type: 'mouseWheel' });
+
+    // 输入仍被拦截（页面不应响应），但不发起接管请求。
+    expect(blocked.preventDefault).toHaveBeenCalledOnce();
+    expect(requested).not.toHaveBeenCalled();
+    await host.dispose();
+  });
+
+  it('reports main-frame load failures to the panel but ignores aborted navigations', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    const failed = vi.fn();
+    host.on('tab-load-failed', failed);
+    const contents = electron.views[0].webContents;
+
+    // ERR_ABORTED(-3) 是新导航打断旧导航的正常信号，不上报。
+    contents.emit('did-fail-load', {}, -3, 'aborted', contents.url, true, 1, 1);
+    expect(failed).not.toHaveBeenCalled();
+
+    contents.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', 'https://missing.example/', true, 1, 1);
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed).toHaveBeenCalledWith({
+      runtimeKey: RUNTIME_KEY,
+      label: TAB_LABEL,
+      url: 'https://missing.example/',
+      errorDescription: 'ERR_NAME_NOT_RESOLVED',
+    });
+
+    // 子框架失败不上报。
+    contents.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', 'https://missing.example/', false, 1, 1);
+    expect(failed).toHaveBeenCalledOnce();
+    await host.dispose();
+  });
+
   it('keeps exact tab metadata while control mode still gates automation and capture', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);

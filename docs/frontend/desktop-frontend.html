@@ -410,10 +410,22 @@
       <li>登录下发的内置模型 Key 遇到 Active Owner 冲突、Gateway 初始化中或临时网络错误时，由主进程在当前 JWT/账号仍一致的前提下分段重试；成功后通过仅本地 IPC 通知 renderer 刷新模型与功能配置，Key 不进入 renderer。</li>
     </ul>
   </section>
+  <section>
+    <h2>内置浏览器接管确认与加载失败遮罩（2026-08-05）</h2>
+    <ul>
+      <li>滚轮不再算接管手势：AI 控制期间 <code>before-mouse-event</code> 只对 <code>mouseDown</code> 发起接管请求，<code>mouseWheel</code> 仍被 preventDefault 拦截但不再触发接管——白屏/加载中页面上的一次随手滚动不会把控制权从 AI 手里抢走。</li>
+      <li>页面内首个真实输入不再静默接管：宿主 <code>user-interaction-requested</code> 到达后，面板在工具栏下方挂一条非模态确认条「检测到页面操作，是否接管浏览器？」（接管 / 忽略）；点「接管」才走原有 <code>ensureHumanControl('page')</code>，点「忽略」或 AI 后续动作成功（<code>action</code> 事件）都会自动收起。确认条放在 chrome 区而非 stage 浮层——stage 上的 HTML 会被原生 WebContentsView 盖住。地址栏（address）与工具栏（chrome）来源本来就是显式 UI 动作，保持直接接管。</li>
+      <li>页面加载失败可感知：宿主 <code>did-fail-load</code> 在主框架失败且错误码不是 ERR_ABORTED(-3) 时向前端推送 <code>browser-view:load-failed</code>（带 URL 与错误描述）；面板收起原生白屏视图并显示错误遮罩（页面加载失败 + URL + 错误描述 + 「重试」），「重试」与工具栏刷新同语义（先接管再 reload）。新导航提交（did-navigate）、点「重试」或切换会话时清除错误状态。</li>
+      <li>接管来源日志：宿主 <code>requestHumanInteraction</code> 打 <code>[browser-host]</code> 日志（来源 keyboard/pointer、标签页、session、runtime）；后端 <code>_change_control_mode</code> 记录 old_mode → new_mode、session_id、action 与 trusted_user 标志，便于区分误触与真实接管。</li>
+      <li>修复"用户未操作却被判定接管"的根因：AI 本轮首个 <code>browser_use</code> 动作会自动展开浏览器面板（<code>openBrowserWorkbench({ createTab: false })</code>），而 <code>openUserBrowser()</code> 在会话还没有任何标签页时会 fallback 调 <code>browserControl('open', '')</code>，经后端 <code>open_for_user</code> 建一个 about:blank 人工标签页并无条件把整个会话置为 human——面板自动展开恰好赶在 AI 首个 navigate 建 tab 之前，于是 AI 的第一个动作就被"用户正在接管浏览器"闸门挡掉。现在 <code>openUserBrowser</code> 新增 <code>createIfEmpty</code> 选项，被动自动打开（inspector <code>prepareBrowserWorkbench</code> 的 <code>createTab: false</code> 路径）只订阅状态流等 AI 首个标签页出现，不再创建人工空白页；用户显式入口（全局浏览器按钮、新建标签页、地址栏回车）行为不变。</li>
+    </ul>
+  </section>
   <h2>5. 测试记录</h2>
   <table>
     <thead><tr><th>日期</th><th>范围</th><th>验证</th><th>结果</th></tr></thead>
     <tbody>
+      <tr><td>2026-08-05</td><td>修复浏览器面板自动打开抢在 AI 首个动作前创建人工空白页、导致会话被误判为人工接管。</td><td>Desktop <code>browser-panel-controls.test.ts</code> 等 3 个文件 <code>60 passed</code>（新增被动打开不创建标签页、显式空打开仍建人工页两个用例）；变更文件 typecheck 与 ESLint 无新增问题。</td><td>通过。</td></tr>
+      <tr><td>2026-08-05</td><td>内置浏览器滚轮不触发接管、页面操作接管确认条、加载失败错误遮罩与接管来源日志。</td><td>Desktop <code>browser-host.test.ts</code> 与 <code>browser-panel-controls.test.ts</code> 共 <code>163 passed</code>（新增滚轮不接管、did-fail-load 上报/忽略 ERR_ABORTED、确认条接管/忽略、错误遮罩与重试用例）；<code>browser-panel-recording</code>、<code>browser-session-switch</code>、<code>browser-auto-open</code>、<code>ipc-schemas</code> 共 <code>78 passed</code>；范围 ESLint 0 error、CSS lint、重复 selector 检查通过，typecheck 本次改动文件无错误（存量 sites 相关错误为在制品）。后端 <code>pytest tests/test_browser_use.py tests/test_browser_plugin.py tests/test_browser_manager_review.py</code>：<code>389 passed, 28 skipped</code>。</td><td>通过。</td></tr>
       <tr><td>2026-08-03</td><td>邮箱租户登录、Owner 隔离、会话持久化与既有认证兼容。</td><td>后端轻量集成验证覆盖邮箱规范化、Cookie 签发、<code>email:&lt;邮箱&gt;</code> Owner 解析及非法邮箱拒绝；Desktop <code>auth-session.test.ts</code> 3 项通过；TypeScript typecheck、production build、Python 语法编译与 <code>git diff --check</code> 通过。完整 Gateway pytest 因系统默认 Python 3.9 低于项目要求的 Python 3.11，未能进入收集。</td><td>本次范围通过；正式配置默认邮箱入口，<code>--dev</code>、<code>local</code>、<code>remote</code> 保持兼容。</td></tr>
       <tr><td>2026-07-30</td><td>阵容虚线空状态、Gateway 恢复配置补拉、登录模型 Key 延迟重试。</td><td><code>composer-external-assistance.test.ts</code> 覆盖两个阵容空状态使用虚线 actionable 结构；<code>backend-status-guard.test.ts</code> 覆盖断连转可用时补拉模型/功能配置；Desktop 全量 <code>117 files / 1222 passed</code>，TypeScript typecheck、CSS lint、production build、范围 ESLint（0 error）、重复 selector 检查与 <code>git diff --check</code> 通过。External Agent 路径归并定向用例 <code>3 passed</code>；全文件已报告 <code>99 passed</code>，但进程停留在 asyncio 清理阶段未自行退出，手动中断。</td><td>功能与前端回归通过；模型 Key 只保留在主进程当前登录生命周期，不持久化到 renderer。后端测试清理未退出问题单独保留，不计作完整命令成功。</td></tr>
       <tr><td>2026-07-30</td><td>Desktop 外援术语、固定三步浮层、滚动解耦、关闭/重播、首次扫描、发现外援卡片降噪与窄窗口固定 Dock。</td><td><code>composer-external-assistance.test.ts</code> 7 项通过，覆盖首次邀请、从 1/3 开始、三步显式切页、目标描边、完成/跳过持久化、页头重播、<code>body</code> Portal、按钮区域滚轮转交、四 Tab、表单、只扫描一次，以及卡片不再渲染 ACP 和可执行路径；Desktop 全量 <code>117 files / 1221 passed</code>。TypeScript typecheck、CSS lint、production build、变更范围 ESLint（0 error）、重复 selector 检查与 <code>git diff --check</code> 通过。</td><td>通过；全量测试首次在沙箱内被本机监听权限拦截，允许监听 <code>127.0.0.1</code> 后原命令全量通过；无后端改动。</td></tr>

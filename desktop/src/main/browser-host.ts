@@ -5510,7 +5510,10 @@ export class BrowserHost extends EventEmitter {
       }
       if (tab.mode !== 'human' && tab.automationDepth === 0) {
         event.preventDefault();
-        if (type === 'mouseDown' || type === 'mouseWheel') {
+        // 只有 mouseDown 算接管手势。滚轮不算：页面白屏/加载失败时用户对着窗口
+        // 随手滚一下是常态，把这种无意输入当成「我要接管」会把控制权从正在
+        // 干活的 AI 手里抢走。输入仍 preventDefault，页面不会因为滚动产生变化。
+        if (type === 'mouseDown') {
           this.requestHumanInteraction(owner, tab, 'pointer');
         }
       }
@@ -5804,9 +5807,9 @@ export class BrowserHost extends EventEmitter {
     });
     contents.on('did-fail-load', (
       details,
-      _errorCode,
-      _errorDescription,
-      _validatedUrl,
+      errorCode,
+      errorDescription,
+      validatedUrl,
       legacyIsMainFrame,
     ) => {
       const isMainFrame = navigationFlag(details, 'isMainFrame', legacyIsMainFrame);
@@ -5816,6 +5819,17 @@ export class BrowserHost extends EventEmitter {
         // navigation. Keep pending until did-stop-loading/did-navigate proves
         // the WebContents has converged; otherwise bounded polling rejects it.
         tab.navigationPending = true;
+        // ERR_ABORTED(-3) 是新导航打断旧导航的正常信号，不算失败。其余主框架
+        // 加载失败会让面板挂着一块可交互白屏——前端需要知道，才能给出错误
+        // 遮罩而不是让用户去点一块什么都没加载出来的页面。
+        if (Number(errorCode) !== -3) {
+          this.emit('tab-load-failed', {
+            runtimeKey: owner.runtimeKey,
+            label: tab.label,
+            url: typeof validatedUrl === 'string' ? validatedUrl : '',
+            errorDescription: String(errorDescription || ''),
+          });
+        }
       }
     });
     contents.on('did-stop-loading', () => {
@@ -5886,6 +5900,12 @@ export class BrowserHost extends EventEmitter {
     const now = Date.now();
     if (now - tab.takeoverRequestAt < 750) return;
     tab.takeoverRequestAt = now;
+    // 接管请求的来源排查口：白屏误触、真实手势混在一起时，靠这条日志区分
+    // 是键盘还是指针、落在哪个标签页上。
+    console.info(
+      `[browser-host] user interaction requested: source=${source} `
+      + `tab=${tab.label} session=${tab.sessionHash} runtime=${owner.runtimeKey}`,
+    );
     this.emit('user-interaction-requested', {
       runtimeKey: owner.runtimeKey,
       label: tab.label,

@@ -46,6 +46,10 @@ let nativeViewMounted = false;
 let lastNativeLayoutKey = '';
 let pendingNativeLayoutKey = '';
 let humanControlPromise: Promise<boolean> | null = null;
+/** 待用户确认的页面接管请求。非空 = 确认条可见；确认/忽略/AI 后续动作时清空。 */
+let takeoverPromptTab = '';
+/** 主框架加载失败（宿主 did-fail-load，已排除 ERR_ABORTED）。非空时收起原生视图、显示错误遮罩。 */
+let loadFailure: { tabLabel: string; url: string; description: string } | null = null;
 
 const GLOBE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>';
 const PLUS_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
@@ -137,7 +141,7 @@ function detachNativeView(force = false): void {
   lastNativeLayoutKey = '';
   pendingNativeLayoutKey = '';
   const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
-  if (empty && pageState?.tab_id) empty.hidden = false;
+  if (empty && pageState?.tab_id && !loadFailureVisible()) empty.hidden = false;
   void window.Crew?.browserViewHide?.();
 }
 
@@ -176,6 +180,8 @@ export function syncBrowserPanelSession(sessionId: string | null): void {
   socketOpen = false;
   streamStateRevision += 1;
   pageState = null;
+  takeoverPromptTab = '';
+  loadFailure = null;
   // Remove stale tab chrome/status immediately. Waiting for the next session's
   // REST/WS state leaves a window where old tabLabel is paired with new sessionId.
   patchChrome();
@@ -251,14 +257,57 @@ function bindGlobalListener(): void {
   if (typeof disposeNavigationListener === 'function') browserListenerDisposers.push(disposeNavigationListener);
   const disposeInteractionListener = window.Crew?.onBrowserViewInteractionRequested?.((event) => {
     if (event.tabLabel !== pageState?.tab_label || pageState.mode === 'human') return;
-    void ensureHumanControl('page');
+    // 页面内的真实输入不再静默接管：白屏/加载失败页面上的误触也会走到这里。
+    // 先挂一条非模态确认条，点「接管」才走 takeover；点「忽略」或 AI 后续
+    // 动作成功都会把它冲掉。
+    takeoverPromptTab = event.tabLabel;
+    renderTakeoverPrompt();
   });
   if (typeof disposeInteractionListener === 'function') browserListenerDisposers.push(disposeInteractionListener);
+  const disposeLoadFailedListener = window.Crew?.onBrowserViewLoadFailed?.((event) => {
+    if (event.tabLabel !== pageState?.tab_label) return;
+    loadFailure = {
+      tabLabel: event.tabLabel,
+      url: event.url,
+      description: event.errorDescription,
+    };
+    patchChrome();
+  });
+  if (typeof disposeLoadFailedListener === 'function') browserListenerDisposers.push(disposeLoadFailedListener);
+}
+
+/** 确认条只挂在 chrome 区：stage 上的任何 HTML 浮层都会被原生 WebContentsView 盖住。 */
+function renderTakeoverPrompt(): void {
+  const banner = document.querySelector<HTMLElement>('[data-browser-takeover]');
+  if (!banner) return;
+  banner.hidden = !(
+    takeoverPromptTab
+    && pageState?.tab_label === takeoverPromptTab
+    && pageState.mode !== 'human'
+  );
+}
+
+function loadFailureVisible(): boolean {
+  return Boolean(loadFailure && loadFailure.tabLabel === pageState?.tab_label);
+}
+
+function renderLoadFailure(): void {
+  const overlay = document.querySelector<HTMLElement>('[data-browser-load-error]');
+  if (!overlay) return;
+  const visible = loadFailureVisible();
+  overlay.hidden = !visible;
+  if (!visible || !loadFailure) return;
+  const url = overlay.querySelector<HTMLElement>('[data-browser-load-error-url]');
+  if (url) url.textContent = loadFailure.url;
+  const description = overlay.querySelector<HTMLElement>('[data-browser-load-error-description]');
+  if (description) description.textContent = loadFailure.description;
 }
 
 async function refreshPanelNavigation(tabLabel: string): Promise<void> {
   const sessionId = currentSession();
   if (!sessionId || !tabLabel || pageState?.tab_label !== tabLabel) return;
+  // did-navigate 已提交 = 新页面加载成功，旧的加载失败遮罩必须让位。
+  if (loadFailure?.tabLabel === tabLabel) loadFailure = null;
   const result = await window.Crew?.browserViewGetNavigation?.({ sessionId, tabLabel });
   if (
     !result?.ok
@@ -307,6 +356,11 @@ function applyEvent(event: BrowserEvent): void {
     // not rendered in the compact user browser chrome.
     return;
   } else if (event.type === 'action') {
+    // AI 还在正常出动作，说明刚才那条接管确认条是误触——自动收起，不打断流程。
+    if (takeoverPromptTab) {
+      takeoverPromptTab = '';
+      renderTakeoverPrompt();
+    }
     return;
   } else if (
     event.type === 'recording_limit'
@@ -396,11 +450,22 @@ export function renderBrowserPanel(options: { workspaceChrome?: boolean } = {}):
         </form>
         <div class="browser-recording" data-browser-recording role="status" aria-live="polite" hidden></div>
       </div>
+      <div class="browser-takeover" data-browser-takeover role="alert" hidden>
+        <span class="browser-takeover__text">检测到页面操作，是否接管浏览器？</span>
+        <button type="button" class="browser-takeover__btn browser-takeover__btn--primary" data-browser-takeover-action="confirm">接管</button>
+        <button type="button" class="browser-takeover__btn" data-browser-takeover-action="dismiss">忽略</button>
+      </div>
       <div class="browser-stage ${value.mode === 'human' ? 'is-interactive' : ''}" data-browser-stage aria-label="沙箱浏览器视图">
         <div class="browser-empty" data-browser-empty ${hasPage && !blankPage && nativeViewMounted ? 'hidden' : ''}>
           <span class="browser-empty__icon">${GLOBE_ICON}</span>
           <strong data-browser-empty-title>${blankPage ? '开始浏览' : '正在打开页面…'}</strong>
           <span data-browser-empty-description>${blankPage ? '输入 URL 以打开页面' : '页面加载后将在此显示'}</span>
+        </div>
+        <div class="browser-load-error" data-browser-load-error hidden>
+          <strong>页面加载失败</strong>
+          <span data-browser-load-error-url></span>
+          <span data-browser-load-error-description></span>
+          <button type="button" class="browser-load-error__retry" data-browser-load-retry>重试</button>
         </div>
         <div class="browser-status" data-browser-status role="status" aria-live="polite"></div>
       </div>
@@ -496,6 +561,20 @@ export function bindBrowserPanel(): void {
 
   document.querySelectorAll<HTMLButtonElement>('[data-browser-action]').forEach((button) => {
     button.addEventListener('click', () => void sendHumanControl(button.dataset.browserAction || ''));
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-browser-takeover-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const confirmed = button.dataset.browserTakeoverAction === 'confirm';
+      takeoverPromptTab = '';
+      renderTakeoverPrompt();
+      if (confirmed) void ensureHumanControl('page');
+    });
+  });
+  document.querySelector<HTMLButtonElement>('[data-browser-load-retry]')?.addEventListener('click', () => {
+    // 「重试」是显式 chrome 动作：与工具栏刷新同语义，先接管再重新加载。
+    loadFailure = null;
+    patchChrome();
+    void sendHumanControl('reload');
   });
   bindRecordingControls();
 
@@ -594,6 +673,12 @@ export type BrowserOpenDestination = 'in_app' | 'cancelled' | 'failed';
 type OpenUserBrowserOptions = {
   /** Creating a user tab changes the whole Crew browser session to human control. */
   confirmTakeover?: boolean;
+  /**
+   * Passive opens (auto-opening the panel to watch the AI) must not create a
+   * blank human tab when the session has no page yet — that would flip the
+   * whole session into human mode before the AI's first action lands.
+   */
+  createIfEmpty?: boolean;
 };
 
 async function approveHumanControl(sessionId: string): Promise<boolean> {
@@ -619,7 +704,8 @@ export async function openUserBrowser(
     // Clicking the global Browser entry is also how users watch an AI-owned
     // tab.  Merely revealing that tab must not silently switch the whole
     // session into human mode.  Only create a blank human tab when the
-    // session truly has no browser page yet.
+    // session truly has no browser page yet — and never on passive opens,
+    // which race ahead of the AI's first tab and would lock the AI out.
     if (!value.trim() && !newTab) {
       const existing = pageState?.tab_id
         ? pageState
@@ -627,7 +713,7 @@ export async function openUserBrowser(
       if (currentSession() !== sessionId) return 'failed';
       if (!isBrowserPageState(existing)) throw new Error('浏览器状态响应格式无效');
       applyPageState(existing);
-      if (existing.tab_id) {
+      if (existing.tab_id || options.createIfEmpty === false) {
         await ensureConnection(sessionId);
         return 'in_app';
       }
@@ -1265,6 +1351,7 @@ function syncNativeViewLayout(): void {
     || !document.contains(stage)
     || document.visibilityState !== 'visible'
     || visibleBlockingOverlay()
+    || loadFailureVisible()
   ) {
     detachNativeView();
     return;
@@ -1411,8 +1498,15 @@ function patchChrome(): void {
     );
   }
   document.querySelector<HTMLElement>('[data-browser-stage]')?.classList.toggle('is-interactive', value.mode === 'human');
+  renderTakeoverPrompt();
+  renderLoadFailure();
   const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
-  if (empty) empty.hidden = Boolean(value.tab_id && !isBlankBrowserUrl(value.url) && nativeViewMounted);
+  // 加载失败时白屏的原生视图已被收起（syncNativeViewLayout 不再挂载），
+  // 空态提示也不能露出来——那一屏只能有错误遮罩。
+  if (empty) {
+    empty.hidden = loadFailureVisible()
+      || Boolean(value.tab_id && !isBlankBrowserUrl(value.url) && nativeViewMounted);
+  }
   const blankPage = !value.tab_id || isBlankBrowserUrl(value.url);
   const emptyTitle = document.querySelector<HTMLElement>('[data-browser-empty-title]');
   if (emptyTitle) emptyTitle.textContent = blankPage ? '开始浏览' : '正在打开页面…';

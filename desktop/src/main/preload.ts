@@ -175,6 +175,19 @@ const api = {
     ipcRenderer.on('browser-view:interaction-requested', listener);
     return () => ipcRenderer.removeListener('browser-view:interaction-requested', listener);
   },
+  onBrowserViewLoadFailed: (cb: (event: {
+    tabLabel: string;
+    url: string;
+    errorDescription: string;
+  }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: {
+      tabLabel: string;
+      url: string;
+      errorDescription: string;
+    }) => cb(value);
+    ipcRenderer.on('browser-view:load-failed', listener);
+    return () => ipcRenderer.removeListener('browser-view:load-failed', listener);
+  },
   onBrowserViewLayoutInvalidated: (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on('browser-view:layout-invalidated', listener);

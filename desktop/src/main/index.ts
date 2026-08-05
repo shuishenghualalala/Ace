@@ -385,6 +385,17 @@ function ensureBrowserHost(): BrowserHost {
         source: record.source,
       });
     });
+    browserHost.on('tab-load-failed', (event: unknown) => {
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
+      const record = event as Record<string, unknown>;
+      const runtimeKey = currentBrowserRuntimeKey();
+      if (!runtimeKey || record.runtimeKey !== runtimeKey || typeof record.label !== 'string') return;
+      mainWindow?.webContents.send('browser-view:load-failed', {
+        tabLabel: record.label,
+        url: typeof record.url === 'string' ? record.url : '',
+        errorDescription: typeof record.errorDescription === 'string' ? record.errorDescription : '',
+      });
+    });
   }
   return browserHost;
 }

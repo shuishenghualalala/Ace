@@ -2283,7 +2283,9 @@ async function prepareBrowserWorkbench(
     commitDraftSession(sessionId, '浏览器', '内置浏览器');
     syncBrowserPanelSession(sessionId);
     if (createTab) await openUserBrowser('', true);
-    else await openUserBrowser();
+    // Auto-open (watching the AI) is passive: never create a human blank tab,
+    // just subscribe and wait for the AI's first tab to appear.
+    else await openUserBrowser('', false, { createIfEmpty: false });
   } catch (error) {
     notify(`浏览器启动失败：${(error as Error).message}`);
   } finally {
