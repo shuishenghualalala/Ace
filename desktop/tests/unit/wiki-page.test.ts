@@ -951,6 +951,54 @@ describe('分栏拖拽', () => {
     expect(document.querySelector('[data-wiki-catalog-sash]')).toBeNull();
     expect((document.querySelector('.wiki-list-pane') as HTMLElement).style.flex).toBe('');
   });
+
+  it('图谱画布内层把手：默认弹性无内联，拖拽固定像素并持久化，钳制 240/800，双击恢复弹性', async () => {
+    // vwFactor=0.5 的视口上限会压过 800 上限（happy-dom 默认 innerWidth 1024 → 上限 512），先拉宽视口再测钳制
+    Object.defineProperty(window, 'innerWidth', { value: 2000, configurable: true });
+    await refreshWikiData();
+    document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
+    const pane = document.querySelector('.wiki-list-pane') as HTMLElement;
+    const sash = document.querySelector('[data-wiki-graph-canvas-sash]') as HTMLElement;
+    expect(sash).not.toBeNull();
+    expect(document.querySelector('[data-wiki-catalog-sash]')).toBeNull();
+    // 未拖拽：1.5:1 弹性分配，无内联 flex
+    expect(pane.style.flex).toBe('');
+
+    // happy-dom 的 getBoundingClientRect 恒为 0：startX=0 → move 到 400，sign=+1 即拖出 400px
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 400, bubbles: true }));
+    expect(pane.style.flex).toBe('0 0 400px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('400');
+
+    // 重渲染后固定像素存活（压过 --graph 的弹性比例）
+    document.querySelector('[data-wiki-view="timeline"]')?.dispatchEvent(new Event('click'));
+    document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
+    const rebuilt = document.querySelector('.wiki-list-pane') as HTMLElement;
+    expect(rebuilt.style.flex).toBe('0 0 400px');
+
+    // 大幅左拖超过下限 → 钳到 240
+    const sash2 = document.querySelector('[data-wiki-graph-canvas-sash]') as HTMLElement;
+    sash2.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: -5000, bubbles: true }));
+    expect(rebuilt.style.flex).toBe('0 0 240px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('240');
+
+    // 大幅右拖超过上限 → 钳到 800
+    sash2.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
+    expect(rebuilt.style.flex).toBe('0 0 800px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('800');
+
+    // 双击复位：恢复弹性（无内联 flex），存储清除
+    sash2.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    const reset = document.querySelector('.wiki-list-pane') as HTMLElement;
+    expect(reset.style.flex).toBe('');
+    expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBeNull();
+    Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true });
+  });
 });
 
 describe('知识库面板收起/展开', () => {

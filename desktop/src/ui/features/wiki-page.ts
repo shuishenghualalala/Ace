@@ -583,10 +583,13 @@ const WIKI_CATALOG_DEFAULT_WIDTH = 240;
 const catalogWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiCatalogWidth.v1', min: 200, max: 480, vwFactor: 0.5 });
 /** 图谱视图下面板宽度（仅图谱视图）：null = 沿用 browserWidth；拖拽后固定为像素值并持久化，双击复位。 */
 const graphWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphWidth.v2', min: 280, vwFactor: 0.7 });
+/** 图谱画布（目录区）宽度（仅图谱视图）：null = 与详情 1.5:1 弹性分配；拖拽后固定像素并持久化，双击恢复弹性。 */
+const graphCanvasWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphCanvasWidth.v1', min: 240, max: 800, vwFactor: 0.5 });
 
 let browserWidth = browserWidthStore.load() ?? WIKI_BROWSER_DEFAULT_WIDTH;
 let catalogWidth = catalogWidthStore.load() ?? WIKI_CATALOG_DEFAULT_WIDTH;
 let graphWidth: number | null = graphWidthStore.load();
+let graphCanvasWidth: number | null = graphCanvasWidthStore.load();
 
 const WIKI_BROWSER_OPEN_KEY = 'crew.desktop.wikiBrowserOpen.v1';
 /** 右侧知识库面板展开/收起（持久化，默认展开）。收起走 CSS 隐藏，DOM 保留，编辑器/详情保活不受影响。 */
@@ -620,6 +623,7 @@ export function __setWikiViewForTest(patch: Partial<WikiViewState>): void {
 function resetWikiViewState(): void {
   view = initialViewState();
   graphWidth = null;
+  graphCanvasWidth = null;
   // 收起状态重新从 localStorage 读取（登录态变化后尊重用户持久化偏好，测试 stub 恒 null → 默认展开）
   try {
     wikiBrowserOpen = localStorage.getItem(WIKI_BROWSER_OPEN_KEY) !== '0';
@@ -1175,10 +1179,10 @@ function browserPaneStyleAttr(): string {
   return ` style="width: ${browserWidth}px"`;
 }
 
-/** 目录内联宽度（仅列表/树/类型视图）：用 flex 简写输出，压过 CSS 里 240px/窄窗口 220px 的 flex-basis 档位；
- * 图谱模式目录走 1.5:1 比例分配，不内联。 */
+/** 目录/图谱画布内联宽度：列表/树/类型视图固定目录宽度，用 flex 简写输出，压过 CSS 里 240px/窄窗口 220px 的 flex-basis 档位；
+ * 图谱模式未拖拽时走 1.5:1 比例分配不内联，拖拽后内联固定像素压过 --graph 的 flex 1.5。 */
 function catalogPaneStyleAttr(): string {
-  if (view.view === 'graph') return '';
+  if (view.view === 'graph') return graphCanvasWidth != null ? ` style="flex: 0 0 ${graphCanvasWidth}px"` : '';
   return ` style="flex: 0 0 ${catalogWidth}px"`;
 }
 
@@ -1254,7 +1258,9 @@ function renderShell(): void {
             <nav class="hub-segment wiki-view-tabs" aria-label="列表视图">${tabs}</nav>
             <div class="wiki-list-scroll${graphMode ? ' wiki-list-scroll--graph' : ''}">${listBody}</div>
           </div>
-          ${graphMode ? '' : '<div class="wiki-sash wiki-sash--inner" data-wiki-catalog-sash role="separator" aria-orientation="vertical" title="拖拽调整目录宽度，双击复位"></div>'}
+          ${graphMode
+            ? '<div class="wiki-sash wiki-sash--inner" data-wiki-graph-canvas-sash role="separator" aria-orientation="vertical" title="拖拽调整图谱宽度，双击恢复弹性比例"></div>'
+            : '<div class="wiki-sash wiki-sash--inner" data-wiki-catalog-sash role="separator" aria-orientation="vertical" title="拖拽调整目录宽度，双击复位"></div>'}
           <div class="wiki-detail-pane">${detailHtml()}</div>
         </div>
       </div>`;
@@ -1861,6 +1867,27 @@ function bindEvents(): void {
       onReset: () => {
         catalogWidth = WIKI_CATALOG_DEFAULT_WIDTH;
         catalogWidthStore.persist(catalogWidth);
+        renderShell();
+      },
+    });
+  });
+
+  // ── 图谱画布内层把手（在画布右缘，sign=+1）：往右拖画布变宽；仅图谱视图渲染，双击清除固定像素恢复 1.5:1 弹性比例 ──
+  $$w('[data-wiki-graph-canvas-sash]').forEach((sash) => {
+    const pane = root.querySelector<HTMLElement>('.wiki-list-pane');
+    if (!pane) return;
+    bindPaneSash(sash, {
+      // 未拖拽时画布是弹性宽度（graphCanvasWidth 为 null），起始宽度取实际测量值
+      startWidth: () => graphCanvasWidth ?? pane.getBoundingClientRect().width,
+      onDrag: (w) => {
+        graphCanvasWidth = graphCanvasWidthStore.clamp(w);
+        pane.style.flex = `0 0 ${graphCanvasWidth}px`;
+      },
+      onCommit: () => graphCanvasWidthStore.persist(graphCanvasWidth),
+      // 双击复位：清掉拖拽固定像素，回到 1.5:1 弹性分配
+      onReset: () => {
+        graphCanvasWidth = null;
+        graphCanvasWidthStore.persist(null);
         renderShell();
       },
     });

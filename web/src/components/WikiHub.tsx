@@ -138,6 +138,63 @@ export default function WikiHub({
       // ignore storage errors
     }
   };
+
+  // 图谱模式下 图谱↔详情 分隔线同样可拖：拖动时按像素固定画布宽度（240–800），
+  // 双击复位为弹性比例分配（CSS 1.2:1）。null 表示弹性。
+  const GRAPH_MIN = 240;
+  const GRAPH_MAX = 800;
+  const [graphCanvasWidth, setGraphCanvasWidth] = useState<number | null>(() => {
+    try {
+      const raw = window.localStorage.getItem("crew:wiki-graph-width");
+      const n = raw ? Number(raw) : NaN;
+      return Number.isFinite(n) ? Math.min(Math.max(n, GRAPH_MIN), GRAPH_MAX) : null;
+    } catch {
+      return null;
+    }
+  });
+  const graphDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const graphCanvasWidthRef = useRef(graphCanvasWidth);
+  graphCanvasWidthRef.current = graphCanvasWidth;
+
+  const handleGraphSashDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    // 弹性态下起始宽度取画布当前实际宽度
+    const catalogEl = (e.currentTarget as HTMLElement).previousElementSibling as HTMLElement | null;
+    const startWidth = graphCanvasWidth ?? catalogEl?.getBoundingClientRect().width ?? 400;
+    graphDragRef.current = { startX: e.clientX, startWidth };
+    const onMove = (ev: MouseEvent) => {
+      const start = graphDragRef.current;
+      if (!start) return;
+      const next = Math.min(Math.max(start.startWidth + (ev.clientX - start.startX), GRAPH_MIN), GRAPH_MAX);
+      setGraphCanvasWidth(next);
+    };
+    const onUp = () => {
+      graphDragRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      try {
+        const w = graphCanvasWidthRef.current;
+        if (w !== null) window.localStorage.setItem("crew:wiki-graph-width", String(w));
+      } catch {
+        // ignore storage errors
+      }
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
+  const handleGraphSashReset = () => {
+    setGraphCanvasWidth(null);
+    try {
+      window.localStorage.removeItem("crew:wiki-graph-width");
+    } catch {
+      // ignore storage errors
+    }
+  };
   // 右侧知识库面板（目录+详情）展开/收起，持久化到 localStorage。
   const [browserOpen, setBrowserOpen] = useState(() => {
     try {
@@ -1081,7 +1138,13 @@ export default function WikiHub({
           >
           <div
             className="wiki-browser__catalog wiki-tree"
-            style={viewMode === "graph" ? undefined : { flex: `0 0 ${catalogWidth}px` }}
+            style={
+              viewMode === "graph"
+                ? graphCanvasWidth !== null
+                  ? { flex: `0 0 ${graphCanvasWidth}px` }
+                  : undefined
+                : { flex: `0 0 ${catalogWidth}px` }
+            }
           >
             <div className="wiki-view-switcher">
               {viewTabs.map((tab) => (
@@ -1124,17 +1187,15 @@ export default function WikiHub({
             )}
           </div>
 
-          {viewMode !== "graph" && (
-            <div
-              className="wiki-browser__sash"
-              onMouseDown={handleCatalogSashDown}
-              onDoubleClick={handleCatalogSashReset}
-              role="separator"
-              aria-label="调整目录宽度"
-              aria-orientation="vertical"
-              title="拖拽调整目录宽度，双击复位"
-            />
-          )}
+          <div
+            className="wiki-browser__sash"
+            onMouseDown={viewMode === "graph" ? handleGraphSashDown : handleCatalogSashDown}
+            onDoubleClick={viewMode === "graph" ? handleGraphSashReset : handleCatalogSashReset}
+            role="separator"
+            aria-label="调整目录宽度"
+            aria-orientation="vertical"
+            title={viewMode === "graph" ? "拖拽调整图谱宽度，双击恢复弹性比例" : "拖拽调整目录宽度，双击复位"}
+          />
 
           <div className="wiki-browser__detail wiki-panel">
             {selectedDocumentName ? (
