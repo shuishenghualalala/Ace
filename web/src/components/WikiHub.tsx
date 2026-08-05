@@ -803,7 +803,12 @@ export default function WikiHub({
             kbId={kbId}
             pages={pages}
             selectedId={selectedId}
-            onSelectPage={(p) => setSelectedId(p.id)}
+            onSelectPage={(p) => {
+              // 与列表点击一致：清掉 vault 文档态，否则详情仍停在 Home.md/index.md
+              setSelectedDocumentName(null);
+              setVaultDocument(null);
+              setSelectedId(p.id);
+            }}
           />
         );
       case "timeline":

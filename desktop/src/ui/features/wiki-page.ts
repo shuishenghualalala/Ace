@@ -1502,7 +1502,16 @@ async function loadPageDetail(pageId: string): Promise<void> {
  * 图谱节点可能不在已分页加载的列表里），避免先闪一帧空正文再切加载文案。
  */
 function selectWikiPage(pageId: string, opts?: { expandTree?: boolean }): void {
-  if (pageId === view.selectedId) return;
+  // 从 vault 文档（Home.md/index.md）切回页面：清掉文档态，否则 detailHtml 仍优先显示文档。
+  // 图谱节点点击走 onSelectPage 直接调这里，不经过列表条目的清理逻辑，必须在这里兜底。
+  const hadDocument = view.selectedDocumentName !== null;
+  view.selectedDocumentName = null;
+  view.vaultDocument = null;
+  if (pageId === view.selectedId) {
+    // 已选中但详情停在文档态时，重渲染让详情切回页面。
+    if (hadDocument) renderShell();
+    return;
+  }
   const previousId = view.selectedId;
   if (previousId && detailEditorHandle && detailDirty) void saveWikiPageDraft(previousId);
   view.selectedId = pageId;
