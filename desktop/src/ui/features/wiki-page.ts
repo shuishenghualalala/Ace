@@ -650,6 +650,11 @@ export function __resetWikiViewForTest(): void {
 
 // ── 渲染 ──
 
+/** 工具栏/标签用线性图标（crew-ui-symbols 雪碧图，风格与全局一致）。 */
+function uiIcon(symbolId: string): string {
+  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="./crew-ui-symbols.svg#${symbolId}"></use></svg>`;
+}
+
 function wikiIcon(name: 'folder' | 'caret', size: number): string {
   if (name === 'folder') {
     return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 2H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></svg>`;
@@ -1199,16 +1204,17 @@ function renderShell(): void {
         .join('')
     : '<option value="" selected>暂无知识库</option>';
 
-  const viewTabs: Array<{ key: WikiListView; label: string }> = [
-    { key: 'timeline', label: '时间线' },
-    { key: 'tree', label: '文件树' },
-    { key: 'type', label: '类型' },
-    { key: 'graph', label: '图谱' },
+  // 视图标签只显示图标（对齐 web WikiHub），原文字保留在 title/aria-label 供悬停提示与无障碍。
+  const viewTabs: Array<{ key: WikiListView; label: string; icon: string }> = [
+    { key: 'timeline', label: '时间线', icon: 'icon-history' },
+    { key: 'tree', label: '文件树', icon: 'icon-folder-line' },
+    { key: 'type', label: '类型', icon: 'icon-tag' },
+    { key: 'graph', label: '图谱', icon: 'icon-graph' },
   ];
   const tabs = viewTabs
     .map(
       (t) =>
-        `<button type="button" class="hub-segment__item${view.view === t.key ? ' is-active' : ''}" data-wiki-view="${t.key}">${t.label}</button>`,
+        `<button type="button" class="hub-segment__item${view.view === t.key ? ' is-active' : ''}" data-wiki-view="${t.key}" title="${t.label}" aria-label="${t.label}">${uiIcon(t.icon)}</button>`,
     )
     .join('');
 
@@ -1269,13 +1275,17 @@ function renderShell(): void {
   const uploadDisabled = !view.kbId;
   const batchToggle =
     view.kbId && !view.selecting && view.pages.length > 0 && view.view !== 'graph'
-      ? '<button type="button" class="hub-refresh-btn" data-batch-toggle title="批量选择页面以批量删除">批量管理</button>'
+      ? `<button type="button" class="hub-refresh-btn" data-batch-toggle title="批量选择页面以批量删除" aria-label="批量管理">${uiIcon('icon-checks')}</button>`
       : '';
   // 重建代价高的三棵子树在状态未变时保留活节点，避免每次点击都推倒重来：
   // 对话面板（整段会话重渲染 + markdown 重解析 + 强制滚底）、详情栏（fold observer 与
   // 已解析正文）、图谱画布（SVG 全量重建 + 逐节点重绑事件，wiki-graph 内部另有签名比对）。
   const liveAgentPanel = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
   const keepAgentPanel = view.kbId && liveAgentPanel?.dataset.kbId === view.kbId ? liveAgentPanel : null;
+  // 面板节点虽被保留，但 innerHTML 重建会把它短暂 detach，浏览器把内部滚动位置
+  // 重置为 0（对话跳回最早消息）。与 listScrollMemory 同理：先记后恢复。
+  const agentMessagesScrollTop =
+    keepAgentPanel?.querySelector<HTMLElement>('[data-wiki-agent-messages]')?.scrollTop ?? 0;
   const detailSigNow = currentDetailSig();
   const liveDetailPane = root.querySelector<HTMLElement>('.wiki-detail-pane');
   const keepDetailPane = liveDetailPane && !view.selectedDocumentName && lastDetailSig && sameDetailSig(lastDetailSig, detailSigNow) ? liveDetailPane : null;
@@ -1291,11 +1301,11 @@ function renderShell(): void {
         </div>
         <div class="page-header__actions">
           <select id="wiki-kb-select" class="wiki-kb-select" title="选择知识库" aria-label="选择知识库"${view.kbs.length === 0 ? ' disabled' : ''}>${kbOptions}</select>
-          <button type="button" class="hub-refresh-btn" data-kb-create-toggle title="新建知识库">新建</button>
-          <button type="button" class="hub-refresh-btn" data-kb-delete title="删除当前知识库、原始素材及专属 Wiki 问答历史（内置知识库不可删）"${!view.kbId || view.kbId === DEFAULT_KB_ID || view.kbId === TUTORIAL_KB_ID ? ' disabled' : ''}>删除</button>
-          <button type="button" class="hub-refresh-btn" data-upload title="上传文件到知识库"${uploadDisabled ? ' disabled' : ''}>上传</button>
+          <button type="button" class="hub-refresh-btn" data-kb-create-toggle title="新建知识库" aria-label="新建知识库">${uiIcon('icon-plus')}</button>
+          <button type="button" class="hub-refresh-btn" data-kb-delete title="删除当前知识库、原始素材及专属 Wiki 问答历史（内置知识库不可删）" aria-label="删除知识库"${!view.kbId || view.kbId === DEFAULT_KB_ID || view.kbId === TUTORIAL_KB_ID ? ' disabled' : ''}>${uiIcon('icon-trash')}</button>
+          <button type="button" class="hub-refresh-btn" data-upload title="上传文件到知识库" aria-label="上传文件"${uploadDisabled ? ' disabled' : ''}>${uiIcon('icon-upload')}</button>
           ${batchToggle}
-          <button type="button" class="hub-refresh-btn" data-wiki-browser-toggle title="收起/展开知识库面板" aria-pressed="${wikiBrowserOpen}">知识库面板</button>
+          <button type="button" class="hub-refresh-btn" data-wiki-browser-toggle title="收起/展开知识库面板" aria-label="知识库面板" aria-pressed="${wikiBrowserOpen}">${uiIcon('icon-panel-right')}</button>
           <button type="button" class="hub-refresh-btn hub-refresh-btn--help" data-wiki-tour title="使用导览" aria-label="使用导览">?</button>
         </div>
       </header>
@@ -1310,6 +1320,8 @@ function renderShell(): void {
     if (placeholder) {
       placeholder.replaceWith(keepAgentPanel);
       agentPanelKept = true;
+      const messagesEl = keepAgentPanel.querySelector<HTMLElement>('[data-wiki-agent-messages]');
+      if (messagesEl && agentMessagesScrollTop > 0) messagesEl.scrollTop = agentMessagesScrollTop;
     }
   }
   const detailPlaceholder = root.querySelector<HTMLElement>('.wiki-detail-pane');
@@ -1724,6 +1736,19 @@ export function openWikiPageInHub(pageId: string): boolean {
 
 // ── 事件绑定 ──
 
+/** 调主进程用系统默认程序打开 Wiki 来源的原始文件（docx → Word/WPS 等）。 */
+async function openWikiSourceFile(sourceId: string, kbId?: string): Promise<void> {
+  if (!window.Crew?.openWikiSourceFile) {
+    notify('当前环境不支持打开原始文件');
+    return;
+  }
+  try {
+    await window.Crew.openWikiSourceFile(sourceId, kbId);
+  } catch (error) {
+    notify(`打开原始文件失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function bindEvents(): void {
   // 选择器必须限定在本页容器内：各 tab 页常驻 DOM（隐藏而非移除），
   // document 级 $$ 会误绑到其他页面的同名 data-* 元素（如 skills 页的 [data-refresh]）。
@@ -1956,6 +1981,20 @@ function bindEvents(): void {
   if (root.dataset.wikiRelBound !== 'true') {
     root.dataset.wikiRelBound = 'true';
     root.addEventListener('click', (e) => {
+      // 「打开原始文件」链接（/api/wiki/sources/{id}/file）：web 端相对地址
+      // 指向 gateway 可直接打开；桌面端渲染进程够不到 gateway，拦截后交给
+      // 主进程查询原始路径并用系统默认程序打开。
+      const fileLink = (e.target as HTMLElement).closest('a[href*="/api/wiki/sources/"]') as HTMLAnchorElement | null;
+      if (fileLink) {
+        const href = fileLink.getAttribute('href') ?? '';
+        const match = href.match(/\/api\/wiki\/sources\/([^/?]+)\/file(?:\?|$)/);
+        if (match) {
+          e.preventDefault();
+          const kbFromHref = new URLSearchParams(href.split('?')[1] ?? '').get('kb_id');
+          void openWikiSourceFile(decodeURIComponent(match[1]), kbFromHref || undefined);
+          return;
+        }
+      }
       const askBtn = (e.target as HTMLElement).closest('[data-wiki-ask]') as HTMLElement | null;
       if (askBtn) {
         fireWikiAgentPrompt(askBtn.getAttribute('data-wiki-ask') ?? '');

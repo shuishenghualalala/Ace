@@ -35,6 +35,9 @@ const api = {
   /** 静默探测路径是否为可读文件；不存在时返回 false，不抛错、不刷主进程 ENOENT 日志。 */
   pathExists: (p: string) => ipcRenderer.invoke('shell:pathExists', { path: p }) as Promise<boolean>,
   showItemInFolder: (p: string) => ipcRenderer.invoke('shell:showItemInFolder', { path: p }),
+  /** 用系统默认程序打开 Wiki 来源的原始文件（路径由主进程向 gateway 查询并校验）。 */
+  openWikiSourceFile: (sourceId: string, kbId?: string) =>
+    ipcRenderer.invoke('wiki:openSourceFile', { sourceId, kbId }) as Promise<{ ok: true }>,
   listOpenApplications: (p: string) => ipcRenderer.invoke('shell:listOpenApplications', { path: p }) as Promise<Array<{ id: string; name: string }>>,
   openPathWith: (p: string, applicationId: string) =>
     ipcRenderer.invoke('shell:openPathWith', { path: p, applicationId }) as Promise<{ ok: true }>,

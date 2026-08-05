@@ -53,7 +53,8 @@ import {
   FeedbackImageArgs,
   DialogSelectFileArgs,
   DialogSelectFolderArgs,
-  UpdateStartDownloadArgs
+  UpdateStartDownloadArgs,
+  WikiOpenSourceFileArgs
 } from '../shared/ipc-schemas';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
@@ -2175,6 +2176,48 @@ function registerIpc() {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:openPathWith target is not a file`);
     }
     await openFileWithApplication(resolved, args.applicationId);
+    return { ok: true as const };
+  });
+
+  /**
+   * wiki:openSourceFile — 用系统默认程序打开 Wiki 来源的原始文件。
+   *
+   * 渲染进程只传 sourceId/kbId（不可信）；主进程向 gateway 查询来源元数据拿到
+   * original_path，realpath 校验必须落在 CREW_HOME 内（wiki_lib/uploads 等都在
+   * 其下），再 shell.openPath。渲染进程无法借此打开 CREW_HOME 外的任意文件。
+   */
+  trustedHandle('wiki:openSourceFile', async (_e, raw: unknown) => {
+    const args = parseOrThrow(WikiOpenSourceFileArgs.parse(raw), 'wiki:openSourceFile');
+    const ensured = await ensureGateway();
+    const kbId = args.kbId || 'default';
+    const listPath = `/api/wiki/sources?kb_id=${encodeURIComponent(kbId)}`;
+    const res = await fetch(new URL(listPath, ensured.baseUrl).toString(), {
+      headers: { ...gatewayAccessHeaders(listPath) },
+    });
+    if (!res.ok) {
+      throw new Error(`查询 Wiki 来源失败（HTTP ${res.status}）`);
+    }
+    const payload = await res.json() as {
+      sources?: Array<{ id?: string; original_path?: string | null }>;
+    };
+    const source = (payload.sources ?? []).find((item) => item.id === args.sourceId);
+    const originalPath = String(source?.original_path ?? '').trim();
+    if (!source || !originalPath) {
+      throw new Error('找不到该来源的原始文件');
+    }
+    const crewHomeReal = await fs.promises.realpath(resolveCrewHome());
+    const real = await fs.promises.realpath(path.resolve(originalPath));
+    if (real !== crewHomeReal && !real.startsWith(`${crewHomeReal}${path.sep}`)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: wiki source file outside CREW_HOME`);
+    }
+    const stat = await fs.promises.stat(real);
+    if (!stat.isFile()) {
+      throw new Error('原始文件不是普通文件');
+    }
+    const openError = await shell.openPath(real);
+    if (openError) {
+      throw new Error(openError);
+    }
     return { ok: true as const };
   });
 

@@ -16,6 +16,7 @@ import {
   ShellOpenExternalArgs,
   ShellOpenPathArgs,
   ShellOpenPathWithArgs,
+  WikiOpenSourceFileArgs,
   FeedbackSubmitArgs,
   FeedbackListArgs,
   DialogSelectFileArgs,
@@ -140,6 +141,27 @@ describe('ShellOpenPathWithArgs', () => {
       path: '/tmp/report.docx',
       applicationId: '',
     }).ok).toBe(false);
+  });
+});
+
+describe('WikiOpenSourceFileArgs', () => {
+  it('accepts a source id with optional kb id', () => {
+    const withKb = WikiOpenSourceFileArgs.parse({ sourceId: 'upload_e1167aa49635', kbId: 'default' });
+    expect(withKb.ok).toBe(true);
+    const withoutKb = WikiOpenSourceFileArgs.parse({ sourceId: 'upload_e1167aa49635' });
+    expect(withoutKb.ok).toBe(true);
+  });
+
+  it('rejects missing/invalid source ids', () => {
+    expect(WikiOpenSourceFileArgs.parse({}).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: '' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: '../etc/passwd' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'a b' }).ok).toBe(false);
+  });
+
+  it('rejects kb ids with path separators', () => {
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'upload_abc', kbId: '../x' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'upload_abc', kbId: 'a/b' }).ok).toBe(false);
   });
 });
 

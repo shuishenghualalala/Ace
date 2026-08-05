@@ -263,6 +263,38 @@ export const ShellOpenPathWithArgs = {
   },
 };
 
+/**
+ * wiki:openSourceFile args（仅结构校验）。
+ * 渲染进程只传 sourceId/kbId，文件路径由主进程向 gateway 查询来源元数据后
+ * 自行校验（必须在 CREW_HOME 内）再打开，渲染进程无法伪造任意路径。
+ */
+export interface WikiOpenSourceFileArgs {
+  sourceId: string;
+  kbId?: string;
+}
+
+export const WikiOpenSourceFileArgs = {
+  parse(raw: unknown): ParseResult<WikiOpenSourceFileArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const sourceId = StringSchema.parse(raw['sourceId'], 'sourceId');
+    if (!sourceId.ok) return sourceId;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(sourceId.value)) {
+      return fail('sourceId', 'invalid characters');
+    }
+    const value: WikiOpenSourceFileArgs = { sourceId: sourceId.value };
+    const kbId = raw['kbId'];
+    if (kbId !== undefined && kbId !== null) {
+      const k = StringSchema.parse(kbId, 'kbId');
+      if (!k.ok) return k;
+      if (/[/\\:]/.test(k.value) || k.value.includes('\0') || k.value.length > 64) {
+        return fail('kbId', 'invalid characters');
+      }
+      value.kbId = k.value;
+    }
+    return { ok: true, value };
+  },
+};
+
 export interface ShellWriteTextFileArgs {
   path: string;
   content: string;

@@ -14,7 +14,9 @@ type IconName =
   | "panel-right"
   | "history"
   | "tags"
-  | "graph";
+  | "graph"
+  | "check-square"
+  | "square";
 
 interface Props extends SVGProps<SVGSVGElement> {
   name: IconName;
@@ -149,6 +151,21 @@ export default function WikiIcon({ name, size = 16, className = "", ...rest }: P
           <line x1="15.41" x2="8.59" y1="6.51" y2="10.49" />
         </svg>
       );
+    case "check-square":
+      return (
+        <svg {...svgProps}>
+          <rect width="18" height="18" x="3" y="3" rx="2" />
+          <path d="m9 12 2 2 4-4" />
+        </svg>
+      );
+    case "square":
+      return (
+        <svg {...svgProps}>
+          <rect width="18" height="18" x="3" y="3" rx="2" />
+        </svg>
+      );
+    default:
+      return null;
   }
 }
 

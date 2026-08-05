@@ -73,6 +73,7 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       sessionTodos: vi.fn(),
       getSessionModel: vi.fn(),
       setSessionModel: vi.fn(),
+      deleteSession: vi.fn(async () => ({ ok: true })),
       sessions: vi.fn(async () => []),
       channelSessions: vi.fn(async () => ({ platforms: [] })),
     },
@@ -137,6 +138,7 @@ const api = backendApi as unknown as {
   sessionTodos: ReturnType<typeof vi.fn>;
   getSessionModel: ReturnType<typeof vi.fn>;
   setSessionModel: ReturnType<typeof vi.fn>;
+  deleteSession: ReturnType<typeof vi.fn>;
 };
 
 const mockSelectFile = vi.fn();
@@ -317,6 +319,49 @@ describe('wiki_cards 渲染', () => {
     expect(viewBtn?.textContent).toBe('查看');
   });
 
+  it('点卡片「查看」打开详情时不动左侧对话（DOM 与滚动位置保持）', async () => {
+    await enterWiki();
+    const rid = await sendAndGetRequestId('查一下');
+    applyChunk({
+      kind: 'final',
+      body: { text: '这是答案' },
+      session_id: WIKI_SID,
+      request_id: rid,
+      sequence: 2,
+      is_final: true,
+    } as ChatChunk);
+    applyChunk({
+      kind: 'wiki_cards',
+      body: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法' })] },
+      session_id: WIKI_SID,
+      request_id: rid,
+      sequence: 3,
+      is_final: false,
+    } as ChatChunk);
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-view-page]')).not.toBeNull());
+
+    const messages = document.querySelector<HTMLElement>('[data-wiki-agent-messages]')!;
+    const cardsPanel = messages.querySelector('.wiki-cards-panel');
+    // 记录滚动写入：谁动了 scrollTop 一览无遗
+    const scrollWrites: number[] = [];
+    let scrollValue = 456;
+    Object.defineProperty(messages, 'scrollTop', {
+      get: () => scrollValue,
+      set: (v: number) => { scrollWrites.push(v); scrollValue = v; },
+      configurable: true,
+    });
+
+    (document.querySelector('[data-wiki-view-page]') as HTMLElement).click();
+    await vi.waitFor(() => expect(api.wikiPage).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(messages.isConnected).toBe(true);
+    expect(messages.querySelector('.wiki-cards-panel')).toBe(cardsPanel);
+    // renderShell 重建时短暂 detach 会重置浏览器滚动位置,修复后应恢复为记住的值
+    expect(scrollWrites).toContain(456);
+    expect(scrollValue).toBe(456);
+  });
+
   it('旧 request_id 的迟到 wiki_cards 被 turn gate 丢弃', async () => {
     await enterWiki();
     const rid = await sendAndGetRequestId('查一下');
@@ -422,6 +467,51 @@ describe('wiki-page 入口挂点', () => {
     expect(payload.query).toBe('总结当前知识库');
     expect(payload.wiki_kb_id).toBe('default');
     expect(uiStore.get().activeTab).toBe('wiki');
+  });
+
+  it('面板内消息复制按钮可用（不依赖 #chat-messages 的全局委托）', async () => {
+    uiStore.set({ activeTab: 'wiki' });
+    await refreshWikiData();
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+
+    const messages = document.querySelector<HTMLElement>('[data-wiki-agent-messages]')!;
+    messages.innerHTML = '<button type="button" class="chat-copy-btn" data-copy="复制这段">复制</button>';
+    messages.querySelector<HTMLButtonElement>('.chat-copy-btn')!.click();
+
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('复制这段'));
+  });
+
+  it('历史对话浮层支持删除非当前会话', async () => {
+    uiStore.set({ activeTab: 'wiki' });
+    await refreshWikiData();
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+
+    api.wikiAgentSessions.mockResolvedValue({
+      ok: true,
+      kb_id: 'default',
+      sessions: [
+        { session_id: WIKI_SID, title: '当前会话', updated_at: NOW, message_count: 2 },
+        { session_id: 'wiki-old-1', title: '旧会话', updated_at: NOW - 60, message_count: 1 },
+      ],
+    });
+
+    document.querySelector<HTMLButtonElement>('[data-wiki-agent-history]')!.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-wiki-agent-history-delete="wiki-old-1"]')).not.toBeNull();
+    });
+
+    document.querySelector<HTMLButtonElement>('[data-wiki-agent-history-delete="wiki-old-1"]')!.click();
+
+    await vi.waitFor(() => expect(api.deleteSession).toHaveBeenCalledWith('wiki-old-1'));
+    expect(mockShowConfirmDialog).toHaveBeenCalled();
+    // 删的不是当前会话：不触发切换/新建。
+    expect(api.wikiAgentSession).not.toHaveBeenCalledWith('default', { forceNew: true });
   });
 
   it('删除 KB 后清理内嵌会话缓存，同名 KB 会重新向后端取会话', async () => {

@@ -102,6 +102,24 @@
   padding: 0 6px;
 }
 
+/* 工具栏/视图标签的线性图标尺寸与对齐（crew-ui-symbols 雪碧图） */
+.ui-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+/* Wiki 页头图标按钮：图标居中（限本页作用域，不影响其他页的文字按钮版式） */
+.page-shell--wiki .hub-refresh-btn {
+  justify-content: center;
+  gap: 5px;
+}
+
+/* 激活标签的图标描边跟随激活蓝（sprite 描边走 --crew-line 变量，顶替原来的文字变色提示） */
+.wiki-view-tabs .hub-segment__item.is-active .ui-icon {
+  --crew-line: #2463eb;
+}
+
 .wiki-list-scroll {
   flex: 1 1 auto;
   min-height: 0;

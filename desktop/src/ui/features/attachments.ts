@@ -131,8 +131,8 @@ export function renderAttachmentPreview(): void {
   void refreshFileQaHint();
 }
 
-/** 非图片附件：扩展名图标 + 文件名 + 类型/大小 + 移除。 */
-function buildFileChip(a: Attachment): HTMLElement {
+/** 非图片附件：扩展名图标 + 文件名 + 类型/大小 + 移除。onRemove 缺省时操作主对话附件状态。 */
+function buildFileChip(a: Attachment, onRemove?: (attId: string) => void): HTMLElement {
   const chip = document.createElement('div');
   chip.className = 'chat-attachment-chip';
   chip.dataset.attId = a.id;
@@ -150,12 +150,17 @@ function buildFileChip(a: Attachment): HTMLElement {
   meta.className = 'chat-attachment-chip__meta';
   meta.textContent = `${a.type}${a.size ? ` · ${Math.max(1, Math.round(a.size / 1024))}KB` : ''}`;
   copy.append(name, meta);
-  chip.append(icon, copy, buildRemoveBtn(a.id));
+  chip.append(icon, copy, buildRemoveBtn(a.id, onRemove));
   return chip;
 }
 
+/** 与主对话完全一致的附件预览卡片，移除回调由调用方提供（Wiki Agent 面板等复用）。 */
+export function buildAttachmentChip(a: Attachment, onRemove: (attId: string) => void): HTMLElement {
+  return a.type === 'image' ? buildImageCard(a, onRemove) : buildFileChip(a, onRemove);
+}
+
 /** 图片附件：缩略图（点击查看大图）+ 文件名 + 移除。 */
-function buildImageCard(a: Attachment): HTMLElement {
+function buildImageCard(a: Attachment, onRemove?: (attId: string) => void): HTMLElement {
   const card = document.createElement('div');
   card.className = 'chat-attachment-thumb';
   card.dataset.attId = a.id;
@@ -176,11 +181,11 @@ function buildImageCard(a: Attachment): HTMLElement {
   meta.className = 'chat-attachment-thumb__meta';
   meta.textContent = a.name;
   meta.title = a.name;
-  card.append(view, meta, buildRemoveBtn(a.id));
+  card.append(view, meta, buildRemoveBtn(a.id, onRemove));
   return card;
 }
 
-function buildRemoveBtn(attId: string): HTMLButtonElement {
+function buildRemoveBtn(attId: string, onRemove?: (attId: string) => void): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'chat-attachment-chip__remove';
@@ -189,6 +194,10 @@ function buildRemoveBtn(attId: string): HTMLButtonElement {
   btn.textContent = '×';
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
+    if (onRemove) {
+      onRemove(attId);
+      return;
+    }
     const idx = state.attachments.findIndex((x) => x.id === attId);
     if (idx >= 0) removeAttachmentAt(idx);
     renderAttachmentPreview();

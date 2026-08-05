@@ -45,7 +45,7 @@ import {
   type TodoItem,
 } from '../state';
 import { messageStore, sessionStore } from '../stores/stores';
-import { bindFileDrop, bindFilePaste } from './attachments';
+import { bindFileDrop, bindFilePaste, buildAttachmentChip } from './attachments';
 import {
   autoresizeTextarea,
   bindComposerIme,
@@ -721,6 +721,12 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   });
   root.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    // 消息复制按钮的全局委托绑在 #chat-messages 上，够不到本面板，这里补一份。
+    const copyBtn = target?.closest<HTMLElement>('.chat-copy-btn');
+    if (copyBtn) {
+      void navigator.clipboard.writeText(copyBtn.getAttribute('data-copy') ?? '').then(() => notify('已复制'));
+      return;
+    }
     const deleteSessionId = target?.closest<HTMLElement>('[data-wiki-agent-history-delete]')
       ?.dataset.wikiAgentHistoryDelete;
     if (deleteSessionId) {
