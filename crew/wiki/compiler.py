@@ -188,8 +188,8 @@ _SHORT_SOURCE_THRESHOLD = 1_000
 _LONG_SOURCE_ENTITY_LIMIT = 5
 _LONG_SOURCE_TOPIC_LIMIT = 3
 _SHORT_SOURCE_ENTITY_LIMIT = 3
-# 推理型模型（如 deepseek-v4 系列）会先烧掉一笔不可见的推理 token，2500 的
-# 上限会让正文一个字都吐不出来（实测空返回）；8000 只是上限而非目标，
+# 推理型模型（如 deepseek-v4 系列）会先烧掉一笔不可见的推理 token，过小的
+# 上限会让正文一个字都吐不出来（实测空返回）；这里只是上限而非目标，
 # 非推理模型不受影响。
 _ANALYSIS_MAX_TOKENS = 20_000
 
@@ -2313,10 +2313,12 @@ class WikiCompiler:
         warnings: list[str] = []
         for attempt in range(_ANALYZE_CHUNK_MAX_RETRIES + 1):
             try:
+                # 推理型模型的"思考" token 与正文共享预算：文档越大推理消耗越多，
+                # 首轮预算可能全被推理烧掉导致正文为空；重试时预算翻倍兜底。
                 text = await chat_text(
                     self._provider_for_owner(self._analysis_owner.get()),
                     messages,
-                    max_tokens=_ANALYSIS_MAX_TOKENS,
+                    max_tokens=_ANALYSIS_MAX_TOKENS * (attempt + 1),
                 )
                 if not text:
                     raise ValueError("LLM 返回为空")

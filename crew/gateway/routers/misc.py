@@ -59,6 +59,7 @@ def create_misc_router(crew) -> APIRouter:
                 filename,
                 content,
                 owner_account_id=account_from_request(request).owner_account_id,
+                provider=getattr(crew, "provider", None),
             )
         )
         _wiki_capture_tasks.add(task)

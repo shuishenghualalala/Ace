@@ -85,6 +85,7 @@ WIKI_READ_TOOLS = [
     "wiki_read",
     "wiki_list_sources",
     "wiki_list_kbs",
+    "wiki_list_inbox",
 ]
 
 WIKI_MANAGE_TOOLS = [
@@ -344,6 +345,23 @@ _WIKI_LIST_KBS_SCHEMA = {
     "name": "wiki_list_kbs",
     "description": WIKI_LIST_KBS_PROMPT,
     "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+_WIKI_LIST_INBOX_SCHEMA = {
+    "name": "wiki_list_inbox",
+    "description": WIKI_LIST_INBOX_PROMPT,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "最多返回多少条，默认 50",
+                "default": 50,
+            },
+            **_KB_ID_PARAM,
+        },
+        "required": [],
+    },
 }
 
 _WIKI_UPDATE_PAGE_SCHEMA = {
@@ -1473,6 +1491,40 @@ def register_wiki_tools(
             count=len(kbs),
         )
 
+    def _handle_list_inbox(args: dict[str, Any]) -> str:
+        """列出已解析且系统建议深度整理、但尚未 ingest 的素材。"""
+        limit = max(1, int(args.get("limit", 50)))
+        kb_id = _kb_id(args)
+        raws = store.list_raws(owner_account_id=_owner(), kb_id=kb_id)
+        inbox = [
+            raw
+            for raw in raws
+            if raw.is_current
+            and (raw.parse_status or "pending") == "parsed"
+            and raw.ingest_recommend
+            and raw.ingest_status in ("pending", "recommended", "failed")
+        ]
+        inbox = sorted(inbox, key=lambda r: r.created_at, reverse=True)[:limit]
+        return tool_result(
+            sources=[
+                {
+                    "source_id": r.id,
+                    "title": r.title,
+                    "source_type": r.source_type,
+                    "doc_type": r.doc_type,
+                    "summary": r.summary,
+                    "tags": r.tags,
+                    "ingest_recommend": r.ingest_recommend,
+                    "ingest_reason": r.ingest_reason,
+                    "ingest_status": r.ingest_status,
+                    "created_at": r.created_at,
+                }
+                for r in inbox
+            ],
+            count=len(inbox),
+            kb_id=kb_id,
+        )
+
     def _handle_create_page(args: dict[str, Any]) -> str:
         from .schemas import WikiPage, WikiRelation
 
@@ -2076,6 +2128,7 @@ def register_wiki_tools(
         (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {{source_id}}", "wiki parse source reparse document extract text"),
         (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出 Raw Sources", "列出 Raw Sources", "wiki list sources raw files pending parsed failed"),
         (_WIKI_LIST_KBS_SCHEMA, _handle_list_kbs, False, "📚", "列出知识库", "列出知识库", "wiki list knowledge bases kbs"),
+        (_WIKI_LIST_INBOX_SCHEMA, _handle_list_inbox, False, "📥", "列出待整理素材", "列出待整理素材", "wiki list inbox pending sources recommend ingest"),
         (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {{page_id}}", "wiki update page edit content tags related aliases"),
         (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {{source_id}}", "wiki plan ingest preview changes proposed pages"),
         (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {{source_id}}", "wiki apply ingest write pages confirm plan"),

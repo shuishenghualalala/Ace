@@ -1281,7 +1281,7 @@ function renderShell(): void {
       <header class="page-header page-header--hub">
         <div class="page-header__copy">
           <h1 class="page-header__title">Wiki <span class="accent">知识库</span></h1>
-          <p class="page-header__desc">大模型自动整理的本地知识库笔记，按时间线、文件夹或类型浏览。</p>
+          <p class="page-header__desc">玩转大模型自动整理的本地知识库笔记。</p>
         </div>
         <div class="page-header__actions">
           <select id="wiki-kb-select" class="wiki-kb-select" title="选择知识库" aria-label="选择知识库"${view.kbs.length === 0 ? ' disabled' : ''}>${kbOptions}</select>
