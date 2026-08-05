@@ -308,7 +308,10 @@ class AnthropicProvider(LLMProvider):
                 args = {"_raw": raw}
             tool = ToolCall(id=acc.get("id", ""), name=acc.get("name", ""), arguments=args)
             assembled.append(tool)
-            return tool
+            # 残缺 JSON 仍需保留到 done 帧，供 executor 结合 stop_reason 进入截断恢复；
+            # 但绝不能作为 ready_tool_call 提前派发，否则 file_read 等并发安全工具可能
+            # 在 message_delta 告知 max_tokens 之前已经用半截参数开始执行。
+            return None if set(args) == {"_raw"} else tool
 
         try:
             async with self._client.stream("POST", self._url, headers=self._headers, json=payload) as response:
