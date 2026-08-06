@@ -68,10 +68,9 @@ describe('settings-preferences', () => {
     expect(clampNumber(Infinity, 1, 10, 5)).toBe(5);
   });
 
-  it('keeps approved themes and migrates the former high-contrast key', () => {
-    expect(hydrateSettings({ themeMode: 'high-contrast' }).themeMode).toBe('high-contrast');
-    expect(hydrateSettings({ themeMode: 'hc' }).themeMode).toBe('high-contrast');
-    expect(resolveThemeMode('high-contrast', false)).toBe('dark');
+  it('migrates the retired high-contrast theme to dark', () => {
+    expect(hydrateSettings({ themeMode: 'high-contrast' }).themeMode).toBe('dark');
+    expect(hydrateSettings({ themeMode: 'hc' }).themeMode).toBe('dark');
   });
 
   it('drops legacy accent and rejects retired or unknown themes', () => {

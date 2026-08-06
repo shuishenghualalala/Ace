@@ -330,16 +330,6 @@
   gap: var(--mw-space-5);
 }
 
-#hub-models .model-config-form .channel-connect-btn:not(:disabled):not(.is-blocked):not(.is-loading) {
-  color: var(--mw-white);
-  background: var(--mw-status-danger-bg);
-  cursor: pointer;
-}
-
-#hub-models .model-config-form .channel-connect-btn:not(:disabled):not(.is-blocked):not(.is-loading):hover {
-  background: var(--mw-action-primary);
-}
-
 @media (max-width: 768px) {
   .model-page-header {
     flex-direction: column;

@@ -3,7 +3,7 @@
  */
 
 export interface Settings {
-  themeMode: 'system' | 'light' | 'dark' | 'high-contrast';
+  themeMode: 'system' | 'light' | 'dark';
   uiFontSize: number;
   contentFontSize: number;
   terminalFontSize: number;
@@ -73,10 +73,9 @@ export function hydrateSettings(parsed?: LegacySettings | null): Settings {
   void startWithConnect;
   void enterToSend;
   void streaming;
-  const candidateTheme = storedTheme === 'hc' ? 'high-contrast' : storedTheme;
+  const candidateTheme = storedTheme === 'hc' || storedTheme === 'high-contrast' ? 'dark' : storedTheme;
   const themeMode: Settings['themeMode'] =
-    candidateTheme === 'system' || candidateTheme === 'light' ||
-    candidateTheme === 'dark' || candidateTheme === 'high-contrast'
+    candidateTheme === 'system' || candidateTheme === 'light' || candidateTheme === 'dark'
       ? candidateTheme
       : DEFAULT_SETTINGS.themeMode;
   const merged: Settings = { ...DEFAULT_SETTINGS, ...supported, themeMode };
@@ -92,7 +91,6 @@ export function hydrateSettings(parsed?: LegacySettings | null): Settings {
 
 export function resolveThemeMode(mode: Settings['themeMode'], prefersDark: boolean): 'light' | 'dark' {
   if (mode === 'system') return prefersDark ? 'dark' : 'light';
-  if (mode === 'high-contrast') return 'dark';
   return mode;
 }
 

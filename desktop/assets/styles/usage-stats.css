@@ -1017,7 +1017,7 @@
 .usage-edit__btn--primary {
   background: var(--mw-action-primary);
   border-color: color-mix(in srgb, var(--mw-status-info) 50%, transparent);
-  color: var(--mw-white);
+  color: var(--mw-action-primary-text);
   box-shadow: 0 2px 6px color-mix(in srgb, var(--mw-status-info) 24%, transparent);
 }
 

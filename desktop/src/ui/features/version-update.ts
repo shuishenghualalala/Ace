@@ -298,31 +298,6 @@ function handleDownloadProgress(payload: VersionUpdateDownloadProgressPayload): 
   }
 }
 
-async function checkVersionUpdateNow(): Promise<void> {
-  console.log('[VersionUpdate] checkVersionUpdateNow - currentVersionLabel:', currentVersionLabel);
-  const result = await bridge()?.heartbeat?.(currentVersionLabel);
-  console.log('[VersionUpdate] heartbeat result:', result);
-  if (!result?.success) {
-    notify(result?.message || '检查更新失败');
-    return;
-  }
-
-  const data = result.data;
-  if (data?.update === 'force' || data?.update === 'reminder') {
-    handleVersionUpdate({
-      type: data.update,
-      title: '提示',
-      message: data.update === 'force' ? '当前版本需要更新后继续使用。' : '发现新版本，可立即更新。',
-      version: data.version,
-      url: data.url,
-      reportedVersion: currentVersionLabel,
-    });
-    return;
-  }
-
-  notify('当前已是最新版本');
-}
-
 async function syncCurrentVersionLabel(): Promise<void> {
   try {
     const info = await bridge()?.getAppVersion?.();
@@ -414,7 +389,7 @@ export function bindVersionUpdateUi(): void {
   });
 
   document.getElementById('set-check-update')?.addEventListener('click', () => {
-    void checkVersionUpdateNow();
+    void window.Crew?.openExternal?.('https://github.com/shuishenghualalala/Ace/releases');
   });
   renderUpdateButton();
 }

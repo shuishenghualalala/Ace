@@ -231,12 +231,12 @@
 .cron-btn--primary {
   background: var(--mw-action-primary);
   border-color: var(--mw-status-info);
-  color: var(--mw-white);
+  color: var(--mw-action-primary-text);
 }
 
 .cron-btn--primary:hover {
   background: var(--mw-action-primary);
-  color: var(--mw-white);
+  color: var(--mw-action-primary-text);
 }
 
 #cron-refresh-btn {

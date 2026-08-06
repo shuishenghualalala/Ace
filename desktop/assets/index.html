@@ -21,9 +21,8 @@
       try {
         var raw = localStorage.getItem('crew.settings');
         var s = raw ? JSON.parse(raw) : {};
-        var themeMode = s.themeMode === 'light' || s.themeMode === 'dark' ||
-                        s.themeMode === 'high-contrast' ? s.themeMode :
-                        s.themeMode === 'hc' ? 'high-contrast' : 'system';
+        var themeMode = s.themeMode === 'light' || s.themeMode === 'dark' ? s.themeMode :
+                        s.themeMode === 'hc' || s.themeMode === 'high-contrast' ? 'dark' : 'system';
         var resolved = themeMode === 'system'
           ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
           : themeMode;
@@ -70,15 +69,6 @@
             </svg>
             <span class="browser-tab-status" id="browser-workbench-status" aria-hidden="true"></span>
           </button>
-        </div>
-        <div class="top-bar-user">
-          <button type="button" class="user-avatar-btn" id="user-avatar-btn" aria-label="账户">
-            <span class="user-avatar-btn__icon" id="sidebar-user-avatar" aria-hidden="true">A</span>
-          </button>
-          <div id="user-section" class="user-section" hidden>
-            <div class="user-section__name" id="sidebar-user-name">-</div>
-            <div class="user-section__email" id="sidebar-user-email">-</div>
-          </div>
         </div>
       </div>
 
@@ -424,7 +414,6 @@
                   <option value="system">跟随系统</option>
                   <option value="light">浅色</option>
                   <option value="dark">深色</option>
-                  <option value="high-contrast">高对比度</option>
                 </select>
               </div>
             </div>
@@ -586,17 +575,6 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
                 </span>
               </a>
-              <a class="set-v2-link-item" href="#" id="set-link-opensource">
-                <span class="set-v2-link-item__left">
-                  <span class="set-v2-link-item__icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 0 0-3.24 19.46c.2.04.28-.09.28-.2v-1.4c-1.14.25-1.38-.55-1.38-.55-.19-.47-.46-.59-.46-.59-.37-.26.03-.25.03-.25.41.03.63.42.63.42.37.62.96.44 1.2.34.04-.26.14-.44.25-.54-.91-.1-1.86-.46-1.86-2.03 0-.45.16-.82.42-1.11-.04-.1-.18-.52.04-1.09 0 0 .35-.11 1.14.42.33-.09.68-.14 1.03-.14.35 0 .7.05 1.03.14.79-.53 1.14-.42 1.14-.42.22.57.08.99.04 1.09.26.29.42.66.42 1.11 0 1.58-.96 1.93-1.87 2.03.15.13.28.37.28.75v1.8c0 .11.08.24.29.2A10 10 0 0 0 12 2Z"/></svg>
-                  </span>
-                  <span>开源条款</span>
-                </span>
-                <span class="set-v2-link-item__arrow">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
-                </span>
-              </a>
               <a class="set-v2-link-item" href="#" id="set-link-docs">
                 <span class="set-v2-link-item__left">
                   <span class="set-v2-link-item__icon">
@@ -608,7 +586,7 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
                 </span>
               </a>
-              <a class="set-v2-link-item" href="#" id="set-link-contact">
+              <a class="set-v2-link-item" href="#" id="set-link-contact" hidden>
                 <span class="set-v2-link-item__left">
                   <span class="set-v2-link-item__icon">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><path d="m22 6-10 7L2 6"/></svg>
@@ -620,11 +598,6 @@
                 </span>
               </a>
             </div>
-          </div>
-          <div class="set-v2-footer-links set-v2-legal-links">
-            <a href="#" id="set-link-privacy">隐私政策</a>
-            <span>|</span>
-            <a href="#" id="set-link-service">服务协议</a>
           </div>
         </div>
   </div>

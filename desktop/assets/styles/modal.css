@@ -298,7 +298,7 @@
 .btn-get-code {
     background: var(--mw-action-primary);
     border: 1px solid transparent;
-    color: var(--mw-white);
+    color: var(--mw-action-primary-text);
     padding: var(--mw-space-3) var(--mw-space-4);
     border-radius: var(--mw-radius-4);
     cursor: pointer;
@@ -374,7 +374,7 @@
 .modal-footer .btn-primary {
     background: var(--mw-action-primary);
     border: 1px solid transparent;
-    color: var(--mw-white);
+    color: var(--mw-action-primary-text);
     padding: var(--mw-space-3) var(--mw-space-4);
     border-radius: var(--mw-radius-4);
     cursor: pointer;
@@ -584,7 +584,7 @@
 .version-modal-footer .btn-primary {
     background: var(--mw-action-primary);
     border: 1px solid transparent;
-    color: var(--mw-white);
+    color: var(--mw-action-primary-text);
     box-shadow: 0 16px 30px color-mix(in srgb, var(--mw-status-info) 24%, transparent);
 }
 

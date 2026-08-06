@@ -390,7 +390,7 @@ body.history-workspace-active .chat-messages {
 
 .chat-message.user .chat-avatar {
     background: var(--mw-action-primary);
-    color: var(--mw-white);
+    color: var(--mw-action-primary-text);
 }
 
 .chat-message.assistant .chat-avatar {
@@ -2107,7 +2107,7 @@ button.chat-message-file:hover {
 .send-btn,
 .chat-stop-btn {
     border: none;
-    color: var(--mw-white);
+    color: var(--mw-action-primary-text);
     width: 30px;
     height: 30px;
     border-radius: var(--mw-radius-3);

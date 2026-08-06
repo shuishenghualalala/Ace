@@ -21,7 +21,7 @@ import {
 } from './settings-library';
 import { bindSessionPreviewModal } from './session-preview-modal';
 import { bindContactModal, closeContactModal, openContactModal } from './settings-contact';
-import { $, notify, state } from '../state';
+import { $, notify } from '../state';
 import { requireRendererLogin } from './auth-gate';
 import { renderAuthAccount } from './login';
 import {
@@ -262,7 +262,7 @@ function applyFontFamily(fontFamily: Settings['fontFamily']): void {
   setRuntimeToken(ROOT, '--mw-font-sans', override);
 }
 
-function resolveTheme(mode: Settings['themeMode']): 'light' | 'dark' | 'high-contrast' {
+function resolveTheme(mode: Settings['themeMode']): 'light' | 'dark' {
   if (mode === 'system') {
     return systemThemeMedia?.matches ? 'dark' : 'light';
   }
@@ -368,7 +368,6 @@ function bindControls(): void {
       system: '跟随系统',
       light: '浅色',
       dark: '深色',
-      'high-contrast': '高对比度',
     };
     notify(`主题已切换：${labels[current.themeMode]}`);
   });
@@ -600,12 +599,12 @@ export function bindSettingsUi(): void {
   });
 
   // 关于页链接
-  document.getElementById('set-view-changelog')?.addEventListener('click', () => notify('版本日志功能即将上线'));
-  ['set-link-official', 'set-link-opensource'].forEach((id) => {
-    document.getElementById(id)?.addEventListener('click', (e) => {
-      e.preventDefault();
-      notify('链接功能即将上线');
-    });
+  document.getElementById('set-view-changelog')?.addEventListener('click', () => {
+    void window.Crew?.openExternal?.('https://github.com/shuishenghualalala/Ace/releases');
+  });
+  document.getElementById('set-link-official')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    void window.Crew?.openExternal?.('https://github.com/shuishenghualalala/Ace');
   });
   document.getElementById('set-link-docs')?.addEventListener('click', (event) => {
     event.preventDefault();

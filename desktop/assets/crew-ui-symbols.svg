@@ -128,7 +128,7 @@
     <symbol id="icon-chevron-up" viewBox="0 0 24 24"><path class="line" d="m6 15 6-6 6 6"/></symbol>
     <symbol id="icon-back" viewBox="0 0 24 24"><path class="line" d="m10 5-7 7 7 7M3 12h17"/></symbol>
     <symbol id="icon-close" viewBox="0 0 24 24"><path class="line" d="m6 6 12 12m0-12L6 18"/></symbol>
-    <symbol id="icon-agent" viewBox="0 0 24 24"><rect class="shell" x="4" y="6" width="16" height="14" rx="5"/><path class="line" d="M12 6V3"/><circle class="accent" cx="12" cy="2.5" r="1"/><circle class="ink" cx="9" cy="13" r="1"/><circle class="ink" cx="15" cy="13" r="1"/></symbol>
+    <symbol id="icon-agent" viewBox="0 0 24 24"><rect class="shell" x="4" y="6" width="16" height="14" rx="5"/><path class="line" d="M12 6V3"/><circle class="ink" cx="12" cy="2.5" r="1"/><circle class="ink" cx="9" cy="13" r="1"/><circle class="ink" cx="15" cy="13" r="1"/></symbol>
     <symbol id="icon-team" viewBox="0 0 24 24"><circle class="line" cx="12" cy="8" r="3"/><circle class="line" cx="5.5" cy="12" r="2.5"/><circle class="line" cx="18.5" cy="12" r="2.5"/><path class="line" d="M7 20c.3-3.2 2-4.8 5-4.8s4.7 1.6 5 4.8M2 19c.2-2.4 1.4-3.6 3.5-3.6M22 19c-.2-2.4-1.4-3.6-3.5-3.6"/></symbol>
     <symbol id="icon-expert-picker" viewBox="0 0 24 24"><use href="#icon-agent"/><path class="accent2" d="m17 4 1 2 2.2.3-1.6 1.6.4 2.2-2-1-2 1 .4-2.2-1.6-1.6 2.2-.3Z"/></symbol>
     <symbol id="icon-wiki" viewBox="0 0 24 24"><path class="line" d="M4 4.5h6.2c1.1 0 1.8.5 1.8 1.5v14c0-1-.7-1.5-1.8-1.5H4Zm16 0h-6.2c-1.1 0-1.8.5-1.8 1.5v14c0-1 .7-1.5 1.8-1.5H20Z"/><path class="thin" d="M7 8h2.5M7 11h2.5m5-3H17m-2.5 3H17"/></symbol>

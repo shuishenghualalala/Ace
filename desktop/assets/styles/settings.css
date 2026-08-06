@@ -254,6 +254,10 @@
   border-color: transparent;
 }
 
+.channel-connect-btn--primary:hover:not(:disabled) {
+  background: var(--mw-action-primary-hover);
+}
+
 .channel-connect-btn--danger {
   color: var(--mw-status-danger);
   border-color: color-mix(in srgb, var(--mw-status-danger) 25%, transparent);
@@ -555,7 +559,7 @@
 .set-v2-btn--primary {
   background: var(--mw-action-primary);
   border-color: transparent;
-  color: var(--mw-white);
+  color: var(--mw-action-primary-text);
 }
 
 .set-v2-btn--primary:hover {
