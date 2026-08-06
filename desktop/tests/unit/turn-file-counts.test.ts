@@ -176,4 +176,33 @@ describe('hydrateMissingTurnFileCounts', () => {
     expect(msg.turnFileChanges[0].path).toContain('secret.html');
     expect(changed).toBe(false);
   });
+
+  it('does not rewrite exact persisted history from the current disk state', async () => {
+    const persisted = [
+      { path: 'C:\\tmp\\removed-later.txt', name: 'removed-later.txt', added: 2, removed: 0, status: 'added' as const },
+      { path: 'C:\\tmp\\changed.txt', name: 'changed.txt', added: 0, removed: 0, status: 'modified' as const },
+    ];
+    messageStore.set({
+      messages: {
+        s1: [{
+          id: 'a1',
+          role: 'assistant',
+          content: 'done',
+          timestamp: 1,
+          turnFileChanges: persisted,
+          turnFileChangesPersistedPaths: persisted.map((file) => file.path),
+        }],
+      },
+    });
+    pathExists.mockResolvedValue(false);
+    readTextFile.mockResolvedValue('current\nfile\ncontent');
+
+    const changed = await hydrateMissingTurnFileCounts('s1');
+
+    expect(changed).toBe(false);
+    const msg = messageStore.get().messages.s1![0] as { turnFileChanges: TurnFileChangeSummary[] };
+    expect(msg.turnFileChanges).toEqual(persisted);
+    expect(pathExists).not.toHaveBeenCalled();
+    expect(readTextFile).not.toHaveBeenCalled();
+  });
 });

@@ -46,6 +46,21 @@ describe('mapBackendHistoryItem turnFileChanges', () => {
     expect(msg.turnFileChanges).toEqual([
       { path: 'C:\\Users\\x\\Desktop\\snake_game.html', name: 'snake_game.html', added: 419, removed: 117, status: 'modified' },
     ]);
+    expect(msg.turnFileChangesPersistedPaths).toEqual(['C:\\Users\\x\\Desktop\\snake_game.html']);
+  });
+
+  it('filters metadata-only empty added files from persisted history like the live reducer', () => {
+    const msg = mapBackendHistoryItem({
+      role: 'assistant',
+      content: 'done',
+      turn_file_changes: [
+        { path: '/work/.turn-marker', name: '.turn-marker', added: 0, removed: 0, status: 'added' },
+        { path: '/work/result.txt', name: 'result.txt', added: 1, removed: 0, status: 'added' },
+      ],
+    });
+
+    expect(msg.turnFileChanges?.map((file) => file.path)).toEqual(['/work/result.txt']);
+    expect(msg.turnFileChangesPersistedPaths).toEqual(['/work/result.txt']);
   });
 
   it('maps Team member turn_file_changes without changing artifact data', () => {
