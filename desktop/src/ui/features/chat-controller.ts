@@ -954,6 +954,9 @@ function sessionTurnIdentity(sessionId: string | null): AgentTurnOptions['identi
   // 首帧前的通用等待态沿用内置 Leader（Crew），聊天区不展示 Team Logo。
   if (provider === 'team') return undefined;
   const name = String(display?.agentLabel?.name || 'Agent').trim();
+  if (provider === 'sites') {
+    return { kind: 'external', name, badge: '', icon: 'icon-inspiration' };
+  }
   const badge = provider.includes('codex') ? 'X' : (name || provider).slice(0, 1).toUpperCase();
   return { kind: 'external', name, badge };
 }
@@ -968,6 +971,9 @@ export function renderChat(): void {
   const sessionId = state.activeSessionId;
   const allMessages = sessionId ? getMessages(sessionId) : [];
   const busy = sessionId ? isBusy(sessionId) : false;
+  const isInspirationSession = sessionId
+    ? String(getSessionAgentDisplay(sessionId)?.agentLabel?.provider || '').trim().toLowerCase() === 'sites'
+    : false;
   const queueHint = sessionId ? state.queueHints[sessionId] : '';
   const pendingFollowup = sessionId ? bookFor(sessionId).pendingFollowup : null;
   const turnIdentity = sessionTurnIdentity(sessionId);
@@ -981,6 +987,7 @@ export function renderChat(): void {
   const workOverviewActive = chatTab?.classList.contains('work-overview-active') ?? false;
   // 编辑态 / 等待用户交互 / todo 面板存在时，即使消息为空也保留对话流页面，不切欢迎页。
   const showChat = chatTab?.classList.contains('work-session-active')
+    || isInspirationSession
     || messages.length > 0
     || busy
     || editing

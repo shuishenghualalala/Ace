@@ -100,6 +100,7 @@ function sessionIdentity(session: SessionRow, workspace?: Workspace): string {
 function sessionIcon(session: SessionRow): IconId {
   if (session.channelPlatform) return 'icon-task';
   const provider = String(session.agentLabel?.provider || '').toLocaleLowerCase();
+  if (provider === 'sites') return 'icon-inspiration';
   if (provider === 'team') return 'icon-team';
   if (provider && !['crew', 'builtin', 'client'].includes(provider)) return 'icon-agent';
   return 'icon-task';

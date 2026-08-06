@@ -5,6 +5,9 @@ mod shell;
 #[cfg(target_os = "linux")]
 mod linux;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 #[cfg(windows)]
 mod windows;
 
@@ -294,7 +297,27 @@ fn handle_request(
                     message: error.message,
                 })
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            {
+                let request = macos::MacOsRunRequest {
+                    command,
+                    cwd: PathBuf::from(cwd),
+                    writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
+                    readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                    denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                    network_enabled,
+                    network_rules,
+                    allow_local_binding,
+                    max_output_bytes,
+                    stdin: process_input.stdin,
+                    env_overrides: process_input.env_overrides,
+                };
+                macos::run(request, sender).map_err(|error| RuntimeFailure {
+                    code: error.code,
+                    message: error.message,
+                })
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             #[cfg(not(windows))]
             {
                 let _ = (

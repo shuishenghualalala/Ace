@@ -6,7 +6,9 @@
  */
 
 :root {
+  --mw-app-rail-width: 128px;
   --mw-task-board-width: 360px;
+  --mw-chat-content-max-width: 920px;
   --mw-browser-workbench-width: clamp(430px, 32vw, 640px);
   /* Primitive color values */
   --mw-white: #fff;

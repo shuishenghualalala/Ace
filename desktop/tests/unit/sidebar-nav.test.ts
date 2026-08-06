@@ -8,6 +8,16 @@ describe('resolveShellNavigation', () => {
     expect(navigation.map((item) => item.id)).toContain('skills');
   });
 
+  it('exposes the Inspiration entry in assistant mode', () => {
+    const navigation = resolveShellNavigation('assistant', { agents: 'available' });
+
+    expect(navigation).toContainEqual(expect.objectContaining({
+      id: 'sites',
+      label: '灵感',
+      featureState: 'available',
+    }));
+  });
+
   it('exposes the Security entry in assistant mode', () => {
     const navigation = resolveShellNavigation('assistant', { agents: 'available' });
 

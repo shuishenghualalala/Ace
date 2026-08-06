@@ -38,6 +38,7 @@ const ASSISTANT_NAVIGATION: ReadonlyArray<ShellNavigationDefinition> = [
   { id: 'chat', label: '对话', icon: 'process-thinking' },
   { id: 'agents', label: '外援', icon: 'icon-agent' },
   { id: 'skills', label: '技能', icon: 'process-skill' },
+  { id: 'sites', label: '灵感', icon: 'icon-inspiration' },
   ...SHARED_NAVIGATION,
 ];
 

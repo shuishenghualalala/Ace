@@ -23,7 +23,7 @@
 .mw-composer__queue-slot,
 .mw-composer__edit-banner,
 .mw-composer__input-shell {
-  width: min(920px, 100%);
+  width: min(var(--mw-chat-content-max-width), 100%);
   margin-inline: auto;
 }
 

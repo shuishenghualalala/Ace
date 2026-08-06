@@ -60,7 +60,7 @@ describe('renderAgentTurn', () => {
 
     for (const root of [turn, typing]) {
       const symbol = root.querySelector<SVGUseElement>('.msg__avatar-symbol use');
-      expect(symbol?.getAttribute('href')).toBe('#avatar-headphones');
+      expect(symbol?.getAttribute('href')).toBe('./crew-ui-symbols.svg#avatar-headphones');
       expect(root.querySelector('.msg__avatar-media')).toBeNull();
     }
   });
@@ -130,7 +130,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.team-internal__name strong')?.textContent).toBe('Crew');
     expect(root.querySelector('.team-internal__name em')?.textContent).toBe('leader');
     expect(root.querySelector<SVGUseElement>('.team-internal__avatar .msg__avatar-symbol use')?.getAttribute('href'))
-      .toBe('#avatar-headphones');
+      .toBe('./crew-ui-symbols.svg#avatar-headphones');
   });
 
   it('Team 外部成员展示成员气泡、执行过程和产物卡', () => {

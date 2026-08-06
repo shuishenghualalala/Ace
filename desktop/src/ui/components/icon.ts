@@ -50,6 +50,7 @@ export const ICON_IDS = [
   'icon-expert-picker',
   'icon-wiki',
   'icon-image',
+  'icon-inspiration',
   'process-thinking',
   'process-write',
   'process-read',

@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-#[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -30,13 +29,11 @@ const TUNNEL_MAX_LIFETIME: Duration = Duration::from_secs(600);
 const TUNNEL_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct ProxyHandle {
-    #[cfg(target_os = "linux")]
     address: SocketAddr,
     stopped: Arc<AtomicBool>,
 }
 
 impl ProxyHandle {
-    #[cfg(target_os = "linux")]
     pub fn start(policy: NetworkPolicy) -> Result<Self, NetworkError> {
         Self::start_on(policy, 0)
     }
@@ -48,7 +45,6 @@ impl ProxyHandle {
                 format!("cannot bind managed proxy: {error}"),
             )
         })?;
-        #[cfg(target_os = "linux")]
         let address = listener.local_addr().map_err(|error| {
             NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
         })?;
@@ -82,13 +78,11 @@ impl ProxyHandle {
             }
         });
         Ok(Self {
-            #[cfg(target_os = "linux")]
             address,
             stopped,
         })
     }
 
-    #[cfg(target_os = "linux")]
     pub fn address(&self) -> SocketAddr {
         self.address
     }

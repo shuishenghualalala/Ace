@@ -108,6 +108,9 @@ function createBeforeInput(): DocumentFragment {
   const fragment = document.createDocumentFragment();
   const input = document.createElement('input');
   const preview = document.createElement('div');
+  const siteAnnotationPreview = document.createElement('div');
+  const blueprintAnnotationPreview = document.createElement('div');
+  const sitesMode = document.createElement('div');
   const scenario = document.createElement('div');
   input.type = 'file';
   input.id = 'chat-file-input';
@@ -117,10 +120,34 @@ function createBeforeInput(): DocumentFragment {
   preview.id = 'chat-attachment-preview';
   preview.className = 'mw-attachment-list';
   preview.hidden = true;
+  siteAnnotationPreview.id = 'chat-site-annotation-preview';
+  siteAnnotationPreview.className = 'chat-site-annotation-preview';
+  siteAnnotationPreview.hidden = true;
+  blueprintAnnotationPreview.id = 'chat-blueprint-annotation-preview';
+  blueprintAnnotationPreview.className = 'chat-site-annotation-preview';
+  blueprintAnnotationPreview.hidden = true;
+  sitesMode.id = 'chat-sites-mode';
+  sitesMode.className = 'chat-sites-mode';
+  sitesMode.hidden = true;
+  sitesMode.innerHTML = `<span class="chat-sites-mode__logo" data-sites-logo aria-hidden="true">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2.5" y="3" width="15" height="14" rx="2.25" />
+      <path d="M2.5 7h15M6 11h5M6 14h8" />
+    </svg>
+  </span><strong>灵感</strong><span>设计一个 App</span>`;
   scenario.id = 'chat-scenario-chip';
   scenario.className = 'scenario-chip';
   scenario.hidden = true;
-  fragment.append(input, createFileQaHint(), preview, scenario, createWorkflowRecommendation());
+  fragment.append(
+    sitesMode,
+    input,
+    createFileQaHint(),
+    preview,
+    siteAnnotationPreview,
+    blueprintAnnotationPreview,
+    scenario,
+    createWorkflowRecommendation(),
+  );
   return fragment;
 }
 

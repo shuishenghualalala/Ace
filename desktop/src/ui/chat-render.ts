@@ -23,6 +23,7 @@ import { formatToolResultDisplay } from './tool-result';
 import { imageDisplayUrl, isAbsoluteLocalPath, screenshotResultPath } from './tool-screenshot';
 import { buildChippedNodes } from './features/composer-mention';
 import { isPlanDocumentPath } from './plan-document-path';
+import { createIcon, type IconId } from './components/icon';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -160,7 +161,7 @@ export interface PendingMessage {
 
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'error';
 
-const CHAT_BOT_AVATAR_SYMBOL = '#avatar-headphones';
+const CHAT_BOT_AVATAR_SYMBOL = './crew-ui-symbols.svg#avatar-headphones';
 
 /** 对话头像：Q 版耳机机器人。用户消息不显示头像。 */
 function createChatAvatar(): HTMLElement {
@@ -839,6 +840,7 @@ export interface AgentTurnOptions {
     kind: 'external' | 'team';
     name: string;
     badge: string;
+    icon?: IconId;
   };
 }
 
@@ -855,7 +857,8 @@ function createAgentTurnAvatar(identity?: AgentTurnOptions['identity']): HTMLEle
     logo.appendChild(document.createElement('i'));
     avatar.appendChild(logo);
   } else {
-    avatar.textContent = identity.badge;
+    if (identity.icon) avatar.append(createIcon(identity.icon, { size: 20 }));
+    else avatar.textContent = identity.badge;
   }
   return avatar;
 }
