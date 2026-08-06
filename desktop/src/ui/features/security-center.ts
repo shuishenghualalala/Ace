@@ -20,6 +20,7 @@ import {
 } from './security-approval';
 import type { SecurityCapabilities } from './security-mode';
 import type { SecurityRuleView } from './security-rules';
+import { enableUacAndPromptRestart, prepareWindowsSecuritySetup } from './security-setup-flow';
 import {
   EMPTY_SECURITY_AUDIT_QUERY,
   type SecurityAuditQuery,
@@ -38,6 +39,7 @@ function workspaceId(): string {
 function emptySnapshot(): SecurityCenterSnapshot {
   return {
     loading: false,
+    setupAction: null,
     error: '',
     workspaceId: workspaceId(),
     strictSecurityEnabled: false,
@@ -196,17 +198,47 @@ async function changeMode(mode: ConversationSecurityMode): Promise<void> {
 }
 
 async function setupWindowsProtection(action: 'repair' | 'uninstall'): Promise<void> {
-  const message = action === 'repair'
-    ? '将弹出一次 Windows UAC，用于创建或修复沙箱技术账号和网络规则。继续吗？'
-    : '卸载 Crew 创建的技术账号和网络规则？项目文件不会被删除。';
-  if (!window.confirm(message)) return;
-  const result = await window.Crew?.securitySetup?.({ action });
-  if (!result?.ok) {
-    notify(action === 'repair'
-      ? '安全设置未完成；托管执行仍保持不可用。'
-      : '安全组件卸载未完成，请使用安装包修复后重试。');
+  if (snapshot.setupAction || snapshot.loading) return;
+  snapshot = {
+    ...snapshot,
+    setupAction: action === 'repair' ? 'install' : 'uninstall',
+  };
+  render();
+  try {
+    if (action === 'repair') {
+      const uacPreparation = await prepareWindowsSecuritySetup();
+      if (uacPreparation !== 'ready') return;
+    }
+    const accepted = await showConfirmDialog({
+      title: action === 'repair' ? '安装安全沙箱' : '卸载 Windows 防护',
+      message: action === 'repair'
+        ? '将请求一次 Windows 管理员权限，创建 Crew 使用的受限账户并配置网络防护规则。安装完成后，受管命令将在沙箱边界内执行。是否继续？'
+        : '将移除 Crew 创建的安全沙箱账户和网络防护规则。项目文件不会被删除，但受管命令将暂时无法使用。是否继续？',
+      confirmText: action === 'repair' ? '安装并继续' : '卸载并继续',
+    });
+    if (!accepted) return;
+    const result = await window.Crew?.securitySetup?.({ action });
+    if (result?.code === 'uac_restart_required') {
+      await prepareWindowsSecuritySetup();
+      return;
+    }
+    if (result?.code === 'uac_disabled') {
+      await enableUacAndPromptRestart();
+      return;
+    }
+    if (!result?.ok) {
+      const detail = result?.detail ? `：${result.detail}` : '';
+      notify(action === 'repair'
+        ? `安全设置未完成${detail}；托管执行仍保持不可用。`
+        : `安全组件卸载未完成${detail}，请使用安装包修复后重试。`);
+    }
+    await refresh();
+  } catch (error) {
+    notify(`安全设置未完成：${String(error)}`);
+  } finally {
+    snapshot = { ...snapshot, setupAction: null };
+    render();
   }
-  await refresh();
 }
 
 async function toggleRule(rule: SecurityRuleView): Promise<void> {

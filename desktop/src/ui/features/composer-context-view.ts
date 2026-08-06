@@ -1,4 +1,4 @@
-import { createIcon, type IconId } from '../components/icon';
+import { createIcon, MONOCHROME_ICON_CLASS, type IconId } from '../components/icon';
 
 export interface ComposerContextView {
   dispose(): void;
@@ -34,7 +34,12 @@ function createChip(
   copy.className = 'mw-context-chip__label';
   copy.textContent = label;
   if (labelId) copy.id = labelId;
-  if (icon) button.append(createIcon(icon, { className: 'mw-context-chip__icon', size: 16 }));
+  if (icon) button.append(createIcon(icon, {
+    className: icon === 'icon-agent'
+      ? `mw-context-chip__icon ${MONOCHROME_ICON_CLASS}`
+      : 'mw-context-chip__icon',
+    size: 16,
+  }));
   button.append(copy, createIcon(
     'icon-chevron-down',
     { className: 'mw-context-chip__chevron', size: 16 },

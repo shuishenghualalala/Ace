@@ -74,6 +74,13 @@ body {
   --mw-symbol-accent-alt: var(--mw-symbol-accent-alt-dark);
 }
 
+.mw-icon.mw-icon--monochrome,
+:root[data-theme='dark'] .mw-icon.mw-icon--monochrome {
+  --mw-symbol-shell: var(--mw-symbol-face);
+  --mw-symbol-accent: var(--mw-symbol-line);
+  --mw-symbol-accent-alt: var(--mw-symbol-line);
+}
+
 button,
 input,
 select,

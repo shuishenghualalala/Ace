@@ -1,4 +1,4 @@
-import { createIcon } from '../components/icon';
+import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
 import { openPopover, type OverlayHandle } from '../components/overlays';
 import {
   resolveShellNavigation,
@@ -261,7 +261,11 @@ export function createApplicationShell(
       const description = document.createElement('span');
       const modeIcon = createIcon(
         productMode === 'assistant' ? 'icon-agent' : 'icon-task',
-        { className: 'mw-product-mode-menu__icon' },
+        {
+          className: productMode === 'assistant'
+            ? `mw-product-mode-menu__icon ${MONOCHROME_ICON_CLASS}`
+            : 'mw-product-mode-menu__icon',
+        },
       );
       const check = createIcon('icon-check', {
         className: 'mw-product-mode-menu__check',
@@ -340,7 +344,11 @@ export function createApplicationShell(
       if (item.id === modeView.lastPosition) button.setAttribute('aria-current', 'page');
       label.className = 'mw-shell-nav-item__label';
       label.textContent = item.label;
-      button.append(createIcon(item.icon, { className: 'mw-shell-nav-item__icon' }), label);
+      button.append(createIcon(item.icon, {
+        className: item.icon === 'icon-agent'
+          ? `mw-shell-nav-item__icon ${MONOCHROME_ICON_CLASS}`
+          : 'mw-shell-nav-item__icon',
+      }), label);
       if (item.featureState === 'unavailable') {
         const availability = document.createElement('span');
         availability.className = 'mw-shell-nav-item__availability';

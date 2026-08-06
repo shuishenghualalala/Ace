@@ -52,6 +52,20 @@
   display: none;
 }
 
+/* 安全提示出现时，项目选择条不能再浮到提示条上方。 */
+.chat-composer:has(.security-banner.show) .mw-composer__project {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: 100%;
+  height: 32px;
+  align-items: center;
+  padding: 0 var(--mw-space-3);
+  border-radius: var(--mw-radius-4) var(--mw-radius-4) 0 0;
+  transform: none;
+}
+
 .mw-composer__panel {
   position: relative;
   z-index: 1;

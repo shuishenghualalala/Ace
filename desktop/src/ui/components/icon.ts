@@ -1,5 +1,7 @@
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 
+export const MONOCHROME_ICON_CLASS = 'mw-icon--monochrome';
+
 export const ICON_IDS = [
   'avatar-base',
   'avatar-cap',

@@ -175,14 +175,21 @@ security-runtime/bin/
 
 ## 5. 启动与集成
 
-### 5.1 同事日常启动（无感）
+### 5.1 Desktop 日常启动（无感）
 
 ```powershell
-python -m crew.gateway.server        # shell A
-cd desktop; npm start                # shell B
+cd desktop
+npm start
 ```
 
-gateway 启动时自动在 `security-runtime/bin/` 找到 runtime；桌面起来后对话框上方出现沙箱 banner，点「开启沙箱」→ UAC → 自动切 `AUTO_REVIEW`。详见 `docs/security/docker-sandbox-poc.md`。
+Desktop 会自动启动带安全状态目录环境的托管 Gateway，并从
+`security-runtime/bin/` 找到 runtime。首次运行时，对话框上方会提示「请安装安全沙箱」，
+点击「安装安全沙箱」→ 同意 UAC → 完成安装后即可使用受管命令执行。
+
+`python -m crew.gateway.server` 是 Web 端的独立 Gateway 启动方式；若手动启动的 Gateway
+要与 Desktop 复用，必须额外设置与 Desktop `userData/security/` 相同的
+`ACE_SECURITY_STATE_DIR`，否则它无法读取 Desktop 完成的沙箱安装状态。详见
+`docs/security/docker-sandbox-poc.md`。
 
 ### 5.2 CLI 子命令（安装/调试用，正常对话不走这些）
 

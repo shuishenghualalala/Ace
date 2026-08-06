@@ -7,6 +7,11 @@ export interface SecurityCapabilities {
   detail?: string;
 }
 
+/** Gateway uses Python's "windows"; Electron uses Node's "win32". */
+export function isWindowsPlatform(platform?: string): boolean {
+  return !platform || platform === 'windows' || platform === 'win32';
+}
+
 export function formatCapabilitySummary(capability: SecurityCapabilities): string {
   if (!capability.helper_present) return `未启用原生沙箱 · ${capability.detail ?? '运行组件缺失'}`;
   const enabled = capability.filesystem_sandbox && capability.managed_network;

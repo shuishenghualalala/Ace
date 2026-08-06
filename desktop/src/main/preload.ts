@@ -146,6 +146,8 @@ const api = {
   securityAudit: (args: SecurityAuditArgs = {}) => ipcRenderer.invoke('security:audit', args),
   securityAuditExport: () => ipcRenderer.invoke('security:audit-export', {}),
   securityAuditPurge: (args: { workspaceId: string }) => ipcRenderer.invoke('security:audit-purge', args),
+  securityUacStatus: () => ipcRenderer.invoke('security:uac-status'),
+  securityEnableUac: () => ipcRenderer.invoke('security:enable-uac'),
   securitySetup: (args: { action: 'install' | 'repair' | 'uninstall' }) =>
     ipcRenderer.invoke('security:setup', args),
   // 本地文件上传（gateway:fetch 只透传 string body，二进制走这里）：

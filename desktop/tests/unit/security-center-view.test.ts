@@ -7,6 +7,7 @@ const stateMock = vi.hoisted(() => ({
   activeSessionId: null as string | null,
   sessions: [] as Array<{ id: string; workspaceId: string }>,
 }));
+const showConfirmDialogMock = vi.hoisted(() => vi.fn(async () => true));
 
 vi.mock('../../src/ui/state', () => ({
   $: (selector: string) => document.querySelector(selector),
@@ -18,6 +19,9 @@ vi.mock('../../src/ui/state', () => ({
     .replaceAll("'", '&#039;'),
   notify: vi.fn(),
   state: stateMock,
+}));
+vi.mock('../../src/ui/ui-feedback', () => ({
+  showConfirmDialog: showConfirmDialogMock,
 }));
 
 import { createSecurityCenterView } from '../../src/ui/features/security-center-view';
@@ -36,6 +40,8 @@ const capabilities = {
 };
 
 beforeEach(() => {
+  showConfirmDialogMock.mockClear();
+  showConfirmDialogMock.mockResolvedValue(true);
   document.body.innerHTML = '<div id="security-page-root"></div>';
   __resetSecurityCenterForTest();
 });
@@ -130,6 +136,83 @@ describe('Security Center view', () => {
     expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
       .toBe(true);
     expect(view.element.textContent).toContain('当前平台不使用 Windows 原生防护');
+  });
+
+  it('keeps only the applicable Windows setup action enabled', () => {
+    const view = createSecurityCenterView({
+      onRefresh: vi.fn(),
+      onStrictSecurityChange: vi.fn(),
+      onModeChange: vi.fn(),
+      onInstall: vi.fn(),
+      onUninstall: vi.fn(),
+      onRuleToggle: vi.fn(),
+      onRuleDelete: vi.fn(),
+      onAuditExport: vi.fn(),
+      onAuditPurge: vi.fn(),
+    });
+    view.update({
+      loading: false,
+      error: '',
+      workspaceId: 'workspace-a',
+      strictSecurityEnabled: true,
+      mode: 'request_approval',
+      capabilities: { ...capabilities, platform: 'windows', filesystem_sandbox: false },
+      rules: [],
+      audits: [],
+    });
+
+    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
+      .toBe(false);
+    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
+      .toBe(true);
+    expect(view.element.textContent).not.toContain('当前平台不使用 Windows 原生防护');
+
+    view.update({
+      loading: false,
+      error: '',
+      workspaceId: 'workspace-a',
+      strictSecurityEnabled: true,
+      mode: 'request_approval',
+      capabilities,
+      rules: [],
+      audits: [],
+    });
+
+    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
+      .toBe(true);
+    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
+      .toBe(false);
+  });
+
+  it('locks both Windows setup actions while one operation is in progress', () => {
+    const view = createSecurityCenterView({
+      onRefresh: vi.fn(),
+      onStrictSecurityChange: vi.fn(),
+      onModeChange: vi.fn(),
+      onInstall: vi.fn(),
+      onUninstall: vi.fn(),
+      onRuleToggle: vi.fn(),
+      onRuleDelete: vi.fn(),
+      onAuditExport: vi.fn(),
+      onAuditPurge: vi.fn(),
+    });
+    view.update({
+      loading: false,
+      setupAction: 'install',
+      error: '',
+      workspaceId: 'workspace-a',
+      strictSecurityEnabled: true,
+      mode: 'request_approval',
+      capabilities: { ...capabilities, filesystem_sandbox: false, managed_network: false },
+      rules: [],
+      audits: [],
+    });
+
+    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
+      .toBe(true);
+    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
+      .toBe(true);
+    expect(view.element.textContent).toContain('正在安装…');
   });
 
   it('hides the strict security toggle while Crew auth allows plaintext HTTP', () => {
@@ -239,6 +322,38 @@ describe('Security Center view', () => {
 });
 
 describe('Security Center integration', () => {
+  it('uses the in-app confirmation and locks setup actions during installation', async () => {
+    let finishSetup: ((value: { ok: boolean; exitCode: number }) => void) | undefined;
+    const securitySetup = vi.fn(() => new Promise<{ ok: boolean; exitCode: number }>((resolve) => {
+      finishSetup = resolve;
+    }));
+    const incompleteCapabilities = { ...capabilities, filesystem_sandbox: false, managed_network: false };
+    Object.assign(window, {
+      Crew: {
+        getStrictSecurityEnabled: vi.fn(async () => ({ strictSecurityEnabled: true })),
+        securityCapabilities: vi.fn(async () => ({ ok: true, body: incompleteCapabilities })),
+        securityRules: vi.fn(async () => ({ ok: true, body: { rules: [] } })),
+        securityAudit: vi.fn(async () => ({ ok: true, body: { total: 0, events: [] } })),
+        securitySetup,
+      },
+    });
+
+    renderSecurityPage();
+    await initSecurityPage();
+    document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.click();
+
+    await vi.waitFor(() => expect(showConfirmDialogMock).toHaveBeenCalledWith(expect.objectContaining({
+      title: '安装安全沙箱',
+      confirmText: '安装并继续',
+    })));
+    expect(document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
+      .toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
+      .toBe(true);
+    finishSetup?.({ ok: true, exitCode: 0 });
+    await vi.waitFor(() => expect(securitySetup).toHaveBeenCalledWith({ action: 'repair' }));
+  });
+
   it('keeps one shell and loads capabilities, rules and audit through the existing bridge', async () => {
     Object.assign(window, {
       Crew: {

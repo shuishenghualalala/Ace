@@ -10,6 +10,7 @@ import {
   type Skill,
 } from '../backend-client';
 import { setRuntimeStyle } from '../components/runtime-style';
+import { MONOCHROME_ICON_CLASS } from '../components/icon';
 import { getSkills, onSkillsChange } from './skill-store';
 import { $, $$, ensureSessionBook, escapeHtml, notify, patchBook, state, type ComposerMode } from '../state';
 import {
@@ -419,9 +420,10 @@ function renderComposerModeSwitch(activeMode: ComposerEntry): string {
   `;
 }
 
-function spriteIcon(id: string): string {
+function spriteIcon(id: string, className?: string): string {
   const viewBox = id === 'skill-badge' ? '0 0 32 32' : '0 0 24 24';
-  return `<svg class="mw-icon" viewBox="${viewBox}" width="18" height="18" aria-hidden="true"><use href="#${id}"></use></svg>`;
+  const classes = ['mw-icon', className].filter(Boolean).join(' ');
+  return `<svg class="${classes}" viewBox="${viewBox}" width="18" height="18" aria-hidden="true"><use href="#${id}"></use></svg>`;
 }
 
 const WORKSPACE_FOLDER_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>`;
@@ -436,7 +438,7 @@ function renderCraftPopover(): void {
   const craftIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>`;
   const planIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
   const askIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
-  const externalIcon = spriteIcon('icon-agent');
+  const externalIcon = spriteIcon('icon-agent', MONOCHROME_ICON_CLASS);
   const modeIcons: Record<ComposerEntry, string> = {
     craft: craftIcon,
     plan: planIcon,

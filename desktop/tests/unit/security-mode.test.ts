@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatCapabilitySummary } from '../../src/ui/features/security-mode';
+import { formatCapabilitySummary, isWindowsPlatform } from '../../src/ui/features/security-mode';
 
 describe('security capability summary', () => {
   it('does not claim protection when the native helper is absent', () => {
@@ -8,5 +8,9 @@ describe('security capability summary', () => {
 
   it('reports the native sandbox only when file and network controls are ready', () => {
     expect(formatCapabilitySummary({ helper_present: true, filesystem_sandbox: true, managed_network: true })).toContain('已启用');
+  });
+
+  it('recognizes the backend Windows platform name', () => {
+    expect(isWindowsPlatform('windows')).toBe(true);
   });
 });

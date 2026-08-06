@@ -291,6 +291,10 @@ body.welcome-active .welcome-view__header {
     calc(var(--mw-space-8) + var(--mw-space-4));
 }
 
+body.welcome-active:has(#security-sandbox-banner.show) .welcome-view__header {
+  padding-bottom: var(--mw-space-3);
+}
+
 body.welcome-active #chat-composer-root {
   position: relative;
   min-width: 0;

@@ -3,56 +3,102 @@
 
 /* 沙箱开关 banner：与 .composer-edit-banner 同带，状态色用修饰类切换 */
 .security-banner {
+  --security-banner-accent: var(--mw-status-warning);
+  --security-banner-soft: var(--mw-status-warning-bg);
   display: none;
+  position: relative;
   align-items: center;
-  gap: var(--mw-space-2);
-  max-width: 760px;
+  gap: var(--mw-space-3);
+  width: min(920px, 100%);
+  box-sizing: border-box;
   margin: 0 auto var(--mw-space-2);
-  padding: var(--mw-space-2) var(--mw-space-3);
-  border: 1px solid var(--mw-border-subtle);
+  min-height: 66px;
+  padding: var(--mw-space-3) var(--mw-space-3) var(--mw-space-3) var(--mw-space-4);
+  border: 1px solid color-mix(in srgb, var(--security-banner-accent) 34%, var(--mw-border-subtle));
+  border-left: 4px solid var(--security-banner-accent);
   border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-surface);
+  background: var(--security-banner-soft);
   color: var(--mw-text-primary);
-  font-size: calc(var(--mw-font-ui-size) - 1.5px);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--security-banner-accent) 12%, transparent);
 }
 .security-banner.show { display: flex; }
-.security-banner__icon { display: inline-flex; }
-.security-banner__text { flex: 1; min-width: 0; }
-.security-banner__actions { display: inline-flex; gap: var(--mw-space-1); flex-shrink: 0; }
+body.welcome-active .security-banner { width: min(720px, 100%); }
+.security-banner__icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border-radius: var(--mw-radius-full);
+  background: var(--security-banner-accent);
+  color: var(--mw-text-inverse);
+  font-size: var(--mw-type-body-size);
+  font-weight: 700;
+  line-height: 1;
+}
+.security-banner__content {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: var(--mw-space-1);
+}
+.security-banner__title {
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-label-size);
+  font-weight: 700;
+  line-height: var(--mw-type-label-line);
+}
+.security-banner__text {
+  min-width: 0;
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-caption-size);
+  line-height: var(--mw-type-caption-line);
+}
+.security-banner__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mw-space-2);
+  flex: 0 0 auto;
+}
+.security-banner__permission {
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  white-space: nowrap;
+}
 .security-banner__btn {
+  min-height: 32px;
+  padding: 0 var(--mw-space-3);
   border: 1px solid var(--mw-action-primary);
-  border-radius: var(--mw-radius-2);
+  border-radius: var(--mw-radius-full);
   background: var(--mw-action-primary);
   color: var(--mw-action-primary-text);
-  font-size: var(--mw-type-caption-size);
-  padding: var(--mw-space-1) var(--mw-space-2);
+  font-size: var(--mw-type-label-size);
+  font-weight: 600;
   cursor: pointer;
   transition: var(--mw-transition-interactive);
 }
-.security-banner__btn:hover { opacity: 0.9; }
-.security-banner__btn[disabled] { opacity: 0.5; cursor: default; }
-.security-banner.is-warn {
-  border-color: var(--mw-bg-selected);
-  background: var(--mw-bg-selected);
-  color: var(--mw-action-primary-hover);
-}
-.security-banner.is-warn .security-banner__btn {
-  border-color: var(--mw-action-primary-hover);
+.security-banner__btn:hover {
   background: var(--mw-action-primary-hover);
+  box-shadow: 0 4px 10px color-mix(in srgb, var(--mw-action-primary) 18%, transparent);
+  transform: translateY(-1px);
+}
+.security-banner__btn[disabled] { opacity: 0.5; cursor: default; }
+.security-banner.is-info {
+  --security-banner-accent: var(--mw-status-info);
+  --security-banner-soft: var(--mw-status-info-bg);
 }
 .security-banner.is-danger {
-  border-color: color-mix(in srgb, var(--mw-status-danger) 35%, transparent);
-  background: color-mix(in srgb, var(--mw-status-danger) 10%, transparent);
-  color: var(--mw-status-danger);
+  --security-banner-accent: var(--mw-status-danger);
+  --security-banner-soft: var(--mw-status-danger-bg);
 }
 .security-banner.is-danger .security-banner__btn {
   border-color: var(--mw-status-danger);
-  background: var(--mw-status-danger-bg);
+  background: var(--mw-status-danger);
 }
-.security-banner.is-info {
-  border-color: var(--mw-bg-selected);
-  background: var(--mw-bg-selected);
-  color: var(--mw-action-primary-hover);
+
+@media (max-width: 640px) {
+  .security-banner { align-items: flex-start; }
+  .security-banner__actions { flex-wrap: wrap; justify-content: flex-end; }
 }
 
 /* 单条命令批准 overlay：盖在输入框区域上层，opacity+translateY 平滑过渡，

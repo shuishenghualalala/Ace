@@ -1,4 +1,4 @@
-import { createIcon, type IconId } from '../components/icon';
+import { createIcon, MONOCHROME_ICON_CLASS, type IconId } from '../components/icon';
 
 const SETTINGS_NAVIGATION: ReadonlyArray<{ id: string; label: string; icon: IconId }> = [
   { id: 'account', label: '账户', icon: 'icon-agent' },
@@ -59,7 +59,10 @@ export function createSettingsShell(options: {
     button.className = 'mw-settings-dialog__nav-item set-v2-nav__item';
     button.dataset.settingsPane = item.id;
     label.textContent = item.label;
-    button.append(createIcon(item.icon, { size: 20 }), label);
+    const iconOptions = item.icon === 'icon-agent'
+      ? { size: 20 as const, className: MONOCHROME_ICON_CLASS }
+      : { size: 20 as const };
+    button.append(createIcon(item.icon, iconOptions), label);
     navigation.append(button);
   }
 

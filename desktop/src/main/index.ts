@@ -87,7 +87,11 @@ import {
   SecurityAuditArgs,
   SecuritySetupArgs,
 } from '../shared/ipc-schemas';
-import { runElevatedSecuritySetup } from './security-setup';
+import {
+  getWindowsUacStatus,
+  runElevatedSecuritySetup,
+  runElevatedUacEnable,
+} from './security-setup';
 import { isDeniedShellPath } from './shell-allowed-path';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
@@ -3089,6 +3093,16 @@ function registerIpc() {
   trustedHandle('security:audit-purge', async (_e, raw: unknown) => {
     const args = parseOrThrow(SecurityWorkspaceArgs.parse(raw), 'security:audit-purge');
     return securityGatewayRequest('POST', `/api/security/audit/purge-expired?workspace_id=${encodeURIComponent(args.workspaceId)}`);
+  });
+  trustedHandle('security:uac-status', async () => {
+    if (process.platform !== 'win32') return { enabled: true };
+    return getWindowsUacStatus();
+  });
+  trustedHandle('security:enable-uac', async () => {
+    if (process.platform !== 'win32') {
+      return { ok: false, exitCode: null, detail: '仅 Windows 支持启用 UAC' };
+    }
+    return runElevatedUacEnable();
   });
   trustedHandle('security:setup', async (_e, raw: unknown) => {
     const args = parseOrThrow(SecuritySetupArgs.parse(raw), 'security:setup');

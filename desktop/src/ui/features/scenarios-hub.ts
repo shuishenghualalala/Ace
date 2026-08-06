@@ -7,7 +7,7 @@
  */
 
 import { backendApi, type Scenario, type SubScenario } from '../backend-client';
-import { createIcon, type IconId } from '../components/icon';
+import { createIcon, MONOCHROME_ICON_CLASS, type IconId } from '../components/icon';
 
 const BATCH = 3;
 const SCENARIO_ICONS: readonly IconId[] = [
@@ -131,7 +131,11 @@ function createScenarioCommand(scenario: Scenario, index: number): HTMLButtonEle
   button.setAttribute('aria-expanded', scenario.id === activeId ? 'true' : 'false');
   button.setAttribute('aria-controls', 'scenario-items');
   symbol.className = 'scenario-command__symbol';
-  symbol.append(createIcon(SCENARIO_ICONS[index % SCENARIO_ICONS.length], { size: 18 }));
+  const icon = SCENARIO_ICONS[index % SCENARIO_ICONS.length];
+  const iconOptions = icon === 'icon-agent'
+    ? { size: 18 as const, className: MONOCHROME_ICON_CLASS }
+    : { size: 18 as const };
+  symbol.append(createIcon(icon, iconOptions));
   title.className = 'scenario-command__title';
   title.textContent = scenario.title;
   button.append(symbol, title);

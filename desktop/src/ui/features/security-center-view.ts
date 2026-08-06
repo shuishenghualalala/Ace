@@ -3,7 +3,11 @@ import {
   SECURITY_MODE_OPTIONS,
   type ConversationSecurityMode,
 } from './security-approval';
-import { formatCapabilitySummary, type SecurityCapabilities } from './security-mode';
+import {
+  formatCapabilitySummary,
+  isWindowsPlatform,
+  type SecurityCapabilities,
+} from './security-mode';
 import { formatSecurityRule, type SecurityRuleView } from './security-rules';
 import {
   actionTypeLabel,
@@ -24,6 +28,7 @@ const STRICT_SECURITY_TOGGLE_VISIBLE = false;
 
 export interface SecurityCenterSnapshot {
   loading: boolean;
+  setupAction?: 'install' | 'uninstall' | null;
   error: string;
   workspaceId: string;
   strictSecurityEnabled: boolean;
@@ -155,7 +160,7 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
   const overview = document.createElement('div');
   const actions = document.createElement('div');
   const capabilities = snapshot.capabilities;
-  const isWindows = !capabilities?.platform || capabilities.platform === 'win32';
+  const isWindows = isWindowsPlatform(capabilities?.platform);
   const helperReady = Boolean(capabilities?.helper_present);
   const sandboxReady = helperReady && Boolean(capabilities?.filesystem_sandbox);
   const networkReady = sandboxReady && Boolean(capabilities?.managed_network);
@@ -185,10 +190,25 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
     ),
   );
 
-  const install = button('安装 / 修复 Windows 防护', 'install', 'primary');
-  const uninstall = button('卸载 Windows 防护', 'uninstall', 'danger');
-  install.disabled = !isWindows || snapshot.loading;
-  uninstall.disabled = !isWindows || snapshot.loading;
+  const setupAction = snapshot.setupAction ?? null;
+  const protectionReady = networkReady;
+  const setupBusy = setupAction !== null;
+  const install = button(
+    setupAction === 'install' ? '正在安装…' : '安装 / 修复 Windows 防护',
+    'install',
+    'primary',
+  );
+  const uninstall = button(
+    setupAction === 'uninstall' ? '正在卸载…' : '卸载 Windows 防护',
+    'uninstall',
+    'danger',
+  );
+  // 安装/修复与卸载互斥：未完整启用时只允许安装，完整启用后只允许卸载。
+  // setupAction 还会锁住 UAC/IPC 进行中的短窗口，避免重复触发。
+  install.disabled = !isWindows || snapshot.loading || setupBusy || protectionReady;
+  uninstall.disabled = !isWindows || snapshot.loading || setupBusy || !protectionReady;
+  install.setAttribute('aria-busy', String(setupAction === 'install'));
+  uninstall.setAttribute('aria-busy', String(setupAction === 'uninstall'));
   actions.append(install, uninstall);
 
   section.append(
