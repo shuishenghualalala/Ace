@@ -90,8 +90,11 @@ export async function hydrateMissingTurnFileCounts(sessionId: string): Promise<b
     const m = cur[i];
     if (m.role !== 'assistant' || !m.turnFileChanges?.length) continue;
 
-    // 先剔幽灵，再补计数（补计数读盘对已存在文件才有意义）
-    let files = await filterExistingTurnFileChanges(m.turnFileChanges);
+    // Gateway 精确落库项保留生成当时的状态与 +/-。只有旧 tool_call 推断项才允许
+    // 依据当前磁盘剔幽灵/补计数；否则后续轮删除文件会篡改前一轮历史卡。
+    const persistedPaths = new Set(m.turnFileChangesPersistedPaths ?? []);
+    const inferred = m.turnFileChanges.filter((file) => !persistedPaths.has(file.path));
+    let files = await filterExistingTurnFileChanges(inferred);
     files = mergeCountsFromFileChanges(files, book);
     if (needsCountHydration(files)) {
       const patched: TurnFileChangeSummary[] = [];
@@ -116,6 +119,13 @@ export async function hydrateMissingTurnFileCounts(sessionId: string): Promise<b
       }
       files = patched;
     }
+
+    const hydratedByPath = new Map(files.map((file) => [file.path, file]));
+    files = m.turnFileChanges.flatMap((file) => {
+      if (persistedPaths.has(file.path)) return [file];
+      const hydrated = hydratedByPath.get(file.path);
+      return hydrated ? [hydrated] : [];
+    });
 
     const prev = m.turnFileChanges;
     const same =

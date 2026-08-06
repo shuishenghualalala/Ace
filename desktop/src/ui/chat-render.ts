@@ -125,6 +125,9 @@ export interface ChatMessage {
   /** 该回合「仅本轮」文件改动差集（finalReducer 在 final 时推算并 patch 进来）；
    *  chat-render 据此在正文下方渲染「已编辑 N 个文件」卡。 */
   turnFileChanges?: TurnFileChangeSummary[] | undefined;
+  /** 历史中由 Gateway 精确落库的文件路径；旧 tool_call 推断项不在其中。
+   *  精确项不得再按当前磁盘状态做“旧历史补全”，否则跨轮删除会改写原回合语义。 */
+  turnFileChangesPersistedPaths?: string[] | undefined;
   /** 该回合内产生的 plan 审批卡片。 */
   planReview?: {
     plan: string;

@@ -162,14 +162,19 @@ export function normalizeTurnFileChanges(
     if (isPlanDocumentPath(path)) continue;
     const status =
       f.status === 'added' || f.status === 'deleted' || f.status === 'modified' ? f.status : 'modified';
-    out.push({
+    const normalized = {
       path,
       name: typeof f.name === 'string' && f.name.trim() ? f.name : fileNameFromPath(path),
       added: typeof f.added === 'number' && Number.isFinite(f.added) ? f.added : 0,
       removed: typeof f.removed === 'number' && Number.isFinite(f.removed) ? f.removed : 0,
       status,
       ...(f.binary ? { binary: true } : {}),
-    });
+    } satisfies TurnFileChangeSummary;
+    // 与实时 reducer 保持一致：空文本文件的 metadata-only added 不形成可读改动卡。
+    if (!normalized.binary && normalized.status === 'added' && normalized.added === 0 && normalized.removed === 0) {
+      continue;
+    }
+    out.push(normalized);
   }
   return out.length > 0 ? out : undefined;
 }
@@ -255,7 +260,10 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     const merged = new Map<string, TurnFileChangeSummary>();
     for (const file of persisted ?? []) merged.set(file.path, file);
     for (const file of inferred) if (!merged.has(file.path)) merged.set(file.path, file);
-    if (merged.size > 0) base.turnFileChanges = Array.from(merged.values());
+    if (merged.size > 0) {
+      base.turnFileChanges = Array.from(merged.values());
+      if (persisted?.length) base.turnFileChangesPersistedPaths = persisted.map((file) => file.path);
+    }
   }
   if (role === 'user') {
     const parsed = parseAttachmentMarkers(item.content);
