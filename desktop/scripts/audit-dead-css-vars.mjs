@@ -3,7 +3,7 @@
  *
  * Scans the assets/styles CSS tree and src TS code for
  * `var(--X, fallback)` references where --X is not defined in
- * variables.css. These "dead" references silently fall back to the
+ * tokens.css. These "dead" references silently fall back to the
  * literal color in the second argument, defeating the point of the
  * token system.
  *
@@ -177,7 +177,7 @@ if (isCli()) {
   const report = auditDeadCssVars({
     stylesDir: 'assets/styles',
     srcDir: 'src',
-    variablesPath: 'assets/styles/variables.css',
+    variablesPath: 'assets/styles/tokens.css',
   });
 
   if (json) {
