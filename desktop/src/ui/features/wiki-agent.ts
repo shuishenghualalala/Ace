@@ -336,17 +336,14 @@ function renderEmbeddedPanel(): void {
   renderEmbeddedTodo(root, panel.sessionId);
   if (preview) {
     const attachments = embeddedAttachments.get(activeEmbeddedKbId) || [];
-    preview.replaceChildren(...attachments.map((attachment) => {
-      const chip = document.createElement('span');
-      chip.className = 'chat-attachment-chip';
-      chip.textContent = attachment.name;
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.dataset.wikiRemoveAttachment = attachment.id;
-      remove.textContent = '×';
-      chip.appendChild(remove);
-      return chip;
-    }));
+    // 附件预览卡片与主对话完全同款（扩展名图标 + 文件名 + 类型/大小 + 悬浮移除按钮）。
+    preview.replaceChildren(...attachments.map((attachment) =>
+      buildAttachmentChip(attachment, (attId) => {
+        const list = embeddedAttachments.get(activeEmbeddedKbId) || [];
+        embeddedAttachments.set(activeEmbeddedKbId, list.filter((item) => item.id !== attId));
+        scheduleEmbeddedRender();
+      }),
+    ));
     preview.hidden = attachments.length === 0;
   }
 }
@@ -754,10 +751,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
       })();
       return;
     }
-    const id = target?.closest<HTMLElement>('[data-wiki-remove-attachment]')?.dataset.wikiRemoveAttachment;
-    if (!id) return;
-    embeddedAttachments.set(req.kbId, (embeddedAttachments.get(req.kbId) || []).filter((item) => item.id !== id));
-    scheduleEmbeddedRender();
+    // 附件移除按钮自带监听并 stopPropagation（见 buildAttachmentChip），不经过本委托。
   });
   form?.addEventListener('submit', (event) => {
     event.preventDefault();
