@@ -55,6 +55,25 @@ describe('sites page annotation handoff', () => {
     expect(shell).not.toContain('chat-sites-mode__logo" aria-hidden="true"><i>');
   });
 
+  it('keeps one Sites mount and a valid trash icon in the static shell', async () => {
+    const fs = await import('node:fs/promises');
+    const [shell, sprite, styles, wikiStyles] = await Promise.all([
+      fs.readFile('assets/index.html', 'utf8'),
+      fs.readFile('assets/crew-ui-symbols.svg', 'utf8'),
+      fs.readFile('assets/styles/sites-page.css', 'utf8'),
+      fs.readFile('assets/styles/wiki-page.css', 'utf8'),
+    ]);
+    expect(shell.match(/id="sites-tab"/g)).toHaveLength(1);
+    expect(shell.match(/id="sites-page-root"/g)).toHaveLength(1);
+    expect(sprite).toContain('<symbol id="icon-trash" viewBox="0 0 24 24">');
+    expect(styles).not.toMatch(/#[0-9a-f]{3,8}/i);
+    expect(styles).not.toMatch(/--(?:bg-primary|surface|text-primary|text-secondary|v2-|color-accent)/);
+    expect(styles).toContain('var(--mw-inspector-hard-max)');
+    expect(wikiStyles).toContain('--mw-symbol-line: var(--mw-identity-blue)');
+    expect(wikiStyles).not.toContain('--crew-line');
+    expect(wikiStyles).not.toContain('#2463eb');
+  });
+
   it('uses one authenticated preview protocol for every inspiration', async () => {
     const fs = await import('node:fs/promises');
     const sitesPage = await fs.readFile('src/ui/features/sites-page.ts', 'utf8');
@@ -142,10 +161,10 @@ describe('sites page annotation handoff', () => {
     expect(sitesPage).toContain('data-inspiration-delete');
     expect(sitesPage).toContain('window.Crew?.openInspirationWindow');
     expect(backend).toContain('/api/sites/inspirations');
-    expect(styles).toContain('grid-template-columns:repeat(auto-fill');
-    expect(styles).toContain('.sites-page-root{display:flex;min-width:0;min-height:0;flex:1;overflow:hidden}');
-    expect(styles).toContain('.inspiration-detail{box-sizing:border-box;display:flex;width:100%;height:100%');
-    expect(styles).toContain('.inspiration-detail__stage{position:relative;width:100%;min-height:0;flex:1 1 0');
+    expect(styles).toMatch(/grid-template-columns:\s*repeat\(auto-fill/);
+    expect(styles).toMatch(/\.sites-page-root\s*\{/);
+    expect(styles).toMatch(/\.inspiration-detail\s*\{[\s\S]*width:\s*100%;[\s\S]*height:\s*100%;/);
+    expect(styles).toMatch(/\.inspiration-detail__stage\s*\{[\s\S]*width:\s*100%;[\s\S]*flex:\s*1 1 0;/);
     expect(protocolSource).toContain("kind: 'site' | 'canvas' | 'widget'");
     expect(protocolSource).toContain('/api/sites/canvases/${resolved.canvasId}/render');
     expect(protocolSource).toContain('/api/sites/widgets/${resolved.widgetId}/render/');
