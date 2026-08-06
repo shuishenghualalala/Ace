@@ -3,7 +3,8 @@
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo.svg">
     <img src="assets/logo.svg" alt="Crew Logo" width="180">
   </picture>
-  <h1>Crew — 本地多智能体工作台</h1>
+  <h1>Crew — 开源版 WorkBuddy：本地多智能体工作台</h1>
+  <p><i>Open WorkBuddy: an open-source, local-first multi-agent workbench with skills, automation, a knowledge base, and your own models.</i></p>
   <p>
     <a href="https://github.com/shuishenghualalala/Ace/stargazers"><img src="https://img.shields.io/github/stars/shuishenghualalala/Ace?style=flat-square&color=F4D98B" alt="Stars"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
@@ -14,14 +15,12 @@
 </div>
 
 > 每天在 ChatGPT 和 Claude 之间来回切，文件散落各处，Agent 做完就忘，换个会话又要重新交代一遍——于是我们决定做一个能常驻本机、记住一切、还能组队干活的工作台。Crew 的名字就是这么来的：一群 Agent 像船员一样各司其职，你当船长。
+>
+> 定位上，Crew 是开源版 WorkBuddy：和 WorkBuddy 一样，它是一个坐在你电脑里干活的 AI 同事——装技能、连服务、操作本地文件、接管浏览器、定时跑任务、多 Agent 并行协作；不同的是，Crew 完全开源（Apache 2.0）、数据全部留在本机，模型用你自己的 API Key，OpenAI 兼容与 Anthropic 协议均可接入。
 
 ### 能做什么
 
-早上打开 Crew，跟 Agent 说"帮我把下载文件夹按日期整理"，它直接动手。Wiki 里存着上周的会议纪要，Agent 能随时检索引用。想写一个需求文档？拉上 Explore Agent 做调研、Plan Agent 拆任务、Wiki Agent 归档，你只需要审核——Team 模式让多个 Agent 像真实团队一样并行协作。
-
-<div align="center">
-  <img src="assets/screenshot_web.png" alt="Crew Web UI" width="700">
-</div>
+早上打开 Crew，跟 Agent 说"帮我把下载文件夹按日期整理"，它直接动手。Wiki 里存着上周的会议纪要和个人笔记，Agent 能随时检索引用。想写一个需求文档？拉上 Explore Agent 做调研、Plan Agent 拆任务、Wiki Agent 归档，你只需要审核——Team 模式让多个 Agent 像真实团队一样并行协作。本机装好的 Codex、Claude Code、Kimi 也能一键接入当外援，各家发挥所长一起干活。
 
 <div align="center">
   <img src="assets/screenshot_desktop.png" alt="Crew Desktop UI" width="700">
