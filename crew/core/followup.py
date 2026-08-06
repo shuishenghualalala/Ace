@@ -287,6 +287,7 @@ async def send_followup_question_to(
     questions: list[dict[str, Any]],
     title: str = "",
     *,
+    note: str = "",
     origin: dict[str, Any] | None = None,
     push_fn=None,
     record_history: bool = True,
@@ -321,11 +322,47 @@ async def send_followup_question_to(
         "request_id": current_request_id.get(),
         "session_id": session_id,
     }
+    normalized_note = str(note or "").strip()
+    if normalized_note:
+        payload["body"]["note"] = normalized_note
     if origin:
         payload["body"]["origin"] = dict(origin)
     await push_fn(session_id, payload)
     log.info("已发送追问 session=%s question=%s", session_id, question_id)
     return session_id, question_id
+
+
+async def send_followup_status_to(
+    session_id: str,
+    question_id: str,
+    status: str,
+    *,
+    note: str = "",
+    push_fn=None,
+) -> bool:
+    """Push a presentation-only lifecycle update for an existing follow-up."""
+
+    session_id = str(session_id or "").strip()
+    question_id = str(question_id or "").strip()
+    status = str(status or "").strip()
+    if not session_id or not question_id or not status:
+        return False
+    push_fn = push_fn or current_push_fn.get()
+    if push_fn is None:
+        return False
+    await push_fn(session_id, {
+        "kind": "followup_question",
+        "body": {
+            "question_id": question_id,
+            "status": status,
+            "note": str(note or "").strip(),
+        },
+        "is_final": False,
+        "sequence": 0,
+        "request_id": current_request_id.get(),
+        "session_id": session_id,
+    })
+    return True
 
 
 async def wait_for_answer(

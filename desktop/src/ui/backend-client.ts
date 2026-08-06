@@ -750,6 +750,7 @@ export interface FollowupQuestion {
     type?: string;
     agent_name?: string;
     origin_session_id?: string;
+    mention_intent?: string;
   };
   questions: {
     id: string;

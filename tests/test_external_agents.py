@@ -2035,6 +2035,60 @@ def test_team_auto_selection_skips_agent_with_missing_runtime_model():
     assert "agent-missing" not in member_ids
 
 
+def test_runtime_staffing_managed_agent_is_owner_scoped_idempotent_and_hidden(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "runtime-staffing-ready",
+        "provider": "custom",
+        "name": "Runtime Staffing",
+        "executable_path": "/bin/sh",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-backend",
+            "models": [{
+                "id": "model-backend",
+                "label": "Backend",
+                "capabilities": ["backend", "implementation"],
+            }],
+        },
+    })
+
+    first = store.get_or_create_managed_agent(
+        owner_account_id="owner-a",
+        managed_kind="runtime_staffing",
+        managed_key="runtime:model:backend",
+        name="Runtime 外援·后端开发",
+        runtime_id=runtime["id"],
+        model="model-backend",
+        system_prompt="负责后端实现",
+    )
+    repeated = store.get_or_create_managed_agent(
+        owner_account_id="owner-a",
+        managed_kind="runtime_staffing",
+        managed_key="runtime:model:backend",
+        name="不会重复创建",
+        runtime_id=runtime["id"],
+        model="model-backend",
+        system_prompt="负责后端实现",
+    )
+    another_owner = store.get_or_create_managed_agent(
+        owner_account_id="owner-b",
+        managed_kind="runtime_staffing",
+        managed_key="runtime:model:backend",
+        name="Runtime 外援·后端开发",
+        runtime_id=runtime["id"],
+        model="model-backend",
+        system_prompt="负责后端实现",
+    )
+
+    assert repeated["id"] == first["id"]
+    assert another_owner["id"] != first["id"]
+    assert first["managed_kind"] == "runtime_staffing"
+    assert first["profile"]["availability"] == "ready"
+    assert store.list_agents(owner_account_id="owner-a", include_managed=False) == []
+    assert [item["id"] for item in store.list_agents(owner_account_id="owner-a")] == [first["id"]]
+
+
 def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_path):
     db = tmp_path / "crew.db"
     store = ExternalAgentStore(str(db))

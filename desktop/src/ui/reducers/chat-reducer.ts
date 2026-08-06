@@ -128,7 +128,12 @@ export interface FollowupQuestionChunk {
     record_history?: boolean;
     status?: string;
     note?: string;
-    origin?: { type?: string; agent_name?: string; origin_session_id?: string };
+    origin?: {
+      type?: string;
+      agent_name?: string;
+      origin_session_id?: string;
+      mention_intent?: string;
+    };
     questions?: Array<{
       id?: string;
       question?: string;
@@ -333,7 +338,9 @@ export function resolveBusyTransition(
   kind: ChatChunkKind,
   statusHint: StatusHint | undefined,
   turnSealed = false,
+  presentationOnly = false,
 ): boolean | null {
+  if (presentationOnly) return null;
   if (USER_WAIT_CHUNK_KINDS.has(kind)) return false;
   if (statusHint === 'running' || statusHint === 'queued') {
     if (turnSealed) return null;
@@ -1053,6 +1060,31 @@ export function planReviewReducer(chunk: PlanReviewChunk, snapshot: ReducerSnaps
 export function followupQuestionReducer(chunk: FollowupQuestionChunk, snapshot: ReducerSnapshot): ReducerResult {
   const book = { ...snapshot.book };
   const status = typeof chunk.body.status === 'string' ? chunk.body.status : '';
+  const current = book.pendingFollowup;
+  const targetsCurrent = !chunk.body.question_id || current?.questionId === chunk.body.question_id;
+  const isRuntimeStaffing = current?.origin?.mentionIntent === 'runtime_staffing';
+  if (
+    current
+    && targetsCurrent
+    && isRuntimeStaffing
+    && ['resolved', 'applying', 'applied', 'declined', 'failed'].includes(status)
+  ) {
+    book.pendingFollowup = {
+      ...current,
+      status: status === 'resolved' ? 'applying' : status,
+      ...(typeof chunk.body.note === 'string' && chunk.body.note.trim()
+        ? { note: chunk.body.note.trim() }
+        : {}),
+    };
+    return {
+      messageUpserts: [],
+      toolUpserts: [],
+      replaceBook: book,
+      statusHint: undefined,
+      queueHint: undefined,
+      finalize: false,
+    };
+  }
   if (['expired', 'cancelled', 'resolved'].includes(status)) {
     if (!chunk.body.question_id || book.pendingFollowup?.questionId === chunk.body.question_id) {
       book.pendingFollowup = null;
@@ -1072,11 +1104,18 @@ export function followupQuestionReducer(chunk: FollowupQuestionChunk, snapshot: 
     ...(typeof chunk.body.origin.origin_session_id === 'string'
       ? { originSessionId: chunk.body.origin.origin_session_id }
       : {}),
+    ...(typeof chunk.body.origin.mention_intent === 'string'
+      ? { mentionIntent: chunk.body.origin.mention_intent }
+      : {}),
   } : undefined;
   book.pendingFollowup = {
     questionId: typeof chunk.body.question_id === 'string' ? chunk.body.question_id : '',
     title: typeof chunk.body.title === 'string' ? chunk.body.title : '',
     recordHistory: chunk.body.record_history !== false,
+    ...(status ? { status } : {}),
+    ...(typeof chunk.body.note === 'string' && chunk.body.note.trim()
+      ? { note: chunk.body.note.trim() }
+      : {}),
     ...(origin ? { origin } : {}),
     questions: (chunk.body.questions ?? []).map((q) => ({
       id: typeof q.id === 'string' ? q.id : '',

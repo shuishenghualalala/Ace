@@ -29,6 +29,7 @@ from crew.team.roles import (
     crew_builtin_agent_public,
     infer_role_key,
     intelligent_role_markdown,
+    is_crew_builtin_agent,
     public_responsibility,
     responsibility_signature,
     role_preset,
@@ -634,6 +635,69 @@ def build_agent_capability_profile(agent: dict[str, Any]) -> AgentProfile:
     """Compatibility wrapper for the old public helper name."""
 
     return build_agent_profile(agent)
+
+
+def rank_staffing_candidates(
+    required_capabilities: list[str],
+    agents: list[dict[str, Any]],
+    *,
+    excluded_agent_ids: set[str] | None = None,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Rank ready External Agents for one Runtime staffing gap."""
+
+    required = normalize_capabilities(required_capabilities)
+    if not required:
+        return []
+    excluded = {str(item or "").strip() for item in (excluded_agent_ids or set()) if str(item or "").strip()}
+    ranked: list[tuple[tuple[int, float, float, str], dict[str, Any]]] = []
+    for agent in agents:
+        agent_id = str(agent.get("id") or "").strip()
+        if not agent_id or agent_id in excluded or is_crew_builtin_agent(agent_id):
+            continue
+        profile = build_agent_profile(agent)
+        if not _profile_available_for_formation(profile):
+            continue
+        covered = [capability for capability in required if profile.score(capability) >= 0.5]
+        if len(covered) != len(required):
+            continue
+        capability_evidence = {
+            capability: {
+                "score": round(profile.score(capability), 4),
+                "confidence": round(profile.confidence(capability), 4),
+                "sources": list(dict.fromkeys(
+                    evidence.source
+                    for evidence in profile.capabilities[capability].evidence
+                ))[:3],
+            }
+            for capability in covered
+        }
+        weighted_score = sum(
+            profile.score(capability) * max(profile.confidence(capability), 0.15)
+            for capability in covered
+        )
+        candidate = {
+            "candidate_type": "agent",
+            "external_agent_id": agent_id,
+            "name": _agent_name(agent),
+            "selection_source": "managed_pool" if str(agent.get("managed_kind") or "") else "existing_agent",
+            "runtime_id": str(agent.get("runtime_id") or ""),
+            "model_id": str(agent.get("model") or ""),
+            "profile_version": profile.version,
+            "covered_capabilities": covered,
+            "capability_evidence": capability_evidence,
+            "reason": f"覆盖 {len(covered)}/{len(required)} 项所需能力，且 Runtime/model 当前可用。",
+        }
+        rank = (-len(covered), -weighted_score, -sum(profile.score(item) for item in covered), agent_id)
+        ranked.append((rank, candidate))
+    ranked.sort(key=lambda item: item[0])
+    return [candidate for _, candidate in ranked[:max(1, int(limit or 1))]]
+
+
+def role_key_for_capabilities(capabilities: list[str]) -> str:
+    """Public Runtime staffing projection onto the existing standard role catalog."""
+
+    return _role_key_for_capabilities(normalize_capabilities(capabilities))
 
 
 def _required_capabilities(_text: str, team_spec: Any) -> list[str]:
@@ -1359,6 +1423,27 @@ def _recommended_runtime_model(
         )
 
     return min(candidates, key=rank)
+
+
+def ready_runtime_model_options(runtimes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Public, deterministic ready Runtime/model catalog for Runtime staffing."""
+
+    return _ready_runtime_model_options(runtimes)
+
+
+def recommend_runtime_model(
+    options: list[dict[str, Any]],
+    *,
+    required_capabilities: list[str],
+) -> dict[str, Any] | None:
+    """Choose the best ready Runtime/model without provider-brand heuristics."""
+
+    return _recommended_runtime_model(
+        options,
+        required_capabilities=required_capabilities,
+        requested_runtime_id="",
+        requested_model_id="",
+    )
 
 
 def formation_ai_context(

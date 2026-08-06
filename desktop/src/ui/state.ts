@@ -87,7 +87,14 @@ export interface PendingFollowup {
   title: string;
   /** false for permission side-channel prompts: keep the current assistant turn intact. */
   recordHistory: boolean;
-  origin?: { type?: string; agentName?: string; originSessionId?: string };
+  status?: string;
+  note?: string;
+  origin?: {
+    type?: string;
+    agentName?: string;
+    originSessionId?: string;
+    mentionIntent?: string;
+  };
   questions: Array<{
     id: string;
     question: string;
