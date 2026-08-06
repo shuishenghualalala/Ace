@@ -10,8 +10,19 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from crew.agent.external.runtime_profile import runtime_model_migrations
+from crew.agent.external.runtime_profile import (
+    canonical_runtime_model_id,
+    runtime_model_fingerprint,
+    runtime_model_migrations,
+)
 from crew.state._migration import rebuild_table_pk
+from crew.team.agent_profile import (
+    RUNTIME_DEFAULT_MODEL_ID,
+    build_agent_profile_envelope,
+    canonical_profile_model_id,
+    is_profile_envelope,
+    resolve_agent_profile_envelope,
+)
 from crew.team.capabilities import AGENT_PROFILE_VERSION, normalize_capabilities
 from crew.team.roles import (
     CREW_BUILTIN_AGENT_ID,
@@ -58,7 +69,7 @@ class ExternalAgentStore:
                 """
             )
             conn.execute(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS external_agent (
                   id TEXT PRIMARY KEY,
                   owner_account_id TEXT NOT NULL DEFAULT '',
@@ -68,9 +79,9 @@ class ExternalAgentStore:
                   model TEXT,
                   system_prompt TEXT NOT NULL DEFAULT '',
                   custom_args_json TEXT NOT NULL DEFAULT '[]',
-                  custom_env_json TEXT NOT NULL DEFAULT '{}',
-                  profile_json TEXT NOT NULL DEFAULT '{}',
-                  profile_version INTEGER NOT NULL DEFAULT 2,
+                  custom_env_json TEXT NOT NULL DEFAULT '{{}}',
+                  profile_json TEXT NOT NULL DEFAULT '{{}}',
+                  profile_version INTEGER NOT NULL DEFAULT {AGENT_PROFILE_VERSION},
                   profile_updated_at TEXT,
                   managed_kind TEXT NOT NULL DEFAULT '',
                   managed_key TEXT NOT NULL DEFAULT '',
@@ -89,6 +100,10 @@ class ExternalAgentStore:
                   source_run_id TEXT NOT NULL,
                   source_node_id TEXT NOT NULL,
                   source_attempt_id TEXT NOT NULL,
+                  runtime_id TEXT NOT NULL DEFAULT '',
+                  model_id TEXT NOT NULL DEFAULT '',
+                  model_fingerprint TEXT NOT NULL DEFAULT '',
+                  model_binding_source TEXT NOT NULL DEFAULT '',
                   capabilities_json TEXT NOT NULL DEFAULT '[]',
                   assessment_source TEXT NOT NULL,
                   outcome TEXT NOT NULL,
@@ -182,6 +197,38 @@ class ExternalAgentStore:
             self._ensure_column(conn, "external_agent", "managed_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "external_agent", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "external_team", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(
+                conn,
+                "external_agent_profile_observation",
+                "runtime_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                "external_agent_profile_observation",
+                "model_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                "external_agent_profile_observation",
+                "model_fingerprint",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                "external_agent_profile_observation",
+                "model_binding_source",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            conn.execute(
+                """
+                UPDATE external_agent_profile_observation
+                SET model_binding_source = 'legacy_unknown'
+                WHERE COALESCE(model_id, '') = ''
+                  AND COALESCE(model_binding_source, '') = ''
+                """
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_external_agent_owner ON external_agent(owner_account_id, created_at)"
             )
@@ -196,6 +243,14 @@ class ExternalAgentStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_external_agent_profile_observation_agent
                 ON external_agent_profile_observation(owner_account_id, external_agent_id, observed_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_external_agent_profile_observation_model
+                ON external_agent_profile_observation(
+                  owner_account_id, external_agent_id, model_id, observed_at
+                )
                 """
             )
             conn.execute(
@@ -635,7 +690,7 @@ class ExternalAgentStore:
         runtime: dict[str, Any] | None = None,
         owner_account_id: str = "",
     ) -> dict[str, Any]:
-        """Rebuild and persist the current AgentProfile snapshot."""
+        """Refresh the default model overlay and return the public Agent row."""
 
         with self._conn() as conn:
             return self._refresh_agent_profile_in_conn(
@@ -645,6 +700,48 @@ class ExternalAgentStore:
                 owner_account_id=owner_account_id,
             )
 
+    def resolve_agent_profile(
+        self,
+        agent_id: str,
+        model_id: str,
+        *,
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        """Resolve and persist one lazy model overlay as a public AgentProfile."""
+
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
+                (agent_id, owner_account_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(agent_id)
+            runtime_row = conn.execute(
+                "SELECT * FROM external_runtime WHERE id = ?",
+                (str(row["runtime_id"] or ""),),
+            ).fetchone()
+            if runtime_row is None:
+                raise KeyError(str(row["runtime_id"] or ""))
+            runtime = self._runtime_dict(runtime_row)
+            requested = canonical_profile_model_id(dict(row), runtime, model_id)
+            self._refresh_agent_profile_in_conn(
+                conn,
+                agent_id,
+                runtime=runtime,
+                owner_account_id=owner_account_id,
+                model_id=requested,
+            )
+            refreshed = conn.execute(
+                "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
+                (agent_id, owner_account_id),
+            ).fetchone()
+            if refreshed is None:  # pragma: no cover - same transaction invariant
+                raise KeyError(agent_id)
+            profile = resolve_agent_profile_envelope(self._profile_json(refreshed), requested)
+            if profile is None:  # pragma: no cover - builder invariant
+                raise RuntimeError("AgentProfile overlay 解析失败")
+            return profile.to_dict()
+
     def _refresh_agent_profile_in_conn(
         self,
         conn: sqlite3.Connection,
@@ -652,10 +749,9 @@ class ExternalAgentStore:
         *,
         runtime: dict[str, Any] | None = None,
         owner_account_id: str = "",
+        model_id: str | None = None,
     ) -> dict[str, Any]:
-        """Rebuild one AgentProfile using the caller's transaction."""
-
-        from crew.team.formation import build_agent_profile
+        """Refresh one or more ProfileEnvelope overlays in the caller transaction."""
 
         row = conn.execute(
             "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
@@ -663,6 +759,7 @@ class ExternalAgentStore:
         ).fetchone()
         if row is None:
             raise KeyError(agent_id)
+        stored_profile = self._profile_json(row)
         agent = self._agent_dict(row)
         runtime_payload = runtime
         if runtime_payload is None:
@@ -673,6 +770,18 @@ class ExternalAgentStore:
             if runtime_row is None:
                 raise KeyError(str(agent.get("runtime_id") or ""))
             runtime_payload = self._runtime_dict(runtime_row)
+        if model_id is None and not str(agent.get("model") or "").strip():
+            inherited_model_id = canonical_profile_model_id(agent, runtime_payload)
+            if inherited_model_id != RUNTIME_DEFAULT_MODEL_ID:
+                conn.execute(
+                    """
+                    UPDATE external_agent
+                    SET model = ?, updated_at = ?
+                    WHERE id = ? AND owner_account_id = ? AND COALESCE(model, '') = ''
+                    """,
+                    (inherited_model_id, _now(), agent_id, owner_account_id),
+                )
+                agent["model"] = inherited_model_id
         observation_rows = conn.execute(
             """
             SELECT *
@@ -683,12 +792,14 @@ class ExternalAgentStore:
             (owner_account_id, agent_id),
         ).fetchall()
         observations = [self._profile_observation_dict(item) for item in observation_rows]
-        profile = build_agent_profile(
+        profile = build_agent_profile_envelope(
             agent,
             runtime=runtime_payload,
             observations=observations,
-        ).to_dict()
-        if agent.get("profile") == profile:
+            existing=stored_profile,
+            model_id=model_id,
+        )
+        if stored_profile == profile:
             return agent
         now = _now()
         conn.execute(
@@ -728,8 +839,12 @@ class ExternalAgentStore:
         quality_weight: float,
         failure_kind: str = "",
         observed_at: str | None = None,
+        runtime_id: str = "",
+        model_id: str = "",
+        model_fingerprint: str = "",
+        model_binding_source: str = "",
     ) -> dict[str, Any]:
-        """Insert one final execution fact and atomically refresh its AgentProfile."""
+        """Insert one model-attributed execution fact and refresh that overlay."""
 
         agent_id = str(external_agent_id or "").strip()
         attempt_id = str(source_attempt_id or "").strip()
@@ -754,14 +869,43 @@ class ExternalAgentStore:
         observed = str(observed_at or now)
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            agent_row = conn.execute(
+                "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
+                (agent_id, owner_account_id),
+            ).fetchone()
+            if agent_row is None:
+                raise KeyError(agent_id)
+            current_runtime_id = str(agent_row["runtime_id"] or "")
+            runtime_row = conn.execute(
+                "SELECT * FROM external_runtime WHERE id = ?",
+                (current_runtime_id,),
+            ).fetchone()
+            if runtime_row is None:
+                raise KeyError(current_runtime_id)
+            runtime_payload = self._runtime_dict(runtime_row)
+            requested_model_id = str(model_id or "").strip()
+            resolved_model_id = (
+                canonical_runtime_model_id(runtime_payload, requested_model_id) or requested_model_id
+                if requested_model_id
+                else canonical_profile_model_id(dict(agent_row), runtime_payload)
+            )
+            resolved_runtime_id = str(runtime_id or current_runtime_id).strip()
+            resolved_fingerprint = str(model_fingerprint or "").strip() or runtime_model_fingerprint(
+                runtime_payload,
+                resolved_model_id,
+            )
+            resolved_binding_source = str(model_binding_source or "").strip() or (
+                "execution_snapshot" if requested_model_id else "agent_default_compat"
+            )
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO external_agent_profile_observation (
                   id, owner_account_id, external_agent_id,
                   source_run_id, source_node_id, source_attempt_id,
+                  runtime_id, model_id, model_fingerprint, model_binding_source,
                   capabilities_json, assessment_source, outcome, quality_weight,
                   failure_kind, observed_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     observation_id,
@@ -770,6 +914,10 @@ class ExternalAgentStore:
                     str(source_run_id or ""),
                     str(source_node_id or ""),
                     attempt_id,
+                    resolved_runtime_id,
+                    resolved_model_id,
+                    resolved_fingerprint,
+                    resolved_binding_source,
                     json.dumps(normalized_capabilities, ensure_ascii=False),
                     normalized_source,
                     normalized_outcome,
@@ -785,6 +933,7 @@ class ExternalAgentStore:
                     conn,
                     agent_id,
                     owner_account_id=owner_account_id,
+                    model_id=resolved_model_id,
                 )
             else:
                 row = conn.execute(
@@ -1417,11 +1566,29 @@ class ExternalAgentStore:
         item["managed_key"] = str(item.get("managed_key") or "")
         item["custom_args"] = json.loads(item.pop("custom_args_json") or "[]")
         item["custom_env"] = json.loads(item.pop("custom_env_json") or "{}")
-        try:
-            item["profile"] = json.loads(item.pop("profile_json") or "{}")
-        except json.JSONDecodeError:
-            item["profile"] = {}
+        stored_profile = ExternalAgentStore._profile_json(row)
+        item.pop("profile_json", None)
+        if is_profile_envelope(stored_profile):
+            overlay_key = str(item.get("model") or RUNTIME_DEFAULT_MODEL_ID)
+            resolved = resolve_agent_profile_envelope(stored_profile, overlay_key)
+            if resolved is None:
+                overlays = stored_profile.get("model_overlays")
+                if isinstance(overlays, dict) and len(overlays) == 1:
+                    resolved = resolve_agent_profile_envelope(stored_profile, next(iter(overlays)))
+            item["profile"] = resolved.to_dict() if resolved is not None else {}
+        else:
+            # V1-V3 rows remain visible during startup; _backfill_agent_profiles
+            # replaces them with a V4 envelope before normal request handling.
+            item["profile"] = stored_profile
         return item
+
+    @staticmethod
+    def _profile_json(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            parsed = json.loads(str(row["profile_json"] or "{}"))
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     @staticmethod
     def _profile_observation_dict(row: sqlite3.Row) -> dict[str, Any]:

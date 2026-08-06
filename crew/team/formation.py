@@ -10,14 +10,12 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from crew.agent.external.runtime_profile import model_binding_status, runtime_model
+from crew.team import agent_profile as _agent_profile
+from crew.team.agent_profile import AgentProfile, build_agent_profile
 from crew.team.capabilities import (
-    AGENT_PROFILE_VERSION,
     CAPABILITIES,
-    CAPABILITY_IMPLICATIONS,
     CAPABILITY_LABELS,
     CAPABILITY_ROLE_KEYS,
-    CAPABILITY_SIGNALS,
     capabilities_from_text,
     normalize_capabilities,
     normalize_capability,
@@ -37,98 +35,13 @@ from crew.team.roles import (
 )
 from crew.team.team_spec import build_team_spec
 
-
-@dataclass(frozen=True)
-class CapabilityEvidence:
-    source: str
-    value: str
-    weight: float
-
-
-@dataclass(frozen=True)
-class CapabilityAssessment:
-    score: float
-    confidence: float
-    evidence: list[CapabilityEvidence] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "score": round(self.score, 4),
-            "confidence": round(self.confidence, 4),
-            "evidence": [asdict(item) for item in self.evidence],
-        }
-
-
-@dataclass
-class AgentProfile:
-    agent_id: str
-    capabilities: dict[str, CapabilityAssessment]
-    availability: str = "ready"
-    runtime: str = "unknown"
-    model: dict[str, Any] = field(default_factory=dict)
-    version: int = AGENT_PROFILE_VERSION
-
-    def score(self, capability: str) -> float:
-        assessment = self.capabilities.get(capability)
-        return assessment.score if assessment is not None else 0.0
-
-    def confidence(self, capability: str) -> float:
-        assessment = self.capabilities.get(capability)
-        return assessment.confidence if assessment is not None else 0.0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "version": self.version,
-            "agent_id": self.agent_id,
-            "availability": self.availability,
-            "runtime": self.runtime,
-            "model": dict(self.model),
-            "capabilities": {
-                capability: assessment.to_dict()
-                for capability, assessment in self.capabilities.items()
-            },
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AgentProfile | None:
-        if int(data.get("version") or 1) < AGENT_PROFILE_VERSION:
-            return None
-        raw_capabilities = data.get("capabilities")
-        if not isinstance(raw_capabilities, dict):
-            return None
-        capabilities: dict[str, CapabilityAssessment] = {}
-        for capability in CAPABILITIES:
-            raw = raw_capabilities.get(capability)
-            if not isinstance(raw, dict):
-                continue
-            evidence = [
-                CapabilityEvidence(
-                    source=str(item.get("source") or "unknown"),
-                    value=str(item.get("value") or ""),
-                    weight=_clamp_score(item.get("weight"), 0.0),
-                )
-                for item in (raw.get("evidence") or [])
-                if isinstance(item, dict)
-            ]
-            capabilities[capability] = CapabilityAssessment(
-                score=_clamp_score(raw.get("score"), 0.2),
-                confidence=_clamp_score(raw.get("confidence"), 0.15),
-                evidence=evidence,
-            )
-        if not capabilities:
-            return None
-        return cls(
-            version=AGENT_PROFILE_VERSION,
-            agent_id=str(data.get("agent_id") or ""),
-            availability=str(data.get("availability") or "ready"),
-            runtime=str(data.get("runtime") or "unknown"),
-            model=dict(data.get("model") or {}) if isinstance(data.get("model"), dict) else {},
-            capabilities=capabilities,
-        )
-
-
-# Compatibility name for callers that imported the original transient model.
-AgentCapabilityProfile = AgentProfile
+# Preserve the original formation.py import surface while the implementation
+# lives in the focused model-aware profile module.
+AgentCapabilityProfile = _agent_profile.AgentCapabilityProfile
+CapabilityAssessment = _agent_profile.CapabilityAssessment
+CapabilityEvidence = _agent_profile.CapabilityEvidence
+apply_execution_observations = _agent_profile.apply_execution_observations
+build_agent_capability_profile = _agent_profile.build_agent_capability_profile
 
 
 @dataclass
@@ -382,259 +295,12 @@ def _payload_agent_ids(payload: dict[str, Any], key: str, valid_ids: set[str]) -
     }
 
 
-def _capability_dict(value: Any) -> dict[str, float]:
-    if not isinstance(value, dict):
-        return {}
-    out: dict[str, float] = {}
-    for raw_key, raw in value.items():
-        capability = normalize_capability(raw_key)
-        if not capability:
-            continue
-        try:
-            score = float(raw)
-        except (TypeError, ValueError):
-            continue
-        out[capability] = max(out.get(capability, 0.0), max(0.0, min(score, 1.0)))
-    return out
-
-
 def _clamp_score(value: Any, default: float) -> float:
     try:
         score = float(value)
     except (TypeError, ValueError):
         return default
     return max(0.0, min(score, 1.0))
-
-
-def _runtime_evidence_blob(runtime: dict[str, Any] | None) -> tuple[str, str]:
-    runtime_payload = runtime if isinstance(runtime, dict) else {}
-    metadata = runtime_payload.get("metadata") if isinstance(runtime_payload.get("metadata"), dict) else {}
-    declared = metadata.get("skills") or metadata.get("declared_skills") or []
-    tools = metadata.get("tools") or metadata.get("tool_manifest") or []
-    declared_blob = " ".join(str(item) for item in declared) if isinstance(declared, list) else str(declared or "")
-    tool_blob = " ".join(str(item) for item in tools) if isinstance(tools, list) else str(tools or "")
-    return declared_blob.lower(), tool_blob.lower()
-
-
-def build_agent_profile(
-    agent: dict[str, Any],
-    *,
-    runtime: dict[str, Any] | None = None,
-    observations: list[dict[str, Any]] | None = None,
-) -> AgentProfile:
-    """Build AgentProfile from declared facts; user assignment is never evidence."""
-
-    if runtime is None and observations is None and isinstance(agent.get("profile"), dict) and agent["profile"]:
-        persisted = AgentProfile.from_dict(agent["profile"])
-        if persisted is not None:
-            return persisted
-
-    agent_id = str(agent.get("id") or "")
-    scores = {capability: 0.2 for capability in CAPABILITIES}
-    confidences = {capability: 0.15 for capability in CAPABILITIES}
-    evidence: dict[str, list[CapabilityEvidence]] = {
-        capability: [CapabilityEvidence("weak_prior", "no structured evidence", 0.15)]
-        for capability in CAPABILITIES
-    }
-
-    explicit = _capability_dict(agent.get("capabilities") or agent.get("capability_profile"))
-    for capability, score in explicit.items():
-        scores[capability] = score
-        confidences[capability] = max(confidences[capability], 0.9)
-        evidence[capability] = [CapabilityEvidence("declared_capability", str(score), 0.9)]
-
-    declared = agent.get("declared_skills") or agent.get("skills")
-    if isinstance(declared, list):
-        blob = " ".join(str(item) for item in declared).lower()
-        for capability, signals in CAPABILITY_SIGNALS.items():
-            if any(signal in blob for signal in signals):
-                scores[capability] = max(scores[capability], 0.75)
-                confidences[capability] = max(confidences[capability], 0.75)
-                evidence[capability].append(CapabilityEvidence("declared_skill", blob[:300], 0.75))
-
-    runtime_skills, runtime_tools = _runtime_evidence_blob(runtime)
-    for capability, signals in CAPABILITY_SIGNALS.items():
-        if runtime_skills and any(signal in runtime_skills for signal in signals):
-            scores[capability] = max(scores[capability], 0.7)
-            confidences[capability] = max(confidences[capability], 0.65)
-            evidence[capability].append(CapabilityEvidence("runtime_skill", runtime_skills[:300], 0.65))
-        if runtime_tools and any(signal in runtime_tools for signal in signals):
-            scores[capability] = max(scores[capability], 0.55)
-            confidences[capability] = max(confidences[capability], 0.5)
-            evidence[capability].append(CapabilityEvidence("tool_manifest", runtime_tools[:300], 0.5))
-
-    selected_model_id = str(agent.get("model") or "").strip()
-    selected_model = runtime_model(runtime, selected_model_id)
-    runtime_metadata = runtime.get("metadata") if isinstance(runtime, dict) else None
-    runtime_status = (
-        str(runtime_metadata.get("availability_status") or "").strip()
-        if isinstance(runtime_metadata, dict)
-        else ""
-    )
-    model_capability_blob = " ".join(selected_model.capabilities).lower() if selected_model else ""
-    for capability, signals in CAPABILITY_SIGNALS.items():
-        if model_capability_blob and any(signal in model_capability_blob for signal in signals):
-            scores[capability] = max(scores[capability], 0.4)
-            confidences[capability] = max(confidences[capability], 0.35)
-            evidence[capability].append(CapabilityEvidence(
-                "runtime_model_capability",
-                model_capability_blob[:300],
-                0.35,
-            ))
-
-    text_blob = " ".join(
-        str(agent.get(key) or "")
-        for key in ("name", "system_prompt", "description")
-    ).lower()
-    for capability, signals in CAPABILITY_SIGNALS.items():
-        if any(signal in text_blob for signal in signals):
-            scores[capability] = max(scores[capability], 0.65)
-            confidences[capability] = max(confidences[capability], 0.4)
-            evidence[capability].append(CapabilityEvidence("text_inference", text_blob[:300], 0.4))
-
-    if agent_id == CREW_BUILTIN_AGENT_ID:
-        scores["planning"] = max(scores["planning"], 0.9)
-        confidences["planning"] = max(confidences["planning"], 0.85)
-        evidence["planning"].append(CapabilityEvidence("builtin_contract", "crew leader orchestration", 0.85))
-        scores["documentation"] = max(scores["documentation"], 0.45)
-        scores["testing"] = max(scores["testing"], 0.45)
-    for source, implied_items in CAPABILITY_IMPLICATIONS.items():
-        for implied in implied_items:
-            implied_score = scores[source] * 0.85
-            implied_confidence = confidences[source] * 0.8
-            if implied_score <= scores[implied] and implied_confidence <= confidences[implied]:
-                continue
-            scores[implied] = max(scores[implied], implied_score)
-            confidences[implied] = max(confidences[implied], implied_confidence)
-            evidence[implied].append(CapabilityEvidence(
-                "capability_implication",
-                f"{source} implies {implied}",
-                round(implied_confidence, 4),
-            ))
-    profile = AgentProfile(
-        agent_id=agent_id,
-        capabilities={
-            capability: CapabilityAssessment(
-                score=scores[capability],
-                confidence=confidences[capability],
-                evidence=list(dict.fromkeys(evidence[capability])),
-            )
-            for capability in CAPABILITIES
-        },
-        availability=str(agent.get("availability") or runtime_status or "ready"),
-        runtime=str(agent.get("runtime") or agent.get("runtime_id") or agent.get("provider") or "unknown"),
-        model={
-            "id": selected_model_id,
-            "label": selected_model.label if selected_model else selected_model_id,
-            "binding_status": model_binding_status(runtime, selected_model_id),
-            "capabilities": list(selected_model.capabilities) if selected_model else [],
-            "thinking_levels": list(selected_model.thinking_levels) if selected_model else [],
-        },
-    )
-    return apply_execution_observations(profile, observations or [])
-
-
-def apply_execution_observations(
-    profile: AgentProfile,
-    observations: list[dict[str, Any]],
-) -> AgentProfile:
-    """Blend settled execution facts into a static profile without one-shot drift."""
-
-    if not observations:
-        return profile
-    stats: dict[str, dict[str, Any]] = {
-        capability: {
-            "positive": 0.0,
-            "negative": 0.0,
-            "success": 0,
-            "revise": 0,
-            "failure": 0,
-            "neutral": 0,
-            "last_observed_at": "",
-        }
-        for capability in CAPABILITIES
-    }
-    for observation in observations:
-        if not isinstance(observation, dict):
-            continue
-        capabilities = normalize_capabilities(observation.get("capabilities") or [])
-        if not capabilities:
-            continue
-        outcome = str(observation.get("outcome") or "neutral").strip().lower()
-        if outcome not in {"success", "revise", "failure", "neutral"}:
-            continue
-        weight = _clamp_score(observation.get("quality_weight"), 0.0) / len(capabilities)
-        observed_at = str(observation.get("observed_at") or "")
-        for capability in capabilities:
-            stat = stats[capability]
-            stat[outcome] += 1
-            stat["last_observed_at"] = max(stat["last_observed_at"], observed_at)
-            if outcome == "success":
-                stat["positive"] += weight
-            elif outcome in {"revise", "failure"}:
-                stat["negative"] += weight
-
-    capabilities: dict[str, CapabilityAssessment] = {}
-    for capability, assessment in profile.capabilities.items():
-        stat = stats[capability]
-        total_observations = sum(
-            int(stat[key])
-            for key in ("success", "revise", "failure", "neutral")
-        )
-        if total_observations == 0:
-            capabilities[capability] = assessment
-            continue
-        sample_count = int(stat["success"]) + int(stat["revise"]) + int(stat["failure"])
-        effective_weight = float(stat["positive"]) + float(stat["negative"])
-        blend = (
-            min(0.5, effective_weight / (effective_weight + 6.0))
-            if sample_count >= 3 and effective_weight > 0
-            else 0.0
-        )
-        empirical_score = (
-            (2.0 + float(stat["positive"])) / (4.0 + effective_weight)
-            if effective_weight > 0
-            else 0.5
-        )
-        score = assessment.score * (1.0 - blend) + empirical_score * blend
-        confidence = min(
-            0.95,
-            max(
-                assessment.confidence,
-                assessment.confidence + blend * (1.0 - assessment.confidence),
-            ),
-        )
-        summary = (
-            f"samples={sample_count}; success={stat['success']}; revise={stat['revise']}; "
-            f"failure={stat['failure']}; neutral={stat['neutral']}; "
-            f"last={stat['last_observed_at'] or 'unknown'}"
-        )
-        capabilities[capability] = CapabilityAssessment(
-            score=_clamp_score(score, assessment.score),
-            confidence=_clamp_score(confidence, assessment.confidence),
-            evidence=[
-                *assessment.evidence,
-                CapabilityEvidence(
-                    source="execution_observation",
-                    value=summary,
-                    weight=round(blend, 4),
-                ),
-            ],
-        )
-    return AgentProfile(
-        version=profile.version,
-        agent_id=profile.agent_id,
-        availability=profile.availability,
-        runtime=profile.runtime,
-        model=dict(profile.model),
-        capabilities=capabilities,
-    )
-
-
-def build_agent_capability_profile(agent: dict[str, Any]) -> AgentProfile:
-    """Compatibility wrapper for the old public helper name."""
-
-    return build_agent_profile(agent)
 
 
 def rank_staffing_candidates(
