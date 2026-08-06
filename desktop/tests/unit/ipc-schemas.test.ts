@@ -19,6 +19,7 @@ import {
   FeedbackSubmitArgs,
   FeedbackListArgs,
   DialogSelectFileArgs,
+  InspirationWindowArgs,
   UpdateStartDownloadArgs,
 } from '../../src/shared/ipc-schemas';
 import { MAX_DIALOG_FILE_BYTES } from '../../src/shared/constants';
@@ -228,6 +229,20 @@ describe('DialogSelectFileArgs', () => {
 
   it('rejects non-array filters', () => {
     expect(DialogSelectFileArgs.parse({ filters: 'png' as unknown as never }).ok).toBe(false);
+  });
+});
+
+describe('InspirationWindowArgs', () => {
+  it('accepts only canonical site and canvas ids', () => {
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab' }).ok).toBe(true);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'canvas_abcdef123456', title: '行情' }).ok).toBe(true);
+  });
+
+  it('rejects arbitrary URLs, widget ids, path fragments, and oversized titles', () => {
+    expect(InspirationWindowArgs.parse({ inspirationId: 'https://example.com' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'widget_0123456789ab' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab/../../x' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab', title: 'x'.repeat(201) }).ok).toBe(false);
   });
 });
 

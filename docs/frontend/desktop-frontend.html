@@ -45,6 +45,14 @@
     <li>代码结构以模块边界为先：同一功能尽量收敛在已有 feature 子模块、样式模块和 typed API 封装内，避免临时脚本式调用和跨层循环依赖。</li>
     <li>可以参考 Hermes 等架构的交互和分层，但实现需按本仓库 Electron + Vanilla TypeScript 结构落地，不直接堆叠不合栈的代码。</li>
   </ul>
+  <p><b>2026-08-05：</b>原“站点”重构为统一“灵感”App 库：移除网站/看板分栏和用户可见类型标签，使用按更新时间排序的响应式真实预览图库与搜索；详情统一提供修改原对话、ZIP 分享、固定到桌面和安全删除。<code>ace-site://</code> 扩展到完整 Canvas，Electron 增加仅接收规范资源 ID 的单例便利贴：无系统标题栏、可拖动缩放、始终置顶，macOS/Windows/Linux 分别采用稳定的透明或实色呈现。<code>publish_site</code>、<code>Canvas.show</code>、<code>Widget.show</code> 统一输出可历史恢复的 <code>InspirationSurface</code>；右侧 Inspector 默认随窗口扩展、支持拖拽改宽和全区域放大，单组件内容直接铺满，并支持使用/批注切换。新会话写入 <code>inspiration_creation</code>，旧 <code>site_creation</code> 保持兼容。</p>
+  <p><b>2026-08-05：</b>站点页新增「网站 / 看板」双模式。看板页提供图库、12 列 Canvas Grid、组件运行与整板刷新、全屏、返回绑定对话，以及整理模式的拖动、缩放和布局持久化；Widget 通过 <code>ace-site://widget_xxx</code> 受控协议加载，不直接访问 Gateway 凭据或数据接口。</p>
+  <p><b>2026-08-05：</b>站点页增加右上角「创建」入口：点击后在当前 Workspace 建立并持久化 <code>site_creation</code> builtin Session、跳转主对话、聚焦输入框；Composer 与历史侧栏会话标题前显示原创的单色网站窗口图标，使用 <code>currentColor</code> 自动适配主题，重启后由后端 <code>agent_label.provider=sites</code> 恢复。创建只开启专用对话，不创建空站点、空看板或自动发布。</p>
+  <p><b>2026-08-05：</b>站点注释改为主对话工作流：从站点页进入注释时打开站点绑定 Session，并在右侧看板显示可点选元素的站点预览；评论按 Session 聚合，Composer 上方以「N 条注释」展示，可返回继续标注或清空。发送时把整体要求与所有元素上下文合并为一条 Agent 消息，发送成功后再清除草稿；Agent 只修改 Workspace 源码，不自动重新发布。</p>
+  <p><b>2026-08-05：</b>Blueprint 新增生成态预览 Surface：<code>Widget.show</code>/<code>Canvas.show</code> 的结构化工具结果会在当前对话右侧 Inspector 挂载组件或完整看板；未完成的 Widget 显示生成占位，成功 <code>Widget.validate</code> 后通过 <code>resourceRevision</code> 自动重载。用户可直接点选 iframe 元素批注，批注按 Session 聚合并在下一条消息中携带 Widget、源码、Canvas、mount、revision 与 DOM 上下文。</p>
+  <p><b>2026-08-05：</b>修正站点注释工作台被异步上下文刷新覆盖的问题，并在已发布站点的绑定对话顶部增加单色「注释」按钮；同一对话存在多个站点时提供站点菜单，普通对话保持隐藏。</p>
+  <p><b>2026-08-05：</b>站点列表预览与对话注释预览统一开放 iframe <code>allow-downloads</code>，支持网站通过浏览器标准下载机制导出 PNG、SVG、CSV 等客户端文件，同时保留其余 sandbox 隔离。</p>
+  <p><b>2026-08-04：</b>新增 Desktop 一级「站点」页：只展示用户明确要求 Agent 通过 <code>publish_site</code> 发布的网站，不扫描 Workspace、不在线部署。页面支持本地 release 预览、元素注释回流绑定 Session、注释状态管理，以及将 active release 保存为不含源码的便携 ZIP。注释桥仅动态注入预览响应，不进入分享包；保存 IPC 只放行 Crew Home 内的 ZIP。</p>
 
   <h2>2. 关键文件</h2>
   <table>

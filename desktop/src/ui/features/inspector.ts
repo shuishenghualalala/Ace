@@ -736,6 +736,7 @@ const expandedFiles = new Set<string>();
 const diffExpandsByPath = new Map<string, DiffRegionExpandMap>();
 let expandedMsg: string | null = null;
 let inspectorOpen = false; // 默认收起；首屏不由代码自动打开
+let customViewOpen = false;
 
 function getDiffExpands(path: string): DiffRegionExpandMap {
   return diffExpandsByPath.get(path) ?? {};
@@ -2179,7 +2180,11 @@ export function openInspectorToTab(
     return;
   }
   inspectorOpen = true;
+  customViewOpen = false;
   activeTab = tab;
+  disableInspectorSurfaceAutoWidth();
+  document.body.classList.remove('site-annotation-workbench-open');
+  document.body.classList.remove('blueprint-surface-open');
   if (tab !== 'browser') openCoreTabs.add(tab);
   document.body.classList.toggle('browser-workbench-open', tab === 'browser');
   if (tab === 'files') {
@@ -2235,6 +2240,24 @@ export function openInspectorToTab(
     }
   }
   syncInspectorToggleState();
+}
+
+/** 打开由功能模块提供内容的自定义看板，并保持看板自身的开关状态一致。 */
+export function openInspectorCustomView(): boolean {
+  if (!canShowInspectorUi() || !state.activeSessionId) return false;
+  if (activeTab === 'browser') {
+    releaseUserBrowserControl();
+    hideBrowserPanelView();
+  }
+  if (activeTab === 'collaboration') stopTeamCollaborationPolling();
+  inspectorOpen = true;
+  customViewOpen = true;
+  activeTab = 'context';
+  document.body.classList.remove('browser-workbench-open', 'browser-workbench-maximized', 'inspector-workspace-maximized');
+  document.body.classList.add('inspector-open');
+  $('#chat-inspector')?.classList.add('is-open');
+  syncInspectorToggleState();
+  return true;
 }
 
 function openInspector(): void {
@@ -2299,9 +2322,10 @@ export function closeInspector(): void {
   if (activeTab === 'browser') releaseUserBrowserControl();
   if (activeTab === 'collaboration') stopTeamCollaborationPolling();
   inspectorOpen = false;
+  customViewOpen = false;
   hideBrowserPanelView();
   document.body.classList.remove('inspector-open');
-  document.body.classList.remove('browser-workbench-open', 'browser-workbench-maximized', 'inspector-workspace-maximized');
+  document.body.classList.remove('browser-workbench-open', 'browser-workbench-maximized', 'inspector-workspace-maximized', 'inspector-surface-auto-width', 'site-annotation-workbench-open', 'blueprint-surface-open');
   $('#chat-inspector')?.classList.remove('is-open');
   syncInspectorToggleState();
 }
@@ -2325,10 +2349,11 @@ const INSPECTOR_DEFAULT_WIDTH = 320;
 /** 展开文件 diff 时自动加宽到默认的 1.5 倍 */
 const INSPECTOR_FILES_EXPANDED_WIDTH = 480;
 /** 常规拖拽宽度上限；放大使用独立的工作区覆盖态。 */
-const INSPECTOR_MAX_WIDTH = 760;
+const INSPECTOR_MAX_WIDTH = 1200;
+const INSPECTOR_SURFACE_MIN_WIDTH = 560;
 
 function effectiveMaxInspectorWidth(): number {
-  const vwCap = Math.floor(window.innerWidth * 0.62);
+  const vwCap = Math.floor(window.innerWidth * 0.72);
   return Math.max(INSPECTOR_MIN_WIDTH, Math.min(INSPECTOR_MAX_WIDTH, vwCap));
 }
 
@@ -2357,6 +2382,10 @@ function loadInspectorWidth(): number {
 function applyInspectorWidth(width: number, persist: boolean): void {
   const w = clampWidth(width);
   document.documentElement.style.setProperty('--inspector-width', `${w}px`);
+  const handle = document.getElementById('chat-inspector-resize-handle');
+  handle?.setAttribute('aria-valuemin', String(INSPECTOR_MIN_WIDTH));
+  handle?.setAttribute('aria-valuemax', String(effectiveMaxInspectorWidth()));
+  handle?.setAttribute('aria-valuenow', String(w));
   if (persist) {
     try {
       localStorage.setItem(INSPECTOR_WIDTH_KEY, String(w));
@@ -2366,31 +2395,46 @@ function applyInspectorWidth(width: number, persist: boolean): void {
   }
 }
 
+function applyResponsiveSurfaceWidth(): void {
+  const target = Math.max(INSPECTOR_SURFACE_MIN_WIDTH, Math.floor(window.innerWidth * 0.52));
+  applyInspectorWidth(target, false);
+}
+
+export function enableInspectorSurfaceAutoWidth(): void {
+  document.body.classList.add('inspector-surface-auto-width');
+  applyResponsiveSurfaceWidth();
+}
+
+export function disableInspectorSurfaceAutoWidth(): void {
+  if (!document.body.classList.contains('inspector-surface-auto-width')) return;
+  document.body.classList.remove('inspector-surface-auto-width');
+  applyInspectorWidth(loadInspectorWidth(), false);
+}
+
 function bindInspectorResize(): void {
   const handle = document.getElementById('chat-inspector-resize-handle');
   if (!handle) return;
   // 启动时立即恢复用户上次拖出来的宽度
   applyInspectorWidth(loadInspectorWidth(), false);
 
-  let dragging = false;
+  let pointerId: number | null = null;
   let startX = 0;
   let startWidth = 0;
 
-  const onMove = (e: MouseEvent): void => {
-    if (!dragging) return;
+  const onMove = (e: PointerEvent): void => {
+    if (pointerId !== e.pointerId) return;
     // 把手在面板左侧，向左拖 = 变宽
     const delta = startX - e.clientX;
     applyInspectorWidth(startWidth + delta, false);
   };
 
-  const onUp = (): void => {
-    if (!dragging) return;
-    dragging = false;
+  const onUp = (e: PointerEvent): void => {
+    if (pointerId !== e.pointerId) return;
+    if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+    pointerId = null;
     handle.classList.remove('is-dragging');
     document.body.classList.remove('inspector-resizing');
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    // mouseup 时再持久化，避免拖拽过程中频繁写 localStorage
+    // 手势结束时再持久化，避免拖拽过程中频繁写 localStorage
     try {
       const cur = parseInt(document.documentElement.style.getPropertyValue('--inspector-width'), 10);
       if (!isNaN(cur)) localStorage.setItem(INSPECTOR_WIDTH_KEY, String(clampWidth(cur)));
@@ -2399,30 +2443,61 @@ function bindInspectorResize(): void {
     }
   };
 
-  handle.addEventListener('mousedown', (e: MouseEvent) => {
+  handle.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (e.button !== 0) return;
     const inspector = document.getElementById('chat-inspector');
     if (!inspector) return;
-    dragging = true;
+    document.body.classList.remove('inspector-surface-auto-width');
+    pointerId = e.pointerId;
+    handle.setPointerCapture(e.pointerId);
     startX = e.clientX;
     startWidth = inspector.getBoundingClientRect().width;
     handle.classList.add('is-dragging');
     document.body.classList.add('inspector-resizing');
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
     e.preventDefault();
+  });
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onUp);
+  handle.addEventListener('pointercancel', onUp);
+
+  handle.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    document.body.classList.remove('inspector-surface-auto-width');
+    const current = document.getElementById('chat-inspector')?.getBoundingClientRect().width
+      || loadInspectorWidth();
+    const next = event.key === 'Home' ? INSPECTOR_MIN_WIDTH
+      : event.key === 'End' ? effectiveMaxInspectorWidth()
+        : current + (event.key === 'ArrowLeft' ? 24 : -24);
+    applyInspectorWidth(next, true);
   });
 
   // 双击复位到默认宽度
   handle.addEventListener('dblclick', () => {
+    document.body.classList.remove('inspector-surface-auto-width');
     applyInspectorWidth(INSPECTOR_DEFAULT_WIDTH, true);
   });
 
   window.addEventListener('resize', () => {
+    if (document.body.classList.contains('inspector-surface-auto-width')) {
+      applyResponsiveSurfaceWidth();
+      return;
+    }
     const cur = parseInt(document.documentElement.style.getPropertyValue('--inspector-width'), 10);
     if (Number.isFinite(cur) && cur > 0) {
       applyInspectorWidth(clampWidth(cur), false);
     }
   });
+}
+
+function toggleInspectorMaximized(): void {
+  const maximized = document.body.classList.toggle('inspector-workspace-maximized');
+  const button = document.getElementById('inspector-maximize');
+  button?.setAttribute('aria-pressed', String(maximized));
+  button?.setAttribute('aria-label', maximized ? '还原预览' : '放大预览');
+  if (button) button.title = maximized ? '还原预览' : '放大预览';
+  window.dispatchEvent(new CustomEvent('inspector:layout-changed', { detail: { maximized } }));
+  window.dispatchEvent(new Event('resize'));
 }
 
 function bindInspector(): void {
@@ -2501,13 +2576,7 @@ function bindInspector(): void {
     setWorkspaceMenuOpen(false);
   });
   document.getElementById('inspector-maximize')?.addEventListener('click', () => {
-    const maximized = document.body.classList.toggle('inspector-workspace-maximized');
-    const button = document.getElementById('inspector-maximize');
-    button?.setAttribute('aria-pressed', String(maximized));
-    button?.setAttribute('aria-label', maximized ? '还原看板' : '放大看板');
-    if (button) button.title = maximized ? '还原看板' : '放大看板';
-    window.dispatchEvent(new CustomEvent('inspector:layout-changed', { detail: { maximized } }));
-    window.dispatchEvent(new Event('resize'));
+    toggleInspectorMaximized();
   });
   window.addEventListener('resize', updateOpenTabMenuToggleVisibility);
   document.getElementById('inspector-close')?.addEventListener('click', closeInspector);
@@ -2529,13 +2598,7 @@ function bindInspector(): void {
     }
     if (action === 'open-existing') openBrowserWorkbench({ createTab: false });
     if (action === 'maximize') {
-      const maximized = document.body.classList.toggle('inspector-workspace-maximized');
-      const button = document.getElementById('inspector-maximize');
-      button?.setAttribute('aria-pressed', String(maximized));
-      button?.setAttribute('aria-label', maximized ? '还原看板' : '放大看板');
-      if (button) button.title = maximized ? '还原看板' : '放大看板';
-      window.dispatchEvent(new CustomEvent('inspector:layout-changed', { detail: { maximized } }));
-      window.dispatchEvent(new Event('resize'));
+      toggleInspectorMaximized();
     }
   }) as EventListener);
   window.addEventListener('browser-panel:state-changed', () => {
@@ -2635,6 +2698,10 @@ export function invalidateFileDiffCachePaths(paths: string[]): void {
 
 export function refreshInspector(): void {
   // 始终刷新（即便关闭）以便 tab 计数 / 状态准确；关闭时不渲染 body 节省开销。
+  if (customViewOpen) {
+    syncInspectorToggleState();
+    return;
+  }
   renderTabs();
   syncInspectorToggleState();
   if (inspectorOpen) renderBody();
@@ -2646,6 +2713,10 @@ export function refreshInspector(): void {
  * 正文仍由 todo_updated / file_changes / plan_review / setUsageSnapshot 等路径全量 refresh。
  */
 export function refreshInspectorChrome(): void {
+  if (customViewOpen) {
+    syncInspectorToggleState();
+    return;
+  }
   renderTabs();
   syncInspectorToggleState();
 }

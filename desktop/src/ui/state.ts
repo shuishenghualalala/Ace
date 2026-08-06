@@ -33,7 +33,7 @@ import {
 // stream-reassembly 零依赖（不 import state/features），故 state.ts 可安全 import 无循环。
 import { resetSession as resetReassembly } from './stream-reassembly';
 
-export type TabKey = 'chat' | 'agents' | 'skills' | 'wiki' | 'cron' | 'audit' | 'system';
+export type TabKey = 'chat' | 'agents' | 'skills' | 'wiki' | 'sites' | 'cron' | 'audit' | 'system';
 export type SystemPanelKey = 'overview' | 'logs' | 'usage';
 export type ComposerMode = 'craft' | 'plan' | 'ask';
 

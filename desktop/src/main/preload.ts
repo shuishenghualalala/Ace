@@ -42,6 +42,14 @@ const api = {
   revealImage: (p: string) => ipcRenderer.invoke('image:showItemInFolder', { path: p }) as Promise<{ ok: true }>,
   selectFile: (opts?: Record<string, unknown>) => ipcRenderer.invoke('dialog:selectFile', opts || {}),
   selectFolder: () => ipcRenderer.invoke('dialog:selectFolder', {}),
+  saveLocalExport: (sourcePath: string, suggestedName: string) =>
+    ipcRenderer.invoke('dialog:saveLocalExport', { sourcePath, suggestedName }) as Promise<{ ok: boolean; canceled: boolean; path?: string }>,
+  openInspirationWindow: (inspirationId: string, title: string) =>
+    ipcRenderer.invoke('inspiration:open-window', { inspirationId, title }) as Promise<{ ok: boolean; open: boolean }>,
+  closeInspirationWindow: (inspirationId: string) =>
+    ipcRenderer.invoke('inspiration:close-window', { inspirationId }) as Promise<{ ok: boolean; open: boolean }>,
+  inspirationWindowState: (inspirationId: string) =>
+    ipcRenderer.invoke('inspiration:window-state', { inspirationId }) as Promise<{ ok: boolean; open: boolean }>,
   getAutoLaunchEnabled: () => ipcRenderer.invoke('app:get-auto-launch-enabled'),
   setAutoLaunchEnabled: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-launch-enabled', enabled),
   getCloseBehavior: () => ipcRenderer.invoke('app:get-close-behavior'),

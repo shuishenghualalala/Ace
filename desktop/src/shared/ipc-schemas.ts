@@ -570,3 +570,48 @@ export const DialogSelectFolderArgs = {
     return { ok: true, value: {} };
   },
 };
+
+export interface DialogSaveLocalExportArgs {
+  sourcePath: string;
+  suggestedName: string;
+}
+
+/** 将后端在 Crew Home 内生成的 ZIP 复制到用户通过保存对话框选择的位置。 */
+export const DialogSaveLocalExportArgs = {
+  parse(raw: unknown): ParseResult<DialogSaveLocalExportArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const sourcePath = StringSchema.parse(raw['sourcePath'], 'sourcePath');
+    if (!sourcePath.ok) return sourcePath;
+    const suggestedName = StringSchema.parse(raw['suggestedName'], 'suggestedName');
+    if (!suggestedName.ok) return suggestedName;
+    if (!ABSOLUTE_PATH_RE.test(sourcePath.value)) return fail('sourcePath', 'must be an absolute path');
+    if (suggestedName.value.includes('/') || suggestedName.value.includes('\\') || suggestedName.value.includes('\0')) {
+      return fail('suggestedName', 'must be a plain filename');
+    }
+    if (!suggestedName.value.toLowerCase().endsWith('.zip')) return fail('suggestedName', 'must end with .zip');
+    return { ok: true, value: { sourcePath: sourcePath.value, suggestedName: suggestedName.value } };
+  },
+};
+
+export interface InspirationWindowArgs {
+  inspirationId: string;
+  title?: string;
+}
+
+/** 灵感悬浮窗只能打开后端生成的受控 site/canvas 标识，不能接收任意 URL。 */
+export const InspirationWindowArgs = {
+  parse(raw: unknown): ParseResult<InspirationWindowArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const inspirationId = StringSchema.parse(raw['inspirationId'], 'inspirationId');
+    if (!inspirationId.ok) return inspirationId;
+    if (!/^(?:site|canvas)_[0-9a-f]{12}$/i.test(inspirationId.value)) {
+      return fail('inspirationId', 'must be a site_* or canvas_* id');
+    }
+    const title = OptionalStringSchema.parse(raw['title'], 'title');
+    if (!title.ok) return title;
+    if ((title.value || '').length > 200) return fail('title', 'max 200 chars');
+    const value: InspirationWindowArgs = { inspirationId: inspirationId.value };
+    if (title.value !== undefined) value.title = title.value;
+    return { ok: true, value };
+  },
+};

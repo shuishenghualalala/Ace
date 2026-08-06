@@ -12,6 +12,7 @@ import WebSocket from 'ws';
 import { BrowserHost, BrowserHostError } from './browser-host';
 import { submitFeedback, getFeedbackList, getFeedbackImage } from './feedback-service';
 import { registerCrewFileProtocol } from './crew-file-protocol';
+import { registerSitePreviewProtocol } from './site-preview-protocol';
 import { authorizeOwnedImagePath, writeOwnedImageToClipboard } from './image-clipboard';
 import {
   managedGatewayModeEnv,
@@ -53,6 +54,8 @@ import {
   FeedbackImageArgs,
   DialogSelectFileArgs,
   DialogSelectFolderArgs,
+  DialogSaveLocalExportArgs,
+  InspirationWindowArgs,
   UpdateStartDownloadArgs
 } from '../shared/ipc-schemas';
 import {
@@ -102,6 +105,11 @@ protocol.registerSchemesAsPrivileged([
     scheme: 'crew-file',
     privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
   },
+  {
+    // Sites iframe 与其 HTML/JS/CSS/图片共享这个受控源，由主进程代理 Gateway 认证。
+    scheme: 'ace-site',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
+  },
 ]);
 
 // Browser traffic must stay on the authenticated loopback policy proxy.
@@ -110,6 +118,7 @@ app.commandLine.appendSwitch('disable-quic');
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_proxied_udp');
 
 let mainWindow: BrowserWindow | null = null;
+const inspirationWindows = new Map<string, BrowserWindow>();
 let managedGateway: ChildProcessWithoutNullStreams | null = null;
 let ensureGatewayPromise: Promise<{ baseUrl: string; managed: boolean }> | null = null;
 const gatewaySockets = new Map<number, WebSocket>();
@@ -845,6 +854,72 @@ function resolveWindowBackgroundColor(): string {
   return isDark ? '#0f1115' : '#ffffff';
 }
 
+function openInspirationWindow(inspirationId: string, title = '灵感'): BrowserWindow {
+  const existing = inspirationWindows.get(inspirationId);
+  if (existing && !existing.isDestroyed()) {
+    existing.show();
+    existing.focus();
+    return existing;
+  }
+  const transparentSticky = process.platform === 'darwin';
+  const win = new BrowserWindow({
+    width: 420,
+    height: 520,
+    minWidth: 280,
+    minHeight: 300,
+    resizable: true,
+    movable: true,
+    alwaysOnTop: true,
+    frame: false,
+    transparent: transparentSticky,
+    backgroundColor: transparentSticky ? '#00000000' : resolveWindowBackgroundColor(),
+    roundedCorners: true,
+    hasShadow: true,
+    skipTaskbar: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    autoHideMenuBar: true,
+    title: title || '灵感',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'inspiration-sticky-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false,
+    },
+  });
+  win.setMenuBarVisibility(false);
+  if (process.platform === 'darwin') {
+    win.setAlwaysOnTop(true, 'floating');
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+  inspirationWindows.set(inspirationId, win);
+  const target = `ace-site://${encodeURIComponent(inspirationId)}/`;
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'ace-site:' || parsed.hostname !== inspirationId) event.preventDefault();
+    } catch {
+      event.preventDefault();
+    }
+  });
+  win.once('ready-to-show', () => win.show());
+  win.on('closed', () => inspirationWindows.delete(inspirationId));
+  void win.loadURL(target);
+  return win;
+}
+
+function closeInspirationWindow(inspirationId: string): boolean {
+  const win = inspirationWindows.get(inspirationId);
+  if (!win || win.isDestroyed()) return false;
+  win.close();
+  return true;
+}
+
 function createWindow() {
   const launchHidden = shouldLaunchHidden();
   nativeWindowReady = false;
@@ -945,7 +1020,9 @@ function createWindow() {
       tryAutoReload(`did-fail-load: ${code} ${desc}`);
     }
   });
-  mainWindow.webContents.on('did-start-loading', () => {
+  mainWindow.webContents.on('did-start-navigation', (_event, url, _isInPlace, isMainFrame) => {
+    const expected = path.join(__dirname, '../assets/index.html');
+    if (!isMainFrame || !isTrustedRendererFileUrl(url, expected, RENDERER_LAUNCH_SEARCH)) return;
     browserHost?.hidePanel();
     resetRendererRevealGate();
   });
@@ -2035,6 +2112,27 @@ function registerIpc() {
   });
   trustedHandle('window:close', () => mainWindow?.close());
   trustedHandle('window:isMaximized', () => mainWindow?.isMaximized() ?? false);
+  trustedHandle('inspiration:open-window', (_e, raw: unknown) => {
+    const args = parseOrThrow(InspirationWindowArgs.parse(raw), 'inspiration:open-window');
+    openInspirationWindow(args.inspirationId, args.title);
+    return { ok: true, open: true };
+  });
+  trustedHandle('inspiration:close-window', (_e, raw: unknown) => {
+    const args = parseOrThrow(InspirationWindowArgs.parse(raw), 'inspiration:close-window');
+    closeInspirationWindow(args.inspirationId);
+    return { ok: true, open: false };
+  });
+  trustedHandle('inspiration:window-state', (_e, raw: unknown) => {
+    const args = parseOrThrow(InspirationWindowArgs.parse(raw), 'inspiration:window-state');
+    const win = inspirationWindows.get(args.inspirationId);
+    return { ok: true, open: Boolean(win && !win.isDestroyed()) };
+  });
+  ipcMain.on('inspiration:sticky-close', (event) => {
+    const entry = Array.from(inspirationWindows.entries()).find(
+      ([, win]) => !win.isDestroyed() && win.webContents.id === event.sender.id,
+    );
+    if (entry) closeInspirationWindow(entry[0]);
+  });
   trustedHandle('app:quit', () => {
     isQuitting = true;
     app.quit();
@@ -2062,6 +2160,45 @@ function registerIpc() {
     const extraRoots = args.allowedRoot ? [args.allowedRoot] : [];
     const resolved = resolveShellAllowedPath(args.path, extraRoots);
     return shell.openPath(resolved);
+  });
+
+  trustedHandle('dialog:saveLocalExport', async (_e, raw: unknown) => {
+    const args = parseOrThrow(DialogSaveLocalExportArgs.parse(raw), 'dialog:saveLocalExport');
+    const source = path.resolve(args.sourcePath);
+    const ownerSegment = currentCrewFileOwnerSegment();
+    if (!ownerSegment) throw new Error(`${IPC_ARG_VALIDATION_FAILED}: no active site owner`);
+    const sitesRoot = path.resolve(activeGatewayCrewHome(), 'accounts', ownerSegment, 'sites');
+    const relative = path.relative(sitesRoot, source);
+    const segments = relative.split(path.sep);
+    const validLocation = (
+      relative !== ''
+      && !relative.startsWith('..')
+      && !path.isAbsolute(relative)
+      && segments.length === 3
+      && /^(?:site|canvas)_[0-9a-f]{12}$/i.test(segments[0] || '')
+      && segments[1] === 'exports'
+      && path.extname(segments[2] || '').toLowerCase() === '.zip'
+    );
+    if (!validLocation) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: export source must be the current owner's inspiration ZIP`);
+    }
+    const stat = await fs.promises.stat(source);
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: export source is not a regular site ZIP`);
+    }
+    const realSource = await fs.promises.realpath(source);
+    const realExportRoot = await fs.promises.realpath(path.dirname(source));
+    if (path.dirname(realSource) !== realExportRoot || realSource !== source) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: export source path is not canonical`);
+    }
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: '分享灵感',
+      defaultPath: path.join(app.getPath('downloads'), args.suggestedName),
+      filters: [{ name: 'ZIP 压缩包', extensions: ['zip'] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    await fs.promises.copyFile(source, result.filePath);
+    return { ok: true, canceled: false, path: result.filePath };
   });
 
   trustedHandle('shell:readTextFile', async (_e, raw: unknown) => {
@@ -2871,6 +3008,10 @@ function registerIpc() {
 async function bootstrap() {
   await app.whenReady();
   registerCrewFileProtocol(activeGatewayCrewHome, currentCrewFileOwnerSegment);
+  registerSitePreviewProtocol(async () => {
+    const gateway = await ensureGateway();
+    return { baseUrl: gateway.baseUrl, headers: gatewayAccessHeaders };
+  });
   console.log(`[gateway] local identity mode: ${gatewayIdentityMode}`);
 
   // 🌟 优化：先创建窗口（显示 loading），Gateway 在后台启动
@@ -2975,6 +3116,10 @@ app.on('window-all-closed', () => {
 // 优雅关闭：包含网络释放以及后台猎杀
 app.on('before-quit', () => {
   isQuitting = true;
+  for (const win of inspirationWindows.values()) {
+    if (!win.isDestroyed()) win.destroy();
+  }
+  inspirationWindows.clear();
   gatewayRestartController.stop();
   void resetBrowserHost('app-quit');
   closeGatewaySockets('app-quit');

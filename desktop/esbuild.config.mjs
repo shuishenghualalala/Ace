@@ -73,6 +73,20 @@ async function main() {
     logLevel: 'info',
   });
 
+  // 灵感便利贴使用独立 preload，只暴露关闭入口，不继承主窗口能力。
+  await esbuild.build({
+    entryPoints: [path.join(rootDir, 'src/main/inspiration-sticky-preload.ts')],
+    outfile: path.join(mainOut, 'inspiration-sticky-preload.js'),
+    bundle: true,
+    platform: 'node',
+    target: 'node18',
+    format: 'cjs',
+    external: ['electron'],
+    sourcemap: isDev,
+    minify: !isDev,
+    logLevel: 'info',
+  });
+
   // 1. 合并原 desktop 的所有 CSS 模块（从源目录直接读，不依赖 dist）
   //    KaTeX 的 katex.min.css 通过 @import 引入，里面 url() 引用了 woff2/woff/ttf 字体；
   //    用 dataurl loader 把字体内联成 base64（桌面端离线，体积可接受），避免 file:// 加载外部字体失败。

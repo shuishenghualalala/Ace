@@ -1,8 +1,14 @@
 ---
 name: canvas
-description: Use when creating, reading, updating, or deleting Daimon Blueprint Canvases and when placing, moving, resizing, ordering, removing, or inspecting Widget placements and placement-local view state.
+description: Use when creating, reading, updating, or deleting Daimon Blueprint Canvases
+  and when placing, moving, resizing, ordering, removing, or inspecting Widget placements
+  and placement-local view state.
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: 画布管理
+  zh_description: 创建、读取、更新、删除 Daimon Blueprint 画布，以及放置、移动、调整大小、排序、移除或检查 Widget 放置与视图状态。
+  query_examples: 创建画布, 调整 widget 位置, 管理蓝图画布
 ---
-
 # Canvas
 
 Canvas is the Blueprint placement surface. It owns Canvas metadata and Widget placement state:
@@ -30,6 +36,8 @@ Canvas.list or Canvas.create
 ```
 
 For Canvas-only display, place the Widget directly. Use `Widget.show` only when the user also wants conversation or dock display.
+
+In Ace, call `Canvas.show({ canvasId })` when the complete Canvas should be mounted in the current conversation Inspector. The Surface stays bound to that conversation and refreshes placed Widgets after successful `Widget.validate` revisions.
 
 ## Conversation Preview
 

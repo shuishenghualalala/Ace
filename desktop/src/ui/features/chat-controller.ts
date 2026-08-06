@@ -62,6 +62,14 @@ import { resetToAgentMode } from './session-mode';
 import { isExternalTeamSession, persistDraftSessionModel, sessionDisplayModelLabel } from './session-model';
 import { renderSystemOverview } from './system-page';
 import { isInspectorOpen, getInspectorActiveTab, openBrowserWorkbench, openInspectorToTab, refreshInspector, refreshInspectorChrome, invalidateFileDiffCachePaths, setUsageSnapshot, resetPlanBoardDraft } from './inspector';
+import { clearSiteAnnotationDraft, composeSiteAnnotationMessage, hasSiteAnnotationDraft } from './sites-page';
+import {
+  clearBlueprintAnnotationDraft,
+  composeBlueprintAnnotationMessage,
+  handleBlueprintSurfaceToolChunk,
+  hasBlueprintAnnotationDraft,
+  mountBlueprintSurface,
+} from './blueprint-surface';
 import { showFileOpenMenu } from './file-open-menu';
 import { openBrowserArtifact, openUserBrowser } from './browser-panel';
 import { shouldAutoOpenBrowserWorkbench } from './browser-auto-open';
@@ -349,6 +357,26 @@ export function ensureFileChangesDelegation(container: HTMLElement): void {
       event.stopPropagation();
       const path = revealBtn.getAttribute('data-file-reveal');
       if (path) void showFileOpenMenu(revealBtn, path);
+      return;
+    }
+    const inspirationBtn = target.closest<HTMLElement>('[data-inspiration-surface]');
+    if (inspirationBtn && container.contains(inspirationBtn)) {
+      event.preventDefault();
+      try {
+        const surface = JSON.parse(inspirationBtn.dataset.inspirationSurface || '{}') as {
+          mode?: string; siteId?: string; inspirationId?: string; sessionId?: string;
+        };
+        if (surface.mode === 'site') {
+          window.dispatchEvent(new CustomEvent('inspiration:site-surface', {
+            detail: {
+              siteId: surface.siteId || surface.inspirationId || '',
+              sessionId: surface.sessionId || state.activeSessionId || '',
+            },
+          }));
+        } else if (surface.mode === 'canvas' || surface.mode === 'widget') {
+          void mountBlueprintSurface(surface as Parameters<typeof mountBlueprintSurface>[0]);
+        }
+      } catch { notify('无法打开这个灵感预览'); }
       return;
     }
     const artifact = target.closest<HTMLElement>('[data-browser-artifact]');
@@ -1795,6 +1823,8 @@ export function applyChunk(chunk: ChatChunk): void {
   if (gate.action === 'drop') return;
   const bindRequestId = 'bindRequestId' in gate ? gate.bindRequestId : null;
 
+  handleBlueprintSurfaceToolChunk(chunk, sid);
+
   if (parsed.kind === 'team_internal') {
     if (bindRequestId) patchBook(sid, { activeRequestId: bindRequestId, acceptingNewRequest: false });
     applyTeamInternalChunk(sid, parsed);
@@ -2093,7 +2123,7 @@ export async function dispatchWs(
   attachments = takeAttachmentsForSend(),
   subScenarioOrOptions: string | DispatchOptions = '',
   planActiveOverride?: boolean,
-): Promise<void> {
+): Promise<boolean> {
   const dispatchOptions: DispatchOptions = typeof subScenarioOrOptions === 'string'
     ? {
         subScenario: subScenarioOrOptions,
@@ -2111,7 +2141,7 @@ export async function dispatchWs(
     setBusyWithUi(sessionId, false);
     renderChat();
     notify('服务未连接');
-    return;
+    return false;
   }
   // 乐观 UI：先把用户消息渲染出来，再 await WS send。
   // 修订式引导在点击瞬间已经追加了 user 气泡；这里复用该气泡，避免当前 turn 收束后重复出现同一句。
@@ -2181,23 +2211,31 @@ export async function dispatchWs(
     setStatusWithUi(sessionId, 'idle');
     renderChat();
     syncTurnDurationTicker();
-    return;
+    return false;
   }
   subscribeSessions([sessionId]);
   logStream('dispatch', 'local-state-ready', { sessionId, requestId, busy: true });
   renderChat();
   syncTurnDurationTicker();
+  return true;
 }
 
 export function sendMessage(text: string): void {
-  const content = text.trim();
+  const plainContent = text.trim();
   const attachments = state.attachments;
-  if (!content && attachments.length === 0) return;
+  const activeHasAnnotations = state.activeSessionId
+    && (hasSiteAnnotationDraft(state.activeSessionId) || hasBlueprintAnnotationDraft(state.activeSessionId));
+  if (!plainContent && attachments.length === 0 && !activeHasAnnotations) return;
 
   // 无活跃会话（欢迎页）时新建草稿：用 composerWorkspaceId()（即右下角选择器所显示的空间），
   // 而不是裸读 state.currentWorkspaceId——避免二者不一致时消息落到选择器之外的空间。
   const sessionId = state.activeSessionId ?? createSessionInWorkspace(composerWorkspaceId(), openSessionFn);
-  const previewText = content || '附件消息';
+  const hasAnnotationDraft = hasSiteAnnotationDraft(sessionId) || hasBlueprintAnnotationDraft(sessionId);
+  const content = composeBlueprintAnnotationMessage(
+    sessionId,
+    composeSiteAnnotationMessage(sessionId, plainContent),
+  );
+  const previewText = plainContent || (hasAnnotationDraft ? '页面注释' : '附件消息');
 
   if (isBusy(sessionId)) {
     const pendingItem = {
@@ -2211,6 +2249,8 @@ export function sendMessage(text: string): void {
       queueEditDraft = null;
     }
     enqueuePending(sessionId, pendingItem);
+    clearSiteAnnotationDraft(sessionId);
+    clearBlueprintAnnotationDraft(sessionId);
     setQueueHintWithUi(sessionId, '正在排队…');
     setStatusWithUi(sessionId, 'queued');
     // 入队不改写会话标题/预览：会话主题由首条消息确定（已在下方非-busy 分支经 dispatchWs +
@@ -2232,7 +2272,11 @@ export function sendMessage(text: string): void {
   }
 
   void (async () => {
-    await dispatchWs(sessionId, content, takeAttachmentsForSend(), takeArmedSubScenario());
+    const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), takeArmedSubScenario());
+    if (sent) {
+      clearSiteAnnotationDraft(sessionId);
+      clearBlueprintAnnotationDraft(sessionId);
+    }
     clearScenarioChip();
     if (isDraftSession(sessionId)) {
       commitDraftSession(sessionId, makeSessionTitle(previewText), previewText.slice(0, 48), openSessionFn);
