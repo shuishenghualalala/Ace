@@ -540,6 +540,89 @@ class SQLiteKanbanStore:
             raise KeyError(workflow_id)
         return workflow
 
+    def apply_task_reassignment_revision(
+        self,
+        workflow_id: str,
+        task_id: str,
+        workflow_plan: dict[str, Any],
+        *,
+        assignee: str,
+        reason: str,
+        delta: dict[str, Any] | None = None,
+        actor: str = "team_runtime",
+    ) -> tuple[Workflow, KanbanTask]:
+        """Atomically persist a WorkflowPlan revision and reset one reassigned task."""
+
+        owner = self._require_owner()
+        event = BoardEvent(
+            workflow_id=workflow_id,
+            task_id=task_id,
+            event_type="workflow_plan_revised",
+            actor=actor,
+            payload={
+                "revision": int(workflow_plan.get("revision") or 1),
+                "reason": str(reason or "运行时改派"),
+                "delta": dict(delta or {}),
+            },
+        )
+
+        def _update(conn: sqlite3.Connection) -> None:
+            workflow_row = conn.execute(
+                """
+                SELECT context FROM kanban_workflows
+                WHERE id = ? AND owner_account_id = ? AND isolation_state = 'owned'
+                """,
+                (workflow_id, owner),
+            ).fetchone()
+            if workflow_row is None:
+                raise KeyError(workflow_id)
+            task_row = conn.execute(
+                "SELECT id FROM kanban_tasks WHERE id = ? AND workflow_id = ?",
+                (task_id, workflow_id),
+            ).fetchone()
+            if task_row is None:
+                raise KeyError(task_id)
+
+            now = time.time()
+            context = json.loads(str(workflow_row["context"] or "{}"))
+            context["workflow_plan"] = dict(workflow_plan)
+            context["current_revision"] = int(workflow_plan.get("revision") or 1)
+            conn.execute(
+                "UPDATE kanban_workflows SET context = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(context, ensure_ascii=False), now, workflow_id),
+            )
+            conn.execute(
+                """
+                UPDATE kanban_tasks
+                SET assignee = ?, status = 'pending', result_summary = '',
+                    artifact_paths = '[]', retry_count = 0,
+                    claimed_by = NULL, claimed_at = NULL, done_at = NULL, updated_at = ?
+                WHERE id = ? AND workflow_id = ?
+                """,
+                (str(assignee), now, task_id, workflow_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO kanban_events (id, workflow_id, task_id, event_type, actor, payload, ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.id,
+                    event.workflow_id,
+                    event.task_id,
+                    event.event_type,
+                    event.actor,
+                    json.dumps(event.payload, ensure_ascii=False),
+                    event.ts,
+                ),
+            )
+
+        self._writer.execute(_update)
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
+            raise KeyError(workflow_id)
+        return workflow, self.get_task(task_id)
+
     def apply_workflow_graph_revision(
         self,
         workflow_id: str,
@@ -1119,6 +1202,7 @@ class SQLiteKanbanStore:
         result_summary: str | None = None,
         artifacts: list[str] | None = None,
         reset_retry: bool = False,
+        assignee: str | None = None,
     ) -> KanbanTask:
         owner = self._require_owner()
         self._ensure_task(task_id)
@@ -1133,6 +1217,9 @@ class SQLiteKanbanStore:
             if artifacts is not None:
                 fields.append("artifact_paths = ?")
                 params.append(json.dumps(artifacts, ensure_ascii=False))
+            if assignee is not None:
+                fields.append("assignee = ?")
+                params.append(str(assignee))
             if status == "done":
                 fields.append("done_at = ?")
                 params.append(now)

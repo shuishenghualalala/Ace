@@ -180,12 +180,20 @@ access_control:
     disabled_skills: ["browser-use"]   # browser-use skill 依赖内置浏览器；external 的 browser toolset 已在 disabled_toolsets 里禁用，避免展示无法使用的“死 skill”
 
 wiki:
+  # 聊天中上传的附件是否自动收入 default 知识库。
+  # true（默认）：保存原文件并解析成 markdown，并自动生成轻量摘要/标签；
+  # 深度整理（生成 entity/topic/relationship）默认不自动执行，需要用户确认。
+  capture_attachments: true
   ingest:
     # 是否在深度整理计划生成成功后自动应用计划。
-    # true（默认）：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
-    # false：plan 后展示创建/更新/跳过计划并等待用户确认，后续回合再 apply。
+    # true：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
+    # false（默认）：plan 后展示创建/更新/跳过计划并等待用户确认，后续回合再 apply。
     # 该配置只影响实体/概念/主题/关系的深度整理；删除、归档、视频外传仍必须人工确认。
-    auto_apply: true
+    auto_apply: false
+    # 捕获后是否自动生成轻量摘要、标签和是否建议整理的标记（第二层）。
+    auto_summarize: true
+    # 捕获后是否自动深度整理（第三层）。默认关闭，避免自动把临时文件写入知识库。
+    auto_ingest: false
   # Wiki 数据独立存储目录。留空时保持现状：
   # {runtime.crew_home}/accounts/{owner_hash}/wiki_lib/。
   # 也可通过 CREW_WIKI_HOME 环境变量覆盖。

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WikiPage } from "../types";
-import { buildFileTree, findPageByTitle, splitHomeQuestions, vaultDocumentLabel, vaultFolderLabel } from "./wikiTree";
+import { buildFileTree, findPageByTitle, normalizeVaultPath, splitHomeQuestions, vaultDocumentLabel, vaultFolderLabel } from "./wikiTree";
 
 function page(id: string, filePath: string): WikiPage {
   return {
@@ -117,5 +117,25 @@ describe("findPageByTitle", () => {
     expect(findPageByTitle(pages, "curation")?.id).toBe("a");
     expect(findPageByTitle(pages, "不存在的页面")).toBeUndefined();
     expect(findPageByTitle(pages, "")).toBeUndefined();
+  });
+});
+
+describe("normalizeVaultPath", () => {
+  it("旧版无 wiki/ 前缀的路径补前缀，正常路径原样保留", () => {
+    expect(normalizeVaultPath("entities/人机分工原则.md")).toBe("wiki/entities/人机分工原则.md");
+    expect(normalizeVaultPath("topics/a.md")).toBe("wiki/topics/a.md");
+    expect(normalizeVaultPath("sources/pdfs/b.md")).toBe("wiki/sources/pdfs/b.md");
+    expect(normalizeVaultPath("wiki/entities/a.md")).toBe("wiki/entities/a.md");
+    expect(normalizeVaultPath("raw/pdfs/c.md")).toBe("raw/pdfs/c.md");
+    expect(normalizeVaultPath("")).toBe("");
+  });
+
+  it("旧版种子页面（无 wiki/ 前缀）也能挂进文件树", () => {
+    const root = buildFileTree([page("legacy", "entities/legacy.md")]);
+    const wiki = root.children[0];
+    if (wiki.kind !== "folder") throw new Error("expected folder");
+    const entities = wiki.children.find((n) => n.kind === "folder" && n.name === "entities");
+    if (entities?.kind !== "folder") throw new Error("expected entities folder");
+    expect(entities.children.map((n) => (n.kind === "page" ? n.page.title : n.name))).toContain("legacy");
   });
 });

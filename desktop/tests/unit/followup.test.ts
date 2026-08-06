@@ -27,6 +27,43 @@ function permissionQuestion(): PendingFollowup {
   };
 }
 
+function staffingQuestion(): PendingFollowup {
+  return {
+    questionId: 'staffing-1',
+    title: '给这项任务找一位帮手？',
+    recordHistory: false,
+    note: '仅用于本次任务，不会加入或修改原团队。',
+    origin: {
+      type: 'team_control',
+      agentName: 'Leader',
+      mentionIntent: 'runtime_staffing',
+    },
+    questions: [{
+      id: 'runtime_staffing:req-1',
+      question: '当前负责这项工作的成员暂时无法使用。\n为了继续完成「实现成绩统计模块」，我找到了以下可用选择。',
+      options: [
+        {
+          label: '现有协作助手（推荐）',
+          value: 'candidate:0',
+          description: '适合后端开发，有相关能力记录，可以立即开始',
+        },
+        {
+          label: '新建一位协作助手',
+          value: 'candidate:1',
+          description: '负责后端开发；使用 Codex · gpt-5.6-sol，首次参与这项任务',
+        },
+        {
+          label: '这次先不添加',
+          value: 'decline',
+          description: '任务会停在这里，之后仍可以继续。',
+        },
+      ],
+      allowFreeText: false,
+      multiSelect: false,
+    }],
+  };
+}
+
 describe('follow-up permission presentation', () => {
   it('uses the shared Team Logo and team name for control-plane permissions', () => {
     const question = permissionQuestion();
@@ -123,5 +160,90 @@ describe('follow-up permission presentation', () => {
     expect(formatFollowupAnswerMessage(question, [
       { question_id: 'perm', answers: ['allow_once'] },
     ])).toBe('已选择：允许一次');
+  });
+});
+
+describe('runtime staffing follow-up presentation', () => {
+  it('uses the shared follow-up shell without impersonating a permission request', () => {
+    const html = renderFollowupCard(staffingQuestion());
+
+    expect(html).toContain('followup-card--staffing');
+    expect(html).not.toContain('followup-card--permission');
+    expect(html).toContain('团队需要你的确认');
+    expect(html).toContain('给这项任务找一位帮手？');
+    expect(html).toContain('仅用于本次任务，不会加入或修改原团队');
+    expect(html).toContain('现有协作助手（推荐）');
+    expect(html).toContain('新建一位协作助手');
+    expect(html).toContain('确认并继续');
+    expect(html).not.toContain('允许执行此操作');
+    expect(html).not.toContain('Crew 请求执行以下操作');
+    expect(html).not.toContain('其他（自定义输入）');
+    expect(html).toContain('data-staffing-value="decline"');
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    expect(root.querySelector('input[value="decline"]')).toBeNull();
+  });
+
+  it('reuses radio selection and submits the original candidate value', () => {
+    const root = document.createElement('div');
+    root.innerHTML = renderFollowupCard(staffingQuestion());
+    const onSubmit = vi.fn();
+    bindFollowupCard(root, { onSubmit, onCancel: () => undefined });
+
+    const candidate = root.querySelector<HTMLInputElement>('input[value="candidate:1"]')!;
+    candidate.checked = true;
+    candidate.dispatchEvent(new Event('change', { bubbles: true }));
+    const submit = root.querySelector<HTMLButtonElement>('.followup-card__submit')!;
+    expect(submit.disabled).toBe(false);
+    submit.click();
+
+    expect(onSubmit).toHaveBeenCalledWith('staffing-1', [{
+      question_id: 'runtime_staffing:req-1',
+      answers: ['candidate:1'],
+    }]);
+  });
+
+  it('submits decline as a governed choice instead of cancelling the follow-up', () => {
+    const root = document.createElement('div');
+    root.innerHTML = renderFollowupCard(staffingQuestion());
+    const onSubmit = vi.fn();
+    const onCancel = vi.fn();
+    bindFollowupCard(root, { onSubmit, onCancel });
+
+    root.querySelector<HTMLButtonElement>('[data-action="staffing-decline"]')!.click();
+
+    expect(onSubmit).toHaveBeenCalledWith('staffing-1', [{
+      question_id: 'runtime_staffing:req-1',
+      answers: ['decline'],
+    }]);
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('renders backend-confirmed applying and applied states in the same card', () => {
+    const applying = staffingQuestion();
+    applying.status = 'applying';
+    applying.note = '正在邀请后端开发助手加入……';
+    expect(renderFollowupCard(applying)).toContain('正在邀请后端开发助手加入……');
+    expect(renderFollowupCard(applying)).toContain('aria-busy="true"');
+
+    const applied = staffingQuestion();
+    applied.status = 'applied';
+    applied.note = '后端开发助手已加入，继续开工。\n仅参与本次任务，原团队没有变化。';
+    const html = renderFollowupCard(applied);
+    expect(html).toContain('后端开发助手已加入，继续开工');
+    expect(html).toContain('原团队没有变化');
+    expect(html).toContain('aria-busy="false"');
+  });
+
+  it('leaves ordinary recorded follow-ups on their existing renderer', () => {
+    const ordinary = staffingQuestion();
+    ordinary.recordHistory = true;
+    ordinary.origin = { agentName: 'Crew' };
+    const html = renderFollowupCard(ordinary);
+
+    expect(html).not.toContain('followup-card--staffing');
+    expect(html).not.toContain('followup-card--permission');
+    expect(html).toContain('data-action="cancel"');
+    expect(html).toContain('>提交</button>');
   });
 });

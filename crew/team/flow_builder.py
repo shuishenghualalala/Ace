@@ -5,10 +5,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from crew.team.capabilities import normalize_capabilities
 from crew.team.models import TeamMemberSpec
 from crew.team.result_presenter import workflow_lane_order
 from crew.team.roles import (
     compile_role_responsibility,
+    infer_role_key,
     infer_workflow_lane,
     public_responsibility,
     role_matches_text,
@@ -88,6 +90,19 @@ def planning_modes(execution_profile: dict[str, Any] | None = None) -> dict[str,
 def member_node_metadata(member: TeamMemberSpec, lane: str | None = None) -> dict[str, Any]:
     node_lane = lane or workflow_lane(member)
     metadata = node_metadata(node_lane, label=role_label(member), key=role_key(member))
+    assigned_capabilities = normalize_capabilities(member.capabilities or [])
+    capability_source = "formation_role"
+    if not assigned_capabilities:
+        contract_role_key = role_key(member) or infer_role_key(role_hint(member))
+        assigned_capabilities = normalize_capabilities(
+            compile_role_responsibility(role_key=contract_role_key).get("_assigned_capabilities") or []
+        )
+        capability_source = "role_catalog"
+    if assigned_capabilities:
+        metadata.update({
+            "required_capabilities": assigned_capabilities,
+            "capability_source": capability_source,
+        })
     formation_responsibility = (member.metadata or {}).get("formation_responsibility")
     if isinstance(formation_responsibility, dict) and formation_responsibility:
         metadata.update({

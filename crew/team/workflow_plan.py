@@ -12,8 +12,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from crew.team.capabilities import normalize_capabilities
-
+from crew.team.capabilities import normalize_capabilities, normalize_capability
 
 PlanningMode = Literal["auto", "fast", "standard", "ai"]
 DependencyPattern = Literal["sequential", "parallel_merge", "staged"]
@@ -171,13 +170,31 @@ def coerce_planning_decision(data: dict[str, Any], *, max_work_units: int = 12) 
         expected_output = str(raw.get("expected_output") or "").strip()
         if not objective or not expected_output:
             continue
+        raw_capabilities = (
+            raw.get("required_capabilities")
+            if isinstance(raw.get("required_capabilities"), list)
+            else []
+        )
+        invalid_capabilities = [
+            str(item)
+            for item in raw_capabilities
+            if str(item).strip() and not normalize_capability(item)
+        ]
+        required_capabilities = normalize_capabilities(raw_capabilities)
+        if invalid_capabilities:
+            raise ValueError(
+                f"PlanningDecision work unit {unit_id} contains unsupported capabilities: "
+                + ", ".join(invalid_capabilities)
+            )
+        if not required_capabilities:
+            raise ValueError(f"PlanningDecision work unit {unit_id} missing required_capabilities")
         seen.add(unit_id)
         units.append(WorkUnit(
             id=unit_id,
             objective=objective,
             display_title=str(raw.get("display_title") or "").strip()[:32],
             kind=str(raw.get("kind") or "other").strip().lower() or "other",
-            required_capabilities=normalize_capabilities(raw.get("required_capabilities") or []),
+            required_capabilities=required_capabilities,
             depends_on=[str(item or "").strip() for item in (raw.get("depends_on") or []) if str(item or "").strip()],
             expected_output=expected_output,
             needs_independent_review=bool(raw.get("needs_independent_review")),
@@ -298,6 +315,7 @@ def workflow_plan_from_graph(
             "kind": str(metadata.get("work_unit_kind") or metadata.get("workflow_lane") or "other"),
             "assignee_id": str(node.get("assignee") or "leader"),
             "required_capabilities": normalize_capabilities(metadata.get("required_capabilities") or []),
+            "capability_source": str(metadata.get("capability_source") or ""),
             "inputs": list(contract.get("inputs") or ["task.goal"]),
             "expected_outputs": list(contract.get("outputs") or []),
             "acceptance_criteria": list(contract.get("acceptance_criteria") or []),

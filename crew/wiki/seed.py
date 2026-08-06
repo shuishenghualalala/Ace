@@ -71,7 +71,9 @@ def _ensure(store: Any, owner_account_id: str) -> bool:
         if not sub_dir.exists():
             continue
         for path in sorted(sub_dir.glob("*.md")):
-            rel = f"{sub}/{path.name}"
+            # 与 ingest 正常产出的页面路径保持一致（wiki/<type>/xxx.md），
+            # 否则前端文件树（按 wiki/ 前缀过滤）会看不到这些页面。
+            rel = f"wiki/{sub}/{path.name}"
             page = deserialize_page(path.read_text(encoding="utf-8"), rel)
             store.save_page(page, owner_account_id=owner_account_id, kb_id=TUTORIAL_KB_ID)
             pages.append(page)

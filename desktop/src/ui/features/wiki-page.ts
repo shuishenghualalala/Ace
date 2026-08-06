@@ -1,5 +1,5 @@
 /**
- * Wiki 知识库页：知识浏览与右栏 Wiki Agent 对话（对齐 web WikiHub）。
+ * Wiki 知识库页：左侧 Wiki Agent 对话主区 + 右侧知识库面板（目录+详情）（对齐 web WikiHub）。
  *
  * 数据源：GET /api/wiki/kbs + /api/wiki/pages（brief=1 分页）+ /api/wiki/pages/{id} + /api/wiki/summary
  *         + /api/wiki/graph（Phase 3 图谱，由 features/wiki-graph.ts 消费）
@@ -8,19 +8,20 @@
  *         + POST /api/wiki/kbs（新建 KB，内联表单）+ POST /api/wiki/init（无 KB 自动初始化）
  *         + DELETE /api/wiki/kbs/{id}（删除 KB，default 不可删）
  *
- * 布局：
- *   1. 页头：KB 选择器（下拉）+ 新建 KB + 上传 + 批量管理（「问 Wiki」已下线：
- *      右栏对话面板常驻，无需入口按钮）
+ * 布局（左对话主区 / 右知识库面板）：
+ *   1. 页头：KB 选择器（下拉）+ 新建 KB + 上传 + 批量管理 + 知识库面板收起/展开
+ *      （「问 Wiki」已下线：对话面板常驻主区，无需入口按钮）
  *   2. 上传任务面板：每个 source 的进度条 + 阶段文案 + 错误态；进度经 WS
  *      wiki_ingest_progress 帧（chat-controller 回调转发）实时更新
- *   3. 左栏列表：分页「加载更多」；条目 = 标题 + 类型徽标 + 更新时间 + 摘要；
+ *   3. 左侧主区：Wiki Agent 对话面板（features/wiki-agent.ts 挂载，常驻，弹性宽度）
+ *   4. 右侧知识库面板（.wiki-browser-pane，可拖拽调宽、可整体收起）：
+ *      目录列表：分页「加载更多」；条目 = 标题 + 类型徽标 + 更新时间 + 摘要；
  *      单条删除按钮；批量管理模式下条目变 checkbox 选择；
- *      「图谱」视图下左栏替换为图谱画布（features/wiki-graph.ts，本文件只注入容器 + 回调）
- *   3.5 分栏把手：列表 | 详情 | 对话之间可拖拽调宽（localStorage 持久化，双击复位；图谱模式无列表把手）
- *   4. 右栏详情：标题 + 元信息 + Markdown 正文；未选中时显示 KB 概览 / 空态；
+ *      「图谱」视图下列表区域替换为图谱画布（features/wiki-graph.ts，本文件只注入容器 + 回调）
+ *   5. 分栏把手：对话主区与知识库面板之间可拖拽调宽（localStorage 持久化，双击复位）
+ *   6. 面板内详情：标题 + 元信息 + Markdown 正文；未选中时显示 KB 概览 / 空态；
  *      Home.md（知识库概览）的「推荐问题」小节会被后处理成提问按钮，
- *      点击直接把问题发给右栏 Wiki Agent（decorateHomeQuestions + [data-wiki-ask] 委托）
- *   5. 最右栏：Wiki Agent 对话面板（features/wiki-agent.ts 挂载，常驻）
+ *      点击直接把问题发给 Wiki Agent（decorateHomeQuestions + [data-wiki-ask] 委托）
  *
  * 边界态：未登录显示登录引导态（不发请求）；没有任何 KB 时自动初始化 default
  * （对齐 web WikiHub，后端幂等，只自动试一次，失败靠重新进入本页重试）。
@@ -48,7 +49,7 @@ import { mountWikiEditor, type WikiEditorHandle } from './wiki-editor';
 import { maybeStartWikiTourOnce, startWikiTour } from './wiki-tour';
 
 // ── Wiki Agent 入口（Phase 4） ──
-// 「上传」按钮（打开右栏附件选择）与失败任务「让 AI 处理」共用同一挂点；回调由 index.ts
+// 「上传」按钮（打开对话区附件选择）与失败任务「让 AI 处理」共用同一挂点；回调由 index.ts
 // 组合根注入（接到 features/wiki-agent.ts 的 openWikiAgent，本文件不 import wiki-agent 内部）。
 
 export interface WikiAgentAssist {
@@ -64,7 +65,7 @@ export interface WikiAgentEntryRequest {
   assist?: WikiAgentAssist;
   /** 直接发往 Wiki Agent 的提问（Home.md 推荐问题点击）。 */
   prompt?: string;
-  /** 聚焦右栏并打开标准 Composer 附件选择。 */
+  /** 聚焦对话主区并打开标准 Composer 附件选择。 */
   openAttachment?: boolean;
 }
 
@@ -102,7 +103,7 @@ function fireWikiAgentEntry(assist?: WikiAgentAssist, openAttachment = false): v
   });
 }
 
-/** Home.md 推荐问题点击：把问题直接发给右栏 Wiki Agent。 */
+/** Home.md 推荐问题点击：把问题直接发给 Wiki Agent。 */
 function fireWikiAgentPrompt(prompt: string): void {
   const text = prompt.trim();
   if (!view.kbId || !text) return;
@@ -227,10 +228,7 @@ export function buildFileTree(pages: WikiPage[]): WikiTreeFolder {
   );
 
   for (const page of pages) {
-    const parts = (page.file_path || '')
-      .split('/')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const parts = normalizeVaultPath(page.file_path).split('/').filter(Boolean);
     if (parts[0] !== 'wiki') continue;
     let current = root;
 
@@ -289,15 +287,29 @@ function sortTree(node: WikiTreeFolder): void {
 
 /** file_path 的全部祖先目录路径（选中页面时自动展开）。 */
 export function ancestorPaths(filePath: string): string[] {
-  const parts = (filePath || '')
-    .split('/')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const parts = normalizeVaultPath(filePath).split('/').filter(Boolean);
   const paths: string[] = [];
   for (let i = 1; i < parts.length; i++) {
     paths.push(parts.slice(0, i).join('/'));
   }
   return paths;
+}
+
+const VAULT_PAGE_DIRS = new Set(['entities', 'topics', 'sources', 'comparisons', 'synthesis']);
+
+/**
+ * 归一化 Vault 相对路径：旧版种子/历史页面的 file_path 可能没有 wiki/ 前缀
+ * （如 entities/xxx.md），统一补成 wiki/ 前缀，保证文件树能识别。
+ */
+export function normalizeVaultPath(filePath: string): string {
+  const parts = (filePath || '')
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length > 0 && parts[0] !== 'wiki' && VAULT_PAGE_DIRS.has(parts[0])) {
+    return ['wiki', ...parts].join('/');
+  }
+  return parts.join('/');
 }
 
 export interface WikiTypeGroup {
@@ -482,7 +494,7 @@ let kbCreateDraft = '';
 let kbCreateSubmitting = false;
 let wikiChangedBound = false;
 
-// ── 分栏宽度：拖拽 + 双击复位 + localStorage 持久化（列表栏 / 图谱栏 / 对话栏共用一套机制） ──
+// ── 分栏宽度：拖拽 + 双击复位 + localStorage 持久化（知识库面板 / 图谱视图共用一套机制） ──
 
 export interface PaneWidthStore {
   clamp(w: number): number;
@@ -563,13 +575,42 @@ export function bindPaneSash(
   sash.addEventListener('dblclick', () => opts.onReset());
 }
 
-const WIKI_LIST_DEFAULT_WIDTH = 340;
-const listWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiListWidth.v1', min: 240, max: 640, vwFactor: 0.5 });
-/** 图谱栏宽度（仅图谱视图）：null = 与详情栏按 1.5:1 弹性分配；拖拽后固定为像素值并持久化，双击复位回弹性。 */
-const graphWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphWidth.v1', min: 280, vwFactor: 0.7 });
+const WIKI_BROWSER_DEFAULT_WIDTH = 500;
+/** 右侧知识库面板（目录+详情）宽度：可拖拽 + 持久化。 */
+const browserWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiBrowserWidth.v2', min: 340, max: 1000, vwFactor: 0.7 });
+const WIKI_CATALOG_DEFAULT_WIDTH = 240;
+/** 面板内目录宽度：可拖拽 + 持久化（仅列表/树/类型视图；图谱模式目录走 1.5:1 比例分配，不内联宽度）。 */
+const catalogWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiCatalogWidth.v1', min: 200, max: 480, vwFactor: 0.5 });
+/** 图谱视图下面板宽度（仅图谱视图）：null = 沿用 browserWidth；拖拽后固定为像素值并持久化，双击复位。 */
+const graphWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphWidth.v2', min: 280, vwFactor: 0.7 });
+/** 图谱画布（目录区）宽度（仅图谱视图）：null = 与详情 1.5:1 弹性分配；拖拽后固定像素并持久化，双击恢复弹性。 */
+const graphCanvasWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphCanvasWidth.v1', min: 240, max: 800, vwFactor: 0.5 });
 
-let listWidth = listWidthStore.load() ?? WIKI_LIST_DEFAULT_WIDTH;
+let browserWidth = browserWidthStore.load() ?? WIKI_BROWSER_DEFAULT_WIDTH;
+let catalogWidth = catalogWidthStore.load() ?? WIKI_CATALOG_DEFAULT_WIDTH;
 let graphWidth: number | null = graphWidthStore.load();
+let graphCanvasWidth: number | null = graphCanvasWidthStore.load();
+
+const WIKI_BROWSER_OPEN_KEY = 'crew.desktop.wikiBrowserOpen.v1';
+/** 右侧知识库面板展开/收起（持久化，默认展开）。收起走 CSS 隐藏，DOM 保留，编辑器/详情保活不受影响。 */
+let wikiBrowserOpen = ((): boolean => {
+  try {
+    return localStorage.getItem(WIKI_BROWSER_OPEN_KEY) !== '0';
+  } catch {
+    return true;
+  }
+})();
+
+/** 收起/展开右侧知识库面板并持久化（页头按钮与 Wiki Agent 面板头按钮共用）。 */
+export function toggleWikiBrowser(): void {
+  wikiBrowserOpen = !wikiBrowserOpen;
+  try {
+    localStorage.setItem(WIKI_BROWSER_OPEN_KEY, wikiBrowserOpen ? '1' : '0');
+  } catch {
+    /* quota / disabled */
+  }
+  renderShell();
+}
 /** 正在加载详情的 pageId（防重复点击重复请求）。 */
 const loadingDetails = new Set<string>();
 
@@ -582,6 +623,13 @@ export function __setWikiViewForTest(patch: Partial<WikiViewState>): void {
 function resetWikiViewState(): void {
   view = initialViewState();
   graphWidth = null;
+  graphCanvasWidth = null;
+  // 收起状态重新从 localStorage 读取（登录态变化后尊重用户持久化偏好，测试 stub 恒 null → 默认展开）
+  try {
+    wikiBrowserOpen = localStorage.getItem(WIKI_BROWSER_OPEN_KEY) !== '0';
+  } catch {
+    wikiBrowserOpen = true;
+  }
   loadSeq = 0;
   autoInitAttempted = false;
   initializedKbIds.clear();
@@ -822,7 +870,7 @@ function relationLabel(item: WikiRelationPage): string {
   }[item.relation] || `反向${label}`;
 }
 
-/** 页面详情 article HTML（Wiki 页右栏与 Phase 4 对话流 overlay 共用）。所有插值 escapeHtml。 */
+/** 页面详情 article HTML（Wiki 页详情区与 Phase 4 对话流 overlay 共用）。所有插值 escapeHtml。 */
 export function wikiDetailArticleHtml(page: WikiPage, opts: WikiDetailArticleOptions): string {
   const sourcePills = opts.sourcePages?.length
     ? opts.sourcePages.map((target) => `
@@ -944,7 +992,7 @@ function detailHtml(): string {
     return `
       <div class="wiki-detail__empty">
         ${summary}
-        <p class="wiki-detail__empty-hint">选择左侧页面查看详情，或在右侧对话栏基于知识库提问</p>
+        <p class="wiki-detail__empty-hint">选择右侧页面查看详情，或在左侧对话栏基于知识库提问</p>
       </div>`;
   }
   if (loadingDetails.has(view.selectedId) && !view.pageDetails[view.selectedId]) {
@@ -952,7 +1000,7 @@ function detailHtml(): string {
   }
   const page = view.pageDetails[view.selectedId] ?? view.pages.find((p) => p.id === view.selectedId);
   if (!page) {
-    return `<div class="wiki-detail__empty"><p class="wiki-detail__empty-hint">选择左侧页面查看详情</p></div>`;
+    return `<div class="wiki-detail__empty"><p class="wiki-detail__empty-hint">选择右侧页面查看详情</p></div>`;
   }
   return wikiDetailArticleHtml(page, {
     sourcePages: view.sourcePages[page.id],
@@ -1125,10 +1173,17 @@ let lastDetailSig: DetailSig | null = null;
 /** 列表滚动记忆：renderShell 全量重建后按 视图+KB 恢复 scrollTop，避免点击条目滚动条跳回顶部。 */
 let listScrollMemory: { key: string; top: number } | null = null;
 
-/** 左栏内联样式：列表视图固定持久化宽度；图谱视图未拖拽时弹性分配（无内联样式），拖拽后固定像素。 */
-function listPaneStyleAttr(): string {
-  if (view.view !== 'graph') return ` style="width: ${listWidth}px"`;
-  return graphWidth != null ? ` style="width: ${graphWidth}px; flex: 0 0 auto"` : '';
+/** 知识库面板内联宽度：列表/树/类型视图固定持久化宽度；图谱视图拖拽后固定像素，未拖拽时沿用 browserWidth。 */
+function browserPaneStyleAttr(): string {
+  if (view.view === 'graph' && graphWidth != null) return ` style="width: ${graphWidth}px"`;
+  return ` style="width: ${browserWidth}px"`;
+}
+
+/** 目录/图谱画布内联宽度：列表/树/类型视图固定目录宽度，用 flex 简写输出，压过 CSS 里 240px/窄窗口 220px 的 flex-basis 档位；
+ * 图谱模式未拖拽时走 1.5:1 比例分配不内联，拖拽后内联固定像素压过 --graph 的 flex 1.5。 */
+function catalogPaneStyleAttr(): string {
+  if (view.view === 'graph') return graphCanvasWidth != null ? ` style="flex: 0 0 ${graphCanvasWidth}px"` : '';
+  return ` style="flex: 0 0 ${catalogWidth}px"`;
 }
 
 function renderShell(): void {
@@ -1173,7 +1228,7 @@ function renderShell(): void {
         <div class="v2-empty__desc">${emptyDesc}</div>
       </div>`;
   } else {
-    // 图谱视图：左栏列表区域整体替换为图谱画布（挂载点由 mountWikiGraph 接管）。
+    // 图谱视图：目录列表区域整体替换为图谱画布（挂载点由 mountWikiGraph 接管）。
     const graphMode = view.view === 'graph';
     const listBody = graphMode
       ? '<div class="wiki-graph-mount" data-graph-mount></div>'
@@ -1190,20 +1245,24 @@ function renderShell(): void {
                 </svg>
               </div>
               <p class="wiki-list__empty-text">知识库还没有内容</p>
-              <p class="wiki-list__empty-hint">点击右上角「上传」，或直接拖拽文件到右侧问答栏</p>
+              <p class="wiki-list__empty-hint">点击右上角「上传」，或直接拖拽文件到左侧问答栏</p>
             </div>`
           : `${listViewHtml()}${loadMoreHtml()}`;
     body = `
-      <div class="wiki-body${graphMode ? ' wiki-body--graph' : ''}">
-        <div class="wiki-list-pane${graphMode ? ' wiki-list-pane--graph' : ''}"${listPaneStyleAttr()}>
-          ${batchBarHtml()}
-          <nav class="hub-segment wiki-view-tabs" aria-label="列表视图">${tabs}</nav>
-          <div class="wiki-list-scroll${graphMode ? ' wiki-list-scroll--graph' : ''}">${listBody}</div>
-        </div>
-        <div class="wiki-sash" data-wiki-sash role="separator" aria-orientation="vertical" title="拖拽调整左栏宽度，双击复位"></div>
-        <div class="wiki-detail-pane">${detailHtml()}</div>
-        <div class="wiki-sash" data-wiki-agent-sash role="separator" aria-orientation="vertical" title="拖拽调整对话栏宽度，双击复位"></div>
+      <div class="wiki-body">
         <aside class="wiki-agent-pane" data-wiki-agent-panel aria-label="Wiki Agent 对话"></aside>
+        <div class="wiki-sash" data-wiki-browser-sash role="separator" aria-orientation="vertical" title="拖拽调整知识库面板宽度，双击复位"></div>
+        <div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
+          <div class="wiki-list-pane"${catalogPaneStyleAttr()}>
+            ${batchBarHtml()}
+            <nav class="hub-segment wiki-view-tabs" aria-label="列表视图">${tabs}</nav>
+            <div class="wiki-list-scroll${graphMode ? ' wiki-list-scroll--graph' : ''}">${listBody}</div>
+          </div>
+          ${graphMode
+            ? '<div class="wiki-sash wiki-sash--inner" data-wiki-graph-canvas-sash role="separator" aria-orientation="vertical" title="拖拽调整图谱宽度，双击恢复弹性比例"></div>'
+            : '<div class="wiki-sash wiki-sash--inner" data-wiki-catalog-sash role="separator" aria-orientation="vertical" title="拖拽调整目录宽度，双击复位"></div>'}
+          <div class="wiki-detail-pane">${detailHtml()}</div>
+        </div>
       </div>`;
   }
 
@@ -1217,7 +1276,6 @@ function renderShell(): void {
   // 已解析正文）、图谱画布（SVG 全量重建 + 逐节点重绑事件，wiki-graph 内部另有签名比对）。
   const liveAgentPanel = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
   const keepAgentPanel = view.kbId && liveAgentPanel?.dataset.kbId === view.kbId ? liveAgentPanel : null;
-  const keepAgentSash = keepAgentPanel ? root.querySelector<HTMLElement>('[data-wiki-agent-sash]') : null;
   const detailSigNow = currentDetailSig();
   const liveDetailPane = root.querySelector<HTMLElement>('.wiki-detail-pane');
   const keepDetailPane = liveDetailPane && !view.selectedDocumentName && lastDetailSig && sameDetailSig(lastDetailSig, detailSigNow) ? liveDetailPane : null;
@@ -1225,11 +1283,11 @@ function renderShell(): void {
   const liveListScroll = root.querySelector<HTMLElement>('.wiki-list-scroll');
   if (liveListScroll && listScrollMemory) listScrollMemory.top = liveListScroll.scrollTop;
   root.innerHTML = `
-    <div class="page-shell page-shell--wiki">
+    <div class="page-shell page-shell--wiki${wikiBrowserOpen ? '' : ' wiki-browser-collapsed'}">
       <header class="page-header page-header--hub">
         <div class="page-header__copy">
           <h1 class="page-header__title">Wiki <span class="accent">知识库</span></h1>
-          <p class="page-header__desc">大模型自动整理的本地知识库笔记，按时间线、文件夹或类型浏览。</p>
+          <p class="page-header__desc">玩转大模型自动整理的本地知识库笔记。</p>
         </div>
         <div class="page-header__actions">
           <select id="wiki-kb-select" class="wiki-kb-select" title="选择知识库" aria-label="选择知识库"${view.kbs.length === 0 ? ' disabled' : ''}>${kbOptions}</select>
@@ -1237,6 +1295,7 @@ function renderShell(): void {
           <button type="button" class="hub-refresh-btn" data-kb-delete title="删除当前知识库、原始素材及专属 Wiki 问答历史（内置知识库不可删）"${!view.kbId || view.kbId === DEFAULT_KB_ID || view.kbId === TUTORIAL_KB_ID ? ' disabled' : ''}>删除</button>
           <button type="button" class="hub-refresh-btn" data-upload title="上传文件到知识库"${uploadDisabled ? ' disabled' : ''}>上传</button>
           ${batchToggle}
+          <button type="button" class="hub-refresh-btn" data-wiki-browser-toggle title="收起/展开知识库面板" aria-pressed="${wikiBrowserOpen}">知识库面板</button>
           <button type="button" class="hub-refresh-btn hub-refresh-btn--help" data-wiki-tour title="使用导览" aria-label="使用导览">?</button>
         </div>
       </header>
@@ -1249,7 +1308,6 @@ function renderShell(): void {
   if (keepAgentPanel) {
     const placeholder = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
     if (placeholder) {
-      if (keepAgentSash) root.querySelector<HTMLElement>('[data-wiki-agent-sash]')?.replaceWith(keepAgentSash);
       placeholder.replaceWith(keepAgentPanel);
       agentPanelKept = true;
     }
@@ -1450,7 +1508,16 @@ async function loadPageDetail(pageId: string): Promise<void> {
  * 图谱节点可能不在已分页加载的列表里），避免先闪一帧空正文再切加载文案。
  */
 function selectWikiPage(pageId: string, opts?: { expandTree?: boolean }): void {
-  if (pageId === view.selectedId) return;
+  // 从 vault 文档（Home.md/index.md）切回页面：清掉文档态，否则 detailHtml 仍优先显示文档。
+  // 图谱节点点击走 onSelectPage 直接调这里，不经过列表条目的清理逻辑，必须在这里兜底。
+  const hadDocument = view.selectedDocumentName !== null;
+  view.selectedDocumentName = null;
+  view.vaultDocument = null;
+  if (pageId === view.selectedId) {
+    // 已选中但详情停在文档态时，重渲染让详情切回页面。
+    if (hadDocument) renderShell();
+    return;
+  }
   const previousId = view.selectedId;
   if (previousId && detailEditorHandle && detailDirty) void saveWikiPageDraft(previousId);
   view.selectedId = pageId;
@@ -1534,7 +1601,7 @@ async function reloadAll(): Promise<void> {
   void loadKbSummary();
 }
 
-// 文件附件统一从右栏 Composer 进入 Wiki Agent 工作流；页面不再编排上传或 ingest。
+// 文件附件统一从对话区 Composer 进入 Wiki Agent 工作流；页面不再编排上传或 ingest。
 // ── 新建 KB（对齐 web WikiHub：kb_id 限英文/数字/下划线，name 缺省同 id） ──
 
 // kb_id 即磁盘目录名（crew/wiki/store/_filesystem.py），后端 normalize_kb_id 只 trim 不限字符集，
@@ -1730,6 +1797,7 @@ function bindEvents(): void {
     }
   });
   onClick('[data-wiki-tour]', () => startWikiTour());
+  onClick('[data-wiki-browser-toggle]', () => toggleWikiBrowser());
   onClick('[data-kb-create-cancel]', () => {
     kbCreateOpen = false;
     kbCreateDraft = '';
@@ -1752,34 +1820,74 @@ function bindEvents(): void {
     });
   });
 
-  // ── 左栏分栏把手：列表/树/类型视图调 listWidth；图谱视图调 graphWidth（null=弹性分配，拖过后固定像素） ──
-  $$w('[data-wiki-sash]').forEach((sash) => {
-    const pane = root.querySelector<HTMLElement>('.wiki-list-pane');
+  // ── 知识库面板把手（在面板左缘，sign=-1）：列表/树/类型视图调 browserWidth；图谱视图调 graphWidth（null=沿用 browserWidth） ──
+  $$w('[data-wiki-browser-sash]').forEach((sash) => {
+    const pane = root.querySelector<HTMLElement>('.wiki-browser-pane');
     if (!pane) return;
     bindPaneSash(sash, {
-      // 图谱模式弹性分配时 listWidth 不反映当前宽度，取实际测量值
-      startWidth: () => (view.view === 'graph' ? pane.getBoundingClientRect().width : listWidth),
+      sign: -1, // 把手在面板左缘：向左拖变宽、向右拖变窄
+      // 图谱模式 browserWidth 不反映当前宽度（可能已被 graphWidth 覆盖），取实际测量值
+      startWidth: () => (view.view === 'graph' ? pane.getBoundingClientRect().width : browserWidth),
       onDrag: (w) => {
         if (view.view === 'graph') {
           graphWidth = graphWidthStore.clamp(w);
-          // 弹性分配下 width 不生效（flex-basis: 0），需同步切为固定尺寸
-          pane.style.flex = '0 0 auto';
           pane.style.width = `${graphWidth}px`;
         } else {
-          listWidth = listWidthStore.clamp(w);
-          pane.style.width = `${listWidth}px`;
+          browserWidth = browserWidthStore.clamp(w);
+          pane.style.width = `${browserWidth}px`;
         }
       },
-      onCommit: () => (view.view === 'graph' ? graphWidthStore.persist(graphWidth) : listWidthStore.persist(listWidth)),
-      // 双击复位：列表回默认宽度；图谱回 1.5:1 弹性分配
+      onCommit: () => (view.view === 'graph' ? graphWidthStore.persist(graphWidth) : browserWidthStore.persist(browserWidth)),
+      // 双击复位：列表回默认宽度；图谱清掉拖拽固定像素，回退到 browserWidth
       onReset: () => {
         if (view.view === 'graph') {
           graphWidth = null;
           graphWidthStore.persist(null);
         } else {
-          listWidth = WIKI_LIST_DEFAULT_WIDTH;
-          listWidthStore.persist(listWidth);
+          browserWidth = WIKI_BROWSER_DEFAULT_WIDTH;
+          browserWidthStore.persist(browserWidth);
         }
+        renderShell();
+      },
+    });
+  });
+
+  // ── 目录内层把手（在目录右缘，sign=+1）：往右拖目录变宽；仅列表/树/类型视图渲染（图谱模式目录走比例分配） ──
+  $$w('[data-wiki-catalog-sash]').forEach((sash) => {
+    const pane = root.querySelector<HTMLElement>('.wiki-list-pane');
+    if (!pane) return;
+    bindPaneSash(sash, {
+      startWidth: () => catalogWidth,
+      onDrag: (w) => {
+        catalogWidth = catalogWidthStore.clamp(w);
+        pane.style.flex = `0 0 ${catalogWidth}px`;
+      },
+      onCommit: () => catalogWidthStore.persist(catalogWidth),
+      // 双击复位默认目录宽度
+      onReset: () => {
+        catalogWidth = WIKI_CATALOG_DEFAULT_WIDTH;
+        catalogWidthStore.persist(catalogWidth);
+        renderShell();
+      },
+    });
+  });
+
+  // ── 图谱画布内层把手（在画布右缘，sign=+1）：往右拖画布变宽；仅图谱视图渲染，双击清除固定像素恢复 1.5:1 弹性比例 ──
+  $$w('[data-wiki-graph-canvas-sash]').forEach((sash) => {
+    const pane = root.querySelector<HTMLElement>('.wiki-list-pane');
+    if (!pane) return;
+    bindPaneSash(sash, {
+      // 未拖拽时画布是弹性宽度（graphCanvasWidth 为 null），起始宽度取实际测量值
+      startWidth: () => graphCanvasWidth ?? pane.getBoundingClientRect().width,
+      onDrag: (w) => {
+        graphCanvasWidth = graphCanvasWidthStore.clamp(w);
+        pane.style.flex = `0 0 ${graphCanvasWidth}px`;
+      },
+      onCommit: () => graphCanvasWidthStore.persist(graphCanvasWidth),
+      // 双击复位：清掉拖拽固定像素，回到 1.5:1 弹性分配
+      onReset: () => {
+        graphCanvasWidth = null;
+        graphCanvasWidthStore.persist(null);
         renderShell();
       },
     });

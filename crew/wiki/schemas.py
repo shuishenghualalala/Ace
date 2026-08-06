@@ -109,6 +109,14 @@ class RawSource:
     superseded_by: str | None = None
     last_refresh_at: float = 0.0
     last_refresh_error: str | None = None
+    # 第二层轻量摘要生成的来源级元数据，仅用于 inbox 筛选与整理推荐，
+    # 不等同于 WikiPage.tags，也不进入页面标签体系。
+    summary: str = ""
+    tags: list[str] = field(default_factory=list)
+    doc_type: str = ""
+    ingest_recommend: bool = False
+    ingest_reason: str = ""
+    ingest_status: str = "pending"  # pending | recommended | ignored | ingested | failed
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +144,12 @@ class RawSource:
             "superseded_by": self.superseded_by,
             "last_refresh_at": self.last_refresh_at,
             "last_refresh_error": self.last_refresh_error,
+            "summary": self.summary,
+            "tags": self.tags,
+            "doc_type": self.doc_type,
+            "ingest_recommend": self.ingest_recommend,
+            "ingest_reason": self.ingest_reason,
+            "ingest_status": self.ingest_status,
         }
 
     @classmethod
@@ -171,6 +185,12 @@ class RawSource:
             superseded_by=data.get("superseded_by"),
             last_refresh_at=float(data.get("last_refresh_at", 0.0) or 0.0),
             last_refresh_error=data.get("last_refresh_error"),
+            summary=str(data.get("summary", "")),
+            tags=[str(t) for t in (data.get("tags") or []) if str(t).strip()],
+            doc_type=str(data.get("doc_type", "")),
+            ingest_recommend=bool(data.get("ingest_recommend", False)),
+            ingest_reason=str(data.get("ingest_reason", "")),
+            ingest_status=str(data.get("ingest_status", "pending") or "pending"),
         )
 
     @property

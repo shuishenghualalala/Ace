@@ -156,7 +156,16 @@ def create_wiki_router(crew) -> APIRouter:
         store = getattr(crew, "_wiki_store", None)
         if store is None:
             return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
-        store.init_kb(_owner(request), _kb_id(request))
+        owner = _owner(request)
+        kb_id = _kb_id(request)
+        store.init_kb(owner, kb_id)
+        # 旧版种子/历史页面可能落在无 wiki/ 前缀的目录（如 entities/xxx.md），
+        # 前端文件树按 wiki/ 前缀过滤会看不到；init 幂等，顺手做一次性布局迁移。
+        try:
+            if store.layout_migration_preview(owner, kb_id).get("required"):
+                store.migrate_layout(owner, kb_id)
+        except Exception:
+            pass
         return {"ok": True}
 
     def _wiki_agent_sessions(owner: str, kb_id: str) -> list[dict[str, Any]]:

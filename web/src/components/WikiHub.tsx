@@ -84,6 +84,136 @@ export default function WikiHub({
   const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
   const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
   const [uploadJobsExpanded, setUploadJobsExpanded] = useState(true);
+  // 知识库面板内 目录列宽（目录↔详情 分隔线可拖拽），localStorage 持久化。
+  const CATALOG_MIN = 200;
+  const CATALOG_MAX = 480;
+  const CATALOG_DEFAULT = 240;
+  const [catalogWidth, setCatalogWidth] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem("crew:wiki-catalog-width");
+      const n = raw ? Number(raw) : NaN;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 200), 480) : 240;
+    } catch {
+      return 240;
+    }
+  });
+  const catalogDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  // onUp 闭包里拿不到最新 state，用 ref 镜像当前目录宽度用于拖拽结束时持久化。
+  const catalogWidthRef = useRef(catalogWidth);
+  catalogWidthRef.current = catalogWidth;
+
+  const handleCatalogSashDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    catalogDragRef.current = { startX: e.clientX, startWidth: catalogWidth };
+    const onMove = (ev: MouseEvent) => {
+      const start = catalogDragRef.current;
+      if (!start) return;
+      const next = Math.min(Math.max(start.startWidth + (ev.clientX - start.startX), CATALOG_MIN), CATALOG_MAX);
+      setCatalogWidth(next);
+    };
+    const onUp = () => {
+      catalogDragRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      // 拖拽结束时持久化一次，避免拖动过程中频繁写 storage
+      try {
+        window.localStorage.setItem("crew:wiki-catalog-width", String(catalogWidthRef.current));
+      } catch {
+        // ignore storage errors
+      }
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
+  const handleCatalogSashReset = () => {
+    setCatalogWidth(CATALOG_DEFAULT);
+    try {
+      window.localStorage.setItem("crew:wiki-catalog-width", String(CATALOG_DEFAULT));
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  // 图谱模式下 图谱↔详情 分隔线同样可拖：拖动时按像素固定画布宽度（240–800），
+  // 双击复位为弹性比例分配（CSS 1.2:1）。null 表示弹性。
+  const GRAPH_MIN = 240;
+  const GRAPH_MAX = 800;
+  const [graphCanvasWidth, setGraphCanvasWidth] = useState<number | null>(() => {
+    try {
+      const raw = window.localStorage.getItem("crew:wiki-graph-width");
+      const n = raw ? Number(raw) : NaN;
+      return Number.isFinite(n) ? Math.min(Math.max(n, GRAPH_MIN), GRAPH_MAX) : null;
+    } catch {
+      return null;
+    }
+  });
+  const graphDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const graphCanvasWidthRef = useRef(graphCanvasWidth);
+  graphCanvasWidthRef.current = graphCanvasWidth;
+
+  const handleGraphSashDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    // 弹性态下起始宽度取画布当前实际宽度
+    const catalogEl = (e.currentTarget as HTMLElement).previousElementSibling as HTMLElement | null;
+    const startWidth = graphCanvasWidth ?? catalogEl?.getBoundingClientRect().width ?? 400;
+    graphDragRef.current = { startX: e.clientX, startWidth };
+    const onMove = (ev: MouseEvent) => {
+      const start = graphDragRef.current;
+      if (!start) return;
+      const next = Math.min(Math.max(start.startWidth + (ev.clientX - start.startX), GRAPH_MIN), GRAPH_MAX);
+      setGraphCanvasWidth(next);
+    };
+    const onUp = () => {
+      graphDragRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      try {
+        const w = graphCanvasWidthRef.current;
+        if (w !== null) window.localStorage.setItem("crew:wiki-graph-width", String(w));
+      } catch {
+        // ignore storage errors
+      }
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
+  const handleGraphSashReset = () => {
+    setGraphCanvasWidth(null);
+    try {
+      window.localStorage.removeItem("crew:wiki-graph-width");
+    } catch {
+      // ignore storage errors
+    }
+  };
+  // 右侧知识库面板（目录+详情）展开/收起，持久化到 localStorage。
+  const [browserOpen, setBrowserOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem("crew:wiki-browser-open") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggleBrowser = () => {
+    setBrowserOpen((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("crew:wiki-browser-open", next ? "1" : "0");
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
 
   const { activeCount, hasDoneJobs } = useMemo(() => {
     const activeCount = uploadJobs.filter((j) => j.status === "uploading" || j.status === "ingesting").length;
@@ -730,7 +860,12 @@ export default function WikiHub({
             kbId={kbId}
             pages={pages}
             selectedId={selectedId}
-            onSelectPage={(p) => setSelectedId(p.id)}
+            onSelectPage={(p) => {
+              // 与列表点击一致：清掉 vault 文档态，否则详情仍停在 Home.md/index.md
+              setSelectedDocumentName(null);
+              setVaultDocument(null);
+              setSelectedId(p.id);
+            }}
           />
         );
       case "timeline":
@@ -822,6 +957,14 @@ export default function WikiHub({
             disabled={!sessionId}
           >
             上传文件
+          </button>
+          <button
+            className={`wiki-card__btn ${browserOpen ? "wiki-card__btn--primary" : ""}`}
+            onClick={toggleBrowser}
+            type="button"
+            title={browserOpen ? "收起知识库面板" : "展开知识库面板"}
+          >
+            知识库面板
           </button>
           <input
             ref={fileRef}
@@ -973,15 +1116,35 @@ export default function WikiHub({
         <div className="wiki-hub__empty">加载中…</div>
       ) : (
         <ResizablePanels
-          storageKey="wiki-hub-layout"
+          storageKey="wiki-hub-layout-v2"
           className="wiki-hub-layout__body"
         >
+          {/* 对话为主区域（flexible，不传 defaultWidth），知识库目录+详情收进右侧扩展面板 */}
+          <ResizablePanels.Panel id="chat" className="wiki-hub__chat">
+            {sessionId ? (
+              <ChatPanel {...chatProps} />
+            ) : (
+              <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
+            )}
+          </ResizablePanels.Panel>
+
+          {browserOpen && (
           <ResizablePanels.Panel
-            id="tree"
-            defaultWidth={320}
-            minWidth={180}
-            maxWidth={900}
-            className="wiki-tree"
+            id="browser"
+            defaultWidth={500}
+            minWidth={360}
+            maxWidth={1100}
+            className={`wiki-browser ${viewMode === "graph" ? "wiki-browser--graph" : ""}`}
+          >
+          <div
+            className="wiki-browser__catalog wiki-tree"
+            style={
+              viewMode === "graph"
+                ? graphCanvasWidth !== null
+                  ? { flex: `0 0 ${graphCanvasWidth}px` }
+                  : undefined
+                : { flex: `0 0 ${catalogWidth}px` }
+            }
           >
             <div className="wiki-view-switcher">
               {viewTabs.map((tab) => (
@@ -1008,7 +1171,7 @@ export default function WikiHub({
                   </svg>
                 </div>
                 <p className="wiki-tree__empty-text">知识库还没有内容</p>
-                <p className="wiki-tree__empty-hint">点击右上角「上传」，或直接拖拽文件到右侧问答栏</p>
+                <p className="wiki-tree__empty-hint">点击右上角「上传」，或直接拖拽文件到左侧问答栏</p>
               </div>
             ) : (
               renderLeftView()
@@ -1022,9 +1185,19 @@ export default function WikiHub({
                 {loadingMore ? "加载中…" : "滚动加载更多"}
               </div>
             )}
-          </ResizablePanels.Panel>
+          </div>
 
-          <ResizablePanels.Panel id="main" className="wiki-panel">
+          <div
+            className="wiki-browser__sash"
+            onMouseDown={viewMode === "graph" ? handleGraphSashDown : handleCatalogSashDown}
+            onDoubleClick={viewMode === "graph" ? handleGraphSashReset : handleCatalogSashReset}
+            role="separator"
+            aria-label="调整目录宽度"
+            aria-orientation="vertical"
+            title={viewMode === "graph" ? "拖拽调整图谱宽度，双击恢复弹性比例" : "拖拽调整目录宽度，双击复位"}
+          />
+
+          <div className="wiki-browser__detail wiki-panel">
             {selectedDocumentName ? (
               vaultDocument ? (
                 <div className="wiki-page-view wiki-page-view--inline">
@@ -1088,21 +1261,9 @@ export default function WikiHub({
                 <p>选择左侧页面查看详情</p>
               </div>
             )}
+          </div>
           </ResizablePanels.Panel>
-
-          <ResizablePanels.Panel
-            id="chat"
-            defaultWidth={360}
-            minWidth={260}
-            maxWidth={600}
-            className="wiki-hub__chat"
-          >
-            {sessionId ? (
-              <ChatPanel {...chatProps} />
-            ) : (
-              <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
-            )}
-          </ResizablePanels.Panel>
+          )}
         </ResizablePanels>
       )}
 

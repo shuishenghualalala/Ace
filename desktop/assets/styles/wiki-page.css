@@ -42,38 +42,71 @@
   cursor: not-allowed;
 }
 
-/* ── 三栏主体 ── */
+/* ── 主体：左对话主区（弹性）+ 右知识库面板（目录+详情，固定宽可拖拽） ── */
 
 .wiki-body {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
-  gap: 10px;
+  /* 面板间不留缝：分隔由单边 1px 发丝线承担（VSCode 风格，避免两条边框线并行） */
+  gap: 0;
   padding: 16px 20px 20px;
 }
 
+/* 右侧知识库面板：整体固定宽度（内联 width，拖拽可调），内部目录 + 详情横向排布 */
+.wiki-browser-pane {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0;
+  min-width: 0;
+  min-height: 0;
+  /* 与对话主区之间唯一的分隔线 */
+  border-left: 1px solid var(--border-subtle);
+}
+
+/* 收起知识库面板：DOM 保留（编辑器/详情保活不受影响），仅 CSS 隐藏 */
+.page-shell--wiki.wiki-browser-collapsed .wiki-browser-pane,
+.page-shell--wiki.wiki-browser-collapsed .wiki-sash[data-wiki-browser-sash] {
+  display: none;
+}
+
 .wiki-list-pane {
-  width: clamp(240px, 23vw, 340px);
-  flex-shrink: 0;
+  flex: 0 0 240px;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
   background: var(--surface);
   overflow: hidden;
+  /* 窄栏（≤240px）时列表项退化为紧凑行：隐藏摘要与标签，对齐 VSCode 侧栏体感 */
+  container-type: inline-size;
+}
+
+@container (max-width: 240px) {
+  .wiki-list-pane .wiki-item__summary,
+  .wiki-list-pane .wiki-item__tags {
+    display: none;
+  }
 }
 
 .wiki-view-tabs {
-  margin: 12px 12px 0;
+  margin: 8px 8px 0;
   flex-shrink: 0;
+  /* 目录窄栏（240px）内四个标签等分拉伸，避免「图谱」被挤出 */
+  display: flex;
+}
+
+.wiki-view-tabs .hub-segment__item {
+  flex: 1 1 0;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 6px;
 }
 
 .wiki-list-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: 8px;
 }
 
 .wiki-detail-pane {
@@ -81,29 +114,22 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  /* 与目录之间唯一的分隔线 */
+  border-left: 1px solid var(--border-subtle);
   background: var(--surface);
-  padding: 24px 28px;
+  padding: 16px 20px;
 }
 
+/* 左侧对话主区：弹性占满知识库面板之外的剩余宽度 */
 .wiki-agent-pane {
   position: relative;
-  width: clamp(280px, 27vw, 420px);
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
   background: var(--surface);
   overflow: hidden;
-  transition: width 0.18s ease;
-}
-
-/* 面板头「展开/收窄」档位（双类选择器压过窄窗口媒体查询的宽度覆盖） */
-.wiki-agent-pane.wiki-agent-pane--wide {
-  width: clamp(430px, 40vw, 640px);
 }
 
 .wiki-agent-pane__header {
@@ -1251,6 +1277,24 @@
 
 /* ── 条目删除按钮 ── */
 
+/* 时间线条目：× 绝对定位悬浮在条目右侧（不占文档流，否则会单起一行挤占列表高度），
+   默认禁用 pointer-events，悬停条目时才可点。 */
+.wiki-item {
+  position: relative;
+}
+
+.wiki-item .wiki-item__delete {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.wiki-item:hover .wiki-item__delete {
+  pointer-events: auto;
+}
+
 .wiki-item__delete {
   flex-shrink: 0;
   width: 20px;
@@ -1488,18 +1532,17 @@
 
 /* ── 图谱视图（Phase 3，对齐 web WikiGraphView） ── */
 
-/* 图谱模式下列表栏加宽（默认 340px 太窄，画布需要空间），详情栏仍在右侧。 */
-.wiki-list-pane--graph {
-  width: auto;
+/* 图谱模式下面板内目录区加宽（默认 240px 太窄，画布需要空间），与详情按 1.5:1 分配。 */
+.wiki-browser-pane--graph .wiki-list-pane {
   flex: 1.5 1 0;
   min-width: 0;
 }
 
-/* 图谱模式下详情栏同样走 basis 0 的比例分配：否则 flex: 1 1 auto 的基准是正文
- * max-content，长文/长标识符会把基准顶大，负自由空间全由图谱栏（basis 0）承担，
- * 图谱栏被压成一条缝、右栏对话面板被挤出可视区。1.5:1 比例分配后两边都不再受
- * 正文内容宽度影响；min-width: 0 保证内容可缩，溢出由滚动条处理。 */
-.wiki-body--graph .wiki-detail-pane {
+/* 图谱模式下详情区同样走 basis 0 的比例分配：否则 flex: 1 1 auto 的基准是正文
+ * max-content，长文/长标识符会把基准顶大，负自由空间全由图谱区（basis 0）承担，
+ * 图谱区被压成一条缝。1.5:1 比例分配后两边都不再受正文内容宽度影响；
+ * min-width: 0 保证内容可缩，溢出由滚动条处理。 */
+.wiki-browser-pane--graph .wiki-detail-pane {
   flex: 1 1 0;
 }
 
@@ -1767,14 +1810,10 @@
   text-align: center;
 }
 
-/* 窄窗口：列表栏收窄，避免挤压详情栏 */
+/* 窄窗口：目录区收窄，避免挤压详情区 */
 @media (max-width: 1100px) {
   .wiki-list-pane {
-    width: 240px;
-  }
-
-  .wiki-agent-pane {
-    width: 300px;
+    flex-basis: 220px;
   }
 }
 
@@ -1784,19 +1823,34 @@
     overflow-y: auto;
   }
 
-  .wiki-list-pane {
-    width: 280px;
+  .wiki-agent-pane {
+    flex: 1 1 100%;
+    min-height: 460px;
+  }
+
+  /* flex-basis 覆盖内联 width：窄窗口下面板整行换行，内部目录/详情上下堆叠 */
+  .wiki-browser-pane {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    /* 上下堆叠后分隔线改为横向 */
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .wiki-browser-pane .wiki-list-pane {
+    flex: 1 1 100%;
     min-height: 520px;
+  }
+
+  /* 上下堆叠模式下目录占整行，竖向内层把手无意义，隐藏 */
+  .wiki-sash--inner {
+    display: none;
   }
 
   .wiki-detail-pane {
     min-height: 520px;
-  }
-
-  .wiki-agent-pane,
-  .wiki-agent-pane.wiki-agent-pane--wide {
-    width: 100%;
-    min-height: 460px;
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
   }
 }
 
@@ -2010,15 +2064,16 @@
 
 /* ── 分栏拖拽把手（对齐 web ResizablePanels sash） ── */
 
-/* 分栏拖拽手柄（列表栏 / Wiki Agent 栏共用）：
- * 16px 宽命中区盖住整个 10px 栏间距，负边距抵消自身占位 → 视觉间距仍是 10px，左右一致；
+/* 分栏拖拽手柄（对话主区与知识库面板之间）：
+ * 16px 宽命中区盖住整个 6px 栏间距，负边距抵消自身占位 → 视觉间距仍是 6px，左右一致；
  * 可见指示只有中间一条 4px 细线，悬停/拖动时高亮。 */
 .wiki-sash {
   position: relative;
   flex: 0 0 auto;
   align-self: stretch;
   width: 16px;
-  margin: 0 -13px;
+  /* 栏间距为 0：把手 16px 命中区正好骑在 1px 分隔线上，不额外占视觉空间 */
+  margin: 0 -8px;
   z-index: 5;
   background: transparent;
   cursor: col-resize;
@@ -2042,14 +2097,14 @@
   background: var(--color-accent);
 }
 
+/* 目录↔详情的内层把手：复用 .wiki-sash 几何，命中区 16px 骑缝（margin -8） */
+.wiki-sash--inner {
+  margin: 0 -8px;
+}
+
 body.wiki-resizing {
   user-select: none;
   cursor: col-resize;
-}
-
-/* 拖拽中禁用宽度过渡，避免跟手延迟 */
-.wiki-agent-pane--resizing {
-  transition: none;
 }
 
 /* ── 界面导览（features/wiki-tour.ts）：遮罩 + 高亮框 + 气泡 ── */

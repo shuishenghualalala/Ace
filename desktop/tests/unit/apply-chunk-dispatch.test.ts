@@ -163,6 +163,10 @@ describe('resolveBusyTransition', () => {
     expect(resolveBusyTransition('plan_review', undefined)).toBe(false);
   });
 
+  it('presentation-only staffing lifecycle does not change busy state', () => {
+    expect(resolveBusyTransition('followup_question', undefined, false, true)).toBeNull();
+  });
+
   it('post-turn auxiliary chunks → do not flip busy back on', () => {
     expect(resolveBusyTransition('todo_updated', undefined)).toBeNull();
     expect(resolveBusyTransition('file_changes', undefined)).toBeNull();

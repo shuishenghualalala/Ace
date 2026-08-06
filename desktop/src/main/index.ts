@@ -232,7 +232,7 @@ function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): st
   return resolved;
 }
 
-const MANAGED_GATEWAY_PORT = 28180;
+const MANAGED_GATEWAY_PORT = 8000;
 const MANAGED_GATEWAY_URL = `http://127.0.0.1:${MANAGED_GATEWAY_PORT}`;
 const AUTOSTART_ARG = '--autostart';
 const IS_DEV_LAUNCH = process.argv.includes('--dev');
@@ -1758,7 +1758,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       throw new Error('packaged macOS Crew Gateway exited before readiness');
     }
 
-    // 4. 开发环境 / 兜底：拉起 28180 端口的 Python 子进程
+    // 4. 开发环境 / 兜底：拉起 MANAGED_GATEWAY_PORT 端口的 Python 子进程
     resolvedGatewayBaseUrl = MANAGED_GATEWAY_URL;
     startManagedGateway();
     if (await waitForHealthApi(MANAGED_GATEWAY_URL, { process: managedGateway, generation })) {
