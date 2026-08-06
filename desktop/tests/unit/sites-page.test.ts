@@ -143,6 +143,9 @@ describe('sites page annotation handoff', () => {
     expect(sitesPage).toContain('window.Crew?.openInspirationWindow');
     expect(backend).toContain('/api/sites/inspirations');
     expect(styles).toContain('grid-template-columns:repeat(auto-fill');
+    expect(styles).toContain('.sites-page-root{display:flex;min-width:0;min-height:0;flex:1;overflow:hidden}');
+    expect(styles).toContain('.inspiration-detail{box-sizing:border-box;display:flex;width:100%;height:100%');
+    expect(styles).toContain('.inspiration-detail__stage{position:relative;width:100%;min-height:0;flex:1 1 0');
     expect(protocolSource).toContain("kind: 'site' | 'canvas' | 'widget'");
     expect(protocolSource).toContain('/api/sites/canvases/${resolved.canvasId}/render');
     expect(protocolSource).toContain('/api/sites/widgets/${resolved.widgetId}/render/');
@@ -150,10 +153,11 @@ describe('sites page annotation handoff', () => {
 
   it('keeps pin windows and ZIP saves behind constrained main-process APIs', async () => {
     const fs = await import('node:fs/promises');
-    const [main, preload, stickyPreload, build, schemas] = await Promise.all([
+    const [main, preload, stickyPreload, sitesPage, build, schemas] = await Promise.all([
       fs.readFile('src/main/index.ts', 'utf8'),
       fs.readFile('src/main/preload.ts', 'utf8'),
       fs.readFile('src/main/inspiration-sticky-preload.ts', 'utf8'),
+      fs.readFile('src/ui/features/sites-page.ts', 'utf8'),
       fs.readFile('esbuild.config.mjs', 'utf8'),
       fs.readFile('src/shared/ipc-schemas.ts', 'utf8'),
     ]);
@@ -163,15 +167,24 @@ describe('sites page annotation handoff', () => {
     expect(main).toContain('skipTaskbar: true');
     expect(main).toContain("process.platform === 'darwin'");
     expect(main).toContain("ipcMain.on('inspiration:sticky-close'");
+    expect(main).toContain("mainWindow.webContents.send('inspiration:window-state-changed'");
+    expect(main).toContain('if (!win.isDestroyed()) win.destroy()');
     expect(main).toContain('sandbox: true');
     expect(main).toContain("setWindowOpenHandler(() => ({ action: 'deny' }))");
     expect(main).toContain('for (const win of inspirationWindows.values())');
     expect(main).toContain('inspirationWindows.clear()');
     expect(main).toContain("segments[1] === 'exports'");
     expect(preload).toContain("ipcRenderer.invoke('inspiration:open-window'");
+    expect(preload).toContain("ipcRenderer.on('inspiration:window-state-changed'");
     expect(stickyPreload).toContain("ipcRenderer.send('inspiration:sticky-close')");
+    expect(stickyPreload).toContain('取消固定并关闭');
     expect(stickyPreload).toContain('-webkit-app-region: drag');
+    expect(stickyPreload).toContain('ace-inspiration-sticky-drag-strip');
+    expect(stickyPreload).toContain("gripLabel.textContent = '拖动'");
+    expect(stickyPreload).not.toContain('attachShadow');
     expect(build).toContain('inspiration-sticky-preload.ts');
+    expect(sitesPage).toContain('onInspirationWindowStateChanged');
+    expect(sitesPage).toContain("button.setAttribute('aria-pressed', String(open))");
     expect(schemas).toContain('/^(?:site|canvas)_[0-9a-f]{12}$/i');
   });
 

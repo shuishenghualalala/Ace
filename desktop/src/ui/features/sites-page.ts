@@ -178,10 +178,18 @@ async function downloadShare(item: InspirationItem): Promise<void> {
   if (result.ok) notify('灵感分享包已保存');
 }
 
+function setPinButtonState(inspirationId: string, open: boolean): void {
+  if (activeInspiration?.id !== inspirationId) return;
+  const button = root()?.querySelector<HTMLButtonElement>('[data-inspiration-pin]');
+  if (!button) return;
+  button.textContent = open ? '取消固定' : '固定到桌面';
+  button.title = open ? '关闭桌面便利贴' : '作为桌面便利贴打开';
+  button.setAttribute('aria-pressed', String(open));
+}
+
 async function syncPinButton(item: InspirationItem): Promise<void> {
   const stateResult = await window.Crew?.inspirationWindowState?.(item.id);
-  const button = root()?.querySelector<HTMLButtonElement>('[data-inspiration-pin]');
-  if (button) button.textContent = stateResult?.open ? '取消固定' : '固定到桌面';
+  setPinButtonState(item.id, Boolean(stateResult?.open));
 }
 
 function bindDetailEvents(item: InspirationItem): void {
@@ -191,10 +199,20 @@ function bindDetailEvents(item: InspirationItem): void {
   root()?.querySelector('[data-inspiration-modify]')?.addEventListener('click', () => void openInspirationAgent?.(item).catch(showError));
   root()?.querySelector('[data-inspiration-share]')?.addEventListener('click', () => void downloadShare(item).catch(showError));
   root()?.querySelector('[data-inspiration-pin]')?.addEventListener('click', () => void (async () => {
-    const current = await window.Crew?.inspirationWindowState?.(item.id);
-    if (current?.open) await window.Crew?.closeInspirationWindow?.(item.id);
-    else await window.Crew?.openInspirationWindow?.(item.id, item.title);
-    await syncPinButton(item);
+    const button = root()?.querySelector<HTMLButtonElement>('[data-inspiration-pin]');
+    if (button) button.disabled = true;
+    try {
+      const current = await window.Crew?.inspirationWindowState?.(item.id);
+      if (current?.open) {
+        await window.Crew?.closeInspirationWindow?.(item.id);
+        setPinButtonState(item.id, false);
+      } else {
+        await window.Crew?.openInspirationWindow?.(item.id, item.title);
+        setPinButtonState(item.id, true);
+      }
+    } finally {
+      if (button) button.disabled = false;
+    }
   })().catch(showError));
   root()?.querySelector('[data-inspiration-delete]')?.addEventListener('click', () => void (async () => {
     const confirmed = await showConfirmDialog({
@@ -342,6 +360,9 @@ export function bindSitesTab(opts: {
   openInspirationAgent = opts.openInspirationAgent;
   createInspirationSession = opts.createInspirationSession;
   restoreDrafts();
+  window.Crew?.onInspirationWindowStateChanged?.(({ inspirationId, open }) => {
+    setPinButtonState(inspirationId, open);
+  });
   document.getElementById('site-annotation-button')?.addEventListener('click', () => {
     const button = document.getElementById('site-annotation-button'), menu = document.getElementById('site-annotation-menu');
     if (!button || !menu || !activeSessionSites.length) return;

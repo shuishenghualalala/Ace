@@ -854,11 +854,17 @@ function resolveWindowBackgroundColor(): string {
   return isDark ? '#0f1115' : '#ffffff';
 }
 
+function pushInspirationWindowState(inspirationId: string, open: boolean): void {
+  if (isQuitting || !mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('inspiration:window-state-changed', { inspirationId, open });
+}
+
 function openInspirationWindow(inspirationId: string, title = '灵感'): BrowserWindow {
   const existing = inspirationWindows.get(inspirationId);
   if (existing && !existing.isDestroyed()) {
     existing.show();
     existing.focus();
+    pushInspirationWindowState(inspirationId, true);
     return existing;
   }
   const transparentSticky = process.platform === 'darwin';
@@ -897,6 +903,7 @@ function openInspirationWindow(inspirationId: string, title = '灵感'): Browser
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
   inspirationWindows.set(inspirationId, win);
+  pushInspirationWindowState(inspirationId, true);
   const target = `ace-site://${encodeURIComponent(inspirationId)}/`;
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (event, url) => {
@@ -908,15 +915,21 @@ function openInspirationWindow(inspirationId: string, title = '灵感'): Browser
     }
   });
   win.once('ready-to-show', () => win.show());
-  win.on('closed', () => inspirationWindows.delete(inspirationId));
+  win.on('closed', () => {
+    if (inspirationWindows.get(inspirationId) !== win) return;
+    inspirationWindows.delete(inspirationId);
+    pushInspirationWindowState(inspirationId, false);
+  });
   void win.loadURL(target);
   return win;
 }
 
 function closeInspirationWindow(inspirationId: string): boolean {
   const win = inspirationWindows.get(inspirationId);
-  if (!win || win.isDestroyed()) return false;
-  win.close();
+  if (!win) return false;
+  inspirationWindows.delete(inspirationId);
+  if (!win.isDestroyed()) win.destroy();
+  pushInspirationWindowState(inspirationId, false);
   return true;
 }
 

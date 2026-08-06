@@ -50,6 +50,11 @@ const api = {
     ipcRenderer.invoke('inspiration:close-window', { inspirationId }) as Promise<{ ok: boolean; open: boolean }>,
   inspirationWindowState: (inspirationId: string) =>
     ipcRenderer.invoke('inspiration:window-state', { inspirationId }) as Promise<{ ok: boolean; open: boolean }>,
+  onInspirationWindowStateChanged: (cb: (state: { inspirationId: string; open: boolean }) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, state: { inspirationId: string; open: boolean }) => cb(state);
+    ipcRenderer.on('inspiration:window-state-changed', listener);
+    return () => ipcRenderer.removeListener('inspiration:window-state-changed', listener);
+  },
   getAutoLaunchEnabled: () => ipcRenderer.invoke('app:get-auto-launch-enabled'),
   setAutoLaunchEnabled: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-launch-enabled', enabled),
   getCloseBehavior: () => ipcRenderer.invoke('app:get-close-behavior'),
