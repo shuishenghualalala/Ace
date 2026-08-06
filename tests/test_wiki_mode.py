@@ -1,10 +1,11 @@
+from crew.agent.executor.external import ExternalExecutor
 from crew.agent.runtime import SingleAgent
 from crew.core.envelope import Envelope
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
 from crew.plugins.manager import PluginManager
-from crew.state.home import task_workspace_path
-from crew.tools.registry import Registry, register_builtin_tools
+from crew.state.home import external_session_workspace_path, task_workspace_path
 from crew.tools.policy import ToolDisclosureMode
+from crew.tools.registry import Registry, register_builtin_tools
 from crew.wiki.manager import WikiSessionManager
 
 
@@ -68,6 +69,38 @@ def test_resolve_agent_workdir_falls_back_to_workspace_path():
     env = Envelope.of("hi", session_id="s1", user_id="owner1", workspace_id="default")
     cwd = agent._resolve_agent_workdir(env)
     assert cwd == str(task_workspace_path("default", owner_account_id="owner1"))
+
+
+def test_external_agent_uses_isolated_session_workspace_by_default():
+    agent = _agent(
+        FakeProvider(),
+        executor=ExternalExecutor({"external_agent_id": "external-1"}),
+    )
+    env = Envelope.of("hi", session_id="side::turn::req", user_id="owner1", workspace_id="default")
+    cwd = agent._resolve_agent_workdir(env, task_session_id="stable-session")
+    assert cwd == str(external_session_workspace_path(
+        "default",
+        "stable-session",
+        "external-1",
+        owner_account_id="owner1",
+    ))
+
+
+def test_external_agent_keeps_existing_runtime_binding_workspace(tmp_path):
+    class LegacyBindingStore:
+        def latest_runtime_session_binding_for_agent(self, **_kwargs):
+            return {"cwd": str(tmp_path)}
+
+    agent = _agent(
+        FakeProvider(),
+        executor=ExternalExecutor({
+            "external_agent_id": "external-1",
+            "external_store": LegacyBindingStore(),
+        }),
+    )
+    env = Envelope.of("hi", session_id="side::turn::req", user_id="owner1", workspace_id="default")
+
+    assert agent._resolve_agent_workdir(env, task_session_id="stable-session") == str(tmp_path.resolve())
 
 
 def test_resolve_agent_workdir_explicit_cwd_overrides_wiki_agent(tmp_path):

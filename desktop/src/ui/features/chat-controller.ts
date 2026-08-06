@@ -91,7 +91,7 @@ import {
 } from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import type { ChatChunk, WikiIngestProgress } from '../backend-client';
-import { makeSessionTitle, mergeTeamInternalMessage } from './history-mapping';
+import { makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold, setTurnFold } from './fold-state';
 import { attachCopyButtons } from './copy-button';
@@ -972,7 +972,10 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
   const artifacts = (msg.artifacts || []).map((artifact) =>
     `${artifact.artifact_id || artifact.id || ''}|${artifact.title || ''}|${artifact.path || ''}|${artifact.summary || ''}`,
   ).join(';');
-  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${isStreaming ? '1' : '0'}`;
+  const files = (msg.turnFileChanges || []).map((file) =>
+    `${file.path}|${file.status}|${file.added}|${file.removed}|${file.binary ? '1' : '0'}`,
+  ).join(';');
+  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${isStreaming ? '1' : '0'}`;
 }
 
 /** 一段 batch（同一回合的连续 agent 消息）的 sig。
@@ -1659,6 +1662,7 @@ function applyTeamInternalChunk(sessionId: string, chunk: TeamInternalChunk): vo
   patchBook(sessionId, { hadTeamInternal: true });
   const timestamp = backendSecondsToMs(body.timestamp);
   const toolCalls = normalizeTeamToolCalls(body.tool_calls);
+  const turnFileChanges = normalizeTurnFileChanges(body.turn_file_changes);
   const streaming = body.display_mode === 'stream' || body.event_type === 'team_stream';
   const incoming: ChatMessage = {
     id: newMessageId('team'),
@@ -1682,6 +1686,7 @@ function applyTeamInternalChunk(sessionId: string, chunk: TeamInternalChunk): vo
     ...(typeof body.collapsed_title === 'string' ? { collapsedTitle: body.collapsed_title } : {}),
     ...(typeof body.process_text === 'string' ? { processText: body.process_text } : {}),
     ...(Array.isArray(body.artifacts) ? { artifacts: body.artifacts } : {}),
+    ...(turnFileChanges ? { turnFileChanges } : {}),
     ...(body.thinking != null ? { thinking: normalizeTeamText(body.thinking) } : {}),
     ...(toolCalls ? { toolCalls } : {}),
     ...(typeof body.turn_started_at === 'number'

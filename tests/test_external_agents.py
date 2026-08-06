@@ -6,16 +6,19 @@ import stat
 import sys
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from crew.agent.external import acp_adapter, detector, process_lifecycle, runtime_registry
 from crew.agent.executor.base import ExecutionContext
+from crew.core.envelope import ResponseChunk
 from crew.agent.skills import SkillActivation, SkillEntrypoint
 from crew.agent.executor.external import (
     AcpExecutor,
     ClientExecutor,
+    ExternalExecutor,
     _build_compact_acp_system_prompt,
     _external_system_prompt,
     _followup_cli_diagnostic,
@@ -25,6 +28,7 @@ from crew.agent.executor.external import (
     _permission_question,
     _stream_runtime_with_safe_resume,
 )
+from crew.agent.plan import PlanModeManager
 from crew.core.types import Message, ToolCall
 from crew.agent.external.detector import (
     discover_local_runtimes,
@@ -4552,3 +4556,227 @@ def test_legacy_acp_bindings_migrate_to_protocol_neutral_session_table(tmp_path)
         }
     assert "external_runtime_session_binding" in tables
     assert "external_acp_session_binding" not in tables
+
+
+@pytest.mark.asyncio
+async def test_external_executor_emits_and_persists_prompt_file_changes(tmp_path):
+    existing = tmp_path / "existing.txt"
+    deleted = tmp_path / "deleted.txt"
+    existing.write_text("before\n", encoding="utf-8")
+    deleted.write_text("remove me\n", encoding="utf-8")
+    manager = PlanModeManager()
+
+    class WritingExternalExecutor(ExternalExecutor):
+        async def _execute_impl(self, ctx):
+            (tmp_path / "added.txt").write_text("one\ntwo\n", encoding="utf-8")
+            existing.write_text("after\n", encoding="utf-8")
+            deleted.unlink()
+            transient = tmp_path / "transient.txt"
+            transient.write_text("temporary\n", encoding="utf-8")
+            transient.unlink()
+            yield ResponseChunk.final(ctx.request_id, "done", 1)
+
+    ctx = ExecutionContext(
+        session_id="external-s1",
+        request_id="req-1",
+        system_prompt="",
+        messages=[],
+        query="change files",
+        cwd=str(tmp_path),
+    )
+    chunks = [
+        chunk
+        async for chunk in WritingExternalExecutor({
+            "external_agent_id": "agent-1",
+            "plan_manager": manager,
+        }).execute(ctx)
+    ]
+
+    assert [chunk.kind for chunk in chunks] == ["file_changes", "final"]
+    files = {item["path"]: item for item in chunks[0].body["files"]}
+    assert files[str(tmp_path / "added.txt")]["status"] == "added"
+    assert files[str(existing)]["status"] == "modified"
+    assert files[str(deleted)]["status"] == "deleted"
+    assert files[str(existing)]["revision"]
+    assert str(tmp_path / "transient.txt") not in files
+    persisted = {
+        item["path"]: item
+        for item in manager.drain_turn_file_changes("external-s1")
+    }
+    assert set(persisted) == {str(tmp_path / "added.txt"), str(existing), str(deleted)}
+
+
+@pytest.mark.asyncio
+async def test_external_executor_uses_structured_tool_path_for_exact_text_diff(tmp_path):
+    target = tmp_path / "app.py"
+    target.write_text("before\nkeep\n", encoding="utf-8")
+
+    class ToolWritingExternalExecutor(ExternalExecutor):
+        async def _execute_impl(self, ctx):
+            args = json.dumps({"path": str(target), "content": "redacted"})
+            yield ResponseChunk.tool_event(
+                ctx.request_id,
+                "file_write",
+                "start",
+                sequence=1,
+                tool_call_id="write-1",
+                args=args,
+            )
+            target.write_text("after\nkeep\n", encoding="utf-8")
+            yield ResponseChunk.tool_event(
+                ctx.request_id,
+                "file_write",
+                "result",
+                sequence=2,
+                tool_call_id="write-1",
+            )
+            yield ResponseChunk.final(ctx.request_id, "done", 3)
+
+    ctx = ExecutionContext(
+        session_id="external-diff-s1",
+        request_id="req-diff",
+        system_prompt="",
+        messages=[],
+        query="change one file",
+        cwd=str(tmp_path),
+    )
+    chunks = [
+        chunk
+        async for chunk in ToolWritingExternalExecutor({"external_agent_id": "agent-1"}).execute(ctx)
+    ]
+
+    files = next(chunk for chunk in chunks if chunk.kind == "file_changes").body["files"]
+    assert len(files) == 1
+    assert files[0]["path"] == str(target)
+    assert files[0]["status"] == "modified"
+    assert files[0]["added"] == 1
+    assert files[0]["removed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_external_team_member_emits_only_current_node_changes(tmp_path):
+    manager = PlanModeManager()
+    manager.file_change_store("member-s1").append({
+        "path": str(tmp_path / "another-agent.txt"),
+        "name": "another-agent.txt",
+        "added": 1,
+        "removed": 0,
+        "status": "added",
+        "diff": [],
+    })
+    target = tmp_path / "current-agent.txt"
+
+    class TeamWritingExternalExecutor(ExternalExecutor):
+        async def _execute_impl(self, ctx):
+            target.write_text("current", encoding="utf-8")
+            yield ResponseChunk.final(ctx.request_id, "done", 1)
+
+    ctx = ExecutionContext(
+        session_id="member-s1",
+        request_id="req-team-file",
+        system_prompt="",
+        messages=[],
+        query="write team output",
+        cwd=str(tmp_path),
+        params={"team_session_id": "team-s1"},
+    )
+    chunks = [
+        chunk
+        async for chunk in TeamWritingExternalExecutor({
+            "external_agent_id": "agent-1",
+            "plan_manager": manager,
+        }).execute(ctx)
+    ]
+
+    files = next(chunk for chunk in chunks if chunk.kind == "file_changes").body["files"]
+    assert [item["path"] for item in files] == [str(target)]
+    assert manager.drain_turn_file_changes("member-s1") == []
+
+
+@pytest.mark.asyncio
+async def test_external_executor_serializes_same_physical_workspace(tmp_path):
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    order: list[str] = []
+
+    class WaitingExternalExecutor(ExternalExecutor):
+        def __init__(self, label):
+            super().__init__({"external_agent_id": label})
+            self.label = label
+
+        async def _execute_impl(self, ctx):
+            order.append(f"start:{self.label}")
+            if self.label == "first":
+                first_started.set()
+                await release_first.wait()
+            (Path(ctx.cwd) / f"{self.label}.txt").write_text(self.label, encoding="utf-8")
+            order.append(f"end:{self.label}")
+            yield ResponseChunk.final(ctx.request_id, self.label, 1)
+
+    def context(request_id):
+        return ExecutionContext(
+            session_id=request_id,
+            request_id=request_id,
+            system_prompt="",
+            messages=[],
+            query="",
+            cwd=str(tmp_path),
+        )
+
+    async def consume(executor, ctx):
+        return [chunk async for chunk in executor.execute(ctx)]
+
+    first_task = asyncio.create_task(consume(WaitingExternalExecutor("first"), context("r1")))
+    await first_started.wait()
+    second_task = asyncio.create_task(consume(WaitingExternalExecutor("second"), context("r2")))
+    await asyncio.sleep(0)
+    assert order == ["start:first"]
+    release_first.set()
+    first_chunks, second_chunks = await asyncio.gather(first_task, second_task)
+    assert order == ["start:first", "end:first", "start:second", "end:second"]
+    first_files = next(chunk for chunk in first_chunks if chunk.kind == "file_changes").body["files"]
+    second_files = next(chunk for chunk in second_chunks if chunk.kind == "file_changes").body["files"]
+    assert [item["path"] for item in first_files] == [str(tmp_path / "first.txt")]
+    assert [item["path"] for item in second_files] == [str(tmp_path / "second.txt")]
+
+
+@pytest.mark.asyncio
+async def test_external_executor_keeps_disjoint_workspaces_parallel(tmp_path):
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    class WaitingExternalExecutor(ExternalExecutor):
+        def __init__(self, label):
+            super().__init__({"external_agent_id": label})
+            self.label = label
+
+        async def _execute_impl(self, ctx):
+            if self.label == "first":
+                first_started.set()
+                await release_first.wait()
+            else:
+                second_started.set()
+            yield ResponseChunk.final(ctx.request_id, self.label, 1)
+
+    async def consume(label, cwd):
+        ctx = ExecutionContext(
+            session_id=label,
+            request_id=label,
+            system_prompt="",
+            messages=[],
+            query="",
+            cwd=str(cwd),
+        )
+        return [chunk async for chunk in WaitingExternalExecutor(label).execute(ctx)]
+
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    first_task = asyncio.create_task(consume("first", first_root))
+    await first_started.wait()
+    second_task = asyncio.create_task(consume("second", second_root))
+    await asyncio.wait_for(second_started.wait(), timeout=1)
+    release_first.set()
+    await asyncio.gather(first_task, second_task)

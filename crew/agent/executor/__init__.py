@@ -88,7 +88,9 @@ def create_executor(
     if kind == "client":
         return ClientExecutor(config)
     if kind in {"external", "acp", "cli"}:
-        return ExternalExecutor(config)
+        executor = ExternalExecutor(config)
+        executor.config.plan_manager = plan_manager
+        return executor
     raise ConfigError(
         f"未知的 agent executor 类型: {kind}"
         "（可选 builtin | client | external；acp/cli 仅用于旧配置兼容）"

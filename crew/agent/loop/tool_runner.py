@@ -11,12 +11,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import mimetypes
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
+from crew.agent.file_changes import (
+    FileMetadataSnapshot,
+    metadata_change,
+    workspace_snapshot,
+)
 from crew.agent.loop.tool_dispatch_helpers import (
     is_tool_parallel_safe,
     segment_consecutive_safe,
@@ -34,7 +38,6 @@ from crew.core.interfaces import ToolRegistry
 from crew.core.types import MediaPart, Message, ToolCall, ToolPermissionDecision, ToolResult, tool_arguments_for_ui
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger, llm_trace
-from crew.tools.file_utils import _has_binary_extension
 from crew.tools.pipeline import (
     check_permission,
     grant_session_allow,
@@ -45,15 +48,6 @@ from crew.tools.tool_search import ToolSearchConfig, dispatch_bridge_tool, is_br
 
 log = get_logger("agent.tool_runner")
 _MAX_TOOL_WORKERS = 8  # Crew run_agent.py / agent.tool_executor default
-_TERMINAL_SNAPSHOT_MAX_FILES = 20_000
-_TERMINAL_SNAPSHOT_SKIP_DIRS = frozenset({
-    ".git", "node_modules", ".venv", "venv", "__pycache__",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache",
-})
-
-TerminalFileSnapshot = dict[str, tuple[int, int]]
-
-
 class ToolRunner:
     """执行一批工具调用并产出 ResponseChunk 帧；原地把结果回灌进 messages。"""
 
@@ -1083,28 +1077,11 @@ class ToolRunner:
         )
 
     @staticmethod
-    def _workspace_snapshot(root: Path) -> TerminalFileSnapshot | None:
+    def _workspace_snapshot(root: Path) -> FileMetadataSnapshot | None:
         """读取工作区文件元数据，用于识别 terminal 间接生成的结果文件。"""
-        snapshot: TerminalFileSnapshot = {}
-        if not root.is_dir():
-            return snapshot
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in _TERMINAL_SNAPSHOT_SKIP_DIRS)
-            for filename in sorted(filenames):
-                path = Path(dirpath) / filename
-                try:
-                    if path.is_symlink() or not path.is_file():
-                        continue
-                    stat = path.stat()
-                except OSError:
-                    continue
-                snapshot[str(path)] = (stat.st_mtime_ns, stat.st_size)
-                if len(snapshot) >= _TERMINAL_SNAPSHOT_MAX_FILES:
-                    log.warning("terminal 文件快照达到上限 root=%s limit=%s", root, _TERMINAL_SNAPSHOT_MAX_FILES)
-                    return None
-        return snapshot
+        return workspace_snapshot(root)
 
-    def _terminal_workspace_snapshot(self, tc) -> tuple[Path, TerminalFileSnapshot] | None:
+    def _terminal_workspace_snapshot(self, tc) -> tuple[Path, FileMetadataSnapshot] | None:
         """仅为可能写盘的前台 terminal 建快照；只读命令与后台任务不增加扫描开销。"""
         if tc.name != "terminal" or is_tool_parallel_safe(tc) or bool((tc.arguments or {}).get("background")):
             return None
@@ -1119,28 +1096,8 @@ class ToolRunner:
 
     @staticmethod
     def _terminal_change(path_text: str, status: str) -> dict[str, Any]:
-        path = Path(path_text)
-        binary = _has_binary_extension(path)
-        added = 0
-        diff_rows: list[dict[str, Any]] = []
-        if status == "added" and not binary:
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-                lines = text.splitlines()
-                added = len(lines)
-                diff_rows = [{"line": 0, "kind": "add", "text": line} for line in lines[:200]]
-            except OSError:
-                pass
-        change: dict[str, Any] = {
-            "path": str(path),
-            "name": path.name or str(path),
-            "added": added,
-            "removed": 0,
-            "status": status,
-            "diff": diff_rows,
-        }
-        if binary:
-            change["binary"] = True
+        change = metadata_change(path_text, status)
+        # Preserve the Builtin store's existing reconciliation semantics.
         if status == "added":
             change["created_in_session"] = True
         return change
@@ -1148,7 +1105,7 @@ class ToolRunner:
     def _terminal_file_change_event(
         self,
         tc,
-        before_state: tuple[Path, TerminalFileSnapshot] | None,
+        before_state: tuple[Path, FileMetadataSnapshot] | None,
         result: ToolResult,
         rid: str,
         next_seq: Callable[[], int],

@@ -1468,6 +1468,48 @@ def test_team_auto_file_artifacts_resolves_relative_turn_workspace_paths(tmp_pat
     assert {item["owner_member_id"] for item in artifacts} == {"kk"}
 
 
+def test_team_auto_file_artifacts_resolve_relative_node_workspace_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "crew.team.team_manager.task_workspace_path",
+        lambda workspace_id: tmp_path / str(workspace_id or "default"),
+    )
+    tm, _ = _team()
+    team = tm._build_team("auto_artifact_node_relative_s1")
+    node = TeamPlanNode(
+        node_id="build_1",
+        title="实现：节点隔离产物",
+        detail="实现节点隔离产物",
+        assignee="kk",
+    )
+    envelope = Envelope.of(
+        "测试团队协作",
+        session_id="web_a::turn::req_node",
+        user_id="owner",
+        workspace_id="default",
+    )
+    workspace = Path(tm._team_delegate_cwd(
+        envelope,
+        envelope.query,
+        node_id=node.node_id,
+        agent_id=node.assignee,
+    ))
+    output = workspace / "result.md"
+    output.write_text("# 节点产物", encoding="utf-8")
+
+    artifacts = tm._auto_file_artifacts_from_result(
+        envelope,
+        team=team,
+        node=node,
+        task_id="task-build",
+        text="交付物：`result.md`",
+        existing_artifacts=[],
+        changed_paths={str(output.resolve())},
+        workspace_root=str(workspace),
+    )
+
+    assert [item["path"] for item in artifacts] == [str(output.resolve())]
+
+
 def test_team_auto_artifacts_register_changed_output_directories(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "crew.team.team_manager.task_workspace_path",
@@ -2819,9 +2861,82 @@ def test_team_delegate_workspace_isolates_abstract_team_turns(tmp_path, monkeypa
     )
 
     assert shared == ""
+    shared_cwd = tm._team_shared_cwd(
+        Envelope.of(
+            "测试一下之前开发的贪吃蛇是否可验收",
+            session_id="web_a::turn::req_1",
+            mode="team",
+            workspace_id="default",
+        ),
+    )
+    assert shared_cwd == str((tmp_path / "default").resolve())
     assert Path(isolated).exists()
     assert str(tmp_path / "default" / "team_turns") in isolated
     assert "req_2" in isolated
+
+    node_a = tm._team_delegate_cwd(
+        Envelope.of("测试团队协作", session_id="web_a::turn::req_2", mode="team"),
+        "测试团队协作",
+        node_id="frontend",
+        agent_id="agent-a",
+    )
+    node_b = tm._team_delegate_cwd(
+        Envelope.of("测试团队协作", session_id="web_a::turn::req_2", mode="team"),
+        "测试团队协作",
+        node_id="backend",
+        agent_id="agent-b",
+    )
+    assert node_a != node_b
+    assert "frontend" in node_a and "agent-a" in node_a
+    assert "backend" in node_b and "agent-b" in node_b
+
+
+def test_team_internal_chunk_carries_member_turn_file_changes(tmp_path):
+    tm, _ = _team()
+    changed = tmp_path / "member.txt"
+    chunk = tm._team_internal_chunk(
+        "req",
+        agent_id="coder",
+        text="完成",
+        node_id="node-1",
+        event_type="team_submit",
+        turn_file_changes=[{
+            "path": str(changed),
+            "name": changed.name,
+            "added": 2,
+            "removed": 1,
+            "status": "modified",
+        }],
+    )
+
+    assert chunk.kind == "team_internal"
+    assert chunk.body["turn_file_changes"] == [{
+        "path": str(changed),
+        "name": changed.name,
+        "added": 2,
+        "removed": 1,
+        "status": "modified",
+    }]
+
+
+def test_team_workspace_file_changes_include_deletions(tmp_path):
+    tm, _ = _team()
+    deleted = tmp_path / "removed.txt"
+    deleted.write_text("old\n", encoding="utf-8")
+    before = tm._workspace_file_snapshot(tmp_path)
+    deleted.unlink()
+
+    changes = tm._workspace_file_changes(tmp_path, before)
+
+    assert changes == [{
+        "path": str(deleted.resolve()),
+        "name": deleted.name,
+        "added": 0,
+        "removed": 0,
+        "status": "deleted",
+        "diff": [],
+        "revision": f"deleted:{before[str(deleted.resolve())][0]}:{before[str(deleted.resolve())][1]}",
+    }]
 
 
 async def test_delegate_tool_rejects_non_team_leader_context():

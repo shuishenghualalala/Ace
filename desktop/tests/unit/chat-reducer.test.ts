@@ -1009,6 +1009,32 @@ describe('finalReducer per-turn file changes', () => {
     expect(turnFilesOf(r2, id2)).toEqual([{ path: 'crew/a.py', name: 'a.py', added: 5, removed: 2, status: 'modified' }]);
   });
 
+  it('includes a metadata-only edit when revision changes but line counts stay equal', () => {
+    const id1 = 'm-revision-1';
+    const fileA1 = { ...fc('crew/a.py', 0, 0, 'modified', ''), revision: '100:20' };
+    const r1 = finalReducer(
+      { kind: 'final', body: { text: 'first' }, sequence: 1 },
+      makeSnapshot({
+        messages: [{ id: id1, role: 'assistant', content: 'first', timestamp: 1000, streaming: true }],
+        book: { ...emptyBook(), assistantId: id1, fileChanges: [fileA1] },
+      }),
+    );
+
+    const id2 = 'm-revision-2';
+    const fileA2 = { ...fileA1, revision: '200:20' };
+    const r2 = finalReducer(
+      { kind: 'final', body: { text: 'second' }, sequence: 2 },
+      makeSnapshot({
+        messages: [{ id: id2, role: 'assistant', content: 'second', timestamp: 2000, streaming: true }],
+        book: { ...r1.replaceBook!, assistantId: id2, fileChanges: [fileA2] },
+      }),
+    );
+
+    expect(turnFilesOf(r2, id2)).toEqual([
+      { path: 'crew/a.py', name: 'a.py', added: 0, removed: 0, status: 'modified' },
+    ]);
+  });
+
   it('emits no turnFileChanges patch when nothing changed this turn', () => {
     const id1 = 'm-1';
     const fileA = fc('crew/a.py', 3, 1);

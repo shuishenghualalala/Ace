@@ -664,6 +664,37 @@ def agent_workspace_path(
     return path
 
 
+def external_session_workspace_path(
+    workspace_id: str,
+    session_id: str,
+    external_agent_id: str,
+    *,
+    owner_account_id: str | None = None,
+    create: bool = True,
+) -> Path:
+    """Return the isolated default workspace for one external Agent session.
+
+    Explicit ``cwd`` and user-bound ``workspace_root_path`` continue to take
+    precedence in ``SingleAgent``.  This path only replaces the old shared
+    fallback for new, unbound external sessions.
+    """
+
+    root = task_workspace_path(
+        workspace_id,
+        owner_account_id=owner_account_id,
+        create=create,
+    )
+    path = (
+        root
+        / "external_sessions"
+        / safe_path_segment(session_id, "session")
+        / safe_path_segment(external_agent_id, "agent")
+    )
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 # ---------------------------------------------------------------------------
 # 文件加载
 # ---------------------------------------------------------------------------

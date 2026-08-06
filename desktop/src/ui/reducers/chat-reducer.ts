@@ -231,6 +231,7 @@ export interface TeamInternalChunk {
     collapsed_title?: string;
     process_text?: string;
     artifacts?: ChatMessage['artifacts'];
+    turn_file_changes?: ChatMessage['turnFileChanges'];
     thinking?: unknown;
     tool_calls?: unknown[];
     turn_started_at?: number;
@@ -1194,7 +1195,7 @@ function fileChangeSignature(f: FileChange): string {
   for (const r of f.diff) {
     h = (Math.imul(h, 33) ^ r.kind.charCodeAt(0) ^ r.text.length) | 0;
   }
-  return `${f.status}|${f.added}|${f.removed}|${f.binary ? 1 : 0}|${h >>> 0}`;
+  return `${f.status}|${f.added}|${f.removed}|${f.binary ? 1 : 0}|${f.revision || ''}|${h >>> 0}`;
 }
 
 /** 整份 fileChanges 快照 → path→签名 映射，存入 book.prevTurnFileSignature 供下一轮差集。 */

@@ -237,6 +237,7 @@ def team_internal_history_items(
                 "timestamp": message.timestamp,
                 **({"thinking": message.thinking} if message.thinking else {}),
                 **({"tool_calls": tool_calls} if tool_calls else {}),
+                **({"turn_file_changes": message.turn_file_changes} if message.turn_file_changes else {}),
             })
     try:
         tasks = crew.tasks.list_tasks(limit=1000, owner_account_id=owner_account_id)

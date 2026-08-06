@@ -55,7 +55,7 @@ from crew.gateway.session_context import (
 )
 from crew.plugins.manager import PluginManager, TerminalOutcome
 from crew.state.logging import get_logger, llm_trace
-from crew.state.home import task_workspace_path, safe_path_segment
+from crew.state.home import external_session_workspace_path, task_workspace_path, safe_path_segment
 
 log = get_logger("agent")
 
@@ -565,7 +565,7 @@ class SingleAgent(Agent):
         base = self.tool_filter if self.tool_filter is not None else self.registry.names()
         return [t for t in base if t not in {"enter_plan_mode", "exit_plan_mode"}]
 
-    def _resolve_agent_workdir(self, envelope: Envelope) -> str:
+    def _resolve_agent_workdir(self, envelope: Envelope, *, task_session_id: str = "") -> str:
         """解析本轮 agent 的文件系统工作目录（Layer 3：backing workspace_id）。
 
         work_dir = {task_workspace_root}/{workspace_id}/
@@ -577,18 +577,46 @@ class SingleAgent(Agent):
         """
         explicit = str(envelope.params.get("cwd") or "").strip()
         if explicit:
-            from pathlib import Path
-
             path = Path(explicit).expanduser()
             path.mkdir(parents=True, exist_ok=True)
             return str(path.resolve())
         root = str(envelope.params.get("workspace_root_path") or "").strip()
         if root:
-            from pathlib import Path
-
             path = Path(root).expanduser()
             if path.is_dir():
                 return str(path.resolve())
+
+        if self.executor.name == "external":
+            config = getattr(self.executor, "config", None)
+            external_agent_id = str(getattr(config, "external_agent_id", "") or "").strip()
+            external_store = getattr(config, "external_store", None)
+            stable_session_id = str(task_session_id or envelope.session_id)
+            latest_binding = getattr(
+                external_store,
+                "latest_runtime_session_binding_for_agent",
+                None,
+            )
+            if external_agent_id and callable(latest_binding):
+                try:
+                    binding = latest_binding(
+                        owner_account_id=envelope.user_id,
+                        crew_session_id=stable_session_id,
+                        external_agent_id=external_agent_id,
+                    )
+                    legacy_cwd_raw = str((binding or {}).get("cwd") or "").strip()
+                    if legacy_cwd_raw:
+                        legacy_cwd = Path(legacy_cwd_raw).expanduser()
+                        if legacy_cwd.is_dir():
+                            return str(legacy_cwd.resolve())
+                except Exception:  # noqa: BLE001 - compatibility lookup must not block a turn
+                    pass
+            if external_agent_id:
+                return str(external_session_workspace_path(
+                    envelope.workspace_id,
+                    stable_session_id,
+                    external_agent_id,
+                    owner_account_id=envelope.user_id,
+                ))
 
         return str(task_workspace_path(envelope.workspace_id, owner_account_id=envelope.user_id))
 
@@ -597,7 +625,7 @@ class SingleAgent(Agent):
             raise RuntimeError("SingleAgent 已关闭，不能继续执行")
         sid = envelope.session_id
         task_sid = str(envelope.params.get("task_session_id") or sid)
-        cwd = self._resolve_agent_workdir(envelope)
+        cwd = self._resolve_agent_workdir(envelope, task_session_id=task_sid)
         # 提前设置运行期会话 id，使 compactor.maybe_compact() 中的 LLM trace 也能带上 session_id
         from crew.core.runctx import (
             current_attachment_files,

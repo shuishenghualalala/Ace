@@ -48,6 +48,26 @@ describe('mapBackendHistoryItem turnFileChanges', () => {
     ]);
   });
 
+  it('maps Team member turn_file_changes without changing artifact data', () => {
+    const item: BackendHistoryItem = {
+      role: 'team_internal',
+      content: '成员已提交',
+      agent_id: 'hermes',
+      event_type: 'team_submit',
+      artifacts: [{ title: 'result.md', path: '/work/result.md', kind: 'text' }],
+      turn_file_changes: [
+        { path: '/work/result.md', name: 'result.md', added: 8, removed: 1, status: 'modified' },
+      ],
+    };
+
+    const msg = mapBackendHistoryItem(item);
+
+    expect(msg.turnFileChanges).toEqual([
+      { path: '/work/result.md', name: 'result.md', added: 8, removed: 1, status: 'modified' },
+    ]);
+    expect(msg.artifacts).toEqual(item.artifacts);
+  });
+
   it('falls back to file_write tool paths when turn_file_changes is absent (legacy history)', () => {
     const item: BackendHistoryItem = {
       role: 'assistant',

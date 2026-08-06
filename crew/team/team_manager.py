@@ -23,6 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from crew.agent.executor import create_executor
+from crew.agent.file_changes import (
+    FileMetadataSnapshot,
+    changes_between_snapshots,
+    merge_changes,
+    workspace_snapshot,
+)
 from crew.agent.runtime import SingleAgent
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ToolError
@@ -1748,6 +1754,7 @@ class InProcessTeamManager(TeamManager):
                     "thinking": _normalize_legacy_chunked_thinking(str(payload.get("thinking") or "")),
                     "tool_calls": list(payload.get("tool_calls") or []),
                     "artifacts": list(payload.get("artifacts") or []),
+                    "turn_file_changes": list(payload.get("turn_file_changes") or []),
                     "mention_from": str(payload.get("mention_from") or ""),
                     "mention_to": list(payload.get("mention_to") or []),
                     "mention_intent": str(payload.get("mention_intent") or ""),
@@ -4518,7 +4525,14 @@ class InProcessTeamManager(TeamManager):
 
         return flow_builder.team_goal_uses_shared_workspace(goal)
 
-    def _team_delegate_cwd(self, envelope: Envelope, goal: str) -> str:
+    def _team_delegate_cwd(
+        self,
+        envelope: Envelope,
+        goal: str,
+        *,
+        node_id: str = "",
+        agent_id: str = "",
+    ) -> str:
         """Give abstract Team tasks a per-turn workspace to avoid stale artifact bleed."""
 
         if self._team_goal_uses_shared_workspace(goal):
@@ -4526,6 +4540,12 @@ class InProcessTeamManager(TeamManager):
         try:
             session_dir = safe_path_segment(envelope.session_id, "team-turn")
             path = task_workspace_path(envelope.workspace_id or "default") / "team_turns" / session_dir
+            if node_id or agent_id:
+                path = (
+                    path
+                    / safe_path_segment(node_id, "node")
+                    / safe_path_segment(agent_id, "agent")
+                )
             path.mkdir(parents=True, exist_ok=True)
             return str(path)
         except Exception as exc:  # noqa: BLE001
@@ -4536,6 +4556,22 @@ class InProcessTeamManager(TeamManager):
                 exc,
             )
             return ""
+
+    @staticmethod
+    def _team_shared_cwd(envelope: Envelope) -> str:
+        """Resolve the actual project root used by shared-workspace Team nodes."""
+
+        explicit = str(envelope.params.get("cwd") or "").strip()
+        if explicit:
+            path = Path(explicit).expanduser()
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path.resolve())
+        workspace_root = str(envelope.params.get("workspace_root_path") or "").strip()
+        if workspace_root:
+            path = Path(workspace_root).expanduser()
+            if path.is_dir():
+                return str(path.resolve())
+        return str(task_workspace_path(envelope.workspace_id or "default").resolve())
 
     @staticmethod
     def _artifact_title_head(title: str) -> str:
@@ -4669,6 +4705,7 @@ class InProcessTeamManager(TeamManager):
         text: str,
         existing_artifacts: list[dict[str, Any]],
         changed_paths: set[str] | None = None,
+        workspace_root: str = "",
     ) -> list[dict[str, Any]]:
         """Register concrete file or directory paths mentioned by a node result."""
 
@@ -4678,7 +4715,11 @@ class InProcessTeamManager(TeamManager):
             if str(item.get("path") or "").strip()
         }
         created: list[dict[str, Any]] = []
-        candidate_paths = self._candidate_artifact_paths(envelope, str(text or ""))
+        candidate_paths = self._candidate_artifact_paths(
+            envelope,
+            str(text or ""),
+            workspace_root=workspace_root,
+        )
         for artifact_path in candidate_paths:
             path = str(artifact_path)
             if not path or path in existing_paths:
@@ -4729,7 +4770,7 @@ class InProcessTeamManager(TeamManager):
         return created
 
     @staticmethod
-    def _workspace_file_snapshot(root: str | Path | None) -> dict[str, tuple[int, int]]:
+    def _workspace_file_snapshot(root: str | Path | None) -> FileMetadataSnapshot:
         base = Path(str(root or "")).expanduser() if root else None
         if base is None:
             return {}
@@ -4739,20 +4780,17 @@ class InProcessTeamManager(TeamManager):
                 return {}
         except Exception:  # noqa: BLE001
             return {}
-        snapshot: dict[str, tuple[int, int]] = {}
-        try:
-            files = resolved_base.rglob("*")
-            for path in files:
-                try:
-                    if not path.is_file():
-                        continue
-                    stat = path.stat()
-                    snapshot[str(path.resolve())] = (int(stat.st_mtime_ns), int(stat.st_size))
-                except Exception:  # noqa: BLE001
-                    continue
-        except Exception:  # noqa: BLE001
-            return snapshot
-        return snapshot
+        snapshot = workspace_snapshot(resolved_base)
+        return snapshot or {}
+
+    @classmethod
+    def _workspace_file_changes(
+        cls,
+        root: str | Path | None,
+        before: FileMetadataSnapshot,
+    ) -> list[dict[str, Any]]:
+        after = cls._workspace_file_snapshot(root)
+        return changes_between_snapshots(before, after)
 
     @classmethod
     def _changed_workspace_files(
@@ -4760,12 +4798,11 @@ class InProcessTeamManager(TeamManager):
         root: str | Path | None,
         before: dict[str, tuple[int, int]],
     ) -> set[str]:
-        after = cls._workspace_file_snapshot(root)
-        changed: set[str] = set()
-        for path, stat in after.items():
-            if before.get(path) != stat:
-                changed.add(path)
-        return changed
+        return {
+            str(item.get("path") or "")
+            for item in cls._workspace_file_changes(root, before)
+            if item.get("status") != "deleted" and str(item.get("path") or "")
+        }
 
     def _persist_node_full_result(
         self,
@@ -4802,7 +4839,13 @@ class InProcessTeamManager(TeamManager):
             )
             return "", 0
 
-    def _candidate_artifact_paths(self, envelope: Envelope, text: str) -> list[Path]:
+    def _candidate_artifact_paths(
+        self,
+        envelope: Envelope,
+        text: str,
+        *,
+        workspace_root: str = "",
+    ) -> list[Path]:
         """Resolve file or directory mentions inside the current Team turn workspace."""
 
         raw_paths: list[str] = []
@@ -4816,9 +4859,16 @@ class InProcessTeamManager(TeamManager):
                 raw_paths.append(raw)
 
         base_dirs: list[Path] = []
+        if str(workspace_root or "").strip():
+            try:
+                base_dirs.append(Path(workspace_root).expanduser().resolve())
+            except OSError:
+                pass
         try:
             session_dir = safe_path_segment(envelope.session_id, "team-turn")
-            base_dirs.append(task_workspace_path(envelope.workspace_id or "default") / "team_turns" / session_dir)
+            turn_root = task_workspace_path(envelope.workspace_id or "default") / "team_turns" / session_dir
+            if turn_root not in base_dirs:
+                base_dirs.append(turn_root)
         except Exception as exc:  # noqa: BLE001
             log.debug("team artifact relative workspace unavailable: session=%s error=%s", envelope.session_id, exc)
 
@@ -4953,6 +5003,7 @@ class InProcessTeamManager(TeamManager):
         collapsed_title: str = "",
         process_text: str = "",
         artifacts: list[dict[str, Any]] | None = None,
+        turn_file_changes: list[dict[str, Any]] | None = None,
         thinking: str = "",
         tool_calls: list[dict[str, Any]] | None = None,
         turn_started_at: float | None = None,
@@ -4981,6 +5032,8 @@ class InProcessTeamManager(TeamManager):
             body["process_text"] = process_text
         if artifacts:
             body["artifacts"] = artifacts
+        if turn_file_changes:
+            body["turn_file_changes"] = turn_file_changes
         if thinking:
             body["thinking"] = thinking
         if tool_calls:
@@ -5020,6 +5073,7 @@ class InProcessTeamManager(TeamManager):
         collapsed_title: str = "",
         process_text: str = "",
         artifacts: list[dict[str, Any]] | None = None,
+        turn_file_changes: list[dict[str, Any]] | None = None,
         thinking: str = "",
         tool_calls: list[dict[str, Any]] | None = None,
         turn_started_at: float | None = None,
@@ -5044,6 +5098,7 @@ class InProcessTeamManager(TeamManager):
             collapsed_title=collapsed_title,
             process_text=process_text,
             artifacts=artifacts,
+            turn_file_changes=turn_file_changes,
             thinking=thinking,
             tool_calls=tool_calls,
             turn_started_at=turn_started_at,
@@ -5889,12 +5944,21 @@ class InProcessTeamManager(TeamManager):
             live_queue: asyncio.Queue[ResponseChunk] = asyncio.Queue()
             member_stream_text: dict[str, list[str]] = {}
             member_runtime_events: dict[str, list[dict[str, Any]]] = {}
+            member_file_changes: dict[str, list[dict[str, Any]]] = {}
 
             def _relay_child_chunk(node: TeamPlanNode, member: str, chunk: ResponseChunk) -> None:
                 text = ""
                 append = False
                 started_at = float((node.metadata or {}).get("execution_started_at") or node.updated_at or time.time())
                 now = time.time()
+                if chunk.kind == "file_changes":
+                    files = chunk.body.get("files") if isinstance(chunk.body, dict) else None
+                    if isinstance(files, list):
+                        member_file_changes[node.node_id] = merge_changes(
+                            member_file_changes.get(node.node_id, []),
+                            [item for item in files if isinstance(item, dict)],
+                        )
+                    return
                 runtime_event = self._child_chunk_execution_event(node, member, chunk)
                 if runtime_event is not None:
                     events = member_runtime_events.setdefault(node.node_id, [])
@@ -5979,8 +6043,14 @@ class InProcessTeamManager(TeamManager):
                         str(item.get("artifact_id") or "")
                         for item in dispatch_team.bus.list_artifacts(envelope.session_id)
                     }
-                    delegate_cwd = self._team_delegate_cwd(envelope, goal)
+                    delegate_cwd = self._team_delegate_cwd(
+                        envelope,
+                        goal,
+                        node_id=node.node_id,
+                        agent_id=node.assignee,
+                    )
                     workspace_scope = "isolated_turn_workspace" if delegate_cwd else "shared_workspace"
+                    member_cwd = delegate_cwd or self._team_shared_cwd(envelope)
                     workspace_snapshot = self._workspace_file_snapshot(delegate_cwd) if delegate_cwd else {}
                     upstream_artifact_refs = self._node_upstream_artifact_refs(plan, node)
                     upstream_artifact_refs.extend(
@@ -6034,8 +6104,8 @@ class InProcessTeamManager(TeamManager):
                         task_payload_meta["active_skills"] = list(
                             envelope.params.get("active_skills") or []
                         )
-                    if delegate_cwd:
-                        task_payload_meta["cwd"] = delegate_cwd
+                    if member_cwd:
+                        task_payload_meta["cwd"] = member_cwd
                     if workspace_guard:
                         task_payload_meta["workspace_guard"] = workspace_guard
                     result = await self.request_delegate(
@@ -6052,11 +6122,25 @@ class InProcessTeamManager(TeamManager):
                         finalize_plan_node=False,
                         attachments=envelope.attachments,
                     )
-                    result["_workspace_changed_paths"] = list(self._changed_workspace_files(delegate_cwd, workspace_snapshot)) if delegate_cwd else []
+                    snapshot_changes = (
+                        self._workspace_file_changes(delegate_cwd, workspace_snapshot)
+                        if delegate_cwd
+                        else []
+                    )
+                    result["_workspace_file_changes"] = merge_changes(
+                        snapshot_changes,
+                        member_file_changes.get(node.node_id, []),
+                    )
+                    result["_workspace_root"] = member_cwd
+                    result["_workspace_changed_paths"] = [
+                        str(item.get("path") or "")
+                        for item in result["_workspace_file_changes"]
+                        if item.get("status") != "deleted" and str(item.get("path") or "")
+                    ]
                     artifacts = self._node_owned_artifacts([
                         item for item in dispatch_team.bus.list_artifacts(envelope.session_id)
                         if str(item.get("artifact_id") or "") not in before_artifact_ids
-                    ], node=node, task_id=str((result or {}).get("task_id") or ""), workspace_root=delegate_cwd)
+                    ], node=node, task_id=str((result or {}).get("task_id") or ""), workspace_root=member_cwd)
                     result["artifacts"] = artifacts
                     return node, result, None
                 except asyncio.CancelledError as exc:
@@ -6169,6 +6253,11 @@ class InProcessTeamManager(TeamManager):
                     finished_at = time.time()
                     output = str((result or {}).get("output") or "").strip()
                     artifacts = self._artifact_cards(list((result or {}).get("artifacts") or []))
+                    turn_file_changes = [
+                        dict(item)
+                        for item in (result or {}).get("_workspace_file_changes") or []
+                        if isinstance(item, dict) and str(item.get("path") or "").strip()
+                    ]
                     changed_paths = {
                         str(path)
                         for path in (result or {}).get("_workspace_changed_paths") or []
@@ -6223,6 +6312,7 @@ class InProcessTeamManager(TeamManager):
                             text="\n".join(part for part in [node_result, runtime_artifact_text] if part),
                             existing_artifacts=artifacts,
                             changed_paths=changed_paths,
+                            workspace_root=str((result or {}).get("_workspace_root") or ""),
                         )
                         if auto_file_artifacts:
                             artifacts.extend(self._artifact_cards(auto_file_artifacts))
@@ -6287,6 +6377,7 @@ class InProcessTeamManager(TeamManager):
                         event_type="team_submit",
                         process_text=process_text,
                         artifacts=artifacts,
+                        turn_file_changes=turn_file_changes,
                         thinking=runtime_thinking,
                         tool_calls=runtime_tool_calls,
                         turn_started_at=started_at,

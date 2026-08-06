@@ -1,4 +1,4 @@
-import type { MsgRole, ToolCallInfo, UiMessage } from "../types";
+import type { MsgRole, ToolCallInfo, TurnFileChangeSummary, UiMessage } from "../types";
 import { backendDurationToMs, backendSecondsToMs } from "./backendTime";
 import { isDuplicateAssistantOfTeamResult, mergeTeamInternalMessage } from "./teamMessageMerge";
 
@@ -24,6 +24,7 @@ export interface BackendHistoryItem {
   collapsed_title?: string;
   process_text?: string;
   artifacts?: UiMessage["artifacts"];
+  turn_file_changes?: Array<Partial<TurnFileChangeSummary> & { path?: string }>;
   tool_calls?: Array<{
     id: string;
     name: string;
@@ -34,6 +35,32 @@ export interface BackendHistoryItem {
     result?: string;
     status?: "generating" | "running" | "done" | "error";
   }>;
+}
+
+export function normalizeTurnFileChanges(raw: unknown): TurnFileChangeSummary[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const files = raw.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const value = item as Record<string, unknown>;
+    const path = String(value.path || "").trim();
+    if (!path || isPlanDocumentPath(path)) return [];
+    const status = value.status === "added" || value.status === "deleted" ? value.status : "modified";
+    return [{
+      path,
+      name: String(value.name || path.split(/[\\/]/).pop() || path),
+      added: Math.max(0, Number(value.added || 0)),
+      removed: Math.max(0, Number(value.removed || 0)),
+      status,
+      ...(value.binary === true ? { binary: true } : {}),
+    } satisfies TurnFileChangeSummary];
+  });
+  return files.length > 0 ? files : undefined;
+}
+
+function isPlanDocumentPath(path: string): boolean {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  return /(^|\/)\.crew\/plans\//i.test(normalized)
+    || (/\/plans\//i.test(normalized) && /\/plan_[^/]+\.md$/i.test(normalized));
 }
 
 let _seq = 0;
@@ -80,6 +107,7 @@ export function mapHistoryItem(item: BackendHistoryItem): UiMessage {
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,
     artifacts: item.artifacts,
+    turnFileChanges: normalizeTurnFileChanges(item.turn_file_changes),
   };
   if ((role === "assistant" || role === "team_internal") && item.tool_calls && item.tool_calls.length > 0) {
     base.toolCalls = mapToolCalls(item.tool_calls);

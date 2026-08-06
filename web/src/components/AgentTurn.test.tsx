@@ -69,4 +69,24 @@ describe("AgentTurn", () => {
     expect(body).toContain("正在输出最终回复…");
   });
 
+  it("外部 Agent 回合复用文件改动卡并禁用已删除文件", () => {
+    const html = renderHtml([{
+      id: "external-1",
+      role: "assistant",
+      text: "修改完成。",
+      turnFileChanges: [
+        { path: "/work/app.ts", name: "app.ts", added: 12, removed: 2, status: "modified" },
+        { path: "/work/old.ts", name: "old.ts", added: 0, removed: 4, status: "deleted" },
+      ],
+    }]);
+
+    expect(html).toContain("已编辑 2 个文件");
+    expect(html).toContain("app.ts");
+    expect(html).toContain("old.ts");
+    expect(html).toContain("修改");
+    expect(html).toContain("删除");
+    expect(html).toContain('data-file-status="deleted"');
+    expect(html).toContain("disabled");
+  });
+
 });
