@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
-import re
 import asyncio
 import hashlib
 import inspect
+import json
+import re
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
@@ -15,7 +15,7 @@ from crew.core.types import ChatResponse, Message
 from crew.dynamickanban.models import PlanEdge, PlanNode, PlanResult
 from crew.dynamickanban.plan_graph import PlanGraph
 from crew.team import flow_builder
-from crew.team.capabilities import normalize_capabilities
+from crew.team.capabilities import normalize_capabilities, normalize_capability
 from crew.team.models import TeamMemberSpec
 from crew.team.policy_checker import TeamPolicyReport, analyze_team_policy
 from crew.team.result_presenter import workflow_lane_order
@@ -178,6 +178,9 @@ def _build_fast_workflow_nodes(
     team: Any,
     goal: str,
     profile: dict[str, Any],
+    *,
+    required_capabilities: list[str] | None = None,
+    capability_source: str = "team_spec",
 ) -> tuple[list[dict[str, Any]], list[Any]]:
     members = list((getattr(team, "members", {}) or {}).values())
     primary = _select_fast_primary(members, profile)
@@ -191,6 +194,14 @@ def _build_fast_workflow_nodes(
         if primary == "leader"
         else flow_builder.member_node_metadata(primary, primary_lane)
     )
+    task_capabilities = normalize_capabilities(required_capabilities or [])
+    if task_capabilities:
+        primary_metadata.update({
+            "required_capabilities": task_capabilities,
+            "capability_source": capability_source,
+        })
+    elif primary == "leader":
+        primary_metadata["capability_source"] = "leader_direct"
     nodes: list[dict[str, Any]] = [
         {
             "id": "leader_plan",
@@ -216,12 +227,17 @@ def _build_fast_workflow_nodes(
     summary_parent = "fast_execute"
     verifier = _select_fast_verifier(members, primary_id=primary_id, profile=profile)
     if verifier is not None:
+        verifier_metadata = flow_builder.member_node_metadata(verifier, "verify")
+        verifier_metadata.update({
+            "required_capabilities": ["review", "testing", "verification"],
+            "capability_source": "system_contract",
+        })
         nodes.append({
             "id": "fast_verify",
             "title": f"轻量验证：{task_title}",
             "detail": f"基于快速执行产物做独立轻量验证，输出通过结论、风险和需要用户确认的问题：{goal}",
             "assignee": verifier.member_id,
-            "metadata": flow_builder.member_node_metadata(verifier, "verify"),
+            "metadata": verifier_metadata,
         })
         edges.append(["fast_execute", "fast_verify"])
         summary_parent = "fast_verify"
@@ -710,6 +726,7 @@ def _semantic_standard_workflow_nodes(
         metadata.update({
             "work_unit_kind": unit.kind,
             "required_capabilities": list(unit.required_capabilities),
+            "capability_source": "work_unit",
             "expected_output": unit.expected_output,
             "needs_independent_review": unit.needs_independent_review,
             **({"display_title": unit.display_title} if unit.display_title else {}),
@@ -758,6 +775,7 @@ def _semantic_standard_workflow_nodes(
         review_meta.update({
             "work_unit_kind": "verify",
             "required_capabilities": ["review", "verification"],
+            "capability_source": "system_contract",
             "quality_policy": decision.quality_policy,
         })
         nodes.append({
@@ -1520,7 +1538,7 @@ def _ai_llm_prompt(
         "{\n"
         '  "nodes": [\n'
         '    {"id": "leader_plan", "title": "...", "detail": "...", "assignee": "leader", "workflow_lane": "lead"},\n'
-        '    {"id": "node_id", "title": "...", "detail": "...", "assignee": "member_id", "workflow_lane": "plan|design|build|verify|docs|release|summary|other"}\n'
+        '    {"id": "node_id", "title": "...", "detail": "...", "assignee": "member_id", "workflow_lane": "plan|design|build|verify|docs|release|summary|other", "required_capabilities": ["上下文能力key"]}\n'
         "  ],\n"
         '  "edges": [["leader_plan", "node_id"], ["node_id", "leader_summary"]],\n'
         '  "notes": ["可选规划说明"]\n'
@@ -1555,12 +1573,20 @@ def _coerce_llm_nodes(
         lane = str(item.get("workflow_lane") or "").strip().lower()
         if not lane:
             lane = _member_lane_for_assignee(member_map, assignee, "other")
+        metadata = _member_metadata_for_assignee(member_map, assignee, lane)
+        metadata.pop("required_capabilities", None)
+        metadata.pop("capability_source", None)
+        if isinstance(item.get("required_capabilities"), list):
+            metadata.update({
+                "required_capabilities": list(item.get("required_capabilities") or []),
+                "capability_source": "ai_planner",
+            })
         nodes.append({
             "id": node_id,
             "title": str(item.get("title") or node_id).strip(),
             "detail": str(item.get("detail") or item.get("description") or goal).strip(),
             "assignee": assignee,
-            "metadata": _member_metadata_for_assignee(member_map, assignee, lane),
+            "metadata": metadata,
         })
         seen.add(node_id)
     if not nodes:
@@ -1718,8 +1744,36 @@ def _normalize_nodes_with_graph(
     for node in ordered_nodes:
         metadata = dict(raw_meta.get(node.id) or {})
         lane = str(metadata.get("workflow_lane") or "other").strip() or "other"
+        raw_capabilities = (
+            metadata.get("required_capabilities")
+            if isinstance(metadata.get("required_capabilities"), list)
+            else []
+        )
+        invalid_capabilities = [
+            str(item)
+            for item in raw_capabilities
+            if str(item).strip() and not normalize_capability(item)
+        ]
+        required_capabilities = normalize_capabilities(raw_capabilities)
+        is_control_node = node.assignee == "leader" and node.id.startswith("leader_")
+        is_leader_direct = (
+            node.assignee == "leader"
+            and metadata.get("capability_source") == "leader_direct"
+        )
+        if invalid_capabilities:
+            raise ValueError(
+                f"node {node.id} contains unsupported capabilities: "
+                + ", ".join(invalid_capabilities)
+            )
+        if not is_control_node and not is_leader_direct and not required_capabilities:
+            raise ValueError(f"execution node {node.id} missing required_capabilities")
         metadata.update({
             "workflow_lane": lane,
+            "required_capabilities": required_capabilities,
+            "capability_source": str(
+                metadata.get("capability_source")
+                or ("control_node" if is_control_node else "")
+            ),
             "display_order": metadata.get("display_order") or workflow_lane_order(lane),
             "planner": "team_graph_planner",
             "plan_strategy": plan_strategy,
@@ -1898,7 +1952,12 @@ class TeamGraphPlanner:
         policy_report = analyze_team_policy(spec=spec, members=members)
         budget_notes: list[str] = []
         if selected_mode == "fast":
-            raw_nodes, raw_edges = _build_fast_workflow_nodes(team, goal, profile)
+            raw_nodes, raw_edges = _build_fast_workflow_nodes(
+                team,
+                goal,
+                profile,
+                required_capabilities=normalize_capabilities(spec.team_requirements.get("capabilities") or []),
+            )
             plan_strategy = "fast_minimal_path"
         else:
             raw_nodes, raw_edges, budget_notes = _build_standard_workflow_nodes(team, goal, profile)
@@ -2041,7 +2100,22 @@ class TeamGraphPlanner:
         policy_report = analyze_team_policy(spec=spec, members=members)
 
         if selected_mode == "fast":
-            raw_nodes, raw_edges = _build_fast_workflow_nodes(team, goal, profile)
+            fast_required_capabilities = normalize_capabilities(
+                capability
+                for unit in (decision.work_units if decision is not None else [])
+                for capability in unit.required_capabilities
+            )
+            if not fast_required_capabilities:
+                fast_required_capabilities = normalize_capabilities(
+                    spec.team_requirements.get("capabilities") or []
+                )
+            raw_nodes, raw_edges = _build_fast_workflow_nodes(
+                team,
+                goal,
+                profile,
+                required_capabilities=fast_required_capabilities,
+                capability_source="work_unit_summary" if decision is not None else "team_spec",
+            )
             nodes, edges, notes = _normalize_nodes_with_graph(
                 goal=goal,
                 raw_nodes=raw_nodes,

@@ -10,29 +10,29 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from crew.agent.executor import BuiltinExecutor
+from crew.agent.executor.external import AcpExecutor
+from crew.agent.external.store import ExternalAgentStore
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ToolError
 from crew.core.interfaces import LLMProvider
 from crew.core.mocks import InMemorySessionStore, NullMemory
+from crew.core.runctx import current_agent_id
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
+from crew.dynamickanban.store import SQLiteKanbanStore
 from crew.gateway.auth import AccountContext
 from crew.gateway.routers.sessions import create_sessions_router
-from crew.dynamickanban.store import SQLiteKanbanStore
 from crew.plugins.manager import PluginManager
 from crew.providers.openai_provider import OpenAIProvider
-from crew.state.config import Config
-from crew.state.config import load_config
+from crew.state.config import Config, load_config
 from crew.tasks.runtime import TaskRuntime
 from crew.tasks.task_manager import InMemoryTaskManager, LegacyTaskManagerAdapter
-from crew.agent.executor import BuiltinExecutor
-from crew.agent.executor.external import AcpExecutor
-from crew.agent.external.store import ExternalAgentStore
-from crew.core.runctx import current_agent_id
-from crew.team.team_manager import (
-    InProcessTeamManager,
-    NodeExecutionAssessment,
-    _join_stream_fragments,
-    _normalize_legacy_chunked_thinking,
+from crew.team.delegate_tool import run_delegate_to_teammate
+from crew.team.graph_planner import (
+    DEFAULT_PLANNING_DECISION_TIMEOUT,
+    PLANNING_DECISION_MAX_TOKENS,
+    TeamGraphPlanner,
+    schedule_planning_provider_warmup,
 )
 from crew.team.history_projection import team_internal_history_items
 from crew.team.models import TeamPlan, TeamPlanEdge, TeamPlanNode
@@ -45,17 +45,21 @@ from crew.team.result_presenter import (
     should_show_assignment,
 )
 from crew.team.roles import CREW_BUILTIN_AGENT_ID
-from crew.team.graph_planner import (
-    DEFAULT_PLANNING_DECISION_TIMEOUT,
-    PLANNING_DECISION_MAX_TOKENS,
-    TeamGraphPlanner,
-    schedule_planning_provider_warmup,
+from crew.team.team_manager import (
+    InProcessTeamManager,
+    NodeExecutionAssessment,
+    _join_stream_fragments,
+    _normalize_legacy_chunked_thinking,
+)
+from crew.team.team_spec import build_team_spec
+from crew.team.turn_decision import (
+    TeamTurnDecision,
+    coerce_team_turn_decision,
+    new_workflow_decision,
 )
 from crew.team.turn_router import TeamTurnRouter
-from crew.team.team_spec import build_team_spec
-from crew.team.turn_decision import TeamTurnDecision, coerce_team_turn_decision, new_workflow_decision
-from crew.team.workspace_guard import classify_external_permission, check_workspace_guard
-from crew.team.delegate_tool import run_delegate_to_teammate
+from crew.team.workflow_plan import coerce_planning_decision
+from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
 from crew.tools.registry import Registry, register_builtin_tools
 
 
@@ -126,8 +130,8 @@ class JsonGraphProvider(LLMProvider):
 {
   "nodes": [
     {"id": "leader_plan", "title": "Leader 定义接口目标", "detail": "确认登录接口边界、成员分工和验收标准。", "assignee": "leader", "workflow_lane": "lead"},
-    {"id": "api_build", "title": "实现登录接口", "detail": "完成接口实现、自测和风险说明。", "assignee": "dev", "workflow_lane": "build"},
-    {"id": "qa_verify", "title": "验证登录接口", "detail": "验证核心路径、失败路径和回归风险。", "assignee": "qa", "workflow_lane": "verify"},
+    {"id": "api_build", "title": "实现登录接口", "detail": "完成接口实现、自测和风险说明。", "assignee": "dev", "workflow_lane": "build", "required_capabilities": ["backend", "implementation"]},
+    {"id": "qa_verify", "title": "验证登录接口", "detail": "验证核心路径、失败路径和回归风险。", "assignee": "qa", "workflow_lane": "verify", "required_capabilities": ["testing", "verification"]},
     {"id": "leader_summary", "title": "Leader 汇总结论", "detail": "汇总实现、验证和交付建议。", "assignee": "leader", "workflow_lane": "summary"}
   ],
   "edges": [["leader_plan", "api_build"], ["api_build", "qa_verify"], ["qa_verify", "leader_summary"]],
@@ -1290,6 +1294,41 @@ def test_leader_review_stops_when_revision_budget_is_exhausted():
     assert review.status == "blocked"
     assert build.status == "completed"
     assert "最多 2 次" in review.result_summary
+
+
+def test_leader_review_exhaustion_opens_runtime_staffing_trigger_when_external_store_exists(tmp_path):
+    tm, _ = _team()
+    tm.external_store = ExternalAgentStore(str(tmp_path / "external.db"))
+    plan = TeamPlan(team_session_id="review_staffing", goal="实现登录接口")
+    build = TeamPlanNode(
+        node_id="build_1",
+        title="实现",
+        assignee="coder",
+        status="completed",
+        metadata={"required_capabilities": ["backend"]},
+    )
+    review = TeamPlanNode(
+        node_id="leader_review",
+        title="Leader 审阅",
+        assignee="leader",
+        metadata={"revision_count": 2},
+    )
+    plan.nodes = {node.node_id: node for node in (build, review)}
+    plan.edges = [TeamPlanEdge(parent_id=build.node_id, child_id=review.node_id)]
+    tm._plans[tm._key(plan.team_session_id, "owner")] = plan
+
+    decision = tm._apply_leader_review_decision(
+        plan,
+        review,
+        {"action": "revise", "target_node_id": build.node_id, "message": "仍需修改"},
+        owner_account_id="owner",
+        max_revisions=2,
+    )
+
+    assert decision["action"] == "block"
+    assert review.status == "blocked"
+    assert build.status == "failed"
+    assert build.metadata["runtime_staffing_trigger"] == "review_exhausted"
 
 
 def test_team_delegate_output_contract_stops_empty_context_search():
@@ -3018,6 +3057,39 @@ async def test_team_mention_tool_routes_and_guards_user_mentions():
     assert "user" in blocked.content
     assert "参数校验失败" in blocked.content
 
+    member_token = current_agent_id.set("coder")
+    try:
+        missing_status = await team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-submit-missing-status",
+                "team_mention",
+                {
+                    "to": ["leader"],
+                    "intent": "submit",
+                    "content": "测试已完成",
+                    "node_id": "qa_plan",
+                },
+            )
+        )
+        submitted = await team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-submit-pass",
+                "team_mention",
+                {
+                    "to": ["leader"],
+                    "intent": "submit",
+                    "content": "测试已完成",
+                    "node_id": "qa_plan",
+                    "result_status": "pass",
+                },
+            )
+        )
+    finally:
+        current_agent_id.reset(member_token)
+    assert missing_status.is_error
+    assert "result_status" in missing_status.content
+    assert not submitted.is_error
+
     leader_token = current_agent_id.set("leader")
     try:
         broadcast = await team.leader.registry.execute(
@@ -3328,6 +3400,7 @@ async def test_leader_request_plan_change_adds_dag_node_and_requeues_summary():
                     "title": "补充调研",
                     "detail": "补充必要事实并提交给 Leader 汇总。",
                     "assignee": "researcher",
+                    "required_capabilities": ["research", "analysis"],
                     "depends_on": ["leader_plan"],
                     "before": ["leader_summary"],
                     "reason": "当前 DAG 缺少调研事实。",
@@ -3346,6 +3419,8 @@ async def test_leader_request_plan_change_adds_dag_node_and_requeues_summary():
     plan = tm.read_plan("plan_change_s1")["plan"]
     nodes = {node["node_id"]: node for node in plan["nodes"]}
     assert nodes["extra_research"]["status"] == "pending"
+    assert nodes["extra_research"]["metadata"]["required_capabilities"] == ["research", "analysis"]
+    assert nodes["extra_research"]["metadata"]["capability_source"] == "leader_plan_change"
     assert nodes["leader_summary"]["status"] == "pending"
     assert {"parent_id": "leader_plan", "child_id": "extra_research"} in plan["edges"]
     assert {"parent_id": "extra_research", "child_id": "leader_summary"} in plan["edges"]
@@ -3375,6 +3450,7 @@ async def test_leader_request_plan_change_rejects_unknown_member_without_mutatio
                     "title": "补充调研",
                     "detail": "补充必要事实。",
                     "assignee": "ghost",
+                    "required_capabilities": ["research"],
                     "depends_on": ["leader_plan"],
                     "before": ["leader_summary"],
                 },
@@ -3390,6 +3466,42 @@ async def test_leader_request_plan_change_rejects_unknown_member_without_mutatio
     plan = tm.read_plan("plan_change_s2")["plan"]
     assert [node["node_id"] for node in plan["nodes"]] == ["leader_plan", "leader_summary"]
     assert plan["edges"] == [{"parent_id": "leader_plan", "child_id": "leader_summary"}]
+
+
+async def test_leader_request_plan_change_requires_capability_contract():
+    tm, _ = _team()
+    team = tm._build_team("plan_change_missing_capabilities")
+    tm.create_plan(
+        "plan_change_missing_capabilities",
+        goal="补充调研后汇总",
+        nodes=[
+            {"id": "leader_plan", "title": "Leader 拆解", "assignee": "leader"},
+            {"id": "leader_summary", "title": "Leader 汇总", "assignee": "leader"},
+        ],
+        edges=[["leader_plan", "leader_summary"]],
+    )
+
+    token = current_agent_id.set("leader")
+    try:
+        result = await team.leader.registry.execute(
+            ToolCall(
+                "plan-change-missing-capabilities",
+                "request_plan_change",
+                {
+                    "change_type": "add_node",
+                    "title": "补充调研",
+                    "detail": "补充必要事实。",
+                    "assignee": "researcher",
+                },
+            )
+        )
+    finally:
+        current_agent_id.reset(token)
+
+    assert result.is_error
+    assert "required_capabilities" in result.content
+    plan = tm.read_plan("plan_change_missing_capabilities")["plan"]
+    assert [node["node_id"] for node in plan["nodes"]] == ["leader_plan", "leader_summary"]
 
 
 async def test_runtime_executes_added_node_after_leader_plan_change():
@@ -3414,6 +3526,7 @@ async def test_runtime_executes_added_node_after_leader_plan_change():
                                     "title": "补充调研",
                                     "detail": "补充必要事实并提交给 Leader 汇总。",
                                     "assignee": "researcher",
+                                    "required_capabilities": ["research", "analysis"],
                                     "depends_on": ["leader_plan"],
                                     "before": ["leader_summary"],
                                     "reason": "当前 DAG 缺少调研事实。",
@@ -3855,6 +3968,54 @@ def test_node_execution_assessment_accepts_recovered_write_with_material_evidenc
     assert assessment.artifact_count == 1
 
 
+def test_node_execution_assessment_uses_structured_runtime_submission_status():
+    node = TeamPlanNode(
+        node_id="verify_1",
+        title="运行验证",
+        assignee="agent-a",
+        metadata={"workflow_lane": "verify"},
+    )
+    events = [
+        {
+            "event_type": "tool",
+            "tool_call": {
+                "id": "mention-1",
+                "name": "mcp__crew-interaction__team_mention",
+                "status": "running",
+                "arguments": json.dumps({
+                    "to": ["leader"],
+                    "intent": "submit",
+                    "content": "本轮通过；历史失败已修复。",
+                    "node_id": "verify_1",
+                    "result_status": "pass",
+                }),
+            },
+        },
+        {
+            "event_type": "tool",
+            "tool_call": {
+                "id": "mention-1",
+                "name": "mcp__crew-interaction__team_mention",
+                "status": "done",
+                "result": '{"ok":true}',
+            },
+        },
+    ]
+
+    result_status = InProcessTeamManager._runtime_result_status(node, events)
+    assessment = InProcessTeamManager._assess_node_execution(
+        node,
+        runtime_events=events,
+        artifact_refs=[],
+        changed_paths=set(),
+        result_contract={"status_signal": result_status or "unknown"},
+    )
+
+    assert result_status == "pass"
+    assert assessment.execution_status == "completed"
+    assert assessment.acceptance_status == "pass"
+
+
 def test_node_execution_assessment_does_not_block_plan_artifact_for_risk_section():
     node = TeamPlanNode(
         node_id="qa_refine_1",
@@ -3939,6 +4100,18 @@ def test_lightweight_question_profile_does_not_embed_execution_mode():
     assert spec.execution_profile["needs_verification"] is False
 
 
+def test_planning_decision_rejects_work_unit_without_capability_contract():
+    with pytest.raises(ValueError, match="missing required_capabilities"):
+        coerce_planning_decision({
+            "work_units": [{
+                "id": "build_api",
+                "objective": "实现接口",
+                "expected_output": "可运行接口",
+                "required_capabilities": [],
+            }],
+        })
+
+
 def test_team_turn_router_returns_team_turn_decision():
     router = TeamTurnRouter()
 
@@ -3991,6 +4164,9 @@ async def test_ai_planner_uses_llm_single_dag():
     assert isinstance((graph_plan.nodes[0]["metadata"] or {})["llm_planning_elapsed_ms"], int)
     assert graph_plan.workflow_plan["planning"]["requested_mode"] == "ai"
     assert graph_plan.workflow_plan["planning"]["selected_mode"] == "ai"
+    assert graph_plan.nodes[1]["metadata"]["required_capabilities"] == ["backend", "implementation"]
+    assert graph_plan.nodes[1]["metadata"]["capability_source"] == "ai_planner"
+    assert graph_plan.workflow_plan["nodes"][1]["capability_source"] == "ai_planner"
     assert any("AI Planner" in note for note in graph_plan.planner_notes)
 
 
@@ -4374,6 +4550,8 @@ async def test_team_graph_planner_standard_compiles_semantic_parallel_work_units
     assert next(node for node in graph_plan.nodes if node["id"] == "synthesis")["assignee"] == "writer"
     assert next(node for node in graph_plan.nodes if node["id"] == "independent_review")["assignee"] == "reviewer"
     assert graph_plan.nodes[1]["metadata"]["plan_strategy"] == "standard_semantic_dag"
+    assert graph_plan.nodes[1]["metadata"]["required_capabilities"] == ["research", "analysis"]
+    assert graph_plan.nodes[1]["metadata"]["capability_source"] == "work_unit"
     assert graph_plan.nodes[1]["metadata"]["display_title"] == "调研架构 A"
     assert graph_plan.workflow_plan["version"] == 1
     assert graph_plan.workflow_plan["revision"] == 1
@@ -5276,6 +5454,8 @@ async def test_team_graph_planner_ai_async_uses_llm_single_dag():
     assert graph_plan.nodes[0]["metadata"]["llm_planning_status"] == "success"
     assert isinstance(graph_plan.nodes[0]["metadata"]["llm_planning_elapsed_ms"], int)
     assert graph_plan.nodes[1]["metadata"]["workflow_lane"] == "build"
+    assert graph_plan.nodes[1]["metadata"]["required_capabilities"] == ["backend", "implementation"]
+    assert graph_plan.nodes[1]["metadata"]["capability_source"] == "ai_planner"
     assert any("AI Planner" in note for note in graph_plan.planner_notes)
 
 
@@ -5312,6 +5492,51 @@ async def test_team_graph_planner_ai_async_records_fallback_timing():
     assert any("AI Planner 失败" in note for note in graph_plan.planner_notes)
 
 
+async def test_team_graph_planner_ai_missing_capability_contract_falls_back_to_standard():
+    class MissingCapabilityGraphProvider(LLMProvider):
+        async def chat(self, messages, tools=None, *, max_tokens=None):
+            return ChatResponse(text="""
+{
+  "nodes": [
+    {"id": "leader_plan", "title": "规划", "assignee": "leader", "workflow_lane": "lead"},
+    {"id": "api_build", "title": "实现接口", "assignee": "dev", "workflow_lane": "build"},
+    {"id": "leader_summary", "title": "汇总", "assignee": "leader", "workflow_lane": "summary"}
+  ],
+  "edges": [["leader_plan", "api_build"], ["api_build", "leader_summary"]]
+}
+""")
+
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+            yield StreamChunk(delta_text="", done=True)
+
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "dev",
+                "name": "dev",
+                "role": "负责开发实现",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "build"},
+            }],
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("ai-missing-capabilities"),
+        "开发一个登录接口",
+        execution_profile={"requested_mode": "ai"},
+        provider=MissingCapabilityGraphProvider(),
+    )
+
+    assert graph_plan.workflow_plan["planning"]["fallback_from"] == "ai"
+    assert graph_plan.nodes[0]["metadata"]["plan_strategy"] == "standard_role_dag"
+    assert "missing required_capabilities" in graph_plan.nodes[0]["metadata"]["llm_planning_error"]
+    executable = next(node for node in graph_plan.nodes if node["assignee"] == "dev")
+    assert executable["metadata"]["required_capabilities"]
+    assert executable["metadata"]["capability_source"] == "role_catalog"
+
+
 async def test_team_graph_planner_standard_async_falls_back_to_role_dag_when_decision_fails():
     tm, _ = _team(config=Config(
         max_iterations=3,
@@ -5341,6 +5566,9 @@ async def test_team_graph_planner_standard_async_falls_back_to_role_dag_when_dec
     assert graph_plan.workflow_plan["planning"]["fallback_from"] == "planning_decision"
     assert graph_plan.workflow_plan["planning"]["engine"] == "legacy_role_compiler"
     assert graph_plan.workflow_plan["planning"]["planning_decision"]["error_type"] == "provider_error"
+    executable = next(node for node in graph_plan.nodes if node["assignee"] == "dev")
+    assert executable["metadata"]["required_capabilities"]
+    assert executable["metadata"]["capability_source"] == "role_catalog"
 
 
 async def test_team_graph_planner_standard_decision_timeout_is_classified():
@@ -5449,6 +5677,12 @@ def test_team_graph_planner_fast_profile_builds_minimal_dag():
     assert graph_plan.nodes[1]["assignee"] == "dev"
     assert graph_plan.nodes[1]["metadata"]["plan_strategy"] == "fast_minimal_path"
     assert graph_plan.nodes[1]["metadata"]["execution_budget"]["max_nodes"] == 3
+    assert graph_plan.nodes[1]["metadata"]["required_capabilities"] == [
+        "implementation",
+        "testing",
+        "verification",
+    ]
+    assert graph_plan.nodes[1]["metadata"]["capability_source"] == "team_spec"
     assert graph_plan.workflow_plan["planning"]["requested_mode"] == "fast"
 
 
@@ -5487,6 +5721,60 @@ def test_team_graph_planner_fast_mode_overrides_default_build_verification():
     assert [node["id"] for node in graph_plan.nodes] == ["leader_plan", "fast_execute", "leader_summary"]
     assert graph_plan.edges == [["leader_plan", "fast_execute"], ["fast_execute", "leader_summary"]]
     assert graph_plan.spec.to_dict()["execution_profile"]["needs_verification"] is False
+
+
+async def test_team_graph_planner_auto_fast_uses_work_unit_capability_contract():
+    class OneUnitPlanningProvider(LLMProvider):
+        async def chat(self, messages, tools=None, *, max_tokens=None):
+            return ChatResponse(text="""
+{
+  "goal_clarity": "high",
+  "critical_missing_info": [],
+  "dependency_pattern": "sequential",
+  "quality_policy": "none",
+  "dynamic_discovery": false,
+  "conditional_branching": false,
+  "iteration_until_convergence": false,
+  "risk_level": "low",
+  "semantic_uncertainty": "low",
+  "work_units": [{
+    "id": "implement_api",
+    "objective": "实现登录接口",
+    "kind": "build",
+    "required_capabilities": ["backend", "implementation"],
+    "depends_on": [],
+    "expected_output": "可运行接口"
+  }]
+}
+""")
+
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+            yield StreamChunk(delta_text="", done=True)
+
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "dev",
+                "name": "dev",
+                "role": "负责开发实现",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "build"},
+                "capabilities": ["backend", "implementation"],
+            }],
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("auto-fast-capabilities"),
+        "实现登录接口",
+        execution_profile={"requested_mode": "auto"},
+        provider=OneUnitPlanningProvider(),
+    )
+
+    assert graph_plan.workflow_plan["planning"]["selected_mode"] == "fast"
+    assert graph_plan.nodes[1]["metadata"]["required_capabilities"] == ["backend", "implementation"]
+    assert graph_plan.nodes[1]["metadata"]["capability_source"] == "work_unit_summary"
 
 
 def test_team_graph_planner_fast_question_prefers_plan_or_docs_before_verify():
@@ -5978,6 +6266,278 @@ def test_runtime_diagnostic_node_persists_workflow_revision_and_replaces_depende
     assert (node_task_ids["leader_plan"], node_task_ids[diagnostic.node_id]) in dependency_pairs
     assert (node_task_ids[diagnostic.node_id], node_task_ids["fast_execute"]) in dependency_pairs
     assert (node_task_ids["leader_plan"], node_task_ids["fast_execute"]) not in dependency_pairs
+
+
+@pytest.mark.asyncio
+async def test_runtime_staffing_e2e_reassigns_executes_and_learns_without_mutating_external_team(
+    tmp_path,
+    monkeypatch,
+):
+    external_store = ExternalAgentStore(str(tmp_path / "external.db"))
+    runtime = external_store.upsert_runtime({
+        "id": "runtime-ready",
+        "provider": "custom",
+        "name": "Ready Runtime",
+        "executable_path": "/bin/sh",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "backend-model",
+            "models": [{
+                "id": "backend-model",
+                "label": "Backend Model",
+                "capabilities": ["backend", "implementation"],
+            }],
+        },
+    })
+    worker = external_store.create_agent(
+        owner_account_id="local",
+        name="原后端",
+        runtime_id=runtime["id"],
+        model="backend-model",
+        system_prompt="负责后端实现",
+    )
+    reserve = external_store.create_agent(
+        owner_account_id="local",
+        name="后端外援",
+        runtime_id=runtime["id"],
+        model="backend-model",
+        system_prompt="负责后端接口实现、调试和交付",
+    )
+    external_team = external_store.create_team(
+        owner_account_id="local",
+        name="接口团队",
+        leader_agent_id=CREW_BUILTIN_AGENT_ID,
+        members=[
+            {"agent_id": CREW_BUILTIN_AGENT_ID, "role": "Leader"},
+            {"agent_id": worker["id"], "role": "后端开发", "capabilities": ["backend"]},
+        ],
+    )
+    initial_member_ids = {
+        item["agent_id"]
+        for item in external_store.get_team(external_team["id"], owner_account_id="local")["members"]
+    }
+    kanban_store = SQLiteKanbanStore(tmp_path / "kanban.db")
+    tm, _ = _team(kanban_store=kanban_store)
+    tm.external_store = external_store
+    session_id = "runtime-staffing-e2e"
+    team = tm._build_team(
+        session_id,
+        external_team_id=external_team["id"],
+        owner_account_id="local",
+    )
+    tm._teams[tm._key(session_id, "local")] = team
+    original_member = next(
+        spec.member_id
+        for spec in team.members.values()
+        if spec.external_agent_id == worker["id"]
+    )
+    node = TeamPlanNode(
+        node_id="build",
+        title="实现接口",
+        detail="完成后端接口实现",
+        assignee=original_member,
+        status="failed",
+        attempt_count=2,
+        delegate_task_id="attempt-2",
+        last_error="连续验收失败",
+        metadata={"required_capabilities": ["backend"]},
+    )
+    plan = TeamPlan(team_session_id=session_id, goal="实现接口", nodes={node.node_id: node})
+    tm._plans[tm._key(session_id, "local")] = plan
+    tm._persist_team_plan(
+        plan,
+        owner_account_id="local",
+        external_team_id=external_team["id"],
+        workflow_plan={
+            "version": 1,
+            "revision": 1,
+            "nodes": [{
+                "id": node.node_id,
+                "title": node.title,
+                "assignee_id": node.assignee,
+                "required_capabilities": ["backend"],
+            }],
+            "edges": [],
+            "budget_snapshot": {"max_retries": 2},
+        },
+    )
+    trigger = tm._runtime_staffing_trigger(
+        team,
+        node,
+        owner_account_id="local",
+        max_attempts=2,
+    )
+    assert trigger is not None
+    assert trigger["trigger_type"] == "acceptance_exhausted"
+
+    captured_questions = []
+    captured_followup = {}
+
+    async def fake_send(session_id, questions, **kwargs):
+        captured_questions.extend(questions)
+        captured_followup.update(kwargs)
+        return session_id, "staffing-question"
+
+    async def fake_wait(session_id, question_id, **kwargs):
+        return [{"id": captured_questions[0]["id"], "answers": ["candidate:0"]}]
+
+    delegated_members = []
+
+    async def fake_request_delegate(session_id, *, member, **kwargs):
+        delegated_members.append(member)
+        on_child_chunk = kwargs["on_child_chunk"]
+        submission_args = json.dumps({
+            "to": ["leader"],
+            "intent": "submit",
+            "content": "后端接口已实现，成功路径与异常路径均已验证。",
+            "node_id": "build",
+            "result_status": "pass",
+        })
+        on_child_chunk(member, ResponseChunk.tool_event(
+            "staffed-attempt-1",
+            "team_mention",
+            "start",
+            tool_call_id="submit-staffed-attempt-1",
+            args=submission_args,
+        ))
+        on_child_chunk(member, ResponseChunk.tool_event(
+            "staffed-attempt-1",
+            "team_mention",
+            "result",
+            "提交成功",
+            tool_call_id="submit-staffed-attempt-1",
+        ))
+        return {
+            "task_id": "staffed-attempt-1",
+            "output": "结论：后端接口已经实现并通过验收。\n依据：成功路径与异常路径均已验证。\n风险：无阻断。",
+        }
+
+    monkeypatch.setattr("crew.team.team_manager.send_followup_question_to", fake_send)
+    monkeypatch.setattr("crew.team.team_manager.wait_for_answer", fake_wait)
+    monkeypatch.setattr(tm, "request_delegate", fake_request_delegate)
+
+    chunks = [
+        chunk async for chunk in tm._run_required_workflow(
+            Envelope.of("实现接口", session_id=session_id, mode="team", user_id="local"),
+            team=team,
+            external_team_id=external_team["id"],
+            execution_profile={"budget": {"max_retries": 2}},
+        )
+    ]
+
+    rebuilt = tm._teams[tm._key(session_id, "local")]
+    assert chunks[-1].kind == "final"
+    assert any("协作助手已加入本次任务" in str(chunk.body.get("message") or "") for chunk in chunks)
+    assert captured_followup["note"] == "仅用于本次任务，不会加入或修改原团队。"
+    assert captured_followup["origin"]["mention_intent"] == "runtime_staffing"
+    assert captured_followup["origin"]["type"] == "team_control"
+    assert "Runtime 补员" not in captured_questions[0]["question"]
+    assert captured_questions[0]["options"][0]["value"] == "candidate:0"
+    assert captured_questions[0]["options"][-1]["label"] == "这次先不添加"
+    assert delegated_members == [reserve["name"]]
+    assert node.assignee == reserve["name"]
+    assert node.status == "completed"
+    assert node.attempt_count == 1
+    assert node.delegate_task_id == "staffed-attempt-1"
+    assert rebuilt.runtime_members[node.assignee].external_agent_id == reserve["id"]
+    assert node.metadata["runtime_staffing"]["status"] == "applied"
+    assert node.metadata["runtime_assignment_history"][-1]["previous_assignee"] == original_member
+    assert {
+        item["agent_id"]
+        for item in external_store.get_team(external_team["id"], owner_account_id="local")["members"]
+    } == initial_member_ids
+
+    owner_kanban = kanban_store.for_owner("local")
+    workflow = owner_kanban.get_latest_workflow_by_session(session_id)
+    assert workflow is not None
+    assert workflow.context["workflow_plan"]["revision"] == 2
+    assert workflow.context["workflow_plan"]["runtime_members"][0]["external_agent_id"] == reserve["id"]
+    board = owner_kanban.get_board_state(workflow.id)
+    assert board["tasks"][0]["assignee"] == reserve["name"]
+    assert board["tasks"][0]["status"] == "done"
+    _, _, recovered_metadata = tm._node_event_index(board["events"])
+    assert recovered_metadata[node.node_id]["runtime_staffing"]["status"] == "applied"
+    observations = external_store.list_agent_profile_observations(
+        reserve["id"],
+        owner_account_id="local",
+    )
+    assert len(observations) == 1
+    assert observations[0]["source_attempt_id"] == "staffed-attempt-1"
+    assert observations[0]["outcome"] == "success"
+    assert observations[0]["capabilities"] == ["backend"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_staffing_timeout_never_auto_approves(tmp_path, monkeypatch):
+    external_store = ExternalAgentStore(str(tmp_path / "external.db"))
+    runtime = external_store.upsert_runtime({
+        "id": "runtime-ready",
+        "provider": "custom",
+        "name": "Ready Runtime",
+        "executable_path": "/bin/sh",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "backend-model",
+            "models": [{"id": "backend-model", "capabilities": ["backend"]}],
+        },
+    })
+    external_store.create_agent(
+        owner_account_id="local",
+        name="候选外援",
+        runtime_id=runtime["id"],
+        model="backend-model",
+        system_prompt="负责后端实现",
+    )
+    tm, _ = _team()
+    tm.external_store = external_store
+    team = tm._build_team("runtime-staffing-timeout", owner_account_id="local")
+    node = TeamPlanNode(
+        node_id="build",
+        title="实现接口",
+        assignee="不存在的成员",
+        metadata={"required_capabilities": ["backend"]},
+    )
+    plan = TeamPlan(team_session_id="runtime-staffing-timeout", goal="实现接口", nodes={"build": node})
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+    send_calls = 0
+
+    async def fake_send(session_id, questions, **kwargs):
+        nonlocal send_calls
+        send_calls += 1
+        return session_id, "staffing-question"
+
+    async def fake_wait(session_id, question_id, **kwargs):
+        return []
+
+    monkeypatch.setattr("crew.team.team_manager.send_followup_question_to", fake_send)
+    monkeypatch.setattr("crew.team.team_manager.wait_for_answer", fake_wait)
+    trigger = tm._runtime_staffing_trigger(team, node, owner_account_id="local", max_attempts=2)
+    assert trigger is not None
+
+    unchanged, status = await tm._handle_runtime_staffing(
+        Envelope.of("实现接口", session_id=plan.team_session_id, mode="team", user_id="local"),
+        plan,
+        node,
+        team,
+        trigger,
+    )
+
+    assert unchanged is team
+    assert status == "awaiting_confirmation"
+    assert node.status == "needs_info"
+    assert node.assignee == "不存在的成员"
+    assert not team.runtime_members
+    assert node.metadata["runtime_staffing"]["status"] == "awaiting_confirmation"
+
+    _, repeated_status = await tm._handle_runtime_staffing(
+        Envelope.of("实现接口", session_id=plan.team_session_id, mode="team", user_id="local"),
+        plan,
+        node,
+        team,
+        trigger,
+    )
+    assert repeated_status == "awaiting_confirmation"
+    assert send_calls == 1
 
 
 def test_leader_summary_uses_current_summary_contract_without_history_fulltext_compat():

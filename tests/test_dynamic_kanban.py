@@ -71,6 +71,62 @@ def test_create_workflow_and_task(store: SQLiteKanbanStore) -> None:
     assert task.status == "ready"  # 无依赖，自动 promote
 
 
+def test_runtime_staffing_reassignment_is_atomic_with_workflow_revision(
+    store: SQLiteKanbanStore,
+) -> None:
+    workflow, tasks = store.create_workflow_graph(
+        "staffing-session",
+        "实现接口",
+        context={
+            "source": "team",
+            "workflow_plan": {
+                "version": 1,
+                "revision": 1,
+                "nodes": [{"id": "build", "assignee_id": "worker-a"}],
+            },
+        },
+        nodes=[{
+            "id": "build",
+            "title": "实现接口",
+            "detail": "完成后端实现",
+            "assignee": "worker-a",
+            "status": "failed",
+        }],
+        edges=[],
+        event_type="team_plan_created",
+        event_payload={"node_task_ids": {}},
+    )
+    revised = {
+        "version": 1,
+        "revision": 2,
+        "nodes": [{"id": "build", "assignee_id": "runtime-worker"}],
+        "runtime_members": [{"member_id": "runtime-worker"}],
+    }
+    task = tasks["build"]
+
+    updated_workflow, updated_task = store.apply_task_reassignment_revision(
+        workflow.id,
+        task.id,
+        revised,
+        assignee="runtime-worker",
+        reason="runtime_staffing",
+        delta={"reassigned_node": {"node_id": "build"}},
+    )
+
+    assert updated_workflow.context["workflow_plan"] == revised
+    assert updated_workflow.context["current_revision"] == 2
+    assert updated_task.assignee == "runtime-worker"
+    assert updated_task.status == "pending"
+    assert updated_task.retry_count == 0
+    event = next(
+        item
+        for item in store.get_board_state(workflow.id)["events"]
+        if item["event_type"] == "workflow_plan_revised"
+    )
+    assert event["task_id"] == task.id
+    assert event["payload"]["reason"] == "runtime_staffing"
+
+
 def test_same_session_id_isolated_by_owner(db_path: str) -> None:
     root = SQLiteKanbanStore(db_path)
     owner_a = root.for_owner("A:uid-a")

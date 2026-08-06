@@ -42,6 +42,15 @@ TeamPlanNodeStatus = Literal[
     "cancelled",
     "timed_out",
 ]
+RuntimeStaffingStatus = Literal[
+    "detected",
+    "awaiting_confirmation",
+    "approved",
+    "declined",
+    "applying",
+    "applied",
+    "failed",
+]
 
 
 def now_ts() -> float:
@@ -206,6 +215,68 @@ class TeamArtifact:
 class TeamPlanEdge:
     parent_id: str
     child_id: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RuntimeStaffingRequest:
+    """One user-governed, WorkflowRun-scoped request for an extra member."""
+
+    request_id: str
+    trigger_node_id: str
+    trigger_type: str
+    required_capabilities: list[str]
+    reason: str
+    status: RuntimeStaffingStatus = "detected"
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    selected_candidate: dict[str, Any] = field(default_factory=dict)
+    previous_assignee: str = ""
+    previous_delegate_task_id: str = ""
+    previous_attempt_count: int = 0
+    created_at: float = field(default_factory=now_ts)
+    resolved_at: float = 0.0
+    last_error: str = ""
+    version: int = 1
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RuntimeStaffingRequest | None:
+        request_id = str(data.get("request_id") or "").strip()
+        node_id = str(data.get("trigger_node_id") or "").strip()
+        if not request_id or not node_id:
+            return None
+        status = str(data.get("status") or "detected").strip()
+        allowed = {
+            "detected",
+            "awaiting_confirmation",
+            "approved",
+            "declined",
+            "applying",
+            "applied",
+            "failed",
+        }
+        return cls(
+            version=max(1, int(data.get("version") or 1)),
+            request_id=request_id,
+            trigger_node_id=node_id,
+            trigger_type=str(data.get("trigger_type") or "capability_gap"),
+            required_capabilities=[str(item) for item in (data.get("required_capabilities") or []) if str(item)],
+            reason=str(data.get("reason") or ""),
+            status=status if status in allowed else "detected",  # type: ignore[arg-type]
+            candidates=[dict(item) for item in (data.get("candidates") or []) if isinstance(item, dict)],
+            selected_candidate=(
+                dict(data.get("selected_candidate"))
+                if isinstance(data.get("selected_candidate"), dict)
+                else {}
+            ),
+            previous_assignee=str(data.get("previous_assignee") or ""),
+            previous_delegate_task_id=str(data.get("previous_delegate_task_id") or ""),
+            previous_attempt_count=max(0, int(data.get("previous_attempt_count") or 0)),
+            created_at=float(data.get("created_at") or now_ts()),
+            resolved_at=float(data.get("resolved_at") or 0.0),
+            last_error=str(data.get("last_error") or ""),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

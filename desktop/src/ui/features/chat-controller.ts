@@ -75,7 +75,12 @@ import {
   resumeSessionGeneration,
 } from './session-busy';
 import { clearScenarioChip, takeArmedSubScenario } from './scenario-arm';
-import { bindFollowupCard, formatFollowupAnswerMessage, renderFollowupCardElement } from '../followup';
+import {
+  bindFollowupCard,
+  formatFollowupAnswerMessage,
+  isRuntimeStaffingFollowup,
+  renderFollowupCardElement,
+} from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import type { ChatChunk, WikiIngestProgress } from '../backend-client';
 import { makeSessionTitle, mergeTeamInternalMessage } from './history-mapping';
@@ -1199,9 +1204,10 @@ export function renderChat(): void {
     }
   }
   if (pendingFollowup && sessionId) {
-    pushPlan('__followup', `f|${pendingFollowup.questionId}`, () =>
-      renderFollowupCardElement(pendingFollowup),
-    );
+    const followupVersion = isRuntimeStaffingFollowup(pendingFollowup)
+      ? `f|${pendingFollowup.questionId}|${pendingFollowup.status ?? ''}|${pendingFollowup.note ?? ''}`
+      : `f|${pendingFollowup.questionId}`;
+    pushPlan('__followup', followupVersion, () => renderFollowupCardElement(pendingFollowup));
   }
   // __anchor：scroll-anchor 永远是最后一个单元，sig 恒定 → 跨帧复用同一节点
   pushPlan('__anchor', 'anchor', () => getScrollAnchor(target));
@@ -1298,9 +1304,18 @@ export function renderChat(): void {
         const message = pending ? formatFollowupAnswerMessage(pending, answers) : null;
         if (message) appendMessage(sid, 'user', message);
       } else {
-        // Permission is a side-channel decision inside the running tool call.
-        // Preserve assistantId/toolMap so the same turn resumes in place.
-        patchBook(sid, { pendingFollowup: null });
+        // Side-channel decisions preserve the current assistant turn. Runtime
+        // staffing keeps the same card long enough to show its backend-confirmed
+        // applying/applied state; permission prompts retain their old close-now behavior.
+        patchBook(sid, {
+          pendingFollowup: pending && isRuntimeStaffingFollowup(pending)
+            ? {
+                ...pending,
+                status: 'applying',
+                note: '正在邀请协作助手加入……',
+              }
+            : null,
+        });
       }
       resumeSessionGeneration(sid);
       renderChat();
@@ -1928,14 +1943,40 @@ export function applyChunk(chunk: ChatChunk): void {
       openInspectorToTab('plan');
     }
   }
+  let isPresentationOnlyFollowupUpdate = false;
+  if (parsed.kind === 'followup_question') {
+    const followupStatus = typeof parsed.body.status === 'string' ? parsed.body.status : '';
+    isPresentationOnlyFollowupUpdate = Boolean(followupStatus)
+      && isRuntimeStaffingFollowup(bookFor(sid).pendingFollowup);
+    if (['applied', 'declined', 'failed'].includes(followupStatus)) {
+      const followupId = typeof parsed.body.question_id === 'string' ? parsed.body.question_id : '';
+      const delay = followupStatus === 'failed' ? 3200 : 1800;
+      window.setTimeout(() => {
+        const pending = bookFor(sid).pendingFollowup;
+        if (
+          pending?.questionId === followupId
+          && pending.status === followupStatus
+          && isRuntimeStaffingFollowup(pending)
+        ) {
+          patchBook(sid, { pendingFollowup: null });
+          if (sid === state.activeSessionId) renderChat();
+        }
+      }, delay);
+    }
+  }
 
   // 状态 hint / busy：仅由 reducer 的 statusHint 与等待用户交互的 kind 驱动，禁止「收到任意 chunk → busy」。
   if (typeof result.queueHint === 'string') setQueueHintWithUi(sid, result.queueHint);
-  if (USER_WAIT_CHUNK_KINDS.has(parsed.kind)) {
+  if (USER_WAIT_CHUNK_KINDS.has(parsed.kind) && !isPresentationOnlyFollowupUpdate) {
     finalizeStreamingTurn(sid);
     setQueueHintWithUi(sid, '');
   }
-  const busyNext = resolveBusyTransition(parsed.kind, result.statusHint, bookFor(sid).turnSealed);
+  const busyNext = resolveBusyTransition(
+    parsed.kind,
+    result.statusHint,
+    bookFor(sid).turnSealed,
+    isPresentationOnlyFollowupUpdate,
+  );
   if (busyNext !== null) setBusyWithUi(sid, busyNext);
   if (typeof result.statusHint === 'string') setStatusWithUi(sid, result.statusHint);
 
