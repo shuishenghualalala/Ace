@@ -66,6 +66,29 @@ describe('browser panel control recovery', () => {
     expect(control).not.toHaveBeenCalled();
   });
 
+  it('passive auto-open with no tab subscribes without creating a human tab', async () => {
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: pageState() });
+    const control = vi.spyOn(backendApi, 'browserControl');
+    setActiveSessionId('session-auto-open');
+
+    const destination = await openUserBrowser('', false, { createIfEmpty: false });
+
+    expect(destination).toBe('in_app');
+    expect(control).not.toHaveBeenCalled();
+  });
+
+  it('explicit empty open still creates a blank user tab when no page exists', async () => {
+    const opened = pageState({ tab_id: 'user-tab', tab_label: 'session-user-tab', mode: 'human' });
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: pageState() });
+    const control = vi.spyOn(backendApi, 'browserControl').mockResolvedValue({ ok: true, state: opened });
+    setActiveSessionId('session-manual-open');
+
+    const destination = await openUserBrowser();
+
+    expect(destination).toBe('in_app');
+    expect(control).toHaveBeenCalledWith('session-manual-open', 'open', '');
+  });
+
   it('discards a stale browser response after the active session changes', async () => {
     let resolveState!: (value: { ok: boolean; state: BrowserPageState }) => void;
     vi.spyOn(backendApi, 'browserState').mockReturnValue(new Promise((resolve) => {
@@ -279,7 +302,7 @@ describe('browser panel control recovery', () => {
     ]);
   });
 
-  it('turns a native page click into a trusted takeover request', async () => {
+  it('asks before taking over on a native page input instead of switching silently', async () => {
     const interactionEvents: Array<(event: {
       tabLabel: string;
       source: 'pointer' | 'keyboard';
@@ -318,8 +341,120 @@ describe('browser panel control recovery', () => {
     await vi.waitFor(() => expect(document.querySelector('[data-browser-tab="ai-tab"]')).not.toBeNull());
     interactionEvents[0]({ tabLabel: 'session-ai-tab', source: 'pointer' });
 
+    // 首个输入只弹确认条，不直接接管。
+    const banner = document.querySelector<HTMLElement>('[data-browser-takeover]');
+    expect(banner?.hidden).toBe(false);
+    expect(control).not.toHaveBeenCalled();
+
+    // 点「接管」才发起 takeover。
+    document.querySelector<HTMLButtonElement>('[data-browser-takeover-action="confirm"]')?.click();
     await vi.waitFor(() => {
       expect(control).toHaveBeenCalledWith('session-native-click', 'takeover');
+    });
+    await vi.waitFor(() => expect(banner?.hidden).toBe(true));
+  });
+
+  it('dismisses the takeover prompt on 忽略 without requesting a takeover', async () => {
+    const interactionEvents: Array<(event: {
+      tabLabel: string;
+      source: 'pointer' | 'keyboard';
+    }) => void> = [];
+    const ai = pageState({
+      tab_id: 'ai-tab',
+      tab_label: 'session-ai-tab',
+      url: 'https://example.com/',
+      mode: 'ai',
+      running: true,
+      tabs: [{ id: 'ai-tab', label: 'session-ai-tab', url: 'https://example.com/', title: 'Example' }],
+    });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        browserViewHide: vi.fn().mockResolvedValue({ ok: true }),
+        onBrowserWsEvent: vi.fn(() => () => undefined),
+        onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
+        onBrowserViewInteractionRequested: vi.fn((callback) => {
+          interactionEvents.push(callback);
+          return () => undefined;
+        }),
+      },
+    });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: ai });
+    const control = vi.spyOn(backendApi, 'browserControl');
+    setActiveSessionId('session-native-dismiss');
+    document.body.innerHTML = renderBrowserPanel();
+
+    bindBrowserPanel();
+    await vi.waitFor(() => expect(interactionEvents).toHaveLength(1));
+    await vi.waitFor(() => expect(document.querySelector('[data-browser-tab="ai-tab"]')).not.toBeNull());
+    interactionEvents[0]({ tabLabel: 'session-ai-tab', source: 'keyboard' });
+
+    const banner = document.querySelector<HTMLElement>('[data-browser-takeover]');
+    expect(banner?.hidden).toBe(false);
+    document.querySelector<HTMLButtonElement>('[data-browser-takeover-action="dismiss"]')?.click();
+    expect(banner?.hidden).toBe(true);
+    expect(control).not.toHaveBeenCalled();
+  });
+
+  it('shows a load-failure overlay with a retry that reloads the page', async () => {
+    const loadFailedEvents: Array<(event: {
+      tabLabel: string;
+      url: string;
+      errorDescription: string;
+    }) => void> = [];
+    const ai = pageState({
+      tab_id: 'ai-tab',
+      tab_label: 'session-ai-tab',
+      url: 'https://example.com/',
+      mode: 'ai',
+      running: true,
+      tabs: [{ id: 'ai-tab', label: 'session-ai-tab', url: 'https://example.com/', title: 'Example' }],
+    });
+    const human = pageState({ ...ai, mode: 'human' });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        browserViewHide: vi.fn().mockResolvedValue({ ok: true }),
+        onBrowserWsEvent: vi.fn(() => () => undefined),
+        onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
+        onBrowserViewLoadFailed: vi.fn((callback) => {
+          loadFailedEvents.push(callback);
+          return () => undefined;
+        }),
+      },
+    });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: ai });
+    const control = vi.spyOn(backendApi, 'browserControl').mockResolvedValue({ ok: true, state: human });
+    setActiveSessionId('session-load-failed');
+    document.body.innerHTML = renderBrowserPanel();
+
+    bindBrowserPanel();
+    await vi.waitFor(() => expect(loadFailedEvents).toHaveLength(1));
+    await vi.waitFor(() => expect(document.querySelector('[data-browser-tab="ai-tab"]')).not.toBeNull());
+    loadFailedEvents[0]({
+      tabLabel: 'session-ai-tab',
+      url: 'https://example.com/',
+      errorDescription: 'ERR_CONNECTION_REFUSED',
+    });
+
+    const overlay = document.querySelector<HTMLElement>('[data-browser-load-error]');
+    await vi.waitFor(() => expect(overlay?.hidden).toBe(false));
+    expect(overlay?.textContent).toContain('页面加载失败');
+    expect(overlay?.textContent).toContain('https://example.com/');
+    expect(overlay?.textContent).toContain('ERR_CONNECTION_REFUSED');
+
+    // 点「重试」：先接管再重新加载，遮罩让位。
+    document.querySelector<HTMLButtonElement>('[data-browser-load-retry]')?.click();
+    expect(overlay?.hidden).toBe(true);
+    await vi.waitFor(() => {
+      expect(control).toHaveBeenCalledWith('session-load-failed', 'takeover');
+      expect(control).toHaveBeenCalledWith('session-load-failed', 'reload', '');
     });
   });
 

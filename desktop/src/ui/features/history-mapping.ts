@@ -15,6 +15,10 @@ import { isPlanDocumentPath } from '../plan-document-path';
 import { newMessageId, state } from '../state';
 import { sessionDisplayModelLabel, sessionMessageModelLabel } from './session-model';
 
+export function makeSessionTitle(text: string): string {
+  return text.trim().slice(0, 18) || '新对话';
+}
+
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg']);
 const BINARY_RESULT_EXTENSIONS = new Set([
   'ppt', 'pptx', 'doc', 'docx', 'xls', 'xlsx', 'pdf',

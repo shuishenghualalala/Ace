@@ -50,8 +50,10 @@ export type TabKey =
   | 'agents'
   | 'skills'
   | 'wiki'
+  | 'sites'
   | 'cron'
   | 'security'
+  | 'audit'
   | 'system';
 export type SystemPanelKey = 'overview' | 'logs' | 'usage';
 export type ComposerMode = 'craft' | 'plan' | 'ask';

@@ -154,6 +154,26 @@ export function createBrowserInspector(
   recordingControls.dataset.browserRecControls = '';
   toolbar.append(navigation, address, note, recordingStatus, recordingControls);
 
+  const takeover = document.createElement('div');
+  takeover.className = 'browser-takeover';
+  takeover.dataset.browserTakeover = '';
+  takeover.setAttribute('role', 'alert');
+  takeover.hidden = true;
+  const takeoverText = document.createElement('span');
+  takeoverText.className = 'browser-takeover__text';
+  takeoverText.textContent = '检测到页面操作，是否接管浏览器？';
+  const takeoverConfirm = document.createElement('button');
+  takeoverConfirm.type = 'button';
+  takeoverConfirm.className = 'browser-takeover__btn browser-takeover__btn--primary';
+  takeoverConfirm.dataset.browserTakeoverAction = 'confirm';
+  takeoverConfirm.textContent = '接管';
+  const takeoverDismiss = document.createElement('button');
+  takeoverDismiss.type = 'button';
+  takeoverDismiss.className = 'browser-takeover__btn';
+  takeoverDismiss.dataset.browserTakeoverAction = 'dismiss';
+  takeoverDismiss.textContent = '忽略';
+  takeover.append(takeoverText, takeoverConfirm, takeoverDismiss);
+
   const stage = document.createElement('div');
   stage.className = `browser-stage${value.mode === 'human' ? ' is-interactive' : ''}`;
   stage.dataset.browserStage = '';
@@ -177,7 +197,23 @@ export function createBrowserInspector(
   status.dataset.browserStatus = '';
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
-  stage.append(empty, status);
-  root.append(tabBar, toolbar, stage);
+  const loadError = document.createElement('div');
+  loadError.className = 'browser-load-error';
+  loadError.dataset.browserLoadError = '';
+  loadError.hidden = true;
+  const loadErrorTitle = document.createElement('strong');
+  loadErrorTitle.textContent = '页面加载失败';
+  const loadErrorUrl = document.createElement('span');
+  loadErrorUrl.dataset.browserLoadErrorUrl = '';
+  const loadErrorDesc = document.createElement('span');
+  loadErrorDesc.dataset.browserLoadErrorDescription = '';
+  const loadErrorRetry = document.createElement('button');
+  loadErrorRetry.type = 'button';
+  loadErrorRetry.className = 'browser-load-error__retry';
+  loadErrorRetry.dataset.browserLoadRetry = '';
+  loadErrorRetry.textContent = '重试';
+  loadError.append(loadErrorTitle, loadErrorUrl, loadErrorDesc, loadErrorRetry);
+  stage.append(empty, loadError, status);
+  root.append(tabBar, toolbar, takeover, stage);
   return root;
 }

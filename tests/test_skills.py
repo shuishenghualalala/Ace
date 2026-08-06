@@ -1050,10 +1050,27 @@ def test_builtin_skills_are_generic_only():
     }
     assert skill_mds == {
         "agent-guide/SKILL.md",
+        "automation/SKILL.md",
+        "binding/SKILL.md",
+        "blueprint/SKILL.md",
+        "canvas/SKILL.md",
+        "content-research-writer/SKILL.md",
         "crew-wiki-curator/SKILL.md",
         "cua-driver/SKILL.md",
+        "docx/SKILL.md",
+        "find-skill-skillhub/SKILL.md",
         "image-understanding/SKILL.md",
+        "md-to-pdf/SKILL.md",
+        "pdf/SKILL.md",
+        "process-doc/SKILL.md",
+        "scientific-problem-selection/SKILL.md",
+        "seaborn-visualization/SKILL.md",
+        "skill-creator/SKILL.md",
         "video-understanding/SKILL.md",
+        "webapp-building/SKILL.md",
+        "widget/SKILL.md",
+        "widgetdesign/SKILL.md",
+        "xlsx/SKILL.md",
     }
     for relative_path in skill_mds:
         content = (builtin_dir / relative_path).read_text(encoding="utf-8")

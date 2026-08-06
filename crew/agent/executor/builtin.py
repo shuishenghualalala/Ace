@@ -23,8 +23,11 @@ from crew.agent.executor.base import AgentExecutor, ExecutionContext
 from crew.agent.loop import (
     CONTINUATION_PROMPT,
     EMPTY_RETRY_NUDGE,
+    ESCALATED_MAX_OUTPUT_TOKENS,
     STREAM_INTERRUPT_PROMPT,
     STREAM_INTERRUPT_STATUS_MESSAGE,
+    TOOL_ARGUMENTS_RECOVERY_LIMIT,
+    TOOL_ARGUMENTS_RECOVERY_PROMPT,
     IterationBudget,
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
@@ -306,6 +309,9 @@ class BuiltinExecutor(AgentExecutor):
         )
         empty_retries = 0
         continuation_count = 0
+        tool_args_recovery_count = 0
+        max_output_tokens_override: int | None = None
+        max_output_tokens_escalated = False
         stream_continuation_count = 0
         streamed_text = ""  # 流式中断续写累计文本
         overflow_mode = False  # 命中上下文溢出后，发给 LLM 的视图持续走 force_compact
@@ -416,7 +422,17 @@ class BuiltinExecutor(AgentExecutor):
 
             # ---- 调模型（流式重试 + 溢出压缩 + provider 故障转移 + 流式中途中断）----
             result: dict[str, Any] = {}
-            async for ev in self._call_model(api_messages, tools, rid, next_seq, result, control, runner, ctx.session_id):
+            async for ev in self._call_model(
+                api_messages,
+                tools,
+                rid,
+                next_seq,
+                result,
+                control,
+                runner,
+                ctx.session_id,
+                max_tokens=max_output_tokens_override,
+            ):
                 yield ev
             # 估算 prompt 固定开销（系统/技能·上下文/工具定义），并入 usage 透传到前端 breakdown
             result.setdefault("usage", {})["prompt_breakdown"] = _estimate_prompt_overhead(ctx, view, tools)
@@ -485,6 +501,40 @@ class BuiltinExecutor(AgentExecutor):
                     ctx.session_id,
                     len(tool_calls),
                 )
+                configured_max_tokens = getattr(self.provider, "max_tokens", None)
+                if (
+                    not max_output_tokens_escalated
+                    and (
+                        not isinstance(configured_max_tokens, int)
+                        or configured_max_tokens < ESCALATED_MAX_OUTPUT_TOKENS
+                    )
+                ):
+                    max_output_tokens_escalated = True
+                    max_output_tokens_override = ESCALATED_MAX_OUTPUT_TOKENS
+                    budget.refund()
+                    log.info(
+                        "工具参数被截断，提高输出上限至 %d 后重试 session=%s",
+                        ESCALATED_MAX_OUTPUT_TOKENS,
+                        ctx.session_id,
+                    )
+                    continue
+                max_output_tokens_override = None
+                if tool_args_recovery_count < TOOL_ARGUMENTS_RECOVERY_LIMIT:
+                    tool_args_recovery_count += 1
+                    budget.refund()
+                    recovery_message = Message.user(
+                        TOOL_ARGUMENTS_RECOVERY_PROMPT,
+                        is_meta=True,
+                    )
+                    ctx.messages.append(recovery_message)
+                    view_messages.append(recovery_message)
+                    log.info(
+                        "工具参数截断，第 %d/%d 次拆分续写 session=%s",
+                        tool_args_recovery_count,
+                        TOOL_ARGUMENTS_RECOVERY_LIMIT,
+                        ctx.session_id,
+                    )
+                    continue
                 yield ResponseChunk.error(
                     rid,
                     "TOOL_ARGUMENTS_INCOMPLETE: 模型输出的工具参数不完整，未执行任何工具。",
@@ -663,6 +713,7 @@ class BuiltinExecutor(AgentExecutor):
         control=None,
         runner=None,
         session_id: str = "",
+        max_tokens: int | None = None,
     ) -> AsyncIterator[ResponseChunk]:
         """调模型一轮：流式 yield delta，结果写入 result。
 
@@ -706,6 +757,8 @@ class BuiltinExecutor(AgentExecutor):
                 _prov_base_url = getattr(provider, "base_url", "") or ""
 
                 request = {"messages": api_messages, "tools": tools}
+                if max_tokens is not None:
+                    request["max_tokens"] = max_tokens
                 mw = await self.plugins.apply_llm_request_middleware(
                     request,
                     session_id=session_id,
@@ -718,10 +771,27 @@ class BuiltinExecutor(AgentExecutor):
                 effective_request = mw.payload if isinstance(mw.payload, dict) else request
                 effective_tools = effective_request.get("tools", tools)
 
-                def _stream(req):
+                def _stream(req, active_provider=provider):
                     messages_arg = req["messages"] if "messages" in req else api_messages
                     tools_arg = req["tools"] if "tools" in req else tools
-                    return provider.stream_chat(messages_arg, tools=tools_arg)
+                    max_tokens_arg = req.get("max_tokens", max_tokens)
+                    if max_tokens_arg is None:
+                        return active_provider.stream_chat(messages_arg, tools=tools_arg)
+                    try:
+                        stream_params = inspect.signature(active_provider.stream_chat).parameters
+                        accepts_max_tokens = "max_tokens" in stream_params or any(
+                            param.kind == inspect.Parameter.VAR_KEYWORD
+                            for param in stream_params.values()
+                        )
+                    except (TypeError, ValueError):
+                        accepts_max_tokens = True
+                    if accepts_max_tokens:
+                        return active_provider.stream_chat(
+                            messages_arg,
+                            tools=tools_arg,
+                            max_tokens=max_tokens_arg,
+                        )
+                    return active_provider.stream_chat(messages_arg, tools=tools_arg)
 
                 stream = await self.plugins.run_llm_execution_middleware(
                     effective_request,

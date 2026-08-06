@@ -6,7 +6,7 @@ import { backendApi } from '../backend-client';
 import { showContextMenu } from '../lib/context-menu';
 import { exportSessionToJson } from '../lib/session-export';
 import { notify, removeSessionState, setActiveSessionId, state } from '../state';
-import { showConfirmDialog } from '../ui-feedback';
+import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
 import type { RefreshSessionsFn } from './workspaces';
 import { renderChat } from './chat-controller';
 
@@ -73,7 +73,8 @@ export async function renameSession(
   currentTitle: string,
   refresh: RefreshSessionsFn,
 ): Promise<void> {
-  const next = window.prompt('新标题', currentTitle);
+  // Electron 不支持 window.prompt（调用无反应），用应用内输入弹窗替代。
+  const next = await showPromptDialog({ title: '重命名会话', defaultValue: currentTitle });
   if (!next?.trim()) return;
   try {
     await backendApi.renameSession(sessionId, next.trim());

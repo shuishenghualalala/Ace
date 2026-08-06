@@ -42,11 +42,10 @@ const api = {
     ipcRenderer.invoke('shell:writeTextFile', { path: p, content }) as Promise<{ ok: true }>,
   writeFileBase64: (p: string, base64: string) =>
     ipcRenderer.invoke('shell:writeFileBase64', { path: p, base64 }) as Promise<{ ok: true }>,
-  listOpenApplications: (p: string) =>
-    ipcRenderer.invoke('shell:listOpenApplications', { path: p }) as Promise<Array<{
-      id: string;
-      name: string;
-    }>>,
+  /** 用系统默认程序打开 Wiki 来源的原始文件（路径由主进程向 gateway 查询并校验）。 */
+  openWikiSourceFile: (sourceId: string, kbId?: string) =>
+    ipcRenderer.invoke('wiki:openSourceFile', { sourceId, kbId }) as Promise<{ ok: true }>,
+  listOpenApplications: (p: string) => ipcRenderer.invoke('shell:listOpenApplications', { path: p }) as Promise<Array<{ id: string; name: string }>>,
   openPathWith: (p: string, applicationId: string) =>
     ipcRenderer.invoke('shell:openPathWith', { path: p, applicationId }) as Promise<{ ok: true }>,
   /** 由主进程按已鉴权 Workspace 记录探测 root；Renderer 不提供路径。 */
@@ -60,6 +59,19 @@ const api = {
   revealImage: (p: string) => ipcRenderer.invoke('image:showItemInFolder', { path: p }) as Promise<{ ok: true }>,
   selectFile: (opts?: Record<string, unknown>) => ipcRenderer.invoke('dialog:selectFile', opts || {}),
   selectFolder: () => ipcRenderer.invoke('dialog:selectFolder', {}),
+  saveLocalExport: (sourcePath: string, suggestedName: string) =>
+    ipcRenderer.invoke('dialog:saveLocalExport', { sourcePath, suggestedName }) as Promise<{ ok: boolean; canceled: boolean; path?: string }>,
+  openInspirationWindow: (inspirationId: string, title: string) =>
+    ipcRenderer.invoke('inspiration:open-window', { inspirationId, title }) as Promise<{ ok: boolean; open: boolean }>,
+  closeInspirationWindow: (inspirationId: string) =>
+    ipcRenderer.invoke('inspiration:close-window', { inspirationId }) as Promise<{ ok: boolean; open: boolean }>,
+  inspirationWindowState: (inspirationId: string) =>
+    ipcRenderer.invoke('inspiration:window-state', { inspirationId }) as Promise<{ ok: boolean; open: boolean }>,
+  onInspirationWindowStateChanged: (cb: (state: { inspirationId: string; open: boolean }) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, state: { inspirationId: string; open: boolean }) => cb(state);
+    ipcRenderer.on('inspiration:window-state-changed', listener);
+    return () => ipcRenderer.removeListener('inspiration:window-state-changed', listener);
+  },
   getAutoLaunchEnabled: () => ipcRenderer.invoke('app:get-auto-launch-enabled'),
   setAutoLaunchEnabled: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-launch-enabled', enabled),
   getCloseBehavior: () => ipcRenderer.invoke('app:get-close-behavior'),
@@ -209,6 +221,30 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, value: { tabLabel: string }) => cb(value);
     ipcRenderer.on('browser-view:navigation-changed', listener);
     return () => ipcRenderer.removeListener('browser-view:navigation-changed', listener);
+  },
+  onBrowserViewInteractionRequested: (cb: (event: {
+    tabLabel: string;
+    source: 'pointer' | 'keyboard';
+  }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: {
+      tabLabel: string;
+      source: 'pointer' | 'keyboard';
+    }) => cb(value);
+    ipcRenderer.on('browser-view:interaction-requested', listener);
+    return () => ipcRenderer.removeListener('browser-view:interaction-requested', listener);
+  },
+  onBrowserViewLoadFailed: (cb: (event: {
+    tabLabel: string;
+    url: string;
+    errorDescription: string;
+  }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: {
+      tabLabel: string;
+      url: string;
+      errorDescription: string;
+    }) => cb(value);
+    ipcRenderer.on('browser-view:load-failed', listener);
+    return () => ipcRenderer.removeListener('browser-view:load-failed', listener);
   },
   onBrowserViewLayoutInvalidated: (cb: () => void) => {
     const listener = () => cb();

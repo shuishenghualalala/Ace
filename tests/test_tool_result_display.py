@@ -81,3 +81,31 @@ def test_subagent_result_paired_in_history_replay():
   # 非 subagent 工具不配对（保持历史载荷精简的既有语义）
   other = ToolCall(id="tc-2", name="file_read", arguments={})
   assert _tool_result_for_history(other, {"tc-2": "x" * 5000}) == ""
+
+
+def test_inspiration_surface_survives_live_detail_and_history_replay():
+  import json
+
+  from crew.core.types import ToolCall
+  from crew.gateway.routers.sessions import _tool_result_for_history
+
+  surface = {
+      "kind": "inspiration", "mode": "widget", "sessionId": "session-1",
+      "widgetId": "widget_123456789abc", "title": "行情", "status": "preparing",
+  }
+  payload = json.dumps({"ok": True, "data": {"large": "x" * 3000}, "surface": surface})
+  detail = tool_result_detail_for_ui("Widget", payload)
+  assert json.loads(detail) == {"ok": True, "surface": surface}
+  tc = ToolCall(id="show-1", name="Widget", arguments={"action": "show", "widgetId": surface["widgetId"]})
+  assert json.loads(_tool_result_for_history(tc, {"show-1": payload})) == {"ok": True, "surface": surface}
+
+  site_surface = {
+      "kind": "inspiration", "mode": "site", "sessionId": "session-1",
+      "inspirationId": "site_123456789abc", "siteId": "site_123456789abc",
+      "title": "应用", "status": "ready",
+  }
+  site_payload = json.dumps({"ok": True, "site_id": site_surface["siteId"], "surface": site_surface})
+  site_call = ToolCall(id="publish-1", name="publish_site", arguments={"name": "应用"})
+  assert json.loads(_tool_result_for_history(site_call, {"publish-1": site_payload})) == {
+      "ok": True, "surface": site_surface,
+  }

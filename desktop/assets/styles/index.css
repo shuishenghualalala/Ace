@@ -37,6 +37,7 @@
 @import './web-messages.css' layer(features);
 @import './agents-page.css' layer(features);
 @import './cron-page.css' layer(features);
+@import './sites-page.css' layer(features);
 @import './wiki-page.css' layer(features);
 @import './usage-stats.css' layer(features);
 @import './settings.css' layer(features);

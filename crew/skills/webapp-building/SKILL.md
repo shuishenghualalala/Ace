@@ -1,8 +1,17 @@
 ---
 name: webapp-building
-description: Tools for building modern React webapps with TypeScript, Tailwind CSS and shadcn/ui on the local machine. Best suited for applications with complex UI components and state management. If the user mentions building a website, webpage, or app, you MUST read and follow this skill's guidance to deploy a local React project rather than a plain HTML file. Supports optional templates for specialized requirements. Local edition.
+description: Tools for building modern React webapps with TypeScript, Tailwind CSS
+  and shadcn/ui on the local machine. Best suited for applications with complex UI
+  components and state management. If the user mentions building a website, webpage,
+  or app, you MUST read and follow this skill's guidance to deploy a local React project
+  rather than a plain HTML file. Supports optional templates for specialized requirements.
+  Local edition.
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: Web 应用构建
+  zh_description: 使用 TypeScript、Tailwind CSS 和 shadcn/ui 在本地构建现代 React Web 应用，适合复杂 UI 组件和状态管理场景。
+  query_examples: 构建 React 网站, 创建网页应用, 搭建前端项目
 ---
-
 # WebApp Building — local edition
 
 **Stack**: React + TypeScript + Vite + Tailwind CSS + shadcn/ui

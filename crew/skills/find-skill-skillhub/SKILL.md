@@ -1,8 +1,14 @@
 ---
 name: find-skill-skillhub
-description: "在 SkillHub 平台查找/搜索 Skill 技能。基于 skills 列表接口，支持关键词分词搜索、一级标签（一级分类）筛选、以及二者组合检索。当用户说『找个 xxx 技能』『有没有处理 PDF 的 skill』『SkillHub 上搜一下 xxx』『按分类看技能』『办公效率类有哪些技能』『推荐一个做数据分析的 skill』『这个需求有现成技能吗』等需要在 SkillHub 上发现/检索/推荐 Skill 的场景时使用本技能。"
+description: 在 SkillHub 平台查找/搜索 Skill 技能。基于 skills 列表接口，支持关键词分词搜索、一级标签（一级分类）筛选、以及二者组合检索。当用户说『找个
+  xxx 技能』『有没有处理 PDF 的 skill』『SkillHub 上搜一下 xxx』『按分类看技能』『办公效率类有哪些技能』『推荐一个做数据分析的 skill』『这个需求有现成技能吗』等需要在
+  SkillHub 上发现/检索/推荐 Skill 的场景时使用本技能。
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: SkillHub 技能搜索
+  zh_description: 在 SkillHub 平台查找/搜索 Skill 技能，支持关键词分词搜索、一级分类筛选及组合检索。
+  query_examples: 找个处理 PDF 的技能, SkillHub 上搜一下, 按分类看技能
 ---
-
 # 在 SkillHub 查找 Skill
 
 通过公开接口 `GET https://api.skillhub.cn/api/skills` 查找平台 Skill（无需鉴权，关键词为**分词搜索**，**不要**用 `/api/v1/search`）。

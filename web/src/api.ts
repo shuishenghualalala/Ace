@@ -408,10 +408,14 @@ export const api = {
   scenarioIntroLines: (count = 8) => getJSON<CrewIntroLine[]>(`/api/scenarios/intro-lines?count=${count}`),
   scenarioLoadingStatuses: (count = 8) => getJSON<CrewLoadingStatus[]>(`/api/scenarios/loading-status?count=${count}`),
   // Wiki
-  wikiAgentSession: (kbId?: string) =>
+  wikiAgentSession: (kbId?: string, opts?: { forceNew?: boolean }) =>
     getJSON<{ ok: boolean; session_id: string; kb_id: string }>(
-      withKb("/api/wiki/agent-session", kbId),
+      `${withKb("/api/wiki/agent-session", kbId)}${opts?.forceNew ? `${kbId ? "&" : "?"}force_new=true` : ""}`,
       { method: "POST" },
+    ),
+  wikiAgentSessions: (kbId?: string) =>
+    getJSON<{ ok: boolean; kb_id: string; sessions: Session[] }>(
+      withKb("/api/wiki/agent-sessions", kbId),
     ),
   wikiKBs: () => getJSON<{ ok: boolean; kbs: WikiKB[] }>("/api/wiki/kbs"),
   wikiCreateKB: (payload: { kb_id: string; name?: string }) =>

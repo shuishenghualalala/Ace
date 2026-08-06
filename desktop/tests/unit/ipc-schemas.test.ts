@@ -16,9 +16,11 @@ import {
   ShellOpenExternalArgs,
   ShellOpenPathArgs,
   ShellOpenPathWithArgs,
+  WikiOpenSourceFileArgs,
   FeedbackSubmitArgs,
   FeedbackListArgs,
   DialogSelectFileArgs,
+  InspirationWindowArgs,
   UpdateStartDownloadArgs,
 } from '../../src/shared/ipc-schemas';
 import { MAX_DIALOG_FILE_BYTES } from '../../src/shared/constants';
@@ -143,6 +145,27 @@ describe('ShellOpenPathWithArgs', () => {
   });
 });
 
+describe('WikiOpenSourceFileArgs', () => {
+  it('accepts a source id with optional kb id', () => {
+    const withKb = WikiOpenSourceFileArgs.parse({ sourceId: 'upload_e1167aa49635', kbId: 'default' });
+    expect(withKb.ok).toBe(true);
+    const withoutKb = WikiOpenSourceFileArgs.parse({ sourceId: 'upload_e1167aa49635' });
+    expect(withoutKb.ok).toBe(true);
+  });
+
+  it('rejects missing/invalid source ids', () => {
+    expect(WikiOpenSourceFileArgs.parse({}).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: '' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: '../etc/passwd' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'a b' }).ok).toBe(false);
+  });
+
+  it('rejects kb ids with path separators', () => {
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'upload_abc', kbId: '../x' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'upload_abc', kbId: 'a/b' }).ok).toBe(false);
+  });
+});
+
 describe('UpdateStartDownloadArgs', () => {
   it('accepts version + force/reminder type', () => {
     expect(UpdateStartDownloadArgs.parse({ version: '0.23.59', type: 'force' }).ok).toBe(true);
@@ -228,6 +251,20 @@ describe('DialogSelectFileArgs', () => {
 
   it('rejects non-array filters', () => {
     expect(DialogSelectFileArgs.parse({ filters: 'png' as unknown as never }).ok).toBe(false);
+  });
+});
+
+describe('InspirationWindowArgs', () => {
+  it('accepts only canonical site and canvas ids', () => {
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab' }).ok).toBe(true);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'canvas_abcdef123456', title: '行情' }).ok).toBe(true);
+  });
+
+  it('rejects arbitrary URLs, widget ids, path fragments, and oversized titles', () => {
+    expect(InspirationWindowArgs.parse({ inspirationId: 'https://example.com' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'widget_0123456789ab' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab/../../x' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab', title: 'x'.repeat(201) }).ok).toBe(false);
   });
 });
 

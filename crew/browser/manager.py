@@ -9399,6 +9399,7 @@ class BrowserManager:
     ) -> str:
         async with owner.lock:
             session = self._session(owner, session_id)
+            previous_mode = session.mode
             if not trusted_user:
                 self._require_model_control(owner, session)
             elif action in {"takeover", "return", "pause"}:
@@ -9457,6 +9458,16 @@ class BrowserManager:
                 owner.owner,
                 session.session_id,
                 {"type": "state", "state": self._page_state(owner, session).public_dict()},
+            )
+            # 接管来源排查口：白屏误触与真实手势都会走到这里，日志里必须能
+            # 区分是谁（trusted_user=用户 UI / 否则为模型）把模式切走的。
+            log.info(
+                "browser control mode changed: session=%s %s -> %s (action=%s, trusted_user=%s)",
+                session_id,
+                previous_mode,
+                session.mode,
+                action,
+                trusted_user,
             )
             return _bounded(
                 {

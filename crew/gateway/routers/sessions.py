@@ -55,6 +55,14 @@ def _tool_result_for_history(tool_call: ToolCall, paired_results: dict[str, str]
         return tool_result_detail_for_ui(
             tool_call.name, paired_results.get(tool_call.id, "")
         )
+    if tool_call.name in {"Widget", "Canvas"} and tool_call.arguments.get("action") == "show":
+        return tool_result_detail_for_ui(
+            tool_call.name, paired_results.get(tool_call.id, "")
+        )
+    if tool_call.name == "publish_site":
+        return tool_result_detail_for_ui(
+            tool_call.name, paired_results.get(tool_call.id, "")
+        )
     return ""
 
 

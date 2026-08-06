@@ -207,6 +207,31 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, wikiKbId]);
 
+  // 新建 Wiki 对话（force_new，与桌面端「新建对话」一致）：旧会话保留在历史列表。
+  const newWikiSession = useCallback(async () => {
+    const { session_id } = await api.wikiAgentSession(wikiKbId, { forceNew: true });
+    setWikiAgentSession({ kbId: wikiKbId, sessionId: session_id });
+    chat.loadHistory(session_id);
+  }, [wikiKbId, chat]);
+
+  // 切换到历史 Wiki 对话。
+  const selectWikiSession = useCallback((sessionId: string) => {
+    if (!sessionId || sessionId === wikiAgentSessionId) return;
+    setWikiAgentSession({ kbId: wikiKbId, sessionId });
+    chat.loadHistory(sessionId);
+  }, [wikiKbId, wikiAgentSessionId, chat]);
+
+  // 删除 Wiki 对话；删的是当前会话则复用后端「取最近、无则新建」语义切到下一条。
+  const deleteWikiSession = useCallback(async (sessionId: string) => {
+    await api.deleteSession(sessionId);
+    chat.clearSession(sessionId);
+    if (wikiAgentSessionId === sessionId) {
+      const { session_id } = await api.wikiAgentSession(wikiKbId);
+      setWikiAgentSession({ kbId: wikiKbId, sessionId: session_id });
+      chat.loadHistory(session_id);
+    }
+  }, [wikiKbId, wikiAgentSessionId, chat]);
+
   useEffect(() => {
     window.localStorage.setItem("crew:board-width", String(boardWidth));
   }, [boardWidth]);
@@ -622,6 +647,9 @@ export default function App() {
             onKbChange={setWikiKbId}
             sessionId={wikiAgentSessionId || ""}
             wikiProgress={chat.wikiProgress}
+            onNewSession={newWikiSession}
+            onSelectSession={selectWikiSession}
+            onDeleteSession={deleteWikiSession}
           />
         ) : (
           <>

@@ -1,8 +1,15 @@
 ---
 name: widget
-description: Use when creating, showing, updating, validating, deleting, rendering, or troubleshooting Daimon Blueprint Widgets, their responsive index.html UI, data slots, submit events, input state, files, and workspace resources. You MUST read widgetdesign skill before creating any widget.
+description: Use when creating, showing, updating, validating, deleting, rendering,
+  or troubleshooting Daimon Blueprint Widgets, their responsive index.html UI, data
+  slots, submit events, input state, files, and workspace resources. You MUST read
+  widgetdesign skill before creating any widget.
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: Widget 组件管理
+  zh_description: 创建、显示、更新、验证、删除、渲染或排障 Daimon Blueprint Widget 及其响应式 index.html UI、数据槽、提交事件、输入状态、文件和工作空间资源。
+  query_examples: 创建 widget, 管理蓝图组件, 调试 widget 界面
 ---
-
 # Widget
 
 Widget owns one responsive `index.html`, display data, input state, events, files, and workspace resources. Every surface renders `data.metadata.roots.workspaceRoot/index.html`.
@@ -23,10 +30,10 @@ Create the Widget definition first:
 
 Then:
 
-1. Write a complete HTML document to `data.metadata.roots.workspaceRoot/index.html`.
-2. Call `Widget.validate`.
-3. For conversation or dock display, call `Widget.show`.
-4. For Canvas display, call `Canvas.placeWidget` with the returned `widgetId`.
+1. For a conversation creation flow, call `Widget.show` immediately so the host can display the generating placeholder.
+2. Write a complete HTML document to `data.metadata.roots.workspaceRoot/index.html`.
+3. Call `Widget.validate`; a successful validation advances `resourceRevision` and refreshes the mounted preview.
+4. For Canvas display, call `Canvas.placeWidget` with the returned `widgetId`; call `Canvas.show` when the whole Canvas should remain visible beside the conversation.
 
 `creationHints` accepts 1-6 short progress lines. The host displays them while the page is being authored. Static Widgets need no slots, events, Binding, or Automation.
 

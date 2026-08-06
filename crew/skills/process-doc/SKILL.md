@@ -1,10 +1,17 @@
 ---
 name: process-doc
-description: Document a business process — flowcharts, RACI, and SOPs. Use when formalizing a process that lives in someone's head, building a RACI to clarify who owns what, writing an SOP for a handoff or audit, or capturing the exceptions and edge cases of how work actually gets done.
-argument-hint: "<process name or description>"
+description: Document a business process — flowcharts, RACI, and SOPs. Use when formalizing
+  a process that lives in someone's head, building a RACI to clarify who owns what,
+  writing an SOP for a handoff or audit, or capturing the exceptions and edge cases
+  of how work actually gets done.
+argument-hint: <process name or description>
 license: Apache-2.0
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: 业务流程文档
+  zh_description: 记录业务流程——流程图、RACI 和 SOP。适用于将流程正式化、构建 RACI 明确职责、编写 SOP 用于交接或审计，以及记录实际工作中的异常和边界情况。
+  query_examples: 记录业务流程, 创建流程图, 编写 SOP
 ---
-
 <!-- Changes: added license field to frontmatter, removed broken ../../CONNECTORS.md reference, removed ~~knowledge base and ~~project tracker OpenClaw placeholder section. Original source: https://github.com/anthropics/knowledge-work-plugins/tree/main/operations/skills/process-doc (Apache-2.0) -->
 
 # /process-doc

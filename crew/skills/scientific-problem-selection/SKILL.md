@@ -1,8 +1,18 @@
 ---
 name: scientific-problem-selection
-description: This skill should be used when scientists need help with research problem selection, project ideation, troubleshooting stuck projects, or strategic scientific decisions. Use this skill when users ask to pitch a new research idea, work through a project problem, evaluate project risks, plan research strategy, navigate decision trees, or get help choosing what scientific problem to work on. Typical requests include "I have an idea for a project", "I'm stuck on my research", "help me evaluate this project", "what should I work on", or "I need strategic advice about my research".
+description: This skill should be used when scientists need help with research problem
+  selection, project ideation, troubleshooting stuck projects, or strategic scientific
+  decisions. Use this skill when users ask to pitch a new research idea, work through
+  a project problem, evaluate project risks, plan research strategy, navigate decision
+  trees, or get help choosing what scientific problem to work on. Typical requests
+  include "I have an idea for a project", "I'm stuck on my research", "help me evaluate
+  this project", "what should I work on", or "I need strategic advice about my research".
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: 科学问题选择
+  zh_description: 帮助科学家进行科研问题选择、项目构思、卡壳项目排障和战略性科学决策。适用于提出新研究想法、评估项目风险、规划研究策略等场景。
+  query_examples: 我有一个研究想法, 科研项目卡住了, 帮我评估这个项目
 ---
-
 # Scientific Problem Selection Skills
 
 A conversational framework for systematic scientific problem selection based on Fischbach & Walsh's "Problem choice and decision trees in science and engineering" (Cell, 2024).

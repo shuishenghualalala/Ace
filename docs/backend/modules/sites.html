@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ace 灵感统一 App 库技术说明</title>
+  <style>
+    body{margin:0;background:#f7f8fb;color:#1f2937;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.7}.wrap{max-width:1060px;margin:32px auto;padding:36px;border:1px solid #e5e7eb;border-radius:14px;background:#fff}h1,h2,h3{color:#111827}h2{margin-top:34px;padding-bottom:7px;border-bottom:1px solid #e5e7eb}code{padding:2px 5px;border-radius:4px;background:#eef2ff}pre{overflow:auto;padding:16px;border-radius:8px;background:#111827;color:#f9fafb}pre code{padding:0;background:none}table{width:100%;border-collapse:collapse}th,td{padding:9px;border:1px solid #e5e7eb;text-align:left;vertical-align:top}th{background:#f9fafb}.note,.warning{margin:14px 0;padding:12px 14px;border-left:4px solid}.note{border-color:#5b7cff;background:#f0f5ff}.warning{border-color:#e3a008;background:#fff8e6}.flow{font-weight:600;word-spacing:5px}a{color:#315efb}
+  </style>
+</head>
+<body><main class="wrap">
+  <h1>Ace「灵感」统一 App 库</h1>
+  <p>“灵感”是用户可创建、使用和继续设计的本地 App 集合。内部继续复用 <code>sites</code> 模块，并保留 <code>site</code> 与 <code>canvas</code> 两种运行时实现；图库、详情、对话和操作层不向用户暴露这一区别。</p>
+  <p class="note"><strong>实现范围：</strong>统一图库、真实内容预览、原对话修改、ZIP 分享、固定到桌面、受控删除、对话 Surface 和元素批注。源码与原对话始终保留；不包含导入、在线公开分享、跨设备同步或重启恢复悬浮窗。</p>
+
+  <h2>1. 用户模型与主流程</h2>
+  <ol>
+    <li>侧栏一级入口显示“灵感”，首页直接加载当前账号所有已部署 App，不要求先选择 Workspace。</li>
+    <li>首页按更新时间倒序显示响应式卡片；卡片使用懒加载、不可交互的缩放 iframe 展示真实内容，并支持名称和描述搜索。</li>
+    <li>点击卡片进入完整可交互 App。详情统一提供“修改、分享、固定到桌面、删除”。</li>
+    <li>“修改”进入资源记录的原始 <code>sessionId</code>；“分享”保存离线 ZIP；“固定到桌面”打开无系统标题栏、可拖动缩放且始终置顶的便利贴；“删除”仅清理运行产物和不再共享的派生资产。</li>
+    <li>新建入口创建 <code>inspiration_creation=true</code> 的 builtin Session，标题和输入提示统一为“灵感 / 描述你想创建的 App”。旧 <code>site_creation</code> 会话继续识别为“灵感”。</li>
+    <li>Agent 生成或发布内容时返回标准 <code>surface</code>，聊天历史中显示可恢复的生成物卡片。点击后在右侧 Inspector 进入“使用”或“批注”模式。</li>
+  </ol>
+  <p class="flow">新建灵感 → 对话设计 → Surface 预览/批注 → 部署到图库 → 使用/分享/固定/继续修改</p>
+
+  <h2>2. 统一资源契约</h2>
+  <table>
+    <thead><tr><th>类型</th><th>关键字段</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>InspirationItem</code></td><td><code>id</code>、<code>kind</code>、<code>title</code>、<code>description</code>、<code>workspaceId</code>、<code>sessionId</code>、<code>createdAt</code>、<code>updatedAt</code></td><td>图库列表项。<code>kind</code> 仅供内部协议和生命周期分发，不渲染类型标签。</td></tr>
+      <tr><td><code>InspirationDetail</code></td><td>列表字段、内部 site/canvas 数据、widgets、annotations</td><td>详情与运行时操作所需的完整资源。</td></tr>
+      <tr><td><code>InspirationAnnotation</code></td><td><code>targetKind</code>、Canvas/Widget/mount、route、selector、elementText、comment、status</td><td>统一保存 App、Widget 与 DOM 元素批注。</td></tr>
+      <tr><td><code>InspirationSurface</code></td><td><code>kind=inspiration</code>、<code>mode</code>、资源 ID、<code>sessionId</code>、title、status、revision</td><td>工具结果、流式展示和历史回放共用的稳定协议。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 模块结构</h2>
+  <table>
+    <thead><tr><th>文件</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>crew/sites/manager.py</code></td><td>统一列表/详情/删除/导出分发；网站 Release；Canvas 完整 HTML 与离线包。</td></tr>
+      <tr><td><code>crew/sites/store.py</code></td><td>网站数据与统一批注表；初始化时把旧 <code>site_annotations</code> 无损迁移到 <code>inspiration_annotations</code>。</td></tr>
+      <tr><td><code>crew/sites/blueprint.py</code></td><td>Canvas、Widget、Binding、Automation、Run 数据及 Widget Runtime。</td></tr>
+      <tr><td><code>crew/gateway/routers/sites.py</code></td><td><code>/api/sites/inspirations</code> 统一 API、旧接口兼容、Canvas/Widget 渲染。</td></tr>
+      <tr><td><code>crew/tools/site_tools.py</code><br><code>crew/tools/blueprint_tools.py</code></td><td><code>publish_site</code>、<code>Canvas.show</code>、<code>Widget.show</code> 返回标准 Surface。</td></tr>
+      <tr><td><code>desktop/src/ui/features/sites-page.ts</code></td><td>灵感图库、详情、搜索、统一操作、网站 Surface 和批注草稿。</td></tr>
+      <tr><td><code>desktop/src/ui/features/blueprint-surface.ts</code></td><td>Canvas/Widget Surface、revision 刷新、嵌套 iframe 选区与批注合成。</td></tr>
+      <tr><td><code>desktop/src/main/site-preview-protocol.ts</code></td><td><code>ace-site://</code> 的 site/canvas/widget 认证转发和 ID/路径校验。</td></tr>
+      <tr><td><code>desktop/src/main/index.ts</code><br><code>desktop/src/main/preload.ts</code><br><code>desktop/src/main/inspiration-sticky-preload.ts</code></td><td>受控便利贴悬浮层、最小权限控制条与 ZIP 保存 IPC。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. HTTP 接口</h2>
+  <table>
+    <thead><tr><th>方法与路径</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /api/sites/inspirations</code></td><td>列出当前 owner 的网站与 Canvas，按 <code>updatedAt</code> 倒序。</td></tr>
+      <tr><td><code>GET /api/sites/inspirations/{id}</code></td><td>读取统一详情和批注。</td></tr>
+      <tr><td><code>DELETE /api/sites/inspirations/{id}</code></td><td>按内部生命周期安全清理运行资源。</td></tr>
+      <tr><td><code>POST /api/sites/inspirations/{id}/export</code></td><td>生成网站 Release ZIP 或 Canvas 离线 ZIP。</td></tr>
+      <tr><td><code>POST /api/sites/inspirations/{id}/annotations</code></td><td>创建统一批注。</td></tr>
+      <tr><td><code>PATCH /api/sites/inspirations/{id}/annotations/{annotation_id}</code></td><td>更新批注状态。</td></tr>
+      <tr><td><code>GET /api/sites/canvases/{canvas_id}/render</code></td><td>渲染包含 Widget iframe 的完整 Canvas App。</td></tr>
+    </tbody>
+  </table>
+  <p>旧网站、Canvas、Widget、Automation 接口继续保留，使已有客户端、数据和工具调用不失效。</p>
+
+  <h2>5. 预览与 Surface</h2>
+  <p><code>ace-site://{resource_id}/</code> 只接受规范的 <code>site_*</code>、<code>canvas_*</code> 或 <code>widget_*</code> ID。主进程把请求映射到当前认证 Gateway；站点资源路径由后端再次执行 release 根目录边界校验。Canvas 入口将 12 列布局渲染为完整 App，每个 Widget 继续在独立 iframe 内运行。</p>
+  <p><code>publish_site</code>、<code>Canvas.show</code> 与 <code>Widget.show</code> 都返回 <code>kind=inspiration</code> 的 Surface。聊天渲染器从持久化工具结果中提取最小 Surface 元数据，因此刷新、历史回放和重新进入 Session 后仍可显示生成物卡片。网站 Surface 使用完整 App iframe；Canvas/Widget Surface 依据 <code>resourceRevision</code> 验证并刷新。</p>
+
+  <h2>6. 批注链路</h2>
+  <p>网站预览桥返回 route、CSS selector、元素标签、截断文本和上下文。Widget Runtime 还返回 Canvas、Widget 与 mount 标识；嵌套 Canvas iframe 把事件转发到 Desktop。统一批注表使用 <code>targetKind</code> 区分 <code>site_dom</code>、<code>canvas</code>、<code>widget</code> 和 <code>widget_dom</code>。</p>
+  <p>批注按原 Session 聚合为 Composer 草稿。发送内容包含源码路径、内部资源标识、页面路由、selector、当前文本、revision 与修改要求。网站修改后等待用户明确重新部署；Widget 修改后调用 <code>Widget.validate</code> 并刷新 Surface。该差异由 Agent 工作流处理，不要求用户选择类型。</p>
+  <p>旧 <code>site_annotations</code> 会在 Store 初始化时使用相同 ID 迁移；网站旧草稿 localStorage key 也会转存到 <code>ace.inspirationAnnotationDrafts.v1</code>，避免升级后丢失未发送批注。</p>
+
+  <h2>7. 分享与删除</h2>
+  <h3>7.1 网站</h3>
+  <p>分享包沿用 active release，包含构建后的静态文件，不包含源码、日志、批注和绝对路径。删除时移除数据库运行记录、release、export 和统一批注；Workspace 源码与原 Session 保留。</p>
+  <h3>7.2 Canvas</h3>
+  <p>离线 ZIP 包含 <code>index.html</code>、无敏感元数据的 manifest、Widget 静态文件、布局和最近成功数据快照。Runtime 保留客户端交互，但不包含实时刷新入口、Automation URL、运行日志、批注、认证信息、本地绝对路径或 source map。</p>
+  <p>删除 Canvas 时先移除 placement，再清理不再被任何 Canvas 使用的 Widget；随之删除没有其他 Binding 的 Automation、Binding 和 Run，并停止对应调度。共享 Widget、仍有绑定的 Automation、工作区源码和原 Session 均保留。</p>
+
+  <h2>8. Electron 安全边界</h2>
+  <ul>
+    <li>悬浮窗 IPC 只接受规范的 <code>site_*</code>/<code>canvas_*</code> ID，不能传 URL；同一资源最多一个窗口。</li>
+    <li>便利贴在 macOS 使用透明圆角，在 Windows/Linux 使用兼容性更稳定的实色无边框窗口；三端均支持拖动、缩放、置顶和应用内取消固定。</li>
+    <li>小窗启用 <code>contextIsolation</code>、sandbox、<code>webSecurity</code>，禁用 Node、webview、新窗口和资源外导航。</li>
+    <li>固定状态仅存于主进程内存；关闭、取消固定、删除或应用退出会销毁窗口。</li>
+    <li>ZIP 保存只接受当前 owner 的 <code>sites/{site|canvas}_*/exports/*.zip</code> canonical regular file，再由系统保存对话框确定目标。</li>
+    <li>所有 API 查询和写入继续以 <code>owner_account_id</code> 隔离。</li>
+  </ul>
+
+  <h2>9. 测试与验收</h2>
+  <ul>
+    <li>后端覆盖：混合列表排序和 owner 隔离、旧批注迁移、统一批注上下文、Canvas 离线包敏感信息排除、共享资产删除。</li>
+    <li>Desktop 覆盖：单一图库、搜索、真实预览、四个操作、原对话跳转、历史 Surface、批注聚合。</li>
+    <li>Electron 覆盖：Canvas 协议、非法资源 ID、悬浮窗安全配置和受控 ZIP 保存。</li>
+    <li>交付检查：Pytest、Vitest、TypeScript、ESLint、安全扫描、CSS lint 与重复选择器审计。</li>
+  </ul>
+  <p class="warning">当前完整 Desktop <code>check</code> 还会先验证仓库的 Playwright 依赖是否使用精确 semver；该依赖基线问题与灵感模块逻辑测试相互独立。</p>
+
+  <p><a href="index.html">返回后端模块索引</a></p>
+</main></body>
+</html>

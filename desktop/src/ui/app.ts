@@ -9,6 +9,9 @@
  */
 
 import { bindChannelConfigModal, bindModelConfigModal, openChannelConfigModal, renderConfigModels, renderPlatforms, toggleChannelConnection } from './features/config-panes';
+import { backendApi } from './backend-client';
+import { bindSitesTab, renderSitesPage, syncSiteAnnotationEntry, syncSiteComposerMarker } from './features/sites-page';
+import { bindBlueprintSurface } from './features/blueprint-surface';
 import { bindModelPicker } from './features/model-picker';
 import { bindComposerToolbar, syncCraftLabel } from './features/composer-toolbar';
 import { bindComposerContextRing } from './features/composer-context-ring';
@@ -41,8 +44,8 @@ import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview
 import { initUsagePage } from './features/usage-panel';
 import { activateCronPage, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
 import {
-  activateWikiPage,
-  bindWikiPageLifecycle,
+  bindWikiTab,
+  refreshWikiData,
   setWikiAgentEntryHandler,
   setWikiAgentKbDeletedHandler,
 } from './features/wiki-page';
@@ -180,7 +183,11 @@ function activateTab(tab: TabKey): boolean {
   if (tab === 'agents') activateAgentsPage();
   else if (tab === 'skills') activateSkillsPage();
   else if (tab === 'security') activateSecurityPage();
-  else if (tab === 'wiki') activateWikiPage();
+  else if (tab === 'wiki') void refreshWikiData();
+  else if (tab === 'sites') {
+    syncSiteAnnotationEntry();
+    void renderSitesPage();
+  }
   else if (tab === 'cron') activateCronPage();
   return true;
 }
@@ -468,7 +475,24 @@ function bindGlobalEvents(): () => void {
   const disposeSkillsLifecycle = bindSkillsPageLifecycle(() => {
     activateTab('chat');
   });
-  const disposeWikiLifecycle = bindWikiPageLifecycle();
+  bindWikiTab(() => activateTab('wiki'));
+  bindSitesTab({
+    openInspirationAgent: async (item) => {
+      if (!item.sessionId) throw new Error('这个灵感没有绑定创建对话');
+      await openSession(item.sessionId);
+      setTab('chat');
+    },
+    createInspirationSession: async () => {
+      const workspaceId = state.currentWorkspaceId || 'default';
+      const sessionId = createSessionInWorkspace(workspaceId, openSession);
+      assignSessionAgentDisplay(sessionId, { name: '灵感', provider: 'sites', display_badge: '◇' });
+      await backendApi.ensureSession(sessionId, { workspace_id: workspaceId, title: '新灵感' });
+      await backendApi.setSessionAgentConfig(sessionId, { executor: 'builtin', inspiration_creation: true });
+      await refreshSessions();
+    },
+  });
+  bindBlueprintSurface();
+  syncSiteComposerMarker();
   const disposeWorkspaceUi = bindWorkspaceUi(refreshSessions, openSession);
   setWorkspacesUiCallbacks({ setTab, renderChat });
   const historyHost = $('#session-history-root');
@@ -512,7 +536,6 @@ function bindGlobalEvents(): () => void {
     disposeWorkspaceUi();
     disposeSystem();
     disposeSkillsLifecycle();
-    disposeWikiLifecycle();
     disposeHistoryToggle();
     disposeSystemTab();
     disposeSecurityApproval();

@@ -5,8 +5,7 @@ let disposeRenderer: (() => void) | null = null;
 
 function startRenderer(): void {
   if (disposeRenderer) return;
-  disposeRenderer = mountRenderer(document.body, createRendererAdapter());
-}
+  disposeRenderer = mountRenderer(document.body, createRendererAdapter());}
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', startRenderer, { once: true });

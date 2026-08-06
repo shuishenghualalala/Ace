@@ -4,8 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval' 'sha256-4DukWC3nrFdrPJtXPd1sjz5dn4iC7aot9O8fRoReuBQ='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: crew-file:; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self' file:; base-uri 'none'; form-action 'none'">
-  <title>Crew</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval' 'sha256-KOd1fEcG2rHoWpv/CS3jUa7om4aCS8rgf4jFycpjkxg='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: crew-file:; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self' file: ace-site:; base-uri 'none'; form-action 'none'">  <title>Crew</title>
   <!--
     FOUC guard (Task 6.1.2 / D4.1.1): runs synchronously BEFORE the
     stylesheet, so the first painted frame already has the right theme
@@ -61,6 +60,17 @@
           </div>
         </div>
         <div class="top-bar-browser-actions">
+          <div class="site-annotation-entry" id="site-annotation-entry" hidden>
+            <button type="button" class="site-annotation-entry__button" id="site-annotation-button"
+              title="批注灵感" aria-label="批注灵感" aria-haspopup="menu" aria-expanded="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4.5A2.5 2.5 0 0 1 4 13.5z"/>
+                <path d="M9 9h6"/>
+              </svg>
+              <span>批注</span>
+            </button>
+            <div class="site-annotation-entry__menu" id="site-annotation-menu" role="menu" hidden></div>
+          </div>
           <button type="button" class="browser-workbench-toggle" id="browser-workbench-toggle"
             title="打开浏览器 (Ctrl/⌘+Shift+B)" aria-label="打开浏览器" aria-expanded="false" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -74,7 +84,6 @@
 
       <!-- 右侧 Inspector：独立于 #chat-tab，与顶栏同列贯穿整高 -->
       <aside class="chat-inspector" id="chat-inspector" aria-label="会话检查器"></aside>
-
       <section id="chat-tab" class="tab-pane active chat-mode">
         <section id="welcome-panel"></section>
 
@@ -92,6 +101,18 @@
         </div>
 
         <div id="chat-composer-root"></div>
+        <div id="chat-site-annotation-preview" class="chat-site-annotation-preview" hidden></div>
+        <div id="chat-blueprint-annotation-preview" class="chat-site-annotation-preview" hidden></div>
+        <div id="chat-sites-mode" class="chat-sites-mode" hidden>
+          <span class="chat-sites-mode__logo" data-sites-logo aria-hidden="true">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2.5" y="3" width="15" height="14" rx="2.25" />
+              <path d="M2.5 7h15M6 11h5M6 14h8" />
+            </svg>
+          </span>
+          <strong>灵感</strong>
+          <span>设计一个 App</span>
+        </div>
         <div id="composer-context-staging" hidden>
           <div data-composer-context-source="approval">
             <div id="composer-approval-panel" class="composer-approval-panel" aria-hidden="true" role="dialog" aria-label="需要你的批准">
@@ -104,8 +125,7 @@
                 <button class="btn btn-danger" type="button" data-security-decision="reject">拒绝</button>
                 <button class="btn btn-primary" type="button" data-security-decision="once">仅这一次</button>
                 <button class="btn btn-ghost" type="button" data-security-decision="session">本次对话</button>
-                <button class="btn btn-ghost" type="button" data-security-decision="always">始终允许</button>
-              </div>
+                <button class="btn btn-ghost" type="button" data-security-decision="always">始终允许</button>              </div>
             </div>
           </div>
         </div>
@@ -127,6 +147,14 @@
 
       <section id="wiki-tab" class="tab-pane">
         <div id="wiki-page-root"></div>
+      </section>
+
+      <section id="sites-tab" class="tab-pane">
+        <div id="sites-page-root"></div>
+      </section>
+
+      <section id="sites-tab" class="tab-pane">
+        <div id="sites-page-root" class="sites-page-root"></div>
       </section>
 
       <section id="cron-tab" class="tab-pane">

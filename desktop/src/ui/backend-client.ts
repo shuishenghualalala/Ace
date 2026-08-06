@@ -442,6 +442,110 @@ export interface Workspace {
   updated_at?: number;
 }
 
+export interface LocalSite {
+  id: string;
+  workspace_id: string;
+  session_id: string;
+  name: string;
+  description: string;
+  source_path: string;
+  build_command: string;
+  output_directory: string;
+  active_release_id: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SiteAnnotation {
+  id: string;
+  site_id: string;
+  release_id: string;
+  route: string;
+  selector: string;
+  element_tag: string;
+  element_text: string;
+  comment: string;
+  context: Record<string, unknown>;
+  status: 'open' | 'resolved' | 'rejected';
+  created_at: number;
+  updated_at: number;
+}
+
+export interface InspirationItem {
+  id: string;
+  kind: 'site' | 'canvas';
+  title: string;
+  description: string;
+  workspaceId: string;
+  sessionId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InspirationAnnotation {
+  id: string;
+  inspirationId: string;
+  inspirationKind: 'site' | 'canvas' | 'widget';
+  targetKind: 'site_dom' | 'canvas' | 'widget' | 'widget_dom';
+  canvasId: string;
+  widgetId: string;
+  mountId: string;
+  revisionId: string;
+  route: string;
+  selector: string;
+  elementTag: string;
+  elementText: string;
+  comment: string;
+  context: Record<string, unknown>;
+  status: 'open' | 'resolved' | 'rejected';
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InspirationDetail extends InspirationItem {
+  site?: LocalSite;
+  canvas?: BlueprintCanvas;
+  widgets?: Record<string, BlueprintWidget>;
+  annotations: InspirationAnnotation[];
+}
+
+export interface InspirationSurface {
+  kind: 'inspiration';
+  mode: 'site' | 'canvas' | 'widget';
+  inspirationId?: string;
+  siteId?: string;
+  canvasId?: string;
+  widgetId?: string;
+  sessionId: string;
+  title: string;
+  status?: 'preparing' | 'ready';
+  revisionId?: string;
+  resourceRevision?: number;
+}
+
+export interface BlueprintLayout {
+  mode: 'grid' | 'free'; x: number; y: number; w: number; h: number;
+}
+
+export interface CanvasPlacement {
+  mountId: string; canvasId: string; widgetId: string; layout: BlueprintLayout;
+  zOrder: number; viewState: Record<string, unknown>; createdAt: number; updatedAt: number;
+}
+
+export interface BlueprintCanvas {
+  id: string; workspaceId: string; sessionId: string; title: string; purpose: string;
+  widgetCount?: number; placements?: CanvasPlacement[]; createdAt: number; updatedAt: number;
+}
+
+export interface BlueprintWidget {
+  id: string; workspaceId: string; title: string; description: string; workspacePath: string;
+  slots: Record<string, unknown>; events: Record<string, unknown>;
+  latestData: Record<string, unknown>; status: string; error: string; lastRun: string;
+  bindings: { main?: string }; createdAt: number; updatedAt: number;
+  resourceRevision: number;
+  validation?: { status: 'valid' | 'invalid'; issues: Array<{ code: string; message: string }>; entry: string };
+}
+
 export interface Attachment {
   id: string;
   name: string;
@@ -1420,6 +1524,72 @@ export interface WikiSummary {
 }
 
 export const backendApi = {
+  inspirations: () => getJSON<{ ok: boolean; inspirations: InspirationItem[] }>(
+    '/api/sites/inspirations',
+  ),
+  inspiration: (inspirationId: string) => getJSON<{ ok: boolean; inspiration: InspirationDetail }>(
+    `/api/sites/inspirations/${encodeURIComponent(inspirationId)}`,
+  ),
+  deleteInspiration: (inspirationId: string) => getJSON<{ ok: boolean }>(
+    `/api/sites/inspirations/${encodeURIComponent(inspirationId)}`, { method: 'DELETE' },
+  ),
+  exportInspiration: (inspirationId: string) => getJSON<{
+    ok: boolean; archive_path: string; filename: string;
+  }>(`/api/sites/inspirations/${encodeURIComponent(inspirationId)}/export`, {
+    method: 'POST', ...jsonBody({}),
+  }),
+  createInspirationAnnotation: (inspirationId: string, payload: Record<string, unknown>) =>
+    getJSON<{ ok: boolean; annotation: InspirationAnnotation }>(
+      `/api/sites/inspirations/${encodeURIComponent(inspirationId)}/annotations`,
+      { method: 'POST', ...jsonBody(payload) },
+    ),
+  updateInspirationAnnotation: (
+    inspirationId: string, annotationId: string, status: InspirationAnnotation['status'],
+  ) => getJSON<{ ok: boolean; annotation: InspirationAnnotation }>(
+    `/api/sites/inspirations/${encodeURIComponent(inspirationId)}/annotations/${encodeURIComponent(annotationId)}`,
+    { method: 'PATCH', ...jsonBody({ status }) },
+  ),
+  canvases: () => getJSON<{ ok: boolean; canvases: BlueprintCanvas[] }>('/api/sites/canvases'),
+  canvas: (canvasId: string) => getJSON<{
+    ok: boolean; canvas: BlueprintCanvas; widgets: Record<string, BlueprintWidget>;
+  }>(`/api/sites/canvases/${encodeURIComponent(canvasId)}`),
+  updateCanvasPlacement: (canvasId: string, mountId: string, payload: Record<string, unknown>) =>
+    getJSON<{ ok: boolean; placement: CanvasPlacement }>(
+      `/api/sites/canvases/${encodeURIComponent(canvasId)}/placements/${encodeURIComponent(mountId)}`,
+      { method: 'PATCH', ...jsonBody(payload) },
+    ),
+  widget: (widgetId: string) => getJSON<{ ok: boolean; widget: BlueprintWidget }>(
+    `/api/sites/widgets/${encodeURIComponent(widgetId)}`,
+  ),
+  emitWidget: (widgetId: string, value: unknown = null) => getJSON<{
+    ok: boolean; run: Record<string, unknown>; widget: BlueprintWidget;
+  }>(`/api/sites/widgets/${encodeURIComponent(widgetId)}/emit`, {
+    method: 'POST', ...jsonBody({ name: 'submit', value }),
+  }),
+  sites: (workspaceId?: string) => getJSON<{ ok: boolean; sites: LocalSite[] }>(
+    `/api/sites${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`,
+  ),
+  site: (siteId: string) => getJSON<{
+    ok: boolean; site: LocalSite; releases: Array<Record<string, unknown>>; annotations: SiteAnnotation[];
+  }>(`/api/sites/${encodeURIComponent(siteId)}`),
+  publishSite: (siteId: string) => getJSON<{ ok: boolean; site: LocalSite }>(
+    `/api/sites/${encodeURIComponent(siteId)}/publish`, { method: 'POST', ...jsonBody({}) },
+  ),
+  deleteSite: (siteId: string) => getJSON<{ ok: boolean }>(
+    `/api/sites/${encodeURIComponent(siteId)}`, { method: 'DELETE' },
+  ),
+  createSiteAnnotation: (siteId: string, payload: Record<string, unknown>) =>
+    getJSON<{ ok: boolean; annotation: SiteAnnotation }>(
+      `/api/sites/${encodeURIComponent(siteId)}/annotations`, { method: 'POST', ...jsonBody(payload) },
+    ),
+  updateSiteAnnotation: (siteId: string, annotationId: string, status: SiteAnnotation['status']) =>
+    getJSON<{ ok: boolean; annotation: SiteAnnotation }>(
+      `/api/sites/${encodeURIComponent(siteId)}/annotations/${encodeURIComponent(annotationId)}`,
+      { method: 'PATCH', ...jsonBody({ status }) },
+    ),
+  exportSite: (siteId: string) => getJSON<{ ok: boolean; archive_path: string; filename: string }>(
+    `/api/sites/${encodeURIComponent(siteId)}/export`, { method: 'POST', ...jsonBody({}) },
+  ),
   config: () => getJSON<BackendConfig>('/api/config'),
   switchModel: (modelId: string) =>
     getJSON<BackendConfig>('/api/config/model', { method: 'POST', ...jsonBody({ model_id: modelId }) }),

@@ -1,9 +1,16 @@
 ---
 name: content-research-writer
-description: Assists in writing high-quality content by conducting research, adding citations, improving hooks, iterating on outlines, and providing real-time feedback on each section. Transforms your writing process from solo effort to collaborative partnership.
+description: Assists in writing high-quality content by conducting research, adding
+  citations, improving hooks, iterating on outlines, and providing real-time feedback
+  on each section. Transforms your writing process from solo effort to collaborative
+  partnership.
 license: Apache-2.0
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: 内容研究与写作
+  zh_description: 协助撰写高质量内容，进行研究、添加引用、优化开头、迭代大纲并提供实时反馈，将写作过程转变为协作式合作。
+  query_examples: 帮我写文章, 内容研究, 论文写作辅助
 ---
-
 <!-- Changes: added license field to frontmatter, replaced ~/writing/ example paths with relative paths. Original source: https://github.com/ComposioHQ/awesome-claude-skills/tree/master/content-research-writer (Apache-2.0) -->
 
 # Content Research Writer

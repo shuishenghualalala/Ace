@@ -1320,6 +1320,14 @@ class CrewApp:
 
         prepare_inbound_channel_envelope(self, envelope)
 
+        command = str(envelope.params.get("channel_session_command") or "")
+        if command:
+            yield ResponseChunk.final(
+                envelope.request_id,
+                "已新建对话，接下来的消息将从空白上下文开始。",
+            )
+            return
+
         token = None
         if self._push_payload_fn is not None:
             async def _push_for_owner(session_id: str, payload: dict) -> None:
@@ -1455,6 +1463,11 @@ class CrewApp:
                 log.exception("MCP Client 启动失败")
         if start_cron:
             await self.start_cron()
+        if getattr(self, "sites", None) is not None:
+            try:
+                await self.sites.start()
+            except Exception:  # noqa: BLE001
+                log.exception("Sites Blueprint 调度器启动失败")
         # 启动会话过期定时器
         if self.config.session_idle_timeout > 0:
             self._expiry_task = asyncio.create_task(self._session_expiry_loop())
@@ -1629,6 +1642,8 @@ class CrewApp:
                 await self.work_service.stop()
             except Exception:  # noqa: BLE001
                 log.exception("WorkService 停止失败")
+        if getattr(self, "sites", None) is not None:
+            await self.sites.stop()
         # One-shot Subagents own dynamic providers and must finish their finally blocks
         # before AgentManager/global Provider shutdown.
         subagent_tasks = {task for task in self._subagent_bg_tasks if not task.done()}
@@ -2514,12 +2529,22 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         workspace_store=workspace_store,
         security_service=app.security_service,
     )
+    from crew.sites import SQLiteSiteStore, SiteManager
+    from crew.tools.blueprint_tools import register_blueprint_tools
+    from crew.tools.site_tools import register_site_tools
+
+    app.sites = SiteManager(SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal))
+    register_site_tools(registry, app.sites)
+    register_blueprint_tools(registry, app.sites)
     # Browser 能力由 plugins/browser 插件装配（创建 BrowserManager、注册 browser_use）。
     # 系统级禁用/未加载时保持 None，面板路由与 startup/aclose 已有 None 兜底。
     app.browser_manager = _browser_manager_from_plugins(plugins)
     app.channel_bindings = channel_bindings
     app.plugin_prefs = plugin_prefs
     app.external_agents = external_agents
+    from crew.gateway.channel_sessions import register_channel_session_tools
+
+    register_channel_session_tools(registry, session_store)
     register_external_agent_tools(
         registry,
         external_agents,

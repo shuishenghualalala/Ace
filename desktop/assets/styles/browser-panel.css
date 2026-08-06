@@ -335,6 +335,58 @@ body.browser-workbench-maximized #chat-inspector {
   color: var(--mw-action-primary-text);
 }
 
+.browser-takeover {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--mw-border-subtle);
+  background: var(--mw-bg-surface);
+  font-size: 12px;
+}
+.browser-takeover[hidden] { display: none; }
+.browser-takeover__text { flex: 1; min-width: 0; color: var(--mw-text-secondary); }
+.browser-takeover__btn {
+  height: 25px;
+  padding: 0 12px;
+  flex: none;
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.browser-takeover__btn:hover { color: var(--mw-text-primary); background: var(--mw-bg-selected); }
+.browser-takeover__btn--primary {
+  background: var(--mw-action-primary);
+  border-color: var(--mw-action-primary);
+  color: var(--mw-action-primary-text);
+}
+.browser-takeover__btn--primary:hover {
+  background: var(--mw-action-primary-hover);
+  border-color: var(--mw-action-primary-hover);
+  color: var(--mw-action-primary-text);
+}
+.browser-load-error { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 24px; background: var(--mw-bg-surface); color: var(--mw-text-secondary); font-size: 12px; text-align: center; }
+.browser-load-error[hidden] { display: none; }
+.browser-load-error strong { color: var(--mw-text-primary); font-size: 15px; font-weight: 600; line-height: 1.35; }
+.browser-load-error span { max-width: 100%; overflow-wrap: anywhere; color: var(--mw-text-muted); }
+.browser-load-error__retry {
+  height: 25px;
+  margin-top: 3px;
+  padding: 0 12px;
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.browser-load-error__retry:hover { color: var(--mw-text-primary); background: var(--mw-bg-selected); }
+
 @keyframes browser-recording-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }

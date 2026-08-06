@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import type { WikiIngestProgress, WikiKB, WikiPage, WikiRelationPage, WikiSourceFiles, WikiSourceTitles, WikiVaultDocument, WikiViewMode } from "../types";
+import type { Session, WikiIngestProgress, WikiKB, WikiPage, WikiRelationPage, WikiSourceFiles, WikiSourceTitles, WikiVaultDocument, WikiViewMode } from "../types";
 import WikiPageView from "./WikiPageView";
 import WikiFileTree from "./WikiFileTree";
 import WikiTimelineView from "./WikiTimelineView";
@@ -8,6 +8,7 @@ import WikiTypeView from "./WikiTypeView";
 import WikiGraphView from "./WikiGraphView";
 import ChatPanel from "./ChatPanel";
 import WikiIcon from "./WikiIcon";
+import type { WikiIconName } from "./WikiIcon";
 import type { Props as ChatPanelProps } from "./ChatPanel";
 import { ResizablePanels } from "./ResizablePanels";
 import { ancestorPaths, buildFileTree, findPageByTitle, splitHomeQuestions, vaultDocumentLabel } from "../lib/wikiTree";
@@ -51,6 +52,12 @@ interface Props {
   onKbChange: (id: string) => void;
   sessionId: string;
   wikiProgress?: Record<string, WikiIngestProgress> | null;
+  /** 新建 Wiki 对话（force_new），与桌面端「新建对话」一致。 */
+  onNewSession: () => Promise<void> | void;
+  /** 切换到历史 Wiki 对话。 */
+  onSelectSession: (sessionId: string) => void;
+  /** 删除 Wiki 对话。 */
+  onDeleteSession: (sessionId: string) => Promise<void> | void;
 }
 
 export default function WikiHub({
@@ -59,6 +66,9 @@ export default function WikiHub({
   onKbChange,
   sessionId,
   wikiProgress,
+  onNewSession,
+  onSelectSession,
+  onDeleteSession,
 }: Props) {
   const [kbs, setKbs] = useState<WikiKB[]>([]);
   const [pages, setPages] = useState<WikiPage[]>([]);
@@ -101,6 +111,86 @@ export default function WikiHub({
   // onUp 闭包里拿不到最新 state，用 ref 镜像当前目录宽度用于拖拽结束时持久化。
   const catalogWidthRef = useRef(catalogWidth);
   catalogWidthRef.current = catalogWidth;
+
+  // Wiki 对话历史浮层（与桌面端一致：新建 / 切换 / 删除）。
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historySessions, setHistorySessions] = useState<Session[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [creatingChat, setCreatingChat] = useState(false);
+  const historyRef = useRef<HTMLDivElement>(null);
+
+  const refreshHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await api.wikiAgentSessions(kbId);
+      setHistorySessions(res.sessions);
+    } catch {
+      setHistorySessions([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [kbId]);
+
+  // 切 KB 时收起浮层并清空缓存，避免展示上一个 KB 的会话。
+  useEffect(() => {
+    setHistoryOpen(false);
+    setHistorySessions([]);
+  }, [kbId]);
+
+  // 点击浮层外部时收起。
+  useEffect(() => {
+    if (!historyOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
+        setHistoryOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [historyOpen]);
+
+  const toggleHistory = () => {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    if (next) refreshHistory();
+  };
+
+  const handleNewChat = async () => {
+    if (creatingChat) return;
+    if (chatProps.busy) {
+      setMessage("请先停止当前 Wiki Agent 任务");
+      return;
+    }
+    setCreatingChat(true);
+    try {
+      await onNewSession();
+      setHistoryOpen(false);
+    } catch (err) {
+      setMessage(`新建 Wiki 对话失败：${(err as Error).message}`);
+    } finally {
+      setCreatingChat(false);
+    }
+  };
+
+  const handleSelectChat = (sid: string) => {
+    onSelectSession(sid);
+    setHistoryOpen(false);
+  };
+
+  const handleDeleteChat = async (sid: string) => {
+    if (sid === sessionId && chatProps.busy) {
+      setMessage("该对话正在生成，请先停止再删除");
+      return;
+    }
+    if (!confirm("确定要删除这条 Wiki 对话吗？该操作不可撤销。")) return;
+    try {
+      await onDeleteSession(sid);
+    } catch (err) {
+      setMessage(`删除 Wiki 对话失败：${(err as Error).message}`);
+      return;
+    }
+    if (historyOpen) refreshHistory();
+  };
 
   const handleCatalogSashDown = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -892,11 +982,11 @@ export default function WikiHub({
     }
   };
 
-  const viewTabs: { key: WikiViewMode; label: string }[] = [
-    { key: "timeline", label: "时间" },
-    { key: "tree", label: "文件夹" },
-    { key: "type", label: "类型" },
-    { key: "graph", label: "图谱" },
+  const viewTabs: { key: WikiViewMode; label: string; icon: WikiIconName }[] = [
+    { key: "timeline", label: "时间", icon: "history" },
+    { key: "tree", label: "文件夹", icon: "folder" },
+    { key: "type", label: "类型", icon: "tags" },
+    { key: "graph", label: "图谱", icon: "graph" },
   ];
 
   return (
@@ -922,31 +1012,42 @@ export default function WikiHub({
             ))}
             {kbs.length === 0 && <option value="default">默认知识库</option>}
           </select>
-          <button className="wiki-card__btn" onClick={handleCreateKb} type="button">
-            新建知识库
+          <button className="wiki-card__btn" onClick={handleCreateKb} type="button" title="新建知识库" aria-label="新建知识库">
+            <WikiIcon name="plus" size={15} />
           </button>
           <button
             className="wiki-card__btn"
             onClick={handleDeleteKb}
             type="button"
             disabled={kbId === "default" || kbId === "tutorial"}
+            title="删除知识库"
+            aria-label="删除知识库"
           >
-            删除知识库
+            <WikiIcon name="trash" size={15} />
           </button>
           <div className="wiki-hub__bulk">
-            <button className="wiki-card__btn" onClick={handleSelectAll} type="button">
-              全选
+            <button className="wiki-card__btn" onClick={handleSelectAll} type="button" title="全选" aria-label="全选">
+              <WikiIcon name="check-square" size={15} />
             </button>
-            <button className="wiki-card__btn" onClick={handleDeselectAll} type="button" disabled={selectedIds.size === 0}>
-              取消全选
+            <button
+              className="wiki-card__btn"
+              onClick={handleDeselectAll}
+              type="button"
+              disabled={selectedIds.size === 0}
+              title="取消全选"
+              aria-label="取消全选"
+            >
+              <WikiIcon name="square" size={15} />
             </button>
             <button
               className="wiki-card__btn wiki-card__btn--danger"
               onClick={handleBulkDelete}
               type="button"
               disabled={selectedIds.size === 0}
+              title="删除选中"
+              aria-label="删除选中"
             >
-              删除选中
+              <WikiIcon name="trash" size={15} />
             </button>
           </div>
 
@@ -955,16 +1056,19 @@ export default function WikiHub({
             onClick={() => fileRef.current?.click()}
             type="button"
             disabled={!sessionId}
+            title="上传文件"
+            aria-label="上传文件"
           >
-            上传文件
+            <WikiIcon name="upload" size={15} />
           </button>
           <button
             className={`wiki-card__btn ${browserOpen ? "wiki-card__btn--primary" : ""}`}
             onClick={toggleBrowser}
             type="button"
             title={browserOpen ? "收起知识库面板" : "展开知识库面板"}
+            aria-label={browserOpen ? "收起知识库面板" : "展开知识库面板"}
           >
-            知识库面板
+            <WikiIcon name="panel-right" size={15} />
           </button>
           <input
             ref={fileRef}
@@ -1121,11 +1225,79 @@ export default function WikiHub({
         >
           {/* 对话为主区域（flexible，不传 defaultWidth），知识库目录+详情收进右侧扩展面板 */}
           <ResizablePanels.Panel id="chat" className="wiki-hub__chat">
-            {sessionId ? (
-              <ChatPanel {...chatProps} />
-            ) : (
-              <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
-            )}
+            <div className="wiki-chat-pane">
+              <header className="wiki-chat-pane__header">
+                <span className="wiki-chat-pane__title">
+                  Wiki 问答 · {kbs.find((kb) => kb.id === kbId)?.name || kbId}
+                </span>
+                <div className="wiki-chat-pane__actions">
+                  <button
+                    className="wiki-card__btn"
+                    type="button"
+                    onClick={handleNewChat}
+                    disabled={creatingChat || !sessionId}
+                    title="新建对话"
+                    aria-label="新建 Wiki 对话"
+                  >
+                    <WikiIcon name="plus" size={15} />
+                  </button>
+                  <div className="wiki-chat-history" ref={historyRef}>
+                    <button
+                      className={`wiki-card__btn ${historyOpen ? "wiki-card__btn--primary" : ""}`}
+                      type="button"
+                      onClick={toggleHistory}
+                      title="查看历史"
+                      aria-label="查看 Wiki 对话历史"
+                      aria-expanded={historyOpen}
+                    >
+                      <WikiIcon name="history" size={15} />
+                    </button>
+                    {historyOpen && (
+                      <div className="wiki-chat-history__popover" role="dialog" aria-label="Wiki 对话历史">
+                        <div className="wiki-chat-history__heading">历史对话</div>
+                        {historyLoading ? (
+                          <p className="wiki-chat-history__empty">正在加载…</p>
+                        ) : historySessions.length === 0 ? (
+                          <p className="wiki-chat-history__empty">暂无历史对话</p>
+                        ) : (
+                          historySessions.map((s) => (
+                            <div
+                              key={s.session_id}
+                              className={`wiki-chat-history__item ${s.session_id === sessionId ? "wiki-chat-history__item--active" : ""}`}
+                            >
+                              <button
+                                type="button"
+                                className="wiki-chat-history__item-main"
+                                onClick={() => handleSelectChat(s.session_id)}
+                              >
+                                <span className="wiki-chat-history__item-title">{s.title || "新对话"}</span>
+                                <span className="wiki-chat-history__item-time">
+                                  {s.updated_at ? new Date(s.updated_at * 1000).toLocaleString() : ""}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                className="wiki-chat-history__item-delete"
+                                onClick={() => handleDeleteChat(s.session_id)}
+                                title="删除对话"
+                                aria-label="删除 Wiki 对话"
+                              >
+                                <WikiIcon name="trash" size={13} />
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </header>
+              {sessionId ? (
+                <ChatPanel {...chatProps} />
+              ) : (
+                <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
+              )}
+            </div>
           </ResizablePanels.Panel>
 
           {browserOpen && (
@@ -1153,8 +1325,10 @@ export default function WikiHub({
                   className={`wiki-view-switcher__tab ${viewMode === tab.key ? "wiki-view-switcher__tab--active" : ""}`}
                   onClick={() => setViewMode(tab.key)}
                   type="button"
+                  title={tab.label}
+                  aria-label={tab.label}
                 >
-                  {tab.label}
+                  <WikiIcon name={tab.icon} size={15} />
                 </button>
               ))}
             </div>

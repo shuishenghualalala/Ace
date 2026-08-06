@@ -47,7 +47,7 @@ import {
   type SessionRow,
 } from '../state';
 import { messageStore, sessionStore } from '../stores/stores';
-import { bindFileDrop, bindFilePaste } from './attachments';
+import { bindFileDrop, bindFilePaste, buildAttachmentChip } from './attachments';
 import { requireRendererLogin } from './auth-gate';
 import {
   autoresizeTextarea,
@@ -57,6 +57,7 @@ import {
   shouldComposerSend,
 } from './composer-input';
 import { openModelSelectPopover } from './model-picker';
+import { showConfirmDialog } from '../ui-feedback';
 import { applySessionModelBinding, loadSessionModel, modelLabelForId } from './session-model';
 import {
   appendMessage,
@@ -437,17 +438,14 @@ function renderEmbeddedPanel(): void {
   renderEmbeddedTodo(root, panel.sessionId);
   if (preview) {
     const attachments = embeddedAttachments.get(activeEmbeddedKbId) || [];
-    preview.replaceChildren(...attachments.map((attachment) => {
-      const chip = document.createElement('span');
-      chip.className = 'chat-attachment-chip';
-      chip.textContent = attachment.name;
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.dataset.wikiRemoveAttachment = attachment.id;
-      remove.textContent = '×';
-      chip.appendChild(remove);
-      return chip;
-    }));
+    // 附件预览卡片与主对话完全同款（扩展名图标 + 文件名 + 类型/大小 + 悬浮移除按钮）。
+    preview.replaceChildren(...attachments.map((attachment) =>
+      buildAttachmentChip(attachment, (attId) => {
+        const list = embeddedAttachments.get(activeEmbeddedKbId) || [];
+        embeddedAttachments.set(activeEmbeddedKbId, list.filter((item) => item.id !== attId));
+        scheduleEmbeddedRender();
+      }),
+    ));
     preview.hidden = attachments.length === 0;
   }
 }
@@ -520,6 +518,7 @@ const WIKI_VOID_ICON = `<svg viewBox="0 0 24 24" width="34" height="34" fill="no
 const WIKI_EXPAND_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>`;
 const WIKI_NEW_CHAT_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h6"/><path d="M18 2v6"/><path d="M15 5h6"/></svg>`;
 const WIKI_HISTORY_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>`;
+const WIKI_HISTORY_DELETE_ICON = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
 const WIKI_MODEL_ICON = `<svg class="composer-chip__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true"><path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5"/><path d="M8.5 8.5v.01"/><path d="M16 15.5v.01"/><path d="M12 12v.01"/></svg>`;
 const WIKI_CHIP_CHEVRON = `<svg class="composer-chip__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`;
 const WIKI_ATTACH_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>`;
@@ -586,11 +585,16 @@ function renderWikiHistoryList(root: HTMLElement, sessions: WikiAgentSessionSumm
     return;
   }
   list.innerHTML = sessions.map((session) => `
-    <button type="button" class="wiki-agent-history__item${session.session_id === activeId ? ' is-active' : ''}"
-      data-wiki-agent-history-session="${escapeHtml(session.session_id)}">
-      <span class="wiki-agent-history__item-title">${escapeHtml(session.title || '新对话')}</span>
-      <span class="wiki-agent-history__item-meta">${escapeHtml(formatWikiHistoryTime(session.updated_at))} · ${session.message_count || 0} 条消息</span>
-    </button>`).join('');
+    <div class="wiki-agent-history__item${session.session_id === activeId ? ' is-active' : ''}">
+      <button type="button" class="wiki-agent-history__item-switch"
+        data-wiki-agent-history-session="${escapeHtml(session.session_id)}">
+        <span class="wiki-agent-history__item-title">${escapeHtml(session.title || '新对话')}</span>
+        <span class="wiki-agent-history__item-meta">${escapeHtml(formatWikiHistoryTime(session.updated_at))} · ${session.message_count || 0} 条消息</span>
+      </button>
+      <button type="button" class="wiki-agent-history__item-delete"
+        data-wiki-agent-history-delete="${escapeHtml(session.session_id)}"
+        title="删除该对话" aria-label="删除该 Wiki 对话">${WIKI_HISTORY_DELETE_ICON}</button>
+    </div>`).join('');
 }
 
 async function openWikiHistory(root: HTMLElement, kbId: string): Promise<void> {
@@ -619,6 +623,51 @@ function closeHistoryPopover(root: HTMLElement): void {
   const button = root.querySelector<HTMLElement>('[data-wiki-agent-history]');
   button?.classList.remove('is-active');
   button?.setAttribute('aria-expanded', 'false');
+}
+
+/** 删除指定 Wiki 会话：确认 → 后端删除 → 清本地缓存；删的是当前会话则切到最近一条（无则新建）。 */
+async function deleteEmbeddedConversation(root: HTMLElement, req: WikiAgentEntryRequest, sessionId: string): Promise<void> {
+  if (isBusy(sessionId)) {
+    notify('该对话正在生成，请先停止再删除');
+    return;
+  }
+  const confirmed = await showConfirmDialog({
+    title: '删除 Wiki 对话',
+    message: '确定要删除这条 Wiki 对话吗？该操作不可撤销。',
+    confirmText: '删除',
+    cancelText: '取消',
+  });
+  if (!confirmed) return;
+  try {
+    await backendApi.deleteSession(sessionId);
+  } catch (err) {
+    notify(`删除 Wiki 对话失败：${(err as Error).message}`);
+    return;
+  }
+  wikiAgentSessions.delete(sessionId);
+  sessionStore.set({
+    sessions: state.sessions.filter((session) => session.id !== sessionId),
+  });
+  if (embeddedByKb.get(req.kbId)?.sessionId === sessionId) {
+    try {
+      // 复用后端「取最近会话、无则新建」语义，前端不用猜下一条。
+      const result = await backendApi.wikiAgentSession(req.kbId);
+      await activateEmbeddedSession(req.kbId, result.session_id, req.kbName || req.kbId);
+    } catch (err) {
+      notify(`切换 Wiki 对话失败：${(err as Error).message}`);
+    }
+  }
+  notify('已删除 Wiki 对话');
+  // 浮层仍展开时刷新历史列表。
+  const popover = root.querySelector<HTMLElement>('[data-wiki-agent-history-popover]');
+  if (popover && !popover.hidden) {
+    try {
+      const result = await backendApi.wikiAgentSessions(req.kbId);
+      if (root.isConnected) renderWikiHistoryList(root, result.sessions);
+    } catch {
+      // 列表刷新失败不影响删除结果，下次打开浮层会重新拉取。
+    }
+  }
 }
 
 /** 切换到指定 Wiki 会话：清附件/草稿 → 激活会话 → 重置输入框 → 收起历史浮层。 */
@@ -809,6 +858,18 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   });
   root.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    // 消息复制按钮的全局委托绑在 #chat-messages 上，够不到本面板，这里补一份。
+    const copyBtn = target?.closest<HTMLElement>('.chat-copy-btn');
+    if (copyBtn) {
+      void navigator.clipboard.writeText(copyBtn.getAttribute('data-copy') ?? '').then(() => notify('已复制'));
+      return;
+    }
+    const deleteSessionId = target?.closest<HTMLElement>('[data-wiki-agent-history-delete]')
+      ?.dataset.wikiAgentHistoryDelete;
+    if (deleteSessionId) {
+      void deleteEmbeddedConversation(root, req, deleteSessionId);
+      return;
+    }
     const historySessionId = target?.closest<HTMLElement>('[data-wiki-agent-history-session]')
       ?.dataset.wikiAgentHistorySession;
     if (historySessionId) {
@@ -830,10 +891,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
       })();
       return;
     }
-    const id = target?.closest<HTMLElement>('[data-wiki-remove-attachment]')?.dataset.wikiRemoveAttachment;
-    if (!id) return;
-    embeddedAttachments.set(req.kbId, (embeddedAttachments.get(req.kbId) || []).filter((item) => item.id !== id));
-    scheduleEmbeddedRender();
+    // 附件移除按钮自带监听并 stopPropagation（见 buildAttachmentChip），不经过本委托。
   });
   form?.addEventListener('submit', (event) => {
     event.preventDefault();
