@@ -1043,6 +1043,35 @@ class ExternalAgentStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def latest_runtime_session_binding_for_agent(
+        self,
+        *,
+        owner_account_id: str = "",
+        crew_session_id: str,
+        external_agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the latest binding regardless of Runtime/cwd.
+
+        Workdir resolution uses this compatibility lookup before moving an
+        existing external conversation to the new isolated session directory.
+        Native session continuity therefore remains unchanged for old rows.
+        """
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM external_runtime_session_binding
+                WHERE owner_account_id = ?
+                  AND crew_session_id = ?
+                  AND external_agent_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (owner_account_id, crew_session_id, external_agent_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def save_runtime_session_binding(
         self,
         *,

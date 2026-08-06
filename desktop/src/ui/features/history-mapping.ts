@@ -152,7 +152,7 @@ export async function filterExistingTurnFileChanges(
 }
 
 /** 把后端 turn_file_changes 规范成前端 TurnFileChangeSummary。 */
-function normalizeTurnFileChanges(
+export function normalizeTurnFileChanges(
   raw: BackendHistoryFileChange[] | undefined,
 ): TurnFileChangeSummary[] | undefined {
   if (!raw?.length) return undefined;
@@ -247,8 +247,8 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
       duration: tc.duration != null ? Math.round(tc.duration * 1000) : 0,
     })),
   };
-  if (role === 'assistant') {
-    // 落库摘要保留准确 +/-；再从旧 terminal 结果补回此前未采集的最终文件。
+  if (role === 'assistant' || role === 'team_internal') {
+    // 落库摘要保留准确 +/-；terminal 结果用于补充未落库的最终文件。
     const persisted = normalizeTurnFileChanges(item.turn_file_changes);
     const inferred = inferTurnFileChangesFromToolCalls(
       persisted ? item.tool_calls?.filter((tc) => tc.name === 'terminal') : item.tool_calls,

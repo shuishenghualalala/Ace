@@ -11,6 +11,7 @@ from crew.state import home as home_module
 from crew.state.home import (
     agent_workspace_path,
     ensure_crew_home,
+    external_session_workspace_path,
     export_crew_runtime_env,
     get_crew_home,
     get_owner_runtime_home,
@@ -165,7 +166,8 @@ def test_task_workspace_defaults_under_user_home(tmp_path, monkeypatch):
     # task_workspaces 默认跟随 get_crew_home()，而非硬编码 ~/.crew
     assert root == crew_home / "task_workspaces"
 
-    # Layer 3：work_dir = {root}/{workspace_id}/（只到 workspace 级，session/agent 无分层）
+    # Builtin Layer 3 remains workspace-scoped; external sessions may opt into
+    # the isolated helper below without changing this existing path.
     task_dir = task_workspace_path("space one")
     assert task_dir == root / "space_one"
     assert task_dir.is_dir()
@@ -174,6 +176,14 @@ def test_task_workspace_defaults_under_user_home(tmp_path, monkeypatch):
     agent_dir = agent_workspace_path("space one", "coder#1")
     assert agent_dir == task_dir / "agents" / "coder_1"
     assert agent_dir.is_dir()
+
+    external_dir = external_session_workspace_path(
+        "space one",
+        "session::1",
+        "agent#1",
+    )
+    assert external_dir == task_dir / "external_sessions" / "session_1" / "agent_1"
+    assert external_dir.is_dir()
 
 
 def test_task_workspace_root_env_override(tmp_path, monkeypatch):

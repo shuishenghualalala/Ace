@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api } from "../api";
-import { mapHistoryItems, mergeHistoryWithLiveMessages, preserveLocalProcessDetails } from "../lib/historyMap";
+import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails } from "../lib/historyMap";
 import { mergeTeamInternalMessage } from "../lib/teamMessageMerge";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { backendDurationToMs, backendSecondsToMs } from "../lib/backendTime";
 import { ChatSocket } from "../ws";
-import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, UiMessage, WikiIngestProgress, WikiPage } from "../types";
+import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, WikiIngestProgress, WikiPage } from "../types";
 
 let _seq = 0;
 const newId = () => `m${Date.now()}_${_seq++}`;
@@ -163,6 +163,39 @@ interface Bookkeeping {
   deltaSpans: DeltaSpan[];
   legacyDeltaText: string;
   hadTeamInternal: boolean;
+  fileChanges: TurnFileChangeSummary[];
+  fileChangeSignatures: Record<string, string>;
+  prevTurnFileSignature: Record<string, string>;
+}
+
+function fileChangeSignature(file: TurnFileChangeSummary, raw?: unknown): string {
+  const base = `${file.status}|${file.added}|${file.removed}|${file.binary ? "1" : "0"}`;
+  if (!raw || typeof raw !== "object") return base;
+  const value = raw as Record<string, unknown>;
+  return `${base}|${String(value.revision || "")}|${JSON.stringify(value.diff ?? [])}`;
+}
+
+function snapshotFileSignatures(
+  files: TurnFileChangeSummary[],
+  rawFiles?: unknown,
+): Record<string, string> {
+  const rawByPath = new Map<string, unknown>();
+  if (Array.isArray(rawFiles)) {
+    for (const item of rawFiles) {
+      if (!item || typeof item !== "object") continue;
+      const path = String((item as Record<string, unknown>).path || "").trim();
+      if (path) rawByPath.set(path, item);
+    }
+  }
+  return Object.fromEntries(
+    files.map((file) => [file.path, fileChangeSignature(file, rawByPath.get(file.path))]),
+  );
+}
+
+function currentTurnFileChanges(book: Bookkeeping): TurnFileChangeSummary[] {
+  return book.fileChanges.filter((file) =>
+    book.prevTurnFileSignature[file.path] !== book.fileChangeSignatures[file.path],
+  );
 }
 
 export interface DeltaSpan {
@@ -395,6 +428,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
         deltaSpans: [],
         legacyDeltaText: "",
         hadTeamInternal: false,
+        fileChanges: [],
+        fileChangeSignatures: {},
+        prevTurnFileSignature: {},
       };
       bookRef.current.set(sid, b);
     }
@@ -698,6 +734,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             thinking: normalizeTeamText(c.body.thinking),
             toolCalls: normalizeChunkToolCalls(c.body.tool_calls),
             artifacts: c.body.artifacts,
+            turnFileChanges: normalizeTurnFileChanges(c.body.turn_file_changes),
             timestamp: backendSecondsToMs(c.body.timestamp) ?? Date.now(),
             turnStartedAt: backendSecondsToMs(c.body.turn_started_at) ?? startLocalTurn(sid),
             turnDurationMs: c.body.turn_duration != null ? backendDurationToMs(c.body.turn_duration) : undefined,
@@ -707,6 +744,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             [sid]: mergeTeamInternalMessage(list, incoming, { append: Boolean(c.body.append) }),
           };
         });
+      } else if (c.kind === "file_changes") {
+        book.fileChanges = normalizeTurnFileChanges(c.body.files) ?? [];
+        book.fileChangeSignatures = snapshotFileSignatures(book.fileChanges, c.body.files);
       } else if (c.kind === "todo_updated") {
         const todos = normalizeTodos(c.body.todos);
         setTodos(sid, todos);
@@ -832,6 +872,11 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             toolCalls: Array.from(book.toolMap.values()),
           });
         }
+        const turnFileChanges = currentTurnFileChanges(book);
+        if (assistantId && turnFileChanges.length > 0) {
+          patch(sid, assistantId, { turnFileChanges });
+        }
+        book.prevTurnFileSignature = { ...book.fileChangeSignatures };
         // 轮次结束才重置聚合（忙时连发时第一轮的尾部 delta 不会误起新消息）
         finishLocalTurn(sid, "idle");
         afterFinalRef.current();

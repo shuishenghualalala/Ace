@@ -79,6 +79,7 @@ import {
   mountWikiDetailFold,
   openWikiPageInHub,
   setWikiAgentPanelRenderer,
+  toggleWikiBrowser,
   type WikiAgentEntryRequest,
 } from './wiki-page';
 
@@ -789,7 +790,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   // 粘贴 / 拖拽上传：与主对话同一套绑定（attachments.ts），上传走 addEmbeddedFiles。
   // 面板随 renderShell 重建后是新 DOM，需每次挂载重新绑定。
   if (input) bindFilePaste(input, (files) => void addEmbeddedFiles(files));
-  if (form) bindFileDrop(form, (files) => void addEmbeddedFiles(files));
+  if (root) bindFileDrop(root, (files) => void addEmbeddedFiles(files));
   root.querySelector('[data-wiki-agent-expand]')?.addEventListener('click', (event) => {
     const btn = event.currentTarget as HTMLElement;
     const next = !embeddedExpanded.has(req.kbId);
@@ -800,6 +801,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     clearRuntimeStyle(root, 'width');
     root.classList.toggle('wiki-agent-pane--wide', next);
     btn.classList.toggle('is-active', next);
+    toggleWikiBrowser();
   });
   // ── 对话栏宽度拖拽：手柄是 .wiki-body 内、面板左侧的 flex 兄弟节点（由 wiki-page 渲染） ──
   // 面板与手柄节点在 renderShell 间被保留时已绑定过（enterWikiAgentMode 会在活面板上重复挂载），跳过防重复绑定。

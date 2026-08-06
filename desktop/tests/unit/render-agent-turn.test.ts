@@ -147,6 +147,10 @@ describe('renderAgentTurn', () => {
       processText: '分析并编写核心算法',
       collapsedTitle: '核心逻辑的执行过程',
       artifacts: [{ title: 'game2048.js', path: '/tmp/game2048.js', kind: 'text' }],
+      turnFileChanges: [
+        { path: '/tmp/game2048.js', name: 'game2048.js', added: 24, removed: 3, status: 'modified' },
+        { path: '/tmp/old.js', name: 'old.js', added: 0, removed: 5, status: 'deleted' },
+      ],
     });
     expect(root.querySelector('.agent-avatar--message.agent-tone-2')?.textContent).toBe('H');
     expect(root.querySelector('.team-internal__bubble--tone-2')).not.toBeNull();
@@ -155,6 +159,9 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.team-internal__collapse')).toBeNull();
     expect(root.querySelector('.team-internal__bubble')?.textContent).toContain('核心逻辑已完成');
     expect(root.querySelector('.team-artifact__body strong')?.textContent).toBe('game2048.js');
+    expect(root.querySelector('.msg__file-changes')?.textContent).toContain('已编辑 2 个文件');
+    expect(root.querySelector('[data-file-status="deleted"] .msg__file-changes__reveal'))
+      .toHaveProperty('disabled', true);
   });
 
   it('Team 规划运行中复用 Agent Turn 实时计时，以团队名称和 Team Logo 展示', () => {

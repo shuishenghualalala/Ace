@@ -7,6 +7,7 @@ import { PlanReviewCard } from "./PlanReviewPanel";
 import AgentProcessTimeline, { type ProcessTimelineItem } from "./AgentProcessTimeline";
 import WikiCard from "./WikiCard";
 import WikiPageView from "./WikiPageView";
+import TurnFileChangesCard from "./TurnFileChangesCard";
 
 interface Props {
   messages: UiMessage[];
@@ -66,8 +67,10 @@ export default function AgentTurn({ messages, isStreaming, onApprovePlan, onReje
 
   const processItems: ProcessTimelineItem[] = [];
   const textParts: ReactNode[] = [];
+  const fileChanges = new Map<string, NonNullable<UiMessage["turnFileChanges"]>[number]>();
 
   messages.forEach((m, i) => {
+    for (const file of m.turnFileChanges || []) fileChanges.set(file.path, file);
     if (m.role === "status") {
       processItems.push({ kind: "status", id: m.id, text: m.text });
       return;
@@ -191,6 +194,7 @@ export default function AgentTurn({ messages, isStreaming, onApprovePlan, onReje
           </details>
         )}
         {textParts}
+        <TurnFileChangesCard files={Array.from(fileChanges.values())} />
       </div>
       {viewingPage && <WikiPageView page={viewingPage} onClose={() => setViewingPage(null)} />}
     </div>

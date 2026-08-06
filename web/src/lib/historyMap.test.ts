@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   mapHistoryItems,
   mergeHistoryWithLiveMessages,
+  normalizeTurnFileChanges,
   preserveLocalProcessDetails,
   type BackendHistoryItem,
 } from "./historyMap";
@@ -47,6 +48,14 @@ describe("preserveLocalProcessDetails", () => {
 });
 
 describe("mapHistoryItems", () => {
+  it("clamps non-finite file change counts at the history boundary", () => {
+    expect(normalizeTurnFileChanges([
+      { path: "/work/app.ts", added: "NaN", removed: Infinity },
+    ])).toEqual([
+      { path: "/work/app.ts", name: "app.ts", added: 0, removed: 0, status: "modified" },
+    ]);
+  });
+
   it("appends streaming thinking chunks without inserting blank lines between every delta", () => {
     const first: UiMessage = {
       id: "m1",
@@ -137,6 +146,39 @@ describe("mapHistoryItems", () => {
     expect(messages[0].eventType).toBe("team_submit");
     expect(messages[0].text).toContain("测试方案初稿已完成");
     expect(messages[0].processText).toContain("让我先看一下相关代码");
+  });
+
+  it("maps Team member file changes alongside artifacts", () => {
+    const messages = mapHistoryItems([{
+      role: "team_internal",
+      content: "成员已提交",
+      source_session_id: "web_demo::turn::req_1::hermes",
+      agent_id: "hermes",
+      event_type: "team_submit",
+      node_id: "build_1",
+      artifacts: [{ title: "result.md", path: "/work/result.md", kind: "text" }],
+      turn_file_changes: [
+        { path: "/work/result.md", name: "result.md", added: 8, removed: 1, status: "modified" },
+      ],
+    }]);
+
+    expect(messages[0].turnFileChanges).toEqual([
+      { path: "/work/result.md", name: "result.md", added: 8, removed: 1, status: "modified" },
+    ]);
+    expect(messages[0].artifacts).toHaveLength(1);
+  });
+
+  it("filters internal plan documents from file cards", () => {
+    const messages = mapHistoryItems([{
+      role: "assistant",
+      content: "完成",
+      turn_file_changes: [
+        { path: "/work/.crew/plans/plan_demo.md", status: "added" },
+        { path: "/work/src/app.ts", status: "modified" },
+      ],
+    }]);
+
+    expect(messages[0].turnFileChanges?.map((file) => file.path)).toEqual(["/work/src/app.ts"]);
   });
 
   it("does not merge same node id across different team turns", () => {

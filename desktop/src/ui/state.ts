@@ -127,6 +127,8 @@ export interface FileChange {
   diff: DiffRow[];
   /** 二进制结果文件没有可统计的文本行数，但仍应保留在文件改动卡中。 */
   binary?: boolean;
+  /** 元数据快照版本，仅用于区分连续两轮相同行数的修改，不进入卡片展示。 */
+  revision?: string;
 }
 
 export interface DeltaSpan {

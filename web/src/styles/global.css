@@ -2126,6 +2126,105 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 12px;
   font-style: normal;
 }
+.turn-file-changes {
+  width: min(620px, 100%);
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.turn-file-changes__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--border);
+}
+.turn-file-changes__header strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+.turn-file-changes__totals,
+.turn-file-changes__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.turn-file-changes em {
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.35;
+  background: var(--bg-hover);
+  color: var(--text-3);
+}
+.turn-file-changes em.is-added,
+.turn-file-changes em.is-modified {
+  color: var(--text-2);
+  background: var(--bg-soft);
+}
+.turn-file-changes em.is-removed,
+.turn-file-changes em.is-deleted {
+  color: var(--text);
+  background: var(--bg-active);
+}
+.turn-file-changes__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.turn-file-changes__list li + li {
+  border-top: 1px solid var(--border);
+}
+.turn-file-changes__list button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 11px;
+  border: 0;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.turn-file-changes__list button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.turn-file-changes__list button:disabled {
+  cursor: default;
+}
+.turn-file-changes__path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.turn-file-changes__path > span {
+  color: var(--text-3);
+}
+.turn-file-changes__path > strong {
+  font-weight: 600;
+}
+.turn-file-changes__more {
+  width: 100%;
+  padding: 7px 11px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
 .team-internal__bubble--tone-0:not(.is-crew) {
   background: rgba(45, 46, 44, .035);
   border-color: rgba(45, 46, 44, .09);
