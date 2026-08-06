@@ -34,6 +34,10 @@ def tool_result_detail_for_ui(name: str, content: str, *, max_len: int = 1200) -
         return _clip(text, max_len)
 
     if isinstance(data, dict):
+        surface = data.get("surface")
+        if name in {"Widget", "Canvas", "publish_site"} and isinstance(surface, dict):
+            return _clip(json.dumps({"ok": bool(data.get("ok", True)), "surface": surface},
+                                    ensure_ascii=False, separators=(",", ":")), max_len)
         for key in ("output", "content", "text", "result"):
             value = data.get(key)
             if isinstance(value, str) and value.strip():

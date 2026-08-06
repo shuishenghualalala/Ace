@@ -1,8 +1,14 @@
 ---
 name: widgetdesign
-description: Use when creating or reviewing a responsive Daimon/Kimi conversational, Blueprint, or Canvas widget; use for generic visual tools only when explicitly invoking $widgetdesign or targeting a Daimon/Kimi widget.
+description: Use when creating or reviewing a responsive Daimon/Kimi conversational,
+  Blueprint, or Canvas widget; use for generic visual tools only when explicitly invoking
+  $widgetdesign or targeting a Daimon/Kimi widget.
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: Widget 设计
+  zh_description: 创建或审查响应式 Daimon/Kimi 对话式、Blueprint 或 Canvas Widget 的设计规范与指南。
+  query_examples: 设计 widget, 审查 widget 设计, Kimi widget 规范
 ---
-
 <!-- preview-rule: skill.purpose | section: Skill purpose | specimen: purpose-card | coverage: covered | priority: core -->
 # Kimi Widget
 

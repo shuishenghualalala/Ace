@@ -51,23 +51,31 @@ def should_continue(finish_reason: str | None, tool_calls: Sequence) -> bool:
 # --------------------------------------------------------------------------- #
 # 2b. 工具调用被截断的 fail-closed 检测
 # --------------------------------------------------------------------------- #
+ESCALATED_MAX_OUTPUT_TOKENS = 64_000
+TOOL_ARGUMENTS_RECOVERY_LIMIT = 3
+TOOL_ARGUMENTS_RECOVERY_PROMPT = (
+    "（系统提示：上一次输出触及长度上限，工具参数没有生成完整。请直接继续，不要道歉，"
+    "不要复述已经完成的工作。如果仍需调用工具，请重新发起完整调用，并把剩余工作拆成更小的步骤。）"
+)
+
 # 现象：模型在生成 file_write 等工具的 arguments 时撞上 max_output_tokens，
 #   arguments JSON 在 content 字符串中途断裂 → provider 的 json.loads 失败 →
 #   走 _raw 兜底（openai_provider.py / anthropic_provider.py 的 flush 阶段），
 #   最终交给 executor 的 ToolCall.arguments = {"_raw": "<半截 JSON>"}，
 #   finish_reason="length"。若直接派发，handler 拿不到 path/content → 静默写空/失败。
 # Executor 在同时持有 finish_reason 与归一化 ToolCall 的位置调用该检测，
-# 命中后直接返回 TOOL_ARGUMENTS_INCOMPLETE，不执行工具，也不做隐藏重试。
+# 命中后不执行工具；executor 先提高输出额度，再做有限次数的隐藏续写，耗尽后才报错。
 
 
 def has_truncated_tool_args(tool_calls: Sequence, finish_reason: str | None) -> bool:
     """本轮工具调用是否被 max_output_tokens 截断。
 
-    判据：finish_reason 指示长度截断，且存在某个 tool_call 的 arguments 只剩
-    ``_raw`` 键（provider json.loads 失败的兜底标记）。两者同时命中才认定为截断，
-    避免把模型正常产出的 ``_raw``（极少见）误判为截断。
+    判据：finish_reason 指示长度截断（OpenAI 为 ``length``，Anthropic 为
+    ``max_tokens``；上下文输出耗尽也走同一恢复路径），且存在某个 tool_call 的
+    arguments 只剩 ``_raw`` 键（provider json.loads 失败的兜底标记）。两者同时
+    命中才认定为截断，避免把模型正常产出的 ``_raw``（极少见）误判为截断。
     """
-    if finish_reason != "length":
+    if finish_reason not in {"length", "max_tokens", "model_context_window_exceeded"}:
         return False
     for tc in tool_calls or []:
         args = getattr(tc, "arguments", None)

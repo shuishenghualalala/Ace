@@ -203,6 +203,16 @@ body.inspector-workspace-maximized.history-panel-collapsed:has(#chat-tab.tab-pan
     grid-column: 2 / -1;
 }
 
+body.inspector-workspace-maximized:has(#chat-tab.tab-pane.active.chat-mode) #chat-inspector {
+    grid-column: 2 / -1;
+    grid-row: 1 / -1;
+    z-index: 80;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    height: 100%;
+}
+
 body.inspector-workspace-maximized #chat-inspector-resize-handle {
     display: none;
 }

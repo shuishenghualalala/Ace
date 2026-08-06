@@ -402,6 +402,42 @@
   color: inherit;
 }
 
+.session__sites-logo,
+.chat-sites-mode__logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: currentcolor;
+}
+
+.session__sites-logo svg {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-sites-mode__logo svg {
+  width: 18px;
+  height: 18px;
+}
+
+.chat-sites-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 2px;
+  color: var(--text-primary, #222);
+  font-size: 14px;
+}
+
+.chat-sites-mode[hidden] {
+  display: none;
+}
+
+.chat-sites-mode > span:last-child {
+  font-weight: 550;
+}
+
 /* 行尾槽位：时间 / 运行 spinner / 错误点 / 未读绿点（互斥） */
 #history-list.history-sidebar-v2 .history-item-trailing {
   flex-shrink: 0;

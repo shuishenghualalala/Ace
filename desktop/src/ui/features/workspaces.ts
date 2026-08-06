@@ -313,7 +313,7 @@ function initSessionStatusSubscriber(): void {
 
 export function isPlaceholderSessionTitle(title: string): boolean {
   const t = title.trim();
-  return !t || t === '新会话' || t === '新对话';
+  return !t || t === '新会话' || t === '新对话' || t === '新站点' || t === '新灵感';
 }
 
 
@@ -435,6 +435,9 @@ function sessionAgentProvider(s: SessionRow): string {
 
 function sessionLeadingInner(s: SessionRow): string {
   const provider = sessionAgentProvider(s);
+  if (provider === 'sites') {
+    return '<span class="session__sites-logo" data-sites-logo aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="15" height="14" rx="2.25"/><path d="M2.5 7h15M6 11h5M6 14h8"/></svg></span>';
+  }
   if (provider === 'team') {
     return '<span class="session__team-logo" aria-hidden="true"><i></i><i></i></span>';
   }
@@ -1496,6 +1499,7 @@ export function createSessionInWorkspace(workspaceId: string, openSession: OpenS
 
   finishNewDraftUi();
   syncSessionModelUi();
+  window.dispatchEvent(new CustomEvent('session:changed', { detail: { sessionId: id } }));
 
   return id;
 

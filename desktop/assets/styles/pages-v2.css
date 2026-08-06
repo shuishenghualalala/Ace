@@ -1712,8 +1712,8 @@
 
 
 :root {
-  --inspector-max-vw: 62vw;
-  --inspector-hard-max: 760px;
+  --inspector-max-vw: 72vw;
+  --inspector-hard-max: 1200px;
 }
 
 .chat-inspector {
@@ -1745,7 +1745,8 @@
 }
 
 .chat-inspector__resize-handle:hover,
-.chat-inspector__resize-handle.is-dragging {
+.chat-inspector__resize-handle.is-dragging,
+.chat-inspector__resize-handle:focus-visible {
   background: linear-gradient(to right, transparent, var(--v2-primary, #477df7), transparent);
   opacity: 0.55;
 }

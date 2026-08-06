@@ -47,6 +47,7 @@ from crew.gateway.routers.runtimes import create_runtimes_router
 from crew.gateway.routers.scenarios import create_scenarios_router
 from crew.gateway.routers.sessions import create_sessions_router
 from crew.gateway.routers.system import create_system_router
+from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.routers.wiki import create_wiki_router
 from crew.gateway.ws import create_ws_router
 from crew.state.active_owner import ActiveOwnerConflict
@@ -360,6 +361,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_plugins_router(crew))
     api.include_router(create_mcp_setup_router(crew))
     api.include_router(create_wiki_router(crew))
+    api.include_router(create_sites_router(crew))
     api.include_router(create_mcp_servers_router(crew))
     api.include_router(create_interaction_router(interaction_bridge, crew))
     api.include_router(create_system_router(crew))

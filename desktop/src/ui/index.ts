@@ -21,6 +21,8 @@ import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview
 import { initUsagePage } from './features/usage-panel';
 import { bindCronTab, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
 import { bindWikiTab, setWikiAgentEntryHandler, setWikiAgentKbDeletedHandler } from './features/wiki-page';
+import { bindSitesTab, renderSitesPage, syncSiteAnnotationEntry, syncSiteComposerMarker } from './features/sites-page';
+import { bindBlueprintSurface } from './features/blueprint-surface';
 import { forgetWikiAgentKb, initWikiAgent, openWikiAgent } from './features/wiki-agent';
 import { assignSessionAgentDisplay, bindWorkspaceUi, createSessionInWorkspace, renderWorkspaceHistory, setWorkspacesUiCallbacks } from './features/workspaces';
 import { bindSessionManageUi, setOpenSessionCallback } from './features/session-manage';
@@ -79,6 +81,7 @@ import {
 import { hydrateMissingTurnFileCounts } from './features/turn-file-counts';
 import { externalAgentsEnabled } from './features/external-agents-feature';
 import { initAuthFlow } from './features/login';
+import { backendApi } from './backend-client';
 
 function setTab(tab: TabKey): void {
   // 后端服务未就绪时阻断页面切换，遮罩已由 backend-status-guard 展示。
@@ -97,6 +100,7 @@ function setTab(tab: TabKey): void {
   document.body.classList.toggle('welcome-active', tab === 'chat' && !state.activeSessionId);
   if (tab === 'chat') {
     renderChat();
+    syncSiteAnnotationEntry();
     renderCronTaskBoard();
     if (state.mode === 'dynamic_kanban' && state.activeSessionId) {
       void refreshKanbanBoard(state.activeSessionId);
@@ -107,6 +111,7 @@ function setTab(tab: TabKey): void {
   if (tab === 'system') {
     setSystemPanel('overview');
   }
+  if (tab === 'sites') renderSitesPage();
 }
 
 function setSystemPanel(panel: SystemPanelKey): void {
@@ -551,6 +556,25 @@ async function init(): Promise<void> {
   }));
   await safe('bindGlobalEvents', bindGlobalEvents);
   await safe('bindAgentsTab', () => bindAgentsTab(() => setTab('agents')));
+  await safe('bindSitesTab', () => bindSitesTab({
+    openInspirationAgent: async (item) => {
+      if (!item.sessionId) throw new Error('这个灵感没有绑定创建对话');
+      await openSession(item.sessionId);
+      setTab('chat');
+    },
+    createInspirationSession: async () => {
+      const workspaceId = state.currentWorkspaceId || 'default';
+      const sessionId = createSessionInWorkspace(workspaceId, openSession);
+      assignSessionAgentDisplay(sessionId, { name: '灵感', provider: 'sites', display_badge: '◇' });
+      await backendApi.ensureSession(sessionId, { workspace_id: workspaceId, title: '新灵感' });
+      await backendApi.setSessionAgentConfig(sessionId, { executor: 'builtin', inspiration_creation: true });
+      await refreshSessions();
+      setTab('chat');
+      syncSiteComposerMarker();
+      ($('#chat-input') as HTMLTextAreaElement | null)?.focus();
+    },
+  }));
+  await safe('bindBlueprintSurface', bindBlueprintSurface);
   await safe('applyHistoryCollapsed', applyHistoryCollapsed);
   await safe('mountHistoryWorkspaceDock', mountHistoryWorkspaceDock);
   await safe('loadRunningIntroCopy', loadRunningIntroCopy);

@@ -11,7 +11,7 @@
  *    因此不触发 check-security 的 innerHTML-插值规则，也不是 XSS 面。
  */
 
-import type { Attachment, TeamArtifactCard, WikiPage } from './backend-client';
+import type { Attachment, InspirationSurface, TeamArtifactCard, WikiPage } from './backend-client';
 import type { FileChange, TodoItem } from './state';
 import { renderMarkdownHtml, renderMarkdownHtmlStreaming } from './markdown';
 import { escapeHtml } from '../shared/html';
@@ -1160,8 +1160,12 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
 
   // HTML 成果直接以网站卡打开右侧 Browser workbench；这是确定性 UI 动作，
   // 不需要把 browser 工具暴露给模型。
-  const artifactCard = renderTurnHtmlArtifactCard(messages);
-  if (artifactCard) frag.appendChild(artifactCard);
+  const inspirationCard = renderTurnInspirationSurfaceCard(messages);
+  if (inspirationCard) frag.appendChild(inspirationCard);
+  else {
+    const artifactCard = renderTurnHtmlArtifactCard(messages);
+    if (artifactCard) frag.appendChild(artifactCard);
+  }
 
   // 正文下方：本轮文件改动卡（仅在有改动时出现；final 时由 finalReducer patch 进消息）。
   const fileCard = renderTurnFileChangesCard(messages);
@@ -1380,6 +1384,38 @@ function splitFilePath(path: string): { dir: string; name: string } {
   const idx = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
   if (idx < 0) return { dir: '', name: path };
   return { dir: path.slice(0, idx + 1), name: path.slice(idx + 1) };
+}
+
+function parseInspirationSurface(raw?: string): InspirationSurface | null {
+  if (!raw) return null;
+  try {
+    const data = JSON.parse(raw) as { surface?: unknown };
+    if (!data.surface || typeof data.surface !== 'object') return null;
+    const surface = data.surface as Record<string, unknown>;
+    if (surface.kind !== 'inspiration' || !['site', 'canvas', 'widget'].includes(String(surface.mode || ''))) return null;
+    if (typeof surface.sessionId !== 'string' || typeof surface.title !== 'string') return null;
+    return surface as unknown as InspirationSurface;
+  } catch { return null; }
+}
+
+function renderTurnInspirationSurfaceCard(messages: ChatMessage[]): HTMLElement | null {
+  const surface = [...messages].reverse().flatMap((message) => [...(message.toolCalls || [])].reverse())
+    .map((tool) => parseInspirationSurface(tool.result)).find(Boolean);
+  if (!surface) return null;
+  const card = document.createElement('article');
+  card.className = 'msg__artifact-card msg__inspiration-card';
+  card.setAttribute('aria-label', `${surface.title}，灵感 App`);
+  const icon = createTrustedElement<HTMLElement>(
+    '<span class="msg__artifact-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.7 5.3a2 2 0 0 1-1.3 1.3L4 11.3l5 1.7a2 2 0 0 1 1.3 1.3L12 20l1.7-5.7A2 2 0 0 1 15 13l5-1.7-5-1.7a2 2 0 0 1-1.3-1.3Z"/></svg></span>',
+  );
+  const copy = document.createElement('div'); copy.className = 'msg__artifact-copy';
+  const title = document.createElement('strong'); title.textContent = surface.title;
+  const detail = document.createElement('span'); detail.textContent = surface.status === 'preparing' ? '正在生成，可实时查看' : '可以使用和批注';
+  copy.append(title, detail);
+  const open = document.createElement('button'); open.type = 'button'; open.className = 'msg__artifact-open';
+  open.dataset.inspirationSurface = JSON.stringify(surface); open.textContent = '打开';
+  card.append(icon, copy, open);
+  return card;
 }
 
 function renderTurnHtmlArtifactCard(messages: ChatMessage[]): HTMLElement | null {

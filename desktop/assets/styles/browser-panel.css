@@ -321,6 +321,61 @@ body.browser-workbench-open .task-board-toggle { color: var(--text-secondary, va
   color: var(--accent-fg, #fff);
 }
 
+/* 页面接管确认条：非模态，挂在工具栏与 stage 之间（stage 浮层会被原生视图盖住）。 */
+.browser-takeover {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.browser-takeover[hidden] { display: none; }
+.browser-takeover__text { flex: 1; min-width: 0; color: var(--text-secondary); }
+.browser-takeover__btn {
+  height: 25px;
+  padding: 0 12px;
+  flex: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.browser-takeover__btn:hover { color: var(--text-primary); background: var(--color-black-overlay-1); }
+.browser-takeover__btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg, #fff);
+}
+.browser-takeover__btn--primary:hover {
+  background: var(--accent-hover, var(--accent));
+  border-color: var(--accent-hover, var(--accent));
+  color: var(--accent-fg, #fff);
+}
+
+/* 加载失败遮罩：盖住白屏那一屏，样式与空态对齐。 */
+.browser-load-error { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 24px; background: var(--surface); color: var(--text-secondary); font-size: 12px; text-align: center; }
+.browser-load-error[hidden] { display: none; }
+.browser-load-error strong { color: var(--text-primary); font-size: 15px; font-weight: 600; line-height: 1.35; }
+.browser-load-error span { max-width: 100%; overflow-wrap: anywhere; color: var(--text-muted); }
+.browser-load-error__retry {
+  height: 25px;
+  margin-top: 3px;
+  padding: 0 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.browser-load-error__retry:hover { color: var(--text-primary); background: var(--color-black-overlay-1); }
+
 @keyframes browser-recording-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
