@@ -5,6 +5,8 @@
  */
 
 .page-shell--wiki {
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
