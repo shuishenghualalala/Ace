@@ -1,0 +1,8 @@
+<meta charset="utf-8">
+<title>契约测试子框架</title>
+<button id="fb">框架内按钮</button>
+<script>
+  document.getElementById('fb').addEventListener('click', () => {
+    parent.postMessage('frame-clicked', '*');
+  });
+</script>

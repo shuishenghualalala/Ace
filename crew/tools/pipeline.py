@@ -290,6 +290,10 @@ _PRIMARY_ARG: dict[str, str] = {
     "patch": "path",
     "glob": "pattern",
     "grep": "pattern",
+    # record_replay.inputs may contain passwords, identifiers, and selected
+    # values. Permission matching/cards bind only the opaque workflow identity;
+    # the replay resolver separately binds a digest of the complete arguments.
+    "record_replay": "workflow_id",
 }
 
 

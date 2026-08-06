@@ -113,7 +113,11 @@ def _sanitize_llm_trace(value: Any, *, browser_scope: bool = False) -> Any:
         ):
             return {"type": "image", "redacted": True}
         name = str(value.get("name") or "")
-        local_browser = browser_scope or name.startswith("browser_")
+        local_browser = (
+            browser_scope
+            or name.startswith("browser_")
+            or name == "record_replay"
+        )
         clean: dict[str, Any] = {}
         for key, item in value.items():
             if local_browser and key in {"arguments", "input", "content", "text", "value", "data"}:

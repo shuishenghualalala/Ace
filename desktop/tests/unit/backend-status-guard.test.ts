@@ -19,12 +19,14 @@ type StatusCb = (s: {
 describe('backend-status-guard slow overlay', () => {
   let statusCb: StatusCb | null = null;
   let retryCalled = 0;
+  let initialStatus: StatusCb extends (s: infer S) => void ? S : never;
 
   beforeEach(() => {
     vi.resetModules();
     vi.useFakeTimers();
     statusCb = null;
     retryCalled = 0;
+    initialStatus = { connected: false };
     recoveryMocks.loadConfig.mockClear();
     document.body.innerHTML = `
       <div id="backend-loading-overlay">
@@ -41,6 +43,7 @@ describe('backend-status-guard slow overlay', () => {
           statusCb = cb;
           return () => {};
         },
+        getBackendStatus: async () => initialStatus,
         retryGateway: () => {
           retryCalled += 1;
         },
@@ -94,6 +97,14 @@ describe('backend-status-guard slow overlay', () => {
     statusCb!({ connected: true });
     expect(document.getElementById('backend-loading-overlay')!.style.display).toBe('none');
     expect(document.getElementById('backend-loading-actions')!.style.display).toBe('none');
+  });
+
+  it('hydrates the current status when the ready event was sent before subscription', async () => {
+    initialStatus = { connected: true, logPath: '/tmp/gw.log' };
+    await loadGuard();
+    await vi.waitFor(() => {
+      expect(document.getElementById('backend-loading-overlay')!.style.display).toBe('none');
+    });
   });
 
   it('reloads model and feature config when the Gateway becomes available again', async () => {

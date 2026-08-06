@@ -71,6 +71,15 @@
             <span class="browser-tab-status" id="browser-workbench-status" aria-hidden="true"></span>
           </button>
         </div>
+        <div class="top-bar-user">
+          <button type="button" class="user-avatar-btn" id="user-avatar-btn" aria-label="账户">
+            <span class="user-avatar-btn__icon" id="sidebar-user-avatar" aria-hidden="true">A</span>
+          </button>
+          <div id="user-section" class="user-section" hidden>
+            <div class="user-section__name" id="sidebar-user-name">-</div>
+            <div class="user-section__email" id="sidebar-user-email">-</div>
+          </div>
+        </div>
       </div>
 
       <!-- 右侧 Inspector：独立于 #chat-tab，与顶栏同列贯穿整高 -->
@@ -358,34 +367,44 @@
   <!-- 设置弹窗（侧栏齿轮按钮触发，内部：左 tab + 右表单） -->
   <div id="settings-pane-staging" hidden>
         <div class="set-v2-pane" id="settings-pane-account">
-          <div class="set-v2-pane__title">本地环境</div>
-          <div class="set-v2-pane__desc">Ace 在当前用户的本机环境中运行，不依赖在线账户或远程登录。</div>
+          <div class="set-v2-pane__title">账户</div>
+          <div class="set-v2-pane__desc">管理登录账户与会话隔离。</div>
 
           <div class="set-v2-section" id="set-account-section">
-            <div class="set-account-card">
+            <!-- 已登录视图 -->
+            <div class="set-account-card" id="set-account-logged-in" hidden>
               <div class="set-account-card__hero">
-                <div class="set-account-card__avatar" aria-hidden="true">A</div>
+                <div class="set-account-card__avatar" id="set-account-avatar" aria-hidden="true">A</div>
                 <div class="set-account-card__body">
-                  <div class="set-account-card__name">本地工作区</div>
+                  <div class="set-account-card__name" id="set-account-name">-</div>
                   <div class="set-account-card__eyebrow">
-                    <span class="set-account-card__badge">可用</span>
-                    <span class="set-account-card__sub">无需在线账户</span>
+                    <span class="set-account-card__badge" id="set-account-provider">本机模式</span>
                   </div>
                 </div>
               </div>
               <div class="set-account-card__list">
                 <div class="set-account-card__row">
-                  <div class="set-account-card__label">数据目录</div>
-                  <div class="set-account-card__value">~/.Crew</div>
+                  <div class="set-account-card__label" id="set-account-contact-label">手机号</div>
+                  <div class="set-account-card__value" id="set-account-phone">-</div>
                 </div>
                 <div class="set-account-card__row">
-                  <div class="set-account-card__label">连接方式</div>
-                  <div class="set-account-card__value">本机 Gateway</div>
+                  <div class="set-account-card__label">用户 ID</div>
+                  <div class="set-account-card__value" id="set-account-user-id">-</div>
                 </div>
               </div>
               <div class="set-account-card__actions">
-                <span class="set-account-empty__desc">会话、配置和运行日志均保存在当前用户环境中。</span>
+                <button type="button" class="set-v2-btn set-v2-btn--danger" id="set-account-logout" hidden>退出登录</button>
               </div>
+            </div>
+
+            <!-- 未登录视图 -->
+            <div class="set-account-empty" id="set-account-logged-out">
+              <div class="set-account-empty__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
+              </div>
+              <div class="set-account-empty__title" id="set-account-empty-title">尚未登录</div>
+              <div class="set-account-empty__desc" id="set-account-empty-desc">登录后，会话、模型配置和 Wiki 数据将按用户隔离。</div>
+              <button type="button" class="set-v2-btn set-v2-btn--primary" id="set-account-go-login" hidden>前往登录</button>
             </div>
           </div>
         </div>
@@ -609,6 +628,29 @@
           </div>
         </div>
   </div>
+
+  <!-- 登录墙：email/remote 模式下未登录时显示，覆盖全部 UI -->
+  <div id="login-modal" class="login-modal" hidden role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <div class="login-modal__card">
+      <div class="login-modal__header">
+        <h2 id="login-title" class="login-modal__title">登录 Ace</h2>
+        <button type="button" id="login-quit" class="login-modal__quit" aria-label="退出应用">×</button>
+      </div>
+      <div class="login-modal__body">
+        <div id="login-message" class="login-message" hidden></div>
+        <div class="login-modal__field">
+          <label id="login-identifier-label" class="login-modal__label" for="login-phone">手机号</label>
+          <input id="login-phone" class="login-modal__input" type="tel" autocomplete="tel" placeholder="请输入手机号" maxlength="32" />
+        </div>
+        <div id="login-code-group" class="login-modal__field login-modal__code-row">
+          <input id="login-code" class="login-modal__input" type="text" autocomplete="one-time-code" placeholder="验证码" maxlength="8" />
+          <button type="button" id="login-get-code" class="login-modal__code-btn">获取验证码</button>
+        </div>
+        <button type="button" id="login-submit" class="login-modal__submit">登录</button>
+      </div>
+    </div>
+  </div>
+
     <div id="renderer-overlay-host" aria-label="应用浮层"></div>
   </div>
 

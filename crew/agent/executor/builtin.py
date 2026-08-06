@@ -43,6 +43,7 @@ from crew.core.interfaces import LLMProvider, ToolRegistry
 from crew.core.types import Message, ToolResult
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger
+from crew.tools.policy import ToolDisclosureMode
 from crew.tools.tool_search import (
     ToolSearchConfig,
     assemble_tool_schemas,
@@ -220,10 +221,12 @@ class BuiltinExecutor(AgentExecutor):
 
         system_msg = Message.system(ctx.system_prompt)
         original_tools = ctx.tool_schemas or []
-        # Wiki 会话关闭渐进披露：wiki_* 工具全部直接暴露，模型直接调用而非经
-        # tool_search，前端工具时间线直接显示真实工具中文名。
+        # 披露模式不改变授权范围。DIRECT 直接发送全部已授权 schema；
+        # PROGRESSIVE 才按全局 ToolSearch 配置装配。
         ts_config = (
-            ToolSearchConfig(enabled="off") if ctx.disable_tool_search else None
+            ToolSearchConfig(enabled="off")
+            if ctx.tool_disclosure_mode is ToolDisclosureMode.DIRECT
+            else None
         )
         tool_search_assembly = assemble_tool_schemas(original_tools, config=ts_config)
         deferred_tools_message = available_deferred_tools_message(tool_search_assembly)
@@ -347,6 +350,7 @@ class BuiltinExecutor(AgentExecutor):
             #   每轮 compact_view 做水位压缩，未触水位时近乎零成本。
             #   overflow_mode 是 provider 报溢出后的紧急兜底，从全量 ctx.messages 重新激进压缩。
             if overflow_mode and self.compactor is not None:
+                yield ResponseChunk.compaction_event(rid, True, next_seq())
                 try:
                     from crew.core.runctx import current_owner_account_id
 
@@ -365,12 +369,26 @@ class BuiltinExecutor(AgentExecutor):
                 except Exception as exc:  # noqa: BLE001
                     log.warning("force_compact 失败，按原视图发送：%s", exc)
                     view_messages = list(ctx.messages)
+                finally:
+                    yield ResponseChunk.compaction_event(rid, False, next_seq())
             elif self.compactor is not None:
-                view_messages = await self.compactor.compact_view(
+                will_compact_view = getattr(self.compactor, "will_compact_view", None)
+                show_compaction = bool(will_compact_view and will_compact_view(
                     view_messages,
                     ctx.session_id,
                     owner_account_id=owner_account_id,
-                )
+                ))
+                if show_compaction:
+                    yield ResponseChunk.compaction_event(rid, True, next_seq())
+                try:
+                    view_messages = await self.compactor.compact_view(
+                        view_messages,
+                        ctx.session_id,
+                        owner_account_id=owner_account_id,
+                    )
+                finally:
+                    if show_compaction:
+                        yield ResponseChunk.compaction_event(rid, False, next_seq())
             view = view_messages
             api_messages = [system_msg]
             if deferred_tools_message:
@@ -666,8 +684,6 @@ class BuiltinExecutor(AgentExecutor):
         providers = provider_chain(self.provider, self.fallback_providers)
         prov_idx = 0
         attempt = 0
-        tool_planning_emitted = False
-
         while True:
             provider = providers[prov_idx]
             accumulated = ""
@@ -725,9 +741,6 @@ class BuiltinExecutor(AgentExecutor):
                         first_event = event_elapsed
                     if chunk.reasoning_content and first_reasoning is None:
                         first_reasoning = event_elapsed
-                        if effective_tools and not tool_planning_emitted:
-                            tool_planning_emitted = True
-                            yield ResponseChunk.tool_planning_event(rid, next_seq())
                     if chunk.reasoning_content and not chunk.done:
                         merged_reasoning = self._merge_streaming_reasoning(
                             reasoning,

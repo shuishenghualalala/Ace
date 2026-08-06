@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator
 from crew.agent.skills import SkillActivation
 from crew.core.envelope import ResponseChunk
 from crew.core.types import Message
+from crew.tools.policy import ToolDisclosureMode
 
 if False:  # 仅类型提示，避免运行期循环导入
     from crew.agent.loop.control import TurnControl
@@ -42,9 +43,8 @@ class ExecutionContext:
     max_iterations: int | None = None  # None=继承 executor 默认；0=无限
     # 本轮可控性句柄（steer / interrupt）；None 表示不接受外部干预
     control: "TurnControl | None" = None
-    # 专用 Wiki Agent 关闭渐进披露，直接暴露其授权工具；普通会话中的 Wiki
-    # 只读工具仍按 deferred_toolsets 规则延迟加载。
-    disable_tool_search: bool = False
+    # 只控制“已授权工具如何向模型披露”，不改变授权范围。
+    tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE
 
 
 class AgentExecutor(ABC):

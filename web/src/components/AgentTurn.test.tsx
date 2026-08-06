@@ -25,15 +25,6 @@ function extractBodyText(html: string): string {
 }
 
 describe("AgentTurn", () => {
-  it("工具规划状态进入实时过程时间线", () => {
-    const html = renderHtml(
-      [{ id: "planning", role: "status", text: "正在规划工具调用…" }],
-      true,
-    );
-    expect(html).toContain("正在规划工具调用…");
-    expect(html).toContain("msg__foldable");
-  });
-
   it("单条 assistant text 渲染为正文，不进入时间线", () => {
     const messages: UiMessage[] = [
       { id: "a1", role: "assistant", text: "这是最终回复。" },

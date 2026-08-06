@@ -22,6 +22,16 @@ from crew.evolution.models import OptimizationSuggestion, SkillUsageStat
 logger = logging.getLogger(__name__)
 
 
+def _current_owner_for_audit() -> str | None:
+    """取当前 owner 记入技能审计；取不到由审计层记成 system。"""
+    try:
+        from crew.core.runctx import current_owner_account_id
+
+        return str(current_owner_account_id.get() or "") or None
+    except Exception:
+        return None
+
+
 class SkillOptimizer:
     """基于历史日志分析 skill 使用情况，生成并应用优化建议。"""
 
@@ -189,7 +199,18 @@ class SkillOptimizer:
         ))
 
         if not dry_run:
-            skill_path.write_text(new_text, encoding="utf-8")
+            # 走受治理的原地更新：互斥锁 + 路径 containment（内置技能不可改）+
+            # 审计日志 + 原子替换 + 失败回滚。此前是裸 write_text，四样全绕过。
+            from crew.agent.skills import update_skill_markdown
+
+            if not update_skill_markdown(
+                suggestion.skill_slug,
+                new_text,
+                operator_account_id=_current_owner_for_audit(),
+                source="crew.evolution.optimizer",
+            ):
+                logger.warning("skill %s 优化写入被拒绝", suggestion.skill_slug)
+                return ""
             suggestion.applied = True
 
         return patch

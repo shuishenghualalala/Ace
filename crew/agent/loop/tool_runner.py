@@ -886,6 +886,10 @@ class ToolRunner:
             "ui_label": ui_label,
         }
         if authorized:
+            # The start event, UI card and durable trace must share one
+            # presentation-safe projection.  Sending the runtime arguments here
+            # would retain browser form values even though the visible event was
+            # already redacted.
             trace_payload["arguments"] = ui_args
         llm_trace("tool_start", trace_payload)
         return ResponseChunk.tool_event(

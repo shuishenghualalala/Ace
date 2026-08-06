@@ -41,6 +41,12 @@ let slowDismissed = false;
 let buttonsBound = false;
 let lastComponentWarning = '';
 
+type BackendStatus = {
+  connected: boolean;
+  logPath?: string;
+  components?: Record<string, { status: string; message?: string }>;
+};
+
 function resolveOverlay(): HTMLElement | null {
   if (overlayEl) return overlayEl;
   overlayEl = document.getElementById(OVERLAY_ID);
@@ -176,7 +182,7 @@ export function initBackendStatusGuard(): void {
   // 初始态：后端尚未连接，立即展示遮罩（首帧就能看到）
   applyBackendOverlay(false);
 
-  window.Crew?.onBackendStatus?.((status) => {
+  const applyStatus = (status: BackendStatus): void => {
     const connected = !!status?.connected;
     const wasConnected = uiStore.get().backendConnected === true;
     if (status?.logPath) currentLogPath = status.logPath;
@@ -194,6 +200,13 @@ export function initBackendStatusGuard(): void {
     if (connected && !wasConnected) {
       void recoverAfterBackendConnected();
     }
+  };
+
+  // reload 后 did-finish-load 可能早于 renderer 完成认证恢复，那次推送会丢失。
+  // 先订阅后立即读一次主进程快照，保证已就绪时遮罩不会永久停留。
+  window.Crew?.onBackendStatus?.(applyStatus);
+  void window.Crew?.getBackendStatus?.().then(applyStatus).catch(() => {
+    // 保持遮罩，后续健康状态推送会继续接管。
   });
 }
 

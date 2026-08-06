@@ -258,12 +258,10 @@ class InteractionBridge:
             })
         if not tools:
             return []
-        return [{
-            "type": "namespace",
-            "name": "crew_interaction",
-            "description": "Crew interaction and governed heterogeneous-team control tools.",
-            "tools": tools,
-        }]
+        # 平铺返回，不再包 namespace：新版 codex app-server 的 dynamicTools
+        # 只接受 function 项（每项必须有 inputSchema，名称匹配 ^[a-zA-Z0-9_-]+$），
+        # namespace 包装会被直接拒绝（missing field `inputSchema`）。
+        return tools
 
     def _active_binding(self, token: str) -> ExternalInteractionBinding:
         binding = self.resolve_binding(token)

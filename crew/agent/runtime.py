@@ -42,6 +42,7 @@ from crew.core.types import Message, tool_arguments_for_history
 from crew.agent.auxiliary import generate_session_title
 from crew.agent.compact import ContextCompactor
 from crew.agent.executor import AgentExecutor, BuiltinExecutor, ExecutionContext
+from crew.tools.policy import ToolDisclosureMode
 from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.wiki.attachments import get_wiki_agent_attachment_messages
@@ -229,7 +230,7 @@ class SingleAgent(Agent):
         lightweight: bool = False,
         plan_manager: Any = None,
         wiki_manager: Any = None,
-        disable_tool_search: bool = False,
+        tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE,
         agent_id: str = "default",
         enabled_skills: list[str] | None = None,
         disabled_skills: list[str] | None = None,
@@ -270,8 +271,8 @@ class SingleAgent(Agent):
         self.plan_manager = plan_manager
         # Wiki Agent 会话管理器（仅 Wiki 预设注入）。
         self.wiki_manager = wiki_manager
-        # 专用 Wiki Agent 继承当前账号的全部工具范围，直接暴露真实 schema。
-        self.disable_tool_search = disable_tool_search
+        # 工具授权与披露分离：Wiki 使用 direct，其余默认 progressive。
+        self.tool_disclosure_mode = ToolDisclosureMode(tool_disclosure_mode)
         self.agent_id = safe_path_segment(agent_id, "default")
         # team member 派活前 drain 自己后台通知的回调（仅 team member 注入；主/子 agent 为 None）
         self.subagent_drain_fn = subagent_drain_fn
@@ -655,7 +656,10 @@ class SingleAgent(Agent):
 
         current_process_launch.set(envelope.params.get("_security_process_launch"))
         # 专用 Wiki Agent 自行建立 KB 状态；普通会话不创建 Wiki 会话状态。
-        if self.wiki_manager is not None and self.disable_tool_search:
+        if (
+            self.wiki_manager is not None
+            and self.tool_disclosure_mode is ToolDisclosureMode.DIRECT
+        ):
             wiki_kb_id = str(envelope.params.get("wiki_kb_id") or "").strip() or "default"
             self.wiki_manager.set_kb_id(task_sid, wiki_kb_id, owner_account_id=envelope.user_id)
         t0 = time.perf_counter()
@@ -787,6 +791,9 @@ class SingleAgent(Agent):
         authorized_tool_names = frozenset(
             effective_tool_filter if effective_tool_filter is not None else self.registry.names()
         )
+        from crew.core.runctx import current_authorized_tool_names
+
+        current_authorized_tool_names.set(authorized_tool_names)
         from crew.agent.skills import skill_activations_from_params
 
         ctx = ExecutionContext(
@@ -808,7 +815,7 @@ class SingleAgent(Agent):
             cwd=cwd,
             max_iterations=self.max_iterations,
             control=self.control,
-            disable_tool_search=self.disable_tool_search,
+            tool_disclosure_mode=self.tool_disclosure_mode,
         )
         t_exec = time.perf_counter()
         interrupted = False
@@ -1164,7 +1171,10 @@ class SingleAgent(Agent):
     def _session_needs_title(self, session_id: str, owner: str) -> bool:
         """占位标题的会话在首轮结束后仍应尝试生成摘要标题。"""
         try:
-            rows = self.session_store.list_sessions(owner_account_id=owner)
+            # 不排除渠道会话（agent:main:*）：它们同样需要首轮后的自动摘要标题。
+            rows = self.session_store.list_sessions(
+                owner_account_id=owner, exclude_channel_sessions=False
+            )
         except Exception:  # noqa: BLE001
             return False
         from crew.state.session_store import is_placeholder_title

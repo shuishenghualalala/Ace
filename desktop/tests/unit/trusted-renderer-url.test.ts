@@ -9,6 +9,7 @@ describe('isTrustedRendererFileUrl', () => {
 
   it('accepts only the exact local renderer file URL', () => {
     expect(isTrustedRendererFileUrl(exact, expectedFile)).toBe(true);
+    expect(isTrustedRendererFileUrl(`${exact}?launchMode=dev`, expectedFile, '?launchMode=dev')).toBe(true);
   });
 
   it('rejects protocol, hostname, pathname, query, and fragment changes', () => {
@@ -18,6 +19,7 @@ describe('isTrustedRendererFileUrl', () => {
       `file://attacker.invalid${pathname}`,
       pathToFileURL(path.resolve('/tmp/other/index.html')).href,
       `${exact}?injected=1`,
+      `${exact}?launchMode=account`,
       `${exact}#injected`,
       'not a URL',
     ]) {

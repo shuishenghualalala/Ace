@@ -1,4 +1,4 @@
-"""MCP Client（连真 stdio server）+ MCP Server（FastMCP 工具）。"""
+"""MCP 2 Client（连真 stdio server）+ MCPServer 工具。"""
 
 import asyncio
 import os
@@ -9,8 +9,8 @@ import pytest
 
 pytest.importorskip("mcp")  # 未装 mcp 包则跳过
 
-from crew.app import CrewApp
 from crew.agent.skills import SkillActivation
+from crew.app import CrewApp
 from crew.core.mocks import FakeProvider, InMemorySessionStore, InMemoryWorkspaceStore, NullMemory
 from crew.core.types import Message, ToolCall
 from crew.gateway.interaction_bridge import InteractionBridge
@@ -62,11 +62,65 @@ async def test_mcp_client_connects_and_calls():
     await mgr.await_started()  # start 为 fire-and-forget，需显式等待后台注册完成
     try:
         assert "echo__echo" in reg.names()  # 外部工具已注册
+        registered = reg.get("echo__echo")
+        assert registered.parameters["required"] == ["text"]
+        assert registered.parameters["properties"]["text"]["type"] == "string"
         res = await reg.execute(ToolCall("1", "echo__echo", {"text": "hi"}))
         assert not res.is_error
         assert "echo: hi" in res.content
+
+        failed = await reg.execute(ToolCall("2", "echo__fail", {"message": "expected failure"}))
+        assert failed.is_error
+        assert "expected failure" in failed.content
     finally:
         await mgr.aclose()
+
+
+async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch):
+    """HTTP 分支使用 MCP 2 的 streamable_http_client、httpx2 和双元素流。"""
+    import httpx2
+    from mcp.server import MCPServer
+
+    server = MCPServer("http-echo", version="2.0-test")
+
+    @server.tool()
+    def http_echo(text: str) -> str:
+        return f"http echo: {text}"
+
+    app = server.streamable_http_app(stateless_http=True, json_response=True)
+    original_async_client = httpx2.AsyncClient
+    seen: dict[str, object] = {}
+
+    def asgi_client(**kwargs):
+        seen.update(kwargs)
+        return original_async_client(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8000",
+            **kwargs,
+        )
+
+    monkeypatch.setattr(httpx2, "AsyncClient", asgi_client)
+    reg = Registry()
+    mgr = MCPClientManager({
+        "remote": {
+            "url": "http://127.0.0.1:8000/mcp",
+            "transport": "http",
+            "headers": {"X-MCP-Test": "mcp2"},
+        }
+    })
+
+    async with app.router.lifespan_context(app):
+        await mgr.start(reg)
+        await mgr.await_started()
+        try:
+            assert "remote__http_echo" in reg.names()
+            assert seen["headers"] == {"X-MCP-Test": "mcp2"}
+            assert seen["follow_redirects"] is True
+            result = await reg.execute(ToolCall("http-1", "remote__http_echo", {"text": "hi"}))
+            assert not result.is_error
+            assert "http echo: hi" in result.content
+        finally:
+            await mgr.aclose()
 
 
 async def test_mcp_client_empty_config_noop():
@@ -128,6 +182,38 @@ async def test_mcp_server_sessions_list_reads_store():
     server = build_mcp_server(crew)
     result = await server.call_tool("sessions_list", {"owner_account_id": "A:uid-a"})
     assert "s1" in str(result)
+
+
+async def test_mcp_server_round_trips_through_mcp2_client():
+    """内置 Crew MCPServer 能被 MCP 2 Client 发现并通过协议实际调用。"""
+    from mcp import Client
+
+    crew = _crew()
+    crew.session_store.save(
+        "protocol-s1",
+        [Message.user("协议往返")],
+        owner_account_id="A:protocol-user",
+    )
+    server = build_mcp_server(crew)
+
+    async with Client(server, mode="auto") as client:
+        tools = await client.list_tools()
+        assert "sessions_list" in {tool.name for tool in tools.tools}
+        result = await client.call_tool(
+            "sessions_list",
+            {"owner_account_id": "A:protocol-user"},
+        )
+
+    assert result.is_error is False
+    assert "protocol-s1" in _extract_protocol_text(result)
+
+
+def _extract_protocol_text(result) -> str:
+    return "\n".join(
+        str(getattr(block, "text", ""))
+        for block in result.content
+        if getattr(block, "type", "") == "text"
+    )
 
 
 async def test_interaction_mcp_server_only_exposes_followup():

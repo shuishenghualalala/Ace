@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+import urllib.parse
 from collections.abc import Awaitable
 from contextvars import ContextVar
 from pathlib import Path
@@ -188,7 +189,10 @@ _SHORT_SOURCE_THRESHOLD = 1_000
 _LONG_SOURCE_ENTITY_LIMIT = 5
 _LONG_SOURCE_TOPIC_LIMIT = 3
 _SHORT_SOURCE_ENTITY_LIMIT = 3
-_ANALYSIS_MAX_TOKENS = 2_500
+# 推理型模型（如 deepseek-v4 系列）会先烧掉一笔不可见的推理 token，过小的
+# 上限会让正文一个字都吐不出来（实测空返回）；这里只是上限而非目标，
+# 非推理模型不受影响。
+_ANALYSIS_MAX_TOKENS = 20_000
 
 
 def _split_into_semantic_chunks(content: str, max_size: int = _CHUNK_SIZE_CHARS) -> list[str]:
@@ -1010,20 +1014,6 @@ class WikiCompiler:
         pages: list[WikiPage] = []
         created_titles: set[str] = set()
 
-        # source 页面：保存原始内容
-        source_page = self._ensure_source_page(
-            source_id,
-            raw,
-            source_content,
-            owner_account_id,
-            kb_id,
-            source_summary=analysis.get("source_summary"),
-            entities=analysis.get("entities") or [],
-            topics=analysis.get("topics") or [],
-        )
-        pages.append(source_page)
-        created_titles.add(source_page.title)
-
         # entities
         _check_cancelled(cancel_event)
         for ent in analysis.get("entities", []):
@@ -1059,7 +1049,23 @@ class WikiCompiler:
                 pages.append(page)
                 created_titles.add(page.title)
 
-        # 更新 related 关系
+        # source 摘要只引用本轮实际生成或更新成功的知识页面，避免展示无法跳转的链接。
+        entity_pages = [page for page in pages if page.page_type == "entity"]
+        topic_pages = [page for page in pages if page.page_type == "topic"]
+        source_page = self._ensure_source_page(
+            source_id,
+            raw,
+            source_content,
+            owner_account_id,
+            kb_id,
+            source_summary=analysis.get("source_summary"),
+            entities=[{"name": page.title} for page in entity_pages],
+            topics=[{"name": page.title} for page in topic_pages],
+        )
+        pages.insert(0, source_page)
+        created_titles.add(source_page.title)
+
+        # 将分析结果编译为基于页面 ID 的有类型关系。
         _check_cancelled(cancel_event)
         relationships = analysis.get("relationships", [])
         self._apply_relationships(pages, relationships, owner_account_id, kb_id)
@@ -1071,8 +1077,8 @@ class WikiCompiler:
 
         await _notify_progress(progress, "done", {"source_id": source_id, "page_count": len(pages)})
 
-        # 页面变化只标记摘要过期；是否调用 LLM 重新分析由 Agent 明确决定。
-        self._mark_summary_stale(owner_account_id, kb_id)
+        # 页面变化后台刷新知识库摘要（内容 hash 未变时不触发 LLM）
+        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
 
         # 追加操作日志
         try:
@@ -1174,34 +1180,6 @@ class WikiCompiler:
         # 干跑：计算计划而不写入
         planned: list[PlannedPage] = []
 
-        # source page
-        source_title = raw.title or source_id
-        source_page_content = _build_source_page_content(
-            source_title,
-            raw,
-            source_content,
-            analysis.get("source_summary"),
-            analysis.get("entities") or [],
-            analysis.get("topics") or [],
-        )
-        existing_source = self.store.get_source_page(source_id, owner_account_id, kb_id)
-        if existing_source is not None:
-            planned.append(PlannedPage(
-                title=source_title, page_type="source", action="update",
-                content=source_page_content,
-                is_new=False,
-                target_page_id=existing_source.id,
-                target_content_sha256=hashlib.sha256(
-                    existing_source.content.encode("utf-8")
-                ).hexdigest(),
-            ))
-        else:
-            planned.append(PlannedPage(
-                title=source_title, page_type="source", action="create",
-                content=source_page_content,
-                is_new=True,
-            ))
-
         # entities
         for e in analysis.get("entities", []):
             pp = self._plan_page(
@@ -1219,6 +1197,46 @@ class WikiCompiler:
             pp = self._plan_topic(t, source_id, owner_account_id, kb_id)
             if pp:
                 planned.append(pp)
+
+        # source page 只引用通过规划门槛、确实会被写入的知识页面。
+        source_title = raw.title or source_id
+        planned_entities = [
+            {"name": page.title}
+            for page in planned
+            if page.page_type == "entity"
+        ]
+        planned_topics = [
+            {"name": page.title}
+            for page in planned
+            if page.page_type == "topic"
+        ]
+        source_page_content = _build_source_page_content(
+            source_title,
+            raw,
+            source_content,
+            analysis.get("source_summary"),
+            planned_entities,
+            planned_topics,
+            kb_id=kb_id,
+        )
+        existing_source = self.store.get_source_page(source_id, owner_account_id, kb_id)
+        if existing_source is not None:
+            source_plan = PlannedPage(
+                title=source_title, page_type="source", action="update",
+                content=source_page_content,
+                is_new=False,
+                target_page_id=existing_source.id,
+                target_content_sha256=hashlib.sha256(
+                    existing_source.content.encode("utf-8")
+                ).hexdigest(),
+            )
+        else:
+            source_plan = PlannedPage(
+                title=source_title, page_type="source", action="create",
+                content=source_page_content,
+                is_new=True,
+            )
+        planned.insert(0, source_plan)
 
         total_new = sum(1 for p in planned if p.action == "create")
         total_update = sum(1 for p in planned if p.action == "update")
@@ -1298,32 +1316,75 @@ class WikiCompiler:
             ]
 
         applied_pages: list[WikiPage] = []
+        linked_pages: list[WikiPage] = []
         skipped_titles: list[str] = []
 
         await _notify_progress(progress, "analyze", {"source_id": source_id})
 
+        source_plan = next(
+            (page for page in pages_to_apply if page.page_type == "source"),
+            None,
+        )
         for planned in pages_to_apply:
             _check_cancelled(cancel_event)
             if planned.page_type == "source":
-                page = self._ensure_source_page(
-                    source_id,
-                    raw,
-                    source_content,
+                continue
+            if planned.action == "skip":
+                existing = self.store.resolve_page(
+                    planned.title,
+                    planned.page_type,
+                    planned.aliases,
                     owner_account_id,
                     kb_id,
-                    prepared_content=planned.content,
                 )
+                if existing is not None:
+                    linked_pages.append(existing)
+                continue
             else:
                 page = self._apply_plan(planned, source_id, owner_account_id, kb_id)
 
             if page is not None:
                 applied_pages.append(page)
+                linked_pages.append(page)
             else:
                 skipped_titles.append(planned.title)
+
+        if source_plan is not None:
+            entity_titles = [
+                page.title for page in linked_pages if page.page_type == "entity"
+            ]
+            topic_titles = [
+                page.title for page in linked_pages if page.page_type == "topic"
+            ]
+            source_content_filtered = _replace_source_page_links(
+                source_plan.content,
+                entity_titles,
+                topic_titles,
+            )
+            source_page = self._ensure_source_page(
+                source_id,
+                raw,
+                source_content,
+                owner_account_id,
+                kb_id,
+                prepared_content=source_content_filtered,
+            )
+            applied_pages.insert(0, source_page)
 
         # 应用关系（只在实际写入的页面间）
         _check_cancelled(cancel_event)
         self._apply_relationships(applied_pages, plan.relationships, owner_account_id, kb_id)
+        source_page = next((page for page in applied_pages if page.page_type == "source"), None)
+        knowledge_pages = [page for page in linked_pages if page.page_type in {"entity", "topic"}]
+        if source_page is not None:
+            source_page.relations = [
+                WikiRelation(
+                    target_page_id=page.id,
+                    relation="describes" if page.page_type == "entity" else "covers",
+                )
+                for page in knowledge_pages
+            ]
+            self.store.update(source_page, owner_account_id, kb_id)
 
         # 更新 index.md；批处理会在全部来源完成后统一更新一次。
         _check_cancelled(cancel_event)
@@ -1332,8 +1393,8 @@ class WikiCompiler:
 
         await _notify_progress(progress, "done", {"source_id": source_id, "page_count": len(applied_pages)})
 
-        # 页面变化只标记摘要过期；是否调用 LLM 重新分析由 Agent 明确决定。
-        self._mark_summary_stale(owner_account_id, kb_id)
+        # 页面变化后台刷新知识库摘要（内容 hash 未变时不触发 LLM）
+        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
 
         # 追加操作日志
         try:
@@ -1701,7 +1762,7 @@ class WikiCompiler:
         self._update_index(owner_account_id, kb_id)
         self.store.append_log([message], owner_account_id=owner_account_id, kb_id=kb_id)
         self.store.update_home(owner_account_id=owner_account_id, kb_id=kb_id)
-        self._mark_summary_stale(owner_account_id, kb_id)
+        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
         self._schedule_home_intro_refresh(owner_account_id, kb_id)
 
     def _schedule_home_intro_refresh(
@@ -1742,15 +1803,42 @@ class WikiCompiler:
                 exc,
             )
 
-    def _mark_summary_stale(
+    def _schedule_kb_summary_refresh(
         self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
+        owner_account_id: str,
+        kb_id: str,
     ) -> None:
-        """确定性标记摘要过期，不在写入路径中隐式调用 LLM。"""
-        summary = self.store.get_kb_summary(owner_account_id=owner_account_id, kb_id=kb_id)
-        summary.status = "stale"
-        self.store.set_kb_summary(summary, owner_account_id=owner_account_id, kb_id=kb_id)
+        """后台 fire-and-forget 刷新知识库摘要；无事件循环的环境直接跳过。
+
+        摘要只在内容 hash 变化时重新生成（见 generate_kb_summary），
+        不阻塞当前写入流程。
+        """
+        if self.summarizer is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._refresh_kb_summary(owner_account_id, kb_id))
+
+    async def _refresh_kb_summary(
+        self,
+        owner_account_id: str,
+        kb_id: str,
+    ) -> None:
+        try:
+            await self.summarizer.generate_kb_summary(
+                owner_account_id,
+                kb_id,
+                force=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "知识库摘要后台刷新失败 %s:%s: %s",
+                owner_account_id,
+                kb_id,
+                exc,
+            )
 
     async def compile_all(
         self,
@@ -1891,7 +1979,7 @@ class WikiCompiler:
             next_cursor = None
         if apply and selected:
             self._update_index(owner_account_id, kb_id)
-            self._mark_summary_stale(owner_account_id, kb_id)
+            self._schedule_kb_summary_refresh(owner_account_id, kb_id)
             self.store.append_log(
                 [
                     "批量 ingest 完成："
@@ -2063,7 +2151,11 @@ class WikiCompiler:
             existing.content = content
             existing.summary = summary
             existing.sources = source_ids
-            existing.related = [page.title for page in seeds[:12]]
+            existing.related = []
+            existing.relations = [
+                WikiRelation(target_page_id=seed.id, relation="references")
+                for seed in seeds[:12]
+            ]
             page = self.store.update(existing, owner_account_id, kb_id) or existing
         else:
             page = self.store.save_page(
@@ -2074,7 +2166,10 @@ class WikiCompiler:
                     content=content,
                     file_path="",
                     sources=source_ids,
-                    related=[page.title for page in seeds[:12]],
+                    relations=[
+                        WikiRelation(target_page_id=seed.id, relation="references")
+                        for seed in seeds[:12]
+                    ],
                     tags=[suffix],
                     summary=summary,
                 ),
@@ -2220,10 +2315,12 @@ class WikiCompiler:
         warnings: list[str] = []
         for attempt in range(_ANALYZE_CHUNK_MAX_RETRIES + 1):
             try:
+                # 推理型模型的"思考" token 与正文共享预算：文档越大推理消耗越多，
+                # 首轮预算可能全被推理烧掉导致正文为空；重试时预算翻倍兜底。
                 text = await chat_text(
                     self._provider_for_owner(self._analysis_owner.get()),
                     messages,
-                    max_tokens=_ANALYSIS_MAX_TOKENS,
+                    max_tokens=_ANALYSIS_MAX_TOKENS * (attempt + 1),
                 )
                 if not text:
                     raise ValueError("LLM 返回为空")
@@ -2292,30 +2389,12 @@ class WikiCompiler:
             source_summary,
             entities or [],
             topics or [],
+            kb_id=kb_id,
         )
         summary = (
             str((source_summary or {}).get("one_sentence") or "").strip()
             or _page_index_summary(page_content, max_len=180)
         )
-        related = list(dict.fromkeys(
-            [
-                *[
-                    str(item.get("name") or "").strip()
-                    for item in (entities or [])
-                    if str(item.get("name") or "").strip()
-                ],
-                *[
-                    str(item.get("name") or "").strip()
-                    for item in (topics or [])
-                    if str(item.get("name") or "").strip()
-                ],
-                *[
-                    value.strip()
-                    for value in re.findall(r"\[\[([^\]|]+)", page_content)
-                    if value.strip() and value.strip() != title
-                ],
-            ]
-        ))
         source_dir = SOURCE_DIRS.get(
             str(raw.source_kind if raw else "asset"),
             "assets",
@@ -2334,10 +2413,10 @@ class WikiCompiler:
                     target_dir,
                     filename_from_title(existing.title),
                 )
-                existing.file_path = str(target_path.relative_to(base))
+                existing.file_path = target_path.relative_to(base).as_posix()
             existing.content = page_content
             existing.summary = summary
-            existing.related = related
+            existing.related = []
             existing.updated_at = time.time()
             # 自愈 legacy 合并页：旧版按标题合并多来源，现以 source_id 为身份，
             # 收敛为单源，避免误删其他来源时连带删除本页。
@@ -2350,11 +2429,10 @@ class WikiCompiler:
             page_type="source",
             title=title,
             content=page_content,
-            file_path=str(
-                unique_file_path(target_dir, filename_from_title(title)).relative_to(base)
-            ),
+            file_path=unique_file_path(target_dir, filename_from_title(title))
+            .relative_to(base)
+            .as_posix(),
             sources=[source_id],
-            related=related,
             tags=[],
             summary=summary,
             created_at=time.time(),
@@ -2409,7 +2487,6 @@ class WikiCompiler:
             content=description,
             file_path="",
             sources=[source_id],
-            related=[],
             tags=[],
             created_at=time.time(),
             updated_at=time.time(),
@@ -2479,7 +2556,6 @@ class WikiCompiler:
             content=content,
             file_path="",
             sources=[source_id],
-            related=list(top.get("related", [])) or [],
             tags=[],
             created_at=time.time(),
             updated_at=time.time(),
@@ -2533,28 +2609,22 @@ class WikiCompiler:
             if src is None:
                 continue
             target = _resolve(tgt_title)
-            canonical_target = target.title if target else tgt_title
-            if canonical_target not in src.related:
-                src.related.append(canonical_target)
-                touched[src.id] = src
+            if target is None:
+                continue
             relation_type = str(rel.get("relation", "related")).strip() or "related"
-            relation_key = (normalize_page_key(canonical_target), relation_type.casefold())
+            relation_key = (target.id, relation_type.casefold())
             existing_relation_keys = {
-                (normalize_page_key(item.target), item.relation.casefold())
+                (item.target_page_id, item.relation.casefold())
                 for item in src.relations
             }
             if relation_key not in existing_relation_keys:
                 src.relations.append(
                     WikiRelation(
-                        target=canonical_target,
+                        target_page_id=target.id,
                         relation=relation_type,
                     )
                 )
                 touched[src.id] = src
-            # 同时反向也加入，简化双向链接
-            if target and src.title not in target.related:
-                target.related.append(src.title)
-                touched[target.id] = target
 
         # 写回
         for page in touched.values():
@@ -2593,12 +2663,9 @@ class WikiCompiler:
                 summary = page.summary or _page_index_summary(page.content)
                 quality: list[str] = [
                     f"来源 {len(page.sources)}",
+                    f"关系 {len(page.relations)}",
                     f"更新 {time.strftime('%Y-%m-%d', time.localtime(page.updated_at)) if page.updated_at else '-'}",
                 ]
-                if page.confidence:
-                    quality.append(f"置信度 {page.confidence}")
-                if page.contested:
-                    quality.append("存在争议")
                 lines.append(
                     f"- [[{page.title}]] — {summary} "
                     f"（{'；'.join(quality)}）"
@@ -2671,6 +2738,35 @@ def _page_index_summary(content: str, max_len: int = 120) -> str:
     return "暂无摘要"
 
 
+def _replace_source_page_links(
+    content: str,
+    entity_titles: list[str],
+    topic_titles: list[str],
+) -> str:
+    """按实际写入的页面重建来源摘要中的三个关联区块。"""
+    sections = {
+        "关键词": ([f"- [[{title}]]" for title in entity_titles] or ["- _暂无独立关键词_"]),
+        "相关话题": ([f"- [[{title}]]" for title in topic_titles] or ["- _暂无独立话题_"]),
+        "相关页面": (
+            [
+                f"- [[{title}]]"
+                for title in dict.fromkeys(entity_titles + topic_titles)
+            ]
+            or ["- _暂无关联页面_"]
+        ),
+    }
+    updated = content
+    for heading, lines in sections.items():
+        replacement = f"## {heading}\n\n" + "\n".join(lines) + "\n\n"
+        updated = re.sub(
+            rf"(?ms)^## {re.escape(heading)}\n.*?(?=^## |^---$)",
+            replacement,
+            updated,
+            count=1,
+        )
+    return updated
+
+
 def _build_source_page_content(
     title: str,
     raw: RawSource | None,
@@ -2678,6 +2774,7 @@ def _build_source_page_content(
     source_summary: dict[str, Any] | None = None,
     entities: list[dict[str, Any]] | None = None,
     topics: list[dict[str, Any]] | None = None,
+    kb_id: str = "default",
 ) -> str:
     summary_data = source_summary if isinstance(source_summary, dict) else {}
     summary = (
@@ -2706,16 +2803,9 @@ def _build_source_page_content(
         if raw.source_url:
             original_ref = raw.source_url
         elif raw.original_path:
-            original_path = Path(raw.original_path)
-            parts = original_path.parts
-            if "raw" in parts:
-                raw_index = parts.index("raw")
-                relative = Path(*parts[raw_index:]).as_posix()
-                # Source Summary 位于 wiki/sources/{source_kind}/，回到 Vault 根目录
-                # 需要三级相对路径。
-                original_ref = f"[打开原始文件](../../../{relative})"
-            else:
-                original_ref = raw.original_ref or original_path.name
+            # 统一使用 Gateway 下载接口，避免相对路径在前端/桌面端解析不一致。
+            encoded_kb = urllib.parse.quote(kb_id, safe="")
+            original_ref = f"[打开原始文件](/api/wiki/sources/{raw.id}/file?kb_id={encoded_kb})"
         else:
             original_ref = raw.original_ref
     lines = [

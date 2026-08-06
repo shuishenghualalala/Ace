@@ -136,3 +136,14 @@
   background: var(--bg-active);
   color: var(--text);
 }
+
+/* Wiki 双链 [[页面标题]]：正文内可点击的内部链接（对齐桌面端 rel-link） */
+.md-wikilink {
+  color: #314ad6;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.md-wikilink:hover {
+  text-decoration: underline;
+}

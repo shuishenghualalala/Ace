@@ -47,6 +47,7 @@ from .prompts import (
     WIKI_FETCH_URL_PROMPT,
     WIKI_REFRESH_SOURCE_PROMPT,
     WIKI_LINT_PROMPT,
+    WIKI_LIST_INBOX_PROMPT,
     WIKI_LIST_KBS_PROMPT,
     WIKI_LIST_SOURCES_PROMPT,
     WIKI_ORIENT_PROMPT,
@@ -67,11 +68,12 @@ from .store import WikiStore
 # 3. 附件只能经 wiki_capture_attachment 读取当前 owner 本轮上传目录。
 # 4. wiki_list_sources 用于在 ingest 前列出当前知识库的 raw sources。
 
-# 共享 schema 片段：kb_id 参数（目标知识库，未指定时使用当前活跃知识库）
+# 共享 schema 片段：kb_id 参数（仅跨库操作时显式传入；常规操作省略，跟随当前活跃知识库。
+# 描述必须抑制模型按惯性填字面量 "default"——显式值优先级最高，填错会整条入库链错库）
 _KB_ID_PARAM: dict[str, dict[str, str]] = {
     "kb_id": {
         "type": "string",
-        "description": "目标知识库 ID；未指定时使用当前活跃知识库",
+        "description": "目标知识库 ID。仅当用户明确要求操作其他知识库时才传入；常规操作必须省略此参数，系统会自动使用当前活跃知识库（active_kb_id），不要自行猜测或填写",
     },
 }
 
@@ -84,6 +86,7 @@ WIKI_READ_TOOLS = [
     "wiki_read",
     "wiki_list_sources",
     "wiki_list_kbs",
+    "wiki_list_inbox",
 ]
 
 WIKI_MANAGE_TOOLS = [
@@ -345,6 +348,23 @@ _WIKI_LIST_KBS_SCHEMA = {
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
+_WIKI_LIST_INBOX_SCHEMA = {
+    "name": "wiki_list_inbox",
+    "description": WIKI_LIST_INBOX_PROMPT,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "最多返回多少条，默认 50",
+                "default": 50,
+            },
+            **_KB_ID_PARAM,
+        },
+        "required": [],
+    },
+}
+
 _WIKI_UPDATE_PAGE_SCHEMA = {
     "name": "wiki_update_page",
     "description": WIKI_UPDATE_PAGE_PROMPT,
@@ -359,20 +379,22 @@ _WIKI_UPDATE_PAGE_SCHEMA = {
                 "type": "string",
                 "description": "页面 Markdown 内容（可选，传入则完全替换）",
             },
-            "related": {
+            "relations": {
                 "type": "array",
-                "items": {"type": "string"},
-                "description": "相关页面标题列表（可选，传入则覆盖）",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "target_page_id": {"type": "string"},
+                        "relation": {"type": "string"},
+                    },
+                    "required": ["target_page_id", "relation"],
+                },
+                "description": "基于稳定页面 ID 的有类型关系（可选，传入则覆盖）",
             },
             "tags": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "标签列表（可选，传入则覆盖）",
-            },
-            "aliases": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "别名列表（可选，传入则覆盖）",
             },
             **_KB_ID_PARAM,
         },
@@ -550,8 +572,17 @@ _WIKI_CREATE_PAGE_SCHEMA = {
                 "enum": ["entity", "topic", "source", "comparison", "synthesis"],
             },
             "tags": {"type": "array", "items": {"type": "string"}},
-            "aliases": {"type": "array", "items": {"type": "string"}},
-            "related": {"type": "array", "items": {"type": "string"}},
+            "relations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "target_page_id": {"type": "string"},
+                        "relation": {"type": "string"},
+                    },
+                    "required": ["target_page_id", "relation"],
+                },
+            },
             **_KB_ID_PARAM,
         },
         "required": ["title", "content"],
@@ -574,7 +605,7 @@ _WIKI_DELETE_PAGES_SCHEMA = {
 
 _WIKI_RENAME_PAGE_SCHEMA = {
     "name": "wiki_rename_page",
-    "description": "重命名页面并修复其他页面中的 related 与 wikilink 引用。",
+    "description": "重命名页面并修复正文 wikilink；结构化关系使用页面 ID，无需改写。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1461,8 +1492,42 @@ def register_wiki_tools(
             count=len(kbs),
         )
 
+    def _handle_list_inbox(args: dict[str, Any]) -> str:
+        """列出已解析且系统建议深度整理、但尚未 ingest 的素材。"""
+        limit = max(1, int(args.get("limit", 50)))
+        kb_id = _kb_id(args)
+        raws = store.list_raws(owner_account_id=_owner(), kb_id=kb_id)
+        inbox = [
+            raw
+            for raw in raws
+            if raw.is_current
+            and (raw.parse_status or "pending") == "parsed"
+            and raw.ingest_recommend
+            and raw.ingest_status in ("pending", "recommended", "failed")
+        ]
+        inbox = sorted(inbox, key=lambda r: r.created_at, reverse=True)[:limit]
+        return tool_result(
+            sources=[
+                {
+                    "source_id": r.id,
+                    "title": r.title,
+                    "source_type": r.source_type,
+                    "doc_type": r.doc_type,
+                    "summary": r.summary,
+                    "tags": r.tags,
+                    "ingest_recommend": r.ingest_recommend,
+                    "ingest_reason": r.ingest_reason,
+                    "ingest_status": r.ingest_status,
+                    "created_at": r.created_at,
+                }
+                for r in inbox
+            ],
+            count=len(inbox),
+            kb_id=kb_id,
+        )
+
     def _handle_create_page(args: dict[str, Any]) -> str:
-        from .schemas import WikiPage
+        from .schemas import WikiPage, WikiRelation
 
         title = str(args.get("title") or "").strip()
         content = str(args.get("content") or "").strip()
@@ -1479,8 +1544,11 @@ def register_wiki_tools(
             content=content,
             file_path="",
             tags=[str(item) for item in args.get("tags") or []],
-            aliases=[str(item) for item in args.get("aliases") or []],
-            related=[str(item) for item in args.get("related") or []],
+            relations=[
+                WikiRelation.from_dict(item)
+                for item in args.get("relations") or []
+                if isinstance(item, dict)
+            ],
         )
         saved = store.save_page(page, owner_account_id=_owner(), kb_id=kb_id)
         _finish_write(kb_id, f"创建页面 {saved.id} ({saved.title})", "page_created", page_ids=[saved.id])
@@ -1510,7 +1578,7 @@ def register_wiki_tools(
             1
             for page in remaining
             if any(value in deleted_titles for value in page.related)
-            or any(relation.target in deleted_titles for relation in page.relations)
+            or any(relation.target_page_id in target_ids for relation in page.relations)
             or any(f"[[{value}]]" in page.content for value in deleted_titles)
         )
         confirmed = _consume_confirmation(args, action="delete_pages", kb_id=kb_id)
@@ -1544,7 +1612,7 @@ def register_wiki_tools(
                 relations = [
                     relation
                     for relation in other.relations
-                    if relation.target not in deleted_titles
+                    if relation.target_page_id not in target_ids
                 ]
                 if len(relations) != len(other.relations):
                     other.relations = relations
@@ -1593,14 +1661,6 @@ def register_wiki_tools(
             if other.id == page.id:
                 continue
             changed = False
-            if old_title in other.related:
-                other.related = [new_title if value == old_title else value for value in other.related]
-                changed = True
-            if any(relation.target == old_title for relation in other.relations):
-                for relation in other.relations:
-                    if relation.target == old_title:
-                        relation.target = new_title
-                changed = True
             if old_link in other.content:
                 other.content = other.content.replace(old_link, new_link)
                 changed = True
@@ -1622,15 +1682,19 @@ def register_wiki_tools(
         if "content" in args:
             page.content = str(args["content"])
             changed_fields.append("content")
-        if "related" in args:
-            page.related = [str(t) for t in args["related"] if t is not None]
-            changed_fields.append("related")
+        if "relations" in args:
+            from .schemas import WikiRelation
+
+            page.relations = [
+                WikiRelation.from_dict(item)
+                for item in args["relations"]
+                if isinstance(item, dict)
+            ]
+            page.related = []
+            changed_fields.append("relations")
         if "tags" in args:
             page.tags = [str(t) for t in args["tags"] if t is not None]
             changed_fields.append("tags")
-        if "aliases" in args:
-            page.aliases = [str(a) for a in args["aliases"] if a is not None]
-            changed_fields.append("aliases")
 
         updated = store.update(page, owner_account_id=_owner(), kb_id=_kb_id(args))
         if updated is None:
@@ -2065,6 +2129,7 @@ def register_wiki_tools(
         (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {{source_id}}", "wiki parse source reparse document extract text"),
         (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出 Raw Sources", "列出 Raw Sources", "wiki list sources raw files pending parsed failed"),
         (_WIKI_LIST_KBS_SCHEMA, _handle_list_kbs, False, "📚", "列出知识库", "列出知识库", "wiki list knowledge bases kbs"),
+        (_WIKI_LIST_INBOX_SCHEMA, _handle_list_inbox, False, "📥", "列出待整理素材", "列出待整理素材", "wiki list inbox pending sources recommend ingest"),
         (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {{page_id}}", "wiki update page edit content tags related aliases"),
         (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {{source_id}}", "wiki plan ingest preview changes proposed pages"),
         (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {{source_id}}", "wiki apply ingest write pages confirm plan"),

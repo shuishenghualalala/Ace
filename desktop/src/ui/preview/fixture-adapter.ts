@@ -1,6 +1,7 @@
 import { backendApi } from '../backend-client';
 import { mountRenderer } from '../app';
 import type { RendererAdapter } from '../adapters/renderer-adapter';
+import type { AuthStateSnapshot } from '../../shared/types';
 import { createApplicationShell } from '../layouts/application-shell';
 import {
   FIXTURE_MARKER,
@@ -37,6 +38,20 @@ function createFixtureBridge(fixture: VisualFixture): Window['Crew'] {
       }, item.afterMs);
       timers.add(timer);
     }
+  };
+
+  const authState: AuthStateSnapshot = {
+    mode: 'local',
+    configured: true,
+    providerId: 'fixture',
+    isLoggedIn: fixture.auth === 'authenticated',
+    user: fixture.auth === 'authenticated'
+      ? {
+          userId: fixture.owner.key,
+          phoneNumber: '',
+          displayName: fixture.owner.displayName,
+        }
+      : null,
   };
 
   const bindOutboundRequest = (
@@ -123,6 +138,11 @@ function createFixtureBridge(fixture: VisualFixture): Window['Crew'] {
       baseUrl: 'http://fixture.invalid',
       managed: false,
     }),
+    rendererInitialStateReady: async () => ({ ok: true as const }),
+    authGetState: async () => ({ ok: true, state: authState }),
+    authSendCode: async () => ({ ok: false, error: '视觉预览不支持发送验证码' }),
+    authLogin: async () => ({ ok: false, error: '视觉预览不支持登录' }),
+    authLogout: async () => ({ ok: true }),
     onBackendStatus: (
       listener: (status: { connected: boolean; components: Record<string, never> }) => void,
     ) => {
@@ -137,18 +157,8 @@ function createFixtureBridge(fixture: VisualFixture): Window['Crew'] {
       });
       return () => { active = false; };
     },
-    onSessionState: (
-      listener: (state: { isLoggedIn: boolean; userInfo: Record<string, string> | null }) => void,
-    ) => {
-      queueMicrotask(() => listener({
-        isLoggedIn: fixture.auth === 'authenticated',
-        userInfo: fixture.auth === 'authenticated'
-          ? {
-              staffCode: fixture.owner.key,
-              nickname: fixture.owner.displayName,
-            }
-          : null,
-      }));
+    onSessionState: (listener: (state: AuthStateSnapshot) => void) => {
+      queueMicrotask(() => listener(authState));
     },
     gatewayFetch: async (url: string, init?: { method?: string }) => {
       const path = new URL(url, 'http://fixture.invalid').pathname;

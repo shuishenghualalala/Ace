@@ -3,7 +3,6 @@ page_type: topic
 title: LLM Wiki 是什么
 file_path: topics/LLM Wiki 是什么.md
 sources: []
-related: [Karpathy 的 LLM Wiki 模式, LLM Wiki 与 RAG 的区别, 人机分工原则, WikiHub 界面导览, 用对话操作 Wiki]
 tags: [入门, 理论]
 aliases: [LLM Wiki 简介, Wiki 总览]
 ---
@@ -25,7 +24,7 @@ LLM Wiki 的思路是：**把知识编译一次，之后持续复用**，而不�
 | 层 | 内容 | 谁负责 |
 |---|---|---|
 | 原始资料（raw） | 你上传的文件、粘贴的文本 | 不可变，AI 只读不改 |
-| Wiki 页面 | AI 编译出的结构化笔记，互相用双方括号链接关联 | AI 创建和维护，你可编辑删除 |
+| Wiki 页面 | 来源摘要、关键词、话题、对比和综合报告 | AI 创建和维护，你可继续编辑 |
 | SCHEMA | 知识库的约定：标签体系、页面规范 | 约束 AI 的整理行为 |
 
 理论背景见 [[Karpathy 的 LLM Wiki 模式]]，和传统检索方案的对比见 [[LLM Wiki 与 RAG 的区别]]。

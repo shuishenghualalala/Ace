@@ -1,8 +1,10 @@
 /**
- * cron-page 纯函数单测。
- * 覆盖 formatDuration / formatTimestamp / filteredJobs。
+ * @vitest-environment happy-dom
+ *
+ * cron-page 单测。
+ * 覆盖 formatDuration / formatTimestamp / filteredJobs，以及任务页点击任务行后的滚动保持。
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   formatDuration,
   formatTimestamp,
@@ -16,11 +18,29 @@ import {
   formatDateInputValue,
   formatTimeInputValue,
   __setCronViewForTest,
+  __resetCronListEventsForTest,
+  bindCronTab,
   isRecurringJob,
   isRecurringSchedule,
   type FilterKey,
 } from '../../src/ui/features/cron-page';
-import type { CronJob } from '../../src/ui/backend-client';
+import { backendApi, type CronJob } from '../../src/ui/backend-client';
+import { state } from '../../src/ui/state';
+import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
+
+vi.mock('../../src/ui/backend-client', () => ({
+  backendApi: {
+    cronJobs: vi.fn(async () => ({ jobs: [] })),
+    cronJobDetail: vi.fn(async () => ({ runs: [] })),
+    cronDeliveryTargets: vi.fn(async () => ({ targets: [] })),
+  },
+}));
+
+const api = backendApi as unknown as {
+  cronJobs: ReturnType<typeof vi.fn>;
+  cronJobDetail: ReturnType<typeof vi.fn>;
+  cronDeliveryTargets: ReturnType<typeof vi.fn>;
+};
 
 function makeJob(partial: Partial<CronJob>): CronJob {
   return {
@@ -212,5 +232,44 @@ describe('isRecurringSchedule', () => {
     expect(isRecurringSchedule('in 30s')).toBe(false);
     expect(isRecurringSchedule('10分钟后')).toBe(false);
     expect(isRecurringSchedule('明天9点')).toBe(false);
+  });
+});
+
+describe('任务页滚动保持', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    __resetAllStoresForTest();
+    __resetCronListEventsForTest();
+    // 清掉 filteredJobs 用例遗留的 view 状态，避免列表被过滤为空。
+    __setCronViewForTest({ jobs: [], filter: 'all', search: '' });
+    vi.clearAllMocks();
+    api.cronJobs.mockResolvedValue({ jobs: [] });
+    api.cronJobDetail.mockResolvedValue({ runs: [] });
+  });
+
+  it('点击任务行后列表滚动位置保持，切换筛选后归零', async () => {
+    state.backendConnected = true;
+    api.cronJobs.mockResolvedValue({ jobs: [makeJob({ id: 'j1', name: '任务一' })] });
+    document.body.innerHTML = '<button data-tab="cron"></button><div id="cron-page-root"></div>';
+    const disposeCronTab = bindCronTab();
+    document.querySelector('[data-tab="cron"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await flush();
+    await flush();
+
+    const scrollEl = () => document.querySelector<HTMLElement>('.cron-list__scroll');
+    const list = scrollEl();
+    expect(list).not.toBeNull();
+    if (list) list.scrollTop = 321;
+
+    document.querySelector('.cron-row')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await flush();
+    await flush();
+    expect(scrollEl()?.scrollTop).toBe(321);
+
+    document.querySelector('[data-filter="enabled"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(scrollEl()?.scrollTop).toBe(0);
+    disposeCronTab();
   });
 });

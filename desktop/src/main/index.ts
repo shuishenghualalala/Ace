@@ -47,7 +47,6 @@ import {
 import { GatewayRestartController } from './gateway-restart-controller';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
-  UserInfoSnapshot,
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
   UpdateStateSnapshot,
@@ -163,6 +162,20 @@ let browserHostConnectionGeneration = 0;
 let browserHostConnectPending = false;
 let browserHostDisposePromise: Promise<void> | null = null;
 let tray: Tray | null = null;
+
+// Renderer readiness reveal-gate.
+//
+// Default state is "open" (rendererInitialStateReady=true) so HEAD's existing
+// show-on-ready-to-show behavior is unchanged. When the email-tenant-auth
+// re-port wires resetRendererRevealGate() into createWindow(), the gate closes
+// on cold start and reopens when the renderer signals app:renderer-initial-state-ready
+// (or when RENDERER_READY_FALLBACK_MS elapses as a safety net).
+let rendererInitialStateReady = true;
+let nativeWindowReady = false;
+let windowShowRequested = true;
+let rendererReadyFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+const RENDERER_READY_FALLBACK_MS = 15_000;
 
 let isQuitting = false;
 // Gateway 重建代际：每次主动重试/重建递增。在途 ensureGateway 流程启动时记下
@@ -310,39 +323,19 @@ function isPortAvailable(port: number): Promise<boolean> {
 }
 
 function gatewayIdentityHeaders(): Record<string, string> | null {
-  const user = loginNewServiceInstance.getSessionInfo().userInfo;
-  const staffCode = user?.staffCode?.trim();
-  const staffUid = user?.staffUid?.trim() || user?.uid?.trim();
-  if (!staffCode || !staffUid) return null;
-  return {
-    'X-Crew-Staff-Code': staffCode,
-    'X-Crew-Staff-Uid': staffUid,
-  };
-}
-
-function rendererSafeUserSnapshot(snapshot: UserInfoSnapshot | null): UserInfoSnapshot | null {
-  if (!snapshot) return null;
-  return {
-    ...(snapshot.staffCode !== undefined ? { staffCode: snapshot.staffCode } : {}),
-    ...(snapshot.staffName !== undefined ? { staffName: snapshot.staffName } : {}),
-    ...(snapshot.staffUid !== undefined ? { staffUid: snapshot.staffUid } : {}),
-    ...(snapshot.pid !== undefined ? { pid: snapshot.pid } : {}),
-    ...(snapshot.uid !== undefined ? { uid: snapshot.uid } : {}),
-  };
+  // 远程/email 模式下鉴权完全由 crew_auth_session cookie 承担（Gateway 的
+  // _remote_account_from_cookie 读它）。返回 Cookie 头；调用点拼出的 Bearer 被 Gateway 忽略。
+  const cookie = loginNewServiceInstance.cookieHeader();
+  if (!cookie) return null;
+  return { Cookie: cookie };
 }
 
 function currentBrowserOwnerId(): string | null {
-  let owner = 'dev:dev';
-  if (!usesDevGatewayIdentity()) {
-    const info = loginNewServiceInstance.getSessionInfo();
-    const staffCode = info.userInfo?.staffCode?.trim();
-    const staffUid = info.userInfo?.staffUid?.trim() || info.userInfo?.uid?.trim();
-    if (!info.isLoggedIn) return null;
-    // The open-source local Gateway has one loopback owner and no remote SSO
-    // identity. Keep this aligned with crew.gateway.auth.LOCAL_OWNER_ACCOUNT_ID.
-    owner = staffCode && staffUid ? `${staffCode}:${staffUid}` : 'local';
-  }
-  return owner;
+  if (usesDevGatewayIdentity()) return 'dev:dev';
+  if (!loginNewServiceInstance.getSessionInfo().isLoggedIn) return null;
+  // owner 形如 `<providerId>:<userId>`（remote/email），local 模式为 'local'。
+  // 与 crew.gateway.auth 的 LOCAL_OWNER_ACCOUNT_ID / owner_account_id 对齐。
+  return loginNewServiceInstance.ownerAccountId() ?? 'local';
 }
 
 function currentBrowserRuntimeKey(): string | null {
@@ -806,6 +799,43 @@ function resolveTrayIcon(): Electron.NativeImage {
   return image;
 }
 
+function revealMainWindowIfReady(): void {
+  if (!mainWindow || !rendererInitialStateReady || !nativeWindowReady || !windowShowRequested) return;
+  mainWindow.setSkipTaskbar(false);
+  if (!mainWindow.isVisible()) mainWindow.show();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+}
+
+/**
+ * Close the reveal-gate and arm the fallback timer.
+ *
+ * NOT wired into createWindow() by default -- HEAD shows the window on
+ * ready-to-show without waiting for the renderer. The email-tenant-auth
+ * re-port should call this in createWindow()/did-start-loading to hide the
+ * window until the renderer resolves initial auth state.
+ */
+function resetRendererRevealGate(): void {
+  rendererInitialStateReady = false;
+  if (rendererReadyFallbackTimer) clearTimeout(rendererReadyFallbackTimer);
+  rendererReadyFallbackTimer = setTimeout(() => {
+    rendererReadyFallbackTimer = null;
+    rendererInitialStateReady = true;
+    console.warn('[main] renderer initial state readiness timed out; revealing window via fallback');
+    revealMainWindowIfReady();
+  }, RENDERER_READY_FALLBACK_MS);
+  mainWindow?.hide();
+}
+
+function markRendererInitialStateReady(): void {
+  rendererInitialStateReady = true;
+  if (rendererReadyFallbackTimer) {
+    clearTimeout(rendererReadyFallbackTimer);
+    rendererReadyFallbackTimer = null;
+  }
+  revealMainWindowIfReady();
+}
+
 function showMainWindow(): void {
   if (!mainWindow) return;
   mainWindow.setSkipTaskbar(false);
@@ -877,19 +907,16 @@ function createTray(): void {
 function pushSessionState(): void {
   if (usesDevGatewayIdentity()) {
     // 开发态：推送合成的已登录开发账号状态，让渲染进程登录墙不弹出。
-    // 身份由后端 gateway.dev_mode 的 loopback 放行统一确定，这里仅解锁 UI。
-    const devInfo = {
+    mainWindow?.webContents.send('auth:session-state', {
+      mode: 'dev',
+      configured: true,
+      providerId: 'dev',
       isLoggedIn: true,
-      userInfo: { staffCode: 'dev', staffUid: 'dev', staffName: '开发者' } as UserInfoSnapshot,
-    };
-    mainWindow?.webContents.send('auth:session-state', devInfo);
+      user: { userId: 'dev', phoneNumber: '', displayName: '开发者' },
+    });
     return;
   }
-  const info = loginNewServiceInstance.getSessionInfo();
-  mainWindow?.webContents.send('auth:session-state', {
-    isLoggedIn: info.isLoggedIn,
-    userInfo: rendererSafeUserSnapshot(info.userInfo),
-  });
+  mainWindow?.webContents.send('auth:session-state', loginNewServiceInstance.getState());
 }
 
 function closeGatewaySockets(reason = 'auth-state-changed'): void {
@@ -937,6 +964,8 @@ function resolveWindowBackgroundColor(): string {
 
 function createWindow() {
   const launchHidden = shouldLaunchHidden();
+  nativeWindowReady = false;
+  windowShowRequested = !launchHidden;
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -969,6 +998,7 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => {
+    nativeWindowReady = true;
     if (launchHidden) {
       hideMainWindowToTray();
       return;
@@ -1046,6 +1076,10 @@ function createWindow() {
     mainWindow?.webContents.send('browser-view:layout-invalidated');
   });
   mainWindow.on('closed', () => {
+    if (rendererReadyFallbackTimer) {
+      clearTimeout(rendererReadyFallbackTimer);
+      rendererReadyFallbackTimer = null;
+    }
     browserHost?.hidePanel();
     mainWindow = null;
   });
@@ -1151,8 +1185,12 @@ function packagedSecurityRuntimeEnv(): Record<string, string> {
 
 /** Browser control is privileged even on loopback; bind it to this Gateway instance. */
 function gatewayAccessHeaders(pathname: string): Record<string, string> {
-  if (!pathname.startsWith('/api/browser/')) return {};
-  return { Authorization: `Bearer ${gatewayInstanceAccessToken(activeGatewayCrewHome())}` };
+  const headers: Record<string, string> = {};
+  const sessionCookie = loginNewServiceInstance.cookieHeader();
+  if (sessionCookie) headers.Cookie = sessionCookie;
+  if (!pathname.startsWith('/api/browser/')) return headers;
+  headers.Authorization = `Bearer ${gatewayInstanceAccessToken(activeGatewayCrewHome())}`;
+  return headers;
 }
 
 /**
@@ -2528,6 +2566,13 @@ function registerIpc() {
     }
     return saveDesktopPrefs({ closeBehavior: behavior });
   });
+  trustedHandle('app:get-system-locale', () => {
+    return app.getLocale();
+  });
+  trustedHandle('app:renderer-initial-state-ready', () => {
+    markRendererInitialStateReady();
+    return { ok: true };
+  });
   trustedHandle('security:get-strict-security', () => ({
     strictSecurityEnabled: isStrictSecurityEnabled(),
   }));
@@ -2590,8 +2635,83 @@ function registerIpc() {
     ) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: auth:heartbeat version must be string|undefined`);
     }
-    const version = typeof rawVersion === 'string' ? rawVersion : undefined;
-    return loginNewServiceInstance.heartbeat(version || currentAppVersionLabel(app));
+    try {
+      const { baseUrl } = await ensureGateway();
+      await loginNewServiceInstance.refreshConfig(baseUrl);
+    } catch {
+      // 心跳不阻塞 UI；失败时沿用旧会话态
+    }
+    pushSessionState();
+    scheduleBrowserHostConnection();
+    return { success: true };
+  });
+
+  trustedHandle('auth:get-state', async () => {
+    const { baseUrl } = await ensureGateway();
+    try {
+      const state = await loginNewServiceInstance.refreshConfig(baseUrl);
+      pushSessionState();
+      scheduleBrowserHostConnection();
+      return { ok: true, state };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        state: loginNewServiceInstance.getState(),
+      };
+    }
+  });
+
+  trustedHandle('auth:send-code', async (_e, raw: unknown) => {
+    const phoneNumber =
+      typeof raw === 'object' && raw !== null
+        ? String((raw as Record<string, unknown>).phoneNumber ?? '').trim()
+        : '';
+    if (!phoneNumber || phoneNumber.length > 32) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: auth:send-code phoneNumber required`);
+    }
+    const { baseUrl } = await ensureGateway();
+    return loginNewServiceInstance.sendCode(baseUrl, phoneNumber);
+  });
+
+  trustedHandle('auth:login', async (_e, raw: unknown) => {
+    const identifier =
+      typeof raw === 'object' && raw !== null
+        ? String((raw as Record<string, unknown>).identifier ?? '').trim()
+        : '';
+    const code =
+      typeof raw === 'object' && raw !== null
+        ? String((raw as Record<string, unknown>).code ?? '').trim()
+        : '';
+    if (!identifier || identifier.length > 128) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: auth:login identifier required`);
+    }
+    const { baseUrl } = await ensureGateway();
+    const authState = loginNewServiceInstance.getState();
+    if (authState.mode === 'remote' && !code) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: auth:login code required`);
+    }
+    const result = authState.mode === 'email'
+      ? await loginNewServiceInstance.loginWithEmail(baseUrl, identifier)
+      : await loginNewServiceInstance.login(baseUrl, identifier, code);
+    if (result.ok) {
+      closeGatewaySockets('login-changed');
+      await resetBrowserHost('login-changed');
+      pushSessionState();
+      scheduleBrowserHostConnection();
+    }
+    return result;
+  });
+
+  trustedHandle('auth:logout', async () => {
+    const { baseUrl } = await ensureGateway();
+    const result = await loginNewServiceInstance.logout(baseUrl);
+    if (result.ok) {
+      closeGatewaySockets('logout');
+      await resetBrowserHost('logout');
+    }
+    pushSessionState();
+    return result;
   });
 
   trustedHandle('gateway:fetch', async (_e, raw: unknown) => {
@@ -2613,7 +2733,7 @@ function registerIpc() {
         ok: false,
         status: 401,
         statusText: 'Unauthorized',
-        body: JSON.stringify({ ok: false, error: '登录用户缺少 staffCode/staffUid' }),
+        body: JSON.stringify({ ok: false, error: '登录信息缺失，请重新登录' }),
         headers: { 'content-type': 'application/json' },
       };
     }
@@ -2829,7 +2949,7 @@ function registerIpc() {
     if (usesRemoteAuth && !jwt) return authFailure(401, '未登录');
     const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
     if (usesRemoteAuth && !identityHeaders) {
-      return authFailure(401, '登录用户缺少 staffCode/staffUid');
+      return authFailure(401, '登录信息缺失，请重新登录');
     }
 
     const ensured = await ensureGateway();
@@ -2888,6 +3008,7 @@ function registerIpc() {
   });
 
   trustedHandle('gateway:ensure', async () => ensureGateway());
+  trustedHandle('gateway:get-status', () => backendStatusPayload(backendConnected));
 
   trustedHandle('security:pending', async (_e, raw: unknown) => {
     const args = parseOrThrow(SecurityPendingArgs.parse(raw), 'security:pending');
@@ -3027,7 +3148,7 @@ function registerIpc() {
       return { ok: false, status: 401, error: '未登录' };
     }
     if (usesRemoteAuth && !gatewayIdentityHeaders()) {
-      return { ok: false, status: 401, error: '登录用户缺少 staffCode/staffUid' };
+      return { ok: false, status: 401, error: '登录信息缺失，请重新登录' };
     }
     const ensured = await ensureGateway();
     if (gatewaySocketGenerations.get(senderId) !== generation || event.sender.isDestroyed()) {

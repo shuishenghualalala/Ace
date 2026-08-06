@@ -212,6 +212,8 @@ const agentWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiAgentWidth
 const embeddedModelByKb = new Map<string, { id: string; label: string }>();
 let activeEmbeddedRoot: HTMLElement | null = null;
 let activeEmbeddedKbId = '';
+/** 面板每次挂载递增；异步会话加载只允许更新发起它的那次挂载。 */
+let embeddedMountVersion = 0;
 /** 当前打开的模型浮层关闭函数（面板重建 / 登录态变化时收回）。 */
 let embeddedModelPopoverClose: (() => void) | null = null;
 /** 面板输入框是否持有焦点（focusin/focusout 全局追踪，重挂载后恢复焦点用）。 */
@@ -230,6 +232,7 @@ function clearEmbeddedPanelState(): void {
   embeddedInputFocused = false;
   activeEmbeddedRoot = null;
   activeEmbeddedKbId = '';
+  embeddedMountVersion += 1;
 }
 
 /** 确保 state.sessions 里有该会话行（openSession 工作空间归属 / dispatch workspace_id 解析用）。 */
@@ -401,11 +404,12 @@ function renderEmbeddedPanel(): void {
   const messages = getMessages(panel.sessionId);
   const pendingFollowup = bookFor(panel.sessionId).pendingFollowup;
   if (!messages.length && !busy && !pendingFollowup) {
-    // 空态：对齐参考设计的居中标语（图标 + 「基于知识库问答」）。
+    // 空态：对齐参考设计的居中标语（图标 + 「基于知识库问答」+ 上传引导）。
     body.innerHTML = `
       <div class="wiki-agent-pane__void">
         <span class="wiki-agent-pane__void-icon" aria-hidden="true">${WIKI_VOID_ICON}</span>
         <p class="wiki-agent-pane__void-text">基于知识库问答</p>
+        <p class="wiki-agent-pane__void-hint">可直接粘贴或拖拽文件到此处上传</p>
       </div>`;
   } else {
     renderConversationSurface(body, messages, state.configModel, { showAssistantName: false });
@@ -453,17 +457,21 @@ const scheduleEmbeddedRender = createChatRenderCoalescer(renderEmbeddedPanel, (c
   window.requestAnimationFrame(cb);
 });
 
-async function sendEmbeddedPrompt(text: string, wikiConfirmationId = ''): Promise<void> {
+async function sendEmbeddedPrompt(
+  text: string,
+  wikiConfirmationId = '',
+  kbId = activeEmbeddedKbId,
+): Promise<void> {
   const query = text.trim();
-  const attachments = embeddedAttachments.get(activeEmbeddedKbId) || [];
-  if ((!query && attachments.length === 0) || !activeEmbeddedKbId) return;
+  const attachments = embeddedAttachments.get(kbId) || [];
+  if ((!query && attachments.length === 0) || !kbId) return;
   try {
-    const panel = await embeddedState(activeEmbeddedKbId);
+    const panel = await embeddedState(kbId);
     if (isBusy(panel.sessionId)) {
       notify('Wiki Agent 正在处理上一条消息');
       return;
     }
-    embeddedAttachments.set(activeEmbeddedKbId, []);
+    embeddedAttachments.set(kbId, []);
     await dispatchWs(panel.sessionId, query, attachments, {
       planActive: false,
       ...(wikiConfirmationId ? { wikiConfirmationId } : {}),
@@ -654,6 +662,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   embeddedModelPopoverClose = null;
   activeEmbeddedRoot = root;
   activeEmbeddedKbId = req.kbId;
+  const mountVersion = ++embeddedMountVersion;
   root.dataset.kbId = req.kbId;
   const kbName = req.kbName || req.kbId;
   const expanded = embeddedExpanded.has(req.kbId);
@@ -834,7 +843,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
       resetTextareaHeight(input);
       embeddedDrafts.set(req.kbId, '');
     }
-    void sendEmbeddedPrompt(text);
+    void sendEmbeddedPrompt(text, '', req.kbId);
   });
   if (input) {
     // Enter 发送与主对话同一套 IME 判定（中文输入选字 Enter 不误发）。
@@ -857,11 +866,20 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   }
   renderEmbeddedPanel();
   void embeddedState(req.kbId).then((panel) => {
+    if (
+      mountVersion !== embeddedMountVersion
+      || activeEmbeddedRoot !== root
+      || root.dataset.kbId !== req.kbId
+    ) return;
     panel.kbName = req.kbName || req.kbId;
     scheduleEmbeddedRender();
     void loadEmbeddedModel(req.kbId, panel.sessionId);
   }).catch((err) => {
-    if (activeEmbeddedRoot === root) {
+    if (
+      mountVersion === embeddedMountVersion
+      && activeEmbeddedRoot === root
+      && root.dataset.kbId === req.kbId
+    ) {
       root.querySelector<HTMLElement>('[data-wiki-agent-messages]')!.textContent =
         `连接 Wiki Agent 失败：${(err as Error).message}`;
     }
@@ -870,7 +888,8 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
 
 /**
  * 打开 Wiki Agent：创建/复用独立会话并挂载到 Wiki 页右栏。
- * req.assist 存在时（上传失败「让 AI 处理」）随后自动发送一条携带失败上下文的 prompt。
+ * req.assist 存在时（上传失败「让 AI 处理」）随后自动发送一条携带失败上下文的 prompt；
+ * req.prompt 存在时（Home.md 推荐问题点击）直接发送该问题。
  */
 export async function openWikiAgent(req: WikiAgentEntryRequest): Promise<void> {
   if (!requireRendererLogin('请先登录后再使用 Wiki 问答')) return;
@@ -880,7 +899,8 @@ export async function openWikiAgent(req: WikiAgentEntryRequest): Promise<void> {
   if (embeddedRoot && state.activeTab === 'wiki') {
     mountWikiAgentPanel(embeddedRoot, req);
     embeddedRoot.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')?.focus();
-    if (req.assist) await sendEmbeddedPrompt(buildWikiAssistPrompt(req.assist));
+    if (req.assist) await sendEmbeddedPrompt(buildWikiAssistPrompt(req.assist), '', kbId);
+    else if (req.prompt?.trim()) await sendEmbeddedPrompt(req.prompt, '', kbId);
     if (req.openAttachment) embeddedRoot.querySelector<HTMLInputElement>('[data-wiki-agent-file]')?.click();
     return;
   }

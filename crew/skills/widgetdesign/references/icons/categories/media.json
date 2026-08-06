@@ -1,0 +1,87 @@
+[
+  {
+    "name": "MusicIcon",
+    "file": "Music.svg",
+    "category": "media",
+    "aliases": [
+      "music",
+      "音乐"
+    ],
+    "use_for": [
+      "media related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "PlayIcon",
+    "file": "Play.svg",
+    "category": "media",
+    "aliases": [
+      "play",
+      "播放"
+    ],
+    "use_for": [
+      "media related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "VideoIcon",
+    "file": "Video.svg",
+    "category": "media",
+    "aliases": [
+      "video",
+      "视频"
+    ],
+    "use_for": [
+      "media related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "VolOffIcon",
+    "file": "VolOff.svg",
+    "category": "media",
+    "aliases": [
+      "voloff",
+      "静音"
+    ],
+    "use_for": [
+      "media related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "VolOnIcon",
+    "file": "VolOn.svg",
+    "category": "media",
+    "aliases": [
+      "volon",
+      "音量开"
+    ],
+    "use_for": [
+      "media related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

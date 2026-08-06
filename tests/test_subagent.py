@@ -17,6 +17,7 @@ from crew.agent.subagent import (
 from crew.agent.subagent import registry as sub_registry_mod
 from crew.agent.subagent.definition import parse_definition
 from crew.app import build_app
+from crew.core.runctx import current_authorized_tool_names
 from crew.core.types import ToolCall
 from crew.state.access_control import AccessControlConfig
 from crew.state.config import Config
@@ -71,12 +72,10 @@ def test_registry_builtin_presets():
     assert reg.get("Explore").source == "builtin"
     wiki = reg.get("Wiki")
     assert wiki is not None
-    assert wiki.toolsets == ["wiki.read", "wiki.manage", "skills", "web"]
+    # Wiki 权限由统一策略计算：父主 Agent 最终权限 + Wiki 专属 Toolset。
+    assert wiki.toolsets is None
+    assert wiki.tools is None
     assert wiki.skills == ["crew-wiki-curator"]
-    assert "terminal" not in (wiki.tools or [])
-    assert "file_read" not in (wiki.tools or [])
-    assert "wiki_search" in (wiki.tools or [])
-    assert "wiki_apply_ingest" in (wiki.tools or [])
 
 
 def test_registry_user_overrides_builtin(tmp_path, monkeypatch):
@@ -292,7 +291,18 @@ def test_subagent_tool_filter_blocks_side_effect_tools():
     assert "cron_create" not in inherited
     assert not any(n.startswith("feishu") for n in inherited)
     assert "delegate_to_external_agent" not in inherited
+    assert not any(name.startswith("wiki_") for name in inherited)
     assert "file_read" in inherited  # 正常只读工具仍在
+
+
+def test_subagent_inherits_parent_final_authorization_snapshot():
+    app = build_app(config=Config(max_iterations=5))
+    token = current_authorized_tool_names.set(frozenset({"file_read"}))
+    try:
+        inherited = app._subagent_tool_filter(["file", "terminal"], None)
+    finally:
+        current_authorized_tool_names.reset(token)
+    assert inherited == ["file_read"]
 
 
 def test_lightweight_prompt_skips_global_context():

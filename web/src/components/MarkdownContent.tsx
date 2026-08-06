@@ -20,10 +20,52 @@ interface Props {
   initialThreshold?: number;
   /** 每次追加渲染的字符阈值，默认 2000。 */
   stepThreshold?: number;
+  /**
+   * 传入后启用 Wiki 双链：正文中的 [[页面标题]] 渲染为可点击链接，
+   * 点击时回调标题（代码围栏内的 [[...]] 不转换）。对齐桌面端详情页行为。
+   */
+  onWikiLink?: (title: string) => void;
 }
 
 const DEFAULT_INITIAL_THRESHOLD = 4000;
 const DEFAULT_STEP_THRESHOLD = 2000;
+
+const WIKILINK_SCHEME = "wikilink://";
+
+/**
+ * 把正文中的 [[页面标题]] 转成 markdown 链接 [标题](wikilink://标题)，
+ * 交由 a 渲染器统一处理为可点击的双链。代码围栏内的内容原样保留。
+ */
+function linkifyWikiLinks(text: string): string {
+  const lines = text.split("\n");
+  let inFence: { marker: string; indent: string } | null = null;
+  return lines
+    .map((line) => {
+      const fenceMatch = line.match(/^([ \t]*)(`{3,}|~{3,})([^\n]*)$/);
+      if (inFence) {
+        if (
+          fenceMatch &&
+          fenceMatch[1] === inFence.indent &&
+          (fenceMatch[3] ?? "").trim() === "" &&
+          fenceMatch[2].startsWith(inFence.marker[0]) &&
+          fenceMatch[2].length >= inFence.marker.length
+        ) {
+          inFence = null;
+        }
+        return line;
+      }
+      if (fenceMatch) {
+        inFence = { marker: fenceMatch[2], indent: fenceMatch[1] };
+        return line;
+      }
+      return line.replace(/\[\[([^\]]+)\]\]/g, (_m, title: string) => {
+        const trimmed = title.trim();
+        if (!trimmed) return _m;
+        return `[${trimmed}](${WIKILINK_SCHEME}${encodeURIComponent(trimmed)})`;
+      });
+    })
+    .join("\n");
+}
 
 /** 把 markdown 拆成相互独立的渲染块。代码围栏与 GFM 表格必须整体出现，否则 fold 会切断结构。 */
 function splitBlocks(text: string): string[] {
@@ -114,6 +156,7 @@ export default function MarkdownContent({
   fold = false,
   initialThreshold = DEFAULT_INITIAL_THRESHOLD,
   stepThreshold = DEFAULT_STEP_THRESHOLD,
+  onWikiLink,
 }: Props) {
   const safeContent = isStreaming ? preprocessStreamMarkdown(content, true) : content;
   // SSR / 首次渲染时通过计算值确定可见块数；hydrate 后由 effect 同步，避免空白。
@@ -188,7 +231,10 @@ export default function MarkdownContent({
   const hasMore = fold && computedVisibleCount < blocks.length;
 
   // 把可见块拼成一份 markdown 交给单个 ReactMarkdown 实例解析，避免每个段落块都重建 remark/rehype 插件。
-  const markdownSource = useMemo(() => visibleBlocks.join("\n\n"), [visibleBlocks]);
+  const markdownSource = useMemo(() => {
+    const joined = visibleBlocks.join("\n\n");
+    return onWikiLink ? linkifyWikiLinks(joined) : joined;
+  }, [visibleBlocks, onWikiLink]);
 
   const components = useMemo(
     () => ({
@@ -222,6 +268,22 @@ export default function MarkdownContent({
             </span>
           );
         }
+        if (target.startsWith(WIKILINK_SCHEME) && onWikiLink) {
+          const title = decodeURIComponent(target.slice(WIKILINK_SCHEME.length));
+          return (
+            <a
+              className="md-wikilink"
+              href={target}
+              title={`打开 Wiki 页面：${title}`}
+              onClick={(e) => {
+                e.preventDefault();
+                onWikiLink(title);
+              }}
+            >
+              {children}
+            </a>
+          );
+        }
         return (
           <a href={href} target="_blank" rel="noopener noreferrer">
             {children}
@@ -229,7 +291,7 @@ export default function MarkdownContent({
         );
       },
     }),
-    []
+    [onWikiLink]
   );
 
   return (
@@ -237,7 +299,7 @@ export default function MarkdownContent({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
-        urlTransform={(url) => url.startsWith("mention://") ? url : defaultUrlTransform(url)}
+        urlTransform={(url) => (url.startsWith("mention://") || url.startsWith(WIKILINK_SCHEME)) ? url : defaultUrlTransform(url)}
         components={components}
       >
         {markdownSource}

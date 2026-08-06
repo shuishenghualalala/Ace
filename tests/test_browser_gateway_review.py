@@ -319,6 +319,69 @@ def test_browser_urls_are_redacted_before_ui_or_history_display():
     assert use_dialog == {"action": "dialog_accept"}
 
 
+def test_fill_form_and_select_values_never_enter_ui_or_history_arguments():
+    fields = [
+        {"type": "textbox", "ref": "p7:e1", "value": "employee-secret"},
+        {
+            "type": "combobox",
+            "ref": "p7:e2",
+            "value": "Secret option label",
+            "select_by": "label",
+        },
+        {"type": "checkbox", "ref": "p7:e3", "value": True},
+        {"type": "slider", "ref": "p7:e4", "value": "73"},
+    ]
+    calls = (
+        tool_arguments_for_ui(
+            "browser_use",
+            {"action": "fill_form", "fields": fields},
+        ),
+        tool_arguments_for_history(
+            "browser_use",
+            {"action": "fill_form", "fields": fields},
+        ),
+        tool_arguments_for_ui("browser_fill_form", {"fields": fields}),
+        tool_arguments_for_history("browser_fill_form", {"fields": fields}),
+    )
+    for projected in calls:
+        encoded = json.dumps(projected, ensure_ascii=False)
+        assert projected["field_count"] == 4
+        assert projected["field_types"] == {
+            "textbox": 1,
+            "combobox": 1,
+            "checkbox": 1,
+            "slider": 1,
+        }
+        assert projected["fields"][1] == {
+            "index": 1,
+            "type": "combobox",
+            "ref": "p7:e2",
+            "select_by": "label",
+        }
+        assert "employee-secret" not in encoded
+        assert "Secret option label" not in encoded
+        assert '"73"' not in encoded
+        assert '"value"' not in encoded
+
+    select_args = {"ref": "p7:e2", "values": ["private-a", "private-b"]}
+    selections = (
+        tool_arguments_for_ui(
+            "browser_use",
+            {"action": "select", **select_args},
+        ),
+        tool_arguments_for_history(
+            "browser_use",
+            {"action": "select", **select_args},
+        ),
+        tool_arguments_for_ui("browser_select", select_args),
+        tool_arguments_for_history("browser_select", select_args),
+    )
+    for projected in selections:
+        assert projected["ref"] == "p7:e2"
+        assert projected["value_count"] == 2
+        assert "private-" not in json.dumps(projected)
+
+
 async def test_logging_plugin_never_logs_browser_arguments_or_results(monkeypatch):
     records: list[str] = []
 
@@ -679,6 +742,70 @@ async def test_browser_host_registration_resets_epoch_and_routes_exact_debug_eve
     assert [action[0] for action in actions] == ["serve", "rpc", "reset", "debug"]
     rpc = actions[1][1]
     assert rpc[1] == "close_owner" and rpc[3]["_allow_unready"] is True
+
+
+async def test_browser_host_routes_popup_download_by_logical_session_hash(monkeypatch):
+    published: list[tuple[object, ...]] = []
+
+    class Manager:
+        async def reset_host_registration(self, _owner: str) -> None:
+            return None
+
+        def session_for_hash(self, owner: str, value: str) -> str | None:
+            return "session" if (owner, value) == ("local", "a" * 32) else None
+
+        def session_for_target(self, _owner: str, _target: str) -> None:
+            # A newly opened popup legitimately has not reached Manager's tab
+            # cache when its first attachment starts.
+            return None
+
+        async def publish_host_download(self, *args) -> bool:
+            published.append(args)
+            return True
+
+    async def request(*_args, **_kwargs):
+        return {"closed": True}
+
+    event = {
+        "type": "download",
+        "downloadId": "download-1",
+        "targetId": "target-popup",
+        "sessionHash": "a" * 32,
+        "path": "/tmp/downloads/browser/report.csv",
+        "name": "report.csv",
+        "suggestedFilename": "report.csv",
+        "url": "https://example.com/report.csv",
+        "state": "completed",
+        "receivedBytes": 12,
+        "totalBytes": 12,
+        "createdAt": 1,
+        "completedAt": 2,
+        "error": "",
+    }
+
+    async def serve(_socket, _runtime_key: str, **callbacks) -> None:
+        await callbacks["on_registered"]()
+        await callbacks["on_event"](event)
+
+    monkeypatch.setattr(
+        "crew.gateway.routers.browser.electron_browser_bridge.request",
+        request,
+    )
+    monkeypatch.setattr(
+        "crew.gateway.routers.browser.electron_browser_bridge.serve",
+        serve,
+    )
+    router = create_browser_router(_host_crew(Manager()))
+    endpoint = next(route.endpoint for route in router.routes if route.path == "/ws/browser-host")
+    socket = _HostSocket(
+        {
+            "authorization": "Bearer expected-token",
+        }
+    )
+
+    await endpoint(socket)
+
+    assert published == [("local", "session", event)]
 
 
 async def test_browser_host_debug_event_rechecks_browser_use_policy(monkeypatch):

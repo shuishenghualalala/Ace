@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>微信渠道（weixin）设计文档</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:30px;font-weight:800;letter-spacing:-.5px;margin:0 0 6px}
+  .sub{color:var(--t3);margin-bottom:40px}
+  h2{font-size:20px;font-weight:700;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;font-weight:700;margin:22px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;border:none;padding:0}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  .logo{width:30px;height:30px;border-radius:8px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:10px}
+  ul{padding-left:20px}
+  .warn{background:#fff7ed;border:1px solid #fed7aa;border-left:4px solid #f97316;border-radius:8px;padding:12px 14px;color:#9a3412;font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="logo">W</span>微信渠道（weixin）设计文档</h1>
+  <div class="sub">个人微信 · 腾讯 iLink Bot API 长轮询 · 2026-08-02 建立</div>
+
+  <h2>1. 定位</h2>
+  <ul>
+    <li>接入<b>个人微信</b>（区别于企业微信 wecom）：基于腾讯 <code>iLink Bot API</code>，长轮询收消息，<b>无需公网 webhook</b>。</li>
+    <li>凭证通过<b>扫码登录</b>获得：桌面端内置扫码 / 终端 <code>crew weixin-login</code>，token 持久化到 <code>{crew_home}/weixin/accounts/</code>。</li>
+    <li>复用既有渠道插件范式（<code>plugins/platforms/*</code> + <code>Channel</code> 接口 + <code>PlatformRegistry</code>），与飞书渠道同构。</li>
+  </ul>
+
+  <h2>2. 关键文件</h2>
+  <table>
+    <thead><tr><th>文件</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>plugins/platforms/weixin/config.py</code></td><td><code>WeixinSettings</code> 配置解析（extra + <code>WEIXIN_*</code> 环境变量）+ <code>decide_access</code> 访问控制门禁。</td></tr>
+      <tr><td><code>plugins/platforms/weixin/ilink.py</code></td><td>iLink 纯协议层：长轮询/发消息/typing、AES-128-ECB 加密 CDN 媒体收发、账号/context-token/游标持久化、入站解析、出站文本排版、扫码登录（<code>fetch_qr_code</code>/<code>poll_qr_status</code>/<code>render_qr_svg</code>）。</td></tr>
+      <tr><td><code>plugins/platforms/weixin/adapter.py</code></td><td><code>WeixinChannel(Channel)</code>：生命周期、poll 循环、访问控制、去重、Envelope 分发、回包（文本分块 + 出站文件）、<code>send_to_target</code>（cron 投递）。</td></tr>
+      <tr><td><code>plugins/platforms/weixin/__init__.py</code> / <code>plugin.yaml</code></td><td>平台插件注册（<code>register(ctx)</code>）与元数据。</td></tr>
+      <tr><td><code>crew/cli/weixin_login.py</code></td><td>终端扫码登录入口（<code>crew weixin-login</code>）。</td></tr>
+      <tr><td><code>crew/gateway/routers/channels.py</code></td><td>新增 <code>POST /api/platforms/{name}/qr-login/start</code> 与 <code>/status</code>，供桌面端内置扫码。</td></tr>
+      <tr><td><code>desktop/src/ui/features/config-panes.ts</code> / <code>desktop/assets/index.html</code></td><td>桌面端渠道卡片 + 扫码登录弹窗 UI。</td></tr>
+      <tr><td><code>tests/test_platform_weixin.py</code></td><td>配置/访问控制/协议/回包/扫码接口 单测（不触网）。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 架构与数据流</h2>
+  <h3>3.1 入站（长轮询）</h3>
+  <pre>start() → poll_loop() 循环 get_updates(sync_buf)
+  → 每条 msg: 解析文本/媒体 → 去重 → decide_access(dm/group 策略)
+  → 下载媒体（AES-ECB 解密 → cache 到 files_dir）
+  → _handle(): 按 chat 串行 → Envelope 投递内核 → 流式收集 final/error → 回包</pre>
+  <h3>3.2 出站</h3>
+  <pre>reply → apply_text_filters → 检测 [FILE:路径] → 发文件(加密 CDN 上传)
+  → 否则 split_text_for_delivery 分块 → send_message(context_token 会话续传)</pre>
+  <h3>3.3 桌面端扫码登录</h3>
+  <pre>桌面「扫码登录」→ POST qr-login/start → 返回二维码 SVG → 展示
+  → 轮询 POST qr-login/status → confirmed 时 save_account + 自动填 accountId 并 connect</pre>
+
+  <h2>4. 配置项</h2>
+  <h3>4.1 启用</h3>
+  <pre>config/config.yaml:
+plugins:
+  enabled:
+    - weixin
+channels:
+  weixin:
+    enabled: true
+    accountId: "ilink_bot_id"   # 扫码登录后自动填充</pre>
+  <h3>4.2 环境变量（extra 与 env 均可）</h3>
+  <table>
+    <thead><tr><th>变量</th><th>默认</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>WEIXIN_ACCOUNT_ID</code></td><td>—</td><td>iLink 机器人 ID（必需）</td></tr>
+      <tr><td><code>WEIXIN_TOKEN</code></td><td>—</td><td>iLink token（必需；也可扫码持久化后省略）</td></tr>
+      <tr><td><code>WEIXIN_BASE_URL</code></td><td><code>https://ilinkai.weixin.qq.com</code></td><td>iLink API 基址</td></tr>
+      <tr><td><code>WEIXIN_CDN_BASE_URL</code></td><td><code>https://novac2c.cdn.weixin.qq.com/c2c</code></td><td>媒体 CDN 基址</td></tr>
+      <tr><td><code>WEIXIN_DM_POLICY</code></td><td><code>open</code></td><td>私聊策略：open / allowlist / disabled</td></tr>
+      <tr><td><code>WEIXIN_GROUP_POLICY</code></td><td><code>disabled</code></td><td>群聊策略：disabled / open / allowlist（默认关，见限制）</td></tr>
+      <tr><td><code>WEIXIN_ALLOWED_USERS</code></td><td>—</td><td>私聊白名单（逗号分隔）</td></tr>
+      <tr><td><code>WEIXIN_GROUP_ALLOWED_USERS</code></td><td>—</td><td>群聊白名单</td></tr>
+      <tr><td><code>WEIXIN_TEXT_CHUNK_LIMIT</code></td><td><code>2000</code></td><td>单条文本上限（iLink 约 2048）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 依赖</h2>
+  <pre>pip install .[weixin]   # aiohttp + cryptography + qrcode</pre>
+
+  <h2>6. 已知限制</h2>
+  <div class="warn">
+    扫码登录连接的是 <b>iLink 机器人身份</b>（形如 <code>xxx@im.bot</code>），普通微信群事件绝大多数账号类型<b>不会推送</b>给机器人，只有<b>私聊稳定可用</b>。
+    <code>WEIXIN_GROUP_POLICY</code> 仅在 iLink 真正返回群事件时生效；群消息不生效属于 iLink 侧限制，非渠道代码问题。
+  </div>
+
+  <h2>7. 测试</h2>
+  <pre>.venv/bin/python -m pytest tests/test_platform_weixin.py -q</pre>
+  <ul>
+    <li>配置解析（extra/env/非法回退）、访问控制（dm/group 策略 + 白名单 + 自回声）。</li>
+    <li>协议：AES 加解密、入站解析、文本分块、账号/context-token 持久化、媒体项构造。</li>
+    <li>适配器：去重、<code>_handle</code> 回包、访问控制拦截、<code>send_to_target</code>。</li>
+    <li>扫码接口：start 返回二维码、confirmed 持久化账号、redirect 跟踪、失败 pending。</li>
+    <li>注册：插件加载后 <code>platform_registry</code> 可用/已配置。</li>
+  </ul>
+</div>
+</body>
+</html>

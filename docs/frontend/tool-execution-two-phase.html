@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tool 执行两阶段前端渲染</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; line-height: 1.7; color: #333; }
+    h1 { font-size: 28px; border-bottom: 2px solid #2563eb; padding-bottom: 8px; }
+    h2 { font-size: 22px; margin-top: 32px; color: #1f2937; }
+    h3 { font-size: 18px; margin-top: 24px; color: #374151; }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+    pre { background: #f3f4f6; padding: 14px; border-radius: 8px; overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+    th, td { border: 1px solid #e5e7eb; padding: 10px; text-align: left; }
+    th { background: #f9fafb; }
+    .note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 12px 16px; margin: 16px 0; }
+  </style>
+</head>
+<body>
+  <h1>Tool 执行两阶段前端渲染</h1>
+  <p>后端工具执行拆成两个阶段：</p>
+  <ul>
+    <li><strong>generating</strong>：模型已经决定调用某 tool，正在生成参数；前端应立即渲染出工具卡片，给用户「已开始处理」的反馈。</li>
+    <li><strong>start / result</strong>：参数就绪并真正执行，最终返回结果；前端更新为 running → done/error，并展示耗时。</li>
+  </ul>
+  <p>该文档记录 Web 与 Desktop 两端的状态映射、本次改动点与排查思路。</p>
+
+  <h2>1. 协议事件</h2>
+  <p>后端通过 WebSocket 推送 <code>{ kind: "tool", body: { phase, tool_call_id, name, ui_label, args, detail } }</code>。</p>
+  <table>
+    <tr><th>phase</th><th>含义</th><th>前端状态</th></tr>
+    <tr><td>generating</td><td>模型生成参数中</td><td><code>status: "generating"</code></td></tr>
+    <tr><td>start</td><td>参数就绪，开始执行</td><td><code>status: "running"</code></td></tr>
+    <tr><td>result</td><td>执行成功返回</td><td><code>status: "done"</code></td></tr>
+    <tr><td>error</td><td>执行失败</td><td><code>status: "error"</code></td></tr>
+  </table>
+
+  <h2>2. Web 端</h2>
+  <h3>2.1 状态机</h3>
+  <ul>
+    <li>文件：<a href="../../web/src/hooks/useChat.ts">web/src/hooks/useChat.ts</a></li>
+    <li>新增纯函数 <code>applyToolChunk(toolMap, body, now, fallbackId)</code>，负责把 tool 事件应用到 <code>toolMap</code>，保持状态流转可单测。</li>
+    <li>关键修复：generating 阶段新条目状态从错误的 <code>"done"</code> 改为 <code>"generating"</code>。</li>
+    <li>generating → start 保留最早的 <code>startedAt</code>，使最终 duration 覆盖「决定调用 → 执行完成」全过程。</li>
+  </ul>
+
+  <h3>2.2 UI 组件</h3>
+  <ul>
+    <li><a href="../../web/src/components/ToolCallCard.tsx">ToolCallCard.tsx</a>：running/generating 用 SVG 旋转动画图标替代静态 ⏳，并实时显示已运行秒数。</li>
+    <li><a href="../../web/src/components/AgentProcessTimeline.tsx">AgentProcessTimeline.tsx</a>：时间线工具标题增加状态后缀（完成/失败），file_write 生成/运行时显示「写入 xxx…」并显示实时耗时。</li>
+    <li><a href="../../web/src/utils/time.ts">utils/time.ts</a>：新增 <code>formatDuration</code> 与 <code>useElapsed</code>，供上述组件共用。</li>
+    <li><a href="../../web/src/styles/global.css">styles/global.css</a>：新增 <code>.tool-card__spinner</code> 旋转动画与 <code>.process-timeline__icon--running</code> 脉冲动画。</li>
+  </ul>
+
+  <h3>2.3 测试</h3>
+  <ul>
+    <li><a href="../../web/src/hooks/useChat.test.ts">useChat.test.ts</a> 新增 <code>applyToolChunk</code> 单测，覆盖 generating → start → result 完整流转、duration 计算与 error 分支。</li>
+  </ul>
+
+  <h2>3. Desktop 端</h2>
+  <h3>3.1 状态机</h3>
+  <ul>
+    <li>文件：<a href="../../desktop/src/ui/reducers/chat-reducer.ts">desktop/src/ui/reducers/chat-reducer.ts</a></li>
+    <li>reducer 原有逻辑已正确区分 generating/running，并保留 <code>startedAt</code>。本次未改变状态映射，仅补充单测锁定行为。</li>
+  </ul>
+
+  <h3>3.2 UI 渲染</h3>
+  <ul>
+    <li><a href="../../desktop/src/ui/chat-render.ts">chat-render.ts</a>：running/generating 工具卡片使用 SVG 旋转动画图标；通过全局 250ms interval 轮询 <code>[data-active]</code> 时长标签，实现实时耗时更新。</li>
+    <li><a href="../../desktop/assets/styles/stream-chat.css">assets/styles/stream-chat.css</a>：新增 <code>.tool-card__spinner</code> 旋转动画。</li>
+  </ul>
+
+  <h3>3.3 测试</h3>
+  <ul>
+    <li>新增 <a href="../../desktop/src/ui/reducers/chat-reducer.test.ts">chat-reducer.test.ts</a>，覆盖 toolReducer 的两阶段流转与 duration 计算。</li>
+  </ul>
+
+  <h2>4. 排查清单</h2>
+  <ul>
+    <li>工具卡只在 result 后才出现 → 检查 <code>applyToolChunk</code> / <code>toolReducer</code> 是否把 generating 状态正确设为非 done。</li>
+    <li>运行中没有动画 → 检查 CSS 是否引入 <code>tool-card__spinner</code> 动画，组件是否正确输出 running 状态。</li>
+    <li>耗时显示 0 或巨大数字 → 检查 <code>startedAt</code> 是否在 generating 阶段正确写入，且 result 阶段用同一 <code>tool_call_id</code>。</li>
+    <li>Web 与 Desktop 状态不一致 → 对照本节「协议事件」表，确认两端 generating/running/done/error 映射一致。</li>
+  </ul>
+
+  <div class="note">
+    <strong>变更日期：</strong>2026-07-15<br/>
+    <strong>相关模块：</strong>前端展示层 / 交互层（Web + Desktop）
+  </div>
+</body>
+</html>

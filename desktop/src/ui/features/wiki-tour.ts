@@ -21,12 +21,12 @@ interface TourStep {
   desc: string;
 }
 
-/** 使用引导只讲两件事：有疑问问右侧智能体；完整教程在「教程」知识库。 */
+/** 使用引导只讲两件事：有疑问问左侧智能体；完整教程在「教程」知识库。 */
 const TOUR_STEPS: TourStep[] = [
   {
     selector: '[data-wiki-agent-panel]',
     title: '有疑问？先问这里的智能体',
-    desc: '右侧对话栏的 Wiki Agent 就是你的使用助手：功能怎么用、操作出了什么问题、想让它帮你整理内容……直接用大白话问它，什么都能解答。把 AI 当助手来沟通，是最快的用法。',
+    desc: '左侧对话区的 Wiki Agent 就是你的使用助手：功能怎么用、操作出了什么问题、想让它帮你整理内容……直接用大白话问它，什么都能解答。把 AI 当助手来沟通，是最快的用法。',
   },
   {
     selector: '#wiki-kb-select',
@@ -93,7 +93,7 @@ function placeTooltip(tooltip: HTMLElement, rect: DOMRect): void {
   let top: number;
 
   if (rect.left > vw * 0.6 && rect.left - TOOLTIP_GAP - tipW > VIEWPORT_MARGIN) {
-    // 目标靠右（如 Wiki Agent 面板）：气泡放左侧，垂直方向与目标顶部对齐并夹取。
+    // 目标靠右（如知识库面板）：气泡放左侧，垂直方向与目标顶部对齐并夹取。
     left = rect.left - TOOLTIP_GAP - tipW;
     top = clamp(rect.top, VIEWPORT_MARGIN, vh - tipH - VIEWPORT_MARGIN);
   } else {

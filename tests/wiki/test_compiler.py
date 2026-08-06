@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +16,7 @@ import pytest
 from crew.core.mocks import FakeProvider
 from crew.core.types import ChatResponse
 from crew.wiki.compiler import WikiCompiler
+from crew.wiki import compiler as compiler_mod
 from crew.wiki.schemas import RawSource, WikiPage
 from crew.wiki.store import FileSystemWikiStore
 
@@ -115,9 +117,7 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
     compiler.summarizer = MagicMock()
-    compiler.summarizer.maybe_refresh = AsyncMock(
-        side_effect=AssertionError("ingest 不得隐式触发第二次 LLM 摘要")
-    )
+    compiler.summarizer.generate_kb_summary = AsyncMock(return_value=None)
 
     store.save_raw(
         RawSource(
@@ -131,8 +131,12 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
     result = await compiler.ingest("src_1", source_content=source_content)
 
     assert not result.issues
-    compiler.summarizer.maybe_refresh.assert_not_awaited()
-    assert store.get_kb_summary().status == "stale"
+    # 摘要走后台 fire-and-forget 刷新（_schedule_kb_summary_refresh），不阻塞 ingest；
+    # 等事件循环把后台任务跑完再断言。
+    await asyncio.sleep(0)
+    compiler.summarizer.generate_kb_summary.assert_awaited()
+    # mock 的 summarizer 不落盘，摘要状态保持初始 empty
+    assert store.get_kb_summary().status == "empty"
     assert len(result.pages) == 3
     titles = {p.title for p in result.pages}
     assert "原始文档" in titles
@@ -156,9 +160,11 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
     assert entity_page is not None
     assert entity_page.page_type == "entity"
     # relationship 被应用
-    assert "ModeManager" in entity_page.related
+    mode_page = store.get_by_title("ModeManager")
+    assert mode_page is not None
+    assert entity_page.related == []
     assert any(
-        relation.target == "ModeManager" and relation.relation == "uses"
+        relation.target_page_id == mode_page.id and relation.relation == "uses"
         for relation in entity_page.relations
     )
 
@@ -537,6 +543,10 @@ async def test_apply_ingest_uses_saved_plan_and_respects_approved_titles(store, 
     assert "计划文档" in titles  # source 页面始终写入
 
     assert store.get_by_title("EntityB") is None
+    source_page = store.get_by_title("计划文档")
+    assert source_page is not None
+    assert "[[EntityA]]" in source_page.content
+    assert "[[EntityB]]" not in source_page.content
 
 
 @pytest.mark.asyncio
@@ -864,6 +874,10 @@ async def test_plan_ingest_uses_compact_units_and_page_threshold(store, compiler
     assert "核心机制" in titles
     assert "辅助实践" in titles
     assert "路过名称" not in titles
+    source_plan = next(page for page in plan.planned_pages if page.page_type == "source")
+    assert "[[核心机制]]" in source_plan.content
+    assert "[[辅助实践]]" in source_plan.content
+    assert "[[路过名称]]" not in source_plan.content
     core = next(page for page in plan.planned_pages if page.title == "核心机制")
     assert core.claims[0].evidence[0].locator == "第一节"
     assert plan.relationships == [
@@ -893,7 +907,7 @@ async def test_analyze_chunk_uses_compact_output_budget(monkeypatch, compiler):
     assert result["format"] == "knowledge-units-v7"
     assert result["entities"] == []
     assert result["topics"] == []
-    assert chat.await_args.kwargs["max_tokens"] == 2_500
+    assert chat.await_args.kwargs["max_tokens"] == compiler_mod._ANALYSIS_MAX_TOKENS
 
 
 @pytest.mark.asyncio
@@ -1155,8 +1169,7 @@ def test_update_index_contains_navigation_quality_metadata(store, compiler):
     assert "## 概念" not in index_text
     assert "[[知识编译]]" in index_text
     assert "来源 2" in index_text
-    assert "置信度 high" in index_text
-    assert "存在争议" in index_text
+    assert "关系 0" in index_text
 
 
 def test_document_limits_apply_after_all_chunks_are_merged():
@@ -1339,7 +1352,7 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
     existing.content = "# AgentRuntime\n\n已被外部修改的新内容"
     store.update(existing)
 
-    await compiler.apply_ingest("s1")
+    result = await compiler.apply_ingest("s1")
     page_after = store.get(existing.id)
     assert "已被外部修改的新内容" in page_after.content
     assert "运行时描述" not in page_after.content  # 计划内容未覆盖

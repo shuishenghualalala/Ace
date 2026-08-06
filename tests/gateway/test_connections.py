@@ -469,10 +469,3 @@ async def test_tool_result_remains_rate_limited():
     assert conn._pending_payloads[key][0]["body"]["phase"] == "result"
     conn.unregister_all(ws, {"s1"})
     await asyncio.sleep(0)
-
-
-def test_tool_planning_status_is_priority_payload():
-    assert ConnectionManager._is_priority_payload({
-        "kind": "status",
-        "body": {"activity": "tool_planning", "message": "正在规划工具调用…"},
-    })

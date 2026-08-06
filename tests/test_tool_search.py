@@ -95,16 +95,22 @@ def _names(schemas):
     return {schema["function"]["name"] for schema in schemas}
 
 
-def test_default_scope_defers_cron_and_wiki_toolsets():
+def test_default_scope_honors_explicit_defer_before_core_wildcard():
     assembly = assemble_tool_schemas(_registry().list_schemas(), config=ToolSearchConfig())
 
     names = _names(assembly.tool_schemas)
     assert assembly.activated is True
     assert {"cron_create", "wiki_search", "wiki_create_page"}.isdisjoint(names)
-    assert {"file_read", "web_search", "demo__mcp", TOOL_SEARCH_NAME} <= names
+    assert {"file_read", "demo__mcp", TOOL_SEARCH_NAME} <= names
+    assert "web_search" not in names
     assert "tool_describe" not in names
     assert "tool_call" not in names
-    assert assembly.categories == {"cron": 1, "wiki.manage": 1, "wiki.read": 1}
+    assert assembly.categories == {
+        "cron": 1,
+        "web": 1,
+        "wiki.manage": 1,
+        "wiki.read": 1,
+    }
 
 
 def test_available_deferred_tools_message_lists_only_scoped_names():

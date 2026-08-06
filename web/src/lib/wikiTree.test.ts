@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WikiPage } from "../types";
-import { buildFileTree, vaultDocumentLabel, vaultFolderLabel } from "./wikiTree";
+import { buildFileTree, findPageByTitle, normalizeVaultPath, splitHomeQuestions, vaultDocumentLabel, vaultFolderLabel } from "./wikiTree";
 
 function page(id: string, filePath: string): WikiPage {
   return {
@@ -66,5 +66,76 @@ describe("buildFileTree", () => {
     expect(vaultFolderLabel("wiki/sources/assets", "assets")).toBe("其他附件");
     expect(vaultDocumentLabel("Home.md")).toBe("知识库概览");
     expect(vaultDocumentLabel("index.md")).toBe("知识导航");
+  });
+});
+
+describe("splitHomeQuestions", () => {
+  const home = [
+    "# 知识库概览",
+    "",
+    "这是导读。",
+    "",
+    "## 推荐问题",
+    "",
+    "- Wiki 里有哪些关于 Karpathy 的页面？",
+    "- 人机分工原则的核心结论是什么？",
+    "1. 如何上传本地文档到知识库？",
+    "",
+    "## 知识地图",
+    "",
+    "- [[人机分工原则]]",
+    "",
+  ].join("\n");
+
+  it("把 Home.md 拆成 前文 / 推荐问题 / 后文", () => {
+    const sections = splitHomeQuestions(home);
+    expect(sections).not.toBeNull();
+    expect(sections!.before).toContain("这是导读。");
+    expect(sections!.before).not.toContain("推荐问题");
+    expect(sections!.questions).toEqual([
+      "Wiki 里有哪些关于 Karpathy 的页面？",
+      "人机分工原则的核心结论是什么？",
+      "如何上传本地文档到知识库？",
+    ]);
+    expect(sections!.after).toContain("## 知识地图");
+  });
+
+  it("没有推荐问题小节或小节为空时返回 null", () => {
+    expect(splitHomeQuestions("# 概览\n\n没有小节。\n")).toBeNull();
+    expect(splitHomeQuestions("## 推荐问题\n\n## 知识地图\n")).toBeNull();
+  });
+});
+
+describe("findPageByTitle", () => {
+  it("按标题或别名精确匹配（大小写不敏感）", () => {
+    const pages = [
+      { ...page("a", "wiki/entities/a.md"), title: "人机分工原则", aliases: ["人机分工", "Curation"] },
+      { ...page("b", "wiki/topics/b.md"), title: "LLM Wiki 是什么" },
+    ];
+    expect(findPageByTitle(pages, "人机分工原则")?.id).toBe("a");
+    expect(findPageByTitle(pages, " 人机分工 ")?.id).toBe("a");
+    expect(findPageByTitle(pages, "curation")?.id).toBe("a");
+    expect(findPageByTitle(pages, "不存在的页面")).toBeUndefined();
+    expect(findPageByTitle(pages, "")).toBeUndefined();
+  });
+});
+
+describe("normalizeVaultPath", () => {
+  it("旧版无 wiki/ 前缀的路径补前缀，正常路径原样保留", () => {
+    expect(normalizeVaultPath("entities/人机分工原则.md")).toBe("wiki/entities/人机分工原则.md");
+    expect(normalizeVaultPath("topics/a.md")).toBe("wiki/topics/a.md");
+    expect(normalizeVaultPath("sources/pdfs/b.md")).toBe("wiki/sources/pdfs/b.md");
+    expect(normalizeVaultPath("wiki/entities/a.md")).toBe("wiki/entities/a.md");
+    expect(normalizeVaultPath("raw/pdfs/c.md")).toBe("raw/pdfs/c.md");
+    expect(normalizeVaultPath("")).toBe("");
+  });
+
+  it("旧版种子页面（无 wiki/ 前缀）也能挂进文件树", () => {
+    const root = buildFileTree([page("legacy", "entities/legacy.md")]);
+    const wiki = root.children[0];
+    if (wiki.kind !== "folder") throw new Error("expected folder");
+    const entities = wiki.children.find((n) => n.kind === "folder" && n.name === "entities");
+    if (entities?.kind !== "folder") throw new Error("expected entities folder");
+    expect(entities.children.map((n) => (n.kind === "page" ? n.page.title : n.name))).toContain("legacy");
   });
 });

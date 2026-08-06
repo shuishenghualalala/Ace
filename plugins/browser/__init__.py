@@ -13,7 +13,11 @@ from __future__ import annotations
 from crew.browser import BrowserManager
 from crew.state.logging import get_logger
 
+from .compile_tool import register_record_compile_tool
 from .tool import PLUGIN_KEY as PLUGIN_KEY, register_browser_use_tool
+
+# PLUGIN_KEY 是给外部（权限判定、偏好键）读的，显式 re-export 而不是留成未用导入。
+__all__ = ["PLUGIN_KEY", "manager", "register"]
 
 log = get_logger("plugins.browser")
 
@@ -32,8 +36,19 @@ def register(ctx) -> None:
     manager = BrowserManager(config.browser)
     ctx.register_disposer(_close_manager)
     ctx.register_skill_root("skills")
-    register_browser_use_tool(ctx, manager, config, plugin_prefs)
-    log.info("browser 插件已注册 browser_use（toolset=browser）")
+    browser_tool = register_browser_use_tool(ctx, manager, config, plugin_prefs)
+    # 两阶段发布 + 独立回放：compile 只生成 owner-private immutable draft；
+    # install 经一次性审批发布私有 executable plan 和全局 opaque entry；
+    # replay 每次 mutation 再走动态审批与 exact session lease。
+    register_record_compile_tool(
+        ctx,
+        manager,
+        capability_check=browser_tool.capability_denial,
+    )
+    log.info(
+        "browser 插件已注册 browser_use / record_compile / record_install / "
+        "record_replay（toolset=browser）"
+    )
 
 
 async def _close_manager() -> None:

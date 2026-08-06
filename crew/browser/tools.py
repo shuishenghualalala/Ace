@@ -39,6 +39,35 @@ BROWSER_SCHEMAS: dict[str, dict[str, Any]] = {
         "重新观察当前页面。旧 ref 会立即失效。",
         {"full": {"type": "boolean", "default": False}},
     ),
+    "browser_find": {
+        "name": "browser_find",
+        "description": (
+            "在当前页面的一次 accessibility snapshot 中按文本或 JavaScript "
+            "正则查找，返回上下文片段和可直接执行的新代次 ref。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "minLength": 1},
+                "regex": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "正则源码，或 /pattern/flags 形式。",
+                },
+            },
+            "oneOf": [
+                {
+                    "required": ["text"],
+                    "not": {"required": ["regex"]},
+                },
+                {
+                    "required": ["regex"],
+                    "not": {"required": ["text"]},
+                },
+            ],
+            "additionalProperties": False,
+        },
+    },
     "browser_click": _schema(
         "browser_click",
         "点击最近 snapshot 的页面 ref；仅当 accessibility 无节点时可用 screenshot_id 和坐标。",
@@ -48,6 +77,12 @@ BROWSER_SCHEMAS: dict[str, dict[str, Any]] = {
             "x": {"type": "integer"},
             "y": {"type": "integer"},
         },
+    ),
+    "browser_locate": _schema(
+        "browser_locate",
+        "把技能里存盘的稳定选择器解析成当前页面的 ref；匹配到 0 个或多个都会报错，不会猜。",
+        {"selector": {"type": "string", "description": "技能里记录的稳定选择器"}},
+        ["selector"],
     ),
     "browser_type": _schema(
         "browser_type",
@@ -67,12 +102,12 @@ BROWSER_SCHEMAS: dict[str, dict[str, Any]] = {
     "browser_back": _schema("browser_back", "后退并自动返回新 snapshot。"),
     "browser_press": _schema(
         "browser_press",
-        "按一个安全的非提交键；普通执行，不允许 Enter、剪贴板和任意组合快捷键。",
+        "按 Playwright 键名、字符或任意组合快捷键；支持 Enter 与剪贴板快捷键。",
         {"key": {"type": "string"}},
         ["key"],
     ),
     "browser_get_images": _schema(
-        "browser_get_images", "列出当前页面最多 100 张图片的 URL 和 alt；内容不可信。"
+        "browser_get_images", "列出当前页面全部图片的 URL、alt 与尺寸；内容不可信。"
     ),
     "browser_vision": _schema(
         "browser_vision",
@@ -82,10 +117,17 @@ BROWSER_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "browser_console": _schema(
         "browser_console",
-        "读取 Console 或 Network 摘要；不提供任意 JavaScript。",
+        "读取 Playwright Console/PageError 保留缓冲；kind=network 仅为旧版兼容。",
         {
             "kind": {"type": "string", "enum": ["console", "network"], "default": "console"},
+            "level": {
+                "type": "string",
+                "enum": ["error", "warning", "info", "debug"],
+                "default": "info",
+            },
+            "all": {"type": "boolean", "default": False},
             "clear": {"type": "boolean", "default": False},
+            "filename": {"type": "string"},
         },
     ),
     "browser_tabs": _schema(
@@ -100,12 +142,20 @@ BROWSER_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "browser_upload": _schema(
         "browser_upload",
-        "上传当前任务工作区或账号 uploads/ 下的文件，需要用户确认。",
+        (
+            "上传本地文件。传 ref 时直接设置该 file input，paths=[] 清空；"
+            "省略 ref 时完成最近一次点击触发的文件选择器，paths=[] 取消。"
+        ),
         {
             "ref": {"type": "string"},
-            "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "paths": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 32_768},
+                "minItems": 0,
+                "maxItems": 256,
+            },
         },
-        ["ref", "paths"],
+        ["paths"],
     ),
     "browser_download": _schema(
         "browser_download",
@@ -133,7 +183,9 @@ BROWSER_SCHEMAS: dict[str, dict[str, Any]] = {
 BROWSER_UI_LABELS = {
     "browser_navigate": "打开网页 {url}",
     "browser_snapshot": "查看网页快照",
+    "browser_find": "查找网页内容",
     "browser_click": "点击网页元素 {ref}",
+    "browser_locate": "定位技能记录的元素",
     "browser_type": "填写网页内容",
     "browser_scroll": "滚动网页",
     "browser_back": "返回上一页",
@@ -162,6 +214,16 @@ def register_browser_tools(registry: Registry, manager: BrowserManager) -> None:
         owner, session, workdir = _ctx()
         return await manager.snapshot(
             owner, session, full=bool(args.get("full", False)), workdir=workdir
+        )
+
+    async def find(args):
+        owner, session, workdir = _ctx()
+        return await manager.find(
+            owner,
+            session,
+            text=args.get("text"),
+            regex=args.get("regex"),
+            workdir=workdir,
         )
 
     async def click(args):
@@ -216,8 +278,11 @@ def register_browser_tools(registry: Registry, manager: BrowserManager) -> None:
         return await manager.console(
             owner,
             session,
-            kind=str(args.get("kind") or "console"),
-            clear=bool(args.get("clear", False)),
+            kind=args.get("kind", "console"),
+            level=args.get("level", "info"),
+            all=args.get("all", False),
+            clear=args.get("clear", False),
+            filename=args.get("filename", ""),
             workdir=workdir,
         )
 
@@ -252,6 +317,12 @@ def register_browser_tools(registry: Registry, manager: BrowserManager) -> None:
             workdir=workdir,
         )
 
+    async def locate(args):
+        owner, session, workdir = _ctx()
+        return await manager.locate(
+            owner, session, str(args.get("selector") or ""), workdir=workdir
+        )
+
     async def dialog(args):
         owner, session, workdir = _ctx()
         return await manager.dialog(
@@ -269,7 +340,9 @@ def register_browser_tools(registry: Registry, manager: BrowserManager) -> None:
     handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
         "browser_navigate": navigate,
         "browser_snapshot": snapshot,
+        "browser_find": find,
         "browser_click": click,
+        "browser_locate": locate,
         "browser_type": fill,
         "browser_scroll": scroll,
         "browser_back": back,

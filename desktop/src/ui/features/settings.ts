@@ -23,6 +23,7 @@ import { bindSessionPreviewModal } from './session-preview-modal';
 import { bindContactModal, closeContactModal, openContactModal } from './settings-contact';
 import { $, notify, state } from '../state';
 import { requireRendererLogin } from './auth-gate';
+import { renderAuthAccount } from './login';
 import {
   DEFAULT_SETTINGS,
   clampNumber,
@@ -549,6 +550,9 @@ export function registerConfigPaneRenderers(r: {
 }
 
 function onSettingsPaneOpened(pane: string): void {
+  if (pane === 'account') {
+    renderAuthAccount();
+  }
   if (pane === 'model' && configRenderers) void configRenderers.renderConfigModels();
   if (pane === 'channel' && configRenderers) void configRenderers.renderPlatforms();
   if (pane === 'sys-logs') {
@@ -580,6 +584,12 @@ export function bindSettingsUi(): void {
   bindSessionPreviewModal();
   bindControls();
   setActivePane('account');
+  // 用户头像按钮：打开设置并切换到账户面板
+  window.addEventListener('user:open-account', () => {
+    openSettingsModal();
+    setActivePane('account');
+    renderAuthAccount();
+  });
   // 启动时应用持久化的设置
   applyAll();
   void syncAutoStartFromSystem();

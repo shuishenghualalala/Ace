@@ -70,6 +70,25 @@ def test_browser_driver_error_preserves_lifecycle_flags() -> None:
     assert isinstance(error, ToolError)
 
 
+@pytest.mark.parametrize("code", ["dialog_pending", "file_chooser_pending"])
+def test_electron_driver_classifies_modal_pending_as_recoverable_state(
+    code: str,
+) -> None:
+    with pytest.raises(BrowserDriverError) as raised:
+        ElectronBrowserDriver._raise(
+            ElectronBridgeError("modal pending", code=code)
+        )
+
+    assert raised.value.code == code
+    assert raised.value.uncertain is False
+    assert raised.value.next_state == {
+        "status": "blocked",
+        "recoverable": True,
+        "reason": code,
+        "retry_original_action": False,
+    }
+
+
 @pytest.mark.asyncio
 async def test_electron_driver_preserves_cancellation_after_remote_lifecycle_failure(
     tmp_path: Path,
@@ -144,6 +163,125 @@ async def test_electron_driver_derives_mutation_from_strict_readonly_whitelist(
 
 
 @pytest.mark.asyncio
+async def test_electron_driver_binds_targeted_execute_to_exact_target_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def request(*args: Any, **kwargs: Any) -> Any:
+        captured["params"] = args[2]
+        captured.update(kwargs)
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(
+        "crew.browser.electron_driver.electron_browser_bridge.request",
+        request,
+    )
+    driver = ElectronBrowserDriver(BrowserConfig())
+
+    await driver.execute_targeted(
+        "crew_0123456789ab",
+        tmp_path / "profile",
+        "click",
+        ["@e1"],
+        target_id="target-exact",
+        timeout=12.345,
+        mutating=True,
+    )
+
+    assert captured["params"]["target_id"] == "target-exact"
+    assert captured["params"]["command"] == "click"
+    assert captured["params"]["args"] == ["@e1"]
+    assert captured["params"]["command_timeout_ms"] == 12_345
+
+
+@pytest.mark.asyncio
+async def test_electron_driver_sends_form_values_only_in_typed_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def request(*args: Any, **kwargs: Any) -> Any:
+        captured["method"] = args[1]
+        captured["params"] = args[2]
+        captured.update(kwargs)
+        return {"success": True, "data": {"completed_count": 1}}
+
+    monkeypatch.setattr(
+        "crew.browser.electron_driver.electron_browser_bridge.request",
+        request,
+    )
+    driver = ElectronBrowserDriver(BrowserConfig())
+    fields = [
+        {
+            "type": "textbox",
+            "ref": "@e1",
+            "value": "private-form-value",
+        }
+    ]
+
+    await driver.fill_form(
+        "crew_0123456789ab",
+        tmp_path / "profile",
+        fields,
+        target_id="target-1",
+        timeout=3,
+    )
+
+    assert captured["method"] == "execute"
+    assert captured["params"]["command"] == "fill_form"
+    assert captured["params"]["args"] == []
+    assert captured["params"]["fields"] == fields
+    assert captured["params"]["command_timeout_ms"] == 3_000
+    assert "private-form-value" not in repr(captured["params"]["args"])
+    assert captured["mutating"] is True
+    assert captured["retry_readonly"] is False
+
+
+@pytest.mark.asyncio
+async def test_electron_driver_sends_atomic_upload_as_typed_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def request(*args: Any, **kwargs: Any) -> Any:
+        captured["method"] = args[1]
+        captured["params"] = args[2]
+        captured.update(kwargs)
+        return {"success": True, "data": {"via": "chooser", "uploaded": 256}}
+
+    monkeypatch.setattr(
+        "crew.browser.electron_driver.electron_browser_bridge.request",
+        request,
+    )
+    driver = ElectronBrowserDriver(BrowserConfig())
+    files = [f"/tmp/upload-{index}.txt" for index in range(256)]
+
+    await driver.upload_with_trigger(
+        "crew_0123456789ab",
+        tmp_path / "profile",
+        target_id="target-1",
+        trigger_selector="#choose-files",
+        input_selector="input[type=file]",
+        files=files,
+        timeout=40,
+    )
+
+    assert captured["method"] == "execute"
+    assert captured["params"]["command"] == "upload_with_trigger"
+    assert captured["params"]["args"] == []
+    assert captured["params"]["trigger_selector"] == "#choose-files"
+    assert captured["params"]["input_selector"] == "input[type=file]"
+    assert captured["params"]["files"] == files
+    assert captured["params"]["command_timeout_ms"] == 40_000
+    assert captured["mutating"] is True
+    assert captured["retry_readonly"] is False
+
+
+@pytest.mark.asyncio
 async def test_driver_defaults_remain_safe_for_test_and_alternative_drivers(tmp_path: Path) -> None:
     driver = _ContractDriver()
     profile = tmp_path / "profile"
@@ -165,6 +303,16 @@ async def test_driver_defaults_remain_safe_for_test_and_alternative_drivers(tmp_
 
     await driver.interrupt("owner", profile)
     assert driver.calls[-1] == ("close", ("owner", profile), {})
+
+    await driver.execute_targeted(
+        "owner",
+        profile,
+        "click",
+        ["@e1"],
+        target_id="ignored-by-compatible-driver",
+    )
+    assert driver.calls[-1][0] == "execute"
+    assert driver.calls[-1][1][2:] == ("click", ("@e1",))
 
 
 @pytest.mark.asyncio
@@ -200,6 +348,7 @@ async def test_electron_page_guard_forwards_lightweight_security_mode(
     assert marker == "marker"
     assert captured["method"] == "page_guard"
     assert captured["params"]["include_security"] is False
+    assert captured["params"]["command_timeout_ms"] == 1_000
     assert captured["mutating"] is False
     assert captured["retry_readonly"] is True
 
@@ -276,6 +425,7 @@ async def test_electron_driver_maps_execute_and_control_mode_to_host_rpc(
         "crew.browser.electron_driver.electron_browser_bridge.request",
         request,
     )
+    monkeypatch.setattr("crew.browser.electron_driver.time.time", lambda: 1_000.0)
     driver = ElectronBrowserDriver(BrowserConfig(command_timeout_seconds=17))
     profile = tmp_path / "profile"
     download_dir = tmp_path / "downloads"
@@ -305,11 +455,13 @@ async def test_electron_driver_maps_execute_and_control_mode_to_host_rpc(
             "profile_dir": str(profile.resolve()),
             "command": "click",
             "args": ["@e17"],
+            "command_timeout_ms": 4_000,
+            "command_deadline_ms": 1_004_000,
             "proxy_url": "http://127.0.0.1:4567",
             "download_dir": str(download_dir.resolve()),
             "mutating": True,
         },
-        4,
+        6,
         {
             "mutating": True,
             "retry_readonly": False,
@@ -334,6 +486,103 @@ async def test_electron_driver_maps_execute_and_control_mode_to_host_rpc(
 
 
 @pytest.mark.asyncio
+async def test_electron_driver_uses_independent_atomic_replay_rpcs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, dict[str, Any], float, dict[str, Any]]] = []
+
+    async def request(
+        owner_session: str,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout: float,
+        **transport: Any,
+    ) -> Any:
+        calls.append((owner_session, method, params, timeout, transport))
+        if method == "capabilities":
+            return {
+                "recordingEventSchemas": [10, 11],
+                "replayArtifactSchemas": [
+                    "crew.browser.replay.v2",
+                    "crew.browser.replay.v3",
+                ],
+                "atomicReplayEffects": True,
+            }
+        return {
+            "matchedEffects": [],
+            "pageBindings": [],
+            "downloads": [],
+            "activePageGuid": "",
+            "closedPageGuids": [],
+        }
+
+    monkeypatch.setattr(
+        "crew.browser.electron_driver.electron_browser_bridge.request",
+        request,
+    )
+    driver = ElectronBrowserDriver(BrowserConfig(command_timeout_seconds=17))
+    profile = tmp_path / "profile"
+    download_dir = tmp_path / "downloads"
+    transaction = {
+        "schemaVersion": 1,
+        "transactionId": 1,
+        "source": {"pageGuid": "p0"},
+        "knownPages": [],
+        "action": {"name": "openPage", "url": "https://example.test/"},
+        "expectedEffects": [],
+        "timeoutMs": 4_000,
+    }
+
+    capabilities = await driver.capabilities(
+        "crew_0123456789ab",
+        profile,
+        timeout=4,
+    )
+    result = await driver.execute_transaction(
+        "crew_0123456789ab",
+        profile,
+        transaction,
+        timeout=4,
+        proxy_url="http://127.0.0.1:4567",
+        download_dir=download_dir,
+    )
+
+    assert capabilities["atomicReplayEffects"] is True
+    assert result["matchedEffects"] == []
+    assert calls == [
+        (
+            "crew_0123456789ab",
+            "capabilities",
+            {},
+            6,
+            {
+                "mutating": False,
+                "retry_readonly": True,
+                "_allow_unready": False,
+            },
+        ),
+        (
+            "crew_0123456789ab",
+            "execute_transaction",
+            {
+                "profile_dir": str(profile.resolve()),
+                **transaction,
+                "proxy_url": "http://127.0.0.1:4567",
+                "download_dir": str(download_dir.resolve()),
+            },
+            6,
+            {
+                "mutating": True,
+                "retry_readonly": False,
+                "_allow_unready": False,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_electron_driver_marks_only_provable_reads_retryable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -353,13 +602,21 @@ async def test_electron_driver_marks_only_provable_reads_retryable(
     await driver.execute(
         "crew_0123456789ab",
         tmp_path / "profile",
+        "find",
+        ["--text", "Search"],
+    )
+    await driver.execute(
+        "crew_0123456789ab",
+        tmp_path / "profile",
         "console",
         ["--clear"],
     )
 
     assert transports[0]["retry_readonly"] is True
     assert transports[0]["mutating"] is False
-    assert transports[1]["retry_readonly"] is False
+    assert transports[1]["retry_readonly"] is True
+    assert transports[1]["mutating"] is False
+    assert transports[2]["retry_readonly"] is False
 
 
 @pytest.mark.asyncio
@@ -386,6 +643,7 @@ async def test_electron_driver_clears_inactive_owner_and_bounds_download_deadlin
         "crew.browser.electron_driver.electron_browser_bridge.request",
         request,
     )
+    monkeypatch.setattr("crew.browser.electron_driver.time.time", lambda: 1_000.0)
     driver = ElectronBrowserDriver(BrowserConfig())
     profile = tmp_path / "profile"
     quarantine = tmp_path / "download-quarantine"
@@ -410,7 +668,10 @@ async def test_electron_driver_clears_inactive_owner_and_bounds_download_deadlin
     assert [call[0] for call in calls[:2]] == ["execute", "clear_owner_data"]
     assert calls[0][1]["command"] == "tab" and calls[0][1]["args"] == ["list"]
     assert calls[1][2]["mutating"] is True
-    assert calls[2][1]["timeout_ms"] == 24_000
+    assert calls[2][1]["timeout_ms"] == 25_000
+    assert calls[2][1]["command_timeout_ms"] == 25_000
+    assert calls[2][1]["command_deadline_ms"] == 1_025_000
+    assert calls[2][2]["timeout"] == 27
     assert calls[2][2]["mutating"] is True
 
 
@@ -445,6 +706,7 @@ async def test_electron_driver_maps_atomic_coordinate_click_to_one_mutating_rpc(
         "crew.browser.electron_driver.electron_browser_bridge.request",
         request,
     )
+    monkeypatch.setattr("crew.browser.electron_driver.time.time", lambda: 1_000.0)
     driver = ElectronBrowserDriver(BrowserConfig())
     profile = tmp_path / "profile"
 
@@ -469,16 +731,54 @@ async def test_electron_driver_maps_atomic_coordinate_click_to_one_mutating_rpc(
                 "x": 50,
                 "y": 25,
                 "proxy_url": "http://127.0.0.1:4567",
+                "download_dir": "",
                 "expected_epoch": "0123456789abcdef0123456789abcdef",
+                "command_timeout_ms": 7_000,
+                "command_deadline_ms": 1_007_000,
             },
             {
-                "timeout": 7,
+                "timeout": 9,
                 "mutating": True,
                 "retry_readonly": False,
                 "_allow_unready": False,
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_electron_driver_bounds_recording_control_with_absolute_deadline_and_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def request(*args: Any, **kwargs: Any) -> Any:
+        captured["method"] = args[1]
+        captured["params"] = args[2]
+        captured.update(kwargs)
+        return {"recording": True}
+
+    monkeypatch.setattr(
+        "crew.browser.electron_driver.electron_browser_bridge.request",
+        request,
+    )
+    monkeypatch.setattr("crew.browser.electron_driver.time.time", lambda: 2_000.0)
+    driver = ElectronBrowserDriver(BrowserConfig(command_timeout_seconds=17))
+
+    await driver.set_recording(
+        "crew_0123456789ab",
+        tmp_path / "profile",
+        target_id="target-1",
+        action="start",
+        recording_id="aabbccddeeff0011",
+    )
+
+    assert captured["method"] == "set_recording"
+    assert captured["params"]["command_timeout_ms"] == 17_000
+    assert captured["params"]["command_deadline_ms"] == 2_017_000
+    assert captured["timeout"] == 19
+    assert captured["mutating"] is True
 
 
 @pytest.mark.asyncio

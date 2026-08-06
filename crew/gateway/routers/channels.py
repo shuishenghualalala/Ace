@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
+import time
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -13,9 +15,17 @@ from fastapi.responses import JSONResponse
 from crew.gateway.auth import account_from_request
 from crew.gateway.channel_config import (
     PLATFORM_ACCOUNT_FIELDS as _PLATFORM_ACCOUNT_FIELDS,
+)
+from crew.gateway.channel_config import (
     PLATFORM_ENV_FIELDS as _PLATFORM_ENV_FIELDS,
+)
+from crew.gateway.channel_config import (
     PLATFORM_SECRET_ENV as _PLATFORM_SECRET_ENV,
+)
+from crew.gateway.channel_config import (
     channel_raw as _resolved_channel_raw,
+)
+from crew.gateway.channel_config import (
     owner_env_map as _owner_env_map,
 )
 from crew.gateway.channel_presets import (
@@ -32,6 +42,16 @@ from crew.state.logging import get_logger
 log = get_logger("gateway.channels")
 
 _SECRET_MARKERS = ("secret", "token", "api_key", "apikey", "password")
+
+# 微信扫码登录的进程内状态：qr_id → {base_url, updated_at}，仅用于跟踪 redirect_host。
+_WEIXIN_QR_TTL_S = 600.0
+_WEIXIN_QR_STATES: dict[str, dict[str, Any]] = {}
+
+
+def _prune_weixin_qr_states(now: float) -> None:
+    for key in [k for k, v in _WEIXIN_QR_STATES.items()
+                if now - float(v.get("updated_at", 0)) > _WEIXIN_QR_TTL_S]:
+        _WEIXIN_QR_STATES.pop(key, None)
 
 
 def _is_secret_key(key: str) -> bool:
@@ -57,7 +77,7 @@ def _redact_secret_text(text: str) -> str:
         r"([?&](?:secret_key|api_key|token|password|app_secret|secret|key)=)[^&\s]+",
         r"\1***",
         text,
-        flags=re.I,
+        flags=re.IGNORECASE,
     )
     redacted = re.sub(r"//([^:/@\s]+):([^/@\s]+)@", r"//\1:***@", redacted)
     return redacted
@@ -286,6 +306,23 @@ def _is_live_connected(name: str, detail: dict[str, Any]) -> bool:
     return bool(detail.get("connected"))
 
 
+def _platform_error_kind(name: str, error: Any) -> str:
+    """把可安全展示的连接异常归类，供前端给出可执行提示。"""
+    if name.strip().lower() != "weixin":
+        return ""
+    message = str(error or "").lower()
+    network_markers = (
+        "cannot connect to host",
+        "nodename nor servname provided",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "connection refused",
+        "network is unreachable",
+        "connection timed out",
+    )
+    return "network" if any(marker in message for marker in network_markers) else ""
+
+
 async def _wait_for_live_connected(channel_manager, name: str) -> tuple[bool, str]:
     """连接后等待真实握手成功；无探针的渠道（测试桩）直接通过。"""
     if not _channel_supports_live_probe(channel_manager, name):
@@ -322,6 +359,10 @@ def _enrich_platform_row(
     if detail:
         row["detail"] = _redact(detail, secret_values)
     row["live_connected"] = _is_live_connected(name, detail) if detail else False
+    error = row.get("error") or detail.get("last_error")
+    error_kind = _platform_error_kind(name, error)
+    if error_kind:
+        row["error_kind"] = error_kind
     return row
 
 
@@ -726,5 +767,83 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             },
             status_code=503,
         )
+
+    # -- 微信扫码登录（桌面端内置扫码）-------------------------------------- #
+    @router.post("/api/platforms/{name}/qr-login/start")
+    async def weixin_qr_login_start(request: Request, name: str) -> JSONResponse:
+        platform = name.strip().lower()
+        if platform != "weixin":
+            return JSONResponse({"ok": False, "error": "该平台不支持扫码登录"}, status_code=400)
+        try:
+            from plugins.platforms.weixin import ilink
+        except ImportError:
+            return JSONResponse({"ok": False, "error": "weixin 插件未安装"}, status_code=404)
+        fetched = await ilink.fetch_qr_code()
+        if fetched is None:
+            return JSONResponse({"ok": False, "error": "获取二维码失败，请稍后重试"}, status_code=500)
+        qrcode_value, qr_scan_data, qrcode_url = fetched
+        svg = ilink.render_qr_svg(qr_scan_data)
+        qr_image = ""
+        if svg:
+            qr_image = "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
+        now = time.time()
+        _WEIXIN_QR_STATES[qrcode_value] = {"base_url": ilink.ILINK_BASE_URL, "updated_at": now}
+        _prune_weixin_qr_states(now)
+        return JSONResponse({
+            "ok": True,
+            "qr_id": qrcode_value,
+            "qr_image": qr_image,
+            "qrcode_url": qrcode_url,
+        })
+
+    @router.post("/api/platforms/{name}/qr-login/status")
+    async def weixin_qr_login_status(request: Request, name: str) -> JSONResponse:
+        platform = name.strip().lower()
+        if platform != "weixin":
+            return JSONResponse({"ok": False, "error": "该平台不支持扫码登录"}, status_code=400)
+        try:
+            from plugins.platforms.weixin import ilink
+            from plugins.platforms.weixin.config import WeixinSettings
+        except ImportError:
+            return JSONResponse({"ok": False, "error": "weixin 插件未安装"}, status_code=404)
+        try:
+            payload = await request.json()
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "invalid qr_id"}, status_code=400)
+        qr_id = str(payload.get("qr_id") or "").strip()
+        if not qr_id:
+            return JSONResponse({"ok": False, "error": "missing qr_id"}, status_code=400)
+        state = _WEIXIN_QR_STATES.get(qr_id)
+        base_url = state["base_url"] if state else ilink.ILINK_BASE_URL
+        status_resp = await ilink.poll_qr_status(qr_id, base_url=base_url)
+        if status_resp is None:
+            return JSONResponse({"ok": True, "status": "pending"})
+        status = str(status_resp.get("status") or "wait")
+        if status == "scaned_but_redirect":
+            redirect_host = str(status_resp.get("redirect_host") or "")
+            if redirect_host:
+                _WEIXIN_QR_STATES.setdefault(qr_id, {})["base_url"] = f"https://{redirect_host}"
+            return JSONResponse({"ok": True, "status": "scaned"})
+        if status == "confirmed":
+            account_id = str(status_resp.get("ilink_bot_id") or "")
+            token = str(status_resp.get("bot_token") or "")
+            base_url = str(status_resp.get("baseurl") or ilink.ILINK_BASE_URL)
+            user_id = str(status_resp.get("ilink_user_id") or "")
+            if not account_id or not token:
+                return JSONResponse({"ok": True, "status": "error", "error": "扫码确认但凭证不完整"})
+            settings = WeixinSettings.from_extra({})
+            ilink.save_account(
+                settings.accounts_dir(),
+                account_id=account_id,
+                token=token,
+                base_url=base_url,
+                user_id=user_id,
+            )
+            _WEIXIN_QR_STATES.pop(qr_id, None)
+            return JSONResponse({
+                "ok": True, "status": "confirmed", "account_id": account_id, "token": token,
+            })
+        _WEIXIN_QR_STATES[qr_id] = {**_WEIXIN_QR_STATES.get(qr_id, {}), "updated_at": time.time()}
+        return JSONResponse({"ok": True, "status": status})
 
     return router

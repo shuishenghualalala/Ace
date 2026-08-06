@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import ipaddress
 import json
 import re
 from pathlib import Path
@@ -24,9 +26,36 @@ from crew.state.logging import _sanitize_llm_trace
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+_JPEG = bytes([0xFF, 0xD8, 0xFF, 0xD9])
+
+
+def _fake_security_digest(element_security: dict[str, str]) -> str:
+    ordered = sorted(
+        element_security,
+        key=lambda value: value.encode("utf-16-be", errors="surrogatepass"),
+    )
+    payload = json.dumps(
+        [[key, element_security[key]] for key in ordered],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class FakeBrowserDriver(BrowserDriver):
+    REF_KEYS = {
+        "@e17": "button\0submit purchase\0#1",
+        "@e18": "textbox\0search\0#1",
+    }
+    REF_ROLES = {"@e17": "button", "@e18": "textbox"}
+    REF_NAMES = {"@e17": "Submit purchase", "@e18": "Search"}
+    REF_ACTION_KINDS = {"@e17": "submit", "@e18": "input"}
+    REF_CONTENT_EDITABLE = {"@e17": False, "@e18": False}
+    ELEMENT_SECURITY = {
+        "button\0submit purchase\0#1": "fake-fingerprint-e17",
+        "textbox\0search\0#1": "fake-fingerprint-e18",
+    }
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.tabs: dict[str, dict[str, str]] = {}
@@ -121,25 +150,100 @@ class FakeBrowserDriver(BrowserDriver):
             if key == "attr":
                 return {"success": True, "data": {"attribute": ""}}
             return {"success": True, "data": {key: self.tabs[active].get(key, "")}}
-        elif command == "snapshot":
+        elif command in {"snapshot", "find"}:
+            if command == "find":
+                if values == ("--regex", "["):
+                    raise BrowserDriverError(
+                        "Invalid regular expression",
+                        code="invalid_find_query",
+                    )
+                query = values[1] if len(values) == 2 else ""
+                if query == "missing":
+                    snapshot = 'No matches found for "missing".'
+                else:
+                    snapshot = (
+                        f'Found 1 match for "{query}":\n\n'
+                        '- textbox "Search" [ref=@e18]'
+                    )
+            else:
+                snapshot = (
+                    '- button "Submit purchase" [ref=@e17]\n'
+                    '- textbox "Search" [ref=@e18]'
+                )
             return {
                 "success": True,
                 "data": {
-                    "snapshot": '- button "Submit purchase" [ref=@e17]\n- textbox "Search" [ref=@e18]'
+                    "snapshot": snapshot,
+                    "ref_keys": dict(self.REF_KEYS),
+                    "ref_actions": {"@e17": "submit"},
+                    "ref_roles": dict(self.REF_ROLES),
+                    "ref_names": dict(self.REF_NAMES),
+                    "ref_action_kinds": dict(self.REF_ACTION_KINDS),
+                    "ref_content_editable": dict(self.REF_CONTENT_EDITABLE),
+                    "security_digest": _fake_security_digest(self.ELEMENT_SECURITY),
+                    "element_security": dict(self.ELEMENT_SECURITY),
+                    "element_navigation": {},
                 },
             }
         elif command == "eval":
             if values and "performance.timeOrigin" in values[0]:
-                marker = {"href": self.tabs[active]["url"], "timeOrigin": self.time_origin}
+                marker = {
+                    "href": self.tabs[active]["url"],
+                    "timeOrigin": self.time_origin,
+                    "securityDigest": _fake_security_digest(self.ELEMENT_SECURITY),
+                    "elementSecurity": dict(self.ELEMENT_SECURITY),
+                    "elementNavigation": {},
+                }
                 return {"success": True, "data": {"value": json.dumps(marker, sort_keys=True)}}
             if values and "elementFromPoint" in values[0]:
                 return {"success": True, "data": {"value": '{"tag":"BUTTON","name":"Continue"}'}}
-            return {"success": True, "data": {"value": "[]"}}
-        elif command == "screenshot":
+            expression = values[0] if values else ""
+            if expression == "() => undefined":
+                return {
+                    "success": True,
+                    "data": {
+                        "is_function": True,
+                        "is_undefined": True,
+                        "serialized": "undefined",
+                    },
+                }
+            if expression == "() => window.__largeEvaluation":
+                value = {"payload": "雪🙂" * 40_000}
+            else:
+                value = []
+            return {
+                "success": True,
+                "data": {
+                    "value": value,
+                    "is_function": "=>" in expression,
+                    "is_undefined": False,
+                    "serialized": json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                },
+            }
+        elif command in {"screenshot", "vision_screenshot"}:
             target = Path(values[-1])
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(_PNG)
-            return {"success": True, "data": {"path": str(target)}}
+            image_type = (
+                values[values.index("--type") + 1]
+                if "--type" in values
+                else "png"
+            )
+            target.write_bytes(_JPEG if image_type == "jpeg" else _PNG)
+            return {
+                "success": True,
+                "data": {
+                    "path": str(target),
+                    **(
+                        {"host_epoch": "a" * 32}
+                        if command == "vision_screenshot"
+                        else {}
+                    ),
+                },
+            }
         return {"success": True, "data": {}}
 
     async def close(self, owner_session: str, profile_dir: Path) -> None:
@@ -185,6 +289,7 @@ class FakeElectronDriver(FakeBrowserDriver, ElectronBrowserDriver):
         self.config = BrowserConfig()
 
     # 显式拉回基类默认，绕开 ElectronBrowserDriver 的 bridge 实现（MRO 中它在基类前）。
+    execute_targeted = BrowserDriver.execute_targeted
     page_guard = BrowserDriver.page_guard
     page_images = BrowserDriver.page_images
     coordinate_click_atomic = BrowserDriver.coordinate_click_atomic
@@ -225,6 +330,76 @@ async def test_snapshot_refs_are_scoped_and_stale_refs_fail(browser):
         await manager.click("owner-a", "session-a", "p1:e18")
 
 
+async def test_find_refs_execute_and_no_match_invalidates_previous_generation(browser):
+    manager, driver = browser
+    initial = await manager.navigate("owner-a", "session-a", "https://example.com")
+    assert "p1:e17" in initial
+    assert "p1:e18" in initial
+
+    found = await manager.find("owner-a", "session-a", text="search")
+    assert "Found 1 match" in found
+    assert "p2:e18" in found
+    assert "p2:e17" not in found
+    assert ("find", ("--text", "search")) in driver.calls
+
+    with pytest.raises(BrowserDriverError, match="失效"):
+        await manager.click("owner-a", "session-a", "p1:e18")
+
+    clicked = await manager.click("owner-a", "session-a", "p2:e18")
+    assert "p3:e18" in clicked
+    assert ("click", ("@e18",)) in driver.calls
+
+    missing = await manager.find("owner-a", "session-a", text="missing")
+    assert 'No matches found for "missing".' in missing
+    assert "page_generation: p4" in missing
+    assert "p4:e" not in missing
+    with pytest.raises(BrowserDriverError, match="失效"):
+        await manager.click("owner-a", "session-a", "p3:e18")
+
+
+@pytest.mark.parametrize(
+    ("text", "regex"),
+    [
+        (None, None),
+        ("", None),
+        ("text", "regex"),
+        (1, None),
+        (None, 1),
+    ],
+)
+async def test_find_rejects_invalid_query_shapes_without_host_capture(
+    browser, text, regex
+):
+    manager, driver = browser
+    await manager.navigate("owner-a", "session-a", "https://example.com")
+    calls_before = list(driver.calls)
+
+    with pytest.raises(BrowserDriverError) as caught:
+        await manager.find(
+            "owner-a",
+            "session-a",
+            text=text,
+            regex=regex,
+        )
+
+    assert caught.value.code == "invalid_find_query"
+    assert driver.calls == calls_before
+
+
+async def test_find_invalid_regex_is_rejected_by_host_and_invalidates_old_refs(browser):
+    manager, driver = browser
+    initial = await manager.navigate("owner-a", "session-a", "https://example.com")
+    assert "p1:e18" in initial
+
+    with pytest.raises(BrowserDriverError) as caught:
+        await manager.find("owner-a", "session-a", regex="[")
+
+    assert caught.value.code == "invalid_find_query"
+    assert ("find", ("--regex", "[")) in driver.calls
+    with pytest.raises(BrowserDriverError, match="失效"):
+        await manager.click("owner-a", "session-a", "p1:e18")
+
+
 async def test_account_session_tabs_and_profiles_are_isolated(browser):
     manager, _driver = browser
     await manager.navigate("owner-a", "session-a", "https://example.com/a")
@@ -245,17 +420,16 @@ async def test_account_session_tabs_and_profiles_are_isolated(browser):
     assert "guard_token" not in listed
 
 
-async def test_sensitive_url_values_are_not_exposed_in_public_state(browser):
+async def test_public_state_preserves_the_exact_navigated_url(browser):
     manager, _driver = browser
+    url = "https://example.com/callback?code=oauth-secret&query=public"
     await manager.navigate(
         "owner",
         "session",
-        "https://example.com/callback?code=oauth-secret&query=public",
+        url,
     )
     state = manager.state("owner", "session")
-    assert "oauth-secret" not in state["url"]
-    assert "query=public" in state["url"]
-    assert "REDACTED" in state["url"]
+    assert state["url"] == url
 
 
 async def test_takeover_pauses_ai_and_invalidates_refs(browser):
@@ -320,60 +494,38 @@ async def test_vision_returns_media_and_page_bound_metadata(browser):
     assert Path(output.media[0].path).is_file()
     assert '"width": 1' in output.content
     assert "<untrusted_browser_content>" in output.content
-    screenshot = next(args for command, args in _driver.calls if command == "screenshot")
+    screenshot = next(
+        args for command, args in _driver.calls if command == "vision_screenshot"
+    )
     assert "--full" not in screenshot
     assert "--settled" not in screenshot
 
 
-def test_snapshot_truncation_never_splits_a_ref():
-    """裸切字符会把 [ref=p1:e50] 切成 p1:e5——一个合法却指向别的元素的 ref，导致静默
-    误点击。按行截断必须保证末行 ref 完整，并自报截断（回归 H3）。"""
+def test_snapshot_compatibility_shim_never_truncates_content_or_refs():
+    """Configured output limits are legacy inputs; snapshots remain complete."""
     body = "\n".join(f'- button "b{i}" [ref=p1:e{i}]' for i in range(200))
-    limit = body.index("[ref=p1:e50]") + 8  # 落在 e5|0 中间
-
-    shown, notice = _truncate_snapshot_at_line(body, limit)
-    refs = set(re.findall(r"p\d+:e\d+", shown))
-
-    assert refs <= set(re.findall(r"p\d+:e\d+", body)), "截断产生了不存在的 ref"
-    assert not shown.rstrip().endswith("e5"), "仍在 ref 中间截断"
-    assert shown.rstrip().endswith("]"), "末行元素不完整"
-    assert "未显示" in notice
-    # 未超限时原样返回、无说明，不加噪声。
-    assert _truncate_snapshot_at_line("short body", 30_000) == ("short body", "")
-
-    # 单行超长：\n 回退不可用，走 ] / 硬切分支——这条以前是死代码。
     one_line = " ".join(f'button "b{i}" [ref=p1:e{i}]' for i in range(200))
-    cut1 = one_line.index("[ref=p1:e50]") + 8
-    shown1, notice1 = _truncate_snapshot_at_line(one_line, cut1)
-    assert set(re.findall(r"p\d+:e\d+", shown1)) <= set(re.findall(r"p\d+:e\d+", one_line))
-    assert "[ref=p1:e5" not in shown1[-12:], "硬切留下了残缺 ref"
-    assert notice1
-
-    # 退化 limit 不能变成负切片（max_output_chars 从配置读入，无下界）。
-    degenerate, note = _truncate_snapshot_at_line(body, 0)
-    assert len(degenerate) < len(body) and note
+    for text, legacy_limit in (
+        (body, body.index("[ref=p1:e50]") + 8),
+        (one_line, one_line.index("[ref=p1:e50]") + 8),
+        (body, 0),
+        ("short body", 30_000),
+    ):
+        assert _truncate_snapshot_at_line(text, legacy_limit) == (text, "")
 
 
-async def test_fake_electron_driver_covers_host_exact_ref_branch(tmp_path, monkeypatch):
-    """测试地基：FakeElectronDriver 让 isinstance(driver, ElectronBrowserDriver) 为真，
-    覆盖 BrowserManager 的 host_exact_ref 快路径——纯 FakeBrowserDriver 下这些分支是死
-    代码（H1 审批竞态就是这么漏检的）。语义差异：host 路径跳过 Python 侧
-    _target_still_matches_snapshot，改由宿主 assertRefCurrent 兜底。"""
+async def test_all_drivers_use_the_same_functional_ref_dispatch_path(tmp_path, monkeypatch):
+    """普通 ref 动作不再因驱动类型分叉到 Python 指纹复核。
+
+    Production Host resolves the ref as a normalized, strict Playwright
+    Locator; compatibility drivers receive the same native ref command.
+    """
     monkeypatch.setattr(
         "crew.browser.manager.get_owner_runtime_home",
         lambda owner: tmp_path / "accounts" / str(owner),
     )
-    original = BrowserManager._target_still_matches_snapshot
-    recheck_hits: dict[str, int] = {}
 
     async def run(driver, key: str) -> str:
-        recheck_hits[key] = 0
-
-        async def spy(self, *args, **kwargs):
-            recheck_hits[key] += 1
-            return await original(self, *args, **kwargs)
-
-        monkeypatch.setattr(BrowserManager, "_target_still_matches_snapshot", spy)
         manager = BrowserManager(BrowserConfig(), driver)
         await manager.startup()
         token = current_tool_call_id.set(f"tc-{key}")
@@ -381,7 +533,7 @@ async def test_fake_electron_driver_covers_host_exact_ref_branch(tmp_path, monke
             await manager.navigate("o", "s", "https://example.com")
             args = {"ref": "p1:e17"}
             decision = manager.permission_for("browser_click", args, "o", "s")
-            manager.confirm_approval(decision.approval_token, "browser_click", args, "o", "s")
+            assert decision is None
             return await manager.click("o", "s", "p1:e17")
         finally:
             current_tool_call_id.reset(token)
@@ -394,9 +546,63 @@ async def test_fake_electron_driver_covers_host_exact_ref_branch(tmp_path, monke
 
     # 两条路径都成功点击并回带新代次快照。
     assert "p2:e17" in compat_click and "p2:e17" in electron_click
-    # 核心覆盖断言：compat 走 Python 侧目标复核，host_exact_ref 路径跳过它。
-    assert recheck_hits["compat"] >= 1
-    assert recheck_hits["electron"] == 0
+    assert not hasattr(BrowserManager, "_target_still_matches_snapshot")
+
+
+@pytest.mark.parametrize(
+    ("action", "kind", "args", "expected_call"),
+    [
+        (
+            "select",
+            "select",
+            {"ref": "p1:e18", "values": ["one", "two"]},
+            ("select", ("@e18", "one", "two")),
+        ),
+        (
+            "check",
+            "toggle",
+            {"ref": "p1:e18", "checked": True},
+            ("check", ("@e18", "true")),
+        ),
+        (
+            "hover",
+            "input",
+            {"ref": "p1:e18"},
+            ("hover", ("@e18",)),
+        ),
+    ],
+)
+async def test_playwright_form_actions_use_electron_host_exact_ref_path(
+    tmp_path,
+    monkeypatch,
+    action: str,
+    kind: str,
+    args: dict,
+    expected_call: tuple[str, tuple[str, ...]],
+):
+    manager, driver = await _electron_manager(tmp_path, monkeypatch)
+    token = current_tool_call_id.set(f"tc-electron-{action}")
+    try:
+        await manager.navigate("o", "s", "https://example.com")
+        assert not hasattr(manager._owners["o"].sessions["s"], "ref_action_kinds")
+        if action != "hover":
+            tool_name = f"browser_{action}"
+            decision = manager.permission_for(tool_name, args, "o", "s")
+            assert decision is None
+
+        if action == "select":
+            result = await manager.select("o", "s", args["ref"], args["values"])
+        elif action == "check":
+            result = await manager.check("o", "s", args["ref"], args["checked"])
+        else:
+            result = await manager.hover("o", "s", args["ref"])
+
+        assert expected_call in driver.calls
+        assert "page_generation: p2" in result
+    finally:
+        current_tool_call_id.reset(token)
+        manager._closed = True
+        await manager.aclose()
 
 
 async def _electron_manager(tmp_path, monkeypatch):
@@ -410,18 +616,15 @@ async def _electron_manager(tmp_path, monkeypatch):
     return manager, driver
 
 
-async def test_type_submit_is_atomic_and_gated_by_one_shot_approval(tmp_path, monkeypatch):
-    """搜索首选 type+submit：填词+回车原子提交。它会导航→高危→必须一次性审批；审批后
-    宿主在同一 RPC 内收到 --submit（原子接 Enter），消灭"type→snapshot→press(审批延迟)
-    →ref 失效"的中间窗口。"""
+async def test_type_submit_is_atomic_without_an_approval_round_trip(tmp_path, monkeypatch):
+    """搜索首选 type+submit：同一 RPC 内填词并按 Enter，无审批等待窗口。"""
     manager, driver = await _electron_manager(tmp_path, monkeypatch)
     token = current_tool_call_id.set("tc-submit")
     try:
         await manager.navigate("o", "s", "https://baidu.com")
         args = {"ref": "p1:e18", "text": "世界杯赛况", "submit": True}
         decision = manager.permission_for("browser_type", args, "o", "s")
-        assert decision is not None and decision.behavior == "ask"
-        assert manager.confirm_approval(decision.approval_token, "browser_type", args, "o", "s")
+        assert decision is None
         driver.calls.clear()
         result = await manager.fill("o", "s", "p1:e18", "世界杯赛况", submit=True)
         fill_args = [a for command, a in driver.calls if command == "fill"]
@@ -447,14 +650,13 @@ async def test_plain_type_needs_no_approval_and_sends_no_submit(tmp_path, monkey
         await manager.aclose()
 
 
-async def test_type_submit_without_approval_fails_closed(tmp_path, monkeypatch):
-    """没有一次性审批就直接 fill(submit=True) 必须拒绝——提交审批不可被绕过。"""
-    manager, _driver = await _electron_manager(tmp_path, monkeypatch)
+async def test_type_submit_direct_call_executes_without_approval(tmp_path, monkeypatch):
+    manager, driver = await _electron_manager(tmp_path, monkeypatch)
     token = current_tool_call_id.set("tc-none")
     try:
         await manager.navigate("o", "s", "https://baidu.com")
-        with pytest.raises(BrowserDriverError, match="审批"):
-            await manager.fill("o", "s", "p1:e18", "世界杯赛况", submit=True)
+        await manager.fill("o", "s", "p1:e18", "世界杯赛况", submit=True)
+        assert ("fill", ("@e18", "世界杯赛况", "--submit")) in driver.calls
     finally:
         current_tool_call_id.reset(token)
         manager._closed = True
@@ -474,9 +676,10 @@ async def test_snapshot_escapes_malicious_page_title_out_of_boundary(browser):
     orig_execute = driver.execute
 
     async def execute(owner_session, profile_dir, command, args=(), **kwargs):
-        if command == "get" and tuple(str(a) for a in args)[:1] == ("title",):
-            return {"success": True, "data": {"title": evil}}
-        return await orig_execute(owner_session, profile_dir, command, args, **kwargs)
+        result = await orig_execute(owner_session, profile_dir, command, args, **kwargs)
+        if command == "snapshot" and isinstance(result.get("data"), dict):
+            result["data"]["title"] = evil
+        return result
 
     driver.execute = execute
 
@@ -491,28 +694,23 @@ async def test_snapshot_escapes_malicious_page_title_out_of_boundary(browser):
     assert "&lt;browser_action_result&gt;" in output
 
 
-async def test_one_shot_approval_is_bound_to_page_and_target(browser):
+async def test_click_is_not_blocked_by_observational_marker_changes(browser):
     manager, driver = browser
     await manager.navigate("owner", "session", "https://example.com")
     token = current_tool_call_id.set("tool-approve")
     try:
         args = {"ref": "p1:e17"}
         decision = manager.permission_for("browser_click", args, "owner", "session")
-        assert decision and decision.approval_token and not decision.allow_always
-        assert manager.confirm_approval(
-            decision.approval_token, "browser_click", args, "owner", "session"
-        )
+        assert decision is None
         clicked = await manager.click("owner", "session", "p1:e17")
         assert "p2:e17" in clicked
 
         args = {"ref": "p2:e17"}
         decision = manager.permission_for("browser_click", args, "owner", "session")
-        assert decision and manager.confirm_approval(
-            decision.approval_token, "browser_click", args, "owner", "session"
-        )
+        assert decision is None
         driver.time_origin = "2000"
-        with pytest.raises(BrowserDriverError, match="页面已在审批"):
-            await manager.click("owner", "session", "p2:e17")
+        clicked_again = await manager.click("owner", "session", "p2:e17")
+        assert "p3:e17" in clicked_again
     finally:
         current_tool_call_id.reset(token)
 
@@ -531,24 +729,25 @@ async def test_ordinary_filling_does_not_require_one_shot_approval(browser):
     assert decision is None
 
 
-def test_private_network_is_denied_unless_admin_allows_it():
+def test_navigation_and_legacy_proxy_allow_all_network_classes_by_default():
     policy = BrowserNetworkPolicy(BrowserConfig())
-    with pytest.raises(BrowserNetworkDenied):
-        policy.validate_navigation_url("http://localhost/admin")
-    with pytest.raises(BrowserNetworkDenied):
-        policy.validate_ip("metadata.example", "169.254.169.254")
-    with pytest.raises(BrowserNetworkDenied):
-        policy.validate_ip("internal.example", "10.1.2.3")
-    with pytest.raises(BrowserNetworkDenied):
-        policy.validate_ip("nat64.example", "64:ff9b::a01:203")
-    for translated in (
-        "64:ff9b:1::a00:1",
-        "::ffff:10.0.0.1",
-        "::10.0.0.1",
-        "fec0::1",
+    assert policy.validate_navigation_url("http://localhost/admin") == (
+        "http://localhost/admin"
+    )
+    assert policy.validate_navigation_url("about:blank") == "about:blank"
+    assert policy.validate_navigation_url("custom:opaque-payload") == (
+        "custom:opaque-payload"
+    )
+    for hostname, value in (
+        ("metadata.example", "169.254.169.254"),
+        ("internal.example", "10.1.2.3"),
+        ("nat64.example", "64:ff9b::a01:203"),
+        ("translation.example", "64:ff9b:1::a00:1"),
+        ("translation.example", "::ffff:10.0.0.1"),
+        ("translation.example", "::10.0.0.1"),
+        ("translation.example", "fec0::1"),
     ):
-        with pytest.raises(BrowserNetworkDenied):
-            policy.validate_ip("translation.example", translated)
+        assert policy.validate_ip(hostname, value) == str(ipaddress.ip_address(value))
 
 
 def test_blocked_hosts_use_dns_idna_canonicalization():
@@ -563,12 +762,14 @@ def test_blocked_hosts_use_dns_idna_canonicalization():
     ):
         with pytest.raises(BrowserNetworkDenied, match="管理员策略"):
             policy.validate_hostname(hostname)
-    with pytest.raises(BrowserNetworkDenied):
-        policy.validate_ip("mapped.example", "::ffff:127.0.0.1")
-    with pytest.raises(BrowserNetworkDenied):
-        policy.validate_navigation_url("https://user:password@example.com/")
+    assert policy.validate_ip("mapped.example", "::ffff:127.0.0.1") == str(
+        ipaddress.ip_address("::ffff:127.0.0.1")
+    )
+    assert policy.validate_navigation_url(
+        "https://user:password@example.com/"
+    ) == "https://user:password@example.com/"
 
-    allowed = BrowserNetworkPolicy(BrowserConfig(allowed_private_hosts=["internal.example"]))
+    allowed = BrowserNetworkPolicy(BrowserConfig())
     assert allowed.validate_ip("internal.example", "10.1.2.3") == "10.1.2.3"
 
 
@@ -597,7 +798,9 @@ def test_browser_secrets_and_screenshots_are_removed_from_llm_trace():
 
 
 async def test_loopback_proxy_requires_per_instance_credentials() -> None:
-    proxy = LoopbackPolicyProxy(BrowserNetworkPolicy(BrowserConfig()))
+    proxy = LoopbackPolicyProxy(
+        BrowserNetworkPolicy(BrowserConfig(blocked_hosts=["localhost"]))
+    )
     await proxy.start()
     parsed = urlsplit(proxy.url)
     assert parsed.username == "crew" and parsed.password
@@ -662,7 +865,6 @@ async def test_loopback_proxy_does_not_reuse_http_socket_for_blocked_host() -> N
     proxy = LoopbackPolicyProxy(
         BrowserNetworkPolicy(
             BrowserConfig(
-                allowed_private_hosts=["127.0.0.1"],
                 blocked_hosts=["blocked.example"],
             )
         )
@@ -742,7 +944,6 @@ async def test_loopback_proxy_rejects_fake_websocket_before_relaying_pipeline(
     proxy = LoopbackPolicyProxy(
         BrowserNetworkPolicy(
             BrowserConfig(
-                allowed_private_hosts=["127.0.0.1"],
                 blocked_hosts=["blocked.example"],
             )
         )
@@ -837,7 +1038,7 @@ async def test_loopback_proxy_finishes_framed_response_without_upstream_eof(
     origin_server = await asyncio.start_server(origin, "127.0.0.1", 0)
     origin_port = int(origin_server.sockets[0].getsockname()[1])
     proxy = LoopbackPolicyProxy(
-        BrowserNetworkPolicy(BrowserConfig(allowed_private_hosts=["127.0.0.1"]))
+        BrowserNetworkPolicy(BrowserConfig())
     )
     await proxy.start()
     parsed = urlsplit(proxy.url)
@@ -890,7 +1091,6 @@ async def test_loopback_proxy_bounds_close_delimited_response_wait() -> None:
     proxy = LoopbackPolicyProxy(
         BrowserNetworkPolicy(
             BrowserConfig(
-                allowed_private_hosts=["127.0.0.1"],
                 command_timeout_seconds=0.1,
                 navigation_timeout_seconds=0.2,
             )

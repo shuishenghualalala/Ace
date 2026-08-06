@@ -90,19 +90,3 @@ describe('toolReducer', () => {
     expect(t.duration).toBe(200);
   });
 });
-
-describe('statusReducer', () => {
-  it('把工具规划状态立即写入当前回合时间线', () => {
-    const result = statusReducer(
-      { kind: 'status', body: { message: '正在规划工具调用…', activity: 'tool_planning' }, sequence: 1 },
-      snapshot(emptyBook(), 1000),
-    );
-    expect(result.messageUpserts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        op: 'append',
-        message: expect.objectContaining({ role: 'status', content: '正在规划工具调用…' }),
-      }),
-    ]));
-    expect(result.statusHint).toBe('running');
-  });
-});

@@ -23,12 +23,14 @@ export interface OptionalSkill {
   description_zh?: string;
   query_examples?: string[];
   category: string;
-  source: "optional";
+  source: "optional" | "local";
 }
 
 export interface SkillStore {
   installed: Skill[];
   optional: OptionalSkill[];
+  /** ~/.agents/skills 中未安装的本地 skill（跨 agent 共享，软链安装）。 */
+  local?: OptionalSkill[];
 }
 
 export interface SubScenario {
@@ -261,6 +263,26 @@ export interface WikiPage {
   created_at: number;
   updated_at: number;
   aliases: string[];
+  relations?: WikiRelation[];
+}
+
+export interface WikiRelation {
+  target_page_id: string;
+  relation: string;
+}
+
+export interface WikiRelationPage {
+  id: string;
+  title: string;
+  page_type: WikiPageType;
+  relation: string;
+  direction: "outgoing" | "incoming";
+}
+
+export interface WikiSourcePage {
+  id: string;
+  title: string;
+  page_type: WikiPageType;
 }
 
 export interface WikiVaultDocument {
@@ -632,8 +654,6 @@ export interface UiMessage {
   todoSnapshot?: TodoItem[];
   /** 本消息回合内产生的 Wiki 页面卡片。 */
   wikiCards?: WikiPage[];
-  /** 本消息为 Wiki 知识库欢迎摘要卡片。 */
-  wikiSummary?: WikiSummary;
 }
 
 export interface TeamMemberView {

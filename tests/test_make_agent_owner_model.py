@@ -237,6 +237,11 @@ async def test_make_agent_without_api_key_borrows_fake_provider(tmp_path, monkey
     from crew.core.mocks import FakeProvider
     from crew.state.config import Config, ModelProfile
 
+    # 同进程内其他测试调用 load_config 时会把仓库 config/.env 中的真实 Key
+    # 写进 os.environ 且不清理；这里清掉，保证 local owner 解析不到任何 Key。
+    monkeypatch.delenv("CREW_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("CREW_API_KEY", raising=False)
+
     crew_home = tmp_path / ".crew"
     monkeypatch.setenv("CREW_HOME", str(crew_home))
     profile = ModelProfile(

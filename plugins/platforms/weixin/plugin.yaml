@@ -1,0 +1,15 @@
+name: weixin-platform
+label: 微信
+version: "0.1.0"
+description: "Weixin (personal WeChat via iLink Bot API) channel adapter plugin for Crew gateway."
+author: "Crew"
+kind: platform
+requires_env:
+  - name: WEIXIN_ACCOUNT_ID
+    description: "iLink bot account ID（由扫码登录获取，也可用 WEIXIN_TOKEN 时从账号文件加载）"
+    secret: false
+  - name: WEIXIN_TOKEN
+    description: "iLink bot token（由扫码登录获取）"
+    secret: true
+provides_platforms:
+  - weixin

@@ -83,6 +83,56 @@ def test_wiki_init_and_pages_crud(tmp_path, auth_headers):
     assert res.status_code == 404
 
 
+def test_wiki_page_detail_returns_outgoing_and_incoming_relations(tmp_path, auth_headers):
+    client, _app = _client(tmp_path)
+    client.post("/api/wiki/init", headers=auth_headers)
+
+    def create(page_type: str, title: str) -> str:
+        response = client.post(
+            "/api/wiki/pages",
+            headers={**auth_headers, "Content-Type": "application/json"},
+            json={"page_type": page_type, "title": title, "content": title},
+        )
+        assert response.status_code == 200
+        return response.json()["page"]["id"]
+
+    keyword_id = create("entity", "罗马")
+    topic_id = create("topic", "意大利城市旅行")
+    source_id = create("source", "意大利旅行行程单")
+
+    response = client.put(
+        f"/api/wiki/pages/{keyword_id}",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={
+            "relations": [
+                {"target_page_id": topic_id, "relation": "part_of"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    response = client.put(
+        f"/api/wiki/pages/{source_id}",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={
+            "relations": [
+                {"target_page_id": keyword_id, "relation": "describes"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+
+    detail = client.get(f"/api/wiki/pages/{keyword_id}", headers=auth_headers)
+    assert detail.status_code == 200
+    relations = detail.json()["relation_pages"]
+    assert {
+        (item["id"], item["relation"], item["direction"])
+        for item in relations
+    } == {
+        (topic_id, "part_of", "outgoing"),
+        (source_id, "describes", "incoming"),
+    }
+
+
 def test_wiki_summary_read_does_not_implicitly_call_llm(tmp_path, auth_headers):
     from crew.wiki.schemas import KBSummary
 
@@ -167,11 +217,11 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
 
     definition = app.subagent_registry.get("Wiki")
     run_agent_wiki = app._make_subagent(build_preset_spec(definition))
-    expected = app._subagent_tool_filter(
-        definition.toolsets,
-        definition.tools,
-        user_type="internal",
+    main_expected = app._single_agent_tool_filter(
+        "builtin",
+        app.config.access_control.resolve_for("internal"),
     )
+    expected = app._wiki_agent_tool_filter(main_expected)
 
     assert not any(name.startswith("wiki_") for name in main_agent.tool_filter)
     assert main_agent.wiki_manager is None
@@ -180,17 +230,17 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
     assert run_agent_wiki.system_prompt == wiki_agent.system_prompt
     assert run_agent_wiki.enabled_skills == wiki_agent.enabled_skills
     assert run_agent_wiki.wiki_manager is wiki_agent.wiki_manager
-    assert run_agent_wiki.disable_tool_search is wiki_agent.disable_tool_search
+    assert run_agent_wiki.tool_disclosure_mode == wiki_agent.tool_disclosure_mode
     assert "wiki_search" in wiki_agent.tool_filter
     assert "wiki_apply_ingest" in wiki_agent.tool_filter
-    assert "web_search" in wiki_agent.tool_filter
-    assert "web_extract" in wiki_agent.tool_filter
-    assert "terminal" not in wiki_agent.tool_filter
-    assert "file_read" not in wiki_agent.tool_filter
+    assert ("web_search" in wiki_agent.tool_filter) == ("web_search" in main_expected)
+    assert ("web_extract" in wiki_agent.tool_filter) == ("web_extract" in main_expected)
+    assert "terminal" in wiki_agent.tool_filter
+    assert "file_read" in wiki_agent.tool_filter
     assert "wiki_compile" not in wiki_agent.tool_filter
     assert wiki_agent.wiki_manager is app.wiki_manager
     assert wiki_agent.agent_id == "subagent_Wiki"
-    assert wiki_agent.disable_tool_search is True
+    assert wiki_agent.tool_disclosure_mode == "direct"
     assert "crew-wiki-curator" in (main_agent.disabled_skills or [])
     assert wiki_agent.enabled_skills == ["crew-wiki-curator"]
     assert "crew-wiki-curator" not in (wiki_agent.disabled_skills or [])
@@ -206,7 +256,7 @@ def test_legacy_wiki_session_flag_does_not_grant_wiki_tools(tmp_path):
 
     assert not any(name.startswith("wiki_") for name in agent.tool_filter)
     assert agent.wiki_manager is None
-    assert agent.disable_tool_search is False
+    assert agent.tool_disclosure_mode == "progressive"
 
 
 def test_cancel_confirmation_is_owner_and_session_scoped(tmp_path, auth_headers):
@@ -246,6 +296,17 @@ def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):
         RawSource(id="src_doc", title="产品文档.docx", source_type="upload", parsed_path=""),
         owner_account_id=OWNER,
     )
+    source_res = client.post(
+        "/api/wiki/pages",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={
+            "page_type": "source",
+            "title": "产品文档摘要",
+            "content": "产品文档来源摘要。",
+            "sources": ["src_doc"],
+        },
+    )
+    source_page_id = source_res.json()["page"]["id"]
 
     # 创建引用该 source 的页面
     res = client.post(
@@ -255,7 +316,7 @@ def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):
             "page_type": "topic",
             "title": "产品分析",
             "content": "基于产品文档整理。",
-            "sources": ["src_doc"],
+            "sources": ["src_doc", "src_doc"],
         },
     )
     assert res.status_code == 200
@@ -266,6 +327,11 @@ def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):
     # 详情
     res = client.get(f"/api/wiki/pages/{page_id}", headers=auth_headers)
     assert res.json()["source_titles"]["src_doc"] == "产品文档.docx"
+    assert res.json()["source_pages"] == [{
+        "id": source_page_id,
+        "title": "产品文档摘要",
+        "page_type": "source",
+    }]
 
     # 列表
     res = client.get("/api/wiki/pages", headers=auth_headers)
@@ -282,6 +348,7 @@ def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):
         json={"content": "更新后内容"},
     )
     assert res.json()["source_titles"]["src_doc"] == "产品文档.docx"
+    assert res.json()["source_pages"][0]["id"] == source_page_id
 
 
 def test_wiki_page_response_includes_source_files(tmp_path, auth_headers):
@@ -712,6 +779,9 @@ def test_wiki_kb_crud(tmp_path, auth_headers):
     # cannot delete default
     res = client.delete("/api/wiki/kbs/default", headers=auth_headers)
     assert res.status_code == 400
+    # built-in tutorial is also protected
+    res = client.delete("/api/wiki/kbs/tutorial", headers=auth_headers)
+    assert res.status_code == 400
 
 
 def test_delete_and_recreate_same_kb_uses_fresh_wiki_session(tmp_path, auth_headers):
@@ -907,7 +977,6 @@ def test_wiki_graph(tmp_path, auth_headers):
             "page_type": "topic",
             "title": "部署规范",
             "content": "参考 [[CI/CD 流水线]]。",
-            "related": ["CI/CD 流水线"],
             "sources": ["upload_abc"],
         },
     )
@@ -937,7 +1006,6 @@ def test_wiki_graph(tmp_path, auth_headers):
     assert any(n["id"].startswith("source:") and "upload_abc" in n["id"] for n in graph["nodes"])
 
     relations = {(e["source"], e["target"], e["relation"]) for e in graph["edges"]}
-    assert (deploy_id, cicd_id, "related") in relations
     assert (deploy_id, cicd_id, "mentions") in relations
     assert any(e["source"] == deploy_id and e["relation"] == "source_of" for e in graph["edges"])
 

@@ -225,6 +225,19 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         # until a verified Active Owner is activated after Crew startup.
         await channel_manager.stop_all(reason="login_required")
 
+        # 从旧版 local 免登录切换到 email/remote 登录时，SQLite 里可能仍保留
+        # local 的排他租约。该租约没有可恢复的登录凭据，却会阻止新账号接管，
+        # 因此在所有渠道已断开、业务请求尚未放行的启动边界安全释放它。
+        auth_mode = str(getattr(crew.config, "auth_mode", "local") or "local").strip().lower()
+        legacy_lease = crew.active_owner.current()
+        if (
+            auth_mode in {"email", "remote"}
+            and legacy_lease is not None
+            and legacy_lease.owner_account_id == "local"
+            and crew.active_owner.release("local")
+        ):
+            log.info("认证模式已切换为 %s，释放遗留 local Owner 租约", auth_mode)
+
         # Keep remote early-health startup, but fence every business request
         # until MCP/Cron and Owner lifecycle services are ready.
         async def _deferred_startup() -> None:
@@ -455,6 +468,37 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     return api
 
 
+def _write_gateway_discovery_file(host: str, port: int) -> None:
+    """把网关实际监听地址写入 {CREW_HOME}/run/gateway.json，进程退出时清理。
+
+    本地客户端（web dev server 的 vite proxy 等）读这个文件即可事先知道端口，
+    无需扫描候选端口。读侧仍会先探测 /api/health 再采信，容忍崩溃后的残留文件。
+    """
+    import atexit
+    import json
+    import os
+    import time
+
+    from crew.state.home import get_crew_home
+
+    try:
+        run_dir = get_crew_home() / "run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / "gateway.json"
+        path.write_text(
+            json.dumps({
+                "host": host,
+                "port": port,
+                "pid": os.getpid(),
+                "started_at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+        atexit.register(lambda: path.unlink(missing_ok=True))
+    except OSError:
+        log.warning("Gateway 发现文件写入失败", exc_info=True)
+
+
 def run() -> None:
     # 忽略 SIGPIPE：MCP stdio 子进程的 stdout 管道断开时不应杀死网关主进程。
     # 没有此处理时，BrokenPipeError 通过 anyio TaskGroup 冒泡到 uvicorn 事件循环，
@@ -474,4 +518,5 @@ def run() -> None:
     # 不在 gateway 侧做 fuser-k / 端口扫描 / 退让重试——那些曾导致 sibling 互杀循环和
     # 静默换端口（Linux 桌面端写死 8000，回退即失联）。
     log.info("Gateway 启动: http://%s:%s", cfg.gateway_host, cfg.gateway_port)
+    _write_gateway_discovery_file(cfg.gateway_host, cfg.gateway_port)
     uvicorn.run(api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning")

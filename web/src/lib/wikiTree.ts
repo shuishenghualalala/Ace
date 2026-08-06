@@ -45,6 +45,23 @@ const FOLDER_ORDER = new Map<string, number>(
   VISIBLE_VAULT_FOLDERS.map((path, index) => [path, index]),
 );
 
+const VAULT_PAGE_DIRS = new Set(["entities", "topics", "sources", "comparisons", "synthesis"]);
+
+/**
+ * 归一化 Vault 相对路径：旧版种子/历史页面的 file_path 可能没有 wiki/ 前缀
+ * （如 entities/xxx.md），统一补成 wiki/ 前缀，保证文件树能识别。
+ */
+export function normalizeVaultPath(filePath: string): string {
+  const parts = (filePath || "")
+    .split("/")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length > 0 && parts[0] !== "wiki" && VAULT_PAGE_DIRS.has(parts[0])) {
+    return ["wiki", ...parts].join("/");
+  }
+  return parts.join("/");
+}
+
 const TYPE_ORDER: Record<WikiPageType, number> = {
   entity: 0,
   topic: 1,
@@ -81,10 +98,7 @@ export function buildFileTree(pages: WikiPage[]): WikiTreeFolder {
   );
 
   for (const page of pages) {
-    const parts = (page.file_path || "")
-      .split("/")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const parts = normalizeVaultPath(page.file_path).split("/").filter(Boolean);
     if (parts[0] !== "wiki") continue;
     let current = root;
 
@@ -142,10 +156,7 @@ function sortTree(node: WikiTreeFolder): void {
 }
 
 export function ancestorPaths(filePath: string): string[] {
-  const parts = (filePath || "")
-    .split("/")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const parts = normalizeVaultPath(filePath).split("/").filter(Boolean);
   const paths: string[] = [];
   for (let i = 1; i < parts.length; i++) {
     paths.push(parts.slice(0, i).join("/"));
@@ -263,4 +274,58 @@ export function sortByUpdatedAt(pages: WikiPage[]): WikiPage[] {
 export function summaryOf(page: WikiPage, maxLen: number = 140): string {
   const text = (page.summary || page.content || "").trim().replace(/\s+/g, " ").slice(0, maxLen);
   return text || "（无内容摘要）";
+}
+
+/** Home.md「推荐问题」小节标题（与后端 store/_filesystem.py 的 _HOME_QUESTIONS_HEADING 同步）。 */
+export const HOME_QUESTIONS_HEADING = "推荐问题";
+
+export interface HomeQuestionsSections {
+  /** 「推荐问题」小节之前的 markdown。 */
+  before: string;
+  /** 推荐问题列表（已去掉列表标记）。 */
+  questions: string[];
+  /** 「推荐问题」小节之后的 markdown。 */
+  after: string;
+}
+
+/**
+ * 把 Home.md 内容拆成 前文 / 推荐问题 / 后文 三段，
+ * 前端把推荐问题渲染成可点击的提问按钮（对齐桌面端 decorateHomeQuestions）。
+ * 没有该小节或小节为空时返回 null，整段按普通 markdown 渲染。
+ */
+export function splitHomeQuestions(content: string): HomeQuestionsSections | null {
+  const lines = content.split("\n");
+  const headingIdx = lines.findIndex((line) => line.trim() === `## ${HOME_QUESTIONS_HEADING}`);
+  if (headingIdx === -1) return null;
+
+  const questions: string[] = [];
+  let endIdx = headingIdx + 1;
+  for (; endIdx < lines.length; endIdx++) {
+    const line = lines[endIdx];
+    const itemMatch = line.match(/^\s*(?:[-*+]|\d+[.、)）])\s+(.*)$/);
+    if (itemMatch) {
+      const q = itemMatch[1].trim();
+      if (q) questions.push(q);
+      continue;
+    }
+    // 小节内的空行跳过；遇到下一个标题或非列表内容即结束。
+    if (line.trim() === "" && questions.length === 0) continue;
+    break;
+  }
+  if (questions.length === 0) return null;
+
+  return {
+    before: lines.slice(0, headingIdx).join("\n"),
+    questions,
+    after: lines.slice(endIdx).join("\n"),
+  };
+}
+
+/** 按标题或别名（大小写不敏感）在页面列表中精确匹配 Wiki 页面。 */
+export function findPageByTitle(pages: WikiPage[], title: string): WikiPage | undefined {
+  const normalized = title.trim().toLocaleLowerCase();
+  if (!normalized) return undefined;
+  return pages.find((page) =>
+    [page.title, ...(page.aliases || [])].some((value) => value.trim().toLocaleLowerCase() === normalized),
+  );
 }

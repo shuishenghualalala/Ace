@@ -109,6 +109,14 @@ class RawSource:
     superseded_by: str | None = None
     last_refresh_at: float = 0.0
     last_refresh_error: str | None = None
+    # 第二层轻量摘要生成的来源级元数据，仅用于 inbox 筛选与整理推荐，
+    # 不等同于 WikiPage.tags，也不进入页面标签体系。
+    summary: str = ""
+    tags: list[str] = field(default_factory=list)
+    doc_type: str = ""
+    ingest_recommend: bool = False
+    ingest_reason: str = ""
+    ingest_status: str = "pending"  # pending | recommended | ignored | ingested | failed
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +144,12 @@ class RawSource:
             "superseded_by": self.superseded_by,
             "last_refresh_at": self.last_refresh_at,
             "last_refresh_error": self.last_refresh_error,
+            "summary": self.summary,
+            "tags": self.tags,
+            "doc_type": self.doc_type,
+            "ingest_recommend": self.ingest_recommend,
+            "ingest_reason": self.ingest_reason,
+            "ingest_status": self.ingest_status,
         }
 
     @classmethod
@@ -171,6 +185,12 @@ class RawSource:
             superseded_by=data.get("superseded_by"),
             last_refresh_at=float(data.get("last_refresh_at", 0.0) or 0.0),
             last_refresh_error=data.get("last_refresh_error"),
+            summary=str(data.get("summary", "")),
+            tags=[str(t) for t in (data.get("tags") or []) if str(t).strip()],
+            doc_type=str(data.get("doc_type", "")),
+            ingest_recommend=bool(data.get("ingest_recommend", False)),
+            ingest_reason=str(data.get("ingest_reason", "")),
+            ingest_status=str(data.get("ingest_status", "pending") or "pending"),
         )
 
     @property
@@ -249,16 +269,17 @@ class WikiClaim:
 class WikiRelation:
     """从当前页面指向另一规范页面的有类型关系。"""
 
-    target: str
+    target_page_id: str
     relation: str = "related"
 
     def to_dict(self) -> dict[str, str]:
-        return {"target": self.target, "relation": self.relation}
+        return {"target_page_id": self.target_page_id, "relation": self.relation}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WikiRelation":
         return cls(
-            target=str(data.get("target", "")),
+            # ``target`` 只在 KB 初始化迁移前用于读取旧 frontmatter。
+            target_page_id=str(data.get("target_page_id") or data.get("target", "")),
             relation=str(data.get("relation", "related")) or "related",
         )
 
@@ -358,7 +379,8 @@ class WikiPage:
             relations=[
                 WikiRelation.from_dict(item)
                 for item in raw_relations
-                if isinstance(item, dict) and str(item.get("target", "")).strip()
+                if isinstance(item, dict)
+                and str(item.get("target_page_id") or item.get("target", "")).strip()
             ],
             stale=bool(data.get("stale", False)),
         )
@@ -401,13 +423,15 @@ class WikiGraph:
 
 @dataclass
 class HomeIntro:
-    """Home.md「关于这个知识库」导读的缓存元数据。
+    """Home.md「内容导读」的缓存元数据。
 
     与 KBSummary（前端摘要卡片）相互独立：导读专为 Home.md 首页撰写，
     只在页面/来源内容 hash 变化时重新生成。
     """
 
     text: str = ""
+    # 首页推荐问题（随导读一起由 LLM 生成，见 summary._HOME_INTRO_PROMPT）。
+    questions: list[str] = field(default_factory=list)
     content_hash: str = ""
     generated_at: float = 0.0
     status: Literal["ready", "generating", "empty", "stale"] = "empty"
@@ -415,6 +439,7 @@ class HomeIntro:
     def to_dict(self) -> dict[str, Any]:
         return {
             "text": self.text,
+            "questions": list(self.questions),
             "content_hash": self.content_hash,
             "generated_at": self.generated_at,
             "status": self.status,
@@ -425,8 +450,12 @@ class HomeIntro:
         status = data.get("status", "empty")
         if status not in ("ready", "generating", "empty", "stale"):
             status = "empty"
+        questions = data.get("questions")
         return cls(
             text=str(data.get("text", "")),
+            questions=[str(q) for q in questions if str(q).strip()]
+            if isinstance(questions, list)
+            else [],
             content_hash=str(data.get("content_hash", "")),
             generated_at=float(data.get("generated_at", 0.0)),
             status=status,  # type: ignore[arg-type]

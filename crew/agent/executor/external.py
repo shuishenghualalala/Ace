@@ -933,7 +933,9 @@ class ExternalExecutor(AgentExecutor):
                     and callable(getattr(bridge, "invoke_tool_json", None))
                 )
                 session_profile = (
-                    "codex-app-server:crew-dynamic-tools-v1"
+                    # v2：dynamicTools 改平铺 function 项（codex 新版拒绝 namespace 包装），
+                    # 旧的 namespace 会话绑定必须作废重开。
+                    "codex-app-server:crew-dynamic-tools-v2"
                     if dynamic_control_capable
                     else ""
                 )

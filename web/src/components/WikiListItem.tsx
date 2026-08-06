@@ -1,7 +1,6 @@
 import React from "react";
 import type { WikiPage } from "../types";
 import { summaryOf, TYPE_META } from "../lib/wikiTree";
-import WikiIcon from "./WikiIcon";
 
 interface Props {
   page: WikiPage;
@@ -47,11 +46,13 @@ function WikiListItem({
         title="选中"
       />
       <button className="wiki-list-item__main" onClick={onSelect} type="button">
-        <span className="wiki-list-item__icon" title={meta.label}>
-          <WikiIcon name={meta.icon} size={18} />
-        </span>
         <span className="wiki-list-item__title-wrap">
-          <span className="wiki-list-item__title">{page.title}</span>
+          <span className="wiki-list-item__title-row">
+            <span className="wiki-list-item__title">{page.title}</span>
+            <span className={`wiki-list-item__type-badge wiki-list-item__type-badge--${page.page_type}`}>
+              {meta.shortLabel}
+            </span>
+          </span>
           <span className="wiki-list-item__summary">{summaryOf(page)}</span>
           <span className="wiki-list-item__meta">
             {page.tags.length > 0 && (

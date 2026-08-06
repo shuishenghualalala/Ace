@@ -286,6 +286,20 @@ def create_cron_router(crew) -> APIRouter:
             return JSONResponse({"ok": False, "error": "session_id 不能为空"}, status_code=400)
         owner = _owner(request)
         if not _session_owned(session_id, owner):
+            # 前端「新会话」是草稿态：发首条消息前后端 sessions 表无记录，直接 404
+            # 会把「在空会话里建定时任务」误杀。为这类会话补占位行（INSERT OR IGNORE，
+            # 已存在不覆盖），补完仍不属于本账号才判定会话不存在。
+            ensure = getattr(crew.session_store, "ensure_session", None)
+            if callable(ensure):
+                try:
+                    ensure(
+                        session_id,
+                        workspace_id=str(payload.get("workspace_id") or "").strip() or "default",
+                        owner_account_id=owner,
+                    )
+                except Exception:  # noqa: BLE001 — 占位失败走下面复查,仍 404
+                    log.exception("cron 创建前补会话占位失败 sid=%s", session_id)
+        if not _session_owned(session_id, owner):
             return JSONResponse({"ok": False, "error": f"会话不存在: {session_id}"}, status_code=404)
         try:
             job = store.create(

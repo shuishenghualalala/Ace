@@ -896,17 +896,18 @@ describe('renderAgentTurn', () => {
         id: 'a1', role: 'assistant', content: '', timestamp: 1, streaming: true, segmentRole: 'process',
         toolCalls: [{ toolCallId: 't1', name: 'skills_list', status: 'done', startedAt: 1, duration: 300 }],
       },
-      { id: 's1', role: 'status', content: '正在规划工具调用…', timestamp: 2, activity: 'tool_planning' },
-      { id: 's2', role: 'status', content: '正在规划工具调用…', timestamp: 3, activity: 'tool_planning' },
+      { id: 's1', role: 'status', content: '处理中…', timestamp: 2, activity: 'progress' },
+      { id: 's2', role: 'status', content: '即将完成…', timestamp: 3, activity: 'progress' },
     ] as ChatMessage[];
     const root = renderAgentTurn(messages, {
       isStreaming: true,
       userPinnedOpen: null,
       turnDurationMs: 3_000,
     });
-    const planning = Array.from(root.querySelectorAll('.process-timeline__item'))
-      .filter((el) => el.textContent?.includes('正在规划工具调用'));
-    expect(planning).toHaveLength(1);
+    const activities = Array.from(root.querySelectorAll('.process-timeline__item'))
+      .filter((el) => el.textContent?.includes('中…') || el.textContent?.includes('完成…'));
+    expect(activities).toHaveLength(1);
+    expect(activities[0].textContent).toContain('即将完成…');
   });
 
   it('回合完成后瞬时活动状态全部隐藏，不影响工具项与折叠条', () => {
@@ -915,8 +916,8 @@ describe('renderAgentTurn', () => {
         id: 'a1', role: 'assistant', content: '让我查看一下技能清单。', timestamp: 1, segmentRole: 'process',
         toolCalls: [{ toolCallId: 't1', name: 'skills_list', status: 'done', startedAt: 1, duration: 300 }],
       },
-      { id: 's1', role: 'status', content: '正在规划工具调用…', timestamp: 2, activity: 'tool_planning' },
-      { id: 's2', role: 'status', content: '正在规划工具调用…', timestamp: 3, activity: 'tool_planning' },
+      { id: 's1', role: 'status', content: '处理中…', timestamp: 2, activity: 'progress' },
+      { id: 's2', role: 'status', content: '即将完成…', timestamp: 3, activity: 'progress' },
       { id: 'a2', role: 'assistant', content: '我有这些技能。', timestamp: 4, segmentRole: 'answer' },
     ] as ChatMessage[];
     const root = renderAgentTurn(messages, {
@@ -924,9 +925,9 @@ describe('renderAgentTurn', () => {
       userPinnedOpen: null,
       turnDurationMs: 17_000,
     });
-    const planning = Array.from(root.querySelectorAll('.process-timeline__item'))
-      .filter((el) => el.textContent?.includes('正在规划工具调用'));
-    expect(planning).toHaveLength(0);
+    const activities = Array.from(root.querySelectorAll('.process-timeline__item'))
+      .filter((el) => el.textContent?.includes('中…') || el.textContent?.includes('完成…'));
+    expect(activities).toHaveLength(0);
     // 工具项保留、折叠条正常计数
     expect(root.textContent).toContain('技能列表');
     expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已执行 17s，已调用 1 个工具');

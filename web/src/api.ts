@@ -22,6 +22,8 @@ import type {
   WikiGraph,
   WikiKB,
   WikiPage,
+  WikiRelationPage,
+  WikiSourcePage,
   WikiVaultDocument,
   WikiSource,
   WikiSourceFiles,
@@ -435,7 +437,14 @@ export const api = {
       }).toString()}`,
     ),
   wikiPage: (id: string, kbId?: string) =>
-    getJSON<{ ok: boolean; page: WikiPage; source_titles: WikiSourceTitles; source_files: WikiSourceFiles }>(
+    getJSON<{
+      ok: boolean;
+      page: WikiPage;
+      source_titles: WikiSourceTitles;
+      source_files: WikiSourceFiles;
+      source_pages: WikiSourcePage[];
+      relation_pages: WikiRelationPage[];
+    }>(
       withKb(`/api/wiki/pages/${encodeURIComponent(id)}`, kbId),
     ),
   wikiDeletePage: (id: string, kbId?: string) =>
@@ -469,6 +478,10 @@ export const api = {
     ),
   wikiQuery: (q: string, kbId?: string) =>
     getJSON<{ ok: boolean; text: string; pages: WikiPage[] }>(withKb(`/api/wiki/query?q=${encodeURIComponent(q)}`, kbId)),
+  wikiSearch: (query: string, kbId?: string, topK = 5) =>
+    getJSON<{ ok: boolean; pages: WikiPage[]; source_titles: WikiSourceTitles; source_files: WikiSourceFiles }>(
+      withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId),
+    ),
   wikiGraph: (kbId?: string) =>
     getJSON<{ ok: boolean; graph: WikiGraph }>(withKb("/api/wiki/graph", kbId)),
   wikiCompile: (kbId?: string) =>

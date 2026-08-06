@@ -1,0 +1,44 @@
+.kimi-pixel-stage,
+[data-kimi-pixel-stage] {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.kimi-pixel-background,
+[data-kimi-pixel-background] {
+  position: absolute;
+  inset: var(--kimi-pixel-background-inset, 0);
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.kimi-pixel-background > canvas,
+[data-kimi-pixel-background] > canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.kimi-pixel-content,
+[data-kimi-pixel-content] {
+  position: relative;
+  z-index: 1;
+}
+
+.kimi-pixel-label-safe,
+[data-kimi-pixel-label-safe] {
+  position: relative;
+  z-index: 2;
+}
+
+html[data-daimon-size-tier="compact"] :is(
+  .kimi-pixel-background,
+  [data-kimi-pixel-background]
+) {
+  opacity: var(--kimi-pixel-compact-opacity, 0.52);
+}

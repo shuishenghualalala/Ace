@@ -981,6 +981,49 @@ def test_browser_tool_label_uses_redacted_arguments():
     assert "keywords" in event.body["ui_label"]
 
 
+def test_browser_fill_form_start_event_and_trace_use_same_safe_projection(monkeypatch):
+    reg = Registry()
+    reg.register(
+        name="browser_use",
+        toolset="browser",
+        schema={"name": "browser_use", "parameters": {}},
+        handler=lambda _args: "ok",
+        ui_label_template="浏览器 {action}",
+    )
+    traced: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "crew.agent.loop.tool_runner.llm_trace",
+        lambda direction, payload: traced.append((direction, payload)),
+    )
+    runner = _runner(reg)
+    call = ToolCall(
+        "fill-form",
+        "browser_use",
+        {
+            "action": "fill_form",
+            "fields": [
+                {
+                    "type": "textbox",
+                    "ref": "p9:e1",
+                    "value": "must-never-enter-event-or-trace",
+                },
+                {"type": "slider", "ref": "p9:e2", "value": "91"},
+            ],
+        },
+    )
+
+    event = runner._start_event(call, "rid", _seq_counter())
+
+    material = repr({"event": event.body, "trace": traced})
+    assert "must-never-enter-event-or-trace" not in material
+    assert "'91'" not in material
+    assert '"field_count": 2' in event.body["args"]
+    assert traced[0][1]["arguments"]["field_types"] == {
+        "textbox": 1,
+        "slider": 1,
+    }
+
+
 def test_segment_consecutive_safe_grouping():
     calls = [
         ToolCall("r1", "file_read", {"path": "/tmp/a"}),
@@ -1033,7 +1076,7 @@ async def test_deferred_tool_rejects_direct_guess_but_accepts_direct_call_after_
         reg,
         tool_search_schemas=original,
         tool_search_config=ToolSearchConfig(enabled="on"),
-        allowed_tool_names={"cron_create"},
+        authorized_tool_names=frozenset({"cron_create"}),
         direct_tool_names=set(),
     )
 
@@ -1451,37 +1494,6 @@ async def test_ready_tool_call_emits_visible_start_before_stream_continues():
     results = [c for c in tool_events if c.body["phase"] == "result"]
     assert [c.body["tool_call_id"] for c in starts] == ["r1"]
     assert [c.body["tool_call_id"] for c in results] == ["r1"]
-
-
-async def test_reasoning_with_available_tools_emits_planning_status_first():
-    """模型只流 reasoning、尚未揭晓 tool_calls 时，先给 UI 可见反馈。"""
-    class ReasoningProvider:
-        async def stream_chat(self, messages, tools=None, **kwargs):
-            yield StreamChunk(reasoning_content="正在判断应使用哪个工具")
-            yield StreamChunk(delta_text="直接回答")
-            yield StreamChunk(done=True, finish_reason="stop")
-
-    executor = _executor(ReasoningProvider())
-    seq = 0
-
-    def next_seq():
-        nonlocal seq
-        seq += 1
-        return seq
-
-    tools = [{"type": "function", "function": {"name": "file_write", "parameters": {}}}]
-    chunks = [
-        c async for c in executor._call_model(
-            [Message.user("hi")], tools, "r", next_seq, {}, session_id="s",
-        )
-    ]
-    planning_idx = next(
-        i for i, c in enumerate(chunks)
-        if c.kind == "status" and c.body.get("activity") == "tool_planning"
-    )
-    thinking_idx = next(i for i, c in enumerate(chunks) if c.kind == "thinking")
-    assert chunks[planning_idx].body["message"] == "正在规划工具调用…"
-    assert planning_idx < thinking_idx
 
 
 async def test_unsafe_ready_tool_call_emits_visible_start_before_stream_continues():

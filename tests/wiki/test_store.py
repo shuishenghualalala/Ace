@@ -137,6 +137,7 @@ def test_update_home_writes_overview_sections(store: FileSystemWikiStore):
     store.set_home_intro(
         HomeIntro(
             text="这个知识库聚焦大语言模型，涵盖架构原理与训练方法。",
+            questions=["Transformer 的自注意力机制是怎么工作的？", "指令微调解决了什么问题？"],
             content_hash="h1",
             generated_at=1.0,
             status="ready",
@@ -148,9 +149,14 @@ def test_update_home_writes_overview_sections(store: FileSystemWikiStore):
     store.update_home()
     home = (store._dir() / "Home.md").read_text(encoding="utf-8")
 
-    # 关于这个知识库：使用缓存导读
-    assert "## 关于这个知识库" in home
+    # 导读：紧跟元信息行，不再有「内容导读」小标题
+    assert "## 内容导读" not in home
     assert "这个知识库聚焦大语言模型" in home
+    # 推荐问题：位于导读之后、知识地图之前
+    assert "## 推荐问题" in home
+    assert "- Transformer 的自注意力机制是怎么工作的？" in home
+    assert home.index("## 推荐问题") < home.index("## 知识地图")
+    assert home.index("这个知识库聚焦大语言模型") < home.index("## 推荐问题")
     # 知识地图：话题页排在关键词页之前，带来源数与较长介绍
     assert "## 知识地图" in home
     assert home.index("### [[大语言模型]]") < home.index("### [[Transformer]]")
@@ -185,6 +191,8 @@ def test_update_home_uses_placeholder_when_intro_missing(store: FileSystemWikiSt
     home = (store._dir() / "Home.md").read_text(encoding="utf-8")
 
     assert "导读整理中" in home
+    # 没有推荐问题时不生成该小节
+    assert "## 推荐问题" not in home
 
 
 def test_init_kb_under_wiki_lib_default(store: FileSystemWikiStore):
@@ -215,6 +223,22 @@ def test_list_kbs_includes_default_after_init(store: FileSystemWikiStore):
     store.init_kb()
     kbs = store.list_kbs()
     assert any(kb.id == "default" for kb in kbs)
+
+
+def test_list_kbs_default_kb_display_name(store: FileSystemWikiStore):
+    """默认知识库展示名为「我的工作」，kb_id 标识符仍为 default。"""
+    store.init_kb()
+    kbs = store.list_kbs()
+    default_kb = next(kb for kb in kbs if kb.id == "default")
+    assert default_kb.name == "我的工作"
+
+
+def test_update_home_uses_default_kb_display_name(store: FileSystemWikiStore):
+    """空默认知识库的 Home.md 头部应展示「我的工作」。"""
+    store.init_kb()
+    store.update_home()
+    home = (store._dir() / "Home.md").read_text(encoding="utf-8")
+    assert "我的工作" in home
 
 
 def test_create_and_delete_kb(store: FileSystemWikiStore):
@@ -972,9 +996,9 @@ def test_get_neighbors_empty_for_unknown_page(store: FileSystemWikiStore):
 def test_get_neighbors_returns_related_pages(store: FileSystemWikiStore):
     """related 字段中的页面应出现在邻居列表中。"""
     a = store.save_page(WikiPage(id="", page_type="topic", title="页面A", content="内容", file_path=""))
-    store.save_page(WikiPage(id="", page_type="topic", title="页面B", content="内容", file_path=""))
+    b = store.save_page(WikiPage(id="", page_type="topic", title="页面B", content="内容", file_path=""))
     # 页面A 显式关联 页面B
-    a.related = ["页面B"]
+    a.relations = [WikiRelation(target_page_id=b.id)]
     store.update(a)
 
     neighbors = store.get_neighbors(a.id)
@@ -994,9 +1018,9 @@ def test_get_neighbors_from_wikilinks(store: FileSystemWikiStore):
 
 def test_get_neighbors_combines_related_and_wikilinks(store: FileSystemWikiStore):
     """related 和 [[wikilinks]] 应合并去重。"""
-    a = store.save_page(WikiPage(id="", page_type="topic", title="中心页", content="参见 [[页面B]] 和 [[页面C]]", file_path="", related=["页面B"]))
-    store.save_page(WikiPage(id="", page_type="topic", title="页面B", content="", file_path=""))
+    b = store.save_page(WikiPage(id="", page_type="topic", title="页面B", content="", file_path=""))
     store.save_page(WikiPage(id="", page_type="topic", title="页面C", content="", file_path=""))
+    a = store.save_page(WikiPage(id="", page_type="topic", title="中心页", content="参见 [[页面B]] 和 [[页面C]]", file_path="", relations=[WikiRelation(target_page_id=b.id)]))
 
     neighbors = store.get_neighbors(a.id)
     assert len(neighbors) == 2
@@ -1006,9 +1030,9 @@ def test_get_neighbors_combines_related_and_wikilinks(store: FileSystemWikiStore
 
 def test_get_neighbors_related_ranked_before_mentions(store: FileSystemWikiStore):
     """related 关系的邻居应排在 mentions（wikilinks）前面。"""
-    a = store.save_page(WikiPage(id="", page_type="topic", title="中心页", content="[[仅提及]]", file_path="", related=["显式关联"]))
-    store.save_page(WikiPage(id="", page_type="topic", title="显式关联", content="", file_path=""))
+    explicit = store.save_page(WikiPage(id="", page_type="topic", title="显式关联", content="", file_path=""))
     store.save_page(WikiPage(id="", page_type="topic", title="仅提及", content="", file_path=""))
+    a = store.save_page(WikiPage(id="", page_type="topic", title="中心页", content="[[仅提及]]", file_path="", relations=[WikiRelation(target_page_id=explicit.id)]))
 
     neighbors = store.get_neighbors(a.id)
     assert len(neighbors) == 2
@@ -1218,7 +1242,7 @@ def test_typed_relations_roundtrip_graph_and_neighbors(store: FileSystemWikiStor
             title="知识问答",
             content="# 知识问答",
             file_path="",
-            relations=[WikiRelation(target="RAG", relation="uses")],
+            relations=[WikiRelation(target_page_id=target.id, relation="uses")],
         )
     )
 

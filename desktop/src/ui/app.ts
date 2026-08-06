@@ -69,6 +69,7 @@ import { mountSessionHistoryView } from './features/session-history-view';
 import { bindSettingsUi, registerConfigPaneRenderers } from './features/settings';
 import { mountSettingsDataPanes } from './features/settings-data';
 import { requireRendererLogin } from './features/auth-gate';
+import { initAuthFlow } from './features/login';
 import { initBackendStatusGuard, isBackendConnected, isBackendInitBypassActive, sealBackendInitBypass } from './features/backend-status-guard';
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
 import { bindInspectorUi, openInspectorToTab, refreshInspector, setPlanBoardActions } from './features/inspector';
@@ -553,6 +554,9 @@ async function init(
   // Phase 1: 同步骨架（必须先做完才能显示首屏）
   // 后端状态守卫：优先初始化，确保遮罩在首屏就能展示
   await safe('initBackendStatusGuard', initBackendStatusGuard);
+  // 认证流程：email/remote 模式下在首屏前判定登录态，未登录则展示登录墙。
+  // local/dev 模式下 isLoggedIn 恒为 true，不显示登录墙，直接放行。
+  await safe('initAuthFlow', async () => { await initAuthFlow(); });
   // 把 openSession / setTab 注入 chat-controller + session-controller，破除循环依赖
   // （语义等价于抽离前这些顶层函数直接互相调用）。
   await safe('setChatCallbacks', () => setChatCallbacks({ openSession, setTab }));
@@ -604,9 +608,8 @@ async function init(
     onSessionAgentAssigned: assignSessionAgentDisplay,
   }));
   void safe('initSkillsPage', initSkillsPage);
-  // 登录逻辑已移除：Ace 恒为已登录，启动即引导后端 socket 并水合会话/配置。
-  // （原由 onSessionState(isLoggedIn=true) 回调触发，该回调随登录墙一并移除，
-  //   导致 socket 永不创建、会话永不加载 —— 即「服务未连接」。）
+  // 登录墙已由 initAuthFlow 在 Phase 1 处理：local/dev 模式直接放行，
+  // email/remote 模式未登录时登录墙覆盖全部 UI，登录后 reload 重新初始化。
   await safe('bootstrapBackend', bootstrapBackend);
   void safe('hydrateBackendState', hydrateBackendState);
 }

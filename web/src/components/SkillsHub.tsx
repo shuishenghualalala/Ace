@@ -182,6 +182,7 @@ function OptionalCard({ skill, onInstall }: { skill: OptionalSkill; onInstall: (
       <div className="hub-card__body">
         <div className="hub-card__name">
           <span className="hub-card__title">{skillTitle(skill)}</span>
+          {skill.source === "local" && <span className="hub-badge hub-badge--local">本地</span>}
           <span className="hub-card__mini">{skill.category}</span>
         </div>
         <div className="hub-card__desc">{skillDesc(skill)}</div>
@@ -221,7 +222,7 @@ export default function SkillsHub() {
   };
 
   const installed = store?.installed ?? [];
-  const optional = store?.optional ?? [];
+  const optional = [...(store?.optional ?? []), ...(store?.local ?? [])];
 
   const filteredInstalled = installed.filter((s) => {
     const qLower = q.toLowerCase();

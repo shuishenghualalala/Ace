@@ -1,0 +1,8 @@
+interface:
+  display_name: "Kimi Widget Design"
+  short_description: "Design adaptive, brand-correct Daimon widgets"
+  brand_color: "#81C4FF"
+  default_prompt: "Use $widgetdesign to turn this request into a responsive Kimi widget."
+
+policy:
+  allow_implicit_invocation: true

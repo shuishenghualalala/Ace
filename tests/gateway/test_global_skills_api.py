@@ -41,3 +41,28 @@ def test_skill_mutation_routes_forward_authenticated_owner(monkeypatch):
         ("install:demo", "A:uid-a", "desktop-api"),
         ("uninstall:demo", "A:uid-a", "desktop-api"),
     ]
+
+
+def test_store_route_includes_local(monkeypatch):
+    """store 路由响应含 local 字段（本地 skill 可安装源）。"""
+    monkeypatch.setattr(misc, "list_skills", lambda **k: [])
+    monkeypatch.setattr(misc, "list_optional_skills", lambda: [])
+    monkeypatch.setattr(
+        misc,
+        "list_local_skills",
+        lambda: [{"slug": "lark-doc", "source": "local"}],
+    )
+
+    crew = SimpleNamespace(config=SimpleNamespace(
+        evolution_auto_trigger=False,
+        evolution_auto_full_cycle=False,
+        evolution_visible=False,
+    ))
+    app = FastAPI()
+    app.include_router(misc.create_misc_router(crew))
+    client = TestClient(app)
+
+    resp = client.get("/api/skills/store")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["local"] == [{"slug": "lark-doc", "source": "local"}]

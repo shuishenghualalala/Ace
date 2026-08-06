@@ -20,7 +20,7 @@ dependencies = [
     "websockets>=12.0",
     "psutil>=5.9",
     "apscheduler>=3.11.2",
-    "mcp>=1.0",
+    "mcp>=2.0,<3.0",
     "httpx>=0.27,<1.0",
     "requests>=2.34.2",
     "wcmatch>=8.4",
@@ -35,11 +35,19 @@ dev = [
 ]
 # MCP 已是核心依赖；该 extra 让 `.[mcp]` 安装形式继续有效。
 mcp = [
-    "mcp>=1.0",
+    "mcp>=2.0,<3.0",
 ]
 # 飞书/Lark 渠道（lark-oapi WebSocket 长连接）。未安装则 feishu 平台显示 unavailable。
 feishu = [
     "lark-oapi==1.5.3",
+]
+# 微信（个人号 iLink Bot API 长轮询）渠道：aiohttp 收发 + cryptography 加密 CDN；
+# qrcode 用于桌面端扫码登录的二维码渲染（SVG，无 pillow 依赖）。
+# 未安装则 weixin 平台显示 unavailable。
+weixin = [
+    "aiohttp>=3.9",
+    "cryptography>=42",
+    "qrcode>=8.0",
 ]
 # Wiki 文件上传解析：HTML 需要 markdownify，PDF 需要 pymupdf，DOCX 需要 python-docx，
 # XLSX 需要 openpyxl，PPTX 需要 python-pptx，文本编码探测需要 charset-normalizer。

@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from crew.agent.skills import (
+    _parse_frontmatter,
     build_skill_activation,
+    get_skills,
     get_package_members,
     install_skill,
     resolve_package,
@@ -51,6 +54,57 @@ def normalize_team_execution_profile(raw: object) -> dict[str, object] | None:
         "requested_mode": requested_mode,
         "profile_source": "user",
     }
+
+
+def _apply_browser_skill_policy(crew, skill_key: str, owner: str, session_id: str) -> None:
+    """技能激活时校验它声明的浏览器策略形状。
+
+    **不再把策略变成运行期的动作白名单。** 授权来自 V2/V3 record-replay 的
+    不可变 plan 与必须精确等于 plan 的 capabilities 声明——那是按这一次录制的
+    实际动作精确推导出来的，比"这个会话只读"这种粗粒度档位准确得多，也不会
+    在正常流程上产生任何阻碍。
+
+    保留这个函数是为了**格式校验**：一份声明了 `browser_policy` 却写坏了的技能
+    应该在激活时就被发现，而不是等回放到一半才炸。校验失败只记日志，不阻断激活。
+    """
+    try:
+        info = get_skills().get(skill_key)
+        if not info:
+            return
+        frontmatter, _ = _parse_frontmatter(
+            Path(info["skill_dir"], "SKILL.md").read_text("utf-8")
+        )
+        metadata = frontmatter.get("metadata")
+        policy = metadata.get("browser_policy") if isinstance(metadata, dict) else None
+        if not isinstance(policy, dict):
+            return
+        generated_by = (
+            str(metadata.get("generated_by") or "")
+            if isinstance(metadata, dict)
+            else ""
+        )
+        # **标记必须与编译器实际写入的完全一致。**
+        # 曾经这里写的是 "crew.browser.record-replay"（点号），而编译器写入的是
+        # "crew.browser-record-replay"（连字符，见 compile_tool.py 与
+        # skills.py 的 validate_generated_skill）——于是整个函数对任何真实技能
+        # 都在第一关 return，看似有校验实际没有。
+        if generated_by != "crew.browser-record-replay":
+            return
+        capabilities = policy.get("capabilities")
+        if (
+            policy.get("schema_version") != "crew.browser.policy.v2"
+            or not isinstance(capabilities, list)
+            or not capabilities
+            or any(not isinstance(item, str) for item in capabilities)
+            or len(set(capabilities)) != len(capabilities)
+        ):
+            log.warning(
+                "录制技能的 browser_policy 格式无效：skill=%s",
+                skill_key,
+            )
+    except Exception:
+        # 形状校验是诊断，不是闸门：解析失败不该让技能装不上或跑不起来。
+        log.debug("跳过 browser_policy 形状校验：skill=%s", skill_key, exc_info=True)
 
 
 def create_ws_router(
@@ -631,6 +685,9 @@ def create_ws_router(
                         if activation is not None:
                             skill_meta = activation.instruction
                             active_skills.append(activation.to_dict())
+                            _apply_browser_skill_policy(
+                                crew, skill_key, owner, session_id
+                            )
                     else:
                         # 2. 尝试解析为 package 并展开
                         pkg = resolve_package(command)

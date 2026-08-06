@@ -643,6 +643,7 @@ export default function App() {
             <ChatPanel
               messages={chat.messages}
               busy={chat.busy}
+              compactingContext={chat.compactingContext}
               queueHint={chat.queueHint}
               pendingQueue={chat.pendingQueue}
               config={config}

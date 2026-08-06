@@ -1,4 +1,4 @@
-import type { UserInfoSnapshot } from '../shared/types';
+import type { AuthUserSnapshot } from '../shared/types';
 
 export type GatewayIdentityMode = 'local' | 'dev';
 
@@ -6,7 +6,7 @@ export type GatewayIdentityMode = 'local' | 'dev';
 export function resolveGatewayIdentityMode(
   isDevLaunch: boolean,
   _jwt?: string | null,
-  _userInfo?: UserInfoSnapshot | null,
+  _userInfo?: AuthUserSnapshot | null,
 ): GatewayIdentityMode {
   return isDevLaunch ? 'dev' : 'local';
 }

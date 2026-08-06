@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Crew 前端设计文档</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:30px;font-weight:800;letter-spacing:-.5px;margin:0 0 6px}
+  .sub{color:var(--t3);margin-bottom:40px}
+  h2{font-size:20px;font-weight:700;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;font-weight:700;margin:22px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;border:none;padding:0}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  .logo{width:30px;height:30px;border-radius:8px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:10px}
+  .swatch{display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid var(--border);vertical-align:middle;margin-right:6px}
+  .tokens td:first-child{font-family:var(--mono);font-size:13px}
+  ul{padding-left:20px}
+  .tree{font-family:var(--mono);font-size:13px;white-space:pre;color:var(--t2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="logo">C</span>Crew 前端设计文档</h1>
+  <div class="sub">React + Vite + TypeScript · 黑白极简 · 白底无色块 · 2026-06-24 更新</div>
+
+  <h2>1. 设计原则</h2>
+  <ul>
+    <li><b>黑白极简</b>：白底，文字与边框走灰阶，强调色只用黑色，<b>不出现大块彩色</b>。</li>
+    <li><b>结构清晰</b>：三栏布局（会话 / 对话 / 任务板），组件单一职责，无状态管理库。</li>
+    <li><b>零额外依赖</b>：不引 UI 组件库 / CSS 框架，纯手写 CSS（一个 <code>global.css</code> + <code>markdown.css</code>），便于同事维护。Markdown 渲染使用 <code>react-markdown</code>。</li>
+    <li><b>复用后端契约</b>：完全沿用已有 WebSocket <code>/ws</code> 与 REST，前端不发明新协议。</li>
+  </ul>
+
+  <h2>2. 设计令牌</h2>
+  <table class="tokens">
+    <thead><tr><th>变量</th><th>值</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>--bg</td><td><span class="swatch" style="background:#fff"></span>#ffffff</td><td>页面背景</td></tr>
+      <tr><td>--soft</td><td><span class="swatch" style="background:#fafafa"></span>#fafafa</td><td>侧栏/任务板底</td></tr>
+      <tr><td>--text / --t2 / --t3</td><td>#111 / #555 / #999</td><td>主/次/弱文字</td></tr>
+      <tr><td>--border</td><td><span class="swatch" style="background:#e8e8e8"></span>#e8e8e8</td><td>分隔线/描边</td></tr>
+      <tr><td>--black</td><td><span class="swatch" style="background:#111"></span>#111111</td><td>按钮/激活态/Logo</td></tr>
+    </tbody>
+  </table>
+  <p>状态（任务 done/failed、连接在线）一律用<b>描边 + 灰度</b>区分，不用色块。错误是唯一例外，用极淡红描边提示。</p>
+
+  <h2>3. 目录结构</h2>
+  <div class="tree">web/
+├── package.json · vite.config.ts · tsconfig*.json
+├── index.html              # 挂载 #root
+└── src/
+    ├── main.tsx            # 入口
+    ├── App.tsx             # 三栏布局 + 顶层状态编排（含附件管理）
+    ├── types.ts            # 类型定义（UiMessage/ToolCallInfo/Attachment/Chunk/ModelOption/ExternalAgent）
+    ├── api.ts              # REST 封装（含上传/补全/模型切换/Agent External API）
+    ├── ws.ts              # ChatSocket（自动重连）
+    ├── styles/global.css   # 设计系统（组件样式）
+    ├── styles/markdown.css # Markdown 渲染样式
+    ├── hooks/
+    │   ├── useSessions.ts  # 会话列表加载/刷新
+    │   └── useChat.ts      # WS 收发 + 消息状态机（含工具聚合/thinking）
+    └── components/
+        ├── Sidebar.tsx · TopBar.tsx  # Sidebar 含智能体入口；TopBar 含模型下拉选择
+        ├── AgentsHub.tsx             # 异构智能体：我的、运行时、创建智能体、创建团队
+        ├── ChatPanel.tsx · MessageList.tsx · MessageItem.tsx
+        ├── MarkdownContent.tsx  # Markdown 渲染（react-markdown + remark-gfm + rehype-highlight）
+        ├── ToolCallCard.tsx     # 工具调用折叠卡片
+        ├── ThinkingBlock.tsx    # 思考过程折叠
+        ├── AttachmentList.tsx   # 附件 pill 列表
+        ├── Composer.tsx · TaskBoard.tsx</div>
+
+  <h2>4. 数据流</h2>
+  <pre><code>用户输入 ─▶ Composer.onSend ─▶ App.handleSend ─▶ useChat.send()
+        ─▶ ChatSocket 发 {query, session_id, mode, attachments} 到 /ws
+后端流式回 Chunk ─▶ useChat.handle()：先按 chunk.session_id 路由到对应会话的桶，再处理：
+   kind=thinking ─▶ 追加到该会话当前 assistant 消息的 thinking 字段
+   kind=tool     ─▶ 按 tool_call_id 聚合 start/result 事件，更新 ToolCallInfo
+   kind=status   ─▶ 含"排队" → 写该会话 queueHint（队列卡片）；其它（Team 派发）→ 状态斜体行
+   kind=final    ─▶ 写助手消息（含 toolCalls/thinking），重置该会话聚合，结束 busy，刷新会话列表 + 任务板
+   kind=error    ─▶ 追加错误行，置该会话状态为 error
+切换会话 ─▶ 直接取该会话的桶渲染；无缓存时 GET /api/session/{id} 回放历史
+切换模型 ─▶ TopBar select ─▶ POST /api/config/model ─▶ 后端重建 Provider
+Team 模式 ─▶ 右侧 TaskBoard 轮询 GET /api/tasks/{id}
+附件上传 ─▶ POST /api/upload → 附件元信息 → 随 WS 发送
+@引用补全 ─▶ GET /api/complete?query= → 文件/文件夹列表 → 选择后注入附件</code></pre>
+
+  <h2>5. 接口契约（与后端约定，勿擅改）</h2>
+  <h3>WebSocket /ws</h3>
+  <table>
+    <thead><tr><th>方向</th><th>负载</th></tr></thead>
+    <tbody>
+      <tr><td>发送</td><td><code>{ query, session_id, mode: "agent"|"team", attachments?: [{id,name,path,type}] }</code></td></tr>
+      <tr><td>接收</td><td><code>{ kind: "delta"|"tool"|"thinking"|"status"|"final"|"error", body, is_final, sequence, session_id }</code></td></tr>
+    </tbody>
+  </table>
+  <p>tool 事件 body 扩展：<code>{ name, phase, detail, tool_call_id?, args? }</code></p>
+  <p>thinking 事件 body：<code>{ text }</code></p>
+  <h3>REST</h3>
+  <table>
+    <thead><tr><th>端点</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>GET /api/config</td><td>{model, has_key, base_url, active_model_id, models:[{id,name,model,base_url,has_key,temperature,max_tokens,context_window,timeout}]}（不含 key）</td></tr>
+      <tr><td>POST /api/config/model</td><td>切换模型配置 {model_id} → 返回最新 config；TopBar 下拉使用</td></tr>
+      <tr><td>GET /api/sessions</td><td>会话列表 [{session_id,title,message_count,updated_at,created_at?,token_count?}]</td></tr>
+      <tr><td>GET /api/session/{id}</td><td>历史 [{role,content,tool_calls?}]（仅 user/assistant；工具调用保留 source/参数/结果/状态）</td></tr>
+      <tr><td>PUT /api/session/{id}/title</td><td>重命名会话 {title}</td></tr>
+      <tr><td>DELETE /api/session/{id}</td><td>删除会话</td></tr>
+      <tr><td>GET /api/tasks/{id}</td><td>任务看板 [{id,assignee,title,status,result}]</td></tr>
+      <tr><td>POST /api/upload</td><td>上传附件 {filename, content(base64)} → {id,name,path,type,size}</td></tr>
+      <tr><td>GET /api/complete</td><td>路径补全 ?query= → [{text,display,meta,type}]</td></tr>
+      <tr><td>GET /api/runtimes/scan</td><td>刷新本机 Kimi / Codex runtime，并同步到 Crew</td></tr>
+      <tr><td>GET /api/runtimes</td><td>运行时列表</td></tr>
+      <tr><td>POST /api/runtimes/register</td><td>手动注册 runtime</td></tr>
+      <tr><td>GET/POST /api/external-agents</td><td>列出 / 创建外部智能体</td></tr>
+      <tr><td>DELETE /api/external-agents/{id}</td><td>删除未被团队使用的外部智能体</td></tr>
+      <tr><td>GET/POST /api/external-teams</td><td>列出 / 创建外部智能体团队</td></tr>
+      <tr><td>POST /api/external-teams/suggest</td><td>根据团队描述和工作流生成可编辑的组队建议</td></tr>
+      <tr><td>DELETE /api/external-teams/{id}</td><td>归档删除团队</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. 开发与构建</h2>
+  <pre><code># 开发（热更新，:5173，proxy /api 与 /ws 到后端 :8000）
+cd web && npm install && npm run dev
+# 另开一个终端启动后端
+python -m crew.gateway.server
+
+# 构建（产物 web/dist，由网关单端口 :8000 托管）
+cd web && npm run build
+# 刷新 http://127.0.0.1:8000</code></pre>
+
+  <h2>7. 如何扩展（给前端同事）</h2>
+  <ul>
+    <li><b>加一种消息渲染</b>：在 <code>types.ts</code> 的 <code>MsgRole</code> 加类型，在 <code>MessageItem.tsx</code> 加分支，<code>global.css</code> 加对应样式。</li>
+    <li><b>加一个面板</b>：仿 <code>TaskBoard</code> 写组件，在 <code>App.tsx</code> 接一个开关 state，<code>.app</code> 的 grid 列宽同步。</li>
+    <li><b>对接新端点</b>：在 <code>api.ts</code> 加一个方法即可，组件用 hook 调用。</li>
+    <li><b>原则</b>：样式只进 <code>global.css</code>/<code>markdown.css</code>（用 CSS 变量），不内联大段 style，不引第三方 UI 库。</li>
+  </ul>
+
+  <h2>8. 对话体验增强（2026-06-10 新增）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>组件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>Markdown 渲染</td><td><code>MarkdownContent.tsx</code></td><td>react-markdown + remark-gfm + rehype-highlight，代码高亮、表格、GFM 扩展</td></tr>
+      <tr><td>工具调用折叠</td><td><code>MessageList.tsx</code> / <code>AgentTurn.tsx</code> / <code>ToolCallCard.tsx</code></td><td>以 Crew Agent 的回合级折叠为唯一展示标准：BuiltinExecutor（含内置/MCP 注册工具）与 AcpExecutor 均输出标准 <code>ToolCallInfo</code>，由 <code>AgentTurn</code> 折叠思考、状态、工具和中间正文块，具体工具详情统一使用 <code>ToolCallCard</code>。流式期间默认展开，收到 final 后回合默认折叠，最终回答常驻显示；工具数据不再携带协议来源字段。正常状态由 result/error 更新，final 仅作为协议无关兜底，清除任何残留 running 状态。</td></tr>
+      <tr><td>思考过程折叠</td><td><code>ThinkingBlock.tsx</code></td><td>显示模型的推理/思考过程（DeepSeek reasoning_content）</td></tr>
+      <tr><td>附件上传</td><td><code>AttachmentList.tsx</code> + Composer 改造</td><td>+按钮选文件，pill 展示附件，随消息发送</td></tr>
+      <tr><td>@上下文引用</td><td>Composer 内置补全弹窗</td><td>输入 @ 触发文件/文件夹补全，选择后注入为附件</td></tr>
+      <tr><td>模型下拉</td><td><code>TopBar.tsx</code></td><td>读取 <code>/api/config</code> 的 <code>models</code>，调用 <code>POST /api/config/model</code> 切换当前 OpenAI 兼容模型</td></tr>
+    </tbody>
+  </table>
+  <p>后端配合改动：<code>gateway/context.py</code>（上下文服务）、<code>core/envelope.py</code>（thinking/tool_call_id 扩展）、<code>agent/runtime.py</code>（thinking 事件推送、附件上下文注入）。</p>
+
+  <h2>8.1 Kimi 风格过程时间线（2026-07-01）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>过程时间线</td><td><code>AgentTurn.tsx</code> / <code>AgentProcessTimeline.tsx</code> / <code>global.css</code></td><td>Web 对话回合改为类似 Kimi 的折叠过程块：summary 显示「运行 N 个命令 / 使用了 N 个工具 · 处理中/已处理 Xs」，展开后按时间线展示思考、状态、工具调用和错误；最终回答仍常驻显示。</td></tr>
+      <tr><td>工具详情</td><td><code>AgentProcessTimeline.tsx</code></td><td>每个工具节点使用 <code>toolCallId</code> 一一绑定，默认只显示工具标题；用户手动展开后显示 <code>Request</code> 和 <code>Response</code> 两个灰底代码块。工具行不显示单个工具耗时，耗时统一放在顶部 summary。</td></tr>
+      <tr><td>层级样式</td><td><code>global.css</code></td><td>展开后的时间线标题降为 13px、中等字重，避免比正文更抢眼；顶部 summary 维持原尺寸，用于承载工具数量和总处理耗时。</td></tr>
+      <tr><td>流式正文层级</td><td><code>AgentTurn.tsx</code></td><td>同一 agent turn 内，非最后一条 assistant 正文作为 narration 收进过程时间线，最后一条 assistant 正文留在外层消息区；这样中间说明、工具调用和后续说明保持时间线顺序，最终回答仍常驻显示。</td></tr>
+      <tr><td>LLM 输出边界</td><td><code>useChat.ts</code></td><td>工具结果到达后，下一段真实 <code>delta</code> 会重置当前 assistant 文本累积并开启新的 assistant 消息；<code>todo_updated</code> 只更新会话级 Todo 面板，不插入空 assistant 消息。</td></tr>
+      <tr><td>UI 标题元数据</td><td><code>tools/registry.py</code> / 各工具注册文件</td><td>工具注册新增 <code>display_name</code> 与 <code>ui_label_template</code>，只存放在 Tool 对象私有 UI metadata 中；<code>to_schema()</code> 不输出这些字段，避免增加 LLM tool schema 负担。执行时后端把渲染后的 <code>ui_label</code> 放入 WebSocket tool event，Web 端直接展示。</td></tr>
+      <tr><td>非思考模型兼容</td><td><code>AgentTurn.tsx</code></td><td>不是所有模型都有独立 thinking。若历史中出现 <code>content</code> 为空、<code>thinking</code> 有内容且没有工具/计划的 assistant 消息，Web 端将其按最终回答展示，不再渲染「思考已完成」。</td></tr>
+      <tr><td>历史加载兜底</td><td><code>useChat.ts</code></td><td>历史加载占位统一为可识别消息；运行中会话合并 live 消息时过滤占位，避免「正在加载历史记录…」残留。主历史请求增加超时兜底，失败时显示明确错误行。</td></tr>
+      <tr><td>空会话 Plan</td><td><code>useChat.ts</code> / <code>gateway/ws.py</code></td><td>新会话选择 Plan 时只更新前端状态，不立即发送 <code>plan_enter</code>；首条消息携带 <code>plan_active</code>，后端在确保 session 存在后静默进入 Plan，避免未发言时出现「处理过程 / 会话不存在」。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>9. 会话列表增强（2026-06-10）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>组件 / 文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>创建时间显示</td><td><code>Sidebar.tsx</code></td><td>优先取 <code>created_at</code> 做 <code>formatTimeAgo</code>，fallback 到 <code>updated_at</code>；tooltip 展示完整本地时间</td></tr>
+      <tr><td>会话重命名</td><td><code>Sidebar.tsx</code> + <code>App.tsx</code></td><td>hover 会话项显示重命名按钮（铅笔图标），点击后 title 变为 inline input；Enter 提交、Escape 取消、blur 自动保存；调用 <code>PUT /api/session/{id}/title</code></td></tr>
+      <tr><td>侧栏入口精简</td><td><code>Sidebar.tsx</code></td><td>移除与「新建任务」能力重复的 <code>Claw</code> 导航入口，保留顶部主按钮作为创建新任务的唯一入口。</td></tr>
+    </tbody>
+  </table>
+  <p>涉及文件：<code>web/src/types.ts</code>（<code>Session.created_at?</code>）、<code>web/src/api.ts</code>（<code>renameSession</code>）、<code>web/src/components/Sidebar.tsx</code>、<code>web/src/App.tsx</code>、<code>web/src/styles/global.css</code>。</p>
+
+  <h2>10. 多对话隔离 · 忙时排队 · 状态点（2026-06-11）</h2>
+  <p>修复「多对话串台 / 新建对话丢失正在生成的回复 / 忙时发不了消息 / 左侧栏恒红点」。核心是把
+    <b>单份全局消息状态</b>改成<b>按 session 分桶</b>，并让 WS 帧带 <code>session_id</code> 用于路由。</p>
+  <table>
+    <thead><tr><th>功能</th><th>组件 / 文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>按会话独立缓存</td><td><code>useChat.ts</code></td><td><code>messagesMap/busyMap/queueMap/statusMap</code> 均按 <code>session_id</code> 分桶；聚合记账（toolMap/assistantId）放 <code>bookRef</code> per-session。chunk 按 <code>c.session_id</code> 路由到对应桶 → 多对话互不串台，后台会话边生成边写自己的桶，切回去仍实时流式。</td></tr>
+      <tr><td>轮次边界重置</td><td><code>useChat.ts</code></td><td>聚合状态只在 <code>final</code>/<code>error</code> 重置（不在 <code>send</code> 重置）；忙时连发第二条时，第一轮尾部 delta 不会误起新消息（借鉴 Hermes：忙时入队不打断当前轮）。</td></tr>
+      <tr><td>忙时可发送 + 队列卡片</td><td><code>Composer.tsx</code> / <code>ChatPanel.tsx</code></td><td>发送按钮去掉 <code>disabled={busy}</code>；收到 <code>status</code> 帧（含"排队"）→ 写入该会话 <code>queueHint</code>，在消息列表与输入框之间渲染「⏳ 正在队列中」小卡片；该会话首个 delta/final 到达即清掉。</td></tr>
+      <tr><td>左侧栏状态点</td><td><code>Sidebar.tsx</code> + <code>global.css</code></td><td><code>session__dot</code> 不再写死红色，按 <code>sessionStatus[session_id]</code> 着色：空闲=灰 / 运行中=琥珀脉冲 / 排队中=蓝 / 出错=红。</td></tr>
+    </tbody>
+  </table>
+  <p>后端配合：<code>gateway/server.py</code>（WS 帧带 <code>session_id</code> + 并发派发，见消息流文档）、<code>gateway/connections.py</code>（推送帧带 <code>session_id</code>）。</p>
+
+  <h2>11. 输入法保护 · 停止按钮 · 队列面板（2026-06-11）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>组件 / 文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>中文输入法 Enter 保护</td><td><code>Composer.tsx</code></td><td>三重防护策略：① <code>composingRef</code> + <code>onCompositionStart/End</code> 追踪合成状态；② <code>keyCode === 229</code> 检测 Chrome 下 IME 事件；③ <code>justComposedRef</code> 专门解决 Safari 的 <code>compositionend</code> 先于 <code>keydown</code> 触发问题。</td></tr>
+      <tr><td>停止生成按钮</td><td><code>ws.ts</code> / <code>useChat.ts</code> / <code>Composer.tsx</code></td><td><code>ChatSocket.stop(sessionId)</code> 发送 <code>{action:"stop", session_id}</code>；<code>Composer</code> 在 <code>busy</code> 态时把黑色发送按钮切换为红色停止按钮，点击调用 <code>onStop</code>。</td></tr>
+      <tr><td>前端本地排队</td><td><code>useChat.ts</code></td><td>新增 <code>pendingQueueMap</code> 按 session 分桶；<code>send()</code> 检测到 <code>busy</code> 时不入 WebSocket，将消息追加到本地队列；<code>final</code>/<code>error</code> 忙态解除后自动 <code>consumePending()</code> 发送队首；<code>stop()</code> 同时清空本地队列。</td></tr>
+      <tr><td>可折叠队列面板</td><td><code>QueuePanel.tsx</code>（新）/ <code>ChatPanel.tsx</code> / <code>global.css</code></td><td>替换原有 <code>queue-card</code> 为可折叠面板：标题「队列 (N)」+ Chevron 图标，展开后列出待发送消息；每项支持编辑、删除和立即发送。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>12. 刷新后恢复错误信息（2026-06-11）</h2>
+  <p>修复「对话中报错，刷新页面后错误信息消失」。后端把错误写入 <code>sessions.last_error</code>，前端加载时通过 <code>/api/session/{id}/status</code> 回显。</p>
+
+  <h2>13. 忙时控制：Stop + Steer 两按钮（2026-06-11）</h2>
+  <table>
+    <thead><tr><th>按钮</th><th>动作</th><th>语义</th></tr></thead>
+    <tbody>
+      <tr><td>⚡ Steer（描边）</td><td><code>{action:"steer", text}</code></td><td>把输入框内容<b>注入运行中的回复</b>，不打断生成。</td></tr>
+      <tr><td>■ Stop（实心）</td><td><code>{action:"interrupt"}</code></td><td><b>停止生成</b>，保留已生成的半截内容，清空本地待发队列。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>14. 异构智能体页面源码迁回（2026-06-12）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>智能体入口</td><td><code>Sidebar.tsx</code> / <code>App.tsx</code></td><td>侧边栏新增"智能体"视图，正式从 <code>web/src</code> 渲染，不再依赖旧 <code>web/dist</code> 构建产物。</td></tr>
+      <tr><td>运行时</td><td><code>AgentsHub.tsx</code></td><td>展示已同步 runtime，提供"刷新运行时"按钮，调用 <code>/api/runtimes/scan</code>；运行时卡片可点击"使用"，自动跳转创建智能体并预填该 runtime。</td></tr>
+      <tr><td>创建智能体</td><td><code>AgentsHub.tsx</code></td><td>选择运行时和模型，创建用户自定义外部智能体；若来自运行时"使用"入口，会显示像素风预填提示，创建完成后自动跳转到"我的"。</td></tr>
+      <tr><td>创建团队</td><td><code>AgentsHub.tsx</code></td><td>选择 Leader、填写团队描述/工作流、智能组队、成员职责弹窗编辑；智能组队会把当前 Leader 一并传给后端，返回后自动填充完整角色职责。</td></tr>
+      <tr><td>我的</td><td><code>AgentsHub.tsx</code></td><td>我的智能体/我的团队卡片展示，支持派活、删除、团队详情弹窗和 Markdown 职责渲染。</td></tr>
+      <tr><td>派活</td><td><code>App.tsx</code> / <code>api.ts</code></td><td>点击我的智能体"派活"后创建新 session，调用 <code>PUT /api/session/{id}/agent-config</code> 写入 <code>executor=acp</code> 与 <code>external_agent_id</code>，再切到普通对话窗口继续交互。</td></tr>
+      <tr><td>样式</td><td><code>global.css</code></td><td>迁回运行时卡片、成员卡片、像素头像/旗帜、职责弹窗、团队详情弹窗等样式。</td></tr>
+    </tbody>
+  </table>
+  <p>入口顺序：点击侧边栏"智能体"默认进入 <code>我的</code> tab；顶部 tab 顺序为 <code>我的 → 运行时 → 创建智能体 → 创建团队</code>，优先展示已创建资产。</p>
+  <p>构建验证：<code>tsc -b</code> 通过，<code>vite build</code> 已从 <code>web/src</code> 重新生成 <code>web/dist</code>。</p>
+
+  <h2>14.1 运行时一键创建智能体（2026-06-14）</h2>
+  <table>
+    <thead><tr><th>交互</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>运行时使用</td><td><code>AgentsHub.tsx</code></td><td>运行时卡片新增像素风"使用"按钮；点击后设置 <code>agentRuntimeId</code>，清空名称/模型输入，并切换到 <code>create-agent</code> tab。</td></tr>
+      <tr><td>创建后跳转</td><td><code>AgentsHub.tsx</code></td><td><code>createAgent()</code> 成功后刷新外部智能体列表，清空表单，并切换到 <code>mine</code> tab 展示新智能体。</td></tr>
+      <tr><td>视觉</td><td><code>global.css</code></td><td>新增 <code>pixel-use-btn</code> 与 <code>runtime-prefill-note</code>，复用现有 8px 卡片、像素网格和黑白按钮语言。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>15. 并发运行态与调试日志（2026-06-12）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>运行态只读卡片</td><td><code>TaskBoard.tsx</code> / <code>api.ts</code> / <code>types.ts</code></td><td>右侧任务板顶部轮询 <code>GET /api/runtime/concurrency</code>，展示 <code>global_active/max_active_runs</code>、全局排队数、活跃子任务数，以及非 idle session 的 <code>live/queue_depth</code>。只读展示，不改变前端主状态枚举。</td></tr>
+      <tr><td>Debug 日志类型与 API</td><td><code>DebugPanel.tsx</code> / <code>api.ts</code> / <code>types.ts</code></td><td>补齐 <code>DebugEvent</code> 与 <code>api.debugLog()</code>，对应后端 <code>GET /api/session/{id}/debug-log</code>。事件来自 <code>.crew/logs/llm.jsonl</code>，仅 <code>runtime.llm_trace=true</code> 时保留。</td></tr>
+      <tr><td>编译保护</td><td><code>npm run build</code></td><td><code>DebugPanel</code> 虽然不是默认入口，也必须通过 TypeScript 编译；因此调试类型和 API 需要与后端契约同步维护。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>16. 会话智能体徽标（2026-06-15）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>会话列表标识</td><td><code>Sidebar.tsx</code> / <code>types.ts</code></td><td>Crew 普通会话不显示额外标识；外部智能体会话在标题前显示 18px 像素风运行时徽标，徽标文字直接读取 Gateway <code>agent_label.display_badge</code>。Web 不再根据 provider/名称推断或保留 Codex 特例；字段缺失仅显示 <code>?</code>。</td></tr>
+      <tr><td>标题展示</td><td><code>Sidebar.tsx</code></td><td>session 标题仍只展示会话标题，不直接拼接智能体名称，避免侧栏拥挤。</td></tr>
+      <tr><td>Hover 全称</td><td><code>Sidebar.tsx</code></td><td>外部会话的徽标和标题 <code>title</code> 使用 <code>provider-agentName-sessionTitle</code>，例如 <code>kimi-测试工程师-xxxxx</code>；Crew 会话 hover 仅显示会话标题。</td></tr>
+      <tr><td>样式</td><td><code>global.css</code></td><td><code>session__agent-badge</code> 使用无纹理纯色底、5px 小圆角、轻内阴影，保持简洁像素风。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>17. 单 Agent 会话选择入口（2026-06-15）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>跨视图打开会话</td><td><code>App.tsx</code></td><td>无论当前在 Chat / Skills / Agents 视图，点击左侧 session 都会切回 <code>chat</code> 并展示该会话历史。</td></tr>
+      <tr><td>Composer Agents</td><td><code>Composer.tsx</code> / <code>ChatPanel.tsx</code></td><td>在 Skills 按钮右侧新增同风格 <code>Agents</code> 按钮，弹出外部智能体列表；用户可在空白单 Agent session 里选择一个外部智能体后直接对话。按钮图标复用 Sidebar 智能体入口轮廓，通过紧凑 viewBox 在 16px 盒内做光学放大，并使用独立细描边适配 Claw 工具栏图标权重。</td></tr>
+      <tr><td>会话绑定边界</td><td><code>App.tsx</code></td><td>一个 session 只能绑定一个 agent：已有消息、正在生成、Team 模式或已绑定外部智能体的 session 不允许切换智能体，只提示当前状态。</td></tr>
+      <tr><td>智能体表单选择器</td><td><code>AgentsHub.tsx</code> / <code>global.css</code></td><td>“创建智能体”的模型选择与“创建团队”的 Leader 选择改为自定义弹层，统一 Claw 底部模型/Agents 弹层的边框、圆角、阴影、hover 与选中态；Leader 选项同时展示 provider 和 model。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>18. 像素图标与技能卡册（2026-06-16）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>侧栏智能体 Logo</td><td><code>Sidebar.tsx</code> / <code>global.css</code></td><td>侧栏"智能体"入口改为黑色描边软徽章：圆润但不复刻参考图，保留小高光与像素星点；尺寸统一为 16px，并降低徽章各层描边粗细，与其他 Sidebar 线性图标保持一致。</td></tr>
+      <tr><td>技能图标系统</td><td><code>SkillsHub.tsx</code></td><td>移除彩色首字母头像，建立基于 <code>pixel-cute-ui-designer</code> 规则的独立透明 SVG keycap-block logo library：writing、translate、image、slides、cloud、legal、marketing、monitor、doc、pdf、sheet、browser、git、clock、code、spark 等类型按 skill 名称/slug/category 自动匹配。</td></tr>
+      <tr><td>技能页视觉</td><td><code>global.css</code> / <code>web/src/assets/skills/*.svg</code></td><td>技能页改成 Skill Deck 卡册风格：副标题去掉"像素"字样，保留 Skill Deck 前色块；搜索框保持浅黄色轻微跳动的小像素标记；技能卡图标统一使用单文件透明 SVG，保留完整 keycap 外框与阴影，不再依赖 PNG 组图裁切。16 个图标统一使用高方形 keycap 外壳、右侧立体面与左上高光；除 writing 的斜向铅笔允许轻微越界外，其余语义图标均保持在按钮框内。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>18. 队列面板：立即发送按钮（2026-06-16）</h2>
+  <p>对齐 Hermes <code>queue-panel.tsx</code> 的「Send queued turn now」交互，在 Crew 队列面板中为每条排队消息补充向上箭头按钮。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>向上箭头按钮</td><td><code>QueuePanel.tsx</code></td><td>队列项操作区新增向上箭头图标，title「立即发送」；hover/聚焦时显示，当前正在生成（<code>busy</code>）或正在编辑该行时禁用。</td></tr>
+      <tr><td>立即发送逻辑</td><td><code>useChat.ts</code></td><td>新增 <code>sendQueueItemNow(sessionId, id)</code>：先从本地 <code>pendingQueue</code> 移除该条，再调用 <code>send()</code> 直接发出；空闲时会立即进入 WS，忙时会被 send 兜底重新入队。</td></tr>
+      <tr><td>数据流贯通</td><td><code>ChatPanel.tsx</code> / <code>App.tsx</code></td><td><code>ChatPanel</code> 新增 <code>onSendQueueItemNow</code> prop 透传给 <code>QueuePanel</code>；<code>App.tsx</code> 绑定到 <code>chat.sendQueueItemNow(currentSessionId, id)</code>。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run build</code>（<code>tsc -b && vite build</code>）通过。</p>
+  <h2>19. 侧栏高度固定修复（2026-06-16）</h2>
+  <p>修复「左侧工作空间展开多个会话后，侧栏整体溢出撑高整页」的布局 bug。</p>
+  <table>
+    <thead><tr><th>文件</th><th>修改</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>global.css</code>（<code>.sidebar</code>）</td><td>新增 <code>overflow: hidden</code></td><td>防止侧栏内部溢出撑大外层 grid 容器</td></tr>
+      <tr><td><code>global.css</code>（<code>.ws-list</code>）</td><td>新增 <code>min-height: 0</code></td><td>Flex 子项默认 <code>min-height: auto</code> 会按内容撑高；置 0 后 <code>flex: 1</code> 才能将中间区域严格限制在剩余视口高度内，配合 <code>overflow-y: auto</code> 滚动</td></tr>
+    </tbody>
+  </table>
+  <p>效果：侧栏品牌、搜索、导航、工作空间标题固定，仅工作空间列表区域可垂直滚动；无论展开多少会话，整页高度不再被撑高。</p>
+
+  <h2>20. Plan 模式前端体验优化（2026-06-17）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>入口收纳</td><td><code>Composer.tsx</code> / <code>global.css</code></td><td>独立 <code>Plan</code> 按钮改为 <code>Craft</code> 模式选择器下拉项；当前仅提供 <code>Craft</code> 与 <code>Plan</code> 两项，当前模式用浅灰背景高亮；下拉项不展示额外图标或信息圆点，菜单宽度和字号与 Skills / 模型下拉保持一致。</td></tr>
+      <tr><td>对话内审批</td><td><code>MessageList.tsx</code> / <code>PlanReviewPanel.tsx</code></td><td><code>plan_review</code> 不再渲染成消息流外的独立确认面板，而是作为 Crew 消息卡插入对话流底部；卡片支持展开/收起，展开后展示计划 Markdown、计划文件路径、以及固定三按钮「继续修改 / 批准并执行 / 拒绝并退出」。点「继续修改」后卡片保留，状态切为「继续修改中」，不再展示旧计划的批准按钮，并提示「在对话框输入修改建议」。历史回放时 <code>useChat.loadHistory()</code> 调用 <code>GET /api/session/{id}/plan</code> 从计划文件恢复 Plan 卡；已执行的历史计划以只读状态展示。</td></tr>
+      <tr><td>模式切换</td><td><code>Composer.tsx</code> / <code>useChat.ts</code> / <code>ws.ts</code></td><td>Craft 下拉中，当前为 Plan 时选择 Craft 会调用 <code>plan_exit</code> 退出 Plan 模式；选择 Plan 则调用 <code>plan_enter</code>。退出后按钮文案与状态同步回 Craft，用户可自由在两种模式间切换。<code>plan_enter</code> / <code>plan_exit</code> / <code>plan_reject</code> 的控制状态只同步本地 Plan 状态，不再追加为 Crew 消息，避免用户尚未输入需求时出现空的“已处理 0.0s”回合。</td></tr>
+      <tr><td>样式统一</td><td><code>global.css</code></td><td>移除 <code>PlanReviewPanel</code> 的大段内联样式，新增 <code>plan-review*</code> 样式，保持 8px 圆角、描边、白底/浅灰底和黑色主按钮。</td></tr>
+    </tbody>
+  </table>
+  <h2>21. 切回运行中会话时消息重新同步（2026-06-23）</h2>
+  <p>修复「一个会话在后台运行中，用户切去新建/其它会话后再切回来，只能看到部分消息」的问题。核心是把
+    <code>loadHistory</code> 从「加载一次、终身跳过」改为「按本地完整性决定是否重新同步」，并在 Gateway 层增加 chunk 缓存与回放，恢复断线期间丢失的中间过程。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>放宽跳过条件</td><td><code>useChat.ts</code></td><td><code>loadHistory(sessionId)</code> 仅在「已加载 <b>且</b> 不 busy <b>且</b> 没有未收尾的 <code>assistantId</code>」时才跳过；否则重新拉取后端历史与运行态。</td></tr>
+      <tr><td>清理聚合记账</td><td><code>useChat.ts</code></td><td>对 running/不完整会话重新同步前，清空该会话的 <code>toolMap</code> 与 <code>assistantId</code>，避免旧 book 状态与新 chunk/历史冲突。</td></tr>
+      <tr><td>区分运行态</td><td><code>useChat.ts</code></td><td>后端返回 <code>live="running"</code> 时保留本地消息桶，只恢复 <code>busy=true</code>，让后续 chunk 继续追加；已结束（idle/failed/stopped）则用后端历史覆盖本地，补齐可能错过的 <code>final</code> 文本与 <code>last_error</code>。</td></tr>
+      <tr><td>Gateway chunk 缓存</td><td><code>connections.py</code></td><td>每个 session 维护有界 deque 缓存所有 WS payload，并写入单调递增的 <code>gateway_sequence</code>。新一轮请求开始时清空缓存。</td></tr>
+      <tr><td>断线回放</td><td><code>connections.py</code> + <code>server.py</code> + <code>ws.ts</code></td><td>WebSocket <code>subscribe/resume</code> 携带各 session 的 <code>last_gateway_sequences</code>；后端只回放 <code>gateway_sequence &gt; after</code> 的帧。replay 与实时推送共享 per-session lock，避免乱序。</td></tr>
+      <tr><td>前端 sequence 跟踪</td><td><code>useChat.ts</code></td><td><code>lastGatewaySequenceRef: Map&lt;string, number&gt;</code> 记录每会话已见最大 gateway_sequence，重连时透传给 subscribe；实时处理用 <code>seenGatewaySequencesRef</code> 按序号集合去重，允许乱序帧进入，避免 tool / todo_updated 被后到的较小序号误丢。</td></tr>
+    </tbody>
+  </table>
+  <p>涉及后端契约：<code>GET /api/session/{id}</code>、<code>GET /api/session/{id}/status</code>，以及 WebSocket subscribe 帧新增 <code>last_gateway_sequences</code>；WS 下行帧新增 <code>gateway_sequence</code>。</p>
+
+  <h2>22. 第二条消息 loading 与回合计时修复（2026-06-23）</h2>
+  <p>修复「发第二条消息时看不到 loading、且『已处理 XXs』一直显示 0」的问题。根因是
+    <code>MessageList</code> 用「最后一个 agent 回合」判定流式回合——发第二条消息时新回合尚未产生
+    assistant，会错误地把<b>已结束的上一回合</b>标记为流式，导致新消息无 loading、计时错位读不到
+    <code>turnDurationMs</code> 而回退到 0；同时 <code>AgentTurn</code> 的时长 <code>useMemo</code> 没有定时器，
+    长工具执行期间无分片时计时冻住。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>流式回合判定</td><td><code>MessageList.tsx</code></td><td>把 <code>activeAgentTurnIdx</code> 从「最后一个 agent 回合」改为「最后一个回合且它本身是 agent 回合」：发新 user 消息时末回合是 user → <code>-1</code> → 显示底部三点 loading，上一回合保持「已处理」；首个分片到达后末回合变为 agent → 正确标记新回合流式。不再使用 <code>lastAgentTurnIndex</code>。</td></tr>
+      <tr><td>实时计时</td><td><code>AgentTurn.tsx</code></td><td><code>isStreaming</code> 时起 <code>setInterval(1000)</code> 触发重渲染，让「处理中 XXs」真正每秒跳动，避免无分片时段冻住。</td></tr>
+      <tr><td>工具运行计数</td><td><code>AgentTurn.tsx</code></td><td>label 末尾追加 <code>· 已运行 N 个工具</code>（<code>messages</code> 内 <code>toolCalls</code> 求和），处理中/已处理均显示。</td></tr>
+    </tbody>
+  </table>
+  <p>仅改 web 端展示层，未动 <code>useChat.ts</code> 计时记账逻辑与后端契约。</p>
+
+  <h2>23. 追问选择框：desktop 端补齐 + 取消通知后端（2026-06-24）</h2>
+  <p><code>ask_followup_question</code>（追问选择框）此前仅 web 端有 UI，desktop 端连
+    <code>followup_question</code> ChunkKind 都未识别，收到追问帧会被静默丢弃。本次把该能力补到 desktop，
+    并把「取消」按钮从「只清前端」改为「通知后端放弃等待」（web/desktop 统一）。</p>
+  <table>
+    <thead><tr><th>端</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>Web</td><td><code>ws.ts</code></td><td>新增 <code>followupCancel(sessionId, questionId)</code>，发送 <code>{action:"followup_cancel",...}</code>。</td></tr>
+      <tr><td>Web</td><td><code>useChat.ts</code></td><td>新增 <code>followupMapRef</code> 镜像；<code>dismissFollowup</code> 读取当前 <code>question_id</code> 发送取消，再清空状态（原先仅清前端，后端会一直等到超时）。</td></tr>
+      <tr><td>Desktop</td><td><code>backend-client.ts</code></td><td>ChunkKind 增 <code>followup_question</code>；新增 <code>FollowupQuestion</code>/<code>FollowupAnswer</code> 类型；<code>BackendChatSocket</code> 增 <code>followupAnswer</code>/<code>followupCancel</code>。</td></tr>
+      <tr><td>Desktop</td><td><code>state.ts</code></td><td><code>AppState</code> 增 <code>followupQuestions: Record&lt;sid, FollowupQuestion|null&gt;</code>。</td></tr>
+      <tr><td>Desktop</td><td><code>followup.ts</code>（新增）</td><td><code>renderFollowupCard</code> 渲染卡片 + <code>bindFollowupCard</code> 绑定单选/多选、「其他」自定义输入（互斥规则对齐 web：单选互斥、多选共存）、提交/取消。仿 web <code>FollowupQuestionCard</code>。</td></tr>
+      <tr><td>Desktop</td><td><code>index.ts</code></td><td><code>applyChunk</code> 增 <code>followup_question</code> 分支写入状态；<code>renderChat</code> 末尾挂卡片并绑定；<code>submitFollowup</code> 回传答案+追加「已选择」user 消息+结束当前回合，<code>cancelFollowup</code> 发取消+清空。</td></tr>
+      <tr><td>Desktop</td><td><code>chat.css</code></td><td>追加 <code>.followup-card*</code> 样式，复用 desktop <code>--bg/--line/--accent</code> 变量，视觉对齐 web。</td></tr>
+    </tbody>
+  </table>
+  <p>后端配套：<code>FollowupWaiter.cancel</code> 由 <code>future.cancel()</code> 改为回灌取消标记答案，避免
+    <code>CancelledError</code> 冒泡到 agent 主任务；<code>gateway/server.py</code> 新增 <code>followup_cancel</code> action。
+    详见 <code>docs/backend/modules/tools.html</code> 变更记录。</p>
+  <h2>24. Claw 精选技能与全局新建任务（2026-06-24）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>精选技能</td><td><code>ChatPanel.tsx</code> / <code>types.ts</code></td><td>Claw 空白欢迎页只展示后端返回的 <code>featured=true</code> Skill；当前标记均位于内置 Skill，名称优先使用 <code>display_name</code> 中文展示。Skills 技能管理页仍展示完整已安装列表。</td></tr>
+      <tr><td>新建任务跳转</td><td><code>App.tsx</code></td><td><code>newSession()</code> 创建空 session 时统一执行 <code>setView("chat")</code>。无论当前停留在技能页还是智能体页，点击侧栏“新建任务”都会回到 Claw 并打开新对话。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>24. 多轮回合 final 覆盖丢失正文修复（2026-06-24）</h2>
+  <p>修复「流式时能看到完整调研报告，<code>final</code> 帧一到报告就消失、只剩最后一句总结」的 bug。
+    根因：整轮所有 <code>delta</code> 分片累加进<b>同一条</b> <code>assistant</code> 消息，而后端 <code>builtin</code> executor 的
+    <code>final</code> 帧只带<b>最后一轮</b>模型输出（<code>crew/agent/executor/builtin.py</code> 的 <code>text</code> 是当轮的，
+    不是全轮累积）。多轮回合（如「派发子智能体 → 主 agent 流式打出报告正文 → 再产出一句总结」）里，
+    <code>useChat.handle</code> 的 <code>final</code> 分支用「总结」整体覆盖了累积全文（报告正文＋总结），报告被冲掉。</p>
+  <table>
+    <thead><tr><th>端</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>Web</td><td><code>useChat.ts</code></td><td><code>final</code> 分支不再无脑覆盖：若已流式累积的全文已以 <code>final</code> 文本结尾（正常情况，<code>final</code>==最后一轮）→ 保留全文、只更新计时；仅当累积里不含该段文本（丢帧/重连兜底）时才用 <code>final</code> 全量覆盖；空 <code>final</code>（用户停止）仍保留半截内容。比较用 <code>trimEnd().endsWith()</code> 容忍首尾空白差异。</td></tr>
+      <tr><td>Desktop</td><td><code>reducers/chat-reducer.ts</code></td><td><code>finalReducer</code> 同源同病（deltas 累加进同一条消息，final 用 <code>content: text</code> 覆盖）。同样改为：累积全文以 final 文本结尾则保留全文、只收尾 <code>streaming/turnDurationMs</code>；否则才覆盖。新增 2 条回归用例（多轮保留正文 / 丢帧兜底）于 <code>tests/unit/chat-reducer.test.ts</code>。</td></tr>
+    </tbody>
+  </table>
+  <p>web 端改 1 处 + desktop 端改 1 处，均未动后端契约 / 协议 / 历史持久化。web <code>tsc -b</code>＋<code>vite build</code> 通过；desktop <code>tsc --noEmit</code>＋<code>chat-reducer</code> 单测 22/22 通过。</p>
+
+  <h2>25. Skills 七分类与语义 Logo（2026-06-25）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>固定分类</td><td><code>SkillsHub.tsx</code> / <code>types.ts</code></td><td>技能页固定展示移动办公、通用办公、图像处理、设计与开发、经营管理、人力资源、音视频处理七类，不再从 Optional 数据临时生成分类。</td></tr>
+      <tr><td>双区筛选与标签</td><td><code>SkillsHub.tsx</code></td><td>“已安装”和“可安装”各自展示完整七分类目录，并维护独立筛选状态，互不影响；两类卡片均展示后端 <code>category</code> 标签，内置状态仍由卡片右侧“内置”徽标表达。</td></tr>
+      <tr><td>商旅/音视频图标</td><td><code>travel-keycap.svg</code> / <code>media-keycap.svg</code></td><td>按现有 keycap-block 透明 SVG 体系新增商旅行李箱+航线、音视频播放键+声波图标；航班、机票、火车、酒店、出差等优先映射 travel，语音、音频、视频、转写优先映射 media。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>26. 流式历史浏览与 Skills 快速检索（2026-06-25）</h2>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>流式滚动跟随</td><td><code>MessageList.tsx</code></td><td>仅当消息区距离底部不超过 48px 时自动跟随新分片；用户主动上滑后停止抢滚动，可在生成过程中自由查看历史。重新滑到底部或发送新消息后恢复跟随。</td></tr>
+      <tr><td>Skills 搜索</td><td><code>Composer.tsx</code></td><td>Claw 底部 Skills 弹层新增自动聚焦搜索框，按 slug、名称、中文名、描述和分类即时过滤；列表每项展示 <code>/slug</code> 与中文名称，不再铺开长描述；选择 Skill 或关闭弹层时清空搜索词。</td></tr>
+      <tr><td>列表窗口</td><td><code>global.css</code></td><td>Skills 搜索区固定在弹层顶部，结果列表限制为 248px 高并独立滚动，避免 Skill 较多时弹层过长。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>27. ACP Agent 追问来源展示（2026-06-25）</h2>
+  <p>Followup 事件新增可选 <code>origin</code>：包含 <code>type=acp</code>、外部 Agent 名称和来源 session。Web 与 Desktop 继续复用原单选/多选/自定义输入组件；当问题来自外部 ACP Agent 时，卡片标题区域显示“Codex/Kimi 等 Agent 正在询问”，答案仍通过现有 <code>followup_answer</code> WebSocket action 返回 Gateway。</p>
+
+  <h2>28. 追问选项 label/value 兼容（2026-06-26）</h2>
+  <p>Web/Desktop 追问选择框兼容两类选项：字符串选项继续按原文本展示并提交；对象选项 <code>{label,value}</code> 展示 <code>label</code>，提交 <code>value</code>。用于适配 Kimi/Hermes 等外部 ACP Agent 通过 Interaction MCP 传入结构化选项，避免 UI 中显示 <code>{'label':'风险分析','value':'risk'}</code> 这类对象字符串。</p>
+
+  <h2>29. 追问选择历史回放持久化（2026-06-26）</h2>
+  <p>追问答案不再只作为前端本地临时消息存在。后端会把用户选择格式化为 <code>已选择：...</code> 并写入 canonical history；Web/Desktop 历史面板重新拉取 <code>GET /api/session/{id}</code> 时可恢复这条 user 消息。对于 <code>{label,value}</code> 选项，历史展示 <code>label</code>，工具结果仍保留提交给 Agent 的 <code>value</code>。</p>
+
+  <h2>30. Web 消息气泡操作组（2026-06-26）</h2>
+  <p>Web 用户消息气泡新增下方轻量操作组：用户消息支持复制；仅最近一条用户消息在非 busy 状态下显示铅笔“修改”按钮。点击修改会把原 query 回填到底部输入框并进入编辑模式；重新发送时自动包装为 <code>继续执行未完成任务。</code> + 修改后的需求，避免篡改既有 canonical history。Agent 输出消息不展示复制/修改按钮。该改动仅限 Web 前端，不修改 desktop。</p>
+
+  <h2>31. Web 历史切换重新对齐后端（2026-06-26）</h2>
+  <p>Kimi/Hermes 等外部 ACP Agent 的追问答案会由后端写入 canonical history。此前 Web 对已加载且空闲的 session 会直接复用本地消息缓存，导致后端已写入的 <code>已选择：...</code> 在切换历史时可能看不到。本次移除该早退逻辑：空闲 session 切回时重新拉取 <code>GET /api/session/{id}</code> 覆盖本地缓存；运行中 session 仍保留 live 片段保护逻辑，避免覆盖流式输出。</p>
+  <p>同时，前端提交追问答案后，本地即时追加的 <code>已选择：...</code> 会按当前问题的 <code>{label,value}</code> 映射展示 <code>label</code>，与刷新后的后端历史保持一致。</p>
+
+  <h2>32. Desktop Plan 模式对齐 Web/OCC（2026-06-29）</h2>
+  <p>Plan 模式语义统一为：<code>plan_enter</code> 只进入/保持只读 Plan 状态并确定计划文件路径；模型后续在 Plan 状态内调研、设计、写计划文件，调用 <code>exit_plan_mode</code> 后才推送 <code>plan_review</code> 审批卡。Desktop 已移除“每次发送前重复 <code>plan_enter</code>”的旧流程，改为选择 Plan 时进入一次，切回 Craft 时 <code>plan_exit</code>。</p>
+  <p>Desktop 审批卡复刻 Web <code>PlanReviewPanel</code> 的信息结构：计划标题、计划文件路径、Markdown 正文、状态标签，以及固定三按钮「继续修改 / 批准并执行 / 拒绝并退出」。选择 Plan/Craft 时后端返回的 <code>已进入 Plan 模式</code>、<code>已退出 Plan 模式</code>、<code>已保留 Plan 模式</code> 属于控制状态，只更新本地 Plan 状态和 composer 状态，不渲染为 Crew 消息，避免用户尚未输入需求时出现空的“已处理 0.0s”回合。收到 <code>plan_review</code> 即代表规划轮进入等待审批，前端会解除 busy 并回到 idle，允许用户直接操作审批卡。继续修改后卡片变为“继续修改中”并沿用同一份计划，同时保持 idle，使对话框里的下一条输入作为同一 Plan 会话的修改建议发送；拒绝并退出保留 rejected 阶段；批准时发送 <code>workspace_id</code>，确保执行轮在当前 workspace 中继续，并把当前审批卡保留为 <code>readonly</code> 只读计划，方便执行过程中回看。历史回放、重连或切换会话时，Desktop 与 Web 一样调用 <code>GET /api/session/{id}/plan</code> 恢复计划卡，避免 <code>resetBook()</code> 清空本地 <code>pendingPlan</code> 后丢失审批卡。</p>
+
+  <h2>33. 流式回复顺序保护（2026-06-30）</h2>
+  <p>修复 Web 前端回复语序可能错乱的问题：后端 <code>subscribe/resume</code> 现在会按前端上报的 <code>last_gateway_sequences</code> 回放断线期间缺失的 chunk；前端 <code>useChat.ts</code> 保留每会话最大 gateway_sequence 用于重连水位，同时用已见序号集合过滤重复帧。该规则允许实时帧乱序到达，避免先收到较大序号的 task progress 后，把后到的 <code>tool</code> / <code>todo_updated</code> 等较小序号帧误判为旧帧丢弃。</p>
+
+  <h2>34. Desktop 重复回放去重（2026-06-30）</h2>
+  <p>修复 Desktop 同一 session 中同一条 Agent 回复被渲染多遍的问题：<code>desktop/src/ui/backend-client.ts</code> 的 <code>BackendChatSocket</code> 现在和 Web 一样记录每个 session 的 <code>gateway_sequence</code> 水位，<code>subscribe/resubscribe</code> 会携带 <code>last_gateway_sequences</code>。实时处理改为按 session 维护已见序号集合，仅丢重复帧，允许较小序号的后到有效帧继续进入，避免 <code>tool</code> / <code>todo_updated</code> 被 task progress 的较大序号误丢。</p>
+
+  <h2>35. Todo 面板实时帧乱序修复（2026-06-30）</h2>
+  <p>Web 端新增 Todo 面板后，端到端测试发现 live 会话中工具真实执行且 <code>/api/session/{id}/todos</code> 已有数据，但页面仍显示“已运行 0 个工具”且没有 Todo 面板。根因是 Gateway <code>task progress</code> 帧可能先于较小序号的 <code>tool</code> / <code>todo_updated</code> 到达，旧的“只接受更大 gateway_sequence”逻辑把这些帧丢弃。现改为按 session 维护已见序号集合去重，最大水位仅用于断线重连订阅。</p>
+
+  <h2>36. Desktop Todo 全局面板（2026-06-30）</h2>
+  <p>Desktop 与 Web 对齐 Todo 展示：移除旧的 assistant 消息内 Todo 卡片，不再把 <code>todoSnapshot</code> 写进消息；<code>todo_updated</code> 只更新会话级 <code>Bookkeeping.todos</code>。聊天输入框上方新增 <code>chat-todo-slot</code>，由 <code>renderTodoSlot()</code> 读取当前 session 的 Todo 快照并渲染可折叠进度面板，条件仅为 <code>todos.length &gt; 0</code>，不依赖 Plan active/review 状态。</p>
+  <p>历史恢复沿用 <code>GET /api/session/{id}/todos</code>：<code>openSession()</code> 在加载消息和 Plan 后继续拉取 Todo，并再次触发 <code>renderChat()</code>，保证切换会话或刷新后仍能看到已有清单。面板样式位于 <code>desktop/assets/styles/chat.css</code>，复用 Desktop 现有 <code>--surface</code>、<code>--line</code>、<code>--accent</code>、<code>--green</code> 等变量，展示 done/total、当前 in_progress 项，以及 pending/in_progress/completed/cancelled 状态。</p>
+
+  <h2>37. Desktop Plan/Todo 合并修复（2026-06-30）</h2>
+  <p>合并其他桌面改动后，<code>renderChat()</code> 只在消息列表非空、busy 或编辑态时进入聊天区，导致历史恢复/重连场景里即使 <code>Bookkeeping.pendingPlan</code> 或 <code>Bookkeeping.todos</code> 已有数据，也仍停留在 welcome/空态，看不到 Plan Review 审批卡和输入框上方 Todo 面板。本次把 <code>pendingPlan</code>、<code>pendingFollowup</code>、<code>todos.length &gt; 0</code> 纳入 <code>showChat</code> 条件，并把 Plan/Followup render-unit 从“有消息”分支移到全局追加，保证等待用户操作的卡片不依赖消息列表。</p>
+  <p>同次合并还把桌面 <code>gateway_sequence</code> 逻辑迁到 <code>features/gateway-sequence.ts</code>，但保留了“序号小于等于最大水位就丢”的旧策略。本次恢复为 Web 同款已见序号集合去重：实时帧只丢相同序号，允许较小序号后到，最大水位仅用于 <code>subscribe</code>/<code>resubscribe</code> 回放定位，避免 <code>tool</code> / <code>todo_updated</code> 被 task progress 误丢。</p>
+
+  <h2>38. Web 对话头像轻量像素化（2026-07-01）</h2>
+  <p>参考 sidebar 智能体 logo 与 <code>pixel-cute-ui-designer</code> 的 pixel/Morandi 规则，Web 对话流中的 Crew assistant 头像从厚重黑底机器人改为黑灰系 keycap 小智能体：外层保留黑色圆角框，内部为无耳朵圆润小脸、左上斜小礼帽、右偏飘逸刘海和双眼。头像抽成 <code>AgentAvatarLogo.tsx</code>，由 <code>MessageItem.tsx</code>、<code>AgentTurn.tsx</code> 与 <code>PlanReviewPanel.tsx</code> 统一复用，样式集中在 <code>global.css</code>，不影响 desktop。</p>
+
+  <h2>39. 流式输出 chunk 错乱修复（2026-07-02）</h2>
+  <p>修复「前端对话输出偶尔错乱，后端日志看文本生成正常」的问题。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>final 覆盖判断</td><td><code>useChat.ts</code></td><td><code>final</code> 帧只带最后一轮模型输出，原 <code>endsWith</code> 判断在多轮场景或末尾空白差异下会触发覆盖，导致已流式内容跳变或丢失。改为 <code>resolveFinalText</code>：累积包含 final → 保留累积；final 明显更完整（单轮 delta 丢帧兜底）→ 覆盖；否则保守保留累积。</td></tr>
+      <tr><td>前端测试</td><td><code>useChat.test.ts</code>（新增）</td><td>覆盖正常保留、final 更完整覆盖、空 final、无包含关系、首尾空白忽略等场景。</td></tr>
+      <tr><td>后端测试</td><td><code>tests/gateway/test_connections.py</code></td><td>补充 final 触发 flush 顺序验证；同步更新 <code>clear_buffer</code> 测试，验证清空缓存后 <code>gateway_sequence</code> 保持会话级单调递增。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>40. 流式正文按 Delta Span 排序（2026-07-02）</h2>
+  <p>修复“生成中正文顺序错乱，刷新后正常”的根因：实时 WS 帧允许乱序到达，旧逻辑只按到达顺序把 <code>delta</code> 追加到 assistant 文本。Gateway 现在给 delta body 写入 <code>delta_start</code>/<code>delta_end</code>（原始 <code>ResponseChunk.sequence</code> 闭区间），限流合并连续 delta 时同步合并范围。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>有序累积</td><td><code>useChat.ts</code></td><td>每个 session 当前 assistant 回合维护 <code>deltaSpans</code> 与 <code>legacyDeltaText</code>。带 span 的 delta 按 <code>delta_start</code> 排序重建正文，后到低序号不会被拼到尾部；合并帧覆盖旧单帧时移除被覆盖 span，避免重复文本。</td></tr>
+      <tr><td>旧帧兼容</td><td><code>useChat.ts</code></td><td>没有 <code>delta_start</code>/<code>delta_end</code> 的旧后端帧继续按到达顺序追加到 legacy 前缀，不阻断现有部署。</td></tr>
+      <tr><td>final 兜底</td><td><code>useChat.ts</code></td><td><code>resolveFinalText</code> 增加“final 与累积长度接近但互不包含”的纠偏规则：单轮乱序累积可被完整 final 覆盖；final 远短于累积时仍视为多轮末段，保留已流式全文。</td></tr>
+      <tr><td>测试</td><td><code>useChat.test.ts</code> / <code>MarkdownContent.test.tsx</code></td><td>覆盖乱序 delta、合并 span 去重、旧帧兼容、final 纠偏，以及流式 Markdown 预处理路径。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>41. 过程时间线流式 Markdown 状态透传（2026-07-02）</h2>
+  <p>修复工具过程折叠区中间正文在生成中露出 Markdown 源码标记的问题，例如有序列表项 <code>2. **F2. Fork 机制...</code> 在闭合 <code>**</code> 尚未到达时会显示成原始 <code>**F2</code>，刷新后又恢复正常。根因是 <code>AgentProcessTimeline</code> 内的 thinking/narration 渲染没有接收当前回合的 <code>isStreaming</code> 状态，未走 <code>preprocessStreamMarkdown</code>。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>状态透传</td><td><code>AgentTurn.tsx</code> / <code>AgentProcessTimeline.tsx</code></td><td><code>AgentTurn</code> 把回合级 <code>isStreaming</code> 传给过程时间线；thinking 与 narration 内部的 <code>MarkdownContent</code> 在流式中同步启用自动闭合。</td></tr>
+      <tr><td>回归测试</td><td><code>MarkdownContent.test.tsx</code> / <code>AgentProcessTimeline.test.tsx</code></td><td>覆盖 <code>2. **F2. Fork 机制...</code> 这类未闭合粗体列表项，确保流式中渲染为 <code>&lt;strong&gt;</code>，不再露出 <code>**F2</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>42. Composer 底部模式切换与模型 pill 移除（2026-07-02）</h2>
+  <p>为释放输入区下方空间，移除 Composer 底部的 "单 Agent / Team" 模式切换条以及当前模型名 pill。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>移除底部模式条</td><td><code>Composer.tsx</code></td><td>删除 <code>composer__mode</code> 区域（"单 Agent / Team" 切换按钮 + <code>config.model</code> pill），不再由 Composer 提供 mode 切换 UI。</td></tr>
+      <tr><td>精简 props</td><td><code>Composer.tsx</code> / <code>ChatPanel.tsx</code> / <code>App.tsx</code></td><td><code>Composer</code> 不再接收 <code>mode</code> / <code>onModeChange</code>；<code>ChatPanel</code> 不再透传这两个 prop；<code>App.tsx</code> 删除已无用的 <code>changeMode</code> 辅助函数。<code>mode</code> 状态仍由 <code>App.tsx</code> 内部根据会话/智能体选择自动维护，并用于 <code>handleSend</code> / <code>approvePlan</code> / <code>TaskBoard</code>。</td></tr>
+      <tr><td>保留模型选择入口</td><td><code>Composer.tsx</code></td><td>工具栏内的模型下拉按钮（"选择模型"）保持不变，用户仍可在输入区上方切换模型。</td></tr>
+      <tr><td>清理 dead CSS</td><td><code>global.css</code></td><td>删除 <code>.composer__mode</code>、<code>.seg</code>、<code>.pill</code> 三个已无引用的样式定义。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run build</code>（<code>tsc -b && vite build</code>）通过；<code>npm test</code> 25/25 通过。</p>
+
+  <h2>43. AgentTurn 中间回复渲染错乱修复（2026-07-02）</h2>
+  <p>修复「agent 输出的最终回复被包进可折叠时间线、文字截断/错位，刷新页面后才正常」的问题。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>稳定最终回复识别</td><td><code>AgentTurn.tsx</code></td><td>原逻辑用数组下标 <code>i &lt; lastTextIdx</code> 判断是否为中间回复；流式中最后一条 assistant text 持续变化，下标漂移会导致已渲染在消息体中的节点被 React 当成同 key 节点「搬进」<code>&lt;details&gt;</code> 时间线，出现跨父容器移动导致的文字截断与错位。改为用<b>消息 id</b> 标识当前 turn 的最终回复（<code>lastTextMessageId</code>），只有 <code>role === "assistant"</code> 且 <code>id !== lastTextMessageId</code> 的 text 才作为 narration 进入时间线。</td></tr>
+      <tr><td>避免同 key 跨容器移动</td><td><code>AgentTurn.tsx</code></td><td>中间回复时间线项使用 key <code>${m.id}-narration</code>，消息体最终回复使用 key <code>${m.id}-text</code>，二者 key 不同，React 不会复用 DOM 节点，彻底消除位置切换导致的渲染异常。</td></tr>
+      <tr><td>流式 Markdown 透传</td><td><code>AgentTurn.tsx</code> / <code>AgentProcessTimeline.tsx</code></td><td>中间回复 narration 仍接收回合级 <code>isStreaming</code>，流式中走 <code>MarkdownContent</code> 的自动闭合预处理，避免未闭合的 Markdown 标记（如 <code>**</code>）露出源码。</td></tr>
+      <tr><td>回归测试</td><td><code>AgentTurn.test.tsx</code>（新增）</td><td>覆盖单条 assistant text 渲染为正文、多条时非最后一条进入时间线、流式中当前最后一条仍在正文三种场景。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npx tsc -b</code> 通过；<code>npm test</code> 41/41 通过。</p>
+
+  <h2>44. Web 流式正文分段与时间线边界（2026-07-02）</h2>
+  <p>Web 对话流保留“过程回复在时间线、最终回复在正文”的交互语义：工具 result 后的下一段 <code>delta</code> 会开启新的 assistant 消息分段；<code>AgentTurn</code> 再按当前 agent turn 的最后一条 assistant text 判断最终回复，非最后一条 assistant text 作为 narration 放入过程时间线，最后一条留在正文。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>工具后新分段</td><td><code>useChat.ts</code></td><td><code>applyAssistantTextDelta</code> 遇到 <code>awaitingAssistantAfterTool</code> 时重置当前 delta 累积；handler 同步清空当前 <code>assistantId</code> 与 <code>toolMap</code>，让下一段文本成为新的 assistant message，而不是堆到上一段正文末尾。</td></tr>
+      <tr><td>Todo 只做进度状态</td><td><code>useChat.ts</code> / <code>ChatPanel.tsx</code></td><td><code>todo_updated</code> 只更新会话级 <code>todoMap</code>，由输入框上方的 <code>TodoProgressPanel</code> 展示；不通过 <code>ensureAssistantMessage</code> 创建空 assistant，也不把 Todo 快照插入消息流。</td></tr>
+      <tr><td>时间线 narration</td><td><code>AgentTurn.tsx</code></td><td>同一 agent turn 中，非最后一条 assistant text 渲染为 <code>process-timeline__item--narration</code>，与工具、思考、状态和错误一起保留在折叠过程里；最后一条 assistant text 渲染在正文区。</td></tr>
+      <tr><td>回归测试</td><td><code>useChat.test.ts</code> / <code>AgentTurn.test.tsx</code></td><td>覆盖工具后 delta 重置、多条 assistant text 的 narration 渲染、流式中当前最后一条 assistant text 仍在正文。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm test -- AgentTurn.test.tsx PlanReviewPanel.test.tsx useChat.test.ts</code> 21/21 通过；<code>npm run build</code> 通过（Vite 仅提示 chunk 体积超过默认阈值）。</p>
+
+  <h2>45. Plan Phase 与固定审批按钮（2026-07-03）</h2>
+  <p>Plan 审批前端对齐 Kimi 式状态语义：后端 <code>plan_review</code> 与 <code>GET /api/session/{id}/plan</code> 透传 <code>phase/status</code>，Web 与 Desktop 不再只靠 <code>active + awaiting_approval</code> 推断卡片状态。同时彻底移除 <code>exit_plan_mode.options</code> 多方案能力，审批卡统一为固定三按钮，降低用户决策成本并保证 Web/Desktop 体验一致。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>固定审批按钮</td><td><code>PlanReviewPanel.tsx</code> / <code>AgentTurn.tsx</code> / <code>useChat.ts</code> / <code>ws.ts</code> / <code>App.tsx</code> / <code>chat-render.ts</code> / <code>chat-reducer.ts</code> / <code>backend-client.ts</code> / <code>index.ts</code></td><td>所有客户端审批卡只显示「继续修改 / 批准并执行 / 拒绝并退出」；移除 <code>selected_option</code>、<code>data-plan-option</code>、<code>PlanReviewOption</code> 等选项相关类型与调用链路。</td></tr>
+      <tr><td>状态恢复</td><td><code>useChat.ts</code> / <code>session-controller.ts</code></td><td>历史恢复优先使用后端 <code>status</code>，支持 <code>pending/editing/revising/approved/rejected/cancelled/empty</code>，刷新后不会把取消或拒绝的计划误显示为普通只读。</td></tr>
+      <tr><td>空计划</td><td><code>PlanReviewPanel.tsx</code> / <code>chat-reducer.ts</code></td><td><code>empty=true</code> 渲染为“计划为空”提示，无审批按钮，要求模型先写计划文件再提交。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>46. WikiHub 可拖拽分栏布局（2026-07-07）</h2>
+  <p>将 Wiki 工作区从固定三栏 Grid 改为可拖拽调节的弹性布局，方便用户根据内容长度和屏幕尺寸自由分配目录树、页面详情和对话区宽度。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>可复用分栏组件</td><td><code>ResizablePanels.tsx</code></td><td>新组件：支持 N 个面板，左右两侧面板可设置默认/最小/最大宽度，中间面板自动填充剩余空间；通过子组件标记 <code>ResizablePanels.Panel</code> 声明配置。</td></tr>
+      <tr><td>鼠标拖拽</td><td><code>ResizablePanels.tsx</code> / <code>global.css</code></td><td>参考 VSCode 的 sash 交互：8px 宽热区，默认显示 1px <code>--border</code> 竖线，悬停/拖拽时背景变淡灰、竖线加深为 <code>--border-strong</code>；拖拽时禁止文本选择并覆盖全屏透明层捕获鼠标，避免 iframe/滚动区域吞事件。</td></tr>
+      <tr><td>宽度持久化</td><td><code>ResizablePanels.tsx</code></td><td>以 <code>crew:resizable:{storageKey}</code> 为键写入 localStorage；刷新页面后恢复用户上次调整的宽度。</td></tr>
+      <tr><td>双击/键盘重置</td><td><code>ResizablePanels.tsx</code></td><td>双击 sash 或按 Enter/Space 可将相邻面板恢复为默认宽度；方向键可微调面板宽度。</td></tr>
+      <tr><td>移动端自适应</td><td><code>ResizablePanels.tsx</code> / <code>global.css</code></td><td>窗口宽度 ≤720px 或检测到粗指针（触屏）时自动禁用拖拽与固定宽度，回归垂直堆叠布局；目录树最大高度 35vh，聊天区最小高度 280px。</td></tr>
+      <tr><td>WikiHub 接入</td><td><code>WikiHub.tsx</code></td><td>目录树默认 280px（180–480px）、对话区默认 360px（260–600px），页面详情区自动填充；原有工具栏、搜索、批量操作、编辑/发布覆盖层逻辑保持不变。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run build</code>（<code>tsc -b && vite build</code>）通过。</p>
+
+  <h2>47. WikiHub 目录 / 时间 / 图谱视图（2026-07-09）</h2>
+  <p>补齐 Notion 风格的三类核心浏览方式：目录树保留、时间视图按日期分组、图谱视图可视化页面关系。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>时间视图</td><td><code>WikiTimelineView.tsx</code></td><td>默认视图；按「今天 / 昨天 / 本周 / 本月 / 更早」分组展示页面卡片；复用 <code>WikiListItem.tsx</code> 保持列表项交互一致。</td></tr>
+      <tr><td>目录视图</td><td><code>WikiFileTree.tsx</code></td><td>原有「文件夹」tab，按 <code>file_path</code> 树形层级展示，保持不动。</td></tr>
+      <tr><td>图谱视图</td><td><code>WikiGraphView.tsx</code></td><td>新增「图谱」tab；调用 <code>GET /api/wiki/graph</code> 获取节点/边；使用 SVG + 轻量力导向布局渲染，点击节点在右侧主面板打开页面。</td></tr>
+      <tr><td>列表项复用</td><td><code>WikiListItem.tsx</code></td><td>从原 <code>WikiPageList.tsx</code> 提取出独立列表项组件，供时间视图复用；原 <code>WikiPageList.tsx</code> 已移除。</td></tr>
+      <tr><td>视图切换</td><td><code>WikiHub.tsx</code> / <code>types.ts</code></td><td>tab 栏改为「时间 / 文件夹 / 类型 / 标签 / 图谱」；<code>WikiViewMode</code> 同步更新，默认 <code>"timeline"</code>。</td></tr>
+      <tr><td>样式</td><td><code>global.css</code></td><td>新增 <code>.wiki-timeline-*</code> 与 <code>.wiki-graph-*</code> 样式类，保持 Crew 中性灰黑风格。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run typecheck</code> 通过；新增组件测试 3 个通过。</p>
+
+  <h2>48. Wiki 图谱视图美化（2026-07-09）</h2>
+  <p>参考 Neo4j Bloom 与 Obsidian Graph 的视觉效果，对 Wiki 图谱进行样式与交互优化，降低密集图谱的视觉杂乱感。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>节点分类着色</td><td><code>WikiGraphView.tsx</code> / <code>global.css</code></td><td>按 <code>topic / entity / concept / source</code> 分配蓝、绿、琥珀、灰四色主题；节点边框、文字、图标统一色系。</td></tr>
+      <tr><td>来源节点降噪</td><td><code>WikiGraphView.tsx</code></td><td>来源节点默认渲染为更小的灰色胶囊，并提供「显示来源节点」开关；关闭后自动隐藏来源节点及其 <code>source_of</code> 边，减少杂乱。</td></tr>
+      <tr><td>节点大小映射</td><td><code>WikiGraphView.tsx</code></td><td>节点宽度根据连接数（度数）动态增加，中心页面更突出。</td></tr>
+      <tr><td>关系边样式</td><td><code>global.css</code></td><td><code>related</code> 实线、<code>mentions</code> 虚线、<code>source_of</code> 点线并带箭头；三类边使用不同灰蓝调区分。</td></tr>
+      <tr><td>选中高亮</td><td><code>WikiGraphView.tsx</code> / <code>global.css</code></td><td>选中节点增加外圈光环（ring），对应类型边框加粗。</td></tr>
+      <tr><td>画布背景</td><td><code>global.css</code></td><td>浅灰点阵网格背景，类似 Obsidian Graph 的 canvas 质感；节点增加柔和投影提升层次。</td></tr>
+      <tr><td>布局优化</td><td><code>WikiGraphView.tsx</code></td><td>增大斥力与弹簧长度、引入温度衰减与碰撞避免，节点分布更均匀。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run typecheck</code> 通过；<code>WikiGraphView.test.tsx</code> 通过。</p>
+
+  <h2>49. Wiki 图谱缩放平移与面板拖拽加宽（2026-07-09）</h2>
+  <p>针对「图谱看不清、不能缩放、视图区域小」的反馈，增加图谱交互缩放平移能力，并放宽左侧导航面板的最大宽度。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>图谱缩放</td><td><code>WikiGraphView.tsx</code></td><td>滚轮以鼠标指针为中心缩放；缩放范围 25%–500%；右上角显示当前缩放百分比。</td></tr>
+      <tr><td>图谱平移</td><td><code>WikiGraphView.tsx</code></td><td>在画布空白处按住拖拽即可平移；拖拽时鼠标变为 grabbing；点击节点不会触发平移。</td></tr>
+      <tr><td>缩放控制条</td><td><code>WikiGraphView.tsx</code> / <code>global.css</code></td><td>画布右下角浮动工具条：放大 / 缩小 / 适应画布 / 1:1 重置。</td></tr>
+      <tr><td>自适应</td><td><code>WikiGraphView.tsx</code></td><td>双击画布空白处或点击「适应」按钮，自动缩放并居中显示全部节点。</td></tr>
+      <tr><td>面板加宽</td><td><code>WikiHub.tsx</code></td><td>左侧导航面板（树/时间/类型/标签/图谱）最小宽度保持 180px，最大宽度从 480px 放宽到 900px，默认 320px；用户可把分隔线往右拖拽以获得更大图谱空间。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run typecheck</code> 与 <code>npm run build</code> 通过；<code>WikiGraphView.test.tsx</code> 通过。</p>
+
+  <h2>50. WikiHub 移除顶部搜索框（2026-07-09）</h2>
+  <p>随着 Wiki 检索完全由 AI 通过 <code>wiki_search</code> / <code>wiki_query</code> 工具完成，前端不再需要独立的搜索输入框；用户可直接在右侧 ChatPanel 中通过对话让 AI 查找知识库内容。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>移除搜索 UI</td><td><code>WikiHub.tsx</code></td><td>删除 <code>query</code> 状态、<code>handleSearch</code> 以及工具栏中的搜索输入框和“搜索”按钮。</td></tr>
+      <tr><td>移除前端 API</td><td><code>api.ts</code></td><td>删除未再使用的 <code>wikiSearch</code> 调用。</td></tr>
+      <tr><td>清理样式</td><td><code>global.css</code></td><td>删除 <code>.wiki-hub__search</code> 及其 <code>input</code> 相关样式。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run typecheck</code> 通过；<code>npm test</code> 12 个测试文件、60 个测试全部通过。</p>
+
+  <h2>51. 外部 Runtime 模型目录与创建约束（2026-07-21）</h2>
+  <p>Web 智能体 Hub 消费后端统一 RuntimeProfile，不再允许用户手写外部 Agent 模型。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>三态运行状态</td><td><code>AgentsHub.tsx</code> / <code>global.css</code></td><td>绿点表示 ready，黄点表示已发现但模型探测失败，红点表示不可用；只有 ready Runtime 可创建 Agent。</td></tr>
+      <tr><td>模型目录</td><td><code>types.ts</code> / <code>AgentsHub.tsx</code></td><td>兼容结构化模型与旧字符串目录；下拉显示 label、稳定 model id、provider/default 标识。Claude Code 由后端 RuntimeProfile 返回 <code>sonnet/opus</code> 官方别名和常见固定版本，不再返回“CLI 默认模型”占位项。</td></tr>
+      <tr><td>默认模型</td><td><code>AgentsHub.tsx</code></td><td>选中 Runtime 时按 <code>default_model_id → model.default → 第一项</code> 自动选择，创建按钮在未选择模型时禁用。</td></tr>
+      <tr><td>服务端约束</td><td><code>/api/external-agents</code></td><td>后端再次校验 Runtime ready 且 model 属于最新目录，避免绕过 UI 写入无效配置。</td></tr>
+      <tr><td>刷新反馈</td><td><code>AgentsHub.tsx</code></td><td>探测期间保留现有卡片，按钮显示“刷新中…”并禁用，页面提示正在探测；完成后显示 Runtime 数量和耗时。</td></tr>
+    </tbody>
+  </table>
+  <p>验证：<code>npm test</code> 21 个测试文件、114 项通过；<code>npm run build</code> 通过，Vite 仅保留既有 chunk 体积提示。</p>
+
+  <h2>52. Team 描述草案中文输入稳定触发（2026-07-21）</h2>
+  <p>创建 Team 时，团队名称输入增加 IME composition 门禁，并将 debounce 从 120ms 调整为 600ms；拼音组合和半成品名称不再触发草案请求，组合完成后继续复用现有取消、请求序号、缓存与本地草案兜底。</p>
+  <p>验证：<code>AgentsHub.test.ts</code> 6 项通过；Web typecheck 与 production build 通过。</p>
+
+  <h2>53. Formation Fast 显式契约与可用成员过滤（2026-07-21）</h2>
+  <ul>
+    <li><code>AgentsHub</code> 在统一“智能组队”入口内部显式发送 <code>formation_mode=fast|ai</code>，不再发送含义过宽的旧 <code>mode</code>；界面先呈现 Fast 草案，再继续 AI 检查。</li>
+    <li><code>ExternalTeamSuggestion</code> 统一读取请求模式、实际采用模式、fallback 原因、Fast/AI/总耗时与警告，后续接入 Auto 无需再次漂移返回结构。</li>
+    <li>Leader 与必选 Agent 选项只保留 AgentProfile ready 且模型绑定未失效的成员；已创建团队和其他 Agent 展示不受影响。</li>
+  </ul>
+
+  <h2>54. SkillPackage 前端适配（2026-07-15）</h2>
+  <p>后端将 5 个商旅 skill 组织为 <code>business-travel</code> package，canonical slug 变为 <code>business-travel/query-flights</code> 等形式，旧 slug（<code>query-flights</code> 等）作为 <code>aliases</code> 保留。Web 技能市场搜索需要同时匹配别名，避免用户搜不到旧名称。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>Skill</code> / <code>OptionalSkill</code> 类型扩展</td><td><code>types.ts</code></td><td>新增可选字段 <code>aliases?: string[]</code>，与后端 <code>/api/skills</code>、<code>/api/skills/store</code> 返回对齐。</td></tr>
+      <tr><td>技能市场搜索匹配 aliases</td><td><code>SkillsHub.tsx</code></td><td>已安装 / 可安装两区的过滤函数同步搜索 <code>aliases</code>；搜索改为大小写不敏感，匹配 slug、名称、描述、分类与别名。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run typecheck</code> 通过。</p>
+
+  <h2>55. 工具两阶段执行渲染优化（2026-07-15）</h2>
+  <p>修复 Web 端 <code>generating</code> 阶段被错误标记为 <code>done</code> 导致工具卡延迟出现的问题，并为 Web / Desktop 工具卡增加运行中动画与实时耗时，改善写文件等长耗时操作的感知性能。</p>
+  <table>
+    <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>两阶段状态机</td><td><code>useChat.ts</code></td><td>新增纯函数 <code>applyToolChunk</code>，统一处理 generating / start / result / error；修复 generating 新条目状态为 <code>"generating"</code>；start 保留 generating 阶段的 <code>startedAt</code>，使 duration 覆盖完整决策到结果周期。</td></tr>
+      <tr><td>工具卡实时 UI</td><td><code>ToolCallCard.tsx</code> / <code>global.css</code></td><td>running/generating 状态使用 SVG 旋转动画图标替代静态 ⏳，并实时显示已运行秒数。</td></tr>
+      <tr><td>过程时间线增强</td><td><code>AgentProcessTimeline.tsx</code> / <code>global.css</code></td><td>工具标题增加完成/失败后缀；file_write 运行中显示「写入 xxx…」；新增 <code>process-timeline__duration</code> 与脉冲动画。</td></tr>
+      <tr><td>公共时长工具</td><td><code>utils/time.ts</code>（新增）</td><td>提供 <code>formatDuration</code> 与 <code>useElapsed</code>，供 ToolCallCard、AgentProcessTimeline 共用。</td></tr>
+      <tr><td>单测</td><td><code>useChat.test.ts</code></td><td>新增 <code>applyToolChunk</code> 测试，覆盖 generating → start → result 完整流转。</td></tr>
+    </tbody>
+  </table>
+  <p>构建验证：<code>npm run typecheck</code> 与 <code>npm test</code> 通过；66 个测试全部通过。</p>
+  <p>详细文档：<a href="./tool-execution-two-phase.html">docs/frontend/tool-execution-two-phase.html</a>。</p>
+
+  <h2>56. 移除工具规划占位状态（2026-08-04）</h2>
+  <p>模型仅开始输出 reasoning 时不再发送或展示工具规划占位状态；Web 过程时间线只在收到真实 generating/start/result 事件后展示工具信息。</p>
+
+  <h2>57. 权限卡专用交互与确认回执（2026-07-23）</h2>
+  <ul>
+    <li><b>专用 UI：</b><code>origin=acp_permission/team_control</code> 的 External ACP 权限问题使用操作、目标、原因和上下文分区，不再复用业务追问的单选框、自由输入与二次提交结构。</li>
+    <li><b>可读信息：</b>用户只看到“修改文件 / 读取文件 / 执行命令”等操作语义和目标路径，内部 <code>toolCallId</code> 不进入页面。</li>
+    <li><b>提交状态：</b>点击允许或拒绝后卡片进入“正在确认您的选择”，只有收到 Gateway 对同一 <code>question_id</code> 的成功回执才清除；旧问题的迟到回执不会关闭新卡片。</li>
+    <li><b>兼容：</b>内置工具权限继续使用原卡片、原清除时序和“允许一次 / 始终允许 / 拒绝”选项；普通 ask follow-up 仍使用原卡片并写入业务历史。</li>
+  </ul>
+  <p>验证：权限卡组件测试 2 项、Web TypeScript typecheck 和 production build 通过；隔离 Gateway + Vite + 假 ACP Runtime 真实点击验证了越界权限卡、<code>approve_once</code> 回传、精确 ACK 清卡，以及工作区内写入不弹卡。</p>
+
+  <h2>58. External Runtime 扫描诊断（2026-07-23）</h2>
+  <ul>
+    <li><b>探测来源：</b>Runtime 卡片显示 environment、PATH、平台用户目录、login shell 或 App bundle 等真实发现来源。</li>
+    <li><b>协议驱动：</b>展示 <code>acp-stdio</code>、<code>claude-stream-json</code> 或 <code>codex-app-server</code>，避免只看 provider 猜测执行方式。</li>
+    <li><b>动态能力：</b>按 RuntimeProfile 展示流式、续聊、工具、用量和审批能力，以及本次探测耗时。</li>
+    <li><b>安全错误：</b>degraded/unavailable 卡片只展示后端已压缩的探测消息，不展示完整环境变量、认证数据、原始 stderr 或用户 Prompt。</li>
+  </ul>
+  <p>验证：Web TypeScript typecheck 与 production build 通过；既有 Runtime API 顶层返回结构不变。</p>
+  <h2>59. Wiki Vault 根文件与 KB 会话重绑定（2026-07-28）</h2>
+  <ul>
+    <li>Wiki 文件树中的 <code>Home.md</code> 与 <code>index.md</code> 可点击，并在详情区展示 Markdown 正文；空白 KB 也保留文件树。当前 KB 先执行幂等初始化再加载页面，旧 KB 缺失的根文件会自动补齐。</li>
+    <li>文件树目录全部显示中文；Entity/Topic 统一显示为“关键词/话题”，根文档显示为“知识库概览/知识导航”。切换 KB 后默认打开知识库概览。</li>
+    <li>空库概览只显示“暂无页面”，不展示产品名称、内部路径或维护说明。</li>
+    <li>Wiki Agent 会话按当前 <code>kb_id</code> 获取；切换、删除或同名重建 KB 时清空旧绑定并重新获取，避免进入已删除知识库的历史会话。Web 不再提供普通聊天的 Wiki 模式、<code>/wiki</code> 命令或 <code>wiki_enter/wiki_exit</code> 控制帧。</li>
+    <li>删除确认框明确提示页面、原始素材和专属 Wiki 问答历史不可恢复。</li>
+  </ul>
+  <p>验证：Web TypeScript typecheck 通过；文件树与 Wiki 图谱测试共 <code>3 passed</code>。</p>
+
+  <h2>59. External Agent 产品门禁（2026-07-27）</h2>
+  <ul>
+    <li><b>单一语义：</b>Gateway 成功返回 <code>config.external_agents.enabled === false</code> 才视为关闭；自 2026-07-30 起，配置加载中、字段缺失或暂时请求失败不再误判为关闭，详见第 64 节。</li>
+    <li><b>入口隐藏：</b>明确关闭后 Sidebar 不渲染“外援”，Composer 不渲染外援按钮或工具分组，页面不会请求外部 Agent/Team 目录。</li>
+    <li><b>历史保留：</b>会话列表按 Gateway 的精确 <code>agent_binding.kind</code> 隐藏 <code>external_agent/external_team</code>；不按 provider 文案猜测，也不删除后端 Session。重新开启后原历史恢复。</li>
+    <li><b>越权防护：</b>过期页面状态不能进入 AgentsHub、选择隐藏 Session 或写入外部 Binding；Gateway 的统一 403 是最终权威门禁。</li>
+    <li><b>影响边界：</b>技能、Wiki、MobileWork 内置会话、专家和专家团不受影响。</li>
+  </ul>
+  <p>验证：Web 全量 <code>23 files / 130 passed</code>，TypeScript typecheck 与 Vite production build 通过。</p>
+
+  <h2>60. Formation AI 双阶段组队与临时补员确认（2026-07-28）</h2>
+  <ul>
+    <li><b>单一入口：</b>创建 Team 只展示“智能组队”，不向用户暴露 Fast/AI 内部模式；内部仍按 Fast 草案 → AI 检查优化的既定链路运行。</li>
+    <li><b>过程反馈：</b>Fast 草案生成后立即进入阵容确认，以团队名称和真实秒数展示“生成初步方案 → 智能检查优化 → 方案已就绪”；进度卡不重复展示 Team Logo。AI 检查期间禁用阵容编辑和创建操作，防止旧响应覆盖新选择。</li>
+    <li><b>完成耗时：</b>AI 检查结束后，“智能检查优化”阶段继续保留本次运行秒数；仅内部 Fast 恢复路径不伪造 AI 耗时。</li>
+    <li><b>结果语义：</b>分别展示“已优化”“无需调整”和“智能检查暂未完成”；Crew 不限制 AI 检查时长，Provider/网络自身失败时仍保留 Fast 草案，允许直接创建团队或重新检查，不向用户暴露内部状态码。</li>
+    <li><b>运行强调：</b>AI 检查期间，进度容器左侧强调线、状态说明、当前阶段卡和运行圆点统一使用橙色，完成后恢复既有完成态，避免用户误判为停滞。</li>
+    <li><b>竞态保护：</b>团队目标、Leader 或约束变化会递增请求序号，使迟到的 AI 响应不能覆盖新输入或新一轮组队结果。</li>
+    <li><b>补员卡：</b>复用现有 <code>role-popover-backdrop</code>、<code>team-constraint-confirm</code>、<code>AgentFormSelect</code> 和 Team 黑白 Logo，以团队名称说明缺口，允许切换已就绪 Runtime/model、确认或暂不补员。</li>
+    <li><b>延迟落库：</b>确认只保存页面内 pending 配置；点击“创建团队”才通过既有 endpoint 提交 <code>temporary_members</code>。目标、Leader、约束或成员变化会使旧补员决策失效。</li>
+    <li><b>边界：</b>没有复制 Desktop DOM，也不触碰聊天、MobileWork、专家或专家团组件；Web 继续使用 React/TypeScript 自身状态与组件。</li>
+  </ul>
+  <p>本轮 UX 验证：Web 全量 <code>23 files / 131 passed</code>，其中 Agent Hub <code>8 passed</code>；production build 通过。</p>
+
+  <h2>61. Formation Auto 单请求与补员风险确认（2026-07-28）</h2>
+  <ul>
+    <li><b>单次请求：</b>“智能组队”直接发送一个 Auto NDJSON 请求；Fast 快照到达即渲染阵容，只有服务端质量门决定需要时才进入橙色“智能检查优化”，不再由页面先后请求 Fast 和 AI。</li>
+    <li><b>竞态与取消：</b>目标、Leader 或约束变化会 abort 当前流；每个快照继续校验 request sequence，旧流无法覆盖新输入。</li>
+    <li><b>结果语义：</b>Auto 高置信直接完成显示“当前方案无需调整”；AI/Provider 失败仍保留初步方案并显示可重新检查，不向用户暴露 Auto/Fast/AI 模式名。</li>
+    <li><b>补员确认：</b>标题按真实数量显示“建议补充 N 名临时成员”；拒绝操作改为“仍使用当前团队”，不会重跑 Fast，明确提示未覆盖能力与风险仍保留。</li>
+    <li><b>复用边界：</b>继续复用 React Team 表单、进度卡、弹窗和 Runtime/model 选择器；没有复制 Desktop DOM，也不改变聊天、MobileWork、专家、专家团或单 External Agent。</li>
+  </ul>
+
+  <h2>62. Team 详情关闭入口微调（2026-07-29）</h2>
+  <ul>
+    <li><b>视觉收敛：</b>点击 Team 展示卡打开详情后，头部关闭按钮由“关闭”文字改为叉号，复用现有 <code>agent-icon-btn</code> 样式，不新增组件或 CSS。</li>
+    <li><b>可访问性：</b>按钮保留“关闭”悬停说明，并通过 <code>aria-label</code> 明确表达“关闭团队详情”，键盘和读屏语义不依赖叉号本身。</li>
+    <li><b>影响边界：</b>只调整 Web Team 详情弹窗，不改变 Team 数据、智能组队、Desktop 或会话行为。</li>
+  </ul>
+  <p>验证：<code>AgentsHub.test.ts</code> 8 项通过；Web TypeScript typecheck 与 Vite production build 通过，仅保留既有 chunk 体积提示。</p>
+
+  <h2>63. Web 外援中心与发现引导（2026-07-29）</h2>
+  <ul>
+    <li><b>统一产品语言：</b>Web Sidebar 与 Composer 的用户入口统一由“智能体 / Agents”改为“外援”；页面标题改为“外援中心”，四个页签依次为“我的阵容 / 发现外援 / 添加外援 / 组建团队”，Desktop 使用相同口径。</li>
+    <li><b>品牌口径：</b>本页面及 Team 内置 Leader 的用户展示统一使用 MobileWork；内部 <code>crew::builtin</code>、Runtime、ExternalAgent、Team、API 与数据库契约保持不变，不做代码领域名批量重命名。</li>
+    <li><b>轻量引导：</b>移除页头三张状态卡，首次进入只展示“第一次来外援中心？”轻量邀请。点击“开始看看”或页头“?”均从固定 1/3 开始：依次切换到发现外援、添加外援和我的阵容，并标记“再找找”、可用外援选择器及首个“派活”；尚无外援时第三步标记“添加外援”Tab。Runtime、Agent 和 Team 数量不再改变引导进度。</li>
+    <li><b>滚动解耦：</b>引导通过 React Portal 挂到 <code>document.body</code> 并固定停靠窗口底部，不监听内容滚动、不进入文档流；非按钮区域允许滚轮穿透，按钮区域的滚轮转交给 <code>.agents-panel</code>。“定位到操作”才按需滚动目标，目标使用轻量像素脉冲描边；完成或跳过写入 <code>localStorage</code>，以后仍可通过页头“?”重播。</li>
+    <li><b>自动发现：</b>进入页面先并行读取缓存的 Runtime、Agent、Team 和角色目录；仅当缓存 Runtime 为空时自动扫描一次，使用 ref 防止开发环境重复 effect 触发重复扫描。已有缓存时不自动刷新，用户可点击“再找找”。</li>
+    <li><b>信息降噪：</b>Runtime 卡片只显示外援名称、提供方、可用状态、版本和“使用”；ACP、Adapter、可执行路径、发现来源、探测耗时、能力枚举和原始错误均不进入用户界面，原“技术详情”折叠区整体移除。</li>
+    <li><b>反馈文案：</b>扫描、添加、组队、空状态和失败反馈改为简短自然语言；扫描结果使用“可用外援”，不使用“可用来源”，按钮按确认保留“再找找 / 使用”。</li>
+    <li><b>复用边界：</b>继续使用现有 <code>AgentsHub</code>、<code>AgentFormSelect</code>、卡片、按钮、状态与 API；只在现有组件和 <code>global.css</code> 内扩展，没有新增业务组件、文件、顶层模块、接口或数据结构。</li>
+  </ul>
+  <p>验证：<code>AgentsHub.test.ts</code> 覆盖固定三步目标与无外援回退；Web 全量测试、TypeScript typecheck 与 Vite production build 通过。1280×720 真实浏览器验证首次邀请、1/3～3/3 切页、目标描边、完成/跳过、“?”从 1/3 重播、<code>body</code> Portal，以及内容区滚动和按钮区域滚轮时浮层位置保持不变。</p>
+
+  <h2>64. Gateway 配置断连重试与外援门禁修正（2026-07-30）</h2>
+  <ul>
+    <li><b>显式关闭：</b>新增共享 <code>externalAgentsAvailable()</code> 判断，App 与 Composer 统一为“只有 Gateway 成功返回 <code>external_agents.enabled=false</code> 才隐藏外援”；初始加载、旧 Gateway 缺字段或暂时断连均保留入口。</li>
+    <li><b>自动恢复：</b><code>App.tsx</code> 首次读取 <code>/api/config</code> 失败后每 3 秒自动重试；请求恢复后直接更新配置，无需刷新页面。组件卸载或用户立即重试时会清理旧计时器，迟到请求不会回写状态。</li>
+    <li><b>可见反馈：</b>断连期间在主内容区顶部显示“运行环境暂未连接，正在重试…”及“立即重试”，不再把网络错误静默伪装成产品功能关闭。</li>
+    <li><b>影响边界：</b>不修改 <code>config.yaml</code>、Gateway 配置响应、外援 API、账号归属或数据库；Gateway 明确关闭外援时，既有隐藏入口、历史隔离和 403 门禁继续生效。</li>
+  </ul>
+  <p>验证：Composer/Sidebar 定向测试 <code>2 files / 4 passed</code>；Web 全量 <code>23 files / 132 passed</code>；TypeScript typecheck 与 production build 通过，仅保留既有 chunk 体积提示。真实浏览器按“先启动 Vite、Gateway 保持关闭”复现：Sidebar 与 Composer 仍显示“外援”，顶部出现重试提示；随后启动 Gateway，页面未刷新即自动移除提示并恢复配置。</p>
+</div>
+</body>
+</html>

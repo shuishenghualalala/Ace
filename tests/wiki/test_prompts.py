@@ -37,7 +37,9 @@ def test_wiki_ingest_requires_confirmation_when_auto_apply_disabled():
 
 
 def test_default_upload_plans_deep_structure_after_searchable_source_page():
-    assert "默认继续 `wiki_orient`" in WIKI_AGENT_SYSTEM_PROMPT
+    assert "附件会被自动捕获到 default 知识库" in WIKI_AGENT_SYSTEM_PROMPT
+    assert "自动对所有附件做深度整理" in WIKI_AGENT_SYSTEM_PROMPT
+    assert "wiki_list_inbox" in WIKI_AGENT_SYSTEM_PROMPT
     assert "wiki_plan_ingest" in WIKI_AGENT_SYSTEM_PROMPT
     assert "全文 Source 页面" in WIKI_PARSE_SOURCE_PROMPT
     assert "图片" in WIKI_PARSE_SOURCE_PROMPT
@@ -65,7 +67,8 @@ def test_wiki_prompt_only_documents_exposed_ingest_workflow():
         "wiki_migrate_layout",
         "wiki_archive_page",
     }
-    assert removed.isdisjoint(definition.tools)
+    # Wiki 预设不再维护静态 tools 白名单（None），工具范围由统一策略计算。
+    assert removed.isdisjoint(definition.tools or [])
     assert "wiki_ingest(source_id)" not in WIKI_LIST_SOURCES_PROMPT
     assert "wiki_ingest(source_id)" not in WIKI_PARSE_SOURCE_PROMPT
     assert "wiki_plan_ingest" in WIKI_LIST_SOURCES_PROMPT

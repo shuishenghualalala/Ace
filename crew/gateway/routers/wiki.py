@@ -15,7 +15,7 @@ from crew.gateway.auth import account_from_request
 from crew.state.logging import get_logger
 from crew.wiki._utils import is_wiki_agent_session
 from crew.wiki.parser import MissingDependencyError, guess_mime_type, parse_document_from_bytes
-from crew.wiki.schemas import RawSource
+from crew.wiki.schemas import RawSource, WikiRelation
 from crew.wiki.sources import classify_file
 from crew.wiki.store import normalize_kb_id
 from crew.wiki.store._ids import filename_from_title
@@ -47,6 +47,60 @@ def create_wiki_router(crew) -> APIRouter:
         if store is None or not page.sources:
             return {}
         return store.get_source_titles(page.sources, owner, kb_id)
+
+    def _source_pages_for_page(page, owner: str, kb_id: str) -> list[dict[str, Any]]:
+        """按稳定页面 ID 返回可跳转的来源摘要页，并去除重复来源。"""
+        store = getattr(crew, "_wiki_store", None)
+        if store is None:
+            return []
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for source_id in page.sources:
+            source_page = store.get_source_page(source_id, owner, kb_id)
+            if source_page is None or source_page.id in seen:
+                continue
+            seen.add(source_page.id)
+            result.append({
+                "id": source_page.id,
+                "title": source_page.title,
+                "page_type": source_page.page_type,
+            })
+        return result
+
+    def _relation_pages_for_page(page, owner: str, kb_id: str) -> list[dict[str, Any]]:
+        """返回页面的正向与反向结构化关系，供详情页直接展示和跳转。"""
+        store = getattr(crew, "_wiki_store", None)
+        if store is None:
+            return []
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        def _append(target, relation: str, direction: str) -> None:
+            key = (target.id, relation.casefold(), direction)
+            if target.id == page.id or key in seen:
+                return
+            seen.add(key)
+            result.append({
+                "id": target.id,
+                "title": target.title,
+                "page_type": target.page_type,
+                "relation": relation,
+                "direction": direction,
+            })
+
+        for relation in page.relations:
+            target = store.get(relation.target_page_id, owner, kb_id)
+            if target is not None:
+                _append(target, relation.relation, "outgoing")
+        for candidate in store.list_all(
+            owner_account_id=owner,
+            kb_id=kb_id,
+            limit=10000,
+        ):
+            for relation in candidate.relations:
+                if relation.target_page_id == page.id:
+                    _append(candidate, relation.relation, "incoming")
+        return result
 
     def _resolve_original_path(raw, owner: str, kb_id: str) -> Path | None:
         """根据 RawSource 元数据定位真实原始文件路径。
@@ -102,7 +156,16 @@ def create_wiki_router(crew) -> APIRouter:
         store = getattr(crew, "_wiki_store", None)
         if store is None:
             return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
-        store.init_kb(_owner(request), _kb_id(request))
+        owner = _owner(request)
+        kb_id = _kb_id(request)
+        store.init_kb(owner, kb_id)
+        # 旧版种子/历史页面可能落在无 wiki/ 前缀的目录（如 entities/xxx.md），
+        # 前端文件树按 wiki/ 前缀过滤会看不到；init 幂等，顺手做一次性布局迁移。
+        try:
+            if store.layout_migration_preview(owner, kb_id).get("required"):
+                store.migrate_layout(owner, kb_id)
+        except Exception:
+            pass
         return {"ok": True}
 
     def _wiki_agent_sessions(owner: str, kb_id: str) -> list[dict[str, Any]]:
@@ -331,9 +394,12 @@ def create_wiki_router(crew) -> APIRouter:
             content=data.get("content", ""),
             file_path="",
             sources=list(data.get("sources") or []),
-            related=list(data.get("related") or []),
             tags=list(data.get("tags") or []),
-            aliases=list(data.get("aliases") or []),
+            relations=[
+                WikiRelation.from_dict(item)
+                for item in data.get("relations", [])
+                if isinstance(item, dict)
+            ],
         )
         owner = _owner(request)
         saved = store.save_page(page, owner, kb_id)
@@ -360,6 +426,8 @@ def create_wiki_router(crew) -> APIRouter:
             "page": page.to_dict(),
             "source_titles": _source_titles_for_page(page, owner, kb_id),
             "source_files": _source_files_for_page(page, owner, kb_id),
+            "source_pages": _source_pages_for_page(page, owner, kb_id),
+            "relation_pages": _relation_pages_for_page(page, owner, kb_id),
         }
 
     @router.put("/pages/{page_id}")
@@ -375,8 +443,14 @@ def create_wiki_router(crew) -> APIRouter:
         existing.title = str(data.get("title", existing.title))
         existing.content = str(data.get("content", existing.content))
         existing.tags = list(data.get("tags", existing.tags))
-        existing.related = list(data.get("related", existing.related))
-        existing.aliases = list(data.get("aliases", existing.aliases))
+        existing.sources = list(data.get("sources", existing.sources))
+        if "relations" in data:
+            existing.relations = [
+                WikiRelation.from_dict(item)
+                for item in data["relations"]
+                if isinstance(item, dict)
+            ]
+        existing.related = []
         owner = _owner(request)
         updated = store.update(existing, owner, kb_id)
         result_page = updated or existing
@@ -386,6 +460,8 @@ def create_wiki_router(crew) -> APIRouter:
             "page": result_page.to_dict(),
             "source_titles": _source_titles_for_page(result_page, owner, kb_id),
             "source_files": _source_files_for_page(result_page, owner, kb_id),
+            "source_pages": _source_pages_for_page(result_page, owner, kb_id),
+            "relation_pages": _relation_pages_for_page(result_page, owner, kb_id),
         }
 
     @router.delete("/pages/{page_id}")

@@ -5,6 +5,7 @@ import sqlite3
 import stat
 import sys
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -1407,6 +1408,7 @@ def test_scan_codex_runtime_uses_desktop_bundle_when_not_on_path(tmp_path, monke
     codex = _fake_cli(tmp_path, "codex-bundle", "codex 0.42.0")
     monkeypatch.delenv("CREW_CODEX_PATH", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(detector, "_platform_search_dirs", lambda **_: ())
     monkeypatch.setattr(detector, "codex_desktop_app_bundle_paths", lambda: [str(codex)])
 
     runtime = scan_codex_runtime()
@@ -1577,6 +1579,220 @@ def test_agent_profile_tracks_selected_runtime_model_binding(tmp_path):
         },
     })
     assert store.get_agent(agent["id"])["profile"]["model"]["binding_status"] == "unverified"
+
+
+def test_agent_profile_observation_is_idempotent_and_thresholded(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "plain-runtime",
+        "provider": "custom",
+        "name": "Plain Runtime",
+        "executable_path": "/bin/sh",
+        "protocol": "cli",
+        "metadata": {"availability_status": "ready"},
+    })
+    agent = store.create_agent(
+        owner_account_id="owner-a",
+        name="Agent A",
+        runtime_id=runtime["id"],
+    )
+    baseline = agent["profile"]["capabilities"]["backend"]["score"]
+
+    first = store.record_agent_profile_observation(
+        owner_account_id="owner-a",
+        external_agent_id=agent["id"],
+        source_run_id="run-1",
+        source_node_id="build-1",
+        source_attempt_id="task-1",
+        capabilities=["backend"],
+        assessment_source="execution_assessment",
+        outcome="success",
+        quality_weight=0.8,
+    )
+    duplicate = store.record_agent_profile_observation(
+        owner_account_id="owner-a",
+        external_agent_id=agent["id"],
+        source_run_id="run-1-replayed",
+        source_node_id="build-1",
+        source_attempt_id="task-1",
+        capabilities=["backend"],
+        assessment_source="execution_assessment",
+        outcome="failure",
+        quality_weight=0.8,
+    )
+    store.record_agent_profile_observation(
+        owner_account_id="owner-a",
+        external_agent_id=agent["id"],
+        source_run_id="run-2",
+        source_node_id="build-2",
+        source_attempt_id="task-2",
+        capabilities=["backend"],
+        assessment_source="execution_assessment",
+        outcome="success",
+        quality_weight=0.8,
+    )
+
+    assert first["inserted"] is True
+    assert duplicate["inserted"] is False
+    assert len(store.list_agent_profile_observations(agent["id"], owner_account_id="owner-a")) == 2
+    before_threshold = store.get_agent(agent["id"], owner_account_id="owner-a")
+    assert before_threshold["profile"]["capabilities"]["backend"]["score"] == baseline
+
+    settled = store.record_agent_profile_observation(
+        owner_account_id="owner-a",
+        external_agent_id=agent["id"],
+        source_run_id="run-3",
+        source_node_id="build-3",
+        source_attempt_id="task-3",
+        capabilities=["backend"],
+        assessment_source="leader_review",
+        outcome="success",
+        quality_weight=1.0,
+    )["agent"]
+    backend = settled["profile"]["capabilities"]["backend"]
+    execution_evidence = [item for item in backend["evidence"] if item["source"] == "execution_observation"]
+    assert backend["score"] > baseline
+    assert execution_evidence[0]["value"].startswith("samples=3; success=3")
+    assert settled["profile_version"] == settled["profile"]["version"] == 3
+
+
+def test_agent_profile_observation_rolls_back_when_profile_refresh_fails(tmp_path, monkeypatch):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "rollback-runtime",
+        "provider": "custom",
+        "name": "Rollback Runtime",
+        "executable_path": "/bin/sh",
+    })
+    agent = store.create_agent(name="Rollback Agent", runtime_id=runtime["id"])
+    original_profile = agent["profile"]
+
+    def fail_profile_refresh(*args, **kwargs):
+        raise RuntimeError("profile refresh failed")
+
+    monkeypatch.setattr("crew.team.formation.build_agent_profile", fail_profile_refresh)
+    with pytest.raises(RuntimeError, match="profile refresh failed"):
+        store.record_agent_profile_observation(
+            external_agent_id=agent["id"],
+            source_run_id="run-rollback",
+            source_node_id="build-rollback",
+            source_attempt_id="task-rollback",
+            capabilities=["backend"],
+            assessment_source="execution_assessment",
+            outcome="success",
+            quality_weight=0.8,
+        )
+
+    assert store.list_agent_profile_observations(agent["id"]) == []
+    assert store.get_agent(agent["id"])["profile"] == original_profile
+
+
+def test_agent_profile_observation_concurrent_writes_preserve_evidence(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "concurrent-runtime",
+        "provider": "custom",
+        "name": "Concurrent Runtime",
+        "executable_path": "/bin/sh",
+    })
+    agent = store.create_agent(name="Concurrent Agent", runtime_id=runtime["id"])
+
+    def record(index: int):
+        return store.record_agent_profile_observation(
+            external_agent_id=agent["id"],
+            source_run_id=f"run-{index}",
+            source_node_id=f"build-{index}",
+            source_attempt_id=f"task-{index}",
+            capabilities=["backend"],
+            assessment_source="execution_assessment",
+            outcome="success",
+            quality_weight=0.8,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(record, range(4)))
+
+    assert all(item["inserted"] for item in results)
+    assert len(store.list_agent_profile_observations(agent["id"])) == 4
+    profile = store.get_agent(agent["id"])["profile"]
+    evidence = profile["capabilities"]["backend"]["evidence"]
+    assert any(item["source"] == "execution_observation" and "samples=4" in item["value"] for item in evidence)
+
+
+def test_runtime_refresh_preserves_agent_profile_observations(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "refresh-runtime",
+        "provider": "custom",
+        "name": "Refresh Runtime",
+        "executable_path": "/bin/sh",
+        "metadata": {"availability_status": "ready"},
+    })
+    agent = store.create_agent(name="Refresh Agent", runtime_id=runtime["id"])
+    for index in range(3):
+        store.record_agent_profile_observation(
+            external_agent_id=agent["id"],
+            source_run_id=f"run-{index}",
+            source_node_id=f"build-{index}",
+            source_attempt_id=f"task-{index}",
+            capabilities=["backend"],
+            assessment_source="execution_assessment",
+            outcome="success",
+            quality_weight=0.8,
+        )
+
+    store.upsert_runtime({
+        **runtime,
+        "metadata": {"availability_status": "degraded", "tools": ["terminal"]},
+    })
+    refreshed = store.get_agent(agent["id"])
+    evidence = refreshed["profile"]["capabilities"]["backend"]["evidence"]
+    assert any(item["source"] == "execution_observation" and "samples=3" in item["value"] for item in evidence)
+
+
+def test_agent_profile_observation_is_owner_scoped_and_deleted_with_agent(tmp_path):
+    db_path = tmp_path / "crew.db"
+    store = ExternalAgentStore(str(db_path))
+    runtime = store.upsert_runtime({
+        "id": "owner-runtime",
+        "provider": "custom",
+        "name": "Owner Runtime",
+        "executable_path": "/bin/sh",
+    })
+    agent = store.create_agent(owner_account_id="owner-a", name="Owner Agent", runtime_id=runtime["id"])
+
+    with pytest.raises(KeyError):
+        store.record_agent_profile_observation(
+            owner_account_id="owner-b",
+            external_agent_id=agent["id"],
+            source_run_id="run-cross-owner",
+            source_node_id="build-cross-owner",
+            source_attempt_id="task-cross-owner",
+            capabilities=["backend"],
+            assessment_source="execution_assessment",
+            outcome="success",
+            quality_weight=0.8,
+        )
+    assert store.list_agent_profile_observations(agent["id"], owner_account_id="owner-a") == []
+
+    store.record_agent_profile_observation(
+        owner_account_id="owner-a",
+        external_agent_id=agent["id"],
+        source_run_id="run-delete",
+        source_node_id="build-delete",
+        source_attempt_id="task-delete",
+        capabilities=["backend"],
+        assessment_source="execution_assessment",
+        outcome="success",
+        quality_weight=0.8,
+    )
+    store.delete_agent(agent["id"], owner_account_id="owner-a")
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM external_agent_profile_observation WHERE external_agent_id = ?",
+            (agent["id"],),
+        ).fetchone()[0]
+    assert count == 0
 
 
 def test_runtime_sync_only_marks_discovery_managed_runtime_unavailable(tmp_path):
@@ -3762,7 +3978,6 @@ def _fake_codex_app_server(tmp_path):
                                 "threadId": "thread-1",
                                 "turnId": "turn-1",
                                 "callId": "dynamic-1",
-                                "namespace": "crew_interaction",
                                 "tool": "ask_followup_question",
                                 "arguments": {"questions": [{"id": "q1", "question": "Pick"}]},
                             },
@@ -3929,15 +4144,10 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
                 "EMIT_DYNAMIC_TOOL": "1",
             },
             dynamic_tools=[{
-                "type": "namespace",
-                "name": "crew_interaction",
-                "description": "Crew controls",
-                "tools": [{
-                    "type": "function",
-                    "name": "ask_followup_question",
-                    "description": "Ask",
-                    "inputSchema": {"type": "object"},
-                }],
+                "type": "function",
+                "name": "ask_followup_question",
+                "description": "Ask",
+                "inputSchema": {"type": "object"},
             }],
             dynamic_tool_handler=handle,
             permission_handler=allow,
@@ -3946,7 +4156,7 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
     ]
 
     assert calls == [(
-        "crew_interaction",
+        "",
         "ask_followup_question",
         {"questions": [{"id": "q1", "question": "Pick"}]},
     )]
@@ -3960,7 +4170,7 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
         ("ask_followup_question", "result", "ALPHA"),
     ]
     thread_params = json.loads(thread_params_file.read_text(encoding="utf-8"))
-    assert thread_params["dynamicTools"][0]["name"] == "crew_interaction"
+    assert thread_params["dynamicTools"][0]["name"] == "ask_followup_question"
 
 
 @pytest.mark.asyncio
@@ -4249,7 +4459,7 @@ async def test_codex_dynamic_control_profile_resets_legacy_native_session_once(t
     binding = store.get_runtime_session_binding(**binding_key)
     assert binding is not None
     assert binding["native_session_id"] == "thread-1"
-    assert binding["session_profile"] == "codex-app-server:crew-dynamic-tools-v1"
+    assert binding["session_profile"] == "codex-app-server:crew-dynamic-tools-v2"
 
 
 def test_legacy_acp_bindings_migrate_to_protocol_neutral_session_table(tmp_path):

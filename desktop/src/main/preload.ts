@@ -3,7 +3,7 @@
  */
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
-  UserInfoSnapshot,
+  AuthStateSnapshot,
   UpdateStateSnapshot,
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
@@ -64,11 +64,21 @@ const api = {
   setAutoLaunchEnabled: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-launch-enabled', enabled),
   getCloseBehavior: () => ipcRenderer.invoke('app:get-close-behavior'),
   setCloseBehavior: (behavior: 'tray' | 'quit' | 'ask') => ipcRenderer.invoke('app:set-close-behavior', behavior),
+  getSystemLocale: () => ipcRenderer.invoke('app:get-system-locale') as Promise<string>,
+  rendererInitialStateReady: (): Promise<{ ok: true }> =>
+    ipcRenderer.invoke('app:renderer-initial-state-ready'),
   getStrictSecurityEnabled: () => ipcRenderer.invoke('security:get-strict-security'),
   setStrictSecurityEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('security:set-strict-security', enabled),
 
   heartbeat: (version?: string) => ipcRenderer.invoke('auth:heartbeat', version),
+  authGetState: () =>
+    ipcRenderer.invoke('auth:get-state') as Promise<{ ok: boolean; state: AuthStateSnapshot; error?: string }>,
+  authSendCode: (phoneNumber: string) =>
+    ipcRenderer.invoke('auth:send-code', { phoneNumber }) as Promise<Record<string, unknown>>,
+  authLogin: (identifier: string, code = '') =>
+    ipcRenderer.invoke('auth:login', { identifier, code }) as Promise<Record<string, unknown>>,
+  authLogout: () => ipcRenderer.invoke('auth:logout') as Promise<Record<string, unknown>>,
 
   // 反馈
   submitFeedback: (payload: { title: string; description: string; images?: Array<{ name: string; dataUrl: string }> }) =>
@@ -80,6 +90,12 @@ const api = {
   // Gateway REST 桥接（webSecurity:true 下 renderer 不直连 127.0.0.1）
   // path 必须在主进程白名单内（/api/ 前缀），不允许指向外部主机
   ensureGateway: () => ipcRenderer.invoke('gateway:ensure'),
+  getBackendStatus: (): Promise<{
+    connected: boolean;
+    baseUrl?: string;
+    logPath?: string;
+    components?: Record<string, { status: string; message?: string }>;
+  }> => ipcRenderer.invoke('gateway:get-status'),
   retryGateway: () => ipcRenderer.invoke('gateway:retry'),
   gatewayFetch: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) =>
     ipcRenderer.invoke('gateway:fetch', { url, init: init || {} }),
@@ -221,7 +237,7 @@ const api = {
   getUpdateState: (): Promise<UpdateStateSnapshot> => ipcRenderer.invoke('update:get-state'),
 
   // 登录态单源（P1-3）：主进程推送当前登录态 + userInfo，renderer 据此驱动 UI
-  onSessionState: (cb: (s: { isLoggedIn: boolean; userInfo: UserInfoSnapshot | null }) => void) => {
+  onSessionState: (cb: (s: AuthStateSnapshot) => void) => {
     ipcRenderer.on('auth:session-state', (_e, s) => cb(s));
   },
 

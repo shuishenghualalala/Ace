@@ -1,10 +1,9 @@
 /**
  * Renderer-side login gates for local desktop workflows.
  *
- * Ace has no login screen — the local desktop is always usable, so these
- * guards are permanent no-ops that report logged-in.
+ * The login wall and main-process Gateway enforce email/remote auth. These
+ * legacy call sites remain no-ops until their individual flows are migrated.
  */
-// Ace 开源桩：无登录墙，恒为已登录。
 export function isRendererLoggedIn(): boolean {
   return true;
 }

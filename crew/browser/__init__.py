@@ -1,8 +1,8 @@
 """Crew first-party browser tools backed by Electron's bundled Chromium.
 
-The gateway owns policy, approvals and model-facing refs.  The authenticated
-Electron main process owns sandboxed WebContentsView instances and never exposes
-its debugger handle to the trusted UI renderer or to model tools.
+The gateway owns owner/session lifecycle and model-facing refs. The Electron
+main process owns WebContentsView instances and exposes their public Playwright
+Page through the versioned browser protocol.
 """
 
 from crew.browser.driver import BrowserDriver

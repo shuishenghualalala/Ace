@@ -7,7 +7,7 @@
  * - 技能卡详情弹窗，支持安装/卸载
  */
 
-import { backendApi, type PluginItem, type Skill, type SkillStore } from '../backend-client';
+import { backendApi, type OptionalSkill, type PluginItem, type Skill, type SkillStore } from '../backend-client';
 import { $, notify } from '../state';
 import { showConfirmDialog } from '../ui-feedback';
 import {
@@ -30,14 +30,28 @@ interface SkillViewItem {
   name: string;
   description: string;
   category: string;
-  source: Skill['source'] | 'optional';
+  source: Skill['source'] | 'optional' | 'local';
+  /** 是否从本机共享 Skill 目录接入；移除时保留原始 Skill。 */
+  isLocalShared?: boolean | undefined;
   status: SkillStatus;
   canInstall: boolean;
   canUninstall: boolean;
   tone: (typeof SKILL_TONES)[number];
-  badges: ('featured' | 'new' | 'builtin')[];
+  badges: ('featured' | 'new' | 'builtin' | 'local')[];
   aliases?: string[];
 }
+
+/**
+ * backend 在 installed 上可能返回 is_local_shared（本机共享目录接入标记）；
+ * backend-client 类型暂未声明，这里本地放宽以承接运行时字段。
+ */
+type InstalledSkill = Skill & { is_local_shared?: boolean };
+
+/**
+ * backend 在 store.local 返回 ~/.agents/skills 中未安装的本地共享技能（跨 agent 共享，软链安装）。
+ * backend-client 类型暂未声明，这里本地放宽以承接运行时字段。
+ */
+type SkillStoreWithLocal = SkillStore & { local?: OptionalSkill[] };
 
 const SKILL_TONES = ['blue', 'violet', 'cyan', 'amber', 'green', 'rose', 'indigo', 'orange'] as const;
 
@@ -57,9 +71,12 @@ let searchQ = '';
 let category = '全部';
 let modalSkill: SkillViewItem | null = null;
 let modalPlugin: PluginItem | null = null;
+/** 弹窗滚动记忆：打开弹窗时记录列表 scrollTop，关闭弹窗全量重建后恢复，避免滚动条跳回顶部。 */
+let modalScrollMemory: number | null = null;
 let capabilityHubView: CapabilityHubView | null = null;
 let skillsLoading = false;
 let togglingEvolution = false;
+/** 自进化配置 */
 let evolutionConfig = { auto_trigger: false, auto_full_cycle: false, visible: false };
 
 const SKILL_CATEGORY_MEMORY_KEY = 'crew.skill.category-by-slug';
@@ -133,6 +150,7 @@ export function skillInitial(name: string): string {
 function buildSkillItems(data: SkillStore): SkillViewItem[] {
   const items: SkillViewItem[] = [];
   for (const s of data.installed ?? []) {
+    const installed = s as InstalledSkill;
     const isBuiltin = s.source === 'builtin';
     items.push({
       slug: s.slug,
@@ -140,6 +158,7 @@ function buildSkillItems(data: SkillStore): SkillViewItem[] {
       description: s.description_zh || s.description,
       category: resolveSkillCategory(s.slug, s.category),
       source: s.source,
+      isLocalShared: installed.is_local_shared,
       status: isBuiltin ? 'builtin' : 'installed',
       canInstall: false,
       canUninstall: !isBuiltin,
@@ -164,15 +183,31 @@ function buildSkillItems(data: SkillStore): SkillViewItem[] {
       aliases: o.aliases ?? [],
     });
   }
+  for (const o of (data as SkillStoreWithLocal).local ?? []) {
+    rememberSkillCategory(o.slug, o.category);
+    items.push({
+      slug: o.slug,
+      name: o.display_name || o.name,
+      description: o.description_zh || o.description,
+      category: o.category || '通用办公',
+      source: 'local',
+      status: 'available',
+      canInstall: true,
+      canUninstall: false,
+      tone: toneFor(o.slug),
+      badges: ['local'],
+      aliases: o.aliases ?? [],
+    });
+  }
   return items;
 }
 
-/** 按二级视图切分技能池：已安装含内置与用户目录；可安装来自 optional-skills。 */
+/** 按二级视图切分技能池：已安装含内置与用户目录；可安装来自 optional-skills 与本地共享。 */
 function itemsForSubview(items: SkillViewItem[]): SkillViewItem[] {
   if (skillSubview === 'installed') {
     return items.filter((s) => s.status === 'builtin' || s.status === 'installed');
   }
-  return items.filter((s) => s.source === 'optional');
+  return items.filter((s) => s.source === 'optional' || s.source === 'local');
 }
 
 function filterSkills(items: SkillViewItem[]): SkillViewItem[] {
@@ -235,7 +270,7 @@ function skillCapability(item: SkillViewItem): CapabilityHubItem {
     status: statusLabel(item),
     action: item.canInstall ? 'install' : item.canUninstall ? 'uninstall' : 'builtin',
     badges: item.badges.map((badge) => (
-      badge === 'featured' ? '推荐' : badge === 'new' ? '新' : '内置'
+      badge === 'featured' ? '推荐' : badge === 'new' ? '新' : badge === 'local' ? '本地' : '内置'
     )),
     tone: item.tone,
     monogram: skillInitial(item.name),
@@ -324,6 +359,7 @@ function searchCapabilities(query: string): void {
 }
 
 function openCapability(id: string): void {
+  modalScrollMemory = $('#skills-page-root')?.scrollTop ?? null;
   if (pageTab === 'skills') {
     modalSkill = lastSkillItems.find((item) => item.slug === id) ?? null;
     modalPlugin = null;
@@ -427,10 +463,14 @@ async function installSkill(slug: string): Promise<void> {
     // 技能落盘在 get_crew_home()/skills（机器级单一目录，不带 owner 维度），审计日志
     // 也叫 global-skills-audit.jsonl——装一个技能会影响本机所有登录账号，不是「我的」
     // 账号内行为。安装前必须把这个作用域说清楚。
+    const isLocal = item?.source === 'local';
+    const localNote = isLocal
+      ? '该技能来自本地共享目录（~/.agents/skills），将以软链方式安装，源目录更新后自动同步。'
+      : '';
     const agreed = await showConfirmDialog({
       title: '确认全局安装技能',
       message:
-        `技能是本机全局共享能力，安装结果对本机所有登录账号生效。`
+        `技能是本机全局共享能力，安装结果对本机所有登录账号生效。${localNote}`
         + `确定安装「${item?.name || slug}」吗？`,
       confirmText: '全局安装',
       cancelText: '取消',
@@ -461,18 +501,22 @@ async function uninstallSkill(slug: string): Promise<void> {
   installing = true;
   try {
     // 卸载同样是机器级：不是只从「我的」账号移除，本机所有账号都会一起失去该技能。
+    // 本地共享 Skill 只移除 Crew 中的接入入口，原始 Skill 仍保留在本机共享目录。
+    const isLocalShared = item?.isLocalShared === true;
     const ok = await showConfirmDialog({
-      title: '确认全局卸载技能',
-      message:
-        `技能是本机全局共享能力。卸载「${item?.name || slug}」后本地技能文件将被移除，`
-        + `本机所有账号都将无法再通过 /${slug} 调用。确定卸载吗？`,
-      confirmText: '全局卸载',
+      title: isLocalShared ? '确认从 Crew 中移除技能' : '确认全局卸载技能',
+      message: isLocalShared
+        ? `移除「${item?.name || slug}」后，本机所有账号都无法再通过 Crew 调用该技能，`
+          + '但不会删除电脑中全局共享目录里的原始技能，之后仍可重新添加。确定移除吗？'
+        : `技能是本机全局共享能力。卸载「${item?.name || slug}」后本地技能文件将被移除，`
+          + `本机所有账号都将无法再通过 /${slug} 调用。确定卸载吗？`,
+      confirmText: isLocalShared ? '从 Crew 中移除' : '全局卸载',
       cancelText: '取消',
     });
     if (!ok) return;
     const res = await backendApi.uninstallSkill(slug);
     if (!res.ok) throw new Error('uninstall failed');
-    notify(`已卸载 ${slug}`);
+    notify(isLocalShared ? `已从 Crew 中移除 ${slug}` : `已卸载 ${slug}`);
     closeModal();
     skillCategoryMemory.delete(slug);
     persistSkillCategoryMemory();
@@ -531,6 +575,9 @@ function closeModal(): void {
   modalSkill = null;
   modalPlugin = null;
   renderShell();
+  const root = $('#skills-page-root');
+  if (root && modalScrollMemory != null) root.scrollTop = modalScrollMemory;
+  modalScrollMemory = null;
 }
 
 async function loadStore(): Promise<void> {

@@ -1,0 +1,159 @@
+<meta charset="utf-8">
+<title>Playwright 契约测试页</title>
+<!--
+  这个页面刻意覆盖现有手写 CDP 实现最吃力的四类情形：
+  延迟出现的元素（自动等待）、Shadow DOM（穿透）、iframe（跨文档定位）、
+  以及可编辑控件的值回显（快照保真）。
+-->
+<h1>工单列表</h1>
+<article aria-label="静态说明">
+  <h2>处理须知</h2>
+  <p>请核对工单中的收件地址与商品数量。</p>
+</article>
+<table aria-label="订单明细">
+  <thead><tr><th>商品</th><th>数量</th></tr></thead>
+  <tbody><tr><td>机械键盘</td><td>2</td></tr></tbody>
+</table>
+<div role="alert">地址不能为空</div>
+<style>
+  #ax-swap.semantic-safe .danger { display: none; }
+  #ax-swap.semantic-danger .safe { display: none; }
+  #contract-mouse-surface {
+    position: relative;
+    width: 360px;
+    height: 120px;
+    margin: 16px 0;
+    border: 1px solid #777;
+  }
+  #contract-drag-source,
+  #contract-drag-target {
+    position: absolute;
+    top: 35px;
+    width: 80px;
+    height: 50px;
+    display: grid;
+    place-items: center;
+  }
+  #contract-drag-source { left: 20px; background: #d9ecff; }
+  #contract-drag-target { right: 20px; background: #dcfce7; }
+  #contract-drop-target {
+    width: 240px;
+    height: 64px;
+    margin: 8px 0;
+  }
+</style>
+
+<button id="late" style="display:none">延迟出现</button>
+<p id="late-result"></p>
+
+<div id="shadow-host"></div>
+
+<iframe id="frame" src="pw-contract-frame.html" width="400" height="120"></iframe>
+<p id="frame-result">未收到</p>
+
+<!-- 表单控件：覆盖 submit 判定、select、checkbox、file input -->
+<form id="ticket" action="/submit-ticket" method="post">
+  <select id="priority" aria-label="优先级">
+    <option value="low">低</option>
+    <option value="high">高</option>
+  </select>
+  <input type="checkbox" id="urgent" aria-label="加急">
+  <input type="file" id="attach" aria-label="附件">
+  <!-- 只用于字段分级证明；契约不会写入任何值。 -->
+  <input type="password" id="password" name="accountPassword"
+         autocomplete="current-password" aria-label="登录密码">
+  <input type="text" id="otp" name="smsCode"
+         autocomplete="one-time-code" aria-label="短信验证码">
+  <div id="rich-note" contenteditable="true" aria-label="处理意见">
+    <p><span id="rich-child">原始意见</span></p>
+  </div>
+  <button type="submit" id="go">提交工单</button>
+</form>
+
+<!-- 就地改写目标：href 会被改掉但节点不换，用来验指纹复核 -->
+<a id="mutable" href="https://example.test/safe">可变链接</a>
+<!-- textContent 始终不变，仅 CSS 改变浏览器实际 accessible name。 -->
+<button id="ax-swap" class="semantic-safe">
+  <span class="safe">批准</span><span class="danger">删除全部</span>
+</button>
+<button id="complex-button"><img alt=""><span>复杂按钮</span></button>
+
+<!-- 官方视觉动作面：原始坐标 mouse + HTML5 drag/drop。 -->
+<div id="contract-mouse-surface" tabindex="0" aria-label="坐标鼠标测试区">
+  <div id="contract-drag-source" draggable="true">拖动源</div>
+  <div id="contract-drag-target">拖动终点</div>
+</div>
+<output id="contract-mouse-state">[]</output>
+<button id="contract-drop-target" type="button" aria-label="外部拖放目标">
+  外部拖放目标
+</button>
+<output id="contract-drop-state">idle</output>
+
+<script>
+  setTimeout(() => { document.getElementById('late').style.display = 'inline-block'; }, 800);
+  document.getElementById('late').addEventListener('click', () => {
+    document.getElementById('late-result').textContent = '延迟按钮已点击';
+  });
+
+  const root = document.getElementById('shadow-host').attachShadow({ mode: 'open' });
+  root.innerHTML = `
+    <label for="si">影子输入</label>
+    <input id="si" type="text">
+    <p id="echo"></p>`;
+  root.getElementById('si').addEventListener('input', (e) => {
+    root.getElementById('echo').textContent = '影子值=' + e.target.value;
+  });
+
+  window.addEventListener('message', (e) => {
+    if (e.data === 'frame-clicked') {
+      document.getElementById('frame-result').textContent = '框架按钮已点击';
+    }
+  });
+
+  const mouseEvents = [];
+  const mouseSurface = document.getElementById('contract-mouse-surface');
+  const mouseState = document.getElementById('contract-mouse-state');
+  for (const eventName of ['mousemove', 'mousedown', 'mouseup', 'click', 'wheel']) {
+    mouseSurface.addEventListener(eventName, (event) => {
+      mouseEvents.push({
+        type: event.type,
+        target: event.target.id,
+        button: event.button,
+        buttons: event.buttons,
+        detail: event.detail,
+        deltaX: event.deltaX || 0,
+        deltaY: event.deltaY || 0,
+      });
+      mouseState.textContent = JSON.stringify(mouseEvents);
+      if (event.type === 'wheel') event.preventDefault();
+    }, { passive: false });
+  }
+  document.getElementById('contract-drag-source').addEventListener('dragstart', () => {
+    mouseEvents.push({ type: 'dragstart', target: 'contract-drag-source' });
+    mouseState.textContent = JSON.stringify(mouseEvents);
+  });
+  const dragTarget = document.getElementById('contract-drag-target');
+  dragTarget.addEventListener('dragover', (event) => event.preventDefault());
+  dragTarget.addEventListener('drop', (event) => {
+    event.preventDefault();
+    mouseEvents.push({ type: 'drop', target: 'contract-drag-target' });
+    mouseState.textContent = JSON.stringify(mouseEvents);
+  });
+  globalThis.__crewContractResetMouse = () => {
+    mouseEvents.splice(0);
+    mouseState.textContent = '[]';
+  };
+
+  const externalDropTarget = document.getElementById('contract-drop-target');
+  externalDropTarget.addEventListener('dragover', (event) => event.preventDefault());
+  externalDropTarget.addEventListener('drop', (event) => {
+    event.preventDefault();
+    const transfer = event.dataTransfer;
+    document.getElementById('contract-drop-state').textContent = JSON.stringify({
+      types: transfer ? Array.from(transfer.types) : [],
+      files: transfer ? Array.from(transfer.files).map((file) => file.name) : [],
+      text: transfer ? transfer.getData('text/plain') : '',
+      uri: transfer ? transfer.getData('text/uri-list') : '',
+    });
+  });
+</script>

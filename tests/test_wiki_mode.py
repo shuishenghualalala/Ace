@@ -4,6 +4,7 @@ from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
 from crew.plugins.manager import PluginManager
 from crew.state.home import task_workspace_path
 from crew.tools.registry import Registry, register_builtin_tools
+from crew.tools.policy import ToolDisclosureMode
 from crew.wiki.manager import WikiSessionManager
 
 
@@ -35,7 +36,7 @@ def test_effective_tool_filter_respects_wiki_preset_scope():
         FakeProvider(),
         wiki_manager=wiki,
         tool_filter=["wiki_orient", "wiki_search"],
-        disable_tool_search=True,
+        tool_disclosure_mode=ToolDisclosureMode.DIRECT,
     )
     tools = agent._effective_tool_filter("s1")
     assert tools == ["wiki_orient", "wiki_search"]
@@ -47,7 +48,7 @@ def test_wiki_manager_does_not_expand_tool_scope_dynamically():
         FakeProvider(),
         wiki_manager=wiki,
         tool_filter=["wiki_search", "wiki_apply_ingest"],
-        disable_tool_search=True,
+        tool_disclosure_mode=ToolDisclosureMode.DIRECT,
     )
     assert agent._effective_tool_filter("s1") == ["wiki_search", "wiki_apply_ingest"]
 

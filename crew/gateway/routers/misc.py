@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 
 from fastapi import APIRouter, Request
@@ -9,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from crew.agent.skills import (
     install_skill,
+    list_local_skills,
     list_optional_skills,
     list_skills,
     uninstall_skill,
@@ -21,10 +23,47 @@ from crew.gateway.instance_auth import (
     create_gateway_instance_proof,
     is_valid_gateway_instance_challenge,
 )
+from crew.state.logging import get_logger
+from crew.wiki.capture import capture_upload_to_wiki
+
+log = get_logger("gateway.routers.misc")
 
 
 def create_misc_router(crew) -> APIRouter:
     router = APIRouter()
+
+    # 后台任务引用集合：防 GC 提前回收，完成回调里统一清理。
+    _wiki_capture_tasks: set[asyncio.Task] = set()
+
+    def _on_wiki_capture_done(task: asyncio.Task) -> None:
+        _wiki_capture_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.warning("聊天附件自动收入 Wiki 任务异常: %s", exc)
+
+    def _schedule_wiki_capture(request: Request, filename: str, content: bytes) -> None:
+        """上传成功后把附件后台收入 default wiki 知识库（wiki.capture_attachments 控制）。"""
+        store = getattr(crew, "_wiki_store", None)
+        wiki_cfg = getattr(getattr(crew, "config", None), "wiki", None)
+        if store is None or wiki_cfg is None:
+            return
+        if not wiki_cfg.enabled or not wiki_cfg.capture_attachments:
+            return
+        task = asyncio.create_task(
+            capture_upload_to_wiki(
+                store,
+                getattr(crew, "_wiki_compiler", None),
+                wiki_cfg,
+                filename,
+                content,
+                owner_account_id=account_from_request(request).owner_account_id,
+                provider=getattr(crew, "provider", None),
+            )
+        )
+        _wiki_capture_tasks.add(task)
+        task.add_done_callback(_on_wiki_capture_done)
 
     def _components(request: Request) -> dict:
         startup_status = str(
@@ -92,6 +131,7 @@ def create_misc_router(crew) -> APIRouter:
         return JSONResponse({
             "installed": list_skills(),
             "optional": list_optional_skills(),
+            "local": list_local_skills(),
             "evolution": {
                 "auto_trigger": cfg.evolution_auto_trigger,
                 "auto_full_cycle": cfg.evolution_auto_full_cycle,
@@ -270,6 +310,7 @@ def create_misc_router(crew) -> APIRouter:
             )
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        _schedule_wiki_capture(request, filename, content_bytes)
         return JSONResponse(meta)
 
     @router.get("/api/complete")

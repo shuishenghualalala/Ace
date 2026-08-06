@@ -60,6 +60,8 @@ def _effective_auth_mode(config: Any | None) -> str:
         return "remote"
     if getattr(config, "gateway_dev_mode", False):
         return "dev"
+    if mode == "email":
+        return "email"
     return "local"
 
 
@@ -216,9 +218,11 @@ def account_from_remote_session_token(token: str, config: Any | None) -> Account
             str(payload.get("providerId") or ""),
             str(payload.get("userId") or ""),
         )
-        configured_provider = str(
-            getattr(config, "auth_provider_id", "custom") or "custom"
-        ).strip()
+        configured_provider = (
+            "email"
+            if _effective_auth_mode(config) == "email"
+            else str(getattr(config, "auth_provider_id", "custom") or "custom").strip()
+        )
         if provider != configured_provider:
             raise AuthenticationError("登录会话不属于当前认证服务")
         return AccountContext(
@@ -287,7 +291,7 @@ async def authenticate_http_request(request: FastAPIRequest, config: Any | None 
     client_host = request.client.host if request.client else None
     if not is_loopback_client(client_host):
         raise AuthenticationError("仅允许本机访问")
-    if _effective_auth_mode(config) == "remote":
+    if _effective_auth_mode(config) in {"remote", "email"}:
         return _remote_account_from_cookie(request.cookies, config)
     local_account = _trusted_local_account(config, client_host)
     if local_account is not None:
@@ -310,7 +314,7 @@ async def authenticate_websocket(socket: WebSocket, config: Any | None = None) -
     client_host = socket.client.host if socket.client else None
     if not is_loopback_client(client_host):
         raise AuthenticationError("仅允许本机访问")
-    if _effective_auth_mode(config) == "remote":
+    if _effective_auth_mode(config) in {"remote", "email"}:
         return _remote_account_from_cookie(socket.cookies, config)
     local_account = _trusted_local_account(config, client_host)
     if local_account is not None:

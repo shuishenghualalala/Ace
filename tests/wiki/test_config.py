@@ -10,7 +10,9 @@ from crew.wiki.config import WikiConfig
 def test_wiki_config_model_defaults_to_empty():
     cfg = WikiConfig.from_raw({})
     assert cfg.model == ""
-    assert cfg.ingest.auto_apply is True
+    assert cfg.ingest.auto_apply is False
+    assert cfg.ingest.auto_summarize is True
+    assert cfg.ingest.auto_ingest is False
 
 
 def test_wiki_config_model_from_raw():
@@ -31,6 +33,15 @@ def test_wiki_ingest_auto_apply_can_be_disabled():
 def test_wiki_ingest_auto_apply_parses_string_value():
     cfg = WikiConfig.from_raw({"ingest": {"auto_apply": "off"}})
     assert cfg.ingest.auto_apply is False
+
+
+def test_capture_attachments_defaults_to_true():
+    assert WikiConfig.from_raw({}).capture_attachments is True
+
+
+def test_capture_attachments_can_be_disabled():
+    assert WikiConfig.from_raw({"capture_attachments": False}).capture_attachments is False
+    assert WikiConfig.from_raw({"capture_attachments": "off"}).capture_attachments is False
 
 
 def test_wiki_storage_root_defaults_to_current_layout():

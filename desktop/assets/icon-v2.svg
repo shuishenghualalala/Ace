@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Crew agent logo</title>
+  <desc id="desc">A capital C shaped robot accompanied by a smaller robot.</desc>
+
+  <!-- Main C: dark outline and sage inner stroke -->
+  <path d="M365 123 A170 170 0 1 0 365 389"
+        fill="none" stroke="#4B4941" stroke-width="142"
+        stroke-linecap="round"/>
+  <path d="M365 123 A170 170 0 1 0 365 389"
+        fill="none" stroke="#B9C4A8" stroke-width="104"
+        stroke-linecap="round"/>
+
+  <!-- Main robot face -->
+  <rect x="137" y="202" width="199" height="108" rx="40"
+        fill="#F8F5EC" stroke="#4B4941" stroke-width="22"/>
+  <circle cx="197" cy="256" r="14" fill="#4B4941"/>
+  <circle cx="276" cy="256" r="14" fill="#4B4941"/>
+
+  <!-- Small crew robot at the opening of the C -->
+  <circle cx="388" cy="326" r="78" fill="#F4D98B" stroke="#4B4941" stroke-width="22"/>
+  <path d="M388 248V229" fill="none" stroke="#4B4941" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="388" cy="226" r="13" fill="#4B4941"/>
+  <circle cx="388" cy="226" r="6.5" fill="#E8AAA8"/>
+  <rect x="335" y="294" width="106" height="66" rx="25"
+        fill="#F8F5EC" stroke="#4B4941" stroke-width="17"/>
+  <circle cx="369" cy="327" r="10" fill="#4B4941"/>
+  <circle cx="407" cy="327" r="10" fill="#4B4941"/>
+</svg>

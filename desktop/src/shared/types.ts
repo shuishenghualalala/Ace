@@ -46,6 +46,22 @@ export interface UserInfoSnapshot {
   uid?: string;
 }
 
+/** email 租户认证模型（main 引入，待移植到新安全栈后与 UserInfoSnapshot 归并）。 */
+export interface AuthUserSnapshot {
+  userId: string;
+  phoneNumber: string;
+  email?: string | undefined;
+  displayName?: string | undefined;
+}
+
+export interface AuthStateSnapshot {
+  mode: 'unknown' | 'local' | 'email' | 'remote' | 'dev';
+  configured: boolean;
+  providerId: string;
+  isLoggedIn: boolean;
+  user: AuthUserSnapshot | null;
+}
+
 /** 版本更新推送载荷（主进程 → renderer，经 preload onVersionUpdate）。 */
 export interface VersionUpdatePayload {
   type: 'force' | 'reminder';

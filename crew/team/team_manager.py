@@ -43,6 +43,7 @@ from crew.state.config import Config
 from crew.state.home import safe_path_segment, task_workspace_path
 from crew.state.logging import get_logger
 from crew.team.bus import TeamBus, register_team_bus_tools
+from crew.team.capabilities import normalize_capabilities
 from crew.team.delegate_tool import (
     register_delegate_tool,
     register_plan_change_tool,
@@ -385,6 +386,16 @@ class InProcessTeamManager(TeamManager):
         owner_account_id: str = "",
         tool_filter: list[str] | None = None,
     ) -> SingleAgent:
+        # Wiki 工具只属于专用 Wiki Agent。Team 使用独立 Registry，但不能因此
+        # 绕过全局的 Wiki 能力边界。
+        from crew.tools.policy import exclude_toolsets
+
+        base_tools = registry.names() if tool_filter is None else tool_filter
+        tool_filter = exclude_toolsets(
+            registry,
+            base_tools,
+            exact={"wiki.read", "wiki.manage"},
+        )
         provider = self._provider_for_owner(owner_account_id)
         executor_kind = "external" if spec.executor in {"acp", "cli", "external"} else spec.executor
         executor = create_executor(
@@ -2180,6 +2191,69 @@ class InProcessTeamManager(TeamManager):
             changed_file_count=changed_file_count,
         )
 
+    def _record_external_agent_profile_observation(
+        self,
+        plan: TeamPlan,
+        node: TeamPlanNode,
+        *,
+        owner_account_id: str,
+        outcome: str,
+        quality_weight: float,
+        assessment_source: str,
+        failure_kind: str = "",
+        source_attempt_id: str = "",
+    ) -> bool:
+        """Persist one settled External Agent execution fact without blocking the workflow."""
+
+        if self.external_store is None or node.assignee == "leader":
+            return False
+        team = self._teams.get(self._existing_team_key(plan.team_session_id, owner_account_id))
+        spec = team.members.get(node.assignee) if team is not None else None
+        external_agent_id = str(spec.external_agent_id or "").strip() if spec is not None else ""
+        capabilities = normalize_capabilities((node.metadata or {}).get("required_capabilities") or [])
+        attempt_id = str(source_attempt_id or node.delegate_task_id or "").strip()
+        if not external_agent_id or is_crew_builtin_agent(external_agent_id):
+            return False
+        if not capabilities or not attempt_id:
+            return False
+        try:
+            result = self.external_store.record_agent_profile_observation(
+                owner_account_id=owner_account_id,
+                external_agent_id=external_agent_id,
+                source_run_id=plan.plan_id,
+                source_node_id=node.node_id,
+                source_attempt_id=attempt_id,
+                capabilities=capabilities,
+                assessment_source=assessment_source,
+                outcome=outcome,
+                quality_weight=quality_weight,
+                failure_kind=failure_kind,
+            )
+            return bool(result.get("inserted"))
+        except Exception as exc:  # noqa: BLE001 - 画像派生失败不能改变用户任务结果
+            log.warning(
+                "AgentProfile observation 写入失败 session=%s node=%s agent=%s err=%s",
+                plan.team_session_id,
+                node.node_id,
+                external_agent_id,
+                exc,
+            )
+            return False
+
+    @staticmethod
+    def _profile_outcome_from_execution(
+        assessment: NodeExecutionAssessment,
+    ) -> tuple[str, float, str]:
+        if assessment.execution_status != "completed":
+            failure_kind = "permission" if assessment.execution_status == "blocked" else "tool"
+            return "neutral", 0.0, failure_kind
+        if assessment.acceptance_status == "fail":
+            return "failure", 0.8, "acceptance"
+        if assessment.acceptance_status == "pass":
+            has_material_evidence = assessment.artifact_count > 0 or assessment.changed_file_count > 0
+            return "success", 0.8 if has_material_evidence else 0.4, ""
+        return "neutral", 0.0, "unverified"
+
     def _reflect_plan_node(
         self,
         plan: TeamPlan,
@@ -2798,6 +2872,15 @@ class InProcessTeamManager(TeamManager):
             }
 
         if action == "revise" and target is not None:
+            self._record_external_agent_profile_observation(
+                plan,
+                target,
+                owner_account_id=owner_account_id,
+                outcome="revise",
+                quality_weight=0.5,
+                assessment_source="leader_review",
+                failure_kind="leader_revise",
+            )
             instructions = str(decision.get("instructions") or decision.get("message") or "请按 Leader 意见修订。")
             target_meta = dict(target.metadata or {})
             history = list(target_meta.get("revision_history") or [])
@@ -2833,6 +2916,15 @@ class InProcessTeamManager(TeamManager):
                 result_summary="",
             )
         elif action == "approve":
+            for reviewed_node in reviewed:
+                self._record_external_agent_profile_observation(
+                    plan,
+                    reviewed_node,
+                    owner_account_id=owner_account_id,
+                    outcome="success",
+                    quality_weight=1.0,
+                    assessment_source="leader_review",
+                )
             review_meta["last_decision"] = dict(decision)
             review_node.metadata = review_meta
             self._mark_plan_node(
@@ -5091,6 +5183,15 @@ class InProcessTeamManager(TeamManager):
                     if error is not None:
                         started_at = float((node.metadata or {}).get("execution_started_at") or node.updated_at or time.time())
                         finished_at = time.time()
+                        self._record_external_agent_profile_observation(
+                            plan,
+                            node,
+                            owner_account_id=envelope.user_id,
+                            outcome="neutral",
+                            quality_weight=0.0,
+                            assessment_source="execution_assessment",
+                            failure_kind="cancelled" if isinstance(error, asyncio.CancelledError) else "runtime",
+                        )
                         chunks.append(self._recorded_team_internal_chunk(
                             envelope,
                             agent_id=node.assignee,
@@ -5304,6 +5405,17 @@ class InProcessTeamManager(TeamManager):
                     node_meta["execution_assessment"] = assessment.to_dict()
                     node.metadata = node_meta
                     if assessment.execution_status != "completed":
+                        outcome, quality_weight, failure_kind = self._profile_outcome_from_execution(assessment)
+                        self._record_external_agent_profile_observation(
+                            plan,
+                            node,
+                            owner_account_id=envelope.user_id,
+                            outcome=outcome,
+                            quality_weight=quality_weight,
+                            assessment_source="execution_assessment",
+                            failure_kind=failure_kind,
+                            source_attempt_id=task_id,
+                        )
                         retryable = assessment.execution_status == "failed" and attempt < max_attempts
                         self._reflect_plan_node(
                             plan,
@@ -5347,6 +5459,18 @@ class InProcessTeamManager(TeamManager):
                             node,
                             owner_account_id=envelope.user_id,
                             reason=review_reason,
+                        )
+                    else:
+                        outcome, quality_weight, failure_kind = self._profile_outcome_from_execution(assessment)
+                        self._record_external_agent_profile_observation(
+                            plan,
+                            node,
+                            owner_account_id=envelope.user_id,
+                            outcome=outcome,
+                            quality_weight=quality_weight,
+                            assessment_source="execution_assessment",
+                            failure_kind=failure_kind,
+                            source_attempt_id=task_id,
                         )
                     self._mark_plan_node(
                         envelope.session_id,

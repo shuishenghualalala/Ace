@@ -32,7 +32,11 @@ def _new_id(prefix: str) -> str:
 
 
 def _tool_event_args_for_ui(name: str, args: str) -> str:
-    if not args or name not in {"file_write", "write_file"}:
+    needs_projection = (
+        name in {"file_write", "write_file", "record_replay"}
+        or name.startswith("browser_")
+    )
+    if not args or not needs_projection:
         return args
     try:
         parsed = json.loads(args)
@@ -106,7 +110,10 @@ class ResponseChunk:
               file_write/write_file 不透传完整 content）。
         """
         args = _tool_event_args_for_ui(name, args)
-        if phase in {"generating", "start"} and name in {"file_write", "write_file"}:
+        if phase in {"generating", "start"} and (
+            name in {"file_write", "write_file", "record_replay"}
+            or name.startswith("browser_")
+        ):
             detail = args
         body: dict[str, Any] = {"name": name, "phase": phase, "detail": detail}
         if tool_call_id:
@@ -170,14 +177,15 @@ class ResponseChunk:
         return ResponseChunk(request_id, kind="status", body={"message": message}, sequence=sequence)
 
     @staticmethod
-    def tool_planning_event(request_id: str, sequence: int = 0) -> "ResponseChunk":
-        """模型已开始推理工具选择，但 provider 尚未给出具体 tool call。"""
+    def compaction_event(request_id: str, active: bool, sequence: int = 0) -> "ResponseChunk":
+        """上下文摘要的瞬时状态，供输入框上方提示条展示。"""
         return ResponseChunk(
             request_id,
             kind="status",
             body={
-                "message": "正在规划工具调用…",
-                "activity": "tool_planning",
+                "message": "正在压缩上下文" if active else "上下文压缩完成",
+                "activity": "context_compaction",
+                "active": active,
             },
             sequence=sequence,
         )

@@ -1,0 +1,312 @@
+[
+  {
+    "name": "AddIcon",
+    "file": "Add.svg",
+    "category": "general",
+    "aliases": [
+      "add",
+      "添加",
+      "新建",
+      "加号"
+    ],
+    "use_for": [
+      "add item",
+      "create new",
+      "insert"
+    ],
+    "avoid_for": [
+      "upload file",
+      "compose text",
+      "expand"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "BookmarkIcon",
+    "file": "Bookmark.svg",
+    "category": "general",
+    "aliases": [
+      "bookmark",
+      "书签",
+      "收藏"
+    ],
+    "use_for": [
+      "bookmark",
+      "save for later"
+    ],
+    "avoid_for": [
+      "pin",
+      "favorite",
+      "collect"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CheckIcon",
+    "file": "Check.svg",
+    "category": "general",
+    "aliases": [
+      "check",
+      "勾选",
+      "对勾",
+      "确认"
+    ],
+    "use_for": [
+      "confirm",
+      "selected",
+      "verified"
+    ],
+    "avoid_for": [
+      "radio button",
+      "favorite",
+      "bookmark"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CloseIcon",
+    "file": "Close.svg",
+    "category": "general",
+    "aliases": [
+      "close",
+      "关闭",
+      "叉号",
+      "删除"
+    ],
+    "use_for": [
+      "close dialog",
+      "dismiss",
+      "remove tag"
+    ],
+    "avoid_for": [
+      "delete forever",
+      "logout",
+      "stop"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CodeIcon",
+    "file": "Code.svg",
+    "category": "general",
+    "aliases": [
+      "code",
+      "代码"
+    ],
+    "use_for": [
+      "general related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "CopyIcon",
+    "file": "Copy.svg",
+    "category": "general",
+    "aliases": [
+      "copy",
+      "复制"
+    ],
+    "use_for": [
+      "duplicate",
+      "copy to clipboard"
+    ],
+    "avoid_for": [
+      "cut",
+      "move",
+      "clone"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "DeleteIcon",
+    "file": "Delete.svg",
+    "category": "general",
+    "aliases": [
+      "delete",
+      "删除",
+      "移除",
+      "垃圾桶"
+    ],
+    "use_for": [
+      "delete item",
+      "remove",
+      "trash"
+    ],
+    "avoid_for": [
+      "clear history",
+      "deregister",
+      "archive"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "LinkIcon",
+    "file": "Link.svg",
+    "category": "general",
+    "aliases": [
+      "link",
+      "链接",
+      "超链接"
+    ],
+    "use_for": [
+      "hyperlink",
+      "attach URL",
+      "connect"
+    ],
+    "avoid_for": [
+      "share",
+      "export",
+      "attach file"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "MinusIcon",
+    "file": "Minus.svg",
+    "category": "general",
+    "aliases": [
+      "minus",
+      "减号",
+      "删除"
+    ],
+    "use_for": [
+      "general related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "MoreIcon",
+    "file": "More.svg",
+    "category": "general",
+    "aliases": [
+      "more",
+      "更多",
+      "省略号"
+    ],
+    "use_for": [
+      "general related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "PinIcon",
+    "file": "Pin.svg",
+    "category": "general",
+    "aliases": [
+      "pin",
+      "置顶",
+      "固定"
+    ],
+    "use_for": [
+      "pin to top",
+      "sticky",
+      "keep visible"
+    ],
+    "avoid_for": [
+      "bookmark",
+      "favorite",
+      "lock"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "PlusIcon",
+    "file": "Plus.svg",
+    "category": "general",
+    "aliases": [
+      "plus",
+      "加号",
+      "增加"
+    ],
+    "use_for": [
+      "general related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "RefreshIcon",
+    "file": "Refresh.svg",
+    "category": "general",
+    "aliases": [
+      "refresh",
+      "刷新",
+      "重新加载"
+    ],
+    "use_for": [
+      "reload",
+      "refresh data",
+      "sync"
+    ],
+    "avoid_for": [
+      "undo",
+      "retry",
+      "rotate"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "SearchIcon",
+    "file": "Search.svg",
+    "category": "general",
+    "aliases": [
+      "search",
+      "搜索",
+      "查找",
+      "查询"
+    ],
+    "use_for": [
+      "search input",
+      "global search",
+      "table search"
+    ],
+    "avoid_for": [
+      "zoom",
+      "inspect",
+      "analytics"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  },
+  {
+    "name": "TagIcon",
+    "file": "Tag.svg",
+    "category": "general",
+    "aliases": [
+      "tag",
+      "标签"
+    ],
+    "use_for": [
+      "general related action"
+    ],
+    "avoid_for": [
+      "unrelated context"
+    ],
+    "color_mode": "currentColor",
+    "default_size": 20
+  }
+]

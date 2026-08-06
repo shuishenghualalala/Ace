@@ -58,6 +58,13 @@ from crew.state.session_store import SQLiteSessionStore
 from crew.state.active_owner import ActiveOwnerLeaseStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
 from crew.tools.registry import Registry, register_builtin_tools
+from crew.tools.policy import (
+    ToolDisclosureMode,
+    exclude_toolsets,
+    extend_with_toolsets,
+    ordered_intersection,
+    select_requested_tools,
+)
 from crew.tasks import TaskRuntime
 
 log = get_logger("app")
@@ -71,6 +78,7 @@ _MODEL_API_KEY_ENV_EXAMPLES = "CREW_API_KEY、OPENAI_API_KEY、ANTHROPIC_API_KEY
 #   subagent/external_agent —— 禁嵌套 + 不转外部 agent
 #   memory                  —— 临时子 agent 不应修改跨会话共享记忆
 #   cron                    —— 不应注册后台定时任务
+#   wiki.*                  —— Wiki 能力只属于专用 Wiki Agent
 #   feishu*（前缀）          —— 不应产生发言/评论等外部副作用
 SUBAGENT_BLOCKED_TOOLSETS = {
     "subagent",
@@ -79,6 +87,8 @@ SUBAGENT_BLOCKED_TOOLSETS = {
     "memory",
     "cron",
     "tasks",
+    "wiki.read",
+    "wiki.manage",
 }
 SUBAGENT_BLOCKED_TOOLSET_PREFIXES = ("feishu",)
 
@@ -99,14 +109,6 @@ def _payload_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
-
-
-def _subagent_blocked_toolset(toolset: str | None) -> bool:
-    if not toolset:
-        return False
-    if toolset in SUBAGENT_BLOCKED_TOOLSETS:
-        return True
-    return any(toolset.startswith(p) for p in SUBAGENT_BLOCKED_TOOLSET_PREFIXES)
 
 
 def _parent_allowed_skill_slugs(
@@ -664,14 +666,23 @@ class CrewApp:
                 disabled_tools=base_disabled_tools,
             )
         }
-        allowed = list(base_names)
+        registry_order = self.registry.names()
+        allowed = ordered_intersection(registry_order, base_names)
 
         # builtin 执行器不直接调用 external_agent 工具。
-        toolset_for = getattr(self.registry, "toolset_for", None)
-        if callable(toolset_for):
-            allowed = [name for name in allowed if toolset_for(name) != "external_agent"]
+        allowed = exclude_toolsets(self.registry, allowed, exact={"external_agent"})
 
         return allowed
+
+    def _wiki_agent_tool_filter(self, main_tools: list[str]) -> list[str]:
+        """Wiki Agent = 同身份主 Agent 最终静态范围 + Wiki 专属工具。"""
+        from crew.wiki.tools import WIKI_MANAGE_TOOLSET, WIKI_READ_TOOLSET
+
+        return extend_with_toolsets(
+            self.registry,
+            main_tools,
+            (WIKI_READ_TOOLSET, WIKI_MANAGE_TOOLSET),
+        )
 
     def _browser_plugin_effective(self, owner: str, user_type: str) -> bool:
         """当前 (owner, user_type) 下 Browser 插件的有效状态。
@@ -879,26 +890,18 @@ class CrewApp:
             # Skills 也看不到它，避免通过说明间接获得管理工作流。
             disabled_skills = [*(disabled_skills or []), "crew-wiki-curator"]
 
+        main_tool_filter = self._single_agent_tool_filter(executor_kind, ac)
         if is_wiki_agent_session:
-            # 与 run_agent(agent_type="Wiki") 使用同一 preset toolsets/tools 解释器。
-            tool_filter = self._subagent_tool_filter(
-                preset_spec["toolsets"],
-                preset_spec["tools"],
-                user_type=user_type,
-            )
+            tool_filter = self._wiki_agent_tool_filter(main_tool_filter)
         else:
-            tool_filter = self._single_agent_tool_filter(executor_kind, ac)
+            tool_filter = main_tool_filter
             # 普通对话不能直接发现或调用任何 Wiki 工具；Wiki 页面会把消息直接
             # 发送到 preset_agent_type=Wiki 的持久化预设会话。
-            from crew.wiki.tools import WIKI_MANAGE_TOOLSET, WIKI_READ_TOOLSET
-
-            base_tools = self.registry.names() if tool_filter is None else tool_filter
-            tool_filter = [
-                name
-                for name in base_tools
-                if self.registry.toolset_for(name)
-                not in {WIKI_READ_TOOLSET, WIKI_MANAGE_TOOLSET}
-            ]
+            tool_filter = exclude_toolsets(
+                self.registry,
+                tool_filter,
+                exact={"wiki.read", "wiki.manage"},
+            )
         if not browser_effective and tool_filter is not None:
             # 插件关闭时从允许工具中剔除 browser_use（skill 过滤见上）
             tool_filter = [name for name in tool_filter if name != "browser_use"]
@@ -919,7 +922,11 @@ class CrewApp:
             enable_title=cfg.title_auto,
             plan_manager=self.plan_manager,
             wiki_manager=self.wiki_manager if is_wiki_agent_session else None,
-            disable_tool_search=is_wiki_agent_session,
+            tool_disclosure_mode=(
+                ToolDisclosureMode.DIRECT
+                if is_wiki_agent_session
+                else ToolDisclosureMode.PROGRESSIVE
+            ),
             agent_id=agent_id,
             enabled_skills=enabled_skills,
             disabled_skills=disabled_skills,
@@ -948,7 +955,7 @@ class CrewApp:
         lightweight: bool = False,
         plan_manager: Any = None,
         wiki_manager: Any = None,
-        disable_tool_search: bool = False,
+        tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE,
         agent_id: str = "default",
         enabled_skills: list[str] | None = None,
         disabled_skills: list[str] | None = None,
@@ -1033,7 +1040,7 @@ class CrewApp:
             lightweight=lightweight,
             plan_manager=plan_manager,
             wiki_manager=wiki_manager,
-            disable_tool_search=disable_tool_search,
+            tool_disclosure_mode=tool_disclosure_mode,
             agent_id=agent_id,
             enabled_skills=enabled_skills,
             disabled_skills=disabled_skills,
@@ -1079,7 +1086,7 @@ class CrewApp:
             tools = [tools]
 
         ac = self.config.access_control.resolve_for(user_type)
-        parent_allowed = {
+        access_allowed = {
             s["function"]["name"]
             for s in self.registry.list_schemas(
                 enabled_toolsets=ac.get("enabled_toolsets"),
@@ -1088,19 +1095,26 @@ class CrewApp:
                 disabled_tools=ac.get("disabled_tools"),
             )
         }
+        from crew.core.runctx import current_authorized_tool_names
 
-        if toolsets:
-            schemas = self.registry.list_schemas(enabled_toolsets=toolsets)
-        else:
-            schemas = self.registry.list_schemas()
-        names = [s["function"]["name"] for s in schemas if s["function"]["name"] in parent_allowed]
-
-        if tools:
-            allow = set(tools)
-            names = [n for n in names if n in allow]
-        toolset_for = getattr(self.registry, "toolset_for", None)
-        if callable(toolset_for):
-            names = [n for n in names if not _subagent_blocked_toolset(toolset_for(n))]
+        parent_snapshot = current_authorized_tool_names.get()
+        parent_allowed = (
+            set(parent_snapshot) & access_allowed
+            if parent_snapshot is not None
+            else access_allowed
+        )
+        names = select_requested_tools(
+            self.registry,
+            ordered_intersection(self.registry.names(), parent_allowed),
+            requested_toolsets=toolsets,
+            requested_tools=tools,
+        )
+        names = exclude_toolsets(
+            self.registry,
+            names,
+            exact=SUBAGENT_BLOCKED_TOOLSETS,
+            prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
+        )
         # 子 agent 同样受 per-owner 插件有效状态约束（schema 层；执行层还有
         # browser_use 的 permission_resolver 逐次重查兜底）。
         from crew.core.runctx import current_owner_account_id
@@ -1214,9 +1228,21 @@ class CrewApp:
                 enabled_skills = parent_enabled
                 disabled_skills = parent_disabled
 
-        tool_filter = self._subagent_tool_filter(
-            spec.get("toolsets"), spec.get("tools"), user_type=parent_user_type
-        )
+        is_wiki_preset = spec.get("preset_name") == "Wiki"
+        if is_wiki_preset:
+            from crew.core.runctx import current_authorized_tool_names
+
+            parent_snapshot = current_authorized_tool_names.get()
+            if parent_snapshot is None:
+                ac = cfg.access_control.resolve_for(parent_user_type)
+                main_tools = self._single_agent_tool_filter("builtin", ac)
+            else:
+                main_tools = ordered_intersection(self.registry.names(), parent_snapshot)
+            tool_filter = self._wiki_agent_tool_filter(main_tools)
+        else:
+            tool_filter = self._subagent_tool_filter(
+                spec.get("toolsets"), spec.get("tools"), user_type=parent_user_type
+            )
         tool_filter = self._apply_model_capability_filter(tool_filter, effective_capabilities)
 
         return self._build_single_agent(
@@ -1230,8 +1256,12 @@ class CrewApp:
             system_prompt=spec.get("system_prompt"),
             enable_title=False,
             lightweight=True,
-            wiki_manager=self.wiki_manager if spec.get("preset_name") == "Wiki" else None,
-            disable_tool_search=spec.get("preset_name") == "Wiki",
+            wiki_manager=self.wiki_manager if is_wiki_preset else None,
+            tool_disclosure_mode=(
+                ToolDisclosureMode.DIRECT
+                if is_wiki_preset
+                else ToolDisclosureMode.PROGRESSIVE
+            ),
             agent_id=f"subagent:{spec['preset_name']}" if spec.get("preset_name") else "subagent",
             enabled_skills=enabled_skills,
             disabled_skills=disabled_skills,
@@ -2514,11 +2544,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         WikiSummarizer,
     )
     from crew.wiki.tools import register_wiki_tools
-    from crew.wiki.seed import ensure_tutorial_kb
-
     wiki_storage_root = cfg.wiki.storage.resolved_root() if cfg.wiki else None
     app._wiki_store = FileSystemWikiStore(storage_root=wiki_storage_root)
-    ensure_tutorial_kb(app._wiki_store)
     if wiki_storage_root is not None:
         log.info("Wiki 独立存储根目录: %s", wiki_storage_root)
     app.wiki_manager = WikiSessionManager(store=app._wiki_store)

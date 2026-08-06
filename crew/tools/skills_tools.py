@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from crew.agent.skills import (
+    get_skill_packages,
     audit_skills,
     get_package_members,
     get_skill_packages,

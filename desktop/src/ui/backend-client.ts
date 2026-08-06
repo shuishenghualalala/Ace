@@ -456,6 +456,8 @@ export interface Skill {
   aliases?: string[];
   description: string;
   source: 'builtin' | 'user';
+  /** 是否从本机共享 Skill 目录接入；移除时保留原始 Skill。 */
+  is_local_shared?: boolean;
   /** SKILL.md frontmatter category；缺省为「通用」。 */
   category?: string;
   /** 中文名（来自 metadata.zh_name，后端 display_name 字段）；缺省回退 name。 */
@@ -470,7 +472,7 @@ export interface OptionalSkill {
   aliases?: string[];
   description: string;
   category: string;
-  source: 'optional';
+  source: 'optional' | 'local';
   /** 中文名（来自 metadata.zh_name，后端 display_name 字段）；缺省回退 name。 */
   display_name?: string;
   /** 中文描述（来自 metadata.zh_description，后端 description_zh 字段）；缺省回退 description。 */
@@ -486,6 +488,8 @@ export interface EvolutionConfig {
 export interface SkillStore {
   installed: Skill[];
   optional: OptionalSkill[];
+  /** ~/.agents/skills 中未安装的本地 skill（跨 agent 共享，软链安装）。 */
+  local?: OptionalSkill[];
   evolution?: EvolutionConfig;
 }
 
@@ -669,6 +673,7 @@ export interface PlatformRow {
   running?: boolean;
   live_connected?: boolean;
   error?: string;
+  error_kind?: 'network' | string;
   description?: string;
   install_hint?: string;
   detail?: Record<string, unknown>;
@@ -1320,6 +1325,20 @@ export interface WikiSource {
 /** source_id -> 人类可读标题 的映射 */
 export type WikiSourceTitles = Record<string, string>;
 
+export interface WikiRelationPage {
+  id: string;
+  title: string;
+  page_type: WikiPageType;
+  relation: string;
+  direction: 'outgoing' | 'incoming';
+}
+
+export interface WikiSourcePage {
+  id: string;
+  title: string;
+  page_type: WikiPageType;
+}
+
 /** source_id -> 原始文件元信息 的映射 */
 export type WikiSourceFiles = Record<string, { original_path: string; file_type?: string; title?: string }>;
 
@@ -1792,6 +1811,16 @@ export const backendApi = {
     getJSON<{ ok: boolean; status: PlatformRow; error?: string }>(`/api/platforms/${encodeURIComponent(name)}/reconnect`, {
       method: 'POST',
     }),
+  qrLoginStart: (name: string) =>
+    getJSON<{ ok: boolean; qr_id: string; qr_image: string; qrcode_url: string; error?: string }>(
+      `/api/platforms/${encodeURIComponent(name)}/qr-login/start`,
+      { method: 'POST' },
+    ),
+  qrLoginStatus: (name: string, qrId: string) =>
+    getJSON<{ ok: boolean; status: string; account_id?: string; token?: string; error?: string }>(
+      `/api/platforms/${encodeURIComponent(name)}/qr-login/status`,
+      { method: 'POST', ...jsonBody({ qr_id: qrId }) },
+    ),
   deletePlatformAccount: (name: string) =>
     getJSON<PlatformConfigResponse & { deleted: boolean; status: PlatformRow; error?: string }>(
       `/api/platforms/${encodeURIComponent(name)}/account`,
@@ -1889,6 +1918,8 @@ export const backendApi = {
       page: WikiPage;
       source_titles: WikiSourceTitles;
       source_files: WikiSourceFiles;
+      source_pages: WikiSourcePage[];
+      relation_pages: WikiRelationPage[];
     }>(withKb(`/api/wiki/pages/${encodeURIComponent(id)}`, kbId)),
   wikiCreatePage: (
     payload: Pick<WikiPage, 'title' | 'content'> & Partial<Pick<WikiPage, 'page_type' | 'status'>>,
@@ -1902,7 +1933,8 @@ export const backendApi = {
     }>(withKb('/api/wiki/pages', kbId), { method: 'POST', ...jsonBody(payload) }),
   wikiUpdatePage: (
     id: string,
-    payload: Pick<WikiPage, 'title' | 'content'> & Partial<Pick<WikiPage, 'status'>>,
+    payload: Pick<WikiPage, 'title' | 'content'> &
+      Partial<Pick<WikiPage, 'tags' | 'sources' | 'relations'>>,
     kbId?: string,
   ) =>
     getJSON<{
@@ -1910,12 +1942,21 @@ export const backendApi = {
       page: WikiPage;
       source_titles: WikiSourceTitles;
       source_files: WikiSourceFiles;
+      source_pages: WikiSourcePage[];
+      relation_pages: WikiRelationPage[];
     }>(withKb(`/api/wiki/pages/${encodeURIComponent(id)}`, kbId), {
       method: 'PUT',
       ...jsonBody(payload),
     }),
-  wikiSummary: (kbId?: string) =>
-    getJSON<{ ok: boolean } & WikiSummary>(withKb('/api/wiki/summary', kbId)),
+  wikiSearch: (query: string, kbId?: string, topK = 5) =>
+    getJSON<{
+      ok: boolean;
+      pages: WikiPage[];
+      source_titles: WikiSourceTitles;
+      source_files: WikiSourceFiles;
+    }>(withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId)),
+  wikiSummary: (kbId?: string, force?: boolean) =>
+    getJSON<{ ok: boolean } & WikiSummary>(withKb(`/api/wiki/summary${force ? '?force=true' : ''}`, kbId)),
   /** 知识图谱（Phase 3）：全量节点 + 关系边，不走分页。 */
   wikiGraph: (kbId?: string) =>
     getJSON<{ ok: boolean; graph: WikiGraph }>(withKb('/api/wiki/graph', kbId)),
