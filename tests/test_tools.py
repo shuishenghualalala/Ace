@@ -459,6 +459,7 @@ async def test_ask_followup_question_returns_user_answers():
         ]
         assert pushed[0][1]["body"]["questions"][0]["allowFreeText"] is True
         assert pushed[0][1]["body"]["record_history"] is True
+        assert "note" not in pushed[0][1]["body"]
         assert pushed[0][1]["request_id"] == "req-followup-test"
         assert drain_followup_answer_messages(session_id) == ["已选择：选项B"]
         assert drain_followup_answer_messages(session_id) == []
@@ -489,6 +490,30 @@ def test_followup_question_options_accept_label_value_objects():
     qid = waiter.create("s-label-value", questions)
     assert waiter.resolve("s-label-value", qid, [{"question_id": "q1", "answers": ["risk"]}]) is True
     assert waiter.drain_answer_messages("s-label-value") == ["已选择：风险分析"]
+
+
+async def test_followup_status_reuses_the_existing_question_channel():
+    from crew.core.followup import send_followup_status_to
+
+    pushed = []
+
+    async def push(session_id, payload):
+        pushed.append((session_id, payload))
+
+    assert await send_followup_status_to(
+        "session-1",
+        "question-1",
+        "applied",
+        note="协作助手已加入，继续开工。",
+        push_fn=push,
+    ) is True
+    assert pushed[0][0] == "session-1"
+    assert pushed[0][1]["kind"] == "followup_question"
+    assert pushed[0][1]["body"] == {
+        "question_id": "question-1",
+        "status": "applied",
+        "note": "协作助手已加入，继续开工。",
+    }
 
 
 async def test_ask_followup_question_validation_errors():

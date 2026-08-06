@@ -118,6 +118,77 @@ describe('followupQuestionReducer', () => {
       questions: [{ allowFreeText: false }],
     });
   });
+
+  it('preserves the structured runtime staffing variant and lifecycle state', () => {
+    const initial = followupQuestionReducer({
+      kind: 'followup_question',
+      sequence: 1,
+      body: {
+        question_id: 'staffing-1',
+        title: '给这项任务找一位帮手？',
+        note: '仅用于本次任务，不会加入或修改原团队。',
+        record_history: false,
+        origin: {
+          type: 'team_control',
+          agent_name: 'Leader',
+          mention_intent: 'runtime_staffing',
+        },
+        questions: [{
+          id: 'runtime_staffing:req-1',
+          question: '当前成员暂时无法使用。',
+          options: [{ label: '现有协作助手', value: 'candidate:0' }],
+          allowFreeText: false,
+          multiSelect: false,
+        }],
+      },
+    }, makeSnapshot());
+    const pending = initial.replaceBook?.pendingFollowup;
+    expect(pending).toMatchObject({
+      questionId: 'staffing-1',
+      note: '仅用于本次任务，不会加入或修改原团队。',
+      origin: { mentionIntent: 'runtime_staffing' },
+    });
+
+    const applying = followupQuestionReducer({
+      kind: 'followup_question',
+      sequence: 2,
+      body: {
+        question_id: 'staffing-1',
+        status: 'resolved',
+      },
+    }, makeSnapshot({ book: { ...emptyBook(), pendingFollowup: pending ?? null } }));
+    expect(applying.replaceBook?.pendingFollowup?.status).toBe('applying');
+
+    const applied = followupQuestionReducer({
+      kind: 'followup_question',
+      sequence: 3,
+      body: {
+        question_id: 'staffing-1',
+        status: 'applied',
+        note: '协作助手已加入，继续开工。',
+      },
+    }, makeSnapshot({ book: applying.replaceBook ?? emptyBook() }));
+    expect(applied.replaceBook?.pendingFollowup).toMatchObject({
+      status: 'applied',
+      note: '协作助手已加入，继续开工。',
+    });
+  });
+
+  it('keeps the existing resolved behavior for non-staffing permissions', () => {
+    const permission = {
+      questionId: 'permission-1',
+      title: '权限确认',
+      recordHistory: false,
+      questions: [],
+    };
+    const result = followupQuestionReducer({
+      kind: 'followup_question',
+      sequence: 2,
+      body: { question_id: 'permission-1', status: 'resolved' },
+    }, makeSnapshot({ book: { ...emptyBook(), pendingFollowup: permission } }));
+
+    expect(result.replaceBook?.pendingFollowup).toBeNull();
+  });
 });
 
 describe('deltaReducer', () => {

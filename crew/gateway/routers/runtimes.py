@@ -173,9 +173,9 @@ def _external_agent_payloads(
 
 
 def _managed_temporary_agent_ids(store: Any, *, owner_account_id: str) -> set[str]:
-    """Return Formation-managed temporary Agents referenced by active teams."""
+    """Return managed Agents that must stay out of the user's normal catalog."""
 
-    return {
+    hidden = {
         str(member.get("agent_id") or "")
         for team in store.list_teams(owner_account_id=owner_account_id)
         for member in (
@@ -187,6 +187,13 @@ def _managed_temporary_agent_ids(store: Any, *, owner_account_id: str) -> set[st
         and member.get("selection_source") == "ai_temporary"
         and str(member.get("agent_id") or "")
     }
+    hidden.update(
+        str(agent.get("id") or "")
+        for agent in store.list_agents(owner_account_id=owner_account_id)
+        if str(agent.get("managed_kind") or "")
+        and str(agent.get("id") or "")
+    )
+    return hidden
 
 
 

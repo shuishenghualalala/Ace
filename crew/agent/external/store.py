@@ -72,6 +72,8 @@ class ExternalAgentStore:
                   profile_json TEXT NOT NULL DEFAULT '{}',
                   profile_version INTEGER NOT NULL DEFAULT 2,
                   profile_updated_at TEXT,
+                  managed_kind TEXT NOT NULL DEFAULT '',
+                  managed_key TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL,
                   FOREIGN KEY(runtime_id) REFERENCES external_runtime(id)
@@ -176,10 +178,19 @@ class ExternalAgentStore:
                 f"INTEGER NOT NULL DEFAULT {AGENT_PROFILE_VERSION}",
             )
             self._ensure_column(conn, "external_agent", "profile_updated_at", "TEXT")
+            self._ensure_column(conn, "external_agent", "managed_kind", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "external_agent", "managed_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "external_agent", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "external_team", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_external_agent_owner ON external_agent(owner_account_id, created_at)"
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_external_agent_managed_identity
+                ON external_agent(owner_account_id, managed_kind, managed_key)
+                WHERE managed_kind <> '' AND managed_key <> ''
+                """
             )
             conn.execute(
                 """
@@ -846,8 +857,8 @@ class ExternalAgentStore:
                 """
                 INSERT INTO external_agent (
                   id, owner_account_id, name, provider, runtime_id, model, system_prompt,
-                  custom_args_json, custom_env_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  custom_args_json, custom_env_json, managed_kind, managed_key, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?)
                 """,
                 (
                     agent_id,
@@ -869,12 +880,87 @@ class ExternalAgentStore:
             owner_account_id=owner_account_id,
         )
 
-    def list_agents(self, *, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def get_or_create_managed_agent(
+        self,
+        *,
+        owner_account_id: str = "",
+        managed_kind: str,
+        managed_key: str,
+        name: str,
+        runtime_id: str,
+        model: str = "",
+        system_prompt: str = "",
+    ) -> dict[str, Any]:
+        """Return one owner-scoped managed Agent, creating it transactionally once."""
+
+        kind = str(managed_kind or "").strip().lower()
+        key = str(managed_key or "").strip()
+        if not kind or not key:
+            raise ValueError("managed_kind 和 managed_key 不能为空")
+        runtime = self.get_runtime(runtime_id)
+        now = _now()
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM external_agent WHERE owner_account_id = ? ORDER BY created_at DESC",
-                (owner_account_id,),
-            ).fetchall()
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM external_agent
+                WHERE owner_account_id = ? AND managed_kind = ? AND managed_key = ?
+                """,
+                (owner_account_id, kind, key),
+            ).fetchone()
+            if row is not None:
+                return self._agent_dict(row)
+            agent_id = f"agent_{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                """
+                INSERT INTO external_agent (
+                  id, owner_account_id, name, provider, runtime_id, model, system_prompt,
+                  custom_args_json, custom_env_json, managed_kind, managed_key,
+                  created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '{}', ?, ?, ?, ?)
+                """,
+                (
+                    agent_id,
+                    owner_account_id,
+                    str(name or "Runtime 托管外援").strip() or "Runtime 托管外援",
+                    runtime["provider"],
+                    runtime_id,
+                    model,
+                    system_prompt,
+                    kind,
+                    key,
+                    now,
+                    now,
+                ),
+            )
+            return self._refresh_agent_profile_in_conn(
+                conn,
+                agent_id,
+                runtime=runtime,
+                owner_account_id=owner_account_id,
+            )
+
+    def list_agents(
+        self,
+        *,
+        owner_account_id: str = "",
+        include_managed: bool = True,
+    ) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            if include_managed:
+                rows = conn.execute(
+                    "SELECT * FROM external_agent WHERE owner_account_id = ? ORDER BY created_at DESC",
+                    (owner_account_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM external_agent
+                    WHERE owner_account_id = ? AND COALESCE(managed_kind, '') = ''
+                    ORDER BY created_at DESC
+                    """,
+                    (owner_account_id,),
+                ).fetchall()
         return [self._agent_dict(row) for row in rows]
 
     def get_agent(self, agent_id: str, *, owner_account_id: str = "") -> dict[str, Any]:
@@ -1298,6 +1384,8 @@ class ExternalAgentStore:
     @staticmethod
     def _agent_dict(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
+        item["managed_kind"] = str(item.get("managed_kind") or "")
+        item["managed_key"] = str(item.get("managed_key") or "")
         item["custom_args"] = json.loads(item.pop("custom_args_json") or "[]")
         item["custom_env"] = json.loads(item.pop("custom_env_json") or "{}")
         try:

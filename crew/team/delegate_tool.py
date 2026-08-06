@@ -10,16 +10,31 @@ import asyncio
 import time
 from typing import Any, Callable
 
-from crew.core.envelope import Envelope
-from crew.core.envelope import ResponseChunk
+from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ToolError
 from crew.core.interfaces import Agent, TaskManager
 from crew.core.runctx import current_agent_id, current_owner_account_id, current_workspace_id
 from crew.state.logging import get_logger
-from crew.tools.registry import Registry, tool_result
 from crew.team.bus import TeamBus
+from crew.team.capabilities import CAPABILITIES
+from crew.tools.registry import Registry, tool_result
 
 log = get_logger("team")
+
+TEAM_RESULT_STATUSES = ("pass", "fail", "blocked")
+
+
+def require_team_result_status(intent: str, value: Any) -> str:
+    """Validate the structured outcome carried by a Team result submission."""
+
+    if str(intent or "").strip() != "submit":
+        return ""
+    status = str(value or "").strip().lower()
+    if status not in TEAM_RESULT_STATUSES:
+        raise ToolError(
+            "team_mention(submit) 必须提供 result_status：pass、fail 或 blocked"
+        )
+    return status
 
 
 def build_delegate_schema(member_names: list[str]) -> dict[str, Any]:
@@ -77,6 +92,12 @@ def build_plan_change_schema(member_names: list[str]) -> dict[str, Any]:
                     "enum": member_names,
                     "description": "新增节点的主责成员",
                 },
+                "required_capabilities": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(CAPABILITIES)},
+                    "minItems": 1,
+                    "description": "新增节点完成工作所需的标准能力 key；由 Runtime 用于画像匹配和补员判断",
+                },
                 "depends_on": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -89,7 +110,7 @@ def build_plan_change_schema(member_names: list[str]) -> dict[str, Any]:
                 },
                 "reason": {"type": "string", "description": "为什么当前 DAG 需要新增该节点"},
             },
-            "required": ["change_type", "title", "detail", "assignee"],
+            "required": ["change_type", "title", "detail", "assignee", "required_capabilities"],
         },
     }
 
@@ -129,6 +150,11 @@ def build_mention_schema(member_names: list[str], *, allow_user: bool = True) ->
                 },
                 "content": {"type": "string", "description": "mention 正文"},
                 "node_id": {"type": "string", "description": "可选：关联 TeamPlan 节点 ID"},
+                "result_status": {
+                    "type": "string",
+                    "enum": list(TEAM_RESULT_STATUSES),
+                    "description": "submit 时必填：当前节点的结构化验收状态",
+                },
                 "artifacts": {
                     "type": "array",
                     "items": {"type": "object"},
@@ -263,6 +289,7 @@ def make_mention_handler(
         if not targets:
             raise ToolError("to 不能为空，且必须是 leader、user、all 或团队成员")
         intent = str(args.get("intent") or "broadcast").strip()
+        result_status = require_team_result_status(intent, args.get("result_status"))
         content = str(args.get("content") or "").strip()
         if not content:
             raise ToolError("content 不能为空")
@@ -281,6 +308,7 @@ def make_mention_handler(
             "from": sender,
             "to": targets,
             "intent": intent,
+            "result_status": result_status,
             "node_id": str(args.get("node_id") or ""),
             "text": _mention_text(targets, content),
             "content": content,

@@ -22,7 +22,7 @@ from crew.core.errors import ToolError
 from crew.core.followup import CANCELLED_MARKER, send_followup_question_to, wait_for_answer
 from crew.core.runctx import PushFn, current_owner_account_id
 from crew.state.logging import get_logger
-
+from crew.team.delegate_tool import TEAM_RESULT_STATUSES, require_team_result_status
 
 log = get_logger("interaction_bridge")
 
@@ -192,18 +192,31 @@ class InteractionBridge:
                 },
             })
         if binding.context_type == "team":
+            mention_intents = (
+                ["assign", "submit", "review", "ask", "broadcast", "handoff"]
+                if binding.team_role == "leader"
+                else ["submit", "review", "ask", "handoff"]
+            )
             tools.extend([
                 {
                     "type": "function",
                     "name": "team_mention",
-                    "description": "Send a governed mention inside the current Crew Team.",
+                    "description": (
+                        "Send a governed mention inside the current Crew Team. "
+                        "Use exactly one of the intent values allowed by the schema."
+                    ),
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "to": {"type": "array", "items": {"type": "string"}},
-                            "intent": {"type": "string"},
+                            "intent": {"type": "string", "enum": mention_intents},
                             "content": {"type": "string"},
                             "node_id": {"type": "string"},
+                            "result_status": {
+                                "type": "string",
+                                "enum": list(TEAM_RESULT_STATUSES),
+                                "description": "Required for submit: structured node acceptance status.",
+                            },
                             "artifact_refs": {"type": "array", "items": {"type": "string"}},
                             "questions": {"type": "array", "items": {"type": "object"}},
                             "title": {"type": "string"},
@@ -306,6 +319,7 @@ class InteractionBridge:
 
         if name == "team_mention":
             intent = str(data.get("intent") or "broadcast").strip().lower()
+            result_status = require_team_result_status(intent, data.get("result_status"))
             leader_intents = {"assign", "submit", "review", "ask", "broadcast", "handoff"}
             member_intents = {"submit", "review", "ask", "handoff"}
             allowed = leader_intents if binding.team_role == "leader" else member_intents
@@ -329,6 +343,7 @@ class InteractionBridge:
                 intent=intent,
                 content=content,
                 node_id=str(data.get("node_id") or "").strip(),
+                result_status=result_status,
                 artifacts=list(data.get("artifact_refs") or []),
                 questions=list(data.get("questions") or []),
                 title=str(data.get("title") or "").strip(),
