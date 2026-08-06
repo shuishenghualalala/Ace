@@ -56,6 +56,7 @@ import {
   DialogSelectFolderArgs,
   DialogSaveLocalExportArgs,
   InspirationWindowArgs,
+  WikiOpenSourceFileArgs,
   UpdateStartDownloadArgs
 } from '../shared/ipc-schemas';
 import {
