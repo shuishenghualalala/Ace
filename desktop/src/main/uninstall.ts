@@ -46,6 +46,8 @@ export interface UninstallDeps {
   stopBackendHealthMonitor(): void;
   /** 向渲染进程发送指令隐藏后端断连遮罩（卸载期间不应弹出） */
   suppressBackendOverlay(): void;
+  /** Remove Windows sandbox accounts/WFP before the application binary disappears. */
+  cleanupSecurity?(): Promise<boolean>;
 }
 
 let deps: UninstallDeps | null = null;
@@ -375,7 +377,7 @@ export async function handleUninstall(): Promise<void> {
   deps.stopBackendHealthMonitor();
   deps.suppressBackendOverlay();
 
-  // ── 第 3 步：停止 gateway 子进程，释放 ~/.Crew 文件句柄 ─────────────
+  // ── 第 3 步：停止 gateway 子进程，释放 ~/.Crew 文件句柄 ────────
   console.log('[uninstall] 停止 managed gateway...');
   await deps.stopManagedGateway();
 
@@ -404,6 +406,17 @@ export async function handleUninstall(): Promise<void> {
   }
   if (waited >= maxWait) {
     console.warn(`[uninstall] ⚠ gateway 进程在 ${maxWait}ms 后仍有残留，卸载可能遗留文件`);
+  }
+
+  if (deps.cleanupSecurity && !await deps.cleanupSecurity()) {
+    showUninstallError(
+      win,
+      '安全组件清理失败',
+      '未继续卸载 Crew',
+      'Windows UAC 被拒绝或安全组件清理失败。请重新启动应用后再试，避免遗留技术账号和网络规则。',
+    );
+    deps.resetQuittingFlag?.();
+    return;
   }
 
   // ── 第 6 步：按用户选择清理用户数据 ───────────────────────────────────

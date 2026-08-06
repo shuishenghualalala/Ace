@@ -67,6 +67,20 @@ def test_capture_output_and_poll():
     assert "hello-crew" in r["output_preview"]
 
 
+def test_child_env_uses_only_runtime_defaults(monkeypatch):
+    import crew.tools.process_registry as pr
+
+    monkeypatch.setattr(
+        "crew.state.home.runtime_env_overrides",
+        lambda **kwargs: {"CREW_RUNTIME_HOME": "runtime"},
+    )
+
+    env, secret_values = pr.ProcessRegistry._child_env("owner-a")
+
+    assert env == {"CREW_RUNTIME_HOME": "runtime", "PYTHONUNBUFFERED": "1"}
+    assert secret_values == ()
+
+
 def test_read_log():
     reg = ProcessRegistry()
     s = reg.spawn_local(_py_cmd("print('l1'); print('l2'); print('l3')"), session_key="s")

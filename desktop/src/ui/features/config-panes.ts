@@ -1,6 +1,6 @@
 /**
  * 配置能力（模型 + 渠道）渲染层。
- * 在设置弹窗中提供两个 Pane：
+ * 原本作为独立的「配置」Tab 承载，现已并入设置弹窗的两个 Pane：
  *   - settings-pane-model  →  renderConfigModels()
  *   - settings-pane-channel → renderPlatforms()
  * 入口由 settings.ts 在切换 Pane 时调用，不在此处绑定点击事件。
@@ -9,8 +9,13 @@
 import { backendApi, type ModelOption, type ModelPayload, type PlatformConfigResponse, type PlatformRow } from '../backend-client';
 import { showConfirmDialog } from '../ui-feedback';
 import { $, escapeHtml, notify, state } from '../state';
-import { loadConfig, switchModel } from './model-picker';
+import { loadConfig } from './model-picker';
 import { reconcileSessionModelsAfterDelete } from './session-model';
+import {
+  createSettingsIntegrationView,
+  type SettingsIntegrationItem,
+  type SettingsIntegrationView,
+} from './settings-integrations';
 
 const CHANNEL_MAP: Record<string, string> = {
   feishu: 'feishu',
@@ -38,8 +43,54 @@ const CHANNEL_ICON_SRC: Record<string, string> = {
   feishu: './image/channels/feishu-icon.png',
 };
 
-/** 渠道功能开关（checkbox）：configured 状态下也可切换，切换即保存并即时生效。 */
-const CHANNEL_TOGGLES: Record<string, Array<{ key: string; label: string; hint?: string }>> = {};
+const CHANNEL_ORDER = ['feishu'] as const;
+
+/** 已配置账号也可即时切换的渠道功能开关。 */
+const CHANNEL_TOGGLES: Record<string, Array<{ key: string; label: string; hint?: string }>> = {
+};
+
+let modelIntegrationView: SettingsIntegrationView | null = null;
+let channelIntegrationView: SettingsIntegrationView | null = null;
+
+function ensureModelIntegrationView(): SettingsIntegrationView | null {
+  const pane = document.getElementById('settings-pane-model');
+  if (!pane) return null;
+  if (!modelIntegrationView) {
+    modelIntegrationView = createSettingsIntegrationView({
+      kind: 'model',
+      title: '模型',
+      description: '管理对话模型、接口能力和当前默认配置。',
+      primaryAction: { label: '添加模型' },
+      onPrimaryAction: () => openModelConfigModal(),
+      onSelect: (id) => {
+        const model = (state.config?.model_profiles ?? state.config?.models ?? [])
+          .find((candidate) => candidate.id === id);
+        if (model && !model.builtin) openModelConfigModal(model);
+      },
+      onAction: () => undefined,
+    });
+  }
+  if (!pane.contains(modelIntegrationView.element)) pane.replaceChildren(modelIntegrationView.element);
+  return modelIntegrationView;
+}
+
+function ensureChannelIntegrationView(): SettingsIntegrationView | null {
+  const pane = document.getElementById('settings-pane-channel');
+  if (!pane) return null;
+  if (!channelIntegrationView) {
+    channelIntegrationView = createSettingsIntegrationView({
+      kind: 'channel',
+      title: '渠道',
+      description: '接入消息渠道，让 Agent 跨平台响应。',
+      onSelect: (id) => void openChannelConfigModal(id),
+      onAction: (action, id) => {
+        if (action === 'toggle') void toggleChannelConnection(id);
+      },
+    });
+  }
+  if (!pane.contains(channelIntegrationView.element)) pane.replaceChildren(channelIntegrationView.element);
+  return channelIntegrationView;
+}
 
 /** 渠道密钥字段 → 后端 `has_secret` 使用的环境变量名。 */
 const CHANNEL_SECRET_ENV: Record<string, Record<string, string>> = {
@@ -59,7 +110,7 @@ function channelFieldHasSecret(
 function applyChannelModalIcon(apiName: string): void {
   const icon = document.getElementById('channel-connect-icon') as HTMLImageElement | null;
   if (!icon) return;
-  icon.src = CHANNEL_ICON_SRC[apiName] ?? CHANNEL_ICON_SRC.feishu;
+  icon.src = CHANNEL_ICON_SRC[apiName] ?? '';
   icon.alt = channelDisplayLabel(apiName);
 }
 
@@ -68,7 +119,7 @@ function isPlatformRunning(p: PlatformRow | undefined): boolean {
   return !!p?.running;
 }
 
-/** 渠道是否已与远端建立真实连接。 */
+/** 渠道是否已与远端建立真实连接（飞书 bot 身份校验或通用连接状态）。 */
 function isPlatformLiveConnected(p: PlatformRow | undefined): boolean {
   if (!p) return false;
   if (typeof p.live_connected === 'boolean') return p.live_connected;
@@ -193,18 +244,6 @@ function platformStatusText(p: PlatformRow): string {
   return '未配置';
 }
 
-function modelAvatarGradient(id: string): string {
-  const palettes = [
-    'linear-gradient(135deg, #477df7 0%, #6366f1 100%)',
-    'linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%)',
-    'linear-gradient(135deg, #8b5cf6 0%, #d946ef 100%)',
-    'linear-gradient(135deg, #5b8def 0%, #477df7 100%)',
-  ];
-  let hash = 0;
-  for (let i = 0; i < id.length; i += 1) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  return palettes[hash % palettes.length];
-}
-
 function modelInitials(name: string): string {
   const parts = name.trim().split(/[\s\-_\/]+/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
@@ -307,7 +346,6 @@ export function openModelConfigModal(model?: ModelOption): void {
   }
   if (icon) {
     icon.textContent = modelInitials(rawName);
-    (icon as HTMLElement).style.background = modelAvatarGradient(model?.id || 'new');
   }
   if (deleteBtn) deleteBtn.hidden = !model;
   overlay.hidden = false;
@@ -413,100 +451,46 @@ function modelStatusText(m: ModelOption, isDefault: boolean): string {
   return '已配置';
 }
 
-function modelStatusChipClass(m: ModelOption, isDefault: boolean): string {
-  if (isDefault) return 'is-online';
-  if (!m.has_key) return 'is-error';
-  if (m.loaded) return 'is-configured';
-  return '';
-}
-
-/** 渲染模型列表：设置页负责 Profile 管理与默认模型切换。 */
 export async function renderConfigModels(): Promise<void> {
-  const list = $('#cfg-model-list');
-  if (!list) return;
+  const view = ensureModelIntegrationView();
+  if (!view) return;
   bindModelFormOnce();
-
+  view.update({ state: 'loading', message: '正在加载模型配置…', items: [] });
   if (!state.config) await loadConfig();
   if (!state.config) {
-    list.innerHTML = `<div class="model-list-v3__empty">无法连接服务，请稍后重试。</div>`;
+    view.update({
+      state: 'error',
+      message: '无法连接服务，请稍后重试。',
+      items: [],
+    });
     return;
   }
 
   const models = state.config.model_profiles ?? state.config.models ?? [];
   if (models.length === 0) {
-    list.innerHTML = `<div class="model-list-v3__empty">暂无模型，点击「添加模型」开始配置。</div>`;
-    const activeEl = document.getElementById('cfg-stat-active');
-    if (activeEl) activeEl.textContent = '—';
+    view.update({
+      state: 'empty',
+      message: '暂无模型，点击“添加模型”开始配置。',
+      items: [],
+    });
     return;
   }
-
-  list.innerHTML = models
-    .map((m) => {
-      const isDefault = m.id === state.config!.active_model_id;
-      const rawName = m.name || m.id;
-      const displayName = escapeHtml(rawName);
-      const gradient = modelAvatarGradient(m.id);
-      const statusText = modelStatusText(m, isDefault);
-      const chipClass = modelStatusChipClass(m, isDefault);
-      const canOpen = !m.builtin;
-      const canActivate = !isDefault && m.loaded && m.has_key;
-      const descText = m.builtin
-        ? escapeHtml(m.model)
-        : `${escapeHtml(m.model)}${m.base_url ? ` · ${escapeHtml(m.base_url)}` : ''}`;
-      return `
-      <article class="conn-row model-conn-row${isDefault ? ' is-active' : ''}${canOpen ? '' : ' model-conn-row--readonly'}" data-model-id="${escapeHtml(m.id)}">
-        <div class="conn-row__icon model-conn-row__icon" style="background:${gradient}">${escapeHtml(modelInitials(rawName))}</div>
-        <div class="conn-row__copy">
-          <div class="conn-row__name">${displayName}</div>
-          <div class="conn-row__desc">${descText}</div>
-          <span class="conn-row__status channel-status-chip ${chipClass}">
-            <span class="channel-status-dot"></span>
-            <span class="model-conn-row__status">${escapeHtml(statusText)}</span>
-          </span>
-        </div>
-        <div class="model-conn-row__actions">
-          ${canOpen ? `<button type="button" class="set-v2-btn" data-model-edit="${escapeHtml(m.id)}">编辑</button>` : ''}
-          <button type="button" class="conn-row__btn${isDefault ? ' conn-row__btn--muted' : ''}" data-model-activate="${escapeHtml(m.id)}"${canActivate ? '' : ' disabled'} title="${isDefault ? '当前默认模型' : canActivate ? '设为新会话的默认模型' : '请先完成模型配置'}">${isDefault ? '当前默认' : '设为默认'}</button>
-        </div>
-      </article>
-    `;
-    })
-    .join('');
-
-  list.querySelectorAll<HTMLButtonElement>('[data-model-edit]').forEach((button) => {
-    const id = button.dataset.modelEdit || '';
-    const model = models.find((m) => m.id === id);
-    if (model && !model.builtin) button.addEventListener('click', () => openModelConfigModal(model));
+  const items: SettingsIntegrationItem[] = models.map((model) => {
+    const active = model.id === state.config!.active_model_id;
+    return {
+      id: model.id,
+      title: model.name || model.id,
+      description: model.builtin
+        ? model.model
+        : `${model.model}${model.base_url ? ` · ${model.base_url}` : ''}`,
+      status: modelStatusText(model, active),
+      tone: active ? 'success' : !model.has_key ? 'danger' : model.loaded ? 'info' : 'warning',
+      selectable: !model.builtin,
+      icon: 'process-thinking',
+      active,
+    };
   });
-
-  list.querySelectorAll<HTMLButtonElement>('[data-model-activate]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const id = button.dataset.modelActivate || '';
-      if (!id || button.disabled) return;
-      button.disabled = true;
-      void switchModel(id)
-        .then(async () => {
-          await renderConfigModels();
-          notify(`已将 ${modelStatusLabel(models, id)} 设为默认模型`);
-        })
-        .catch((error) => {
-          button.disabled = false;
-          notify(`模型切换失败：${(error as Error).message}`);
-        });
-    });
-  });
-
-  const activeEl = document.getElementById('cfg-stat-active');
-  if (activeEl) {
-    const active = state.config.active_model_id;
-    const found = models.find((m) => m.id === active);
-    activeEl.textContent = found?.name || active || '—';
-  }
-}
-
-function modelStatusLabel(models: ModelOption[], modelId: string): string {
-  const model = models.find((item) => item.id === modelId);
-  return model?.name || model?.model || modelId;
+  view.update({ state: 'ready', message: '', items });
 }
 
 export async function openChannelConfigModal(channel: string): Promise<void> {
@@ -589,7 +573,6 @@ export async function openChannelConfigModal(channel: string): Promise<void> {
         </label>
       </div>
     `).join('');
-  // 功能开关：切换即保存（后端热应用，运行中的渠道即时生效），configured 状态下也可用。
   form.querySelectorAll<HTMLInputElement>('[data-channel-toggle-field]').forEach((input) => {
     input.addEventListener('change', () => {
       void saveChannelToggle(apiName, input.dataset.channelToggleField || '', input.checked);
@@ -619,20 +602,20 @@ function readChannelForm(): { config: Record<string, unknown>; secrets: Record<s
   return { config, secrets, environment };
 }
 
-/** 渠道功能开关：切换即保存（携带当前 enabled 状态与环境预设，避免误停渠道或丢失 URL）；失败时还原勾选。 */
+/** 保存单个渠道开关，并保留当前启用状态与环境。 */
 async function saveChannelToggle(apiName: string, key: string, value: boolean): Promise<void> {
-  const label = (CHANNEL_TOGGLES[apiName] ?? []).find((t) => t.key === key)?.label || key;
+  const label = (CHANNEL_TOGGLES[apiName] ?? []).find((toggle) => toggle.key === key)?.label || key;
   const input = document.querySelector<HTMLInputElement>(`[data-channel-toggle-field="${key}"]`);
-  if (input) input.disabled = true;  // 保存期间防连点
+  if (input) input.disabled = true;
   try {
-    const [platforms, cfg] = await Promise.all([
+    const [platforms, config] = await Promise.all([
       backendApi.platforms(),
       backendApi.platformConfig(apiName),
     ]);
-    const current = platforms.find((x) => x.name === apiName);
+    const current = platforms.find((platform) => platform.name === apiName);
     await backendApi.savePlatformConfig(apiName, {
       enabled: current?.enabled ?? false,
-      ...(cfg.environment ? { environment: cfg.environment } : {}),
+      ...(config.environment ? { environment: config.environment } : {}),
       config: { [key]: value },
     });
     notify(value ? `已开启${label}` : `已关闭${label}`);
@@ -743,17 +726,6 @@ function bindChannelButton(id: string, handler: (channel: string) => Promise<boo
 }
 
 export function bindChannelConfigModal(): void {
-  // 渠道卡片：点击卡片主体 → 打开配置弹层
-  document.querySelectorAll<HTMLElement>('.conn-row[data-channel]').forEach((card) => {
-    const channel = card.getAttribute('data-channel') ?? '';
-    if (!channel) return;
-    card.addEventListener('click', (e: Event) => {
-      // 排除点击「连接 / 断开」按钮（它有自己的 handler）
-      if ((e.target as HTMLElement | null)?.closest('[data-channel-toggle]')) return;
-      void openChannelConfigModal(channel);
-    });
-  });
-
   bindChannelButton('channel-connect-submit', async (channel) => {
     const form = readChannelForm();
     const configResp = await backendApi.platformConfig(channel);
@@ -815,40 +787,43 @@ export function bindChannelConfigModal(): void {
   });
 }
 
-/** 刷新连接行状态。 */
 export async function renderPlatforms(): Promise<void> {
+  const view = ensureChannelIntegrationView();
+  if (!view) return;
+  view.update({ state: 'loading', message: '正在加载渠道状态…', items: [] });
   let platforms: PlatformRow[] = [];
   try {
     platforms = await backendApi.platforms();
-  } catch {
+  } catch (error) {
+    view.update({
+      state: 'error',
+      message: `无法加载渠道：${(error as Error).message}`,
+      items: [],
+    });
     return;
   }
 
   const byName = Object.fromEntries(platforms.map((p) => [p.name.toLowerCase(), p]));
-
-  document.querySelectorAll('.conn-row[data-channel]').forEach((card) => {
-    const key = card.getAttribute('data-channel') ?? '';
-    const apiName = CHANNEL_MAP[key] ?? key;
-    const p = byName[apiName] || platforms.find((x) => x.label.includes(key) || x.name === key);
-    const statusEl = card.querySelector('.channel-overview-status');
-    const chipEl = card.querySelector('.channel-status-chip');
-    const titleEl = card.querySelector('.conn-row__name');
-    const btn = card.querySelector('[data-channel-toggle]') as HTMLButtonElement | null;
-    if (titleEl) titleEl.textContent = channelDisplayLabel(apiName, titleEl.textContent || apiName);
-    if (statusEl) statusEl.textContent = p ? platformStatusText(p) : '未注册';
-    if (chipEl) {
-      const live = isPlatformLiveConnected(p);
-      chipEl.classList.toggle('is-online', live);
-      chipEl.classList.toggle('is-configured', !!(p?.has_account || p?.configured) && !live && !p?.running && !p?.error);
-      chipEl.classList.toggle('is-error', !!p?.error);
-    }
-    if (btn && p) {
-      const live = isPlatformLiveConnected(p);
-      const starting = isPlatformRunning(p) && !live;
-      btn.textContent = live ? '断开' : (starting ? '连接中' : '连接');
-      btn.classList.toggle('conn-row__btn--disconnect', live);
-      btn.disabled = !!p.operation || starting;
-      btn.hidden = false;
-    }
+  const items: SettingsIntegrationItem[] = CHANNEL_ORDER.map((apiName) => {
+    const platform = byName[apiName];
+    const live = isPlatformLiveConnected(platform);
+    const starting = isPlatformRunning(platform) && !live;
+    return {
+      id: apiName,
+      title: channelDisplayLabel(apiName, platform?.label),
+      description: '',
+      status: platform ? platformStatusText(platform) : '不可用',
+      tone: platform?.error ? 'danger' : live ? 'success' : starting ? 'running' :
+        platform?.configured || platform?.has_account ? 'info' : 'neutral',
+      selectable: Boolean(platform),
+      image: { src: CHANNEL_ICON_SRC[apiName], alt: '' },
+      actions: platform ? [{
+        id: 'toggle',
+        label: live ? '断开' : starting ? '连接中' : '连接',
+        tone: live ? 'danger' : 'secondary',
+        disabled: Boolean(platform.operation) || starting,
+      }] : [],
+    };
   });
+  view.update({ state: 'ready', message: '', items });
 }

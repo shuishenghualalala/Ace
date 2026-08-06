@@ -459,10 +459,24 @@ class ToolRunner:
                     ensure_ascii=False,
                 )
             return None
-        if not should_block_for_tool_call(tc):
+        from crew.security.settings import strict_security_enabled
+
+        strict = strict_security_enabled()
+        native_gated = strict and tc.name in {
+            "terminal",
+            "file_read",
+            "file_write",
+            "glob",
+            "grep",
+            "patch",
+        }
+        if not native_gated and not should_block_for_tool_call(tc):
             return None  # 只读类工具默认放行，不打扰用户
         behavior, reason, suggested = check_permission(
-            tc.name, tc.arguments, session_id=self.session_id
+            tc.name,
+            tc.arguments,
+            session_id=self.session_id,
+            default_behavior="allow" if native_gated or not strict else "ask",
         )
         if behavior == "allow":
             return None
@@ -872,7 +886,7 @@ class ToolRunner:
             "ui_label": ui_label,
         }
         if authorized:
-            trace_payload["arguments"] = tc.arguments
+            trace_payload["arguments"] = ui_args
         llm_trace("tool_start", trace_payload)
         return ResponseChunk.tool_event(
             rid, tc.name, "start", str(ui_args), next_seq(),
@@ -906,7 +920,11 @@ class ToolRunner:
             "name": tc.name,
             "status": status,
             "is_error": result.is_error,
-            "content": "<browser_content_redacted>" if str(tc.name).startswith("browser_") else result.content,
+            "content": (
+                "<browser_content_redacted>"
+                if str(tc.name).startswith("browser_") or tc.name == "record_replay"
+                else result.content
+            ),
         })
         detail = tool_result_detail_for_ui(tc.name, result.content)
         return ResponseChunk.tool_event(

@@ -25,7 +25,15 @@ files:
   - "!**/.DS_Store"
 
 # 显式排除源码与开发产物，避免进包
-extraResources: []
+extraResources:
+  - from: security-runtime-bin
+    to: .
+    filter:
+      - ace-security-runtime*
+      - bwrap
+      - runtime-manifest.json
+      - security-runtime.env
+      - BWRAP-LICENSE
 
 # Linux target：dir 即"未打包目录"。
 linux:

@@ -1,7 +1,8 @@
 /**
  * 后端历史 → 前端 ChatMessage 的纯映射（无 DOM / 无副作用）。
- * 包含 makeSessionTitle / guessAttachmentType / parseAttachmentMarkers /
- * mapBackendHistoryItem 等无副作用转换。
+ *
+ * 从 ui/index.ts 抽出（X2）：guessAttachmentType / parseAttachmentMarkers /
+ * mapBackendHistoryItem 原样搬迁，行为等价。
  */
 
 import {
@@ -13,10 +14,6 @@ import type { ChatMessage, MessageRole, ToolCallInfo, TurnFileChangeSummary } fr
 import { isPlanDocumentPath } from '../plan-document-path';
 import { newMessageId, state } from '../state';
 import { sessionDisplayModelLabel, sessionMessageModelLabel } from './session-model';
-
-export function makeSessionTitle(text: string): string {
-  return text.trim().slice(0, 18) || '新对话';
-}
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg']);
 const BINARY_RESULT_EXTENSIONS = new Set([
@@ -247,7 +244,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     })),
   };
   if (role === 'assistant') {
-    // 落库摘要保留准确 +/-；terminal 结果用于补充未落库的最终文件。
+    // 落库摘要保留准确 +/-；再从旧 terminal 结果补回此前未采集的最终文件。
     const persisted = normalizeTurnFileChanges(item.turn_file_changes);
     const inferred = inferTurnFileChangesFromToolCalls(
       persisted ? item.tool_calls?.filter((tc) => tc.name === 'terminal') : item.tool_calls,

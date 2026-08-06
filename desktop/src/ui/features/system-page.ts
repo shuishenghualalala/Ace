@@ -1,18 +1,22 @@
 /**
  * 系统页：资源 + 服务 + 日志。
  *
- * 全部数据来自以下后端接口：
+ * 全部数据来自后端真实接口，不再使用 mock/估算：
  *   GET /api/system/metrics      → 运行时长 / CPU / 内存 / 磁盘 / 网络（psutil）
  *   GET /api/usage               → 累计 token / 会话数（SQL 聚合）
  *   GET /api/runtime/concurrency → 并发上限 / 活跃 / 排队（dispatcher.runtime_status）
  *   GET /api/sessions/status     → 各会话运行状态
- *   GET /api/platforms           → 平台插件运行状态
+ *   GET /api/platforms           → 平台插件运行状态（feishu）
  *   GET /api/system/logs         → 进程内环形缓冲日志（按级别/关键词筛选）
  */
 
 import { backendApi, type LogEntry, type PlatformRow, type SystemMetrics } from '../backend-client';
 import { state } from '../state';
 import { bindPagination, paginate, renderPagination } from '../pagination';
+import { createSystemPageView, type SystemPageView } from './system-page-view';
+import { createStatus } from '../components/controls';
+import { createIcon, type IconId } from '../components/icon';
+import { setRuntimeStyle } from '../components/runtime-style';
 
 // ── 工具函数 ────────────────────────────────────────
 function fmtUptime(seconds: number): string {
@@ -38,7 +42,7 @@ function fmtBytes(n: number): string {
 
 function setBar(id: string, pct: number, valId: string, valText: string): void {
   const el = document.getElementById(id);
-  if (el) el.style.width = `${pct}%`;
+  if (el) setRuntimeStyle(el, 'width', `${pct}%`);
   const v = document.getElementById(valId);
   if (v) v.textContent = valText;
 }
@@ -62,44 +66,56 @@ let lastMetrics: SystemMetrics | null = null;
 let lastFetchAt = 0;
 let lastError: string | null = null;
 let overviewRefreshTimer: number | null = null;
+let systemPageView: SystemPageView | null = null;
 
-async function refreshBackendData(_force = false): Promise<void> {
+function ensureSystemPageView(): SystemPageView | null {
+  const root = document.getElementById('system-page-root');
+  if (!root) return null;
+  if (!systemPageView) {
+    systemPageView = createSystemPageView({ onRefresh: () => void refreshBackendData() });
+  }
+  if (!root.contains(systemPageView.element)) root.replaceChildren(systemPageView.element);
+  return systemPageView;
+}
+
+async function refreshBackendData(): Promise<void> {
+  const view = ensureSystemPageView();
   if (!state.backendConnected) {
     lastError = null;
+    view?.setStatus('offline', '后端未连接，连接恢复后自动刷新');
     renderOverviewValues();
     return;
   }
-  try {
-    const [usage, conc, sessions, metrics] = await Promise.allSettled([
-      backendApi.usage(),
-      backendApi.runtimeConcurrency(),
-      backendApi.sessionsStatus(),
-      backendApi.systemMetrics(),
-    ]);
-    if (usage.status === 'fulfilled') lastUsage = usage.value;
-    if (conc.status === 'fulfilled') lastConcurrency = conc.value;
-    if (sessions.status === 'fulfilled') lastSessions = sessions.value;
-    if (metrics.status === 'fulfilled') lastMetrics = metrics.value;
-    if (metrics.status === 'rejected') {
-      lastError = `资源指标失败：${(metrics.reason as Error)?.message || '未知'}`;
-    } else {
-      lastError = null;
-    }
-    lastFetchAt = Date.now();
-    renderOverviewValues();
-  } catch (e) {
-    lastError = `刷新失败：${(e as Error)?.message || '未知'}`;
-    renderOverviewValues();
-  }
+  view?.setStatus('loading', '');
+  const [usage, conc, sessions, metrics] = await Promise.allSettled([
+    backendApi.usage(),
+    backendApi.runtimeConcurrency(),
+    backendApi.sessionsStatus(),
+    backendApi.systemMetrics(),
+  ]);
+  const failures: string[] = [];
+  if (usage.status === 'fulfilled') lastUsage = usage.value;
+  else failures.push(`使用统计：${String(usage.reason)}`);
+  if (conc.status === 'fulfilled') lastConcurrency = conc.value;
+  else failures.push(`并发状态：${String(conc.reason)}`);
+  if (sessions.status === 'fulfilled') lastSessions = sessions.value;
+  else failures.push(`会话状态：${String(sessions.reason)}`);
+  if (metrics.status === 'fulfilled') lastMetrics = metrics.value;
+  else failures.push(`资源指标：${String(metrics.reason)}`);
+  lastError = failures.length ? failures.join('；') : null;
+  lastFetchAt = Date.now();
+  renderOverviewValues();
 }
 
 // ── 总览渲染 ────────────────────────────────────────
 export function renderSystemOverview(): void {
+  ensureSystemPageView();
   void refreshBackendData().then(() => renderOverviewValues());
 }
 
 function renderOverviewValues(): void {
   const conn = state.backendConnected;
+  const view = ensureSystemPageView();
 
   // ── 4 KPI ──
   const uptimeEl = document.getElementById('sys-kpi-uptime');
@@ -204,6 +220,12 @@ function renderOverviewValues(): void {
       stampEl.textContent = '暂无数据';
     }
   }
+  if (!conn) view?.setStatus('offline', '后端未连接，连接恢复后自动刷新');
+  else if (lastError) view?.setStatus(lastFetchAt ? 'partial' : 'error', lastError);
+  else if (lastFetchAt) {
+    const updated = new Date(lastFetchAt).toLocaleTimeString('zh-CN', { hour12: false });
+    view?.setStatus('ready', `系统状态已更新 · ${updated}`);
+  }
 
   // ── 活跃服务表（来自 /api/platforms） ──
   void renderServicesTable();
@@ -215,7 +237,7 @@ async function renderServicesTable(): Promise<void> {
   const hint = document.getElementById('sys-services-hint');
   if (!container) return;
   if (!state.backendConnected) {
-    container.innerHTML = '<div class="sys-v2-table__empty">暂无服务状态</div>';
+    container.textContent = '暂无服务状态';
     if (hint) hint.textContent = '—';
     return;
   }
@@ -226,45 +248,30 @@ async function renderServicesTable(): Promise<void> {
     platforms = [];
   }
   let onlineCount = 0;
-  const rows: string[] = [];
+  container.replaceChildren();
   for (const p of platforms) {
     const status = p.error ? 'error' : (p.live_connected || (p.detail as { connected?: boolean } | undefined)?.connected) ? 'online' : 'offline';
     if (status === 'online') onlineCount += 1;
-    rows.push(serviceRow(p.label || p.name, status, '—', '—', '—'));
+    const row = document.createElement('div');
+    const name = document.createElement('span');
+    row.className = 'system-page__service';
+    name.className = 'system-page__service-name';
+    name.textContent = p.label || p.name;
+    row.append(
+      name,
+      createStatus({
+        label: status === 'online' ? '在线' : status === 'error' ? '异常' : '已停止',
+        tone: status === 'online' ? 'success' : status === 'error' ? 'warning' : 'neutral',
+      }),
+    );
+    container.append(row);
   }
-  if (rows.length === 0) {
-    container.innerHTML = '<div class="sys-v2-table__empty">暂无服务状态</div>';
+  if (platforms.length === 0) {
+    container.textContent = '暂无服务状态';
     if (hint) hint.textContent = '—';
     return;
   }
-  container.innerHTML = `
-    <div class="sys-v2-table__row sys-v2-table__row--head">
-      <div>服务</div>
-      <div class="sys-v2-table__cell sys-v2-table__cell--left">状态</div>
-      <div class="sys-v2-table__cell">PID</div>
-      <div class="sys-v2-table__cell sys-v2-table__cell--right">内存</div>
-    </div>
-    ${rows.join('')}
-  `;
   if (hint) hint.textContent = `${onlineCount} 在线`;
-}
-
-function serviceRow(name: string, status: 'online' | 'offline' | 'error', pid: string, _cpu: string, mem: string): string {
-  const dotClass = status === 'online' ? '' : status === 'error' ? 'is-amber' : 'is-gray';
-  const pillClass = status === 'online' ? 'status-pill--online' : status === 'error' ? 'status-pill--warn' : 'status-pill--offline';
-  const pillText = status === 'online' ? '在线' : status === 'error' ? '异常' : '已停止';
-  return `
-    <div class="sys-v2-table__row">
-      <div class="sys-v2-table__name">
-        <span class="sys-v2-table__name-dot ${dotClass}"></span>${name}
-      </div>
-      <div class="sys-v2-table__cell sys-v2-table__cell--left">
-        <span class="status-pill ${pillClass}"><span class="status-pill__dot"></span>${pillText}</span>
-      </div>
-      <div class="sys-v2-table__cell">${pid}</div>
-      <div class="sys-v2-table__cell sys-v2-table__cell--right">${mem}</div>
-    </div>
-  `;
 }
 
 // ── 日志页：真实日志 + 级别/关键词筛选 ────────────────
@@ -275,35 +282,27 @@ let logPageSize = 50;
 let logRefreshTimer: number | null = null;
 let logAutoRefreshTimer: number | null = null;
 
-const LOG_EMPTY_HTML = `
-  <div class="system-logs-empty">
-    <div class="system-logs-empty__icon" aria-hidden="true">
-      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
-    </div>
-    <div class="system-logs-empty__title">暂无日志</div>
-    <div class="system-logs-empty__desc">没有匹配当前筛选条件的日志，或服务尚未产生日志。</div>
-  </div>
-`;
-
-const LOG_OFFLINE_HTML = `
-  <div class="system-logs-empty">
-    <div class="system-logs-empty__icon" aria-hidden="true">
-      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
-    </div>
-    <div class="system-logs-empty__title">暂无日志</div>
-    <div class="system-logs-empty__desc">连接恢复后可查看实时日志。</div>
-  </div>
-`;
-
-const LOG_FAIL_HTML = `
-  <div class="system-logs-empty">
-    <div class="system-logs-empty__icon system-logs-empty__icon--error" aria-hidden="true">
-      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    </div>
-    <div class="system-logs-empty__title">日志拉取失败</div>
-    <div class="system-logs-empty__desc">请稍后重试。</div>
-  </div>
-`;
+function createLogState(
+  stateName: 'empty' | 'offline' | 'error',
+  iconId: IconId,
+  titleText: string,
+  descriptionText: string,
+): HTMLElement {
+  const stateElement = document.createElement('div');
+  const icon = document.createElement('span');
+  const title = document.createElement('strong');
+  const description = document.createElement('p');
+  stateElement.className = 'system-logs-empty';
+  stateElement.dataset.state = stateName;
+  icon.className = 'system-logs-empty__icon';
+  icon.append(createIcon(iconId, { size: 24 }));
+  title.className = 'system-logs-empty__title';
+  title.textContent = titleText;
+  description.className = 'system-logs-empty__desc';
+  description.textContent = descriptionText;
+  stateElement.append(icon, title, description);
+  return stateElement;
+}
 
 export async function renderSystemLogs(): Promise<void> {
   const list = document.getElementById('sys-logs-list');
@@ -311,9 +310,14 @@ export async function renderSystemLogs(): Promise<void> {
   const pagerHost = document.getElementById('sys-logs-pager');
   if (!list) return;
   if (!state.backendConnected) {
-    list.innerHTML = LOG_OFFLINE_HTML;
+    list.replaceChildren(createLogState(
+      'offline',
+      'icon-warning',
+      '暂无日志',
+      '连接恢复后可查看实时日志。',
+    ));
     if (countEl) countEl.textContent = '0';
-    if (pagerHost) pagerHost.innerHTML = '';
+    pagerHost?.replaceChildren();
     return;
   }
   try {
@@ -325,12 +329,17 @@ export async function renderSystemLogs(): Promise<void> {
     const items = data.items;
     if (countEl) countEl.textContent = String(items.length);
     if (items.length === 0) {
-      list.innerHTML = LOG_EMPTY_HTML;
-      if (pagerHost) pagerHost.innerHTML = '';
+      list.replaceChildren(createLogState(
+        'empty',
+        'icon-file',
+        '暂无日志',
+        '没有匹配当前筛选条件的日志，或服务尚未产生日志。',
+      ));
+      pagerHost?.replaceChildren();
       return;
     }
     const pageItems = paginate(items, logPage, logPageSize);
-    list.innerHTML = pageItems.map(renderLogLine).join('');
+    list.replaceChildren(...pageItems.map(createLogLine));
     if (pagerHost) {
       pagerHost.innerHTML = renderPagination(
         { page: logPage, pageSize: logPageSize, total: items.length },
@@ -349,22 +358,35 @@ export async function renderSystemLogs(): Promise<void> {
       });
     }
   } catch {
-    list.innerHTML = LOG_FAIL_HTML;
-    if (pagerHost) pagerHost.innerHTML = '';
+    list.replaceChildren(createLogState(
+      'error',
+      'icon-error',
+      '日志拉取失败',
+      '请稍后重试。',
+    ));
+    pagerHost?.replaceChildren();
   }
 }
 
-function renderLogLine(entry: LogEntry): string {
+function createLogLine(entry: LogEntry): HTMLElement {
   const time = new Date(entry.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false });
   const levelClass = levelToClass(entry.level);
-  return `
-    <div class="system-log-line system-log-line--${levelClass}">
-      <span class="system-log-line__time">${time}</span>
-      <span class="system-log-line__level">${entry.level}</span>
-      <span class="system-log-line__logger">${entry.name}</span>
-      <span class="system-log-line__msg">${entry.message}</span>
-    </div>
-  `;
+  const row = document.createElement('div');
+  const timeElement = document.createElement('span');
+  const level = document.createElement('span');
+  const logger = document.createElement('span');
+  const message = document.createElement('span');
+  row.className = `system-log-line system-log-line--${levelClass}`;
+  timeElement.className = 'system-log-line__time';
+  timeElement.textContent = time;
+  level.className = 'system-log-line__level';
+  level.textContent = entry.level;
+  logger.className = 'system-log-line__logger';
+  logger.textContent = entry.name;
+  message.className = 'system-log-line__msg';
+  message.textContent = entry.message;
+  row.append(timeElement, level, logger, message);
+  return row;
 }
 
 function levelToClass(level: string): string {
@@ -425,19 +447,17 @@ export function disposeSystemTab(): void {
     window.clearInterval(overviewRefreshTimer);
     overviewRefreshTimer = null;
   }
+  if (logRefreshTimer != null) {
+    window.clearTimeout(logRefreshTimer);
+    logRefreshTimer = null;
+  }
+  if (logAutoRefreshTimer != null) {
+    window.clearInterval(logAutoRefreshTimer);
+    logAutoRefreshTimer = null;
+  }
 }
 
 export function bindSystemTab(): () => void {
-  // 资源刷新按钮
-  const refreshBtn = document.getElementById('sys-resources-refresh');
-  const onRefresh = (): void => {
-    const btn = document.getElementById('sys-resources-refresh');
-    btn?.classList.add('is-refreshing');
-    void refreshBackendData(true).finally(() => {
-      window.setTimeout(() => btn?.classList.remove('is-refreshing'), 220);
-    });
-  };
-  refreshBtn?.addEventListener('click', onRefresh);
   bindLogsControls();
   // 每 8s 刷新总览指标（避免重复创建：setInterval 多次调用 → 多次刷新）
   if (overviewRefreshTimer != null) window.clearInterval(overviewRefreshTimer);
@@ -447,7 +467,6 @@ export function bindSystemTab(): () => void {
 
   // D10: return a disposer so the caller can tear the interval + listener down.
   return () => {
-    if (refreshBtn) refreshBtn.removeEventListener('click', onRefresh);
     disposeSystemTab();
   };
 }

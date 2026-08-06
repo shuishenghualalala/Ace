@@ -3,7 +3,7 @@
  *
  * Scans the assets/styles CSS tree and classifies every
  * `font-size: NNpx` declaration into one of three buckets:
- *   - shouldUseVar    (~80%): NN is one of {10..56} → `var(--font-*)`
+ *   - shouldUseVar    (~80%): NN is one of {10..56} → `var(--mw-font-*)`
  *   - shouldUseCalc   (~15%): other integer that maps to a calc() expression
  *   - mustKeepLiteral (~5%):  rare / sub-pixel / icon-only sizes
  *
@@ -23,25 +23,25 @@ const FONT_SIZE_PATTERN = /font-size\s*:\s*(\d+(?:\.\d+)?)px/g;
 
 /**
  * Canonical mapping: integer px size → recommended token name.
- * Sourced from variables.css `--font-*` scale at base-font-size = 14.
+ * Sourced from tokens.css `--mw-font-*` scale at base-font-size = 14.
  */
 const COMMON_SIZES = {
-  10: '--font-xs',
-  11: '--font-xs',
-  12: '--font-sm',
-  13: '--font-md',
-  14: '--font-base',
-  15: '--font-lg',
-  16: '--font-lg',
-  18: '--font-xl',
-  20: '--font-2xl',
-  21: '--font-2xl',
-  24: '--font-3xl',
-  28: '--font-3xl',
-  30: '--font-4xl',
-  36: '--font-4xl',
-  40: '--font-5xl',
-  56: '--font-5xl',
+  10: '--mw-font-xxs',
+  11: '--mw-font-xs',
+  12: '--mw-font-sm',
+  13: '--mw-font-md',
+  14: '--mw-font-base',
+  15: '--mw-font-lg',
+  16: '--mw-font-lg',
+  18: '--mw-font-xl',
+  20: '--mw-font-2xl',
+  21: '--mw-font-2xl',
+  24: '--mw-font-3xl',
+  28: '--mw-font-3xl',
+  30: '--mw-font-4xl',
+  36: '--mw-font-4xl',
+  40: '--mw-font-5xl',
+  56: '--mw-font-5xl',
 };
 
 /**
@@ -128,11 +128,12 @@ function isCli() {
 
 if (isCli()) {
   const args = process.argv.slice(2);
+  const strict = args.includes('--strict');
   const target = args.find((a) => !a.startsWith('--')) ?? 'assets/styles';
   const report = auditFontSizes(target);
 
   process.stdout.write(`font-size audit — ${report.summary.total} literals\n`);
-  process.stdout.write(`  should use --font-* : ${report.summary.shouldUseVar}\n`);
+  process.stdout.write(`  should use --mw-font-* : ${report.summary.shouldUseVar}\n`);
   process.stdout.write(`  should use calc()   : ${report.summary.shouldUseCalc}\n`);
   process.stdout.write(`  must keep literal  : ${report.summary.mustKeepLiteral}\n\n`);
 
@@ -141,5 +142,9 @@ if (isCli()) {
   }
   if (report.byFile.length > 10) {
     process.stdout.write(`  … and ${report.byFile.length - 10} more files\n`);
+  }
+
+  if (strict && report.summary.total > 0) {
+    process.exitCode = 1;
   }
 }

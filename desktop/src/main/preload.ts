@@ -3,12 +3,13 @@
  */
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
-  AuthStateSnapshot,
+  UserInfoSnapshot,
   UpdateStateSnapshot,
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
   VersionUpdatePayload,
 } from '../shared/types';
+import type { SecurityAuditArgs } from '../shared/ipc-schemas';
 
 const api = {
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
@@ -29,15 +30,32 @@ const api = {
       allowedRoot: allowedRoot && allowedRoot.trim() ? allowedRoot : undefined,
     }),
   readTextFile: (p: string) => ipcRenderer.invoke('shell:readTextFile', { path: p }) as Promise<string>,
-  writeTextFile: (p: string, content: string) => ipcRenderer.invoke('shell:writeTextFile', { path: p, content }) as Promise<{ ok: true }>,
-  readFileBase64: (p: string) => ipcRenderer.invoke('shell:readFileBase64', { path: p }) as Promise<{ base64: string; mimeType: string }>,
-  writeFileBase64: (p: string, base64: string) => ipcRenderer.invoke('shell:writeFileBase64', { path: p, base64 }) as Promise<{ ok: true }>,
   /** 静默探测路径是否为可读文件；不存在时返回 false，不抛错、不刷主进程 ENOENT 日志。 */
   pathExists: (p: string) => ipcRenderer.invoke('shell:pathExists', { path: p }) as Promise<boolean>,
-  showItemInFolder: (p: string) => ipcRenderer.invoke('shell:showItemInFolder', { path: p }),
-  listOpenApplications: (p: string) => ipcRenderer.invoke('shell:listOpenApplications', { path: p }) as Promise<Array<{ id: string; name: string }>>,
+  /** 仅允许读取/覆盖当前账号已有的任务产物；主进程重新校验 canonical owner root。 */
+  readFileBase64: (p: string) =>
+    ipcRenderer.invoke('shell:readFileBase64', { path: p }) as Promise<{
+      base64: string;
+      mimeType: string;
+    }>,
+  writeTextFile: (p: string, content: string) =>
+    ipcRenderer.invoke('shell:writeTextFile', { path: p, content }) as Promise<{ ok: true }>,
+  writeFileBase64: (p: string, base64: string) =>
+    ipcRenderer.invoke('shell:writeFileBase64', { path: p, base64 }) as Promise<{ ok: true }>,
+  listOpenApplications: (p: string) =>
+    ipcRenderer.invoke('shell:listOpenApplications', { path: p }) as Promise<Array<{
+      id: string;
+      name: string;
+    }>>,
   openPathWith: (p: string, applicationId: string) =>
     ipcRenderer.invoke('shell:openPathWith', { path: p, applicationId }) as Promise<{ ok: true }>,
+  /** 由主进程按已鉴权 Workspace 记录探测 root；Renderer 不提供路径。 */
+  workspaceDirectoryInfo: (workspaceId: string) =>
+    ipcRenderer.invoke('workspace:directoryInfo', { workspaceId }) as Promise<{
+      exists: boolean;
+      canonicalPath: string | null;
+    }>,
+  showItemInFolder: (p: string) => ipcRenderer.invoke('shell:showItemInFolder', { path: p }),
   copyImage: (p: string) => ipcRenderer.invoke('clipboard:writeImage', { path: p }) as Promise<{ ok: true }>,
   revealImage: (p: string) => ipcRenderer.invoke('image:showItemInFolder', { path: p }) as Promise<{ ok: true }>,
   selectFile: (opts?: Record<string, unknown>) => ipcRenderer.invoke('dialog:selectFile', opts || {}),
@@ -46,21 +64,14 @@ const api = {
   setAutoLaunchEnabled: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-launch-enabled', enabled),
   getCloseBehavior: () => ipcRenderer.invoke('app:get-close-behavior'),
   setCloseBehavior: (behavior: 'tray' | 'quit' | 'ask') => ipcRenderer.invoke('app:set-close-behavior', behavior),
+  getStrictSecurityEnabled: () => ipcRenderer.invoke('security:get-strict-security'),
+  setStrictSecurityEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('security:set-strict-security', enabled),
 
-  authGetState: (): Promise<AuthStateSnapshot> => ipcRenderer.invoke('auth:get-state'),
-  authSendCode: (phoneNumber: string): Promise<Record<string, unknown>> =>
-    ipcRenderer.invoke('auth:send-code', { phoneNumber }),
-  authLogin: (phoneNumber: string, code: string): Promise<Record<string, unknown>> =>
-    ipcRenderer.invoke('auth:login', { phoneNumber, code }),
-  authLogout: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('auth:logout'),
-  onAuthSessionState: (cb: (state: AuthStateSnapshot) => void) => {
-    const listener = (_e: Electron.IpcRendererEvent, state: AuthStateSnapshot) => cb(state);
-    ipcRenderer.on('auth:session-state', listener);
-    return () => ipcRenderer.removeListener('auth:session-state', listener);
-  },
+  heartbeat: (version?: string) => ipcRenderer.invoke('auth:heartbeat', version),
 
   // 反馈
-  submitFeedback: (payload: { title: string; description: string; images?: Array<{ name: string; dataUrl: string }>; userId?: string }) =>
+  submitFeedback: (payload: { title: string; description: string; images?: Array<{ name: string; dataUrl: string }> }) =>
     ipcRenderer.invoke('feedback:submit', payload),
   getFeedbackList: (params: unknown) => ipcRenderer.invoke('feedback:list', params),
   // 附件图片：renderer 无法直连外部主机(CSP/webSecurity)，走主进程 fetch 转 data URL
@@ -95,6 +106,32 @@ const api = {
     ipcRenderer.on('gateway:stream-event', listener);
     return () => ipcRenderer.removeListener('gateway:stream-event', listener);
   },
+  securityPending: (args: { workspaceId: string; sessionId: string; taskId?: string }) =>
+    ipcRenderer.invoke('security:pending', args),
+  securitySetMode: (args: {
+    workspaceId: string;
+    sessionId: string;
+    mode: 'request_approval' | 'auto_review' | 'full_access';
+  }) => ipcRenderer.invoke('security:set-mode', args),
+  securityDecide: (args: {
+    workspaceId: string;
+    sessionId: string;
+    taskId?: string;
+    requestId: string;
+    decision: 'once' | 'session' | 'always' | 'reject';
+    alwaysArgvPrefix?: string[];
+  }) => ipcRenderer.invoke('security:decide', args),
+  securityCapabilities: () => ipcRenderer.invoke('security:capabilities', {}),
+  securityRules: (args: { workspaceId: string }) => ipcRenderer.invoke('security:rules', args),
+  securitySetRule: (args: { workspaceId: string; ruleId: string; enabled: boolean }) =>
+    ipcRenderer.invoke('security:set-rule', args),
+  securityDeleteRule: (args: { workspaceId: string; ruleId: string }) =>
+    ipcRenderer.invoke('security:delete-rule', args),
+  securityAudit: (args: SecurityAuditArgs = {}) => ipcRenderer.invoke('security:audit', args),
+  securityAuditExport: () => ipcRenderer.invoke('security:audit-export', {}),
+  securityAuditPurge: (args: { workspaceId: string }) => ipcRenderer.invoke('security:audit-purge', args),
+  securitySetup: (args: { action: 'install' | 'repair' | 'uninstall' }) =>
+    ipcRenderer.invoke('security:setup', args),
   // 本地文件上传（gateway:fetch 只透传 string body，二进制走这里）：
   // files 为绝对路径数组，主进程读文件组 multipart POST；path 限 /api/wiki/upload。
   gatewayUpload: (url: string, files: string[]) =>
@@ -155,17 +192,6 @@ const api = {
     ipcRenderer.on('browser-view:navigation-changed', listener);
     return () => ipcRenderer.removeListener('browser-view:navigation-changed', listener);
   },
-  onBrowserViewInteractionRequested: (cb: (event: {
-    tabLabel: string;
-    source: 'pointer' | 'keyboard';
-  }) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, value: {
-      tabLabel: string;
-      source: 'pointer' | 'keyboard';
-    }) => cb(value);
-    ipcRenderer.on('browser-view:interaction-requested', listener);
-    return () => ipcRenderer.removeListener('browser-view:interaction-requested', listener);
-  },
   onBrowserViewLayoutInvalidated: (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on('browser-view:layout-invalidated', listener);
@@ -184,15 +210,20 @@ const api = {
     return () => ipcRenderer.removeListener('version-update-download-progress', listener);
   },
   // 版本更新：下载（客户端按 version+OS 拼 URL）/ 暂停 / 续传 / 重试 / 安装 / 读状态
-  startDownload: (args: { version: string; type: 'force' | 'reminder' }): Promise<{ success: boolean; message?: string }> =>
+  startDownload: (args: { version: string; type: 'force' | 'reminder'; url?: string | undefined }): Promise<{ success: boolean; message?: string }> =>
     ipcRenderer.invoke('update:start-download', args),
   pauseDownload: (): Promise<{ success: boolean }> => ipcRenderer.invoke('update:pause'),
   resumeDownload: (): Promise<{ success: boolean }> => ipcRenderer.invoke('update:resume'),
-  retryDownload: (args: { version: string; type: 'force' | 'reminder' }): Promise<{ success: boolean; message?: string }> =>
+  retryDownload: (args: { version: string; type: 'force' | 'reminder'; url?: string | undefined }): Promise<{ success: boolean; message?: string }> =>
     ipcRenderer.invoke('update:retry', args),
   installUpdatePackage: (): Promise<VersionUpdatePackageResult> =>
     ipcRenderer.invoke('update:install-package'),
   getUpdateState: (): Promise<UpdateStateSnapshot> => ipcRenderer.invoke('update:get-state'),
+
+  // 登录态单源（P1-3）：主进程推送当前登录态 + userInfo，renderer 据此驱动 UI
+  onSessionState: (cb: (s: { isLoggedIn: boolean; userInfo: UserInfoSnapshot | null }) => void) => {
+    ipcRenderer.on('auth:session-state', (_e, s) => cb(s));
+  },
 
   // 主进程未捕获错误（uncaughtException / unhandledRejection）：主进程不再 process.exit，
   // 改为把错误推到渲染层，这里接收后由 UI 弹 toast 提示用户「出错了但 app 还活着」。

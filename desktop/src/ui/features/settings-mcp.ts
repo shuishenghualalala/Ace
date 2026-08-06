@@ -18,7 +18,13 @@ import {
   type CuaSetupProgress,
 } from '../backend-client';
 import { showConfirmDialog } from '../ui-feedback';
-import { $, escapeHtml, notify } from '../state';
+import { $, notify } from '../state';
+import { createIcon } from '../components/icon';
+import {
+  createSettingsIntegrationView,
+  type SettingsIntegrationItem,
+  type SettingsIntegrationView,
+} from './settings-integrations';
 
 const TRANSPORT_LABEL: Record<McpTransport, string> = {
   stdio: '本地(stdio)',
@@ -26,6 +32,60 @@ const TRANSPORT_LABEL: Record<McpTransport, string> = {
   sse: 'SSE',
   unknown: '未知',
 };
+
+let mcpIntegrationView: SettingsIntegrationView | null = null;
+let lastMcpServers: McpServerRow[] = [];
+
+function ensureMcpIntegrationView(): SettingsIntegrationView | null {
+  const pane = document.getElementById('settings-pane-mcp');
+  if (!pane) return null;
+  if (!mcpIntegrationView) {
+    mcpIntegrationView = createSettingsIntegrationView({
+      kind: 'mcp',
+      title: 'MCP 服务',
+      description: '管理外部工具服务、传输方式和连接状态。',
+      primaryAction: { label: '添加服务' },
+      onPrimaryAction: () => void openMcpServerModal(),
+      onSelect: (name) => {
+        const server = lastMcpServers.find((candidate) => candidate.name === name);
+        if (server) void openMcpServerModal(server);
+      },
+      onAction: (action, name) => {
+        if (action === 'reload') void reloadMcpServer(name);
+        if (action === 'delete') void deleteMcpServer(name);
+      },
+    });
+    const card = document.createElement('article');
+    const symbol = document.createElement('span');
+    const copy = document.createElement('span');
+    const title = document.createElement('strong');
+    const description = document.createElement('span');
+    const action = document.createElement('button');
+    const progress = document.createElement('div');
+    card.id = 'cua-driver-card';
+    card.className = 'settings-integrations__cua';
+    symbol.className = 'settings-integrations__symbol';
+    symbol.append(createIcon('process-terminal', { size: 20 }));
+    copy.className = 'settings-integrations__copy';
+    title.className = 'settings-integrations__item-title';
+    title.textContent = 'Computer Use';
+    description.id = 'cua-driver-desc';
+    description.className = 'settings-integrations__item-description';
+    description.textContent = '检测中…';
+    copy.append(title, description);
+    action.id = 'cua-driver-action';
+    action.type = 'button';
+    action.className = 'mw-button mw-button--secondary mw-button--small';
+    action.textContent = '一键安装';
+    card.append(symbol, copy, action);
+    progress.id = 'cua-driver-progress';
+    progress.className = 'cua-driver-progress';
+    progress.hidden = true;
+    mcpIntegrationView.leading.append(card, progress);
+  }
+  if (!pane.contains(mcpIntegrationView.element)) pane.replaceChildren(mcpIntegrationView.element);
+  return mcpIntegrationView;
+}
 
 export function mcpStatusText(s: McpServerRow): string {
   if (s.error) return `失败：${s.error}`;
@@ -180,7 +240,7 @@ function clearCuaProgress(): void {
   const box = $('#cua-driver-progress');
   if (box) {
     box.hidden = true;
-    box.innerHTML = '';
+    box.replaceChildren();
   }
 }
 
@@ -200,9 +260,7 @@ async function refreshCuaSetup(taskId: string): Promise<void> {
     const actionBtn = $('#cua-driver-action') as HTMLButtonElement | null;
     if (actionBtn) actionBtn.disabled = false;
     if (progress.status === 'success') {
-      notify(progress.platform === 'macos'
-        ? 'Computer Use 安装完成；首次使用请在系统设置中授予 CuaDriver 辅助功能权限'
-        : 'Computer Use 安装完成');
+      notify('Computer Use 安装完成');
       clearCuaProgress();
       void renderMcpServers(); // cua-driver 应出现在列表
     } else if (progress.status === 'failed') {
@@ -295,104 +353,79 @@ function bindCuaCardOnce(): void {
   });
 }
 
-/** 渲染 server 列表（conn-row 卡片）。 */
 export async function renderMcpServers(): Promise<void> {
-  const list = $('#mcp-server-list');
-  if (!list) return;
+  const view = ensureMcpIntegrationView();
+  if (!view) return;
+  view.update({ state: 'loading', message: '正在加载 MCP 服务…', items: [] });
 
   let servers: McpServerRow[] = [];
   try {
     const resp = await backendApi.mcpServers();
     servers = resp.servers ?? [];
   } catch (error) {
-    list.innerHTML = `<div class="model-list-v3__empty">无法加载 MCP 服务：${escapeHtml((error as Error).message)}</div>`;
+    lastMcpServers = [];
+    view.update({
+      state: 'error',
+      message: `无法加载 MCP 服务：${(error as Error).message}`,
+      items: [],
+    });
     return;
   }
 
+  lastMcpServers = servers;
   if (servers.length === 0) {
-    list.innerHTML = `<div class="model-list-v3__empty">暂无 MCP 服务，点击「添加服务」开始配置。</div>`;
+    view.update({
+      state: 'empty',
+      message: '暂无 MCP 服务，点击“添加服务”开始配置。',
+      items: [],
+    });
     return;
   }
 
-  list.innerHTML = servers
-    .map((s) => {
-      const name = escapeHtml(s.name);
-      const transport = escapeHtml(mcpTransportLabel(s.transport));
-      const toolCount = s.tools.length;
-      const toolHint = toolCount > 0 ? `${toolCount} 个工具` : '无工具';
-      const stText = escapeHtml(mcpStatusText(s));
-      const chip = mcpStatusChipClass(s);
-      return `
-      <article class="conn-row mcp-conn-row" data-mcp-name="${name}" tabindex="0" role="button">
-        <div class="conn-row__icon mcp-conn-row__icon">MCP</div>
-        <div class="conn-row__copy">
-          <div class="conn-row__name">${name}</div>
-          <div class="conn-row__desc">${transport} · ${escapeHtml(toolHint)}</div>
-          <span class="conn-row__status channel-status-chip ${chip}">
-            <span class="channel-status-dot"></span>
-            <span class="mcp-conn-row__status">${stText}</span>
-          </span>
-        </div>
-        <button type="button" class="conn-row__btn" data-mcp-reload="${name}" title="重连">重连</button>
-        <button type="button" class="conn-row__btn conn-row__btn--disconnect" data-mcp-delete="${name}" title="删除">删除</button>
-      </article>
-    `;
-    })
-    .join('');
+  const items: SettingsIntegrationItem[] = servers.map((server) => ({
+    id: server.name,
+    title: server.name,
+    description: `${mcpTransportLabel(server.transport)} · ${
+      server.tools.length ? `${server.tools.length} 个工具` : '无工具'
+    }`,
+    status: server.error ? '失败' : mcpStatusText(server),
+    ...(server.error ? { error: server.error } : {}),
+    tone: server.error ? 'danger' : server.connected ? 'success' : 'warning',
+    selectable: true,
+    icon: 'process-terminal',
+    actions: [
+      { id: 'reload', label: '重连' },
+      { id: 'delete', label: '删除', tone: 'danger' },
+    ],
+  }));
+  view.update({ state: 'ready', message: '', items });
+}
 
-  // 点击卡片主体 → 编辑
-  list.querySelectorAll<HTMLElement>('.mcp-conn-row[data-mcp-name]').forEach((card) => {
-    const name = card.getAttribute('data-mcp-name') || '';
-    card.addEventListener('click', (e) => {
-      // 排除操作按钮
-      if ((e.target as HTMLElement | null)?.closest('[data-mcp-reload],[data-mcp-delete]')) return;
-      const server = servers.find((s) => s.name === name);
-      if (server) void openMcpServerModal(server);
-    });
-  });
+async function reloadMcpServer(name: string): Promise<void> {
+  try {
+    const response = await backendApi.reloadMcpServer(name);
+    notify(response.ok ? `${name} 已重连` : `${name} 重连失败`);
+  } catch (error) {
+    notify(`重连失败：${(error as Error).message}`);
+  }
+  await renderMcpServers();
+}
 
-  // 重连
-  list.querySelectorAll<HTMLButtonElement>('[data-mcp-reload]').forEach((btn) => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const name = btn.getAttribute('data-mcp-reload') || '';
-      btn.disabled = true;
-      const old = btn.textContent;
-      btn.textContent = '重连中';
-      try {
-        const resp = await backendApi.reloadMcpServer(name);
-        notify(resp.ok ? `${name} 已重连` : `${name} 重连失败`);
-        await renderMcpServers();
-      } catch (error) {
-        notify(`重连失败：${(error as Error).message}`);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = old;
-      }
-    });
+async function deleteMcpServer(name: string): Promise<void> {
+  const confirmed = await showConfirmDialog({
+    title: `删除 MCP 服务 ${name}`,
+    message: '删除后该服务及其工具将不再可用。此操作不可撤销。',
+    confirmText: '删除',
+    cancelText: '取消',
   });
-
-  // 删除
-  list.querySelectorAll<HTMLButtonElement>('[data-mcp-delete]').forEach((btn) => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const name = btn.getAttribute('data-mcp-delete') || '';
-      const confirmed = await showConfirmDialog({
-        title: `删除 MCP 服务 ${name}`,
-        message: '删除后该服务及其工具将不再可用。此操作不可撤销。',
-        confirmText: '删除',
-        cancelText: '取消',
-      });
-      if (!confirmed) return;
-      try {
-        await backendApi.deleteMcpServer(name);
-        notify(`${name} 已删除`);
-        await renderMcpServers();
-      } catch (error) {
-        notify(`删除失败：${(error as Error).message}`);
-      }
-    });
-  });
+  if (!confirmed) return;
+  try {
+    await backendApi.deleteMcpServer(name);
+    notify(`${name} 已删除`);
+    await renderMcpServers();
+  } catch (error) {
+    notify(`删除失败：${(error as Error).message}`);
+  }
 }
 
 /** 读取弹层表单为 payload。 */
@@ -584,6 +617,7 @@ function bindMcpFormOnce(): void {
 
 /** 绑定面板（在 settings.ts 打开 mcp pane 时调用）。 */
 export function bindMcpPane(): void {
+  ensureMcpIntegrationView();
   bindMcpFormOnce();
   bindCuaCardOnce();
   void renderMcpServers();

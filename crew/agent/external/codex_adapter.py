@@ -217,6 +217,11 @@ def _item_tool(item: Any, *, phase: str) -> ExternalToolEvent | None:
 async def _spawn_app_server(
     request: RuntimeExecutionRequest,
 ) -> tuple[asyncio.subprocess.Process, _CodexRpcClient, list[bytes], asyncio.Task[None]]:
+    from crew.security.launch import host_stream_launch_block_reason
+
+    blocked = host_stream_launch_block_reason()
+    if blocked:
+        raise CodexAdapterError(f"严格安全约束已拒绝 Codex 宿主流式启动：{blocked}")
     env = build_external_runtime_env(request.custom_env)
     cwd = str(Path(request.cwd or ".").expanduser().resolve())
     try:
@@ -475,7 +480,7 @@ async def _stream_codex_app_server(
                             "title": tool.name,
                             "rawInput": {
                                 "name": tool.name,
-                                "arguments": item,
+                                "arguments": params,
                             },
                         },
                         raw_params=params,

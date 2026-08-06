@@ -9,17 +9,12 @@
 import { backendApi, type DynamicKanbanStatus, type Task } from '../backend-client';
 import { taskStatusLabel } from '../../shared/task-status';
 import { $, escapeHtml, isDynamicKanbanSession, notify, saveToStorage, state } from '../state';
+import { clearRuntimeStyle, setRuntimeStyle, setRuntimeToken } from '../components/runtime-style';
 import {
   activateWorkflowTimeline,
   buildWorkflowTimelineHtml,
   refreshWorkflowTimelineDom,
 } from './workflow-timeline';
-
-/** 空串或非字符串不能作为 shell:openPath 的 allowedRoot。 */
-export function normalizeAllowedRoot(value: unknown): string | undefined {
-  const root = typeof value === 'string' ? value.trim() : '';
-  return root || undefined;
-}
 
 interface KanbanTask {
   id: string;
@@ -75,7 +70,7 @@ const KANBAN_STATUS_POLL_MS = 2000;
 
 export async function refreshKanbanBoard(sessionId?: string | null): Promise<void> {
   const sid = sessionId ?? state.activeSessionId;
-  // 只有当前会话处于 Dynamic Kanban 模式时才拉取 board；
+  // 只有当前会话是专家团队会话时才拉取 Dynamic Kanban board；
   // 普通 agent 会话直接清空看板，避免 404 或无意义请求。
   if (!sid || !isDynamicKanbanSession(sid)) {
     state.kanbanBoard = { tasks: [], dependencies: [], events: [] };
@@ -160,7 +155,7 @@ export function isRelevantRuntimeTask(task: Task): boolean {
   // 只看板展示真正后台化或子任务性质的任务。
   if (task.backgrounded) return true;
   if (task.kind && ['shell', 'subagent', 'team'].includes(task.kind)) return true;
-  // 除整轮对话容器外，其他前台运行任务也允许进入看板。
+  // 其他前台任务（如旧 Team 模式遗留）也允许展示，但 agent_turn 必须过滤。
   return true;
 }
 
@@ -177,8 +172,8 @@ export function bindTaskBoardResize(): void {
     resizing = true;
     startX = e.clientX;
     startWidth = state.taskBoardWidth;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    setRuntimeStyle(document.body, 'cursor', 'col-resize');
+    setRuntimeStyle(document.body, 'userSelect', 'none');
     e.preventDefault();
   });
 
@@ -193,8 +188,8 @@ export function bindTaskBoardResize(): void {
   window.addEventListener('mouseup', () => {
     if (!resizing) return;
     resizing = false;
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
+    clearRuntimeStyle(document.body, 'cursor');
+    clearRuntimeStyle(document.body, 'userSelect');
     saveToStorage(STORAGE_KEY, state.taskBoardWidth);
   });
 
@@ -204,9 +199,9 @@ export function bindTaskBoardResize(): void {
 function applyTaskBoardWidth(width: number): void {
   const panel = $('#task-board-panel') as HTMLElement | null;
   const handle = $('#task-board-resize-handle') as HTMLElement | null;
-  if (panel) panel.style.width = `${width}px`;
-  if (handle) handle.style.right = `${width}px`;
-  document.documentElement.style.setProperty('--task-board-width', `${width}px`);
+  if (panel) setRuntimeStyle(panel, 'width', `${width}px`);
+  if (handle) setRuntimeStyle(handle, 'right', `${width}px`);
+  setRuntimeToken(document.documentElement, '--mw-task-board-width', `${width}px`);
 }
 
 function hideLegacyTaskBoardPanel(): void {
@@ -230,7 +225,7 @@ export function buildKanbanInspectorHtml(): string {
   const runtimeListHtml = runtimeTasksHtml(state.tasks);
 
   if (!isKanbanMode) {
-    return `<div class="inspector-empty">当前会话暂无可展示的 Dynamic Kanban 工作流。</div>`;
+    return `<div class="inspector-empty">当前会话未绑定专家团队，任务看板仅在专家团（Dynamic Kanban）模式下可用。</div>`;
   }
 
   const timelineHtml = buildWorkflowTimelineHtml(latestStatus);
@@ -396,7 +391,9 @@ function resolveKanbanWorkspaceRootPath(): string | undefined {
   const board = (state.kanbanBoard || { workflow: undefined }) as {
     workflow?: { context?: Record<string, unknown> };
   };
-  return normalizeAllowedRoot(board.workflow?.context?.workspace_root_path);
+  const rootPath = board.workflow?.context?.workspace_root_path;
+  const root = typeof rootPath === 'string' ? rootPath.trim() : '';
+  return root || undefined;
 }
 
 /** 看板数据更新后，若 Inspector 任务 Tab 已挂载则刷新 DOM。 */

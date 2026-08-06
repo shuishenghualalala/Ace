@@ -27,7 +27,7 @@ function packageVersion(): string {
 
 /**
  * 读取 package.json 中预制注入的平台标识（如 "Win amd64"、"UOS amd64"、"Kylin amd64"）。
- * 下游发行流水线可在构建安装包时写入该字段。
+ * 构建时由 pack_exe.ps1 / pack_deb.ps1 / Dockerfile.pack 写入。
  * 开发环境无此字段时，回退为运行时自动检测。
  */
 function packagePlatform(): string | null {

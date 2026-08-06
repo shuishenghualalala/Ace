@@ -12,15 +12,29 @@
  *    display_name 解析），无中文名则回退 `/slug`。textarea 仍是 input.value 真相源。
  *  - **chip = 透明 textarea + 全量覆盖层**：textarea 文字透明（仅 caret 可见，IME 合成期由
  *    覆盖层镜像合成文本），覆盖层重绘整段正文——普通字正常色、`@file:`/`@folder:`/`@image:`
- *    与已知 `/中文名`/`/slug` 区间染蓝。因覆盖层与 textarea 同字体同换行（copyTextareaStyle），
+ *    与已知 `/中文名`/`/slug` 区间染蓝。文件引用选中后使用短显示 token，发送时还原完整前缀。
+ *    因覆盖层与 textarea 使用同一短 token（copyTextareaStyle），
  *    光标与文字像素对齐；合成期临时停画 chip，避免与 IME 预览冲突。
  *  - **Backspace** 在已成型 chip 末尾一次删整段（atomic）。
  *  - **发送守卫**：popup 打开时，index.ts 的 Enter→发送 必须让位（见 isMentionOpen）。
  */
 
-import { backendApi, type CompleteItem, type Skill } from '../backend-client';
-import { $, escapeHtml } from '../state';
+import { backendApi, type CompleteItem, type Skill, type WorkPreference } from '../backend-client';
+import { createIcon, type IconId } from '../components/icon';
+import { setRuntimeStyle } from '../components/runtime-style';
+import { $, state } from '../state';
+import { productModeStore } from '../stores/product-mode-store';
+import { sessionStore } from '../stores/session-store';
+import { workStore } from '../stores/work-store';
 import { composerWorkspaceId } from './workspaces';
+import {
+  removeMentionTag,
+  renderMentionTags,
+  searchMentions,
+  selectMention,
+  type MentionResult,
+  type MentionTag,
+} from './work/mentions';
 import { copyTextareaStyle, getCaretCoords } from '../lib/textarea-caret';
 import { pinyin as toPinyin } from 'pinyin-pro';
 
@@ -39,6 +53,13 @@ interface MentionItem {
   meta: string;
   /** 图标类型：slash / folder / image / file。 */
   sig: 'slash' | 'folder' | 'image' | 'file';
+  workResult?: MentionResult;
+}
+
+interface CompactMention {
+  visible: string;
+  canonical: string;
+  kind: 'folder' | 'image' | 'file';
 }
 
 interface ChipToken {
@@ -47,19 +68,25 @@ interface ChipToken {
   kind: 'at' | 'slash';
 }
 
-/** 技能的拼音索引：全拼（连写）+ 首字母串。用于「输入 wangye / wyss 搜到 网页搜索」。 */
+/** 技能的拼音索引：全拼（连写）+ 首字母串。用于「输入 bocha / bcss 搜到 博查搜索」。 */
 export interface SkillPinyin {
   full: string;
   initials: string;
 }
 
 let bound = false;
+let bindingController: AbortController | null = null;
 let input: HTMLTextAreaElement | null = null;
 let overlay: HTMLElement | null = null;
 let popup: HTMLElement | null = null;
 let items: MentionItem[] = [];
 let active: ActiveTrigger | null = null;
 let selectedIndex = 0;
+let workTags: MentionTag[] = [];
+let workTagsHost: HTMLElement | null = null;
+/** 选中后的短显示 token，发送时还原成后端识别的结构化 token。 */
+let compactMentions: CompactMention[] = [];
+const disabledWorkPreferenceIds = new Set<string>();
 
 let skillsCache: Skill[] | null = null;
 let skillsCachePromise: Promise<Skill[]> | null = null;
@@ -149,13 +176,14 @@ async function ensureSkills(): Promise<Skill[]> {
 
 /** 启动时预取 skills：未连后端会失败，按秒退避重试，直到拿到（让首条 / 零延迟）。 */
 let prefetchTries = 0;
+let prefetchTimer: number | null = null;
 function prefetchSkills(): void {
   if (skillsCache) return;
   void ensureSkills().then(() => {
     renderOverlay();
     if (!skillsCache && prefetchTries < 8) {
       prefetchTries += 1;
-      window.setTimeout(prefetchSkills, 1000);
+      prefetchTimer = window.setTimeout(prefetchSkills, 1000);
     }
   });
 }
@@ -167,8 +195,8 @@ function prefetchSkills(): void {
 //   5  slug / 中文名 / name 前缀命中
 //   4  slug / 中文名 / name 子串命中
 //   3  description 子串命中
-//   2  slug / 中文名 / name 子序列命中（缩写：wbs → web-search）
-//   1  slug / 中文名 滑窗编辑距离 ≤1（打错一个字：网页索 → 网页搜索）
+//   2  slug / 中文名 / name 子序列命中（缩写：bch → bocha-search）
+//   1  slug / 中文名 滑窗编辑距离 ≤1（打错一个字：博查索 → 博查搜索）
 //   0  不匹配
 // 空查询：所有技能同分（保留原序），让用户看到全部可选。
 
@@ -225,9 +253,9 @@ export function matchSkill(s: Skill, q: string, py?: SkillPinyin | null): number
   if (slug.startsWith(query) || disp.startsWith(query) || name.startsWith(query)) return 5;
   if (slug.includes(query) || disp.includes(query) || name.includes(query)) return 4;
   if (desc.includes(query)) return 3;
-  // 拼音：全拼子串（wangye）/ 首字母前缀或整词（wys）—— 仅对拉丁查询有意义
+  // 拼音：全拼子串（bocha）/ 首字母前缀或整词（bcs）—— 仅对拉丁查询有意义
   if (py && /[a-z0-9]/.test(query) && (py.full.includes(query) || py.initials === query || py.initials.startsWith(query))) return 3;
-  // 宽松层（子序列 / 错字）只在查询 ≥3 字符时启用：2 字查询（如「网页」）靠精确层即可，
+  // 宽松层（子序列 / 错字）只在查询 ≥3 字符时启用：2 字查询（如「博查」）靠精确层即可，
   // 否则子序列/编辑距离会把含「博」或「查」的无关技能也带进来，拉低精度。
   if (query.length >= 3) {
     if (isSubsequence(query, slug) || isSubsequence(query, disp) || isSubsequence(query, name)) return 2;
@@ -287,25 +315,156 @@ export function mentionTextForSkill(skill: Skill, allSkills: Skill[] = skillsCac
 
 /** @ 补全用的工作空间：复用工作区模块的单一判定，默认对话只走 default task workspace。 */
 function activeWorkspaceId(): string {
-  return composerWorkspaceId();
+  return productModeStore.get().productMode === 'work'
+    ? workStore.get().selectedWorkspaceId ?? 'default'
+    : composerWorkspaceId();
 }
 
 async function fetchFileItems(token: string): Promise<MentionItem[]> {
-  const rows: CompleteItem[] = await backendApi.complete(token, {
-    workspaceId: activeWorkspaceId(),
-  });
-  return rows.map((r) => ({
+  const rowsPromise = backendApi.complete(token, { workspaceId: activeWorkspaceId() });
+  const workPromise = productModeStore.get().productMode === 'work'
+    ? searchMentions(token.slice(1), activeWorkspaceId())
+    : Promise.resolve([]);
+  const [rows, workResults] = await Promise.all([rowsPromise, workPromise]);
+  return (rows as CompleteItem[]).map<MentionItem>((r) => ({
     text: r.text,
     display: r.display,
     meta: r.meta,
     sig: r.type === 'folder' ? 'folder' : r.type === 'image' ? 'image' : 'file',
-  }));
+  })).concat(workResults.map((result) => ({
+    text: workMentionText(result),
+    display: result.title,
+    meta: result.entity_type === 'agent_session' ? 'Agent 会话快照' : result.entity_type === 'work_session' ? 'Work 会话' : ENTITY_META[result.entity_type],
+    sig: 'file' as const,
+    workResult: result,
+  })));
 }
+
+export function compactMentionText(item: MentionItem): string {
+  if (!['folder', 'image', 'file'].includes(item.sig)) return item.text;
+  const prefix = `@${item.sig}:`;
+  if (!item.text.startsWith(prefix)) return item.text;
+  const visible = `@${item.text.slice(prefix.length)}`;
+  if (!compactMentions.some((mention) => mention.visible === visible && mention.canonical === item.text)) {
+    compactMentions.push({ visible, canonical: item.text, kind: item.sig as CompactMention['kind'] });
+  }
+  return visible;
+}
+
+function hasMentionToken(value: string, token: string): boolean {
+  let from = 0;
+  while (from <= value.length) {
+    const index = value.indexOf(token, from);
+    if (index < 0) return false;
+    const before = index === 0 ? '' : value[index - 1]!;
+    const after = value[index + token.length] ?? '';
+    if ((!before || /\s/.test(before)) && (!after || /\s/.test(after))) return true;
+    from = index + token.length;
+  }
+  return false;
+}
+
+function syncCompactMentions(value: string): void {
+  compactMentions = compactMentions.filter((mention) => hasMentionToken(value, mention.visible));
+}
+
+/** 将输入框里的短显示 token 还原为 Gateway 识别的 @file/@folder/@image token。 */
+export function serializeMentionInput(value: string): string {
+  syncCompactMentions(value);
+  let result = value;
+  for (const mention of [...compactMentions].sort((a, b) => b.visible.length - a.visible.length)) {
+    const escaped = mention.visible.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    result = result.replace(new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, 'g'), (_match, lead: string) => `${lead}${mention.canonical}`);
+  }
+  return result;
+}
+
+/** Return preferences that can be known to apply before a Work turn is sent. */
+export function applicableWorkPreferences(
+  preferences: WorkPreference[],
+  workspaceId: string,
+): WorkPreference[] {
+  return preferences.filter((preference) =>
+    preference.status === 'active'
+    && (
+      preference.scope === 'global'
+      || (preference.scope === 'workspace' && preference.scope_id === workspaceId)
+    ));
+}
+
+/** Toggle one preference for the next Work turn only. */
+export function disableWorkPreferenceForTurn(preferenceId: string, disabled = true): void {
+  const id = preferenceId.trim();
+  if (!id) return;
+  if (disabled) disabledWorkPreferenceIds.add(id);
+  else disabledWorkPreferenceIds.delete(id);
+  renderWorkTags();
+}
+
+/** Replace the one-turn preference exclusions, for example when editing a queued message. */
+export function setDisabledWorkPreferenceIdsForTurn(preferenceIds: readonly string[]): void {
+  disabledWorkPreferenceIds.clear();
+  for (const preferenceId of preferenceIds) {
+    const id = preferenceId.trim();
+    if (id) disabledWorkPreferenceIds.add(id);
+  }
+  renderWorkTags();
+}
+
+/** Consume and clear the preferences disabled for the next Work turn. */
+export function takeDisabledWorkPreferenceIds(): string[] {
+  const ids = [...disabledWorkPreferenceIds];
+  disabledWorkPreferenceIds.clear();
+  renderWorkTags();
+  return ids;
+}
+
+export function workMentionText(result: MentionResult): string {
+  return `@${result.entity_type}:${result.id}`;
+}
+
+const ENTITY_META: Record<MentionResult['entity_type'], string> = {
+  work_item: '事项',
+  work_session: 'Work 会话',
+  agent_session: 'Agent 会话快照',
+  personal_knowledge: '个人知识',
+  source_record: '来源记录',
+};
 
 // ---------------- chip token 识别（覆盖层 + 整段删共用） ----------------
 
 // 已解析的 @ 提及：必须是 @file:/@folder:/@image: 前缀（complete_path 的回填格式）
-const AT_RE = /(?:^|\s)(@(?:file|folder|image):[^\s@]+)/g;
+const AT_RE = /(?:^|\s)(@(?:file|folder|image|work_item|work_session|agent_session|personal_knowledge|source_record):[^\s@]+)/g;
+
+function compactCanonicalMentionsInInput(): void {
+  if (!input) return;
+  const value = input.value;
+  const caret = input.selectionStart ?? value.length;
+  const replacements: Array<{ start: number; end: number; visible: string }> = [];
+  AT_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = AT_RE.exec(value))) {
+    const canonical = match[1]!;
+    const kind = canonical.match(/^@(file|folder|image):/)?.[1] as CompactMention['kind'] | undefined;
+    if (!kind) continue;
+    const lead = match[0].length - canonical.length;
+    const start = match.index + lead;
+    const visible = `@${canonical.slice(kind.length + 2)}`;
+    compactMentions.push({ visible, canonical, kind });
+    replacements.push({ start, end: start + canonical.length, visible });
+  }
+  if (replacements.length === 0) return;
+
+  let next = value;
+  let nextCaret = caret;
+  for (const replacement of replacements.reverse()) {
+    next = next.slice(0, replacement.start) + replacement.visible + next.slice(replacement.end);
+    if (caret >= replacement.end) nextCaret -= replacement.end - replacement.start - replacement.visible.length;
+    else if (caret > replacement.start) nextCaret = replacement.start + replacement.visible.length;
+  }
+  input.value = next;
+  input.setSelectionRange(nextCaret, nextCaret);
+}
 
 /** 当前已知技能的 chip 文本集合：/中文名 与 /slug（用于覆盖层染色 + 整段删识别）。 */
 function currentSlashTokens(): Set<string> {
@@ -353,6 +512,18 @@ export function iterChipTokens(value: string, slashTokens?: Set<string>): ChipTo
     const start = m.index + lead;
     out.push({ start, end: start + m[1]!.length, kind: 'at' });
   }
+  for (const mention of compactMentions) {
+    let from = 0;
+    while (from <= value.length) {
+      const idx = value.indexOf(mention.visible, from);
+      if (idx < 0) break;
+      const end = idx + mention.visible.length;
+      if (isTokenBoundary(value, idx - 1) && isTokenBoundary(value, end)) {
+        out.push({ start: idx, end, kind: 'at' });
+      }
+      from = end;
+    }
+  }
   // / chip：对每个已知 token 做边界感知的子串扫描（token 含中文，无法用单一 ASCII 正则）
   for (const tok of tokens) {
     let from = 0;
@@ -368,8 +539,8 @@ export function iterChipTokens(value: string, slashTokens?: Set<string>): ChipTo
 }
 
 /**
- * 把一个 chip token 拆成「标记 + 可见名」：标记（/ @file: @folder: @image:）渲染成透明
- * （不可见但占宽，保证光标与存储文本对齐、后端 dispatch 仍拿到完整 token），可见名染蓝。
+ * 把一个 chip token 拆成「标记 + 可见名」：标记（/ @file: @folder: @image:）供覆盖层
+ * 渲染成紧凑图标，可见名染蓝；选中的文件引用在 textarea 中使用短显示 token。
  * 纯函数，可单测。
  */
 export function renderChip(token: string, kind: 'at' | 'slash'): { mark: string; body: string } {
@@ -392,13 +563,28 @@ export function buildChippedNodes(text: string, slashTokens?: Set<string>): Node
   for (const t of tokens) {
     if (t.start < cursor) continue; // 重叠保护
     if (t.start > cursor) nodes.push(document.createTextNode(text.slice(cursor, t.start)));
-    const { mark, body } = renderChip(text.slice(t.start, t.end), t.kind);
+    const rawToken = text.slice(t.start, t.end);
+    const compact = t.kind === 'at' ? compactMentions.find((mention) => mention.visible === rawToken) : undefined;
+    const { mark, body } = compact
+      ? { mark: `@${compact.kind}:`, body: rawToken.slice(1) }
+      : renderChip(rawToken, t.kind);
     const chip = document.createElement('span');
     chip.className = `mention-chip mention-chip--${t.kind}`;
     if (mark) {
       const markSpan = document.createElement('span');
-      markSpan.className = 'mention-chip__mark';
-      markSpan.textContent = mark; // 透明占位
+      const atKind = mark.match(/^@(file|folder|image):/)?.[1] as 'file' | 'folder' | 'image' | undefined;
+      markSpan.className = `mention-chip__mark${atKind ? ` mention-chip__mark--${atKind}` : ''}`;
+      markSpan.setAttribute('aria-hidden', 'true');
+      if (atKind) {
+        const iconByKind: Record<typeof atKind, IconId> = {
+          file: 'icon-file',
+          folder: 'icon-folder',
+          image: 'icon-image',
+        };
+        markSpan.append(createIcon(iconByKind[atKind], { size: 16 }));
+      } else {
+        markSpan.textContent = mark;
+      }
       chip.appendChild(markSpan);
     }
     chip.appendChild(document.createTextNode(body)); // 染蓝的可见名
@@ -411,14 +597,17 @@ export function buildChippedNodes(text: string, slashTokens?: Set<string>): Node
 
 // ---------------- 浮层渲染 ----------------
 
-function sigMarkup(sig: MentionItem['sig']): string {
-  const map: Record<MentionItem['sig'], string> = {
-    slash: '<span class="mention-pop__sig mention-pop__sig--slash">/</span>',
-    folder: '<span class="mention-pop__sig">📁</span>',
-    image: '<span class="mention-pop__sig">🖼️</span>',
-    file: '<span class="mention-pop__sig">📄</span>',
+function createSig(sig: MentionItem['sig']): HTMLElement {
+  const iconBySig: Record<MentionItem['sig'], IconId> = {
+    slash: 'skill-badge',
+    folder: 'icon-folder',
+    image: 'icon-image',
+    file: 'icon-file',
   };
-  return map[sig];
+  const element = document.createElement('span');
+  element.className = `mention-pop__sig mention-pop__sig--${sig}`;
+  element.append(createIcon(iconBySig[sig], { size: 20 }));
+  return element;
 }
 
 function renderPopup(): void {
@@ -431,39 +620,47 @@ function renderPopup(): void {
   popup.id = 'mention-popup';
   popup.className = 'mention-pop';
   popup.setAttribute('role', 'listbox');
-  popup.innerHTML = items
-    .map(
-      (item, i) => `
-      <button type="button" class="mention-pop__item${i === selectedIndex ? ' is-active' : ''}" role="option" data-idx="${i}">
-        ${sigMarkup(item.sig)}
-        <span class="mention-pop__body">
-          <span class="mention-pop__display">${escapeHtml(item.display)}</span>
-          ${item.meta ? `<span class="mention-pop__meta">${escapeHtml(item.meta)}</span>` : ''}
-        </span>
-      </button>`,
-    )
-    .join('');
+  items.forEach((item, index) => {
+    const button = document.createElement('button');
+    const body = document.createElement('span');
+    const display = document.createElement('span');
+    button.type = 'button';
+    button.className = `mention-pop__item${index === selectedIndex ? ' is-active' : ''}`;
+    button.dataset.idx = String(index);
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(index === selectedIndex));
+    body.className = 'mention-pop__body';
+    display.className = 'mention-pop__display';
+    display.textContent = item.display;
+    body.append(display);
+    if (item.meta) {
+      const meta = document.createElement('span');
+      meta.className = 'mention-pop__meta';
+      meta.textContent = item.meta;
+      body.append(meta);
+    }
+    button.append(createSig(item.sig), body);
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      selectedIndex = index;
+      pickSelected();
+    });
+    popup?.append(button);
+  });
 
   // 锚到 .chat-input-row（CSS 已置 position:relative），bottom:100% 贴在输入行上方
   const host = input.parentElement;
   if (host) {
     host.appendChild(popup);
-    popup.style.left = `${Math.max(0, coords.left)}px`;
+    setRuntimeStyle(popup, 'left', `${Math.max(0, coords.left)}px`);
   }
-  popup.querySelectorAll<HTMLElement>('.mention-pop__item').forEach((btn) => {
-    btn.addEventListener('mousedown', (e) => {
-      e.preventDefault(); // 不让 textarea 失焦
-      const idx = Number(btn.getAttribute('data-idx'));
-      selectedIndex = idx;
-      pickSelected();
-    });
-  });
 }
 
 function markActive(): void {
   if (!popup) return;
   popup.querySelectorAll<HTMLElement>('.mention-pop__item').forEach((el, i) => {
     el.classList.toggle('is-active', i === selectedIndex);
+    el.setAttribute('aria-selected', String(i === selectedIndex));
   });
 }
 
@@ -483,7 +680,7 @@ function closePopup(): void {
 function repositionPopup(): void {
   if (!popup || !input || !active) return;
   const coords = getCaretCoords(input, active.start);
-  if (coords) popup.style.left = `${Math.max(0, coords.left)}px`;
+  if (coords) setRuntimeStyle(popup, 'left', `${Math.max(0, coords.left)}px`);
 }
 
 // ---------------- 查询调度 ----------------
@@ -535,14 +732,86 @@ function pickSelected(): void {
   const start = active.start;
   const value = input.value;
   const caret = input.selectionStart ?? value.length;
-  const next = value.slice(0, start) + item.text + ' ' + value.slice(caret);
+  const visibleText = compactMentionText(item);
+  const next = value.slice(0, start) + visibleText + ' ' + value.slice(caret);
   input.value = next;
-  const newCaret = start + item.text.length + 1;
+  const newCaret = start + visibleText.length + 1;
   input.setSelectionRange(newCaret, newCaret);
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.focus();
+  if (item.workResult && state.activeSessionId && productModeStore.get().productMode === 'work') {
+    void selectMention(item.workResult, state.activeSessionId)
+      .then((tag) => {
+        workTags.push(tag);
+        renderWorkTags();
+      })
+      .catch(() => {
+        input?.setAttribute('aria-invalid', 'true');
+      });
+  }
   closePopup();
   renderOverlay();
+}
+
+function renderWorkTags(): void {
+  const inputRow = input?.parentElement;
+  const panel = inputRow?.parentElement;
+  if (!inputRow || !panel || productModeStore.get().productMode !== 'work') {
+    workTagsHost?.remove();
+    workTagsHost = null;
+    return;
+  }
+  const preferences = applicableWorkPreferences(
+    workStore.get().preferences,
+    workStore.get().selectedWorkspaceId ?? 'default',
+  );
+  if (preferences.length === 0 && workTags.length === 0) {
+    workTagsHost?.remove();
+    workTagsHost = null;
+    return;
+  }
+  if (!workTagsHost) {
+    workTagsHost = document.createElement('div');
+    panel.insertBefore(workTagsHost, inputRow);
+  }
+  workTagsHost.className = 'mw-work-composer-context';
+  workTagsHost.replaceChildren();
+
+  if (preferences.length > 0) {
+    const preferenceHost = document.createElement('div');
+    preferenceHost.className = 'mw-work-composer-preferences';
+    preferenceHost.setAttribute('aria-label', '本次应用的工作偏好');
+    for (const preference of preferences) {
+      const disabled = disabledWorkPreferenceIds.has(preference.preference_id);
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'mw-work-composer-preference';
+      toggle.dataset.preferenceId = preference.preference_id;
+      toggle.dataset.disabled = String(disabled);
+      toggle.textContent = `${disabled ? '本次不应用' : '本次应用'}：${preference.content}`;
+      toggle.title = disabled ? '恢复本轮应用' : '仅本轮取消应用';
+      toggle.addEventListener('click', () => {
+        disableWorkPreferenceForTurn(preference.preference_id, !disabled);
+      });
+      preferenceHost.append(toggle);
+    }
+    workTagsHost.append(preferenceHost);
+  }
+
+  if (workTags.length === 0) return;
+  const mentionHost = document.createElement('div');
+  workTagsHost.append(mentionHost);
+  renderMentionTags(mentionHost, workTags, (tag) => {
+    void removeMentionTag(tag).then(() => {
+      workTags = workTags.filter((candidate) => candidate !== tag);
+      const token = workMentionText(tag.result);
+      if (input) {
+        input.value = input.value.replace(token, '').replace(/ {2,}/g, ' ');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      renderWorkTags();
+    });
+  });
 }
 
 // ---------------- 整段删 chip ----------------
@@ -585,7 +854,8 @@ function ensureOverlay(): void {
   if (!input) return;
   const host = input.parentElement;
   if (!host) return;
-  host.style.position = 'relative';
+  host.classList.add('chat-input-overlay-host');
+  input.classList.add('chat-input-overlay-source');
   if (!overlay) {
     overlay = document.createElement('div');
     overlay.className = 'chat-input-overlay';
@@ -594,16 +864,10 @@ function ensureOverlay(): void {
   }
   // 每次同步字体/盒模型（主题/字号可能变化）
   copyTextareaStyle(input, overlay);
-  // 强制 textarea 透明（内联样式最高优先级）：避免 CSS 缓存/加载时序导致 textarea 文字
-  // 与覆盖层同时可见，表现为「文字双倍显示」。caretColor 保留可见光标。
-  input.style.color = 'transparent';
-  input.style.caretColor = 'var(--tx)';
 }
 
 function renderOverlay(): void {
   if (!input || !overlay) return;
-  overlay.style.width = `${input.clientWidth}px`;
-  overlay.style.height = `${input.clientHeight}px`;
   const inComposing = composing && composingText.length > 0;
   // Windows 输入法会在 textarea 上独立绘制合成串，即使 textarea 文本透明仍可见。
   // overlay 再插入 composingText 会把拼音显示两遍；合成期只停画 chip，展示已提交文本。
@@ -631,6 +895,14 @@ function evaluateTrigger(): void {
 }
 
 function onInput(): void {
+  input?.removeAttribute('aria-invalid');
+  compactCanonicalMentionsInInput();
+  if (!input?.value.trim()) {
+    workTags = [];
+    compactMentions = [];
+    renderWorkTags();
+  }
+  if (input) syncCompactMentions(input.value);
   renderOverlay();
   // IME 合成中不弹补全（合成文本还未落定，避免误判触发符）
   if (composing) return;
@@ -672,59 +944,105 @@ function onKeydown(e: KeyboardEvent): void {
  * 绑定 #chat-input 的触发式补全。幂等。替代旧 bindCompletePopup。
  * 由 ui/index.ts 在 init 时调用一次。
  */
-export function bindComposerMention(): void {
-  if (bound) return;
+export function bindComposerMention(): () => void {
+  if (bound) return () => {};
   input = ($('#chat-input') as HTMLTextAreaElement | null) ?? null;
-  if (!input) return;
+  if (!input) return () => {};
   bound = true;
+  bindingController = new AbortController();
+  const signal = bindingController.signal;
 
   ensureOverlay();
   renderOverlay();
+  renderWorkTags();
 
-  input.addEventListener('input', onInput);
-  input.addEventListener('keydown', onKeydown);
+  const unsubscribeWork = workStore.subscribe((next, previous) => {
+    if (
+      next.preferences !== previous.preferences
+      || next.selectedWorkspaceId !== previous.selectedWorkspaceId
+    ) renderWorkTags();
+  });
+  const unsubscribeMode = productModeStore.subscribe((next, previous) => {
+    if (next.productMode === previous.productMode) return;
+    if (next.productMode !== 'work') disabledWorkPreferenceIds.clear();
+    renderWorkTags();
+  });
+  const unsubscribeSession = sessionStore.subscribe((next, previous) => {
+    if (next.activeSessionId === previous.activeSessionId) return;
+    disabledWorkPreferenceIds.clear();
+    renderWorkTags();
+  });
+
+  input.addEventListener('input', onInput, { signal });
+  input.addEventListener('keydown', onKeydown, { signal });
   // 光标移动（点击定位 / 方向键）后重判触发：补空格后把光标置于 /词 末尾即可弹补全
-  input.addEventListener('click', evaluateTrigger);
-  input.addEventListener('focus', evaluateTrigger);
+  input.addEventListener('click', evaluateTrigger, { signal });
+  input.addEventListener('focus', evaluateTrigger, { signal });
   input.addEventListener('keyup', (e) => {
     if (popup) return; // popup 打开时方向键走导航
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Home' || e.key === 'End') {
       evaluateTrigger();
     }
-  });
+  }, { signal });
   // IME 合成：textarea 文字透明，合成中文需覆盖层镜像显示
   input.addEventListener('compositionstart', () => {
     composing = true;
     composingText = '';
-  });
+  }, { signal });
   input.addEventListener('compositionupdate', (e) => {
     composingText = (e as CompositionEvent).data ?? '';
     renderOverlay();
-  });
+  }, { signal });
   input.addEventListener('compositionend', () => {
     composing = false;
     composingText = '';
     renderOverlay();
-    // IME 提交后重判触发：否则中文输入（/网页、@文件 中文片段）提交后不刷新浮层——
-    // 表现为「/网页无反应，删一个字才有」，因为删除是 Latin 按键走 input 事件，而输入是 IME。
+    // IME 提交后重判触发：否则中文输入（/博查、@文件 中文片段）提交后不刷新浮层——
+    // 表现为「/博查无反应，删一个字才有」，因为删除是 Latin 按键走 input 事件，而输入是 IME。
     evaluateTrigger();
-  });
+  }, { signal });
   input.addEventListener('scroll', () => {
     if (overlay && input) overlay.scrollTop = input.scrollTop;
     repositionPopup();
-  });
-  input.addEventListener('blur', () => closePopup());
+  }, { signal });
+  input.addEventListener('blur', () => closePopup(), { signal });
   window.addEventListener('resize', () => {
     ensureOverlay();
     renderOverlay();
     repositionPopup();
-  });
+  }, { signal });
   document.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     if (popup && !popup.contains(t) && t !== input) closePopup();
-  });
+  }, { signal });
 
   // 预取 skills（首启未连后端会失败，prefetchSkills 按秒退避重试），让首条 / 零延迟；
   // 拿到后也补画一次 chip（/中文名 药丸才出现）。
   prefetchSkills();
+  return () => {
+    if (!bound) return;
+    bindingController?.abort();
+    unsubscribeWork();
+    unsubscribeMode();
+    unsubscribeSession();
+    bindingController = null;
+    if (prefetchTimer != null) window.clearTimeout(prefetchTimer);
+    prefetchTimer = null;
+    closePopup();
+    overlay?.remove();
+    overlay = null;
+    workTagsHost?.remove();
+    workTagsHost = null;
+    workTags = [];
+    compactMentions = [];
+    disabledWorkPreferenceIds.clear();
+    if (input) {
+      input.classList.remove('chat-input-overlay-source');
+      input.parentElement?.classList.remove('chat-input-overlay-host');
+    }
+    input = null;
+    composing = false;
+    composingText = '';
+    bound = false;
+  };
 }

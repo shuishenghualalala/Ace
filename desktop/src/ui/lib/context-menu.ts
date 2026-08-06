@@ -3,6 +3,8 @@
  * 点击外部、Esc、滚动时自动关闭。
  */
 
+import { clearRuntimeStyle, setRuntimeStyle } from '../components/runtime-style';
+
 export type ContextMenuItem = {
   id: string;
   label: string;
@@ -25,9 +27,9 @@ export function dismissContextMenu(): void {
 function positionMenu(menu: HTMLElement, anchor: HTMLElement): void {
   const rect = anchor.getBoundingClientRect();
   const margin = 6;
-  menu.style.visibility = 'hidden';
-  menu.style.left = '0';
-  menu.style.top = '0';
+  setRuntimeStyle(menu, 'visibility', 'hidden');
+  setRuntimeStyle(menu, 'left', '0');
+  setRuntimeStyle(menu, 'top', '0');
   document.body.appendChild(menu);
   const menuRect = menu.getBoundingClientRect();
   let left = rect.right - menuRect.width;
@@ -39,9 +41,9 @@ function positionMenu(menu: HTMLElement, anchor: HTMLElement): void {
   if (top + menuRect.height > window.innerHeight - margin) {
     top = Math.max(margin, rect.top - menuRect.height - margin);
   }
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
-  menu.style.visibility = '';
+  setRuntimeStyle(menu, 'left', `${left}px`);
+  setRuntimeStyle(menu, 'top', `${top}px`);
+  clearRuntimeStyle(menu, 'visibility');
 }
 
 /**

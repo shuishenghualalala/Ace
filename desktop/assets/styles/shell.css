@@ -78,7 +78,7 @@
   height: 14px;
   flex: 0 0 auto;
   color: var(--mw-text-muted);
-  transition: transform var(--mw-duration-fast) var(--mw-ease-out);
+  transition: var(--mw-transition-interactive);
 }
 
 .mw-product-mode-trigger[aria-expanded='true'] .mw-product-mode-trigger__chevron {
@@ -395,7 +395,7 @@
 }
 
 .mw-chat-history-actions__toggle .mw-icon {
-  transition: transform var(--mw-duration-normal) var(--mw-ease-out);
+  transition: var(--mw-transition-interactive);
 }
 
 .mw-application-shell[data-navigation-collapsed='true']
@@ -489,7 +489,7 @@
   align-items: center;
   gap: var(--mw-space-2);
   min-height: 52px;
-  padding: 7px var(--mw-space-2);
+  padding: var(--mw-space-2) var(--mw-space-2);
   border: 0;
   border-radius: var(--mw-radius-2);
   background: transparent;

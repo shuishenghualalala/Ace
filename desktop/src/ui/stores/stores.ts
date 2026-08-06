@@ -1,7 +1,8 @@
 /**
- * 渲染层 7 个领域 store 的统一 barrel（SPEC §3.2 要求 7 个独立 store 文件）。
+ * 渲染层领域 store 的统一 barrel。
  *
- * 通过 barrel re-export 保持 `./stores/stores` 统一导入路径。
+ * 旧版单文件 `stores.ts` 在 T6 拆成 7 个独立文件 + barrel re-export，
+ * 旧 import 路径 `./stores/stores` 仍可用，调用方零改动。
  */
 export {
   sessionStore,
@@ -24,6 +25,10 @@ export {
   type WorkspaceStoreState,
 } from './workspace-store';
 export {
+  authStore,
+  type AuthStoreState,
+} from './auth-store';
+export {
   uiStore,
   type UiStoreState,
 } from './ui-store';
@@ -32,14 +37,37 @@ export {
   type CronJobStoreState,
   type CronJobScope,
 } from './cron-store';
+export {
+  externalStore,
+  type ExternalStoreState,
+} from './external-store';
+export {
+  productModeStore,
+  type ProductMode,
+  type ProductModeStoreState,
+  type ProductModeViewState,
+} from './product-mode-store';
+export {
+  workStore,
+  type WorkStoreState,
+} from './work-store';
+export {
+  officeStore,
+  type OfficeSnapshots,
+} from './office-store';
 
 import { sessionStore } from './session-store';
 import { messageStore } from './message-store';
 import { taskStore } from './task-store';
 import { configStore } from './config-store';
 import { workspaceStore } from './workspace-store';
+import { authStore } from './auth-store';
 import { uiStore } from './ui-store';
 import { cronStore } from './cron-store';
+import { externalStore } from './external-store';
+import { defaultProductModeState, productModeStore } from './product-mode-store';
+import { workStore } from './work-store';
+import { officeStore } from './office-store';
 
 /** 测试钩子：把全部 store 重置为初始状态。 */
 export function __resetAllStoresForTest(): void {
@@ -56,7 +84,6 @@ export function __resetAllStoresForTest(): void {
     userFoldedTurns: new Set(),
     userUnfoldedTurns: new Set(),
     unreadCompletedSessions: new Set(),
-    activeExternalTeamIdBySession: {},
   });
   messageStore.replace({
     messages: {},
@@ -83,6 +110,7 @@ export function __resetAllStoresForTest(): void {
     selectedSessions: {},
     manageMode: false,
   });
+  authStore.replace({ userInfo: null, isLoggedIn: false });
   uiStore.replace({
     activeTab: 'chat',
     activeSystemPanel: 'overview',
@@ -98,6 +126,33 @@ export function __resetAllStoresForTest(): void {
     cronJobDetailId: null,
     cronDeleteConfirmId: null,
   });
+  externalStore.replace({
+    activeExternalTeamIdBySession: {},
+  });
+  productModeStore.replace(defaultProductModeState());
+  workStore.replace({
+    history: [],
+    selectedWorkspaceId: null,
+    items: [],
+    dashboard: null,
+    sources: [],
+    personalKnowledge: [],
+    templates: [],
+    preferences: [],
+    preferenceAutoLearning: true,
+    settings: {},
+    indexStatus: {},
+    loading: false,
+    error: null,
+  });
+  officeStore.replace({
+    mail: null,
+    todo: null,
+    schedule: null,
+    meeting: null,
+    loading: false,
+    error: null,
+  });
 }
 
 /** 兼容旧导出：ALL_STORES 仍可被外部引用。 */
@@ -107,6 +162,11 @@ export const ALL_STORES = {
   task: taskStore,
   config: configStore,
   workspace: workspaceStore,
+  auth: authStore,
   ui: uiStore,
   cron: cronStore,
+  external: externalStore,
+  productMode: productModeStore,
+  work: workStore,
+  office: officeStore,
 } as const;

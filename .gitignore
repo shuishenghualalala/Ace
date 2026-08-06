@@ -5,6 +5,7 @@ CLAUDE.md
 .git-commands.md
 CONTEXT.md
 .codebase-memory/
+.codex-quarantine/
 
 # Runtime data and user-generated content
 .crew/
@@ -17,6 +18,19 @@ CONTEXT.md
 *.pid
 *.pid.lock
 *.tmp
+
+# Local runtime databases and credential material. Source fixtures should use
+# text/JSON so they remain reviewable and cannot be mistaken for user state.
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+*.credentials
 
 # Environment files and local credentials
 .env
@@ -44,12 +58,14 @@ coverage/
 htmlcov/
 build/
 dist/
+/security-runtime/target/
 
 # Node, Vite, and Electron output
 **/node_modules/
 web/dist/
 desktop/dist/
 desktop/release/
+desktop/security-runtime-bin/
 **/test-results/
 **/playwright-report/
 .vite/

@@ -1,0 +1,71 @@
+name: security-windows
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native-security:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: uv sync --extra dev
+      - run: python scripts/audit_runtime_npm.py
+      - run: cargo build --manifest-path security-runtime/Cargo.toml --release --locked --target x86_64-pc-windows-msvc
+      - run: cargo fmt --manifest-path security-runtime/Cargo.toml --check
+      - run: cargo clippy --manifest-path security-runtime/Cargo.toml --all-targets --locked -- -D warnings
+      - shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:ACE_SECURITY_STATE_DIR | Out-Null
+          & ./security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe --windows-setup $env:ACE_SECURITY_STATE_DIR
+          if ($LASTEXITCODE -ne 0) { throw 'release sandbox setup failed' }
+        env:
+          ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
+      - run: cargo test --manifest-path security-runtime/Cargo.toml --release --locked --target x86_64-pc-windows-msvc
+        env:
+          ACE_REQUIRE_NATIVE_TESTS: '1'
+          ACE_WINDOWS_NATIVE_STATE_DIR: '${{ runner.temp }}\ace-security-state'
+          ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
+      - run: uv run pytest tests/security -q
+      - run: python tests/security/security_matrix.py --platform windows --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe
+        env:
+          ACE_REQUIRE_NATIVE_SECURITY: '1'
+          ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
+      - shell: pwsh
+        run: ./tests/security/windows_install_matrix.ps1 -Runtime ./security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe
+      - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe --output desktop/security-runtime-bin
+      - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
+      - name: Bind Windows evidence to the tested release artifact
+        shell: pwsh
+        env:
+          EVIDENCE_COMMIT: ${{ github.sha }}
+          EVIDENCE_REPOSITORY: ${{ github.repository }}
+          EVIDENCE_WORKFLOW_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python scripts/write_security_runtime_evidence.py
+          --repo-root .
+          --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe
+          --staged-runtime desktop/security-runtime-bin/ace-security-runtime.exe
+          --output security-windows-evidence.json
+          --platform windows
+          --target-triple x86_64-pc-windows-msvc
+          --repository "$env:EVIDENCE_REPOSITORY"
+          --commit "$env:EVIDENCE_COMMIT"
+          --workflow-run "$env:EVIDENCE_WORKFLOW_RUN"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-windows-evidence
+          path: security-windows-evidence.json
+      - name: Remove Windows sandbox fixture
+        if: always()
+        shell: pwsh
+        run: ./security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe --windows-uninstall '${{ runner.temp }}\ace-security-state'

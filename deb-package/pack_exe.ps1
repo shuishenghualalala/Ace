@@ -87,6 +87,13 @@ try {
     # 清理 electron-builder 旧产物：win-unpacked 若残留，electron-builder 可能复用
     # 旧 asar（含旧 version），导致「装新版桌面端仍显示旧版本号」。
     if (Test-Path "release") { Remove-Item "release" -Recurse -Force }
+    Write-Host "正在构建原生安全 runtime..." -ForegroundColor Yellow
+    cargo build --release --manifest-path "..\security-runtime\Cargo.toml"
+    if ($LASTEXITCODE -ne 0) { throw "cargo build security-runtime 失败 (exit $LASTEXITCODE)" }
+    node scripts/prepare-security-runtime.mjs --runtime "..\security-runtime\target\release\ace-security-runtime.exe"
+    if ($LASTEXITCODE -ne 0) { throw "准备 security-runtime 失败 (exit $LASTEXITCODE)" }
+    npm run security:verify
+    if ($LASTEXITCODE -ne 0) { throw "security-runtime 校验失败 (exit $LASTEXITCODE)" }
     npm run dist:win
     # PowerShell 的 $ErrorActionPreference=Stop 对 native 命令(npm)不生效——
     # npm 失败只设 $LASTEXITCODE，不抛异常，脚本会继续跑后续步骤（PyInstaller），

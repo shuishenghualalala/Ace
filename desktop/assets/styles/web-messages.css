@@ -1,88 +1,185 @@
 
 
 
-.composer-edit-banner {
+/* 沙箱开关 banner：与 .composer-edit-banner 同带，状态色用修饰类切换 */
+.security-banner {
   display: none;
   align-items: center;
-  gap: 8px;
-  max-width: 100%;
-  margin: 0 0 8px;
-  padding: 7px 12px;
-  border: 1px solid var(--accent-light, rgba(71, 125, 247, 0.22));
-  border-radius: 10px;
-  background: var(--accent-soft, rgba(71, 125, 247, 0.08));
-  color: var(--accent2, #3568d8);
-  font-size: 12.5px;
+  gap: var(--mw-space-2);
+  max-width: 760px;
+  margin: 0 auto var(--mw-space-2);
+  padding: var(--mw-space-2) var(--mw-space-3);
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-4);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+  font-size: calc(var(--mw-font-ui-size) - 1.5px);
 }
-.composer-edit-banner.show { display: flex; }
-.composer-edit-banner__icon { display: inline-flex; color: var(--accent, #4f7eff); }
-.composer-edit-banner__text { flex: 1; min-width: 0; }
-.composer-edit-banner__cancel {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--tx2, #667085);
+.security-banner.show { display: flex; }
+.security-banner__icon { display: inline-flex; }
+.security-banner__text { flex: 1; min-width: 0; }
+.security-banner__actions { display: inline-flex; gap: var(--mw-space-1); flex-shrink: 0; }
+.security-banner__btn {
+  border: 1px solid var(--mw-action-primary);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-action-primary);
+  color: var(--mw-action-primary-text);
+  font-size: var(--mw-type-caption-size);
+  padding: var(--mw-space-1) var(--mw-space-2);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: var(--mw-transition-interactive);
 }
-.composer-edit-banner__cancel:hover {
-  background: rgba(0, 0, 0, 0.06);
-  color: var(--tx1, var(--tx1));
+.security-banner__btn:hover { opacity: 0.9; }
+.security-banner__btn[disabled] { opacity: 0.5; cursor: default; }
+.security-banner.is-warn {
+  border-color: var(--mw-bg-selected);
+  background: var(--mw-bg-selected);
+  color: var(--mw-action-primary-hover);
 }
+.security-banner.is-warn .security-banner__btn {
+  border-color: var(--mw-action-primary-hover);
+  background: var(--mw-action-primary-hover);
+}
+.security-banner.is-danger {
+  border-color: color-mix(in srgb, var(--mw-status-danger) 35%, transparent);
+  background: color-mix(in srgb, var(--mw-status-danger) 10%, transparent);
+  color: var(--mw-status-danger);
+}
+.security-banner.is-danger .security-banner__btn {
+  border-color: var(--mw-status-danger);
+  background: var(--mw-status-danger-bg);
+}
+.security-banner.is-info {
+  border-color: var(--mw-bg-selected);
+  background: var(--mw-bg-selected);
+  color: var(--mw-action-primary-hover);
+}
+
+/* 单条命令批准 overlay：盖在输入框区域上层，opacity+translateY 平滑过渡，
+   不卸载输入框（撤回时内容原样保留，无 reflow）。 */
+.chat-input-container { position: relative; }
+.composer-approval-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* 固定最大高度 + 内部滚动：长命令/多文件/长描述不会被输入容器高度截断。
+     原先 inset:0 把面板钉死在 chat-input-container 的尺寸上，内容稍长就显示不全。 */
+  max-height: min(70vh, 460px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-3) var(--mw-space-4);
+  border-radius: var(--mw-radius-4);
+  background: var(--mw-bg-surface);
+  box-shadow: inset 0 0 0 1px var(--mw-border-default);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: var(--mw-transition-interactive);
+}
+.chat-input-container.is-approving .composer-approval-panel {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  pointer-events: auto;
+}
+.composer-approval-panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--mw-space-2);
+}
+.composer-approval-panel__title { font-weight: 600; font-size: var(--mw-type-body-size); }
+.composer-approval-panel__hint { font-size: calc(var(--mw-font-ui-size) - 3px); opacity: 0.6; }
+.composer-approval-panel__summary {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  color: var(--mw-text-primary);
+  font-size: calc(var(--mw-font-ui-size) - 1.5px);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  background: var(--mw-bg-subtle);
+  border-radius: var(--mw-radius-3);
+  padding: var(--mw-space-2) var(--mw-space-3);
+}
+.composer-approval-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mw-space-2);
+  justify-content: flex-end;
+}
+
+/* 安全中心独立页：复用 page-shell / page-header 骨架，这里只补列表与规则行排版。 */
+.security-content { display: flex; flex-direction: column; gap: var(--mw-space-6); max-width: 880px; }
+.security-section { display: flex; flex-direction: column; gap: var(--mw-space-2); }
+.security-section__title { margin: 0; font-size: calc(var(--mw-font-ui-size) + 1px); font-weight: 600; }
+.security-section__text { margin: 0; font-size: var(--mw-type-compact-size); line-height: 1.6; opacity: 0.85; white-space: pre-wrap; }
+.security-section__actions { display: flex; flex-wrap: wrap; gap: var(--mw-space-2); }
+.security-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--mw-space-1); font-size: var(--mw-type-compact-size); line-height: 1.5; }
+.security-list--scroll { max-height: 320px; overflow: auto; }
+.security-rule { display: flex; align-items: center; gap: var(--mw-space-2); flex-wrap: wrap; }
+.security-rule__label { flex: 1; min-width: 200px; }
 
 .chat-messages.web-flow {
   flex: 1;
   min-height: 0;
-  padding: 20px 0;
+  padding: var(--mw-space-5) 0;
   display: block;
   overflow-y: auto;
   overflow-x: hidden;
-  background: var(--bg);
+  background: var(--mw-bg-app);
   gap: 0;
 }
 
 .chat-messages.web-flow .messages__inner {
-  padding: 0 24px;
+  padding: 0 var(--mw-space-6);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--mw-space-4);
+}
+
+.chat-messages.web-flow .messages__inner:has(> .empty:only-child) {
+  min-height: 100%;
 }
 
 .chat-messages.web-flow .empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
   text-align: center;
-  color: var(--tx3);
-  margin-top: 80px;
+  color: var(--mw-text-muted);
 }
 
 .chat-messages.web-flow .empty h2 {
-  color: var(--tx2);
+  color: var(--mw-text-secondary);
   font-weight: 600;
-  margin-bottom: 6px;
-  font-size: var(--font-xl);
+  margin-bottom: var(--mw-space-1);
+  font-size: var(--mw-type-dialog-size);
 }
 
 .chat-messages.web-flow .msg {
   display: flex;
-  gap: 12px;
+  gap: var(--mw-space-3);
   min-width: 0;
   width: 100%;
 }
 
 /* agent 消息右侧留出用户头像+间距的宽度，与用户消息头像左边缘对齐 */
-.chat-messages.web-flow .msg:not(.user) {
-  padding-right: calc(var(--msg-avatar-size, 38px) + 12px);
-}
 
 .chat-messages.web-flow .msg__avatar {
-  --msg-avatar-size: 38px;
+  --mw-msg-avatar-size: 38px;
   position: relative;
-  width: var(--msg-avatar-size);
-  height: var(--msg-avatar-size);
+  width: var(--mw-msg-avatar-size);
+  height: var(--mw-msg-avatar-size);
   border-radius: 22%;
   flex-shrink: 0;
   display: grid;
@@ -90,8 +187,8 @@
   overflow: hidden;
   border: none;
   /* 黑色 PNG 描边：浅色透明，深色用 --msg-avatar-plate 托底 */
-  background: var(--msg-avatar-plate, transparent);
-  box-shadow: var(--msg-avatar-plate-ring, none);
+  background: transparent;
+  box-shadow: none;
 }
 
 .chat-messages.web-flow .msg__avatar-media {
@@ -121,14 +218,11 @@
 }
 
 .chat-messages.web-flow .msg__avatar--external {
-  width: 32px;
-  height: 32px;
-  margin: 3px;
-  border: 1.5px solid var(--tx1, #172033);
-  border-radius: 9px;
-  background: var(--bg, #fff);
-  color: var(--tx1, #172033);
-  font-size: 16px;
+  border: 1.5px solid var(--mw-text-primary);
+  border-radius: var(--mw-radius-4);
+  background: var(--mw-bg-app);
+  color: var(--mw-text-primary);
+  font-size: var(--mw-font-xl);
   font-weight: 650;
 }
 
@@ -156,9 +250,9 @@
 
 .chat-messages.web-flow .msg__name {
   font-weight: 600;
-  font-size: var(--font-sm);
-  margin-bottom: 3px;
-  color: var(--tx1, var(--tx1));
+  font-size: var(--mw-type-caption-size);
+  margin-bottom: var(--mw-space-1);
+  color: var(--mw-text-primary);
 }
 
 .chat-messages.web-flow .msg.user .msg__body {
@@ -167,13 +261,13 @@
   align-items: flex-end;
   flex: 0 1 auto;
   /* 预留右侧头像+间距，避免窄抽屉把头像挤出 overflow-x:hidden 裁切区 */
-  max-width: min(80%, calc(100% - var(--msg-avatar-size, 28px) - 8px));
+  max-width: min(80%, calc(100% - var(--mw-msg-avatar-size, 28px) - 8px));
   min-width: 0;
   text-align: right;
 }
 
 .chat-messages.web-flow .msg.user .msg__name {
-  margin-bottom: 3px;
+  margin-bottom: var(--mw-space-1);
   flex: initial;
   max-width: fit-content;
   text-align: right;
@@ -187,11 +281,6 @@
   text-align: left;
 }
 
-.chat-messages.web-flow .msg__text {
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
-
 .chat-messages.web-flow .msg__foldable,
 .chat-messages.web-flow .process-timeline {
   max-width: 100%;
@@ -202,10 +291,10 @@
 .chat-messages.web-flow .msg__footer {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 5px;
+  gap: var(--mw-space-2);
+  margin-top: var(--mw-space-1);
   opacity: 0;
-  transition: opacity 0.15s ease;
+  transition: var(--mw-transition-interactive);
 }
 .chat-messages.web-flow .msg:not(.user) .msg__footer {
   opacity: 1;
@@ -218,8 +307,8 @@
 }
 
 .chat-messages.web-flow .msg__meta {
-  font-size: var(--font-xs);
-  color: var(--tx3, #98a2b3);
+  font-size: var(--mw-type-caption-size);
+  color: var(--mw-text-muted);
   font-weight: 400;
   white-space: nowrap;
 }
@@ -227,7 +316,7 @@
 .chat-messages.web-flow .msg__actions {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--mw-space-1);
 }
 
 
@@ -238,21 +327,21 @@
   width: 24px;
   height: 24px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--mw-radius-2);
   background: transparent;
-  color: var(--tx3, #98a2b3);
+  color: var(--mw-text-muted);
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition: var(--mw-transition-interactive);
 }
 .chat-messages.web-flow .msg-action-btn:hover {
-  background: var(--accent-soft, rgba(71, 125, 247, 0.1));
-  border-color: var(--accent-light, rgba(71, 125, 247, 0.18));
-  color: var(--accent, #4f7eff);
+  background: var(--mw-bg-selected);
+  border-color: var(--mw-bg-selected);
+  color: var(--mw-action-primary);
 }
 .chat-messages.web-flow .chat-edit-btn:hover {
-  background: var(--red-dim, rgba(220, 38, 38, 0.1));
-  border-color: rgba(220, 38, 38, 0.2);
-  color: var(--red, var(--color-error));
+  background: var(--mw-status-danger-bg);
+  border-color: color-mix(in srgb, var(--mw-status-danger) 20%, transparent);
+  color: var(--mw-status-danger);
 }
 
 
@@ -267,61 +356,82 @@
   user-select: none;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px 3px 4px;
-  margin: 0 0 6px 0;
-  border-radius: 6px;
-  font-size: var(--font-sm);
-  color: var(--tx2, #667085);
-  transition: background 0.15s, color 0.15s;
+  gap: var(--mw-space-1);
+  padding: var(--mw-space-1) var(--mw-space-2) var(--mw-space-1) var(--mw-space-1);
+  margin: 0 0 var(--mw-space-1) 0;
+  border-radius: var(--mw-radius-2);
+  font-size: var(--mw-type-caption-size);
+  color: var(--mw-text-secondary);
+  transition: var(--mw-transition-interactive);
 }
 .chat-messages.web-flow .msg__foldable > summary::-webkit-details-marker { display: none; }
 .chat-messages.web-flow .msg__foldable > summary::marker { display: none; content: ''; }
 .chat-messages.web-flow .msg__foldable > summary:hover {
-  background: var(--bg2, #f7f8fb);
-  color: var(--tx1, var(--tx1));
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
 }
 .chat-messages.web-flow .msg__foldable > summary:focus-visible {
-  outline: 2px solid var(--accent-light, rgba(71, 125, 247, 0.3));
+  outline: 2px solid var(--mw-bg-selected);
   outline-offset: 1px;
 }
 
 .chat-messages.web-flow .msg__fold-caret {
   flex-shrink: 0;
-  transition: transform 0.18s var(--ease-out, ease);
+  transition: var(--mw-transition-interactive);
 }
 .chat-messages.web-flow .msg__foldable[open] > summary > .msg__fold-caret {
   transform: rotate(90deg);
 }
 
+@property --mw-msg-fold-spinner-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
 .chat-messages.web-flow .msg__fold-spinner {
   width: 12px;
   height: 12px;
-  border: 2px solid rgba(59, 130, 246, 0.25);
-  border-top-color: var(--accent, #3b82f6);
   border-radius: 50%;
+  background: conic-gradient(
+    from var(--mw-msg-fold-spinner-angle),
+    var(--mw-action-primary) 0deg 84deg,
+    color-mix(in srgb, var(--mw-status-info) 25%, transparent) 84deg 360deg
+  );
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    var(--mw-black) calc(100% - 2px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    var(--mw-black) calc(100% - 2px)
+  );
   animation: msg-fold-spin 0.8s linear infinite;
   flex-shrink: 0;
 }
 @keyframes msg-fold-spin {
-  to { transform: rotate(360deg); }
+  to { --mw-msg-fold-spinner-angle: 360deg; }
 }
 
 .chat-messages.web-flow .msg__fold-summary--live {
-  color: var(--accent, #3b82f6);
+  color: var(--mw-action-primary);
   font-weight: 500;
 }
 
 .chat-messages.web-flow .msg__fold-content {
   display: grid;
-  gap: 6px;
+  gap: var(--mw-space-1);
 }
 
 .chat-messages.web-flow .msg__text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   word-break: break-word;
-  font-size: var(--font-base);
+  font-size: var(--mw-type-body-size);
   line-height: 1.65;
-  color: var(--tx1, var(--tx1));
+  color: var(--mw-text-primary);
 }
 
 .chat-messages.web-flow .msg.user {
@@ -331,9 +441,9 @@
 
 .chat-messages.web-flow .msg.user .msg__bubble,
 .chat-messages.web-flow .msg.user .msg__text {
-  background: var(--user-bubble-bg, #f0f0f0);
-  padding: 10px 16px;
-  border-radius: 18px;
+  background: var(--mw-bg-subtle);
+  padding: var(--mw-space-2) var(--mw-space-4);
+  border-radius: var(--mw-radius-4);
   width: fit-content;
   max-width: fit-content;
   white-space: pre-wrap;
@@ -343,8 +453,8 @@
 .chat-messages.web-flow .msg__attachments {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
+  gap: var(--mw-space-2);
+  margin-top: var(--mw-space-1);
 }
 
 .chat-messages.web-flow .msg.user .msg__attachments {
@@ -354,7 +464,7 @@
 .chat-messages.web-flow .msg__attachment {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--mw-space-1);
   max-width: 100%;
 }
 
@@ -362,9 +472,9 @@
   display: inline-flex;
   flex-direction: column;
   align-items: stretch;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: var(--bg2);
+  border-radius: var(--mw-radius-4);
+  border: 1px solid var(--mw-border-subtle);
+  background: var(--mw-bg-subtle);
 }
 
 .chat-messages.web-flow .msg__attachment-image-view {
@@ -373,7 +483,7 @@
   border: 0;
   background: transparent;
   cursor: zoom-in;
-  border-radius: 10px 10px 0 0;
+  border-radius: var(--mw-radius-4) var(--mw-radius-4) 0 0;
   overflow: hidden;
 }
 
@@ -389,17 +499,17 @@
 .chat-messages.web-flow .msg__attachment--image .chat-image-actions {
   width: 100%;
   box-sizing: border-box;
-  border-radius: 0 0 10px 10px;
+  border-radius: 0 0 var(--mw-radius-4) var(--mw-radius-4);
 }
 
 .chat-messages.web-flow .msg__attachment--file {
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  color: var(--tx1);
+  padding: var(--mw-space-1) var(--mw-space-2);
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-bg-subtle);
+  border: 1px solid var(--mw-border-subtle);
+  color: var(--mw-text-primary);
   text-decoration: none;
-  font-size: var(--font-sm);
+  font-size: var(--mw-type-caption-size);
 }
 
 .chat-messages.web-flow .msg__attachment-name {
@@ -410,18 +520,18 @@
 }
 
 .chat-messages.web-flow .line-tool {
-  font-family: var(--mono);
-  font-size: var(--font-sm);
-  color: var(--tx3);
-  border-left: 2px solid var(--line);
-  padding: 2px 0 2px 12px;
-  margin-left: 40px;
+  font-family: var(--mw-font-mono);
+  font-size: var(--mw-type-caption-size);
+  color: var(--mw-text-muted);
+  border-left: 2px solid var(--mw-border-subtle);
+  padding: var(--mw-space-1) 0 var(--mw-space-1) var(--mw-space-3);
+  margin-left: var(--mw-space-10);
 }
 
 .chat-messages.web-flow .md-body {
-  font-size: var(--font-base);
+  font-size: var(--mw-type-body-size);
   line-height: 1.7;
-  color: var(--text-primary);
+  color: var(--mw-text-primary);
   word-break: break-word;
 }
 
@@ -430,10 +540,10 @@
 }
 
 .chat-messages.web-flow .md-body code {
-  background: var(--color-gray-overlay-1);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-family: var(--mono);
+  background: var(--mw-border-subtle);
+  padding: var(--mw-space-1) var(--mw-space-1);
+  border-radius: var(--mw-radius-1);
+  font-family: var(--mw-font-mono);
   font-size: 0.88em;
   word-break: break-all;
   overflow-wrap: anywhere;
@@ -443,49 +553,34 @@
   word-break: break-all;
   overflow-wrap: anywhere;
 }
-
 .chat-messages.web-flow .chat-markdown h2 {
-  margin-top: 10px;
-  margin-bottom: 10px;
-}
-.chat-messages.web-flow .chat-markdown h2 {
-  margin-top: calc(0.85em + 10px);
-  margin-bottom: calc(0.35em + 10px);
+  margin-top: calc(0.85em + var(--mw-space-2));
+  margin-bottom: calc(0.35em + var(--mw-space-2));
 }
 
 .chat-messages.web-flow .md-body hr,
 .chat-messages.web-flow .chat-markdown hr {
   border: none;
-  border-top: 1px solid var(--border-subtle, var(--line));
-  margin: 10px 0;
-  margin-top: 20px;
+  border-top: 1px solid var(--mw-border-subtle);
+  margin: var(--mw-space-2) 0;
+  margin-top: var(--mw-space-5);
   max-width: 100%;
 }
 
 .chat-messages.web-flow .md-body pre {
-  background: var(--surface-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 12px 14px;
+  background: var(--mw-bg-subtle);
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-3);
+  padding: var(--mw-space-3) var(--mw-space-3);
   overflow-x: auto;
   max-width: 100%;
   min-width: 0;
-  font-size: var(--font-sm);
+  font-size: var(--mw-type-caption-size);
 }
 
 .chat-messages.web-flow .md-body pre code {
   background: none;
   padding: 0;
-}
-
-.chat-messages.web-flow .md-body .chat-md-table,
-.chat-messages.web-flow .md-body table {
-  border-collapse: collapse;
-  width: 100%;
-  margin: 0.6em 0;
-  font-size: var(--font-sm);
-  display: block;
-  overflow-x: auto;
 }
 
 .chat-messages.web-flow .md-body .chat-md-table th,
@@ -494,46 +589,46 @@
 .chat-messages.web-flow .md-body .chat-markdown td,
 .chat-messages.web-flow .md-body table th,
 .chat-messages.web-flow .md-body table td {
-  border: 1px solid var(--border-subtle, var(--line));
-  padding: 6px 10px;
+  border: 1px solid var(--mw-border-subtle);
+  padding: var(--mw-space-1) var(--mw-space-2);
   text-align: left;
   vertical-align: top;
-  color: var(--text-primary);
+  color: var(--mw-text-primary);
 }
 
 .chat-messages.web-flow .md-body .chat-md-table th,
 .chat-messages.web-flow .md-body .chat-markdown th,
 .chat-messages.web-flow .md-body table th {
-  background: var(--surface-2, var(--bg2));
+  background: var(--mw-bg-subtle);
   font-weight: 600;
 }
 
 .chat-messages.web-flow .md-body .chat-md-table tbody tr:nth-child(odd) td,
 .chat-messages.web-flow .md-body .chat-markdown tbody tr:nth-child(odd) td,
 .chat-messages.web-flow .md-body table tbody tr:nth-child(odd) td {
-  background: var(--surface, var(--bg1));
+  background: var(--mw-bg-surface);
 }
 
 .chat-messages.web-flow .md-body .chat-md-table tbody tr:nth-child(even) td,
 .chat-messages.web-flow .md-body .chat-markdown tbody tr:nth-child(even) td,
 .chat-messages.web-flow .md-body table tbody tr:nth-child(even) td {
-  background: color-mix(in srgb, var(--surface-2, var(--bg2)) 82%, var(--color-accent, #477df7) 8%);
+  background: color-mix(in srgb, var(--mw-bg-subtle) 82%, var(--mw-action-primary) 8%);
 }
 
 .chat-messages.web-flow .md-body .chat-md-hr {
   border: none;
-  border-top: 1px solid var(--border-subtle, var(--line));
+  border-top: 1px solid var(--mw-border-subtle);
   margin: 0.9em 0;
 }
 
 .chat-messages.web-flow .gateway-hint {
   text-align: center;
-  padding: 12px 16px;
-  border-radius: 10px;
-  background: var(--color-warning-soft);
-  border: 1px solid var(--color-warning);
-  color: var(--color-warning);
-  font-size: var(--font-sm);
+  padding: var(--mw-space-3) var(--mw-space-4);
+  border-radius: var(--mw-radius-4);
+  background: var(--mw-status-warning-bg);
+  border: 1px solid var(--mw-status-warning);
+  color: var(--mw-status-warning);
+  font-size: var(--mw-type-caption-size);
 }
 
 /* Team Session 成员消息：对齐 Web TeamAgentTurnBubble，保持 Desktop TypeScript DOM。 */
@@ -542,26 +637,26 @@
 }
 
 .chat-messages.web-flow .team-internal__avatar {
-  --msg-avatar-size: 32px;
+  --mw-msg-avatar-size: 32px;
 }
 
 .chat-messages.web-flow .team-internal__name {
   display: flex;
-  gap: 6px;
+  gap: var(--mw-space-1);
   align-items: baseline;
-  color: var(--text-2, #6f6a63);
+  color: var(--mw-text-secondary);
   font-weight: 500;
 }
 
 .chat-messages.web-flow .team-internal__name strong {
-  color: #3f342a;
-  font-size: 13px;
+  color: var(--mw-status-danger);
+  font-size: var(--mw-type-compact-size);
   line-height: 1.2;
 }
 
 .chat-messages.web-flow .team-internal__name em {
-  color: #82786b;
-  font-size: 12px;
+  color: var(--mw-status-warning);
+  font-size: var(--mw-type-caption-size);
   font-style: normal;
   font-weight: 500;
 }
@@ -570,14 +665,14 @@
   display: inline-block;
   min-width: 0;
   max-width: min(680px, 100%);
-  padding: 10px 14px;
-  color: var(--text-primary, #2d2e2c);
+  padding: var(--mw-space-2) var(--mw-space-3);
+  color: var(--mw-text-primary);
   word-break: break-word;
   overflow-wrap: anywhere;
-  background: rgb(255 255 255 / 58%);
-  border: 1px solid rgb(125 141 113 / 14%);
-  border-radius: 14px;
-  box-shadow: 0 4px 14px rgb(60 50 38 / 3%);
+  background: var(--mw-bg-surface);
+  border: 1px solid color-mix(in srgb, var(--mw-status-success) 14%, transparent);
+  border-radius: var(--mw-radius-4);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--mw-status-warning) 3%, transparent);
 }
 
 .chat-messages.web-flow .team-internal .msg__foldable,
@@ -609,19 +704,19 @@
 .chat-messages.web-flow .team-internal--planning .team-internal__name,
 .chat-messages.web-flow .team-internal--planning .team-internal__name strong,
 .chat-messages.web-flow .team-internal--planning .team-internal__name em {
-  color: #9a958d;
+  color: var(--mw-text-secondary);
   font-weight: 500;
 }
 
 .chat-messages.web-flow .team-internal__bubble.is-planning.is-crew {
   display: block;
   width: min(520px, 100%);
-  padding: 8px 10px;
-  color: #7d776f;
-  font-size: 13px;
-  background: rgb(250 249 246 / 66%);
-  border: 1px solid rgb(134 129 119 / 14%);
-  border-radius: 8px;
+  padding: var(--mw-space-2) var(--mw-space-2);
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-compact-size);
+  background: var(--mw-bg-surface);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-3);
   box-shadow: none;
 }
 
@@ -630,26 +725,26 @@
 }
 
 .chat-messages.web-flow .team-internal__collapse summary {
-  padding: 8px 10px;
-  color: #8b877f;
-  font-size: 13px;
+  padding: var(--mw-space-2) var(--mw-space-2);
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-compact-size);
   cursor: pointer;
   user-select: none;
 }
 
 .chat-messages.web-flow .team-internal__collapse[open] > summary {
-  margin-bottom: 4px;
+  margin-bottom: var(--mw-space-1);
 }
 
 .chat-messages.web-flow .team-internal__collapse--embedded {
-  margin-top: 10px;
+  margin-top: var(--mw-space-2);
 }
 
 .chat-messages.web-flow .team-internal__process {
-  padding-top: 10px;
-  margin-top: 8px;
-  color: var(--text-secondary, #82786b);
-  border-top: 1px solid rgb(129 151 118 / 18%);
+  padding-top: var(--mw-space-2);
+  margin-top: var(--mw-space-2);
+  color: var(--mw-text-secondary);
+  border-top: 1px solid color-mix(in srgb, var(--mw-status-success) 18%, transparent);
 }
 
 .chat-messages.web-flow .agent-avatar--message {
@@ -658,54 +753,54 @@
   width: 32px;
   height: 32px;
   place-items: center;
-  color: #fff;
-  font-size: 13px;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-font-md);
   font-weight: 750;
-  background: #2d2e2c;
-  border: 1px solid #2d2e2c;
-  border-radius: 10px;
+  background: var(--mw-bg-selected);
+  border: 1px solid var(--mw-border-strong);
+  border-radius: var(--mw-radius-4);
 }
 
-.chat-messages.web-flow .agent-avatar--message.agent-tone-1 { color: #2d2e2c; background: #fffaf1; }
-.chat-messages.web-flow .agent-avatar--message.agent-tone-2 { color: #43563b; background: #dbe8cf; border-color: #7f9871; }
-.chat-messages.web-flow .agent-avatar--message.agent-tone-3 { color: #6b4b22; background: #f5d7a8; border-color: #b88a42; }
-.chat-messages.web-flow .agent-avatar--message.agent-tone-4 { color: #51456d; background: #e7e2f4; border-color: #8c80a7; }
-.chat-messages.web-flow .agent-avatar--message.agent-tone-5 { color: #405c76; background: #dfe9f4; border-color: #7e98b2; }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-1 { color: var(--mw-text-primary); background: var(--mw-bg-surface); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-2 { color: var(--mw-status-success); background: var(--mw-bg-subtle); border-color: var(--mw-status-success); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-3 { color: var(--mw-status-warning); background: var(--mw-status-warning-bg); border-color: var(--mw-status-warning); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-4 { color: var(--mw-status-info); background: var(--mw-bg-subtle); border-color: var(--mw-status-info); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-5 { color: var(--mw-status-info); background: var(--mw-bg-subtle); border-color: var(--mw-status-info); }
 
-.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew) { background: rgb(45 46 44 / 3.5%); border-color: rgb(45 46 44 / 9%); }
-.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew) { background: rgb(242 234 220 / 28%); border-color: rgb(105 91 72 / 9%); }
-.chat-messages.web-flow .team-internal__bubble--tone-2:not(.is-crew) { background: rgb(219 232 207 / 26%); border-color: rgb(127 152 113 / 10%); }
-.chat-messages.web-flow .team-internal__bubble--tone-3:not(.is-crew) { background: rgb(245 215 168 / 24%); border-color: rgb(184 138 66 / 10%); }
-.chat-messages.web-flow .team-internal__bubble--tone-4:not(.is-crew) { background: rgb(231 226 244 / 26%); border-color: rgb(140 128 167 / 10%); }
-.chat-messages.web-flow .team-internal__bubble--tone-5:not(.is-crew) { background: rgb(223 233 244 / 26%); border-color: rgb(126 152 178 / 10%); }
+.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 4%, transparent); border-color: var(--mw-border-strong); }
+.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 28%, transparent); border-color: color-mix(in srgb, var(--mw-status-warning) 9%, transparent); }
+.chat-messages.web-flow .team-internal__bubble--tone-2:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 26%, transparent); border-color: color-mix(in srgb, var(--mw-status-success) 10%, transparent); }
+.chat-messages.web-flow .team-internal__bubble--tone-3:not(.is-crew) { background: color-mix(in srgb, var(--mw-status-warning) 24%, transparent); border-color: color-mix(in srgb, var(--mw-status-warning) 10%, transparent); }
+.chat-messages.web-flow .team-internal__bubble--tone-4:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 26%, transparent); border-color: color-mix(in srgb, var(--mw-status-info) 10%, transparent); }
+.chat-messages.web-flow .team-internal__bubble--tone-5:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 26%, transparent); border-color: color-mix(in srgb, var(--mw-status-info) 10%, transparent); }
 
 .chat-messages.web-flow .team-artifacts {
   display: grid;
-  gap: 8px;
-  margin-top: 10px;
+  gap: var(--mw-space-2);
+  margin-top: var(--mw-space-2);
 }
 
 .chat-messages.web-flow .team-artifact {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
-  gap: 9px;
+  gap: var(--mw-space-2);
   align-items: center;
   width: min(360px, 100%);
-  padding: 8px 10px;
+  padding: var(--mw-space-2) var(--mw-space-2);
   color: inherit;
   font: inherit;
   text-align: left;
   text-decoration: none;
   cursor: pointer;
   appearance: none;
-  background: rgb(255 255 255 / 72%);
-  border: 1px solid rgb(131 124 113 / 18%);
-  border-radius: 8px;
+  background: var(--mw-bg-surface);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-3);
 }
 
 .chat-messages.web-flow .team-artifact:hover {
-  background: rgb(255 255 255 / 90%);
-  border-color: rgb(93 125 80 / 35%);
+  background: var(--mw-bg-surface);
+  border-color: color-mix(in srgb, var(--mw-status-success) 35%, transparent);
 }
 
 .chat-messages.web-flow .team-artifact__icon {
@@ -713,16 +808,16 @@
   width: 30px;
   height: 30px;
   place-items: center;
-  color: #586754;
-  font-size: 10px;
+  color: var(--mw-status-success);
+  font-size: var(--mw-font-xxs);
   font-weight: 700;
-  background: #eef1ea;
-  border-radius: 7px;
+  background: var(--mw-bg-surface);
+  border-radius: var(--mw-radius-3);
 }
 
 .chat-messages.web-flow .team-artifact__body {
   display: grid;
-  gap: 2px;
+  gap: var(--mw-space-1);
   min-width: 0;
 }
 
@@ -733,8 +828,8 @@
   white-space: nowrap;
 }
 
-.chat-messages.web-flow .team-artifact__body strong { font-size: 13px; font-weight: 650; }
-.chat-messages.web-flow .team-artifact__body em { color: #8b877f; font-size: 12px; font-style: normal; }
+.chat-messages.web-flow .team-artifact__body strong { font-size: var(--mw-type-compact-size); font-weight: 650; }
+.chat-messages.web-flow .team-artifact__body em { color: var(--mw-text-secondary); font-size: var(--mw-type-caption-size); font-style: normal; }
 
 /* 对话内容统一边界：任何 Agent 子内容都不能突破用户消息的右侧基准线。 */
 .chat-messages.web-flow .messages__inner,
@@ -749,6 +844,7 @@
 }
 
 .chat-messages.web-flow .msg:not(.user) {
+  padding-right: calc(var(--mw-msg-avatar-size, var(--mw-space-10)) + var(--mw-space-3));
   box-sizing: border-box;
   max-width: 100%;
 }
@@ -767,6 +863,11 @@
 /* 表格只在自身范围横向滚动，普通文本和长单词优先换行。 */
 .chat-messages.web-flow .md-body .chat-md-table,
 .chat-messages.web-flow .md-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.6em 0;
+  font-size: var(--mw-type-caption-size);
+  display: block;
   box-sizing: border-box;
   max-width: 100%;
   min-width: 0;
@@ -829,4 +930,10 @@
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Incremental Markdown rendering observes this spacer near the document end. */
+.md-sentinel {
+  width: 100%;
+  height: 24px;
 }

@@ -30,7 +30,7 @@ describe('detectUpdatePlatform', () => {
 
 describe('buildUpdateUrl', () => {
   afterEach(() => {
-    delete process.env.CREW_DOWNLOAD_BASE_URL;
+    delete process.env.ACE_DOWNLOAD_BASE_URL;
   });
 
   it('Windows → Inno Setup exe 模板', () => {
@@ -56,7 +56,7 @@ describe('buildUpdateUrl', () => {
   });
 
   it('自定义下载基址（自动补斜杠）', () => {
-    process.env.CREW_DOWNLOAD_BASE_URL = 'http://example.test/downloads';
+    process.env.ACE_DOWNLOAD_BASE_URL = 'http://example.test/downloads';
     expect(downloadBaseUrl()).toBe('http://example.test/downloads/');
     expect(buildUpdateUrl('1.2.3', 'linux')).toBe('http://example.test/downloads/crew-desktop_1.2.3_amd64.deb');
   });

@@ -6,153 +6,127 @@
 /* ── Input ─────────────────────────────────── */
 .form-input {
     width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--control-radius-lg);
-    font-family: var(--sans);
-    font-size: var(--font-sm);
-    color: var(--tx);
-    background: var(--bg);
-    transition: background-color var(--duration-fast) ease, border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+    padding: var(--mw-space-2) var(--mw-space-3);
+    border: 1px solid var(--mw-border-strong);
+    border-radius: var(--mw-radius-4);
+    font-family: var(--mw-font-sans);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-primary);
+    background: var(--mw-bg-app);
+    transition: var(--mw-transition-interactive);
 }
 
 .form-input:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--color-selected);
+    border-color: var(--mw-action-primary);
+    box-shadow: 0 0 0 2px var(--mw-bg-selected);
 }
 
 .form-input::placeholder {
-    color: var(--tx3);
+    color: var(--mw-text-muted);
 }
 
 .form-input:disabled {
-    background: var(--bg2);
-    color: var(--tx3);
+    background: var(--mw-bg-subtle);
+    color: var(--mw-text-muted);
     cursor: not-allowed;
 }
 
 /* ── Textarea ─────────────────────────────────── */
 .form-textarea {
     width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--control-radius-lg);
-    font-family: var(--sans);
-    font-size: var(--font-sm);
-    color: var(--tx);
-    background: var(--bg);
+    padding: var(--mw-space-2) var(--mw-space-3);
+    border: 1px solid var(--mw-border-strong);
+    border-radius: var(--mw-radius-4);
+    font-family: var(--mw-font-sans);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-primary);
+    background: var(--mw-bg-app);
     resize: vertical;
     min-height: 60px;
-    transition: background-color var(--duration-fast) ease, border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+    transition: var(--mw-transition-interactive);
 }
 
 .form-textarea:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--color-selected);
+    border-color: var(--mw-action-primary);
+    box-shadow: 0 0 0 2px var(--mw-bg-selected);
 }
 
 /* ── Select ─────────────────────────────────── */
 .form-select {
     width: 100%;
-    padding: 10px 14px;
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--control-radius-lg);
-    font-family: var(--sans);
-    font-size: var(--font-sm);
-    color: var(--tx);
-    background: var(--bg);
+    padding: var(--mw-space-2) var(--mw-space-3);
+    border: 1px solid var(--mw-border-strong);
+    border-radius: var(--mw-radius-4);
+    font-family: var(--mw-font-sans);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-primary);
+    background: var(--mw-bg-app);
     cursor: pointer;
-    transition: background-color var(--duration-fast) ease, border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+    transition: var(--mw-transition-interactive);
     appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239aa3b2' d='M6 8L2 4h8z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 12px center;
-    padding-right: 32px;
+    padding-right: var(--mw-space-8);
 }
 
 .form-select:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--color-selected);
+    border-color: var(--mw-action-primary);
+    box-shadow: 0 0 0 2px var(--mw-bg-selected);
 }
 
 /* ── Model select (top bar)：仅作布局容器，边框由 chat.css 的 .chat-model-select 负责，避免双层框 ── */
-.chat-model-picker {
-    display: inline-flex;
-    align-items: center;
-    gap: 0;
-    padding: 0;
-    border: none;
-    border-radius: 0;
-    background: none;
-    box-shadow: none;
-}
-
-.chat-model-label {
-    font-size: var(--font-sm);
-    color: var(--tx2);
-    font-weight: 600;
-    white-space: nowrap;
-}
 
 /* 具体尺寸与边框见 chat.css，避免与 forms 重复定义造成「套娃」与过宽 */
-
-.chat-model-summary {
-    font-size: var(--font-sm);
-    color: var(--tx3);
-    max-width: 180px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
 
 .model-dropdown {
     position: relative;
 }
 
 .model-select {
-    background: var(--bg2);
-    border: 1px solid var(--line);
-    color: var(--tx);
-    padding: 5px 10px;
-    border-radius: var(--r2);
+    background: var(--mw-bg-subtle);
+    border: 1px solid var(--mw-border-subtle);
+    color: var(--mw-text-primary);
+    padding: var(--mw-space-1) var(--mw-space-2);
+    border-radius: var(--mw-radius-4);
     cursor: pointer;
-    font-size: var(--font-sm);
+    font-size: var(--mw-type-caption-size);
     font-weight: 600;
-    transition: background-color var(--duration-fast) ease, border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+    transition: var(--mw-transition-interactive);
     min-width: 120px;
 }
 
 .model-select:hover {
-    border-color: var(--accent);
+    border-color: var(--mw-action-primary);
 }
 
 .model-select:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-dim);
+    border-color: var(--mw-action-primary);
+    box-shadow: 0 0 0 3px var(--mw-bg-selected);
 }
 
 /* ── Checkbox ─────────────────────────────────── */
 .form-checkbox {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--mw-space-1);
     cursor: pointer;
 }
 
 .form-checkbox input {
     width: 14px;
     height: 14px;
-    accent-color: var(--accent);
+    accent-color: var(--mw-action-primary);
     cursor: pointer;
 }
 
 .form-checkbox label {
-    font-size: var(--font-sm);
-    color: var(--tx2);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-secondary);
     cursor: pointer;
 }
 
@@ -160,54 +134,54 @@
 .form-radio {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--mw-space-2);
     cursor: pointer;
 }
 
 .form-radio input {
     width: 16px;
     height: 16px;
-    accent-color: var(--accent);
+    accent-color: var(--mw-action-primary);
     cursor: pointer;
 }
 
 .form-radio label {
-    font-size: var(--font-sm);
-    color: var(--tx2);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-secondary);
     cursor: pointer;
 }
 
 /* ── Form group ─────────────────────────────────── */
 .form-group {
-    margin-bottom: 16px;
+    margin-bottom: var(--mw-space-4);
 }
 
 .form-label {
     display: block;
-    margin-bottom: 6px;
-    font-size: var(--font-sm);
+    margin-bottom: var(--mw-space-1);
+    font-size: var(--mw-type-caption-size);
     font-weight: 600;
-    color: var(--tx1);
+    color: var(--mw-text-primary);
 }
 
 .form-hint {
-    margin-top: 6px;
-    font-size: var(--font-xs);
-    color: var(--tx3);
+    margin-top: var(--mw-space-1);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-muted);
 }
 
 .form-hint.error {
-    color: var(--red);
+    color: var(--mw-status-danger);
 }
 
 .form-hint.success {
-    color: var(--green);
+    color: var(--mw-status-success);
 }
 
 /* ── Form row ─────────────────────────────────── */
 .form-row {
     display: flex;
-    gap: 12px;
+    gap: var(--mw-space-3);
     align-items: flex-start;
 }
 
@@ -218,7 +192,7 @@
 /* ── Input with button ─────────────────────────────────── */
 .input-with-btn {
     display: flex;
-    gap: 8px;
+    gap: var(--mw-space-2);
 }
 
 .input-with-btn .form-input {
@@ -226,11 +200,6 @@
 }
 
 @media (max-width: 900px) {
-    .chat-model-picker {
-        width: 100%;
-        justify-content: space-between;
-        flex-wrap: wrap;
-    }
 
     .chat-model-select,
     .chat-model-summary {

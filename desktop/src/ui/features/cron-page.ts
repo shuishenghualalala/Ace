@@ -81,6 +81,14 @@ const view: ViewState = {
   deliveryTargetsLoaded: false,
 };
 
+let cronPageSlots: {
+  shell: HTMLElement;
+  kpi: HTMLElement;
+  toolbar: HTMLElement;
+  list: HTMLElement;
+  drawer: HTMLElement;
+} | null = null;
+
 const FILTER_LABELS: Record<FilterKey, string> = {
   all: '全部',
   enabled: '启用中',
@@ -404,12 +412,12 @@ function renderRunTimeline(): string {
 
 function renderTemplateIcon(icon: string): string {
   const icons: Record<string, string> = {
-    newspaper: '<svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" fill="#EDF3FF"/><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" stroke="#C3D2F3"/><path d="M29.9918 32.6722H14.0235C12.9817 32.6722 12.1421 31.7228 12.1421 30.5449V13.4555C12.1421 12.2775 12.9817 11.3281 14.0235 11.3281H29.9763C31.018 11.3281 31.8577 12.2775 31.8577 13.4555V30.5273C31.8732 31.7228 31.0336 32.6722 29.9918 32.6722Z" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10"/><path d="M16.0312 16.5427H27.9862" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M16.0312 21.3064H27.9862" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M16.0312 26.0698H21.5039" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/></svg>',
-    clipboard: '<svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" fill="#EDF3FF"/><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" stroke="#C3D2F3"/><path d="M30.4596 33.0847H13.5567C12.4539 33.0847 11.5652 32.1959 11.5652 31.0932V15.0955C11.5652 13.9928 12.4539 13.104 13.5567 13.104H30.4431C31.5459 13.104 32.4346 13.9928 32.4346 15.0955V31.0767C32.4511 32.1959 31.5623 33.0847 30.4596 33.0847Z" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10"/><path d="M16.0173 19.4424H27.9993" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M16.0173 23.9644H27.9993" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M16.0173 28.4863H27.9993" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M27.0876 15.2933H16.9288C15.8679 15.2933 14.9958 14.3057 14.9958 13.1043C14.9958 11.9028 15.8679 10.9153 16.9288 10.9153H27.0876C28.1486 10.9153 29.0206 11.9028 29.0206 13.1043C29.0206 14.3057 28.1631 15.2933 27.0876 15.2933Z" fill="#EDF3FF" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10"/></svg>',
-    checks: '<svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" fill="#EDF3FF"/><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" stroke="#C3D2F3"/><path d="M30.5175 28.1368H13.4828C12.8035 28.1368 12.2288 27.562 12.2288 26.8827V12.1995H31.7716V26.8827C31.7716 27.562 31.1968 28.1368 30.5175 28.1368Z" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M10.7131 12.1995H33.2867" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M16.1475 33.9891L22.0521 28.1367" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M27.8004 33.9891L21.948 28.1367" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M15.573 22.389L19.8055 18.1565L24.1426 22.2323L28.2184 18.1565" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-    alarm: '<svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" fill="#EDF3FF"/><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" stroke="#C3D2F3"/><path d="M22.0001 33.3523C28.1173 33.3523 33.0762 28.3934 33.0762 22.2763C33.0762 16.1591 28.1173 11.2002 22.0001 11.2002C15.883 11.2002 10.9241 16.1591 10.9241 22.2763C10.9241 28.3934 15.883 33.3523 22.0001 33.3523Z" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10"/><path d="M18.0293 22.3596L20.7879 25.1182L26.723 19.1831" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M11.0493 13.0809L13.6825 10.4478" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/><path d="M32.9508 13.0809L30.3176 10.4478" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round"/></svg>',
+    newspaper: 'icon-file',
+    clipboard: 'icon-task',
+    checks: 'icon-check',
+    alarm: 'process-clock',
   };
-  return icons[icon] || icons.alarm;
+  return `<svg class="mw-icon" width="40" height="40" viewBox="0 0 24 24" aria-hidden="true"><use href="#${icons[icon] || icons.alarm}"></use></svg>`;
 }
 
 function renderTemplates(layout: 'empty' | 'drawer' = 'empty'): string {
@@ -480,7 +488,7 @@ async function loadCron(opts: { silent?: boolean } = {}): Promise<void> {
     } else {
       renderTasksTab();
     }
-    return;
+    return; /* removed by T22 patch */
   }
   if (loadCronInFlight) return;
   loadCronInFlight = true;
@@ -574,14 +582,14 @@ export function filteredJobs(): CronJob[] {
 // ---------------------------------------------------------------------------
 
 const KPI_ICONS: Record<'total' | 'enabled' | 'interval' | 'failed', string> = {
-  total: '<svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" stroke="#EFEFEF"/><path d="M30.4596 33.0847H13.5567C12.4539 33.0847 11.5652 32.1959 11.5652 31.0932V15.0955C11.5652 13.9928 12.4539 13.104 13.5567 13.104H30.4431C31.5459 13.104 32.4346 13.9928 32.4346 15.0955V31.0767C32.4511 32.1959 31.5623 33.0847 30.4596 33.0847Z" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10"/><path d="M27.0876 15.2933H16.9288C15.8679 15.2933 14.9958 14.3057 14.9958 13.1043C14.9958 11.9028 15.8679 10.9153 16.9288 10.9153H27.0876C28.1486 10.9153 29.0206 11.9028 29.0206 13.1043C29.0206 14.3057 28.1631 15.2933 27.0876 15.2933Z" fill="#EDF3FF" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10"/><path d="M16.2559 25.415L19.6957 21.9916L23.2837 25.415L27.925 20.7737" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  enabled: '<svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" stroke="#EFEFEF"/><path d="M22 33.5183C28.3614 33.5183 33.5183 28.3614 33.5183 22C33.5183 15.6386 28.3614 10.4817 22 10.4817C15.6386 10.4817 10.4817 15.6386 10.4817 22C10.4817 28.3614 15.6386 33.5183 22 33.5183Z" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round" stroke-linejoin="round"/><path d="M26.6614 21.1339C27.328 21.5188 27.328 22.481 26.6614 22.8659L20.4194 26.4697C19.7528 26.8546 18.9195 26.3735 18.9195 25.6037L18.9195 18.3961C18.9195 17.6263 19.7528 17.1452 20.4195 17.5301L26.6614 21.1339Z" fill="currentColor"/></svg>',
-  interval: '<svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" stroke="#EFEFEF"/><path d="M29.4977 30.6861C27.4972 32.4213 24.8638 33.4624 22.0058 33.4624C15.6775 33.4624 10.5332 28.3181 10.5332 21.9897" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.5549 13.2935C16.5555 11.5787 19.1481 10.5376 22.006 10.5376C28.3343 10.5376 33.4786 15.6819 33.4786 22.0102C33.4786 22.5818 33.4378 23.1534 33.3562 23.6842" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.0438 17.5803L7.61455 21.0507C7.32875 21.459 7.61455 22.0102 8.1249 22.0102H12.9426C13.4325 22.0102 13.7183 21.459 13.4529 21.0507L11.0441 17.5803C10.7991 17.2333 10.2684 17.2333 10.0438 17.5803Z" fill="currentColor"/><path d="M32.968 26.4197L30.5591 22.9697C30.2733 22.5614 30.5591 22.0103 31.0695 22.0103H35.8872C36.3771 22.0103 36.6629 22.5614 36.3975 22.9697L33.9887 26.4197C33.7233 26.7871 33.2129 26.7871 32.968 26.4197Z" fill="currentColor"/><path d="M21.1482 14.5999V22.7042H27.1703" stroke="currentColor" stroke-width="1.6" stroke-miterlimit="10" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  failed: '<svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="43" height="43" rx="7.5" stroke="#EFEFEF"/><path d="M22 33.55C28.3789 33.55 33.55 28.3789 33.55 22C33.55 15.6211 28.3789 10.45 22 10.45C15.6211 10.45 10.45 15.6211 10.45 22C10.45 28.3789 15.6211 33.55 22 33.55Z" stroke="currentColor" stroke-width="1.5" stroke-miterlimit="10"/><path d="M22 23.2037C21.2818 23.2037 20.68 22.6795 20.583 21.9613L19.923 17.2248C19.7483 15.963 20.7188 14.8372 22 14.8372C23.2812 14.8372 24.2518 15.963 24.0771 17.2248L23.4171 21.9613C23.32 22.6795 22.7183 23.2037 22 23.2037Z" fill="currentColor"/><path d="M21.9999 28.0371C22.9326 28.0371 23.6887 27.281 23.6887 26.3483C23.6887 25.4155 22.9326 24.6594 21.9999 24.6594C21.0672 24.6594 20.311 25.4155 20.311 26.3483C20.311 27.281 21.0672 28.0371 21.9999 28.0371Z" fill="currentColor"/></svg>',
+  total: 'icon-task',
+  enabled: 'status-running',
+  interval: 'process-clock',
+  failed: 'process-error',
 };
 
 function renderKpiIcon(kind: 'total' | 'enabled' | 'interval' | 'failed'): string {
-  return `<span class="cron-kpi__icon" aria-hidden="true">${KPI_ICONS[kind]}</span>`;
+  return `<span class="cron-kpi__icon" aria-hidden="true"><svg class="mw-icon" viewBox="0 0 24 24"><use href="#${KPI_ICONS[kind]}"></use></svg></span>`;
 }
 
 function renderKpi(): string {
@@ -929,32 +937,48 @@ function renderCreateDrawer(): string {
   <div class="cron-drawer-backdrop" id="cron-drawer-backdrop"></div>`;
 }
 
+function ensureCronPage(root: HTMLElement): NonNullable<typeof cronPageSlots> {
+  if (!cronPageSlots) {
+    const shell = document.createElement('section');
+    const header = document.createElement('header');
+    const page = document.createElement('div');
+    const kpi = document.createElement('div');
+    const toolbar = document.createElement('div');
+    const list = document.createElement('div');
+    const drawer = document.createElement('div');
+    shell.className = 'page-shell page-shell--cron mw-cron-page';
+    shell.dataset.template = 'list-management';
+    header.className = 'cron-page__head page-header page-header--hub';
+    header.innerHTML = `
+      <div class="page-header__copy">
+        <h1 class="cron-page__title page-header__title">定时任务</h1>
+        <p class="cron-page__desc page-header__desc">让 AI 在指定时间执行工作，并把结果投递到目标会话或渠道。</p>
+      </div>`;
+    page.className = 'cron-page';
+    kpi.className = 'mw-cron-page__kpi';
+    toolbar.className = 'mw-cron-page__toolbar';
+    list.className = 'cron-list';
+    drawer.className = 'mw-cron-page__drawer';
+    page.append(kpi, toolbar, list);
+    shell.append(header, page);
+    cronPageSlots = { shell, kpi, toolbar, list, drawer };
+  }
+  if (!root.contains(cronPageSlots.shell)) root.replaceChildren(cronPageSlots.shell, cronPageSlots.drawer);
+  return cronPageSlots;
+}
+
 function renderTasksTab(): void {
   const root = $('#cron-page-root');
   if (!root) return;
-
-  const drawerHtml = view.drawer === 'create'
+  const slots = ensureCronPage(root);
+  slots.kpi.innerHTML = renderKpi();
+  slots.toolbar.innerHTML = renderToolbar();
+  slots.list.innerHTML = renderList();
+  slots.drawer.innerHTML = view.drawer === 'create'
     ? renderCreateDrawer()
     : view.drawer === 'detail'
       ? renderDetailDrawer()
       : '';
-
-  root.innerHTML = `
-      <div class="page-shell page-shell--cron">
-      <header class="cron-page__head page-header page-header--hub">
-        <div class="page-header__copy">
-          <h1 class="cron-page__title page-header__title">定时任务</h1>
-          <p class="cron-page__desc page-header__desc">让 AI 在指定时间提醒你。消息会自动发送到当前聊天或已连接的飞书，不错过任何重要安排。</p>
-        </div>
-      </header>
-      <div class="cron-page">
-      ${renderKpi()}
-      ${renderToolbar()}
-      <div class="cron-list">${renderList()}</div>
-      </div>
-    </div>
-    ${drawerHtml}
-  `;
   bindEvents();
 }
 
@@ -966,7 +990,7 @@ function bindEvents(): void {
   document.querySelectorAll<HTMLElement>('[data-filter]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const k = btn.getAttribute('data-filter') as FilterKey | null;
-      if (!k) return;
+      if (!k) return; /* removed by T22 patch */
       view.filter = k;
       renderTasksTab();
     });
@@ -1015,14 +1039,14 @@ function bindEvents(): void {
   document.querySelectorAll<HTMLElement>('[data-run-drawer]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-run-drawer');
-      if (!id) return;
+      if (!id) return; /* removed by T22 patch */
       void triggerJobRun(id).catch((err) => notify('触发失败：' + err.message));
     });
   });
   document.querySelectorAll<HTMLElement>('[data-toggle-drawer]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-toggle-drawer');
-      if (!id) return;
+      if (!id) return; /* removed by T22 patch */
       const job = view.jobs.find((j) => j.id === id);
       const enabled = !(job?.enabled ?? false);
       void (enabled ? backendApi.resumeCronJob(id) : backendApi.pauseCronJob(id)).then(() => {
@@ -1034,10 +1058,10 @@ function bindEvents(): void {
   document.querySelectorAll<HTMLElement>('[data-delete-drawer]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-delete-drawer');
-      if (!id) return;
+      if (!id) return; /* removed by T22 patch */
       const job = view.jobs.find((j) => j.id === id);
       const name = job?.name || id;
-      if (!confirm(`确定删除定时任务「${name}」吗？`)) return;
+      if (!confirm(`确定删除定时任务「${name}」吗？`)) return; /* removed by T22 patch */
       void backendApi.deleteCronJob(id).then(() => {
         view.selectedId = null;
         view.drawer = null;
@@ -1063,17 +1087,17 @@ let listEventsBound = false;
  */
 let loadCronInFlight = false;
 function bindListEvents(): void {
-  if (listEventsBound) return;
+  if (listEventsBound) return; /* removed by T22 patch */
   listEventsBound = true;
 
   // 行点击 → 打开详情
   document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
     const row = target.closest('.cron-row') as HTMLElement | null;
-    if (!row) return;
-    if (target.closest('.cron-row__actions')) return;
+    if (!row) return; /* removed by T22 patch */
+    if (target.closest('.cron-row__actions')) return; /* removed by T22 patch */
     const id = row.getAttribute('data-job-id');
-    if (!id) return;
+    if (!id) return; /* removed by T22 patch */
     view.selectedId = id;
     view.drawer = 'detail';
     renderTasksTab();
@@ -1083,10 +1107,10 @@ function bindListEvents(): void {
   // 启停开关
   document.addEventListener('change', (e) => {
     const target = e.target as HTMLElement;
-    if (!(target instanceof HTMLInputElement) || target.getAttribute('data-toggle') === null) return;
+    if (!(target instanceof HTMLInputElement) || target.getAttribute('data-toggle') === null) return; /* removed by T22 patch */
     const sw = target;
     const id = sw.getAttribute('data-toggle');
-    if (!id) return;
+    if (!id) return; /* removed by T22 patch */
     const enabled = sw.checked;
     void (async () => {
       try {
@@ -1104,10 +1128,10 @@ function bindListEvents(): void {
   document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
     const btn = target.closest('[data-run]') as HTMLElement | null;
-    if (!btn) return;
+    if (!btn) return; /* removed by T22 patch */
     e.stopPropagation();
     const id = btn.getAttribute('data-run');
-    if (!id) return;
+    if (!id) return; /* removed by T22 patch */
     void (async () => {
       try {
         await triggerJobRun(id);
@@ -1133,13 +1157,13 @@ function bindListEvents(): void {
   document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
     const btn = target.closest('[data-delete]') as HTMLElement | null;
-    if (!btn) return;
+    if (!btn) return; /* removed by T22 patch */
     e.stopPropagation();
     const id = btn.getAttribute('data-delete');
-    if (!id) return;
+    if (!id) return; /* removed by T22 patch */
     const job = view.jobs.find((j) => j.id === id);
     const name = job?.name || id;
-    if (!confirm(`确定删除定时任务「${name}」吗？此操作不可撤销。`)) return;
+    if (!confirm(`确定删除定时任务「${name}」吗？此操作不可撤销。`)) return; /* removed by T22 patch */
     void (async () => {
       try {
         await backendApi.deleteCronJob(id);
@@ -1159,6 +1183,7 @@ function bindListEvents(): void {
 /** 测试钩子：重置委托绑定状态（用于单测）。 */
 export function __resetCronListEventsForTest(): void {
   listEventsBound = false;
+  cronPageSlots = null;
 }
 
 /** 测试钩子：覆盖 view 的可过滤状态（用于 filteredJobs 单测）。 */
@@ -1355,12 +1380,12 @@ async function triggerJobRun(jobId: string): Promise<void> {
 
 function applyTemplate(templateId: string): void {
   const tpl = CRON_TEMPLATES.find((item) => item.id === templateId);
-  if (!tpl) return;
+  if (!tpl) return; /* removed by T22 patch */
   view.drawer = 'create';
   void loadDeliveryTargets();
   renderTasksTab();
   const form = document.getElementById('cron-create-form') as HTMLFormElement | null;
-  if (!form) return;
+  if (!form) return; /* removed by T22 patch */
   const name = form.elements.namedItem('name') as HTMLInputElement | null;
   const query = form.elements.namedItem('query') as HTMLTextAreaElement | null;
   if (name) name.value = tpl.title;
@@ -1375,7 +1400,7 @@ function bindCreateForm(): void {
   const form = document.getElementById('cron-create-form') as HTMLFormElement | null;
   const cancel = document.getElementById('cron-form-cancel');
   if (cancel) cancel.addEventListener('click', () => closeDrawer());
-  if (!form) return;
+  if (!form) return; /* removed by T22 patch */
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (isCustomDatetimeOpen() && !syncCustomDatetimeToSchedule()) return;
@@ -1394,7 +1419,7 @@ function bindCreateForm(): void {
         errBox.textContent = '请填写任务名称、设定时长和执行指令';
         errBox.hidden = false;
       }
-      return;
+      return; /* removed by T22 patch */
     }
     if (!payload.session_id) {
       if (errBox) {
@@ -1424,10 +1449,10 @@ function bindCreateForm(): void {
 /** 聊天侧 task-board 渲染：这里只显示当前 session 关联的 cron 任务。 */
 export function renderCronTaskBoard(): void {
   const panel = $('#task-board-panel');
-  if (!panel) return;
+  if (!panel) return; /* removed by T22 patch */
   const show = state.mode === 'team' && state.taskBoardOpen && state.activeTab === 'chat';
   panel.hidden = !show;
-  if (!show) return;
+  if (!show) return; /* removed by T22 patch */
   const sid = state.activeSessionId || '';
   const mine = view.jobs.filter((j) => !sid || j.session_id === sid);
   panel.innerHTML = `
@@ -1462,7 +1487,7 @@ export async function refreshCronJobs(): Promise<void> {
   if (!state.backendConnected) {
     view.jobs = [];
     renderCronTaskBoard();
-    return;
+    return; /* removed by T22 patch */
   }
   try {
     const list = await backendApi.cronJobs();
@@ -1473,31 +1498,8 @@ export async function refreshCronJobs(): Promise<void> {
   renderCronTaskBoard();
 }
 
-let cronTabBound = false;
-
-/**
- * D10: bind the cron-tab click → loadCron(). Returns a disposer that removes
- * the listener (and resets the bind guard) so callers can tear it down.
- * Idempotent: a second call is a no-op until the previous disposer runs.
- */
-export function bindCronTab(): () => void {
-  if (cronTabBound) return () => undefined;
-  const el = document.querySelector('[data-tab="cron"]');
-  if (!el) {
-    // Nothing to bind yet; allow a later retry.
-    return () => undefined;
-  }
-  cronTabBound = true;
-  const handler = (): void => {
-    // loadCron() is itself in-flight-guarded (D10), so even though both the
-    // generic nav listener and this one fire on a click, only one load runs.
-    void loadCron();
-  };
-  el.addEventListener('click', handler);
-  return () => {
-    el.removeEventListener('click', handler);
-    cronTabBound = false;
-  };
+export function activateCronPage(): void {
+  void loadCron();
 }
 
 export function onAfterFinal(): void {

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -288,12 +289,15 @@ def complete_path(
 
     search_dir = base
     pattern = clean
+    recursive = bool(clean) and "/" not in clean and "\\" not in clean
 
-    # 如果包含路径分隔符，在父目录下搜索
+    # 如果包含路径分隔符，在父目录下搜索；单段查询则递归匹配工作区内的文件名，
+    # 让用户不必先知道完整目录层级。
     if "/" in clean or "\\" in clean:
         parts = Path(clean)
         search_dir = base / parts.parent
         pattern = parts.name
+        recursive = False
 
     # 解析后的 search_dir 仍必须在 crew_home 内（防 ../ 逃逸）
     try:
@@ -306,9 +310,30 @@ def complete_path(
     if not search_dir.is_dir():
         return []
 
+    def iter_entries() -> Iterable[Path]:
+        if not recursive:
+            yield from sorted(search_dir.iterdir(), key=lambda item: item.name.lower())
+            return
+
+        # ponytail: skip generated/dependency trees; recursive completion must stay
+        # interactive, and users can still use an explicit path to enter these dirs.
+        ignored_dirs = {".git", ".venv", "__pycache__", "node_modules", "dist", "build"}
+        try:
+            for current, dirnames, filenames in os.walk(search_dir, topdown=True, followlinks=False):
+                dirnames[:] = sorted(
+                    name
+                    for name in dirnames
+                    if not name.startswith(".") and name not in ignored_dirs
+                )
+                current_path = Path(current)
+                for name in sorted((*dirnames, *filenames), key=str.lower):
+                    yield current_path / name
+        except OSError:
+            return
+
     results: list[dict[str, str]] = []
     try:
-        for entry in sorted(search_dir.iterdir()):
+        for entry in iter_entries():
             if entry.name.startswith(".") and not pattern.startswith("."):
                 continue
             if pattern and not entry.name.lower().startswith(pattern.lower()):

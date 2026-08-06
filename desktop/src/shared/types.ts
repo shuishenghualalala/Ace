@@ -14,7 +14,6 @@ export interface IpcError {
   /** 调试用，详情。 */
   details?: unknown;
 }
-
 /** 通用返回：成功 / 失败二选一。 */
 export type IpcResult<T> =
   | { ok: true; data: T }
@@ -33,20 +32,18 @@ export type CloseBehavior = 'tray' | 'quit' | 'ask';
 
 export interface DesktopPrefs {
   closeBehavior: CloseBehavior;
+  /** 加密后的 JWT（base64 string）；空表示未登录。 */
+  encryptedJwt?: string;
+  /** 与 encryptedJwt 关联的 userInfo（明文，体积小）。 */
+  userInfo?: UserInfoSnapshot;
 }
 
-export interface AuthUserSnapshot {
-  userId: string;
-  phoneNumber: string;
-  displayName?: string | undefined;
-}
-
-export interface AuthStateSnapshot {
-  mode: 'unknown' | 'local' | 'remote' | 'dev';
-  configured: boolean;
-  providerId: string;
-  isLoggedIn: boolean;
-  user: AuthUserSnapshot | null;
+export interface UserInfoSnapshot {
+  staffCode?: string;
+  staffName?: string;
+  staffUid?: string;
+  pid?: string;
+  uid?: string;
 }
 
 /** 版本更新推送载荷（主进程 → renderer，经 preload onVersionUpdate）。 */

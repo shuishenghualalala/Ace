@@ -50,6 +50,7 @@ class LogoutCoordinator:
         cron_service: Any | None = None,
         team_manager: Any | None = None,
         interaction_bridge: Any | None = None,
+        security_service: Any | None = None,
         logout_timeout_seconds: float = 10.0,
     ) -> None:
         self._active_owner = active_owner
@@ -61,6 +62,7 @@ class LogoutCoordinator:
         self._cron_service = cron_service
         self._team_manager = team_manager
         self._interaction_bridge = interaction_bridge
+        self._security_service = security_service
         self._logout_timeout_seconds = max(0.001, float(logout_timeout_seconds))
         self._lock = asyncio.Lock()
         self._draining_owner = ""
@@ -153,6 +155,8 @@ class LogoutCoordinator:
             self._task_runtime.block_owner(owner)
             if self._interaction_bridge is not None:
                 self._interaction_bridge.remove_owner(owner)
+            if self._security_service is not None:
+                self._security_service.revoke_owner(owner)
             if not self._active_owner.prepare_restart_logout(owner):
                 raise LogoutCleanupError("Logout 超时且无法持久化 Gateway 重启退出意图")
             self._channel_owner = ""
@@ -209,6 +213,8 @@ class LogoutCoordinator:
             self._task_runtime.block_owner(owner)
             if self._interaction_bridge is not None:
                 self._interaction_bridge.remove_owner(owner)
+            if self._security_service is not None:
+                self._security_service.revoke_owner(owner)
             errors: list[str] = []
             stopped_dispatches = 0
             cancelled_tasks: list[str] = []

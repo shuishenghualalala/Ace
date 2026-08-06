@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "runtime_version": "0.1.0",
+  "note": "Template only. Release packaging regenerates per-platform SHA-256 entries and refuses placeholders.",
+  "files": []
+}

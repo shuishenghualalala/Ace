@@ -138,6 +138,23 @@ def _bundled_runtime_paths() -> list[str]:
     return paths
 
 
+def bundled_runtime_roots() -> tuple[Path, ...]:
+    """Return canonical packaged Python/Node roots trusted by managed execution.
+
+    These roots are added to the managed sandbox's trusted-readable allowlist so
+    the bundled interpreter/runtime stays usable inside the sandbox. Only
+    meaningful in frozen (packaged) mode; dev runs return an empty tuple.
+    """
+    if not getattr(sys, "frozen", False):
+        return ()
+    runtimes_dir = Path(sys.executable).parent / "_internal" / "runtimes"
+    return tuple(
+        runtime.resolve(strict=True)
+        for name in ("python", "node")
+        if (runtime := runtimes_dir / name).is_dir()
+    )
+
+
 def bundled_python_executable() -> str | None:
     """返回打包内嵌 Python 解释器的可执行文件路径（仅冻结态有效）。
 
@@ -305,6 +322,23 @@ def runtime_env_overrides(
         existing_pythonpath = os.environ.get("PYTHONPATH", "")
         values["PYTHONPATH"] = _prepend_path_unique([str(user_site)], existing_pythonpath)
 
+    return values
+
+
+def managed_runtime_env_overrides(
+    env_file: str | Path | None = None,
+    *,
+    owner_account_id: str | None = None,
+) -> dict[str, str]:
+    """Build a child environment without ambient executable/module paths."""
+    values = runtime_env_overrides(env_file, owner_account_id=owner_account_id)
+    runtime_paths = _bundled_runtime_paths()
+    if runtime_paths:
+        values["PATH"] = os.pathsep.join(runtime_paths)
+    else:
+        values["PATH"] = ""
+    values.pop("PYTHONPATH", None)
+    values.pop("PIP_USER", None)
     return values
 
 

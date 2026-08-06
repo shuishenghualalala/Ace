@@ -1,7 +1,10 @@
 /**
  * 对话滚动锚定：stickyBottom 模型 + 程序滚动 guard + wheel/touch disarm。
  *
- * 核心契约（与 Crew 一致）：
+ * 设计参考：hermes-agent/apps/desktop/src/components/assistant-ui/thread-virtualizer.tsx
+ * 的 `useThreadScrollAnchor`——但翻译成 vanilla TS（无 React、无虚拟化）。
+ *
+ * 核心契约（与 hermes 一致）：
  *  - 故意不做「流式追底」：一旦回合在飞，视口停在用户离开的位置，不追流。
  *  - 只在三个时机跳到底部：会话切换、空→非空、用户提交新消息（runStart）。
  *  - wheel-up / 手指下滑（想往上看）立即 disarm stickyBottom；用户滚回底部时 re-arm。

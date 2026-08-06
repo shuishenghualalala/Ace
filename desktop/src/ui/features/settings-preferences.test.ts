@@ -5,15 +5,16 @@ import {
   clampNumber,
   hydrateSettings,
   resolveFontFamily,
+  resolveFontFamilyOverride,
   resolveThemeMode,
 } from './settings-preferences';
 
 describe('settings-preferences', () => {
-  it('migrates legacy fontSize into ui/content/editor sizes', () => {
+  it('migrates legacy fontSize into ui/content sizes', () => {
     const settings = hydrateSettings({ fontSize: 16, themeMode: 'dark' });
     expect(settings.uiFontSize).toBe(16);
     expect(settings.contentFontSize).toBe(16);
-    expect(settings.editorFontSize).toBe(16);
+    expect(settings).not.toHaveProperty('editorFontSize');
     expect(settings.terminalFontSize).toBe(DEFAULT_SETTINGS.terminalFontSize);
     expect(settings.themeMode).toBe('dark');
   });
@@ -22,13 +23,25 @@ describe('settings-preferences', () => {
     const settings = hydrateSettings({
       uiFontSize: 99,
       contentFontSize: 2,
-      editorFontSize: 19.6,
       terminalFontSize: 100,
     });
     expect(settings.uiFontSize).toBe(18);
     expect(settings.contentFontSize).toBe(12);
-    expect(settings.editorFontSize).toBe(20);
     expect(settings.terminalFontSize).toBe(18);
+  });
+
+  it('folds the retired editor size into content and drops dead behavior switches', () => {
+    const settings = hydrateSettings({
+      editorFontSize: 18,
+      startWithConnect: false,
+      enterToSend: false,
+      streaming: false,
+    });
+    expect(settings.contentFontSize).toBe(18);
+    expect(settings).not.toHaveProperty('editorFontSize');
+    expect(settings).not.toHaveProperty('startWithConnect');
+    expect(settings).not.toHaveProperty('enterToSend');
+    expect(settings).not.toHaveProperty('streaming');
   });
 
   it('resolves system theme from prefers-color-scheme', () => {
@@ -44,26 +57,28 @@ describe('settings-preferences', () => {
     expect(resolveFontFamily('inter')).toContain('Inter');
   });
 
+  it('keeps the system font on the design-token default', () => {
+    expect(resolveFontFamilyOverride('system')).toBeNull();
+    expect(resolveFontFamilyOverride('noto')).toBe(resolveFontFamily('noto'));
+    expect(resolveFontFamilyOverride('inter')).toBe(resolveFontFamily('inter'));
+  });
+
   it('clampNumber falls back on non-finite values', () => {
     expect(clampNumber(Number.NaN, 1, 10, 5)).toBe(5);
     expect(clampNumber(Infinity, 1, 10, 5)).toBe(5);
   });
 
-  // Coverage for the accent + theme fields that
-  // are now read by settings.ts:applyAccent / applyTheme.
-  it('falls back to "blue" when accent is missing or unknown', () => {
-    expect(hydrateSettings({}).accent).toBe('blue');
-    expect(hydrateSettings({ accent: 'magenta' as unknown as 'blue' }).accent).toBe('blue');
+  it('keeps approved themes and migrates the former high-contrast key', () => {
+    expect(hydrateSettings({ themeMode: 'high-contrast' }).themeMode).toBe('high-contrast');
+    expect(hydrateSettings({ themeMode: 'hc' }).themeMode).toBe('high-contrast');
+    expect(resolveThemeMode('high-contrast', false)).toBe('dark');
   });
 
-  it('preserves a valid accent value through hydration', () => {
-    expect(hydrateSettings({ accent: 'violet' }).accent).toBe('violet');
-    expect(hydrateSettings({ accent: 'cyan' }).accent).toBe('cyan');
-    expect(hydrateSettings({ accent: 'indigo' }).accent).toBe('indigo');
-  });
-
-  it('falls back to "system" when theme is missing or unknown', () => {
+  it('drops legacy accent and rejects retired or unknown themes', () => {
+    expect(hydrateSettings({ accent: 'violet' })).not.toHaveProperty('accent');
+    expect(hydrateSettings({ themeMode: 'sepia' }).themeMode).toBe('system');
+    expect(hydrateSettings({ themeMode: 'sidebar-gray' }).themeMode).toBe('system');
     expect(hydrateSettings({}).themeMode).toBe('system');
-    expect(hydrateSettings({ themeMode: 'high-contrast' as unknown as 'system' }).themeMode).toBe('system');
+    expect(hydrateSettings({ themeMode: 'unknown' }).themeMode).toBe('system');
   });
 });

@@ -1,5 +1,5 @@
 /**
- * 系统页 · 使用统计面板
+ * 系统页 · 使用统计面板（参考 CC Switch）
  *
  * 数据完全来自真实来源：
  *   - 后端 /api/usage → 真实 total_tokens（Hero 主数值）
@@ -13,6 +13,7 @@
 // `state` 在模板字符串内被引用 26 次，typescript-eslint parser 偶尔漏检。
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { $, escapeHtml, notify, state } from '../state';
+import { setRuntimeStyle } from '../components/runtime-style';
 import {
   type UsageRecord,
   type UsageSummary,
@@ -118,7 +119,7 @@ function renderHero(summary: UsageSummary): string {
         <div class="usage-hero__metric">
           <span class="usage-hero__metric-label">总请求数</span>
           <span class="usage-hero__metric-value">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            <svg class="mw-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><use href="#process-thinking"></use></svg>
             ${empty ? '—' : fmtInt(summary.totalRequests)}
           </span>
         </div>
@@ -133,28 +134,28 @@ function renderHero(summary: UsageSummary): string {
     <div class="usage-stats">
       <div class="usage-stat">
         <div class="usage-stat__head">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+            <svg class="mw-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><use href="#process-read"></use></svg>
           <span title="本回合 LLM 实际接收的完整上下文（含 system prompt / 历史消息 / 工具结果 / 本轮输入），每次调用都会重发整个上下文">上下文输入</span>
         </div>
         <div class="usage-stat__value">${empty ? '—' : fmtTokensShort(summary.totalInput)}</div>
       </div>
       <div class="usage-stat">
         <div class="usage-stat__head">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#a855f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            <svg class="mw-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><use href="#process-write"></use></svg>
           <span>Output（估）</span>
         </div>
         <div class="usage-stat__value">${empty ? '—' : fmtTokensShort(summary.totalOutput)}</div>
       </div>
       <div class="usage-stat">
         <div class="usage-stat__head">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.66 4.03 3 9 3s9-1.34 9-3V5M3 11v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6"/></svg>
+            <svg class="mw-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><use href="#icon-folder"></use></svg>
           <span>缓存创建</span>
         </div>
         <div class="usage-stat__value">${summary.totalCacheCreate}</div>
       </div>
       <div class="usage-stat">
         <div class="usage-stat__head">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 7v6c0 5 3.5 9.5 8 11 4.5-1.5 8-6 8-11V7l-8-5z"/></svg>
+            <svg class="mw-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><use href="#icon-check"></use></svg>
           <span>缓存命中</span>
         </div>
         <div class="usage-stat__value">${summary.totalCacheRead}</div>
@@ -164,7 +165,7 @@ function renderHero(summary: UsageSummary): string {
           <span class="usage-stat__head"><span>缓存命中率</span></span>
           <span class="usage-stat__rate">${(summary.hitRate * 100).toFixed(1)}%</span>
         </div>
-        <div class="usage-stat__bar"><div class="usage-stat__bar-fill" style="width:${(summary.hitRate * 100).toFixed(1)}%"></div></div>
+        <div class="usage-stat__bar"><div class="usage-stat__bar-fill" data-usage-width="${(summary.hitRate * 100).toFixed(1)}"></div></div>
       </div>
     </div>
   `;
@@ -198,9 +199,9 @@ function trendSvg(trend: TrendPoint[], hours: number): string {
   const yLabels: string[] = [];
   for (let k = 0; k <= 4; k++) {
     const y = padT + (innerH * k) / 4;
-    grid.push(`<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="rgba(148,163,184,0.18)" stroke-dasharray="3 3"/>`);
+    grid.push(`<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--mw-chart-grid)" stroke-dasharray="3 3"/>`);
     const vTok = (maxTokens * (4 - k)) / 4;
-    yLabels.push(`<text x="${padL - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" font-size="10" fill="#94a3b8">${fmtTokensShort(vTok)}</text>`);
+    yLabels.push(`<text x="${padL - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--mw-chart-label)">${fmtTokensShort(vTok)}</text>`);
   }
 
   // X 轴：根据 hours 决定刻度密度（24h：每 4h；7d：每天；30d：每 5 天）
@@ -211,7 +212,7 @@ function trendSvg(trend: TrendPoint[], hours: number): string {
     const d = new Date(trend[i].ts * 1000);
     const x = padL + (i / Math.max(1, trend.length - 1)) * innerW;
     const label = `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:00`;
-    xLabels.push(`<text x="${x.toFixed(1)}" y="${H - padB + 18}" text-anchor="middle" font-size="10" fill="#94a3b8">${label}</text>`);
+    xLabels.push(`<text x="${x.toFixed(1)}" y="${H - padB + 18}" text-anchor="middle" font-size="10" fill="var(--mw-chart-label)">${label}</text>`);
   }
 
   function pathOf(get: (p: TrendPoint) => number, yFn: (v: number) => number): string {
@@ -235,10 +236,10 @@ function trendSvg(trend: TrendPoint[], hours: number): string {
   }
 
   const series: { id: string; label: string; color: string; get: (p: TrendPoint) => number; yFn: (v: number) => number }[] = [
-    { id: 'cacheRead', label: '缓存命中', color: '#a855f7', get: (p) => p.cacheRead, yFn: yTok },
-    { id: 'cacheWrite', label: '缓存创建', color: '#f97316', get: (p) => p.cacheWrite, yFn: yTok },
-    { id: 'input', label: '输入', color: '#3b82f6', get: (p) => p.input, yFn: yTok },
-    { id: 'output', label: '输出', color: '#22c55e', get: (p) => p.output, yFn: yTok },
+    { id: 'cacheRead', label: '缓存命中', color: 'var(--mw-chart-3)', get: (p) => p.cacheRead, yFn: yTok },
+    { id: 'cacheWrite', label: '缓存创建', color: 'var(--mw-chart-4)', get: (p) => p.cacheWrite, yFn: yTok },
+    { id: 'input', label: '输入', color: 'var(--mw-chart-1)', get: (p) => p.input, yFn: yTok },
+    { id: 'output', label: '输出', color: 'var(--mw-chart-2)', get: (p) => p.output, yFn: yTok },
   ];
 
   const paths: string[] = [];
@@ -259,7 +260,7 @@ function trendSvg(trend: TrendPoint[], hours: number): string {
     <div class="usage-trend__canvas">
       <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="usage-trend__svg" xmlns="http://www.w3.org/2000/svg">
         ${grid.join('')}${yLabels.join('')}${paths.join('')}${lines.join('')}${hitBands.join('')}${xLabels.join('')}
-        <line class="usage-trend__crosshair" x1="0" y1="${padT}" x2="0" y2="${padT + innerH}" stroke="var(--color-accent)" stroke-width="1" opacity="0"/>
+        <line class="usage-trend__crosshair" x1="0" y1="${padT}" x2="0" y2="${padT + innerH}" stroke="var(--mw-action-primary)" stroke-width="1" opacity="0"/>
       </svg>
       <div class="usage-trend__tooltip" hidden></div>
     </div>`;
@@ -393,7 +394,17 @@ function renderLogsTable(state: UsagePageState, providers: string[], models: str
         <span class="usage-log__count">共 ${sorted.length} 条</span>
       </div>
       <div class="usage-log__table-wrap">
-        <table class="usage-log__table">
+        <table class="usage-log__table usage-log__table--requests">
+          <colgroup>
+            <col class="usage-log__col--time">
+            <col class="usage-log__col--provider">
+            <col class="usage-log__col--model">
+            <col class="usage-log__col--tokens">
+            <col class="usage-log__col--tokens">
+            <col class="usage-log__col--latency">
+            <col class="usage-log__col--status">
+            <col class="usage-log__col--session">
+          </colgroup>
           <thead>
             <tr>
               <th>时间</th>
@@ -556,6 +567,7 @@ const pageState: UsagePageState = {
 let refreshTimer: number | null = null;
 let unsubscribeTracker: (() => void) | null = null;
 let lastTrendSnapshot: TrendPoint[] = [];
+let lastTrendHours = 24;
 
 function timePresetHours(): number {
   return TIME_PRESETS.find((t) => t.id === pageState.timePreset)?.hours ?? 24;
@@ -574,16 +586,8 @@ async function render(): Promise<void> {
   const hours = timePresetHours();
   const trend = getTrend(hours);
   lastTrendSnapshot = trend;
-  const refreshLabel = pageState.refreshMs > 0 ? `${pageState.refreshMs / 1000}s` : '关闭';
-
+  lastTrendHours = hours;
   root.innerHTML = `
-    <header class="hub-section-header system-section-header">
-      <div class="hub-section-header-copy">
-        <h2 class="hub-section-title">使用统计</h2>
-        <p class="hub-section-desc">每回合完成后自动记录。Hero 主数值取自后端 /api/usage；明细/趋势来自本地真实请求日志（自动刷新：${refreshLabel}）。</p>
-      </div>
-    </header>
-
     ${renderHero(summary)}
 
     <section class="usage-trend">
@@ -606,7 +610,14 @@ async function render(): Promise<void> {
 
     <div class="usage-tab-content">${renderTabContent(pageState, providers, models)}</div>
   `;
+  applyUsageRuntimeStyles(root);
   bindEvents();
+}
+
+function applyUsageRuntimeStyles(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('[data-usage-width]').forEach((fill) => {
+    setRuntimeStyle(fill, 'width', `${fill.dataset.usageWidth ?? '0'}%`);
+  });
 }
 
 function bindEvents(): void {
@@ -713,10 +724,11 @@ function bindTrendHover(): void {
     const rect = canvas.getBoundingClientRect();
     const x = Math.min(Math.max(clientX - rect.left + 12, 8), rect.width - tip.offsetWidth - 8);
     const y = Math.min(Math.max(clientY - rect.top - 12, 8), rect.height - tip.offsetHeight - 8);
-    tip.style.left = `${x}px`;
-    tip.style.top = `${y}px`;
+    setRuntimeStyle(tip, 'left', `${x}px`);
+    setRuntimeStyle(tip, 'top', `${y}px`);
     if (cross) {
       const xSvg = padL + (idx / Math.max(1, trend.length - 1)) * innerW;
+      const scale = rect.width / W;
       cross.setAttribute('x1', String(xSvg));
       cross.setAttribute('x2', String(xSvg));
       cross.setAttribute('opacity', '0.55');
@@ -939,7 +951,10 @@ function rerenderTabOnly(): void {
   const providers = getProviderOptions();
   const models = getModelOptions();
   const host = document.querySelector('.usage-tab-content');
-  if (host) host.innerHTML = renderTabContent(pageState, providers, models);
+  if (host) {
+    host.innerHTML = renderTabContent(pageState, providers, models);
+    applyUsageRuntimeStyles(host as HTMLElement);
+  }
   // 重新绑定 status 按钮
   document.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => {
     b.addEventListener('click', () => {

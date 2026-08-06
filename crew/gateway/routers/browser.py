@@ -279,10 +279,9 @@ def create_browser_router(crew) -> APIRouter:
     async def browser_host(socket: WebSocket) -> None:
         """Register the authenticated Electron main process as browser executor.
 
-        UOS starts the gateway from systemd before Electron, so this is an
-        outbound desktop connection rather than a port or token inherited from
-        a parent process.  The account-derived runtime key prevents one signed-in
-        desktop from servicing another account's browser tools.
+        The desktop process opens an outbound loopback connection to the Gateway.
+        The instance-derived bearer token prevents another local process from
+        servicing this installation's browser tools.
         """
         if not _loopback_host(socket.client.host if socket.client else None):
             await socket.close(code=4403)

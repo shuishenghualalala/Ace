@@ -16,7 +16,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator
 
 from crew.agent.external.process_lifecycle import (
     finish_process_after_terminal,
@@ -34,6 +34,7 @@ from crew.agent.external.runtime_adapter import (
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
 from crew.state.logging import get_logger
 
 
@@ -96,48 +97,6 @@ def _diagnostic_tail(value: str, *, max_chars: int = 16000) -> str:
     if len(text) <= max_chars:
         return text
     return f"...<truncated>\n{text[-max_chars:]}"
-
-
-async def _collect_cli_output(
-    proc: asyncio.subprocess.Process,
-    stdin_data: bytes | None,
-    on_first_io: Callable[[str], None],
-) -> tuple[bytes, bytes]:
-    """Drain stdout/stderr concurrently and record the first observable byte."""
-
-    stdout_parts: list[bytes] = []
-    stderr_parts: list[bytes] = []
-
-    async def _read(
-        stream: asyncio.StreamReader | None,
-        target: list[bytes],
-        stream_name: str,
-    ) -> None:
-        if stream is None:
-            return
-        while True:
-            chunk = await stream.read(64 * 1024)
-            if not chunk:
-                return
-            on_first_io(stream_name)
-            target.append(chunk)
-
-    if proc.stdin is not None:
-        try:
-            if stdin_data:
-                proc.stdin.write(stdin_data)
-                await proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        finally:
-            proc.stdin.close()
-
-    await asyncio.gather(
-        _read(proc.stdout, stdout_parts, "stdout"),
-        _read(proc.stderr, stderr_parts, "stderr"),
-        proc.wait(),
-    )
-    return b"".join(stdout_parts), b"".join(stderr_parts)
 
 
 @dataclass
@@ -561,6 +520,11 @@ def _claude_control_response(request_id: str, allow: bool, tool_input: Any) -> d
 async def _stream_claude_once(
     request: RuntimeExecutionRequest,
 ) -> AsyncIterator[ExternalStreamEvent]:
+    from crew.security.launch import host_stream_launch_block_reason
+
+    blocked = host_stream_launch_block_reason()
+    if blocked:
+        raise ExternalCliError(f"严格安全约束已拒绝 Claude Code 宿主流式启动：{blocked}")
     cwd = str(Path(request.cwd or ".").expanduser().resolve())
     env = build_external_runtime_env(request.custom_env)
     args = [
@@ -774,11 +738,15 @@ async def _stream_claude_once(
 async def stream_claude_events(
     request: RuntimeExecutionRequest,
 ) -> AsyncIterator[ExternalStreamEvent]:
+    """Stream one Claude Code turn as protocol-neutral external events."""
+
     async for event in _stream_claude_once(request):
         yield event
 
 
 class ClaudeStreamJsonAdapter:
+    """Drive Claude Code through its native stdin/stdout stream-json protocol."""
+
     adapter_id = "claude-stream-json"
 
     async def probe(
@@ -789,6 +757,8 @@ class ClaudeStreamJsonAdapter:
         launch_args: tuple[str, ...] = (),
         custom_env: dict[str, str] | None = None,
     ) -> RuntimeAdapterProbe:
+        """Return the stable Claude Code model catalog and supported capabilities."""
+
         del executable_path, provider, launch_args, custom_env
         # Claude Code has no documented ``models list`` command.  Keep the
         # short, versioned catalog here (the same strategy used by Multica)
@@ -832,6 +802,8 @@ class ClaudeStreamJsonAdapter:
         )
 
     def stream(self, request: RuntimeExecutionRequest) -> AsyncIterator[ExternalStreamEvent]:
+        """Start streaming a Claude Code execution request."""
+
         return stream_claude_events(request)
 
 
@@ -841,6 +813,8 @@ register_runtime_adapter(ClaudeStreamJsonAdapter())
 
 
 async def run_external_cli(config: ExternalCliConfig) -> str:
+    """Run one CLI turn through the security execution boundary."""
+
     started_at = time.perf_counter()
     prompt = config.prompt
     if config.system_prompt:
@@ -852,63 +826,53 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
         args, stdin_text = default_cli_args(config.provider, prompt, config.model)
 
     cwd = str(Path(config.cwd or ".").expanduser().resolve())
+    process_id: int | None = None
+    first_io_at: dict[str, float] = {}
+
+    def _mark_started(pid: int | None) -> None:
+        nonlocal process_id
+        process_id = pid
+        log.info(
+            "[PERF] cli_spawn provider=%s elapsed=%.3fs model=%s pid=%s",
+            config.provider,
+            time.perf_counter() - started_at,
+            config.model or "default",
+            pid,
+        )
+
+    def _mark_first_io(stream_name: str) -> None:
+        if stream_name in first_io_at:
+            return
+        first_io_at[stream_name] = time.perf_counter()
+        log.info(
+            "[PERF] cli_first_%s provider=%s elapsed=%.3fs model=%s pid=%s",
+            stream_name,
+            config.provider,
+            first_io_at[stream_name] - started_at,
+            config.model or "default",
+            process_id,
+        )
+
     env = build_external_runtime_env(config.custom_env)
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            config.executable_path,
-            *args,
-            cwd=cwd,
+        from crew.security.launch import execute_captured
+
+        result = await execute_captured(
+            (config.executable_path, *args),
+            cwd=Path(cwd),
             env=env,
-            # Desktop starts the managed Gateway with an open stdin pipe. If a
-            # CLI invocation inherits it, Codex treats that pipe as additional
-            # prompt input and waits forever for EOF. Explicitly detach stdin
-            # for argument-based providers; stdin-based providers still get a
-            # dedicated pipe below.
-            stdin=asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **isolated_process_kwargs(),
+            stdin=stdin_text.encode("utf-8") if stdin_text is not None else None,
+            env_overrides=config.custom_env,
+            timeout=config.timeout,
+            on_started=_mark_started,
+            on_output=_mark_first_io,
         )
     except FileNotFoundError as exc:
         raise ExternalCliError(f"找不到可执行文件: {config.executable_path}") from exc
-
-    spawned_at = time.perf_counter()
-    log.info(
-        "[PERF] cli_spawn provider=%s elapsed=%.3fs model=%s pid=%s",
-        config.provider,
-        spawned_at - started_at,
-        config.model or "default",
-        proc.pid,
-    )
-    first_io_at: dict[str, float] = {}
-
-    def _mark_first_io(stream_name: str) -> None:
-        if stream_name not in first_io_at:
-            first_io_at[stream_name] = time.perf_counter()
-            log.info(
-                "[PERF] cli_first_%s provider=%s elapsed=%.3fs model=%s pid=%s",
-                stream_name,
-                config.provider,
-                first_io_at[stream_name] - started_at,
-                config.model or "default",
-                proc.pid,
-            )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            _collect_cli_output(
-                proc,
-                stdin_text.encode("utf-8") if stdin_text is not None else None,
-                _mark_first_io,
-            ),
-            timeout=config.timeout,
-        )
-    except asyncio.CancelledError:
-        await terminate_process_tree(proc)
-        raise
-    except asyncio.TimeoutError as exc:
-        await terminate_process_tree(proc)
+    except (asyncio.TimeoutError, NativeRuntimeError) as exc:
+        if isinstance(exc, NativeRuntimeError) and exc.code is not RuntimeErrorCode.TIMEOUT:
+            raise
         log.error(
             "[PERF] cli_total provider=%s elapsed=%.3fs model=%s status=timeout",
             config.provider,
@@ -917,13 +881,13 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
         )
         raise ExternalCliError(f"{config.provider} CLI 调用超时") from exc
 
-    out_text = stdout.decode("utf-8", errors="replace")
-    err_text = stderr.decode("utf-8", errors="replace").strip()
-    if proc.returncode != 0:
+    out_text = result.stdout
+    err_text = result.stderr.strip()
+    if result.returncode != 0:
         log.error(
             "[CLI] provider=%s exit=%s stderr=%s stdout=%s",
             config.provider,
-            proc.returncode,
+            result.returncode,
             _diagnostic_tail(err_text),
             _diagnostic_tail(out_text),
         )
@@ -937,7 +901,7 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
             err_text,
             out_text,
             prompt=prompt,
-            returncode=proc.returncode,
+            returncode=result.returncode,
         )
         raise ExternalCliError(f"{config.provider} CLI 调用失败: {detail}")
 

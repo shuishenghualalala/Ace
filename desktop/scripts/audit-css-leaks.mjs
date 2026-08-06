@@ -12,11 +12,11 @@
  *   node scripts/audit-css-leaks.mjs path/to/dir     # scan a custom dir
  *   node scripts/audit-css-leaks.mjs --json          # machine-readable output
  *
- * Exit code: 0 always (advisory tool).
+ * Exit code: 0 by default (advisory tool); --strict fails on any leak.
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { basename, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HEX_PATTERN = /#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g;
@@ -94,7 +94,9 @@ export function auditFile(filePath) {
 }
 
 /**
- * Audit all CSS files under `rootDir`.
+ * Audit all feature CSS files under `rootDir`. `tokens.css` is intentionally
+ * excluded: primitive literals belong in the token layer; this audit checks
+ * that component and feature styles consume those tokens.
  *
  * @param {string} rootDir
  * @returns {{
@@ -104,7 +106,7 @@ export function auditFile(filePath) {
  */
 export function auditCssLeaks(rootDir) {
   const abs = resolve(rootDir);
-  const files = walkCssFiles(abs);
+  const files = walkCssFiles(abs).filter((file) => basename(file) !== 'tokens.css');
   const reports = files.map(auditFile);
   const totalHex = reports.reduce((s, r) => s + r.hex, 0);
   const totalRgb = reports.reduce((s, r) => s + r.rgb, 0);
@@ -138,6 +140,7 @@ function isCli() {
 if (isCli()) {
   const args = process.argv.slice(2);
   const json = args.includes('--json');
+  const strict = args.includes('--strict');
   const target = args.find((a) => !a.startsWith('--')) ?? 'assets/styles';
   const report = auditCssLeaks(target);
 
@@ -154,5 +157,9 @@ if (isCli()) {
         `  ${f.path.padEnd(36)} hex=${String(f.hex).padStart(3)} rgb=${String(f.rgb).padStart(3)}  samples: ${f.samples.join(', ')}\n`,
       );
     }
+  }
+
+  if (strict && report.summary.totalHex + report.summary.totalRgb > 0) {
+    process.exitCode = 1;
   }
 }

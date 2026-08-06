@@ -283,6 +283,11 @@ def _scan_descriptors(descriptors: tuple[RuntimeDescriptor, ...]) -> list[Runtim
 
 
 def _detect_version(path: str) -> str:
+    from crew.security.launch import current_process_launch
+
+    launch = current_process_launch.get()
+    if launch is not None and launch.managed:
+        return "managed-probe-unavailable"
     for args in ([path, "--version"], [path, "-v"]):
         try:
             proc = subprocess.run(

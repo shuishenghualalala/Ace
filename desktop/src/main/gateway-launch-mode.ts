@@ -1,11 +1,13 @@
+import type { UserInfoSnapshot } from '../shared/types';
+
 export type GatewayIdentityMode = 'local' | 'dev';
 
 /** Resolve the Gateway identity used for this Desktop process lifetime. */
 export function resolveGatewayIdentityMode(
   isDevLaunch: boolean,
+  _jwt?: string | null,
+  _userInfo?: UserInfoSnapshot | null,
 ): GatewayIdentityMode {
-  // 开源桌面端不依赖远程账号：普通启动固定使用本地 owner，`--dev`
-  // 继续使用隔离的开发 home，避免开发数据污染正常工作区。
   return isDevLaunch ? 'dev' : 'local';
 }
 
@@ -21,8 +23,7 @@ export function managedGatewayModeEnv(
 
 /**
  * Resolve the CREW_HOME shared by the Desktop verifier and its Gateway.
- * Dev fallback is intentionally isolated, but both processes must read the
- * instance-auth key from that same isolated home.
+ * 统一指向真实 crew home（config 的 ~/.Crew），避免 dev 模式把数据隔离到空目录。
  */
 export function resolveGatewayCrewHome(
   mode: GatewayIdentityMode,
@@ -32,7 +33,7 @@ export function resolveGatewayCrewHome(
   return mode === 'dev' ? devHome : accountHome;
 }
 
-/** Normal local mode may reuse a verified Gateway; dev mode stays isolated. */
+/** Only an account-mode Desktop may reuse a Gateway with unknown dev settings. */
 export function shouldProbeExternalGateway(mode: GatewayIdentityMode): boolean {
   return mode === 'local';
 }

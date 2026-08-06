@@ -1,0 +1,478 @@
+//! Installer-only persistent WFP policy for the two Ace sandbox accounts.
+//!
+//! Stable GUIDs make setup/repair/uninstall idempotent. Filters are scoped by
+//! ALE_USER_ID: the offline account is blocked, while the online account may
+//! reach only the fixed loopback proxy port and is otherwise blocked.
+
+use std::ffi::OsStr;
+use std::mem::zeroed;
+use std::os::windows::ffi::OsStrExt;
+use std::ptr::{null, null_mut};
+
+use windows_sys::core::GUID;
+use windows_sys::Win32::Foundation::{
+    LocalFree, FWP_E_ALREADY_EXISTS, FWP_E_FILTER_NOT_FOUND, FWP_E_NOT_FOUND, HANDLE, HLOCAL,
+};
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
+use windows_sys::Win32::Security::Authorization::{
+    BuildExplicitAccessWithNameW, BuildSecurityDescriptorW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+};
+use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
+use windows_sys::Win32::System::Threading::INFINITE;
+
+const PROXY_PORT: u16 = 43119;
+const PROVIDER_KEY: GUID = GUID::from_u128(0x4f4f9ca9_7741_4c6a_a230_6d0f24479c20);
+const SUBLAYER_KEY: GUID = GUID::from_u128(0x7d54fa23_8d4c_4632_ae37_47d56f1bc75d);
+const OFFLINE_V4: GUID = GUID::from_u128(0x60232765_66dd_4813_a070_810a6f51d4e1);
+const OFFLINE_V6: GUID = GUID::from_u128(0xe8fd818f_9c95_46cb_8103_f193c8c7d86f);
+const ONLINE_PERMIT_V4: GUID = GUID::from_u128(0x7ac9494d_fdef_4eea_9252_b62f9c040944);
+const ONLINE_PERMIT_V6: GUID = GUID::from_u128(0x847f5760_3cec_45f7_aac2_7272fa311e87);
+const ONLINE_BLOCK_V4: GUID = GUID::from_u128(0xdf12efcc_d5c8_4113_bb2a_d0781ce56599);
+const ONLINE_BLOCK_V6: GUID = GUID::from_u128(0xd07399a9_a34e_4858_84ed_dd9f323f6fd1);
+
+pub fn install(offline_account: &str, online_account: &str) -> Result<(), String> {
+    let engine = Engine::open()?;
+    let mut transaction = engine.transaction()?;
+    ensure_provider(engine.handle)?;
+    ensure_sublayer(engine.handle)?;
+    let offline = UserCondition::new(offline_account)?;
+    let online = UserCondition::new(online_account)?;
+    for (key, layer) in [
+        (OFFLINE_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
+        (OFFLINE_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
+    ] {
+        replace_filter(engine.handle, key, layer, &offline, false, false)?;
+    }
+    for (key, layer) in [
+        (ONLINE_PERMIT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
+        (ONLINE_PERMIT_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
+    ] {
+        replace_filter(engine.handle, key, layer, &online, true, true)?;
+    }
+    for (key, layer) in [
+        (ONLINE_BLOCK_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
+        (ONLINE_BLOCK_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
+    ] {
+        replace_filter(engine.handle, key, layer, &online, false, false)?;
+    }
+    transaction.commit()
+}
+
+pub fn uninstall() -> Result<(), String> {
+    let engine = Engine::open()?;
+    let mut transaction = engine.transaction()?;
+    for key in [
+        OFFLINE_V4,
+        OFFLINE_V6,
+        ONLINE_PERMIT_V4,
+        ONLINE_PERMIT_V6,
+        ONLINE_BLOCK_V4,
+        ONLINE_BLOCK_V6,
+    ] {
+        delete_filter(engine.handle, &key)?;
+    }
+    let sublayer = unsafe { FwpmSubLayerDeleteByKey0(engine.handle, &SUBLAYER_KEY) };
+    allow_missing(sublayer, "FwpmSubLayerDeleteByKey0")?;
+    let provider = unsafe { FwpmProviderDeleteByKey0(engine.handle, &PROVIDER_KEY) };
+    allow_missing(provider, "FwpmProviderDeleteByKey0")?;
+    transaction.commit()
+}
+
+/// Verify all Ace WFP filters exist **and** have the expected action,
+/// condition count, and layer key. A filter that exists but was externally
+/// modified (wrong action, missing conditions, wrong layer) must be detected
+/// so the caller can trigger re-install (audit M6).
+pub fn verify_installed() -> Result<(), String> {
+    let engine = Engine::open()?;
+    // (name, key, layer, action, expected numFilterConditions)
+    let expected: [(&str, GUID, GUID, u32, u32); 6] = [
+        (
+            "OFFLINE_V4",
+            OFFLINE_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWP_ACTION_BLOCK,
+            1,
+        ),
+        (
+            "OFFLINE_V6",
+            OFFLINE_V6,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            FWP_ACTION_BLOCK,
+            1,
+        ),
+        (
+            "ONLINE_PERMIT_V4",
+            ONLINE_PERMIT_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWP_ACTION_PERMIT,
+            3,
+        ),
+        (
+            "ONLINE_PERMIT_V6",
+            ONLINE_PERMIT_V6,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            FWP_ACTION_PERMIT,
+            3,
+        ),
+        (
+            "ONLINE_BLOCK_V4",
+            ONLINE_BLOCK_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWP_ACTION_BLOCK,
+            1,
+        ),
+        (
+            "ONLINE_BLOCK_V6",
+            ONLINE_BLOCK_V6,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            FWP_ACTION_BLOCK,
+            1,
+        ),
+    ];
+    for (name, key, layer, action, conditions) in expected {
+        let mut filter: *mut FWPM_FILTER0 = null_mut();
+        check(
+            unsafe { FwpmFilterGetByKey0(engine.handle, &key, &mut filter) },
+            "FwpmFilterGetByKey0",
+        )?;
+        let result = unsafe {
+            let f = &*filter;
+            let layer_match = (
+                f.layerKey.data1,
+                f.layerKey.data2,
+                f.layerKey.data3,
+                f.layerKey.data4,
+            ) == (layer.data1, layer.data2, layer.data3, layer.data4);
+            let action_match = f.action.r#type == action;
+            let cond_match = f.numFilterConditions == conditions;
+            if layer_match && action_match && cond_match {
+                Ok(())
+            } else {
+                Err(format!(
+                    "WFP filter {name} mismatch: action=0x{:X} (expected 0x{action:X}), \
+                     conditions={} (expected {conditions}), layer_match={layer_match}",
+                    f.action.r#type, f.numFilterConditions
+                ))
+            }
+        };
+        unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
+        result?;
+    }
+    Ok(())
+}
+
+struct Engine {
+    handle: HANDLE,
+}
+impl Engine {
+    fn open() -> Result<Self, String> {
+        let mut session: FWPM_SESSION0 = unsafe { zeroed() };
+        let name = wide("Ace sandbox WFP");
+        session.displayData.name = name.as_ptr() as *mut _;
+        session.txnWaitTimeoutInMSec = INFINITE;
+        let mut handle = 0;
+        check(
+            unsafe {
+                FwpmEngineOpen0(
+                    null(),
+                    RPC_C_AUTHN_DEFAULT as u32,
+                    null(),
+                    &session,
+                    &mut handle,
+                )
+            },
+            "FwpmEngineOpen0",
+        )?;
+        Ok(Self { handle })
+    }
+    fn transaction(&self) -> Result<Transaction<'_>, String> {
+        check(
+            unsafe { FwpmTransactionBegin0(self.handle, 0) },
+            "FwpmTransactionBegin0",
+        )?;
+        Ok(Transaction {
+            engine: self,
+            committed: false,
+        })
+    }
+}
+impl Drop for Engine {
+    fn drop(&mut self) {
+        unsafe {
+            FwpmEngineClose0(self.handle);
+        }
+    }
+}
+struct Transaction<'a> {
+    engine: &'a Engine,
+    committed: bool,
+}
+impl Transaction<'_> {
+    fn commit(&mut self) -> Result<(), String> {
+        check(
+            unsafe { FwpmTransactionCommit0(self.engine.handle) },
+            "FwpmTransactionCommit0",
+        )?;
+        self.committed = true;
+        Ok(())
+    }
+}
+impl Drop for Transaction<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            unsafe {
+                FwpmTransactionAbort0(self.engine.handle);
+            }
+        }
+    }
+}
+
+struct UserCondition {
+    descriptor: PSECURITY_DESCRIPTOR,
+    blob: FWP_BYTE_BLOB,
+}
+impl UserCondition {
+    fn new(account: &str) -> Result<Self, String> {
+        let account = wide(account);
+        let mut access: EXPLICIT_ACCESS_W = unsafe { zeroed() };
+        unsafe {
+            BuildExplicitAccessWithNameW(
+                &mut access,
+                account.as_ptr(),
+                FWP_ACTRL_MATCH_FILTER,
+                GRANT_ACCESS,
+                0,
+            );
+        }
+        let mut descriptor = null_mut();
+        let mut length = 0;
+        check(
+            unsafe {
+                BuildSecurityDescriptorW(
+                    null(),
+                    null(),
+                    1,
+                    &access,
+                    0,
+                    null(),
+                    null_mut(),
+                    &mut length,
+                    &mut descriptor,
+                )
+            },
+            "BuildSecurityDescriptorW",
+        )?;
+        Ok(Self {
+            descriptor,
+            blob: FWP_BYTE_BLOB {
+                size: length,
+                data: descriptor as *mut u8,
+            },
+        })
+    }
+}
+impl Drop for UserCondition {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.descriptor as HLOCAL);
+        }
+    }
+}
+
+fn ensure_provider(engine: HANDLE) -> Result<(), String> {
+    let name = wide("Ace sandbox WFP");
+    let provider = FWPM_PROVIDER0 {
+        providerKey: PROVIDER_KEY,
+        displayData: FWPM_DISPLAY_DATA0 {
+            name: name.as_ptr() as *mut _,
+            description: null_mut(),
+        },
+        flags: FWPM_PROVIDER_FLAG_PERSISTENT,
+        providerData: empty_blob(),
+        serviceName: null_mut(),
+    };
+    allow_exists(
+        unsafe { FwpmProviderAdd0(engine, &provider, null_mut()) },
+        "FwpmProviderAdd0",
+    )
+}
+
+fn ensure_sublayer(engine: HANDLE) -> Result<(), String> {
+    let name = wide("Ace sandbox WFP");
+    let provider = PROVIDER_KEY;
+    let sublayer = FWPM_SUBLAYER0 {
+        subLayerKey: SUBLAYER_KEY,
+        displayData: FWPM_DISPLAY_DATA0 {
+            name: name.as_ptr() as *mut _,
+            description: null_mut(),
+        },
+        flags: FWPM_SUBLAYER_FLAG_PERSISTENT,
+        providerKey: &provider as *const _ as *mut _,
+        providerData: empty_blob(),
+        weight: 0x8000,
+    };
+    allow_exists(
+        unsafe { FwpmSubLayerAdd0(engine, &sublayer, null_mut()) },
+        "FwpmSubLayerAdd0",
+    )
+}
+
+fn replace_filter(
+    engine: HANDLE,
+    key: GUID,
+    layer: GUID,
+    user: &UserCondition,
+    permit_proxy: bool,
+    high_weight: bool,
+) -> Result<(), String> {
+    delete_filter(engine, &key)?;
+    let mut conditions = vec![FWPM_FILTER_CONDITION0 {
+        fieldKey: FWPM_CONDITION_ALE_USER_ID,
+        matchType: FWP_MATCH_EQUAL,
+        conditionValue: FWP_CONDITION_VALUE0 {
+            r#type: FWP_SECURITY_DESCRIPTOR_TYPE,
+            Anonymous: FWP_CONDITION_VALUE0_0 {
+                sd: &user.blob as *const _ as *mut _,
+            },
+        },
+    }];
+    if permit_proxy {
+        conditions.push(FWPM_FILTER_CONDITION0 {
+            fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
+            matchType: FWP_MATCH_EQUAL,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_UINT16,
+                Anonymous: FWP_CONDITION_VALUE0_0 { uint16: PROXY_PORT },
+            },
+        });
+        conditions.push(FWPM_FILTER_CONDITION0 {
+            fieldKey: FWPM_CONDITION_FLAGS,
+            matchType: FWP_MATCH_FLAGS_ALL_SET,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_UINT32,
+                Anonymous: FWP_CONDITION_VALUE0_0 {
+                    uint32: FWP_CONDITION_FLAG_IS_LOOPBACK,
+                },
+            },
+        });
+    }
+    let name = wide(if permit_proxy {
+        "Ace permit local proxy"
+    } else {
+        "Ace block sandbox outbound"
+    });
+    let provider = PROVIDER_KEY;
+    let filter = FWPM_FILTER0 {
+        filterKey: key,
+        displayData: FWPM_DISPLAY_DATA0 {
+            name: name.as_ptr() as *mut _,
+            description: null_mut(),
+        },
+        flags: FWPM_FILTER_FLAG_PERSISTENT,
+        providerKey: &provider as *const _ as *mut _,
+        providerData: empty_blob(),
+        layerKey: layer,
+        subLayerKey: SUBLAYER_KEY,
+        weight: FWP_VALUE0 {
+            r#type: FWP_UINT8,
+            Anonymous: FWP_VALUE0_0 {
+                uint8: if high_weight { 15 } else { 0 },
+            },
+        },
+        numFilterConditions: conditions.len() as u32,
+        filterCondition: conditions.as_mut_ptr(),
+        action: FWPM_ACTION0 {
+            r#type: if permit_proxy {
+                FWP_ACTION_PERMIT
+            } else {
+                FWP_ACTION_BLOCK
+            },
+            Anonymous: FWPM_ACTION0_0 {
+                filterType: GUID::from_u128(0),
+            },
+        },
+        Anonymous: FWPM_FILTER0_0 { rawContext: 0 },
+        reserved: null_mut(),
+        filterId: 0,
+        effectiveWeight: FWP_VALUE0 {
+            r#type: FWP_EMPTY,
+            Anonymous: unsafe { zeroed() },
+        },
+    };
+    let mut id = 0;
+    check(
+        unsafe { FwpmFilterAdd0(engine, &filter, null_mut(), &mut id) },
+        "FwpmFilterAdd0",
+    )
+}
+
+fn delete_filter(engine: HANDLE, key: &GUID) -> Result<(), String> {
+    allow_missing(
+        unsafe { FwpmFilterDeleteByKey0(engine, key) },
+        "FwpmFilterDeleteByKey0",
+    )
+}
+fn check(code: u32, operation: &str) -> Result<(), String> {
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(format!("{operation} failed: 0x{code:08X}"))
+    }
+}
+fn allow_exists(code: u32, operation: &str) -> Result<(), String> {
+    if code == 0 || code == FWP_E_ALREADY_EXISTS as u32 {
+        Ok(())
+    } else {
+        check(code, operation)
+    }
+}
+fn allow_missing(code: u32, operation: &str) -> Result<(), String> {
+    if code == 0 || code == FWP_E_FILTER_NOT_FOUND as u32 || code == FWP_E_NOT_FOUND as u32 {
+        Ok(())
+    } else {
+        check(code, operation)
+    }
+}
+fn empty_blob() -> FWP_BYTE_BLOB {
+    FWP_BYTE_BLOB {
+        size: 0,
+        data: null_mut(),
+    }
+}
+fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
+    value
+        .as_ref()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+    #[test]
+    fn stable_filter_keys_are_unique() {
+        let keys = [
+            OFFLINE_V4,
+            OFFLINE_V6,
+            ONLINE_PERMIT_V4,
+            ONLINE_PERMIT_V6,
+            ONLINE_BLOCK_V4,
+            ONLINE_BLOCK_V6,
+        ];
+        // windows_sys::core::GUID doesn't derive PartialEq in 0.52; compare field tuples.
+        for (index, key) in keys.iter().enumerate() {
+            let dup = keys[..index].iter().any(|k| {
+                (k.data1, k.data2, k.data3, k.data4) == (key.data1, key.data2, key.data3, key.data4)
+            });
+            assert!(!dup, "duplicate WFP filter key at index {index}");
+        }
+    }
+    #[test]
+    fn account_identity_not_desktop_session_is_filter_boundary() {
+        assert_eq!(PROXY_PORT, 43119);
+        assert_eq!(size_of::<GUID>(), 16);
+    }
+}

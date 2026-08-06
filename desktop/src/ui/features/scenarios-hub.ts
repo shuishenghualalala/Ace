@@ -1,16 +1,21 @@
 /**
- * 场景化推荐（welcome 首页）
+ * Welcome start view and Gateway-backed scenario recommendations.
  *
- * - 用统一的低饱和能力列表渲染经典场景，配「换一换」随机换一批。
- * - 点场景 → 展开细分玩法 chip；点细分玩法 → 通过 onPick 把 query 预填进输入框 + 记录绑定。
- * - 绑定（skill / 注入提示词）由后端按 sub_scenario id 反查，前端只负责传 id。
- * - API 不可用或返回空列表时展示内置 fallback，避免首页卡片被清空。
+ * The Gateway owns scenario content and execution binding. This owner only
+ * renders the start view, exposes loading/fallback state, and reports a picked
+ * sub-scenario to the Composer.
  */
 
 import { backendApi, type Scenario, type SubScenario } from '../backend-client';
-import { $, escapeHtml } from '../state';
+import { createIcon, type IconId } from '../components/icon';
 
 const BATCH = 3;
+const SCENARIO_ICONS: readonly IconId[] = [
+  'icon-task',
+  'icon-agent',
+  'icon-search',
+  'icon-file',
+];
 
 const FALLBACK_SCENARIOS: Scenario[] = [
   {
@@ -42,115 +47,221 @@ const FALLBACK_SCENARIOS: Scenario[] = [
   },
 ];
 
-// Notion 简约风：只保留单色线条图形，颜色交给 CSS（currentColor）。
-const CARD_GLYPHS: string[] = [
-  // 1. Skill 立方体
-  '<path d="M32 14 L48 22 V42 L32 50 L16 42 V22 Z" /><path d="M16 22 L32 30 L48 22" /><path d="M32 30 V50" />',
-  // 2. 邮件
-  '<rect x="10" y="18" width="44" height="28" rx="4" /><path d="M12 22 L32 36 L52 22" />',
-  // 3. 文件夹 / 整理
-  '<path d="M10 20 H24 L28 24 H54 V48 H10 Z" /><path d="M22 33 L26 37 L34 29" />',
-  // 4. 日历 / 日程
-  '<rect x="10" y="16" width="44" height="34" rx="4" /><path d="M10 26 H54" /><path d="M22 12 V20 M42 12 V20" /><rect x="28" y="33" width="8" height="8" rx="1.5" />',
-  // 5. 公文检索
-  '<path d="M16 12 H38 L48 22 V52 H16 Z" /><path d="M38 12 V22 H48" /><circle cx="36" cy="40" r="5.5" /><path d="M40 44 L46 50" />',
-];
-
-function cardSvg(index: number): string {
-  const glyph = CARD_GLYPHS[index % CARD_GLYPHS.length];
-  return `<svg class="card-svg" viewBox="0 0 64 64" aria-hidden="true">
-    <g class="card-glyph" fill="none" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">${glyph}</g>
-  </svg>`;
-}
-
 let scenarios: Scenario[] = [...FALLBACK_SCENARIOS];
 let activeId: string | null = null;
 let onPick: ((sub: SubScenario, parent: Scenario) => void) | null = null;
+let loadGeneration = 0;
+let outsideClickHandler: ((event: MouseEvent) => void) | null = null;
+let composerPopoverOpenHandler: (() => void) | null = null;
+
+function mountWelcomeView(): void {
+  const host = document.getElementById('welcome-panel');
+  if (!host || host.querySelector('[data-welcome-view]')) return;
+
+  const view = document.createElement('div');
+  const header = document.createElement('header');
+  const identity = document.createElement('div');
+  const logo = document.createElement('img');
+  const heading = document.createElement('div');
+  const title = document.createElement('h1');
+  const subtitle = document.createElement('p');
+  const scenariosSection = document.createElement('section');
+  const sectionHeader = document.createElement('header');
+  const sectionTitle = document.createElement('h2');
+  const refresh = document.createElement('button');
+  const status = document.createElement('div');
+  const cards = document.createElement('div');
+  const items = document.createElement('div');
+
+  host.className = 'welcome-view-host';
+  view.className = 'welcome-view';
+  view.dataset.welcomeView = '';
+  header.className = 'welcome-view__header';
+  identity.className = 'welcome-view__identity';
+  logo.className = 'welcome-view__logo';
+  logo.src = './icon.png';
+  logo.alt = 'Crew';
+  logo.decoding = 'async';
+  heading.className = 'welcome-view__heading';
+  title.className = 'welcome-view__title';
+  title.textContent = 'Hi, 我是 Crew';
+  subtitle.className = 'welcome-view__subtitle';
+  subtitle.textContent = '今天想从哪里开始？';
+  heading.append(title, subtitle);
+  identity.append(logo, heading);
+  header.append(identity);
+
+  scenariosSection.className = 'welcome-scenarios';
+  scenariosSection.setAttribute('aria-labelledby', 'welcome-scenarios-title');
+  sectionHeader.className = 'welcome-scenarios__header';
+  sectionTitle.id = 'welcome-scenarios-title';
+  sectionTitle.className = 'welcome-scenarios__title';
+  sectionTitle.textContent = '快捷场景';
+  refresh.id = 'scenario-refresh';
+  refresh.type = 'button';
+  refresh.className = 'mw-button mw-button--ghost mw-button--icon welcome-scenarios__refresh';
+  refresh.title = '换一换';
+  refresh.setAttribute('aria-label', '换一换');
+  refresh.append(createIcon('icon-refresh', { size: 16 }));
+  sectionHeader.append(sectionTitle, refresh);
+  status.id = 'scenario-status';
+  status.className = 'welcome-scenarios__status';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  cards.id = 'scenario-cards';
+  cards.className = 'welcome-scenarios__commands';
+  cards.setAttribute('aria-label', '推荐场景列表');
+  items.id = 'scenario-items';
+  items.className = 'welcome-scenarios__items';
+  items.setAttribute('aria-label', '场景操作');
+  items.hidden = true;
+  scenariosSection.append(sectionHeader, status, cards, items);
+  view.append(header, scenariosSection);
+  host.replaceChildren(view);
+}
+
+function createScenarioCommand(scenario: Scenario, index: number): HTMLButtonElement {
+  const button = document.createElement('button');
+  const symbol = document.createElement('span');
+  const title = document.createElement('strong');
+  button.type = 'button';
+  button.className = 'scenario-command';
+  button.dataset.scenarioId = scenario.id;
+  button.title = scenario.description || scenario.title;
+  button.setAttribute('aria-expanded', scenario.id === activeId ? 'true' : 'false');
+  button.setAttribute('aria-controls', 'scenario-items');
+  symbol.className = 'scenario-command__symbol';
+  symbol.append(createIcon(SCENARIO_ICONS[index % SCENARIO_ICONS.length], { size: 18 }));
+  title.className = 'scenario-command__title';
+  title.textContent = scenario.title;
+  button.append(symbol, title);
+  return button;
+}
 
 function renderCards(): void {
-  const host = $('#scenario-cards');
+  const host = document.getElementById('scenario-cards');
   if (!host) return;
-  host.innerHTML = scenarios
-    .map((s, i) => {
-      const active = s.id === activeId ? ' scenario-card--active' : '';
-      return `
-      <button type="button" class="feature-card${active}" data-scenario-id="${escapeHtml(s.id)}">
-        <div class="card-icon-area">${cardSvg(i)}</div>
-        <div class="card-text-area">
-          <div class="card-title">${escapeHtml(s.title)}</div>
-          <div class="card-subtitle">${escapeHtml(s.description ?? '')}</div>
-        </div>
-        <svg class="feature-card__chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5" /></svg>
-      </button>`;
-    })
-    .join('');
+  host.replaceChildren(...scenarios.map(createScenarioCommand));
+}
+
+function syncCardState(): void {
+  document.querySelectorAll<HTMLButtonElement>('[data-scenario-id]').forEach((button) => {
+    const active = button.dataset.scenarioId === activeId;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-expanded', active ? 'true' : 'false');
+  });
+}
+
+function collapseScenarioItems(): void {
+  if (!activeId) return;
+  activeId = null;
+  syncCardState();
+  renderItems();
 }
 
 function renderItems(): void {
-  const host = $('#scenario-items') as HTMLElement | null;
+  const host = document.getElementById('scenario-items');
   if (!host) return;
-  const active = scenarios.find((s) => s.id === activeId);
-  if (!active || active.items.length === 0) {
+  const active = scenarios.find((scenario) => scenario.id === activeId);
+  host.replaceChildren();
+  if (!active?.items.length) {
     host.hidden = true;
-    host.innerHTML = '';
     return;
   }
+  for (const item of active.items) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'scenario-item';
+    button.dataset.subId = item.id;
+    button.title = item.query;
+    button.textContent = item.title;
+    host.append(button);
+  }
   host.hidden = false;
-  host.innerHTML = active.items
-    .map(
-      (item) =>
-        `<button type="button" class="scenario-item" data-sub-id="${escapeHtml(item.id)}" title="${escapeHtml(item.query)}">${escapeHtml(item.title)}</button>`,
-    )
-    .join('');
+}
+
+function setLoadState(state: 'loading' | 'ready' | 'fallback', text: string): void {
+  const status = document.getElementById('scenario-status');
+  const refresh = document.getElementById('scenario-refresh') as HTMLButtonElement | null;
+  if (status) {
+    status.dataset.state = state;
+    status.textContent = text;
+  }
+  if (refresh) refresh.disabled = state === 'loading';
 }
 
 function applyScenarios(list: Scenario[]): void {
-  scenarios = list.length > 0 ? list : [...FALLBACK_SCENARIOS];
-  if (activeId && !scenarios.some((s) => s.id === activeId)) {
-    activeId = null;
-  }
+  const valid = list.filter((scenario) => scenario && Array.isArray(scenario.items));
+  scenarios = valid.length > 0 ? valid : [...FALLBACK_SCENARIOS];
+  if (activeId && !scenarios.some((scenario) => scenario.id === activeId)) activeId = null;
   renderCards();
   renderItems();
 }
 
-function load(): void {
-  backendApi
-    .scenarios(BATCH)
-    .then((list) => applyScenarios(list))
-    .catch(() => applyScenarios([]));
+async function load(): Promise<void> {
+  collapseScenarioItems();
+  const generation = ++loadGeneration;
+  setLoadState('loading', '正在加载推荐场景…');
+  try {
+    const list = await backendApi.scenarios(BATCH);
+    if (generation !== loadGeneration) return;
+    applyScenarios(list);
+    setLoadState('ready', `已加载 ${scenarios.length} 个推荐场景`);
+  } catch {
+    if (generation !== loadGeneration) return;
+    applyScenarios([]);
+    setLoadState('fallback', '服务暂不可用，当前显示本地推荐');
+  }
 }
 
 /**
- * 绑定场景推荐交互。onPick 在用户点击某细分玩法时触发。
+ * Mounts the start view and binds scenario selection to the Composer owner.
  */
 export function bindScenarioHub(pick: (sub: SubScenario, parent: Scenario) => void): void {
+  mountWelcomeView();
+  scenarios = [...FALLBACK_SCENARIOS];
+  activeId = null;
   onPick = pick;
+  renderCards();
+  renderItems();
 
-  $('#scenario-refresh')?.addEventListener('click', load);
-
-  $('#scenario-cards')?.addEventListener('click', (e) => {
-    const card = (e.target as HTMLElement).closest('[data-scenario-id]') as HTMLElement | null;
-    if (!card) return;
-    const id = card.getAttribute('data-scenario-id');
+  document.getElementById('scenario-refresh')?.addEventListener('click', () => void load());
+  document.getElementById('scenario-cards')?.addEventListener('click', (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-scenario-id]');
+    if (!button) return;
+    const id = button.dataset.scenarioId || null;
     activeId = activeId === id ? null : id;
-    renderCards();
+    syncCardState();
     renderItems();
   });
-
-  $('#scenario-items')?.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest('[data-sub-id]') as HTMLElement | null;
-    if (!btn) return;
-    const subId = btn.getAttribute('data-sub-id');
-    const parent = scenarios.find((s) => s.id === activeId);
-    const item = parent?.items.find((it) => it.id === subId);
-    if (parent && item && onPick) onPick(item, parent);
+  document.getElementById('scenario-items')?.addEventListener('click', (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-sub-id]');
+    const parent = scenarios.find((scenario) => scenario.id === activeId);
+    const item = parent?.items.find((candidate) => candidate.id === button?.dataset.subId);
+    if (parent && item) {
+      onPick?.(item, parent);
+      collapseScenarioItems();
+    }
   });
+  if (outsideClickHandler) document.removeEventListener('click', outsideClickHandler);
+  outsideClickHandler = (event) => {
+    // 点场景按钮（切换展开）或子项（选择指令）交给各自处理器；其余任意点击（含空白处）都收起
+    const target = event.target as HTMLElement;
+    if (!target.closest('[data-scenario-id]') && !target.closest('[data-sub-id]')) {
+      collapseScenarioItems();
+    }
+  };
+  document.addEventListener('click', outsideClickHandler);
+  if (composerPopoverOpenHandler) {
+    window.removeEventListener('composer:popover-opened', composerPopoverOpenHandler);
+  }
+  composerPopoverOpenHandler = collapseScenarioItems;
+  window.addEventListener('composer:popover-opened', composerPopoverOpenHandler);
 
-  renderCards();
-  load();
+  void load();
 }
 
-/** 网关（重新）连接后刷新一批推荐。 */
+/** Refreshes recommendations after the Gateway reconnects. */
 export function refreshScenarioHub(): void {
-  load();
+  void load();
 }

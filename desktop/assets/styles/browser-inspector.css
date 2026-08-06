@@ -1,0 +1,73 @@
+/* Browser Inspector chrome; native BrowserView remains outside renderer DOM. */
+.mw-browser-inspector {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  background: var(--mw-bg-surface);
+}
+
+.mw-browser-inspector .browser-tabbar,
+.mw-browser-inspector .browser-toolbar {
+  border-color: var(--mw-border-default);
+  background: var(--mw-bg-surface);
+}
+
+.mw-browser-inspector .browser-tab {
+  border-color: var(--mw-border-subtle);
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-secondary);
+}
+
+.mw-browser-inspector .browser-tab.is-active {
+  background: var(--mw-bg-selected);
+  color: var(--mw-text-selected);
+}
+
+.mw-browser-inspector .browser-chrome-btn,
+.mw-browser-inspector .browser-icon-btn,
+.mw-browser-inspector .browser-tab__select,
+.mw-browser-inspector .browser-tab__close {
+  color: var(--mw-text-secondary);
+}
+
+.mw-browser-inspector .browser-chrome-btn:hover,
+.mw-browser-inspector .browser-icon-btn:hover,
+.mw-browser-inspector .browser-tab__close:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.mw-browser-inspector .browser-chrome-btn:focus-visible,
+.mw-browser-inspector .browser-icon-btn:focus-visible,
+.mw-browser-inspector .browser-tab__select:focus-visible,
+.mw-browser-inspector .browser-tab__close:focus-visible,
+.mw-browser-inspector .browser-url:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: 2px;
+}
+
+.mw-browser-inspector .browser-icon-btn--forward .mw-icon {
+  transform: rotate(180deg);
+}
+
+.mw-browser-inspector .browser-url {
+  border-color: var(--mw-border-default);
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+  font-family: var(--mw-font-sans);
+}
+
+.mw-browser-inspector .browser-stage {
+  min-width: 0;
+  min-height: 0;
+  background: var(--mw-bg-canvas);
+}
+
+.mw-browser-inspector .browser-empty {
+  color: var(--mw-text-muted);
+}
+
+.mw-browser-inspector .browser-empty strong {
+  color: var(--mw-text-primary);
+}

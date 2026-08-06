@@ -13,6 +13,7 @@ import {
 } from '../backend-client';
 import type { ChatMessage } from '../chat-render';
 import { escapeHtml, notify, state } from '../state';
+import { setRuntimeStyle } from '../components/runtime-style';
 
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 const TEAM_PLAN_SOURCES = new Set(['team_plan', 'team_kanban', 'team_flow_fallback']);
@@ -836,11 +837,11 @@ function teamMarkHtml(): string {
 }
 
 function crewAvatarHtml(): string {
-  return '<span class="team-member__crew-avatar" aria-hidden="true"><svg class="msg__avatar-symbol" viewBox="0 0 32 32"><use href="./crew-ui-symbols.svg#avatar-headphones"></use></svg></span>';
+  return '<span class="team-member__crew-avatar" aria-hidden="true"><svg class="msg__avatar-symbol" viewBox="0 0 32 32"><use href="#avatar-headphones"></use></svg></span>';
 }
 
 function folderIconHtml(): string {
-  return '<svg viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="#2D2E2C" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"><path d="M4.5 8.2h5l1.5 1.7h8.5v7.9c0 1-.7 1.7-1.7 1.7H6.2c-1 0-1.7-.7-1.7-1.7z" fill="#F4F4F1"/><path d="M4.5 8.2V6.7c0-1 .7-1.7 1.7-1.7H9l1.5 1.7h5.3c1 0 1.7.7 1.7 1.5v1.7"/><path d="M8.2 13.3h.1" stroke-width="2.5"/><path d="M11.2 13.3h5"/><path d="M8.2 16.3h.1" stroke-width="2.5"/><path d="M11.2 16.3h3.8" stroke="#8A9188"/></g><rect x="17.8" y="4.4" width="1.4" height="1.4" fill="#8FA79A"/><rect x="19.7" y="6.3" width="1" height="1" fill="#8FA79A" opacity=".7"/></svg>';
+  return '<svg class="mw-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-folder"></use></svg>';
 }
 
 function renderMembers(members: TeamBoardMember[]): string {
@@ -963,7 +964,7 @@ export function buildTeamCollaborationBoardHtml(sessionId: string | null | undef
     <div class="board__head"><div><span class="board__title-row">协作看板<button class="board-files-btn${filesOpen.has(sessionId) ? ' is-active' : ''}" type="button" data-team-files aria-expanded="${filesOpen.has(sessionId)}" title="查看当前 session 文件清单">${folderIconHtml()}${files.length ? `<i>${files.length}</i>` : ''}</button></span><em>Team Flow</em></div><div class="board__actions"><button class="team-board-close" type="button" data-team-close title="收起">×</button></div></div>
     ${renderFiles(sessionId, files)}
     <div class="board__list team-board__list">
-      <section class="flow-hero"><div class="flow-hero__title">${teamMarkHtml()}<div><strong>${nodes.length ? '团队 DAG 工作流' : '等待团队工作流'}</strong><p>${nextNode ? (allCompleted ? `已完成：${escapeHtml(nextNode.title)}` : `当前节点：${escapeHtml(nextNode.title)}`) : '开始任务后这里会展示 DAG 阶段、负责人和节点小结。'}</p></div></div><div class="flow-meter" aria-label="完成进度 ${progress.percent}%"><span style="width:${progress.percent}%"></span></div><div class="flow-hero__meta"><span>${progress.completed}/${progress.total || 0} 已完成</span><span>${runningNode ? `${escapeHtml(runningNode.owner.toLowerCase() === 'leader' ? leaderName : runningNode.owner)} 处理中` : '暂无运行节点'}</span></div><div class="team-members" aria-label="团队成员">${renderMembers(members)}</div></section>
+      <section class="flow-hero"><div class="flow-hero__title">${teamMarkHtml()}<div><strong>${nodes.length ? '团队 DAG 工作流' : '等待团队工作流'}</strong><p>${nextNode ? (allCompleted ? `已完成：${escapeHtml(nextNode.title)}` : `当前节点：${escapeHtml(nextNode.title)}`) : '开始任务后这里会展示 DAG 阶段、负责人和节点小结。'}</p></div></div><div class="flow-meter" aria-label="完成进度 ${progress.percent}%"><span data-team-progress="${progress.percent}"></span></div><div class="flow-hero__meta"><span>${progress.completed}/${progress.total || 0} 已完成</span><span>${runningNode ? `${escapeHtml(runningNode.owner.toLowerCase() === 'leader' ? leaderName : runningNode.owner)} 处理中` : '暂无运行节点'}</span></div><div class="team-members" aria-label="团队成员">${renderMembers(members)}</div></section>
       ${flowHtml}
       ${errors.length ? `<section class="board-alert"><strong>错误待处理</strong><p>${escapeHtml(errors[0]?.title || '')}：${escapeHtml(errors[0]?.summary || '')}</p></section>` : ''}
       ${renderRuntime(sessionId, snapshot.runtime, dagInfo)}
@@ -986,6 +987,8 @@ async function openPath(filePath: string): Promise<void> {
 
 export function activateTeamCollaborationBoard(sessionId: string | null | undefined = state.activeSessionId): void {
   if (!sessionId) return;
+  const progressFill = document.querySelector<HTMLElement>('[data-team-progress]');
+  if (progressFill) setRuntimeStyle(progressFill, 'width', `${progressFill.dataset.teamProgress ?? '0'}%`);
   startTeamCollaborationPolling(sessionId);
   document.querySelectorAll<HTMLButtonElement>('[data-team-turn]').forEach((button) => {
     button.addEventListener('click', () => {

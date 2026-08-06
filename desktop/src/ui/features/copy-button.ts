@@ -11,6 +11,8 @@
  *  - 安全：navigator.clipboard 可能在非 secure context 不可用，做兜底 try/catch。
  */
 
+import { setRuntimeStyle } from '../components/runtime-style';
+
 const BOUND_FLAG = 'copyBound';
 const FEEDBACK_MS = 1200;
 
@@ -74,8 +76,8 @@ function fallbackExecCopy(text: string): boolean {
   try {
     const ta = document.createElement('textarea');
     ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
+    setRuntimeStyle(ta, 'position', 'fixed');
+    setRuntimeStyle(ta, 'opacity', '0');
     document.body.appendChild(ta);
     ta.select();
     const ok = document.execCommand('copy');

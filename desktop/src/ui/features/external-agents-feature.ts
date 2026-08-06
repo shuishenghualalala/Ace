@@ -29,3 +29,10 @@ export function syncExternalAgentsFeatureUi(): void {
   if (entry) entry.hidden = !externalAgentsEnabled();
   window.dispatchEvent(new CustomEvent('external-agents:config-change'));
 }
+
+export function bindExternalAgentsFeatureUi(onChange: (enabled: boolean) => void): () => void {
+  const handler = (): void => onChange(externalAgentsEnabled());
+  window.addEventListener('external-agents:config-change', handler);
+  handler();
+  return () => window.removeEventListener('external-agents:config-change', handler);
+}

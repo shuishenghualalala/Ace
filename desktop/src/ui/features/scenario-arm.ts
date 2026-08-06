@@ -2,7 +2,8 @@
  * 场景化推荐：用户点 welcome 细分玩法后 arm sub_scenario，随下一条 WS 消息发送。
  */
 
-import { $, escapeHtml } from '../state';
+import { createIcon } from '../components/icon';
+import { $ } from '../state';
 
 let armedSubScenario = '';
 
@@ -11,7 +12,18 @@ export function armSubScenario(label: string, subId: string): void {
   armedSubScenario = subId;
   const chip = $('#chat-scenario-chip') as HTMLElement | null;
   if (!chip) return;
-  chip.innerHTML = `<span>📑 ${escapeHtml(label)}</span><button type="button" class="scenario-chip__clear" title="清除场景">✕</button>`;
+  const selected = document.createElement('span');
+  const clear = document.createElement('button');
+  selected.className = 'scenario-chip__label';
+  selected.append(createIcon('icon-file', { size: 16 }), document.createTextNode(label));
+  clear.type = 'button';
+  clear.className = 'scenario-chip__clear';
+  clear.title = '清除场景';
+  clear.ariaLabel = '清除场景';
+  clear.append(createIcon('icon-close', { size: 16 }));
+  chip.setAttribute('role', 'status');
+  chip.setAttribute('aria-label', `已选择场景：${label}`);
+  chip.replaceChildren(selected, clear);
   chip.hidden = false;
 }
 
@@ -28,5 +40,6 @@ export function clearScenarioChip(): void {
   const chip = $('#chat-scenario-chip') as HTMLElement | null;
   if (!chip) return;
   chip.hidden = true;
-  chip.innerHTML = '';
+  chip.removeAttribute('aria-label');
+  chip.replaceChildren();
 }

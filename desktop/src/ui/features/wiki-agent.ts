@@ -25,6 +25,7 @@ import {
   type FollowupAnswer,
   type WikiAgentSessionSummary,
 } from '../backend-client';
+import { clearRuntimeStyle, setRuntimeStyle } from '../components/runtime-style';
 import {
   renderConversationSurface,
   renderTodoProgressPanelHtml,
@@ -43,9 +44,11 @@ import {
   setBookTodos,
   state,
   type TodoItem,
+  type SessionRow,
 } from '../state';
 import { messageStore, sessionStore } from '../stores/stores';
 import { bindFileDrop, bindFilePaste } from './attachments';
+import { requireRendererLogin } from './auth-gate';
 import {
   autoresizeTextarea,
   bindComposerIme,
@@ -72,8 +75,7 @@ import { getToolFold, setToolFold } from './fold-state';
 import { resumeSessionGeneration } from './session-busy';
 import { loadBackendHistory } from './session-controller';
 import {
-  bindPaneSash,
-  createPaneWidthStore,
+  mountWikiDetailFold,
   openWikiPageInHub,
   setWikiAgentPanelRenderer,
   type WikiAgentEntryRequest,
@@ -88,6 +90,7 @@ export interface WikiAgentSessionState {
 
 /** sessionId → Wiki Agent 状态；权威身份由后端持久化会话配置决定。 */
 const wikiAgentSessions = new Map<string, WikiAgentSessionState>();
+const wikiSessionRows = new Map<string, SessionRow>();
 
 /** KB 被删除后清理仅以 kbId 为键的内嵌会话缓存，避免同名重建复用旧会话。 */
 export function forgetWikiAgentKb(kbId: string): void {
@@ -96,6 +99,7 @@ export function forgetWikiAgentKb(kbId: string): void {
   const embedded = embeddedByKb.get(normalized);
   if (embedded) {
     wikiAgentSessions.delete(embedded.sessionId);
+    wikiSessionRows.delete(embedded.sessionId);
     sessionStore.set({
       sessions: state.sessions.filter((session) => session.id !== embedded.sessionId),
     });
@@ -108,7 +112,8 @@ export function forgetWikiAgentKb(kbId: string): void {
   embeddedModelByKb.delete(normalized);
   if (activeEmbeddedKbId === normalized) {
     // 同名 KB 重建时不能让 wiki-page 复用旧面板 DOM，否则不会重新创建/加载会话。
-    activeEmbeddedRoot?.remove();
+    activeEmbeddedRoot?.replaceChildren();
+    activeEmbeddedRoot?.removeAttribute('data-kb-id');
     activeEmbeddedKbId = '';
     activeEmbeddedRoot = null;
   }
@@ -131,6 +136,77 @@ const embeddedDrafts = new Map<string, string>();
 const embeddedExpanded = new Set<string>();
 
 // ── 右栏对话面板宽度：可拖拽 + 持久化（与 wiki-page 列表栏同一套 createPaneWidthStore / bindPaneSash 机制） ──
+function createPaneWidthStore(opts: {
+  key: string;
+  min: number;
+  max?: number;
+  vwFactor: number;
+}): {
+  clamp: (width: number) => number;
+  load: () => number | null;
+  persist: (width: number | null) => void;
+} {
+  const clamp = (width: number): number => {
+    const viewportMax = Math.max(opts.min, Math.floor(window.innerWidth * opts.vwFactor));
+    return Math.max(opts.min, Math.min(opts.max ?? Infinity, viewportMax, Math.round(width)));
+  };
+  return {
+    clamp,
+    load: () => {
+      try {
+        const width = Number(localStorage.getItem(opts.key));
+        return Number.isFinite(width) && width > 0 ? clamp(width) : null;
+      } catch {
+        return null;
+      }
+    },
+    persist: (width) => {
+      try {
+        if (width === null) localStorage.removeItem(opts.key);
+        else localStorage.setItem(opts.key, String(width));
+      } catch {
+        // localStorage unavailable: keep the current in-memory width.
+      }
+    },
+  };
+}
+
+function bindPaneSash(
+  sash: HTMLElement,
+  options: {
+    sign?: 1 | -1;
+    startWidth: () => number;
+    onStart?: () => void;
+    onDrag: (width: number) => void;
+    onCommit: (width: number) => void;
+    onReset: () => void;
+  },
+): void {
+  sash.addEventListener('mousedown', (event) => {
+    const startX = event.clientX;
+    const startWidth = options.startWidth();
+    let currentWidth = startWidth;
+    const onMove = (moveEvent: MouseEvent): void => {
+      currentWidth = startWidth + (options.sign ?? 1) * (moveEvent.clientX - startX);
+      options.onDrag(currentWidth);
+    };
+    const onUp = (): void => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      sash.classList.remove('is-dragging');
+      document.body.classList.remove('wiki-resizing');
+      options.onCommit(currentWidth);
+    };
+    sash.classList.add('is-dragging');
+    document.body.classList.add('wiki-resizing');
+    options.onStart?.();
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    event.preventDefault();
+  });
+  sash.addEventListener('dblclick', options.onReset);
+}
+
 const agentWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiAgentWidth.v1', min: 280, max: 760, vwFactor: 0.6 });
 /** 会话级模型展示缓存（kbId → { id, label }），chip 高亮与浮层选中态共用。 */
 const embeddedModelByKb = new Map<string, { id: string; label: string }>();
@@ -158,20 +234,32 @@ function clearEmbeddedPanelState(): void {
 
 /** 确保 state.sessions 里有该会话行（openSession 工作空间归属 / dispatch workspace_id 解析用）。 */
 function ensureWikiSessionRow(sessionId: string): void {
-  if (state.sessions.some((s) => s.id === sessionId)) return;
+  const existing = state.sessions.find((s) => s.id === sessionId);
+  if (existing) wikiSessionRows.set(sessionId, existing);
+  const missing = Array.from(wikiSessionRows.values()).filter(
+    (row) => !state.sessions.some((session) => session.id === row.id),
+  );
+  if (!missing.length && existing) return;
   sessionStore.set({
     sessions: [
       ...state.sessions,
-      {
-        id: sessionId,
-        title: WIKI_AGENT_SESSION_TITLE,
-        updatedAt: Date.now(),
-        preview: '',
-        badge: '工作空间',
-        workspaceId: WIKI_AGENT_WORKSPACE_ID,
-      },
+      ...(existing ? [] : [
+        {
+          id: sessionId,
+          title: WIKI_AGENT_SESSION_TITLE,
+          updatedAt: Date.now(),
+          preview: '',
+          badge: '工作空间',
+          workspaceId: WIKI_AGENT_WORKSPACE_ID,
+        } satisfies SessionRow,
+      ]),
+      ...missing,
     ],
   });
+  if (!existing) {
+    const row = state.sessions.find((session) => session.id === sessionId);
+    if (row) wikiSessionRows.set(sessionId, row);
+  }
 }
 
 /** 激活一个已创建的 Wiki Agent 会话并接入现有消息与订阅。 */
@@ -194,6 +282,7 @@ async function activateEmbeddedSession(
   subscribeSessions([sessionId]);
   await loadBackendHistory(sessionId);
   await loadEmbeddedTodos(sessionId);
+  ensureWikiSessionRow(sessionId);
   scheduleEmbeddedRender();
   void loadEmbeddedModel(kbId, sessionId);
   return item;
@@ -282,10 +371,16 @@ function embeddedState(kbId: string): Promise<EmbeddedWikiAgentState> {
   if (cached) return Promise.resolve(cached);
   const pending = embeddedLoads.get(kbId);
   if (pending) return pending;
-  const load = backendApi.wikiAgentSession(kbId).then(async (res) => {
+  let load: Promise<EmbeddedWikiAgentState>;
+  load = backendApi.wikiAgentSession(kbId).then(async (res) => {
+    if (embeddedLoads.get(kbId) !== load) {
+      throw new Error('Wiki Agent 会话加载已失效');
+    }
     if (!res.session_id) throw new Error('后端未返回 Wiki Agent 会话');
     return activateEmbeddedSession(kbId, res.session_id);
-  }).finally(() => embeddedLoads.delete(kbId));
+  }).finally(() => {
+    if (embeddedLoads.get(kbId) === load) embeddedLoads.delete(kbId);
+  });
   embeddedLoads.set(kbId, load);
   return load;
 }
@@ -564,7 +659,8 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   const expanded = embeddedExpanded.has(req.kbId);
   root.classList.toggle('wiki-agent-pane--wide', expanded);
   const customWidth = agentWidthStore.load();
-  if (customWidth != null) root.style.width = `${customWidth}px`;
+  if (customWidth != null) setRuntimeStyle(root, 'width', `${customWidth}px`);
+  else clearRuntimeStyle(root, 'width');
   root.innerHTML = `
     <header class="wiki-agent-pane__header">
       <span class="wiki-agent-pane__title" title="${escapeHtml(kbName)}">Wiki 问答 · ${escapeHtml(kbName)}</span>
@@ -643,7 +739,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     else embeddedExpanded.delete(req.kbId);
     // 展开/收窄走 CSS 档位：清掉拖拽产生的内联宽度与持久化值，避免两类宽度打架
     agentWidthStore.persist(null);
-    root.style.width = '';
+    clearRuntimeStyle(root, 'width');
     root.classList.toggle('wiki-agent-pane--wide', next);
     btn.classList.toggle('is-active', next);
   });
@@ -665,7 +761,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
         }
       },
       onDrag: (w) => {
-        root.style.width = `${agentWidthStore.clamp(w)}px`;
+        setRuntimeStyle(root, 'width', `${agentWidthStore.clamp(w)}px`);
       },
       onCommit: (w) => {
         root.classList.remove('wiki-agent-pane--resizing');
@@ -674,7 +770,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
       // 双击复位默认宽度（回退到 CSS clamp 档位）
       onReset: () => {
         agentWidthStore.persist(null);
-        root.style.width = '';
+        clearRuntimeStyle(root, 'width');
       },
     });
   }
@@ -777,6 +873,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
  * req.assist 存在时（上传失败「让 AI 处理」）随后自动发送一条携带失败上下文的 prompt。
  */
 export async function openWikiAgent(req: WikiAgentEntryRequest): Promise<void> {
+  if (!requireRendererLogin('请先登录后再使用 Wiki 问答')) return;
   const kbId = req.kbId.trim();
   if (!kbId) return;
   const embeddedRoot = document.querySelector<HTMLElement>('[data-wiki-agent-panel]');
@@ -789,6 +886,8 @@ export async function openWikiAgent(req: WikiAgentEntryRequest): Promise<void> {
   }
   notify('请先打开 Wiki 页面，再使用 Wiki Agent');
 }
+
+export const enterWikiAgentMode = openWikiAgent;
 
 /** 上传失败「让 AI 处理」的 prompt（对齐 web WikiHub 的 aiPrompt 文案）。 */
 export function buildWikiAssistPrompt(assist: { fileName: string; error: string; sourceId?: string | null }): string {
@@ -894,6 +993,7 @@ export function initWikiAgent(): void {
 /** 测试钩子：重置模块级会话状态；全局监听器保留。 */
 export function __resetWikiAgentForTest(): void {
   wikiAgentSessions.clear();
+  wikiSessionRows.clear();
   clearEmbeddedPanelState();
   setWikiSendExtrasResolver(null);
   setWikiAgentPanelRenderer(null);

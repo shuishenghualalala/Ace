@@ -1,6 +1,14 @@
 /**
  * Electron main process entry
  */
+// Windows 控制台默认 GBK：managed gateway 子进程的 UTF-8 中文/emoji 日志会被误解码成乱码。
+// 把 main 进程 stdout/stderr 显式按 UTF-8 输出，并在 Windows 上切控制台代码页到 65001。
+if (process.platform === 'win32') {
+  try {
+    process.stdout.setDefaultEncoding('utf8' as BufferEncoding);
+    process.stderr.setDefaultEncoding('utf8' as BufferEncoding);
+  } catch { /* default encoding best-effort */ }
+}
 import { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage, nativeTheme, protocol } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -10,8 +18,14 @@ import { createHash } from 'crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import WebSocket from 'ws';
 import { BrowserHost, BrowserHostError } from './browser-host';
+import { loginNewServiceInstance } from './auth-service';
 import { submitFeedback, getFeedbackList, getFeedbackImage } from './feedback-service';
-import { registerCrewFileProtocol } from './crew-file-protocol';
+import {
+  readResolvedCrewFile,
+  registerCrewFileProtocol,
+  resolveOwnedFilePath,
+  type ResolvedOwnedFile,
+} from './crew-file-protocol';
 import { authorizeOwnedImagePath, writeOwnedImageToClipboard } from './image-clipboard';
 import {
   managedGatewayModeEnv,
@@ -20,8 +34,12 @@ import {
   shouldProbeExternalGateway,
   type GatewayIdentityMode,
 } from './gateway-launch-mode';
-import { resolveCrewHome } from './crew-home';
 import {
+  resolveCrewHome,
+} from './crew-session-file';
+import {
+  classifyCuaSetupAuthorityRequest,
+  createDesktopSecurityProof,
   gatewayInstanceAccessToken,
   probeGatewayInstance,
   type GatewayComponentState,
@@ -29,22 +47,30 @@ import {
 import { GatewayRestartController } from './gateway-restart-controller';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
+  UserInfoSnapshot,
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
   UpdateStateSnapshot,
 } from '../shared/types';
 import {
+  isStrictSecurityEnabled,
   normalizeCloseBehavior,
   readDesktopPrefsFile,
   saveCloseBehaviorPreference,
+  saveStrictSecurityPreference,
   type CloseBehavior,
 } from './desktop-prefs';
 import { logMainStream } from './stream-debug';
+import {
+  confirmCuaDriverInstall,
+  confirmStrictSecurityDisable,
+} from './host-authority-dialog';
 import {
   GatewayFetchArgs,
   GatewayUploadArgs,
   ShellOpenExternalArgs,
   ShellOpenPathArgs,
+  WorkspaceDirectoryArgs,
   ShellOpenPathWithArgs,
   ShellWriteFileBase64Args,
   ShellWriteTextFileArgs,
@@ -53,8 +79,17 @@ import {
   FeedbackImageArgs,
   DialogSelectFileArgs,
   DialogSelectFolderArgs,
-  UpdateStartDownloadArgs
+  UpdateStartDownloadArgs,
+  SecurityPendingArgs,
+  SecurityDecisionArgs,
+  SecurityModeArgs,
+  SecurityWorkspaceArgs,
+  SecurityRuleMutationArgs,
+  SecurityAuditArgs,
+  SecuritySetupArgs,
 } from '../shared/ipc-schemas';
+import { runElevatedSecuritySetup } from './security-setup';
+import { isDeniedShellPath } from './shell-allowed-path';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
   IPC_ARG_VALIDATION_FAILED,
@@ -77,10 +112,14 @@ import {
   setDownloadedRecord,
   setForceLock,
 } from './update/update-state';
-import { verifyPackageIntegrity } from './update/update-integrity';
+import {
+  configuredUpdatePublicKey,
+  verifyPackageIntegrity,
+  verifyPackageSignature,
+} from './update/update-integrity';
 import { evaluateVersionUpdate } from './version-compare';
+import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
-import { desktopAuthSession } from './auth-session';
 
 // 必须早于 app.whenReady()/BrowserWindow 创建；该开关随同一安装包跨 Windows、macOS、Linux 生效。
 configurePptxWasmRuntime(app.commandLine);
@@ -112,6 +151,7 @@ app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_pro
 let mainWindow: BrowserWindow | null = null;
 let managedGateway: ChildProcessWithoutNullStreams | null = null;
 let ensureGatewayPromise: Promise<{ baseUrl: string; managed: boolean }> | null = null;
+const securityApprovalNonces = new Map<string, string>();
 const gatewaySockets = new Map<number, WebSocket>();
 const gatewaySocketGenerations = new Map<number, number>();
 const browserSockets = new Map<number, WebSocket>();
@@ -140,6 +180,7 @@ const HEALTH_FAIL_THRESHOLD = 3;
 let gatewayComponents: Record<string, GatewayComponentState> | undefined;
 // Track the actually resolved gateway base URL (updated by ensureGateway)
 let resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
+// Idempotency guard for registerIpc().
 // registerIpc() is called once at bootstrap, but defending against accidental
 // re-invocation prevents duplicate ipcMain handlers (which would otherwise
 // throw "attempt to register a second handler").
@@ -160,15 +201,13 @@ const gatewayRestartController = new GatewayRestartController(async () => {
 });
 
 function readCrewHomeFromConfig(): string | null {
-  for (const filename of ['config.yaml', 'config.yaml.example']) {
-    try {
-      const configPath = path.join(repoRoot(), 'config', filename);
-      const content = fs.readFileSync(configPath, 'utf8');
-      const match = content.match(/^\s*crew_home:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/m);
-      if (match?.[1]?.trim()) return match[1].trim();
-    } catch {
-      // Try the publishable example before using the standard local home.
-    }
+  try {
+    const configPath = path.join(repoRoot(), 'config', 'config.yaml');
+    const content = fs.readFileSync(configPath, 'utf8');
+    const match = content.match(/^\s*crew_home:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/m);
+    if (match?.[1]?.trim()) return match[1].trim();
+  } catch {
+    // config.yaml not available
   }
   return null;
 }
@@ -199,6 +238,12 @@ function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): st
   if (!path.isAbsolute(resolved)) {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path must be absolute`);
   }
+  // Deny sensitive security/audit resources even when they sit under an allowed root
+  // (M-1): the instance HMAC key (.gateway-instance) and raw cross-owner SQLite must
+  // never reach the renderer.
+  if (isDeniedShellPath(resolved)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path is a sensitive security/audit resource`);
+  }
   const taskWorkspaceRoot = getTaskWorkspaceRoot();
   const allowedRoots = [
     app.getPath('userData'),
@@ -221,7 +266,16 @@ const MANAGED_GATEWAY_PORT = 28180;
 const MANAGED_GATEWAY_URL = `http://127.0.0.1:${MANAGED_GATEWAY_PORT}`;
 const AUTOSTART_ARG = '--autostart';
 const IS_DEV_LAUNCH = process.argv.includes('--dev');
-const gatewayIdentityMode: GatewayIdentityMode = resolveGatewayIdentityMode(IS_DEV_LAUNCH);
+let gatewayIdentityMode: GatewayIdentityMode = 'local';
+
+function usesDevGatewayIdentity(): boolean {
+  return gatewayIdentityMode === 'dev';
+}
+
+/** Ace's local Gateway authenticates the loopback transport, not a remote JWT. */
+function usesGatewayRemoteAuth(): boolean {
+  return Boolean(loginNewServiceInstance.getJWTToken() && gatewayIdentityHeaders());
+}
 
 /**
  * Check whether a TCP port is available for binding.
@@ -255,8 +309,40 @@ function isPortAvailable(port: number): Promise<boolean> {
   });
 }
 
+function gatewayIdentityHeaders(): Record<string, string> | null {
+  const user = loginNewServiceInstance.getSessionInfo().userInfo;
+  const staffCode = user?.staffCode?.trim();
+  const staffUid = user?.staffUid?.trim() || user?.uid?.trim();
+  if (!staffCode || !staffUid) return null;
+  return {
+    'X-Crew-Staff-Code': staffCode,
+    'X-Crew-Staff-Uid': staffUid,
+  };
+}
+
+function rendererSafeUserSnapshot(snapshot: UserInfoSnapshot | null): UserInfoSnapshot | null {
+  if (!snapshot) return null;
+  return {
+    ...(snapshot.staffCode !== undefined ? { staffCode: snapshot.staffCode } : {}),
+    ...(snapshot.staffName !== undefined ? { staffName: snapshot.staffName } : {}),
+    ...(snapshot.staffUid !== undefined ? { staffUid: snapshot.staffUid } : {}),
+    ...(snapshot.pid !== undefined ? { pid: snapshot.pid } : {}),
+    ...(snapshot.uid !== undefined ? { uid: snapshot.uid } : {}),
+  };
+}
+
 function currentBrowserOwnerId(): string | null {
-  return desktopAuthSession.ownerAccountId();
+  let owner = 'dev:dev';
+  if (!usesDevGatewayIdentity()) {
+    const info = loginNewServiceInstance.getSessionInfo();
+    const staffCode = info.userInfo?.staffCode?.trim();
+    const staffUid = info.userInfo?.staffUid?.trim() || info.userInfo?.uid?.trim();
+    if (!info.isLoggedIn) return null;
+    // The open-source local Gateway has one loopback owner and no remote SSO
+    // identity. Keep this aligned with crew.gateway.auth.LOCAL_OWNER_ACCOUNT_ID.
+    owner = staffCode && staffUid ? `${staffCode}:${staffUid}` : 'local';
+  }
+  return owner;
 }
 
 function currentBrowserRuntimeKey(): string | null {
@@ -273,16 +359,84 @@ function currentCrewFileOwnerSegment(): string | null {
   return `acct_${digest}`;
 }
 
+/** Authorize one existing renderer-selected artifact to the active account. */
+function authorizeOwnedRendererFile(rawPath: string): ResolvedOwnedFile {
+  const ownerSegment = currentCrewFileOwnerSegment();
+  const resolved = ownerSegment
+    ? resolveOwnedFilePath(rawPath, activeGatewayCrewHome(), ownerSegment)
+    : null;
+  if (!resolved) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: file is outside the current account`);
+  }
+  return resolved;
+}
+
+function resolvedFileIdentityMatches(resolved: ResolvedOwnedFile, stat: fs.Stats): boolean {
+  return (
+    stat.isFile()
+    && stat.dev === resolved.identity.dev
+    && stat.ino === resolved.identity.ino
+    && stat.nlink === resolved.identity.nlink
+    && stat.size === resolved.identity.size
+    && stat.mtimeMs === resolved.identity.mtimeMs
+    && stat.ctimeMs === resolved.identity.ctimeMs
+  );
+}
+
+/**
+ * Write through the already-authorized inode. Opening without O_TRUNC lets us
+ * verify the inode before the first destructive operation.
+ */
+async function writeResolvedOwnedFile(
+  resolved: ResolvedOwnedFile,
+  content: string | Buffer,
+): Promise<void> {
+  const noFollow = process.platform !== 'win32' && typeof fs.constants.O_NOFOLLOW === 'number'
+    ? fs.constants.O_NOFOLLOW
+    : 0;
+  const handle = await fs.promises.open(
+    resolved.filePath,
+    fs.constants.O_WRONLY | noFollow,
+  );
+  try {
+    if (!resolvedFileIdentityMatches(resolved, await handle.stat())) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: file identity changed`);
+    }
+    await handle.truncate(0);
+    await handle.writeFile(content);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * 背压熔断阈值。
+ *
+ * **按帧体积拒发是错的**（原来那样做过）：会静默丢掉完整快照和录制步骤，而
+ * 那两样都是"少一条就对不上"的数据，本机 loopback 上按体积拒发纯粹是自找失败。
+ * 所以正常一律发，不看单帧多大。
+ *
+ * 但缓冲无限积压同样不行：对端卡住（渲染进程忙、面板没在读）时 `socket.send`
+ * 会一直往内存里堆，堆到主进程 OOM。阈值定得很高——只有对端真的停止消费才会
+ * 撞到，一次正常的大快照（几百 KB）碰不到。
+ */
+const BROWSER_HOST_BACKPRESSURE_BYTES = 64 * 1024 * 1024;
+
 function sendBrowserHostFrame(
   socket: WebSocket,
   value: Record<string, unknown>,
-  maxBytes: number,
-  maxBufferedBytes: number,
+  _maxBytes?: number,
+  _maxBufferedBytes?: number,
 ): boolean {
-  if (socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > maxBufferedBytes) return false;
+  if (socket.readyState !== WebSocket.OPEN) return false;
+  // 只在缓冲严重积压时熔断：这不是"帧太大"，是"对端已经不读了"。
+  if (socket.bufferedAmount > BROWSER_HOST_BACKPRESSURE_BYTES) return false;
   try {
     const payload = JSON.stringify(value);
-    if (Buffer.byteLength(payload, 'utf8') > maxBytes) return false;
+    // ws.send queues frames in call order. Rejecting on payload size
+    // silently dropped exact snapshots/recording steps and made
+    // large Playwright responses fail despite a healthy local connection.
     socket.send(payload);
     return true;
   } catch {
@@ -302,6 +456,41 @@ function ensureBrowserHost(): BrowserHost {
       if (!socket) return;
       sendBrowserHostFrame(socket, { type: 'event', event: record }, 64 * 1024, 256 * 1024);
     });
+    browserHost.on('download', (event: unknown) => {
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
+      const record = event as Record<string, unknown>;
+      const runtimeKey = currentBrowserRuntimeKey();
+      if (!runtimeKey || record.runtimeKey !== runtimeKey) return;
+      const socket = browserHostSocket;
+      if (!socket) return;
+      sendBrowserHostFrame(socket, { type: 'event', event: record });
+    });
+    browserHost.on('recording', (event: unknown) => {
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
+      const record = event as Record<string, unknown>;
+      const markIncomplete = (): void => {
+        browserHost?.markRecordingIncomplete(
+          typeof record.targetId === 'string' ? record.targetId : '',
+          typeof record.recordingId === 'string' ? record.recordingId : '',
+        );
+      };
+      const runtimeKey = currentBrowserRuntimeKey();
+      const v11 = record.schemaVersion === 11;
+      if (
+        !runtimeKey
+        || (!v11 && record.runtimeKey !== runtimeKey)
+        || (v11 && typeof record.runtimeKey === 'string' && record.runtimeKey !== runtimeKey)
+      ) {
+        markIncomplete();
+        return;
+      }
+      const socket = browserHostSocket;
+      if (!socket) {
+        markIncomplete();
+        return;
+      }
+      if (!sendBrowserHostFrame(socket, { type: 'event', event: record })) markIncomplete();
+    });
     browserHost.on('tab-updated', (event: unknown) => {
       if (!event || typeof event !== 'object' || Array.isArray(event)) return;
       const record = event as Record<string, unknown>;
@@ -309,21 +498,6 @@ function ensureBrowserHost(): BrowserHost {
       if (!runtimeKey || record.runtimeKey !== runtimeKey || typeof record.label !== 'string') return;
       mainWindow?.webContents.send('browser-view:navigation-changed', {
         tabLabel: record.label,
-      });
-    });
-    browserHost.on('user-interaction-requested', (event: unknown) => {
-      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
-      const record = event as Record<string, unknown>;
-      const runtimeKey = currentBrowserRuntimeKey();
-      if (
-        !runtimeKey
-        || record.runtimeKey !== runtimeKey
-        || typeof record.label !== 'string'
-        || (record.source !== 'pointer' && record.source !== 'keyboard')
-      ) return;
-      mainWindow?.webContents.send('browser-view:interaction-requested', {
-        tabLabel: record.label,
-        source: record.source,
       });
     });
   }
@@ -393,24 +567,15 @@ async function connectBrowserHost(): Promise<void> {
     target.pathname = '/ws/browser-host';
     target.search = '';
     target.hash = '';
-    const accessToken = gatewayInstanceAccessToken(activeGatewayCrewHome());
-    const sessionCookie = desktopAuthSession.cookieHeader();
     const socket = new WebSocket(target.toString(), {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        ...(sessionCookie ? { Cookie: sessionCookie } : {}),
-      },
-      maxPayload: 2 * 1024 * 1024,
+      headers: gatewayAccessHeaders('/api/browser/'),
+      maxPayload: 0,
     });
     browserHostSocket = socket;
 
     socket.on('message', (raw) => {
       if (socket !== browserHostSocket) return;
       const text = raw.toString();
-      if (Buffer.byteLength(text, 'utf8') > 2 * 1024 * 1024) {
-        socket.close(1009, 'browser-host-request-too-large');
-        return;
-      }
       let request: Record<string, unknown>;
       try {
         const value: unknown = JSON.parse(text);
@@ -455,11 +620,14 @@ async function connectBrowserHost(): Promise<void> {
           type: 'response',
           id,
           ok: false,
-          error: message.slice(0, 1000),
+          error: message,
           // 传 code：Python 侧需要据此区分「ref 失效」这类可恢复失败与真正的故障，
           // 靠匹配中文错误文本太脆。
           code: failure?.code ?? '',
           uncertain: failure?.uncertain ?? false,
+          phase: failure?.phase ?? '',
+          partial: failure?.partial ?? false,
+          completed_count: failure?.completed_count ?? 0,
           browser_stopped: failure?.browser_stopped ?? false,
           stop_unconfirmed: failure?.stop_unconfirmed ?? false,
         }, 2 * 1024 * 1024, 4 * 1024 * 1024);
@@ -706,6 +874,24 @@ function createTray(): void {
   tray.on('click', () => showMainWindow());
 }
 
+function pushSessionState(): void {
+  if (usesDevGatewayIdentity()) {
+    // 开发态：推送合成的已登录开发账号状态，让渲染进程登录墙不弹出。
+    // 身份由后端 gateway.dev_mode 的 loopback 放行统一确定，这里仅解锁 UI。
+    const devInfo = {
+      isLoggedIn: true,
+      userInfo: { staffCode: 'dev', staffUid: 'dev', staffName: '开发者' } as UserInfoSnapshot,
+    };
+    mainWindow?.webContents.send('auth:session-state', devInfo);
+    return;
+  }
+  const info = loginNewServiceInstance.getSessionInfo();
+  mainWindow?.webContents.send('auth:session-state', {
+    isLoggedIn: info.isLoggedIn,
+    userInfo: rendererSafeUserSnapshot(info.userInfo),
+  });
+}
+
 function closeGatewaySockets(reason = 'auth-state-changed'): void {
   for (const [id, generation] of gatewaySocketGenerations) {
     gatewaySocketGenerations.set(id, generation + 1);
@@ -732,8 +918,8 @@ function closeGatewaySockets(reason = 'auth-state-changed'): void {
 }
 
 /**
- * Resolve the BrowserWindow backgroundColor for cold start. Mirrors the logic
- * of the inline <head> script in index.html
+ * Resolve the BrowserWindow backgroundColor for cold start (Task 6.1.2 /
+ * D4.1.2). Mirrors the logic of the inline <head> script in index.html
  * so the first painted frame matches the user's theme — no dark→light
  * or light→dark flash before the renderer can apply data-theme.
  *
@@ -746,7 +932,7 @@ function resolveWindowBackgroundColor(): string {
   if (prefs.themeMode === 'dark') isDark = true;
   else if (prefs.themeMode === 'light') isDark = false;
   else isDark = nativeTheme.shouldUseDarkColors;
-  return isDark ? '#0f1115' : '#ffffff';
+  return isDark ? '#000000' : '#ffffff';
 }
 
 function createWindow() {
@@ -844,7 +1030,13 @@ function createWindow() {
     }
   });
   mainWindow.webContents.on('did-start-loading', () => browserHost?.hidePanel());
+  // Cold-start session-state push. This MUST be registered inside
+  // createWindow() (after `mainWindow` is assigned) — previously it lived in
+  // registerIpc() which runs at bootstrap BEFORE createWindow(), so
+  // `mainWindow` was null there and the optional chaining silently no-op'd,
+  // meaning the auth:session-state push the renderer relies on never fired.
   mainWindow.webContents.on('did-finish-load', () => {
+    pushSessionState();
     // Push current backend health status on load so the renderer knows immediately
     mainWindow?.webContents.send('backend:status', backendStatusPayload(backendConnected));
   });
@@ -860,8 +1052,20 @@ function createWindow() {
   mainWindow.on('close', (event) => {
     if (isQuitting) return;
     if (!mainWindow) return;
+    if (!loginNewServiceInstance.getSessionInfo().isLoggedIn) {
+      isQuitting = true;
+      return;
+    }
     if (!mainWindow.isVisible()) return;
-    if (shouldPreventClose()) event.preventDefault();
+    if (shouldPreventClose()) {
+      event.preventDefault();
+      return;
+    }
+    // AutomationHost owns a hidden BrowserWindow, so closing the visible main
+    // window no longer makes Electron emit window-all-closed. A user-selected
+    // "quit" must explicitly enter the app quit path and dispose hidden hosts.
+    isQuitting = true;
+    app.quit();
   });
 }
 
@@ -888,15 +1092,67 @@ function activeGatewayCrewHome(): string {
   );
 }
 
+function packagedSecurityRuntimeEnv(): Record<string, string> {
+  const stateDir = path.join(app.getPath('userData'), 'security');
+  const strictSecurity = isStrictSecurityEnabled() ? '1' : '0';
+  const configured = String(process.env['ACE_SECURITY_RUNTIME'] ?? '').trim();
+  const runtimeName = process.platform === 'win32'
+    ? 'ace-security-runtime.exe'
+    : 'ace-security-runtime';
+  const runtime = configured || (app.isPackaged ? path.join(process.resourcesPath, runtimeName) : '');
+  if (!runtime || !path.isAbsolute(runtime) || !fs.existsSync(runtime)) {
+    return {
+      ACE_SECURITY_STATE_DIR: stateDir,
+      ACE_STRICT_SECURITY: strictSecurity,
+    };
+  }
+  if (app.isPackaged) {
+    try {
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(process.resourcesPath, 'runtime-manifest.json'), 'utf8'),
+      ) as { files?: Array<{ name?: string; sha256?: string }> };
+      const expected = manifest.files?.find((item) => item.name === runtimeName)?.sha256;
+      const actual = createHash('sha256').update(fs.readFileSync(runtime)).digest('hex');
+      if (!expected || actual !== expected) {
+        return {
+          ACE_SECURITY_STATE_DIR: stateDir,
+          ACE_STRICT_SECURITY: strictSecurity,
+        };
+      }
+    } catch {
+      return {
+        ACE_SECURITY_STATE_DIR: stateDir,
+        ACE_STRICT_SECURITY: strictSecurity,
+      };
+    }
+  }
+  const result: Record<string, string> = {
+    ACE_SECURITY_RUNTIME: runtime,
+    ACE_SECURITY_STATE_DIR: stateDir,
+    ACE_STRICT_SECURITY: strictSecurity,
+  };
+  const manifestPath = app.isPackaged ? path.join(process.resourcesPath, 'runtime-manifest.json') : '';
+  if (manifestPath && fs.existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+        files?: Array<{ name?: string; sha256?: string }>;
+      };
+      const bwrap = manifest.files?.find((item) => item.name === 'bwrap');
+      if (bwrap?.sha256) {
+        result['ACE_BUNDLED_BWRAP'] = path.join(process.resourcesPath, 'bwrap');
+        result['ACE_BUNDLED_BWRAP_SHA256'] = bwrap.sha256;
+      }
+    } catch {
+      // Malformed release metadata leaves the bundled fallback unavailable.
+    }
+  }
+  return result;
+}
+
 /** Browser control is privileged even on loopback; bind it to this Gateway instance. */
 function gatewayAccessHeaders(pathname: string): Record<string, string> {
-  const headers: Record<string, string> = {};
-  const sessionCookie = desktopAuthSession.cookieHeader();
-  if (sessionCookie) headers.Cookie = sessionCookie;
-  if (pathname.startsWith('/api/browser/')) {
-    headers.Authorization = `Bearer ${gatewayInstanceAccessToken(activeGatewayCrewHome())}`;
-  }
-  return headers;
+  if (!pathname.startsWith('/api/browser/')) return {};
+  return { Authorization: `Bearer ${gatewayInstanceAccessToken(activeGatewayCrewHome())}` };
 }
 
 /**
@@ -922,6 +1178,7 @@ function startManagedGateway(): void {
     CREW_HOME: crewHome,
     GATEWAY_PORT: String(MANAGED_GATEWAY_PORT),
     PYTHONPATH: root,
+    ...packagedSecurityRuntimeEnv(),
     ...managedGatewayModeEnv(
       gatewayIdentityMode,
       crewHome,
@@ -961,6 +1218,19 @@ function startManagedGateway(): void {
   });
 }
 
+/**
+ * 回收当前 gateway 进程，使其带着最新的安全偏好（如严格安全约束开关）重启。
+ * gateway 仅在 spawn 时读取 ACE_STRICT_SECURITY / ACE_SECURITY_* 等环境变量，
+ * 运行中的实例不会热更新；故持久化偏好后必须回收一次。exit handler 会通过
+ * gatewayRestartController 自动调度重启，这里只负责触发 exit。
+ */
+function recycleGatewayForSecurityChange(): void {
+  const child = managedGateway;
+  if (!child || child.killed || isQuitting) return;
+  logSupervisorDecision('security-change-restart', { generation: gatewayGeneration });
+  child.kill();
+}
+
 // ============================================================================
 // 🌟 核心新增：专供 Windows 打包态使用的绝对路径静默启动
 // ============================================================================
@@ -993,6 +1263,7 @@ function startWindowsPackagedGateway(port: number): void {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...packagedSecurityRuntimeEnv(),
         // 与开发态一致：打包 exe 内嵌 Python 仍可能走 GBK 控制台
         PYTHONIOENCODING: 'utf-8',
         ...(process.platform === 'win32' ? { PYTHONUTF8: '1' } : {}),
@@ -1047,7 +1318,7 @@ function startWindowsPackagedGateway(port: number): void {
 
 /**
  * macOS 打包版专用：在指定端口启动 crew-gateway 二进制。
- * macOS .app 结构：Crew.app/Contents/Resources/crew-gateway/
+ * macOS .app 结构：Ace.app/Contents/Resources/crew-gateway/
  */
 function startMacOSPackagedGateway(port: number): void {
   if (managedGateway) return;
@@ -1074,6 +1345,7 @@ function startMacOSPackagedGateway(port: number): void {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...packagedSecurityRuntimeEnv(),
       },
     });
     const child = managedGateway;
@@ -1110,8 +1382,10 @@ function startMacOSPackagedGateway(port: number): void {
  * Linux 打包版专用：在指定端口启动 crew-gateway 二进制。
  * deb 装在固定路径 /opt/crew-gateway/crew-gateway。
  *
- * 与 macOS/Windows 一致，由 desktop 子进程托管 gateway：启动时 spawn，退出时
- * 随之结束，避免多用户常驻服务争抢端口或使用不一致的 instance key。
+ * 与 macOS/Windows 一致：desktop 子进程托管 gateway。废弃了原先的 systemd user
+ * service 架构——多用户机器上各用户 systemd 服务都 enable-linger + Restart=always
+ * 会抢同一个 8000 端口，且跨用户 instance key 不一致导致桌面端验签失败。
+ * 改为 desktop 启动时 spawn、退出时随之消亡，彻底消除多用户常驻冲突。
  */
 function startLinuxPackagedGateway(port: number): void {
   if (managedGateway) return;
@@ -1129,6 +1403,7 @@ function startLinuxPackagedGateway(port: number): void {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...packagedSecurityRuntimeEnv(),
       },
     });
     const child = managedGateway;
@@ -1176,7 +1451,7 @@ function killZombieGatewayProcesses(): void {
       });
 
       let stdout = '';
-      output.stdout.on('data', (chunk) => { stdout += chunk; });
+      output.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
 
       output.on('close', () => {
         const lines = stdout.split('\n').filter(line => line.includes('crew-gateway.exe'));
@@ -1248,7 +1523,7 @@ function attachGatewayLog(child: ChildProcessWithoutNullStreams): void {
     gatewayLogStream?.end();
     gatewayLogStream = fs.createWriteStream(file, { flags: 'w', encoding: 'utf8' });
     const write = (prefix: string, chunk: Buffer | string): void => {
-      const text = String(chunk);
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
       gatewayLogStream?.write(
         `[${new Date().toISOString()}] ${prefix}${text.endsWith('\n') ? text : `${text}\n`}`,
         'utf8',
@@ -1348,6 +1623,32 @@ async function waitForHealthApi(
   }
 }
 
+/** Stop only a Gateway child owned by this Desktop before rebuilding it. */
+async function stopManagedGateway(reason: string): Promise<void> {
+  const child = managedGateway;
+  if (!child) return;
+  managedGateway = null;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    if (child.exitCode !== null) {
+      finish();
+      return;
+    }
+    child.once('exit', finish);
+    setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      setTimeout(finish, 400);
+    }, 3000);
+    try { child.kill(); } catch { finish(); }
+  });
+  logSupervisorDecision('instance-exit-superseded', { pid: child.pid ?? -1, reason });
+}
+
 // ============================================================================
 // Backend health monitor: periodically polls /api/health and pushes status
 // changes to the renderer via IPC ('backend:status').
@@ -1407,8 +1708,9 @@ function stopBackendHealthMonitor(): void {
 // 🌟 核心改造：双平台极致适配的 Gateway 路由
 // ============================================================================
 async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
-  if (ensureGatewayPromise) {
-    const cached = await ensureGatewayPromise;
+  const cachedPromise = ensureGatewayPromise;
+  if (cachedPromise) {
+    const cached = await cachedPromise;
     // A prior proof is not a permanent trust grant. Re-prove immediately before
     // every credential-bearing caller reuses the URL, so an unmanaged Gateway
     // restart cannot silently turn a stale cached port into a trusted service.
@@ -1420,11 +1722,17 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       if (await hasHealthApi(cached.baseUrl)) return cached;
       await new Promise((r) => setTimeout(r, 300));
     }
-    // 只在自己仍是缓存持有方时清除，避免误清 retry 已设置的新代际 promise。
-    // ensureGatewayPromise 类型为 Promise，await 后是结果对象；这里直接置空即可（
-    // retry 会重新设置，不会读到 null）。
+    // 只在自己仍是缓存持有方时清除，避免并发调用误杀新代际 Gateway。
+    if (ensureGatewayPromise !== cachedPromise) return ensureGateway();
     ensureGatewayPromise = null;
-    throw new Error('previously verified Crew Gateway no longer proves its instance identity');
+    if (cached.managed) {
+      await stopManagedGateway('identity-mismatch');
+    }
+    logSupervisorDecision('instance-reprobe', {
+      cachedBaseUrl: cached.baseUrl,
+      managed: cached.managed,
+    });
+    return ensureGateway();
   }
   const ensureStart = Date.now();
   const generation = gatewayGeneration;
@@ -1483,8 +1791,10 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       }
     }
 
-    // 3. Linux 打包版由 desktop 子进程托管 gateway（与 Win/mac 一致），
-    // 让进程生命周期与桌面端一致，并避免多用户实例争抢端口或验签配置不一致。
+    // 3. Linux 打包版专属：desktop 子进程托管 gateway（与 Win/mac 一致）
+    // 废弃了原先依赖 systemd user service 的架构：多用户机器上各用户 systemd 服务
+    // enable-linger + Restart=always 会抢同一个 8000，且跨用户 instance key 不一致
+    // 导致验签失败。改为 desktop 启动 spawn、退出随之消亡，彻底消除多用户常驻冲突。
     if (app.isPackaged && process.platform === 'linux') {
       // 托管实例存活时复用，避免扫出新端口却 spawn 不出来空等。
       if (managedGateway) {
@@ -1508,7 +1818,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
         console.log(`[gateway] Port ${port} is in use, trying ${port + 1}...`);
       }
       const portUrl = `http://127.0.0.1:${selectedPort}`;
-      // spawn 前暴露真实端口，wait 期间监控打对地址；无冷启动天花板，靠 child 退出兜底。
+      // spawn 前暴露真实端口，wait 期间监控打对地址；最多等待 60 秒，child 提前退出则立即失败。
       resolvedGatewayBaseUrl = portUrl;
       startLinuxPackagedGateway(selectedPort);
       if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: 60_000 })) {
@@ -1566,6 +1876,36 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     if (ensureGatewayPromise === pending) ensureGatewayPromise = null;
   });
   return pending;
+}
+
+async function securityGatewayRequest(
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  pathname: string,
+  payload?: Record<string, unknown>,
+): Promise<{ ok: boolean; status: number; body: unknown }> {
+  const usesRemoteAuth = usesGatewayRemoteAuth();
+  const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+  const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+  if (usesRemoteAuth && (!jwt || !identityHeaders)) {
+    return { ok: false, status: 401, body: { detail: '未登录' } };
+  }
+  const { baseUrl } = await ensureGateway();
+  const body = payload === undefined ? '' : JSON.stringify(payload);
+  const requestPath = new URL(pathname, 'http://127.0.0.1').pathname;
+  const headers: Record<string, string> = {
+    ...(requestPath.startsWith('/api/security/')
+      ? { 'X-Crew-Security-Proof': createDesktopSecurityProof(method, requestPath, body) }
+      : {}),
+    ...(body ? { 'content-type': 'application/json' } : {}),
+    ...(usesRemoteAuth ? { Authorization: `Bearer ${jwt}`, ...identityHeaders } : {}),
+  };
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    method,
+    headers,
+    ...(body ? { body } : {}),
+  });
+  const responseBody = await response.json().catch(() => ({ detail: response.statusText }));
+  return { ok: response.ok, status: response.status, body: responseBody };
 }
 
 function parseOrThrow<T>(parsed: { ok: true; value: T } | { ok: false; error: string }, channel: string): T {
@@ -1710,7 +2050,10 @@ function cleanupOldPackages(): void {
     if (!fs.existsSync(dir)) return;
     const preserved = new Set<string>();
     const downloaded = readUpdateState().downloaded;
-    if (downloaded) preserved.add(path.resolve(downloaded.filePath));
+    if (downloaded) {
+      preserved.add(path.resolve(downloaded.filePath));
+      preserved.add(path.resolve(`${downloaded.filePath}.sig`));
+    }
     for (const p of activeFilePaths()) preserved.add(path.resolve(p));
     for (const name of fs.readdirSync(dir)) {
       const full = path.resolve(path.join(dir, name));
@@ -1759,6 +2102,20 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
     setDownloadedRecord(null);
     return { success: false, message: integrity.message };
   }
+  if (isStrictSecurityEnabled()) {
+    const publicKey = configuredUpdatePublicKey();
+    const signature = publicKey
+      ? verifyPackageSignature(
+          downloaded.filePath,
+          `${downloaded.filePath}.sig`,
+          publicKey,
+        )
+      : { ok: false, message: '严格安全约束已阻止安装：未配置更新签名公钥' };
+    if (!signature.ok) {
+      sendVersionUpdateDownloadProgress({ phase: 'error', message: signature.message });
+      return { success: false, message: signature.message };
+    }
+  }
 
   const targetPath = path.resolve(downloaded.filePath);
   const quitAfterLaunch = () => {
@@ -1772,8 +2129,7 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
   try {
     const ext = path.extname(targetPath).toLowerCase();
     if (process.platform === 'win32' && ext === '.exe') {
-      // Inno Setup 静默安装；/NORESTART 避免安装器替我们重启。
-      // 安装器由下游发行流水线生成，不属于当前源码预览版。
+      // Inno Setup 静默安装（见 deb-package/pack_exe.ps1）；/NORESTART 避免安装器替我们重启
       const child = spawn(targetPath, ['/SILENT', '/NORESTART'], { detached: true, stdio: 'ignore', windowsHide: true });
       child.unref();
       setDownloadedRecord(null); // 包已消费
@@ -1897,7 +2253,14 @@ function mimeFromExt(ext: string): string {
     case 'png': return 'image/png';
     case 'gif': return 'image/gif';
     case 'webp': return 'image/webp';
+    case 'bmp': return 'image/bmp';
+    case 'ico': return 'image/x-icon';
+    case 'tif':
+    case 'tiff': return 'image/tiff';
     case 'pdf': return 'application/pdf';
+    case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    case 'pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    case 'xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
     case 'txt': return 'text/plain';
     case 'md':
     case 'markdown': return 'text/markdown';
@@ -1963,67 +2326,42 @@ function registerIpc() {
 
   trustedHandle('shell:writeTextFile', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellWriteTextFileArgs.parse(raw), 'shell:writeTextFile');
-    const resolved = resolveShellAllowedPath(args.path);
-    const stat = await fs.promises.stat(resolved).catch(() => null);
     const maxBytes = 2 * 1024 * 1024;
     const bytes = Buffer.byteLength(args.content, 'utf8');
-    if (stat && !stat.isFile()) {
-      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:writeTextFile target is not a file`);
-    }
     if (bytes > maxBytes) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:writeTextFile file too large`);
     }
-    await fs.promises.writeFile(resolved, args.content, 'utf8');
+    const resolved = authorizeOwnedRendererFile(args.path);
+    await writeResolvedOwnedFile(resolved, args.content);
     return { ok: true };
   });
 
-  ipcMain.handle('shell:readFileBase64', async (_e, raw: unknown) => {
+  trustedHandle('shell:readFileBase64', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:readFileBase64');
-    const resolved = resolveShellAllowedPath(args.path);
-    const stat = await fs.promises.stat(resolved);
+    const resolved = authorizeOwnedRendererFile(args.path);
     const maxBytes = 50 * 1024 * 1024;
-    if (!stat.isFile()) {
-      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readFileBase64 target is not a file`);
-    }
-    if (stat.size > maxBytes) {
+    if (resolved.identity.size > maxBytes) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readFileBase64 file too large`);
     }
-    const ext = path.extname(resolved).toLowerCase();
-    const mimeTypes: Record<string, string> = {
-      '.pdf': 'application/pdf',
-      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-      '.bmp': 'image/bmp',
-      '.ico': 'image/x-icon',
-      '.tif': 'image/tiff',
-      '.tiff': 'image/tiff',
-    };
-    const buffer = await fs.promises.readFile(resolved);
+    const buffer = await readResolvedCrewFile(resolved);
+    if (!buffer) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readFileBase64 file is empty`);
+    }
     return {
       base64: buffer.toString('base64'),
-      mimeType: mimeTypes[ext] || 'application/octet-stream',
+      mimeType: mimeFromExt(path.extname(resolved.filePath).slice(1).toLowerCase()),
     };
   });
 
   trustedHandle('shell:writeFileBase64', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellWriteFileBase64Args.parse(raw), 'shell:writeFileBase64');
-    const resolved = resolveShellAllowedPath(args.path);
-    const stat = await fs.promises.stat(resolved).catch(() => null);
     const buffer = Buffer.from(args.base64, 'base64');
     const maxBytes = 50 * 1024 * 1024;
-    if (stat && !stat.isFile()) {
-      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:writeFileBase64 target is not a file`);
-    }
     if (buffer.byteLength > maxBytes) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:writeFileBase64 file too large`);
     }
-    await fs.promises.writeFile(resolved, buffer);
+    const resolved = authorizeOwnedRendererFile(args.path);
+    await writeResolvedOwnedFile(resolved, buffer);
     return { ok: true };
   });
 
@@ -2045,6 +2383,15 @@ function registerIpc() {
     }
   });
 
+  // Renderer 只能提交 Workspace ID；root 来自已鉴权 Gateway 记录，避免任意路径枚举。
+  trustedHandle('workspace:directoryInfo', async (_e, raw: unknown) => {
+    const args = parseOrThrow(WorkspaceDirectoryArgs.parse(raw), 'workspace:directoryInfo');
+    return resolveWorkspaceDirectoryInfo(
+      args.workspaceId,
+      () => securityGatewayRequest('GET', '/api/workspaces'),
+    );
+  });
+
   trustedHandle('shell:showItemInFolder', (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:showItemInFolder');
     const resolved = resolveShellAllowedPath(args.path);
@@ -2053,22 +2400,14 @@ function registerIpc() {
 
   trustedHandle('shell:listOpenApplications', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:listOpenApplications');
-    const resolved = resolveShellAllowedPath(args.path);
-    const stat = await fs.promises.stat(resolved);
-    if (!stat.isFile()) {
-      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:listOpenApplications target is not a file`);
-    }
-    return listOpenWithApplications(resolved);
+    const resolved = authorizeOwnedRendererFile(args.path);
+    return listOpenWithApplications(resolved.filePath);
   });
 
   trustedHandle('shell:openPathWith', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathWithArgs.parse(raw), 'shell:openPathWith');
-    const resolved = resolveShellAllowedPath(args.path);
-    const stat = await fs.promises.stat(resolved);
-    if (!stat.isFile()) {
-      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:openPathWith target is not a file`);
-    }
-    await openFileWithApplication(resolved, args.applicationId);
+    const resolved = authorizeOwnedRendererFile(args.path);
+    await openFileWithApplication(resolved.filePath, args.applicationId);
     return { ok: true as const };
   });
 
@@ -2168,7 +2507,7 @@ function registerIpc() {
       title: '选择工作空间文件夹',
     });
     if (r.canceled || r.filePaths.length === 0) return null;
-    return r.filePaths;
+    return Promise.all(r.filePaths.map((folderPath) => fs.promises.realpath(folderPath)));
   });
 
   trustedHandle('app:get-auto-launch-enabled', () => {
@@ -2189,63 +2528,36 @@ function registerIpc() {
     }
     return saveDesktopPrefs({ closeBehavior: behavior });
   });
-
-  trustedHandle('auth:get-state', async () => {
-    const ensured = await ensureGateway();
-    return desktopAuthSession.refreshConfig(ensured.baseUrl);
-  });
-  trustedHandle('auth:send-code', async (_e, raw: unknown) => {
-    const phoneNumber = (
-      raw && typeof raw === 'object' && typeof (raw as Record<string, unknown>).phoneNumber === 'string'
-        ? String((raw as Record<string, unknown>).phoneNumber)
-        : ''
-    ).trim();
-    if (!phoneNumber || phoneNumber.length > 32) {
-      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid phoneNumber`);
+  trustedHandle('security:get-strict-security', () => ({
+    strictSecurityEnabled: isStrictSecurityEnabled(),
+  }));
+  trustedHandle('security:set-strict-security', async (_e, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') {
+      throw new Error(
+        `${IPC_ARG_VALIDATION_FAILED}: security:set-strict-security expected boolean`,
+      );
     }
-    const ensured = await ensureGateway();
-    await desktopAuthSession.refreshConfig(ensured.baseUrl);
-    return desktopAuthSession.sendCode(ensured.baseUrl, phoneNumber);
-  });
-  trustedHandle('auth:login', async (_e, raw: unknown) => {
-    const record = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
-    const phoneNumber = typeof record.phoneNumber === 'string' ? record.phoneNumber.trim() : '';
-    const code = typeof record.code === 'string' ? record.code.trim() : '';
-    if (!phoneNumber || phoneNumber.length > 32 || !code || code.length > 32) {
-      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid login input`);
+    if (!enabled && !await confirmStrictSecurityDisable(mainWindow)) {
+      return { strictSecurityEnabled: isStrictSecurityEnabled() };
     }
-    const ensured = await ensureGateway();
-    await desktopAuthSession.refreshConfig(ensured.baseUrl);
-    const result = await desktopAuthSession.login(ensured.baseUrl, phoneNumber, code);
-    if (result.ok === true) {
-      closeGatewaySockets('login-changed');
-      await resetBrowserHost('login-changed');
-      scheduleBrowserHostConnection();
-      mainWindow?.webContents.send('auth:session-state', desktopAuthSession.state());
-    }
-    return result;
-  });
-  trustedHandle('auth:logout', async () => {
-    const ensured = await ensureGateway();
-    const result = await desktopAuthSession.logout(ensured.baseUrl);
-    if (result.ok === true) {
-      closeGatewaySockets('logout');
-      await resetBrowserHost('logout');
-      mainWindow?.webContents.send('auth:session-state', desktopAuthSession.state());
-    }
-    return result;
+    const saved = saveStrictSecurityPreference(enabled);
+    loginNewServiceInstance.setStrictSecurityEnabled(enabled);
+    // 严格安全约束在 gateway 启动时通过 ACE_STRICT_SECURITY 注入；运行中的 gateway
+    // 不会热更新 env，故持久化后回收一次 gateway，使其带着新值重启。
+    recycleGatewayForSecurityChange();
+    return saved;
   });
 
   trustedHandle('update:start-download', async (_e, raw: unknown) => {
     const args = parseOrThrow(UpdateStartDownloadArgs.parse(raw), 'update:start-download');
-    return startUpdateDownload({ version: args.version, type: args.type });
+    return startUpdateDownload({ version: args.version, type: args.type, url: args.url });
   });
 
   trustedHandle('update:pause', () => pauseUpdateDownload());
   trustedHandle('update:resume', () => resumeUpdateDownload());
   trustedHandle('update:retry', async (_e, raw: unknown) => {
     const args = parseOrThrow(UpdateStartDownloadArgs.parse(raw), 'update:retry');
-    return retryUpdateDownload({ version: args.version, type: args.type });
+    return retryUpdateDownload({ version: args.version, type: args.type, url: args.url });
   });
 
   trustedHandle('update:install-package', async () => installDownloadedUpdate());
@@ -2256,17 +2568,55 @@ function registerIpc() {
     const args = parseOrThrow(FeedbackSubmitArgs.parse(raw), 'feedback:submit');
     return submitFeedback(args);
   });
-  trustedHandle('feedback:list', async (_e, params: unknown) => {
-    const validated = parseOrThrow(FeedbackListArgs.parse(params), 'feedback:list');
-    return getFeedbackList(validated);
+
+  trustedHandle('feedback:list', async (_e, raw: unknown) => {
+    const args = parseOrThrow(FeedbackListArgs.parse(raw), 'feedback:list');
+    return getFeedbackList(args);
   });
-  trustedHandle('feedback:image', async (_e, rawArgs: unknown) => {
-    const validated = parseOrThrow(FeedbackImageArgs.parse(rawArgs), 'feedback:image');
-    return getFeedbackImage(validated.path);
+
+  trustedHandle('feedback:image', async (_e, raw: unknown) => {
+    const args = parseOrThrow(FeedbackImageArgs.parse(raw), 'feedback:image');
+    return getFeedbackImage(args.path);
+  });
+
+  trustedHandle('auth:heartbeat', async (_e, rawVersion: unknown) => {
+    if (
+      rawVersion !== undefined
+      && (
+        typeof rawVersion !== 'string'
+        || rawVersion.length > 100
+        || /[\r\n\0]/.test(rawVersion)
+      )
+    ) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: auth:heartbeat version must be string|undefined`);
+    }
+    const version = typeof rawVersion === 'string' ? rawVersion : undefined;
+    return loginNewServiceInstance.heartbeat(version || currentAppVersionLabel(app));
   });
 
   trustedHandle('gateway:fetch', async (_e, raw: unknown) => {
     const args = parseOrThrow(GatewayFetchArgs.parse(raw), 'gateway:fetch');
+    const usesRemoteAuth = usesGatewayRemoteAuth();
+    const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+    if (usesRemoteAuth && !jwt) {
+      return {
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        body: JSON.stringify({ ok: false, error: '未登录' }),
+        headers: { 'content-type': 'application/json' },
+      };
+    }
+    const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+    if (usesRemoteAuth && !identityHeaders) {
+      return {
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        body: JSON.stringify({ ok: false, error: '登录用户缺少 staffCode/staffUid' }),
+        headers: { 'content-type': 'application/json' },
+      };
+    }
     const ensured = await ensureGateway();
     const targetUrl = new URL(args.url);
     const ensuredUrl = new URL(ensured.baseUrl);
@@ -2282,7 +2632,7 @@ function registerIpc() {
       // token-setter for the gateway.
       const DENYLIST = new Set([
         'host', 'connection', 'cookie', 'authorization',
-        'origin', 'referer', 'content-length',
+        'origin', 'referer', 'content-length', 'x-crew-security-proof',
       ]);
       const sanitized: Record<string, string> = {};
       const incoming = args.init.headers as Record<string, string>;
@@ -2292,11 +2642,43 @@ function registerIpc() {
       }
       fetchInit.headers = sanitized;
     }
+    if (!usesRemoteAuth) {
+      // 开发态：不带认证头，由后端 dev_mode loopback 放行。
+      fetchInit.headers = { ...(fetchInit.headers as Record<string, string> | undefined) };
+    } else {
+      fetchInit.headers = {
+        ...(fetchInit.headers as Record<string, string> | undefined),
+        Authorization: `Bearer ${jwt}`,
+        ...identityHeaders,
+      };
+    }
     fetchInit.headers = {
       ...(fetchInit.headers as Record<string, string> | undefined),
       ...gatewayAccessHeaders(targetUrl.pathname),
     };
     if (args.init?.body !== undefined) fetchInit.body = args.init.body;
+    const proofMethod = (args.init?.method || 'GET').toUpperCase();
+    const proofPath = targetUrl.pathname;
+    const proofBody = typeof args.init?.body === 'string' ? args.init.body : '';
+    const cuaAuthority = classifyCuaSetupAuthorityRequest(proofMethod, proofPath, proofBody);
+    if (cuaAuthority === 'install') {
+      const confirmed = await confirmCuaDriverInstall(mainWindow);
+      if (!confirmed) {
+        return {
+          ok: false,
+          status: 403,
+          statusText: 'Forbidden',
+          body: JSON.stringify({ ok: false, error: '用户取消了 CUA Driver 安装' }),
+          headers: { 'content-type': 'application/json' },
+        };
+      }
+    }
+    if (cuaAuthority !== null) {
+      fetchInit.headers = {
+        ...(fetchInit.headers as Record<string, string> | undefined),
+        'X-Crew-Security-Proof': createDesktopSecurityProof(proofMethod, proofPath, proofBody),
+      };
+    }
     const res = await fetch(targetUrl.toString(), fetchInit);
     const body = await res.text();
     return {
@@ -2323,6 +2705,14 @@ function registerIpc() {
         event.sender.send('gateway:stream-event', { request_id: requestId, ...payload });
       }
     };
+    const usesRemoteAuth = usesGatewayRemoteAuth();
+    const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+    const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+    if (usesRemoteAuth && (!jwt || !identityHeaders)) {
+      send({ type: 'error', error: '未登录或登录用户缺少身份信息' });
+      return { ok: false };
+    }
+
     const ensured = await ensureGateway();
     const targetUrl = new URL(args.url);
     const ensuredUrl = new URL(ensured.baseUrl);
@@ -2336,6 +2726,10 @@ function registerIpc() {
     ]);
     for (const [key, value] of Object.entries(args.init?.headers || {})) {
       if (!denylist.has(key.toLowerCase())) headers[key] = value;
+    }
+    if (usesRemoteAuth && jwt && identityHeaders) {
+      headers.Authorization = `Bearer ${jwt}`;
+      Object.assign(headers, identityHeaders);
     }
     Object.assign(headers, gatewayAccessHeaders(targetUrl.pathname));
     const controller = new AbortController();
@@ -2397,12 +2791,12 @@ function registerIpc() {
   });
 
   /**
-   * gateway:upload — Wiki 本地文件 multipart 上传通道。
+   * gateway:upload — 本地文件 multipart 上传通道（Wiki Phase 2）。
    *
    * gateway:fetch 只透传 string body，无法承载二进制；这里由 renderer 传文件
    * 绝对路径，主进程读文件 + Node 内置 FormData/Blob 组 multipart POST 到
    * gateway。目标 path 精确白名单（GATEWAY_UPLOAD_ALLOWED_PATHS，当前仅
-   * /api/wiki/upload），hostname 钳制与 gateway:fetch 一致。
+   * /api/wiki/upload），hostname 钳制与 JWT/身份头注入与 gateway:fetch 一致。
    *
    * 返回 { results }：每个文件一项，shape 与 gateway:fetch 返回一致，
    * 本地失败（读不到/超限/非普通文件）合成为 4xx JSON 错误体。
@@ -2426,6 +2820,18 @@ function registerIpc() {
       body: JSON.stringify({ ok: false, error: message }),
       headers: { 'content-type': 'application/json' },
     });
+    // 认证级失败：与 gateway:fetch 返回同样的状态码/错误体，逐文件合成。
+    const authFailure = (status: number, message: string) => ({
+      results: args.files.map((f) => localFailure(f, status, message)),
+    });
+    const usesRemoteAuth = usesGatewayRemoteAuth();
+    const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+    if (usesRemoteAuth && !jwt) return authFailure(401, '未登录');
+    const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+    if (usesRemoteAuth && !identityHeaders) {
+      return authFailure(401, '登录用户缺少 staffCode/staffUid');
+    }
+
     const ensured = await ensureGateway();
     const targetUrl = new URL(args.url);
     const ensuredUrl = new URL(ensured.baseUrl);
@@ -2433,6 +2839,11 @@ function registerIpc() {
     targetUrl.hostname = ensuredUrl.hostname;
     targetUrl.port = ensuredUrl.port;
     const uploadUrl = targetUrl.toString();
+    // 与 gateway:fetch 相同：主进程是唯一 token-setter，renderer 不提供任何 header。
+    const authHeaders: Record<string, string> = usesRemoteAuth
+      ? { Authorization: `Bearer ${jwt}`, ...identityHeaders }
+      : {};
+
     const maxMb = Math.round(GATEWAY_UPLOAD_MAX_FILE_BYTES / 1024 / 1024);
     const results: UploadFileResult[] = [];
     for (const filePath of args.files) {
@@ -2460,11 +2871,7 @@ function registerIpc() {
       const form = new FormData();
       form.append('file', new Blob([new Uint8Array(content)]), path.basename(filePath));
       try {
-        const res = await fetch(uploadUrl, {
-          method: 'POST',
-          headers: gatewayAccessHeaders(targetUrl.pathname),
-          body: form,
-        });
+        const res = await fetch(uploadUrl, { method: 'POST', headers: authHeaders, body: form });
         results.push({
           path: filePath,
           ok: res.ok,
@@ -2482,6 +2889,106 @@ function registerIpc() {
 
   trustedHandle('gateway:ensure', async () => ensureGateway());
 
+  trustedHandle('security:pending', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityPendingArgs.parse(raw), 'security:pending');
+    const query = new URLSearchParams({
+      workspace_id: args.workspaceId,
+      session_id: args.sessionId,
+      ...(args.taskId ? { task_id: args.taskId } : {}),
+    });
+    const pathname = `/api/security/pending?${query.toString()}`;
+    const result = await securityGatewayRequest('GET', pathname);
+    if (!result.ok) return result;
+    const body = result.body as { requests?: Array<Record<string, unknown>> };
+    const requests = (body.requests ?? []).map((request) => {
+      const requestId = typeof request['request_id'] === 'string' ? request['request_id'] : '';
+      const nonce = typeof request['nonce'] === 'string' ? request['nonce'] : '';
+      if (requestId && nonce) securityApprovalNonces.set(requestId, nonce);
+      const { nonce: _nonce, ...safe } = request;
+      void _nonce;
+      return safe;
+    });
+    return { ...result, body: { requests } };
+  });
+
+  trustedHandle('security:set-mode', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityModeArgs.parse(raw), 'security:set-mode');
+    return securityGatewayRequest('PUT', '/api/security/mode', {
+      workspace_id: args.workspaceId,
+      session_id: args.sessionId,
+      mode: args.mode,
+    });
+  });
+
+  trustedHandle('security:decide', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityDecisionArgs.parse(raw), 'security:decide');
+    const nonce = securityApprovalNonces.get(args.requestId);
+    if (!nonce) return { ok: false, status: 409, body: { detail: '批准请求已过期或未加载' } };
+    const pathname = `/api/security/requests/${encodeURIComponent(args.requestId)}/decision`;
+    const result = await securityGatewayRequest('POST', pathname, {
+      workspace_id: args.workspaceId,
+      session_id: args.sessionId,
+      task_id: args.taskId ?? '',
+      nonce,
+      decision: args.decision,
+      ...(args.alwaysArgvPrefix ? { always_argv_prefix: args.alwaysArgvPrefix } : {}),
+    });
+    // 仅成功才删 nonce：409 可能是瞬时（task_id 时空不一致等），若删掉会让后续所有点击
+    // 都命中上面的"已过期或未加载"分支而无法重试。409 时保留 nonce，交给下一次 /pending
+    // 轮询与渲染层错误处理去对账（请求真死了轮询不再返回，overlay 自然撤掉）。
+    if (result.ok) securityApprovalNonces.delete(args.requestId);
+    return result;
+  });
+
+  trustedHandle('security:capabilities', async () => securityGatewayRequest('GET', '/api/security/capabilities'));
+  trustedHandle('security:rules', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityWorkspaceArgs.parse(raw), 'security:rules');
+    return securityGatewayRequest('GET', `/api/security/rules?workspace_id=${encodeURIComponent(args.workspaceId)}`);
+  });
+  trustedHandle('security:set-rule', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityRuleMutationArgs.parse(raw), 'security:set-rule');
+    return securityGatewayRequest('PATCH', `/api/security/rules/${encodeURIComponent(args.ruleId)}`, {
+      workspace_id: args.workspaceId, enabled: args.enabled,
+    });
+  });
+  trustedHandle('security:delete-rule', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityRuleMutationArgs.parse(raw), 'security:delete-rule');
+    return securityGatewayRequest('DELETE', `/api/security/rules/${encodeURIComponent(args.ruleId)}?workspace_id=${encodeURIComponent(args.workspaceId)}`);
+  });
+  trustedHandle('security:audit', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityAuditArgs.parse(raw), 'security:audit');
+    const query = new URLSearchParams({ limit: String(args.limit ?? 100), offset: String(args.offset ?? 0) });
+    if (args.actionType) query.set('action_type', args.actionType);
+    if (args.decision) query.set('decision', args.decision);
+    if (args.sessionId) query.set('session_id', args.sessionId);
+    query.set('sort', args.sort ?? 'newest');
+    return securityGatewayRequest('GET', `/api/security/audit?${query.toString()}`);
+  });
+  trustedHandle('security:audit-export', async () => securityGatewayRequest('GET', '/api/security/audit/export'));
+  trustedHandle('security:audit-purge', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityWorkspaceArgs.parse(raw), 'security:audit-purge');
+    return securityGatewayRequest('POST', `/api/security/audit/purge-expired?workspace_id=${encodeURIComponent(args.workspaceId)}`);
+  });
+  trustedHandle('security:setup', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecuritySetupArgs.parse(raw), 'security:setup');
+    if (process.platform !== 'win32') {
+      return { ok: false, exitCode: null, detail: '仅 Windows 支持安全设置' };
+    }
+    const runtime = app.isPackaged
+      ? path.join(process.resourcesPath, 'ace-security-runtime.exe')
+      : String(process.env.ACE_SECURITY_RUNTIME ?? '').trim()
+        || path.join(repoRoot(), 'security-runtime', 'bin', 'ace-security-runtime.exe');
+    if (!path.isAbsolute(runtime) || !fs.existsSync(runtime) || path.basename(runtime) !== 'ace-security-runtime.exe') {
+      return {
+        ok: false,
+        exitCode: null,
+        detail: app.isPackaged
+          ? '随包 runtime 缺失，请重装或修复'
+          : '未找到 runtime：security-runtime/bin/ 下无预编译 exe，也未设 ACE_SECURITY_RUNTIME',
+      };
+    }
+    return runElevatedSecuritySetup(runtime, path.join(app.getPath('userData'), 'security'), args.action);
+  });
   // 冷启动/卡死时 renderer「重试」按钮调用。
   // 协作式作废（generation++）+ 等旧实例真正退出后才重建，保证同一时刻至多一个
   // ensureGateway 流程，从根源上消除「旧实例未退 → 扫到新端口 → spawn 被短路 →
@@ -2490,22 +2997,7 @@ function registerIpc() {
     gatewayGeneration += 1;
     logSupervisorDecision('user-retry', { generation: gatewayGeneration });
     ensureGatewayPromise = null;
-    const gw = managedGateway;
-    if (gw) {
-      managedGateway = null;
-      await new Promise<void>((resolve) => {
-        const done = () => resolve();
-        gw.once('exit', done);
-        setTimeout(() => {
-          try { gw.kill('SIGKILL'); } catch { /* already dead */ }
-          setTimeout(done, 400);
-        }, 3000);
-        try { gw.kill(); } catch { /* already dead */ }
-      });
-      // 旧实例已被 retry 路径接管退出（exit handler 因 managedGateway=null 不会记录），
-      // 这里显式补一条决策日志，保证重试→旧实例退出在 gateway-startup.log 可回溯（B5）。
-      logSupervisorDecision('instance-exit-superseded', { pid: gw.pid ?? -1 });
-    }
+    await stopManagedGateway('user-retry');
     void ensureGateway()
       .then(() => scheduleBrowserHostConnection())
       .catch((err) => console.error('[gateway] retry failed:', err));
@@ -2530,9 +3022,21 @@ function registerIpc() {
       }
     }
 
+    const usesRemoteAuth = usesGatewayRemoteAuth();
+    if (usesRemoteAuth && !loginNewServiceInstance.getJWTToken()) {
+      return { ok: false, status: 401, error: '未登录' };
+    }
+    if (usesRemoteAuth && !gatewayIdentityHeaders()) {
+      return { ok: false, status: 401, error: '登录用户缺少 staffCode/staffUid' };
+    }
     const ensured = await ensureGateway();
     if (gatewaySocketGenerations.get(senderId) !== generation || event.sender.isDestroyed()) {
       return { ok: false, error: 'WebSocket 连接已取消' };
+    }
+    const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+    const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+    if (usesRemoteAuth && (!jwt || !identityHeaders)) {
+      return { ok: false, status: 401, error: '登录状态已变更' };
     }
     const httpUrl = new URL(ensured.baseUrl);
     httpUrl.protocol = httpUrl.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2540,10 +3044,11 @@ function registerIpc() {
     httpUrl.search = '';
     httpUrl.hash = '';
 
-    const sessionCookie = desktopAuthSession.cookieHeader();
-    const socket = new WebSocket(httpUrl.toString(), {
-      headers: sessionCookie ? { Cookie: sessionCookie } : {},
-    });
+    const socket = !usesRemoteAuth
+      ? new WebSocket(httpUrl.toString())
+      : new WebSocket(httpUrl.toString(), {
+          headers: { Authorization: `Bearer ${jwt}`, ...identityHeaders },
+        });
     gatewaySockets.set(senderId, socket);
     const sendEvent = (payload: Record<string, unknown>): void => {
       if (
@@ -2645,22 +3150,26 @@ function registerIpc() {
       browserSockets.delete(senderId);
       try { previous.close(1000, 'switch-session'); } catch { /* best effort */ }
     }
+    const usesRemoteAuth = usesGatewayRemoteAuth();
+    if (usesRemoteAuth && (!loginNewServiceInstance.getJWTToken() || !gatewayIdentityHeaders())) {
+      return { ok: false, status: 401, error: '未登录' };
+    }
     const ensured = await ensureGateway();
     if (browserSocketGenerations.get(senderId) !== generation || event.sender.isDestroyed()) {
       return { ok: false, error: '浏览器状态连接已取消' };
+    }
+    const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+    const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+    if (usesRemoteAuth && (!jwt || !identityHeaders)) {
+      return { ok: false, status: 401, error: '登录状态已变更' };
     }
     const target = new URL(ensured.baseUrl);
     target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
     target.pathname = `/ws/browser/${encodeURIComponent(sessionId)}`;
     target.search = '';
     target.hash = '';
-    const accessToken = gatewayInstanceAccessToken(activeGatewayCrewHome());
-    const sessionCookie = desktopAuthSession.cookieHeader();
     const socket = new WebSocket(target.toString(), {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        ...(sessionCookie ? { Cookie: sessionCookie } : {}),
-      },
+      headers: gatewayAccessHeaders('/api/browser/'),
       maxPayload: 2 * 1024 * 1024,
     });
     browserSockets.set(senderId, socket);
@@ -2736,22 +3245,53 @@ function registerIpc() {
     }
   });
 
+  loginNewServiceInstance.setVersionUpdateHandler((payload) => {
+    // force 策略：持久化阻断锁，保证重启后仍强制更新直到本机版本达标
+    if (payload.type === 'force' && payload.version) {
+      setForceLock({
+        requiredVersion: payload.version,
+        ...(payload.message ? { message: payload.message } : {}),
+      });
+    }
+    mainWindow?.webContents.send('version-update-available', payload);
+  });
+  loginNewServiceInstance.setSessionExpiredHandler(async () => {
+    closeGatewaySockets('session-expired');
+    await resetBrowserHost('session-expired');
+    pushSessionState();
+  });
 }
 
 async function bootstrap() {
   await app.whenReady();
+  loginNewServiceInstance.setStrictSecurityEnabled(isStrictSecurityEnabled());
+
+  // 普通启动使用本地 Gateway 身份；只有显式 `--dev` 才使用隔离的开发身份。
+  // 先于 crew-home / owner / 文件协议注册解析，确保下游各处读到一致的身份。
+  const bootSession = loginNewServiceInstance.getSessionInfo();
+  gatewayIdentityMode = resolveGatewayIdentityMode(
+    IS_DEV_LAUNCH,
+    loginNewServiceInstance.getJWTToken(),
+    bootSession.userInfo,
+  );
+  if (gatewayIdentityMode === 'dev' && loginNewServiceInstance.getJWTToken()) {
+    // 残留的持久化身份不能拥有 Gateway 数据：保留加密偏好，但不跑其心跳。
+    loginNewServiceInstance.stopHeartbeat();
+    loginNewServiceInstance.clearJWTToken();
+  }
+  console.log(`[gateway] identity mode: ${gatewayIdentityMode}`);
+
   registerCrewFileProtocol(activeGatewayCrewHome, currentCrewFileOwnerSegment);
-  console.log(`[gateway] local identity mode: ${gatewayIdentityMode}`);
 
   // 🌟 优化：先创建窗口（显示 loading），Gateway 在后台启动
   // 避免串行等待导致用户长时间白屏，提升用户体验
   // Windows/macOS: 后台启动 Gateway，启动完成后推送 status 更新遮罩
   // Linux: 等待 wrapper 脚本拉起的 Gateway 就绪
-  // 非打包态：同样后台启动 managed Gateway，避免 browser-host
+  // 非打包态：同样后台启动 managed Gateway，避免旧 Gateway / browser-host
   // 连到 8000 端口的残留 Gateway 或空端口。
   if (IS_DEV_LAUNCH) {
-    // 开发态统一使用托管 Gateway 端口，避免默认 8000 上残留进程导致
-    // browser-host 连接错误。
+    // 开发态统一使用托管 Gateway 端口，让浏览器客户端与 managed Gateway
+    // 使用同一端口，避免默认 8000 上残留进程导致 403 / ECONNREFUSED。
     process.env.GATEWAY_PORT = String(MANAGED_GATEWAY_PORT);
   }
 
@@ -2761,8 +3301,10 @@ async function bootstrap() {
 
   // 后台异步启动 Gateway（不阻塞窗口创建）
   ensureGateway()
-    .then(async result => {
+    .then(result => {
       console.log('[main] Gateway started:', result);
+      // 让浏览器客户端与 managed / 复用的 Gateway 使用同一端口，
+      // 避免默认 8000 与实际端口不一致导致 WS 连不上。
       try {
         const resolvedPort = new URL(result.baseUrl).port;
         if (resolvedPort) {
@@ -2771,11 +3313,6 @@ async function bootstrap() {
       } catch {
         /* ignore malformed URL */
       }
-      try {
-        await desktopAuthSession.refreshConfig(result.baseUrl);
-      } catch (error) {
-        console.warn('[auth] failed to load gateway auth config:', (error as Error).message);
-      }
       scheduleBrowserHostConnection();
     })
     .catch(err => {
@@ -2783,6 +3320,13 @@ async function bootstrap() {
       // 进程可能仍在慢启动：保持健康监控，不在此处 push disconnected。
     });
 
+  // 持久化恢复只做本地解密与 JWT 形状检查；随后由立即启动的 heartbeat 异步发现
+  // 服务端明确返回的 unauthorized。网络不可用时当前产品语义仍允许离线恢复。
+  // 不 await：bootstrap 不应被后台恢复阻塞，renderer 先以未登录状态启动。
+  if (IS_DEV_LAUNCH) {
+    // 开发启动已在 Gateway 拉起前恢复账号并固定本进程身份模式。
+    pushSessionState();
+  }
   registerIpc();
   createTray();
   createWindow();
@@ -2790,7 +3334,7 @@ async function bootstrap() {
 
   // 版本更新：配置下载控制器进度回调、清理上次中断的 .part、启动旧包定期清理；
   // 页面就绪后恢复 force 阻断 / 已下载待安装状态（renderer 监听器此时已绑定）。
-  configureUpdateController(sendVersionUpdateDownloadProgress);
+  configureUpdateController(sendVersionUpdateDownloadProgress, isStrictSecurityEnabled);
   sweepUpdatePartials();
   startUpdateCleanupMonitor();
   if (mainWindow) {
@@ -2831,12 +3375,15 @@ async function bootstrap() {
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    // Hidden AutomationHost windows are implementation details and must not
+    // suppress recreation of the user-facing window on macOS.
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
     else showMainWindow();
   });
 }
 
 app.on('window-all-closed', () => {
+  loginNewServiceInstance.stopHeartbeat();
   if (process.platform !== 'darwin') app.quit();
 });
 

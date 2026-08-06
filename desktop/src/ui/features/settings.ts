@@ -1,41 +1,44 @@
 /**
  * 设置弹窗：侧栏齿轮按钮触发；内部"左 tab + 右表单"。
  *
- * 行为持久化：所有控件写入 localStorage `crew.settings`，实时应用主题/字体大小。
+ * 行为持久化：所有控件写入 localStorage `crew.settings.*`，实时应用主题/字体大小。
  * 真实行为：
  *   - 主题模式：写入 root/body theme 类与 data 属性，system 跟随 OS 深浅色变化
- *   - 强调色：覆盖 --v2-primary / --accent CSS 变量
- *   - 字体大小：覆盖 UI / 正文 / 编辑器 / 终端四组 CSS 变量
+ *   - 字体大小：三项用户设置覆盖 UI / 正文 / 代码；编辑输入复用正文字号
  *   - 关闭行为：仅记录偏好（实际生效需 Electron 主进程配合）
  *   - 清除缓存：扫描 localStorage 中 crew.* 命名的 key
  *   - 导出会话：读取后端 /api/sessions 并下载为 JSON
  */
 
 import { backendApi } from '../backend-client';
+import { openDialog, type OverlayHandle } from '../components/overlays';
+import { clearRuntimeToken, setRuntimeToken } from '../components/runtime-style';
 import { renderMarkdownHtml } from '../markdown';
-import helpDocMarkdown from '../../../assets/help-docs/crew-user-guide.md?raw';
-import { bindSettingsLibraryUi } from './settings-library';
+import helpDocMarkdown from '../../../assets/help-docs/crew-user-guide.md';
+import {
+  bindSettingsLibraryUi,
+  disposeSettingsLibraryPane,
+} from './settings-library';
 import { bindSessionPreviewModal } from './session-preview-modal';
-import { $, notify } from '../state';
+import { bindContactModal, closeContactModal, openContactModal } from './settings-contact';
+import { $, notify, state } from '../state';
+import { requireRendererLogin } from './auth-gate';
 import {
   DEFAULT_SETTINGS,
   clampNumber,
   hydrateSettings,
-  resolveFontFamily,
+  resolveFontFamilyOverride,
   type Settings,
 } from './settings-preferences';
+import { createSettingsShell, type SettingsShell } from './settings-shell';
+import { mountSettingsDataPanes } from './settings-data';
+import { disposeMcpPane } from './settings-mcp';
+import { productModeStore } from '../stores/product-mode-store';
 
 const STORAGE_KEY = 'crew.settings';
 const ROOT = document.documentElement;
 const HELP_DOC_ASSET_BASE = './help-docs/';
 const HELP_DOC_VERSION_LABEL = `文档版本 ${__HELP_DOC_VERSION__}`;
-
-type HelpDocHeading = {
-  id: string;
-  level: number;
-  title: string;
-  searchText: string;
-};
 
 const SYSTEM_THEME_QUERY = '(prefers-color-scheme: dark)';
 const systemThemeMedia = window.matchMedia?.(SYSTEM_THEME_QUERY) ?? null;
@@ -59,132 +62,118 @@ function saveSettings(s: Settings): void {
 }
 
 let current: Settings = loadSettings();
-let helpDocSource: string | null = null;
-let helpDocHeadings: HelpDocHeading[] = [];
-let helpDocLoading: Promise<void> | null = null;
+let settingsShell: SettingsShell | null = null;
+let helpDocOverlay: OverlayHandle<HTMLDivElement> | null = null;
 
-function normalizeHelpDocTitle(line: string): string {
-  return line
-    .replace(/^#{1,6}\s+/, '')
-    .replace(/\\([+_.()])/g, '$1')
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .trim();
+interface HelpDocHeading {
+  id: string;
+  level: number;
+  title: string;
+  searchText: string;
 }
 
-function parseHelpDocHeadings(source: string): HelpDocHeading[] {
+function helpDocHeadings(source: string): HelpDocHeading[] {
   const headings: HelpDocHeading[] = [];
-  source.split(/\r?\n/).forEach((line) => {
-    const match = /^(#{1,4})\s+(.+)$/.exec(line);
-    if (!match) return;
-    const level = match[1].length;
-    if (level > 3) return;
-    const title = normalizeHelpDocTitle(line);
+  for (const line of source.split(/\r?\n/)) {
+    const match = /^(#{1,3})\s+(.+)$/.exec(line);
+    if (!match) continue;
+    const title = match[2]
+      .replace(/\\([+_.()])/g, '$1')
+      .replace(/\*\*(.*?)\*\*/g, '$1')
+      .trim();
     headings.push({
       id: `help-doc-heading-${headings.length}`,
-      level,
+      level: match[1].length,
       title,
       searchText: title.toLowerCase(),
     });
-  });
+  }
   return headings;
 }
 
-function rewriteHelpDocMarkdown(source: string): string {
-  return source.replace(/!\[([^\]]*)\]\((image(?:-\d+)?\.png)\)/g, (_all, alt: string, filename: string) => {
-    const safeAlt = alt || 'Crew 功能截图';
-    return `![${safeAlt}](${HELP_DOC_ASSET_BASE}${filename})`;
+function openHelpDoc(trigger: HTMLElement): void {
+  helpDocOverlay?.close();
+  const headings = helpDocHeadings(helpDocMarkdown);
+  const layout = document.createElement('div');
+  layout.className = 'help-doc-modal__body';
+  const sidebar = document.createElement('aside');
+  sidebar.className = 'help-doc-sidebar';
+  sidebar.setAttribute('aria-label', '帮助文档目录');
+  const searchBox = document.createElement('label');
+  searchBox.className = 'help-doc-search';
+  searchBox.innerHTML = `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m21 21-4.35-4.35"></path>
+      <circle cx="11" cy="11" r="7"></circle>
+    </svg>
+  `;
+  const search = document.createElement('input');
+  search.type = 'search';
+  search.placeholder = '搜索文档';
+  search.autocomplete = 'off';
+  search.setAttribute('aria-label', '搜索帮助文档');
+  searchBox.append(search);
+  const treeHeading = document.createElement('div');
+  treeHeading.className = 'help-doc-sidebar__head';
+  const treeTitle = document.createElement('span');
+  treeTitle.textContent = '目录';
+  const chapterCount = document.createElement('span');
+  chapterCount.textContent = `${headings.filter((item) => item.level === 1).length}章`;
+  treeHeading.append(treeTitle, chapterCount);
+  const tree = document.createElement('nav');
+  tree.className = 'help-doc-tree';
+  tree.setAttribute('aria-label', '文档章节');
+  const empty = document.createElement('div');
+  empty.className = 'help-doc-empty';
+  empty.textContent = '没有匹配的目录';
+  empty.hidden = true;
+  const version = document.createElement('div');
+  version.className = 'help-doc-sidebar__version';
+  version.textContent = HELP_DOC_VERSION_LABEL;
+  const content = document.createElement('article');
+  content.className = 'help-doc-content md-body chat-markdown';
+  content.setAttribute('aria-label', '帮助文档内容');
+  const markdown = helpDocMarkdown.replace(
+    /!\[([^\]]*)\]\((image(?:-\d+)?\.png)\)/g,
+    (_all: string, alt: string, filename: string) =>
+      `![${alt || 'Crew 功能截图'}](${HELP_DOC_ASSET_BASE}${filename})`,
+  );
+  content.innerHTML = renderMarkdownHtml(markdown, { allowImages: true });
+  content.querySelectorAll<HTMLElement>('h1, h2, h3').forEach((heading, index) => {
+    if (headings[index]) heading.id = headings[index].id;
   });
-}
-
-function assignHelpDocHeadingIds(body: HTMLElement): void {
-  const renderedHeadings = Array.from(body.querySelectorAll<HTMLElement>('h1, h2, h3'));
-  renderedHeadings.forEach((heading, index) => {
-    const id = helpDocHeadings[index]?.id;
-    if (!id) return;
-    heading.id = id;
+  const renderTree = (): void => {
+    const query = search.value.trim().toLowerCase();
+    tree.replaceChildren();
+    const matches = headings.filter((item) => !query || item.searchText.includes(query));
+    empty.hidden = matches.length > 0;
+    for (const heading of matches) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `help-doc-tree__item help-doc-tree__item--level-${heading.level}`;
+      button.textContent = heading.title;
+      button.addEventListener('click', () => {
+        content.querySelector<HTMLElement>(`#${heading.id}`)?.scrollIntoView({
+          block: 'start',
+          behavior: 'smooth',
+        });
+      });
+      tree.append(button);
+    }
+  };
+  search.addEventListener('input', renderTree);
+  renderTree();
+  sidebar.append(searchBox, treeHeading, tree, empty, version);
+  layout.append(sidebar, content);
+  helpDocOverlay = openDialog({
+    trigger,
+    title: '帮助文档',
+    content: layout,
+    onClose: () => {
+      helpDocOverlay = null;
+    },
   });
-}
-
-function renderHelpDocTree(filter = ''): void {
-  const tree = document.getElementById('help-doc-tree');
-  const empty = document.getElementById('help-doc-empty');
-  if (!tree || !empty) return;
-
-  const query = filter.trim().toLowerCase();
-  const visible = helpDocHeadings.filter((heading) => !query || heading.searchText.includes(query));
-  tree.innerHTML = '';
-  empty.hidden = visible.length > 0;
-
-  visible.forEach((heading) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `help-doc-tree__item help-doc-tree__item--level-${heading.level}`;
-    button.dataset.helpDocTarget = heading.id;
-    button.textContent = heading.title;
-    button.addEventListener('click', () => {
-      const target = document.getElementById(heading.id);
-      target?.scrollIntoView({ block: 'start', behavior: 'smooth' });
-    });
-    tree.appendChild(button);
-  });
-}
-
-function setHelpDocLoadingState(message: string): void {
-  const body = document.getElementById('help-doc-content');
-  if (body) {
-    const state = document.createElement('div');
-    state.className = 'help-doc-state';
-    state.textContent = message;
-    body.replaceChildren(state);
-  }
-}
-
-async function loadHelpDoc(): Promise<void> {
-  if (helpDocSource) return;
-  if (helpDocLoading) return helpDocLoading;
-
-  helpDocLoading = (async () => {
-    setHelpDocLoadingState('正在加载帮助文档…');
-    helpDocSource = helpDocMarkdown;
-    helpDocHeadings = parseHelpDocHeadings(helpDocSource);
-
-    const content = document.getElementById('help-doc-content');
-    if (!content) return;
-    content.innerHTML = renderMarkdownHtml(rewriteHelpDocMarkdown(helpDocSource), { allowImages: true });
-    assignHelpDocHeadingIds(content);
-    renderHelpDocTree((document.getElementById('help-doc-search') as HTMLInputElement | null)?.value || '');
-  })();
-
-  try {
-    await helpDocLoading;
-  } catch (error) {
-    setHelpDocLoadingState(`帮助文档加载失败：${(error as Error).message || '未知错误'}`);
-  } finally {
-    helpDocLoading = null;
-  }
-}
-
-function openHelpDocModal(): void {
-  const modal = document.getElementById('help-doc-modal');
-  if (!modal) return;
-  modal.classList.add('show');
-  void loadHelpDoc();
-}
-
-function closeHelpDocModal(): void {
-  document.getElementById('help-doc-modal')?.classList.remove('show');
-}
-
-function bindHelpDocModal(): void {
-  const version = document.getElementById('help-doc-version');
-  if (version) version.textContent = HELP_DOC_VERSION_LABEL;
-  document.getElementById('help-doc-modal-close')?.addEventListener('click', closeHelpDocModal);
-  document.getElementById('help-doc-modal')?.addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) closeHelpDocModal();
-  });
-  document.getElementById('help-doc-search')?.addEventListener('input', (e) => {
-    renderHelpDocTree((e.target as HTMLInputElement).value);
-  });
+  helpDocOverlay.element.querySelector('.mw-dialog')?.classList.add('help-doc-modal-content');
 }
 
 async function syncAutoStartFromSystem(): Promise<void> {
@@ -216,6 +205,17 @@ async function syncCloseBehaviorFromMain(): Promise<void> {
   }
 }
 
+async function syncStrictSecurityFromMain(): Promise<void> {
+  try {
+    const result = await window.Crew?.getStrictSecurityEnabled?.();
+    if (!result || typeof result.strictSecurityEnabled !== 'boolean') return;
+    const toggle = document.querySelector<HTMLInputElement>('#set-strict-security');
+    if (toggle) toggle.checked = result.strictSecurityEnabled;
+  } catch {
+    // 主进程不可用时保留 fail-closed 的 checked 默认值。
+  }
+}
+
 function updateRangeValue(id: string, px: number): void {
   const el = document.getElementById(id);
   if (el) el.textContent = `${px}px`;
@@ -224,64 +224,44 @@ function updateRangeValue(id: string, px: number): void {
 function applyFontSizes(s: Settings): void {
   const ui = clampNumber(s.uiFontSize, 12, 18, DEFAULT_SETTINGS.uiFontSize);
   const content = clampNumber(s.contentFontSize, 12, 20, DEFAULT_SETTINGS.contentFontSize);
-  const editor = clampNumber(s.editorFontSize, 12, 20, DEFAULT_SETTINGS.editorFontSize);
   const terminal = clampNumber(s.terminalFontSize, 11, 18, DEFAULT_SETTINGS.terminalFontSize);
 
   current.uiFontSize = ui;
   current.contentFontSize = content;
-  current.editorFontSize = editor;
   current.terminalFontSize = terminal;
 
-  // Body font sizes are controlled by the CSS variable cascade so the UI
-  // slider updates all scales derived from --base-font-size via calc().
-  ROOT.style.setProperty('--base-font-size', `${ui}px`);
-  ROOT.style.setProperty('--content-font-size', `${content}px`);
-  ROOT.style.setProperty('--editor-font-size', `${editor}px`);
-  ROOT.style.setProperty('--terminal-font-size', `${terminal}px`);
+  setRuntimeToken(ROOT, '--mw-font-ui-size', `${ui}px`);
+  setRuntimeToken(ROOT, '--mw-font-content-size', `${content}px`);
+  setRuntimeToken(ROOT, '--mw-font-editor-size', `${content}px`);
+  setRuntimeToken(ROOT, '--mw-font-code-size', `${terminal}px`);
 
   updateRangeValue('set-ui-font-size-value', ui);
   updateRangeValue('set-content-font-size-value', content);
-  updateRangeValue('set-editor-font-size-value', editor);
   updateRangeValue('set-terminal-font-size-value', terminal);
 }
 
 /**
- * Reset the 4 font-size CSS variables to their defaults. Called by
+ * Reset the font-size CSS variables to their defaults. Called by
  * 'reset all settings' so a reset doesn't leave stale inline values
  * on :root.
  */
 function resetFontSizeCssVars(): void {
-  ROOT.style.removeProperty('--base-font-size');
-  ROOT.style.removeProperty('--content-font-size');
-  ROOT.style.removeProperty('--editor-font-size');
-  ROOT.style.removeProperty('--terminal-font-size');
+  clearRuntimeToken(ROOT, '--mw-font-ui-size');
+  clearRuntimeToken(ROOT, '--mw-font-content-size');
+  clearRuntimeToken(ROOT, '--mw-font-editor-size');
+  clearRuntimeToken(ROOT, '--mw-font-code-size');
 }
 
-function applyAccent(name: Settings['accent']): void {
-  const map: Record<Settings['accent'], string> = {
-    blue: '#2563eb',
-    indigo: '#4f46e5',
-    violet: '#7c5cff',
-    cyan: '#0891b2',
-  };
-  const color = map[name];
-  // --color-accent is the source of truth. The remaining accent variables
-  // are aliases maintained by the inline FOUC script and _tokens.css.
-  ROOT.style.setProperty('--color-accent', color);
-  ROOT.style.setProperty('--accent', color);
-  ROOT.style.setProperty('--accent2', color);
-  ROOT.style.setProperty('--v2-primary', color);
-  document.body.style.setProperty('--mm-accent', color);
+function applyFontFamily(fontFamily: Settings['fontFamily']): void {
+  const override = resolveFontFamilyOverride(fontFamily);
+  if (override === null) {
+    clearRuntimeToken(ROOT, '--mw-font-sans');
+    return;
+  }
+  setRuntimeToken(ROOT, '--mw-font-sans', override);
 }
 
-/**
- * Resolve the actual theme key for a given mode.
- *   system → light | dark (via matchMedia)
- *   light / dark / sepia / hc → as-is
- * 'sepia' and 'hc' are named themes that activate their own
- * :root[data-theme="..."] block in variables.css.
- */
-function resolveTheme(mode: Settings['themeMode']): 'light' | 'dark' | 'sepia' | 'hc' {
+function resolveTheme(mode: Settings['themeMode']): 'light' | 'dark' | 'high-contrast' {
   if (mode === 'system') {
     return systemThemeMedia?.matches ? 'dark' : 'light';
   }
@@ -290,25 +270,26 @@ function resolveTheme(mode: Settings['themeMode']): 'light' | 'dark' | 'sepia' |
 
 function applyTheme(mode: Settings['themeMode']): void {
   const resolved = resolveTheme(mode);
-  // Theme switching uses :root[data-theme]; each named theme
-  // (light/dark/sepia/hc) defines its own block in variables.css.
   document.body.dataset.themeMode = mode;
   document.body.dataset.theme = resolved;
   ROOT.dataset.themeMode = mode;
   ROOT.dataset.theme = resolved;
-  ROOT.style.colorScheme = resolved === 'sepia' || resolved === 'hc' || resolved === 'light' ? 'light' : 'dark';
-  ROOT.style.setProperty('--sans', resolveFontFamily(current.fontFamily));
+  ROOT.style.colorScheme = resolved === 'light' ? 'light' : 'dark';
 }
 
 function applyAll(): void {
   applyFontSizes(current);
-  applyAccent(current.accent);
+  applyFontFamily(current.fontFamily);
   applyTheme(current.themeMode);
   // 不在此处改 body.inspector-open：由 inspector.ts 在 bindInspectorUi()
   // 里根据 saved setting 自己 open/close，避免和按钮切换后的状态脱节。
 }
 
 function setActivePane(pane: string): void {
+  if (settingsShell) {
+    settingsShell.setActivePane(pane);
+    return;
+  }
   document.querySelectorAll<HTMLElement>('.set-v2-nav__item').forEach((el) => {
     el.classList.toggle('is-active', el.getAttribute('data-settings-pane') === pane);
   });
@@ -317,38 +298,51 @@ function setActivePane(pane: string): void {
   });
 }
 
+function mountSettingsShell(): void {
+  if (settingsShell?.element.isConnected) return;
+  settingsShell?.dispose();
+  settingsShell = null;
+  const staging = document.getElementById('settings-pane-staging');
+  if (!staging) return;
+  const panes = [...staging.querySelectorAll<HTMLElement>('.set-v2-pane')];
+  settingsShell = createSettingsShell({
+    panes,
+    onPaneChange: onSettingsPaneOpened,
+    onClose: closeSettingsModal,
+  });
+  staging.replaceWith(settingsShell.element);
+}
+
 function openSettingsModal(): void {
-  const modal = document.getElementById('settings-modal');
-  if (!modal) return;
-  modal.classList.add('show');
-  // 清掉内联 display，交给 .modal-overlay.show { display:flex }，避免破坏垂直居中
-  modal.style.removeProperty('display');
+  mountSettingsShell();
+  settingsShell?.setPaneVisible('work', productModeStore.get().productMode === 'work');
+  settingsShell?.open();
   syncControlsToState();
+  const pane = document.querySelector<HTMLElement>('.set-v2-nav__item.is-active')?.dataset.settingsPane;
+  if (pane) onSettingsPaneOpened(pane);
   void syncAutoStartFromSystem();
   void syncCloseBehaviorFromMain();
+  void syncStrictSecurityFromMain();
 }
 
 function closeSettingsModal(): void {
-  const modal = document.getElementById('settings-modal');
-  if (!modal) return;
-  modal.classList.remove('show');
-  modal.style.removeProperty('display');
+  settingsShell?.close();
+  helpDocOverlay?.close();
+  closeContactModal(false);
+  $('#settings-btn')?.focus();
+  disposeSettingsLibraryPane();
   // 停止 MCP 面板的 CUA 安装轮询，避免弹窗关闭后空跑
-  void import('./settings-mcp').then((m) => m.disposeMcpPane());
+  disposeMcpPane();
 }
 
 function syncControlsToState(): void {
   // 主题
   const themeSel = document.querySelector<HTMLSelectElement>('#set-theme-mode');
   if (themeSel) themeSel.value = current.themeMode;
-  const accentSel = document.querySelector<HTMLSelectElement>('#set-accent');
-  if (accentSel) accentSel.value = current.accent;
   const uiFontSizeRange = document.querySelector<HTMLInputElement>('#set-ui-font-size');
   if (uiFontSizeRange) uiFontSizeRange.value = String(current.uiFontSize);
   const contentFontSizeRange = document.querySelector<HTMLInputElement>('#set-content-font-size');
   if (contentFontSizeRange) contentFontSizeRange.value = String(current.contentFontSize);
-  const editorFontSizeRange = document.querySelector<HTMLInputElement>('#set-editor-font-size');
-  if (editorFontSizeRange) editorFontSizeRange.value = String(current.editorFontSize);
   const terminalFontSizeRange = document.querySelector<HTMLInputElement>('#set-terminal-font-size');
   if (terminalFontSizeRange) terminalFontSizeRange.value = String(current.terminalFontSize);
   applyFontSizes(current);
@@ -356,16 +350,10 @@ function syncControlsToState(): void {
   if (fontFamilySel) fontFamilySel.value = current.fontFamily;
 
   // 行为
-  const startConn = document.querySelector<HTMLInputElement>('#set-start-connect');
-  if (startConn) startConn.checked = current.startWithConnect;
   const closeSel = document.querySelector<HTMLSelectElement>('#set-close-behavior');
   if (closeSel) closeSel.value = current.closeBehavior;
   const autoStart = document.querySelector<HTMLInputElement>('#set-auto-start');
   if (autoStart) autoStart.checked = current.autoStart;
-  const enterToSend = document.querySelector<HTMLInputElement>('#set-enter-send');
-  if (enterToSend) enterToSend.checked = current.enterToSend;
-  const streaming = document.querySelector<HTMLInputElement>('#set-streaming');
-  if (streaming) streaming.checked = current.streaming;
   const ins = document.querySelector<HTMLInputElement>('#set-inspector-open');
   if (ins) ins.checked = current.inspectorOpen;
 }
@@ -375,32 +363,26 @@ function bindControls(): void {
     current.themeMode = (e.target as HTMLSelectElement).value as Settings['themeMode'];
     saveSettings(current);
     applyTheme(current.themeMode);
-    notify(`主题已切换：${current.themeMode === 'system' ? '跟随系统' : current.themeMode === 'dark' ? '深色' : '浅色'}`);
-  });
-
-  document.querySelector<HTMLSelectElement>('#set-accent')?.addEventListener('change', (e) => {
-    current.accent = (e.target as HTMLSelectElement).value as Settings['accent'];
-    saveSettings(current);
-    applyAccent(current.accent);
-    notify('强调色已更新');
+    const labels: Record<Settings['themeMode'], string> = {
+      system: '跟随系统',
+      light: '浅色',
+      dark: '深色',
+      'high-contrast': '高对比度',
+    };
+    notify(`主题已切换：${labels[current.themeMode]}`);
   });
 
   bindFontRange('set-ui-font-size', 'uiFontSize');
   bindFontRange('set-content-font-size', 'contentFontSize');
-  bindFontRange('set-editor-font-size', 'editorFontSize');
   bindFontRange('set-terminal-font-size', 'terminalFontSize');
 
   document.querySelector<HTMLSelectElement>('#set-font-family')?.addEventListener('change', (e) => {
     current.fontFamily = (e.target as HTMLSelectElement).value as Settings['fontFamily'];
     saveSettings(current);
-    ROOT.style.setProperty('--sans', resolveFontFamily(current.fontFamily));
+    applyFontFamily(current.fontFamily);
     notify('字体设置已更新（重启后部分应用生效）');
   });
 
-  document.querySelector<HTMLInputElement>('#set-start-connect')?.addEventListener('change', (e) => {
-    current.startWithConnect = (e.target as HTMLInputElement).checked;
-    saveSettings(current);
-  });
   document.querySelector<HTMLSelectElement>('#set-close-behavior')?.addEventListener('change', (e) => {
     const select = e.target as HTMLSelectElement;
     const requested = select.value as Settings['closeBehavior'];
@@ -436,13 +418,22 @@ function bindControls(): void {
       }
     })();
   });
-  document.querySelector<HTMLInputElement>('#set-enter-send')?.addEventListener('change', (e) => {
-    current.enterToSend = (e.target as HTMLInputElement).checked;
-    saveSettings(current);
-  });
-  document.querySelector<HTMLInputElement>('#set-streaming')?.addEventListener('change', (e) => {
-    current.streaming = (e.target as HTMLInputElement).checked;
-    saveSettings(current);
+  document.querySelector<HTMLInputElement>('#set-strict-security')?.addEventListener('change', (e) => {
+    const checkbox = e.target as HTMLInputElement;
+    const previous = !checkbox.checked;
+    void (async (): Promise<void> => {
+      try {
+        const result = await window.Crew?.setStrictSecurityEnabled?.(checkbox.checked);
+        if (!result || typeof result.strictSecurityEnabled !== 'boolean') {
+          throw new Error('invalid strict security preference');
+        }
+        checkbox.checked = result.strictSecurityEnabled;
+        notify(result.strictSecurityEnabled ? '已开启严格安全约束，网关正在重启以应用' : '已启用兼容模式，网关正在重启以应用');
+      } catch {
+        checkbox.checked = previous;
+        notify('安全策略设置失败');
+      }
+    })();
   });
   document.querySelector<HTMLInputElement>('#set-inspector-open')?.addEventListener('change', (e) => {
     current.inspectorOpen = (e.target as HTMLInputElement).checked;
@@ -466,6 +457,7 @@ function bindControls(): void {
   });
 
   document.getElementById('set-export-sessions')?.addEventListener('click', async () => {
+    if (!requireRendererLogin()) return;
     const btn = document.getElementById('set-export-sessions') as HTMLButtonElement | null;
     if (btn) btn.disabled = true;
     try {
@@ -514,7 +506,8 @@ function bindControls(): void {
     current = { ...DEFAULT_SETTINGS };
     saveSettings(current);
     applyAll();
-    // Remove inline font-size variables so variables.css defaults take effect.
+    // Ensure no stale inline font-size tokens survive a reset.
+    // A reset removes the runtime override so tokens.css defaults apply again.
     resetFontSizeCssVars();
     applyFontSizes(current);
     syncControlsToState();
@@ -522,7 +515,7 @@ function bindControls(): void {
   });
 }
 
-function bindFontRange(id: string, key: 'uiFontSize' | 'contentFontSize' | 'editorFontSize' | 'terminalFontSize'): void {
+function bindFontRange(id: string, key: 'uiFontSize' | 'contentFontSize' | 'terminalFontSize'): void {
   const range = document.querySelector<HTMLInputElement>(`#${id}`);
   range?.addEventListener('input', (e) => {
     current[key] = Number((e.target as HTMLInputElement).value);
@@ -532,15 +525,6 @@ function bindFontRange(id: string, key: 'uiFontSize' | 'contentFontSize' | 'edit
 }
 
 function bindSettingsNav(): void {
-  document.querySelectorAll<HTMLElement>('.set-v2-nav__item').forEach((el) => {
-    el.addEventListener('click', () => {
-      const pane = el.getAttribute('data-settings-pane');
-      if (pane) {
-        setActivePane(pane);
-        onSettingsPaneOpened(pane);
-      }
-    });
-  });
   document.querySelectorAll<HTMLElement>('[data-settings-pane].set-v2-link-item--btn').forEach((el) => {
     el.addEventListener('click', () => {
       const pane = el.getAttribute('data-settings-pane');
@@ -579,42 +563,51 @@ function onSettingsPaneOpened(pane: string): void {
   if (pane === 'mcp') {
     void import('./settings-mcp').then((m) => void m.bindMcpPane());
   }
+  if (pane === 'work') {
+    const workPane = document.getElementById('settings-pane-work');
+    if (workPane) void import('./work/settings').then((module) => void module.renderWorkSettings(workPane));
+  }
 }
 
 export function bindSettingsUi(): void {
+  mountSettingsDataPanes();
+  mountSettingsShell();
   $('#settings-btn')?.addEventListener('click', openSettingsModal);
-  document.getElementById('settings-modal-close')?.addEventListener('click', closeSettingsModal);
-  document.getElementById('settings-modal')?.addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) closeSettingsModal();
-  });
   bindSettingsNav();
   bindSettingsLibraryUi();
+  bindContactModal();
+  window.addEventListener('pagehide', disposeSettingsLibraryPane, { once: true });
   bindSessionPreviewModal();
-  bindHelpDocModal();
   bindControls();
-  setActivePane('general');
-  window.addEventListener('settings:open-projects', () => openProjectsPane());
+  setActivePane('account');
   // 启动时应用持久化的设置
   applyAll();
   void syncAutoStartFromSystem();
   void syncCloseBehaviorFromMain();
+  void syncStrictSecurityFromMain();
   systemThemeMedia?.addEventListener('change', () => {
     if (current.themeMode === 'system') applyTheme('system');
   });
 
-  document.getElementById('set-link-docs')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    openHelpDocModal();
+  // 关于页链接
+  document.getElementById('set-view-changelog')?.addEventListener('click', () => notify('版本日志功能即将上线'));
+  ['set-link-official', 'set-link-opensource'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('click', (e) => {
+      e.preventDefault();
+      notify('链接功能即将上线');
+    });
+  });
+  document.getElementById('set-link-docs')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    openHelpDoc(event.currentTarget as HTMLElement);
+  });
+  document.getElementById('set-link-contact')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    openContactModal();
   });
 
 }
 
 export function getSettings(): Settings {
   return current;
-}
-
-function openProjectsPane(): void {
-  openSettingsModal();
-  setActivePane('projects');
-  onSettingsPaneOpened('projects');
 }

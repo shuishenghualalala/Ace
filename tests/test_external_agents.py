@@ -61,11 +61,25 @@ from crew.agent.external.runtime_adapter import (
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
 from crew.gateway.helpers import role_markdown, suggest_role_description, with_session_agent_labels
+from crew.security.launch import ProcessLaunch, current_process_launch
+from crew.security.models import PermissionProfile, PermissionProfileKind
 from crew.state.config import Config
 from crew.team.formation import build_agent_profile, fast_team_suggestion
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, all_role_public_payloads
 from crew.team.workspace_guard import classify_external_permission
 from crew.tools.registry import Registry
+
+
+@pytest.fixture(autouse=True)
+def _host_process_launch_for_external_adapter_tests():
+    """测试显式声明兼容模式的宿主执行边界。"""
+    token = current_process_launch.set(
+        ProcessLaunch(PermissionProfile(PermissionProfileKind.DISABLED))
+    )
+    try:
+        yield
+    finally:
+        current_process_launch.reset(token)
 
 
 def test_external_runtime_env_inherits_owner_settings_and_blocks_crew_credentials(monkeypatch):

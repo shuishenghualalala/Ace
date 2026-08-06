@@ -1,0 +1,192 @@
+/* Turn file summary and Diff entry owner. Inspector Diff body migrates in C8. */
+.mw-turn-files {
+  overflow: hidden;
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-bg-surface);
+}
+
+.mw-turn-files__header {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: var(--mw-space-2);
+  padding: 0 var(--mw-space-2) 0 var(--mw-space-3);
+  border-bottom: 1px solid var(--mw-border-subtle);
+}
+
+.mw-turn-files .msg__file-changes__lead {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-2) 0;
+  border: 0;
+  background: transparent;
+  color: var(--mw-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mw-turn-files .msg__file-changes__title {
+  overflow: hidden;
+  font-size: var(--mw-type-compact-size);
+  font-weight: var(--mw-type-item-weight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mw-turn-files .msg__file-changes__stats,
+.mw-turn-files .msg__file-changes__badges {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--mw-space-2);
+  font: var(--mw-type-label-weight) var(--mw-type-caption-size) / var(--mw-type-caption-line) var(--mw-font-mono);
+}
+
+.mw-turn-files .msg__file-changes__stat--add,
+.mw-turn-files .msg__file-changes__badge--add {
+  color: var(--mw-status-success);
+}
+
+.mw-turn-files .msg__file-changes__stat--del,
+.mw-turn-files .msg__file-changes__badge--del {
+  color: var(--mw-status-danger);
+}
+
+.mw-turn-files .msg__file-changes__review,
+.mw-turn-files .msg__file-changes__more-btn {
+  min-height: 28px;
+  padding: var(--mw-space-1) var(--mw-space-2);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-caption-size);
+  cursor: pointer;
+}
+
+.mw-turn-files .msg__file-changes__review:hover,
+.mw-turn-files .msg__file-changes__more-btn:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.mw-turn-files__list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mw-turn-files__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  padding: 0 var(--mw-space-2) 0 var(--mw-space-3);
+  border-bottom: 1px solid var(--mw-border-subtle);
+}
+
+.mw-turn-files__item:last-child {
+  border-bottom: 0;
+}
+
+.mw-turn-files__row {
+  display: flex;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  gap: var(--mw-space-3);
+  padding: var(--mw-space-1) 0;
+  border: 0;
+  background: transparent;
+  color: var(--mw-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mw-turn-files__row:hover {
+  color: var(--mw-text-link);
+}
+
+.mw-turn-files .msg__file-changes__path {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+}
+
+.mw-turn-files .msg__file-changes__dir {
+  overflow: hidden;
+  color: var(--mw-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mw-turn-files .msg__file-changes__name {
+  flex-shrink: 0;
+  font-weight: var(--mw-type-label-weight);
+}
+
+.mw-turn-files .msg__file-changes__badge--status {
+  padding: var(--mw-space-1) var(--mw-space-1);
+  border-radius: var(--mw-radius-full);
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-secondary);
+  font-family: var(--mw-font-sans);
+}
+
+.mw-turn-files .msg__file-changes__badge--added {
+  background: var(--mw-status-success-bg);
+  color: var(--mw-status-success);
+}
+
+.mw-turn-files .msg__file-changes__badge--deleted,
+.mw-turn-files .msg__file-changes__badge--unavailable {
+  background: var(--mw-status-danger-bg);
+  color: var(--mw-status-danger);
+}
+
+.mw-turn-files .msg__file-changes__badge--binary,
+.mw-turn-files .msg__file-changes__badge--renamed {
+  background: var(--mw-status-info-bg);
+  color: var(--mw-status-info);
+}
+
+.mw-turn-files .msg__file-changes__reveal {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-muted);
+  cursor: pointer;
+}
+
+.mw-turn-files .msg__file-changes__reveal:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.mw-turn-files .msg__file-changes__reveal:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.mw-turn-files .msg__file-changes__lead:focus-visible,
+.mw-turn-files .msg__file-changes__review:focus-visible,
+.mw-turn-files .msg__file-changes__row:focus-visible,
+.mw-turn-files .msg__file-changes__reveal:focus-visible,
+.mw-turn-files .msg__file-changes__more-btn:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: 2px;
+}
+
+.mw-turn-files .msg__file-changes__more-btn {
+  margin: var(--mw-space-2) var(--mw-space-3);
+  justify-self: start;
+}

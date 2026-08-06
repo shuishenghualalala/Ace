@@ -184,7 +184,7 @@ describe('协作看板 HTML', () => {
     expect(html).toContain('Team Flow');
     expect(html).toContain('团队 DAG 工作流');
     expect(html).toContain('Crew');
-    expect(html).toContain('href="./crew-ui-symbols.svg#avatar-headphones"');
+    expect(html).toContain('href="#avatar-headphones"');
     expect(html).not.toContain('assistant.png');
     expect(html).not.toContain('Crew 内置智能体');
     expect(html).toContain('Leader 统筹团队协作，负责项目计划与验收把关');

@@ -2,7 +2,10 @@
  * 设置 → 项目与会话：折叠面板，同时展示工作空间与归档会话。
  */
 
-import { renderSettingsProjectsPage } from './settings-projects';
+import {
+  disposeSettingsProjectsPage,
+  renderSettingsProjectsPage,
+} from './settings-projects';
 import { renderSettingsSessionsPage } from './settings-sessions';
 
 export type LibrarySection = 'projects' | 'sessions';
@@ -51,6 +54,11 @@ export async function refreshSettingsLibraryIfVisible(): Promise<void> {
 export async function renderSettingsLibraryPane(): Promise<void> {
   applyStoredAccordionState();
   await Promise.all([renderSettingsProjectsPage(), renderSettingsSessionsPage()]);
+}
+
+/** Releases Settings library owners when the modal closes or the page unloads. */
+export function disposeSettingsLibraryPane(): void {
+  disposeSettingsProjectsPage();
 }
 
 /** 绑定折叠面板交互。 */
