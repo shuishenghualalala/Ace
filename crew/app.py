@@ -35,6 +35,11 @@ from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
+from crew.security.approvals import ApprovalManager
+from crew.security.audit import SQLiteSecurityAudit
+from crew.security.grants import GrantRegistry
+from crew.security.rule_store import SQLiteRuleStore
+from crew.security.service import SecurityApprovalService
 from crew.state.config import (
     Config,
     ModelProfile,
@@ -371,6 +376,17 @@ class CrewApp:
         self.workspace_store = workspace_store
         self.memory = memory
         self.plugins = plugins
+        self.security_grants = GrantRegistry()
+        self.security_approvals = ApprovalManager(self.security_grants)
+        self.security_rules = SQLiteRuleStore(config.db_path, wal_enabled=config.sqlite_wal)
+        self.security_audit = SQLiteSecurityAudit(config.db_path, wal_enabled=config.sqlite_wal)
+        self.security_service = SecurityApprovalService(
+            self.security_approvals,
+            self.security_grants,
+            self.security_rules,
+            self.security_audit,
+            db_path=config.db_path,
+        )
         # Gateway 级单活登录事实源；HTTP/WS、Cron 与渠道只消费这一份租约。
         self.active_owner = ActiveOwnerLeaseStore(
             config.db_path,
@@ -413,6 +429,8 @@ class CrewApp:
         self.team = None
         # Dynamic Kanban 管理器延迟装配（见 build_app）
         self.dynamic_kanban = None
+        # Work 业务域组合服务（由 build_app 装配；不进入 core）。
+        self.work_service = None
         self.channel_bindings = None
         # 用户级插件开关偏好（由 build_app 装配后赋值）
         self.plugin_prefs = None
@@ -743,14 +761,20 @@ class CrewApp:
             if external_agent_id and not str(executor_config.get("external_agent_id") or "").strip():
                 executor_config["external_agent_id"] = external_agent_id
 
-        user_type = str(resolved.get("user_type") or cfg.access_control.user_type).strip().lower()
-        if user_type not in ("external", "internal"):
-            user_type = cfg.access_control.user_type
-        ac = cfg.access_control.resolve_for(user_type)
         # 显式参数优先；仅在调用方未传时回退 ContextVar（兼容直接测 _make_agent 的旧路径）
         from crew.core.runctx import current_owner_account_id
 
         owner = str(owner_account_id or current_owner_account_id.get() or "").strip()
+        requested_user_type = str(resolved.get("user_type") or "").strip().lower()
+        resolver = getattr(cfg.access_control, "user_type_for_owner", None)
+        user_type = (
+            resolver(owner, requested=requested_user_type)
+            if callable(resolver)
+            else requested_user_type or cfg.access_control.user_type
+        )
+        if user_type not in ("external", "internal"):
+            user_type = cfg.access_control.user_type
+        ac = cfg.access_control.resolve_for(user_type)
         owner_profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         # 先选出最终 profile 再创建客户端，避免 Owner 默认模型随后被 session
         # 覆盖时遗留一个无人持有的连接池。没有动态 profile 才借用 App 全局 Provider。
@@ -1423,6 +1447,11 @@ class CrewApp:
         except Exception:  # noqa: BLE001
             log.exception("后台进程崩溃恢复失败")
         await self.tasks.start()
+        if self.work_service is not None:
+            try:
+                await self.work_service.start()
+            except Exception:  # noqa: BLE001
+                log.exception("WorkService 启动失败")
         if self.browser_manager is not None:
             try:
                 await self.browser_manager.startup()
@@ -1613,6 +1642,11 @@ class CrewApp:
         await self.dispatcher.shutdown()
         if self.cron_service is not None:
             await self.cron_service.stop()
+        if self.work_service is not None:
+            try:
+                await self.work_service.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("WorkService 停止失败")
         if getattr(self, "sites", None) is not None:
             await self.sites.stop()
         # One-shot Subagents own dynamic providers and must finish their finally blocks
@@ -1647,6 +1681,10 @@ class CrewApp:
         if bindings is not None and hasattr(bindings, "close"):
             bindings.close()
         self.active_owner.close()
+        if self.work_service is not None:
+            self.work_service.close()
+        self.security_rules.close()
+        self.security_audit.close()
 
     async def reload_mcp_manager(self) -> None:
         """热重载 MCPClientManager：关闭现有连接并用当前 config.mcp_servers 重新启动。
@@ -2341,6 +2379,23 @@ class CrewApp:
             token = current_push_fn.set(_push_for_owner)
         try:
             self._enrich_workspace(envelope)
+            from crew.security.context import build_gateway_security_context
+            from crew.security.launch import compile_process_launch
+
+            security_context = build_gateway_security_context(
+                self.workspace_store,
+                owner_account_id=envelope.user_id,
+                workspace_id=envelope.workspace_id,
+                session_id=envelope.session_id,
+                task_id=str(envelope.params.get("task_id") or ""),
+                request_id=envelope.request_id,
+                cwd=envelope.params.get("workspace_root_path") or None,
+            )
+            envelope.params["_security_process_launch"] = compile_process_launch(
+                security_context,
+                self.security_service.mode_for(security_context),
+                db_path=self.security_service.db_path,
+            )
             config_session_id = str(envelope.params.get("task_session_id") or envelope.session_id)
             if not getattr(self.config, "external_agents_enabled", True):
                 agent_config = self._session_agent_config(
@@ -2473,7 +2528,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     ac = cfg.access_control.resolve_for()
 
     registry = Registry()
-    register_builtin_tools(registry)
 
     session_store = SQLiteSessionStore(cfg.db_path)
     workspace_store = SQLiteWorkspaceStore(cfg.db_path)
@@ -2510,6 +2564,11 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     cfg.apply_platform_config_bridges(platform_registry.all_entries())
 
     app = CrewApp(cfg, provider, registry, session_store, workspace_store, memory, plugins)
+    register_builtin_tools(
+        registry,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
     from crew.sites import SQLiteSiteStore, SiteManager
     from crew.tools.blueprint_tools import register_blueprint_tools
     from crew.tools.site_tools import register_site_tools
@@ -2591,6 +2650,52 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         app.wiki_manager,
         config=cfg.wiki,
         session_store=session_store,
+    )
+
+    from crew.work.briefs import WorkBriefStore
+    from crew.work.items import WorkItemStore
+    from crew.work.knowledge import WorkKnowledgeStore
+    from crew.work.preferences import WorkPreferenceStore
+    from crew.work.references import WorkReferenceStore
+    from crew.work.service import LLMPreferenceExtractor, WorkService
+    from crew.work.settings import WorkSettingsStore
+    from crew.work.sources import WorkSourceStore
+    from crew.work.templates import WorkTemplateStore
+
+    async def _notify_work_owner(owner_account_id: str, payload: dict[str, Any]) -> None:
+        if app._notify_owner_fn is not None:
+            await app._notify_owner_fn(owner_account_id, payload)
+
+    app.work_service = WorkService(
+        references=WorkReferenceStore(
+            cfg.db_path,
+            session_store=session_store,
+            wal_enabled=cfg.sqlite_wal,
+        ),
+        preferences=WorkPreferenceStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        items=WorkItemStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        sources=WorkSourceStore(
+            cfg.db_path,
+            approved_source_keys=set(),
+            adapters={},
+            wal_enabled=cfg.sqlite_wal,
+        ),
+        briefs=WorkBriefStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        settings=WorkSettingsStore(
+            cfg.db_path,
+            workspace_store=workspace_store,
+            wal_enabled=cfg.sqlite_wal,
+        ),
+        templates=WorkTemplateStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        knowledge=WorkKnowledgeStore(
+            cfg.db_path,
+            wiki_store=app._wiki_store,
+            wal_enabled=cfg.sqlite_wal,
+        ),
+        session_store=session_store,
+        workspace_store=workspace_store,
+        preference_extractor=LLMPreferenceExtractor(provider),
+        preference_notifier=_notify_work_owner,
     )
 
     # subagent：预设注册表 + delegate_task / run_agent / collect_subagent（toolset='subagent'）

@@ -9,6 +9,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { createPublicKey, verify } from 'crypto';
 
 /** PE 可执行文件 magic（前 2 字节 `MZ`）。 */
 const EXE_MAGIC = Buffer.from('MZ', 'ascii');
@@ -27,6 +28,10 @@ export function packageKindFromPath(filePath: string): PackageKind {
 export interface IntegrityResult {
   ok: boolean;
   message?: string;
+}
+
+export function configuredUpdatePublicKey(): string {
+  return String(process.env['ACE_UPDATE_PUBLIC_KEY'] ?? '').trim();
 }
 
 /**
@@ -70,4 +75,32 @@ export function verifyPackageIntegrity(filePath: string, expectedSize: number): 
     ok: false,
     message: kind === 'exe' ? '安装包不是有效的 Windows 程序（缺少 MZ 头）' : '安装包不是有效的 deb 归档（缺少 !<arch> 头）',
   };
+}
+
+/** Verify a detached base64 Ed25519 signature against the exact package bytes. */
+export function verifyPackageSignature(
+  filePath: string,
+  signaturePath: string,
+  publicKeyValue: string,
+): IntegrityResult {
+  try {
+    const publicKey = publicKeyValue.includes('BEGIN PUBLIC KEY')
+      ? createPublicKey(publicKeyValue)
+      : createPublicKey({
+          key: Buffer.from(publicKeyValue, 'base64'),
+          format: 'der',
+          type: 'spki',
+        });
+    const signatureText = fs.readFileSync(signaturePath, 'utf8').trim();
+    const signature = Buffer.from(signatureText, 'base64');
+    if (!signatureText || signature.length === 0) {
+      return { ok: false, message: '更新包签名为空' };
+    }
+    const valid = verify(null, fs.readFileSync(filePath), publicKey, signature);
+    return valid
+      ? { ok: true }
+      : { ok: false, message: '更新包签名无效，文件可能已被篡改' };
+  } catch (error) {
+    return { ok: false, message: `更新包签名校验失败：${(error as Error).message}` };
+  }
 }

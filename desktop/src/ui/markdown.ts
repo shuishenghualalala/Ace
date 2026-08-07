@@ -1,7 +1,7 @@
 /**
  * Markdown → HTML 渲染（assistant 气泡正文专用）。
  *
- * 实现：micromark + GFM + 数学公式扩展。
+ * 实现：micromark + GFM + 数学公式扩展（与 hermes-agent/apps/desktop 同栈），旧的正则实现已整体废弃。
  *  - 支持完整 GFM：blockquote、有序列表、嵌套列表、删除线、任务列表、autolink、表格。
  *  - 支持数学公式：inline `$E=mc^2$` 和 block `$$...$$`，由 micromark-extension-math + KaTeX 渲染。
  *    KaTeX 输出 MathML + HTML span 结构，需要引入 katex.css 才能正确排版。

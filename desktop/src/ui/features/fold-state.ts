@@ -1,7 +1,8 @@
 /**
  * 折叠状态管理：回合级 + 工具卡片级，localStorage 持久化（跨重启保留）。
  *
- * 按 disclosure ID 记录用户的开/合选择，跨会话保留，不被流式重建冲掉。
+ * 设计参考：hermes-agent/apps/desktop/src/store/tool-view.ts 的 `$toolDisclosureStates`——
+ * 按「 disclosure ID 」记录用户的开/合选择，跨会话保留，不被流式重建冲掉。
  *
  * 与现有 state.userFoldedTurns / userUnfoldedTurns 的关系：
  *  - 回合级：仍由 state 那两个 Set 作为「当前会话内」的快速读路径；
@@ -131,7 +132,7 @@ export function hydrateTurnFoldFromStorage(
 // ---------- 工具卡片级 ----------
 
 /**
- * 工具卡片折叠键：与 Crew 的 `tool-entry:${messageId}:${toolPartId}` 同构。
+ * 工具卡片折叠键：与 hermes 的 `tool-entry:${messageId}:${toolPartId}` 同构。
  * 这里用 message id + toolCallId，跨重启后 message id 仍由历史回放稳定生成。
  */
 export function toolFoldKey(messageId: string, toolCallId: string): string {

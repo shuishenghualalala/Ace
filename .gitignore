@@ -5,6 +5,7 @@ CLAUDE.md
 .git-commands.md
 CONTEXT.md
 .codebase-memory/
+.codex-quarantine/
 
 # Runtime data and user-generated content
 .crew/
@@ -17,6 +18,19 @@ CONTEXT.md
 *.pid
 *.pid.lock
 *.tmp
+
+# Local runtime databases and credential material. Source fixtures should use
+# text/JSON so they remain reviewable and cannot be mistaken for user state.
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+*.credentials
 
 # Environment files and local credentials
 .env
@@ -44,12 +58,14 @@ coverage/
 htmlcov/
 build/
 dist/
+/security-runtime/target/
 
 # Node, Vite, and Electron output
 **/node_modules/
 web/dist/
 desktop/dist/
 desktop/release/
+desktop/security-runtime-bin/
 # Playwright-managed Chromium 已整体移除（运行时用 Electron 自带的 Chromium）。
 # 这个目录若还在本机（历史遗留约 500MB），整个忽略，绝不入 git。可安全删除。
 desktop/playwright-browsers/

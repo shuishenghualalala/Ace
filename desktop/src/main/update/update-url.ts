@@ -2,20 +2,19 @@
  * 客户端按 OS 拼接更新包下载 URL（不改服务端）。
  *
  * 服务端心跳只回 `version`；本机据此 + 当前系统选模板拼出下载地址：
- *   Windows → {base}/Crew_Setup_v{ver}.exe              （Inno Setup）
- *   Linux   → {base}/crew-desktop_{ver}_amd64.deb       （UOS / 麒麟 / 标准 Debian 共用同一 deb）
+ *   Windows → {base}/Crew_Setup_v{ver}.exe   （Inno Setup，见 deb-package/pack_exe.ps1）
+ *   Linux   → {base}/crew-desktop_{ver}_amd64.deb     （UOS / 麒麟 / 标准 Debian 共用同一 deb）
  *   macOS   → {base}/crew-desktop_{ver}_arm64.dmg       （仅 Apple Silicon）
  *
- * base 取自环境变量 `CREW_DOWNLOAD_BASE_URL`，缺省为 GitHub Releases。
+ * base 取自环境变量 `ACE_DOWNLOAD_BASE_URL`；开源版缺省为空，避免指向内部下载站。
  * 纯函数模块（不 import electron），便于单测。
  */
 
-/** 生产环境更新包下载站。 */
-export const DEFAULT_DOWNLOAD_BASE_URL =
-  'https://github.com/shuishenghualalala/Ace/releases/latest/download/';
+/** 更新包下载站。开源版未配置发布源，留空以禁用自动下载（后续可注入 GitHub Releases 等）。 */
+export const DEFAULT_DOWNLOAD_BASE_URL = '';
 
 export function downloadBaseUrl(): string {
-  const fromEnv = process.env['CREW_DOWNLOAD_BASE_URL']?.trim();
+  const fromEnv = process.env['ACE_DOWNLOAD_BASE_URL']?.trim();
   if (fromEnv) return fromEnv.endsWith('/') ? fromEnv : `${fromEnv}/`;
   return DEFAULT_DOWNLOAD_BASE_URL;
 }

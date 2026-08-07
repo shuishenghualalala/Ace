@@ -159,6 +159,14 @@ def test_permission_session_allow_overrides():
     assert cfg.check("terminal", "git push", session_id="s1")[0] == "allow"
 
 
+def test_check_permission_default_behavior_is_forwarded_and_invalid_is_denied():
+    cfg = PermissionConfig()
+    assert check_permission("terminal", {"command": "echo ok"}, config=cfg, default_behavior="ask")[0] == "ask"
+    assert check_permission("terminal", {"command": "echo ok"}, config=cfg, default_behavior="deny")[0] == "deny"
+    assert check_permission("terminal", {"command": "echo ok"}, config=cfg, default_behavior="unexpected")[0] == "deny"
+    assert check_permission("terminal", {"command": "echo ok"}, config=cfg, default_behavior=[])[0] == "deny"
+
+
 def test_extract_match_key_by_tool():
     assert extract_match_key("terminal", {"command": "ls"}) == "ls"
     assert extract_match_key("file_write", {"path": "/x"}) == "/x"

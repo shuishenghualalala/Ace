@@ -1,7 +1,8 @@
 /**
  * 后端历史 → 前端 ChatMessage 的纯映射（无 DOM / 无副作用）。
- * 包含 makeSessionTitle / guessAttachmentType / parseAttachmentMarkers /
- * mapBackendHistoryItem 等无副作用转换。
+ *
+ * 从 ui/index.ts 抽出（X2）：guessAttachmentType / parseAttachmentMarkers /
+ * mapBackendHistoryItem 原样搬迁，行为等价。
  */
 
 import {

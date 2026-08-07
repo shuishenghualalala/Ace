@@ -8,6 +8,8 @@
  * 注意：本模块是纯几何工具，不含任何业务/补全逻辑，可独立单测。
  */
 
+import { setRuntimeStyle } from '../components/runtime-style';
+
 /** 需要 1:1 复制以保证换行一致的「文本 + 盒模型」计算属性（camelCase）。 */
 const COPIED_STYLE_PROPS = [
   'fontFamily',
@@ -41,12 +43,11 @@ const COPIED_STYLE_PROPS = [
 export function copyTextareaStyle(src: HTMLTextAreaElement, target: HTMLElement): void {
   const cs = getComputedStyle(src);
   const srcRec = cs as unknown as Record<string, string>;
-  const dst = target.style as unknown as Record<string, string>;
-  for (const prop of COPIED_STYLE_PROPS) dst[prop] = srcRec[prop];
-  target.style.whiteSpace = 'pre-wrap';
-  target.style.wordWrap = 'break-word';
-  target.style.overflowWrap = 'break-word';
-  target.style.width = `${src.clientWidth}px`;
+  for (const prop of COPIED_STYLE_PROPS) setRuntimeStyle(target, prop, srcRec[prop]);
+  setRuntimeStyle(target, 'whiteSpace', 'pre-wrap');
+  setRuntimeStyle(target, 'wordWrap', 'break-word');
+  setRuntimeStyle(target, 'overflowWrap', 'break-word');
+  setRuntimeStyle(target, 'width', `${src.clientWidth}px`);
 }
 
 let caretMirror: HTMLDivElement | null = null;
@@ -56,13 +57,13 @@ function getCaretMirror(): HTMLDivElement {
   if (!caretMirror) {
     caretMirror = document.createElement('div');
     caretMirror.setAttribute('aria-hidden', 'true');
-    caretMirror.style.position = 'absolute';
-    caretMirror.style.visibility = 'hidden';
+    setRuntimeStyle(caretMirror, 'position', 'absolute');
+    setRuntimeStyle(caretMirror, 'visibility', 'hidden');
     caretMarkerStyleFallback(caretMirror);
-    caretMirror.style.top = '0';
-    caretMirror.style.left = '0';
-    caretMirror.style.pointerEvents = 'none';
-    caretMirror.style.zIndex = '-1';
+    setRuntimeStyle(caretMirror, 'top', '0');
+    setRuntimeStyle(caretMirror, 'left', '0');
+    setRuntimeStyle(caretMirror, 'pointerEvents', 'none');
+    setRuntimeStyle(caretMirror, 'zIndex', '-1');
     document.body.appendChild(caretMirror);
   }
   return caretMirror;
@@ -70,8 +71,8 @@ function getCaretMirror(): HTMLDivElement {
 
 /** 兜底：visibility:hidden 时部分浏览器仍渲染空白，叠加 0 尺寸避免影响布局。 */
 function caretMarkerStyleFallback(el: HTMLElement): void {
-  el.style.height = '0';
-  el.style.overflow = 'hidden';
+  setRuntimeStyle(el, 'height', '0');
+  setRuntimeStyle(el, 'overflow', 'hidden');
 }
 
 export interface CaretCoords {

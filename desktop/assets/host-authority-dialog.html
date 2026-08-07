@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src 'self'; img-src 'self'; navigate-to 'self'"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="./styles/index.css" />
+  <title>安装 CUA Driver</title>
+</head>
+<body class="host-authority-page">
+  <main class="host-authority-dialog" role="dialog" aria-modal="true" aria-labelledby="host-authority-title">
+    <div class="host-authority-dialog__symbol" aria-hidden="true">!</div>
+    <div class="host-authority-dialog__copy">
+      <p class="host-authority-dialog__eyebrow">设备安装授权</p>
+      <h1 id="host-authority-title">安装并启动 CUA Driver？</h1>
+      <p>Crew 将下载并执行官方安装程序，可能修改本机配置。仅在你主动发起安装时继续。</p>
+      <p class="host-authority-dialog__note">取消不会改动设备，也不会影响其他 MCP 服务。</p>
+    </div>
+    <nav class="host-authority-dialog__actions" aria-label="安装确认">
+      <a class="mw-button mw-button--secondary" href="#cancel" autofocus>取消</a>
+      <a class="mw-button mw-button--primary" href="#confirm">继续安装</a>
+    </nav>
+  </main>
+</body>
+</html>

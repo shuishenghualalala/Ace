@@ -453,10 +453,24 @@ class ToolRunner:
                     ensure_ascii=False,
                 )
             return None
-        if not should_block_for_tool_call(tc):
+        from crew.security.settings import strict_security_enabled
+
+        strict = strict_security_enabled()
+        native_gated = strict and tc.name in {
+            "terminal",
+            "file_read",
+            "file_write",
+            "glob",
+            "grep",
+            "patch",
+        }
+        if not native_gated and not should_block_for_tool_call(tc):
             return None  # 只读类工具默认放行，不打扰用户
         behavior, reason, suggested = check_permission(
-            tc.name, tc.arguments, session_id=self.session_id
+            tc.name,
+            tc.arguments,
+            session_id=self.session_id,
+            default_behavior="allow" if native_gated or not strict else "ask",
         )
         if behavior == "allow":
             return None

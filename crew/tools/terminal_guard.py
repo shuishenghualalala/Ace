@@ -1,9 +1,9 @@
-"""终端命令安全检测（采用 tools/approval.py 核心模式）。
+"""终端命令安全检测（对齐 Hermes tools/approval.py 核心模式）。
 
-本模块只保留模式匹配部分，剥离 Crew 的审批状态机、LLM 智能审批、持久化 allowlist 等。
+本模块只保留模式匹配部分，剥离 Hermes 的审批状态机、LLM 智能审批、持久化 allowlist 等。
 Crew 当前策略：
 - hardline：无条件阻止（rm -rf /、mkfs、dd 到块设备、fork bomb、shutdown 等）。
-- dangerous：默认阻止，但调用方传 force=true 可放行（用于用户已确认的场景）。
+- dangerous：返回宿主批准需求；模型参数不能授权。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ _CMDPOS = (
 
 _RE_FLAGS = re.IGNORECASE | re.DOTALL
 
-# 无条件阻止（无论是否 yolo/force）
+# 无条件阻止（任何对话模式和批准均不能覆盖）
 HARDLINE_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*(/|/\*|/ \*)(\s|$)', "recursive delete of root filesystem"),
     (r'\brm\s+(-[^\s]*\s+)*(/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*|/lib64|/lib64/\*)(\s|$)', "recursive delete of system directory"),
@@ -38,6 +38,26 @@ HARDLINE_PATTERNS = [
     (_CMDPOS + r'init\s+[06]\b', "init 0/6 (shutdown/reboot)"),
     (_CMDPOS + r'systemctl\s+(poweroff|reboot|halt|kexec)\b', "systemctl poweroff/reboot"),
     (_CMDPOS + r'telinit\s+[06]\b', "telinit 0/6 (shutdown/reboot)"),
+    # Windows / PowerShell system-destructive commands. These are the direct
+    # equivalents of the Unix hardline set: irreversible volume/disk destruction
+    # and system power state. Refusing them here gives Windows parity with the
+    # Unix ``mkfs``/``dd``/``shutdown`` hardlines instead of leaving PowerShell
+    # exempt just because the regex above was Unix-only.
+    (r'\bformat-volume\b', "format filesystem (Format-Volume)"),
+    (r'\bclear-disk\b', "clear disk (Clear-Disk)"),
+    (r'\bdiskpart\b', "raw disk partition tool (diskpart)"),
+    (r'\bstop-computer\b', "system shutdown (Stop-Computer)"),
+    (r'\brestart-computer\b', "system reboot (Restart-Computer)"),
+    (r'\bshutdown\b[^\n]*\b/[sr]\b', "system shutdown/reboot (shutdown.exe /s|/r)"),
+    (r'\bformat\b[^\n]*[a-z]:[\\/][^\n]*\b/q\b', "format Windows drive (format /q)"),
+    # Recursive delete of a Windows system directory (C:\Windows, Program Files,
+    # System32, Users) — parity with ``rm -rf /``-style Unix hardlines.
+    (r'\bremove-item\b[^\n]*-recurse[^\n]*-force[^\n]*[a-z]:\\(?:windows|program files|users|system32)\b',
+     "recursive delete of Windows system directory (Remove-Item)"),
+    (r'(?:^|[;&|\n])\s*(?:cmd\s+/c\s+)?(?:rd|rmdir)\s+/s\b[^\n]*[a-z]:\\(?:windows|program files|users|system32)?',
+     "recursive delete on Windows system path (rd /s)"),
+    (r'(?:^|[;&|\n])\s*(?:cmd\s+/c\s+)?del\s+/[fs]\b[^\n]*[a-z]:\\(?:windows|program files|users|system32)\b',
+     "recursive delete of Windows system directory (del /s)"),
 ]
 
 HARDLINE_PATTERNS_COMPILED = [
@@ -45,7 +65,7 @@ HARDLINE_PATTERNS_COMPILED = [
     for pattern, description in HARDLINE_PATTERNS
 ]
 
-# 危险但可通过 force=true 放行
+# 危险且需要宿主批准
 DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
@@ -75,6 +95,17 @@ DANGEROUS_PATTERNS = [
     (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
     (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
     (r'\bgit\s+branch\s+-D\b', "git branch force delete"),
+    # Windows / PowerShell dangerous actions that need host approval — parity with
+    # the Unix dangerous set (recursive delete, shell -c, remote-pipe-to-shell).
+    (r'\bremove-item\b[^\n]*-recurse[^\n]*-force', "recursive force delete (Remove-Item -Recurse -Force)"),
+    (r'(?:^|[;&|\n])\s*(?:cmd\s+/c\s+)?(?:rd|rmdir)\s+/s\b', "recursive directory delete (rd /s)"),
+    (r'(?:^|[;&|\n])\s*(?:cmd\s+/c\s+)?del\s+/s\b', "recursive delete (del /s)"),
+    (r'\b(?:invoke-expression|iex)\b\s', "PowerShell Invoke-Expression (arbitrary code)"),
+    (r'\b(?:irm|invoke-restmethod|iwr|invoke-webrequest)\b[^\n]*\|\s*(?:iex|invoke-expression)\b',
+     "pipe remote content to Invoke-Expression"),
+    (r'\bset-executionpolicy\b', "change PowerShell execution policy"),
+    (r'\bstart-process\b[^\n]*-verb\s+runas', "elevated process spawn (Start-Process -Verb RunAs)"),
+    (r'(?:^|[;&|\n])\s*cmd\s+/c\b', "arbitrary command via cmd /c"),
 ]
 
 DANGEROUS_PATTERNS_COMPILED = [
@@ -103,7 +134,7 @@ def detect_hardline_command(command: str) -> tuple[bool, str | None]:
 
 
 def detect_dangerous_command(command: str) -> tuple[bool, str | None]:
-    """检查命令是否命中危险模式（可通过 force 放行）。"""
+    """检查命令是否命中需要宿主批准的危险模式。"""
     normalized = _normalize_command(command).lower()
     for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
         if pattern_re.search(normalized):

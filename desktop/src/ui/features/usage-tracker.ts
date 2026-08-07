@@ -39,7 +39,7 @@ export interface UsageRecord {
   durationMs: number;     // 来自 state.messages[].turnDurationMs
   firstTokenMs?: number | undefined;  // 首字延迟（来自 tracker 内部时间戳）
   status: number;         // 200 / 4xx / 5xx
-  source: string;         // 'session_log' 等数据来源
+  source: string;         // 'session_log' / 'expert' / 'skills' ...
   edited: boolean;        // 是否被用户在编辑面板手动改过
   /** 本条 token 数字是否来自 Provider API 真实返回值（而非字符估算） */
   fromProvider: boolean;
@@ -94,8 +94,19 @@ export interface TrendPoint {
 
 const MAX_RECORDS = 500;
 
+/**
+ * localStorage key 按当前登录账号 staffCode 分桶，实现多账号隔离：
+ * 同一台机器切换账号不会看到彼此的用量；登出时只清当前账号的桶。
+ *
+ * key 形如 `Crew.usage.records.v1:<staffCode>`。staffCode 缺失
+ * （未登录 / 旧数据无 staffCode）时落 `__anonymous__` 匿名桶，绝不与
+ * 真实账号混。基础 key 值与 shared/storage-keys.ts 的注册表保持一致。
+ */
+const ANON_BUCKET = '__anonymous__';
+
 function storageKey(): string {
-  return STORAGE_KEYS.usageRecords;
+  const sc = state.userInfo?.staffCode?.trim();
+  return `${STORAGE_KEYS.usageRecords}:${sc || ANON_BUCKET}`;
 }
 
 // 简易订阅：跟踪器被 recordTurn 后通知监听者刷新
@@ -142,7 +153,8 @@ function setAll(next: UsageRecord[]): void {
 }
 
 /**
- * 登录态恢复时调用：丢弃内存缓存，下次重新读取本地记录。
+ * 账号切换 / 登录态恢复时调用：丢弃按旧账号加载的内存缓存，
+ * 下次读取按新 staffCode 重新 load。冷启动恢复、登录成功、切账号都会触发。
  * 极轻量（仅清两个变量），可无条件调用。
  */
 export function resetForAccountChange(): void {
@@ -153,7 +165,8 @@ export function resetForAccountChange(): void {
 }
 
 /**
- * 登出时清掉本地用量记录。
+ * 登出时清掉**当前账号**的本地用量记录（隐私：换人登录看不到上一人数据）。
+ * 必须在 state.userInfo 被清空之前调用——它依赖 staffCode 解析 key。
  */
 export function clearCurrentAccountRecords(): void {
   try {
@@ -252,7 +265,7 @@ export function recordTurn(input: {
     sessionId: sid,
     workspaceId: wsId,
     model,
-    provider: 'session_log',
+    provider: input.source === 'expert' ? 'expert' : 'session_log',
     inputChars: input.inputText.length,
     outputChars: input.outputText.length,
     inputTokens: inTok,
@@ -325,7 +338,7 @@ export function subscribe(fn: Listener): () => void {
  *
  * 两个口径：
  *   - `totalTokens` = 本地所有回合的 (input + output + cache) 之和
- *     （每个 LLM 调用真正消耗的 token）
+ *     （与 CC Switch 的 realTotalTokens 一致：每个 LLM 调用真正消耗的 token）
  *     这是 Hero 主数值。
  *   - `backendTotalTokens` = 后端 /api/usage 的 total_tokens
  *     （每个 session 当前上下文大小累加，是另一回事：会话结束/N 回合后这个值

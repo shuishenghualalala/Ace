@@ -11,13 +11,13 @@
 
 export const STORAGE_KEYS = {
   /** gateway base URL（默认 http://127.0.0.1:8000）。 */
-  gatewayBase: 'crew.gatewayBase',
-  /** 用户自定义团队列表。 */
-  customTeams: 'crew.custom.teams',
+  gatewayBase: 'Crew.gatewayBase',
+  /** 当前登录用户的 userInfo（明文）。 */
+  userInfo: 'Crew.userInfo',
   /** 使用统计的模型定价。 */
-  usagePricing: 'crew.usage.pricing.v1',
-  /** 使用统计的滚动 500 条记录。 */
-  usageRecords: 'crew.usage.records.v1',
+  usagePricing: 'Crew.usage.pricing.v1',
+  /** 使用统计的滚动 500 条记录（按账号 staffCode 分桶，见 usage-tracker）。 */
+  usageRecords: 'Crew.usage.records.v1',
   /** 检查器面板宽度。 */
   inspectorWidth: 'crew.inspector.width',
   /** 设置页偏好。 */
@@ -25,9 +25,9 @@ export const STORAGE_KEYS = {
   /** 历史面板折叠状态。 */
   historyCollapsed: 'crew.history.collapsed',
   /** 反馈草稿。 */
-  feedbackDraft: 'crew.feedbackDraft',
+  feedbackDraft: 'Crew.feedbackDraft',
   /** Desktop 外援中心首次使用引导是否已关闭。 */
-  externalAgentsGuideDismissed: 'crew.externalAgents.guideDismissed.v1',
+  externalAgentsGuideDismissed: 'Crew.externalAgents.guideDismissed.v1',
 } as const;
 
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];

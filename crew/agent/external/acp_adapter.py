@@ -752,6 +752,18 @@ def _format_timeout_error(
 
 
 async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncIterator[AcpStreamEvent]:
+    from crew.security.launch import host_stream_launch_block_reason
+
+    blocked = host_stream_launch_block_reason()
+    if blocked == "security launch context missing":
+        raise AcpAdapterError(
+            "ACP adapter 缺少安全启动上下文：当前运行时未建立 ProcessLaunch（常见于 Team "
+            "委派未继承启动边界）。已拒绝在无明确启动决策时启动宿主进程。"
+        )
+    if blocked:
+        raise AcpAdapterError(
+            "当前 ACP adapter 需要双向长连接，尚未接入 native stdio transport；managed 模式拒绝宿主启动"
+        )
     loop = asyncio.get_running_loop()
     total_started_at = loop.time()
     env = build_external_runtime_env(config.custom_env)

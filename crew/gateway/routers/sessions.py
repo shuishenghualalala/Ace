@@ -20,6 +20,7 @@ from crew.core.types import Message, ToolCall, tool_arguments_for_ui
 from crew.gateway.auth import account_from_request
 from crew.gateway.helpers import require_external_agents_enabled, with_session_agent_labels
 from crew.gateway.hooks import hook_registry
+from crew.security.settings import strict_security_enabled
 from crew.state.session_store import SessionOwnershipError, is_placeholder_title
 from crew.state.team_member_model import (
     TeamMemberModelBindingError,
@@ -1084,6 +1085,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         if not callable(getter):
             return JSONResponse({})
         config = getter(session_id, owner_account_id=owner) or {}
+        if strict_security_enabled():
+            config = {key: value for key, value in config.items() if key != "user_type"}
         if is_external_session_config(config):
             require_external_agents_enabled(crew)
         return JSONResponse(config)
@@ -1093,6 +1096,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         owner = _owner(request)
         raw_config = payload.get("config") if isinstance(payload.get("config"), dict) else payload
         config = {k: v for k, v in raw_config.items() if k not in {"workspace_id", "title"}}
+        if strict_security_enabled():
+            config.pop("user_type", None)
         executor = str(config.get("executor") or "").strip().lower()
         if executor not in {"builtin", "client", "external", "acp", "team"}:
             return JSONResponse(

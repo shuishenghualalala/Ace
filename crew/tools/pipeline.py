@@ -221,12 +221,21 @@ class PermissionConfig:
     def all_rules_for(self, session_id: str) -> list[PermissionRule]:
         return [*self._session_allows.get(session_id, []), *self.rules]
 
-    def check(self, tool_name: str, key: str, session_id: str = "") -> tuple[str, str, str]:
+    def check(
+        self,
+        tool_name: str,
+        key: str,
+        session_id: str = "",
+        *,
+        default_behavior: str = "allow",
+    ) -> tuple[str, str, str]:
         """返回 (behavior, reason, suggested_rule)。
 
-        behavior: ``allow`` | ``deny`` | ``ask`` | ``allow``(默认无规则)
+        behavior: ``allow`` | ``deny`` | ``ask`` | default_behavior（默认无规则）
         suggested_rule: 仅 ask 时给出，供弹窗展示「保存为规则」选项
         """
+        if default_behavior not in ("allow", "deny", "ask"):
+            default_behavior = "deny"
         # session allows 优先（用户本轮已授权），命中即 allow
         for rule in self._session_allows.get(session_id, []):
             if rule.matches(tool_name, key):
@@ -250,8 +259,12 @@ class PermissionConfig:
             return ("ask", matched_ask.reason, _suggest_rule(tool_name, key))
         if matched_allow:
             return ("allow", matched_allow.reason, "")
-        # 无规则：默认 allow（fail-open，因为工具暴露面已由 access_control 收窄）
-        return ("allow", "", "")
+        # 无规则时由调用方决定；未知值在上面已 fail-closed 为 deny。
+        return (
+            default_behavior,
+            "",
+            _suggest_rule(tool_name, key) if default_behavior == "ask" else "",
+        )
 
 
 def _suggest_rule(tool_name: str, key: str) -> str:
@@ -354,11 +367,17 @@ def check_permission(
     *,
     session_id: str = "",
     config: PermissionConfig | None = None,
+    default_behavior: str = "allow",
 ) -> tuple[str, str, str]:
     """Stage 4 权限检查入口。返回 (behavior, reason, suggested_rule)。"""
     cfg = config if config is not None else get_permission_config()
     key = extract_match_key(tool_name, args)
-    return cfg.check(tool_name, key, session_id=session_id)
+    return cfg.check(
+        tool_name,
+        key,
+        session_id=session_id,
+        default_behavior=default_behavior,
+    )
 
 
 def grant_session_allow(

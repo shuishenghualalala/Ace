@@ -1,28 +1,523 @@
 """文件工具公共辅助函数。
 
-本文件从 Crew 的 tools/file_tools.py 和 tools/file_operations.py
+本文件从 Hermes 的 tools/file_tools.py 和 tools/file_operations.py
 复制/改造关键独立函数，用于增强 Crew 的 file_read / file_write / patch / glob / grep。
 """
 
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
+import secrets
+import stat
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from crew.core.runctx import current_agent_workdir
 
 
+class FileConflictError(RuntimeError):
+    """Raised when a structured write target changed after inspection."""
+
+
+@dataclass(frozen=True)
+class FileVersion:
+    path: Path
+    exists: bool
+    device: int = 0
+    inode: int = 0
+    size: int = 0
+    mtime_ns: int = 0
+    digest: str = ""
+    mode: int = 0
+    data: bytes = b""
+
+
+def snapshot_file(path: Path) -> FileVersion:
+    """Capture identity and content hash, rejecting ambiguous hard-link writes."""
+    canonical = _lexical_absolute(path)
+    try:
+        info, data = _read_verified_file(canonical)
+    except FileNotFoundError:
+        return FileVersion(path=canonical, exists=False)
+    return FileVersion(
+        path=canonical,
+        exists=True,
+        device=info.st_dev,
+        inode=info.st_ino,
+        size=info.st_size,
+        mtime_ns=info.st_mtime_ns,
+        digest=hashlib.sha256(data).hexdigest(),
+        mode=info.st_mode,
+        data=data,
+    )
+
+
+def atomic_replace_bytes(path: Path, data: bytes, expected: FileVersion) -> None:
+    """Replace one file in-place only if path identity and content are unchanged."""
+    canonical = _lexical_absolute(path)
+    if canonical != expected.path:
+        raise FileConflictError("文件在写入前已被修改或替换")
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    with _pinned_parent(canonical) as parent_descriptor:
+        match_descriptor = None if os.name == "nt" else parent_descriptor
+        if not _file_version_matches(expected, match_descriptor):
+            raise FileConflictError("文件在原子替换前已被修改或替换")
+        if os.name == "nt":
+            _atomic_replace_windows(canonical, data, expected, parent_descriptor)
+        else:
+            _atomic_replace_posix(canonical.name, data, expected, parent_descriptor)
+
+
+def _atomic_replace_windows(
+    path: Path,
+    data: bytes,
+    expected: FileVersion,
+    parent_handle: int,
+) -> None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    temporary = path.parent / f".{path.name}.{secrets.token_hex(8)}"
+    delete_access = 0x00010000
+    generic_write = 0x40000000
+    share_all = 0x0001 | 0x0002 | 0x0004
+    create_new = 1
+    temporary_attribute = 0x0100
+    invalid_handle = ctypes.c_void_p(-1).value
+    handle = create_file(
+        str(temporary),
+        delete_access | generic_write,
+        share_all,
+        None,
+        create_new,
+        temporary_attribute,
+        None,
+    )
+    if handle == invalid_handle:
+        raise OSError(ctypes.get_last_error(), "无法创建结构化写入临时文件")
+    try:
+        descriptor = msvcrt.open_osfhandle(int(handle), os.O_WRONLY | getattr(os, "O_BINARY", 0))
+    except Exception:
+        close_handle(handle)
+        raise
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if expected.exists:
+            os.chmod(temporary, stat.S_IMODE(expected.mode))
+        if not _file_version_matches(expected, None):
+            raise FileConflictError("文件在原子替换前已被修改或替换")
+        _rename_windows_handle(descriptor, parent_handle, path.name)
+    finally:
+        os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _rename_windows_handle(descriptor: int, parent_handle: int, destination_name: str) -> None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileRenameInformation(ctypes.Structure):
+        _fields_ = [
+            ("ReplaceIfExists", wintypes.BOOLEAN),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", wintypes.WCHAR * len(destination_name)),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [
+            ("StatusOrPointer", ctypes.c_void_p),
+            ("Information", ctypes.c_size_t),
+        ]
+
+    information = FileRenameInformation()
+    information.ReplaceIfExists = True
+    information.RootDirectory = parent_handle
+    information.FileNameLength = len(destination_name.encode("utf-16-le"))
+    information.FileName = destination_name
+    ntdll = ctypes.WinDLL("ntdll")
+    set_information = ntdll.NtSetInformationFile
+    set_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.c_int,
+    ]
+    set_information.restype = ctypes.c_long
+    status_block = IoStatusBlock()
+    status = set_information(
+        msvcrt.get_osfhandle(descriptor),
+        ctypes.byref(status_block),
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        10,  # FileRenameInformation
+    )
+    if status < 0:
+        to_win_error = ntdll.RtlNtStatusToDosError
+        to_win_error.argtypes = [ctypes.c_long]
+        to_win_error.restype = wintypes.ULONG
+        raise OSError(to_win_error(status), "无法以父目录对象替换结构化文件")
+
+
+def _atomic_replace_posix(
+    name: str,
+    data: bytes,
+    expected: FileVersion,
+    parent_descriptor: int,
+) -> None:
+    temporary_name = f".{name}.{secrets.token_hex(8)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_descriptor)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if expected.exists:
+            os.fchmod(descriptor, stat.S_IMODE(expected.mode))
+        if not _file_version_matches(expected, parent_descriptor):
+            raise FileConflictError("文件在原子替换前已被修改或替换")
+        os.replace(
+            temporary_name,
+            name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+    finally:
+        os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            pass
+
+
+def _file_version_matches(expected: FileVersion, parent_descriptor: int | None = None) -> bool:
+    try:
+        info, data = (
+            _read_verified_path(expected.path)
+            if parent_descriptor is None
+            else _read_verified_at(parent_descriptor, expected.path.name)
+        )
+    except FileNotFoundError:
+        return not expected.exists
+    except (FileConflictError, OSError):
+        return False
+    if not expected.exists:
+        return False
+    if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
+        expected.device,
+        expected.inode,
+        expected.size,
+        expected.mtime_ns,
+    ):
+        return False
+    return hashlib.sha256(data).hexdigest() == expected.digest
+
+
+def read_verified_bytes(path: Path, *, max_bytes: int | None = None) -> bytes:
+    """Read one regular, single-link file through the identity-checked handle."""
+
+    if max_bytes is not None and max_bytes < 0:
+        raise ValueError("文件读取上限不能为负数")
+    _info, data = _read_verified_file(_lexical_absolute(path), max_bytes=max_bytes)
+    return data
+
+
+def stat_verified_file(path: Path) -> os.stat_result:
+    """Stat one regular, single-link file through an identity-checked handle."""
+
+    return _stat_verified_file(_lexical_absolute(path))
+
+
+def _read_verified_file(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[os.stat_result, bytes]:
+    with _pinned_parent(path) as parent_descriptor:
+        if os.name == "nt":
+            return _read_verified_path(path, max_bytes=max_bytes)
+        return _read_verified_at(parent_descriptor, path.name, max_bytes=max_bytes)
+
+
+def _stat_verified_file(path: Path) -> os.stat_result:
+    with _pinned_parent(path) as parent_descriptor:
+        if os.name == "nt":
+            return _stat_verified_path(path)
+        return _stat_verified_at(parent_descriptor, path.name)
+
+
+def _read_verified_path(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[os.stat_result, bytes]:
+    return _read_verified_open(
+        path.lstat(),
+        lambda flags: os.open(path, flags),
+        max_bytes=max_bytes,
+    )
+
+
+def _stat_verified_path(path: Path) -> os.stat_result:
+    return _stat_verified_open(
+        path.lstat(),
+        lambda flags: os.open(path, flags),
+    )
+
+
+def _read_verified_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[os.stat_result, bytes]:
+    before = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    return _read_verified_open(
+        before,
+        lambda flags: os.open(name, flags, dir_fd=parent_descriptor),
+        max_bytes=max_bytes,
+    )
+
+
+def _stat_verified_at(parent_descriptor: int, name: str) -> os.stat_result:
+    before = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    return _stat_verified_open(
+        before,
+        lambda flags: os.open(name, flags, dir_fd=parent_descriptor),
+    )
+
+
+def _read_verified_open(
+    before: os.stat_result,
+    opener,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[os.stat_result, bytes]:
+    descriptor, opened = _open_verified(before, opener)
+    try:
+        if max_bytes is not None and opened.st_size > max_bytes:
+            raise ValueError("文件超过读取上限")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            data = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+        if max_bytes is not None and len(data) > max_bytes:
+            raise ValueError("文件超过读取上限")
+        after = os.fstat(descriptor)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise FileConflictError("结构化文件在读取时已变化")
+        return after, data
+    finally:
+        os.close(descriptor)
+
+
+def _stat_verified_open(before: os.stat_result, opener) -> os.stat_result:
+    descriptor, opened = _open_verified(before, opener)
+    os.close(descriptor)
+    return opened
+
+
+def _open_verified(before: os.stat_result, opener) -> tuple[int, os.stat_result]:
+    if stat.S_ISLNK(before.st_mode):
+        raise FileConflictError("结构化文件目标是符号链接")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = opener(flags)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EMLINK}:
+            raise FileConflictError("结构化文件目标是符号链接") from exc
+        raise
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise FileConflictError("结构化文件目标不是普通文件")
+        if opened.st_nlink > 1:
+            raise FileConflictError("结构化写入拒绝多硬链接目标")
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise FileConflictError("结构化文件在打开时身份已变化")
+        return descriptor, opened
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(path.expanduser()))
+
+
+@contextmanager
+def _pinned_parent(path: Path) -> Iterator[int]:
+    """Pin the authorized parent object while the structured operation uses it."""
+
+    if os.name == "nt":
+        handles, close_handle = _pin_windows_directory_chain(path.parent)
+        try:
+            yield int(handles[-1])
+        finally:
+            for handle in reversed(handles):
+                close_handle(handle)
+        return
+    descriptor = _open_posix_directory_chain(path.parent)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _open_posix_directory_chain(directory: Path) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    absolute = _lexical_absolute(directory)
+    descriptor = os.open(absolute.anchor or "/", flags)
+    try:
+        for component in absolute.parts[1:]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _pin_windows_directory_chain(directory: Path):
+    import ctypes
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+    get_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    file_read_attributes = 0x0080
+    file_share_read_write = 0x0001 | 0x0002
+    open_existing = 3
+    backup_semantics = 0x02000000
+    open_reparse_point = 0x00200000
+    attribute_directory = 0x0010
+    attribute_reparse = 0x0400
+    invalid_handle = ctypes.c_void_p(-1).value
+
+    absolute = _lexical_absolute(directory)
+    current = Path(absolute.anchor)
+    components = [current]
+    for component in absolute.parts[1:]:
+        current /= component
+        components.append(current)
+
+    handles = []
+    try:
+        for component in components:
+            handle = create_file(
+                str(component),
+                file_read_attributes,
+                file_share_read_write,
+                None,
+                open_existing,
+                backup_semantics | open_reparse_point,
+                None,
+            )
+            if handle == invalid_handle:
+                raise FileConflictError(
+                    f"无法锁定结构化文件父目录: WinError {ctypes.get_last_error()}"
+                )
+            handles.append(handle)
+            information = ByHandleFileInformation()
+            if not get_information(handle, ctypes.byref(information)):
+                raise FileConflictError(
+                    f"无法验证结构化文件父目录: WinError {ctypes.get_last_error()}"
+                )
+            if not information.dwFileAttributes & attribute_directory:
+                raise FileConflictError("结构化文件父路径组件不是目录")
+            if information.dwFileAttributes & attribute_reparse:
+                raise FileConflictError("结构化文件父路径组件是 reparse point")
+        return handles, close_handle
+    except Exception:
+        for handle in reversed(handles):
+            close_handle(handle)
+        raise
+
+
 # ---------------------------------------------------------------------------
-# 路径解析（采用 _resolve_base_dir / _resolve_path_for_task）
+# 路径解析（对齐 Hermes _resolve_base_dir / _resolve_path_for_task）
 # ---------------------------------------------------------------------------
 
 def _resolve_base_dir() -> Path:
     """返回解析相对路径时的绝对基目录。
 
     优先使用 current_agent_workdir ContextVar；否则使用进程 cwd。
-    与 Crew 的区别：Crew 用 task_id + TERMINAL_CWD；Crew 用 ContextVar。
+    与 Hermes 的区别：Hermes 用 task_id + TERMINAL_CWD；Crew 用 ContextVar。
     """
     raw = current_agent_workdir.get()
     base = Path(raw).expanduser() if raw else Path(os.getcwd())
@@ -40,7 +535,7 @@ def _resolve_path(filepath: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 设备路径黑名单（实现）
+# 设备路径黑名单（复制自 Hermes）
 # ---------------------------------------------------------------------------
 
 _BLOCKED_DEVICE_PATHS = frozenset({
@@ -78,7 +573,7 @@ def _is_blocked_device(filepath: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 敏感写入路径保护（实现）
+# 敏感写入路径保护（改造自 Hermes）
 # ---------------------------------------------------------------------------
 
 _SENSITIVE_PATH_PREFIXES = (
@@ -150,7 +645,7 @@ def _is_expected_write_exception(exc: Exception) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 行尾符与 BOM 处理（实现 tools/file_operations.py）
+# 行尾符与 BOM 处理（复制自 Hermes tools/file_operations.py）
 # ---------------------------------------------------------------------------
 
 def _detect_line_ending(sample: str) -> Optional[str]:
@@ -191,7 +686,7 @@ def _has_bom(text: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 分页规范化（实现 tools/file_operations.py）
+# 分页规范化（复制自 Hermes tools/file_operations.py）
 # ---------------------------------------------------------------------------
 
 def _normalize_read_pagination(
@@ -201,7 +696,7 @@ def _normalize_read_pagination(
 ) -> tuple[int, int]:
     """Return validated (offset, limit) for read_file pagination.
 
-    Offset is 1-based for model-facing parameters (uses Crew conventions).
+    Offset is 1-based for model-facing parameters (matches Hermes).
     """
     if offset is None:
         offset = 1
@@ -248,7 +743,7 @@ def _normalize_search_pagination(
 
 
 # ---------------------------------------------------------------------------
-# 二进制扩展名检测（实现 tools/binary_extensions.py 的子集）
+# 二进制扩展名检测（复制自 Hermes tools/binary_extensions.py 的子集）
 # ---------------------------------------------------------------------------
 
 _BINARY_EXTENSIONS = frozenset({
@@ -267,7 +762,7 @@ def _has_binary_extension(path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 读取上限（实现）
+# 读取上限（改造自 Hermes）
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MAX_READ_CHARS = 100_000
@@ -308,7 +803,7 @@ def _format_read_result(
     truncated: bool = False,
     hint: str = "",
 ) -> str:
-    """把读取结果格式化为 JSON，与 Crew 返回结构接近。"""
+    """把读取结果格式化为 JSON，与 Hermes 返回结构接近。"""
     import json
 
     shown_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)

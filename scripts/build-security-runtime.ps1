@@ -1,0 +1,49 @@
+# 构建 Ace security-runtime 并把二进制 + 源码哈希清单提交进 security-runtime/bin/。
+# 触发时机：改了 security-runtime/ 下的 Rust 源码或 Cargo.toml，重跑本脚本再 commit。
+# 产出：security-runtime/bin/ace-security-runtime.exe（Windows）
+#       security-runtime/bin/runtime-manifest.json（source_hash，供启动时漂移检测）
+# 要求：本机已装 Rust 工具链（rustup + MSVC），首次 cargo check 已通。
+
+$ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$crate = Join-Path $repoRoot 'security-runtime'
+$binDir = Join-Path $crate 'bin'
+$exe = Join-Path $binDir 'ace-security-runtime.exe'
+
+Write-Host "[1/3] cargo build --release (x86_64-pc-windows-msvc)..."
+Push-Location $crate
+try {
+    & cargo build --release --target x86_64-pc-windows-msvc
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
+} finally { Pop-Location }
+
+$built = Join-Path $crate "target\x86_64-pc-windows-msvc\release\ace-security-runtime.exe"
+if (-not (Test-Path $built)) { throw "build 产物未找到：$built" }
+New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+Copy-Item -Force $built $exe
+Write-Host "[2/3] copied -> $exe"
+
+Write-Host "[3/3] regenerating runtime-manifest.json (source + binary hash)..."
+$manifestScript = @'
+import hashlib, json, pathlib, sys
+crate = pathlib.Path(sys.argv[1]); bin_dir = pathlib.Path(sys.argv[2]); exe = pathlib.Path(sys.argv[3])
+files = sorted(p for p in [*crate.glob("src/**/*"), *crate.glob("tests/**/*.rs"), crate / "Cargo.toml", crate / "Cargo.lock"] if p.is_file())
+h = hashlib.sha256()
+for p in files:
+    h.update(p.relative_to(crate).as_posix().encode()); h.update(b"\0")
+    h.update(p.read_bytes()); h.update(b"\0")
+manifest = {
+    "schema": 2,
+    "source_hash": h.hexdigest(),
+    "binary_sha256": hashlib.sha256(exe.read_bytes()).hexdigest(),
+    "binary_name": exe.name,
+    "source_files": len(files),
+    "built_for": "x86_64-pc-windows-msvc",
+    "note": "由 scripts/build-security-runtime.{ps1,sh} 重新生成；勿手改。source_hash 用于检测源码漂移，binary_sha256 用于 Python/Desktop 启动时校验二进制完整性。",
+}
+(bin_dir / "runtime-manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+print(f"    source_hash: {manifest['source_hash'][:16]}... binary_sha256: {manifest['binary_sha256'][:16]}... over {len(files)} files")
+'@
+$manifestScript | python - "$crate" "$binDir" "$exe"
+if ($LASTEXITCODE -ne 0) { throw "manifest 生成失败" }
+Write-Host "done. 请 git add security-runtime/bin/ 后提交。"

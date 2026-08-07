@@ -513,10 +513,36 @@ function validatedWaitOptions(options: WaitOptions): Required<WaitOptions> {
   return { timeSeconds, text, textGone };
 }
 
+/**
+ * 元素**存在但当前点不动**的证据：动画未静止、被浮层挡住、在视口外、被禁用。
+ *
+ * 这些只出现在 Playwright 的 Call log 里（错误第一行永远只有
+ * `locator.click: Timeout NNNNNms exceeded.`），所以必须看全文。
+ */
+const NOT_ACTIONABLE_EVIDENCE =
+  /element is not stable|intercepts pointer events|element is not visible|element is outside of the viewport|element is not enabled|element is not editable|element is disabled/i;
+
 /** mutation 尚未调用时，可安全地分类成 stale/not-executed。 */
 function translatePreDispatch(error: unknown): never {
   if (error instanceof ActionError) throw error;
   const message = firstLine(error);
+  const callLog = fullErrorText(error);
+  // 「找不到元素」和「元素在那儿但点不动」需要完全相反的下一步：前者重新 snapshot
+  // 取新 ref 有用，后者再 snapshot 一百次也没用（轮播/动画元素永远不静止），
+  // 只会每次白等满一个超时。过去两者都被塞进 stale_ref，模型就在 30s × N 的
+  // 死循环里打转。这里按证据分开，并给出各自可执行的下一步。
+  if (NOT_ACTIONABLE_EVIDENCE.test(callLog)) {
+    throw new ActionError(
+      `元素存在但当前不可点击（动画未停、被遮挡或在视口外）：${message}`,
+      'element_not_actionable',
+    );
+  }
+  // strict mode violation 同时用于「解析到 0 个」和「解析到 N 个」。
+  // 前者是元素没了（重新 snapshot 有用），后者是身份不唯一（要挑更具体的 ref）。
+  // 只有后者才是 ambiguous，否则会把「找不到」误导成「太多了」。
+  if (/strict mode violation[^\n]*resolved to (?!0\b)\d+ element/i.test(callLog)) {
+    throw new ActionError(`该 ref 在当前页面匹配到多个元素：${message}`, 'ambiguous_ref');
+  }
   if (
     /Timeout .* exceeded|waiting for locator|element is not attached|not visible|not enabled|not editable|strict mode/i
       .test(message)

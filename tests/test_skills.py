@@ -881,6 +881,16 @@ def test_list_optional_skills_not_installed(optional_env):
     assert any(s["slug"] == "opt-skill" for s in optional)
 
 
+def test_missing_optional_catalog_is_an_empty_source(optional_env, monkeypatch, caplog):
+    missing = optional_env["opt_dir"].parent / "missing-optional"
+    monkeypatch.setattr("crew.agent.skills.get_optional_skills_dir", lambda: missing)
+
+    with caplog.at_level("WARNING", logger="crew.agent.skills"):
+        assert list_optional_skills() == []
+
+    assert "skill_root_missing" not in caplog.text
+
+
 def test_list_optional_skills_category(optional_env):
     scan_skills()
     optional = list_optional_skills()

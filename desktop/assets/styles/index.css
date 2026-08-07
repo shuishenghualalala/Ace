@@ -1,47 +1,71 @@
 /**
- * 样式入口文件
- * @module styles/index
+ * Renderer style entry point.
  *
- * 导入所有模块化样式
+ * Import order is an ownership contract. A feature can override a shell rule
+ * only through its feature layer; a skin can remap a feature without
+ * selector-specific `!important` patches.
  */
+@layer reset, tokens, base, components, shell, features, skins, utilities;
 
-@import './variables.css';
-@import './base.css';
-@import './backend-loading.css';
+@import './tokens.css' layer(tokens);
+@import './foundations.css' layer(base);
+@import './components.css' layer(components);
+@import './overlays.css' layer(components);
+@import './layouts.css' layer(shell);
+@import './shell.css' layer(shell);
+@import './session-history.css' layer(shell);
+@import './workspace.css' layer(shell);
+@import './composer.css' layer(components);
+@import './backend-loading.css' layer(shell);
 /* KaTeX 数学公式样式（micromark-extension-math 输出需要）。bare import 由 esbuild css bundler 解析 node_modules。 */
-@import 'katex/dist/katex.min.css';
-@import './legacy-compat.css';
-@import './layout.css';
-@import './sidebar.css';
-@import './buttons.css';
-@import './forms.css';
-@import './modal.css';
-@import './context-menu.css';
-@import './chat.css';
-@import './history.css';
-@import './history-sidebar.css';
-@import './user.css';
-@import './config.css';
-@import './channel-config.css';
-@import './model-config.css';
-@import './plugin-config.css';
-@import './plugins.css';
-@import './welcome.css';
-@import './ui-preview.css';
-@import './stream-chat.css';
-@import './integration-pages.css';
-@import './web-messages.css';
-@import './config-premium.css';
-@import './system-tasks-premium.css';
-@import './pages-v2.css';
-@import './hub-premium.css';
-@import './shell-v2.css';
-@import './agents-page.css';
-@import './cron-page.css';
-@import './wiki-page.css';
-@import './sites-page.css';
-@import './usage-stats.css';
-@import './settings.css';
-@import './kanban-board.css';
-@import './browser-panel.css';
-@import './_dark-overrides.css';
+@import 'katex/dist/katex.min.css' layer(base);
+@import './layout.css' layer(shell);
+@import './buttons.css' layer(components);
+@import './forms.css' layer(components);
+@import './modal.css' layer(components);
+@import './context-menu.css' layer(components);
+@import './chat.css' layer(features);
+@import './config.css' layer(features);
+@import './channel-config.css' layer(features);
+@import './model-config.css' layer(features);
+@import './plugin-config.css' layer(features);
+@import './plugins.css' layer(features);
+@import './welcome-scenarios.css' layer(features);
+@import './ui-preview.css' layer(features);
+@import './stream-chat.css' layer(features);
+@import './integration-pages.css' layer(features);
+@import './web-messages.css' layer(features);
+@import './agents-page.css' layer(features);
+@import './cron-page.css' layer(features);
+@import './sites-page.css' layer(features);
+@import './wiki-page.css' layer(features);
+@import './usage-stats.css' layer(features);
+@import './settings.css' layer(features);
+@import './auth.css' layer(features);
+@import './kanban-board.css' layer(features);
+@import './browser-panel.css' layer(features);
+@import './composer-context.css' layer(components);
+@import './transcript.css' layer(components);
+@import './process-timeline.css' layer(components);
+@import './diff.css' layer(components);
+@import './inspector.css' layer(shell);
+@import './browser-inspector.css' layer(features);
+@import './expert-hub.css' layer(features);
+@import './agent-hub.css' layer(features);
+@import './capability-hub.css' layer(features);
+@import './wiki-workspace.css' layer(features);
+@import './security-center.css' layer(features);
+@import './system-page.css' layer(features);
+@import './settings-shell.css' layer(features);
+@import './settings-integrations.css' layer(features);
+@import './settings-data.css' layer(features);
+@import './account-overlays.css' layer(components);
+@import './studio.css' layer(skins);
+@import './work-shell.css' layer(features);
+@import './work-items.css' layer(features);
+@import './work-item-space.css' layer(features);
+@import './work-mentions.css' layer(features);
+@import './work-dashboard.css' layer(features);
+@import './work-settings.css' layer(features);
+@import './work-knowledge.css' layer(features);
+@import './runtime.css' layer(utilities);

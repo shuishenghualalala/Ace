@@ -2413,7 +2413,7 @@ class WikiCompiler:
                     target_dir,
                     filename_from_title(existing.title),
                 )
-                existing.file_path = str(target_path.relative_to(base))
+                existing.file_path = target_path.relative_to(base).as_posix()
             existing.content = page_content
             existing.summary = summary
             existing.related = []
@@ -2429,9 +2429,9 @@ class WikiCompiler:
             page_type="source",
             title=title,
             content=page_content,
-            file_path=str(
-                unique_file_path(target_dir, filename_from_title(title)).relative_to(base)
-            ),
+            file_path=unique_file_path(target_dir, filename_from_title(title))
+            .relative_to(base)
+            .as_posix(),
             sources=[source_id],
             tags=[],
             summary=summary,

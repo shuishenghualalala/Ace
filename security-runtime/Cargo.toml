@@ -1,0 +1,46 @@
+[package]
+name = "ace-security-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+sha2 = "0.10"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+# Constant-time comparison for the startup token auth check (N5). The token is
+# an authentication credential, so `String::!=`'s short-circuit would leak
+# prefix information via timing. subtle is the standard minimal crate for this.
+subtle = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+seccompiler = "0.5.0"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.52"
+features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_NetManagement",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Environment",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Rpc",
+    "Win32_System_Threading",
+]
+
+[dev-dependencies]
+tempfile = "3"

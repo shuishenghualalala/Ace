@@ -446,7 +446,7 @@ def register(ctx):
 
     result = await plugins.run_tool_execution_middleware("demo", request.payload, terminal)
     assert result == {"wrapped": {"text": "secret", "masked": True, "executed": True}}
-    assert await plugins.run_plugin_command("/hello venus") == "hello venus"
+    assert await plugins.run_plugin_command("/hello world") == "hello world"
     assert plugins.api_routers[0][0] == "mw-plugin"
 
 

@@ -84,18 +84,37 @@ class SiteManager:
     def _copy_release(source_dir: Path, release_dir: Path) -> dict[str, Any]:
         if not source_dir.is_dir() or not (source_dir / "index.html").is_file():
             raise SiteBuildError("构建输出目录缺少 index.html")
+        if any(path.is_symlink() for path in source_dir.rglob("*")):
+            raise SiteBuildError("构建输出不能包含符号链接")
         if release_dir.exists():
             shutil.rmtree(release_dir)
-        shutil.copytree(source_dir, release_dir, symlinks=False)
+        # 保留链接以避免 TOCTOU 期间解引用工作区外目标；最终清单阶段会移除它们。
+        shutil.copytree(source_dir, release_dir, symlinks=True)
         # 便携分享包通过 file:// 打开，根绝对资源路径必须改成相对路径。
         # 只处理 HTML/CSS 中的站内根路径；协议相对 URL（//host）保持不变。
+        def asset_prefix(file_path: Path) -> str:
+            prefix = os.path.relpath(release_dir, file_path.parent).replace(os.sep, "/")
+            return "." if prefix == "." else prefix
+
         for html_path in release_dir.rglob("*.html"):
             text = html_path.read_text(encoding="utf-8")
-            text = re.sub(r'((?:src|href)=["\'])/(?!/)', r'\1./', text, flags=re.IGNORECASE)
+            prefix = asset_prefix(html_path)
+            text = re.sub(
+                r'((?:src|href)=["\'])/(?!/)',
+                lambda match: f"{match.group(1)}{prefix}/",
+                text,
+                flags=re.IGNORECASE,
+            )
             html_path.write_text(text, encoding="utf-8")
         for css_path in release_dir.rglob("*.css"):
             text = css_path.read_text(encoding="utf-8")
-            text = re.sub(r'url\((["\']?)/(?!/)', r'url(\1../', text, flags=re.IGNORECASE)
+            prefix = asset_prefix(css_path)
+            text = re.sub(
+                r'url\((["\']?)/(?!/)',
+                lambda match: f"url({match.group(1)}{prefix}/",
+                text,
+                flags=re.IGNORECASE,
+            )
             css_path.write_text(text, encoding="utf-8")
         files: list[dict[str, Any]] = []
         for path in sorted(release_dir.rglob("*")):

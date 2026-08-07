@@ -1171,6 +1171,11 @@ def _is_excluded_dir(name: str) -> bool:
 
 def _iter_skill_files(skills_dir: Path):
     """安全遍历 skills_dir，yield 最终目标仍在各 Skill 根内的 SKILL.md。"""
+    # Optional/local skill source may be absent in a development checkout or
+    # release that does not ship a catalog. That is an empty source, not an
+    # unsafe path; only existing roots need containment validation.
+    if not skills_dir.is_dir():
+        return
     matches: list[Path] = []
     for _root, files in _walk_contained(skills_dir):
         for path in files:

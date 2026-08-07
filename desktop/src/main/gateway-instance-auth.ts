@@ -1,7 +1,7 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { resolveCrewHome } from './crew-home';
+import { resolveCrewHome } from './crew-session-file';
 
 export const GATEWAY_INSTANCE_CHALLENGE_HEADER = 'X-Crew-Gateway-Challenge';
 export const GATEWAY_INSTANCE_DIRECTORY = '.gateway-instance';
@@ -9,6 +9,7 @@ export const GATEWAY_INSTANCE_KEY_FILENAME = 'gateway-instance.key';
 
 const PROOF_CONTEXT = Buffer.from('crew-gateway-instance-v1\0', 'ascii');
 const ACCESS_TOKEN_CONTEXT = Buffer.from('crew-gateway-browser-access-v1\0', 'ascii');
+const SECURITY_PROOF_CONTEXT = Buffer.from('crew-security-desktop-v1\0', 'ascii');
 const HEX_32_BYTES = /^[0-9a-f]{64}$/;
 const HEALTH_TIMEOUT_MS = 3_000;
 
@@ -255,9 +256,76 @@ export async function probeGatewayInstance(
   }
 }
 
+const SECURITY_PROOF_PATH_PREFIXES = ['/api/security/', '/api/mcp/cua-driver/setup'];
+const CUA_SETUP_PATH = '/api/mcp/cua-driver/setup';
+const CUA_CANCEL_PATH = /^\/api\/mcp\/cua-driver\/setup\/[^/]+\/cancel$/;
+
+export type CuaSetupAuthorityAction = 'install' | 'cancel';
+
+/**
+ * Validate the exact CUA authority surface before main signs it.
+ *
+ * Install accepts only the two backend booleans. Cancel has no body. Status
+ * reads and unknown descendants never receive authority.
+ */
+export function classifyCuaSetupAuthorityRequest(
+  method: string,
+  pathname: string,
+  body: string,
+): CuaSetupAuthorityAction | null {
+  if (method.toUpperCase() !== 'POST') return null;
+  if (pathname === CUA_SETUP_PATH) {
+    let payload: unknown;
+    try {
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      return null;
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const record = payload as Record<string, unknown>;
+    if (
+      Object.keys(record).some((key) => !['force_reinstall', 'start_daemon'].includes(key))
+      || Object.values(record).some((value) => typeof value !== 'boolean')
+    ) {
+      return null;
+    }
+    return 'install';
+  }
+  return CUA_CANCEL_PATH.test(pathname) && body.length === 0 ? 'cancel' : null;
+}
+
+/** Sign one security-authority REST request; renderer code never receives this key or proof.
+ *
+ * The proof binds ``timestamp`` + a fresh one-time ``nonce`` + method + pathname +
+ * body hash. The gateway consumes the nonce after a successful verify, so the same
+ * proof cannot be replayed within its TTL even for an identical request (H-19).
+ * Pathname must be a security-authority route or the CUA driver setup route (the
+ * latter runs remote installer scripts on the host and is treated as authority).
+ */
+export function createDesktopSecurityProof(
+  method: string,
+  pathname: string,
+  body: string,
+  options: { crewHome?: string; nowSeconds?: number; nonce?: string } = {},
+): string {
+  if (!SECURITY_PROOF_PATH_PREFIXES.some((p) => pathname.startsWith(p))) {
+    throw new Error('invalid security proof path');
+  }
+  const timestamp = Math.floor(options.nowSeconds ?? Date.now() / 1000);
+  const nonce = options.nonce ?? randomBytes(16).toString('hex');
+  const plainBodyHash = createHash('sha256').update(body, 'utf8').digest('hex');
+  const message = Buffer.concat([
+    SECURITY_PROOF_CONTEXT,
+    Buffer.from(`${timestamp}\n${nonce}\n${method.toUpperCase()}\n${pathname}\n${plainBodyHash}`, 'utf8'),
+  ]);
+  const key = loadOrCreateGatewayInstanceKey(options.crewHome);
+  const signature = createHmac('sha256', key).update(message).digest('hex');
+  return `${timestamp}:${nonce}:${signature}`;
+}
+
 /**
  * Prove that a loopback HTTP listener is this user's Crew Gateway before any
- * login JWT or account identity headers are sent to it.
+ * login JWT or employee identity headers are sent to it.
  */
 export async function verifyGatewayInstance(
   baseUrl: string,

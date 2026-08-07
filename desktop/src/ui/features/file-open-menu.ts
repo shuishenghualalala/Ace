@@ -1,12 +1,10 @@
 import { notify } from '../state';
+import { createIcon, type IconId } from '../components/icon';
+import { setRuntimeStyle } from '../components/runtime-style';
 
 let activeMenu: HTMLElement | null = null;
 let activeAnchor: HTMLElement | null = null;
 let removeGlobalListeners: (() => void) | null = null;
-
-const FOLDER_ICON = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M2.5 5.5h5l1.4 1.6h8.6v7.4a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5v-9Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M2.5 7.1h15" stroke="currentColor" stroke-width="1.5"/></svg>';
-const APP_ICON = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M7 13 10 7l3 6M8.2 10.8h3.6" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-type MenuIcon = typeof FOLDER_ICON | typeof APP_ICON;
 
 function closeFileOpenMenu(): void {
   activeMenu?.remove();
@@ -16,7 +14,6 @@ function closeFileOpenMenu(): void {
   removeGlobalListeners?.();
   removeGlobalListeners = null;
 }
-
 function positionMenu(menu: HTMLElement, anchor: HTMLElement): void {
   const anchorRect = anchor.getBoundingClientRect();
   const menuRect = menu.getBoundingClientRect();
@@ -29,24 +26,22 @@ function positionMenu(menu: HTMLElement, anchor: HTMLElement): void {
   const top = preferredTop + menuRect.height <= window.innerHeight - margin
     ? preferredTop
     : Math.max(margin, anchorRect.top - menuRect.height - 5);
-  menu.style.left = `${Math.round(left)}px`;
-  menu.style.top = `${Math.round(top)}px`;
+  setRuntimeStyle(menu, 'left', `${Math.round(left)}px`);
+  setRuntimeStyle(menu, 'top', `${Math.round(top)}px`);
 }
 
-function menuButton(label: string, icon: MenuIcon): HTMLButtonElement {
+function menuButton(label: string, icon: IconId): HTMLButtonElement {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'file-open-menu__item';
   button.setAttribute('role', 'menuitem');
-  const iconWrap = document.createElement('span');
-  iconWrap.className = 'file-open-menu__icon';
-  // `icon` is restricted to the two compile-time SVG constants above.
-  iconWrap.innerHTML = icon;
-  button.appendChild(iconWrap);
+  const iconNode = document.createElement('span');
+  iconNode.className = 'file-open-menu__icon';
+  iconNode.appendChild(createIcon(icon, { size: 18 }));
   const text = document.createElement('span');
   text.className = 'file-open-menu__label';
   text.textContent = label;
-  button.appendChild(text);
+  button.append(iconNode, text);
   return button;
 }
 
@@ -61,7 +56,6 @@ async function revealInFolder(targetPath: string): Promise<void> {
     notify(`打开失败：${error instanceof Error ? error.message : String(error)}`);
   }
 }
-
 async function openWithApplication(
   targetPath: string,
   application: { id: string; name: string },
@@ -120,7 +114,7 @@ export async function showFileOpenMenu(anchor: HTMLElement, targetPath: string):
   menu.setAttribute('role', 'menu');
   menu.setAttribute('aria-label', '文件打开方式');
 
-  const reveal = menuButton('在资源管理器中显示', FOLDER_ICON);
+  const reveal = menuButton('在资源管理器中显示', 'icon-folder');
   reveal.addEventListener('click', () => {
     closeFileOpenMenu();
     void revealInFolder(targetPath);
@@ -155,7 +149,7 @@ export async function showFileOpenMenu(anchor: HTMLElement, targetPath: string):
       menu.appendChild(empty);
     } else {
       for (const application of applications) {
-        const button = menuButton(`打开于 ${application.name}`, APP_ICON);
+        const button = menuButton(`打开于 ${application.name}`, 'icon-agent');
         button.addEventListener('click', () => {
           closeFileOpenMenu();
           void openWithApplication(targetPath, application);

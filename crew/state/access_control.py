@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from crew.security.settings import strict_security_enabled
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROMPT_PROFILES_DIR = _REPO_ROOT / "config" / "prompts" / "profiles"
 
@@ -27,8 +29,19 @@ class AccessControlConfig:
     """访问控制配置。"""
 
     user_type: str = "internal"  # "external" | "internal"
+    internal_accounts: list[str] = field(default_factory=list)
     external: dict[str, Any] = field(default_factory=dict)
     internal: dict[str, Any] = field(default_factory=dict)
+
+    def user_type_for_owner(self, owner: str, *, requested: str | None = None) -> str:
+        """Resolve role from authenticated owner; requested session roles are compatibility-only."""
+        if not strict_security_enabled() and requested in {"external", "internal"}:
+            return requested
+        normalized_owner = str(owner or "").strip()
+        internal_accounts = {str(item).strip() for item in self.internal_accounts if str(item).strip()}
+        if internal_accounts:
+            return "internal" if normalized_owner in internal_accounts else "external"
+        return self.resolve_for()["user_type"]
 
     def resolve_for(self, user_type: str | None = None) -> dict[str, Any]:
         """为指定用户类型解析出统一配置字典。

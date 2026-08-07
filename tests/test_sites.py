@@ -70,6 +70,41 @@ def test_static_site_publish_preview_annotation_and_export(site_manager: SiteMan
         assert "source_path" not in json.dumps(release["manifest"])
 
 
+def test_copy_release_rejects_symlinked_files(site_manager: SiteManager, tmp_path: Path) -> None:
+    source = tmp_path / "symlink-site"
+    source.mkdir()
+    (source / "index.html").write_text("<h1>site</h1>", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("not for publishing", encoding="utf-8")
+    try:
+        (source / "leak.txt").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不支持创建符号链接")
+
+    with pytest.raises(SiteBuildError, match="符号链接"):
+        SiteManager._copy_release(source, tmp_path / "release")
+
+
+def test_copy_release_rewrites_root_assets_relative_to_nested_files(
+    site_manager: SiteManager, tmp_path: Path,
+) -> None:
+    source = tmp_path / "nested-site"
+    (source / "pages").mkdir(parents=True)
+    (source / "assets" / "css").mkdir(parents=True)
+    (source / "index.html").write_text("<link href=\"/assets/app.css\">", encoding="utf-8")
+    (source / "pages" / "index.html").write_text(
+        '<script src="/assets/app.js"></script>', encoding="utf-8",
+    )
+    (source / "assets" / "css" / "app.css").write_text(
+        "body{background:url('/assets/bg.png')}", encoding="utf-8",
+    )
+
+    SiteManager._copy_release(source, tmp_path / "release")
+
+    assert 'src="../assets/app.js"' in (tmp_path / "release" / "pages" / "index.html").read_text(encoding="utf-8")
+    assert "url('../../assets/bg.png')" in (tmp_path / "release" / "assets" / "css" / "app.css").read_text(encoding="utf-8")
+
+
 def test_preview_directory_serves_entry_assets_and_spa_routes(site_manager: SiteManager, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     source = workspace / "vite-site"

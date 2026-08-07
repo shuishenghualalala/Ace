@@ -1,7 +1,8 @@
 /** Login wall and account settings for local email and remote authentication. */
 
 import type { AuthStateSnapshot } from '../../shared/types';
-import { notify } from '../state';
+import { notify, type UserInfo } from '../state';
+import { authStore } from '../stores/auth-store';
 
 let currentState: AuthStateSnapshot = {
   mode: 'unknown',
@@ -31,13 +32,52 @@ function setBusy(busy: boolean): void {
 function showLoginWall(show: boolean): void {
   document.body.classList.toggle('auth-wall-active', show);
   const modal = document.getElementById('login-modal');
-  if (modal) modal.style.display = show ? 'flex' : 'none';
+  if (modal) {
+    modal.hidden = !show;
+    if (show) {
+      queueMicrotask(() => (document.getElementById('login-phone') as HTMLInputElement | null)?.focus());
+    }
+  }
+}
+
+/** Keep the old renderer consumers working while AuthStateSnapshot is canonical. */
+function legacyUserInfo(state: AuthStateSnapshot): UserInfo | null {
+  if (!state.isLoggedIn) return null;
+  const user = state.user;
+  if (!user) {
+    if (state.mode === 'dev') return { staffCode: 'dev:dev', staffName: '开发账号' };
+    if (state.mode === 'local') return { staffCode: 'local', staffName: '本地账号' };
+    return null;
+  }
+  const accountId = state.mode === 'remote' || state.mode === 'email'
+    ? `${state.providerId}:${user.userId}`
+    : state.mode === 'dev' ? 'dev:dev' : 'local';
+  const name = user.displayName || user.email || user.phoneNumber || user.userId;
+  return {
+    staffCode: accountId,
+    staffUid: user.userId,
+    uid: user.userId,
+    staffName: name,
+  };
+}
+
+function syncRendererAuth(state: AuthStateSnapshot): void {
+  const next = { isLoggedIn: state.isLoggedIn, userInfo: legacyUserInfo(state) };
+  const previous = authStore.get();
+  if (
+    previous.isLoggedIn !== next.isLoggedIn
+    || previous.userInfo?.staffCode !== next.userInfo?.staffCode
+    || previous.userInfo?.staffUid !== next.userInfo?.staffUid
+    || previous.userInfo?.staffName !== next.userInfo?.staffName
+  ) {
+    authStore.replace(next);
+  }
 }
 
 function displayValue(id: string, value: string): void {
   const element = document.getElementById(id);
   if (!element) return;
-  element.textContent = value || '—';
+  element.textContent = value || '-';
   element.classList.toggle('is-empty', !value);
 }
 
@@ -46,15 +86,14 @@ function renderAccount(): void {
   const loggedOut = document.getElementById('set-account-logged-out');
   const user = currentState.user;
   const visibleUser = currentState.isLoggedIn && user;
-  const sidebarUser = document.getElementById('user-section');
   if (loggedIn) loggedIn.hidden = !visibleUser;
   if (loggedOut) loggedOut.hidden = Boolean(visibleUser);
-  if (sidebarUser) sidebarUser.hidden = !visibleUser;
   if (visibleUser) {
     const name = user.displayName || user.email || user.phoneNumber || user.userId;
-    displayValue('sidebar-user-name', name);
-    displayValue('sidebar-user-email', user.email || user.phoneNumber);
-    displayValue('sidebar-user-avatar', Array.from(name)[0] || '我');
+    const navAvatar = document.querySelector('[data-user-avatar]');
+    const navName = document.querySelector('[data-user-name]');
+    if (navAvatar) navAvatar.textContent = Array.from(name)[0] || '我';
+    if (navName) navName.textContent = name;
     displayValue('set-account-name', name);
     displayValue('set-account-provider', currentState.mode === 'email' ? '本机邮箱租户' : currentState.mode === 'remote' ? currentState.providerId : '本机模式');
     displayValue('set-account-user-id', user.userId);
@@ -100,6 +139,7 @@ function renderLoginMode(): void {
 
 function applyState(state: AuthStateSnapshot): void {
   currentState = state;
+  syncRendererAuth(state);
   renderLoginMode();
   renderAccount();
   const needsLogin = (state.mode === 'remote' || state.mode === 'email') && !state.isLoggedIn;
@@ -178,12 +218,14 @@ function bind(): void {
       .finally(() => setBusy(false));
   };
   document.getElementById('login-submit')?.addEventListener('click', submit);
-  document.getElementById('login-code')?.addEventListener('keydown', (event) => {
+  const submitOnEnter = (event: Event): void => {
     if ((event as KeyboardEvent).key === 'Enter') submit();
-  });
+  };
+  document.getElementById('login-phone')?.addEventListener('keydown', submitOnEnter);
+  document.getElementById('login-code')?.addEventListener('keydown', submitOnEnter);
   document.getElementById('login-quit')?.addEventListener('click', () => void window.Crew.appQuit());
   document.getElementById('set-account-go-login')?.addEventListener('click', () => showLoginWall(true));
-  document.querySelector('.user-avatar-btn')?.addEventListener('click', () => {
+  document.querySelector('[data-user-account-trigger]')?.addEventListener('click', () => {
     window.dispatchEvent(new CustomEvent('user:open-account'));
   });
   document.getElementById('set-account-logout')?.addEventListener('click', () => {
@@ -197,15 +239,25 @@ function bind(): void {
       })
       .catch((error) => notify(`退出登录失败：${(error as Error).message}`));
   });
-  window.Crew.onAuthSessionState((state) => applyState(state));
+  window.Crew.onSessionState((state) => applyState(state));
 }
 
 export async function initAuthFlow(): Promise<boolean> {
   bind();
-  const state = await window.Crew.authGetState();
-  applyState(state);
+  const result = await window.Crew.authGetState();
+  if (result.ok && result.state) {
+    applyState(result.state);
+  } else if (!result.ok) {
+    applyState({
+      mode: 'unknown',
+      configured: false,
+      providerId: 'custom',
+      isLoggedIn: false,
+      user: null,
+    });
+  }
   await window.Crew.rendererInitialStateReady();
-  return state.isLoggedIn;
+  return result.ok ? result.state.isLoggedIn : false;
 }
 
 export function renderAuthAccount(): void {

@@ -26,7 +26,7 @@ from crew.tools.registry import Registry, tool_result
 
 SKILLS_LIST_SCHEMA = {
     "name": "skills_list",
-    "description": "列出当前智能体/上下文中允许使用的技能 metadata。",
+    "description": "列出当前专家/上下文中允许使用的技能 metadata。",
     "parameters": {
         "type": "object",
         "properties": {"category": {"type": "string", "description": "可选分类过滤"}},
@@ -64,7 +64,7 @@ SKILL_PACKAGE_OPEN_SCHEMA = {
 
 SKILLS_AUDIT_SCHEMA = {
     "name": "skills_audit",
-    "description": "检测 skills 的中文展示 metadata、中文 query 示例和目录安全性。",
+    "description": "检测 skills 的中文展示 metadata、中文 query 示例，以及旧项目固定路径引用。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -83,7 +83,7 @@ SKILLS_AUDIT_SCHEMA = {
 
 SKILLS_REPAIR_SCHEMA = {
     "name": "skills_repair",
-    "description": "显式修复 skills：调用模型补全中文 metadata 和技能分类。",
+    "description": "显式修复 skills：调用模型补全中文 metadata，并把旧路径迁移为 CREW_SESSION_FILE/CREW_ENV_FILE。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -131,7 +131,7 @@ def _current_skill_scope() -> tuple[list[str] | None, list[str] | None]:
 
 
 def handle_skills_list(args: dict[str, Any]) -> str:
-    """列出当前智能体/上下文允许的技能。委托 crew.agent.skills.list_skills()，统一真相源。
+    """列出当前专家/上下文允许的技能。委托 crew.agent.skills.list_skills()，统一真相源。
 
     可选 category 过滤：技能 frontmatter 有 category 字段时生效。
     """
@@ -273,7 +273,7 @@ def handle_skill_package_open(args: dict[str, Any]) -> str:
         if _skill_allowed(m["slug"], enabled, disabled, m.get("aliases"))
     ]
     if not allowed_members:
-        raise ToolError(f"package {name} 在当前任务上下文中不可用")
+        raise ToolError(f"package {name} 在当前专家上下文中不可用")
 
     # 加入当前激活集合
     try:

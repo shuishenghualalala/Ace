@@ -10,7 +10,7 @@
  */
 
 import { backendApi } from '../backend-client';
-import { $, escapeHtml, notify, removeSelectedSession, removeSessionState, removeSubscribedSession, setActiveSessionId, setSelectedSession, setSelectedSessions, state } from '../state';
+import { escapeHtml, notify, removeSelectedSession, removeSessionState, removeSubscribedSession, setActiveSessionId, setSelectedSession, setSelectedSessions, state } from '../state';
 import { showConfirmDialog } from '../ui-feedback';
 import { sessionsForManageList } from './workspaces';
 import { refreshAllSessions, type OpenSessionFn } from './workspaces';
@@ -290,15 +290,16 @@ export function toggleSelectAll(): void {
   renderManageList();
 }
 
-function openSessionManage(): void {
+export function openSessionManage(): void {
   state.manageMode = true;
   state.selectedSessions = {};
   manageCollapsedSections.clear();
   showArchived = false;
   const cb = document.getElementById('manage-show-archived') as HTMLInputElement | null;
   if (cb) cb.checked = false;
-  document.getElementById('session-manage-modal')?.classList.add('show');
-  document.getElementById('session-manage-modal')?.setAttribute('style', 'display: flex;');
+  const modal = document.getElementById('session-manage-modal');
+  modal?.classList.add('show');
+  if (modal) modal.hidden = false;
   void reloadManageList();
 }
 
@@ -311,7 +312,7 @@ function closeSessionManage(): void {
   if (cb) cb.checked = false;
   const modal = document.getElementById('session-manage-modal');
   modal?.classList.remove('show');
-  modal?.setAttribute('style', 'display: none;');
+  if (modal) modal.hidden = true;
 }
 
 async function deleteSelectedSessions(): Promise<void> {
@@ -358,7 +359,11 @@ async function deleteSelectedSessions(): Promise<void> {
   setSelectedSessions(nextSelected);
 
   renderManageList();
-  void openSession(state.activeSessionId || state.sessions[0]?.id || '');
+  void openSession(
+    state.activeSessionId
+      || state.sessions.find((session) => !session.archived)?.id
+      || '',
+  );
 
   if (failed.length === 0) {
     notify(`已删除 ${ok.length} 个会话`);
@@ -373,7 +378,6 @@ async function deleteSelectedSessions(): Promise<void> {
 }
 
 export function bindSessionManageUi(): void {
-  $('#history-manage-btn-inline')?.addEventListener('click', openSessionManage);
   document.getElementById('session-manage-close')?.addEventListener('click', closeSessionManage);
   document.getElementById('session-manage-done')?.addEventListener('click', closeSessionManage);
   document.getElementById('session-manage-modal')?.addEventListener('click', (e) => {

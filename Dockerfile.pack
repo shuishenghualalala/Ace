@@ -3,7 +3,7 @@
 # -----------------------------------------------------------------------------
 # 产物：crew-desktop_${BUILD_VERSION}_amd64.deb
 # 特性：
-#   - 采用 Systemd User Service 架构，完全摆脱 sudo 权限依赖
+#   - Gateway 随桌面进程托管，用户配置按用户目录隔离
 #   - 配置文件 (~/.Crew/) 在用户首次双击运行时动态初始化
 #   - 原生支持 Linux 多用户环境，服务与数据相互隔离
 # =============================================================================
@@ -122,6 +122,19 @@ RUN mkdir -p dist/crew-gateway/config \
 
 
 # -----------------------------------------------------------------------------
+# Native security runtime and bundled bubblewrap are build-time artifacts.
+# -----------------------------------------------------------------------------
+FROM docker.m.daocloud.io/library/rust:1.85-slim-buster AS security-runtime-builder
+RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list \
+    && apt-get update -o Acquire::Check-Valid-Until=false \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /security-runtime
+COPY security-runtime ./
+RUN cargo build --release
+RUN dpkg-query -W -f='${Version}' bubblewrap > /tmp/bwrap-version
+
+# -----------------------------------------------------------------------------
 # Stage 2: crew-desktop Electron 客户端打包
 # -----------------------------------------------------------------------------
 FROM docker.m.daocloud.io/library/python:3.11-slim-buster AS desktop-builder
@@ -160,6 +173,11 @@ RUN npm ci --no-audit --no-fund
 COPY desktop/esbuild.config.mjs desktop/tsconfig.json desktop/electron-builder.yml ./
 COPY desktop/src ./src
 COPY desktop/assets ./assets
+COPY desktop/scripts ./scripts
+COPY --from=security-runtime-builder /security-runtime/target/release/ace-security-runtime /tmp/ace-security-runtime
+COPY --from=security-runtime-builder /usr/bin/bwrap /tmp/bwrap
+COPY --from=security-runtime-builder /usr/share/doc/bubblewrap/copyright /tmp/bwrap-copyright
+COPY --from=security-runtime-builder /tmp/bwrap-version /tmp/bwrap-version
 
 # 注入版本号与平台标识到 package.json，使 Electron 客户端版本标签与 .deb 包版本一致
 # 必须在 npm ci 之后执行，避免 npm ci 根据 lockfile 校验 package.json 时覆盖修改
@@ -167,7 +185,10 @@ ARG BUILD_VERSION=0.1.0
 RUN node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='${BUILD_VERSION}';p.platform='${BUILD_PLATFORM}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n');" \
     && echo "✓ version=${BUILD_VERSION}, platform=${BUILD_PLATFORM} injected"
 
-RUN npm run build \
+RUN node scripts/prepare-security-runtime.mjs --runtime /tmp/ace-security-runtime --bwrap /tmp/bwrap \
+      --bwrap-license /tmp/bwrap-copyright --bwrap-version "$(cat /tmp/bwrap-version)" \
+    && npm run security:verify \
+    && npm run build \
     && npx electron-builder --linux --config electron-builder.yml
 
 
@@ -232,7 +253,7 @@ RUN mkdir -p /tmp/runtimes/node \
 
 WORKDIR /deb-build
 
-# 创建 Debian 标准目录结构（注意新增了 usr/lib/systemd/user）
+# 创建 Debian 标准目录结构
 RUN mkdir -p DEBIAN \
     opt/crew-gateway opt/crew-desktop \
     usr/bin \
@@ -240,8 +261,7 @@ RUN mkdir -p DEBIAN \
     usr/share/icons/hicolor/48x48/apps \
     usr/share/icons/hicolor/128x128/apps \
     usr/share/icons/hicolor/256x256/apps \
-    usr/share/icons/hicolor/512x512/apps \
-    usr/lib/systemd/user
+    usr/share/icons/hicolor/512x512/apps
 
 # ----- 1) 拷贝应用本体 -----
 COPY --from=gateway-builder /app/dist/crew-gateway ./opt/crew-gateway
@@ -333,7 +353,7 @@ Depends: ca-certificates, fonts-liberation, libasound2 (>= 1.0.17), libatk-bridg
 Description: Crew - 多智能体平台（网关服务与桌面客户端）\n 本软件包包含 Crew gateway 和基于 Electron 的桌面客户端。\n" > DEBIAN/control
 
 # ----- 8) 安装后脚本 (postinst) -----
-# 负责：刷新 systemd 缓存 → 为已登录用户启动服务 → 刷新桌面缓存
+# 负责：清理旧版 systemd 自启 → 刷新桌面缓存 → 为已登录用户创建快捷方式
 RUN cat << 'POSTINST_EOF' > DEBIAN/postinst
 #!/bin/sh
 set -e
@@ -366,8 +386,12 @@ if command -v loginctl >/dev/null 2>&1; then
         " 2>/dev/null || true
     done
 fi
-# 杀掉残留的旧 gateway 进程（旧 systemd 实例或手动启动的），释放 8000
-pkill -f /opt/crew-gateway/crew-gateway 2>/dev/null || true
+# 只杀掉各用户自己的旧 gateway 进程（旧 systemd 实例或手动启动的），释放 8000。
+# 不使用无用户范围的 pkill，避免安装/升级影响其他用户的进程。
+getent passwd 2>/dev/null | awk -F: '$3 >= 1000 && $3 < 65534 {print $3}' | while IFS= read -r uid; do
+    [ -n "$uid" ] || continue
+    pkill -u "$uid" -f '/opt/crew-gateway/crew-gateway([[:space:]]|$)' 2>/dev/null || true
+done
 
 # 3. 刷新桌面缓存
 command -v update-desktop-database >/dev/null 2>&1 \
@@ -431,9 +455,12 @@ if command -v systemctl >/dev/null 2>&1; then
     done
 fi
 
-# 暴力终止所有运行中的相关进程
-pkill -f /opt/crew-desktop/crew-desktop 2>/dev/null || true
-pkill -f /opt/crew-gateway/crew-gateway 2>/dev/null || true
+# 终止各用户自己的运行实例，不影响其他用户的桌面端或 gateway。
+getent passwd 2>/dev/null | awk -F: '$3 >= 1000 && $3 < 65534 {print $3}' | while IFS= read -r uid; do
+    [ -n "$uid" ] || continue
+    pkill -u "$uid" -f '/opt/crew-desktop/crew-desktop([[:space:]]|$)' 2>/dev/null || true
+    pkill -u "$uid" -f '/opt/crew-gateway/crew-gateway([[:space:]]|$)' 2>/dev/null || true
+done
 sleep 1
 
 # 移除各普通用户桌面上的快捷方式（与 postinst 第 4 步创建对应）

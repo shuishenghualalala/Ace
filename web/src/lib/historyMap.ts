@@ -37,6 +37,11 @@ export interface BackendHistoryItem {
   }>;
 }
 
+function nonNegativeCount(value: unknown): number {
+  const count = Number(value);
+  return Number.isFinite(count) ? Math.max(0, count) : 0;
+}
+
 export function normalizeTurnFileChanges(raw: unknown): TurnFileChangeSummary[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const files = raw.flatMap((item) => {
@@ -48,8 +53,8 @@ export function normalizeTurnFileChanges(raw: unknown): TurnFileChangeSummary[] 
     return [{
       path,
       name: String(value.name || path.split(/[\\/]/).pop() || path),
-      added: Math.max(0, Number(value.added || 0)),
-      removed: Math.max(0, Number(value.removed || 0)),
+      added: nonNegativeCount(value.added),
+      removed: nonNegativeCount(value.removed),
       status,
       ...(value.binary === true ? { binary: true } : {}),
     } satisfies TurnFileChangeSummary];

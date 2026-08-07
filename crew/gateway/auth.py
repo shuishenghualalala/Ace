@@ -15,9 +15,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Request as FastAPIRequest
 from fastapi import WebSocket
+
+from crew.security.settings import strict_security_enabled
 
 LOCAL_OWNER_ACCOUNT_ID = "local"
 REMOTE_AUTH_COOKIE = "crew_auth_session"
@@ -86,6 +89,8 @@ def _read_session_key(path: Path) -> bytes:
         if stat.S_ISLNK(before.st_mode) or not _metadata_is_secure(before):
             raise AuthenticationError("本地认证会话密钥权限无效")
         flags = os.O_RDONLY
+        if os.name == "nt" and hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
         if os.name != "nt" and hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(path, flags)
@@ -126,6 +131,8 @@ def _load_or_create_session_key() -> bytes:
         return _read_session_key(path)
     key = secrets.token_bytes(32)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if os.name == "nt" and hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
     if os.name != "nt" and hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -246,6 +253,19 @@ def is_loopback_client(host: str | None) -> bool:
         return host in {"localhost", "testclient"}
 
 
+def is_loopback_host(host: str | None) -> bool:
+    """Return whether a configured bind host is loopback-only."""
+    if not host:
+        return False
+    normalized = str(host).strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
 def account_from_request(request: FastAPIRequest) -> AccountContext:
     """Read the authenticated account context attached by middleware."""
 
@@ -281,6 +301,15 @@ async def authenticate_http_request(request: FastAPIRequest, config: Any | None 
 
 async def authenticate_websocket(socket: WebSocket, config: Any | None = None) -> AccountContext:
     """Authenticate a local WebSocket with the same policy as HTTP."""
+
+    origin = str(socket.headers.get("origin") or "").strip()
+    if strict_security_enabled() and origin and origin not in {"null", "file://"}:
+        try:
+            parsed = urlsplit(origin)
+        except ValueError as exc:
+            raise AuthenticationError("WebSocket Origin 非法") from exc
+        if parsed.scheme not in {"http", "https"} or not is_loopback_host(parsed.hostname):
+            raise AuthenticationError("WebSocket Origin 不受信任")
 
     client_host = socket.client.host if socket.client else None
     if not is_loopback_client(client_host):

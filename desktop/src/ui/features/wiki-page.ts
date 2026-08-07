@@ -167,6 +167,7 @@ const FOLDER_ORDER = new Map<string, number>(
 /** 页面类型元数据：order 同时驱动文件树排序与类型视图分组顺序（一张表，防双表漂移）。 */
 export const TYPE_META: Record<WikiPageType, { order: number; label: string; shortLabel: string }> = {
   entity: { order: 0, label: '关键词', shortLabel: '关键词' },
+  concept: { order: 0, label: '概念', shortLabel: '概念' },
   topic: { order: 1, label: '话题', shortLabel: '话题' },
   source: { order: 2, label: '来源摘要', shortLabel: '摘要' },
   comparison: { order: 3, label: '对比分析', shortLabel: '对比' },

@@ -7,6 +7,8 @@
  * 目标元素不存在时（如未登录态缺少对话栏）自动跳过该步。
  */
 
+import { setRuntimeStyle } from '../components/runtime-style';
+
 const TOUR_SEEN_KEY = 'crew.desktop.wikiTourSeen.v1';
 const HIGHLIGHT_PADDING = 6;
 const TOOLTIP_GAP = 12;
@@ -104,8 +106,8 @@ function placeTooltip(tooltip: HTMLElement, rect: DOMRect): void {
     left = clamp(rect.left + rect.width / 2 - tipW / 2, VIEWPORT_MARGIN, vw - tipW - VIEWPORT_MARGIN);
   }
 
-  tooltip.style.left = `${Math.round(left)}px`;
-  tooltip.style.top = `${Math.round(top)}px`;
+  setRuntimeStyle(tooltip, 'left', `${Math.round(left)}px`);
+  setRuntimeStyle(tooltip, 'top', `${Math.round(top)}px`);
 }
 
 function showStep(index: number): void {
@@ -122,10 +124,10 @@ function showStep(index: number): void {
   const tooltip = container.querySelector<HTMLElement>('.wiki-tour__tooltip');
   if (!highlight || !tooltip) return;
 
-  highlight.style.left = `${step.rect.left - HIGHLIGHT_PADDING}px`;
-  highlight.style.top = `${step.rect.top - HIGHLIGHT_PADDING}px`;
-  highlight.style.width = `${step.rect.width + HIGHLIGHT_PADDING * 2}px`;
-  highlight.style.height = `${step.rect.height + HIGHLIGHT_PADDING * 2}px`;
+  setRuntimeStyle(highlight, 'left', `${step.rect.left - HIGHLIGHT_PADDING}px`);
+  setRuntimeStyle(highlight, 'top', `${step.rect.top - HIGHLIGHT_PADDING}px`);
+  setRuntimeStyle(highlight, 'width', `${step.rect.width + HIGHLIGHT_PADDING * 2}px`);
+  setRuntimeStyle(highlight, 'height', `${step.rect.height + HIGHLIGHT_PADDING * 2}px`);
 
   tooltip.querySelector('.wiki-tour__title')!.textContent = step.title;
   tooltip.querySelector('.wiki-tour__desc')!.textContent = step.desc;

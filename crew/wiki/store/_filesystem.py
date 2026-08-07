@@ -697,7 +697,7 @@ class FileSystemWikiStore(WikiStore):
             base = self._dir(owner_account_id, kb_id)
             if not page.file_path:
                 file_path = page_file_path(base, page.page_type, page.title)
-                page.file_path = str(file_path.relative_to(base))
+                page.file_path = file_path.relative_to(base).as_posix()
             if not page.id:
                 page.id = page_id(page.page_type, page.title)
             now = time.time()
@@ -756,7 +756,7 @@ class FileSystemWikiStore(WikiStore):
                         continue
                     seen_paths.add(resolved)
                     try:
-                        rel = str(path.relative_to(base))
+                        rel = path.relative_to(base).as_posix()
                         if brief:
                             page = self._deserialize_page_brief_from_file(path, rel)
                         else:
@@ -1418,7 +1418,7 @@ class FileSystemWikiStore(WikiStore):
             "pages": len(legacy_pages),
             "source_pages_to_classify": len(flat_source_pages),
             "sources": len(legacy_sources),
-            "internal_paths": [str(path.relative_to(base)) for path in legacy_internal],
+            "internal_paths": [path.relative_to(base).as_posix() for path in legacy_internal],
             "vault_path": str(base.resolve()),
         }
 
@@ -1431,7 +1431,7 @@ class FileSystemWikiStore(WikiStore):
         base = self._dir(owner_account_id, kb_id)
         preview = self.layout_migration_preview(owner_account_id, kb_id)
         collisions = [
-            str((base / "wiki" / sub / path.name).relative_to(base))
+            (base / "wiki" / sub / path.name).relative_to(base).as_posix()
             for sub in _PAGE_DIRS
             for path in (base / sub).glob("*.md")
             if (base / "wiki" / sub / path.name).exists()
@@ -1441,7 +1441,7 @@ class FileSystemWikiStore(WikiStore):
         for path in flat_source_pages:
             page = deserialize_page(
                 path.read_text(encoding="utf-8", errors="replace"),
-                str(path.relative_to(base)),
+                path.relative_to(base).as_posix(),
             )
             raw = (
                 self.load_raw(page.sources[0], owner_account_id, kb_id)
@@ -1454,7 +1454,7 @@ class FileSystemWikiStore(WikiStore):
             )
             target = base / "wiki" / "sources" / source_dir / path.name
             if target.exists():
-                collisions.append(str(target.relative_to(base)))
+                collisions.append(target.relative_to(base).as_posix())
             source_page_targets.append((path, target, page))
         if collisions:
             raise FileExistsError(
@@ -1481,7 +1481,7 @@ class FileSystemWikiStore(WikiStore):
 
         for path, target, page in source_page_targets:
             target.parent.mkdir(parents=True, exist_ok=True)
-            page.file_path = str(target.relative_to(base))
+            page.file_path = target.relative_to(base).as_posix()
             target.write_text(serialize_page(page), encoding="utf-8")
             path.unlink()
             self._search_index(owner_account_id, kb_id).sync_page(page)

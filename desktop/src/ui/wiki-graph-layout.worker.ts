@@ -1,7 +1,7 @@
 /**
- * Wiki 图谱力导向布局 Worker。
+ * Wiki 图谱力导向布局 Worker（Phase 3）。
  *
- * 与 web/src/components/wikiGraphLayout.worker.ts 使用同一套零依赖物理模拟：
+ * 移植自 web/src/components/wikiGraphLayout.worker.ts（零依赖自研物理模拟：
  * 斥力 / 弹簧引力 / 碰撞 / 居中度，tick 迭代），把 O(n²) 计算放到独立线程，
  * 避免主线程卡顿。本文件零 import、自包含：esbuild 打成独立 iife 产物
  * （dist/assets/wiki-graph-layout.worker.js），renderer 以相对路径

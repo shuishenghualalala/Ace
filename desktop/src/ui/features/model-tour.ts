@@ -6,6 +6,7 @@
  */
 
 import type { BackendConfig } from '../backend-client';
+import { clearRuntimeStyle, setRuntimeStyle } from '../components/runtime-style';
 
 const MODEL_TOUR_SEEN_KEY = 'crew.desktop.modelTourSeen.v1';
 const HIGHLIGHT_PADDING = 6;
@@ -99,8 +100,8 @@ function placeTooltip(tooltip: HTMLElement, rect: DOMRect): void {
     top = rect.top + rect.height / 2 - tipHeight / 2;
   }
 
-  tooltip.style.left = `${Math.round(clamp(left, VIEWPORT_MARGIN, vw - tipWidth - VIEWPORT_MARGIN))}px`;
-  tooltip.style.top = `${Math.round(clamp(top, VIEWPORT_MARGIN, vh - tipHeight - VIEWPORT_MARGIN))}px`;
+  setRuntimeStyle(tooltip, 'left', `${Math.round(clamp(left, VIEWPORT_MARGIN, vw - tipWidth - VIEWPORT_MARGIN))}px`);
+  setRuntimeStyle(tooltip, 'top', `${Math.round(clamp(top, VIEWPORT_MARGIN, vh - tipHeight - VIEWPORT_MARGIN))}px`);
 }
 
 function cancelLayout(): void {
@@ -144,11 +145,12 @@ function layoutStep(step: ModelTourStep): void {
   const padding = step.highlightPadding ?? HIGHLIGHT_PADDING;
   highlight.hidden = false;
   tooltip.hidden = false;
-  highlight.style.left = `${Math.round(rect.left - padding)}px`;
-  highlight.style.top = `${Math.round(rect.top - padding)}px`;
-  highlight.style.width = `${Math.round(rect.width + padding * 2)}px`;
-  highlight.style.height = `${Math.round(rect.height + padding * 2)}px`;
-  highlight.style.borderRadius = step.highlightRadius == null ? '' : `${step.highlightRadius}px`;
+  setRuntimeStyle(highlight, 'left', `${Math.round(rect.left - padding)}px`);
+  setRuntimeStyle(highlight, 'top', `${Math.round(rect.top - padding)}px`);
+  setRuntimeStyle(highlight, 'width', `${Math.round(rect.width + padding * 2)}px`);
+  setRuntimeStyle(highlight, 'height', `${Math.round(rect.height + padding * 2)}px`);
+  if (step.highlightRadius == null) clearRuntimeStyle(highlight, 'borderRadius');
+  else setRuntimeStyle(highlight, 'borderRadius', `${step.highlightRadius}px`);
 
   tooltip.querySelector('.wiki-tour__title')!.textContent = step.title;
   tooltip.querySelector('.wiki-tour__desc')!.textContent = step.desc;

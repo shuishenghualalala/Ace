@@ -1,7 +1,8 @@
 /**
  * 会话生命周期：打开 / 历史回填 / 网关 socket 引导 / 后端状态水合。
- * 提供 openSession / loadBackendHistory / bootstrapBackend /
- * hydrateBackendState / ensureDesktopGateway。
+ *
+ * 从 ui/index.ts 抽出（X2）：openSession / loadBackendHistory / bootstrapBackend /
+ * hydrateBackendState / ensureDesktopGateway 原样搬迁。
  *
  * 依赖方向（无循环）：session-controller → chat-controller（applyChunk / renderChat 等）
  * 及其它 feature 模块；index.ts init 时调用本模块完成引导。
@@ -13,11 +14,11 @@ import { renderWorkspaceHistory } from './workspaces';
 import { refreshKanbanBoard } from './kanban-board';
 import { refreshCronJobs } from './cron-page';
 import { findChannelSession, loadChannelSessions } from './channel-sessions';
-import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate } from './workspaces';
+import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate, syncSessionsFromBackend } from './workspaces';
 import { loadConfig } from './model-picker';
 import { externalAgentsEnabled, isExternalAgentOrTeamSession } from './external-agents-feature';
 import { resetToAgentMode } from './session-mode';
-import { loadSessionModel, syncSessionModelUi } from './session-model';
+import { loadSessionModel, mergeSessionModelsFromBackend, syncSessionModelUi } from './session-model';
 import { loadInspectorContext, refreshInspector } from './inspector';
 import { syncCraftLabel } from './composer-toolbar';
 import {
@@ -56,6 +57,7 @@ import { getLastGatewaySequences } from './gateway-sequence';
 import { resetSessionExcept } from '../stream-reassembly';
 import { syncSessionLiveFromBackend } from './session-busy';
 import { startStreamWatchdog } from './stream-watchdog';
+import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import { logStream } from '../stream-debug';
 import { sessionStore } from '../stores/stores';
 import { hydrateTurnFoldFromStorage } from './fold-state';
@@ -66,7 +68,12 @@ export function setSessionControllerSetTab(fn: (tab: TabKey) => void): void {
   setTabFn = fn;
 }
 
-export async function openSession(sessionId: string): Promise<void> {
+/** Hydrates a session and optionally leaves the current product page active. */
+export async function openSession(
+  sessionId: string,
+  options: { activateChat?: boolean } = {},
+): Promise<void> {
+  if (!requireRendererLogin()) return;
   discardDraft();
   // 重新打开会话会重载消息，清掉可能残留的编辑态（避免 editFromIdx 指向失效下标）
   setEditFrom(sessionId, null);
@@ -87,14 +94,15 @@ export async function openSession(sessionId: string): Promise<void> {
       if (changed && state.activeSessionId === sessionId) renderChat();
     });
   }
-  state.mode = state.activeExternalTeamIdBySession[sessionId] ? 'team' : 'agent';
+  // 打开已有会话：默认 agent 模式（专家/专家团功能已随旧品牌残留移除）
+  state.mode = 'agent';
   state.taskBoardOpen = false;
   syncCraftLabel();
   syncSessionModelUi();
   renderWorkspaceHistory(openSession);
   void refreshKanbanBoard(sessionId);
   renderChat();
-  // 会话切换：强制跳到底部（重置 stickyBottom）。采用 的「session change → jumpToBottom」。
+  // 会话切换：强制跳到底部（重置 stickyBottom）。对齐 hermes 的「session change → jumpToBottom」。
   jumpChatToBottom();
   void refreshCronJobs();
   await loadSessionTodos(sessionId);
@@ -103,11 +111,11 @@ export async function openSession(sessionId: string): Promise<void> {
   refreshInspector();
   window.dispatchEvent(new CustomEvent('session:changed', { detail: { sessionId } }));
   window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId } }));
-  setTabFn('chat');
+  if (options.activateChat !== false) setTabFn('chat');
   // Debug: URL hash auto-switch
   if (typeof window !== 'undefined' && window.location.hash) {
     const m = window.location.hash.match(/tab=([a-z]+)/);
-    if (m && ['chat','agents','skills','cron','audit','system'].includes(m[1])) {
+    if (m && ['chat','skills','cron','audit','system'].includes(m[1])) {
       setTabFn(m[1] as TabKey);
     }
   }
@@ -160,6 +168,7 @@ export function sessionsAffectedByDisconnect(): string[] {
 const historyLoadSeq = new Map<string, number>();
 
 export async function loadBackendHistory(sessionId: string): Promise<void> {
+  if (!isRendererLoggedIn()) return;
   const loadSeq = (historyLoadSeq.get(sessionId) ?? 0) + 1;
   historyLoadSeq.set(sessionId, loadSeq);
   const isLatestLoad = () => historyLoadSeq.get(sessionId) === loadSeq;
@@ -205,21 +214,14 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
     // todoSnapshot 挂到最后一条 assistant（最新进度）。两者可能不是同一条消息，分开挂载。
     const wantPlan = Boolean(planState?.has_plan && planState.plan);
     const rawTodos = Array.isArray(todoState?.todos) ? todoState.todos : [];
-    const todos: TodoItem[] = rawTodos.map((raw) => {
-      const todo = raw && typeof raw === 'object'
-        ? raw as Record<string, unknown>
-        : {};
-      const status = todo.status === 'in_progress'
-        || todo.status === 'completed'
-        || todo.status === 'cancelled'
-        ? todo.status
-        : 'pending';
-      return {
-        id: typeof todo.id === 'string' ? todo.id : '?',
-        content: typeof todo.content === 'string' ? todo.content : '',
-        status,
-      };
-    });
+    const todos: TodoItem[] = rawTodos.map((t: any) => ({
+      id: typeof t.id === 'string' ? t.id : '?',
+      content: typeof t.content === 'string' ? t.content : '',
+      status:
+        t.status === 'in_progress' || t.status === 'completed' || t.status === 'cancelled'
+          ? t.status
+          : 'pending',
+    }));
     if (wantPlan) {
       let planIdx = -1;
       for (let i = merged.length - 1; i >= 0; i--) {
@@ -269,7 +271,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
     }
     if (todos.length > 0) setBookTodos(sessionId, todos);
     replaceSessionMessages(sessionId, merged);
-    // 历史替换后清掉已被替换回合的 delta 重组缓冲，保留仍在 live 流式的尾巴。
+    // 修法3：历史替换后清掉已被替换掉的旧回合 delta 重组缓冲；保留仍在 live 流式的尾巴
     // （其 assistantId 在 merged 里）。避免旧回合缓冲残留导致泄漏 / 串轮。
     resetSessionExcept(sessionId, new Set(merged.map((m) => m.id)));
     // 旧历史 turnFileChanges 可能只有路径、计数为 0：异步读盘补全 +/-，再重绘对话卡。
@@ -325,7 +327,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
   } catch {
     if (isLatestLoad()) replaceSessionMessages(sessionId, []);
   } finally {
-    // history 写回完成：flush 期间排队的迟到分片，再清 loading 标记。
+    // history 写回完成：flush 期间排队的迟到分片（P2-2），再清 loading 标记。
     // 仅最新请求收尾：旧请求不得清 loading（新请求仍在排队窗口内）也不得 flush。
     if (isLatestLoad()) {
       setHistoryLoading(sessionId, false);
@@ -368,6 +370,7 @@ function bindChannelSessionListener(): void {
 
 export function bootstrapBackend(): void {
   bindChannelSessionListener();
+  if (!isRendererLoggedIn()) return;
   state.socket?.dispose();
   state.socket = new BackendChatSocket(
     (chunk) => applyChunk(chunk),
@@ -421,6 +424,7 @@ export function bootstrapBackend(): void {
 }
 
 export async function hydrateBackendState(): Promise<void> {
+  if (!isRendererLoggedIn()) return;
   // 各路后端加载相互隔离：任一路失败不阻断其余，也不再让 sessions 挂掉连累 workspaces。
   // loadSessionsList / loadWorkspaces 内部已自带 try-catch + 错误态（区分「加载失败 vs 真空」），
   // 这里只对没有内部容错的 loadConfig/loadChannelSessions 包一层。
@@ -457,7 +461,7 @@ export async function ensureDesktopGateway(): Promise<void> {
   try {
     const result = await ensureGateway();
     if (result?.baseUrl) {
-      localStorage.setItem('crew.gatewayBase', result.baseUrl);
+      localStorage.setItem('Crew.gatewayBase', result.baseUrl);
     }
   } catch {
     // 桌面端没有成功拉起 gateway 时，继续走默认连接状态和页面提示。

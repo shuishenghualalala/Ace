@@ -2130,9 +2130,9 @@ button { font-family: inherit; cursor: pointer; }
   width: min(620px, 100%);
   margin-top: 12px;
   overflow: hidden;
-  border: 1px solid rgba(131, 124, 113, .2);
-  border-radius: 9px;
-  background: rgba(255, 255, 255, .74);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
 }
 .turn-file-changes__header {
   display: flex;
@@ -2141,7 +2141,7 @@ button { font-family: inherit; cursor: pointer; }
   gap: 12px;
   min-height: 38px;
   padding: 8px 11px;
-  border-bottom: 1px solid rgba(131, 124, 113, .14);
+  border-bottom: 1px solid var(--border);
 }
 .turn-file-changes__header strong {
   font-size: 13px;
@@ -2159,18 +2159,18 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 11px;
   font-style: normal;
   line-height: 1.35;
-  background: rgba(111, 106, 97, .08);
-  color: #777168;
+  background: var(--bg-hover);
+  color: var(--text-3);
 }
 .turn-file-changes em.is-added,
 .turn-file-changes em.is-modified {
-  color: #4f7350;
-  background: rgba(91, 133, 82, .1);
+  color: var(--text-2);
+  background: var(--bg-soft);
 }
 .turn-file-changes em.is-removed,
 .turn-file-changes em.is-deleted {
-  color: #a25f55;
-  background: rgba(171, 88, 75, .09);
+  color: var(--text);
+  background: var(--bg-active);
 }
 .turn-file-changes__list {
   margin: 0;
@@ -2178,7 +2178,7 @@ button { font-family: inherit; cursor: pointer; }
   list-style: none;
 }
 .turn-file-changes__list li + li {
-  border-top: 1px solid rgba(131, 124, 113, .1);
+  border-top: 1px solid var(--border);
 }
 .turn-file-changes__list button {
   display: flex;
@@ -2188,14 +2188,14 @@ button { font-family: inherit; cursor: pointer; }
   width: 100%;
   padding: 8px 11px;
   border: 0;
-  background: transparent;
+  background: var(--bg);
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 .turn-file-changes__list button:hover:not(:disabled) {
-  background: rgba(92, 119, 80, .05);
+  background: var(--bg-hover);
 }
 .turn-file-changes__list button:disabled {
   cursor: default;
@@ -2208,7 +2208,7 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 12px;
 }
 .turn-file-changes__path > span {
-  color: #999289;
+  color: var(--text-3);
 }
 .turn-file-changes__path > strong {
   font-weight: 600;
@@ -2217,9 +2217,9 @@ button { font-family: inherit; cursor: pointer; }
   width: 100%;
   padding: 7px 11px;
   border: 0;
-  border-top: 1px solid rgba(131, 124, 113, .1);
-  background: transparent;
-  color: #777168;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-3);
   font: inherit;
   font-size: 12px;
   text-align: left;
@@ -8330,62 +8330,4 @@ button { font-family: inherit; cursor: pointer; }
 .wiki-sources-view__actions .wiki-card__btn {
   padding: 4px 10px;
   font-size: 12px;
-}
-/* Provider-neutral remote login. Local mode never renders this surface. */
-.auth-page {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: #f5f7fb;
-  color: #172033;
-}
-
-.auth-card {
-  width: min(420px, 100%);
-  display: grid;
-  gap: 16px;
-  padding: 32px;
-  border: 1px solid #e3e8f1;
-  border-radius: 20px;
-  background: #fff;
-  box-shadow: 0 18px 50px rgba(30, 52, 90, 0.12);
-}
-
-.auth-brand { color: #316ff6; font-weight: 800; letter-spacing: .08em; }
-.auth-card h1 { margin: 0; font-size: 28px; }
-.auth-card p { margin: 0; color: #667085; line-height: 1.6; }
-.auth-card label { display: grid; gap: 8px; font-size: 14px; font-weight: 600; }
-.auth-card input {
-  min-width: 0;
-  padding: 11px 12px;
-  border: 1px solid #d4dbe7;
-  border-radius: 10px;
-  font: inherit;
-}
-.auth-code-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
-.auth-code-row button, .auth-submit {
-  padding: 10px 14px;
-  border: 0;
-  border-radius: 10px;
-  background: #316ff6;
-  color: #fff;
-  font-weight: 700;
-  cursor: pointer;
-}
-.auth-code-row button:disabled, .auth-submit:disabled { opacity: .55; cursor: default; }
-.auth-message { padding: 10px 12px; border-radius: 10px; background: #eef4ff; color: #344054; font-size: 13px; }
-.auth-message.is-error { background: #fff0f0; color: #b42318; }
-.auth-logout {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 100;
-  padding: 8px 12px;
-  border: 1px solid #d5dce8;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .94);
-  color: #475467;
-  box-shadow: 0 4px 16px rgba(30, 52, 90, .12);
-  cursor: pointer;
 }

@@ -1,6 +1,6 @@
 """单 Agent 运行时：会话编排器。
 
-职责（用于 run_conversation 的外层）：
+职责（对照 Hermes run_conversation 的外层）：
   load 历史 -> 追加 user(含附件) -> 记忆预取 -> 构建 system(静态) + reminder(动态)
   -> 委托 AgentExecutor 执行（产出帧透传）-> 保存会话 -> 记忆写入 -> 会话标题
 
@@ -284,7 +284,7 @@ class SingleAgent(Agent):
             else None
         )
         # 轻量模式（子 agent）：跳过全局 SOUL/MEMORY/USER/上下文文件/skills 注入，
-        # 用于 子 agent 的 skip_memory / skip_context_files。
+        # 对照 Hermes 子 agent 的 skip_memory / skip_context_files。
         self.lightweight = lightweight
         # 本 Agent 的可控性句柄（steer / interrupt）。AgentManager 按 session 缓存 Agent，
         # 故一个实例对应一个 session；gateway 经 CrewApp.steer/interrupt 路由到这里。
@@ -388,7 +388,7 @@ class SingleAgent(Agent):
                         })
                         continue  # 图像不再作为文本附件注入
 
-                # 非图像附件：读取文本内容。
+                # 非图像附件：按原逻辑读取文本内容
                 if not content and path:
                     content = _read_attachment(path)
                 if content:
@@ -651,7 +651,7 @@ class SingleAgent(Agent):
         current_parent_task_id.set(str(envelope.params.get("sidechain_task_id") or ""))
         current_workspace_id.set(envelope.workspace_id)
         current_owner_account_id.set(envelope.user_id)
-        # 热刷新当前 owner 的运行期 env：本地开发配置 + owner 私有 .env。
+        # 热刷新当前 owner 的运行期 env：config/.env + owner .env + session.json。
         from crew.state.home import refresh_owner_runtime_env
 
         refresh_owner_runtime_env(envelope.user_id)
@@ -675,11 +675,14 @@ class SingleAgent(Agent):
         # 子 Agent 的 ``model=inherit`` 读取父 Agent 实际生效能力；会话绑定模型、
         # owner 模型与全局模型因此走同一条能力约束链。
         current_model_capabilities.set(self.model_capabilities)
-        # 暴露当前生效 skill 范围，供 delegate_task 子 agent 继承父级技能
+        # 暴露当前生效 skill 范围，供 delegate_task 子 agent 继承父（含 expert）的技能
         current_skill_scope.set((self.enabled_skills, self.disabled_skills))
         # 同步当前已展开的 skill packages，供 build_skills_index_prompt 展开内部 skills
         active_packages = envelope.params.get("active_skill_packages") or []
         current_active_skill_packages.set(set(active_packages))
+        from crew.security.launch import current_process_launch
+
+        current_process_launch.set(envelope.params.get("_security_process_launch"))
         # 专用 Wiki Agent 自行建立 KB 状态；普通会话不创建 Wiki 会话状态。
         if (
             self.wiki_manager is not None
@@ -729,12 +732,35 @@ class SingleAgent(Agent):
         user_message.timestamp = turn_started_at
         history.append(user_message)
 
+        if is_new and self.enable_title and not self.lightweight:
+            if not self._session_needs_title(task_sid, owner):
+                try:
+                    self.session_store.save(
+                        task_sid,
+                        history,
+                        workspace_id=envelope.workspace_id,
+                        owner_account_id=owner,
+                        title_fallback="",
+                    )
+                except Exception:  # noqa: BLE001
+                    log.debug("创建会话标题占位失败 session=%s", task_sid)
+            from crew.core.runctx import current_push_fn
+
+            if self._session_needs_title(task_sid, owner):
+                self._spawn_title_task(
+                    task_sid,
+                    owner,
+                    history,
+                    current_push_fn.get(),
+                    user_only=True,
+                )
+
         # Skill 展开内容写入 canonical history（is_meta=True，前端不渲染但模型可见）
         skill_meta = envelope.params.get("skill_meta")
         if skill_meta:
             history.append(Message.user(skill_meta, is_meta=True))
 
-        # Crew-style hidden plan attachments: persist in canonical history so
+        # OCC-style hidden plan attachments: persist in canonical history so
         # future turns can see prior reminders and throttle by user turns.
         if self.plan_manager is not None:
             history.extend(
@@ -1194,11 +1220,13 @@ class SingleAgent(Agent):
         owner: str,
         history: list[Message],
         push_fn,
+        *,
+        user_only: bool = False,
     ) -> None:
         """后台生成会话标题并推送，不阻塞主推理或 final 帧发送。
 
-        只在主回合完成后调用，可携带 assistant snippet。同一 (owner, title_sid)
-        在途任务去重，避免重复 LLM 调用。
+        首轮开始时使用 ``user_only`` 与主回答并发；回合结束后的兜底调用可携带
+        assistant snippet。同一 (owner, title_sid) 在途任务去重，避免重复 LLM 调用。
         """
         inflight_key = (owner, title_sid)
         if inflight_key in self._title_inflight:
@@ -1210,7 +1238,14 @@ class SingleAgent(Agent):
                 title = await generate_session_title(
                     self.provider,
                     history,
+                    user_only=user_only,
                 )
+                if not title and self._session_needs_title(title_sid, owner):
+                    title = await generate_session_title(
+                        self.provider,
+                        history,
+                        user_only=user_only,
+                    )
                 if not title:
                     return
                 try:
@@ -1319,7 +1354,7 @@ class SingleAgent(Agent):
         history.extend(new_msgs)
 
         # 子 agent（lightweight）的会话用完即弃：不落库、不写记忆，避免 SQLite 堆积
-        # 一次性 uuid 会话（用于 子 agent 的 ephemeral 会话）。
+        # 一次性 uuid 会话（对照 Hermes 子 agent 的 ephemeral 会话）。
         if not self.lightweight:
             t = time.perf_counter()
             try:

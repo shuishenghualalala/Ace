@@ -1,13 +1,16 @@
 /**
- * Composer 工具栏：Craft/Plan/Ask 下拉 + 外援 + 模型/Skills 浮层（移开鼠标关闭）。
+ * Composer 工具栏：Craft/Plan/Ask 下拉 + 模型/Skills/安全模式 浮层（移开鼠标关闭）。
  */
 
 import {
+  backendApi,
   type ExternalAgent,
   type ExternalRuntime,
   type ExternalTeam,
   type Skill,
 } from '../backend-client';
+import { setRuntimeStyle } from '../components/runtime-style';
+import { MONOCHROME_ICON_CLASS } from '../components/icon';
 import { getSkills, onSkillsChange } from './skill-store';
 import { $, $$, ensureSessionBook, escapeHtml, notify, patchBook, state, type ComposerMode } from '../state';
 import {
@@ -18,11 +21,11 @@ import {
   getSessionAgentDisplay,
   setComposerTargetWorkspace,
   visibleProjectWorkspaces,
+  workspaceForSessionDispatch,
   workspaceLabel,
 } from './workspaces';
 import { composerModelOptions, setSessionModel, activeComposerModelId, resolveComposerModelLabel } from './session-model';
 import { syncModelUi } from './model-picker';
-import { startModelTour } from './model-tour';
 import {
   loadExternalConversationCatalog,
   useAgent,
@@ -33,6 +36,17 @@ import {
   EXTERNAL_AGENTS_DISABLED_MESSAGE,
   externalAgentsEnabled,
 } from './external-agents-feature';
+import { showConfirmDialog } from '../ui-feedback';
+import { sessionStore } from '../stores/session-store';
+import { startModelTour } from './model-tour';
+import {
+  FULL_ACCESS_CONFIRMATION,
+  SECURITY_MODE_OPTIONS,
+  currentSecurityMode,
+  modeLabel,
+  selectNextConversationMode,
+  type ConversationSecurityMode,
+} from './security-approval';
 
 type ComposerEntry = ComposerMode | 'external';
 
@@ -40,6 +54,7 @@ const CRAFT_OPTIONS: { value: ComposerEntry; label: string; desc: string }[] = [
   { value: 'craft', label: '智能体', desc: '默认单 Agent 创作' },
   { value: 'plan', label: '计划模式', desc: '先出方案 · 审批后再执行' },
   { value: 'external', label: '外援', desc: '选择已接入的智能体或团队' },
+  // { value: 'ask', label: '问答', desc: '交给 Team 协作回答' },  // 「问答」模式暂时下线；ask 模式位保留，恢复时取消注释即可
 ];
 
 function visibleCraftOptions(): typeof CRAFT_OPTIONS {
@@ -52,38 +67,98 @@ let modelPopoverOpen = false;
 let skillsPopoverOpen = false;
 let craftPopoverOpen = false;
 let workspacePopoverOpen = false;
+let securityModePopoverOpen = false;
+let toolbarController: AbortController | null = null;
+let toolbarBoundTrigger: HTMLElement | null = null;
+
+type PopoverPlacement = 'auto' | 'down' | 'right';
+
 function mountFloatingPopover(
   anchor: HTMLElement,
   popover: HTMLElement,
   width = 300,
   align: 'start' | 'end' = 'start',
+  placement: PopoverPlacement = 'auto',
+  maxHeight?: number,
 ): void {
   popover.classList.add('composer-floating-popover');
-  const availableWidth = Math.max(0, window.innerWidth - 16);
-  const actualWidth = Math.min(width, availableWidth);
-  popover.style.width = `${actualWidth}px`;
+  popover.dataset.placement = placement;
+  const actualWidth = Math.min(width, Math.max(0, window.innerWidth - 16));
+  setRuntimeStyle(popover, 'width', `${actualWidth}px`);
   document.body.appendChild(popover);
-  scheduleFloatingPopoverPosition(anchor, popover, actualWidth, align);
+  window.dispatchEvent(new CustomEvent('composer:popover-opened'));
+  scheduleFloatingPopoverPosition(anchor, popover, actualWidth, align, placement, maxHeight);
 }
 
+/**
+ * 浮层定位：right 用于外援等右侧子菜单，横向空间不足时回退 auto；
+ * down=空间允许时向下，否则自动翻到上方；auto=空间允许优先向上，否则向下。
+ */
 function scheduleFloatingPopoverPosition(
   anchor: HTMLElement,
   popover: HTMLElement,
   width: number,
   align: 'start' | 'end' = 'start',
+  placement: PopoverPlacement = 'auto',
+  maxHeight = Number.POSITIVE_INFINITY,
 ): void {
   requestAnimationFrame(() => {
     if (!anchor.isConnected || !popover.isConnected) return;
     const rect = anchor.getBoundingClientRect();
-    const popoverHeight = popover.offsetHeight || 180;
-    const viewportBottom = Math.max(8, window.innerHeight - popoverHeight - 8);
-    const openUp = rect.top > popoverHeight + 12;
-    const desiredTop = openUp ? rect.top - popoverHeight - 6 : rect.bottom + 6;
-    const top = Math.max(8, Math.min(desiredTop, viewportBottom));
+    const ph = Math.min(popover.offsetHeight || 180, maxHeight);
+    const gap = 6;
+    if (placement === 'right') {
+      const availableRight = Math.max(0, window.innerWidth - rect.right - gap - 8);
+      const availableLeft = Math.max(0, rect.left - gap - 8);
+      const openRight = availableRight >= Math.min(width, 220) || availableRight >= availableLeft;
+      const sideSpace = openRight ? availableRight : availableLeft;
+      if (sideSpace >= Math.min(width, 220)) {
+        const nestedWidth = Math.min(width, sideSpace);
+        const availableHeight = Math.min(Math.max(0, window.innerHeight - 16), maxHeight);
+        const nestedHeight = Math.min(popover.offsetHeight || ph, availableHeight);
+        const left = openRight ? rect.right + gap : rect.left - nestedWidth - gap;
+        const top = Math.max(8, Math.min(
+          rect.bottom - nestedHeight,
+          window.innerHeight - nestedHeight - 8,
+        ));
+        setRuntimeStyle(popover, 'width', `${nestedWidth}px`);
+        setRuntimeStyle(popover, 'maxHeight', `${availableHeight}px`);
+        setRuntimeStyle(popover, 'left', `${Math.max(8, left)}px`);
+        setRuntimeStyle(popover, 'top', `${top}px`);
+        popover.dataset.resolvedPlacement = openRight ? 'right-up' : 'left-up';
+        return;
+      }
+    }
     let left = align === 'end' ? rect.right - width : rect.left;
     left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
-    popover.style.left = `${left}px`;
-    popover.style.top = `${top}px`;
+    setRuntimeStyle(popover, 'left', `${left}px`);
+    if (placement === 'down') {
+      const availableBelow = Math.max(0, window.innerHeight - rect.bottom - gap - 8);
+      const availableAbove = Math.max(0, rect.top - gap - 8);
+      const openDown = availableBelow >= ph || availableBelow >= availableAbove;
+      const available = openDown ? availableBelow : availableAbove;
+      const effectiveHeight = Math.min(ph, available);
+      popover.dataset.resolvedPlacement = openDown ? 'down' : 'up';
+      setRuntimeStyle(
+        popover,
+        'top',
+        openDown ? `${rect.bottom + gap}px` : `${Math.max(8, rect.top - gap - effectiveHeight)}px`,
+      );
+      setRuntimeStyle(popover, 'maxHeight', `${Math.min(available, maxHeight)}px`);
+      return;
+    }
+    const availableAbove = Math.max(0, rect.top - gap - 8);
+    const availableBelow = Math.max(0, window.innerHeight - rect.bottom - gap - 8);
+    const openUp = availableAbove >= ph || (availableBelow < ph && availableAbove >= availableBelow);
+    const available = openUp ? availableAbove : availableBelow;
+    const effectiveHeight = Math.min(ph, available);
+    popover.dataset.resolvedPlacement = openUp ? 'up' : 'down';
+    setRuntimeStyle(
+      popover,
+      'top',
+      openUp ? `${Math.max(8, rect.top - gap - effectiveHeight)}px` : `${rect.bottom + gap}px`,
+    );
+    setRuntimeStyle(popover, 'maxHeight', `${Math.min(available, maxHeight)}px`);
   });
 }
 
@@ -97,6 +172,13 @@ function closeModelPopover(): void {
   modelPopoverOpen = false;
   $('#chat-model-inline-popover')?.remove();
   $('#chat-model-picker-inline-btn')?.classList.remove('is-open');
+}
+
+function closeSecurityModeInline(): void {
+  securityModePopoverOpen = false;
+  $('#chat-security-mode-inline-popover')?.remove();
+  $('#chat-security-mode-btn')?.classList.remove('is-open');
+  $('#chat-security-mode-btn')?.setAttribute('aria-expanded', 'false');
 }
 
 function closeSkillsPopover(): void {
@@ -126,7 +208,9 @@ function syncComposerWorkspaceRowVisibility(): void {
   const row = document.getElementById('chat-workspace-row');
   if (!row) return;
   const show = canSwitchComposerWorkspace();
+  const host = row.parentElement;
   row.hidden = !show;
+  if (host?.matches('[data-composer-context-target="project"]')) host.hidden = !show;
   if (!show) closeWorkspacePopover();
 }
 
@@ -139,23 +223,17 @@ function syncComposerWorkspaceLabel(): void {
 
   const id = composerWorkspaceId();
   const isDefault = id === 'default';
-  label.textContent = isDefault ? '工作空间' : workspaceLabel(id);
-  btn.title = isDefault ? '选择工作空间' : `工作空间：${label.textContent}`;
+  label.textContent = isDefault ? '不在项目中工作' : workspaceLabel(id);
+  btn.title = isDefault ? '选择项目' : `项目：${label.textContent}`;
   btn.classList.toggle('is-named', !isDefault);
   btn.classList.remove('is-locked');
 }
 
 function filterWorkspacePopoverList(popover: HTMLElement, query: string): void {
   const q = query.trim().toLowerCase();
-  const section = popover.querySelector<HTMLElement>('[data-workspace-section="projects"]');
-  const openRow = popover.querySelector<HTMLElement>('[data-workspace-open-local]');
-  if (section) section.hidden = Boolean(q);
-  if (openRow) openRow.style.display = q ? 'none' : '';
-  popover.querySelectorAll<HTMLElement>('[data-workspace-filterable]').forEach((row) => {
-    if (row.hasAttribute('data-workspace-open-local')) return;
+  popover.querySelectorAll<HTMLElement>('[data-workspace-project]').forEach((row) => {
     const name = row.querySelector('.composer-select-item__title')?.textContent?.toLowerCase() ?? '';
-    const path = row.querySelector('.composer-select-item__desc')?.textContent?.toLowerCase() ?? '';
-    row.style.display = !q || name.includes(q) || path.includes(q) ? '' : 'none';
+    row.hidden = Boolean(q && !name.includes(q));
   });
 }
 
@@ -174,38 +252,18 @@ function renderWorkspacePopover(): void {
   popover.id = 'chat-workspace-popover';
   popover.innerHTML = `
     <div class="composer-select-popover__search">
-      <input type="search" class="chat-popover-search-input" placeholder="搜索工作空间" id="chat-workspace-search-input" autocomplete="off" />
+      <svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-search"></use></svg>
+      <input type="search" class="chat-popover-search-input" placeholder="搜索项目" id="chat-workspace-search-input" autocomplete="off" />
     </div>
-    <button type="button" class="composer-select-item composer-select-item--nav" data-workspace-open-local data-workspace-filterable>
-      <span class="composer-select-item__icon composer-select-item__icon--tone-4">${WORKSPACE_OPEN_ICON}</span>
-      <span class="composer-select-item__body">
-        <span class="composer-select-item__title">打开本地工作空间</span>
-        <span class="composer-select-item__desc">选择文件夹并绑定为项目</span>
-      </span>
-      <span class="composer-select-item__arrow" aria-hidden="true">›</span>
-    </button>
-    <div class="composer-select-popover__divider" role="separator"></div>
-    <div class="composer-select-popover__section" data-workspace-section="projects">我的工作空间</div>
-    <div class="composer-select-popover__list" role="listbox" aria-label="工作空间">
-      <button type="button" class="composer-select-item${current === 'default' ? ' is-selected' : ''}" data-workspace-id="default" data-workspace-filterable>
-        <span class="composer-select-item__icon composer-select-item__icon--tone-0">${WORKSPACE_GLOBE_ICON}</span>
-        <span class="composer-select-item__body">
-          <span class="composer-select-item__title">从新工作空间开始</span>
-          <span class="composer-select-item__desc">不绑定项目目录的通用对话</span>
-        </span>
-        ${current === 'default' ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
-      </button>
+    <div class="composer-select-popover__list" role="listbox" aria-label="项目">
       ${projects
         .map((ws) => {
-          const sub = ws.root_path?.trim() ?? '';
           const selected = ws.id === current;
-          const tone = workspaceToneIndex(ws.id);
           return `
-        <button type="button" class="composer-select-item${selected ? ' is-selected' : ''}" data-workspace-id="${escapeHtml(ws.id)}" data-workspace-filterable>
-          <span class="composer-select-item__icon composer-select-item__icon--tone-${tone}">${WORKSPACE_FOLDER_ICON}</span>
+        <button type="button" class="composer-select-item${selected ? ' is-selected' : ''}" data-workspace-id="${escapeHtml(ws.id)}" data-workspace-project>
+          <span class="composer-select-item__plain-icon">${WORKSPACE_FOLDER_ICON}</span>
           <span class="composer-select-item__body">
             <span class="composer-select-item__title">${escapeHtml(ws.name)}</span>
-            ${sub ? `<span class="composer-select-item__desc">${escapeHtml(sub)}</span>` : '<span class="composer-select-item__desc">本地项目工作空间</span>'}
           </span>
           ${selected ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
         </button>
@@ -213,6 +271,21 @@ function renderWorkspacePopover(): void {
         })
         .join('')}
       ${projects.length === 0 ? '<div class="composer-select-popover__empty">暂无项目，可打开本地文件夹创建</div>' : ''}
+      <div class="composer-select-popover__divider" role="separator"></div>
+      <button type="button" class="composer-select-item" data-workspace-open-local>
+        <span class="composer-select-item__plain-icon"><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-plus"></use></svg></span>
+        <span class="composer-select-item__body">
+          <span class="composer-select-item__title">新建项目</span>
+        </span>
+        <span class="composer-select-item__spacer"></span>
+      </button>
+      <button type="button" class="composer-select-item${current === 'default' ? ' is-selected' : ''}" data-workspace-id="default">
+        <span class="composer-select-item__plain-icon"><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-close"></use></svg></span>
+        <span class="composer-select-item__body">
+          <span class="composer-select-item__title">不在项目中工作</span>
+        </span>
+        ${current === 'default' ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
+      </button>
     </div>
   `;
 
@@ -252,6 +325,7 @@ function renderWorkspacePopover(): void {
 function closeAllPopovers(): void {
   closeCraftPopover();
   closeModelPopover();
+  closeSecurityModeInline();
   closeSkillsPopover();
   closeExternalPopover();
   closeWorkspacePopover();
@@ -279,11 +353,14 @@ export function applyComposerMode(mode: ComposerMode): void {
 export function syncCraftLabel(): void {
   const label = $('#chat-craft-btn-label');
   const btn = $('#chat-craft-btn') as HTMLElement | null;
+  const selection = $('#chat-craft-inline');
+  const clear = $('#chat-craft-clear') as HTMLButtonElement | null;
   if (!label) return;
   const externalDisplay = getSessionAgentDisplay(state.activeSessionId);
   const externalKind = externalDisplay?.agentBinding?.kind;
   const externalName = String(externalDisplay?.agentLabel?.name || '').trim();
   let title = 'Craft · Plan · Ask';
+  // 选中外援后，按钮直接显示外援名，不再带模式前缀
   if (
     externalName
     && (externalKind === 'external_agent' || externalKind === 'external_team')
@@ -296,6 +373,14 @@ export function syncCraftLabel(): void {
   }
   if (btn) {
     btn.title = title;
+  }
+  const activeEntry = activeComposerEntry();
+  const selected = activeEntry !== 'craft';
+  selection?.classList.toggle('is-selected', selected);
+  if (clear) {
+    clear.hidden = !selected || activeEntry === 'external';
+    clear.title = `清除${label.textContent || '对话模式'}`;
+    clear.setAttribute('aria-label', clear.title);
   }
 }
 
@@ -312,9 +397,11 @@ function mountSelectPopover(
   popover: HTMLElement,
   width = 300,
   align: 'start' | 'end' = 'start',
+  placement: PopoverPlacement = 'auto',
+  maxHeight?: number,
 ): void {
   popover.classList.add('composer-floating-popover', 'composer-select-popover');
-  mountFloatingPopover(anchor, popover, width, align);
+  mountFloatingPopover(anchor, popover, width, align, placement, maxHeight);
 }
 
 function selectChevron(): string {
@@ -325,7 +412,7 @@ function renderComposerModeSwitch(activeMode: ComposerEntry): string {
   return `
     <div class="composer-mode-switch" role="tablist" aria-label="对话模式">
       ${visibleCraftOptions().map((o) => `
-        <button type="button" class="composer-mode-switch__item${o.value === activeMode ? ' is-active' : ''}" data-composer-mode-switch="${o.value}" role="tab" aria-selected="${o.value === activeMode ? 'true' : 'false'}">
+        <button type="button" class="composer-mode-switch__item${o.value === activeMode ? ' is-active' : ''}" data-expert-mode-switch="${o.value}" role="tab" aria-selected="${o.value === activeMode ? 'true' : 'false'}">
           ${escapeHtml(o.label)}
         </button>
       `).join('')}
@@ -333,19 +420,17 @@ function renderComposerModeSwitch(activeMode: ComposerEntry): string {
   `;
 }
 
-const WORKSPACE_FOLDER_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>`;
-const WORKSPACE_GLOBE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`;
-const WORKSPACE_OPEN_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>`;
-
-function workspaceToneIndex(id: string): number {
-  let hash = 0;
-  for (let i = 0; i < id.length; i += 1) hash = (hash + id.charCodeAt(i) * (i + 1)) % 5;
-  return hash;
+function spriteIcon(id: string, className?: string): string {
+  const viewBox = id === 'skill-badge' ? '0 0 32 32' : '0 0 24 24';
+  const classes = ['mw-icon', className].filter(Boolean).join(' ');
+  return `<svg class="${classes}" viewBox="${viewBox}" width="18" height="18" aria-hidden="true"><use href="#${id}"></use></svg>`;
 }
+
+const WORKSPACE_FOLDER_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>`;
 
 function renderCraftPopover(): void {
   closeAllPopovers();
-  const anchor = $('#chat-craft-btn');
+  const anchor = $('#chat-craft-btn') as HTMLElement | null;
   if (!anchor) return;
 
   const popover = document.createElement('div');
@@ -353,7 +438,7 @@ function renderCraftPopover(): void {
   const craftIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>`;
   const planIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
   const askIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
-  const externalIcon = `<svg class="composer-external-agent-logo" viewBox="3 3 18 18" aria-hidden="true"><path d="M5.2 13.2c0-4.5 2.9-6.9 6.8-6.9 4.5 0 7 2.8 7 6.2 0 3.8-2.5 5.5-7.2 5.5-4.3 0-6.6-1.4-6.6-4.8Z"></path><path d="M9 6.7c.7-1.1 1.7-1.7 3.1-1.7 1.3 0 2.3.5 3 1.5"></path><path d="M9.6 10.8v1.9"></path><path d="M14.4 10.8v1.9"></path><path d="M18.8 8.2h1.5M19.55 7.45v1.5"></path></svg>`;
+  const externalIcon = spriteIcon('icon-agent', MONOCHROME_ICON_CLASS);
   const modeIcons: Record<ComposerEntry, string> = {
     craft: craftIcon,
     plan: planIcon,
@@ -418,28 +503,25 @@ function renderModelPopover(): void {
   const active = activeComposerModelId();
   const popover = document.createElement('div');
   popover.id = 'chat-model-inline-popover';
-  const header = `
-    <div class="composer-model-popover__header">
-      <div class="composer-select-popover__section">可用模型</div>
-      <button
-        type="button"
-        class="composer-model-popover__help"
-        data-model-tour-open
-        title="模型配置引导"
-        aria-label="打开模型配置引导"
-      >?</button>
+  popover.setAttribute('role', 'listbox');
+  popover.setAttribute('aria-label', '选择模型');
+  const modelTourHelp = `
+    <div class="composer-select-popover__header">
+      <span>选择模型</span>
+      <button type="button" class="composer-select-popover__help" data-model-tour-open aria-label="打开模型配置引导" title="打开模型配置引导">?</button>
     </div>`;
   popover.innerHTML = models.length
-    ? `${header}
+    ? `
+      ${modelTourHelp}
+      <div class="composer-select-popover__section">可用模型</div>
       <div class="composer-select-popover__list">
         ${models
           .map(
             (m) => `
-          <button type="button" class="composer-select-item${m.id === active ? ' is-selected' : ''}" data-model-id="${escapeHtml(m.id)}"${m.selectable ? '' : ' disabled'}>
-            <span class="composer-select-item__icon composer-select-item__icon--model">${escapeHtml((m.label || '?').slice(0, 1).toUpperCase())}</span>
-            <span class="composer-select-item__body">
+          <button type="button" class="composer-select-item composer-select-item--model${m.id === active ? ' is-selected' : ''}" data-model-id="${escapeHtml(m.id)}" title="${escapeHtml(m.description)}" aria-label="${escapeHtml(`${m.label}${m.description ? `，${m.description}` : ''}`)}"${m.selectable ? '' : ' disabled'}>
+            <span class="composer-select-item__body composer-select-item__body--model">
               <span class="composer-select-item__title">${escapeHtml(m.label)}${m.default ? ' · 默认' : ''}</span>
-              <span class="composer-select-item__desc${m.warning ? ' composer-select-item__desc--warn' : ''}">${escapeHtml(m.description)}</span>
+              ${m.warning ? `<span class="composer-select-item__meta composer-select-item__meta--warn">${escapeHtml(m.description)}</span>` : ''}
             </span>
             ${m.id === active ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
           </button>
@@ -448,13 +530,13 @@ function renderModelPopover(): void {
           .join('')}
       </div>
     `
-    : `${header}<div class="composer-select-popover__empty">暂无模型，请前往配置页</div>`;
+    : `${modelTourHelp}<div class="composer-select-popover__empty">暂无模型，请前往配置页</div>`;
 
-  mountSelectPopover(anchor, popover, 320);
+  mountSelectPopover(anchor, popover, 300, 'end');
   modelPopoverOpen = true;
   anchor.classList.add('is-open');
 
-  popover.querySelector<HTMLElement>('[data-model-tour-open]')?.addEventListener('click', (event) => {
+  popover.querySelector<HTMLButtonElement>('[data-model-tour-open]')?.addEventListener('click', (event) => {
     event.stopPropagation();
     closeModelPopover();
     startModelTour();
@@ -471,14 +553,19 @@ function renderModelPopover(): void {
 
 async function renderSkillsPopover(): Promise<void> {
   closeAllPopovers();
-  const anchor = $('#chat-skills-btn');
+  const anchor = $('#chat-skills-btn') as HTMLElement | null;
   const input = $('#chat-input') as HTMLTextAreaElement | null;
   if (!anchor) return;
 
-  const skillsCache = await getSkills().catch(() => [] as Skill[]);
-
   const popover = document.createElement('div');
   popover.id = 'chat-skills-inline-popover';
+  popover.innerHTML = '<div class="composer-select-popover__empty">正在读取技能…</div>';
+  mountSelectPopover(anchor, popover, 340, 'start', 'auto', 340);
+  skillsPopoverOpen = true;
+  anchor.classList.add('is-open');
+
+  const skillsCache = await getSkills().catch(() => [] as Skill[]);
+  if (!skillsPopoverOpen || !popover.isConnected) return;
   popover.innerHTML = skillsCache.length
     ? `
       <div class="chat-popover-search composer-select-popover__search">
@@ -502,22 +589,19 @@ async function renderSkillsPopover(): Promise<void> {
       </div>
     `
     : '<div class="composer-select-popover__empty">暂无 Skills</div>';
+  scheduleFloatingPopoverPosition(anchor, popover, 340, 'start', 'auto', 340);
 
-  mountSelectPopover(anchor, popover, 340);
-  skillsPopoverOpen = true;
-  anchor.classList.add('is-open');
-
-  const searchInput = $('#chat-skills-search-input') as HTMLInputElement | null;
+  const searchInput = popover.querySelector<HTMLInputElement>('#chat-skills-search-input');
   if (searchInput) {
     searchInput.focus();
     searchInput.addEventListener('input', () => {
       const q = searchInput.value.trim().toLowerCase();
-      $$('[data-skill-filterable]').forEach((btn) => {
+      popover.querySelectorAll<HTMLElement>('[data-skill-filterable]').forEach((btn) => {
         const slug = btn.getAttribute('data-skill-slug') || '';
         const title = btn.querySelector('.composer-select-item__title')?.textContent || '';
         const desc = btn.querySelector('.composer-select-item__desc')?.textContent || '';
         const match = slug.toLowerCase().includes(q) || title.toLowerCase().includes(q) || desc.toLowerCase().includes(q);
-        (btn as HTMLElement).style.display = match ? 'flex' : 'none';
+        btn.hidden = !match;
       });
     });
     searchInput.addEventListener('keydown', (e) => {
@@ -525,7 +609,7 @@ async function renderSkillsPopover(): Promise<void> {
     });
   }
 
-  $$('.composer-select-item[data-skill-slug]').forEach((btn) => {
+  popover.querySelectorAll<HTMLElement>('.composer-select-item[data-skill-slug]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const slug = btn.getAttribute('data-skill-slug');
       if (!slug || !input) return;
@@ -541,6 +625,58 @@ async function renderSkillsPopover(): Promise<void> {
 function syncComposerModelChip(): void {
   const label = document.getElementById('chat-model-picker-inline-label');
   if (label) label.textContent = resolveComposerModelLabel() || '模型';
+}
+
+/** 安全模式 chip 标签：据当前生效模式（会话绑定优先，否则新对话预设）渲染。 */
+function syncSecurityModeChip(): void {
+  const label = document.getElementById('chat-security-mode-btn-label');
+  if (label) label.textContent = modeLabel(currentSecurityMode());
+}
+
+function renderSecurityModePopover(): void {
+  closeAllPopovers();
+  const anchor = $('#chat-security-mode-btn');
+  if (!anchor) return;
+  const active = currentSecurityMode();
+  const popover = document.createElement('div');
+  popover.id = 'chat-security-mode-inline-popover';
+  popover.innerHTML = `
+    <div class="composer-select-popover__section composer-select-popover__section--title">Crew 应如何批准操作？</div>
+    <div class="composer-select-popover__list">
+      ${SECURITY_MODE_OPTIONS.map((o) => `
+        <button type="button" class="composer-select-item composer-select-item--security${o.value === active ? ' is-selected' : ''}" data-sec-mode="${o.value}">
+          <span class="composer-select-item__plain-icon">${spriteIcon(o.value === 'full_access' ? 'icon-warning' : 'icon-security')}</span>
+          <span class="composer-select-item__body">
+            <span class="composer-select-item__title">${escapeHtml(o.label)}</span>
+            <span class="composer-select-item__desc">${escapeHtml(o.desc)}</span>
+          </span>
+          ${o.value === active ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
+        </button>
+      `).join('')}
+    </div>
+  `;
+  mountSelectPopover(anchor, popover, 300);
+  securityModePopoverOpen = true;
+  anchor.classList.add('is-open');
+  anchor.setAttribute('aria-expanded', 'true');
+
+  $$('.composer-select-item[data-sec-mode]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const m = btn.getAttribute('data-sec-mode') as ConversationSecurityMode | null;
+      if (!m) {
+        closeSecurityModeInline();
+        return;
+      }
+      // full_access 仍走二次确认；只有 Gateway ACK 后才提交本地 chip 状态。
+      const accepted = await selectNextConversationMode(m, () => showConfirmDialog({
+        title: '启用完全访问权限？',
+        message: FULL_ACCESS_CONFIRMATION,
+        confirmText: '仅对此对话启用',
+      }));
+      if (accepted) syncSecurityModeChip();
+      closeSecurityModeInline();
+    });
+  });
 }
 
 function externalRuntimeReady(runtime: ExternalRuntime | undefined): boolean {
@@ -600,11 +736,14 @@ function externalAgentTone(value: string): number {
   return Math.abs(hash) % 6;
 }
 
-function bindExternalModeSwitch(popover: HTMLElement): void {
-  popover.querySelectorAll<HTMLElement>('[data-composer-mode-switch]').forEach((btn) => {
+function bindExternalModeSwitch(
+  popover: HTMLElement,
+  anchor: HTMLElement,
+): void {
+  popover.querySelectorAll<HTMLElement>('[data-expert-mode-switch]').forEach((btn) => {
     btn.addEventListener('click', (event) => {
       event.stopPropagation();
-      const mode = btn.getAttribute('data-composer-mode-switch') as ComposerEntry | null;
+      const mode = btn.getAttribute('data-expert-mode-switch') as ComposerEntry | null;
       if (!mode || mode === 'external') {
         if (!externalAgentsEnabled()) notify(EXTERNAL_AGENTS_DISABLED_MESSAGE);
         return;
@@ -635,7 +774,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
   externalPopoverOpen = true;
   resolvedAnchor.classList.add('is-open');
   resolvedAnchor.setAttribute('aria-expanded', 'true');
-  bindExternalModeSwitch(popover);
+  bindExternalModeSwitch(popover, resolvedAnchor);
 
   let catalog: ExternalConversationCatalog;
   try {
@@ -646,7 +785,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       ${renderComposerModeSwitch('external')}
       <div class="composer-select-popover__empty">加载外援失败：${escapeHtml((error as Error).message)}</div>
     `;
-    bindExternalModeSwitch(popover);
+    bindExternalModeSwitch(popover, resolvedAnchor);
     scheduleFloatingPopoverPosition(resolvedAnchor, popover, 340);
     return;
   }
@@ -664,7 +803,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       : '暂时不可用，请到外援页面再找找';
     return `
       <button type="button" class="composer-select-item${ready ? '' : ' is-unavailable'}" data-external-agent-id="${escapeHtml(agent.id)}" data-external-filterable aria-disabled="${ready ? 'false' : 'true'}">
-        <span class="composer-agent-pixel-icon composer-agent-pixel-icon--tone-${externalAgentTone(agent.id || agent.name)}" aria-hidden="true">${escapeHtml(agent.display_badge || '?')}</span>
+        <span class="composer-agent-badge composer-agent-pixel-icon composer-agent-pixel-icon--tone-${externalAgentTone(agent.id || agent.name)}" aria-hidden="true">${escapeHtml(agent.display_badge || '?')}</span>
         <span class="composer-select-item__body">
           <span class="composer-select-item__title">${escapeHtml(agent.name || '未命名外援')}</span>
           <span class="composer-select-item__desc${ready ? '' : ' composer-select-item__desc--warn'}">${escapeHtml(description)}</span>
@@ -711,7 +850,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       </div>
     `}
   `;
-  bindExternalModeSwitch(popover);
+  bindExternalModeSwitch(popover, resolvedAnchor);
   // 初次定位发生在“正在加载”短内容阶段；目录渲染后高度改变，必须重新贴合锚点。
   scheduleFloatingPopoverPosition(resolvedAnchor, popover, 340);
 
@@ -721,23 +860,21 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
     popover.querySelectorAll<HTMLElement>('[data-external-filterable]').forEach((row) => {
       const name = row.querySelector('.composer-select-item__title')?.textContent || '';
       const description = row.querySelector('.composer-select-item__desc')?.textContent || '';
-      row.style.display = !query
-        || name.toLowerCase().includes(query)
-        || description.toLowerCase().includes(query)
-        ? ''
-        : 'none';
+      row.hidden = Boolean(query
+        && !name.toLowerCase().includes(query)
+        && !description.toLowerCase().includes(query));
     });
     popover.querySelectorAll<HTMLElement>('[data-external-section]').forEach((section) => {
       let next = section.nextElementSibling as HTMLElement | null;
       let visible = false;
       while (next && !next.hasAttribute('data-external-section')) {
-        if (next.hasAttribute('data-external-filterable') && next.style.display !== 'none') {
+        if (next.hasAttribute('data-external-filterable') && !next.hidden) {
           visible = true;
           break;
         }
         next = next.nextElementSibling as HTMLElement | null;
       }
-      section.style.display = visible ? '' : 'none';
+      section.hidden = !visible;
     });
   });
   searchInput?.addEventListener('keydown', (event) => {
@@ -780,24 +917,48 @@ export function syncComposerModelLabel(): void {
   syncComposerModelChip();
 }
 
-export function bindComposerToolbar(): void {
+export function bindComposerToolbar(): () => void {
+  const trigger = $('#chat-craft-btn');
+  if (toolbarController && toolbarBoundTrigger === trigger && trigger?.isConnected) return () => {};
+  if (toolbarController) {
+    toolbarController.abort();
+    toolbarController = null;
+    closeAllPopovers();
+  }
+  toolbarController = new AbortController();
+  toolbarBoundTrigger = trigger;
+  const { signal } = toolbarController;
+
   $('#chat-craft-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (craftPopoverOpen) closeCraftPopover();
+    if (craftPopoverOpen) closeAllPopovers();
     else renderCraftPopover();
-  });
+  }, { signal });
+
+  $('#chat-craft-clear')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeAllPopovers();
+    applyComposerMode('craft');
+    notify('已切回默认主智能体');
+  }, { signal });
 
   $('#chat-model-picker-inline-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
     if (modelPopoverOpen) closeModelPopover();
     else renderModelPopover();
-  });
+  }, { signal });
+
+  $('#chat-security-mode-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (securityModePopoverOpen) closeSecurityModeInline();
+    else renderSecurityModePopover();
+  }, { signal });
 
   $('#chat-skills-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
     if (skillsPopoverOpen) closeSkillsPopover();
     else void renderSkillsPopover();
-  });
+  }, { signal });
 
   $('#chat-workspace-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -806,45 +967,69 @@ export function bindComposerToolbar(): void {
       return;
     }
     // 避免同一次 click 冒泡到 document 监听器后立即被关掉
-    window.setTimeout(() => renderWorkspacePopover(), 0);
-  });
+    window.setTimeout(() => {
+      if (!signal.aborted) renderWorkspacePopover();
+    }, 0);
+  }, { signal });
 
   document.addEventListener('click', (e) => {
-    const t = e.target as HTMLElement;
-    if (craftPopoverOpen && !t.closest('#chat-craft-popover') && !t.closest('#chat-craft-btn')) closeCraftPopover();
+    const t = e.target instanceof Element ? e.target : null;
+    if (!t) {
+      closeAllPopovers();
+      return;
+    }
+    if (
+      craftPopoverOpen
+      && !t.closest('#chat-craft-popover')
+      && !t.closest('#chat-craft-btn')
+    ) closeCraftPopover();
     if (modelPopoverOpen && !t.closest('#chat-model-inline-popover') && !t.closest('#chat-model-picker-inline-btn')) closeModelPopover();
+    if (securityModePopoverOpen && !t.closest('#chat-security-mode-inline-popover') && !t.closest('#chat-security-mode-btn')) closeSecurityModeInline();
     if (skillsPopoverOpen && !t.closest('#chat-skills-inline-popover') && !t.closest('#chat-skills-btn')) closeSkillsPopover();
     if (externalPopoverOpen && !t.closest('#chat-external-inline-popover') && !t.closest('#chat-craft-btn')) closeExternalPopover();
     if (workspacePopoverOpen && !t.closest('#chat-workspace-popover') && !t.closest('#chat-workspace-btn')) closeWorkspacePopover();
-  });
+  }, { signal, capture: true });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeAllPopovers();
-  });
+  }, { signal });
 
   syncComposerModelLabel();
   syncCraftLabel();
   syncComposerWorkspaceLabel();
-  window.addEventListener('craft:mode-change', () => syncCraftLabel());
-  window.addEventListener('workspace:context-changed', () => syncComposerWorkspaceLabel());
+  syncSecurityModeChip();
+  window.addEventListener('craft:mode-change', () => syncCraftLabel(), { signal });
+  window.addEventListener('security:mode-change', () => syncSecurityModeChip(), { signal });
+  window.addEventListener('workspace:context-changed', () => syncComposerWorkspaceLabel(), { signal });
   window.addEventListener('session:changed', () => {
     syncComposerWorkspaceLabel();
     syncCraftLabel();
-  });
-  window.addEventListener('session:agent-assigned', () => syncCraftLabel());
+  }, { signal });
+  window.addEventListener('session:agent-assigned', () => syncCraftLabel(), { signal });
   window.addEventListener('external-agents:config-change', () => {
     if (!externalAgentsEnabled()) {
       closeExternalPopover();
       closeCraftPopover();
     }
-  });
-  window.addEventListener('messages:changed', () => syncComposerWorkspaceLabel());
-  window.addEventListener('session:model-picker-disabled', closeModelPopover);
+  }, { signal });
+  window.addEventListener('messages:changed', () => syncComposerWorkspaceLabel(), { signal });
+  window.addEventListener('session:model-picker-disabled', closeModelPopover, { signal });
 
   // skill 安装/卸载后关闭 skills 浮层，避免展示旧列表；下次打开会重新拉取。
-  onSkillsChange(() => {
+  const unsubscribeSkills = onSkillsChange(() => {
     if (skillsPopoverOpen) closeSkillsPopover();
   });
+  const unsubscribeSession = sessionStore.subscribe(() => {
+    syncComposerWorkspaceLabel();
+  });
+  return () => {
+    toolbarController?.abort();
+    toolbarController = null;
+    toolbarBoundTrigger = null;
+    unsubscribeSkills();
+    unsubscribeSession();
+    closeAllPopovers();
+  };
 }
 
 export { syncModelUi, syncComposerWorkspaceLabel };

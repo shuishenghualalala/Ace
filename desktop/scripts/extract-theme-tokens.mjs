@@ -1,10 +1,10 @@
 /**
  * extract-theme-tokens.mjs
  *
- * Scans assets/styles/theme.css and classifies each
+ * Scans the production stylesheet and classifies each
  * `body.theme-dark .X { ... }` rule into two buckets:
  *   - autoDeletable: rule body only references var(--*) and every
- *     referenced variable is defined in variables.css. These rules
+ *     referenced variable is defined in tokens.css. These rules
  *     can be safely removed; the underlying token does the work.
  *   - needsReview: rule body contains hardcoded color literals. The
  *     developer must extract a new token or change the rule to use
@@ -14,7 +14,7 @@
  *
  * Usage:
  *   node scripts/extract-theme-tokens.mjs
- *   node scripts/extract-theme-tokens.mjs theme.css variables.css
+ *   node scripts/extract-theme-tokens.mjs index.css tokens.css
  */
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -27,7 +27,7 @@ const HEX_PATTERN = /#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g;
 const RGB_PATTERN = /\brgba?\s*\([^)]+\)/g;
 
 /**
- * Parse `variables.css` and return the set of defined variable names.
+ * Parse `tokens.css` and return the set of defined variable names.
  *
  * @param {string} text
  * @returns {Set<string>}
@@ -113,8 +113,8 @@ function isCli() {
 
 if (isCli()) {
   const args = process.argv.slice(2);
-  const themePath = resolve(args[0] ?? 'assets/styles/theme.css');
-  const variablesPath = resolve(args[1] ?? 'assets/styles/variables.css');
+  const themePath = resolve(args[0] ?? 'assets/styles/index.css');
+  const variablesPath = resolve(args[1] ?? 'assets/styles/tokens.css');
 
   if (!existsSync(themePath)) {
     process.stderr.write(`extract-theme-tokens: file not found: ${themePath}\n`);

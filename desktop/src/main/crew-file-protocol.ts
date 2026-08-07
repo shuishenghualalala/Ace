@@ -36,9 +36,8 @@ function samePath(left: string, right: string): boolean {
     : path.resolve(left) === path.resolve(right);
 }
 
-export interface ResolvedCrewFile {
+export interface ResolvedOwnedFile {
   filePath: string;
-  contentType: string;
   identity: {
     dev: number;
     ino: number;
@@ -47,6 +46,10 @@ export interface ResolvedCrewFile {
     mtimeMs: number;
     ctimeMs: number;
   };
+}
+
+export interface ResolvedCrewFile extends ResolvedOwnedFile {
+  contentType: string;
 }
 
 function resolveCanonicalOwnedRoot(ownerRoot: string, segment: 'task_workspaces' | 'uploads'): string | null {
@@ -64,6 +67,72 @@ function resolveCanonicalCrewHomeRoot(crewHomeRoot: string, segment: string): st
     const candidate = path.join(crewHomeRoot, segment);
     const real = fs.realpathSync(candidate);
     return samePath(real, candidate) && isWithin(crewHomeRoot, real) ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a renderer-provided existing file against the current account's
+ * canonical task/upload roots. The returned path and inode identity are the
+ * only values callers may use for subsequent file operations.
+ */
+export function resolveOwnedFilePath(
+  rawPath: string,
+  crewHome: string,
+  ownerSegment: string,
+  includeSharedTmp = false,
+): ResolvedOwnedFile | null {
+  if (
+    rawPath.length === 0
+    || rawPath.length > 4_096
+    || rawPath.includes('\0')
+    || crewHome.length > 4_096
+    || ownerSegment.length > 64
+    || !path.isAbsolute(rawPath)
+    || !/^acct_[0-9a-f]{16}$/i.test(ownerSegment)
+  ) {
+    return null;
+  }
+
+  const accountsRoot = path.join(path.resolve(crewHome), 'accounts');
+  const resolved = path.resolve(rawPath);
+  let real: string;
+  let realAccountsRoot: string;
+  let realOwnerRoot: string;
+  try {
+    realAccountsRoot = fs.realpathSync(accountsRoot);
+    realOwnerRoot = fs.realpathSync(path.join(realAccountsRoot, ownerSegment));
+    real = fs.realpathSync(resolved);
+  } catch {
+    return null;
+  }
+  if (!samePath(realOwnerRoot, path.join(realAccountsRoot, ownerSegment))) return null;
+  if (!isWithin(realAccountsRoot, realOwnerRoot)) return null;
+
+  const allowedRoots = [
+    resolveCanonicalOwnedRoot(realOwnerRoot, 'task_workspaces'),
+    resolveCanonicalOwnedRoot(realOwnerRoot, 'uploads'),
+    ...(includeSharedTmp
+      ? [resolveCanonicalCrewHomeRoot(path.dirname(realAccountsRoot), 'tmp')]
+      : []),
+  ].filter((root): root is string => Boolean(root));
+  if (!allowedRoots.some((root) => isWithin(root, real))) return null;
+
+  try {
+    const fileStat = fs.statSync(real);
+    if (!fileStat.isFile() || fileStat.nlink !== 1) return null;
+    return {
+      filePath: real,
+      identity: {
+        dev: fileStat.dev,
+        ino: fileStat.ino,
+        nlink: fileStat.nlink,
+        size: fileStat.size,
+        mtimeMs: fileStat.mtimeMs,
+        ctimeMs: fileStat.ctimeMs,
+      },
+    };
   } catch {
     return null;
   }
@@ -92,63 +161,19 @@ export function resolveCrewFilePath(
   } catch {
     return null;
   }
-  if (!path.isAbsolute(candidate) || !/^acct_[0-9a-f]{16}$/i.test(ownerSegment)) return null;
-  const accountsRoot = path.join(path.resolve(crewHome), 'accounts');
-  const resolved = path.resolve(candidate);
-  let real: string;
-  let realAccountsRoot: string;
-  let realOwnerRoot: string;
-  try {
-    realAccountsRoot = fs.realpathSync(accountsRoot);
-    realOwnerRoot = fs.realpathSync(path.join(realAccountsRoot, ownerSegment));
-    real = fs.realpathSync(resolved);
-  } catch {
-    return null;
-  }
-  // All authorization happens in one canonical namespace. This both accepts
-  // macOS /var -> /private/var aliases and rejects owner/task roots implemented
-  // as links, including links into another account under the same accounts root.
-  if (!samePath(realOwnerRoot, path.join(realAccountsRoot, ownerSegment))) return null;
-  if (!isWithin(realAccountsRoot, realOwnerRoot)) return null;
-  // 渠道入站文件默认落在 <crewHome>/tmp/<channel>-files/，
-  // 与账号目录隔离但仍在 crewHome 内，需要一并放行供桌面端渲染/定位。
-  const realCrewHome = path.dirname(realAccountsRoot);
-  const allowedRoots = [
-    resolveCanonicalOwnedRoot(realOwnerRoot, 'task_workspaces'),
-    resolveCanonicalOwnedRoot(realOwnerRoot, 'uploads'),
-    resolveCanonicalCrewHomeRoot(realCrewHome, 'tmp'),
-  ].filter((root): root is string => Boolean(root));
-  if (!allowedRoots.some((root) => isWithin(root, real))) return null;
-  const contentType = IMAGE_CONTENT_TYPES[path.extname(real).toLowerCase()];
+  const contentType = IMAGE_CONTENT_TYPES[path.extname(candidate).toLowerCase()];
   if (!contentType) return null;
-  try {
-    const fileStat = fs.statSync(real);
-    // A hard link inside account A could otherwise alias an inode whose other
-    // name lives in account B; screenshots/uploads are expected to be
-    // single-link artifacts, so reject ambiguous inode ownership.
-    if (!fileStat.isFile() || fileStat.nlink !== 1) return null;
-    return {
-      filePath: real,
-      contentType,
-      identity: {
-        dev: fileStat.dev,
-        ino: fileStat.ino,
-        nlink: fileStat.nlink,
-        size: fileStat.size,
-        mtimeMs: fileStat.mtimeMs,
-        ctimeMs: fileStat.ctimeMs,
-      },
-    };
-  } catch {
-    return null;
-  }
+  // Channel images may live in the shared crewHome/tmp ingress area. General
+  // renderer file APIs intentionally do not opt into this extra root.
+  const resolved = resolveOwnedFilePath(candidate, crewHome, ownerSegment, true);
+  return resolved ? { ...resolved, contentType } : null;
 }
 
 /** Open the already-authorized inode without following a swapped leaf link.
  * The fstat identity closes the resolve -> open race for both leaf and ancestor
  * replacement: a path redirected after authorization cannot be read. */
 export async function readResolvedCrewFile(
-  resolved: ResolvedCrewFile,
+  resolved: ResolvedOwnedFile,
   includeBody = true,
 ): Promise<Buffer | null> {
   const noFollow = process.platform !== 'win32' && typeof fs.constants.O_NOFOLLOW === 'number'

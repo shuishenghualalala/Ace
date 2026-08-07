@@ -5,23 +5,15 @@
 import { backendApi } from '../backend-client';
 import { renderConversationPreview } from '../chat-render';
 import { mapBackendHistoryItem } from './history-mapping';
-import { escapeHtml, notify, state } from '../state';
-
-function showModal(): void {
-  const modal = document.getElementById('session-preview-modal');
-  if (!modal) return;
-  if (modal.parentElement !== document.body) {
-    document.body.appendChild(modal);
-  }
-  modal.style.display = 'flex';
-  modal.classList.add('show');
-}
+import { notify, state } from '../state';
+import {
+  closeAccountOverlay,
+  ensureAccountOverlay,
+  openAccountOverlay,
+} from './account-overlays';
 
 function hideModal(): void {
-  const modal = document.getElementById('session-preview-modal');
-  if (!modal) return;
-  modal.style.display = 'none';
-  modal.classList.remove('show');
+  closeAccountOverlay('session-preview-modal');
   const root = document.getElementById('session-preview-messages');
   root?.replaceChildren();
 }
@@ -33,8 +25,13 @@ export async function openSessionPreviewModal(sessionId: string, title: string):
   if (!titleEl || !root) return;
 
   titleEl.textContent = title.trim() || '会话预览';
-  root.innerHTML = '<p class="session-preview-empty">加载中…</p>';
-  showModal();
+  const loading = document.createElement('p');
+  loading.className = 'session-preview-empty';
+  loading.textContent = '加载中…';
+  root.replaceChildren(loading);
+  openAccountOverlay('session-preview-modal', {
+    initialFocus: document.getElementById('session-preview-close') ?? undefined,
+  });
 
   try {
     const items = await backendApi.history(sessionId);
@@ -42,21 +39,17 @@ export async function openSessionPreviewModal(sessionId: string, title: string):
     renderConversationPreview(root, messages, state.configModel);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    root.innerHTML = `<p class="session-preview-empty">加载失败：${escapeHtml(msg || '未知错误')}</p>`;
+    const error = document.createElement('p');
+    error.className = 'session-preview-empty';
+    error.textContent = `加载失败：${msg || '未知错误'}`;
+    root.replaceChildren(error);
     notify('加载会话历史失败');
   }
 }
 
 /** 绑定预览弹窗关闭交互。 */
 export function bindSessionPreviewModal(): void {
+  ensureAccountOverlay('session-preview-modal');
   document.getElementById('session-preview-close')?.addEventListener('click', hideModal);
   document.getElementById('session-preview-done')?.addEventListener('click', hideModal);
-  document.getElementById('session-preview-modal')?.addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) hideModal();
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && document.getElementById('session-preview-modal')?.classList.contains('show')) {
-      hideModal();
-    }
-  });
 }

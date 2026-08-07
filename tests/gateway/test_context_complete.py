@@ -142,6 +142,30 @@ def test_complete_subdir_entries_relative_meta(crew_home):
     assert "a.txt" in results[0]["meta"]
 
 
+def test_complete_prefix_search_includes_nested_entries(crew_home):
+    """在根目录输入文件名前缀时，也能命中子目录并保留相对路径。"""
+    results = complete_path("a", cwd=str(crew_home))
+
+    assert results == [{
+        "text": "@file:subdir/a.txt",
+        "display": "a.txt",
+        "meta": "subdir/a.txt",
+        "type": "file",
+    }]
+
+
+def test_complete_prefix_search_skips_generated_trees(crew_home):
+    """递归补全不应被依赖/构建目录拖慢或污染结果。"""
+    (crew_home / "node_modules" / "nested").mkdir(parents=True)
+    (crew_home / "node_modules" / "nested" / "desktop.txt").write_text("x", encoding="utf-8")
+    (crew_home / "src" / "desktop.txt").parent.mkdir()
+    (crew_home / "src" / "desktop.txt").write_text("x", encoding="utf-8")
+
+    results = complete_path("desktop", cwd=str(crew_home))
+
+    assert [result["meta"] for result in results] == ["src/desktop.txt"]
+
+
 def test_complete_route_default_workspace_ignores_configured_root_path(crew_home, tmp_path):
     """默认「对话」只补全 default task workspace，不应误读项目 workspace root_path。"""
     owner_id = "A:uid-a"

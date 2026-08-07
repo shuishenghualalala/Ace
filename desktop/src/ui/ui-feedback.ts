@@ -41,14 +41,14 @@ export function showConfirmDialog({
     // 用 includes 而非全等：「全局卸载」这类带限定词的破坏性动作同样要红色警示。
     okBtn.classList.toggle('is-danger', confirmText.includes('卸载') || confirmText.includes('删除'));
 
-    dialog.style.display = 'flex';
+    dialog.hidden = false;
     dialog.classList.add('show');
 
     let settled = false;
 
     const cleanup = (): void => {
       dialog.classList.remove('show');
-      dialog.style.display = 'none';
+      dialog.hidden = true;
       okBtn.removeEventListener('click', onConfirm);
       cancelBtn.removeEventListener('click', onCancel);
       dialog.removeEventListener('click', onOverlayClick);

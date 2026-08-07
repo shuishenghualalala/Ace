@@ -895,7 +895,7 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
     const startedAt = snapshot.messages.find((m) => m.id === assistantId)?.turnStartedAt;
     turnDurationMs = snapshot.now - (startedAt ?? snapshot.now);
     if (book.firstChunkAt != null && startedAt != null) firstTokenMs = book.firstChunkAt - startedAt;
-    // 配合 stream-reassembly 的按序重组：累积正文以 gateway_sequence 为序号权威，
+    // 修法2（配合 stream-reassembly 的按序重组）：累积正文现已按 gateway_sequence 重组为序号权威，
     // 乱序不再需要这里兜底。覆盖只在「final.text 是累积正文的超集前缀」时发生——即 acc 是 text 的
     // 前缀（text.startsWith(acc)），此时 text ⊇ acc，覆盖只补全（单段回合丢尾帧的合法恢复），不丢
     // 任何已累积文字。其它情况一律保留累积正文：多步回合的 final 只含末段（builtin executor，
@@ -1373,7 +1373,7 @@ export function workflowProgressReducer(chunk: WorkflowProgressChunk, snapshot: 
   }
 
   // workflow 完成/失败/暂停时：释放 busy，并把最后一条有内容的角色输出提升为最终回复。
-  // Dynamic Kanban 会话里，角色输出就是交付物；synthesize 后的 final chunk 可能因
+  // Dynamic Kanban 的专家团会话里，角色输出就是交付物；synthesize 后的 final chunk 可能因
   // 后台化、限流或静默检测没有到达桌面端，导致会话一直转圈。这里用 workflow_progress 的
   // 终态作为兜底，确保左侧消息列表的转圈能消失。
   let statusHint: StatusHint | undefined = payload.status === 'running' ? 'running' : undefined;

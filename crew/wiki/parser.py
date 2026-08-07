@@ -10,6 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from crew.security.settings import strict_security_enabled
 from crew.state.logging import get_logger
 
 log = get_logger("wiki.parser")
@@ -653,6 +654,11 @@ def fetch_url_to_markdown(url: str, timeout: float = 15.0) -> tuple[str, str]:
 
 def _parse_legacy_office(path: Path, target_extension: str) -> str:
     """通过 LibreOffice 把旧版 Office 转成现代格式，再复用现有解析器。"""
+    if strict_security_enabled():
+        raise RuntimeError(
+            "严格安全约束已阻止在 Gateway 宿主上运行 LibreOffice；"
+            f"请先将文件另存为 {target_extension}，或在安全中心启用兼容模式。"
+        )
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
         raise MissingDependencyError(

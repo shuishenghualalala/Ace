@@ -5,7 +5,7 @@ agent 即可像调内置工具一样调用它们（工具名 ``{server}__{tool}`
 连接模型：每个 server 一个常驻 worker task，task 内打开传输 + MCP 2 Client 并保持，
 然后从 asyncio.Queue 取 (tool_name, args, future)，在**本 task** 内 call_tool 后回填 future。
 工具 handler 只负责入队 + await future——所有 session I/O 都在持有它的 task 里，
-单事件循环下正确，且避免 Crew 那套专用事件循环/跨 loop 编组（其 mcp_tool.py 达 3915 行）。
+单事件循环下正确，且避免 Hermes 那套专用事件循环/跨 loop 编组（其 mcp_tool.py 达 3915 行）。
 
 仅复用 MCP SDK 的调用范式（stdio_client / streamable_http_client / sse_client +
 Client.list_tools/call_tool）。Client 使用 ``mode="auto"``，优先协商 MCP 2 的现代协议，
@@ -53,7 +53,7 @@ class _CallRequest:
 
 
 def _interpolate(value: Any) -> Any:
-    """递归解析 ${VAR}（from os.environ）。找不到保留字面。采用 _interpolate_env_vars。"""
+    """递归解析 ${VAR}（from os.environ）。找不到保留字面。对齐 hermes _interpolate_env_vars。"""
     if isinstance(value, str):
         return _ENV_VAR_PATTERN.sub(
             lambda m: os.environ.get(m.group(1), m.group(0)), value
@@ -278,6 +278,11 @@ class _ServerWorker:
         self._task: asyncio.Task[None] | None = None
         self._current: _CallRequest | None = None
         self._closing = False
+        # True when this worker was started as a host stdio subprocess (only possible
+        # under ACE_ALLOW_HOST_MCP_STDIO=1 in a non-managed context). A worker
+        # started that way must not be re-used by a later managed conversation: the
+        # tool call would route host side-effects past the managed boundary (H-21).
+        self._host_stdio_spawn = False
 
     async def _open(self, stack: AsyncExitStack):
         from mcp import Client, StdioServerParameters
@@ -285,6 +290,30 @@ class _ServerWorker:
 
         cfg = _resolve_paths(self.cfg)
         if cfg.get("command"):
+            # managed（包括宽权限 full_access）模式下不得经 stdio spawn 宿主子进程——
+            # 那是绕过 broker 的执行面（决策 #13、spec §7.2）。只有真正 disabled
+            #（或无 launch 上下文的 dev/装机场景）在操作者显式
+            # ACE_ALLOW_HOST_MCP_STDIO=1 时放行。
+            from crew.security.launch import current_process_launch
+
+            launch = current_process_launch.get()
+            managed = launch is not None and getattr(launch, "managed", False)
+            host_stdio_allowed = (
+                os.environ.get("ACE_ALLOW_HOST_MCP_STDIO") == "1"
+                and not managed
+            )
+            if not host_stdio_allowed:
+                reason = (
+                    "managed profile disables MCP stdio host spawn"
+                    if managed
+                    else "MCP stdio host process is disabled; use a managed transport "
+                    "or explicitly approved host configuration"
+                )
+                raise ValueError(reason)
+            # Mark the worker so per-call handlers can refuse reuse by a later managed
+            # conversation (H-21): the spawn context is non-managed, but a subsequent
+            # managed dialog must not route tool calls through this host stdio worker.
+            self._host_stdio_spawn = True
             child_env = _stdio_env(cfg.get("env"))
             params = StdioServerParameters(
                 command=cfg["command"], args=cfg.get("args", []), env=child_env
@@ -464,6 +493,18 @@ class _ServerWorker:
 
     def _make_handler(self, tool_name: str):
         async def handler(args: dict[str, Any]) -> str:
+            # Per-call launch re-check: a host stdio worker is spawned under a
+            # non-managed context, but tool calls arrive from whatever conversation
+            # invokes them. A later managed dialog must not route side-effects through
+            # this host worker (H-21).
+            if self._host_stdio_spawn:
+                from crew.security.launch import current_process_launch
+
+                launch = current_process_launch.get()
+                if launch is None or getattr(launch, "managed", False):
+                    return tool_error(
+                        f"MCP server {self.name} 为宿主 stdio 进程，缺少 disabled 安全上下文"
+                    )
             if (
                 self._closing
                 or self._error is not None

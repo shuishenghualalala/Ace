@@ -2,7 +2,8 @@
  * 流式 Markdown 预处理：在 micromark 解析前修复「未完成的语法」，
  * 让流式中半截 `**bold` / ` ```python ` 不再以源码形式闪烁出现。
  *
- * 这里只做「自动闭合」，不做 autolink / 货币转义 / LaTeX 重写等 polish（按最小闭环原则）。
+ * 设计参考：hermes-agent/apps/desktop/src/lib/markdown-preprocess.ts 的 `parseIncompleteMarkdown`
+ * 思路——只做「自动闭合」，不做 autolink / 货币转义 / LaTeX 重写等 polish（按最小闭环原则）。
  *
  * 纯字符串处理，无 DOM 依赖，可在 node 环境单测。
  */

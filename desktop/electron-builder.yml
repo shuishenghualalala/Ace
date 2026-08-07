@@ -25,11 +25,18 @@ files:
   - package.json
   - "!**/.DS_Store"
 
-# 不再打包任何 Playwright-managed Chromium（约 500MB/平台）：运行时用 Electron
-# 自带的 Chromium，那 500MB 从来没被执行过。曾经打包它的 ManagedChromiumEngine
-# 没接线，已整体移除。将来若真要 managed 引擎，在此重新声明 extraResources 并
-# 恢复 browser:stage 步骤。
-extraResources: []
+# 显式排除源码与开发产物，避免进包
+# （main 移除 Playwright-managed Chromium 的意图已天然满足：此处只打包
+#   security-runtime-bin，不再打包任何独立 Chromium。）
+extraResources:
+  - from: security-runtime-bin
+    to: .
+    filter:
+      - ace-security-runtime*
+      - bwrap
+      - runtime-manifest.json
+      - security-runtime.env
+      - BWRAP-LICENSE
 
 # Linux target：dir 即"未打包目录"。
 linux:

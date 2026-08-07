@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   mapHistoryItems,
   mergeHistoryWithLiveMessages,
+  normalizeTurnFileChanges,
   preserveLocalProcessDetails,
   type BackendHistoryItem,
 } from "./historyMap";
@@ -47,6 +48,14 @@ describe("preserveLocalProcessDetails", () => {
 });
 
 describe("mapHistoryItems", () => {
+  it("clamps non-finite file change counts at the history boundary", () => {
+    expect(normalizeTurnFileChanges([
+      { path: "/work/app.ts", added: "NaN", removed: Infinity },
+    ])).toEqual([
+      { path: "/work/app.ts", name: "app.ts", added: 0, removed: 0, status: "modified" },
+    ]);
+  });
+
   it("appends streaming thinking chunks without inserting blank lines between every delta", () => {
     const first: UiMessage = {
       id: "m1",

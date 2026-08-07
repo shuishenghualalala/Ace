@@ -3,6 +3,7 @@
  */
 
 import { backendApi, type Attachment } from '../backend-client';
+import { createIcon } from '../components/icon';
 import {
   $,
   appendAttachment,
@@ -76,6 +77,7 @@ const DOC_EXTS = new Set(['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pp
 const FILE_QA_SLUG = 'file-qa';
 /** file-qa 是否已安装的会话级缓存：null=未查询。避免每次渲染都打 /api/skills。 */
 let fileQaInstalledCache: boolean | null = null;
+let attachmentController: AbortController | null = null;
 
 function extOf(name: string): string {
   const i = name.lastIndexOf('.');
@@ -191,7 +193,7 @@ function buildRemoveBtn(attId: string, onRemove?: (attId: string) => void): HTML
   btn.className = 'chat-attachment-chip__remove';
   btn.dataset.removeAtt = attId;
   btn.setAttribute('aria-label', '移除');
-  btn.textContent = '×';
+  btn.append(createIcon('icon-close', { size: 16 }));
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (onRemove) {
@@ -226,18 +228,32 @@ export function takeAttachmentsForSend(): Attachment[] {
   return list;
 }
 
-export function bindAttachments(): void {
+export function bindAttachments(): () => void {
+  if (attachmentController) return () => {};
+  attachmentController = new AbortController();
+  const signal = attachmentController.signal;
   const input = $('#chat-file-input') as HTMLInputElement | null;
-  $('#chat-attach-btn')?.addEventListener('click', () => input?.click());
+  $('#chat-attach-btn')?.addEventListener('click', () => input?.click(), { signal });
   input?.addEventListener('change', () => {
     void handleFileSelect(input.files);
     input.value = '';
-  });
+  }, { signal });
   const dropZone = $('#chat-input-container');
-  if (dropZone) bindFileDrop(dropZone, (files) => void handleFileSelect(files));
+  const unbindDrop = dropZone
+    ? bindFileDrop(dropZone, (files) => void handleFileSelect(files))
+    : () => {};
   const chatInput = $('#chat-input');
-  if (chatInput) bindFilePaste(chatInput, (files) => void handleFileSelect(files));
-  bindFileQaHintActions();
+  const unbindPaste = chatInput
+    ? bindFilePaste(chatInput, (files) => void handleFileSelect(files))
+    : () => {};
+  bindFileQaHintActions(signal);
+  return () => {
+    if (!attachmentController) return;
+    attachmentController.abort();
+    attachmentController = null;
+    unbindDrop();
+    unbindPaste();
+  };
 }
 
 /**
@@ -248,21 +264,29 @@ export function bindAttachments(): void {
  * 注意：截图在部分浏览器只出现在 clipboardData.items（不在 files），因此 files
  * 为空时才回退 items；两者同时读取会把同一位图的不同包装重复上传。
  */
-export function bindFilePaste(target: HTMLElement, onFiles: (files: File[]) => void): void {
-  if (target.dataset.pasteUploadBound === 'true') return;
+export function bindFilePaste(
+  target: HTMLElement,
+  onFiles: (files: File[]) => void,
+): () => void {
+  if (target.dataset.pasteUploadBound === 'true') return () => {};
   target.dataset.pasteUploadBound = 'true';
-  target.addEventListener('paste', (e) => {
+  const handlePaste = (e: ClipboardEvent): void => {
     const dt = e.clipboardData;
     if (!dt) return;
     const files = uniqueClipboardFiles(dt);
     if (files.length === 0) return;
     e.preventDefault();
     onFiles(files);
-  });
+  };
+  target.addEventListener('paste', handlePaste);
+  return () => {
+    target.removeEventListener('paste', handlePaste);
+    delete target.dataset.pasteUploadBound;
+  };
 }
 
 /** 引导条交互：一键安装 file-qa；关闭按钮本次会话隐藏（附件变化后仍会按规则重判）。 */
-function bindFileQaHintActions(): void {
+function bindFileQaHintActions(signal: AbortSignal): void {
   $('#chat-fileqa-install-btn')?.addEventListener('click', async () => {
     const btn = $('#chat-fileqa-install-btn') as HTMLButtonElement | null;
     if (btn) btn.disabled = true;
@@ -291,11 +315,11 @@ function bindFileQaHintActions(): void {
     } finally {
       if (btn) btn.disabled = false;
     }
-  });
+  }, { signal });
   $('#chat-fileqa-close-btn')?.addEventListener('click', () => {
     const hint = $('#chat-fileqa-hint');
     if (hint) hint.hidden = true;
-  });
+  }, { signal });
 }
 
 /**
@@ -308,31 +332,48 @@ function bindFileQaHintActions(): void {
  *  - dragenter/leave 在容器与子元素（textarea、按钮）间会成对抖动，用 depth 计数器
  *    防闪烁：进入子元素时 enter+1、leave-1，仅当归零才真正离开。
  */
-export function bindFileDrop(zone: HTMLElement, onFiles: (files: File[]) => void): void {
+export function bindFileDrop(
+  zone: HTMLElement,
+  onFiles: (files: File[]) => void,
+): () => void {
+  if (zone.dataset.fileDropBound === 'true') return () => {};
+  zone.dataset.fileDropBound = 'true';
   const hasFiles = (e: DragEvent): boolean =>
     Boolean(e.dataTransfer) && Array.from(e.dataTransfer!.types).includes('Files');
   let depth = 0;
 
-  zone.addEventListener('dragenter', (e) => {
+  const handleDragEnter = (e: DragEvent): void => {
     if (!hasFiles(e)) return;
     e.preventDefault();
     depth += 1;
     zone.classList.add('is-drag-over');
-  });
-  zone.addEventListener('dragover', (e) => {
+  };
+  const handleDragOver = (e: DragEvent): void => {
     if (!hasFiles(e)) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-  });
-  zone.addEventListener('dragleave', () => {
+  };
+  const handleDragLeave = (): void => {
     if (depth > 0) depth -= 1;
     if (depth === 0) zone.classList.remove('is-drag-over');
-  });
-  zone.addEventListener('drop', (e) => {
+  };
+  const handleDrop = (e: DragEvent): void => {
     if (!hasFiles(e)) return;
     e.preventDefault();
     depth = 0;
     zone.classList.remove('is-drag-over');
     if (e.dataTransfer) onFiles(Array.from(e.dataTransfer.files));
-  });
+  };
+  zone.addEventListener('dragenter', handleDragEnter);
+  zone.addEventListener('dragover', handleDragOver);
+  zone.addEventListener('dragleave', handleDragLeave);
+  zone.addEventListener('drop', handleDrop);
+  return () => {
+    zone.removeEventListener('dragenter', handleDragEnter);
+    zone.removeEventListener('dragover', handleDragOver);
+    zone.removeEventListener('dragleave', handleDragLeave);
+    zone.removeEventListener('drop', handleDrop);
+    zone.classList.remove('is-drag-over');
+    delete zone.dataset.fileDropBound;
+  };
 }

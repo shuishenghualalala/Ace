@@ -1,5 +1,10 @@
 /**
- * 流式 delta 按 gateway_sequence 重组，避免到达顺序与生成顺序不一致时正文串位或丢字。
+ * 流式 delta 按 gateway_sequence 重组 —— 根治「到达顺序 != 生成顺序」导致的正文串位/丢字。
+ *
+ * 背景：deltaReducer 原先用 `content = cur + text` 按**到达顺序**盲目拼接，隐含「分片到达顺序
+ * 恒等于文本生成顺序」的假设。该假设在重连 replay（旧低序号帧在客户端已应用更高序号帧之后才
+ * 到达）等场景下被打破，导致正文串位 / 丢字，靠 finalReducer 的兜底覆盖救回（而该覆盖对
+ * builtin executor 的多步回合又会丢前言）。
  *
  * 本模块维护「每会话 × 每回合 assistant 消息」的 delta 片段缓冲，按 gateway_sequence（后端
  * push 时分配的会话级单调序号，见 crew/gateway/connections.py::push_payload）**升序**重组正文。

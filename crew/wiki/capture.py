@@ -161,10 +161,9 @@ async def _capture_media(
 
     store.save_raw(raw, owner_account_id, kb_id)
 
-    # 第三层：默认不自动深度 ingest；只有显式开启 auto_ingest 且系统建议整理时才执行
+    # 第三层：默认不自动深度 ingest；显式开启 auto_ingest 即表示用户确认。
     if (
         config.ingest.auto_ingest
-        and raw.ingest_recommend
         and compiler is not None
     ):
         try:
@@ -229,10 +228,9 @@ async def _capture_document(
         except Exception:  # noqa: BLE001
             log.warning("聊天附件发布来源页失败 source=%s", raw.id, exc_info=True)
 
-    # 第三层：默认不自动深度 ingest；只有显式开启 auto_ingest 且系统建议整理时才执行
+    # 第三层：默认不自动深度 ingest；显式开启 auto_ingest 即表示用户确认。
     if (
         config.ingest.auto_ingest
-        and raw.ingest_recommend
         and compiler is not None
     ):
         try:

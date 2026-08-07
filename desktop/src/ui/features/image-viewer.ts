@@ -7,10 +7,13 @@
 
 import { notify } from '../state';
 import { isAbsoluteLocalPath } from '../tool-screenshot';
+import {
+  activateExistingModal,
+  type OverlayHandle,
+} from '../components/overlays';
 
 let imageViewer: HTMLElement | null = null;
-let imageViewerEsc: ((event: KeyboardEvent) => void) | null = null;
-let restoreFocusTo: HTMLElement | null = null;
+let imageViewerHandle: OverlayHandle | null = null;
 
 export async function copyImageToClipboard(localPath: string): Promise<boolean> {
   if (!isAbsoluteLocalPath(localPath)) {
@@ -54,8 +57,7 @@ export function openImageViewer(
   caption: string,
   localPath = '',
 ): void {
-  closeImageViewer(false);
-  restoreFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  closeImageViewer();
 
   const viewer = document.createElement('div');
   viewer.className = 'chat-image-viewer';
@@ -95,26 +97,26 @@ export function openImageViewer(
   footer.append(captionEl, actions);
   dialog.append(body, footer);
   viewer.appendChild(dialog);
-  document.body.appendChild(viewer);
-  requestAnimationFrame(() => viewer.classList.add('show'));
-
   imageViewer = viewer;
-  imageViewerEsc = (event) => {
-    if (event.key === 'Escape') closeImageViewer();
-  };
-  viewer.addEventListener('click', (event) => {
-    if (event.target === viewer) closeImageViewer();
+  imageViewerHandle = activateExistingModal({
+    root: viewer,
+    panel: dialog,
+    initialFocus:
+      actions.querySelector<HTMLButtonElement>('.chat-image-viewer__copy') ?? closeButton,
+    onClose: () => {
+      viewer.remove();
+      if (imageViewer === viewer) imageViewer = null;
+      imageViewerHandle = null;
+    },
   });
-  document.addEventListener('keydown', imageViewerEsc);
-  (actions.querySelector<HTMLButtonElement>('.chat-image-viewer__copy') ?? closeButton).focus();
 }
 
-export function closeImageViewer(restoreFocus = true): void {
+export function closeImageViewer(): void {
   if (!imageViewer) return;
-  if (imageViewerEsc) document.removeEventListener('keydown', imageViewerEsc);
-  imageViewer.remove();
-  imageViewer = null;
-  imageViewerEsc = null;
-  if (restoreFocus && restoreFocusTo?.isConnected) restoreFocusTo.focus();
-  restoreFocusTo = null;
+  imageViewerHandle?.close();
+  if (imageViewer) {
+    imageViewer.remove();
+    imageViewer = null;
+  }
+  imageViewerHandle = null;
 }

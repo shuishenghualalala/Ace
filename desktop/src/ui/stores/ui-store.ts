@@ -11,7 +11,7 @@ export interface UiStoreState {
   /** BackendChatSocket 实例本身，不参与持久化也不参与订阅通知（避免循环）。 */
   socket: unknown | null;
   feedbackDraft: FeedbackDraft;
-  /** 服务端反馈列表（反馈页“提交记录”数据源）。 */
+  /** 服务端反馈列表（反馈页"提交记录"数据源，打开时按工号 staffCode 拉取）。 */
   feedbackList: FeedbackListItem[];
   editingResend: boolean;
 }

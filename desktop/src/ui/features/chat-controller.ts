@@ -1,13 +1,15 @@
 /**
- * Chat 流式处理与渲染入口。
+ * Chat 流式处理 + 渲染入口（从 ui/index.ts 抽出，X2）。
  *
  * 这里集中了「会话消息流」相关的全部逻辑：流式分片 dispatch、回合结算、
  * 消息发送/撤回/编辑，以及与之强耦合的 DOM 渲染（renderChat /
- * patchStreamingTurn / renderQueueSlot）。
+ * patchStreamingTurn）。
  *
  * 与 index.ts 的解耦：本模块不 import index.ts（避免循环）。需要回调
  * openSession / renderWorkspaceHistory 的位置，通过模块级 registry（setCallbacks）
- * 由 index.ts 在 init 时注入。
+ * 由 index.ts 在 init 时注入——等价于 index.ts 内部函数互相调用的旧行为。
+ *
+ * 本文件所有函数均为「原样搬迁」，行为与抽离前的 index.ts 完全一致。
  */
 
 import { getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, touchStreamActivity } from './gateway-sequence';
@@ -23,9 +25,9 @@ import {
   renderMessageHtml,
   renderTeamInternalMessage,
   renderQueueHintCard,
-  renderQueuePanelHtml,
   renderTodoProgressPanelHtml,
   renderTypingIndicator,
+  renderWorkEmptyState,
   resolveLiveFoldLabel,
   resolveTeamTurnFoldLabel,
   resolveTurnDurationMs,
@@ -33,7 +35,7 @@ import {
   turnHasProcessContent,
   hasVisibleAnswerText,
 } from '../chat-render';
-import { renderMarkdownHtmlStreaming } from '../markdown';
+import { patchTranscriptMarkdown } from '../components/transcript';
 import { diffRenderUnits, type RenderUnit } from '../chat-diff';
 import { recordTurn } from './usage-tracker';
 import { onAfterFinal } from './cron-page';
@@ -74,7 +76,7 @@ import { showFileOpenMenu } from './file-open-menu';
 import { openBrowserArtifact, openUserBrowser } from './browser-panel';
 import { shouldAutoOpenBrowserWorkbench } from './browser-auto-open';
 import { htmlArtifactPathFromHref, httpUrlFromHref } from '../artifact-links';
-import { setContextCompactionActive, syncRunningIntroSlot } from './running-intro';
+import { syncRunningIntroSlot } from './running-intro';
 import {
   applyBusyUi,
   discardEmptyOptimisticAssistant,
@@ -83,6 +85,7 @@ import {
   resumeSessionGeneration,
 } from './session-busy';
 import { clearScenarioChip, takeArmedSubScenario } from './scenario-arm';
+import { requireRendererLogin } from './auth-gate';
 import {
   bindFollowupCard,
   formatFollowupAnswerMessage,
@@ -94,6 +97,7 @@ import type { ChatChunk, WikiIngestProgress } from '../backend-client';
 import { makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold, setTurnFold } from './fold-state';
+import { renderSecurityBanner } from './security-banner';
 import { attachCopyButtons } from './copy-button';
 import { renderMermaidBlocks } from './mermaid-render';
 import {
@@ -109,7 +113,6 @@ import {
 } from '../reducers/chat-reducer';
 import {
   $,
-  $$,
   addSubscribedSessions,
   addSuppressedSession,
   appendSessionMessage,
@@ -120,7 +123,6 @@ import {
   getPendingQueue,
   isBusySession,
   isDynamicKanbanSession,
-  movePendingQueueItem,
   newMessageId,
   notify,
   promotePendingQueueItemAsRevision,
@@ -140,7 +142,10 @@ import { takeAttachmentsForSend } from './attachments';
 import { renderAttachmentPreview } from './attachments';
 import { messageStore, sessionStore } from '../stores/stores';
 import type { TabKey } from '../state';
+import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
+import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds } from './composer-mention';
+import { productModeStore } from '../stores/product-mode-store';
 
 // ---------- registry: 由 index.ts 在 init 时注入的回调（破循环） ----------
 
@@ -155,6 +160,7 @@ interface DispatchOptions {
   clientIntent?: 'revision';
   optimisticUserMessageId?: string;
   wikiConfirmationId?: string;
+  workDisabledPreferenceIds?: string[];
 }
 /**
  * index.ts init 时调用，把 openSession / setTab 等顶层入口注入本模块。
@@ -172,14 +178,14 @@ export function setChatCallbacks(opts: { openSession: OpenSessionFn; setTab: (ta
   }
 }
 
-/** 在主聊天区打开指定会话（Wiki 右栏等外部面板跳转会话用）：先 openSession 再 setTab('chat')。 */
+/** Open a session through the current renderer owner, then switch to chat. */
 export async function openSessionInChat(sessionId: string): Promise<void> {
   if (!sessionId) return;
   await openSessionFn(sessionId);
   setTabFn('chat');
 }
 
-// ---------- Wiki ingest 进度帧转发 ----------
+// ---------- Wiki ingest 进度帧转发（Phase 2） ----------
 // wiki_ingest_progress 是 /api/wiki/ingest 推到某个会话的带外进度帧，不属于对话回合，
 // 不进 reducer；经回调转发给订阅者（wiki-page 由 index.ts 组合根注入，chat 侧不 import wiki-page）。
 let wikiIngestProgressCallback: ((progress: WikiIngestProgress) => void) | null = null;
@@ -252,18 +258,8 @@ export function updateGatewayDot(): void {
 }
 
 export function updateComposerControls(): void {
-  const sessionId = state.activeSessionId;
-  const busy = sessionId ? isBusy(sessionId) : false;
-  // busy 且输入框有内容 → 切「发送」态（可直接发送→入队待发卡片）；输入清空（发送后/手动删）
-  // → 回到「停止」态。CSS 据 --busy / --composing 显隐 send/stop 按钮。
-  const input = $('#chat-input') as HTMLTextAreaElement | null;
-  const composing = busy && !!input?.value.trim();
-  const ctrl = $('#composer-controls');
-  ctrl?.classList.toggle('composer-controls--busy', busy);
-  ctrl?.classList.toggle('composer-controls--composing', composing);
-  // 撤回修改后，在输入框上方显示「正在编辑」提示条（仅当前会话处于编辑态时）
-  const editing = sessionId ? state.editFromIdx[sessionId] != null : false;
-  $('#composer-edit-banner')?.classList.toggle('show', editing);
+  // ComposerView subscribes to stores and owns the execution controls.
+  renderSecurityBanner();
 }
 
 export function scrollChatToBottom(): void {
@@ -289,7 +285,7 @@ let scrollAnchorContainerId: string | null = null;
 /** 拿到当前渲染容器的 scroll anchor；容器变了就 dispose 旧的、建新的。
  *  命名带 Instance 后缀以避免与 chat-diff 渲染层同名的 getScrollAnchor 冲突。 */
 function getScrollAnchorInstance(): ScrollAnchor {
-  const containerId = 'chat-messages';
+  const containerId = resolveChatRenderTargetId(isStudioView());
   const container = document.getElementById(containerId);
   if (!container) {
     // 容器还没挂载：返回一个 no-op anchor，避免外部炸。
@@ -298,7 +294,7 @@ function getScrollAnchorInstance(): ScrollAnchor {
   if (scrollAnchor && scrollAnchorContainerId === containerId) {
     return scrollAnchor;
   }
-  // 容器被替换时销毁旧实例并重新绑定。
+  // 容器变了（工作室 ↔ 对话页切换）：销毁旧的，建新的。
   scrollAnchor?.dispose();
   scrollAnchor = attachScrollAnchor(container);
   scrollAnchorContainerId = containerId;
@@ -342,13 +338,11 @@ export function setStatusWithUi(sessionId: string, status: SessionStatus): void 
 
 export function setQueueHintWithUi(sessionId: string, hint: string): void {
   setQueueHint(sessionId, hint);
-  if (sessionId === state.activeSessionId) renderQueueSlot();
 }
 
 // ---------- fold 委托（一次性 capture 监听） ----------
 
-/** 「已编辑文件」卡：打开看板 Files / 在资源管理器中显示（与 fold 委托同容器、各绑一次）。
- *  WeakSet：Wiki 右栏面板等会整体重建 DOM 的容器也会绑定，避免持有已分离元素。 */
+/** 「已编辑文件」卡：打开看板 Files / 在资源管理器中显示（与 fold 委托同容器、各绑一次）。 */
 const fileChangesBoundContainers = new WeakSet<HTMLElement>();
 export function ensureFileChangesDelegation(container: HTMLElement): void {
   if (fileChangesBoundContainers.has(container)) return;
@@ -445,20 +439,19 @@ export function ensureFileChangesDelegation(container: HTMLElement): void {
                 removed: typeof item.removed === 'number' ? item.removed : 0,
                 status: item.status === 'added' || item.status === 'deleted' || item.status === 'modified' ? item.status : 'modified',
                 diff: [],
-                binary: item.binary === true,
               }));
           }
         } catch {
           fileChanges = null;
         }
       }
-      openInspectorToTab('files', { expandFilePath: expandPath, filePaths, fileChanges });
+      openInspectorToTab('files', { expandFilePath: expandPath, filePaths, fileChanges: fileChanges ?? null });
     }
   });
 }
 
 /** 一次性事件委托：在消息容器上 capture 监听 toggle（toggle 不冒泡）。
- *  对话容器只绑定一次。
+ *  工作室与对话页各有一个容器，分别绑定一次。
  *  覆盖两类折叠：
  *   - 回合级 `.msg__foldable`：写 state.userFoldedTurns/userUnfoldedTurns（现有路径）+ fold-state.ts 持久化。
  *   - 时间线工具项 `.process-timeline__details`：直接写 fold-state.ts（data-fold-key 由 renderToolCard 写入；
@@ -587,7 +580,8 @@ function collapseLatestAgentProcess(sessionId: string): void {
   });
 }
 
-/** 流式渲染合并：同一帧内多次 schedule 只触发一次 renderChat。 */
+/** 流式渲染合并：同一帧内多次 schedule 只触发一次 renderChat，
+ *  把 delta 30/s 的全量 innerHTML 重绘降到每帧 ≤1 次（P2-3）。 */
 const scheduleChatRender = createChatRenderCoalescer(
   () => renderChat(),
   (cb) => requestAnimationFrame(cb),
@@ -626,7 +620,7 @@ function syncTurnDurationTicker(): void {
           stopTurnDurationTicker();
           return;
         }
-        // 保留单 Agent/Dynamic Kanban 原 patch 路径；Team 仅在原路径无活跃
+        // 保留单 Agent/专家团原 patch 路径；Team 仅在原路径无活跃
         // assistant 时追加旁路适配，共用同一个 ticker，不新建定时器。
         if (!patchActiveStreamingTurnLabel(active)) patchActiveTeamTurnLabel(active);
       }, 1000);
@@ -644,82 +638,6 @@ export function _resetTurnDurationTickerForTests(): void {
 /** 单测用：重置待发队列编辑草稿，避免模块级状态跨用例残留。 */
 export function _resetQueueEditDraftForTests(): void {
   queueEditDraft = null;
-}
-
-// ---------- 队列槽渲染 ----------
-
-export function renderQueueSlot(): void {
-  const slot = $('#chat-queue-slot');
-  if (!slot) return;
-  const sessionId = state.activeSessionId;
-  if (!sessionId) {
-    slot.innerHTML = '';
-    return;
-  }
-  const queue = state.pendingQueues[sessionId] ?? [];
-  // 动态看板后端 steer 目前是日志占位（crew/dynamickanban/manager.py），不实际注入——
-  // 这类会话隐藏「引导」按钮，避免点了触发缓存空等（即「引导后空白数分钟」）。
-  const canSteer = !isDynamicKanbanSession(sessionId);
-  // 流式期间 renderChat 每帧（1s 计时器 + 各类非-delta chunk）都会回调本函数。
-  // 若每帧都 slot.innerHTML = renderQueuePanelHtml(...) 全量重建，会：
-  //   ① 把已点开的「更多」菜单 panel.hidden 重置回默认隐藏 → 菜单一闪而过；
-  //   ② 在 pointerdown→click 之间替换按钮节点 → 卡片点不上。
-  // 队列内容仅在显式增删/移动/编辑/引导或切会话时才变，故用 sig 比对：内容未变就跳过重建，
-  // 保留菜单展开态与已绑定的事件监听。
-  const sig = `${canSteer ? '1' : '0'}|${queue.length}|${queue.map((i) => `${i.id}:${i.query}:${i.optimisticUserMessageId ?? ''}`).join(' ')}`;
-  if (slot.dataset.queueSig === sig) return;
-  slot.dataset.queueSig = sig;
-  if (queue.length === 0) {
-    slot.innerHTML = '';
-    return;
-  }
-  slot.innerHTML = renderQueuePanelHtml(queue, canSteer);
-  $$('[data-queue-remove]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const index = Number(btn.getAttribute('data-queue-remove'));
-      removePendingQueueItem(sessionId, index);
-      if (getPendingQueue(sessionId).length === 0) setQueueHintWithUi(sessionId, '');
-      renderQueueSlot();
-    });
-  });
-  $$('[data-queue-steer]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const index = Number(btn.getAttribute('data-queue-steer'));
-      steerQueuedItem(sessionId, index);
-    });
-  });
-  $$('[data-queue-edit]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const index = Number(btn.getAttribute('data-queue-edit'));
-      editQueueItem(sessionId, index);
-    });
-  });
-  $$('[data-queue-move]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const index = Number(btn.getAttribute('data-queue-move'));
-      const direction = Number(btn.getAttribute('data-queue-move-dir'));
-      movePendingQueueItem(sessionId, index, index + direction);
-      renderQueueSlot();
-    });
-  });
-  $$('[data-queue-menu]').forEach((btn) => {
-    btn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const index = Number(btn.getAttribute('data-queue-menu'));
-      const panel = slot.querySelector<HTMLElement>(`[data-queue-menu-panel="${index}"]`);
-      const shouldOpen = !!panel?.hidden;
-      slot.querySelectorAll<HTMLElement>('[data-queue-menu-panel]').forEach((el) => {
-        el.hidden = true;
-      });
-      slot.querySelectorAll<HTMLElement>('[data-queue-menu]').forEach((el) => {
-        el.setAttribute('aria-expanded', 'false');
-      });
-      if (panel) {
-        panel.hidden = !shouldOpen;
-        btn.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
-      }
-    });
-  });
 }
 
 export function renderTodoSlot(): void {
@@ -749,8 +667,8 @@ export function renderTodoSlot(): void {
 // ---------- patchStreamingTurn（流式增量） ----------
 
 /**
- * 流式正文增量 patch：只更新当前 streaming 回合的正文 + 计时 label，
- * 不重建整棵消息树，以避免：
+ * 流式正文增量 patch（P2-3）：只更新当前 streaming 回合的正文 + 计时 label，
+ * 不重建整棵消息树。修两个问题：
  *  1. 长会话下每帧全量 innerHTML 重绘 → 卡顿；
  *  2. 每帧重建会销毁用户正在交互的 <details>，导致手动展开/折叠状态丢失。
  * 找不到目标（首片未渲染 / 切换会话 / 结构变化）→ 返回 null，调用方回退全量 render。
@@ -761,7 +679,7 @@ function resolveStreamingTurnTarget(sid: string, assistantId: string): {
   msg: ChatMessage;
 } | null {
   if (sid !== state.activeSessionId) return null;
-  const containerId = 'chat-messages';
+  const containerId = resolveChatRenderTargetId(isStudioView());
   const root = document.getElementById(containerId);
   const turnEl = root?.querySelector<HTMLElement>('.msg[data-streaming="true"]') ?? null;
   if (!turnEl) return null;
@@ -828,7 +746,7 @@ function patchActiveTeamTurnLabel(sid: string): boolean {
     (item) => item.role === 'team_internal' && item.streaming,
   );
   if (!message) return false;
-  const containerId = 'chat-messages';
+  const containerId = resolveChatRenderTargetId(isStudioView());
   const root = document.getElementById(containerId);
   const turn = Array.from(root?.querySelectorAll<HTMLElement>('.team-internal[data-message-id]') || [])
     .find((element) => element.dataset.messageId === message.id);
@@ -847,15 +765,11 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
   const textEl = turnEl.querySelector<HTMLElement>(`[data-text-for="${assistantId}"]`);
   if (textEl) {
     textEl.classList.remove('typing-inline');
-    textEl.innerHTML = msg.content ? renderMarkdownHtmlStreaming(msg.content) : '';
+    patchTranscriptMarkdown(textEl, msg.content, true);
   }
   const thinkingEl = turnEl.querySelector<HTMLElement>(`[data-thinking-for="${assistantId}"] .process-timeline__thinking`);
   if (thinkingEl && msg.thinking != null) {
-    const followThinkingOutput = (
-      thinkingEl.scrollHeight - thinkingEl.scrollTop - thinkingEl.clientHeight
-    ) <= 24;
     thinkingEl.textContent = msg.thinking;
-    if (followThinkingOutput) thinkingEl.scrollTop = thinkingEl.scrollHeight;
   }
   // 实时计时：以整回合 batch 为准（工具阶段可能无正文 data-text-for，但仍需刷新 label）。
   patchStreamingTurnLabel(sid, assistantId);
@@ -863,18 +777,19 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
   return true;
 }
 
-// ---------- renderChat：keyed 增量 diff 渲染 ----------
+// ---------- renderChat（X3b：keyed 增量 diff 渲染） ----------
 
 /**
- * 跨帧维护 Map<key, HTMLElement>，每帧只重建真正变化的单元。
+ * X3b：跨帧维护 Map<key, HTMLElement>，每帧只重建真正变化的单元。
  *
- * 每帧的渲染目标是有序的 render-unit 列表（key + sig + build fn），
- * 由纯逻辑 diffRenderUnits(prev, next) 算出最小 op：
+ * X3a 是「每帧全量重建所有 message 节点 + container.replaceChildren」—— 500 条消息的长会话
+ * 里每个流式分片都重建整棵 DOM，开销随会话长度线性放大。X3b 把每帧的渲染目标建模成有序的
+ * render-unit 列表（key + sig + build fn），用纯逻辑 diffRenderUnits(prev, next) 算出最小 op：
  * reuse（原样保留）/ patch（sig 变了，重建该单元）/ append（新单元）/ remove（消失）。
  *
  * 性能收益：流式中只有「在飞的最后一个回合」sig 变化 → 只重建它；前 N-1 个回合的节点原样复用。
  *
- * 行为等价性：
+ * 行为等价性论证（见 build-followup-x3b.md）：
  *  - reuse：节点是上一帧 render* 的产物；只要 sig 保守地覆盖了 render* 的全部输入，
  *    「sig 相同」⟺「render* 输出相同」⟺ 复用旧节点 == 全量重建该单元的输出。
  *  - patch/append：调的是同一批 render*（renderAgentTurn / renderMessageHtml / ...），
@@ -882,7 +797,7 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
  *  - 因此 reuse + patch + append 在可见 DOM 上与「全量重建后 replaceChildren」等价，
  *    但复用了绝大多数节点（省掉它们的 build + GC 开销）。
  *
- * 模块级缓存：按容器 id 维护 ChatRenderTarget。
+ * 模块级缓存：按容器 id 维护独立 ChatRenderTarget（工作室 / 对话双轨）。
  */
 interface ChatRenderTarget {
   wrapper: HTMLElement | null;
@@ -922,7 +837,7 @@ function resetAllChatRenderTargetsForSession(sessionId: string | null): void {
 }
 
 /** 给定 build() 产物：null 或 data-empty 占位视为「缺席」（不进 DOM、不占 Map 槽位）。
- *  build 返回 null 的单元不进 DOM；
+ *  与 X3a 的 appendRendered 过滤语义一致（build 返回 null 的单元不进 DOM；
  *  renderAgentTurn 空批次返回 data-empty div）。 */
 function isPresent(node: HTMLElement | null): node is HTMLElement {
   if (!node) return false;
@@ -931,10 +846,10 @@ function isPresent(node: HTMLElement | null): node is HTMLElement {
 }
 
 /** 稳定的 scroll-anchor 节点：sig 恒定，跨帧复用同一个 div（避免每帧新建）。 */
-function getScrollAnchor(target: ChatRenderTarget): HTMLDivElement {
+function getScrollAnchor(target: ChatRenderTarget, containerId: string): HTMLDivElement {
   if (!target.scrollAnchorNode) {
     const div = document.createElement('div');
-    div.id = 'chat-scroll-anchor';
+    div.id = containerId === 'studio-chat-messages' ? 'studio-chat-scroll-anchor' : 'chat-scroll-anchor';
     target.scrollAnchorNode = div;
   }
   return target.scrollAnchorNode;
@@ -972,24 +887,24 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
   const artifacts = (msg.artifacts || []).map((artifact) =>
     `${artifact.artifact_id || artifact.id || ''}|${artifact.title || ''}|${artifact.path || ''}|${artifact.summary || ''}`,
   ).join(';');
+  const durationBucket = Math.floor(Math.max(0, msg.turnDurationMs || 0) / 1000);
   const files = (msg.turnFileChanges || []).map((file) =>
     `${file.path}|${file.status}|${file.added}|${file.removed}|${file.binary ? '1' : '0'}`,
   ).join(';');
-  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${isStreaming ? '1' : '0'}`;
+  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
 }
 
 /** 一段 batch（同一回合的连续 agent 消息）的 sig。
  *
- *  关键：流式计时由独立 ticker 原地更新 label 和工具 duration，时间本身不能进入结构签名。
- *  否则每跨一个整秒，整个回合 DOM 都会被 replaceChild，导致 Timeline 闪烁、动画重启，
- *  以及 details 展开状态短暂跳变。
+ *  关键：流式计时由 updateActiveToolDurations() 原地更新，不能让纯时间变化重建整个回合。
+ *  流结束时 streaming/tool 状态本身会改变 sig，届时再渲染最终时长。
  *
- *  覆盖 renderAgentTurn 的结构输入：isStreaming / userPinnedOpen /
+ *  覆盖 renderAgentTurn 的全部输入：isStreaming / userPinnedOpen / turnDurationMs 桶 /
  *  batch 内每条消息的 role|content|thinking|toolCalls|planReview|todoSnapshot|turnFileChanges|
  *  streaming|agentName|model|timestamp。
  *  toolCall 逐项展开（name/args/result/status/startedAt/duration）确保工具状态变化触发 patch。
  *  planReview / todoSnapshot / turnFileChanges 同样展开，否则 todo_updated / plan_review /
- *  hydrate 剔除无效文件后字段变了但 sig 不变时会错误复用旧 DOM，造成 todo/文件卡不刷新。 */
+ *  hydrate 剔幽灵文件后字段变了但 sig 不变，X3b 会复用旧 DOM，造成 todo/文件卡不刷新。 */
 function sigAgentTurn(
   batch: ChatMessage[],
   isStreaming: boolean,
@@ -1039,19 +954,26 @@ function sessionTurnIdentity(sessionId: string | null): AgentTurnOptions['identi
   // 首帧前的通用等待态沿用内置 Leader（Crew），聊天区不展示 Team Logo。
   if (provider === 'team') return undefined;
   const name = String(display?.agentLabel?.name || 'Agent').trim();
-  const badge = String(display?.agentLabel?.display_badge || '?');
+  if (provider === 'sites') {
+    return { kind: 'external', name, badge: '', icon: 'icon-inspiration' };
+  }
+  const badge = provider.includes('codex') ? 'X' : (name || provider).slice(0, 1).toUpperCase();
   return { kind: 'external', name, badge };
 }
 
 export function renderChat(): void {
   const welcomePanel = $('#welcome-panel');
   const chatPanel = $('#chat-panel');
-  const containerId = 'chat-messages';
+  const isStudioMode = isStudioView();
+  const containerId = resolveChatRenderTargetId(isStudioMode);
   const container = document.getElementById(containerId);
   if (!welcomePanel || !chatPanel || !container) return;
   const sessionId = state.activeSessionId;
   const allMessages = sessionId ? getMessages(sessionId) : [];
   const busy = sessionId ? isBusy(sessionId) : false;
+  const isInspirationSession = sessionId
+    ? String(getSessionAgentDisplay(sessionId)?.agentLabel?.provider || '').trim().toLowerCase() === 'sites'
+    : false;
   const queueHint = sessionId ? state.queueHints[sessionId] : '';
   const pendingFollowup = sessionId ? bookFor(sessionId).pendingFollowup : null;
   const turnIdentity = sessionTurnIdentity(sessionId);
@@ -1061,14 +983,27 @@ export function renderChat(): void {
   const editing = editFrom != null;
   const messages = editing ? allMessages.slice(0, editFrom) : allMessages;
 
+  const chatTab = chatPanel.closest('#chat-tab');
+  const workOverviewActive = chatTab?.classList.contains('work-overview-active') ?? false;
   // 编辑态 / 等待用户交互 / todo 面板存在时，即使消息为空也保留对话流页面，不切欢迎页。
-  const showChat = messages.length > 0
+  const showChat = chatTab?.classList.contains('work-session-active')
+    || isInspirationSession
+    || messages.length > 0
     || busy
     || editing
     || Boolean(pendingFollowup);
-  welcomePanel.hidden = showChat;
-  chatPanel.hidden = !showChat;
-  document.body.classList.toggle('welcome-active', state.activeTab === 'chat' && !showChat);
+  if (!isStudioMode) {
+    welcomePanel.hidden = workOverviewActive || showChat;
+    chatPanel.hidden = workOverviewActive || !showChat;
+    document.body.classList.toggle(
+      'welcome-active',
+      state.activeTab === 'chat' && !workOverviewActive && !showChat,
+    );
+  } else {
+    welcomePanel.hidden = true;
+    chatPanel.hidden = true;
+    document.body.classList.remove('welcome-active');
+  }
 
   resetAllChatRenderTargetsForSession(sessionId);
   const target = getChatRenderTarget(containerId);
@@ -1095,11 +1030,16 @@ export function renderChat(): void {
   };
 
   if (messages.length === 0 && !busy && !editing) {
-    pushPlan('__empty', 'empty', () => renderEmptyState());
+    // Work 办公会话用专属空态，不复用通用助手的「开始一段对话 / Team 模式」文案。
+    const isWorkSession = chatTab?.classList.contains('work-session-active') ?? false;
+    pushPlan('__empty', 'empty', () =>
+      isWorkSession
+        ? renderWorkEmptyState(chatTab?.classList.contains('work-item-active') ?? false)
+        : renderEmptyState());
   } else if (messages.length === 0 && editing) {
     // 编辑态 + 空流：留白（提示条已在输入框上方）—— 不 push 任何单元
   } else {
-    // 把连续的 agent 消息（assistant / status / error）合并成一个 .msg 块。
+    // 把连续的 agent 消息（assistant / status / error）合并成一个 .msg 块（与 X3a 完全一致的切分逻辑）
     let i = 0;
     // 末尾没有实际内容的 streaming assistant turn（Dynamic Kanban 里由首个 status/workflow 帧
     // 开出的空 anchor）本质上等同于「正在生成」的 typing 指示器。如果把它留在原位置，
@@ -1241,7 +1181,7 @@ export function renderChat(): void {
     pushPlan('__followup', followupVersion, () => renderFollowupCardElement(pendingFollowup));
   }
   // __anchor：scroll-anchor 永远是最后一个单元，sig 恒定 → 跨帧复用同一节点
-  pushPlan('__anchor', 'anchor', () => getScrollAnchor(target));
+  pushPlan('__anchor', 'anchor', () => getScrollAnchor(target, containerId));
 
   // ---- diff + apply ----
   const nextMetas = plans.map((p) => p.meta);
@@ -1275,7 +1215,12 @@ export function renderChat(): void {
     const fresh = build();
     const old = lastUnits.get(op.key);
     if (isPresent(fresh)) {
-      if (old && old.parentNode === wrapper) wrapper.replaceChild(fresh, old);
+      if (old && old.parentNode === wrapper) {
+        const oldSpinner = old.querySelector('.msg__fold-spinner');
+        const freshSpinner = fresh.querySelector('.msg__fold-spinner');
+        if (oldSpinner && freshSpinner) freshSpinner.replaceWith(oldSpinner);
+        wrapper.replaceChild(fresh, old);
+      }
       lastUnits.set(op.key, fresh);
     } else {
       // build 产出 null/data-empty → 该单元缺席：移除旧节点并清出 Map
@@ -1309,7 +1254,7 @@ export function renderChat(): void {
     if (node) wrapper.appendChild(node);
   }
 
-  // ---- 渲染后的幂等副作用 ----
+  // ---- 副作用：全部与 X3a 保持一致 ----
   ensureFoldDelegation(container);
   ensureFileChangesDelegation(container);
   // 代码块复制按钮：patch/append 后新节点需重新绑定（幂等，旧节点跳过）。
@@ -1359,7 +1304,6 @@ export function renderChat(): void {
       renderChat();
     },
   });
-  renderQueueSlot();
   renderTodoSlot();
   updateComposerControls();
   syncRunningIntroSlot();
@@ -1375,9 +1319,9 @@ export function renderChat(): void {
   target.wrapper = chatWrapper;
 }
 
-// ---------- 迟到分片排队 ----------
+// ---------- P2-2 迟到分片排队 ----------
 
-// loadBackendHistory 期间到达的分片排队，history 写回后再 flush，
+// P2-2: loadBackendHistory 期间到达的分片排队，history 写回后再 flush，
 // 避免「全量替换 state.messages[sid]」覆盖掉迟到的流式分片。
 const pendingChunks: Record<string, ChatChunk[]> = {};
 const historyLoading = new Set<string>();
@@ -1463,9 +1407,8 @@ export function patchPlanReviewMessages(
 export function updateSessionPreview(sessionId: string, text: string): void {
   const session = state.sessions.find((s) => s.id === sessionId);
   if (!session) return;
-  // ponytail: 只更新预览/时间，不动 title。标题归摘要帧 applySessionTitle（titleFromSummary=true）、
-  // 首条 commitDraftSession、或用户 rename。这里若再写 title=makeSessionTitle(text)，已有会话每发一条
-  // 消息都会把标题盖成最新输入的截断——即"标题变成用户最后一条输入"。预览才是每条更新的对象。
+  // ponytail: 只更新预览/时间，不动 title。标题归摘要帧 applySessionTitle
+  //（titleFromSummary=true）或用户 rename；预览才是每条消息更新的对象。
   session.preview = text.slice(0, 48);
   session.updatedAt = Date.now();
 }
@@ -1487,7 +1430,7 @@ export function finalizeTurn(sessionId: string): void {
   const book = bookFor(sessionId);
   const finalizedAssistantId = book.assistantId;
   if (finalizedAssistantId) patchMessage(sessionId, finalizedAssistantId, { streaming: false });
-  // 回合封口时清理该回合的 delta 重组缓冲（assistantId 每回合唯一，不影响后续回合）。
+  // 修法3：回合封口 → 清该回合的 delta 重组缓冲（assistantId 每回合唯一，不影响后续回合；防泄漏）
   if (finalizedAssistantId) resetAssistant(sessionId, finalizedAssistantId);
   // 不可变更新 book：finalize 后清空本轮记账，触发 sessionStore 订阅
   patchBook(sessionId, {
@@ -1701,7 +1644,7 @@ function applyTeamInternalChunk(sessionId: string, chunk: TeamInternalChunk): vo
   setStatusWithUi(sessionId, 'running');
 }
 
-// applyChunk 是 dispatch + apply + 副作用的薄适配层。
+// T3：把 applyChunk 改造成 dispatch + apply + 副作用 的薄适配层。
 // 状态迁移全部走 chat-reducer，避免在 index.ts 重复实现 7 个 kind 的迁移逻辑。
 export function applyChunk(chunk: ChatChunk): void {
   const sid = chunk.session_id || state.activeSessionId || 'default';
@@ -1719,48 +1662,16 @@ export function applyChunk(chunk: ChatChunk): void {
     logStream('apply-chunk', 'drop-suppressed', { sid, kind: chunk.kind });
     return;
   }
-  if (chunk.kind === 'status') {
-    const body = (chunk.body ?? {}) as { activity?: string; active?: boolean };
-    if (body.activity === 'context_compaction') {
-      setContextCompactionActive(sid, body.active === true);
-      return;
-    }
-  }
   if (chunk.kind === 'session_title') {
     const title = String((chunk.body as { title?: string })?.title || '').trim();
     if (title) applySessionTitle(sid, title);
     return;
   }
   if (chunk.kind === 'channel_session_updated') {
-    const body = (chunk.body ?? {}) as { platform?: string; event?: string; query?: string };
+    const body = (chunk.body ?? {}) as { platform?: string };
     // 渠道会话开始/结束时都确保前端已订阅：开始订阅后才能收到实时 delta，
     // 结束订阅后也能通过 replay 补到可能错过的帧。
     subscribeSessions([sid]);
-    if (body.event === 'agent:start') {
-      // 渠道入站的用户消息不作为 WS 帧广播，先把原文补插到本地，
-      // 否则实时流出的回答会直接接在上一轮尾部，看起来像「串轮」。
-      // 去重：桌面本地发送的渠道会话消息已有乐观用户消息，不重复补插。
-      // 注意本地发送时尾部是乐观 assistant 占位，要向前找最后一条 user 消息比较。
-      const query = typeof body.query === 'string' ? body.query.trim() : '';
-      if (query) {
-        const msgs = getMessages(sid);
-        const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
-        const alreadyLocal = !!lastUser
-          && (lastUser.content === query || lastUser.content.startsWith(query));
-        if (!alreadyLocal) {
-          appendSessionMessage(sid, {
-            id: newMessageId('user'),
-            role: 'user',
-            content: query,
-            timestamp: Date.now(),
-          });
-        }
-      }
-      // 渠道外部发起的回合：本地 book 处于封口状态，turn gate 会把实时帧全部丢弃。
-      // 立即开门（挂 process 占位 + acceptingNewRequest），让首帧绑定 request_id 实时渲染。
-      resumeSessionGeneration(sid);
-      renderChat();
-    }
     void import('./channel-sessions').then(({ refreshChannelSessionsOnEvent }) =>
       refreshChannelSessionsOnEvent(body.platform, sid).then(() => renderWorkspaceHistory(openSessionFn)),
     );
@@ -1787,7 +1698,17 @@ export function applyChunk(chunk: ChatChunk): void {
     return;
   }
   if (chunk.kind === 'audit_updated') {
-    void import('./audit-page').then(({ onAuditDataChanged }) => onAuditDataChanged());
+    void import('./security-center').then(({ activateSecurityPage }) => activateSecurityPage());
+    return;
+  }
+  if (chunk.kind === 'work_event') {
+    const body = (chunk.body ?? {}) as { entity?: string; action?: string; content?: string };
+    if (body.entity === 'preference' && body.action === 'auto_enabled') {
+      notify(`已自动启用工作偏好：${body.content || '新偏好'}`);
+      void import('../stores/work-store').then(({ loadWorkPreferences }) => loadWorkPreferences());
+    } else {
+      void import('./work/notifications').then(({ handleWorkItemEvent }) => handleWorkItemEvent());
+    }
     return;
   }
   if (chunk.kind === 'wiki_ingest_progress') {
@@ -1804,10 +1725,9 @@ export function applyChunk(chunk: ChatChunk): void {
     }));
     return;
   }
-  touchStreamActivity(sid);
   // history 正在加载：排队，等 loadBackendHistory 写回后统一 flush，防止被全量替换覆盖。
-  // 必须先排队再记 gateway_sequence：否则 flush 重新 applyChunk 时会被判重误丢，
-  // 且序号水位已推进、重连 replay 也补不回来。
+  // 必须在 sequence 登记之前排队；flush 会重新走 applyChunk，若提前登记，
+  // 队列里的首帧会被误判为 replay 重复帧而永久丢失。
   if (historyLoading.has(sid)) {
     enqueuePendingChunk(sid, chunk);
     return;
@@ -1816,6 +1736,7 @@ export function applyChunk(chunk: ChatChunk): void {
     return;
   }
   noteGatewaySequence(sid, chunk);
+  touchStreamActivity(sid);
 
   const parsed = normalizeChunk(chunk);
   if (!parsed) {
@@ -1872,14 +1793,13 @@ export function applyChunk(chunk: ChatChunk): void {
     setQueueHintWithUi(sid, teamStatusMessage);
     setBusyWithUi(sid, true);
     setStatusWithUi(sid, 'running');
-    renderQueueSlot();
     renderWorkspaceHistory(openSessionFn);
     syncTurnDurationTicker();
     return;
   }
 
   // Dynamic Kanban 看板：只在回合 gate 接收后刷新，避免旧 request 的迟到帧触发 UI 副作用。
-  // 使用 per-session 动态看板状态判断，避免全局 state.mode 与后台会话不一致导致漏刷新。
+  // 使用 per-session 专家团队状态判断，避免全局 state.mode 与后台会话不一致导致漏刷新。
   // kanban 事件（call_completed / board_changed）到达后立即刷新右侧阶段，不必等轮询。
   if (sid === state.activeSessionId && isDynamicKanbanSession(sid) && ['tool', 'status', 'final', 'error', 'kanban', 'workflow_progress'].includes(parsed.kind)) {
     void scheduleRefreshKanbanBoard();
@@ -1914,7 +1834,7 @@ export function applyChunk(chunk: ChatChunk): void {
   };
   const result = reduceChunk(parsed, snapshot);
 
-  // delta 按 gateway_sequence 重组，避免依赖网络到达顺序累积正文。
+  // 修法1：delta 按 gateway_sequence 重组，覆盖 reducer 「cur + text 按到达顺序拼接」的脆弱累积。
   // 后端在重连 replay 等场景会把旧低序号帧晚于更高序号帧投递，到达顺序 != 生成顺序 → 盲目追加会
   // 串位/丢字。这里把本片按 gateway_sequence（会话级单调序号，见 crew/gateway/connections.py）
   // 入缓冲，用「按 seq 升序拼接」的重组结果覆盖 upsert 的 content，与到达顺序彻底解耦。
@@ -2105,7 +2025,7 @@ export function applyChunk(chunk: ChatChunk): void {
   // 非活跃会话的其它 chunk 同理不重绘侧栏（见上 delta 分支注释）。
 }
 
-/** 把 reducer 输出的 MessageUpsert 应用到 messageStore。 */
+/** T3：把 reducer 输出的 MessageUpsert 应用到 messageStore。 */
 function applyMessageUpserts(sessionId: string, upserts: ReturnType<typeof reduceChunk>['messageUpserts']): void {
   if (upserts.length === 0) return;
   const cur = getMessages(sessionId);
@@ -2133,6 +2053,7 @@ export function consumePending(sessionId: string): void {
   if (head.planActive !== undefined) dispatchOptions.planActive = head.planActive;
   if (head.clientIntent) dispatchOptions.clientIntent = head.clientIntent;
   if (head.optimisticUserMessageId) dispatchOptions.optimisticUserMessageId = head.optimisticUserMessageId;
+  if (head.workDisabledPreferenceIds) dispatchOptions.workDisabledPreferenceIds = head.workDisabledPreferenceIds;
   void dispatchWs(sessionId, head.query, head.attachments ?? [], dispatchOptions);
 }
 
@@ -2143,8 +2064,13 @@ export function sendQueueItemNow(sessionId: string, id: string): void {
   const item = queue[index]!;
   removePendingQueueItem(sessionId, index);
   setQueueHintWithUi(sessionId, '');
-  void dispatchWs(sessionId, item.query, item.attachments ?? [], item.subScenario ?? '', item.planActive);
-  renderQueueSlot();
+  void dispatchWs(sessionId, item.query, item.attachments ?? [], {
+    subScenario: item.subScenario ?? '',
+    ...(item.planActive !== undefined ? { planActive: item.planActive } : {}),
+    ...(item.workDisabledPreferenceIds
+      ? { workDisabledPreferenceIds: item.workDisabledPreferenceIds }
+      : {}),
+  });
 }
 
 export function editQueueItem(sessionId: string, index: number): void {
@@ -2153,6 +2079,7 @@ export function editQueueItem(sessionId: string, index: number): void {
   // 回填输入框供用户修改：从队列移除，下一次发送按新的提交时间追加到队尾。
   queueEditDraft = { sessionId };
   removePendingQueueItem(sessionId, index);
+  setDisabledWorkPreferenceIdsForTurn(item.workDisabledPreferenceIds ?? []);
   if (getPendingQueue(sessionId).length === 0) setQueueHintWithUi(sessionId, '');
   const input = $('#chat-input') as HTMLTextAreaElement | null;
   if (input) {
@@ -2160,7 +2087,6 @@ export function editQueueItem(sessionId: string, index: number): void {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.focus();
   }
-  renderQueueSlot();
 }
 
 export async function dispatchWs(
@@ -2177,6 +2103,7 @@ export async function dispatchWs(
       }
     : subScenarioOrOptions;
   const subScenario = dispatchOptions.subScenario ?? '';
+  if (!requireRendererLogin()) return false;
   if (isDraftSession(sessionId)) {
     await persistDraftSessionModel(sessionId);
   }
@@ -2202,15 +2129,16 @@ export async function dispatchWs(
     });
   }
   renderChat();
-  // 用户提交新消息：强制跳到底部（重置 stickyBottom）。采用 的 runStart → jumpToBottom。
+  // 用户提交新消息：强制跳到底部（重置 stickyBottom）。对齐 hermes 的 runStart → jumpToBottom。
   jumpChatToBottom();
   const planActiveForSend = dispatchOptions.planActive ?? state.composerMode === 'plan';
+  const workDisabledPreferenceIds = dispatchOptions.workDisabledPreferenceIds
+    ?? (productModeStore.get().productMode === 'work' ? takeDisabledWorkPreferenceIds() : []);
   // Plan 模式：发送实际 query 之前先发一帧 plan_enter。
   // 注意：openTurn 必须在 plan_enter 之后——plan 控制 status 会把 busy 置 idle，
   // 若先开乐观回合再 plan_enter，会把刚置起的 busy/计时打回 idle。
   await ensurePlanModeForSession(sessionId, planActiveForSend);
-  // 外援 Team 路由已写入 session_agent_config；WS payload 再带上 id，
-  // 便于网关直连场景。
+  // 外源 Team 路由已写入 session_agent_config；WS payload 再带上 id，便于网关直连场景。
   const externalTeamId = state.activeExternalTeamIdBySession[sessionId] || '';
   const mode = externalTeamId ? 'team' : 'agent';
   state.mode = mode;
@@ -2248,6 +2176,7 @@ export async function dispatchWs(
     ...(subScenario ? { sub_scenario: subScenario } : {}),
     ...(wikiExtras ? { wiki_kb_id: wikiExtras.wikiKbId } : {}),
     ...(dispatchOptions.wikiConfirmationId ? { wiki_confirmation_id: dispatchOptions.wikiConfirmationId } : {}),
+    ...(workDisabledPreferenceIds.length > 0 ? { work_disabled_preference_ids: workDisabledPreferenceIds } : {}),
   });
   if (!ok) {
     logStream('dispatch', 'send-ws-failed', { sessionId, requestId });
@@ -2266,7 +2195,8 @@ export async function dispatchWs(
   return true;
 }
 
-export function sendMessage(text: string): void {
+export async function sendMessage(text: string): Promise<void> {
+  if (!requireRendererLogin()) return;
   const plainContent = text.trim();
   const attachments = state.attachments;
   const activeHasAnnotations = state.activeSessionId
@@ -2290,6 +2220,9 @@ export function sendMessage(text: string): void {
       attachments: [...state.attachments],
       subScenario: takeArmedSubScenario(),
       planActive: state.composerMode === 'plan',
+      workDisabledPreferenceIds: productModeStore.get().productMode === 'work'
+        ? takeDisabledWorkPreferenceIds()
+        : [],
     };
     if (queueEditDraft?.sessionId === sessionId) {
       queueEditDraft = null;
@@ -2308,6 +2241,7 @@ export function sendMessage(text: string): void {
     if (enqueuedSession) enqueuedSession.updatedAt = Date.now();
     clearAttachments();
     renderAttachmentPreview();
+    if (isStudioView()) openStudioChatPanel();
     renderChat();
     setTabFn('chat');
     return;
@@ -2317,23 +2251,22 @@ export function sendMessage(text: string): void {
     queueEditDraft = null;
   }
 
-  void (async () => {
-    const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), takeArmedSubScenario());
-    if (sent) {
-      clearSiteAnnotationDraft(sessionId);
-      clearBlueprintAnnotationDraft(sessionId);
-    }
-    clearScenarioChip();
-    if (isDraftSession(sessionId)) {
-      commitDraftSession(sessionId, makeSessionTitle(previewText), previewText.slice(0, 48), openSessionFn);
-    } else {
-      updateSessionPreview(sessionId, previewText);
-    }
-    renderWorkspaceHistory(openSessionFn);
-    syncComposerWorkspaceLabel();
-    setTabFn('chat');
-    renderChat();
-  })();
+  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), takeArmedSubScenario());
+  if (sent) {
+    clearSiteAnnotationDraft(sessionId);
+    clearBlueprintAnnotationDraft(sessionId);
+  }
+  clearScenarioChip();
+  if (isDraftSession(sessionId)) {
+    commitDraftSession(sessionId, makeSessionTitle(previewText), previewText.slice(0, 48), openSessionFn);
+  } else {
+    updateSessionPreview(sessionId, previewText);
+  }
+  renderWorkspaceHistory(openSessionFn);
+  syncComposerWorkspaceLabel();
+  if (isStudioView()) openStudioChatPanel();
+  setTabFn('chat');
+  renderChat();
 }
 
 /** 把指定会话当前正在 streaming 的 assistant 消息冻结并结算回合耗时。
@@ -2354,7 +2287,7 @@ export function finalizeStreamingTurn(sessionId: string): void {
       });
     }
   }
-  // Team 仅追加自己的结算分支；上面单 Agent/Dynamic Kanban 的原循环不改。
+  // Team 仅追加自己的结算分支；上面单 Agent/专家团的原循环不改。
   for (const message of list) {
     if (message.role !== 'team_internal' || !message.streaming) continue;
     const startedAt = message.turnStartedAt;
@@ -2370,7 +2303,7 @@ export function finalizeStreamingTurn(sessionId: string): void {
 export function stopGeneration(sessionIdOverride?: string | Event): void {
   const sessionId = typeof sessionIdOverride === 'string' ? sessionIdOverride : state.activeSessionId;
   if (!sessionId) return;
-  // 用户主动停止是终态（每会话仅一个活跃回合），清理该会话 delta 重组缓冲。
+  // 修法3：用户主动停止是终态（每会话仅一个活跃回合）→ 清该会话 delta 重组缓冲，防泄漏。
   // withdrawMessage 走 stopGeneration，故撤回编辑也由此覆盖。
   resetSession(sessionId);
   replacePendingQueue(sessionId, []);
@@ -2391,7 +2324,6 @@ export function stopGeneration(sessionIdOverride?: string | Event): void {
     }
   });
   renderChat();
-  renderQueueSlot();
   // 用户停止后立刻拉取后端最新看板状态，避免右侧阶段仍显示“进行中”。
   void refreshKanbanBoard();
 }
@@ -2413,8 +2345,8 @@ export function withdrawMessage(msgId: string): void {
   // 2. 冻结「该消息起」的所有内容（把还在流式的助手消息标记为非流式，
   //    这样取消编辑还原时，它就停在被打断那一刻，不再带 … 光标）。
   //    注意：不删除！只是用 editFromIdx 标记隐藏范围，取消编辑可整段还原。
-  //    必须通过 store 不可变写回，触发 messageStore 订阅并避免与并发
-  //    patchMessage 互相覆盖。
+  //    不可变更新：原实现就地改 list[k].streaming 不触发 messageStore 订阅，
+  //    改用 store 不可变写回，避免与并发 patchMessage 互相覆盖。
   const frozen = list.map((m, k) => (k >= idx && m.streaming ? { ...m, streaming: false } : m));
   messageStore.set({ messages: { ...messageStore.get().messages, [sessionId]: frozen } });
   // 3. 复位记账：assistantId 指向正在生成的消息，必须清掉，否则下一轮的回复会 patch 到它上面
@@ -2455,13 +2387,11 @@ function requestRevisionAfterCurrentTurn(sessionId: string): void {
   setQueueHintWithUi(sessionId, '已引导，当前回复将尽快结束…');
   if (!isBusy(sessionId)) {
     consumePending(sessionId);
-    renderQueueSlot();
     return;
   }
   const sent = state.socket?.interrupt(sessionId);
   if (!sent) {
     notify('服务未连接，已保留为下一条待发消息');
-    renderQueueSlot();
     return;
   }
   void sent.then((ok) => {
@@ -2485,10 +2415,10 @@ export function steerQueuedItem(sessionId: string, index: number): void {
   requestRevisionAfterCurrentTurn(sessionId);
   renderChat();
   jumpChatToBottom();
-  renderQueueSlot();
 }
 
 export function steerGeneration(text: string): void {
+  if (!requireRendererLogin()) return;
   const sessionId = state.activeSessionId;
   const t = text.trim();
   if (!sessionId || !t) return;
@@ -2507,7 +2437,6 @@ export function steerGeneration(text: string): void {
   requestRevisionAfterCurrentTurn(sessionId);
   renderChat();
   jumpChatToBottom();
-  renderQueueSlot();
 }
 
 export function subscribeSessions(sessionIds: string[]): void {
@@ -2516,6 +2445,7 @@ export function subscribeSessions(sessionIds: string[]): void {
 }
 
 export async function refreshSessions(): Promise<void> {
+  if (!requireRendererLogin()) return;
   await refreshAllSessions();
   const { loadChannelSessions } = await import('./channel-sessions');
   await loadChannelSessions();

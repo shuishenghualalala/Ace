@@ -1,6 +1,6 @@
 """内置工具：terminal / file_read / file_write。
 
-本文件使用 Crew工具格式：
+本文件使用 Hermes 风格工具格式：
   SCHEMA + handler(args) + registry.register(name, toolset, schema, handler)
 """
 
@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -25,12 +27,15 @@ from crew.tools.file_utils import (
     _normalize_line_endings,
     _normalize_read_pagination,
     _resolve_base_dir,
-    _resolve_path,
     _strip_bom,
+    atomic_replace_bytes,
+    read_verified_bytes,
+    snapshot_file,
 )
 from crew.tools.output_filters import strip_ansi, truncate_output
 from crew.tools.redact import redact_sensitive_text
 from crew.tools.registry import Registry
+from crew.tools.security_guard import authorize_file_tool
 from crew.tools.terminal_guard import detect_dangerous_command, detect_hardline_command
 
 
@@ -78,18 +83,34 @@ def _terminal_max_timeout() -> float:
     return 600.0
 
 
-def _check_terminal_command(command: str, force: bool) -> tuple[bool, str | None]:
-    """检查命令是否被阻止或需要 force。"""
+def _check_terminal_command(command: str) -> tuple[bool, str | None, str | None]:
+    """Apply immutable best-effort hardlines; managed commands are always authorized later."""
     is_hardline, hardline_desc = detect_hardline_command(command)
     if is_hardline:
-        return False, f"BLOCKED (hardline): {hardline_desc}. 该命令无条件禁止通过 agent 执行。"
-    is_dangerous, dangerous_desc = detect_dangerous_command(command)
-    if is_dangerous and not force:
-        return False, (
-            f"DANGEROUS: {dangerous_desc}. "
-            "若已确认风险，请使用 terminal(force=true) 重试。"
+        return (
+            False,
+            f"BLOCKED (hardline): {hardline_desc}. 该命令无条件禁止通过 agent 执行。",
+            "policy_denied",
         )
-    return True, None
+    is_dangerous, dangerous_desc = detect_dangerous_command(command)
+    if is_dangerous:
+        return (
+            False,
+            f"DANGEROUS: {dangerous_desc}. 需要宿主运行时向用户申请批准。",
+            "approval_required",
+        )
+    return True, None, None
+
+
+def _classification_auto_allows(mode: Any, classification: Any) -> bool:
+    """Require approval until classifier output is bound to executable identity.
+
+    ``PATH`` resolution alone cannot prove that classification and execution target
+    the same file. Returning False is the fail-closed policy until the runtime binds
+    canonical path plus file identity in both steps.
+    """
+    del mode, classification
+    return False
 
 
 TERMINAL_SCHEMA = {
@@ -110,14 +131,19 @@ TERMINAL_SCHEMA = {
                 "type": "boolean",
                 "description": "仅后台模式：进程退出时排队一条完成通知（含退出码和输出尾部）",
             },
-            "force": {"type": "boolean", "description": "是否跳过危险命令检测（需用户已确认）"},
         },
         "required": ["command"],
     },
 }
 
 
-async def handle_terminal(args: dict[str, Any], *, timeout: float = 30.0) -> str:
+async def handle_terminal(
+    args: dict[str, Any],
+    *,
+    timeout: float = 30.0,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
     command = str(args.get("command", "")).strip()
     if not command:
         raise ToolError("command 不能为空")
@@ -127,13 +153,104 @@ async def handle_terminal(args: dict[str, Any], *, timeout: float = 30.0) -> str
     max_timeout = _terminal_max_timeout()
     effective_timeout = min(max(requested_timeout, 1.0), max_timeout)
     background = bool(args.get("background", False))
-    force = bool(args.get("force", False))
-
-    allowed, reason = _check_terminal_command(command, force)
-    if not allowed:
-        return json.dumps({"success": False, "error": reason}, ensure_ascii=False)
+    allowed, reason, error_code = _check_terminal_command(command)
+    if not allowed and error_code == "policy_denied":
+        return json.dumps(
+            {"success": False, "error": reason, "error_code": error_code},
+            ensure_ascii=False,
+        )
 
     cwd = str(_resolve_base_dir())
+    launch = None
+    if security_service is not None and workspace_store is not None:
+        from crew.security.context import build_security_context
+        from crew.security.launch import compile_process_launch
+
+        from crew.security.actions import normalize_exec_action
+        from crew.security.approvals import ApprovalDecision
+        from crew.security.launch import packaged_runtime_argv, shell_argv
+        from crew.security.runtime_client import NativeRuntimeClient
+
+        security_context = build_security_context(workspace_store)
+        mode = security_service.mode_for(security_context)
+        final_argv = shell_argv(command)
+        shell_kind = "powershell" if os.name == "nt" else "bash"
+        classification = await NativeRuntimeClient(packaged_runtime_argv()).classify_shell(
+            shell_kind=shell_kind,
+            executable=final_argv[0],
+            raw_command=command,
+        )
+        # Classification fields are part of the exact action digest, so the request/UI,
+        # grant, persistent rule, and eventual execution all refer to the same command.
+        action = normalize_exec_action(
+            final_argv,
+            cwd,
+            raw_command=command,
+            shell_kind=shell_kind,
+            parsed_commands=classification.parsed_commands if classification else (),
+            canonical_digest=classification.canonical_digest if classification else "",
+        )
+        # 只有 auto_review + runtime 成功证明全部命令只读时可自动放行；request_approval
+        # 始终询问，classifier 缺失/崩溃/未知语法均 ASK，不回退 Python 正则猜测。
+        proven_read_only = _classification_auto_allows(mode, classification)
+        authorized, approval = security_service.authorize_exec_action(
+            security_context,
+            action,
+            tool_name="terminal",
+            risk_class=(
+                "dangerous_command" if error_code == "approval_required" else "shell_command"
+            ),
+            auto_allow=proven_read_only,
+        )
+        if not authorized:
+            if approval is None:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "该命令被安全规则拒绝",
+                        "error_code": "policy_denied",
+                    },
+                    ensure_ascii=False,
+                )
+            # 阻塞等待 owner 决策：抛/回灌审批请求会让模型复述进正文、且 turn 结束后
+            # grant 无人消费（"对话停了"）。批准则继续，拒绝则回干净错误让模型自适应。
+            outcome = await security_service.await_decision(approval["request_id"])
+            if outcome is None or outcome.decision is ApprovalDecision.REJECT:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "用户未批准该命令",
+                        "error_code": "approval_rejected",
+                    },
+                    ensure_ascii=False,
+                )
+            # 批准：grant/rule 已由 decide() 落地；复用同一 action 消费 once grant，
+            # 避免二次 shell_argv/which 在 PATH 变化时生成不同 digest。
+            authorized, approval = security_service.authorize_exec_action(
+                security_context,
+                action,
+                tool_name="terminal",
+                risk_class=("dangerous_command" if error_code == "approval_required" else "shell_command"),
+            )
+            if not authorized:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "批准后授权校验失败，请重试",
+                        "error_code": "approval_lost",
+                    },
+                    ensure_ascii=False,
+                )
+        launch = compile_process_launch(
+            security_context,
+            security_service.mode_for(security_context),
+            db_path=security_service.db_path,
+        )
+    elif not allowed:
+        return json.dumps(
+            {"success": False, "error": reason, "error_code": error_code},
+            ensure_ascii=False,
+        )
 
     from crew.core.runctx import (
         current_owner_account_id,
@@ -183,8 +300,10 @@ async def handle_terminal(args: dict[str, Any], *, timeout: float = 30.0) -> str
         try:
             if runtime is not None and task_id:
                 runtime.mark_running(task_id)
-            session = process_registry.spawn_local(
+            spawn = process_registry.spawn_security if launch is not None else process_registry.spawn_local
+            session = spawn(
                 command,
+                **({"launch": launch} if launch is not None else {}),
                 cwd=cwd,
                 session_key=current_session_id.get(),
                 owner_account_id=current_owner_account_id.get(),
@@ -219,8 +338,10 @@ async def handle_terminal(args: dict[str, Any], *, timeout: float = 30.0) -> str
     # foreground command is reclassified in place; it is never restarted.
     if runtime is not None and task_id:
         runtime.mark_running(task_id)
-    session = process_registry.spawn_local(
+    spawn = process_registry.spawn_security if launch is not None else process_registry.spawn_local
+    session = spawn(
         command,
+        **({"launch": launch} if launch is not None else {}),
         cwd=cwd,
         session_key=current_session_id.get(),
         owner_account_id=current_owner_account_id.get(),
@@ -243,7 +364,7 @@ async def handle_terminal(args: dict[str, Any], *, timeout: float = 30.0) -> str
         auto_after = float(getattr(runtime, "auto_background_after", auto_after))
     wait_budget = min(effective_timeout, auto_after) if auto_after > 0 else effective_timeout
     started = time.monotonic()
-    # Crew Stage 5 onProgress：前台阻塞期按已累计输出增量推给前端，让用户实时看到命令输出。
+    # OCC Stage 5 onProgress：前台阻塞期按已累计输出增量推给前端，让用户实时看到命令输出。
     emitted_len = 0
     last_emit = 0.0
     while not session.exited and time.monotonic() - started < wait_budget:
@@ -282,10 +403,12 @@ async def handle_terminal(args: dict[str, Any], *, timeout: float = 30.0) -> str
         }, ensure_ascii=False)
 
     text = session.output_buffer
-    # 输出后处理：去 ANSI → 头尾截断 → 脱敏（采用）
+    # 输出后处理：去 ANSI → 头尾截断 → 脱敏（对齐 Hermes）
     text = strip_ansi(text)
     text, truncated = truncate_output(text)
-    text = redact_sensitive_text(text)
+    # 输出后处理：去 ANSI → 头尾截断 → 脱敏（对齐 Hermes）。force=True：安全边界
+    # 输出脱敏不可由 CREW_REDACT_SECRETS=false 关闭（spec §109）。
+    text = redact_sensitive_text(text, force=True)
 
     result = {
         "success": True,
@@ -300,8 +423,39 @@ async def handle_terminal(args: dict[str, Any], *, timeout: float = 30.0) -> str
     return json.dumps(result, ensure_ascii=False)
 
 
-async def handle_file_read(args: dict[str, Any]) -> str:
-    path = _resolve_path(str(args.get("path", "")))
+def _assert_no_symlink_component(path: Path) -> None:
+    """授权后、I/O 前复检：canonical path 的任一组件不能是符号链接（H-5 轻量加固）。
+
+    防 TOCTOU：授权时父目录是普通目录，授权后到 open 之间被换为指向控制面（crew.db /
+    identity / 凭据）的 symlink/junction，随后的 ``read_bytes``/``snapshot`` 会跟随新链接
+    逃逸出授权范围。逐级 ``lstat``，任一组件为符号链接即拒绝。完整修复需 POSIX
+    ``openat``+``O_NOFOLLOW``+``fstat`` 或 Windows reparse-safe handle；此为缩小窗口的
+    轻量加固，仍存在 lstat 后到 open 前的残余窗口。
+    """
+    current = path
+    while current != current.parent:
+        try:
+            if current.is_symlink():
+                raise ToolError(f"路径组件 {current} 是符号链接，拒绝（TOCTOU 防护）")
+        except OSError as exc:
+            raise ToolError(f"路径 {current} 校验失败：{exc}") from exc
+        current = current.parent
+
+
+async def handle_file_read(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
+    path = await authorize_file_tool(
+        args,
+        operation="read",
+        tool_name="file_read",
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
+    _assert_no_symlink_component(path)
     if _is_blocked_device(str(args.get("path", ""))):
         raise ToolError(f"禁止读取设备/特殊文件: {path}")
     if not path.exists():
@@ -312,12 +466,12 @@ async def handle_file_read(args: dict[str, Any]) -> str:
         return f"[二进制文件，跳过文本读取]: {path}"
     try:
         # 阻塞 I/O 丢线程池，避免卡住事件循环（拖垮网关心跳）
-        raw_bytes = await asyncio.to_thread(path.read_bytes)
+        raw_bytes = await asyncio.to_thread(read_verified_bytes, path)
         text = raw_bytes.decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"读取失败: {exc}") from exc
 
-    # BOM / line-ending preservation (Crew)
+    # BOM / line-ending preservation (Hermes-compatible)
     text, had_bom = _strip_bom(text.replace("\r\r\n", "\r\n"))
     if not had_bom:
         # On Windows, test fixtures and user-created text files may be written
@@ -360,13 +514,14 @@ async def handle_file_read(args: dict[str, Any]) -> str:
 def _write_file_sync(path: Path, content: str, append: bool) -> dict[str, Any]:
     """同步执行文件写入（含 BOM / 行尾保留）。阻塞 I/O，由调用方丢线程池执行。"""
     path.parent.mkdir(parents=True, exist_ok=True)
+    version = snapshot_file(path)
 
-    # Preserve existing file's BOM and line endings (Crew)
+    # Preserve existing file's BOM and line endings (Hermes-compatible)
     original_ending = None
     had_bom = False
     if path.exists() and path.is_file() and not append:
         try:
-            raw = path.read_bytes()
+            raw = version.data
             existing = raw.decode("utf-8", errors="replace")
             existing, had_bom = _strip_bom(existing)
             original_ending = _detect_line_ending(existing)
@@ -378,9 +533,10 @@ def _write_file_sync(path: Path, content: str, append: bool) -> dict[str, Any]:
     if had_bom and not content.startswith("﻿"):
         content = "﻿" + content
 
-    mode = "a" if append else "w"
-    with path.open(mode, encoding="utf-8", newline="") as f:
-        f.write(content)
+    encoded = content.encode("utf-8")
+    if append and version.exists:
+        encoded = version.data + encoded
+    atomic_replace_bytes(path, encoded, version)
 
     return {
         "success": True,
@@ -390,8 +546,20 @@ def _write_file_sync(path: Path, content: str, append: bool) -> dict[str, Any]:
     }
 
 
-async def handle_file_write(args: dict[str, Any]) -> str:
-    path = _resolve_path(str(args.get("path", "")))
+async def handle_file_write(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
+    path = await authorize_file_tool(
+        args,
+        operation="write",
+        tool_name="file_write",
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
+    _assert_no_symlink_component(path)
     content = str(args.get("content", ""))
     append = bool(args.get("append", False))
 
@@ -407,13 +575,22 @@ async def handle_file_write(args: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def register_builtin_tools(registry: Registry) -> None:
+def register_builtin_tools(
+    registry: Registry,
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> None:
     """注册所有内置工具。"""
     registry.register(
         name="terminal",
         toolset="terminal",
         schema=TERMINAL_SCHEMA,
-        handler=handle_terminal,
+        handler=partial(
+            handle_terminal,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
         is_async=True,
         display_name="运行命令",
         ui_label_template="运行 {command}",
@@ -424,7 +601,11 @@ def register_builtin_tools(registry: Registry) -> None:
         name="file_read",
         toolset="file",
         schema=FILE_READ_SCHEMA,
-        handler=handle_file_read,
+        handler=partial(
+            handle_file_read,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
         is_async=True,
         display_name="读取文件",
         ui_label_template="读取 {path}",
@@ -435,7 +616,11 @@ def register_builtin_tools(registry: Registry) -> None:
         name="file_write",
         toolset="file",
         schema=FILE_WRITE_SCHEMA,
-        handler=handle_file_write,
+        handler=partial(
+            handle_file_write,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
         is_async=True,
         display_name="写入文件",
         ui_label_template="写入 {path}",
@@ -451,7 +636,11 @@ def register_builtin_tools(registry: Registry) -> None:
     from crew.tools.web_tools import register_web_tools
 
     register_process_tool(registry)
-    register_file_tools(registry)
+    register_file_tools(
+        registry,
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
     register_skills_tools(registry)
     register_memory_tools(registry)
     register_web_tools(registry)

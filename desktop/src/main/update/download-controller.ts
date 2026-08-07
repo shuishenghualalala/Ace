@@ -15,8 +15,15 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import http from 'http';
+import https from 'https';
 import { app } from 'electron';
 import { buildUpdateUrl } from './update-url';
+import {
+  configuredUpdatePublicKey,
+  verifyPackageSignature,
+} from './update-integrity';
+import { isSecureRemoteUrl } from '../request';
 import { readUpdateState, setDownloadedRecord } from './update-state';
 import type {
   DownloadedUpdateRecord,
@@ -47,14 +54,21 @@ interface Inflight {
 
 let inflight: Inflight | null = null;
 let progressSender: ((p: VersionUpdateDownloadProgressPayload) => void) | null = null;
+let strictSecurityEnabled = (): boolean => true;
 
-export function configureUpdateController(send: ((p: VersionUpdateDownloadProgressPayload) => void) | null): void {
+export function configureUpdateController(
+  send: ((p: VersionUpdateDownloadProgressPayload) => void) | null,
+  strictSecurityResolver: () => boolean = (): boolean => true,
+): void {
   progressSender = send;
+  strictSecurityEnabled = strictSecurityResolver;
 }
 
 /** 当前在用的文件路径（cleanup 需跳过，避免删到正在写的 .part / 目标）。 */
 export function activeFilePaths(): string[] {
-  return inflight ? [inflight.partPath, inflight.targetPath] : [];
+  return inflight
+    ? [inflight.partPath, inflight.targetPath, `${inflight.targetPath}.sig`, `${inflight.targetPath}.sig.part`]
+    : [];
 }
 
 function updatesDir(): string {
@@ -86,6 +100,40 @@ function safeUnlink(p: string): void {
     fs.rmSync(p, { force: true });
   } catch {
     /* ignore */
+  }
+}
+
+async function downloadAndVerifySignature(packageUrl: string, packagePath: string): Promise<void> {
+  const publicKey = configuredUpdatePublicKey();
+  if (!publicKey) {
+    throw new Error('严格安全约束已阻止更新：未配置 ACE_UPDATE_PUBLIC_KEY');
+  }
+  const signaturePath = `${packagePath}.sig`;
+  const temporaryPath = `${signaturePath}.part`;
+  safeUnlink(temporaryPath);
+  const response = await fetch(`${packageUrl}.sig`, { redirect: 'follow' });
+  if (!response.ok || !response.body || new URL(response.url).protocol !== 'https:') {
+    throw new Error(`更新包签名下载失败（HTTP ${response.status}）`);
+  }
+  const declared = Number.parseInt(response.headers.get('content-length') || '0', 10) || 0;
+  if (declared > 16 * 1024) throw new Error('更新包签名响应过大');
+  const chunks: Buffer[] = [];
+  let received = 0;
+  const reader = response.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    received += value.byteLength;
+    if (received > 16 * 1024) throw new Error('更新包签名响应过大');
+    chunks.push(Buffer.from(value));
+  }
+  fs.writeFileSync(temporaryPath, Buffer.concat(chunks), { mode: 0o600 });
+  fs.renameSync(temporaryPath, signaturePath);
+  const verified = verifyPackageSignature(packagePath, signaturePath, publicKey);
+  if (!verified.ok) {
+    safeUnlink(signaturePath);
+    throw new Error(verified.message || '更新包签名无效');
   }
 }
 
@@ -136,72 +184,129 @@ function safeEndStream(inf: Inflight): Promise<void> {
 }
 
 async function runDownload(inf: Inflight): Promise<void> {
+  console.log('[Download] runDownload url:', inf.url, 'resumeFrom:', inf.receivedBytes);
   try {
     const resumeFrom = inf.receivedBytes;
-    const headers: Record<string, string> = {};
-    if (resumeFrom > 0) headers['Range'] = `bytes=${resumeFrom}-`;
 
-    const response = await fetch(inf.url, { headers, redirect: 'follow', signal: inf.abort.signal });
-    const rangeHonored = response.status === 206;
-    if (!response.ok) {
-      throw new Error(`下载失败（HTTP ${response.status}）`);
-    }
-    if (!response.body) {
-      throw new Error('下载失败（响应体为空）');
-    }
+    await new Promise<void>((resolve, reject) => {
+      const urlObj = new URL(inf.url);
+      const isHttps = urlObj.protocol === 'https:';
+      const requestLib = isHttps ? https : http;
 
-    let startOffset = resumeFrom;
-    if (resumeFrom > 0 && !rangeHonored) {
-      // 服务器不支持断点（返回 200 全量）→ 丢弃旧 part，从头再来
-      startOffset = 0;
-      inf.receivedBytes = 0;
-    }
-    const contentLength = Number.parseInt(response.headers.get('content-length') || '0', 10) || 0;
-    inf.totalBytes = contentLength > 0 ? contentLength + startOffset : 0;
+      const reqHeaders: Record<string, string> = {};
+      if (resumeFrom > 0) reqHeaders['Range'] = `bytes=${resumeFrom}-`;
 
-    fs.mkdirSync(path.dirname(inf.targetPath), { recursive: true });
-    inf.writeStream = fs.createWriteStream(inf.partPath, { flags: startOffset > 0 ? 'a' : 'w' });
+      const reqOpts: http.RequestOptions = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (isHttps ? 443 : 80),
+        path: urlObj.pathname + urlObj.search,
+        method: 'GET',
+        headers: reqHeaders,
+      };
 
-    inf.status = 'downloading';
-    inf.lastEmittedPercent = null;
-    send({ phase: 'downloading', percent: pct(inf), receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
-    resetNoProgressTimer(inf);
+      const req = requestLib.request(reqOpts, (res) => {
+        const statusCode = res.statusCode ?? 0;
 
-    const reader = response.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      inf.receivedBytes += value.byteLength;
-      if (!inf.writeStream.write(Buffer.from(value))) {
-        await new Promise<void>((resolve) => inf.writeStream?.once('drain', () => resolve()));
-      }
-      clearNoProgressTimer(inf);
-      resetNoProgressTimer(inf);
-      emitProgress(inf);
-    }
-    clearNoProgressTimer(inf);
-    await safeEndStream(inf);
+        // 处理重定向
+        if (statusCode >= 300 && statusCode < 400 && res.headers.location) {
+          inf.url = new URL(res.headers.location, inf.url).href;
+          console.log('[Download] redirect to:', inf.url);
+          // 严格安全：手动 follow 重定向时，禁止落到非 HTTPS（替代 fetch 自动 follow 后的 isSecureRemoteUrl 校验）
+          if (!isSecureRemoteUrl(inf.url, strictSecurityEnabled())) {
+            reject(new Error('严格安全约束已阻止更新包重定向到非 HTTPS 地址'));
+            return;
+          }
+          req.destroy();
+          resolve(runDownload(inf));
+          return;
+        }
 
-    // 收尾：rename .part → 目标，落 update-state.downloaded
-    fs.renameSync(inf.partPath, inf.targetPath);
-    const size = fs.statSync(inf.targetPath).size;
-    const record: DownloadedUpdateRecord = {
-      filePath: inf.targetPath,
-      version: inf.version,
-      size,
-      type: inf.type,
-      ...(inf.message ? { message: inf.message } : {}),
-    };
-    setDownloadedRecord(record);
-    inf.status = 'completed';
-    send({ phase: 'downloaded', percent: 100, receivedBytes: size, totalBytes: size });
+        const rangeHonored = statusCode === 206;
+        if (statusCode < 200 || statusCode >= 300) {
+          reject(new Error(`下载失败（HTTP ${statusCode}）`));
+          return;
+        }
+
+        let startOffset = resumeFrom;
+        if (resumeFrom > 0 && !rangeHonored) {
+          startOffset = 0;
+          inf.receivedBytes = 0;
+        }
+        const contentLength = Number.parseInt(String(res.headers['content-length'] ?? '0'), 10) || 0;
+        inf.totalBytes = contentLength > 0 ? contentLength + startOffset : 0;
+
+        fs.mkdirSync(path.dirname(inf.targetPath), { recursive: true });
+        inf.writeStream = fs.createWriteStream(inf.partPath, { flags: startOffset > 0 ? 'a' : 'w' });
+
+        inf.status = 'downloading';
+        inf.lastEmittedPercent = null;
+        send({ phase: 'downloading', percent: pct(inf), receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
+        resetNoProgressTimer(inf);
+
+        res.on('data', (chunk: Buffer) => {
+          inf.receivedBytes += chunk.byteLength;
+          const drained = inf.writeStream?.write(chunk);
+          if (drained === false) {
+            res.pause();
+            inf.writeStream?.once('drain', () => res.resume());
+          }
+          clearNoProgressTimer(inf);
+          resetNoProgressTimer(inf);
+          emitProgress(inf);
+        });
+
+        res.on('end', async () => {
+          clearNoProgressTimer(inf);
+          await safeEndStream(inf);
+
+          fs.renameSync(inf.partPath, inf.targetPath);
+          // 严格安全：完成后校验更新包签名；失败则删除包与签名，不留未验证产物
+          if (strictSecurityEnabled()) {
+            try {
+              await downloadAndVerifySignature(inf.url, inf.targetPath);
+            } catch (error) {
+              safeUnlink(inf.targetPath);
+              safeUnlink(`${inf.targetPath}.sig`);
+              reject(error);
+              return;
+            }
+          }
+          const size = fs.statSync(inf.targetPath).size;
+          const record: DownloadedUpdateRecord = {
+            filePath: inf.targetPath,
+            version: inf.version,
+            size,
+            type: inf.type,
+            ...(inf.message ? { message: inf.message } : {}),
+          };
+          setDownloadedRecord(record);
+          inf.status = 'completed';
+          send({ phase: 'downloaded', percent: 100, receivedBytes: size, totalBytes: size });
+          resolve();
+        });
+
+        res.on('error', (err) => reject(err));
+      });
+
+      req.on('timeout', () => {
+        req.destroy(new Error('下载超时'));
+      });
+
+      req.on('error', (err) => reject(err));
+
+      // 支持 abort
+      const abortHandler = () => req.destroy();
+      inf.abort.signal.addEventListener('abort', abortHandler, { once: true });
+
+      req.end();
+    });
   } catch (err) {
     await handleRunError(inf, err);
   }
 }
 
 async function handleRunError(inf: Inflight, err: unknown): Promise<void> {
+  console.log('[Download] handleRunError reason:', inf.abortReason, 'error:', (err as Error)?.message, 'cause:', (err as any)?.cause, 'stack:', (err as Error)?.stack);
   clearNoProgressTimer(inf);
   const reason = inf.abortReason;
 
@@ -242,6 +347,7 @@ interface StartArgs {
   version: string;
   type: 'force' | 'reminder';
   message?: string;
+  url?: string | undefined;
 }
 
 export function startDownload(args: StartArgs): { success: boolean; message?: string } {
@@ -271,15 +377,44 @@ export function startDownload(args: StartArgs): { success: boolean; message?: st
   const state = readUpdateState();
   if (state.downloaded && state.downloaded.version !== args.version) {
     safeUnlink(state.downloaded.filePath);
+    safeUnlink(`${state.downloaded.filePath}.sig`);
     setDownloadedRecord(null);
   }
 
+  console.log('[Download] startDownload called with args:', args);
   let url: string;
-  try {
-    url = buildUpdateUrl(args.version);
-  } catch (err) {
-    send({ phase: 'error', message: (err as Error).message });
-    return { success: false, message: (err as Error).message };
+  if (args.url && args.url.trim()) {
+    url = args.url.trim();
+    console.log('[Download] using provided url:', url);
+  } else {
+    try {
+      url = buildUpdateUrl(args.version);
+      console.log('[Download] using built url:', url);
+    } catch (err) {
+      console.error('[Download] buildUpdateUrl error:', err);
+      send({ phase: 'error', message: (err as Error).message });
+      return { success: false, message: (err as Error).message };
+    }
+  }
+  if (strictSecurityEnabled()) {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      const message = '严格安全约束要求更新包使用有效的 HTTPS 地址';
+      send({ phase: 'error', message });
+      return { success: false, message };
+    }
+    if (parsedUrl.protocol !== 'https:') {
+      const message = '严格安全约束要求更新包使用 HTTPS；可在安全中心关闭后启用兼容模式';
+      send({ phase: 'error', message });
+      return { success: false, message };
+    }
+    if (!configuredUpdatePublicKey()) {
+      const message = '严格安全约束已阻止更新：未配置 ACE_UPDATE_PUBLIC_KEY';
+      send({ phase: 'error', message });
+      return { success: false, message };
+    }
   }
 
   const targetPath = path.join(updatesDir(), fileNameFromUrl(url));

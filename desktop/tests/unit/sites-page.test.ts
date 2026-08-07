@@ -41,18 +41,43 @@ describe('sites page annotation handoff', () => {
 
   it('keeps the create entry and Inspiration session marker in the Desktop shell', async () => {
     const fs = await import('node:fs/promises');
-    const [shell, sitesPage, workspaces] = await Promise.all([
+    const [shell, sitesPage, workspaces, composerContext, sessionHistory, chatController] = await Promise.all([
       fs.readFile('assets/index.html', 'utf8'),
       fs.readFile('src/ui/features/sites-page.ts', 'utf8'),
       fs.readFile('src/ui/features/workspaces.ts', 'utf8'),
+      fs.readFile('src/ui/features/composer-context-view.ts', 'utf8'),
+      fs.readFile('src/ui/features/session-history-view.ts', 'utf8'),
+      fs.readFile('src/ui/features/chat-controller.ts', 'utf8'),
     ]);
     expect(sitesPage).toContain('data-sites-create');
-    expect(shell).toContain('id="chat-sites-mode"');
-    expect(shell).toContain('data-sites-logo');
+    expect(composerContext).toContain("sitesMode.id = 'chat-sites-mode'");
+    expect(composerContext).toContain('data-sites-logo');
     expect(workspaces).toContain('data-sites-logo');
-    expect(shell).toContain('<span>灵感</span>');
-    expect(shell).toContain('设计一个 App');
+    expect(composerContext).toContain('灵感');
+    expect(composerContext).toContain('设计一个 App');
     expect(shell).not.toContain('chat-sites-mode__logo" aria-hidden="true"><i>');
+    expect(sessionHistory).toContain("if (provider === 'sites') return 'icon-inspiration';");
+    expect(chatController).toContain("icon: 'icon-inspiration'");
+    expect(chatController).toContain('|| isInspirationSession');
+  });
+
+  it('keeps one Sites mount and a valid trash icon in the static shell', async () => {
+    const fs = await import('node:fs/promises');
+    const [shell, sprite, styles, wikiStyles] = await Promise.all([
+      fs.readFile('assets/index.html', 'utf8'),
+      fs.readFile('assets/crew-ui-symbols.svg', 'utf8'),
+      fs.readFile('assets/styles/sites-page.css', 'utf8'),
+      fs.readFile('assets/styles/wiki-page.css', 'utf8'),
+    ]);
+    expect(shell.match(/id="sites-tab"/g)).toHaveLength(1);
+    expect(shell.match(/id="sites-page-root"/g)).toHaveLength(1);
+    expect(sprite).toContain('<symbol id="icon-trash" viewBox="0 0 24 24">');
+    expect(styles).not.toMatch(/#[0-9a-f]{3,8}/i);
+    expect(styles).not.toMatch(/--(?:bg-primary|surface|text-primary|text-secondary|v2-|color-accent)/);
+    expect(styles).toContain('var(--mw-inspector-hard-max)');
+    expect(wikiStyles).toContain('--mw-symbol-line: var(--mw-identity-blue)');
+    expect(wikiStyles).not.toContain('--crew-line');
+    expect(wikiStyles).not.toContain('#2463eb');
   });
 
   it('uses one authenticated preview protocol for every inspiration', async () => {
@@ -70,11 +95,12 @@ describe('sites page annotation handoff', () => {
 
   it('opens annotation mode in the bound conversation and batches comments in the composer', async () => {
     const fs = await import('node:fs/promises');
-    const [sitesPage, uiIndex, chatController, shell] = await Promise.all([
+    const [sitesPage, uiIndex, chatController, shell, composerContext] = await Promise.all([
       fs.readFile('src/ui/features/sites-page.ts', 'utf8'),
-      fs.readFile('src/ui/index.ts', 'utf8'),
+      fs.readFile('src/ui/app.ts', 'utf8'),
       fs.readFile('src/ui/features/chat-controller.ts', 'utf8'),
       fs.readFile('assets/index.html', 'utf8'),
+      fs.readFile('src/ui/features/composer-context-view.ts', 'utf8'),
     ]);
     expect(uiIndex).toContain('await openSession(item.sessionId)');
     expect(sitesPage).toContain('ace.inspirationAnnotationDrafts.v1');
@@ -83,7 +109,7 @@ describe('sites page annotation handoff', () => {
     expect(sitesPage).toContain('ace-site-element-selected');
     expect(chatController).toContain('composeSiteAnnotationMessage(sessionId, plainContent)');
     expect(chatController).toContain('clearSiteAnnotationDraft(sessionId);');
-    expect(shell).toContain('id="chat-site-annotation-preview"');
+    expect(composerContext).toContain("siteAnnotationPreview.id = 'chat-site-annotation-preview'");
     expect(shell).toContain('id="site-annotation-button"');
     expect(sitesPage).toContain("site.session_id === sessionId");
     expect(sitesPage).toContain('activeSessionSites.length === 1');
@@ -142,10 +168,10 @@ describe('sites page annotation handoff', () => {
     expect(sitesPage).toContain('data-inspiration-delete');
     expect(sitesPage).toContain('window.Crew?.openInspirationWindow');
     expect(backend).toContain('/api/sites/inspirations');
-    expect(styles).toContain('grid-template-columns:repeat(auto-fill');
-    expect(styles).toContain('.sites-page-root{display:flex;min-width:0;min-height:0;flex:1;overflow:hidden}');
-    expect(styles).toContain('.inspiration-detail{box-sizing:border-box;display:flex;width:100%;height:100%');
-    expect(styles).toContain('.inspiration-detail__stage{position:relative;width:100%;min-height:0;flex:1 1 0');
+    expect(styles).toMatch(/grid-template-columns:\s*repeat\(auto-fill/);
+    expect(styles).toMatch(/\.sites-page-root\s*\{/);
+    expect(styles).toMatch(/\.inspiration-detail\s*\{[\s\S]*width:\s*100%;[\s\S]*height:\s*100%;/);
+    expect(styles).toMatch(/\.inspiration-detail__stage\s*\{[\s\S]*width:\s*100%;[\s\S]*flex:\s*1 1 0;/);
     expect(protocolSource).toContain("kind: 'site' | 'canvas' | 'widget'");
     expect(protocolSource).toContain('/api/sites/canvases/${resolved.canvasId}/render');
     expect(protocolSource).toContain('/api/sites/widgets/${resolved.widgetId}/render/');
@@ -190,11 +216,11 @@ describe('sites page annotation handoff', () => {
 
   it('mounts generated tool results in a session-scoped annotation surface', async () => {
     const fs = await import('node:fs/promises');
-    const [surface, controller, shell, inspector] = await Promise.all([
+    const [surface, controller, inspector, composerContext] = await Promise.all([
       fs.readFile('src/ui/features/blueprint-surface.ts', 'utf8'),
       fs.readFile('src/ui/features/chat-controller.ts', 'utf8'),
-      fs.readFile('assets/index.html', 'utf8'),
       fs.readFile('src/ui/features/inspector.ts', 'utf8'),
+      fs.readFile('src/ui/features/composer-context-view.ts', 'utf8'),
     ]);
     expect(surface).toContain('handleBlueprintSurfaceToolChunk');
     expect(surface).toContain("kind: 'inspiration'");
@@ -209,7 +235,7 @@ describe('sites page annotation handoff', () => {
     expect(surface).toContain('composeBlueprintAnnotationMessage');
     expect(controller).toContain('handleBlueprintSurfaceToolChunk(chunk, sid)');
     expect(controller).toContain('composeBlueprintAnnotationMessage');
-    expect(shell).toContain('chat-blueprint-annotation-preview');
+    expect(composerContext).toContain("blueprintAnnotationPreview.id = 'chat-blueprint-annotation-preview'");
     expect(inspector).toContain("'blueprint-surface-open'");
   });
 });

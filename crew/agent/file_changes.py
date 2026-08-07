@@ -21,10 +21,19 @@ from typing import Any
 from crew.state.logging import get_logger
 from crew.team.workspace_guard import normalize_acp_tool_name
 from crew.tools.file_utils import _has_binary_extension
+from crew.tools.redact import redact_sensitive_text
 
 log = get_logger("agent.file_changes")
 
 WORKSPACE_SNAPSHOT_MAX_FILES = 20_000
+FILE_CHANGE_MAX_BYTES = 128 * 1024
+SENSITIVE_FILE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+SENSITIVE_FILE_NAMES = frozenset({
+    ".env",
+    "credentials.json",
+    "secrets.json",
+    "service-account.json",
+})
 WORKSPACE_SNAPSHOT_SKIP_DIRS = frozenset({
     ".git",
     "node_modules",
@@ -56,6 +65,26 @@ def resolve_file_path(raw: str | Path, *, cwd: str | Path = "") -> Path:
     return path.resolve()
 
 
+def _is_sensitive_file(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        name in SENSITIVE_FILE_NAMES
+        or name.startswith(".env.")
+        or name.endswith(SENSITIVE_FILE_SUFFIXES)
+    )
+
+
+def _read_text_with_limit(path: Path) -> tuple[str | None, bool]:
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(FILE_CHANGE_MAX_BYTES + 1)
+    except (OSError, ValueError):
+        return None, False
+    if len(data) > FILE_CHANGE_MAX_BYTES:
+        return None, True
+    return data.decode("utf-8", errors="replace"), False
+
+
 def read_file_state(path: str | Path) -> FileState:
     target = Path(path)
     try:
@@ -63,13 +92,23 @@ def read_file_state(path: str | Path) -> FileState:
             return FileState(False)
     except OSError:
         return FileState(False)
+    if _is_sensitive_file(target):
+        return FileState(True, binary=True)
     binary = _has_binary_extension(target)
     if binary:
         return FileState(True, binary=True)
-    try:
-        return FileState(True, text=target.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
+    text, oversized = _read_text_with_limit(target)
+    if oversized:
+        return FileState(True, binary=True)
+    if text is None:
         return FileState(True)
+    return FileState(True, text=text)
+
+
+def _text_within_limit(text: str) -> bool:
+    if len(text) > FILE_CHANGE_MAX_BYTES:
+        return False
+    return len(text.encode("utf-8", errors="replace")) <= FILE_CHANGE_MAX_BYTES
 
 
 def workspace_snapshot(
@@ -103,6 +142,8 @@ def workspace_snapshot(
 
 
 def _diff_rows(before: str, after: str) -> tuple[list[dict[str, Any]], int, int]:
+    if not _text_within_limit(before) or not _text_within_limit(after):
+        return [], 0, 0
     rows: list[dict[str, Any]] = []
     added = 0
     removed = 0
@@ -112,15 +153,15 @@ def _diff_rows(before: str, after: str) -> tuple[list[dict[str, Any]], int, int]
         lineterm="",
     ):
         if line.startswith(("@@", "---", "+++")):
-            rows.append({"line": 0, "kind": "meta", "text": line})
+            rows.append({"line": 0, "kind": "meta", "text": redact_sensitive_text(line, force=True)})
         elif line.startswith("+"):
             added += 1
-            rows.append({"line": 0, "kind": "add", "text": line[1:]})
+            rows.append({"line": 0, "kind": "add", "text": redact_sensitive_text(line[1:], force=True)})
         elif line.startswith("-"):
             removed += 1
-            rows.append({"line": 0, "kind": "del", "text": line[1:]})
+            rows.append({"line": 0, "kind": "del", "text": redact_sensitive_text(line[1:], force=True)})
         else:
-            rows.append({"line": 0, "kind": "ctx", "text": line[1:]})
+            rows.append({"line": 0, "kind": "ctx", "text": redact_sensitive_text(line[1:], force=True)})
     return rows[:200], added, removed
 
 
@@ -131,7 +172,10 @@ def file_change_from_states(path: str | Path, before: FileState, after: FileStat
     if not before.exists and not after.exists:
         return None
     status = "added" if not before.exists else "deleted" if not after.exists else "modified"
-    binary = before.binary or after.binary
+    binary = before.binary or after.binary or any(
+        text is not None and not _text_within_limit(text)
+        for text in (before.text, after.text)
+    )
     diff: list[dict[str, Any]] = []
     added = 0
     removed = 0
@@ -154,19 +198,25 @@ def metadata_change(path_text: str, status: str) -> dict[str, Any]:
     """Build the metadata-only shape used by terminal/full-workspace snapshots."""
 
     path = Path(path_text)
-    binary = _has_binary_extension(path)
+    binary = _has_binary_extension(path) or _is_sensitive_file(path)
     added = 0
     diff_rows: list[dict[str, Any]] = []
-    if status == "added" and not binary:
+    if not binary and status != "deleted":
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            added = len(lines)
-            diff_rows = [
-                {"line": 0, "kind": "add", "text": line}
-                for line in lines[:200]
-            ]
+            binary = path.stat().st_size > FILE_CHANGE_MAX_BYTES
         except OSError:
             pass
+    if status == "added" and not binary:
+        text, oversized = _read_text_with_limit(path)
+        if oversized:
+            binary = True
+        elif text is not None:
+            lines = text.splitlines()
+            added = len(lines)
+            diff_rows = [
+                {"line": 0, "kind": "add", "text": redact_sensitive_text(line, force=True)}
+                for line in lines[:200]
+            ]
     change: dict[str, Any] = {
         "path": str(path),
         "name": path.name or str(path),
@@ -274,11 +324,21 @@ def external_tool_write_paths(
                     raw_paths.append(raw)
     paths: list[Path] = []
     seen: set[str] = set()
+    try:
+        root = resolve_file_path(cwd)
+    except (OSError, RuntimeError, ValueError) as exc:
+        log.debug("忽略无效外部工具工作区 cwd=%s error=%s", cwd, exc)
+        return []
     for raw in raw_paths:
         try:
             path = resolve_file_path(str(raw), cwd=cwd)
         except (OSError, RuntimeError, ValueError) as exc:
             log.debug("忽略无效外部工具文件路径 raw=%r cwd=%s error=%s", raw, cwd, exc)
+            continue
+        try:
+            path.relative_to(root)
+        except ValueError:
+            log.debug("忽略工作区外部工具文件路径 raw=%r path=%s root=%s", raw, path, root)
             continue
         key = str(path)
         if key not in seen:

@@ -1,7 +1,7 @@
 /**
- * 使用统计 · 成本定价配置
+ * 使用统计 · 成本定价配置（cc-switch 同款）
  *
- * 持久化：localStorage `crew.usage.pricing.v1`
+ * 持久化：localStorage `Crew.usage.pricing.v1`
  *
  * 与 usage-tracker 的关系：tracker 里的 lookupPrice() 优先查这里（按 modelId 精确匹配），
  * 找不到再回落到内置默认表。这样用户在面板里改了价格，所有未来回合的 cost 估算立刻生效。
@@ -10,14 +10,14 @@
 export interface PricingRow {
   id: string;
   modelId: string;
-  /** USD per 1M tokens，方便与官方价格比对。 */
+  /** USD per 1M tokens（与 cc-switch / OpenAI 同口径，方便与官方价格比对） */
   inputPerMillion: number;
   outputPerMillion: number;
   cacheReadPerMillion: number;
   cacheWritePerMillion: number;
 }
 
-export const PRICING_KEY = 'crew.usage.pricing.v1';
+export const PRICING_KEY = 'Crew.usage.pricing.v1';
 
 /** 内置默认价格表（与 usage-tracker.ts 里的 PRICE_TABLE 同步） */
 export const PRICING_DEFAULT: PricingRow[] = [
