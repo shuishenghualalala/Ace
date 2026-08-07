@@ -28,7 +28,6 @@ export interface AgentHubRuntime {
   detail: string;
   statusDetail?: string;
   availability: 'ready' | 'degraded' | 'unavailable';
-  deletable: boolean;
 }
 
 export interface AgentHubState {
@@ -257,7 +256,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
           runtime.availability !== 'ready',
         ),
       );
-      if (options.onDeleteRuntime && runtime.deletable) {
+      if (options.onDeleteRuntime) {
         cardActions.append(action(
           '删除',
           'deleteRuntime',

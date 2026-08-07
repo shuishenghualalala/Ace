@@ -1227,8 +1227,6 @@ function agentHubState(): AgentHubState {
       detail: runtime.version || providerLabel(runtime.provider),
       statusDetail: runtimeStatusDetail(runtime),
       availability: runtimeStatus(runtime),
-      deletable: runtimeStatus(runtime) === 'unavailable'
-        || typeof runtime.metadata?.runtime_profile_version !== 'number',
     })),
     loading: busy && !runtimeScanning && activeTab !== 'create-team',
     scanning: runtimeScanning,

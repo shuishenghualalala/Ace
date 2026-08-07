@@ -2790,6 +2790,68 @@ def test_external_store_saves_acp_session_binding(tmp_path):
     assert binding["acp_session_id"] == "h1"
 
 
+def test_delete_agent_removes_runtime_session_bindings(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "runtime-agent-cleanup",
+        "provider": "hermes",
+        "name": "Hermes",
+        "executable_path": "/bin/hermes",
+        "protocol": "acp",
+    })
+    agent = store.create_agent(name="待删除外援", runtime_id=runtime["id"])
+    binding_key = {
+        "crew_session_id": "crew-agent-cleanup",
+        "external_agent_id": agent["id"],
+        "runtime_id": runtime["id"],
+        "provider": "hermes",
+        "cwd": str(tmp_path),
+    }
+    store.save_acp_session_binding(acp_session_id="native-agent-cleanup", **binding_key)
+
+    store.delete_agent(agent["id"])
+
+    assert store.get_acp_session_binding(**binding_key) is None
+
+
+def test_delete_runtime_removes_orphaned_session_bindings(tmp_path):
+    db_path = tmp_path / "crew.db"
+    store = ExternalAgentStore(str(db_path))
+    runtime = store.upsert_runtime({
+        "id": "runtime-stale-binding",
+        "provider": "e2e",
+        "name": "Stale Runtime",
+        "executable_path": "",
+        "protocol": "acp",
+    })
+    agent = store.create_agent(name="旧外援", runtime_id=runtime["id"])
+    store.save_acp_session_binding(
+        crew_session_id="crew-stale-binding",
+        external_agent_id=agent["id"],
+        runtime_id=runtime["id"],
+        provider="e2e",
+        cwd=str(tmp_path),
+        acp_session_id="native-stale-binding",
+    )
+    # 模拟旧版本删除 Agent 后遗留的原生会话续接元数据。
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM external_agent WHERE id = ?", (agent["id"],))
+
+    store.delete_runtime(runtime["id"])
+
+    with sqlite3.connect(db_path) as conn:
+        binding_count = conn.execute(
+            "SELECT COUNT(*) FROM external_runtime_session_binding WHERE runtime_id = ?",
+            (runtime["id"],),
+        ).fetchone()[0]
+        runtime_count = conn.execute(
+            "SELECT COUNT(*) FROM external_runtime WHERE id = ?",
+            (runtime["id"],),
+        ).fetchone()[0]
+    assert binding_count == 0
+    assert runtime_count == 0
+
+
 def test_external_store_scopes_acp_session_binding_by_owner(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({

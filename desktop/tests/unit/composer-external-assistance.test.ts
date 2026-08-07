@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { backendApi } from '../../src/ui/backend-client';
 import { initAgentsPage, loadAgentsPage } from '../../src/ui/features/agents-page';
 import { bindComposerToolbar } from '../../src/ui/features/composer-toolbar';
+import { getFixture } from '../../src/ui/preview/fixtures';
 import { STORAGE_KEYS } from '../../src/shared/storage-keys';
 import {
   __resetAllStoresForTest,
@@ -239,7 +240,7 @@ describe('composer 外援入口', () => {
     expect(backendApi.scanRuntimes).toHaveBeenCalledTimes(1);
   });
 
-  it('发现外援用紧凑状态行显示探测原因，并可删除无用运行时记录', async () => {
+  it('发现外援用紧凑状态行显示探测原因，并为所有运行时提供删除入口', async () => {
     configStore.set({
       config: {
         model: 'test',
@@ -287,7 +288,8 @@ describe('composer 外援入口', () => {
     expect(codexRow?.textContent).toContain('模型探测失败');
     expect(codexRow?.textContent).toContain('模型服务暂时未响应');
     expect(codexRow?.querySelector('.mw-agent-card__copy .mw-badge')).toBeNull();
-    expect(codexRow?.querySelector('[data-delete-runtime]')).toBeNull();
+    expect(document.querySelectorAll('[data-runtime-id] [data-delete-runtime]')).toHaveLength(2);
+    expect(codexRow?.querySelector('[data-delete-runtime="runtime-codex"]')).not.toBeNull();
     expect(e2eRow?.textContent).toContain('当前未找到可执行文件');
     expect(e2eRow?.querySelector('[data-delete-runtime="runtime-e2e"]')).not.toBeNull();
 
@@ -295,6 +297,20 @@ describe('composer 外援入口', () => {
     await vi.waitFor(() => expect(deleteRuntime).toHaveBeenCalledWith('runtime-e2e'));
     expect(document.querySelector('[data-runtime-id="runtime-e2e"]')).toBeNull();
     expect(document.querySelector('.mw-agent-hub__message')?.textContent).toContain('已删除 E2E Source Runtime');
+  });
+
+  it('Runtime 视觉夹具不再注入 E2E 记录，并为每条展示数据提供删除响应', () => {
+    const fixture = getFixture('agent-runtimes');
+    const runtimeResponse = fixture.responses['/api/runtimes']?.body;
+    const fixtureRuntimes = Array.isArray(runtimeResponse)
+      ? runtimeResponse as Array<{ id: string }>
+      : [];
+
+    expect(fixtureRuntimes.map((runtime) => runtime.id)).not.toContain('runtime-e2e');
+    expect(fixtureRuntimes).not.toHaveLength(0);
+    fixtureRuntimes.forEach((runtime) => {
+      expect(fixture.responses[`DELETE /api/runtimes/${runtime.id}`]?.body).toEqual({ ok: true });
+    });
   });
 
   it('Desktop Gateway 文本流按 Fast、AI 状态、final 顺序更新组队结果', async () => {
