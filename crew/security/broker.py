@@ -45,6 +45,21 @@ class SecurityExecutionBroker:
         on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
     ) -> RuntimeCommandResult:
         """Run a managed request; disabled profiles are deliberately unsupported here."""
+        kwargs = self._runtime_kwargs(request)
+        return await self._runtime.execute(
+            **kwargs,
+            on_started=on_started,
+            on_output=on_output,
+        )
+
+    async def open_interactive(self, request: ExecutionRequest):
+        """Open a managed bidirectional child through the native runtime."""
+        kwargs = self._runtime_kwargs(request)
+        kwargs.pop("stdin", None)
+        return await self._runtime.open_interactive(**kwargs)
+
+    @staticmethod
+    def _runtime_kwargs(request: ExecutionRequest) -> dict:
         if request.permission_profile.kind is not PermissionProfileKind.MANAGED:
             raise ValueError("host execution is outside the managed security broker")
         writable: list[Path] = []
@@ -86,25 +101,23 @@ class SecurityExecutionBroker:
             }
             for entry in network_entries
         ]
-        return await self._runtime.execute(
-            command=request.command,
-            cwd=request.cwd,
-            writable_roots=writable,
-            readable_roots=readable,
-            denied_roots=denied,
-            network_enabled=bool(network_rules),
-            network_rules=network_rules,
-            allow_local_binding=(
+        return {
+            "command": request.command,
+            "cwd": request.cwd,
+            "writable_roots": writable,
+            "readable_roots": readable,
+            "denied_roots": denied,
+            "network_enabled": bool(network_rules),
+            "network_rules": network_rules,
+            "allow_local_binding": (
                 request.permission_profile.allow_local_binding
                 or request.additional_permissions.allow_local_binding
             ),
-            timeout=request.timeout_seconds,
-            max_output_bytes=request.max_output_bytes,
-            stdin=request.stdin,
-            env_overrides=request.env_overrides,
-            on_started=on_started,
-            on_output=on_output,
-        )
+            "timeout": request.timeout_seconds,
+            "max_output_bytes": request.max_output_bytes,
+            "stdin": request.stdin,
+            "env_overrides": request.env_overrides,
+        }
 
 
 def packaged_runtime_argv(executable: str | Path) -> Sequence[str]:

@@ -10,9 +10,9 @@ pub mod wfp;
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Receiver, SyncSender};
 
-use crate::protocol::{RuntimeCapabilities, RuntimeMessage};
+use crate::protocol::{RuntimeCapabilities, RuntimeControl, RuntimeMessage};
 
 pub struct WindowsRunRequest {
     pub command: Vec<String>,
@@ -35,6 +35,22 @@ pub struct WindowsRuntimeError {
 
 pub fn run(
     request: WindowsRunRequest,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), WindowsRuntimeError> {
+    run_with_control(request, None, sender)
+}
+
+pub fn run_interactive(
+    request: WindowsRunRequest,
+    control_rx: Receiver<RuntimeControl>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), WindowsRuntimeError> {
+    run_with_control(request, Some(control_rx), sender)
+}
+
+fn run_with_control(
+    request: WindowsRunRequest,
+    control_rx: Option<Receiver<RuntimeControl>>,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), WindowsRuntimeError> {
     let state_dir = state_dir().map_err(|message| error("sandbox_unavailable", message))?;
@@ -95,6 +111,7 @@ pub fn run(
         &request,
         lease.capability_sids(),
         capabilities,
+        control_rx,
         sender,
     )
     .map_err(|message| {

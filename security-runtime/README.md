@@ -23,6 +23,7 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 | 输出上限 | `max_output_bytes` 截断（默认 2 MiB） | 同 |
 | 一次性 stdin | 最多 1 MiB，写入后立即 EOF | 同 |
 | stdout/stderr | 独立 NDJSON 事件流，共享输出预算 | 同 |
+| 长连接 stdin/stdout | interactive_open/write/close 由 native runtime 代理 | 同 |
 | 协议鉴权 | 启动 token（≥32 字节）+ 单次 nonce 防重放 | 同 |
 
 ### 1.1 Windows 后端要点
@@ -49,7 +50,8 @@ NDJSON over stdio，**版本化 + 鉴权 + 防重放**：
 ```
 runtime 启动 → 读 ACE_SECURITY_RUNTIME_TOKEN（≥32 字节）
             → stdout 写 {type:"ready", version:2,
-                          capabilities:["stdin_once","stream_output"]}
+                          capabilities:["stdin_once","stream_output",
+                                        "stdin_bidirectional"]}
 host 每行一个请求：
   {version:2, token, nonce,
    request:{op:"run", command, cwd, writable_roots, ...,
@@ -67,6 +69,21 @@ runtime 每请求回连续事件：
 `version/nonce`，`seq` 必须从 0 严格递增；终态后必须 EOF。Python 调用方只在完整校验后
 得到最终 `RuntimeCommandResult`，不会收到原始输出 chunk。
 
+交互式外援使用同一条已鉴权的 NDJSON 控制通道，但子进程的 ACP/CLI
+协议保持不透明：
+
+    host → {request:{op:"interactive_open", command, cwd, ...}}
+          ← started(seq=0, ...)
+    host → {request:{op:"interactive_write", data_b64}}
+          ← stdout|stderr(seq++, data_b64)*
+    host → {request:{op:"interactive_close"}}
+          ← completed(seq++, exit_code) | error(seq++, code, message)
+
+interactive_write 可以重复发送；interactive_close 只关闭外援子进程
+的 stdin，不改变 stdout/stderr 的事件格式。stdin_bidirectional 是
+交互式会话能力标志；旧的只支持一次性 run 的 helper 会在打开会话前
+被拒绝，不会回退到宿主直接启动。
+
 `run` 请求字段：`command[]`, `cwd`, `writable_roots[]`, `readable_roots[]`,
 `denied_roots[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
 `max_output_bytes`, `stdin_b64?`, `env_overrides?`。
@@ -75,6 +92,7 @@ runtime 每请求回连续事件：
 环境变量名值合计 256 KiB、默认 stdout+stderr 总量 2 MiB。stdin 只写一次并立即关闭；
 未提供 stdin 时子进程获得关闭/空输入。`env_overrides` 只进入最终受限子进程，不进入
 runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
+`PATH`/`HOME`/`TMPDIR`/`PWD`/`OLDPWD`、
 `ACE_SECURITY_*` 和 `ACE_BUNDLED_*` 不允许由调用方覆盖，runtime
 生成的代理与安全变量拥有最终优先级。
 
@@ -265,6 +283,9 @@ security-runtime/
 
 ## 变更记录
 
+- **2026-08-07**：新增通用 managed interactive stdio transport；当前 ACP 在不接管其内部协议
+  的前提下，通过 Native Runtime 维持双向 stdin/stdout，CLI 可复用同一接口；同时加入
+  `stdin_bidirectional` 能力校验、Team 安全启动上下文继承，以及 Native Runtime 控制环境变量保护。
 - **2026-07-26**：协议升级为 v2 流式事件；新增一次性 stdin/EOF、受限子进程环境变量、
   全局序列、started/stdout/stderr/completed/error、严格帧与输出边界，以及 Windows
   runner/Linux bwrap 的实时输出和整树清理。Windows Rust 测试与 Linux 目标交叉编译已通过；

@@ -3,14 +3,14 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use rand::RngCore;
 
-use crate::protocol::{RuntimeCapabilities, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
+use crate::protocol::{RuntimeCapabilities, RuntimeControl, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PLATFORM_READ_ROOTS: &[&str] = &[
@@ -54,6 +54,22 @@ pub fn run(
     request: MacOsRunRequest,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), MacOsRuntimeError> {
+    run_with_control(request, None, sender)
+}
+
+pub fn run_interactive(
+    request: MacOsRunRequest,
+    control_rx: Receiver<RuntimeControl>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), MacOsRuntimeError> {
+    run_with_control(request, Some(control_rx), sender)
+}
+
+fn run_with_control(
+    request: MacOsRunRequest,
+    control_rx: Option<Receiver<RuntimeControl>>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), MacOsRuntimeError> {
     if !Path::new(SANDBOX_EXEC).is_file() {
         return Err(unavailable("macOS Seatbelt launcher is unavailable"));
     }
@@ -81,7 +97,7 @@ pub fn run(
         .env("TMPDIR", &plan.home)
         .env("ACE_SANDBOX", "macos-seatbelt")
         .envs(&request.env_overrides)
-        .stdin(if request.stdin.is_some() {
+        .stdin(if request.stdin.is_some() || control_rx.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
@@ -123,7 +139,21 @@ pub fn run(
         })
         .map_err(|_| unavailable("protocol receiver disconnected"))?;
 
-    if let Some(stdin) = request.stdin {
+    if let Some(control_rx) = control_rx {
+        let mut child_stdin = child.stdin.take().expect("piped stdin");
+        thread::spawn(move || {
+            for control in control_rx {
+                match control {
+                    RuntimeControl::Write(data) => {
+                        if child_stdin.write_all(&data).is_err() {
+                            break;
+                        }
+                    }
+                    RuntimeControl::Close => break,
+                }
+            }
+        });
+    } else if let Some(stdin) = request.stdin {
         let mut child_stdin = child.stdin.take().expect("piped stdin");
         thread::spawn(move || {
             let _ = child_stdin.write_all(&stdin);

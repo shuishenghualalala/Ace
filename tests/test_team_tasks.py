@@ -28,6 +28,8 @@ from crew.state.config import Config, load_config
 from crew.tasks.runtime import TaskRuntime
 from crew.tasks.task_manager import InMemoryTaskManager, LegacyTaskManagerAdapter
 from crew.team.delegate_tool import run_delegate_to_teammate
+from crew.security.launch import ProcessLaunch, current_process_launch
+from crew.security.models import PermissionProfile, PermissionProfileKind
 from crew.team.graph_planner import (
     DEFAULT_PLANNING_DECISION_TIMEOUT,
     PLANNING_DECISION_MAX_TOKENS,
@@ -3385,6 +3387,34 @@ async def test_team_delegate_propagates_current_turn_attachments(tmp_path):
         "type": "image",
     }]
     assert seen[0].user_id == "owner-a"
+
+
+async def test_team_delegate_propagates_security_launch_context():
+    seen: list[Envelope] = []
+
+    class RecordingAgent:
+        async def run(self, envelope):
+            seen.append(envelope)
+            yield ResponseChunk.final(envelope.request_id, "已继承安全边界")
+
+    launch = ProcessLaunch(
+        PermissionProfile(PermissionProfileKind.MANAGED),
+        ("native-runtime",),
+    )
+    token = current_process_launch.set(launch)
+    try:
+        output = await run_delegate_to_teammate(
+            {"coder": RecordingAgent()},
+            InMemoryTaskManager(),
+            "team-security-context-s1",
+            member="coder",
+            instruction="执行受控外援任务",
+        )
+    finally:
+        current_process_launch.reset(token)
+
+    assert output == "已继承安全边界"
+    assert seen[0].params["_security_process_launch"] is launch
 
 
 async def test_required_workflow_delegate_waits_for_structured_acceptance_before_completion():

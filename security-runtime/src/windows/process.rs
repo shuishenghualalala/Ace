@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -31,7 +31,8 @@ use super::job::KillOnCloseJob;
 use super::token::create_restricted_token;
 use super::WindowsRunRequest;
 use crate::protocol::{
-    RuntimeCapabilities, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES, MAX_RESPONSE_FRAME_BYTES,
+    RuntimeCapabilities, RuntimeControl, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES,
+    MAX_RESPONSE_FRAME_BYTES,
 };
 
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
@@ -46,6 +47,14 @@ struct RunnerRequest {
     allow_local_binding: bool,
     stdin_b64: Option<String>,
     env_overrides: BTreeMap<String, String>,
+    interactive: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RunnerControl {
+    Write { data_b64: String },
+    Close,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -71,6 +80,7 @@ pub fn run_via_account(
     request: &WindowsRunRequest,
     capability_sids: &[String],
     capabilities: RuntimeCapabilities,
+    control_rx: Option<Receiver<RuntimeControl>>,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), String> {
     let runner_request = RunnerRequest {
@@ -85,6 +95,7 @@ pub fn run_via_account(
             .as_ref()
             .map(|value| BASE64_STANDARD.encode(value)),
         env_overrides: request.env_overrides.clone(),
+        interactive: control_rx.is_some(),
     };
     let executable = std::env::current_exe()
         .and_then(|path| path.canonicalize())
@@ -164,7 +175,31 @@ pub fn run_via_account(
         .write_all(&request_bytes)
         .and_then(|_| child_stdin.parent_file.write_all(b"\n"))
         .map_err(|error| format!("cannot send Windows runner request: {error}"))?;
-    drop(child_stdin);
+    if let Some(control_rx) = control_rx {
+        let mut child_stdin = child_stdin.parent_file;
+        thread::spawn(move || {
+            for control in control_rx {
+                let message = match control {
+                    RuntimeControl::Write(data) => RunnerControl::Write {
+                        data_b64: BASE64_STANDARD.encode(data),
+                    },
+                    RuntimeControl::Close => RunnerControl::Close,
+                };
+                let Ok(mut encoded) = serde_json::to_vec(&message) else {
+                    break;
+                };
+                encoded.push(b'\n');
+                if child_stdin.write_all(&encoded).is_err() {
+                    break;
+                }
+                if matches!(message, RunnerControl::Close) {
+                    break;
+                }
+            }
+        });
+    } else {
+        drop(child_stdin);
+    }
 
     let stderr_reader =
         thread::spawn(move || read_capped(&mut child_stderr, MAX_RESPONSE_FRAME_BYTES));
@@ -252,8 +287,9 @@ pub fn run_via_account(
 }
 
 pub fn runner_main() -> ! {
+    let mut reader = BufReader::new(std::io::stdin());
     let mut line = String::new();
-    let request = BufReader::new(std::io::stdin())
+    let request = reader
         .read_line(&mut line)
         .and_then(|_| {
             serde_json::from_str::<RunnerRequest>(&line)
@@ -262,7 +298,7 @@ pub fn runner_main() -> ! {
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     let result = match request {
-        Ok(request) => run_restricted(request, &mut output),
+        Ok(request) => run_restricted(request, &mut output, reader),
         Err(_) => RunnerWriter::new(&mut output)
             .write(RunnerMessage::Error("invalid runner request".to_string())),
     };
@@ -273,7 +309,11 @@ pub fn runner_main() -> ! {
     std::process::exit(0);
 }
 
-fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<(), String> {
+fn run_restricted<W: Write, R: BufRead + Send + 'static>(
+    request: RunnerRequest,
+    output: &mut W,
+    reader: R,
+) -> Result<(), String> {
     let token = create_restricted_token(&request.capability_sids)?;
     let child_stdin = Pipe::new(/*parent_reads*/ false)?;
     let child_stdout = Pipe::new(/*parent_reads*/ true)?;
@@ -345,7 +385,56 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
     let mut writer = RunnerWriter::new(output);
     writer.write(RunnerMessage::Started(process_info.dwProcessId))?;
 
-    if let Some(encoded) = request.stdin_b64 {
+    let control_rx = if request.interactive {
+        let (control_tx, control_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = reader;
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                if line.len() > MAX_RESPONSE_FRAME_BYTES {
+                    break;
+                }
+                let Ok(control) = serde_json::from_slice::<RunnerControl>(&line) else {
+                    break;
+                };
+                let close = matches!(control, RunnerControl::Close);
+                if control_tx.send(control).is_err() {
+                    break;
+                }
+                if close {
+                    break;
+                }
+            }
+        });
+        Some(control_rx)
+    } else {
+        None
+    };
+
+    if let Some(control_rx) = control_rx {
+        thread::spawn(move || {
+            let mut stdin = stdin;
+            for control in control_rx {
+                match control {
+                    RunnerControl::Write { data_b64 } => {
+                        let Ok(data) = BASE64_STANDARD.decode(data_b64) else {
+                            break;
+                        };
+                        if stdin.write_all(&data).is_err() {
+                            break;
+                        }
+                    }
+                    RunnerControl::Close => break,
+                }
+            }
+        });
+    } else if let Some(encoded) = request.stdin_b64 {
         let value = BASE64_STANDARD
             .decode(encoded)
             .map_err(|_| "invalid runner stdin payload".to_string())?;

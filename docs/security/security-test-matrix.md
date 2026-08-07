@@ -9,6 +9,7 @@ workflow has executed the real packaged helper on the target OS.
 | SMX-FS-002 | outside/protected read | unmounted/overlaid roots and symlink tests | technical account lacks ambient ACL and secret output is absent | required |
 | SMX-FS-003 | structured search link race | glob/grep 在静态 symlink 及 prune 后交换下不返回外部内容/metadata | glob/grep 在静态 junction、prune 后 junction 交换及 leaf swap 下不返回外部内容/metadata | required |
 | SMX-PROC-001 | process tree/handles | PID namespace + timeout kill | Job kill-on-close + explicit handle list | required |
+| SMX-ACP-001 | managed ACP bidirectional stdio | native runtime interactive session forwards stdin/stdout and closes child tree | same through Windows runner | required |
 | SMX-NET-001 | offline direct connect | isolated net namespace | offline technical-account WFP block | required |
 | SMX-NET-002 | allowed destination | Unix-socket proxy bridge, DNS pinning | online account may reach fixed loopback proxy only | required |
 | SMX-STATE-001 | native security state | N/A：Linux 不持有 Windows 技术账号 state | state parent、identity/tmp/bak、ACL/capability/recovery 对其他用户及 sandbox 账号不可读写；junction/hardlink/repair 失败关闭 | required on Windows |

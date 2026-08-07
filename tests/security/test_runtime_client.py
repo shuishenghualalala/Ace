@@ -166,10 +166,78 @@ for frame in frames:
 '''
 
 
+_INTERACTIVE_HELPER = r'''
+import base64, json, sys
+
+print(json.dumps({
+    "type": "ready",
+    "version": 2,
+    "capabilities": ["stdin_once", "stream_output", "stdin_bidirectional"],
+}), flush=True)
+open_request = json.loads(sys.stdin.readline())
+print(json.dumps({
+    "version": 2,
+    "nonce": open_request["nonce"],
+    "seq": 0,
+    "type": "started",
+    "pid": 123,
+    "capabilities": {
+        "backend": "fake",
+        "filesystem_sandbox": True,
+        "process_tree_cleanup": True,
+        "managed_network": False,
+    },
+}), flush=True)
+seq = 1
+for line in sys.stdin:
+    request = json.loads(line)["request"]
+    if request["op"] == "interactive_write":
+        data = base64.b64decode(request["data_b64"])
+        print(json.dumps({
+            "version": 2,
+            "nonce": open_request["nonce"],
+            "seq": seq,
+            "type": "stdout",
+            "data_b64": base64.b64encode(data).decode(),
+        }), flush=True)
+        seq += 1
+    elif request["op"] == "interactive_close":
+        print(json.dumps({
+            "version": 2,
+            "nonce": open_request["nonce"],
+            "seq": seq,
+            "type": "completed",
+            "exit_code": 0,
+        }), flush=True)
+        break
+'''
+
+
 def _helper(tmp_path: Path, mode: str) -> NativeRuntimeClient:
     script = tmp_path / "fake_runtime.py"
     script.write_text(_FAKE_HELPER, encoding="utf-8")
     return NativeRuntimeClient((sys.executable, str(script), mode), startup_timeout=0.5)
+
+
+def _interactive_helper(tmp_path: Path) -> NativeRuntimeClient:
+    script = tmp_path / "fake_interactive_runtime.py"
+    script.write_text(_INTERACTIVE_HELPER, encoding="utf-8")
+    return NativeRuntimeClient((sys.executable, str(script)), startup_timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_interactive_session_forwards_bidirectional_stdio(tmp_path):
+    session = await _interactive_helper(tmp_path).open_interactive(
+        command=("ignored",),
+        cwd=tmp_path,
+        timeout=1,
+    )
+    await session.write(b"hello\n")
+    assert await session.read_chunk() == b"hello\n"
+
+    await session.close_child_stdin()
+    assert await session.read_chunk() is None
+    await session.close()
 
 
 @pytest.mark.asyncio
@@ -405,6 +473,7 @@ async def test_callback_failure_does_not_change_command_result(tmp_path):
         (None, {"INVALID-NAME": "value"}),
         (None, {"VALID_NAME": "nul\x00value"}),
         (None, {"HTTP_PROXY": "http://attacker"}),
+        (None, {"PATH": "/tmp/attacker"}),
         (None, {"ACE_SECURITY_RUNTIME_TOKEN": "attacker"}),
         (None, {"LARGE": "x" * (256 * 1024)}),
     ],
@@ -413,6 +482,7 @@ async def test_callback_failure_does_not_change_command_result(tmp_path):
         "invalid-env-name",
         "env-nul",
         "proxy-env-reserved",
+        "sandbox-env-reserved",
         "runtime-env-reserved",
         "env-too-large",
     ],

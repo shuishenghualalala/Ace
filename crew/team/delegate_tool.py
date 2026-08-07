@@ -405,6 +405,21 @@ async def run_delegate_to_teammate(
     teammate = teammates[member]
     child_session_id = f"{session_id}::{member}"
     child_id = f"{task['id']}::{member}"
+    from crew.security.launch import current_process_launch
+
+    child_params = {
+        "task_session_id": session_id,
+        "team_session_id": session_id,
+        "member_session_id": child_session_id,
+        "agent_id": member,
+        **(task_payload_meta or {}),
+    }
+    # Team delegation runs the child Agent in-process. Carry the immutable
+    # parent launch decision forward so external ACP/CLI execution cannot lose
+    # the managed boundary at the child envelope.
+    launch = current_process_launch.get()
+    if launch is not None:
+        child_params["_security_process_launch"] = launch
     if bus is not None:
         bus.send(
             team_session_id=session_id,
@@ -418,13 +433,7 @@ async def run_delegate_to_teammate(
     sub_env = Envelope.of(
         instruction,
         session_id=child_session_id,
-        params={
-            "task_session_id": session_id,
-            "team_session_id": session_id,
-            "member_session_id": child_session_id,
-            "agent_id": member,
-            **(task_payload_meta or {}),
-        },
+        params=child_params,
         channel="team",
         mode="agent",
         workspace_id=current_workspace_id.get(),

@@ -225,10 +225,12 @@ async def test_captured_execution_without_launch_context_refuses_host(tmp_path, 
     assert caught.value.code is RuntimeErrorCode.SANDBOX_UNAVAILABLE
 
 
-def test_managed_acp_is_explicitly_unavailable_not_host_fallback() -> None:
+def test_managed_acp_has_a_native_transport_path() -> None:
     source = Path("crew/agent/external/acp_adapter.py").read_text(encoding="utf-8")
-    assert "managed 模式拒绝宿主启动" in source
-    assert "host_stream_launch_block_reason" in source
+    assert "SecurityExecutionBroker" in source
+    assert "open_interactive" in source
+    assert "_NativeAcpTransport" in source
+    assert "managed 模式拒绝宿主启动" not in source
 
 
 def test_sensitive_env_values_and_precise_redaction() -> None:
