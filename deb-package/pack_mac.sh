@@ -117,7 +117,8 @@ tar -xzf /tmp/crew-python.tar.gz -C "$RUNTIMES/python" --strip-components=1
 rm /tmp/crew-python.tar.gz
 "$RUNTIMES/python/bin/python3" --version
 "$RUNTIMES/python/bin/python3" -m pip install --quiet --no-cache-dir \
-    requests lxml python-pptx openpyxl xlsxwriter beautifulsoup4 markdown charset-normalizer
+    requests lxml python-pptx openpyxl xlsxwriter beautifulsoup4 markdown charset-normalizer \
+    reportlab matplotlib pikepdf pdfplumber markdown2 "xhtml2pdf>=0.2.15" pypdfium2 Pillow defusedxml pandas
 "$RUNTIMES/python/bin/python3" -m pip install --quiet --no-cache-dir --no-deps markitdown
 "$RUNTIMES/python/bin/python3" -m pip install --quiet --no-cache-dir "mcp==1.28.0"
 ln -sf python3 "$RUNTIMES/python/bin/python"

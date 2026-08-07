@@ -62,6 +62,42 @@ wiki = [
     "python-pptx>=1.0.0",
     "youtube-transcript-api>=1.0.0",
 ]
+# PDF 处理 skill（crew/skills/pdf）：创建/处理 PDF + 视觉 QA。
+# 创建：reportlab + matplotlib（图表）。
+# 处理（提取/合并/填表/旋转）：pikepdf + pdfplumber。
+# Markdown→PDF（swarm 报告）：markdown2 + xhtml2pdf（底层复用 reportlab）。
+# 视觉 QA（SKILL.md 强制要求）：pypdfium2 + Pillow。
+# 不加入核心依赖；按需安装 `.[pdf]`。
+pdf = [
+    "reportlab>=4.0",
+    "matplotlib>=3.8",
+    "pikepdf>=8.0",
+    "pdfplumber>=0.10",
+    "markdown2>=2.5",
+    "xhtml2pdf>=0.2.15",
+    "pypdfium2>=4.0",
+    "Pillow>=10.0",
+]
+# DOCX 处理 skill（crew/skills/docx）：创建/编辑/分析 .docx。
+# Python 端：lxml + defusedxml（XML 解析/校验，脚本实际 import；SKILL.md 描述与代码不一致，以代码为准）。
+# 创建新文档：依赖 Node.js 工具链（`node` + `npm install -g docx`），不在 pip 范围。
+# 可选二进制：pandoc（文本提取/PDF 导出）、pdftoppm（PDF 转图片）。
+# 不加入核心依赖；按需安装 `.[docx]`。
+docx = [
+    "lxml>=5.0",
+    "defusedxml>=0.7",
+]
+# XLSX 处理 skill（crew/skills/xlsx）：创建/编辑/分析 .xlsx。
+# Python 端：openpyxl（创建/编辑/公式）+ lxml + defusedxml（XML 校验）。
+# pandas：SKILL.md 工作流强依赖（数据分析/读取/写入），纳入此 extra。
+# 公式重算：依赖系统 LibreOffice（`soffice` 命令），不在 pip 范围。
+# 不加入核心依赖；按需安装 `.[xlsx]`。
+xlsx = [
+    "openpyxl>=3.1",
+    "lxml>=5.0",
+    "defusedxml>=0.7",
+    "pandas>=2.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/shuishenghualalala/Ace"
