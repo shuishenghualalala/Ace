@@ -6,6 +6,7 @@ const stylesDir = resolve(process.cwd(), 'assets/styles');
 const studioCss = readFileSync(resolve(stylesDir, 'studio.css'), 'utf8');
 const layoutCss = readFileSync(resolve(stylesDir, 'layouts.css'), 'utf8');
 const chatCss = readFileSync(resolve(stylesDir, 'chat.css'), 'utf8');
+const webMessagesCss = readFileSync(resolve(stylesDir, 'web-messages.css'), 'utf8');
 const securityCenterCss = readFileSync(resolve(stylesDir, 'security-center.css'), 'utf8');
 
 function ruleBody(css: string, selector: string): string {
@@ -39,6 +40,14 @@ describe('shared chat chrome styles', () => {
     expect(disclaimer).toContain('font-size: var(--mw-type-caption-size)');
     expect(disclaimer).toContain('text-align: center');
     expect(disclaimer).toContain('color: var(--mw-text-muted)');
+  });
+
+  it('keeps a narrow-window safety gutter without shifting the desktop message track', () => {
+    const messageTrack = ruleBody(webMessagesCss, '.chat-messages.web-flow .messages__inner');
+    expect(messageTrack).toContain(
+      'width: min(calc(var(--mw-chat-content-max-width) + var(--mw-space-8)), 100%)',
+    );
+    expect(messageTrack).toContain('padding: 0 var(--mw-space-4)');
   });
 });
 

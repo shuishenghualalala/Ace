@@ -185,10 +185,11 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 
 .chat-messages.web-flow .messages__inner {
   box-sizing: border-box;
-  width: min(var(--mw-chat-content-max-width), 100%);
+  /* 外层多容纳两侧安全间距，宽屏内容基线不动，窄屏头像不贴分隔线。 */
+  width: min(calc(var(--mw-chat-content-max-width) + var(--mw-space-8)), 100%);
   max-width: 100%;
   margin-inline: auto;
-  padding: 0;
+  padding: 0 var(--mw-space-4);
   display: flex;
   flex-direction: column;
   gap: var(--mw-space-4);
