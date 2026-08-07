@@ -10,7 +10,8 @@ from httpx import ASGITransport, AsyncClient
 from crew.app import build_app
 from crew.core.types import Message
 from crew.gateway.server import create_app
-from crew.state.config import Config
+from crew.state.config import Config, ModelProfile
+from crew.team.roles import CREW_BUILTIN_AGENT_ID
 
 
 OWNER_A = "A:uid-a"
@@ -452,6 +453,82 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
         owner_account_id=OWNER_A,
     )
     assert rebuilt.leader.executor.config.model == "model-b"
+
+
+@pytest.mark.asyncio
+async def test_team_builtin_member_model_switch_uses_bound_profile(tmp_path, auth_headers, monkeypatch):
+    cfg = Config(
+        db_path=str(tmp_path / "crew.db"),
+        cron_enabled=False,
+        active_model_id="builtin-b",
+        default_model_id="builtin-b",
+        model_profiles={
+            "builtin-a": ModelProfile(
+                id="builtin-a",
+                name="Builtin A",
+                api_key="test-a-key",
+                model="builtin-a-model",
+                builtin=True,
+            ),
+            "builtin-b": ModelProfile(
+                id="builtin-b",
+                name="Builtin B",
+                api_key="test-b-key",
+                model="builtin-b-model",
+                builtin=True,
+            ),
+        },
+    )
+    crew = build_app(config=cfg, enable_team=True)
+    # Gateway owner 的模型目录来自登录 overlay；测试中直接提供可用 profile，
+    # 以验证 Team 内置成员的绑定不会退回全局默认 Provider。
+    profiles = dict(cfg.model_profiles)
+    monkeypatch.setattr(crew, "owner_model_profiles", lambda _owner: profiles)
+    monkeypatch.setattr(crew.config, "owner_default_model_id", lambda _owner: "builtin-b")
+    team = crew.external_agents.create_team(
+        owner_account_id=OWNER_A,
+        name="Builtin Model Team",
+        leader_agent_id=CREW_BUILTIN_AGENT_ID,
+        members=[{"agent_id": CREW_BUILTIN_AGENT_ID, "role": "Leader"}],
+    )
+    crew.session_store.ensure_session("team-builtin-model", owner_account_id=OWNER_A)
+    crew.session_store.set_agent_config(
+        "team-builtin-model",
+        {"executor": "team", "team": {"external_team_id": team["id"]}},
+        owner_account_id=OWNER_A,
+    )
+    app = create_app(crew)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        initial = await client.get("/api/session/team-builtin-model/model")
+        switched = await client.put(
+            "/api/session/team-builtin-model/model",
+            json={
+                "member_id": CREW_BUILTIN_AGENT_ID,
+                "model_profile_id": "builtin-a",
+                "expected_revision": 1,
+            },
+        )
+
+    assert initial.status_code == 200
+    initial_member = initial.json()["members"][0]
+    assert initial_member["member_id"] == CREW_BUILTIN_AGENT_ID
+    assert initial_member["model_profile_id"] == "builtin-b"
+    assert initial_member["model_switchable"] is True
+    assert switched.status_code == 200
+    assert switched.json()["model_profile_id"] == "builtin-a"
+    assert switched.json()["runtime_id"] == "builtin"
+
+    rebuilt = crew.team._build_team(
+        "team-builtin-model",
+        external_team_id=team["id"],
+        owner_account_id=OWNER_A,
+    )
+    assert rebuilt.leader.executor.provider.model == "builtin-a-model"
 
 
 @pytest.mark.asyncio

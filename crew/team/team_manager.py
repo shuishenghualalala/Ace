@@ -198,11 +198,15 @@ class InProcessTeamManager(TeamManager):
         kanban_store: Any | None = None,
         drain_subagent_notifications: Callable[[str, str], list] | None = None,
         provider_for_owner: Callable[[str], LLMProvider] | None = None,
+        provider_for_member_model: Callable[[str, str], LLMProvider] | None = None,
     ) -> None:
         self.provider = provider
         # TeamManager 是多 owner 共享实例。规划器和内置 Leader 不能固定借用
         # 进程级 provider，否则远程登录用户在“设置 → 模型”选择的默认模型不会生效。
         self.provider_for_owner = provider_for_owner
+        # 内置 Team 成员可绑定不同于 owner 默认模型的 profile。Provider 由 App
+        # 缓存并负责关闭；此处只按成员快照选择，绝不在运行中改写已有 Agent。
+        self.provider_for_member_model = provider_for_member_model
         self.base_registry = registry
         self.session_store = session_store
         self.memory = memory
@@ -236,6 +240,20 @@ class InProcessTeamManager(TeamManager):
             if resolved is not None:
                 return resolved
         return self.provider
+
+    def _provider_for_member(
+        self,
+        spec: TeamMemberSpec,
+        owner_account_id: str = "",
+    ) -> LLMProvider:
+        """Resolve the Provider captured by one newly-created built-in member."""
+        model_id = str(spec.model or "").strip()
+        resolver = self.provider_for_member_model
+        if spec.executor == "builtin" and model_id and callable(resolver):
+            resolved = resolver(str(owner_account_id or ""), model_id)
+            if resolved is not None:
+                return resolved
+        return self._provider_for_owner(owner_account_id)
 
     @staticmethod
     def _key(session_id: str, owner_account_id: str = "") -> TeamKey:
@@ -432,7 +450,7 @@ class InProcessTeamManager(TeamManager):
             base_tools,
             exact={"wiki.read", "wiki.manage"},
         )
-        provider = self._provider_for_owner(owner_account_id)
+        provider = self._provider_for_member(spec, owner_account_id)
         executor_kind = "external" if spec.executor in {"acp", "cli", "external"} else spec.executor
         executor = create_executor(
             executor_kind,
@@ -6690,7 +6708,7 @@ class InProcessTeamManager(TeamManager):
                         model_bindings=model_bindings,
                     )
                 else:
-                    members, _ = self._external_team_specs(
+                    members, leader_spec = self._external_team_specs(
                         external_team_id,
                         owner_account_id=owner_account_id,
                         model_bindings=model_bindings,

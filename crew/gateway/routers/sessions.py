@@ -742,8 +742,15 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     for profile in owner_profiles.values()
                 ]
                 selected = owner_profiles.get(selected_model_id)
-                switchable = False
-                unavailable_reason = "内置成员模型切换等待运行层启用"
+                switchable = any(
+                    profile.loaded and profile.has_key
+                    for profile in owner_profiles.values()
+                )
+                unavailable_reason = (
+                    None
+                    if switchable
+                    else "没有可用的内置模型配置"
+                )
                 runtime_id = "builtin"
                 model_label = selected.label if selected is not None else selected_model_id
             else:
@@ -911,47 +918,54 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     status_code=409,
                 )
             if is_crew_builtin_agent(member_id):
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "code": "runtime_model_switch_unsupported",
-                        "error": "内置成员模型切换等待运行层启用",
-                    },
-                    status_code=409,
-                )
-            try:
-                agent, runtime = crew.external_agents.agent_with_runtime(
-                    member_id,
+                profile = crew.owner_model_profiles(owner).get(model_id)
+                if profile is None or not profile.loaded:
+                    return JSONResponse(
+                        {"ok": False, "code": "model_not_available", "error": "所选模型不可用"},
+                        status_code=400,
+                    )
+                if not profile.has_key:
+                    return JSONResponse(
+                        {"ok": False, "code": "model_not_available", "error": "所选模型未配置 API Key"},
+                        status_code=409,
+                    )
+                runtime_id = "builtin"
+                canonical_model_id = profile.id
+            else:
+                try:
+                    agent, runtime = crew.external_agents.agent_with_runtime(
+                        member_id,
+                        owner_account_id=owner,
+                    )
+                except KeyError:
+                    return JSONResponse(
+                        {"ok": False, "code": "session_or_member_not_found", "error": "Team 成员不存在"},
+                        status_code=404,
+                    )
+                metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
+                models = normalize_runtime_models(metadata.get("models"))
+                canonical_model_id = canonical_runtime_model_id(runtime, model_id)
+                selected = next((item for item in models if item.id == canonical_model_id), None)
+                if selected is None:
+                    return JSONResponse(
+                        {"ok": False, "code": "model_not_in_runtime", "error": "所选模型不属于目标成员运行时"},
+                        status_code=400,
+                    )
+                if not runtime_model_switchable(runtime, models):
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "code": "runtime_model_switch_unsupported",
+                            "error": "目标成员运行时不支持保留会话的模型切换",
+                        },
+                        status_code=409,
+                    )
+                crew.external_agents.resolve_agent_profile(
+                    agent["id"],
+                    canonical_model_id,
                     owner_account_id=owner,
                 )
-            except KeyError:
-                return JSONResponse(
-                    {"ok": False, "code": "session_or_member_not_found", "error": "Team 成员不存在"},
-                    status_code=404,
-                )
-            metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
-            models = normalize_runtime_models(metadata.get("models"))
-            canonical_model_id = canonical_runtime_model_id(runtime, model_id)
-            selected = next((item for item in models if item.id == canonical_model_id), None)
-            if selected is None:
-                return JSONResponse(
-                    {"ok": False, "code": "model_not_in_runtime", "error": "所选模型不属于目标成员运行时"},
-                    status_code=400,
-                )
-            if not runtime_model_switchable(runtime, models):
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "code": "runtime_model_switch_unsupported",
-                        "error": "目标成员运行时不支持保留会话的模型切换",
-                    },
-                    status_code=409,
-                )
-            crew.external_agents.resolve_agent_profile(
-                agent["id"],
-                canonical_model_id,
-                owner_account_id=owner,
-            )
+                runtime_id = str(runtime.get("id") or agent.get("runtime_id") or "")
             expected_revision_raw = payload.get("expected_revision")
             try:
                 expected_revision = (
@@ -970,7 +984,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     session_id,
                     owner_account_id=owner,
                     agent_id=member_id,
-                    runtime_id=str(runtime.get("id") or agent.get("runtime_id") or ""),
+                    runtime_id=runtime_id,
                     model_id=canonical_model_id,
                     binding_source=(
                         "restored_from_agent_default"
