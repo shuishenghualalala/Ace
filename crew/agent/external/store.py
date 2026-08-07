@@ -650,6 +650,30 @@ class ExternalAgentStore:
             self._refresh_profiles_for_runtime(runtime_id, self.get_runtime(runtime_id))
         return self.list_runtimes()
 
+    def delete_runtime(self, runtime_id: str) -> None:
+        """Delete an unused runtime record without orphaning Agents or sessions."""
+
+        with self._conn() as conn:
+            runtime = conn.execute(
+                "SELECT id FROM external_runtime WHERE id = ?",
+                (runtime_id,),
+            ).fetchone()
+            if runtime is None:
+                raise KeyError(runtime_id)
+            agent = conn.execute(
+                "SELECT name FROM external_agent WHERE runtime_id = ? LIMIT 1",
+                (runtime_id,),
+            ).fetchone()
+            if agent is not None:
+                raise ValueError(f"运行时仍被智能体「{agent['name']}」使用，请先删除对应智能体")
+            binding = conn.execute(
+                "SELECT 1 FROM external_runtime_session_binding WHERE runtime_id = ? LIMIT 1",
+                (runtime_id,),
+            ).fetchone()
+            if binding is not None:
+                raise ValueError("运行时仍有关联会话，暂不能删除")
+            conn.execute("DELETE FROM external_runtime WHERE id = ?", (runtime_id,))
+
     def _refresh_profiles_for_runtime(self, runtime_id: str, runtime: dict[str, Any] | None = None) -> None:
         """Refresh current AgentProfile snapshots after Runtime facts change."""
 

@@ -59,8 +59,12 @@
 }
 
 .mw-agent-card--runtime {
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
+  min-height: 64px;
+  gap: var(--mw-space-3);
+  padding: var(--mw-space-3);
+  border-radius: var(--mw-radius-2);
 }
 
 .mw-agent-card > .mw-icon {
@@ -93,6 +97,28 @@
   line-height: 1.45;
 }
 
+.mw-agent-card__runtime-status {
+  justify-self: start;
+  white-space: nowrap;
+}
+
+.mw-agent-card__runtime-status-detail {
+  margin: 0;
+  overflow: hidden;
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-label-size);
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mw-agent-card__runtime-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--mw-space-2);
+}
+
 .mw-agent-card__tags,
 .mw-agent-card__actions {
   display: flex;
@@ -108,7 +134,13 @@
 }
 
 .mw-agent-hub__form {
-  width: min(920px, 100%);
+  min-width: 0;
+  width: 100%;
+}
+
+.mw-agent-hub__form > .mw-agent-hub__legacy-form > .agents-section {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .mw-agent-hub__legacy-form {
@@ -124,7 +156,12 @@
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .mw-agent-card--runtime > .mw-button {
-    grid-column: 1 / -1;
+  .mw-agent-card__runtime-status,
+  .mw-agent-card__runtime-actions {
+    grid-column: 2;
+  }
+
+  .mw-agent-card__runtime-actions {
+    justify-content: flex-start;
   }
 }

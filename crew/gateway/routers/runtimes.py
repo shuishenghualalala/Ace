@@ -29,6 +29,8 @@ from crew.gateway.helpers import (
     require_external_agents_enabled,
     suggest_role_description,
 )
+from crew.security.launch import ProcessLaunch, current_process_launch
+from crew.security.models import PermissionProfile, PermissionProfileKind
 from crew.state.logging import get_logger
 from crew.team.formation import (
     apply_formation_ai_audit,
@@ -520,7 +522,16 @@ def create_runtimes_router(crew) -> APIRouter:
     @router.post("/api/runtimes/scan")
     async def scan_external_runtimes() -> JSONResponse:
         store = _external_store()
-        detected = await discover_local_runtimes()
+        # Runtime discovery launches only fixed built-in probe commands, but it
+        # still needs an explicit host boundary under strict security.  Without
+        # this context Codex app-server fails closed before model discovery.
+        token = current_process_launch.set(
+            ProcessLaunch(PermissionProfile(PermissionProfileKind.DISABLED)),
+        )
+        try:
+            detected = await discover_local_runtimes()
+        finally:
+            current_process_launch.reset(token)
         synced = store.sync_runtimes(detected)
         return JSONResponse([_runtime_availability(runtime) for runtime in synced])
 
@@ -554,6 +565,19 @@ def create_runtimes_router(crew) -> APIRouter:
         return JSONResponse(_runtime_availability(
             _external_store().upsert_runtime(payload),
         ))
+
+    @router.delete("/api/runtimes/{runtime_id}")
+    async def delete_external_runtime(request: Request, runtime_id: str) -> JSONResponse:
+        denied = _admin_or_403(request)
+        if denied is not None:
+            return denied
+        try:
+            _external_store().delete_runtime(runtime_id)
+        except KeyError:
+            return JSONResponse({"ok": False, "error": "运行时不存在"}, status_code=404)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        return JSONResponse({"ok": True})
 
     @router.get("/api/external-agents")
     async def external_agents(request: Request) -> JSONResponse:

@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BackendConfig, ModelOption } from '../../src/ui/backend-client';
 import { hasUserConfiguredModel, startModelTour } from '../../src/ui/features/model-tour';
+import { startWikiTour } from '../../src/ui/features/wiki-tour';
 
 function config(profiles: ModelOption[]): BackendConfig {
   return {
@@ -89,14 +90,19 @@ describe('model tour flow', () => {
     startModelTour();
     const next = () => document.querySelector<HTMLButtonElement>('[data-tour-next]')!.click();
     expect(document.querySelector('.model-tour')).not.toBeNull();
+    expect(document.querySelector('.wiki-tour__tooltip')?.classList).toContain('mw-tour-card');
+    expect(document.querySelector('.mw-tour-card__spark')).not.toBeNull();
+    expect(document.querySelector('.mw-tour-card__actions')).not.toBeNull();
+    expect(document.querySelector('.wiki-tour__btn')).toBeNull();
+    expect(document.querySelector<HTMLButtonElement>('[data-tour-prev]')?.hidden).toBe(true);
     next();
     expect(modal.classList.contains('show')).toBe(true);
     const highlight = document.querySelector<HTMLElement>('.wiki-tour__highlight')!;
-    expect(highlight.style.left).toBe('98px');
-    expect(highlight.style.top).toBe('98px');
-    expect(highlight.style.width).toBe('124px');
-    expect(highlight.style.height).toBe('44px');
-    expect(highlight.style.borderRadius).toBe('14px');
+    expect(highlight.style.getPropertyValue('--mw-runtime-left')).toBe('98px');
+    expect(highlight.style.getPropertyValue('--mw-runtime-top')).toBe('98px');
+    expect(highlight.style.getPropertyValue('--mw-runtime-width')).toBe('124px');
+    expect(highlight.style.getPropertyValue('--mw-runtime-height')).toBe('44px');
+    expect(highlight.style.getPropertyValue('--mw-runtime-border-radius')).toBe('14px');
     next();
     expect(nav.classList.contains('is-active')).toBe(true);
     expect(pane.hidden).toBe(false);
@@ -106,5 +112,42 @@ describe('model tour flow', () => {
     next();
     expect(document.querySelector('.model-tour')).toBeNull();
     expect(localStorage.getItem('crew.desktop.modelTourSeen.v1')).toBe('1');
+  });
+});
+
+describe('shared Spotlight appearance', () => {
+  afterEach(() => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    document.body.innerHTML = '';
+  });
+
+  it('uses the external-assistance guide card for Wiki', () => {
+    document.body.innerHTML = `
+      <section data-wiki-agent-panel>Wiki Agent</section>
+      <button id="wiki-kb-select">教程</button>
+    `;
+    document.querySelectorAll<HTMLElement>('[data-wiki-agent-panel], #wiki-kb-select')
+      .forEach((element) => {
+        element.getBoundingClientRect = () => ({
+          x: 80,
+          y: 100,
+          left: 80,
+          top: 100,
+          right: 320,
+          bottom: 220,
+          width: 240,
+          height: 120,
+          toJSON: () => ({}),
+        });
+      });
+
+    startWikiTour();
+
+    expect(document.querySelector('.wiki-tour__tooltip')?.classList).toContain('mw-tour-card');
+    expect(document.querySelector('.mw-tour-card__top .wiki-tour__progress')?.textContent).toBe('1 / 2');
+    expect(document.querySelector('.mw-tour-card__spark')).not.toBeNull();
+    expect(document.querySelector('.mw-tour-card__actions')).not.toBeNull();
+    expect(document.querySelector('.wiki-tour__btn')).toBeNull();
+    expect(document.querySelector<HTMLButtonElement>('[data-tour-prev]')?.hidden).toBe(true);
   });
 });

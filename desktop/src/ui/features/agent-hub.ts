@@ -26,7 +26,9 @@ export interface AgentHubRuntime {
   name: string;
   provider: string;
   detail: string;
+  statusDetail?: string;
   availability: 'ready' | 'degraded' | 'unavailable';
+  deletable: boolean;
 }
 
 export interface AgentHubState {
@@ -49,6 +51,7 @@ export interface AgentHubOptions {
   onUseTeam?: (id: string) => void;
   onDeleteTeam?: (id: string) => void;
   onUseRuntime?: (id: string) => void;
+  onDeleteRuntime?: (id: string) => void;
   onScanRuntimes?: () => void;
   onOpenGuide?: () => void;
 }
@@ -61,7 +64,7 @@ export interface AgentHubView {
 
 const runtimeLabels = {
   ready: '随时可用',
-  degraded: '已找到，模型信息还没准备好',
+  degraded: '模型探测失败',
   unavailable: '暂时不可用',
 } as const;
 
@@ -226,6 +229,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
     for (const runtime of current.runtimes) {
       const card = document.createElement('article');
       const copy = document.createElement('div');
+      const cardActions = document.createElement('div');
       const availability = createBadge({
         label: runtimeLabels[runtime.availability],
         tone: runtime.availability === 'ready' ? 'success' : runtime.availability === 'degraded' ? 'warning' : 'danger',
@@ -236,12 +240,14 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
       copy.className = 'mw-agent-card__copy';
       copy.append(
         textElement('h3', 'mw-agent-card__title', runtime.name || runtime.provider),
-        availability,
         textElement('p', 'mw-agent-card__detail', runtime.detail),
       );
-      card.append(
-        createIcon('icon-agent', { size: 40 }),
-        copy,
+      if (runtime.statusDetail) {
+        copy.append(textElement('p', 'mw-agent-card__runtime-status-detail', runtime.statusDetail));
+      }
+      availability.classList.add('mw-agent-card__runtime-status');
+      cardActions.className = 'mw-agent-card__runtime-actions';
+      cardActions.append(
         action(
           '使用',
           'useRuntime',
@@ -250,6 +256,21 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
           'primary',
           runtime.availability !== 'ready',
         ),
+      );
+      if (options.onDeleteRuntime && runtime.deletable) {
+        cardActions.append(action(
+          '删除',
+          'deleteRuntime',
+          runtime.id,
+          options.onDeleteRuntime,
+          'danger',
+        ));
+      }
+      card.append(
+        createIcon('icon-agent', { size: 32 }),
+        copy,
+        availability,
+        cardActions,
       );
       list.append(card);
     }

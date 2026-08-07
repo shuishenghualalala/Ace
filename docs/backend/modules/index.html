@@ -33,11 +33,11 @@
       <tr><td>2</td><td><code>state</code><span class="muted">待补充 · crew/state/</span></td><td>State 状态：配置、日志、会话、工作空间。</td></tr>
       <tr><td>3</td><td><code>providers</code><span class="muted">待补充 · crew/providers/</span></td><td>Provider 模型：隔离模型厂商 SDK，连接 OpenAI 兼容端点。</td></tr>
       <tr><td>4</td><td><code>tools</code><span class="muted">待补充 · crew/tools/</span></td><td>Tools 工具：工具注册、schema 暴露、工具执行和结果回灌。</td></tr>
-      <tr><td>5</td><td><code>agent</code><span class="muted">待补充 · crew/agent/</span></td><td>Agent 内核：单智能体循环（历史、记忆、模型、工具、保存）；含 external / executor / loop / plan / subagent / compact 子模块。</td></tr>
+      <tr><td>5</td><td><code>agent</code><span class="muted">待补充 · crew/agent/</span></td><td>Agent 内核：单智能体循环（历史、记忆、模型、工具、保存）；含 external / executor / loop / plan / subagent / compact 子模块。External Runtime 存储支持安全删除无引用记录；Hermes 探测使用 30 秒冷启动阈值，普通 ACP 保持 15 秒，执行任务超时不变。</td></tr>
       <tr><td>6</td><td><code>memory</code><span class="muted">待补充 · crew/memory/</span></td><td>Memory 记忆：对话前召回和对话后写入。</td></tr>
       <tr><td>7</td><td><code>plugins</code><span class="muted">待补充 · crew/plugins/</span></td><td>Plugins 插件：LLM/工具调用生命周期钩子。</td></tr>
       <tr><td>8</td><td><code>app.py</code><span class="muted">待补充 · crew/app.py</span></td><td>App 装配：依赖注入、Agent 缓存、agent/team 路由。</td></tr>
-      <tr><td>9</td><td><code>gateway</code><span class="muted">待补充 · crew/gateway/</span></td><td>Gateway 网关：Web/API/WS 入口（含 routers），统一进入 app.handle。</td></tr>
+      <tr><td>9</td><td><code>gateway</code><span class="muted">待补充 · crew/gateway/</span></td><td>Gateway 网关：Web/API/WS 入口（含 routers），统一进入 app.handle。Runtime 路由提供列表、扫描、管理员注册与管理员删除；扫描为固定内置探测命令建立显式 host ProcessLaunch，删除引用冲突返回 409。</td></tr>
       <tr><td>10</td><td><code>cli</code><span class="muted">待补充 · crew/cli/</span></td><td>CLI 入口：本地 REPL、slash 命令、响应帧渲染。</td></tr>
       <tr><td>11</td><td><code>team</code><span class="muted">待补充 · crew/team/</span></td><td>Team 多智能体：Leader 委派 Teammate，复用 Agent 内核。</td></tr>
       <tr><td>12</td><td><code>tasks</code><span class="muted">待补充 · crew/tasks/</span></td><td>Tasks 任务：委派任务的状态流转和任务看板。</td></tr>

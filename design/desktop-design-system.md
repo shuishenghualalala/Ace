@@ -6,7 +6,7 @@
 >
 > Scope: `Ace/desktop` and its preview mode.
 >
-> Visual reference: [crew-ui-design-system.html](../desktop/crew-ui-design-system.html).
+> Visual reference: [ace-ui-design-system.html](./ace-ui-design-system.html).
 >
 > This document defines the target contract. It does not claim that the current
 > `desktop` CSS or `gemini_v3` preview already complies with it.
@@ -42,7 +42,7 @@ Behavior and appearance have different authorities:
 4. Focused behavior documents in `Ace/docs/desktop` and
    `Ace/docs/frontend` define already implemented feature details.
 5. The historical Soft Pixel direction in
-   `Ace/docs/desktop/crew-soft-pixel-ui-design.html` is visual reference.
+   `Ace/doc/desktop/crew-soft-pixel-ui-design.html` is visual reference.
 6. Existing production behavior and verified accessibility wins are preserved
    unless an approved specification changes them.
 7. Existing production styling and the current `gemini_v3` appearance are
@@ -1663,7 +1663,7 @@ stacking remain authoritative.
 
 Session selection updates active rows in place. Store refreshes must not detach and reinsert
 unchanged rows in a way that replays hover/focus motion after a click.
-  backend text is never forced into a single-line status pill or allowed to
+- Backend text is never forced into a single-line status pill or allowed to
   collide with actions.
 - Model rows use a bounded responsive grid. `Default model`, `Built in`, and
   other short states are content-sized badges, never full-width colored bars.
@@ -2187,9 +2187,9 @@ The Desktop design system is maintained as a connected set of artifacts:
 | --- | --- | --- |
 | Approved feature specification | behavior, permissions, data and workflow contract | only when it explicitly changes product behavior |
 | `docs/specs/desktop-ui-reconstruction.md` | Renderer replacement scope, boundaries and completion criteria | no |
-| `docs/frontend/desktop-design-system.md` | single normative UI standard | yes |
+| `design/desktop-design-system.md` | single normative UI standard | yes |
 | `docs/frontend/desktop-ui-parity-acceptance-manual.md` | legacy capability, interaction, IPC and security parity baseline | no |
-| `docs/desktop/crew-ui-design-system.html` | executable visual reference and acceptance surface | no |
+| `design/ace-ui-design-system.html` | executable visual reference and acceptance surface | no |
 | `desktop` production source | implementation | no |
 | preview fixtures and visual snapshots | state coverage and regression evidence | no |
 
@@ -2286,7 +2286,7 @@ enforce repository policy.
 | 2026-07-26 | The office assistant uses a function rail, context list, and dominant work area. |
 | 2026-07-26 | Agent conversations are read-only in the office assistant and enter Work context as explicit snapshots. |
 | 2026-07-26 | Work item business, execution, and synchronization states are independent. |
-| 2026-07-26 | `docs/frontend/desktop-design-system.md` is the single normative Desktop UI standard; the Living HTML is its executable visual reference. |
+| 2026-07-26 | `design/desktop-design-system.md` is the single normative Desktop UI standard; `design/ace-ui-design-system.html` is its executable visual reference. |
 | 2026-07-26 | The master-merge baseline adds Agent Hub, Wiki, Team collaboration, chat approval/media patterns, revised Skills/Plugins, history identity, and Usage provenance to the migration inventory. |
 | 2026-07-26 | Desktop UI governance uses the normative standard, Living HTML, repository-level `开发约束.md`, automated checks, and human review as complementary enforcement layers. |
 | 2026-07-26 | Process timelines preserve semantic icons for thinking, tool families, delegation, status, and errors; generic dots are not an acceptable replacement. |

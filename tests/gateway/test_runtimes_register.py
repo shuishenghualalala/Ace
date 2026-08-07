@@ -6,9 +6,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
-from crew.gateway.server import create_app
 from crew.gateway.routers import runtimes as runtimes_router
+from crew.gateway.server import create_app
+from crew.security.launch import current_process_launch
 from crew.state.config import Config
+
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
@@ -96,6 +98,9 @@ async def test_scan_allows_authenticated_non_admin(api, monkeypatch):
     async def fake_discover():
         nonlocal calls
         calls += 1
+        launch = current_process_launch.get()
+        assert launch is not None
+        assert launch.managed is False
         return []
 
     monkeypatch.setattr(runtimes_router, "discover_local_runtimes", fake_discover)
@@ -142,6 +147,41 @@ async def test_admin_scan_remains_supported(api, auth_headers, monkeypatch):
 
     assert resp.status_code == 200
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_runtime_removes_unused_registered_record(api, auth_headers):
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        registered = await client.post(
+            "/api/runtimes/register",
+            json={"id": "runtime-e2e", "type": "e2e", "provider": "e2e"},
+        )
+        assert registered.status_code == 200
+
+        deleted = await client.delete("/api/runtimes/runtime-e2e")
+
+        assert deleted.status_code == 200
+        assert deleted.json() == {"ok": True}
+        assert all(runtime["id"] != "runtime-e2e" for runtime in (await client.get("/api/runtimes")).json())
+
+
+@pytest.mark.asyncio
+async def test_delete_runtime_rejects_record_used_by_agent(api, auth_headers):
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        await _register_ready_runtime(client)
+        agent = await client.post(
+            "/api/external-agents",
+            json={"name": "保留的外援", "runtime_id": "rt-models", "model": "model-a"},
+        )
+        assert agent.status_code == 200
+
+        deleted = await client.delete("/api/runtimes/rt-models")
+
+        assert deleted.status_code == 409
+        assert "请先删除对应智能体" in deleted.json()["error"]
+        assert any(runtime["id"] == "rt-models" for runtime in (await client.get("/api/runtimes")).json())
 
 
 async def _register_ready_runtime(client: AsyncClient) -> None:

@@ -1398,6 +1398,30 @@ def test_scan_hermes_runtime_uses_env_path(tmp_path, monkeypatch):
     assert runtime.protocol == "acp"
 
 
+def test_hermes_runtime_probe_allows_cold_start_timeout(monkeypatch):
+    captured: dict[str, float] = {}
+
+    async def fake_probe(*args, timeout, **kwargs):
+        del args, kwargs
+        captured["timeout"] = timeout
+        return acp_adapter.AcpRuntimeProbeResult(
+            models=[],
+            default_model_id="",
+            capabilities=acp_adapter.RuntimeCapabilities(),
+        )
+
+    monkeypatch.setattr(acp_adapter, "probe_acp_runtime", fake_probe)
+
+    asyncio.run(acp_adapter.AcpRuntimeAdapter().probe(
+        "/fixture/hermes",
+        provider="hermes",
+        launch_args=("acp",),
+    ))
+
+    assert captured["timeout"] == acp_adapter.HERMES_RUNTIME_PROBE_TIMEOUT_SECONDS
+    assert captured["timeout"] > acp_adapter.ACP_RUNTIME_PROBE_TIMEOUT_SECONDS
+
+
 def test_scan_codex_runtime_skips_warning_version_lines(tmp_path, monkeypatch):
     codex = _fake_cli(tmp_path, "codex", "codex 0.42.0", prefix="WARNING: path update failed")
     monkeypatch.setenv("CREW_CODEX_PATH", str(codex))

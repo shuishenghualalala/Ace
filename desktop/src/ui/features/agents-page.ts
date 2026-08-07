@@ -34,6 +34,7 @@ import {
   externalAgentsEnabled,
 } from './external-agents-feature';
 import { renderMarkdownHtml } from '../markdown';
+import { showConfirmDialog } from '../ui-feedback';
 
 type AgentsTab = 'mine' | 'runtime' | 'create-agent' | 'create-team';
 type AgentsSelectOption = {
@@ -74,6 +75,9 @@ export interface ExternalConversationCatalog {
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 
 const TEAM_DRAFT_DEBOUNCE_MS = 600;
+const AGENTS_GUIDE_HIGHLIGHT_PADDING = 6;
+const AGENTS_GUIDE_TOOLTIP_GAP = 12;
+const AGENTS_GUIDE_VIEWPORT_MARGIN = 12;
 
 const TEAM_REQUIRED_CAPABILITIES = [
   { key: 'information_retrieval', label: '检索', prompt: '必须包含信息检索能力。' },
@@ -162,6 +166,7 @@ let agentsSelectGlobalBound = false;
 let agentHubView: AgentHubView | null = null;
 let agentsGuideMode: AgentsGuideMode = 'hidden';
 let agentsGuideStep: AgentsGuideStepNumber = 1;
+let agentsGuideLayoutFrame: number | null = null;
 let initialRuntimeScanStarted = false;
 
 function stopFormationElapsedTimer(): void {
@@ -236,6 +241,21 @@ function externalActionError(prefix: string, error: unknown): string {
 function runtimeWasReplaced(runtime: ExternalRuntime): boolean {
   return runtime.metadata?.lifecycle_status === 'replaced'
     && typeof runtime.metadata?.replaced_by_runtime_id === 'string';
+}
+
+function runtimeStatusDetail(runtime: ExternalRuntime): string {
+  const status = runtimeStatus(runtime);
+  if (status === 'ready') return '';
+  const probe = runtime.metadata?.probe;
+  const probeRecord = probe && typeof probe === 'object'
+    ? probe as Record<string, unknown>
+    : undefined;
+  const errorCode = String(probeRecord?.error_code || '').trim();
+  const probeMessage = String(probeRecord?.message || '').trim();
+  if (errorCode === 'models_empty') return '运行时没有返回可用模型，可点“再找找”重试';
+  if (probeMessage) return probeMessage;
+  if (status === 'degraded') return '已找到工具，但这次没能读取模型目录，可点“再找找”重试';
+  return '当前未找到可执行文件；确认不再需要后可删除这条记录';
 }
 
 function runtimeModelOptions(runtimeId: string): RuntimeModelProfile[] {
@@ -1205,7 +1225,10 @@ function agentHubState(): AgentHubState {
       name: runtime.name || runtime.provider,
       provider: providerLabel(runtime.provider),
       detail: runtime.version || providerLabel(runtime.provider),
+      statusDetail: runtimeStatusDetail(runtime),
       availability: runtimeStatus(runtime),
+      deletable: runtimeStatus(runtime) === 'unavailable'
+        || typeof runtime.metadata?.runtime_profile_version !== 'number',
     })),
     loading: busy && !runtimeScanning && activeTab !== 'create-team',
     scanning: runtimeScanning,
@@ -1266,11 +1289,131 @@ function guideTarget(): {
   };
 }
 
-function removeAgentsGuide(): void {
-  document.querySelector('[data-agents-guide-portal]')?.remove();
+function clampGuidePosition(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function cancelAgentsGuideLayout(): void {
+  if (agentsGuideLayoutFrame === null) return;
+  window.cancelAnimationFrame(agentsGuideLayoutFrame);
+  agentsGuideLayoutFrame = null;
+}
+
+function clearAgentsGuideTarget(): void {
   document.querySelectorAll('.agents-guide-target').forEach((target) => {
     target.classList.remove('agents-guide-target');
   });
+}
+
+function placeAgentsGuideBubble(bubble: HTMLElement, rect: DOMRect): void {
+  const bubbleRect = bubble.getBoundingClientRect();
+  const bubbleWidth = bubbleRect.width || 320;
+  const bubbleHeight = bubbleRect.height || 176;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  let left = rect.left + rect.width / 2 - bubbleWidth / 2;
+  let top = rect.bottom + AGENTS_GUIDE_TOOLTIP_GAP;
+  if (top + bubbleHeight > viewportHeight - AGENTS_GUIDE_VIEWPORT_MARGIN) {
+    top = rect.top - AGENTS_GUIDE_TOOLTIP_GAP - bubbleHeight;
+  }
+  if (rect.left > viewportWidth * 0.6
+    && rect.left - AGENTS_GUIDE_TOOLTIP_GAP - bubbleWidth > AGENTS_GUIDE_VIEWPORT_MARGIN) {
+    left = rect.left - AGENTS_GUIDE_TOOLTIP_GAP - bubbleWidth;
+    top = rect.top + rect.height / 2 - bubbleHeight / 2;
+  }
+
+  setRuntimeStyle(
+    bubble,
+    'left',
+    `${Math.round(clampGuidePosition(
+      left,
+      AGENTS_GUIDE_VIEWPORT_MARGIN,
+      viewportWidth - bubbleWidth - AGENTS_GUIDE_VIEWPORT_MARGIN,
+    ))}px`,
+  );
+  setRuntimeStyle(
+    bubble,
+    'top',
+    `${Math.round(clampGuidePosition(
+      top,
+      AGENTS_GUIDE_VIEWPORT_MARGIN,
+      viewportHeight - bubbleHeight - AGENTS_GUIDE_VIEWPORT_MARGIN,
+    ))}px`,
+  );
+}
+
+function layoutAgentsGuide(): void {
+  if (agentsGuideMode !== 'tour') return;
+  const portal = document.querySelector<HTMLElement>('[data-agents-guide-portal]');
+  const highlight = portal?.querySelector<HTMLElement>('[data-agents-guide-highlight]');
+  const bubble = portal?.querySelector<HTMLElement>('[data-agents-guide]');
+  const target = document.querySelector<HTMLElement>(guideTarget().selector);
+  if (!highlight || !bubble || !target) return;
+
+  const rect = target.getBoundingClientRect();
+  if (rect.width < 4 || rect.height < 4) {
+    highlight.hidden = true;
+    return;
+  }
+
+  highlight.hidden = false;
+  setRuntimeStyle(highlight, 'left', `${Math.round(rect.left - AGENTS_GUIDE_HIGHLIGHT_PADDING)}px`);
+  setRuntimeStyle(highlight, 'top', `${Math.round(rect.top - AGENTS_GUIDE_HIGHLIGHT_PADDING)}px`);
+  setRuntimeStyle(
+    highlight,
+    'width',
+    `${Math.round(rect.width + AGENTS_GUIDE_HIGHLIGHT_PADDING * 2)}px`,
+  );
+  setRuntimeStyle(
+    highlight,
+    'height',
+    `${Math.round(rect.height + AGENTS_GUIDE_HIGHLIGHT_PADDING * 2)}px`,
+  );
+  placeAgentsGuideBubble(bubble, rect);
+}
+
+function scheduleAgentsGuideLayout(): void {
+  cancelAgentsGuideLayout();
+  agentsGuideLayoutFrame = window.requestAnimationFrame(() => {
+    agentsGuideLayoutFrame = null;
+    layoutAgentsGuide();
+  });
+}
+
+function onAgentsGuideKeydown(event: KeyboardEvent): void {
+  if (agentsGuideMode !== 'tour') return;
+  if (event.key === 'Escape') finishAgentsGuide();
+  if (event.key === 'ArrowLeft' && agentsGuideStep > 1) {
+    setAgentsGuideStep((agentsGuideStep - 1) as AgentsGuideStepNumber);
+  }
+  if (event.key === 'ArrowRight') {
+    if (agentsGuideStep === 3) finishAgentsGuide();
+    else setAgentsGuideStep((agentsGuideStep + 1) as AgentsGuideStepNumber);
+  }
+}
+
+function onAgentsGuideResize(): void {
+  scheduleAgentsGuideLayout();
+}
+
+function bindAgentsGuideWindowEvents(): void {
+  document.removeEventListener('keydown', onAgentsGuideKeydown);
+  window.removeEventListener('resize', onAgentsGuideResize);
+  document.addEventListener('keydown', onAgentsGuideKeydown);
+  window.addEventListener('resize', onAgentsGuideResize);
+}
+
+function unbindAgentsGuideWindowEvents(): void {
+  document.removeEventListener('keydown', onAgentsGuideKeydown);
+  window.removeEventListener('resize', onAgentsGuideResize);
+}
+
+function removeAgentsGuide(): void {
+  cancelAgentsGuideLayout();
+  unbindAgentsGuideWindowEvents();
+  document.querySelector('[data-agents-guide-portal]')?.remove();
+  clearAgentsGuideTarget();
 }
 
 function finishAgentsGuide(): void {
@@ -1289,72 +1432,109 @@ function setAgentsGuideStep(step: AgentsGuideStepNumber): void {
 }
 
 function renderAgentsGuide(): void {
-  removeAgentsGuide();
-  if (agentsGuideMode === 'hidden') return;
+  if (agentsGuideMode === 'hidden') {
+    removeAgentsGuide();
+    return;
+  }
   const root = $('#agents-page-root');
   const pane = root?.closest('.tab-pane');
-  if (pane && !pane.classList.contains('active')) return;
+  if (pane && !pane.classList.contains('active')) {
+    removeAgentsGuide();
+    return;
+  }
 
   const target = agentsGuideMode === 'tour' ? guideTarget() : null;
-  const portal = document.createElement('div');
-  portal.className = 'agents-guide-portal agents-guide-portal--right';
-  portal.dataset.agentsGuidePortal = '';
-  portal.innerHTML = agentsGuideMode === 'welcome'
-    ? `
-      <aside class="agents-guide-bubble" data-agents-guide role="dialog" aria-label="外援中心新手引导">
-        <div class="agents-guide-bubble__top"><span class="agents-guide-bubble__spark" aria-hidden="true"></span><span>外援小向导</span></div>
+  let portal = document.querySelector<HTMLElement>('[data-agents-guide-portal]');
+  if (!portal) {
+    portal = document.createElement('div');
+    portal.dataset.agentsGuidePortal = '';
+    document.body.appendChild(portal);
+  }
+  portal.dataset.guideMode = agentsGuideMode;
+
+  if (agentsGuideMode === 'welcome') {
+    cancelAgentsGuideLayout();
+    unbindAgentsGuideWindowEvents();
+    clearAgentsGuideTarget();
+    portal.className = 'agents-guide-portal agents-guide-portal--right';
+    portal.innerHTML = `
+      <aside class="agents-guide-bubble mw-tour-card" data-agents-guide role="dialog" aria-label="外援中心新手引导">
+        <div class="mw-tour-card__top"><span class="mw-tour-card__spark" aria-hidden="true"></span><span>外援小向导</span></div>
         <strong>第一次来外援中心？</strong>
         <p>用 30 秒认识发现、添加和派活。</p>
-        <div class="agents-guide-bubble__actions agents-guide-bubble__actions--welcome">
-          <button type="button" class="agents-guide-bubble__dismiss" data-agents-guide-skip>稍后再说</button>
-          <button type="button" class="agents-guide-bubble__action" data-agents-guide-start>开始看看</button>
+        <div class="mw-tour-card__actions mw-tour-card__actions--welcome">
+          <button type="button" class="mw-tour-card__secondary" data-agents-guide-skip>稍后再说</button>
+          <button type="button" class="mw-tour-card__primary" data-agents-guide-start>开始看看</button>
         </div>
-      </aside>`
-    : `
-      <aside class="agents-guide-bubble" data-agents-guide role="dialog" aria-label="外援中心引导：${target?.progress}">
-        <div class="agents-guide-bubble__top"><span class="agents-guide-bubble__spark" aria-hidden="true"></span><span>${target?.progress}</span></div>
-        <strong>${escapeHtml(target?.title || '')}</strong>
-        <p>${escapeHtml(target?.body || '')}</p>
-        <div class="agents-guide-bubble__actions">
-          <button type="button" class="agents-guide-bubble__locate" data-agents-guide-locate>定位到操作</button>
-          <div class="agents-guide-bubble__steps">
-            <button type="button" class="agents-guide-bubble__quiet" data-agents-guide-skip>跳过</button>
-            ${agentsGuideStep > 1 ? '<button type="button" class="agents-guide-bubble__dismiss" data-agents-guide-previous>上一步</button>' : ''}
-            <button type="button" class="agents-guide-bubble__action" data-agents-guide-next>${agentsGuideStep === 3 ? '完成' : '下一步'}</button>
+      </aside>`;
+    portal.querySelector<HTMLElement>('[data-agents-guide-skip]')?.addEventListener(
+      'click',
+      finishAgentsGuide,
+    );
+    portal.querySelector<HTMLElement>('[data-agents-guide-start]')?.addEventListener(
+      'click',
+      () => setAgentsGuideStep(1),
+    );
+    return;
+  }
+
+  const isExistingTour = portal.classList.contains('agents-guide-portal--tour');
+  portal.className = 'agents-guide-portal agents-guide-portal--tour';
+  if (!isExistingTour) {
+    portal.innerHTML = `
+      <div class="agents-guide-mask" data-agents-guide-mask></div>
+      <div class="agents-guide-highlight" data-agents-guide-highlight hidden></div>
+      <aside class="agents-guide-bubble mw-tour-card" data-agents-guide role="dialog" aria-label="外援中心引导：${target?.progress}">
+        <div class="mw-tour-card__top"><span class="mw-tour-card__spark" aria-hidden="true"></span><span data-agents-guide-progress></span></div>
+        <strong data-agents-guide-title></strong>
+        <p data-agents-guide-body></p>
+        <div class="mw-tour-card__actions">
+          <button type="button" class="mw-tour-card__quiet" data-agents-guide-skip>跳过</button>
+          <div class="mw-tour-card__steps">
+            <button type="button" class="mw-tour-card__secondary" data-agents-guide-previous>上一步</button>
+            <button type="button" class="mw-tour-card__primary" data-agents-guide-next></button>
           </div>
         </div>
       </aside>`;
-  document.body.appendChild(portal);
-  if (target) document.querySelector<HTMLElement>(target.selector)?.classList.add('agents-guide-target');
-
-  portal.querySelectorAll<HTMLElement>('[data-agents-guide-skip]').forEach((button) => {
-    button.addEventListener('click', finishAgentsGuide);
-  });
-  portal.querySelector<HTMLElement>('[data-agents-guide-start]')?.addEventListener(
-    'click',
-    () => setAgentsGuideStep(1),
-  );
-  portal.querySelector<HTMLElement>('[data-agents-guide-previous]')?.addEventListener(
-    'click',
-    () => setAgentsGuideStep((agentsGuideStep - 1) as AgentsGuideStepNumber),
-  );
-  portal.querySelector<HTMLElement>('[data-agents-guide-next]')?.addEventListener('click', () => {
-    if (agentsGuideStep === 3) finishAgentsGuide();
-    else setAgentsGuideStep((agentsGuideStep + 1) as AgentsGuideStepNumber);
-  });
-  portal.querySelector<HTMLElement>('[data-agents-guide-locate]')?.addEventListener('click', () => {
-    document.querySelector<HTMLElement>(guideTarget().selector)?.scrollIntoView?.({
-      behavior: 'smooth',
-      block: 'center',
-      inline: 'nearest',
+    portal.querySelector<HTMLElement>('[data-agents-guide-skip]')?.addEventListener(
+      'click',
+      finishAgentsGuide,
+    );
+    portal.querySelector<HTMLElement>('[data-agents-guide-previous]')?.addEventListener('click', () => {
+      if (agentsGuideStep > 1) {
+        setAgentsGuideStep((agentsGuideStep - 1) as AgentsGuideStepNumber);
+      }
     });
-  });
-  portal.addEventListener('wheel', (event) => {
-    const results = root?.querySelector<HTMLElement>('.mw-hub-template__results');
-    if (!results) return;
-    event.preventDefault();
-    results.scrollBy({ top: event.deltaY, behavior: 'auto' });
-  }, { passive: false });
+    portal.querySelector<HTMLElement>('[data-agents-guide-next]')?.addEventListener('click', () => {
+      if (agentsGuideStep === 3) finishAgentsGuide();
+      else setAgentsGuideStep((agentsGuideStep + 1) as AgentsGuideStepNumber);
+    });
+    portal.addEventListener('wheel', (event) => {
+      const results = root?.querySelector<HTMLElement>('.mw-hub-template__results');
+      if (!results) return;
+      event.preventDefault();
+      results.scrollBy({ top: event.deltaY, behavior: 'auto' });
+      scheduleAgentsGuideLayout();
+    }, { passive: false });
+  }
+
+  const bubble = portal.querySelector<HTMLElement>('[data-agents-guide]');
+  if (bubble) bubble.setAttribute('aria-label', `外援中心引导：${target?.progress}`);
+  const progress = portal.querySelector<HTMLElement>('[data-agents-guide-progress]');
+  const title = portal.querySelector<HTMLElement>('[data-agents-guide-title]');
+  const body = portal.querySelector<HTMLElement>('[data-agents-guide-body]');
+  const previous = portal.querySelector<HTMLButtonElement>('[data-agents-guide-previous]');
+  const next = portal.querySelector<HTMLButtonElement>('[data-agents-guide-next]');
+  if (progress) progress.textContent = target?.progress || '';
+  if (title) title.textContent = target?.title || '';
+  if (body) body.textContent = target?.body || '';
+  if (previous) previous.hidden = agentsGuideStep === 1;
+  if (next) next.textContent = agentsGuideStep === 3 ? '完成' : '下一步';
+
+  clearAgentsGuideTarget();
+  if (target) document.querySelector<HTMLElement>(target.selector)?.classList.add('agents-guide-target');
+  bindAgentsGuideWindowEvents();
+  scheduleAgentsGuideLayout();
 }
 
 function render(): void {
@@ -1386,6 +1566,10 @@ function render(): void {
         if (team) void deleteTeam(team);
       },
       onUseRuntime: selectRuntime,
+      onDeleteRuntime: (id) => {
+        const runtime = runtimes.find((item) => item.id === id);
+        if (runtime) void deleteRuntime(runtime);
+      },
       onScanRuntimes: () => void scanRuntimes(),
       onOpenGuide: () => setAgentsGuideStep(1),
     });
@@ -1756,6 +1940,28 @@ async function scanRuntimes(): Promise<void> {
     message = `刷新运行时失败：${(error as Error).message}`;
   } finally {
     runtimeScanning = false;
+    busy = false;
+    render();
+  }
+}
+
+async function deleteRuntime(runtime: ExternalRuntime): Promise<void> {
+  const confirmed = await showConfirmDialog({
+    title: '删除运行时记录',
+    message: `删除“${runtime.name || runtime.provider}”的发现记录？如果工具仍安装在电脑上，下次点“再找找”时它会重新出现。`,
+    confirmText: '删除',
+  });
+  if (!confirmed) return;
+  busy = true;
+  message = '';
+  render();
+  try {
+    await backendApi.deleteRuntime(runtime.id);
+    runtimes = runtimes.filter((item) => item.id !== runtime.id);
+    message = `已删除 ${runtime.name || runtime.provider}`;
+  } catch (error) {
+    message = `删除运行时失败：${(error as Error).message}`;
+  } finally {
     busy = false;
     render();
   }

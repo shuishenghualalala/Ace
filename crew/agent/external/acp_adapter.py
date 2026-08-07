@@ -26,6 +26,8 @@ from crew.state.logging import get_logger
 log = get_logger("agent.acp")
 
 ACP_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+ACP_RUNTIME_PROBE_TIMEOUT_SECONDS = 15.0
+HERMES_RUNTIME_PROBE_TIMEOUT_SECONDS = 30.0
 
 
 class AcpAdapterError(RuntimeError):
@@ -1073,6 +1075,11 @@ class AcpRuntimeAdapter:
             provider=provider,
             launch_args=launch_args,
             custom_env=custom_env,
+            timeout=(
+                HERMES_RUNTIME_PROBE_TIMEOUT_SECONDS
+                if provider == "hermes"
+                else ACP_RUNTIME_PROBE_TIMEOUT_SECONDS
+            ),
         )
         models = result.models
         default_model_id = result.default_model_id

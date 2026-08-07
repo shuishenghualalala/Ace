@@ -2440,87 +2440,15 @@ body.wiki-resizing {
 .wiki-tour__tooltip {
   position: fixed;
   z-index: calc(var(--mw-z-dialog) + 3);
-  width: 300px;
+  width: 320px;
   max-width: calc(100vw - 24px);
-  padding: var(--mw-space-4);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-surface);
-  box-shadow: var(--mw-shadow-overlay);
+  pointer-events: auto;
   transition:
     var(--mw-transition-interactive);
 }
 
-.wiki-tour__title {
-  margin-bottom: var(--mw-space-2);
-  color: var(--mw-text-primary);
-  font-size: var(--mw-type-section-size);
-  font-weight: var(--mw-type-section-weight);
-}
-
-.wiki-tour__desc {
-  margin: 0;
-  color: var(--mw-text-secondary);
-  font-size: var(--mw-type-body-size);
-  line-height: var(--mw-type-body-line);
-}
-
-.wiki-tour__foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--mw-space-2);
-  margin-top: var(--mw-space-3);
-}
-
 .wiki-tour__progress {
-  color: var(--mw-text-muted);
-  font-size: var(--mw-type-caption-size);
   font-variant-numeric: tabular-nums;
-}
-
-.wiki-tour__actions {
-  display: flex;
-  gap: var(--mw-space-2);
-}
-
-.wiki-tour__btn {
-  padding: var(--mw-space-2) var(--mw-space-3);
-  border-radius: var(--mw-radius-2);
-  font-size: var(--mw-type-label-size);
-  font-weight: var(--mw-type-label-weight);
-  cursor: pointer;
-}
-
-.wiki-tour__btn--ghost {
-  border: 1px solid var(--mw-border-subtle);
-  background: transparent;
-  color: var(--mw-text-secondary);
-}
-
-.wiki-tour__btn--ghost:hover {
-  background: var(--mw-bg-selected);
-  color: var(--mw-text-primary);
-}
-
-.wiki-tour__btn--ghost:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.wiki-tour__btn--primary {
-  border: 1px solid var(--mw-action-primary);
-  background: var(--mw-action-primary);
-  color: var(--mw-action-primary-text);
-}
-
-.wiki-tour__btn--primary:hover {
-  background: var(--mw-action-primary-hover);
-}
-
-.wiki-tour__btn:focus-visible {
-  outline: 2px solid var(--mw-focus-ring);
-  outline-offset: 2px;
 }
 
 .hub-refresh-btn--help {
