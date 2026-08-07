@@ -1,6 +1,8 @@
 """Gateway 新增 REST 端点测试。"""
 
 import asyncio
+import json
+import sqlite3
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -77,6 +79,7 @@ async def test_external_session_model_switch_requires_idle_and_runtime_catalog(t
         "metadata": {
             "availability_status": "ready",
             "default_model_id": "gpt-default",
+            "runtime_capabilities": {"model_switch": True},
             "models": [
                 {"id": "gpt-default", "label": "GPT Default", "default": True},
                 {"id": "gpt-alt", "label": "GPT Alt"},
@@ -131,6 +134,7 @@ async def test_external_session_model_switch_requires_idle_and_runtime_catalog(t
     assert current.status_code == 200
     assert current.json()["source"] == "external"
     assert current.json()["model_profile_id"] == "gpt-default"
+    assert current.json()["model_switchable"] is True
     assert [item["id"] for item in current.json()["models"]] == ["gpt-default", "gpt-alt"]
     assert history.json()[-1]["model"] == "gpt-default"
     assert switched.status_code == 200
@@ -207,6 +211,206 @@ async def test_external_session_model_resolves_adapter_declared_legacy_id(tmp_pa
         agent["id"],
         owner_account_id=OWNER_A,
     )["model"] == "sonnet"
+
+
+@pytest.mark.asyncio
+async def test_external_session_model_switch_requires_explicit_runtime_capability(tmp_path, auth_headers):
+    crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
+    runtime = crew.external_agents.upsert_runtime({
+        "id": "protocol-is-not-capability",
+        "provider": "custom",
+        "name": "Custom CLI",
+        "executable_path": "/bin/sh",
+        "protocol": "cli",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-a",
+            "models": [
+                {"id": "model-a", "label": "Model A", "default": True},
+                {"id": "model-b", "label": "Model B"},
+            ],
+        },
+    })
+    agent = crew.external_agents.create_agent(
+        owner_account_id=OWNER_A,
+        name="Custom Agent",
+        runtime_id=runtime["id"],
+        model="model-a",
+    )
+    crew.session_store.ensure_session("explicit-capability", owner_account_id=OWNER_A)
+    crew.session_store.set_agent_config(
+        "explicit-capability",
+        {
+            "executor": "external",
+            "external": {"external_agent_id": agent["id"]},
+        },
+        owner_account_id=OWNER_A,
+    )
+    app = create_app(crew)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        current = await client.get("/api/session/explicit-capability/model")
+        switched = await client.put(
+            "/api/session/explicit-capability/model",
+            json={"model_profile_id": "model-b"},
+        )
+
+    assert current.status_code == 200
+    assert current.json()["model_switchable"] is False
+    assert switched.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_team_session_model_materializes_and_switches_one_member(tmp_path, auth_headers):
+    db_path = tmp_path / "crew.db"
+    crew = build_app(config=Config(db_path=str(db_path), cron_enabled=False), enable_team=True)
+    runtime = crew.external_agents.upsert_runtime({
+        "id": "team-model-runtime",
+        "provider": "custom",
+        "name": "Team Model Runtime",
+        "executable_path": "/bin/sh",
+        "protocol": "cli",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-b",
+            "runtime_capabilities": {"model_switch": True, "session_resume": True},
+            "models": [
+                {"id": "model-a", "label": "Model A", "capabilities": ["text", "tools"]},
+                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text"]},
+            ],
+        },
+    })
+    leader = crew.external_agents.create_agent(
+        owner_account_id=OWNER_A,
+        name="Team Leader",
+        runtime_id=runtime["id"],
+        model="model-b",
+    )
+    member = crew.external_agents.create_agent(
+        owner_account_id=OWNER_A,
+        name="Team Member",
+        runtime_id=runtime["id"],
+        model="model-b",
+    )
+    team = crew.external_agents.create_team(
+        owner_account_id=OWNER_A,
+        name="Model Team",
+        leader_agent_id=leader["id"],
+        members=[
+            {"agent_id": leader["id"], "role": "Leader"},
+            {"agent_id": member["id"], "role": "Member"},
+        ],
+    )
+    crew.session_store.ensure_session("team-model", owner_account_id=OWNER_A)
+    crew.session_store.set_agent_config(
+        "team-model",
+        {"executor": "team", "team": {"external_team_id": team["id"]}},
+        owner_account_id=OWNER_A,
+    )
+    crew.session_store.ensure_session("team-model-other", owner_account_id=OWNER_A)
+    crew.session_store.set_agent_config(
+        "team-model-other",
+        {"executor": "team", "team": {"external_team_id": team["id"]}},
+        owner_account_id=OWNER_A,
+    )
+    app = create_app(crew)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        initial = await client.get("/api/session/team-model/model")
+        forged = await client.put(
+            "/api/session/team-model/agent-config",
+            json={
+                "executor": "team",
+                "team": {
+                    "external_team_id": team["id"],
+                    "member_model_bindings": {
+                        leader["id"]: {"model_id": "model-a", "revision": 99},
+                    },
+                    "model_binding_revision": 99,
+                },
+            },
+        )
+        switched = await client.put(
+            "/api/session/team-model/model",
+            json={
+                "member_id": leader["id"],
+                "model_profile_id": "model-a",
+                "expected_revision": 1,
+            },
+        )
+        selected = await client.get(
+            f"/api/session/team-model/model?member_id={leader['id']}"
+        )
+        other_session = await client.get(
+            f"/api/session/team-model-other/model?member_id={leader['id']}"
+        )
+        stale = await client.put(
+            "/api/session/team-model/model",
+            json={
+                "member_id": leader["id"],
+                "model_profile_id": "model-b",
+                "expected_revision": 1,
+            },
+        )
+        restored = await client.put(
+            "/api/session/team-model/model",
+            json={
+                "member_id": leader["id"],
+                "model_profile_id": "model-b",
+                "expected_revision": 2,
+                "restore_default": True,
+            },
+        )
+
+    assert initial.status_code == 200
+    initial_body = initial.json()
+    assert initial_body["scope"] == "team"
+    assert initial_body["model_binding_revision"] == 1
+    assert {item["member_id"] for item in initial_body["members"]} == {leader["id"], member["id"]}
+    assert {item["model_profile_id"] for item in initial_body["members"]} == {"model-b"}
+    assert all(item["model_switchable"] for item in initial_body["members"])
+    assert forged.status_code == 200
+    assert forged.json()["team"]["model_binding_revision"] == 1
+    assert forged.json()["team"]["member_model_bindings"][leader["id"]]["model_id"] == "model-b"
+
+    assert switched.status_code == 200
+    assert switched.json()["scope"] == "team_member"
+    assert switched.json()["model_profile_id"] == "model-a"
+    assert switched.json()["model_binding_revision"] == 2
+    assert selected.json()["model_profile_id"] == "model-a"
+    assert other_session.json()["model_profile_id"] == "model-b"
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "model_binding_stale"
+    assert restored.status_code == 200
+    assert restored.json()["model_profile_id"] == "model-b"
+    assert restored.json()["binding_source"] == "restored_from_agent_default"
+    assert restored.json()["model_binding_revision"] == 3
+    assert crew.external_agents.get_agent(leader["id"], owner_account_id=OWNER_A)["model"] == "model-b"
+
+    stored = crew.session_store.get_agent_config("team-model", owner_account_id=OWNER_A)
+    assert set(stored["team"]["member_model_bindings"]) == {leader["id"], member["id"]}
+    assert stored["team"]["member_model_bindings"][member["id"]]["model_id"] == "model-b"
+    with sqlite3.connect(db_path) as conn:
+        envelope = json.loads(conn.execute(
+            "SELECT profile_json FROM external_agent WHERE id = ?",
+            (leader["id"],),
+        ).fetchone()[0])
+    assert set(envelope["model_overlays"]) == {"model-a", "model-b"}
+
+    rebuilt = crew.team._build_team(
+        "team-model",
+        external_team_id=team["id"],
+        owner_account_id=OWNER_A,
+    )
+    assert rebuilt.leader.executor.config.model == "model-b"
 
 
 @pytest.mark.asyncio
