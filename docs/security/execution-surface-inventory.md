@@ -25,7 +25,7 @@
 | `crew/security/process_lifecycle.py` | runtime-boundary | 安全执行边界的固定进程树清理 helper；Windows 只调用固定 `taskkill` argv，POSIX 只终止已启动的进程组。 |
 | `crew/tools/process_registry.py` | broker | terminal 后台执行已按 `ProcessLaunch` 分流：disabled 才使用本地 shell；managed 只启动固定 Python bridge，再由 `NativeRuntimeClient` 执行协议内 command，runtime unavailable 不回退宿主。`taskkill/tasklist` 仅用于已登记进程的宿主生命周期清理/探测。 |
 | `crew/tools/mcp_client.py` | indirect | 默认禁用 MCP host stdio；只有操作者显式 host 配置可启用，managed transport 未实现时 unavailable。 |
-| `crew/agent/external/acp_adapter.py` | broker | ACP 双向 stdio 在 managed 模式经 `SecurityExecutionBroker.open_interactive` 由 native runtime 托管；ACP 协议仍是原生 stdin/stdout，disabled 仅保留兼容测试路径。 |
+| `crew/agent/external/acp_adapter.py` | broker | ACP 双向 stdio 在 managed 模式经 `SecurityExecutionBroker.open_interactive` 由 native runtime 托管；ACP 协议仍是原生 stdin/stdout。Crew `crew-interaction` MCP proxy 的短期 binding 环境保留在 MCP 声明内，并只获得当前 Gateway loopback `host:port` 回调权限；disabled 仅保留兼容测试路径。 |
 | `crew/agent/external/codex_adapter.py` | broker | Codex app-server 双向 stdio 尚无 native transport；managed 或缺少可信 launch context 时始终失败关闭，兼容开关不得把 managed 会话回退到宿主调用。 |
 | `crew/agent/external/cli_adapter.py` | broker | CLI 对话调用 `security.launch.execute_captured`，managed 失败不回退宿主；模型探测只运行已登记 candidate 的固定 argv，属于认证后的宿主控制面发现，不接收模型 argv。 |
 | `crew/agent/external/detector.py` | broker | 外部 agent 路径只来自运维环境变量、PATH 或已知 Desktop bundle，版本/能力探测使用固定 argv；managed 会话内版本探测明确 unavailable。仍应在未来有 native probe transport 时收敛，但当前不是模型可控 host command。 |

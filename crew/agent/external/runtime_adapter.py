@@ -12,10 +12,24 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal, Protocol
 
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.security.models import AdditionalPermissionProfile
 
 
 _PROTECTED_EXTERNAL_ENV_NAMES = frozenset({"JWT"})
-_PROTECTED_EXTERNAL_ENV_PREFIXES = ("CREW_",)
+_PROTECTED_EXTERNAL_ENV_PREFIXES = ("CREW_", "ACE_SECURITY_", "ACE_BUNDLED_")
+_NATIVE_RUNTIME_CONTROLLED_ENV_NAMES = frozenset(
+    {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "PWD",
+        "OLDPWD",
+    }
+)
 
 
 def _is_protected_external_env(key: str) -> bool:
@@ -47,6 +61,25 @@ def build_external_runtime_env(
             continue
         env[str(key)] = str(value)
     return env
+
+
+def build_managed_external_runtime_env(
+    custom_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build external env overrides without native-runtime control variables.
+
+    Provider credentials and endpoint settings remain available. The native
+    runtime owns sandbox paths, proxy routing and its internal ACE variables;
+    those values are never forwarded as child overrides. MCP server-specific
+    declarations are separate protocol data and are intentionally unaffected.
+    """
+
+    env = build_external_runtime_env(custom_env)
+    return {
+        key: value
+        for key, value in env.items()
+        if key.upper() not in _NATIVE_RUNTIME_CONTROLLED_ENV_NAMES
+    }
 
 
 class RuntimeResumeRejected(RuntimeError):
@@ -150,6 +183,9 @@ class RuntimeExecutionRequest:
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
     mcp_servers: list[RuntimeMcpServer] = field(default_factory=list)
+    additional_permissions: AdditionalPermissionProfile = field(
+        default_factory=AdditionalPermissionProfile
+    )
     dynamic_tools: list[dict[str, Any]] = field(default_factory=list)
     dynamic_tool_handler: Any = None
     resume_session_id: str = ""

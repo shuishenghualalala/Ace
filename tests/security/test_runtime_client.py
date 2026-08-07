@@ -16,6 +16,7 @@ from crew.security.runtime_client import (
 )
 from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
 from crew.security.models import (
+    AdditionalPermissionProfile,
     FilesystemAccess,
     FilesystemEntry,
     NetworkAccess,
@@ -723,6 +724,47 @@ async def test_broker_passes_process_data_and_activity_callbacks_once(tmp_path):
     assert runtime.kwargs["max_output_bytes"] == 1234
     assert runtime.kwargs["on_started"] is started
     assert runtime.kwargs["on_output"] is output
+
+
+@pytest.mark.asyncio
+async def test_broker_merges_system_callback_network_permission(tmp_path):
+    class RecordingRuntime:
+        async def open_interactive(self, **kwargs):
+            self.kwargs = kwargs
+            return "session"
+
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    request = ExecutionRequest(
+        command=("test",),
+        cwd=tmp_path,
+        permission_profile=PermissionProfile(PermissionProfileKind.MANAGED),
+        additional_permissions=AdditionalPermissionProfile(
+            network=(
+                NetworkEntry(
+                    "127.0.0.1",
+                    8123,
+                    "http",
+                    NetworkAccess.ALLOW,
+                    allow_private=True,
+                    escalatable=False,
+                ),
+            ),
+        ),
+    )
+
+    assert await broker.open_interactive(request) == "session"
+    assert runtime.kwargs["network_enabled"] is True
+    assert runtime.kwargs["network_rules"] == [
+        {
+            "host": "127.0.0.1",
+            "port": 8123,
+            "protocol": "http",
+            "allow": True,
+            "allow_private": True,
+            "escalatable": False,
+        }
+    ]
 
 
 @pytest.mark.asyncio

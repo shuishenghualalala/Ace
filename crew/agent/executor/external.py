@@ -47,6 +47,7 @@ from crew.core.followup import drain_followup_answer_messages
 from crew.core.runctx import current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.state.home import get_owner_runtime_home
+from crew.security.models import AdditionalPermissionProfile
 from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
 
 
@@ -1114,6 +1115,13 @@ class ExternalExecutor(AgentExecutor):
                             else []
                         )
                     )
+                    additional_permissions = (
+                        bridge.local_callback_permissions(interaction_binding)
+                        if mcp_servers
+                        and interaction_binding is not None
+                        and callable(getattr(bridge, "local_callback_permissions", None))
+                        else None
+                    )
                     dynamic_tools = (
                         bridge.dynamic_tool_specs(interaction_binding)
                         if use_dynamic_control_tools
@@ -1163,6 +1171,7 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=adapter_system_prompt,
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        additional_permissions=additional_permissions or AdditionalPermissionProfile(),
                         mcp_servers=mcp_servers,
                         dynamic_tools=dynamic_tools,
                         dynamic_tool_handler=dynamic_tool_handler,

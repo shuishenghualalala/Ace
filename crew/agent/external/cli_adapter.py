@@ -31,6 +31,7 @@ from crew.agent.external.runtime_adapter import (
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
     build_external_runtime_env,
+    build_managed_external_runtime_env,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
@@ -863,7 +864,7 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
             cwd=Path(cwd),
             env=env,
             stdin=stdin_text.encode("utf-8") if stdin_text is not None else None,
-            env_overrides=config.custom_env,
+            env_overrides=build_managed_external_runtime_env(config.custom_env),
             timeout=config.timeout,
             on_started=_mark_started,
             on_output=_mark_first_io,

@@ -84,6 +84,12 @@ interactive_write 可以重复发送；interactive_close 只关闭外援子进�
 交互式会话能力标志；旧的只支持一次性 run 的 helper 会在打开会话前
 被拒绝，不会回退到宿主直接启动。
 
+Crew 的 `crew-interaction` MCP proxy 属于交互式会话的受控回调：MCP
+声明中的一次性 `CREW_INTERACTION_*` 变量只用于当前 binding，Native
+Runtime 另外接收一个由 Gateway 生成的精确 loopback `host:port` 网络权限。
+该权限不等于开放任意 localhost，也不等于开放公网；没有这个系统权限时，
+`ask_followup_question` 会安全失败。
+
 `run` 请求字段：`command[]`, `cwd`, `writable_roots[]`, `readable_roots[]`,
 `denied_roots[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
 `max_output_bytes`, `stdin_b64?`, `env_overrides?`。
@@ -286,6 +292,9 @@ security-runtime/
 - **2026-08-07**：新增通用 managed interactive stdio transport；当前 ACP 在不接管其内部协议
   的前提下，通过 Native Runtime 维持双向 stdin/stdout，CLI 可复用同一接口；同时加入
   `stdin_bidirectional` 能力校验、Team 安全启动上下文继承，以及 Native Runtime 控制环境变量保护。
+- **2026-08-08**：补齐 Crew `ask_followup_question` 的 `crew-interaction` MCP 回调；父外援环境
+  不再携带 ACE/沙箱控制变量，但 MCP 声明中的短期 binding 环境仍保留，并只为当前 Gateway
+  loopback 地址追加受控网络权限。
 - **2026-07-26**：协议升级为 v2 流式事件；新增一次性 stdin/EOF、受限子进程环境变量、
   全局序列、started/stdout/stderr/completed/error、严格帧与输出边界，以及 Windows
   runner/Linux bwrap 的实时输出和整树清理。Windows Rust 测试与 Linux 目标交叉编译已通过；

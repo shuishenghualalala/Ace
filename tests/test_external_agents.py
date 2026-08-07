@@ -3755,6 +3755,7 @@ async def test_acp_executor_marks_failed_acp_binding_unsafe_and_skips_resume(tmp
 
 async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch):
     from crew.agent.external.acp_adapter import AcpStreamEvent
+    from crew.security.models import AdditionalPermissionProfile, NetworkEntry
 
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
@@ -3770,6 +3771,7 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
 
     async def fake_stream(_prompt, config):
         seen["mcp_servers"] = config.mcp_servers
+        seen["additional_permissions"] = config.additional_permissions
         yield AcpStreamEvent(kind="text", text="done")
 
     monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
@@ -3784,6 +3786,12 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
         def mcp_server_config(self, binding):
             assert binding.token == "bind-token"
             return {"name": "crew-interaction", "command": "python", "args": []}
+
+        def local_callback_permissions(self, binding):
+            assert binding.token == "bind-token"
+            return AdditionalPermissionProfile(
+                network=(NetworkEntry("127.0.0.1", 8123, "http"),),
+            )
 
         def remove_binding(self, token):
             self.removed.append(token)
@@ -3810,6 +3818,7 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
     assert seen["binding"]["control_session_id"] == "main"
     assert seen["binding"]["origin_session_id"] == "main::child"
     assert seen["mcp_servers"][0]["name"] == "crew-interaction"
+    assert seen["additional_permissions"].network[0].port == 8123
     assert bridge.removed == ["bind-token"]
     assert chunks[-1].kind == "final"
 

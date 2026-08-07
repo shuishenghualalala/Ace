@@ -19,7 +19,14 @@ from types import SimpleNamespace
 import pytest
 
 from crew.security.launch import ProcessLaunch, current_process_launch
-from crew.security.models import FilesystemAccess, FilesystemEntry, PermissionProfile, PermissionProfileKind
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    FilesystemAccess,
+    FilesystemEntry,
+    NetworkEntry,
+    PermissionProfile,
+    PermissionProfileKind,
+)
 
 
 @pytest.mark.asyncio
@@ -127,6 +134,53 @@ async def test_managed_acp_uses_native_broker_and_preserves_stdio_protocol(
 
 
 @pytest.mark.asyncio
+async def test_managed_acp_forwards_system_callback_permission(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crew.agent.external.acp_adapter import AcpAdapterConfig, stream_acp_events
+    from crew.security.broker import SecurityExecutionBroker
+
+    captured = {}
+    session = _FakeManagedAcpSession()
+
+    async def open_interactive(self, request):
+        captured["request"] = request
+        return session
+
+    monkeypatch.setattr(SecurityExecutionBroker, "open_interactive", open_interactive)
+    launch = ProcessLaunch(
+        PermissionProfile(
+            PermissionProfileKind.MANAGED,
+            filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
+        ),
+        ("native-runtime",),
+    )
+    additional_permissions = AdditionalPermissionProfile(
+        network=(NetworkEntry("127.0.0.1", 8123, "http"),),
+    )
+    token = current_process_launch.set(launch)
+    try:
+        events = [
+            event
+            async for event in stream_acp_events(
+                "hello",
+                AcpAdapterConfig(
+                    executable_path=sys.executable,
+                    cwd=str(tmp_path),
+                    additional_permissions=additional_permissions,
+                    timeout=2,
+                ),
+            )
+        ]
+    finally:
+        current_process_launch.reset(token)
+
+    assert [event.text for event in events if event.kind == "text"] == ["managed ok"]
+    assert captured["request"].additional_permissions is additional_permissions
+
+
+@pytest.mark.asyncio
 async def test_managed_acp_does_not_override_native_runtime_environment(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -145,6 +199,8 @@ async def test_managed_acp_does_not_override_native_runtime_environment(
     monkeypatch.setenv("PATH", "/host/path")
     monkeypatch.setenv("HOME", "/host/home")
     monkeypatch.setenv("HTTP_PROXY", "http://host-proxy")
+    monkeypatch.setenv("ACE_SECURITY_RUNTIME_TOKEN", "host-token")
+    monkeypatch.setenv("ACE_BUNDLED_RUNTIME", "host-runtime")
     launch = ProcessLaunch(
         PermissionProfile(
             PermissionProfileKind.MANAGED,
@@ -182,4 +238,6 @@ async def test_managed_acp_does_not_override_native_runtime_environment(
         "HTTPS_PROXY",
         "ALL_PROXY",
         "NO_PROXY",
+        "ACE_SECURITY_RUNTIME_TOKEN",
+        "ACE_BUNDLED_RUNTIME",
     }.intersection(env_overrides)
