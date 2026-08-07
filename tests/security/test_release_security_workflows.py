@@ -17,7 +17,7 @@ def test_native_security_workflows_bind_release_artifact_evidence() -> None:
     for field in ("artifact_sha256", "repository", "commit"):
         assert f'"{field}"' in writer
 
-    for platform in ("linux", "windows"):
+    for platform in ("linux", "windows", "macos"):
         source = (ROOT / ".github" / "workflows" / f"security-{platform}.yml").read_text(
             encoding="utf-8"
         )

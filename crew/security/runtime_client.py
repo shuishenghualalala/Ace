@@ -12,6 +12,7 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -533,6 +534,13 @@ class NativeRuntimeClient:
     async def _terminate_tree(process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
             return
+        if sys.platform == "darwin":
+            try:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=0.5)
+                return
+            except (ProcessLookupError, asyncio.TimeoutError):
+                pass
         try:
             if os.name == "nt":
                 process.kill()

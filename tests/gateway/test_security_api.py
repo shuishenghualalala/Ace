@@ -399,7 +399,7 @@ async def test_capabilities_do_not_trust_static_windows_identity(api, tmp_path, 
         "crew.security.launch.packaged_runtime_argv",
         lambda: (str(Path(invalid_helper).resolve()),),
     )
-    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda: False)
+    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
 
     path = "/api/security/capabilities"
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
@@ -428,6 +428,7 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         async def execute(self, **kwargs):
             network_enabled = kwargs["network_enabled"]
             calls.append(network_enabled)
+            Path(kwargs["cwd"]).joinpath("probe-marker").write_text("ok", encoding="ascii")
             return SimpleNamespace(
                 exit_code=1,
                 capabilities=RuntimeCapabilities(
@@ -448,7 +449,7 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         "crew.security.launch.packaged_runtime_argv",
         lambda: (str(helper),),
     )
-    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda: False)
+    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
     monkeypatch.setattr("crew.gateway.routers.security.NativeRuntimeClient", FakeRuntimeClient)
 
     path = "/api/security/capabilities"
@@ -462,6 +463,96 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
     assert calls == [False, True]
 
 
+@pytest.mark.asyncio
+async def test_capabilities_probe_macos_runtime(api, tmp_path, monkeypatch):
+    helper = tmp_path / "ace-security-runtime"
+    helper.write_bytes(b"fake helper")
+    calls: list[tuple[tuple[str, ...], bool]] = []
+
+    class FakeRuntimeClient:
+        def __init__(self, helper_argv):
+            assert helper_argv == (str(helper),)
+
+        async def execute(self, **kwargs):
+            command = tuple(kwargs["command"])
+            network_enabled = kwargs["network_enabled"]
+            calls.append((command, network_enabled))
+            assert command[:3] == (
+                "/bin/sh",
+                "-c",
+                'printf ok > "$1"; cat "$2" >/dev/null',
+            )
+            Path(command[4]).write_text("ok", encoding="ascii")
+            return SimpleNamespace(
+                exit_code=1,
+                capabilities=RuntimeCapabilities(
+                    backend="macos_seatbelt",
+                    filesystem_sandbox=True,
+                    process_tree_cleanup=True,
+                    managed_network=network_enabled,
+                    local_binding_control=True,
+                ),
+            )
+
+    monkeypatch.setattr("crew.gateway.routers.security.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "crew.security.launch.packaged_runtime_argv",
+        lambda: (str(helper),),
+    )
+    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
+    monkeypatch.setattr("crew.gateway.routers.security.NativeRuntimeClient", FakeRuntimeClient)
+
+    path = "/api/security/capabilities"
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    assert response.json()["platform"] == "darwin"
+    assert response.json()["filesystem_sandbox"] is True
+    assert response.json()["managed_network"] is True
+    assert response.json()["local_binding_control"] is True
+    assert [network for _command, network in calls] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_capabilities_probe_rejects_runtime_startup_failure(api, tmp_path, monkeypatch):
+    helper = tmp_path / "ace-security-runtime"
+    helper.write_bytes(b"fake helper")
+
+    class FakeRuntimeClient:
+        def __init__(self, _helper_argv):
+            pass
+
+        async def execute(self, **_kwargs):
+            return SimpleNamespace(
+                exit_code=71,
+                capabilities=RuntimeCapabilities(
+                    backend="macos_seatbelt",
+                    filesystem_sandbox=True,
+                    process_tree_cleanup=True,
+                    managed_network=False,
+                ),
+            )
+
+    monkeypatch.setattr("crew.gateway.routers.security.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "crew.security.launch.packaged_runtime_argv",
+        lambda: (str(helper),),
+    )
+    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
+    monkeypatch.setattr("crew.gateway.routers.security.NativeRuntimeClient", FakeRuntimeClient)
+
+    path = "/api/security/capabilities"
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    assert response.json()["filesystem_sandbox"] is False
+    assert response.json()["managed_network"] is False
+
+
 def test_proof_one_time_nonce_rejects_replay(tmp_path, monkeypatch):
     """H-19: a verified Desktop proof is consumed; the same proof cannot be replayed
     within its TTL even for an identical request."""
@@ -470,7 +561,9 @@ def test_proof_one_time_nonce_rejects_replay(tmp_path, monkeypatch):
     crew_home = tmp_path / ".crew"
     key_dir = crew_home / ".gateway-instance"
     key_dir.mkdir(parents=True, mode=0o700)
-    (key_dir / "gateway-instance.key").write_text(_KEY.hex(), encoding="ascii")
+    key_file = key_dir / "gateway-instance.key"
+    key_file.write_text(_KEY.hex(), encoding="ascii")
+    key_file.chmod(0o600)
     monkeypatch.setenv("CREW_HOME", str(crew_home))
 
     body = b'{"mode":"request_approval"}'

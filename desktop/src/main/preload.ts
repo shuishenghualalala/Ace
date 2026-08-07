@@ -18,6 +18,7 @@ const api = {
   windowIsMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   appQuit: () => ipcRenderer.invoke('app:quit'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+  runtimePlatform: process.platform,
   onMaximizedChanged: (cb: (max: boolean) => void) => {
     ipcRenderer.on('window:maximized-changed', (_e, max) => cb(max));
   },

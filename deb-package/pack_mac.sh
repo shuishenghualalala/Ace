@@ -5,6 +5,7 @@
 # 产物：crew-desktop_${VERSION}_arm64.dmg
 # 组成：crew-desktop.app（Electron）+ Contents/Resources/crew-gateway（PyInstaller）
 #       + _internal/runtimes（内嵌 Python standalone + Node.js portable）
+#       + ace-security-runtime（macOS Seatbelt 安全运行组件）
 # 运行环境：macOS arm64 主机（PyInstaller / Electron 均不可交叉构建 Mac 二进制）
 # 用法：
 #   ./deb-package/pack_mac.sh            # 版本号取 deb-package/version.txt
@@ -62,16 +63,17 @@ if [ ! -x "$ROOT_DIR/.venv/bin/pyinstaller" ]; then
 fi
 command -v node >/dev/null || { echo "❌ 未找到 node，请先安装 Node.js 22+" >&2; exit 1; }
 command -v npm  >/dev/null || { echo "❌ 未找到 npm" >&2; exit 1; }
+command -v cargo >/dev/null || { echo "❌ 未找到 cargo，请先安装 Rust stable 工具链" >&2; exit 1; }
 command -v hdiutil >/dev/null || { echo "❌ 未找到 hdiutil（应为 macOS 自带）" >&2; exit 1; }
 
 # ----- 1) web 前端构建（gateway 内嵌管理台静态资源） -----
 echo ""
-echo "→ [1/6] 构建 web 前端..."
+echo "→ [1/7] 构建 web 前端..."
 (cd web && npm install --no-audit --no-fund && npm run build)
 
 # ----- 2) PyInstaller 打包 crew-gateway -----
 echo ""
-echo "→ [2/6] PyInstaller 打包 crew-gateway..."
+echo "→ [2/7] PyInstaller 打包 crew-gateway..."
 venv_pip_install --no-deps .
 rm -rf dist build
 .venv/bin/pyinstaller --name crew-gateway \
@@ -104,7 +106,7 @@ echo "✓ crew-gateway 打包完成"
 
 # ----- 3) 内嵌运行时（Python standalone + Node.js portable） -----
 echo ""
-echo "→ [3/6] 下载内嵌运行时..."
+echo "→ [3/7] 下载内嵌运行时..."
 RUNTIMES="dist/crew-gateway/_internal/runtimes"
 mkdir -p "$RUNTIMES/python" "$RUNTIMES/node"
 
@@ -133,9 +135,19 @@ rm /tmp/crew-node.tar.gz
 chmod -R 755 "$RUNTIMES"
 echo "✓ 内嵌运行时就绪（Python ${BUNDLED_PYTHON_VERSION} + Node v${BUNDLED_NODE_VERSION}）"
 
-# ----- 4) Electron 桌面端构建（mac dir target） -----
+# ----- 4) macOS 原生安全运行组件 -----
 echo ""
-echo "→ [4/6] 构建 crew-desktop Electron 客户端..."
+echo "→ [4/7] 构建并校验 macOS 安全运行组件..."
+cargo build --manifest-path security-runtime/Cargo.toml --release --locked
+node desktop/scripts/prepare-security-runtime.mjs \
+    --runtime security-runtime/target/release/ace-security-runtime \
+    --output desktop/security-runtime-bin
+node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
+echo "✓ macOS Seatbelt 安全运行组件已就绪"
+
+# ----- 5) Electron 桌面端构建（mac dir target） -----
+echo ""
+echo "→ [5/7] 构建 crew-desktop Electron 客户端..."
 # Electron / electron-builder 二进制统一走 npmmirror（GitHub 直连在代理环境下易超时，与 Dockerfile.pack 同源）
 export ELECTRON_MIRROR="${ELECTRON_MIRROR:-https://npmmirror.com/mirrors/electron/}"
 export ELECTRON_BUILDER_BINARIES_MIRROR="${ELECTRON_BUILDER_BINARIES_MIRROR:-https://npmmirror.com/mirrors/electron-builder-binaries/}"
@@ -153,18 +165,18 @@ if [ -z "$APP_PATH" ]; then
 fi
 echo "✓ Electron 客户端: $APP_PATH"
 
-# ----- 5) 组装 .app：gateway 放进 Contents/Resources/crew-gateway -----
+# ----- 6) 组装 .app：gateway 放进 Contents/Resources/crew-gateway -----
 # desktop 主进程约定路径：path.join(process.resourcesPath, 'crew-gateway', 'crew-gateway')
 echo ""
-echo "→ [5/6] 组装 .app..."
+echo "→ [6/7] 组装 .app..."
 rm -rf "$APP_PATH/Contents/Resources/crew-gateway"
 cp -R dist/crew-gateway "$APP_PATH/Contents/Resources/crew-gateway"
 chmod -R 755 "$APP_PATH/Contents/Resources/crew-gateway"
 echo "✓ gateway 已嵌入 $APP_PATH/Contents/Resources/crew-gateway"
 
-# ----- 6) 生成 DMG -----
+# ----- 7) 生成 DMG -----
 echo ""
-echo "→ [6/6] 生成 DMG..."
+echo "→ [7/7] 生成 DMG..."
 STAGE="$(mktemp -d /tmp/crew-dmg-stage.XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -R "$APP_PATH" "$STAGE/crew-desktop.app"

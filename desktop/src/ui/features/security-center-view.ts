@@ -5,6 +5,8 @@ import {
 } from './security-approval';
 import {
   formatCapabilitySummary,
+  detectedRuntimePlatform,
+  isMacOSPlatform,
   isWindowsPlatform,
   type SecurityCapabilities,
 } from './security-mode';
@@ -160,11 +162,16 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
   const overview = document.createElement('div');
   const actions = document.createElement('div');
   const capabilities = snapshot.capabilities;
-  const isWindows = isWindowsPlatform(capabilities?.platform);
-  const helperReady = Boolean(capabilities?.helper_present);
+  const capabilitiesLoaded = capabilities !== null;
+  const platform = detectedRuntimePlatform(capabilities?.platform);
+  const isWindows = isWindowsPlatform(platform);
+  const isMacOS = isMacOSPlatform(platform);
+  const helperReady = capabilitiesLoaded && capabilities.helper_present === true;
   const sandboxReady = helperReady && Boolean(capabilities?.filesystem_sandbox);
   const networkReady = sandboxReady && Boolean(capabilities?.managed_network);
-  const unsupportedReason = isWindows ? '' : '当前平台不使用 Windows 原生防护';
+  const unsupportedReason = platform
+    ? (isWindows || isMacOS ? '' : '当前设备尚未提供原生防护')
+    : '正在检测本机防护能力';
 
   section.className = 'security-center__section';
   overview.className = 'security-center__status-grid';
@@ -194,12 +201,12 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
   const protectionReady = networkReady;
   const setupBusy = setupAction !== null;
   const install = button(
-    setupAction === 'install' ? '正在安装…' : '安装 / 修复 Windows 防护',
+    setupAction === 'install' ? '正在安装…' : '安装 / 修复防护',
     'install',
     'primary',
   );
   const uninstall = button(
-    setupAction === 'uninstall' ? '正在卸载…' : '卸载 Windows 防护',
+    setupAction === 'uninstall' ? '正在卸载…' : '卸载防护',
     'uninstall',
     'danger',
   );
@@ -209,7 +216,7 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
   uninstall.disabled = !isWindows || snapshot.loading || setupBusy || !protectionReady;
   install.setAttribute('aria-busy', String(setupAction === 'install'));
   uninstall.setAttribute('aria-busy', String(setupAction === 'uninstall'));
-  actions.append(install, uninstall);
+  if (isWindows) actions.append(install, uninstall);
 
   section.append(
     text('h2', 'security-center__section-title', '本机防护能力'),
@@ -218,6 +225,17 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
   );
   if (unsupportedReason) {
     section.append(text('p', 'security-center__policy-note', unsupportedReason));
+  } else if (isMacOS) {
+    const macNote = !capabilitiesLoaded
+      ? '安全能力检测未返回，请点击刷新重试。'
+      : !helperReady
+      ? '未找到 macOS 原生安全运行组件，请重新构建或重新安装应用；无需管理员权限。'
+      : !sandboxReady
+        ? 'macOS 原生运行组件存在，但文件沙箱 live probe 未通过；请重启应用或重新构建运行组件。'
+        : !networkReady
+          ? '文件沙箱已启用，但联网管控 live probe 未通过；当前不能声称出网已受保护。'
+          : '系统内置原生防护，运行组件随应用提供，无需手动安装或申请管理员权限。';
+    section.append(text('p', 'security-center__policy-note', macNote));
   }
   return section;
 }

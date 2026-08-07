@@ -142,10 +142,32 @@ async def _probe_runtime(
         workspace.mkdir()
         host_secret = parent / "host-secret"
         host_secret.write_text("probe", encoding="ascii")
+        marker = workspace / "probe-marker"
         if system == "windows":
-            command = ("cmd.exe", "/d", "/c", "type", str(host_secret))
+            command = (
+                "cmd.exe",
+                "/d",
+                "/c",
+                f'echo ok>"{marker}" & type "{host_secret}"',
+            )
         elif system == "linux":
-            command = ("/bin/sh", "-c", 'test -r "$1"', "ace-probe", str(host_secret))
+            command = (
+                "/bin/sh",
+                "-c",
+                'printf ok > "$1"; cat "$2" >/dev/null',
+                "ace-probe",
+                str(marker),
+                str(host_secret),
+            )
+        elif system == "darwin":
+            command = (
+                "/bin/sh",
+                "-c",
+                'printf ok > "$1"; cat "$2" >/dev/null',
+                "ace-probe",
+                str(marker),
+                str(host_secret),
+            )
         else:
             return None
         try:
@@ -159,8 +181,14 @@ async def _probe_runtime(
             )
         except (NativeRuntimeError, OSError, ValueError):
             return None
-        # Reading the sibling file means the sandbox did not establish a strict host-read boundary.
-        return result.capabilities if result.exit_code != 0 else None
+        # The marker proves the child actually started and could write inside the declared
+        # workspace. A Seatbelt/bwrap startup failure also returns non-zero, but leaves no
+        # marker; treating that as a passing denial would produce a false "sandbox ready" state.
+        try:
+            marker_ready = marker.is_file() and marker.read_text(encoding="ascii").startswith("ok")
+        except (OSError, UnicodeError):
+            marker_ready = False
+        return result.capabilities if marker_ready and result.exit_code != 0 else None
 
 
 async def _live_filesystem_runtime() -> tuple[RuntimeCapabilities | None, bool, bool, str]:
@@ -169,9 +197,9 @@ async def _live_filesystem_runtime() -> tuple[RuntimeCapabilities | None, bool, 
 
     helper_argv = packaged_runtime_argv()
     helper_present = Path(helper_argv[0]).is_file()
-    stale = runtime_source_stale()
+    stale = runtime_source_stale(helper_argv[0])
     system = platform.system().lower()
-    if not helper_present or stale or system not in {"windows", "linux"}:
+    if not helper_present or stale or system not in {"windows", "linux", "darwin"}:
         return None, helper_present, stale, system
     return (
         await _probe_runtime(helper_argv, system=system, network_enabled=False),
@@ -414,6 +442,7 @@ def create_security_router(crew) -> APIRouter:
         detail = "native security runtime 未随包安装"
         filesystem = filesystem_probe is not None
         network = False
+        network_probe: RuntimeCapabilities | None = None
         if helper_present and stale:
             detail = "native security runtime 与当前源码不一致"
         elif filesystem_probe is not None:
@@ -434,7 +463,7 @@ def create_security_router(crew) -> APIRouter:
                 )
             )
         elif helper_present:
-            detail = f"{system or 'unknown'} 不支持 native security runtime"
+            detail = "当前设备不支持可用的原生安全运行组件"
         return {
             "platform": system,
             "helper_present": helper_present,

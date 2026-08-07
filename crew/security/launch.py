@@ -287,8 +287,9 @@ def shell_argv(command: str) -> tuple[str, ...]:
 def packaged_runtime_argv() -> tuple[str, ...]:
     """Resolve a trusted installed helper without searching the task cwd.
 
-    Priority: ACE_SECURITY_RUNTIME env (absolute) → 提交进仓库的
-    security-runtime/bin/<name> 预编译产物（团队 dev 默认路径，免 Rust 工具链）。
+    Priority: ACE_SECURITY_RUNTIME env (absolute) → Desktop 本地 staging 目录 → 提交进
+    仓库的 security-runtime/bin/<name> 预编译产物。所有候选都固定在仓库根目录，不搜索
+    任务 cwd。
     """
     configured = os.environ.get("ACE_SECURITY_RUNTIME", "").strip()
     if configured:
@@ -297,7 +298,11 @@ def packaged_runtime_argv() -> tuple[str, ...]:
         name = "ace-security-runtime.exe" if os.name == "nt" else "ace-security-runtime"
         # crew/security/launch.py → parents[2] = 仓库根
         repo_root = Path(__file__).resolve().parents[2]
-        candidate = repo_root / "security-runtime" / "bin" / name
+        candidates = (
+            repo_root / "desktop" / "security-runtime-bin" / name,
+            repo_root / "security-runtime" / "bin" / name,
+        )
+        candidate = next((path for path in candidates if path.is_file()), candidates[0])
     if not candidate.is_absolute():
         raise RuntimeError("native security runtime path must be absolute")
     return (str(candidate),)
@@ -359,16 +364,20 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         )
 
 
-def runtime_source_stale() -> bool | None:
+def runtime_source_stale(helper_path: str | Path | None = None) -> bool | None:
     """检测提交进 bin/ 的二进制是否落后于 Rust 源码。
 
-    对 bin/runtime-manifest.json 里记录的 source_hash 与当前 src/+Cargo.toml+tests
-    的实时哈希比对。返回 True=过期、False=一致、None=无法判定（缺 manifest 或源码，
-    例如打包态或源码未随包——不报过期，避免误报）。
+    对 helper 旁边 manifest 里记录的 source_hash 与当前 src/+Cargo.toml+tests 的实时哈希
+    比对。打包态 manifest 只包含二进制文件 hash，没有 source_hash，因此返回 None。
+    返回 True=过期、False=一致、None=无法判定（缺 manifest/source_hash 或源码未随包）。
     """
     repo_root = Path(__file__).resolve().parents[2]
     sec_root = repo_root / "security-runtime"
-    manifest_path = sec_root / "bin" / "runtime-manifest.json"
+    if helper_path is None:
+        helper_path = packaged_runtime_argv()[0]
+    manifest_path = Path(helper_path).expanduser().resolve(strict=False).with_name(
+        "runtime-manifest.json"
+    )
     if not manifest_path.is_file():
         return None
     try:

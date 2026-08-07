@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -11,6 +12,8 @@ from crew.security.launch import (
     current_process_launch,
     execute_captured,
     host_stream_launch_block_reason,
+    packaged_runtime_argv,
+    runtime_source_stale,
 )
 from crew.security.models import FilesystemAccess, FilesystemEntry, PermissionProfile, PermissionProfileKind
 from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
@@ -51,6 +54,33 @@ def test_host_stream_launch_policy_never_falls_back_from_managed_to_host(
         assert host_stream_launch_block_reason() is None
     finally:
         current_process_launch.reset(token)
+
+
+def test_packaged_runtime_honors_explicit_platform_artifact(monkeypatch, tmp_path):
+    runtime = tmp_path / "ace-security-runtime"
+    runtime.write_bytes(b"runtime")
+    monkeypatch.setenv("ACE_SECURITY_RUNTIME", str(runtime))
+
+    assert packaged_runtime_argv() == (str(runtime.resolve()),)
+
+
+def test_runtime_source_stale_uses_manifest_next_to_selected_helper(tmp_path):
+    runtime = tmp_path / "ace-security-runtime"
+    runtime.write_bytes(b"runtime")
+    (tmp_path / "runtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "binary_name": runtime.name,
+                "binary_sha256": "not-used-by-source-check",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Desktop staging manifests intentionally omit source_hash because the source tree
+    # is not shipped with the application; they must not be reported as stale.
+    assert runtime_source_stale(runtime) is None
 
 
 def test_managed_background_command_is_protocol_data_not_host_argv(tmp_path, monkeypatch):

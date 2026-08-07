@@ -5,25 +5,22 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 托管网络与进程树回收。是 crew/gateway 之外**唯一**以提升权限运行的可执行文件，
 因此也是整个项目最敏感的信任边界。
 
-> 对外口径：本运行时是 Windows 原生沙箱 + Linux bubblewrap 沙箱的承载者；
+> 对外口径：本运行时承载 Windows 原生沙箱、Linux bubblewrap 与 macOS Seatbelt；
 > 它**共享主机内核**，是对话级隔离边界，不是防内核 0day 的强隔离（那是 Phase 3+ 的 gVisor/Firecracker）。
 
 ---
 
 ## 1. 能力总览
 
-| 能力 | Windows | Linux |
-|------|---------|-------|
-| 文件系统隔离 | 专用技术账户 + ACL lease（capability SID） | bubblewrap（`--ro-bind /` + 选择性可写根） |
-| 受限身份执行 | `CreateProcessWithLogonW` 切到沙箱账户 + restricted token | 沙箱内以非 root 运行；seccomp 限 syscall |
-| 进程树回收 | Kill-On-Close Job Object（父进程退出即杀全部子进程） | 进程组 + bwrap 退出回收 |
-| 托管网络 | WFP 过滤器：offline 账户全断；online 账户仅放行 loopback 代理端口 | 网络命名空间 + 用户态代理 + seccomp |
-| 保护元数据 | `.git` / `.agents` / `.crew` 在可写根内强制 Deny | 同（bwrap 只读覆盖） |
-| 身份持久化 | `CryptProtectData` 加密的账户凭证（identity v3） | 不需要（无账户模型） |
-| 输出上限 | `max_output_bytes` 截断（默认 2 MiB） | 同 |
-| 一次性 stdin | 最多 1 MiB，写入后立即 EOF | 同 |
-| stdout/stderr | 独立 NDJSON 事件流，共享输出预算 | 同 |
-| 协议鉴权 | 启动 token（≥32 字节）+ 单次 nonce 防重放 | 同 |
+| 能力 | Windows | Linux | macOS |
+|------|---------|-------|-------|
+| 文件系统隔离 | 专用技术账户 + ACL lease（capability SID） | bubblewrap 选择性挂载 | Seatbelt 参数化可读/可写/拒绝根 |
+| 受限身份执行 | 沙箱账户 + restricted token | 非 root + seccomp | 当前用户 + `deny default` Seatbelt profile |
+| 进程树回收 | Kill-On-Close Job Object | 进程组 + bwrap | 独立进程组 + helper 整树终止 |
+| 托管网络 | WFP 仅放行 loopback 代理 | 网络命名空间 + 用户态代理 | 仅放行本次随机 loopback 代理端口 |
+| 保护元数据 | `.git` / `.agents` / `.crew` 强制 Deny | bwrap 只读覆盖 | Seatbelt deny 覆盖宽写根 |
+| 身份持久化 | DPAPI 加密凭证 | 不需要 | 不需要 |
+| 输出、stdin、协议鉴权 | 统一 v2 契约 | 同 | 同 |
 
 ### 1.1 Windows 后端要点
 
@@ -42,7 +39,14 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 - **WSL**（`linux/wsl.rs`）：检测 WSL 版本；WSL1 不支持 user namespace → 拒绝沙箱执行（不静默降级）。
 - **托管网络**：用户态代理（`network/`）+ seccomp 兜底。
 
-### 1.3 协议（`protocol.rs`）
+### 1.3 macOS 后端要点
+
+- **Seatbelt**（`macos/mod.rs`）：每次执行生成独立 profile，用户路径只通过 `-D` 参数传入。
+- **最小环境**：从空环境重建 PATH、私有 HOME/TMPDIR 和已验证覆盖，避免继承宿主秘密。
+- **托管网络**：离线 profile 没有 outbound allow；在线 profile 只能访问本次代理的精确 loopback 端口。
+- **无安装步骤**：不创建技术账号、不写系统防火墙 state，也不需要管理员授权。
+
+### 1.4 协议（`protocol.rs`）
 
 NDJSON over stdio，**版本化 + 鉴权 + 防重放**：
 
@@ -88,6 +92,7 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 |------|------|
 | Windows | 10/11 x64；首次开启沙箱需 **UAC 管理员**授权一次（建账户 + 装 WFP） |
 | Linux | x64；`bwrap` 可执行文件（系统装或随包）；内核支持 user namespace |
+| macOS | `/usr/bin/sandbox-exec`；运行组件随 Desktop 包提供，无安装步骤 |
 
 普通同事**不需要 Rust 工具链**——直接用仓库里 `security-runtime/bin/` 的预编译产物（见 §4）。
 
@@ -97,6 +102,7 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 |------|--------|
 | Windows | `rustup` + **MSVC**（Visual Studio 2022 BuildTools，含 `cl.exe`/`link.exe`）；`vcvarsall.bat` 配好后 `cargo check` 须能跑通 |
 | Linux | `rustup` + `gcc`/`libc6-dev`；`bubblewrap` 装好（测试需要） |
+| macOS | Rust stable + Xcode Command Line Tools；真实测试不能嵌套在另一个 Seatbelt 会话中 |
 
 依赖见 `Cargo.toml`：`serde/serde_json/rand/base64`（通用）；`libc/seccompiler/sha2`（Linux）；`windows-sys = "0.52"`（Windows，**勿随意升级**——0.59+ 会迁 API 路径，见变更记录）。
 
@@ -111,7 +117,7 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 .\scripts\build-security-runtime.ps1
 ```
 ```bash
-# Linux（需在 Linux 机器或 CI）
+# Linux/macOS（生成当前主机原生产物）
 ./scripts/build-security-runtime.sh
 ```
 
@@ -218,6 +224,7 @@ helper/沙箱进程树。host 侧不直接碰沙箱账户/WFP/bwrap。
 cd security-runtime
 cargo test --target x86_64-pc-windows-msvc    # Windows
 cargo test                                    # Linux
+cargo test                                    # macOS（包含 Seatbelt 对抗测试）
 ```
 
 契约测试（`tests/`）覆盖：
@@ -232,6 +239,8 @@ cargo test                                    # Linux
 - `linux_bwrap.rs` / `linux_adversarial.rs` — bwrap 隔离、一次性 stdin、环境变量、
   实时 stdout/stderr、共享输出上限与对抗用例；必须在 Linux 运行，Windows 交叉编译
   不能替代运行证据。
+- `macos_adversarial.rs` — Seatbelt 工作区写入、外部读取/写入和受保护目录拒绝；
+  `tests/security/security_matrix.py --platform macos` 另测离线直连与规则代理。
 
 ---
 
@@ -246,7 +255,8 @@ security-runtime/
 │   ├── protocol.rs            # NDJSON 协议、鉴权、防重放
 │   ├── network/               # 托管网络代理（connector/policy/proxy）
 │   ├── windows/               # Windows 后端（identity/process/token/acl/wfp/job/readiness）
-│   └── linux/                 # Linux 后端（bwrap/seccomp/wsl/proxy_routing）
+│   ├── linux/                 # Linux 后端（bwrap/seccomp/wsl/proxy_routing）
+│   └── macos/                 # macOS 后端（Seatbelt/受管代理/进程回收）
 └── tests/                     # 契约测试（见 §6）
 ```
 
@@ -265,6 +275,8 @@ security-runtime/
 
 ## 变更记录
 
+- **2026-08-06**：新增 macOS Seatbelt 文件隔离、精确 loopback 代理联网边界、进程树清理、
+  Gateway live probe、安全中心平台展示、DMG runtime staging 与真实 macOS runner 发布证据。
 - **2026-07-26**：协议升级为 v2 流式事件；新增一次性 stdin/EOF、受限子进程环境变量、
   全局序列、started/stdout/stderr/completed/error、严格帧与输出边界，以及 Windows
   runner/Linux bwrap 的实时输出和整树清理。Windows Rust 测试与 Linux 目标交叉编译已通过；

@@ -44,12 +44,20 @@ afterEach(() => {
 });
 
 describe('security banner deriveState', () => {
-  it('hides on non-win32 platforms', () => {
-    expect(deriveState({ platform: 'darwin', helper_present: true, filesystem_sandbox: true, managed_network: true })).toBe('hidden');
+  it('reports on when macOS Seatbelt and managed networking are active', () => {
+    expect(deriveState({ platform: 'darwin', helper_present: true, filesystem_sandbox: true, managed_network: true })).toBe('on');
+  });
+
+  it('reports incomplete instead of offering Windows setup on macOS', () => {
+    expect(deriveState({ platform: 'darwin', helper_present: true, filesystem_sandbox: false, managed_network: false })).toBe('mac-incomplete');
   });
 
   it('reports missing when the helper binary is absent', () => {
     expect(deriveState({ platform: 'win32', helper_present: false })).toBe('missing');
+  });
+
+  it('does not show a platform-specific setup prompt before detection completes', () => {
+    expect(deriveState({ helper_present: false })).toBe('hidden');
   });
 
   it('reports stale when the runtime binary lags behind Rust source', () => {

@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,6 +15,7 @@ use rand::RngCore;
 use crate::protocol::{RuntimeCapabilities, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+static ACTIVE_PROCESS_GROUP: AtomicI32 = AtomicI32::new(0);
 const PLATFORM_READ_ROOTS: &[&str] = &[
     "/System",
     "/Library",
@@ -54,11 +57,12 @@ pub fn run(
     request: MacOsRunRequest,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), MacOsRuntimeError> {
+    install_signal_cleanup();
     if !Path::new(SANDBOX_EXEC).is_file() {
         return Err(unavailable("macOS Seatbelt launcher is unavailable"));
     }
-    let policy = crate::network::NetworkPolicy::new(request.network_rules.clone())
-        .map_err(network_error)?;
+    let policy =
+        crate::network::NetworkPolicy::new(request.network_rules.clone()).map_err(network_error)?;
     let proxy = if request.network_enabled {
         Some(crate::network::proxy::ProxyHandle::start(policy).map_err(network_error)?)
     } else {
@@ -88,6 +92,7 @@ pub fn run(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command.process_group(0);
     if let Some(address) = proxy_address {
         let proxy_url = format!("http://{address}");
         command
@@ -97,12 +102,21 @@ pub fn run(
             .env("NO_PROXY", "");
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| unavailable(format!("failed to start macOS Seatbelt: {error}")))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            cleanup_home(&plan.home);
+            return Err(unavailable(format!(
+                "failed to start macOS Seatbelt: {error}"
+            )));
+        }
+    };
+    if let Ok(group) = i32::try_from(child.id()) {
+        ACTIVE_PROCESS_GROUP.store(group, Ordering::Release);
+    }
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
-    sender
+    if sender
         .send(RuntimeMessage::Started {
             pid: Some(child.id()),
             capabilities: RuntimeCapabilities {
@@ -121,7 +135,12 @@ pub fn run(
                 windows_wfp: false,
             },
         })
-        .map_err(|_| unavailable("protocol receiver disconnected"))?;
+        .is_err()
+    {
+        terminate_child_tree(&mut child);
+        cleanup_home(&plan.home);
+        return Err(unavailable("protocol receiver disconnected"));
+    }
 
     if let Some(stdin) = request.stdin {
         let mut child_stdin = child.stdin.take().expect("piped stdin");
@@ -149,8 +168,7 @@ pub fn run(
 
     let status = loop {
         if let Ok(failure) = failure_receiver.try_recv() {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_child_tree(&mut child);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             cleanup_home(&plan.home);
@@ -160,11 +178,15 @@ pub fn run(
             Ok(Some(status)) => break status,
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(error) => {
+                terminate_child_tree(&mut child);
                 cleanup_home(&plan.home);
-                return Err(unavailable(format!("cannot wait for Seatbelt command: {error}")));
+                return Err(unavailable(format!(
+                    "cannot wait for Seatbelt command: {error}"
+                )));
             }
         }
     };
+    terminate_process_group(child.id());
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
     cleanup_home(&plan.home);
@@ -174,6 +196,48 @@ pub fn run(
     sender
         .send(RuntimeMessage::Completed(status.code().unwrap_or(-1)))
         .map_err(|_| unavailable("protocol receiver disconnected"))
+}
+
+fn terminate_child_tree(child: &mut std::process::Child) {
+    terminate_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn terminate_process_group(pid: u32) {
+    if let Ok(group) = i32::try_from(pid) {
+        ACTIVE_PROCESS_GROUP
+            .compare_exchange(group, 0, Ordering::AcqRel, Ordering::Acquire)
+            .ok();
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+    }
+}
+
+fn install_signal_cleanup() {
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            terminate_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            terminate_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+extern "C" fn terminate_signal(signal: libc::c_int) {
+    let group = ACTIVE_PROCESS_GROUP.swap(0, Ordering::AcqRel);
+    if group > 0 {
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+    }
+    unsafe {
+        libc::_exit(128 + signal);
+    }
 }
 
 fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<SandboxPlan, String> {
@@ -251,11 +315,15 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     if let Some(executable) = request.command.first().map(PathBuf::from) {
         if executable.is_absolute() {
             let executable = executable.canonicalize().map_err(|error| {
-                format!("cannot resolve command executable {}: {error}", executable.display())
+                format!(
+                    "cannot resolve command executable {}: {error}",
+                    executable.display()
+                )
             })?;
             let value = path_string(&executable)?;
             parameters.push(("COMMAND_EXECUTABLE".to_string(), value));
-            read_rules.push("(allow file-read* (literal (param \"COMMAND_EXECUTABLE\")))".to_string());
+            read_rules
+                .push("(allow file-read* (literal (param \"COMMAND_EXECUTABLE\")))".to_string());
         }
     }
 
@@ -284,7 +352,7 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     let profile = format!(
         "(version 1)\n(deny default)\n(import \"system.sb\")\n\
          (allow process*)\n(allow sysctl-read)\n(allow signal (target self))\n\
-         (allow file-read-metadata)\n{}\n{}\n{}\n{}\n",
+         {}\n{}\n{}\n{}\n",
         read_rules.join("\n"),
         write_rules.join("\n"),
         deny_rules.join("\n"),
@@ -314,7 +382,10 @@ fn push_subpath_rule(
 fn create_private_home() -> Result<PathBuf, String> {
     let mut random = [0_u8; 16];
     rand::thread_rng().fill_bytes(&mut random);
-    let suffix = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let home = std::env::temp_dir().join(format!("ace-sandbox-home-{suffix}"));
     fs::create_dir(&home)
         .map_err(|error| format!("cannot create private sandbox home: {error}"))?;
@@ -352,10 +423,19 @@ fn canonical_or_missing_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String>
     let mut result = Vec::new();
     for path in paths {
         if !path.is_absolute() {
-            return Err(format!("permission root must be absolute: {}", path.display()));
+            return Err(format!(
+                "permission root must be absolute: {}",
+                path.display()
+            ));
         }
-        if path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
-            return Err(format!("permission root cannot contain '..': {}", path.display()));
+        if path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "permission root cannot contain '..': {}",
+                path.display()
+            ));
         }
         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
         if !result.contains(&canonical) {

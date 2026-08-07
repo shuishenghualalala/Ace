@@ -36,7 +36,7 @@ const capabilities = {
   helper_present: true,
   filesystem_sandbox: true,
   managed_network: true,
-  detail: 'Windows runtime 已就绪',
+  detail: '安全运行组件已就绪',
 };
 
 beforeEach(() => {
@@ -110,7 +110,7 @@ describe('Security Center view', () => {
     expect(onModeChange).toHaveBeenCalledWith('auto_review');
   });
 
-  it('disables Windows setup actions with an explicit reason on unsupported platforms', () => {
+  it('shows built-in Seatbelt status without Windows setup actions on macOS', () => {
     const view = createSecurityCenterView({
       onRefresh: vi.fn(),
       onStrictSecurityChange: vi.fn(),
@@ -133,9 +133,66 @@ describe('Security Center view', () => {
       audits: [],
     });
 
-    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
-      .toBe(true);
-    expect(view.element.textContent).toContain('当前平台不使用 Windows 原生防护');
+    expect(view.element.querySelector('[data-security-action="install"]')).toBeNull();
+    expect(view.element.querySelector('[data-security-action="uninstall"]')).toBeNull();
+    expect(view.element.textContent).toContain('系统内置原生防护');
+    expect(view.element.textContent).toContain('无需手动安装或申请管理员权限');
+    expect(view.element.textContent).not.toMatch(/Windows|Linux|macOS/);
+  });
+
+  it('explains a missing macOS runtime instead of claiming built-in protection is ready', () => {
+    const view = createSecurityCenterView({
+      onRefresh: vi.fn(),
+      onStrictSecurityChange: vi.fn(),
+      onModeChange: vi.fn(),
+      onInstall: vi.fn(),
+      onUninstall: vi.fn(),
+      onRuleToggle: vi.fn(),
+      onRuleDelete: vi.fn(),
+      onAuditExport: vi.fn(),
+      onAuditPurge: vi.fn(),
+    });
+    view.update({
+      loading: false,
+      error: '',
+      workspaceId: 'workspace-a',
+      strictSecurityEnabled: true,
+      mode: 'request_approval',
+      capabilities: { platform: 'darwin', helper_present: false },
+      rules: [],
+      audits: [],
+    });
+
+    expect(view.element.textContent).toContain('未找到 macOS 原生安全运行组件');
+    expect(view.element.textContent).not.toContain('系统内置原生防护，运行组件随应用提供');
+  });
+
+  it('does not treat an unavailable capability response as a missing macOS runtime', () => {
+    Object.assign(window, { Crew: { runtimePlatform: 'darwin' } });
+    const view = createSecurityCenterView({
+      onRefresh: vi.fn(),
+      onStrictSecurityChange: vi.fn(),
+      onModeChange: vi.fn(),
+      onInstall: vi.fn(),
+      onUninstall: vi.fn(),
+      onRuleToggle: vi.fn(),
+      onRuleDelete: vi.fn(),
+      onAuditExport: vi.fn(),
+      onAuditPurge: vi.fn(),
+    });
+    view.update({
+      loading: false,
+      error: '安全能力接口暂时不可用',
+      workspaceId: 'workspace-a',
+      strictSecurityEnabled: true,
+      mode: 'request_approval',
+      capabilities: null,
+      rules: [],
+      audits: [],
+    });
+
+    expect(view.element.textContent).toContain('安全能力检测未返回，请点击刷新重试');
+    expect(view.element.textContent).not.toContain('未找到 macOS 原生安全运行组件');
   });
 
   it('keeps only the applicable Windows setup action enabled', () => {
@@ -165,7 +222,7 @@ describe('Security Center view', () => {
       .toBe(false);
     expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
       .toBe(true);
-    expect(view.element.textContent).not.toContain('当前平台不使用 Windows 原生防护');
+    expect(view.element.textContent).not.toContain('当前设备尚未提供原生防护');
 
     view.update({
       loading: false,
@@ -343,7 +400,7 @@ describe('Security Center integration', () => {
     document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.click();
 
     await vi.waitFor(() => expect(showConfirmDialogMock).toHaveBeenCalledWith(expect.objectContaining({
-      title: '安装安全沙箱',
+      title: '安装安全防护',
       confirmText: '安装并继续',
     })));
     expect(document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
@@ -391,7 +448,7 @@ describe('Security Center integration', () => {
     await initSecurityPage();
 
     expect(document.querySelector('[data-security-center]')).toBe(shell);
-    expect(document.body.textContent).toContain('Windows runtime 已就绪');
+    expect(document.body.textContent).toContain('安全运行组件已就绪');
     expect(document.body.textContent).toContain('git status');
     expect(document.body.textContent).toContain('exec');
   });

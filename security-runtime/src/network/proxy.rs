@@ -77,10 +77,7 @@ impl ProxyHandle {
                 }
             }
         });
-        Ok(Self {
-            address,
-            stopped,
-        })
+        Ok(Self { address, stopped })
     }
 
     pub fn address(&self) -> SocketAddr {

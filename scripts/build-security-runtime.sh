@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 构建 Ace security-runtime（Linux 产物）并落 bin/ + 更新 source-hash 清单。
+# 构建 Ace security-runtime（Linux/macOS 本机产物）并落 bin/ + 更新 source-hash 清单。
 # 触发时机：改了 security-runtime/ 下的 Rust 源码或 Cargo.toml，重跑本脚本再 commit。
-# 产出：security-runtime/bin/ace-security-runtime（ELF）
+# 产出：security-runtime/bin/ace-security-runtime（当前 Unix 平台原生二进制）
 #       security-runtime/bin/runtime-manifest.json（source_hash）
-# 注意：Linux 二进制需在 Linux 机器上构建（或 CI）。Windows 同事请用 .ps1 版本。
+# 注意：产物与构建主机平台绑定。Windows 请使用 .ps1 版本。
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,7 +21,7 @@ echo "[2/3] copied -> $bin_dir/$target"
 
 echo "[3/3] regenerating runtime-manifest.json (source + binary hash)..."
 python3 - "$crate" "$bin_dir" "$bin_dir/$target" <<'PY'
-import hashlib, json, pathlib, sys
+import hashlib, json, pathlib, platform, sys
 crate = pathlib.Path(sys.argv[1]); bin_dir = pathlib.Path(sys.argv[2]); exe = pathlib.Path(sys.argv[3])
 files = sorted(p for p in [*crate.glob("src/**/*"), *crate.glob("tests/**/*.rs"), crate / "Cargo.toml", crate / "Cargo.lock"] if p.is_file())
 h = hashlib.sha256()
@@ -34,7 +34,7 @@ manifest = {
     "binary_sha256": hashlib.sha256(exe.read_bytes()).hexdigest(),
     "binary_name": exe.name,
     "source_files": len(files),
-    "built_for": "linux-native",
+    "built_for": f"{platform.system().lower()}-{platform.machine().lower()}",
     "note": "由 scripts/build-security-runtime.{ps1,sh} 重新生成；勿手改。source_hash 用于检测源码漂移，binary_sha256 用于 Python/Desktop 启动时校验二进制完整性。",
 }
 (bin_dir / "runtime-manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
