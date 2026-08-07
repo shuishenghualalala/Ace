@@ -32,7 +32,7 @@ from crew.team.history_projection import (
     team_tasks_with_plan_projection,
     team_visible_history_items,
 )
-from crew.team.roles import is_crew_builtin_agent
+from crew.team.roles import CREW_BUILTIN_AGENT_ID, is_crew_builtin_agent
 
 log = logging.getLogger(__name__)
 
@@ -774,7 +774,15 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 runtime_id = str(runtime.get("id") or agent.get("runtime_id") or "")
                 model_label = selected.label if selected is not None else selected_model_id
             is_leader = agent_id == leader_agent_id
-            runtime_member_id = "leader" if is_leader else agent_id
+            # API/持久化用外部 agent id；Team 运行时则以 member_id 路由，
+            # 对外部普通成员该 id 优先是 agent_name。忙闲判断必须映射到后者。
+            runtime_member_id = (
+                "leader"
+                if is_leader
+                else CREW_BUILTIN_AGENT_ID
+                if is_crew_builtin_agent(agent_id)
+                else str(team_member.get("agent_name") or agent_id)
+            )
             state = (
                 team_member_state(
                     session_id,

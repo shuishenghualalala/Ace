@@ -389,7 +389,7 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
             "child_id": "task-model::member",
             "parent_session_id": "team-model",
             "owner_account_id": OWNER_A,
-            "member": member["id"],
+            "member": member["name"],
             "agent": object(),
         })
         busy_member = await client.get(
