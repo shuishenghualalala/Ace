@@ -544,6 +544,45 @@ class InProcessTeamManager(TeamManager):
                 if not owner_account_id or owner == owner_account_id
             }
 
+    def team_member_switch_state(
+        self,
+        session_id: str,
+        member_id: str,
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        """Return one member's execution state across a visible Team session.
+
+        A Team turn can create ``::turn::`` sidechain sessions.  Model
+        switching is scoped to the selected member, so an active sibling must
+        not block it; an active invocation of this member must.  The running
+        coroutine already holds its Agent instance, which makes that
+        invocation an immutable model snapshot while a later turn can rebuild
+        the Team from the new binding.
+        """
+        visible_session_id = _visible_session_id(str(session_id or ""))
+        target_member_id = str(member_id or "").strip()
+        if not visible_session_id or not target_member_id:
+            return {"status": "idle", "active_task_count": 0, "active_children": []}
+        prefix = f"{visible_session_id}::turn::"
+        owner = str(owner_account_id or "")
+        with self._active_lock:
+            active_children = [
+                self._public_child(record)
+                for (record_owner, parent_session_id), children in self._active_children.items()
+                if record_owner == owner
+                and (
+                    parent_session_id == visible_session_id
+                    or parent_session_id.startswith(prefix)
+                )
+                for record in children.values()
+                if str(record.get("member") or "") == target_member_id
+            ]
+        return {
+            "status": "running" if active_children else "idle",
+            "active_task_count": len(active_children),
+            "active_children": active_children,
+        }
+
     def _member_ids_for_session(
         self,
         session_id: str,
@@ -7332,7 +7371,11 @@ class InProcessTeamManager(TeamManager):
         log.info("[Team] 已销毁团队 session=%s", session_id)
 
     def drop_session_team(self, session_id: str, owner_account_id: str = "") -> bool:
-        """Evict one idle Team runtime while preserving its persisted plan/history."""
+        """Evict cached Team runtimes while preserving persisted plan/history.
+
+        In-flight turns retain their local Team/Agent references, so eviction
+        only changes the model snapshot used by later turns.
+        """
 
         visible_session_id = _visible_session_id(session_id)
         prefix = f"{visible_session_id}::turn::"

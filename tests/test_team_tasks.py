@@ -3948,6 +3948,34 @@ def test_team_interrupt_only_stops_current_team_session_children():
     assert "owner_account_id" not in remaining[0]
 
 
+def test_team_member_switch_state_is_scoped_to_member_and_visible_session():
+    tm, _ = _team()
+    child = object()
+    tm._mark_child_active({
+        "child_id": "task-a::coder",
+        "parent_session_id": "team-a::turn::req_1",
+        "owner_account_id": "local",
+        "member": "coder",
+        "agent": child,
+    })
+    tm._mark_child_active({
+        "child_id": "task-b::reviewer",
+        "parent_session_id": "team-b",
+        "owner_account_id": "local",
+        "member": "reviewer",
+        "agent": object(),
+    })
+
+    coder = tm.team_member_switch_state("team-a", "coder", owner_account_id="local")
+    reviewer = tm.team_member_switch_state("team-a", "reviewer", owner_account_id="local")
+
+    assert coder["status"] == "running"
+    assert coder["active_task_count"] == 1
+    assert coder["active_children"][0]["member"] == "coder"
+    assert "agent" not in coder["active_children"][0]
+    assert reviewer == {"status": "idle", "active_task_count": 0, "active_children": []}
+
+
 def test_team_interrupt_parent_cancels_sidechain_plan():
     tm, _ = _team()
     session_id = "web_parent::turn::req_1"

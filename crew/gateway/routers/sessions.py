@@ -715,6 +715,9 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             else {}
         )
         leader_agent_id = str(team.get("leader_agent_id") or "")
+        team_member_state = getattr(crew.team, "team_member_switch_state", None)
+        dispatcher_state = dispatcher.status(session_id, owner_account_id=owner)
+        session_is_running = dispatcher_state.get("live") != "idle"
         owner_profiles = crew.owner_model_profiles(owner)
         owner_default_model_id = crew.config.owner_default_model_id(owner)
         members: list[dict[str, Any]] = []
@@ -763,16 +766,36 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     unavailable_reason = None
                 runtime_id = str(runtime.get("id") or agent.get("runtime_id") or "")
                 model_label = selected.label if selected is not None else selected_model_id
+            is_leader = agent_id == leader_agent_id
+            runtime_member_id = "leader" if is_leader else agent_id
+            state = (
+                team_member_state(
+                    session_id,
+                    runtime_member_id,
+                    owner_account_id=owner,
+                )
+                if callable(team_member_state)
+                else {}
+            )
+            active_task_count = int(state.get("active_task_count") or 0)
+            # Leader 的执行由 dispatcher 管理，而 teammate 的执行由
+            # TeamManager 的 child registry 管理；两者合起来才是成员级状态。
+            if is_leader and session_is_running:
+                status = "running"
+                active_task_count = max(1, active_task_count)
+            else:
+                status = str(state.get("status") or "idle")
             members.append({
                 "member_id": agent_id,
                 "member_name": str(team_member.get("agent_name") or agent_id),
-                "is_leader": agent_id == leader_agent_id,
+                "is_leader": is_leader,
                 "runtime_id": runtime_id,
                 "model_profile_id": selected_model_id,
                 "model_label": model_label,
                 "binding_source": str(binding.get("binding_source") or ""),
                 "binding_revision": int(binding.get("revision") or 0),
-                "status": "idle",
+                "status": status,
+                "active_task_count": active_task_count,
                 "model_switchable": switchable,
                 "unavailable_reason": unavailable_reason,
                 "models": models,
@@ -882,7 +905,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     "model_binding_revision": binding_body["model_binding_revision"],
                     **member,
                 })
-            if st.get("live") != "idle":
+            if member.get("status") != "idle":
                 return JSONResponse(
                     {"ok": False, "code": "member_busy", "error": "目标成员运行中，请在任务结束后切换模型"},
                     status_code=409,

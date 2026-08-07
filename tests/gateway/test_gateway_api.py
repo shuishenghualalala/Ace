@@ -265,7 +265,7 @@ async def test_external_session_model_switch_requires_explicit_runtime_capabilit
 
 
 @pytest.mark.asyncio
-async def test_team_session_model_materializes_and_switches_one_member(tmp_path, auth_headers):
+async def test_team_session_model_materializes_and_switches_one_member(tmp_path, auth_headers, monkeypatch):
     db_path = tmp_path / "crew.db"
     crew = build_app(config=Config(db_path=str(db_path), cron_enabled=False), enable_team=True)
     runtime = crew.external_agents.upsert_runtime({
@@ -369,6 +369,40 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
                 "restore_default": True,
             },
         )
+        # Dispatcher 表示 Team 当前仍有一轮在执行；此时只要目标成员空闲，
+        # 仍可更新它下一轮任务的模型。旧的 session-level busy guard 会误拒绝。
+        monkeypatch.setattr(
+            crew.dispatcher,
+            "status",
+            lambda *_args, **_kwargs: {"live": "running"},
+        )
+        member_switched_while_leader_busy = await client.put(
+            "/api/session/team-model/model",
+            json={
+                "member_id": member["id"],
+                "model_profile_id": "model-a",
+                "expected_revision": 3,
+            },
+        )
+        crew.team._mark_child_active({
+            "child_id": "task-model::member",
+            "parent_session_id": "team-model",
+            "owner_account_id": OWNER_A,
+            "member": member["id"],
+            "agent": object(),
+        })
+        busy_member = await client.get(
+            f"/api/session/team-model/model?member_id={member['id']}"
+        )
+        blocked_member_switch = await client.put(
+            "/api/session/team-model/model",
+            json={
+                "member_id": member["id"],
+                "model_profile_id": "model-b",
+                "expected_revision": 4,
+            },
+        )
+        crew.team._mark_child_done("team-model", "task-model::member", OWNER_A)
 
     assert initial.status_code == 200
     initial_body = initial.json()
@@ -394,10 +428,17 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
     assert restored.json()["binding_source"] == "restored_from_agent_default"
     assert restored.json()["model_binding_revision"] == 3
     assert crew.external_agents.get_agent(leader["id"], owner_account_id=OWNER_A)["model"] == "model-b"
+    assert member_switched_while_leader_busy.status_code == 200
+    assert member_switched_while_leader_busy.json()["model_binding_revision"] == 4
+    assert busy_member.status_code == 200
+    assert busy_member.json()["status"] == "running"
+    assert busy_member.json()["active_task_count"] == 1
+    assert blocked_member_switch.status_code == 409
+    assert blocked_member_switch.json()["code"] == "member_busy"
 
     stored = crew.session_store.get_agent_config("team-model", owner_account_id=OWNER_A)
     assert set(stored["team"]["member_model_bindings"]) == {leader["id"], member["id"]}
-    assert stored["team"]["member_model_bindings"][member["id"]]["model_id"] == "model-b"
+    assert stored["team"]["member_model_bindings"][member["id"]]["model_id"] == "model-a"
     with sqlite3.connect(db_path) as conn:
         envelope = json.loads(conn.execute(
             "SELECT profile_json FROM external_agent WHERE id = ?",
