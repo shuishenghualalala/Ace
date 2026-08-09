@@ -22,6 +22,7 @@ from crew.agent.external.runtime_adapter import (
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
 from crew.security.models import AdditionalPermissionProfile
+from crew.security.runtime_client import NativeRuntimeError
 from crew.state.logging import get_logger
 
 
@@ -322,7 +323,7 @@ class _JsonRpcClient:
                     await self._handle_line(line)
             if buffer:
                 await self._handle_line(bytes(buffer))
-        except AcpAdapterError as exc:
+        except (AcpAdapterError, NativeRuntimeError) as exc:
             for fut in self.pending.values():
                 if not fut.done():
                     fut.set_exception(exc)
@@ -1110,7 +1111,9 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
                     session_resumed=bool(session_state["resumed"]),
                     session_reset=bool(session_state["reset"]),
                 )
-        except AcpAdapterError as exc:
+        except (AcpAdapterError, NativeRuntimeError) as exc:
+            if isinstance(exc, NativeRuntimeError):
+                exc = AcpAdapterError(str(exc))
             stderr_tail = "\n".join(stderr_lines[-8:]).strip()
             if stderr_tail and stderr_tail not in str(exc):
                 raise AcpAdapterError(f"{exc}\nstderr: {stderr_tail}") from exc

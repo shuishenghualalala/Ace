@@ -14,7 +14,7 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 
 | 能力 | Windows | Linux | macOS |
 |------|---------|-------|-------|
-| 文件系统隔离 | 专用技术账户 + ACL lease（capability SID） | bubblewrap（`--ro-bind /` + 选择性可写根） | Seatbelt profile + 私有临时 HOME |
+| 文件系统隔离 | 专用技术账户 + ACL lease（capability SID） | bubblewrap（`--ro-bind /` + 选择性可写根） | Seatbelt profile + 默认私有临时 HOME；仅在显式授予用户 Home 的 managed profile 下复用真实 HOME |
 | 受限身份执行 | `CreateProcessWithLogonW` 切到沙箱账户 + restricted token | 沙箱内以非 root 运行；seccomp 限 syscall | `/usr/bin/sandbox-exec` |
 | 进程树回收 | Kill-On-Close Job Object（父进程退出即杀全部子进程） | 进程组 + bwrap 退出回收 | 受控子进程回收 |
 | 托管网络 | WFP 过滤器：offline 账户全断；online 账户仅放行 loopback 代理端口 | 网络命名空间 + 用户态代理 + seccomp | 用户态代理 + Seatbelt 网络规则 |
@@ -89,6 +89,20 @@ Crew 的 `crew-interaction` MCP proxy 属于交互式会话的受控回调：MCP
 Runtime 另外接收一个由 Gateway 生成的精确 loopback `host:port` 网络权限。
 该权限不等于开放任意 localhost，也不等于开放公网；没有这个系统权限时，
 `ask_followup_question` 会安全失败。
+
+### 1.4 外援凭据与 HOME 边界
+
+macOS Seatbelt 不会默认把宿主用户的 `HOME` 暴露给外援。Native Runtime
+为每个子进程创建私有临时 HOME，避免外援顺着 `~` 读取宿主配置、密钥和登录态。
+当用户明确选择包含用户 Home 的 managed 权限模式（当前 `full_access`）时，
+runtime 才把真实 HOME 作为子进程 HOME；此时它仍运行在 Seatbelt profile 内，
+`.git`、`.agents`、`.crew` 等不可升级的保护目录继续由 deny 规则覆盖。
+`TMPDIR` 始终使用独立临时目录，不会因为复用 HOME 而改变临时文件边界。
+
+这保证了已登录的 Kimi CLI 能在用户明确授予 Home 访问时读取
+`~/.kimi-code`，同时不会让 `request_approval` / `auto_review` 静默获得用户 Home。
+后两种模式若没有环境变量形式的 provider 凭据，Kimi 会返回认证错误；ACP 适配器会
+保留该原始错误，不再把它误报成 `native runtime closed the protocol stream`。
 
 `run` 请求字段：`command[]`, `cwd`, `writable_roots[]`, `readable_roots[]`,
 `denied_roots[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
@@ -335,7 +349,10 @@ security-runtime/
 - **2026-08-08**：补齐 Crew `ask_followup_question` 的 `crew-interaction` MCP 回调；父外援环境
   不再携带 ACE/沙箱控制变量，但 MCP 声明中的短期 binding 环境仍保留，并只为当前 Gateway
   loopback 地址追加受控网络权限。
-- **2026-08-09**：补齐跨平台 native runtime 构建链路：新增 macOS Seatbelt 平台说明、按主机
+- **2026-08-09**：修复 macOS managed 外援的 HOME 边界：仅在权限 profile 明确覆盖用户 Home
+  时复用真实 HOME，TMPDIR 仍保持私有临时目录；Kimi ACP 能读取已登录状态，且 ACP reader
+  透传 native runtime EOF 的原始错误，避免把认证失败误报为协议流关闭。补齐跨平台 native runtime
+  构建链路：新增 macOS Seatbelt 平台说明、按主机
   自动选择 Rust target 的构建脚本，以及同时兼容 Gateway 完整性检查和 Desktop staging
   校验的 manifest。macOS 不再错误寻找 Windows `.exe` 制品；managed 外援仍保持 native
   runtime 缺失即拒绝启动，不回退宿主直启。

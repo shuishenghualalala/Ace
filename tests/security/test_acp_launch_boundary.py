@@ -27,6 +27,7 @@ from crew.security.models import (
     PermissionProfile,
     PermissionProfileKind,
 )
+from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
 
 
 @pytest.mark.asyncio
@@ -90,6 +91,14 @@ class _FakeManagedAcpSession:
         await self.close()
 
 
+class _BrokenManagedAcpSession(_FakeManagedAcpSession):
+    async def read_chunk(self) -> bytes | None:
+        raise NativeRuntimeError(
+            RuntimeErrorCode.RUNTIME_CRASHED,
+            "native runtime closed the protocol stream",
+        )
+
+
 @pytest.mark.asyncio
 async def test_managed_acp_uses_native_broker_and_preserves_stdio_protocol(
     tmp_path,
@@ -131,6 +140,43 @@ async def test_managed_acp_uses_native_broker_and_preserves_stdio_protocol(
     assert [event.text for event in events if event.kind == "text"] == ["managed ok"]
     assert captured["request"].command[0] == str(Path(sys.executable).resolve())
     assert captured["request"].permission_profile.kind is PermissionProfileKind.MANAGED
+
+
+@pytest.mark.asyncio
+async def test_managed_acp_preserves_native_stream_failure_detail(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crew.agent.external.acp_adapter import AcpAdapterConfig, AcpAdapterError, stream_acp_events
+    from crew.security.broker import SecurityExecutionBroker
+
+    session = _BrokenManagedAcpSession()
+
+    async def open_interactive(self, request):
+        return session
+
+    monkeypatch.setattr(SecurityExecutionBroker, "open_interactive", open_interactive)
+    launch = ProcessLaunch(
+        PermissionProfile(
+            PermissionProfileKind.MANAGED,
+            filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
+        ),
+        ("native-runtime",),
+    )
+    token = current_process_launch.set(launch)
+    try:
+        with pytest.raises(AcpAdapterError, match="native runtime closed the protocol stream"):
+            async for _ in stream_acp_events(
+                "hello",
+                AcpAdapterConfig(
+                    executable_path=sys.executable,
+                    cwd=str(tmp_path),
+                    timeout=2,
+                ),
+            ):
+                pass
+    finally:
+        current_process_launch.reset(token)
 
 
 @pytest.mark.asyncio

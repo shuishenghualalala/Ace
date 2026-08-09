@@ -48,6 +48,7 @@ struct SandboxPlan {
     parameters: Vec<(String, String)>,
     cwd: PathBuf,
     home: PathBuf,
+    private_home: PathBuf,
 }
 
 pub fn run(
@@ -94,7 +95,7 @@ fn run_with_control(
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("HOME", &plan.home)
-        .env("TMPDIR", &plan.home)
+        .env("TMPDIR", &plan.private_home)
         .env("ACE_SANDBOX", "macos-seatbelt")
         .envs(&request.env_overrides)
         .stdin(if request.stdin.is_some() || control_rx.is_some() {
@@ -183,21 +184,21 @@ fn run_with_control(
             let _ = child.wait();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
-            cleanup_home(&plan.home);
+            cleanup_home(&plan.private_home);
             return Err(failure.into_error());
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(error) => {
-                cleanup_home(&plan.home);
+                cleanup_home(&plan.private_home);
                 return Err(unavailable(format!("cannot wait for Seatbelt command: {error}")));
             }
         }
     };
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
-    cleanup_home(&plan.home);
+    cleanup_home(&plan.private_home);
     if let Ok(failure) = failure_receiver.try_recv() {
         return Err(failure.into_error());
     }
@@ -217,7 +218,12 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     }
     let readable = canonical_roots(&request.readable_roots)?;
     let denied = canonical_or_missing_roots(&request.denied_roots)?;
-    let home = create_private_home()?;
+    let private_home = create_private_home()?;
+    let home = select_execution_home(
+        &writable,
+        &private_home,
+        std::env::var_os("HOME").map(PathBuf::from),
+    );
 
     let mut parameters = Vec::new();
     let mut read_rules = Vec::new();
@@ -266,7 +272,7 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         &mut read_rules,
         "PRIVATE_HOME",
         0,
-        &path_string(&home)?,
+        &path_string(&private_home)?,
         "allow file-read*",
     );
     push_subpath_rule(
@@ -274,7 +280,7 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         &mut write_rules,
         "PRIVATE_HOME_WRITE",
         0,
-        &path_string(&home)?,
+        &path_string(&private_home)?,
         "allow file-write*",
     );
 
@@ -325,7 +331,29 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         parameters,
         cwd,
         home,
+        private_home,
     })
+}
+
+fn select_execution_home(
+    writable: &[PathBuf],
+    private_home: &Path,
+    host_home: Option<PathBuf>,
+) -> PathBuf {
+    let Some(host_home) = host_home else {
+        return private_home.to_path_buf();
+    };
+    let host_home = host_home
+        .canonicalize()
+        .unwrap_or(host_home);
+    if writable
+        .iter()
+        .any(|root| host_home == *root || host_home.starts_with(root))
+    {
+        host_home
+    } else {
+        private_home.to_path_buf()
+    }
 }
 
 fn push_subpath_rule(
@@ -493,7 +521,7 @@ fn network_error(error: crate::network::policy::NetworkError) -> MacOsRuntimeErr
 
 #[cfg(test)]
 mod tests {
-    use super::{build_plan, MacOsRunRequest};
+    use super::{build_plan, select_execution_home, MacOsRunRequest};
     use std::collections::BTreeMap;
 
     fn request(workspace: &std::path::Path) -> MacOsRunRequest {
@@ -541,5 +569,27 @@ mod tests {
         value.allow_local_binding = true;
         let plan = build_plan(&value, None).unwrap();
         assert!(plan.profile.contains("allow network-bind"));
+    }
+
+    #[test]
+    fn host_home_is_used_only_when_an_explicit_writable_root_covers_it() {
+        let private_home = std::path::Path::new("/private/tmp/ace-private-home");
+        let host_home = std::path::Path::new("/Users/yun");
+        assert_eq!(
+            select_execution_home(
+                &[host_home.to_path_buf()],
+                private_home,
+                Some(host_home.to_path_buf()),
+            ),
+            host_home
+        );
+        assert_eq!(
+            select_execution_home(
+                &[std::path::PathBuf::from("/Users/yun/workspace")],
+                private_home,
+                Some(host_home.to_path_buf()),
+            ),
+            private_home
+        );
     }
 }
