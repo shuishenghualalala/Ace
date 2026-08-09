@@ -462,6 +462,51 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
     assert calls == [False, True]
 
 
+@pytest.mark.asyncio
+async def test_capabilities_live_probe_supports_macos_seatbelt(api, tmp_path, monkeypatch):
+    helper = tmp_path / "ace-security-runtime"
+    helper.write_bytes(b"fake helper")
+    calls: list[dict] = []
+
+    class FakeRuntimeClient:
+        def __init__(self, helper_argv):
+            assert helper_argv == (str(helper),)
+
+        async def execute(self, **kwargs):
+            calls.append(kwargs)
+            network_enabled = kwargs["network_enabled"]
+            return SimpleNamespace(
+                exit_code=1,
+                capabilities=RuntimeCapabilities(
+                    backend="macos_seatbelt",
+                    filesystem_sandbox=True,
+                    process_tree_cleanup=True,
+                    managed_network=network_enabled,
+                    local_binding_control=network_enabled,
+                ),
+            )
+
+    monkeypatch.setattr("crew.gateway.routers.security.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "crew.security.launch.packaged_runtime_argv",
+        lambda: (str(helper),),
+    )
+    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda: False)
+    monkeypatch.setattr("crew.gateway.routers.security.NativeRuntimeClient", FakeRuntimeClient)
+
+    path = "/api/security/capabilities"
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    assert response.json()["platform"] == "darwin"
+    assert response.json()["filesystem_sandbox"] is True
+    assert response.json()["managed_network"] is True
+    assert [call["network_enabled"] for call in calls] == [False, True]
+    assert all(call["command"][:2] == ("/bin/sh", "-c") for call in calls)
+
+
 def test_proof_one_time_nonce_rejects_replay(tmp_path, monkeypatch):
     """H-19: a verified Desktop proof is consumed; the same proof cannot be replayed
     within its TTL even for an identical request."""

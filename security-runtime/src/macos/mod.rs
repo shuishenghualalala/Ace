@@ -4,15 +4,18 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 use rand::RngCore;
 
-use crate::protocol::{RuntimeCapabilities, RuntimeControl, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
+use crate::protocol::{
+    RuntimeCapabilities, RuntimeControl, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES,
+};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const SEATBELT_PREFLIGHT_PROFILE: &str = "(version 1)\n(allow process*)\n";
 const PLATFORM_READ_ROOTS: &[&str] = &[
     "/System",
     "/Library",
@@ -71,9 +74,7 @@ fn run_with_control(
     control_rx: Option<Receiver<RuntimeControl>>,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), MacOsRuntimeError> {
-    if !Path::new(SANDBOX_EXEC).is_file() {
-        return Err(unavailable("macOS Seatbelt launcher is unavailable"));
-    }
+    ensure_sandbox_exec_available()?;
     let policy = crate::network::NetworkPolicy::new(request.network_rules.clone())
         .map_err(network_error)?;
     let proxy = if request.network_enabled {
@@ -205,6 +206,37 @@ fn run_with_control(
     sender
         .send(RuntimeMessage::Completed(status.code().unwrap_or(-1)))
         .map_err(|_| unavailable("protocol receiver disconnected"))
+}
+
+fn ensure_sandbox_exec_available() -> Result<(), MacOsRuntimeError> {
+    static PREFLIGHT: OnceLock<Result<(), String>> = OnceLock::new();
+    match PREFLIGHT.get_or_init(|| {
+        if !Path::new(SANDBOX_EXEC).is_file() {
+            return Err("macOS Seatbelt launcher is unavailable".to_string());
+        }
+        let output = Command::new(SANDBOX_EXEC)
+            .arg("-p")
+            .arg(SEATBELT_PREFLIGHT_PROFILE)
+            .arg("/usr/bin/true")
+            .output()
+            .map_err(|error| format!("failed to start macOS Seatbelt preflight: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let status = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_string(), |code| code.to_string());
+        Err(if stderr.is_empty() {
+            format!("macOS Seatbelt preflight failed with exit code {status}")
+        } else {
+            format!("macOS Seatbelt preflight failed with exit code {status}: {stderr}")
+        })
+    }) {
+        Ok(()) => Ok(()),
+        Err(message) => Err(unavailable(message.clone())),
+    }
 }
 
 fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<SandboxPlan, String> {

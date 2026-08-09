@@ -14,7 +14,7 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 
 | 能力 | Windows | Linux | macOS |
 |------|---------|-------|-------|
-| 文件系统隔离 | 专用技术账户 + ACL lease（capability SID） | bubblewrap（`--ro-bind /` + 选择性可写根） | Seatbelt profile + 默认私有临时 HOME；仅在显式授予用户 Home 的 managed profile 下复用真实 HOME |
+| 文件系统隔离 | 专用技术账户 + ACL lease（capability SID） | bubblewrap（`--ro-bind /` + 选择性可写根） | Seatbelt profile + 默认私有临时 HOME；仅在显式授予用户 Home 的 managed profile 下复用真实 HOME；启动前先做通用 Seatbelt preflight |
 | 受限身份执行 | `CreateProcessWithLogonW` 切到沙箱账户 + restricted token | 沙箱内以非 root 运行；seccomp 限 syscall | `/usr/bin/sandbox-exec` |
 | 进程树回收 | Kill-On-Close Job Object（父进程退出即杀全部子进程） | 进程组 + bwrap 退出回收 | 受控子进程回收 |
 | 托管网络 | WFP 过滤器：offline 账户全断；online 账户仅放行 loopback 代理端口 | 网络命名空间 + 用户态代理 + seccomp | 用户态代理 + Seatbelt 网络规则 |
@@ -219,6 +219,11 @@ macOS 上执行。
   优先 `ACE_SECURITY_RUNTIME` 环境变量（绝对路径），否则回落到 `<repo>/security-runtime/bin/<name>`。
 - **桌面 dev**（`desktop/src/main/index.ts` `security:setup`）：同上回落，`repoRoot()/security-runtime/bin/`。
 - **打包态**：从 `process.resourcesPath/` 取随包 exe + 打包 manifest 哈希校验（`packagedSecurityRuntimeEnv`）。
+- **macOS 能力探测**：Gateway 的 `/api/security/capabilities` 会对 Darwin 执行与 Linux
+  相同的最小文件边界 canary；如果当前宿主上下文不能应用 Seatbelt，结果保持
+  `filesystem_sandbox=false`，不会把“平台支持但运行时不可用”误报成“不支持”。Native
+  Runtime 在处理实际命令前还会执行一次不含用户路径的 Seatbelt preflight，并将系统返回的
+  失败原因以 `sandbox_unavailable` 透传给 ACP/CLI。
 
 ### 4.2 漂移检测（防"改了源码忘重 build"）
 
@@ -356,6 +361,9 @@ security-runtime/
   自动选择 Rust target 的构建脚本，以及同时兼容 Gateway 完整性检查和 Desktop staging
   校验的 manifest。macOS 不再错误寻找 Windows `.exe` 制品；managed 外援仍保持 native
   runtime 缺失即拒绝启动，不回退宿主直启。
+- **2026-08-09**：补齐 macOS Seatbelt 的通用可用性探测：Gateway 能对 Darwin 执行 live
+  capability probe；Native Runtime 在发送 `started` 前验证 Seatbelt 能否真正应用，失败时
+  返回带系统诊断的 `sandbox_unavailable`，避免 ACP/CLI 只看到 protocol stream EOF。
 - **2026-07-26**：协议升级为 v2 流式事件；新增一次性 stdin/EOF、受限子进程环境变量、
   全局序列、started/stdout/stderr/completed/error、严格帧与输出边界，以及 Windows
   runner/Linux bwrap 的实时输出和整树清理。Windows Rust 测试与 Linux 目标交叉编译已通过；

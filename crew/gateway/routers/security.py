@@ -144,7 +144,7 @@ async def _probe_runtime(
         host_secret.write_text("probe", encoding="ascii")
         if system == "windows":
             command = ("cmd.exe", "/d", "/c", "type", str(host_secret))
-        elif system == "linux":
+        elif system in {"linux", "darwin"}:
             command = ("/bin/sh", "-c", 'test -r "$1"', "ace-probe", str(host_secret))
         else:
             return None
@@ -171,7 +171,7 @@ async def _live_filesystem_runtime() -> tuple[RuntimeCapabilities | None, bool, 
     helper_present = Path(helper_argv[0]).is_file()
     stale = runtime_source_stale()
     system = platform.system().lower()
-    if not helper_present or stale or system not in {"windows", "linux"}:
+    if not helper_present or stale or system not in {"windows", "linux", "darwin"}:
         return None, helper_present, stale, system
     return (
         await _probe_runtime(helper_argv, system=system, network_enabled=False),

@@ -5,16 +5,16 @@
   "arch": "arm64",
   "generated_by": "security-runtime/scripts/build-security-runtime.py",
   "binary_name": "ace-security-runtime",
-  "binary_sha256": "0f7e2d5f4666e276ac66aade67f602941e07aed4434b77615656e021041e5a76",
-  "source_hash": "500fd71400a7cc82b3e834051a53963d48fe174b960afa879999f5954fb2185e",
+  "binary_sha256": "c7a4ec5f35fe638c5415313b244bd3162fbc80a462a96b0d68ee49433e248556",
+  "source_hash": "73c181d25865ae7355ef54f5d36a088096a22e05fb91cf31b7dbffad5471b929",
   "source_files": 35,
   "built_for": "aarch64-apple-darwin",
   "files": [
     {
       "name": "ace-security-runtime",
-      "sha256": "0f7e2d5f4666e276ac66aade67f602941e07aed4434b77615656e021041e5a76",
-      "size": 2600960,
-      "source_hash": "500fd71400a7cc82b3e834051a53963d48fe174b960afa879999f5954fb2185e"
+      "sha256": "c7a4ec5f35fe638c5415313b244bd3162fbc80a462a96b0d68ee49433e248556",
+      "size": 2619552,
+      "source_hash": "73c181d25865ae7355ef54f5d36a088096a22e05fb91cf31b7dbffad5471b929"
     },
     {
       "name": "ace-security-runtime.exe",
