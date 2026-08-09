@@ -15,7 +15,8 @@ use crate::protocol::{
 };
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const SEATBELT_PREFLIGHT_PROFILE: &str = "(version 1)\n(allow process*)\n";
+const SEATBELT_PREFLIGHT_PROFILE: &str =
+    "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process*)\n";
 const PLATFORM_READ_ROOTS: &[&str] = &[
     "/System",
     "/Library",

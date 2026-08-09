@@ -222,8 +222,8 @@ macOS 上执行。
 - **macOS 能力探测**：Gateway 的 `/api/security/capabilities` 会对 Darwin 执行与 Linux
   相同的最小文件边界 canary；如果当前宿主上下文不能应用 Seatbelt，结果保持
   `filesystem_sandbox=false`，不会把“平台支持但运行时不可用”误报成“不支持”。Native
-  Runtime 在处理实际命令前还会执行一次不含用户路径的 Seatbelt preflight，并将系统返回的
-  失败原因以 `sandbox_unavailable` 透传给 ACP/CLI。
+  Runtime 在处理实际命令前还会执行一次复用相同 `deny default` / `system.sb` 基础的不含用户路径
+  Seatbelt preflight，并将系统返回的失败原因以 `sandbox_unavailable` 透传给 ACP/CLI。
 
 ### 4.2 漂移检测（防"改了源码忘重 build"）
 
@@ -363,7 +363,8 @@ security-runtime/
   runtime 缺失即拒绝启动，不回退宿主直启。
 - **2026-08-09**：补齐 macOS Seatbelt 的通用可用性探测：Gateway 能对 Darwin 执行 live
   capability probe；Native Runtime 在发送 `started` 前验证 Seatbelt 能否真正应用，失败时
-  返回带系统诊断的 `sandbox_unavailable`，避免 ACP/CLI 只看到 protocol stream EOF。
+  返回带系统诊断的 `sandbox_unavailable`，避免 ACP/CLI 只看到 protocol stream EOF；preflight
+  与实际 managed profile 共用 `deny default` / `system.sb` 基础，避免探针自身偏离真实边界。
 - **2026-07-26**：协议升级为 v2 流式事件；新增一次性 stdin/EOF、受限子进程环境变量、
   全局序列、started/stdout/stderr/completed/error、严格帧与输出边界，以及 Windows
   runner/Linux bwrap 的实时输出和整树清理。Windows Rust 测试与 Linux 目标交叉编译已通过；
