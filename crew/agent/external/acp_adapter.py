@@ -16,6 +16,7 @@ from crew.agent.external.runtime_adapter import (
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
+    build_external_runtime_home_files,
     build_external_runtime_env,
     build_managed_external_runtime_env,
     register_runtime_adapter,
@@ -68,6 +69,7 @@ class AcpAdapterConfig:
     system_prompt: str = ""
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
     additional_permissions: AdditionalPermissionProfile = field(
         default_factory=AdditionalPermissionProfile
     )
@@ -858,6 +860,7 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
         except OSError as exc:
             raise AcpAdapterError(f"找不到 ACP 可执行文件: {config.executable_path}") from exc
         managed_env = build_managed_external_runtime_env(config.custom_env)
+        projected_home_files = build_external_runtime_home_files(config.credential_home_paths)
         native_session = await SecurityExecutionBroker(
             NativeRuntimeClient(launch.helper_argv)
         ).open_interactive(
@@ -867,6 +870,7 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
                 permission_profile=launch.profile,
                 additional_permissions=config.additional_permissions,
                 trusted_readable_roots=launch.trusted_readable_roots,
+                home_files=projected_home_files,
                 env_overrides=managed_env,
                 timeout_seconds=config.timeout,
                 max_output_bytes=ACP_STREAM_LIMIT_BYTES,
@@ -1224,6 +1228,7 @@ class AcpRuntimeAdapter:
                 system_prompt=request.system_prompt,
                 custom_args=request.custom_args,
                 custom_env=request.custom_env,
+                credential_home_paths=request.credential_home_paths,
                 additional_permissions=request.additional_permissions,
                 mcp_servers=[
                     server.stdio_config(env_as_list=True)

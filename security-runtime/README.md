@@ -99,14 +99,30 @@ runtime 才把真实 HOME 作为子进程 HOME；此时它仍运行在 Seatbelt 
 `.git`、`.agents`、`.crew` 等不可升级的保护目录继续由 deny 规则覆盖。
 `TMPDIR` 始终使用独立临时目录，不会因为复用 HOME 而改变临时文件边界。
 
-这保证了已登录的 Kimi CLI 能在用户明确授予 Home 访问时读取
-`~/.kimi-code`，同时不会让 `request_approval` / `auto_review` 静默获得用户 Home。
-后两种模式若没有环境变量形式的 provider 凭据，Kimi 会返回认证错误；ACP 适配器会
-保留该原始错误，不再把它误报成 `native runtime closed the protocol stream`。
+Crew Home 内的数据库、认证密钥、配置凭据和日志仍由不可升级的精确 deny 根保护；
+任务 workspace 不再被其父目录 deny 覆盖。受控模式下，运行时描述可以声明宿主 HOME
+下的相对配置文件；宿主侧只读取这些已声明且存在的普通文件，内置 descriptor 当前声明
+Kimi、Codex、Hermes、Claude Code 的默认布局，Native Runtime 通过
+`home_files` 写入一次性的私有 HOME，进程结束即清理。该投影不接受绝对路径、`..`、
+目录复制或整个 HOME，因此已登录 Kimi、已配置 Hermes 可以继续工作，但不会让外援
+获得宿主 HOME 的通用读取权。未声明配置的外援仍按自身认证错误返回，ACP 适配器不会
+把它误报成 `native runtime closed the protocol stream`。
 
 `run` 请求字段：`command[]`, `cwd`, `writable_roots[]`, `readable_roots[]`,
 `denied_roots[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
-`max_output_bytes`, `stdin_b64?`, `env_overrides?`。
+`max_output_bytes`, `stdin_b64?`, `env_overrides?`, `home_files?`。
+
+`home_files` 的 key 必须是私有 HOME 下的相对 POSIX 路径，value 是 Native Runtime
+协议内部的 base64 文件内容；最多 64 个文件、单文件 1 MiB、总内容 2 MiB。宿主侧
+声明路径最多读取 64 个普通文件，单文件 1 MiB、总内容 2 MiB，并拒绝符号链接解析到
+HOME 外的目标。文件按私有配置权限写入，不进入日志或模型上下文。
+
+外部 ACP/CLI 使用托管模式时，Broker 会对宿主已注册的脚本入口做最小运行时依赖解析：
+仅静态读取入口 shebang、Python `pyvenv.cfg` 与 editable-install 元数据，把 venv、基础
+解释器动态库目录和明确声明的包目录作为只读根。工作区内脚本不会触发这项推导，原生二进制
+也不会因此获得额外目录；不会自动把 `HOME`、工作区父目录或任意安装目录加入可读范围。
+因此 Hermes 这类 venv/可编辑安装的 ACP 可以启动，同时仍由 `cwd` 与 `writable_roots`
+共同决定可写边界。
 
 固定边界：请求帧 2 MiB、响应帧 128 KiB、单输出 chunk 64 KiB、stdin 1 MiB、
 环境变量名值合计 256 KiB、默认 stdout+stderr 总量 2 MiB。stdin 只写一次并立即关闭；
@@ -348,6 +364,10 @@ security-runtime/
 
 ## 变更记录
 
+- **2026-08-09**：补齐 managed 外援脚本运行时依赖边界：Security Broker 静态解析入口 shebang、Python `pyvenv.cfg` 与 editable-install 元数据，只把 venv、基础环境动态库目录和明确声明的包目录加入只读根；工作区脚本不触发推导，原生二进制不额外放行，也不开放用户 Home。Hermes venv ACP 可在受控 cwd 下启动，同时保留 Native Runtime 的显式可写根校验。
+- **2026-08-09**：收窄 Crew Home 的保护范围：不再把包含 `accounts/*/task_workspaces` 的整个父目录作为不可升级 deny，改为保护数据库、认证密钥、配置凭据和日志等精确路径，修复 macOS Seatbelt 下外援进程在 `os.getcwd()` 阶段被父级 deny 拒绝的问题。
+- **2026-08-09**：修复 managed 外援的工作目录安全上下文断点：未绑定本地目录的工作空间现在由 Gateway 与 SingleAgent 共同使用 Owner 私有 task workspace 作为显式 `writable_root`；外部 session 的隔离子目录因此可以安全进入 Native Runtime。Team 子任务只从父 `ProcessLaunch` 继承覆盖当前 cwd 的最具体可写根，找不到匹配根仍 fail closed；不按 Kimi/Hermes 或其他 provider 增加分支。
+- **2026-08-09**：补齐受控外援的凭据/模型配置投影：运行时描述以相对路径声明需要的宿主配置，统一 RuntimeAdapter 读取最小文件集合并通过 Native Runtime `home_files` 临时写入私有 HOME；接入 Kimi、Codex、Hermes 与 Claude Code 的跨平台文件配置，没有 Provider 分支、没有整个 HOME 放行，Python/Rust/三平台后端和边界测试同步更新。Claude Code 在 macOS 默认使用系统 Keychain，文件投影不绕过 Keychain 权限。
 - **2026-08-07**：新增通用 managed interactive stdio transport；当前 ACP 在不接管其内部协议
   的前提下，通过 Native Runtime 维持双向 stdin/stdout，CLI 可复用同一接口；同时加入
   `stdin_bidirectional` 能力校验、Team 安全启动上下文继承，以及 Native Runtime 控制环境变量保护。

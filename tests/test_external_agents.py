@@ -61,6 +61,7 @@ from crew.agent.external.runtime_adapter import (
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
     build_external_runtime_env,
+    build_external_runtime_home_files,
     runtime_adapter_ids,
 )
 from crew.agent.external.store import ExternalAgentStore
@@ -115,6 +116,19 @@ def test_external_runtime_env_inherits_owner_settings_and_blocks_crew_credential
     assert "CREW_INTERNAL_SECRET" not in env
     assert "CREW_ENV_FILE" not in env
     assert "CREW_RUNTIME_SECRET" not in env
+
+
+def test_external_runtime_projects_only_declared_home_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".kimi-code" / "oauth").mkdir(parents=True)
+    (tmp_path / ".kimi-code" / "oauth" / "kimi-code").write_text("token", encoding="utf-8")
+    (tmp_path / "unlisted-secret").write_text("must-not-project", encoding="utf-8")
+
+    projected = build_external_runtime_home_files(
+        (".kimi-code/oauth/kimi-code", "../escape")
+    )
+
+    assert projected == {".kimi-code/oauth/kimi-code": b"token"}
 
 
 @pytest.mark.asyncio
@@ -1129,11 +1143,20 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
     assert descriptors["kimi"].launch_args == ("acp",)
     assert descriptors["codex"].protocol == "cli"
     assert descriptors["codex"].launch_args == ()
+    assert descriptors["codex"].credential_home_paths == (
+        ".codex/auth.json",
+        ".codex/config.toml",
+    )
     assert descriptors["claude"].commands == ("claude-agent-acp",)
     assert descriptors["claude"].launch_args == ()
     assert descriptors["hermes"].commands == ("hermes",)
     assert descriptors["hermes"].launch_args == ("acp",)
     assert dict(descriptors["hermes"].probe_env) == {"HERMES_YOLO_MODE": "1"}
+    assert descriptors["hermes"].credential_home_paths == (
+        ".hermes/.env",
+        ".hermes/config.yaml",
+        ".hermes/auth.json",
+    )
     assert {
         provider: descriptor.launch_args
         for provider, descriptor in descriptors.items()
@@ -1153,7 +1176,19 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
     }
     assert descriptors["claude-code"].commands == ("claude",)
     assert descriptors["claude-code"].adapter_id == "claude-stream-json"
+    assert descriptors["claude-code"].credential_home_paths == (
+        ".claude/.credentials.json",
+        ".claude.json",
+    )
     assert descriptors["codex"].adapter_id == "codex-app-server"
+    assert runtime_registry.resolve_runtime_credential_home_paths(
+        provider="codex",
+        metadata={"descriptor_id": "builtin:codex"},
+    ) == (".codex/auth.json", ".codex/config.toml")
+    assert runtime_registry.resolve_runtime_credential_home_paths(
+        provider="codex",
+        metadata={"credential_home_paths": []},
+    ) == ()
     assert {
         provider: descriptors[provider].display_badge
         for provider in ("kimi", "codex", "hermes", "claude-code")

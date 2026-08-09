@@ -35,7 +35,10 @@ from crew.agent.external.runtime_adapter import (
     get_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import canonical_runtime_model_id
-from crew.agent.external.runtime_registry import resolve_runtime_adapter_id
+from crew.agent.external.runtime_registry import (
+    resolve_runtime_adapter_id,
+    resolve_runtime_credential_home_paths,
+)
 from crew.agent.file_changes import (
     TurnFileChangeTracker,
     persist_file_changes,
@@ -944,6 +947,10 @@ class ExternalExecutor(AgentExecutor):
         prompt = ctx.query
         protocol = str(runtime.get("protocol") or "").lower()
         runtime_metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
+        credential_home_paths = resolve_runtime_credential_home_paths(
+            provider=provider,
+            metadata=runtime_metadata,
+        )
         adapter_id = resolve_runtime_adapter_id(
             provider=provider,
             protocol=protocol,
@@ -1171,6 +1178,7 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=adapter_system_prompt,
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        credential_home_paths=credential_home_paths,
                         additional_permissions=additional_permissions or AdditionalPermissionProfile(),
                         mcp_servers=mcp_servers,
                         dynamic_tools=dynamic_tools,
@@ -1281,6 +1289,7 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=_external_system_prompt(agent, runtime, effective_model),
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        credential_home_paths=credential_home_paths,
                         timeout=self.config.timeout,
                     )
                 )

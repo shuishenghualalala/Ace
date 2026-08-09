@@ -24,6 +24,9 @@ _MAX_PROTOCOL_FRAME = 128 * 1024
 _MAX_OUTPUT_CHUNK = 64 * 1024
 _MAX_STDIN_BYTES = 1024 * 1024
 _MAX_ENV_BYTES = 256 * 1024
+_MAX_HOME_FILE_BYTES = 1024 * 1024
+_MAX_HOME_TOTAL_BYTES = 2 * 1024 * 1024
+_MAX_HOME_FILES = 64
 _MAX_HELPER_STDERR = 64 * 1024
 _ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _RESERVED_ENV_NAMES = frozenset(
@@ -390,6 +393,7 @@ class NativeRuntimeClient:
         timeout: float = 30.0,
         max_output_bytes: int = 2 * 1024 * 1024,
         stdin: bytes | None = None,
+        home_files: Mapping[str, bytes] | None = None,
         env_overrides: Mapping[str, str] | None = None,
         on_started: Callable[[int | None], None] | None = None,
         on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
@@ -397,7 +401,9 @@ class NativeRuntimeClient:
         """Execute a command through the helper; never fall back to a host spawn."""
         if not command:
             raise ValueError("command cannot be empty")
-        validated_env = _validate_request_inputs(stdin, env_overrides)
+        validated_env, encoded_home_files = _validate_request_inputs(
+            stdin, env_overrides, home_files
+        )
         token = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(24)
         payload = {
@@ -412,6 +418,7 @@ class NativeRuntimeClient:
             "allow_local_binding": allow_local_binding,
             "max_output_bytes": max_output_bytes,
             "env_overrides": validated_env,
+            "home_files": encoded_home_files,
         }
         if stdin is not None:
             payload["stdin_b64"] = base64.b64encode(stdin).decode("ascii")
@@ -481,12 +488,15 @@ class NativeRuntimeClient:
         allow_local_binding: bool = False,
         timeout: float = 120.0,
         max_output_bytes: int = 64 * 1024 * 1024,
+        home_files: Mapping[str, bytes] | None = None,
         env_overrides: Mapping[str, str] | None = None,
     ) -> NativeInteractiveSession:
         """Open one managed child whose stdin/stdout remain bidirectional."""
         if not command:
             raise ValueError("command cannot be empty")
-        validated_env = _validate_request_inputs(None, env_overrides)
+        validated_env, encoded_home_files = _validate_request_inputs(
+            None, env_overrides, home_files
+        )
         token = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(24)
         payload = {
@@ -501,6 +511,7 @@ class NativeRuntimeClient:
             "allow_local_binding": allow_local_binding,
             "max_output_bytes": max_output_bytes,
             "env_overrides": validated_env,
+            "home_files": encoded_home_files,
         }
         request_frame = json.dumps(
             {
@@ -862,7 +873,8 @@ def _optional_int(value: Any) -> int | None:
 def _validate_request_inputs(
     stdin: bytes | None,
     env_overrides: Mapping[str, str] | None,
-) -> dict[str, str]:
+    home_files: Mapping[str, bytes] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
     if stdin is not None and (not isinstance(stdin, bytes) or len(stdin) > _MAX_STDIN_BYTES):
         raise ValueError("native runtime stdin exceeds the size limit")
 
@@ -882,7 +894,27 @@ def _validate_request_inputs(
         encoded_size += len(name.encode("utf-8")) + len(value.encode("utf-8"))
         if encoded_size > _MAX_ENV_BYTES:
             raise ValueError("native runtime environment exceeds the size limit")
-    return validated
+    encoded_home_files: dict[str, str] = {}
+    total_home_bytes = 0
+    for relative_path, content in dict(home_files or {}).items():
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or relative_path.startswith(("/", "\\"))
+            or ":" in relative_path
+            or "\\" in relative_path
+            or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+        ):
+            raise ValueError("native runtime projected HOME path must be relative")
+        if not isinstance(content, bytes) or len(content) > _MAX_HOME_FILE_BYTES:
+            raise ValueError("native runtime projected HOME file exceeds the size limit")
+        if len(encoded_home_files) >= _MAX_HOME_FILES:
+            raise ValueError("native runtime projected HOME has too many files")
+        total_home_bytes += len(content)
+        if total_home_bytes > _MAX_HOME_TOTAL_BYTES:
+            raise ValueError("native runtime projected HOME exceeds the size limit")
+        encoded_home_files[relative_path] = base64.b64encode(content).decode("ascii")
+    return validated, encoded_home_files
 
 
 def _safe_callback(callback: Callable[[Any], None] | None, value: Any) -> None:

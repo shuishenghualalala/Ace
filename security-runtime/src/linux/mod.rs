@@ -26,6 +26,7 @@ pub struct LinuxRunRequest {
     pub max_output_bytes: usize,
     pub stdin: Option<Vec<u8>>,
     pub env_overrides: BTreeMap<String, String>,
+    pub home_files: BTreeMap<String, Vec<u8>>,
 }
 
 pub struct LinuxRuntimeError {

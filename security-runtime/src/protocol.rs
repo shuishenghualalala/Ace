@@ -8,6 +8,9 @@ pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_STDIN_BYTES: usize = 1024 * 1024;
 pub const MAX_ENV_BYTES: usize = 256 * 1024;
+pub const MAX_HOME_FILE_BYTES: usize = 1024 * 1024;
+pub const MAX_HOME_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_HOME_FILES: usize = 64;
 pub const MAX_RESPONSE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
@@ -90,6 +93,8 @@ pub enum RuntimeRequest {
         stdin_b64: Option<String>,
         #[serde(default)]
         env_overrides: BTreeMap<String, String>,
+        #[serde(default)]
+        home_files: BTreeMap<String, String>,
     },
     InteractiveOpen {
         command: Vec<String>,
@@ -110,6 +115,8 @@ pub enum RuntimeRequest {
         max_output_bytes: usize,
         #[serde(default)]
         env_overrides: BTreeMap<String, String>,
+        #[serde(default)]
+        home_files: BTreeMap<String, String>,
     },
     InteractiveWrite {
         data_b64: String,
@@ -194,6 +201,7 @@ pub enum RuntimeMessage {
 pub struct ProcessInput {
     pub stdin: Option<Vec<u8>>,
     pub env_overrides: BTreeMap<String, String>,
+    pub home_files: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,6 +242,14 @@ fn default_escalatable() -> bool {
 pub fn validate_process_inputs(
     stdin_b64: Option<&str>,
     env_overrides: &BTreeMap<String, String>,
+) -> Result<ProcessInput, InputValidationError> {
+    validate_process_inputs_with_home_files(stdin_b64, env_overrides, &BTreeMap::new())
+}
+
+pub fn validate_process_inputs_with_home_files(
+    stdin_b64: Option<&str>,
+    env_overrides: &BTreeMap<String, String>,
+    home_files: &BTreeMap<String, String>,
 ) -> Result<ProcessInput, InputValidationError> {
     let stdin = match stdin_b64 {
         Some(encoded) => {
@@ -289,9 +305,56 @@ pub fn validate_process_inputs(
         }
     }
 
+    if home_files.len() > MAX_HOME_FILES {
+        return Err(InputValidationError {
+            code: "sandbox_denied",
+            message: "projected HOME has too many files",
+        });
+    }
+    let mut decoded_home_files = BTreeMap::new();
+    let mut total_home_bytes = 0usize;
+    for (relative_path, encoded) in home_files {
+        let components: Vec<&str> = relative_path.split('/').collect();
+        if relative_path.is_empty()
+            || relative_path.starts_with('/')
+            || relative_path.contains('\\')
+            || relative_path.contains(':')
+            || components.iter().any(|part| part.is_empty() || *part == "." || *part == "..")
+        {
+            return Err(InputValidationError {
+                code: "sandbox_denied",
+                message: "projected HOME path must be relative",
+            });
+        }
+        let decoded = BASE64_STANDARD.decode(encoded).map_err(|_| InputValidationError {
+            code: "sandbox_denied",
+            message: "invalid projected HOME file encoding",
+        })?;
+        if decoded.len() > MAX_HOME_FILE_BYTES {
+            return Err(InputValidationError {
+                code: "sandbox_denied",
+                message: "projected HOME file exceeds the size limit",
+            });
+        }
+        total_home_bytes = total_home_bytes
+            .checked_add(decoded.len())
+            .ok_or(InputValidationError {
+                code: "sandbox_denied",
+                message: "projected HOME exceeds the size limit",
+            })?;
+        if total_home_bytes > MAX_HOME_TOTAL_BYTES {
+            return Err(InputValidationError {
+                code: "sandbox_denied",
+                message: "projected HOME exceeds the size limit",
+            });
+        }
+        decoded_home_files.insert(relative_path.clone(), decoded);
+    }
+
     Ok(ProcessInput {
         stdin,
         env_overrides: env_overrides.clone(),
+        home_files: decoded_home_files,
     })
 }
 

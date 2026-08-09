@@ -22,7 +22,7 @@ use std::thread;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use protocol::{
-    validate_process_inputs, ReadyFrame, RequestEnvelope, RuntimeControl, RuntimeEvent,
+    validate_process_inputs_with_home_files, ReadyFrame, RequestEnvelope, RuntimeControl, RuntimeEvent,
     RuntimeMessage, RuntimeRequest, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
     MAX_STDIN_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
 };
@@ -459,7 +459,23 @@ fn execute_interactive_request(
             allow_local_binding,
             max_output_bytes,
             env_overrides,
+            home_files,
         } => {
+            let process_input = validate_process_inputs_with_home_files(
+                None,
+                &env_overrides,
+                &home_files,
+            );
+            let process_input = match process_input {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sender.send(RuntimeMessage::Error {
+                        code: error.code,
+                        message: error.message.to_string(),
+                    });
+                    return;
+                }
+            };
             if command.is_empty() {
                 Err(RuntimeFailure {
                     code: "sandbox_denied",
@@ -480,7 +496,8 @@ fn execute_interactive_request(
                         proxy_socket_dir: None,
                         max_output_bytes,
                         stdin: None,
-                        env_overrides,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
                     };
                     linux::run_interactive(request, control_rx, &sender).map_err(|error| {
                         RuntimeFailure {
@@ -502,7 +519,8 @@ fn execute_interactive_request(
                         allow_local_binding,
                         max_output_bytes,
                         stdin: None,
-                        env_overrides,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
                     };
                     macos::run_interactive(request, control_rx, &sender).map_err(|error| {
                         RuntimeFailure {
@@ -524,7 +542,8 @@ fn execute_interactive_request(
                         allow_local_binding,
                         max_output_bytes,
                         stdin: None,
-                        env_overrides,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
                     };
                     windows::run_interactive(request, control_rx, &sender).map_err(|error| {
                         RuntimeFailure {
@@ -599,8 +618,13 @@ fn handle_request(
             max_output_bytes,
             stdin_b64,
             env_overrides,
+            home_files,
         } => {
-            let process_input = validate_process_inputs(stdin_b64.as_deref(), &env_overrides)
+            let process_input = validate_process_inputs_with_home_files(
+                stdin_b64.as_deref(),
+                &env_overrides,
+                &home_files,
+            )
                 .map_err(|error| RuntimeFailure {
                     code: error.code,
                     message: error.message.to_string(),
@@ -626,6 +650,7 @@ fn handle_request(
                     max_output_bytes,
                     stdin: process_input.stdin,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 linux::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,
@@ -646,6 +671,7 @@ fn handle_request(
                     max_output_bytes,
                     stdin: process_input.stdin,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 macos::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,
@@ -686,6 +712,7 @@ fn handle_request(
                     max_output_bytes,
                     stdin: process_input.stdin,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 windows::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,

@@ -3,7 +3,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, RawHandle};
@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use rand::RngCore;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
@@ -47,6 +48,7 @@ struct RunnerRequest {
     allow_local_binding: bool,
     stdin_b64: Option<String>,
     env_overrides: BTreeMap<String, String>,
+    home_files: BTreeMap<String, String>,
     interactive: bool,
 }
 
@@ -95,6 +97,11 @@ pub fn run_via_account(
             .as_ref()
             .map(|value| BASE64_STANDARD.encode(value)),
         env_overrides: request.env_overrides.clone(),
+        home_files: request
+            .home_files
+            .iter()
+            .map(|(path, content)| (path.clone(), BASE64_STANDARD.encode(content)))
+            .collect(),
         interactive: control_rx.is_some(),
     };
     let executable = std::env::current_exe()
@@ -315,6 +322,7 @@ fn run_restricted<W: Write, R: BufRead + Send + 'static>(
     reader: R,
 ) -> Result<(), String> {
     let token = create_restricted_token(&request.capability_sids)?;
+    let staged_home = stage_home_files(&request.home_files)?;
     let child_stdin = Pipe::new(/*parent_reads*/ false)?;
     let child_stdout = Pipe::new(/*parent_reads*/ true)?;
     let child_stderr = Pipe::new(/*parent_reads*/ true)?;
@@ -337,10 +345,19 @@ fn run_restricted<W: Write, R: BufRead + Send + 'static>(
                 .to_string(),
         );
     }
-    let mut environment = environment_block(restricted_environment(
+    let mut child_environment = restricted_environment(
         request.network_enabled,
         request.env_overrides,
-    ));
+    );
+    if let Some(home) = &staged_home {
+        child_environment.insert("HOME".to_string(), home.0.to_string_lossy().to_string());
+        child_environment.insert("USERPROFILE".to_string(), home.0.to_string_lossy().to_string());
+        child_environment.insert(
+            "APPDATA".to_string(),
+            home.0.join("AppData").join("Roaming").to_string_lossy().to_string(),
+        );
+    }
+    let mut environment = environment_block(child_environment);
     let flags = CREATE_NO_WINDOW
         | CREATE_SUSPENDED
         | CREATE_UNICODE_ENVIRONMENT
@@ -491,6 +508,51 @@ fn run_restricted<W: Write, R: BufRead + Send + 'static>(
         return writer.write(RunnerMessage::Error(error));
     }
     writer.write(RunnerMessage::Completed(exit_code as i32))
+}
+
+struct StagedHome(PathBuf);
+
+impl Drop for StagedHome {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn stage_home_files(files: &BTreeMap<String, String>) -> Result<Option<StagedHome>, String> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut suffix = [0_u8; 16];
+    rand::thread_rng().fill_bytes(&mut suffix);
+    let name = suffix
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let root = std::env::temp_dir().join(format!("ace-sandbox-home-files-{name}"));
+    fs::create_dir(&root).map_err(|error| format!("cannot create projected HOME: {error}"))?;
+    for (relative_path, encoded) in files {
+        let components: Vec<&str> = relative_path.split('/').collect();
+        if relative_path.is_empty()
+            || relative_path.starts_with('/')
+            || relative_path.contains('\\')
+            || relative_path.contains(':')
+            || components.iter().any(|part| part.is_empty() || *part == "." || *part == "..")
+        {
+            let _ = fs::remove_dir_all(&root);
+            return Err("projected HOME path must be relative".to_string());
+        }
+        let destination = root.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create projected HOME directory: {error}"))?;
+        }
+        let content = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|_| "invalid projected HOME file encoding".to_string())?;
+        fs::write(&destination, content)
+            .map_err(|error| format!("cannot stage projected HOME file: {error}"))?;
+    }
+    Ok(Some(StagedHome(root)))
 }
 
 fn forward_runner_output(

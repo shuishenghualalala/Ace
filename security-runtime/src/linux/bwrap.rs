@@ -1,9 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::fs;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use rand::RngCore;
 
 use super::LinuxRunRequest;
 
@@ -22,6 +24,7 @@ const PLATFORM_READ_ROOTS: &[&str] = &[
 pub struct BwrapPlan {
     pub args: Vec<String>,
     synthetic_targets: Vec<PathBuf>,
+    home_staging: Option<PathBuf>,
 }
 
 impl Drop for BwrapPlan {
@@ -30,6 +33,9 @@ impl Drop for BwrapPlan {
         // still-empty synthetic directories; concurrent real content is preserved.
         for target in self.synthetic_targets.iter().rev() {
             let _ = std::fs::remove_dir(target);
+        }
+        if let Some(home_staging) = &self.home_staging {
+            let _ = fs::remove_dir_all(home_staging);
         }
     }
 }
@@ -49,6 +55,11 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
     reject_overlapping_roots(&writable, &readable)?;
 
     let mut synthetic_targets = Vec::new();
+    let home_staging = if request.home_files.is_empty() {
+        None
+    } else {
+        Some(stage_home_files(&request.home_files)?)
+    };
     let mut args = vec![
         "--new-session".to_string(),
         "--die-with-parent".to_string(),
@@ -92,6 +103,13 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
     for root in &writable {
         append_bind(&mut args, &mut created_target_dirs, "--bind", root)?;
         visible_roots.push(root.clone());
+    }
+    if let Some(home_staging) = &home_staging {
+        args.extend([
+            "--ro-bind".to_string(),
+            path_string(home_staging)?,
+            "/tmp/ace-home".to_string(),
+        ]);
     }
 
     // The helper re-enters itself inside the namespace before executing the
@@ -219,7 +237,47 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
     Ok(BwrapPlan {
         args,
         synthetic_targets,
+        home_staging,
     })
+}
+
+fn stage_home_files(files: &BTreeMap<String, Vec<u8>>) -> Result<PathBuf, String> {
+    let mut suffix = [0_u8; 16];
+    rand::thread_rng().fill_bytes(&mut suffix);
+    let name = suffix
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let root = std::env::temp_dir().join(format!("ace-sandbox-home-files-{name}"));
+    fs::create_dir(&root).map_err(|error| format!("cannot create projected HOME: {error}"))?;
+    for (relative_path, content) in files {
+        let destination = root.join(relative_path);
+        if destination.components().any(|component| {
+            matches!(component, std::path::Component::ParentDir)
+        }) {
+            let _ = fs::remove_dir_all(&root);
+            return Err("projected HOME path escapes the staging root".to_string());
+        }
+        if let Some(parent) = destination.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                let _ = fs::remove_dir_all(&root);
+                return Err(format!("cannot create projected HOME directory: {error}"));
+            }
+        }
+        if let Err(error) = fs::write(&destination, content) {
+            let _ = fs::remove_dir_all(&root);
+            return Err(format!("cannot stage projected HOME file: {error}"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(error) = fs::set_permissions(&destination, fs::Permissions::from_mode(0o600)) {
+                let _ = fs::remove_dir_all(&root);
+                return Err(format!("cannot restrict projected HOME file: {error}"));
+            }
+        }
+    }
+    Ok(root)
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf, String> {
@@ -336,6 +394,7 @@ mod tests {
             max_output_bytes: 1024,
             stdin: None,
             env_overrides: Default::default(),
+            home_files: Default::default(),
         };
         let plan = build_args(&request).unwrap();
         assert!(plan.args.iter().any(|arg| arg == "--unshare-net"));
@@ -363,6 +422,7 @@ mod tests {
             max_output_bytes: 1024,
             stdin: None,
             env_overrides: Default::default(),
+            home_files: Default::default(),
         };
 
         let plan = build_args(&request).unwrap();
@@ -397,6 +457,7 @@ mod tests {
             max_output_bytes: 1024,
             stdin: None,
             env_overrides: Default::default(),
+            home_files: Default::default(),
         };
 
         let error = build_args(&request)

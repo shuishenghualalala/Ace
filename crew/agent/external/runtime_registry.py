@@ -26,6 +26,7 @@ class RuntimeDescriptor:
     adapter_id: str = ""
     launch_args: tuple[str, ...] = ()
     probe_env: tuple[tuple[str, str], ...] = ()
+    credential_home_paths: tuple[str, ...] = ()
     command_aliases: tuple[str, ...] = ()
     source: str = "builtin"
 
@@ -54,6 +55,10 @@ BUILTIN_RUNTIME_DESCRIPTORS: tuple[RuntimeDescriptor, ...] = (
         protocol="acp",
         adapter_id="acp-stdio",
         launch_args=("acp",),
+        credential_home_paths=(
+            ".kimi-code/oauth/kimi-code",
+            ".kimi-code/credentials/kimi-code.json",
+        ),
     ),
     RuntimeDescriptor(
         provider="codex",
@@ -63,6 +68,7 @@ BUILTIN_RUNTIME_DESCRIPTORS: tuple[RuntimeDescriptor, ...] = (
         command="codex",
         protocol="cli",
         adapter_id="codex-app-server",
+        credential_home_paths=(".codex/auth.json", ".codex/config.toml"),
     ),
     RuntimeDescriptor(
         provider="claude",
@@ -83,6 +89,11 @@ BUILTIN_RUNTIME_DESCRIPTORS: tuple[RuntimeDescriptor, ...] = (
         adapter_id="acp-stdio",
         launch_args=("acp",),
         probe_env=(("HERMES_YOLO_MODE", "1"),),
+        credential_home_paths=(
+            ".hermes/.env",
+            ".hermes/config.yaml",
+            ".hermes/auth.json",
+        ),
     ),
     RuntimeDescriptor(
         provider="kiro",
@@ -200,6 +211,7 @@ BUILTIN_RUNTIME_DESCRIPTORS: tuple[RuntimeDescriptor, ...] = (
         command="claude",
         protocol="cli",
         adapter_id="claude-stream-json",
+        credential_home_paths=(".claude/.credentials.json", ".claude.json"),
     ),
 )
 
@@ -216,6 +228,52 @@ def builtin_descriptor(provider: str) -> RuntimeDescriptor:
         for descriptor in BUILTIN_RUNTIME_DESCRIPTORS
         if descriptor.provider == provider
     )
+
+
+def resolve_runtime_credential_home_paths(
+    *,
+    provider: str,
+    metadata: dict[str, object] | None = None,
+) -> tuple[str, ...]:
+    """Resolve declared credential paths for persisted and newly detected runtimes.
+
+    Newly detected rows carry the declaration in metadata. Older persisted rows
+    may not have that field, so a known built-in descriptor remains the
+    compatibility source. Custom runtimes never inherit a built-in path list.
+    """
+
+    runtime_metadata = metadata or {}
+    if "credential_home_paths" in runtime_metadata:
+        raw_paths = runtime_metadata.get("credential_home_paths")
+        if isinstance(raw_paths, (list, tuple)):
+            return tuple(
+                str(item).strip()
+                for item in raw_paths
+                if isinstance(item, str) and str(item).strip()
+            )
+        return ()
+
+    descriptor_id = str(runtime_metadata.get("descriptor_id") or "").strip()
+    if not descriptor_id:
+        descriptor_source = str(
+            runtime_metadata.get("runtime_descriptor_source") or ""
+        ).strip()
+        if descriptor_source:
+            descriptor_id = f"{descriptor_source}:{provider}"
+    descriptor = next(
+        (
+            item
+            for item in BUILTIN_RUNTIME_DESCRIPTORS
+            if descriptor_id and item.descriptor_id == descriptor_id
+        ),
+        None,
+    )
+    if descriptor is None and not descriptor_id:
+        descriptor = next(
+            (item for item in BUILTIN_RUNTIME_DESCRIPTORS if item.provider == provider),
+            None,
+        )
+    return descriptor.credential_home_paths if descriptor is not None else ()
 
 
 def _normalize_display_badge(value: object) -> str:

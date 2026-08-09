@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Literal, Protocol
 
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
@@ -30,6 +31,9 @@ _NATIVE_RUNTIME_CONTROLLED_ENV_NAMES = frozenset(
         "OLDPWD",
     }
 )
+_MAX_PROJECTED_HOME_FILE_BYTES = 1024 * 1024
+_MAX_PROJECTED_HOME_TOTAL_BYTES = 2 * 1024 * 1024
+_MAX_PROJECTED_HOME_FILES = 64
 
 
 def _is_protected_external_env(key: str) -> bool:
@@ -80,6 +84,52 @@ def build_managed_external_runtime_env(
         for key, value in env.items()
         if key.upper() not in _NATIVE_RUNTIME_CONTROLLED_ENV_NAMES
     }
+
+
+def build_external_runtime_home_files(
+    declared_paths: tuple[str, ...] | list[str] | None,
+) -> dict[str, bytes]:
+    """Read only descriptor-declared host-home files for managed projection.
+
+    The descriptor is trusted application metadata, not model input. Paths are
+    still validated and must remain relative to the host user's HOME. Missing
+    files are skipped so an agent can report its normal authentication/setup
+    guidance; no arbitrary HOME traversal or directory copy is permitted.
+    """
+
+    if not declared_paths:
+        return {}
+    host_home = Path.home().expanduser().resolve(strict=True)
+    projected: dict[str, bytes] = {}
+    total = 0
+    for raw_path in tuple(dict.fromkeys(str(value).strip() for value in declared_paths)):
+        if not raw_path or len(projected) >= _MAX_PROJECTED_HOME_FILES:
+            break
+        relative = PurePosixPath(raw_path)
+        if (
+            relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or "\\" in raw_path
+            or ":" in raw_path
+        ):
+            continue
+        source = host_home.joinpath(*relative.parts)
+        try:
+            resolved = source.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if resolved != source or host_home not in resolved.parents or not resolved.is_file():
+            continue
+        try:
+            size = resolved.stat().st_size
+            if size > _MAX_PROJECTED_HOME_FILE_BYTES or total + size > _MAX_PROJECTED_HOME_TOTAL_BYTES:
+                continue
+            content = resolved.read_bytes()
+        except OSError:
+            continue
+        projected[raw_path] = content
+        total += len(content)
+    return projected
 
 
 class RuntimeResumeRejected(RuntimeError):
@@ -182,6 +232,7 @@ class RuntimeExecutionRequest:
     launch_args: list[str] = field(default_factory=list)
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
     mcp_servers: list[RuntimeMcpServer] = field(default_factory=list)
     additional_permissions: AdditionalPermissionProfile = field(
         default_factory=AdditionalPermissionProfile

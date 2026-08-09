@@ -93,6 +93,7 @@ fn probe_acl_and_token(state_dir: &Path, account: &str) -> Result<(), String> {
         max_output_bytes: 4096,
         stdin: None,
         env_overrides: Default::default(),
+        home_files: Default::default(),
     };
     let lease = AclLease::prepare(&probe_state, account, &request)?;
     let capability_sids = lease.capability_sids().to_vec();

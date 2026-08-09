@@ -60,12 +60,15 @@ if request["request"].get("op") == "classify_shell":
     raise SystemExit
 if mode == "crash":
     raise SystemExit(4)
+payload = request["request"]
 if mode == "assert-request":
-    payload = request["request"]
     if base64.b64decode(payload["stdin_b64"]) != b"\x00prompt\xff":
         raise SystemExit(5)
     if payload["env_overrides"] != {"CODEX_API_KEY": "secret"}:
         raise SystemExit(6)
+if mode == "assert-home-files":
+    if payload["home_files"] != {".agent/auth": base64.b64encode(b"token").decode()}:
+        raise SystemExit(9)
 if mode == "assert-no-stdin" and "stdin_b64" in request["request"]:
     raise SystemExit(7)
 if mode == "assert-empty-stdin" and request["request"].get("stdin_b64") != "":
@@ -425,6 +428,17 @@ async def test_request_carries_binary_stdin_and_environment_overrides(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_request_carries_projected_home_files(tmp_path):
+    result = await _helper(tmp_path, "assert-home-files").execute(
+        command=("ignored",),
+        cwd=tmp_path,
+        home_files={".agent/auth": b"token"},
+        timeout=1,
+    )
+    assert result.stdout == "sandboxed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "stdin"),
     [("assert-no-stdin", None), ("assert-empty-stdin", b"")],
@@ -610,6 +624,87 @@ async def test_broker_preserves_read_write_deny_and_network_semantics(tmp_path):
     ]
     assert runtime.kwargs["denied_roots"] == [tmp_path / "deny"]
     assert runtime.kwargs["network_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_broker_derives_readonly_roots_for_host_python_venv_entrypoint(tmp_path):
+    class RecordingRuntime:
+        async def execute(self, **kwargs):
+            self.kwargs = kwargs
+            return "result"
+
+    environment = tmp_path / "external-agent" / "venv"
+    interpreter = environment / "bin" / "python"
+    entrypoint = environment / "bin" / "external-agent"
+    base_python = tmp_path / "python-base" / "bin" / "python3.12"
+    base_stdlib = tmp_path / "python-base" / "lib" / "python3.12"
+    interpreter.parent.mkdir(parents=True)
+    base_python.parent.mkdir(parents=True)
+    base_stdlib.mkdir(parents=True)
+    base_python.write_text("", encoding="utf-8")
+    interpreter.symlink_to(base_python)
+    (environment / "pyvenv.cfg").write_text(
+        f"home = {base_python.parent}\n", encoding="utf-8"
+    )
+    entrypoint.write_text(f"#!{interpreter}\n", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),),
+    )
+
+    await broker.execute(
+        ExecutionRequest(
+            command=(str(entrypoint), "--version"),
+            cwd=workspace,
+            permission_profile=profile,
+        )
+    )
+
+    assert runtime.kwargs["readable_roots"] == [
+        environment.resolve(),
+        (tmp_path / "python-base" / "lib").resolve(),
+        base_stdlib.resolve(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_broker_does_not_derive_venv_roots_for_workspace_script(tmp_path):
+    workspace = tmp_path / "workspace"
+    environment = tmp_path / "external-agent" / "venv"
+    workspace.mkdir()
+    (environment / "bin").mkdir(parents=True)
+    (environment / "bin" / "python").write_text("", encoding="utf-8")
+    (environment / "pyvenv.cfg").write_text(
+        f"home = {tmp_path / 'python-base' / 'bin'}\n", encoding="utf-8"
+    )
+    entrypoint = workspace / "entrypoint"
+    entrypoint.write_text(f"#!{environment / 'bin' / 'python'}\n", encoding="utf-8")
+
+    class RecordingRuntime:
+        async def execute(self, **kwargs):
+            self.kwargs = kwargs
+            return "result"
+
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),),
+    )
+    await broker.execute(
+        ExecutionRequest(
+            command=(str(entrypoint),),
+            cwd=workspace,
+            permission_profile=profile,
+        )
+    )
+
+    assert runtime.kwargs["readable_roots"] == []
 
 
 @pytest.mark.asyncio

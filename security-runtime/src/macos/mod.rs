@@ -40,6 +40,7 @@ pub struct MacOsRunRequest {
     pub max_output_bytes: usize,
     pub stdin: Option<Vec<u8>>,
     pub env_overrides: BTreeMap<String, String>,
+    pub home_files: BTreeMap<String, Vec<u8>>,
 }
 
 pub struct MacOsRuntimeError {
@@ -252,6 +253,10 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     let readable = canonical_roots(&request.readable_roots)?;
     let denied = canonical_or_missing_roots(&request.denied_roots)?;
     let private_home = create_private_home()?;
+    if let Err(error) = stage_home_files(&private_home, &request.home_files) {
+        cleanup_home(&private_home);
+        return Err(error);
+    }
     let home = select_execution_home(
         &writable,
         &private_home,
@@ -416,6 +421,30 @@ fn cleanup_home(home: &Path) {
     let _ = fs::remove_dir_all(home);
 }
 
+fn stage_home_files(home: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+    for (relative_path, content) in files {
+        let destination = home.join(relative_path);
+        if destination.components().any(|component| {
+            matches!(component, std::path::Component::ParentDir)
+        }) {
+            return Err("projected HOME path escapes the private home".to_string());
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create projected HOME directory: {error}"))?;
+        }
+        fs::write(&destination, content)
+            .map_err(|error| format!("cannot stage projected HOME file: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("cannot restrict projected HOME file: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn canonical_directory(path: &Path) -> Result<PathBuf, String> {
     let canonical = path
         .canonicalize()
@@ -570,6 +599,7 @@ mod tests {
             max_output_bytes: 1024,
             stdin: None,
             env_overrides: BTreeMap::new(),
+            home_files: BTreeMap::new(),
         }
     }
 
