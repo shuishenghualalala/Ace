@@ -1,0 +1,65 @@
+name: security-macos
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native-security:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+          components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: uv sync --extra dev
+      - run: python scripts/audit_runtime_npm.py
+      - run: >-
+          cargo build --manifest-path security-runtime/Cargo.toml --release --locked
+          --target aarch64-apple-darwin
+      - run: cargo check --manifest-path security-runtime/Cargo.toml --all-targets --locked
+      - run: cargo clippy --manifest-path security-runtime/Cargo.toml --all-targets --locked -- -D warnings
+      - run: >-
+          cargo test --manifest-path security-runtime/Cargo.toml --release --locked
+          --target aarch64-apple-darwin
+        env:
+          ACE_REQUIRE_NATIVE_TESTS: '1'
+      - run: uv run pytest tests/security -q
+      - run: >-
+          python tests/security/security_matrix.py
+          --platform macos
+          --runtime security-runtime/target/aarch64-apple-darwin/release/ace-security-runtime
+        env:
+          ACE_REQUIRE_NATIVE_SECURITY: '1'
+      - run: >-
+          node desktop/scripts/prepare-security-runtime.mjs
+          --runtime security-runtime/target/aarch64-apple-darwin/release/ace-security-runtime
+          --output desktop/security-runtime-bin
+      - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
+      - name: Bind macOS evidence to the tested release artifact
+        env:
+          EVIDENCE_COMMIT: ${{ github.sha }}
+          EVIDENCE_REPOSITORY: ${{ github.repository }}
+          EVIDENCE_WORKFLOW_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python scripts/write_security_runtime_evidence.py
+          --repo-root .
+          --runtime security-runtime/target/aarch64-apple-darwin/release/ace-security-runtime
+          --staged-runtime desktop/security-runtime-bin/ace-security-runtime
+          --output security-macos-evidence.json
+          --platform macos
+          --target-triple aarch64-apple-darwin
+          --repository "$EVIDENCE_REPOSITORY"
+          --commit "$EVIDENCE_COMMIT"
+          --workflow-run "$EVIDENCE_WORKFLOW_RUN"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-macos-evidence
+          path: security-macos-evidence.json

@@ -335,8 +335,9 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
     A missing binary is NOT raised here--the subsequent spawn's FileNotFoundError
     already maps to SANDBOX_UNAVAILABLE, and tests assert that spawn path is
     reached. A missing manifest is allowed in an unbuilt development tree.
-    Once a manifest is present it must be schema 2, name the selected helper,
-    and include its binary digest; otherwise the managed path fails closed.
+    Once a manifest is present it must be schema 2 and include the selected
+    helper's binary digest; otherwise the managed path fails closed. A source
+    tree may carry one entry per platform in the same manifest.
     """
     path = Path(helper_path)
     if not path.is_file():
@@ -346,10 +347,13 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         return
     if manifest.get("schema") != 2:
         raise HelperIntegrityError("native security runtime manifest schema is unsupported")
-    expected_name = str(manifest.get("binary_name", "")).strip()
-    if expected_name != path.name:
-        raise HelperIntegrityError("native security runtime manifest names a different binary")
-    expected = str(manifest.get("binary_sha256", "")).strip()
+    expected = ""
+    for entry in manifest.get("files", []):
+        if isinstance(entry, dict) and str(entry.get("name", "")).strip() == path.name:
+            expected = str(entry.get("sha256", "")).strip()
+            break
+    if not expected and str(manifest.get("binary_name", "")).strip() == path.name:
+        expected = str(manifest.get("binary_sha256", "")).strip()
     if not expected:
         raise HelperIntegrityError("native security runtime manifest is missing binary digest")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -375,7 +379,14 @@ def runtime_source_stale() -> bool | None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    expected = str(manifest.get("source_hash", ""))
+    runtime_name = "ace-security-runtime.exe" if os.name == "nt" else "ace-security-runtime"
+    expected = ""
+    for entry in manifest.get("files", []):
+        if isinstance(entry, dict) and entry.get("name") == runtime_name:
+            expected = str(entry.get("source_hash", ""))
+            break
+    if not expected and manifest.get("binary_name") == runtime_name:
+        expected = str(manifest.get("source_hash", ""))
     if not expected:
         return None
     files = sorted(

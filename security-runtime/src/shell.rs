@@ -1,6 +1,7 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+#[cfg(windows)]
 use std::process::{Command, Stdio};
 use tree_sitter::{Node, Parser, Tree};
 use tree_sitter_bash::LANGUAGE as BASH;

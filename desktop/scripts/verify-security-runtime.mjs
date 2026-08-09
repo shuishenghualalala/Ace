@@ -11,16 +11,19 @@ if (manifest.schema !== 2 || !Array.isArray(manifest.files)) throw new Error('in
 const expectedRuntime = process.platform === 'win32'
   ? 'ace-security-runtime.exe'
   : 'ace-security-runtime';
-if (!manifest.files.some((item) => item.name === expectedRuntime)) throw new Error(`required ${expectedRuntime} missing from manifest`);
-if (manifest.binary_name !== expectedRuntime || typeof manifest.binary_sha256 !== 'string') {
-  throw new Error('runtime manifest binary integrity metadata missing');
+const expectedRecord = manifest.files.find((item) => item.name === expectedRuntime);
+if (!expectedRecord || typeof expectedRecord.sha256 !== 'string') throw new Error(`required ${expectedRuntime} missing from manifest`);
+if (manifest.binary_name === expectedRuntime
+  && typeof manifest.binary_sha256 === 'string'
+  && manifest.binary_sha256 !== expectedRecord.sha256) {
+  throw new Error(`runtime manifest binary metadata mismatch: ${expectedRuntime}`);
 }
 for (const item of manifest.files) {
   const file = resolve(root, item.name);
   if (!existsSync(file) || !statSync(file).isFile()) throw new Error(`security runtime file missing: ${item.name}`);
   const digest = createHash('sha256').update(readFileSync(file)).digest('hex');
   if (digest !== item.sha256) throw new Error(`security runtime digest mismatch: ${item.name}`);
-  if (item.name === expectedRuntime && digest !== manifest.binary_sha256) {
+  if (item.name === expectedRuntime && digest !== expectedRecord.sha256) {
     throw new Error(`security runtime binary metadata mismatch: ${item.name}`);
   }
 }

@@ -13,7 +13,7 @@ mod windows;
 
 use std::collections::{HashSet, VecDeque};
 use std::env;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -22,8 +22,8 @@ use std::thread;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use protocol::{
-    validate_process_inputs, ReadyFrame, RequestEnvelope, RuntimeEvent, RuntimeMessage,
-    RuntimeControl, RuntimeRequest, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
+    validate_process_inputs, ReadyFrame, RequestEnvelope, RuntimeControl, RuntimeEvent,
+    RuntimeMessage, RuntimeRequest, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
     MAX_STDIN_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
 };
 use subtle::ConstantTimeEq;
@@ -135,13 +135,13 @@ fn protocol_main() -> Result<(), String> {
                 }
             }
             if raw.len() > MAX_REQUEST_FRAME_BYTES {
-                if input_tx.send(InputMessage::Invalid).is_err() {
+                if input_tx.send(InputMessage::TooLarge).is_err() {
                     break;
                 }
                 continue;
             }
             let message = serde_json::from_str::<RequestEnvelope>(&raw)
-                .map(InputMessage::Frame)
+                .map(|value| InputMessage::Frame(Box::new(value)))
                 .unwrap_or(InputMessage::Invalid);
             if input_tx.send(message).is_err() {
                 break;
@@ -154,13 +154,22 @@ fn protocol_main() -> Result<(), String> {
     let mut seen_nonces = NonceCache::new(NONCE_CACHE_CAP);
     loop {
         let envelope = match input_rx.recv() {
-            Ok(InputMessage::Frame(value)) => value,
+            Ok(InputMessage::Frame(value)) => *value,
             Ok(InputMessage::Invalid) => {
                 write_error(
                     &mut output,
                     String::new(),
                     "runtime_protocol_mismatch",
                     "frame is not valid JSON",
+                )?;
+                continue;
+            }
+            Ok(InputMessage::TooLarge) => {
+                write_error(
+                    &mut output,
+                    String::new(),
+                    "runtime_protocol_mismatch",
+                    "frame exceeds 2MiB limit",
                 )?;
                 continue;
             }
@@ -227,8 +236,9 @@ fn protocol_main() -> Result<(), String> {
 }
 
 enum InputMessage {
-    Frame(RequestEnvelope),
+    Frame(Box<RequestEnvelope>),
     Invalid,
+    TooLarge,
     Eof,
 }
 
@@ -297,7 +307,8 @@ fn stream_interactive_request(
                         if data.len() > MAX_STDIN_BYTES {
                             writer.write_message(RuntimeMessage::Error {
                                 code: "sandbox_denied",
-                                message: "interactive stdin payload exceeds the size limit".to_string(),
+                                message: "interactive stdin payload exceeds the size limit"
+                                    .to_string(),
                             })?;
                             break;
                         }
@@ -316,7 +327,8 @@ fn stream_interactive_request(
                     _ => {
                         writer.write_message(RuntimeMessage::Error {
                             code: "sandbox_denied",
-                            message: "interactive session accepts only write or close frames".to_string(),
+                            message: "interactive session accepts only write or close frames"
+                                .to_string(),
                         })?;
                         break;
                     }
@@ -329,10 +341,16 @@ fn stream_interactive_request(
                 })?;
                 break;
             }
+            Ok(InputMessage::TooLarge) => {
+                writer.write_message(RuntimeMessage::Error {
+                    code: "runtime_protocol_mismatch",
+                    message: "frame exceeds 2MiB limit".to_string(),
+                })?;
+                break;
+            }
             Ok(InputMessage::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 if !close_sent {
                     let _ = control_tx.send(RuntimeControl::Close);
-                    close_sent = true;
                 }
                 break;
             }
@@ -364,11 +382,7 @@ fn authenticate_frame(
         })?;
         return Ok(false);
     }
-    if !startup_token
-        .as_bytes()
-        .ct_eq(envelope.token.as_bytes())
-        .into()
-    {
+    if !bool::from(startup_token.as_bytes().ct_eq(envelope.token.as_bytes())) {
         writer.write_message(RuntimeMessage::Error {
             code: "runtime_protocol_mismatch",
             message: "invalid runtime authentication".to_string(),
@@ -679,6 +693,12 @@ fn handle_request(
                 })
             }
         }
+        RuntimeRequest::InteractiveOpen { .. }
+        | RuntimeRequest::InteractiveWrite { .. }
+        | RuntimeRequest::InteractiveClose => Err(RuntimeFailure {
+            code: "sandbox_denied",
+            message: "interactive request must open a session".to_string(),
+        }),
     }
 }
 
