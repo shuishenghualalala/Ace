@@ -395,21 +395,13 @@ async def test_lint_deep_skips_llm_when_single_page(store, compiler):
 
 
 @pytest.mark.asyncio
-async def test_orient_returns_kb_snapshot(store, compiler):
-    store.save_page(
-        WikiPage(id="p_a", page_type="topic", title="页面A", content="# 页面A\n\n正文", file_path="topics/页面A.md")
-    )
-    store.save_page(
-        WikiPage(id="p_b", page_type="entity", title="概念B", content="# 概念B\n\n正文", file_path="entities/概念B.md", aliases=["B"])
-    )
+async def test_orient_returns_kb_snapshot(compiler):
+    """compiler.orient 仅委托 store.orient（详细快照断言见 test_store.py）。"""
+    compiler.store = MagicMock()
+    compiler.store.orient.return_value = sentinel = MagicMock()
 
-    orientation = await compiler.orient()
-    assert orientation.kb_id == "default"
-    assert orientation.index["page_count"] == 2
-    assert orientation.stats["by_type"]["topic"] == 1
-    assert orientation.stats["by_type"]["entity"] == 1
-    assert "页面A" in orientation.candidate_index["title_to_id"]
-    assert "B" in orientation.candidate_index["alias_to_id"]
+    assert await compiler.orient(owner_account_id="owner", kb_id="kb1") is sentinel
+    compiler.store.orient.assert_called_once_with("owner", "kb1")
 
 
 @pytest.mark.asyncio

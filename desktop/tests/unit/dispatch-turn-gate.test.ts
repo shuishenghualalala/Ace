@@ -57,7 +57,7 @@ function chunk(kind: ChatChunk['kind'], requestId: string, body: Record<string, 
 beforeEach(() => {
   __resetAllStoresForTest();
   setActiveSessionId('sid-1');
-  document.body.innerHTML = '<div id="chat-messages"></div><div id="composer-controls"></div><div id="chat-running-intro"></div>';
+  document.body.innerHTML = '<div id="chat-messages"></div><div id="composer-controls"></div><div class="chat-running-intro"></div>';
 });
 
 describe('dispatch turn gate', () => {

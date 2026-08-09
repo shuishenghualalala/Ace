@@ -29,21 +29,18 @@ def _is_async_func_def(name: str) -> bool:
     return False
 
 
-def test_mcp_sessions_list_is_async():
-    assert _is_async_func_def("sessions_list"), "sessions_list 必须是 async def"
-
-
-def test_mcp_session_history_is_async():
-    assert _is_async_func_def("session_history"), "session_history 必须是 async def"
-
-
-def test_mcp_session_status_is_async():
-    assert _is_async_func_def("session_status"), "session_status 必须是 async def"
-
-
-def test_mcp_send_message_still_async():
-    """send_message 原本就是 async，回归保护。"""
-    assert _is_async_func_def("send_message")
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sessions_list",
+        "session_history",
+        "session_status",
+        # send_message 原本就是 async，回归保护
+        "send_message",
+    ],
+)
+def test_mcp_tool_is_async(name):
+    assert _is_async_func_def(name), f"{name} 必须是 async def"
 
 
 try:

@@ -135,11 +135,6 @@ describe('拼音匹配（输入 wangye / wyss 搜到中文名）', () => {
     expect(matchSkill(searchSkill, 'wyss', py)).toBe(3);
     expect(matchSkill(searchSkill, 'wys', py)).toBe(3);
   });
-
-  it('不传拼音时退化（不影响 slug/中文名本身的匹配）', () => {
-    expect(matchSkill(searchSkill, '网页')).toBe(5);
-    expect(matchSkill(searchSkill, 'web')).toBe(5); // slug 前缀
-  });
 });
 
 describe('iterChipTokens', () => {

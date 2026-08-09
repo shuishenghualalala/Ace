@@ -12,7 +12,6 @@
 
 import os
 import sys
-import asyncio
 import pytest
 
 # 端到端/真实 LLM：默认不跑，用 `pytest -m e2e` 单独运行。
@@ -86,7 +85,7 @@ async def test_mimo_tool_call(app: CrewApp):
         assert "terminal" in tool_names, f"期望调用 terminal 工具，实际调用: {tool_names}"
         print(f"[PASS] 工具调用对话: 调用了 {tool_names}")
     else:
-        print(f"[PASS] 工具调用对话: 模型直接回答（未调工具），kinds={kinds}")
+        pytest.skip(f"模型未调用工具，无法验证 terminal 工具调用，kinds={kinds}")
 
     assert final_chunks, f"未收到 final 帧，kinds={kinds}"
     final_text = final_chunks[0].body.get("text", "")
@@ -148,47 +147,3 @@ async def test_mimo_session_persistence(app: CrewApp):
     assert "assistant" in roles, "历史中缺少 assistant 消息"
 
     print(f"[PASS] 会话持久化: {len(history)} 条历史记录, roles={roles}")
-
-
-if __name__ == "__main__":
-    """直接运行端到端测试。"""
-    import time
-
-    print("=" * 60)
-    print("Crew 端到端测试 — MiMo 模型")
-    print("=" * 60)
-
-    app = build_app(enable_team=False)
-    print(f"活跃模型: {app.config.active_model_id} ({app.provider.model})")
-    print(f"API Key 已配置: {app.config.has_llm_key}")
-    print()
-
-    async def run_all():
-        tests = [
-            ("纯文本对话", test_mimo_plain_chat),
-            ("工具调用对话", test_mimo_tool_call),
-            ("流式输出", test_mimo_streaming_delta),
-            ("多轮对话", test_mimo_multi_turn),
-            ("会话持久化", test_mimo_session_persistence),
-        ]
-        passed = 0
-        failed = 0
-        for name, fn in tests:
-            t0 = time.time()
-            try:
-                await fn(app)
-                passed += 1
-            except Exception as e:
-                failed += 1
-                print(f"[FAIL] {name}: {e}")
-            dt = time.time() - t0
-            print(f"  耗时: {dt:.1f}s")
-            print()
-
-        print("=" * 60)
-        print(f"测试结果: {passed} passed, {failed} failed")
-        print("=" * 60)
-        return failed == 0
-
-    success = asyncio.run(run_all())
-    sys.exit(0 if success else 1)

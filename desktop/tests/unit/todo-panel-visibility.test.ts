@@ -7,39 +7,45 @@ import {
 import type { TodoItem } from '../../src/ui/state';
 
 describe('shouldShowTodoPanel', () => {
-  it('returns false for empty todos', () => {
-    expect(shouldShowTodoPanel([])).toBe(false);
-  });
-
-  it('returns false when all todos are completed', () => {
-    const todos: TodoItem[] = [
-      { id: '1', content: 'A', status: 'completed' },
-      { id: '2', content: 'B', status: 'completed' },
-    ];
-    expect(shouldShowTodoPanel(todos)).toBe(false);
-  });
-
-  it('returns true when there is a pending todo', () => {
-    const todos: TodoItem[] = [
-      { id: '1', content: 'A', status: 'completed' },
-      { id: '2', content: 'B', status: 'pending' },
-    ];
-    expect(shouldShowTodoPanel(todos)).toBe(true);
-  });
-
-  it('returns true when there is an in_progress todo', () => {
-    const todos: TodoItem[] = [
-      { id: '1', content: 'A', status: 'in_progress' },
-    ];
-    expect(shouldShowTodoPanel(todos)).toBe(true);
-  });
-
-  it('returns true when there is a cancelled todo', () => {
-    const todos: TodoItem[] = [
-      { id: '1', content: 'A', status: 'completed' },
-      { id: '2', content: 'B', status: 'cancelled' },
-    ];
-    expect(shouldShowTodoPanel(todos)).toBe(true);
+  it.each([
+    {
+      name: 'returns false for empty todos',
+      todos: [] as TodoItem[],
+      expected: false,
+    },
+    {
+      name: 'returns false when all todos are completed',
+      todos: [
+        { id: '1', content: 'A', status: 'completed' },
+        { id: '2', content: 'B', status: 'completed' },
+      ] as TodoItem[],
+      expected: false,
+    },
+    {
+      name: 'returns true when there is a pending todo',
+      todos: [
+        { id: '1', content: 'A', status: 'completed' },
+        { id: '2', content: 'B', status: 'pending' },
+      ] as TodoItem[],
+      expected: true,
+    },
+    {
+      name: 'returns true when there is an in_progress todo',
+      todos: [
+        { id: '1', content: 'A', status: 'in_progress' },
+      ] as TodoItem[],
+      expected: true,
+    },
+    {
+      name: 'returns true when there is a cancelled todo',
+      todos: [
+        { id: '1', content: 'A', status: 'completed' },
+        { id: '2', content: 'B', status: 'cancelled' },
+      ] as TodoItem[],
+      expected: true,
+    },
+  ])('$name', ({ todos, expected }) => {
+    expect(shouldShowTodoPanel(todos)).toBe(expected);
   });
 });
 

@@ -78,9 +78,9 @@ beforeEach(() => {
   document.body.innerHTML = `
     <div id="welcome-panel"></div>
     <div id="chat-panel" hidden><div id="chat-messages"></div></div>
-    <div id="chat-todo-slot"></div>
+    <div class="chat-todo-slot"></div>
     <div id="composer-controls"></div>
-    <div id="chat-running-intro"></div>
+    <div class="chat-running-intro"></div>
   `;
 });
 

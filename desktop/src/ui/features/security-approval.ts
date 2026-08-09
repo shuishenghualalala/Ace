@@ -8,6 +8,7 @@
 
 import { $, notify, state } from '../state';
 import { appendMessage, renderChat } from './chat-controller';
+import { queryPrimaryComposer } from './composer-scope';
 
 export type ConversationSecurityMode = 'request_approval' | 'auto_review' | 'full_access';
 export type SecurityApprovalChoice = 'once' | 'session' | 'always' | 'reject';
@@ -223,7 +224,7 @@ function decisionLabel(decision: SecurityApprovalChoice): string {
 export function bindSecurityApprovalUi(): () => void {
   const panel = $('#composer-approval-panel') as HTMLElement | null;
   const summary = $('#composer-approval-summary');
-  const container = $('#chat-input-container');
+  const container = queryPrimaryComposer('.chat-input-container');
   const decisionButtons = Array.from(
     panel?.querySelectorAll<HTMLButtonElement>('[data-security-decision]') ?? [],
   );

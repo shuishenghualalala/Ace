@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 
 from crew.core.runctx import (
     current_tool_progress_fn,

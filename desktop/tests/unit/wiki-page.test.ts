@@ -590,6 +590,122 @@ describe('点击条目加载详情', () => {
   });
 });
 
+describe('详情面板多 Tab', () => {
+  const tabKeys = (): string[] =>
+    Array.from(document.querySelectorAll('#wiki-page-tabs [data-wiki-tab]')).map(
+      (el) => el.getAttribute('data-wiki-tab') ?? '',
+    );
+  const activeKey = (): string | null =>
+    document.querySelector('#wiki-page-tabs .wiki-tab.is-active [data-wiki-tab]')?.getAttribute('data-wiki-tab') ?? null;
+  const clickTab = (key: string): void => {
+    document.querySelector(`[data-wiki-tab="${key}"]`)?.dispatchEvent(new Event('click'));
+  };
+  const clickClose = (key: string): void => {
+    document.querySelector(`[data-wiki-tab-close="${key}"]`)?.dispatchEvent(new Event('click', { bubbles: true }));
+  };
+  const openPage = (id: string): void => {
+    document.querySelector(`[data-page-id="${id}"]`)?.dispatchEvent(new Event('click'));
+  };
+
+  beforeEach(() => {
+    api.wikiPages.mockResolvedValue(
+      pagesResult([makePage({ id: 'p1', title: '页面一' }), makePage({ id: 'p2', title: '页面二' })]),
+    );
+    api.wikiPage.mockImplementation(async (id: string) => ({
+      ok: true,
+      page: makePage({ id, title: id === 'p1' ? '页面一' : '页面二', content: '正文' }),
+      source_titles: {},
+      source_files: {},
+    }));
+  });
+
+  it('打开页面/文档产生 tab，激活态跟随当前详情', async () => {
+    await refreshWikiData();
+    // 进入 KB 默认打开 Home.md，成为第一个 tab。
+    expect(tabKeys()).toEqual(['doc:Home.md']);
+    expect(activeKey()).toBe('doc:Home.md');
+
+    openPage('p1');
+    await vi.waitFor(() => {
+      expect(tabKeys()).toEqual(['doc:Home.md', 'page:p1']);
+      expect(activeKey()).toBe('page:p1');
+    });
+
+    clickTab('doc:Home.md');
+    await vi.waitFor(() => {
+      expect(activeKey()).toBe('doc:Home.md');
+      expect(document.querySelector('.wiki-detail.wiki-home-document')).not.toBeNull();
+    });
+  });
+
+  it('重复打开同一页面去重，不产生重复 tab', async () => {
+    await refreshWikiData();
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+
+    openPage('p1');
+    openPage('p1');
+    await flush();
+    expect(tabKeys()).toEqual(['doc:Home.md', 'page:p1']);
+  });
+
+  it('关闭激活 tab 时相邻 tab 接管（右侧优先）', async () => {
+    await refreshWikiData();
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+    openPage('p2');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p2'));
+
+    // 激活中间的 p1 再关闭：右侧的 p2 接管。
+    clickTab('page:p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+    clickClose('page:p1');
+    await vi.waitFor(() => {
+      expect(tabKeys()).toEqual(['doc:Home.md', 'page:p2']);
+      expect(activeKey()).toBe('page:p2');
+      expect((document.querySelector('[data-wiki-title]') as HTMLInputElement | null)?.value).toBe('页面二');
+    });
+
+    // 关闭末尾的 p2：左侧的 Home.md 接管。
+    clickClose('page:p2');
+    await vi.waitFor(() => {
+      expect(tabKeys()).toEqual(['doc:Home.md']);
+      expect(activeKey()).toBe('doc:Home.md');
+      expect(document.querySelector('.wiki-detail.wiki-home-document')).not.toBeNull();
+    });
+  });
+
+  it('关闭非激活 tab 不影响当前详情', async () => {
+    await refreshWikiData();
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+    openPage('p2');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p2'));
+
+    clickClose('page:p1');
+    await vi.waitFor(() => expect(tabKeys()).toEqual(['doc:Home.md', 'page:p2']));
+    expect(activeKey()).toBe('page:p2');
+    expect((document.querySelector('[data-wiki-title]') as HTMLInputElement | null)?.value).toBe('页面二');
+  });
+
+  it('切 KB（reloadAll）清空 tabs，仅保留新 KB 的 Home.md', async () => {
+    await refreshWikiData();
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+    openPage('p2');
+    await vi.waitFor(() => expect(tabKeys()).toEqual(['doc:Home.md', 'page:p1', 'page:p2']));
+
+    const select = document.querySelector('#wiki-kb-select') as HTMLSelectElement;
+    select.value = 'work';
+    select.dispatchEvent(new Event('change'));
+
+    await vi.waitFor(() => {
+      expect(tabKeys()).toEqual(['doc:Home.md']);
+      expect(activeKey()).toBe('doc:Home.md');
+    });
+  });
+});
+
 describe('错误处理', () => {
   it('KB 加载失败时 notify 提示并显示「加载失败」空态（而非误导的「暂无知识库」）', async () => {
     api.wikiKBs.mockRejectedValue(new Error('网络异常'));

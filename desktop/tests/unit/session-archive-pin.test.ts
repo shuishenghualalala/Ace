@@ -16,17 +16,10 @@ import type { SessionRow } from '../../src/ui/state';
 import { renderWorkspaceHistory, syncSessionsFromBackend } from '../../src/ui/features/workspaces';
 import { backendApi } from '../../src/ui/backend-client';
 import type { BackendSession } from '../../src/ui/backend-client';
+import { mountHistoryList } from './helpers/history-list';
 
 function makeSession(id: string, workspaceId = 'default', extra: Partial<SessionRow> = {}): SessionRow {
   return { id, title: id, workspaceId, updatedAt: 1000, preview: '', badge: '', ...extra };
-}
-
-function mountHistoryList(): HTMLElement {
-  const list = document.createElement('div');
-  list.id = 'history-list';
-  document.body.innerHTML = '';
-  document.body.appendChild(list);
-  return list;
 }
 
 function backendRow(id: string, extra: Partial<BackendSession> = {}): BackendSession {

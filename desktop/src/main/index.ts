@@ -2638,8 +2638,9 @@ function registerIpc() {
    * wiki:openSourceFile — 用系统默认程序打开 Wiki 来源的原始文件。
    *
    * 渲染进程只传 sourceId/kbId（不可信）；主进程向 gateway 查询来源元数据拿到
-   * original_path，realpath 校验必须落在 CREW_HOME 内（wiki_lib/uploads 等都在
-   * 其下），再 shell.openPath。渲染进程无法借此打开 CREW_HOME 外的任意文件。
+   * original_path，realpath 校验必须落在 gateway 实际使用的 CREW_HOME 内
+   * （wiki_lib/uploads 等都在其下；--dev 模式隔离在 userData/gateway-dev，
+   * 与账号 home 不同），再 shell.openPath。渲染进程无法借此打开 CREW_HOME 外的任意文件。
    */
   trustedHandle('wiki:openSourceFile', async (_e, raw: unknown) => {
     const args = parseOrThrow(WikiOpenSourceFileArgs.parse(raw), 'wiki:openSourceFile');
@@ -2660,7 +2661,7 @@ function registerIpc() {
     if (!source || !originalPath) {
       throw new Error('找不到该来源的原始文件');
     }
-    const crewHomeReal = await fs.promises.realpath(resolveCrewHome());
+    const crewHomeReal = await fs.promises.realpath(activeGatewayCrewHome());
     const real = await fs.promises.realpath(path.resolve(originalPath));
     if (real !== crewHomeReal && !real.startsWith(`${crewHomeReal}${path.sep}`)) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: wiki source file outside CREW_HOME`);

@@ -1404,6 +1404,25 @@ def test_team_node_owned_artifacts_filters_concurrent_member_artifacts():
     assert [item["artifact_id"] for item in owned] == ["a-kk"]
 
 
+@pytest.fixture
+def auto_artifact_ctx(tmp_path, monkeypatch):
+    """auto-artifact 用例共享 setup：task_workspace_path 指向 tmp_path，附 node/envelope 构造器。"""
+    monkeypatch.setattr(
+        "crew.team.team_manager.task_workspace_path",
+        lambda workspace_id: tmp_path / str(workspace_id or "default"),
+    )
+    tm, _ = _team()
+    team = tm._build_team("auto_artifact_s1")
+
+    def _node(title: str, detail: str) -> TeamPlanNode:
+        return TeamPlanNode(node_id="build_1", title=title, detail=detail, assignee="kk")
+
+    def _envelope(query: str, session_id: str) -> Envelope:
+        return Envelope.of(query, session_id=session_id, user_id="owner", workspace_id="default")
+
+    return SimpleNamespace(tm=tm, team=team, node=_node, envelope=_envelope)
+
+
 def test_team_auto_file_artifacts_from_node_result(tmp_path):
     tm, _ = _team()
     team = tm._build_team("auto_artifact_s1")
@@ -1432,32 +1451,17 @@ def test_team_auto_file_artifacts_from_node_result(tmp_path):
     assert artifacts[0]["path"] == str(html)
 
 
-def test_team_auto_file_artifacts_resolves_relative_turn_workspace_paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "crew.team.team_manager.task_workspace_path",
-        lambda workspace_id: tmp_path / str(workspace_id or "default"),
-    )
-    tm, _ = _team()
-    team = tm._build_team("auto_artifact_relative_s1")
-    node = TeamPlanNode(
-        node_id="build_1",
-        title="实现：2048",
-        detail="实现 2048",
-        assignee="kk",
-    )
-    envelope = Envelope.of(
-        "做 2048",
-        session_id="web_a::turn::req_2048",
-        user_id="owner",
-        workspace_id="default",
-    )
-    workspace = Path(tm._team_delegate_cwd(envelope, "做一个2048小游戏"))
+def test_team_auto_file_artifacts_resolves_relative_turn_workspace_paths(auto_artifact_ctx):
+    ctx = auto_artifact_ctx
+    node = ctx.node("实现：2048", "实现 2048")
+    envelope = ctx.envelope("做 2048", "web_a::turn::req_2048")
+    workspace = Path(ctx.tm._team_delegate_cwd(envelope, "做一个2048小游戏"))
     (workspace / "index.html").write_text("<html>2048</html>", encoding="utf-8")
     (workspace / "README.md").write_text("# 2048", encoding="utf-8")
 
-    artifacts = tm._auto_file_artifacts_from_result(
+    artifacts = ctx.tm._auto_file_artifacts_from_result(
         envelope,
-        team=team,
+        team=ctx.team,
         node=node,
         task_id="task-build",
         text="交付物：`index.html` 和 `README.md`；Wrote 10552 bytes to index.html",
@@ -1468,26 +1472,11 @@ def test_team_auto_file_artifacts_resolves_relative_turn_workspace_paths(tmp_pat
     assert {item["owner_member_id"] for item in artifacts} == {"kk"}
 
 
-def test_team_auto_file_artifacts_resolve_relative_node_workspace_paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "crew.team.team_manager.task_workspace_path",
-        lambda workspace_id: tmp_path / str(workspace_id or "default"),
-    )
-    tm, _ = _team()
-    team = tm._build_team("auto_artifact_node_relative_s1")
-    node = TeamPlanNode(
-        node_id="build_1",
-        title="实现：节点隔离产物",
-        detail="实现节点隔离产物",
-        assignee="kk",
-    )
-    envelope = Envelope.of(
-        "测试团队协作",
-        session_id="web_a::turn::req_node",
-        user_id="owner",
-        workspace_id="default",
-    )
-    workspace = Path(tm._team_delegate_cwd(
+def test_team_auto_file_artifacts_resolve_relative_node_workspace_paths(auto_artifact_ctx):
+    ctx = auto_artifact_ctx
+    node = ctx.node("实现：节点隔离产物", "实现节点隔离产物")
+    envelope = ctx.envelope("测试团队协作", "web_a::turn::req_node")
+    workspace = Path(ctx.tm._team_delegate_cwd(
         envelope,
         envelope.query,
         node_id=node.node_id,
@@ -1496,9 +1485,9 @@ def test_team_auto_file_artifacts_resolve_relative_node_workspace_paths(tmp_path
     output = workspace / "result.md"
     output.write_text("# 节点产物", encoding="utf-8")
 
-    artifacts = tm._auto_file_artifacts_from_result(
+    artifacts = ctx.tm._auto_file_artifacts_from_result(
         envelope,
-        team=team,
+        team=ctx.team,
         node=node,
         task_id="task-build",
         text="交付物：`result.md`",
@@ -1510,26 +1499,11 @@ def test_team_auto_file_artifacts_resolve_relative_node_workspace_paths(tmp_path
     assert [item["path"] for item in artifacts] == [str(output.resolve())]
 
 
-def test_team_auto_artifacts_register_changed_output_directories(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "crew.team.team_manager.task_workspace_path",
-        lambda workspace_id: tmp_path / str(workspace_id or "default"),
-    )
-    tm, _ = _team()
-    team = tm._build_team("auto_artifact_directory_s1")
-    node = TeamPlanNode(
-        node_id="build_1",
-        title="实现：体检报告平台",
-        detail="实现前后端",
-        assignee="kk",
-    )
-    envelope = Envelope.of(
-        "实现体检报告平台",
-        session_id="web_f9x8m9::turn::req_f4834b83cea8",
-        user_id="owner",
-        workspace_id="default",
-    )
-    workspace = Path(tm._team_delegate_cwd(envelope, envelope.query))
+def test_team_auto_artifacts_register_changed_output_directories(auto_artifact_ctx):
+    ctx = auto_artifact_ctx
+    node = ctx.node("实现：体检报告平台", "实现前后端")
+    envelope = ctx.envelope("实现体检报告平台", "web_f9x8m9::turn::req_f4834b83cea8")
+    workspace = Path(ctx.tm._team_delegate_cwd(envelope, envelope.query))
     api_file = workspace / "apps" / "api" / "src" / "main.ts"
     web_file = workspace / "apps" / "web" / "src" / "App.tsx"
     api_file.parent.mkdir(parents=True)
@@ -1537,9 +1511,9 @@ def test_team_auto_artifacts_register_changed_output_directories(tmp_path, monke
     api_file.write_text("export {};", encoding="utf-8")
     web_file.write_text("export default function App() {}", encoding="utf-8")
 
-    artifacts = tm._auto_file_artifacts_from_result(
+    artifacts = ctx.tm._auto_file_artifacts_from_result(
         envelope,
-        team=team,
+        team=ctx.team,
         node=node,
         task_id="task-build",
         text="产物位于当前工作区 `apps/api` 与 `apps/web`。",
@@ -5714,7 +5688,21 @@ async def test_team_graph_planner_standard_async_falls_back_to_role_dag_when_dec
     assert executable["metadata"]["capability_source"] == "role_catalog"
 
 
-async def test_team_graph_planner_standard_decision_timeout_is_classified():
+@pytest.mark.parametrize(
+    "provider,error_type,execution_profile",
+    [
+        (
+            SlowPlanningProvider(),
+            "timeout",
+            {"requested_mode": "standard", "budget": {"planning_decision_timeout": 0.001}},
+        ),
+        (InvalidJsonPlanningProvider(), "invalid_json", {"requested_mode": "standard"}),
+    ],
+    ids=["timeout", "invalid_json"],
+)
+async def test_team_graph_planner_standard_decision_failure_is_classified(
+    provider, error_type, execution_profile,
+):
     assert DEFAULT_PLANNING_DECISION_TIMEOUT == 30.0
     tm, _ = _team(config=Config(
         max_iterations=3,
@@ -5728,54 +5716,25 @@ async def test_team_graph_planner_standard_decision_timeout_is_classified():
             }],
         },
     ))
-    team = tm._build_team("standard-timeout-classification")
+    team = tm._build_team("standard-decision-classification")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
         "开发一个登录接口",
-        execution_profile={"requested_mode": "standard", "budget": {"planning_decision_timeout": 0.001}},
-        provider=SlowPlanningProvider(),
+        execution_profile=execution_profile,
+        provider=provider,
     )
 
     metadata = graph_plan.nodes[0]["metadata"]
-    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    planning = graph_plan.workflow_plan["planning"]
+    planning_decision = planning["planning_decision"]
     assert metadata["plan_strategy"] == "standard_role_dag"
-    assert metadata["llm_planning_error_type"] == "timeout"
-    assert graph_plan.workflow_plan["planning"]["engine"] == "legacy_role_compiler"
+    assert metadata["llm_planning_error_type"] == error_type
+    assert planning["engine"] == "legacy_role_compiler"
+    assert planning["fallback_from"] == "planning_decision"
     assert planning_decision["status"] == "fallback"
-    assert planning_decision["error_type"] == "timeout"
+    assert planning_decision["error_type"] == error_type
     assert planning_decision["fallback_from"] == "planning_decision"
-
-
-async def test_team_graph_planner_standard_decision_invalid_json_is_classified():
-    tm, _ = _team(config=Config(
-        max_iterations=3,
-        team_config={
-            "members": [{
-                "member_id": "analyst",
-                "name": "analyst",
-                "role": "负责分析",
-                "executor": "builtin",
-                "metadata": {"workflow_lane": "plan"},
-            }],
-        },
-    ))
-    team = tm._build_team("standard-invalid-json-classification")
-
-    graph_plan = await TeamGraphPlanner().plan_async(
-        team,
-        "调研一个架构方案",
-        execution_profile={"requested_mode": "standard"},
-        provider=InvalidJsonPlanningProvider(),
-    )
-
-    metadata = graph_plan.nodes[0]["metadata"]
-    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
-    assert metadata["llm_planning_error_type"] == "invalid_json"
-    assert metadata["plan_strategy"] == "standard_role_dag"
-    assert graph_plan.workflow_plan["planning"]["engine"] == "legacy_role_compiler"
-    assert planning_decision["error_type"] == "invalid_json"
-    assert graph_plan.workflow_plan["planning"]["fallback_from"] == "planning_decision"
 
 
 def test_team_graph_planner_fast_profile_builds_minimal_dag():

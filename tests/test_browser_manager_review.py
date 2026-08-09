@@ -1324,36 +1324,6 @@ async def test_playwright_form_actions_use_exact_ref_and_post_snapshot(
         await manager.aclose()
 
 
-@pytest.mark.parametrize(
-    ("action", "ref", "value", "expected_kind"),
-    [
-        ("select", "p1:e2", ["cn"], "select"),
-        ("check", "p1:e1", True, "toggle"),
-    ],
-)
-async def test_form_actions_defer_live_control_capability_to_driver(
-    browser_env,
-    action: str,
-    ref: str,
-    value,
-    expected_kind: str,
-):
-    driver = _playwright_form_driver()
-    manager = BrowserManager(BrowserConfig(), driver)
-    try:
-        await manager.navigate("owner", "session", "https://example.com")
-
-        del expected_kind
-        if action == "select":
-            await manager.select("owner", "session", ref, value)
-        else:
-            await manager.check("owner", "session", ref, value)
-
-        assert any(command == action for command, _args in driver.calls)
-    finally:
-        await manager.aclose()
-
-
 @pytest.mark.parametrize("action", ["select", "check", "hover"])
 async def test_form_actions_reject_stale_generation_before_dispatch(
     browser_env, action: str

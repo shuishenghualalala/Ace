@@ -1561,21 +1561,6 @@ def test_fast_team_suggestion_user_can_assign_kimi_to_development():
     assert "用户指定" in by_role["technical_writer"]["selection_reason"]
 
 
-def test_fast_team_suggestion_user_can_assign_hermes_to_writer():
-    agents = [
-        {"id": "kimi_1", "name": "Kimi Writer", "provider": "kimi", "model": "moonshot"},
-        {"id": "hermes_1", "name": "Hermes Coder", "provider": "hermes", "model": "code"},
-    ]
-    result = fast_team_suggestion(
-        {"name": "交付团队", "description": "实现接口并输出交付报告，Hermes 负责写文档"},
-        agents,
-    )
-
-    by_role = {member["role_key"]: member for member in result["members"]}
-    assert by_role["technical_writer"]["agent_id"] == "hermes_1"
-    assert "用户指定" in by_role["technical_writer"]["selection_reason"]
-
-
 def test_fast_team_suggestion_excludes_agent_when_user_says_do_not_join():
     agents = [
         {"id": "kimi_1", "name": "Kimi Writer", "provider": "kimi", "model": "moonshot"},

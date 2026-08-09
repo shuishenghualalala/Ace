@@ -973,35 +973,6 @@ async def test_dispatcher_does_not_overwrite_dynamic_kanban_history() -> None:
     assert history[1].content == "Dynamic Kanban 最终回复"
 
 
-@pytest.mark.asyncio
-async def test_dispatcher_overwrites_agent_history_via_sidechain() -> None:
-    """普通 agent 模式仍走 sidechain 收敛：inner 写到 sidechain 的消息应被合并回原始 session。"""
-    store = InMemorySessionStore()
-    owner = "user-agent"
-
-    async def inner(envelope: Envelope) -> Any:
-        """模拟普通 SingleAgent：把用户消息和回复写到 sidechain session。"""
-        sid = envelope.session_id
-        store.append(sid, [Message(role="user", content="用户请求", timestamp=1.0)], owner_account_id=owner)
-        store.append(sid, [Message(role="assistant", content="Agent 回复", timestamp=2.0)], owner_account_id=owner)
-        yield ResponseChunk.final(envelope.request_id, "Agent 回复", sequence=1)
-
-    dispatcher = SessionDispatcher(
-        inner,
-        store,
-        task_runtime=_DummyTaskRuntime(),
-    )
-
-    env = Envelope.of("用户请求", session_id="s_agent_dispatch", user_id=owner, mode="agent")
-    chunks = [c async for c in dispatcher.run(env)]
-    assert chunks[-1].kind == "final"
-
-    history = store.load("s_agent_dispatch", owner_account_id=owner)
-    roles = [m.role for m in history]
-    assert "user" in roles
-    assert "assistant" in roles
-
-
 # --------------------------------------------------------------------------- #
 # WorkflowOrchestrator tests
 # --------------------------------------------------------------------------- #

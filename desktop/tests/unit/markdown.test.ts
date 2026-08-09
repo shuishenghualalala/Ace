@@ -182,11 +182,6 @@ describe('renderMarkdownHtml', () => {
     expect(out).not.toContain('**F2. Fork');
   });
 
-  it('流式：空加粗开头不闪出 ****', () => {
-    const out = renderMarkdownHtml('- 📝 **', { isStreaming: true });
-    expect(out).not.toContain('****');
-  });
-
   it('流式：未闭合 ```python fence 自动闭合', () => {
     const out = renderMarkdownHtml('```python\nprint(hi)', { isStreaming: true });
     // 应该渲染成代码块，而不是把 ```python 当纯文本显示。

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -289,52 +288,3 @@ async def test_e2e_run_agent_plan(app: CrewApp):
     assert len(final) > 50, f"Plan 结果过短，可能未真正规划: {final[:300]}"
 
     print(f"[PASS] run_agent Plan: final={final[:120]}...")
-
-
-if __name__ == "__main__":
-    import time as _time
-
-    print("=" * 60)
-    print("Crew Subagent 端到端测试")
-    print("=" * 60)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg = _build_config(Path(tmp))
-        app = build_app(config=cfg, enable_team=False)
-        print(f"活跃模型: {app.config.active_model_id} ({app.provider.model})")
-        print(f"API Key 已配置: {app.config.has_llm_key}")
-        if not app.config.has_llm_key:
-            print("未配置 API Key，退出")
-            sys.exit(1)
-        print()
-
-        async def run_all():
-            tests = [
-                ("run_agent Explore", test_e2e_run_agent_explore),
-                ("delegate_task batch", test_e2e_delegate_task_batch),
-                ("background run_agent + collect", test_e2e_background_run_agent_collect),
-                ("external parent caps child tools", test_e2e_external_parent_caps_child_tools),
-                ("delegate_task timeout", test_e2e_delegate_task_timeout),
-                ("run_agent Plan", test_e2e_run_agent_plan),
-            ]
-            passed = 0
-            failed = 0
-            for name, fn in tests:
-                t0 = _time.time()
-                try:
-                    await fn(app)
-                    passed += 1
-                except Exception as e:
-                    failed += 1
-                    print(f"[FAIL] {name}: {e}")
-                dt = _time.time() - t0
-                print(f"  耗时: {dt:.1f}s")
-                print()
-
-            print("=" * 60)
-            print(f"测试结果: {passed} passed, {failed} failed")
-            print("=" * 60)
-            return failed == 0
-
-        success = asyncio.run(run_all())
-        sys.exit(0 if success else 1)

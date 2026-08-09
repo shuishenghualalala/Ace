@@ -3,7 +3,6 @@
 
 运行：
     CREW_MODEL_PROFILE=deepseek pytest tests/test_e2e_compact.py -v -s
-    CREW_MODEL_PROFILE=deepseek python tests/test_e2e_compact.py
 
 覆盖：
 1. deepseek 模型可正常连接
@@ -24,7 +23,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -466,69 +464,3 @@ async def test_resilience_overflow_and_anti_thrash(app: CrewApp, caplog):
         "连续 2 次压缩省 <10%" in record.message
         for record in caplog.records
     ), "应记录 anti-thrash 跳过摘要的警告"
-
-
-# --------------------------------------------------------------------------- #
-# main：直接运行
-# --------------------------------------------------------------------------- #
-
-if __name__ == "__main__":
-    import time
-
-    print("=" * 60)
-    print("Crew 端到端测试 — 上下文压缩（deepseek 模型）")
-    print("=" * 60)
-
-    from crew.state.config import load_config
-
-    cfg = load_config()
-    cfg.log_file = ".crew/logs/crew.log"
-    cfg.timeout = 180.0
-    cfg.compaction_token_budget = 10000
-    cfg.compaction_keep_recent = 4
-    cfg.compaction_keep_recent_tools = 3
-    cfg.compaction_l2_delta_threshold = 5000  # e2e 场景：2 条 2000 字符消息约 3800 token，5000 以下可触发纯规则复用
-
-    import crew.state.logging as _log_mod
-
-    _log_mod._CONFIGURED = False
-    _log_mod._LLM_TRACE_ENABLED = False
-
-    app = build_app(cfg, enable_team=False)
-    print(f"活跃模型: {app.config.active_model_id} ({app.provider.model})")
-    print(f"API Key 已配置: {app.config.has_llm_key}")
-    print(f"压缩预算: {app.config.compaction_token_budget}")
-    print()
-
-    async def run_all():
-        tests = [
-            ("deepseek 连接", test_deepseek_connection),
-            ("L1 MicroCompact", test_l1_microcompact_clears_old_tools),
-            ("L3 全量摘要", test_l3_full_summary_first_compaction),
-            ("L2 增量摘要", test_l2_incremental_summary_reuses_cache),
-            ("L2 纯规则复用", test_l2_pure_rule_no_llm_when_delta_small),
-            ("历史完整性", test_canonical_history_preserved_after_compaction),
-            ("鲁棒性：溢出+防抖", test_resilience_overflow_and_anti_thrash),
-        ]
-        passed = 0
-        failed = 0
-        for name, fn in tests:
-            t0 = time.time()
-            try:
-                await fn(app)
-                passed += 1
-                print(f"[PASS] {name}")
-            except Exception as e:
-                failed += 1
-                print(f"[FAIL] {name}: {e}")
-            dt = time.time() - t0
-            print(f"  耗时: {dt:.1f}s")
-            print()
-
-        print("=" * 60)
-        print(f"测试结果: {passed} passed, {failed} failed")
-        print("=" * 60)
-        return failed == 0
-
-    success = asyncio.run(run_all())
-    sys.exit(0 if success else 1)

@@ -301,19 +301,6 @@ def test_validate_args_rejects_invalid_combinations(args):
 @pytest.mark.parametrize(
     "args",
     [
-        # text="" 且不提交 —— 清空字段，合法
-        {"action": "type", "ref": "p1:e1", "text": "", "submit": False},
-        # 有内容 + 提交 —— 正常的搜索
-        {"action": "type", "ref": "p1:e1", "text": "工单", "submit": True},
-    ],
-)
-def test_type_empty_text_is_only_rejected_together_with_submit(args):
-    assert validate_args(args) is None
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
         {"action": "navigate", "url": "https://example.com"},
         {"action": "snapshot"},
         {"action": "find", "text": "Search"},
@@ -369,6 +356,8 @@ def test_type_empty_text_is_only_rejected_together_with_submit(args):
             "submit": True,
         },
         {"action": "type", "ref": "p1:e1", "text": ""},
+        # 有内容 + 提交 —— 正常的搜索
+        {"action": "type", "ref": "p1:e1", "text": "工单", "submit": True},
         {"action": "select", "ref": "p1:e1", "values": ["one", "two"]},
         {"action": "select", "ref": "p1:e1", "values": []},
         {"action": "select", "ref": "p1:e1", "values": [""]},

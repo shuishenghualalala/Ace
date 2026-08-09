@@ -48,7 +48,9 @@
   display: flex;
   /* 面板间不留缝：分隔由单边 1px 发丝线承担（VSCode 风格，避免两条边框线并行） */
   gap: 0;
-  padding: var(--mw-space-5) var(--mw-space-8) var(--mw-space-6);
+  /* 底部不留 padding：三条竖向分隔线（对话↔面板、目录↔详情）直接伸到窗口底边，
+     对齐主对话 mw-chat-template 整列通高的版式；对话栏底部留白由 disclaimer 自带 padding 承担 */
+  padding: var(--mw-space-5) var(--mw-space-8) 0;
 }
 
 /* 右侧知识库面板：整体固定宽度（内联 width，拖拽可调），内部目录 + 详情横向排布 */
@@ -161,6 +163,98 @@
   border-left: 1px solid var(--mw-border-subtle);
   background: var(--mw-bg-surface);
   padding: var(--mw-space-4) var(--mw-space-5);
+}
+
+/* ── 详情面板多 tab 栏（pill chip，视觉对齐 Inspector workspace tab，类名独立不耦合） ── */
+
+#wiki-page-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--mw-space-1);
+  margin: 0 auto var(--mw-space-3);
+  max-width: 760px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+#wiki-page-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.wiki-tab {
+  display: flex;
+  min-width: 0;
+  max-width: 156px;
+  height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--mw-radius-3) var(--mw-radius-3) var(--mw-radius-2) var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-secondary);
+  white-space: nowrap;
+}
+
+.wiki-tab:hover {
+  background: color-mix(in srgb, var(--mw-bg-subtle) 62%, transparent);
+  color: var(--mw-text-primary);
+}
+
+.wiki-tab.is-active {
+  border-color: var(--mw-border-subtle);
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+  box-shadow: var(--mw-shadow-raised);
+}
+
+.wiki-tab__select {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  align-items: center;
+  padding: 0 var(--mw-space-1) 0 var(--mw-space-2);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wiki-tab__label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--mw-type-caption-size);
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+
+.wiki-tab__close {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  margin-right: var(--mw-space-1);
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: inherit;
+  font-size: var(--mw-type-caption-size);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wiki-tab__close:hover {
+  background: color-mix(in srgb, var(--mw-text-primary) 8%, transparent);
+}
+
+.wiki-tab__select:focus-visible,
+.wiki-tab__close:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: 2px;
 }
 
 /* 左侧对话主区：弹性占满知识库面板之外的剩余宽度 */
@@ -343,6 +437,29 @@
   background: transparent;
 }
 
+/* 对话面板本体（conversation-panel）：消息区 + Composer 竖向撑满对话栏当前宽度 */
+.wiki-agent-pane__conversation {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 窄栏内的 Composer：收敛主对话的大 padding，卡片边距对齐旧内嵌 Composer */
+.wiki-agent-pane__conversation .mw-composer {
+  gap: var(--mw-space-1);
+  padding: var(--mw-space-1) var(--mw-space-3) var(--mw-space-1);
+  background: transparent;
+}
+
+/* 主对话把输入壳限制在 --mw-chat-content-max-width 居中（对话栏很宽时成立）；
+   wiki 对话栏本身窄且可拖宽，输入壳/队列/编辑横幅直接撑满面板，跟随栏宽自适应。 */
+.wiki-agent-pane__conversation .mw-composer__input-shell,
+.wiki-agent-pane__conversation .mw-composer__queue-slot,
+.wiki-agent-pane__conversation .mw-composer__edit-banner {
+  width: 100%;
+}
+
 .wiki-agent-pane__messages.chat-messages.web-flow {
   padding: var(--mw-space-4) 0;
 }
@@ -411,52 +528,7 @@
   pointer-events: none;
 }
 
-/* 卡片式 Composer：复用主对话 composer-chip / chat-action-btn / send-btn 全局样式 */
-.wiki-agent-pane__composer {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--mw-space-1);
-  margin: 0 var(--mw-space-3);
-  padding: var(--mw-space-2) var(--mw-space-2) var(--mw-space-1);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-surface);
-  transition: var(--mw-transition-interactive);
-}
-
-.wiki-agent-pane__composer:focus-within {
-  border-color: var(--mw-action-primary);
-}
-
-.wiki-agent-pane__composer .chat-attachment-preview {
-  padding: var(--mw-space-1) 0 0;
-}
-
-.wiki-agent-pane__composer textarea {
-  width: 100%;
-  border: none;
-  outline: none;
-  resize: none;
-  padding: var(--mw-space-1) var(--mw-space-1);
-  background: transparent;
-  color: var(--mw-text-primary);
-  font: inherit;
-  line-height: 1.5;
-  max-height: 140px;
-}
-
-.wiki-agent-pane__composer textarea::placeholder {
-  color: var(--mw-text-muted);
-}
-
-.wiki-agent-pane__toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--mw-space-1);
-}
-
+/* 模型 chip：挂在对话面板 Composer 的 toolbar-left 槽位（复用 composer-chip 全局样式） */
 .wiki-agent-pane__model {
   display: inline-flex;
   min-width: 0;
@@ -475,19 +547,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.wiki-agent-pane__toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: var(--mw-space-1);
-}
-
-/* 发送 / 停止按钮显隐走 hidden 属性（wiki-agent.ts renderEmbeddedPanel），
-   但全局按钮的 display:flex 会压过 UA 的 [hidden] 规则，这里显式补回。 */
-.wiki-agent-pane__composer .chat-stop-btn[hidden],
-.wiki-agent-pane__composer .send-btn[hidden] {
-  display: none;
 }
 
 .wiki-agent-pane__disclaimer {
@@ -1921,7 +1980,7 @@
 /* 窄窗口：目录区收窄，避免挤压详情区 */
 @media (max-width: 1100px) {
   .wiki-body {
-    padding: var(--mw-space-4) var(--mw-space-5) var(--mw-space-5);
+    padding: var(--mw-space-4) var(--mw-space-5) 0;
   }
 
   .wiki-list-pane {

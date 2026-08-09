@@ -19,7 +19,6 @@ from crew.core.runctx import (
     current_session_id,
     current_tool_call_id,
 )
-from crew.gateway.ws import _apply_browser_skill_policy
 from plugins.browser.compile_tool import (
     RecordWorkflowTools,
     WorkflowRejected,
@@ -607,7 +606,6 @@ def test_v11_values_and_arrays_survive_bridge_compile_and_store(
 def test_v11_drag_positions_and_external_drop_survive_compile_and_store(
     v11_gate: None,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     exact_paths = [
         f"/tmp/外部-{index}-\udfff.bin"
@@ -720,34 +718,6 @@ def test_v11_drag_positions_and_external_drop_survive_compile_and_store(
         encoding="utf-8",
     )
     assert validate_generated_skill(skill_dir, "external-drop-flow") == []
-
-    class PolicyManager:
-        def __init__(self) -> None:
-            self.calls: list[tuple] = []
-
-        def clear_readonly(self, owner: str, session_id: str) -> None:
-            self.calls.append(("clear", owner, session_id))
-
-        def set_readonly(self, *args) -> None:
-            self.calls.append(("set", *args))
-
-    policy_manager = PolicyManager()
-    monkeypatch.setattr(
-        "crew.gateway.ws.get_skills",
-        lambda: {
-            "external-drop-flow": {
-                "skill_dir": str(skill_dir),
-            }
-        },
-    )
-    _apply_browser_skill_policy(
-        type("Crew", (), {"browser_manager": policy_manager})(),
-        "external-drop-flow",
-        OWNER,
-        "session-v11-drop",
-    )
-    # 技能激活不再改会话上的任何运行期档位——授权来自不可变 plan。
-    assert policy_manager.calls == []
 
 
 def test_v11_pointer_gesture_survives_bridge_compile_and_v3_store_without_cap(

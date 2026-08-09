@@ -10,17 +10,10 @@ import { __resetAllStoresForTest, sessionStore, workspaceStore } from '../../src
 import { setBusy, setSessionStatus, setActiveSessionId, setExpandedWorkspace, type SessionRow } from '../../src/ui/state';
 import { CONVERSATIONS_LIMIT, patchSessionRowStatus, renderWorkspaceHistory } from '../../src/ui/features/workspaces';
 import type { Workspace } from '../../src/ui/backend-client';
+import { mountHistoryList } from './helpers/history-list';
 
 function makeSession(id: string, workspaceId = 'default'): SessionRow {
   return { id, title: id, workspaceId, updatedAt: 1000, preview: '', badge: '' };
-}
-
-function mountHistoryList(): HTMLElement {
-  const list = document.createElement('div');
-  list.id = 'history-list';
-  document.body.innerHTML = '';
-  document.body.appendChild(list);
-  return list;
 }
 
 beforeEach(() => __resetAllStoresForTest());

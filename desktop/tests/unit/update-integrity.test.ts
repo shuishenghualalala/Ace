@@ -32,32 +32,46 @@ describe('packageKindFromPath', () => {
 });
 
 describe('verifyPackageIntegrity', () => {
-  it('exe: 正确 MZ 头通过', () => {
-    const p = writeTemp('ok.exe', Buffer.concat([Buffer.from('MZ'), Buffer.from('rest-of-pe')]));
-    const r = verifyPackageIntegrity(p, 0);
-    expect(r.ok).toBe(true);
-  });
-
-  it('exe: 错误头不通过', () => {
-    const p = writeTemp('bad.exe', Buffer.from('XXcorrupt'));
-    const r = verifyPackageIntegrity(p, 0);
-    expect(r.ok).toBe(false);
-    expect(r.message).toContain('MZ');
-  });
-
-  it('deb: 正确 !<arch> 头通过', () => {
-    const data = Buffer.concat([Buffer.from('!<arch>\n'), Buffer.from('control')]);
-    const p = writeTemp('ok.deb', data);
-    const r = verifyPackageIntegrity(p, 0);
-    expect(r.ok).toBe(true);
-  });
-
-  it('deb: 错误头不通过', () => {
-    const p = writeTemp('bad.deb', Buffer.from('not-an-archive'));
-    const r = verifyPackageIntegrity(p, 0);
-    expect(r.ok).toBe(false);
-    expect(r.message).toContain('arch');
-  });
+  it.each([
+    {
+      name: 'exe: 正确 MZ 头通过',
+      file: 'ok.exe',
+      data: Buffer.concat([Buffer.from('MZ'), Buffer.from('rest-of-pe')]),
+      ok: true,
+      message: undefined,
+    },
+    {
+      name: 'exe: 错误头不通过',
+      file: 'bad.exe',
+      data: Buffer.from('XXcorrupt'),
+      ok: false,
+      message: 'MZ',
+    },
+    {
+      name: 'deb: 正确 !<arch> 头通过',
+      file: 'ok.deb',
+      data: Buffer.concat([Buffer.from('!<arch>\n'), Buffer.from('control')]),
+      ok: true,
+      message: undefined,
+    },
+    {
+      name: 'deb: 错误头不通过',
+      file: 'bad.deb',
+      data: Buffer.from('not-an-archive'),
+      ok: false,
+      message: 'arch',
+    },
+  ] as Array<{ name: string; file: string; data: Buffer; ok: boolean; message?: string }>)(
+    '$name',
+    ({ file, data, ok, message }) => {
+      const p = writeTemp(file, data);
+      const r = verifyPackageIntegrity(p, 0);
+      expect(r.ok).toBe(ok);
+      if (message !== undefined) {
+        expect(r.message).toContain(message);
+      }
+    },
+  );
 
   it('size 不符（下载不完整）不通过', () => {
     const p = writeTemp('truncated.exe', Buffer.concat([Buffer.from('MZ'), Buffer.from('x')]));

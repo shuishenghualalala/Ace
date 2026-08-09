@@ -32,7 +32,7 @@ type MockCrew = {
 
 function setupDom(): void {
   document.body.innerHTML = `
-    <div id="chat-input-container">
+    <div class="chat-input-container">
       <div id="composer-approval-panel" aria-hidden="true">
         <pre id="composer-approval-summary"></pre>
         <div class="composer-approval-panel__actions">

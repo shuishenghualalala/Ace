@@ -117,15 +117,11 @@ def test_all_process_capable_sources_are_classified() -> None:
     assert INDIRECT_SURFACES <= registered, f"未登记的间接执行面: {sorted(INDIRECT_SURFACES - registered)}"
     assert _desktop_process_files() == DESKTOP_PROCESS_FILES
 
-
-def test_inventory_has_no_stale_direct_process_entries() -> None:
-    registered = _inventory_paths()
+    # 直接执行面条目不得陈旧：登记的直接文件集合必须与源码扫描结果一致
     direct_entries = {
         path
         for path in registered
         if path.endswith((".py", ".ts", ".tsx", ".js", ".mjs", ".cjs"))
         and path not in INDIRECT_SURFACES
     }
-    expected = _python_process_files() | _javascript_process_files()
-
-    assert direct_entries == expected
+    assert direct_entries == discovered

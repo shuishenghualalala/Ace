@@ -16,24 +16,32 @@ function config(profiles: ModelOption[]): BackendConfig {
 }
 
 describe('first-use model tour eligibility', () => {
-  it('shows for an account that only sees built-in models', () => {
-    expect(hasUserConfiguredModel(config([
-      { id: 'default', name: 'Default', model: 'default', has_key: false, loaded: true, builtin: true },
-    ]))).toBe(false);
-  });
-
-  it('does not show after the account adds a private model', () => {
-    expect(hasUserConfiguredModel(config([
-      { id: 'default', name: 'Default', model: 'default', has_key: false, loaded: true, builtin: true },
-      { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat', has_key: true, loaded: true, builtin: false },
-    ]))).toBe(true);
-  });
-
-  it('still shows when a private model record has no API key', () => {
-    expect(hasUserConfiguredModel(config([
-      { id: 'default', name: 'Default', model: 'default', has_key: false, loaded: true, builtin: true },
-      { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat', has_key: false, loaded: true, builtin: false },
-    ]))).toBe(false);
+  it.each([
+    {
+      name: 'shows for an account that only sees built-in models',
+      profiles: [
+        { id: 'default', name: 'Default', model: 'default', has_key: false, loaded: true, builtin: true },
+      ],
+      expected: false,
+    },
+    {
+      name: 'does not show after the account adds a private model',
+      profiles: [
+        { id: 'default', name: 'Default', model: 'default', has_key: false, loaded: true, builtin: true },
+        { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat', has_key: true, loaded: true, builtin: false },
+      ],
+      expected: true,
+    },
+    {
+      name: 'still shows when a private model record has no API key',
+      profiles: [
+        { id: 'default', name: 'Default', model: 'default', has_key: false, loaded: true, builtin: true },
+        { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat', has_key: false, loaded: true, builtin: false },
+      ],
+      expected: false,
+    },
+  ])('$name', ({ profiles, expected }) => {
+    expect(hasUserConfiguredModel(config(profiles))).toBe(expected);
   });
 });
 

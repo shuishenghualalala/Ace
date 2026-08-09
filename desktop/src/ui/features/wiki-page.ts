@@ -416,6 +416,42 @@ function errMsg(err: unknown): string {
   return (err as Error).message;
 }
 
+// ── 详情面板多 Tab ──
+
+/** 详情面板顶部打开的 tab：Wiki 页面或 vault 文档（Home.md/index.md）。 */
+export type WikiOpenTab = { kind: 'page'; id: string } | { kind: 'doc'; name: 'Home.md' | 'index.md' };
+
+/** tab 的稳定标识（DOM data-* 与详情签名比对共用）。 */
+function tabKey(tab: WikiOpenTab): string {
+  return tab.kind === 'page' ? `page:${tab.id}` : `doc:${tab.name}`;
+}
+
+/** 追加 tab（同 key 去重，已存在时返回原数组）。 */
+function openTabUnique(tabs: WikiOpenTab[], tab: WikiOpenTab): WikiOpenTab[] {
+  return tabs.some((t) => tabKey(t) === tabKey(tab)) ? tabs : [...tabs, tab];
+}
+
+/** 关闭 tab：返回新列表与下一个激活 key；关闭激活 tab 时相邻优先右侧，无相邻则为 null。 */
+function closeTabByKey(
+  tabs: WikiOpenTab[],
+  key: string,
+  activeKey: string | null,
+): { tabs: WikiOpenTab[]; nextActiveKey: string | null } {
+  const index = tabs.findIndex((t) => tabKey(t) === key);
+  if (index < 0) return { tabs, nextActiveKey: activeKey };
+  const next = tabs.filter((_, i) => i !== index);
+  if (activeKey !== key) return { tabs: next, nextActiveKey: activeKey };
+  const neighbor = next[index] ?? next[index - 1] ?? null;
+  return { tabs: next, nextActiveKey: neighbor ? tabKey(neighbor) : null };
+}
+
+/** 当前激活 tab 的 key（未打开任何详情时为 null）。 */
+function activeTabKey(): string | null {
+  if (view.selectedId) return `page:${view.selectedId}`;
+  if (view.selectedDocumentName) return `doc:${view.selectedDocumentName}`;
+  return null;
+}
+
 // ── 页面视图状态 ──
 
 interface WikiViewState {
@@ -430,6 +466,8 @@ interface WikiViewState {
   view: WikiListView;
   selectedId: string | null;
   selectedDocumentName: 'Home.md' | 'index.md' | null;
+  /** 详情面板顶部已打开的 tab（页面 + vault 文档，按打开顺序排列）。 */
+  openTabs: WikiOpenTab[];
   vaultDocument: WikiVaultDocument | null;
   /** vault 文档（Home.md/index.md）加载中标记。 */
   detailLoading: boolean;
@@ -466,6 +504,7 @@ function initialViewState(): WikiViewState {
     view: 'timeline',
     selectedId: null,
     selectedDocumentName: null,
+    openTabs: [],
     vaultDocument: null,
     detailLoading: false,
     pageDetails: {},
@@ -967,6 +1006,26 @@ export function decorateHomeQuestions(container: HTMLElement): void {
   list?.remove();
 }
 
+/** 详情面板顶部的多 tab 栏（pill chip，视觉对齐 Inspector 的 workspace tab；无打开 tab 时不渲染）。 */
+function wikiTabsHtml(): string {
+  if (view.openTabs.length === 0) return '';
+  const active = activeTabKey();
+  const chips = view.openTabs
+    .map((tab) => {
+      const key = tabKey(tab);
+      const title =
+        tab.kind === 'doc'
+          ? vaultDocumentLabel(tab.name)
+          : view.pageDetails[tab.id]?.title ?? view.pages.find((p) => p.id === tab.id)?.title ?? tab.id;
+      return `<div class="wiki-tab${key === active ? ' is-active' : ''}">
+        <button type="button" class="wiki-tab__select" data-wiki-tab="${escapeHtml(key)}" title="${escapeHtml(title)}"><span class="wiki-tab__label">${escapeHtml(title)}</span></button>
+        <button type="button" class="wiki-tab__close" data-wiki-tab-close="${escapeHtml(key)}" title="关闭" aria-label="关闭 ${escapeHtml(title)}">×</button>
+      </div>`;
+    })
+    .join('');
+  return `<div id="wiki-page-tabs" role="tablist">${chips}</div>`;
+}
+
 function detailHtml(): string {
   if (view.selectedDocumentName) {
     if (view.detailLoading || !view.vaultDocument) {
@@ -1149,6 +1208,8 @@ interface DetailSig {
   sourceTitles: WikiSourceTitles;
   kbSummary: { summary: string; page_count?: number | undefined; source_count?: number | undefined; generated_at?: number | undefined; status: string } | null;
   loading: boolean;
+  /** 已打开 tab 列表 + 激活 tab：tab 增删/切换时详情子树需重建 tab 栏。 */
+  tabsKey: string;
 }
 
 function currentDetailSig(): DetailSig {
@@ -1159,6 +1220,7 @@ function currentDetailSig(): DetailSig {
     sourceTitles: view.sourceTitles,
     kbSummary: selectedId ? null : view.kbSummary,
     loading: selectedId ? loadingDetails.has(selectedId) : false,
+    tabsKey: `${view.openTabs.map(tabKey).join('|')}#${activeTabKey() ?? ''}`,
   };
 }
 
@@ -1170,7 +1232,8 @@ function sameDetailSig(a: DetailSig, b: DetailSig): boolean {
     a.kbSummary?.summary === b.kbSummary?.summary &&
     a.kbSummary?.page_count === b.kbSummary?.page_count &&
     a.kbSummary?.source_count === b.kbSummary?.source_count &&
-    a.loading === b.loading
+    a.loading === b.loading &&
+    a.tabsKey === b.tabsKey
   );
 }
 
@@ -1268,7 +1331,7 @@ function renderShell(): void {
           ${graphMode
             ? '<div class="wiki-sash wiki-sash--inner" data-wiki-graph-canvas-sash role="separator" aria-orientation="vertical" title="拖拽调整图谱宽度，双击恢复弹性比例"></div>'
             : '<div class="wiki-sash wiki-sash--inner" data-wiki-catalog-sash role="separator" aria-orientation="vertical" title="拖拽调整目录宽度，双击复位"></div>'}
-          <div class="wiki-detail-pane">${detailHtml()}</div>
+          <div class="wiki-detail-pane">${wikiTabsHtml()}${detailHtml()}</div>
         </div>
       </div>`;
   }
@@ -1526,6 +1589,7 @@ function selectWikiPage(pageId: string, opts?: { expandTree?: boolean }): void {
   const hadDocument = view.selectedDocumentName !== null;
   view.selectedDocumentName = null;
   view.vaultDocument = null;
+  view.openTabs = openTabUnique(view.openTabs, { kind: 'page', id: pageId });
   if (pageId === view.selectedId) {
     // 已选中但详情停在文档态时，重渲染让详情切回页面。
     if (hadDocument) renderShell();
@@ -1555,6 +1619,7 @@ async function loadVaultDocument(name: 'Home.md' | 'index.md'): Promise<void> {
   view.selectedId = null;
   view.selectedDocumentName = name;
   view.vaultDocument = null;
+  view.openTabs = openTabUnique(view.openTabs, { kind: 'doc', name });
   view.detailLoading = true;
   renderShell();
   try {
@@ -1570,6 +1635,44 @@ async function loadVaultDocument(name: 'Home.md' | 'index.md'): Promise<void> {
     if (seq === loadSeq) view.detailLoading = false;
   }
   renderShell();
+}
+
+/**
+ * 关闭详情面板顶部的一个 tab。关闭激活 tab 时切到相邻 tab（右侧优先）；
+ * 有未保存编辑时先弹确认（确认即保存后关闭），关闭非激活 tab 只更新 tab 栏。
+ */
+async function closeWikiTab(key: string): Promise<void> {
+  const activeKey = activeTabKey();
+  const closingActive = activeKey !== null && key === activeKey;
+  if (closingActive && detailDirty && view.selectedId) {
+    const confirmed = await showConfirmDialog({
+      title: '关闭页面',
+      message: '当前页面有未保存的修改，关闭前需要先保存。',
+      confirmText: '保存并关闭',
+    });
+    if (!confirmed) return;
+    await saveWikiPageDraft(view.selectedId);
+  }
+  const { tabs, nextActiveKey } = closeTabByKey(view.openTabs, key, activeKey);
+  view.openTabs = tabs;
+  if (!closingActive) {
+    // 关闭非激活 tab：编辑器与当前详情不动，仅 tab 栏重渲染。
+    renderShell();
+    return;
+  }
+  const next = tabs.find((t) => tabKey(t) === nextActiveKey);
+  if (next?.kind === 'page') {
+    selectWikiPage(next.id);
+  } else if (next?.kind === 'doc') {
+    void loadVaultDocument(next.name);
+  } else {
+    // 最后一个 tab 被关掉：回到空态。
+    view.selectedId = null;
+    view.selectedDocumentName = null;
+    view.vaultDocument = null;
+    disposeDetailEditor();
+    renderShell();
+  }
 }
 
 /** KB 概览只用于详情空态展示，失败静默（不打扰主流程）。 */
@@ -1595,6 +1698,7 @@ async function reloadAll(): Promise<void> {
   view.selectedId = null;
   view.selectedDocumentName = null;
   view.vaultDocument = null;
+  view.openTabs = [];
   view.detailLoading = false;
   view.pageDetails = {};
   view.sourcePages = {};
@@ -1968,6 +2072,27 @@ function bindEvents(): void {
     if (name !== 'Home.md' && name !== 'index.md') return;
     if (name === view.selectedDocumentName && view.vaultDocument) return;
     void loadVaultDocument(name);
+  });
+
+  // ── 详情面板多 tab ──
+  onClick('[data-wiki-tab]', (btn) => {
+    const key = btn.getAttribute('data-wiki-tab') ?? '';
+    if (!key || key === activeTabKey()) return;
+    const tab = view.openTabs.find((t) => tabKey(t) === key);
+    if (!tab) return;
+    if (tab.kind === 'page') {
+      selectWikiPage(tab.id);
+    } else {
+      // 切到只读 vault 文档前 flush 脏编辑（loadVaultDocument 自身不做，对齐 selectWikiPage 的行为）。
+      if (view.selectedId && detailEditorHandle && detailDirty) void saveWikiPageDraft(view.selectedId);
+      void loadVaultDocument(tab.name);
+    }
+  });
+  onClick('[data-wiki-tab-close]', (btn, e) => {
+    // 关闭按钮在 chip 内部，阻止冒泡避免触发激活。
+    e.stopPropagation();
+    const key = btn.getAttribute('data-wiki-tab-close') ?? '';
+    if (key) void closeWikiTab(key);
   });
 
   onClick('[data-tree-path]', (btn) => {

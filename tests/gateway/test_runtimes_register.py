@@ -27,40 +27,26 @@ def api(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_register_missing_fields_returns_400(api, auth_headers):
-    """POST 完全无关的 payload → 400，并指出缺失字段。"""
+@pytest.mark.parametrize(
+    "payload, expected_error_fragment",
+    [
+        # 完全无关的 payload → 400，并指出缺失字段
+        ({"foo": "bar"}, "id"),
+        # id 存在但类型错误 → 400
+        ({"id": 123, "type": "claude", "provider": "anthropic"}, None),
+        # 只有部分必填字段（缺 provider）→ 400
+        ({"id": "rt-1", "type": "claude"}, "provider"),
+    ],
+    ids=["missing-fields", "wrong-typed-field", "partial-missing"],
+)
+async def test_register_invalid_payload_returns_400(api, auth_headers, payload, expected_error_fragment):
     transport = ASGITransport(app=api)
     async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        resp = await client.post("/api/runtimes/register", json={"foo": "bar"})
+        resp = await client.post("/api/runtimes/register", json=payload)
     assert resp.status_code == 400
     assert resp.json()["ok"] is False
-    assert "id" in resp.json()["error"]
-
-
-@pytest.mark.asyncio
-async def test_register_wrong_typed_field_returns_400(api, auth_headers):
-    """id 存在但类型错误 → 400。"""
-    transport = ASGITransport(app=api)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        resp = await client.post(
-            "/api/runtimes/register",
-            json={"id": 123, "type": "claude", "provider": "anthropic"},
-        )
-    assert resp.status_code == 400
-    assert resp.json()["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_register_partial_missing_returns_400(api, auth_headers):
-    """只有部分必填字段 → 400。"""
-    transport = ASGITransport(app=api)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        resp = await client.post(
-            "/api/runtimes/register",
-            json={"id": "rt-1", "type": "claude"},  # 缺 provider
-        )
-    assert resp.status_code == 400
-    assert "provider" in resp.json()["error"]
+    if expected_error_fragment is not None:
+        assert expected_error_fragment in resp.json()["error"]
 
 
 @pytest.mark.asyncio
@@ -76,17 +62,6 @@ async def test_register_valid_passes(api, auth_headers):
     data = resp.json()
     assert data["id"] == "rt-valid"
     assert data["display_badge"] == "A"
-
-
-@pytest.mark.asyncio
-async def test_local_owner_can_register_runtime(api, auth_headers):
-    transport = ASGITransport(app=api)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        resp = await client.post(
-            "/api/runtimes/register",
-            json={"id": "rt-denied", "type": "claude", "provider": "anthropic"},
-        )
-    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio

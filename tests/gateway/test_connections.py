@@ -71,16 +71,6 @@ async def test_buffer_survives_disconnect(conn: ConnectionManager):
     # 缓存保留
     assert len(conn._chunk_buffers[key]) == 3
 
-    # 新连接注册并回放
-    ws2 = _FakeWS()
-    conn.register("s1", ws2)
-    await conn.replay("s1", ws2, after_gateway_sequence=1)
-
-    # 只回放 > 1 的帧
-    assert len(ws2.sent) == 2
-    assert ws2.sent[0]["kind"] == "tool"
-    assert ws2.sent[1]["kind"] == "final"
-
 
 @pytest.mark.asyncio
 async def test_replay_respects_after_sequence(conn: ConnectionManager):

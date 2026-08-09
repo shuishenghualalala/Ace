@@ -25,6 +25,7 @@ vi.mock('../../src/ui/ui-feedback', () => ({
 }));
 
 import { createSecurityCenterView } from '../../src/ui/features/security-center-view';
+import type { SecurityCenterActions } from '../../src/ui/features/security-center-view';
 import {
   __resetSecurityCenterForTest,
   initSecurityPage,
@@ -39,6 +40,21 @@ const capabilities = {
   detail: 'Windows runtime 已就绪',
 };
 
+function makeHandlers(overrides: Partial<SecurityCenterActions> = {}): SecurityCenterActions {
+  return {
+    onRefresh: vi.fn(),
+    onStrictSecurityChange: vi.fn(),
+    onModeChange: vi.fn(),
+    onInstall: vi.fn(),
+    onUninstall: vi.fn(),
+    onRuleToggle: vi.fn(),
+    onRuleDelete: vi.fn(),
+    onAuditExport: vi.fn(),
+    onAuditPurge: vi.fn(),
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   showConfirmDialogMock.mockClear();
   showConfirmDialogMock.mockResolvedValue(true);
@@ -48,17 +64,7 @@ beforeEach(() => {
 
 describe('Security Center view', () => {
   it('can render inside the audit page without a second page header', () => {
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    }, { embedded: true });
+    const view = createSecurityCenterView(makeHandlers(), { embedded: true });
 
     expect(view.element.classList.contains('security-center--embedded')).toBe(true);
     expect(view.element.querySelector('.page-header')).toBeNull();
@@ -66,17 +72,7 @@ describe('Security Center view', () => {
 
   it('explains mode consequences and renders exact rule scope as text', () => {
     const onModeChange = vi.fn();
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange,
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+    const view = createSecurityCenterView(makeHandlers({ onModeChange }));
     view.update({
       loading: false,
       error: '',
@@ -111,17 +107,7 @@ describe('Security Center view', () => {
   });
 
   it('disables Windows setup actions with an explicit reason on unsupported platforms', () => {
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+    const view = createSecurityCenterView(makeHandlers());
     view.update({
       loading: false,
       error: '',
@@ -139,17 +125,7 @@ describe('Security Center view', () => {
   });
 
   it('keeps only the applicable Windows setup action enabled', () => {
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+    const view = createSecurityCenterView(makeHandlers());
     view.update({
       loading: false,
       error: '',
@@ -185,17 +161,7 @@ describe('Security Center view', () => {
   });
 
   it('locks both Windows setup actions while one operation is in progress', () => {
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+    const view = createSecurityCenterView(makeHandlers());
     view.update({
       loading: false,
       setupAction: 'install',
@@ -217,17 +183,7 @@ describe('Security Center view', () => {
 
   it('hides the strict security toggle while Crew auth allows plaintext HTTP', () => {
     const onStrictSecurityChange = vi.fn();
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange,
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+    const view = createSecurityCenterView(makeHandlers({ onStrictSecurityChange }));
     view.update({
       loading: false,
       error: '',
@@ -249,18 +205,7 @@ describe('Security Center view', () => {
 
   it('filters and sorts audit rows, then opens a redacted detail dialog', () => {
     const onAuditQueryChange = vi.fn();
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-      onAuditQueryChange,
-    });
+    const view = createSecurityCenterView(makeHandlers({ onAuditQueryChange }));
     view.update({
       loading: false,
       error: '',

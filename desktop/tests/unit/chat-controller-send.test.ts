@@ -68,10 +68,10 @@ beforeEach(() => {
     <section id="welcome-panel"></section>
     <section id="chat-panel" hidden>
       <div id="chat-messages"></div>
-      <div id="chat-queue-slot"></div>
+      <div class="chat-queue-slot"></div>
       <div id="composer-controls"></div>
-      <div id="chat-running-intro"></div>
-      <textarea id="chat-input"></textarea>
+      <div class="chat-running-intro"></div>
+      <textarea data-composer-input></textarea>
     </section>
   `;
 });

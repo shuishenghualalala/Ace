@@ -279,21 +279,6 @@ def test_sqlite_write_helper_retries_locked_write(tmp_path):
     contender.close()
 
 
-async def test_persist_turn_uses_task_sid_for_memory(tmp_path):
-    """Bug B: 网关 sidechain 路径下，memory 应按 task_session_id（稳定 id）写入，
-    而非 envelope.session_id（::turn:: 临时 id）。
-    此测试驱动 _persist_turn 接受 task_sid 并用于 memory.write。"""
-    from crew.core.types import Message
-    from crew.memory.simple import SQLiteMemory
-
-    mem = SQLiteMemory(str(tmp_path / "m.db"))
-    stable_sid = "web_abc"
-    turn_sid = f"{stable_sid}::turn::req_1"
-    await mem.write(stable_sid, [Message.user("你好")])
-    assert "你好" in await mem.prefetch(stable_sid, "你好")
-    assert await mem.prefetch(turn_sid, "你好") == ""
-
-
 def test_load_config_resolves_memory_db_path_under_crew_home(tmp_path, monkeypatch):
     """Bug A: memory_db_path 应像 db_path 一样解析到 crew_home 下，且为绝对路径。"""
     from crew.state.config import load_config

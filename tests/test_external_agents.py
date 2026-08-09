@@ -1013,16 +1013,57 @@ def _fake_hermes(tmp_path):
     return script
 
 
-def test_scan_kimi_runtime_uses_env_path(tmp_path, monkeypatch):
-    kimi = _fake_kimi(tmp_path)
-    monkeypatch.setenv("CREW_KIMI_PATH", str(kimi))
+@pytest.mark.parametrize(
+    ("fake_factory", "env_var", "scan_fn", "provider", "expected_version", "expected_protocol"),
+    [
+        pytest.param(_fake_kimi, "CREW_KIMI_PATH", scan_kimi_runtime, "kimi", "kimi 1.2.3", None, id="kimi"),
+        pytest.param(
+            lambda tmp_path: _fake_cli(tmp_path, "codex", "codex 0.42.0"),
+            "CREW_CODEX_PATH",
+            scan_codex_runtime,
+            "codex",
+            "codex 0.42.0",
+            "cli",
+            id="codex",
+        ),
+        pytest.param(
+            lambda tmp_path: _fake_cli(tmp_path, "claude", "claude 2.0.0"),
+            "CREW_CLAUDE_ACP_PATH",
+            scan_claude_runtime,
+            "claude",
+            "claude 2.0.0",
+            "acp",
+            id="claude",
+        ),
+        pytest.param(_fake_hermes, "CREW_HERMES_PATH", scan_hermes_runtime, "hermes", None, "acp", id="hermes"),
+    ],
+)
+def test_scan_runtime_uses_env_path(
+    tmp_path,
+    monkeypatch,
+    fake_factory,
+    env_var,
+    scan_fn,
+    provider,
+    expected_version,
+    expected_protocol,
+):
+    executable = fake_factory(tmp_path)
+    monkeypatch.setenv(env_var, str(executable))
 
-    runtime = scan_kimi_runtime()
+    runtime = scan_fn()
 
     assert runtime is not None
-    assert runtime.provider == "kimi"
-    assert runtime.executable_path == str(kimi)
-    assert runtime.version == "kimi 1.2.3"
+    assert runtime.provider == provider
+    assert runtime.executable_path == str(executable)
+    if expected_version is not None:
+        assert runtime.version == expected_version
+    if expected_protocol is not None:
+        assert runtime.protocol == expected_protocol
+    if provider == "codex":
+        assert runtime.name == "Codex"
+        assert runtime.metadata["descriptor_id"] == "builtin:codex"
+        assert runtime.metadata["adapter_id"] == "codex-app-server"
 
 
 def test_windows_runtime_search_dirs_and_executable_rules(tmp_path, monkeypatch):
@@ -1062,22 +1103,6 @@ def test_process_launcher_uses_platform_specific_isolation(monkeypatch):
     assert process_lifecycle.isolated_process_kwargs(platform_name="posix") == {
         "start_new_session": True,
     }
-
-
-def test_scan_codex_runtime_uses_env_path(tmp_path, monkeypatch):
-    codex = _fake_cli(tmp_path, "codex", "codex 0.42.0")
-    monkeypatch.setenv("CREW_CODEX_PATH", str(codex))
-
-    runtime = scan_codex_runtime()
-
-    assert runtime is not None
-    assert runtime.provider == "codex"
-    assert runtime.name == "Codex"
-    assert runtime.executable_path == str(codex)
-    assert runtime.version == "codex 0.42.0"
-    assert runtime.protocol == "cli"
-    assert runtime.metadata["descriptor_id"] == "builtin:codex"
-    assert runtime.metadata["adapter_id"] == "codex-app-server"
 
 
 def test_scan_runtimes_returns_kimi_and_codex(tmp_path, monkeypatch):
@@ -1334,19 +1359,6 @@ def test_login_shell_resolution_skips_unsupported_shell(monkeypatch):
     assert detector._login_shell_executables({"claude"}) == {}
 
 
-def test_scan_claude_runtime_uses_env_path(tmp_path, monkeypatch):
-    claude = _fake_cli(tmp_path, "claude", "claude 2.0.0")
-    monkeypatch.setenv("CREW_CLAUDE_ACP_PATH", str(claude))
-
-    runtime = scan_claude_runtime()
-
-    assert runtime is not None
-    assert runtime.provider == "claude"
-    assert runtime.executable_path == str(claude)
-    assert runtime.version == "claude 2.0.0"
-    assert runtime.protocol == "acp"
-
-
 def test_discover_local_runtimes_probes_acp_and_cli_models(tmp_path, monkeypatch):
     kimi = _fake_kimi(tmp_path)
     codex = _fake_cli(tmp_path, "codex", "codex 0.42.0")
@@ -1384,18 +1396,6 @@ def test_kimi_acp_falls_back_to_local_cli_model_catalog(tmp_path, monkeypatch):
     assert profile.models[1].thinking_levels == ("max",)
     assert profile.probe is not None
     assert profile.probe.source == "acp_session_new+kimi_provider_list"
-
-
-def test_scan_hermes_runtime_uses_env_path(tmp_path, monkeypatch):
-    hermes = _fake_hermes(tmp_path)
-    monkeypatch.setenv("CREW_HERMES_PATH", str(hermes))
-
-    runtime = scan_hermes_runtime()
-
-    assert runtime is not None
-    assert runtime.provider == "hermes"
-    assert runtime.executable_path == str(hermes)
-    assert runtime.protocol == "acp"
 
 
 def test_scan_codex_runtime_skips_warning_version_lines(tmp_path, monkeypatch):
@@ -2066,23 +2066,30 @@ def test_runtime_sync_only_marks_discovery_managed_runtime_unavailable(tmp_path)
     assert runtimes["discovered-runtime"]["metadata"]["availability_status"] == "unavailable"
 
 
-def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    old_runtime = store.upsert_runtime({
-        "id": "hermes-old-path",
+def _hermes_runtime(runtime_id: str, executable_path: str, metadata: dict) -> dict:
+    """构造 sync_runtimes 场景下的 hermes runtime 字典。"""
+    return {
+        "id": runtime_id,
         "provider": "hermes",
         "name": "Hermes",
-        "executable_path": "/old/bin/hermes",
+        "executable_path": executable_path,
         "protocol": "acp",
         "metadata": {
             "runtime_profile_version": 1,
-            "runtime_descriptor_source": "builtin",
-            "adapter_id": "acp-stdio",
-            "availability_status": "ready",
-            "default_model_id": "hermes/default",
-            "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
+            **metadata,
         },
-    })
+    }
+
+
+def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    old_runtime = store.upsert_runtime(_hermes_runtime("hermes-old-path", "/old/bin/hermes", {
+        "runtime_descriptor_source": "builtin",
+        "adapter_id": "acp-stdio",
+        "availability_status": "ready",
+        "default_model_id": "hermes/default",
+        "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
+    }))
     agent = store.create_agent(
         owner_account_id="owner-a",
         name="Hermes Agent",
@@ -2103,22 +2110,14 @@ def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path)
         adapter_id="acp-stdio",
         native_session_id="native-old",
     )
-    new_runtime = {
-        "id": "hermes-new-path",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": "/new/venv/bin/hermes",
-        "protocol": "acp",
-        "metadata": {
-            "runtime_profile_version": 1,
-            "runtime_descriptor_source": "builtin",
-            "descriptor_id": "builtin:hermes",
-            "adapter_id": "acp-stdio",
-            "availability_status": "ready",
-            "default_model_id": "hermes/default",
-            "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
-        },
-    }
+    new_runtime = _hermes_runtime("hermes-new-path", "/new/venv/bin/hermes", {
+        "runtime_descriptor_source": "builtin",
+        "descriptor_id": "builtin:hermes",
+        "adapter_id": "acp-stdio",
+        "availability_status": "ready",
+        "default_model_id": "hermes/default",
+        "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
+    })
 
     runtimes = {runtime["id"]: runtime for runtime in store.sync_runtimes([new_runtime])}
 
@@ -2142,37 +2141,21 @@ def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path)
 
 def test_runtime_sync_does_not_guess_between_multiple_replacements(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    old_runtime = store.upsert_runtime({
-        "id": "hermes-old-path",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": "/old/bin/hermes",
-        "protocol": "acp",
-        "metadata": {
-            "runtime_profile_version": 1,
-            "runtime_descriptor_source": "builtin",
-            "availability_status": "ready",
-        },
-    })
+    old_runtime = store.upsert_runtime(_hermes_runtime("hermes-old-path", "/old/bin/hermes", {
+        "runtime_descriptor_source": "builtin",
+        "availability_status": "ready",
+    }))
     agent = store.create_agent(
         name="Hermes Agent",
         runtime_id=old_runtime["id"],
     )
 
     def replacement(runtime_id: str, path: str) -> dict:
-        return {
-            "id": runtime_id,
-            "provider": "hermes",
-            "name": "Hermes",
-            "executable_path": path,
-            "protocol": "acp",
-            "metadata": {
-                "runtime_profile_version": 1,
-                "runtime_descriptor_source": "builtin",
-                "descriptor_id": "builtin:hermes",
-                "availability_status": "ready",
-            },
-        }
+        return _hermes_runtime(runtime_id, path, {
+            "runtime_descriptor_source": "builtin",
+            "descriptor_id": "builtin:hermes",
+            "availability_status": "ready",
+        })
 
     runtimes = {
         runtime["id"]: runtime
@@ -2189,44 +2172,28 @@ def test_runtime_sync_does_not_guess_between_multiple_replacements(tmp_path):
 
 def test_runtime_sync_retires_legacy_path_when_unique_replacement_is_degraded(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    old_runtime = store.upsert_runtime({
-        "id": "hermes-old-path",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": "/old/bin/hermes",
-        "protocol": "acp",
-        "metadata": {
-            "runtime_profile_version": 1,
-            "availability_status": "ready",
-            "default_model_id": "hermes/default",
-            "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
-        },
-    })
+    old_runtime = store.upsert_runtime(_hermes_runtime("hermes-old-path", "/old/bin/hermes", {
+        "availability_status": "ready",
+        "default_model_id": "hermes/default",
+        "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
+    }))
     agent = store.create_agent(
         owner_account_id="owner-a",
         name="Hermes Agent",
         runtime_id=old_runtime["id"],
         model="hermes/default",
     )
-    degraded_runtime = {
-        "id": "hermes-new-path",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": "/new/venv/bin/hermes",
-        "protocol": "acp",
-        "metadata": {
-            "runtime_profile_version": 1,
-            "runtime_descriptor_source": "builtin",
-            "descriptor_id": "builtin:hermes",
-            "adapter_id": "acp-stdio",
-            "availability_status": "degraded",
-            "models": [],
-            "probe": {
-                "error_code": "probe_failed",
-                "message": "hermes 运行时探测超时",
-            },
+    degraded_runtime = _hermes_runtime("hermes-new-path", "/new/venv/bin/hermes", {
+        "runtime_descriptor_source": "builtin",
+        "descriptor_id": "builtin:hermes",
+        "adapter_id": "acp-stdio",
+        "availability_status": "degraded",
+        "models": [],
+        "probe": {
+            "error_code": "probe_failed",
+            "message": "hermes 运行时探测超时",
         },
-    }
+    })
 
     runtimes = {runtime["id"]: runtime for runtime in store.sync_runtimes([degraded_runtime])}
 
@@ -3304,19 +3271,31 @@ async def test_acp_skips_redundant_model_update_for_any_runtime(tmp_path, resume
     assert output == "model unchanged"
 
 
-async def test_acp_executor_uses_external_task_payload_for_single_agent(tmp_path, monkeypatch):
-    from crew.agent.external.acp_adapter import AcpStreamEvent
-
+def _payload_agent(tmp_path, runtime_id: str, agent_name: str):
+    """构造 ExternalAgentStore + kimi acp runtime + agent，供 payload 测试复用。"""
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
-        "id": "kimi_payload_single",
+        "id": runtime_id,
         "provider": "kimi",
         "name": "Kimi",
         "executable_path": str(tmp_path / "kimi"),
         "version": "1.2.3",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Kimi Payload", runtime_id=runtime["id"])
+    agent = store.create_agent(name=agent_name, runtime_id=runtime["id"])
+    return store, agent
+
+
+async def _run_executor(monkeypatch, fake_stream, ctx, executor_config):
+    """以 fake_stream 替换 ACP 流并收集执行产生的全部 chunk。"""
+    monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
+    return [chunk async for chunk in AcpExecutor(executor_config).execute(ctx)]
+
+
+async def test_acp_executor_uses_external_task_payload_for_single_agent(tmp_path, monkeypatch):
+    from crew.agent.external.acp_adapter import AcpStreamEvent
+
+    store, agent = _payload_agent(tmp_path, "kimi_payload_single", "Kimi Payload")
     seen: dict[str, str] = {}
 
     async def fake_stream(prompt, config):
@@ -3325,7 +3304,6 @@ async def test_acp_executor_uses_external_task_payload_for_single_agent(tmp_path
         yield AcpStreamEvent(kind="thinking", text="先核对测试范围。")
         yield AcpStreamEvent(kind="text", text="ok")
 
-    monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
     ctx = ExecutionContext(
         session_id="crew_s1",
         request_id="r",
@@ -3335,13 +3313,11 @@ async def test_acp_executor_uses_external_task_payload_for_single_agent(tmp_path
         cwd=str(tmp_path),
     )
 
-    chunks = [
-        chunk async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-            "model": "kimi-code/k3",
-        }).execute(ctx)
-    ]
+    chunks = await _run_executor(monkeypatch, fake_stream, ctx, {
+        "external_agent_id": agent["id"],
+        "external_store": store,
+        "model": "kimi-code/k3",
+    })
 
     assert chunks[-1].kind == "final"
     assert any(chunk.kind == "thinking" and chunk.body["text"] == "先核对测试范围。" for chunk in chunks)
@@ -3357,16 +3333,7 @@ async def test_acp_executor_uses_external_task_payload_for_single_agent(tmp_path
 async def test_acp_executor_uses_team_chat_payload_for_team_leader(tmp_path, monkeypatch):
     from crew.agent.external.acp_adapter import AcpStreamEvent
 
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_payload_leader_chat",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(tmp_path / "kimi"),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
-    agent = store.create_agent(name="Kimi Team Leader", runtime_id=runtime["id"])
+    store, agent = _payload_agent(tmp_path, "kimi_payload_leader_chat", "Kimi Team Leader")
     seen: dict[str, str] = {}
 
     async def fake_stream(prompt, config):
@@ -3374,7 +3341,6 @@ async def test_acp_executor_uses_team_chat_payload_for_team_leader(tmp_path, mon
         seen["system_prompt"] = config.system_prompt
         yield AcpStreamEvent(kind="text", text="ok")
 
-    monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
     ctx = ExecutionContext(
         session_id="team_s1::leader",
         request_id="r",
@@ -3391,15 +3357,13 @@ async def test_acp_executor_uses_team_chat_payload_for_team_leader(tmp_path, mon
         cwd=str(tmp_path),
     )
 
-    chunks = [
-        chunk async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-            "crew_session_id": "team_s1::leader",
-            "display_session_id": "team_s1",
-            "control_session_id": "team_s1",
-        }).execute(ctx)
-    ]
+    chunks = await _run_executor(monkeypatch, fake_stream, ctx, {
+        "external_agent_id": agent["id"],
+        "external_store": store,
+        "crew_session_id": "team_s1::leader",
+        "display_session_id": "team_s1",
+        "control_session_id": "team_s1",
+    })
 
     assert chunks[-1].kind == "final"
     assert "- team_role: leader" in seen["prompt"]
@@ -3415,16 +3379,7 @@ async def test_acp_executor_uses_team_chat_payload_for_team_leader(tmp_path, mon
 async def test_acp_executor_uses_external_task_payload_for_team_member(tmp_path, monkeypatch):
     from crew.agent.external.acp_adapter import AcpStreamEvent
 
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_payload_team",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(tmp_path / "kimi"),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
-    agent = store.create_agent(name="Kimi Team Payload", runtime_id=runtime["id"])
+    store, agent = _payload_agent(tmp_path, "kimi_payload_team", "Kimi Team Payload")
     seen: dict[str, object] = {}
 
     async def fake_stream(prompt, config):
@@ -3435,7 +3390,6 @@ async def test_acp_executor_uses_external_task_payload_for_team_member(tmp_path,
         yield AcpStreamEvent(kind="thinking", text="先核对团队测试范围。")
         yield AcpStreamEvent(kind="text", text="ok")
 
-    monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
     ctx = ExecutionContext(
         session_id="team_s1::kk",
         request_id="r",
@@ -3458,15 +3412,13 @@ async def test_acp_executor_uses_external_task_payload_for_team_member(tmp_path,
         cwd=str(tmp_path),
     )
 
-    chunks = [
-        chunk async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-            "crew_session_id": "team_s1::kk",
-            "display_session_id": "team_s1",
-            "control_session_id": "team_s1",
-        }).execute(ctx)
-    ]
+    chunks = await _run_executor(monkeypatch, fake_stream, ctx, {
+        "external_agent_id": agent["id"],
+        "external_store": store,
+        "crew_session_id": "team_s1::kk",
+        "display_session_id": "team_s1",
+        "control_session_id": "team_s1",
+    })
 
     assert chunks[-1].kind == "final"
     assert any(chunk.kind == "thinking" and chunk.body["text"] == "先核对团队测试范围。" for chunk in chunks)

@@ -103,12 +103,24 @@ def test_load_soul_md_exists(crew_home_dir):
     assert "Crew" in content
 
 
-def test_load_soul_md_missing(tmp_path, monkeypatch):
-    """SOUL.md 不存在时返回 None。"""
+@pytest.mark.parametrize(
+    ("loader", "expect_none"),
+    [
+        pytest.param(load_soul_md, True, id="soul"),
+        pytest.param(load_memory_md, False, id="memory"),
+        pytest.param(load_user_md, False, id="user"),
+    ],
+)
+def test_load_md_missing(tmp_path, monkeypatch, loader, expect_none):
+    """SOUL.md/MEMORY.md/USER.md 不存在时按各自约定返回 None 或空串。"""
     empty_home = tmp_path / "empty_crew"
     empty_home.mkdir()
     monkeypatch.setenv("CREW_HOME", str(empty_home))
-    assert load_soul_md() is None
+    result = loader()
+    if expect_none:
+        assert result is None
+    else:
+        assert result == ""
 
 
 def test_load_soul_md_empty(crew_home_dir):
@@ -134,27 +146,11 @@ def test_load_memory_md_empty(crew_home_dir):
     assert content == ""
 
 
-def test_load_memory_md_missing(tmp_path, monkeypatch):
-    """MEMORY.md 不存在时返回空串。"""
-    empty_home = tmp_path / "empty_crew2"
-    empty_home.mkdir()
-    monkeypatch.setenv("CREW_HOME", str(empty_home))
-    assert load_memory_md() == ""
-
-
 def test_load_user_md_exists(crew_home_dir):
     """USER.md 存在且有内容时返回内容。"""
     ensure_crew_home()
     content = load_user_md()
     assert "姓名" in content
-
-
-def test_load_user_md_missing(tmp_path, monkeypatch):
-    """USER.md 不存在时返回空串。"""
-    empty_home = tmp_path / "empty_crew3"
-    empty_home.mkdir()
-    monkeypatch.setenv("CREW_HOME", str(empty_home))
-    assert load_user_md() == ""
 
 
 def test_task_workspace_defaults_under_user_home(tmp_path, monkeypatch):
@@ -536,45 +532,32 @@ def test_refresh_owner_runtime_env_loads_system_and_owner_env(tmp_path, monkeypa
     assert os.environ["CREW_ENV_FILE"] == str(owner_home / ".env")
 
 
-def test_refresh_owner_runtime_env_hot_reloads_system_env(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scope", ["system", "owner"])
+def test_refresh_owner_runtime_env_hot_reloads_env(tmp_path, monkeypatch, scope):
     root = tmp_path / "repo"
     config_dir = root / "config"
     config_dir.mkdir(parents=True)
     crew_home = tmp_path / ".Crew"
     owner = "owner:user-a"
-    (config_dir / ".env").write_text("CREW_HOT_SYSTEM=system-v1\n", encoding="utf-8")
+    key = f"CREW_HOT_{scope.upper()}"
+    if scope == "owner":
+        env_dir = crew_home / "accounts" / owner_path_segment(owner)
+        env_dir.mkdir(parents=True)
+        env_file = env_dir / ".env"
+    else:
+        env_file = config_dir / ".env"
+    env_file.write_text(f"{key}={scope}-v1\n", encoding="utf-8")
     monkeypatch.setattr(home_module, "ROOT", root)
     monkeypatch.setenv("CREW_HOME", str(crew_home))
-    monkeypatch.delenv("CREW_HOT_SYSTEM", raising=False)
+    monkeypatch.delenv(key, raising=False)
 
     refresh_owner_runtime_env(owner)
-    assert os.environ["CREW_HOT_SYSTEM"] == "system-v1"
+    assert os.environ[key] == f"{scope}-v1"
 
-    (config_dir / ".env").write_text("CREW_HOT_SYSTEM=system-v2\n", encoding="utf-8")
+    env_file.write_text(f"{key}={scope}-v2\n", encoding="utf-8")
     refresh_owner_runtime_env(owner)
 
-    assert os.environ["CREW_HOT_SYSTEM"] == "system-v2"
-
-
-def test_refresh_owner_runtime_env_hot_reloads_owner_env(tmp_path, monkeypatch):
-    root = tmp_path / "repo"
-    (root / "config").mkdir(parents=True)
-    crew_home = tmp_path / ".Crew"
-    owner = "owner:user-a"
-    owner_home = crew_home / "accounts" / owner_path_segment(owner)
-    owner_home.mkdir(parents=True)
-    (owner_home / ".env").write_text("CREW_HOT_OWNER=owner-v1\n", encoding="utf-8")
-    monkeypatch.setattr(home_module, "ROOT", root)
-    monkeypatch.setenv("CREW_HOME", str(crew_home))
-    monkeypatch.delenv("CREW_HOT_OWNER", raising=False)
-
-    refresh_owner_runtime_env(owner)
-    assert os.environ["CREW_HOT_OWNER"] == "owner-v1"
-
-    (owner_home / ".env").write_text("CREW_HOT_OWNER=owner-v2\n", encoding="utf-8")
-    refresh_owner_runtime_env(owner)
-
-    assert os.environ["CREW_HOT_OWNER"] == "owner-v2"
+    assert os.environ[key] == f"{scope}-v2"
 
 
 def test_refresh_owner_runtime_env_reuses_unchanged_env_cache(tmp_path, monkeypatch):

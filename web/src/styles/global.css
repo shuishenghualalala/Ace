@@ -6471,6 +6471,82 @@ button { font-family: inherit; cursor: pointer; }
   background: var(--bg-hover);
 }
 
+/* WikiPageTabs：详情面板顶部的多 Tab 栏（视觉对齐 desktop Inspector 的 pill tab） */
+.wiki-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 8px 10px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.wiki-tabs::-webkit-scrollbar { display: none; }
+.wiki-tabs__tab {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 5px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.wiki-tabs__tab:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.wiki-tabs__tab.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+.wiki-tabs__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.wiki-tabs__close {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+}
+.wiki-tabs__close:hover {
+  background: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+/* Tab 栏固定在详情面板顶部，正文区域独立滚动 */
+.wiki-browser__detail.wiki-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.wiki-browser__detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 /* WikiPageView */
 .wiki-page-view {
   padding: 24px;

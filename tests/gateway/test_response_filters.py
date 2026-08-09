@@ -39,24 +39,6 @@ def test_response_filter_chain_multiple():
     assert result == "[PREFIX] test [SUFFIX]"
 
 
-def test_response_filter_chain_error_handling():
-    """测试过滤器异常不中断链。"""
-    chain = ResponseFilterChain()
-
-    def failing_filter(text: str, context: dict) -> str:
-        raise ValueError("intentional failure")
-
-    def success_filter(text: str, context: dict) -> str:
-        return text.upper()
-
-    chain.register("failing", failing_filter)
-    chain.register("success", success_filter)
-
-    # failing_filter 失败后，success_filter 仍执行
-    result = chain.apply("hello", {})
-    assert result == "HELLO"
-
-
 def test_response_filter_chain_unregister():
     """测试移除过滤器。"""
     chain = ResponseFilterChain()
@@ -187,16 +169,16 @@ def test_redact_secrets_failure_returns_safe_placeholder():
 
 
 def test_non_safety_filter_failure_keeps_current():
-    """非安全关键过滤器失败仍保持「继续用当前文本」的宽容行为。"""
+    """非安全关键过滤器失败仍保持「继续用当前文本」的宽容行为，且不中断后续过滤器。"""
     chain = ResponseFilterChain()
 
     def failing(text, context):
         raise ValueError("boom")
 
-    def echo(text, context):
-        return text
+    def shout(text, context):
+        return text.upper()
 
     chain.register("non_critical", failing)
-    chain.register("echo", echo)
-    # failing 失败后继续用 current（原文本），echo 原样返回
-    assert chain.apply("hello world", {}) == "hello world"
+    chain.register("shout", shout)
+    # failing 失败后继续用 current（原文本），后续过滤器仍执行
+    assert chain.apply("hello world", {}) == "HELLO WORLD"

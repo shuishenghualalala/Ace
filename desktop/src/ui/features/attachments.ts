@@ -12,9 +12,11 @@ import {
   removeAttachmentAt,
   state,
 } from '../state';
+import { messageStore } from '../stores/stores';
 import { imageDisplayUrl } from '../tool-screenshot';
 import { showConfirmDialog } from '../ui-feedback';
 import { openImageViewer } from './image-viewer';
+import { queryPrimaryComposer } from './composer-scope';
 
 function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -117,20 +119,57 @@ async function refreshFileQaHint(): Promise<void> {
  * 全程用 DOM 构造（textContent），不走 innerHTML，XSS 安全。
  */
 export function renderAttachmentPreview(): void {
-  const box = $('#chat-attachment-preview');
+  const box = queryPrimaryComposer('[data-attachment-preview]');
   if (!box) return;
-  if (state.attachments.length === 0) {
+  renderAttachmentList(box, state.attachments, removeMainAttachment);
+  void refreshFileQaHint();
+}
+
+/** 把附件列表渲染进指定预览容器：主对话（before-input 槽位）与 Wiki 面板共用同一套卡片结构。 */
+export function renderAttachmentList(
+  box: HTMLElement,
+  attachments: Attachment[],
+  onRemove: (attId: string) => void,
+): void {
+  if (attachments.length === 0) {
     box.replaceChildren();
     box.hidden = true;
-    void refreshFileQaHint();
     return;
   }
   box.hidden = false;
-  box.replaceChildren();
-  for (const a of state.attachments) {
-    box.appendChild(a.type === 'image' ? buildImageCard(a) : buildFileChip(a));
-  }
-  void refreshFileQaHint();
+  box.replaceChildren(...attachments.map((a) => buildAttachmentChip(a, onRemove)));
+}
+
+/** 主对话附件移除：操作全局 state.attachments 并重绘预览（buildRemoveBtn 缺省路径的显式版）。 */
+function removeMainAttachment(attId: string): void {
+  const idx = state.attachments.findIndex((x) => x.id === attId);
+  if (idx >= 0) removeAttachmentAt(idx);
+  renderAttachmentPreview();
+}
+
+/**
+ * 对话面板的附件流抽象（重构计划步骤 4）：主对话包全局 state.attachments，
+ * Wiki 问答面板包自己的 per-KB 附件列表；Composer hasDraft / 预览渲染只面向接口。
+ */
+export interface PanelAttachments {
+  list(): Attachment[];
+  add(files: FileList | File[] | null): Promise<void>;
+  remove(id: string): void;
+  takeForSend(): Attachment[];
+  subscribe(cb: () => void): () => void;
+}
+
+/** 主对话附件 adapter：包现有全局 state.attachments 流（行为不变）。 */
+export function createMainPanelAttachments(): PanelAttachments {
+  return {
+    list: () => [...state.attachments],
+    add: (files) => handleFileSelect(files),
+    remove: removeMainAttachment,
+    takeForSend: takeAttachmentsForSend,
+    subscribe: (cb) => messageStore.subscribe((next, prev) => {
+      if (next.attachments !== prev.attachments) cb();
+    }),
+  };
 }
 
 /** 非图片附件：扩展名图标 + 文件名 + 类型/大小 + 移除。onRemove 缺省时操作主对话附件状态。 */
@@ -238,11 +277,11 @@ export function bindAttachments(): () => void {
     void handleFileSelect(input.files);
     input.value = '';
   }, { signal });
-  const dropZone = $('#chat-input-container');
+  const dropZone = queryPrimaryComposer('.chat-input-container');
   const unbindDrop = dropZone
     ? bindFileDrop(dropZone, (files) => void handleFileSelect(files))
     : () => {};
-  const chatInput = $('#chat-input');
+  const chatInput = queryPrimaryComposer('[data-composer-input]');
   const unbindPaste = chatInput
     ? bindFilePaste(chatInput, (files) => void handleFileSelect(files))
     : () => {};

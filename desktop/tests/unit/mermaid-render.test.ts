@@ -13,10 +13,12 @@ interface MockMermaid {
 }
 
 let resetMermaidLoader: () => void;
+let renderMermaidBlocks: typeof import('../../src/ui/features/mermaid-render').renderMermaidBlocks;
 
 beforeEach(async () => {
   const mod = await import('../../src/ui/features/mermaid-render');
   resetMermaidLoader = mod.resetMermaidLoader;
+  renderMermaidBlocks = mod.renderMermaidBlocks;
   resetMermaidLoader();
   delete (window as unknown as { mermaid?: MockMermaid }).mermaid;
   document.querySelectorAll('script').forEach((s) => s.remove());
@@ -34,7 +36,6 @@ function setMockMermaid(overrides: Partial<MockMermaid> = {}): MockMermaid {
 
 describe('renderMermaidBlocks', () => {
   it('无占位时不加载 mermaid（不创建 script、不调用 initialize）', async () => {
-    const { renderMermaidBlocks } = await import('../../src/ui/features/mermaid-render');
     const m = setMockMermaid();
     const root = document.createElement('div');
     root.innerHTML = '<p>无图</p>';
@@ -44,7 +45,6 @@ describe('renderMermaidBlocks', () => {
   });
 
   it('有占位时调用 run 并标记 rendered', async () => {
-    const { renderMermaidBlocks } = await import('../../src/ui/features/mermaid-render');
     const m = setMockMermaid();
     const root = document.createElement('div');
     root.innerHTML = '<div class="mermaid" data-mermaid>graph TD\nA-->B</div>';
@@ -55,7 +55,6 @@ describe('renderMermaidBlocks', () => {
   });
 
   it('幂等：已 rendered 的占位不重复处理', async () => {
-    const { renderMermaidBlocks } = await import('../../src/ui/features/mermaid-render');
     const m = setMockMermaid();
     const root = document.createElement('div');
     root.innerHTML = '<div class="mermaid" data-mermaid data-mermaid-rendered="1">x</div>';
@@ -64,7 +63,6 @@ describe('renderMermaidBlocks', () => {
   });
 
   it('容错：mermaid.run 抛错时标 error 且移除 rendered（保留源码占位待重试）', async () => {
-    const { renderMermaidBlocks } = await import('../../src/ui/features/mermaid-render');
     setMockMermaid({ run: vi.fn().mockRejectedValue(new Error('parse error')) });
     const root = document.createElement('div');
     root.innerHTML = '<div class="mermaid" data-mermaid>bad source</div>';
@@ -76,7 +74,6 @@ describe('renderMermaidBlocks', () => {
   });
 
   it('window.mermaid 不存在时创建 script 且 src 指向 ./mermaid.min.js', async () => {
-    const { renderMermaidBlocks } = await import('../../src/ui/features/mermaid-render');
     // 不预设 window.mermaid → 走 script 加载路径。
     // 用 spy 拦截 appendChild，阻止 happy-dom 真实加载，只验证 script.src。
     const appendSpy = vi.spyOn(document.head, 'appendChild').mockImplementation((node) => {

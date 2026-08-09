@@ -8,11 +8,12 @@
  * 点击「安装」→ securitySetup('install')（UAC 提权）→ 成功后把当前会话切 auto_review。
  *
  * 设计：不引入 push 订阅；setup 是一次性用户动作，invoke 返回后重拉 capabilities 刷新即可。
- * 挂载点：.chat-composer 内、#composer-edit-banner 之前（与既有"正在编辑"提示条同带）。
+ * 挂载点：.chat-composer 内、.composer-edit-banner 之前（与既有"正在编辑"提示条同带）。
  */
 
 import { state, notify } from '../state';
 import { showConfirmDialog } from '../ui-feedback';
+import { queryPrimaryComposer } from './composer-scope';
 import { isWindowsPlatform } from './security-mode';
 import { enableUacAndPromptRestart, prepareWindowsSecuritySetup } from './security-setup-flow';
 
@@ -123,7 +124,7 @@ export function renderSecurityBanner(): void {
 function ensureBanner(container: Element): HTMLElement | null {
   const existing = document.getElementById(BANNER_ID);
   if (existing) return existing;
-  const reference = document.getElementById('composer-edit-banner');
+  const reference = queryPrimaryComposer('.composer-edit-banner');
   const el = document.createElement('div');
   el.id = BANNER_ID;
   el.className = 'security-banner';

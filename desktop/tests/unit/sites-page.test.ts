@@ -41,13 +41,14 @@ describe('sites page annotation handoff', () => {
 
   it('keeps the create entry and Inspiration session marker in the Desktop shell', async () => {
     const fs = await import('node:fs/promises');
-    const [shell, sitesPage, workspaces, composerContext, sessionHistory, chatController] = await Promise.all([
+    const [shell, sitesPage, workspaces, composerContext, sessionHistory, chatController, conversationRenderer] = await Promise.all([
       fs.readFile('assets/index.html', 'utf8'),
       fs.readFile('src/ui/features/sites-page.ts', 'utf8'),
       fs.readFile('src/ui/features/workspaces.ts', 'utf8'),
       fs.readFile('src/ui/features/composer-context-view.ts', 'utf8'),
       fs.readFile('src/ui/features/session-history-view.ts', 'utf8'),
       fs.readFile('src/ui/features/chat-controller.ts', 'utf8'),
+      fs.readFile('src/ui/features/conversation-renderer.ts', 'utf8'),
     ]);
     expect(sitesPage).toContain('data-sites-create');
     expect(composerContext).toContain("sitesMode.id = 'chat-sites-mode'");
@@ -57,7 +58,8 @@ describe('sites page annotation handoff', () => {
     expect(composerContext).toContain('设计一个 App');
     expect(shell).not.toContain('chat-sites-mode__logo" aria-hidden="true"><i>');
     expect(sessionHistory).toContain("if (provider === 'sites') return 'icon-inspiration';");
-    expect(chatController).toContain("icon: 'icon-inspiration'");
+    // 外部会话展示身份（含灵感 icon）随渲染主体迁入 conversation-renderer。
+    expect(conversationRenderer).toContain("icon: 'icon-inspiration'");
     expect(chatController).toContain('|| isInspirationSession');
   });
 

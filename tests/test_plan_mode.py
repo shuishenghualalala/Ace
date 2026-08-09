@@ -800,6 +800,12 @@ def test_effective_tool_filter_narrows_in_plan():
     assert "enter_plan_mode" not in eff_normal
     assert "exit_plan_mode" not in eff_normal
     assert "file_read" in eff_normal
+    # 显式 tool_filter 里列了 enter/exit，未激活时同样被剔除
+    stub.tool_filter = ["file_read", "file_write", "enter_plan_mode", "exit_plan_mode"]
+    eff_explicit = SingleAgent._effective_tool_filter(stub, sid)
+    assert "exit_plan_mode" not in eff_explicit
+    assert "enter_plan_mode" not in eff_explicit
+    stub.tool_filter = None
     # 激活 → 收窄到只读白名单
     mgr.enter(sid)
     assert SingleAgent._effective_tool_filter(stub, sid) == list(PLAN_MODE_TOOLS)
@@ -809,24 +815,8 @@ def test_effective_tool_filter_narrows_in_plan():
     eff = SingleAgent._effective_tool_filter(stub, sid)
     assert set(eff) == {"file_read", "file_write"}
 
-
-def test_effective_tool_filter_hides_plan_control_tools_when_not_active():
-    """plan 未激活时从工具列表剔除 enter_plan_mode / exit_plan_mode。"""
-    from crew.agent.runtime import SingleAgent
-
-    mgr = PlanModeManager()
-    sid = "sess-filter-exit"
-
-    class _Stub:
-        tool_filter = ["file_read", "file_write", "enter_plan_mode", "exit_plan_mode"]
-        plan_manager = mgr
-
-    stub = _Stub()
-    eff = SingleAgent._effective_tool_filter(stub, sid)
-    assert "exit_plan_mode" not in eff
-    assert "enter_plan_mode" not in eff
     # plan 激活后 exit_plan_mode 可见，enter_plan_mode 仍不可见（白名单内无主动进入）。
-    mgr.enter(sid)
+    stub.tool_filter = ["file_read", "file_write", "enter_plan_mode", "exit_plan_mode"]
     eff_active = SingleAgent._effective_tool_filter(stub, sid)
     assert "exit_plan_mode" in eff_active
     assert "enter_plan_mode" not in eff_active
@@ -1029,25 +1019,6 @@ async def test_plan_mode_stops_after_exit_plan_mode_approval_request(tmp_path, m
 # --------------------------------------------------------------------------- #
 # Plan attachment message + throttling
 # --------------------------------------------------------------------------- #
-def test_plan_attachment_first_active_turn_is_full(tmp_path, monkeypatch):
-    """Plan active 后首轮把 full plan_mode attachment 写入 history。"""
-    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
-    mgr = PlanModeManager()
-    sid = "attachment-first"
-    owner = "A:uid-a"
-    mgr.enter(sid, owner_account_id=owner)
-    history = [Message.user("implement this")]
-
-    attachments = get_plan_mode_attachment_messages(history, sid, mgr, owner_account_id=owner)
-
-    assert len(attachments) == 1
-    msg = attachments[0]
-    assert msg.is_meta is True
-    assert msg.attachment_type == "plan_mode"
-    assert msg.attachment_data["reminderType"] == "full"
-    assert "Plan mode is active" in msg.content
-
-
 def test_plan_attachment_throttles_by_real_user_turns(tmp_path, monkeypatch):
     """已有 plan attachment 后，未满 5 个真实 user turn 不重复注入。"""
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
@@ -1085,6 +1056,11 @@ def test_plan_attachment_full_sparse_cycle_matches_expected_schedule(tmp_path, m
             history.append(Message.user(f"user {attachment_index}-{turn_index}"))
         attachments = get_plan_mode_attachment_messages(history, sid, mgr, owner_account_id=owner)
         assert len(attachments) == 1
+        if attachment_index == 0:
+            # 首轮 full attachment 的完整形态（is_meta / 类型 / 文案）
+            assert attachments[0].is_meta is True
+            assert attachments[0].attachment_type == "plan_mode"
+            assert "Plan mode is active" in attachments[0].content
         history.extend(attachments)
         reminder_types.append(attachments[0].attachment_data["reminderType"])
 

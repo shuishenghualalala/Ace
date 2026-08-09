@@ -2169,7 +2169,7 @@ export function renderQueueHintCard(hint: string): HTMLElement {
 export function renderQueuePanelHtml(queue: PendingMessage[], canSteer = true): string {
   // 注：renderQueueSlot 直接 slot.innerHTML = renderQueuePanelHtml(...)，X3a 显式 OUT OF SCOPE。
   // 此处保持字符串实现；所有用户派生文本均已 escapeHtml，安全边界已具备。
-  // 卡片贴在输入框上方（#chat-queue-slot），对齐 Codex 的「待发消息」交互：
+  // 卡片贴在输入框上方（.chat-queue-slot），对齐 Codex 的「待发消息」交互：
   //   - 不操作 → 当前任务结束后逐条自动发送队首（consumePending）
   //   - 引导   → 把该项提升为修订式下一轮，并请求当前回复尽快收束
   //   - 编辑   → 回填输入框

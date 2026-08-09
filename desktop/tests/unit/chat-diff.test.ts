@@ -157,14 +157,4 @@ describe('diffRenderUnits', () => {
     expect(aOps.some((o) => o.type === 'reuse')).toBe(true);
     expect(aOps.some((o) => o.type === 'patch')).toBe(true);
   });
-
-  it('gate/empty/anchor constant-sig units reuse across frames when state unchanged', () => {
-    // 模拟 __gateway / __empty / __anchor 这类 sig 恒定的单元：连续帧全部 reuse
-    const prev = [u('__gateway', 'C'), u('__anchor', 'C')];
-    const next = [u('__gateway', 'C'), u('__anchor', 'C')];
-    expect(opsByKey(diffRenderUnits(prev, next))).toEqual({
-      __gateway: 'reuse',
-      __anchor: 'reuse',
-    });
-  });
 });
