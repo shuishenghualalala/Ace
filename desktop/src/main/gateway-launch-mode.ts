@@ -4,11 +4,14 @@ export type GatewayIdentityMode = 'local' | 'dev';
 
 /** Resolve the Gateway identity used for this Desktop process lifetime. */
 export function resolveGatewayIdentityMode(
-  isDevLaunch: boolean,
+  _isDevLaunch: boolean,
   _jwt?: string | null,
   _userInfo?: AuthUserSnapshot | null,
 ): GatewayIdentityMode {
-  return isDevLaunch ? 'dev' : 'local';
+  // Ace has one local identity. `--dev` controls renderer/build behavior only;
+  // isolating Gateway state here prevents developers from reusing a manually
+  // started local Gateway and silently drops their normal model configuration.
+  return 'local';
 }
 
 /** Return the child-process overrides required by the selected identity mode. */

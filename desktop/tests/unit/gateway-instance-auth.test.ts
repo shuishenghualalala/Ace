@@ -137,6 +137,7 @@ describe('verifyGatewayInstance', () => {
     });
 
     expect(result).toEqual({
+      status: 'verified',
       verified: true,
       components: {
         cron: { status: 'failed', message: '定时任务启动失败，请查看 Gateway 日志' },
@@ -195,6 +196,38 @@ describe('verifyGatewayInstance', () => {
       fetchImpl: replay,
       challenge: '34'.repeat(32),
     })).resolves.toBe(false);
+  });
+
+  it('classifies network failures as unreachable instead of identity mismatches', async () => {
+    const crewHome = tempCrewHome();
+    const unavailable = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+
+    const result = await probeGatewayInstance('http://127.0.0.1:8000', {
+      crewHome,
+      fetchImpl: unavailable,
+      challenge: 'ab'.repeat(32),
+    });
+
+    expect(result).toEqual({ status: 'unreachable', verified: false });
+  });
+
+  it('classifies a reachable service with the wrong proof as untrusted', async () => {
+    const crewHome = tempCrewHome();
+    const wrongProof = vi.fn(async () => jsonResponse({
+      ok: true,
+      service: 'crew-gateway',
+      instance_proof: '00'.repeat(32),
+    })) as unknown as typeof fetch;
+
+    const result = await probeGatewayInstance('http://127.0.0.1:8000', {
+      crewHome,
+      fetchImpl: wrongProof,
+      challenge: 'ab'.repeat(32),
+    });
+
+    expect(result).toEqual({ status: 'untrusted', verified: false });
   });
 
   it('refuses non-loopback and ambiguous base URLs before fetching', async () => {

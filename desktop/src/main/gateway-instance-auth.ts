@@ -26,6 +26,7 @@ export interface GatewayComponentState {
 }
 
 export interface GatewayInstanceProbe {
+  status: 'verified' | 'unreachable' | 'untrusted';
   verified: boolean;
   components?: Record<string, GatewayComponentState>;
 }
@@ -207,16 +208,16 @@ export async function probeGatewayInstance(
   options: GatewayInstanceVerificationOptions = {},
 ): Promise<GatewayInstanceProbe> {
   const endpoint = healthEndpoint(baseUrl);
-  if (!endpoint) return { verified: false };
+  if (!endpoint) return { status: 'untrusted', verified: false };
 
   const challenge = options.challenge ?? randomBytes(32).toString('hex');
-  if (!HEX_32_BYTES.test(challenge)) return { verified: false };
+  if (!HEX_32_BYTES.test(challenge)) return { status: 'untrusted', verified: false };
 
   let key: Buffer;
   try {
     key = loadOrCreateGatewayInstanceKey(options.crewHome);
   } catch {
-    return { verified: false };
+    return { status: 'untrusted', verified: false };
   }
 
   const controller = new AbortController();
@@ -233,24 +234,28 @@ export async function probeGatewayInstance(
     });
     const contentType = response.headers.get('content-type') ?? '';
     if (!response.ok || !contentType.toLowerCase().includes('application/json')) {
-      return { verified: false };
+      return { status: 'untrusted', verified: false };
     }
     const body = await response.json().catch(() => null) as unknown;
-    if (!body || typeof body !== 'object') return { verified: false };
+    if (!body || typeof body !== 'object') return { status: 'untrusted', verified: false };
     const record = body as Record<string, unknown>;
-    if (record.ok !== true || record.service !== 'crew-gateway') return { verified: false };
+    if (record.ok !== true || record.service !== 'crew-gateway') {
+      return { status: 'untrusted', verified: false };
+    }
     const proof = record.instance_proof;
-    if (typeof proof !== 'string' || !HEX_32_BYTES.test(proof)) return { verified: false };
+    if (typeof proof !== 'string' || !HEX_32_BYTES.test(proof)) {
+      return { status: 'untrusted', verified: false };
+    }
 
     const actual = Buffer.from(proof, 'hex');
     const expected = expectedProof(key, challenge);
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-      return { verified: false };
+      return { status: 'untrusted', verified: false };
     }
     const components = parseComponents(record.components);
-    return { verified: true, ...(components ? { components } : {}) };
+    return { status: 'verified', verified: true, ...(components ? { components } : {}) };
   } catch {
-    return { verified: false };
+    return { status: 'unreachable', verified: false };
   } finally {
     clearTimeout(timeout);
   }

@@ -12,8 +12,8 @@ describe('resolveGatewayIdentityMode', () => {
     expect(resolveGatewayIdentityMode(false)).toBe('local');
   });
 
-  it('uses isolated dev mode for development launches', () => {
-    expect(resolveGatewayIdentityMode(true)).toBe('dev');
+  it('keeps the local Gateway identity for development launches', () => {
+    expect(resolveGatewayIdentityMode(true)).toBe('local');
   });
 });
 
@@ -25,13 +25,11 @@ describe('Gateway launch policy', () => {
     expect(shouldProbeExternalGateway('local')).toBe(true);
   });
 
-  it('isolates dev fallback and requires its managed Gateway', () => {
-    expect(resolveGatewayCrewHome('dev', 'C:/account-home', 'C:/dev-home'))
-      .toBe('C:/dev-home');
-    expect(managedGatewayModeEnv('dev', 'C:/dev-home')).toEqual({
-      CREW_GATEWAY_DEV: '1',
-      CREW_HOME: 'C:/dev-home',
-    });
-    expect(shouldProbeExternalGateway('dev')).toBe(false);
+  it('lets development launches reuse the verified local Gateway', () => {
+    const mode = resolveGatewayIdentityMode(true);
+    expect(resolveGatewayCrewHome(mode, 'C:/account-home', 'C:/dev-home'))
+      .toBe('C:/account-home');
+    expect(managedGatewayModeEnv(mode, 'C:/dev-home')).toEqual({});
+    expect(shouldProbeExternalGateway(mode)).toBe(true);
   });
 });
