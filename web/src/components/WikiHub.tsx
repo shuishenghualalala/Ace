@@ -19,6 +19,13 @@ import MarkdownContent from "./MarkdownContent";
 
 type UploadJobStatus = "uploading" | "ingesting" | "done" | "error" | "cancelled";
 const PAGE_LIMIT = 200;
+const HIDDEN_STYLE = { display: "none" } as const;
+const LOAD_MORE_HINT_STYLE = {
+  padding: "12px",
+  textAlign: "center" as const,
+  color: "var(--text-3)",
+  fontSize: "12px",
+};
 
 // LLM 分析阶段实际耗时很长，前端用这些本地真实阶段文案循环显示，
 // 让用户感觉后台一直在工作，而不是卡在"LLM 分析内容"。
@@ -452,6 +459,10 @@ export default function WikiHub({
   useEffect(() => {
     const timer = setInterval(() => {
       setUploadJobs((prev) => {
+        // 无活跃任务时跳过，避免空转。
+        if (prev.every((j) => j.status === "done" || j.status === "error" || j.status === "cancelled")) {
+          return prev;
+        }
         let changed = false;
         const next = prev.map((job) => {
           if (job.status === "done" || job.status === "error" || job.status === "cancelled") {
@@ -1140,7 +1151,7 @@ export default function WikiHub({
             ref={fileRef}
             type="file"
             multiple
-            style={{ display: "none" }}
+            style={HIDDEN_STYLE}
             accept=".txt,.md,.pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.bmp,.gif,.mp4,.mov,.webm,.avi,.mkv"
             onChange={(e) => {
               const files = e.target.files;
@@ -1420,7 +1431,7 @@ export default function WikiHub({
               <div
                 ref={loadMoreRef}
                 className="wiki-tree__load-more"
-                style={{ padding: "12px", textAlign: "center", color: "var(--text-3)", fontSize: "12px" }}
+                style={LOAD_MORE_HINT_STYLE}
               >
                 {loadingMore ? "加载中…" : "滚动加载更多"}
               </div>

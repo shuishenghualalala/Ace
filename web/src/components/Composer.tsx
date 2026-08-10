@@ -70,7 +70,6 @@ export default function Composer({
   const externalAgentsEnabled = externalAgentsAvailable(config);
   const [text, setText] = useState("");
   const [atOpen, setAtOpen] = useState(false);
-  const [, setAtQuery] = useState("");
   const [atResults, setAtResults] = useState<
     { text: string; display: string; meta: string; type: string }[]
   >([]);
@@ -225,22 +224,27 @@ export default function Composer({
     onCancelEdit?.();
   };
 
-  /** 上传 File 列表并追加到 attachments（复用：文件选择 / 粘贴 / 拖拽） */
+  /** 上传 File 列表并追加到 attachments（复用：文件选择 / 粘贴 / 拖拽）。并行上传。 */
   const uploadFiles = async (files: File[]) => {
-    const newAtts: Attachment[] = [...attachments];
-    for (const file of files) {
-      try {
+    const results = await Promise.allSettled(
+      files.map(async (file) => {
         const content = await readFileAsBase64(file);
         const result = await api.upload(file.name, content);
-        newAtts.push({
+        return {
           id: result.id,
           name: result.name,
           path: result.path,
           type: result.type as Attachment["type"],
           previewUrl: result.previewUrl,
-        });
-      } catch (err) {
-        console.error("上传失败:", err);
+        };
+      }),
+    );
+    const newAtts: Attachment[] = [...attachments];
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        newAtts.push(r.value);
+      } else {
+        console.error("上传失败:", r.reason);
       }
     }
     onAttachmentsChange(newAtts);
@@ -324,10 +328,8 @@ export default function Composer({
     const atMatch = textBeforeCursor.match(/@(\w*)$/);
     if (atMatch) {
       atIndexRef.current = cursorPos - atMatch[0].length;
-      const query = atMatch[1];
-      setAtQuery(query);
       setAtOpen(true);
-      api.complete(query).then(setAtResults).catch(() => setAtResults([]));
+      api.complete(atMatch[1]).then(setAtResults).catch(() => setAtResults([]));
     } else {
       setAtOpen(false);
     }
