@@ -1,10 +1,35 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  chooseStandaloneGatewayAction,
   nextGatewayConnectionState,
   waitForGatewayCandidate,
 } from '../../src/main/gateway-availability';
 import type { GatewayInstanceProbe } from '../../src/main/gateway-instance-auth';
+
+describe('chooseStandaloneGatewayAction', () => {
+  it('never starts a managed replacement while a standalone listener exists', () => {
+    expect(chooseStandaloneGatewayAction(
+      { status: 'unreachable', verified: false },
+      true,
+    )).toBe('wait');
+    expect(chooseStandaloneGatewayAction(
+      { status: 'untrusted', verified: false },
+      true,
+    )).toBe('reject');
+  });
+
+  it('reuses a verified Gateway and starts managed only when no listener exists', () => {
+    expect(chooseStandaloneGatewayAction(
+      { status: 'verified', verified: true },
+      true,
+    )).toBe('reuse');
+    expect(chooseStandaloneGatewayAction(
+      { status: 'unreachable', verified: false },
+      false,
+    )).toBe('start-managed');
+  });
+});
 
 describe('waitForGatewayCandidate', () => {
   it('waits through transient timeouts and accepts the same candidate when it recovers', async () => {

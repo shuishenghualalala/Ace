@@ -1,5 +1,17 @@
 import type { GatewayInstanceProbe } from './gateway-instance-auth';
 
+export type StandaloneGatewayAction = 'reuse' | 'wait' | 'reject' | 'start-managed';
+
+/** Decide ownership before Desktop is allowed to spawn a managed fallback. */
+export function chooseStandaloneGatewayAction(
+  probe: GatewayInstanceProbe,
+  candidatePresent: boolean,
+): StandaloneGatewayAction {
+  if (probe.verified) return 'reuse';
+  if (!candidatePresent) return 'start-managed';
+  return probe.status === 'untrusted' ? 'reject' : 'wait';
+}
+
 export type GatewayCandidateWaitResult =
   | { status: 'ready'; probe: GatewayInstanceProbe }
   | { status: 'untrusted'; probe: GatewayInstanceProbe }

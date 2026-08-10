@@ -45,6 +45,11 @@ import {
   probeGatewayInstance,
   type GatewayComponentState,
 } from './gateway-instance-auth';
+import {
+  chooseStandaloneGatewayAction,
+  nextGatewayConnectionState,
+  waitForGatewayCandidate,
+} from './gateway-availability';
 import { GatewayRestartController } from './gateway-restart-controller';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
@@ -199,11 +204,7 @@ let gatewayGeneration = 0;
 // Backend health monitor state
 let backendConnected = false;
 let healthMonitorTimer: ReturnType<typeof setInterval> | null = null;
-// 连续健康检查失败次数。单次 /api/health 超时不代表 gateway 挂了——gateway 繁忙
-// （加载技能 / 构建大 prompt / 执行工具）时单线程 asyncio 可能 2s 内没响应 health。
-// 需连续 N 次失败才判 disconnected，避免误弹「智能体运行环境准备中」遮罩。
-let healthFailCount = 0;
-const HEALTH_FAIL_THRESHOLD = 3;
+let healthPollInFlight = false;
 let gatewayComponents: Record<string, GatewayComponentState> | undefined;
 // Track the actually resolved gateway base URL (updated by ensureGateway)
 let resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
@@ -1350,16 +1351,21 @@ function createActiveGatewaySecurityProof(method: string, pathname: string, body
   });
 }
 
-/**
- * 🌟 启动优化：加 2s AbortController 超时，避免半启动状态的 gateway 接受 TCP
- * 但无法返回 HTTP 响应时 fetch 无限挂起。
- */
-async function hasHealthApi(baseUrl: string): Promise<boolean> {
-  return (await probeHealthApi(baseUrl)).verified;
-}
-
 async function probeHealthApi(baseUrl: string) {
   return probeGatewayInstance(baseUrl, { crewHome: activeGatewayCrewHome() });
+}
+
+async function gatewayCandidatePresent(baseUrl: string): Promise<boolean> {
+  try {
+    const parsed = new URL(baseUrl);
+    const port = Number(parsed.port);
+    if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1' || !Number.isInteger(port)) {
+      return false;
+    }
+    return !(await isPortAvailable(port));
+  } catch {
+    return false;
+  }
 }
 
 // 供开发态 / 回退使用的 Gateway
@@ -1810,9 +1816,14 @@ async function waitForHealthApi(
       return false;
     }
     attempts++;
-    if (await hasHealthApi(baseUrl)) {
+    const probe = await probeHealthApi(baseUrl);
+    if (probe.verified) {
       console.log(`[gateway] Health API ready after ${Date.now() - started}ms (${attempts} attempts)`);
       return true;
+    }
+    if (probe.status === 'untrusted') {
+      console.error(`[gateway] Health API rejected an untrusted listener at ${baseUrl}`);
+      return false;
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
@@ -1863,23 +1874,34 @@ function pushBackendStatus(connected: boolean, options: { force?: boolean } = {}
 }
 
 async function pollBackendHealth(): Promise<void> {
-  // Use the resolved gateway base URL (updated by ensureGateway after port selection)
-  const baseUrl = resolvedGatewayBaseUrl;
-  const probe = await probeHealthApi(baseUrl);
-  if (probe.verified) {
-    // 恢复要快：一旦成功立即重置并推送 connected（若先前被判 disconnected，遮罩立刻消失）
-    healthFailCount = 0;
-    const componentsChanged = JSON.stringify(gatewayComponents) !== JSON.stringify(probe.components);
-    gatewayComponents = probe.components;
-    pushBackendStatus(true, { force: componentsChanged });
-    return;
-  }
-  // 失败容错：连续 N 次失败才判 disconnected。gateway 繁忙时单次 health 超时属正常，
-  // 立即弹遮罩会误阻断用户操作（如点技能时 gateway 正在加载）。
-  healthFailCount += 1;
-  if (healthFailCount >= HEALTH_FAIL_THRESHOLD) {
-    gatewayComponents = undefined;
-    pushBackendStatus(false);
+  if (healthPollInFlight) return;
+  healthPollInFlight = true;
+  try {
+    // Use the resolved gateway base URL (updated by ensureGateway after port selection).
+    const baseUrl = resolvedGatewayBaseUrl;
+    const probe = await probeHealthApi(baseUrl);
+    if (probe.verified) {
+      const componentsChanged = JSON.stringify(gatewayComponents) !== JSON.stringify(probe.components);
+      gatewayComponents = probe.components;
+      pushBackendStatus(true, { force: componentsChanged });
+      return;
+    }
+
+    // A busy asyncio loop can miss health deadlines while its TCP listener remains owned by
+    // the same Gateway. Preserve the last verified state in that case. Only an explicit bad
+    // proof or a listener that has actually disappeared may turn the UI disconnected.
+    const candidatePresent = probe.status === 'untrusted'
+      ? true
+      : await gatewayCandidatePresent(baseUrl);
+    const nextConnected = nextGatewayConnectionState(
+      backendConnected,
+      probe,
+      candidatePresent,
+    );
+    if (!nextConnected) gatewayComponents = undefined;
+    pushBackendStatus(nextConnected);
+  } finally {
+    healthPollInFlight = false;
   }
 }
 
@@ -1897,6 +1919,7 @@ function stopBackendHealthMonitor(): void {
     clearInterval(healthMonitorTimer);
     healthMonitorTimer = null;
   }
+  healthPollInFlight = false;
 }
 
 // ============================================================================
@@ -1909,21 +1932,55 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     // A prior proof is not a permanent trust grant. Re-prove immediately before
     // every credential-bearing caller reuses the URL, so an unmanaged Gateway
     // restart cannot silently turn a stale cached port into a trusted service.
-    // 与 pollBackendHealth 容错对齐：gateway 单线程 asyncio 繁忙（摘要/工具执行）+
-    // Defender 扫描时，单次 3s health 超时属正常；连续失败才判定实例失效。
-    // 否则一次抖动就清空缓存 → 全量重拉 → 旧实例占 8000 → 扫描选出 8001 →
-    // spawn 被 managedGateway 短路 → 空等无进程端口，遮罩永不消失。
-    for (let attempt = 0; attempt < HEALTH_FAIL_THRESHOLD; attempt++) {
-      if (await hasHealthApi(cached.baseUrl)) return cached;
-      await new Promise((r) => setTimeout(r, 300));
+    // Timeout means "not answering now", not "wrong instance". Keep waiting for the same
+    // candidate while its process/listener exists; this prevents expensive tools or deferred
+    // startup from being mistaken for an identity change and recycled in a loop.
+    const firstProbe = await probeHealthApi(cached.baseUrl);
+    if (firstProbe.verified) return cached;
+
+    const waitGeneration = gatewayGeneration;
+    const ownedChild = cached.managed ? managedGateway : null;
+    const candidatePresent = cached.managed
+      ? Boolean(ownedChild && ownedChild.exitCode === null)
+      : await gatewayCandidatePresent(cached.baseUrl);
+
+    if (firstProbe.status === 'untrusted' && candidatePresent) {
+      if (cached.managed) await stopManagedGateway('identity-rejected');
+      if (ensureGatewayPromise === cachedPromise) ensureGatewayPromise = null;
+      throw new Error(`Gateway instance verification rejected ${cached.baseUrl}`);
     }
-    // 只在自己仍是缓存持有方时清除，避免并发调用误杀新代际 Gateway。
+
+    if (candidatePresent) {
+      logSupervisorDecision('wait-existing-instance', {
+        baseUrl: cached.baseUrl,
+        managed: cached.managed,
+      });
+      const waited = await waitForGatewayCandidate({
+        probe: () => probeHealthApi(cached.baseUrl),
+        shouldContinue: async () => {
+          if (
+            isQuitting
+            || gatewayGeneration !== waitGeneration
+            || ensureGatewayPromise !== cachedPromise
+          ) return false;
+          if (cached.managed) {
+            return managedGateway === ownedChild && ownedChild?.exitCode === null;
+          }
+          return gatewayCandidatePresent(cached.baseUrl);
+        },
+      });
+      if (waited.status === 'ready') return cached;
+      if (waited.status === 'untrusted') {
+        if (cached.managed) await stopManagedGateway('identity-rejected');
+        if (ensureGatewayPromise === cachedPromise) ensureGatewayPromise = null;
+        throw new Error(`Gateway instance verification rejected ${cached.baseUrl}`);
+      }
+    }
+
+    // The candidate really disappeared. Clear only the promise we inspected, then rebuild.
     if (ensureGatewayPromise !== cachedPromise) return ensureGateway();
     ensureGatewayPromise = null;
-    if (cached.managed) {
-      await stopManagedGateway('identity-mismatch');
-    }
-    logSupervisorDecision('instance-reprobe', {
+    logSupervisorDecision('instance-gone', {
       cachedBaseUrl: cached.baseUrl,
       managed: cached.managed,
     });
@@ -1973,16 +2030,49 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       throw new Error('packaged Windows Crew Gateway exited before readiness');
     }
 
-    // 真实账号可复用外部 Gateway；dev 兜底必须使用带 dev_mode 的托管实例。
+    // 本地启动优先复用 8000 上由用户单独运行的 Gateway。
     // Linux 打包态除外：由本进程 spawn 托管，不复用外部 gateway（避免复用到别的
     // 用户的 gateway 导致 instance key 验签失败）。
     if (
       shouldProbeExternalGateway(gatewayIdentityMode)
       && !(app.isPackaged && (process.platform === 'win32' || process.platform === 'linux'))
     ) {
-      if (await hasHealthApi(DEFAULT_GATEWAY_URL)) {
+      const firstProbe = await probeHealthApi(DEFAULT_GATEWAY_URL);
+      const externalPresent = firstProbe.verified
+        ? true
+        : await gatewayCandidatePresent(DEFAULT_GATEWAY_URL);
+      const externalAction = chooseStandaloneGatewayAction(firstProbe, externalPresent);
+      if (externalAction === 'reuse') {
         resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
         return { baseUrl: DEFAULT_GATEWAY_URL, managed: false };
+      }
+      if (externalAction === 'reject') {
+        // Never hide a trust failure by silently launching a second Gateway elsewhere.
+        throw new Error(
+          `Existing service at ${DEFAULT_GATEWAY_URL} failed Gateway instance verification; `
+          + 'ensure the standalone Gateway and Desktop use the same CREW_HOME',
+        );
+      }
+      if (externalAction === 'wait') {
+        logSupervisorDecision('wait-external-instance', { baseUrl: DEFAULT_GATEWAY_URL });
+        const waited = await waitForGatewayCandidate({
+          probe: () => probeHealthApi(DEFAULT_GATEWAY_URL),
+          shouldContinue: async () => {
+            if (isQuitting || generation !== gatewayGeneration) return false;
+            return gatewayCandidatePresent(DEFAULT_GATEWAY_URL);
+          },
+        });
+        if (waited.status === 'ready') {
+          resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
+          return { baseUrl: DEFAULT_GATEWAY_URL, managed: false };
+        }
+        if (waited.status === 'untrusted') {
+          throw new Error(
+            `Existing service at ${DEFAULT_GATEWAY_URL} failed Gateway instance verification; `
+            + 'ensure the standalone Gateway and Desktop use the same CREW_HOME',
+          );
+        }
+        if (generation !== gatewayGeneration) throw new GatewaySupersededError();
       }
     }
 
