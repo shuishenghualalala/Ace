@@ -30,7 +30,7 @@ _FAKE_HELPER = r'''
 import base64, json, os, sys, time
 mode = sys.argv[1]
 version = 999 if mode == "bad-ready" else 2
-ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output"]}
+ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output", "readonly_roots"]}
 if mode == "missing-ready-capability":
     ready["capabilities"] = ["stdin_once"]
 print(json.dumps(ready), flush=True)
@@ -65,6 +65,8 @@ if mode == "assert-request":
         raise SystemExit(5)
     if payload["env_overrides"] != {"CODEX_API_KEY": "secret"}:
         raise SystemExit(6)
+    if payload["readonly_roots"] != [os.path.join(payload["cwd"], ".agents")]:
+        raise SystemExit(9)
 if mode == "assert-no-stdin" and "stdin_b64" in request["request"]:
     raise SystemExit(7)
 if mode == "assert-empty-stdin" and request["request"].get("stdin_b64") != "":
@@ -348,6 +350,7 @@ async def test_request_carries_binary_stdin_and_environment_overrides(tmp_path):
     result = await _helper(tmp_path, "assert-request").execute(
         command=("ignored",),
         cwd=tmp_path,
+        readonly_roots=(tmp_path / ".agents",),
         stdin=b"\x00prompt\xff",
         env_overrides={"CODEX_API_KEY": "secret"},
         timeout=1,
@@ -538,12 +541,13 @@ async def test_broker_preserves_read_write_deny_and_network_semantics(tmp_path):
         tmp_path / "read",
     ]
     assert runtime.kwargs["denied_roots"] == [tmp_path / "deny"]
+    assert runtime.kwargs["readonly_roots"] == []
     assert runtime.kwargs["network_enabled"] is False
 
 
 @pytest.mark.asyncio
-async def test_broker_does_not_forward_runtime_owned_protected_read_roots(tmp_path):
-    """Missing .git/.agents/.crew guards are enforced by each runtime, not resolved as host reads."""
+async def test_broker_forwards_immutable_read_roots_to_the_native_runtime(tmp_path):
+    """Missing metadata guards use the native read-only carve-out contract."""
 
     class RecordingRuntime:
         async def execute(self, **kwargs):
@@ -575,6 +579,7 @@ async def test_broker_does_not_forward_runtime_owned_protected_read_roots(tmp_pa
 
     assert runtime.kwargs["writable_roots"] == [tmp_path]
     assert runtime.kwargs["readable_roots"] == []
+    assert runtime.kwargs["readonly_roots"] == [tmp_path / ".agents"]
 
 
 @pytest.mark.asyncio

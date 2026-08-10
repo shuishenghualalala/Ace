@@ -15,6 +15,7 @@ use rand::RngCore;
 use crate::protocol::{RuntimeCapabilities, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const PROTECTED_NAMES: &[&str] = &[".git", ".agents", ".crew"];
 static ACTIVE_PROCESS_GROUP: AtomicI32 = AtomicI32::new(0);
 const PLATFORM_READ_ROOTS: &[&str] = &[
     "/System",
@@ -32,6 +33,7 @@ pub struct MacOsRunRequest {
     pub cwd: PathBuf,
     pub writable_roots: Vec<PathBuf>,
     pub readable_roots: Vec<PathBuf>,
+    pub readonly_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
     pub network_enabled: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,
@@ -250,6 +252,7 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         return Err("sandbox cwd must be inside an explicit writable root".to_string());
     }
     let readable = canonical_roots(&request.readable_roots)?;
+    let readonly = canonical_readonly_roots(&request.readonly_roots, &writable)?;
     let denied = canonical_or_missing_roots(&request.denied_roots)?;
     let home = create_private_home()?;
 
@@ -328,11 +331,34 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     }
 
     let mut deny_rules = Vec::new();
+    for (index, root) in readonly.iter().enumerate() {
+        push_path_rule(
+            &mut parameters,
+            &mut deny_rules,
+            "READONLY_ROOT",
+            index,
+            &path_string(root)?,
+            "deny file-write*",
+        );
+    }
     for (index, root) in denied.iter().enumerate() {
-        let name = format!("DENIED_ROOT_{index}");
-        parameters.push((name.clone(), path_string(root)?));
-        deny_rules.push(format!("(deny file-read* (subpath (param \"{name}\")))"));
-        deny_rules.push(format!("(deny file-write* (subpath (param \"{name}\")))"));
+        let value = path_string(root)?;
+        push_path_rule(
+            &mut parameters,
+            &mut deny_rules,
+            "DENIED_READ_ROOT",
+            index,
+            &value,
+            "deny file-read*",
+        );
+        push_path_rule(
+            &mut parameters,
+            &mut deny_rules,
+            "DENIED_WRITE_ROOT",
+            index,
+            &value,
+            "deny file-write*",
+        );
     }
 
     let network_rule = match proxy_port {
@@ -376,6 +402,20 @@ fn push_subpath_rule(
 ) {
     let name = format!("{prefix}_{index}");
     parameters.push((name.clone(), value.to_string()));
+    rules.push(format!("({operation} (subpath (param \"{name}\")))"));
+}
+
+fn push_path_rule(
+    parameters: &mut Vec<(String, String)>,
+    rules: &mut Vec<String>,
+    prefix: &str,
+    index: usize,
+    value: &str,
+    operation: &str,
+) {
+    let name = format!("{prefix}_{index}");
+    parameters.push((name.clone(), value.to_string()));
+    rules.push(format!("({operation} (literal (param \"{name}\")))"));
     rules.push(format!("({operation} (subpath (param \"{name}\")))"));
 }
 
@@ -437,12 +477,84 @@ fn canonical_or_missing_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String>
                 path.display()
             ));
         }
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let canonical = canonicalize_allow_missing(path)?;
         if !result.contains(&canonical) {
             result.push(canonical);
         }
     }
     Ok(result)
+}
+
+fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    if path.symlink_metadata().is_ok() {
+        return path.canonicalize().map_err(|error| {
+            format!("cannot resolve permission root {}: {error}", path.display())
+        });
+    }
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while ancestor.symlink_metadata().is_err() {
+        let name = ancestor.file_name().ok_or_else(|| {
+            format!(
+                "cannot resolve permission root ancestor: {}",
+                path.display()
+            )
+        })?;
+        suffix.push(name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            format!(
+                "cannot resolve permission root ancestor: {}",
+                path.display()
+            )
+        })?;
+    }
+    let mut canonical = ancestor
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve permission root {}: {error}", path.display()))?;
+    for name in suffix.iter().rev() {
+        canonical.push(name);
+    }
+    Ok(canonical)
+}
+
+fn canonical_readonly_roots(
+    paths: &[PathBuf],
+    writable: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for root in writable {
+        for name in PROTECTED_NAMES {
+            roots.push(root.join(name));
+        }
+    }
+    for path in paths {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "read-only root cannot be a symlink: {}",
+                path.display()
+            ));
+        }
+    }
+    for root in canonical_or_missing_roots(paths)? {
+        if !writable.iter().any(|candidate| root.starts_with(candidate)) {
+            return Err(format!(
+                "read-only root must be inside an explicit writable root: {}",
+                root.display()
+            ));
+        }
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    for root in &roots {
+        if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "read-only root cannot be a symlink: {}",
+                root.display()
+            ));
+        }
+    }
+    Ok(roots)
 }
 
 fn path_string(path: &Path) -> Result<String, String> {
@@ -552,6 +664,7 @@ mod tests {
             cwd: workspace.to_path_buf(),
             writable_roots: vec![workspace.to_path_buf()],
             readable_roots: vec![],
+            readonly_roots: vec![workspace.join(".agents")],
             denied_roots: vec![workspace.join(".git")],
             network_enabled: false,
             network_rules: vec![],
@@ -567,10 +680,32 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let plan = build_plan(&request(workspace.path()), None).unwrap();
         assert!(!plan.profile.contains(workspace.path().to_str().unwrap()));
-        assert!(plan.profile.contains("DENIED_ROOT_0"));
+        assert!(plan.profile.contains("READONLY_ROOT_0"));
+        assert!(plan.profile.contains("DENIED_READ_ROOT_0"));
+        assert!(plan.profile.contains("DENIED_WRITE_ROOT_0"));
         assert!(plan.profile.contains("deny file-read*"));
         assert!(plan.profile.contains("deny file-write*"));
+        assert!(plan
+            .profile
+            .contains("deny file-write* (literal (param \"READONLY_ROOT_0\"))"));
+        assert!(!plan
+            .profile
+            .contains("deny file-read* (literal (param \"READONLY_ROOT_0\"))"));
         assert!(!plan.profile.contains("allow network-outbound"));
+    }
+
+    #[test]
+    fn readonly_root_must_be_inside_a_writable_root() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut value = request(workspace.path());
+        value.readonly_roots = vec![outside.path().to_path_buf()];
+
+        let error = build_plan(&value, None)
+            .err()
+            .expect("read-only root outside writable roots must fail");
+
+        assert!(error.contains("read-only root must be inside"), "{error}");
     }
 
     #[test]

@@ -348,9 +348,9 @@ class SecurityApprovalService:
         forbids judging by command name. They are enforced by (a) the file-side policy
         for structured file tools (``file_policy`` denies writes/deletes on protected
         roots) and (b) the native OS sandbox + process-tree kill + wall timeout for
-        arbitrary exec, uniformly across modes including FULL_ACCESS. Until the native
-        runtime is wired, arbitrary-shell hardlines are not yet enforced — that is a
-        runtime task (P3/P4), not a gap in this function's contract.
+        arbitrary exec, uniformly across modes including FULL_ACCESS. This function
+        authorizes the normalized action; the compiled ProcessLaunch remains the
+        mandatory execution boundary after authorization.
         """
         mode = self.mode_for(context)
         if self._rejection_cooldown_active(context, action):

@@ -45,6 +45,7 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         return Err("sandbox cwd must be inside an explicit writable root".to_string());
     }
     let readable = canonical_roots(&request.readable_roots)?;
+    let readonly = protected_roots(&writable, &request.readonly_roots)?;
     let denied = canonical_or_missing_roots(&request.denied_roots)?;
     reject_overlapping_roots(&writable, &readable)?;
 
@@ -121,37 +122,23 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         }
     }
 
-    // Re-apply immutable project metadata after writable roots, so the narrow rule wins.
-    for root in &writable {
-        for name in PROTECTED_NAMES {
-            let protected = root.join(name);
-            let metadata = std::fs::symlink_metadata(&protected);
-            if metadata
-                .as_ref()
-                .is_ok_and(|value| value.file_type().is_symlink())
-            {
-                return Err(format!(
-                    "protected metadata path cannot be a symlink: {}",
-                    protected.display()
-                ));
-            }
-            if protected.exists() {
-                let value = path_string(&protected)?;
-                args.extend(["--ro-bind".to_string(), value.clone(), value]);
-            } else {
-                // Match Codex's missing-protected-entry shape: a read-only
-                // synthetic directory prevents creation through a writable root.
-                let value = path_string(&protected)?;
-                args.extend([
-                    "--perms".to_string(),
-                    "555".to_string(),
-                    "--tmpfs".to_string(),
-                    value.clone(),
-                    "--remount-ro".to_string(),
-                    value,
-                ]);
-                synthetic_targets.push(protected);
-            }
+    // Re-apply immutable paths after writable roots, so the narrow rule wins.
+    for protected in readonly {
+        if protected.exists() {
+            let value = path_string(&protected)?;
+            args.extend(["--ro-bind".to_string(), value.clone(), value]);
+        } else {
+            // A read-only synthetic directory prevents creation through a writable root.
+            let value = path_string(&protected)?;
+            args.extend([
+                "--perms".to_string(),
+                "555".to_string(),
+                "--tmpfs".to_string(),
+                value.clone(),
+                "--remount-ro".to_string(),
+                value,
+            ]);
+            synthetic_targets.push(protected);
         }
     }
     // Deny entries are applied last and therefore cannot be upgraded by an
@@ -248,16 +235,91 @@ fn canonical_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 fn canonical_or_missing_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut result = Vec::new();
     for path in paths {
-        let value = if path.exists() {
-            path.canonicalize()
-                .map_err(|error| format!("cannot resolve deny root {}: {error}", path.display()))?
-        } else if path.is_absolute() {
-            path.clone()
-        } else {
+        if !path.is_absolute() {
             return Err(format!("deny root must be absolute: {}", path.display()));
-        };
+        }
+        if path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "permission root cannot contain '..': {}",
+                path.display()
+            ));
+        }
+        let value = canonicalize_allow_missing(path)?;
         if !result.contains(&value) {
             result.push(value);
+        }
+    }
+    Ok(result)
+}
+
+fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    if path.symlink_metadata().is_ok() {
+        return path.canonicalize().map_err(|error| {
+            format!("cannot resolve permission root {}: {error}", path.display())
+        });
+    }
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while ancestor.symlink_metadata().is_err() {
+        let name = ancestor.file_name().ok_or_else(|| {
+            format!(
+                "cannot resolve permission root ancestor: {}",
+                path.display()
+            )
+        })?;
+        suffix.push(name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            format!(
+                "cannot resolve permission root ancestor: {}",
+                path.display()
+            )
+        })?;
+    }
+    let mut canonical = ancestor
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve permission root {}: {error}", path.display()))?;
+    for name in suffix.iter().rev() {
+        canonical.push(name);
+    }
+    Ok(canonical)
+}
+
+fn protected_roots(
+    writable: &[PathBuf],
+    explicit: &[PathBuf],
+) -> Result<BTreeSet<PathBuf>, String> {
+    let mut result = BTreeSet::new();
+    for root in writable {
+        for name in PROTECTED_NAMES {
+            result.insert(root.join(name));
+        }
+    }
+    for path in explicit {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "protected metadata path cannot be a symlink: {}",
+                path.display()
+            ));
+        }
+    }
+    for root in canonical_or_missing_roots(explicit)? {
+        if !writable.iter().any(|candidate| root.starts_with(candidate)) {
+            return Err(format!(
+                "read-only root must be inside an explicit writable root: {}",
+                root.display()
+            ));
+        }
+        result.insert(root);
+    }
+    for path in &result {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "protected metadata path cannot be a symlink: {}",
+                path.display()
+            ));
         }
     }
     Ok(result)
@@ -328,6 +390,7 @@ mod tests {
             cwd: temp.path().to_path_buf(),
             writable_roots: vec![temp.path().to_path_buf()],
             readable_roots: vec![],
+            readonly_roots: vec![temp.path().join(".git")],
             denied_roots: vec![],
             network_enabled: false,
             network_rules: vec![],
@@ -355,6 +418,7 @@ mod tests {
             cwd: workspace.clone(),
             writable_roots: vec![workspace],
             readable_roots: vec![],
+            readonly_roots: vec![],
             denied_roots: vec![],
             network_enabled: false,
             network_rules: vec![],
@@ -389,6 +453,7 @@ mod tests {
             cwd: workspace.path().to_path_buf(),
             writable_roots: vec![],
             readable_roots: vec![],
+            readonly_roots: vec![],
             denied_roots: vec![],
             network_enabled: false,
             network_rules: vec![],

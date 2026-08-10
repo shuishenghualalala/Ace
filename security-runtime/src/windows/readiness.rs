@@ -86,6 +86,7 @@ fn probe_acl_and_token(state_dir: &Path, account: &str) -> Result<(), String> {
         cwd: probe_writable.clone(),
         writable_roots: vec![probe_writable.clone()],
         readable_roots: Vec::new(),
+        readonly_roots: vec![probe_writable.join(".git")],
         denied_roots: Vec::new(),
         network_enabled: false,
         network_rules: Vec::new(),

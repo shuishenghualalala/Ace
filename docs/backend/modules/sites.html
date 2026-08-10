@@ -3,104 +3,340 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Ace 灵感统一 App 库技术说明</title>
+  <title>Ace 灵感统一 App 库技术拆解</title>
   <style>
-    body{margin:0;background:#f7f8fb;color:#1f2937;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.7}.wrap{max-width:1060px;margin:32px auto;padding:36px;border:1px solid #e5e7eb;border-radius:14px;background:#fff}h1,h2,h3{color:#111827}h2{margin-top:34px;padding-bottom:7px;border-bottom:1px solid #e5e7eb}code{padding:2px 5px;border-radius:4px;background:#eef2ff}pre{overflow:auto;padding:16px;border-radius:8px;background:#111827;color:#f9fafb}pre code{padding:0;background:none}table{width:100%;border-collapse:collapse}th,td{padding:9px;border:1px solid #e5e7eb;text-align:left;vertical-align:top}th{background:#f9fafb}.note,.warning{margin:14px 0;padding:12px 14px;border-left:4px solid}.note{border-color:#5b7cff;background:#f0f5ff}.warning{border-color:#e3a008;background:#fff8e6}.flow{font-weight:600;word-spacing:5px}a{color:#315efb}
+    body{margin:0;background:#f7f8fb;color:#1f2937;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.7}
+    .wrap{max-width:1080px;margin:32px auto;padding:40px;border:1px solid #e5e7eb;border-radius:14px;background:#fff}
+    h1,h2,h3,h4{color:#111827}h1{font-size:1.7rem}
+    h2{margin-top:38px;padding-bottom:7px;border-bottom:2px solid #e5e7eb}
+    h3{margin-top:26px;color:#1f3a8a}h4{margin-top:18px;color:#374151}
+    code{padding:2px 5px;border-radius:4px;background:#eef2ff;font-size:.92em}
+    pre{overflow:auto;padding:14px 16px;border-radius:8px;background:#111827;color:#e5e7eb;font-size:.84rem;line-height:1.55}
+    pre code{padding:0;background:none}
+    table{width:100%;border-collapse:collapse;margin:10px 0;font-size:.93rem}
+    th,td{padding:8px 10px;border:1px solid #e5e7eb;text-align:left;vertical-align:top}
+    th{background:#f9fafb;font-weight:600}
+    tr:nth-child(even) td{background:#fcfcfe}
+    .note,.warning,.key{margin:14px 0;padding:12px 14px;border-left:4px solid;border-radius:0 6px 6px 0}
+    .note{border-color:#5b7cff;background:#f0f5ff}
+    .warning{border-color:#e3a008;background:#fff8e6}
+    .key{border-color:#16a34a;background:#f0fdf4}
+    .lead{font-size:1.05rem;color:#374151}
+    .chip{display:inline-block;padding:1px 7px;border-radius:10px;font-size:.78rem;font-weight:600;vertical-align:middle}
+    .c-site{background:#e0f2fe;color:#075985}.c-canvas{background:#ede9fe;color:#5b21b6}
+    .c-widget{background:#dcfce7;color:#166534}.c-auto{background:#fee2e2;color:#991b1b}
+    .c-bind{background:#fef3c7;color:#92400e}
+    .toc{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:14px 20px;margin:18px 0}
+    .toc ol{margin:6px 0 0;padding-left:22px}.toc li{margin:3px 0}
+    a{color:#315efb}
+    .flow-arrow{color:#9ca3af}
   </style>
 </head>
 <body><main class="wrap">
-  <h1>Ace「灵感」统一 App 库</h1>
-  <p>“灵感”是用户可创建、使用和继续设计的本地 App 集合。内部继续复用 <code>sites</code> 模块，并保留 <code>site</code> 与 <code>canvas</code> 两种运行时实现；图库、详情、对话和操作层不向用户暴露这一区别。</p>
-  <p class="note"><strong>实现范围：</strong>统一图库、真实内容预览、原对话修改、ZIP 分享、固定到桌面、受控删除、对话 Surface 和元素批注。源码与原对话始终保留；不包含导入、在线公开分享、跨设备同步或重启恢复悬浮窗。</p>
+  <h1>Ace「灵感」统一 App 库 —— 技术拆解</h1>
+  <p class="lead">「灵感」是 Ace Desktop 里用户可创建、使用和继续设计的本地 App 集合。本文不按目录罗列文件，而是把它当作一个跨前后端的运行系统来拆解：它要解决什么问题、Agent 用哪些工具与 skill 把一句话需求变成可运行 App、运行时如何用统一协议把构建产物和声明式组件收纳进同一个图库，以及预览、批注、分享、固定、删除这条生命周期在代码里如何落地。</p>
+  <p class="note"><strong>实现范围：</strong>统一图库与真实预览、原对话修改、离线 ZIP 分享、置顶便利贴、受控删除、对话 Surface 与元素批注。源码与原对话始终保留；不含导入、在线公开分享、跨设备同步或重启恢复悬浮窗。</p>
 
-  <h2>1. 用户模型与主流程</h2>
-  <ol>
-    <li>侧栏一级入口显示“灵感”，首页直接加载当前账号所有已部署 App，不要求先选择 Workspace。</li>
-    <li>首页按更新时间倒序显示响应式卡片；卡片使用懒加载、不可交互的缩放 iframe 展示真实内容，并支持名称和描述搜索。</li>
-    <li>点击卡片进入完整可交互 App。详情统一提供“修改、分享、固定到桌面、删除”。</li>
-    <li>“修改”进入资源记录的原始 <code>sessionId</code>；“分享”保存离线 ZIP；“固定到桌面”打开无系统标题栏、可拖动缩放且始终置顶的便利贴；“删除”仅清理运行产物和不再共享的派生资产。</li>
-    <li>新建入口创建 <code>inspiration_creation=true</code> 的 builtin Session，标题和输入提示统一为“灵感 / 描述你想创建的 App”。旧 <code>site_creation</code> 会话继续识别为“灵感”。</li>
-    <li>Agent 生成或发布内容时返回标准 <code>surface</code>，聊天历史中显示可恢复的生成物卡片。点击后在右侧 Inspector 进入“使用”或“批注”模式。</li>
-  </ol>
-  <p class="flow">新建灵感 → 对话设计 → Surface 预览/批注 → 部署到图库 → 使用/分享/固定/继续修改</p>
+  <div class="toc">
+    <strong>目录</strong>
+    <ol>
+      <li><a href="#overview">定位与全景</a></li>
+      <li><a href="#abstractions">核心抽象</a></li>
+      <li><a href="#tools">工具（Agent Tools）</a></li>
+      <li><a href="#skills">Skill 体系</a></li>
+      <li><a href="#flows">工作流程：三条执行路径</a></li>
+      <li><a href="#lifecycle">生命周期与状态</a></li>
+      <li><a href="#tradeoffs">设计取舍</a></li>
+      <li><a href="#security">安全边界</a></li>
+      <li><a href="#entrypoints">关键实现入口</a></li>
+      <li><a href="#api">HTTP 接口</a></li>
+      <li><a href="#summary">小结</a></li>
+    </ol>
+  </div>
 
-  <h2>2. 统一资源契约</h2>
+  <h2 id="overview">1. 定位与全景</h2>
+  <p>「灵感」对外是一个统一 App 库：用户在侧栏点「灵感」即看到当前账号所有 App，按更新时间倒序排列，卡片是懒加载的真实内容缩略预览。它对内仍然复用 <code>sites</code> 模块，并保留两种运行时——<span class="chip c-site">site</span> 构建产物型与 <span class="chip c-canvas">canvas</span> 声明式组件型——但图库、详情、对话 Surface、批注和四操作都不向用户暴露这一区别，只靠资源 ID 前缀在内部分发。</p>
+  <p>整个系统的核心动力线是：Agent 在灵感会话里调用工具产出 App，工具返回一个稳定的 <code>InspirationSurface</code> 协议；这个协议既是聊天里的生成物卡片，也是右侧 Inspector 预览的锚点，还是图库列表项的来源。一条数据从需求到可使用 App 的全景如下：</p>
+  <pre><code>用户「描述你想创建的 App」
+   <span class="flow-arrow">│</span>  新建 builtin Session（inspiration_creation=true，标题「灵感」）
+   <span class="flow-arrow">▼</span>
+Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widget 声明
+   <span class="flow-arrow">│</span>  调用工具：publish_site  /  Canvas.show / Widget.show
+   <span class="flow-arrow">▼</span>
+后端 sites 模块分发（ID 前缀 site_/canvas_/widget_）
+   <span class="flow-arrow">│</span>  site：构建 release → copy_release → finish_release(ready)
+   <span class="flow-arrow">│</span>  canvas/widget：校验 index.html → bump resourceRevision
+   <span class="flow-arrow">▼</span>
+工具返回 InspirationSurface（kind=inspiration, mode=site|canvas|widget）
+   <span class="flow-arrow">│</span>  持久化进工具结果 → 聊天历史生成物卡片（刷新/回放可恢复）
+   <span class="flow-arrow">▼</span>
+右侧 Inspector 用 ace-site:// 协议加载预览（默认查看，按需指出要修改的位置）
+   <span class="flow-arrow">│</span>  批注按原 Session 聚合为 Composer 草稿 → 发送回 Agent 修改
+   <span class="flow-arrow">▼</span>
+图库列表（list_inspirations：site+canvas 合并，按 updatedAt 倒序）
+   <span class="flow-arrow">▼</span>
+详情四操作：修改（回原 sessionId）/ 分享（ZIP）/ 固定（sticky 便利贴）/ 删除（级联清理）</code></pre>
+  <p class="key">理解这条主线就抓住了灵感功能的骨架：工具产出 <strong>Surface</strong>，<strong>Surface</strong> 是图库、预览、历史回放的单一事实来源，所有用户操作都是围绕 Surface 背后资源的生命周期管理。</p>
+
+  <h2 id="abstractions">2. 核心抽象</h2>
+
+  <h3>2.1 双运行时：site 与 canvas</h3>
+  <p>灵感内部承载 App 的方式有两种，决定了一整套差异化的构建、预览、分享与删除行为：</p>
   <table>
-    <thead><tr><th>类型</th><th>关键字段</th><th>说明</th></tr></thead>
+    <thead><tr><th>维度</th><th><span class="chip c-site">site</span> 构建产物型</th><th><span class="chip c-canvas">canvas</span> 声明式组件型</th></tr></thead>
     <tbody>
-      <tr><td><code>InspirationItem</code></td><td><code>id</code>、<code>kind</code>、<code>title</code>、<code>description</code>、<code>workspaceId</code>、<code>sessionId</code>、<code>createdAt</code>、<code>updatedAt</code></td><td>图库列表项。<code>kind</code> 仅供内部协议和生命周期分发，不渲染类型标签。</td></tr>
-      <tr><td><code>InspirationDetail</code></td><td>列表字段、内部 site/canvas 数据、widgets、annotations</td><td>详情与运行时操作所需的完整资源。</td></tr>
-      <tr><td><code>InspirationAnnotation</code></td><td><code>targetKind</code>、Canvas/Widget/mount、route、selector、elementText、comment、status</td><td>统一保存 App、Widget 与 DOM 元素批注。</td></tr>
-      <tr><td><code>InspirationSurface</code></td><td><code>kind=inspiration</code>、<code>mode</code>、资源 ID、<code>sessionId</code>、title、status、revision</td><td>工具结果、流式展示和历史回放共用的稳定协议。</td></tr>
+      <tr><td>本质</td><td>Workspace 内一个完整 webapp 项目经 <code>npm run build</code> 产出的静态站点</td><td>若干 Widget（每个一个 <code>index.html</code>）按 12 列网格 placement 组合成的 App</td></tr>
+      <tr><td>存储</td><td><code>sites</code> + <code>site_releases</code> 表；release 目录在 <code>owner_home/sites/site_*/releases/rel_*/site</code></td><td>Blueprint 表（canvas/widget/placement/binding/automation）；Widget 源码在 <code>.ace/blueprint/widgets/widget_*</code></td></tr>
+      <tr><td>预览</td><td>release 目录的 <code>index.html</code> + 静态资源，注入批注 bridge</td><td>运行时拼装 Canvas HTML，每个 Widget 在独立 iframe 内运行</td></tr>
+      <tr><td>更新</td><td>重新 <code>publish_site</code> 生成新 release，<code>active_release_id</code> 切换</td><td><code>Widget.validate</code> 升 <code>resourceRevision</code>，Surface 按指纹刷新</td></tr>
+      <tr><td>分享</td><td>ZIP = release 静态文件，根路径改相对</td><td>ZIP = 离线 Canvas HTML + manifest + Widget 静态文件 + 最近成功数据快照</td></tr>
+      <tr><td>删除</td><td>删 DB 记录 + release/export 目录 + 批注；源码与原 Session 保留</td><td>删 placement → 删不再共享的 Widget → 删无 Binding 的 Automation；共享资产保留</td></tr>
+    </tbody>
+  </table>
+  <p>两条运行时通过资源 ID 前缀（<code>site_</code> / <code>canvas_</code> / <code>widget_</code>）在 <code>SiteManager</code> 的 <code>get_inspiration</code> / <code>export_inspiration</code> / <code>delete_inspiration</code> 里统一分发，对上层只暴露「灵感」一个概念。</p>
+
+  <h3>2.2 InspirationSurface：单一事实来源协议</h3>
+  <p>所有发布/展示工具都返回 <code>kind=inspiration</code> 的 Surface。它是工具结果、流式展示、历史回放共用的最小协议——聊天渲染器从持久化的工具结果里提取 Surface 元数据，所以刷新页面、重新进入 Session 后生成物卡片仍然在。</p>
+  <table>
+    <thead><tr><th>字段</th><th>取值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>kind</code></td><td><code>"inspiration"</code></td><td>固定，标识灵感类 Surface</td></tr>
+      <tr><td><code>mode</code></td><td><code>site</code> / <code>canvas</code> / <code>widget</code></td><td>决定 Inspector 渲染哪种预览</td></tr>
+      <tr><td><code>inspirationId</code></td><td>资源 ID</td><td>图库与详情统一锚点</td></tr>
+      <tr><td><code>siteId</code>/<code>canvasId</code>/<code>widgetId</code></td><td>对应 mode 的内部 ID</td><td>按 mode 填充</td></tr>
+      <tr><td><code>sessionId</code></td><td>原会话 ID</td><td>「修改」跳回原对话的依据</td></tr>
+      <tr><td><code>title</code></td><td>展示名</td><td>卡片标题</td></tr>
+      <tr><td><code>status</code></td><td><code>preparing</code> / <code>ready</code></td><td>Widget 未通过 validate 时为 preparing</td></tr>
+      <tr><td><code>revisionId</code></td><td>site=release_id，canvas=updatedAt</td><td>site/canvas 版本锚</td></tr>
+      <tr><td><code>resourceRevision</code></td><td>Widget 专属</td><td>validate 通过后 bump，驱动 Surface 刷新</td></tr>
     </tbody>
   </table>
 
-  <h2>3. 模块结构</h2>
+  <h3>2.3 统一资源契约</h3>
   <table>
-    <thead><tr><th>文件</th><th>职责</th></tr></thead>
+    <thead><tr><th>类型</th><th>关键字段</th><th>角色</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/sites/manager.py</code></td><td>统一列表/详情/删除/导出分发；网站 Release；Canvas 完整 HTML 与离线包。</td></tr>
-      <tr><td><code>crew/sites/store.py</code></td><td>网站数据与统一批注表；初始化时把旧 <code>site_annotations</code> 无损迁移到 <code>inspiration_annotations</code>。</td></tr>
-      <tr><td><code>crew/sites/blueprint.py</code></td><td>Canvas、Widget、Binding、Automation、Run 数据及 Widget Runtime。</td></tr>
-      <tr><td><code>crew/gateway/routers/sites.py</code></td><td><code>/api/sites/inspirations</code> 统一 API、旧接口兼容、Canvas/Widget 渲染。</td></tr>
-      <tr><td><code>crew/tools/site_tools.py</code><br><code>crew/tools/blueprint_tools.py</code></td><td><code>publish_site</code>、<code>Canvas.show</code>、<code>Widget.show</code> 返回标准 Surface。</td></tr>
-      <tr><td><code>desktop/src/ui/features/sites-page.ts</code></td><td>灵感图库、详情、搜索、统一操作、网站 Surface 和批注草稿。</td></tr>
-      <tr><td><code>desktop/src/ui/features/blueprint-surface.ts</code></td><td>Canvas/Widget Surface、revision 刷新、嵌套 iframe 选区与批注合成。</td></tr>
-      <tr><td><code>desktop/src/main/site-preview-protocol.ts</code></td><td><code>ace-site://</code> 的 site/canvas/widget 认证转发和 ID/路径校验。</td></tr>
-      <tr><td><code>desktop/src/main/index.ts</code><br><code>desktop/src/main/preload.ts</code><br><code>desktop/src/main/inspiration-sticky-preload.ts</code></td><td>受控便利贴悬浮层、最小权限控制条与 ZIP 保存 IPC。</td></tr>
+      <tr><td><code>InspirationItem</code></td><td><code>id, kind, title, description, workspaceId, sessionId, createdAt, updatedAt</code></td><td>图库列表项；<code>kind</code> 仅内部分发，不渲染类型标签</td></tr>
+      <tr><td><code>InspirationDetail</code></td><td>Item 字段 + <code>site?/canvas?/widgets?/annotations</code></td><td>详情与运行时操作所需的完整资源</td></tr>
+      <tr><td><code>InspirationAnnotation</code></td><td><code>targetKind, canvasId, widgetId, mountId, revisionId, route, selector, elementTag, elementText, comment, context, status</code></td><td>统一批注；<code>targetKind</code> 区分 DOM 元素与组件级批注</td></tr>
+      <tr><td><code>InspirationSurface</code></td><td>见 2.2</td><td>工具结果/历史回放共用协议</td></tr>
     </tbody>
   </table>
 
-  <h2>4. HTTP 接口</h2>
+  <h3>2.4 ace-site:// 私有协议</h3>
+  <p>预览不直连后端 HTTP 端口，而是走 Electron 私有 scheme <code>ace-site://{resource_id}/</code>。主进程 <code>protocol.handle</code> 把 hostname 当作 assetId，按前缀定 kind 并映射到当前认证 Gateway：site → <code>/api/sites/{id}/preview/{path}</code>、canvas → <code>/api/sites/canvases/{id}/render</code>、widget → <code>/api/sites/widgets/{id}/render/{path}</code>。ID 必须匹配 <code>/^(?:site|canvas|widget)_[0-9a-f]{12}$/i</code>，不接受任意 URL。这样预览鉴权由主进程统一注入，资源 ID 是唯一入口，后端再对 release/widget 根目录做二次边界校验。</p>
+
+  <h2 id="tools">3. 工具（Agent Tools）</h2>
+  <p>Agent 不直接写文件入库，而是通过工具产出 App 并返回 Surface。灵感相关工具分两组：<code>sites</code> toolset 的 <code>publish_site</code>，以及 <code>blueprint</code> toolset 的四个 Blueprint 工具。所有工具 <code>always_load=True</code>，即开箱可用，无需额外注册。</p>
+
+  <h3>3.1 publish_site —— 构建产物型发布</h3>
+  <table>
+    <thead><tr><th>属性</th><th>值</th></tr></thead>
+    <tbody>
+      <tr><td>toolset / name</td><td><code>sites</code> / <code>publish_site</code></td></tr>
+      <tr><td>触发</td><td>仅当用户明确要求部署或发布灵感 App 时</td></tr>
+      <tr><td>必填参数</td><td><code>source_path</code>（Workspace 内目录）、<code>name</code></td></tr>
+      <tr><td>可选参数</td><td><code>description</code>、<code>build_command</code>（默认读 package.json 的 build script）、<code>output_directory</code>（默认 dist）、<code>site_id</code>（更新既有灵感时传入）</td></tr>
+      <tr><td>副作用</td><td>校验源码在 Workspace 内 → 构建 → copy_release → 生成 release 记录（building→ready）</td></tr>
+      <tr><td>返回 Surface</td><td><code>mode=site</code>，<code>revisionId=release_id</code>，<code>status=ready</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.2 Blueprint 四工具 action 矩阵</h3>
+  <p>四个工具共享同一种 schema 形态：一个 <code>action</code> 枚举 + 一组可选资源字段，<code>action</code> 是唯一必填。这把「资源 CRUD」压成单一工具入口，避免工具数量爆炸。</p>
+  <table>
+    <thead><tr><th>工具</th><th>toolset</th><th>action 集合</th><th>是否产出 Surface</th></tr></thead>
+    <tbody>
+      <tr><td><span class="chip c-canvas">Canvas</span></td><td>blueprint</td><td><code>list / create / read / update / placeWidget / updatePlacement / removePlacement / show / delete</code></td><td><code>show</code> → <code>mode=canvas</code></td></tr>
+      <tr><td><span class="chip c-widget">Widget</span></td><td>blueprint</td><td><code>list / create / read / update / validate / show / delete</code></td><td><code>show</code> → <code>mode=widget</code>（<code>resourceRevision</code> + validate 状态决定 status）</td></tr>
+      <tr><td><span class="chip c-auto">Automation</span></td><td>blueprint（async）</td><td><code>list / create / read / update / run / readRun / readRunArtifact / readRunLogs / listRuns / delete</code></td><td>否（产出 JSON artifact 投递给 Widget）</td></tr>
+      <tr><td><span class="chip c-bind">Binding</span></td><td>blueprint</td><td><code>list / create / read / validate / delete</code></td><td>否（连接 Automation↔Widget 的持久边）</td></tr>
+    </tbody>
+  </table>
+  <p class="note"><strong>关键约束：</strong>工具结果里的 ID（<code>automationId/widgetId/bindingId/canvasId/mountId</code>）必须原样回用，<strong>不得臆造</strong>。需用 <code>list</code> 解析具名资产、<code>read</code> 读详情。<code>Automation.run</code> 是异步工具，运行后用 <code>readRun</code> 拿终态、<code>readRunArtifact</code> 拿产物。<code>Widget.validate</code> 通过才会 <code>bump resourceRevision</code>，挂载的预览随之刷新。</p>
+
+  <h3>3.3 工具 → Surface 映射</h3>
+  <table>
+    <thead><tr><th>工具调用</th><th>Surface mode</th><th>版本锚</th><th>status 语义</th></tr></thead>
+    <tbody>
+      <tr><td><code>publish_site</code></td><td><code>site</code></td><td><code>revisionId=release.id</code></td><td>固定 <code>ready</code>（构建失败则工具抛错，无 Surface）</td></tr>
+      <tr><td><code>Canvas.show</code></td><td><code>canvas</code></td><td><code>revisionId=str(updatedAt)</code></td><td>固定 <code>ready</code></td></tr>
+      <tr><td><code>Widget.show</code></td><td><code>widget</code></td><td><code>resourceRevision</code></td><td>validate 通过 <code>ready</code>，否则 <code>preparing</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="skills">4. Skill 体系</h2>
+  <p>工具是「手」，skill 是「脑」。灵感会话里 Agent 加载哪些 skill，决定了它用什么方式把需求变成 App。灵感相关的 skill 分两层：Blueprint 域（组件型 App）和 webapp-building（构建产物型 App）。</p>
+
+  <h3>4.1 blueprint —— 路由分发 skill</h3>
+  <p><code>blueprint</code> 本身不产出 App，它是 Blueprint 四资产的<strong>调度入口</strong>，告诉 Agent 该加载哪个子 skill。它定义了四资产的所有权边界：</p>
+  <table>
+    <thead><tr><th>资产</th><th>拥有</th></tr></thead>
+    <tbody>
+      <tr><td><span class="chip c-auto">Automation</span></td><td>执行与结果（artifact）</td></tr>
+      <tr><td><span class="chip c-widget">Widget</span></td><td>展示与交互</td></tr>
+      <tr><td><span class="chip c-bind">Binding</span></td><td>Automation ↔ Widget 的持久连接边</td></tr>
+      <tr><td><span class="chip c-canvas">Canvas</span></td><td>仅 placement（布局、z 序、placement 局部 view state）</td></tr>
+    </tbody>
+  </table>
+  <p>它的 Routing 规则把请求导向子 skill：执行/调度/条件 → <code>automation</code>；HTML UI/数据渲染 → <code>widget</code>（再读 <code>runtime-api.md</code>）；数据投递/submit 路由 → <code>binding</code>；placement 布局 → <code>canvas</code>。它还给出了若干 Standard Chains（标准调用链），见第 5 节。</p>
+
+  <h3>4.2 子 skill 分工</h3>
+  <table>
+    <thead><tr><th>skill</th><th>职责</th><th>关键产出</th></tr></thead>
+    <tbody>
+      <tr><td><code>widget</code></td><td>Widget 的创建/展示/校验/更新/删除；定义响应式尺寸契约与 runtime 状态机</td><td>一个 <code>index.html</code> + <code>slots.main</code>/<code>events.submit</code> 契约</td></tr>
+      <tr><td><code>canvas</code></td><td>Canvas 与 placement 的增删改查；12 列网格尺寸模型；共享 vs placement 局部状态</td><td>placement（<code>mountId</code> + <code>layout{x,y,w,h}</code>）</td></tr>
+      <tr><td><code>widgetdesign</code></td><td>Widget <strong>设计规范权威</strong>；一个 job + 一个 archetype + Kimi tokens + 语义重组（Compact/Regular/Expanded）</td><td>视觉与排版决策（不碰 API）</td></tr>
+      <tr><td><code>binding</code></td><td>Automation artifact → <code>Widget.slots.main</code> 的投递与 <code>events.submit</code> 回路验证</td><td>经验证的 Binding 边</td></tr>
+      <tr><td><code>automation</code></td><td>Automation 的执行/调度/触发（manual/one-shot/scheduled/interval/condition/widget-event）与 run 记录</td><td>JSON artifact + run 状态</td></tr>
+      <tr><td><code>webapp-building</code></td><td>本地脚手架 React+TS+Vite+Tailwind+shadcn/ui 项目，<code>npm run build</code> 产出 <code>dist/</code></td><td>可被 <code>publish_site</code> 发布的 webapp 源码</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.3 Widget Runtime 边界</h3>
+  <p>Widget 的 <code>index.html</code> 运行在沙箱 iframe 里，只能用宿主注入的全局 <code>window.DaimonWidget</code> / <code>window.DaimonCanvas</code>（数据订阅、状态、主题、文件、placement 局部 view state）。<strong>iframe 内代码永远不直接调 agent 侧的 Canvas/Widget/Automation/Binding 工具</strong>——submit 事件经 Binding 路由到 Automation，由宿主运行后把数据回投到 <code>data.main</code>。这是组件型 App 的安全基石：不可信的渲染内容拿不到 agent 权限。</p>
+  <p class="note"><strong>必读约束：</strong>创建任何 Widget 前必须先读 <code>widgetdesign</code>；写 iframe JS 前必须读 <code>widget/references/runtime-api.md</code>。<code>widgetdesign</code> 是唯一的 Widget 设计权威，不为同一工作加载第二个设计 skill。</p>
+
+  <h2 id="flows">5. 工作流程：三条执行路径</h2>
+  <p>不同的需求落到不同的工具链。Blueprint skill 给出了若干 Standard Chains，落到灵感功能里有三条主干路径。</p>
+
+  <h3>5.1 构建产物型（site）</h3>
+  <p>适合「做一个完整网站/应用」——需要复杂 UI 组件、状态管理、构建流水线。</p>
+  <pre><code>1. 加载 webapp-building skill
+2. bash init-webapp.sh &lt;project-dir&gt; "&lt;title&gt;"   <span class="flow-arrow"># 脚手架 React+TS+Tailwind+shadcn/ui</span>
+3. 编辑 src/，npm run build → dist/
+4. publish_site(source_path=&lt;project-dir&gt;, name=..., description=...)
+   <span class="flow-arrow">#</span> 后端：_resolve_source 校验源码在 Workspace 内
+   <span class="flow-arrow">#</span>       _defaults 限定 build 命令首段 ∈ {npm,pnpm,yarn,bun}
+   <span class="flow-arrow">#</span>       execute_captured 构建 → Native Runtime → _copy_release（拒符号链接、输出必在源码内）
+   <span class="flow-arrow">#</span>       finish_release(ready) → 更新 active_release_id
+5. 返回 Surface(mode=site, revisionId=release_id, status=ready)
+   <span class="flow-arrow">#</span> 聊天卡片 + 图库列表（list_inspirations 合并 site+canvas）</code></pre>
+
+  <h3>5.2 声明式组件型（静态 widget / canvas）</h3>
+  <p>适合「做一个卡片/看板/小工具」——单页响应式 UI，无需构建。</p>
+  <pre><code>1. 加载 blueprint → widget skill（先读 widgetdesign 设计规范）
+2. Widget.create(title, description)            <span class="flow-arrow"># 拿到 widgetId + workspaceRoot</span>
+3. Widget.show(widgetId)                        <span class="flow-arrow"># 立即挂占位预览（status 可能 preparing）</span>
+4. 写完整 index.html 到 workspaceRoot/index.html
+5. Widget.validate(widgetId)                    <span class="flow-arrow"># 校验通过则 bump resourceRevision，预览刷新</span>
+6. （可选）Canvas.placeWidget(canvasId, widgetId, layout{x,y,w,h})
+7. Canvas.show(canvasId)                        <span class="flow-arrow"># 返回 Surface(mode=canvas)</span>
+   <span class="flow-arrow">#</span> Canvas 单组件时铺满；多组件按 12 列网格 grid 排版</code></pre>
+  <p class="note">Standard Chain 里强调：<code>Widget.show</code> 要在创作开始时尽早调用以挂占位；<code>Widget.validate</code> 是唯一的 revision 推进器；<code>Canvas.show</code> 在整个看板需要常驻对话时调用。纯 Canvas 展示用 <code>placeWidget</code> 即可，<code>Widget.show</code> 只在还需要对话/侧栏展示时才用。</p>
+
+  <h3>5.3 数据驱动型（automation-backed widget）</h3>
+  <p>适合「做一个会自动刷新数据的仪表盘」——Widget 展示 Automation 产出的 JSON。</p>
+  <pre><code>1. 定义匹配的 schema：Automation.result ↔ Widget.slots.main ↔ events.submit ↔ Automation.input
+2. Automation.create(...) + Widget.create(...)   <span class="flow-arrow"># 拿到 automationId / widgetId</span>
+3. 写 index.html + Widget.validate               <span class="flow-arrow"># 准备渲染</span>
+4. Binding.create(automationId, widgetId)        <span class="flow-arrow"># 建边，初始 pending_run</span>
+5. Binding.validate / Automation.run             <span class="flow-arrow"># 首次运行，artifact 投递到 data.main</span>
+6. Canvas.placeWidget + Canvas.show              <span class="flow-arrow"># Surface(mode=canvas)</span>
+7. （可选）启用 interval / schedule 触发器周期刷新</code></pre>
+  <p class="warning"><strong>验证要点：</strong><code>pending_run</code> 只表示 Binding 已配置，<strong>不代表数据已投递</strong>。要确认 run 达到 <code>succeeded</code> 且 <code>Widget.read</code> 的 <code>latestData.main</code> 符合预期，才算数据真的到位。</p>
+
+  <h2 id="lifecycle">6. 生命周期与状态</h2>
+
+  <h3>6.1 灵感资源生命周期</h3>
+  <pre><code>新建（inspiration_creation=true builtin Session）
+  <span class="flow-arrow">→</span> 对话生成（工具产出 Surface）
+  <span class="flow-arrow">→</span> 对话成果卡（点击后打开 Inspector 预览）
+  <span class="flow-arrow">→</span> 指出要修改的位置（按需进入批注）
+  <span class="flow-arrow">→</span> 部署到图库（list_inspirations 可见）
+  <span class="flow-arrow">→</span> 使用 / 分享(ZIP) / 固定(sticky) / 删除(级联)
+  <span class="flow-arrow">→</span> 修改：回原 sessionId 继续对话 → 重新发布/validate → 新 revision</code></pre>
+
+  <h3>6.2 release 生命周期（site）</h3>
+  <p><code>create_release</code> 写入 <code>status=building</code> → 构建成功 <code>finish_release(ready)</code> 并更新 <code>active_release_id</code>，失败 <code>finish_release(failed)</code> 记 error；若是新建站点失败则回滚删除 site 记录，不留半成品。</p>
+
+  <h3>6.3 Widget revision 生命周期（canvas）</h3>
+  <p><code>Widget.create</code> 生成初始 <code>resourceRevision</code> → 写 <code>index.html</code> → <code>Widget.validate</code> 通过则 <code>bump_widget_revision</code>。前端 <code>blueprint-surface</code> 用 <code>surfaceSignature()</code>（widget id+revision+validation.status / canvas placements+widgets 指纹）判断是否重渲染，<code>schedulePoll</code> 每秒轮询，签名不变就跳过——避免轮询抖动。</p>
+
+  <h3>6.4 批注生命周期与迁移</h3>
+  <p>批注状态 <code>open → resolved/rejected</code>。统一存 <code>inspiration_annotations</code> 表，<code>targetKind</code> 区分 <code>site_dom</code>（网站 DOM 元素）/ <code>canvas</code>（看板级）/ <code>widget</code>（组件级）/ <code>widget_dom</code>（组件内 DOM），<code>context</code> JSON 存 <code>canvasId/widgetId/mountId</code>。Store 初始化时用 <code>INSERT OR IGNORE</code> 把旧 <code>site_annotations</code> 无损迁移到统一表（<code>inspiration_kind='site'</code>）；前端旧草稿 localStorage key <code>ace.siteAnnotationDrafts.v1</code> 转存到 <code>ace.inspirationAnnotationDrafts.v1</code>，升级后不丢未发送批注。</p>
+
+  <h3>6.5 批注 → Composer 回写</h3>
+  <p>批注按原 Session 聚合成 Composer 草稿 chip（<code>chat-site-annotation-preview</code> / <code>chat-blueprint-annotation-preview</code> 容器）。发送内容含源码路径、内部资源 ID、route、selector、当前文本、revision 与修改要求。<strong>site 修改后等用户明确重新部署</strong>；<strong>widget 修改后调 <code>Widget.validate</code> 直接刷新 Surface</strong>——这一差异由 Agent 工作流处理，不要求用户选类型。</p>
+
+  <h3>6.6 用户体验收敛（2026-08-10）</h3>
+  <p>灵感对用户只保留「成果」这一概念，site/canvas/widget、HTML、revision 等继续作为内部协议字段，不出现在成果卡和预览操作中。聊天内网站、看板和静态 HTML 统一渲染为一张可点击的灵感成果卡：整卡是单一入口，右侧使用箭头表达“查看”，不再同时展示“在 Crew 打开”或打开方式菜单。生成结果到达时不自动抢占 Inspector，用户点击卡片后才打开对应的网站或看板预览；历史回放仍可从同一 Surface 恢复。</p>
+  <p>预览面板默认只展示成果内容；网站和看板的批注入口统一为「指出要修改的位置」，进入后通过点击元素产生 Composer 批注草稿。刷新、revision、整体批注/元素批注等运行时概念不作为普通用户操作暴露。低频的分享、固定和删除继续保留在图库详情的次级操作中，避免干扰查看与修改主路径。</p>
+
+  <h2 id="tradeoffs">7. 设计取舍</h2>
+
+  <h4>双运行时统一为「灵感」，不向用户暴露 site/canvas</h4>
+  <p>朴素方案是只用一套承载——但 React 构建产物是单体 <code>index.html</code>，硬塞进 widget 网格不合理；反之把一个静态小卡片走完整构建流水线又过重。保留双运行时、用 ID 前缀在 <code>SiteManager</code> 内分发，让「完整 webapp」和「组合式组件看板」各得其所，而上层图库/详情/操作只认一个「灵感」。代价是 <code>get/export/delete_inspiration</code> 三个方法都要写前缀分支。</p>
+
+  <h4>Surface 作为单一事实来源</h4>
+  <p>替代方案是每种类型独立协议。但历史回放、批注、图库都需要统一锚点，独立协议意味着每个消费方都要 if/else 分发。把 <code>publish_site</code>/<code>Canvas.show</code>/<code>Widget.show</code> 全部统一成 <code>kind=inspiration</code> + <code>mode</code>，工具结果持久化后任何消费方都能从最小元数据重建卡片，刷新不丢。</p>
+
+  <h4>ace-site:// 私有协议 + ID 前缀，而非直连后端端口</h4>
+  <p>直接用 <code>http://localhost:port</code> 会暴露端口、需要鉴权头、还有路径穿越风险。私有 scheme 让主进程成为唯一转发点：ID 正则校验 + 认证注入 + 后端二次根目录边界校验，三道独立校验。代价是 Electron 侧要维护 <code>protocol.handle</code> 与 scheme 特权声明。</p>
+
+  <h4>批注统一表 + targetKind，而非每种类型一张表</h4>
+  <p>site/canvas/widget/widget_dom 四种 target 若各建一表，跨类型聚合到 Composer 草稿和按 Session 聚合会很难。统一 <code>inspiration_annotations</code> 表 + <code>context</code> JSON 扩展字段，配合一次性迁移，让批注链路只有一套读写路径。</p>
+
+  <h4>sticky 便利贴 frame:false + preload 注入 chrome</h4>
+  <p>用系统标题栏会占空间且三端不统一；自绘标题栏需要 <code>frame:false</code>。<code>inspiration-sticky-preload</code> 注入拖拽条 + 关闭键，保证三端一致的无标题栏体验。透明圆角在 macOS 稳定（<code>transparent:true</code> + <code>floating</code> 层级 + 全工作区可见），Win/Linux 透明不稳定改用 <code>resolveWindowBackgroundColor()</code> 实色——这是显式的平台兼容性取舍，而非 bug。</p>
+
+  <h4>删除采用引用计数式级联，保留共享资产</h4>
+  <p>删 Canvas 时朴素方案是级联全删 constituent widget/automation。但一个 Widget 可能被多个 Canvas 引用，全删会误伤。改为：删 placement → 删不再被任何 Canvas 引用的 Widget → 删没有其他 Binding 的 Automation 并停调度。共享资产保留，源码与原 Session 也保留。</p>
+
+  <h2 id="security">8. 安全边界</h2>
+  <table>
+    <thead><tr><th>边界</th><th>约束</th></tr></thead>
+    <tbody>
+      <tr><td>构建命令</td><td><code>_defaults</code> 限定首段 ∈ {npm,pnpm,yarn,bun}；命令经会话 <code>ProcessLaunch</code> 和 <code>execute_captured</code> 进入 Native Runtime，缺少安全上下文或 runtime 时失败关闭；Desktop 手动重发会从认证 owner/workspace 重新编译 launch；<code>_copy_release</code> 拒符号链接、要求输出在源码内</td></tr>
+      <tr><td>预览协议</td><td>ace-site:// ID 正则 <code>/^(?:site|canvas|widget)_[0-9a-f]{12}$/i</code>；<code>release_file</code> 强制 requested 路径在 release root 内；widget 资源路径在 widget root 内</td></tr>
+      <tr><td>sticky 窗口</td><td>仅接受规范 <code>site_*/canvas_*</code> ID，不传 URL；单例 Map；<code>contextIsolation+sandbox+webSecurity</code>，禁 Node/webview/新窗口/外导航；<code>will-navigate</code> 钳制同 ID ace-site:，<code>windowOpenHandler</code> deny</td></tr>
+      <tr><td>ZIP 保存</td><td>通道 <code>dialog:saveLocalExport</code>；schema 要求绝对路径 + 无分隔符文件名 + <code>.zip</code>；主进程再校验相对 <code>sites/{site|canvas}_*/exports/*.zip</code> 三段、<code>stat</code>(isFile+nlink==1)+<code>realpath</code> canonical，最后 <code>showSaveDialog</code> + <code>copyFile</code></td></tr>
+      <tr><td>隔离</td><td>所有 API 查询/写入以 <code>owner_account_id</code> 隔离；Widget iframe 只能用 <code>window.DaimonWidget/DaimonCanvas</code>，不直调 agent 工具</td></tr>
+      <tr><td>文件传递</td><td>资产间传文件只走 <code>FileResourceRef</code>；浏览器 File、原始字节、大 base64、本地路径、<code>file:</code> URL 不得进持久化 JSON 与通知</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="entrypoints">9. 关键实现入口</h2>
+  <table>
+    <thead><tr><th>层</th><th>文件</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td>后端·管理</td><td><code>crew/sites/manager.py</code></td><td>统一 list/get/export/delete 分发；site publish/release/export；Canvas HTML 拼装与离线包</td></tr>
+      <tr><td>后端·存储</td><td><code>crew/sites/store.py</code></td><td>sites/releases/批注表；初始化迁移 site_annotations→inspiration_annotations</td></tr>
+      <tr><td>后端·Blueprint</td><td><code>crew/sites/blueprint.py</code></td><td>Canvas/Widget/Binding/Automation 数据、Widget Runtime、调度与运行</td></tr>
+      <tr><td>后端·路由</td><td><code>crew/gateway/routers/sites.py</code></td><td><code>/api/sites/inspirations</code> 统一 API、旧接口兼容、Canvas/Widget 渲染、预览 bridge 注入</td></tr>
+      <tr><td>后端·工具</td><td><code>crew/tools/site_tools.py</code> / <code>crew/tools/blueprint_tools.py</code></td><td><code>publish_site</code>；Canvas/Widget/Automation/Binding 四工具 action 实现 + Surface 返回</td></tr>
+      <tr><td>前端·图库</td><td><code>desktop/src/ui/features/sites-page.ts</code></td><td>图库/详情/搜索/四操作/site Surface/批注草稿</td></tr>
+      <tr><td>前端·Surface</td><td><code>desktop/src/ui/features/blueprint-surface.ts</code></td><td>canvas/widget Surface 渲染、revision 指纹刷新、嵌套 iframe 选区与批注合成</td></tr>
+      <tr><td>前端·契约</td><td><code>desktop/src/ui/backend-client.ts</code></td><td>InspirationItem/Detail/Annotation/Surface 类型定义与 API 客户端</td></tr>
+      <tr><td>主进程·协议</td><td><code>desktop/src/main/site-preview-protocol.ts</code></td><td>ace-site:// scheme 特权声明、ID 校验、按 kind 映射 Gateway</td></tr>
+      <tr><td>主进程·窗口</td><td><code>desktop/src/main/index.ts</code></td><td>sticky 便利贴窗口创建/IPC/单例/平台差异、ZIP 保存校验</td></tr>
+      <tr><td>主进程·preload</td><td><code>desktop/src/main/inspiration-sticky-preload.ts</code> / <code>preload.ts</code></td><td>便利贴 chrome 注入、IPC 通道暴露</td></tr>
+      <tr><td>共享·schema</td><td><code>desktop/src/shared/ipc-schemas.ts</code></td><td><code>InspirationWindowArgs</code>、<code>DialogSaveLocalExportArgs</code> 等 IPC 校验</td></tr>
+      <tr><td>skill</td><td><code>crew/skills/{blueprint,widget,canvas,widgetdesign,binding,automation,webapp-building}/SKILL.md</code></td><td>路由分发、组件/画布/设计/绑定/自动化/构建的 Agent 指引</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="api">10. HTTP 接口</h2>
   <table>
     <thead><tr><th>方法与路径</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>GET /api/sites/inspirations</code></td><td>列出当前 owner 的网站与 Canvas，按 <code>updatedAt</code> 倒序。</td></tr>
-      <tr><td><code>GET /api/sites/inspirations/{id}</code></td><td>读取统一详情和批注。</td></tr>
-      <tr><td><code>DELETE /api/sites/inspirations/{id}</code></td><td>按内部生命周期安全清理运行资源。</td></tr>
-      <tr><td><code>POST /api/sites/inspirations/{id}/export</code></td><td>生成网站 Release ZIP 或 Canvas 离线 ZIP。</td></tr>
-      <tr><td><code>POST /api/sites/inspirations/{id}/annotations</code></td><td>创建统一批注。</td></tr>
-      <tr><td><code>PATCH /api/sites/inspirations/{id}/annotations/{annotation_id}</code></td><td>更新批注状态。</td></tr>
-      <tr><td><code>GET /api/sites/canvases/{canvas_id}/render</code></td><td>渲染包含 Widget iframe 的完整 Canvas App。</td></tr>
+      <tr><td><code>GET /api/sites/inspirations</code></td><td>列出当前 owner 的 site+canvas，按 <code>updatedAt</code> 倒序</td></tr>
+      <tr><td><code>GET /api/sites/inspirations/{id}</code></td><td>读取统一详情 + 批注</td></tr>
+      <tr><td><code>DELETE /api/sites/inspirations/{id}</code></td><td>按内部生命周期安全清理</td></tr>
+      <tr><td><code>POST /api/sites/inspirations/{id}/export</code></td><td>生成 site Release ZIP 或 Canvas 离线 ZIP，返回 <code>archive_path</code></td></tr>
+      <tr><td><code>POST /api/sites/inspirations/{id}/annotations</code></td><td>创建统一批注（widget_ 前缀走 widget 路径取 revision）</td></tr>
+      <tr><td><code>PATCH /api/sites/inspirations/{id}/annotations/{aid}</code></td><td>更新批注状态</td></tr>
+      <tr><td><code>GET /api/sites/canvases/{id}/render</code></td><td>渲染含 Widget iframe 的完整 Canvas HTML</td></tr>
+      <tr><td><code>GET /api/sites/widgets/{id}/render/{path}</code></td><td>渲染 Widget（index.html 经 <code>runtime_html</code> 注入宿主 API）</td></tr>
+      <tr><td><code>POST /api/sites/widgets/{id}/emit</code></td><td>Widget submit 事件 → 活跃 Binding → Automation 运行</td></tr>
+      <tr><td><code>GET /api/sites/{id}/preview/{path}</code></td><td>site 资源预览；index.html 注入批注 bridge 脚本</td></tr>
     </tbody>
   </table>
-  <p>旧网站、Canvas、Widget、Automation 接口继续保留，使已有客户端、数据和工具调用不失效。</p>
+  <p>旧 site/canvas/widget/automation 接口继续保留，使已有客户端、数据和工具调用不失效。</p>
 
-  <h2>5. 预览与 Surface</h2>
-  <p><code>ace-site://{resource_id}/</code> 只接受规范的 <code>site_*</code>、<code>canvas_*</code> 或 <code>widget_*</code> ID。主进程把请求映射到当前认证 Gateway；站点资源路径由后端再次执行 release 根目录边界校验。Canvas 入口将 12 列布局渲染为完整 App，每个 Widget 继续在独立 iframe 内运行。</p>
-  <p><code>publish_site</code>、<code>Canvas.show</code> 与 <code>Widget.show</code> 都返回 <code>kind=inspiration</code> 的 Surface。聊天渲染器从持久化工具结果中提取最小 Surface 元数据，因此刷新、历史回放和重新进入 Session 后仍可显示生成物卡片。网站 Surface 使用完整 App iframe；Canvas/Widget Surface 依据 <code>resourceRevision</code> 验证并刷新。</p>
-
-  <h2>6. 批注链路</h2>
-  <p>网站预览桥返回 route、CSS selector、元素标签、截断文本和上下文。Widget Runtime 还返回 Canvas、Widget 与 mount 标识；嵌套 Canvas iframe 把事件转发到 Desktop。统一批注表使用 <code>targetKind</code> 区分 <code>site_dom</code>、<code>canvas</code>、<code>widget</code> 和 <code>widget_dom</code>。</p>
-  <p>批注按原 Session 聚合为 Composer 草稿。发送内容包含源码路径、内部资源标识、页面路由、selector、当前文本、revision 与修改要求。网站修改后等待用户明确重新部署；Widget 修改后调用 <code>Widget.validate</code> 并刷新 Surface。该差异由 Agent 工作流处理，不要求用户选择类型。</p>
-  <p>旧 <code>site_annotations</code> 会在 Store 初始化时使用相同 ID 迁移；网站旧草稿 localStorage key 也会转存到 <code>ace.inspirationAnnotationDrafts.v1</code>，避免升级后丢失未发送批注。</p>
-
-  <h2>7. 分享与删除</h2>
-  <h3>7.1 网站</h3>
-  <p>分享包沿用 active release，包含构建后的静态文件，不包含源码、日志、批注和绝对路径。删除时移除数据库运行记录、release、export 和统一批注；Workspace 源码与原 Session 保留。</p>
-  <h3>7.2 Canvas</h3>
-  <p>离线 ZIP 包含 <code>index.html</code>、无敏感元数据的 manifest、Widget 静态文件、布局和最近成功数据快照。Runtime 保留客户端交互，但不包含实时刷新入口、Automation URL、运行日志、批注、认证信息、本地绝对路径或 source map。</p>
-  <p>删除 Canvas 时先移除 placement，再清理不再被任何 Canvas 使用的 Widget；随之删除没有其他 Binding 的 Automation、Binding 和 Run，并停止对应调度。共享 Widget、仍有绑定的 Automation、工作区源码和原 Session 均保留。</p>
-
-  <h2>8. Electron 安全边界</h2>
-  <ul>
-    <li>悬浮窗 IPC 只接受规范的 <code>site_*</code>/<code>canvas_*</code> ID，不能传 URL；同一资源最多一个窗口。</li>
-    <li>便利贴在 macOS 使用透明圆角，在 Windows/Linux 使用兼容性更稳定的实色无边框窗口；三端均支持拖动、缩放、置顶和应用内取消固定。</li>
-    <li>小窗启用 <code>contextIsolation</code>、sandbox、<code>webSecurity</code>，禁用 Node、webview、新窗口和资源外导航。</li>
-    <li>固定状态仅存于主进程内存；关闭、取消固定、删除或应用退出会销毁窗口。</li>
-    <li>ZIP 保存只接受当前 owner 的 <code>sites/{site|canvas}_*/exports/*.zip</code> canonical regular file，再由系统保存对话框确定目标。</li>
-    <li>所有 API 查询和写入继续以 <code>owner_account_id</code> 隔离。</li>
-  </ul>
-
-  <h2>9. 测试与验收</h2>
-  <ul>
-    <li>后端覆盖：混合列表排序和 owner 隔离、旧批注迁移、统一批注上下文、Canvas 离线包敏感信息排除、共享资产删除。</li>
-    <li>Desktop 覆盖：单一图库、搜索、真实预览、四个操作、原对话跳转、历史 Surface、批注聚合。</li>
-    <li>Electron 覆盖：Canvas 协议、非法资源 ID、悬浮窗安全配置和受控 ZIP 保存。</li>
-    <li>交付检查：Pytest、Vitest、TypeScript、ESLint、安全扫描、CSS lint 与重复选择器审计。</li>
-  </ul>
-  <p class="warning">当前完整 Desktop <code>check</code> 还会先验证仓库的 Playwright 依赖是否使用精确 semver；该依赖基线问题与灵感模块逻辑测试相互独立。</p>
-
+  <h2 id="summary">11. 小结</h2>
+  <p>把灵感功能当成一个系统看，它有三层稳定契约：底层是<strong>双运行时</strong>（site 构建产物 / canvas 声明式组件），靠 ID 前缀分发；中层是<strong>InspirationSurface 协议</strong>，把工具产出统一成图库、预览、历史回放的单一事实来源；上层是<strong>四操作生命周期</strong>（修改/分享/固定/删除），围绕 Surface 背后资源做受控管理。Agent 侧通过 <code>publish_site</code> + Blueprint 四工具产出 Surface，由 <code>webapp-building</code> 与 Blueprint 域 skill 决定走哪条执行路径。安全上靠 ace-site:// 私有协议、sticky 沙箱窗口、ZIP canonical 校验、owner 隔离四道独立边界纵深防御。理解了「工具产出 Surface、Surface 驱动一切」这条主线，就理解了灵感功能的全部设计意图。</p>
   <p><a href="index.html">返回后端模块索引</a></p>
 </main></body>
 </html>

@@ -229,7 +229,9 @@ describe('sites page annotation handoff', () => {
     expect(surface).toContain("mode: 'widget' | 'canvas'");
     expect(surface).toContain('ace-blueprint-annotation-mode');
     expect(surface).toContain('ace-blueprint-element-selected');
-    expect(surface).toContain('data-blueprint-target-note');
+    expect(surface).toContain('指出要修改的位置');
+    expect(surface).not.toContain('data-blueprint-target-note');
+    expect(surface).not.toContain('data-site-surface-mode="use"');
     expect(surface).toContain("targetKind: 'canvas'");
     expect(surface).toContain("targetKind: 'widget'");
     expect(surface).toContain("targetKind: 'widget_dom'");

@@ -97,7 +97,7 @@ def test_parse_legacy_xls_converts_with_libreoffice(monkeypatch, tmp_path):
         (output_dir / "legacy.xlsx").write_bytes(b"converted")
         return MagicMock(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(parser_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr("crew.security.launch.execute_captured_sync", fake_run)
     assert "工作表" in parse_document_to_markdown(source)
 
 

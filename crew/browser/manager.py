@@ -807,12 +807,7 @@ class BrowserManager:
                                 self._cleanup_expired_artifacts,
                                 home / "browser" / "artifacts",
                             )
-                            # The browser connects directly by default.  A
-                            # mandatory Python HTTP/1.1 proxy changed Chromium
-                            # networking semantics (HTTP/2, WebSocket, auth,
-                            # downloads and custom schemes) and made the
-                            # Playwright facade less compatible with upstream.
-                            current.initialized = True
+                            await self._start_owner_proxy(current)
                     except BaseException:
                         # Publish the tombstone before releasing current.lock.
                         # A waiter can therefore never reinitialize and return
@@ -834,16 +829,18 @@ class BrowserManager:
                 raise
 
     async def _start_owner_proxy(self, owner: _Owner) -> None:
-        """Initialize a direct-network owner.
-
-        Kept as a compatibility entry point for lifecycle code that used to
-        require a temporary policy proxy.  Existing in-memory legacy proxies
-        are closed; new owners intentionally pass an empty ``proxy_url`` so
-        Electron/Chromium retains its native networking stack.
-        """
-        if owner.proxy is not None:
-            await owner.proxy.aclose()
-            owner.proxy = None
+        """Create the authenticated DNS-pinning boundary before browser use."""
+        if not self.driver.requires_policy_proxy():
+            owner.initialized = True
+            return
+        if owner.proxy is None:
+            proxy = LoopbackPolicyProxy(self.policy)
+            try:
+                await proxy.start()
+            except BaseException:
+                await proxy.aclose()
+                raise
+            owner.proxy = proxy
         owner.initialized = True
 
     def _cleanup_expired_artifacts(self, root: Path) -> None:

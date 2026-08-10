@@ -2922,8 +2922,11 @@ describe('BrowserHost', () => {
       runtime_key: RUNTIME_KEY,
       method: 'execute',
       params: { profile_dir: PROFILE, command: 'tab', args: ['list'], proxy_url: '' },
-    })).resolves.toMatchObject({ success: true });
-    expect(electron.sessions[0].proxy).toEqual({ mode: 'direct' });
+    })).rejects.toMatchObject({ code: 'proxy_required' });
+    expect(electron.sessions[0].proxy).toMatchObject({
+      mode: 'fixed_servers',
+      proxyRules: PROXY_URL,
+    });
 
     await host.dispose();
   });

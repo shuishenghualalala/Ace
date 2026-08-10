@@ -245,6 +245,7 @@ async def handle_terminal(
             security_context,
             security_service.mode_for(security_context),
             db_path=security_service.db_path,
+            audit=security_service.audit,
         )
     elif not allowed:
         return json.dumps(

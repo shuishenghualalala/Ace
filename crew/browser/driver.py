@@ -70,6 +70,10 @@ class BrowserOperationCancelled(asyncio.CancelledError):
 class BrowserDriver(ABC):
     """Transport-neutral interface for Crew's deterministic browser actions."""
 
+    def requires_policy_proxy(self) -> bool:
+        """Whether this driver can reach the network and must receive the policy proxy."""
+        return False
+
     async def prepare(self) -> bool:
         """Perform optional readiness work before the first browser action."""
         return self.available()

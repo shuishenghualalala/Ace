@@ -62,29 +62,28 @@ linux:
 
 # Windows target：同样输出 win-unpacked/ 裸目录。
 # - 不打 NSIS 安装器，避免引入额外工具链（makensis）与代码签名复杂度
-# - 开发构建默认不做代码签名，避免缺少 signtool 或证书时失败
-#   signAndEditExecutable=false 同时关掉"签 + 改 PE 头"两步
-#   如未来需要正式发布，再配置证书并改回 true
+# - 没有证书时仍可输出开发构建；发布流水线配置 CSC_LINK/CSC_KEY_PASSWORD
+#   后由 electron-builder 对 PE 文件执行 Authenticode 签名
 # - 图标暂用源 PNG，electron-builder 在 Windows 上能直接处理 PNG→ICO
 #   若未来 Windows 构建需要更严谨的 .ico，提交一份 assets/icon.ico 即可
 win:
   icon: assets/icon.png
-  signAndEditExecutable: false
+  signAndEditExecutable: true
   target:
     - target: dir
       arch:
         - x64
 
 # macOS target：同样输出 mac-unpacked/（或 mac-arm64-unpacked/）裸目录。
-# - 开发构建默认不做代码签名；正式发布时再配置 Apple Developer 证书，
-#   首次运行需用户右键 → 打开 以绕过 Gatekeeper
+# - 没有证书时仍可输出开发构建；发布流水线配置 Developer ID 后签名，
+#   公证作为 GitHub 直发安装包的独立发布步骤
 # - 直接使用仓库内的通用 PNG 图标，由 electron-builder 生成平台图标
 # - 默认只构建当前 host arch；双架构发布分别在对应架构 runner 执行
 #   dist:mac:x64 / dist:mac:arm64。
 mac:
   icon: assets/icon.png
   category: public.app-category.productivity
-  hardenedRuntime: false
+  hardenedRuntime: true
   gatekeeperAssess: false
   target:
     - target: dir
@@ -92,4 +91,3 @@ mac:
 # Electron 二进制下载镜像（中国大陆 Docker 构建环境友好）
 # 在 Dockerfile.pack 里也会通过 ENV 再次设置
 # electronBuilderMirror: https://npmmirror.com/mirrors/electron-builder/
-

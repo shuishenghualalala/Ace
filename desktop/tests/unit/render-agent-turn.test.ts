@@ -965,7 +965,7 @@ describe('renderAgentTurn', () => {
     expect(meta).not.toContain('16:40');
   });
 
-  it('HTML 成果渲染为可在 Crew 浏览器打开的网站卡，并优先 index.html', () => {
+  it('HTML 成果渲染为统一灵感卡，并优先 index.html', () => {
     const root = renderAgentTurn(
       makeMessages({
         content: '页面已完成。',
@@ -995,19 +995,14 @@ describe('renderAgentTurn', () => {
     );
 
     const card = root.querySelector<HTMLElement>('.msg__artifact-card');
-    const open = root.querySelector<HTMLButtonElement>('.msg__artifact-open');
     expect(card?.tagName).toBe('ARTICLE');
-    expect(card?.hasAttribute('data-browser-artifact')).toBe(false);
+    expect(card?.getAttribute('data-browser-artifact')).toBe('site/index.html');
+    expect(card?.getAttribute('role')).toBe('button');
+    expect(card?.tabIndex).toBe(0);
     expect(card?.getAttribute('aria-label')).toContain('index');
-    expect(card?.textContent).toContain('本地 HTML · 网站');
-    expect(open?.dataset.browserArtifact).toBe('site/index.html');
-    // 产品名以 package.json、electron-builder appId 和 DEFAULT_HOME_DIRNAME 为准。
-    expect(open?.textContent).toBe('在 Crew 打开');
-    expect(open?.tagName).toBe('BUTTON');
-    expect(open?.tabIndex).toBe(0);
-    expect(open?.getAttribute('aria-label')).toContain('index');
-    expect(root.querySelector('.msg__artifact-reveal')?.getAttribute('data-file-reveal'))
-      .toBe('site/index.html');
+    expect(card?.textContent).toContain('灵感成果');
+    expect(root.querySelector('.msg__artifact-open')).toBeNull();
+    expect(root.querySelector('.msg__artifact-reveal')).toBeNull();
   });
 
   it('本轮文件改动卡含查看入口、路径、单文件与合计红绿计数', () => {

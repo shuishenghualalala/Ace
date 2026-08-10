@@ -143,29 +143,36 @@ async def _probe_runtime(
         host_secret = parent / "host-secret"
         host_secret.write_text("probe", encoding="ascii")
         marker = workspace / "probe-marker"
+        metadata_root = workspace / ".git"
+        metadata_root.mkdir()
+        metadata_file = metadata_root / "config"
+        metadata_sentinel = "ace-security-readonly-probe"
+        metadata_file.write_text(metadata_sentinel, encoding="ascii")
         if system == "windows":
             command = (
                 "cmd.exe",
                 "/d",
                 "/c",
-                f'echo ok>"{marker}" & type "{host_secret}"',
+                f'echo ok>"{marker}" & echo changed>"{metadata_file}" & type "{host_secret}"',
             )
         elif system == "linux":
             command = (
                 "/bin/sh",
                 "-c",
-                'printf ok > "$1"; cat "$2" >/dev/null',
+                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; cat "$3" >/dev/null',
                 "ace-probe",
                 str(marker),
+                str(metadata_file),
                 str(host_secret),
             )
         elif system == "darwin":
             command = (
                 "/bin/sh",
                 "-c",
-                'printf ok > "$1"; cat "$2" >/dev/null',
+                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; cat "$3" >/dev/null',
                 "ace-probe",
                 str(marker),
+                str(metadata_file),
                 str(host_secret),
             )
         else:
@@ -175,6 +182,7 @@ async def _probe_runtime(
                 command=command,
                 cwd=workspace,
                 writable_roots=(workspace,),
+                readonly_roots=(metadata_root,),
                 network_enabled=network_enabled,
                 timeout=10,
                 max_output_bytes=4096,
@@ -186,9 +194,15 @@ async def _probe_runtime(
         # marker; treating that as a passing denial would produce a false "sandbox ready" state.
         try:
             marker_ready = marker.is_file() and marker.read_text(encoding="ascii").startswith("ok")
+            metadata_ready = metadata_file.read_text(encoding="ascii") == metadata_sentinel
         except (OSError, UnicodeError):
             marker_ready = False
-        return result.capabilities if marker_ready and result.exit_code != 0 else None
+            metadata_ready = False
+        return (
+            result.capabilities
+            if marker_ready and metadata_ready and result.exit_code != 0
+            else None
+        )
 
 
 async def _live_filesystem_runtime() -> tuple[RuntimeCapabilities | None, bool, bool, str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import uuid
 from typing import Any
 
@@ -897,7 +898,27 @@ def create_wiki_router(crew) -> APIRouter:
 
         try:
             # 解析是 CPU 密集型同步调用，丢线程池避免阻塞事件循环拖垮整个网关。
-            text = await asyncio.to_thread(parse_document_from_bytes, content, filename)
+            from crew.security.context import SecurityContext
+            from crew.security.launch import compile_process_launch, use_process_launch
+
+            security_context = SecurityContext(
+                os_user=getpass.getuser(),
+                owner_account_id=_owner(request),
+                workspace_id="wiki",
+                workspace_root=source_dir.resolve(),
+                session_id="wiki-upload",
+                request_id=uuid.uuid4().hex,
+                task_id="",
+                cwd=source_dir.resolve(),
+            )
+            launch = compile_process_launch(
+                security_context,
+                crew.security_service.mode_for(security_context),
+                db_path=crew.security_service.db_path,
+                audit=crew.security_service.audit,
+            )
+            with use_process_launch(launch):
+                text = await asyncio.to_thread(parse_document_from_bytes, content, filename)
         except asyncio.CancelledError:
             # 请求中断/取消时 raw 不能留在 pending（永远不会被重试，前端也看不到），
             # 标记为 failed，让 Agent / 用户能发现并按失败处理。

@@ -49,19 +49,21 @@ class SecurityExecutionBroker:
             raise ValueError("host execution is outside the managed security broker")
         writable: list[Path] = []
         readable = list(request.trusted_readable_roots)
+        readonly: list[Path] = []
         denied: list[Path] = []
         filesystem = (*request.permission_profile.filesystem, *request.additional_permissions.filesystem)
         for entry in filesystem:
             if entry.access is FilesystemAccess.READ_WRITE:
                 writable.append(entry.root)
             elif entry.access is FilesystemAccess.READ:
-                # Immutable project-metadata guards are runtime-owned carveouts
-                # below writable roots. Forwarding their often-missing paths as
-                # ordinary reads makes NativeRuntimeClient.resolve(strict=True)
-                # reject every normal workspace before either backend starts.
+                # Immutable entries below writable roots use the native
+                # read-only carve-out contract. Missing metadata paths remain
+                # valid so the runtime can prevent their later creation.
                 if entry.escalatable:
                     if entry.root not in readable:
                         readable.append(entry.root)
+                elif entry.root not in readonly:
+                    readonly.append(entry.root)
             elif entry.access is FilesystemAccess.DENY:
                 denied.append(entry.root)
         # A trusted runtime root already below a writable root is visible through
@@ -91,6 +93,7 @@ class SecurityExecutionBroker:
             cwd=request.cwd,
             writable_roots=writable,
             readable_roots=readable,
+            readonly_roots=readonly,
             denied_roots=denied,
             network_enabled=bool(network_rules),
             network_rules=network_rules,

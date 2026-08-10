@@ -3169,7 +3169,11 @@ export class BrowserHost extends EventEmitter {
   }
 
   private parseProxy(proxyUrl: string): ProxyAuthState | null {
-    if (!proxyUrl) return null;
+    if (!proxyUrl) {
+      throw new BrowserHostError('浏览器网络策略代理不可用', {
+        code: 'proxy_required',
+      });
+    }
     let parsed: URL;
     try {
       parsed = new URL(proxyUrl);

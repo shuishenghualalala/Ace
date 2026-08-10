@@ -33,17 +33,28 @@
 | `crew/tools/cua_setup.py` | broker | CUA 安装/daemon 生命周期是 Desktop-proof 保护的显式宿主安装动作，argv 固定；会话内 managed CUA 命令经 `execute_captured` 走 broker。安装制品 digest/签名仍开放（`SEC-P1-004`）。 |
 | `crew/tools/managed_tools.py` | host-fixed | ripgrep 下载、SHA-256 校验和版本探测属于宿主工具安装/维护；managed 文件搜索不会调用它，安装来源与固定 digest 继续由供应链门禁约束。 |
 | `crew/tools/file_tools.py` | broker | disabled 模式可调用校验后的 host ripgrep；managed 模式 `_resolve_rg()` 固定返回 `None`，改走同一文件授权与 identity-checked Python 读取，不会从 sandbox 旁路启动宿主 rg。 |
+| `crew/sites/manager.py` | broker | 站点构建命令经会话 `ProcessLaunch` 和 `execute_captured` 进入统一边界；managed runtime 缺失时失败关闭，Desktop 手动重发也会从认证 workspace 重新编译 launch。 |
 | `crew/browser/manager.py` | indirect | Electron 浏览器控制与网络动作；不直接创建进程，继续由 Desktop browser host 与独立网络策略约束。上传只把审批后 identity-checked 字节物化到 owner 私有 `approved-uploads` 根，Host 不接受原工作区/任意宿主路径。 |
 | `crew/cron/scheduler.py` | indirect | 定时触发 agent/tool；沿用被调用工具的 broker 和 owner context。 |
 | `crew/team/team_manager.py` | indirect | teammate 触发共享工具；沿用被调用工具的 broker 和 owner context。 |
 | `crew/skills/html-to-pdf/scripts/convert.cjs` | indirect | Puppeteer 间接启动系统 Chrome/Edge；当前依赖外层 managed terminal 的 OS sandbox，`--no-sandbox` 关闭浏览器自身隔离的风险需独立复核。 |
-| `crew/wiki/parser.py` | broker | **OPEN：当前仍直接 `subprocess.run(soffice)` 使用 Gateway 宿主权限。** 旧 Office 上传/ingest 必须迁移 broker，或在无可信 `ProcessLaunch` 时显式 unavailable；见 `SEC-P1-013`。 |
+| `crew/skills/docx/scripts/office/validators/redlining.py` | sandbox-descendant | 仅由 managed terminal 内的文档 Skill 脚本调用；LibreOffice 子进程继承同一 native sandbox，不提供 Gateway host fallback。 |
+| `crew/skills/md-to-pdf/scripts/md2pdf.py` | sandbox-descendant | 仅由 managed terminal 内的 PDF Skill 脚本调用；wkhtmltopdf/浏览器后代继承同一 native sandbox。 |
+| `crew/skills/pdf/scripts/md2pdf/md2pdf_convert.py` | sandbox-descendant | 仅由 managed terminal 内的 PDF Skill 脚本调用；外部转换器继承同一 native sandbox。 |
+| `crew/skills/skill-creator/eval-viewer/generate_review.py` | sandbox-descendant | Skill 开发辅助脚本；只允许从 managed terminal 启动，其浏览器预览后代继承同一 native sandbox。 |
+| `crew/skills/skill-creator/scripts/improve_description.py` | sandbox-descendant | Skill 开发辅助脚本；只允许从 managed terminal 启动，其 Codex CLI 后代继承同一 native sandbox。 |
+| `crew/skills/skill-creator/scripts/run_eval.py` | sandbox-descendant | Skill 评估辅助脚本；只允许从 managed terminal 启动，其 Codex CLI 后代继承同一 native sandbox。 |
+| `crew/skills/xlsx/scripts/office/soffice.py` | sandbox-descendant | 仅由 managed terminal 内的表格 Skill 调用；LibreOffice 后代继承同一 native sandbox。 |
+| `crew/skills/xlsx/scripts/office/validators/redlining.py` | sandbox-descendant | 仅由 managed terminal 内的表格 Skill 调用；LibreOffice 后代继承同一 native sandbox。 |
+| `crew/skills/xlsx/scripts/recalc.py` | sandbox-descendant | 仅由 managed terminal 内的表格 Skill 调用；LibreOffice 后代继承同一 native sandbox。 |
+| `crew/wiki/parser.py` | broker | 旧 Office 转换已使用 `execute_captured_sync`；Gateway 的 `asyncio.to_thread` 会继承可信 `ProcessLaunch`，managed runtime 缺失或上下文丢失时失败关闭。 |
 | `scripts/audit_runtime_npm.py` | dev-only | CI/发布期遍历源码锁文件并以固定 npm audit argv 审计生产依赖；不进入用户安装包。 |
 | `scripts/check_release_readiness.py` | dev-only | CI/发布期以固定 git argv 绑定验收证据到当前提交；不执行用户输入命令，不进入用户安装包。 |
 | `desktop/src/main/index.ts` | host-fixed | Gateway 启停、更新器和 OS 生命周期；固定产品 argv。严格模式要求初始及重定向后最终地址均为 HTTPS、Ed25519 detached signature，并在下载和安装前后校验；兼容模式保留旧更新源能力。 |
 | `desktop/src/main/open-with-service.ts` | host-fixed | 仅响应 Desktop 用户“使用其他应用打开”；应用来自当前 OS 已登记清单，命令固定、argv 分离，并限制探测输出与超时；超时或输出超限会终止完整探测进程树。 |
 | `desktop/src/main/uninstall.ts` | host-fixed | 卸载清理；仅签名安装包的用户发起卸载流程可达。 |
 | `desktop/scripts/check-security.mjs` | dev-only | 构建期 Electron 安全配置检查。 |
+| `desktop/scripts/resolve-playwright-candidates.mjs` | dev-only | 定时/手动兼容性 CI 解析候选 npm 版本；不进入用户安装包，也不接收产品用户输入。 |
 | `desktop/src/main/security-setup.ts` | installer-only | 仅 Windows 安装包：固定 runtime 绝对路径经编码 PowerShell `RunAs` 请求一次 UAC，用户动作不能提供 executable/argv。 |
 
 ## 门禁边界

@@ -29,7 +29,9 @@ _MAX_HELPER_STDERR = 64 * 1024
 _ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _RESERVED_ENV_NAMES = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"})
 _RESERVED_ENV_PREFIXES = ("ACE_SECURITY_", "ACE_BUNDLED_")
-_REQUIRED_READY_CAPABILITIES = frozenset({"stdin_once", "stream_output"})
+_REQUIRED_READY_CAPABILITIES = frozenset(
+    {"stdin_once", "stream_output", "readonly_roots"}
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -205,6 +207,7 @@ class NativeRuntimeClient:
         cwd: Path,
         writable_roots: Sequence[Path] = (),
         readable_roots: Sequence[Path] = (),
+        readonly_roots: Sequence[Path] = (),
         denied_roots: Sequence[Path] = (),
         network_enabled: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
@@ -228,6 +231,7 @@ class NativeRuntimeClient:
             "cwd": str(cwd.resolve(strict=True)),
             "writable_roots": [str(path.resolve(strict=True)) for path in writable_roots],
             "readable_roots": [str(path.resolve(strict=True)) for path in readable_roots],
+            "readonly_roots": [str(path.resolve(strict=False)) for path in readonly_roots],
             "denied_roots": [str(path.resolve(strict=False)) for path in denied_roots],
             "network_enabled": network_enabled,
             "network_rules": [dict(rule) for rule in network_rules],

@@ -110,19 +110,16 @@ export function handleBlueprintSurfaceToolChunk(chunk: ChatChunk, sessionId: str
     const payload = JSON.parse(body.detail) as { surface?: unknown };
     const raw = payload.surface as Record<string, unknown> | undefined;
     if (raw?.kind === 'inspiration' && raw.mode === 'site') {
-      const siteId = typeof raw.siteId === 'string' ? raw.siteId : typeof raw.inspirationId === 'string' ? raw.inspirationId : '';
-      if (siteId.startsWith('site_')) {
-        window.dispatchEvent(new CustomEvent('inspiration:site-surface', {
-          detail: { siteId, sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : sessionId },
-        }));
-      }
+      // Website results are opened from the persisted Inspiration card. Do not
+      // steal focus from the conversation when the tool result arrives.
       return;
     }
     const surface = validSurface(payload.surface, sessionId);
     if (!surface || surface.sessionId !== sessionId) return;
     surfaces.set(sessionId, surface);
     persist(SURFACES_KEY, surfaces);
-    if (state.activeSessionId === sessionId) void mountBlueprintSurface(surface);
+    // Keep the result available to the conversation card; the user opens the
+    // preview explicitly from that card.
   } catch {
     // Ordinary tool results are not Surface commands.
   }
@@ -144,19 +141,17 @@ function renderShell(surface: BlueprintSurface): HTMLElement | null {
   const title = document.createElement('div'); title.className = 'blueprint-surface-title';
   const icon = document.createElement('span'); icon.ariaHidden = 'true'; icon.textContent = '◇';
   const name = document.createElement('strong'); name.textContent = surface.title;
-  const mode = document.createElement('em'); mode.textContent = surface.mode === 'canvas' ? 'App 预览' : '生成中预览';
+  const mode = document.createElement('em'); mode.textContent = surface.status === 'preparing' ? '正在制作' : '预览';
   title.append(icon, name, mode); elements.tabs.replaceChildren(title);
   elements.body.innerHTML = `<div class="blueprint-surface">
-    <div class="blueprint-surface-toolbar"><span data-blueprint-status>正在准备预览…</span><button type="button" data-blueprint-target-note>批注整体</button><button type="button" data-blueprint-annotate>批注元素</button><button type="button" data-blueprint-reload>刷新</button></div>
-    <div class="blueprint-surface-stage" data-blueprint-stage><div class="blueprint-surface-placeholder">Agent 正在生成界面…</div></div>
+    <div class="blueprint-surface-toolbar"><span data-blueprint-status>正在准备预览…</span><button type="button" data-blueprint-annotate>指出要修改的位置</button></div>
+    <div class="blueprint-surface-stage" data-blueprint-stage><div class="blueprint-surface-placeholder">正在制作界面…</div></div>
     <div class="site-annotation-overlay" data-blueprint-overlay hidden></div>
   </div>`;
   elements.body.querySelector('[data-blueprint-annotate]')?.addEventListener('click', () => {
     annotationMode = !annotationMode;
     syncAnnotationMode();
   });
-  elements.body.querySelector('[data-blueprint-target-note]')?.addEventListener('click', selectSurfaceTarget);
-  elements.body.querySelector('[data-blueprint-reload]')?.addEventListener('click', () => void refreshSurface(true));
   return elements.body;
 }
 
@@ -168,7 +163,7 @@ function widgetFrame(widget: BlueprintWidget, placement?: CanvasPlacement): HTML
   if (!widgetReady(widget)) {
     const placeholder = document.createElement('div'); placeholder.className = 'blueprint-surface-placeholder';
     const title = document.createElement('strong'); title.textContent = widget.title;
-    const detail = document.createElement('span'); detail.textContent = 'Agent 正在生成组件文件…';
+    const detail = document.createElement('span'); detail.textContent = '正在制作组件…';
     placeholder.append(title, detail); return placeholder;
   }
   const frame = document.createElement('iframe');
@@ -185,7 +180,7 @@ function renderWidgetSurface(widget: BlueprintWidget): void {
   if (!stage || !status) return;
   stage.className = 'blueprint-surface-stage is-widget';
   stage.replaceChildren(widgetFrame(widget));
-  status.textContent = widgetReady(widget) ? `预览已更新 · revision ${widget.resourceRevision}` : 'Agent 正在生成组件文件…';
+  status.textContent = widgetReady(widget) ? '预览已更新' : '正在制作组件…';
   bindFrames();
 }
 
@@ -216,7 +211,7 @@ function renderCanvasSurface(canvas: BlueprintCanvas, widgets: Record<string, Bl
   });
   if (!grid.childElementCount) {
     const placeholder = document.createElement('div'); placeholder.className = 'blueprint-surface-placeholder';
-    placeholder.textContent = 'Agent 正在向 App 放置组件…'; grid.appendChild(placeholder);
+    placeholder.textContent = '正在整理内容…'; grid.appendChild(placeholder);
   }
   stage.replaceChildren(grid);
   grid.addEventListener('click', (event) => {
@@ -236,7 +231,7 @@ function renderCanvasSurface(canvas: BlueprintCanvas, widgets: Record<string, Bl
     };
     showCommentEditor();
   });
-  status.textContent = `${placements.length} 个组件 · 生成过程实时预览`;
+  status.textContent = `${placements.length} 个内容 · 正在同步预览`;
   bindFrames();
 }
 
@@ -251,7 +246,7 @@ function bindFrames(): void {
 function syncAnnotationMode(): void {
   const button = document.querySelector<HTMLButtonElement>('[data-blueprint-annotate]');
   button?.classList.toggle('is-active', annotationMode);
-  if (button) button.textContent = annotationMode ? '退出元素批注' : '批注元素';
+  if (button) button.textContent = annotationMode ? '完成选择' : '指出要修改的位置';
   document.querySelectorAll<HTMLIFrameElement>('[data-blueprint-widget-id]').forEach((frame) =>
     frame.contentWindow?.postMessage({ type: 'ace-blueprint-annotation-mode', enabled: annotationMode }, '*'));
 }
@@ -427,8 +422,6 @@ export function bindBlueprintSurface(): void {
     document.body.classList.remove('blueprint-surface-open');
     disableInspectorSurfaceAutoWidth();
     renderAnnotationChip();
-    const surface = state.activeSessionId ? surfaces.get(state.activeSessionId) : undefined;
-    if (surface) void mountBlueprintSurface(surface);
   });
   window.addEventListener('message', (event) => {
     if (event.data?.type === 'ace-widget-view-state' && activeCanvas && typeof event.data.mountId === 'string') {
@@ -450,6 +443,4 @@ export function bindBlueprintSurface(): void {
     showCommentEditor();
   });
   renderAnnotationChip();
-  const current = state.activeSessionId ? surfaces.get(state.activeSessionId) : undefined;
-  if (current) void mountBlueprintSurface(current);
 }

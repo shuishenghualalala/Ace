@@ -428,6 +428,7 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         async def execute(self, **kwargs):
             network_enabled = kwargs["network_enabled"]
             calls.append(network_enabled)
+            assert kwargs["readonly_roots"] == (Path(kwargs["cwd"]) / ".git",)
             Path(kwargs["cwd"]).joinpath("probe-marker").write_text("ok", encoding="ascii")
             return SimpleNamespace(
                 exit_code=1,
@@ -480,8 +481,9 @@ async def test_capabilities_probe_macos_runtime(api, tmp_path, monkeypatch):
             assert command[:3] == (
                 "/bin/sh",
                 "-c",
-                'printf ok > "$1"; cat "$2" >/dev/null',
+                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; cat "$3" >/dev/null',
             )
+            assert kwargs["readonly_roots"] == (Path(command[5]).parent,)
             Path(command[4]).write_text("ok", encoding="ascii")
             return SimpleNamespace(
                 exit_code=1,

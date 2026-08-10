@@ -28,6 +28,9 @@ class ElectronBrowserDriver(BrowserDriver):
     def __init__(self, config: BrowserConfig) -> None:
         self.config = config
 
+    def requires_policy_proxy(self) -> bool:
+        return True
+
     @staticmethod
     def _raise(exc: ElectronBridgeError) -> None:
         code = str(getattr(exc, "code", "") or "")

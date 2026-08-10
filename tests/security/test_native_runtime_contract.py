@@ -51,7 +51,9 @@ def test_macos_profile_uses_seatbelt_and_exact_managed_proxy_route():
     source = (RUNTIME / "macos" / "mod.rs").read_text(encoding="utf-8")
     assert 'const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec"' in source
     assert "(deny default)" in source
-    assert "DENIED_ROOT_" in source
+    assert "READONLY_ROOT" in source
+    assert "DENIED_READ_ROOT" in source
+    assert '"deny file-write*"' in source
     assert "allow file-write*" in source
     assert 'remote ip \\"localhost:{port}\\"' in source
     assert 'backend: "macos_seatbelt"' in source

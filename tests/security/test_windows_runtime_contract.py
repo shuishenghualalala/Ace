@@ -86,3 +86,6 @@ def test_acl_changes_preserve_existing_dacl_and_have_crash_manifest():
     assert "cleanup_stale" in acl
     assert "revoke_entry" in acl
     assert '".git", ".agents", ".crew"' in acl
+    assert "AclAccess::DenyWrite" in acl
+    assert "DENY_WRITE_MASK" in acl
+    assert "readonly_targets" in acl

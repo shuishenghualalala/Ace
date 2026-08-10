@@ -29,6 +29,21 @@ def test_native_security_workflows_bind_release_artifact_evidence() -> None:
         assert "python scripts/audit_runtime_npm.py" in source
 
 
+def test_cross_platform_prebuilt_workflow_attests_native_artifacts() -> None:
+    source = (ROOT / ".github" / "workflows" / "security-prebuilt.yml").read_text(
+        encoding="utf-8"
+    )
+    for platform in ("darwin-arm64", "darwin-x64", "linux-x64", "win32-x64"):
+        assert f"platform: {platform}" in source
+    assert "macos-15-intel" in source
+    assert "actions/attest@v4" in source
+    assert "SHA256SUMS" in source
+    assert "MACOS_CERTIFICATE" in source
+    assert "WINDOWS_CERTIFICATE" in source
+    assert "env.MACOS_CERTIFICATE != ''" in source
+    assert "env.WINDOWS_CERTIFICATE != ''" in source
+
+
 def test_runtime_npm_audit_discovers_every_committed_lockfile() -> None:
     discovered = {
         path.relative_to(ROOT).as_posix() for path in package_lock_directories(ROOT)
@@ -41,11 +56,11 @@ def test_runtime_npm_audit_discovers_every_committed_lockfile() -> None:
     }
 
 
-def test_evidence_source_hash_matches_the_runtime_manifest() -> None:
-    manifest = json.loads(
-        (ROOT / "security-runtime" / "bin" / "runtime-manifest.json").read_text(encoding="utf-8")
-    )
-    assert _source_hash(ROOT / "security-runtime") == manifest["source_hash"]
+def test_legacy_runtime_bin_is_not_a_launch_candidate() -> None:
+    launch = (ROOT / "crew" / "security" / "launch.py").read_text(encoding="utf-8")
+    candidates = launch[launch.index("def packaged_runtime_candidates") :]
+    candidates = candidates[: candidates.index("def packaged_runtime_argv")]
+    assert '"bin"' not in candidates
 
 
 def test_committed_prebuilt_runtimes_match_source_target_and_digest() -> None:

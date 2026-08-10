@@ -35,7 +35,8 @@ def site_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SiteManager
     return manager
 
 
-def test_static_site_publish_preview_annotation_and_export(site_manager: SiteManager, tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_static_site_publish_preview_annotation_and_export(site_manager: SiteManager, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     source = workspace / "landing"
     (source / "assets").mkdir(parents=True)
@@ -45,7 +46,7 @@ def test_static_site_publish_preview_annotation_and_export(site_manager: SiteMan
     (source / "assets" / "app.css").write_text("body{background:url('/assets/bg.png')}", encoding="utf-8")
     (source / "assets" / "bg.png").write_bytes(b"png")
 
-    result = site_manager.publish(
+    result = await site_manager.publish(
         owner="owner-1", workspace_id="ws-1", session_id="session-1",
         workspace_root=str(workspace), source_path="landing", name="Landing",
     )
@@ -105,7 +106,8 @@ def test_copy_release_rewrites_root_assets_relative_to_nested_files(
     assert "url('../../assets/bg.png')" in (tmp_path / "release" / "assets" / "css" / "app.css").read_text(encoding="utf-8")
 
 
-def test_preview_directory_serves_entry_assets_and_spa_routes(site_manager: SiteManager, tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_preview_directory_serves_entry_assets_and_spa_routes(site_manager: SiteManager, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     source = workspace / "vite-site"
     (source / "assets").mkdir(parents=True)
@@ -115,7 +117,7 @@ def test_preview_directory_serves_entry_assets_and_spa_routes(site_manager: Site
     )
     (source / "assets" / "app.css").write_text("body{color:#123}", encoding="utf-8")
     (source / "assets" / "app.js").write_text("window.siteReady=true", encoding="utf-8")
-    published = site_manager.publish(
+    published = await site_manager.publish(
         owner="owner-1", workspace_id="ws-1", session_id="session-1",
         workspace_root=str(workspace), source_path="vite-site", name="Vite Site",
     )
@@ -140,25 +142,27 @@ def test_preview_directory_serves_entry_assets_and_spa_routes(site_manager: Site
     assert client.get(f"/api/sites/{site_id}/preview/settings/profile").status_code == 200
 
 
-def test_publish_rejects_source_outside_workspace(site_manager: SiteManager, tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_publish_rejects_source_outside_workspace(site_manager: SiteManager, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "index.html").write_text("ok", encoding="utf-8")
     with pytest.raises(ValueError, match="Workspace"):
-        site_manager.publish(
+        await site_manager.publish(
             owner="owner", workspace_id="ws", session_id="s",
             workspace_root=str(workspace), source_path=str(outside), name="bad",
         )
 
 
-def test_publish_requires_index_or_build_script(site_manager: SiteManager, tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_publish_requires_index_or_build_script(site_manager: SiteManager, tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     source = workspace / "empty"
     source.mkdir(parents=True)
     with pytest.raises(SiteBuildError, match="index.html"):
-        site_manager.publish(
+        await site_manager.publish(
             owner="owner", workspace_id="ws", session_id="s",
             workspace_root=str(workspace), source_path=str(source), name="empty",
         )
@@ -368,14 +372,15 @@ def test_blueprint_gateway_lists_canvas_and_serves_widget(
     assert widget_note.json()["annotation"]["targetKind"] == "widget_dom"
 
 
-def test_inspiration_gateway_merges_sorts_and_isolates_owners(
+@pytest.mark.asyncio
+async def test_inspiration_gateway_merges_sorts_and_isolates_owners(
     site_manager: SiteManager, tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "inspiration-workspace"
     source = workspace / "site"
     source.mkdir(parents=True)
     (source / "index.html").write_text("<!doctype html><h1>site</h1>", encoding="utf-8")
-    published = site_manager.publish(
+    published = await site_manager.publish(
         owner="owner-1", workspace_id="ws-1", session_id="site-session",
         workspace_root=str(workspace), source_path="site", name="网站产物",
     )
@@ -423,14 +428,15 @@ def test_inspiration_gateway_merges_sorts_and_isolates_owners(
     assert canvas_note.json()["annotation"]["targetKind"] == "canvas"
 
 
-def test_legacy_site_annotations_migrate_to_unified_store(
+@pytest.mark.asyncio
+async def test_legacy_site_annotations_migrate_to_unified_store(
     site_manager: SiteManager, tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "migration-workspace"
     source = workspace / "site"
     source.mkdir(parents=True)
     (source / "index.html").write_text("<!doctype html><h1>legacy</h1>", encoding="utf-8")
-    published = site_manager.publish(
+    published = await site_manager.publish(
         owner="owner-1", workspace_id="ws-1", session_id="session-1",
         workspace_root=str(workspace), source_path="site", name="Legacy",
     )

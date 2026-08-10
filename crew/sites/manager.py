@@ -8,7 +8,6 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import zipfile
 from html import escape
 from pathlib import Path
@@ -127,7 +126,7 @@ class SiteManager:
             files.append({"path": path.relative_to(release_dir).as_posix(), "sha256": digest, "size": path.stat().st_size})
         return {"entry": "index.html", "files": files, "portable": True}
 
-    def publish(
+    async def publish(
         self, *, owner: str, workspace_id: str, session_id: str, workspace_root: str,
         source_path: str, name: str, build_command: str = "", output_directory: str = "",
         site_id: str = "", description: str = "",
@@ -143,9 +142,14 @@ class SiteManager:
         release = self.store.create_release(owner, site["id"])
         try:
             if argv:
-                result = subprocess.run(
-                    argv, cwd=source, capture_output=True, text=True, timeout=180,
-                    env={**os.environ, "CI": "1"}, check=False,
+                from crew.security.launch import execute_captured
+
+                result = await execute_captured(
+                    tuple(argv),
+                    cwd=source,
+                    timeout=180,
+                    env_overrides={"CI": "1"},
+                    tool_name="publish_site",
                 )
                 if result.returncode != 0:
                     detail = (result.stderr or result.stdout or "构建失败")[-6000:]

@@ -18,6 +18,7 @@ pub struct LinuxRunRequest {
     pub cwd: PathBuf,
     pub writable_roots: Vec<PathBuf>,
     pub readable_roots: Vec<PathBuf>,
+    pub readonly_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
     pub network_enabled: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,

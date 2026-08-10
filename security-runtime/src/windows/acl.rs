@@ -32,6 +32,7 @@ pub const ACL_CLEANUP_LOG: &str = "windows-acl-cleanup.log";
 const PROTECTED_NAMES: &[&str] = &[".git", ".agents", ".crew"];
 const READ_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 const WRITE_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+const DENY_WRITE_MASK: u32 = FILE_GENERIC_WRITE | DELETE | 0x40; // FILE_DELETE_CHILD
 const GENERIC_ALL_MASK: u32 = 0x1000_0000;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_ABANDONED: u32 = 0x80;
@@ -54,6 +55,7 @@ struct AclRecord {
 enum AclAccess {
     Read,
     Write,
+    DenyWrite,
     Deny,
 }
 
@@ -161,8 +163,12 @@ impl AclLease {
                 synthetic: false,
             });
         }
-        for (index, root) in request.writable_roots.iter().enumerate() {
-            let root = canonical_existing(root)?;
+        let writable = request
+            .writable_roots
+            .iter()
+            .map(|root| canonical_existing(root))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (index, root) in writable.iter().enumerate() {
             self.records.push(AclRecord {
                 path: root.clone(),
                 sid: account_sid.to_string(),
@@ -175,29 +181,29 @@ impl AclLease {
                 access: AclAccess::Write,
                 synthetic: false,
             });
-            for name in PROTECTED_NAMES {
-                let protected = root.join(name);
-                reject_reparse_point(&protected)?;
-                if !protected.exists() {
-                    fs::create_dir(&protected).map_err(|error| {
-                        format!(
-                            "cannot create protected ACL mount point {}: {error}",
-                            protected.display()
-                        )
-                    })?;
-                    self.synthetic_protected.push(protected.clone());
-                }
-                let synthetic = self.synthetic_protected.contains(&protected);
+        }
+        for (protected, writable_index) in readonly_targets(&writable, &request.readonly_roots)? {
+            if !protected.exists() {
+                fs::create_dir(&protected).map_err(|error| {
+                    format!(
+                        "cannot create protected ACL mount point {}: {error}",
+                        protected.display()
+                    )
+                })?;
+                self.synthetic_protected.push(protected.clone());
+            }
+            let synthetic = self.synthetic_protected.contains(&protected);
+            for sid in [account_sid, self.capability_sids[writable_index].as_str()] {
                 self.records.push(AclRecord {
                     path: protected.clone(),
-                    sid: account_sid.to_string(),
-                    access: AclAccess::Deny,
+                    sid: sid.to_string(),
+                    access: AclAccess::Read,
                     synthetic,
                 });
                 self.records.push(AclRecord {
-                    path: protected,
-                    sid: self.capability_sids[index].clone(),
-                    access: AclAccess::Deny,
+                    path: protected.clone(),
+                    sid: sid.to_string(),
+                    access: AclAccess::DenyWrite,
                     synthetic,
                 });
             }
@@ -234,6 +240,7 @@ impl AclLease {
             let (mode, mask) = match record.access {
                 AclAccess::Read => (SET_ACCESS, READ_MASK),
                 AclAccess::Write => (SET_ACCESS, WRITE_MASK),
+                AclAccess::DenyWrite => (DENY_ACCESS, DENY_WRITE_MASK),
                 AclAccess::Deny => (DENY_ACCESS, GENERIC_ALL_MASK),
             };
             apply_entry(&record.path, sid.as_ptr(), mode, mask)?;
@@ -433,7 +440,10 @@ fn canonical_optional(path: &Path) -> Result<Option<PathBuf>, String> {
     match path.canonicalize() {
         Ok(path) => Ok(Some(path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("cannot resolve ACL root {}: {error}", path.display())),
+        Err(error) => Err(format!(
+            "cannot resolve ACL root {}: {error}",
+            path.display()
+        )),
     }
 }
 
@@ -447,6 +457,53 @@ fn reject_reparse_point(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn readonly_targets(
+    writable: &[PathBuf],
+    explicit: &[PathBuf],
+) -> Result<std::collections::BTreeMap<PathBuf, usize>, String> {
+    let mut targets = std::collections::BTreeMap::new();
+    for (index, root) in writable.iter().enumerate() {
+        for name in PROTECTED_NAMES {
+            targets.insert(root.join(name), index);
+        }
+    }
+    for path in explicit {
+        reject_reparse_point(path)?;
+        let root = match canonical_optional(path)? {
+            Some(root) => root,
+            None if path.is_absolute()
+                && !path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir)) =>
+            {
+                path.clone()
+            }
+            None => {
+                return Err(format!(
+                    "read-only root must be absolute and cannot contain '..': {}",
+                    path.display()
+                ));
+            }
+        };
+        let Some((index, _)) = writable
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| root.starts_with(candidate))
+            .max_by_key(|(_, candidate)| candidate.components().count())
+        else {
+            return Err(format!(
+                "read-only root must be inside an explicit writable root: {}",
+                root.display()
+            ));
+        };
+        targets.insert(root, index);
+    }
+    for path in targets.keys() {
+        reject_reparse_point(path)?;
+    }
+    Ok(targets)
 }
 
 fn acquire_mutex() -> Result<AclMutex, String> {
@@ -476,7 +533,24 @@ mod tests {
             r"C:\\ace-security-runtime-missing-{}",
             std::process::id()
         ));
-        assert_eq!(canonical_optional(&path).expect("not a permission error"), None);
+        assert_eq!(
+            canonical_optional(&path).expect("not a permission error"),
+            None
+        );
+    }
+
+    #[test]
+    fn readonly_root_outside_writable_roots_is_rejected() {
+        let writable = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let error = readonly_targets(
+            &[writable.path().canonicalize().unwrap()],
+            &[outside.path().to_path_buf()],
+        )
+        .unwrap_err();
+
+        assert!(error.contains("read-only root must be inside"), "{error}");
     }
 
     #[test]

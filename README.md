@@ -167,6 +167,12 @@ npm run dev --prefix desktop
 后的重建要求，见 [security-runtime/README.md](security-runtime/README.md)。正式 DMG 会在
 目标平台重新构建并装入 runtime，安装包使用者无需安装 Rust。
 
+维护者也可以在 GitHub Actions 手动运行 **security-prebuilt**。它会分别在 Apple Silicon、
+Intel Mac、Windows x64 和 Linux x64 原生 runner 上构建与测试，产出带 SHA-256 manifest 和
+GitHub build provenance 的压缩包；打 `v*` tag 时会附加到 GitHub Release。同事只需使用对应
+平台的预编译目录，不需要安装 Cargo。证书是可选增强：未配置证书仍会生成可验证产物，配置
+Developer ID/Authenticode secrets 后才会额外执行系统签名。
+
 ### 2B. 启动 Web 端
 
 分别在两个终端中，从仓库根目录运行：
@@ -307,7 +313,10 @@ python -m crew.cli
 
 ## 构建桌面发行包（可选）
 
-当前仓库提供本地构建脚本，但不发布预编译安装包，也不包含代码签名、公证和自动更新服务。
+当前仓库提供本地构建脚本，但不发布预编译桌面安装包，也不包含完整桌面应用的公证和自动更新服务。
+安全运行组件的 GitHub workflow 会始终生成 SHA-256 与 build provenance；只有仓库配置了
+Apple Developer ID 或 Windows Authenticode secrets 时才额外签署运行组件。没有证书仍可构建、
+测试和从 GitHub 分发，只是 macOS Gatekeeper / Windows SmartScreen 可能向首次下载的用户显示警告。
 构建过程会下载 Electron、Python、Node.js 等运行时，可能占用数 GB 磁盘空间。
 
 ### Electron 裸目录
@@ -322,7 +331,7 @@ npm run dist:win     # Windows x64 → desktop/release/win-unpacked/
 npm run dist:mac     # macOS x64 + arm64 → desktop/release/
 ```
 
-这些产物适合本地验证或作为下游发行流程的输入，不是已签名的正式安装器。更多配置说明见
+这些产物适合本地验证或作为下游发行流程的输入，不保证是已签名、已公证的正式安装器。更多配置说明见
 [Desktop 文档](desktop/README.md#本地预打包)。
 
 ### Linux UOS / Kylin `.deb`

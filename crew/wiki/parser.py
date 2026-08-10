@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 import zipfile
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from crew.security.settings import strict_security_enabled
 from crew.state.logging import get_logger
 
 log = get_logger("wiki.parser")
@@ -654,11 +652,6 @@ def fetch_url_to_markdown(url: str, timeout: float = 15.0) -> tuple[str, str]:
 
 def _parse_legacy_office(path: Path, target_extension: str) -> str:
     """通过 LibreOffice 把旧版 Office 转成现代格式，再复用现有解析器。"""
-    if strict_security_enabled():
-        raise RuntimeError(
-            "严格安全约束已阻止在 Gateway 宿主上运行 LibreOffice；"
-            f"请先将文件另存为 {target_extension}，或在安全中心启用兼容模式。"
-        )
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
         raise MissingDependencyError(
@@ -672,13 +665,15 @@ def _parse_legacy_office(path: Path, target_extension: str) -> str:
 
     from tempfile import TemporaryDirectory
 
-    with TemporaryDirectory() as tmp:
+    with TemporaryDirectory(prefix=".ace-office-", dir=path.parent) as tmp:
         output_dir = Path(tmp)
         profile_dir = output_dir / "profile"
         profile_dir.mkdir()
+        from crew.security.launch import execute_captured_sync
+
         try:
-            completed = subprocess.run(
-                [
+            completed = execute_captured_sync(
+                (
                     soffice,
                     f"-env:UserInstallation={profile_dir.as_uri()}",
                     "--headless",
@@ -687,13 +682,12 @@ def _parse_legacy_office(path: Path, target_extension: str) -> str:
                     "--outdir",
                     str(output_dir),
                     str(path),
-                ],
-                capture_output=True,
-                text=True,
+                ),
+                cwd=output_dir,
                 timeout=120,
-                check=False,
+                tool_name="wiki_legacy_office",
             )
-        except subprocess.TimeoutExpired as exc:
+        except TimeoutError as exc:
             raise RuntimeError(f"{path.name} 通过 LibreOffice 转换超时") from exc
         converted = output_dir / f"{path.stem}{target_extension}"
         if completed.returncode != 0 or not converted.is_file():
@@ -823,9 +817,13 @@ def guess_mime_type(path: str | Path, content: bytes | None = None) -> str:
 def parse_document_from_bytes(content: bytes, filename: str) -> str:
     """从内存字节解析文档（临时写文件后解析）。"""
     from tempfile import TemporaryDirectory
+    from crew.security.launch import current_process_launch
 
     ext = _document_extension(filename, content) or ".txt"
-    with TemporaryDirectory() as tmp:
+    launch = current_process_launch.get()
+    workspace_root = launch.security_context.workspace_root if launch and launch.security_context else None
+    temporary_parent = workspace_root if workspace_root and workspace_root.is_dir() else None
+    with TemporaryDirectory(prefix=".ace-wiki-", dir=temporary_parent) as tmp:
         tmp_path = Path(tmp) / f"upload{ext}"
         tmp_path.write_bytes(content)
         return parse_document_to_markdown(tmp_path)
