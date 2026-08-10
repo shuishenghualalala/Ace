@@ -15,7 +15,12 @@ from typing import Callable, Literal, Mapping
 
 from crew.security.context import SecurityContext
 from crew.security.file_policy import _protected_entries
-from crew.security.models import ConversationPermissionMode, PermissionProfile, PermissionProfileKind
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    ConversationPermissionMode,
+    PermissionProfile,
+    PermissionProfileKind,
+)
 from crew.security.policy import settings_for_mode
 from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
 
@@ -72,6 +77,7 @@ async def execute_captured(
     env: dict[str, str] | None = None,
     stdin: bytes | None = None,
     home_files: Mapping[str, bytes] | None = None,
+    additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
     env_overrides: Mapping[str, str] | None = None,
     max_output_bytes: int = 2 * 1024 * 1024,
     on_started: Callable[[int | None], None] | None = None,
@@ -113,6 +119,7 @@ async def execute_captured(
                 command=argv,
                 cwd=cwd,
                 permission_profile=launch.profile,
+                additional_permissions=additional_permissions,
                 trusted_readable_roots=launch.trusted_readable_roots,
                 stdin=stdin,
                 home_files=home_files,

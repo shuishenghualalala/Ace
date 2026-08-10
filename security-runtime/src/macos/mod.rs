@@ -110,11 +110,7 @@ fn run_with_control(
         .stderr(Stdio::piped());
     if let Some(address) = proxy_address {
         let proxy_url = format!("http://{address}");
-        command
-            .env("HTTP_PROXY", &proxy_url)
-            .env("HTTPS_PROXY", &proxy_url)
-            .env("ALL_PROXY", &proxy_url)
-            .env("NO_PROXY", "");
+        command.envs(crate::network::managed_proxy_environment(&proxy_url));
     }
 
     let mut child = command
@@ -358,6 +354,7 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     let profile = format!(
         "(version 1)\n(deny default)\n(import \"system.sb\")\n\
          (allow process*)\n(allow sysctl-read)\n(allow signal (target self))\n\
+         (allow mach-lookup (global-name \"com.apple.FSEvents\"))\n\
          (allow file-read-metadata)\n{}\n{}\n{}\n{}\n",
         read_rules.join("\n"),
         write_rules.join("\n"),
@@ -611,6 +608,10 @@ mod tests {
         assert!(plan.profile.contains("DENIED_ROOT_0"));
         assert!(plan.profile.contains("deny file-read*"));
         assert!(plan.profile.contains("deny file-write*"));
+        assert!(plan.profile.contains(
+            "(allow mach-lookup (global-name \"com.apple.FSEvents\"))"
+        ));
+        assert!(!plan.profile.contains("(allow mach-lookup)"));
         assert!(!plan.profile.contains("allow network-outbound"));
     }
 

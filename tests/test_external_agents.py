@@ -62,6 +62,7 @@ from crew.agent.external.runtime_adapter import (
     RuntimeResumeRejected,
     build_external_runtime_env,
     build_external_runtime_home_files,
+    build_external_runtime_network_permissions,
     runtime_adapter_ids,
 )
 from crew.agent.external.store import ExternalAgentStore
@@ -129,6 +130,32 @@ def test_external_runtime_projects_only_declared_home_files(tmp_path, monkeypatc
     )
 
     assert projected == {".kimi-code/oauth/kimi-code": b"token"}
+
+
+def test_external_runtime_network_permissions_come_from_host_declarations():
+    permissions = build_external_runtime_network_permissions({
+        ".runtime/config.toml": b'''\
+base_url = "https://api.example.test/v1"
+backup_url = "https://api.example.test/v2"
+local_url = "http://127.0.0.1:8765/v1"
+insecure_remote = "http://insecure.example.test/v1"
+wildcard = "https://*.example.test/v1"
+''',
+    }, (
+        "https://auth.example.test/oauth/token",
+        "https://api.example.test/duplicate",
+        "http://insecure-declared.example.test",
+        "https://*.invalid.example.test",
+    ))
+
+    assert [
+        (entry.host, entry.port, entry.protocol, entry.allow_private, entry.escalatable)
+        for entry in permissions.network
+    ] == [
+        ("auth.example.test", 443, "https", False, False),
+        ("api.example.test", 443, "https", False, False),
+        ("127.0.0.1", 8765, "http", True, False),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1004,6 +1031,33 @@ def test_acp_adapter_accepts_direct_params_and_plain_thinking_text():
     assert event.text == "先检查运行环境。"
 
 
+async def test_acp_reader_translates_native_stream_timeout():
+    class TimeoutTransport:
+        async def read(self):
+            await asyncio.sleep(0)
+            raise asyncio.TimeoutError
+
+        async def write(self, _data):
+            return None
+
+        async def close(self):
+            return None
+
+        async def abort(self):
+            return None
+
+    client = _JsonRpcClient(TimeoutTransport())
+    future = asyncio.get_running_loop().create_future()
+    client.pending[1] = future
+    await client.start()
+    with pytest.raises(AcpAdapterError, match="protocol stream timed out"):
+        await asyncio.wait_for(future, timeout=1)
+    event = await asyncio.wait_for(client.event_queue.get(), timeout=1)
+    assert event.kind == "error"
+    assert "protocol stream timed out" in event.text
+    await client.close()
+
+
 def _fake_hermes(tmp_path):
     script = tmp_path / "hermes"
     script.write_text(
@@ -1037,6 +1091,7 @@ def test_scan_kimi_runtime_uses_env_path(tmp_path, monkeypatch):
     assert runtime.provider == "kimi"
     assert runtime.executable_path == str(kimi)
     assert runtime.version == "kimi 1.2.3"
+    assert runtime.metadata["network_endpoints"] == ["https://auth.kimi.com"]
 
 
 def test_windows_runtime_search_dirs_and_executable_rules(tmp_path, monkeypatch):
@@ -1141,6 +1196,12 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
     ]
     assert descriptors["kimi"].commands == ("kimi",)
     assert descriptors["kimi"].launch_args == ("acp",)
+    assert descriptors["kimi"].credential_home_paths == (
+        ".kimi-code/config.toml",
+        ".kimi-code/oauth/kimi-code",
+        ".kimi-code/credentials/kimi-code.json",
+    )
+    assert descriptors["kimi"].network_endpoints == ("https://auth.kimi.com",)
     assert descriptors["codex"].protocol == "cli"
     assert descriptors["codex"].launch_args == ()
     assert descriptors["codex"].credential_home_paths == (
@@ -1189,6 +1250,14 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
         provider="codex",
         metadata={"credential_home_paths": []},
     ) == ()
+    assert runtime_registry.resolve_runtime_network_endpoints(
+        provider="kimi",
+        metadata={"descriptor_id": "builtin:kimi"},
+    ) == ("https://auth.kimi.com",)
+    assert runtime_registry.resolve_runtime_network_endpoints(
+        provider="kimi",
+        metadata={"network_endpoints": ["https://custom.example.test"]},
+    ) == ("https://custom.example.test",)
     assert {
         provider: descriptors[provider].display_badge
         for provider in ("kimi", "codex", "hermes", "claude-code")

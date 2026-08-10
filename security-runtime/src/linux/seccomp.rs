@@ -53,10 +53,9 @@ pub fn exec_inner(arguments: Vec<String>) -> ! {
     }
     if proxy_socket.is_some() {
         let proxy = super::proxy_routing::proxy_url();
-        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
-            std::env::set_var(name, &proxy);
+        for (name, value) in crate::network::managed_proxy_environment(&proxy) {
+            std::env::set_var(name, value);
         }
-        std::env::set_var("NO_PROXY", "");
     }
     eprint!("{}", String::from_utf8_lossy(INNER_READY_MARKER));
     let error = Command::new(&command[0]).args(&command[1..]).exec();

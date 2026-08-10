@@ -17,8 +17,10 @@ from crew.agent.external.runtime_adapter import (
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
     build_external_runtime_home_files,
+    build_external_runtime_network_permissions,
     build_external_runtime_env,
     build_managed_external_runtime_env,
+    merge_additional_permission_profiles,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
@@ -70,6 +72,7 @@ class AcpAdapterConfig:
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
     credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
     additional_permissions: AdditionalPermissionProfile = field(
         default_factory=AdditionalPermissionProfile
     )
@@ -325,7 +328,11 @@ class _JsonRpcClient:
                     await self._handle_line(line)
             if buffer:
                 await self._handle_line(bytes(buffer))
-        except (AcpAdapterError, NativeRuntimeError) as exc:
+        except (AcpAdapterError, NativeRuntimeError, asyncio.TimeoutError) as exc:
+            if isinstance(exc, asyncio.TimeoutError):
+                exc = AcpAdapterError(
+                    "ACP protocol stream timed out while waiting for runtime output"
+                )
             for fut in self.pending.values():
                 if not fut.done():
                     fut.set_exception(exc)
@@ -861,6 +868,16 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
             raise AcpAdapterError(f"找不到 ACP 可执行文件: {config.executable_path}") from exc
         managed_env = build_managed_external_runtime_env(config.custom_env)
         projected_home_files = build_external_runtime_home_files(config.credential_home_paths)
+        projected_network_permissions = build_external_runtime_network_permissions(
+            projected_home_files,
+            config.network_endpoints,
+        )
+        additional_permissions = config.additional_permissions
+        if projected_network_permissions.network:
+            additional_permissions = merge_additional_permission_profiles(
+                additional_permissions,
+                projected_network_permissions,
+            )
         native_session = await SecurityExecutionBroker(
             NativeRuntimeClient(launch.helper_argv)
         ).open_interactive(
@@ -868,7 +885,7 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
                 command=(executable, *config.launch_args, *config.custom_args),
                 cwd=cwd_path,
                 permission_profile=launch.profile,
-                additional_permissions=config.additional_permissions,
+                additional_permissions=additional_permissions,
                 trusted_readable_roots=launch.trusted_readable_roots,
                 home_files=projected_home_files,
                 env_overrides=managed_env,
@@ -1229,6 +1246,7 @@ class AcpRuntimeAdapter:
                 custom_args=request.custom_args,
                 custom_env=request.custom_env,
                 credential_home_paths=request.credential_home_paths,
+                network_endpoints=request.network_endpoints,
                 additional_permissions=request.additional_permissions,
                 mcp_servers=[
                     server.stdio_config(env_as_list=True)

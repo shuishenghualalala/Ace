@@ -24,6 +24,7 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 | 一次性 stdin | 最多 1 MiB，写入后立即 EOF | 同 | 同 |
 | stdout/stderr | 独立 NDJSON 事件流，共享输出预算 | 同 | 同 |
 | 长连接 stdin/stdout | interactive_open/write/close 由 native runtime 代理 | 同 | 同 |
+| 文件监听 | 由受限账户 ACL 约束 | bwrap 可见根内监听 | 仅放行精确 `com.apple.FSEvents` Mach service；文件内容仍受 Seatbelt 路径规则约束 |
 | 协议鉴权 | 启动 token（≥32 字节）+ 单次 nonce 防重放 | 同 | 同 |
 
 ### 1.1 Windows 后端要点
@@ -102,7 +103,7 @@ runtime 才把真实 HOME 作为子进程 HOME；此时它仍运行在 Seatbelt 
 Crew Home 内的数据库、认证密钥、配置凭据和日志仍由不可升级的精确 deny 根保护；
 任务 workspace 不再被其父目录 deny 覆盖。受控模式下，运行时描述可以声明宿主 HOME
 下的相对配置文件；宿主侧只读取这些已声明且存在的普通文件，内置 descriptor 当前声明
-Kimi、Codex、Hermes、Claude Code 的默认布局，Native Runtime 通过
+Kimi（`.kimi-code/config.toml`、OAuth 文件与 credentials JSON）、Codex、Hermes、Claude Code 的默认布局，Native Runtime 通过
 `home_files` 写入一次性的私有 HOME，进程结束即清理。该投影不接受绝对路径、`..`、
 目录复制或整个 HOME，因此已登录 Kimi、已配置 Hermes 可以继续工作，但不会让外援
 获得宿主 HOME 的通用读取权。未声明配置的外援仍按自身认证错误返回，ACP 适配器不会
@@ -364,6 +365,15 @@ security-runtime/
 
 ## 变更记录
 
+- **2026-08-10**：补齐 Codex app-server 事件流退出与 approval 参数契约：reader 在子进程 EOF 后向事件队列发送内部 `$/processExited`，消费者立即报告退出码与受限 stderr 尾部；approval 将规范化后的真实 `item` 传入统一权限分类器，使 shell `command` 可被检查，不再因参数层级错误被误判为缺失。
+- **2026-08-10**：修复 Native Proxy 的 HTTP 响应收尾死锁：任一方向复制遇到 EOF 后向对端传播 TCP 写半关闭，另一方向仍可继续排空；上游使用 `Connection: close` 时客户端能及时收到 EOF，不再在已收到完整响应后等待到超时。
+- **2026-08-10**：补齐运行时描述的精确网络 endpoint 契约：Detector 将宿主维护的 `network_endpoints` 与凭据文件布局一并持久化，ACP/CLI 适配器统一合并描述声明和投影配置中的 URL；Kimi 描述声明其 OAuth 刷新服务 `https://auth.kimi.com`，无 provider 条件分支、无需用户逐任务配置。Native Proxy 对未声明目标立即返回 HTTP 403，不再让外援无提示高速重试直至超时。
+- **2026-08-10**：修复 managed ACP 超时诊断被清理流程覆盖：Native Runtime 长连接读取超时统一转换为可读的 ACP 错误并完成 pending request，使 adapter 能保留调用阶段与 stderr，而不是在 <code>close()</code> 时泄漏裸 <code>TimeoutError</code>。
+- **2026-08-10**：统一 managed 网络代理环境：macOS、Linux、Windows 均由 Native Runtime 在宿主环境覆盖之后写入标准代理变量与 `NODE_USE_ENV_PROXY=1`，使 Node 24+ CLI 自动走同一受控代理；非 Node 外援忽略该变量，外援不能覆盖或绕过 runtime-owned 代理地址。
+- **2026-08-10**：修复 macOS Native Proxy 的 CONNECT 隧道中断：代理监听器仍用 non-blocking 模式响应停止信号，但每个 accepted socket 在进入有超时边界的双向转发前统一恢复 blocking，避免 macOS 继承监听器状态后把 CONNECT 与 TLS ClientHello 之间的短暂空档误判为转发结束；该修复不增加任何网络权限。
+- **2026-08-10**：补齐 macOS managed 外援的文件监听系统能力：Seatbelt 仅放行精确 `com.apple.FSEvents` Mach service，修复 Node/Kimi 在允许的 workspace 上创建 watcher 时被映射为 `EMFILE` 并提前退出；文件内容读写、网络与其他 Mach service 仍按原规则拒绝。
+- **2026-08-10**：外援网络权限从已投影、宿主声明的配置文件中提取精确 HTTPS endpoint，并与 Interaction MCP 的精确 loopback 权限合并；不按 provider 写死域名，拒绝远程明文 HTTP、通配域名与模型输入追加的目标。
+- **2026-08-10**：兼容系统代理/VPN 的 fake-IP DNS：只有已命中精确域名规则时才允许其解析到 RFC 2544 `198.18.0.0/15` 合成地址；直接声明该 IP 网段仍按私网拒绝，RFC1918、loopback 与云元数据保护不变。
 - **2026-08-09**：补齐 managed 外援脚本运行时依赖边界：Security Broker 静态解析入口 shebang、Python `pyvenv.cfg` 与 editable-install 元数据，只把 venv、基础环境动态库目录和明确声明的包目录加入只读根；工作区脚本不触发推导，原生二进制不额外放行，也不开放用户 Home。Hermes venv ACP 可在受控 cwd 下启动，同时保留 Native Runtime 的显式可写根校验。
 - **2026-08-09**：收窄 Crew Home 的保护范围：不再把包含 `accounts/*/task_workspaces` 的整个父目录作为不可升级 deny，改为保护数据库、认证密钥、配置凭据和日志等精确路径，修复 macOS Seatbelt 下外援进程在 `os.getcwd()` 阶段被父级 deny 拒绝的问题。
 - **2026-08-09**：修复 managed 外援的工作目录安全上下文断点：未绑定本地目录的工作空间现在由 Gateway 与 SingleAgent 共同使用 Owner 私有 task workspace 作为显式 `writable_root`；外部 session 的隔离子目录因此可以安全进入 Native Runtime。Team 子任务只从父 `ProcessLaunch` 继承覆盖当前 cwd 的最具体可写根，找不到匹配根仍 fail closed；不按 Kimi/Hermes 或其他 provider 增加分支。

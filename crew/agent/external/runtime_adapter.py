@@ -7,13 +7,20 @@ branching on provider names.
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Literal, Protocol
+from urllib.parse import urlsplit
 
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
-from crew.security.models import AdditionalPermissionProfile
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    NetworkAccess,
+    NetworkEntry,
+)
 
 
 _PROTECTED_EXTERNAL_ENV_NAMES = frozenset({"JWT"})
@@ -34,6 +41,8 @@ _NATIVE_RUNTIME_CONTROLLED_ENV_NAMES = frozenset(
 _MAX_PROJECTED_HOME_FILE_BYTES = 1024 * 1024
 _MAX_PROJECTED_HOME_TOTAL_BYTES = 2 * 1024 * 1024
 _MAX_PROJECTED_HOME_FILES = 64
+_MAX_RUNTIME_CONFIG_ENDPOINTS = 32
+_RUNTIME_CONFIG_URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
 
 def _is_protected_external_env(key: str) -> bool:
@@ -130,6 +139,91 @@ def build_external_runtime_home_files(
         projected[raw_path] = content
         total += len(content)
     return projected
+
+
+def _is_explicit_private_endpoint(host: str) -> bool:
+    normalized = host.rstrip(".").lower()
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local
+
+
+def build_external_runtime_network_permissions(
+    projected_home_files: dict[str, bytes],
+    declared_endpoints: tuple[str, ...] | list[str] | None = None,
+) -> AdditionalPermissionProfile:
+    """Build exact API permissions from descriptor and projected config declarations.
+
+    Both sources are host-owned runtime metadata: model input cannot add files or
+    network targets. Descriptor endpoints cover service URLs a CLI keeps internally
+    (for example an OAuth issuer), while projected config supports user-selected API
+    bases. Remote plaintext HTTP endpoints are ignored so provider credentials are
+    not sent over an insecure transport. Exact loopback/private HTTP endpoints remain
+    available for configured local runtimes. Wildcards and malformed targets are
+    rejected by NetworkEntry.
+    """
+
+    entries: list[NetworkEntry] = []
+    seen: set[tuple[str, int, str]] = set()
+    candidates = [str(value).strip() for value in (declared_endpoints or ())]
+    for content in projected_home_files.values():
+        text = content.decode("utf-8", errors="ignore")
+        candidates.extend(
+            match.group(0).rstrip(".,;:)]}")
+            for match in _RUNTIME_CONFIG_URL.finditer(text)
+        )
+    for candidate in candidates:
+        try:
+            parsed = urlsplit(candidate)
+            host = str(parsed.hostname or "").rstrip(".").lower()
+            scheme = parsed.scheme.lower()
+            port = parsed.port or (443 if scheme == "https" else 80)
+        except ValueError:
+            continue
+        if not host or scheme not in {"http", "https"}:
+            continue
+        allow_private = _is_explicit_private_endpoint(host)
+        if scheme == "http" and not allow_private:
+            continue
+        key = (host, port, scheme)
+        if key in seen:
+            continue
+        try:
+            entry = NetworkEntry(
+                host=host,
+                port=port,
+                protocol=scheme,
+                access=NetworkAccess.ALLOW,
+                allow_private=allow_private,
+                escalatable=False,
+            )
+        except ValueError:
+            continue
+        entries.append(entry)
+        seen.add(key)
+        if len(entries) >= _MAX_RUNTIME_CONFIG_ENDPOINTS:
+            break
+    return AdditionalPermissionProfile(network=tuple(entries))
+
+
+def merge_additional_permission_profiles(
+    *profiles: AdditionalPermissionProfile,
+) -> AdditionalPermissionProfile:
+    """Combine independent host-owned grants without broadening their scope."""
+
+    return AdditionalPermissionProfile(
+        filesystem=tuple(dict.fromkeys(
+            entry for profile in profiles for entry in profile.filesystem
+        )),
+        network=tuple(dict.fromkeys(
+            entry for profile in profiles for entry in profile.network
+        )),
+        allow_local_binding=any(profile.allow_local_binding for profile in profiles),
+    )
 
 
 class RuntimeResumeRejected(RuntimeError):
@@ -233,6 +327,7 @@ class RuntimeExecutionRequest:
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
     credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
     mcp_servers: list[RuntimeMcpServer] = field(default_factory=list)
     additional_permissions: AdditionalPermissionProfile = field(
         default_factory=AdditionalPermissionProfile

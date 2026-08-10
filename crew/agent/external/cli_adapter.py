@@ -31,6 +31,7 @@ from crew.agent.external.runtime_adapter import (
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
     build_external_runtime_home_files,
+    build_external_runtime_network_permissions,
     build_external_runtime_env,
     build_managed_external_runtime_env,
     register_runtime_adapter,
@@ -112,6 +113,7 @@ class ExternalCliConfig:
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
     credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
     timeout: float = 120.0
 
 
@@ -861,12 +863,17 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
     try:
         from crew.security.launch import execute_captured
 
+        projected_home_files = build_external_runtime_home_files(config.credential_home_paths)
         result = await execute_captured(
             (config.executable_path, *args),
             cwd=Path(cwd),
             env=env,
             stdin=stdin_text.encode("utf-8") if stdin_text is not None else None,
-            home_files=build_external_runtime_home_files(config.credential_home_paths),
+            home_files=projected_home_files,
+            additional_permissions=build_external_runtime_network_permissions(
+                projected_home_files,
+                config.network_endpoints,
+            ),
             env_overrides=build_managed_external_runtime_env(config.custom_env),
             timeout=config.timeout,
             on_started=_mark_started,

@@ -821,11 +821,9 @@ fn restricted_environment(
     );
     result.extend(env_overrides);
     if network_enabled {
-        let proxy = "http://127.0.0.1:43119".to_string();
-        result.insert("HTTP_PROXY".to_string(), proxy.clone());
-        result.insert("HTTPS_PROXY".to_string(), proxy.clone());
-        result.insert("ALL_PROXY".to_string(), proxy);
-        result.insert("NO_PROXY".to_string(), String::new());
+        result.extend(crate::network::managed_proxy_environment(
+            "http://127.0.0.1:43119",
+        ));
     }
     result
 }

@@ -27,6 +27,7 @@ class RuntimeDescriptor:
     launch_args: tuple[str, ...] = ()
     probe_env: tuple[tuple[str, str], ...] = ()
     credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
     command_aliases: tuple[str, ...] = ()
     source: str = "builtin"
 
@@ -56,9 +57,11 @@ BUILTIN_RUNTIME_DESCRIPTORS: tuple[RuntimeDescriptor, ...] = (
         adapter_id="acp-stdio",
         launch_args=("acp",),
         credential_home_paths=(
+            ".kimi-code/config.toml",
             ".kimi-code/oauth/kimi-code",
             ".kimi-code/credentials/kimi-code.json",
         ),
+        network_endpoints=("https://auth.kimi.com",),
     ),
     RuntimeDescriptor(
         provider="codex",
@@ -274,6 +277,52 @@ def resolve_runtime_credential_home_paths(
             None,
         )
     return descriptor.credential_home_paths if descriptor is not None else ()
+
+
+def resolve_runtime_network_endpoints(
+    *,
+    provider: str,
+    metadata: dict[str, object] | None = None,
+) -> tuple[str, ...]:
+    """Resolve exact host-owned API endpoints for a detected runtime.
+
+    Endpoint declarations are descriptor data, not provider branches or model
+    input. Persisted metadata wins so custom runtimes can carry their own
+    declaration; older built-in rows fall back to the matching descriptor.
+    """
+
+    runtime_metadata = metadata or {}
+    if "network_endpoints" in runtime_metadata:
+        raw_endpoints = runtime_metadata.get("network_endpoints")
+        if isinstance(raw_endpoints, (list, tuple)):
+            return tuple(
+                str(item).strip()
+                for item in raw_endpoints
+                if isinstance(item, str) and str(item).strip()
+            )
+        return ()
+
+    descriptor_id = str(runtime_metadata.get("descriptor_id") or "").strip()
+    if not descriptor_id:
+        descriptor_source = str(
+            runtime_metadata.get("runtime_descriptor_source") or ""
+        ).strip()
+        if descriptor_source:
+            descriptor_id = f"{descriptor_source}:{provider}"
+    descriptor = next(
+        (
+            item
+            for item in BUILTIN_RUNTIME_DESCRIPTORS
+            if descriptor_id and item.descriptor_id == descriptor_id
+        ),
+        None,
+    )
+    if descriptor is None and not descriptor_id:
+        descriptor = next(
+            (item for item in BUILTIN_RUNTIME_DESCRIPTORS if item.provider == provider),
+            None,
+        )
+    return descriptor.network_endpoints if descriptor is not None else ()
 
 
 def _normalize_display_badge(value: object) -> str:

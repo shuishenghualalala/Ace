@@ -84,6 +84,10 @@ class _CodexRpcClient:
                 if not future.done():
                     future.set_exception(error)
             self.pending.clear()
+            await self.events.put({
+                "method": "$/processExited",
+                "params": {"exitCode": self.proc.returncode},
+            })
 
     async def send(self, payload: dict[str, Any]) -> None:
         if self.proc.stdin is None:
@@ -380,6 +384,12 @@ async def _stream_codex_app_server(
             method = str(payload.get("method") or "")
             params = payload.get("params")
             params = params if isinstance(params, dict) else {}
+            if method == "$/processExited":
+                stderr = b"".join(stderr_parts).decode("utf-8", errors="replace").strip()
+                detail = f"Codex app-server 已退出（exit={params.get('exitCode')}）"
+                if stderr:
+                    detail = f"{detail}: {stderr[-2000:]}"
+                raise CodexAdapterError(detail)
             event_thread, event_turn = _event_scope(params)
             if not event_thread or not event_turn:
                 continue
@@ -480,7 +490,7 @@ async def _stream_codex_app_server(
                             "title": tool.name,
                             "rawInput": {
                                 "name": tool.name,
-                                "arguments": params,
+                                "arguments": item,
                             },
                         },
                         raw_params=params,
@@ -579,6 +589,8 @@ async def stream_codex_events(
                 cwd=request.cwd,
                 system_prompt=request.system_prompt,
                 custom_env=request.custom_env,
+                credential_home_paths=request.credential_home_paths,
+                network_endpoints=request.network_endpoints,
                 timeout=request.timeout,
             )
         )

@@ -38,6 +38,7 @@ from crew.agent.external.runtime_profile import canonical_runtime_model_id
 from crew.agent.external.runtime_registry import (
     resolve_runtime_adapter_id,
     resolve_runtime_credential_home_paths,
+    resolve_runtime_network_endpoints,
 )
 from crew.agent.file_changes import (
     TurnFileChangeTracker,
@@ -951,6 +952,10 @@ class ExternalExecutor(AgentExecutor):
             provider=provider,
             metadata=runtime_metadata,
         )
+        network_endpoints = resolve_runtime_network_endpoints(
+            provider=provider,
+            metadata=runtime_metadata,
+        )
         adapter_id = resolve_runtime_adapter_id(
             provider=provider,
             protocol=protocol,
@@ -1179,6 +1184,7 @@ class ExternalExecutor(AgentExecutor):
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
                         credential_home_paths=credential_home_paths,
+                        network_endpoints=network_endpoints,
                         additional_permissions=additional_permissions or AdditionalPermissionProfile(),
                         mcp_servers=mcp_servers,
                         dynamic_tools=dynamic_tools,
@@ -1290,6 +1296,7 @@ class ExternalExecutor(AgentExecutor):
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
                         credential_home_paths=credential_home_paths,
+                        network_endpoints=network_endpoints,
                         timeout=self.config.timeout,
                     )
                 )
