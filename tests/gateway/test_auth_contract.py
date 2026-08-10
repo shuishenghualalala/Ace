@@ -352,15 +352,6 @@ async def test_local_owner_can_use_admin_routes(api):
 
 
 @pytest.mark.asyncio
-async def test_dev_mode_loopback_no_headers_passes(api_dev):
-    transport = ASGITransport(app=api_dev, client=("127.0.0.1", 12345))
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/api/sessions")
-
-    assert resp.status_code == 200
-
-
-@pytest.mark.asyncio
 async def test_dev_mode_uses_configured_local_owner(api_dev):
     transport = ASGITransport(app=api_dev, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:

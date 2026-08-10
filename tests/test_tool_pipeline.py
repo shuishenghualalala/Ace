@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 
 from crew.core.runctx import (
     current_tool_progress_fn,
@@ -35,35 +36,42 @@ from crew.tools.registry import Registry
 # --------------------------------------------------------------------------- #
 # Stage 2：输入验证
 # --------------------------------------------------------------------------- #
-def test_validate_arguments_pass():
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
-    assert validate_arguments("t", schema, {"path": "a"}) is None
-
-
-def test_validate_arguments_missing_required():
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
-    err = validate_arguments("t", schema, {})
-    assert err is not None
-    assert "required" in err
-    assert "t" in err
-
-
-def test_validate_arguments_wrong_type():
-    schema = {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
-    err = validate_arguments("t", schema, {"n": "not-a-number"})
-    assert err is not None
-    assert "integer" in err
-
-
-def test_validate_arguments_non_dict_args():
-    err = validate_arguments("t", {"type": "object"}, "not-a-dict")
-    assert err is not None
-    assert "对象" in err
-
-
-def test_validate_arguments_no_schema_skips():
-    """工具未声明 parameters 时不做结构校验，交给业务层。"""
-    assert validate_arguments("t", {}, {"anything": 1}) is None
+@pytest.mark.parametrize(
+    "schema,args,expected_err_parts",
+    [
+        # 合法入参 → 通过（None）
+        (
+            {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            {"path": "a"},
+            None,
+        ),
+        # 缺必填字段
+        (
+            {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            {},
+            ["required", "t"],
+        ),
+        # 类型错误
+        (
+            {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+            {"n": "not-a-number"},
+            ["integer"],
+        ),
+        # args 非对象
+        ({"type": "object"}, "not-a-dict", ["对象"]),
+        # 工具未声明 parameters 时不做结构校验，交给业务层
+        ({}, {"anything": 1}, None),
+    ],
+    ids=["pass", "missing_required", "wrong_type", "non_dict_args", "no_schema_skips"],
+)
+def test_validate_arguments(schema, args, expected_err_parts):
+    err = validate_arguments("t", schema, args)
+    if expected_err_parts is None:
+        assert err is None
+    else:
+        assert err is not None
+        for part in expected_err_parts:
+            assert part in err
 
 
 # --------------------------------------------------------------------------- #
@@ -121,27 +129,36 @@ def test_load_permission_config_drops_invalid():
     assert cfg.rules[0].behavior == "ask"
 
 
-def test_permission_exact_match():
-    cfg = load_permission_config([{"tool": "terminal", "match": "ls", "behavior": "deny"}])
-    assert cfg.check("terminal", "ls")[0] == "deny"
-    assert cfg.check("terminal", "ls -la")[0] == "allow"  # 精确不匹配前缀
-
-
-def test_permission_prefix_match():
-    cfg = load_permission_config([{"tool": "terminal", "match": "git push:*", "behavior": "ask"}])
-    assert cfg.check("terminal", "git push origin main")[0] == "ask"
-    assert cfg.check("terminal", "git pull")[0] == "allow"
-
-
-def test_permission_wildcard_suffix():
-    cfg = load_permission_config([{"tool": "terminal", "match": "git *", "behavior": "ask"}])
-    assert cfg.check("terminal", "git commit")[0] == "ask"
-    assert cfg.check("terminal", "npm install")[0] == "allow"
-
-
-def test_permission_blanket_match():
-    cfg = load_permission_config([{"tool": "file_write", "match": "*", "behavior": "deny"}])
-    assert cfg.check("file_write", "/any/path")[0] == "deny"
+@pytest.mark.parametrize(
+    "rule,checks",
+    [
+        # 精确匹配：不匹配前缀
+        (
+            {"tool": "terminal", "match": "ls", "behavior": "deny"},
+            [("terminal", "ls", "deny"), ("terminal", "ls -la", "allow")],
+        ),
+        # 前缀匹配（`:*` 后缀）
+        (
+            {"tool": "terminal", "match": "git push:*", "behavior": "ask"},
+            [("terminal", "git push origin main", "ask"), ("terminal", "git pull", "allow")],
+        ),
+        # 通配后缀（` *`）
+        (
+            {"tool": "terminal", "match": "git *", "behavior": "ask"},
+            [("terminal", "git commit", "ask"), ("terminal", "npm install", "allow")],
+        ),
+        # 全量匹配
+        (
+            {"tool": "file_write", "match": "*", "behavior": "deny"},
+            [("file_write", "/any/path", "deny")],
+        ),
+    ],
+    ids=["exact_match", "prefix_match", "wildcard_suffix", "blanket_match"],
+)
+def test_permission_rule_matching(rule, checks):
+    cfg = load_permission_config([rule])
+    for tool, key, expected in checks:
+        assert cfg.check(tool, key)[0] == expected
 
 
 def test_permission_deny_priority_over_ask():

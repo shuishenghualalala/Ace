@@ -14,8 +14,7 @@ pub const MAX_HOME_FILES: usize = 64;
 pub const MAX_RESPONSE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
-pub const READY_CAPABILITIES: [&str; 3] =
-    ["stdin_once", "stream_output", "stdin_bidirectional"];
+pub const READY_CAPABILITIES: [&str; 3] = ["stdin_once", "stream_output", "stdin_bidirectional"];
 
 /// Stable error codes for the managed-network layer (spec §13).
 ///
@@ -319,29 +318,34 @@ pub fn validate_process_inputs_with_home_files(
             || relative_path.starts_with('/')
             || relative_path.contains('\\')
             || relative_path.contains(':')
-            || components.iter().any(|part| part.is_empty() || *part == "." || *part == "..")
+            || components
+                .iter()
+                .any(|part| part.is_empty() || *part == "." || *part == "..")
         {
             return Err(InputValidationError {
                 code: "sandbox_denied",
                 message: "projected HOME path must be relative",
             });
         }
-        let decoded = BASE64_STANDARD.decode(encoded).map_err(|_| InputValidationError {
-            code: "sandbox_denied",
-            message: "invalid projected HOME file encoding",
-        })?;
+        let decoded = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|_| InputValidationError {
+                code: "sandbox_denied",
+                message: "invalid projected HOME file encoding",
+            })?;
         if decoded.len() > MAX_HOME_FILE_BYTES {
             return Err(InputValidationError {
                 code: "sandbox_denied",
                 message: "projected HOME file exceeds the size limit",
             });
         }
-        total_home_bytes = total_home_bytes
-            .checked_add(decoded.len())
-            .ok_or(InputValidationError {
-                code: "sandbox_denied",
-                message: "projected HOME exceeds the size limit",
-            })?;
+        total_home_bytes =
+            total_home_bytes
+                .checked_add(decoded.len())
+                .ok_or(InputValidationError {
+                    code: "sandbox_denied",
+                    message: "projected HOME exceeds the size limit",
+                })?;
         if total_home_bytes > MAX_HOME_TOTAL_BYTES {
             return Err(InputValidationError {
                 code: "sandbox_denied",

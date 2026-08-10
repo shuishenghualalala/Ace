@@ -22,9 +22,9 @@ use std::thread;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use protocol::{
-    validate_process_inputs_with_home_files, ReadyFrame, RequestEnvelope, RuntimeControl, RuntimeEvent,
-    RuntimeMessage, RuntimeRequest, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
-    MAX_STDIN_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
+    validate_process_inputs_with_home_files, ReadyFrame, RequestEnvelope, RuntimeControl,
+    RuntimeEvent, RuntimeMessage, RuntimeRequest, MAX_REQUEST_FRAME_BYTES,
+    MAX_RESPONSE_FRAME_BYTES, MAX_STDIN_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
 };
 use subtle::ConstantTimeEq;
 
@@ -461,11 +461,8 @@ fn execute_interactive_request(
             env_overrides,
             home_files,
         } => {
-            let process_input = validate_process_inputs_with_home_files(
-                None,
-                &env_overrides,
-                &home_files,
-            );
+            let process_input =
+                validate_process_inputs_with_home_files(None, &env_overrides, &home_files);
             let process_input = match process_input {
                 Ok(value) => value,
                 Err(error) => {
@@ -625,10 +622,10 @@ fn handle_request(
                 &env_overrides,
                 &home_files,
             )
-                .map_err(|error| RuntimeFailure {
-                    code: error.code,
-                    message: error.message.to_string(),
-                })?;
+            .map_err(|error| RuntimeFailure {
+                code: error.code,
+                message: error.message.to_string(),
+            })?;
             if command.is_empty() {
                 return Err(RuntimeFailure {
                     code: "sandbox_denied",

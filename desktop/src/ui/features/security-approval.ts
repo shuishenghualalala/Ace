@@ -8,6 +8,7 @@
 
 import { $, notify, state } from '../state';
 import { appendMessage, renderChat } from './chat-controller';
+import { queryPrimaryComposer } from './composer-scope';
 
 export type ConversationSecurityMode = 'request_approval' | 'auto_review' | 'full_access';
 export type SecurityApprovalChoice = 'once' | 'session' | 'always' | 'reject';
@@ -27,7 +28,7 @@ export const SECURITY_MODE_OPTIONS: { value: ConversationSecurityMode; label: st
 ];
 
 export const FULL_ACCESS_CONFIRMATION =
-  '完全访问会在 Windows/Linux 原生安全运行时中开放当前项目和用户目录的广泛读写，普通动作不再逐条询问；Crew 数据库、授权规则、审计、凭据和系统级硬边界仍隔离。确定只对当前对话启用吗？';
+  '完全访问会在原生安全运行时中开放当前项目和用户目录的广泛读写，普通动作不再逐条询问；Crew 数据库、授权规则、审计、凭据和系统级硬边界仍隔离。确定只对当前对话启用吗？';
 
 export function modeLabel(mode: ConversationSecurityMode): string {
   if (mode === 'full_access') return '完全访问权限';
@@ -223,7 +224,7 @@ function decisionLabel(decision: SecurityApprovalChoice): string {
 export function bindSecurityApprovalUi(): () => void {
   const panel = $('#composer-approval-panel') as HTMLElement | null;
   const summary = $('#composer-approval-summary');
-  const container = $('#chat-input-container');
+  const container = queryPrimaryComposer('.chat-input-container');
   const decisionButtons = Array.from(
     panel?.querySelectorAll<HTMLButtonElement>('[data-security-decision]') ?? [],
   );

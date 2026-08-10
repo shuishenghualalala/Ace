@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{collections::BTreeMap, io::Read, io::Write, thread};
 
-use crate::protocol::{RuntimeCapabilities, RuntimeControl, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
+use crate::protocol::{
+    RuntimeCapabilities, RuntimeControl, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES,
+};
 
 pub struct LinuxRunRequest {
     pub command: Vec<String>,

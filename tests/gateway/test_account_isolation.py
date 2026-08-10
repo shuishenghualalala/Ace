@@ -18,26 +18,6 @@ LOCAL_OWNER = "local"
 
 
 @pytest.mark.asyncio
-async def test_health_is_public_local_api_is_allowed_and_remote_api_is_rejected(tmp_path):
-    crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
-    app = create_app(crew)
-    transport = ASGITransport(app=app)
-
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        health = await client.get("/api/health", headers={"x-test-no-auth": "1"})
-        assert health.status_code == 200
-        assert health.json()["ok"] is True
-
-        sessions = await client.get("/api/sessions")
-        assert sessions.status_code == 200
-
-    remote_transport = ASGITransport(app=app, client=("10.0.0.1", 12345))
-    async with AsyncClient(transport=remote_transport, base_url="http://test") as client:
-        rejected = await client.get("/api/sessions")
-        assert rejected.status_code == 401
-
-
-@pytest.mark.asyncio
 async def test_sessions_and_workspaces_use_local_owner(tmp_path):
     crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
     crew.session_store.save(

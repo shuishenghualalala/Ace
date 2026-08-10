@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -7,11 +9,17 @@ from types import SimpleNamespace
 import pytest
 
 from crew.security.launch import (
+    HelperIntegrityError,
     ProcessLaunch,
     compile_process_launch,
     current_process_launch,
     execute_captured,
     host_stream_launch_block_reason,
+    packaged_runtime_candidates,
+    packaged_runtime_argv,
+    runtime_platform_key,
+    runtime_source_stale,
+    verify_helper_integrity,
 )
 from crew.security.models import FilesystemAccess, FilesystemEntry, PermissionProfile, PermissionProfileKind
 from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
@@ -69,6 +77,13 @@ def test_external_stream_policy_can_be_explicitly_disabled_without_disabling_bui
         assert host_stream_launch_block_reason(external=True) is None
     finally:
         current_process_launch.reset(token)
+
+
+def test_process_launch_defaults_external_security_to_disabled(tmp_path: Path) -> None:
+    launch = _managed(tmp_path)
+
+    assert launch.external_security_enabled is False
+    assert launch.external_managed is False
 
 
 def test_compile_process_launch_uses_explicit_external_security_setting(
@@ -136,6 +151,75 @@ async def test_external_captured_execution_uses_host_only_when_switch_is_off(tmp
     finally:
         current_process_launch.reset(token)
     assert result.stdout.strip() == "external-ok"
+def test_packaged_runtime_honors_explicit_platform_artifact(monkeypatch, tmp_path):
+    runtime = tmp_path / "ace-security-runtime"
+    runtime.write_bytes(b"runtime")
+    monkeypatch.setenv("ACE_SECURITY_RUNTIME", str(runtime))
+
+    assert packaged_runtime_argv() == (str(runtime.resolve()),)
+
+
+@pytest.mark.parametrize(
+    ("system_name", "machine_name", "expected"),
+    [
+        ("darwin", "arm64", "darwin-arm64"),
+        ("macos", "aarch64", "darwin-arm64"),
+        ("linux", "x86_64", "linux-x64"),
+        ("windows", "AMD64", "win32-x64"),
+    ],
+)
+def test_runtime_platform_key_is_stable(system_name, machine_name, expected):
+    assert runtime_platform_key(system_name, machine_name) == expected
+
+
+def test_packaged_runtime_candidates_include_host_specific_prebuilt(tmp_path):
+    candidates = packaged_runtime_candidates(tmp_path, "ace-security-runtime")
+
+    assert candidates[0] == tmp_path / "desktop" / "security-runtime-bin" / "ace-security-runtime"
+    assert candidates[-1] == tmp_path / "security-runtime" / "bin" / "ace-security-runtime"
+    assert any(path.parent.parent.name == "prebuilt" for path in candidates)
+
+
+def test_helper_integrity_rejects_another_platform(tmp_path):
+    runtime = tmp_path / "ace-security-runtime"
+    runtime.write_bytes(b"runtime")
+    digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+    current = runtime_platform_key()
+    wrong_platform = "win32" if not current or not current.startswith("win32-") else "darwin"
+    (tmp_path / "runtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "platform": wrong_platform,
+                "arch": "arm64",
+                "binary_name": runtime.name,
+                "binary_sha256": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(HelperIntegrityError, match="different platform"):
+        verify_helper_integrity(runtime)
+
+
+def test_runtime_source_stale_uses_manifest_next_to_selected_helper(tmp_path):
+    runtime = tmp_path / "ace-security-runtime"
+    runtime.write_bytes(b"runtime")
+    (tmp_path / "runtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "binary_name": runtime.name,
+                "binary_sha256": "not-used-by-source-check",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Desktop staging manifests intentionally omit source_hash because the source tree
+    # is not shipped with the application; they must not be reported as stale.
+    assert runtime_source_stale(runtime) is None
 
 
 def test_managed_background_command_is_protocol_data_not_host_argv(tmp_path, monkeypatch):

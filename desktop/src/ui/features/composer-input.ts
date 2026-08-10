@@ -2,7 +2,7 @@
  * Composer 输入框键盘/IME 处理
  *
  * 将「Enter 发送」与中文/日文/韩文等 IME 合成状态判断抽成可测模块，
- * 供 desktop/src/ui/index.ts 绑定 #chat-input 使用。
+ * 供 Composer（composer-view）绑定 [data-composer-input] 输入框使用。
  */
 
 import { clearRuntimeStyle, setRuntimeStyle } from '../components/runtime-style';

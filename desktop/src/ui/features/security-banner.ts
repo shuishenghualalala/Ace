@@ -8,12 +8,13 @@
  * 点击「安装」→ securitySetup('install')（UAC 提权）→ 成功后把当前会话切 auto_review。
  *
  * 设计：不引入 push 订阅；setup 是一次性用户动作，invoke 返回后重拉 capabilities 刷新即可。
- * 挂载点：.chat-composer 内、#composer-edit-banner 之前（与既有"正在编辑"提示条同带）。
+ * 挂载点：.chat-composer 内、.composer-edit-banner 之前（与既有"正在编辑"提示条同带）。
  */
 
 import { state, notify } from '../state';
 import { showConfirmDialog } from '../ui-feedback';
-import { isWindowsPlatform } from './security-mode';
+import { queryPrimaryComposer } from './composer-scope';
+import { detectedRuntimePlatform, isMacOSPlatform, isWindowsPlatform } from './security-mode';
 import { enableUacAndPromptRestart, prepareWindowsSecuritySetup } from './security-setup-flow';
 
 type GatewayResult = { ok: boolean; status: number; body: unknown };
@@ -29,7 +30,7 @@ type SecurityCapabilities = {
 
 type SecuritySetupResult = { ok: boolean; exitCode: number | null; detail?: string; code?: 'uac_disabled' | 'uac_restart_required' };
 
-type BannerState = 'on' | 'off' | 'enabling' | 'failed' | 'missing' | 'stale' | 'hidden' | 'net-missing' | 'restart-required';
+type BannerState = 'on' | 'off' | 'enabling' | 'failed' | 'missing' | 'stale' | 'hidden' | 'net-missing' | 'mac-incomplete' | 'restart-required';
 
 const BANNER_ID = 'security-sandbox-banner';
 const SEED_RETRY_MS = 5000;        // 失败后至少间隔 5s 再重试，避免每帧打 gateway
@@ -45,7 +46,12 @@ let uacRestartRequired = false;
 
 /** 从 capabilities 派生 banner 状态。导出供单元测试覆盖网络降级分支（U3）。 */
 export function deriveState(c: SecurityCapabilities): BannerState {
-  // 当前 banner 仅服务于 Windows 原生沙箱；其他平台走 Docker/bwrap，不在本条 banner 范围。
+  if (isMacOSPlatform(c.platform)) {
+    if (!c.helper_present || c.runtime_stale || !c.filesystem_sandbox || !c.managed_network) {
+      return 'mac-incomplete';
+    }
+    return 'on';
+  }
   if (!isWindowsPlatform(c.platform)) return 'hidden';
   if (!c.helper_present) return 'missing';
   if (!c.filesystem_sandbox) return 'off';
@@ -72,6 +78,8 @@ export async function refreshSecurityBanner(): Promise<void> {
       seeded = false; // 允许后续重试（登录后/网关就绪后能重新拉到）
     } else {
       const caps = ((result.body ?? {}) as SecurityCapabilities);
+      const platform = detectedRuntimePlatform(caps.platform);
+      if (platform) caps.platform = platform;
       lastDetail = caps.detail ?? '';
       current = uacRestartRequired ? 'restart-required' : deriveState(caps);
       seeded = true; // 成功一次后不再每帧重试，交给周期刷新维持
@@ -123,7 +131,7 @@ export function renderSecurityBanner(): void {
 function ensureBanner(container: Element): HTMLElement | null {
   const existing = document.getElementById(BANNER_ID);
   if (existing) return existing;
-  const reference = document.getElementById('composer-edit-banner');
+  const reference = queryPrimaryComposer('.composer-edit-banner');
   const el = document.createElement('div');
   el.id = BANNER_ID;
   el.className = 'security-banner';
@@ -203,6 +211,12 @@ function applyState(el: HTMLElement): void {
     actions.innerHTML =
       '<span class="security-banner__permission">需要管理员权限</span>' +
       '<button class="security-banner__btn" data-action="enable">修复网络防护</button>';
+  } else if (current === 'mac-incomplete') {
+    el.classList.add('is-warn');
+    icon.textContent = '!';
+    title.textContent = '安全防护尚未就绪';
+    text.textContent = lastDetail || '系统原生运行组件或联网管控未通过检测，请修复或重新安装应用。';
+    actions.innerHTML = '';
   } else if (current === 'restart-required') {
     el.classList.add('is-info');
     icon.textContent = 'i';
@@ -224,7 +238,7 @@ async function onEnable(): Promise<void> {
     }
     const accepted = await showConfirmDialog({
       title: '安装安全沙箱',
-      message: '将请求一次 Windows 管理员权限，创建 Crew 使用的受限账户并配置网络防护规则。安装完成后，受管命令将在沙箱边界内执行。是否继续？',
+      message: '将请求一次系统管理员权限，创建受限执行环境并配置网络防护规则。安装完成后，受管命令将在安全边界内执行。是否继续？',
       confirmText: '安装并继续',
     });
     if (!accepted) return;

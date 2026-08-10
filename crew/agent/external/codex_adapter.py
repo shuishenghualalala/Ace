@@ -489,7 +489,10 @@ async def _stream_codex_app_server(
                             "toolCallId": tool.tool_call_id,
                             "title": tool.name,
                             "rawInput": {
-                                "name": tool.name,
+                            "name": tool.name,
+                                # 权限分类器从 arguments 里取 command/path 做判定；
+                                # 审批请求的参数嵌套在 item 里（如 item.command），
+                                # 直接给 params 会让分类器看不到命令内容而一律 deny。
                                 "arguments": item,
                             },
                         },

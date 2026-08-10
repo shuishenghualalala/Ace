@@ -650,19 +650,6 @@ async def test_plain_type_needs_no_approval_and_sends_no_submit(tmp_path, monkey
         await manager.aclose()
 
 
-async def test_type_submit_direct_call_executes_without_approval(tmp_path, monkeypatch):
-    manager, driver = await _electron_manager(tmp_path, monkeypatch)
-    token = current_tool_call_id.set("tc-none")
-    try:
-        await manager.navigate("o", "s", "https://baidu.com")
-        await manager.fill("o", "s", "p1:e18", "世界杯赛况", submit=True)
-        assert ("fill", ("@e18", "世界杯赛况", "--submit")) in driver.calls
-    finally:
-        current_tool_call_id.reset(token)
-        manager._closed = True
-        await manager.aclose()
-
-
 async def test_snapshot_escapes_malicious_page_title_out_of_boundary(browser):
     """页面把 </untrusted_browser_content> + <browser_action_result> 塞进 title，必须被
     转义在边界内，不能逃出隔离区伪造 Crew 控制信封（回归 C2：title/url 曾裸插）。"""

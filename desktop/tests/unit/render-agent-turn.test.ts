@@ -228,6 +228,7 @@ describe('renderAgentTurn', () => {
     const html = root.outerHTML;
     const details = root.querySelector('details.msg__foldable');
     expect(html).toContain('已思考 5s');
+    expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已思考 5s');
     expect(html).not.toContain('正在执行');
     expect(html).not.toContain('msg__fold-spinner');
     expect(details).not.toBeNull();
@@ -262,15 +263,6 @@ describe('renderAgentTurn', () => {
     expect(item?.querySelector('details.process-timeline__details')?.open).toBe(true);
     expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考中');
     expect(item?.querySelector('.process-timeline__icon--running')).not.toBeNull();
-  });
-
-  it('已完成无用户偏好且有正文时默认折叠', () => {
-    const root = renderAgentTurn(makeMessages(), {
-      isStreaming: false,
-      userPinnedOpen: null,
-      turnDurationMs: 5_000,
-    });
-    expect(root.querySelector('details.msg__foldable')?.open).toBe(false);
   });
 
   it('已完成用户手动展开时保持展开', () => {
@@ -340,20 +332,6 @@ describe('renderAgentTurn', () => {
     vi.restoreAllMocks();
   });
 
-  it('流式中仅过程内容时默认展开', () => {
-    const root = renderAgentTurn(makeMessages({ streaming: true, content: '' }), {
-      isStreaming: true,
-      userPinnedOpen: null,
-      turnDurationMs: 1_200,
-    });
-    const html = root.outerHTML;
-    const details = root.querySelector('details.msg__foldable');
-    expect(html).toContain('正在执行 · 已等待 1s');
-    expect(html).toContain('msg__fold-spinner');
-    expect(details?.open).toBe(true);
-    expect(details?.classList.contains('msg__foldable--live')).toBe(true);
-  });
-
   it('乐观占位在首个 thinking 到达后文案切到「正在执行」', () => {
     const root = renderAgentTurn(
       [{
@@ -400,17 +378,6 @@ describe('renderAgentTurn', () => {
     const details = root.querySelector('details.msg__foldable');
     expect(details?.open).toBe(false);
     // 但 live 标记样式仍在（说明这是执行中回合，只是用户选择折叠了）
-    expect(details?.classList.contains('msg__foldable--live')).toBe(true);
-  });
-
-  it('执行中无用户偏好且尚无正文时默认展开', () => {
-    const root = renderAgentTurn(makeMessages({ streaming: true, content: '' }), {
-      isStreaming: true,
-      userPinnedOpen: null,
-      turnDurationMs: 3_000,
-    });
-    const details = root.querySelector('details.msg__foldable');
-    expect(details?.open).toBe(true);
     expect(details?.classList.contains('msg__foldable--live')).toBe(true);
   });
 
@@ -649,33 +616,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector<HTMLImageElement>('.tool-card__image')?.draggable).toBe(false);
   });
 
-  it('带工具调用的推理旁白在执行中也进折叠区', () => {
-    const root = renderAgentTurn(
-      makeMessages({
-        content: '我来帮您查询今天的黄金价格。',
-        thinking: undefined,
-        streaming: true,
-        toolCalls: [
-          {
-            toolCallId: 't1',
-            name: 'skill_view',
-            status: 'running',
-            startedAt: 1_700_000_000_000,
-          },
-        ],
-      }),
-      {
-        isStreaming: true,
-        userPinnedOpen: null,
-        turnDurationMs: 9_000,
-      },
-    );
-    const foldContent = root.querySelector('.msg__fold-content');
-    expect(foldContent?.textContent).toContain('我来帮您查询今天的黄金价格');
-    expect(root.querySelector('.msg__body > .msg__foldable + .msg__text')).toBeNull();
-  });
-
-  it('同条消息内旁白渲染在工具卡之上（跟随模型产出时序）', () => {
+  it('带工具调用的推理旁白在执行中也进折叠区，且渲染在工具卡之上', () => {
     // 模型先说"我来帮您查询…"再发 tool_call；二者落在同一条 assistant message 上
     // （toolReducer 把 toolCalls patch 到承载 content 的当前 assistantId）。
     // 渲染顺序必须跟随产出时序：旁白在前、工具卡在后。改前这里反了（工具在上）。
@@ -700,6 +641,8 @@ describe('renderAgentTurn', () => {
       },
     );
     const foldContent = root.querySelector('.msg__fold-content');
+    expect(foldContent?.textContent).toContain('我来帮您查询今天的黄金价格');
+    expect(root.querySelector('.msg__body > .msg__foldable + .msg__text')).toBeNull();
     const timeline = foldContent?.querySelector('.process-timeline');
     expect(timeline).not.toBeNull();
     const items = Array.from(timeline!.children);
@@ -991,15 +934,6 @@ describe('renderAgentTurn', () => {
     );
     const label = root.querySelector('.msg__fold-label')?.textContent;
     expect(label).toBe('已执行 24s，已调用 2 个工具');
-  });
-
-  it('完成回合无工具调用时折叠条保持「已思考 Xs」', () => {
-    const root = renderAgentTurn(makeMessages(), {
-      isStreaming: false,
-      userPinnedOpen: null,
-      turnDurationMs: 5_000,
-    });
-    expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已思考 5s');
   });
 
   it('多段回合 footer 时间取末段 assistant（完成时间）而非批次首条', () => {

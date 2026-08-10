@@ -199,6 +199,8 @@ describe('deltaReducer', () => {
     expect(r.queueHint).toBe('');
     expect(r.messageUpserts.length).toBe(1);
     expect(r.messageUpserts[0]?.op).toBe('append');
+    expect(r.messageUpserts[0]?.message?.role).toBe('assistant');
+    expect(r.messageUpserts[0]?.message?.content).toBe('hello');
     // 工具前不确定阶段标 process，避免旁白冒充正文触发自动折
     expect(r.messageUpserts[0]?.message?.segmentRole).toBe('process');
     expect(r.replaceBook?.assistantId).not.toBeNull();
@@ -447,6 +449,9 @@ describe('toolReducer', () => {
     );
     expect(r.toolUpserts[0]?.status).toBe('running');
     expect(r.replaceBook?.toolMap.get('t1')?.name).toBe('web_search');
+    // tool 帧把 toolCalls patch 到 assistant 消息
+    const toolPatch = r.messageUpserts.find((u) => u.op === 'patch');
+    expect(toolPatch && toolPatch.op === 'patch' ? toolPatch.patch.toolCalls?.[0]?.toolCallId : undefined).toBe('t1');
   });
 
   it('keeps generating and start as one desktop tool card', () => {
@@ -769,6 +774,14 @@ describe('planReviewReducer', () => {
     expect(r.replaceBook?.pendingPlan).toEqual({ plan: 'step 1...', planFile: '/tmp/p.md', status: 'pending' });
     expect(r.replaceBook?.planActive).toBe(true);
     expect(r.statusHint).toBe('idle');
+    // planReview 挂到回合消息（无 assistantId 时 append 一条空 assistant 消息）
+    expect(r.messageUpserts).toHaveLength(1);
+    expect(r.messageUpserts[0]?.op).toBe('append');
+    expect(r.messageUpserts[0]?.message?.planReview).toMatchObject({
+      plan: 'step 1...',
+      planFile: '/tmp/p.md',
+      status: 'pending',
+    });
   });
 });
 
@@ -933,6 +946,7 @@ describe('reduceChunk dispatch', () => {
     );
     expect(r.messageUpserts).toEqual([]);
     expect(r.finalize).toBe(false);
+    expect(r.statusHint).toBeUndefined();
   });
 });
 

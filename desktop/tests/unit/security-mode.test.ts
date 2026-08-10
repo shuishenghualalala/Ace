@@ -1,5 +1,11 @@
+// @vitest-environment happy-dom
+
 import { describe, expect, it } from 'vitest';
-import { formatCapabilitySummary, isWindowsPlatform } from '../../src/ui/features/security-mode';
+import {
+  detectedRuntimePlatform,
+  formatCapabilitySummary,
+  isWindowsPlatform,
+} from '../../src/ui/features/security-mode';
 
 describe('security capability summary', () => {
   it('does not claim protection when the native helper is absent', () => {
@@ -12,5 +18,15 @@ describe('security capability summary', () => {
 
   it('recognizes the backend Windows platform name', () => {
     expect(isWindowsPlatform('windows')).toBe(true);
+  });
+
+  it('does not treat an unknown platform as Windows', () => {
+    expect(isWindowsPlatform(undefined)).toBe(false);
+    expect(isWindowsPlatform('')).toBe(false);
+  });
+
+  it('uses the desktop runtime platform when the gateway has not reported one', () => {
+    Object.assign(window, { Crew: { runtimePlatform: 'darwin' } });
+    expect(detectedRuntimePlatform()).toBe('darwin');
   });
 });

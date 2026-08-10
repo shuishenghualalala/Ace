@@ -363,39 +363,28 @@ def test_build_skills_index_prompt_uses_cache(skills_dir):
     assert skills_mod._skills_index_cache
 
 
-def test_build_skills_index_prompt_with_enabled(skills_dir):
+@pytest.mark.parametrize(
+    "kwargs,greet_present,custom_present",
+    [
+        ({"enabled": ["greet"]}, True, False),
+        ({"disabled": ["greet"]}, False, True),
+        ({"enabled": ["*"]}, True, True),
+        ({"enabled": []}, False, False),
+        ({"disabled": ["*"]}, False, False),
+    ],
+    ids=[
+        "with_enabled",
+        "with_disabled",
+        "star_means_all",
+        "empty_enabled_blocks_all",
+        "star_disabled_blocks_all",
+    ],
+)
+def test_build_skills_index_prompt_filter(skills_dir, kwargs, greet_present, custom_present):
     scan_skills()
-    prompt = build_skills_index_prompt(enabled=["greet"])
-    assert "/greet" in prompt
-    assert "/custom" not in prompt
-
-
-def test_build_skills_index_prompt_with_disabled(skills_dir):
-    scan_skills()
-    prompt = build_skills_index_prompt(disabled=["greet"])
-    assert "/greet" not in prompt
-    assert "/custom" in prompt
-
-
-def test_build_skills_index_prompt_star_means_all(skills_dir):
-    scan_skills()
-    prompt = build_skills_index_prompt(enabled=["*"])
-    assert "/greet" in prompt
-    assert "/custom" in prompt
-
-
-def test_build_skills_index_prompt_empty_enabled_blocks_all(skills_dir):
-    scan_skills()
-    prompt = build_skills_index_prompt(enabled=[])
-    assert "/greet" not in prompt
-    assert "/custom" not in prompt
-
-
-def test_build_skills_index_prompt_star_disabled_blocks_all(skills_dir):
-    scan_skills()
-    prompt = build_skills_index_prompt(disabled=["*"])
-    assert "/greet" not in prompt
-    assert "/custom" not in prompt
+    prompt = build_skills_index_prompt(**kwargs)
+    assert ("/greet" in prompt) is greet_present
+    assert ("/custom" in prompt) is custom_present
 
 
 

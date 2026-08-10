@@ -2051,6 +2051,15 @@ button.chat-message-file:hover {
     scrollbar-gutter: stable;
 }
 
+/* chip 覆盖层方案（composer-mention.ts）：正文由 .chat-input-overlay 绘制，绑定后 textarea
+   本体必须透明、仅 caret 可见。composer-context.css 里的同名规则在 components 层，
+   层序输给上面这条 features 层基础色，导致 textarea 文字常年可见、与覆盖层双重渲染——
+   必须在 features 层用更高特异性压回去。 */
+.chat-input-container textarea.chat-input-overlay-source {
+    color: transparent;
+    caret-color: var(--mw-text-primary);
+}
+
 .input-container textarea::placeholder {
     color: var(--mw-text-muted);
 }

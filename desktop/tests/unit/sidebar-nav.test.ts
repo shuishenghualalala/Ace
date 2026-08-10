@@ -2,31 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { resolveShellNavigation } from '../../src/ui/features/sidebar-nav';
 
 describe('resolveShellNavigation', () => {
-  it('preserves the existing Skills entry in assistant mode', () => {
+  it('assistant mode keeps Skills, exposes Inspiration/Security and removes Audit', () => {
     const navigation = resolveShellNavigation('assistant', { agents: 'available' });
+    const ids = navigation.map((item) => item.id);
 
-    expect(navigation.map((item) => item.id)).toContain('skills');
-  });
-
-  it('exposes the Inspiration entry in assistant mode', () => {
-    const navigation = resolveShellNavigation('assistant', { agents: 'available' });
-
+    expect(ids).toContain('skills');
     expect(navigation).toContainEqual(expect.objectContaining({
       id: 'sites',
       label: '灵感',
       featureState: 'available',
     }));
-  });
-
-  it('exposes the Security entry in assistant mode', () => {
-    const navigation = resolveShellNavigation('assistant', { agents: 'available' });
-
-    expect(navigation.map((item) => item.id)).toContain('security');
-  });
-
-  it('exposes Security as a standalone page and removes Audit', () => {
-    const ids = resolveShellNavigation('assistant', { agents: 'available' }).map((item) => item.id);
-
+    expect(ids).toContain('security');
     expect(ids).not.toContain('audit');
   });
 });

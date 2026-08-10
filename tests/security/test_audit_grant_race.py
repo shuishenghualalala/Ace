@@ -171,33 +171,20 @@ def test_persistent_deny_beats_auto_allow_and_full_access(tmp_path: Path) -> Non
     assert request is None
 
 
-def test_mode_change_keeps_session_grant_but_cancels_pending(tmp_path: Path) -> None:
-    approvals, grants, _audit, service = _service(tmp_path)
+def test_set_mode_revokes_pending_and_returns_idempotently(tmp_path: Path) -> None:
+    """service.set_mode 接线到 revoke_pending_session，且重复切换幂等返回 False。
+
+    会话 grant 存活、end_session 撤销等行为由 test_security_approvals.py 覆盖。
+    """
+    approvals, _grants, _audit, service = _service(tmp_path)
     context = _context(tmp_path)
-    allowed = normalize_exec_action(["git", "status"], tmp_path)
-    pending_action = normalize_exec_action(["git", "diff"], tmp_path)
-    approved = approvals.create(context, allowed, "terminal")
-    grant = approvals.decide(
-        approved.request_id,
-        approved.nonce,
-        ApprovalDecision.SESSION,
-        context,
-    ).grant
-    pending = approvals.create(context, pending_action, "terminal")
-    assert grant is not None
+    approvals.create(context, normalize_exec_action(["git", "diff"], tmp_path), "terminal")
 
     from crew.security.models import ConversationPermissionMode
 
     assert service.set_mode(context, ConversationPermissionMode.AUTO_REVIEW) is True
     assert approvals.list_pending(context) == []
-    grants.authorize(grant.grant_id, context, allowed)
-    with pytest.raises(ApprovalError, match="已处理"):
-        approvals.decide(pending.request_id, pending.nonce, ApprovalDecision.ONCE, context)
-
     assert service.set_mode(context, ConversationPermissionMode.AUTO_REVIEW) is False
-    assert service.end_session(context.owner_account_id, context.session_id) >= 1
-    with pytest.raises(GrantError, match="不存在"):
-        grants.authorize(grant.grant_id, context, allowed)
 
 
 def test_recent_user_rejection_suppresses_immediate_identical_exec_retry(

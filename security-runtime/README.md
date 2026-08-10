@@ -5,7 +5,7 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 托管网络与进程树回收。是 crew/gateway 之外**唯一**以提升权限运行的可执行文件，
 因此也是整个项目最敏感的信任边界。
 
-> 对外口径：本运行时是 Windows 原生沙箱、Linux bubblewrap 沙箱和 macOS Seatbelt 沙箱的承载者；
+> 对外口径：本运行时承载 Windows 原生沙箱、Linux bubblewrap 与 macOS Seatbelt；
 > 它**共享主机内核**，是对话级隔离边界，不是防内核 0day 的强隔离（那是 Phase 3+ 的 gVisor/Firecracker）。
 
 ---
@@ -14,18 +14,13 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 
 | 能力 | Windows | Linux | macOS |
 |------|---------|-------|-------|
-| 文件系统隔离 | 专用技术账户 + ACL lease（capability SID） | bubblewrap（`--ro-bind /` + 选择性可写根） | Seatbelt profile + 默认私有临时 HOME；仅在显式授予用户 Home 的 managed profile 下复用真实 HOME；启动前先做通用 Seatbelt preflight |
-| 受限身份执行 | `CreateProcessWithLogonW` 切到沙箱账户 + restricted token | 沙箱内以非 root 运行；seccomp 限 syscall | `/usr/bin/sandbox-exec` |
-| 进程树回收 | Kill-On-Close Job Object（父进程退出即杀全部子进程） | 进程组 + bwrap 退出回收 | 受控子进程回收 |
-| 托管网络 | WFP 过滤器：offline 账户全断；online 账户仅放行 loopback 代理端口 | 网络命名空间 + 用户态代理 + seccomp | 用户态代理 + Seatbelt 网络规则 |
-| 保护元数据 | `.git` / `.agents` / `.crew` 在可写根内强制 Deny | 同（bwrap 只读覆盖） | Seatbelt deny 规则 |
-| 身份持久化 | `CryptProtectData` 加密的账户凭证（identity v3） | 不需要（无账户模型） | 不需要（无账户模型） |
-| 输出上限 | `max_output_bytes` 截断（默认 2 MiB） | 同 | 同 |
-| 一次性 stdin | 最多 1 MiB，写入后立即 EOF | 同 | 同 |
-| stdout/stderr | 独立 NDJSON 事件流，共享输出预算 | 同 | 同 |
-| 长连接 stdin/stdout | interactive_open/write/close 由 native runtime 代理 | 同 | 同 |
-| 文件监听 | 由受限账户 ACL 约束 | bwrap 可见根内监听 | 仅放行精确 `com.apple.FSEvents` Mach service；文件内容仍受 Seatbelt 路径规则约束 |
-| 协议鉴权 | 启动 token（≥32 字节）+ 单次 nonce 防重放 | 同 | 同 |
+| 文件系统隔离 | 专用技术账户 + ACL lease（capability SID） | bubblewrap 选择性挂载 | Seatbelt 参数化可读/可写/拒绝根 |
+| 受限身份执行 | 沙箱账户 + restricted token | 非 root + seccomp | 当前用户 + `deny default` Seatbelt profile |
+| 进程树回收 | Kill-On-Close Job Object | 进程组 + bwrap | 独立进程组 + helper 整树终止 |
+| 托管网络 | WFP 仅放行 loopback 代理 | 网络命名空间 + 用户态代理 | 仅放行本次随机 loopback 代理端口 |
+| 保护元数据 | `.git` / `.agents` / `.crew` 强制 Deny | bwrap 只读覆盖 | Seatbelt deny 覆盖宽写根 |
+| 身份持久化 | DPAPI 加密凭证 | 不需要 | 不需要 |
+| 输出、stdin、协议鉴权 | 统一 v2 契约 | 同 | 同 |
 
 ### 1.1 Windows 后端要点
 
@@ -44,15 +39,21 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 - **WSL**（`linux/wsl.rs`）：检测 WSL 版本；WSL1 不支持 user namespace → 拒绝沙箱执行（不静默降级）。
 - **托管网络**：用户态代理（`network/`）+ seccomp 兜底。
 
-### 1.3 协议（`protocol.rs`）
+### 1.3 macOS 后端要点
+
+- **Seatbelt**（`macos/mod.rs`）：每次执行生成独立 profile，用户路径只通过 `-D` 参数传入。
+- **最小环境**：从空环境重建 PATH、私有 HOME/TMPDIR 和已验证覆盖，避免继承宿主秘密。
+- **托管网络**：离线 profile 没有 outbound allow；在线 profile 只能访问本次代理的精确 loopback 端口。
+- **无安装步骤**：不创建技术账号、不写系统防火墙 state，也不需要管理员授权。
+
+### 1.4 协议（`protocol.rs`）
 
 NDJSON over stdio，**版本化 + 鉴权 + 防重放**：
 
 ```
 runtime 启动 → 读 ACE_SECURITY_RUNTIME_TOKEN（≥32 字节）
             → stdout 写 {type:"ready", version:2,
-                          capabilities:["stdin_once","stream_output",
-                                        "stdin_bidirectional"]}
+                          capabilities:["stdin_once","stream_output"]}
 host 每行一个请求：
   {version:2, token, nonce,
    request:{op:"run", command, cwd, writable_roots, ...,
@@ -101,35 +102,26 @@ runtime 才把真实 HOME 作为子进程 HOME；此时它仍运行在 Seatbelt 
 `TMPDIR` 始终使用独立临时目录，不会因为复用 HOME 而改变临时文件边界。
 
 Crew Home 内的数据库、认证密钥、配置凭据和日志仍由不可升级的精确 deny 根保护；
-任务 workspace 不再被其父目录 deny 覆盖。受控模式下，运行时描述可以声明宿主 HOME
-下的相对配置文件；宿主侧只读取这些已声明且存在的普通文件，内置 descriptor 当前声明
-Kimi（`.kimi-code/config.toml`、OAuth 文件与 credentials JSON）、Codex、Hermes、Claude Code 的默认布局，Native Runtime 通过
-`home_files` 写入一次性的私有 HOME，进程结束即清理。该投影不接受绝对路径、`..`、
-目录复制或整个 HOME，因此已登录 Kimi、已配置 Hermes 可以继续工作，但不会让外援
-获得宿主 HOME 的通用读取权。未声明配置的外援仍按自身认证错误返回，ACP 适配器不会
-把它误报成 `native runtime closed the protocol stream`。
+任务 workspace 不再被其父目录 deny 覆盖。受控模式下，运行时 descriptor 可以声明宿主 HOME
+下的相对配置文件；宿主侧只读取这些已声明且存在的普通文件。Kimi（`.kimi-code/config.toml`、
+OAuth 文件与 credentials JSON）、Codex、Hermes、Claude Code 的路径只是内置 descriptor 的
+兼容默认值，不是安全核心里的 Kimi 专用分支；已发现并持久化的 runtime metadata 可以覆盖
+`credential_home_paths` 和 `network_endpoints`，自定义 runtime 不会继承内置路径。Native Runtime
+通过 `home_files` 写入一次性的私有 HOME，进程结束即清理。该投影不接受绝对路径、`..`、
+目录复制或整个 HOME，因此已登录 Kimi、已配置 Hermes 可以继续工作，但不会让外援获得宿主
+HOME 的通用读取权。`external_agents.security_enabled` 默认是 `false` 时不执行 HOME 投影，
+外援按旧 runtime 直接使用当前用户环境；只有显式打开后才进入上述受管投影。未声明配置的
+受管外援仍按自身认证错误返回，ACP 适配器不会把它误报成 `native runtime closed the
+protocol stream`。
 
 `run` 请求字段：`command[]`, `cwd`, `writable_roots[]`, `readable_roots[]`,
 `denied_roots[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
-`max_output_bytes`, `stdin_b64?`, `env_overrides?`, `home_files?`。
-
-`home_files` 的 key 必须是私有 HOME 下的相对 POSIX 路径，value 是 Native Runtime
-协议内部的 base64 文件内容；最多 64 个文件、单文件 1 MiB、总内容 2 MiB。宿主侧
-声明路径最多读取 64 个普通文件，单文件 1 MiB、总内容 2 MiB，并拒绝符号链接解析到
-HOME 外的目标。文件按私有配置权限写入，不进入日志或模型上下文。
-
-外部 ACP/CLI 使用托管模式时，Broker 会对宿主已注册的脚本入口做最小运行时依赖解析：
-仅静态读取入口 shebang、Python `pyvenv.cfg` 与 editable-install 元数据，把 venv、基础
-解释器动态库目录和明确声明的包目录作为只读根。工作区内脚本不会触发这项推导，原生二进制
-也不会因此获得额外目录；不会自动把 `HOME`、工作区父目录或任意安装目录加入可读范围。
-因此 Hermes 这类 venv/可编辑安装的 ACP 可以启动，同时仍由 `cwd` 与 `writable_roots`
-共同决定可写边界。
+`max_output_bytes`, `stdin_b64?`, `env_overrides?`。
 
 固定边界：请求帧 2 MiB、响应帧 128 KiB、单输出 chunk 64 KiB、stdin 1 MiB、
 环境变量名值合计 256 KiB、默认 stdout+stderr 总量 2 MiB。stdin 只写一次并立即关闭；
 未提供 stdin 时子进程获得关闭/空输入。`env_overrides` 只进入最终受限子进程，不进入
 runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
-`PATH`/`HOME`/`TMPDIR`/`PWD`/`OLDPWD`、
 `ACE_SECURITY_*` 和 `ACE_BUNDLED_*` 不允许由调用方覆盖，runtime
 生成的代理与安全变量拥有最终优先级。
 
@@ -143,9 +135,9 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 |------|------|
 | Windows | 10/11 x64；首次开启沙箱需 **UAC 管理员**授权一次（建账户 + 装 WFP） |
 | Linux | x64；`bwrap` 可执行文件（系统装或随包）；内核支持 user namespace |
-| macOS | Apple Silicon / Intel；系统提供 `/usr/bin/sandbox-exec` |
+| macOS | `/usr/bin/sandbox-exec`；运行组件随 Desktop 包提供，无安装步骤 |
 
-普通同事**不需要 Rust 工具链**——直接用仓库里 `security-runtime/bin/` 的预编译产物（见 §4）。
+普通同事**不需要 Rust 工具链**——Desktop 会自动选择仓库里与当前平台和架构一致的预编译产物（见 §4）。
 
 ### 2.2 编译（改了 Rust 源码的同事）
 
@@ -153,7 +145,7 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 |------|--------|
 | Windows | `rustup` + **MSVC**（Visual Studio 2022 BuildTools，含 `cl.exe`/`link.exe`）；`vcvarsall.bat` 配好后 `cargo check` 须能跑通 |
 | Linux | `rustup` + `gcc`/`libc6-dev`；`bubblewrap` 装好（测试需要） |
-| macOS | `rustup` + Xcode Command Line Tools；Seatbelt 使用系统 `/usr/bin/sandbox-exec` |
+| macOS | Rust stable + Xcode Command Line Tools；真实测试不能嵌套在另一个 Seatbelt 会话中 |
 
 依赖见 `Cargo.toml`：`serde/serde_json/rand/base64`（通用）；`libc/seccompiler/sha2`（Linux）；`windows-sys = "0.52"`（Windows，**勿随意升级**——0.59+ 会迁 API 路径，见变更记录）。
 
@@ -168,25 +160,13 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 .\scripts\build-security-runtime.ps1
 ```
 ```bash
-# Linux（需在 Linux 机器或 CI）
+# Linux/macOS（生成当前主机原生产物）
 ./scripts/build-security-runtime.sh
 ```
 
-```bash
-# macOS（Apple Silicon / Intel，按当前主机自动选择 target）
-./scripts/build-security-runtime.sh
-```
-
-脚本做三件事：`cargo build --release --locked` → 复制到
-`security-runtime/bin/` → 重算 `runtime-manifest.json` 的 `source_hash` 和
-`binary_sha256`。也可以显式指定 target：
-
-```bash
-python3 scripts/build-security-runtime.py --target aarch64-apple-darwin
-```
-
-协议 v2 不兼容 v1，Python 源码、runtime 二进制和 manifest 必须作为同一发布单元更新；
-不允许协议降级或 managed 失败后回退 host。
+脚本做三件事：`cargo build --release` → 复制到 `security-runtime/bin/` → 重算
+`runtime-manifest.json` 的 `source_hash`。协议 v2 不兼容 v1，Python 源码、runtime
+二进制和 manifest 必须作为同一发布单元更新；不允许协议降级或 managed 失败后回退 host。
 
 ### 3.2 手动
 
@@ -197,60 +177,89 @@ cargo test                                    # 跑契约测试（见 §6）
 ```
 
 Windows 显式三元组：`cargo build --release --target x86_64-pc-windows-msvc`。
-macOS Apple Silicon 显式三元组：`cargo build --release --target aarch64-apple-darwin`。
 
 产物路径：`target/<triple>/release/ace-security-runtime[.exe]`。
 
-> ⚠️ 手动 `cargo build` 不会更新 `bin/runtime-manifest.json`。启动时 Python/Desktop
+#### Intel Mac（x86_64）首次编译
+
+仓库目前提交了 Apple Silicon（`darwin-arm64`）预编译文件。Intel Mac 会拒绝加载该文件，
+需要在 Intel Mac 上本机编译一次：
+
+```bash
+# 确认输出为 x86_64
+uname -m
+
+# 首次安装工具链
+xcode-select --install
+brew install rustup
+export PATH="$(brew --prefix rustup)/bin:$PATH"
+rustup default stable
+
+# 在 Ace 仓库根目录执行
+cargo build \
+  --manifest-path security-runtime/Cargo.toml \
+  --release \
+  --locked
+
+node desktop/scripts/prepare-security-runtime.mjs \
+  --runtime security-runtime/target/release/ace-security-runtime \
+  --output desktop/security-runtime-bin
+
+node desktop/scripts/verify-security-runtime.mjs \
+  desktop/security-runtime-bin
+
+npm run dev --prefix desktop
+```
+
+`desktop/security-runtime-bin/` 是被 Git 忽略的本机 staging 目录，不会污染提交。Intel
+维护者若要把验证后的产物提供给所有 Intel 同事，可将 `--output` 改成
+`security-runtime/prebuilt/darwin-x64`，并额外传入
+`--source-root security-runtime`；随后提交该目录中的二进制、manifest 和环境描述文件。
+
+> ⚠️ 手动 `cargo build` 不会更新 runtime 旁边的 `runtime-manifest.json`。启动时 Python/Desktop
 > 会用 manifest 里的 `binary_sha256` / `source_hash` 做完整性校验（fail-closed），
-> 二进制与 manifest 不匹配则**拒绝运行**。手动构建后请务必跑一遍 §3.1 脚本，或把
-> 产物覆盖到 `security-runtime/bin/ace-security-runtime[.exe]` 并重算 manifest。
+> 二进制与 manifest 不匹配则**拒绝运行**。本机开发请通过
+> `desktop/scripts/prepare-security-runtime.mjs` staging；提交团队预编译文件时必须增加
+> `--source-root security-runtime`，将源码摘要一起写入 manifest。
 
 ### 3.3 自编译替代预编译产物
 
-仓库 `security-runtime/bin/` 里的预编译二进制是**便捷产物**（让不装 Rust 的人也能跑）。
-若你想自行验证或从源码编译，跑 §3.1 脚本即可用你自己的构建覆盖它--脚本会同步重算
-manifest，完整性校验自动通过。也可设 `ACE_SECURITY_RUNTIME` 环境变量指向任意绝对路径
-的自构建二进制，跳过仓库内预编译产物。
+仓库 `security-runtime/prebuilt/<platform>-<arch>/` 里的预编译二进制是**便捷产物**（让不装 Rust 的人也能跑）。
+若你想自行验证或从源码编译，可按 §3.2 构建并 staging。也可设
+`ACE_SECURITY_RUNTIME` 环境变量指向带有效 manifest 的绝对路径；显式路径不会绕过摘要、
+平台或架构校验。
 
 ---
 
 ## 4. 分发（团队免 Rust 方案）
 
-`security-runtime/bin/` 提交预编译产物，让团队成员**不装 Rust、不设环境变量**即可启动：
+`security-runtime/prebuilt/` 按平台和架构提交预编译产物，让团队成员**不装 Rust、不设环境变量**即可启动：
 
 ```
-security-runtime/bin/
-├── ace-security-runtime.exe       # Windows x86_64-pc-windows-msvc
-├── ace-security-runtime           # Linux ELF 或 macOS Mach-O（按发布 target 生成）
-└── runtime-manifest.json          # 每个平台 entry 的 source_hash + binary_sha256
+security-runtime/prebuilt/
+├── darwin-arm64/
+│   ├── ace-security-runtime       # Apple Silicon Mach-O
+│   └── runtime-manifest.json      # 平台、架构、二进制与源码摘要
+├── darwin-x64/                    # Intel Mac 可按相同结构扩展
+└── linux-x64/                     # Linux 可按相同结构扩展
 ```
 
-每个平台的发布包只应包含该平台对应的 runtime 文件。macOS Apple Silicon
-开发环境应生成 `ace-security-runtime`（无 `.exe` 后缀）；Windows 的 `.exe` 不能在
-macOS 上执行。
+旧版 `security-runtime/bin/` 仍作为 Windows 等既有开发流程的兼容回退。正式安装包不直接复用开发态预编译文件，而是在对应平台的发布 runner 上重新构建、测试和签名。
 
 ### 4.1 gateway / desktop 如何找到它
 
 - **Python gateway**（`crew/security/launch.py:packaged_runtime_argv`）：
-  优先 `ACE_SECURITY_RUNTIME` 环境变量（绝对路径），否则回落到 `<repo>/security-runtime/bin/<name>`。
-- **桌面 dev**（`desktop/src/main/index.ts` `security:setup`）：同上回落，`repoRoot()/security-runtime/bin/`。
+  优先 `ACE_SECURITY_RUNTIME` 环境变量和 Desktop staging，否则选择 `<repo>/security-runtime/prebuilt/<platform>-<arch>/<name>`，最后兼容回落到 `bin/`。
+- **桌面 dev**（`desktop/src/main/index.ts`）：使用相同的平台/架构选择规则，并在启动 Gateway 前校验 manifest。
 - **打包态**：从 `process.resourcesPath/` 取随包 exe + 打包 manifest 哈希校验（`packagedSecurityRuntimeEnv`）。
-- **macOS 能力探测**：Gateway 的 `/api/security/capabilities` 会对 Darwin 执行与 Linux
-  相同的最小文件边界 canary；如果当前宿主上下文不能应用 Seatbelt，结果保持
-  `filesystem_sandbox=false`，不会把“平台支持但运行时不可用”误报成“不支持”。Native
-  Runtime 在处理实际命令前还会执行一次复用相同 `deny default` / `system.sb` 基础的不含用户路径
-  Seatbelt preflight，并将系统返回的失败原因以 `sandbox_unavailable` 透传给 ACP/CLI。
 
 ### 4.2 漂移检测（防"改了源码忘重 build"）
 
-启动时 gateway 根据当前平台选择 `runtime-manifest.json` 中对应 binary entry，重算
-`security-runtime/{src,tests}/**/*.rs + Cargo.toml` 的 SHA256；源码与当前平台 entry
-不一致 → `/api/security/capabilities` 返回 `runtime_stale=true`，桌面 banner 显示：
+启动时 gateway 重算 `security-runtime/{src,tests}/**/*.rs + Cargo.toml + Cargo.lock` 的 SHA256，与所选预编译目录中 `runtime-manifest.json` 的 `source_hash` 对账；不一致 → `/api/security/capabilities` 返回 `runtime_stale=true`，桌面 banner 显示：
 
 > 🔄 runtime 二进制落后于 Rust 源码：改了 security-runtime/ 需重跑 scripts/build-security-runtime 再提交
 
-**结论：凡修改本目录下任何 `.rs` 或 `Cargo.toml`，必须跑 §3.1 脚本并 `git add security-runtime/bin/`。**
+**结论：凡修改本目录下任何 `.rs`、Rust 测试、`Cargo.toml` 或 `Cargo.lock`，必须重建受影响平台的 runtime，并原子提交对应 prebuilt 目录。**
 
 ---
 
@@ -263,8 +272,8 @@ cd desktop
 npm start
 ```
 
-Desktop 会自动启动带安全状态目录环境的托管 Gateway，并从
-`security-runtime/bin/` 找到 runtime。首次运行时，对话框上方会提示「请安装安全沙箱」，
+Desktop 会自动启动带安全状态目录环境的托管 Gateway，并从本地 staging 或
+`security-runtime/prebuilt/<platform>-<arch>/` 找到 runtime。macOS 无需安装步骤；Windows 首次运行时会提示安装安全沙箱，
 点击「安装安全沙箱」→ 同意 UAC → 完成安装后即可使用受管命令执行。
 
 `python -m crew.gateway.server` 是 Web 端的独立 Gateway 启动方式；若手动启动的 Gateway
@@ -299,17 +308,8 @@ helper/沙箱进程树。host 侧不直接碰沙箱账户/WFP/bwrap。
 cd security-runtime
 cargo test --target x86_64-pc-windows-msvc    # Windows
 cargo test                                    # Linux
-python3 scripts/build-security-runtime.py --target aarch64-apple-darwin --skip-build  # macOS staging
+cargo test                                    # macOS（包含 Seatbelt 对抗测试）
 ```
-
-macOS 原生验收从仓库根目录运行：
-
-```bash
-PYTHONPATH=. python tests/security/security_matrix.py \
-  --platform macos --runtime security-runtime/bin/ace-security-runtime
-```
-
-该矩阵覆盖工作区写入、越界读取拒绝、默认网络拒绝和显式 loopback 代理放行。
 
 契约测试（`tests/`）覆盖：
 - `protocol.rs` — v2 事件形状、输入/帧限制、token/nonce 防重放。
@@ -323,10 +323,8 @@ PYTHONPATH=. python tests/security/security_matrix.py \
 - `linux_bwrap.rs` / `linux_adversarial.rs` — bwrap 隔离、一次性 stdin、环境变量、
   实时 stdout/stderr、共享输出上限与对抗用例；必须在 Linux 运行，Windows 交叉编译
   不能替代运行证据。
-- macOS Seatbelt 单元测试 — profile、私有 HOME、保护路径、网络代理规则和本机
-  `sandbox-exec` 启动；`security_matrix.py --platform macos` 提供真实运行证据。
-- `tests/security/test_runtime_build_script.py` — 平台 binary 命名、source hash、
-  binary digest，以及 Gateway/Desktop 共用 manifest 的 staging 契约。
+- `macos_adversarial.rs` — Seatbelt 工作区写入、外部读取/写入和受保护目录拒绝；
+  `tests/security/security_matrix.py --platform macos` 另测离线直连与规则代理。
 
 ---
 
@@ -335,18 +333,15 @@ PYTHONPATH=. python tests/security/security_matrix.py \
 ```
 security-runtime/
 ├── Cargo.toml                 # windows-sys = "0.52"，勿随意升
-├── scripts/
-│   ├── build-security-runtime.py # 跨平台构建、制品复制和 manifest 生成
-│   ├── build-security-runtime.sh # macOS/Linux 入口
-│   └── build-security-runtime.ps1 # Windows 入口
-├── bin/                       # 预编译产物 + manifest（提交入库）
+├── prebuilt/                  # 按 platform-arch 分隔的预编译产物 + manifest
+├── bin/                       # 旧版预编译目录（兼容回退）
 ├── src/
 │   ├── main.rs                # CLI 分发 + 协议主循环
 │   ├── protocol.rs            # NDJSON 协议、鉴权、防重放
 │   ├── network/               # 托管网络代理（connector/policy/proxy）
 │   ├── windows/               # Windows 后端（identity/process/token/acl/wfp/job/readiness）
 │   ├── linux/                 # Linux 后端（bwrap/seccomp/wsl/proxy_routing）
-│   └── macos/                 # macOS Seatbelt 后端
+│   └── macos/                 # macOS 后端（Seatbelt/受管代理/进程回收）
 └── tests/                     # 契约测试（见 §6）
 ```
 
@@ -355,9 +350,9 @@ security-runtime/
 ## 8. 安全约束（贡献者必读）
 
 1. **windows-sys 不随意升级**：0.52 的符号路径与 0.59+ 不同；升级会引入 API 迁移，需全量重测。
-2. **改源码必须重 build**：否则 `bin/` 的 runtime 与源码漂移，漂移检测会让所有人的 banner 报 stale。
+2. **改源码必须重 build**：否则 prebuilt runtime 与源码漂移，漂移检测会让对应平台的 banner 报 stale。
 3. **WFP GUID 稳定**：`wfp.rs` 里 7 个 GUID 是安装期锚点，**不可改**（改了会导致旧过滤器残留）。
-4. **`bin/` 的 exe 以 UAC 运行**：code review 时改本目录的 PR 必须走严格审查——这是供应链信任的落点。
+4. **Windows runtime 以 UAC 运行**：code review 时改本目录的 PR 必须走严格审查——这是供应链信任的落点。
 5. **协议与产物原子升级**：v2 不提供 v1 兼容或 host fallback；修改帧语义必须提升
    `PROTOCOL_VERSION`，同时更新 Python、Rust、测试、预编译产物和 manifest。
 
@@ -365,6 +360,11 @@ security-runtime/
 
 ## 变更记录
 
+- **2026-08-10**：新增 `prebuilt/<platform>-<arch>` 分发结构和 Apple Silicon 预编译 runtime；
+  Desktop/Gateway 自动选择当前架构并校验平台、架构、二进制摘要与源码摘要，补充 Intel Mac
+  本机编译与 staging 流程。
+- **2026-08-06**：新增 macOS Seatbelt 文件隔离、精确 loopback 代理联网边界、进程树清理、
+  Gateway live probe、安全中心平台展示、DMG runtime staging 与真实 macOS runner 发布证据。
 - **2026-08-10**：补齐 Codex app-server 事件流退出与 approval 参数契约：reader 在子进程 EOF 后向事件队列发送内部 `$/processExited`，消费者立即报告退出码与受限 stderr 尾部；approval 将规范化后的真实 `item` 传入统一权限分类器，使 shell `command` 可被检查，不再因参数层级错误被误判为缺失。
 - **2026-08-10**：修复 Native Proxy 的 HTTP 响应收尾死锁：任一方向复制遇到 EOF 后向对端传播 TCP 写半关闭，另一方向仍可继续排空；上游使用 `Connection: close` 时客户端能及时收到 EOF，不再在已收到完整响应后等待到超时。
 - **2026-08-10**：补齐运行时描述的精确网络 endpoint 契约：Detector 将宿主维护的 `network_endpoints` 与凭据文件布局一并持久化，ACP/CLI 适配器统一合并描述声明和投影配置中的 URL；Kimi 描述声明其 OAuth 刷新服务 `https://auth.kimi.com`，无 provider 条件分支、无需用户逐任务配置。Native Proxy 对未声明目标立即返回 HTTP 403，不再让外援无提示高速重试直至超时。
@@ -372,6 +372,7 @@ security-runtime/
 - **2026-08-10**：统一 managed 网络代理环境：macOS、Linux、Windows 均由 Native Runtime 在宿主环境覆盖之后写入标准代理变量与 `NODE_USE_ENV_PROXY=1`，使 Node 24+ CLI 自动走同一受控代理；非 Node 外援忽略该变量，外援不能覆盖或绕过 runtime-owned 代理地址。
 - **2026-08-10**：修复 macOS Native Proxy 的 CONNECT 隧道中断：代理监听器仍用 non-blocking 模式响应停止信号，但每个 accepted socket 在进入有超时边界的双向转发前统一恢复 blocking，避免 macOS 继承监听器状态后把 CONNECT 与 TLS ClientHello 之间的短暂空档误判为转发结束；该修复不增加任何网络权限。
 - **2026-08-10**：补齐 macOS managed 外援的文件监听系统能力：Seatbelt 仅放行精确 `com.apple.FSEvents` Mach service，修复 Node/Kimi 在允许的 workspace 上创建 watcher 时被映射为 `EMFILE` 并提前退出；文件内容读写、网络与其他 Mach service 仍按原规则拒绝。
+- **2026-08-10**：统一外援安全开关默认值为关闭：`external_agents.security_enabled=false` 时 ACP、Codex app-server 和 Claude Code 继续使用旧 runtime 直联；打开后才启用 Native Runtime。外援凭据路径继续由通用 descriptor/metadata 声明，不把 Kimi HOME 写死到安全核心。
 - **2026-08-10**：外援网络权限从已投影、宿主声明的配置文件中提取精确 HTTPS endpoint，并与 Interaction MCP 的精确 loopback 权限合并；不按 provider 写死域名，拒绝远程明文 HTTP、通配域名与模型输入追加的目标。
 - **2026-08-10**：兼容系统代理/VPN 的 fake-IP DNS：只有已命中精确域名规则时才允许其解析到 RFC 2544 `198.18.0.0/15` 合成地址；直接声明该 IP 网段仍按私网拒绝，RFC1918、loopback 与云元数据保护不变。
 - **2026-08-09**：补齐 managed 外援脚本运行时依赖边界：Security Broker 静态解析入口 shebang、Python `pyvenv.cfg` 与 editable-install 元数据，只把 venv、基础环境动态库目录和明确声明的包目录加入只读根；工作区脚本不触发推导，原生二进制不额外放行，也不开放用户 Home。Hermes venv ACP 可在受控 cwd 下启动，同时保留 Native Runtime 的显式可写根校验。

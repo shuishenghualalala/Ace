@@ -1,6 +1,7 @@
 """计划任务调度 + cron 引擎（持久化任务 / schedule 解析 / agent 工具）。"""
 
 import asyncio
+import contextlib
 import json
 import os
 import sqlite3
@@ -14,7 +15,7 @@ import pytest
 from crew.core.types import ToolCall
 from crew.core.runctx import current_owner_account_id
 from crew.cron import CronJobStore, CronService, parse_schedule
-from crew.cron.jobs import format_bj_timestamp, parse_duration
+from crew.cron.jobs import BJ_TZ, format_bj_timestamp, parse_duration
 from crew.cron.scheduler import IntervalScheduler
 from crew.tools.cron_tools import register_cron_tools
 from crew.tools.registry import Registry
@@ -936,8 +937,13 @@ async def test_cron_service_passes_source_session_id(tmp_path):
     assert seen[0].params["cron_source_session_id"] == "s1"
 
 
-async def test_cron_runner_creates_new_session():
-    """集成测试：验证 _cron_runner 在 deliver 为空/new_session 时会创建新本地会话并广播事件。"""
+@contextlib.asynccontextmanager
+async def _cron_runner_app(reply_text="done", auto_start=True):
+    """cron runner 集成测试骨架：临时 DB + build_app + mock dispatch/notify_owner。
+
+    产出 (app, dispatched_envs, notified_payloads)；退出时自动 shutdown。
+    auto_start=False 时由用例自行决定 start/mount_owner 的时机。
+    """
     from crew.app import build_app
     from crew.state.config import load_config
 
@@ -950,8 +956,9 @@ async def test_cron_runner_creates_new_session():
         cfg.gateway_admin_accounts = ["tester"]
         cfg.gateway_dev_mode = False
         app = build_app(cfg, enable_team=False)
-        await app.cron_service.start()
-        app.cron_service.mount_owner("u1")
+        if auto_start:
+            await app.cron_service.start()
+            app.cron_service.mount_owner("u1")
 
         dispatched_envs = []
         notified_payloads = []
@@ -959,7 +966,8 @@ async def test_cron_runner_creates_new_session():
         async def _mock_dispatch(env):
             dispatched_envs.append(env)
             from crew.core.envelope import ResponseChunk
-            yield ResponseChunk.final(env.request_id, "done")
+
+            yield ResponseChunk.final(env.request_id, reply_text)
 
         async def _mock_notify_owner(owner_account_id, payload):
             notified_payloads.append((owner_account_id, payload))
@@ -968,6 +976,15 @@ async def test_cron_runner_creates_new_session():
         app.dispatch = _mock_dispatch
         app._notify_owner_fn = _mock_notify_owner
 
+        try:
+            yield app, dispatched_envs, notified_payloads
+        finally:
+            await app.shutdown()
+
+
+async def test_cron_runner_creates_new_session():
+    """集成测试：验证 _cron_runner 在 deliver 为空/new_session 时会创建新本地会话并广播事件。"""
+    async with _cron_runner_app() as (app, dispatched_envs, notified_payloads):
         job = app.cron_store.create(
             name="测试提醒",
             schedule="in 0s",
@@ -994,47 +1011,27 @@ async def test_cron_runner_creates_new_session():
         assert payload["body"]["job_id"] == job["id"]
         assert payload["body"]["job_name"] == "测试提醒"
         assert payload["body"]["source_session_id"] == "source_session_123"
-        await app.shutdown()
 
 
-async def test_cron_runner_origin_from_local_fallback_to_new_session():
-    """本地会话来源的 deliver=origin 不应静默成功，须 fallback 为新建会话。"""
-    from crew.app import build_app
-    from crew.state.config import load_config
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        cfg = load_config()
-        cfg.db_path = os.path.join(tmp, "crew.db")
-        cfg.memory_db_path = os.path.join(tmp, "memory.db")
-        cfg.cron_enabled = True
-        cfg.gateway_admin_accounts = ["tester"]
-        cfg.gateway_dev_mode = False
-        app = build_app(cfg, enable_team=False)
-        await app.cron_service.start()
-        app.cron_service.mount_owner("u1")
-
-        dispatched_envs = []
-        notified_payloads = []
-
-        async def _mock_dispatch(env):
-            dispatched_envs.append(env)
-            from crew.core.envelope import ResponseChunk
-            yield ResponseChunk.final(env.request_id, "提醒完成")
-
-        async def _mock_notify_owner(owner_account_id, payload):
-            notified_payloads.append((owner_account_id, payload))
-
-        app.dispatch = _mock_dispatch
-        app._notify_owner_fn = _mock_notify_owner
-
+@pytest.mark.parametrize(
+    ("platform", "session_id", "job_name"),
+    [
+        ("local", "local_session_456", "本地 origin 提醒"),
+        ("web", "web_session_789", "web origin 提醒"),
+    ],
+    ids=["local", "web"],
+)
+async def test_cron_runner_origin_fallback_to_new_session(platform, session_id, job_name):
+    """local/web 会话来源的 deliver=origin 不应静默成功，须 fallback 为新建会话。"""
+    async with _cron_runner_app(reply_text="提醒完成") as (app, dispatched_envs, notified_payloads):
         app.cron_store.create(
-            name="本地 origin 提醒",
+            name=job_name,
             schedule="in 0s",
             query="提醒我开会",
-            session_id="local_session_456",
+            session_id=session_id,
             workspace_id="default",
             deliver="origin",
-            origin_source={"platform": "local", "chat_id": "local_session_456", "chat_type": "private"},
+            origin_source={"platform": platform, "chat_id": session_id, "chat_type": "private"},
             owner_account_id="u1",
         )
         await app.cron_service.tick()
@@ -1042,97 +1039,15 @@ async def test_cron_runner_origin_from_local_fallback_to_new_session():
         assert len(dispatched_envs) == 1
         new_sid = dispatched_envs[0].session_id
         assert new_sid.startswith("cron_")
-        # 本地来源的 origin 被 fallback 为新建会话，须广播 cron_session_created
+        # local/web 来源的 origin 被 fallback 为新建会话，须广播 cron_session_created
         assert len(notified_payloads) == 1
         assert notified_payloads[0][1]["kind"] == "cron_session_created"
         assert notified_payloads[0][1]["session_id"] == new_sid
-        await app.shutdown()
-
-
-async def test_cron_runner_origin_from_web_fallback_to_new_session():
-    """web 会话来源的 deliver=origin 不应静默成功，须 fallback 为新建会话。"""
-    from crew.app import build_app
-    from crew.state.config import load_config
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        cfg = load_config()
-        cfg.db_path = os.path.join(tmp, "crew.db")
-        cfg.memory_db_path = os.path.join(tmp, "memory.db")
-        cfg.cron_enabled = True
-        cfg.gateway_admin_accounts = ["tester"]
-        cfg.gateway_dev_mode = False
-        app = build_app(cfg, enable_team=False)
-        await app.cron_service.start()
-        app.cron_service.mount_owner("u1")
-
-        dispatched_envs = []
-        notified_payloads = []
-
-        async def _mock_dispatch(env):
-            dispatched_envs.append(env)
-            from crew.core.envelope import ResponseChunk
-
-            yield ResponseChunk.final(env.request_id, "提醒完成")
-
-        async def _mock_notify_owner(owner_account_id, payload):
-            notified_payloads.append((owner_account_id, payload))
-
-        app.dispatch = _mock_dispatch
-        app._notify_owner_fn = _mock_notify_owner
-
-        app.cron_store.create(
-            name="web origin 提醒",
-            schedule="in 0s",
-            query="提醒我开会",
-            session_id="web_session_789",
-            workspace_id="default",
-            deliver="origin",
-            origin_source={"platform": "web", "chat_id": "web_session_789", "chat_type": "private"},
-            owner_account_id="u1",
-        )
-        await app.cron_service.tick()
-
-        assert len(dispatched_envs) == 1
-        new_sid = dispatched_envs[0].session_id
-        assert new_sid.startswith("cron_")
-        # web 来源的 origin 被 fallback 为新建会话，须广播 cron_session_created
-        assert len(notified_payloads) == 1
-        assert notified_payloads[0][1]["kind"] == "cron_session_created"
-        assert notified_payloads[0][1]["session_id"] == new_sid
-        await app.shutdown()
 
 
 async def test_cron_runner_local_deliver_notifies_owner():
     """deliver=local 时应保留原会话，并向 owner 广播 cron_session_updated 事件供前端标未读。"""
-    from crew.app import build_app
-    from crew.state.config import load_config
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        cfg = load_config()
-        cfg.db_path = os.path.join(tmp, "crew.db")
-        cfg.memory_db_path = os.path.join(tmp, "memory.db")
-        cfg.cron_enabled = True
-        cfg.gateway_admin_accounts = ["tester"]
-        cfg.gateway_dev_mode = False
-        app = build_app(cfg, enable_team=False)
-        await app.cron_service.start()
-        app.cron_service.mount_owner("u1")
-
-        dispatched_envs = []
-        notified_payloads = []
-
-        async def _mock_dispatch(env):
-            dispatched_envs.append(env)
-            from crew.core.envelope import ResponseChunk
-
-            yield ResponseChunk.final(env.request_id, "提醒完成")
-
-        async def _mock_notify_owner(owner_account_id, payload):
-            notified_payloads.append((owner_account_id, payload))
-
-        app.dispatch = _mock_dispatch
-        app._notify_owner_fn = _mock_notify_owner
-
+    async with _cron_runner_app(reply_text="提醒完成") as (app, dispatched_envs, notified_payloads):
         source_sid = "local_session_456"
         job = app.cron_store.create(
             name="本地会话提醒",
@@ -1157,7 +1072,6 @@ async def test_cron_runner_local_deliver_notifies_owner():
         assert payload["body"]["job_id"] == job["id"]
         assert payload["body"]["job_name"] == "本地会话提醒"
         assert payload["body"]["source_session_id"] == source_sid
-        await app.shutdown()
 
 
 # ---- manual Fire run-now ----
@@ -1198,33 +1112,7 @@ async def test_cron_service_run_now_returns_none_for_missing_job(tmp_path):
 
 async def test_cron_service_run_now_creates_manual_fire_and_new_session():
     """Manual Fire uses the normal cron runner and broadcasts the new session."""
-    from crew.app import build_app
-    from crew.state.config import load_config
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        cfg = load_config()
-        cfg.db_path = os.path.join(tmp, "crew.db")
-        cfg.memory_db_path = os.path.join(tmp, "memory.db")
-        cfg.cron_enabled = True
-        cfg.gateway_admin_accounts = ["tester"]
-        cfg.gateway_dev_mode = False
-        app = build_app(cfg, enable_team=False)
-
-        dispatched_envs = []
-        notified_payloads = []
-
-        async def _mock_dispatch(env):
-            dispatched_envs.append(env)
-            from crew.core.envelope import ResponseChunk
-
-            yield ResponseChunk.final(env.request_id, "done")
-
-        async def _mock_notify_owner(owner_account_id, payload):
-            notified_payloads.append((owner_account_id, payload))
-
-        app.dispatch = _mock_dispatch
-        app._notify_owner_fn = _mock_notify_owner
-
+    async with _cron_runner_app(auto_start=False) as (app, dispatched_envs, notified_payloads):
         job = app.cron_store.create(
             name="测试提醒",
             schedule="every 1h",
@@ -1246,56 +1134,29 @@ async def test_cron_service_run_now_creates_manual_fire_and_new_session():
         assert len(notified_payloads) == 1
         assert notified_payloads[0][1]["kind"] == "cron_session_created"
         assert notified_payloads[0][1]["session_id"] == new_sid
-        await app.shutdown()
 
 
 # ---- 自然语言相对日期解析 ----
 
-def test_parse_schedule_tomorrow():
-    from crew.cron.jobs import BJ_TZ
-
+@pytest.mark.parametrize(
+    ("text", "expected", "expect_once"),
+    [
+        # 基准 now = 2026-07-13 08:00（周一）
+        ("明天9点", datetime(2026, 7, 14, 9, 0, 0), True),
+        ("明天下午3点30分", datetime(2026, 7, 14, 15, 30, 0), False),
+        ("后天8点", datetime(2026, 7, 15, 8, 0, 0), False),
+        # 下周三是 7 月 15 日
+        ("下周三9点", datetime(2026, 7, 15, 9, 0, 0), False),
+        # 已过当天 8:00，应取下下周一（7 月 20 日）
+        ("下周一9点", datetime(2026, 7, 20, 9, 0, 0), False),
+    ],
+    ids=["tomorrow", "tomorrow_afternoon", "day_after_tomorrow", "next_weekday", "same_day_rolls_to_next_week"],
+)
+def test_parse_schedule_relative_days(text, expected, expect_once):
     now = datetime(2026, 7, 13, 8, 0, 0, tzinfo=BJ_TZ)
-    spec = parse_schedule("明天9点", now=now)
-    assert spec["kind"] == "once"
-    assert spec["trigger_type"] == "date"
+    spec = parse_schedule(text, now=now)
+    if expect_once:
+        assert spec["kind"] == "once"
+        assert spec["trigger_type"] == "date"
     run_at = datetime.fromisoformat(spec["trigger_payload"]["run_at"])
-    assert run_at == datetime(2026, 7, 14, 9, 0, 0, tzinfo=BJ_TZ)
-
-
-def test_parse_schedule_tomorrow_afternoon():
-    from crew.cron.jobs import BJ_TZ
-
-    now = datetime(2026, 7, 13, 8, 0, 0, tzinfo=BJ_TZ)
-    spec = parse_schedule("明天下午3点30分", now=now)
-    run_at = datetime.fromisoformat(spec["trigger_payload"]["run_at"])
-    assert run_at == datetime(2026, 7, 14, 15, 30, 0, tzinfo=BJ_TZ)
-
-
-def test_parse_schedule_day_after_tomorrow():
-    from crew.cron.jobs import BJ_TZ
-
-    now = datetime(2026, 7, 13, 8, 0, 0, tzinfo=BJ_TZ)
-    spec = parse_schedule("后天8点", now=now)
-    run_at = datetime.fromisoformat(spec["trigger_payload"]["run_at"])
-    assert run_at == datetime(2026, 7, 15, 8, 0, 0, tzinfo=BJ_TZ)
-
-
-def test_parse_schedule_next_weekday():
-    from crew.cron.jobs import BJ_TZ
-
-    # 2026-07-13 是周一
-    now = datetime(2026, 7, 13, 8, 0, 0, tzinfo=BJ_TZ)
-    spec = parse_schedule("下周三9点", now=now)
-    run_at = datetime.fromisoformat(spec["trigger_payload"]["run_at"])
-    # 下周三是 7 月 15 日
-    assert run_at == datetime(2026, 7, 15, 9, 0, 0, tzinfo=BJ_TZ)
-
-
-def test_parse_schedule_next_weekday_same_day_rolls_to_next_week():
-    from crew.cron.jobs import BJ_TZ
-
-    now = datetime(2026, 7, 13, 8, 0, 0, tzinfo=BJ_TZ)  # 周一
-    spec = parse_schedule("下周一9点", now=now)
-    run_at = datetime.fromisoformat(spec["trigger_payload"]["run_at"])
-    # 已过当天 8:00，应取下下周一（7 月 20 日）
-    assert run_at == datetime(2026, 7, 20, 9, 0, 0, tzinfo=BJ_TZ)
+    assert run_at == expected.replace(tzinfo=BJ_TZ)

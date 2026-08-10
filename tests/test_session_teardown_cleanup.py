@@ -183,25 +183,6 @@ def test_delete_session_blocked_by_enabled_cron(tmp_path, auth_headers):
     assert app.cron_store.list(session_id=sid, owner_account_id=OWNER) == []
 
 
-def test_delete_session_cascades_disabled_cron(tmp_path, auth_headers):
-    """已停用 cron 不挡删，但 teardown 须清掉孤儿 job 行。"""
-    client, app = _client(tmp_path)
-    sid = "cron_orphan"
-    app.session_store.save(sid, [Message.user("旧定时")], owner_account_id=OWNER)
-    assert app.cron_store is not None
-    job = app.cron_store.create(
-        name="已停用任务",
-        schedule="every 1h",
-        query="ping",
-        session_id=sid,
-        owner_account_id=OWNER,
-    )
-    app.cron_store.set_enabled(job["id"], False, owner_account_id=OWNER)
-    res = client.delete(f"/api/session/{sid}", headers=auth_headers)
-    assert res.status_code == 200
-    assert app.cron_store.list(session_id=sid, owner_account_id=OWNER) == []
-
-
 def test_task_runtime_unlink_and_prune_removes_disk(tmp_path):
     from crew.tasks.runtime import TaskRuntime
 

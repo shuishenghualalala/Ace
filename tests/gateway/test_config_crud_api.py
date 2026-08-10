@@ -208,17 +208,8 @@ async def test_local_owner_can_manage_builtin_model(api, auth_headers):
         delete = await client.delete("/api/config/models/alpha")
 
     assert update.status_code == 200
+    assert update.json()["profile"]["builtin"] is True
     assert delete.status_code != 403
-
-
-@pytest.mark.asyncio
-async def test_admin_can_update_builtin_model(api, auth_headers):
-    transport = ASGITransport(app=api)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        resp = await client.put("/api/config/models/alpha", json={"temperature": 0.2})
-
-    assert resp.status_code == 200
-    assert resp.json()["profile"]["builtin"] is True
 
 
 @pytest.mark.asyncio
@@ -231,16 +222,6 @@ async def test_local_owner_can_view_builtin_model_profiles(api, auth_headers):
     body = resp.json()
     assert "alpha" in {item["id"] for item in body["model_profiles"]}
     assert "beta" in {item["id"] for item in body["model_profiles"]}
-
-
-@pytest.mark.asyncio
-async def test_admin_can_view_builtin_model_profiles(api, auth_headers):
-    transport = ASGITransport(app=api)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        resp = await client.get("/api/config")
-
-    assert resp.status_code == 200
-    assert "alpha" in {item["id"] for item in resp.json()["model_profiles"]}
 
 
 @pytest.mark.asyncio
@@ -468,21 +449,6 @@ async def test_config_includes_all_model_profiles_for_settings(api, auth_headers
     body = resp.json()
     assert "no_key" not in {item["id"] for item in body["models"]}
     assert "no_key" in {item["id"] for item in body["model_profiles"]}
-
-
-@pytest.mark.asyncio
-async def test_unloaded_model_is_configured_but_not_available_for_chat(api, auth_headers):
-    transport = ASGITransport(app=api)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        resp = await client.get("/api/config")
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "beta" not in {item["id"] for item in body["models"]}
-    beta = next(item for item in body["model_profiles"] if item["id"] == "beta")
-    assert beta["loaded"] is False
-    assert beta["base_url"] == "https://beta.example.com/v1"
-    assert beta["has_key"] is True
 
 
 @pytest.mark.asyncio

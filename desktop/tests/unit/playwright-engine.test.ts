@@ -107,6 +107,42 @@ function connectThroughTransport(browser: unknown) {
   };
 }
 
+function fakeContext(targetId: string): {
+  context: EventEmitter & {
+    pages: ReturnType<typeof vi.fn>;
+    newCDPSession: ReturnType<typeof vi.fn>;
+  };
+  makePage: () => EventEmitter & {
+    isClosed: ReturnType<typeof vi.fn>;
+    context: ReturnType<typeof vi.fn>;
+  };
+  setPages: (next: unknown[]) => void;
+} {
+  let pages: unknown[] = [];
+  const context = Object.assign(new EventEmitter(), {
+    pages: vi.fn(() => pages),
+    newCDPSession: vi.fn(async () => ({
+      send: vi.fn(async () => ({
+        targetInfo: { targetId },
+      })),
+      detach: vi.fn(async () => undefined),
+    })),
+  });
+  const makePage = () => Object.assign(new EventEmitter(), {
+    isClosed: vi.fn(() => false),
+    context: vi.fn(() => context),
+  });
+  const browser = { contexts: vi.fn(() => [context]) };
+  mocks.connectOverCdp.mockImplementationOnce(connectThroughTransport(browser) as never);
+  return {
+    context,
+    makePage,
+    setPages: (next: unknown[]) => {
+      pages = next;
+    },
+  };
+}
+
 describe('PlaywrightEngine', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -179,18 +215,9 @@ describe('PlaywrightEngine', () => {
       isClosed: vi.fn(() => false),
       context: vi.fn(),
     };
-    const context = Object.assign(new EventEmitter(), {
-      pages: vi.fn(() => [page]),
-      newCDPSession: vi.fn(async () => ({
-        send: vi.fn(async () => ({
-          targetInfo: { targetId: 'unregistered-page' },
-        })),
-        detach: vi.fn(async () => undefined),
-      })),
-    });
+    const { context, setPages } = fakeContext('unregistered-page');
+    setPages([page]);
     page.context.mockReturnValue(context);
-    const browser = { contexts: vi.fn(() => [context]) };
-    mocks.connectOverCdp.mockImplementationOnce(connectThroughTransport(browser) as never);
 
     const engine = new PlaywrightEngine();
     await expect(engine.context()).resolves.toBe(context);
@@ -201,22 +228,8 @@ describe('PlaywrightEngine', () => {
   });
 
   it('unregister 使正在解析 Page 的旧任务失效，不能在稍后重新写回映射', async () => {
-    let pages: any[] = [];
-    const context = Object.assign(new EventEmitter(), {
-      pages: vi.fn(() => pages),
-      newCDPSession: vi.fn(async () => ({
-        send: vi.fn(async () => ({
-          targetInfo: { targetId: 'engine-target' },
-        })),
-        detach: vi.fn(async () => undefined),
-      })),
-    });
-    const page = Object.assign(new EventEmitter(), {
-      isClosed: vi.fn(() => false),
-      context: vi.fn(() => context),
-    });
-    const browser = { contexts: vi.fn(() => [context]) };
-    mocks.connectOverCdp.mockImplementationOnce(connectThroughTransport(browser) as never);
+    const { context, makePage, setPages } = fakeContext('engine-target');
+    const page = makePage();
     const engine = new PlaywrightEngine();
     const { view } = fakeView();
     engine.registerTab(view);
@@ -224,7 +237,7 @@ describe('PlaywrightEngine', () => {
     const lookup = engine.pageForView(view);
     await new Promise<void>((resolve) => setImmediate(resolve));
     engine.unregisterTab(view);
-    pages = [page];
+    setPages([page]);
     context.emit('page', page);
 
     await expect(lookup).rejects.toThrow(/生命周期已变化/);
@@ -235,25 +248,10 @@ describe('PlaywrightEngine', () => {
   });
 
   it('旧 Page 晚到 close 不会清掉 reattach 后新 Page 的 filechooser', async () => {
-    let pages: any[] = [];
-    const context = Object.assign(new EventEmitter(), {
-      pages: vi.fn(() => pages),
-      newCDPSession: vi.fn(async () => ({
-        send: vi.fn(async () => ({
-          targetInfo: { targetId: 'engine-target' },
-        })),
-        detach: vi.fn(async () => undefined),
-      })),
-    });
-    const makePage = () => Object.assign(new EventEmitter(), {
-      isClosed: vi.fn(() => false),
-      context: vi.fn(() => context),
-    });
+    const { context, makePage, setPages } = fakeContext('engine-target');
     const oldPage = makePage();
     const newPage = makePage();
-    pages = [oldPage];
-    const browser = { contexts: vi.fn(() => [context]) };
-    mocks.connectOverCdp.mockImplementationOnce(connectThroughTransport(browser) as never);
+    setPages([oldPage]);
     const engine = new PlaywrightEngine();
     const { view } = fakeView();
     engine.registerTab(view);
@@ -261,7 +259,7 @@ describe('PlaywrightEngine', () => {
 
     engine.unregisterTab(view);
     engine.registerTab(view);
-    pages = [newPage];
+    setPages([newPage]);
     context.emit('page', newPage);
     await expect(engine.pageForView(view)).resolves.toBe(newPage);
 

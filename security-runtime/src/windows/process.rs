@@ -1,5 +1,6 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -11,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use rand::RngCore;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
@@ -296,12 +296,10 @@ pub fn run_via_account(
 pub fn runner_main() -> ! {
     let mut reader = BufReader::new(std::io::stdin());
     let mut line = String::new();
-    let request = reader
-        .read_line(&mut line)
-        .and_then(|_| {
-            serde_json::from_str::<RunnerRequest>(&line)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-        });
+    let request = reader.read_line(&mut line).and_then(|_| {
+        serde_json::from_str::<RunnerRequest>(&line)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    });
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     let result = match request {
@@ -345,16 +343,21 @@ fn run_restricted<W: Write, R: BufRead + Send + 'static>(
                 .to_string(),
         );
     }
-    let mut child_environment = restricted_environment(
-        request.network_enabled,
-        request.env_overrides,
-    );
+    let mut child_environment =
+        restricted_environment(request.network_enabled, request.env_overrides);
     if let Some(home) = &staged_home {
         child_environment.insert("HOME".to_string(), home.0.to_string_lossy().to_string());
-        child_environment.insert("USERPROFILE".to_string(), home.0.to_string_lossy().to_string());
+        child_environment.insert(
+            "USERPROFILE".to_string(),
+            home.0.to_string_lossy().to_string(),
+        );
         child_environment.insert(
             "APPDATA".to_string(),
-            home.0.join("AppData").join("Roaming").to_string_lossy().to_string(),
+            home.0
+                .join("AppData")
+                .join("Roaming")
+                .to_string_lossy()
+                .to_string(),
         );
     }
     let mut environment = environment_block(child_environment);
@@ -536,7 +539,9 @@ fn stage_home_files(files: &BTreeMap<String, String>) -> Result<Option<StagedHom
             || relative_path.starts_with('/')
             || relative_path.contains('\\')
             || relative_path.contains(':')
-            || components.iter().any(|part| part.is_empty() || *part == "." || *part == "..")
+            || components
+                .iter()
+                .any(|part| part.is_empty() || *part == "." || *part == "..")
         {
             let _ = fs::remove_dir_all(&root);
             return Err("projected HOME path must be relative".to_string());

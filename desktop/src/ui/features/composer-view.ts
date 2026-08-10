@@ -20,6 +20,8 @@ import {
   shouldComposerSend,
 } from './composer-input';
 import { serializeMentionInput } from './composer-mention';
+import { registerPrimaryComposerRoot } from './composer-scope';
+import type { PanelAttachments } from './attachments';
 
 const MAX_INPUT_HEIGHT = 180;
 
@@ -30,6 +32,14 @@ export interface ComposerViewOptions {
   editQueueItem(sessionId: string, index: number): void;
   steerQueueItem(sessionId: string, index: number): void;
   isCompletionOpen?(): boolean;
+  /** 本实例的会话来源（缺省 = 全局活跃会话）；Wiki 问答面板注入自己的 resolver。 */
+  getSessionId?(): string | null;
+  /** 附件流来源（缺省 = 主对话全局 messageStore.attachments）；Wiki 问答面板注入自己的 adapter。 */
+  attachments?: PanelAttachments;
+  /** 输入框占位文案（缺省「输入消息...」）；Wiki 问答面板注入自己的文案。 */
+  placeholder?: string;
+  /** 主对话 Composer 置 true：注册为 primary root，供 composer-scope 的 scope 查询锚定。 */
+  primary?: boolean;
 }
 
 export interface ComposerView {
@@ -84,21 +94,21 @@ export function createComposerView(
   contextStaging?: HTMLElement | null,
 ): ComposerView {
   const controller = new AbortController();
+  // 多实例共存（主对话 + Wiki 问答面板）：不再使用全局唯一 id，
+  // 槽位一律用 class 标记，外部经 composer-scope 在 primary root 内 scope 查询。
+  const getSessionId = options.getSessionId ?? (() => sessionStore.get().activeSessionId);
   const root = document.createElement('section');
   root.className = 'chat-composer mw-composer';
   root.dataset.composerView = '';
 
   const queueSlot = document.createElement('div');
-  queueSlot.id = 'chat-queue-slot';
-  queueSlot.className = 'mw-composer__queue-slot';
+  queueSlot.className = 'chat-queue-slot mw-composer__queue-slot';
   const todoSlot = document.createElement('div');
-  todoSlot.id = 'chat-todo-slot';
+  todoSlot.className = 'chat-todo-slot';
   const runningSlot = document.createElement('div');
-  runningSlot.id = 'chat-running-intro';
-  runningSlot.className = 'mw-composer__running-slot';
+  runningSlot.className = 'chat-running-intro mw-composer__running-slot';
 
   const editBanner = document.createElement('div');
-  editBanner.id = 'composer-edit-banner';
   editBanner.className = 'composer-edit-banner mw-composer__edit-banner';
   editBanner.dataset.composerEditBanner = '';
   editBanner.hidden = true;
@@ -116,7 +126,6 @@ export function createComposerView(
 
   const panel = document.createElement('div');
   panel.className = 'chat-input-container mw-composer__panel';
-  panel.id = 'chat-input-container';
 
   const inputShell = document.createElement('div');
   inputShell.className = 'mw-composer__input-shell';
@@ -131,10 +140,9 @@ export function createComposerView(
   const inputRow = document.createElement('div');
   inputRow.className = 'chat-input-row mw-composer__input-row';
   const input = document.createElement('textarea');
-  input.id = 'chat-input';
   input.dataset.composerInput = '';
   input.rows = 1;
-  input.placeholder = '输入消息...';
+  input.placeholder = options.placeholder ?? '输入消息...';
   input.setAttribute('aria-label', '输入消息');
   const inputOverlay = document.createElement('div');
   inputOverlay.className = 'mw-composer__input-overlay';
@@ -181,6 +189,9 @@ export function createComposerView(
   inputShell.append(project, panel);
   root.append(queueSlot, runningSlot, todoSlot, editBanner, inputShell);
   host.replaceChildren(root);
+  // 主对话 Composer 注册为 primary root：composer-scope 的 scope 查询都锚定到它，
+  // 避免与 Wiki 问答面板的 Composer 实例混淆。
+  if (options.primary) registerPrimaryComposerRoot(root);
 
   const movedContext: Array<{ source: HTMLElement; nodes: Node[] }> = [];
   if (contextStaging) {
@@ -215,7 +226,7 @@ export function createComposerView(
 
   const renderQueue = (): void => {
     if (disposed) return;
-    const sessionId = sessionStore.get().activeSessionId;
+    const sessionId = getSessionId();
     const queue = sessionId ? getPendingQueue(sessionId) : [];
     const canSteer = Boolean(sessionId && !isDynamicKanbanSession(sessionId));
     const signature = `${sessionId ?? ''}|${canSteer}|${queue.map((item) =>
@@ -296,9 +307,13 @@ export function createComposerView(
     if (disposed) return;
     const session = sessionStore.get();
     const messages = messageStore.get();
-    const sessionId = session.activeSessionId;
+    const sessionId = getSessionId();
     const busy = Boolean(sessionId && session.busySessions[sessionId]);
-    const hasDraft = Boolean(input.value.trim() || messages.attachments.length);
+    // hasDraft 的附件部分走面板注入的 adapter（缺省 = 主对话全局附件流）。
+    const attachmentCount = options.attachments
+      ? options.attachments.list().length
+      : messages.attachments.length;
+    const hasDraft = Boolean(input.value.trim() || attachmentCount);
     const blocked = !authStore.get().isLoggedIn || !uiStore.get().backendConnected;
     input.disabled = blocked;
     send.disabled = blocked || submitting || !hasDraft;
@@ -349,7 +364,7 @@ export function createComposerView(
   cancelEdit.addEventListener('click', options.cancelEdit, { signal: controller.signal });
   queueSlot.addEventListener('click', (event) => {
     const target = event.target as HTMLElement;
-    const sessionId = sessionStore.get().activeSessionId;
+    const sessionId = getSessionId();
     if (!sessionId) return;
     const remove = target.closest<HTMLElement>('[data-queue-remove]');
     if (remove) {
@@ -385,6 +400,7 @@ export function createComposerView(
     dispose() {
       if (disposed) return;
       disposed = true;
+      if (options.primary) registerPrimaryComposerRoot(null);
       controller.abort();
       unbindIme();
       unsubscribeAuth();

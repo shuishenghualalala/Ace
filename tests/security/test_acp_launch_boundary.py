@@ -121,6 +121,7 @@ async def test_managed_acp_uses_native_broker_and_preserves_stdio_protocol(
             filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
         ),
         ("native-runtime",),
+        external_security_enabled=True,
     )
     token = current_process_launch.set(launch)
     try:
@@ -162,6 +163,7 @@ async def test_managed_acp_preserves_native_stream_failure_detail(
             filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
         ),
         ("native-runtime",),
+        external_security_enabled=True,
     )
     token = current_process_launch.set(launch)
     try:
@@ -201,6 +203,7 @@ async def test_managed_acp_forwards_system_callback_permission(
             filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
         ),
         ("native-runtime",),
+        external_security_enabled=True,
     )
     additional_permissions = AdditionalPermissionProfile(
         network=(NetworkEntry("127.0.0.1", 8123, "http"),),
@@ -253,6 +256,7 @@ async def test_managed_acp_does_not_override_native_runtime_environment(
             filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
         ),
         ("native-runtime",),
+        external_security_enabled=True,
     )
     token = current_process_launch.set(launch)
     try:

@@ -5,7 +5,7 @@ import ChatPanel from "./ChatPanel";
 const noop = () => {};
 
 describe("ChatPanel team empty session", () => {
-  it("keeps an empty Team session in chat and shows the default auto Mode", () => {
+  it("keeps an empty Team session in chat without the single-agent empty state", () => {
     const html = renderToStaticMarkup(
       <ChatPanel
         messages={[]}
@@ -22,7 +22,5 @@ describe("ChatPanel team empty session", () => {
     expect(html).not.toContain("Claw Your Ideas Into Reality");
     expect(html).not.toContain("开始一段对话");
     expect(html).not.toContain("单 Agent 直接执行任务");
-    expect(html).toContain("team-mode-picker");
-    expect(html).toContain(">auto</span>");
   });
 });

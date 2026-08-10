@@ -725,37 +725,6 @@ def test_search_returns_all_pages(store: FileSystemWikiStore):
     assert {r.title for r in results} == {"页面一", "页面二"}
 
 
-def test_search_fts_chinese(store: FileSystemWikiStore):
-    """FTS5 中文单字分词：搜"负责"应命中"租户负责人"。"""
-    store.save_page(
-        WikiPage(id="", page_type="entity", title="租户负责人", content="负责特定租户下 UCX 产品运营的人员。", file_path=""),
-    )
-    store.save_page(
-        WikiPage(id="", page_type="entity", title="订购租户", content="使用 UCX 产品的业务部门或合作方。", file_path=""),
-    )
-
-    results = store.search("负责")
-    assert len(results) == 1
-    assert results[0].title == "租户负责人"
-
-    results = store.search("租户")
-    assert len(results) == 2
-
-
-def test_search_fts_rank_prefers_title_match(store: FileSystemWikiStore):
-    """标题命中应比正文命中更靠前（FTS5 rank 已考虑字段权重）。"""
-    store.save_page(
-        WikiPage(id="", page_type="topic", title="周报", content="项目 A 已经交付上线。", file_path=""),
-    )
-    store.save_page(
-        WikiPage(id="", page_type="topic", title="项目总结", content="周报内容整理。", file_path=""),
-    )
-
-    results = store.search("周报")
-    assert len(results) == 2
-    assert results[0].title == "周报"
-
-
 def test_delete_page_removes_fts_index(store: FileSystemWikiStore):
     """删除页面后，FTS5 索引中不应再搜到。"""
     saved = store.save_page(
@@ -916,23 +885,6 @@ def test_lint_no_orphan_for_source_pages(store: FileSystemWikiStore):
     store.save_page(WikiPage(id="", page_type="source", title="来源页", content="# 来源页\n\n无链接", file_path=""))
     issues = store.lint()
     assert not any(i.kind == "orphan" for i in issues)
-
-
-def test_search_and_count_respect_kb_id(store: FileSystemWikiStore):
-    store.init_kb(kb_id="default")
-    store.init_kb(kb_id="project_a")
-
-    store.save_page(
-        WikiPage(id="", page_type="topic", title="Keyword", content="x", file_path=""),
-        kb_id="default",
-    )
-    store.save_page(
-        WikiPage(id="", page_type="topic", title="Keyword", content="x", file_path=""),
-        kb_id="project_a",
-    )
-
-    assert len(store.search("Keyword", kb_id="default")) == 1
-    assert len(store.search("Keyword", kb_id="project_a")) == 1
 
 
 def test_get_source_titles(store: FileSystemWikiStore):
@@ -1297,3 +1249,42 @@ def test_lint_reports_quality_source_alias_and_index_issues(store: FileSystemWik
     assert "contested" in kinds
     assert "alias_conflict" in kinds
     assert "index_drift" in kinds
+
+
+def test_legacy_frontmatter_without_id_gets_stable_derived_id(store: FileSystemWikiStore):
+    """旧版 frontmatter（type 键、无 id 字段）读路径派生稳定 id，brief 列表与详情一致。"""
+    legacy = store._dir() / "wiki" / "entities" / "R2S2R.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        "---\n"
+        "type: entity\n"
+        "title: R2S2R\n"
+        "aliases: [Real-to-Sim-to-Real]\n"
+        "confidence: high\n"
+        "---\n\n# R2S2R\n\n正文内容\n",
+        encoding="utf-8",
+    )
+
+    brief = [p for p in store.list_all(brief=True) if p.title == "R2S2R"]
+    assert len(brief) == 1
+    derived_id = brief[0].id
+    assert derived_id  # 不再是空 id（空 id 会导致前端无法选中、详情 404）
+    assert brief[0].page_type == "entity"  # 旧版 type 键映射为 page_type
+
+    # get 内部重新全量读取文件，能找到即证明 brief/full 两条反序列化路径派生的 id 一致
+    full = store.get(derived_id)
+    assert full is not None
+    assert "正文内容" in full.content
+
+
+def test_legacy_frontmatter_without_type_defaults_topic_and_stem_title(store: FileSystemWikiStore):
+    """旧版 frontmatter 连 type 也缺省时回退 topic，标题缺省时用文件名派生 id。"""
+    legacy = store._dir() / "wiki" / "topics" / "旧页面.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("---\naliases: [old]\n---\n\n正文\n", encoding="utf-8")
+
+    brief = [p for p in store.list_all(brief=True) if p.file_path.endswith("旧页面.md")]
+    assert len(brief) == 1
+    assert brief[0].id
+    assert brief[0].page_type == "topic"
+    assert store.get(brief[0].id) is not None

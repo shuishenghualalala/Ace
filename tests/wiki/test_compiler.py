@@ -26,6 +26,16 @@ def _analysis_response(payload: dict[str, Any]) -> ChatResponse:
     return ChatResponse(text=json.dumps(payload, ensure_ascii=False))
 
 
+_EMPTY_ANALYSIS: dict[str, Any] = {"entities": [], "topics": [], "relationships": []}
+
+
+def _save_paste_source(store: FileSystemWikiStore, source_id: str, title: str, **extra: Any) -> None:
+    """保存一个 paste 类型、无 parsed 文件的 RawSource。"""
+    store.save_raw(
+        RawSource(id=source_id, title=title, source_type="paste", parsed_path="", **extra)
+    )
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> FileSystemWikiStore:
     return FileSystemWikiStore(base_dir=tmp_path)
@@ -119,14 +129,7 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
     compiler.summarizer = MagicMock()
     compiler.summarizer.generate_kb_summary = AsyncMock(return_value=None)
 
-    store.save_raw(
-        RawSource(
-            id="src_1",
-            title="原始文档",
-            source_type="paste",
-            parsed_path="",
-        )
-    )
+    _save_paste_source(store, "src_1", "原始文档")
 
     result = await compiler.ingest("src_1", source_content=source_content)
 
@@ -175,12 +178,7 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
 
 @pytest.mark.asyncio
 async def test_ingest_with_source_content_no_raw_file(store, compiler):
-    analysis = {
-        "entities": [],
-        "topics": [],
-        "relationships": [],
-    }
-    compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
+    compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
 
     result = await compiler.ingest("missing_src", source_content="一些内容")
 
@@ -201,14 +199,7 @@ async def test_ingest_returns_issue_when_source_missing_and_no_content(store, co
 @pytest.mark.asyncio
 async def test_ingest_handles_invalid_json_gracefully(store, compiler):
     compiler.provider = FakeProvider(script=[ChatResponse(text="not valid json")])
-    store.save_raw(
-        RawSource(
-            id="src_bad",
-            title="Bad",
-            source_type="paste",
-            parsed_path="",
-        )
-    )
+    _save_paste_source(store, "src_bad", "Bad")
 
     result = await compiler.ingest("src_bad", source_content="bad content")
 
@@ -248,17 +239,10 @@ async def test_plan_capacity_failure_preserves_parsed_source_for_retry(store, co
 
 @pytest.mark.asyncio
 async def test_ingest_strips_markdown_code_fences(store, compiler):
-    analysis = {
-        "entities": [],
-        "topics": [],
-        "relationships": [],
-    }
     compiler.provider = FakeProvider(
-        script=[ChatResponse(text=f"```json\n{json.dumps(analysis)}\n```")]
+        script=[ChatResponse(text=f"```json\n{json.dumps(_EMPTY_ANALYSIS)}\n```")]
     )
-    store.save_raw(
-        RawSource(id="src_fenced", title="Fenced", source_type="paste", parsed_path="")
-    )
+    _save_paste_source(store, "src_fenced", "Fenced")
 
     result = await compiler.ingest("src_fenced", source_content="原始内容")
 
@@ -269,13 +253,8 @@ async def test_ingest_strips_markdown_code_fences(store, compiler):
 
 @pytest.mark.asyncio
 async def test_compile_all_recompiles_all_raw_sources(store, compiler):
-    analysis = {
-        "entities": [],
-        "topics": [],
-        "relationships": [],
-    }
     compiler.provider = FakeProvider(
-        script=[_analysis_response(analysis), _analysis_response(analysis)]
+        script=[_analysis_response(_EMPTY_ANALYSIS), _analysis_response(_EMPTY_ANALYSIS)]
     )
 
     for i in range(2):
@@ -297,17 +276,10 @@ async def test_compile_all_recompiles_all_raw_sources(store, compiler):
 
 @pytest.mark.asyncio
 async def test_repeated_ingest_updates_source_page(store, compiler):
-    analysis = {
-        "entities": [],
-        "topics": [],
-        "relationships": [],
-    }
     compiler.provider = FakeProvider(
-        script=[_analysis_response(analysis), _analysis_response(analysis)]
+        script=[_analysis_response(_EMPTY_ANALYSIS), _analysis_response(_EMPTY_ANALYSIS)]
     )
-    store.save_raw(
-        RawSource(id="src_repeat", title="重复源", source_type="paste", parsed_path="")
-    )
+    _save_paste_source(store, "src_repeat", "重复源")
 
     await compiler.ingest("src_repeat", source_content="第一段内容。")
     await compiler.ingest("src_repeat", source_content="第二段内容。")
@@ -395,32 +367,19 @@ async def test_lint_deep_skips_llm_when_single_page(store, compiler):
 
 
 @pytest.mark.asyncio
-async def test_orient_returns_kb_snapshot(store, compiler):
-    store.save_page(
-        WikiPage(id="p_a", page_type="topic", title="页面A", content="# 页面A\n\n正文", file_path="topics/页面A.md")
-    )
-    store.save_page(
-        WikiPage(id="p_b", page_type="entity", title="概念B", content="# 概念B\n\n正文", file_path="entities/概念B.md", aliases=["B"])
-    )
+async def test_orient_returns_kb_snapshot(compiler):
+    """compiler.orient 仅委托 store.orient（详细快照断言见 test_store.py）。"""
+    compiler.store = MagicMock()
+    compiler.store.orient.return_value = sentinel = MagicMock()
 
-    orientation = await compiler.orient()
-    assert orientation.kb_id == "default"
-    assert orientation.index["page_count"] == 2
-    assert orientation.stats["by_type"]["topic"] == 1
-    assert orientation.stats["by_type"]["entity"] == 1
-    assert "页面A" in orientation.candidate_index["title_to_id"]
-    assert "B" in orientation.candidate_index["alias_to_id"]
+    assert await compiler.orient(owner_account_id="owner", kb_id="kb1") is sentinel
+    compiler.store.orient.assert_called_once_with("owner", "kb1")
 
 
 @pytest.mark.asyncio
 async def test_orient_appends_log_after_ingest(store, compiler):
-    analysis = {
-        "entities": [],
-        "topics": [],
-        "relationships": [],
-    }
-    compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    store.save_raw(RawSource(id="src_log", title="日志测试源", source_type="paste", parsed_path=""))
+    compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
+    _save_paste_source(store, "src_log", "日志测试源")
 
     await compiler.ingest("src_log", source_content="测试内容")
 
@@ -430,18 +389,9 @@ async def test_orient_appends_log_after_ingest(store, compiler):
 
 @pytest.mark.asyncio
 async def test_ingest_reports_duplicate_source(store, compiler):
-    analysis = {
-        "entities": [],
-        "topics": [],
-        "relationships": [],
-    }
-    compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    store.save_raw(
-        RawSource(id="src_dup_1", title="源A", source_type="paste", parsed_path="", content_sha256="samehash")
-    )
-    store.save_raw(
-        RawSource(id="src_dup_2", title="源B", source_type="paste", parsed_path="", content_sha256="samehash")
-    )
+    compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
+    _save_paste_source(store, "src_dup_1", "源A", content_sha256="samehash")
+    _save_paste_source(store, "src_dup_2", "源B", content_sha256="samehash")
 
     result = await compiler.ingest("src_dup_2", source_content="测试内容")
     assert any("重复" in issue for issue in result.issues)
@@ -459,7 +409,7 @@ async def test_ingest_progress_callback_reports_stages(store, compiler):
         "relationships": [],
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    store.save_raw(RawSource(id="src_prog", title="Progress", source_type="paste", parsed_path=""))
+    _save_paste_source(store, "src_prog", "Progress")
 
     stages: list[tuple[str, int, dict[str, Any]]] = []
 
@@ -489,13 +439,8 @@ async def test_ingest_progress_callback_reports_stages(store, compiler):
 @pytest.mark.asyncio
 async def test_ingest_progress_callback_silent_on_exception(store, compiler):
     """progress callback 抛异常时不应中断 ingest。"""
-    analysis = {
-        "entities": [],
-        "topics": [],
-        "relationships": [],
-    }
-    compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    store.save_raw(RawSource(id="src_broken_cb", title="BrokenCB", source_type="paste", parsed_path=""))
+    compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
+    _save_paste_source(store, "src_broken_cb", "BrokenCB")
 
     async def bad_progress(_stage: str, _percent: int, _detail: dict[str, Any]) -> None:
         raise RuntimeError("callback error")
@@ -520,14 +465,7 @@ async def test_apply_ingest_uses_saved_plan_and_respects_approved_titles(store, 
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
 
-    store.save_raw(
-        RawSource(
-            id="src_plan",
-            title="计划文档",
-            source_type="paste",
-            parsed_path="",
-        )
-    )
+    _save_paste_source(store, "src_plan", "计划文档")
     store.save_parsed_markdown("src_plan", source_content)
 
     plan = await compiler.plan_ingest("src_plan")
@@ -560,14 +498,7 @@ async def test_apply_ingest_rejects_when_plan_missing(store, compiler):
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
 
-    store.save_raw(
-        RawSource(
-            id="src_fallback",
-            title="回退文档",
-            source_type="paste",
-            parsed_path="",
-        )
-    )
+    _save_paste_source(store, "src_fallback", "回退文档")
     store.save_parsed_markdown("src_fallback", source_content)
 
     result = await compiler.apply_ingest("src_fallback")
@@ -586,9 +517,7 @@ async def test_apply_ingest_rejects_stale_source_content(store, compiler):
     )
     store.save_raw(raw)
     store.save_parsed_markdown(raw.id, "第一版内容")
-    compiler.provider = FakeProvider(
-        script=[_analysis_response({"entities": [], "topics": [], "relationships": []})]
-    )
+    compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
     plan = await compiler.plan_ingest(raw.id)
     assert plan.source_content_sha256
 
@@ -779,14 +708,7 @@ async def test_long_document_ingest_uses_chunked_analysis(store, compiler):
         ]
     )
 
-    store.save_raw(
-        RawSource(
-            id="long_src",
-            title="长文档",
-            source_type="paste",
-            parsed_path="",
-        )
-    )
+    _save_paste_source(store, "long_src", "长文档")
 
     result = await compiler.ingest(
         "long_src",
@@ -1220,8 +1142,8 @@ def test_short_document_limits_skip_topics():
 async def test_batch_ingest_is_bounded_and_returns_cursor(store, compiler):
     compiler.provider = FakeProvider(
         script=[
-            _analysis_response({"entities": [], "topics": [], "relationships": []}),
-            _analysis_response({"entities": [], "topics": [], "relationships": []}),
+            _analysis_response(_EMPTY_ANALYSIS),
+            _analysis_response(_EMPTY_ANALYSIS),
         ]
     )
     source_ids = []
@@ -1311,7 +1233,7 @@ async def test_plan_ingest_records_plan_fingerprint(store, compiler):
         "relationships": [],
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    store.save_raw(RawSource(id="s1", title="文档", source_type="paste", parsed_path=""))
+    _save_paste_source(store, "s1", "文档")
     store.save_parsed_markdown("s1", "文档正文内容")
     plan = await compiler.plan_ingest("s1")
     assert plan.plan_fingerprint
@@ -1329,7 +1251,7 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
         "relationships": [],
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    store.save_raw(RawSource(id="s1", title="文档", source_type="paste", parsed_path=""))
+    _save_paste_source(store, "s1", "文档")
     store.save_parsed_markdown("s1", "文档正文内容")
     # 预置目标 entity 页，使计划走 update 并快照其正文版本
     existing = store.save_page(
@@ -1368,7 +1290,7 @@ async def test_apply_rejects_superseded_source(store, compiler):
         "relationships": [],
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    store.save_raw(RawSource(id="s1", title="文档", source_type="paste", parsed_path=""))
+    _save_paste_source(store, "s1", "文档")
     store.save_parsed_markdown("s1", "文档正文内容")
     await compiler.plan_ingest("s1")
 

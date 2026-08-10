@@ -10,6 +10,7 @@ import { $, escapeHtml, notify, state } from '../state';
 import { showConfirmDialog } from '../ui-feedback';
 import { closeInspector, enableInspectorSurfaceAutoWidth, openInspectorCustomView } from './inspector';
 import { getSessionAgentDisplay } from './workspaces';
+import { queryPrimaryComposer } from './composer-scope';
 
 type Selection = {
   route: string; selector: string; element_tag: string; element_text: string;
@@ -346,7 +347,7 @@ function showError(error: unknown): void { notify(`灵感操作失败：${error 
 
 export function syncSiteComposerMarker(): void {
   const marker = document.getElementById('chat-sites-mode');
-  const input = document.getElementById('chat-input') as HTMLTextAreaElement | null;
+  const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
   const provider = getSessionAgentDisplay(state.activeSessionId)?.agentLabel?.provider || '';
   const isInspiration = provider.toLowerCase() === 'sites';
   if (marker) marker.hidden = !isInspiration;

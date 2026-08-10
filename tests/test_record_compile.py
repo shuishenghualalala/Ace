@@ -2921,44 +2921,17 @@ async def test_recorder_v5_rejects_partial_or_spoofed_native_path_resolution(
     ) == "DRAFT_REJECTED: trace_upload_invalid"
 
 
-async def test_install_failure_rolls_back_the_published_artifact(compile_env, monkeypatch):
-    """装技能失败时，刚发布的 owner 私有 artifact 必须回滚，不留孤儿。
+@pytest.mark.parametrize("failure_mode", ["return-false", "raise"])
+async def test_install_failure_rolls_back_the_published_artifact(
+    compile_env, monkeypatch, failure_mode
+):
+    """装技能失败（返回 False 或抛异常）时，刚发布的 owner 私有 artifact 必须回滚，不留孤儿。
 
     rollback_published_workflow 之前 export 了却零调用（死代码）。现在接回失败
     路径：先 publish 成功、再装技能失败，应回滚已发布的产物。不回滚不阻断重试
     （publish 幂等），但会在盘上留一个没有入口技能、workflow_id 不可知的孤儿。
-    """
-    from plugins.browser import compile_tool
-
-    public, _path, draft = await _draft(
-        compile_env,
-        [
-            _record(1),
-            _record(2, "click", selector="#run", tag="button"),
-        ],
-        {"source_step": 1},
-        {"source_step": 2},
-        slug="rollback-on-install-failure",
-    )
-    args = _install_args(public)
-
-    # 让治理安装这一步失败（publish 已经成功）
-    monkeypatch.setattr(compile_tool, "install_skill_from_dir", lambda *a, **k: False)
-
-    result = await compile_env["install"](args)
-    assert result.startswith("INSTALL_FAILED: ")
-
-    # 发布的 artifact 已被回滚——read_workflow 找不到它
-    workflow_id = draft["workflow_id"]
-    with pytest.raises((OSError, WorkflowStoreError)):
-        read_workflow(OWNER, workflow_id)
-
-
-async def test_install_rollback_also_covers_the_raise_path(compile_env, monkeypatch):
-    """装技能**抛异常**（不只是返回 False）时，产物同样要回滚。
-
     回滚放在 try 内部只覆盖 return-False；install_skill_from_dir 抛异常会跳到
-    except，绕过回滚。这条钉住"两条失败路都回滚"。
+    except，绕过回滚——两档参数钉住"两条失败路都回滚"。
     """
     from plugins.browser import compile_tool
 
@@ -2970,18 +2943,24 @@ async def test_install_rollback_also_covers_the_raise_path(compile_env, monkeypa
         ],
         {"source_step": 1},
         {"source_step": 2},
-        slug="rollback-on-install-raise",
+        slug=f"rollback-on-install-{failure_mode}",
     )
     args = _install_args(public)
 
     def _boom(*a, **k):
         raise RuntimeError("装技能过程中的非常规异常")
 
-    monkeypatch.setattr(compile_tool, "install_skill_from_dir", _boom)
+    # 让治理安装这一步失败（publish 已经成功）
+    monkeypatch.setattr(
+        compile_tool,
+        "install_skill_from_dir",
+        (lambda *a, **k: False) if failure_mode == "return-false" else _boom,
+    )
 
     result = await compile_env["install"](args)
     assert result.startswith("INSTALL_FAILED: ")
 
+    # 发布的 artifact 已被回滚——read_workflow 找不到它
     with pytest.raises((OSError, WorkflowStoreError)):
         read_workflow(OWNER, draft["workflow_id"])
 

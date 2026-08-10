@@ -25,6 +25,7 @@ jobs:
           cargo build --manifest-path security-runtime/Cargo.toml --release --locked
           --target aarch64-apple-darwin
       - run: cargo check --manifest-path security-runtime/Cargo.toml --all-targets --locked
+      - run: cargo fmt --manifest-path security-runtime/Cargo.toml --check
       - run: cargo clippy --manifest-path security-runtime/Cargo.toml --all-targets --locked -- -D warnings
       - run: >-
           cargo test --manifest-path security-runtime/Cargo.toml --release --locked

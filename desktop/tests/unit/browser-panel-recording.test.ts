@@ -206,7 +206,7 @@ describe('浏览器录制指示条', () => {
   it('生成技能只填输入框、不自动发送', async () => {
     // 轨迹进入模型上下文必须是用户按下发送键的那一刻。自动发送等于替用户
     // 做了那个决定——而这正是「录制不是接管的副作用」要守住的最后一环。
-    document.body.innerHTML = `${renderBrowserPanel()}<textarea id="chat-input"></textarea>`;
+    document.body.innerHTML = `${renderBrowserPanel()}<textarea data-composer-input></textarea>`;
     await activateRecordingSession('session-rec');
     const control = vi.spyOn(backendApi, 'browserControl')
       .mockResolvedValue(recordingResponse(true, false, 3));
@@ -216,7 +216,7 @@ describe('浏览器录制指示条', () => {
 
     expect(compileLastRecording()).toBe(true);
 
-    const input = document.querySelector<HTMLTextAreaElement>('#chat-input');
+    const input = document.querySelector<HTMLTextAreaElement>('[data-composer-input]');
     expect(input?.value).toContain('编译成一个技能');
     expect(input?.value).toContain('录制 ID：abcd1234');
     expect(input?.value).toContain('共 3 步');
@@ -228,8 +228,8 @@ describe('浏览器录制指示条', () => {
   });
 
   it('已有草稿时追加而不是覆盖', async () => {
-    document.body.innerHTML = `${renderBrowserPanel()}<textarea id="chat-input"></textarea>`;
-    const input = document.querySelector<HTMLTextAreaElement>('#chat-input')!;
+    document.body.innerHTML = `${renderBrowserPanel()}<textarea data-composer-input></textarea>`;
+    const input = document.querySelector<HTMLTextAreaElement>('[data-composer-input]')!;
     input.value = '这个技能叫「查工单」';
     await activateRecordingSession('session-rec');
     const control = vi.spyOn(backendApi, 'browserControl')
@@ -247,7 +247,7 @@ describe('浏览器录制指示条', () => {
   it('生成技能只收起入口，绝不删轨迹', async () => {
     // 这是复核查出的主链路回归：填好提示词的同时把它指向的目录删了，用户按下
     // 发送时 Agent 读到的是一个不存在的路径。「用掉入口」与「删除数据」是两件事。
-    document.body.innerHTML = `${renderBrowserPanel()}<textarea id="chat-input"></textarea>`;
+    document.body.innerHTML = `${renderBrowserPanel()}<textarea data-composer-input></textarea>`;
     await activateRecordingSession('session-rec');
     const control = vi.spyOn(backendApi, 'browserControl')
       .mockResolvedValue(recordingResponse(true, false, 3));
@@ -268,7 +268,7 @@ describe('浏览器录制指示条', () => {
   it('删除失败要如实告诉用户，不能照样说已丢弃', async () => {
     // 后端删不掉时返回的是 HTTP 200 + discarded:false（请求本身是成功的）。
     // 不看这个字段，用户会以为含真实业务数据的轨迹已经删了，而它还躺在盘上。
-    document.body.innerHTML = `${renderBrowserPanel()}<textarea id="chat-input"></textarea>`;
+    document.body.innerHTML = `${renderBrowserPanel()}<textarea data-composer-input></textarea>`;
     await activateRecordingSession('session-rec');
     const control = vi.spyOn(backendApi, 'browserControl')
       .mockResolvedValue(recordingResponse(true, false, 5));
@@ -288,7 +288,7 @@ describe('浏览器录制指示条', () => {
   });
 
   it('丢弃后入口消失，且不再能编译', async () => {
-    document.body.innerHTML = `${renderBrowserPanel()}<textarea id="chat-input"></textarea>`;
+    document.body.innerHTML = `${renderBrowserPanel()}<textarea data-composer-input></textarea>`;
     await activateRecordingSession('session-rec');
     const control = vi.spyOn(backendApi, 'browserControl')
       .mockResolvedValue(recordingResponse(true, false, 5));

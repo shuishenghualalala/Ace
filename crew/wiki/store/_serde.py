@@ -15,6 +15,25 @@ from crew.wiki.store._ids import page_id
 
 log = get_logger("wiki.store.serde")
 
+# 与 schemas._PAGE_TYPES 一致；本地冗余以避免跨模块引用私有名（同 _filesystem.py 的做法）。
+_LEGACY_PAGE_TYPES = ("entity", "topic", "source", "comparison", "synthesis")
+
+
+def _normalize_legacy_frontmatter(data: dict[str, Any], file_path: str) -> None:
+    """兼容旧版页面 frontmatter：``type`` 键映射为 ``page_type``；缺失 ``id`` 时按
+    页面类型 + 标题派生稳定 id。旧格式文件（无 id 字段）在列表里会得到空 id，
+    前端无法选中、详情接口也无法定位，这里在读路径统一补齐，brief/full 结果一致。"""
+    legacy_type = str(data.pop("type", "") or "").strip()
+    if not data.get("page_type") and legacy_type in _LEGACY_PAGE_TYPES:
+        data["page_type"] = legacy_type
+    if str(data.get("id", "") or "").strip():
+        return
+    page_type = str(data.get("page_type") or "topic")
+    if page_type not in _LEGACY_PAGE_TYPES:
+        page_type = "topic"
+    title = str(data.get("title") or "").strip() or Path(file_path).stem
+    data["id"] = page_id(page_type, title)
+
 
 def serialize_page(page: WikiPage) -> str:
     """把 WikiPage 序列化为带 YAML frontmatter 的 Markdown。"""
@@ -49,6 +68,7 @@ def deserialize_page(text: str, file_path: str) -> WikiPage:
             data: dict[str, Any] = yaml.safe_load(fm) or {}
             data["content"] = content.strip()
             data["file_path"] = file_path
+            _normalize_legacy_frontmatter(data, file_path)
             return WikiPage.from_dict(data)
         except Exception:  # noqa: BLE001
             log.warning("Wiki 页面 frontmatter 解析失败: %s", file_path)
@@ -101,6 +121,7 @@ def deserialize_page_brief(text: str, file_path: str) -> WikiPage:
             data["summary"] = _extract_summary(text)
     else:
         data["summary"] = _extract_summary(text)
+    _normalize_legacy_frontmatter(data, file_path)
     return WikiPage.from_dict(data)
 
 

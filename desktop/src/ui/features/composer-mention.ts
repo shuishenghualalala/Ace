@@ -10,23 +10,26 @@
  *  - **数据源分流**：`@` 走后端 `/api/complete`（120ms 防抖）；`/` 走本地 skillsCache 过滤（即时）。
  *  - **回填纯文本**：`@` 插 `@file:src/a.ts`；`/` 插 `/中文名`（后端 resolve_skill 已支持按
  *    display_name 解析），无中文名则回退 `/slug`。textarea 仍是 input.value 真相源。
- *  - **chip = 透明 textarea + 全量覆盖层**：textarea 文字透明（仅 caret 可见，IME 合成期由
- *    覆盖层镜像合成文本），覆盖层重绘整段正文——普通字正常色、`@file:`/`@folder:`/`@image:`
- *    与已知 `/中文名`/`/slug` 区间染蓝。文件引用选中后使用短显示 token，发送时还原完整前缀。
- *    因覆盖层与 textarea 使用同一短 token（copyTextareaStyle），
- *    光标与文字像素对齐；合成期临时停画 chip，避免与 IME 预览冲突。
+ *  - **chip = 透明 textarea + 全量覆盖层**：textarea 文字透明（仅 caret 可见），覆盖层重绘
+ *    整段正文——普通字正常色、`@file:`/`@folder:`/`@image:` 与已知 `/中文名`/`/slug` 区间染蓝。
+ *    文件引用选中后使用短显示 token，发送时还原完整前缀。
+ *    因覆盖层与 textarea 使用同一短 token（copyTextareaStyle），光标与文字像素对齐。
+ *  - **IME 合成期交还原生绘制**：浏览器会把合成串画在 textarea 层（color:transparent 挡不住），
+ *    且合成串会撑高/滚动 textarea，与只承载已提交文本的覆盖层必然错位叠字。因此 compositionstart
+ *    时恢复 textarea 文字可见、隐藏覆盖层（原生排版天然对齐），compositionend 再切回覆盖层。
  *  - **Backspace** 在已成型 chip 末尾一次删整段（atomic）。
  *  - **发送守卫**：popup 打开时，index.ts 的 Enter→发送 必须让位（见 isMentionOpen）。
  */
 
 import { backendApi, type CompleteItem, type Skill, type WorkPreference } from '../backend-client';
 import { createIcon, type IconId } from '../components/icon';
-import { setRuntimeStyle } from '../components/runtime-style';
+import { setRuntimeStyle, clearRuntimeStyle } from '../components/runtime-style';
 import { $, state } from '../state';
 import { productModeStore } from '../stores/product-mode-store';
 import { sessionStore } from '../stores/session-store';
 import { workStore } from '../stores/work-store';
 import { composerWorkspaceId } from './workspaces';
+import { queryPrimaryComposer } from './composer-scope';
 import {
   removeMentionTag,
   renderMentionTags,
@@ -97,9 +100,8 @@ const pinyinCache = new Map<string, SkillPinyin>();
 let fetchSeq = 0;
 let debounceTimer: number | null = null;
 
-/** IME 合成态：textarea 文字透明，合成中的中文需由覆盖层镜像显示，否则用户看不见输入。 */
+/** IME 合成态：合成期 textarea 恢复原生可见、覆盖层隐藏（见文件头「IME 合成期交还原生绘制」）。 */
 let composing = false;
-let composingText = '';
 
 /** popup 打开且有候选项时为 true——index.ts 的发送守卫据此让 Enter 走「选中」。 */
 export function isMentionOpen(): boolean {
@@ -868,12 +870,27 @@ function ensureOverlay(): void {
 
 function renderOverlay(): void {
   if (!input || !overlay) return;
-  const inComposing = composing && composingText.length > 0;
-  // Windows 输入法会在 textarea 上独立绘制合成串，即使 textarea 文本透明仍可见。
-  // overlay 再插入 composingText 会把拼音显示两遍；合成期只停画 chip，展示已提交文本。
-  const nodes = inComposing ? [document.createTextNode(input.value)] : buildChippedNodes(input.value);
-  overlay.replaceChildren(...nodes);
+  overlay.replaceChildren(...buildChippedNodes(input.value));
   overlay.scrollTop = input.scrollTop;
+}
+
+/**
+ * IME 合成期切换：恢复 textarea 文字可见（颜色取计算后的 caret-color，兼容 studio 等皮肤）、
+ * 隐藏覆盖层。合成串由浏览器画在 textarea 层且会撑高/滚动它，若仍用覆盖层显示已提交文本，
+ * 两层文字必然错位叠字（长输入时尤为明显）。
+ */
+function enterNativeComposing(): void {
+  if (!input || !overlay) return;
+  setRuntimeStyle(input, 'color', getComputedStyle(input).caretColor);
+  setRuntimeStyle(overlay, 'visibility', 'hidden');
+}
+
+/** 合成结束：恢复「透明 textarea + 覆盖层」并按已提交文本重绘。 */
+function exitNativeComposing(): void {
+  if (!input || !overlay) return;
+  clearRuntimeStyle(input, 'color');
+  clearRuntimeStyle(overlay, 'visibility');
+  renderOverlay();
 }
 
 // ---------------- 事件处理 ----------------
@@ -941,12 +958,12 @@ function onKeydown(e: KeyboardEvent): void {
 }
 
 /**
- * 绑定 #chat-input 的触发式补全。幂等。替代旧 bindCompletePopup。
+ * 绑定主对话 Composer 输入框的触发式补全。幂等。替代旧 bindCompletePopup。
  * 由 ui/index.ts 在 init 时调用一次。
  */
 export function bindComposerMention(): () => void {
   if (bound) return () => {};
-  input = ($('#chat-input') as HTMLTextAreaElement | null) ?? null;
+  input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]') ?? null;
   if (!input) return () => {};
   bound = true;
   bindingController = new AbortController();
@@ -984,19 +1001,14 @@ export function bindComposerMention(): () => void {
       evaluateTrigger();
     }
   }, { signal });
-  // IME 合成：textarea 文字透明，合成中文需覆盖层镜像显示
+  // IME 合成：合成期 textarea 原生可见、覆盖层隐藏，避免两层文字错位叠字
   input.addEventListener('compositionstart', () => {
     composing = true;
-    composingText = '';
-  }, { signal });
-  input.addEventListener('compositionupdate', (e) => {
-    composingText = (e as CompositionEvent).data ?? '';
-    renderOverlay();
+    enterNativeComposing();
   }, { signal });
   input.addEventListener('compositionend', () => {
     composing = false;
-    composingText = '';
-    renderOverlay();
+    exitNativeComposing();
     // IME 提交后重判触发：否则中文输入（/博查、@文件 中文片段）提交后不刷新浮层——
     // 表现为「/博查无反应，删一个字才有」，因为删除是 Latin 按键走 input 事件，而输入是 IME。
     evaluateTrigger();
@@ -1011,6 +1023,17 @@ export function bindComposerMention(): () => void {
     renderOverlay();
     repositionPopup();
   }, { signal });
+  // 侧栏/看板/检查器开合是容器级布局变化，不触发 window resize——
+  // 不监听的话覆盖层按过期宽度渲染（inset:0 中 left+width 生效、right 被忽略），
+  // composer 变窄时文字会溢出面板右边框。
+  const resizeObserver = typeof ResizeObserver === 'undefined'
+    ? null
+    : new ResizeObserver(() => {
+      ensureOverlay();
+      renderOverlay();
+      repositionPopup();
+    });
+  resizeObserver?.observe(input);
   document.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     if (popup && !popup.contains(t) && t !== input) closePopup();
@@ -1022,6 +1045,7 @@ export function bindComposerMention(): () => void {
   return () => {
     if (!bound) return;
     bindingController?.abort();
+    resizeObserver?.disconnect();
     unsubscribeWork();
     unsubscribeMode();
     unsubscribeSession();
@@ -1037,12 +1061,13 @@ export function bindComposerMention(): () => void {
     compactMentions = [];
     disabledWorkPreferenceIds.clear();
     if (input) {
+      // 合成中途解绑时还原文字透明（overlay 随后即移除，无需清 visibility）
+      clearRuntimeStyle(input, 'color');
       input.classList.remove('chat-input-overlay-source');
       input.parentElement?.classList.remove('chat-input-overlay-host');
     }
     input = null;
     composing = false;
-    composingText = '';
     bound = false;
   };
 }

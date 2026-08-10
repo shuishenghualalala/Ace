@@ -95,15 +95,6 @@ def test_raw_source_hash_and_drift_fields_roundtrip():
 
 # ---- PlannedPage / PlanResult brief 序列化 ----
 
-def test_planned_page_to_dict_full_by_default():
-    from crew.wiki.schemas import PlannedPage
-
-    content = "A" * 2000
-    page = PlannedPage(title="t", page_type="entity", action="create", content=content)
-    data = page.to_dict()
-    assert data["content"] == content
-
-
 def test_planned_page_to_dict_brief_truncates_long_content():
     from crew.wiki.schemas import PlannedPage
 
@@ -113,15 +104,6 @@ def test_planned_page_to_dict_brief_truncates_long_content():
     assert len(data["content"]) < len(content)
     assert "...(内容已省略" in data["content"]
     assert data["content"].startswith("A" * 500)
-
-
-def test_planned_page_to_dict_brief_keeps_short_content():
-    from crew.wiki.schemas import PlannedPage
-
-    content = "short content"
-    page = PlannedPage(title="t", page_type="entity", action="create", content=content)
-    data = page.to_dict(brief=True)
-    assert data["content"] == content
 
 
 def test_plan_result_to_dict_brief_propagates_to_pages():

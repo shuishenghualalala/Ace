@@ -1,11 +1,12 @@
 /**
- * 执行中轮播文案（composer 上方 #chat-running-intro 槽位）。
+ * 执行中轮播文案（composer 上方 .chat-running-intro 槽位）。
  * 文案来源：/api/scenarios/intro-lines 与 loading-status，失败时用内置兜底。
  */
 
 import { backendApi } from '../backend-client';
 import { renderRunningIntro } from '../chat-render';
-import { $, isBusySession, state } from '../state';
+import { isBusySession, state } from '../state';
+import { queryPrimaryComposer } from './composer-scope';
 
 const FALLBACK_RUNNING_INTROS = [
   'Crew 可以把复杂需求拆成可跟踪的任务。',
@@ -110,9 +111,9 @@ function advanceRunningIntro(): void {
   syncRunningIntroSlot();
 }
 
-/** 根据当前 session busy 状态刷新 #chat-running-intro 槽位。 */
+/** 根据当前 session busy 状态刷新主对话 Composer 的 running-intro 槽位。 */
 export function syncRunningIntroSlot(): void {
-  const slot = $('#chat-running-intro') as HTMLElement | null;
+  const slot = queryPrimaryComposer('.chat-running-intro');
   if (!slot) return;
   const sessionId = state.activeSessionId;
   const busy = sessionId ? isBusySession(sessionId) : false;

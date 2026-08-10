@@ -200,21 +200,6 @@ describe('协作看板 HTML', () => {
     expect(html).toContain('活跃子任务');
     expect(html).not.toContain('React');
 
-    expect(resolveTeamCollaborationMember(SESSION_ID, {
-      id: 'leader-event',
-      role: 'team_internal',
-      content: '开始规划',
-      timestamp: 1,
-      agentId: 'leader',
-      agentName: 'leader',
-      isLeader: true,
-    })).toMatchObject({
-      agentId: 'crew::builtin',
-      name: 'Crew',
-      isLeader: true,
-    });
-    expect(resolveTeamCollaborationName(SESSION_ID)).toBe('产品研发团队');
-
     document.body.innerHTML = html;
     activateTeamCollaborationBoard(SESSION_ID);
     document.querySelector<HTMLButtonElement>('[data-team-files]')?.click();

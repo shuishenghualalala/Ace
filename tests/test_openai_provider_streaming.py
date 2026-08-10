@@ -248,51 +248,32 @@ async def test_non_stream_strips_leaked_parameter_tag(monkeypatch):
     assert result.tool_calls[0].arguments == {"name": "mail-assistant"}
 
 
-async def test_stream_emits_tool_call_generating_when_name_arrives(monkeypatch):
+@pytest.mark.parametrize(
+    "id_chunk_position, expected_generating_ids, expected_ready_id",
+    [
+        # 第一个 tool_call delta 就带上 name+id
+        pytest.param(0, ["call_x", "call_x"], "call_x", id="id_with_name"),
+        # name 先到、id 很晚才到 → 用占位 id，UI 仍应立刻显示工具卡
+        pytest.param(3, ["call_stream_0", "call_stream_0"], "call_stream_0", id="id_arrives_late"),
+    ],
+)
+async def test_stream_emits_tool_call_generating_when_name_arrives(
+    monkeypatch, id_chunk_position, expected_generating_ids, expected_ready_id
+):
     """工具 name 一出现即 yield tool_call_generating，早于 ready_tool_call。"""
     p = _provider()
-    sdk_chunks = [
-        _chunk(content="我来写散文并保存到桌面。"),
-        # 第一个 tool_call delta：name+id 到达，arguments 空
-        _chunk(tool_calls=[_tc(0, id="call_x", name="file_write", args='')]),
+    tool_deltas = [
+        # 第一个 tool_call delta：name 到达（id 是否同到由参数档决定），arguments 空
+        _tc(0, id="call_x" if id_chunk_position == 0 else None, name="file_write", args=''),
         # 后续逐段拼参数（content 长）
-        _chunk(tool_calls=[_tc(0, args='{"path":"/a.html","content":"')]),
-        _chunk(tool_calls=[_tc(0, args='<html>…</html>')]),  # content 字符串未闭合，JSON 不合法
-        _chunk(tool_calls=[_tc(0, args='"}')]),  # 参数拼完
-        _chunk(finish_reason="tool_calls"),
+        _tc(0, args='{"path":"/a.html","content":"'),
+        _tc(0, args='<html>…</html>'),  # content 字符串未闭合，JSON 不合法
+        # 参数拼完；id 晚到的档位里真实 id 在这一段才到
+        _tc(0, id="call_real_late" if id_chunk_position == 3 else None, args='"}'),
     ]
-
-    async def fake_create(**kwargs):
-        return _fake_stream(sdk_chunks)
-
-    monkeypatch.setattr(p._client.chat.completions, "create", fake_create)
-
-    out = [c async for c in p.stream_chat([], tools=[{"type": "function"}])]
-    generating = [c.tool_call_generating for c in out if c.tool_call_generating is not None]
-    ready = [c.ready_tool_call for c in out if c.ready_tool_call is not None]
-    # name 出现即发 generating；path 字段闭合后同一 id 再更新一次 UI-only 参数
-    assert [g.id for g in generating] == ["call_x", "call_x"]
-    assert generating[0].name == "file_write" and generating[0].arguments == {}
-    assert generating[1].arguments == {"path": "/a.html"}
-    # ready 在参数拼完后发
-    assert len(ready) == 1 and ready[0].arguments == {"path": "/a.html", "content": "<html>…</html>"}
-    # generating 必须早于 ready（name 出现在参数拼完之前）
-    seen_pos = next(i for i, c in enumerate(out) if c.tool_call_generating is not None)
-    ready_pos = next(i for i, c in enumerate(out) if c.ready_tool_call is not None)
-    assert seen_pos < ready_pos
-
-
-async def test_stream_emits_tool_call_generating_when_name_arrives_before_id(monkeypatch):
-    """OpenAI-compatible provider 可能 name 先到、id 很晚才到；UI 仍应立刻显示工具卡。"""
-    p = _provider()
     sdk_chunks = [
         _chunk(content="我来写散文并保存到桌面。"),
-        # name 先到，id 尚未到。这里仍应先发 tool_call_generating，避免 file_write
-        # 卡片要等长 content 参数全部生成完才出现。
-        _chunk(tool_calls=[_tc(0, id=None, name="file_write", args='')]),
-        _chunk(tool_calls=[_tc(0, args='{"path":"/a.html","content":"')]),
-        _chunk(tool_calls=[_tc(0, args='<html>…</html>')]),
-        _chunk(tool_calls=[_tc(0, id="call_real_late", args='"}')]),
+        *(_chunk(tool_calls=[delta]) for delta in tool_deltas),
         _chunk(finish_reason="tool_calls"),
     ]
 
@@ -306,13 +287,16 @@ async def test_stream_emits_tool_call_generating_when_name_arrives_before_id(mon
     ready = [c.ready_tool_call for c in out if c.ready_tool_call is not None]
     done = next(c for c in out if c.done)
 
-    assert [g.id for g in generating] == ["call_stream_0", "call_stream_0"]
-    assert generating[0].name == "file_write"
+    # name 出现即发 generating；path 字段闭合后同一 id 再更新一次 UI-only 参数
+    assert [g.id for g in generating] == expected_generating_ids
+    assert generating[0].name == "file_write" and generating[0].arguments == {}
     assert generating[1].arguments == {"path": "/a.html"}
-    assert len(ready) == 1
-    assert ready[0].id == "call_stream_0"
-    assert done.tool_calls[0].id == "call_stream_0"
+    # ready 在参数拼完后发
+    assert len(ready) == 1 and ready[0].arguments == {"path": "/a.html", "content": "<html>…</html>"}
+    assert ready[0].id == expected_ready_id
+    assert done.tool_calls[0].id == expected_ready_id
     assert done.tool_calls[0].arguments == {"path": "/a.html", "content": "<html>…</html>"}
+    # generating 必须早于 ready（name 出现在参数拼完之前）
     seen_pos = next(i for i, c in enumerate(out) if c.tool_call_generating is not None)
     ready_pos = next(i for i, c in enumerate(out) if c.ready_tool_call is not None)
     assert seen_pos < ready_pos

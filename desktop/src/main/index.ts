@@ -1240,19 +1240,45 @@ function packagedSecurityRuntimeEnv(): Record<string, string> {
   const runtimeName = process.platform === 'win32'
     ? 'ace-security-runtime.exe'
     : 'ace-security-runtime';
-  const runtime = configured || (app.isPackaged ? path.join(process.resourcesPath, runtimeName) : '');
+  const platformKey = `${process.platform}-${process.arch}`;
+  const runtimeCandidates = configured
+    ? [configured]
+    : app.isPackaged
+      ? [path.join(process.resourcesPath, runtimeName)]
+      : [
+          path.join(repoRoot(), 'desktop', 'security-runtime-bin', runtimeName),
+          path.join(repoRoot(), 'security-runtime', 'prebuilt', platformKey, runtimeName),
+          path.join(repoRoot(), 'security-runtime', 'bin', runtimeName),
+        ];
+  const runtime = runtimeCandidates.find((candidate) => path.isAbsolute(candidate) && fs.existsSync(candidate)) ?? '';
   if (!runtime || !path.isAbsolute(runtime) || !fs.existsSync(runtime)) {
     return {
       ACE_SECURITY_STATE_DIR: stateDir,
       ACE_STRICT_SECURITY: strictSecurity,
     };
   }
-  if (app.isPackaged) {
+  const manifestPath = path.join(path.dirname(runtime), 'runtime-manifest.json');
+  if (fs.existsSync(manifestPath)) {
     try {
-      const manifest = JSON.parse(
-        fs.readFileSync(path.join(process.resourcesPath, 'runtime-manifest.json'), 'utf8'),
-      ) as { files?: Array<{ name?: string; sha256?: string }> };
-      const expected = manifest.files?.find((item) => item.name === runtimeName)?.sha256;
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+        files?: Array<{ name?: string; sha256?: string }>;
+        binary_name?: string;
+        binary_sha256?: string;
+        platform?: string;
+        arch?: string;
+      };
+      const declaresPlatform = Boolean(manifest.platform || manifest.arch);
+      if (
+        declaresPlatform
+        && (manifest.platform !== process.platform || manifest.arch !== process.arch)
+      ) {
+        return {
+          ACE_SECURITY_STATE_DIR: stateDir,
+          ACE_STRICT_SECURITY: strictSecurity,
+        };
+      }
+      const expected = manifest.files?.find((item) => item.name === runtimeName)?.sha256
+        ?? (manifest.binary_name === runtimeName ? manifest.binary_sha256 : undefined);
       const actual = createHash('sha256').update(fs.readFileSync(runtime)).digest('hex');
       if (!expected || actual !== expected) {
         return {
@@ -1272,8 +1298,7 @@ function packagedSecurityRuntimeEnv(): Record<string, string> {
     ACE_SECURITY_STATE_DIR: stateDir,
     ACE_STRICT_SECURITY: strictSecurity,
   };
-  const manifestPath = app.isPackaged ? path.join(process.resourcesPath, 'runtime-manifest.json') : '';
-  if (manifestPath && fs.existsSync(manifestPath)) {
+  if (fs.existsSync(manifestPath)) {
     try {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
         files?: Array<{ name?: string; sha256?: string }>;
@@ -1298,6 +1323,13 @@ function gatewayAccessHeaders(pathname: string): Record<string, string> {
   if (!pathname.startsWith('/api/browser/')) return headers;
   headers.Authorization = `Bearer ${gatewayInstanceAccessToken(activeGatewayCrewHome())}`;
   return headers;
+}
+
+/** Sign privileged requests with the same instance key as the active Gateway. */
+function createActiveGatewaySecurityProof(method: string, pathname: string, body: string): string {
+  return createDesktopSecurityProof(method, pathname, body, {
+    crewHome: activeGatewayCrewHome(),
+  });
 }
 
 /**
@@ -2039,7 +2071,7 @@ async function securityGatewayRequest(
   const requestPath = new URL(pathname, 'http://127.0.0.1').pathname;
   const headers: Record<string, string> = {
     ...(requestPath.startsWith('/api/security/')
-      ? { 'X-Crew-Security-Proof': createDesktopSecurityProof(method, requestPath, body) }
+      ? { 'X-Crew-Security-Proof': createActiveGatewaySecurityProof(method, requestPath, body) }
       : {}),
     ...(body ? { 'content-type': 'application/json' } : {}),
     ...(usesRemoteAuth ? { Authorization: `Bearer ${jwt}`, ...identityHeaders } : {}),
@@ -2620,8 +2652,9 @@ function registerIpc() {
    * wiki:openSourceFile — 用系统默认程序打开 Wiki 来源的原始文件。
    *
    * 渲染进程只传 sourceId/kbId（不可信）；主进程向 gateway 查询来源元数据拿到
-   * original_path，realpath 校验必须落在 CREW_HOME 内（wiki_lib/uploads 等都在
-   * 其下），再 shell.openPath。渲染进程无法借此打开 CREW_HOME 外的任意文件。
+   * original_path，realpath 校验必须落在 gateway 实际使用的 CREW_HOME 内
+   * （wiki_lib/uploads 等都在其下；--dev 模式隔离在 userData/gateway-dev，
+   * 与账号 home 不同），再 shell.openPath。渲染进程无法借此打开 CREW_HOME 外的任意文件。
    */
   trustedHandle('wiki:openSourceFile', async (_e, raw: unknown) => {
     const args = parseOrThrow(WikiOpenSourceFileArgs.parse(raw), 'wiki:openSourceFile');
@@ -2642,7 +2675,7 @@ function registerIpc() {
     if (!source || !originalPath) {
       throw new Error('找不到该来源的原始文件');
     }
-    const crewHomeReal = await fs.promises.realpath(resolveCrewHome());
+    const crewHomeReal = await fs.promises.realpath(activeGatewayCrewHome());
     const real = await fs.promises.realpath(path.resolve(originalPath));
     if (real !== crewHomeReal && !real.startsWith(`${crewHomeReal}${path.sep}`)) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: wiki source file outside CREW_HOME`);
@@ -3012,7 +3045,7 @@ function registerIpc() {
     if (cuaAuthority !== null) {
       fetchInit.headers = {
         ...(fetchInit.headers as Record<string, string> | undefined),
-        'X-Crew-Security-Proof': createDesktopSecurityProof(proofMethod, proofPath, proofBody),
+        'X-Crew-Security-Proof': createActiveGatewaySecurityProof(proofMethod, proofPath, proofBody),
       };
     }
     const res = await fetch(targetUrl.toString(), fetchInit);
@@ -3312,14 +3345,14 @@ function registerIpc() {
   });
   trustedHandle('security:enable-uac', async () => {
     if (process.platform !== 'win32') {
-      return { ok: false, exitCode: null, detail: '仅 Windows 支持启用 UAC' };
+      return { ok: false, exitCode: null, detail: '当前设备无需手动启用此安全设置' };
     }
     return runElevatedUacEnable();
   });
   trustedHandle('security:setup', async (_e, raw: unknown) => {
     const args = parseOrThrow(SecuritySetupArgs.parse(raw), 'security:setup');
     if (process.platform !== 'win32') {
-      return { ok: false, exitCode: null, detail: '仅 Windows 支持安全设置' };
+      return { ok: false, exitCode: null, detail: '当前设备无需手动安装安全防护' };
     }
     const runtime = app.isPackaged
       ? path.join(process.resourcesPath, 'ace-security-runtime.exe')

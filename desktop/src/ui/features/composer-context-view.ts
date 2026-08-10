@@ -117,7 +117,7 @@ function createBeforeInput(): DocumentFragment {
   input.className = 'chat-file-input';
   input.multiple = true;
   input.hidden = true;
-  preview.id = 'chat-attachment-preview';
+  preview.dataset.attachmentPreview = '';
   preview.className = 'mw-attachment-list';
   preview.hidden = true;
   siteAnnotationPreview.id = 'chat-site-annotation-preview';

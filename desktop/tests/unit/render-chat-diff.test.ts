@@ -4,11 +4,12 @@
  *
  * X3a（2026-06）：补充 chat-render 导出的纯逻辑 helper 单测
  * （formatMessageTime / formatDuration / sessionStatusClass）。
- * 注：render* 现在返回 DOM 节点（HTMLElement），而 vitest environment 为 node（无 DOM），
- * 故 DOM-shape 断言无法在此环境运行；它们的等价性由「typecheck + 行为不变的 renderChat」
- * 共同保证。DOM-shape 测试待切到 happy-dom/jsdom 环境后再补。
+ *
+ * 对话面板多实例化重构（2026-08）：环境切到 happy-dom，末尾补
+ * conversation-renderer 双实例（不同 containerId/sessionId）隔离用例。
  */
-import { describe, it, expect } from 'vitest';
+// @vitest-environment happy-dom
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   applyFoldState,
   createChatRenderCoalescer,
@@ -16,35 +17,47 @@ import {
   type FoldSets,
 } from '../../src/ui/render-utils';
 import { formatMessageTime, formatDuration, renderQueuePanelHtml, sessionStatusClass } from '../../src/ui/chat-render';
+import {
+  disposeConversationRenderer,
+  getConversationScrollAnchor,
+  renderConversation,
+} from '../../src/ui/features/conversation-renderer';
+import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
+import { appendSessionMessage } from '../../src/ui/state';
+
+// conversation-renderer 的重依赖：本文件只验证消息流渲染与 diff 缓存隔离，
+// 外部会话身份 / 看板 / 浏览器面板点击跳转不在此覆盖。
+vi.mock('../../src/ui/features/workspaces', () => ({
+  getSessionAgentDisplay: vi.fn(() => null),
+}));
+vi.mock('../../src/ui/features/inspector', () => ({
+  openBrowserWorkbench: vi.fn(),
+  openInspectorToTab: vi.fn(),
+}));
+vi.mock('../../src/ui/features/browser-panel', () => ({
+  openBrowserArtifact: vi.fn(async () => 'in_app'),
+  openUserBrowser: vi.fn(async () => 'in_app'),
+}));
 
 describe('applyFoldState', () => {
   function makeSets(): FoldSets {
     return { unfolded: new Set<string>(), folded: new Set<string>() };
   }
 
-  it('open=true → add to unfolded, remove from folded', () => {
+  it('open/close 状态在两个集合间往返迁移', () => {
     const sets = makeSets();
     sets.folded.add('t1');
     applyFoldState('t1', true, sets);
     expect(sets.unfolded.has('t1')).toBe(true);
     expect(sets.folded.has('t1')).toBe(false);
-  });
 
-  it('open=false → add to folded, remove from unfolded', () => {
-    const sets = makeSets();
-    sets.unfolded.add('t2');
-    applyFoldState('t2', false, sets);
-    expect(sets.folded.has('t2')).toBe(true);
-    expect(sets.unfolded.has('t2')).toBe(false);
-  });
+    applyFoldState('t1', false, sets);
+    expect(sets.folded.has('t1')).toBe(true);
+    expect(sets.unfolded.has('t1')).toBe(false);
 
-  it('toggling same turn moves it between sets', () => {
-    const sets = makeSets();
-    applyFoldState('t3', false, sets);
-    expect(Array.from(sets.folded)).toEqual(['t3']);
-    applyFoldState('t3', true, sets);
+    applyFoldState('t1', true, sets);
     expect(Array.from(sets.folded)).toEqual([]);
-    expect(Array.from(sets.unfolded)).toEqual(['t3']);
+    expect(Array.from(sets.unfolded)).toEqual(['t1']);
   });
 });
 
@@ -210,5 +223,46 @@ describe('renderQueuePanelHtml', () => {
 
     expect(html).not.toContain('data-queue-steer');
     expect(html).toContain('data-queue-menu="0"');
+  });
+});
+
+describe('conversation-renderer 双实例隔离', () => {
+  beforeEach(() => {
+    __resetAllStoresForTest();
+    document.body.innerHTML = '<div id="panel-a"></div><div id="panel-b"></div>';
+  });
+
+  afterEach(() => {
+    disposeConversationRenderer('panel-a');
+    disposeConversationRenderer('panel-b');
+  });
+
+  it('不同 containerId/sessionId 的 diff 缓存与 scroll anchor 互不干扰', () => {
+    const panelA = document.getElementById('panel-a')!;
+    const panelB = document.getElementById('panel-b')!;
+    appendSessionMessage('sid-a', { id: 'u-a', role: 'user', content: '面板A消息', timestamp: 1 });
+    appendSessionMessage('sid-b', { id: 'u-b', role: 'user', content: '面板B消息', timestamp: 1 });
+
+    renderConversation(panelA, 'panel-a', 'sid-a');
+    renderConversation(panelB, 'panel-b', 'sid-b');
+    expect(panelA.textContent).toContain('面板A消息');
+    expect(panelA.textContent).not.toContain('面板B消息');
+    expect(panelB.textContent).toContain('面板B消息');
+    expect(panelB.textContent).not.toContain('面板A消息');
+    // scroll anchor 按容器 id 分键：两个实例各自独立
+    expect(getConversationScrollAnchor('panel-a')).not.toBe(getConversationScrollAnchor('panel-b'));
+
+    // A 追加消息重渲：B 的 DOM 节点身份不变（各自的 diff 缓存互不影响）
+    const bFirst = panelB.querySelector('.msg');
+    appendSessionMessage('sid-a', { id: 'u-a2', role: 'user', content: '面板A第二条', timestamp: 2 });
+    renderConversation(panelA, 'panel-a', 'sid-a');
+    expect(panelA.textContent).toContain('面板A第二条');
+    expect(panelB.querySelector('.msg')).toBe(bFirst);
+
+    // A 切到 B 的会话：只重置 A 容器的缓存；B 的 DOM 仍保持原节点
+    renderConversation(panelA, 'panel-a', 'sid-b');
+    expect(panelA.textContent).toContain('面板B消息');
+    expect(panelA.textContent).not.toContain('面板A第二条');
+    expect(panelB.querySelector('.msg')).toBe(bFirst);
   });
 });

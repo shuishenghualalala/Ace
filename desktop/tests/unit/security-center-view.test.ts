@@ -25,6 +25,7 @@ vi.mock('../../src/ui/ui-feedback', () => ({
 }));
 
 import { createSecurityCenterView } from '../../src/ui/features/security-center-view';
+import type { SecurityCenterActions } from '../../src/ui/features/security-center-view';
 import {
   __resetSecurityCenterForTest,
   initSecurityPage,
@@ -36,8 +37,23 @@ const capabilities = {
   helper_present: true,
   filesystem_sandbox: true,
   managed_network: true,
-  detail: 'Windows runtime 已就绪',
+  detail: '安全运行组件已就绪',
 };
+
+function makeHandlers(overrides: Partial<SecurityCenterActions> = {}): SecurityCenterActions {
+  return {
+    onRefresh: vi.fn(),
+    onStrictSecurityChange: vi.fn(),
+    onModeChange: vi.fn(),
+    onInstall: vi.fn(),
+    onUninstall: vi.fn(),
+    onRuleToggle: vi.fn(),
+    onRuleDelete: vi.fn(),
+    onAuditExport: vi.fn(),
+    onAuditPurge: vi.fn(),
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
   showConfirmDialogMock.mockClear();
@@ -48,17 +64,7 @@ beforeEach(() => {
 
 describe('Security Center view', () => {
   it('can render inside the audit page without a second page header', () => {
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    }, { embedded: true });
+    const view = createSecurityCenterView(makeHandlers(), { embedded: true });
 
     expect(view.element.classList.contains('security-center--embedded')).toBe(true);
     expect(view.element.querySelector('.page-header')).toBeNull();
@@ -66,17 +72,7 @@ describe('Security Center view', () => {
 
   it('explains mode consequences and renders exact rule scope as text', () => {
     const onModeChange = vi.fn();
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange,
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+    const view = createSecurityCenterView(makeHandlers({ onModeChange }));
     view.update({
       loading: false,
       error: '',
@@ -110,7 +106,7 @@ describe('Security Center view', () => {
     expect(onModeChange).toHaveBeenCalledWith('auto_review');
   });
 
-  it('disables Windows setup actions with an explicit reason on unsupported platforms', () => {
+  it('shows built-in Seatbelt status without Windows setup actions on macOS', () => {
     const view = createSecurityCenterView({
       onRefresh: vi.fn(),
       onStrictSecurityChange: vi.fn(),
@@ -165,7 +161,7 @@ describe('Security Center view', () => {
       .toBe(false);
     expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
       .toBe(true);
-    expect(view.element.textContent).not.toContain('当前平台不使用 Windows 原生防护');
+    expect(view.element.textContent).not.toContain('当前设备尚未提供原生防护');
 
     view.update({
       loading: false,
@@ -185,17 +181,7 @@ describe('Security Center view', () => {
   });
 
   it('locks both Windows setup actions while one operation is in progress', () => {
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+    const view = createSecurityCenterView(makeHandlers());
     view.update({
       loading: false,
       setupAction: 'install',
@@ -217,17 +203,7 @@ describe('Security Center view', () => {
 
   it('shows the strict security toggle so compatibility remains an explicit opt-out', () => {
     const onStrictSecurityChange = vi.fn();
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange,
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+    const view = createSecurityCenterView(makeHandlers({ onStrictSecurityChange }));
     view.update({
       loading: false,
       error: '',
@@ -247,18 +223,7 @@ describe('Security Center view', () => {
 
   it('filters and sorts audit rows, then opens a redacted detail dialog', () => {
     const onAuditQueryChange = vi.fn();
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-      onAuditQueryChange,
-    });
+    const view = createSecurityCenterView(makeHandlers({ onAuditQueryChange }));
     view.update({
       loading: false,
       error: '',
@@ -341,7 +306,7 @@ describe('Security Center integration', () => {
     document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.click();
 
     await vi.waitFor(() => expect(showConfirmDialogMock).toHaveBeenCalledWith(expect.objectContaining({
-      title: '安装安全沙箱',
+      title: '安装安全防护',
       confirmText: '安装并继续',
     })));
     expect(document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
@@ -389,7 +354,7 @@ describe('Security Center integration', () => {
     await initSecurityPage();
 
     expect(document.querySelector('[data-security-center]')).toBe(shell);
-    expect(document.body.textContent).toContain('Windows runtime 已就绪');
+    expect(document.body.textContent).toContain('安全运行组件已就绪');
     expect(document.body.textContent).toContain('git status');
     expect(document.body.textContent).toContain('exec');
   });

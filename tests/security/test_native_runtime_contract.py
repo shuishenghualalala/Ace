@@ -45,3 +45,16 @@ def test_linux_hardening_and_bundle_verification_are_not_optional_fallbacks():
     assert "ACE_BUNDLED_BWRAP_SHA256" in source
     assert "/proc/self/fd/" in source
     assert 'arg("--version")' in source
+
+
+def test_macos_profile_uses_seatbelt_and_exact_managed_proxy_route():
+    source = (RUNTIME / "macos" / "mod.rs").read_text(encoding="utf-8")
+    assert 'const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec"' in source
+    assert "(deny default)" in source
+    assert "DENIED_ROOT_" in source
+    assert "allow file-write*" in source
+    assert 'remote ip \\"localhost:{port}\\"' in source
+    assert 'backend: "macos_seatbelt"' in source
+    assert '.env_clear()' in source
+    assert "ACTIVE_PROCESS_GROUP" in source
+    assert "terminate_signal" in source

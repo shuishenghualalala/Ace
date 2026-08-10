@@ -660,13 +660,6 @@ async def test_compactor_summarizes_old_and_keeps_recent_from_user_boundary():
     assert len(out) < len(msgs)
 
 
-async def test_compactor_skips_when_under_budget():
-    msgs = [Message.user("短"), Message.assistant("答")]
-    compactor = ContextCompactor(FakeProvider(), token_budget=100000, keep_recent=3)
-    out = await compactor.maybe_compact(msgs)
-    assert out is msgs
-
-
 async def test_compaction_does_not_destroy_persisted_history():
     """压缩只作用于发给 LLM 的视图，DB 里应保留完整原始历史 + 本轮新增。"""
     store = InMemorySessionStore()

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -252,9 +252,10 @@ fn stage_home_files(files: &BTreeMap<String, Vec<u8>>) -> Result<PathBuf, String
     fs::create_dir(&root).map_err(|error| format!("cannot create projected HOME: {error}"))?;
     for (relative_path, content) in files {
         let destination = root.join(relative_path);
-        if destination.components().any(|component| {
-            matches!(component, std::path::Component::ParentDir)
-        }) {
+        if destination
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
             let _ = fs::remove_dir_all(&root);
             return Err("projected HOME path escapes the staging root".to_string());
         }
@@ -271,7 +272,8 @@ fn stage_home_files(files: &BTreeMap<String, Vec<u8>>) -> Result<PathBuf, String
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(error) = fs::set_permissions(&destination, fs::Permissions::from_mode(0o600)) {
+            if let Err(error) = fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))
+            {
                 let _ = fs::remove_dir_all(&root);
                 return Err(format!("cannot restrict projected HOME file: {error}"));
             }

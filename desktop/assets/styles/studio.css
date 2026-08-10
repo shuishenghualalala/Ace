@@ -823,9 +823,9 @@ body.studio-mode .studio-chat-messages .chat-edit-btn:hover {
 }
 
 /* 执行中提示 / 队列 / Todo 改为浮层，避免挤占 Studio 场景高度导致画布缩放闪烁 */
-#chat-tab.active.studio-mode .chat-composer #chat-running-intro,
-#chat-tab.active.studio-mode .chat-composer #chat-queue-slot,
-#chat-tab.active.studio-mode .chat-composer #chat-todo-slot {
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro,
+#chat-tab.active.studio-mode .chat-composer .chat-queue-slot,
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot {
   position: absolute;
   left: 0;
   right: 0;
@@ -837,17 +837,17 @@ body.studio-mode .studio-chat-messages .chat-edit-btn:hover {
 }
 
 /* 队列 / Todo 在抽屉展开时避让右侧面板 */
-body.studio-panel-open #chat-tab.active.studio-mode .chat-composer #chat-queue-slot,
-body.studio-panel-open #chat-tab.active.studio-mode .chat-composer #chat-todo-slot {
+body.studio-panel-open #chat-tab.active.studio-mode .chat-composer .chat-queue-slot,
+body.studio-panel-open #chat-tab.active.studio-mode .chat-composer .chat-todo-slot {
   right: calc(var(--mw-studio-panel-width) + 10px);
 }
 
-#chat-tab.active.studio-mode .chat-composer #chat-queue-slot,
-#chat-tab.active.studio-mode .chat-composer #chat-todo-slot {
+#chat-tab.active.studio-mode .chat-composer .chat-queue-slot,
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot {
   pointer-events: auto;
 }
 
-#chat-tab.active.studio-mode .chat-composer #chat-todo-slot .desktop-todo-panel {
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot .desktop-todo-panel {
   --mw-todo-accent: var(--mw-studio-brown);
   --mw-todo-accent-soft: var(--mw-studio-parchment-deep);
   --mw-todo-ring-track: var(--mw-studio-parchment-strong);
@@ -858,18 +858,18 @@ body.studio-panel-open #chat-tab.active.studio-mode .chat-composer #chat-todo-sl
   pointer-events: auto;
 }
 
-#chat-tab.active.studio-mode .chat-composer #chat-todo-slot .desktop-todo-panel__count {
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot .desktop-todo-panel__count {
   background: var(--mw-studio-parchment-deep);
   color: var(--mw-studio-brown-dark);
   border: 1px solid var(--mw-studio-brown);
 }
 
-#chat-tab.active.studio-mode .chat-composer #chat-todo-slot .desktop-todo-panel__current,
-#chat-tab.active.studio-mode .chat-composer #chat-todo-slot .desktop-todo-panel__caret {
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot .desktop-todo-panel__current,
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot .desktop-todo-panel__caret {
   color: var(--mw-studio-brown-dark);
 }
 
-#chat-tab.active.studio-mode .chat-composer #chat-running-intro .running-intro {
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro .running-intro {
   width: 100%;
   max-width: none;
   margin: 0;
@@ -882,9 +882,9 @@ body.studio-panel-open #chat-tab.active.studio-mode .chat-composer #chat-todo-sl
   box-shadow: none;
 }
 
-#chat-tab.active.studio-mode .chat-composer #chat-running-intro .running-intro__logo,
-#chat-tab.active.studio-mode .chat-composer #chat-running-intro .running-intro__status,
-#chat-tab.active.studio-mode .chat-composer #chat-running-intro .running-intro__ad {
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro .running-intro__logo,
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro .running-intro__status,
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro .running-intro__ad {
   color: var(--mw-studio-brown-dark);
 }
 
@@ -1025,7 +1025,7 @@ body.studio-panel-open #chat-tab.active.studio-mode .chat-composer #chat-todo-sl
   color: var(--mw-studio-brown-dark);
 }
 
-#chat-tab.active.studio-mode .chat-composer #chat-running-intro {
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro {
   background: var(--mw-studio-parchment);
   border: 3px solid var(--mw-studio-brown-dark);
   border-bottom: none;

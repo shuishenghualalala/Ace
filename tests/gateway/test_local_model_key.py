@@ -49,15 +49,23 @@ def _write_config(tmp_path: Path, *, dev_mode: bool = False) -> Path:
     return config_path
 
 
-def test_local_owner_can_use_explicit_environment_model_key(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "owner, dev_mode, key",
+    [
+        ("local", False, "sk-local"),
+        ("dev:dev", True, "sk-dev"),
+    ],
+    ids=["local-owner", "dev-owner"],
+)
+def test_owner_can_use_explicit_environment_model_key(tmp_path, monkeypatch, owner, dev_mode, key):
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
-    monkeypatch.setenv("CREW_MODEL_API_KEY", "sk-local")
-    config = load_config(config_path=str(_write_config(tmp_path)))
+    monkeypatch.setenv("CREW_MODEL_API_KEY", key)
+    config = load_config(config_path=str(_write_config(tmp_path, dev_mode=dev_mode)))
 
-    profile = config.owner_model_profiles("local")["default"]
+    profile = config.owner_model_profiles(owner)["default"]
 
     assert profile.has_key is True
-    assert profile.api_key == "sk-local"
+    assert profile.api_key == key
 
 
 def test_non_local_owner_does_not_inherit_process_model_key(tmp_path, monkeypatch):
@@ -66,11 +74,3 @@ def test_non_local_owner_does_not_inherit_process_model_key(tmp_path, monkeypatc
     config = load_config(config_path=str(_write_config(tmp_path)))
 
     assert config.owner_model_profiles("another-owner")["default"].has_key is False
-
-
-def test_dev_owner_can_use_explicit_environment_model_key(tmp_path, monkeypatch):
-    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
-    monkeypatch.setenv("CREW_MODEL_API_KEY", "sk-dev")
-    config = load_config(config_path=str(_write_config(tmp_path, dev_mode=True)))
-
-    assert config.owner_model_profiles("dev:dev")["default"].api_key == "sk-dev"

@@ -15,7 +15,6 @@ import { bindBlueprintSurface } from './features/blueprint-surface';
 import { bindModelPicker } from './features/model-picker';
 import { bindComposerToolbar, syncCraftLabel } from './features/composer-toolbar';
 import { bindComposerContextRing } from './features/composer-context-ring';
-import { createComposerView } from './features/composer-view';
 import { createComposerContextView } from './features/composer-context-view';
 import { activateAgentsPage, disposeAgentsPage, initAgentsPage } from './features/agents-page';
 import {
@@ -78,12 +77,19 @@ import { initBackendStatusGuard, isBackendConnected, isBackendInitBypassActive, 
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
 import { bindInspectorUi, openInspectorToTab, refreshInspector, setPlanBoardActions } from './features/inspector';
 import { bindAttachments } from './features/attachments';
+import { queryPrimaryComposer } from './features/composer-scope';
 import {
   copyImageToClipboard,
   openImageViewer,
   revealImageInFolder,
 } from './features/image-viewer';
 import { bindComposerMention, isMentionOpen } from './features/composer-mention';
+import { createMainPanelAttachments } from './features/attachments';
+import {
+  createMainComposerActions,
+  mountConversationPanel,
+} from './features/conversation-panel';
+import { resolveChatRenderTargetId, isStudioView } from './features/studio-chrome-state';
 import { bindScenarioHub } from './features/scenarios-hub';
 import { bindVersionUpdateUi } from './features/version-update';
 import { armSubScenario, clearScenarioChip } from './features/scenario-arm';
@@ -96,16 +102,12 @@ import {
   notify,
   patchBook,
   setActiveSessionId,
-  setEditFrom,
   state,
-  truncateMessagesFrom,
   type SystemPanelKey,
   type TabKey,
 } from './state';
 import {
   bookFor,
-  cancelEdit,
-  editQueueItem,
   getMessages,
   patchPlanReviewMessages,
   refreshSessions,
@@ -114,8 +116,6 @@ import {
   setBusyWithUi,
   setChatCallbacks,
   setStatusWithUi,
-  stopGeneration,
-  steerQueuedItem,
   updateGatewayDot,
   withdrawMessage,
 } from './features/chat-controller';
@@ -226,27 +226,23 @@ function bindGlobalEvents(): () => void {
   ): void => target?.addEventListener(type, listener, { signal: controller.signal });
 
   const composerHost = $('#chat-composer-root');
-  const composerView = composerHost
-    ? createComposerView(composerHost, {
-      submit: async (text) => {
-        if (!requireRendererLogin()) return;
-        const sessionId = state.activeSessionId;
-        if (sessionId && state.editFromIdx[sessionId] != null) {
-          const removed = truncateMessagesFrom(sessionId, state.editFromIdx[sessionId]);
-          setEditFrom(sessionId, null);
-          for (const message of removed) {
-            state.userFoldedTurns.delete(message.id);
-            state.userUnfoldedTurns.delete(message.id);
-          }
-        }
-        await sendMessage(text);
+  // 主对话面板：接管既有 #chat-messages / #chat-composer-root（不自建 DOM），
+  // 渲染仍由 chat-controller.renderChat 驱动；面板负责 Composer + 附件流接线。
+  const mainPanelAttachments = createMainPanelAttachments();
+  const conversationPanel = composerHost
+    ? mountConversationPanel($('#chat-panel') as HTMLElement, {
+      getSessionId: () => state.activeSessionId,
+      attachments: mainPanelAttachments,
+      actions: createMainComposerActions(isMentionOpen),
+      resolveMessages: () => {
+        const containerId = resolveChatRenderTargetId(isStudioView());
+        const container = document.getElementById(containerId);
+        return container ? { container, containerId } : null;
       },
-      stop: stopGeneration,
-      cancelEdit,
-      editQueueItem,
-      steerQueueItem: steerQueuedItem,
-      isCompletionOpen: isMentionOpen,
-    }, $('#composer-context-staging') as HTMLElement | null)
+      composerHost,
+      primary: true,
+      contextStaging: $('#composer-context-staging') as HTMLElement | null,
+    })
     : null;
   const composerContextView = composerHost
     ? createComposerContextView(composerHost)
@@ -281,7 +277,7 @@ function bindGlobalEvents(): () => void {
 
   on($('#new-chat-btn'), 'click', startNewChat);
 
-  const input = $('#chat-input') as HTMLTextAreaElement | null;
+  const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
 
   on($('#chat-messages'), 'click', (event) => {
     const eventTarget = event.target instanceof Element ? event.target : null;
@@ -545,7 +541,7 @@ function bindGlobalEvents(): () => void {
     disposeComposerToolbar();
     disposeAgentsPage();
     composerContextView?.dispose();
-    composerView?.dispose();
+    conversationPanel?.dispose();
   };
   on(window, 'pagehide', dispose);
   return dispose;

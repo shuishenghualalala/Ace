@@ -9,9 +9,12 @@ import WikiGraphView from "./WikiGraphView";
 import ChatPanel from "./ChatPanel";
 import WikiIcon from "./WikiIcon";
 import type { WikiIconName } from "./WikiIcon";
+import WikiPageTabs from "./WikiPageTabs";
 import type { Props as ChatPanelProps } from "./ChatPanel";
 import { ResizablePanels } from "./ResizablePanels";
 import { ancestorPaths, buildFileTree, findPageByTitle, splitHomeQuestions, vaultDocumentLabel } from "../lib/wikiTree";
+import type { WikiOpenTab } from "../lib/wikiTabs";
+import { closeTab, openTab, tabKey } from "../lib/wikiTabs";
 import MarkdownContent from "./MarkdownContent";
 
 type UploadJobStatus = "uploading" | "ingesting" | "done" | "error" | "cancelled";
@@ -81,6 +84,8 @@ export default function WikiHub({
   const [sourceTitles, setSourceTitles] = useState<WikiSourceTitles>({});
   const [sourceFiles, setSourceFiles] = useState<WikiSourceFiles>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** 详情面板已打开的 Tab（页面 / Vault 文档），顶部 Tab 栏可切换、关闭。 */
+  const [openTabs, setOpenTabs] = useState<WikiOpenTab[]>([]);
   const [selectedDocumentName, setSelectedDocumentName] = useState<"Home.md" | "index.md" | null>(null);
   const [vaultDocument, setVaultDocument] = useState<WikiVaultDocument | null>(null);
   const [initializedKbId, setInitializedKbId] = useState<string | null>(null);
@@ -560,6 +565,7 @@ export default function WikiHub({
     setSelectedId(null);
     setSelectedDocumentName(null);
     setVaultDocument(null);
+    setOpenTabs([]);
     setSelectedIds(new Set());
     setPageDetails({});
     setRelationPages({});
@@ -839,6 +845,8 @@ export default function WikiHub({
     setSelectedId(null);
     setSelectedDocumentName(name);
     setVaultDocument(null);
+    // 每次打开都登记为 Tab（已存在则保持原顺序），激活 doc Tab 也复用这里重新拉取。
+    setOpenTabs((prev) => openTab(prev, { kind: "doc", name }).tabs);
     try {
       const res = await api.wikiVaultDocument(name, kbId);
       setVaultDocument(res.document);
@@ -848,20 +856,82 @@ export default function WikiHub({
     }
   }, [kbId]);
 
+  /** 打开页面 Tab：与目录点击一致，清掉 vault 文档态。 */
+  const openPageTab = useCallback((id: string) => {
+    setSelectedDocumentName(null);
+    setVaultDocument(null);
+    setSelectedId(id);
+    setOpenTabs((prev) => openTab(prev, { kind: "page", id }).tabs);
+  }, []);
+
+  /** 当前激活 Tab 的 key：page tab ↔ selectedId 且无文档选中；doc tab ↔ selectedDocumentName。 */
+  const activeWikiTabKey = selectedDocumentName
+    ? tabKey({ kind: "doc", name: selectedDocumentName })
+    : selectedId
+      ? tabKey({ kind: "page", id: selectedId })
+      : null;
+
+  /** 激活已有 Tab：doc Tab 总是重新走 loadVaultDocument 拉取最新内容。 */
+  const activateWikiTab = useCallback(
+    (tab: WikiOpenTab) => {
+      if (tab.kind === "page") {
+        openPageTab(tab.id);
+      } else {
+        void loadVaultDocument(tab.name);
+      }
+    },
+    [openPageTab, loadVaultDocument],
+  );
+
+  /** 关闭 Tab：web 端 wiki 只读无编辑，关闭无需确认。 */
+  const closeWikiTab = useCallback(
+    (key: string) => {
+      const { tabs: nextTabs, nextActiveKey } = closeTab(openTabs, key, activeWikiTabKey);
+      setOpenTabs(nextTabs);
+      // 关闭的不是激活 Tab 时，选中态保持不变。
+      if (nextActiveKey === activeWikiTabKey) return;
+      if (!nextActiveKey) {
+        setSelectedId(null);
+        setSelectedDocumentName(null);
+        setVaultDocument(null);
+        return;
+      }
+      const nextTab = nextTabs.find((t) => tabKey(t) === nextActiveKey);
+      if (!nextTab) return;
+      if (nextTab.kind === "page") {
+        setSelectedDocumentName(null);
+        setVaultDocument(null);
+        setSelectedId(nextTab.id);
+      } else {
+        void loadVaultDocument(nextTab.name);
+      }
+    },
+    [openTabs, activeWikiTabKey, loadVaultDocument],
+  );
+
+  /** Tab 标题：page 用页面标题（详情缓存优先），doc 用固定文案。 */
+  const wikiTabTitles = useMemo(() => {
+    const titles: Record<string, string> = {};
+    for (const tab of openTabs) {
+      if (tab.kind === "page") {
+        titles[tabKey(tab)] =
+          pageDetails[tab.id]?.title ?? pages.find((p) => p.id === tab.id)?.title ?? tab.id;
+      } else {
+        titles[tabKey(tab)] = vaultDocumentLabel(tab.name);
+      }
+    }
+    return titles;
+  }, [openTabs, pageDetails, pages]);
+
   /**
    * 点击正文 [[Wiki 双链]]：先按标题/别名在已加载页面里精确匹配，
    * 找不到再走搜索接口兜底（对齐桌面端 resolveAndOpenWikiPage）。
    */
   const handleWikiLink = useCallback(
     async (title: string) => {
-      const openPage = (pageId: string) => {
-        setSelectedDocumentName(null);
-        setVaultDocument(null);
-        setSelectedId(pageId);
-      };
       const local = findPageByTitle(pages, title);
       if (local) {
-        openPage(local.id);
+        openPageTab(local.id);
         return;
       }
       try {
@@ -875,12 +945,12 @@ export default function WikiHub({
         setPageDetails((prev) => ({ ...prev, [target.id]: target }));
         setSourceTitles((prev) => ({ ...prev, ...(res.source_titles || {}) }));
         setSourceFiles((prev) => ({ ...prev, ...(res.source_files || {}) }));
-        openPage(target.id);
+        openPageTab(target.id);
       } catch (err) {
         setMessage(`打开 Wiki 页面失败：${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    [pages, kbId],
+    [pages, kbId, openPageTab],
   );
 
   useEffect(() => {
@@ -923,9 +993,7 @@ export default function WikiHub({
       selectedIds,
       highlightedIds,
       onSelectPage: (p: WikiPage) => {
-        setSelectedDocumentName(null);
-        setVaultDocument(null);
-        setSelectedId(p.id);
+        openPageTab(p.id);
       },
       onToggleSelect: handleToggleSelect,
       onDelete: handleDelete,
@@ -952,9 +1020,7 @@ export default function WikiHub({
             selectedId={selectedId}
             onSelectPage={(p) => {
               // 与列表点击一致：清掉 vault 文档态，否则详情仍停在 Home.md/index.md
-              setSelectedDocumentName(null);
-              setVaultDocument(null);
-              setSelectedId(p.id);
+              openPageTab(p.id);
             }}
           />
         );
@@ -1372,6 +1438,15 @@ export default function WikiHub({
           />
 
           <div className="wiki-browser__detail wiki-panel">
+            {/* 已打开页面/文档的 Tab 栏：固定在详情面板顶部，内容区独立滚动 */}
+            <WikiPageTabs
+              tabs={openTabs}
+              activeKey={activeWikiTabKey}
+              titles={wikiTabTitles}
+              onActivate={activateWikiTab}
+              onClose={closeWikiTab}
+            />
+            <div className="wiki-browser__detail-body">
             {selectedDocumentName ? (
               vaultDocument ? (
                 <div className="wiki-page-view wiki-page-view--inline">
@@ -1425,7 +1500,7 @@ export default function WikiHub({
                 sourceFiles={sourceFiles}
                 kbId={kbId}
                 inline
-                onNavigate={(pageId) => setSelectedId(pageId)}
+                onNavigate={(pageId) => openPageTab(pageId)}
                 onWikiLink={handleWikiLink}
                 pages={pages}
                 relationPages={relationPages[selectedPage.id] ?? []}
@@ -1435,6 +1510,7 @@ export default function WikiHub({
                 <p>选择左侧页面查看详情</p>
               </div>
             )}
+            </div>
           </div>
           </ResizablePanels.Panel>
           )}

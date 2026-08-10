@@ -235,6 +235,7 @@ RUN mkdir -p /tmp/runtimes/python \
     && /tmp/runtimes/python/bin/python3 --version \
     && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir \
        requests lxml python-pptx openpyxl xlsxwriter beautifulsoup4 markdown charset-normalizer \
+       reportlab matplotlib pikepdf pdfplumber markdown2 "xhtml2pdf>=0.2.15" pypdfium2 Pillow defusedxml pandas \
     && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir --no-deps markitdown \
     && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir "mcp==2.0.0" \
     && ln -sf python3 /tmp/runtimes/python/bin/python \

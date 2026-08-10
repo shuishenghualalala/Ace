@@ -8,6 +8,8 @@ import shutil
 import asyncio
 import hashlib
 import logging
+import platform
+import sys
 from dataclasses import asdict, dataclass, replace
 from contextvars import ContextVar
 from pathlib import Path
@@ -35,7 +37,10 @@ class ProcessLaunch:
     profile: PermissionProfile
     helper_argv: tuple[str, ...] = ()
     trusted_readable_roots: tuple[Path, ...] = ()
-    external_security_enabled: bool = True
+    # External runtimes stay on the legacy host path unless Config explicitly
+    # enables the managed security boundary. Built-in tools remain managed
+    # according to ``profile`` and do not use this flag.
+    external_security_enabled: bool = False
 
     @property
     def managed(self) -> bool:
@@ -270,12 +275,13 @@ def compile_process_launch(
     mode: ConversationPermissionMode,
     *,
     db_path: Path,
-    external_security_enabled: bool = True,
+    external_security_enabled: bool = False,
 ) -> ProcessLaunch:
     """Build the host launch decision from trusted config and security state.
 
     ``external_security_enabled`` is supplied by ``Config`` for Gateway requests.
-    Lower-level callers default to the secure managed behavior.
+    Lower-level callers default external runtimes to the legacy host path.
+    Built-in tools remain managed whenever ``profile`` is managed.
     """
     protected = _protected_entries(context, db_path)
     profile = settings_for_mode(mode, context.workspace_root, deny_entries=protected).profile
@@ -319,11 +325,46 @@ def shell_argv(command: str) -> tuple[str, ...]:
     return (str(Path(executable).resolve()), "-lc", command)
 
 
+def runtime_platform_key(
+    system_name: str | None = None,
+    machine_name: str | None = None,
+) -> str | None:
+    """Return the repository prebuilt directory key for the current host."""
+    system = (system_name or sys.platform).strip().lower()
+    system = {
+        "macos": "darwin",
+        "windows": "win32",
+        "linux2": "linux",
+    }.get(system, system)
+    machine = (machine_name or platform.machine()).strip().lower()
+    arch = {
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "amd64": "x64",
+        "x64": "x64",
+        "x86_64": "x64",
+    }.get(machine)
+    if system not in {"darwin", "linux", "win32"} or arch is None:
+        return None
+    return f"{system}-{arch}"
+
+
+def packaged_runtime_candidates(repo_root: Path, name: str) -> tuple[Path, ...]:
+    """Return fixed, host-specific runtime locations in development priority order."""
+    candidates = [repo_root / "desktop" / "security-runtime-bin" / name]
+    platform_key = runtime_platform_key()
+    if platform_key:
+        candidates.append(repo_root / "security-runtime" / "prebuilt" / platform_key / name)
+    candidates.append(repo_root / "security-runtime" / "bin" / name)
+    return tuple(candidates)
+
+
 def packaged_runtime_argv() -> tuple[str, ...]:
     """Resolve a trusted installed helper without searching the task cwd.
 
-    Priority: ACE_SECURITY_RUNTIME env (absolute) → 提交进仓库的
-    security-runtime/bin/<name> 预编译产物（团队 dev 默认路径，免 Rust 工具链）。
+    Priority: ACE_SECURITY_RUNTIME env (absolute) → Desktop 本地 staging 目录 → 当前
+    平台/架构的仓库预编译产物 → 旧版 security-runtime/bin/<name>。所有候选都固定在
+    仓库根目录，不搜索任务 cwd。
     """
     configured = os.environ.get("ACE_SECURITY_RUNTIME", "").strip()
     if configured:
@@ -332,7 +373,8 @@ def packaged_runtime_argv() -> tuple[str, ...]:
         name = "ace-security-runtime.exe" if os.name == "nt" else "ace-security-runtime"
         # crew/security/launch.py → parents[2] = 仓库根
         repo_root = Path(__file__).resolve().parents[2]
-        candidate = repo_root / "security-runtime" / "bin" / name
+        candidates = packaged_runtime_candidates(repo_root, name)
+        candidate = next((path for path in candidates if path.is_file()), candidates[0])
     if not candidate.is_absolute():
         raise RuntimeError("native security runtime path must be absolute")
     return (str(candidate),)
@@ -382,13 +424,24 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         return
     if manifest.get("schema") != 2:
         raise HelperIntegrityError("native security runtime manifest schema is unsupported")
-    expected = ""
-    for entry in manifest.get("files", []):
-        if isinstance(entry, dict) and str(entry.get("name", "")).strip() == path.name:
-            expected = str(entry.get("sha256", "")).strip()
-            break
-    if not expected and str(manifest.get("binary_name", "")).strip() == path.name:
-        expected = str(manifest.get("binary_sha256", "")).strip()
+    declared_platform = str(manifest.get("platform", "")).strip()
+    declared_arch = str(manifest.get("arch", "")).strip()
+    if bool(declared_platform) != bool(declared_arch):
+        raise HelperIntegrityError("native security runtime manifest target is incomplete")
+    if declared_platform and declared_arch:
+        declared_key = runtime_platform_key(declared_platform, declared_arch)
+        current_key = runtime_platform_key()
+        if declared_key is None or current_key is None or declared_key != current_key:
+            raise HelperIntegrityError("native security runtime targets a different platform")
+    expected_name = str(manifest.get("binary_name", "")).strip()
+    if expected_name and expected_name != path.name:
+        raise HelperIntegrityError("native security runtime manifest names a different binary")
+    expected = str(manifest.get("binary_sha256", "")).strip()
+    if not expected:
+        for entry in manifest.get("files", []):
+            if isinstance(entry, dict) and str(entry.get("name", "")).strip() == path.name:
+                expected = str(entry.get("sha256", "")).strip()
+                break
     if not expected:
         raise HelperIntegrityError("native security runtime manifest is missing binary digest")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -398,16 +451,20 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         )
 
 
-def runtime_source_stale() -> bool | None:
+def runtime_source_stale(helper_path: str | Path | None = None) -> bool | None:
     """检测提交进 bin/ 的二进制是否落后于 Rust 源码。
 
-    对 bin/runtime-manifest.json 里记录的 source_hash 与当前 src/+Cargo.toml+tests
-    的实时哈希比对。返回 True=过期、False=一致、None=无法判定（缺 manifest 或源码，
-    例如打包态或源码未随包——不报过期，避免误报）。
+    对 helper 旁边 manifest 里记录的 source_hash 与当前 src/+Cargo.toml+tests 的实时哈希
+    比对。打包态 manifest 只包含二进制文件 hash，没有 source_hash，因此返回 None。
+    返回 True=过期、False=一致、None=无法判定（缺 manifest/source_hash 或源码未随包）。
     """
     repo_root = Path(__file__).resolve().parents[2]
     sec_root = repo_root / "security-runtime"
-    manifest_path = sec_root / "bin" / "runtime-manifest.json"
+    if helper_path is None:
+        helper_path = packaged_runtime_argv()[0]
+    manifest_path = Path(helper_path).expanduser().resolve(strict=False).with_name(
+        "runtime-manifest.json"
+    )
     if not manifest_path.is_file():
         return None
     try:

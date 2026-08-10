@@ -433,7 +433,10 @@ fn canonical_optional(path: &Path) -> Result<Option<PathBuf>, String> {
     match path.canonicalize() {
         Ok(path) => Ok(Some(path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("cannot resolve ACL root {}: {error}", path.display())),
+        Err(error) => Err(format!(
+            "cannot resolve ACL root {}: {error}",
+            path.display()
+        )),
     }
 }
 
@@ -476,7 +479,10 @@ mod tests {
             r"C:\\ace-security-runtime-missing-{}",
             std::process::id()
         ));
-        assert_eq!(canonical_optional(&path).expect("not a permission error"), None);
+        assert_eq!(
+            canonical_optional(&path).expect("not a permission error"),
+            None
+        );
     }
 
     #[test]

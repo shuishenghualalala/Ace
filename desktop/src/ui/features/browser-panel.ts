@@ -3,6 +3,7 @@
 import { backendApi, type BrowserPageState } from '../backend-client';
 import { notify, state } from '../state';
 import { createBrowserInspector, replaceBrowserTabs } from './browser-inspector';
+import { queryPrimaryComposer } from './composer-scope';
 
 type BrowserEvent =
   | { type: 'state'; state: BrowserPageState }
@@ -1084,7 +1085,7 @@ export function renderBrowserRecordingBar(): void {
 export function compileLastRecording(): boolean {
   const lastRecording = lastRecordingBySession.get(currentSession());
   if (!lastRecording || lastRecording.incomplete) return false;
-  const input = document.querySelector<HTMLTextAreaElement>('#chat-input');
+  const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
   if (!input) return false;
   const prompt = `把我刚才在浏览器里的这段录制编译成一个技能。\n`
     + `录制 ID：${lastRecording.recordingId}\n`

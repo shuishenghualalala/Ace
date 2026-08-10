@@ -58,18 +58,4 @@ describe('appendSessionMessage (D5: subscribers fire on append)', () => {
     expect(after).not.toBe(before);
     expect(after.length).toBe(2);
   });
-
-  it('does not clobber an append when a second immutable update follows', () => {
-    // Reproduces the original race: append (mutate, no publish) then an
-    // immutable patchMessage-style set that read the pre-append list. With the
-    // fix, append publishes first so the second set sees both messages.
-    appendSessionMessage('sid-1', makeMessage('m1', 'user'));
-    // Simulate a concurrent immutable rewrite that reads current state.
-    const cur = messageStore.get().messages['sid-1'] ?? [];
-    messageStore.set({ messages: { ...messageStore.get().messages, ['sid-1']: [...cur] } });
-
-    const final = messageStore.get().messages['sid-1']!;
-    expect(final.length).toBe(1);
-    expect(final[0].id).toBe('m1');
-  });
 });

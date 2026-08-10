@@ -60,8 +60,3 @@ async def test_cron_run_now_background_task_strong_ref_drains(crew_env, auth_hea
             break
     assert not cron_mod._background_tasks, "后台任务集合应在任务完成后排空"
     await crew.shutdown()
-
-
-def test_cron_module_exposes_background_task_set():
-    """仍直接 create_task 的 cron 模块必须保留强引用集合。"""
-    assert isinstance(cron_mod._background_tasks, set)

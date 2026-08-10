@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+import importlib
 import ssl
 
 import certifi
 import httpx
+import pytest
 
 from crew.providers.ssl_context import get_shared_ssl_context
 
@@ -66,27 +68,25 @@ def test_build_ssl_context_reads_cacert_once(monkeypatch):
     assert len(opens) == 1, f"cadata 路径应只 open cacert 一次，实际 {len(opens)} 次"
 
 
-def test_openai_provider_uses_shared_ssl_context():
-    """OpenAIProvider 的 httpx client verify 指向共享 ctx。"""
-    from crew.providers.openai_provider import OpenAIProvider
-
-    provider = OpenAIProvider(api_key="sk-test", base_url="https://example.test/v1")
-    client = provider._client  # AsyncOpenAI
-    # SDK 内部 httpx client 的 ssl_context 应是共享单例
-    httpx_client = client._client
+@pytest.mark.parametrize(
+    "provider_path,base_url",
+    [
+        ("crew.providers.openai_provider.OpenAIProvider", "https://example.test/v1"),
+        ("crew.providers.anthropic_provider.AnthropicProvider", "https://example.test"),
+    ],
+    ids=["openai", "anthropic"],
+)
+def test_provider_uses_shared_ssl_context(provider_path, base_url):
+    """Provider 的 httpx client verify 指向共享 ctx。"""
+    module_path, cls_name = provider_path.rsplit(".", 1)
+    provider_cls = getattr(importlib.import_module(module_path), cls_name)
+    provider = provider_cls(api_key="sk-test", base_url=base_url)
+    client = provider._client
+    # OpenAI SDK 内部还包一层 AsyncOpenAI，其 ._client 才是 httpx client；
+    # Anthropic provider._client 直接就是 httpx.AsyncClient
+    httpx_client = getattr(client, "_client", client)
     assert isinstance(httpx_client, httpx.AsyncClient)
     # httpx 把 verify=<SSLContext> 存到 transport._pool._ssl_context；直接比对单例对象
-    shared = get_shared_ssl_context()
-    assert _extract_ssl_context(httpx_client) is shared
-
-
-def test_anthropic_provider_uses_shared_ssl_context():
-    """AnthropicProvider 的 httpx client verify 指向共享 ctx。"""
-    from crew.providers.anthropic_provider import AnthropicProvider
-
-    provider = AnthropicProvider(api_key="sk-test", base_url="https://example.test")
-    httpx_client = provider._client
-    assert isinstance(httpx_client, httpx.AsyncClient)
     shared = get_shared_ssl_context()
     assert _extract_ssl_context(httpx_client) is shared
 

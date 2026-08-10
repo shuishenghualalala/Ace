@@ -76,6 +76,22 @@ function runtimeVariable(property: string): string {
   return `--mw-runtime-${property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
 }
 
+// ── 阻断 --mw-runtime-* 的继承泄漏 ──
+// 自定义属性默认沿 DOM 树继承：在容器上 setRuntimeStyle('width', …) 会把变量静默
+// 传给所有带 .mw-runtime-style 的后代——wiki 对话栏用 runtime width 持久化栏宽时，
+// 栏内 composer 输入框的 width 被锁死成栏宽旧值，栏拉宽后输入框不跟随。
+// 语义本应是「只作用于被 setRuntimeStyle 的那一个元素」，因此把全部变量注册为
+// inherits: false（syntax '*' 的初始值即 guaranteed-invalid，var() 回退 fallback）。
+if (typeof CSS !== 'undefined' && typeof CSS.registerProperty === 'function') {
+  for (const property of RUNTIME_PROPERTIES) {
+    try {
+      CSS.registerProperty({ name: runtimeVariable(property), syntax: '*', inherits: false });
+    } catch {
+      // 重复注册（热更新 / 双实例模块加载）时忽略，退回继承语义，行为与修复前一致。
+    }
+  }
+}
+
 export function setRuntimeStyle(
   element: HTMLElement,
   property: string,

@@ -62,8 +62,8 @@ function ensureSecurityCenter(): SecurityCenterView | null {
       onRefresh: () => void refresh(),
       onStrictSecurityChange: (enabled) => void changeStrictSecurity(enabled),
       onModeChange: (mode) => void changeMode(mode),
-      onInstall: () => void setupWindowsProtection('repair'),
-      onUninstall: () => void setupWindowsProtection('uninstall'),
+      onInstall: () => void setupProtection('repair'),
+      onUninstall: () => void setupProtection('uninstall'),
       onRuleToggle: (rule) => void toggleRule(rule),
       onRuleDelete: (rule) => void deleteRule(rule),
       onAuditExport: () => void exportAudit(),
@@ -197,7 +197,7 @@ async function changeMode(mode: ConversationSecurityMode): Promise<void> {
   render();
 }
 
-async function setupWindowsProtection(action: 'repair' | 'uninstall'): Promise<void> {
+async function setupProtection(action: 'repair' | 'uninstall'): Promise<void> {
   if (snapshot.setupAction || snapshot.loading) return;
   snapshot = {
     ...snapshot,
@@ -210,10 +210,10 @@ async function setupWindowsProtection(action: 'repair' | 'uninstall'): Promise<v
       if (uacPreparation !== 'ready') return;
     }
     const accepted = await showConfirmDialog({
-      title: action === 'repair' ? '安装安全沙箱' : '卸载 Windows 防护',
+      title: action === 'repair' ? '安装安全防护' : '卸载安全防护',
       message: action === 'repair'
-        ? '将请求一次 Windows 管理员权限，创建 Crew 使用的受限账户并配置网络防护规则。安装完成后，受管命令将在沙箱边界内执行。是否继续？'
-        : '将移除 Crew 创建的安全沙箱账户和网络防护规则。项目文件不会被删除，但受管命令将暂时无法使用。是否继续？',
+        ? '将请求一次系统管理员权限，创建受限执行环境并配置网络防护规则。安装完成后，受管命令将在安全边界内执行。是否继续？'
+        : '将移除应用创建的安全执行环境和网络防护规则。项目文件不会被删除，但受管命令将暂时无法使用。是否继续？',
       confirmText: action === 'repair' ? '安装并继续' : '卸载并继续',
     });
     if (!accepted) return;

@@ -7,7 +7,7 @@ import { syncRunningIntroSlot } from '../../src/ui/features/running-intro';
 
 beforeEach(() => {
   __resetAllStoresForTest();
-  document.body.innerHTML = '<div id="chat-running-intro"></div>';
+  document.body.innerHTML = '<div class="chat-running-intro"></div>';
 });
 
 afterEach(() => {
@@ -23,7 +23,7 @@ describe('syncSessionLiveFromBackend', () => {
     sessionStore.set({ busySessions: { 'sid-1': true } });
 
     syncRunningIntroSlot();
-    const slot = document.getElementById('chat-running-intro')!;
+    const slot = document.querySelector<HTMLElement>('.chat-running-intro')!;
     const intro = slot.firstElementChild;
     const logo = slot.querySelector('.running-intro__logo');
     const logoImage = logo?.querySelector<HTMLImageElement>('.running-intro__agent-logo');

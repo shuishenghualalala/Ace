@@ -12,6 +12,7 @@ import {
 import { setRuntimeStyle } from '../components/runtime-style';
 import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
 import { getSkills, onSkillsChange } from './skill-store';
+import { queryPrimaryComposer } from './composer-scope';
 import { $, $$, ensureSessionBook, escapeHtml, notify, patchBook, state, type ComposerMode } from '../state';
 import {
   canSwitchComposerWorkspace,
@@ -610,7 +611,7 @@ function renderModelPopover(): void {
 async function renderSkillsPopover(): Promise<void> {
   closeAllPopovers();
   const anchor = $('#chat-skills-btn') as HTMLElement | null;
-  const input = $('#chat-input') as HTMLTextAreaElement | null;
+  const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
   if (!anchor) return;
 
   const popover = document.createElement('div');

@@ -9,6 +9,18 @@ import {
 import { mergeTeamInternalMessage } from "./teamMessageMerge";
 import type { UiMessage } from "../types";
 
+const teamItem = (overrides: Partial<BackendHistoryItem>): BackendHistoryItem => ({
+  role: "team_internal",
+  content: "",
+  source_session_id: "web_demo::turn::req_1::kk",
+  agent_id: "kk",
+  event_type: "team_stream",
+  node_id: "qa_engineer_plan_1",
+  display_mode: "stream",
+  timestamp: 1,
+  ...overrides,
+});
+
 describe("preserveLocalProcessDetails", () => {
   it("keeps thinking and tools when an immediate history reload trails persistence", () => {
     const history: UiMessage[] = [
@@ -112,31 +124,21 @@ describe("mapHistoryItems", () => {
 
   it("keeps a completed team node as one summary bubble with folded process text", () => {
     const items: BackendHistoryItem[] = [
-      {
-        role: "team_internal",
+      teamItem({
         content: "让我先看一下相关代码。",
-        source_session_id: "web_demo::turn::req_1::kk",
-        agent_id: "kk",
         agent_name: "kk",
         agent_role: "测试方案：测试一下团队协作",
-        event_type: "team_stream",
-        node_id: "qa_engineer_plan_1",
         display_mode: "collapsible",
         collapsed_title: "测试方案：测试一下团队协作 的执行过程",
-        timestamp: 1,
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "测试方案：测试一下团队协作提交 Leader 审阅。\n\n测试方案初稿已完成。",
-        source_session_id: "web_demo::turn::req_1::kk",
-        agent_id: "kk",
         agent_name: "kk",
         agent_role: "测试方案：测试一下团队协作",
         event_type: "team_submit",
-        node_id: "qa_engineer_plan_1",
         display_mode: "chat",
         timestamp: 2,
-      },
+      }),
     ];
 
     const messages = mapHistoryItems(items);
@@ -183,24 +185,21 @@ describe("mapHistoryItems", () => {
 
   it("does not merge same node id across different team turns", () => {
     const items: BackendHistoryItem[] = [
-      {
-        role: "team_internal",
+      teamItem({
         content: "第一轮 Leader 正在汇总。",
         source_session_id: "web_demo::turn::req_1::leader",
         agent_id: "leader",
-        event_type: "team_stream",
         node_id: "leader_summary",
         display_mode: "collapsible",
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "第二轮 Leader 已汇总。",
         source_session_id: "web_demo::turn::req_2::leader",
         agent_id: "leader",
         event_type: "team_submit",
         node_id: "leader_summary",
         display_mode: "chat",
-      },
+      }),
     ];
 
     const messages = mapHistoryItems(items);
@@ -213,23 +212,16 @@ describe("mapHistoryItems", () => {
 
   it("does not let completion without source session overwrite an existing node", () => {
     const items: BackendHistoryItem[] = [
-      {
-        role: "team_internal",
+      teamItem({
         content: "已有执行过程。",
-        source_session_id: "web_demo::turn::req_1::kk",
-        agent_id: "kk",
-        event_type: "team_stream",
-        node_id: "qa_engineer_plan_1",
         display_mode: "collapsible",
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "缺少来源的完成消息。",
-        agent_id: "kk",
+        source_session_id: undefined,
         event_type: "team_submit",
-        node_id: "qa_engineer_plan_1",
         display_mode: "chat",
-      },
+      }),
     ];
 
     const messages = mapHistoryItems(items);
@@ -241,11 +233,8 @@ describe("mapHistoryItems", () => {
 
   it("keeps team internal thinking and tool calls for the agent timeline", () => {
     const items: BackendHistoryItem[] = [
-      {
-        role: "team_internal",
+      teamItem({
         content: "我完成了检查。",
-        source_session_id: "web_demo::turn::req_1::kk",
-        agent_id: "kk",
         agent_name: "kk",
         thinking: "先确认运行环境。",
         tool_calls: [
@@ -258,7 +247,7 @@ describe("mapHistoryItems", () => {
             status: "done",
           },
         ],
-      },
+      }),
     ];
 
     const messages = mapHistoryItems(items);
@@ -271,27 +260,14 @@ describe("mapHistoryItems", () => {
 
   it("merges live team stream timeline events into the same node bubble", () => {
     const items: BackendHistoryItem[] = [
-      {
-        role: "team_internal",
-        content: "",
-        source_session_id: "web_demo::turn::req_1::kk",
-        agent_id: "kk",
+      teamItem({
         agent_role: "实现：2048",
-        event_type: "team_stream",
         node_id: "build_1",
-        display_mode: "stream",
         thinking: "先确认要生成单文件游戏。",
-        timestamp: 1,
-      },
-      {
-        role: "team_internal",
-        content: "",
-        source_session_id: "web_demo::turn::req_1::kk",
-        agent_id: "kk",
+      }),
+      teamItem({
         agent_role: "实现：2048",
-        event_type: "team_stream",
         node_id: "build_1",
-        display_mode: "stream",
         tool_calls: [
           {
             id: "tool_write",
@@ -302,29 +278,21 @@ describe("mapHistoryItems", () => {
           },
         ],
         timestamp: 2,
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "已生成 `index.html`。",
-        source_session_id: "web_demo::turn::req_1::kk",
-        agent_id: "kk",
         agent_role: "实现：2048",
-        event_type: "team_stream",
         node_id: "build_1",
-        display_mode: "stream",
         timestamp: 3,
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "@leader 实现：2048 已完成。",
-        source_session_id: "web_demo::turn::req_1::kk",
-        agent_id: "kk",
         agent_role: "实现：2048",
         event_type: "team_submit",
         node_id: "build_1",
         display_mode: "chat",
         timestamp: 4,
-      },
+      }),
     ];
 
     const messages = mapHistoryItems(items);
@@ -339,35 +307,27 @@ describe("mapHistoryItems", () => {
 
   it("merges direct leader stream into one result without duplicate process text", () => {
     const items: BackendHistoryItem[] = [
-      {
-        role: "team_internal",
+      teamItem({
         content: "你好，",
         source_session_id: "web_demo::turn::req_1::leader",
         agent_id: "leader",
         agent_name: "hh",
         agent_role: "leader",
         is_leader: true,
-        event_type: "team_stream",
         node_id: "direct_leader_req_1",
-        display_mode: "stream",
         collapsed_title: "Leader 的回复过程",
-        timestamp: 1,
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "我是 hh，可以继续帮你处理团队任务。",
         source_session_id: "web_demo::turn::req_1::leader",
         agent_id: "leader",
         agent_name: "hh",
         agent_role: "leader",
         is_leader: true,
-        event_type: "team_stream",
         node_id: "direct_leader_req_1",
-        display_mode: "stream",
         timestamp: 2,
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "你好，我是 hh，可以继续帮你处理团队任务。",
         source_session_id: "web_demo::turn::req_1::leader",
         agent_id: "leader",
@@ -380,7 +340,7 @@ describe("mapHistoryItems", () => {
         collapsed_title: "Leader 的回复过程",
         thinking: "判断为轻量团队聊天。",
         timestamp: 3,
-      },
+      }),
     ];
 
     const messages = mapHistoryItems(items);
@@ -395,17 +355,13 @@ describe("mapHistoryItems", () => {
 
   it("folds leader review tools into the review bubble instead of showing a standalone tool bubble", () => {
     const items: BackendHistoryItem[] = [
-      {
-        role: "team_internal",
-        content: "",
+      teamItem({
         source_session_id: "web_demo::turn::req_1::leader",
         agent_id: "leader",
         agent_name: "hh",
         agent_role: "leader",
         is_leader: true,
-        event_type: "team_stream",
         node_id: "leader_review_qa_plan",
-        display_mode: "stream",
         tool_calls: [
           {
             id: "tool_review_1",
@@ -415,10 +371,8 @@ describe("mapHistoryItems", () => {
             status: "done",
           },
         ],
-        timestamp: 1,
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "@kk @crew 方案已通过 Leader 审阅，开始验证。",
         source_session_id: "web_demo::turn::req_1::leader",
         agent_id: "leader",
@@ -429,7 +383,7 @@ describe("mapHistoryItems", () => {
         node_id: "leader_review_qa_plan",
         display_mode: "chat",
         timestamp: 2,
-      },
+      }),
     ];
 
     const messages = mapHistoryItems(items);
@@ -443,8 +397,7 @@ describe("mapHistoryItems", () => {
 
   it("suppresses generic approve decision when the same leader review already says it passed", () => {
     const items: BackendHistoryItem[] = [
-      {
-        role: "team_internal",
+      teamItem({
         content: "@kk @crew 方案已通过 Leader 审阅，开始验证。",
         source_session_id: "web_demo::turn::req_1::leader",
         agent_id: "leader",
@@ -454,10 +407,8 @@ describe("mapHistoryItems", () => {
         event_type: "team_review",
         node_id: "leader_review_qa_plan",
         display_mode: "chat",
-        timestamp: 1,
-      },
-      {
-        role: "team_internal",
+      }),
+      teamItem({
         content: "审阅通过，继续后续流程。",
         source_session_id: "web_demo::turn::req_1::leader",
         agent_id: "leader",
@@ -469,7 +420,7 @@ describe("mapHistoryItems", () => {
         mention_intent: "approve",
         display_mode: "chat",
         timestamp: 2,
-      },
+      }),
     ];
 
     const messages = mapHistoryItems(items);

@@ -1,5 +1,6 @@
 """Release security workflows must test and stage the final runtime artifact."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -17,7 +18,7 @@ def test_native_security_workflows_bind_release_artifact_evidence() -> None:
     for field in ("artifact_sha256", "repository", "commit"):
         assert f'"{field}"' in writer
 
-    for platform in ("linux", "macos", "windows"):
+    for platform in ("linux", "windows", "macos"):
         source = (ROOT / ".github" / "workflows" / f"security-{platform}.yml").read_text(
             encoding="utf-8"
         )
@@ -40,11 +41,28 @@ def test_runtime_npm_audit_discovers_every_committed_lockfile() -> None:
     }
 
 
-def test_evidence_source_hash_matches_the_runtime_manifest() -> None:
-    manifest = json.loads(
-        (ROOT / "security-runtime" / "bin" / "runtime-manifest.json").read_text(encoding="utf-8")
-    )
-    assert _source_hash(ROOT / "security-runtime") == manifest["source_hash"]
+def test_evidence_source_hash_matches_platform_prebuilt_manifests() -> None:
+    crate = ROOT / "security-runtime"
+    manifests = sorted((crate / "prebuilt").glob("*/runtime-manifest.json"))
+    assert manifests, "at least one platform-specific prebuilt runtime must be committed"
+    expected = _source_hash(crate)
+    for manifest_path in manifests:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["source_hash"] == expected
+
+
+def test_committed_prebuilt_runtimes_match_source_target_and_digest() -> None:
+    crate = ROOT / "security-runtime"
+    manifests = sorted((crate / "prebuilt").glob("*/runtime-manifest.json"))
+    assert manifests, "at least one platform-specific prebuilt runtime must be committed"
+    for manifest_path in manifests:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        runtime = manifest_path.parent / manifest["binary_name"]
+        assert manifest["schema"] == 2
+        assert f"{manifest['platform']}-{manifest['arch']}" == manifest_path.parent.name
+        assert manifest["source_hash"] == _source_hash(crate)
+        assert runtime.is_file()
+        assert hashlib.sha256(runtime.read_bytes()).hexdigest() == manifest["binary_sha256"]
 
 
 def test_runtime_evidence_binds_the_same_tested_and_staged_bytes(tmp_path: Path) -> None:

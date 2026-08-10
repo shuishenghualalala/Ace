@@ -135,7 +135,7 @@ async def run_matrix(runtime: Path, platform_name: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--platform", required=True, choices=("linux", "macos", "windows"))
+    parser.add_argument("--platform", required=True, choices=("linux", "windows", "macos"))
     parser.add_argument("--runtime", required=True, type=Path)
     args = parser.parse_args()
     asyncio.run(run_matrix(args.runtime, args.platform))

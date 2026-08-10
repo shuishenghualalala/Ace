@@ -32,7 +32,7 @@ describe('Windows security setup UAC flow', () => {
 
     expect(window.Crew.securityEnableUac).toHaveBeenCalledTimes(1);
     expect(showConfirmDialogMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      title: '需要启用 Windows 用户账户控制',
+      title: '需要启用系统安全设置',
       confirmText: '启用 UAC',
     }));
     expect(showConfirmDialogMock).toHaveBeenNthCalledWith(2, expect.objectContaining({

@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator
 
+import pytest
+
 from crew.agent.executor import BuiltinExecutor, ExecutionContext
 from crew.agent.loop import (
     IterationBudget,
@@ -1459,71 +1461,52 @@ class VisibleReadyStreamProvider(LLMProvider):
         yield StreamChunk(done=True, tool_calls=[self._tool_call], finish_reason="tool_calls")
 
 
-async def test_ready_tool_call_emits_visible_start_before_stream_continues():
-    """safe 工具 ready 时立即显示 start；run_batch 后续只补 result，不重复 start。"""
-    reg = Registry()
-    reg.register(
-        name="file_read",
-        toolset="file",
-        schema={"name": "file_read", "parameters": {}},
-        handler=lambda a: tool_result(path=a.get("path")),
-        is_async=False,
-        override=True,
-    )
-    release_after_start = asyncio.Event()
-    tc = ToolCall("r1", "file_read", {"path": "/tmp/a.txt"})
-    provider = VisibleReadyStreamProvider(tc, release_after_start)
-    ex = _executor(provider, reg)
+@pytest.mark.parametrize(
+    ("tool_name", "call_id", "args", "handler", "sanitized_args"),
+    [
+        ("file_read", "r1", {"path": "/tmp/a.txt"}, lambda a: tool_result(path=a.get("path")), None),
+        (
+            "file_write",
+            "w1",
+            {"path": "/tmp/crew_test_unsafe.html", "content": "x"},
+            lambda a: tool_result(ok=True),
+            '{"path": "/tmp/crew_test_unsafe.html"}',
+        ),
+    ],
+    ids=["safe", "unsafe"],
+)
+async def test_ready_tool_call_emits_visible_start_before_stream_continues(
+    tool_name, call_id, args, handler, sanitized_args
+):
+    """safe/unsafe 工具 ready 时立即显示 start；run_batch 后续只补 result，不重复 start。
 
-    stream = ex.execute(_ctx())
-    try:
-        first = await asyncio.wait_for(stream.__anext__(), timeout=0.5)
-        assert first.kind == "tool"
-        assert first.body["phase"] == "start"
-        assert first.body["tool_call_id"] == "r1"
-        assert not provider.continued_after_ready.is_set()
-
-        release_after_start.set()
-        rest = [c async for c in stream]
-    finally:
-        release_after_start.set()
-        await stream.aclose()
-
-    tool_events = [first, *[c for c in rest if c.kind == "tool"]]
-    starts = [c for c in tool_events if c.body["phase"] == "start"]
-    results = [c for c in tool_events if c.body["phase"] == "result"]
-    assert [c.body["tool_call_id"] for c in starts] == ["r1"]
-    assert [c.body["tool_call_id"] for c in results] == ["r1"]
-
-
-async def test_unsafe_ready_tool_call_emits_visible_start_before_stream_continues():
-    """unsafe 工具（file_write）ready 时也立即显示 start。
-
-    start 事件与 prewarm 解耦，仅用于及时展示；实际执行仍由 run_batch 使用完整参数完成。
+    unsafe 的 start 事件与 prewarm 解耦，仅用于及时展示（参数脱敏）；实际执行仍由
+    run_batch 使用完整参数完成。
     """
     reg = Registry()
     reg.register(
-        name="file_write",
+        name=tool_name,
         toolset="file",
-        schema={"name": "file_write", "parameters": {}},
-        handler=lambda a: tool_result(ok=True),
+        schema={"name": tool_name, "parameters": {}},
+        handler=handler,
         is_async=False,
         override=True,
     )
     release_after_start = asyncio.Event()
-    tc = ToolCall("w1", "file_write", {"path": "/tmp/crew_test_unsafe.html", "content": "x"})
+    tc = ToolCall(call_id, tool_name, args)
     provider = VisibleReadyStreamProvider(tc, release_after_start)
     ex = _executor(provider, reg)
 
     stream = ex.execute(_ctx())
     try:
-        # 修复后：unsafe 也提前发 start，第一个 chunk 即 tool start，不等 release
+        # 修复后：safe/unsafe 都提前发 start，第一个 chunk 即 tool start，不等 release
         first = await asyncio.wait_for(stream.__anext__(), timeout=0.5)
         assert first.kind == "tool"
         assert first.body["phase"] == "start"
-        assert first.body["tool_call_id"] == "w1"
-        assert first.body["args"] == '{"path": "/tmp/crew_test_unsafe.html"}'
-        assert "content" not in first.body["detail"]
+        assert first.body["tool_call_id"] == call_id
+        if sanitized_args is not None:
+            assert first.body["args"] == sanitized_args
+            assert "content" not in first.body["detail"]
         assert not provider.continued_after_ready.is_set()
 
         release_after_start.set()
@@ -1535,8 +1518,8 @@ async def test_unsafe_ready_tool_call_emits_visible_start_before_stream_continue
     tool_events = [first, *[c for c in rest if c.kind == "tool"]]
     starts = [c for c in tool_events if c.body["phase"] == "start"]
     results = [c for c in tool_events if c.body["phase"] == "result"]
-    assert [c.body["tool_call_id"] for c in starts] == ["w1"]
-    assert [c.body["tool_call_id"] for c in results] == ["w1"]
+    assert [c.body["tool_call_id"] for c in starts] == [call_id]
+    assert [c.body["tool_call_id"] for c in results] == [call_id]
 
 
 class SeenThenReadyProvider(LLMProvider):

@@ -110,7 +110,14 @@ async def test_inflight_timeout_is_not_retried_and_reports_unknown_state(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_stop_completes_inflight_and_queued_futures(monkeypatch):
+@pytest.mark.parametrize(
+    ("disconnect", "first_error"),
+    [
+        pytest.param("stop", "正在关闭", id="stop"),
+        pytest.param("exit", "连接已断开", id="unexpected_exit"),
+    ],
+)
+async def test_disconnect_completes_inflight_and_queued_futures(monkeypatch, disconnect, first_error):
     worker, session = await _started_worker(monkeypatch, call_timeout=1.0)
     first = asyncio.create_task(worker._make_handler("first")({}))
     await session.call_started.wait()
@@ -118,29 +125,14 @@ async def test_stop_completes_inflight_and_queued_futures(monkeypatch):
     while worker._queue.empty():
         await asyncio.sleep(0)
 
-    await worker.stop()
+    if disconnect == "exit":
+        assert worker._task is not None
+        worker._task.cancel()
+    else:
+        await worker.stop()
     first_result, second_result = await asyncio.gather(first, second)
 
-    assert "正在关闭" in _error(first_result)
-    assert "状态可能未知" in _error(first_result)
-    assert "排队请求未调用远端" in _error(second_result)
-    assert session.calls == ["first"]
-
-
-@pytest.mark.asyncio
-async def test_unexpected_worker_exit_completes_all_futures(monkeypatch):
-    worker, session = await _started_worker(monkeypatch, call_timeout=1.0)
-    first = asyncio.create_task(worker._make_handler("first")({}))
-    await session.call_started.wait()
-    second = asyncio.create_task(worker._make_handler("second")({}))
-    while worker._queue.empty():
-        await asyncio.sleep(0)
-
-    assert worker._task is not None
-    worker._task.cancel()
-    first_result, second_result = await asyncio.gather(first, second)
-
-    assert "连接已断开" in _error(first_result)
+    assert first_error in _error(first_result)
     assert "状态可能未知" in _error(first_result)
     assert "排队请求未调用远端" in _error(second_result)
     assert session.calls == ["first"]

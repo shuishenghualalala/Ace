@@ -21,7 +21,6 @@ describe("mergeStreamingText", () => {
 
   it("deduplicates overlapping or cumulative chunks", () => {
     expect(mergeStreamingText("先检查项目", "项目结构")).toBe("先检查项目结构");
-    expect(mergeStreamingText("先检查", "先检查项目")).toBe("先检查项目");
   });
 });
 

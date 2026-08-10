@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ace 原生安全运行时</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { max-width: 1080px; margin: 0 auto; padding: 40px 24px 72px; line-height: 1.65; }
+    h1, h2 { line-height: 1.25; }
+    code { padding: .12rem .35rem; border-radius: 5px; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0 28px; }
+    th, td { padding: 10px 12px; border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas); text-align: left; vertical-align: top; }
+    .note { padding: 12px 16px; border-left: 4px solid #b7791f; background: color-mix(in srgb, #b7791f 10%, Canvas); }
+  </style>
+</head>
+<body>
+  <h1>Ace 原生安全运行时</h1>
+  <p>本模块负责把会话权限编译为真实操作系统边界。Gateway 只把已批准的文件根、网络目标、stdin 和环境覆盖交给每任务运行组件；运行组件失败时不会退回宿主直接执行。</p>
+
+  <h2>平台后端</h2>
+  <table>
+    <thead><tr><th>平台</th><th>文件隔离</th><th>联网管控</th><th>进程清理</th></tr></thead>
+    <tbody>
+      <tr><td>Linux</td><td>bubblewrap 挂载边界与 seccomp</td><td>独立网络命名空间，经 Unix socket 转发到受管代理</td><td>PID namespace 与父进程退出联动</td></tr>
+      <tr><td>Windows</td><td>受限账号、ACL 与 restricted token</td><td>WFP 仅允许固定本机代理</td><td>Job Object kill-on-close</td></tr>
+      <tr><td>macOS</td><td>系统 Seatbelt；可读、可写、拒绝根按请求生成</td><td>Seatbelt 仅允许连接本次运行的精确 loopback 代理端口</td><td>Desktop 启动独立进程组，取消或超时时整体终止</td></tr>
+    </tbody>
+  </table>
+
+  <h2>macOS 策略</h2>
+  <p><code>security-runtime/src/macos/mod.rs</code> 使用系统 <code>/usr/bin/sandbox-exec</code>。策略以 <code>deny default</code> 开始，只开放系统运行所需只读目录、明确的 readable/writable roots、一次性私有 HOME，以及命令本身。用户路径通过 <code>-D</code> 参数进入 Seatbelt，避免路径内容改变策略语法。</p>
+  <p>denied roots 同时拒绝读取与写入，并覆盖更宽的工作区写权限。子进程环境从空环境重建，只保留固定 PATH、私有 HOME/TMPDIR 和 Gateway 已验证的环境覆盖。</p>
+
+  <h2>网络路径</h2>
+  <p>离线请求不生成任何 outbound allow rule。在线请求先在宿主运行组件内启动随机 loopback 端口，再让 Seatbelt 子进程只能访问该精确端口。HTTP/HTTPS 请求经代理解析后，由既有规则引擎核对协议、域名、端口、私网许可并执行 DNS pinning。直接 socket、绕过代理和未批准目标均失败关闭。</p>
+
+  <h2>能力探针与界面</h2>
+  <p>Gateway 的 <code>/api/security/capabilities</code> 会在 macOS 上先在工作区写入探针标记，再尝试读取同级秘密文件；只有标记写入成功、秘密文件读取失败且运行组件正常返回能力帧，文件沙箱才显示已启用。这样 Seatbelt 启动失败不会被误报为“读取被拒绝”。联网能力使用独立探针。桌面端同时读取主进程运行平台作为兜底，网关暂时不可达或未返回平台时不会误判为某个系统，也不会展示错误的安装操作。</p>
+  <p>安全接口使用短时、单次消费的 Desktop 实例证明。签名必须显式绑定当前 Gateway 的绝对 <code>CREW_HOME</code>；开发态、账号态或未来新增的运行模式即使使用不同数据目录，也只能读取对应实例密钥，不能隐式回退到其他目录。</p>
+  <p>安全中心只呈现“安全防护”“安装 / 修复防护”等统一文案。需要系统级安装的场景由运行环境自动决定；系统内置防护直接显示能力状态，不要求用户选择系统类型。</p>
+
+  <h2>构建与发布</h2>
+  <p><code>deb-package/pack_mac.sh</code> 在生成 Electron 应用前执行 release/locked Rust 构建，再通过 Desktop staging 脚本生成包含 SHA-256 的 manifest。开发态依次使用本地 staging、<code>security-runtime/prebuilt/&lt;platform&gt;-&lt;arch&gt;</code> 和旧版 <code>security-runtime/bin</code>；打包态使用 Resources 内的同平台文件名。Desktop 和 Python Gateway 都校验 runtime 旁边的 manifest、二进制摘要以及声明的平台架构，源码树中的预编译产物还必须通过源码哈希漂移检测。</p>
+  <p><code>security-macos</code> 工作流在真实 macOS runner 上运行 fmt、clippy、Rust 测试、Python 安全套件、原生文件/网络矩阵和 Desktop staging 校验，并生成绑定 commit 与实际二进制摘要的证据。</p>
+
+  <h2>测试入口</h2>
+  <ul>
+    <li><code>cargo test --manifest-path security-runtime/Cargo.toml --release --locked</code></li>
+    <li><code>python tests/security/security_matrix.py --platform macos --runtime ...</code></li>
+    <li><code>pytest tests/security tests/gateway/test_security_api.py</code></li>
+    <li><code>npm test -- --run tests/unit/security-center-view.test.ts tests/unit/security-banner.test.ts</code></li>
+  </ul>
+  <p class="note">嵌套在另一个 Seatbelt 会话中的进程可能无法再次调用 <code>sandbox-exec</code>。发布证据必须来自允许创建 Seatbelt profile 的真实 macOS runner，不能用 mock 或仅协议测试代替。</p>
+
+  <h2>更新记录</h2>
+  <p>2026-08-06：新增 macOS Seatbelt 文件沙箱、精确 loopback 代理联网边界、Gateway live probe、安全中心平台展示、DMG staging 和真实 runner 发布证据。</p>
+  <p>2026-08-07：修正能力接口失败时的系统误判；平台由桌面运行环境自动探测，安全中心不再向用户展示具体系统名称或错误的安装入口。</p>
+  <p>2026-08-07：补齐开发态 macOS runtime 自动发现、按所选 runtime 读取源码漂移状态、启动失败探针校验和缺失组件提示。</p>
+  <p>2026-08-07：安全接口签名改为强制绑定当前 Gateway 数据目录，修复开发模式下实例密钥目录不一致导致的 403，并增加目录隔离回归测试。</p>
+  <p>2026-08-10：加入按平台和架构分目录的仓库预编译 runtime；Apple Silicon 开发者无需安装 Rust 即可启动，错误架构、摘要不一致和源码漂移均失败关闭；Intel Mac 通过本机 release/locked 构建后 staging，后续可扩展独立的 <code>darwin-x64</code> 产物。</p>
+</body>
+</html>

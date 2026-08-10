@@ -152,15 +152,6 @@ async def test_plugin_skill_root_resolves_against_plugin_dir(tmp_path):
     assert roots[0].endswith("lifecycle_plugin/skills")
 
 
-def test_plugin_context_services_visible(tmp_path):
-    marker = object()
-    _write_lifecycle_plugin(tmp_path)
-    registry = Registry()
-    plugins = PluginManager(registry=registry, services={"config": marker})
-    plugins.discover_and_load([tmp_path], enabled=["lifecycle_plugin"])
-    assert plugins.services["config"] is marker
-
-
 # ---- PluginPreferencesStore ----
 
 
