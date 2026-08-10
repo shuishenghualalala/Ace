@@ -119,7 +119,7 @@ def collect_gate_results(root: Path = ROOT) -> list[dict[str, Any]]:
     # the real fix; until that exists we at least require commit+repository+workflow_run
     # fields and match the commit to the current HEAD, so hand-written evidence is rejected.
     head_commit = _current_head_commit(root)
-    for platform_name in ("linux", "windows"):
+    for platform_name in ("linux", "windows", "macos"):
         configured = os.environ.get(
             f"ACE_SECURITY_{platform_name.upper()}_EVIDENCE", ""
         ).strip()
@@ -165,7 +165,7 @@ def collect_gate_results(root: Path = ROOT) -> list[dict[str, Any]]:
             "id": native_policy["id"],
             "status": "ready" if native_ready else native_policy["status"],
             "blocked_scopes": native_policy["blocked_scopes"],
-            "reason": "real Windows and Linux native security evidence bound to this commit is required",
+            "reason": "real Windows, Linux, and macOS native security evidence bound to this commit is required",
             "evidence": native_evidence,
         }
     )

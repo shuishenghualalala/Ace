@@ -306,10 +306,13 @@ export function createDesktopSecurityProof(
   method: string,
   pathname: string,
   body: string,
-  options: { crewHome?: string; nowSeconds?: number; nonce?: string } = {},
+  options: { crewHome: string; nowSeconds?: number; nonce?: string },
 ): string {
   if (!SECURITY_PROOF_PATH_PREFIXES.some((p) => pathname.startsWith(p))) {
     throw new Error('invalid security proof path');
+  }
+  if (!path.isAbsolute(options.crewHome)) {
+    throw new Error('security proof crew home must be absolute');
   }
   const timestamp = Math.floor(options.nowSeconds ?? Date.now() / 1000);
   const nonce = options.nonce ?? randomBytes(16).toString('hex');

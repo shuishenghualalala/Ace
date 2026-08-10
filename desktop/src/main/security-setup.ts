@@ -94,7 +94,7 @@ export function getWindowsUacStatus(): { enabled: boolean | null; restartRequire
   const enabled = readWindowsUacEnabled();
   if (uacRestartRequired) return { enabled, restartRequired: true };
   return enabled === null
-    ? { enabled: null, detail: '无法读取 Windows 用户账户控制状态' }
+    ? { enabled: null, detail: '无法读取系统安全设置状态' }
     : { enabled };
 }
 
@@ -119,7 +119,7 @@ async function runElevatedCommand(
     child.once('error', (error) => finish({
       ok: false,
       exitCode: null,
-      detail: `无法启动 Windows 安装程序：${error.message}`,
+      detail: `无法启动安全防护安装程序：${error.message}`,
     }));
     child.once('exit', (code) => {
       const detail = output.join('').trim();
@@ -168,7 +168,7 @@ export async function runElevatedSecuritySetup(
         ok: false,
         exitCode: null,
         code: 'uac_disabled',
-        detail: 'Windows 用户账户控制（UAC）已关闭',
+        detail: '系统安全设置未启用',
       };
     }
   }

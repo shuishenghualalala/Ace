@@ -1,4 +1,4 @@
-import { createHmac } from 'crypto';
+import { createHash, createHmac } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -7,6 +7,7 @@ import {
   GATEWAY_INSTANCE_CHALLENGE_HEADER,
   GATEWAY_INSTANCE_DIRECTORY,
   GATEWAY_INSTANCE_KEY_FILENAME,
+  createDesktopSecurityProof,
   loadOrCreateGatewayInstanceKey,
   probeGatewayInstance,
   verifyGatewayInstance,
@@ -14,6 +15,7 @@ import {
 
 const tempRoots: string[] = [];
 const PROOF_CONTEXT = Buffer.from('crew-gateway-instance-v1\0', 'ascii');
+const SECURITY_PROOF_CONTEXT = Buffer.from('crew-security-desktop-v1\0', 'ascii');
 
 function tempCrewHome(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crew-gateway-instance-'));
@@ -70,6 +72,41 @@ describe('gateway instance key', () => {
     fs.chmodSync(keyFile, 0o600);
     fs.chmodSync(directory, 0o755);
     expect(() => loadOrCreateGatewayInstanceKey(crewHome)).toThrow(/0700/);
+  });
+});
+
+describe('desktop security proof', () => {
+  it('uses only the explicitly selected Gateway home', () => {
+    const accountHome = tempCrewHome();
+    const activeGatewayHome = tempCrewHome();
+    const method = 'GET';
+    const pathname = '/api/security/capabilities';
+    const body = '';
+    const nowSeconds = 1_800_000_000;
+    const nonce = '12'.repeat(16);
+    const proof = createDesktopSecurityProof(method, pathname, body, {
+      crewHome: activeGatewayHome,
+      nowSeconds,
+      nonce,
+    });
+    const activeKey = loadOrCreateGatewayInstanceKey(activeGatewayHome);
+    const accountKey = loadOrCreateGatewayInstanceKey(accountHome);
+    const bodyHash = createHash('sha256').update(body, 'utf8').digest('hex');
+    const message = Buffer.concat([
+      SECURITY_PROOF_CONTEXT,
+      Buffer.from(`${nowSeconds}\n${nonce}\n${method}\n${pathname}\n${bodyHash}`, 'utf8'),
+    ]);
+    const expected = createHmac('sha256', activeKey).update(message).digest('hex');
+    const wrongHomeSignature = createHmac('sha256', accountKey).update(message).digest('hex');
+
+    expect(proof).toBe(`${nowSeconds}:${nonce}:${expected}`);
+    expect(proof).not.toBe(`${nowSeconds}:${nonce}:${wrongHomeSignature}`);
+  });
+
+  it('rejects a relative Gateway home', () => {
+    expect(() => createDesktopSecurityProof('GET', '/api/security/capabilities', '', {
+      crewHome: 'relative-gateway-home',
+    })).toThrow(/must be absolute/);
   });
 });
 

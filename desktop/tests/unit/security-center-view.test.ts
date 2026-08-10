@@ -37,7 +37,7 @@ const capabilities = {
   helper_present: true,
   filesystem_sandbox: true,
   managed_network: true,
-  detail: 'Windows runtime 已就绪',
+  detail: '安全运行组件已就绪',
 };
 
 function makeHandlers(overrides: Partial<SecurityCenterActions> = {}): SecurityCenterActions {
@@ -106,8 +106,18 @@ describe('Security Center view', () => {
     expect(onModeChange).toHaveBeenCalledWith('auto_review');
   });
 
-  it('disables Windows setup actions with an explicit reason on unsupported platforms', () => {
-    const view = createSecurityCenterView(makeHandlers());
+  it('shows built-in Seatbelt status without Windows setup actions on macOS', () => {
+    const view = createSecurityCenterView({
+      onRefresh: vi.fn(),
+      onStrictSecurityChange: vi.fn(),
+      onModeChange: vi.fn(),
+      onInstall: vi.fn(),
+      onUninstall: vi.fn(),
+      onRuleToggle: vi.fn(),
+      onRuleDelete: vi.fn(),
+      onAuditExport: vi.fn(),
+      onAuditPurge: vi.fn(),
+    });
     view.update({
       loading: false,
       error: '',
@@ -125,7 +135,17 @@ describe('Security Center view', () => {
   });
 
   it('keeps only the applicable Windows setup action enabled', () => {
-    const view = createSecurityCenterView(makeHandlers());
+    const view = createSecurityCenterView({
+      onRefresh: vi.fn(),
+      onStrictSecurityChange: vi.fn(),
+      onModeChange: vi.fn(),
+      onInstall: vi.fn(),
+      onUninstall: vi.fn(),
+      onRuleToggle: vi.fn(),
+      onRuleDelete: vi.fn(),
+      onAuditExport: vi.fn(),
+      onAuditPurge: vi.fn(),
+    });
     view.update({
       loading: false,
       error: '',
@@ -141,7 +161,7 @@ describe('Security Center view', () => {
       .toBe(false);
     expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
       .toBe(true);
-    expect(view.element.textContent).not.toContain('当前平台不使用 Windows 原生防护');
+    expect(view.element.textContent).not.toContain('当前设备尚未提供原生防护');
 
     view.update({
       loading: false,
@@ -288,7 +308,7 @@ describe('Security Center integration', () => {
     document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.click();
 
     await vi.waitFor(() => expect(showConfirmDialogMock).toHaveBeenCalledWith(expect.objectContaining({
-      title: '安装安全沙箱',
+      title: '安装安全防护',
       confirmText: '安装并继续',
     })));
     expect(document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
@@ -336,7 +356,7 @@ describe('Security Center integration', () => {
     await initSecurityPage();
 
     expect(document.querySelector('[data-security-center]')).toBe(shell);
-    expect(document.body.textContent).toContain('Windows runtime 已就绪');
+    expect(document.body.textContent).toContain('安全运行组件已就绪');
     expect(document.body.textContent).toContain('git status');
     expect(document.body.textContent).toContain('exec');
   });
