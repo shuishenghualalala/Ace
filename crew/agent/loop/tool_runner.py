@@ -597,8 +597,10 @@ class ToolRunner:
 
         async def _sink(text: str) -> None:
             try:
+                # 与常规工具帧同用 kind="tool"（gateway/桌面端只认这个 kind；
+                # 历史上用 "tool_event" 的进度帧在 normalize 阶段就被丢弃了）。
                 await push(sid, {
-                    "kind": "tool_event",
+                    "kind": "tool",
                     "body": {
                         "tool_call_id": tc.id,
                         "name": tc.name,

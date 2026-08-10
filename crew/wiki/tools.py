@@ -16,6 +16,7 @@ from crew.core.runctx import (
     current_push_fn,
     current_request_id,
     current_session_id,
+    emit_tool_progress,
 )
 from crew.tools.registry import Registry, tool_error, tool_result
 
@@ -1757,6 +1758,8 @@ def register_wiki_tools(
             kb_id=kb_id,
             chunk_size=chunk_size,
             use_chunking=use_chunking,
+            # LLM 分析耗时较长：把阶段进度推到前端工具行（无推送通道时 no-op）。
+            progress=emit_tool_progress,
         )
         analysis_failed = any(
             str(issue).startswith("LLM 分析失败:")

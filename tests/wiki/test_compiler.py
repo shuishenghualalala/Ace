@@ -1301,3 +1301,46 @@ async def test_apply_rejects_superseded_source(store, compiler):
     result = await compiler.apply_ingest("s1")
     assert any("已被新版本" in issue for issue in result.issues)
     assert result.pages == []
+
+
+async def test_plan_ingest_reports_analysis_progress(store, compiler):
+    """长耗时 LLM 分析应对调用方上报阶段进度（前端工具行据此展示当前阶段）。"""
+    raw = RawSource(id="src_prog", title="进度来源", source_type="paste", parsed_path="")
+    store.save_raw(raw)
+    raw.parsed_path = store.save_parsed_markdown(
+        "src_prog", ("第一段内容，包含若干知识点。" * 300) + "\n\n" + ("第二段内容，包含另一些知识点。" * 300)
+    )
+    raw.parse_status = "parsed"
+    store.save_raw(raw)
+    compiler.provider = FakeProvider(script=[
+        _analysis_response(_EMPTY_ANALYSIS),
+        _analysis_response(_EMPTY_ANALYSIS),
+        _analysis_response(_EMPTY_ANALYSIS),
+        _analysis_response(_EMPTY_ANALYSIS),
+    ])
+
+    events: list[str] = []
+
+    async def _progress(text: str) -> None:
+        events.append(text)
+
+    await compiler.plan_ingest("src_prog", use_chunking=True, chunk_size=1000, progress=_progress)
+
+    assert events[0].startswith("正在分析来源内容")
+    # 分块进度：至少出现一次「已完成/总块数」形式
+    assert any("块）" in e and "/" in e for e in events)
+    assert any("生成页面变更计划" in e for e in events)
+
+
+async def test_plan_ingest_without_progress_callback_still_works(store, compiler):
+    """不传 progress（CLI/无推送通道场景）时行为不变。"""
+    raw = RawSource(id="src_noprog", title="无回调来源", source_type="paste", parsed_path="")
+    store.save_raw(raw)
+    raw.parsed_path = store.save_parsed_markdown("src_noprog", "短内容。")
+    raw.parse_status = "parsed"
+    store.save_raw(raw)
+    compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
+
+    result = await compiler.plan_ingest("src_noprog")
+
+    assert result.source_id == "src_noprog"
