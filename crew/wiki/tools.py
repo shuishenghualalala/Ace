@@ -1188,7 +1188,7 @@ def register_wiki_tools(
             return tool_error("禁止删除 default 知识库")
 
         owner = _owner()
-        pages = store.list_all(owner_account_id=owner, kb_id=kb_id, limit=10000)
+        page_count = store.count_pages(owner_account_id=owner, kb_id=kb_id)
         raws = store.list_raws(owner_account_id=owner, kb_id=kb_id)
 
         confirmed = _consume_confirmation(args, action="delete_kb", kb_id=kb_id)
@@ -1199,7 +1199,7 @@ def register_wiki_tools(
                 payload={"kb_id": kb_id},
                 summary=f"删除知识库 {kb_id}",
                 impact={
-                    "pages": len(pages),
+                    "pages": page_count,
                     "raw_sources": len(raws),
                     "cannot_undo": True,
                 },
@@ -1224,10 +1224,7 @@ def register_wiki_tools(
         if raw is None:
             return tool_error(f"Raw source 不存在: {source_id}")
 
-        linked_pages = [
-            page for page in store.list_all(owner_account_id=_owner(), kb_id=kb_id, limit=10000)
-            if source_id in page.sources
-        ]
+        linked_pages = store.list_pages_by_source(source_id, owner_account_id=_owner(), kb_id=kb_id)
 
         confirmed = _consume_confirmation(args, action="delete_source", kb_id=kb_id)
         if confirmed is None:

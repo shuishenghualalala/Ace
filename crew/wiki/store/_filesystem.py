@@ -845,6 +845,41 @@ class FileSystemWikiStore(WikiStore):
         pages.sort(key=lambda p: p.updated_at, reverse=True)
         return pages[offset : offset + limit]
 
+    def count_pages(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> int:
+        """统计页面数量，仅遍历文件不反序列化。"""
+        base = self._dir(owner_account_id, kb_id)
+        seen: set[str] = set()
+        count = 0
+        for sub in _PAGE_DIRS:
+            current_dir = base / "wiki" / sub
+            legacy_dir = base / sub
+            for directory, recursive in ((current_dir, True), (legacy_dir, False)):
+                paths = directory.rglob("*.md") if recursive else directory.glob("*.md")
+                for path in paths:
+                    resolved = str(path.resolve())
+                    if resolved in seen:
+                        continue
+                    seen.add(resolved)
+                    count += 1
+        return count
+
+    def list_pages_by_source(
+        self,
+        source_id: str,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> list[WikiPage]:
+        """返回引用了指定 source 的页面列表（brief 模式，不含正文）。"""
+        return [
+            page
+            for page in self._iter_pages(owner_account_id, kb_id, brief=True)
+            if source_id in page.sources
+        ]
+
     def search(
         self,
         query: str,
