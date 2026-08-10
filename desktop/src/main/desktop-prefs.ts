@@ -77,9 +77,9 @@ export function saveCloseBehaviorPreference(behavior: unknown): { closeBehavior:
   return { closeBehavior };
 }
 
-/** Compatibility mode is the default until the strict-security services are available. */
+/** Strict security is the default; compatibility requires an explicit saved opt-out. */
 export function isStrictSecurityEnabled(): boolean {
-  return readDesktopPrefsFile().strictSecurityEnabled === true;
+  return readDesktopPrefsFile().strictSecurityEnabled !== false;
 }
 
 export function saveStrictSecurityPreference(enabled: boolean): { strictSecurityEnabled: boolean } {
