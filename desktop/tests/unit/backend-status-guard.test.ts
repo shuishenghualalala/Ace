@@ -29,9 +29,9 @@ describe('backend-status-guard slow overlay', () => {
     initialStatus = { connected: false };
     recoveryMocks.loadConfig.mockClear();
     document.body.innerHTML = `
-      <div id="backend-loading-overlay">
-        <p id="backend-loading-elapsed"></p>
-        <div id="backend-loading-actions"></div>
+      <div id="backend-loading-overlay" hidden>
+        <p id="backend-loading-elapsed" hidden></p>
+        <div id="backend-loading-actions" hidden></div>
         <button id="backend-loading-log"></button>
         <button id="backend-loading-retry"></button>
         <button id="backend-loading-dismiss"></button>
@@ -57,53 +57,74 @@ describe('backend-status-guard slow overlay', () => {
     mod.initBackendStatusGuard();
   }
 
+  it('does not flash the overlay while the initial connected status hydrates', async () => {
+    initialStatus = { connected: true };
+    await loadGuard();
+
+    expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(true);
+    await vi.waitFor(() => {
+      expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(true);
+    });
+  });
+
+  it('reveals the overlay only after a sustained startup disconnect', async () => {
+    await loadGuard();
+    statusCb!({ connected: false });
+
+    expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(true);
+    vi.advanceTimersByTime(1_000);
+    expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(true);
+    vi.advanceTimersByTime(500);
+    expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(false);
+  });
+
   it('shows slow actions only after the 20s threshold; dismiss hides them', async () => {
     await loadGuard();
     expect(statusCb).toBeTruthy();
     statusCb!({ connected: false, logPath: '/tmp/gw.log' });
 
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('none');
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(true);
 
-    vi.advanceTimersByTime(21_000);
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('');
+    vi.advanceTimersByTime(22_500);
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(false);
     expect(document.getElementById('backend-loading-elapsed')!.textContent).toContain('仍在准备中');
 
     document.getElementById('backend-loading-dismiss')!.click();
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('none');
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(true);
   });
 
   it('retry calls the gateway and resets the slow clock', async () => {
     await loadGuard();
     statusCb!({ connected: false });
-    vi.advanceTimersByTime(21_000);
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('');
+    vi.advanceTimersByTime(22_500);
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(false);
 
     document.getElementById('backend-loading-retry')!.click();
     expect(retryCalled).toBe(1);
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('none');
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(true);
 
     vi.advanceTimersByTime(10_000);
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('none');
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(true);
     vi.advanceTimersByTime(12_000);
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('');
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(false);
   });
 
   it('connected hides the overlay and stops the slow timer', async () => {
     await loadGuard();
     statusCb!({ connected: false });
-    vi.advanceTimersByTime(21_000);
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('');
+    vi.advanceTimersByTime(22_500);
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(false);
 
     statusCb!({ connected: true });
-    expect(document.getElementById('backend-loading-overlay')!.style.display).toBe('none');
-    expect(document.getElementById('backend-loading-actions')!.style.display).toBe('none');
+    expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(true);
+    expect(document.getElementById('backend-loading-actions')!.hidden).toBe(true);
   });
 
   it('hydrates the current status when the ready event was sent before subscription', async () => {
     initialStatus = { connected: true, logPath: '/tmp/gw.log' };
     await loadGuard();
     await vi.waitFor(() => {
-      expect(document.getElementById('backend-loading-overlay')!.style.display).toBe('none');
+      expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(true);
     });
   });
 
@@ -128,7 +149,7 @@ describe('backend-status-guard slow overlay', () => {
     statusCb!(failed);
     await vi.advanceTimersByTimeAsync(20);
 
-    expect(document.getElementById('backend-loading-overlay')!.style.display).toBe('none');
+    expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(true);
     expect(Array.from(document.querySelectorAll('.ui-toast')).map((el) => el.textContent))
       .toEqual(['定时任务启动失败，请查看 Gateway 日志']);
   });
@@ -144,7 +165,7 @@ describe('backend-status-guard slow overlay', () => {
     });
     await vi.advanceTimersByTimeAsync(20);
 
-    expect(document.getElementById('backend-loading-overlay')!.style.display).toBe('none');
+    expect(document.getElementById('backend-loading-overlay')!.hidden).toBe(true);
     expect(document.querySelector('.ui-toast')?.textContent)
       .toBe('运行环境组件初始化失败，请查看 Gateway 日志');
   });

@@ -21,6 +21,8 @@ const ACTIONS_ID = 'backend-loading-actions';
 const LOG_BTN_ID = 'backend-loading-log';
 const RETRY_BTN_ID = 'backend-loading-retry';
 const DISMISS_BTN_ID = 'backend-loading-dismiss';
+/** Ignore brief startup/status-hydration gaps so the blocking overlay never flashes. */
+const OVERLAY_REVEAL_DELAY_MS = 1_500;
 /** 超过此阈值仍连不上，就升级为「仍在准备中」+ 操作按钮。 */
 const SLOW_THRESHOLD_MS = 20_000;
 const SLOW_TICK_MS = 1000;
@@ -31,6 +33,8 @@ let overlayEl: HTMLElement | null = null;
 let initBypassActive = true;
 /** 避免 health 抖动时重复触发恢复 hydrate。 */
 let recoverInFlight = false;
+let overlayRevealTimer: number | null = null;
+let overlaySuppressed = false;
 
 // ── 慢启动计时 ──
 let slowTimer: number | null = null;
@@ -60,13 +64,22 @@ function resolveOverlay(): HTMLElement | null {
 function applyBackendOverlay(connected: boolean): void {
   const el = resolveOverlay();
   if (!el) return;
-  if (connected) {
+  if (connected || overlaySuppressed) {
+    if (overlayRevealTimer !== null) {
+      window.clearTimeout(overlayRevealTimer);
+      overlayRevealTimer = null;
+    }
     el.hidden = true;
     stopSlowTimer();
-  } else {
+    return;
+  }
+  if (!el.hidden || overlayRevealTimer !== null) return;
+  overlayRevealTimer = window.setTimeout(() => {
+    overlayRevealTimer = null;
+    if (overlaySuppressed || uiStore.get().backendConnected === true) return;
     el.hidden = false;
     startSlowTimer();
-  }
+  }, OVERLAY_REVEAL_DELAY_MS);
 }
 
 function startSlowTimer(): void {
@@ -179,7 +192,7 @@ export function initBackendStatusGuard(): void {
   if (initialized) return;
   initialized = true;
 
-  // 初始态：后端尚未连接，立即展示遮罩（首帧就能看到）
+  // 初始态先保持 HTML 中的 hidden；只有持续断连才显示，避免 hydrate 期间闪屏。
   applyBackendOverlay(false);
 
   const applyStatus = (status: BackendStatus): void => {
@@ -205,6 +218,10 @@ export function initBackendStatusGuard(): void {
   // reload 后 did-finish-load 可能早于 renderer 完成认证恢复，那次推送会丢失。
   // 先订阅后立即读一次主进程快照，保证已就绪时遮罩不会永久停留。
   window.Crew?.onBackendStatus?.(applyStatus);
+  window.Crew?.onBackendSuppressOverlay?.(() => {
+    overlaySuppressed = true;
+    applyBackendOverlay(true);
+  });
   void window.Crew?.getBackendStatus?.().then(applyStatus).catch(() => {
     // 保持遮罩，后续健康状态推送会继续接管。
   });
