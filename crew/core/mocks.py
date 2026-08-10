@@ -241,7 +241,10 @@ class InMemorySessionStore(SessionStore):
 
 
 class InMemoryWorkspaceStore(WorkspaceStore):
-    """内存工作空间存储。测试用，自带 default 空间。"""
+    """内存工作空间存储。测试用，内置工作空间查不到时自动补建。"""
+
+    # 镜像 crew/state/workspace_store.py 的 BUILTIN_WORKSPACES（core 不反向依赖 state）。
+    _BUILTIN_WORKSPACES = {"default": ("默认工作空间", False), "wiki": ("Wiki 知识库", True)}
 
     def __init__(self) -> None:
         self._data: dict[tuple[str, str], dict] = {}
@@ -250,12 +253,13 @@ class InMemoryWorkspaceStore(WorkspaceStore):
     def _key(workspace_id: str, owner_account_id: str = "") -> tuple[str, str]:
         return owner_account_id, workspace_id
 
-    @staticmethod
-    def _default() -> dict:
-        return {"id": "default", "name": "默认工作空间", "description": "", "instructions": "", "hidden": False}
+    @classmethod
+    def _builtin(cls, workspace_id: str) -> dict:
+        name, hidden = cls._BUILTIN_WORKSPACES[workspace_id]
+        return {"id": workspace_id, "name": name, "description": "", "instructions": "", "hidden": hidden}
 
     def _ensure_default(self, owner_account_id: str = "") -> None:
-        self._data.setdefault(self._key("default", owner_account_id), self._default())
+        self._data.setdefault(self._key("default", owner_account_id), self._builtin("default"))
 
     def create(
         self,
@@ -279,7 +283,8 @@ class InMemoryWorkspaceStore(WorkspaceStore):
         return dict(ws)
 
     def get(self, workspace_id: str, owner_account_id: str = "") -> dict:
-        self._ensure_default(owner_account_id)
+        if workspace_id in self._BUILTIN_WORKSPACES:
+            self._data.setdefault(self._key(workspace_id, owner_account_id), self._builtin(workspace_id))
         return dict(self._data[self._key(workspace_id, owner_account_id)])
 
     def list(self, owner_account_id: str = "") -> list[dict]:
@@ -292,7 +297,7 @@ class InMemoryWorkspaceStore(WorkspaceStore):
         return dict(self._data[key])
 
     def delete(self, workspace_id: str, owner_account_id: str = "") -> None:
-        if workspace_id != "default":
+        if workspace_id not in self._BUILTIN_WORKSPACES:
             self._data.pop(self._key(workspace_id, owner_account_id), None)
 
 
