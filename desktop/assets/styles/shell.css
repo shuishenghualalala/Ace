@@ -502,23 +502,88 @@
 }
 
 @media (max-width: 1179px) {
+  .mw-application-shell {
+    grid-template-columns: var(--mw-app-rail-width-compact) minmax(0, 1fr);
+  }
+
   .mw-application-shell__body.mw-shell-template,
   .mw-application-shell[data-product-mode='work'] .mw-application-shell__body {
-    grid-template-columns: var(--mw-app-rail-width) 240px minmax(0, 1fr);
+    grid-template-columns: var(--mw-app-rail-width-compact) 240px minmax(0, 1fr);
+  }
+
+  /* 无上下文栏的页面（主对话以外的页面 has-context=false）也要收成紧凑栏——
+     基础规则带属性选择器特异性更高，媒体查询里必须点名覆盖，否则窄窗口下
+     这些页面的栏宽保持 128px 而文字标签已被隐藏，显得突兀。 */
+  .mw-application-shell__body.mw-shell-template[data-has-context='false'] {
+    grid-template-columns: var(--mw-app-rail-width-compact) minmax(0, 1fr);
   }
 
   .mw-application-shell[data-product-mode='assistant'][data-navigation-collapsed='true']
     .mw-application-shell__body[data-has-context='true'] {
-    grid-template-columns: var(--mw-app-rail-width) minmax(0, 1fr);
+    grid-template-columns: var(--mw-app-rail-width-compact) minmax(0, 1fr);
   }
 
   .mw-application-shell[data-product-mode='work'][data-navigation-collapsed='true']
     .mw-application-shell__body {
-    grid-template-columns: var(--mw-app-rail-width) minmax(0, 1fr);
+    grid-template-columns: var(--mw-app-rail-width-compact) minmax(0, 1fr);
   }
 
   .mw-app-context-restore {
-    left: calc(var(--mw-app-rail-width) - 16px);
+    left: calc(var(--mw-app-rail-width-compact) - 16px);
+  }
+
+  .mw-sidebar-brand {
+    min-height: 72px;
+    padding: var(--mw-space-3);
+  }
+
+  .mw-sidebar-brand__icon {
+    width: 32px;
+    height: 32px;
+    transform: none;
+  }
+
+  .mw-sidebar-brand__label,
+  .mw-shell-nav-item__label,
+  .mw-app-command__label,
+  .mw-app-account__details {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .mw-shell-nav-item,
+  .mw-app-command {
+    grid-template-columns: 22px;
+    justify-content: center;
+    padding-inline: var(--mw-space-2);
+  }
+
+  .mw-app-account__trigger {
+    grid-template-columns: 24px;
+  }
+
+  .mw-shell-nav-item__availability {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    display: grid;
+    width: 14px;
+    height: 14px;
+    place-items: center;
+    overflow: hidden;
+    border: 1px solid var(--mw-border-strong);
+    border-radius: var(--mw-radius-full);
+    background: var(--mw-bg-surface);
+    font-size: 0;
+  }
+
+  .mw-shell-nav-item__availability::before {
+    content: '!';
+    font-size: var(--mw-type-caption-size);
   }
 }
 

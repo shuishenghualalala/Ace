@@ -6,7 +6,9 @@
  */
 
 :root {
-  --mw-app-rail-width: 96px;
+  --mw-app-rail-width: 128px;
+  /* 窄窗口（<1180px）紧凑导航栏宽度，见 shell.css 媒体查询 */
+  --mw-app-rail-width-compact: 56px;
   --mw-task-board-width: 360px;
   --mw-chat-content-max-width: 920px;
   --mw-browser-workbench-width: clamp(430px, 32vw, 640px);
@@ -208,6 +210,7 @@
   --mw-z-busy: 70;
   --mw-z-toast: 80;
   --mw-z-context-menu: 90;
+  --mw-z-tooltip: 100;
   --mw-z-chrome-top: 100;
 }
 

@@ -1103,8 +1103,11 @@ class WikiCompiler:
         chunk_size: int | None = None,
         use_chunking: bool | None = None,
         skip_index: bool = False,
+        progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> PlanResult:
-        """对 source 做只读分析，返回变更计划，不写入任何页面。"""
+        """对 source 做只读分析，返回变更计划，不写入任何页面。
+
+        progress：可选阶段进度回调（LLM 分析耗时较长，供前端展示当前阶段）。"""
         self.init_kb(owner_account_id, kb_id)
 
         raw = self.store.load_raw(source_id, owner_account_id, kb_id)
@@ -1162,6 +1165,7 @@ class WikiCompiler:
                 chunk_size=chunk_size,
                 use_chunking=use_chunking,
                 cache_path=cache_path,
+                progress=progress,
             )
         except Exception as exc:  # noqa: BLE001
             return PlanResult(
@@ -1170,6 +1174,11 @@ class WikiCompiler:
                 source_content_sha256=raw.content_sha256 or "",
                 issues=issues + [f"LLM 分析失败: {exc}"],
             )
+        if progress is not None:
+            try:
+                await progress("正在生成页面变更计划…")
+            except Exception:  # noqa: BLE001
+                pass
         analysis_stats = {
             str(key): int(value)
             for key, value in (analysis.get("_analysis_meta") or {}).items()
@@ -2194,6 +2203,7 @@ class WikiCompiler:
         chunk_size: int | None = None,
         use_chunking: bool | None = None,
         cache_path: Path | None = None,
+        progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """提取轻量知识单元，并确定性聚合为页面规划输入。
 
@@ -2202,6 +2212,8 @@ class WikiCompiler:
             use_chunking: 是否对长文档启用分块分析，None 按长度自动判断。
             cache_path: 可选的 source 级分块缓存文件。每个成功块立即持久化，
                 失败或取消后重试只处理未完成块。
+            progress: 可选的阶段进度回调（耗时 LLM 分析对调用方完全黑盒，
+                分块场景按完成块数上报，异常静默不影响分析）。
         """
         started_at = time.monotonic()
         effective_chunk_size = max(
@@ -2225,6 +2237,19 @@ class WikiCompiler:
                 effective_chunk_size,
                 len(chunks),
             )
+
+        async def _emit(text: str) -> None:
+            if progress is None:
+                return
+            try:
+                await progress(text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if len(chunks) > 1:
+            await _emit(f"正在分析来源内容（共 {len(chunks)} 块）…")
+        else:
+            await _emit("正在分析来源内容…")
 
         semaphore = asyncio.Semaphore(_ANALYZE_CHUNK_CONCURRENCY)
         cached_chunks = _load_analysis_cache(cache_path)
@@ -2274,6 +2299,8 @@ class WikiCompiler:
                     _save_analysis_cache(cache_path, cache_state)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Wiki 分块分析异常，跳过该块: %s", exc)
+            if len(chunks) > 1:
+                await _emit(f"正在分析来源内容（{len(results_by_index)}/{len(chunks)} 块）…")
 
         results = [
             results_by_index.get(

@@ -89,8 +89,10 @@ describe('security center scroll contract', () => {
 });
 
 describe('Crew shell and Welcome identity', () => {
-  it('keeps the narrow full-height rail with centered icon-label rows', () => {
-    expect(ruleBody(tokensCss, ':root')).toContain('--mw-app-rail-width: 96px');
+  it('keeps the responsive full-height rail with a compact icon-only mode', () => {
+    const tokens = ruleBody(tokensCss, ':root');
+    expect(tokens).toContain('--mw-app-rail-width: 128px');
+    expect(tokens).toContain('--mw-app-rail-width-compact: 56px');
     const brand = ruleBody(shellCss, '.mw-sidebar-brand');
     expect(brand).toContain('flex-direction: column');
     expect(brand).toContain('min-height: 136px');
@@ -99,6 +101,10 @@ describe('Crew shell and Welcome identity', () => {
       'grid-template-rows: auto minmax(0, 1fr) auto',
     );
     expect(shellCss).toContain('grid-template-columns: 22px minmax(0, 32px)');
+    expect(shellCss).toContain(
+      'grid-template-columns: var(--mw-app-rail-width-compact) 240px minmax(0, 1fr)',
+    );
+    expect(shellCss).toContain('.mw-sidebar-brand__label');
   });
 
   it('anchors the mascot and larger tiger paws to the Welcome project strip', () => {

@@ -712,3 +712,23 @@ textarea.mw-field__control--large {
     overflow-x: auto;
   }
 }
+
+/* 自绘 tooltip：Electron 38+ 在 macOS 上原生 title 气泡已坏（electron/electron#49843），
+   由 components/tooltip.ts 驱动，仅 macOS 启用。 */
+.mw-tooltip {
+  position: fixed;
+  z-index: var(--mw-z-tooltip);
+  max-width: 280px;
+  padding: var(--mw-space-1) var(--mw-space-2);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-text-primary);
+  box-shadow: var(--mw-shadow-float);
+  color: var(--mw-bg-surface);
+  font-size: var(--mw-type-caption-size);
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.mw-tooltip[hidden] {
+  display: none;
+}

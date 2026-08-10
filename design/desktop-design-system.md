@@ -574,10 +574,12 @@ Rules:
 10. Yellow/amber is reserved for warning state or an explicitly documented
     entity illustration. It is not the default folder, security, or navigation
     color.
-11. The `96px` application rail uses `22px` navigation and footer-command icons
-    beside centered labels. Rail instances use `2px` primary strokes and
-    `1.75px` secondary strokes; their outline follows row text color while
-    entity fills retain the restrained product symbol palette.
+11. The `128px` application rail uses `22px` navigation and footer-command icons
+    beside centered labels. At viewports below `1180px`, the rail uses the
+    `56px` compact token and hides labels while retaining accessible titles and
+    the Crew mark. Rail instances use `2px` primary strokes and `1.75px`
+    secondary strokes; their outline follows row text color while entity fills
+    retain the restrained product symbol palette.
 
 ### 9.1 Icon families
 
@@ -1059,9 +1061,9 @@ state model, Team status model, browser host, or file-action implementation.
 - Default application window: `1280 x 800`.
 - Supported minimum: `960 x 640`.
 - Primary verification: `1440 x 1000`, `1280 x 800`, and `960 x 640`.
-- The application rail remains a labeled `96px` column at every supported
-  desktop width. Context, inspector, and content tracks collapse before the
-  primary labels are removed.
+- The application rail is `128px` at normal desktop widths and uses a `56px`
+  compact column below `1180px`. The compact mode hides primary labels after
+  preserving their accessible names and title tooltips.
 - Page content must not cause body-level horizontal scrolling.
 - Tables, code, graphs, and boards may own local scrolling.
 - Shell columns are route-owned. A chat history column exists only for a chat
@@ -1103,9 +1105,10 @@ Rules:
 
 ### 12.4 Sidebar brand and shell owner
 
-Crew uses one full-height `96px` application rail. The brand sits at its top;
-the title bar starts to the right and owns only the drag region and native
-window commands.
+Crew uses one full-height application rail. The brand sits at its top; the
+title bar starts to the right and owns only the drag region and native window
+commands. The rail is `128px` in the normal layout and `56px` in compact mode;
+the compact brand keeps the Logo icon and hides the text label.
 
 ```text
 [ Crew product mark ]
@@ -1156,12 +1159,12 @@ The office assistant uses three stable regions, following the product flow in
 `docs/frontend/work-mode-panel.html`:
 
 ```text
-96px shared application rail | 260px context list | minmax(0, 1fr) work area
+128px shared application rail | 260px context list | minmax(0, 1fr) work area
 ```
 
-Work and General Assistant use the same `96px` application rail, row geometry,
-labels, and footer commands. The rail remains labeled below `1180px`; the
-context list narrows to `240px` on constrained viewports and may be removed
+Work and General Assistant use the same application rail, row geometry, labels,
+and footer commands. Below `1180px`, the rail becomes `56px` and switches to
+icon-only rows while the context list narrows to `240px` and may be removed
 entirely by its collapse command.
 
 The Work navigation starts with three Work destinations: 工作, 计划, and 知识.
@@ -1806,7 +1809,8 @@ At or above `1180px`:
 
 Between `960px` and `1179px`:
 
-- the `96px` navigation rail keeps its centered icon-and-label rows;
+- the `56px` navigation rail keeps centered icon rows, accessible names, and the
+  compact Crew Logo;
 - header actions may wrap;
 - grids reduce columns;
 - side summaries move below primary content;
@@ -2457,7 +2461,8 @@ enforce repository policy.
 | 2026-07-30 | Workbench presentation now follows the representative daily-work layout: a compact greeting header, one continuous four-metric brief, a primary attention list with a secondary template rail, and office-source detail below the first-viewport work summary. Item conversations expose an explicit keyboard-accessible return to Workbench in the stable context header. Existing Work API, template, item, archive, and shared Composer ownership remain unchanged. |
 | 2026-08-09 | macOS menu-bar default/rest use transparent black-line Template Images; working, notification, and done remain supplied color states. All five macOS states use a 44px @2x representation for a crisp 22pt status item. |
 | 2026-08-10 | New Crew drafts reset external runtime models to the configured Crew default. Running-intro and Agent avatars share one responsive content axis without fixed offsets; the approved yellow assistant keeps its small white-face artwork. Menu-bar color states use restrained optical normalization, with `done` enlarged 1.16x before the final 44px crop. |
-| 2026-08-10 | The static Crew brand moves from the title bar into a full-height 96px Sidebar; its top spacing matches the 40px title-bar track so the brand aligns optically with the adjacent context heading while centered side-by-side icon/label navigation stays intact. Welcome restores one centered reading order: a large bold greeting, smaller regular prompt, and enlarged transparent Crew mark. Two larger three-toe doodle paws are owned by the primary Composer and straddle the project-context strip's upper edge at a wider stance. Reduced-motion support and six approved daily greetings remain intact. |
+| 2026-08-10 | The static Crew brand moves from the title bar into the responsive full-height Sidebar: 128px in regular windows and a 56px icon-only rail below 1180px. Its expanded-state top spacing matches the 40px title-bar track so the brand aligns optically with the adjacent context heading. Welcome restores one centered reading order: a large bold greeting, smaller regular prompt, and enlarged transparent Crew mark. Two larger three-toe doodle paws are owned by the primary Composer and straddle the project-context strip's upper edge at a wider stance. Reduced-motion support and six approved daily greetings remain intact. |
+| 2026-08-11 | The shared application rail adopts `--mw-app-rail-width` (`128px`) and `--mw-app-rail-width-compact` (`56px`); below 1180px the rail, title-bar offset, no-context pages, restore control, navigation labels, account details, and Crew brand label switch together to compact icon-only presentation. |
 | 2026-07-31 | Workbench office detail uses compact inbox/todo lists above paired schedule/meeting month calendars. Calendar dates expose event labels and selected-day detail; every source keeps a non-expanding `查看全部` search and pagination dialog. |
 | 2026-07-30 | WorkItem and chat are separate: item creation never creates a conversation, item routes open details first, and one processing conversation can be created explicitly. Linked conversations are item-owned navigation, receive trusted owner-scoped item context, and do not duplicate in top-level history. The Work shell now follows example 09 directly and removes both the legacy top row and collapsed context placeholder track. |
 | 2026-07-28 | G-W19 completion keeps date items and linked processing conversations as separate projections of the same WorkItem. Plan position restores across product-mode switches; item-aware sessions retain their context bar. Work text sizes use typography tokens, and both approved viewports pass the production interaction and overflow matrix. |
