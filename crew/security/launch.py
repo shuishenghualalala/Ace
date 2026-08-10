@@ -8,7 +8,7 @@ import shutil
 import asyncio
 import hashlib
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Callable, Literal, Mapping
@@ -35,10 +35,16 @@ class ProcessLaunch:
     profile: PermissionProfile
     helper_argv: tuple[str, ...] = ()
     trusted_readable_roots: tuple[Path, ...] = ()
+    external_security_enabled: bool = True
 
     @property
     def managed(self) -> bool:
         return self.profile.kind is PermissionProfileKind.MANAGED
+
+    @property
+    def external_managed(self) -> bool:
+        """Whether external runtimes must cross the native managed boundary."""
+        return self.managed and self.external_security_enabled
 
 
 current_process_launch: ContextVar[ProcessLaunch | None] = ContextVar(
@@ -46,17 +52,19 @@ current_process_launch: ContextVar[ProcessLaunch | None] = ContextVar(
 )
 
 
-def host_stream_launch_block_reason() -> str | None:
+def host_stream_launch_block_reason(*, external: bool = False) -> str | None:
     """Return why a bidirectional host subprocess must be refused, if any.
 
     Long-lived stdio adapters cannot currently cross the native runtime transport.
-    A missing or managed launch boundary therefore always fails closed. Compatibility
-    mode may relax transport and approval policy, but it cannot turn managed execution
-    into an unconfined host subprocess.
+    A missing or managed launch boundary therefore fails closed for built-in
+    execution. External adapters may explicitly opt into the legacy host path
+    through the trusted ``Config`` switch; that exception does not affect built-ins.
     """
     launch = current_process_launch.get()
     if launch is None:
         return "security launch context missing"
+    if external and not launch.external_security_enabled:
+        return None
     if launch.managed:
         return "managed launch requires native bidirectional stdio transport"
     return None
@@ -82,6 +90,7 @@ async def execute_captured(
     max_output_bytes: int = 2 * 1024 * 1024,
     on_started: Callable[[int | None], None] | None = None,
     on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
+    external: bool = False,
 ) -> CapturedProcessResult:
     """Run an adapter under the current conversation boundary.
 
@@ -110,6 +119,13 @@ async def execute_captured(
     def _redact(text: str) -> str:
         return redact_sensitive_text(redact_secret_values(text, secret_values), force=True)
 
+    if external and not launch.external_security_enabled:
+        launch = replace(
+            launch,
+            profile=PermissionProfile(PermissionProfileKind.DISABLED),
+            helper_argv=(),
+            trusted_readable_roots=(),
+        )
     if launch.managed:
         from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
         from crew.security.runtime_client import NativeRuntimeClient
@@ -254,8 +270,13 @@ def compile_process_launch(
     mode: ConversationPermissionMode,
     *,
     db_path: Path,
+    external_security_enabled: bool = True,
 ) -> ProcessLaunch:
-    """Build filesystem/profile facts and locate only the packaged native helper."""
+    """Build the host launch decision from trusted config and security state.
+
+    ``external_security_enabled`` is supplied by ``Config`` for Gateway requests.
+    Lower-level callers default to the secure managed behavior.
+    """
     protected = _protected_entries(context, db_path)
     profile = settings_for_mode(mode, context.workspace_root, deny_entries=protected).profile
     from crew.agent.skills import get_builtin_skills_dir
@@ -272,6 +293,11 @@ def compile_process_launch(
         helper_argv=packaged_runtime_argv() if profile.kind is PermissionProfileKind.MANAGED else (),
         trusted_readable_roots=(
             tuple(trusted_roots) if profile.kind is PermissionProfileKind.MANAGED else ()
+        ),
+        external_security_enabled=(
+            external_security_enabled
+            if profile.kind is PermissionProfileKind.MANAGED
+            else False
         ),
     )
 

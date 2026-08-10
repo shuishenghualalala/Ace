@@ -2403,6 +2403,11 @@ class CrewApp:
                 security_context,
                 self.security_service.mode_for(security_context),
                 db_path=self.security_service.db_path,
+                external_security_enabled=getattr(
+                    self.config,
+                    "external_security_enabled",
+                    False,
+                ),
             )
             config_session_id = str(envelope.params.get("task_session_id") or envelope.session_id)
             if not getattr(self.config, "external_agents_enabled", True):

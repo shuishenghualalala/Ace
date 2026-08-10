@@ -856,7 +856,7 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
     last_activity = {"text": "准备启动 ACP 子进程"}
     native_session = None
     stderr_task: asyncio.Task[None] | None = None
-    if launch.managed:
+    if launch.external_managed:
         from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
         from crew.security.runtime_client import NativeRuntimeClient
 

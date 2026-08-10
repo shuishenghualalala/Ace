@@ -84,6 +84,9 @@ team:
 # 外部智能体与外部 Team 的产品入口开关。关闭时仅隐藏/禁用，历史数据仍保留。
 external_agents:
   enabled: true
+  # true: 外援经过 Ace native runtime；false: 外援按旧 runtime 直联。
+  # 默认 false；该开关不影响内建工具的会话安全边界。
+  security_enabled: false
 
 subagent:
   max_concurrent: 3

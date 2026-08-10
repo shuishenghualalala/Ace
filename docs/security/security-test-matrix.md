@@ -11,6 +11,7 @@ workflow has executed the real packaged helper on the target OS.
 | SMX-PROC-001 | process tree/handles | PID namespace + timeout kill | Job kill-on-close + explicit handle list | required |
 | SMX-ACP-001 | managed ACP bidirectional stdio | native runtime interactive session forwards stdin/stdout and closes child tree | same through Windows runner | required |
 | SMX-ACP-002 | Crew interaction MCP callback | one-time binding token reaches proxy; only Gateway loopback host/port is allowed | same through Windows managed proxy | required |
+| SMX-ACP-003 | external security switch | `config/config.yaml: external_agents.security_enabled` defaults to `false`/legacy external runtime; `true` enables the external native managed boundary, while built-in conversation launch remains managed in both cases | same config value propagated on Gateway restart | required |
 | SMX-NET-001 | offline direct connect | isolated net namespace | offline technical-account WFP block | required |
 | SMX-NET-002 | allowed destination | Unix-socket proxy bridge, DNS pinning | online account may reach fixed loopback proxy only | required |
 | SMX-STATE-001 | native security state | N/A：Linux 不持有 Windows 技术账号 state | state parent、identity/tmp/bak、ACL/capability/recovery 对其他用户及 sandbox 账号不可读写；junction/hardlink/repair 失败关闭 | required on Windows |

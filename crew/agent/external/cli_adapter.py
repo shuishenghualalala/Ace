@@ -527,7 +527,7 @@ async def _stream_claude_once(
 ) -> AsyncIterator[ExternalStreamEvent]:
     from crew.security.launch import host_stream_launch_block_reason
 
-    blocked = host_stream_launch_block_reason()
+    blocked = host_stream_launch_block_reason(external=True)
     if blocked:
         raise ExternalCliError(f"严格安全约束已拒绝 Claude Code 宿主流式启动：{blocked}")
     cwd = str(Path(request.cwd or ".").expanduser().resolve())
@@ -878,6 +878,7 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
             timeout=config.timeout,
             on_started=_mark_started,
             on_output=_mark_first_io,
+            external=True,
         )
     except FileNotFoundError as exc:
         raise ExternalCliError(f"找不到可执行文件: {config.executable_path}") from exc

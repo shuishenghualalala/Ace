@@ -223,7 +223,7 @@ async def _spawn_app_server(
 ) -> tuple[asyncio.subprocess.Process, _CodexRpcClient, list[bytes], asyncio.Task[None]]:
     from crew.security.launch import host_stream_launch_block_reason
 
-    blocked = host_stream_launch_block_reason()
+    blocked = host_stream_launch_block_reason(external=True)
     if blocked:
         raise CodexAdapterError(f"严格安全约束已拒绝 Codex 宿主流式启动：{blocked}")
     env = build_external_runtime_env(request.custom_env)

@@ -8,6 +8,7 @@ import pytest
 
 from crew.security.launch import (
     ProcessLaunch,
+    compile_process_launch,
     current_process_launch,
     execute_captured,
     host_stream_launch_block_reason,
@@ -51,6 +52,90 @@ def test_host_stream_launch_policy_never_falls_back_from_managed_to_host(
         assert host_stream_launch_block_reason() is None
     finally:
         current_process_launch.reset(token)
+
+
+def test_external_stream_policy_can_be_explicitly_disabled_without_disabling_builtins(
+    tmp_path: Path,
+) -> None:
+    launch = ProcessLaunch(
+        _managed(tmp_path).profile,
+        _managed(tmp_path).helper_argv,
+        _managed(tmp_path).trusted_readable_roots,
+        external_security_enabled=False,
+    )
+    token = current_process_launch.set(launch)
+    try:
+        assert "managed" in (host_stream_launch_block_reason() or "")
+        assert host_stream_launch_block_reason(external=True) is None
+    finally:
+        current_process_launch.reset(token)
+
+
+def test_compile_process_launch_uses_explicit_external_security_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from crew.security.context import SecurityContext
+    from crew.security.models import ConversationPermissionMode
+
+    context = SecurityContext(
+        os_user="test-user",
+        owner_account_id="owner-a",
+        workspace_id="workspace-a",
+        session_id="session-a",
+        task_id="task-a",
+        request_id="request-a",
+        cwd=tmp_path,
+        workspace_root=tmp_path,
+    )
+    monkeypatch.setattr(
+        "crew.security.launch._protected_entries",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        "crew.security.launch.packaged_runtime_argv",
+        lambda: ("ace-security-runtime",),
+    )
+    monkeypatch.setattr(
+        "crew.agent.skills.get_builtin_skills_dir",
+        lambda: tmp_path / "missing-skills",
+    )
+    monkeypatch.setattr("crew.state.home.bundled_runtime_roots", lambda: [])
+
+    launch = compile_process_launch(
+        context,
+        ConversationPermissionMode.FULL_ACCESS,
+        db_path=tmp_path / "security.db",
+        external_security_enabled=False,
+    )
+
+    assert launch.managed is True
+    assert launch.external_managed is False
+
+
+@pytest.mark.asyncio
+async def test_external_captured_execution_uses_host_only_when_switch_is_off(tmp_path, monkeypatch):
+    launch = ProcessLaunch(
+        _managed(tmp_path).profile,
+        _managed(tmp_path).helper_argv,
+        _managed(tmp_path).trusted_readable_roots,
+        external_security_enabled=False,
+    )
+    monkeypatch.setattr(
+        "crew.security.broker.SecurityExecutionBroker.execute",
+        lambda *args, **kwargs: pytest.fail("disabled external security must not use native runtime"),
+    )
+    token = current_process_launch.set(launch)
+    try:
+        result = await execute_captured(
+            (sys.executable, "-c", "print('external-ok')"),
+            cwd=tmp_path,
+            timeout=3,
+            external=True,
+        )
+    finally:
+        current_process_launch.reset(token)
+    assert result.stdout.strip() == "external-ok"
 
 
 def test_managed_background_command_is_protocol_data_not_host_argv(tmp_path, monkeypatch):
