@@ -109,11 +109,6 @@ body:not(.welcome-active):not(.history-workspace-active) .top-bar-left {
   overflow: hidden;
 }
 
-.chat-composer {
-  padding: var(--mw-space-2) var(--mw-space-6) var(--mw-space-2);
-  gap: var(--mw-space-1);
-}
-
 .input-container textarea {
   min-height: 44px;
   font-size: var(--mw-type-body-size);

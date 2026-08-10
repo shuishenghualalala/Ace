@@ -7,6 +7,9 @@ const studioCss = readFileSync(resolve(stylesDir, 'studio.css'), 'utf8');
 const layoutCss = readFileSync(resolve(stylesDir, 'layouts.css'), 'utf8');
 const chatCss = readFileSync(resolve(stylesDir, 'chat.css'), 'utf8');
 const webMessagesCss = readFileSync(resolve(stylesDir, 'web-messages.css'), 'utf8');
+const composerCss = readFileSync(resolve(stylesDir, 'composer.css'), 'utf8');
+const streamChatCss = readFileSync(resolve(stylesDir, 'stream-chat.css'), 'utf8');
+const uiPreviewCss = readFileSync(resolve(stylesDir, 'ui-preview.css'), 'utf8');
 const securityCenterCss = readFileSync(resolve(stylesDir, 'security-center.css'), 'utf8');
 
 function ruleBody(css: string, selector: string): string {
@@ -55,6 +58,21 @@ describe('shared chat chrome styles', () => {
     const userTurn = ruleBody(webMessagesCss, '.chat-messages.web-flow .msg.user');
     expect(assistantTurn).toContain('padding-left: var(--mw-space-4)');
     expect(userTurn).toContain('padding-right: var(--mw-space-4)');
+  });
+
+  it('keeps the running assistant on the same responsive axis as agent turns', () => {
+    const composer = ruleBody(composerCss, '.chat-composer.mw-composer');
+    const runningSlot = ruleBody(composerCss, '.mw-composer__running-slot');
+    const runningLogo = ruleBody(streamChatCss, '.running-intro__logo');
+    const runningImage = ruleBody(streamChatCss, '.running-intro__agent-logo');
+    expect(composer).toContain('padding: var(--mw-space-4) var(--mw-space-4) var(--mw-space-3)');
+    expect(runningSlot).toContain('padding-inline: var(--mw-space-4)');
+    expect(runningLogo).toContain('width: 38px');
+    expect(runningLogo).toContain('height: 38px');
+    expect(runningImage).toContain('width: 38px');
+    expect(runningImage).toContain('height: 38px');
+    expect(runningImage).not.toContain('translate(');
+    expect(uiPreviewCss).not.toMatch(/(?:^|\n)\s*\.chat-composer\s*\{/);
   });
 });
 

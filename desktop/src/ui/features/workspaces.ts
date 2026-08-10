@@ -20,7 +20,7 @@ import { openDialog, type OverlayHandle } from '../components/overlays';
 import { isChannelSessionId, type ChannelSessionGroup } from './channel-sessions';
 import { isSessionVisibleWithExternalAgentsFlag } from './external-agents-feature';
 import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
-import { applySessionModelBinding, activeComposerModelId, mergeSessionModelsFromBackend, modelLabelForId, syncSessionModelUi } from './session-model';
+import { applySessionModelBinding, mergeSessionModelsFromBackend, modelIdForNewCrewSession, modelLabelForId, syncSessionModelUi } from './session-model';
 import { assignSecurityMode } from './security-approval';
 import {
   patchMountedSessionHistoryStatus,
@@ -958,7 +958,7 @@ export function createSessionInWorkspace(workspaceId: string, openSession: OpenS
 
   if (!requireRendererLogin()) return '';
 
-  const seedModel = activeComposerModelId() || state.config?.active_model_id || '';
+  const seedModel = modelIdForNewCrewSession();
 
   discardDraft();
 

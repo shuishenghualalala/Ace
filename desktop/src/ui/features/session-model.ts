@@ -64,6 +64,28 @@ export function activeComposerModelId(): string {
   return state.config?.active_model_id || '';
 }
 
+/**
+ * 新建普通 Crew 对话时的初始模型。
+ *
+ * 普通会话可以继承当前选择；外部 Agent/Team 的 Runtime 模型只属于原会话，
+ * 不能泄漏到“新建对话”的 Crew Composer。
+ */
+export function modelIdForNewCrewSession(): string {
+  const fallback = state.config?.active_model_id || '';
+  const sessionId = state.activeSessionId;
+  if (!sessionId) return fallback;
+
+  const binding = bindingsBySession.get(sessionId);
+  const display = getSessionAgentDisplay(sessionId);
+  const provider = String(display?.agentLabel?.provider || '').trim().toLowerCase();
+  const isExternalIdentity = display?.agentBinding?.kind === 'external_agent'
+    || display?.agentBinding?.kind === 'external_team'
+    || Boolean(provider && !['crew', 'builtin', 'client'].includes(provider));
+
+  if (binding?.source === 'external' || isExternalIdentity) return fallback;
+  return activeComposerModelId() || fallback;
+}
+
 /** 当前会话绑定模型上下文窗口的默认回退值（缺失/无效时使用）。 */
 export const DEFAULT_CONTEXT_WINDOW = 200000;
 

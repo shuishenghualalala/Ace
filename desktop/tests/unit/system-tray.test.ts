@@ -1,9 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   TRAY_REST_TIMEOUT_MS,
   pendingAttentionKeys,
   resolveTrayStatus,
 } from '../../src/ui/features/system-tray';
+import { trayIconOpticalScale } from '../../src/main/tray-service';
+
+vi.mock('electron', () => ({
+  Menu: { buildFromTemplate: vi.fn() },
+  nativeImage: {},
+  Tray: class {},
+}));
 
 describe('system tray status', () => {
   it('keeps the approved priority order', () => {
@@ -58,5 +65,12 @@ describe('system tray status', () => {
     } as never);
 
     expect(keys).toEqual(['plan:session-a', 'followup:session-a:question-1']);
+  });
+
+  it('optically enlarges the small done artwork without changing template states', () => {
+    expect(trayIconOpticalScale('default')).toBe(1);
+    expect(trayIconOpticalScale('rest')).toBe(1);
+    expect(trayIconOpticalScale('done')).toBeGreaterThan(trayIconOpticalScale('working'));
+    expect(trayIconOpticalScale('done')).toBe(1.16);
   });
 });

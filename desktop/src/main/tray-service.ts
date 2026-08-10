@@ -18,6 +18,18 @@ const STATUS_LABELS: Record<TrayStatus, string> = {
   rest: 'Crew · 休眠',
 };
 
+const STATUS_OPTICAL_SCALE: Record<TrayStatus, number> = {
+  default: 1,
+  working: 1.02,
+  notification: 1,
+  done: 1.16,
+  rest: 1,
+};
+
+export function trayIconOpticalScale(status: TrayStatus): number {
+  return STATUS_OPTICAL_SCALE[status];
+}
+
 export interface TrayServiceOptions {
   assetsDir: string;
   onActivate: () => void;
@@ -73,7 +85,18 @@ export class TrayService {
     if (process.platform !== 'darwin') return source;
     // macOS Retina 菜单栏按 2x 像素密度绘制。先生成 44px 位图，再以
     // scaleFactor=2 注册为 22pt 图像，避免把 22 个物理像素直接放大。
-    const retinaBitmap = source.resize({ width: 44, height: 44, quality: 'best' });
+    const targetSize = 44;
+    const opticalSize = Math.round(targetSize * trayIconOpticalScale(status));
+    const resized = source.resize({ width: opticalSize, height: opticalSize, quality: 'best' });
+    // done 素材右侧包含庆祝星光，主体机器人占比比其他状态小。放大后从左侧
+    // 保留完整主体，并向上校正；其余状态只做居中的亚像素级光学校正。
+    const cropX = status === 'done' ? 0 : Math.floor((opticalSize - targetSize) / 2);
+    const cropY = status === 'done'
+      ? opticalSize - targetSize
+      : Math.floor((opticalSize - targetSize) / 2);
+    const retinaBitmap = opticalSize === targetSize
+      ? resized
+      : resized.crop({ x: cropX, y: cropY, width: targetSize, height: targetSize });
     const image = nativeImage.createFromBuffer(retinaBitmap.toPNG(), { scaleFactor: 2 });
     // default/rest 使用仅保留黑色线稿的透明 PNG，可安全交给 macOS
     // 按系统主题着色；其余三态保留原始彩色情感反馈。

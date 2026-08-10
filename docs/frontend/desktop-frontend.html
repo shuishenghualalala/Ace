@@ -559,6 +559,17 @@
     </ul>
     <p>验证：Composer 外援、智能体回合、会话状态、共享样式、Sites 与菜单栏状态定向测试共 <code>107 passed</code>；TypeScript、CSS lint 与 production build 通过。真实 Desktop Renderer 确认智能体回合左侧内收 16px，头像与正文间距保持 12px；开发端已使用最新构建重新启动。</p>
   </section>
+  <section>
+    <h2>新对话模型隔离、Tray 光学尺寸与运行助手响应式对齐（2026-08-10）</h2>
+    <ul>
+      <li>从外部 Agent/Team 会话点击“新建对话”时，普通 Crew 草稿强制回到全局 Crew 默认模型；外部 Runtime 模型只属于原会话，不再进入新 Composer。</li>
+      <li>macOS 菜单栏保持 44×44 @2x 输出；默认/休眠保持基准尺寸，工作态只做 1.02 倍轻微校正，完成态在最终裁切前放大 1.16 倍，补偿星光素材导致的主体偏小。</li>
+      <li>运行提示槽位与消息区共用 920px 内容轨道、16px 内侧留白和 38px 头像轴；黄小助手、Crew、外部 Agent/Team 头像在窗口缩放时保持同一中心线，不再使用固定负位移。</li>
+      <li>移除 <code>ui-preview.css</code> 对生产 Composer 的旧 24px padding 覆盖；共享 Composer 几何只由 <code>composer.css</code> 维护，避免预览样式与生产布局竞争。</li>
+      <li>黄小助手恢复为确认的小主体、白脸、圆润粗线版本，并保留完整透明画布留白；生产和设计参考素材同步，不再裁切放大。</li>
+    </ul>
+    <p>验证：新增模型隔离、Tray 光学比例和响应式样式回归测试；定向 4 个测试文件共 <code>36 passed</code>，TypeScript、CSS lint 与 production build 通过。真实 Renderer 在 1280px 和 900px 两种视口测得黄助手、图片画布与 Agent 头像均为 38px，中心线分别同为 439px 和 347px；Electron <code>nativeImage</code> 实际导出的默认/完成态均为非空 44×44 位图，完成态主体与默认态光学尺寸一致且庆祝星光保留。</p>
+  </section>
 </div>
 </body>
 </html>

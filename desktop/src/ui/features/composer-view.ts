@@ -95,6 +95,7 @@ export function createComposerView(
   todoSlot.id = 'chat-todo-slot';
   const runningSlot = document.createElement('div');
   runningSlot.id = 'chat-running-intro';
+  runningSlot.className = 'mw-composer__running-slot';
 
   const editBanner = document.createElement('div');
   editBanner.id = 'composer-edit-banner';

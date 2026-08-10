@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { __resetAllStoresForTest, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, configStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
 import { setActiveSessionId, setCurrentWorkspaceId } from '../../src/ui/state';
 import {
   canSwitchComposerWorkspace,
@@ -17,7 +17,11 @@ import {
   workspaceForSessionDispatch,
 } from '../../src/ui/features/workspaces';
 import { backendApi } from '../../src/ui/backend-client';
-import { applySessionModelBinding, sessionDisplayModelLabel } from '../../src/ui/features/session-model';
+import {
+  __resetSessionModelBindingsForTest,
+  applySessionModelBinding,
+  sessionDisplayModelLabel,
+} from '../../src/ui/features/session-model';
 
 vi.mock('../../src/ui/backend-client', () => ({
   backendApi: {
@@ -32,6 +36,7 @@ vi.mock('../../src/ui/ui-feedback', () => ({
 
 beforeEach(() => {
   __resetAllStoresForTest();
+  __resetSessionModelBindingsForTest();
   vi.clearAllMocks();
 });
 
@@ -131,6 +136,47 @@ describe('workspace/session boundary', () => {
 
     expect(sessionStore.get().activeSessionId).toBe(id);
     expect(workspaceForSessionDispatch(id)).toBe('default');
+  });
+
+  it('new Crew chat resets an external runtime model to the Crew default', () => {
+    configStore.set({
+      config: {
+        model: 'crew-model',
+        has_key: true,
+        base_url: '',
+        active_model_id: 'crew-default',
+        models: [{
+          id: 'crew-default',
+          name: 'Crew Default',
+          model: 'crew-model',
+          has_key: true,
+          loaded: true,
+        }],
+      },
+    });
+    sessionStore.set({
+      sessions: [{
+        id: 'external-session',
+        title: 'Kimi task',
+        updatedAt: 1,
+        preview: '',
+        badge: 'K',
+        workspaceId: 'default',
+        agentLabel: { name: 'Kimi', provider: 'kimi', model: 'kimi-code/k3' },
+        agentBinding: { kind: 'external_agent', id: 'kimi-runtime' },
+      }],
+      activeSessionId: 'external-session',
+    });
+    applySessionModelBinding('external-session', {
+      source: 'external',
+      model_profile_id: 'kimi-code/k3',
+      model_label: 'kimi-code/k3',
+    });
+
+    const id = createSessionInWorkspace('default', vi.fn());
+
+    expect(sessionStore.get().activeSessionId).toBe(id);
+    expect(sessionDisplayModelLabel(id)).toBe('Crew Default');
   });
 
   it('composer workspace is switchable only for drafts or empty chat', () => {
