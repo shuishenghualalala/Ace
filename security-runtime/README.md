@@ -94,7 +94,7 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 | Linux | x64；`bwrap` 可执行文件（系统装或随包）；内核支持 user namespace |
 | macOS | `/usr/bin/sandbox-exec`；运行组件随 Desktop 包提供，无安装步骤 |
 
-普通同事**不需要 Rust 工具链**——直接用仓库里 `security-runtime/bin/` 的预编译产物（见 §4）。
+普通同事**不需要 Rust 工具链**——Desktop 会自动选择仓库里与当前平台和架构一致的预编译产物（见 §4）。
 
 ### 2.2 编译（改了 Rust 源码的同事）
 
@@ -137,45 +137,86 @@ Windows 显式三元组：`cargo build --release --target x86_64-pc-windows-msvc
 
 产物路径：`target/<triple>/release/ace-security-runtime[.exe]`。
 
-> ⚠️ 手动 `cargo build` 不会更新 `bin/runtime-manifest.json`。启动时 Python/Desktop
+#### Intel Mac（x86_64）首次编译
+
+仓库目前提交了 Apple Silicon（`darwin-arm64`）预编译文件。Intel Mac 会拒绝加载该文件，
+需要在 Intel Mac 上本机编译一次：
+
+```bash
+# 确认输出为 x86_64
+uname -m
+
+# 首次安装工具链
+xcode-select --install
+brew install rustup
+export PATH="$(brew --prefix rustup)/bin:$PATH"
+rustup default stable
+
+# 在 Ace 仓库根目录执行
+cargo build \
+  --manifest-path security-runtime/Cargo.toml \
+  --release \
+  --locked
+
+node desktop/scripts/prepare-security-runtime.mjs \
+  --runtime security-runtime/target/release/ace-security-runtime \
+  --output desktop/security-runtime-bin
+
+node desktop/scripts/verify-security-runtime.mjs \
+  desktop/security-runtime-bin
+
+npm run dev --prefix desktop
+```
+
+`desktop/security-runtime-bin/` 是被 Git 忽略的本机 staging 目录，不会污染提交。Intel
+维护者若要把验证后的产物提供给所有 Intel 同事，可将 `--output` 改成
+`security-runtime/prebuilt/darwin-x64`，并额外传入
+`--source-root security-runtime`；随后提交该目录中的二进制、manifest 和环境描述文件。
+
+> ⚠️ 手动 `cargo build` 不会更新 runtime 旁边的 `runtime-manifest.json`。启动时 Python/Desktop
 > 会用 manifest 里的 `binary_sha256` / `source_hash` 做完整性校验（fail-closed），
-> 二进制与 manifest 不匹配则**拒绝运行**。手动构建后请务必跑一遍 §3.1 脚本，或把
-> 产物覆盖到 `security-runtime/bin/ace-security-runtime[.exe]` 并重算 manifest。
+> 二进制与 manifest 不匹配则**拒绝运行**。本机开发请通过
+> `desktop/scripts/prepare-security-runtime.mjs` staging；提交团队预编译文件时必须增加
+> `--source-root security-runtime`，将源码摘要一起写入 manifest。
 
 ### 3.3 自编译替代预编译产物
 
-仓库 `security-runtime/bin/` 里的预编译二进制是**便捷产物**（让不装 Rust 的人也能跑）。
-若你想自行验证或从源码编译，跑 §3.1 脚本即可用你自己的构建覆盖它--脚本会同步重算
-manifest，完整性校验自动通过。也可设 `ACE_SECURITY_RUNTIME` 环境变量指向任意绝对路径
-的自构建二进制，跳过仓库内预编译产物。
+仓库 `security-runtime/prebuilt/<platform>-<arch>/` 里的预编译二进制是**便捷产物**（让不装 Rust 的人也能跑）。
+若你想自行验证或从源码编译，可按 §3.2 构建并 staging。也可设
+`ACE_SECURITY_RUNTIME` 环境变量指向带有效 manifest 的绝对路径；显式路径不会绕过摘要、
+平台或架构校验。
 
 ---
 
 ## 4. 分发（团队免 Rust 方案）
 
-`security-runtime/bin/` 提交预编译产物，让团队成员**不装 Rust、不设环境变量**即可启动：
+`security-runtime/prebuilt/` 按平台和架构提交预编译产物，让团队成员**不装 Rust、不设环境变量**即可启动：
 
 ```
-security-runtime/bin/
-├── ace-security-runtime.exe       # Windows x86_64-pc-windows-msvc
-├── ace-security-runtime           # Linux ELF（需 Linux 同事/CI 跑一次 .sh 后提交）
-└── runtime-manifest.json                 # source_hash + 元信息
+security-runtime/prebuilt/
+├── darwin-arm64/
+│   ├── ace-security-runtime       # Apple Silicon Mach-O
+│   └── runtime-manifest.json      # 平台、架构、二进制与源码摘要
+├── darwin-x64/                    # Intel Mac 可按相同结构扩展
+└── linux-x64/                     # Linux 可按相同结构扩展
 ```
+
+旧版 `security-runtime/bin/` 仍作为 Windows 等既有开发流程的兼容回退。正式安装包不直接复用开发态预编译文件，而是在对应平台的发布 runner 上重新构建、测试和签名。
 
 ### 4.1 gateway / desktop 如何找到它
 
 - **Python gateway**（`crew/security/launch.py:packaged_runtime_argv`）：
-  优先 `ACE_SECURITY_RUNTIME` 环境变量（绝对路径），否则回落到 `<repo>/security-runtime/bin/<name>`。
-- **桌面 dev**（`desktop/src/main/index.ts` `security:setup`）：同上回落，`repoRoot()/security-runtime/bin/`。
+  优先 `ACE_SECURITY_RUNTIME` 环境变量和 Desktop staging，否则选择 `<repo>/security-runtime/prebuilt/<platform>-<arch>/<name>`，最后兼容回落到 `bin/`。
+- **桌面 dev**（`desktop/src/main/index.ts`）：使用相同的平台/架构选择规则，并在启动 Gateway 前校验 manifest。
 - **打包态**：从 `process.resourcesPath/` 取随包 exe + 打包 manifest 哈希校验（`packagedSecurityRuntimeEnv`）。
 
 ### 4.2 漂移检测（防"改了源码忘重 build"）
 
-启动时 gateway 重算 `security-runtime/{src,tests}/**/*.rs + Cargo.toml` 的 SHA256，与 `bin/runtime-manifest.json` 的 `source_hash` 对账；不一致 → `/api/security/capabilities` 返回 `runtime_stale=true`，桌面 banner 显示：
+启动时 gateway 重算 `security-runtime/{src,tests}/**/*.rs + Cargo.toml + Cargo.lock` 的 SHA256，与所选预编译目录中 `runtime-manifest.json` 的 `source_hash` 对账；不一致 → `/api/security/capabilities` 返回 `runtime_stale=true`，桌面 banner 显示：
 
 > 🔄 runtime 二进制落后于 Rust 源码：改了 security-runtime/ 需重跑 scripts/build-security-runtime 再提交
 
-**结论：凡修改本目录下任何 `.rs` 或 `Cargo.toml`，必须跑 §3.1 脚本并 `git add security-runtime/bin/`。**
+**结论：凡修改本目录下任何 `.rs`、Rust 测试、`Cargo.toml` 或 `Cargo.lock`，必须重建受影响平台的 runtime，并原子提交对应 prebuilt 目录。**
 
 ---
 
@@ -188,8 +229,8 @@ cd desktop
 npm start
 ```
 
-Desktop 会自动启动带安全状态目录环境的托管 Gateway，并从
-`security-runtime/bin/` 找到 runtime。首次运行时，对话框上方会提示「请安装安全沙箱」，
+Desktop 会自动启动带安全状态目录环境的托管 Gateway，并从本地 staging 或
+`security-runtime/prebuilt/<platform>-<arch>/` 找到 runtime。macOS 无需安装步骤；Windows 首次运行时会提示安装安全沙箱，
 点击「安装安全沙箱」→ 同意 UAC → 完成安装后即可使用受管命令执行。
 
 `python -m crew.gateway.server` 是 Web 端的独立 Gateway 启动方式；若手动启动的 Gateway
@@ -249,7 +290,8 @@ cargo test                                    # macOS（包含 Seatbelt 对抗�
 ```
 security-runtime/
 ├── Cargo.toml                 # windows-sys = "0.52"，勿随意升
-├── bin/                       # 预编译产物 + manifest（提交入库）
+├── prebuilt/                  # 按 platform-arch 分隔的预编译产物 + manifest
+├── bin/                       # 旧版预编译目录（兼容回退）
 ├── src/
 │   ├── main.rs                # CLI 分发 + 协议主循环
 │   ├── protocol.rs            # NDJSON 协议、鉴权、防重放
@@ -265,9 +307,9 @@ security-runtime/
 ## 8. 安全约束（贡献者必读）
 
 1. **windows-sys 不随意升级**：0.52 的符号路径与 0.59+ 不同；升级会引入 API 迁移，需全量重测。
-2. **改源码必须重 build**：否则 `bin/` 的 exe 与源码漂移，漂移检测会让所有人的 banner 报 stale。
+2. **改源码必须重 build**：否则 prebuilt runtime 与源码漂移，漂移检测会让对应平台的 banner 报 stale。
 3. **WFP GUID 稳定**：`wfp.rs` 里 7 个 GUID 是安装期锚点，**不可改**（改了会导致旧过滤器残留）。
-4. **`bin/` 的 exe 以 UAC 运行**：code review 时改本目录的 PR 必须走严格审查——这是供应链信任的落点。
+4. **Windows runtime 以 UAC 运行**：code review 时改本目录的 PR 必须走严格审查——这是供应链信任的落点。
 5. **协议与产物原子升级**：v2 不提供 v1 兼容或 host fallback；修改帧语义必须提升
    `PROTOCOL_VERSION`，同时更新 Python、Rust、测试、预编译产物和 manifest。
 
@@ -275,6 +317,9 @@ security-runtime/
 
 ## 变更记录
 
+- **2026-08-10**：新增 `prebuilt/<platform>-<arch>` 分发结构和 Apple Silicon 预编译 runtime；
+  Desktop/Gateway 自动选择当前架构并校验平台、架构、二进制摘要与源码摘要，补充 Intel Mac
+  本机编译与 staging 流程。
 - **2026-08-06**：新增 macOS Seatbelt 文件隔离、精确 loopback 代理联网边界、进程树清理、
   Gateway live probe、安全中心平台展示、DMG runtime staging 与真实 macOS runner 发布证据。
 - **2026-07-26**：协议升级为 v2 流式事件；新增一次性 stdin/EOF、受限子进程环境变量、

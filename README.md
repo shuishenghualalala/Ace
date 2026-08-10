@@ -132,6 +132,41 @@ npm run dev
 `npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，因此不会显示
 邮箱登录页。两种命令都不需要另外手动启动 Gateway。
 
+#### macOS 安全运行组件
+
+Apple Silicon（M 系列、`uname -m` 输出 `arm64`）所需的安全运行组件已经按架构提交到
+仓库，拉取源码后可直接执行 `npm run dev`，不需要安装 Rust 或 Cargo。Desktop 启动时会
+校验产物声明的平台、架构、二进制 SHA-256 和 Rust 源码摘要，不匹配时拒绝启用受管执行。
+
+Intel Mac（`uname -m` 输出 `x86_64`）目前需要本机编译一次：
+
+```bash
+# 首次安装编译工具链
+xcode-select --install
+brew install rustup
+export PATH="$(brew --prefix rustup)/bin:$PATH"
+rustup default stable
+
+# 在 Ace 仓库根目录编译并放入本机 staging
+cargo build \
+  --manifest-path security-runtime/Cargo.toml \
+  --release \
+  --locked
+
+node desktop/scripts/prepare-security-runtime.mjs \
+  --runtime security-runtime/target/release/ace-security-runtime \
+  --output desktop/security-runtime-bin
+
+node desktop/scripts/verify-security-runtime.mjs \
+  desktop/security-runtime-bin
+
+npm run dev --prefix desktop
+```
+
+本机 staging 目录已被 Git 忽略。维护者发布 Intel 预编译文件、以及修改 Rust 安全运行组件
+后的重建要求，见 [security-runtime/README.md](security-runtime/README.md)。正式 DMG 会在
+目标平台重新构建并装入 runtime，安装包使用者无需安装 Rust。
+
 ### 2B. 启动 Web 端
 
 分别在两个终端中，从仓库根目录运行：
@@ -401,4 +436,3 @@ pytest -m e2e
     <img src="https://api.star-history.com/svg?repos=shuishenghualalala/Ace&type=Date" alt="Star History" width="500">
   </a>
 </p>
-

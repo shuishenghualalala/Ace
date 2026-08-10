@@ -8,6 +8,8 @@ import shutil
 import asyncio
 import hashlib
 import logging
+import platform
+import sys
 from dataclasses import asdict, dataclass
 from contextvars import ContextVar
 from pathlib import Path
@@ -284,12 +286,46 @@ def shell_argv(command: str) -> tuple[str, ...]:
     return (str(Path(executable).resolve()), "-lc", command)
 
 
+def runtime_platform_key(
+    system_name: str | None = None,
+    machine_name: str | None = None,
+) -> str | None:
+    """Return the repository prebuilt directory key for the current host."""
+    system = (system_name or sys.platform).strip().lower()
+    system = {
+        "macos": "darwin",
+        "windows": "win32",
+        "linux2": "linux",
+    }.get(system, system)
+    machine = (machine_name or platform.machine()).strip().lower()
+    arch = {
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "amd64": "x64",
+        "x64": "x64",
+        "x86_64": "x64",
+    }.get(machine)
+    if system not in {"darwin", "linux", "win32"} or arch is None:
+        return None
+    return f"{system}-{arch}"
+
+
+def packaged_runtime_candidates(repo_root: Path, name: str) -> tuple[Path, ...]:
+    """Return fixed, host-specific runtime locations in development priority order."""
+    candidates = [repo_root / "desktop" / "security-runtime-bin" / name]
+    platform_key = runtime_platform_key()
+    if platform_key:
+        candidates.append(repo_root / "security-runtime" / "prebuilt" / platform_key / name)
+    candidates.append(repo_root / "security-runtime" / "bin" / name)
+    return tuple(candidates)
+
+
 def packaged_runtime_argv() -> tuple[str, ...]:
     """Resolve a trusted installed helper without searching the task cwd.
 
-    Priority: ACE_SECURITY_RUNTIME env (absolute) → Desktop 本地 staging 目录 → 提交进
-    仓库的 security-runtime/bin/<name> 预编译产物。所有候选都固定在仓库根目录，不搜索
-    任务 cwd。
+    Priority: ACE_SECURITY_RUNTIME env (absolute) → Desktop 本地 staging 目录 → 当前
+    平台/架构的仓库预编译产物 → 旧版 security-runtime/bin/<name>。所有候选都固定在
+    仓库根目录，不搜索任务 cwd。
     """
     configured = os.environ.get("ACE_SECURITY_RUNTIME", "").strip()
     if configured:
@@ -298,10 +334,7 @@ def packaged_runtime_argv() -> tuple[str, ...]:
         name = "ace-security-runtime.exe" if os.name == "nt" else "ace-security-runtime"
         # crew/security/launch.py → parents[2] = 仓库根
         repo_root = Path(__file__).resolve().parents[2]
-        candidates = (
-            repo_root / "desktop" / "security-runtime-bin" / name,
-            repo_root / "security-runtime" / "bin" / name,
-        )
+        candidates = packaged_runtime_candidates(repo_root, name)
         candidate = next((path for path in candidates if path.is_file()), candidates[0])
     if not candidate.is_absolute():
         raise RuntimeError("native security runtime path must be absolute")
@@ -351,6 +384,15 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         return
     if manifest.get("schema") != 2:
         raise HelperIntegrityError("native security runtime manifest schema is unsupported")
+    declared_platform = str(manifest.get("platform", "")).strip()
+    declared_arch = str(manifest.get("arch", "")).strip()
+    if bool(declared_platform) != bool(declared_arch):
+        raise HelperIntegrityError("native security runtime manifest target is incomplete")
+    if declared_platform and declared_arch:
+        declared_key = runtime_platform_key(declared_platform, declared_arch)
+        current_key = runtime_platform_key()
+        if declared_key is None or current_key is None or declared_key != current_key:
+            raise HelperIntegrityError("native security runtime targets a different platform")
     expected_name = str(manifest.get("binary_name", "")).strip()
     if expected_name != path.name:
         raise HelperIntegrityError("native security runtime manifest names a different binary")

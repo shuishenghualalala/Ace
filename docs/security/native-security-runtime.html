@@ -41,7 +41,7 @@
   <p>安全中心只呈现“安全防护”“安装 / 修复防护”等统一文案。需要系统级安装的场景由运行环境自动决定；系统内置防护直接显示能力状态，不要求用户选择系统类型。</p>
 
   <h2>构建与发布</h2>
-  <p><code>deb-package/pack_mac.sh</code> 在生成 Electron 应用前执行 release/locked Rust 构建，再通过 Desktop staging 脚本生成包含 SHA-256 的 manifest。开发态优先使用 <code>desktop/security-runtime-bin</code>，其次使用 <code>security-runtime/bin</code>；打包态使用 Resources 内的同平台文件名。Desktop 和 Python Gateway 都按 runtime 旁边的 manifest 校验二进制，打包 manifest 没有源码哈希时不会被误判为源码漂移。</p>
+  <p><code>deb-package/pack_mac.sh</code> 在生成 Electron 应用前执行 release/locked Rust 构建，再通过 Desktop staging 脚本生成包含 SHA-256 的 manifest。开发态依次使用本地 staging、<code>security-runtime/prebuilt/&lt;platform&gt;-&lt;arch&gt;</code> 和旧版 <code>security-runtime/bin</code>；打包态使用 Resources 内的同平台文件名。Desktop 和 Python Gateway 都校验 runtime 旁边的 manifest、二进制摘要以及声明的平台架构，源码树中的预编译产物还必须通过源码哈希漂移检测。</p>
   <p><code>security-macos</code> 工作流在真实 macOS runner 上运行 fmt、clippy、Rust 测试、Python 安全套件、原生文件/网络矩阵和 Desktop staging 校验，并生成绑定 commit 与实际二进制摘要的证据。</p>
 
   <h2>测试入口</h2>
@@ -58,5 +58,6 @@
   <p>2026-08-07：修正能力接口失败时的系统误判；平台由桌面运行环境自动探测，安全中心不再向用户展示具体系统名称或错误的安装入口。</p>
   <p>2026-08-07：补齐开发态 macOS runtime 自动发现、按所选 runtime 读取源码漂移状态、启动失败探针校验和缺失组件提示。</p>
   <p>2026-08-07：安全接口签名改为强制绑定当前 Gateway 数据目录，修复开发模式下实例密钥目录不一致导致的 403，并增加目录隔离回归测试。</p>
+  <p>2026-08-10：加入按平台和架构分目录的仓库预编译 runtime；Apple Silicon 开发者无需安装 Rust 即可启动，错误架构、摘要不一致和源码漂移均失败关闭；Intel Mac 通过本机 release/locked 构建后 staging，后续可扩展独立的 <code>darwin-x64</code> 产物。</p>
 </body>
 </html>

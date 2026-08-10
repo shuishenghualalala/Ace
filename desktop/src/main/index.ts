@@ -1258,12 +1258,14 @@ function packagedSecurityRuntimeEnv(): Record<string, string> {
   const runtimeName = process.platform === 'win32'
     ? 'ace-security-runtime.exe'
     : 'ace-security-runtime';
+  const platformKey = `${process.platform}-${process.arch}`;
   const runtimeCandidates = configured
     ? [configured]
     : app.isPackaged
       ? [path.join(process.resourcesPath, runtimeName)]
       : [
           path.join(repoRoot(), 'desktop', 'security-runtime-bin', runtimeName),
+          path.join(repoRoot(), 'security-runtime', 'prebuilt', platformKey, runtimeName),
           path.join(repoRoot(), 'security-runtime', 'bin', runtimeName),
         ];
   const runtime = runtimeCandidates.find((candidate) => path.isAbsolute(candidate) && fs.existsSync(candidate)) ?? '';
@@ -1280,7 +1282,19 @@ function packagedSecurityRuntimeEnv(): Record<string, string> {
         files?: Array<{ name?: string; sha256?: string }>;
         binary_name?: string;
         binary_sha256?: string;
+        platform?: string;
+        arch?: string;
       };
+      const declaresPlatform = Boolean(manifest.platform || manifest.arch);
+      if (
+        declaresPlatform
+        && (manifest.platform !== process.platform || manifest.arch !== process.arch)
+      ) {
+        return {
+          ACE_SECURITY_STATE_DIR: stateDir,
+          ACE_STRICT_SECURITY: strictSecurity,
+        };
+      }
       const expected = manifest.files?.find((item) => item.name === runtimeName)?.sha256
         ?? (manifest.binary_name === runtimeName ? manifest.binary_sha256 : undefined);
       const actual = createHash('sha256').update(fs.readFileSync(runtime)).digest('hex');
