@@ -353,6 +353,7 @@ class Config:
         self.max_tokens = profile.max_tokens
         self.context_window = profile.context_window
         self.timeout = profile.timeout
+        self.vision = profile.vision
         return profile
 
     def public_model_options(self) -> list[dict[str, Any]]:

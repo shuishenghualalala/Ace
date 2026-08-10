@@ -355,3 +355,33 @@ def test_resolve_writable_env_path_owner_scoped(monkeypatch, tmp_path):
     monkeypatch.setenv("CREW_HOME", str(home))
     p = resolve_writable_env_path("owner:user-a")
     assert p == home / "accounts" / owner_path_segment("owner:user-a") / ".env"
+
+
+# ----------------------- Config.activate_model: vision 同步 -----------------------
+
+
+def test_activate_model_syncs_vision_flag(cfg: Config):
+    """激活模型时必须把 profile.vision 同步到 Config 顶层。
+
+    回归：主对话 provider 由 build_provider(cfg) 用 cfg.vision 构造（非 profile.vision）。
+    若 activate_model 漏同步 vision，纯文本模型（vision=False）仍按 vision=True 发送
+    image_url，触发 "Model do not support image input" 400（如 browser_use 截图）。
+    """
+    # 加一个显式关闭 vision 的 profile 并激活
+    cfg.add_model({
+        "id": "textonly",
+        "name": "Text Only",
+        "api_key_env": "ALPHA_KEY",
+        "model": "text-1",
+        "vision": False,
+    })
+    assert cfg.model_profiles["textonly"].vision is False
+
+    profile = cfg.activate_model("textonly")
+    assert profile.vision is False
+    # 关键：Config 顶层 vision 必须跟随激活模型，而非保持默认 True
+    assert cfg.vision is False
+
+    # 切回 vision=True 的模型，顶层标志应同步回升
+    cfg.activate_model("alpha")
+    assert cfg.vision is True
