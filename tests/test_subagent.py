@@ -96,14 +96,21 @@ def test_registry_user_overrides_builtin(tmp_path, monkeypatch):
 
 # ── 3. 工具过滤：禁嵌套 + 白名单交集 ────────────────────────────────────────
 
-def test_subagent_tool_filter_blocks_nesting():
+def test_subagent_tool_filter_blacklist():
+    """🔴 工具黑名单：禁嵌套（delegate_task/run_agent/delegate_to_external_agent）
+    + 写副作用工具（memory/cron/feishu/wiki_*），正常只读工具保留。"""
     app = build_app(config=Config(max_iterations=5))
-    # 继承全量（toolsets=None）也不能拿到 delegate_task / run_agent
+    # 继承全量（toolsets=None）也不能拿到嵌套委派工具
     inherited = app._subagent_tool_filter(None, None)
     assert "delegate_task" not in inherited
     assert "run_agent" not in inherited
     assert "delegate_to_external_agent" not in inherited
-    assert "file_read" in inherited
+    # 写副作用工具同样被过滤
+    assert "memory" not in inherited
+    assert "cron_create" not in inherited
+    assert not any(n.startswith("feishu") for n in inherited)
+    assert not any(name.startswith("wiki_") for name in inherited)
+    assert "file_read" in inherited  # 正常只读工具仍在
 
 
 def test_subagent_tool_filter_whitelist():
@@ -287,18 +294,6 @@ async def test_delegate_task_caps_task_count():
         })
     )
     assert result.is_error and ("最多委派" in result.content or "Too many tasks" in result.content)
-
-
-def test_subagent_tool_filter_blocks_side_effect_tools():
-    """🔴 工具黑名单：子 agent 拿不到 memory / cron / feishu 等写副作用工具。"""
-    app = build_app(config=Config(max_iterations=5))
-    inherited = app._subagent_tool_filter(None, None)
-    assert "memory" not in inherited
-    assert "cron_create" not in inherited
-    assert not any(n.startswith("feishu") for n in inherited)
-    assert "delegate_to_external_agent" not in inherited
-    assert not any(name.startswith("wiki_") for name in inherited)
-    assert "file_read" in inherited  # 正常只读工具仍在
 
 
 def test_subagent_inherits_parent_final_authorization_snapshot():

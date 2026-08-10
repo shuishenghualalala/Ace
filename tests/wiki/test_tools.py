@@ -60,6 +60,24 @@ def _set_context(session_id: str = "sid", owner: str = "owner"):
     current_owner_account_id.set(owner)
 
 
+@pytest.fixture
+def fs_wiki(tmp_path):
+    """真实 FileSystemWikiStore + mock compiler/manager 的工具注册环境（KB 固定为 default）。"""
+    store = FileSystemWikiStore(base_dir=tmp_path / "home")
+    compiler = MagicMock(spec=WikiCompiler)
+    manager = MagicMock(spec=WikiSessionManager)
+    manager.get_kb_id.return_value = "default"
+    registry = Registry()
+    register_wiki_tools(registry, store, compiler, MagicMock(spec=WikiQuerier), manager)
+    _set_context()
+    return {
+        "store": store,
+        "compiler": compiler,
+        "manager": manager,
+        "registry": registry,
+    }
+
+
 def test_wiki_tools_are_split_into_read_and_manage_toolsets(wiki_mocks):
     registry = wiki_mocks["registry"]
     assert set(registry.names_for_toolset(WIKI_READ_TOOLSET)) == set(WIKI_READ_TOOLS)
@@ -744,7 +762,6 @@ async def test_wiki_plan_ingest_returns_brief_content(wiki_mocks):
 
     registry = wiki_mocks["registry"]
     compiler = wiki_mocks["compiler"]
-    manager = wiki_mocks["manager"]
     long_content = "C" * 2000
     compiler.plan_ingest = AsyncMock(
         return_value=PlanResult(
@@ -843,7 +860,7 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     manager.issue_confirmation.assert_called_once()
 
 
-async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path):
+async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, fs_wiki):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     allowed = uploads / "current.md"
@@ -851,13 +868,8 @@ async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path):
     old = uploads / "old.md"
     old.write_text("# old", encoding="utf-8")
 
-    store = FileSystemWikiStore(base_dir=tmp_path / "home")
-    compiler = MagicMock(spec=WikiCompiler)
-    registry = Registry()
-    manager = MagicMock(spec=WikiSessionManager)
-    manager.get_kb_id.return_value = "default"
-    register_wiki_tools(registry, store, compiler, MagicMock(spec=WikiQuerier), manager)
-    _set_context()
+    store = fs_wiki["store"]
+    registry = fs_wiki["registry"]
     current_attachment_paths.set((str(allowed),))
 
     with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
@@ -872,7 +884,7 @@ async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path):
     current_attachment_paths.set(())
 
 
-async def test_capture_attachment_uses_original_name_and_content_type_not_display_title(tmp_path):
+async def test_capture_attachment_uses_original_name_and_content_type_not_display_title(tmp_path, fs_wiki):
     from crew.core.runctx import current_attachment_files
 
     uploads = tmp_path / "uploads"
@@ -880,13 +892,8 @@ async def test_capture_attachment_uses_original_name_and_content_type_not_displa
     stored = uploads / "ticket_1234.pdf"
     stored.write_bytes(b"%PDF-1.7\nfake")
 
-    store = FileSystemWikiStore(base_dir=tmp_path / "home")
-    compiler = MagicMock(spec=WikiCompiler)
-    registry = Registry()
-    manager = MagicMock(spec=WikiSessionManager)
-    manager.get_kb_id.return_value = "default"
-    register_wiki_tools(registry, store, compiler, MagicMock(spec=WikiQuerier), manager)
-    _set_context()
+    store = fs_wiki["store"]
+    registry = fs_wiki["registry"]
     current_attachment_paths.set((str(stored),))
     current_attachment_files.set(((str(stored), "机票预订单.pdf"),))
 
@@ -906,24 +913,14 @@ async def test_capture_attachment_uses_original_name_and_content_type_not_displa
     current_attachment_files.set(())
 
 
-async def test_capture_text_marks_duplicate_before_publishing_second_source(tmp_path):
-    store = FileSystemWikiStore(base_dir=tmp_path / "home")
-    compiler = MagicMock(spec=WikiCompiler)
+async def test_capture_text_marks_duplicate_before_publishing_second_source(fs_wiki):
+    store = fs_wiki["store"]
+    compiler = fs_wiki["compiler"]
+    registry = fs_wiki["registry"]
     source_page = MagicMock()
     source_page.id = "source-page"
     source_page.to_dict.return_value = {"id": "source-page", "page_type": "source"}
     compiler.publish_source_page.return_value = source_page
-    manager = MagicMock(spec=WikiSessionManager)
-    manager.get_kb_id.return_value = "default"
-    registry = Registry()
-    register_wiki_tools(
-        registry,
-        store,
-        compiler,
-        MagicMock(spec=WikiQuerier),
-        manager,
-    )
-    _set_context()
     content = "这是一段足够长且完全相同的测试正文，用于验证解析完成后立即去重。"
 
     first = await registry.get("wiki_capture_text").run({"title": "第一份", "content": content})
@@ -938,11 +935,12 @@ async def test_capture_text_marks_duplicate_before_publishing_second_source(tmp_
 
 
 async def test_refresh_source_keeps_same_version_and_creates_drift_version_on_change(
-    tmp_path,
+    fs_wiki,
 ):
     from crew.wiki.schemas import RawSource
 
-    store = FileSystemWikiStore(base_dir=tmp_path / "home")
+    store = fs_wiki["store"]
+    registry = fs_wiki["registry"]
     original = RawSource(
         id="url_original",
         title="示例页面",
@@ -960,16 +958,11 @@ async def test_refresh_source_keeps_same_version_and_creates_drift_version_on_ch
         owner_account_id="owner",
         kb_id="default",
     )
-    compiler = MagicMock(spec=WikiCompiler)
+    compiler = fs_wiki["compiler"]
     page = MagicMock()
     page.id = "source-new"
     page.to_dict.return_value = {"id": "source-new", "page_type": "source"}
     compiler.publish_source_page.return_value = page
-    manager = MagicMock(spec=WikiSessionManager)
-    manager.get_kb_id.return_value = "default"
-    registry = Registry()
-    register_wiki_tools(registry, store, compiler, MagicMock(spec=WikiQuerier), manager)
-    _set_context()
 
     with patch("crew.wiki.tools.fetch_url_to_markdown", return_value=(old_content, original.source_url)):
         unchanged = await registry.get("wiki_refresh_source").run({"source_id": original.id})
@@ -995,11 +988,12 @@ async def test_refresh_source_keeps_same_version_and_creates_drift_version_on_ch
     assert new_raw.is_current is True
 
 
-async def test_refresh_failure_preserves_old_immutable_version(tmp_path):
+async def test_refresh_failure_preserves_old_immutable_version(fs_wiki):
     """刷新失败不改写旧版本的 parse_status/extraction_state，旧版本仍可用。"""
     from crew.wiki.schemas import RawSource
 
-    store = FileSystemWikiStore(base_dir=tmp_path / "home")
+    store = fs_wiki["store"]
+    registry = fs_wiki["registry"]
     original = RawSource(
         id="url_original",
         title="示例页面",
@@ -1016,12 +1010,6 @@ async def test_refresh_failure_preserves_old_immutable_version(tmp_path):
         owner_account_id="owner",
         kb_id="default",
     )
-    compiler = MagicMock(spec=WikiCompiler)
-    manager = MagicMock(spec=WikiSessionManager)
-    manager.get_kb_id.return_value = "default"
-    registry = Registry()
-    register_wiki_tools(registry, store, compiler, MagicMock(spec=WikiQuerier), manager)
-    _set_context()
 
     with patch("crew.wiki.tools.fetch_url_to_markdown", side_effect=RuntimeError("blocked")):
         result = await registry.get("wiki_refresh_source").run({"source_id": original.id})
@@ -1039,14 +1027,9 @@ async def test_refresh_failure_preserves_old_immutable_version(tmp_path):
     assert old.superseded_by is None
 
 
-async def test_fetch_url_failure_persists_retryable_source_state(tmp_path):
-    store = FileSystemWikiStore(base_dir=tmp_path / "home")
-    compiler = MagicMock(spec=WikiCompiler)
-    manager = MagicMock(spec=WikiSessionManager)
-    manager.get_kb_id.return_value = "default"
-    registry = Registry()
-    register_wiki_tools(registry, store, compiler, MagicMock(spec=WikiQuerier), manager)
-    _set_context()
+async def test_fetch_url_failure_persists_retryable_source_state(fs_wiki):
+    store = fs_wiki["store"]
+    registry = fs_wiki["registry"]
 
     with patch("crew.wiki.tools.fetch_url_to_markdown", side_effect=RuntimeError("blocked")):
         result = await registry.get("wiki_fetch_url").run(
@@ -1062,10 +1045,12 @@ async def test_fetch_url_failure_persists_retryable_source_state(tmp_path):
     assert "blocked" in str(raws[0].parse_error)
 
 
-async def test_rename_and_delete_pages_repair_all_inbound_reference_forms(tmp_path):
+async def test_rename_and_delete_pages_repair_all_inbound_reference_forms(fs_wiki):
     from crew.wiki.schemas import WikiPage, WikiRelation
 
-    store = FileSystemWikiStore(base_dir=tmp_path / "home")
+    store = fs_wiki["store"]
+    manager = fs_wiki["manager"]
+    registry = fs_wiki["registry"]
     target = store.save_page(
         WikiPage(
             id="",
@@ -1087,12 +1072,6 @@ async def test_rename_and_delete_pages_repair_all_inbound_reference_forms(tmp_pa
         ),
         owner_account_id="owner",
     )
-    compiler = MagicMock(spec=WikiCompiler)
-    manager = MagicMock(spec=WikiSessionManager)
-    manager.get_kb_id.return_value = "default"
-    registry = Registry()
-    register_wiki_tools(registry, store, compiler, MagicMock(spec=WikiQuerier), manager)
-    _set_context()
 
     await registry.get("wiki_rename_page").run(
         {"page_id": target.id, "new_title": "新标题"}
@@ -1188,7 +1167,6 @@ async def test_wiki_plan_ingest_explicit_kb_overrides_source_location(wiki_mocks
     registry = wiki_mocks["registry"]
     store = wiki_mocks["store"]
     compiler = wiki_mocks["compiler"]
-    manager = wiki_mocks["manager"]
     compiler.plan_ingest = AsyncMock(
         return_value=PlanResult(source_id="s1", total_new=0, total_update=0)
     )

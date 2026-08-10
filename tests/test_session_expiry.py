@@ -155,23 +155,31 @@ async def test_agent_manager_repeated_aclose_is_safe_and_rejects_new_leases():
 # ---------------------------------------------------------------------------
 
 
-def test_expire_idle_sessions(tmp_path):
-    """空闲超时的会话被清理。"""
-    db_path = str(tmp_path / "test.db")
-    store = SQLiteSessionStore(db_path)
+def _expired_session_store(db_path: str, sessions: dict[str, str | None], fresh: tuple[str, ...] = ()):
+    """构造会话并把 updated_at 改为 2 小时前；status 为 None 时不写状态。
 
+    fresh 列出的 session 保持当前 updated_at（模拟刚活动的会话，不会被过期）。
+    返回 (store, old_time)，old_time 供需要比对 updated_at 的用例使用。
+    """
     from crew.core.types import Message
 
-    # 保存两个会话
-    store.save("s1", [Message.user("hello")])
-    store.save("s2", [Message.user("world")])
-    # 标记 s1 为 completed
-    store.set_status("s1", "completed")
-
-    # 手动把 s1 的 updated_at 改为很久以前
+    store = SQLiteSessionStore(db_path)
     old_time = time.time() - 7200  # 2 小时前
-    store._conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (old_time, "s1"))
+    for sid, status in sessions.items():
+        store.save(sid, [Message.user("hello")])
+        if status is not None:
+            store.set_status(sid, status)
+        if sid not in fresh:
+            store._conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (old_time, sid))
     store._conn.commit()
+    return store, old_time
+
+
+def test_expire_idle_sessions(tmp_path):
+    """空闲超时的会话被清理。"""
+    store, _ = _expired_session_store(
+        str(tmp_path / "test.db"), {"s1": "completed", "s2": None}, fresh=("s2",),
+    )
 
     # 清理 1 小时（3600秒）前的空闲会话
     expired = store.expire_idle_sessions(3600.0)
@@ -183,19 +191,7 @@ def test_expire_idle_sessions(tmp_path):
 
 def test_expire_does_not_remove_running_sessions(tmp_path):
     """正在运行的会话不被清理。"""
-    db_path = str(tmp_path / "test.db")
-    store = SQLiteSessionStore(db_path)
-
-    from crew.core.types import Message
-
-    store.save("s1", [Message.user("hello")])
-    # 模拟正在运行（last_status 为空或 running）
-    store.set_status("s1", "running")
-
-    # 把 updated_at 改为很久以前
-    old_time = time.time() - 7200
-    store._conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (old_time, "s1"))
-    store._conn.commit()
+    store, _ = _expired_session_store(str(tmp_path / "test.db"), {"s1": "running"})
 
     # 清理不应删除正在运行的会话
     expired = store.expire_idle_sessions(3600.0)
@@ -205,15 +201,7 @@ def test_expire_does_not_remove_running_sessions(tmp_path):
 
 def test_expire_zero_timeout_no_op(tmp_path):
     """idle_seconds=0 时不清理。"""
-    db_path = str(tmp_path / "test.db")
-    store = SQLiteSessionStore(db_path)
-
-    from crew.core.types import Message
-
-    store.save("s1", [Message.user("hello")])
-    old_time = time.time() - 7200
-    store._conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (old_time, "s1"))
-    store._conn.commit()
+    store, _ = _expired_session_store(str(tmp_path / "test.db"), {"s1": None})
 
     expired = store.expire_idle_sessions(0)
     assert expired == 0
@@ -221,16 +209,7 @@ def test_expire_zero_timeout_no_op(tmp_path):
 
 def test_expire_excludes_running_via_exclude_set(tmp_path):
     """显式传入 running/queued session_id 时，即使 last_status 是 completed 也不清理。"""
-    db_path = str(tmp_path / "test.db")
-    store = SQLiteSessionStore(db_path)
-
-    from crew.core.types import Message
-
-    store.save("s1", [Message.user("hello")])
-    store.set_status("s1", "completed")
-    old_time = time.time() - 7200
-    store._conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (old_time, "s1"))
-    store._conn.commit()
+    store, _ = _expired_session_store(str(tmp_path / "test.db"), {"s1": "completed"})
 
     expired = store.expire_idle_sessions(3600.0, exclude_session_ids={"s1"})
     assert expired == 0
@@ -239,15 +218,7 @@ def test_expire_excludes_running_via_exclude_set(tmp_path):
 
 def test_set_running_status_refreshes_updated_at(tmp_path):
     """set_status('running') 会刷新 updated_at，防止长任务被过期清理。"""
-    db_path = str(tmp_path / "test.db")
-    store = SQLiteSessionStore(db_path)
-
-    from crew.core.types import Message
-
-    store.save("s1", [Message.user("hello")])
-    old_time = time.time() - 7200
-    store._conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (old_time, "s1"))
-    store._conn.commit()
+    store, old_time = _expired_session_store(str(tmp_path / "test.db"), {"s1": None})
 
     store.set_status("s1", "running")
     row = store._conn.execute("SELECT updated_at, last_status FROM sessions WHERE session_id = ?", ("s1",)).fetchone()

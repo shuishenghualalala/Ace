@@ -46,9 +46,11 @@ from crew.agent.compact.microcompact import TOOL_SUMMARY_PREFIX
 from crew.agent.compact.store import SummaryState
 from crew.agent.compact.summary import SUMMARY_MARKER
 from crew.app import build_app, CrewApp
-from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.envelope import Envelope
 from crew.core.errors import ProviderError
 from crew.core.types import Message, ToolCall
+
+from tests._e2e_helpers import collect_chunks
 
 
 # --------------------------------------------------------------------------- #
@@ -141,14 +143,6 @@ def _trace_start_index() -> int:
     return len(_read_llm_trace())
 
 
-async def _collect_chunks(app: CrewApp, envelope: Envelope) -> list[ResponseChunk]:
-    """收集 app.handle 返回的所有 chunk。"""
-    chunks: list[ResponseChunk] = []
-    async for chunk in app.handle(envelope):
-        chunks.append(chunk)
-    return chunks
-
-
 # --------------------------------------------------------------------------- #
 # Fixture
 # --------------------------------------------------------------------------- #
@@ -195,7 +189,7 @@ async def test_deepseek_connection(app: CrewApp):
     """deepseek 最小连接验证：能收到非空 final 且无 error 帧。"""
     session_id = "e2e_compact_conn"
     envelope = Envelope.of("你好，请用一句话回复", session_id=session_id)
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope)
 
     final_chunks = [c for c in chunks if c.kind == "final"]
     assert final_chunks, f"未收到 final 帧: {[c.kind for c in chunks]}"
@@ -216,7 +210,7 @@ async def test_l1_microcompact_clears_old_tools(app: CrewApp):
     app.session_store.save(session_id, history, owner_account_id="local")
 
     envelope = Envelope.of("总结一下之前的工具执行结果", session_id=session_id)
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope)
 
     assert any(c.kind == "final" for c in chunks), "应收到 final 帧"
     assert not any(c.kind == "error" for c in chunks), "不应有 error 帧"
@@ -255,7 +249,7 @@ async def test_l3_full_summary_first_compaction(app: CrewApp):
     app.session_store.save(session_id, history, owner_account_id="local")
 
     envelope = Envelope.of("请简要总结我们之前的讨论", session_id=session_id)
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope)
 
     assert any(c.kind == "final" for c in chunks), "应收到 final 帧"
     assert not any(c.kind == "error" for c in chunks), "不应有 error 帧"
@@ -297,7 +291,7 @@ async def test_l2_incremental_summary_reuses_cache(app: CrewApp):
     history = _build_long_history(25, chars_per_msg=2000)
     app.session_store.save(session_id, history, owner_account_id="local")
     envelope1 = Envelope.of("第一轮总结", session_id=session_id)
-    chunks1 = await _collect_chunks(app, envelope1)
+    chunks1 = await collect_chunks(app, envelope1)
     assert any(c.kind == "final" for c in chunks1), "第一轮应收到 final"
 
     state1 = app.summary_store.get(session_id, owner_account_id="local")
@@ -310,7 +304,7 @@ async def test_l2_incremental_summary_reuses_cache(app: CrewApp):
     app.session_store.save(session_id, saved, owner_account_id="local")
 
     envelope2 = Envelope.of("第二轮总结", session_id=session_id)
-    chunks2 = await _collect_chunks(app, envelope2)
+    chunks2 = await collect_chunks(app, envelope2)
     assert any(c.kind == "final" for c in chunks2), "第二轮应收到 final"
 
     # 验证缓存覆盖范围扩展
@@ -338,7 +332,7 @@ async def test_l2_pure_rule_no_llm_when_delta_small(app: CrewApp):
     history = _build_long_history(25, chars_per_msg=2000)
     app.session_store.save(session_id, history, owner_account_id="local")
     envelope1 = Envelope.of("建立缓存", session_id=session_id)
-    await _collect_chunks(app, envelope1)
+    await collect_chunks(app, envelope1)
 
     state1 = app.summary_store.get(session_id, owner_account_id="local")
     assert state1 is not None, "应建立缓存"
@@ -350,7 +344,7 @@ async def test_l2_pure_rule_no_llm_when_delta_small(app: CrewApp):
     app.session_store.save(session_id, saved, owner_account_id="local")
 
     envelope2 = Envelope.of("回答", session_id=session_id)
-    chunks2 = await _collect_chunks(app, envelope2)
+    chunks2 = await collect_chunks(app, envelope2)
     assert any(c.kind == "final" for c in chunks2), "应收到 final"
 
     # 验证没有新增 LLM 摘要请求
@@ -381,7 +375,7 @@ async def test_canonical_history_preserved_after_compaction(app: CrewApp):
     app.session_store.save(session_id, history, owner_account_id="local")
 
     envelope = Envelope.of("请总结之前的内容", session_id=session_id)
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope)
     assert any(c.kind == "final" for c in chunks), "应收到 final"
 
     saved = app.session_store.load(session_id, owner_account_id="local")
@@ -427,7 +421,7 @@ async def test_resilience_overflow_and_anti_thrash(app: CrewApp, caplog):
     app.provider.stream_chat = _overflow_then_ok
 
     envelope1 = Envelope.of("请总结", session_id=session_id)
-    chunks1 = await _collect_chunks(app, envelope1)
+    chunks1 = await collect_chunks(app, envelope1)
     assert overflow_triggered, "应触发一次 overflow 异常"
     assert any(c.kind == "final" for c in chunks1), "兜底后应收到 final"
     assert not any(c.kind == "error" for c in chunks1), "overflow 不应透传为 error 帧"
@@ -456,7 +450,7 @@ async def test_resilience_overflow_and_anti_thrash(app: CrewApp, caplog):
     caplog.clear()
 
     envelope2 = Envelope.of("再总结一次", session_id=session_id)
-    chunks2 = await _collect_chunks(app, envelope2)
+    chunks2 = await collect_chunks(app, envelope2)
     assert any(c.kind == "final" for c in chunks2), "防抖跳过后仍应收到 final"
 
     # 验证日志中出现 anti-thrash 跳过摘要的警告

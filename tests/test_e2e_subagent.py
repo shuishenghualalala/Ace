@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 import time
@@ -26,6 +25,8 @@ from crew.app import build_app, CrewApp
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.runctx import current_user_type
 from crew.state.config import Config, load_config
+
+from tests._e2e_helpers import collect_chunks
 
 
 def _build_config(tmp_path: Path) -> Config:
@@ -51,22 +52,6 @@ async def app(tmp_path_factory):
     if not _app.config.has_llm_key:
         pytest.skip(f"模型 {_app.config.active_model_id} 未配置 API Key，跳过真实 LLM E2E")
     yield _app
-
-
-async def _collect_chunks(app: CrewApp, envelope: Envelope, timeout: float = 300.0) -> list[ResponseChunk]:
-    """收集 handle 返回的所有 ResponseChunk，带总超时保护。"""
-    chunks: list[ResponseChunk] = []
-
-    async def _consume() -> None:
-        async for chunk in app.handle(envelope):
-            chunks.append(chunk)
-
-    try:
-        await asyncio.wait_for(_consume(), timeout=timeout)
-    except asyncio.TimeoutError:
-        # 总超时仍保留已收集的 chunk，方便断言给出诊断信息
-        chunks.append(ResponseChunk.error(envelope.request_id, "总超时"))
-    return chunks
 
 
 def _tool_calls(chunks: list[ResponseChunk]) -> list[dict]:
@@ -96,7 +81,7 @@ async def test_e2e_run_agent_explore(app: CrewApp):
         "给出关键文件路径和函数名。",
         session_id=session_id,
     )
-    chunks = await _collect_chunks(app, envelope, timeout=240.0)
+    chunks = await collect_chunks(app, envelope, timeout=240.0)
 
     errors = _errors(chunks)
     assert not errors, f"出现 error: {errors}"
@@ -134,7 +119,7 @@ async def test_e2e_delegate_task_batch(app: CrewApp):
         "要求两个子任务并行执行，最后汇总告诉我。"
     )
     envelope = Envelope.of(prompt, session_id=session_id)
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope, timeout=300.0)
 
     errors = _errors(chunks)
     assert not errors, f"出现 error: {errors}"
@@ -162,7 +147,7 @@ async def test_e2e_background_run_agent_collect(app: CrewApp):
         "请调用 Explore 子智能体在后台查询本项目的日志模块设计，并返回 task_id。",
         session_id=session_id,
     )
-    chunks1 = await _collect_chunks(app, envelope1, timeout=180.0)
+    chunks1 = await collect_chunks(app, envelope1, timeout=180.0)
 
     errors = _errors(chunks1)
     assert not errors, f"启动后台任务出错: {errors}"
@@ -188,7 +173,7 @@ async def test_e2e_background_run_agent_collect(app: CrewApp):
         f"请用 collect_subagent 取回 task_id {task_id} 的结果，告诉我查询到了什么。",
         session_id=session_id,
     )
-    chunks2 = await _collect_chunks(app, envelope2, timeout=180.0)
+    chunks2 = await collect_chunks(app, envelope2, timeout=180.0)
 
     errors2 = _errors(chunks2)
     assert not errors2, f"collect 出错: {errors2}"
@@ -249,7 +234,7 @@ async def test_e2e_delegate_task_timeout(app: CrewApp):
         "请用 delegate_task 委派一个子任务：'详细分析 README.md 的每一行'。这个任务应该在 1 秒内超时。",
         session_id=session_id,
     )
-    chunks = await _collect_chunks(app2, envelope, timeout=30.0)
+    chunks = await collect_chunks(app2, envelope, timeout=30.0)
 
     # 主 agent 可能直接回答，也可能调用 delegate_task 后超时
     tools = _tool_calls(chunks)
@@ -274,7 +259,7 @@ async def test_e2e_run_agent_plan(app: CrewApp):
         "列出关键文件和接口。",
         session_id=session_id,
     )
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope, timeout=300.0)
 
     errors = _errors(chunks)
     assert not errors, f"出现 error: {errors}"

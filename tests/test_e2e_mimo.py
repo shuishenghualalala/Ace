@@ -26,7 +26,9 @@ if ROOT not in sys.path:
 os.environ["CREW_MODEL_PROFILE"] = "mimo"
 
 from crew.app import build_app, CrewApp
-from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.envelope import Envelope
+
+from tests._e2e_helpers import collect_chunks
 
 
 @pytest.fixture(scope="module")
@@ -39,20 +41,12 @@ def app() -> CrewApp:
     return _app
 
 
-async def _collect_chunks(app: CrewApp, envelope: Envelope) -> list[ResponseChunk]:
-    """收集 handle 返回的所有 ResponseChunk。"""
-    chunks = []
-    async for chunk in app.handle(envelope):
-        chunks.append(chunk)
-    return chunks
-
-
 # ---- 测试 1: 纯文本对话 ----
 async def test_mimo_plain_chat(app: CrewApp):
     """MiMo 纯文本对话：发一句话，收到非空 final 回复。"""
     session_id = "e2e_mimo_plain"
     envelope = Envelope.of("你好，请用一句话介绍你自己。", session_id=session_id)
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope)
 
     # 应有 final 帧
     final_chunks = [c for c in chunks if c.kind == "final"]
@@ -72,7 +66,7 @@ async def test_mimo_tool_call(app: CrewApp):
     """MiMo 工具调用：请求执行命令，验证工具事件 + final 回复。"""
     session_id = "e2e_mimo_tool"
     envelope = Envelope.of("请执行命令 echo hello_crew，告诉我结果。", session_id=session_id)
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope)
 
     kinds = [c.kind for c in chunks]
     # 应有 tool 事件（start 和/或 result）
@@ -97,7 +91,7 @@ async def test_mimo_streaming_delta(app: CrewApp):
     """MiMo 流式输出：验证收到 delta 帧，且拼接后非空。"""
     session_id = "e2e_mimo_stream"
     envelope = Envelope.of("用三句话描述春天的景色。", session_id=session_id)
-    chunks = await _collect_chunks(app, envelope)
+    chunks = await collect_chunks(app, envelope)
 
     delta_chunks = [c for c in chunks if c.kind == "delta"]
     assert delta_chunks, "未收到 delta 帧，流式输出可能异常"
@@ -115,13 +109,13 @@ async def test_mimo_multi_turn(app: CrewApp):
 
     # 第一轮
     envelope1 = Envelope.of("我喜欢的颜色是蓝色，请记住。", session_id=session_id)
-    chunks1 = await _collect_chunks(app, envelope1)
+    chunks1 = await collect_chunks(app, envelope1)
     final1 = [c for c in chunks1 if c.kind == "final"]
     assert final1, "第一轮未收到 final 帧"
 
     # 第二轮
     envelope2 = Envelope.of("我刚才说我喜欢什么颜色？", session_id=session_id)
-    chunks2 = await _collect_chunks(app, envelope2)
+    chunks2 = await collect_chunks(app, envelope2)
     final2 = [c for c in chunks2 if c.kind == "final"]
     assert final2, "第二轮未收到 final 帧"
 
@@ -136,7 +130,7 @@ async def test_mimo_session_persistence(app: CrewApp):
     """MiMo 会话持久化：对话后可通过 session_store 回放历史。"""
     session_id = "e2e_mimo_persist"
     envelope = Envelope.of("1+1等于几？", session_id=session_id)
-    await _collect_chunks(app, envelope)
+    await collect_chunks(app, envelope)
 
     # 通过 session_store 回放
     history = app.session_store.load(session_id)

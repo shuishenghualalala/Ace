@@ -128,13 +128,19 @@ def test_workspace_delete_can_be_wrapped_with_session_delete_in_one_transaction(
     assert [row["session_id"] for row in sess_store.list_sessions(ws["id"])] == ["s1"]
 
 
-def test_placeholder_title_replaced_on_save(tmp_path):
-    """占位标题「新会话」应在 save 时被首条 user 消息 fallback 覆盖。"""
+def test_save_title_fallback_defaults_to_first_user_message(tmp_path):
+    """save 的标题 fallback：占位标题「新会话」或未传 title_fallback（None 保持旧行为，
+    兼容未传该参数的调用方）时，都以首条 user 消息截断作为标题。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
+    # 占位标题被首条 user 消息覆盖
     store.ensure_session("s1", title="新会话")
     store.save("s1", [Message.user("帮我写一段 Python 脚本")])
     s1 = next(s for s in store.list_sessions() if s["session_id"] == "s1")
     assert s1["title"] == "帮我写一段 Python 脚本"
+    # title_fallback=None（旧行为）同样取首条 user 消息
+    store.save("s-legacy", [Message.user("帮我看看天气")], title_fallback=None)
+    row = next(s for s in store.list_sessions() if s["session_id"] == "s-legacy")
+    assert row["title"] == "帮我看看天气"
 
 
 def test_save_does_not_overwrite_workspace_id_on_update(tmp_path):
@@ -166,14 +172,6 @@ def test_save_title_fallback_empty_keeps_placeholder_for_summary(tmp_path):
     store.set_title("s-title", "文件清单问答")
     row = next(s for s in store.list_sessions() if s["session_id"] == "s-title")
     assert row["title"] == "文件清单问答"
-
-
-def test_save_title_fallback_none_keeps_legacy_behavior(tmp_path):
-    """title_fallback=None 保持旧行为（首条 user 消息截断作 fallback），兼容未传该参数的调用方。"""
-    store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s-legacy", [Message.user("帮我看看天气")], title_fallback=None)
-    row = next(s for s in store.list_sessions() if s["session_id"] == "s-legacy")
-    assert row["title"] == "帮我看看天气"
 
 
 def test_app_enrich_workspace():

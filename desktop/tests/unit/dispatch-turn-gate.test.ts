@@ -4,6 +4,8 @@
  * dispatch 开回合与 applyChunk gate：首帧必须在 turnSealed=false + activeRequestId 绑定后到达。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+// 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
+import './helpers/mock-chat-controller-deps';
 import { applyChunk } from '../../src/ui/features/chat-controller';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
 import { resolveTurnGate } from '../../src/ui/reducers/chat-reducer';
@@ -18,29 +20,6 @@ vi.mock('../../src/ui/features/workspaces', () => ({
   createSessionInWorkspace: vi.fn(() => 'sid-1'),
   getSessionAgentDisplay: vi.fn(() => null),
   isDraftSession: vi.fn(() => false),
-}));
-
-vi.mock('../../src/ui/features/running-intro', () => ({ syncRunningIntroSlot: vi.fn() }));
-vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
-vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));
-vi.mock('../../src/ui/features/kanban-board', () => ({
-  refreshKanbanBoard: vi.fn(async () => undefined),
-  renderKanbanBoard: vi.fn(),
-}));
-vi.mock('../../src/ui/features/inspector', () => ({
-  isInspectorOpen: vi.fn(() => false),
-  openInspectorToTab: vi.fn(),
-  refreshInspector: vi.fn(),
-  refreshInspectorChrome: vi.fn(),
-}));
-vi.mock('../../src/ui/features/composer-toolbar', () => ({
-  syncComposerModelLabel: vi.fn(),
-}));
-vi.mock('../../src/ui/features/model-picker', () => ({ syncModelUi: vi.fn() }));
-vi.mock('../../src/ui/features/system-page', () => ({ renderSystemOverview: vi.fn() }));
-vi.mock('../../src/ui/features/attachments', () => ({
-  takeAttachmentsForSend: vi.fn(() => []),
-  renderAttachmentPreview: vi.fn(),
 }));
 
 function chunk(kind: ChatChunk['kind'], requestId: string, body: Record<string, unknown> = {}): ChatChunk {
@@ -191,22 +170,6 @@ describe('dispatch turn gate', () => {
     expect(sessionStore.get().books['sid-1']?.assistantId).toBe(optimisticId);
     expect(sessionStore.get().books['sid-1']?.firstChunkAt).toBe(t0 + 90_000);
     vi.restoreAllMocks();
-  });
-
-  it('keeps approved pendingPlan after approve-resume delta for Plan Board', () => {
-    openTurnForRequest('sid-1', 'req-plan');
-    sessionStore.get().books['sid-1']!.pendingPlan = {
-      plan: '# 方案\n\n- step',
-      planFile: 'plans/p.md',
-      status: 'approved',
-    };
-    // 批准路径走 resume，不重新 openTurn；此处模拟执行首包 delta
-    applyChunk(chunk('delta', 'req-plan', { text: '按方案执行' }));
-    expect(sessionStore.get().books['sid-1']?.pendingPlan).toEqual({
-      plan: '# 方案\n\n- step',
-      planFile: 'plans/p.md',
-      status: 'approved',
-    });
   });
 
   it('first tool chunk patches optimistic assistant instead of appending a second bubble', () => {

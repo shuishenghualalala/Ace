@@ -201,9 +201,12 @@ def test_session_append_and_clear(tmp_path):
 
 async def test_memory_recall_same_session(tmp_path):
     mem = SQLiteMemory(str(tmp_path / "m.db"))
-    await mem.write("s1", [Message.user("我喜欢用 Python 写后端")])
+    original = "我喜欢用 Python 写后端"
+    await mem.write("s1", [Message.user(original)])
     hit = await mem.prefetch("s1", "Python 项目")
     assert "Python" in hit
+    # 中文 round-trip 不乱码（召回文本须包含原始中文，而非 ?? 之类乱码）
+    assert original in hit, f"中文 round-trip 失败，召回内容: {hit!r}"
     miss = await mem.prefetch("s1", "完全无关xyz")
     assert miss == ""
 
@@ -288,13 +291,3 @@ def test_load_config_resolves_memory_db_path_under_crew_home(tmp_path, monkeypat
     cfg = load_config()
     assert cfg.memory_db_path == str(home / "crew_data" / "memory.db")
     assert Path(cfg.memory_db_path).is_absolute()
-
-
-async def test_memory_chinese_roundtrip_no_mojibake(tmp_path):
-    """Bug C: 验证中文写入/读回不乱码（排除 GBK 显示问题 vs 真乱码）。"""
-    mem = SQLiteMemory(str(tmp_path / "m.db"))
-    original = "我喜欢用 Python 写后端"
-    await mem.write("s1", [Message.user(original)])
-    hit = await mem.prefetch("s1", "Python")
-    # 召回的文本必须包含原始中文，且不是 ?? 之类乱码
-    assert original in hit, f"中文 round-trip 失败，召回内容: {hit!r}"

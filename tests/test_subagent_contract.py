@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -200,12 +201,44 @@ async def test_subagent_error_does_not_crash_parent(tmp_path):
     assert "good" in statuses
 
 
-async def test_many_parallel_children_under_cap(tmp_path):
-    """delegate_task 批量任务应受 max_concurrent 并发上限控制。"""
+async def test_many_parallel_children_under_cap(tmp_path, monkeypatch):
+    """delegate_task 批量任务应受 subagent_max_concurrent 并发上限控制。
+
+    通过包装 _make_subagent 统计同时在途的子 agent 数，断言峰值 ≤ cap（2），
+    且峰值确实达到 2（证明发生了并行，而非串行巧合）。
+    注意必须在 build_app 之前 patch 类方法——注册时捕获的是当时的绑定方法。
+    """
     cfg = Config(max_iterations=5, subagent_max_concurrent=2)
     cfg.db_path = str(tmp_path / "crew.db")
     cfg.memory_db_path = str(tmp_path / "memory.db")
     cfg.crew_home = str(tmp_path / ".crew")
+
+    stats = {"in_flight": 0, "peak": 0}
+    real_make_subagent = CrewApp._make_subagent
+
+    class _TrackedChild:
+        """包装子 agent：统计同时在途数，其余属性透传。"""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def run(self, env):
+            stats["in_flight"] += 1
+            stats["peak"] = max(stats["peak"], stats["in_flight"])
+            try:
+                await asyncio.sleep(0)  # 让出事件循环，保证并发窗口可观测
+                async for chunk in self._inner.run(env):
+                    yield chunk
+            finally:
+                stats["in_flight"] -= 1
+
+    def tracking_make_subagent(self, spec):
+        return _TrackedChild(real_make_subagent(self, spec))
+
+    monkeypatch.setattr(CrewApp, "_make_subagent", tracking_make_subagent)
     app = build_app(config=cfg, enable_team=False)
 
     tasks = [{"goal": f"任务{i}"} for i in range(5)]
@@ -215,3 +248,6 @@ async def test_many_parallel_children_under_cap(tmp_path):
     assert not result.is_error
     payload = json.loads(result.content)
     assert len(payload["results"]) == 5
+    assert all(r["status"] == "completed" for r in payload["results"])
+    assert stats["peak"] <= 2, f"同时在途子 agent 数 {stats['peak']} 超过上限 2"
+    assert stats["peak"] == 2, "未观测到并行，并发上限断言失去意义"
