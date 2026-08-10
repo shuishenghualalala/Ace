@@ -2277,10 +2277,15 @@ class CrewApp:
     def _enrich_workspace(self, envelope: Envelope) -> None:
         """把工作空间的 instructions 注入到 envelope.params，供内核构建 system prompt。"""
         try:
-            if "workspace_instructions" not in envelope.params:
+            if (
+                "workspace_instructions" not in envelope.params
+                or "workspace_root_path" not in envelope.params
+            ):
                 ws = self.workspace_store.get(envelope.workspace_id, owner_account_id=envelope.user_id)
-                envelope.params["workspace_instructions"] = ws.get("instructions", "")
-                envelope.params["workspace_root_path"] = ws.get("root_path", "") or ""
+                if "workspace_instructions" not in envelope.params:
+                    envelope.params["workspace_instructions"] = ws.get("instructions", "")
+                if "workspace_root_path" not in envelope.params:
+                    envelope.params["workspace_root_path"] = ws.get("root_path", "") or ""
             workspace_root = str(envelope.params.get("workspace_root_path") or "").strip()
             if not workspace_root:
                 from crew.state.home import task_workspace_path
@@ -2291,6 +2296,9 @@ class CrewApp:
                         owner_account_id=envelope.user_id,
                     )
                 )
+                # Keep the workdir selected by SingleAgent and the root used to
+                # compile ProcessLaunch identical for the default workspace.
+                envelope.params["workspace_root_path"] = workspace_root
             from crew.gateway.context import resolve_structured_path_references
 
             referenced_paths = resolve_structured_path_references(

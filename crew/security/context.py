@@ -15,6 +15,7 @@ from crew.core.runctx import (
     current_task_runtime_id,
     current_workspace_id,
 )
+from crew.state.home import task_workspace_path
 from crew.state.workspace_store import _normalize_root_path
 
 
@@ -48,8 +49,16 @@ def build_security_context(workspace_store: Any) -> SecurityContext:
         raise SecurityContextError("可信工作空间不存在或不可用") from exc
 
     normalized_root = _normalize_root_path(str(workspace.get("root_path") or ""))
-    workspace_root = Path(normalized_root) if normalized_root else None
     cwd = _canonical_runtime_cwd(current_agent_workdir.get())
+    workspace_root = Path(normalized_root) if normalized_root else None
+    if workspace_root is None and cwd is not None:
+        task_root = task_workspace_path(workspace_id, owner_account_id=owner)
+        try:
+            cwd.relative_to(task_root)
+        except ValueError:
+            pass
+        else:
+            workspace_root = task_root
     return SecurityContext(
         os_user=getpass.getuser(),
         owner_account_id=owner,
@@ -87,9 +96,16 @@ def build_gateway_security_context(
     except (KeyError, OSError, ValueError) as exc:
         raise SecurityContextError("可信工作空间不存在或不可用") from exc
     normalized_root = _normalize_root_path(str(workspace.get("root_path") or ""))
-    root = Path(normalized_root) if normalized_root else None
+    # An unbound workspace still has a host-owned task root. Keep that root in
+    # the same security context as a user-bound project root so managed ACP/CLI
+    # sessions can use their isolated child cwd without widening permissions.
+    root = (
+        Path(normalized_root)
+        if normalized_root
+        else task_workspace_path(workspace_key, owner_account_id=owner)
+    )
     requested_cwd = Path(cwd).expanduser().resolve(strict=False) if cwd else root
-    if requested_cwd is not None and root is not None:
+    if requested_cwd is not None:
         try:
             requested_cwd.relative_to(root)
         except ValueError as exc:

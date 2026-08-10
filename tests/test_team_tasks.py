@@ -17,7 +17,7 @@ from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ToolError
 from crew.core.interfaces import LLMProvider
 from crew.core.mocks import InMemorySessionStore, NullMemory
-from crew.core.runctx import current_agent_id
+from crew.core.runctx import current_agent_id, current_agent_workdir
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
 from crew.dynamickanban.store import SQLiteKanbanStore
 from crew.gateway.auth import AccountContext
@@ -29,7 +29,12 @@ from crew.tasks.runtime import TaskRuntime
 from crew.tasks.task_manager import InMemoryTaskManager, LegacyTaskManagerAdapter
 from crew.team.delegate_tool import run_delegate_to_teammate
 from crew.security.launch import ProcessLaunch, current_process_launch
-from crew.security.models import PermissionProfile, PermissionProfileKind
+from crew.security.models import (
+    FilesystemAccess,
+    FilesystemEntry,
+    PermissionProfile,
+    PermissionProfileKind,
+)
 from crew.team.graph_planner import (
     DEFAULT_PLANNING_DECISION_TIMEOUT,
     PLANNING_DECISION_MAX_TOKENS,
@@ -3415,6 +3420,41 @@ async def test_team_delegate_propagates_security_launch_context():
 
     assert output == "已继承安全边界"
     assert seen[0].params["_security_process_launch"] is launch
+
+
+async def test_team_delegate_inherits_workspace_root_from_security_launch(tmp_path):
+    session_cwd = tmp_path / "external-session"
+    session_cwd.mkdir()
+    seen: list[Envelope] = []
+
+    class RecordingAgent:
+        async def run(self, envelope):
+            seen.append(envelope)
+            yield ResponseChunk.final(envelope.request_id, "已继承工作空间根")
+
+    launch = ProcessLaunch(
+        PermissionProfile(
+            PermissionProfileKind.MANAGED,
+            filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
+        ),
+        ("native-runtime",),
+    )
+    launch_token = current_process_launch.set(launch)
+    cwd_token = current_agent_workdir.set(str(session_cwd))
+    try:
+        output = await run_delegate_to_teammate(
+            {"coder": RecordingAgent()},
+            InMemoryTaskManager(),
+            "team-workspace-context-s1",
+            member="coder",
+            instruction="执行受控外援任务",
+        )
+    finally:
+        current_agent_workdir.reset(cwd_token)
+        current_process_launch.reset(launch_token)
+
+    assert output == "已继承工作空间根"
+    assert seen[0].params["workspace_root_path"] == str(tmp_path.resolve())
 
 
 async def test_required_workflow_delegate_waits_for_structured_acceptance_before_completion():

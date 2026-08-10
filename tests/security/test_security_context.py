@@ -14,10 +14,14 @@ from crew.core.runctx import (
 )
 from crew.security.context import (
     SecurityContextError,
+    build_gateway_security_context,
     build_security_context,
     path_is_in_workspace,
     resolve_requested_path,
 )
+from crew.security.models import ConversationPermissionMode, FilesystemAccess
+from crew.security.launch import compile_process_launch
+from crew.state.home import external_session_workspace_path, get_crew_home, task_workspace_path
 
 
 class _WorkspaceStore:
@@ -67,6 +71,106 @@ def test_normal_conversation_has_no_implicit_workspace_or_cwd() -> None:
     assert context.cwd is None
     with pytest.raises(SecurityContextError, match="没有可信工作目录"):
         resolve_requested_path(context, "relative.txt")
+
+
+def test_gateway_context_gives_unbound_workspace_an_explicit_task_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(tmp_path / "task-output"))
+    store = _WorkspaceStore({("acct-a", "default"): None})
+    task_root = task_workspace_path("default", owner_account_id="acct-a")
+    external_cwd = external_session_workspace_path(
+        "default",
+        "session-1",
+        "external-1",
+        owner_account_id="acct-a",
+    )
+
+    context = build_gateway_security_context(
+        store,
+        owner_account_id="acct-a",
+        workspace_id="default",
+        session_id="session-1",
+        cwd=external_cwd,
+    )
+
+    assert context.workspace_root == task_root.resolve()
+    assert context.cwd == external_cwd.resolve()
+    assert context.cwd.is_relative_to(context.workspace_root)
+    launch = compile_process_launch(
+        context,
+        ConversationPermissionMode.REQUEST_APPROVAL,
+        db_path=tmp_path / "crew.db",
+    )
+    assert any(
+        entry.root == task_root.resolve() and entry.access is FilesystemAccess.READ_WRITE
+        for entry in launch.profile.filesystem
+    )
+
+
+def test_task_workspace_is_not_under_a_crew_home_deny_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(tmp_path / "task-output"))
+    store = _WorkspaceStore({("acct-a", "default"): None})
+    task_root = task_workspace_path("default", owner_account_id="acct-a")
+    context = build_gateway_security_context(
+        store,
+        owner_account_id="acct-a",
+        workspace_id="default",
+        session_id="session-1",
+        cwd=task_root,
+    )
+
+    launch = compile_process_launch(
+        context,
+        ConversationPermissionMode.REQUEST_APPROVAL,
+        db_path=tmp_path / "crew.db",
+    )
+    denied_roots = {
+        entry.root
+        for entry in launch.profile.filesystem
+        if entry.access is FilesystemAccess.DENY
+    }
+
+    assert get_crew_home().resolve() not in denied_roots
+    assert (get_crew_home() / "crew_data").resolve() in denied_roots
+    assert (get_crew_home() / "logs").resolve() in denied_roots
+    assert task_root.resolve() not in denied_roots
+
+
+def test_active_unbound_context_reuses_task_root_for_file_policy(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(tmp_path / "task-output"))
+    store = _WorkspaceStore({("acct-a", "default"): None})
+    task_root = task_workspace_path("default", owner_account_id="acct-a")
+    external_cwd = external_session_workspace_path(
+        "default",
+        "session-1",
+        "external-1",
+        owner_account_id="acct-a",
+    )
+    _set_runtime_context(owner="acct-a", workspace="default", cwd=external_cwd)
+
+    context = build_security_context(store)
+
+    assert context.workspace_root == task_root.resolve()
+    assert context.cwd == external_cwd.resolve()
+
+
+def test_gateway_context_rejects_cwd_outside_unbound_task_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(tmp_path / "task-output"))
+    store = _WorkspaceStore({("acct-a", "default"): None})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with pytest.raises(SecurityContextError, match="cwd 不属于已认证工作空间"):
+        build_gateway_security_context(
+            store,
+            owner_account_id="acct-a",
+            workspace_id="default",
+            session_id="session-1",
+            cwd=outside,
+        )
 
 
 def test_dotdot_is_classified_after_canonical_resolution(tmp_path: Path) -> None:
