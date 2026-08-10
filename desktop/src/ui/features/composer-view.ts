@@ -134,6 +134,17 @@ export function createComposerView(
   project.className = 'mw-composer__project';
   project.dataset.composerContextTarget = 'project';
   project.hidden = true;
+  if (options.primary) {
+    const welcomePaws = document.createElement('span');
+    const leftPaw = document.createElement('span');
+    const rightPaw = document.createElement('span');
+    welcomePaws.className = 'mw-composer__welcome-paws';
+    welcomePaws.setAttribute('aria-hidden', 'true');
+    leftPaw.className = 'mw-composer__welcome-paw mw-composer__welcome-paw--left';
+    rightPaw.className = 'mw-composer__welcome-paw mw-composer__welcome-paw--right';
+    welcomePaws.append(leftPaw, rightPaw);
+    project.append(welcomePaws);
+  }
   const beforeInput = document.createElement('div');
   beforeInput.className = 'mw-composer__context-before';
   beforeInput.dataset.composerContextTarget = 'before-input';

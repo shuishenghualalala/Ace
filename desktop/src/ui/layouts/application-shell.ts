@@ -1,5 +1,4 @@
 import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
-import { openPopover, type OverlayHandle } from '../components/overlays';
 import {
   resolveShellNavigation,
   type FeatureState,
@@ -15,15 +14,9 @@ import {
 } from '../stores/product-mode-store';
 import { createShellTemplate } from './page-templates';
 
-const PRODUCT_COPY: Record<ProductMode, { label: string; description: string }> = {
-  assistant: {
-    label: 'Crew',
-    description: '通用对话、Agent 与项目',
-  },
-  work: {
-    label: 'Crew 办公助手',
-    description: '事项、文件与办公知识',
-  },
+const PRODUCT_LABEL: Record<ProductMode, string> = {
+  assistant: 'Crew',
+  work: 'Crew 办公助手',
 };
 
 export interface ApplicationShellCommands {
@@ -108,14 +101,13 @@ export function createApplicationShell(
 ): ApplicationShell {
   const storage = options.storage ?? localStorage;
   let features = options.features ?? {};
-  let productMenu: OverlayHandle | null = null;
   let disposed = false;
 
   restoreProductMode(storage);
 
   const element = document.createElement('div');
   const titlebar = document.createElement('header');
-  const productTrigger = document.createElement('button');
+  const productBrand = document.createElement('div');
   const productIcon = document.createElement('img');
   const productLabel = document.createElement('span');
   const windowCommands = document.createElement('div');
@@ -133,14 +125,14 @@ export function createApplicationShell(
   titlebar.id = 'title-bar';
   titlebar.className = 'mw-app-titlebar';
   titlebar.dataset.shellTitlebar = '';
-  productTrigger.type = 'button';
-  productTrigger.className = 'mw-product-mode-trigger';
-  // ponytail: 办公助手 (work) 模式已移除——左上角不再是模式切换下拉，仅作静态品牌标识。
-  productIcon.className = 'mw-product-mode-trigger__icon';
+  productBrand.className = 'mw-sidebar-brand';
+  productBrand.setAttribute('role', 'img');
+  productBrand.setAttribute('aria-label', 'Crew');
+  productIcon.className = 'mw-sidebar-brand__icon';
   productIcon.src = options.productIconUrl ?? './icon.png';
-  productIcon.alt = 'Crew';
-  productLabel.className = 'mw-product-mode-trigger__label';
-  productTrigger.append(productIcon, productLabel);
+  productIcon.alt = '';
+  productLabel.className = 'mw-sidebar-brand__label';
+  productBrand.append(productIcon, productLabel);
 
   windowCommands.className = 'mw-window-commands';
   windowCommands.append(
@@ -148,7 +140,7 @@ export function createApplicationShell(
     createWindowButton('maximize', '最大化或还原', '□'),
     createWindowButton('close', '关闭', '×'),
   );
-  titlebar.append(productTrigger, windowCommands);
+  titlebar.append(windowCommands);
 
   template.element.classList.add('mw-application-shell__body');
   template.slots.rail.classList.add('mw-app-rail');
@@ -209,7 +201,7 @@ export function createApplicationShell(
     updateCommand,
     settingsCommand,
   );
-  navigation.append(navigationList, navigationFooter);
+  navigation.append(productBrand, navigationList, navigationFooter);
   template.slots.rail.append(navigation);
 
   contextHeader.className = 'mw-app-context__header';
@@ -224,13 +216,7 @@ export function createApplicationShell(
   template.element.append(restoreContextCommand);
   element.append(titlebar, template.element);
 
-  const closeProductMenu = (): void => {
-    productMenu?.close();
-    productMenu = null;
-  };
-
   const switchProductMode = (productMode: ProductMode): void => {
-    closeProductMenu();
     if (productModeStore.get().productMode === productMode) return;
     setProductMode(productMode, storage);
     options.onProductModeChange?.(productMode);
@@ -241,84 +227,6 @@ export function createApplicationShell(
         candidate.featureState === 'available',
     );
     if (item) options.onNavigate?.(item.id, productMode);
-  };
-
-  const openProductMenu = (): void => {
-    if (productMenu) {
-      closeProductMenu();
-      return;
-    }
-    const menu = document.createElement('div');
-    menu.className = 'mw-product-mode-menu';
-    menu.setAttribute('role', 'menu');
-    menu.setAttribute('aria-label', '切换助手模式');
-    const current = productModeStore.get().productMode;
-    // ponytail: 办公助手 (work) 模式已移除，下拉菜单只保留通用助手。
-    for (const productMode of ['assistant'] as const) {
-      const button = document.createElement('button');
-      const copy = document.createElement('span');
-      const label = document.createElement('strong');
-      const description = document.createElement('span');
-      const modeIcon = createIcon(
-        productMode === 'assistant' ? 'icon-agent' : 'icon-task',
-        {
-          className: productMode === 'assistant'
-            ? `mw-product-mode-menu__icon ${MONOCHROME_ICON_CLASS}`
-            : 'mw-product-mode-menu__icon',
-        },
-      );
-      const check = createIcon('icon-check', {
-        className: 'mw-product-mode-menu__check',
-      });
-      button.type = 'button';
-      button.className = 'mw-product-mode-menu__item';
-      button.dataset.productModeOption = productMode;
-      button.setAttribute('role', 'menuitemradio');
-      button.setAttribute('aria-checked', String(productMode === current));
-      button.setAttribute('aria-current', String(productMode === current));
-      copy.className = 'mw-product-mode-menu__copy';
-      label.textContent = PRODUCT_COPY[productMode].label;
-      description.textContent = PRODUCT_COPY[productMode].description;
-      check.toggleAttribute('hidden', productMode !== current);
-      copy.append(label, description);
-      button.append(modeIcon, copy, check);
-      menu.append(button);
-    }
-    menu.addEventListener('click', (event) => {
-      const target =
-        event.target instanceof Element
-          ? event.target.closest<HTMLButtonElement>('[data-product-mode-option]')
-          : null;
-      const productMode = target?.dataset.productModeOption;
-      if (productMode === 'assistant') switchProductMode(productMode);
-    });
-    menu.addEventListener('keydown', (event) => {
-      const items = [
-        ...menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
-      ];
-      const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
-      let next: HTMLButtonElement | undefined;
-      if (event.key === 'Home') next = items[0];
-      else if (event.key === 'End') next = items.at(-1);
-      else if (event.key === 'ArrowDown') next = items[(currentIndex + 1) % items.length];
-      else if (event.key === 'ArrowUp') {
-        next = items[(currentIndex - 1 + items.length) % items.length];
-      }
-      if (!next) return;
-      event.preventDefault();
-      next.focus();
-    });
-    productMenu = openPopover({
-      anchor: productTrigger,
-      label: '切换助手模式',
-      content: menu,
-      onClose: () => {
-        productMenu = null;
-      },
-    });
-    productMenu.element.classList.add('mw-product-mode-popover');
-    productMenu.element.setAttribute('role', 'presentation');
-    productTrigger.setAttribute('aria-haspopup', 'menu');
   };
 
   const renderNavigation = (): void => {
@@ -363,7 +271,7 @@ export function createApplicationShell(
         ?.focus();
     }
     const active = items.find((item) => item.id === modeView.lastPosition) ?? items[0];
-    contextTitle.textContent = active?.label ?? PRODUCT_COPY[state.productMode].label;
+    contextTitle.textContent = active?.label ?? PRODUCT_LABEL[state.productMode];
   };
 
   const sync = (): void => {
@@ -377,8 +285,8 @@ export function createApplicationShell(
     element.dataset.navigationCollapsed = String(modeView.navigationCollapsed);
     template.element.dataset.hasContext = String(hasContext && !workContextCollapsed);
     if (template.slots.context) template.slots.context.hidden = !hasContext || workContextCollapsed;
-    productLabel.textContent = PRODUCT_COPY[state.productMode].label;
-    productTrigger.setAttribute('aria-label', PRODUCT_COPY[state.productMode].label);
+    productLabel.textContent = PRODUCT_LABEL[state.productMode];
+    productBrand.setAttribute('aria-label', PRODUCT_LABEL[state.productMode]);
     const assistantChat = state.productMode === 'assistant' && hasContext;
     const syncCollapseCommand = (button: HTMLButtonElement, noun: string): void => {
       const label = modeView.navigationCollapsed ? `展开${noun}` : `收起${noun}`;
@@ -450,7 +358,6 @@ export function createApplicationShell(
     dispose() {
       if (disposed) return;
       disposed = true;
-      closeProductMenu();
       unsubscribe();
       element.removeEventListener('click', handleClick);
     },

@@ -574,9 +574,9 @@ Rules:
 10. Yellow/amber is reserved for warning state or an explicitly documented
     entity illustration. It is not the default folder, security, or navigation
     color.
-11. The application rail uses `22px` navigation and footer-command icons in
-    both compact and expanded states. Rail instances use `2px` primary strokes
-    and `1.75px` secondary strokes; their outline follows row text color while
+11. The `96px` application rail uses `22px` navigation and footer-command icons
+    beside centered labels. Rail instances use `2px` primary strokes and
+    `1.75px` secondary strokes; their outline follows row text color while
     entity fills retain the restrained product symbol palette.
 
 ### 9.1 Icon families
@@ -1059,7 +1059,9 @@ state model, Team status model, browser host, or file-action implementation.
 - Default application window: `1280 x 800`.
 - Supported minimum: `960 x 640`.
 - Primary verification: `1440 x 1000`, `1280 x 800`, and `960 x 640`.
-- The navigation rail collapses before content becomes unusable.
+- The application rail remains a labeled `96px` column at every supported
+  desktop width. Context, inspector, and content tracks collapse before the
+  primary labels are removed.
 - Page content must not cause body-level horizontal scrolling.
 - Tables, code, graphs, and boards may own local scrolling.
 - Shell columns are route-owned. A chat history column exists only for a chat
@@ -1099,33 +1101,38 @@ Rules:
 - Card grids use responsive grid tracks, not fixed card widths followed by empty
   space.
 
-### 12.4 Product mode selector
+### 12.4 Sidebar brand and shell owner
 
-The selector replaces the static product name in the top-left identity area.
+Crew uses one full-height `96px` application rail. The brand sits at its top;
+the title bar starts to the right and owns only the drag region and native
+window commands.
 
 ```text
-[product icon] Crew 办公助手 [chevron]
-               ┌──────────────────────────────┐
-               │ [agent] Crew 通用助手  │
-               │         通用对话、Agent 与项目│
-               │ [task]  Crew 办公助手 ✓│
-               │         事项、文件与办公知识 │
-               └──────────────────────────────┘
+[ Crew product mark ]
+        Crew
+
+  [icon]  对话
+  [icon]  外援
+  [icon]  技能
+  [icon]  灵感
+          ...
 ```
 
-- It is a menu button, not a select styled as a large pill.
-- The trigger uses the compact application icon asset without an added tile or
-  decorative container. Its chevron rotates only while the menu is open.
-- Each option uses the existing Agent or Task symbol to make the two modes
-  scannable. The menu remains a compact two-row list rather than a large card.
-- The current item uses the standard check symbol, selected-row background,
-  `aria-current`, and `aria-checked`; it never relies on color or a text glyph
-  alone.
+- The brand mark and `Crew` label use a vertical identity stack without an
+  added tile, border, shadow, menu, or chevron.
+- Navigation rows keep icon and label side by side. A fixed `22px` icon track,
+  restrained gap, and bounded label track are centered as one unit so icons do
+  not shift when labels have different lengths.
+- Selected, hover, focus, disabled, account, update, and settings rows reuse the
+  same centered geometry. Long account names truncate visibly instead of
+  clipping raw characters.
+- The rail and its brand span the title-bar and page rows. The title bar never
+  paints a duplicate product mark.
 - Switching does not convert the active record to the other mode.
 - Restoring the assistant mode's active session must not navigate away from
   that mode's saved `lastPosition` when asynchronous session hydration finishes.
-- At constrained width, the product icon and current assistant label remain
-  visible; supporting descriptions exist only in the menu.
+- At constrained width the rail keeps both icons and labels; the context track
+  narrows or collapses first.
 - `product-mode-store.ts` owns the `productMode` field and separate
   `lastPosition`, `navigationCollapsed`, and `historyFilter` snapshots for each
   product mode. It must not read or write Agent execution `mode`, session
@@ -1149,14 +1156,13 @@ The office assistant uses three stable regions, following the product flow in
 `docs/frontend/work-mode-panel.html`:
 
 ```text
-172px shared application rail | 260px context list | minmax(0, 1fr) work area
+96px shared application rail | 260px context list | minmax(0, 1fr) work area
 ```
 
-Work and General Assistant use the same expanded `172px` application rail,
-row geometry, labels, footer commands, and responsive collapse behavior. The
-rail collapses to the same `56px` icon presentation below `1180px`. The context
-list narrows to `240px` on constrained viewports and may be removed entirely by
-its collapse command.
+Work and General Assistant use the same `96px` application rail, row geometry,
+labels, and footer commands. The rail remains labeled below `1180px`; the
+context list narrows to `240px` on constrained viewports and may be removed
+entirely by its collapse command.
 
 The Work navigation starts with three Work destinations: 工作, 计划, and 知识.
 It then reuses the shared 专家, 技能, Wiki, 任务, 审计, and 系统 destinations
@@ -1601,10 +1607,22 @@ failed. These are not interchangeable:
 The welcome view is the general assistant's quiet start state, not a marketing
 hero and not a Work dashboard.
 
-- Brand identity, the existing `Hi, 我是 Crew` / `今天想从哪里开始？`
-  greeting, the shared Composer, and
+- Brand identity, the daily Crew greeting, the shared Composer, and
   scenario commands form one centered vertical reading order. The Composer is
   the dominant action and scenario commands remain secondary.
+- Welcome copy rotates through the six approved colloquial title/subtitle pairs
+  by local calendar date. One day keeps one stable pair, including across
+  rerenders; invalid dates fall back to the first pair. The greeting is the
+  centered, large, bold primary line; its prompt is a smaller regular-weight
+  secondary line. This hierarchy remains stable for all six copy pairs.
+- The transparent Crew product mark is enlarged above the Composer without the
+  old circular tile, border, or raised shadow. Two large rounded doodle paws
+  use a bold `4px` rounded outline and three matching toe marks. They belong
+  to the primary Composer project-context strip, straddle its upper edge, and
+  sit wider than the mascot body. Mascot, paws, and Composer share one
+  responsive center axis; paws are decorative and never receive pointer events.
+- The mascot may breathe by at most `2px`. Reduced-motion disables this motion,
+  and short or narrow windows scale the complete mascot-hand unit together.
 - The welcome state reuses the production Composer in the centered composition;
   it does not create a second textarea or event path. Once conversation content
   exists, the same Composer returns to the chat workspace's stable bottom
@@ -1750,11 +1768,11 @@ office reminders.
 Legal documents have a bounded dialog shell and one scroll owner in the document body.
 At short viewport heights the final section must remain reachable without scrolling the page.
 
-The General Assistant welcome topology uses a centered 64px Crew product
-mark above the existing `Hi, 我是 Crew` / `今天想从哪里开始？` greeting,
-the shared Composer immediately below, and a compact horizontal
-scenario-command row beneath the Composer. Current theme tokens and responsive
-stacking remain authoritative.
+The General Assistant welcome topology uses a centered daily greeting followed
+by a `120px` Crew mascot unit whose two doodle hands overlap the shared Composer
+top edge. Short windows reduce the unit to `88px`; narrow windows use `96px`.
+A compact horizontal scenario-command row remains beneath the Composer. Current
+theme tokens and responsive stacking remain authoritative.
 
 Session selection updates active rows in place. Store refreshes must not detach and reinsert
 unchanged rows in a way that replays hover/focus motion after a click.
@@ -1765,8 +1783,9 @@ unchanged rows in a way that replays hover/focus motion after a click.
 - These presentation rules do not change selection, edit, default, reconnect,
   delete, install, or channel connect/disconnect behavior.
 
-The application title bar contains the product-mode trigger and native window
-commands. Approval, sandbox, and network state stay in the Composer and Security
+The application title bar begins after the full-height Sidebar brand and
+contains only the drag region and native window commands. Approval, sandbox,
+and network state stay in the Composer and Security
 surfaces; a permanent three-badge status strip is not shown in either mode.
 
 Office assistant adds Workbench, Work items, Workspace, Knowledge, Templates,
@@ -1787,7 +1806,7 @@ At or above `1180px`:
 
 Between `960px` and `1179px`:
 
-- navigation rail collapses to icons;
+- the `96px` navigation rail keeps its centered icon-and-label rows;
 - header actions may wrap;
 - grids reduce columns;
 - side summaries move below primary content;
@@ -1797,7 +1816,7 @@ Between `960px` and `1179px`:
 
 Office assistant behavior at the minimum window:
 
-- the function rail remains as icons with tooltips;
+- the function rail remains labeled, with tooltips as supplemental help;
 - the context list can collapse and is restored without losing selection;
 - the collapsed context action rail keeps restore and new-conversation commands
   reachable without moving them into primary navigation;
@@ -2438,6 +2457,7 @@ enforce repository policy.
 | 2026-07-30 | Workbench presentation now follows the representative daily-work layout: a compact greeting header, one continuous four-metric brief, a primary attention list with a secondary template rail, and office-source detail below the first-viewport work summary. Item conversations expose an explicit keyboard-accessible return to Workbench in the stable context header. Existing Work API, template, item, archive, and shared Composer ownership remain unchanged. |
 | 2026-08-09 | macOS menu-bar default/rest use transparent black-line Template Images; working, notification, and done remain supplied color states. All five macOS states use a 44px @2x representation for a crisp 22pt status item. |
 | 2026-08-10 | New Crew drafts reset external runtime models to the configured Crew default. Running-intro and Agent avatars share one responsive content axis without fixed offsets; the approved yellow assistant keeps its small white-face artwork. Menu-bar color states use restrained optical normalization, with `done` enlarged 1.16x before the final 44px crop. |
+| 2026-08-10 | The static Crew brand moves from the title bar into a full-height 96px Sidebar; its top spacing matches the 40px title-bar track so the brand aligns optically with the adjacent context heading while centered side-by-side icon/label navigation stays intact. Welcome restores one centered reading order: a large bold greeting, smaller regular prompt, and enlarged transparent Crew mark. Two larger three-toe doodle paws are owned by the primary Composer and straddle the project-context strip's upper edge at a wider stance. Reduced-motion support and six approved daily greetings remain intact. |
 | 2026-07-31 | Workbench office detail uses compact inbox/todo lists above paired schedule/meeting month calendars. Calendar dates expose event labels and selected-day detail; every source keeps a non-expanding `查看全部` search and pagination dialog. |
 | 2026-07-30 | WorkItem and chat are separate: item creation never creates a conversation, item routes open details first, and one processing conversation can be created explicitly. Linked conversations are item-owned navigation, receive trusted owner-scoped item context, and do not duplicate in top-level history. The Work shell now follows example 09 directly and removes both the legacy top row and collapsed context placeholder track. |
 | 2026-07-28 | G-W19 completion keeps date items and linked processing conversations as separate projections of the same WorkItem. Plan position restores across product-mode switches; item-aware sessions retain their context bar. Work text sizes use typography tokens, and both approved viewports pass the production interaction and overflow matrix. |

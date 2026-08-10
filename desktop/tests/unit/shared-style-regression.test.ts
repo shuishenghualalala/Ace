@@ -11,6 +11,9 @@ const composerCss = readFileSync(resolve(stylesDir, 'composer.css'), 'utf8');
 const streamChatCss = readFileSync(resolve(stylesDir, 'stream-chat.css'), 'utf8');
 const uiPreviewCss = readFileSync(resolve(stylesDir, 'ui-preview.css'), 'utf8');
 const securityCenterCss = readFileSync(resolve(stylesDir, 'security-center.css'), 'utf8');
+const shellCss = readFileSync(resolve(stylesDir, 'shell.css'), 'utf8');
+const tokensCss = readFileSync(resolve(stylesDir, 'tokens.css'), 'utf8');
+const welcomeCss = readFileSync(resolve(stylesDir, 'welcome-scenarios.css'), 'utf8');
 
 function ruleBody(css: string, selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -82,5 +85,32 @@ describe('security center scroll contract', () => {
     expect(root).toContain('display: flex');
     expect(root).toContain('flex: 1 1 auto');
     expect(root).toContain('min-height: 0');
+  });
+});
+
+describe('Crew shell and Welcome identity', () => {
+  it('keeps the narrow full-height rail with centered icon-label rows', () => {
+    expect(ruleBody(tokensCss, ':root')).toContain('--mw-app-rail-width: 96px');
+    const brand = ruleBody(shellCss, '.mw-sidebar-brand');
+    expect(brand).toContain('flex-direction: column');
+    expect(brand).toContain('min-height: 136px');
+    expect(brand).toContain('padding: var(--mw-space-10)');
+    expect(ruleBody(shellCss, '.mw-app-navigation')).toContain(
+      'grid-template-rows: auto minmax(0, 1fr) auto',
+    );
+    expect(shellCss).toContain('grid-template-columns: 22px minmax(0, 32px)');
+  });
+
+  it('anchors the mascot and larger tiger paws to the Welcome project strip', () => {
+    expect(ruleBody(welcomeCss, '.welcome-view__mascot')).toContain('width: 184px');
+    expect(ruleBody(welcomeCss, '.welcome-view__title')).toContain('font: 700');
+    const paw = ruleBody(welcomeCss, '.mw-composer__welcome-paw');
+    expect(paw).toContain('width: 38px');
+    expect(paw).toContain('border: 4px solid var(--mw-text-primary)');
+    expect(welcomeCss).toContain('.mw-composer__project:not([hidden])');
+    expect(ruleBody(welcomeCss, 'body.welcome-active #chat-composer-root')).toContain(
+      'position: relative',
+    );
+    expect(welcomeCss).toContain('@media (prefers-reduced-motion: reduce)');
   });
 });

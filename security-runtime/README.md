@@ -363,6 +363,10 @@ security-runtime/
 - **2026-08-10**：新增 `prebuilt/<platform>-<arch>` 分发结构和 Apple Silicon 预编译 runtime；
   Desktop/Gateway 自动选择当前架构并校验平台、架构、二进制摘要与源码摘要，补充 Intel Mac
   本机编译与 staging 流程。
+- **2026-08-10**：Codex app-server 与 Claude stream-json 已迁移到 Native Runtime interactive
+  transport；`external_agents.security_enabled=true` 时，两个协议的双向 stdin/stdout、凭据
+  投影、workspace 内 MCP 配置、精确网络权限和取消/进程树清理均经过 managed boundary，失败不
+  回退宿主直启；关闭开关仍保留旧 runtime 兼容路径。
 - **2026-08-06**：新增 macOS Seatbelt 文件隔离、精确 loopback 代理联网边界、进程树清理、
   Gateway live probe、安全中心平台展示、DMG runtime staging 与真实 macOS runner 发布证据。
 - **2026-08-10**：补齐 Codex app-server 事件流退出与 approval 参数契约：reader 在子进程 EOF 后向事件队列发送内部 `$/processExited`，消费者立即报告退出码与受限 stderr 尾部；approval 将规范化后的真实 `item` 传入统一权限分类器，使 shell `command` 可被检查，不再因参数层级错误被误判为缺失。

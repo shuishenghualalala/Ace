@@ -12,7 +12,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, AsyncIterator, Literal, Protocol
+from typing import Any, AsyncIterator, Literal, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
@@ -343,6 +343,87 @@ class RuntimeExecutionRequest:
             item if isinstance(item, RuntimeMcpServer) else RuntimeMcpServer.from_mapping(item)
             for item in self.mcp_servers
         ]
+
+
+class NativeInteractiveLineTransport:
+    """Expose a Native Runtime interactive session as a bounded JSONL reader."""
+
+    def __init__(self, session: Any, *, max_line_bytes: int) -> None:
+        self.session = session
+        self.process = session.process
+        self.stderr_lines = session.stderr_lines
+        self._max_line_bytes = max(1024, int(max_line_bytes))
+        self._buffer = bytearray()
+
+    async def read_line(self) -> bytes:
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                line = bytes(self._buffer[: newline + 1])
+                del self._buffer[: newline + 1]
+                return line
+            if len(self._buffer) > self._max_line_bytes:
+                raise ValueError("native external JSONL line exceeds the size limit")
+            chunk = await self.session.read_chunk()
+            if chunk is None:
+                if not self._buffer:
+                    return b""
+                line = bytes(self._buffer)
+                self._buffer.clear()
+                return line
+            self._buffer.extend(chunk)
+
+    async def write(self, data: bytes) -> None:
+        await self.session.write(data)
+
+    async def close(self) -> None:
+        await self.session.close()
+
+    async def abort(self) -> None:
+        await self.session.abort()
+
+
+async def open_managed_external_interactive(
+    request: RuntimeExecutionRequest,
+    command: Sequence[str],
+) -> Any | None:
+    """Open a managed external child with descriptor-scoped credentials/network."""
+
+    from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
+    from crew.security.launch import current_process_launch
+    from crew.security.runtime_client import NativeRuntimeClient
+
+    launch = current_process_launch.get()
+    if launch is None or not launch.external_managed:
+        return None
+    if not launch.helper_argv:
+        raise RuntimeError("external managed runtime helper is unavailable")
+
+    cwd = Path(request.cwd or ".").expanduser().resolve(strict=True)
+    projected_home_files = build_external_runtime_home_files(request.credential_home_paths)
+    projected_network_permissions = build_external_runtime_network_permissions(
+        projected_home_files,
+        request.network_endpoints,
+    )
+    additional_permissions = merge_additional_permission_profiles(
+        request.additional_permissions,
+        projected_network_permissions,
+    )
+    return await SecurityExecutionBroker(
+        NativeRuntimeClient(launch.helper_argv)
+    ).open_interactive(
+        ExecutionRequest(
+            command=tuple(str(part) for part in command),
+            cwd=cwd,
+            permission_profile=launch.profile,
+            additional_permissions=additional_permissions,
+            trusted_readable_roots=launch.trusted_readable_roots,
+            home_files=projected_home_files,
+            env_overrides=build_managed_external_runtime_env(request.custom_env),
+            timeout_seconds=request.timeout,
+            max_output_bytes=64 * 1024 * 1024,
+        )
+    )
 
 
 class RuntimeAdapter(Protocol):
