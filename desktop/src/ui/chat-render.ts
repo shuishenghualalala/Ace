@@ -48,6 +48,8 @@ export interface ToolCallInfo {
   status: 'generating' | 'running' | 'done' | 'error';
   startedAt: number;
   duration?: number | undefined;
+  /** 运行中的阶段进度文案（phase=progress 帧），完成/失败后为空。 */
+  progressText?: string | undefined;
 }
 
 /** 同回合内 assistant 段的语义角色：过程（进折叠区）vs 最终答案（折叠外可见）。 */
@@ -619,7 +621,15 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
     details.open = open;
     // 把 foldKey 写到 data-fold-key，toggle 委托据此回写 fold-state。
     details.setAttribute('data-fold-key', foldKey);
-    details.querySelector<HTMLElement>('.process-timeline__title')!.textContent = title;
+    const titleEl = details.querySelector<HTMLElement>('.process-timeline__title')!;
+    titleEl.textContent = title;
+    // 长耗时工具的阶段进度（phase=progress）：折叠状态也可见，跟随标题行。
+    if (isActive && tool.progressText) {
+      const stage = document.createElement('span');
+      stage.className = 'process-timeline__stage';
+      stage.textContent = tool.progressText;
+      titleEl.after(stage);
+    }
     const durSpan = details.querySelector<HTMLElement>('.process-timeline__duration')!;
     if (!initialDuration && !isActive) durSpan.remove();
     const argsSection = details.querySelector<HTMLElement>('[data-section="args"]')!;
@@ -650,7 +660,14 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
       </div>
     </div>`,
   );
-  content.querySelector<HTMLElement>('.process-timeline__title')!.textContent = title;
+  const titleEl = content.querySelector<HTMLElement>('.process-timeline__title')!;
+  titleEl.textContent = title;
+  if (isActive && tool.progressText) {
+    const stage = document.createElement('span');
+    stage.className = 'process-timeline__stage';
+    stage.textContent = tool.progressText;
+    titleEl.after(stage);
+  }
   const durSpan = content.querySelector<HTMLElement>('.process-timeline__duration')!;
   if (!initialDuration && !isActive) durSpan.remove();
   return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, content);

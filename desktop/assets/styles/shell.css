@@ -538,21 +538,28 @@
 @media (max-width: 1179px) {
   .mw-application-shell__body.mw-shell-template,
   .mw-application-shell[data-product-mode='work'] .mw-application-shell__body {
-    grid-template-columns: 56px 240px minmax(0, 1fr);
+    grid-template-columns: var(--mw-app-rail-width-compact) 240px minmax(0, 1fr);
+  }
+
+  /* 无上下文栏的页面（主对话以外的页面 has-context=false）也要收成紧凑栏——
+     基础规则带属性选择器特异性更高，媒体查询里必须点名覆盖，否则窄窗口下
+     这些页面的栏宽保持 128px 而文字标签已被隐藏，显得突兀。 */
+  .mw-application-shell__body.mw-shell-template[data-has-context='false'] {
+    grid-template-columns: var(--mw-app-rail-width-compact) minmax(0, 1fr);
   }
 
   .mw-application-shell[data-product-mode='assistant'][data-navigation-collapsed='true']
     .mw-application-shell__body[data-has-context='true'] {
-    grid-template-columns: 56px minmax(0, 1fr);
+    grid-template-columns: var(--mw-app-rail-width-compact) minmax(0, 1fr);
   }
 
   .mw-application-shell[data-product-mode='work'][data-navigation-collapsed='true']
     .mw-application-shell__body {
-    grid-template-columns: 56px minmax(0, 1fr);
+    grid-template-columns: var(--mw-app-rail-width-compact) minmax(0, 1fr);
   }
 
   .mw-app-context-restore {
-    left: calc(56px - 16px);
+    left: calc(var(--mw-app-rail-width-compact) - 16px);
   }
 
   .mw-shell-nav-item,

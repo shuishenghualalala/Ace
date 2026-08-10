@@ -16,6 +16,7 @@ from crew.core.runctx import (
     current_push_fn,
     current_request_id,
     current_session_id,
+    emit_tool_progress,
 )
 from crew.tools.registry import Registry, tool_error, tool_result
 
@@ -1757,6 +1758,8 @@ def register_wiki_tools(
             kb_id=kb_id,
             chunk_size=chunk_size,
             use_chunking=use_chunking,
+            # LLM 分析耗时较长：把阶段进度推到前端工具行（无推送通道时 no-op）。
+            progress=emit_tool_progress,
         )
         analysis_failed = any(
             str(issue).startswith("LLM 分析失败:")
@@ -2123,25 +2126,25 @@ def register_wiki_tools(
         (_WIKI_SEARCH_SCHEMA, _handle_search, False, "🗂️", "搜索 Wiki", "搜索 Wiki", "wiki search keyword pages find"),
         (_WIKI_READ_SCHEMA, _handle_read, False, "📄", "读取 Wiki 页面", "读取 Wiki 页面", "wiki read page content view"),
         (_WIKI_LINT_SCHEMA, _handle_lint, True, "🧹", "检查 Wiki", "检查 Wiki", "wiki lint check quality issues broken links orphan"),
-        (_WIKI_CREATE_KB_SCHEMA, _handle_create_kb, False, "📚", "创建知识库", "创建知识库 {{kb_id}}", "wiki create knowledge base new kb"),
-        (_WIKI_DELETE_KB_SCHEMA, _handle_delete_kb, False, "🗑️", "删除知识库", "删除知识库 {{kb_id}}", "wiki delete knowledge base remove kb"),
-        (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除 Raw Source {{source_id}}", "wiki delete raw source remove"),
-        (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {{source_id}}", "wiki parse source reparse document extract text"),
+        (_WIKI_CREATE_KB_SCHEMA, _handle_create_kb, False, "📚", "创建知识库", "创建知识库 {kb_id}", "wiki create knowledge base new kb"),
+        (_WIKI_DELETE_KB_SCHEMA, _handle_delete_kb, False, "🗑️", "删除知识库", "删除知识库 {kb_id}", "wiki delete knowledge base remove kb"),
+        (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除 Raw Source {source_id}", "wiki delete raw source remove"),
+        (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {source_id}", "wiki parse source reparse document extract text"),
         (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出 Raw Sources", "列出 Raw Sources", "wiki list sources raw files pending parsed failed"),
         (_WIKI_LIST_KBS_SCHEMA, _handle_list_kbs, False, "📚", "列出知识库", "列出知识库", "wiki list knowledge bases kbs"),
         (_WIKI_LIST_INBOX_SCHEMA, _handle_list_inbox, False, "📥", "列出待整理素材", "列出待整理素材", "wiki list inbox pending sources recommend ingest"),
-        (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {{page_id}}", "wiki update page edit content tags related aliases"),
-        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {{source_id}}", "wiki plan ingest preview changes proposed pages"),
-        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {{source_id}}", "wiki apply ingest write pages confirm plan"),
-        (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, False, "🌐", "抓取网页", "抓取网页 {{url}}", "wiki fetch url webpage scrape crawl import"),
-        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, False, "🔄", "刷新网页来源", "刷新来源 {{source_id}}", "wiki refresh url source drift version"),
-        (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {{topic}}", "wiki digest synthesis comparison multi source"),
-        (_WIKI_CAPTURE_ATTACHMENT_SCHEMA, _handle_capture_attachment, False, "📎", "捕获 Wiki 附件", "捕获附件 {{path}}", "wiki capture attachment file import upload"),
-        (_WIKI_CAPTURE_TEXT_SCHEMA, _handle_capture_text, False, "📝", "捕获 Wiki 文本", "捕获文本 {{title}}", "wiki capture text snippet import note"),
-        (_WIKI_CAPTURE_SESSION_SCHEMA, _handle_capture_session, False, "💬", "沉淀会话", "沉淀会话 {{session_id}}", "wiki capture session conversation import chat"),
-        (_WIKI_CREATE_PAGE_SCHEMA, _handle_create_page, False, "📄", "创建 Wiki 页面", "创建页面 {{title}}", "wiki create page new manual write"),
+        (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {page_id}", "wiki update page edit content tags related aliases"),
+        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {source_id}", "wiki plan ingest preview changes proposed pages"),
+        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {source_id}", "wiki apply ingest write pages confirm plan"),
+        (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, False, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
+        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, False, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
+        (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {topic}", "wiki digest synthesis comparison multi source"),
+        (_WIKI_CAPTURE_ATTACHMENT_SCHEMA, _handle_capture_attachment, False, "📎", "捕获 Wiki 附件", "捕获附件 {path}", "wiki capture attachment file import upload"),
+        (_WIKI_CAPTURE_TEXT_SCHEMA, _handle_capture_text, False, "📝", "捕获 Wiki 文本", "捕获文本 {title}", "wiki capture text snippet import note"),
+        (_WIKI_CAPTURE_SESSION_SCHEMA, _handle_capture_session, False, "💬", "沉淀会话", "沉淀会话 {session_id}", "wiki capture session conversation import chat"),
+        (_WIKI_CREATE_PAGE_SCHEMA, _handle_create_page, False, "📄", "创建 Wiki 页面", "创建页面 {title}", "wiki create page new manual write"),
         (_WIKI_DELETE_PAGES_SCHEMA, _handle_delete_pages, False, "🗑️", "删除 Wiki 页面", "删除 Wiki 页面", "wiki delete pages remove"),
-        (_WIKI_RENAME_PAGE_SCHEMA, _handle_rename_page, False, "✏️", "重命名 Wiki 页面", "重命名 {{page_id}}", "wiki rename page title change"),
+        (_WIKI_RENAME_PAGE_SCHEMA, _handle_rename_page, False, "✏️", "重命名 Wiki 页面", "重命名 {page_id}", "wiki rename page title change"),
     ]
     read_tools = set(WIKI_READ_TOOLS)
     for schema, handler, is_async, emoji, display_name, ui_label, search_hint in _TOOLS:

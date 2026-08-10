@@ -50,6 +50,40 @@ def test_default_workspace_protected(tmp_path):
         store.delete("default")
 
 
+def test_builtin_wiki_workspace_auto_created(tmp_path):
+    """wiki 内置工作空间：Wiki Agent 会话的 workspace_id="wiki" 查不到时幂等自建。"""
+    store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
+    ws = store.get("wiki", owner_account_id="owner-a")
+    assert ws["name"] == "Wiki 知识库"
+    assert ws["hidden"] is True
+    # 幂等，且按账号隔离
+    assert store.get("wiki", owner_account_id="owner-a")["id"] == "wiki"
+    assert all(w["id"] != "wiki" for w in store.list(owner_account_id="owner-b"))
+
+
+def test_builtin_wiki_workspace_protected(tmp_path):
+    store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
+    store.get("wiki")  # 先确保存在
+    with pytest.raises(ValueError):
+        store.delete("wiki")
+
+
+def test_unknown_workspace_still_missing(tmp_path):
+    """内置之外的 id 不放开校验：不存在仍抛 KeyError。"""
+    store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
+    with pytest.raises(KeyError):
+        store.get("ghost")
+
+
+def test_inmemory_store_mirrors_builtin_workspaces():
+    store = InMemoryWorkspaceStore()
+    assert store.get("wiki")["hidden"] is True
+    store.delete("wiki")  # mock 对齐既有 default 行为：内置空间删除被忽略
+    assert store.get("wiki")["id"] == "wiki"
+    with pytest.raises(KeyError):
+        store.get("ghost")
+
+
 def test_session_list_filtered_by_workspace(tmp_path):
     from crew.state.session_store import SQLiteSessionStore
 

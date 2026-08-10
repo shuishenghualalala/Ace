@@ -82,6 +82,26 @@ def test_wiki_tools_are_split_into_read_and_manage_toolsets(wiki_mocks):
     registry = wiki_mocks["registry"]
     assert set(registry.names_for_toolset(WIKI_READ_TOOLSET)) == set(WIKI_READ_TOOLS)
     assert set(registry.names_for_toolset(WIKI_MANAGE_TOOLSET)) == set(WIKI_MANAGE_TOOLS)
+
+
+def test_wiki_tool_ui_labels_render_placeholders(wiki_mocks):
+    """ui_label_template 用 Python format 单大括号占位；双大括号会被 format_map 当字面量原样输出。"""
+    registry = wiki_mocks["registry"]
+    args = {
+        "kb_id": "kb1",
+        "source_id": "s1",
+        "page_id": "p1",
+        "url": "https://example.com",
+        "topic": "主题",
+        "path": "a.md",
+        "title": "标题",
+        "session_id": "sid1",
+    }
+    for name in list(WIKI_READ_TOOLS) + list(WIKI_MANAGE_TOOLS):
+        template = registry.ui_meta(name).get("ui_label_template", "")
+        assert "{{" not in template and "}}" not in template, name
+        rendered = registry.render_ui_label(name, args)
+        assert "{" not in rendered and "}" not in rendered, (name, rendered)
     assert {
         "wiki_check_duplicate",
         "wiki_check_drift",

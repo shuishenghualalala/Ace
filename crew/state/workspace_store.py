@@ -16,6 +16,15 @@ from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 DEFAULT_ID = "default"
 
+# 内置工作空间：get() 查不到时幂等自建（对齐 default 的既有行为）。
+# wiki：Wiki Agent 会话的分组空间（crew/gateway/routers/wiki.py 创建会话时写死
+# workspace_id="wiki"）；hidden=1 不进工作空间选择器，root_path 恒空——wiki 会话
+# 不获得文件系统可信根目录，知识库读写走 wiki_lib 自己的路径。
+BUILTIN_WORKSPACES: dict[str, tuple[str, int]] = {
+    DEFAULT_ID: ("默认工作空间", 0),
+    "wiki": ("Wiki 知识库", 1),
+}
+
 
 def _normalize_root_path(path: str) -> str:
     """规范化本地根目录为绝对路径；无效输入返回空串。"""
@@ -112,14 +121,16 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             "hidden": bool(r[7]) if len(r) > 7 else False,
         }
 
-    def _ensure_default(self, owner_account_id: str) -> None:
+    def _ensure_builtin(self, workspace_id: str, owner_account_id: str) -> None:
+        """内置工作空间（见 BUILTIN_WORKSPACES）不存在时幂等补建。"""
+        name, hidden = BUILTIN_WORKSPACES[workspace_id]
         now = time.time()
         def _write(conn):
             conn.execute(
                 "INSERT OR IGNORE INTO workspaces "
-                "(owner_account_id, id, name, description, instructions, created_at, updated_at) "
-                "VALUES (?, ?, ?, '', '', ?, ?)",
-                (owner_account_id, DEFAULT_ID, "默认工作空间", now, now),
+                "(owner_account_id, id, name, description, instructions, created_at, updated_at, hidden) "
+                "VALUES (?, ?, ?, '', '', ?, ?, ?)",
+                (owner_account_id, workspace_id, name, now, now, hidden),
             )
         self._writer.execute(_write)
 
@@ -160,8 +171,8 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         return ws.to_dict()
 
     def get(self, workspace_id: str, owner_account_id: str = "") -> dict:
-        if workspace_id == DEFAULT_ID:
-            self._ensure_default(owner_account_id)
+        if workspace_id in BUILTIN_WORKSPACES:
+            self._ensure_builtin(workspace_id, owner_account_id)
         with self._lock:
             r = self._conn.execute(
                 "SELECT id, name, description, instructions, created_at, updated_at, root_path, hidden "
@@ -173,7 +184,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         return self._row(r)
 
     def list(self, owner_account_id: str = "") -> list[dict]:
-        self._ensure_default(owner_account_id)
+        self._ensure_builtin(DEFAULT_ID, owner_account_id)
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, name, description, instructions, created_at, updated_at, root_path, hidden "
@@ -202,8 +213,8 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         return self.get(workspace_id, owner_account_id=owner_account_id)
 
     def delete(self, workspace_id: str, owner_account_id: str = "", *, writer=None) -> None:
-        if workspace_id == DEFAULT_ID:
-            raise ValueError("默认工作空间不可删除")
+        if workspace_id in BUILTIN_WORKSPACES:
+            raise ValueError("内置工作空间不可删除")
         if writer is not None:
             writer.execute(
                 "DELETE FROM workspaces WHERE owner_account_id = ? AND id = ?",

@@ -519,6 +519,39 @@ describe('toolReducer', () => {
     );
     expect(r.replaceBook?.toolMap.get('t1')?.status).toBe('error');
   });
+
+  it('keeps running and records stage text on progress phase', () => {
+    const toolMap = new Map();
+    toolMap.set('t1', {
+      toolCallId: 't1', name: 'wiki_plan_ingest', args: '{}', status: 'running' as const, startedAt: 100,
+    });
+    const snap = makeSnapshot({ book: { ...emptyBook(), toolMap } });
+    const r = toolReducer(
+      { kind: 'tool', body: { tool_call_id: 't1', phase: 'progress', text: '正在分析来源内容（2/5 块）…' }, sequence: 2 },
+      { ...snap, now: 200 },
+    );
+    const updated = r.replaceBook?.toolMap.get('t1');
+    // 进度帧不得把工具行提前标成完成
+    expect(updated?.status).toBe('running');
+    expect(updated?.progressText).toBe('正在分析来源内容（2/5 块）…');
+    expect(updated?.duration).toBeUndefined();
+  });
+
+  it('clears stage text when the tool completes', () => {
+    const toolMap = new Map();
+    toolMap.set('t1', {
+      toolCallId: 't1', name: 'wiki_plan_ingest', args: '{}', status: 'running' as const, startedAt: 100,
+      progressText: '正在分析来源内容（2/5 块）…',
+    });
+    const snap = makeSnapshot({ book: { ...emptyBook(), toolMap } });
+    const r = toolReducer(
+      { kind: 'tool', body: { tool_call_id: 't1', phase: 'end', detail: 'done' }, sequence: 3 },
+      { ...snap, now: 300 },
+    );
+    const updated = r.replaceBook?.toolMap.get('t1');
+    expect(updated?.status).toBe('done');
+    expect(updated?.progressText).toBeUndefined();
+  });
 });
 
 describe('statusReducer', () => {
