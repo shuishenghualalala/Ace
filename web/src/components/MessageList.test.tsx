@@ -75,6 +75,8 @@ describe("MessageList agent bubble routing", () => {
     );
 
     expect(html).toContain("Kimi");
+    expect(html).toContain("agent-avatar--external");
+    expect(html).toContain(">K</span>");
     expect(html).toContain("思考已完成");
     expect(html).toContain("读取 README.md");
     expect(html).toContain("检查完成。");

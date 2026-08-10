@@ -319,6 +319,10 @@
   color: var(--mw-text-secondary);
 }
 
+.mw-session-history__identity-icon.session__external-agent-icon {
+  color: var(--mw-text-primary);
+}
+
 .mw-session-history__copy {
   display: flex;
   min-width: 0;

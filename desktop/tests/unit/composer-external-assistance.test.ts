@@ -4,7 +4,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { backendApi } from '../../src/ui/backend-client';
 import { initAgentsPage, loadAgentsPage } from '../../src/ui/features/agents-page';
+import { createComposerContextView } from '../../src/ui/features/composer-context-view';
 import { bindComposerToolbar } from '../../src/ui/features/composer-toolbar';
+import { externalAgentInitial, externalAgentTone } from '../../src/ui/features/external-agent-avatar';
 import { getFixture } from '../../src/ui/preview/fixtures';
 import { STORAGE_KEYS } from '../../src/shared/storage-keys';
 import {
@@ -25,7 +27,7 @@ function mountComposer(): void {
 async function openExternalEntry(): Promise<void> {
   document.getElementById('chat-craft-btn')?.click();
   const entry = document.querySelector<HTMLElement>('[data-craft-mode="external"]');
-  expect(entry?.querySelector('.mw-icon use')?.getAttribute('href')).toBe('#icon-agent');
+  expect(entry?.querySelector('.mw-icon image')?.getAttribute('href')).toBe('./external-agent.png');
   entry?.click();
   await vi.waitFor(() => {
     expect(document.getElementById('chat-external-inline-popover')?.textContent).not.toContain(
@@ -62,6 +64,40 @@ afterEach(() => {
 });
 
 describe('composer 外援入口', () => {
+  it('新建对话默认智能体入口与浮层使用智能体图标', () => {
+    document.body.innerHTML = `
+      <main id="composer-root">
+        <div data-composer-context-target="project"></div>
+        <div data-composer-context-target="before-input"></div>
+        <div data-composer-context-target="toolbar-left"></div>
+        <div data-composer-context-target="toolbar-right"></div>
+      </main>
+    `;
+    const root = document.getElementById('composer-root') as HTMLElement;
+    const view = createComposerContextView(root);
+    const disposeToolbar = bindComposerToolbar();
+    const trigger = document.getElementById('chat-craft-btn');
+
+    expect(trigger?.querySelector('.mw-context-chip__icon image')?.getAttribute('href')).toBe('./menubar/default.png');
+    expect(trigger?.querySelector('.mw-context-chip__icon use')).toBeNull();
+
+    trigger?.click();
+    const agentEntry = document.querySelector('[data-craft-mode="craft"]');
+    expect(agentEntry?.querySelector('.mw-icon image')?.getAttribute('href')).toBe('./menubar/default.png');
+    expect(agentEntry?.querySelector('.mw-icon use')).toBeNull();
+
+    disposeToolbar();
+    view.dispose();
+  });
+
+  it('我的外援头像沿用 display_badge，并在缺失时回退 provider 首字母', () => {
+    expect(externalAgentInitial('kimi')).toBe('K');
+    expect(externalAgentInitial('codex', 'X')).toBe('X');
+    expect(externalAgentInitial('claude-code')).toBe('C');
+    expect(externalAgentTone('kimi')).not.toBe(externalAgentTone('codex'));
+    expect(externalAgentTone('kimi')).toBe(externalAgentTone('KIMI'));
+  });
+
   it('外援中心用三步 Spotlight 引导发现、添加和派活，并支持关闭后从头重播', async () => {
     configStore.set({
       config: {
@@ -185,6 +221,9 @@ describe('composer 外援入口', () => {
     expect(document.querySelector('.runtime-technical-details')).toBeNull();
     expect(document.querySelector('.mw-agent-card')?.textContent).not.toContain('codex-acp');
     expect(document.querySelector('.mw-agent-card')?.textContent).not.toContain('/usr/local/bin/codex');
+    const runtimeLogo = document.querySelector('[data-runtime-id] > .mw-icon');
+    expect(runtimeLogo?.querySelector('image')?.getAttribute('href')).toBe('./external-agent.png');
+    expect(runtimeLogo?.querySelector('use')).toBeNull();
     expect(document.querySelector('[data-runtime-id]')?.textContent).toContain('使用');
 
     document.querySelector<HTMLElement>('[data-use-runtime="runtime-codex"]')?.click();
@@ -547,6 +586,8 @@ describe('composer 外援入口', () => {
     await initAgentsPage();
     await loadAgentsPage();
 
+    expect(document.querySelector('[data-agent-id="agent-leader"] .mw-agent-card__external-avatar.agent-provider-tone-1')).not.toBeNull();
+
     const card = document.querySelector<HTMLElement>('[data-team-id="team-product"]');
     expect(card?.getAttribute('role')).toBe('button');
     card?.click();
@@ -734,36 +775,23 @@ describe('composer 外援入口', () => {
     expect(popover?.textContent).toContain('研发外援团');
     expect(popover?.textContent).toContain('1 名成员 · Codex 开发助手 Leader');
     expect(popover?.textContent).not.toContain('冗长团队目标说明');
+    const expectedBadges = {
+      'agent-codex': 'X',
+      'agent-kimi': 'K',
+      'agent-hermes': 'H',
+      'agent-claude': 'C',
+      'agent-contract-error': 'C',
+    } as const;
+    for (const [agentId, badge] of Object.entries(expectedBadges)) {
+      const row = popover?.querySelector<HTMLElement>(`[data-external-agent-id="${agentId}"]`);
+      expect(row?.querySelector('.composer-agent-avatar')).not.toBeNull();
+      expect(row?.querySelector('[class*="agent-provider-tone-"]')).not.toBeNull();
+      expect(row?.querySelector('.composer-agent-team-logo')).toBeNull();
+      expect(row?.querySelector('.composer-agent-avatar')?.textContent).toBe(badge);
+    }
     expect(
-      popover?.querySelector('[data-external-agent-id="agent-codex"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('X');
-    expect(
-      popover?.querySelector('[data-external-agent-id="agent-kimi"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('K');
-    expect(
-      popover?.querySelector('[data-external-agent-id="agent-hermes"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('H');
-    expect(
-      popover?.querySelector('[data-external-agent-id="agent-claude"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('C');
-    expect(
-      popover?.querySelector('[data-external-agent-id="agent-contract-error"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('?');
-    expect(
-      popover
-        ?.querySelector('[data-external-agent-id="agent-codex"] .composer-agent-pixel-icon')
-        ?.className,
-    ).toMatch(/composer-agent-pixel-icon--tone-\d/);
-    expect(
-      popover?.querySelector(
-        '[data-external-team-id="team-dev"] .composer-agent-pixel-icon',
-      ),
-    ).toBeNull();
+      popover?.querySelector('[data-external-agent-id="agent-codex"] .agent-provider-tone-1'),
+    ).not.toBeNull();
     expect(
       popover?.querySelectorAll(
         '[data-external-team-id="team-dev"] .composer-agent-team-logo .session__team-logo i',

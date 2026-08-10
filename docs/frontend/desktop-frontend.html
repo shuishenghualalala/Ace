@@ -45,6 +45,7 @@
     <li>代码结构以模块边界为先：同一功能尽量收敛在已有 feature 子模块、样式模块和 typed API 封装内，避免临时脚本式调用和跨层循环依赖。</li>
     <li>可以参考 Hermes 等架构的交互和分层，但实现需按本仓库 Electron + Vanilla TypeScript 结构落地，不直接堆叠不合栈的代码。</li>
   </ul>
+  <p><b>2026-08-09：</b>Composer 外援选择器统一使用黑白双框 Team Logo：外援 Agent、外援团队和已选中的顶部外援 chip 复用同一 <code>.session__team-logo</code> 结构，不再在 Composer 内按 provider 显示彩色首字母头像；外援中心其他页面继续保留 provider 头像。</p>
   <p><b>2026-08-08：</b>修复普通对话在窄窗口下 Crew Logo 贴近主内容左侧分隔线：共享 Conversation Surface 的消息轨道将 16px 左右安全间距计入外层最大宽度，小窗口收窄时仍保留稳定留白；宽窗口的 920px 正文基线和居中位置保持不变。Wiki、Studio 与会话预览继续使用各自既有局部覆盖。</p>
   <p><b>2026-08-07：</b>恢复外援中心三步 Spotlight 定位导览：首次邀请仍停靠窗口右下角；进入步骤后改为全屏中性遮罩、目标镂空高亮和随目标就近定位的悬浮说明卡。切换步骤时复用同一 Portal 与卡片节点，目标滚动、窗口缩放和内容区滚轮会重新计算位置；Escape、方向键、上一步/下一步、跳过和完成均有明确生命周期。视觉按 <code>design/desktop-design-system.md</code> 使用纯中性色、语义边框、8/12px 圆角、标准浮层阴影与 reduced-motion 降级，不恢复旧 soft-pixel 橄榄色装饰。</p>
   <p><b>2026-08-07：</b>修复 Runtime 删除被历史会话续接绑定永久拦截：<code>external_runtime_session_binding</code> 只保存外部进程的原生 session id，不承载 Crew 聊天记录；当 Runtime 已无 Agent 引用时，删除操作会先清理这些不可再用的续接元数据，再删除 Runtime，Crew Session 与历史消息保持不变。删除 Agent 时也同步清理它的续接绑定，避免再次形成孤儿行；仍被 Agent 使用的 Runtime 继续拒绝删除并提示先删除对应外援。</p>
@@ -445,6 +446,7 @@
   <table>
     <thead><tr><th>日期</th><th>范围</th><th>验证</th><th>结果</th></tr></thead>
     <tbody>
+      <tr><td>2026-08-08</td><td>Composer 外援列表独立滚动、Desktop/Web 组合头像与 provider 首字母像素化。</td><td>Desktop <code>composer-external-assistance.test.ts</code>：<code>9 passed</code>；Desktop typecheck、CSS lint、production build 通过。Web <code>AgentsHub.test.ts</code>、<code>Composer.test.tsx</code>、<code>Sidebar.test.tsx</code>：<code>19 passed</code>；Web typecheck、production build 通过。</td><td>通过；测试环境仍会输出未启动 <code>127.0.0.1:8000</code> 的 EPERM，但不影响 mock 覆盖用例。</td></tr>
       <tr><td>2026-08-08</td><td>普通对话 Crew Logo 的窄窗口左侧安全间距与宽屏内容基线。</td><td><code>shared-style-regression.test.ts</code>：<code>5 passed</code>；TypeScript typecheck、范围 ESLint、全量 CSS lint、<code>web-messages.css</code> 重复 selector 检查与 visual build 通过。真实页面分别在 960×640、1440×900 验收：小窗口主内容分隔线到 Logo 为 16px；宽屏 Logo 横坐标与修改前 920px 内容轨道基线一致。</td><td>通过；小窗口不再贴线，宽屏现有对齐不变。</td></tr>
       <tr><td>2026-08-07</td><td>Runtime 删除清理孤立原生会话续接绑定，删除 Agent 同步清理续接绑定。</td><td>External Store 新增定向回归 <code>2 passed</code>；Gateway Runtime 文件 <code>14 passed</code>；Desktop 外援文件 <code>8 passed</code>。Store Ruff 全规则、测试文件 Ruff F/E9、Python 语法编译、范围 <code>git diff --check</code> 通过。</td><td>通过；Runtime 仍被 Agent 使用时继续拒绝，只有孤立续接元数据时自动清理，Crew 会话和历史消息不受影响。</td></tr>
       <tr><td>2026-08-07</td><td>发现外援所有 Runtime 统一删除入口，以及视觉夹具 E2E 记录与 DELETE 响应修正。</td><td><code>composer-external-assistance.test.ts</code>：<code>8 passed</code>；TypeScript typecheck、变更范围 ESLint、production build 与范围 <code>git diff --check</code> 通过。真实页面验收确认 Kimi / Codex / Hermes 三条均有删除按钮、E2E Source Runtime 不再出现；确认删除 Kimi 后行即时移除并显示成功消息。</td><td>通过；测试环境连接未启动的 <code>127.0.0.1:8000</code> 时输出 EPERM，但 mock 覆盖的 8 项用例全部完成并通过。</td></tr>
@@ -483,6 +485,80 @@
     </tbody>
   </table>
 
+  <section>
+    <h2>菜单栏状态、Logo 与外援会话身份（2026-08-08）</h2>
+    <ul>
+      <li>Desktop/Web 产品 Logo 统一使用 <code>crew-logo-trans.png</code>；Desktop 菜单栏使用 <code>assets/menubar</code> 下的默认、工作中、有通知、完成、休眠五态素材。</li>
+      <li>菜单栏优先级固定为“有通知 &gt; 工作中 &gt; 完成 &gt; 休眠 &gt; 默认”；无任务连续 5 分钟进入休眠。点击菜单栏图标会打开 Crew，并清除通知与完成态。</li>
+      <li>外援导航与模式入口使用独立的 <code>external-agent.png</code>；异构智能体会话身份使用首字母像素按钮，身份文案顺序为“kimi · Agent”，名称在前、类型在后。</li>
+      <li>Composer 默认“智能体”触发按钮和同名浮层项统一使用 <code>crew-menubar-default-template-2.png</code> 的 Crew 线稿；只有外援入口使用 <code>external-agent.png</code>，选中具体外援后再显示对应 provider 首字母头像。</li>
+      <li>Composer 外援列表与“我的外援”卡片共用 provider 首字母像素按钮：使用 Gateway <code>display_badge</code>（缺失时回退 provider 首字母），例如 kimi 显示 K；所有 provider 使用主题黑白底，仅通过稳定、低对比度的全表面像素纹样区分。</li>
+      <li>Composer 外援浮层采用固定的模式切换和搜索区，智能体/团队列表为独立滚动容器；长列表滚动不会挤出 Composer，也不会移动上方控件。</li>
+      <li>参考素材归档于 <code>design/reference-assets/</code>；设计系统规范同步维护于 <code>design/desktop-design-system.md</code>。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>外援头像回归首字母像素按钮（2026-08-09）</h2>
+    <ul>
+      <li>“我的外援”、Composer 外援列表、session history 和外部 ACP 对话头像统一只显示 <code>display_badge</code> 或 provider 首字母，不再使用 <code>external-agent.png + 首字母</code> 组合。</li>
+      <li>四处共用圆角厚描边、主题黑白底、provider 稳定映射的低对比度全表面像素纹样、等宽字母和轻微内阴影；Kimi/Codex/Hermes/Claude/Gemini/Sites 分别使用斜纹、棋盘、竖线、横线、点阵和十字。Composer 的单 Agent 行使用 provider 首字母头像，外援团队行使用一黑一白双智能体图标。</li>
+    </ul>
+    <p>验证：Desktop <code>composer-external-assistance.test.ts</code> 与 <code>render-agent-turn.test.ts</code> 共 <code>66 passed</code>；Desktop typecheck、CSS lint、production build 通过。</p>
+  </section>
+  <section>
+    <h2>macOS 菜单栏 Template Image 修复（2026-08-09）</h2>
+    <ul>
+      <li>Desktop 开发态和打包态继续共用 <code>assets/menubar</code> 五态素材及原有状态优先级。</li>
+      <li>默认态使用 <code>design/reference-assets/crew-menubar-default-template-2.png</code> 的透明黑色粗线稿，休眠态使用 <code>design/reference-assets/crew-menubar-rest-template-2.png</code>；macOS 将其作为真正的 Template Image，自动适配系统主题。白色细线版本仅保留为设计参考，不进入生产素材。</li>
+      <li>工作中、有通知、完成继续显示原始彩色素材；不得直接把带不透明机身的完整彩色位图作为模板蒙版。</li>
+      <li>macOS 五态统一生成 44×44 物理像素、<code>scaleFactor: 2</code> 的 22pt Retina 表示，禁止直接把素材压成单倍率 22×22 位图，避免菜单栏线稿锯齿和断线。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>外援头像全表面纹样与发现外援图标统一（2026-08-10）</h2>
+    <ul>
+      <li>“我的外援”、Composer 外援 Agent、session history 与外部 ACP 对话继续共用相同 provider 首字母和稳定纹样槽位；纹样改为从左上角低对比度平铺整个头像表面，不再只显示右上角小块。</li>
+      <li>纹样使用约 10% 主题墨色，保持黑白、克制、像素按钮风；不同 provider 仅区分纹样，不引入专属颜色。</li>
+      <li>“发现外援”中的 runtime 卡片统一使用 Sidebar 外援入口的 <code>external-agent.png</code>，不与 provider 身份头像混用。</li>
+      <li>休眠菜单栏生产素材同步为 <code>design/reference-assets/crew-menubar-rest-template-2.png</code>，运行时代码只引用打包内相对路径。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>新建对话 Composer 默认智能体图标修正（2026-08-10）</h2>
+    <ul>
+      <li>新建对话默认模式的触发按钮使用指定的 Crew 黑色线稿，文案保持“智能体”。</li>
+      <li>模式浮层中的“智能体”项同步使用 <code>./menubar/default.png</code>；<code>external-agent.png</code> 只属于“外援”入口，选中具体外援后触发按钮继续显示 provider 首字母头像。</li>
+      <li>菜单栏“完成”态由后台会话从运行态转为空闲且尚未查看触发；优先级仍为“有通知 &gt; 工作中 &gt; 完成 &gt; 休眠 &gt; 默认”。</li>
+    </ul>
+    <p>验证：Desktop Composer/Tray 定向测试 <code>12 passed</code>，TypeScript、ESLint（无新增 error）与 production build 通过；真实开发态新建对话确认触发按钮和“智能体”浮层项不再渲染 <code>external-agent.png</code>。</p>
+  </section>
+  <section>
+    <h2>运行提示跳跃角色替换（2026-08-10）</h2>
+    <ul>
+      <li>Composer 上方运行提示的旧内嵌机器人 SVG 替换为 <code>assets/crew-jump-agent.png</code>；设计源文件保存在 <code>design/reference-assets/crew-jump-agent.png</code>。</li>
+      <li>Renderer 仅使用 <code>./crew-jump-agent.png</code> 相对路径，不依赖开发者用户名或本机绝对目录。</li>
+      <li>保留原有 <code>chat-running-logo-hop</code> 跳跃节奏、减少动态效果设置，以及重复状态同步时复用同一 DOM 节点的行为。</li>
+    </ul>
+    <p>验证：<code>session-busy.test.ts</code> 与 <code>render-agent-turn.test.ts</code> 共 <code>72 passed</code>；Desktop TypeScript、ESLint、CSS lint 和 production build 通过。</p>
+  </section>
+  <section>
+    <h2>Composer Crew 图标、外部会话头像与跳跃角色定位统一（2026-08-10）</h2>
+    <ul>
+      <li>Composer 默认“智能体”按钮与浮层项改用 <code>./menubar/default.png</code>，其设计源为 <code>design/reference-assets/crew-menubar-default-template-2.png</code>；深色主题通过 Template Image 反色规则保持可见。</li>
+      <li>新版会话历史面板的外部 Agent 不再统一显示外援图标，改为与旧 session、我的外援和 Composer 外援一致的 provider 首字母与稳定全表面纹样。</li>
+      <li>运行提示为黄小助手预留 32×28 布局宽度，并把素材图层向左上校正，完整主体不再落到 Composer 边界下方；减少动态效果时停止跳跃。</li>
+    </ul>
+    <p>验证：Composer、session history、running intro、Sites 与回合渲染定向测试共 <code>99 passed</code>；TypeScript、ESLint（无新增 error）、CSS lint 和 production build 通过。真实开发态确认 Composer 图片路径为 <code>./menubar/default.png</code>，Kimi/Hermes/Codex 会话分别显示 K/H/X provider 头像，黄小助手完整显示于 Composer 上方。</p>
+  </section>
+  <section>
+    <h2>Crew 与运行助手光学对齐（2026-08-10）</h2>
+    <ul>
+      <li>主对话全部智能体回合（Crew、外部 provider、外援团队）整条向右收进 16px，使头像中心线与 Composer 上方黄小助手一致，同时保留头像与名称、正文的原有 12px 间距。</li>
+      <li>用户消息从右侧等量收进 16px，与智能体侧形成对称留白；气泡尺寸和文字内边距保持不变。</li>
+      <li>黄小助手图层由向上 12px 调整为向上 18px，图形视觉中心与后方运行状态文案对齐；原跳跃动画与 32×28 布局槽位保持不变。</li>
+    </ul>
+    <p>验证：Composer 外援、智能体回合、会话状态、共享样式、Sites 与菜单栏状态定向测试共 <code>107 passed</code>；TypeScript、CSS lint 与 production build 通过。真实 Desktop Renderer 确认智能体回合左侧内收 16px，头像与正文间距保持 12px；开发端已使用最新构建重新启动。</p>
+  </section>
 </div>
 </body>
 </html>

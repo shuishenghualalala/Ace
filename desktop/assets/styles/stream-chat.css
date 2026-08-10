@@ -514,14 +514,25 @@
 }
 
 .running-intro__logo {
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 28px;
   display: grid;
   place-items: center;
   flex-shrink: 0;
   color: var(--mw-text-primary);
   animation: chat-running-logo-hop 1.05s ease-in-out infinite;
   transform-origin: 50% 100%;
+}
+
+.running-intro__agent-logo {
+  width: 48px;
+  height: 48px;
+  max-width: none;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  transform: translate(-6px, -18px);
+  user-select: none;
 }
 
 .nav-agent-logo {
@@ -604,6 +615,12 @@
   0%, 100% { transform: translateY(0) scaleY(1); }
   35% { transform: translateY(-4px) scaleY(1.03); }
   65% { transform: translateY(1px) scaleY(.97); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .running-intro__logo {
+    animation: none;
+  }
 }
 
 .queue-card {

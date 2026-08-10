@@ -81,6 +81,10 @@ body {
   --mw-symbol-accent-alt: var(--mw-symbol-line);
 }
 
+:root[data-theme='dark'] .mw-icon--template-image image {
+  filter: invert(1);
+}
+
 button,
 input,
 select,

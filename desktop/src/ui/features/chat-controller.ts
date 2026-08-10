@@ -52,6 +52,7 @@ import {
   type OpenSessionFn,
 } from './workspaces';
 import { syncComposerWorkspaceLabel } from './composer-toolbar';
+import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
 import { refreshKanbanBoard, scheduleRefreshKanbanBoard } from './kanban-board';
 import {
   primeTeamCollaborationIdentity,
@@ -954,11 +955,8 @@ function sessionTurnIdentity(sessionId: string | null): AgentTurnOptions['identi
   // 首帧前的通用等待态沿用内置 Leader（Crew），聊天区不展示 Team Logo。
   if (provider === 'team') return undefined;
   const name = String(display?.agentLabel?.name || 'Agent').trim();
-  if (provider === 'sites') {
-    return { kind: 'external', name, badge: '', icon: 'icon-inspiration' };
-  }
-  const badge = provider.includes('codex') ? 'X' : (name || provider).slice(0, 1).toUpperCase();
-  return { kind: 'external', name, badge };
+  const badge = externalAgentInitial(provider, display?.agentLabel?.display_badge);
+  return { kind: 'external', name, badge, tone: externalAgentTone(provider) };
 }
 
 export function renderChat(): void {

@@ -840,6 +840,7 @@ export interface AgentTurnOptions {
     kind: 'external' | 'team';
     name: string;
     badge: string;
+    tone?: number;
     icon?: IconId;
   };
 }
@@ -847,7 +848,8 @@ export interface AgentTurnOptions {
 function createAgentTurnAvatar(identity?: AgentTurnOptions['identity']): HTMLElement {
   if (!identity) return createChatAvatar();
   const avatar = document.createElement('div');
-  avatar.className = `msg__avatar msg__avatar--${identity.kind}`;
+  const toneClass = identity.tone === undefined ? '' : ` agent-provider-tone-${identity.tone}`;
+  avatar.className = `msg__avatar msg__avatar--${identity.kind}${toneClass}`;
   avatar.setAttribute('aria-hidden', 'true');
   if (identity.kind === 'team') {
     const logo = document.createElement('span');
@@ -1192,7 +1194,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
 
   // 组装最终 .msg
   const msg = document.createElement('div');
-  msg.className = 'msg';
+  msg.className = 'msg msg--agent-turn';
   if (isLive) msg.dataset.streaming = 'true';
   msg.dataset.messageId = firstId;
 
@@ -2095,7 +2097,7 @@ export const renderConversationPreview = renderConversationSurface;
  *  会由 renderAgentTurn 接管同回合的流式渲染，这里就不再追加，避免出现两个 Crew 头像。 */
 export function renderTypingIndicator(identity?: AgentTurnOptions['identity']): HTMLElement {
   const msg = document.createElement('div');
-  msg.className = 'msg msg--typing';
+  msg.className = 'msg msg--typing msg--agent-turn';
   msg.dataset.messageId = 'typing';
   msg.setAttribute('aria-label', '正在生成');
 
@@ -2128,15 +2130,12 @@ export function renderRunningIntro(status: string, intro: string): HTMLElement {
   const logo = document.createElement('span');
   logo.className = 'running-intro__logo';
   logo.setAttribute('aria-hidden', 'true');
-  logo.appendChild(createTrustedFragment(
-    `<svg class="nav-agent-logo running-intro__agent-logo" width="18" height="18" viewBox="3 3 18 18" aria-hidden="true">
-      <path class="nav-agent-logo__blob" d="M5.2 13.2c0-4.5 2.9-6.9 6.8-6.9 4.5 0 7 2.8 7 6.2 0 3.8-2.5 5.5-7.2 5.5-4.3 0-6.6-1.4-6.6-4.8Z"></path>
-      <path class="nav-agent-logo__cap" d="M9 6.7c.7-1.1 1.7-1.7 3.1-1.7 1.3 0 2.3.5 3 1.5"></path>
-      <path class="nav-agent-logo__shine nav-agent-logo__shine--left" d="M9.6 10.8v1.9"></path>
-      <path class="nav-agent-logo__shine nav-agent-logo__shine--right" d="M14.4 10.8v1.9"></path>
-      <path class="nav-agent-logo__pixel" d="M18.8 8.2h1.5M19.55 7.45v1.5"></path>
-    </svg>`,
-  ));
+  const logoImage = document.createElement('img');
+  logoImage.className = 'running-intro__agent-logo';
+  logoImage.src = './crew-jump-agent.png';
+  logoImage.alt = '';
+  logoImage.draggable = false;
+  logo.appendChild(logoImage);
 
   const textWrap = document.createElement('span');
   textWrap.className = 'running-intro__text';

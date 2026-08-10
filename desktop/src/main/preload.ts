@@ -8,6 +8,7 @@ import type {
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
   VersionUpdatePayload,
+  TrayStatus,
 } from '../shared/types';
 import type { SecurityAuditArgs } from '../shared/ipc-schemas';
 
@@ -76,6 +77,12 @@ const api = {
   setAutoLaunchEnabled: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-launch-enabled', enabled),
   getCloseBehavior: () => ipcRenderer.invoke('app:get-close-behavior'),
   setCloseBehavior: (behavior: 'tray' | 'quit' | 'ask') => ipcRenderer.invoke('app:set-close-behavior', behavior),
+  traySetStatus: (status: TrayStatus) => ipcRenderer.invoke('tray:set-status', status) as Promise<{ ok: true }>,
+  onTrayActivated: (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on('tray:activated', listener);
+    return () => ipcRenderer.removeListener('tray:activated', listener);
+  },
   getSystemLocale: () => ipcRenderer.invoke('app:get-system-locale') as Promise<string>,
   rendererInitialStateReady: (): Promise<{ ok: true }> =>
     ipcRenderer.invoke('app:renderer-initial-state-ready'),

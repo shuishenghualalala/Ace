@@ -345,7 +345,7 @@ export function createApplicationShell(
       label.className = 'mw-shell-nav-item__label';
       label.textContent = item.label;
       button.append(createIcon(item.icon, {
-        className: item.icon === 'icon-agent'
+        className: item.icon === 'icon-agent' || item.icon === 'icon-external-agent'
           ? `mw-shell-nav-item__icon ${MONOCHROME_ICON_CLASS}`
           : 'mw-shell-nav-item__icon',
       }), label);

@@ -59,6 +59,9 @@ button { font-family: inherit; cursor: pointer; }
   display: grid; place-items: center;
   color: var(--text);
 }
+.sidebar__logo img {
+  width: 100%; height: 100%; object-fit: contain;
+}
 .sidebar__name {
   font-weight: 800;
   font-size: 13px;
@@ -137,6 +140,9 @@ button { font-family: inherit; cursor: pointer; }
 .nav-item:hover { background: var(--bg-hover); color: var(--text); }
 .nav-item.active { background: var(--bg-active); color: var(--text); font-weight: 600; }
 .nav-item svg { flex-shrink: 0; }
+.sidebar-agent-icon {
+  width: 16px; height: 16px; flex: 0 0 16px; object-fit: contain;
+}
 .nav-agent-logo {
   overflow: visible;
   color: var(--black);
@@ -170,22 +176,11 @@ button { font-family: inherit; cursor: pointer; }
 .nav-item:hover .nav-agent-logo__blob {
   fill: none;
 }
-.composer-agent-logo .nav-agent-logo__blob {
-  fill: none;
-  stroke-width: 1.65;
-}
-.composer-agent-logo .nav-agent-logo__cap {
-  stroke-width: 1.45;
-}
-.composer-agent-logo .nav-agent-logo__shine {
-  stroke-width: 1.55;
-}
-.composer-agent-logo .nav-agent-logo__pixel {
-  stroke-width: 1.35;
-}
-.toolbar-btn:hover .composer-agent-logo .nav-agent-logo__blob,
-.toolbar-btn--active .composer-agent-logo .nav-agent-logo__blob {
-  fill: none;
+.composer-agent-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  object-fit: contain;
 }
 .nav-item--disabled { opacity: .4; cursor: default; pointer-events: none; }
 
@@ -280,20 +275,66 @@ button { font-family: inherit; cursor: pointer; }
 .session.active .session__check {
   opacity: 1;
 }
+
+/* Provider-specific pixel palette: stable provider hash, shared across all avatar sizes. */
+.agent-provider-tone-0,
+.agent-provider-tone-1,
+.agent-provider-tone-2,
+.agent-provider-tone-3,
+.agent-provider-tone-4,
+.agent-provider-tone-5 {
+  --agent-provider-fill: var(--bg);
+  --agent-provider-ink: color-mix(in srgb, var(--text) 10%, transparent);
+  --agent-provider-pattern-size: 8px 8px;
+}
+.agent-provider-tone-0 {
+  /* Kimi: quiet diagonal pixel stripe. */
+  --agent-provider-pattern: linear-gradient(135deg, transparent 0 40%, var(--agent-provider-ink) 40% 56%, transparent 56% 100%);
+  --agent-provider-pattern-size: 10px 10px;
+}
+.agent-provider-tone-1 {
+  /* Codex: two-by-two checker. */
+  --agent-provider-pattern: conic-gradient(var(--agent-provider-ink) 0 25%, transparent 0 50%, var(--agent-provider-ink) 0 75%, transparent 0);
+}
+.agent-provider-tone-2 {
+  /* Hermes: restrained vertical bars. */
+  --agent-provider-pattern: repeating-linear-gradient(90deg, var(--agent-provider-ink) 0 1px, transparent 1px 4px);
+}
+.agent-provider-tone-3 {
+  /* Claude: restrained horizontal bars. */
+  --agent-provider-pattern: repeating-linear-gradient(0deg, var(--agent-provider-ink) 0 1px, transparent 1px 4px);
+}
+.agent-provider-tone-4 {
+  /* Gemini: two quiet pixel dots. */
+  --agent-provider-pattern: radial-gradient(circle at 25% 25%, var(--agent-provider-ink) 0 1px, transparent 1.1px), radial-gradient(circle at 75% 75%, var(--agent-provider-ink) 0 1px, transparent 1.1px);
+  --agent-provider-pattern-size: 10px 10px;
+}
+.agent-provider-tone-5 {
+  /* Sites/other slot: compact plus. */
+  --agent-provider-pattern: linear-gradient(90deg, transparent 0 38%, var(--agent-provider-ink) 38% 62%, transparent 62%), linear-gradient(0deg, transparent 0 38%, var(--agent-provider-ink) 38% 62%, transparent 62%);
+  --agent-provider-pattern-size: 10px 10px;
+}
+
 .session__agent-badge {
   width: 18px;
   height: 18px;
   flex: 0 0 18px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--border-strong);
+  border: 2px solid #4b4239;
   border-radius: 5px;
-  background: transparent;
-  color: var(--text);
-  font-size: 10px;
-  font-weight: 800;
+  background-color: var(--agent-provider-fill, #fffaf1);
+  background-image: var(--agent-provider-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--agent-provider-pattern-size, 8px 8px);
+  color: #3f342a;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 950;
   line-height: 1;
-  box-shadow: inset -1px -1px rgba(0,0,0,.08);
+  image-rendering: pixelated;
+  box-shadow: inset -1px -1px rgba(105,91,72,.12);
 }
 .board-session-badge {
   width: 36px;
@@ -646,7 +687,9 @@ button { font-family: inherit; cursor: pointer; }
     linear-gradient(90deg, rgba(112, 128, 91, .06) 1px, transparent 1px),
     linear-gradient(0deg, rgba(112, 128, 91, .06) 1px, transparent 1px),
     #fffdf7;
-  background-size: 8px 8px;
+  background-repeat: no-repeat;
+  background-position: right 4px top 4px;
+  background-size: 6px 6px;
   color: #22251f;
   padding: 12px;
   box-shadow: 4px 4px 0 rgba(70, 79, 61, .16);
@@ -835,6 +878,12 @@ button { font-family: inherit; cursor: pointer; }
   border-radius: 8px;
   padding: 12px;
   background: var(--bg);
+}
+.runtime-external-agent-icon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  object-fit: contain;
 }
 .agent-card__main { flex: 1; min-width: 0; }
 .agent-card__title {
@@ -1218,7 +1267,9 @@ button { font-family: inherit; cursor: pointer; }
     linear-gradient(90deg, rgba(26,26,26,.035) 1px, transparent 1px),
     linear-gradient(0deg, rgba(26,26,26,.035) 1px, transparent 1px),
     var(--bg);
-  background-size: 8px 8px;
+  background-repeat: no-repeat;
+  background-position: right 3px top 3px;
+  background-size: 6px 6px;
 }
 .team-member-card.is-builtin .team-member-card__mark {
   border-radius: 6px;
@@ -1371,6 +1422,40 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text);
   font-size: 12px;
   font-weight: 800;
+}
+.external-agent-avatar {
+  position: relative;
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  border: 2px solid #4b4239;
+  border-radius: 10px;
+  background-color: var(--agent-provider-fill, #fffaf1);
+  background-image: var(--agent-provider-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--agent-provider-pattern-size, 8px 8px);
+  color: #3f342a;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 950;
+  line-height: 1;
+  image-rendering: pixelated;
+  box-shadow: inset -3px -3px rgba(105, 91, 72, .12);
+}
+.external-agent-avatar > span {
+  display: grid;
+  place-items: center;
+}
+.external-agent-avatar--compact {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+  border-width: 2px;
+  border-radius: 8px;
+  font-size: 12px;
 }
 .pixel-badge {
   width: 22px;
@@ -1934,40 +2019,10 @@ button { font-family: inherit; cursor: pointer; }
   box-shadow: none;
 }
 .msg-agent-logo {
-  overflow: visible;
-  color: currentColor;
-}
-.msg-agent-logo__head {
-  fill: #fff;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.msg-agent-logo__hat {
-  fill: #fff;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.msg-agent-logo__hair {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.82;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 1;
-}
-.msg-agent-logo__hair--tip {
-  opacity: 1;
-}
-.msg-agent-logo__eye {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.95;
-  stroke-linecap: round;
-  opacity: 1;
+  display: block;
+  width: 25px;
+  height: 25px;
+  object-fit: contain;
 }
 .msg__body { min-width: 0; flex: 1; position: relative; }
 .msg__name { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
@@ -3506,6 +3561,11 @@ button { font-family: inherit; cursor: pointer; }
   z-index: 100;
   overflow: hidden;
 }
+.agents-popover {
+  max-height: min(420px, calc(100vh - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .skills-popover__search {
   display: flex;
   align-items: center;
@@ -3600,6 +3660,10 @@ button { font-family: inherit; cursor: pointer; }
   cursor: pointer;
   transition: background .1s;
   overflow: hidden;
+}
+.skills-popover__item .external-agent-avatar {
+  align-self: center;
+  margin-right: 1px;
 }
 .skills-popover__item:hover { background: var(--bg-hover); }
 .skills-popover__item:disabled {
@@ -4047,7 +4111,7 @@ button { font-family: inherit; cursor: pointer; }
     linear-gradient(90deg, rgba(26,26,26,.04) 1px, transparent 1px),
     linear-gradient(0deg, rgba(26,26,26,.04) 1px, transparent 1px),
     rgba(var(--team-accent-rgb), .045);
-  background-size: 8px 8px;
+  background-size: 6px 6px;
   box-shadow: inset -2px -2px rgba(26,26,26,.06), 0 4px 0 rgba(26,26,26,.05);
 }
 .team-create__heading h2 { margin: 0; color: var(--team-ink); }
@@ -5207,6 +5271,19 @@ button { font-family: inherit; cursor: pointer; }
   border-width: 2px;
   border-radius: 10px;
   font-size: 13px;
+  box-shadow: inset -2px -2px rgba(105,91,72,.12);
+}
+.agent-avatar--message.agent-avatar--external {
+  background-color: var(--agent-provider-fill, #fffaf1);
+  background-image: var(--agent-provider-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--agent-provider-pattern-size, 8px 8px);
+  color: #3f342a;
+  border-color: #4b4239;
+  font-family: var(--mono);
+  font-weight: 950;
+  image-rendering: pixelated;
   box-shadow: inset -2px -2px rgba(105,91,72,.12);
 }
 .agent-avatar--hero {

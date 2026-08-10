@@ -11,6 +11,92 @@
 > This document defines the target contract. It does not claim that the current
 > `desktop` CSS or `gemini_v3` preview already complies with it.
 
+## 0.1 Brand assets, external-agent identity, and system menu bar
+
+The approved visual source files are preserved in `design/reference-assets/`.
+Production consumers use the following small, stable set of assets:
+
+| Surface | Asset | Rule |
+| --- | --- | --- |
+| Desktop/Web product logo and Crew assistant avatar | `crew-logo-trans.png` | Use the supplied brand mark; preserve its transparent background and aspect ratio. |
+| 外援 navigation/mode entry | `external-agent.png` | Use this standalone monochrome mark for the 外援 navigation and mode entry only. Session, Composer-agent, and “我的外援” identity surfaces use the pixel initial button below. |
+| Desktop running-intro character | `crew-jump-agent.png` | Use the supplied yellow assistant for the Composer running hint. Keep the existing restrained hop animation and DOM reuse; load the production copy through a bundle-relative path. |
+| macOS/desktop menu bar | `desktop/assets/menubar/{default,working,notification,done,rest}.png` | Default and rest use transparent black-line Template Image assets; working, notification, and done retain their supplied color. Never use a white-only or filled color mascot directly as a Template Image. |
+
+The menu-bar status contract is shared by Desktop Renderer and the main-process
+tray service:
+
+1. Priority is `有通知 > 工作中 > 完成 > 休眠 > 默认`.
+2. A new Work notification latches `有通知` until the user clicks the menu-bar
+   icon. The same click clears notification and completion indicators and opens
+   Crew.
+3. A session that finishes in the background shows `完成` until that click;
+   active-session completion is not treated as an unread completion.
+4. When there is no active task, no pending attention, and no completion state
+   for five continuous minutes, the icon changes to `休眠`. Otherwise it remains
+   `默认`.
+5. Renderer reports only the semantic state through IPC; image paths, scaling,
+   tooltip text, and raster/template policy remain main-process owned. The
+   default/rest production PNGs use solid black primary linework and state marks
+   on transparency so macOS can recolor them by theme. The active default source
+   is `design/reference-assets/crew-menubar-default-template-2.png`; the active
+   rest source is `design/reference-assets/crew-menubar-rest-template-2.png`.
+6. macOS assets render as a 44x44 physical-pixel representation with scale
+   factor 2, producing a 22pt Retina status item. Do not resize directly to a
+   single-density 22x22 bitmap; that path visibly pixelates line art.
+
+External-agent session identity is rendered as `kimi · Agent` (agent name first)
+wherever the session identity label is shown. The supplied external-agent mark
+is only used for navigation and mode entry; session identity surfaces use the
+provider/display badge initial so the label and avatar follow the same rule.
+
+The default Composer mode uses the supplied Crew black-line mark from
+`crew-menubar-default-template-2.png` in both its trigger chip and the
+“智能体” popover row. The Composer 外援 entry uses the
+standalone `external-agent.png` mark; after a specific external agent is
+selected, the trigger changes to that provider's initial avatar. Icons keep the
+existing 16–18px optical size and do not change selection, disabled, or popover
+behavior.
+
+In “我的外援” cards, Composer external-agent lists, session history, and ACP
+conversation turns, the identity is a single pixel-cute initial button. The
+letter uses the existing `display_badge` rule when supplied (for example kimi
+→ `K`); if the field is absent, it falls back to the first uppercase character
+of `provider`. These identity buttons use a chunky rounded outline, muted
+surface, compact monospace letter, and restrained inset depth; they do not
+combine `external-agent.png` with a provider badge. The standalone
+`external-agent.png` remains reserved for the 外援 navigation/entry icon.
+Long Composer lists must keep the mode switch and search field fixed while the
+agent/team list owns the scroll viewport.
+
+Provider tone is deterministic: known providers use a stable pattern slot and
+other providers use a normalized-name hash across six slots. All provider
+avatars use the current theme's black/white surface and ink; the provider is
+distinguished only by a quiet hard-edged pixel pattern (checker, grid, stripe,
+or cross). The same initial, slot, and full-surface pattern are shared across
+session, Composer, and Hub avatar sizes so the provider remains recognizable
+without introducing a provider color palette.
+The stable slots are: Kimi diagonal stair, Codex checker, Hermes vertical bars,
+Claude horizontal bars, Gemini double dots, and Sites compact plus.
+The tile repeats from the avatar's top-left corner across the complete surface
+at a 4–8px rhythm and uses 10% theme ink. This keeps the full avatar visually
+intentional while the initial remains the strongest element. The pattern must
+not introduce provider-specific color or high-contrast decoration.
+
+Runtime cards under “发现外援” use the same standalone `external-agent.png`
+mark as the Sidebar 外援 navigation item. They do not use the provider initial
+avatar, because they identify an external runtime integration rather than a
+configured agent identity.
+
+In the main conversation, every assistant turn (built-in Crew, an external
+provider, or an external team) is inset by 16px so its avatar center aligns
+with the running-intro assistant below while preserving the avatar-to-name and
+avatar-to-body spacing. User turns are inset by the same 16px from the right,
+forming a symmetric conversation gutter without changing bubble padding. The yellow
+running assistant's source canvas is shifted 6px left and 18px upward inside
+its 32x28 layout slot; this is an optical crop correction, not message-layout
+spacing, and keeps the character centered against the adjacent status copy.
+
 ## 1. Purpose
 
 The design system exists to make current and future Crew pages feel like
@@ -2341,6 +2427,7 @@ enforce repository policy.
 | 2026-07-28 | A Work route owns exactly one main surface: Workbench shows Dashboard, a Work session shows Conversation, and neither may coexist with Welcome. Knowledge uses a bounded master list plus flexible detail; create/edit forms are progressive states triggered by explicit actions, never permanent empty-page furniture. |
 | 2026-07-28 | G-W19 Work planning uses one WorkItem source for the dashboard, date-grouped item history, office conversations, calendar/list/board views, and lifecycle actions. The create dialog uses visible labels and native date controls. New Work CSS may use only semantic tokens; preview data stays fixture-only. |
 | 2026-07-30 | Workbench presentation now follows the representative daily-work layout: a compact greeting header, one continuous four-metric brief, a primary attention list with a secondary template rail, and office-source detail below the first-viewport work summary. Item conversations expose an explicit keyboard-accessible return to Workbench in the stable context header. Existing Work API, template, item, archive, and shared Composer ownership remain unchanged. |
+| 2026-08-09 | macOS menu-bar default/rest use transparent black-line Template Images; working, notification, and done remain supplied color states. All five macOS states use a 44px @2x representation for a crisp 22pt status item. |
 | 2026-07-31 | Workbench office detail uses compact inbox/todo lists above paired schedule/meeting month calendars. Calendar dates expose event labels and selected-day detail; every source keeps a non-expanding `查看全部` search and pagination dialog. |
 | 2026-07-30 | WorkItem and chat are separate: item creation never creates a conversation, item routes open details first, and one processing conversation can be created explicitly. Linked conversations are item-owned navigation, receive trusted owner-scoped item context, and do not duplicate in top-level history. The Work shell now follows example 09 directly and removes both the legacy top row and collapsed context placeholder track. |
 | 2026-07-28 | G-W19 completion keeps date items and linked processing conversations as separate projections of the same WorkItem. Plan position restores across product-mode switches; item-aware sessions retain their context bar. Work text sizes use typography tokens, and both approved viewports pass the production interaction and overflow matrix. |

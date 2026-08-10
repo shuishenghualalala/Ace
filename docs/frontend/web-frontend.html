@@ -265,10 +265,10 @@ cd web && npm run build
   <table>
     <thead><tr><th>功能</th><th>文件</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td>会话列表标识</td><td><code>Sidebar.tsx</code> / <code>types.ts</code></td><td>Crew 普通会话不显示额外标识；外部智能体会话在标题前显示 18px 像素风运行时徽标，徽标文字直接读取 Gateway <code>agent_label.display_badge</code>。Web 不再根据 provider/名称推断或保留 Codex 特例；字段缺失仅显示 <code>?</code>。</td></tr>
+      <tr><td>会话列表标识</td><td><code>Sidebar.tsx</code> / <code>AgentsHub.tsx</code> / <code>ExternalAgentAvatar.tsx</code></td><td>Crew 普通会话不显示额外标识；外部智能体会话、我的外援卡片与 Composer 外援选择器统一显示 provider/display_badge 首字母（kimi → K）的像素按钮。所有 provider 使用主题黑白底，仅以稳定、低对比度的全表面像素纹样区分，不叠加 <code>external-agent.png</code>。</td></tr>
       <tr><td>标题展示</td><td><code>Sidebar.tsx</code></td><td>session 标题仍只展示会话标题，不直接拼接智能体名称，避免侧栏拥挤。</td></tr>
       <tr><td>Hover 全称</td><td><code>Sidebar.tsx</code></td><td>外部会话的徽标和标题 <code>title</code> 使用 <code>provider-agentName-sessionTitle</code>，例如 <code>kimi-测试工程师-xxxxx</code>；Crew 会话 hover 仅显示会话标题。</td></tr>
-      <tr><td>样式</td><td><code>global.css</code></td><td><code>session__agent-badge</code> 使用无纹理纯色底、5px 小圆角、轻内阴影，保持简洁像素风。</td></tr>
+      <tr><td>样式</td><td><code>global.css</code></td><td><code>session__agent-badge</code> 使用主题黑白底、provider 稳定映射的低对比度全表面像素纹样、厚描边和轻内阴影；纹样跨头像尺寸保持一致。</td></tr>
     </tbody>
   </table>
 
@@ -758,6 +758,27 @@ cd web && npm run build
     <li><b>影响边界：</b>不修改 <code>config.yaml</code>、Gateway 配置响应、外援 API、账号归属或数据库；Gateway 明确关闭外援时，既有隐藏入口、历史隔离和 403 门禁继续生效。</li>
   </ul>
   <p>验证：Composer/Sidebar 定向测试 <code>2 files / 4 passed</code>；Web 全量 <code>23 files / 132 passed</code>；TypeScript typecheck 与 production build 通过，仅保留既有 chunk 体积提示。真实浏览器按“先启动 Vite、Gateway 保持关闭”复现：Sidebar 与 Composer 仍显示“外援”，顶部出现重试提示；随后启动 Gateway，页面未刷新即自动移除提示并恢复配置。</p>
+
+  <h2>65. Composer 外援组合头像与列表滚动（2026-08-08）</h2>
+  <ul>
+    <li><b>统一头像：</b>新增共享 <code>ExternalAgentAvatar.tsx</code>，在“我的外援”、Composer 当前外援和外援选择列表统一 provider 首字母规则与头像实现；该历史组合方案已在后续版本中收敛为纯首字母像素按钮。</li>
+    <li><b>像素首字母：</b>provider badge 使用紧凑的等宽字形、网格纹理和像素化渲染，保留 Kimi/Codex 等既有首字母规则，不依赖 provider 专属颜色。</li>
+    <li><b>滚动：</b>Web 外援选择器限制最大高度并将滚轮交给列表；Desktop 外援浮层固定模式切换和搜索区，智能体/团队列表独立滚动。</li>
+  </ul>
+  <p>验证：<code>AgentsHub.test.ts</code>、<code>Composer.test.tsx</code>、<code>Sidebar.test.tsx</code> 共 <code>19 passed</code>；Web TypeScript typecheck 与 production build 通过。</p>
+
+  <h2>66. 外援头像回归首字母像素按钮（2026-08-09）</h2>
+  <ul>
+    <li>“我的外援”、Composer 当前外援/选择器、session 列表和 ACP 对话头像统一只显示 <code>display_badge</code> 或 provider 首字母。</li>
+    <li>移除头像上的 <code>external-agent.png</code> 组合层，使用主题黑白底和 provider 稳定映射的像素纹样、圆角厚描边、等宽首字母和轻微内阴影；Kimi/Codex/Hermes/Claude/Gemini/Sites 分别使用斜纹、棋盘、竖线、横线、点阵和十字，导航栏外援入口图标保持独立。</li>
+  </ul>
+  <p>验证：AgentsHub、Composer、Sidebar、MessageList 定向测试共 <code>22 passed</code>；Web TypeScript typecheck 与 production build 通过。</p>
+
+  <h2>67. 外援头像全表面纹样与发现外援图标统一（2026-08-10）</h2>
+  <ul>
+    <li>“我的外援”、Composer 外援 Agent、session 列表和 ACP 对话头像共用相同的 provider 首字母与稳定纹样槽位；纹样以约 10% 主题墨色平铺完整头像表面，解决只在右上角出现一小块的问题。</li>
+    <li>“发现外援”的 runtime 卡片统一显示 Sidebar 外援入口同款 <code>external-agent.png</code>；runtime 集成图标与 provider 身份头像保持清晰分工。</li>
+  </ul>
 </div>
 </body>
 </html>

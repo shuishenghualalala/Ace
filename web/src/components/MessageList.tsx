@@ -7,6 +7,7 @@ import AgentTurnBubble from "./AgentTurnBubble";
 import MessageItem from "./MessageItem";
 import FollowupQuestionCard from "./FollowupQuestionCard";
 import AgentAvatarLogo from "./AgentAvatarLogo";
+import { externalAgentInitial, externalAgentTone } from "./ExternalAgentAvatar";
 
 interface Props {
   messages: UiMessage[];
@@ -133,8 +134,12 @@ export default function MessageList({
               key={turn.turnId}
               identity={{
                 name: currentAgentLabel?.name || currentAgentLabel?.provider || "Agent",
-                badge: currentAgentLabel?.display_badge || "?",
-                tone: 0,
+                badge: externalAgentInitial({
+                  provider: currentAgentLabel?.provider || "external",
+                  display_badge: currentAgentLabel?.display_badge,
+                }),
+                tone: externalAgentTone(currentAgentLabel?.provider || "external"),
+                external: true,
               }}
               state={buildAgentTurnState(turn.messages, busy && idx === activeAgentTurnIdx)}
               isStreaming={busy && idx === activeAgentTurnIdx}

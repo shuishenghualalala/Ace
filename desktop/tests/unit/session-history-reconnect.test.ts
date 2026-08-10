@@ -1,17 +1,65 @@
 /**
  * @vitest-environment happy-dom
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
-import { __resetAllStoresForTest, messageStore } from '../../src/ui/stores/stores';
+import { createSessionHistoryView } from '../../src/ui/features/session-history-view';
+import {
+  __resetAllStoresForTest,
+  configStore,
+  messageStore,
+  sessionStore,
+} from '../../src/ui/stores/stores';
 import { ensureSessionBook, patchBook, setBusy, setActiveSessionId } from '../../src/ui/state';
 
 beforeEach(() => {
   __resetAllStoresForTest();
+  document.body.innerHTML = '';
   setActiveSessionId('sid-1');
 });
 
 describe('shouldSkipHistoryReloadOnReconnect', () => {
+  it('renders each external session with its provider initial and stable pattern', () => {
+    configStore.set({
+      config: { external_agents: { enabled: true } } as never,
+    });
+    sessionStore.set({
+      sessions: [
+        {
+          id: 'sid-kimi', title: 'Kimi session', updatedAt: 2, preview: '', badge: '', workspaceId: 'default',
+          agentLabel: { provider: 'kimi', display_badge: 'K', name: 'Kimi' },
+        },
+        {
+          id: 'sid-codex', title: 'Codex session', updatedAt: 1, preview: '', badge: '', workspaceId: 'default',
+          agentLabel: { provider: 'codex', display_badge: 'X', name: 'Codex' },
+        },
+      ],
+    });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const view = createSessionHistoryView(host, {
+      openSession: vi.fn(),
+      createSession: vi.fn(),
+      createWorkspace: vi.fn(),
+      manageHistory: vi.fn(),
+      openWorkspace: vi.fn(),
+      refreshSessions: async () => undefined,
+      retrySessions: async () => undefined,
+      retryWorkspaces: async () => undefined,
+      getLoadErrors: () => ({ sessions: null, workspaces: null }),
+    });
+
+    const kimi = host.querySelector('[data-session-open="sid-kimi"] [data-session-identity-icon]');
+    const codex = host.querySelector('[data-session-open="sid-codex"] [data-session-identity-icon]');
+    expect(kimi?.textContent).toBe('K');
+    expect(kimi?.classList.contains('agent-provider-tone-0')).toBe(true);
+    expect(codex?.textContent).toBe('X');
+    expect(codex?.classList.contains('agent-provider-tone-1')).toBe(true);
+    expect(host.querySelector('[data-session-identity-icon] image')).toBeNull();
+
+    view.dispose();
+  });
+
   it('returns true when session is busy with an active request', () => {
     ensureSessionBook('sid-1');
     patchBook('sid-1', { activeRequestId: 'req-1', turnSealed: false, acceptingNewRequest: false });

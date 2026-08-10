@@ -1205,6 +1205,7 @@ function agentHubState(): AgentHubState {
       id: agent.id,
       name: agent.name || '未命名智能体',
       provider: providerLabel(agent.provider),
+      ...(agent.display_badge ? { displayBadge: agent.display_badge } : {}),
       detail: [
         agent.model || '默认模型',
         agent.status || 'ready',

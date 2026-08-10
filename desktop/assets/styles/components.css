@@ -14,6 +14,47 @@
   border: 0;
 }
 
+/* Provider-specific pixel palette: same provider keeps the same pattern everywhere. */
+.agent-provider-tone-0,
+.agent-provider-tone-1,
+.agent-provider-tone-2,
+.agent-provider-tone-3,
+.agent-provider-tone-4,
+.agent-provider-tone-5 {
+  --mw-agent-fill: var(--mw-bg-surface);
+  --mw-agent-ink: color-mix(in srgb, var(--mw-text-primary) 10%, transparent);
+  --mw-agent-pattern-size: 8px 8px;
+}
+.agent-provider-tone-0 {
+  /* Kimi: quiet diagonal pixel stripe. */
+  --mw-agent-pattern: linear-gradient(135deg, transparent 0 40%, var(--mw-agent-ink) 40% 56%, transparent 56% 100%);
+  --mw-agent-pattern-size: 10px 10px;
+}
+.agent-provider-tone-1 {
+  /* Codex: two-by-two checker. */
+  --mw-agent-pattern: conic-gradient(var(--mw-agent-ink) 0 25%, transparent 0 50%, var(--mw-agent-ink) 0 75%, transparent 0);
+}
+.agent-provider-tone-2 {
+  /* Hermes: restrained vertical bars. */
+  --mw-agent-pattern: repeating-linear-gradient(90deg, var(--mw-agent-ink) 0 1px, transparent 1px 4px);
+  --mw-agent-pattern-size: 8px 8px;
+}
+.agent-provider-tone-3 {
+  /* Claude: restrained horizontal bars. */
+  --mw-agent-pattern: repeating-linear-gradient(0deg, var(--mw-agent-ink) 0 1px, transparent 1px 4px);
+  --mw-agent-pattern-size: 8px 8px;
+}
+.agent-provider-tone-4 {
+  /* Gemini: paired pixel dots. */
+  --mw-agent-pattern: radial-gradient(circle at 25% 25%, var(--mw-agent-ink) 0 1px, transparent 1.1px), radial-gradient(circle at 75% 75%, var(--mw-agent-ink) 0 1px, transparent 1.1px);
+  --mw-agent-pattern-size: 10px 10px;
+}
+.agent-provider-tone-5 {
+  /* Sites/other slot: repeating compact plus. */
+  --mw-agent-pattern: linear-gradient(90deg, transparent 0 38%, var(--mw-agent-ink) 38% 62%, transparent 62%), linear-gradient(0deg, transparent 0 38%, var(--mw-agent-ink) 38% 62%, transparent 62%);
+  --mw-agent-pattern-size: 10px 10px;
+}
+
 .mw-identity {
   --mw-identity-color: var(--mw-identity-blue);
   --mw-identity-surface: var(--mw-identity-blue-bg);
@@ -114,12 +155,45 @@
   bottom: 1px;
   left: 1px;
   z-index: 2;
+  color: var(--mw-bg-surface);
+  border-color: var(--mw-text-primary);
+  background:
+    linear-gradient(var(--mw-bg-surface) 0 0) 2px 3px / 1px 3px no-repeat,
+    linear-gradient(var(--mw-bg-surface) 0 0) 7px 3px / 1px 3px no-repeat,
+    var(--mw-text-primary);
 }
 
 .session__team-logo i:last-child {
   top: 1px;
   right: 1px;
-  color: var(--mw-text-muted);
+  color: var(--mw-text-primary);
+  border-color: var(--mw-text-primary);
+  background:
+    linear-gradient(var(--mw-text-primary) 0 0) 2px 3px / 1px 3px no-repeat,
+    linear-gradient(var(--mw-text-primary) 0 0) 7px 3px / 1px 3px no-repeat,
+    var(--mw-bg-surface);
+}
+
+.session__external-agent-icon {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+  border: 1px solid var(--mw-border-strong);
+  border-radius: var(--mw-radius-1);
+  background-color: var(--mw-agent-fill, var(--mw-bg-surface));
+  background-image: var(--mw-agent-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--mw-agent-pattern-size, 8px 8px);
+  color: var(--mw-text-primary);
+  font-family: var(--mw-font-mono);
+  font-size: var(--mw-type-caption-size);
+  font-weight: 800;
+  line-height: 1;
+  image-rendering: pixelated;
+  box-shadow: inset -1px -1px color-mix(in srgb, var(--mw-text-primary) 10%, transparent);
 }
 
 .mw-button {

@@ -49,6 +49,13 @@ describe('shared chat chrome styles', () => {
     );
     expect(messageTrack).toContain('padding: 0 var(--mw-space-4)');
   });
+
+  it('keeps assistant turns and user bubbles symmetrically inset', () => {
+    const assistantTurn = ruleBody(webMessagesCss, '.chat-messages.web-flow .msg.msg--agent-turn');
+    const userTurn = ruleBody(webMessagesCss, '.chat-messages.web-flow .msg.user');
+    expect(assistantTurn).toContain('padding-left: var(--mw-space-4)');
+    expect(userTurn).toContain('padding-right: var(--mw-space-4)');
+  });
 });
 
 describe('security center scroll contract', () => {

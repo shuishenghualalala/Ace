@@ -57,7 +57,6 @@ describe('sites page annotation handoff', () => {
     expect(composerContext).toContain('设计一个 App');
     expect(shell).not.toContain('chat-sites-mode__logo" aria-hidden="true"><i>');
     expect(sessionHistory).toContain("if (provider === 'sites') return 'icon-inspiration';");
-    expect(chatController).toContain("icon: 'icon-inspiration'");
     expect(chatController).toContain('|| isInspirationSession');
   });
 

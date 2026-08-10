@@ -9,7 +9,7 @@ if (process.platform === 'win32') {
     process.stderr.setDefaultEncoding('utf8' as BufferEncoding);
   } catch { /* default encoding best-effort */ }
 }
-import { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage, nativeTheme, protocol } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, nativeTheme, protocol } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -51,6 +51,7 @@ import type {
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
   UpdateStateSnapshot,
+  TrayStatus,
 } from '../shared/types';
 import {
   isStrictSecurityEnabled,
@@ -104,6 +105,7 @@ import {
 } from '../shared/constants';
 import { listOpenWithApplications, openFileWithApplication } from './open-with-service';
 import { handleUninstall, setUninstallDeps } from './uninstall';
+import { isTrayStatus, TrayService } from './tray-service';
 import { currentAppVersion, currentAppVersionLabel } from './app-version';
 import {
   configureUpdateController,
@@ -175,7 +177,7 @@ let browserHostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let browserHostConnectionGeneration = 0;
 let browserHostConnectPending = false;
 let browserHostDisposePromise: Promise<void> | null = null;
-let tray: Tray | null = null;
+let trayService: TrayService | null = null;
 
 // Renderer readiness reveal-gate.
 //
@@ -827,19 +829,6 @@ function resolveAppIcon(): Electron.NativeImage {
   return image.isEmpty() ? nativeImage.createEmpty() : image;
 }
 
-function resolveTrayIcon(): Electron.NativeImage {
-  const image = resolveAppIcon();
-  if (image.isEmpty()) return nativeImage.createEmpty();
-
-  // macOS 菜单栏：图标需缩放到约 22x22 逻辑像素（@2x 44），
-  // 并标记为 template image 以自动适配明暗模式。
-  // 若不缩放，128x128 源图会以原始尺寸渲染，远大于其他菜单栏图标。
-  if (process.platform === 'darwin') {
-    return image.resize({ width: 22, height: 22 });
-  }
-  return image;
-}
-
 function revealMainWindowIfReady(): void {
   if (!mainWindow || !rendererInitialStateReady || !nativeWindowReady || !windowShowRequested) return;
   mainWindow.setSkipTaskbar(false);
@@ -918,31 +907,24 @@ function shouldPreventClose(): boolean {
 }
 
 function createTray(): void {
-  if (tray) return;
-  tray = new Tray(resolveTrayIcon());
-  tray.setToolTip('Crew');
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      {
-        label: '打开 Crew',
-        click: () => showMainWindow(),
-      },
-      {
-        label: '卸载',
-        click: () => handleUninstall(),
-      },
-      { type: 'separator' },
-      {
-        label: '退出',
-        click: () => {
-          isQuitting = true;
-          app.quit();
-        },
-      },
-    ]),
-  );
-  tray.on('double-click', () => showMainWindow());
-  tray.on('click', () => showMainWindow());
+  if (trayService) return;
+  trayService = new TrayService({
+    assetsDir: path.join(__dirname, '../assets'),
+    onActivate: () => {
+      showMainWindow();
+      mainWindow?.webContents.send('tray:activated');
+    },
+    onUninstall: () => { void handleUninstall(); },
+    onQuit: () => {
+      isQuitting = true;
+      app.quit();
+    },
+  });
+  trayService.create();
+}
+
+function setTrayStatus(status: TrayStatus): void {
+  trayService?.setStatus(status);
 }
 
 function pushSessionState(): void {
@@ -2792,6 +2774,13 @@ function registerIpc() {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: app:set-close-behavior expected tray|quit|ask`);
     }
     return saveDesktopPrefs({ closeBehavior: behavior });
+  });
+  trustedHandle('tray:set-status', (_e, status: unknown) => {
+    if (!isTrayStatus(status)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: tray:set-status expected a known tray status`);
+    }
+    setTrayStatus(status);
+    return { ok: true };
   });
   trustedHandle('app:get-system-locale', () => {
     return app.getLocale();

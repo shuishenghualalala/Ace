@@ -26,11 +26,16 @@ describe('syncSessionLiveFromBackend', () => {
     const slot = document.getElementById('chat-running-intro')!;
     const intro = slot.firstElementChild;
     const logo = slot.querySelector('.running-intro__logo');
+    const logoImage = logo?.querySelector<HTMLImageElement>('.running-intro__agent-logo');
+
+    expect(logoImage?.getAttribute('src')).toBe('./crew-jump-agent.png');
+    expect(logo?.querySelector('svg')).toBeNull();
 
     syncRunningIntroSlot();
 
     expect(slot.firstElementChild).toBe(intro);
     expect(slot.querySelector('.running-intro__logo')).toBe(logo);
+    expect(slot.querySelector('.running-intro__agent-logo')).toBe(logoImage);
   });
 
   it('live=running → busy true + turnSealed false', () => {

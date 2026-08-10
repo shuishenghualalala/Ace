@@ -1,6 +1,7 @@
 import { createBadge, createButton, createTabs } from '../components/controls';
 import { createIcon } from '../components/icon';
 import { createHubTemplate } from '../layouts/page-templates';
+import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
 
 export type AgentHubTab = 'mine' | 'runtime' | 'create-agent' | 'create-team';
 
@@ -8,6 +9,7 @@ export interface AgentHubAgent {
   id: string;
   name: string;
   provider: string;
+  displayBadge?: string;
   detail: string;
   tags: string[];
   available: boolean;
@@ -72,6 +74,16 @@ function textElement(tag: string, className: string, text: string): HTMLElement 
   element.className = className;
   element.textContent = text;
   return element;
+}
+
+function createExternalAgentAvatar(provider: string, displayBadge?: string): HTMLElement {
+  const avatar = document.createElement('span');
+  const initial = document.createElement('span');
+  avatar.className = `mw-agent-card__external-avatar agent-provider-tone-${externalAgentTone(provider)}`;
+  avatar.setAttribute('aria-hidden', 'true');
+  initial.textContent = externalAgentInitial(provider, displayBadge);
+  avatar.append(initial);
+  return avatar;
 }
 
 function action(
@@ -181,7 +193,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
         action('派活', 'useAgent', agent.id, (id) => options.onUseAgent?.(id), 'primary', !agent.available),
         action('删除', 'deleteAgent', agent.id, (id) => options.onDeleteAgent?.(id), 'danger'),
       );
-      card.append(createIcon('icon-agent', { size: 40 }), copy, cardActions);
+      card.append(createExternalAgentAvatar(agent.provider, agent.displayBadge), copy, cardActions);
       agentGrid.append(card);
     }
     if (!current.agents.length) agentGrid.append(textElement('p', 'mw-hub-state', '阵容还是空的'));
@@ -266,7 +278,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
         ));
       }
       card.append(
-        createIcon('icon-agent', { size: 32 }),
+        createIcon('icon-external-agent', { size: 32 }),
         copy,
         availability,
         cardActions,

@@ -71,6 +71,41 @@
   color: var(--mw-symbol-line);
 }
 
+.mw-agent-card__external-avatar {
+  display: inline-grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  place-items: center;
+  border: 2px solid var(--mw-border-strong);
+  border-radius: var(--mw-radius-2);
+  background-color: var(--mw-agent-fill, var(--mw-bg-surface));
+  background-image: var(--mw-agent-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--mw-agent-pattern-size, 8px 8px);
+  color: var(--mw-text-primary);
+  font-family: var(--mw-font-mono);
+  font-size: var(--mw-type-body-size);
+  font-weight: 800;
+  line-height: 1;
+  image-rendering: pixelated;
+  box-shadow: inset -3px -3px color-mix(in srgb, var(--mw-text-primary) 10%, transparent);
+}
+
+.mw-agent-card__external-avatar > span {
+  position: static;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  box-shadow: none;
+}
+
 .mw-agent-card__copy {
   display: grid;
   min-width: 0;
