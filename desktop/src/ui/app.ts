@@ -76,6 +76,7 @@ import { initBackendStatusGuard, isBackendConnected, isBackendInitBypassActive, 
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
 import { bindInspectorUi, openInspectorToTab, refreshInspector, setPlanBoardActions } from './features/inspector';
 import { bindAttachments } from './features/attachments';
+import { bindTooltips } from './components/tooltip';
 import { queryPrimaryComposer } from './features/composer-scope';
 import {
   copyImageToClipboard,
@@ -460,6 +461,7 @@ function bindGlobalEvents(): () => void {
 
   const disposeAttachments = bindAttachments();
   const disposeComposerMention = bindComposerMention();
+  bindTooltips();
   bindModelPicker();
   const disposeComposerToolbar = bindComposerToolbar();
   bindComposerContextRing();

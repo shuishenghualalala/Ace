@@ -208,6 +208,7 @@
   --mw-z-busy: 70;
   --mw-z-toast: 80;
   --mw-z-context-menu: 90;
+  --mw-z-tooltip: 100;
   --mw-z-chrome-top: 100;
 }
 

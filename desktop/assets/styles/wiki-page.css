@@ -101,6 +101,9 @@
 }
 
 .wiki-view-tabs .hub-segment__item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
   height: 28px;
   padding: 0 var(--mw-space-2);
