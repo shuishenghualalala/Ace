@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from crew.core.interfaces import SessionStore
 from crew.core.types import Message, ToolCall
@@ -628,6 +629,56 @@ class SQLiteSessionStore(SessionStore):
                 """,
                 (session_id, owner_account_id, payload, created_at, now),
             )
+        self._writer.execute(_write)
+        return self.get_agent_config(session_id, owner_account_id=owner_account_id) or {}
+
+    def update_agent_config(
+        self,
+        session_id: str,
+        updater: Callable[[dict[str, Any]], dict[str, Any]],
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        """Atomically read, transform, and persist one Session AgentConfig."""
+
+        now = self._now_iso()
+
+        def _write(conn):
+            row = conn.execute(
+                """
+                SELECT config_json, created_at
+                FROM session_agent_config
+                WHERE session_id = ? AND owner_account_id = ?
+                """,
+                (session_id, owner_account_id),
+            ).fetchone()
+            try:
+                current = json.loads(str(row[0] or "{}")) if row is not None else {}
+            except json.JSONDecodeError:
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            updated = updater(dict(current))
+            if not isinstance(updated, dict):
+                raise TypeError("AgentConfig updater 必须返回 dict")
+            if updated == current:
+                return current
+            created_at = str(row[1] or now) if row is not None else now
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO session_agent_config (
+                    session_id, owner_account_id, config_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    owner_account_id,
+                    json.dumps(updated, ensure_ascii=False),
+                    created_at,
+                    now,
+                ),
+            )
+            return updated
+
         self._writer.execute(_write)
         return self.get_agent_config(session_id, owner_account_id=owner_account_id) or {}
 

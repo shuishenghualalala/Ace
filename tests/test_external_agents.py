@@ -1437,7 +1437,7 @@ def test_external_agent_store_is_additive(tmp_path):
     assert store.list_runtimes()[0]["id"] == "kimi_test"
     assert store.agent_with_runtime(agent["id"])[1]["executable_path"] == "/bin/kimi"
     assert agent["profile"]["agent_id"] == agent["id"]
-    assert agent["profile"]["version"] == 3
+    assert agent["profile"]["version"] == 4
     assert "backend" in agent["profile"]["capabilities"]
     assert "research" in agent["profile"]["capabilities"]
     backend = agent["profile"]["capabilities"]["backend"]
@@ -1519,7 +1519,7 @@ def test_external_agent_profile_v2_uses_generic_capability_evidence(tmp_path):
     )
 
     profile = agent["profile"]
-    assert profile["version"] == 3
+    assert profile["version"] == 4
     assert profile["capabilities"]["information_retrieval"]["score"] >= 0.7
     assert profile["capabilities"]["research"]["score"] >= 0.7
     assert profile["capabilities"]["analysis"]["score"] >= 0.7
@@ -1555,13 +1555,25 @@ def test_agent_profile_tracks_selected_runtime_model_binding(tmp_path):
         model="kimi/default",
     )
 
-    assert agent["profile"]["version"] == 3
-    assert agent["profile"]["model"] == {
+    assert agent["profile"]["version"] == 4
+    profile_model = agent["profile"]["model"]
+    assert {
+        key: profile_model[key]
+        for key in ("id", "label", "binding_status", "capabilities", "thinking_levels")
+    } == {
         "id": "kimi/default",
         "label": "Kimi Default",
         "binding_status": "valid",
         "capabilities": ["text", "tools"],
         "thinking_levels": [],
+    }
+    assert profile_model["runtime_id"] == runtime["id"]
+    assert profile_model["fingerprint"].startswith("sha256:")
+    assert profile_model["execution_features"] == {
+        "text": True,
+        "tools": True,
+        "images": False,
+        "context_window": None,
     }
 
     store.upsert_runtime({
@@ -1583,6 +1595,232 @@ def test_agent_profile_tracks_selected_runtime_model_binding(tmp_path):
         },
     })
     assert store.get_agent(agent["id"])["profile"]["model"]["binding_status"] == "unverified"
+
+
+def test_agent_profile_v4_reuses_lazy_model_overlays(tmp_path):
+    db_path = tmp_path / "crew.db"
+    store = ExternalAgentStore(str(db_path))
+    runtime = store.upsert_runtime({
+        "id": "overlay-runtime",
+        "provider": "custom",
+        "name": "Overlay Runtime",
+        "executable_path": "/bin/sh",
+        "protocol": "cli",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-b",
+            "models": [
+                {"id": "model-a", "label": "Model A", "capabilities": ["text", "analysis"]},
+                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text", "tools"]},
+            ],
+        },
+    })
+    agent = store.create_agent(name="Overlay Agent", runtime_id=runtime["id"], model="model-b")
+
+    def stored_envelope():
+        with sqlite3.connect(db_path) as conn:
+            raw = conn.execute(
+                "SELECT profile_json FROM external_agent WHERE id = ?",
+                (agent["id"],),
+            ).fetchone()[0]
+        return json.loads(raw)
+
+    initial = stored_envelope()
+    assert initial["version"] == 4
+    assert set(initial["model_overlays"]) == {"model-b"}
+    base_fingerprint = initial["base"]["source_fingerprint"]
+
+    switched = store.resolve_agent_profile(agent["id"], "model-a")
+    after_a = stored_envelope()
+    assert switched["model"]["id"] == "model-a"
+    assert set(after_a["model_overlays"]) == {"model-a", "model-b"}
+    assert after_a["base"]["source_fingerprint"] == base_fingerprint
+
+    restored = store.resolve_agent_profile(agent["id"], "model-b")
+    after_b = stored_envelope()
+    assert restored["model"]["id"] == "model-b"
+    assert set(after_b["model_overlays"]) == {"model-a", "model-b"}
+    assert after_b["model_overlays"]["model-b"] == after_a["model_overlays"]["model-b"]
+
+
+def test_agent_profile_materializes_runtime_default_model_for_new_agent(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "default-model-runtime",
+        "provider": "custom",
+        "name": "Default Model Runtime",
+        "executable_path": "/bin/sh",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-default",
+            "models": [{"id": "model-default", "label": "Model Default", "default": True}],
+        },
+    })
+
+    agent = store.create_agent(name="Default Agent", runtime_id=runtime["id"])
+
+    assert agent["model"] == "model-default"
+    assert agent["profile"]["model"]["id"] == "model-default"
+
+
+def test_agent_profile_observations_are_scoped_to_frozen_model(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "scoped-observation-runtime",
+        "provider": "custom",
+        "name": "Scoped Observation Runtime",
+        "executable_path": "/bin/sh",
+        "protocol": "cli",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-b",
+            "models": [
+                {"id": "model-a", "label": "Model A", "capabilities": ["text"]},
+                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text"]},
+            ],
+        },
+    })
+    agent = store.create_agent(
+        owner_account_id="owner-a",
+        name="Scoped Agent",
+        runtime_id=runtime["id"],
+        model="model-b",
+    )
+    baseline_a = store.resolve_agent_profile(
+        agent["id"], "model-a", owner_account_id="owner-a",
+    )["capabilities"]["backend"]["score"]
+    baseline_b = store.resolve_agent_profile(
+        agent["id"], "model-b", owner_account_id="owner-a",
+    )["capabilities"]["backend"]["score"]
+
+    for index in range(3):
+        store.record_agent_profile_observation(
+            owner_account_id="owner-a",
+            external_agent_id=agent["id"],
+            source_run_id=f"run-{index}",
+            source_node_id=f"node-{index}",
+            source_attempt_id=f"attempt-{index}",
+            capabilities=["backend"],
+            assessment_source="leader_review",
+            outcome="success",
+            quality_weight=1.0,
+            runtime_id=runtime["id"],
+            model_id="model-a",
+            model_binding_source="execution_snapshot",
+        )
+
+    profile_a = store.resolve_agent_profile(
+        agent["id"], "model-a", owner_account_id="owner-a",
+    )
+    profile_b = store.resolve_agent_profile(
+        agent["id"], "model-b", owner_account_id="owner-a",
+    )
+    observations = store.list_agent_profile_observations(agent["id"], owner_account_id="owner-a")
+
+    assert profile_a["capabilities"]["backend"]["score"] > baseline_a
+    assert profile_b["capabilities"]["backend"]["score"] == baseline_b
+    assert {item["model_id"] for item in observations} == {"model-a"}
+    assert {item["model_binding_source"] for item in observations} == {"execution_snapshot"}
+    assert all(item["model_fingerprint"].startswith("sha256:") for item in observations)
+
+
+def test_agent_profile_model_fingerprint_refreshes_only_affected_overlay(tmp_path):
+    db_path = tmp_path / "crew.db"
+    store = ExternalAgentStore(str(db_path))
+    runtime_payload = {
+        "id": "fingerprint-runtime",
+        "provider": "custom",
+        "name": "Fingerprint Runtime",
+        "executable_path": "/bin/sh",
+        "protocol": "cli",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-b",
+            "models": [
+                {"id": "model-a", "label": "Model A", "capabilities": ["text", "analysis"]},
+                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text"]},
+            ],
+        },
+    }
+    runtime = store.upsert_runtime(runtime_payload)
+    agent = store.create_agent(name="Fingerprint Agent", runtime_id=runtime["id"], model="model-b")
+    store.resolve_agent_profile(agent["id"], "model-a")
+
+    def overlays():
+        with sqlite3.connect(db_path) as conn:
+            raw = conn.execute(
+                "SELECT profile_json FROM external_agent WHERE id = ?",
+                (agent["id"],),
+            ).fetchone()[0]
+        return json.loads(raw)["model_overlays"]
+
+    before = overlays()
+    store.upsert_runtime({
+        **runtime_payload,
+        "metadata": {
+            **runtime_payload["metadata"],
+            "models": [
+                {"id": "model-a", "label": "Model A 新标签", "capabilities": ["text", "analysis", "tools"]},
+                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text"]},
+            ],
+        },
+    })
+    changed = overlays()
+    assert changed["model-a"]["model_fingerprint"] != before["model-a"]["model_fingerprint"]
+    assert changed["model-b"]["model_fingerprint"] == before["model-b"]["model_fingerprint"]
+
+    store.upsert_runtime({
+        **runtime_payload,
+        "metadata": {
+            **runtime_payload["metadata"],
+            "models": [
+                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text"]},
+            ],
+        },
+    })
+    removed = overlays()
+    assert set(removed) == {"model-a", "model-b"}
+    assert removed["model-a"]["model"]["label"] == "Model A 新标签"
+    assert removed["model-a"]["model"]["binding_status"] == "missing"
+    assert removed["model-a"]["model_evidence"] == changed["model-a"]["model_evidence"]
+
+
+def test_agent_profile_v4_keeps_legacy_unattributed_observation_audit_only(tmp_path):
+    db_path = tmp_path / "crew.db"
+    store = ExternalAgentStore(str(db_path))
+    runtime = store.upsert_runtime({
+        "id": "legacy-observation-runtime",
+        "provider": "custom",
+        "name": "Legacy Observation Runtime",
+        "executable_path": "/bin/sh",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-b",
+            "models": [{"id": "model-b", "label": "Model B", "default": True}],
+        },
+    })
+    agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"], model="model-b")
+    baseline = agent["profile"]["capabilities"]["backend"]["score"]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO external_agent_profile_observation (
+              id, owner_account_id, external_agent_id,
+              source_run_id, source_node_id, source_attempt_id,
+              capabilities_json, assessment_source, outcome, quality_weight,
+              failure_kind, observed_at, created_at, model_binding_source
+            ) VALUES (?, '', ?, 'legacy-run', 'legacy-node', 'legacy-attempt',
+                      '[\"backend\"]', 'legacy', 'success', 1.0, '',
+                      '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'legacy_unknown')
+            """,
+            ("legacy-observation", agent["id"]),
+        )
+
+    refreshed = store.refresh_agent_profile(agent["id"])
+    evidence = refreshed["profile"]["capabilities"]["backend"]["evidence"]
+    assert refreshed["profile"]["capabilities"]["backend"]["score"] == baseline
+    assert not any(item["source"] == "execution_observation" for item in evidence)
+    assert store.list_agent_profile_observations(agent["id"])[0]["model_binding_source"] == "legacy_unknown"
 
 
 def test_agent_profile_observation_is_idempotent_and_thresholded(tmp_path):
@@ -1657,7 +1895,7 @@ def test_agent_profile_observation_is_idempotent_and_thresholded(tmp_path):
     execution_evidence = [item for item in backend["evidence"] if item["source"] == "execution_observation"]
     assert backend["score"] > baseline
     assert execution_evidence[0]["value"].startswith("samples=3; success=3")
-    assert settled["profile_version"] == settled["profile"]["version"] == 3
+    assert settled["profile_version"] == settled["profile"]["version"] == 4
 
 
 def test_agent_profile_observation_rolls_back_when_profile_refresh_fails(tmp_path, monkeypatch):
@@ -1674,7 +1912,7 @@ def test_agent_profile_observation_rolls_back_when_profile_refresh_fails(tmp_pat
     def fail_profile_refresh(*args, **kwargs):
         raise RuntimeError("profile refresh failed")
 
-    monkeypatch.setattr("crew.team.formation.build_agent_profile", fail_profile_refresh)
+    monkeypatch.setattr("crew.agent.external.store.build_agent_profile_envelope", fail_profile_refresh)
     with pytest.raises(RuntimeError, match="profile refresh failed"):
         store.record_agent_profile_observation(
             external_agent_id=agent["id"],
@@ -2115,10 +2353,17 @@ def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_pa
         )
 
     refreshed = ExternalAgentStore(str(db)).get_agent(agent["id"])
+    with sqlite3.connect(db) as conn:
+        stored_envelope = json.loads(conn.execute(
+            "SELECT profile_json FROM external_agent WHERE id = ?",
+            (agent["id"],),
+        ).fetchone()[0])
 
-    assert refreshed["profile_version"] == 3
-    assert refreshed["profile"]["version"] == 3
+    assert refreshed["profile_version"] == 4
+    assert refreshed["profile"]["version"] == 4
     assert "information_retrieval" in refreshed["profile"]["capabilities"]
+    assert stored_envelope["version"] == 4
+    assert set(stored_envelope) >= {"base", "model_overlays"}
 
 
 def test_external_team_persists_independent_formation_plan(tmp_path):

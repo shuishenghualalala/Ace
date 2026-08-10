@@ -452,6 +452,9 @@ class CrewApp:
         # 外部 Team 的内置 Leader/规划器会跨多个请求复用 Agent，因此 owner 默认
         # Provider 也需由 App 持有并统一关闭；普通一次性生成接口仍走 owner_provider。
         self._owner_team_providers: dict[str, LLMProvider] = {}
+        # Team 内置成员的显式模型绑定。key 含 owner 与 profile id，避免不同
+        # 账号或不同模型错误复用同一个持久连接。
+        self._owner_team_member_model_providers: dict[tuple[str, str], LLMProvider] = {}
         # 默认模型切换时，已有 Team/Dynamic Kanban 后台任务可能仍持有旧客户端。
         # 保留强引用到 shutdown，避免后台化后已脱离 Dispatcher 的任务被提前断流。
         self._stale_owner_team_providers: dict[int, LLMProvider] = {}
@@ -1558,9 +1561,11 @@ class CrewApp:
         providers = list({
             **self._stale_owner_team_providers,
             **{id(provider): provider for provider in self._owner_team_providers.values()},
+            **{id(provider): provider for provider in self._owner_team_member_model_providers.values()},
             **{id(provider): provider for provider in self._auxiliary_providers},
         }.values())
         self._owner_team_providers.clear()
+        self._owner_team_member_model_providers.clear()
         self._stale_owner_team_providers.clear()
         self._auxiliary_providers.clear()
         for provider in providers:
@@ -1799,12 +1804,38 @@ class CrewApp:
         self._owner_team_providers[owner] = provider
         return provider
 
+    def owner_team_member_model_provider(
+        self,
+        owner_account_id: str = "",
+        model_profile_id: str = "",
+    ) -> LLMProvider:
+        """Return the App-owned Provider for one explicitly bound Team member."""
+        owner = str(owner_account_id or "").strip()
+        model_id = str(model_profile_id or "").strip()
+        if not model_id or model_id == self.config.owner_default_model_id(owner):
+            return self.owner_team_provider(owner)
+        profiles = self.owner_model_profiles(owner) if owner else self.config.model_profiles
+        profile = profiles.get(model_id)
+        if profile is None or not profile.loaded or not profile.has_key:
+            return self.owner_team_provider(owner)
+        key = (owner, model_id)
+        cached = self._owner_team_member_model_providers.get(key)
+        if cached is not None:
+            return cached
+        provider = build_provider_for_profile(profile, self.config.stream_read_timeout)
+        self._owner_team_member_model_providers[key] = provider
+        return provider
+
     def _invalidate_owner_team_provider(self, owner_account_id: str = "") -> None:
         owner = str(owner_account_id or "").strip()
         if owner:
             provider = self._owner_team_providers.pop(owner, None)
             if provider is not None and provider is not self.provider:
                 self._stale_owner_team_providers[id(provider)] = provider
+            for key in [key for key in self._owner_team_member_model_providers if key[0] == owner]:
+                provider = self._owner_team_member_model_providers.pop(key)
+                if provider is not self.provider:
+                    self._stale_owner_team_providers[id(provider)] = provider
             drop = getattr(self.team, "drop_owner_teams", None)
             if callable(drop):
                 drop(owner)
@@ -1813,8 +1844,15 @@ class CrewApp:
                 drop_kanban(owner)
             return
 
-        providers = list({id(provider): provider for provider in self._owner_team_providers.values()}.values())
+        providers = list({
+            id(provider): provider
+            for provider in [
+                *self._owner_team_providers.values(),
+                *self._owner_team_member_model_providers.values(),
+            ]
+        }.values())
         self._owner_team_providers.clear()
+        self._owner_team_member_model_providers.clear()
         for provider in providers:
             if provider is not self.provider:
                 self._stale_owner_team_providers[id(provider)] = provider
@@ -2052,8 +2090,9 @@ class CrewApp:
             profiles[model_id] = profile
             cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
             self.agents.drop_owner(owner)
-            if active_model_id == model_id:
-                self._invalidate_owner_team_provider(owner)
+            # Team 内置成员可以显式绑定非默认 profile；更新任意 profile
+            # 都要淘汰对应 Team/Provider 缓存，下一轮才会使用新配置。
+            self._invalidate_owner_team_provider(owner)
         else:
             profile = cfg.update_model(model_id, payload)
             cfg.persist_model_profiles()
@@ -2141,6 +2180,7 @@ class CrewApp:
                     self._schedule_provider_retirement(old_provider)
         elif owner:
             cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
+            self._invalidate_owner_team_provider(owner)
         else:
             cfg.persist_model_profiles()
             self._invalidate_owner_team_provider()
@@ -2831,6 +2871,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                 kanban_store=dk_store,
                 drain_subagent_notifications=app.pop_subagent_notifications,
                 provider_for_owner=app.owner_team_provider,
+                provider_for_member_model=app.owner_team_member_model_provider,
             )
         )
 

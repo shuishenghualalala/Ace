@@ -51,6 +51,7 @@ from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.state.home import safe_path_segment, task_workspace_path
 from crew.state.logging import get_logger
+from crew.state.team_member_model import materialize_team_member_model_bindings
 from crew.team import flow_builder
 from crew.team import result_presenter as team_presenter
 from crew.team.bus import TeamBus, register_team_bus_tools
@@ -197,11 +198,15 @@ class InProcessTeamManager(TeamManager):
         kanban_store: Any | None = None,
         drain_subagent_notifications: Callable[[str, str], list] | None = None,
         provider_for_owner: Callable[[str], LLMProvider] | None = None,
+        provider_for_member_model: Callable[[str, str], LLMProvider] | None = None,
     ) -> None:
         self.provider = provider
         # TeamManager 是多 owner 共享实例。规划器和内置 Leader 不能固定借用
         # 进程级 provider，否则远程登录用户在“设置 → 模型”选择的默认模型不会生效。
         self.provider_for_owner = provider_for_owner
+        # 内置 Team 成员可绑定不同于 owner 默认模型的 profile。Provider 由 App
+        # 缓存并负责关闭；此处只按成员快照选择，绝不在运行中改写已有 Agent。
+        self.provider_for_member_model = provider_for_member_model
         self.base_registry = registry
         self.session_store = session_store
         self.memory = memory
@@ -235,6 +240,20 @@ class InProcessTeamManager(TeamManager):
             if resolved is not None:
                 return resolved
         return self.provider
+
+    def _provider_for_member(
+        self,
+        spec: TeamMemberSpec,
+        owner_account_id: str = "",
+    ) -> LLMProvider:
+        """Resolve the Provider captured by one newly-created built-in member."""
+        model_id = str(spec.model or "").strip()
+        resolver = self.provider_for_member_model
+        if spec.executor == "builtin" and model_id and callable(resolver):
+            resolved = resolver(str(owner_account_id or ""), model_id)
+            if resolved is not None:
+                return resolved
+        return self._provider_for_owner(owner_account_id)
 
     @staticmethod
     def _key(session_id: str, owner_account_id: str = "") -> TeamKey:
@@ -278,6 +297,7 @@ class InProcessTeamManager(TeamManager):
         external_team_id: str,
         *,
         owner_account_id: str = "",
+        model_bindings: dict[str, Any] | None = None,
     ) -> tuple[list[TeamMemberSpec], TeamMemberSpec | None]:
         if not external_team_id or self.external_store is None:
             return [], None
@@ -299,8 +319,10 @@ class InProcessTeamManager(TeamManager):
         formation_version = max(1, int(formation_plan.get("version") or 1)) if formation_plan else 0
         members: list[TeamMemberSpec] = []
         leader_spec: TeamMemberSpec | None = None
+        bindings = model_bindings if isinstance(model_bindings, dict) else {}
         for row in external_team.get("members") or []:
             agent_id = str(row.get("agent_id") or "").strip()
+            binding = bindings.get(agent_id) if isinstance(bindings.get(agent_id), dict) else {}
             formation_member = formation_members.get(agent_id, {})
             responsibility = (
                 formation_member.get("responsibility")
@@ -315,6 +337,7 @@ class InProcessTeamManager(TeamManager):
                 "role": str(row.get("role") or ""),
                 "executor": "builtin" if is_builtin else "external",
                 "external_agent_id": agent_id,
+                "model": str(binding.get("model_id") or ""),
                 "capabilities": row.get("capabilities") or [],
                 "metadata": {
                     "role_key": row.get("role_key") or "",
@@ -395,6 +418,8 @@ class InProcessTeamManager(TeamManager):
         config: dict[str, Any] = dict(spec.metadata.get(spec.executor) or {})
         if spec.external_agent_id:
             config["external_agent_id"] = spec.external_agent_id
+        if spec.model:
+            config["model"] = spec.model
         if self.external_store is not None:
             config["external_store"] = self.external_store
         if self.interaction_bridge is not None:
@@ -425,7 +450,7 @@ class InProcessTeamManager(TeamManager):
             base_tools,
             exact={"wiki.read", "wiki.manage"},
         )
-        provider = self._provider_for_owner(owner_account_id)
+        provider = self._provider_for_member(spec, owner_account_id)
         executor_kind = "external" if spec.executor in {"acp", "cli", "external"} else spec.executor
         executor = create_executor(
             executor_kind,
@@ -536,6 +561,45 @@ class InProcessTeamManager(TeamManager):
                 for (owner, sid), children in self._active_children.items()
                 if not owner_account_id or owner == owner_account_id
             }
+
+    def team_member_switch_state(
+        self,
+        session_id: str,
+        member_id: str,
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        """Return one member's execution state across a visible Team session.
+
+        A Team turn can create ``::turn::`` sidechain sessions.  Model
+        switching is scoped to the selected member, so an active sibling must
+        not block it; an active invocation of this member must.  The running
+        coroutine already holds its Agent instance, which makes that
+        invocation an immutable model snapshot while a later turn can rebuild
+        the Team from the new binding.
+        """
+        visible_session_id = _visible_session_id(str(session_id or ""))
+        target_member_id = str(member_id or "").strip()
+        if not visible_session_id or not target_member_id:
+            return {"status": "idle", "active_task_count": 0, "active_children": []}
+        prefix = f"{visible_session_id}::turn::"
+        owner = str(owner_account_id or "")
+        with self._active_lock:
+            active_children = [
+                self._public_child(record)
+                for (record_owner, parent_session_id), children in self._active_children.items()
+                if record_owner == owner
+                and (
+                    parent_session_id == visible_session_id
+                    or parent_session_id.startswith(prefix)
+                )
+                for record in children.values()
+                if str(record.get("member") or "") == target_member_id
+            ]
+        return {
+            "status": "running" if active_children else "idle",
+            "active_task_count": len(active_children),
+            "active_children": active_children,
+        }
 
     def _member_ids_for_session(
         self,
@@ -6599,8 +6663,38 @@ class InProcessTeamManager(TeamManager):
         external_team_id = str(external_team_id or team_cfg.get("external_team_id") or "").strip()
         display_name = str(team_cfg.get("name") or "团队").strip() or "团队"
         leader_spec: TeamMemberSpec | None = None
+        model_bindings: dict[str, Any] = {}
         if external_team_id and self.external_store is not None:
             try:
+                getter = getattr(self.session_store, "get_agent_config", None)
+                stored_config = (
+                    getter(_visible_session_id(session_id), owner_account_id=owner_account_id)
+                    if callable(getter)
+                    else None
+                )
+                stored_team = (
+                    stored_config.get("team")
+                    if isinstance(stored_config, dict) and isinstance(stored_config.get("team"), dict)
+                    else {}
+                )
+                if str(stored_team.get("external_team_id") or "").strip() == external_team_id:
+                    materialized, _ = materialize_team_member_model_bindings(
+                        self.session_store,
+                        self.external_store,
+                        session_id,
+                        owner_account_id=owner_account_id,
+                        builtin_model_id=self.config.owner_default_model_id(owner_account_id),
+                    )
+                    materialized_team = (
+                        materialized.get("team")
+                        if isinstance(materialized.get("team"), dict)
+                        else {}
+                    )
+                    model_bindings = (
+                        materialized_team.get("member_model_bindings")
+                        if isinstance(materialized_team.get("member_model_bindings"), dict)
+                        else {}
+                    )
                 external_team = self.external_store.get_team(
                     external_team_id,
                     owner_account_id=owner_account_id,
@@ -6611,11 +6705,13 @@ class InProcessTeamManager(TeamManager):
                     members, leader_spec = self._external_team_specs(
                         external_team_id,
                         owner_account_id=owner_account_id,
+                        model_bindings=model_bindings,
                     )
                 else:
-                    members, _ = self._external_team_specs(
+                    members, leader_spec = self._external_team_specs(
                         external_team_id,
                         owner_account_id=owner_account_id,
+                        model_bindings=model_bindings,
                     )
             except Exception as exc:  # noqa: BLE001
                 log.warning("读取外部团队失败 external_team_id=%s err=%s", external_team_id, exc)
@@ -7291,6 +7387,25 @@ class InProcessTeamManager(TeamManager):
         with self._active_lock:
             self._active_children.pop(self._key(session_id, owner_account_id), None)
         log.info("[Team] 已销毁团队 session=%s", session_id)
+
+    def drop_session_team(self, session_id: str, owner_account_id: str = "") -> bool:
+        """Evict cached Team runtimes while preserving persisted plan/history.
+
+        In-flight turns retain their local Team/Agent references, so eviction
+        only changes the model snapshot used by later turns.
+        """
+
+        visible_session_id = _visible_session_id(session_id)
+        prefix = f"{visible_session_id}::turn::"
+        keys = [
+            key
+            for key in self._teams
+            if key[0] == str(owner_account_id or "")
+            and (key[1] == visible_session_id or key[1].startswith(prefix))
+        ]
+        for key in keys:
+            self._teams.pop(key, None)
+        return bool(keys)
 
     def clear(self) -> None:
         self._teams.clear()
