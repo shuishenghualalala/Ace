@@ -61,6 +61,8 @@ from crew.agent.external.runtime_adapter import (
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
     build_external_runtime_env,
+    build_external_runtime_home_files,
+    build_external_runtime_network_permissions,
     runtime_adapter_ids,
 )
 from crew.agent.external.store import ExternalAgentStore
@@ -115,6 +117,45 @@ def test_external_runtime_env_inherits_owner_settings_and_blocks_crew_credential
     assert "CREW_INTERNAL_SECRET" not in env
     assert "CREW_ENV_FILE" not in env
     assert "CREW_RUNTIME_SECRET" not in env
+
+
+def test_external_runtime_projects_only_declared_home_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".kimi-code" / "oauth").mkdir(parents=True)
+    (tmp_path / ".kimi-code" / "oauth" / "kimi-code").write_text("token", encoding="utf-8")
+    (tmp_path / "unlisted-secret").write_text("must-not-project", encoding="utf-8")
+
+    projected = build_external_runtime_home_files(
+        (".kimi-code/oauth/kimi-code", "../escape")
+    )
+
+    assert projected == {".kimi-code/oauth/kimi-code": b"token"}
+
+
+def test_external_runtime_network_permissions_come_from_host_declarations():
+    permissions = build_external_runtime_network_permissions({
+        ".runtime/config.toml": b'''\
+base_url = "https://api.example.test/v1"
+backup_url = "https://api.example.test/v2"
+local_url = "http://127.0.0.1:8765/v1"
+insecure_remote = "http://insecure.example.test/v1"
+wildcard = "https://*.example.test/v1"
+''',
+    }, (
+        "https://auth.example.test/oauth/token",
+        "https://api.example.test/duplicate",
+        "http://insecure-declared.example.test",
+        "https://*.invalid.example.test",
+    ))
+
+    assert [
+        (entry.host, entry.port, entry.protocol, entry.allow_private, entry.escalatable)
+        for entry in permissions.network
+    ] == [
+        ("auth.example.test", 443, "https", False, False),
+        ("api.example.test", 443, "https", False, False),
+        ("127.0.0.1", 8765, "http", True, False),
+    ]
 
 
 @pytest.mark.asyncio
@@ -990,6 +1031,33 @@ def test_acp_adapter_accepts_direct_params_and_plain_thinking_text():
     assert event.text == "先检查运行环境。"
 
 
+async def test_acp_reader_translates_native_stream_timeout():
+    class TimeoutTransport:
+        async def read(self):
+            await asyncio.sleep(0)
+            raise asyncio.TimeoutError
+
+        async def write(self, _data):
+            return None
+
+        async def close(self):
+            return None
+
+        async def abort(self):
+            return None
+
+    client = _JsonRpcClient(TimeoutTransport())
+    future = asyncio.get_running_loop().create_future()
+    client.pending[1] = future
+    await client.start()
+    with pytest.raises(AcpAdapterError, match="protocol stream timed out"):
+        await asyncio.wait_for(future, timeout=1)
+    event = await asyncio.wait_for(client.event_queue.get(), timeout=1)
+    assert event.kind == "error"
+    assert "protocol stream timed out" in event.text
+    await client.close()
+
+
 def _fake_hermes(tmp_path):
     script = tmp_path / "hermes"
     script.write_text(
@@ -1064,6 +1132,8 @@ def test_scan_runtime_uses_env_path(
         assert runtime.name == "Codex"
         assert runtime.metadata["descriptor_id"] == "builtin:codex"
         assert runtime.metadata["adapter_id"] == "codex-app-server"
+    if provider == "kimi":
+        assert runtime.metadata["network_endpoints"] == ["https://auth.kimi.com"]
 
 
 def test_windows_runtime_search_dirs_and_executable_rules(tmp_path, monkeypatch):
@@ -1152,13 +1222,28 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
     ]
     assert descriptors["kimi"].commands == ("kimi",)
     assert descriptors["kimi"].launch_args == ("acp",)
+    assert descriptors["kimi"].credential_home_paths == (
+        ".kimi-code/config.toml",
+        ".kimi-code/oauth/kimi-code",
+        ".kimi-code/credentials/kimi-code.json",
+    )
+    assert descriptors["kimi"].network_endpoints == ("https://auth.kimi.com",)
     assert descriptors["codex"].protocol == "cli"
     assert descriptors["codex"].launch_args == ()
+    assert descriptors["codex"].credential_home_paths == (
+        ".codex/auth.json",
+        ".codex/config.toml",
+    )
     assert descriptors["claude"].commands == ("claude-agent-acp",)
     assert descriptors["claude"].launch_args == ()
     assert descriptors["hermes"].commands == ("hermes",)
     assert descriptors["hermes"].launch_args == ("acp",)
     assert dict(descriptors["hermes"].probe_env) == {"HERMES_YOLO_MODE": "1"}
+    assert descriptors["hermes"].credential_home_paths == (
+        ".hermes/.env",
+        ".hermes/config.yaml",
+        ".hermes/auth.json",
+    )
     assert {
         provider: descriptor.launch_args
         for provider, descriptor in descriptors.items()
@@ -1178,7 +1263,27 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
     }
     assert descriptors["claude-code"].commands == ("claude",)
     assert descriptors["claude-code"].adapter_id == "claude-stream-json"
+    assert descriptors["claude-code"].credential_home_paths == (
+        ".claude/.credentials.json",
+        ".claude.json",
+    )
     assert descriptors["codex"].adapter_id == "codex-app-server"
+    assert runtime_registry.resolve_runtime_credential_home_paths(
+        provider="codex",
+        metadata={"descriptor_id": "builtin:codex"},
+    ) == (".codex/auth.json", ".codex/config.toml")
+    assert runtime_registry.resolve_runtime_credential_home_paths(
+        provider="codex",
+        metadata={"credential_home_paths": []},
+    ) == ()
+    assert runtime_registry.resolve_runtime_network_endpoints(
+        provider="kimi",
+        metadata={"descriptor_id": "builtin:kimi"},
+    ) == ("https://auth.kimi.com",)
+    assert runtime_registry.resolve_runtime_network_endpoints(
+        provider="kimi",
+        metadata={"network_endpoints": ["https://custom.example.test"]},
+    ) == ("https://custom.example.test",)
     assert {
         provider: descriptors[provider].display_badge
         for provider in ("kimi", "codex", "hermes", "claude-code")
@@ -1396,6 +1501,42 @@ def test_kimi_acp_falls_back_to_local_cli_model_catalog(tmp_path, monkeypatch):
     assert profile.models[1].thinking_levels == ("max",)
     assert profile.probe is not None
     assert profile.probe.source == "acp_session_new+kimi_provider_list"
+
+
+def test_scan_hermes_runtime_uses_env_path(tmp_path, monkeypatch):
+    hermes = _fake_hermes(tmp_path)
+    monkeypatch.setenv("CREW_HERMES_PATH", str(hermes))
+
+    runtime = scan_hermes_runtime()
+
+    assert runtime is not None
+    assert runtime.provider == "hermes"
+    assert runtime.executable_path == str(hermes)
+    assert runtime.protocol == "acp"
+
+
+def test_hermes_runtime_probe_allows_cold_start_timeout(monkeypatch):
+    captured: dict[str, float] = {}
+
+    async def fake_probe(*args, timeout, **kwargs):
+        del args, kwargs
+        captured["timeout"] = timeout
+        return acp_adapter.AcpRuntimeProbeResult(
+            models=[],
+            default_model_id="",
+            capabilities=acp_adapter.RuntimeCapabilities(),
+        )
+
+    monkeypatch.setattr(acp_adapter, "probe_acp_runtime", fake_probe)
+
+    asyncio.run(acp_adapter.AcpRuntimeAdapter().probe(
+        "/fixture/hermes",
+        provider="hermes",
+        launch_args=("acp",),
+    ))
+
+    assert captured["timeout"] == acp_adapter.HERMES_RUNTIME_PROBE_TIMEOUT_SECONDS
+    assert captured["timeout"] > acp_adapter.ACP_RUNTIME_PROBE_TIMEOUT_SECONDS
 
 
 def test_scan_codex_runtime_skips_warning_version_lines(tmp_path, monkeypatch):
@@ -2733,6 +2874,68 @@ def test_external_store_saves_acp_session_binding(tmp_path):
     assert binding["acp_session_id"] == "h1"
 
 
+def test_delete_agent_removes_runtime_session_bindings(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "runtime-agent-cleanup",
+        "provider": "hermes",
+        "name": "Hermes",
+        "executable_path": "/bin/hermes",
+        "protocol": "acp",
+    })
+    agent = store.create_agent(name="待删除外援", runtime_id=runtime["id"])
+    binding_key = {
+        "crew_session_id": "crew-agent-cleanup",
+        "external_agent_id": agent["id"],
+        "runtime_id": runtime["id"],
+        "provider": "hermes",
+        "cwd": str(tmp_path),
+    }
+    store.save_acp_session_binding(acp_session_id="native-agent-cleanup", **binding_key)
+
+    store.delete_agent(agent["id"])
+
+    assert store.get_acp_session_binding(**binding_key) is None
+
+
+def test_delete_runtime_removes_orphaned_session_bindings(tmp_path):
+    db_path = tmp_path / "crew.db"
+    store = ExternalAgentStore(str(db_path))
+    runtime = store.upsert_runtime({
+        "id": "runtime-stale-binding",
+        "provider": "e2e",
+        "name": "Stale Runtime",
+        "executable_path": "",
+        "protocol": "acp",
+    })
+    agent = store.create_agent(name="旧外援", runtime_id=runtime["id"])
+    store.save_acp_session_binding(
+        crew_session_id="crew-stale-binding",
+        external_agent_id=agent["id"],
+        runtime_id=runtime["id"],
+        provider="e2e",
+        cwd=str(tmp_path),
+        acp_session_id="native-stale-binding",
+    )
+    # 模拟旧版本删除 Agent 后遗留的原生会话续接元数据。
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM external_agent WHERE id = ?", (agent["id"],))
+
+    store.delete_runtime(runtime["id"])
+
+    with sqlite3.connect(db_path) as conn:
+        binding_count = conn.execute(
+            "SELECT COUNT(*) FROM external_runtime_session_binding WHERE runtime_id = ?",
+            (runtime["id"],),
+        ).fetchone()[0]
+        runtime_count = conn.execute(
+            "SELECT COUNT(*) FROM external_runtime WHERE id = ?",
+            (runtime["id"],),
+        ).fetchone()[0]
+    assert binding_count == 0
+    assert runtime_count == 0
+
+
 def test_external_store_scopes_acp_session_binding_by_owner(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
@@ -3621,6 +3824,7 @@ async def test_acp_executor_marks_failed_acp_binding_unsafe_and_skips_resume(tmp
 
 async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch):
     from crew.agent.external.acp_adapter import AcpStreamEvent
+    from crew.security.models import AdditionalPermissionProfile, NetworkEntry
 
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
@@ -3636,6 +3840,7 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
 
     async def fake_stream(_prompt, config):
         seen["mcp_servers"] = config.mcp_servers
+        seen["additional_permissions"] = config.additional_permissions
         yield AcpStreamEvent(kind="text", text="done")
 
     monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
@@ -3650,6 +3855,12 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
         def mcp_server_config(self, binding):
             assert binding.token == "bind-token"
             return {"name": "crew-interaction", "command": "python", "args": []}
+
+        def local_callback_permissions(self, binding):
+            assert binding.token == "bind-token"
+            return AdditionalPermissionProfile(
+                network=(NetworkEntry("127.0.0.1", 8123, "http"),),
+            )
 
         def remove_binding(self, token):
             self.removed.append(token)
@@ -3676,6 +3887,7 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
     assert seen["binding"]["control_session_id"] == "main"
     assert seen["binding"]["origin_session_id"] == "main::child"
     assert seen["mcp_servers"][0]["name"] == "crew-interaction"
+    assert seen["additional_permissions"].network[0].port == 8123
     assert bridge.removed == ["bind-token"]
     assert chunks[-1].kind == "final"
 

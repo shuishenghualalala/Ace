@@ -42,7 +42,7 @@ function emptySnapshot(): SecurityCenterSnapshot {
     setupAction: null,
     error: '',
     workspaceId: workspaceId(),
-    strictSecurityEnabled: false,
+    strictSecurityEnabled: true,
     mode: currentSecurityMode(),
     capabilities: null,
     rules: [],

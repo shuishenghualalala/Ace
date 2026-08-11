@@ -59,6 +59,7 @@ describe('renderAgentTurn', () => {
     const typing = renderTypingIndicator();
 
     for (const root of [turn, typing]) {
+      expect(root.classList.contains('msg--agent-turn')).toBe(true);
       const symbol = root.querySelector<SVGUseElement>('.msg__avatar-symbol use');
       expect(symbol?.getAttribute('href')).toBe('./crew-ui-symbols.svg#avatar-headphones');
       expect(root.querySelector('.msg__avatar-media')).toBeNull();
@@ -85,6 +86,7 @@ describe('renderAgentTurn', () => {
       identity: { kind: 'external', name: 'Kimi', badge: 'K' },
     });
     expect(root.querySelector('.msg__name')?.textContent).toBe('Kimi');
+    expect(root.classList.contains('msg--agent-turn')).toBe(true);
     expect(root.querySelector('.msg__avatar--external')?.textContent).toBe('K');
     expect(root.querySelector('.msg__avatar-media')).toBeNull();
   });

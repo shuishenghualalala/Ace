@@ -1801,6 +1801,8 @@ export const backendApi = {
   // 运行时（外部 Agent runtime 检测）
   runtimes: () => getJSON<ExternalRuntime[]>('/api/runtimes'),
   scanRuntimes: () => getJSON<ExternalRuntime[]>('/api/runtimes/scan', { method: 'POST' }),
+  deleteRuntime: (id: string) =>
+    getJSON<{ ok: boolean }>(`/api/runtimes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // 外部 Agent：作为外援页的实时数据源
   externalAgents: () => getJSON<ExternalAgent[]>('/api/external-agents'),
   createExternalAgent: (agent: {

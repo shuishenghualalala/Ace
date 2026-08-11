@@ -7,7 +7,7 @@ import json
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Protocol
 
 from crew.agent.external.process_lifecycle import isolated_process_kwargs, terminate_process_tree
 from crew.agent.external.runtime_adapter import (
@@ -16,16 +16,24 @@ from crew.agent.external.runtime_adapter import (
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
+    build_external_runtime_home_files,
+    build_external_runtime_network_permissions,
     build_external_runtime_env,
+    build_managed_external_runtime_env,
+    merge_additional_permission_profiles,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.security.models import AdditionalPermissionProfile
+from crew.security.runtime_client import NativeRuntimeError
 from crew.state.logging import get_logger
 
 
 log = get_logger("agent.acp")
 
 ACP_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+ACP_RUNTIME_PROBE_TIMEOUT_SECONDS = 15.0
+HERMES_RUNTIME_PROBE_TIMEOUT_SECONDS = 30.0
 
 
 class AcpAdapterError(RuntimeError):
@@ -63,6 +71,11 @@ class AcpAdapterConfig:
     system_prompt: str = ""
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
+    additional_permissions: AdditionalPermissionProfile = field(
+        default_factory=AdditionalPermissionProfile
+    )
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     resume_session_id: str = ""
     timeout: float = 120.0
@@ -71,6 +84,67 @@ class AcpAdapterConfig:
 
 AcpToolEvent = ExternalToolEvent
 AcpStreamEvent = ExternalStreamEvent
+
+
+class _AcpTransport(Protocol):
+    async def read(self) -> bytes | None: ...
+
+    async def write(self, data: bytes) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def abort(self) -> None: ...
+
+
+class _SubprocessAcpTransport:
+    """Adapter for the legacy host process used only outside managed mode."""
+
+    def __init__(self, proc: asyncio.subprocess.Process) -> None:
+        self.proc = proc
+
+    async def read(self) -> bytes | None:
+        if not self.proc.stdout:
+            return None
+        try:
+            data = await self.proc.stdout.read(64 * 1024)
+        except ValueError as exc:
+            raise AcpAdapterError(
+                f"ACP stdout JSONL 单行超过读取上限 ({ACP_STREAM_LIMIT_BYTES // 1024 // 1024}MB): {exc}"
+            ) from exc
+        return data or None
+
+    async def write(self, data: bytes) -> None:
+        if not self.proc.stdin:
+            raise AcpAdapterError("ACP stdin is closed")
+        self.proc.stdin.write(data)
+        await self.proc.stdin.drain()
+
+    async def close(self) -> None:
+        if self.proc.stdin and not self.proc.stdin.is_closing():
+            self.proc.stdin.close()
+
+    async def abort(self) -> None:
+        await terminate_process_tree(self.proc)
+
+
+class _NativeAcpTransport:
+    """Protocol-neutral ACP view over the managed native interactive session."""
+
+    def __init__(self, session: Any) -> None:
+        self.session = session
+        self.stderr_lines = session.stderr_lines
+
+    async def read(self) -> bytes | None:
+        return await self.session.read_chunk()
+
+    async def write(self, data: bytes) -> None:
+        await self.session.write(data)
+
+    async def close(self) -> None:
+        await self.session.close()
+
+    async def abort(self) -> None:
+        await self.session.abort()
 
 
 @dataclass(frozen=True)
@@ -172,11 +246,11 @@ def _permission_result(
 class _JsonRpcClient:
     def __init__(
         self,
-        proc: asyncio.subprocess.Process,
+        transport: _AcpTransport,
         *,
         permission_handler: PermissionHandler | None = None,
     ) -> None:
-        self.proc = proc
+        self.transport = transport
         self.permission_handler = permission_handler
         self.next_id = 1
         self.pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -196,9 +270,11 @@ class _JsonRpcClient:
     async def start(self) -> None:
         self._reader_task = asyncio.create_task(self._read_loop())
 
-    async def close(self) -> None:
-        if self.proc.stdin:
-            self.proc.stdin.close()
+    async def close(self, *, abort: bool = False) -> None:
+        if abort:
+            await self.transport.abort()
+        else:
+            await self.transport.close()
         if self._reader_task:
             self._reader_task.cancel()
             try:
@@ -230,51 +306,38 @@ class _JsonRpcClient:
         return raw.get("result")
 
     async def _write(self, payload: dict[str, Any]) -> None:
-        if not self.proc.stdin:
-            raise AcpAdapterError("ACP stdin is closed")
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
-        self.proc.stdin.write(data)
-        await self.proc.stdin.drain()
+        await self.transport.write(data)
 
     async def _read_loop(self) -> None:
-        if not self.proc.stdout:
-            return
+        buffer = bytearray()
         try:
             while True:
-                try:
-                    line = await self.proc.stdout.readline()
-                except ValueError as exc:
-                    message = (
-                        "ACP stdout JSONL 单行超过读取上限 "
-                        f"({ACP_STREAM_LIMIT_BYTES // 1024 // 1024}MB): {exc}"
+                chunk = await self.transport.read()
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                if len(buffer) > ACP_STREAM_LIMIT_BYTES:
+                    raise AcpAdapterError(
+                        f"ACP stdout JSONL 超过读取上限 ({ACP_STREAM_LIMIT_BYTES // 1024 // 1024}MB)"
                     )
-                    err = AcpAdapterError(message)
-                    for fut in self.pending.values():
-                        if not fut.done():
-                            fut.set_exception(err)
-                    self.pending.clear()
-                    await self.event_queue.put(AcpStreamEvent(kind="error", text=message))
-                    break
-                if not line:
-                    break
-                try:
-                    raw = json.loads(line.decode("utf-8", errors="replace"))
-                except json.JSONDecodeError:
-                    continue
-                if "id" in raw and ("result" in raw or "error" in raw):
-                    try:
-                        msg_id = int(raw["id"])
-                    except Exception:
-                        continue
-                    fut = self.pending.pop(msg_id, None)
-                    if fut and not fut.done():
-                        fut.set_result(raw)
-                    continue
-                if "id" in raw and "method" in raw:
-                    await self._handle_agent_request(raw)
-                    continue
-                if raw.get("method") in {"session/update", "session/notification"}:
-                    self._handle_notification(raw)
+                while b"\n" in buffer:
+                    index = buffer.index(b"\n")
+                    line = bytes(buffer[:index])
+                    del buffer[: index + 1]
+                    await self._handle_line(line)
+            if buffer:
+                await self._handle_line(bytes(buffer))
+        except (AcpAdapterError, NativeRuntimeError, asyncio.TimeoutError) as exc:
+            if isinstance(exc, asyncio.TimeoutError):
+                exc = AcpAdapterError(
+                    "ACP protocol stream timed out while waiting for runtime output"
+                )
+            for fut in self.pending.values():
+                if not fut.done():
+                    fut.set_exception(exc)
+            self.pending.clear()
+            await self.event_queue.put(AcpStreamEvent(kind="error", text=str(exc)))
         finally:
             if self.pending:
                 err = AcpAdapterError("ACP process exited before responding")
@@ -282,6 +345,28 @@ class _JsonRpcClient:
                     if not fut.done():
                         fut.set_exception(err)
                 self.pending.clear()
+
+    async def _handle_line(self, line: bytes) -> None:
+        if not line:
+            return
+        try:
+            raw = json.loads(line.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            return
+        if "id" in raw and ("result" in raw or "error" in raw):
+            try:
+                msg_id = int(raw["id"])
+            except Exception:
+                return
+            fut = self.pending.pop(msg_id, None)
+            if fut and not fut.done():
+                fut.set_result(raw)
+            return
+        if "id" in raw and "method" in raw:
+            await self._handle_agent_request(raw)
+            return
+        if raw.get("method") in {"session/update", "session/notification"}:
+            self._handle_notification(raw)
 
     async def _handle_agent_request(self, raw: dict[str, Any]) -> None:
         method = raw.get("method")
@@ -670,7 +755,7 @@ async def probe_acp_runtime(
         stderr=asyncio.subprocess.DEVNULL,
         limit=ACP_STREAM_LIMIT_BYTES,
     )
-    client = _JsonRpcClient(proc)
+    client = _JsonRpcClient(_SubprocessAcpTransport(proc))
     await client.start()
     try:
         async def _probe() -> AcpRuntimeProbeResult:
@@ -752,38 +837,81 @@ def _format_timeout_error(
 
 
 async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncIterator[AcpStreamEvent]:
-    from crew.security.launch import host_stream_launch_block_reason
+    from crew.security.launch import current_process_launch
 
-    blocked = host_stream_launch_block_reason()
-    if blocked == "security launch context missing":
+    launch = current_process_launch.get()
+    if launch is None:
         raise AcpAdapterError(
             "ACP adapter 缺少安全启动上下文：当前运行时未建立 ProcessLaunch（常见于 Team "
             "委派未继承启动边界）。已拒绝在无明确启动决策时启动宿主进程。"
         )
-    if blocked:
-        raise AcpAdapterError(
-            "当前 ACP adapter 需要双向长连接，尚未接入 native stdio transport；managed 模式拒绝宿主启动"
-        )
     loop = asyncio.get_running_loop()
     total_started_at = loop.time()
     env = build_external_runtime_env(config.custom_env)
-    cwd = str(Path(config.cwd or ".").expanduser().resolve())
+    cwd_path = Path(config.cwd or ".").expanduser().resolve(strict=True)
+    cwd = str(cwd_path)
     stderr_lines: list[str] = []
     stage_state = {"name": "spawn"}
     provider_label = str(config.provider or Path(config.executable_path).name or "external").strip()
     last_activity = {"text": "准备启动 ACP 子进程"}
-    proc = await asyncio.create_subprocess_exec(
-        config.executable_path,
-        *config.launch_args,
-        *config.custom_args,
-        cwd=cwd,
-        env=env,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        limit=ACP_STREAM_LIMIT_BYTES,
-        **isolated_process_kwargs(),
-    )
+    native_session = None
+    stderr_task: asyncio.Task[None] | None = None
+    if launch.external_managed:
+        from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
+        from crew.security.runtime_client import NativeRuntimeClient
+
+        if not launch.helper_argv:
+            raise AcpAdapterError("ACP adapter 缺少 managed native security runtime")
+        try:
+            executable = str(Path(config.executable_path).expanduser().resolve(strict=True))
+        except OSError as exc:
+            raise AcpAdapterError(f"找不到 ACP 可执行文件: {config.executable_path}") from exc
+        managed_env = build_managed_external_runtime_env(config.custom_env)
+        projected_home_files = build_external_runtime_home_files(config.credential_home_paths)
+        projected_network_permissions = build_external_runtime_network_permissions(
+            projected_home_files,
+            config.network_endpoints,
+        )
+        additional_permissions = config.additional_permissions
+        if projected_network_permissions.network:
+            additional_permissions = merge_additional_permission_profiles(
+                additional_permissions,
+                projected_network_permissions,
+            )
+        native_session = await SecurityExecutionBroker(
+            NativeRuntimeClient(launch.helper_argv)
+        ).open_interactive(
+            ExecutionRequest(
+                command=(executable, *config.launch_args, *config.custom_args),
+                cwd=cwd_path,
+                permission_profile=launch.profile,
+                additional_permissions=additional_permissions,
+                trusted_readable_roots=launch.trusted_readable_roots,
+                home_files=projected_home_files,
+                env_overrides=managed_env,
+                timeout_seconds=config.timeout,
+                max_output_bytes=ACP_STREAM_LIMIT_BYTES,
+            )
+        )
+        proc = native_session.process
+        stderr_lines = native_session.stderr_lines
+        transport: _AcpTransport = _NativeAcpTransport(native_session)
+    else:
+        # Disabled profiles are retained for existing compatibility/unit-test
+        # callers. Production conversation modes compile a managed profile.
+        proc = await asyncio.create_subprocess_exec(
+            config.executable_path,
+            *config.launch_args,
+            *config.custom_args,
+            cwd=cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=ACP_STREAM_LIMIT_BYTES,
+            **isolated_process_kwargs(),
+        )
+        transport = _SubprocessAcpTransport(proc)
     log.info(
         "[PERF] acp_spawn provider=%s elapsed=%.3fs model=%s pid=%s",
         provider_label,
@@ -800,9 +928,14 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
         [str(item.get("name") or item.get("id") or "unnamed") for item in config.mcp_servers],
         len(config.custom_args),
     )
-    client = _JsonRpcClient(proc, permission_handler=config.permission_handler)
-    await client.start()
-    stderr_task = asyncio.create_task(_read_stderr(proc, stderr_lines))
+    client = _JsonRpcClient(transport, permission_handler=config.permission_handler)
+    try:
+        await client.start()
+    except Exception:
+        await client.close(abort=True)
+        raise
+    if native_session is None:
+        stderr_task = asyncio.create_task(_read_stderr(proc, stderr_lines))
     was_cancelled = False
     try:
         session_state: dict[str, Any] = {
@@ -999,7 +1132,9 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
                     session_resumed=bool(session_state["resumed"]),
                     session_reset=bool(session_state["reset"]),
                 )
-        except AcpAdapterError as exc:
+        except (AcpAdapterError, NativeRuntimeError) as exc:
+            if isinstance(exc, NativeRuntimeError):
+                exc = AcpAdapterError(str(exc))
             stderr_tail = "\n".join(stderr_lines[-8:]).strip()
             if stderr_tail and stderr_tail not in str(exc):
                 raise AcpAdapterError(f"{exc}\nstderr: {stderr_tail}") from exc
@@ -1017,15 +1152,14 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
         if "task" in locals() and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        stderr_task.cancel()
-        try:
-            await stderr_task
-        except asyncio.CancelledError:
-            pass
-        await client.close()
-        if was_cancelled:
-            await terminate_process_tree(proc)
-        else:
+        if stderr_task is not None:
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except asyncio.CancelledError:
+                pass
+        await client.close(abort=was_cancelled)
+        if native_session is None and not was_cancelled:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2)
             except asyncio.TimeoutError:
@@ -1073,6 +1207,11 @@ class AcpRuntimeAdapter:
             provider=provider,
             launch_args=launch_args,
             custom_env=custom_env,
+            timeout=(
+                HERMES_RUNTIME_PROBE_TIMEOUT_SECONDS
+                if provider == "hermes"
+                else ACP_RUNTIME_PROBE_TIMEOUT_SECONDS
+            ),
         )
         models = result.models
         default_model_id = result.default_model_id
@@ -1106,6 +1245,9 @@ class AcpRuntimeAdapter:
                 system_prompt=request.system_prompt,
                 custom_args=request.custom_args,
                 custom_env=request.custom_env,
+                credential_home_paths=request.credential_home_paths,
+                network_endpoints=request.network_endpoints,
+                additional_permissions=request.additional_permissions,
                 mcp_servers=[
                     server.stdio_config(env_as_list=True)
                     for server in request.mcp_servers

@@ -159,7 +159,7 @@ async def _probe_runtime(
                 str(marker),
                 str(host_secret),
             )
-        elif system == "darwin":
+        elif system in {"linux", "darwin"}:
             command = (
                 "/bin/sh",
                 "-c",

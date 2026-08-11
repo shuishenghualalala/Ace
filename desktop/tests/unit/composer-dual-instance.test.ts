@@ -130,4 +130,17 @@ describe('双 Composer 实例隔离', () => {
       expect(getPrimaryComposerRoot()).toBeNull();
     });
   });
+
+  it('只给主 Composer 提供 Welcome 猛虎爪装饰锚点', () => {
+    const hostA = document.getElementById('host-a')!;
+    const hostB = document.getElementById('host-b')!;
+    const viewA = createPanelComposer(hostA, 'sid-a', stubAttachments());
+    const viewB = createPanelComposer(hostB, 'sid-b', stubAttachments());
+
+    expect(hostA.querySelectorAll('.mw-composer__welcome-paw')).toHaveLength(2);
+    expect(hostB.querySelector('.mw-composer__welcome-paws')).toBeNull();
+
+    viewA.dispose();
+    viewB.dispose();
+  });
 });

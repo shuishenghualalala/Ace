@@ -201,7 +201,7 @@ describe('Security Center view', () => {
     expect(view.element.textContent).toContain('正在安装…');
   });
 
-  it('hides the strict security toggle while Crew auth allows plaintext HTTP', () => {
+  it('shows the strict security toggle so compatibility remains an explicit opt-out', () => {
     const onStrictSecurityChange = vi.fn();
     const view = createSecurityCenterView(makeHandlers({ onStrictSecurityChange }));
     view.update({
@@ -215,12 +215,10 @@ describe('Security Center view', () => {
       audits: [],
     });
 
-    // ponytail: 严格安全约束开关暂时隐藏——后端 _ALLOW_INSECURE_AUTH_HTTP 已单独放行
-    // Crew 认证 HTTP（见 crew/tools/crew_auth.py），无需用户切全局兼容模式。
-    // 见 security-center-view.ts 的 STRICT_SECURITY_TOGGLE_VISIBLE；上游认证服务切 HTTPS 后
-    // 改回 true，此处应恢复为「toggle 渲染 + checked 反映 snapshot + change 触发回调」。
+    // 严格安全默认开启；兼容模式必须由用户显式切换。
     const toggle = view.element.querySelector('[data-security-strict-toggle]');
-    expect(toggle).toBeNull();
+    expect(toggle).not.toBeNull();
+    expect((toggle as HTMLInputElement).checked).toBe(true);
   });
 
   it('filters and sorts audit rows, then opens a redacted detail dialog', () => {

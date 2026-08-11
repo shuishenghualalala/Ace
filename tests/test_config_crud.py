@@ -98,6 +98,34 @@ def test_add_model_basic(cfg: Config):
     assert cfg.active_model_id == "alpha"
 
 
+def test_load_config_reads_external_security_switch(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {"external_agents": {"enabled": True, "security_enabled": False}},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert loaded.external_agents_enabled is True
+    assert loaded.external_security_enabled is False
+
+
+def test_load_config_defaults_external_security_to_disabled(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"external_agents": {"enabled": True}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert loaded.external_security_enabled is False
+
+
 def test_add_model_rejects_empty_id(cfg: Config):
     with pytest.raises(ValueError, match="不能为空"):
         cfg.add_model({"id": "", "name": "x"})

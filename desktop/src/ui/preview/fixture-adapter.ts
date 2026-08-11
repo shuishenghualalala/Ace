@@ -85,6 +85,8 @@ function createFixtureBridge(fixture: VisualFixture): Window['Crew'] {
     getAppVersion: async () => '0.0.0-fixture',
     getAutoLaunchEnabled: async () => ({ enabled: false }),
     getCloseBehavior: async () => ({ closeBehavior: 'tray' as const }),
+    traySetStatus: async () => ({ ok: true as const }),
+    onTrayActivated: () => () => undefined,
     getFeedbackList: async () => ({
       success: true,
       list: [{

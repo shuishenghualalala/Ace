@@ -14,6 +14,7 @@ export interface AgentTurnIdentity {
   role?: string;
   tone?: number;
   crewLogo?: boolean;
+  external?: boolean;
 }
 
 interface Props {
@@ -107,7 +108,7 @@ export default function AgentTurnBubble({
           <AgentAvatarLogo />
         </div>
       ) : (
-        <span className={`agent-avatar agent-avatar--message agent-tone-${identity.tone ?? 0}`}>
+        <span className={`agent-avatar agent-avatar--message${identity.external ? ` agent-avatar--external agent-provider-tone-${identity.tone ?? 0}` : ` agent-tone-${identity.tone ?? 0}`}`}>
           {identity.badge?.trim() || "?"}
         </span>
       )}

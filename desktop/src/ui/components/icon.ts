@@ -46,6 +46,8 @@ export const ICON_IDS = [
   'icon-back',
   'icon-close',
   'icon-agent',
+  'icon-crew-agent',
+  'icon-external-agent',
   'icon-team',
   'icon-expert-picker',
   'icon-wiki',
@@ -88,7 +90,6 @@ export interface IconOptions {
 export function createIcon(id: IconId | string, options: IconOptions = {}): SVGSVGElement {
   const resolvedId: IconId = iconIds.has(id) ? (id as IconId) : 'icon-error';
   const svg = document.createElementNS(SVG_NAMESPACE, 'svg');
-  const use = document.createElementNS(SVG_NAMESPACE, 'use');
   const isEntity = /^(?:avatar-|team-|skill-badge|plugin-badge)/.test(resolvedId);
 
   svg.setAttribute('class', options.className ? `mw-icon ${options.className}` : 'mw-icon');
@@ -106,7 +107,21 @@ export function createIcon(id: IconId | string, options: IconOptions = {}): SVGS
   }
   if (resolvedId !== id) svg.dataset.iconMissing = id;
 
-  use.setAttribute('href', `#${resolvedId}`);
-  svg.append(use);
+  if (resolvedId === 'icon-external-agent' || resolvedId === 'icon-crew-agent') {
+    const image = document.createElementNS(SVG_NAMESPACE, 'image');
+    const isCrewAgent = resolvedId === 'icon-crew-agent';
+    image.setAttribute('href', isCrewAgent ? './menubar/default.png' : './external-agent.png');
+    image.setAttribute('x', isCrewAgent ? '0' : '1');
+    image.setAttribute('y', isCrewAgent ? '0' : '1');
+    image.setAttribute('width', isCrewAgent ? '24' : '22');
+    image.setAttribute('height', isCrewAgent ? '24' : '22');
+    image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    if (isCrewAgent) svg.classList.add('mw-icon--template-image');
+    svg.append(image);
+  } else {
+    const use = document.createElementNS(SVG_NAMESPACE, 'use');
+    use.setAttribute('href', `#${resolvedId}`);
+    svg.append(use);
+  }
   return svg;
 }

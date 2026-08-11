@@ -13,17 +13,18 @@ mod windows;
 
 use std::collections::{HashSet, VecDeque};
 use std::env;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use protocol::{
-    validate_process_inputs, ReadyFrame, RequestEnvelope, RuntimeEvent, RuntimeMessage,
-    RuntimeRequest, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES, PROTOCOL_VERSION,
-    READY_CAPABILITIES,
+    validate_process_inputs_with_home_files, ReadyFrame, RequestEnvelope, RuntimeControl,
+    RuntimeEvent, RuntimeMessage, RuntimeRequest, MAX_REQUEST_FRAME_BYTES,
+    MAX_RESPONSE_FRAME_BYTES, MAX_STDIN_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
 };
 use subtle::ConstantTimeEq;
 
@@ -113,36 +114,48 @@ fn protocol_main() -> Result<(), String> {
         },
     )?;
 
+    // The interactive transport must keep reading control frames while the
+    // managed child is running. A dedicated reader thread lets the worker
+    // stream child output without blocking on the host's next write frame.
     let stdin = io::stdin();
+    let (input_tx, input_rx) = mpsc::sync_channel::<InputMessage>(128);
+    thread::spawn(move || {
+        let mut raw = String::new();
+        loop {
+            raw.clear();
+            match stdin.read_line(&mut raw) {
+                Ok(0) => {
+                    let _ = input_tx.send(InputMessage::Eof);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    let _ = input_tx.send(InputMessage::Invalid);
+                    break;
+                }
+            }
+            if raw.len() > MAX_REQUEST_FRAME_BYTES {
+                if input_tx.send(InputMessage::TooLarge).is_err() {
+                    break;
+                }
+                continue;
+            }
+            let message = serde_json::from_str::<RequestEnvelope>(&raw)
+                .map(|value| InputMessage::Frame(Box::new(value)))
+                .unwrap_or(InputMessage::Invalid);
+            if input_tx.send(message).is_err() {
+                break;
+            }
+        }
+    });
     // ponytail: FIFO-evicting nonce cache. Not a true LRU (no access-time
     // reordering), but replay protection only needs "recently seen" semantics;
     // a strict LRU would add bookkeeping for no security gain here.
     let mut seen_nonces = NonceCache::new(NONCE_CACHE_CAP);
-    let mut reader = stdin.lock();
-    let mut raw = String::new();
     loop {
-        raw.clear();
-        match reader.read_line(&mut raw) {
-            Ok(0) => break, // EOF: peer closed stdin
-            Ok(_) => {}
-            Err(error) => return Err(format!("failed to read protocol frame: {error}")),
-        }
-        // M5: reject oversized frames before parsing so a peer cannot drive
-        // unbounded allocation by streaming a single huge line.
-        if raw.len() > MAX_REQUEST_FRAME_BYTES {
-            write_error(
-                &mut output,
-                String::new(),
-                "runtime_protocol_mismatch",
-                "frame exceeds 2MiB limit",
-            )?;
-            continue;
-        }
-        // M6: do not reflect the serde error back to the peer — it can echo
-        // attacker-controlled bytes and leak parser internals. Fixed string.
-        let envelope: RequestEnvelope = match serde_json::from_str(&raw) {
-            Ok(value) => value,
-            Err(_) => {
+        let envelope = match input_rx.recv() {
+            Ok(InputMessage::Frame(value)) => *value,
+            Ok(InputMessage::Invalid) => {
                 write_error(
                     &mut output,
                     String::new(),
@@ -151,6 +164,16 @@ fn protocol_main() -> Result<(), String> {
                 )?;
                 continue;
             }
+            Ok(InputMessage::TooLarge) => {
+                write_error(
+                    &mut output,
+                    String::new(),
+                    "runtime_protocol_mismatch",
+                    "frame exceeds 2MiB limit",
+                )?;
+                continue;
+            }
+            Ok(InputMessage::Eof) | Err(_) => break,
         };
         let nonce = envelope.nonce.clone();
         if envelope.version != PROTOCOL_VERSION {
@@ -185,9 +208,195 @@ fn protocol_main() -> Result<(), String> {
             )?;
             continue;
         }
-        stream_request(envelope.request, nonce, &mut output)?;
+        match envelope.request {
+            request @ RuntimeRequest::InteractiveOpen { .. } => {
+                drop(output);
+                stream_interactive_request(
+                    request,
+                    nonce,
+                    &input_rx,
+                    &startup_token,
+                    &mut seen_nonces,
+                    Arc::new(Mutex::new(io::BufWriter::new(io::stdout()))),
+                )?;
+                output = stdout.lock();
+            }
+            RuntimeRequest::InteractiveWrite { .. } | RuntimeRequest::InteractiveClose => {
+                write_error(
+                    &mut output,
+                    nonce,
+                    "sandbox_denied",
+                    "interactive session is not open",
+                )?;
+            }
+            request => stream_request(request, nonce, &mut output)?,
+        }
     }
     Ok(())
+}
+
+enum InputMessage {
+    Frame(Box<RequestEnvelope>),
+    Invalid,
+    TooLarge,
+    Eof,
+}
+
+type SharedOutput = Arc<Mutex<io::BufWriter<io::Stdout>>>;
+
+struct SharedOutputWriter(SharedOutput);
+
+impl Write for SharedOutputWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("native runtime output lock poisoned"))?
+            .write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("native runtime output lock poisoned"))?
+            .flush()
+    }
+}
+
+fn stream_interactive_request(
+    request: RuntimeRequest,
+    nonce: String,
+    input_rx: &Receiver<InputMessage>,
+    startup_token: &str,
+    seen_nonces: &mut NonceCache,
+    output: SharedOutput,
+) -> Result<(), String> {
+    let (sender, receiver) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
+    let (control_tx, control_rx) = mpsc::channel();
+    let worker = thread::spawn(move || execute_interactive_request(request, control_rx, sender));
+    let mut output_writer = SharedOutputWriter(output.clone());
+    let mut writer = EventWriter::new(&mut output_writer, nonce);
+    let mut close_sent = false;
+
+    loop {
+        while let Ok(message) = receiver.try_recv() {
+            writer.write_message(message)?;
+            if writer.terminal {
+                break;
+            }
+        }
+        if writer.terminal {
+            break;
+        }
+        match input_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+            Ok(InputMessage::Frame(envelope)) => {
+                if !authenticate_frame(&envelope, startup_token, seen_nonces, &mut writer)? {
+                    break;
+                }
+                match envelope.request {
+                    RuntimeRequest::InteractiveWrite { data_b64 } => {
+                        let data = match BASE64_STANDARD.decode(data_b64) {
+                            Ok(data) => data,
+                            Err(_) => {
+                                writer.write_message(RuntimeMessage::Error {
+                                    code: "runtime_protocol_mismatch",
+                                    message: "invalid interactive stdin payload".to_string(),
+                                })?;
+                                break;
+                            }
+                        };
+                        if data.len() > MAX_STDIN_BYTES {
+                            writer.write_message(RuntimeMessage::Error {
+                                code: "sandbox_denied",
+                                message: "interactive stdin payload exceeds the size limit"
+                                    .to_string(),
+                            })?;
+                            break;
+                        }
+                        control_tx
+                            .send(RuntimeControl::Write(data))
+                            .map_err(|_| "interactive worker closed".to_string())?;
+                    }
+                    RuntimeRequest::InteractiveClose => {
+                        if !close_sent {
+                            control_tx
+                                .send(RuntimeControl::Close)
+                                .map_err(|_| "interactive worker closed".to_string())?;
+                            close_sent = true;
+                        }
+                    }
+                    _ => {
+                        writer.write_message(RuntimeMessage::Error {
+                            code: "sandbox_denied",
+                            message: "interactive session accepts only write or close frames"
+                                .to_string(),
+                        })?;
+                        break;
+                    }
+                }
+            }
+            Ok(InputMessage::Invalid) => {
+                writer.write_message(RuntimeMessage::Error {
+                    code: "runtime_protocol_mismatch",
+                    message: "frame is not valid JSON".to_string(),
+                })?;
+                break;
+            }
+            Ok(InputMessage::TooLarge) => {
+                writer.write_message(RuntimeMessage::Error {
+                    code: "runtime_protocol_mismatch",
+                    message: "frame exceeds 2MiB limit".to_string(),
+                })?;
+                break;
+            }
+            Ok(InputMessage::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if !close_sent {
+                    let _ = control_tx.send(RuntimeControl::Close);
+                }
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+
+    drop(control_tx);
+    while let Ok(message) = receiver.recv() {
+        writer.write_message(message)?;
+        if writer.terminal {
+            break;
+        }
+    }
+    let _ = worker.join();
+    Ok(())
+}
+
+fn authenticate_frame(
+    envelope: &RequestEnvelope,
+    startup_token: &str,
+    seen_nonces: &mut NonceCache,
+    writer: &mut EventWriter<'_, SharedOutputWriter>,
+) -> Result<bool, String> {
+    if envelope.version != PROTOCOL_VERSION {
+        writer.write_message(RuntimeMessage::Error {
+            code: "runtime_protocol_mismatch",
+            message: "unsupported protocol version".to_string(),
+        })?;
+        return Ok(false);
+    }
+    if !bool::from(startup_token.as_bytes().ct_eq(envelope.token.as_bytes())) {
+        writer.write_message(RuntimeMessage::Error {
+            code: "runtime_protocol_mismatch",
+            message: "invalid runtime authentication".to_string(),
+        })?;
+        return Ok(false);
+    }
+    if envelope.nonce.len() < 16 || !seen_nonces.check_and_insert(&envelope.nonce) {
+        writer.write_message(RuntimeMessage::Error {
+            code: "sandbox_denied",
+            message: "invalid or replayed nonce".to_string(),
+        })?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Bounded replay-protection cache (M5).
@@ -233,6 +442,148 @@ struct RuntimeFailure {
     message: String,
 }
 
+fn execute_interactive_request(
+    request: RuntimeRequest,
+    control_rx: Receiver<RuntimeControl>,
+    sender: SyncSender<RuntimeMessage>,
+) {
+    let result = match request {
+        RuntimeRequest::InteractiveOpen {
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            denied_roots,
+            network_enabled,
+            network_rules,
+            allow_local_binding,
+            max_output_bytes,
+            env_overrides,
+            home_files,
+        } => {
+            let process_input =
+                validate_process_inputs_with_home_files(None, &env_overrides, &home_files);
+            let process_input = match process_input {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sender.send(RuntimeMessage::Error {
+                        code: error.code,
+                        message: error.message.to_string(),
+                    });
+                    return;
+                }
+            };
+            if command.is_empty() {
+                Err(RuntimeFailure {
+                    code: "sandbox_denied",
+                    message: "empty command".to_string(),
+                })
+            } else {
+                #[cfg(target_os = "linux")]
+                {
+                    let request = linux::LinuxRunRequest {
+                        command,
+                        cwd: PathBuf::from(cwd),
+                        writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
+                        readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                        denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                        network_enabled,
+                        network_rules,
+                        allow_local_binding,
+                        proxy_socket_dir: None,
+                        max_output_bytes,
+                        stdin: None,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
+                    };
+                    linux::run_interactive(request, control_rx, &sender).map_err(|error| {
+                        RuntimeFailure {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    })
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let request = macos::MacOsRunRequest {
+                        command,
+                        cwd: PathBuf::from(cwd),
+                        writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
+                        readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                        denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                        network_enabled,
+                        network_rules,
+                        allow_local_binding,
+                        max_output_bytes,
+                        stdin: None,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
+                    };
+                    macos::run_interactive(request, control_rx, &sender).map_err(|error| {
+                        RuntimeFailure {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    })
+                }
+                #[cfg(windows)]
+                {
+                    let request = windows::WindowsRunRequest {
+                        command,
+                        cwd: PathBuf::from(cwd),
+                        writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
+                        readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                        denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                        network_enabled,
+                        network_rules,
+                        allow_local_binding,
+                        max_output_bytes,
+                        stdin: None,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
+                    };
+                    windows::run_interactive(request, control_rx, &sender).map_err(|error| {
+                        RuntimeFailure {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    })
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+                {
+                    let _ = (
+                        command,
+                        cwd,
+                        writable_roots,
+                        readable_roots,
+                        denied_roots,
+                        network_enabled,
+                        network_rules,
+                        allow_local_binding,
+                        max_output_bytes,
+                        env_overrides,
+                        control_rx,
+                    );
+                    Err(RuntimeFailure {
+                        code: "sandbox_unavailable",
+                        message: "platform backend is unavailable".to_string(),
+                    })
+                }
+            }
+        }
+        _ => Err(RuntimeFailure {
+            code: "sandbox_denied",
+            message: "interactive request must open a session".to_string(),
+        }),
+    };
+    if let Err(error) = result {
+        let _ = sender.send(RuntimeMessage::Error {
+            code: error.code,
+            message: error.message,
+        });
+    }
+}
+
 fn handle_request(
     request: RuntimeRequest,
     sender: &SyncSender<RuntimeMessage>,
@@ -264,12 +615,17 @@ fn handle_request(
             max_output_bytes,
             stdin_b64,
             env_overrides,
+            home_files,
         } => {
-            let process_input = validate_process_inputs(stdin_b64.as_deref(), &env_overrides)
-                .map_err(|error| RuntimeFailure {
-                    code: error.code,
-                    message: error.message.to_string(),
-                })?;
+            let process_input = validate_process_inputs_with_home_files(
+                stdin_b64.as_deref(),
+                &env_overrides,
+                &home_files,
+            )
+            .map_err(|error| RuntimeFailure {
+                code: error.code,
+                message: error.message.to_string(),
+            })?;
             if command.is_empty() {
                 return Err(RuntimeFailure {
                     code: "sandbox_denied",
@@ -291,6 +647,7 @@ fn handle_request(
                     max_output_bytes,
                     stdin: process_input.stdin,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 linux::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,
@@ -311,6 +668,7 @@ fn handle_request(
                     max_output_bytes,
                     stdin: process_input.stdin,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 macos::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,
@@ -351,6 +709,7 @@ fn handle_request(
                     max_output_bytes,
                     stdin: process_input.stdin,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 windows::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,
@@ -358,6 +717,12 @@ fn handle_request(
                 })
             }
         }
+        RuntimeRequest::InteractiveOpen { .. }
+        | RuntimeRequest::InteractiveWrite { .. }
+        | RuntimeRequest::InteractiveClose => Err(RuntimeFailure {
+            code: "sandbox_denied",
+            message: "interactive request must open a session".to_string(),
+        }),
     }
 }
 

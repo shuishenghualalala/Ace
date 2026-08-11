@@ -25,11 +25,30 @@ _MAX_PROTOCOL_FRAME = 128 * 1024
 _MAX_OUTPUT_CHUNK = 64 * 1024
 _MAX_STDIN_BYTES = 1024 * 1024
 _MAX_ENV_BYTES = 256 * 1024
+_MAX_HOME_FILE_BYTES = 1024 * 1024
+_MAX_HOME_TOTAL_BYTES = 2 * 1024 * 1024
+_MAX_HOME_FILES = 64
 _MAX_HELPER_STDERR = 64 * 1024
 _ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_RESERVED_ENV_NAMES = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"})
+_RESERVED_ENV_NAMES = frozenset(
+    {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        # These values are established by the native sandbox backend. Allowing
+        # callers to replace them would make the child observe host-controlled
+        # paths or bypass the backend's private home/tmp layout.
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "PWD",
+        "OLDPWD",
+    }
+)
 _RESERVED_ENV_PREFIXES = ("ACE_SECURITY_", "ACE_BUNDLED_")
 _REQUIRED_READY_CAPABILITIES = frozenset({"stdin_once", "stream_output"})
+_INTERACTIVE_READY_CAPABILITIES = _REQUIRED_READY_CAPABILITIES | {"stdin_bidirectional"}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -131,6 +150,168 @@ class RuntimeCommandResult:
     capabilities: RuntimeCapabilities
 
 
+class NativeInteractiveSession:
+    """One authenticated, managed child process with bidirectional stdio."""
+
+    def __init__(
+        self,
+        client: "NativeRuntimeClient",
+        process: asyncio.subprocess.Process,
+        *,
+        open_nonce: str,
+        stderr_task: asyncio.Task[bytes],
+        timeout: float,
+        max_output_bytes: int,
+    ) -> None:
+        self._client = client
+        self.process = process
+        self._open_nonce = open_nonce
+        self._stderr_task = stderr_task
+        self._timeout = max(0.1, float(timeout or 0.0))
+        self._max_output_bytes = max_output_bytes
+        self._next_seq = 0
+        self._output_bytes = 0
+        self._write_lock = asyncio.Lock()
+        self._closed = False
+        self._completed = False
+        self.stderr_lines: list[str] = []
+
+    async def write(self, data: bytes) -> None:
+        if self._closed or self._completed:
+            raise NativeRuntimeError(RuntimeErrorCode.RUNTIME_CRASHED, "native interactive session is closed")
+        if not isinstance(data, bytes) or len(data) > _MAX_STDIN_BYTES:
+            raise ValueError("native interactive stdin exceeds the size limit")
+        await self._send_request({
+            "op": "interactive_write",
+            "data_b64": base64.b64encode(data).decode("ascii"),
+        })
+
+    async def close_child_stdin(self) -> None:
+        if self._closed or self._completed:
+            return
+        await self._send_request({"op": "interactive_close"})
+
+    async def read_chunk(self) -> bytes | None:
+        if self._completed:
+            return None
+        deadline = asyncio.get_running_loop().time() + self._timeout
+        while True:
+            frame = await self._client._read_frame(
+                self.process,
+                _remaining(deadline),
+            )
+            version = frame.get("version")
+            nonce = str(frame.get("nonce") or "")
+            seq = frame.get("seq")
+            if version != RUNTIME_PROTOCOL_VERSION or seq != self._next_seq:
+                raise NativeRuntimeError(
+                    RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH,
+                    "native interactive response mismatch",
+                )
+            self._next_seq += 1
+            frame_type = frame.get("type")
+            if frame_type == "started" and nonce == self._open_nonce:
+                capabilities = RuntimeCapabilities.from_payload(
+                    frame.get("capabilities") if isinstance(frame.get("capabilities"), dict) else {}
+                )
+                if not capabilities.filesystem_sandbox or not capabilities.process_tree_cleanup:
+                    raise NativeRuntimeError(
+                        RuntimeErrorCode.SANDBOX_UNAVAILABLE,
+                        "native runtime lacks required managed capabilities",
+                    )
+                continue
+            if frame_type == "stdout" and nonce == self._open_nonce:
+                try:
+                    chunk = base64.b64decode(frame.get("data_b64"), validate=True)
+                except (binascii.Error, TypeError, ValueError) as exc:
+                    raise NativeRuntimeError(
+                        RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH,
+                        "invalid native interactive stdout encoding",
+                    ) from exc
+                if (
+                    len(chunk) > _MAX_OUTPUT_CHUNK
+                    or self._output_bytes + len(chunk) > self._max_output_bytes
+                ):
+                    raise NativeRuntimeError(
+                        RuntimeErrorCode.OUTPUT_TRUNCATED,
+                        "native interactive output exceeds the configured limit",
+                    )
+                self._output_bytes += len(chunk)
+                return chunk
+            if frame_type == "stderr" and nonce == self._open_nonce:
+                try:
+                    chunk = base64.b64decode(frame.get("data_b64"), validate=True)
+                except (binascii.Error, TypeError, ValueError) as exc:
+                    raise NativeRuntimeError(
+                        RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH,
+                        "invalid native interactive stderr encoding",
+                    ) from exc
+                if len(chunk) <= _MAX_OUTPUT_CHUNK:
+                    text = chunk.decode("utf-8", errors="replace").strip()
+                    if text:
+                        self.stderr_lines.append(text)
+                continue
+            if frame_type == "completed" and nonce == self._open_nonce:
+                self._completed = True
+                return None
+            if frame_type == "error":
+                raise NativeRuntimeError(
+                    _runtime_error_code(frame.get("code")),
+                    str(frame.get("message") or "native interactive runtime failed"),
+                )
+            raise NativeRuntimeError(
+                RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH,
+                "invalid native interactive event",
+            )
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.process.stdin and not self.process.stdin.is_closing():
+            self.process.stdin.close()
+        await self._finish_helper()
+
+    async def abort(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._client._terminate_tree(self.process)
+        await self._finish_helper()
+
+    async def _send_request(self, payload: dict[str, Any], *, nonce: str | None = None) -> None:
+        if not self.process.stdin or self.process.stdin.is_closing():
+            raise NativeRuntimeError(RuntimeErrorCode.RUNTIME_CRASHED, "native interactive stdin is closed")
+        token = self._client._startup_token
+        nonce = nonce or secrets.token_urlsafe(24)
+        request = {
+            "version": RUNTIME_PROTOCOL_VERSION,
+            "token": token,
+            "nonce": nonce,
+            "request": payload,
+        }
+        frame = json.dumps(request, separators=(",", ":")).encode() + b"\n"
+        if len(frame) > _MAX_REQUEST_FRAME:
+            raise ValueError("native interactive request exceeds the size limit")
+        async with self._write_lock:
+            try:
+                self.process.stdin.write(frame)
+                await self.process.stdin.drain()
+            except (BrokenPipeError, ConnectionError) as exc:
+                raise NativeRuntimeError(
+                    RuntimeErrorCode.RUNTIME_CRASHED,
+                    "native interactive runtime terminated unexpectedly",
+                ) from exc
+
+    async def _finish_helper(self) -> None:
+        if self.process.returncode is None:
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                await self._client._terminate_tree(self.process)
+        await self._stderr_task
+
+
 class NativeRuntimeClient:
     """Launch a fresh authenticated helper and exchange one NDJSON request."""
 
@@ -140,6 +321,7 @@ class NativeRuntimeClient:
             raise ValueError("helper_argv cannot be empty")
         self._helper_argv = argv
         self._startup_timeout = startup_timeout
+        self._startup_token = ""
 
     async def classify_shell(
         self,
@@ -212,6 +394,7 @@ class NativeRuntimeClient:
         timeout: float = 30.0,
         max_output_bytes: int = 2 * 1024 * 1024,
         stdin: bytes | None = None,
+        home_files: Mapping[str, bytes] | None = None,
         env_overrides: Mapping[str, str] | None = None,
         on_started: Callable[[int | None], None] | None = None,
         on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
@@ -219,7 +402,9 @@ class NativeRuntimeClient:
         """Execute a command through the helper; never fall back to a host spawn."""
         if not command:
             raise ValueError("command cannot be empty")
-        validated_env = _validate_request_inputs(stdin, env_overrides)
+        validated_env, encoded_home_files = _validate_request_inputs(
+            stdin, env_overrides, home_files
+        )
         token = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(24)
         payload = {
@@ -234,6 +419,7 @@ class NativeRuntimeClient:
             "allow_local_binding": allow_local_binding,
             "max_output_bytes": max_output_bytes,
             "env_overrides": validated_env,
+            "home_files": encoded_home_files,
         }
         if stdin is not None:
             payload["stdin_b64"] = base64.b64encode(stdin).decode("ascii")
@@ -289,6 +475,89 @@ class NativeRuntimeClient:
             await stderr_task
 
         return result
+
+    async def open_interactive(
+        self,
+        *,
+        command: Sequence[str],
+        cwd: Path,
+        writable_roots: Sequence[Path] = (),
+        readable_roots: Sequence[Path] = (),
+        denied_roots: Sequence[Path] = (),
+        network_enabled: bool = False,
+        network_rules: Sequence[Mapping[str, Any]] = (),
+        allow_local_binding: bool = False,
+        timeout: float = 120.0,
+        max_output_bytes: int = 64 * 1024 * 1024,
+        home_files: Mapping[str, bytes] | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+    ) -> NativeInteractiveSession:
+        """Open one managed child whose stdin/stdout remain bidirectional."""
+        if not command:
+            raise ValueError("command cannot be empty")
+        validated_env, encoded_home_files = _validate_request_inputs(
+            None, env_overrides, home_files
+        )
+        token = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(24)
+        payload = {
+            "op": "interactive_open",
+            "command": list(command),
+            "cwd": str(cwd.resolve(strict=True)),
+            "writable_roots": [str(path.resolve(strict=True)) for path in writable_roots],
+            "readable_roots": [str(path.resolve(strict=True)) for path in readable_roots],
+            "denied_roots": [str(path.resolve(strict=False)) for path in denied_roots],
+            "network_enabled": network_enabled,
+            "network_rules": [dict(rule) for rule in network_rules],
+            "allow_local_binding": allow_local_binding,
+            "max_output_bytes": max_output_bytes,
+            "env_overrides": validated_env,
+            "home_files": encoded_home_files,
+        }
+        request_frame = json.dumps(
+            {
+                "version": RUNTIME_PROTOCOL_VERSION,
+                "token": token,
+                "nonce": nonce,
+                "request": payload,
+            },
+            separators=(",", ":"),
+        ).encode() + b"\n"
+        if len(request_frame) > _MAX_REQUEST_FRAME:
+            raise ValueError("native interactive request exceeds the size limit")
+
+        process = await self._spawn(token)
+        stderr_task = asyncio.create_task(self._drain_helper_stderr(process))
+        deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout or 0.0))
+        try:
+            ready = await self._read_frame(
+                process,
+                min(self._startup_timeout, _remaining(deadline)),
+            )
+            self._validate_ready(
+                ready,
+                required_capabilities=_INTERACTIVE_READY_CAPABILITIES,
+            )
+            session = NativeInteractiveSession(
+                self,
+                process,
+                open_nonce=nonce,
+                stderr_task=stderr_task,
+                timeout=timeout,
+                max_output_bytes=max_output_bytes,
+            )
+            assert process.stdin is not None
+            process.stdin.write(request_frame)
+            await process.stdin.drain()
+            return session
+        except asyncio.CancelledError:
+            await self._terminate_tree(process)
+            await stderr_task
+            raise
+        except Exception:
+            await self._terminate_tree(process)
+            await stderr_task
+            raise
 
     async def _collect_result(
         self,
@@ -432,6 +701,7 @@ class NativeRuntimeClient:
             ) from exc
         env = dict(os.environ)
         env["ACE_SECURITY_RUNTIME_TOKEN"] = token
+        self._startup_token = token
         kwargs: dict[str, Any] = {}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -518,13 +788,17 @@ class NativeRuntimeClient:
             )
 
     @staticmethod
-    def _validate_ready(frame: Mapping[str, Any]) -> None:
+    def _validate_ready(
+        frame: Mapping[str, Any],
+        *,
+        required_capabilities: frozenset[str] = _REQUIRED_READY_CAPABILITIES,
+    ) -> None:
         capabilities = frame.get("capabilities")
         if (
             frame.get("type") != "ready"
             or frame.get("version") != RUNTIME_PROTOCOL_VERSION
             or not isinstance(capabilities, list)
-            or not _REQUIRED_READY_CAPABILITIES.issubset(capabilities)
+            or not required_capabilities.issubset(capabilities)
         ):
             raise NativeRuntimeError(
                 RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH, "native runtime handshake mismatch"
@@ -607,7 +881,8 @@ def _optional_int(value: Any) -> int | None:
 def _validate_request_inputs(
     stdin: bytes | None,
     env_overrides: Mapping[str, str] | None,
-) -> dict[str, str]:
+    home_files: Mapping[str, bytes] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
     if stdin is not None and (not isinstance(stdin, bytes) or len(stdin) > _MAX_STDIN_BYTES):
         raise ValueError("native runtime stdin exceeds the size limit")
 
@@ -627,7 +902,27 @@ def _validate_request_inputs(
         encoded_size += len(name.encode("utf-8")) + len(value.encode("utf-8"))
         if encoded_size > _MAX_ENV_BYTES:
             raise ValueError("native runtime environment exceeds the size limit")
-    return validated
+    encoded_home_files: dict[str, str] = {}
+    total_home_bytes = 0
+    for relative_path, content in dict(home_files or {}).items():
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or relative_path.startswith(("/", "\\"))
+            or ":" in relative_path
+            or "\\" in relative_path
+            or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+        ):
+            raise ValueError("native runtime projected HOME path must be relative")
+        if not isinstance(content, bytes) or len(content) > _MAX_HOME_FILE_BYTES:
+            raise ValueError("native runtime projected HOME file exceeds the size limit")
+        if len(encoded_home_files) >= _MAX_HOME_FILES:
+            raise ValueError("native runtime projected HOME has too many files")
+        total_home_bytes += len(content)
+        if total_home_bytes > _MAX_HOME_TOTAL_BYTES:
+            raise ValueError("native runtime projected HOME exceeds the size limit")
+        encoded_home_files[relative_path] = base64.b64encode(content).decode("ascii")
+    return validated, encoded_home_files
 
 
 def _safe_callback(callback: Callable[[Any], None] | None, value: Any) -> None:

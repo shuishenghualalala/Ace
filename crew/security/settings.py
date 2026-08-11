@@ -1,4 +1,4 @@
-"""Process-wide security compatibility preference propagated by the desktop app."""
+"""Low-level security compatibility settings."""
 
 from __future__ import annotations
 

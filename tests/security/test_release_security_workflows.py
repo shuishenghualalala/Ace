@@ -41,11 +41,14 @@ def test_runtime_npm_audit_discovers_every_committed_lockfile() -> None:
     }
 
 
-def test_evidence_source_hash_matches_the_runtime_manifest() -> None:
-    manifest = json.loads(
-        (ROOT / "security-runtime" / "bin" / "runtime-manifest.json").read_text(encoding="utf-8")
-    )
-    assert _source_hash(ROOT / "security-runtime") == manifest["source_hash"]
+def test_evidence_source_hash_matches_platform_prebuilt_manifests() -> None:
+    crate = ROOT / "security-runtime"
+    manifests = sorted((crate / "prebuilt").glob("*/runtime-manifest.json"))
+    assert manifests, "at least one platform-specific prebuilt runtime must be committed"
+    expected = _source_hash(crate)
+    for manifest_path in manifests:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["source_hash"] == expected
 
 
 def test_committed_prebuilt_runtimes_match_source_target_and_digest() -> None:

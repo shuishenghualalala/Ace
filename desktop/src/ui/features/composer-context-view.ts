@@ -35,7 +35,7 @@ function createChip(
   copy.textContent = label;
   if (labelId) copy.id = labelId;
   if (icon) button.append(createIcon(icon, {
-    className: icon === 'icon-agent'
+    className: icon === 'icon-agent' || icon === 'icon-crew-agent' || icon === 'icon-external-agent'
       ? `mw-context-chip__icon ${MONOCHROME_ICON_CLASS}`
       : 'mw-context-chip__icon',
     size: 16,
@@ -195,7 +195,7 @@ function createLeftControls(): DocumentFragment {
   const modeTrigger = createChip(
     'chat-craft-btn',
     '智能体',
-    'icon-agent',
+    'icon-crew-agent',
     'chat-craft-btn-label',
   );
   const clearMode = createIconControl(

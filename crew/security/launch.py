@@ -10,14 +10,19 @@ import hashlib
 import logging
 import platform
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 from crew.security.context import SecurityContext
 from crew.security.file_policy import _protected_entries
-from crew.security.models import ConversationPermissionMode, PermissionProfile, PermissionProfileKind
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    ConversationPermissionMode,
+    PermissionProfile,
+    PermissionProfileKind,
+)
 from crew.security.policy import settings_for_mode
 from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
 
@@ -32,10 +37,19 @@ class ProcessLaunch:
     profile: PermissionProfile
     helper_argv: tuple[str, ...] = ()
     trusted_readable_roots: tuple[Path, ...] = ()
+    # External runtimes stay on the legacy host path unless Config explicitly
+    # enables the managed security boundary. Built-in tools remain managed
+    # according to ``profile`` and do not use this flag.
+    external_security_enabled: bool = False
 
     @property
     def managed(self) -> bool:
         return self.profile.kind is PermissionProfileKind.MANAGED
+
+    @property
+    def external_managed(self) -> bool:
+        """Whether external runtimes must cross the native managed boundary."""
+        return self.managed and self.external_security_enabled
 
 
 current_process_launch: ContextVar[ProcessLaunch | None] = ContextVar(
@@ -43,17 +57,19 @@ current_process_launch: ContextVar[ProcessLaunch | None] = ContextVar(
 )
 
 
-def host_stream_launch_block_reason() -> str | None:
+def host_stream_launch_block_reason(*, external: bool = False) -> str | None:
     """Return why a bidirectional host subprocess must be refused, if any.
 
     Long-lived stdio adapters cannot currently cross the native runtime transport.
-    A missing or managed launch boundary therefore always fails closed. Compatibility
-    mode may relax transport and approval policy, but it cannot turn managed execution
-    into an unconfined host subprocess.
+    A missing or managed launch boundary therefore fails closed for built-in
+    execution. External adapters may explicitly opt into the legacy host path
+    through the trusted ``Config`` switch; that exception does not affect built-ins.
     """
     launch = current_process_launch.get()
     if launch is None:
         return "security launch context missing"
+    if external and not launch.external_security_enabled:
+        return None
     if launch.managed:
         return "managed launch requires native bidirectional stdio transport"
     return None
@@ -73,10 +89,13 @@ async def execute_captured(
     timeout: float,
     env: dict[str, str] | None = None,
     stdin: bytes | None = None,
+    home_files: Mapping[str, bytes] | None = None,
+    additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
     env_overrides: Mapping[str, str] | None = None,
     max_output_bytes: int = 2 * 1024 * 1024,
     on_started: Callable[[int | None], None] | None = None,
     on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
+    external: bool = False,
 ) -> CapturedProcessResult:
     """Run an adapter under the current conversation boundary.
 
@@ -105,6 +124,13 @@ async def execute_captured(
     def _redact(text: str) -> str:
         return redact_sensitive_text(redact_secret_values(text, secret_values), force=True)
 
+    if external and not launch.external_security_enabled:
+        launch = replace(
+            launch,
+            profile=PermissionProfile(PermissionProfileKind.DISABLED),
+            helper_argv=(),
+            trusted_readable_roots=(),
+        )
     if launch.managed:
         from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
         from crew.security.runtime_client import NativeRuntimeClient
@@ -114,8 +140,10 @@ async def execute_captured(
                 command=argv,
                 cwd=cwd,
                 permission_profile=launch.profile,
+                additional_permissions=additional_permissions,
                 trusted_readable_roots=launch.trusted_readable_roots,
                 stdin=stdin,
+                home_files=home_files,
                 env_overrides=env_overrides,
                 timeout_seconds=timeout,
                 max_output_bytes=max_output_bytes,
@@ -247,8 +275,14 @@ def compile_process_launch(
     mode: ConversationPermissionMode,
     *,
     db_path: Path,
+    external_security_enabled: bool = False,
 ) -> ProcessLaunch:
-    """Build filesystem/profile facts and locate only the packaged native helper."""
+    """Build the host launch decision from trusted config and security state.
+
+    ``external_security_enabled`` is supplied by ``Config`` for Gateway requests.
+    Lower-level callers default external runtimes to the legacy host path.
+    Built-in tools remain managed whenever ``profile`` is managed.
+    """
     protected = _protected_entries(context, db_path)
     profile = settings_for_mode(mode, context.workspace_root, deny_entries=protected).profile
     from crew.agent.skills import get_builtin_skills_dir
@@ -265,6 +299,11 @@ def compile_process_launch(
         helper_argv=packaged_runtime_argv() if profile.kind is PermissionProfileKind.MANAGED else (),
         trusted_readable_roots=(
             tuple(trusted_roots) if profile.kind is PermissionProfileKind.MANAGED else ()
+        ),
+        external_security_enabled=(
+            external_security_enabled
+            if profile.kind is PermissionProfileKind.MANAGED
+            else False
         ),
     )
 
@@ -373,8 +412,9 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
     A missing binary is NOT raised here--the subsequent spawn's FileNotFoundError
     already maps to SANDBOX_UNAVAILABLE, and tests assert that spawn path is
     reached. A missing manifest is allowed in an unbuilt development tree.
-    Once a manifest is present it must be schema 2, name the selected helper,
-    and include its binary digest; otherwise the managed path fails closed.
+    Once a manifest is present it must be schema 2 and include the selected
+    helper's binary digest; otherwise the managed path fails closed. A source
+    tree may carry one entry per platform in the same manifest.
     """
     path = Path(helper_path)
     if not path.is_file():
@@ -394,9 +434,14 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         if declared_key is None or current_key is None or declared_key != current_key:
             raise HelperIntegrityError("native security runtime targets a different platform")
     expected_name = str(manifest.get("binary_name", "")).strip()
-    if expected_name != path.name:
+    if expected_name and expected_name != path.name:
         raise HelperIntegrityError("native security runtime manifest names a different binary")
     expected = str(manifest.get("binary_sha256", "")).strip()
+    if not expected:
+        for entry in manifest.get("files", []):
+            if isinstance(entry, dict) and str(entry.get("name", "")).strip() == path.name:
+                expected = str(entry.get("sha256", "")).strip()
+                break
     if not expected:
         raise HelperIntegrityError("native security runtime manifest is missing binary digest")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -426,7 +471,14 @@ def runtime_source_stale(helper_path: str | Path | None = None) -> bool | None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    expected = str(manifest.get("source_hash", ""))
+    runtime_name = "ace-security-runtime.exe" if os.name == "nt" else "ace-security-runtime"
+    expected = ""
+    for entry in manifest.get("files", []):
+        if isinstance(entry, dict) and entry.get("name") == runtime_name:
+            expected = str(entry.get("source_hash", ""))
+            break
+    if not expected and manifest.get("binary_name") == runtime_name:
+        expected = str(manifest.get("source_hash", ""))
     if not expected:
         return None
     files = sorted(

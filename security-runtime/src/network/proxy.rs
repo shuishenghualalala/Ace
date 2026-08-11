@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -92,6 +92,14 @@ impl Drop for ProxyHandle {
 }
 
 fn serve(mut client: TcpStream, policy: &NetworkPolicy) -> Result<(), NetworkError> {
+    // Some platforms (notably macOS) inherit O_NONBLOCK from the listener on
+    // accepted sockets. The listener itself is non-blocking so the owner can
+    // stop it, but each connection uses bounded blocking I/O. Without this
+    // normalization CONNECT can consume the ready header, then mistake the
+    // short gap before the TLS ClientHello for EOF/error and drop the tunnel.
+    client.set_nonblocking(false).map_err(|error| {
+        NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
+    })?;
     client.set_read_timeout(Some(IO_TIMEOUT)).map_err(|error| {
         NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
     })?;
@@ -119,7 +127,13 @@ fn serve(mut client: TcpStream, policy: &NetworkPolicy) -> Result<(), NetworkErr
     }
     if fields[0].eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_authority(fields[1], 443)?;
-        let upstream = connector::connect(policy, &host, port, "https", IO_TIMEOUT)?;
+        let upstream = match connector::connect(policy, &host, port, "https", IO_TIMEOUT) {
+            Ok(stream) => stream,
+            Err(error) => {
+                write_proxy_error(&mut client, &error);
+                return Err(error);
+            }
+        };
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .map_err(|error| {
@@ -128,12 +142,27 @@ fn serve(mut client: TcpStream, policy: &NetworkPolicy) -> Result<(), NetworkErr
         return tunnel(client, upstream);
     }
     let (host, port, path) = parse_absolute_http_target(fields[1])?;
-    let mut upstream = connector::connect(policy, &host, port, "http", IO_TIMEOUT)?;
+    let mut upstream = match connector::connect(policy, &host, port, "http", IO_TIMEOUT) {
+        Ok(stream) => stream,
+        Err(error) => {
+            write_proxy_error(&mut client, &error);
+            return Err(error);
+        }
+    };
     let rewritten = rewrite_request_line(&header, fields[0], &path, fields[2])?;
     upstream.write_all(&rewritten).map_err(|error| {
         NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
     })?;
     tunnel(client, upstream)
+}
+
+fn write_proxy_error(client: &mut TcpStream, error: &NetworkError) {
+    let response = if error.code == NetworkErrorCode::PolicyDenied {
+        b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".as_slice()
+    } else {
+        b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".as_slice()
+    };
+    let _ = client.write_all(response);
 }
 
 fn read_header(stream: &mut TcpStream) -> Result<Vec<u8>, NetworkError> {
@@ -271,14 +300,18 @@ fn tunnel(left: TcpStream, right: TcpStream) -> Result<(), NetworkError> {
         NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
     })?;
     let max_bytes = TUNNEL_MAX_BYTES;
-    let outbound =
-        thread::spawn(move || copy_bounded(&mut left_read, &mut right_write, max_bytes, deadline));
+    let outbound = thread::spawn(move || {
+        let result = copy_bounded(&mut left_read, &mut right_write, max_bytes, deadline);
+        let _ = right_write.shutdown(Shutdown::Write);
+        result
+    });
     let mut right_read = right;
     let mut left_write = left;
-    // Drive the other direction on this thread. We ignore the result: either
-    // direction ending (EOF, timeout, or byte cap) terminates the tunnel, and
-    // we drop the streams so the peer sees a closed connection.
+    // Propagate EOF as a write half-close. The peer can then finish its other
+    // direction instead of both sides waiting for a full close (common for
+    // HTTP responses with Connection: close).
     let _ = copy_bounded(&mut right_read, &mut left_write, max_bytes, deadline);
+    let _ = left_write.shutdown(Shutdown::Write);
     let _ = outbound.join();
     Ok(())
 }
@@ -286,6 +319,7 @@ fn tunnel(left: TcpStream, right: TcpStream) -> Result<(), NetworkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::NetworkRule;
     use std::io::{self, Cursor};
 
     #[test]
@@ -334,5 +368,107 @@ mod tests {
         let copied = copy_bounded(&mut reader, &mut writer, 1024, deadline).unwrap();
         assert_eq!(copied, 64);
         assert_eq!(writer.len(), 64);
+    }
+
+    #[test]
+    fn connect_tunnel_survives_a_gap_before_client_payload() {
+        let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let policy = NetworkPolicy::new(vec![NetworkRule {
+            host: "127.0.0.1".to_string(),
+            port: upstream_port,
+            protocol: "https".to_string(),
+            allow: true,
+            allow_private: true,
+            escalatable: false,
+        }])
+        .unwrap();
+        let proxy = ProxyHandle::start(policy).unwrap();
+        let mut client = TcpStream::connect(proxy.address()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(
+            client,
+            "CONNECT 127.0.0.1:{upstream_port} HTTP/1.1\r\nHost: 127.0.0.1:{upstream_port}\r\n\r\n"
+        )
+        .unwrap();
+        let response = read_header(&mut client).unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+
+        // Force the accepted socket through a period with no readable data.
+        // A leaked non-blocking flag used to terminate the outbound copy here.
+        thread::sleep(Duration::from_millis(50));
+        client.write_all(b"client-hello").unwrap();
+
+        let (mut upstream, _) = upstream_listener.accept().unwrap();
+        upstream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        upstream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut received = [0_u8; 12];
+        upstream.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"client-hello");
+        upstream.write_all(b"server-hello").unwrap();
+
+        let mut reply = [0_u8; 12];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"server-hello");
+    }
+
+    #[test]
+    fn denied_connect_returns_forbidden_instead_of_hanging() {
+        let proxy = ProxyHandle::start(NetworkPolicy::new(Vec::new()).unwrap()).unwrap();
+        let mut client = TcpStream::connect(proxy.address()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .write_all(b"CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n")
+            .unwrap();
+        let response = read_header(&mut client).unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 403 Forbidden"));
+    }
+
+    #[test]
+    fn plain_http_upstream_eof_is_forwarded_to_the_client() {
+        let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener.accept().unwrap();
+            let request = read_header(&mut stream).unwrap();
+            assert!(request.starts_with(b"GET /health HTTP/1.1"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let policy = NetworkPolicy::new(vec![NetworkRule {
+            host: "127.0.0.1".to_string(),
+            port: upstream_port,
+            protocol: "http".to_string(),
+            allow: true,
+            allow_private: true,
+            escalatable: false,
+        }])
+        .unwrap();
+        let proxy = ProxyHandle::start(policy).unwrap();
+        let mut client = TcpStream::connect(proxy.address()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(
+            client,
+            "GET http://127.0.0.1:{upstream_port}/health HTTP/1.1\r\nHost: 127.0.0.1:{upstream_port}\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        upstream.join().unwrap();
     }
 }

@@ -276,6 +276,8 @@ class Config:
     team_max_concurrent_children: int = 3
     # 外部 ACP 智能体与外部 Team 的产品开关；不影响 Dynamic Kanban 和默认主智能体。
     external_agents_enabled: bool = True
+    # 外援安全边界开关；默认关闭，外援走旧 runtime 直联，内建工具仍按会话安全边界执行。
+    external_security_enabled: bool = False
 
     # --- subagent（主 agent 通过 delegate_task / run_agent 调用子 agent）---
     subagent_max_concurrent: int = 3      # delegate_task 批量子任务的最大并发数
@@ -1457,6 +1459,10 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.external_agents_enabled = _as_bool(
                 external_agents.get("enabled"),
                 cfg.external_agents_enabled,
+            )
+            cfg.external_security_enabled = _as_bool(
+                external_agents.get("security_enabled"),
+                cfg.external_security_enabled,
             )
 
         tasks = data.get("tasks", {})

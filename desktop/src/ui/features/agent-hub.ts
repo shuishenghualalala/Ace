@@ -1,6 +1,7 @@
 import { createBadge, createButton, createTabs } from '../components/controls';
 import { createIcon } from '../components/icon';
 import { createHubTemplate } from '../layouts/page-templates';
+import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
 
 export type AgentHubTab = 'mine' | 'runtime' | 'create-agent' | 'create-team';
 
@@ -8,6 +9,7 @@ export interface AgentHubAgent {
   id: string;
   name: string;
   provider: string;
+  displayBadge?: string;
   detail: string;
   tags: string[];
   available: boolean;
@@ -26,6 +28,7 @@ export interface AgentHubRuntime {
   name: string;
   provider: string;
   detail: string;
+  statusDetail?: string;
   availability: 'ready' | 'degraded' | 'unavailable';
 }
 
@@ -49,6 +52,7 @@ export interface AgentHubOptions {
   onUseTeam?: (id: string) => void;
   onDeleteTeam?: (id: string) => void;
   onUseRuntime?: (id: string) => void;
+  onDeleteRuntime?: (id: string) => void;
   onScanRuntimes?: () => void;
   onOpenGuide?: () => void;
 }
@@ -61,7 +65,7 @@ export interface AgentHubView {
 
 const runtimeLabels = {
   ready: '随时可用',
-  degraded: '已找到，模型信息还没准备好',
+  degraded: '模型探测失败',
   unavailable: '暂时不可用',
 } as const;
 
@@ -70,6 +74,16 @@ function textElement(tag: string, className: string, text: string): HTMLElement 
   element.className = className;
   element.textContent = text;
   return element;
+}
+
+function createExternalAgentAvatar(provider: string, displayBadge?: string): HTMLElement {
+  const avatar = document.createElement('span');
+  const initial = document.createElement('span');
+  avatar.className = `mw-agent-card__external-avatar agent-provider-tone-${externalAgentTone(provider)}`;
+  avatar.setAttribute('aria-hidden', 'true');
+  initial.textContent = externalAgentInitial(provider, displayBadge);
+  avatar.append(initial);
+  return avatar;
 }
 
 function action(
@@ -179,7 +193,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
         action('派活', 'useAgent', agent.id, (id) => options.onUseAgent?.(id), 'primary', !agent.available),
         action('删除', 'deleteAgent', agent.id, (id) => options.onDeleteAgent?.(id), 'danger'),
       );
-      card.append(createIcon('icon-agent', { size: 40 }), copy, cardActions);
+      card.append(createExternalAgentAvatar(agent.provider, agent.displayBadge), copy, cardActions);
       agentGrid.append(card);
     }
     if (!current.agents.length) agentGrid.append(textElement('p', 'mw-hub-state', '阵容还是空的'));
@@ -226,6 +240,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
     for (const runtime of current.runtimes) {
       const card = document.createElement('article');
       const copy = document.createElement('div');
+      const cardActions = document.createElement('div');
       const availability = createBadge({
         label: runtimeLabels[runtime.availability],
         tone: runtime.availability === 'ready' ? 'success' : runtime.availability === 'degraded' ? 'warning' : 'danger',
@@ -236,12 +251,14 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
       copy.className = 'mw-agent-card__copy';
       copy.append(
         textElement('h3', 'mw-agent-card__title', runtime.name || runtime.provider),
-        availability,
         textElement('p', 'mw-agent-card__detail', runtime.detail),
       );
-      card.append(
-        createIcon('icon-agent', { size: 40 }),
-        copy,
+      if (runtime.statusDetail) {
+        copy.append(textElement('p', 'mw-agent-card__runtime-status-detail', runtime.statusDetail));
+      }
+      availability.classList.add('mw-agent-card__runtime-status');
+      cardActions.className = 'mw-agent-card__runtime-actions';
+      cardActions.append(
         action(
           '使用',
           'useRuntime',
@@ -250,6 +267,21 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
           'primary',
           runtime.availability !== 'ready',
         ),
+      );
+      if (options.onDeleteRuntime) {
+        cardActions.append(action(
+          '删除',
+          'deleteRuntime',
+          runtime.id,
+          options.onDeleteRuntime,
+          'danger',
+        ));
+      }
+      card.append(
+        createIcon('icon-external-agent', { size: 32 }),
+        copy,
+        availability,
+        cardActions,
       );
       list.append(card);
     }

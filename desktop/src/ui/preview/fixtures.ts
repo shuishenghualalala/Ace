@@ -1042,6 +1042,54 @@ const fixtures = {
     responses: composerResponses(),
     events: [openEvent],
   },
+  'agent-runtimes': {
+    id: 'agent-runtimes',
+    now: NOW,
+    auth: 'authenticated',
+    backend: 'connected',
+    owner: OWNER,
+    responses: {
+      ...commonResponses,
+      '/api/config': ok({
+        model: 'fixture-model',
+        has_key: true,
+        base_url: '',
+        active_model_id: 'fixture-model',
+        models: [{
+          id: 'fixture-model', name: '演示模型', model: 'fixture-model',
+          has_key: true, loaded: true, builtin: true,
+        }],
+        external_agents: { enabled: true },
+      }),
+      '/api/runtimes': ok([
+        {
+          id: 'runtime-kimi', name: 'Kimi', provider: 'kimi', version: '0.26.0',
+          availability_status: 'ready', executable_path: '/fixture/bin/kimi',
+          metadata: { runtime_profile_version: 1 },
+        },
+        {
+          id: 'runtime-codex', name: 'Codex', provider: 'codex', version: 'codex-cli 0.147.0-alpha.1.2',
+          availability_status: 'degraded', executable_path: '/fixture/bin/codex',
+          metadata: {
+            runtime_profile_version: 1,
+            probe: { error_code: 'probe_failed', message: '模型服务暂时未响应' },
+          },
+        },
+        {
+          id: 'runtime-hermes', name: 'Hermes', provider: 'hermes', version: 'Hermes Agent v0.16.0 (2026.6.5)',
+          availability_status: 'degraded', executable_path: '/fixture/bin/hermes',
+          metadata: {
+            runtime_profile_version: 1,
+            probe: { error_code: 'models_empty', message: '运行时未返回可选模型' },
+          },
+        },
+      ]),
+      'DELETE /api/runtimes/runtime-kimi': ok({ ok: true }),
+      'DELETE /api/runtimes/runtime-codex': ok({ ok: true }),
+      'DELETE /api/runtimes/runtime-hermes': ok({ ok: true }),
+    },
+    events: [openEvent],
+  },
   'work-dashboard': {
     id: 'work-dashboard',
     now: NOW,

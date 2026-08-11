@@ -10,7 +10,7 @@ import {
   type Skill,
 } from '../backend-client';
 import { setRuntimeStyle } from '../components/runtime-style';
-import { MONOCHROME_ICON_CLASS } from '../components/icon';
+import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
 import { getSkills, onSkillsChange } from './skill-store';
 import { queryPrimaryComposer } from './composer-scope';
 import { $, $$, ensureSessionBook, escapeHtml, notify, patchBook, state, type ComposerMode } from '../state';
@@ -48,8 +48,39 @@ import {
   selectNextConversationMode,
   type ConversationSecurityMode,
 } from './security-approval';
+import {
+  externalAgentAvatarMarkup,
+  externalAgentInitial,
+  externalAgentTone,
+} from './external-agent-avatar';
 
 type ComposerEntry = ComposerMode | 'external';
+
+function createComposerTeamLogoElement(): HTMLSpanElement {
+  const logo = document.createElement('span');
+  logo.className = 'session__team-logo';
+  logo.setAttribute('aria-hidden', 'true');
+  logo.append(document.createElement('i'), document.createElement('i'));
+  return logo;
+}
+
+function createComposerTeamChipIcon(): HTMLSpanElement {
+  const icon = document.createElement('span');
+  icon.className = 'mw-context-chip__icon mw-context-chip__external-agent-avatar';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.append(createComposerTeamLogoElement());
+  return icon;
+}
+
+function createComposerAgentChipIcon(provider: string, displayBadge?: string): HTMLSpanElement {
+  const icon = document.createElement('span');
+  icon.className = `mw-context-chip__icon mw-context-chip__external-agent-avatar mw-context-chip__external-agent-avatar--provider agent-provider-tone-${externalAgentTone(provider)}`;
+  icon.setAttribute('aria-hidden', 'true');
+  const initial = document.createElement('span');
+  initial.textContent = externalAgentInitial(provider, displayBadge);
+  icon.append(initial);
+  return icon;
+}
 
 const CRAFT_OPTIONS: { value: ComposerEntry; label: string; desc: string }[] = [
   { value: 'craft', label: '智能体', desc: '默认单 Agent 创作' },
@@ -359,13 +390,16 @@ export function syncCraftLabel(): void {
   if (!label) return;
   const externalDisplay = getSessionAgentDisplay(state.activeSessionId);
   const externalKind = externalDisplay?.agentBinding?.kind;
+  const externalProvider = String(externalDisplay?.agentLabel?.provider || 'external').trim() || 'external';
   const externalName = String(externalDisplay?.agentLabel?.name || '').trim();
+  const externalSelected = Boolean(
+    externalName
+    && (externalKind === 'external_agent' || externalKind === 'external_team'),
+  );
+  const externalTeamSelected = externalKind === 'external_team' || externalProvider.toLowerCase() === 'team';
   let title = 'Craft · Plan · Ask';
   // 选中外援后，按钮直接显示外援名，不再带模式前缀
-  if (
-    externalName
-    && (externalKind === 'external_agent' || externalKind === 'external_team')
-  ) {
+  if (externalSelected) {
     label.textContent = externalName;
     title = `外援：${externalName}`;
   } else {
@@ -374,6 +408,19 @@ export function syncCraftLabel(): void {
   }
   if (btn) {
     btn.title = title;
+    const icon = btn.querySelector<HTMLElement>('.mw-context-chip__icon');
+    if (externalSelected) {
+      const nextIcon = externalTeamSelected
+        ? createComposerTeamChipIcon()
+        : createComposerAgentChipIcon(externalProvider, externalDisplay?.agentLabel?.display_badge);
+      if (icon) icon.replaceWith(nextIcon);
+      else btn?.prepend(nextIcon);
+    } else if (icon?.classList.contains('mw-context-chip__external-agent-avatar')) {
+      icon.replaceWith(createIcon('icon-crew-agent', {
+        className: `mw-context-chip__icon ${MONOCHROME_ICON_CLASS}`,
+        size: 16,
+      }));
+    }
   }
   const activeEntry = activeComposerEntry();
   const selected = activeEntry !== 'craft';
@@ -423,7 +470,16 @@ function renderComposerModeSwitch(activeMode: ComposerEntry): string {
 
 function spriteIcon(id: string, className?: string): string {
   const viewBox = id === 'skill-badge' ? '0 0 32 32' : '0 0 24 24';
-  const classes = ['mw-icon', className].filter(Boolean).join(' ');
+  const classes = ['mw-icon', id === 'icon-crew-agent' ? 'mw-icon--template-image' : '', className]
+    .filter(Boolean)
+    .join(' ');
+  if (id === 'icon-external-agent' || id === 'icon-crew-agent') {
+    const isCrewAgent = id === 'icon-crew-agent';
+    const href = isCrewAgent ? './menubar/default.png' : './external-agent.png';
+    const inset = isCrewAgent ? 0 : 1;
+    const size = isCrewAgent ? 24 : 22;
+    return `<svg class="${classes}" viewBox="${viewBox}" width="18" height="18" aria-hidden="true"><image href="${href}" x="${inset}" y="${inset}" width="${size}" height="${size}" preserveAspectRatio="xMidYMid meet"></image></svg>`;
+  }
   return `<svg class="${classes}" viewBox="${viewBox}" width="18" height="18" aria-hidden="true"><use href="#${id}"></use></svg>`;
 }
 
@@ -436,10 +492,10 @@ function renderCraftPopover(): void {
 
   const popover = document.createElement('div');
   popover.id = 'chat-craft-popover';
-  const craftIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>`;
+  const craftIcon = spriteIcon('icon-crew-agent', MONOCHROME_ICON_CLASS);
   const planIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
   const askIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
-  const externalIcon = spriteIcon('icon-agent', MONOCHROME_ICON_CLASS);
+  const externalIcon = spriteIcon('icon-external-agent', MONOCHROME_ICON_CLASS);
   const modeIcons: Record<ComposerEntry, string> = {
     craft: craftIcon,
     plan: planIcon,
@@ -731,12 +787,6 @@ function externalTeamLeaderLabel(
   return /\bleader$/i.test(leaderName) ? leaderName : `${leaderName} Leader`;
 }
 
-function externalAgentTone(value: string): number {
-  let hash = 0;
-  for (const char of value) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
-  return Math.abs(hash) % 6;
-}
-
 function bindExternalModeSwitch(
   popover: HTMLElement,
   anchor: HTMLElement,
@@ -804,7 +854,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       : '暂时不可用，请到外援页面再找找';
     return `
       <button type="button" class="composer-select-item${ready ? '' : ' is-unavailable'}" data-external-agent-id="${escapeHtml(agent.id)}" data-external-filterable aria-disabled="${ready ? 'false' : 'true'}">
-        <span class="composer-agent-badge composer-agent-pixel-icon composer-agent-pixel-icon--tone-${externalAgentTone(agent.id || agent.name)}" aria-hidden="true">${escapeHtml(agent.display_badge || '?')}</span>
+        ${externalAgentAvatarMarkup(agent.provider || 'external', agent.display_badge)}
         <span class="composer-select-item__body">
           <span class="composer-select-item__title">${escapeHtml(agent.name || '未命名外援')}</span>
           <span class="composer-select-item__desc${ready ? '' : ' composer-select-item__desc--warn'}">${escapeHtml(description)}</span>

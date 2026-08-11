@@ -4,7 +4,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { backendApi } from '../../src/ui/backend-client';
 import { initAgentsPage, loadAgentsPage } from '../../src/ui/features/agents-page';
+import { createComposerContextView } from '../../src/ui/features/composer-context-view';
 import { bindComposerToolbar } from '../../src/ui/features/composer-toolbar';
+import { externalAgentInitial, externalAgentTone } from '../../src/ui/features/external-agent-avatar';
+import { getFixture } from '../../src/ui/preview/fixtures';
 import { STORAGE_KEYS } from '../../src/shared/storage-keys';
 import {
   __resetAllStoresForTest,
@@ -24,7 +27,7 @@ function mountComposer(): void {
 async function openExternalEntry(): Promise<void> {
   document.getElementById('chat-craft-btn')?.click();
   const entry = document.querySelector<HTMLElement>('[data-craft-mode="external"]');
-  expect(entry?.querySelector('.composer-external-agent-logo')).not.toBeNull();
+  expect(entry?.querySelector('.mw-icon image')?.getAttribute('href')).toBe('./external-agent.png');
   entry?.click();
   await vi.waitFor(() => {
     expect(document.getElementById('chat-external-inline-popover')?.textContent).not.toContain(
@@ -61,6 +64,40 @@ afterEach(() => {
 });
 
 describe('composer 外援入口', () => {
+  it('新建对话默认智能体入口与浮层使用智能体图标', () => {
+    document.body.innerHTML = `
+      <main id="composer-root">
+        <div data-composer-context-target="project"></div>
+        <div data-composer-context-target="before-input"></div>
+        <div data-composer-context-target="toolbar-left"></div>
+        <div data-composer-context-target="toolbar-right"></div>
+      </main>
+    `;
+    const root = document.getElementById('composer-root') as HTMLElement;
+    const view = createComposerContextView(root);
+    const disposeToolbar = bindComposerToolbar();
+    const trigger = document.getElementById('chat-craft-btn');
+
+    expect(trigger?.querySelector('.mw-context-chip__icon image')?.getAttribute('href')).toBe('./menubar/default.png');
+    expect(trigger?.querySelector('.mw-context-chip__icon use')).toBeNull();
+
+    trigger?.click();
+    const agentEntry = document.querySelector('[data-craft-mode="craft"]');
+    expect(agentEntry?.querySelector('.mw-icon image')?.getAttribute('href')).toBe('./menubar/default.png');
+    expect(agentEntry?.querySelector('.mw-icon use')).toBeNull();
+
+    disposeToolbar();
+    view.dispose();
+  });
+
+  it('我的外援头像沿用 display_badge，并在缺失时回退 provider 首字母', () => {
+    expect(externalAgentInitial('kimi')).toBe('K');
+    expect(externalAgentInitial('codex', 'X')).toBe('X');
+    expect(externalAgentInitial('claude-code')).toBe('C');
+    expect(externalAgentTone('kimi')).not.toBe(externalAgentTone('codex'));
+    expect(externalAgentTone('kimi')).toBe(externalAgentTone('KIMI'));
+  });
+
   it('外援中心用三步 Spotlight 引导发现、添加和派活，并支持关闭后从头重播', async () => {
     configStore.set({
       config: {
@@ -102,16 +139,15 @@ describe('composer 外援入口', () => {
     await initAgentsPage();
     await loadAgentsPage();
 
-    expect(document.querySelector('.agents-panel__head h1')?.textContent).toBe('外援中心');
-    expect(document.querySelector('.agents-tabs')?.textContent).toContain('我的阵容');
-    expect(document.querySelector('.agents-tabs')?.textContent).toContain('发现外援');
-    expect(document.querySelector('.agents-tabs')?.textContent).toContain('添加外援');
-    expect(document.querySelector('.agents-tabs')?.textContent).toContain('组建团队');
-    const lineupEmptyStates = document.querySelectorAll('.agents-empty--actionable');
+    expect(document.querySelector('.mw-hub-heading__title')?.textContent).toBe('外援');
+    expect(document.querySelector('[role="tablist"]')?.textContent).toContain('我的阵容');
+    expect(document.querySelector('[role="tablist"]')?.textContent).toContain('发现外援');
+    expect(document.querySelector('[role="tablist"]')?.textContent).toContain('添加外援');
+    expect(document.querySelector('[role="tablist"]')?.textContent).toContain('组建团队');
+    const lineupEmptyStates = document.querySelectorAll('.mw-agent-hub__grid .mw-hub-state');
     expect(lineupEmptyStates).toHaveLength(2);
     lineupEmptyStates.forEach((emptyState) => {
-      expect(emptyState.classList).toContain('agents-empty--wide');
-      expect(emptyState.classList).not.toContain('agents-empty--plain');
+      expect(emptyState.closest('.mw-agent-card')).toBeNull();
     });
     expect(document.querySelector('[data-agents-guide]')?.textContent).toContain('第一次来外援中心');
     expect(document.querySelector('[data-agents-guide]')?.parentElement).toBe(
@@ -138,21 +174,18 @@ describe('composer 外援入口', () => {
       firstTarget.scrollIntoView = vi.fn();
       vi.spyOn(firstTarget, 'getBoundingClientRect').mockReturnValue(rect(820, 160, 120, 40));
       vi.spyOn(guideBubble, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 300, 160));
-      document.querySelector<HTMLElement>('[data-agents-guide-locate]')?.click();
+      expect(document.querySelector('[data-agents-guide-locate]')).toBeNull();
+      window.dispatchEvent(new Event('resize'));
       await vi.waitFor(() => expect(guideHighlight?.hidden).toBe(false));
-      expect(guideHighlight?.style.left).toBe('814px');
-      expect(guideHighlight?.style.top).toBe('154px');
-      expect(guideHighlight?.style.width).toBe('132px');
-      expect(guideBubble.style.left).toBe('508px');
-      expect(firstTarget.scrollIntoView).toHaveBeenCalledWith({
-        behavior: 'smooth',
-        block: 'center',
-        inline: 'nearest',
-      });
+      expect(guideHighlight?.style.getPropertyValue('--mw-runtime-left')).toBe('814px');
+      expect(guideHighlight?.style.getPropertyValue('--mw-runtime-top')).toBe('154px');
+      expect(guideHighlight?.style.getPropertyValue('--mw-runtime-width')).toBe('132px');
+      expect(guideBubble.style.getPropertyValue('--mw-runtime-left')).toBe('508px');
+      expect(firstTarget.scrollIntoView).not.toHaveBeenCalled();
     }
 
     const scrollBy = vi.fn();
-    const agentsPanel = document.querySelector<HTMLElement>('.agents-panel');
+    const agentsPanel = document.querySelector<HTMLElement>('.mw-hub-template__results');
     if (agentsPanel) agentsPanel.scrollBy = scrollBy;
     guidePortal?.dispatchEvent(new WheelEvent('wheel', { deltaY: 72, bubbles: true, cancelable: true }));
     expect(scrollBy).toHaveBeenCalledWith({ top: 72, behavior: 'auto' });
@@ -182,15 +215,18 @@ describe('composer 外援入口', () => {
     expect(document.querySelector('[data-agents-guide]')).toBeNull();
 
     document.querySelector<HTMLElement>('[data-agents-tab="runtime"]')?.click();
-    expect(document.querySelector('.agents-section__intro h2')?.textContent).toBe('发现外援');
+    expect(document.querySelector('.mw-agent-hub__section-header h2')?.textContent).toBe('发现外援');
     expect(document.querySelector('[data-scan-runtimes]')?.textContent).toContain('再找找');
-    expect(document.querySelector('.agent-card__meta')?.textContent).toContain('随时可用');
+    expect(document.querySelector('.mw-agent-card')?.textContent).toContain('随时可用');
     expect(document.querySelector('.runtime-technical-details')).toBeNull();
-    expect(document.querySelector('.agent-card')?.textContent).not.toContain('codex-acp');
-    expect(document.querySelector('.agent-card')?.textContent).not.toContain('/usr/local/bin/codex');
+    expect(document.querySelector('.mw-agent-card')?.textContent).not.toContain('codex-acp');
+    expect(document.querySelector('.mw-agent-card')?.textContent).not.toContain('/usr/local/bin/codex');
+    const runtimeLogo = document.querySelector('[data-runtime-id] > .mw-icon');
+    expect(runtimeLogo?.querySelector('image')?.getAttribute('href')).toBe('./external-agent.png');
+    expect(runtimeLogo?.querySelector('use')).toBeNull();
     expect(document.querySelector('[data-runtime-id]')?.textContent).toContain('使用');
 
-    document.querySelector<HTMLElement>('[data-runtime-id="runtime-codex"]')?.click();
+    document.querySelector<HTMLElement>('[data-use-runtime="runtime-codex"]')?.click();
     expect(document.querySelector('.agents-section h2')?.textContent).toBe('添加外援');
     expect(document.querySelector('.agents-form')?.textContent).toContain('可用外援');
     expect(document.querySelector('.agents-form')?.textContent).toContain('外援称呼');
@@ -198,6 +234,8 @@ describe('composer 外援入口', () => {
     expect(document.querySelector('[data-create-agent]')?.textContent).toContain('加入我的外援');
 
     document.querySelector<HTMLElement>('[data-agents-tab="create-team"]')?.click();
+    expect(document.querySelector('.mw-agent-hub__form > .mw-agent-hub__legacy-form > .team-create')).not.toBeNull();
+    expect(document.querySelectorAll('.team-create__heading .team-mark i')).toHaveLength(2);
     const leaderTrigger = document.querySelector<HTMLElement>('[data-agents-select-key="team-leader"]');
     expect(leaderTrigger?.textContent).toContain('Crew');
     expect(leaderTrigger?.textContent).toContain('内置');
@@ -239,6 +277,79 @@ describe('composer 外援入口', () => {
     await initAgentsPage();
     await loadAgentsPage();
     expect(backendApi.scanRuntimes).toHaveBeenCalledTimes(1);
+  });
+
+  it('发现外援用紧凑状态行显示探测原因，并为所有运行时提供删除入口', async () => {
+    configStore.set({
+      config: {
+        model: 'test',
+        has_key: true,
+        base_url: '',
+        active_model_id: 'test',
+        models: [],
+        external_agents: { enabled: true },
+      },
+    });
+    localStorage.setItem(STORAGE_KEYS.externalAgentsGuideDismissed, 'true');
+    vi.spyOn(backendApi, 'runtimes').mockResolvedValue([
+      {
+        id: 'runtime-codex',
+        name: 'Codex',
+        provider: 'codex',
+        version: 'codex-cli 1.2.3',
+        availability_status: 'degraded',
+        metadata: {
+          runtime_profile_version: 1,
+          probe: { error_code: 'probe_failed', message: '模型服务暂时未响应' },
+        },
+      },
+      {
+        id: 'runtime-e2e',
+        name: 'E2E Source Runtime',
+        provider: 'e2e',
+        version: 'e2e',
+        availability_status: 'unavailable',
+      },
+    ]);
+    vi.spyOn(backendApi, 'externalAgents').mockResolvedValue([]);
+    vi.spyOn(backendApi, 'externalTeams').mockResolvedValue([]);
+    vi.spyOn(backendApi, 'externalTeamRoles').mockResolvedValue([]);
+    const deleteRuntime = vi.spyOn(backendApi, 'deleteRuntime').mockResolvedValue({ ok: true });
+    vi.stubGlobal('confirm', vi.fn(() => true));
+
+    document.body.innerHTML = '<div id="agents-page-root"></div>';
+    await initAgentsPage();
+    await loadAgentsPage();
+    document.querySelector<HTMLElement>('[data-agents-tab="runtime"]')?.click();
+
+    const codexRow = document.querySelector<HTMLElement>('[data-runtime-id="runtime-codex"]');
+    const e2eRow = document.querySelector<HTMLElement>('[data-runtime-id="runtime-e2e"]');
+    expect(codexRow?.textContent).toContain('模型探测失败');
+    expect(codexRow?.textContent).toContain('模型服务暂时未响应');
+    expect(codexRow?.querySelector('.mw-agent-card__copy .mw-badge')).toBeNull();
+    expect(document.querySelectorAll('[data-runtime-id] [data-delete-runtime]')).toHaveLength(2);
+    expect(codexRow?.querySelector('[data-delete-runtime="runtime-codex"]')).not.toBeNull();
+    expect(e2eRow?.textContent).toContain('当前未找到可执行文件');
+    expect(e2eRow?.querySelector('[data-delete-runtime="runtime-e2e"]')).not.toBeNull();
+
+    e2eRow?.querySelector<HTMLElement>('[data-delete-runtime="runtime-e2e"]')?.click();
+    await vi.waitFor(() => expect(deleteRuntime).toHaveBeenCalledWith('runtime-e2e'));
+    expect(document.querySelector('[data-runtime-id="runtime-e2e"]')).toBeNull();
+    expect(document.querySelector('.mw-agent-hub__message')?.textContent).toContain('已删除 E2E Source Runtime');
+  });
+
+  it('Runtime 视觉夹具不再注入 E2E 记录，并为每条展示数据提供删除响应', () => {
+    const fixture = getFixture('agent-runtimes');
+    const runtimeResponse = fixture.responses['/api/runtimes']?.body;
+    const fixtureRuntimes = Array.isArray(runtimeResponse)
+      ? runtimeResponse as Array<{ id: string }>
+      : [];
+
+    expect(fixtureRuntimes.map((runtime) => runtime.id)).not.toContain('runtime-e2e');
+    expect(fixtureRuntimes).not.toHaveLength(0);
+    fixtureRuntimes.forEach((runtime) => {
+      expect(fixture.responses[`DELETE /api/runtimes/${runtime.id}`]?.body).toEqual({ ok: true });
+    });
   });
 
   it('Desktop Gateway 文本流按 Fast、AI 状态、final 顺序更新组队结果', async () => {
@@ -475,6 +586,8 @@ describe('composer 外援入口', () => {
     await initAgentsPage();
     await loadAgentsPage();
 
+    expect(document.querySelector('[data-agent-id="agent-leader"] .mw-agent-card__external-avatar.agent-provider-tone-1')).not.toBeNull();
+
     const card = document.querySelector<HTMLElement>('[data-team-id="team-product"]');
     expect(card?.getAttribute('role')).toBe('button');
     card?.click();
@@ -662,42 +775,31 @@ describe('composer 外援入口', () => {
     expect(popover?.textContent).toContain('研发外援团');
     expect(popover?.textContent).toContain('1 名成员 · Codex 开发助手 Leader');
     expect(popover?.textContent).not.toContain('冗长团队目标说明');
+    const expectedBadges = {
+      'agent-codex': 'X',
+      'agent-kimi': 'K',
+      'agent-hermes': 'H',
+      'agent-claude': 'C',
+      'agent-contract-error': 'C',
+    } as const;
+    for (const [agentId, badge] of Object.entries(expectedBadges)) {
+      const row = popover?.querySelector<HTMLElement>(`[data-external-agent-id="${agentId}"]`);
+      expect(row?.querySelector('.composer-agent-avatar')).not.toBeNull();
+      expect(row?.querySelector('[class*="agent-provider-tone-"]')).not.toBeNull();
+      expect(row?.querySelector('.composer-agent-team-logo')).toBeNull();
+      expect(row?.querySelector('.composer-agent-avatar')?.textContent).toBe(badge);
+    }
     expect(
-      popover?.querySelector('[data-external-agent-id="agent-codex"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('X');
-    expect(
-      popover?.querySelector('[data-external-agent-id="agent-kimi"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('K');
-    expect(
-      popover?.querySelector('[data-external-agent-id="agent-hermes"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('H');
-    expect(
-      popover?.querySelector('[data-external-agent-id="agent-claude"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('C');
-    expect(
-      popover?.querySelector('[data-external-agent-id="agent-contract-error"] .composer-agent-pixel-icon')
-        ?.textContent,
-    ).toBe('?');
-    expect(
-      popover
-        ?.querySelector('[data-external-agent-id="agent-codex"] .composer-agent-pixel-icon')
-        ?.className,
-    ).toMatch(/composer-agent-pixel-icon--tone-\d/);
-    expect(
-      popover?.querySelector(
-        '[data-external-team-id="team-dev"] .composer-agent-pixel-icon',
-      ),
-    ).toBeNull();
+      popover?.querySelector('[data-external-agent-id="agent-codex"] .agent-provider-tone-1'),
+    ).not.toBeNull();
     expect(
       popover?.querySelectorAll(
         '[data-external-team-id="team-dev"] .composer-agent-team-logo .session__team-logo i',
       ),
     ).toHaveLength(2);
-    await vi.waitFor(() => expect(popover?.style.top).toBe('334px'));
+    await vi.waitFor(() => {
+      expect(popover?.style.getPropertyValue('--mw-runtime-top')).toBe('334px');
+    });
 
     popover?.querySelector<HTMLElement>('[data-external-agent-id="agent-codex"]')?.click();
     await vi.waitFor(() => expect(setAgentConfig).toHaveBeenCalledOnce());

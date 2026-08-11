@@ -17,6 +17,7 @@ from crew.core.types import ChatResponse, ToolCall
 from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.state.session_store import SQLiteSessionStore
+from crew.state.home import task_workspace_path
 from crew.state.workspace_store import SQLiteWorkspaceStore
 from crew.tools.registry import Registry
 
@@ -208,7 +209,17 @@ def test_save_title_fallback_empty_keeps_placeholder_for_summary(tmp_path):
     assert row["title"] == "文件清单问答"
 
 
-def test_app_enrich_workspace():
+def test_save_title_fallback_none_keeps_legacy_behavior(tmp_path):
+    """title_fallback=None 保持旧行为（首条 user 消息截断作 fallback），兼容未传该参数的调用方。"""
+    store = SQLiteSessionStore(str(tmp_path / "s.db"))
+    store.save("s-legacy", [Message.user("帮我看看天气")], title_fallback=None)
+    row = next(s for s in store.list_sessions() if s["session_id"] == "s-legacy")
+    assert row["title"] == "帮我看看天气"
+
+
+def test_app_enrich_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(tmp_path / "task-output"))
     ws_store = InMemoryWorkspaceStore()
     ws = ws_store.create("空间X", instructions="遵守X规范", owner_account_id="local")
     app = CrewApp(
@@ -223,7 +234,39 @@ def test_app_enrich_workspace():
     env = Envelope.of("hi", session_id="s1", workspace_id=ws["id"], user_id="local")
     app._enrich_workspace(env)
     assert env.params["workspace_instructions"] == "遵守X规范"
-    assert env.params["workspace_root_path"] == ""
+    assert env.params["workspace_root_path"] == str(
+        task_workspace_path(ws["id"], owner_account_id="local")
+    )
+
+
+def test_app_enrich_workspace_fills_root_when_instructions_are_preassembled(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(tmp_path / "task-output"))
+    ws_store = InMemoryWorkspaceStore()
+    ws = ws_store.create("空间X", instructions="遵守X规范", owner_account_id="local")
+    app = CrewApp(
+        Config(),
+        FakeProvider(),
+        Registry(),
+        InMemorySessionStore(),
+        ws_store,
+        NullMemory(),
+        PluginManager(),
+    )
+    env = Envelope.of(
+        "hi",
+        session_id="s1",
+        workspace_id=ws["id"],
+        user_id="local",
+        params={"workspace_instructions": "已由上游装配"},
+    )
+
+    app._enrich_workspace(env)
+
+    assert env.params["workspace_instructions"] == "已由上游装配"
+    assert env.params["workspace_root_path"] == str(
+        task_workspace_path(ws["id"], owner_account_id="local")
+    )
 
 
 async def test_single_agent_writes_relative_artifacts_to_task_workspace(tmp_path, monkeypatch):

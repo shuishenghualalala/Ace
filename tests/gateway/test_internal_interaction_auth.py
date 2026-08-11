@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from crew.core.runctx import current_owner_account_id
 from crew.gateway.auth_policy import requires_gateway_auth
 from crew.gateway.interaction_bridge import InteractionBridge, create_interaction_router
+from crew.security.models import NetworkAccess
 
 INTERNAL_BINDING_PATHS = (
     "/api/internal/interactions/ask",
@@ -55,6 +56,47 @@ def test_interaction_binding_inherits_runtime_owner_context():
 
     assert binding is not None
     assert binding.owner_account_id == "A:uid-a"
+
+
+def test_interaction_mcp_preserves_binding_env_and_only_allows_gateway_callback():
+    bridge = InteractionBridge()
+    bridge.configure(push_fn=lambda *_: None, gateway_url="http://127.0.0.1:8123")
+    binding = bridge.create_binding(
+        owner_account_id="A:uid-a",
+        display_session_id="main",
+        origin_session_id="main::agent",
+        agent_name="Kimi",
+        ttl_seconds=30,
+    )
+    assert binding is not None
+
+    config = bridge.mcp_server_config(binding)
+    env = {item["name"]: item["value"] for item in config["env"]}
+    assert env["CREW_INTERACTION_TOKEN"] == binding.token
+
+    permissions = bridge.local_callback_permissions(binding)
+    assert len(permissions.network) == 1
+    entry = permissions.network[0]
+    assert (entry.host, entry.port, entry.protocol) == ("127.0.0.1", 8123, "http")
+    assert entry.access is NetworkAccess.ALLOW
+    assert entry.allow_private is True
+    assert entry.escalatable is False
+
+
+def test_interaction_callback_rejects_non_loopback_gateway():
+    bridge = InteractionBridge()
+    bridge.configure(push_fn=lambda *_: None, gateway_url="https://example.com:443")
+    binding = bridge.create_binding(
+        owner_account_id="A:uid-a",
+        display_session_id="main",
+        origin_session_id="main::agent",
+        agent_name="Kimi",
+        ttl_seconds=30,
+    )
+    assert binding is not None
+
+    with pytest.raises(RuntimeError, match="loopback"):
+        bridge.local_callback_permissions(binding)
 
 
 def test_remove_owner_revokes_only_that_owners_bindings():

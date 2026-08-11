@@ -35,7 +35,11 @@ from crew.agent.external.runtime_adapter import (
     get_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import canonical_runtime_model_id
-from crew.agent.external.runtime_registry import resolve_runtime_adapter_id
+from crew.agent.external.runtime_registry import (
+    resolve_runtime_adapter_id,
+    resolve_runtime_credential_home_paths,
+    resolve_runtime_network_endpoints,
+)
 from crew.agent.file_changes import (
     TurnFileChangeTracker,
     persist_file_changes,
@@ -47,6 +51,7 @@ from crew.core.followup import drain_followup_answer_messages
 from crew.core.runctx import current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.state.home import get_owner_runtime_home
+from crew.security.models import AdditionalPermissionProfile
 from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
 
 
@@ -943,6 +948,14 @@ class ExternalExecutor(AgentExecutor):
         prompt = ctx.query
         protocol = str(runtime.get("protocol") or "").lower()
         runtime_metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
+        credential_home_paths = resolve_runtime_credential_home_paths(
+            provider=provider,
+            metadata=runtime_metadata,
+        )
+        network_endpoints = resolve_runtime_network_endpoints(
+            provider=provider,
+            metadata=runtime_metadata,
+        )
         adapter_id = resolve_runtime_adapter_id(
             provider=provider,
             protocol=protocol,
@@ -1114,6 +1127,13 @@ class ExternalExecutor(AgentExecutor):
                             else []
                         )
                     )
+                    additional_permissions = (
+                        bridge.local_callback_permissions(interaction_binding)
+                        if mcp_servers
+                        and interaction_binding is not None
+                        and callable(getattr(bridge, "local_callback_permissions", None))
+                        else None
+                    )
                     dynamic_tools = (
                         bridge.dynamic_tool_specs(interaction_binding)
                         if use_dynamic_control_tools
@@ -1163,6 +1183,9 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=adapter_system_prompt,
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        credential_home_paths=credential_home_paths,
+                        network_endpoints=network_endpoints,
+                        additional_permissions=additional_permissions or AdditionalPermissionProfile(),
                         mcp_servers=mcp_servers,
                         dynamic_tools=dynamic_tools,
                         dynamic_tool_handler=dynamic_tool_handler,
@@ -1272,6 +1295,8 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=_external_system_prompt(agent, runtime, effective_model),
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        credential_home_paths=credential_home_paths,
+                        network_endpoints=network_endpoints,
                         timeout=self.config.timeout,
                     )
                 )

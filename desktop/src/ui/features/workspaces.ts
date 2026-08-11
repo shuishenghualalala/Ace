@@ -19,7 +19,8 @@ import {
 import { openDialog, type OverlayHandle } from '../components/overlays';
 import { isChannelSessionId, type ChannelSessionGroup } from './channel-sessions';
 import { isSessionVisibleWithExternalAgentsFlag } from './external-agents-feature';
-import { applySessionModelBinding, activeComposerModelId, mergeSessionModelsFromBackend, modelLabelForId, syncSessionModelUi } from './session-model';
+import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
+import { applySessionModelBinding, mergeSessionModelsFromBackend, modelIdForNewCrewSession, modelLabelForId, syncSessionModelUi } from './session-model';
 import { assignSecurityMode } from './security-approval';
 import {
   patchMountedSessionHistoryStatus,
@@ -318,7 +319,7 @@ function sessionLeadingInner(s: SessionRow): string {
     return '<span class="session__team-logo" aria-hidden="true"><i></i><i></i></span>';
   }
   if (provider && provider !== 'crew' && provider !== 'builtin' && provider !== 'client') {
-    return `<span class="session__agent-badge session__agent-badge--external" aria-hidden="true">${escapeHtml(s.agentLabel?.display_badge || '?')}</span>`;
+    return `<span class="session__external-agent-icon agent-provider-tone-${externalAgentTone(provider)}" aria-hidden="true">${escapeHtml(externalAgentInitial(provider, s.agentLabel?.display_badge))}</span>`;
   }
   return CONVERSATION_ICON;
 }
@@ -957,7 +958,7 @@ export function createSessionInWorkspace(workspaceId: string, openSession: OpenS
 
   if (!requireRendererLogin()) return '';
 
-  const seedModel = activeComposerModelId() || state.config?.active_model_id || '';
+  const seedModel = modelIdForNewCrewSession();
 
   discardDraft();
 

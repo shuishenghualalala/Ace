@@ -80,6 +80,7 @@ impl NetworkPolicy {
                 "network destination is not approved",
             )
         })?;
+        let requested_by_hostname = host.parse::<IpAddr>().is_err();
         let addresses: Vec<SocketAddr> = (host.as_str(), port)
             .to_socket_addrs()
             .map_err(|error| {
@@ -104,7 +105,10 @@ impl NetworkPolicy {
                     "cloud metadata endpoints are permanently denied",
                 ));
             }
-            if is_local_or_private(address.ip()) && !allow.allow_private {
+            if is_local_or_private(address.ip())
+                && !(requested_by_hostname && is_synthetic_dns_address(address.ip()))
+                && !allow.allow_private
+            {
                 return Err(NetworkError::new(
                     NetworkErrorCode::PolicyDenied,
                     "destination resolved to a local or private address",
@@ -201,6 +205,18 @@ fn is_local_or_private(ip: IpAddr) -> bool {
     }
 }
 
+fn is_synthetic_dns_address(ip: IpAddr) -> bool {
+    // Clash and similar system proxies commonly return RFC 2544 benchmarking
+    // addresses for exact hostnames, then route those synthetic addresses through
+    // their TUN device. Permit this range only after an exact hostname rule matched;
+    // a literal 198.18/15 network permission remains classified as private.
+    let ip = match ip {
+        IpAddr::V6(value) => value.to_ipv4().map(IpAddr::V4).unwrap_or(IpAddr::V6(value)),
+        other => other,
+    };
+    matches!(ip, IpAddr::V4(value) if ipv4_in_cidr(value, [198, 18, 0, 0], 15))
+}
+
 fn ipv4_in_cidr(ip: std::net::Ipv4Addr, base: [u8; 4], prefix: u8) -> bool {
     let ip = u32::from(ip);
     let base = u32::from(std::net::Ipv4Addr::from(base));
@@ -277,6 +293,19 @@ mod tests {
         // 100.64.0.1 属 CGNAT（RFC 6598），非公网；无 allow_private 时必须拒绝。
         let policy = NetworkPolicy::new(vec![rule("100.64.0.1", true, false)]).unwrap();
         assert!(policy.resolve_allowed("100.64.0.1", 8080, "http").is_err());
+    }
+
+    #[test]
+    fn exact_hostname_can_use_a_synthetic_rfc2544_dns_address() {
+        assert!(is_synthetic_dns_address("198.18.0.105".parse().unwrap()));
+        assert!(is_local_or_private("198.18.0.105".parse().unwrap()));
+        assert!(!is_synthetic_dns_address("10.0.0.1".parse().unwrap()));
+
+        // Literal IP rules do not receive the hostname-only exception.
+        let policy = NetworkPolicy::new(vec![rule("198.18.0.105", true, false)]).unwrap();
+        assert!(policy
+            .resolve_allowed("198.18.0.105", 8080, "http")
+            .is_err());
     }
 
     // N8 regression: resolve_allowed must surface stable NetworkErrorCode

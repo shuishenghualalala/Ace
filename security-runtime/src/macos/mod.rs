@@ -5,16 +5,20 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 use rand::RngCore;
 
-use crate::protocol::{RuntimeCapabilities, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
+use crate::protocol::{
+    RuntimeCapabilities, RuntimeControl, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES,
+};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const SEATBELT_PREFLIGHT_PROFILE: &str =
+    "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process*)\n";
 static ACTIVE_PROCESS_GROUP: AtomicI32 = AtomicI32::new(0);
 const PLATFORM_READ_ROOTS: &[&str] = &[
     "/System",
@@ -39,6 +43,7 @@ pub struct MacOsRunRequest {
     pub max_output_bytes: usize,
     pub stdin: Option<Vec<u8>>,
     pub env_overrides: BTreeMap<String, String>,
+    pub home_files: BTreeMap<String, Vec<u8>>,
 }
 
 pub struct MacOsRuntimeError {
@@ -51,16 +56,31 @@ struct SandboxPlan {
     parameters: Vec<(String, String)>,
     cwd: PathBuf,
     home: PathBuf,
+    private_home: PathBuf,
 }
 
 pub fn run(
     request: MacOsRunRequest,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), MacOsRuntimeError> {
+    run_with_control(request, None, sender)
+}
+
+pub fn run_interactive(
+    request: MacOsRunRequest,
+    control_rx: Receiver<RuntimeControl>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), MacOsRuntimeError> {
+    run_with_control(request, Some(control_rx), sender)
+}
+
+fn run_with_control(
+    request: MacOsRunRequest,
+    control_rx: Option<Receiver<RuntimeControl>>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), MacOsRuntimeError> {
     install_signal_cleanup();
-    if !Path::new(SANDBOX_EXEC).is_file() {
-        return Err(unavailable("macOS Seatbelt launcher is unavailable"));
-    }
+    ensure_sandbox_exec_available()?;
     let policy =
         crate::network::NetworkPolicy::new(request.network_rules.clone()).map_err(network_error)?;
     let proxy = if request.network_enabled {
@@ -82,10 +102,10 @@ pub fn run(
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("HOME", &plan.home)
-        .env("TMPDIR", &plan.home)
+        .env("TMPDIR", &plan.private_home)
         .env("ACE_SANDBOX", "macos-seatbelt")
         .envs(&request.env_overrides)
-        .stdin(if request.stdin.is_some() {
+        .stdin(if request.stdin.is_some() || control_rx.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
@@ -95,17 +115,13 @@ pub fn run(
     command.process_group(0);
     if let Some(address) = proxy_address {
         let proxy_url = format!("http://{address}");
-        command
-            .env("HTTP_PROXY", &proxy_url)
-            .env("HTTPS_PROXY", &proxy_url)
-            .env("ALL_PROXY", &proxy_url)
-            .env("NO_PROXY", "");
+        command.envs(crate::network::managed_proxy_environment(&proxy_url));
     }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            cleanup_home(&plan.home);
+            cleanup_home(&plan.private_home);
             return Err(unavailable(format!(
                 "failed to start macOS Seatbelt: {error}"
             )));
@@ -138,11 +154,25 @@ pub fn run(
         .is_err()
     {
         terminate_child_tree(&mut child);
-        cleanup_home(&plan.home);
+        cleanup_home(&plan.private_home);
         return Err(unavailable("protocol receiver disconnected"));
     }
 
-    if let Some(stdin) = request.stdin {
+    if let Some(control_rx) = control_rx {
+        let mut child_stdin = child.stdin.take().expect("piped stdin");
+        thread::spawn(move || {
+            for control in control_rx {
+                match control {
+                    RuntimeControl::Write(data) => {
+                        if child_stdin.write_all(&data).is_err() {
+                            break;
+                        }
+                    }
+                    RuntimeControl::Close => break,
+                }
+            }
+        });
+    } else if let Some(stdin) = request.stdin {
         let mut child_stdin = child.stdin.take().expect("piped stdin");
         thread::spawn(move || {
             let _ = child_stdin.write_all(&stdin);
@@ -171,7 +201,7 @@ pub fn run(
             terminate_child_tree(&mut child);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
-            cleanup_home(&plan.home);
+            cleanup_home(&plan.private_home);
             return Err(failure.into_error());
         }
         match child.try_wait() {
@@ -179,7 +209,7 @@ pub fn run(
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(error) => {
                 terminate_child_tree(&mut child);
-                cleanup_home(&plan.home);
+                cleanup_home(&plan.private_home);
                 return Err(unavailable(format!(
                     "cannot wait for Seatbelt command: {error}"
                 )));
@@ -189,13 +219,44 @@ pub fn run(
     terminate_process_group(child.id());
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
-    cleanup_home(&plan.home);
+    cleanup_home(&plan.private_home);
     if let Ok(failure) = failure_receiver.try_recv() {
         return Err(failure.into_error());
     }
     sender
         .send(RuntimeMessage::Completed(status.code().unwrap_or(-1)))
         .map_err(|_| unavailable("protocol receiver disconnected"))
+}
+
+fn ensure_sandbox_exec_available() -> Result<(), MacOsRuntimeError> {
+    static PREFLIGHT: OnceLock<Result<(), String>> = OnceLock::new();
+    match PREFLIGHT.get_or_init(|| {
+        if !Path::new(SANDBOX_EXEC).is_file() {
+            return Err("macOS Seatbelt launcher is unavailable".to_string());
+        }
+        let output = Command::new(SANDBOX_EXEC)
+            .arg("-p")
+            .arg(SEATBELT_PREFLIGHT_PROFILE)
+            .arg("/usr/bin/true")
+            .output()
+            .map_err(|error| format!("failed to start macOS Seatbelt preflight: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let status = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_string(), |code| code.to_string());
+        Err(if stderr.is_empty() {
+            format!("macOS Seatbelt preflight failed with exit code {status}")
+        } else {
+            format!("macOS Seatbelt preflight failed with exit code {status}: {stderr}")
+        })
+    }) {
+        Ok(()) => Ok(()),
+        Err(message) => Err(unavailable(message.clone())),
+    }
 }
 
 fn terminate_child_tree(child: &mut std::process::Child) {
@@ -251,7 +312,16 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     }
     let readable = canonical_roots(&request.readable_roots)?;
     let denied = canonical_or_missing_roots(&request.denied_roots)?;
-    let home = create_private_home()?;
+    let private_home = create_private_home()?;
+    if let Err(error) = stage_home_files(&private_home, &request.home_files) {
+        cleanup_home(&private_home);
+        return Err(error);
+    }
+    let home = select_execution_home(
+        &writable,
+        &private_home,
+        std::env::var_os("HOME").map(PathBuf::from),
+    );
 
     let mut parameters = Vec::new();
     let mut read_rules = Vec::new();
@@ -300,7 +370,7 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         &mut read_rules,
         "PRIVATE_HOME",
         0,
-        &path_string(&home)?,
+        &path_string(&private_home)?,
         "allow file-read*",
     );
     push_subpath_rule(
@@ -308,7 +378,7 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         &mut write_rules,
         "PRIVATE_HOME_WRITE",
         0,
-        &path_string(&home)?,
+        &path_string(&private_home)?,
         "allow file-write*",
     );
 
@@ -352,7 +422,8 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     let profile = format!(
         "(version 1)\n(deny default)\n(import \"system.sb\")\n\
          (allow process*)\n(allow sysctl-read)\n(allow signal (target self))\n\
-         {}\n{}\n{}\n{}\n",
+         (allow mach-lookup (global-name \"com.apple.FSEvents\"))\n\
+         (allow file-read-metadata)\n{}\n{}\n{}\n{}\n",
         read_rules.join("\n"),
         write_rules.join("\n"),
         deny_rules.join("\n"),
@@ -363,7 +434,27 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         parameters,
         cwd,
         home,
+        private_home,
     })
+}
+
+fn select_execution_home(
+    writable: &[PathBuf],
+    private_home: &Path,
+    host_home: Option<PathBuf>,
+) -> PathBuf {
+    let Some(host_home) = host_home else {
+        return private_home.to_path_buf();
+    };
+    let host_home = host_home.canonicalize().unwrap_or(host_home);
+    if writable
+        .iter()
+        .any(|root| host_home == *root || host_home.starts_with(root))
+    {
+        host_home
+    } else {
+        private_home.to_path_buf()
+    }
 }
 
 fn push_subpath_rule(
@@ -394,6 +485,31 @@ fn create_private_home() -> Result<PathBuf, String> {
 
 fn cleanup_home(home: &Path) {
     let _ = fs::remove_dir_all(home);
+}
+
+fn stage_home_files(home: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+    for (relative_path, content) in files {
+        let destination = home.join(relative_path);
+        if destination
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("projected HOME path escapes the private home".to_string());
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create projected HOME directory: {error}"))?;
+        }
+        fs::write(&destination, content)
+            .map_err(|error| format!("cannot stage projected HOME file: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("cannot restrict projected HOME file: {error}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf, String> {
@@ -543,7 +659,7 @@ fn network_error(error: crate::network::policy::NetworkError) -> MacOsRuntimeErr
 
 #[cfg(test)]
 mod tests {
-    use super::{build_plan, MacOsRunRequest};
+    use super::{build_plan, select_execution_home, MacOsRunRequest};
     use std::collections::BTreeMap;
 
     fn request(workspace: &std::path::Path) -> MacOsRunRequest {
@@ -559,6 +675,7 @@ mod tests {
             max_output_bytes: 1024,
             stdin: None,
             env_overrides: BTreeMap::new(),
+            home_files: BTreeMap::new(),
         }
     }
 
@@ -570,6 +687,10 @@ mod tests {
         assert!(plan.profile.contains("DENIED_ROOT_0"));
         assert!(plan.profile.contains("deny file-read*"));
         assert!(plan.profile.contains("deny file-write*"));
+        assert!(plan
+            .profile
+            .contains("(allow mach-lookup (global-name \"com.apple.FSEvents\"))"));
+        assert!(!plan.profile.contains("(allow mach-lookup)"));
         assert!(!plan.profile.contains("allow network-outbound"));
     }
 
@@ -591,5 +712,27 @@ mod tests {
         value.allow_local_binding = true;
         let plan = build_plan(&value, None).unwrap();
         assert!(plan.profile.contains("allow network-bind"));
+    }
+
+    #[test]
+    fn host_home_is_used_only_when_an_explicit_writable_root_covers_it() {
+        let private_home = std::path::Path::new("/private/tmp/ace-private-home");
+        let host_home = std::path::Path::new("/Users/yun");
+        assert_eq!(
+            select_execution_home(
+                &[host_home.to_path_buf()],
+                private_home,
+                Some(host_home.to_path_buf()),
+            ),
+            host_home
+        );
+        assert_eq!(
+            select_execution_home(
+                &[std::path::PathBuf::from("/Users/yun/workspace")],
+                private_home,
+                Some(host_home.to_path_buf()),
+            ),
+            private_home
+        );
     }
 }

@@ -23,10 +23,8 @@ import {
 import { bindPagination, renderPagination } from '../pagination';
 import { openDialog } from '../components/overlays';
 
-// ponytail: 严格安全服务尚未就绪，当前默认兼容模式并隐藏此开关。
-// 上游 HTTPS 与安装校验服务就绪后：把此处改回 true，并去掉 assets/index.html 里
-// #set-strict-security 所在 row 的 hidden，即恢复桌面端开关。
-const STRICT_SECURITY_TOGGLE_VISIBLE = false;
+// Strict security is the default. Compatibility remains an explicit user choice.
+const STRICT_SECURITY_TOGGLE_VISIBLE = true;
 
 export interface SecurityCenterSnapshot {
   loading: boolean;

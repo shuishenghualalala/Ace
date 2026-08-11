@@ -30,7 +30,12 @@ from crew.agent.external.runtime_adapter import (
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
+    NativeInteractiveLineTransport,
+    build_external_runtime_home_files,
+    build_external_runtime_network_permissions,
     build_external_runtime_env,
+    build_managed_external_runtime_env,
+    open_managed_external_interactive,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
@@ -109,6 +114,8 @@ class ExternalCliConfig:
     system_prompt: str = ""
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
     timeout: float = 120.0
 
 
@@ -173,7 +180,11 @@ def _write_claude_mcp_config(request: RuntimeExecutionRequest) -> str:
             for server in request.mcp_servers
         }
     }
-    fd, path = tempfile.mkstemp(prefix="crew-claude-mcp-", suffix=".json")
+    fd, path = tempfile.mkstemp(
+        prefix=".crew-claude-mcp-",
+        suffix=".json",
+        dir=str(Path(request.cwd or ".").expanduser().resolve(strict=True)),
+    )
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(fd, 0o600)
@@ -190,6 +201,31 @@ def _write_claude_mcp_config(request: RuntimeExecutionRequest) -> str:
             pass
         raise
     return path
+
+
+class _SubprocessClaudeLineTransport:
+    """Line transport for the legacy direct path used when external security is off."""
+
+    def __init__(self, proc: asyncio.subprocess.Process) -> None:
+        self.process = proc
+
+    async def read_line(self) -> bytes:
+        if self.process.stdout is None:
+            return b""
+        return await self.process.stdout.readline()
+
+    async def write(self, data: bytes) -> None:
+        if self.process.stdin is None:
+            raise ExternalCliError("Claude CLI stdin 不可用")
+        self.process.stdin.write(data)
+        await self.process.stdin.drain()
+
+    async def close(self) -> None:
+        if self.process.stdin is not None and not self.process.stdin.is_closing():
+            self.process.stdin.close()
+
+    async def abort(self) -> None:
+        await terminate_process_tree(self.process)
 
 
 def default_cli_args(provider: str, prompt: str, model: str = "") -> tuple[list[str], str | None]:
@@ -520,11 +556,11 @@ def _claude_control_response(request_id: str, allow: bool, tool_input: Any) -> d
 async def _stream_claude_once(
     request: RuntimeExecutionRequest,
 ) -> AsyncIterator[ExternalStreamEvent]:
-    from crew.security.launch import host_stream_launch_block_reason
+    from crew.security.launch import current_process_launch
 
-    blocked = host_stream_launch_block_reason()
-    if blocked:
-        raise ExternalCliError(f"严格安全约束已拒绝 Claude Code 宿主流式启动：{blocked}")
+    launch = current_process_launch.get()
+    if launch is None:
+        raise ExternalCliError("Claude Code 缺少安全启动上下文")
     cwd = str(Path(request.cwd or ".").expanduser().resolve())
     env = build_external_runtime_env(request.custom_env)
     args = [
@@ -546,27 +582,42 @@ async def _stream_claude_once(
     if mcp_config_path:
         args.extend(["--mcp-config", mcp_config_path])
     args.extend(_filtered_claude_custom_args(request.custom_args))
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            request.executable_path,
-            *args,
-            cwd=cwd,
-            env=env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=64 * 1024 * 1024,
-            **isolated_process_kwargs(),
+    command = (request.executable_path, *args)
+    native_session = None
+    if launch.external_managed:
+        try:
+            native_session = await open_managed_external_interactive(request, command)
+        except Exception as exc:  # noqa: BLE001 - preserve adapter-level diagnostics
+            raise ExternalCliError(f"Claude Code managed runtime 启动失败: {exc}") from exc
+        if native_session is None:
+            raise ExternalCliError("Claude Code managed runtime 未建立 interactive session")
+        proc = native_session.process
+        transport = NativeInteractiveLineTransport(
+            native_session,
+            max_line_bytes=64 * 1024 * 1024,
         )
-    except OSError as exc:
-        if mcp_config_path:
-            try:
-                os.remove(mcp_config_path)
-            except OSError:
-                pass
-        if isinstance(exc, FileNotFoundError):
-            raise ExternalCliError(f"找不到可执行文件: {request.executable_path}") from exc
-        raise ExternalCliError(f"Claude Code 启动失败: {exc}") from exc
+    else:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=cwd,
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=64 * 1024 * 1024,
+                **isolated_process_kwargs(),
+            )
+        except OSError as exc:
+            if mcp_config_path:
+                try:
+                    os.remove(mcp_config_path)
+                except OSError:
+                    pass
+            if isinstance(exc, FileNotFoundError):
+                raise ExternalCliError(f"找不到可执行文件: {request.executable_path}") from exc
+            raise ExternalCliError(f"Claude Code 启动失败: {exc}") from exc
+        transport = _SubprocessClaudeLineTransport(proc)
 
     stderr_parts: list[bytes] = []
 
@@ -581,7 +632,7 @@ async def _stream_claude_once(
             if sum(map(len, stderr_parts)) > 64 * 1024:
                 stderr_parts[:] = [b"".join(stderr_parts)[-64 * 1024:]]
 
-    stderr_task = asyncio.create_task(_drain_stderr())
+    stderr_task = None if native_session is not None else asyncio.create_task(_drain_stderr())
     emitted_output = False
     saw_partial_text = False
     session_emitted = False
@@ -595,13 +646,10 @@ async def _stream_claude_once(
             "content": [{"type": "text", "text": request.prompt}],
         },
     }
-    if proc.stdin is None or proc.stdout is None:
-        await terminate_process_tree(proc)
-        raise ExternalCliError("Claude CLI 未建立 stdin/stdout 管道")
-
     async def _write_initial_prompt() -> None:
-        proc.stdin.write((json.dumps(initial, ensure_ascii=False) + "\n").encode("utf-8"))
-        await proc.stdin.drain()
+        await transport.write(
+            (json.dumps(initial, ensure_ascii=False) + "\n").encode("utf-8")
+        )
 
     # Multica-compatible ordering: start the writer as a task and immediately
     # drain stdout. Some Claude builds emit startup JSON before reading stdin.
@@ -610,7 +658,7 @@ async def _stream_claude_once(
     try:
         while True:
             try:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=request.timeout)
+                line = await asyncio.wait_for(transport.read_line(), timeout=request.timeout)
             except asyncio.TimeoutError as exc:
                 raise ExternalCliError("Claude Code 模型响应空闲超时") from exc
             if not line:
@@ -674,8 +722,9 @@ async def _stream_claude_once(
                 )
                 response = _claude_control_response(request_id, decision == "allow", tool_input)
                 await writer_task
-                proc.stdin.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
-                await proc.stdin.drain()
+                await transport.write(
+                    (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
+                )
             elif event_type == "result":
                 terminal_received = True
                 usage = _claude_usage(payload)
@@ -692,10 +741,14 @@ async def _stream_claude_once(
                 break
         if terminal_received:
             await writer_task
-            await finish_process_after_terminal(proc, stdin=proc.stdin)
         else:
             await proc.wait()
-        stderr = b"".join(stderr_parts).decode("utf-8", errors="replace").strip()
+        native_stderr = getattr(transport, "stderr_lines", ())
+        stderr = (
+            "\n".join(str(line) for line in native_stderr)
+            if native_stderr
+            else b"".join(stderr_parts).decode("utf-8", errors="replace")
+        ).strip()
         if proc.returncode and not terminal_received:
             compact = _compact_cli_error(
                 stderr,
@@ -718,16 +771,18 @@ async def _stream_claude_once(
             )
         await writer_task
     except asyncio.CancelledError:
-        await terminate_process_tree(proc)
+        await transport.abort()
         raise
     finally:
         if terminal_received:
-            await finish_process_after_terminal(proc, stdin=proc.stdin)
+            await transport.close()
+            await finish_process_after_terminal(proc)
         else:
-            if proc.stdin is not None and not proc.stdin.is_closing():
-                proc.stdin.close()
-            await terminate_process_tree(proc)
-        await asyncio.gather(stderr_task, writer_task, return_exceptions=True)
+            await transport.abort()
+        tasks: list[asyncio.Task[Any]] = [writer_task]
+        if stderr_task is not None:
+            tasks.append(stderr_task)
+        await asyncio.gather(*tasks, return_exceptions=True)
         if mcp_config_path:
             try:
                 os.remove(mcp_config_path)
@@ -858,15 +913,22 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
     try:
         from crew.security.launch import execute_captured
 
+        projected_home_files = build_external_runtime_home_files(config.credential_home_paths)
         result = await execute_captured(
             (config.executable_path, *args),
             cwd=Path(cwd),
             env=env,
             stdin=stdin_text.encode("utf-8") if stdin_text is not None else None,
-            env_overrides=config.custom_env,
+            home_files=projected_home_files,
+            additional_permissions=build_external_runtime_network_permissions(
+                projected_home_files,
+                config.network_endpoints,
+            ),
+            env_overrides=build_managed_external_runtime_env(config.custom_env),
             timeout=config.timeout,
             on_started=_mark_started,
             on_output=_mark_first_io,
+            external=True,
         )
     except FileNotFoundError as exc:
         raise ExternalCliError(f"找不到可执行文件: {config.executable_path}") from exc

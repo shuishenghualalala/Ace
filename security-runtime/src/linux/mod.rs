@@ -6,12 +6,14 @@ pub mod wsl;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{collections::BTreeMap, io::Read, io::Write, thread};
 
-use crate::protocol::{RuntimeCapabilities, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
+use crate::protocol::{
+    RuntimeCapabilities, RuntimeControl, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES,
+};
 
 pub struct LinuxRunRequest {
     pub command: Vec<String>,
@@ -26,6 +28,7 @@ pub struct LinuxRunRequest {
     pub max_output_bytes: usize,
     pub stdin: Option<Vec<u8>>,
     pub env_overrides: BTreeMap<String, String>,
+    pub home_files: BTreeMap<String, Vec<u8>>,
 }
 
 pub struct LinuxRuntimeError {
@@ -35,6 +38,22 @@ pub struct LinuxRuntimeError {
 
 pub fn run(
     request: LinuxRunRequest,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), LinuxRuntimeError> {
+    run_with_control(request, None, sender)
+}
+
+pub fn run_interactive(
+    request: LinuxRunRequest,
+    control_rx: Receiver<RuntimeControl>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), LinuxRuntimeError> {
+    run_with_control(request, Some(control_rx), sender)
+}
+
+fn run_with_control(
+    request: LinuxRunRequest,
+    control_rx: Option<Receiver<RuntimeControl>>,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), LinuxRuntimeError> {
     if wsl::detect() == Some(1) {
@@ -61,7 +80,7 @@ pub fn run(
     let mut command = Command::new(source.executable());
     command.args(&plan.args);
     command
-        .stdin(if request.stdin.is_some() {
+        .stdin(if request.stdin.is_some() || control_rx.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
@@ -105,7 +124,21 @@ pub fn run(
         })
         .map_err(|_| unavailable("protocol receiver disconnected"))?;
 
-    if let Some(stdin) = request.stdin {
+    if let Some(control_rx) = control_rx {
+        let mut child_stdin = child.stdin.take().expect("piped stdin");
+        thread::spawn(move || {
+            for control in control_rx {
+                match control {
+                    RuntimeControl::Write(data) => {
+                        if child_stdin.write_all(&data).is_err() {
+                            break;
+                        }
+                    }
+                    RuntimeControl::Close => break,
+                }
+            }
+        });
+    } else if let Some(stdin) = request.stdin {
         let mut child_stdin = child.stdin.take().expect("piped stdin");
         thread::spawn(move || {
             let _ = child_stdin.write_all(&stdin);

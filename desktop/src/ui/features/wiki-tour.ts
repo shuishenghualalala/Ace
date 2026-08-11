@@ -3,7 +3,7 @@
  *
  * 入口：首次进入 Wiki 页自动启动一次（localStorage 标记，见 maybeStartWikiTourOnce），
  * 之后可通过页头「?」按钮随时重新启动（startWikiTour）。
- * 纯文字教程和界面对应不起来，导览直接把每个功能的位置指给用户看。
+ * 卡片视觉复用模型与外援导览的 mw-tour-card，直接把每个功能的位置指给用户看。
  * 目标元素不存在时（如未登录态缺少对话栏）自动跳过该步。
  */
 
@@ -135,7 +135,7 @@ function showStep(index: number): void {
 
   const prevBtn = tooltip.querySelector<HTMLButtonElement>('[data-tour-prev]')!;
   const nextBtn = tooltip.querySelector<HTMLButtonElement>('[data-tour-next]')!;
-  prevBtn.disabled = current === 0;
+  prevBtn.hidden = current === 0;
   nextBtn.textContent = current === steps.length - 1 ? '完成' : '下一步';
 
   // 先更新内容再测量定位（内容高度影响放置方向）。
@@ -153,18 +153,18 @@ export function startWikiTour(): void {
   container.innerHTML = `
     <div class="wiki-tour__mask"></div>
     <div class="wiki-tour__highlight"></div>
-    <div class="wiki-tour__tooltip" role="dialog" aria-label="界面导览">
-      <div class="wiki-tour__title"></div>
+    <aside class="wiki-tour__tooltip mw-tour-card" role="dialog" aria-label="界面导览">
+      <div class="mw-tour-card__top"><span class="mw-tour-card__spark" aria-hidden="true"></span><span class="wiki-tour__progress"></span></div>
+      <strong class="wiki-tour__title"></strong>
       <p class="wiki-tour__desc"></p>
-      <div class="wiki-tour__foot">
-        <span class="wiki-tour__progress"></span>
-        <div class="wiki-tour__actions">
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--ghost" data-tour-skip>跳过</button>
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--ghost" data-tour-prev>上一步</button>
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--primary" data-tour-next>下一步</button>
+      <div class="mw-tour-card__actions">
+        <button type="button" class="mw-tour-card__quiet" data-tour-skip>跳过</button>
+        <div class="mw-tour-card__steps">
+          <button type="button" class="mw-tour-card__secondary" data-tour-prev>上一步</button>
+          <button type="button" class="mw-tour-card__primary" data-tour-next>下一步</button>
         </div>
       </div>
-    </div>`;
+    </aside>`;
 
   container.querySelector('[data-tour-skip]')!.addEventListener('click', closeWikiTour);
   container.querySelector('[data-tour-prev]')!.addEventListener('click', () => showStep(current - 1));

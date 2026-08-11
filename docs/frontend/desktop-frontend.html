@@ -45,6 +45,15 @@
     <li>代码结构以模块边界为先：同一功能尽量收敛在已有 feature 子模块、样式模块和 typed API 封装内，避免临时脚本式调用和跨层循环依赖。</li>
     <li>可以参考 Hermes 等架构的交互和分层，但实现需按本仓库 Electron + Vanilla TypeScript 结构落地，不直接堆叠不合栈的代码。</li>
   </ul>
+  <p><b>2026-08-10：</b>Desktop Shell 将左上角 Crew 品牌从标题栏移入贯穿窗口全高的 Sidebar：普通窗口使用 <code>128px</code>，窄窗口（<code>&lt;1180px</code>）压缩为 <code>56px</code>；品牌 Logo 与 Crew 字样在普通窗口上下排列，窄窗口保留 Logo 图标并隐藏文字，主导航同步切换为图标模式。顶部留白与右侧 <code>40px</code> 标题栏轨道一致，使品牌和上下文标题形成稳定的视觉对齐。新建对话 Welcome 去掉 Logo 圆形卡片并恢复单一居中阅读顺序：问候语粗且大，提示句细小克制，透明 Crew Logo 放大后作为独立主视觉。两只更大、使用 <code>4px</code> 圆角外框及同粗三趾线的“猛虎爪”不再跟随 Logo 猜偏移，而是由主 Composer 持有并直接跨在浅灰项目条的上边缘，向两侧拉开；窄窗仍同步缩放并响应 <code>prefers-reduced-motion</code>。欢迎语继续使用 6 组已确认文案并按本地自然日稳定轮换；没有新增后端 API 或业务模块。</p>
+  <p><b>2026-08-09：</b>Composer 外援选择器统一使用黑白双框 Team Logo：外援 Agent、外援团队和已选中的顶部外援 chip 复用同一 <code>.session__team-logo</code> 结构，不再在 Composer 内按 provider 显示彩色首字母头像；外援中心其他页面继续保留 provider 头像。</p>
+  <p><b>2026-08-08：</b>修复普通对话在窄窗口下 Crew Logo 贴近主内容左侧分隔线：共享 Conversation Surface 的消息轨道将 16px 左右安全间距计入外层最大宽度，小窗口收窄时仍保留稳定留白；宽窗口的 920px 正文基线和居中位置保持不变。Wiki、Studio 与会话预览继续使用各自既有局部覆盖。</p>
+  <p><b>2026-08-07：</b>恢复外援中心三步 Spotlight 定位导览：首次邀请仍停靠窗口右下角；进入步骤后改为全屏中性遮罩、目标镂空高亮和随目标就近定位的悬浮说明卡。切换步骤时复用同一 Portal 与卡片节点，目标滚动、窗口缩放和内容区滚轮会重新计算位置；Escape、方向键、上一步/下一步、跳过和完成均有明确生命周期。视觉按 <code>design/desktop-design-system.md</code> 使用纯中性色、语义边框、8/12px 圆角、标准浮层阴影与 reduced-motion 降级，不恢复旧 soft-pixel 橄榄色装饰。</p>
+  <p><b>2026-08-07：</b>修复 Runtime 删除被历史会话续接绑定永久拦截：<code>external_runtime_session_binding</code> 只保存外部进程的原生 session id，不承载 Crew 聊天记录；当 Runtime 已无 Agent 引用时，删除操作会先清理这些不可再用的续接元数据，再删除 Runtime，Crew Session 与历史消息保持不变。删除 Agent 时也同步清理它的续接绑定，避免再次形成孤儿行；仍被 Agent 使用的 Runtime 继续拒绝删除并提示先删除对应外援。</p>
+  <p><b>2026-08-07：</b>“发现外援”每条 Runtime 统一提供“删除”，不再按可用状态或探测来源隐藏入口；删除仍走既有确认和引用保护，已安装工具下次“再找找”可重新发现。视觉验收专用的 <code>E2E Source Runtime</code> 不是用户数据，已从 <code>agent-runtimes</code> 固定夹具移除，并为夹具内真实展示的 Kimi、Codex、Hermes 补齐 DELETE 响应，避免演示页面出现按钮可点但请求无响应。</p>
+  <p><b>2026-08-10：</b>外援安全管控改由 <code>config/config.yaml</code> 的 <code>external_agents.security_enabled</code> 统一控制：默认关闭，外援按旧 runtime 直联；显式开启后 ACP、Codex app-server 和 Claude stream-json 的双向子进程经过 Native interactive runtime，内建工具的会话安全边界始终不改变。修改配置后重启 Gateway 生效。</p>
+  <p><b>2026-08-07：</b>“发现外援”由纵向大卡片收敛为 64px 起的紧凑 Runtime 行：版本、内容宽度状态 Badge、探测失败原因和操作各自占稳定列，短状态不再拉伸成整行色带。新增 Runtime 记录删除闭环；Desktop 使用标准危险操作确认，Gateway 只允许管理员删除，存储层会阻止删除仍被 Agent 引用的 Runtime，并在无 Agent 引用时清理不可再用的原生会话续接绑定。扫描入口为固定内置探测命令建立显式 host ProcessLaunch，修复 Codex 在严格安全模式下因缺少启动上下文而无法读取模型；Hermes 冷启动探测阈值由通用 15 秒单独延长到 30 秒，执行任务超时不变。探测失败直接显示持久化的可读原因；已安装的内置工具在下次扫描时仍会被重新发现。</p>
+  <p><b>2026-08-07：</b>“添加外援 / 组建团队”表单取消 920px 上限并清除 Hub 表单入口的重复顶部分隔线，继续保留页面统一安全边距；团队两步标题恢复 8px 中性网格，双 Agent 标记固定为黑底白眼与白底黑眼。模型、Wiki、外援三套 Spotlight 改为复用 <code>overlays.css</code> 的 <code>mw-tour-card</code> 共享卡片、按钮和进度头；各模块仅保留目标解析与悬浮几何。外援引导删除冗余“定位到操作”，目标切换、窗口缩放和内容滚动仍会自动高亮并就近定位。</p>
   <p><b>2026-08-05：</b>原“站点”重构为统一“灵感”App 库：移除网站/看板分栏和用户可见类型标签，使用按更新时间排序的响应式真实预览图库与搜索；详情统一提供修改原对话、ZIP 分享、固定到桌面和安全删除。<code>ace-site://</code> 扩展到完整 Canvas，Electron 增加仅接收规范资源 ID 的单例便利贴：无系统标题栏、可拖动缩放、始终置顶，macOS/Windows/Linux 分别采用稳定的透明或实色呈现。<code>publish_site</code>、<code>Canvas.show</code>、<code>Widget.show</code> 统一输出可历史恢复的 <code>InspirationSurface</code>；右侧 Inspector 默认随窗口扩展、支持拖拽改宽和全区域放大，单组件内容直接铺满，并支持使用/批注切换。新会话写入 <code>inspiration_creation</code>，旧 <code>site_creation</code> 保持兼容。</p>
   <p><b>2026-08-05：</b>站点页新增「网站 / 看板」双模式。看板页提供图库、12 列 Canvas Grid、组件运行与整板刷新、全屏、返回绑定对话，以及整理模式的拖动、缩放和布局持久化；Widget 通过 <code>ace-site://widget_xxx</code> 受控协议加载，不直接访问 Gateway 凭据或数据接口。</p>
   <p><b>2026-08-05：</b>站点页增加右上角「创建」入口：点击后在当前 Workspace 建立并持久化 <code>site_creation</code> builtin Session、跳转主对话、聚焦输入框；Composer 与历史侧栏会话标题前显示原创的单色网站窗口图标，使用 <code>currentColor</code> 自动适配主题，重启后由后端 <code>agent_label.provider=sites</code> 恢复。创建只开启专用对话，不创建空站点、空看板或自动发布。</p>
@@ -69,9 +78,10 @@
       <tr><td><code>desktop/src/ui/features/fold-state.ts</code></td><td>折叠状态持久化：回合级 <code>turnFold</code> 与工具卡片级 <code>toolFold</code> 双 Map，写入 <code>localStorage</code>（<code>mm.desktop.turnFold.v1</code> / <code>mm.desktop.toolFold.v1</code>），上限 240 条 LRU。提供 <code>getTurnFold/setTurnFold</code>、<code>getToolFold/setToolFold</code>、<code>hydrateTurnFoldFromStorage</code>、<code>clearFoldMemoryCache</code>。</td></tr>
       <tr><td><code>desktop/src/ui/chat-render.ts</code></td><td>消息 → DOM 渲染。过程区（thinking / 工具 / 旁白 / 状态 / 错误）统一渲染为 <code>.process-timeline</code> 时间线（图标列 + 虚线连接，结构对齐 web <code>AgentProcessTimeline</code>）。<code>renderToolCard</code> 产出工具时间线项：标题走 <code>toolDisplayTitle</code>（语义化带参数，如「运行 ls -lah」），<code>messageId</code> 构造 <code>toolFoldKey</code>，<code>open</code> 优先取用户偏好，默认折叠；展开后为 Request/Response 代码块。<code>delegate_task</code>/<code>run_agent</code> 走 <code>renderSubagentCard</code> 专属卡片（对齐 Hermes Task 卡）：单人图标 + 中文标题（<code>子智能体 {agent_type}：{goal 摘要}</code>，批量为「N 个并行任务」），展开体显示任务描述（goal/context，批量按序编号）、子智能体最终回复（<code>max-height</code> 块内滚动）与执行摘要行（N 次工具调用、耗时；timeout/error 异常态标红）；底部留白仅展开时保留，折叠态为单行，后台启动显示「已转后台运行（任务 ID）」；折叠行为与其他工具卡一致。流式消息走 <code>renderMarkdownHtmlStreaming</code>。</td></tr>
       <tr><td><code>desktop/src/ui/render-utils.ts</code></td><td>渲染工具函数；新增 <code>applyToolFoldState</code> 对齐 <code>applyFoldState</code>。</td></tr>
-      <tr><td><code>desktop/src/ui/features/agents-page.ts</code></td><td>桌面端外援中心：本机外援发现、外部 Agent 添加/移除/派活、外部 Team 组建/智能组队/派活，以及首次使用状态引导。该模块复用 <code>backend-client.ts</code> typed API，不复用 Web React 组件；派活通过注入的 <code>ensureChatSession</code> 回调创建新会话并切回对话页，避免反向 import <code>index.ts</code> 造成循环依赖。</td></tr>
+      <tr><td><code>desktop/src/ui/features/agents-page.ts</code></td><td>桌面端外援中心工作流：本机外援发现、外部 Agent 添加/移除/派活、外部 Team 组建/智能组队/派活，以及首次使用 Spotlight 引导。该模块复用 <code>backend-client.ts</code> typed API，不复用 Web React 组件；派活通过注入的 <code>ensureChatSession</code> 回调创建新会话并切回对话页，避免反向 import <code>index.ts</code> 造成循环依赖。</td></tr>
+      <tr><td><code>desktop/src/ui/features/agent-hub.ts</code></td><td>外援 Hub 的共享列表管理视图：复用 Hub 页面模板、Tabs、Button、Badge 和统一 Agent/Team 图标，负责“我的阵容 / 发现外援 / 添加外援 / 组建团队”的稳定 DOM 骨架；业务请求和草稿状态仍由 <code>agents-page.ts</code> 持有。</td></tr>
       <tr><td><code>desktop/src/ui/features/team-collaboration-board.ts</code></td><td>Team Session「协作」看板：将 Gateway task、DAG 依赖、FormationPlan 成员、execution events、产物和 runtime concurrency 投影为 Desktop 原生 TypeScript DOM；信息结构、状态文案和视觉规格逐项对齐 Web <code>TaskBoard</code>，但不引入 React 或复制 Web 运行时。</td></tr>
-      <tr><td><code>desktop/assets/styles/agents-page.css</code></td><td>外援中心独立样式。页面、状态引导气泡、卡片、智能组队、冲突确认弹窗和成员职责编辑均收敛在该样式文件，避免散落到全局样式。</td></tr>
+      <tr><td><code>desktop/assets/styles/agent-hub.css</code> / <code>agents-page.css</code></td><td>前者负责共享 Hub 列表、身份卡和表单承载区；后者保留外援业务表单、Spotlight 引导、智能组队、冲突确认弹窗和成员职责编辑。两者只消费设计系统语义 token，不另建颜色体系。</td></tr>
       <tr><td><code>desktop/src/ui/backend-client.ts</code></td><td>桌面端 Gateway typed API 封装。外部 runtime / agent / team / team role / team suggestion 等接口从这里进入 UI，避免 feature 模块直接拼 URL。</td></tr>
       <tr><td><code>desktop/src/ui/tool-labels.ts</code></td><td>工具展示名：<code>formatToolDisplayName</code> 静态中文名映射；<code>toolDisplayTitle</code> 过程时间线标题（对齐 web <code>processDisplay</code>），<code>uiLabel</code> 优先，按工具语义拼 path/command/query 参数，未知工具回退静态名。</td></tr>
       <tr><td><code>desktop/src/ui/features/chat-controller.ts</code></td><td>对话主控：<code>scrollChatToBottom</code> 改用 <code>pinToBottomIfSticky</code>，新增 <code>jumpChatToBottom</code>；<code>ensureFoldDelegation</code> 委托 <code>details.process-timeline__details</code>（带 <code>data-fold-key</code> 的工具项）toggle 写 <code>setToolFold</code>、<code>details.msg__foldable</code> 写 <code>setTurnFold</code>；发消息后 <code>jumpChatToBottom</code>。</td></tr>
@@ -182,17 +192,17 @@
   </ul>
   <h3>3.11 外援中心（原智能体 Hub）</h3>
   <ul>
-    <li>桌面端外援中心使用 Electron 原生 DOM/TypeScript 实现，复用后端外部智能体接口，不直接复用 <code>web/src/components/AgentsHub.tsx</code>，也没有新增 Gateway API、数据库表或核心模块。</li>
+    <li>桌面端外援中心使用 Electron 原生 DOM/TypeScript 实现，复用后端外部智能体接口，不直接复用 <code>web/src/components/AgentsHub.tsx</code>；Runtime 删除沿用既有 Gateway Runtime 模块和 <code>external_runtime</code> 表，没有新增数据库表、核心模块或零散文件。</li>
     <li>页面入口在左侧导航 <code>data-tab="agents"</code>，用户名称统一为“外援”，内容挂载到 <code>#agents-page-root</code>；初始化由 <code>initAgentsPage()</code> 延迟加载，点击 tab 时刷新运行时、Agent 和团队列表。</li>
-    <li>页面标题与四个 Tab 统一为“外援中心 / 我的阵容 / 发现外援 / 添加外援 / 组建团队”；创建表单使用“可用外援 / 外援称呼 / 使用模型 / 加入我的外援”，内置 Leader 显示为“MobileWork”并带“内置”小标签，约束成员入口统一使用“选择外援”。“使用”只保留在尚未加入阵容的 Runtime 上，已保存外援和团队的动作统一叫“派活”。</li>
+    <li>页面复用 <code>createHubTemplate()</code> 与 <code>createAgentHubView()</code>，标题为“外援”，四个 Tab 为“我的阵容 / 发现外援 / 添加外援 / 组建团队”；两个创建 Tab 的表单占满 Hub 结果区可用宽度，入口不重复绘制 <code>.agents-section</code> 顶部分隔线。创建表单使用“可用外援 / 外援称呼 / 使用模型 / 加入我的外援”，内置 Leader 带“内置”小标签，约束成员入口统一使用“选择外援”。“使用”只保留在尚未加入阵容的 Runtime 上，已保存外援和团队的动作统一叫“派活”。</li>
     <li>首次进入只展示一只“第一次来外援中心？用 30 秒认识一下”的轻量邀请，用户可选择“开始看看 / 稍后再说”。开始或点击页头“?”都会从固定 1/3 重播：第一步切到“发现外援”并标记“再找找”，第二步切到“添加外援”并标记可用外援选择器，第三步回到“我的阵容”并标记首个“派活”；尚无已加入外援时改为标记“添加外援”Tab。步骤只负责认位置，不触发扫描或创建，Runtime 扫描结果、创建成功等业务消息不再改变引导进度。</li>
-    <li>引导提供“上一步 / 下一步 / 完成 / 跳过 / 定位到操作”。浮层通过 <code>renderAgentsGuidePortal()</code> 挂到 <code>document.body</code>，每一步固定在左下或右下，不监听内容滚动、不按目标位置重排，也不再回退成占据文档流的 <code>.is-inline</code>。浮层主体允许滚轮穿透；落在按钮上的滚轮事件转交给 <code>.agents-panel</code>，页面仍可顺畅下滑；“定位到操作”才按需执行 <code>scrollIntoView()</code>。目标仅增加低强度像素脉冲描边，窄窗口保持固定底部 Dock。视觉沿用 Desktop 既有 soft-pixel 体系：暖白底、低饱和橄榄绿、8px 内圆角、单个像素星标与克制像素阴影，不增加图片资产。</li>
-    <li>“我的阵容”空态取消虚线大卡，改为无边框轻提示和单一下一步动作；“发现外援”卡片不展示 ACP、adapter、可执行路径、探测来源、探测耗时、能力枚举或原始错误，也不保留“技术详情”折叠区，只展示名称、提供方、可读状态、版本和“使用”。首次目录为空时自动扫描一次，同一页面生命周期内重复加载不会反复扫描。</li>
+    <li>引导提供“上一步 / 下一步 / 完成 / 跳过”，也支持 Escape 退出和左右方向键切换；不再展示“定位到操作”。首次邀请通过 <code>document.body</code> Portal 停靠右下角；进入三步导览后，同一 Portal 切换为 Spotlight：<code>--mw-bg-overlay</code> 投影遮罩包围目标镂空高亮，说明卡优先出现在目标左侧或下方，空间不足时自动换位并限制在视口内。切换步骤保留同一 Portal/卡片节点；滚轮转交给 Hub 结果滚动区，目标滚动和窗口缩放会自动刷新几何。模型、Wiki 与外援统一复用 <code>overlays.css</code> 的 <code>mw-tour-card</code> 卡片、进度头和按钮；各自只维护步骤与目标定位。</li>
+    <li>“我的阵容”空态在对应 Agent/Team 分区内显示无卡片边框的轻提示；“发现外援”使用紧凑 Runtime 行，不展示 ACP、adapter、可执行路径、探测来源、探测耗时或能力枚举，只展示名称、版本、内容宽度状态 Badge、可读探测原因与操作。所有 Runtime 行统一提供“删除”；删除先确认，仍被 Agent 使用时返回 409 并提示先删除对应外援；仅剩历史原生会话续接绑定时自动清理绑定后删除 Runtime，不删除 Crew 会话或历史消息。已安装工具下次“再找找”时可重新发现。首次目录为空时自动扫描一次，同一页面生命周期内重复加载不会反复扫描。</li>
     <li>外部 Agent 派活语义：点击“派活”会新建一个默认工作空间下的 chat session，切回对话页，然后写入 <code>session_agent_config.executor=external</code>、<code>external_agent_id</code> 与 <code>external.external_agent_id</code>。旧 <code>executor=acp</code> 只由后端兼容读取，不再由 Desktop 新写。不会污染用户原本正在查看的会话。</li>
     <li>外部 Team 派活语义：点击团队“派活”同样新建 chat session，写入 <code>executor=team</code> 和 <code>team.external_team_id</code>，并清空 expert / expert team / external team 旧绑定。</li>
     <li>新建会话统一由 <code>createSessionInWorkspace()</code> 清理旧专家、专家团和外源 Team 绑定，保证 session 之间不串状态。</li>
     <li>外援导航入口复用 Web/MobileWork 的小机器人线稿；“我的阵容”页外援和团队卡片复用 Web 的首字母像素头像 / badge 格式。</li>
-    <li>创建团队页按 Web 两步结构实现：定义团队时只展示目标、Leader 和可折叠组队约束；智能组队后进入阵容确认区，显示约束采纳、能力覆盖、成员职责和工作流。</li>
+    <li>创建团队页按 Web 两步结构实现：定义团队时只展示目标、Leader 和可折叠组队约束；智能组队后进入阵容确认区，显示约束采纳、能力覆盖、成员职责和工作流。两步标题使用 8px 中性网格，双 Agent 标记固定为黑底白眼与白底黑眼。</li>
     <li>“我的团队”卡片与 Web 保持同一详情交互：点击卡片或键盘 Enter/空格打开组队明细，展示团队描述、工作流、Leader 和按顺序排列的成员职责；点击“派活/删除”会阻止卡片冒泡，不会误开详情。弹层支持关闭按钮、点击遮罩和 Escape 退出。</li>
     <li>外部 ACP 会话的历史侧栏图标与 Web 保持一致：普通 MobileWork 会话继续使用原对话气泡和原消息头像；外部智能体使用首字母 badge，外部 Team 使用黑白双 agent logo。外部绑定先写入 draft session，并在首条发送提交时继承；绑定 API 成功后立即刷新会话列表，因此无需等待用户发送才出现外部图标。</li>
     <li>Gateway 的 <code>agent_label</code> 为 ACP 会话附带外部 <code>model</code>；外部 agent 未显式配置 model 时按 <code>provider/name</code> 回退。Desktop 将它作为消息 footer 与 Composer 的展示模型，且 draft 的展示模型优先于首发时持久化的 Crew 内部模型绑定。</li>
@@ -286,6 +296,12 @@
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-08-08</td><td>普通对话消息轨道增加窄窗口 16px 安全间距，同时保持宽窗口正文基线不变。</td><td>既有 <code>web-messages.css</code>、共享样式回归测试与本文档；无新模块、文件、API 或数据结构。</td></tr>
+      <tr><td>2026-08-07</td><td>Runtime 删除不再被孤立的原生会话续接绑定拦截；删除 Agent 同步清理续接绑定。</td><td>既有 External Agent Store、Runtime 删除 API、后端定向测试、Desktop 说明与前后端模块文档；无新 API、数据表、模块或文件。</td></tr>
+      <tr><td>2026-08-07</td><td>发现外援所有 Runtime 统一显示删除入口；移除视觉夹具中的 E2E Source Runtime，并补齐夹具 Runtime 的 DELETE 响应。</td><td>既有 Agent Hub 视图、外援状态映射、视觉夹具、定向单测与本文档；无新 API、数据表、模块或文件。</td></tr>
+      <tr><td>2026-08-07</td><td>添加外援与组建团队表单恢复全宽并移除重复顶线；团队标题恢复中性网格和黑白 Agent 眼睛；模型、Wiki、外援统一共享 Spotlight 卡片，外援删除“定位到操作”。</td><td>既有 Hub/外援/模型/Wiki feature、共享 <code>overlays.css</code>、页面样式、定向单测与本文档；无新 API、数据表、核心模块或新增文件。</td></tr>
+      <tr><td>2026-08-07</td><td>发现外援 Runtime 大卡片改为紧凑状态行，补充模型探测失败原因和安全删除记录闭环；修复 Codex 扫描安全启动上下文与 Hermes 冷启动误超时。</td><td>既有 External Runtime adapter/存储、Gateway 路由、Desktop typed API、Agent Hub 视图/样式、视觉夹具、外援定向测试与本文档；无新表、无新核心模块、无新增文件。</td></tr>
+      <tr><td>2026-08-07</td><td>外援中心恢复三步 Spotlight 投影、高亮与对应位置悬浮卡；Hub 页面继续消费统一设计系统 token。</td><td><code>agents-page.ts</code>、<code>agents-page.css</code>、外援定向单测与本文档；未新增 API、数据表、核心模块或零散文件。</td></tr>
       <tr><td>2026-07-30</td><td>Desktop 外援中心活人感优化：Sidebar 与页面统一“外援”语言；四个 Tab、Runtime 状态、表单和派活动作文案重写；内置 Leader 显示为“MobileWork + 内置”标签，组队约束统一“选择外援”；新手提示采用首次轻邀请和固定三步浮层，关闭持久化、问号从头重播、滚动不重排、窄窗口固定底部 Dock；空态降噪，Runtime 技术诊断折叠，空目录首次只自动寻找一次；Composer 外援浮层同步术语。</td><td>仅 <code>desktop/assets/index.html</code>、<code>agents-page.ts</code>、<code>composer-toolbar.ts</code>、<code>storage-keys.ts</code>、<code>agents-page.css</code>、既有 Desktop 单测与本文档；无后端、数据库、API 或新模块。</td></tr>
       <tr><td>2026-07-22</td><td>Wiki 页分栏拖拽：列表 | 详情之间新增 <code>.wiki-sash</code> 把手（对齐 web <code>ResizablePanels</code>，实现模式同 inspector 宽度拖拽）——宽度存 <code>localStorage</code>（<code>mm.desktop.wikiListWidth.v1</code>，240–640px + 50vw 上限钳制），拖动中只改 DOM 样式不重渲染、mouseup 才持久化，双击复位 340px；图谱模式无把手。</td><td>desktop wiki-page.ts、wiki-page.css、desktop 单测（wiki-page +3）、本文档。</td></tr>
       <tr><td>2026-07-22</td><td>全链路删除 Wiki 页面 status（published/deprecated）体系：该字段后端从无代码会置为 deprecated，唯一读取处是展示，属死重。后端 <code>WikiPage</code> schema / 序列化（页面 .md frontmatter 不再写 status，旧数据多余键 from_dict 直接忽略、无需迁移）、compiler 三处构造与 index.md 已发布/已弃用分组（改平铺列表）、gateway POST/PUT /pages 的 status 参数、store 图节点/orientation 的 status、_DEFAULT_SCHEMA_MD「状态」小节全部移除；web 与 desktop 的 WikiPageStatus 类型、详情/卡片状态徽标、图谱 deprecated 置灰、WikiEditor 状态选择器同步删净。KBSummary.status（ready/generating/empty/stale）与 RawSource.parse_status 是不同字段，不受影响。</td><td>crew wiki（schemas/compiler/store/prompts/query/__init__）、gateway routers/wiki.py、web（types、WikiCard、WikiPageView、WikiEditor、global.css、测试）、desktop（backend-client、wiki-page、wiki-graph、chat-render、chat-reducer、chat-controller、wiki-page.css、单测）、tests/wiki/、本文档与 web/wiki 模块文档。</td></tr>
@@ -432,6 +448,15 @@
   <table>
     <thead><tr><th>日期</th><th>范围</th><th>验证</th><th>结果</th></tr></thead>
     <tbody>
+      <tr><td>2026-08-11</td><td>合并远端 Desktop Shell 响应式侧栏：普通窗口 <code>128px</code>、窄窗口 <code>56px</code>，Crew Logo 保留在侧边栏并在窄窗保留图标；同步远端 Wiki 进度与 Tooltip 改动。</td><td>Desktop 相关定向单测 <code>81 passed</code>；Python 安全、外援、Wiki 定向测试 <code>315 passed</code>；TypeScript typecheck、Desktop build、全量 CSS lint、Python compileall、<code>git diff --check</code> 通过。</td><td>本次合并范围通过。全量 Desktop 仍有工作区已有 Browser/Skills/Gateway 环境类失败；<code>tests/test_workspace.py</code> 另有 1 项旧路径断言与当前 owner runtime workspace 语义不一致，未归因于侧栏合并。</td></tr>
+      <tr><td>2026-08-10</td><td>响应式全高 Sidebar 品牌区、Welcome 居中文案层级、放大 Crew 主视觉与 Composer 边线猛虎爪。</td><td><code>sidebar-nav.test.ts</code>、<code>welcome-scenarios.test.ts</code>、<code>shared-style-regression.test.ts</code>、<code>composer-dual-instance.test.ts</code>：<code>4 files / 18 passed</code>；TypeScript typecheck、变更范围 ESLint、全量 CSS lint、production build、visual fixture build 和范围 <code>git diff --check</code> 通过。最终视觉 Fixture 在 <code>1280×800</code> 验收：Sidebar 为 <code>128px</code> 全高展开态且品牌区高 <code>136px</code>；问候语粗大、副标题细小，mascot 为 <code>184px</code>；浅灰项目条上边缘与两只 <code>38×29px</code>、<code>4px</code> 粗线猛虎爪的垂直中心同为 <code>y=354</code>，无需依赖 Logo 偏移。</td><td>本次范围通过。全量 Desktop 基线为 <code>1547 passed / 69 failed</code>；失败集中在工作区已有 Browser 上传审批、Skills 页面改造及本地 Gateway 连接等非本模块在制项，未纳入本次 UI 交付。</td></tr>
+      <tr><td>2026-08-08</td><td>Composer 外援列表独立滚动、Desktop/Web 组合头像与 provider 首字母像素化。</td><td>Desktop <code>composer-external-assistance.test.ts</code>：<code>9 passed</code>；Desktop typecheck、CSS lint、production build 通过。Web <code>AgentsHub.test.ts</code>、<code>Composer.test.tsx</code>、<code>Sidebar.test.tsx</code>：<code>19 passed</code>；Web typecheck、production build 通过。</td><td>通过；测试环境仍会输出未启动 <code>127.0.0.1:8000</code> 的 EPERM，但不影响 mock 覆盖用例。</td></tr>
+      <tr><td>2026-08-08</td><td>普通对话 Crew Logo 的窄窗口左侧安全间距与宽屏内容基线。</td><td><code>shared-style-regression.test.ts</code>：<code>5 passed</code>；TypeScript typecheck、范围 ESLint、全量 CSS lint、<code>web-messages.css</code> 重复 selector 检查与 visual build 通过。真实页面分别在 960×640、1440×900 验收：小窗口主内容分隔线到 Logo 为 16px；宽屏 Logo 横坐标与修改前 920px 内容轨道基线一致。</td><td>通过；小窗口不再贴线，宽屏现有对齐不变。</td></tr>
+      <tr><td>2026-08-07</td><td>Runtime 删除清理孤立原生会话续接绑定，删除 Agent 同步清理续接绑定。</td><td>External Store 新增定向回归 <code>2 passed</code>；Gateway Runtime 文件 <code>14 passed</code>；Desktop 外援文件 <code>8 passed</code>。Store Ruff 全规则、测试文件 Ruff F/E9、Python 语法编译、范围 <code>git diff --check</code> 通过。</td><td>通过；Runtime 仍被 Agent 使用时继续拒绝，只有孤立续接元数据时自动清理，Crew 会话和历史消息不受影响。</td></tr>
+      <tr><td>2026-08-07</td><td>发现外援所有 Runtime 统一删除入口，以及视觉夹具 E2E 记录与 DELETE 响应修正。</td><td><code>composer-external-assistance.test.ts</code>：<code>8 passed</code>；TypeScript typecheck、变更范围 ESLint、production build 与范围 <code>git diff --check</code> 通过。真实页面验收确认 Kimi / Codex / Hermes 三条均有删除按钮、E2E Source Runtime 不再出现；确认删除 Kimi 后行即时移除并显示成功消息。</td><td>通过；测试环境连接未启动的 <code>127.0.0.1:8000</code> 时输出 EPERM，但 mock 覆盖的 8 项用例全部完成并通过。</td></tr>
+      <tr><td>2026-08-07</td><td>添加外援 / 组建团队全宽与顶线清理、团队标题网格和黑白 Agent 眼睛、外援 / 模型 / Wiki 共享 Spotlight 卡片，以及外援引导删除“定位到操作”。</td><td>Desktop 定向 <code>3 files / 13 passed</code>；TypeScript typecheck、变更范围 ESLint、全量 CSS lint、变更样式重复 selector 检查、production build 与 <code>git diff --check</code> 通过。真实页面验收覆盖两个表单宽度和顶边框、8px 团队网格、黑底白眼 / 白底黑眼，以及三套引导统一的 12px 圆角、投影和按钮结构；外援引导确认不存在“定位到操作”。</td><td>通过；测试环境连接未启动的 <code>127.0.0.1:8000</code> 时输出 EPERM，但 mock 覆盖的 13 项用例全部完成并通过。</td></tr>
+      <tr><td>2026-08-07</td><td>Runtime 紧凑行、探测原因、安全上下文、Hermes 冷启动、删除确认、引用保护与记录删除。</td><td>Gateway <code>test_runtimes_register.py</code>：<code>14 passed</code>；External Runtime 定向回归：<code>3 passed</code>；Desktop <code>composer-external-assistance.test.ts</code>：<code>7 passed</code>。同权限真实探测结果为 Kimi <code>4</code>、Codex <code>8</code>、Hermes <code>7</code> 个模型且全部 ready。Browser 视觉验收覆盖 1096px 列表、77–104px 行高、内容宽度 Badge 与删除确认框；TypeScript typecheck、范围 ESLint、全量 CSS lint、Python Ruff（Runtime/Gateway 全规则及 adapter F 规则）、重复 selector、production build 与 <code>git diff --check</code> 通过。</td><td>定向功能、真实探测与构建检查通过；Desktop mock 环境仍会输出未启动 <code>127.0.0.1:8000</code> 的 EPERM，不影响 7 项用例通过。</td></tr>
+      <tr><td>2026-08-07</td><td>外援中心三步 Spotlight 遮罩、高亮、目标就近悬浮、滚轮重定位、关闭与重播，以及 Hub 设计系统契约。</td><td><code>composer-external-assistance.test.ts</code>：<code>6 passed</code>；TypeScript typecheck、变更范围 ESLint、全量 CSS lint、重复 selector 检查、production build 与 <code>git diff --check</code> 通过。严格 Design System 全仓审计仍被既有 <code>sites-page.css</code>、<code>wiki-page.css</code>、旧 SVG 色值和旧 inline style 等存量项拦截，本次变更文件未出现在违规清单。</td><td>本次范围通过；测试环境尝试连接未启动的 <code>127.0.0.1:8000</code> 时输出 EPERM，但 mock 覆盖的 6 项用例全部完成并通过。</td></tr>
       <tr><td>2026-08-05</td><td>修复浏览器面板自动打开抢在 AI 首个动作前创建人工空白页、导致会话被误判为人工接管。</td><td>Desktop <code>browser-panel-controls.test.ts</code> 等 3 个文件 <code>60 passed</code>（新增被动打开不创建标签页、显式空打开仍建人工页两个用例）；变更文件 typecheck 与 ESLint 无新增问题。</td><td>通过。</td></tr>
       <tr><td>2026-08-05</td><td>内置浏览器滚轮不触发接管、页面操作接管确认条、加载失败错误遮罩与接管来源日志。</td><td>Desktop <code>browser-host.test.ts</code> 与 <code>browser-panel-controls.test.ts</code> 共 <code>163 passed</code>（新增滚轮不接管、did-fail-load 上报/忽略 ERR_ABORTED、确认条接管/忽略、错误遮罩与重试用例）；<code>browser-panel-recording</code>、<code>browser-session-switch</code>、<code>browser-auto-open</code>、<code>ipc-schemas</code> 共 <code>78 passed</code>；范围 ESLint 0 error、CSS lint、重复 selector 检查通过，typecheck 本次改动文件无错误（存量 sites 相关错误为在制品）。后端 <code>pytest tests/test_browser_use.py tests/test_browser_plugin.py tests/test_browser_manager_review.py</code>：<code>389 passed, 28 skipped</code>。</td><td>通过。</td></tr>
       <tr><td>2026-08-03</td><td>邮箱租户登录、Owner 隔离、会话持久化与既有认证兼容。</td><td>后端轻量集成验证覆盖邮箱规范化、Cookie 签发、<code>email:&lt;邮箱&gt;</code> Owner 解析及非法邮箱拒绝；Desktop <code>auth-session.test.ts</code> 3 项通过；TypeScript typecheck、production build、Python 语法编译与 <code>git diff --check</code> 通过。完整 Gateway pytest 因系统默认 Python 3.9 低于项目要求的 Python 3.11，未能进入收集。</td><td>本次范围通过；正式配置默认邮箱入口，<code>--dev</code>、<code>local</code>、<code>remote</code> 保持兼容。</td></tr>
@@ -464,6 +489,91 @@
     </tbody>
   </table>
 
+  <section>
+    <h2>菜单栏状态、Logo 与外援会话身份（2026-08-08）</h2>
+    <ul>
+      <li>Desktop/Web 产品 Logo 统一使用 <code>crew-logo-trans.png</code>；Desktop 菜单栏使用 <code>assets/menubar</code> 下的默认、工作中、有通知、完成、休眠五态素材。</li>
+      <li>菜单栏优先级固定为“有通知 &gt; 工作中 &gt; 完成 &gt; 休眠 &gt; 默认”；无任务连续 5 分钟进入休眠。点击菜单栏图标会打开 Crew，并清除通知与完成态。</li>
+      <li>外援导航与模式入口使用独立的 <code>external-agent.png</code>；异构智能体会话身份使用首字母像素按钮，身份文案顺序为“kimi · Agent”，名称在前、类型在后。</li>
+      <li>Composer 默认“智能体”触发按钮和同名浮层项统一使用 <code>crew-menubar-default-template-2.png</code> 的 Crew 线稿；只有外援入口使用 <code>external-agent.png</code>，选中具体外援后再显示对应 provider 首字母头像。</li>
+      <li>Composer 外援列表与“我的外援”卡片共用 provider 首字母像素按钮：使用 Gateway <code>display_badge</code>（缺失时回退 provider 首字母），例如 kimi 显示 K；所有 provider 使用主题黑白底，仅通过稳定、低对比度的全表面像素纹样区分。</li>
+      <li>Composer 外援浮层采用固定的模式切换和搜索区，智能体/团队列表为独立滚动容器；长列表滚动不会挤出 Composer，也不会移动上方控件。</li>
+      <li>参考素材归档于 <code>design/reference-assets/</code>；设计系统规范同步维护于 <code>design/desktop-design-system.md</code>。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>外援头像回归首字母像素按钮（2026-08-09）</h2>
+    <ul>
+      <li>“我的外援”、Composer 外援列表、session history 和外部 ACP 对话头像统一只显示 <code>display_badge</code> 或 provider 首字母，不再使用 <code>external-agent.png + 首字母</code> 组合。</li>
+      <li>四处共用圆角厚描边、主题黑白底、provider 稳定映射的低对比度全表面像素纹样、等宽字母和轻微内阴影；Kimi/Codex/Hermes/Claude/Gemini/Sites 分别使用斜纹、棋盘、竖线、横线、点阵和十字。Composer 的单 Agent 行使用 provider 首字母头像，外援团队行使用一黑一白双智能体图标。</li>
+    </ul>
+    <p>验证：Desktop <code>composer-external-assistance.test.ts</code> 与 <code>render-agent-turn.test.ts</code> 共 <code>66 passed</code>；Desktop typecheck、CSS lint、production build 通过。</p>
+  </section>
+  <section>
+    <h2>macOS 菜单栏 Template Image 修复（2026-08-09）</h2>
+    <ul>
+      <li>Desktop 开发态和打包态继续共用 <code>assets/menubar</code> 五态素材及原有状态优先级。</li>
+      <li>默认态使用 <code>design/reference-assets/crew-menubar-default-template-2.png</code> 的透明黑色粗线稿，休眠态使用 <code>design/reference-assets/crew-menubar-rest-template-2.png</code>；macOS 将其作为真正的 Template Image，自动适配系统主题。白色细线版本仅保留为设计参考，不进入生产素材。</li>
+      <li>工作中、有通知、完成继续显示原始彩色素材；不得直接把带不透明机身的完整彩色位图作为模板蒙版。</li>
+      <li>macOS 五态统一生成 44×44 物理像素、<code>scaleFactor: 2</code> 的 22pt Retina 表示，禁止直接把素材压成单倍率 22×22 位图，避免菜单栏线稿锯齿和断线。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>外援头像全表面纹样与发现外援图标统一（2026-08-10）</h2>
+    <ul>
+      <li>“我的外援”、Composer 外援 Agent、session history 与外部 ACP 对话继续共用相同 provider 首字母和稳定纹样槽位；纹样改为从左上角低对比度平铺整个头像表面，不再只显示右上角小块。</li>
+      <li>纹样使用约 10% 主题墨色，保持黑白、克制、像素按钮风；不同 provider 仅区分纹样，不引入专属颜色。</li>
+      <li>“发现外援”中的 runtime 卡片统一使用 Sidebar 外援入口的 <code>external-agent.png</code>，不与 provider 身份头像混用。</li>
+      <li>休眠菜单栏生产素材同步为 <code>design/reference-assets/crew-menubar-rest-template-2.png</code>，运行时代码只引用打包内相对路径。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>新建对话 Composer 默认智能体图标修正（2026-08-10）</h2>
+    <ul>
+      <li>新建对话默认模式的触发按钮使用指定的 Crew 黑色线稿，文案保持“智能体”。</li>
+      <li>模式浮层中的“智能体”项同步使用 <code>./menubar/default.png</code>；<code>external-agent.png</code> 只属于“外援”入口，选中具体外援后触发按钮继续显示 provider 首字母头像。</li>
+      <li>菜单栏“完成”态由后台会话从运行态转为空闲且尚未查看触发；优先级仍为“有通知 &gt; 工作中 &gt; 完成 &gt; 休眠 &gt; 默认”。</li>
+    </ul>
+    <p>验证：Desktop Composer/Tray 定向测试 <code>12 passed</code>，TypeScript、ESLint（无新增 error）与 production build 通过；真实开发态新建对话确认触发按钮和“智能体”浮层项不再渲染 <code>external-agent.png</code>。</p>
+  </section>
+  <section>
+    <h2>运行提示跳跃角色替换（2026-08-10）</h2>
+    <ul>
+      <li>Composer 上方运行提示的旧内嵌机器人 SVG 替换为 <code>assets/crew-jump-agent.png</code>；设计源文件保存在 <code>design/reference-assets/crew-jump-agent.png</code>。</li>
+      <li>Renderer 仅使用 <code>./crew-jump-agent.png</code> 相对路径，不依赖开发者用户名或本机绝对目录。</li>
+      <li>保留原有 <code>chat-running-logo-hop</code> 跳跃节奏、减少动态效果设置，以及重复状态同步时复用同一 DOM 节点的行为。</li>
+    </ul>
+    <p>验证：<code>session-busy.test.ts</code> 与 <code>render-agent-turn.test.ts</code> 共 <code>72 passed</code>；Desktop TypeScript、ESLint、CSS lint 和 production build 通过。</p>
+  </section>
+  <section>
+    <h2>Composer Crew 图标、外部会话头像与跳跃角色定位统一（2026-08-10）</h2>
+    <ul>
+      <li>Composer 默认“智能体”按钮与浮层项改用 <code>./menubar/default.png</code>，其设计源为 <code>design/reference-assets/crew-menubar-default-template-2.png</code>；深色主题通过 Template Image 反色规则保持可见。</li>
+      <li>新版会话历史面板的外部 Agent 不再统一显示外援图标，改为与旧 session、我的外援和 Composer 外援一致的 provider 首字母与稳定全表面纹样。</li>
+      <li>运行提示为黄小助手预留 32×28 布局宽度，并把素材图层向左上校正，完整主体不再落到 Composer 边界下方；减少动态效果时停止跳跃。</li>
+    </ul>
+    <p>验证：Composer、session history、running intro、Sites 与回合渲染定向测试共 <code>99 passed</code>；TypeScript、ESLint（无新增 error）、CSS lint 和 production build 通过。真实开发态确认 Composer 图片路径为 <code>./menubar/default.png</code>，Kimi/Hermes/Codex 会话分别显示 K/H/X provider 头像，黄小助手完整显示于 Composer 上方。</p>
+  </section>
+  <section>
+    <h2>Crew 与运行助手光学对齐（2026-08-10）</h2>
+    <ul>
+      <li>主对话全部智能体回合（Crew、外部 provider、外援团队）整条向右收进 16px，使头像中心线与 Composer 上方黄小助手一致，同时保留头像与名称、正文的原有 12px 间距。</li>
+      <li>用户消息从右侧等量收进 16px，与智能体侧形成对称留白；气泡尺寸和文字内边距保持不变。</li>
+      <li>黄小助手图层由向上 12px 调整为向上 18px，图形视觉中心与后方运行状态文案对齐；原跳跃动画与 32×28 布局槽位保持不变。</li>
+    </ul>
+    <p>验证：Composer 外援、智能体回合、会话状态、共享样式、Sites 与菜单栏状态定向测试共 <code>107 passed</code>；TypeScript、CSS lint 与 production build 通过。真实 Desktop Renderer 确认智能体回合左侧内收 16px，头像与正文间距保持 12px；开发端已使用最新构建重新启动。</p>
+  </section>
+  <section>
+    <h2>新对话模型隔离、Tray 光学尺寸与运行助手响应式对齐（2026-08-10）</h2>
+    <ul>
+      <li>从外部 Agent/Team 会话点击“新建对话”时，普通 Crew 草稿强制回到全局 Crew 默认模型；外部 Runtime 模型只属于原会话，不再进入新 Composer。</li>
+      <li>macOS 菜单栏保持 44×44 @2x 输出；默认/休眠保持基准尺寸，工作态只做 1.02 倍轻微校正，完成态在最终裁切前放大 1.16 倍，补偿星光素材导致的主体偏小。</li>
+      <li>运行提示槽位与消息区共用 920px 内容轨道、16px 内侧留白和 38px 头像轴；黄小助手、Crew、外部 Agent/Team 头像在窗口缩放时保持同一中心线，不再使用固定负位移。</li>
+      <li>移除 <code>ui-preview.css</code> 对生产 Composer 的旧 24px padding 覆盖；共享 Composer 几何只由 <code>composer.css</code> 维护，避免预览样式与生产布局竞争。</li>
+      <li>黄小助手恢复为确认的小主体、白脸、圆润粗线版本，并保留完整透明画布留白；生产和设计参考素材同步，不再裁切放大。</li>
+    </ul>
+    <p>验证：新增模型隔离、Tray 光学比例和响应式样式回归测试；定向 4 个测试文件共 <code>36 passed</code>，TypeScript、CSS lint 与 production build 通过。真实 Renderer 在 1280px 和 900px 两种视口测得黄助手、图片画布与 Agent 头像均为 38px，中心线分别同为 439px 和 347px；Electron <code>nativeImage</code> 实际导出的默认/完成态均为非空 44×44 位图，完成态主体与默认态光学尺寸一致且庆祝星光保留。</p>
+  </section>
 </div>
 </body>
 </html>

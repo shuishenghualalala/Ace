@@ -12,6 +12,10 @@ def test_cron_and_team_reenter_app_security_context() -> None:
     assert 'current_process_launch.set(envelope.params.get("_security_process_launch"))' in runtime
 
 
-def test_managed_mcp_fails_closed_until_native_stdio_exists() -> None:
+def test_managed_mcp_stays_closed_and_acp_uses_native_stdio() -> None:
     mcp = (ROOT / "crew/tools/mcp_client.py").read_text(encoding="utf-8")
+    acp = (ROOT / "crew/agent/external/acp_adapter.py").read_text(encoding="utf-8")
     assert "ACE_ALLOW_HOST_MCP_STDIO" in mcp
+    assert "SecurityExecutionBroker" in acp
+    assert "open_interactive" in acp
+    assert "_NativeAcpTransport" in acp

@@ -10,6 +10,7 @@ import AgentsHub, {
   formatTeamDraftElapsed,
   resolveFormationUiStatus,
 } from "./AgentsHub";
+import { externalAgentInitial, externalAgentTone } from "./ExternalAgentAvatar";
 
 describe("external helper language", () => {
   it("presents the runtime and agent flow in user-facing terms", () => {
@@ -26,6 +27,16 @@ describe("external helper language", () => {
     expect(html).toContain(">添加外援</button>");
     expect(html).toContain(">组建团队</button>");
     expect(html).not.toContain("<h1>异构智能体</h1>");
+  });
+});
+
+describe("external agent avatar identity", () => {
+  it("uses the existing display badge rule and falls back to the provider initial", () => {
+    expect(externalAgentInitial({ provider: "kimi", display_badge: "" })).toBe("K");
+    expect(externalAgentInitial({ provider: "codex", display_badge: "X" })).toBe("X");
+    expect(externalAgentInitial({ provider: "claude-code" })).toBe("C");
+    expect(externalAgentTone("kimi")).not.toBe(externalAgentTone("codex"));
+    expect(externalAgentTone("kimi")).toBe(externalAgentTone("KIMI"));
   });
 });
 

@@ -38,6 +38,7 @@ import {
 import { openWorkItemDrawer } from './features/work/item-space';
 import type { WorkItem } from './backend-client';
 import { setNotificationClickHandler } from './features/work/notifications';
+import { initSystemTrayStatus } from './features/system-tray';
 import { refreshKanbanBoard, renderKanbanBoard } from './features/kanban-board';
 import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview } from './features/system-page';
 import { initUsagePage } from './features/usage-panel';
@@ -575,6 +576,9 @@ async function init(
   // Phase 1: 同步骨架（必须先做完才能显示首屏）
   // 后端状态守卫：优先初始化，确保遮罩在首屏就能展示
   await safe('initBackendStatusGuard', initBackendStatusGuard);
+  await safe('initSystemTrayStatus', () => {
+    registerDispose(initSystemTrayStatus());
+  });
   // 认证流程：email/remote 模式下在首屏前判定登录态，未登录则展示登录墙。
   // local/dev 模式下 isLoggedIn 恒为 true，不显示登录墙，直接放行。
   await safe('initAuthFlow', async () => { await initAuthFlow(); });
@@ -941,7 +945,7 @@ function mountApplicationShell(
 
 export function mountRenderer(root: HTMLElement, adapter: RendererAdapter): () => void {
   let disposed = false;
-  let disposeEvents: (() => void) | null = null;
+  const disposeEvents: Array<() => void> = [];
   const rendererRoot = ensureRendererRoot(root);
   const mountedShell = mountApplicationShell(rendererRoot, adapter);
   root.dataset.rendererMounted = 'true';
@@ -949,7 +953,7 @@ export function mountRenderer(root: HTMLElement, adapter: RendererAdapter): () =
 
   const registerDispose = (dispose: () => void): void => {
     if (disposed) dispose();
-    else disposeEvents = dispose;
+    else disposeEvents.push(dispose);
   };
 
   void init(registerDispose).catch((error) => {
@@ -960,8 +964,7 @@ export function mountRenderer(root: HTMLElement, adapter: RendererAdapter): () =
   return () => {
     if (disposed) return;
     disposed = true;
-    disposeEvents?.();
-    disposeEvents = null;
+    for (const dispose of disposeEvents.splice(0)) dispose();
     const socket = state.socket;
     state.socket = null;
     socket?.dispose();
