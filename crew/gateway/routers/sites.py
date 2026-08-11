@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -259,15 +260,47 @@ def create_sites_router(crew) -> APIRouter:
             current = manager().store.get_site(owner(request), site_id)
             workspace = crew.workspace_store.get(current["workspace_id"], owner_account_id=owner(request))
             workspace_root = workspace.get("root_path") or current["source_path"]
-            result = manager().publish(
-                owner=owner(request), workspace_id=current["workspace_id"],
-                session_id=current["session_id"], workspace_root=workspace_root,
-                source_path=current["source_path"], name=str(data.get("name") or current["name"]),
-                description=str(data.get("description") or current.get("description") or ""),
-                build_command=str(data.get("build_command") or current["build_command"]),
-                output_directory=str(data.get("output_directory") or current["output_directory"]),
-                site_id=site_id,
+            from crew.security.context import build_gateway_security_context
+            from crew.security.launch import compile_process_launch, use_process_launch
+
+            context = build_gateway_security_context(
+                crew.workspace_store,
+                owner_account_id=owner(request),
+                workspace_id=current["workspace_id"],
+                session_id=current["session_id"] or f"site-{site_id}",
+                request_id=uuid4().hex,
+                cwd=workspace_root,
             )
+            launch = compile_process_launch(
+                context,
+                crew.security_service.mode_for(context),
+                db_path=crew.security_service.db_path,
+                audit=crew.security_service.audit,
+                approval_service=crew.security_service,
+            )
+
+            async def authorize_build(argv, cwd, _preview):
+                from crew.tools.security_guard import authorize_user_initiated_exec
+
+                authorize_user_initiated_exec(
+                    argv,
+                    cwd=cwd,
+                    tool_name="publish_site",
+                    security_service=crew.security_service,
+                    security_context=context,
+                )
+
+            with use_process_launch(launch):
+                result = await manager().publish(
+                    owner=owner(request), workspace_id=current["workspace_id"],
+                    session_id=current["session_id"], workspace_root=workspace_root,
+                    source_path=current["source_path"], name=str(data.get("name") or current["name"]),
+                    description=str(data.get("description") or current.get("description") or ""),
+                    build_command=str(data.get("build_command") or current["build_command"]),
+                    output_directory=str(data.get("output_directory") or current["output_directory"]),
+                    site_id=site_id,
+                    build_authorizer=authorize_build,
+                )
             return {"ok": True, **result}
         except KeyError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)

@@ -38,7 +38,6 @@ from crew.tools.registry import Registry
 from crew.tools.security_guard import authorize_file_tool
 from crew.tools.terminal_guard import detect_dangerous_command, detect_hardline_command
 
-
 FILE_READ_SCHEMA = {
     "name": "file_read",
     "description": "读取一个文本文件的内容。支持 offset/limit 分页、保留原始行尾符、自动处理 UTF-8 BOM。",
@@ -102,20 +101,9 @@ def _check_terminal_command(command: str) -> tuple[bool, str | None, str | None]
     return True, None, None
 
 
-def _classification_auto_allows(mode: Any, classification: Any) -> bool:
-    """Require approval until classifier output is bound to executable identity.
-
-    ``PATH`` resolution alone cannot prove that classification and execution target
-    the same file. Returning False is the fail-closed policy until the runtime binds
-    canonical path plus file identity in both steps.
-    """
-    del mode, classification
-    return False
-
-
 TERMINAL_SCHEMA = {
     "name": "terminal",
-    "description": "在当前工作目录执行一条 shell 命令，返回 stdout/stderr。支持 timeout、后台运行、危险命令检测。",
+    "description": "在当前工作目录的原生沙箱中执行 shell 命令。访问项目外路径、联网或监听端口时必须声明 additional_permissions；非空权限会展示给用户审批并在批准后传入沙箱。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -131,10 +119,177 @@ TERMINAL_SCHEMA = {
                 "type": "boolean",
                 "description": "仅后台模式：进程退出时排队一条完成通知（含退出码和输出尾部）",
             },
+            "additional_permissions": {
+                "type": "object",
+                "description": "命令确实需要越过基础沙箱时申请的精确权限；非空时必须由用户批准。",
+                "properties": {
+                    "filesystem": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "root": {"type": "string", "description": "已存在的精确文件或目录"},
+                                "access": {"type": "string", "enum": ["read", "read_write"]},
+                            },
+                            "required": ["root", "access"],
+                        },
+                    },
+                    "network": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "host": {"type": "string"},
+                                "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                                "protocol": {
+                                    "type": "string",
+                                    "enum": ["http", "https", "tcp", "udp", "socks5_tcp", "socks5_udp"],
+                                },
+                                "allow_private": {"type": "boolean"},
+                            },
+                            "required": ["host", "port", "protocol"],
+                        },
+                    },
+                    "allow_local_binding": {"type": "boolean"},
+                },
+            },
+            "permission_reason": {
+                "type": "string",
+                "description": "向用户说明为何需要额外权限，不参与授权匹配。",
+            },
         },
         "required": ["command"],
     },
 }
+
+
+def _parse_additional_permissions(
+    raw: object,
+    *,
+    cwd: Path,
+    security_context: Any,
+    mode: Any,
+    db_path: Path,
+):
+    """Validate model-requested authority before it can appear in an approval."""
+    from crew.security.file_policy import _is_filesystem_root, _protected_entries
+    from crew.security.models import (
+        EMPTY_ADDITIONAL_PERMISSIONS,
+        AdditionalPermissionProfile,
+        FilesystemAccess,
+        FilesystemEntry,
+        FilesystemOperation,
+        NetworkEntry,
+    )
+    from crew.security.policy import filesystem_operation_allowed, settings_for_mode
+
+    if raw is None:
+        return AdditionalPermissionProfile()
+    if not isinstance(raw, dict):
+        raise ToolError("additional_permissions 必须是对象")
+    unknown = set(raw) - {"filesystem", "network", "allow_local_binding"}
+    if unknown:
+        raise ToolError(
+            f"additional_permissions 包含未知字段: {', '.join(sorted(map(str, unknown)))}"
+        )
+    filesystem_raw = raw.get("filesystem", [])
+    network_raw = raw.get("network", [])
+    if not isinstance(filesystem_raw, list) or not isinstance(network_raw, list):
+        raise ToolError("filesystem 和 network 必须是数组")
+    if len(filesystem_raw) > 32 or len(network_raw) > 32:
+        raise ToolError("单次最多申请 32 条文件权限和 32 条网络权限")
+
+    filesystem_entries = []
+    for item in filesystem_raw:
+        if not isinstance(item, dict) or set(item) - {"root", "access"}:
+            raise ToolError("文件权限条目只能包含 root 和 access")
+        root_value = item.get("root")
+        if (
+            not isinstance(root_value, str)
+            or not root_value.strip()
+            or "\x00" in root_value
+            or len(root_value) > 4096
+        ):
+            raise ToolError("文件权限 root 必须是长度不超过 4096 的非空路径")
+        try:
+            root = Path(root_value).expanduser()
+            if not root.is_absolute():
+                root = cwd / root
+            root = root.resolve(strict=False)
+            exists = root.exists()
+        except (OSError, RuntimeError) as exc:
+            raise ToolError(f"无法解析额外文件权限路径: {exc}") from exc
+        if not exists:
+            raise ToolError("额外文件权限只能授予已存在路径；创建文件时请申请已存在的父目录")
+        try:
+            access = FilesystemAccess(str(item.get("access", "")))
+        except ValueError as exc:
+            raise ToolError("文件权限 access 仅支持 read 或 read_write") from exc
+        if access not in {FilesystemAccess.READ, FilesystemAccess.READ_WRITE}:
+            raise ToolError("文件权限不能申请 deny")
+        if access is FilesystemAccess.READ_WRITE and _is_filesystem_root(root):
+            raise ToolError("不能申请文件系统根目录的写权限")
+        filesystem_entries.append(FilesystemEntry(root, access))
+    if sum(len(str(entry.root)) for entry in filesystem_entries) > 32_768:
+        raise ToolError("额外文件权限路径总长度不能超过 32768")
+
+    network_entries = []
+    for item in network_raw:
+        if not isinstance(item, dict) or set(item) - {"host", "port", "protocol", "allow_private"}:
+            raise ToolError("网络权限条目字段无效")
+        allow_private = item.get("allow_private", False)
+        if not isinstance(allow_private, bool):
+            raise ToolError("allow_private 必须是布尔值")
+        host = item.get("host", "")
+        if not isinstance(host, str) or not 1 <= len(host) <= 253:
+            raise ToolError("网络权限 host 必须是长度不超过 253 的非空字符串")
+        try:
+            network_entries.append(
+                NetworkEntry(
+                    host=host,
+                    port=item.get("port"),
+                    protocol=item.get("protocol", ""),
+                    allow_private=allow_private,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ToolError(f"网络权限无效: {exc}") from exc
+    allow_local_binding = raw.get("allow_local_binding", False)
+    if not isinstance(allow_local_binding, bool):
+        raise ToolError("allow_local_binding 必须是布尔值")
+
+    profile = AdditionalPermissionProfile(
+        filesystem=tuple(dict.fromkeys(filesystem_entries)),
+        network=tuple(dict.fromkeys(network_entries)),
+        allow_local_binding=allow_local_binding,
+    )
+    base = settings_for_mode(
+        mode,
+        security_context.workspace_root,
+        deny_entries=_protected_entries(security_context, db_path),
+    ).profile
+    effective_filesystem = []
+    for entry in profile.filesystem:
+        operation = (
+            FilesystemOperation.READ
+            if entry.access is FilesystemAccess.READ
+            else FilesystemOperation.WRITE
+        )
+        if filesystem_operation_allowed(
+            base,
+            EMPTY_ADDITIONAL_PERMISSIONS,
+            entry.root,
+            operation,
+        ):
+            continue
+        if not filesystem_operation_allowed(base, profile, entry.root, operation):
+            raise ToolError("请求的额外权限与不可升级的受保护路径冲突")
+        effective_filesystem.append(entry)
+    return AdditionalPermissionProfile(
+        filesystem=tuple(effective_filesystem),
+        network=profile.network,
+        allow_local_binding=profile.allow_local_binding,
+    )
 
 
 async def handle_terminal(
@@ -163,23 +318,46 @@ async def handle_terminal(
     cwd = str(_resolve_base_dir())
     launch = None
     if security_service is not None and workspace_store is not None:
-        from crew.security.context import build_security_context
-        from crew.security.launch import compile_process_launch
-
         from crew.security.actions import normalize_exec_action
         from crew.security.approvals import ApprovalDecision
-        from crew.security.launch import packaged_runtime_argv, shell_argv
+        from crew.security.context import build_security_context
+        from crew.security.launch import (
+            compile_process_launch,
+            current_process_launch,
+            packaged_runtime_argv,
+            shell_argv,
+        )
+        from crew.security.models import (
+            EMPTY_ADDITIONAL_PERMISSIONS,
+            ConversationPermissionMode,
+        )
         from crew.security.runtime_client import NativeRuntimeClient
 
         security_context = build_security_context(workspace_store)
         mode = security_service.mode_for(security_context)
+        requested_permissions = (
+            EMPTY_ADDITIONAL_PERMISSIONS
+            if mode is ConversationPermissionMode.FULL_ACCESS
+            else _parse_additional_permissions(
+                args.get("additional_permissions"),
+                cwd=Path(cwd),
+                security_context=security_context,
+                mode=mode,
+                db_path=security_service.db_path,
+            )
+        )
+        permission_reason = args.get("permission_reason", "")
+        if not isinstance(permission_reason, str) or len(permission_reason) > 1000:
+            raise ToolError("permission_reason 必须是长度不超过 1000 的字符串")
         final_argv = shell_argv(command)
         shell_kind = "powershell" if os.name == "nt" else "bash"
-        classification = await NativeRuntimeClient(packaged_runtime_argv()).classify_shell(
-            shell_kind=shell_kind,
-            executable=final_argv[0],
-            raw_command=command,
-        )
+        classification = None
+        if mode is not ConversationPermissionMode.FULL_ACCESS:
+            classification = await NativeRuntimeClient(packaged_runtime_argv()).classify_shell(
+                shell_kind=shell_kind,
+                executable=final_argv[0],
+                raw_command=command,
+            )
         # Classification fields are part of the exact action digest, so the request/UI,
         # grant, persistent rule, and eventual execution all refer to the same command.
         action = normalize_exec_action(
@@ -190,17 +368,27 @@ async def handle_terminal(
             parsed_commands=classification.parsed_commands if classification else (),
             canonical_digest=classification.canonical_digest if classification else "",
         )
-        # 只有 auto_review + runtime 成功证明全部命令只读时可自动放行；request_approval
-        # 始终询问，classifier 缺失/崩溃/未知语法均 ASK，不回退 Python 正则猜测。
-        proven_read_only = _classification_auto_allows(mode, classification)
-        authorized, approval = security_service.authorize_exec_action(
+        # The native sandbox is the authority for ordinary commands. Dangerous
+        # classifications and every requested permission expansion still require
+        # explicit approval in the two managed auto-run modes.
+        authorization = security_service.authorize_exec_action(
             security_context,
             action,
             tool_name="terminal",
             risk_class=(
                 "dangerous_command" if error_code == "approval_required" else "shell_command"
             ),
-            auto_allow=proven_read_only,
+            requires_approval=(
+                error_code == "approval_required" or not requested_permissions.empty
+            ),
+            additional_permissions=requested_permissions,
+            preview=permission_reason,
+        )
+        authorized, approval = authorization
+        granted_permissions = getattr(
+            authorization,
+            "additional_permissions",
+            requested_permissions if authorized else None,
         )
         if not authorized:
             if approval is None:
@@ -226,11 +414,20 @@ async def handle_terminal(
                 )
             # 批准：grant/rule 已由 decide() 落地；复用同一 action 消费 once grant，
             # 避免二次 shell_argv/which 在 PATH 变化时生成不同 digest。
-            authorized, approval = security_service.authorize_exec_action(
+            authorization = security_service.authorize_exec_action(
                 security_context,
                 action,
                 tool_name="terminal",
                 risk_class=("dangerous_command" if error_code == "approval_required" else "shell_command"),
+                requires_approval=True,
+                additional_permissions=requested_permissions,
+                preview=permission_reason,
+            )
+            authorized, approval = authorization
+            granted_permissions = getattr(
+                authorization,
+                "additional_permissions",
+                requested_permissions if authorized else None,
             )
             if not authorized:
                 return json.dumps(
@@ -241,10 +438,16 @@ async def handle_terminal(
                     },
                     ensure_ascii=False,
                 )
+        inherited_launch = current_process_launch.get()
         launch = compile_process_launch(
             security_context,
             security_service.mode_for(security_context),
             db_path=security_service.db_path,
+            audit=security_service.audit,
+            additional_permissions=granted_permissions,
+            trusted_readable_roots=(
+                inherited_launch.trusted_readable_roots if inherited_launch is not None else ()
+            ),
         )
     elif not allowed:
         return json.dumps(
@@ -643,5 +846,9 @@ def register_builtin_tools(
     )
     register_skills_tools(registry)
     register_memory_tools(registry)
-    register_web_tools(registry)
+    register_web_tools(
+        registry,
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
     register_interaction_tools(registry)

@@ -17,13 +17,18 @@ export interface SecurityAuditView {
   decision_source?: string;
   action_summary?: string;
   action_detail?: string;
+  additional_permissions_summary?: string;
   approval_mode?: string;
   current_approval_mode?: string;
 }
 
 export interface SecurityAuditQuery {
-  actionType: '' | 'approval_requested' | 'approval_decision' | 'exec_decision' | 'file_decision';
-  decision: '' | 'allow' | 'deny' | 'pending' | 'ask' | 'once' | 'session' | 'always' | 'reject';
+  actionType: '' | 'approval_requested' | 'approval_decision' | 'exec_decision'
+    | 'file_decision' | 'network_decision' | 'exec_result' | 'rule_created'
+    | 'rule_disabled' | 'rule_deleted' | 'audit_purged';
+  decision: '' | 'allow' | 'deny' | 'pending' | 'ask' | 'once' | 'session'
+    | 'always' | 'reject' | 'completed' | 'failed' | 'cancelled' | 'error'
+    | 'enabled' | 'disabled' | 'deleted';
   sessionId: string;
   sort: 'newest' | 'oldest';
 }
@@ -41,6 +46,8 @@ export function actionTypeLabel(value?: string): string {
     approval_decision: '用户审批',
     exec_decision: '命令判定',
     file_decision: '文件判定',
+    network_decision: '网络判定',
+    exec_result: '命令执行结果',
     rule_created: '创建授权规则',
     rule_disabled: '停用授权规则',
     rule_deleted: '删除授权规则',
@@ -60,13 +67,20 @@ export function approvalChoiceLabel(event: SecurityAuditView): string {
     deny: '拒绝',
     pending: '等待审批',
     ask: '需要审批',
+    completed: '执行成功',
+    failed: '执行失败',
+    cancelled: '已取消',
+    error: '运行错误',
+    enabled: '已启用',
+    disabled: '已停用',
+    deleted: '已删除',
   };
   return labels[value] || value || '—';
 }
 
 export function modeLabel(value?: string): string {
   const labels: Record<string, string> = {
-    request_approval: '请求批准',
+    request_approval: '每次询问',
     auto_review: '替我审批',
     full_access: '完全访问权限',
   };
@@ -83,7 +97,7 @@ export function decisionSourceLabel(value?: string): string {
     base_profile: '基础权限配置',
     always_rule: '永久授权规则',
     runtime_grant: '临时授权',
-    full_access: '完全访问模式',
+    full_access: '完全访问权限模式',
     auto_review: '自动审批',
     approval_required: '需要用户审批',
   };

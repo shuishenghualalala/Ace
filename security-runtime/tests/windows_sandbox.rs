@@ -18,11 +18,13 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
     let state_dir = PathBuf::from(state_dir);
     let workspace = tempfile::tempdir().unwrap();
     let denied = tempfile::tempdir().unwrap();
+    std::fs::create_dir(workspace.path().join(".git")).unwrap();
+    std::fs::write(workspace.path().join(".git/config"), "original").unwrap();
     std::fs::write(denied.path().join("secret.txt"), "host-only").unwrap();
     let command =
         std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_string());
     let script = format!(
-        "set /p INPUT= && if not \"%INPUT%\"==\"prompt\" exit /b 43 && if not \"%CUSTOM_ENV%\"==\"custom\" exit /b 44 && echo allowed>allowed.txt && (type \"{}\" >NUL 2>NUL && exit /b 41 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 45 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 46 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 47 || ver>NUL) && (echo denied>.git\\config && exit /b 42 || exit /b 0)",
+        "set /p INPUT= && if not \"%INPUT%\"==\"prompt\" exit /b 43 && if not \"%CUSTOM_ENV%\"==\"custom\" exit /b 44 && echo allowed>allowed.txt && type .git\\config >NUL 2>NUL || exit /b 48 && (type \"{}\" >NUL 2>NUL && exit /b 41 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 45 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 46 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 47 || ver>NUL) && (echo denied>.git\\config && exit /b 42 || exit /b 0)",
         denied.path().join("secret.txt").display(),
         state_dir.join("windows-sandbox-identity.json").display(),
         state_dir.join("windows-capability-sids.json").display(),
@@ -51,6 +53,7 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
             "command": [command, "/d", "/s", "/c", script],
             "cwd": workspace.path(),
             "writable_roots": [workspace.path()],
+            "readonly_roots": [workspace.path().join(".git")],
             "denied_roots": [denied.path()],
             "network_enabled": false,
             "max_output_bytes": 65536,
@@ -81,8 +84,10 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
     assert!(started);
     assert_eq!(exit_code, Some(0));
     assert!(workspace.path().join("allowed.txt").exists());
-    assert!(!workspace.path().join(".git/config").exists());
-    assert!(!workspace.path().join(".git").exists());
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join(".git/config")).unwrap(),
+        "original"
+    );
     assert!(child.wait().unwrap().success());
 }
 

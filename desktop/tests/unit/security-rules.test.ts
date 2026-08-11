@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { formatSecurityRule } from '../../src/ui/features/security-rules';
+import {
+  formatSecurityRule,
+  formatSecurityRulePermissions,
+} from '../../src/ui/features/security-rules';
 
 describe('security rule display', () => {
   it('shows the token prefix and working directory', () => {
@@ -15,5 +18,16 @@ describe('security rule display', () => {
       action_summary: '执行命令：git status',
       action_detail: '具体命令：git status\n工作目录：D:/work',
     })).toBe('允许 执行命令：git status');
+  });
+
+  it('keeps persistent permission overlays visible', () => {
+    expect(formatSecurityRulePermissions({
+      additional_permissions: {
+        filesystem: [{ root: '/tmp/release', access: 'read_write' }],
+        network: [{ host: 'uploads.example.com', port: 443, protocol: 'https' }],
+      },
+    })).toBe(
+      '额外文件权限（读写）：/tmp/release\n额外网络权限：uploads.example.com:443（https）',
+    );
   });
 });

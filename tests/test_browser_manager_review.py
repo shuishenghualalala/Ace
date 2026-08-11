@@ -2164,6 +2164,71 @@ def test_default_runtime_keeps_playwright_inputs_beyond_legacy_product_caps(tmp_
     ) == [str(upload_directory.resolve())]
 
 
+@pytest.mark.asyncio
+async def test_upload_staging_snapshots_files_and_directories_then_cleans(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "crew.browser.manager.get_owner_runtime_home",
+        lambda owner: tmp_path / "accounts" / str(owner),
+    )
+    source = tmp_path / "source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    (nested / "payload.txt").write_text("approved payload", encoding="utf-8")
+    manager = BrowserManager(BrowserConfig(), ReviewDriver())
+    try:
+        owner = await manager._owner("owner")
+        staged, stage = await asyncio.to_thread(
+            manager._stage_approved_uploads,
+            owner,
+            [str(source)],
+        )
+        staged_directory = Path(staged[0])
+        assert staged_directory.is_dir()
+        assert (staged_directory / "nested" / "payload.txt").read_text(
+            encoding="utf-8"
+        ) == "approved payload"
+        assert "approved-uploads" in staged_directory.parts
+        await asyncio.to_thread(
+            manager._cleanup_approved_upload_stage,
+            stage,
+            owner.profile_dir.parent / "approved-uploads",
+        )
+        assert stage is not None and not stage.exists()
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_upload_staging_rejects_symlinks_inside_directory(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(
+        "crew.browser.manager.get_owner_runtime_home",
+        lambda owner: tmp_path / "accounts" / str(owner),
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (source / "linked.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    manager = BrowserManager(BrowserConfig(), ReviewDriver())
+    try:
+        owner = await manager._owner("owner")
+        with pytest.raises(BrowserDriverError, match="符号链接或特殊文件"):
+            await asyncio.to_thread(
+                manager._stage_approved_uploads,
+                owner,
+                [str(source)],
+            )
+        approved_root = owner.profile_dir.parent / "approved-uploads"
+        assert not list(approved_root.iterdir())
+    finally:
+        await manager.aclose()
+
+
 def test_recording_is_sealed_only_for_exact_persisted_host_sequence(
     browser_env, monkeypatch, tmp_path
 ):

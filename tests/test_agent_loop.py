@@ -497,6 +497,71 @@ async def test_loop_failover_to_fallback_provider():
     assert ctx.messages[-1].model == "fallback-model"
 
 
+async def test_loop_recovers_from_unsupported_image_input_in_text_mode():
+    class RejectImageOnce(LLMProvider):
+        def __init__(self) -> None:
+            self.calls: list[list[Message]] = []
+
+        async def chat(self, messages, tools=None):  # pragma: no cover
+            return ChatResponse()
+
+        async def stream_chat(self, messages, tools=None):
+            self.calls.append(list(messages))
+            if len(self.calls) == 1:
+                raise ProviderError(
+                    "Model do not support image input",
+                    category="unsupported_capability",
+                    capability="vision",
+                )
+            yield StreamChunk(delta_text="已改用网页文本信息继续")
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+    provider = RejectImageOnce()
+    image = Message(
+        role="user",
+        content="查看网页",
+        content_parts=[
+            {"type": "text", "text": "查看网页"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    )
+    chunks = await _collect(_executor(provider), _ctx([image]))
+
+    assert len(provider.calls) == 2
+    assert provider.calls[0][1].content_parts is not None
+    second_parts = [part for message in provider.calls[1] for part in (message.content_parts or [])]
+    assert not any(part.get("type") == "image_url" for part in second_parts)
+    second_text = "\n".join(message.text_content for message in provider.calls[1])
+    assert "不要声称已经看过图片" in second_text
+    assert any(chunk.kind == "status" and "非视觉方式" in chunk.body["message"] for chunk in chunks)
+    assert not any(chunk.kind == "error" for chunk in chunks)
+    assert chunks[-1].body["text"] == "已改用网页文本信息继续"
+
+
+async def test_loop_does_not_repeat_unsupported_capability_recovery_forever():
+    provider = RaiseThenScript(
+        ProviderError(
+            "Model do not support image input",
+            category="unsupported_capability",
+            capability="vision",
+        ),
+        fail_times=2,
+        script=[],
+    )
+    image = Message(
+        role="user",
+        content="查看图片",
+        content_parts=[
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    )
+    chunks = await _collect(_executor(provider), _ctx([image]))
+
+    assert provider.stream_calls == 2
+    assert sum(chunk.kind == "status" for chunk in chunks) == 1
+    assert chunks[-1].kind == "error"
+
+
 # --------------------------------------------------------------------------- #
 # 5. 并行工具执行
 # --------------------------------------------------------------------------- #

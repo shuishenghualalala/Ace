@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from crew.core.errors import ToolError
 from crew.security.context import SecurityContext
 from crew.security.models import ConversationPermissionMode
-from crew.security.runtime_client import ShellClassification, ShellVerdict
-from crew.tools.builtin import _classification_auto_allows, handle_terminal
+from crew.tools.builtin import _parse_additional_permissions, handle_terminal
 
 
 class _ApprovalOnlyService:
@@ -21,15 +21,35 @@ class _ApprovalOnlyService:
 
         return ConversationPermissionMode.REQUEST_APPROVAL
 
-    def authorize_exec_action(self, context, action, *, tool_name, risk_class, auto_allow=False):
+    def authorize_exec_action(
+        self,
+        context,
+        action,
+        *,
+        tool_name,
+        risk_class,
+        **_kwargs,
+    ):
         self.actions.append((context, action, tool_name, risk_class))
-        if auto_allow:
-            return True, None
         return False, {"request_id": "approval-1"}
 
     async def await_decision(self, request_id):
         assert request_id == "approval-1"
         return None
+
+
+class _FullAccessService:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        self.audit = None
+
+    @staticmethod
+    def mode_for(_context):
+        return ConversationPermissionMode.FULL_ACCESS
+
+    @staticmethod
+    def authorize_exec_action(*_args, **_kwargs):
+        return True, None
 
 
 @pytest.mark.asyncio
@@ -76,39 +96,104 @@ async def test_every_managed_terminal_command_requires_host_authorization(
     assert command in action.argv[-1]
 
 
-def test_auto_review_only_trusts_verified_read_only_classification() -> None:
-    # ``whoami`` resolves to a real system binary on both platforms
-    # (/usr/bin/whoami on POSIX, C:\Windows\System32\whoami.exe on Windows), so it
-    # passes executable provenance and may be auto-allowed. PowerShell built-in
-    # cmdlets like Write-Output/Get-Content have no on-disk binary, so ``which``
-    # cannot pin them to a trusted bin dir — they now fall back to ASK rather than
-    # being trusted by bare basename (H-3).
-    safe = ShellClassification(
-        shell_kind="bash",
-        raw_command="whoami",
-        parsed_commands=(("whoami",),),
-        canonical_digest="a" * 64,
-        verdict=ShellVerdict.ALLOW_READ_ONLY,
-        reason="all_commands_proven_read_only",
+@pytest.mark.asyncio
+async def test_full_access_does_not_depend_on_native_classifier_or_permission_overlay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = SecurityContext(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+        workspace_root=tmp_path,
+        session_id="session-a",
+        request_id="request-a",
+        task_id="task-a",
+        cwd=tmp_path,
     )
-    ask = ShellClassification(
-        shell_kind="powershell",
-        raw_command="Remove-Item x",
-        parsed_commands=(("Remove-Item", "x"),),
-        canonical_digest="b" * 64,
-        verdict=ShellVerdict.ASK,
-        reason="command_not_in_read_only_policy",
+    monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+    monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
+
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("full access must not require the native classifier")
+
+    monkeypatch.setattr(
+        "crew.security.runtime_client.NativeRuntimeClient.classify_shell",
+        fail_if_called,
     )
-    sensitive_read = ShellClassification(
-        shell_kind="powershell",
-        raw_command="Get-Content ~/.ssh/id_rsa",
-        parsed_commands=(("Get-Content", "~/.ssh/id_rsa"),),
-        canonical_digest="c" * 64,
-        verdict=ShellVerdict.ALLOW_READ_ONLY,
-        reason="all_commands_proven_read_only",
+    result = await handle_terminal(
+        {
+            "command": "echo full-access-ok",
+            "additional_permissions": {
+                "filesystem": [{"root": str(tmp_path.anchor), "access": "read_write"}],
+            },
+        },
+        workspace_store=object(),
+        security_service=_FullAccessService(tmp_path / "crew.db"),
     )
-    assert not _classification_auto_allows(ConversationPermissionMode.AUTO_REVIEW, safe)
-    assert not _classification_auto_allows(ConversationPermissionMode.REQUEST_APPROVAL, safe)
-    assert not _classification_auto_allows(ConversationPermissionMode.AUTO_REVIEW, ask)
-    assert not _classification_auto_allows(ConversationPermissionMode.AUTO_REVIEW, sensitive_read)
-    assert not _classification_auto_allows(ConversationPermissionMode.AUTO_REVIEW, None)
+
+    assert '"success": true' in result
+    assert "full-access-ok" in result
+
+
+def test_terminal_permission_request_is_exact_and_protected_metadata_stays_read_only(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    metadata = workspace / ".git"
+    workspace.mkdir()
+    outside.mkdir()
+    metadata.mkdir()
+    context = SecurityContext(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+        workspace_root=workspace,
+        session_id="session-a",
+        request_id="request-a",
+        task_id="task-a",
+        cwd=workspace,
+    )
+
+    profile = _parse_additional_permissions(
+        {
+            "filesystem": [{"root": str(outside), "access": "read_write"}],
+            "network": [{
+                "host": "Uploads.Example.COM.",
+                "port": 443,
+                "protocol": "HTTPS",
+            }],
+        },
+        cwd=workspace,
+        security_context=context,
+        mode=ConversationPermissionMode.AUTO_REVIEW,
+        db_path=tmp_path / "crew.db",
+    )
+    assert profile.filesystem[0].root == outside.resolve()
+    assert profile.network[0].host == "uploads.example.com"
+    redundant = _parse_additional_permissions(
+        {"filesystem": [{"root": str(workspace), "access": "read_write"}]},
+        cwd=workspace,
+        security_context=context,
+        mode=ConversationPermissionMode.AUTO_REVIEW,
+        db_path=tmp_path / "crew.db",
+    )
+    assert redundant.empty
+
+    with pytest.raises(ToolError, match="受保护路径"):
+        _parse_additional_permissions(
+            {"filesystem": [{"root": str(metadata), "access": "read_write"}]},
+            cwd=workspace,
+            security_context=context,
+            mode=ConversationPermissionMode.AUTO_REVIEW,
+            db_path=tmp_path / "crew.db",
+        )
+    with pytest.raises(ToolError, match="已存在路径"):
+        _parse_additional_permissions(
+            {"filesystem": [{"root": str(tmp_path / "missing"), "access": "read"}]},
+            cwd=workspace,
+            security_context=context,
+            mode=ConversationPermissionMode.AUTO_REVIEW,
+            db_path=tmp_path / "crew.db",
+        )

@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
-import os
-import json
-import shutil
 import asyncio
 import hashlib
+import json
 import logging
+import os
 import platform
+import shutil
 import sys
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Callable, Literal, Mapping
+from typing import Any, Literal, Sequence
 
 from crew.security.context import SecurityContext
 from crew.security.file_policy import _protected_entries
 from crew.security.models import (
+    EMPTY_ADDITIONAL_PERMISSIONS,
     AdditionalPermissionProfile,
     ConversationPermissionMode,
     PermissionProfile,
@@ -25,7 +28,6 @@ from crew.security.models import (
 )
 from crew.security.policy import settings_for_mode
 from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
-
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +43,10 @@ class ProcessLaunch:
     # enables the managed security boundary. Built-in tools remain managed
     # according to ``profile`` and do not use this flag.
     external_security_enabled: bool = False
+    security_context: SecurityContext | None = None
+    audit: Any | None = None
+    approval_service: Any | None = None
+    additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
 
     @property
     def managed(self) -> bool:
@@ -55,6 +61,16 @@ class ProcessLaunch:
 current_process_launch: ContextVar[ProcessLaunch | None] = ContextVar(
     "current_process_launch", default=None
 )
+
+
+@contextmanager
+def use_process_launch(launch: ProcessLaunch | None) -> Iterator[None]:
+    """Install one trusted launch decision for a bounded host call path."""
+    token = current_process_launch.set(launch)
+    try:
+        yield
+    finally:
+        current_process_launch.reset(token)
 
 
 def host_stream_launch_block_reason(*, external: bool = False) -> str | None:
@@ -96,6 +112,7 @@ async def execute_captured(
     on_started: Callable[[int | None], None] | None = None,
     on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
     external: bool = False,
+    tool_name: str = "captured_process",
 ) -> CapturedProcessResult:
     """Run an adapter under the current conversation boundary.
 
@@ -131,25 +148,70 @@ async def execute_captured(
             helper_argv=(),
             trusted_readable_roots=(),
         )
+    host_env = env
+    if env_overrides:
+        host_env = {**(env if env is not None else os.environ), **env_overrides}
+
+    action = _execution_action(argv, cwd)
+    effective_permissions = AdditionalPermissionProfile(
+        filesystem=(
+            *launch.additional_permissions.filesystem,
+            *additional_permissions.filesystem,
+        ),
+        network=(
+            *launch.additional_permissions.network,
+            *additional_permissions.network,
+        ),
+        allow_local_binding=(
+            launch.additional_permissions.allow_local_binding
+            or additional_permissions.allow_local_binding
+        ),
+    )
     if launch.managed:
         from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
-        from crew.security.runtime_client import NativeRuntimeClient
+        from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError
 
-        result = await SecurityExecutionBroker(NativeRuntimeClient(launch.helper_argv)).execute(
-            ExecutionRequest(
-                command=argv,
-                cwd=cwd,
-                permission_profile=launch.profile,
-                additional_permissions=additional_permissions,
-                trusted_readable_roots=launch.trusted_readable_roots,
-                stdin=stdin,
-                home_files=home_files,
-                env_overrides=env_overrides,
-                timeout_seconds=timeout,
-                max_output_bytes=max_output_bytes,
+        try:
+            result = await SecurityExecutionBroker(NativeRuntimeClient(launch.helper_argv)).execute(
+                ExecutionRequest(
+                    command=argv,
+                    cwd=cwd,
+                    permission_profile=launch.profile,
+                    additional_permissions=effective_permissions,
+                    trusted_readable_roots=launch.trusted_readable_roots,
+                    stdin=stdin,
+                    home_files=home_files,
+                    env_overrides=env_overrides,
+                    timeout_seconds=timeout,
+                    max_output_bytes=max_output_bytes,
+                ),
+                on_started=on_started,
+                on_output=on_output,
+            )
+        except NativeRuntimeError as exc:
+            audit_execution_result(
+                launch,
+                action,
+                tool_name=tool_name,
+                decision="error",
+                stable_error_code=exc.code.value,
+            )
+            raise
+        runtime_capabilities = getattr(result, "capabilities", None)
+        audit_execution_result(
+            launch,
+            action,
+            tool_name=tool_name,
+            decision="completed" if result.exit_code == 0 else "failed",
+            sandbox_backend=(
+                str(runtime_capabilities.backend) if runtime_capabilities is not None else ""
             ),
-            on_started=on_started,
-            on_output=on_output,
+            capabilities=(
+                _enabled_capabilities(runtime_capabilities)
+                if runtime_capabilities is not None
+                else ()
+            ),
+            exit_code=result.exit_code,
         )
         return CapturedProcessResult(result.exit_code, _redact(result.stdout), _redact(result.stderr))
     # Shield the spawn itself: on Windows process creation can outlive cancellation.
@@ -160,7 +222,7 @@ async def execute_captured(
         asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
-            env=env,
+            env=host_env,
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -189,20 +251,132 @@ async def execute_captured(
                 pass
         if process is not None:
             await terminate_process_tree(process)
+        audit_execution_result(
+            launch,
+            action,
+            tool_name=tool_name,
+            decision="cancelled",
+            sandbox_backend="host_unconfined",
+            stable_error_code="cancelled",
+        )
         raise
     except asyncio.TimeoutError:
         if process is not None:
             await terminate_process_tree(process)
+        audit_execution_result(
+            launch,
+            action,
+            tool_name=tool_name,
+            decision="error",
+            sandbox_backend="host_unconfined",
+            stable_error_code="timeout",
+        )
         raise
     except Exception:
         if process is not None:
             await terminate_process_tree(process)
+        audit_execution_result(
+            launch,
+            action,
+            tool_name=tool_name,
+            decision="error",
+            sandbox_backend="host_unconfined",
+            stable_error_code="host_spawn_failed",
+        )
         raise
-    return CapturedProcessResult(
+    completed = CapturedProcessResult(
         int(process.returncode or 0),
         _redact(stdout.decode("utf-8", errors="replace")),
         _redact(stderr.decode("utf-8", errors="replace")),
     )
+    audit_execution_result(
+        launch,
+        action,
+        tool_name=tool_name,
+        decision="completed" if completed.returncode == 0 else "failed",
+        sandbox_backend="host_unconfined",
+        exit_code=completed.returncode,
+    )
+    return completed
+
+
+def execute_captured_sync(
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    timeout: float,
+    env: dict[str, str] | None = None,
+    env_overrides: Mapping[str, str] | None = None,
+    tool_name: str = "captured_process",
+) -> CapturedProcessResult:
+    """Run a captured adapter from a worker thread while preserving its context."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            execute_captured(
+                argv,
+                cwd=cwd,
+                timeout=timeout,
+                env=env,
+                env_overrides=env_overrides,
+                tool_name=tool_name,
+            )
+        )
+    raise RuntimeError("execute_captured_sync must run outside an active event loop")
+
+
+def _execution_action(argv: tuple[str, ...], cwd: Path):
+    from crew.security.actions import normalize_exec_action
+
+    return normalize_exec_action(argv, cwd)
+
+
+def _enabled_capabilities(capabilities: object) -> tuple[str, ...]:
+    values = asdict(capabilities)  # RuntimeCapabilities is a frozen dataclass.
+    return tuple(
+        key
+        for key, value in values.items()
+        if key != "backend" and (value is True or key == "wsl_version" and value is not None)
+    )
+
+
+def audit_execution_result(
+    launch: ProcessLaunch,
+    action: object,
+    *,
+    tool_name: str,
+    decision: str,
+    sandbox_backend: str = "",
+    capabilities: tuple[str, ...] = (),
+    exit_code: int | None = None,
+    stable_error_code: str = "",
+) -> None:
+    """Persist one execution outcome using the action authorized for this launch."""
+    if launch.security_context is None or launch.audit is None:
+        return
+    from crew.security.audit import AuditEvent
+
+    try:
+        launch.audit.record(
+            AuditEvent.for_action(
+                launch.security_context,
+                action,
+                action_type="exec_result",
+                decision=decision,
+                decision_source="native_runtime" if launch.managed else "compatibility_host",
+                sandbox_backend=sandbox_backend,
+                capabilities=capabilities,
+                exit_code=exit_code,
+                stable_error_code=stable_error_code,
+                tool_name=tool_name,
+                additional_permissions_summary=_additional_permissions_summary(launch),
+            )
+        )
+    except Exception:
+        # exec_result is operational evidence, not the authorization decision itself.
+        # A saturated optional audit buffer must not strand an already-completed child.
+        _LOGGER.warning("execution result audit write failed", exc_info=True)
 
 
 async def _collect_host_output(
@@ -276,6 +450,10 @@ def compile_process_launch(
     *,
     db_path: Path,
     external_security_enabled: bool = False,
+    audit: Any | None = None,
+    approval_service: Any | None = None,
+    additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
+    trusted_readable_roots: Sequence[str | Path] = (),
 ) -> ProcessLaunch:
     """Build the host launch decision from trusted config and security state.
 
@@ -286,12 +464,17 @@ def compile_process_launch(
     protected = _protected_entries(context, db_path)
     profile = settings_for_mode(mode, context.workspace_root, deny_entries=protected).profile
     from crew.agent.skills import get_builtin_skills_dir
-    from crew.state.home import bundled_runtime_roots
+    from crew.state.home import managed_runtime_read_roots
 
     builtin_skills = get_builtin_skills_dir()
     trusted_roots = [
         *((builtin_skills.resolve(strict=True),) if builtin_skills.is_dir() else ()),
-        *bundled_runtime_roots(),
+        *managed_runtime_read_roots(),
+        *(
+            root.resolve(strict=True)
+            for value in trusted_readable_roots
+            if (root := Path(value).expanduser()).exists()
+        ),
     ]
     trusted_roots = list(dict.fromkeys(trusted_roots))
     return ProcessLaunch(
@@ -305,6 +488,23 @@ def compile_process_launch(
             if profile.kind is PermissionProfileKind.MANAGED
             else False
         ),
+        security_context=context,
+        audit=audit,
+        approval_service=approval_service,
+        additional_permissions=additional_permissions,
+    )
+
+
+def _additional_permissions_summary(launch: ProcessLaunch) -> str:
+    if launch.additional_permissions.empty:
+        return ""
+    from crew.security.models import serialize_additional_permissions
+
+    return json.dumps(
+        serialize_additional_permissions(launch.additional_permissions),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -355,7 +555,6 @@ def packaged_runtime_candidates(repo_root: Path, name: str) -> tuple[Path, ...]:
     platform_key = runtime_platform_key()
     if platform_key:
         candidates.append(repo_root / "security-runtime" / "prebuilt" / platform_key / name)
-    candidates.append(repo_root / "security-runtime" / "bin" / name)
     return tuple(candidates)
 
 
@@ -363,7 +562,7 @@ def packaged_runtime_argv() -> tuple[str, ...]:
     """Resolve a trusted installed helper without searching the task cwd.
 
     Priority: ACE_SECURITY_RUNTIME env (absolute) → Desktop 本地 staging 目录 → 当前
-    平台/架构的仓库预编译产物 → 旧版 security-runtime/bin/<name>。所有候选都固定在
+    平台/架构的仓库预编译产物。所有候选都固定在
     仓库根目录，不搜索任务 cwd。
     """
     configured = os.environ.get("ACE_SECURITY_RUNTIME", "").strip()

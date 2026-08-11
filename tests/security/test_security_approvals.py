@@ -1,5 +1,5 @@
-from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,6 +12,7 @@ from crew.security.approvals import (
 )
 from crew.security.context import SecurityContext
 from crew.security.grants import GrantError, GrantRegistry
+from crew.security.models import AdditionalPermissionProfile, FilesystemAccess, FilesystemEntry
 from crew.security.rules import RuleScope
 
 
@@ -86,6 +87,43 @@ def test_create_or_get_does_not_share_pending_authority_across_tasks(tmp_path: P
     )
 
     assert first.request_id != second.request_id
+
+
+def test_pending_and_grant_bind_exact_additional_permissions(tmp_path: Path) -> None:
+    clock = _Clock()
+    grants = GrantRegistry(clock=clock)
+    manager = ApprovalManager(grants, clock=clock)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["tool", "write"], tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    additional = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),)
+    )
+
+    plain, _ = manager.create_or_get(context, action, "terminal")
+    expanded, _ = manager.create_or_get(
+        context,
+        action,
+        "terminal",
+        additional_permissions=additional,
+    )
+    assert plain.request_id != expanded.request_id
+
+    outcome = manager.decide(
+        expanded.request_id,
+        expanded.nonce,
+        ApprovalDecision.SESSION,
+        context,
+    )
+    assert outcome.grant is not None
+    assert outcome.grant.additional_permissions == additional
+    assert grants.authorize_action(context, action) is None
+    assert grants.authorize_action(
+        context,
+        action,
+        additional_permissions=additional,
+    ) == outcome.grant
 
 
 def test_pending_requests_have_a_hard_per_session_limit(tmp_path: Path) -> None:

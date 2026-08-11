@@ -117,14 +117,16 @@ async def test_blocked_external_read_resumes_on_approve_and_cleanly_errors_on_re
 
 
 @pytest.mark.asyncio
-async def test_project_file_allowed_and_traversal_outside_requests_approval(secured_app, tmp_path):
+async def test_request_mode_asks_for_workspace_write_and_traversal_outside(secured_app, tmp_path):
     app, project = secured_app
     inside = project / "inside.txt"
     outside = tmp_path / "outside.txt"
     outside.write_text("outside", encoding="utf-8")
     with _security_context(project):
-        written = await app.registry.execute(
-            ToolCall("w1", "file_write", {"path": str(inside), "content": "inside"})
+        written = await _drive(
+            app,
+            ToolCall("w1", "file_write", {"path": str(inside), "content": "inside"}),
+            ApprovalDecision.ONCE,
         )
         escaped = await _drive(
             app,
@@ -225,55 +227,40 @@ async def test_auto_review_still_requires_approval_for_external_read_and_write(s
 
 
 @pytest.mark.asyncio
-async def test_full_access_is_managed_and_cannot_modify_security_control_plane(
+async def test_full_access_uses_host_authority_except_permanent_root_hardline(
     secured_app,
     tmp_path,
-    monkeypatch,
 ):
     app, project = secured_app
-    outside = Path.home() / f"ace-full-access-{tmp_path.name}.txt"
-    runtime_root = tmp_path / "bundled-python"
-    runtime_root.mkdir()
-    monkeypatch.setattr(
-        "crew.state.home.bundled_runtime_roots",
-        lambda: (runtime_root.resolve(strict=True),),
-        raising=False,
-    )
-    try:
-        with _security_context(project):
-            context = build_security_context(app.workspace_store)
-            app.security_service.set_mode(context, ConversationPermissionMode.FULL_ACCESS)
-            write = await app.registry.execute(
-                ToolCall("w1", "file_write", {"path": str(outside), "content": "changed"})
-            )
-            database = await app.registry.execute(
-                ToolCall("w2", "file_write", {"path": app.config.db_path, "content": "tampered"})
-            )
-            assessment = app.security_service.authorize_file_action(
-                context,
-                normalize_file_action(project.anchor, "write"),
-                tool_name="file_write",
-            )
-            launch = compile_process_launch(
-                context,
-                ConversationPermissionMode.FULL_ACCESS,
-                db_path=Path(app.config.db_path),
-            )
-        assert not write.is_error
-        assert database.is_error and "SECURITY_FILE_DENIED" in database.content
-        assert assessment[0].value == "deny"
-        assert launch.managed
-        from crew.agent.skills import get_builtin_skills_dir
-
-        assert launch.trusted_readable_roots == (
-            get_builtin_skills_dir().resolve(strict=True),
-            runtime_root.resolve(strict=True),
+    outside = tmp_path / "outside.txt"
+    with _security_context(project):
+        context = build_security_context(app.workspace_store)
+        app.security_service.set_mode(context, ConversationPermissionMode.FULL_ACCESS)
+        write = await app.registry.execute(
+            ToolCall("w1", "file_write", {"path": str(outside), "content": "changed"})
         )
-        assert all(
-            entry.root != launch.trusted_readable_roots[0] for entry in launch.profile.filesystem
+        database_assessment = app.security_service.authorize_file_action(
+            context,
+            normalize_file_action(app.config.db_path, "write"),
+            tool_name="file_write",
         )
-    finally:
-        outside.unlink(missing_ok=True)
+        root_assessment = app.security_service.authorize_file_action(
+            context,
+            normalize_file_action(project.anchor, "write"),
+            tool_name="file_write",
+        )
+        launch = compile_process_launch(
+            context,
+            ConversationPermissionMode.FULL_ACCESS,
+            db_path=Path(app.config.db_path),
+        )
+    assert not write.is_error
+    assert outside.read_text(encoding="utf-8") == "changed"
+    assert database_assessment[0].value == "allow"
+    assert root_assessment[0].value == "deny"
+    assert not launch.managed
+    assert launch.helper_argv == ()
+    assert launch.trusted_readable_roots == ()
 
 
 @pytest.mark.asyncio
@@ -285,12 +272,14 @@ async def test_patch_and_search_use_the_same_evaluator(secured_app, tmp_path):
     external.mkdir()
     (external / "outside.py").write_text("needle\n", encoding="utf-8")
     with _security_context(project):
-        patched = await app.registry.execute(
+        patched = await _drive(
+            app,
             ToolCall(
                 "p1",
                 "patch",
                 {"path": str(source), "old": "old", "new": "new"},
-            )
+            ),
+            ApprovalDecision.ONCE,
         )
         inside_search = await app.registry.execute(
             ToolCall("g1", "grep", {"path": str(project), "pattern": "new"})

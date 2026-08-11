@@ -11,10 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crew.agent.external import acp_adapter, detector, process_lifecycle, runtime_registry
 from crew.agent.executor.base import ExecutionContext
-from crew.core.envelope import ResponseChunk
-from crew.agent.skills import SkillActivation, SkillEntrypoint
 from crew.agent.executor.external import (
     AcpExecutor,
     ClientExecutor,
@@ -28,8 +25,29 @@ from crew.agent.executor.external import (
     _permission_question,
     _stream_runtime_with_safe_resume,
 )
-from crew.agent.plan import PlanModeManager
-from crew.core.types import Message, ToolCall
+from crew.agent.external import acp_adapter, detector, process_lifecycle, runtime_registry
+from crew.agent.external.acp_adapter import (
+    AcpAdapterConfig,
+    AcpAdapterError,
+    _build_session_new_params,
+    _build_session_resume_params,
+    _JsonRpcClient,
+    _permission_result,
+    run_acp_prompt,
+    stream_acp_events,
+)
+from crew.agent.external.cli_adapter import (
+    ClaudeStreamJsonAdapter,
+    ExternalCliConfig,
+    _authorized_external_launch,
+    _claude_native_executable,
+    _codex_native_executable,
+    _compact_cli_error,
+    _managed_default_args,
+    run_external_cli,
+    stream_claude_events,
+)
+from crew.agent.external.codex_adapter import stream_codex_events
 from crew.agent.external.detector import (
     discover_local_runtimes,
     scan_claude_runtime,
@@ -38,24 +56,6 @@ from crew.agent.external.detector import (
     scan_kimi_runtime,
     scan_runtimes,
 )
-from crew.agent.external.acp_adapter import (
-    AcpAdapterConfig,
-    AcpAdapterError,
-    _JsonRpcClient,
-    _build_session_new_params,
-    _build_session_resume_params,
-    _permission_result,
-    run_acp_prompt,
-    stream_acp_events,
-)
-from crew.agent.external.cli_adapter import (
-    ClaudeStreamJsonAdapter,
-    ExternalCliConfig,
-    _compact_cli_error,
-    run_external_cli,
-    stream_claude_events,
-)
-from crew.agent.external.codex_adapter import stream_codex_events
 from crew.agent.external.runtime_adapter import (
     ExternalStreamEvent,
     RuntimeExecutionRequest,
@@ -67,9 +67,15 @@ from crew.agent.external.runtime_adapter import (
 )
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
+from crew.agent.plan import PlanModeManager
+from crew.agent.skills import SkillActivation, SkillEntrypoint
+from crew.core.envelope import ResponseChunk
+from crew.core.types import Message, ToolCall
 from crew.gateway.helpers import role_markdown, suggest_role_description, with_session_agent_labels
+from crew.security.context import SecurityContext
 from crew.security.launch import ProcessLaunch, current_process_launch
 from crew.security.models import PermissionProfile, PermissionProfileKind
+from crew.security.service import ExecAuthorization
 from crew.state.config import Config
 from crew.team.formation import build_agent_profile, fast_team_suggestion
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, all_role_public_payloads
@@ -156,6 +162,276 @@ wildcard = "https://*.example.test/v1"
         ("api.example.test", 443, "https", False, False),
         ("127.0.0.1", 8765, "http", True, False),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+async def test_managed_codex_and_claude_use_captured_one_shot_instead_of_host_stream(
+    monkeypatch,
+    tmp_path,
+    provider,
+):
+    from crew.agent.external import cli_adapter, codex_adapter
+
+    calls: list[ExternalCliConfig] = []
+
+    async def captured(config: ExternalCliConfig) -> str:
+        calls.append(config)
+        return "managed result"
+
+    monkeypatch.setattr(cli_adapter, "run_external_cli", captured)
+    token = current_process_launch.set(
+        ProcessLaunch(PermissionProfile(PermissionProfileKind.MANAGED))
+    )
+    request = RuntimeExecutionRequest(
+        executable_path=str(tmp_path / provider),
+        provider=provider,
+        prompt="hello",
+        cwd=str(tmp_path),
+    )
+    try:
+        stream = (
+            codex_adapter.stream_codex_events(request)
+            if provider == "codex"
+            else cli_adapter.stream_claude_events(request)
+        )
+        events = [event async for event in stream]
+    finally:
+        current_process_launch.reset(token)
+
+    assert [event.text for event in events] == ["managed result"]
+    assert len(calls) == 1
+    assert calls[0].provider == provider
+
+
+def test_managed_external_default_args_delegate_policy_to_native_runtime():
+    codex = _managed_default_args("codex", ["exec", "--skip-git-repo-check", "hello"])
+    assert codex[:2] == ["exec", "--dangerously-bypass-approvals-and-sandbox"]
+    assert "--ephemeral" in codex
+    assert "--ignore-user-config" in codex
+
+    claude = _managed_default_args(
+        "claude-code",
+        ["-p", "hello", "--output-format", "stream-json"],
+    )
+    assert claude[claude.index("--output-format") + 1] == "json"
+    assert claude[claude.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "--safe-mode" in claude
+    assert "--no-session-persistence" in claude
+
+
+def test_codex_npm_launcher_resolves_packaged_windows_native_binary(monkeypatch, tmp_path):
+    launcher = tmp_path / "bin" / "codex.cmd"
+    launcher.parent.mkdir()
+    launcher.write_text("@node codex.js", encoding="utf-8")
+    native = (
+        launcher.parent
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native")
+    monkeypatch.setattr("crew.agent.external.cli_adapter.platform.system", lambda: "Windows")
+    monkeypatch.setattr("crew.agent.external.cli_adapter.platform.machine", lambda: "AMD64")
+
+    assert _codex_native_executable(str(launcher)) == native.resolve()
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "package_name", "target"),
+    [
+        ("Darwin", "arm64", "codex-darwin-arm64", "aarch64-apple-darwin"),
+        ("Linux", "x86_64", "codex-linux-x64", "x86_64-unknown-linux-musl"),
+    ],
+)
+def test_codex_npm_launcher_resolves_packaged_posix_native_binary(
+    monkeypatch,
+    tmp_path,
+    system,
+    machine,
+    package_name,
+    target,
+):
+    package_root = tmp_path / "codex-package"
+    launcher = package_root / "bin" / "codex.js"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/usr/bin/env node", encoding="utf-8")
+    native = (
+        package_root
+        / "node_modules"
+        / "@openai"
+        / package_name
+        / "vendor"
+        / target
+        / "bin"
+        / "codex"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native")
+    monkeypatch.setattr("crew.agent.external.cli_adapter.platform.system", lambda: system)
+    monkeypatch.setattr("crew.agent.external.cli_adapter.platform.machine", lambda: machine)
+
+    assert _codex_native_executable(str(launcher)) == native.resolve()
+
+
+def test_claude_npm_windows_shim_resolves_packaged_native_binary(tmp_path):
+    launcher = tmp_path / "bin" / "claude.cmd"
+    launcher.parent.mkdir()
+    launcher.write_text("@node claude.js", encoding="utf-8")
+    native = (
+        launcher.parent
+        / "node_modules"
+        / "@anthropic-ai"
+        / "claude-code"
+        / "bin"
+        / "claude.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native")
+
+    assert _claude_native_executable(str(launcher)) == native.resolve()
+
+
+@pytest.mark.asyncio
+async def test_managed_external_launch_approves_exact_provider_network_overlay(tmp_path):
+    class ApprovalService:
+        def __init__(self):
+            self.calls = []
+            self.approved = False
+
+        def authorize_exec_action(self, context, action, **kwargs):
+            self.calls.append((context, action, kwargs))
+            if self.approved:
+                return ExecAuthorization(
+                    True,
+                    additional_permissions=kwargs["additional_permissions"],
+                )
+            return ExecAuthorization(False, {"request_id": "external-approval"})
+
+        async def await_decision(self, request_id):
+            from crew.security.approvals import ApprovalDecision
+
+            assert request_id == "external-approval"
+            self.approved = True
+            return SimpleNamespace(decision=ApprovalDecision.ONCE)
+
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="workspace",
+        workspace_root=tmp_path,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=tmp_path,
+    )
+    service = ApprovalService()
+    token = current_process_launch.set(
+        ProcessLaunch(
+            PermissionProfile(PermissionProfileKind.MANAGED),
+            security_context=context,
+            approval_service=service,
+        )
+    )
+    try:
+        launch = await _authorized_external_launch(
+            provider="codex",
+            executable_path=str(tmp_path / "codex"),
+            cwd=tmp_path,
+            custom_env={"OPENAI_BASE_URL": "https://models.example.test/v1"},
+        )
+    finally:
+        current_process_launch.reset(token)
+
+    assert len(service.calls) == 2
+    assert service.calls[0][2]["risk_class"] == "external_agent_network"
+    assert service.calls[0][2]["requires_approval"] is True
+    approved_targets = {
+        (entry.host, entry.port, entry.protocol)
+        for entry in launch.additional_permissions.network
+    }
+    assert approved_targets >= {
+        ("api.openai.com", 443, "https"),
+        ("chatgpt.com", 443, "https"),
+        ("models.example.test", 443, "https"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_managed_external_cli_passes_provider_env_but_not_runtime_control_env(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    class ApprovalService:
+        @staticmethod
+        def authorize_exec_action(_context, _action, **kwargs):
+            return ExecAuthorization(
+                True,
+                additional_permissions=kwargs["additional_permissions"],
+            )
+
+    async def captured(argv, **kwargs):
+        calls.append((argv, kwargs, current_process_launch.get()))
+        return SimpleNamespace(returncode=0, stdout="managed", stderr="")
+
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"native")
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="workspace",
+        workspace_root=tmp_path,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=tmp_path,
+    )
+    monkeypatch.setattr("crew.security.launch.execute_captured", captured)
+    monkeypatch.setenv("HOME", "/private/owner")
+    monkeypatch.setenv("PATH", "/untrusted/bin")
+    monkeypatch.setenv("HTTP_PROXY", "http://untrusted.proxy")
+    monkeypatch.setenv("SEARCH_PROVIDER_API_KEY", "unrelated-secret")
+    token = current_process_launch.set(
+        ProcessLaunch(
+            PermissionProfile(PermissionProfileKind.MANAGED),
+            security_context=context,
+            approval_service=ApprovalService(),
+        )
+    )
+    try:
+        output = await run_external_cli(
+            ExternalCliConfig(
+                provider="codex",
+                executable_path=str(executable),
+                prompt="hello",
+                cwd=str(tmp_path),
+                custom_env={"OPENAI_API_KEY": "provider-key"},
+            )
+        )
+    finally:
+        current_process_launch.reset(token)
+
+    assert output == "managed"
+    argv, kwargs, effective_launch = calls[0]
+    assert argv[0] == str(executable.resolve())
+    assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert kwargs["env_overrides"]["OPENAI_API_KEY"] == "provider-key"
+    assert "HOME" not in kwargs["env_overrides"]
+    assert "PATH" not in kwargs["env_overrides"]
+    assert "HTTP_PROXY" not in kwargs["env_overrides"]
+    assert "SEARCH_PROVIDER_API_KEY" not in kwargs["env_overrides"]
+    assert effective_launch is not None
+    assert effective_launch.additional_permissions.network
 
 
 @pytest.mark.asyncio

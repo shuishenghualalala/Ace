@@ -137,7 +137,14 @@ async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
 
 
 @pytest.mark.asyncio
-async def test_strict_auto_review_requires_live_native_runtime(api):
+async def test_strict_auto_review_requires_live_native_runtime(api, monkeypatch):
+    async def unavailable_runtime():
+        return None, False, False, "darwin"
+
+    monkeypatch.setattr(
+        "crew.gateway.routers.security._live_filesystem_runtime",
+        unavailable_runtime,
+    )
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await _put_json(
@@ -148,6 +155,27 @@ async def test_strict_auto_review_requires_live_native_runtime(api):
 
     assert response.status_code == 409
     assert "live probe" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_full_access_selection_does_not_depend_on_native_runtime(api, monkeypatch):
+    async def unavailable_runtime():
+        raise AssertionError("full access must not probe the managed runtime")
+
+    monkeypatch.setattr(
+        "crew.gateway.routers.security._live_filesystem_runtime",
+        unavailable_runtime,
+    )
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await _put_json(
+            client,
+            "/api/security/mode",
+            {"workspace_id": "default", "session_id": "s1", "mode": "full_access"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"mode": "full_access"}
 
 
 @pytest.mark.asyncio
@@ -428,6 +456,7 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         async def execute(self, **kwargs):
             network_enabled = kwargs["network_enabled"]
             calls.append(network_enabled)
+            assert kwargs["readonly_roots"] == (Path(kwargs["cwd"]) / ".git",)
             Path(kwargs["cwd"]).joinpath("probe-marker").write_text("ok", encoding="ascii")
             return SimpleNamespace(
                 exit_code=1,
@@ -480,8 +509,9 @@ async def test_capabilities_probe_macos_runtime(api, tmp_path, monkeypatch):
             assert command[:3] == (
                 "/bin/sh",
                 "-c",
-                'printf ok > "$1"; cat "$2" >/dev/null',
+                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; cat "$3" >/dev/null',
             )
+            assert kwargs["readonly_roots"] == (Path(command[5]).parent,)
             Path(command[4]).write_text("ok", encoding="ascii")
             return SimpleNamespace(
                 exit_code=1,

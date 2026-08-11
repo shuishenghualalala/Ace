@@ -14,7 +14,12 @@ pub const MAX_HOME_FILES: usize = 64;
 pub const MAX_RESPONSE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
-pub const READY_CAPABILITIES: [&str; 3] = ["stdin_once", "stream_output", "stdin_bidirectional"];
+pub const READY_CAPABILITIES: [&str; 4] = [
+    "stdin_once",
+    "stream_output",
+    "stdin_bidirectional",
+    "readonly_roots",
+];
 
 /// Stable error codes for the managed-network layer (spec §13).
 ///
@@ -79,6 +84,8 @@ pub enum RuntimeRequest {
         #[serde(default)]
         readable_roots: Vec<String>,
         #[serde(default)]
+        readonly_roots: Vec<String>,
+        #[serde(default)]
         denied_roots: Vec<String>,
         #[serde(default)]
         network_enabled: bool,
@@ -102,6 +109,8 @@ pub enum RuntimeRequest {
         writable_roots: Vec<String>,
         #[serde(default)]
         readable_roots: Vec<String>,
+        #[serde(default)]
+        readonly_roots: Vec<String>,
         #[serde(default)]
         denied_roots: Vec<String>,
         #[serde(default)]
@@ -134,7 +143,7 @@ pub struct ReadyFrame {
     #[serde(rename = "type")]
     pub frame_type: &'static str,
     pub version: u16,
-    pub capabilities: [&'static str; 3],
+    pub capabilities: [&'static str; 4],
 }
 
 #[derive(Debug, Serialize)]

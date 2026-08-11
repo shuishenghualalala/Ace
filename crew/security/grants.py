@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from crew.security.actions import NormalizedAction
 from crew.security.context import SecurityContext
+from crew.security.models import EMPTY_ADDITIONAL_PERMISSIONS, AdditionalPermissionProfile
 from crew.security.rules import RuleScope
 
 
@@ -28,6 +29,7 @@ class ExecutionGrant:
     session_id: str
     task_id: str
     expires_monotonic: float | None
+    additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
 
 
 class GrantRegistry:
@@ -45,6 +47,7 @@ class GrantRegistry:
         scope: RuleScope,
         *,
         expires_monotonic: float | None,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
     ) -> ExecutionGrant:
         if scope not in {RuleScope.ONCE, RuleScope.SESSION}:
             raise ValueError("execution grant 只支持 once/session")
@@ -58,6 +61,7 @@ class GrantRegistry:
             session_id=context.session_id,
             task_id=context.task_id,
             expires_monotonic=expires_monotonic,
+            additional_permissions=additional_permissions,
         )
         with self._lock:
             self._grants[grant.grant_id] = grant
@@ -123,6 +127,8 @@ class GrantRegistry:
         self,
         context: SecurityContext,
         action: NormalizedAction,
+        *,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
     ) -> ExecutionGrant | None:
         """Authorize by exact action when a tool retry does not carry a grant ID."""
         with self._lock:
@@ -131,7 +137,11 @@ class GrantRegistry:
                 if grant.expires_monotonic is not None and now > grant.expires_monotonic:
                     self._grants.pop(grant_id, None)
                     continue
-                if grant.action_digest != action.digest or not _context_matches(grant, context):
+                if (
+                    grant.action_digest != action.digest
+                    or grant.additional_permissions != additional_permissions
+                    or not _context_matches(grant, context)
+                ):
                     continue
                 if grant.scope is RuleScope.ONCE:
                     self._grants.pop(grant_id, None)

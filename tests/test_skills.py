@@ -1545,9 +1545,10 @@ def test_skill_view_old_alias_still_works(package_env):
 def test_skill_activation_uses_same_resolved_skill_metadata(tmp_path, monkeypatch):
     from crew.agent.skills import (
         SkillActivation,
-        skill_activations_from_params,
         build_skill_activation,
         scan_skills,
+        skill_activations_from_params,
+        trusted_skill_roots_from_params,
     )
 
     builtin_dir = tmp_path / "builtin"
@@ -1594,6 +1595,14 @@ def test_skill_activation_uses_same_resolved_skill_metadata(tmp_path, monkeypatc
     )
     assert restored == (context,)
     assert isinstance(restored[0], SkillActivation)
+    assert trusted_skill_roots_from_params(
+        {"active_skills": [context.to_dict()]}
+    ) == (skill_dir.resolve(),)
+
+    forged = context.to_dict()
+    forged["skill_root"] = str(tmp_path)
+    with pytest.raises(ValueError, match="发生变化"):
+        trusted_skill_roots_from_params({"active_skills": [forged]})
 
 
 def test_install_skill_from_dir_is_governed(tmp_path, monkeypatch):

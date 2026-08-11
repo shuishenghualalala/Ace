@@ -38,6 +38,7 @@ fn startup_token_and_nonce_replay_are_enforced() {
     assert!(line.contains("\"version\":2"));
     assert!(line.contains("\"stdin_once\""));
     assert!(line.contains("\"stream_output\""));
+    assert!(line.contains("\"readonly_roots\""));
 
     let request = serde_json::json!({
         "version": 2,

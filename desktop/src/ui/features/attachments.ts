@@ -72,9 +72,10 @@ export function uniqueClipboardFiles(data: ClipboardFileSource): File[] {
   return uniqueFiles(itemFiles);
 }
 
-// ---- 文档类附件提示 ----
+// ---- 文档类附件提示（当前未启用，代码保留备用）----
 // 默认上传链路只把 pdf/word/excel/ppt 当「二进制文件」传路径给模型（读不到内容），
 // 真正解析需要可选技能 file-qa。这里检测到这类附件且未安装时，弹引导条一键安装。
+// 启用方式见 renderAttachmentPreview 内注释。
 const DOC_EXTS = new Set(['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']);
 const FILE_QA_SLUG = 'file-qa';
 /** file-qa 是否已安装的会话级缓存：null=未查询。避免每次渲染都打 /api/skills。 */
@@ -122,7 +123,8 @@ export function renderAttachmentPreview(): void {
   const box = queryPrimaryComposer('[data-attachment-preview]');
   if (!box) return;
   renderAttachmentList(box, state.attachments, removeMainAttachment);
-  void refreshFileQaHint();
+  // file-qa 引导条暂不启用（代码保留）：启用时恢复 refreshFileQaHint() 调用
+  // + composer-context-view.ts 里 createFileQaHint() 的挂载。
 }
 
 /** 把附件列表渲染进指定预览容器：主对话（before-input 槽位）与 Wiki 面板共用同一套卡片结构。 */

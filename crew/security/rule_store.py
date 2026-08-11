@@ -8,6 +8,10 @@ import time
 from pathlib import Path
 
 from crew.security.actions import ActionKind
+from crew.security.models import (
+    deserialize_additional_permissions,
+    serialize_additional_permissions,
+)
 from crew.security.rules import ActionRule, RuleDecision, RuleScope
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
@@ -79,6 +83,9 @@ class SQLiteRuleStore:
                     rule.action_detail,
                     "action_detail",
                     _MAX_ACTION_DETAIL_LENGTH,
+                ),
+                "additional_permissions": serialize_additional_permissions(
+                    rule.additional_permissions
                 ),
             },
             ensure_ascii=False,
@@ -208,6 +215,9 @@ def _decode_rule(row) -> ActionRule:
                 payload.get("action_detail", ""),
                 "action_detail",
                 _MAX_ACTION_DETAIL_LENGTH,
+            ),
+            additional_permissions=deserialize_additional_permissions(
+                payload.get("additional_permissions")
             ),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

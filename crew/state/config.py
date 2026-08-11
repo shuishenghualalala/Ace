@@ -16,6 +16,7 @@ import yaml
 from dotenv import dotenv_values, load_dotenv
 
 from crew.browser.types import BrowserConfig
+from crew.security.outbound import NetworkConfig
 from crew.state.access_control import AccessControlConfig
 from crew.wiki.config import WikiConfig
 
@@ -120,7 +121,7 @@ class ModelProfile:
     max_tokens: int | None = None
     context_window: int | None = None
     timeout: float = 60.0
-    vision: bool = True
+    vision: bool = False
     loaded: bool = True
     builtin: bool = False
     capabilities: list[str] = field(default_factory=lambda: ["text", "tools"])
@@ -132,6 +133,13 @@ class ModelProfile:
     @property
     def has_key(self) -> bool:
         return bool(self.api_key)
+
+    @property
+    def supports_vision(self) -> bool:
+        """Whether this profile may send image inputs to its provider."""
+        return "vision" in {
+            str(item).strip().lower() for item in self.capabilities
+        }
 
     @property
     def api_key_masked(self) -> str:
@@ -156,7 +164,7 @@ class ModelProfile:
             "max_tokens": self.max_tokens,
             "context_window": self.context_window,
             "timeout": self.timeout,
-            "vision": self.vision,
+            "vision": self.supports_vision,
             "loaded": self.loaded,
             "builtin": self.builtin,
             "capabilities": list(self.capabilities),
@@ -316,6 +324,8 @@ class Config:
 
     access_control: AccessControlConfig = field(default_factory=AccessControlConfig)
     browser: BrowserConfig = field(default_factory=_default_browser_config)
+    # 进程内 HTTP 边界（web_search/web_extract/Wiki）上游代理；空=读环境变量
+    network: NetworkConfig = field(default_factory=NetworkConfig)
 
     @property
     def has_llm_key(self) -> bool:
@@ -324,6 +334,9 @@ class Config:
     @property
     def active_model(self) -> ModelProfile:
         if not self.model_profiles:
+            capabilities = ["text", "tools"]
+            if self.vision:
+                capabilities.append("vision")
             self.model_profiles["default"] = ModelProfile(
                 id="default",
                 api_key=self.api_key,
@@ -336,6 +349,7 @@ class Config:
                 context_window=self.context_window,
                 timeout=self.timeout,
                 vision=self.vision,
+                capabilities=capabilities,
             )
         return self.model_profiles.get(self.active_model_id) or next(iter(self.model_profiles.values()))
 
@@ -355,6 +369,8 @@ class Config:
         self.max_tokens = profile.max_tokens
         self.context_window = profile.context_window
         self.timeout = profile.timeout
+        # capabilities 是模型能力的唯一运行时来源；vision 仅保留为旧配置兼容字段。
+        self.vision = profile.supports_vision
         return profile
 
     def public_model_options(self) -> list[dict[str, Any]]:
@@ -1014,15 +1030,22 @@ def _as_bool(value: Any, default: bool) -> bool:
 
 def _model_capabilities(raw: dict[str, Any]) -> list[str]:
     value = raw.get("capabilities")
-    if not isinstance(value, list):
-        return ["text", "tools"]
-    items = [str(item).strip().lower() for item in value if str(item).strip()]
-    return list(dict.fromkeys(items or ["text", "tools"]))
+    if isinstance(value, list):
+        items = [str(item).strip().lower() for item in value if str(item).strip()]
+        return list(dict.fromkeys(items or ["text", "tools"]))
+
+    # 旧配置没有 capabilities 时，用 legacy vision 完成一次兼容迁移；新配置一旦
+    # 提供 capabilities，它就是唯一事实来源，避免 UI 与 Provider 各读一套开关。
+    items = ["text", "tools"]
+    if _as_bool(raw.get("vision", True), True):
+        items.append("vision")
+    return items
 
 
 def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
     api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
+    capabilities = _model_capabilities(raw)
 
     return ModelProfile(
         id=model_id,
@@ -1036,17 +1059,18 @@ def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
         max_tokens=_as_int_or_none(raw.get("max_tokens")),
         context_window=_as_int_or_none(raw.get("context_window")),
         timeout=_as_float(raw.get("timeout", 60.0), 60.0),
-        vision=_as_bool(raw.get("vision", True), True),
+        vision="vision" in capabilities,
         loaded=_as_bool(raw.get("loaded", True), True),
         # 基础 config.yaml 是共享配置层；是否内置不信任用户填写字段，而由来源决定。
         builtin=True,
-        capabilities=_model_capabilities(raw),
+        capabilities=capabilities,
     )
 
 
 def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict[str, str]) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
     api_key = _lookup_api_key(api_key_env, env_map, fallback_global=False)
+    capabilities = _model_capabilities(raw)
     return ModelProfile(
         id=model_id,
         name=str(raw.get("name") or model_id),
@@ -1059,10 +1083,10 @@ def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict
         max_tokens=_as_int_or_none(raw.get("max_tokens")),
         context_window=_as_int_or_none(raw.get("context_window")),
         timeout=_as_float(raw.get("timeout", 60.0), 60.0),
-        vision=_as_bool(raw.get("vision", True), True),
+        vision="vision" in capabilities,
         loaded=_as_bool(raw.get("loaded", True), True),
         builtin=False,
-        capabilities=_model_capabilities(raw),
+        capabilities=capabilities,
     )
 
 
@@ -1075,6 +1099,7 @@ def _build_profile_from_payload(model_id: str, payload: dict[str, Any]) -> Model
     api_key_env = str(payload.get("api_key_env") or "CREW_API_KEY").strip() or "CREW_API_KEY"
     # 已存在的 env 变量沿用其值，让 update 场景保留 has_key 状态
     api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
+    capabilities = _model_capabilities(payload)
     return ModelProfile(
         id=model_id,
         name=str(payload.get("name") or model_id),
@@ -1087,10 +1112,10 @@ def _build_profile_from_payload(model_id: str, payload: dict[str, Any]) -> Model
         max_tokens=_as_int_or_none(payload.get("max_tokens")),
         context_window=_as_int_or_none(payload.get("context_window")),
         timeout=_as_float(payload.get("timeout", 60.0), 60.0),
-        vision=_as_bool(payload.get("vision", True), True),
+        vision="vision" in capabilities,
         loaded=_as_bool(payload.get("loaded", True), True),
         builtin=_as_bool(payload.get("builtin", False), False),
-        capabilities=_model_capabilities(payload),
+        capabilities=capabilities,
     )
 
 
@@ -1115,7 +1140,7 @@ def _serialize_profile_for_yaml(profile: ModelProfile) -> dict[str, Any]:
         data["max_tokens"] = profile.max_tokens
     if profile.context_window is not None:
         data["context_window"] = profile.context_window
-    if not profile.vision:
+    if not profile.supports_vision:
         data["vision"] = False
     return data
 
@@ -1535,6 +1560,15 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.session_idle_timeout = int(session_cfg.get("idle_timeout_minutes", cfg.session_idle_timeout))
 
         cfg.wiki = WikiConfig.from_raw(data.get("wiki", {}))
+        cfg.network = NetworkConfig.from_raw(data.get("network", {}))
+        # 把 config 的 network 段注入 outbound 作为进程级默认代理，
+        # 供 web_search/web_extract/Wiki 等未显式传参的调用方使用。
+        from crew.security.outbound import set_network_defaults
+
+        set_network_defaults(
+            upstream_proxy=cfg.network.upstream_proxy,
+            allow_loopback_proxy=cfg.network.allow_loopback_proxy,
+        )
 
         cfg.mcp_servers = data.get("mcp_servers", {}) or {}
         cron = data.get("cron", {})

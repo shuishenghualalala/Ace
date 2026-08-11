@@ -1034,20 +1034,20 @@ async def test_official_mouse_resize_and_drop_actions_dispatch_exact_wire(
         }
     )
     assert "fresh_snapshot: true" in dropped
-    assert (
-        "drop",
-        (
-            "@e18",
-            "--path",
-            str(upload),
-            "--data",
-            "text/plain",
-            "--path",
-            "--data",
-            "text/uri-list",
-            "https://example.com/item",
-        ),
-    ) in driver.calls
+    drop_call = next(call for call in reversed(driver.calls) if call[0] == "drop")
+    staged_path = Path(drop_call[1][2])
+    assert drop_call[1][:2] == ("@e18", "--path")
+    assert staged_path.name == upload.name
+    assert "approved-uploads" in staged_path.parts
+    assert drop_call[1][3:] == (
+        "--data",
+        "text/plain",
+        "--path",
+        "--data",
+        "text/uri-list",
+        "https://example.com/item",
+    )
+    assert not staged_path.exists()
 
     latest_ref = re.findall(r"\[ref=(p\d+:e18)\]", dropped)[-1]
     await tool.handler({"action": "drop", "ref": latest_ref, "data": {}})

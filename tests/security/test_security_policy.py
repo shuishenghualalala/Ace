@@ -9,8 +9,8 @@ from crew.security.models import (
     FilesystemAccess,
     FilesystemEntry,
     FilesystemOperation,
-    NetworkPolicy,
     NetworkEntry,
+    NetworkPolicy,
     PermissionProfileKind,
 )
 from crew.security.policy import filesystem_operation_allowed, settings_for_mode
@@ -26,12 +26,10 @@ def test_ui_modes_map_to_two_independent_security_axes(tmp_path: Path) -> None:
     assert auto.profile.kind is PermissionProfileKind.MANAGED
     assert auto.approval_policy is ApprovalPolicy.AUTO_REVIEW
     assert request.profile == auto.profile
-    assert full.profile.kind is PermissionProfileKind.MANAGED
-    assert full.profile.network is NetworkPolicy.RESTRICTED
-    assert full.approval_policy is ApprovalPolicy.REQUEST
-    roots = {entry.root for entry in full.profile.filesystem}
-    assert tmp_path.resolve() in roots
-    assert Path.home().resolve() in roots
+    assert full.profile.kind is PermissionProfileKind.DISABLED
+    assert full.profile.network is NetworkPolicy.UNRESTRICTED
+    assert full.approval_policy is ApprovalPolicy.NEVER
+    assert full.profile.filesystem == ()
 
 
 def test_unknown_ui_mode_fails_closed(tmp_path: Path) -> None:
@@ -68,6 +66,55 @@ def test_non_escalatable_deny_cannot_be_overridden(tmp_path: Path) -> None:
 
     assert not filesystem_operation_allowed(
         profile, additional, protected / "audit.db", FilesystemOperation.READ
+    )
+
+
+def test_more_specific_base_workspace_can_be_carved_from_runtime_home(tmp_path: Path) -> None:
+    runtime_home = tmp_path / "runtime-home"
+    workspace = runtime_home / "accounts" / "owner" / "task_workspaces" / "default"
+    workspace.mkdir(parents=True)
+    sibling = runtime_home / "accounts" / "owner" / "identity.json"
+    profile = settings_for_mode(
+        ConversationPermissionMode.REQUEST_APPROVAL,
+        workspace,
+        deny_entries=(
+            FilesystemEntry(runtime_home, FilesystemAccess.DENY, escalatable=False),
+        ),
+    ).profile
+
+    assert filesystem_operation_allowed(
+        profile,
+        AdditionalPermissionProfile(),
+        workspace / "artifact.txt",
+        FilesystemOperation.WRITE,
+    )
+    assert not filesystem_operation_allowed(
+        profile,
+        AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(sibling, FilesystemAccess.READ_WRITE),)
+        ),
+        sibling,
+        FilesystemOperation.WRITE,
+    )
+
+
+def test_non_escalatable_read_only_root_cannot_be_upgraded_to_write(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    protected = workspace / ".git"
+    profile = settings_for_mode(
+        ConversationPermissionMode.REQUEST_APPROVAL,
+        workspace,
+        deny_entries=(FilesystemEntry(protected, FilesystemAccess.READ, escalatable=False),),
+    ).profile
+    additional = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(protected, FilesystemAccess.READ_WRITE),)
+    )
+
+    assert not filesystem_operation_allowed(
+        profile,
+        additional,
+        protected,
+        FilesystemOperation.WRITE,
     )
 
 

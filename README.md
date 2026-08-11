@@ -184,6 +184,12 @@ npm run dev --prefix desktop
 后的重建要求，见 [security-runtime/README.md](security-runtime/README.md)。正式 DMG 会在
 目标平台重新构建并装入 runtime，安装包使用者无需安装 Rust。
 
+维护者也可以在 GitHub Actions 手动运行 **security-prebuilt**。它会分别在 Apple Silicon、
+Intel Mac、Windows x64 和 Linux x64 原生 runner 上构建与测试，产出带 SHA-256 manifest 和
+GitHub build provenance 的压缩包；打 `v*` tag 时会附加到 GitHub Release。同事只需使用对应
+平台的预编译目录，不需要安装 Cargo。证书是可选增强：未配置证书仍会生成可验证产物，配置
+Developer ID/Authenticode secrets 后才会额外执行系统签名。
+
 ### 2B. 启动 Web 端
 
 分别在两个终端中，从仓库根目录运行：
@@ -343,7 +349,7 @@ npm run dist:win     # Windows x64 → desktop/release/win-unpacked/
 npm run dist:mac     # macOS x64 + arm64 → desktop/release/
 ```
 
-这些产物适合本地验证或作为下游发行流程的输入，不是已签名的正式安装器。更多配置说明见
+这些产物适合本地验证或作为下游发行流程的输入，不保证是已签名、已公证的正式安装器。更多配置说明见
 [Desktop 文档](desktop/README.md#本地预打包)。
 
 ### Linux UOS / Kylin `.deb`
@@ -459,5 +465,4 @@ pytest -m e2e
 本项目采用 [Apache License 2.0](LICENSE) 开源许可。项目致谢见 [NOTICE](NOTICE)。
 
 ---
-
 

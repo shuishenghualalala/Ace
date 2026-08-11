@@ -1563,6 +1563,21 @@ def skill_activations_from_params(params: dict[str, Any] | None) -> tuple[SkillA
     return tuple(activations)
 
 
+def trusted_skill_roots_from_params(params: dict[str, Any] | None) -> tuple[Path, ...]:
+    """Revalidate explicitly activated Skill roots before sandbox exposure."""
+    roots: list[Path] = []
+    for activation in skill_activations_from_params(params):
+        info = resolve_skill_any(activation.skill_id)
+        if info is None:
+            raise ValueError(f"当前 Skill 已不存在：{activation.skill_id}")
+        root = _registered_skill_dir(Path(str(info.get("skill_dir") or "")))
+        if root != Path(activation.skill_root).expanduser().resolve():
+            raise ValueError(f"Skill 在当前执行期间发生变化：{activation.skill_id}")
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
 def resolve_skill_activation_entrypoint(
     activation: SkillActivation,
     entrypoint_id: str,

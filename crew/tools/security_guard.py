@@ -5,11 +5,12 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from crew.core.errors import ToolError
-from crew.security.actions import normalize_file_action
+from crew.security.actions import normalize_file_action, normalize_network_action
 from crew.security.approvals import ApprovalDecision
 from crew.security.context import (
     SecurityContextError,
@@ -127,3 +128,140 @@ async def authorize_file_tool(
         # 罕见竞态（grant 在 decide 与重检之间过期或被撤销）→ fail-closed，模型可重试。
         raise ToolError("批准后授权校验失败，请重试")
     return target
+
+
+async def authorize_network_tool(
+    url: str,
+    *,
+    tool_name: str,
+    workspace_store: Any | None,
+    security_service: Any | None,
+) -> None:
+    """Authorize a public HTTP(S) target and wait for an owner decision if needed."""
+    from crew.security.outbound import parse_public_http_target
+
+    try:
+        parse_public_http_target(url)
+    except ValueError as exc:
+        raise ToolError(f"联网目标无效: {exc}") from exc
+    if workspace_store is None or security_service is None:
+        return
+    try:
+        context = build_security_context(workspace_store)
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全联网上下文无效: {exc}") from exc
+    await authorize_network_target(
+        url,
+        tool_name=tool_name,
+        security_service=security_service,
+        security_context=context,
+    )
+
+
+async def authorize_network_target(
+    url: str,
+    *,
+    tool_name: str,
+    security_service: Any,
+    security_context: Any,
+) -> None:
+    """Authorize an exact public target for a host-built security context."""
+    from crew.security.outbound import parse_public_http_target
+
+    try:
+        target = parse_public_http_target(url)
+        action = normalize_network_action(target.host, target.port, target.protocol)
+        result = security_service.authorize_network_action(
+            security_context,
+            action,
+            tool_name=tool_name,
+            public_target=True,
+        )
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全联网上下文无效: {exc}") from exc
+    if result.allowed:
+        return
+    if result.request is None:
+        raise ToolError("联网请求已被安全策略拒绝")
+    outcome = await security_service.await_decision(result.request["request_id"])
+    if outcome is None or outcome.decision is ApprovalDecision.REJECT:
+        raise ToolError("用户未批准该联网请求")
+    result2 = security_service.authorize_network_action(
+        security_context,
+        action,
+        tool_name=tool_name,
+        public_target=True,
+    )
+    if not result2.allowed:
+        raise ToolError("批准后联网授权校验失败，请重试")
+
+
+async def authorize_exec_tool(
+    argv: Sequence[str],
+    *,
+    cwd: str | Path,
+    tool_name: str,
+    workspace_store: Any | None,
+    security_service: Any | None,
+    security_context: Any | None = None,
+    preview: str = "",
+) -> None:
+    """Authorize one exact direct-argv build command and wait when required."""
+    if workspace_store is None or security_service is None:
+        return
+    from crew.security.actions import normalize_exec_action
+
+    try:
+        context = security_context or build_security_context(workspace_store)
+        action = normalize_exec_action(tuple(argv), Path(cwd))
+        result = security_service.authorize_exec_action(
+            context,
+            action,
+            tool_name=tool_name,
+            risk_class="site_build",
+            requires_approval=False,
+            preview=preview,
+        )
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全构建上下文无效: {exc}") from exc
+    if result.allowed:
+        return
+    if result.request is None:
+        raise ToolError("站点构建已被安全策略拒绝")
+    outcome = await security_service.await_decision(result.request["request_id"])
+    if outcome is None or outcome.decision is ApprovalDecision.REJECT:
+        raise ToolError("用户未批准站点构建")
+    result2 = security_service.authorize_exec_action(
+        context,
+        action,
+        tool_name=tool_name,
+        risk_class="site_build",
+        requires_approval=True,
+        preview=preview,
+    )
+    if not result2.allowed:
+        raise ToolError("批准后构建授权校验失败，请重试")
+
+
+def authorize_user_initiated_exec(
+    argv: Sequence[str],
+    *,
+    cwd: str | Path,
+    tool_name: str,
+    security_service: Any,
+    security_context: Any,
+) -> None:
+    """Apply rules and audit an authenticated Desktop command without a second prompt."""
+    from crew.security.actions import normalize_exec_action
+
+    try:
+        action = normalize_exec_action(tuple(argv), Path(cwd))
+        result = security_service.authorize_user_initiated_exec_action(
+            security_context,
+            action,
+            tool_name=tool_name,
+        )
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全构建上下文无效: {exc}") from exc
+    if not result.allowed:
+        raise ToolError("站点构建已被安全规则拒绝")

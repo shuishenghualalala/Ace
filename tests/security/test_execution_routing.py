@@ -2,12 +2,15 @@ import asyncio
 import hashlib
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from crew.security.audit import SQLiteSecurityAudit
+from crew.security.context import SecurityContext
 from crew.security.launch import (
     HelperIntegrityError,
     ProcessLaunch,
@@ -15,14 +18,24 @@ from crew.security.launch import (
     current_process_launch,
     execute_captured,
     host_stream_launch_block_reason,
-    packaged_runtime_candidates,
     packaged_runtime_argv,
+    packaged_runtime_candidates,
     runtime_platform_key,
     runtime_source_stale,
+    shell_argv,
+    use_process_launch,
     verify_helper_integrity,
 )
-from crew.security.models import FilesystemAccess, FilesystemEntry, PermissionProfile, PermissionProfileKind
-from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    ConversationPermissionMode,
+    FilesystemAccess,
+    FilesystemEntry,
+    NetworkEntry,
+    PermissionProfile,
+    PermissionProfileKind,
+)
+from crew.security.runtime_client import NativeRuntimeError, RuntimeCapabilities, RuntimeErrorCode
 from crew.tools.process_registry import ProcessRegistry
 
 
@@ -37,6 +50,149 @@ def _managed(tmp_path: Path) -> ProcessLaunch:
         (str(tmp_path / "ace-security-runtime"),),
         (runtime_skills,),
     )
+
+
+@pytest.mark.asyncio
+async def test_approved_outside_write_reaches_native_runtime(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    target = outside / "approved.txt"
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="workspace",
+        workspace_root=workspace,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=workspace,
+    )
+    if os.name == "nt":
+        escaped = str(target).replace("'", "''")
+        command = f"Set-Content -LiteralPath '{escaped}' -Value approved -NoNewline"
+    else:
+        command = f"printf approved > {shlex.quote(str(target))}"
+
+    denied_launch = compile_process_launch(
+        context,
+        ConversationPermissionMode.AUTO_REVIEW,
+        db_path=tmp_path / "crew.db",
+    )
+    with use_process_launch(denied_launch):
+        denied = await execute_captured(shell_argv(command), cwd=workspace, timeout=10)
+    assert denied.returncode != 0
+    assert not target.exists()
+
+    permissions = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),)
+    )
+    approved_launch = compile_process_launch(
+        context,
+        ConversationPermissionMode.AUTO_REVIEW,
+        db_path=tmp_path / "crew.db",
+        additional_permissions=permissions,
+    )
+    with use_process_launch(approved_launch):
+        approved = await execute_captured(shell_argv(command), cwd=workspace, timeout=10)
+    assert approved.returncode == 0
+    assert target.read_text(encoding="utf-8") == "approved"
+
+
+@pytest.mark.asyncio
+async def test_default_workspace_inside_runtime_home_remains_writable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_home = tmp_path / "runtime-home"
+    workspace = runtime_home / "accounts" / "owner" / "task_workspaces" / "default"
+    workspace.mkdir(parents=True)
+    monkeypatch.setenv("CREW_HOME", str(runtime_home))
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="default",
+        workspace_root=workspace,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=workspace,
+    )
+    target = workspace / "result.txt"
+    if os.name == "nt":
+        escaped = str(target).replace("'", "''")
+        command = f"Set-Content -LiteralPath '{escaped}' -Value ok -NoNewline"
+    else:
+        command = f"printf ok > {shlex.quote(str(target))}"
+    launch = compile_process_launch(
+        context,
+        ConversationPermissionMode.AUTO_REVIEW,
+        db_path=runtime_home / "crew.db",
+    )
+
+    with use_process_launch(launch):
+        result = await execute_captured(shell_argv(command), cwd=workspace, timeout=10)
+
+    assert result.returncode == 0
+    assert target.read_text(encoding="utf-8") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_captured_execution_records_native_result_fields(tmp_path, monkeypatch):
+    audit = SQLiteSecurityAudit(tmp_path / "audit.db")
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="workspace",
+        workspace_root=tmp_path,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=tmp_path,
+    )
+    base = _managed(tmp_path)
+    launch = ProcessLaunch(
+        base.profile,
+        base.helper_argv,
+        base.trusted_readable_roots,
+        security_context=context,
+        audit=audit,
+    )
+
+    async def managed_execute(self, request, **kwargs):
+        return SimpleNamespace(
+            exit_code=7,
+            stdout="",
+            stderr="failed",
+            capabilities=RuntimeCapabilities(
+                backend="macos_seatbelt",
+                filesystem_sandbox=True,
+                process_tree_cleanup=True,
+                managed_network=False,
+            ),
+        )
+
+    monkeypatch.setattr("crew.security.broker.SecurityExecutionBroker.execute", managed_execute)
+    token = current_process_launch.set(launch)
+    try:
+        result = await execute_captured(
+            ("tool", "--check"), cwd=tmp_path, timeout=1, tool_name="contract_test"
+        )
+    finally:
+        current_process_launch.reset(token)
+    records = audit.query(owner_account_id="owner")
+    audit.close()
+
+    assert result.returncode == 7
+    assert len(records) == 1
+    record = records[0]
+    assert record.action_type == "exec_result"
+    assert record.sandbox_backend == "macos_seatbelt"
+    assert record.capabilities == ("filesystem_sandbox", "process_tree_cleanup")
+    assert record.exit_code == 7
+    assert record.stable_error_code == ""
+    assert record.tool_name == "contract_test"
 
 
 def test_host_stream_launch_policy_never_falls_back_from_managed_to_host(
@@ -176,8 +332,8 @@ def test_packaged_runtime_candidates_include_host_specific_prebuilt(tmp_path):
     candidates = packaged_runtime_candidates(tmp_path, "ace-security-runtime")
 
     assert candidates[0] == tmp_path / "desktop" / "security-runtime-bin" / "ace-security-runtime"
-    assert candidates[-1] == tmp_path / "security-runtime" / "bin" / "ace-security-runtime"
     assert any(path.parent.parent.name == "prebuilt" for path in candidates)
+    assert all(path.parent.name != "bin" for path in candidates)
 
 
 def test_helper_integrity_rejects_another_platform(tmp_path):
@@ -242,7 +398,100 @@ def test_managed_background_command_is_protocol_data_not_host_argv(tmp_path, mon
     assert result == "session"
     assert captured["payload"]["command"][-1].endswith("echo secret")
     assert captured["payload"]["helper_argv"] == [str(tmp_path / "ace-security-runtime")]
-    assert captured["payload"]["readable_roots"] == [str(tmp_path / "runtime-skills")]
+    # The trusted root is already visible through the broader writable root, so the
+    # bridge omits the overlapping read bind just like the foreground broker.
+    assert captured["payload"]["readable_roots"] == []
+
+
+def test_managed_background_keeps_immutable_read_only_carve_out(tmp_path, monkeypatch):
+    registry = ProcessRegistry()
+    captured = {}
+    protected = tmp_path / ".git"
+    launch = _managed(tmp_path)
+    launch = ProcessLaunch(
+        PermissionProfile(
+            PermissionProfileKind.MANAGED,
+            filesystem=(
+                *launch.profile.filesystem,
+                FilesystemEntry(protected, FilesystemAccess.READ, escalatable=False),
+            ),
+        ),
+        launch.helper_argv,
+        launch.trusted_readable_roots,
+    )
+
+    def record(command, payload, **kwargs):
+        captured.update(command=command, payload=payload, kwargs=kwargs)
+        return "session"
+
+    monkeypatch.setattr(registry, "_spawn_managed_bridge", record)
+    registry.spawn_security("git status", launch=launch, cwd=str(tmp_path))
+
+    assert captured["payload"]["readonly_roots"] == [str(protected.resolve())]
+
+
+def test_managed_background_carves_workspace_from_parent_deny(tmp_path, monkeypatch):
+    registry = ProcessRegistry()
+    captured = {}
+    runtime_home = tmp_path / "runtime-home"
+    workspace = runtime_home / "task-workspaces" / "default"
+    workspace.mkdir(parents=True)
+    launch = ProcessLaunch(
+        PermissionProfile(
+            PermissionProfileKind.MANAGED,
+            filesystem=(
+                FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),
+                FilesystemEntry(runtime_home, FilesystemAccess.DENY, escalatable=False),
+            ),
+        ),
+        (str(tmp_path / "ace-security-runtime"),),
+    )
+
+    def record(command, payload, **kwargs):
+        captured.update(command=command, payload=payload, kwargs=kwargs)
+        return "session"
+
+    monkeypatch.setattr(registry, "_spawn_managed_bridge", record)
+    registry.spawn_security("echo ok", launch=launch, cwd=str(workspace))
+
+    assert captured["payload"]["writable_roots"] == [str(workspace.resolve())]
+    assert captured["payload"]["denied_roots"] == []
+
+
+def test_managed_background_forwards_approved_permission_overlay(tmp_path, monkeypatch):
+    registry = ProcessRegistry()
+    captured = {}
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    base = _managed(tmp_path)
+    launch = ProcessLaunch(
+        base.profile,
+        base.helper_argv,
+        base.trusted_readable_roots,
+        additional_permissions=AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),),
+            network=(NetworkEntry("uploads.example.com", 443, "https"),),
+            allow_local_binding=True,
+        ),
+    )
+
+    def record(command, payload, **kwargs):
+        captured.update(command=command, payload=payload, kwargs=kwargs)
+        return "session"
+
+    monkeypatch.setattr(registry, "_spawn_managed_bridge", record)
+    registry.spawn_security("upload artifact", launch=launch, cwd=str(tmp_path))
+
+    assert str(outside.resolve()) in captured["payload"]["writable_roots"]
+    assert captured["payload"]["network_rules"] == [{
+        "host": "uploads.example.com",
+        "port": 443,
+        "protocol": "https",
+        "allow": True,
+        "allow_private": False,
+        "escalatable": True,
+    }]
+    assert captured["payload"]["allow_local_binding"] is True
 
 
 def test_managed_background_receives_minimal_runtime_env(
@@ -289,15 +538,28 @@ async def test_background_bridge_forwards_explicit_env_overrides(tmp_path, monke
 
         async def execute(self, **kwargs):
             captured.update(kwargs)
-            return SimpleNamespace(exit_code=0, stdout="", stderr="")
+            return SimpleNamespace(
+                exit_code=0,
+                stdout="",
+                stderr="",
+                capabilities=RuntimeCapabilities(
+                    backend="macos_seatbelt",
+                    filesystem_sandbox=True,
+                    process_tree_cleanup=True,
+                    managed_network=False,
+                ),
+            )
 
     monkeypatch.setattr(background_runner, "NativeRuntimeClient", _Runtime)
+    result_path = tmp_path / "result.json"
     exit_code = await background_runner._run(
         {
             "helper_argv": ["runtime"],
             "command": ["python", "skill.py"],
             "cwd": str(tmp_path),
             "env_overrides": {"CREW_SEARCH_TICKET": "one-time-ticket-9876"},
+            "result_path": str(result_path),
+            "result_nonce": "a" * 32,
         }
     )
 
@@ -305,6 +567,71 @@ async def test_background_bridge_forwards_explicit_env_overrides(tmp_path, monke
     assert captured["env_overrides"] == {
         "CREW_SEARCH_TICKET": "one-time-ticket-9876"
     }
+    metadata = json.loads(result_path.read_text(encoding="utf-8"))
+    assert metadata == {
+        "nonce": "a" * 32,
+        "sandbox_backend": "macos_seatbelt",
+        "capabilities": ["filesystem_sandbox", "process_tree_cleanup"],
+        "exit_code": 0,
+    }
+
+
+def test_background_process_result_is_audited(tmp_path):
+    from crew.security.actions import normalize_exec_action
+    from crew.tools.process_registry import ProcessSession
+
+    audit = SQLiteSecurityAudit(tmp_path / "background-audit.db")
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="workspace",
+        workspace_root=tmp_path,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=tmp_path,
+    )
+    base = _managed(tmp_path)
+    launch = ProcessLaunch(
+        base.profile,
+        base.helper_argv,
+        base.trusted_readable_roots,
+        security_context=context,
+        audit=audit,
+    )
+    result_path = tmp_path / "native-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "nonce": "b" * 32,
+                "sandbox_backend": "macos_seatbelt",
+                "capabilities": ["filesystem_sandbox", "process_tree_cleanup"],
+                "exit_code": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = ProcessSession(
+        id="proc-test",
+        command="false",
+        exit_code=3,
+        _security_launch=launch,
+        _security_action=normalize_exec_action(("/usr/bin/false",), tmp_path),
+        _security_result_path=result_path,
+        _security_result_nonce="b" * 32,
+    )
+
+    ProcessRegistry._audit_process_result(session)
+    records = audit.query(owner_account_id="owner")
+    audit.close()
+
+    assert not result_path.exists()
+    assert len(records) == 1
+    assert records[0].tool_name == "terminal"
+    assert records[0].decision == "failed"
+    assert records[0].sandbox_backend == "macos_seatbelt"
+    assert records[0].capabilities == ("filesystem_sandbox", "process_tree_cleanup")
+    assert records[0].exit_code == 3
 
 
 @pytest.mark.asyncio

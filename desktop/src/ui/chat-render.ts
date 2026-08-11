@@ -1433,17 +1433,19 @@ function renderTurnInspirationSurfaceCard(messages: ChatMessage[]): HTMLElement 
   if (!surface) return null;
   const card = document.createElement('article');
   card.className = 'msg__artifact-card msg__inspiration-card';
+  card.dataset.inspirationSurface = JSON.stringify(surface);
+  card.setAttribute('role', 'button');
+  card.tabIndex = 0;
   card.setAttribute('aria-label', `${surface.title}，灵感 App`);
   const icon = createTrustedElement<HTMLElement>(
     '<span class="msg__artifact-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.7 5.3a2 2 0 0 1-1.3 1.3L4 11.3l5 1.7a2 2 0 0 1 1.3 1.3L12 20l1.7-5.7A2 2 0 0 1 15 13l5-1.7-5-1.7a2 2 0 0 1-1.3-1.3Z"/></svg></span>',
   );
   const copy = document.createElement('div'); copy.className = 'msg__artifact-copy';
   const title = document.createElement('strong'); title.textContent = surface.title;
-  const detail = document.createElement('span'); detail.textContent = surface.status === 'preparing' ? '正在生成，可实时查看' : '可以使用和批注';
+  const detail = document.createElement('span'); detail.textContent = surface.status === 'preparing' ? '正在制作' : '可以继续调整';
   copy.append(title, detail);
-  const open = document.createElement('button'); open.type = 'button'; open.className = 'msg__artifact-open';
-  open.dataset.inspirationSurface = JSON.stringify(surface); open.textContent = '打开';
-  card.append(icon, copy, open);
+  const affordance = document.createElement('span'); affordance.className = 'msg__artifact-chevron'; affordance.setAttribute('aria-hidden', 'true'); affordance.textContent = '›';
+  card.append(icon, copy, affordance);
   return card;
 }
 
@@ -1462,7 +1464,10 @@ function renderTurnHtmlArtifactCard(messages: ChatMessage[]): HTMLElement | null
 
   const card = document.createElement('article');
   card.className = 'msg__artifact-card';
-  card.setAttribute('aria-label', `${display}，本地 HTML 网站`);
+  card.dataset.browserArtifact = artifact.path;
+  card.setAttribute('role', 'button');
+  card.tabIndex = 0;
+  card.setAttribute('aria-label', `${display}，灵感成果`);
 
   const icon = createTrustedElement<HTMLElement>(
     '<span class="msg__artifact-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg></span>',
@@ -1474,28 +1479,11 @@ function renderTurnHtmlArtifactCard(messages: ChatMessage[]): HTMLElement | null
   const title = document.createElement('strong');
   title.textContent = display;
   const kind = document.createElement('span');
-  kind.textContent = '本地 HTML · 网站';
+  kind.textContent = '灵感成果';
   copy.append(title, kind);
   card.appendChild(copy);
-
-  const open = document.createElement('button');
-  open.type = 'button';
-  open.className = 'msg__artifact-open';
-  open.dataset.browserArtifact = artifact.path;
-  open.textContent = '在 Crew 打开';
-  open.setAttribute('aria-label', `在 Crew 浏览器中打开 ${display}`);
-  card.appendChild(open);
-
-  const reveal = document.createElement('button');
-  reveal.type = 'button';
-  reveal.className = 'msg__artifact-reveal';
-  reveal.dataset.fileReveal = artifact.path;
-  reveal.title = '打开方式';
-  reveal.setAttribute('aria-label', `${display} 的打开方式`);
-  reveal.setAttribute('aria-haspopup', 'menu');
-  reveal.setAttribute('aria-expanded', 'false');
-  reveal.appendChild(createTrustedFragment(FILE_REVEAL_ICON_SVG));
-  card.appendChild(reveal);
+  const affordance = document.createElement('span'); affordance.className = 'msg__artifact-chevron'; affordance.setAttribute('aria-hidden', 'true'); affordance.textContent = '›';
+  card.appendChild(affordance);
   return card;
 }
 

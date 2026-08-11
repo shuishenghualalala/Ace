@@ -299,9 +299,10 @@ function syncSiteWorkbenchMode(): void {
   frame?.contentWindow?.postMessage({ type: 'ace-site-annotation-mode', enabled: siteAnnotationMode }, '*');
   document.querySelectorAll<HTMLElement>('[data-site-surface-mode]').forEach((button) => {
     button.classList.toggle('is-active', button.dataset.siteSurfaceMode === (siteAnnotationMode ? 'annotate' : 'use'));
+    if (button.dataset.siteSurfaceMode === 'annotate') button.textContent = siteAnnotationMode ? '完成选择' : '指出要修改的位置';
   });
   const label = document.querySelector<HTMLElement>('.site-workbench-title em');
-  if (label) label.textContent = siteAnnotationMode ? '批注模式' : '使用中';
+  if (label) label.textContent = siteAnnotationMode ? '选择修改位置' : '预览';
 }
 
 function mountSiteSurface(site: LocalSite, annotate: boolean): void {
@@ -314,9 +315,9 @@ function mountSiteSurface(site: LocalSite, annotate: boolean): void {
   const title = document.createElement('div'); title.className = 'site-workbench-title';
   const icon = document.createElement('span'); icon.ariaHidden = 'true'; icon.textContent = '◇';
   const name = document.createElement('strong'); name.textContent = site.name;
-  const mode = document.createElement('em'); mode.textContent = annotate ? '批注模式' : '使用中';
+  const mode = document.createElement('em'); mode.textContent = annotate ? '选择修改位置' : '预览';
   title.append(icon, name, mode); tabs.replaceChildren(title);
-  body.innerHTML = `<div class="site-annotation-workbench"><div class="site-surface-toolbar"><button data-site-surface-mode="use">使用</button><button data-site-surface-mode="annotate">批注</button></div><div class="site-workbench-frame-wrap"><div class="sites-frame-status" id="site-workbench-status">正在打开 App…</div><iframe id="site-workbench-frame" src="${escapeHtml(previewUrl(site))}" sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-downloads"></iframe><div id="site-annotation-overlay" class="site-annotation-overlay" hidden></div></div></div>`;
+  body.innerHTML = `<div class="site-annotation-workbench"><div class="site-surface-toolbar"><button type="button" data-site-surface-mode="annotate">指出要修改的位置</button></div><div class="site-workbench-frame-wrap"><div class="sites-frame-status" id="site-workbench-status">正在打开 App…</div><iframe id="site-workbench-frame" src="${escapeHtml(previewUrl(site))}" sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-downloads"></iframe><div id="site-annotation-overlay" class="site-annotation-overlay" hidden></div></div></div>`;
   document.body.classList.add('site-annotation-workbench-open');
   body.querySelectorAll<HTMLElement>('[data-site-surface-mode]').forEach((button) => button.addEventListener('click', () => {
     siteAnnotationMode = button.dataset.siteSurfaceMode === 'annotate';

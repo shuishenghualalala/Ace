@@ -32,6 +32,10 @@ async def run_matrix(runtime: Path, platform_name: str) -> None:
         outside = root / "outside"
         workspace.mkdir()
         outside.mkdir()
+        metadata_root = workspace / ".git"
+        metadata_root.mkdir()
+        metadata_file = metadata_root / "config"
+        metadata_file.write_text("matrix-metadata-original", encoding="utf-8")
         secret = outside / "secret.txt"
         secret.write_text("MATRIX_SECRET_MUST_NOT_LEAK", encoding="utf-8")
         profile = PermissionProfile(
@@ -40,6 +44,14 @@ async def run_matrix(runtime: Path, platform_name: str) -> None:
                 FilesystemEntry(
                     root=workspace,
                     access=FilesystemAccess.READ_WRITE,
+                ),
+                *(
+                    FilesystemEntry(
+                        root=workspace / name,
+                        access=FilesystemAccess.READ,
+                        escalatable=False,
+                    )
+                    for name in (".git", ".agents", ".crew")
                 ),
             ),
             network=NetworkPolicy.RESTRICTED,
@@ -75,6 +87,32 @@ async def run_matrix(runtime: Path, platform_name: str) -> None:
         combined = denied.stdout + denied.stderr
         if denied.exit_code == 0 or "MATRIX_SECRET_MUST_NOT_LEAK" in combined:
             raise SystemExit("SMX-FS-002 outside read was not denied or leaked secret output")
+        metadata = await broker.execute(
+            ExecutionRequest(
+                command=(
+                    (
+                        "cmd.exe",
+                        "/d",
+                        "/c",
+                        "type .git\\config >NUL && echo changed>.git\\config",
+                    )
+                    if platform_name == "windows"
+                    else (
+                        "/bin/sh",
+                        "-c",
+                        "cat .git/config >/dev/null && printf changed > .git/config",
+                    )
+                ),
+                cwd=workspace,
+                permission_profile=profile,
+                timeout_seconds=15,
+            )
+        )
+        if (
+            metadata.exit_code == 0
+            or metadata_file.read_text(encoding="utf-8") != "matrix-metadata-original"
+        ):
+            raise SystemExit("SMX-FS-003 project metadata was not readable and write-protected")
 
         curl = shutil.which("curl.exe" if platform_name == "windows" else "curl")
         if not curl:

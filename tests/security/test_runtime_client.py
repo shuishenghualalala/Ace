@@ -31,7 +31,7 @@ _FAKE_HELPER = r'''
 import base64, json, os, sys, time
 mode = sys.argv[1]
 version = 999 if mode == "bad-ready" else 2
-ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output"]}
+ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output", "readonly_roots"]}
 if mode == "missing-ready-capability":
     ready["capabilities"] = ["stdin_once"]
 print(json.dumps(ready), flush=True)
@@ -66,6 +66,8 @@ if mode == "assert-request":
         raise SystemExit(5)
     if payload["env_overrides"] != {"CODEX_API_KEY": "secret"}:
         raise SystemExit(6)
+    if payload["readonly_roots"] != [os.path.join(payload["cwd"], ".agents")]:
+        raise SystemExit(9)
 if mode == "assert-home-files":
     if payload["home_files"] != {".agent/auth": base64.b64encode(b"token").decode()}:
         raise SystemExit(9)
@@ -176,7 +178,7 @@ import base64, json, sys
 print(json.dumps({
     "type": "ready",
     "version": 2,
-    "capabilities": ["stdin_once", "stream_output", "stdin_bidirectional"],
+    "capabilities": ["stdin_once", "stream_output", "stdin_bidirectional", "readonly_roots"],
 }), flush=True)
 open_request = json.loads(sys.stdin.readline())
 print(json.dumps({
@@ -420,6 +422,7 @@ async def test_request_carries_binary_stdin_and_environment_overrides(tmp_path):
     result = await _helper(tmp_path, "assert-request").execute(
         command=("ignored",),
         cwd=tmp_path,
+        readonly_roots=(tmp_path / ".agents",),
         stdin=b"\x00prompt\xff",
         env_overrides={"CODEX_API_KEY": "secret"},
         timeout=1,
@@ -623,6 +626,7 @@ async def test_broker_preserves_read_write_deny_and_network_semantics(tmp_path):
         tmp_path / "read",
     ]
     assert runtime.kwargs["denied_roots"] == [tmp_path / "deny"]
+    assert runtime.kwargs["readonly_roots"] == []
     assert runtime.kwargs["network_enabled"] is False
 
 
@@ -722,6 +726,36 @@ async def test_broker_does_not_forward_runtime_owned_protected_read_roots(tmp_pa
         kind=PermissionProfileKind.MANAGED,
         filesystem=(
             FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),
+            FilesystemEntry(tmp_path / ".agents", FilesystemAccess.READ, escalatable=False),
+        ),
+    )
+    await broker.execute(
+        ExecutionRequest(
+            command=("test",),
+            cwd=tmp_path,
+            permission_profile=profile,
+            trusted_readable_roots=(tmp_path / "runtime-skills",),
+        )
+    )
+    assert runtime.kwargs["writable_roots"] == [tmp_path]
+    assert runtime.kwargs["readable_roots"] == []
+
+
+@pytest.mark.asyncio
+async def test_broker_forwards_immutable_read_roots_to_the_native_runtime(tmp_path):
+    """Missing metadata guards use the native read-only carve-out contract."""
+
+    class RecordingRuntime:
+        async def execute(self, **kwargs):
+            self.kwargs = kwargs
+            return "result"
+
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(
+            FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),
             FilesystemEntry(
                 tmp_path / ".agents",
                 FilesystemAccess.READ,
@@ -741,6 +775,37 @@ async def test_broker_does_not_forward_runtime_owned_protected_read_roots(tmp_pa
 
     assert runtime.kwargs["writable_roots"] == [tmp_path]
     assert runtime.kwargs["readable_roots"] == []
+    assert runtime.kwargs["readonly_roots"] == [tmp_path / ".agents"]
+
+
+@pytest.mark.asyncio
+async def test_broker_carves_workspace_from_protected_runtime_home(tmp_path):
+    class RecordingRuntime:
+        async def execute(self, **kwargs):
+            self.kwargs = kwargs
+            return "result"
+
+    runtime_home = tmp_path / "runtime-home"
+    workspace = runtime_home / "accounts" / "owner" / "task_workspaces" / "default"
+    workspace.mkdir(parents=True)
+    database = runtime_home / "crew.db"
+    database.write_text("protected", encoding="utf-8")
+    runtime = RecordingRuntime()
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(
+            FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),
+            FilesystemEntry(runtime_home, FilesystemAccess.DENY, escalatable=False),
+            FilesystemEntry(database, FilesystemAccess.DENY, escalatable=False),
+        ),
+    )
+
+    await SecurityExecutionBroker(runtime).execute(  # type: ignore[arg-type]
+        ExecutionRequest(command=("test",), cwd=workspace, permission_profile=profile)
+    )
+
+    assert runtime.kwargs["writable_roots"] == [workspace]
+    assert runtime.kwargs["denied_roots"] == [database]
 
 
 @pytest.mark.asyncio

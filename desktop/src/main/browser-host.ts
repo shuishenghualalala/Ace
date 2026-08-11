@@ -3,7 +3,9 @@ import { constants as fsConstants, existsSync, realpathSync } from 'node:fs';
 import {
   chmod,
   copyFile,
+  lstat,
   open,
+  readdir,
   rename,
   stat,
   unlink,
@@ -3169,7 +3171,11 @@ export class BrowserHost extends EventEmitter {
   }
 
   private parseProxy(proxyUrl: string): ProxyAuthState | null {
-    if (!proxyUrl) return null;
+    if (!proxyUrl) {
+      throw new BrowserHostError('浏览器网络策略代理不可用', {
+        code: 'proxy_required',
+      });
+    }
     let parsed: URL;
     try {
       parsed = new URL(proxyUrl);
@@ -7498,7 +7504,6 @@ export class BrowserHost extends EventEmitter {
   ): Promise<string[]> {
     if (
       !Array.isArray(files)
-      || files.length > 256
       || files.some((file) => typeof file !== 'string' || !path.isAbsolute(file))
     ) {
       throw new BrowserHostError('上传文件列表无效', { code: 'invalid_upload' });
@@ -7509,17 +7514,25 @@ export class BrowserHost extends EventEmitter {
     try {
       const root = realpathSync.native(rawRoot);
       if (!samePath(root, path.resolve(rawRoot))) throw new Error('linked upload root');
-      return await Promise.all(files.map(async (file) => {
-        const resolved = realpathSync.native(file);
-        const info = await stat(resolved);
+      const validateEntry = async (entry: string): Promise<string> => {
+        const resolved = realpathSync.native(entry);
+        const info = await lstat(entry);
         if (
-          !samePath(resolved, path.resolve(file))
+          info.isSymbolicLink()
+          || !samePath(resolved, path.resolve(entry))
           || !ensureWithin(resolved, root)
-          || !info.isFile()
+          || (!info.isFile() && !info.isDirectory())
         ) {
-          throw new Error('invalid upload file');
+          throw new Error('invalid upload entry');
+        }
+        if (info.isDirectory()) {
+          const children = await readdir(entry);
+          await Promise.all(children.map((child) => validateEntry(path.join(entry, child))));
         }
         return resolved;
+      };
+      return await Promise.all(files.map(async (file) => {
+        return validateEntry(file);
       }));
     } catch {
       throw new BrowserHostError('上传文件不属于账号审批暂存目录', {

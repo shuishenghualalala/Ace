@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError
@@ -18,6 +19,7 @@ async def _run(payload: dict) -> int:
             cwd=Path(payload["cwd"]),
             writable_roots=tuple(Path(value) for value in payload.get("writable_roots", [])),
             readable_roots=tuple(Path(value) for value in payload.get("readable_roots", [])),
+            readonly_roots=tuple(Path(value) for value in payload.get("readonly_roots", [])),
             denied_roots=tuple(Path(value) for value in payload.get("denied_roots", [])),
             network_enabled=bool(payload.get("network_rules")),
             network_rules=tuple(payload.get("network_rules", [])),
@@ -27,11 +29,42 @@ async def _run(payload: dict) -> int:
             env_overrides=payload.get("env_overrides"),
         )
     except NativeRuntimeError as error:
+        _write_result(
+            payload,
+            {
+                "stable_error_code": error.code.value,
+            },
+        )
         print(json.dumps({"error_code": error.code.value, "error": str(error)}), flush=True)
         return 125
+    capabilities = asdict(result.capabilities)
+    _write_result(
+        payload,
+        {
+            "sandbox_backend": str(capabilities.pop("backend", "")),
+            "capabilities": [
+                key
+                for key, value in capabilities.items()
+                if value is True or key == "wsl_version" and value is not None
+            ],
+            "exit_code": result.exit_code,
+        },
+    )
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     return result.exit_code
+
+
+def _write_result(payload: dict, result: dict) -> None:
+    """Return trusted runtime metadata through a host-only sidecar."""
+    result_path = str(payload.get("result_path") or "")
+    nonce = str(payload.get("result_nonce") or "")
+    if not result_path or len(nonce) < 32:
+        return
+    Path(result_path).write_text(
+        json.dumps({"nonce": nonce, **result}, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
 
 def main() -> int:

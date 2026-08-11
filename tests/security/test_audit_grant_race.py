@@ -20,7 +20,13 @@ from crew.security.actions import normalize_exec_action
 from crew.security.approvals import ApprovalDecision, ApprovalError, ApprovalManager
 from crew.security.audit import SQLiteSecurityAudit
 from crew.security.context import SecurityContext
-from crew.security.grants import GrantError, GrantRegistry
+from crew.security.grants import GrantRegistry
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    ConversationPermissionMode,
+    FilesystemAccess,
+    FilesystemEntry,
+)
 from crew.security.rule_store import SQLiteRuleStore
 from crew.security.rules import ActionRule, RuleDecision, RuleScope
 from crew.security.service import SecurityApprovalService
@@ -146,7 +152,6 @@ def test_persistent_deny_beats_auto_allow_and_full_access(tmp_path: Path) -> Non
         action,
         tool_name="terminal",
         risk_class="shell_command",
-        auto_allow=True,
     )
     assert not authorized
     assert request is None
@@ -157,7 +162,12 @@ def test_persistent_deny_beats_auto_allow_and_full_access(tmp_path: Path) -> Non
         for event in audit.query(owner_account_id=context.owner_account_id)
     )
 
-    from crew.security.models import ConversationPermissionMode
+    user_initiated = service.authorize_user_initiated_exec_action(
+        context,
+        action,
+        tool_name="publish_site",
+    )
+    assert not user_initiated.allowed
 
     service.set_mode(context, ConversationPermissionMode.FULL_ACCESS)
     authorized, request = service.authorize_exec_action(
@@ -165,10 +175,101 @@ def test_persistent_deny_beats_auto_allow_and_full_access(tmp_path: Path) -> Non
         action,
         tool_name="terminal",
         risk_class="shell_command",
-        auto_allow=True,
     )
     assert not authorized
     assert request is None
+
+
+def test_authenticated_user_gesture_is_audited_without_a_second_prompt(tmp_path: Path) -> None:
+    _approvals, _grants, audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["node", "npm-cli.js", "run", "build"], tmp_path)
+
+    result = service.authorize_user_initiated_exec_action(
+        context,
+        action,
+        tool_name="publish_site",
+    )
+
+    assert result.allowed
+    assert any(
+        event.action_type == "exec_decision"
+        and event.decision == "allow"
+        and event.decision_source == "desktop_user_gesture"
+        for event in audit.query(owner_account_id=context.owner_account_id)
+    )
+
+
+def test_auto_review_runs_sandbox_local_commands_but_asks_for_expansion(tmp_path: Path) -> None:
+    approvals, _grants, _audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["tool", "status"], tmp_path)
+    service.set_mode(context, ConversationPermissionMode.AUTO_REVIEW)
+
+    local = service.authorize_exec_action(
+        context,
+        action,
+        tool_name="terminal",
+        risk_class="shell_command",
+        requires_approval=False,
+    )
+    assert local.allowed
+    assert local.additional_permissions.empty
+
+    dangerous = service.authorize_exec_action(
+        context,
+        normalize_exec_action(["tool", "delete"], tmp_path),
+        tool_name="terminal",
+        risk_class="dangerous_command",
+        requires_approval=True,
+    )
+    assert not dangerous.allowed
+    assert dangerous.request is not None
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    additional = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),)
+    )
+    expanded = service.authorize_exec_action(
+        context,
+        action,
+        tool_name="terminal",
+        risk_class="shell_command",
+        requires_approval=True,
+        additional_permissions=additional,
+    )
+    assert not expanded.allowed
+    assert expanded.request is not None
+    assert expanded.request["additional_permissions"]["filesystem"] == [
+        {
+            "root": str(outside.resolve()),
+            "access": "read_write",
+            "escalatable": True,
+        }
+    ]
+    pending = next(
+        request
+        for request in approvals.list_pending(context)
+        if request.request_id == expanded.request["request_id"]
+    )
+    assert pending.additional_permissions == additional
+    service.decide(
+        context,
+        request_id=pending.request_id,
+        nonce=pending.nonce,
+        decision=ApprovalDecision.ONCE,
+    )
+    approved = service.authorize_exec_action(
+        context,
+        action,
+        tool_name="terminal",
+        risk_class="shell_command",
+        requires_approval=True,
+        additional_permissions=additional,
+    )
+    assert approved.allowed
+    assert approved.additional_permissions == additional
 
 
 def test_set_mode_revokes_pending_and_returns_idempotently(tmp_path: Path) -> None:
@@ -222,6 +323,15 @@ def test_recent_user_rejection_suppresses_immediate_identical_exec_retry(
         and event.decision_source == "recent_user_rejection"
         for event in audit.query(owner_account_id=context.owner_account_id)
     )
+
+    service.set_mode(context, ConversationPermissionMode.FULL_ACCESS)
+    full_access = service.authorize_exec_action(
+        context,
+        action,
+        tool_name="terminal",
+        risk_class="shell_command",
+    )
+    assert full_access.allowed
 
 
 @pytest.mark.parametrize("terminate", ["session", "owner"])
