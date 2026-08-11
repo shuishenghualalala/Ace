@@ -29,6 +29,8 @@ def wiki_mocks():
     # 默认不在任何知识库中找到 source：退回会话活跃 KB（与各用例的 kb_active 断言一致）。
     store.find_source_kb.return_value = None
     store.check_source_duplicate.return_value = None
+    store.count_pages.return_value = 0
+    store.list_pages_by_source.return_value = []
     compiler = MagicMock(spec=WikiCompiler)
     source_page = MagicMock()
     source_page.id = "source-page"

@@ -51,6 +51,8 @@ export interface Props {
   editDraft?: { messageId: string; text: string } | null;
   onEditMessage?: (message: UiMessage) => void;
   onCancelEdit?: () => void;
+  /** 附件上传归属（wiki 会话时传入）：透传给 Composer 的上传调用 */
+  uploadContext?: { sessionId?: string; kbId?: string };
 }
 
 const SKILL_ICONS: Record<string, string> = {
@@ -97,6 +99,7 @@ export default function ChatPanel({
   onEditMessage,
   onCancelEdit,
   todos = [],
+  uploadContext,
 }: Props) {
   const [skills, setSkills] = useState<Skill[]>([]);
   const isEmpty = messages.length === 0 && !busy && !followupQuestion && !isTeamSession;
@@ -258,6 +261,7 @@ export default function ChatPanel({
               subScenario={scenarioChip?.subId}
               editDraft={editDraft}
               onCancelEdit={onCancelEdit}
+              uploadContext={uploadContext}
               compact
             />
           </div>
@@ -326,6 +330,7 @@ export default function ChatPanel({
             onExitPlan={onExitPlan}
             editDraft={editDraft}
             onCancelEdit={onCancelEdit}
+            uploadContext={uploadContext}
           />
         </>
       )}

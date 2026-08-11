@@ -36,6 +36,8 @@ interface Props {
   subScenario?: string;
   editDraft?: { messageId: string; text: string } | null;
   onCancelEdit?: () => void;
+  /** 附件上传归属（wiki 会话时传入）：后端把附件收入对应知识库 */
+  uploadContext?: { sessionId?: string; kbId?: string };
 }
 
 export default function Composer({
@@ -67,6 +69,7 @@ export default function Composer({
   subScenario,
   editDraft,
   onCancelEdit,
+  uploadContext,
 }: Props) {
   const externalAgentsEnabled = externalAgentsAvailable(config);
   const [text, setText] = useState("");
@@ -230,7 +233,7 @@ export default function Composer({
     const results = await Promise.allSettled(
       files.map(async (file) => {
         const content = await readFileAsBase64(file);
-        const result = await api.upload(file.name, content);
+        const result = await api.upload(file.name, content, uploadContext);
         return {
           id: result.id,
           name: result.name,

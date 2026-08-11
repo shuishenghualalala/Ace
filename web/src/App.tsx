@@ -517,6 +517,8 @@ export default function App() {
   const wikiChatProps: ChatPanelProps = useMemo(() => ({
     ...chatProps,
     ...chat.forSession(wikiSid),
+    // wiki 会话上传的附件落入当前知识库（sessionId 为空时后端按 kbId 解析）
+    uploadContext: { sessionId: wikiSid, kbId: wikiKbId },
     onStop: () => chat.stop(wikiSid),
     onSteer: (text) => chat.steer(wikiSid, text),
     onRemoveFromQueue: (i) => chat.removeFromQueue(wikiSid, i),
@@ -529,7 +531,7 @@ export default function App() {
     onRejectAndExitPlan: () => chat.rejectAndExitPlan(wikiSid),
     onAnswerFollowup: (questionId, answers) => chat.answerFollowup(wikiSid, questionId, answers),
     onDismissFollowup: () => chat.dismissFollowup(wikiSid),
-  }), [chatProps, wikiSid, mode, currentWorkspaceId, chat]);
+  }), [chatProps, wikiSid, wikiKbId, mode, currentWorkspaceId, chat]);
 
   return (
     <div

@@ -1902,8 +1902,15 @@ export const backendApi = {
     return getJSON<{ items: LogEntry[]; total: number }>(`/api/system/logs${qs ? `?${qs}` : ''}`);
   },
 
-  upload: (filename: string, contentBase64: string) =>
-    getJSON<Attachment>('/api/upload', { method: 'POST', ...jsonBody({ filename, content: contentBase64 }) }),
+  upload: (filename: string, contentBase64: string, opts?: { sessionId?: string | undefined; kbId?: string | undefined }) => {
+    const body: { filename: string; content: string; session_id?: string; kb_id?: string } = {
+      filename,
+      content: contentBase64,
+    };
+    if (opts?.sessionId) body.session_id = opts.sessionId;
+    if (opts?.kbId) body.kb_id = opts.kbId;
+    return getJSON<Attachment>('/api/upload', { method: 'POST', ...jsonBody(body) });
+  },
   complete: (query: string, opts?: { cwd?: string; workspaceId?: string }) => {
     const params = new URLSearchParams({ query });
     if (opts?.cwd) params.set('cwd', opts.cwd);

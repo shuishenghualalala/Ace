@@ -475,11 +475,13 @@ async function addEmbeddedFiles(
   kbId = activeEmbeddedKbId,
 ): Promise<void> {
   if (!files?.length || !kbId) return;
+  // 附件随 wiki 会话上传：后端据此把附件收入当前知识库（而非 default）。
+  const sessionId = embeddedByKb.get(kbId)?.sessionId;
   // 多文件并行上传（单个失败只提示、不阻断其余），成功结果保持原顺序追加。
   const uploaded = await Promise.all(
     Array.from(files).map(async (file) => {
       try {
-        return await backendApi.upload(file.name, await readFileAsBase64(file));
+        return await backendApi.upload(file.name, await readFileAsBase64(file), { kbId, sessionId });
       } catch (err) {
         notify(`上传失败：${file.name} · ${(err as Error).message}`);
         return null;
