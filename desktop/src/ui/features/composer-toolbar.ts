@@ -672,7 +672,7 @@ function renderSecurityModePopover(): void {
       const accepted = await selectNextConversationMode(m, () => showConfirmDialog({
         title: '启用完全访问权限？',
         message: FULL_ACCESS_CONFIRMATION,
-        confirmText: '仅对此对话启用',
+        confirmText: '启用完全访问权限',
       }));
       if (accepted) syncSecurityModeChip();
       closeSecurityModeInline();

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  FULL_ACCESS_CONFIRMATION,
   SECURITY_APPROVAL_CHOICES,
   SECURITY_MODE_OPTIONS,
   assignSecurityMode,
@@ -36,6 +37,11 @@ describe('security approval UI model', () => {
     await expect(selectNextConversationMode('full_access', reject)).resolves.toBe(false);
     await expect(assignSecurityMode('session-b')).resolves.toBe('request_approval');
     expect(reject).toHaveBeenCalledOnce();
+  });
+
+  it('does not claim that full access is limited to only the current conversation', () => {
+    expect(FULL_ACCESS_CONFIRMATION).not.toContain('只对当前对话');
+    expect(FULL_ACCESS_CONFIRMATION).not.toContain('仅在当前对话');
   });
 
   it('waits for the styled confirmation result before granting full access', async () => {

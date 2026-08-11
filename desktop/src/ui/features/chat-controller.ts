@@ -586,7 +586,7 @@ export function renderChat(): void {
         const pending = bookFor(sid).pendingFollowup;
         void state.socket?.send({ action: 'followup_answer', session_id: sid, question_id: questionId, answers });
         if (pending?.recordHistory !== false) {
-          // Ordinary follow-ups become a new user turn.
+          // Keep a local receipt without impersonating a typed user message.
           patchBook(sid, {
             pendingFollowup: null,
             assistantId: null,
@@ -595,7 +595,7 @@ export function renderChat(): void {
             legacyDeltaText: '',
           });
           const message = pending ? formatFollowupAnswerMessage(pending, answers) : null;
-          if (message) appendMessage(sid, 'user', message);
+          if (message) appendMessage(sid, 'status', message);
         } else {
           // Side-channel decisions preserve the current assistant turn. Runtime
           // staffing keeps the same card long enough to show its backend-confirmed

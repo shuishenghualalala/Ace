@@ -657,8 +657,11 @@ describe('wiki-page 入口挂点', () => {
       answers: [{ question_id: 'scope', answers: ['all'] }],
     });
     expect(sessionStore.get().books[WIKI_SID]?.pendingFollowup).toBeNull();
-    expect(messageStore.get().messages[WIKI_SID]?.find((message) => message.role === 'user')?.content)
+    expect(messageStore.get().messages[WIKI_SID]?.find((message) => message.role === 'status')?.content)
       .toBe('已选择：全部内容');
+    expect(messageStore.get().messages[WIKI_SID]?.some((message) => (
+      message.role === 'user' && message.content === '已选择：全部内容'
+    ))).toBe(false);
   });
 
   it('右栏「已编辑文件」卡「查看」：跳主聊天区同一会话并展开 Files 看板定位文件', async () => {

@@ -3725,7 +3725,10 @@ async def test_acp_executor_persists_followup_answer_when_acp_errors(tmp_path, m
     ]
 
     assert chunks[-1].kind == "error"
-    assert any(m.role == "user" and m.content == "已选择：风险分析" for m in ctx.messages)
+    assert any(
+        m.role == "user" and m.is_meta and m.content == "已选择：风险分析"
+        for m in ctx.messages
+    )
 
 
 async def test_acp_executor_streams_acp_tool_events(tmp_path):

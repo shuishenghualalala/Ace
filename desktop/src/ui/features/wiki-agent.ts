@@ -366,7 +366,7 @@ function resolveEmbeddedFollowup(
       legacyDeltaText: '',
     });
     const message = pending ? formatFollowupAnswerMessage(pending, answers) : null;
-    if (message) appendMessage(sessionId, 'user', message);
+    if (message) appendMessage(sessionId, 'status', message);
   } else {
     patchBook(sessionId, { pendingFollowup: null });
   }

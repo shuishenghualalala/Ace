@@ -961,7 +961,7 @@ class ExternalExecutor(AgentExecutor):
 
         def append_pending_followup_answers() -> None:
             for content in drain_followup_answer_messages(display_session_id):
-                ctx.messages.append(Message.user(content))
+                ctx.messages.append(Message.user(content, is_meta=True))
 
         runtime_failure_binding_key: dict[str, str] | None = None
         runtime_failure_session_id = ""

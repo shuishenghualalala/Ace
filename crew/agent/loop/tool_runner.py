@@ -366,11 +366,11 @@ class ToolRunner:
                 yield self._file_change_event(tc, before_map.get(tc.id), rid, next_seq)
 
     def _append_followup_answers(self, messages: list[Message]) -> None:
-        """把追问选择作为 user 消息插入 tool result 之后，确保 history 可回放。"""
+        """把追问选择作为仅供模型续跑的隐藏 user 消息插入 tool result 之后。"""
         if not self.session_id:
             return
         for content in drain_followup_answer_messages(self.session_id):
-            messages.append(Message.user(content))
+            messages.append(Message.user(content, is_meta=True))
 
     async def _resolve(self, tc) -> ToolResult:
         """取单工具结果：命中 prewarm 缓存则 await 缓存任务，否则现场执行（带并发闸门）。"""

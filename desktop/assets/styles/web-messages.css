@@ -111,7 +111,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   bottom: 0;
   /* 固定最大高度 + 内部滚动：长命令/多文件/长描述不会被输入容器高度截断。
      原先 inset:0 把面板钉死在 chat-input-container 的尺寸上，内容稍长就显示不全。 */
-  max-height: min(70vh, 460px);
+  max-height: min(70dvh, 460px);
   z-index: 40;
   display: flex;
   flex-direction: column;
@@ -150,6 +150,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   white-space: pre-wrap;
   word-break: break-word;
   overflow: auto;
+  overscroll-behavior: contain;
   background: var(--mw-bg-subtle);
   border-radius: var(--mw-radius-3);
   padding: var(--mw-space-2) var(--mw-space-3);

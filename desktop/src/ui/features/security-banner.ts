@@ -25,12 +25,13 @@ type SecurityCapabilities = {
   filesystem_sandbox?: boolean;
   managed_network?: boolean;
   runtime_stale?: boolean;
+  state_dir_configured?: boolean;
   detail?: string;
 };
 
 type SecuritySetupResult = { ok: boolean; exitCode: number | null; detail?: string; code?: 'uac_disabled' | 'uac_restart_required' };
 
-type BannerState = 'on' | 'off' | 'enabling' | 'failed' | 'missing' | 'stale' | 'hidden' | 'net-missing' | 'mac-incomplete' | 'restart-required';
+type BannerState = 'on' | 'off' | 'enabling' | 'failed' | 'missing' | 'stale' | 'hidden' | 'net-missing' | 'mac-incomplete' | 'restart-required' | 'service-restart-required';
 
 const BANNER_ID = 'security-sandbox-banner';
 const SEED_RETRY_MS = 5000;        // 失败后至少间隔 5s 再重试，避免每帧打 gateway
@@ -54,6 +55,7 @@ export function deriveState(c: SecurityCapabilities): BannerState {
   }
   if (!isWindowsPlatform(c.platform)) return 'hidden';
   if (!c.helper_present) return 'missing';
+  if (c.state_dir_configured === false) return 'service-restart-required';
   if (!c.filesystem_sandbox) return 'off';
   // runtime 在、但 Rust 源码与已提交二进制不一致 -> 漂移，优先提示重 build
   if (c.runtime_stale) return 'stale';
@@ -223,6 +225,12 @@ function applyState(el: HTMLElement): void {
     title.textContent = '请重启电脑以完成安全设置';
     text.textContent = 'UAC 已启用，重启后重新打开 Crew，即可继续安装安全沙箱。';
     actions.innerHTML = '<span class="security-banner__permission">等待重启</span>';
+  } else if (current === 'service-restart-required') {
+    el.classList.add('is-info');
+    icon.textContent = 'i';
+    title.textContent = '安全服务需要重启';
+    text.textContent = lastDetail || '沙箱已安装，但当前 Gateway 尚未加载安全状态目录。请重启 Crew 后再试。';
+    actions.innerHTML = '<span class="security-banner__permission">无需重新安装</span>';
   }
 }
 
@@ -259,6 +267,11 @@ async function onEnable(): Promise<void> {
       const detail = result?.detail || (result?.exitCode == null ? '未返回结果' : `退出码 ${result.exitCode}`);
       setState('failed', detail);
       notify(`沙箱安装未完成：${detail}。命令暂不可用`);
+      return;
+    }
+    await refreshSecurityBanner();
+    if (current !== 'on') {
+      notify(`沙箱安装完成，但尚未通过运行检测${lastDetail ? `：${lastDetail}` : ''}`);
       return;
     }
     // setup 成功 → 把当前活跃会话切到 AUTO_REVIEW（无活跃会话则仅完成基础设施安装）

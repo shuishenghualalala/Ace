@@ -412,6 +412,29 @@ async def test_capabilities_do_not_trust_static_windows_identity(api, tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_capabilities_explain_when_windows_gateway_missed_state_directory(api, tmp_path, monkeypatch):
+    helper = tmp_path / "ace-security-runtime.exe"
+    helper.write_bytes(b"fake helper")
+    monkeypatch.delenv("ACE_SECURITY_STATE_DIR", raising=False)
+    monkeypatch.setattr("crew.gateway.routers.security.platform.system", lambda: "Windows")
+    monkeypatch.setattr(
+        "crew.security.launch.packaged_runtime_argv",
+        lambda: (str(helper),),
+    )
+    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
+
+    path = "/api/security/capabilities"
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    assert response.json()["state_dir_configured"] is False
+    assert "Gateway" in response.json()["detail"]
+    assert "重启" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_capabilities_require_separate_live_filesystem_and_network_probes(
     api,
     tmp_path,

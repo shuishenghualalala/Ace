@@ -21,6 +21,7 @@
 }
 
 .mw-composer__queue-slot,
+.chat-running-intro,
 .mw-composer__edit-banner,
 .mw-composer__input-shell {
   width: min(var(--mw-chat-content-max-width), 100%);

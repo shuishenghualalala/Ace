@@ -72,6 +72,16 @@ describe('security banner deriveState', () => {
     expect(deriveState({ platform: 'windows', helper_present: true, filesystem_sandbox: false, managed_network: false })).toBe('off');
   });
 
+  it('asks for a service restart instead of reinstalling when the gateway missed the sandbox state directory', () => {
+    expect(deriveState({
+      platform: 'windows',
+      helper_present: true,
+      filesystem_sandbox: false,
+      managed_network: false,
+      state_dir_configured: false,
+    })).toBe('service-restart-required');
+  });
+
   it('keeps the install prompt ahead of stale diagnostics when the sandbox is not ready', () => {
     expect(deriveState({
       platform: 'windows',
@@ -108,5 +118,41 @@ describe('security banner deriveState', () => {
     })));
 
     await vi.waitFor(() => expect(securitySetup).toHaveBeenCalledWith({ action: 'install' }));
+  });
+
+  it('verifies capabilities after setup instead of claiming the sandbox is ready', async () => {
+    const securitySetup = vi.fn(async () => ({ ok: true, exitCode: 0 }));
+    const securityCapabilities = vi.mocked(window.Crew.securityCapabilities!);
+    securityCapabilities
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: {
+          platform: 'windows',
+          helper_present: true,
+          filesystem_sandbox: false,
+          managed_network: false,
+        },
+      })
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: {
+          platform: 'windows',
+          helper_present: true,
+          filesystem_sandbox: false,
+          managed_network: false,
+          state_dir_configured: false,
+          detail: '当前 Gateway 未加载安全状态目录，请重启 Crew 后再试',
+        },
+      });
+    Object.assign(window.Crew, { securitySetup });
+
+    await refreshSecurityBanner();
+    document.querySelector<HTMLButtonElement>('[data-action="enable"]')?.click();
+
+    await vi.waitFor(() => expect(
+      document.querySelector('.security-banner__title')?.textContent,
+    ).toBe('安全服务需要重启'));
   });
 });

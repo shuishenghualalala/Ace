@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
+import os
 import platform
 import tempfile
 from pathlib import Path
@@ -209,6 +210,10 @@ async def _live_filesystem_runtime() -> tuple[RuntimeCapabilities | None, bool, 
     )
 
 
+def _state_dir_configured(system: str) -> bool:
+    return system != "windows" or bool(os.environ.get("ACE_SECURITY_STATE_DIR", "").strip())
+
+
 def create_security_router(crew) -> APIRouter:
     """Create host-authority routes; authentication alone cannot approve actions."""
     router = APIRouter(prefix="/api/security")
@@ -242,6 +247,12 @@ def create_security_router(crew) -> APIRouter:
             payload.mode == ConversationPermissionMode.AUTO_REVIEW.value
             and strict_security_enabled()
         ):
+            system = platform.system().lower()
+            if not _state_dir_configured(system):
+                raise HTTPException(
+                    status_code=409,
+                    detail="替我审批的 live probe 无法启动：当前 Gateway 未加载安全状态目录，请重启 Crew 后再试",
+                )
             runtime, _present, _stale, _system = await _live_filesystem_runtime()
             if runtime is None:
                 raise HTTPException(
@@ -439,6 +450,7 @@ def create_security_router(crew) -> APIRouter:
 
         filesystem_probe, helper_present, stale, system = await _live_filesystem_runtime()
         helper_argv = packaged_runtime_argv()
+        state_dir_configured = _state_dir_configured(system)
         detail = "native security runtime 未随包安装"
         filesystem = filesystem_probe is not None
         network = False
@@ -464,6 +476,8 @@ def create_security_router(crew) -> APIRouter:
             )
         elif helper_present:
             detail = "当前设备不支持可用的原生安全运行组件"
+        if helper_present and not state_dir_configured:
+            detail = "当前 Gateway 未加载安全状态目录，请重启 Crew 后再试"
         return {
             "platform": system,
             "helper_present": helper_present,
@@ -475,6 +489,7 @@ def create_security_router(crew) -> APIRouter:
             if filesystem
             else False,
             "runtime_stale": bool(stale),
+            "state_dir_configured": state_dir_configured,
             "detail": detail,
         }
 
