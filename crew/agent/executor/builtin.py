@@ -17,6 +17,7 @@ import asyncio
 import inspect
 import random
 import time
+from dataclasses import replace
 from typing import Any, AsyncIterator
 
 from crew.agent.executor.base import AgentExecutor, ExecutionContext
@@ -43,7 +44,7 @@ from crew.agent.loop.tool_dispatch_helpers import plan_tool_calls
 from crew.core.envelope import ResponseChunk
 from crew.core.errors import ProviderError
 from crew.core.interfaces import LLMProvider, ToolRegistry
-from crew.core.types import Message, ToolResult
+from crew.core.types import IMAGE_INPUT_UNAVAILABLE_NOTICE, Message, ToolResult
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger
 from crew.tools.policy import ToolDisclosureMode
@@ -57,6 +58,36 @@ from crew.tools.tool_search import (
 )
 
 log = get_logger("agent.executor")
+
+VISION_CAPABILITY_RECOVERY_PROMPT = (
+    "当前模型刚刚拒绝了图片输入，本轮已切换为非视觉模式。不要声称已经看过图片。"
+    "如果任务涉及网页，请优先使用 browser snapshot、DOM、文本提取等非视觉方式继续；"
+    "如果图片内容无法通过文本方式获得，请明确告知用户当前配置的模型没有视觉能力，"
+    "需要切换到支持视觉的模型。"
+)
+
+
+def _without_image_inputs(messages: list[Message]) -> list[Message]:
+    """Build a request-only text view while preserving canonical multimodal history."""
+    sanitized: list[Message] = []
+    for message in messages:
+        parts = message.content_parts or []
+        if not any(
+            str(part.get("type") or "").lower() in {"image", "image_url", "input_image"}
+            for part in parts
+        ):
+            sanitized.append(message)
+            continue
+        text_parts = [
+            str(part.get("text") or "").strip()
+            for part in parts
+            if part.get("type") == "text" and str(part.get("text") or "").strip()
+        ]
+        text_parts.append(IMAGE_INPUT_UNAVAILABLE_NOTICE)
+        sanitized.append(
+            replace(message, content="\n".join(text_parts), content_parts=None)
+        )
+    return sanitized
 
 def _dump_prompt(ctx: ExecutionContext, view: list, tools: list | None, iteration: int) -> None:
     """DEBUG 级别：打印本轮发送给 LLM 的完整 prompt（system + messages + tools）。"""
@@ -315,6 +346,7 @@ class BuiltinExecutor(AgentExecutor):
         stream_continuation_count = 0
         streamed_text = ""  # 流式中断续写累计文本
         overflow_mode = False  # 命中上下文溢出后，发给 LLM 的视图持续走 force_compact
+        vision_downgraded = False  # 上游实际拒绝图片后，本轮余下请求只发送文本视图
 
         from crew.core.runctx import current_agent_workdir, current_session_id
         current_session_id.set(ctx.session_id)
@@ -401,6 +433,9 @@ class BuiltinExecutor(AgentExecutor):
                 api_messages.append(Message.user(deferred_tools_message, is_meta=True))
             api_messages.extend(view)
             api_messages = self._maybe_append_todo_reminder(api_messages, ctx.session_id)
+            if vision_downgraded:
+                api_messages = _without_image_inputs(api_messages)
+                api_messages.append(Message.system_reminder(VISION_CAPABILITY_RECOVERY_PROMPT))
             hook_started = time.perf_counter()
             pre_llm_result = await self.plugins.pre_llm_call(ctx.session_id, api_messages)
             log.info(
@@ -436,6 +471,35 @@ class BuiltinExecutor(AgentExecutor):
                 yield ev
             # 估算 prompt 固定开销（系统/技能·上下文/工具定义），并入 usage 透传到前端 breakdown
             result.setdefault("usage", {})["prompt_breakdown"] = _estimate_prompt_overhead(ctx, view, tools)
+            unsupported_capability = str(result.get("unsupported_capability") or "")
+            if unsupported_capability:
+                if unsupported_capability == "vision" and not vision_downgraded:
+                    vision_downgraded = True
+                    budget.refund()
+                    from crew.core.runctx import current_model_capabilities
+
+                    capabilities = current_model_capabilities.get()
+                    if capabilities is not None:
+                        current_model_capabilities.set(tuple(
+                            item for item in capabilities
+                            if str(item).strip().lower() != "vision"
+                        ))
+                    log.warning(
+                        "模型拒绝图片输入，切换为非视觉模式后重试 session=%s",
+                        ctx.session_id,
+                    )
+                    yield ResponseChunk.status_event(
+                        rid,
+                        "当前模型不支持图片，正在改用非视觉方式继续…",
+                        next_seq(),
+                    )
+                    continue
+                yield ResponseChunk.error(
+                    rid,
+                    str(result.get("provider_error") or "当前模型不支持所需能力"),
+                    next_seq(),
+                )
+                return
             if result.get("overflow"):
                 if self.compactor is not None and not overflow_mode:
                     # 首次命中溢出：静默开启压缩模式并重试本轮（退还本轮预算）
@@ -964,6 +1028,16 @@ class BuiltinExecutor(AgentExecutor):
                 # 上下文溢出：静默交主循环压缩后重试本轮（不向用户吐 error 帧）
                 if is_context_overflow(exc) and self.compactor is not None:
                     result["overflow"] = True
+                    return
+                if (
+                    isinstance(exc, ProviderError)
+                    and exc.category == "unsupported_capability"
+                    and exc.capability
+                ):
+                    result.update(
+                        unsupported_capability=exc.capability,
+                        provider_error=str(exc),
+                    )
                     return
                 retryable = isinstance(exc, ProviderError) and exc.retryable
                 if retryable and attempt < self.max_retries:

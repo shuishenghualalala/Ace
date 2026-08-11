@@ -2462,7 +2462,7 @@ def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float
         temperature=profile.temperature,
         max_tokens=profile.max_tokens,
         timeout=stream_read_timeout if stream_read_timeout is not None else profile.timeout,
-        vision=profile.vision,
+        vision=profile.supports_vision,
     )
 
 
@@ -2477,7 +2477,7 @@ def build_provider(cfg: Config) -> LLMProvider:
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
             timeout=cfg.stream_read_timeout,
-            vision=cfg.vision,
+            vision=cfg.active_model.supports_vision,
         )
         log.info("使用 %s Provider，profile=%s model=%s base_url=%s", cfg.provider, cfg.active_model_id, cfg.model, cfg.base_url or "默认")
         return provider

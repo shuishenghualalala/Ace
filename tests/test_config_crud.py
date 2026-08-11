@@ -361,12 +361,7 @@ def test_resolve_writable_env_path_owner_scoped(monkeypatch, tmp_path):
 
 
 def test_activate_model_syncs_vision_flag(cfg: Config):
-    """激活模型时必须把 profile.vision 同步到 Config 顶层。
-
-    回归：主对话 provider 由 build_provider(cfg) 用 cfg.vision 构造（非 profile.vision）。
-    若 activate_model 漏同步 vision，纯文本模型（vision=False）仍按 vision=True 发送
-    image_url，触发 "Model do not support image input" 400（如 browser_use 截图）。
-    """
+    """capabilities 是视觉能力的唯一运行时来源，legacy vision 仅负责兼容读取。"""
     # 加一个显式关闭 vision 的 profile 并激活
     cfg.add_model({
         "id": "textonly",
@@ -385,3 +380,27 @@ def test_activate_model_syncs_vision_flag(cfg: Config):
     # 切回 vision=True 的模型，顶层标志应同步回升
     cfg.activate_model("alpha")
     assert cfg.vision is True
+
+
+def test_capabilities_override_conflicting_legacy_vision(cfg: Config):
+    profile = cfg.add_model({
+        "id": "capability-text-only",
+        "model": "text-only",
+        "vision": True,
+        "capabilities": ["text", "tools"],
+    })
+
+    assert profile.vision is False
+    assert profile.supports_vision is False
+    assert profile.public_dict()["vision"] is False
+
+
+def test_legacy_vision_migrates_when_capabilities_are_absent(cfg: Config):
+    profile = cfg.add_model({
+        "id": "legacy-vision",
+        "model": "legacy-vision-model",
+        "vision": True,
+    })
+
+    assert profile.supports_vision is True
+    assert "vision" in profile.capabilities
