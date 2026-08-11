@@ -141,7 +141,8 @@ function createBeforeInput(): DocumentFragment {
   fragment.append(
     sitesMode,
     input,
-    createFileQaHint(),
+    // createFileQaHint() 技能引导条代码保留备用，当前不挂载；
+    // 启用时恢复此处调用 + attachments.ts 里的 refreshFileQaHint() 调用。
     preview,
     siteAnnotationPreview,
     blueprintAnnotationPreview,
