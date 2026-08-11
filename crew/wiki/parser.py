@@ -602,41 +602,14 @@ def _parse_html(path: Path) -> str:
 
 def fetch_url_to_markdown(url: str, timeout: float = 15.0) -> tuple[str, str]:
     """抓取 URL 并将 HTML 转为 Markdown。返回 (markdown_text, final_url)。"""
-    import ipaddress
-    import socket
-    import urllib.request
-    from urllib.parse import urlsplit
+    from crew.security.outbound import fetch_public_http
 
-    def _validate_public_url(value: str) -> None:
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("Wiki URL 仅允许公开 http/https 地址")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("Wiki URL 不允许内嵌用户名或密码")
-        host = parsed.hostname
-        if host == "localhost" or host.endswith(".localhost"):
-            raise ValueError("Wiki URL 禁止访问 localhost")
-        for result in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80)):
-            address = ipaddress.ip_address(result[4][0])
-            if not address.is_global or address.is_multicast or address.is_reserved:
-                raise ValueError("Wiki URL 禁止访问私网、链路本地或保留地址")
-
-    class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-            _validate_public_url(newurl)
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-    _validate_public_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "Crew/1.0"})
-    opener = urllib.request.build_opener(_SafeRedirectHandler())
-    with opener.open(req, timeout=timeout) as resp:  # noqa: S310
-        raw = resp.read(10_000_001)
-        if len(raw) > 10_000_000:
-            raise ValueError("Wiki URL 响应超过 10 MB 限制")
-        content_type = resp.headers.get_content_type()
-        final_url = resp.geturl()
-
-    charset = resp.headers.get_content_charset() or "utf-8"
+    final_url, raw, content_type, charset = fetch_public_http(
+        url,
+        timeout=timeout,
+        max_bytes=10_000_000,
+        headers={"User-Agent": "Ace/1.0"},
+    )
 
     if "html" in content_type:
         try:

@@ -320,6 +320,13 @@ def test_lightweight_prompt_skips_global_context():
     assert "组织规则X" in full["user_reminder"]
 
 
+def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
+    parts = build_prompt_parts(cwd=str(tmp_path), lightweight=True)
+
+    assert f"当前工作目录：`{tmp_path.resolve()}`" in parts["user_reminder"]
+    assert "不要用它推导、验证或重建当前工作空间路径" in parts["user_reminder"]
+
+
 def test_active_subagents_interrupt_cascade():
     """🔴 中断级联：CrewApp.interrupt 经 ActiveSubagents 下发到运行中的子 agent。"""
     class _FakeChild:

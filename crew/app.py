@@ -2379,6 +2379,7 @@ class CrewApp:
             token = current_push_fn.set(_push_for_owner)
         try:
             self._enrich_workspace(envelope)
+            from crew.agent.skills import trusted_skill_roots_from_params
             from crew.security.context import build_gateway_security_context
             from crew.security.launch import compile_process_launch
 
@@ -2396,6 +2397,8 @@ class CrewApp:
                 self.security_service.mode_for(security_context),
                 db_path=self.security_service.db_path,
                 audit=self.security_service.audit,
+                approval_service=self.security_service,
+                trusted_readable_roots=trusted_skill_roots_from_params(envelope.params),
             )
             config_session_id = str(envelope.params.get("task_session_id") or envelope.session_id)
             if not getattr(self.config, "external_agents_enabled", True):
@@ -2565,6 +2568,15 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     cfg.apply_platform_config_bridges(platform_registry.all_entries())
 
     app = CrewApp(cfg, provider, registry, session_store, workspace_store, memory, plugins)
+    # Plugins are discovered before CrewApp constructs the security service.
+    # Publish these live dependencies afterward; plugin tools retain the shared
+    # services mapping and therefore see the production authorization boundary.
+    plugins.services.update(
+        {
+            "workspace_store": workspace_store,
+            "security_service": app.security_service,
+        }
+    )
     register_builtin_tools(
         registry,
         workspace_store=workspace_store,
@@ -2575,8 +2587,18 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.tools.site_tools import register_site_tools
 
     app.sites = SiteManager(SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal))
-    register_site_tools(registry, app.sites)
-    register_blueprint_tools(registry, app.sites)
+    register_site_tools(
+        registry,
+        app.sites,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
+    register_blueprint_tools(
+        registry,
+        app.sites,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
     # Browser 能力由 plugins/browser 插件装配（创建 BrowserManager、注册 browser_use）。
     # 系统级禁用/未加载时保持 None，面板路由与 startup/aclose 已有 None 兜底。
     app.browser_manager = _browser_manager_from_plugins(plugins)

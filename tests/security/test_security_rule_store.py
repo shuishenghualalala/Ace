@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from crew.security.actions import normalize_exec_action, normalize_network_action
+from crew.security.models import AdditionalPermissionProfile, FilesystemAccess, FilesystemEntry
 from crew.security.rule_store import RuleStoreCorruptError, SQLiteRuleStore
 from crew.security.rules import ActionRule, RuleScope
 
@@ -51,6 +52,29 @@ def test_rule_round_trip_keeps_redacted_approval_description(tmp_path: Path) -> 
         workspace_id="project-a",
     )
     assert loaded == [rule]
+    store.close()
+
+
+def test_rule_round_trip_keeps_exact_permission_overlay(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    permissions = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),)
+    )
+    store = SQLiteRuleStore(tmp_path / "crew.db")
+    rule = ActionRule.exec_prefix(
+        ["tool", "write"],
+        cwd=tmp_path,
+        additional_permissions=permissions,
+    )
+
+    store.create(rule, os_user="os-a", owner_account_id="owner-a", workspace_id="project-a")
+
+    assert store.list(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    ) == [rule]
     store.close()
 
 

@@ -10,7 +10,6 @@ from crew.core.runctx import (
 )
 from crew.tools.registry import Registry, tool_result
 
-
 PUBLISH_SITE_SCHEMA = {
     "name": "publish_site",
     "description": (
@@ -32,7 +31,13 @@ PUBLISH_SITE_SCHEMA = {
 }
 
 
-def register_site_tools(registry: Registry, manager) -> None:
+def register_site_tools(
+    registry: Registry,
+    manager,
+    *,
+    workspace_store=None,
+    security_service=None,
+) -> None:
     async def publish_site(args):
         owner = current_owner_account_id.get().strip()
         workspace_id = current_workspace_id.get().strip() or "default"
@@ -40,12 +45,26 @@ def register_site_tools(registry: Registry, manager) -> None:
         workdir = current_agent_workdir.get().strip()
         if not owner or not workdir:
             raise ValueError("当前会话缺少用户或 Workspace 工作目录")
+
+        async def authorize_build(argv, cwd, preview):
+            from crew.tools.security_guard import authorize_exec_tool
+
+            await authorize_exec_tool(
+                argv,
+                cwd=cwd,
+                tool_name="publish_site",
+                workspace_store=workspace_store,
+                security_service=security_service,
+                preview=preview,
+            )
+
         result = await manager.publish(
             owner=owner, workspace_id=workspace_id, session_id=session_id,
             workspace_root=workdir, source_path=str(args.get("source_path") or ""),
             name=str(args.get("name") or ""), build_command=str(args.get("build_command") or ""),
             output_directory=str(args.get("output_directory") or ""), site_id=str(args.get("site_id") or ""),
             description=str(args.get("description") or ""),
+            build_authorizer=authorize_build,
         )
         site = result["site"]
         release = result["release"]

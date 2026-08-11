@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -25,6 +25,7 @@ const PLATFORM_READ_ROOTS: &[&str] = &[
     "/sbin",
     "/private/etc",
     "/private/var/db",
+    "/private/var/select",
     "/dev",
 ];
 
@@ -314,6 +315,10 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         &path_string(&home)?,
         "allow file-write*",
     );
+    let mut traversal_roots = readable.clone();
+    traversal_roots.extend(writable.iter().cloned());
+    traversal_roots.push(home.clone());
+    push_ancestor_metadata_rules(&mut parameters, &mut read_rules, &traversal_roots)?;
 
     if let Some(executable) = request.command.first().map(PathBuf::from) {
         if executable.is_absolute() {
@@ -403,6 +408,31 @@ fn push_subpath_rule(
     let name = format!("{prefix}_{index}");
     parameters.push((name.clone(), value.to_string()));
     rules.push(format!("({operation} (subpath (param \"{name}\")))"));
+}
+
+fn push_ancestor_metadata_rules(
+    parameters: &mut Vec<(String, String)>,
+    rules: &mut Vec<String>,
+    roots: &[PathBuf],
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for root in roots {
+        for ancestor in root
+            .ancestors()
+            .skip(1)
+            .filter(|value| value.parent().is_some())
+        {
+            if !seen.insert(ancestor.to_path_buf()) {
+                continue;
+            }
+            let name = format!("READABLE_ANCESTOR_{}", seen.len() - 1);
+            parameters.push((name.clone(), path_string(ancestor)?));
+            rules.push(format!(
+                "(allow file-read-metadata (literal (param \"{name}\")))"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn push_path_rule(
@@ -692,6 +722,25 @@ mod tests {
             .profile
             .contains("deny file-read* (literal (param \"READONLY_ROOT_0\"))"));
         assert!(!plan.profile.contains("allow network-outbound"));
+    }
+
+    #[test]
+    fn readable_roots_allow_only_ancestor_metadata_for_path_traversal() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let nested = runtime.path().join("node/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        let mut value = request(workspace.path());
+        value.readable_roots = vec![nested];
+
+        let plan = build_plan(&value, None).unwrap();
+
+        assert!(plan
+            .profile
+            .contains("allow file-read-metadata (literal (param \"READABLE_ANCESTOR_0\"))"));
+        assert!(!plan
+            .profile
+            .contains("allow file-read* (subpath (param \"READABLE_ANCESTOR_0\"))"));
     }
 
     #[test]

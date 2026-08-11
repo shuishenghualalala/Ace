@@ -47,6 +47,14 @@ def assess_file_action(
         return FilePolicyAssessment(FilePolicyResult.DENY, "永久拒绝写入文件系统根")
 
     protected = _protected_entries(context, db_path)
+    settings = settings_for_mode(mode, context.workspace_root, deny_entries=protected)
+    if filesystem_operation_allowed(
+        settings.profile,
+        AdditionalPermissionProfile(),
+        target,
+        operation,
+    ):
+        return FilePolicyAssessment(FilePolicyResult.ALLOW, "base_profile")
     matching = [entry for entry in protected if _contains(entry.root, target)]
     if any(
         entry.access is FilesystemAccess.DENY and not entry.escalatable
@@ -58,15 +66,6 @@ def assess_file_action(
         for entry in matching
     ):
         return FilePolicyAssessment(FilePolicyResult.DENY, "受保护项目元数据只读")
-
-    settings = settings_for_mode(mode, context.workspace_root, deny_entries=protected)
-    if filesystem_operation_allowed(
-        settings.profile,
-        AdditionalPermissionProfile(),
-        target,
-        operation,
-    ):
-        return FilePolicyAssessment(FilePolicyResult.ALLOW, "base_profile")
     return FilePolicyAssessment(FilePolicyResult.REQUIRE_APPROVAL, "项目外路径需要额外授权")
 
 

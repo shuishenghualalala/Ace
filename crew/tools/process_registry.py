@@ -38,6 +38,7 @@ from crew.security.launch import (
     serialize_profile,
     shell_argv,
 )
+from crew.security.models import serialize_additional_permissions
 from crew.tools.output_filters import strip_ansi
 from crew.tools.registry import tool_error
 
@@ -367,30 +368,40 @@ class ProcessRegistry:
             owner_account_id,
             managed=True,
         )
+        from crew.security.broker import compile_runtime_filesystem_roots
+
         profile = serialize_profile(launch.profile)
-        readable_roots = [
-            entry["root"]
-            for entry in profile["filesystem"]
-            if entry["access"] == "read" and entry["escalatable"]
-        ]
-        for root in launch.trusted_readable_roots:
-            value = str(root)
-            if value not in readable_roots:
-                readable_roots.append(value)
+        additional = serialize_additional_permissions(launch.additional_permissions)
+        writable, readable, readonly, denied = compile_runtime_filesystem_roots(
+            launch.profile,
+            launch.additional_permissions,
+            launch.trusted_readable_roots,
+        )
+        network_rules = []
+        for entry in [*profile["network_entries"], *additional["network"]]:
+            network_rules.append(
+                {
+                    "host": entry["host"],
+                    "port": entry["port"],
+                    "protocol": entry["protocol"],
+                    "allow": entry["access"] == "allow",
+                    "allow_private": entry["allow_private"],
+                    "escalatable": entry["escalatable"],
+                }
+            )
         payload = {
             "version": 1,
             "helper_argv": list(launch.helper_argv),
             "command": list(command_argv),
             "cwd": str(resolved_cwd),
-            "writable_roots": [
-                entry["root"] for entry in profile["filesystem"] if entry["access"] == "read_write"
-            ],
-            "readable_roots": readable_roots,
-            "denied_roots": [
-                entry["root"] for entry in profile["filesystem"] if entry["access"] == "deny"
-            ],
-            "network_rules": profile["network_entries"],
-            "allow_local_binding": profile["allow_local_binding"],
+            "writable_roots": [str(root) for root in writable],
+            "readable_roots": [str(root) for root in readable],
+            "readonly_roots": [str(root) for root in readonly],
+            "denied_roots": [str(root) for root in denied],
+            "network_rules": network_rules,
+            "allow_local_binding": (
+                profile["allow_local_binding"] or additional["allow_local_binding"]
+            ),
             "env_overrides": child_env,
         }
         return self._spawn_managed_bridge(

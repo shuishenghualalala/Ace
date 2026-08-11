@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from crew.security.actions import ActionKind, NormalizedAction, normalize_exec_action
+from crew.security.models import EMPTY_ADDITIONAL_PERMISSIONS, AdditionalPermissionProfile
 
 
 class RuleScope(StrEnum):
@@ -36,6 +37,7 @@ class ActionRule:
     # Redacted, user-facing provenance. These fields never participate in matching.
     action_summary: str = ""
     action_detail: str = ""
+    additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
 
     @classmethod
     def exact(
@@ -44,6 +46,7 @@ class ActionRule:
         *,
         scope: RuleScope,
         decision: RuleDecision = RuleDecision.ALLOW,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
     ) -> ActionRule:
         """Create an exact digest rule; safe for shell exec because raw+final argv are bound."""
         return cls(
@@ -51,6 +54,7 @@ class ActionRule:
             decision=decision,
             kind=action.kind,
             exact_digest=action.digest,
+            additional_permissions=additional_permissions,
         )
 
     @classmethod
@@ -60,6 +64,7 @@ class ActionRule:
         *,
         cwd: str | Path,
         decision: RuleDecision = RuleDecision.ALLOW,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
     ) -> ActionRule:
         action = normalize_exec_action(argv_prefix, cwd)
         return cls(
@@ -68,6 +73,7 @@ class ActionRule:
             kind=ActionKind.EXEC,
             argv_prefix=action.argv,
             cwd=action.cwd,
+            additional_permissions=additional_permissions,
         )
 
     def matches(self, action: NormalizedAction) -> bool:

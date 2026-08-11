@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from crew.state.home import get_crew_home
-
 from crew.security.models import (
     AdditionalPermissionProfile,
     ApprovalPolicy,
@@ -37,20 +35,14 @@ def settings_for_mode(
         (FilesystemEntry(workspace_root, FilesystemAccess.READ_WRITE),) if workspace_root else ()
     )
     if mode is ConversationPermissionMode.FULL_ACCESS:
-        # “完全访问”是宽权限受管模式，不再等同宿主裸跑。开放 workspace 与
-        # 当前用户 home，随后由更具体、不可升级的 deny_entries 覆盖 Ace
-        # DB/proof/identity/审计和 protected metadata；home 外仍需精确批准。
-        user_home = Path.home().resolve(strict=False)
-        broad_roots = {entry.root for entry in filesystem}
-        if user_home != get_crew_home().resolve(strict=False) and user_home not in broad_roots:
-            filesystem = (*filesystem, FilesystemEntry(user_home, FilesystemAccess.READ_WRITE))
+        # 完全访问权限明确选择宿主用户权限，不再编译文件或网络沙箱。
+        # 不可逾越的破坏性红线仍由终端 hardline 与结构化文件根目录检查负责。
         return SecurityModeSettings(
             profile=PermissionProfile(
-                kind=PermissionProfileKind.MANAGED,
-                filesystem=(*filesystem, *deny_entries),
-                network=NetworkPolicy.RESTRICTED,
+                kind=PermissionProfileKind.DISABLED,
+                network=NetworkPolicy.UNRESTRICTED,
             ),
-            approval_policy=ApprovalPolicy.REQUEST,
+            approval_policy=ApprovalPolicy.NEVER,
         )
 
     profile = PermissionProfile(
@@ -78,8 +70,24 @@ def filesystem_operation_allowed(
 
     resolved = target.expanduser().resolve(strict=False)
     base_matches = [entry for entry in profile.filesystem if _contains(entry.root, resolved)]
-    if any(entry.access is FilesystemAccess.DENY and not entry.escalatable for entry in base_matches):
-        return False
+    if base_matches:
+        base_specificity = max(len(entry.root.parts) for entry in base_matches)
+        selected_base = [
+            entry for entry in base_matches if len(entry.root.parts) == base_specificity
+        ]
+        # Immutable denies/read-only entries cannot be overridden by an
+        # approval overlay.  A more-specific host-owned base entry can still
+        # carve the task workspace out of a broad runtime-home deny.
+        if any(
+            entry.access is FilesystemAccess.DENY and not entry.escalatable
+            for entry in selected_base
+        ):
+            return False
+        if operation is FilesystemOperation.WRITE and any(
+            entry.access is FilesystemAccess.READ and not entry.escalatable
+            for entry in selected_base
+        ):
+            return False
 
     matches = [
         entry

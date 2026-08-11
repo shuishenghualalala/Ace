@@ -15,18 +15,19 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from crew.security.context import SecurityContext
 from crew.security.file_policy import _protected_entries
 from crew.security.models import (
+    EMPTY_ADDITIONAL_PERMISSIONS,
+    AdditionalPermissionProfile,
     ConversationPermissionMode,
     PermissionProfile,
     PermissionProfileKind,
 )
 from crew.security.policy import settings_for_mode
 from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
-
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +41,8 @@ class ProcessLaunch:
     trusted_readable_roots: tuple[Path, ...] = ()
     security_context: SecurityContext | None = None
     audit: Any | None = None
+    approval_service: Any | None = None
+    additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
 
     @property
     def managed(self) -> bool:
@@ -139,6 +142,7 @@ async def execute_captured(
                     command=argv,
                     cwd=cwd,
                     permission_profile=launch.profile,
+                    additional_permissions=launch.additional_permissions,
                     trusted_readable_roots=launch.trusted_readable_roots,
                     stdin=stdin,
                     env_overrides=env_overrides,
@@ -330,6 +334,7 @@ def audit_execution_result(
                 exit_code=exit_code,
                 stable_error_code=stable_error_code,
                 tool_name=tool_name,
+                additional_permissions_summary=_additional_permissions_summary(launch),
             )
         )
     except Exception:
@@ -409,17 +414,25 @@ def compile_process_launch(
     *,
     db_path: Path,
     audit: Any | None = None,
+    approval_service: Any | None = None,
+    additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
+    trusted_readable_roots: Sequence[str | Path] = (),
 ) -> ProcessLaunch:
     """Build filesystem/profile facts and locate only the packaged native helper."""
     protected = _protected_entries(context, db_path)
     profile = settings_for_mode(mode, context.workspace_root, deny_entries=protected).profile
     from crew.agent.skills import get_builtin_skills_dir
-    from crew.state.home import bundled_runtime_roots
+    from crew.state.home import managed_runtime_read_roots
 
     builtin_skills = get_builtin_skills_dir()
     trusted_roots = [
         *((builtin_skills.resolve(strict=True),) if builtin_skills.is_dir() else ()),
-        *bundled_runtime_roots(),
+        *managed_runtime_read_roots(),
+        *(
+            root.resolve(strict=True)
+            for value in trusted_readable_roots
+            if (root := Path(value).expanduser()).exists()
+        ),
     ]
     trusted_roots = list(dict.fromkeys(trusted_roots))
     return ProcessLaunch(
@@ -430,6 +443,21 @@ def compile_process_launch(
         ),
         security_context=context,
         audit=audit,
+        approval_service=approval_service,
+        additional_permissions=additional_permissions,
+    )
+
+
+def _additional_permissions_summary(launch: ProcessLaunch) -> str:
+    if launch.additional_permissions.empty:
+        return ""
+    from crew.security.models import serialize_additional_permissions
+
+    return json.dumps(
+        serialize_additional_permissions(launch.additional_permissions),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 

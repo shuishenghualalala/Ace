@@ -34,6 +34,12 @@ AuditActionType = Literal[
     "approval_decision",
     "exec_decision",
     "file_decision",
+    "network_decision",
+    "exec_result",
+    "rule_created",
+    "rule_disabled",
+    "rule_deleted",
+    "audit_purged",
 ]
 AuditDecision = Literal[
     "",
@@ -45,6 +51,13 @@ AuditDecision = Literal[
     "session",
     "always",
     "reject",
+    "completed",
+    "failed",
+    "cancelled",
+    "error",
+    "enabled",
+    "disabled",
+    "deleted",
 ]
 AuditSort = Literal["newest", "oldest"]
 _AUDIT_FILE_OPERATIONS = {
@@ -307,6 +320,8 @@ def create_security_router(crew) -> APIRouter:
 
     @router.get("/rules")
     async def list_rules(request: Request, workspace_id: str = Query("default")):
+        from crew.security.models import serialize_additional_permissions
+
         await _require_desktop_proof(request)
         ctx = context(request, workspace_id, "rules-ui")
         rules = crew.security_rules.list_with_status(
@@ -315,7 +330,16 @@ def create_security_router(crew) -> APIRouter:
             workspace_id=ctx.workspace_id,
         )
         return {
-            "rules": [{**rule.__dict__, "enabled": enabled} for rule, enabled in rules]
+            "rules": [
+                {
+                    **rule.__dict__,
+                    "additional_permissions": serialize_additional_permissions(
+                        rule.additional_permissions
+                    ),
+                    "enabled": enabled,
+                }
+                for rule, enabled in rules
+            ]
         }
 
     @router.patch("/rules/{rule_id}")

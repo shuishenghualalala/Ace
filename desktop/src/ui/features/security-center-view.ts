@@ -10,7 +10,11 @@ import {
   isWindowsPlatform,
   type SecurityCapabilities,
 } from './security-mode';
-import { formatSecurityRule, type SecurityRuleView } from './security-rules';
+import {
+  formatSecurityRule,
+  formatSecurityRulePermissions,
+  type SecurityRuleView,
+} from './security-rules';
 import {
   actionTypeLabel,
   approvalChoiceLabel,
@@ -136,7 +140,7 @@ function renderModeSection(snapshot: SecurityCenterSnapshot): HTMLElement {
     text(
       'p',
       'security-center__section-description',
-      `当前工作空间：${snapshot.workspaceId}。完全访问只作用于当前会话，不会静默继承到新会话。`,
+      `当前工作空间：${snapshot.workspaceId}。完全访问权限只作用于当前会话，不会静默继承到后续新会话。`,
     ),
   );
   for (const option of SECURITY_MODE_OPTIONS) {
@@ -266,10 +270,13 @@ function renderRulesSection(snapshot: SecurityCenterSnapshot): HTMLElement {
     item.dataset.ruleId = String(rule.rule_id ?? '');
     copy.className = 'security-center__rule-copy';
     actions.className = 'security-center__rule-actions';
+    const detail = [rule.action_detail?.trim(), formatSecurityRulePermissions(rule)]
+      .filter(Boolean)
+      .join('\n');
     copy.append(
       text('strong', 'security-center__rule-title', formatSecurityRule(rule)),
-      ...(rule.action_detail?.trim()
-        ? [text('pre', 'security-center__rule-detail', rule.action_detail.trim())]
+      ...(detail
+        ? [text('pre', 'security-center__rule-detail', detail)]
         : []),
       text(
         'span',
@@ -334,7 +341,12 @@ function openAuditDetail(event: SecurityAuditView, trigger: HTMLElement): void {
   overview.className = 'security-center__audit-detail-overview';
   metadata.className = 'security-center__audit-detail-grid';
   command.className = 'security-center__audit-command';
-  command.textContent = event.action_detail || event.action_summary || '旧记录未保存动作详情';
+  command.textContent = [
+    event.action_detail || event.action_summary || '旧记录未保存动作详情',
+    event.additional_permissions_summary
+      ? `额外权限：${event.additional_permissions_summary}`
+      : '',
+  ].filter(Boolean).join('\n');
   overview.append(
     text('span', 'security-center__audit-detail-kicker', actionTypeLabel(event.action_type)),
     text('strong', 'security-center__audit-detail-summary', event.action_summary || '安全事件'),
@@ -414,6 +426,12 @@ function renderAuditSection(snapshot: SecurityCenterSnapshot): HTMLElement {
       ['approval_decision', '用户审批'],
       ['exec_decision', '命令判定'],
       ['file_decision', '文件判定'],
+      ['network_decision', '网络判定'],
+      ['exec_result', '命令执行结果'],
+      ['rule_created', '创建授权规则'],
+      ['rule_disabled', '停用授权规则'],
+      ['rule_deleted', '删除授权规则'],
+      ['audit_purged', '清理审计记录'],
     ]),
     auditSelect('结果', 'decision', query.decision, [
       ['', '全部结果'],
@@ -425,6 +443,13 @@ function renderAuditSection(snapshot: SecurityCenterSnapshot): HTMLElement {
       ['session', '当前会话'],
       ['always', '始终允许'],
       ['reject', '用户拒绝'],
+      ['completed', '执行成功'],
+      ['failed', '执行失败'],
+      ['cancelled', '已取消'],
+      ['error', '运行错误'],
+      ['enabled', '已启用'],
+      ['disabled', '已停用'],
+      ['deleted', '已删除'],
     ]),
     auditSelect('排序', 'sort', query.sort, [
       ['newest', '最新优先'],

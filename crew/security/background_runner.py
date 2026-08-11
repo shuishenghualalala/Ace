@@ -19,6 +19,7 @@ async def _run(payload: dict) -> int:
             cwd=Path(payload["cwd"]),
             writable_roots=tuple(Path(value) for value in payload.get("writable_roots", [])),
             readable_roots=tuple(Path(value) for value in payload.get("readable_roots", [])),
+            readonly_roots=tuple(Path(value) for value in payload.get("readonly_roots", [])),
             denied_roots=tuple(Path(value) for value in payload.get("denied_roots", [])),
             network_enabled=bool(payload.get("network_rules")),
             network_rules=tuple(payload.get("network_rules", [])),

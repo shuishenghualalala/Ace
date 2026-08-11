@@ -1,19 +1,21 @@
-"""AUTO_REVIEW fails closed until executable identity is bound end to end."""
+from pathlib import Path
 
-from __future__ import annotations
-
-from crew.security.models import ConversationPermissionMode
-from crew.security.runtime_client import ShellClassification, ShellVerdict
-from crew.tools.builtin import _classification_auto_allows
+from crew.security.actions import normalize_exec_action
 
 
-def test_auto_review_rejects_workspace_same_named_executable() -> None:
-    fake = ShellClassification(
-        shell_kind="bash",
-        raw_command="./echo hi",
-        parsed_commands=(("./echo", "hi"),),
-        canonical_digest="d" * 64,
-        verdict=ShellVerdict.ALLOW_READ_ONLY,
-        reason="basename says echo",
+def test_classifier_evidence_does_not_expand_shell_action_authority(tmp_path: Path) -> None:
+    plain = normalize_exec_action(
+        ["bash", "-lc", "tool status"],
+        tmp_path,
+        raw_command="tool status",
     )
-    assert _classification_auto_allows(ConversationPermissionMode.AUTO_REVIEW, fake) is False
+    classified = normalize_exec_action(
+        ["bash", "-lc", "tool status"],
+        tmp_path,
+        raw_command="tool status",
+        shell_kind="bash",
+        parsed_commands=(("tool", "status"),),
+        canonical_digest="a" * 64,
+    )
+
+    assert classified.digest == plain.digest

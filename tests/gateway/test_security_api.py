@@ -137,7 +137,14 @@ async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
 
 
 @pytest.mark.asyncio
-async def test_strict_auto_review_requires_live_native_runtime(api):
+async def test_strict_auto_review_requires_live_native_runtime(api, monkeypatch):
+    async def unavailable_runtime():
+        return None, False, False, "darwin"
+
+    monkeypatch.setattr(
+        "crew.gateway.routers.security._live_filesystem_runtime",
+        unavailable_runtime,
+    )
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await _put_json(
@@ -148,6 +155,27 @@ async def test_strict_auto_review_requires_live_native_runtime(api):
 
     assert response.status_code == 409
     assert "live probe" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_full_access_selection_does_not_depend_on_native_runtime(api, monkeypatch):
+    async def unavailable_runtime():
+        raise AssertionError("full access must not probe the managed runtime")
+
+    monkeypatch.setattr(
+        "crew.gateway.routers.security._live_filesystem_runtime",
+        unavailable_runtime,
+    )
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await _put_json(
+            client,
+            "/api/security/mode",
+            {"workspace_id": "default", "session_id": "s1", "mode": "full_access"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"mode": "full_access"}
 
 
 @pytest.mark.asyncio

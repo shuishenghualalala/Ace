@@ -18,6 +18,29 @@ from crew.core.runctx import (
 from crew.state.workspace_store import _normalize_root_path
 
 
+def _effective_workspace_root(
+    normalized_root: str,
+    *,
+    workspace_id: str,
+    owner_account_id: str,
+) -> Path:
+    """Return the host-owned writable root used by the agent runtime.
+
+    A workspace without a bound project still has a real task directory.  The
+    agent has always used that directory as its cwd, so the security context
+    must compile the same directory instead of representing the workspace as
+    rootless.
+    """
+    if normalized_root:
+        return Path(normalized_root)
+    from crew.state.home import task_workspace_path
+
+    return task_workspace_path(
+        workspace_id,
+        owner_account_id=owner_account_id,
+    ).resolve()
+
+
 class SecurityContextError(RuntimeError):
     """Raised when trusted runtime facts are absent or inconsistent."""
 
@@ -48,8 +71,17 @@ def build_security_context(workspace_store: Any) -> SecurityContext:
         raise SecurityContextError("可信工作空间不存在或不可用") from exc
 
     normalized_root = _normalize_root_path(str(workspace.get("root_path") or ""))
-    workspace_root = Path(normalized_root) if normalized_root else None
+    workspace_root = _effective_workspace_root(
+        normalized_root,
+        workspace_id=workspace_id,
+        owner_account_id=owner,
+    )
     cwd = _canonical_runtime_cwd(current_agent_workdir.get())
+    if cwd is not None:
+        try:
+            cwd.relative_to(workspace_root)
+        except ValueError as exc:
+            raise SecurityContextError("可信工作目录不属于已认证工作空间") from exc
     return SecurityContext(
         os_user=getpass.getuser(),
         owner_account_id=owner,
@@ -87,9 +119,13 @@ def build_gateway_security_context(
     except (KeyError, OSError, ValueError) as exc:
         raise SecurityContextError("可信工作空间不存在或不可用") from exc
     normalized_root = _normalize_root_path(str(workspace.get("root_path") or ""))
-    root = Path(normalized_root) if normalized_root else None
+    root = _effective_workspace_root(
+        normalized_root,
+        workspace_id=workspace_key,
+        owner_account_id=owner,
+    )
     requested_cwd = Path(cwd).expanduser().resolve(strict=False) if cwd else root
-    if requested_cwd is not None and root is not None:
+    if requested_cwd is not None:
         try:
             requested_cwd.relative_to(root)
         except ValueError as exc:

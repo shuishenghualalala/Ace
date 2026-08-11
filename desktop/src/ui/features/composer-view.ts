@@ -224,6 +224,10 @@ export function createComposerView(
   const imeState = createComposerImeState();
   const unbindIme = bindComposerIme(input, imeState);
 
+  const hasContextDraft = (): boolean => [...beforeInput.querySelectorAll<HTMLElement>(
+    '[data-composer-draft]',
+  )].some((item) => !item.hidden && Boolean(item.textContent?.trim()));
+
   const renderQueue = (): void => {
     if (disposed) return;
     const sessionId = getSessionId();
@@ -313,7 +317,7 @@ export function createComposerView(
     const attachmentCount = options.attachments
       ? options.attachments.list().length
       : messages.attachments.length;
-    const hasDraft = Boolean(input.value.trim() || attachmentCount);
+    const hasDraft = Boolean(input.value.trim() || attachmentCount || hasContextDraft());
     const blocked = !authStore.get().isLoggedIn || !uiStore.get().backendConnected;
     input.disabled = blocked;
     send.disabled = blocked || submitting || !hasDraft;
@@ -392,6 +396,13 @@ export function createComposerView(
   const unsubscribeUi = uiStore.subscribe(refresh);
   const unsubscribeSession = sessionStore.subscribe(refresh);
   const unsubscribeMessages = messageStore.subscribe(refresh);
+  const contextDraftObserver = new MutationObserver(refresh);
+  contextDraftObserver.observe(beforeInput, {
+    attributes: true,
+    attributeFilter: ['hidden'],
+    childList: true,
+    subtree: true,
+  });
   refresh();
 
   return {
@@ -407,6 +418,7 @@ export function createComposerView(
       unsubscribeUi();
       unsubscribeSession();
       unsubscribeMessages();
+      contextDraftObserver.disconnect();
       for (const { source, nodes } of movedContext) source.append(...nodes);
       host.replaceChildren();
     },

@@ -5,14 +5,14 @@
   "arch": "arm64",
   "generated_by": "desktop/scripts/prepare-security-runtime.mjs",
   "binary_name": "ace-security-runtime",
-  "binary_sha256": "2572fc8fe5b72f43f9451eefc0979ef8068cbc14e856e09970c17b0579f41573",
+  "binary_sha256": "e5560d27bfd2fe9e77a790e8650ffdda0b166944e759f42bc5f1106dce064f4d",
   "files": [
     {
       "name": "ace-security-runtime",
-      "sha256": "2572fc8fe5b72f43f9451eefc0979ef8068cbc14e856e09970c17b0579f41573",
-      "size": 2499680
+      "sha256": "e5560d27bfd2fe9e77a790e8650ffdda0b166944e759f42bc5f1106dce064f4d",
+      "size": 2519120
     }
   ],
-  "source_hash": "b06d128473b4631c879b2934d76ea6040865e13fa634f38ea75379bd2d81a215",
+  "source_hash": "7e9bc41d6f64e229ef5a340cfc98cfebb487647d04eb620fb9ecb1eec7c5238b",
   "source_files": 36
 }

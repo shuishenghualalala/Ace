@@ -184,6 +184,15 @@ def build_prompt_parts(
 
     # ── User Reminder 层（每轮可能变） ──
     reminder_parts = []
+    if cwd:
+        trusted_cwd = str(Path(cwd).expanduser().resolve())
+        reminder_parts.append(
+            "# 当前工作空间（可信）\n"
+            f"- 当前工作目录：`{trusted_cwd}`\n"
+            "- terminal、文件和搜索工具都以这个目录为起点；直接使用相对路径，不要再次 cd 到该目录。\n"
+            "- 原生沙箱中的 `$HOME`/`%USERPROFILE%` 是隔离环境，不代表宿主用户目录，"
+            "不要用它推导、验证或重建当前工作空间路径。"
+        )
     # 子 agent（lightweight）：跳过全局 workspace/上下文文件/skills/记忆/用户画像注入，
     # 只保留日期，保持聚焦（用于 skip_memory / skip_context_files）。
     if not lightweight:

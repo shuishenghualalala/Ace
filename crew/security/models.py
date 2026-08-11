@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 
 class ConversationPermissionMode(StrEnum):
@@ -99,6 +100,102 @@ class AdditionalPermissionProfile:
     filesystem: tuple[FilesystemEntry, ...] = ()
     network: tuple[NetworkEntry, ...] = ()
     allow_local_binding: bool = False
+
+    @property
+    def empty(self) -> bool:
+        return not self.filesystem and not self.network and not self.allow_local_binding
+
+
+EMPTY_ADDITIONAL_PERMISSIONS = AdditionalPermissionProfile()
+
+
+def serialize_additional_permissions(profile: AdditionalPermissionProfile) -> dict[str, Any]:
+    """Serialize an immutable permission overlay for approval, persistence, and runtime IO."""
+    return {
+        "filesystem": [
+            {
+                "root": str(entry.root),
+                "access": entry.access.value,
+                "escalatable": entry.escalatable,
+            }
+            for entry in profile.filesystem
+        ],
+        "network": [
+            {
+                "host": entry.host,
+                "port": entry.port,
+                "protocol": entry.protocol,
+                "access": entry.access.value,
+                "allow_private": entry.allow_private,
+                "escalatable": entry.escalatable,
+            }
+            for entry in profile.network
+        ],
+        "allow_local_binding": profile.allow_local_binding,
+    }
+
+
+def deserialize_additional_permissions(payload: object) -> AdditionalPermissionProfile:
+    """Decode a host-created permission overlay and reject malformed persisted state."""
+    if payload is None:
+        return AdditionalPermissionProfile()
+    if not isinstance(payload, dict):
+        raise ValueError("additional_permissions 必须是对象")
+    filesystem_payload = payload.get("filesystem", [])
+    network_payload = payload.get("network", [])
+    if not isinstance(filesystem_payload, list) or not isinstance(network_payload, list):
+        raise ValueError("additional_permissions 条目必须是数组")
+    filesystem = tuple(
+        FilesystemEntry(
+            root=Path(_required_string(entry, "root")),
+            access=FilesystemAccess(_required_string(entry, "access")),
+            escalatable=_optional_bool(entry, "escalatable", True),
+        )
+        for entry in filesystem_payload
+    )
+    network = tuple(
+        NetworkEntry(
+            host=_required_string(entry, "host"),
+            port=_required_port(entry),
+            protocol=_required_string(entry, "protocol"),
+            access=NetworkAccess(_required_string(entry, "access", NetworkAccess.ALLOW.value)),
+            allow_private=_optional_bool(entry, "allow_private", False),
+            escalatable=_optional_bool(entry, "escalatable", True),
+        )
+        for entry in network_payload
+    )
+    return AdditionalPermissionProfile(
+        filesystem=filesystem,
+        network=network,
+        allow_local_binding=_optional_bool(payload, "allow_local_binding", False),
+    )
+
+
+def _required_string(payload: object, key: str, default: str | None = None) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("permission entry 必须是对象")
+    value = payload.get(key, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} 必须是非空字符串")
+    return value.strip()
+
+
+def _optional_bool(payload: object, key: str, default: bool) -> bool:
+    if not isinstance(payload, dict):
+        raise ValueError("permission entry 必须是对象")
+    value = payload.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} 必须是布尔值")
+    return value
+
+
+def _required_port(payload: object) -> int:
+    if not isinstance(payload, dict):
+        raise ValueError("permission entry 必须是对象")
+    value = payload.get("port")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+        raise ValueError("port 必须在 1..65535")
+    return value
 
 
 @dataclass(frozen=True)

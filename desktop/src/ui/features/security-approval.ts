@@ -22,18 +22,18 @@ export const SECURITY_APPROVAL_CHOICES: readonly SecurityApprovalChoice[] = [
 
 /** toolbar chip 的三选一：value/label/desc 由本模块（类型所有者）统一提供。 */
 export const SECURITY_MODE_OPTIONS: { value: ConversationSecurityMode; label: string; desc: string }[] = [
-  { value: 'request_approval', label: '请求批准', desc: '每条命令都问我' },
-  { value: 'auto_review', label: '替我审批', desc: '沙箱内自动放行，越界再问' },
-  { value: 'full_access', label: '完全访问权限', desc: '宽权限受管：安全控制面仍隔离' },
+  { value: 'request_approval', label: '每次询问', desc: '执行命令或修改文件前都询问' },
+  { value: 'auto_review', label: '替我审批', desc: '工作空间内自动执行，空间外扩权时询问' },
+  { value: 'full_access', label: '完全访问权限', desc: '除永久禁止的破坏性操作外全部放行' },
 ];
 
 export const FULL_ACCESS_CONFIRMATION =
-  '完全访问会在原生安全运行时中开放当前项目和用户目录的广泛读写，普通动作不再逐条询问；Crew 数据库、授权规则、审计、凭据和系统级硬边界仍隔离。确定只对当前对话启用吗？';
+  '完全访问权限会让命令继承当前登录用户的文件与网络权限，普通操作不再逐条询问；删除文件系统根目录、格式化磁盘、无条件清空数据库等永久禁止操作仍会被拦截。确定只对当前对话启用吗？';
 
 export function modeLabel(mode: ConversationSecurityMode): string {
   if (mode === 'full_access') return '完全访问权限';
   if (mode === 'auto_review') return '替我审批';
-  return '请求批准';
+  return '每次询问';
 }
 
 function actionKindLabel(kind: string): string {
@@ -59,7 +59,11 @@ function riskClassLabel(riskClass: string, toolName: string): string {
   if (riskClass === 'external_file_read') {
     return channelFileIntent(toolName) ? '读取并发送项目外文件' : '读取项目外文件';
   }
+  if (riskClass === 'workspace_file_write') return '修改工作空间文件';
   if (riskClass === 'external_file_write') return '修改项目外文件';
+  if (riskClass === 'public_network') return '访问公开网络';
+  if (riskClass === 'private_network') return '访问私有网络';
+  if (riskClass === 'external_agent_network') return '启动外部智能体并允许其访问模型服务';
   if (riskClass === 'dangerous_command') return '执行高风险命令';
   if (riskClass === 'shell_command') return '执行命令';
   return riskClass || '需要人工确认';
@@ -108,13 +112,31 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
     const protocol = action['protocol'] ? `（${String(action['protocol'])}）` : '';
     if (host) lines.push(`联网目标：${host}${port}${protocol}`);
   }
-  lines.push('授权只匹配上面显示的完整动作；任一字符变化都会重新判断。');
+  const permissions = (request['additional_permissions'] ?? {}) as Record<string, unknown>;
+  const filesystem = Array.isArray(permissions['filesystem']) ? permissions['filesystem'] : [];
+  filesystem.forEach((value) => {
+    const entry = value as Record<string, unknown>;
+    const access = String(entry['access'] ?? '') === 'read_write' ? '读写' : '只读';
+    lines.push(`额外文件权限（${access}）：${String(entry['root'] ?? '')}`);
+  });
+  const network = Array.isArray(permissions['network']) ? permissions['network'] : [];
+  network.forEach((value) => {
+    const entry = value as Record<string, unknown>;
+    const privateLabel = entry['allow_private'] === true ? '，允许私网地址' : '';
+    lines.push(
+      `额外网络权限：${String(entry['host'] ?? '')}:${String(entry['port'] ?? '')}`
+      + `（${String(entry['protocol'] ?? '')}${privateLabel}）`,
+    );
+  });
+  if (permissions['allow_local_binding'] === true) lines.push('额外权限：允许监听本地端口');
+  if (kind === 'exec' && request['preview']) lines.push(`申请说明：${String(request['preview'])}`);
+  lines.push('授权只匹配上面显示的完整动作和额外权限；任一范围变化都会重新判断。');
   return lines.join('\n');
 }
 
 const sessionModes = new Map<string, ConversationSecurityMode>();
-// 按项目记忆的新对话预设（决策 #96）。full_access 永不作为预设持久化——
-// 新对话必须再次确认（决策 #95），避免一次确认后静默继承最高权限。
+// 按项目记忆的新对话预设。full_access 可以在空白输入框里显式选择，但仅消费一次，
+// 创建该对话后立即回退，避免后续新对话静默继承最高权限。
 const nextConversationModes = new Map<string, ConversationSecurityMode>();
 
 function presetForWorkspace(workspaceId: string): ConversationSecurityMode {
@@ -144,7 +166,7 @@ export function currentSecurityMode(): ConversationSecurityMode {
 /**
  * 选择安全模式：若有活跃会话则即时切到该会话（toolbar chip 是「对话框内」选择器，
  * 与 codex 一致）。request_approval/auto_review 会记为该项目新对话预设并静默沿用；
- * full_access 只作用于当前会话，不写入预设——下次新对话仍需再次确认（决策 #95）。
+ * full_access 只作用于当前会话；无活跃会话时作为一次性新对话预设保存。
  * full_access 的二次确认由调用方传入的 confirmFullAccess 负责。
  */
 export async function selectNextConversationMode(
@@ -172,8 +194,8 @@ export async function selectNextConversationMode(
     }
     // Gateway ACK 后才更新 renderer 状态，避免 UI 显示 full_access 但后端仍在 managed（或相反）。
     sessionModes.set(sid, mode);
-  }
-  if (mode !== 'full_access') {
+    if (mode !== 'full_access') nextConversationModes.set(workspaceId, mode);
+  } else {
     nextConversationModes.set(workspaceId, mode);
   }
   announceModeChange();
@@ -207,6 +229,7 @@ export async function assignSecurityMode(
     }
   }
   sessionModes.set(sessionId, preset);
+  if (preset === 'full_access') nextConversationModes.set(workspaceId, 'request_approval');
   return preset;
 }
 
@@ -214,10 +237,13 @@ export function securityModeForSession(sessionId: string): ConversationSecurityM
   return sessionModes.get(sessionId) ?? 'request_approval';
 }
 
-function decisionLabel(decision: SecurityApprovalChoice): string {
+function decisionLabel(decision: SecurityApprovalChoice, request: Record<string, unknown>): string {
   if (decision === 'once') return '（仅这一次）';
   if (decision === 'session') return '（本次对话）';
-  if (decision === 'always') return '（始终允许此命令）';
+  if (decision === 'always') {
+    const kind = String((request['action'] as Record<string, unknown> | undefined)?.['kind'] ?? '');
+    return kind === 'exec' ? '（始终允许此命令及所列权限）' : '（始终允许此操作）';
+  }
   return '';
 }
 
@@ -284,7 +310,7 @@ export function bindSecurityApprovalUi(): () => void {
       // always 会持久保存上面展示的完整动作；shell wrapper 只按完整命令精确匹配，
       // 不允许用 pwsh/bash 固定前缀泛化为未来任意脚本。
       if (decision === 'always'
-        && !window.confirm('「始终允许」会持久保存上面展示的完整动作。只有命令、工作目录和执行参数完全一致时才会自动放行；任何变化都会重新询问。确定要持久授权吗？')) {
+        && !window.confirm('「始终允许」会持久保存上面展示的完整动作和额外权限。动作或权限范围发生任何变化都会重新询问。确定要持久授权吗？')) {
         return;
       }
       const workspaceId = String(visibleRequest['workspace_id'] ?? 'default');
@@ -320,8 +346,8 @@ export function bindSecurityApprovalUi(): () => void {
         }
         // 写回对话流：不带 activity 的 status 消息会持久保留（带 activity 的才被回合折叠/清掉）。
         const note = decision === 'reject'
-          ? `✕ 已拒绝，命令未执行`
-          : `✔ 已批准${decisionLabel(decision)}`;
+          ? `✕ 已拒绝，本次操作未执行`
+          : `✔ 已批准${decisionLabel(decision, visibleRequest)}`;
         appendMessage(sessionId, 'status', note);
         renderChat();
         visibleRequest = null;

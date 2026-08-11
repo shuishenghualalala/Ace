@@ -13,6 +13,7 @@ from uuid import uuid4
 from crew.security.actions import ActionKind, NormalizedAction
 from crew.security.context import SecurityContext
 from crew.security.grants import ExecutionGrant, GrantRegistry
+from crew.security.models import EMPTY_ADDITIONAL_PERMISSIONS, AdditionalPermissionProfile
 from crew.security.rules import ActionRule, RuleScope
 
 # Bounded in-memory state for a long-running gateway. Pending/handled requests are
@@ -57,6 +58,7 @@ class ApprovalRequest:
     preview: str
     created_monotonic: float
     expires_monotonic: float
+    additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ class ApprovalManager:
         risk_class: str = "unknown",
         preview: str = "",
         ttl_seconds: float = 300.0,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
     ) -> ApprovalRequest:
         now = self._clock()
         request = _new_request(
@@ -104,6 +107,7 @@ class ApprovalManager:
             preview=preview,
             ttl_seconds=ttl_seconds,
             now=now,
+            additional_permissions=additional_permissions,
         )
         with self._lock:
             self._ensure_capacity(context, now)
@@ -121,6 +125,7 @@ class ApprovalManager:
         risk_class: str = "unknown",
         preview: str = "",
         ttl_seconds: float = 300.0,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
     ) -> tuple[ApprovalRequest, bool]:
         """Atomically reuse one live session/tool/action request or create it."""
         now = self._clock()
@@ -139,6 +144,7 @@ class ApprovalManager:
                     and request.expires_monotonic >= now
                     and request.tool_name == normalized_tool
                     and request.action_digest == action_digest
+                    and request.additional_permissions == additional_permissions
                     and _request_context_matches(request, context)
                 ),
                 None,
@@ -155,6 +161,7 @@ class ApprovalManager:
                 preview=preview,
                 ttl_seconds=ttl_seconds,
                 now=now,
+                additional_permissions=additional_permissions,
             )
             self._requests[request.request_id] = request
             self._maybe_prune(now)
@@ -209,7 +216,11 @@ class ApprovalManager:
             if request.action.digest != request.action_digest:
                 raise ApprovalError("批准请求动作完整性校验失败")
             persistent_rule = (
-                _always_rule(request.action, always_argv_prefix)
+                _always_rule(
+                    request.action,
+                    always_argv_prefix,
+                    request.additional_permissions,
+                )
                 if decision is ApprovalDecision.ALWAYS
                 else None
             )
@@ -228,6 +239,7 @@ class ApprovalManager:
             request.action,
             grant_scope,
             expires_monotonic=expires,
+            additional_permissions=request.additional_permissions,
         )
         return ApprovalOutcome(
             request=request,
@@ -344,15 +356,27 @@ class ApprovalManager:
         return len(pending) + self._grants.revoke_owner(owner)
 
 
-def _always_rule(action: NormalizedAction, prefix: Sequence[str] | None) -> ActionRule:
+def _always_rule(
+    action: NormalizedAction,
+    prefix: Sequence[str] | None,
+    additional_permissions: AdditionalPermissionProfile,
+) -> ActionRule:
     if action.kind is not ActionKind.EXEC or action.raw_command:
         # Shell wrappers (pwsh -Command / bash -lc) make argv-prefix authority unsafe:
         # the wrapper prefix is identical for every future script. Bind the complete
         # user-visible command + final argv digest instead; direct argv may still use
         # the narrower structured prefix path below.
-        return ActionRule.exact(action, scope=RuleScope.ALWAYS)
+        return ActionRule.exact(
+            action,
+            scope=RuleScope.ALWAYS,
+            additional_permissions=additional_permissions,
+        )
     chosen = tuple(prefix) if prefix is not None else action.argv
-    rule = ActionRule.exec_prefix(chosen, cwd=action.cwd)
+    rule = ActionRule.exec_prefix(
+        chosen,
+        cwd=action.cwd,
+        additional_permissions=additional_permissions,
+    )
     if not rule.matches(action):
         raise ApprovalError("always argv prefix 不是已批准命令的 token prefix")
     return rule
@@ -368,6 +392,7 @@ def _new_request(
     preview: str,
     ttl_seconds: float,
     now: float,
+    additional_permissions: AdditionalPermissionProfile,
 ) -> ApprovalRequest:
     if ttl_seconds <= 0:
         raise ValueError("approval TTL 必须大于 0")
@@ -390,6 +415,7 @@ def _new_request(
         preview=str(preview),
         created_monotonic=now,
         expires_monotonic=now + ttl_seconds,
+        additional_permissions=additional_permissions,
     )
 
 

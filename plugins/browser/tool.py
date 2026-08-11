@@ -24,6 +24,7 @@ from crew.core.runctx import (
 )
 from crew.core.types import ToolPermissionDecision
 from crew.state.plugin_preferences import plugin_effective_enabled, plugin_role_allowed
+from crew.tools.security_guard import authorize_file_tool
 
 PLUGIN_KEY = "browser"
 TOOL_NAME = "browser_use"
@@ -1021,10 +1022,30 @@ def _logical_call(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 class BrowserUseTool:
     """持有 BrowserManager 与能力判定依赖，向 PluginContext 注册单一 browser_use。"""
 
-    def __init__(self, manager: BrowserManager, config: Any, plugin_prefs: Any) -> None:
+    def __init__(
+        self,
+        manager: BrowserManager,
+        config: Any,
+        plugin_prefs: Any,
+        services: dict[str, Any] | None = None,
+    ) -> None:
         self._manager = manager
         self._config = config
         self._plugin_prefs = plugin_prefs
+        self._services = services if services is not None else {}
+
+    async def _authorized_upload_paths(self, paths: list[Any]) -> list[str]:
+        authorized: list[str] = []
+        for raw_path in paths:
+            target = await authorize_file_tool(
+                {"path": str(raw_path)},
+                operation="read",
+                tool_name="browser_upload",
+                workspace_store=self._services.get("workspace_store"),
+                security_service=self._services.get("security_service"),
+            )
+            authorized.append(str(target))
+        return authorized
 
     # ---- 能力判定 ----
 
@@ -1097,6 +1118,9 @@ class BrowserUseTool:
         # 检查点中断或返回 uncertain，绝不自动重试。
         generation = self._manager.capability_generation(owner)
         action = str(args.get("action") or "")
+        if action in {"upload", "drop"} and args.get("paths"):
+            args = dict(args)
+            args["paths"] = await self._authorized_upload_paths(list(args["paths"]))
         dispatch: dict[str, Callable[[], Any]] = {
             "navigate": lambda: self._manager.navigate(
                 owner, session, str(args.get("url") or ""), workdir=workdir
@@ -1557,7 +1581,7 @@ def register_browser_use_tool(
     config: Any,
     plugin_prefs: Any,
 ) -> BrowserUseTool:
-    tool = BrowserUseTool(manager, config, plugin_prefs)
+    tool = BrowserUseTool(manager, config, plugin_prefs, ctx.services)
     ctx.register_tool(
         name=TOOL_NAME,
         toolset="browser",

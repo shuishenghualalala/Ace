@@ -583,6 +583,36 @@ async def test_broker_forwards_immutable_read_roots_to_the_native_runtime(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_broker_carves_workspace_from_protected_runtime_home(tmp_path):
+    class RecordingRuntime:
+        async def execute(self, **kwargs):
+            self.kwargs = kwargs
+            return "result"
+
+    runtime_home = tmp_path / "runtime-home"
+    workspace = runtime_home / "accounts" / "owner" / "task_workspaces" / "default"
+    workspace.mkdir(parents=True)
+    database = runtime_home / "crew.db"
+    database.write_text("protected", encoding="utf-8")
+    runtime = RecordingRuntime()
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(
+            FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),
+            FilesystemEntry(runtime_home, FilesystemAccess.DENY, escalatable=False),
+            FilesystemEntry(database, FilesystemAccess.DENY, escalatable=False),
+        ),
+    )
+
+    await SecurityExecutionBroker(runtime).execute(  # type: ignore[arg-type]
+        ExecutionRequest(command=("test",), cwd=workspace, permission_profile=profile)
+    )
+
+    assert runtime.kwargs["writable_roots"] == [workspace]
+    assert runtime.kwargs["denied_roots"] == [database]
+
+
+@pytest.mark.asyncio
 async def test_broker_passes_only_exact_network_amendments(tmp_path):
     class RecordingRuntime:
         async def execute(self, **kwargs):

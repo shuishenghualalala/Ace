@@ -77,7 +77,13 @@ BINDING_SCHEMA = _schema(
 )
 
 
-def register_blueprint_tools(registry: Registry, sites) -> None:
+def register_blueprint_tools(
+    registry: Registry,
+    sites,
+    *,
+    workspace_store=None,
+    security_service=None,
+) -> None:
     manager = sites.blueprint
     store = manager.store
 
@@ -232,7 +238,22 @@ def register_blueprint_tools(registry: Registry, sites) -> None:
                            for item in store.list_bindings(owner, automation_id=automation_id) if item["active"]]
             return _response(automation, revalidatedBindings=revalidated)
         if action == "run":
-            return _response(await manager.run_automation(owner, automation_id, run_input=args.get("runInput")))
+            async def authorize_network(url: str) -> None:
+                from crew.tools.security_guard import authorize_network_tool
+
+                await authorize_network_tool(
+                    url,
+                    tool_name="Automation.run",
+                    workspace_store=workspace_store,
+                    security_service=security_service,
+                )
+
+            return _response(await manager.run_automation(
+                owner,
+                automation_id,
+                run_input=args.get("runInput"),
+                authorize_network=authorize_network,
+            ))
         if action == "readRun":
             return _response(store.get_run(owner, str(args.get("runId") or "")))
         if action == "readRunArtifact":

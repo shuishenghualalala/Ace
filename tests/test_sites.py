@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,6 +170,82 @@ async def test_publish_requires_index_or_build_script(site_manager: SiteManager,
     assert site_manager.store.list_sites("owner") == []
 
 
+def test_site_build_plan_uses_explicit_node_and_package_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_root = tmp_path / "node-runtime"
+    node = node_root / "bin" / "node"
+    npm_root = tmp_path / "packages" / "node_modules" / "npm"
+    npm = npm_root / "bin" / "npm-cli.js"
+    node.parent.mkdir(parents=True)
+    npm.parent.mkdir(parents=True)
+    node.write_bytes(b"\x7fELF")
+    npm.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "crew.sites.manager.shutil.which",
+        lambda name: str(npm) if name == "npm" else str(node) if name == "node" else None,
+    )
+
+    plan = SiteManager._build_plan(["npm", "run", "build"])
+
+    assert plan.stored_argv == ("npm", "run", "build")
+    assert plan.runtime_argv == (str(node.resolve()), str(npm.resolve()), "run", "build")
+    assert plan.trusted_readable_roots == (node_root.resolve(), npm_root.resolve())
+    assert plan.runtime_path.split(os.pathsep)[0] == str(node.parent)
+
+
+def test_site_build_plan_resolves_windows_corepack_shim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install = tmp_path / "nodejs"
+    shim = install / "pnpm.cmd"
+    node = install / "node.exe"
+    script = install / "node_modules" / "corepack" / "dist" / "pnpm.js"
+    script.parent.mkdir(parents=True)
+    shim.write_text("@echo off\n", encoding="utf-8")
+    node.write_bytes(b"MZ")
+    script.write_text("require('./lib/corepack.cjs')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "crew.sites.manager.shutil.which",
+        lambda name: str(shim) if name == "pnpm" else str(node) if name == "node" else None,
+    )
+
+    plan = SiteManager._build_plan(["pnpm", "run", "build"])
+
+    assert plan.runtime_argv == (str(node.resolve()), str(script.resolve()), "run", "build")
+    assert install.resolve() in plan.trusted_readable_roots
+    assert (install / "node_modules" / "corepack").resolve() in plan.trusted_readable_roots
+
+
+@pytest.mark.asyncio
+async def test_site_publish_authorizes_build_before_creating_records(
+    site_manager: SiteManager, tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "app"
+    source.mkdir(parents=True)
+    (source / "package.json").write_text(
+        json.dumps({"scripts": {"build": "vite build"}}), encoding="utf-8",
+    )
+    calls: list[tuple[tuple[str, ...], Path, str]] = []
+
+    async def reject(argv: tuple[str, ...], cwd: Path, preview: str) -> None:
+        calls.append((argv, cwd, preview))
+        raise RuntimeError("not approved")
+
+    with pytest.raises(RuntimeError, match="not approved"):
+        await site_manager.publish(
+            owner="owner", workspace_id="ws", session_id="s",
+            workspace_root=str(workspace), source_path="app", name="App",
+            build_authorizer=reject,
+        )
+
+    assert calls and calls[0][1:] == (source.resolve(), "npm run build")
+    assert Path(calls[0][0][0]).name == "node"
+    assert site_manager.store.list_sites("owner") == []
+
+
 @pytest.mark.asyncio
 async def test_publish_site_emits_standard_inspiration_surface(
     site_manager: SiteManager, tmp_path: Path,
@@ -293,6 +370,70 @@ async def test_blueprint_http_automation_delivers_and_preserves_last_success(
     assert rejected["latestData"] == {"main": {"price": 1309.05}}
     assert rejected["status"] == "error"
     assert "必填字段" in rejected["error"]
+
+
+@pytest.mark.asyncio
+async def test_blueprint_automation_authorizes_redirect_targets(
+    site_manager: SiteManager, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blueprint = site_manager.blueprint
+    execution = {"kind": "http_json", "method": "GET", "url": "https://api.example/data"}
+    authorized: list[str] = []
+    redirected = "https://cdn.example/data"
+
+    async def authorize(url: str) -> None:
+        authorized.append(url)
+
+    async def request(_execution, _run_input, allowed):
+        if ("cdn.example", 443, "https") not in allowed:
+            from crew.security.outbound import PublicRedirectApprovalRequired
+
+            raise PublicRedirectApprovalRequired(redirected)
+        return {"ok": True}, "GET https://cdn.example -> 200"
+
+    monkeypatch.setattr(blueprint, "_request_json", request)
+
+    result, _logs = await blueprint._fetch_json_authorized(execution, None, authorize)
+
+    assert result == {"ok": True}
+    assert authorized == [execution["url"], redirected]
+
+
+@pytest.mark.asyncio
+async def test_blueprint_post_uses_shared_dns_pinned_transport(
+    site_manager: SiteManager, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crew.security.outbound import PublicHttpResponse
+
+    captured: dict = {}
+
+    def request(url: str, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return PublicHttpResponse(
+            url=url,
+            body=b'{"price":1309.05}',
+            content_type="application/json",
+            charset="utf-8",
+            status=200,
+        )
+
+    monkeypatch.setattr("crew.sites.blueprint.request_public_http", request)
+
+    artifact, logs = await site_manager.blueprint._fetch_json(
+        {
+            "kind": "http_json",
+            "method": "POST",
+            "url": "https://market.example/query",
+            "headers": {"X-View": "summary"},
+        },
+        {"symbol": "ACE"},
+    )
+
+    assert artifact == {"price": 1309.05}
+    assert captured["method"] == "POST"
+    assert captured["json_body"] == {"symbol": "ACE"}
+    assert captured["allowed_targets"] is None
+    assert logs == "POST https://market.example -> 200"
 
 
 def test_blueprint_canvas_layout_and_widget_runtime(site_manager: SiteManager, tmp_path: Path) -> None:
@@ -519,10 +660,10 @@ def test_blueprint_rejects_private_network_and_secret_headers(
 ) -> None:
     blueprint = site_manager.blueprint
     monkeypatch.setattr(
-        "crew.sites.blueprint.socket.getaddrinfo",
+        "crew.security.outbound.socket.getaddrinfo",
         lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 0))],
     )
-    with pytest.raises(ValueError, match="局域网"):
+    with pytest.raises(ValueError, match="私网"):
         blueprint._assert_public_host("internal.example")
     with pytest.raises(ValueError, match="不保存鉴权"):
         blueprint.validate_automation_contract(

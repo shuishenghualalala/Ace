@@ -276,7 +276,20 @@ def create_sites_router(crew) -> APIRouter:
                 crew.security_service.mode_for(context),
                 db_path=crew.security_service.db_path,
                 audit=crew.security_service.audit,
+                approval_service=crew.security_service,
             )
+
+            async def authorize_build(argv, cwd, _preview):
+                from crew.tools.security_guard import authorize_user_initiated_exec
+
+                authorize_user_initiated_exec(
+                    argv,
+                    cwd=cwd,
+                    tool_name="publish_site",
+                    security_service=crew.security_service,
+                    security_context=context,
+                )
+
             with use_process_launch(launch):
                 result = await manager().publish(
                     owner=owner(request), workspace_id=current["workspace_id"],
@@ -286,6 +299,7 @@ def create_sites_router(crew) -> APIRouter:
                     build_command=str(data.get("build_command") or current["build_command"]),
                     output_directory=str(data.get("output_directory") or current["output_directory"]),
                     site_id=site_id,
+                    build_authorizer=authorize_build,
                 )
             return {"ok": True, **result}
         except KeyError as exc:

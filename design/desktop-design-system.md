@@ -829,7 +829,7 @@ authoritative:
 - The model selector opens a compact flat list below its trigger. Optional model
   descriptions belong to hover help rather than permanent nested cards.
 - The security selector offers only the policy-supported Crew modes:
-  `请求批准`, `替我审批`, and `完全访问权限`. It does not expose a
+  `每次询问`, `替我审批`, and `完全访问权限`. It does not expose a
   free-form or custom policy editor.
 - Busy, queued, offline, and permission-blocked states are explicit.
 - Preview controls must never overlap the composer.

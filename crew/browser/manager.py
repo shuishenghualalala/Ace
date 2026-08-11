@@ -1359,6 +1359,11 @@ class BrowserManager:
             if expected_dialogs
             else None
         )
+        staged_files, upload_stage = await asyncio.to_thread(
+            self._stage_approved_uploads,
+            owner,
+            files,
+        )
         try:
             download_root = self._prepare_download_dir(session, workdir)
             if wire_expected_dialogs:
@@ -1372,7 +1377,7 @@ class BrowserManager:
                     payload={
                         "trigger_selector": trigger_selector,
                         "input_selector": input_selector,
-                        "files": files,
+                        "files": staged_files,
                     },
                     timeout=timeout,
                     proxy_url=owner.proxy.url if owner.proxy else "",
@@ -1385,7 +1390,7 @@ class BrowserManager:
                     target_id=self._active_tab(session).target_id,
                     trigger_selector=trigger_selector,
                     input_selector=input_selector,
-                    files=files,
+                    files=staged_files,
                     timeout=timeout,
                     proxy_url=owner.proxy.url if owner.proxy else "",
                     download_dir=download_root,
@@ -1400,6 +1405,12 @@ class BrowserManager:
         except BrowserOperationCancelled as exc:
             await self._apply_driver_lifecycle_failure(owner, session, exc)
             raise
+        finally:
+            await asyncio.to_thread(
+                self._cleanup_approved_upload_stage,
+                upload_stage,
+                owner.profile_dir.parent / "approved-uploads",
+            )
 
     def _new_tab(self, session: _Session) -> _Tab:
         session.counter += 1
@@ -8912,6 +8923,134 @@ class BrowserManager:
         return resolved
 
     @staticmethod
+    def _is_reparse_point(info: os.stat_result) -> bool:
+        """Return whether a Windows entry is a junction or other reparse point."""
+        attributes = int(getattr(info, "st_file_attributes", 0) or 0)
+        marker = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0) or 0)
+        return bool(marker and attributes & marker)
+
+    def _stage_approved_uploads(
+        self,
+        owner: _Owner,
+        paths: list[str],
+    ) -> tuple[list[str], Path | None]:
+        """Snapshot authorized upload inputs into the Host-owned staging root."""
+        if not paths:
+            return [], None
+
+        approved_root = owner.profile_dir.parent / "approved-uploads"
+        approved_root.mkdir(parents=True, exist_ok=True)
+        try:
+            root = approved_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise BrowserDriverError("无法创建浏览器上传审批暂存目录") from exc
+        if root != approved_root.absolute() or root.is_symlink():
+            raise BrowserDriverError("浏览器上传审批暂存目录不安全")
+
+        stage = root / uuid.uuid4().hex
+        try:
+            stage.mkdir(mode=0o700)
+        except OSError as exc:
+            raise BrowserDriverError("无法创建浏览器上传暂存区") from exc
+
+        limit = int(getattr(self.config, "max_transfer_bytes", 0) or 0)
+        copied_bytes = 0
+        copied_entries = 0
+
+        def reserve(info: os.stat_result) -> None:
+            nonlocal copied_bytes, copied_entries
+            copied_entries += 1
+            if copied_entries > 10_000:
+                raise BrowserDriverError("上传目录包含过多文件")
+            copied_bytes += max(0, int(info.st_size))
+            if limit > 0 and copied_bytes > limit:
+                raise BrowserDriverError(
+                    f"上传内容超过 {limit} 字节传输上限；请缩小范围后重试",
+                    code="transfer_too_large",
+                )
+
+        def copy_file(source: Path, destination: Path, info: os.stat_result) -> None:
+            if not stat.S_ISREG(info.st_mode) or self._is_reparse_point(info):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            reserve(info)
+            flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+            flags |= int(getattr(os, "O_NOFOLLOW", 0))
+            try:
+                descriptor = os.open(source, flags)
+                with os.fdopen(descriptor, "rb", closefd=True) as reader:
+                    opened = os.fstat(reader.fileno())
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or self._is_reparse_point(opened)
+                        or (
+                            getattr(info, "st_ino", 0)
+                            and getattr(opened, "st_ino", 0)
+                            and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)
+                        )
+                    ):
+                        raise BrowserDriverError("上传文件在审批后发生变化")
+                    with destination.open("xb") as writer:
+                        shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                    finished = os.fstat(reader.fileno())
+                    if (
+                        opened.st_size != finished.st_size
+                        or opened.st_mtime_ns != finished.st_mtime_ns
+                    ):
+                        raise BrowserDriverError("上传文件在复制期间发生变化")
+            except BrowserDriverError:
+                raise
+            except OSError as exc:
+                raise BrowserDriverError("上传文件无法安全读取") from exc
+
+        def copy_entry(source: Path, destination: Path) -> None:
+            try:
+                info = source.lstat()
+            except OSError as exc:
+                raise BrowserDriverError("上传文件不存在或不可读取") from exc
+            if stat.S_ISLNK(info.st_mode) or self._is_reparse_point(info):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            if stat.S_ISREG(info.st_mode):
+                copy_file(source, destination, info)
+                return
+            if not stat.S_ISDIR(info.st_mode):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            destination.mkdir(mode=0o700)
+            try:
+                children = sorted(source.iterdir(), key=lambda item: item.name)
+            except OSError as exc:
+                raise BrowserDriverError("上传目录无法读取") from exc
+            for child in children:
+                copy_entry(child, destination / child.name)
+
+        staged: list[str] = []
+        try:
+            for index, raw in enumerate(paths):
+                source = Path(raw)
+                # Indexing prevents duplicate basenames from colliding while the
+                # original basename remains visible to the browser upload API.
+                destination = stage / f"{index:03d}" / source.name
+                destination.parent.mkdir(mode=0o700)
+                copy_entry(source, destination)
+                staged.append(str(destination))
+            return staged, stage
+        except BaseException:
+            self._cleanup_approved_upload_stage(stage, root)
+            raise
+
+    @staticmethod
+    def _cleanup_approved_upload_stage(stage: Path | None, approved_root: Path) -> None:
+        if stage is None:
+            return
+        try:
+            root = approved_root.resolve(strict=True)
+            candidate = stage.resolve(strict=True)
+            if candidate.parent != root or not re.fullmatch(r"[0-9a-f]{32}", candidate.name):
+                return
+            shutil.rmtree(candidate)
+        except OSError:
+            log.warning("failed to clean browser upload staging directory: %s", stage)
+
+    @staticmethod
     def _validated_drop_data(data: Any) -> dict[str, str] | None:
         if data is None:
             return None
@@ -8957,31 +9096,43 @@ class BrowserManager:
             session = self._session(owner, session_id)
             self._require_ai(owner, session)
             native = self._native_ref(session, ref)
-            drop_args = [native]
-            for path in resolved:
-                drop_args.extend(["--path", path])
-            if checked_data is not None:
-                if checked_data:
-                    for mime, value in checked_data.items():
-                        drop_args.extend(["--data", mime, value])
-                else:
-                    # The argv wire otherwise cannot distinguish official
-                    # ``data: {}`` from an entirely absent payload.
-                    drop_args.append("--empty-data")
-            await self._run(
+            staged, upload_stage = await asyncio.to_thread(
+                self._stage_approved_uploads,
                 owner,
-                session,
-                "drop",
-                drop_args,
-                mutating=True,
-                workdir=workdir,
+                resolved,
             )
-            session.last_action = f"拖放到 {ref}"
-            return await self._observe_after_mutation(
-                owner,
-                session,
-                workdir=workdir,
-            )
+            try:
+                drop_args = [native]
+                for path in staged:
+                    drop_args.extend(["--path", path])
+                if checked_data is not None:
+                    if checked_data:
+                        for mime, value in checked_data.items():
+                            drop_args.extend(["--data", mime, value])
+                    else:
+                        # The argv wire otherwise cannot distinguish official
+                        # ``data: {}`` from an entirely absent payload.
+                        drop_args.append("--empty-data")
+                await self._run(
+                    owner,
+                    session,
+                    "drop",
+                    drop_args,
+                    mutating=True,
+                    workdir=workdir,
+                )
+                session.last_action = f"拖放到 {ref}"
+                return await self._observe_after_mutation(
+                    owner,
+                    session,
+                    workdir=workdir,
+                )
+            finally:
+                await asyncio.to_thread(
+                    self._cleanup_approved_upload_stage,
+                    upload_stage,
+                    owner.profile_dir.parent / "approved-uploads",
+                )
 
     async def upload(
         self, owner_id: str, session_id: str, ref: str, paths: list[str], *, workdir: str = ""
@@ -8996,31 +9147,43 @@ class BrowserManager:
             session = self._session(owner, session_id)
             self._require_ai(owner, session)
             await self._select_checked(owner, session, workdir=workdir)
-            if ref:
-                native = self._native_ref(session, ref)
-                await self._run(
-                    owner,
-                    session,
-                    "upload",
-                    [native, *resolved],
-                    mutating=True,
-                    workdir=workdir,
-                )
-            else:
-                await self._run(
-                    owner,
-                    session,
-                    "file_upload",
-                    resolved if resolved else ["--cancel"],
-                    mutating=True,
-                    workdir=workdir,
-                )
-            session.last_action = (
-                f"上传 {len(resolved)} 个文件"
-                if resolved
-                else ("清空文件输入" if ref else "取消文件选择")
+            staged, upload_stage = await asyncio.to_thread(
+                self._stage_approved_uploads,
+                owner,
+                resolved,
             )
-            return await self._observe_after_mutation(owner, session, workdir=workdir)
+            try:
+                if ref:
+                    native = self._native_ref(session, ref)
+                    await self._run(
+                        owner,
+                        session,
+                        "upload",
+                        [native, *staged],
+                        mutating=True,
+                        workdir=workdir,
+                    )
+                else:
+                    await self._run(
+                        owner,
+                        session,
+                        "file_upload",
+                        staged if staged else ["--cancel"],
+                        mutating=True,
+                        workdir=workdir,
+                    )
+                session.last_action = (
+                    f"上传 {len(resolved)} 个文件"
+                    if resolved
+                    else ("清空文件输入" if ref else "取消文件选择")
+                )
+                return await self._observe_after_mutation(owner, session, workdir=workdir)
+            finally:
+                await asyncio.to_thread(
+                    self._cleanup_approved_upload_stage,
+                    upload_stage,
+                    owner.profile_dir.parent / "approved-uploads",
+                )
 
     async def download(
         self, owner_id: str, session_id: str, ref: str, filename: str = "", *, workdir: str = ""

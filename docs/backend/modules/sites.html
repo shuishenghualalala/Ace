@@ -209,7 +209,8 @@ Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widg
 4. publish_site(source_path=&lt;project-dir&gt;, name=..., description=...)
    <span class="flow-arrow">#</span> 后端：_resolve_source 校验源码在 Workspace 内
    <span class="flow-arrow">#</span>       _defaults 限定 build 命令首段 ∈ {npm,pnpm,yarn,bun}
-   <span class="flow-arrow">#</span>       execute_captured 构建 → Native Runtime → _copy_release（拒符号链接、输出必在源码内）
+   <span class="flow-arrow">#</span>       精确审核实际 argv/cwd → 解析受信 Node/包管理器入口 → Native Runtime
+   <span class="flow-arrow">#</span>       _copy_release（拒符号链接、输出必在源码内）
    <span class="flow-arrow">#</span>       finish_release(ready) → 更新 active_release_id
 5. 返回 Surface(mode=site, revisionId=release_id, status=ready)
    <span class="flow-arrow">#</span> 聊天卡片 + 图库列表（list_inspirations 合并 site+canvas）</code></pre>
@@ -232,7 +233,7 @@ Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widg
 2. Automation.create(...) + Widget.create(...)   <span class="flow-arrow"># 拿到 automationId / widgetId</span>
 3. 写 index.html + Widget.validate               <span class="flow-arrow"># 准备渲染</span>
 4. Binding.create(automationId, widgetId)        <span class="flow-arrow"># 建边，初始 pending_run</span>
-5. Binding.validate / Automation.run             <span class="flow-arrow"># 首次运行，artifact 投递到 data.main</span>
+5. Binding.validate / Automation.run             <span class="flow-arrow"># 审核初始目标及跨域重定向，再投递 artifact</span>
 6. Canvas.placeWidget + Canvas.show              <span class="flow-arrow"># Surface(mode=canvas)</span>
 7. （可选）启用 interval / schedule 触发器周期刷新</code></pre>
   <p class="warning"><strong>验证要点：</strong><code>pending_run</code> 只表示 Binding 已配置，<strong>不代表数据已投递</strong>。要确认 run 达到 <code>succeeded</code> 且 <code>Widget.read</code> 的 <code>latestData.main</code> 符合预期，才算数据真的到位。</p>
@@ -288,8 +289,9 @@ Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widg
   <table>
     <thead><tr><th>边界</th><th>约束</th></tr></thead>
     <tbody>
-      <tr><td>构建命令</td><td><code>_defaults</code> 限定首段 ∈ {npm,pnpm,yarn,bun}；命令经会话 <code>ProcessLaunch</code> 和 <code>execute_captured</code> 进入 Native Runtime，缺少安全上下文或 runtime 时失败关闭；Desktop 手动重发会从认证 owner/workspace 重新编译 launch；<code>_copy_release</code> 拒符号链接、要求输出在源码内</td></tr>
-      <tr><td>预览协议</td><td>ace-site:// ID 正则 <code>/^(?:site|canvas|widget)_[0-9a-f]{12}$/i</code>；<code>release_file</code> 强制 requested 路径在 release root 内；widget 资源路径在 widget root 内</td></tr>
+      <tr><td>构建命令</td><td><code>_defaults</code> 限定首段 ∈ {npm,pnpm,yarn,bun}；Agent 发布前以实际 Node/包管理器 argv 与源码 cwd 进入统一 exec 审核，请求批准模式会等待用户决定；npm/pnpm/yarn 解析为绝对 Node 与脚本入口，Native Runtime 仅增加已解析运行时依赖根的只读权限，工作区仍是唯一构建写入根；Desktop 手动重发本身就是认证用户动作，不重复弹审批，但仍执行持久 deny 规则检查、写入 <code>desktop_user_gesture</code> 审计并使用同一 Native Runtime；<code>_copy_release</code> 拒符号链接、要求输出在源码内</td></tr>
+      <tr><td>Automation 联网</td><td><code>http_json</code> 只接受无内嵌凭据的公开 HTTP/HTTPS GET/POST；连接固定到已校验的公共 DNS 地址，拒绝 localhost、私网、链路本地、保留地址、敏感查询参数与鉴权请求头；Agent 手动运行按精确 host/port/protocol 审核，每个跨域重定向都重新授权；响应上限 5 MiB。已启用的定时 Automation 以用户保存的公开目标配置作为持续执行授权，但仍经过相同 SSRF/DNS 固定边界</td></tr>
+      <tr><td>预览协议</td><td>ace-site:// ID 正则 <code>/^(?:site|canvas|widget)_[0-9a-f]{12}$/i</code>；<code>release_file</code> 强制 requested 路径在 release root 内；widget 资源路径在 widget root 内；主进程为所有预览响应注入 CSP，<code>connect-src 'none'</code>、<code>form-action 'none'</code>，生成页面不能绕过 Ace 审核自行联网或提交外部表单</td></tr>
       <tr><td>sticky 窗口</td><td>仅接受规范 <code>site_*/canvas_*</code> ID，不传 URL；单例 Map；<code>contextIsolation+sandbox+webSecurity</code>，禁 Node/webview/新窗口/外导航；<code>will-navigate</code> 钳制同 ID ace-site:，<code>windowOpenHandler</code> deny</td></tr>
       <tr><td>ZIP 保存</td><td>通道 <code>dialog:saveLocalExport</code>；schema 要求绝对路径 + 无分隔符文件名 + <code>.zip</code>；主进程再校验相对 <code>sites/{site|canvas}_*/exports/*.zip</code> 三段、<code>stat</code>(isFile+nlink==1)+<code>realpath</code> canonical，最后 <code>showSaveDialog</code> + <code>copyFile</code></td></tr>
       <tr><td>隔离</td><td>所有 API 查询/写入以 <code>owner_account_id</code> 隔离；Widget iframe 只能用 <code>window.DaimonWidget/DaimonCanvas</code>，不直调 agent 工具</td></tr>

@@ -122,9 +122,11 @@ function createBeforeInput(): DocumentFragment {
   preview.hidden = true;
   siteAnnotationPreview.id = 'chat-site-annotation-preview';
   siteAnnotationPreview.className = 'chat-site-annotation-preview';
+  siteAnnotationPreview.dataset.composerDraft = '';
   siteAnnotationPreview.hidden = true;
   blueprintAnnotationPreview.id = 'chat-blueprint-annotation-preview';
   blueprintAnnotationPreview.className = 'chat-site-annotation-preview';
+  blueprintAnnotationPreview.dataset.composerDraft = '';
   blueprintAnnotationPreview.hidden = true;
   sitesMode.id = 'chat-sites-mode';
   sitesMode.className = 'chat-sites-mode';
@@ -223,7 +225,7 @@ function createLeftControls(): DocumentFragment {
   security.id = 'chat-security-mode-inline';
   security.append(createChip(
     'chat-security-mode-btn',
-    '请求批准',
+    '每次询问',
     'icon-security',
     'chat-security-mode-btn-label',
   ));

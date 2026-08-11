@@ -155,6 +155,14 @@ impl AclLease {
             access: AclAccess::Read,
             synthetic: false,
         });
+        if let Some(command) = canonical_command_executable(request)? {
+            self.records.push(AclRecord {
+                path: command,
+                sid: account_sid.to_string(),
+                access: AclAccess::Read,
+                synthetic: false,
+            });
+        }
         for root in &request.readable_roots {
             self.records.push(AclRecord {
                 path: canonical_existing(root)?,
@@ -436,6 +444,16 @@ fn canonical_existing(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("cannot resolve ACL root {}: {error}", path.display()))
 }
 
+fn canonical_command_executable(request: &WindowsRunRequest) -> Result<Option<PathBuf>, String> {
+    let Some(path) = request.command.first().map(Path::new) else {
+        return Ok(None);
+    };
+    if !path.is_absolute() {
+        return Ok(None);
+    }
+    canonical_existing(path).map(Some)
+}
+
 fn canonical_optional(path: &Path) -> Result<Option<PathBuf>, String> {
     match path.canonicalize() {
         Ok(path) => Ok(Some(path)),
@@ -536,6 +554,32 @@ mod tests {
         assert_eq!(
             canonical_optional(&path).expect("not a permission error"),
             None
+        );
+    }
+
+    #[test]
+    fn absolute_command_executable_is_part_of_the_acl_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("tool.exe");
+        fs::write(&executable, b"test").unwrap();
+        let request = WindowsRunRequest {
+            command: vec![executable.to_string_lossy().into_owned()],
+            cwd: directory.path().to_path_buf(),
+            writable_roots: vec![],
+            readable_roots: vec![],
+            readonly_roots: vec![],
+            denied_roots: vec![],
+            network_enabled: false,
+            network_rules: vec![],
+            allow_local_binding: false,
+            max_output_bytes: 1024,
+            stdin: None,
+            env_overrides: Default::default(),
+        };
+
+        assert_eq!(
+            canonical_command_executable(&request).unwrap(),
+            Some(executable.canonicalize().unwrap()),
         );
     }
 

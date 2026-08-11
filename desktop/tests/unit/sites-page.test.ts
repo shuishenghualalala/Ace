@@ -136,6 +136,8 @@ describe('sites page annotation handoff', () => {
     expect(protocolSource).toContain('/api/sites/${resolved.siteId}/preview/');
     expect(protocolSource).toContain('headers: gateway.headers(endpoint.pathname)');
     expect(protocolSource).toContain('previewErrorDocument');
+    expect(protocolSource).toContain("connect-src 'none'");
+    expect(protocolSource).toContain("'Content-Security-Policy': SITE_PREVIEW_CSP");
     expect(shell).toContain("frame-src 'self' file: ace-site:");
   });
 
