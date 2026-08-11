@@ -187,9 +187,9 @@ async function changeMode(mode: ConversationSecurityMode): Promise<void> {
   const accepted = await selectNextConversationMode(
     mode,
     () => showConfirmDialog({
-      title: '启用完全访问权限？',
+      title: '启用完全访问？',
       message: FULL_ACCESS_CONFIRMATION,
-      confirmText: '仅对此对话完全放行',
+      confirmText: '仅对此对话启用',
     }),
   );
   if (!accepted) return;

@@ -191,15 +191,6 @@ export function ensureFileChangesDelegation(container: HTMLElement): void {
       openInspectorToTab('files', { expandFilePath: expandPath, filePaths, fileChanges: fileChanges ?? null });
     }
   });
-  container.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    const target = event.target instanceof Element ? event.target : null;
-    if (!target) return;
-    const actionable = target.closest<HTMLElement>('[data-inspiration-surface], [data-browser-artifact]');
-    if (!actionable || !container.contains(actionable)) return;
-    event.preventDefault();
-    actionable.click();
-  });
 }
 
 /** 一次性事件委托：在消息容器上 capture 监听 toggle（toggle 不冒泡）。

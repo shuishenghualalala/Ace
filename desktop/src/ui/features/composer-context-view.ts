@@ -122,11 +122,9 @@ function createBeforeInput(): DocumentFragment {
   preview.hidden = true;
   siteAnnotationPreview.id = 'chat-site-annotation-preview';
   siteAnnotationPreview.className = 'chat-site-annotation-preview';
-  siteAnnotationPreview.dataset.composerDraft = '';
   siteAnnotationPreview.hidden = true;
   blueprintAnnotationPreview.id = 'chat-blueprint-annotation-preview';
   blueprintAnnotationPreview.className = 'chat-site-annotation-preview';
-  blueprintAnnotationPreview.dataset.composerDraft = '';
   blueprintAnnotationPreview.hidden = true;
   sitesMode.id = 'chat-sites-mode';
   sitesMode.className = 'chat-sites-mode';
@@ -143,8 +141,7 @@ function createBeforeInput(): DocumentFragment {
   fragment.append(
     sitesMode,
     input,
-    // createFileQaHint() 技能引导条代码保留备用，当前不挂载；
-    // 启用时恢复此处调用 + attachments.ts 里的 refreshFileQaHint() 调用。
+    createFileQaHint(),
     preview,
     siteAnnotationPreview,
     blueprintAnnotationPreview,
@@ -225,7 +222,7 @@ function createLeftControls(): DocumentFragment {
   security.id = 'chat-security-mode-inline';
   security.append(createChip(
     'chat-security-mode-btn',
-    '每次询问',
+    '请求批准',
     'icon-security',
     'chat-security-mode-btn-label',
   ));
