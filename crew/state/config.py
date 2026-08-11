@@ -1554,6 +1554,15 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.session_idle_timeout = int(session_cfg.get("idle_timeout_minutes", cfg.session_idle_timeout))
 
         cfg.wiki = WikiConfig.from_raw(data.get("wiki", {}))
+        cfg.network = NetworkConfig.from_raw(data.get("network", {}))
+        # 把 config 的 network 段注入 outbound 作为进程级默认代理，
+        # 供 web_search/web_extract/Wiki 等未显式传参的调用方使用。
+        from crew.security.outbound import set_network_defaults
+
+        set_network_defaults(
+            upstream_proxy=cfg.network.upstream_proxy,
+            allow_loopback_proxy=cfg.network.allow_loopback_proxy,
+        )
 
         cfg.mcp_servers = data.get("mcp_servers", {}) or {}
         cron = data.get("cron", {})
