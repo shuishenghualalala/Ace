@@ -584,6 +584,9 @@
   text-align: left;
   cursor: pointer;
   color: var(--mw-text-primary);
+  transition:
+    var(--mw-transition-interactive),
+    padding-inline-end var(--mw-duration-normal) var(--mw-ease-standard);
 }
 
 .wiki-item__main:hover {
@@ -1438,15 +1441,15 @@
   background: var(--mw-bg-selected);
 }
 
-/* ── 条目删除按钮 ── */
+/* ── 条目 ⋯ 菜单按钮 ── */
 
-/* 时间线条目：× 绝对定位悬浮在条目右侧（不占文档流，否则会单起一行挤占列表高度），
+/* 时间线条目：⋯ 绝对定位悬浮在条目右侧（不占文档流，否则会单起一行挤占列表高度），
    默认禁用 pointer-events，悬停条目时才可点。 */
 .wiki-item {
   position: relative;
 }
 
-.wiki-item .wiki-item__delete {
+.wiki-item .wiki-item__menu {
   position: absolute;
   right: var(--mw-space-2);
   top: 50%;
@@ -1454,44 +1457,52 @@
   pointer-events: none;
 }
 
-.wiki-item:hover .wiki-item__delete {
+.wiki-item:hover .wiki-item__menu {
   pointer-events: auto;
 }
 
-.wiki-item__delete {
+/* 悬停/聚焦时条目内容右缩给 ⋯ 让位（对齐会话历史行的让位动画），
+   避免按钮直接覆盖标题、摘要或时间。批量选择模式不渲染 ⋯，无需让位。 */
+.wiki-item:not(.wiki-item--selecting):hover .wiki-item__main,
+.wiki-item:not(.wiki-item--selecting):focus-within .wiki-item__main {
+  padding-inline-end: calc(var(--mw-space-2) + 22px + var(--mw-space-1));
+}
+
+.wiki-item__menu {
   flex-shrink: 0;
-  width: 20px;
-  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: none;
-  border-radius: 50%;
+  border-radius: var(--mw-radius-1);
   background: transparent;
   color: var(--mw-text-muted);
-  font-size: var(--mw-font-base);
-  line-height: 20px;
-  text-align: center;
   cursor: pointer;
   opacity: 0;
   transition: var(--mw-transition-interactive);
 }
 
-.wiki-item:hover .wiki-item__delete,
-.wiki-tree__item:hover .wiki-item__delete {
+.wiki-item:hover .wiki-item__menu,
+.wiki-tree__item:hover .wiki-item__menu,
+.wiki-item__menu:focus-visible {
   opacity: 1;
 }
 
-.wiki-item__delete:hover {
-  background: var(--mw-status-danger-bg);
-  color: var(--mw-status-danger);
+.wiki-item__menu:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
 }
 
-/* 文件树条目：删除按钮绝对定位到文件名左侧的缩进空隙（--tree-indent 由模板注入），
+/* 文件树条目：⋯ 菜单按钮绝对定位到文件名左侧的缩进空隙（--tree-indent 由模板注入），
    隐藏时禁用 pointer-events，避免挡住条目点击。 */
 .wiki-tree__item {
   position: relative;
 }
 
-.wiki-tree__item .wiki-item__delete {
+.wiki-tree__item .wiki-item__menu {
   position: absolute;
   left: max(2px, calc(var(--tree-indent, 6px) - 22px));
   top: 50%;
@@ -1499,7 +1510,7 @@
   pointer-events: none;
 }
 
-.wiki-tree__item:hover .wiki-item__delete {
+.wiki-tree__item:hover .wiki-item__menu {
   pointer-events: auto;
 }
 

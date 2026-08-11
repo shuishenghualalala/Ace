@@ -952,7 +952,7 @@ function ensureCronPage(root: HTMLElement): NonNullable<typeof cronPageSlots> {
     header.innerHTML = `
       <div class="page-header__copy">
         <h1 class="cron-page__title page-header__title">定时任务</h1>
-        <p class="cron-page__desc page-header__desc">让 AI 在指定时间执行工作，并把结果投递到目标会话或渠道。</p>
+        <p class="cron-page__desc page-header__desc">有没有一种可能， AI可以在指定时间自己干活不用你手动催，并把结果投递到目标会话或渠道。</p>
       </div>`;
     page.className = 'cron-page';
     kpi.className = 'mw-cron-page__kpi';

@@ -24,9 +24,11 @@ import {
   summaryOf,
 } from '../../src/ui/features/wiki-page';
 import { __resetAllStoresForTest, sessionStore } from '../../src/ui/stores/stores';
+import { showContextMenu } from '../../src/ui/lib/context-menu';
 
-const { mockShowConfirmDialog } = vi.hoisted(() => ({
+const { mockShowConfirmDialog, mockShowPromptDialog } = vi.hoisted(() => ({
   mockShowConfirmDialog: vi.fn(async () => true),
+  mockShowPromptDialog: vi.fn(async () => null as string | null),
 }));
 
 vi.mock('../../src/ui/backend-client', () => ({
@@ -52,6 +54,12 @@ vi.mock('../../src/ui/backend-client', () => ({
 
 vi.mock('../../src/ui/ui-feedback', () => ({
   showConfirmDialog: mockShowConfirmDialog,
+  showPromptDialog: mockShowPromptDialog,
+}));
+
+vi.mock('../../src/ui/lib/context-menu', () => ({
+  showContextMenu: vi.fn(),
+  dismissContextMenu: vi.fn(),
 }));
 
 const api = backendApi as unknown as {
@@ -102,6 +110,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(() => {
   vi.clearAllMocks();
   mockShowConfirmDialog.mockResolvedValue(true);
+  mockShowPromptDialog.mockResolvedValue(null);
   __resetAllStoresForTest();
   sessionStore.set({ activeSessionId: 'sid-1' });
   __resetWikiViewForTest();
@@ -1254,11 +1263,11 @@ describe('Agent-first 写入边界', () => {
     expect(root().querySelector('.wiki-upload-jobs')).toBeNull();
   });
 
-  it('渲染单条删除与批量管理入口（default 不渲染编译入口）', async () => {
+  it('渲染单条 ⋯ 菜单与批量管理入口（default 不渲染编译入口）', async () => {
     api.wikiPages.mockResolvedValue(pagesResult([makePage({ id: 'p1' })]));
     await refreshWikiData();
-    // 单条删除按钮（非批量模式下显示）+ 批量管理按钮均存在；直接编译入口不渲染。
-    expect(root().querySelector('[data-delete-id]')).not.toBeNull();
+    // 单条 ⋯ 菜单按钮（非批量模式下显示）+ 批量管理按钮均存在；直接编译入口不渲染。
+    expect(root().querySelector('[data-page-menu]')).not.toBeNull();
     expect(root().querySelector('[data-batch-toggle]')).not.toBeNull();
     expect(root().querySelector('[data-bulk-delete]')).toBeNull();
     expect(root().querySelector('[data-compile]')).toBeNull();
@@ -1278,5 +1287,66 @@ describe('Agent-first 写入边界', () => {
     expect(root().querySelector('[data-page-edit]')).toBeNull();
     expect(root().querySelector('[data-page-editor]')).toBeNull();
     expect(root().querySelector('.wiki-detail__path')).toBeNull();
+  });
+});
+
+// ── 条目 ⋯ 操作菜单 ──
+
+describe('条目 ⋯ 操作菜单', () => {
+  const root = () => document.querySelector('#wiki-page-root') as HTMLElement;
+
+  /** 渲染一个页面条目并点击其 ⋯ 按钮，返回 showContextMenu 收到的锚点与菜单项。 */
+  async function openPageMenu(pageId = 'p1') {
+    api.wikiPages.mockResolvedValue(pagesResult([makePage({ id: pageId, title: '原标题' })]));
+    await refreshWikiData();
+    const btn = root().querySelector(`[data-page-menu="${pageId}"]`) as HTMLElement | null;
+    expect(btn).not.toBeNull();
+    btn!.dispatchEvent(new Event('click'));
+    expect(showContextMenu).toHaveBeenCalledTimes(1);
+    const [anchor, items] = vi.mocked(showContextMenu).mock.calls[0];
+    return { anchor, btn: btn!, items };
+  }
+
+  it('点击 ⋯ 弹出 打开/重命名/删除 菜单，删除为 danger', async () => {
+    const { anchor, btn, items } = await openPageMenu();
+    expect(anchor).toBe(btn);
+    expect(items.map((i) => i.id)).toEqual(['open', 'rename', 'delete']);
+    expect(items.map((i) => i.label)).toEqual(['打开', '重命名', '删除']);
+    expect(items.find((i) => i.id === 'delete')?.danger).toBe(true);
+  });
+
+  it('「打开」选中页面并加载详情', async () => {
+    const { items } = await openPageMenu();
+    items.find((i) => i.id === 'open')?.onSelect();
+    await vi.waitFor(() => expect(api.wikiPage).toHaveBeenCalledWith('p1', 'default'));
+  });
+
+  it('「重命名」输入新标题后调 wikiUpdatePage 仅更新 title', async () => {
+    mockShowPromptDialog.mockResolvedValue('  新标题  ');
+    const { items } = await openPageMenu();
+    void items.find((i) => i.id === 'rename')?.onSelect();
+    await vi.waitFor(() =>
+      expect(api.wikiUpdatePage).toHaveBeenCalledWith('p1', { title: '新标题' }, 'default'),
+    );
+  });
+
+  it('「重命名」空标题或未变更不发请求', async () => {
+    const { items } = await openPageMenu();
+    const rename = items.find((i) => i.id === 'rename');
+
+    mockShowPromptDialog.mockResolvedValueOnce('   ');
+    await rename?.onSelect();
+    expect(api.wikiUpdatePage).not.toHaveBeenCalled();
+
+    mockShowPromptDialog.mockResolvedValueOnce('原标题');
+    await rename?.onSelect();
+    expect(api.wikiUpdatePage).not.toHaveBeenCalled();
+  });
+
+  it('「删除」复用确认弹窗 + wikiDeletePage', async () => {
+    const { items } = await openPageMenu();
+    void items.find((i) => i.id === 'delete')?.onSelect();
+    await vi.waitFor(() => expect(api.wikiDeletePage).toHaveBeenCalledWith('p1', 'default'));
+    expect(mockShowConfirmDialog).toHaveBeenCalled();
   });
 });

@@ -16,7 +16,7 @@
  *   3. 左侧主区：Wiki Agent 对话面板（features/wiki-agent.ts 挂载，常驻，弹性宽度）
  *   4. 右侧知识库面板（.wiki-browser-pane，可拖拽调宽、可整体收起）：
  *      目录列表：分页「加载更多」；条目 = 标题 + 类型徽标 + 更新时间 + 摘要；
- *      单条删除按钮；批量管理模式下条目变 checkbox 选择；
+ *      单条 ⋯ 操作菜单（打开/重命名/删除）；批量管理模式下条目变 checkbox 选择；
  *      「图谱」视图下列表区域替换为图谱画布（features/wiki-graph.ts，本文件只注入容器 + 回调）
  *   5. 分栏把手：对话主区与知识库面板之间可拖拽调宽（localStorage 持久化，双击复位）
  *   6. 面板内详情：标题 + 元信息 + Markdown 正文；未选中时显示 KB 概览 / 空态；
@@ -43,7 +43,8 @@ import {
 import { $, escapeHtml, notify, state } from '../state';
 import { renderMarkdownHtml } from '../markdown';
 import { mountFoldedMarkdown, type FoldedMarkdownHandle } from '../markdown-fold';
-import { showConfirmDialog } from '../ui-feedback';
+import { showContextMenu } from '../lib/context-menu';
+import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
 import { __resetWikiGraphForTest, invalidateWikiGraph, mountWikiGraph } from './wiki-graph';
 import { mountWikiEditor, type WikiEditorHandle } from './wiki-editor';
 import { maybeStartWikiTourOnce, startWikiTour } from './wiki-tour';
@@ -731,10 +732,10 @@ function selectionMark(pageId: string): { checkedClass: string; checkHtml: strin
   };
 }
 
-/** 单条删除按钮（批量选择模式下隐藏）。 */
-function deletePageBtnHtml(page: WikiPage): string {
+/** 单条 ⋯ 操作菜单按钮（批量选择模式下隐藏），与会话条目的 ⋯ 菜单同款。 */
+function pageMenuBtnHtml(page: WikiPage): string {
   if (view.selecting) return '';
-  return `<button type="button" class="wiki-item__delete" data-delete-id="${escapeHtml(page.id)}" data-delete-title="${escapeHtml(page.title)}" title="删除页面" aria-label="删除页面">×</button>`;
+  return `<button type="button" class="wiki-item__menu" data-page-menu="${escapeHtml(page.id)}" title="页面操作" aria-label="页面操作">${uiIcon('icon-more')}</button>`;
 }
 
 function listItemHtml(page: WikiPage, compact = false): string {
@@ -755,7 +756,7 @@ function listItemHtml(page: WikiPage, compact = false): string {
         <span class="wiki-item__summary">${escapeHtml(summaryOf(page))}</span>
         <span class="wiki-item__meta">${tags}<span class="wiki-item__time">${escapeHtml(time)}</span></span>
       </button>
-      ${deletePageBtnHtml(page)}
+      ${pageMenuBtnHtml(page)}
     </li>
   `;
 }
@@ -822,7 +823,7 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
       }
       const active = node.page.id === view.selectedId ? ' is-active' : '';
       const { checkedClass, checkHtml } = selectionMark(node.page.id);
-      // 删除按钮是 <li> 的独立子元素（button 不能嵌套 button），
+      // ⋯ 菜单按钮是 <li> 的独立子元素（button 不能嵌套 button），
       // 由 CSS 绝对定位到文件名左侧的缩进空隙里，悬停时淡入。
       return `
         <li class="wiki-tree__item${view.selecting ? ' wiki-item--selecting' : ''}${active}${checkedClass}" data-page-id="${escapeHtml(node.page.id)}" style="--tree-indent: ${treeIndentPx(depth)}px">
@@ -831,7 +832,7 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
             ${typeBadge(node.page.page_type)}
             <span class="wiki-tree__title">${escapeHtml(node.page.title)}</span>
           </button>
-          ${deletePageBtnHtml(node.page)}
+          ${pageMenuBtnHtml(node.page)}
         </li>`;
     })
     .join('');
@@ -1361,7 +1362,7 @@ function renderShell(): void {
       <header class="page-header page-header--hub">
         <div class="page-header__copy">
           <h1 class="page-header__title">Wiki <span class="accent">知识库</span></h1>
-          <p class="page-header__desc">玩转大模型自动整理的本地知识库笔记。</p>
+          <p class="page-header__desc">都什么年代了，还在古法记笔记？？</p>
         </div>
         <div class="page-header__actions">
           <select id="wiki-kb-select" class="wiki-kb-select" title="选择知识库" aria-label="选择知识库"${view.kbs.length === 0 ? ' disabled' : ''}>${kbOptions}</select>
@@ -1783,7 +1784,7 @@ async function handleDeleteKb(): Promise<void> {
   }
 }
 
-// ── 删除（Phase 2） ──
+// ── 单条操作（重命名 / 删除，Phase 2） ──
 
 /** 删除后重新加载列表与概览（互不依赖，并行）；删的是当前选中页时清空详情栏。 */
 async function refreshAfterDelete(deletedIds: string[]): Promise<void> {
@@ -1791,6 +1792,25 @@ async function refreshAfterDelete(deletedIds: string[]): Promise<void> {
     view.selectedId = null;
   }
   await Promise.all([loadPages(), loadKbSummary()]);
+}
+
+/** 重命名：应用内输入弹窗（Electron 不支持 window.prompt），只更新 title，后端缺省字段沿用旧值。 */
+async function handleRenamePage(page: WikiPage): Promise<void> {
+  const next = await showPromptDialog({ title: '重命名页面', defaultValue: page.title });
+  const title = next?.trim();
+  if (!title || title === page.title) return;
+  // 正打开该页且有未保存草稿时先落盘，避免 loadPages 的重渲染把草稿冲掉（同 selectWikiPage 的切换保存）。
+  if (view.selectedId === page.id && detailEditorHandle && detailDirty) void saveWikiPageDraft(page.id);
+  try {
+    const result = await backendApi.wikiUpdatePage(page.id, { title }, view.kbId ?? undefined);
+    notify('已重命名页面');
+    // 详情缓存同步新标题（若正打开该页），列表刷新与删除后一致走 loadPages。
+    const detail = view.pageDetails[page.id];
+    if (detail) view.pageDetails = { ...view.pageDetails, [page.id]: { ...detail, title: result.page.title } };
+    await loadPages();
+  } catch (err) {
+    notify(`重命名失败：${errMsg(err)}`);
+  }
 }
 
 async function handleDeletePage(pageId: string, title: string): Promise<void> {
@@ -1912,12 +1932,30 @@ function bindEvents(): void {
   });
   onClick('[data-bulk-delete]', () => void handleBulkDelete());
 
-  onClick('[data-delete-id]', (btn, e) => {
-    // 删除按钮在条目内部，阻止冒泡避免触发选中/打开详情。
+  onClick('[data-page-menu]', (btn, e) => {
+    // ⋯ 菜单按钮在条目内部，阻止冒泡避免触发选中/打开详情。
     e.stopPropagation();
-    const id = btn.getAttribute('data-delete-id') ?? '';
-    if (!id) return;
-    void handleDeletePage(id, btn.getAttribute('data-delete-title') ?? '');
+    const id = btn.getAttribute('data-page-menu') ?? '';
+    const page = view.pages.find((p) => p.id === id);
+    if (!page) return;
+    showContextMenu(btn, [
+      {
+        id: 'open',
+        label: '打开',
+        onSelect: () => selectWikiPage(page.id, { expandTree: true }),
+      },
+      {
+        id: 'rename',
+        label: '重命名',
+        onSelect: () => void handleRenamePage(page),
+      },
+      {
+        id: 'delete',
+        label: '删除',
+        danger: true,
+        onSelect: () => void handleDeletePage(page.id, page.title),
+      },
+    ]);
   });
   onClick('[data-kb-create-toggle]', () => {
     kbCreateOpen = !kbCreateOpen;

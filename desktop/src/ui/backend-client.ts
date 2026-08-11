@@ -2113,8 +2113,7 @@ export const backendApi = {
     }>(withKb('/api/wiki/pages', kbId), { method: 'POST', ...jsonBody(payload) }),
   wikiUpdatePage: (
     id: string,
-    payload: Pick<WikiPage, 'title' | 'content'> &
-      Partial<Pick<WikiPage, 'tags' | 'sources' | 'relations'>>,
+    payload: Partial<Pick<WikiPage, 'title' | 'content' | 'tags' | 'sources' | 'relations'>>,
     kbId?: string,
   ) =>
     getJSON<{
