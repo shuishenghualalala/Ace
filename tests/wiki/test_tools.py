@@ -1067,6 +1067,42 @@ async def test_fetch_url_failure_persists_retryable_source_state(fs_wiki):
     assert "blocked" in str(raws[0].parse_error)
 
 
+async def test_fetch_url_authorizes_initial_and_redirect_targets(fs_wiki, monkeypatch):
+    from crew.security.outbound import PublicRedirectApprovalRequired
+    from crew.wiki import tools as wiki_tools
+
+    registry = fs_wiki["registry"]
+    compiler = fs_wiki["compiler"]
+    page = MagicMock()
+    page.id = "source-redirect"
+    page.to_dict.return_value = {"id": "source-redirect", "page_type": "source"}
+    compiler.publish_source_page.return_value = page
+    authorized = []
+    redirected = "https://cdn.example.org/article"
+
+    async def authorize(url, **_kwargs):
+        authorized.append(url)
+
+    calls = 0
+
+    def fetch(url, _timeout, allowed):
+        nonlocal calls
+        calls += 1
+        if ("cdn.example.org", 443, "https") not in allowed:
+            raise PublicRedirectApprovalRequired(redirected)
+        return "网页正文足够长，用于通过 Wiki 文本质量检查。", redirected
+
+    monkeypatch.setattr(wiki_tools, "authorize_network_tool", authorize)
+    monkeypatch.setattr(wiki_tools, "fetch_url_to_markdown", fetch)
+    result = await registry.get("wiki_fetch_url").run(
+        {"url": "https://example.com/a", "title": "示例"}
+    )
+
+    assert '"extracted": true' in result
+    assert authorized == ["https://example.com/a", redirected]
+    assert calls == 2
+
+
 async def test_rename_and_delete_pages_repair_all_inbound_reference_forms(fs_wiki):
     from crew.wiki.schemas import WikiPage, WikiRelation
 

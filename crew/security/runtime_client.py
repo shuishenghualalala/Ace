@@ -409,6 +409,7 @@ class NativeRuntimeClient:
         stdin: bytes | None = None,
         home_files: Mapping[str, bytes] | None = None,
         env_overrides: Mapping[str, str] | None = None,
+        trusted_path: str | None = None,
         on_started: Callable[[int | None], None] | None = None,
         on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
     ) -> RuntimeCommandResult:
@@ -418,6 +419,8 @@ class NativeRuntimeClient:
         validated_env, encoded_home_files = _validate_request_inputs(
             stdin, env_overrides, home_files
         )
+        if trusted_path is not None:
+            validated_env["PATH"] = _validate_trusted_path(trusted_path)
         token = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(24)
         payload = {
@@ -950,6 +953,23 @@ def _validate_request_inputs(
             raise ValueError("native runtime projected HOME exceeds the size limit")
         encoded_home_files[relative_path] = base64.b64encode(content).decode("ascii")
     return validated, encoded_home_files
+
+
+def _validate_trusted_path(value: str) -> str:
+    """Validate the host-assembled executable search path.
+
+    PATH stays forbidden in generic ``env_overrides``.  This separate channel
+    is reserved for the host launcher after it has assembled the bundled and
+    system tool directories needed by managed commands.
+    """
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("native runtime trusted PATH is invalid")
+    if len(value.encode("utf-8")) > _MAX_ENV_BYTES:
+        raise ValueError("native runtime trusted PATH exceeds the size limit")
+    for item in value.split(os.pathsep):
+        if not item or not Path(item).expanduser().is_absolute():
+            raise ValueError("native runtime trusted PATH must contain absolute directories")
+    return value
 
 
 def _safe_callback(callback: Callable[[Any], None] | None, value: Any) -> None:

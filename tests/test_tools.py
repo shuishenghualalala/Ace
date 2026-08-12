@@ -34,6 +34,47 @@ async def test_file_write_then_read(registry, tmp_path):
     assert payload["content"] == "你好"
 
 
+async def test_file_delete_removes_one_exact_file(registry, tmp_path):
+    target = tmp_path / "remove-me.txt"
+    target.write_text("temporary", encoding="utf-8")
+
+    deleted = await registry.execute(
+        ToolCall("c3", "file_delete", {"path": str(target)})
+    )
+
+    assert not deleted.is_error
+    assert json.loads(deleted.content) == {
+        "success": True,
+        "path": str(target),
+        "deleted": True,
+        "bytes_deleted": 9,
+    }
+    assert not target.exists()
+
+
+async def test_file_delete_refuses_directories_and_symlinks(registry, tmp_path):
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    refused_directory = await registry.execute(
+        ToolCall("d1", "file_delete", {"path": str(directory)})
+    )
+    assert refused_directory.is_error
+    assert directory.is_dir()
+
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("当前平台无法创建符号链接")
+    refused_link = await registry.execute(
+        ToolCall("d2", "file_delete", {"path": str(link)})
+    )
+    assert refused_link.is_error
+    assert target.read_text(encoding="utf-8") == "keep"
+
+
 async def test_builtin_file_tools_resolve_relative_paths_from_agent_workdir(registry, tmp_path):
     token = current_agent_workdir.set(str(tmp_path))
     try:
@@ -128,7 +169,7 @@ async def test_crew_tool_registration_executes():
 def test_toolset_filter_uses_toolset_metadata(registry):
     schemas = registry.list_schemas(enabled_toolsets=["file"])
     names = {item["function"]["name"] for item in schemas}
-    assert {"file_read", "file_write", "glob", "grep", "patch"} <= names
+    assert {"file_read", "file_write", "file_delete", "glob", "grep", "patch"} <= names
 
     without_file = registry.list_schemas(disabled_toolsets=["file"])
     names = {item["function"]["name"] for item in without_file}
@@ -163,6 +204,7 @@ def test_builtin_tools_are_crew_function_tools(registry):
     assert isinstance(registry.get("terminal"), FunctionTool)
     assert isinstance(registry.get("file_read"), FunctionTool)
     assert isinstance(registry.get("file_write"), FunctionTool)
+    assert isinstance(registry.get("file_delete"), FunctionTool)
 
 
 async def test_grep_and_patch(registry, tmp_path):
@@ -274,6 +316,40 @@ async def test_skills_repair_tool_fixes_skill(registry, tmp_path, monkeypatch):
     assert "技能正文" in content
 
 
+async def test_skills_repair_authorizes_registered_directory_before_mutation(monkeypatch):
+    from crew.tools import skills_tools
+
+    pending = {
+        "skills": [{
+            "skill_dir": "/registered/skill",
+            "findings": [{"code": "missing_metadata_zh_name"}],
+        }]
+    }
+    monkeypatch.setattr(skills_tools, "audit_skills", lambda **_kwargs: pending)
+    monkeypatch.setattr("crew.agent.skills._is_metadata_finding", lambda _finding: True)
+    authorized = []
+
+    async def authorize(args, **kwargs):
+        authorized.append((args, kwargs))
+
+    async def repair(**_kwargs):
+        return {"ok": True, "skills": []}
+
+    monkeypatch.setattr(skills_tools, "authorize_file_tool", authorize)
+    monkeypatch.setattr(skills_tools, "repair_skills", repair)
+
+    await skills_tools.handle_skills_repair(
+        {"only": "demo"},
+        workspace_store=object(),
+        security_service=object(),
+    )
+
+    assert len(authorized) == 1
+    assert authorized[0][0] == {"path": "/registered/skill"}
+    assert authorized[0][1]["operation"] == "write"
+    assert authorized[0][1]["tool_name"] == "skills_repair"
+
+
 def test_default_registry_does_not_install_legacy_fake_browser(registry):
     # Browser Use is registered by build_app with an account-scoped
     # BrowserManager. The old local-file HTTP parser must never masquerade as a
@@ -289,6 +365,31 @@ async def test_vision_analyze_png(registry, tmp_path):
     result = await registry.execute(ToolCall("v1", "vision_analyze", {"path": str(png)}))
     assert not result.is_error
     assert '"width": 1' in result.content
+
+
+async def test_vision_analyze_uses_file_authorization(tmp_path, monkeypatch):
+    from crew.tools import web_tools
+
+    png = tmp_path / "authorized.png"
+    png.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    ))
+    seen = {}
+
+    async def authorize(args, **kwargs):
+        seen.update({"args": args, **kwargs})
+        return png
+
+    monkeypatch.setattr(web_tools, "authorize_file_tool", authorize)
+    payload = json.loads(await web_tools.handle_vision_analyze(
+        {"path": "/untrusted/model/path.png"},
+        workspace_store=object(),
+        security_service=object(),
+    ))
+
+    assert payload["image"]["path"] == str(png)
+    assert seen["operation"] == "read"
+    assert seen["tool_name"] == "vision_analyze"
 
 
 async def test_file_read_pagination(registry, tmp_path):

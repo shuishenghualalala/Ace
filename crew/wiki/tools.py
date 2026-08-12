@@ -19,6 +19,8 @@ from crew.core.runctx import (
     emit_tool_progress,
 )
 from crew.tools.registry import Registry, tool_error, tool_result
+from crew.tools.security_guard import authorize_network_tool
+from crew.security.outbound import PublicRedirectApprovalRequired, parse_public_http_target
 
 from .compiler import WikiCompiler
 from .config import WikiConfig
@@ -626,6 +628,8 @@ def register_wiki_tools(
     manager: WikiSessionManager,
     config: WikiConfig | None = None,
     session_store: Any = None,
+    workspace_store: Any = None,
+    security_service: Any = None,
 ) -> None:
     """把 Wiki 工具注册到 registry（toolset='wiki'）。"""
 
@@ -1877,7 +1881,45 @@ def register_wiki_tools(
             issues=result.issues,
         )
 
-    def _capture_url(
+    async def _authorized_web_fetch(url: str) -> tuple[str, str]:
+        """Authorize the initial authority and every cross-authority redirect."""
+        next_target = url
+        allowed: set[tuple[str, int, str]] = set()
+        for _attempt in range(6):
+            await authorize_network_tool(
+                next_target,
+                tool_name="wiki_fetch_url",
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
+            allowed.add(parse_public_http_target(next_target).authority)
+            try:
+                return await asyncio.to_thread(
+                    fetch_url_to_markdown,
+                    url,
+                    15.0,
+                    allowed,
+                )
+            except PublicRedirectApprovalRequired as exc:
+                next_target = exc.url
+        raise ValueError("网页重定向次数过多")
+
+    async def _authorized_youtube_fetch(url: str) -> tuple[str, str]:
+        """Authorize both a shared short URL and the fixed transcript service host."""
+        targets = [url]
+        original = parse_public_http_target(url)
+        if original.host not in {"youtube.com", "www.youtube.com"}:
+            targets.append("https://www.youtube.com/")
+        for target in targets:
+            await authorize_network_tool(
+                target,
+                tool_name="wiki_fetch_url",
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
+        return await asyncio.to_thread(fetch_youtube_transcript, url)
+
+    async def _capture_url(
         url: str,
         title: str,
         kb_id: str,
@@ -1955,9 +1997,9 @@ def register_wiki_tools(
         for _attempt in range(2):
             try:
                 if platform == "youtube":
-                    markdown_text, video_id = fetch_youtube_transcript(url)
+                    markdown_text, video_id = await _authorized_youtube_fetch(url)
                 else:
-                    markdown_text, final_url = fetch_url_to_markdown(url)
+                    markdown_text, final_url = await _authorized_web_fetch(url)
                 markdown_text = validate_parsed_text(markdown_text, url)
                 last_error = None
                 break
@@ -2075,17 +2117,17 @@ def register_wiki_tools(
             message="URL 内容已抓取、通过质量检查并发布为可搜索的全文 Source 页面。",
         )
 
-    def _handle_fetch_url(args: dict[str, Any]) -> str:
+    async def _handle_fetch_url(args: dict[str, Any]) -> str:
         url = str(args.get("url", "")).strip()
         if not url:
             return tool_error("缺少 url")
-        return _capture_url(
+        return await _capture_url(
             url,
             str(args.get("title", "")).strip(),
             _kb_id(args),
         )
 
-    def _handle_refresh_source(args: dict[str, Any]) -> str:
+    async def _handle_refresh_source(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()
         if not source_id:
             return tool_error("缺少 source_id")
@@ -2095,7 +2137,7 @@ def register_wiki_tools(
             return tool_error(f"Raw source 不存在: {source_id}")
         if raw.source_type != "url" or not raw.source_url:
             return tool_error("只有带 source_url 的 URL RawSource 可以刷新")
-        return _capture_url(raw.source_url, raw.title, kb_id, refresh_from=raw)
+        return await _capture_url(raw.source_url, raw.title, kb_id, refresh_from=raw)
 
     async def _handle_digest(args: dict[str, Any]) -> str:
         topic = str(args.get("topic") or "").strip()
@@ -2133,8 +2175,8 @@ def register_wiki_tools(
         (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {page_id}", "wiki update page edit content tags related aliases"),
         (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {source_id}", "wiki plan ingest preview changes proposed pages"),
         (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {source_id}", "wiki apply ingest write pages confirm plan"),
-        (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, False, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
-        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, False, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
+        (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, True, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
+        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, True, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
         (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {topic}", "wiki digest synthesis comparison multi source"),
         (_WIKI_CAPTURE_ATTACHMENT_SCHEMA, _handle_capture_attachment, False, "📎", "捕获 Wiki 附件", "捕获附件 {path}", "wiki capture attachment file import upload"),
         (_WIKI_CAPTURE_TEXT_SCHEMA, _handle_capture_text, False, "📝", "捕获 Wiki 文本", "捕获文本 {title}", "wiki capture text snippet import note"),

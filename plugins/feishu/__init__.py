@@ -7,11 +7,10 @@ tool surface as standalone tools.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any
 
 
@@ -38,23 +37,26 @@ def _json_error(message: str, **extra: Any) -> str:
 
 
 def _request_json(method: str, path: str, *, token: str | None = None, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    from crew.security.outbound import parse_public_http_target, request_public_http
+
     url = _api_base() + path
-    data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json; charset=utf-8"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 - explicit integration tool
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        try:
-            parsed = json.loads(raw.decode("utf-8", errors="replace"))
-        except ValueError:
-            parsed = {"raw": raw.decode("utf-8", errors="replace")}
-        return {"code": exc.code, "msg": str(exc), "data": parsed}
-    return json.loads(raw.decode("utf-8", errors="replace"))
+        target = parse_public_http_target(url)
+        response = request_public_http(
+            url,
+            method=method,
+            timeout=20,
+            max_bytes=8 * 1024 * 1024,
+            headers=headers,
+            json_body=body,
+            allowed_targets={target.authority},
+        )
+        return json.loads(response.body.decode(response.charset, errors="replace"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"code": -1, "msg": str(exc), "data": {}}
 
 
 def _tenant_access_token() -> tuple[str | None, str | None]:
@@ -260,48 +262,75 @@ def _handle_add_comment(args: dict[str, Any], **_: Any) -> str:
 
 
 def register(ctx) -> None:
+    async def authorized_handler(
+        args: dict[str, Any],
+        *,
+        tool_name: str,
+        handler: Any,
+    ) -> str:
+        from crew.tools.security_guard import authorize_network_tool
+
+        await authorize_network_tool(
+            _api_base(),
+            tool_name=tool_name,
+            workspace_store=ctx.services.get("workspace_store"),
+            security_service=ctx.services.get("security_service"),
+        )
+        return await asyncio.to_thread(handler, args)
+
+    def secured(tool_name: str, handler: Any):
+        async def run(args: dict[str, Any]) -> str:
+            return await authorized_handler(args, tool_name=tool_name, handler=handler)
+
+        return run
+
     ctx.register_tool(
         name="feishu_doc_read",
         toolset="feishu_doc",
         schema=FEISHU_DOC_READ_SCHEMA,
-        handler=_handle_doc_read,
+        handler=secured("feishu_doc_read", _handle_doc_read),
         check_fn=_has_credentials,
         requires_env=["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
         description="Read Feishu/Lark document content.",
+        is_async=True,
     )
     ctx.register_tool(
         name="feishu_drive_list_comments",
         toolset="feishu_drive",
         schema=FEISHU_DRIVE_LIST_COMMENTS_SCHEMA,
-        handler=_handle_list_comments,
+        handler=secured("feishu_drive_list_comments", _handle_list_comments),
         check_fn=_has_credentials,
         requires_env=["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
         description="List Feishu/Lark document comments.",
+        is_async=True,
     )
     ctx.register_tool(
         name="feishu_drive_list_comment_replies",
         toolset="feishu_drive",
         schema=FEISHU_DRIVE_LIST_REPLIES_SCHEMA,
-        handler=_handle_list_replies,
+        handler=secured("feishu_drive_list_comment_replies", _handle_list_replies),
         check_fn=_has_credentials,
         requires_env=["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
         description="List Feishu/Lark comment replies.",
+        is_async=True,
     )
     ctx.register_tool(
         name="feishu_drive_reply_comment",
         toolset="feishu_drive",
         schema=FEISHU_DRIVE_REPLY_SCHEMA,
-        handler=_handle_reply_comment,
+        handler=secured("feishu_drive_reply_comment", _handle_reply_comment),
         check_fn=_has_credentials,
         requires_env=["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
         description="Reply to a Feishu/Lark document comment.",
+        is_async=True,
     )
     ctx.register_tool(
         name="feishu_drive_add_comment",
         toolset="feishu_drive",
         schema=FEISHU_DRIVE_ADD_COMMENT_SCHEMA,
-        handler=_handle_add_comment,
+        handler=secured("feishu_drive_add_comment", _handle_add_comment),
         check_fn=_has_credentials,
         requires_env=["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
         description="Add a Feishu/Lark document comment.",
+        is_async=True,
     )

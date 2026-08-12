@@ -12,6 +12,7 @@ import tempfile
 
 from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
 from crew.security.models import (
+    AdditionalPermissionProfile,
     FilesystemAccess,
     FilesystemEntry,
     NetworkAccess,
@@ -101,6 +102,49 @@ async def run_matrix(runtime: Path, platform_name: str) -> None:
         )
         if outside_write.exit_code == 0 or (outside / "denied.txt").exists():
             raise SystemExit("SMX-FS-003 outside write was not denied")
+
+        home_probe = await broker.execute(
+            ExecutionRequest(
+                command=(
+                    ("cmd.exe", "/d", "/c", "echo", "%USERPROFILE%")
+                    if platform_name == "windows"
+                    else ("/bin/sh", "-c", 'printf %s "$HOME"')
+                ),
+                cwd=workspace,
+                permission_profile=profile,
+                timeout_seconds=15,
+            )
+        )
+        expected_home = str(Path.home().resolve())
+        if home_probe.exit_code != 0 or home_probe.stdout.strip() != expected_home:
+            raise SystemExit(
+                f"SMX-FS-004 terminal HOME mismatch: expected={expected_home!r} "
+                f"actual={home_probe.stdout.strip()!r} stderr={home_probe.stderr!r}"
+            )
+
+        approved_delete = outside / "approved-delete.txt"
+        approved_delete.write_text("delete-me", encoding="utf-8")
+        delete_result = await broker.execute(
+            ExecutionRequest(
+                command=(
+                    ("cmd.exe", "/d", "/c", "del", "/q", str(approved_delete))
+                    if platform_name == "windows"
+                    else ("/bin/rm", str(approved_delete))
+                ),
+                cwd=workspace,
+                permission_profile=profile,
+                additional_permissions=AdditionalPermissionProfile(
+                    filesystem=(
+                        FilesystemEntry(approved_delete, FilesystemAccess.READ_WRITE),
+                    ),
+                ),
+                timeout_seconds=15,
+            )
+        )
+        if delete_result.exit_code != 0 or approved_delete.exists():
+            raise SystemExit(
+                f"SMX-FS-005 precise outside delete permission failed: {delete_result.stderr}"
+            )
         metadata = await broker.execute(
             ExecutionRequest(
                 command=(
@@ -126,7 +170,7 @@ async def run_matrix(runtime: Path, platform_name: str) -> None:
             metadata.exit_code == 0
             or metadata_file.read_text(encoding="utf-8") != "matrix-metadata-original"
         ):
-            raise SystemExit("SMX-FS-004 project metadata was not readable and write-protected")
+            raise SystemExit("SMX-FS-006 project metadata was not readable and write-protected")
 
         curl = shutil.which("curl.exe" if platform_name == "windows" else "curl")
         if not curl:

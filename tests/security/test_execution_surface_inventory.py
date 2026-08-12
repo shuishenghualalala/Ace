@@ -39,7 +39,10 @@ INDIRECT_SURFACES = {
     "crew/team/team_manager.py",
     "crew/tools/builtin.py",
     "crew/tools/mcp_client.py",
+    "crew/tools/skills_tools.py",
+    "crew/tools/web_tools.py",
     "crew/wiki/parser.py",
+    "crew/wiki/tools.py",
 }
 DESKTOP_PROCESS_FILES = {
     "desktop/scripts/check-security.mjs",

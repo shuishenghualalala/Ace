@@ -1,8 +1,17 @@
 ---
 name: automation
-description: Use when creating, reading, updating, deleting, running, cancelling, scheduling, condition-triggering, or inspecting Daimon Blueprint Automations and their run records.
+description: Use when creating, reading, updating, deleting, running, cancelling,
+  scheduling, condition-triggering, or inspecting Daimon Blueprint Automations and
+  their run records.
+metadata:
+  zh_name: "自动化管理"
+  zh_description: "创建、读取、更新、删除、运行、取消、调度、条件触发或检查 Daimon Blueprint 自动化及其运行记录。"
+  query_examples:
+    - "创建一个定时自动化任务"
+    - "查看这个自动化的运行记录"
+    - "暂停/恢复这个自动化"
+  skillCategoryName: 通用办公
 ---
-
 # Automation
 
 Automation owns executable work: trigger, input contract, execution, result contract, files, delivery, runs, assets, and workspace.

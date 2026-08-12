@@ -9,7 +9,7 @@ import pytest
 from crew.security import outbound
 from crew.security.outbound import parse_public_http_target
 from crew.tools import web_tools
-from crew.tools.security_guard import authorize_exec_tool
+from crew.tools.security_guard import authorize_configured_mcp_call, authorize_exec_tool
 
 
 @pytest.mark.parametrize(
@@ -31,6 +31,45 @@ def test_public_http_target_rejects_local_and_ambiguous_urls(url: str) -> None:
 def test_public_http_target_normalizes_exact_host_port_protocol() -> None:
     target = parse_public_http_target("https://EXAMPLE.com./docs")
     assert (target.host, target.port, target.protocol) == ("example.com", 443, "https")
+
+
+@pytest.mark.asyncio
+async def test_remote_mcp_authorization_binds_endpoint_and_complete_arguments(tmp_path: Path) -> None:
+    from crew.security.approvals import ApprovalDecision
+
+    class Service:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def authorize_exec_action(self, context, action, **kwargs):
+            self.calls.append((context, action, kwargs))
+            if len(self.calls) == 1:
+                return SimpleNamespace(allowed=False, request={"request_id": "mcp-approval"})
+            return SimpleNamespace(allowed=True, request=None)
+
+        async def await_decision(self, request_id):
+            assert request_id == "mcp-approval"
+            return SimpleNamespace(decision=ApprovalDecision.ONCE)
+
+    context = SimpleNamespace(workspace_root=tmp_path)
+    service = Service()
+    await authorize_configured_mcp_call(
+        "http://127.0.0.1:8765/mcp",
+        tool_name="local__mutate",
+        args={"path": "/tmp/a", "value": 2},
+        security_service=service,
+        security_context=context,
+    )
+
+    assert len(service.calls) == 2
+    first_action = service.calls[0][1]
+    second_action = service.calls[1][1]
+    assert first_action == second_action
+    assert first_action.argv[:2] == ("mcp-call", "local__mutate")
+    additional = service.calls[0][2]["additional_permissions"]
+    assert additional.network[0].host == "127.0.0.1"
+    assert additional.network[0].allow_private is True
+    assert service.calls[0][2]["requires_approval"] is True
 
 
 @pytest.mark.asyncio

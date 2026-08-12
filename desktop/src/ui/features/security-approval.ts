@@ -249,6 +249,22 @@ function decisionLabel(decision: SecurityApprovalChoice): string {
   return '';
 }
 
+export function approvalBoundaryLabel(request: Record<string, unknown>): string {
+  const additional = (request['additional_permissions'] ?? {}) as Record<string, unknown>;
+  const sandboxPermissions = String(additional['sandbox_permissions'] ?? 'use_default');
+  if (sandboxPermissions === 'require_escalated') return '脱离沙箱执行';
+  const filesystem = Array.isArray(additional['filesystem']) ? additional['filesystem'] : [];
+  if (filesystem.length) {
+    const first = filesystem[0] as Record<string, unknown>;
+    const access = String(first['access'] ?? '') === 'read_write' ? '读写' : '只读';
+    const suffix = filesystem.length > 1 ? ` 等 ${filesystem.length} 项` : '';
+    return `沙箱内增加${access}权限：${String(first['root'] ?? '')}${suffix}`;
+  }
+  const network = Array.isArray(additional['network']) ? additional['network'] : [];
+  if (network.length || additional['allow_local_binding'] === true) return '沙箱内增加网络权限';
+  return '仅在当前沙箱内执行';
+}
+
 export function bindSecurityApprovalUi(): () => void {
   const panel = $('#composer-approval-panel') as HTMLElement | null;
   const summary = $('#composer-approval-summary');
@@ -343,7 +359,7 @@ export function bindSecurityApprovalUi(): () => void {
         // 写回对话流：不带 activity 的 status 消息会持久保留（带 activity 的才被回合折叠/清掉）。
         const note = decision === 'reject'
           ? `✕ 已拒绝，命令未执行`
-          : `✔ 已批准${decisionLabel(decision)}`;
+          : `✔ 已批准${decisionLabel(decision)} · ${approvalBoundaryLabel(visibleRequest)}`;
         appendMessage(sessionId, 'status', note);
         renderChat();
         visibleRequest = null;

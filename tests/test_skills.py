@@ -133,6 +133,32 @@ def test_scan_skills_skips_external_symlink(tmp_path, monkeypatch):
     assert "/escaped" not in scan_skills()
 
 
+def test_scan_skills_skips_package_metadata_symlink_outside_root(tmp_path, monkeypatch):
+    """PACKAGE.md cannot expose a file outside its registered package directory."""
+    from crew.agent import skills as skills_mod
+
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    package_dir = builtin_dir / "unsafe-package"
+    outside = tmp_path / "outside-package.md"
+    package_dir.mkdir(parents=True)
+    user_dir.mkdir()
+    outside.write_text("---\nname: escaped-package\n---\nsecret", encoding="utf-8")
+    _symlink_or_skip(outside, package_dir / "PACKAGE.md")
+    member = package_dir / "member"
+    member.mkdir()
+    (member / "SKILL.md").write_text("---\nname: member\n---\nbody", encoding="utf-8")
+
+    monkeypatch.setattr(skills_mod, "get_builtin_skills_dir", lambda: builtin_dir)
+    monkeypatch.setattr(skills_mod, "get_user_skills_dir", lambda: user_dir)
+    monkeypatch.setattr(skills_mod, "get_plugin_skill_roots", lambda: ())
+    skills_mod._cache = {}
+    skills_mod._cache_key = ()
+
+    assert "/escaped-package/member" not in skills_mod.scan_skills()
+    assert "/escaped-package" not in skills_mod.get_skill_packages()
+
+
 def test_scan_skills_prunes_directory_symlink_cycle(tmp_path, monkeypatch):
     """root 内目录环必须被剪枝，合法 Skill 仍只发现一次。"""
     builtin_dir = tmp_path / "builtin"

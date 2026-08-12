@@ -324,7 +324,8 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         return Err(error);
     }
     let home = select_execution_home(
-        &writable,
+        request.full_disk_read,
+        request.home_files.is_empty(),
         &private_home,
         std::env::var_os("HOME").map(PathBuf::from),
     );
@@ -475,18 +476,19 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
 }
 
 fn select_execution_home(
-    writable: &[PathBuf],
+    full_disk_read: bool,
+    use_host_home: bool,
     private_home: &Path,
     host_home: Option<PathBuf>,
 ) -> PathBuf {
+    if !full_disk_read || !use_host_home {
+        return private_home.to_path_buf();
+    }
     let Some(host_home) = host_home else {
         return private_home.to_path_buf();
     };
     let host_home = host_home.canonicalize().unwrap_or(host_home);
-    if writable
-        .iter()
-        .any(|root| host_home == *root || host_home.starts_with(root))
-    {
+    if host_home.is_absolute() {
         host_home
     } else {
         private_home.to_path_buf()
@@ -921,23 +923,19 @@ mod tests {
     }
 
     #[test]
-    fn host_home_is_used_only_when_an_explicit_writable_root_covers_it() {
+    fn managed_full_disk_read_uses_host_home_without_making_it_writable() {
         let private_home = std::path::Path::new("/private/tmp/ace-private-home");
         let host_home = std::path::Path::new("/Users/yun");
         assert_eq!(
-            select_execution_home(
-                &[host_home.to_path_buf()],
-                private_home,
-                Some(host_home.to_path_buf()),
-            ),
+            select_execution_home(true, true, private_home, Some(host_home.to_path_buf()),),
             host_home
         );
         assert_eq!(
-            select_execution_home(
-                &[std::path::PathBuf::from("/Users/yun/workspace")],
-                private_home,
-                Some(host_home.to_path_buf()),
-            ),
+            select_execution_home(false, true, private_home, Some(host_home.to_path_buf()),),
+            private_home
+        );
+        assert_eq!(
+            select_execution_home(true, false, private_home, Some(host_home.to_path_buf())),
             private_home
         );
     }

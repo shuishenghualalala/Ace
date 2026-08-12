@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -517,6 +518,18 @@ async def test_invalid_stdin_or_environment_is_rejected_before_spawn(
             cwd=tmp_path,
             stdin=stdin,
             env_overrides=env_overrides,
+            timeout=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_host_trusted_path_has_a_separate_validated_channel(tmp_path, monkeypatch):
+    client = NativeRuntimeClient((str(tmp_path / "must-not-spawn"),))
+    with pytest.raises(ValueError, match="absolute directories"):
+        await client.execute(
+            command=("ignored",),
+            cwd=tmp_path,
+            trusted_path=f"relative{os.pathsep}{tmp_path}",
             timeout=1,
         )
 

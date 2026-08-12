@@ -1,4 +1,4 @@
-"""内置工具：terminal / file_read / file_write。
+"""内置工具：terminal / file_read / file_write / file_delete。
 
 本文件使用 Hermes 风格工具格式：
   SCHEMA + handler(args) + registry.register(name, toolset, schema, handler)
@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import Any
 
 from crew.core.errors import ToolError
@@ -67,6 +69,18 @@ FILE_WRITE_SCHEMA = {
     },
 }
 
+FILE_DELETE_SCHEMA = {
+    "name": "file_delete",
+    "description": "删除一个明确的文件。只接受文件，不递归删除目录；工作区外路径会按安全模式请求精确授权。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "要删除的文件路径（宿主绝对路径或工作区相对路径）"},
+        },
+        "required": ["path"],
+    },
+}
+
 
 
 
@@ -104,7 +118,7 @@ def _check_terminal_command(command: str) -> tuple[bool, str | None, str | None]
 
 TERMINAL_SCHEMA = {
     "name": "terminal",
-    "description": "执行 shell 命令。默认使用当前沙箱；可申请明确的额外权限，或说明原因后申请仅本命令脱离沙箱。",
+    "description": "执行 shell 命令。受管模式下 HOME 指向宿主用户目录，但沙箱仍单独限制读写；工作区外写入应使用宿主绝对路径申请精确权限，删除单个文件优先使用 file_delete。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -129,7 +143,7 @@ TERMINAL_SCHEMA = {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "root": {"type": "string", "description": "已存在的精确文件或目录"},
+                                "root": {"type": "string", "description": "已存在的宿主绝对文件或目录；相对路径以当前工作目录解析"},
                                 "access": {"type": "string", "enum": ["read", "read_write"]},
                             },
                             "required": ["root", "access"],
@@ -167,6 +181,115 @@ TERMINAL_SCHEMA = {
         "required": ["command"],
     },
 }
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_destructive_terminal_targets(
+    parsed_commands: tuple[tuple[str, ...], ...],
+    *,
+    shell_kind: str,
+    raw_command: str = "",
+    workspace_root: Path,
+    requested_permissions: Any,
+) -> None:
+    """Require literal absolute targets for statically parsed delete commands.
+
+    This binds an external write grant to the path the command will actually
+    delete. Dynamic shell expressions remain outside this helper and are still
+    handled by the native classifier and ordinary approval policy.
+    """
+    from crew.security.models import FilesystemAccess
+
+    if not parsed_commands and re.search(
+        r"(?i)(?:^|[;&|]\s*)(?:rm|rmdir|unlink|remove-item|del|erase|ri)(?:\.exe)?(?:\s|$)",
+        raw_command,
+    ):
+        raise ToolError(
+            "无法把删除命令静态绑定到实际路径；请改用 file_delete，或使用不含 ~、环境变量、"
+            "通配符和命令替换的宿主绝对路径"
+        )
+
+    for command in parsed_commands:
+        if not command:
+            continue
+        executable = command[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if executable in {"sudo", "env", "command", "nohup"}:
+            delete_index = next(
+                (
+                    index
+                    for index, token in enumerate(command[1:], start=1)
+                    if token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+                    in {"rm", "rmdir", "unlink", "remove-item", "del", "erase", "ri"}
+                ),
+                None,
+            )
+            if delete_index is not None:
+                command = command[delete_index:]
+                executable = command[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+        operands: list[str] = []
+        if shell_kind == "powershell" and executable in {
+            "remove-item",
+            "del",
+            "erase",
+            "ri",
+            "rm",
+            "rmdir",
+        }:
+            skip_next = False
+            for token in command[1:]:
+                if skip_next:
+                    operands.append(token)
+                    skip_next = False
+                elif token.lower() in {"-path", "-literalpath"}:
+                    skip_next = True
+                elif not token.startswith("-"):
+                    operands.append(token)
+        elif shell_kind != "powershell" and executable in {"rm", "rmdir", "unlink"}:
+            after_options = False
+            for token in command[1:]:
+                if token == "--":
+                    after_options = True
+                elif after_options or not token.startswith("-"):
+                    operands.append(token)
+        else:
+            continue
+
+        if not operands:
+            raise ToolError("删除命令必须包含明确的目标路径；删除单个文件请优先使用 file_delete")
+        for raw_target in operands:
+            absolute = (
+                PureWindowsPath(raw_target).is_absolute()
+                if shell_kind == "powershell"
+                else Path(raw_target).is_absolute()
+            )
+            if not absolute:
+                raise ToolError(
+                    "删除命令必须使用宿主绝对路径，不能用相对路径、~ 或环境变量；"
+                    "删除单个文件请使用 file_delete"
+                )
+            target = Path(raw_target).resolve(strict=False)
+            if _path_is_within(target, workspace_root):
+                continue
+            covered = any(
+                entry.access is FilesystemAccess.READ_WRITE
+                and _path_is_within(target, entry.root)
+                for entry in requested_permissions.filesystem
+            )
+            if (
+                requested_permissions.sandbox_permissions.value != "require_escalated"
+                and not covered
+            ):
+                raise ToolError(
+                    f"删除工作区外文件必须为实际目标申请 read_write 权限：{target}；"
+                    "无需脱离沙箱"
+                )
 
 
 def _parse_additional_permissions(
@@ -333,6 +456,17 @@ async def handle_terminal(
 
     cwd = str(_resolve_base_dir())
     launch = None
+    approval_decision = ""
+    terminal_metadata: dict[str, Any] = {
+        "execution_boundary": "host",
+        "effective_home": str(Path.home().expanduser().resolve(strict=False)),
+        "applied_permissions": {
+            "filesystem": [],
+            "network": [],
+            "allow_local_binding": False,
+            "sandbox_permissions": "use_default",
+        },
+    }
     if security_service is not None and workspace_store is not None:
         from crew.security.actions import normalize_exec_action
         from crew.security.approvals import ApprovalDecision
@@ -347,6 +481,7 @@ async def handle_terminal(
             EMPTY_ADDITIONAL_PERMISSIONS,
             ConversationPermissionMode,
             SandboxPermissions,
+            serialize_additional_permissions,
         )
         from crew.security.runtime_client import NativeRuntimeClient
 
@@ -411,6 +546,13 @@ async def handle_terminal(
                 executable=final_argv[0],
                 raw_command=command,
             )
+            _validate_destructive_terminal_targets(
+                classification.parsed_commands,
+                shell_kind=shell_kind,
+                raw_command=command,
+                workspace_root=security_context.workspace_root,
+                requested_permissions=requested_permissions,
+            )
         # Classification fields are part of the exact action digest, so the request/UI,
         # grant, persistent rule, and eventual execution all refer to the same command.
         action = normalize_exec_action(
@@ -456,15 +598,25 @@ async def handle_terminal(
             # 阻塞等待 owner 决策：抛/回灌审批请求会让模型复述进正文、且 turn 结束后
             # grant 无人消费（"对话停了"）。批准则继续，拒绝则回干净错误让模型自适应。
             outcome = await security_service.await_decision(approval["request_id"])
-            if outcome is None or outcome.decision is ApprovalDecision.REJECT:
+            if outcome is None:
                 return json.dumps(
                     {
                         "success": False,
-                        "error": "用户未批准该命令",
+                        "error": "命令审批已过期或会话已变更",
+                        "error_code": "approval_expired",
+                    },
+                    ensure_ascii=False,
+                )
+            if outcome.decision is ApprovalDecision.REJECT:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "用户拒绝了该命令",
                         "error_code": "approval_rejected",
                     },
                     ensure_ascii=False,
                 )
+            approval_decision = outcome.decision.value
             # 批准：grant/rule 已由 decide() 落地；复用同一 action 消费 once grant，
             # 避免二次 shell_argv/which 在 PATH 变化时生成不同 digest。
             authorization = security_service.authorize_exec_action(
@@ -502,6 +654,14 @@ async def handle_terminal(
                 inherited_launch.trusted_readable_roots if inherited_launch is not None else ()
             ),
         )
+        applied_permissions = granted_permissions or EMPTY_ADDITIONAL_PERMISSIONS
+        terminal_metadata = {
+            "execution_boundary": "sandbox" if launch.managed else "host",
+            "effective_home": str(Path.home().expanduser().resolve(strict=False)),
+            "applied_permissions": serialize_additional_permissions(applied_permissions),
+        }
+        if approval_decision:
+            terminal_metadata["approval_decision"] = approval_decision
     elif not allowed:
         return json.dumps(
             {"success": False, "error": reason, "error_code": error_code},
@@ -585,6 +745,7 @@ async def handle_terminal(
                 "pid": session.pid,
                 "command": command,
                 "cwd": cwd,
+                **terminal_metadata,
                 "hint": "后台运行中。用 process(action='poll'|'log'|'wait'|'kill', session_id=...) 查询。",
             }, ensure_ascii=False)
         except Exception as exc:
@@ -654,6 +815,7 @@ async def handle_terminal(
             "pid": session.pid,
             "command": command,
             "cwd": cwd,
+            **terminal_metadata,
             "output_ref": output_ref,
             "hint": "命令超过前台阻塞预算，已原地转为后台任务；完成后会自动通知。",
         }, ensure_ascii=False)
@@ -666,6 +828,31 @@ async def handle_terminal(
     # 输出脱敏不可由 CREW_REDACT_SECRETS=false 关闭（spec §109）。
     text = redact_sensitive_text(text, force=True)
 
+    if session.stable_error_code:
+        runtime_messages = {
+            "runtime_crashed": "安全运行时异常退出，命令未执行",
+            "runtime_protocol_mismatch": "安全运行时协议不匹配，命令未执行",
+            "sandbox_unavailable": "当前平台的安全沙箱不可用，命令未执行",
+            "sandbox_denied": "安全沙箱拒绝执行该命令",
+            "network_unavailable": "安全运行时无法建立获批的网络边界",
+            "timeout": "安全运行时执行超时",
+            "output_truncated": "安全运行时输出超过限制",
+        }
+        return json.dumps(
+            {
+                "success": False,
+                "error": runtime_messages.get(
+                    session.stable_error_code,
+                    "安全运行时失败，命令未执行",
+                ),
+                "error_code": session.stable_error_code,
+                "cwd": cwd,
+                "command": command,
+                **terminal_metadata,
+            },
+            ensure_ascii=False,
+        )
+
     result = {
         "success": True,
         "cwd": cwd,
@@ -673,6 +860,7 @@ async def handle_terminal(
         "exit_code": session.exit_code,
         "output": text,
         "truncated": truncated,
+        **terminal_metadata,
     }
     if task_id:
         result["task_id"] = task_id
@@ -831,6 +1019,58 @@ async def handle_file_write(
     return json.dumps(result, ensure_ascii=False)
 
 
+def _delete_file_sync(path: Path) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise ToolError(f"文件不存在: {path}") from exc
+    if path.is_symlink():
+        raise ToolError("file_delete 不删除符号链接；请提供实际文件的绝对路径")
+    if not path.is_file():
+        raise ToolError(f"file_delete 只支持普通文件，不递归删除目录: {path}")
+    path.unlink()
+    return {
+        "success": True,
+        "path": str(path),
+        "deleted": True,
+        "bytes_deleted": int(metadata.st_size),
+    }
+
+
+async def handle_file_delete(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
+    requested_path = Path(str(args.get("path") or ".")).expanduser()
+    if not requested_path.is_absolute():
+        requested_path = _resolve_base_dir() / requested_path
+    requested_path = requested_path.parent.resolve(strict=False) / requested_path.name
+    path = await authorize_file_tool(
+        args,
+        operation="delete",
+        tool_name="file_delete",
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
+    if requested_path.is_symlink():
+        raise ToolError("file_delete 不删除符号链接；请提供实际文件的绝对路径")
+    _assert_no_symlink_component(path)
+    if _is_blocked_device(str(args.get("path", ""))):
+        raise ToolError(f"禁止删除设备/特殊文件: {path}")
+    sensitive = _check_sensitive_path(str(args.get("path", "")))
+    if sensitive:
+        raise ToolError(sensitive)
+    try:
+        result = await asyncio.to_thread(_delete_file_sync, path)
+    except ToolError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ToolError(f"删除失败: {exc}") from exc
+    return json.dumps(result, ensure_ascii=False)
+
+
 def register_builtin_tools(
     registry: Registry,
     *,
@@ -883,6 +1123,21 @@ def register_builtin_tools(
         always_load=True,
         search_hint="write file append create save text",
     )
+    registry.register(
+        name="file_delete",
+        toolset="file",
+        schema=FILE_DELETE_SCHEMA,
+        handler=partial(
+            handle_file_delete,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
+        is_async=True,
+        display_name="删除文件",
+        ui_label_template="删除 {path}",
+        always_load=True,
+        search_hint="delete remove file unlink exact path",
+    )
 
     from crew.tools.file_tools import register_file_tools
     from crew.tools.interaction import register_interaction_tools
@@ -897,7 +1152,11 @@ def register_builtin_tools(
         workspace_store=workspace_store,
         security_service=security_service,
     )
-    register_skills_tools(registry)
+    register_skills_tools(
+        registry,
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
     register_memory_tools(registry)
     register_web_tools(
         registry,

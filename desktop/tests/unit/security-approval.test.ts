@@ -4,6 +4,7 @@ import {
   SECURITY_APPROVAL_CHOICES,
   SECURITY_MODE_OPTIONS,
   assignSecurityMode,
+  approvalBoundaryLabel,
   formatApprovalSummary,
   securityModeForSession,
   selectNextConversationMode,
@@ -124,6 +125,16 @@ describe('security approval UI model', () => {
     expect(expanded).toContain('执行边界：留在沙箱内，并增加下方明确权限');
     expect(escalated).toContain('执行边界：脱离沙箱');
     expect(escalated).toContain('本次对话仍绑定完整命令与工作目录');
+    expect(approvalBoundaryLabel({ action: { kind: 'exec' } })).toBe('仅在当前沙箱内执行');
+    expect(approvalBoundaryLabel({
+      additional_permissions: {
+        sandbox_permissions: 'with_additional_permissions',
+        filesystem: [{ root: '/Users/me/Desktop/file.png', access: 'read_write' }],
+      },
+    })).toBe('沙箱内增加读写权限：/Users/me/Desktop/file.png');
+    expect(approvalBoundaryLabel({
+      additional_permissions: { sandbox_permissions: 'require_escalated' },
+    })).toBe('脱离沙箱执行');
   });
 
   it('explains managed external-agent network expansion in user-facing language', () => {

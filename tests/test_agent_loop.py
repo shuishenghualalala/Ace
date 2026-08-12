@@ -8,6 +8,7 @@ resilience(空响应重试/截断续写/溢出兜底压缩/provider 故障转移
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import AsyncIterator
 
 import pytest
@@ -1012,8 +1013,8 @@ async def test_tool_runner_authorizes_each_batch_item_independently():
 def test_is_tool_parallel_safe_classification():
     assert is_tool_parallel_safe(ToolCall("1", "file_read", {"path": "/tmp/a"}))
     assert is_tool_parallel_safe(ToolCall("2", "web_search", {"q": "x"}))
-    assert is_tool_parallel_safe(ToolCall("4", "terminal", {"command": "ls -la"}))
-    assert is_tool_parallel_safe(ToolCall("4b", "terminal", {"command": "git diff --stat"}))
+    assert not is_tool_parallel_safe(ToolCall("4", "terminal", {"command": "ls -la"}))
+    assert not is_tool_parallel_safe(ToolCall("4b", "terminal", {"command": "git diff --stat"}))
     # 写/复杂命令/未知工具：不安全
     assert not is_tool_parallel_safe(ToolCall("3", "file_write", {"path": "/tmp/a", "content": "x"}))
     assert not is_tool_parallel_safe(ToolCall("4c", "terminal", {"command": "echo x > out.txt"}))
@@ -1404,6 +1405,79 @@ async def test_run_batch_emits_start_when_not_started_id():
         [tc], messages, "rid", _seq_counter(), started_tool_call_ids=set())]
     phases = [c.body["phase"] for c in chunks if c.kind == "tool"]
     assert phases == ["start", "result"]
+
+
+async def test_explicit_security_rejection_fences_later_tools_in_same_batch():
+    reg = Registry()
+    calls: list[str] = []
+
+    async def terminal(_args):
+        calls.append("terminal")
+        return json.dumps({
+            "success": False,
+            "error": "用户拒绝了该命令",
+            "error_code": "approval_rejected",
+        }, ensure_ascii=False)
+
+    async def glob_handler(_args):
+        calls.append("glob")
+        return tool_result(files=["secret.txt"])
+
+    reg.register(
+        name="terminal",
+        toolset="terminal",
+        schema={"name": "terminal", "parameters": {}},
+        handler=terminal,
+        is_async=True,
+    )
+    reg.register(
+        name="glob",
+        toolset="file",
+        schema={"name": "glob", "parameters": {}},
+        handler=glob_handler,
+        is_async=True,
+    )
+    runner = _runner(reg, parallel_enabled=False)
+    messages: list[Message] = []
+    tool_calls = [
+        ToolCall("t1", "terminal", {"command": "ls ~/Desktop"}),
+        ToolCall("g1", "glob", {"path": "~/Desktop", "pattern": "*"}),
+    ]
+
+    _ = [chunk async for chunk in runner.run_batch(
+        tool_calls, messages, "rid", _seq_counter(),
+    )]
+
+    assert calls == ["terminal"]
+    assert runner.approval_rejected is True
+    assert "approval_rejected_turn_stopped" in messages[-1].content
+
+
+async def test_security_runtime_failure_is_a_real_tool_error():
+    reg = Registry()
+    reg.register(
+        name="terminal",
+        toolset="terminal",
+        schema={"name": "terminal", "parameters": {}},
+        handler=lambda _args: json.dumps({
+            "success": False,
+            "error": "安全运行时异常退出，命令未执行",
+            "error_code": "runtime_crashed",
+        }, ensure_ascii=False),
+    )
+    runner = _runner(reg, parallel_enabled=False)
+    messages: list[Message] = []
+
+    chunks = [chunk async for chunk in runner.run_batch(
+        [ToolCall("t1", "terminal", {"command": "ls ~/Desktop"})],
+        messages,
+        "rid",
+        _seq_counter(),
+    )]
+
+    assert runner.security_boundary_failed is True
+    assert any(chunk.body.get("phase") == "result" for chunk in chunks)
+    assert messages[-1].content.endswith('"runtime_crashed"}')
 
 
 class ReadyStreamProvider(LLMProvider):

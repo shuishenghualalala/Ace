@@ -207,7 +207,7 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
 function permissionButtonClass(label: string, value: string): string {
   const choice = `${label} ${value}`.toLowerCase();
   if (/allow_once|允许一次|允许本次/.test(choice)) return ' permission-dialog__button--primary';
-  if (/always|始终允许/.test(choice)) return ' permission-dialog__button--persistent';
+  if (/always|session_exact|始终允许|本次对话/.test(choice)) return ' permission-dialog__button--persistent';
   return ' permission-dialog__button--secondary';
 }
 
@@ -263,7 +263,7 @@ function permissionDialogHtml(question: PendingFollowup): string {
   const rank = (label: string, value: string): number => {
     const choice = `${label} ${value}`.toLowerCase();
     if (/deny|拒绝/.test(choice)) return 0;
-    if (/always|始终允许/.test(choice)) return 1;
+    if (/always|session_exact|始终允许|本次对话/.test(choice)) return 1;
     return 2;
   };
   const orderedOptions = [...options].sort(

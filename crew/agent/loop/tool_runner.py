@@ -28,6 +28,7 @@ from crew.agent.loop.tool_dispatch_helpers import (
     should_parallelize_tool_batch,
 )
 from crew.agent.loop.tool_guardrails import ToolCallGuardrailController, append_toolguard_guidance, toolguard_synthetic_result
+from crew.agent.loop.tool_result_classification import file_mutation_result_landed
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import (
     drain_followup_answer_messages,
@@ -96,6 +97,8 @@ class ToolRunner:
         self._prewarm_keys: set[tuple[str, str]] = set()  # (name, repr(args)) 去重
         self._sem: asyncio.Semaphore | None = None  # 全轮共享并发闸门，懒创建
         self._pending_media: list[tuple[str, str, MediaPart]] = []
+        self.approval_rejected = False
+        self.security_boundary_failed = False
 
     @staticmethod
     def _extract_mcp_images(content: str) -> tuple[list[dict[str, str]], str] | None:
@@ -180,6 +183,8 @@ class ToolRunner:
         safe 工具若已在流式期间 prewarm，命中缓存即时返回，执行已与流重叠。
         started_tool_call_ids 用于 UI 已提前收到 start 帧的工具，避免 run_batch 重复发 start。
         """
+        self.approval_rejected = False
+        self.security_boundary_failed = False
         segments = self._plan_segments(tool_calls)
         started_ids = set(started_tool_call_ids or set())
         llm_trace("tool_batch_plan", {
@@ -205,7 +210,7 @@ class ToolRunner:
 
     def _plan_segments(self, tool_calls: list) -> list[tuple[bool, list]]:
         """把工具序列规划成执行段。"""
-        if not self.parallel_enabled:
+        if not self.parallel_enabled or self._request_approval_mode():
             return [(False, [tc]) for tc in tool_calls]
         if should_parallelize_tool_batch(tool_calls).parallel:
             return [(True, list(tool_calls))]
@@ -219,7 +224,7 @@ class ToolRunner:
         同一 (name, args) 去重，避免模型重复调用时重复执行/重复计 guardrail。
         返回 True 表示本次确实新建了提前执行任务，可安全向 UI 发送 start 帧。
         """
-        if self._interrupted or tc.id in self._prewarm:
+        if self._interrupted or self.approval_rejected or self._request_approval_mode() or tc.id in self._prewarm:
             return False
         # 未授权调用不得进入提前执行，也不得借 start 帧把参数写进 trace/UI。
         if not self._is_authorized(tc):
@@ -270,6 +275,22 @@ class ToolRunner:
         """Check the current turn's immutable tool authorization snapshot."""
         return self.authorized_tool_names is None or tc.name in self.authorized_tool_names
 
+    @staticmethod
+    def _request_approval_mode() -> bool:
+        """Return whether this turn requires ordered owner approval boundaries."""
+        from crew.security.launch import current_process_launch
+        from crew.security.models import ConversationPermissionMode
+
+        launch = current_process_launch.get()
+        service = getattr(launch, "approval_service", None)
+        context = getattr(launch, "security_context", None)
+        if service is None or context is None:
+            return False
+        try:
+            return service.mode_for(context) is ConversationPermissionMode.REQUEST_APPROVAL
+        except Exception:  # noqa: BLE001 - uncertain mode must keep the conservative order
+            return True
+
     def _record_bridge_discovery(self, bridge_name: str, result: ToolResult) -> None:
         """Record schemas made callable by tool_search."""
         if result.is_error or bridge_name != "tool_search":
@@ -303,6 +324,17 @@ class ToolRunner:
         started_tool_call_ids: set[str],
     ) -> AsyncIterator[ResponseChunk]:
         for tc in calls:
+            if self.approval_rejected or self.security_boundary_failed:
+                result = self._approval_fence_result(
+                    tc,
+                    approval_rejected=self.approval_rejected,
+                )
+                if tc.id not in started_tool_call_ids:
+                    yield self._start_event(tc, rid, next_seq)
+                self._mark_tool_finished(tc)
+                yield self._result_event(tc, result, rid, next_seq, status="cancelled")
+                messages.append(Message.tool(tc.id, result.content, name=tc.name))
+                continue
             if self._interrupted:
                 result = self._cancelled_result(tc)
                 if tc.id not in started_tool_call_ids:
@@ -314,9 +346,15 @@ class ToolRunner:
                 continue
             if tc.id not in started_tool_call_ids:
                 yield self._start_event(tc, rid, next_seq)
-            before = self._read_file_before(tc) if tc.name == "file_write" else None
+            before = self._read_file_before(tc) if tc.name in {"file_write", "file_delete"} else None
             terminal_before = self._terminal_workspace_snapshot(tc)
             result = await self._resolve(tc)
+            if self._is_explicit_approval_rejection(result):
+                self.approval_rejected = True
+                result.is_error = True
+            if self._is_security_boundary_failure(result):
+                self.security_boundary_failed = True
+                result.is_error = True
             status = "cancelled" if self._interrupted else ("error" if result.is_error else "ok")
             yield self._result_event(tc, result, rid, next_seq, status=status)
             messages.append(Message.tool(tc.id, result.content, name=tc.name))
@@ -325,7 +363,11 @@ class ToolRunner:
             self._append_followup_answers(messages)
             if tc.name == "todo":
                 yield self._todo_snapshot_event(rid, next_seq)
-            if tc.name == "file_write":
+            if (
+                tc.name in {"file_write", "file_delete"}
+                and not result.is_error
+                and file_mutation_result_landed(tc.name, result.content)
+            ):
                 yield self._file_change_event(tc, before, rid, next_seq)
             elif tc.name == "terminal":
                 terminal_event = self._terminal_file_change_event(
@@ -350,7 +392,7 @@ class ToolRunner:
         # 但保留 before 读取与 file_change 广播，防御未来放宽安全判定时漏播。
         before_map: dict[str, Any] = {}
         for tc in calls:
-            if tc.name == "file_write":
+            if tc.name in {"file_write", "file_delete"}:
                 before_map[tc.id] = self._read_file_before(tc)
         results = await self._resolve_parallel(calls)
         for tc, result in zip(calls, results):
@@ -362,7 +404,11 @@ class ToolRunner:
             self._append_followup_answers(messages)
             if tc.name == "todo":
                 yield self._todo_snapshot_event(rid, next_seq)
-            if tc.name == "file_write":
+            if (
+                tc.name in {"file_write", "file_delete"}
+                and not result.is_error
+                and file_mutation_result_landed(tc.name, result.content)
+            ):
                 yield self._file_change_event(tc, before_map.get(tc.id), rid, next_seq)
 
     def _append_followup_answers(self, messages: list[Message]) -> None:
@@ -419,7 +465,7 @@ class ToolRunner:
 
         - 无规则 / allow → 放行（返回 None）
         - deny → 返回拒绝原因（作为 is_error 结果回灌）
-        - ask → 弹出「允许一次 / 始终允许 / 拒绝」三选一，record_history=False
+        - ask → 弹出「允许一次 / 本次对话允许此完整操作 / 拒绝」，record_history=False
           不把答案写进 canonical history（权限确认是 side-channel）
         - 当前环境无法交互（无 push_fn，如子 agent / 测试）触发 ask 时按 deny 处理（fail-closed）
         """
@@ -460,6 +506,7 @@ class ToolRunner:
             "terminal",
             "file_read",
             "file_write",
+            "file_delete",
             "glob",
             "grep",
             "patch",
@@ -499,10 +546,10 @@ class ToolRunner:
         if reason:
             question_text += f"\n\n原因：{reason}"
         if suggested:
-            question_text += f"\n\n始终允许规则：{tc.name}({suggested})"
+            question_text += f"\n\n本次对话复用范围：仅完整匹配 {tc.name}({suggested})"
         options = [{"label": "允许一次", "value": "allow_once"}]
-        if allow_always:
-            options.append({"label": "始终允许", "value": "always"})
+        if allow_always and suggested and suggested != "*":
+            options.append({"label": "本次对话允许此完整操作", "value": "session_exact"})
         options.append({"label": "拒绝", "value": "deny"})
         questions = [{
             "id": "perm",
@@ -528,12 +575,18 @@ class ToolRunner:
                 choice = str(vals[0])
         if choice == "allow_once":
             return None
-        if choice == "always":
-            grant_session_allow(self.session_id, tc.name, suggested or "*")
+        if choice in {"session_exact", "always"}:
+            grant_session_allow(self.session_id, tc.name, suggested)
             return None
         # deny / 超时 / 取消
         if choice == "deny":
-            return json.dumps({"error": "用户拒绝了该工具调用"}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error_code": "approval_rejected",
+                    "error": "用户拒绝了该工具调用",
+                },
+                ensure_ascii=False,
+            )
         return json.dumps(
             {"error": "权限确认未得到明确许可（超时或未选择），按拒绝处理"}, ensure_ascii=False
         )
@@ -804,6 +857,50 @@ class ToolRunner:
     @staticmethod
     def _cancelled_result(tc) -> ToolResult:
         return ToolResult(tc.id, tc.name, "工具调用因用户中断而取消。", is_error=True)
+
+    @staticmethod
+    def _approval_fence_result(tc, *, approval_rejected: bool = True) -> ToolResult:
+        return ToolResult(
+            tc.id,
+            tc.name,
+            json.dumps(
+                {
+                    "error_code": (
+                        "approval_rejected_turn_stopped"
+                        if approval_rejected
+                        else "security_boundary_failed_turn_stopped"
+                    ),
+                    "error": (
+                        "用户已拒绝本轮安全审批，后续工具未执行"
+                        if approval_rejected
+                        else "安全运行时发生故障，后续工具未执行"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            is_error=True,
+        )
+
+    @staticmethod
+    def _is_explicit_approval_rejection(result: ToolResult) -> bool:
+        return bool(result.is_error or '"success": false' in result.content) and (
+            '"error_code": "approval_rejected"' in result.content
+            or '"error_code":"approval_rejected"' in result.content
+        )
+
+    @staticmethod
+    def _is_security_boundary_failure(result: ToolResult) -> bool:
+        return any(
+            f'"error_code": "{code}"' in result.content
+            or f'"error_code":"{code}"' in result.content
+            for code in (
+                "runtime_crashed",
+                "runtime_protocol_mismatch",
+                "sandbox_unavailable",
+                "sandbox_denied",
+                "network_unavailable",
+            )
+        )
 
     def _plan_mode_block(self, tc) -> str | None:
         """Plan 模式下的写操作门控。返回拦截原因（JSON 字符串），放行则返回 None。

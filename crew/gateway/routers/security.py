@@ -63,6 +63,7 @@ AuditSort = Literal["newest", "oldest"]
 _AUDIT_FILE_OPERATIONS = {
     "file_read": "read",
     "file_write": "write",
+    "file_delete": "delete",
     "patch": "patch",
 }
 

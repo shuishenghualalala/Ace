@@ -148,7 +148,11 @@ def _best_effort_tool_args(tool_name: str, raw_arguments: str) -> dict[str, Any]
     except json.JSONDecodeError:
         pass
 
-    keys = ("path", "file_path") if tool_name in {"file_write", "file_read", "patch"} else _PARTIAL_STRING_KEYS
+    keys = (
+        ("path", "file_path")
+        if tool_name in {"file_write", "file_delete", "file_read", "patch"}
+        else _PARTIAL_STRING_KEYS
+    )
     out: dict[str, Any] = {}
     for key in keys:
         value = _extract_partial_json_string(raw_arguments, key)

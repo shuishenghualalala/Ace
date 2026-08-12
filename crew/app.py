@@ -2707,6 +2707,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         app.wiki_manager,
         config=cfg.wiki,
         session_store=session_store,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
     )
 
     from crew.work.briefs import WorkBriefStore

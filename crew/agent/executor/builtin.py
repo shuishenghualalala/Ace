@@ -708,6 +708,29 @@ class BuiltinExecutor(AgentExecutor):
                 yield ev
             view_messages.extend(ctx.messages[_pre_batch_len:])
 
+            # 用户拒绝的是本轮目标的执行边界。继续把拒绝结果交给模型会诱发它改用
+            # 另一种工具完成同一目标，因此拒绝后直接结束本轮。
+            if runner.approval_rejected:
+                async for _fc in self._emit_final(
+                    rid,
+                    next_seq,
+                    ctx.session_id,
+                    owner_account_id,
+                    "操作未执行：你拒绝了本轮安全审批。",
+                ):
+                    yield _fc
+                return
+            if runner.security_boundary_failed:
+                async for _fc in self._emit_final(
+                    rid,
+                    next_seq,
+                    ctx.session_id,
+                    owner_account_id,
+                    "操作未执行：安全运行时发生故障，请检查运行时状态后重试。",
+                ):
+                    yield _fc
+                return
+
             # Plan 模式提交审批后，本轮必须立即停住，等待用户 approve/reject。
             # 不能再把 exit_plan_mode 的工具结果喂回模型，否则弱模型可能继续执行计划。
             if self.plan_manager is not None and self.plan_manager.is_awaiting_approval(

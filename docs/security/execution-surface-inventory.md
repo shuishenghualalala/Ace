@@ -24,7 +24,12 @@
 | `crew/security/launch.py` | runtime-boundary | 会话级统一 captured execution；managed 只启动固定 native helper，disabled 才使用当前 OS 用户权限。 |
 | `crew/security/process_lifecycle.py` | runtime-boundary | 安全执行边界的固定进程树清理 helper；Windows 只调用固定 `taskkill` argv，POSIX 只终止已启动的进程组。 |
 | `crew/tools/process_registry.py` | broker | terminal 后台执行已按 `ProcessLaunch` 分流：disabled 才使用本地 shell；managed 只启动固定 Python bridge，再由 `NativeRuntimeClient` 执行协议内 command，runtime unavailable 不回退宿主。`taskkill/tasklist` 仅用于已登记进程的宿主生命周期清理/探测。 |
-| `crew/tools/mcp_client.py` | indirect | 默认禁用 MCP host stdio；只有操作者显式 host 配置可启用，managed transport 未实现时 unavailable。 |
+| `crew/tools/mcp_client.py` | indirect | 默认禁用 MCP host stdio；只有操作者显式 host 配置可启用，managed transport 未实现时 unavailable。HTTP/SSE worker 每次调用前绑定配置 endpoint、完整工具名和参数摘要，并经当前会话安全服务审批精确网络 overlay；缺少会话上下文时失败关闭。 |
+| `crew/tools/web_tools.py` | indirect | 网页搜索/提取经公开 HTTP 与网络审批；视觉工具对模型路径复用结构化文件授权和 identity-checked read，不直接读取任意宿主路径。 |
+| `plugins/feishu` / `plugins/platforms/feishu` | indirect | 飞书工具先绑定配置 API authority，实际 HTTP 走 DNS-pinning、固定 authority 和响应上限；平台出站附件上传前走结构化文件读取授权与 identity-checked read。 |
+| `plugins/crew_disk_cleanup` | app-maintenance | 只枚举 Ace 管理的临时根；status/dry-run 只读，quick 删除必须逐次确认且不提供永久授权。 |
+| `crew/tools/skills_tools.py` | indirect | Skill/package 阅读重新绑定注册根；真正 repair 前对每个待修改 Skill 目录申请精确写权限。Skill 资源后续由受管 terminal 以只读根执行。 |
+| `crew/wiki/tools.py` | indirect | 当前轮附件只从 host 登记上传集合捕获；URL 来源对初始 authority 和每个跨 authority 重定向分别做网络审批，Wiki 页面数据只写 owner/KB 隔离应用根。 |
 | `crew/agent/external/acp_adapter.py` | broker | ACP 双向 stdio 在 `config/config.yaml` 的 `external_agents.security_enabled=true` 时经 `SecurityExecutionBroker.open_interactive` 由 native runtime 托管；设为 `false` 后仅允许当前用户权限直启。ACP 协议仍是原生 stdin/stdout。Crew `crew-interaction` MCP proxy 的短期 binding 环境保留在 MCP 声明内，并只获得当前 Gateway loopback `host:port` 回调权限。 |
 | `crew/agent/external/codex_adapter.py` | broker | Codex app-server 双向 stdio 在配置开关开启时经 `NativeRuntimeClient.open_interactive` 托管，凭据、workspace、精确网络权限和进程树均由 Security Broker 编译；managed 失败不回退宿主，关闭后才允许兼容直启。 |
 | `crew/agent/external/cli_adapter.py` | broker | Claude stream-json 双向 stdio 在配置开关开启时经 Native interactive transport 托管，临时 MCP 配置写入 workspace 并随会话清理；普通 CLI 对话调用 `security.launch.execute_captured`，managed 失败不回退宿主，关闭后才按旧 runtime 直启。模型探测只运行已登记 candidate 的固定 argv，属于认证后的宿主控制面发现，不接收模型 argv。 |

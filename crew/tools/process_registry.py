@@ -177,6 +177,8 @@ class ProcessSession:
     _security_action: Any | None = field(default=None, repr=False)
     _security_result_path: Path | None = field(default=None, repr=False)
     _security_result_nonce: str = field(default="", repr=False)
+    stable_error_code: str = ""
+    sandbox_backend: str = ""
 
 
 class ProcessRegistry:
@@ -398,6 +400,7 @@ class ProcessRegistry:
             "readable_roots": [str(root) for root in readable],
             "readonly_roots": [str(root) for root in readonly],
             "denied_roots": [str(root) for root in denied],
+            "full_disk_read": bool(profile["full_disk_read"]),
             "network_rules": network_rules,
             "allow_local_binding": (
                 profile["allow_local_binding"] or additional["allow_local_binding"]
@@ -664,6 +667,8 @@ class ProcessRegistry:
             parsed_exit_code = session.exit_code
         if launch.managed and not result:
             stable_error_code = "runtime_crashed"
+        session.stable_error_code = stable_error_code
+        session.sandbox_backend = str(result.get("sandbox_backend") or "")
         audit_execution_result(
             launch,
             action,

@@ -3,7 +3,7 @@
 Design constraints:
 - Tool calls are ``crew.core.types.ToolCall`` objects (``name``/``arguments``)
   instead of OpenAI SDK objects (``function.name``/JSON arguments).
-- Built-in file tool names are ``file_read`` / ``file_write``.
+- Built-in file tool names are ``file_read`` / ``file_write`` / ``file_delete``.
 - MCP parallel safety stays conservative unless a tool name is already in the
   read-only allowlist.
 """
@@ -50,7 +50,7 @@ _PARALLEL_SAFE_TOOLS = frozenset(
     }
 )
 
-_PATH_SCOPED_TOOLS = frozenset({"file_read", "file_write", "read_file", "write_file", "patch"})
+_PATH_SCOPED_TOOLS = frozenset({"file_read", "file_write", "file_delete", "read_file", "write_file", "patch"})
 
 _DESTRUCTIVE_PATTERNS = re.compile(
     r"""(?:^|\s|&&|\|\||;|`)(?:
@@ -260,7 +260,7 @@ def should_parallelize_tool_batch(tool_calls: list[Any]) -> ToolBatchDecision:
             if any(_paths_overlap(scoped_path, existing) for existing in reserved_paths):
                 return ToolBatchDecision(False, f"{tool_name} path overlaps another tool")
             reserved_paths.append(scoped_path)
-            if tool_name in {"file_write", "write_file", "patch"}:
+            if tool_name in {"file_write", "file_delete", "write_file", "patch"}:
                 return ToolBatchDecision(False, f"{tool_name} mutates files")
             continue
 
@@ -282,15 +282,15 @@ def is_tool_parallel_safe(tool_call: Any) -> bool:
     与整批判定 ``should_parallelize_tool_batch`` 复用同一组白名单，避免分类漂移。
     """
     name = _tool_name(tool_call)
+    if name == "terminal":
+        return False
     if name in _NEVER_PARALLEL_TOOLS:
         return False
-    if name in {"file_write", "write_file", "patch"}:
+    if name in {"file_write", "file_delete", "write_file", "patch"}:
         return False
     args = _tool_args(tool_call)
     if args is None:
         return False
-    if name == "terminal":
-        return _terminal_parallel_safety(args)[0]
     return name in _PARALLEL_SAFE_TOOLS or _is_mcp_tool_parallel_safe(name)
 
 

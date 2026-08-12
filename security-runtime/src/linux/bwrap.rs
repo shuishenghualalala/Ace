@@ -61,6 +61,11 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
     } else {
         Some(stage_home_files(&request.home_files)?)
     };
+    let execution_home = if request.full_disk_read && home_staging.is_none() {
+        host_home().unwrap_or_else(|| PathBuf::from("/tmp/ace-home"))
+    } else {
+        PathBuf::from("/tmp/ace-home")
+    };
     let mut args = vec![
         "--new-session".to_string(),
         "--die-with-parent".to_string(),
@@ -203,7 +208,7 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         "/usr/local/bin:/usr/bin:/bin".to_string(),
         "--setenv".to_string(),
         "HOME".to_string(),
-        "/tmp/ace-home".to_string(),
+        path_string(&execution_home)?,
         "--setenv".to_string(),
         "TMPDIR".to_string(),
         "/tmp".to_string(),
@@ -235,6 +240,11 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         synthetic_targets,
         home_staging,
     })
+}
+
+fn host_home() -> Option<PathBuf> {
+    let path = env::var_os("HOME").map(PathBuf::from)?;
+    path.is_absolute().then_some(path)
 }
 
 fn stage_home_files(files: &BTreeMap<String, Vec<u8>>) -> Result<PathBuf, String> {
@@ -597,5 +607,44 @@ mod tests {
             .args
             .windows(2)
             .any(|window| window == ["--tmpfs", "/"]));
+        let home_index = plan
+            .args
+            .windows(3)
+            .position(|window| window[0] == "--setenv" && window[1] == "HOME")
+            .unwrap();
+        assert_eq!(
+            plan.args[home_index + 2],
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp/ace-home".to_string())
+        );
+    }
+
+    #[test]
+    fn projected_home_stays_private_even_with_full_disk_read() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut home_files = std::collections::BTreeMap::new();
+        home_files.insert(".config/provider.json".to_string(), b"{}".to_vec());
+        let request = LinuxRunRequest {
+            command: vec!["/bin/true".to_string()],
+            cwd: workspace.path().to_path_buf(),
+            writable_roots: vec![workspace.path().to_path_buf()],
+            readable_roots: vec![],
+            readonly_roots: vec![],
+            denied_roots: vec![],
+            full_disk_read: true,
+            network_enabled: false,
+            network_rules: vec![],
+            allow_local_binding: false,
+            proxy_socket_dir: None,
+            max_output_bytes: 1024,
+            stdin: None,
+            env_overrides: Default::default(),
+            home_files,
+        };
+
+        let plan = build_args(&request).unwrap();
+        assert!(plan
+            .args
+            .windows(3)
+            .any(|window| { window == ["--setenv", "HOME", "/tmp/ace-home"] }));
     }
 }

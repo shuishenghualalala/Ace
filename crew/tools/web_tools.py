@@ -22,9 +22,9 @@ from crew.security.outbound import (
     fetch_public_http,
     parse_public_http_target,
 )
-from crew.tools.file_utils import _resolve_path, _truncate
+from crew.tools.file_utils import _truncate, read_verified_bytes
 from crew.tools.registry import Registry, tool_result
-from crew.tools.security_guard import authorize_network_tool
+from crew.tools.security_guard import authorize_file_tool, authorize_network_tool
 
 _MAX_OUTPUT = 12000
 _TEXT_RE = re.compile(r"<[^>]+>")
@@ -235,7 +235,7 @@ VISION_ANALYZE_SCHEMA = {
 
 
 def _image_size(path: Path) -> dict[str, Any]:
-    data = path.read_bytes()
+    data = read_verified_bytes(path, max_bytes=64 * 1024 * 1024)
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
         width, height = struct.unpack(">II", data[16:24])
         return {"format": "png", "width": width, "height": height}
@@ -255,8 +255,20 @@ def _image_size(path: Path) -> dict[str, Any]:
     return {"format": "unknown"}
 
 
-def handle_vision_analyze(args: dict[str, Any]) -> str:
-    path = _resolve_path(str(args.get("path", "")))
+async def handle_vision_analyze(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
+    """Inspect one image only after the same canonical file authorization as file_read."""
+    path = await authorize_file_tool(
+        args,
+        operation="read",
+        tool_name="vision_analyze",
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
     if not path.is_file():
         raise ToolError(f"图片不存在: {path}")
     info = _image_size(path)
@@ -308,8 +320,12 @@ def register_web_tools(
         name="vision_analyze",
         toolset="vision",
         schema=VISION_ANALYZE_SCHEMA,
-        handler=handle_vision_analyze,
-        is_async=False,
+        handler=partial(
+            handle_vision_analyze,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
+        is_async=True,
         display_name="分析图片",
         ui_label_template="分析图片 {path}",
         should_defer=True,

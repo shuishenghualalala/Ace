@@ -43,7 +43,7 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 
 - **Seatbelt**（`macos/mod.rs`）：每次执行生成独立 profile，用户路径只通过 `-D` 参数传入。
 - **只读 carve-out**：对每个只读目标的 literal 与 subpath 拒绝写入；不存在的 `.git` / `.agents` / `.crew` 也不能借父级写权限创建。
-- **最小环境**：从空环境重建 PATH、私有 HOME/TMPDIR 和已验证覆盖，避免继承宿主秘密。
+- **受控环境**：从空环境重建 PATH 与 TMPDIR。内置终端在广泛只读基线中使用宿主 HOME 解析用户路径，但不因此获得额外写权限；携带凭据投影的外援仍使用私有 HOME。
 - **托管网络**：离线 profile 没有 outbound allow；在线 profile 只能访问本次代理的精确 loopback 端口。
 - **无安装步骤**：不创建技术账号、不写系统防火墙 state，也不需要管理员授权。
 
@@ -53,10 +53,10 @@ NDJSON over stdio，**版本化 + 鉴权 + 防重放**：
 
 ```
 runtime 启动 → 读 ACE_SECURITY_RUNTIME_TOKEN（≥32 字节）
-            → stdout 写 {type:"ready", version:2,
-                          capabilities:["stdin_once","stream_output","readonly_roots"]}
+            → stdout 写 {type:"ready", version:3,
+                          capabilities:["stdin_once","stream_output","readonly_roots","full_disk_read"]}
 host 每行一个请求：
-  {version:2, token, nonce,
+  {version:3, token, nonce,
    request:{op:"run", command, cwd, writable_roots, ...,
             stdin_b64?, env_overrides?}}
   → token 不符 → runtime_protocol_mismatch
@@ -97,10 +97,10 @@ Runtime 另外接收一个由 Gateway 生成的精确 loopback `host:port` 网�
 
 macOS Seatbelt 不会默认把宿主用户的 `HOME` 暴露给外援。Native Runtime
 为每个子进程创建私有临时 HOME，避免外援顺着 `~` 读取宿主配置、密钥和登录态。
-当用户明确选择包含用户 Home 的 managed 权限模式（当前 `full_access`）时，
-runtime 才把真实 HOME 作为子进程 HOME；此时它仍运行在 Seatbelt profile 内，
-`.git`、`.agents`、`.crew` 等不可升级的保护目录继续由 deny 规则覆盖。
-`TMPDIR` 始终使用独立临时目录，不会因为复用 HOME 而改变临时文件边界。
+受管 profile 启用 `full_disk_read` 且请求没有 `home_files` 时，runtime 把宿主 HOME 作为
+子进程 HOME，使 `~/Desktop` 与结构化文件工具指向同一宿主路径；文件仍只按 profile/overlay
+获得读写能力，HOME 本身不会变成可写根。携带 `home_files` 的外援始终使用私有 HOME。
+`TMPDIR` 继续由平台沙箱控制，不会因为复用 HOME 而改变临时文件边界。
 
 Crew Home 内的数据库、认证密钥、配置凭据和日志仍由不可升级的精确 deny 根保护；
 任务 workspace 不再被其父目录 deny 覆盖。受控模式下，运行时 descriptor 可以声明宿主 HOME
@@ -116,7 +116,7 @@ HOME 的通用读取权。`external_agents.security_enabled` 默认是 `false` �
 protocol stream`。
 
 `run` 请求字段：`command[]`, `cwd`, `writable_roots[]`, `readable_roots[]`,
-`readonly_roots[]`, `denied_roots[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
+`readonly_roots[]`, `denied_roots[]`, `full_disk_read`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
 `max_output_bytes`, `stdin_b64?`, `env_overrides?`。
 
 固定边界：请求帧 2 MiB、响应帧 128 KiB、单输出 chunk 64 KiB、stdin 1 MiB、

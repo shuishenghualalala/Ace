@@ -493,6 +493,7 @@ class _ServerWorker:
 
     def _make_handler(self, tool_name: str):
         async def handler(args: dict[str, Any]) -> str:
+            qualified_name = f"{self.name}__{tool_name}"
             # Per-call launch re-check: a host stdio worker is spawned under a
             # non-managed context, but tool calls arrive from whatever conversation
             # invokes them. A later managed dialog must not route side-effects through
@@ -505,6 +506,30 @@ class _ServerWorker:
                     return tool_error(
                         f"MCP server {self.name} 为宿主 stdio 进程，缺少 disabled 安全上下文"
                     )
+            configured_url = str(self.cfg.get("url") or "").strip()
+            if configured_url:
+                from crew.security.launch import current_process_launch
+                from crew.tools.security_guard import authorize_configured_mcp_call
+
+                launch = current_process_launch.get()
+                if (
+                    launch is None
+                    or launch.security_context is None
+                    or launch.approval_service is None
+                ):
+                    return tool_error(
+                        f"MCP server {self.name} 缺少当前会话安全上下文，已拒绝远程调用"
+                    )
+                try:
+                    await authorize_configured_mcp_call(
+                        configured_url,
+                        tool_name=qualified_name,
+                        args=args,
+                        security_service=launch.approval_service,
+                        security_context=launch.security_context,
+                    )
+                except ToolError as exc:
+                    return tool_error(str(exc))
             if (
                 self._closing
                 or self._error is not None

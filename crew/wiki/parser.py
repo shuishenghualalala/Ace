@@ -600,7 +600,11 @@ def _parse_html(path: Path) -> str:
     return markdownify(html_content, heading_style="ATX", bullets="-").strip()
 
 
-def fetch_url_to_markdown(url: str, timeout: float = 15.0) -> tuple[str, str]:
+def fetch_url_to_markdown(
+    url: str,
+    timeout: float = 15.0,
+    allowed_targets: set[tuple[str, int, str]] | None = None,
+) -> tuple[str, str]:
     """抓取 URL 并将 HTML 转为 Markdown。返回 (markdown_text, final_url)。"""
     from crew.security.outbound import fetch_public_http
 
@@ -609,6 +613,7 @@ def fetch_url_to_markdown(url: str, timeout: float = 15.0) -> tuple[str, str]:
         timeout=timeout,
         max_bytes=10_000_000,
         headers={"User-Agent": "Ace/1.0"},
+        allowed_targets=allowed_targets,
     )
 
     if "html" in content_type:

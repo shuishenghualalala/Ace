@@ -49,6 +49,8 @@ struct RunnerRequest {
     stdin_b64: Option<String>,
     env_overrides: BTreeMap<String, String>,
     home_files: BTreeMap<String, String>,
+    full_disk_read: bool,
+    host_home: Option<PathBuf>,
     interactive: bool,
 }
 
@@ -102,6 +104,12 @@ pub fn run_via_account(
             .iter()
             .map(|(path, content)| (path.clone(), BASE64_STANDARD.encode(content)))
             .collect(),
+        full_disk_read: request.full_disk_read,
+        host_home: if request.full_disk_read && request.home_files.is_empty() {
+            host_home()
+        } else {
+            None
+        },
         interactive: control_rx.is_some(),
     };
     let executable = std::env::current_exe()
@@ -359,6 +367,19 @@ fn run_restricted<W: Write, R: BufRead + Send + 'static>(
                 .to_string_lossy()
                 .to_string(),
         );
+    } else if request.full_disk_read {
+        if let Some(home) = request.host_home.as_ref().filter(|path| path.is_absolute()) {
+            let value = home.to_string_lossy().to_string();
+            child_environment.insert("HOME".to_string(), value.clone());
+            child_environment.insert("USERPROFILE".to_string(), value);
+            child_environment.insert(
+                "APPDATA".to_string(),
+                home.join("AppData")
+                    .join("Roaming")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
     }
     let mut environment = environment_block(child_environment);
     let flags = CREATE_NO_WINDOW
@@ -511,6 +532,13 @@ fn run_restricted<W: Write, R: BufRead + Send + 'static>(
         return writer.write(RunnerMessage::Error(error));
     }
     writer.write(RunnerMessage::Completed(exit_code as i32))
+}
+
+fn host_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 struct StagedHome(PathBuf);

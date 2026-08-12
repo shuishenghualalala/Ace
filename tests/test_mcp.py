@@ -55,7 +55,15 @@ def _crew_with_team() -> CrewApp:
 
 # ---- MCP Client ----
 
-async def test_mcp_client_connects_and_calls():
+async def test_mcp_client_connects_and_calls(monkeypatch):
+    from crew.security.launch import current_process_launch
+    from crew.security.models import PermissionProfile, PermissionProfileKind
+
+    monkeypatch.setenv("ACE_ALLOW_HOST_MCP_STDIO", "1")
+    launch_token = current_process_launch.set(SimpleNamespace(
+        managed=False,
+        profile=PermissionProfile(PermissionProfileKind.DISABLED),
+    ))
     reg = Registry()
     mgr = MCPClientManager({"echo": {"command": sys.executable, "args": [_FIXTURE]}})
     await mgr.start(reg)
@@ -74,6 +82,7 @@ async def test_mcp_client_connects_and_calls():
         assert "expected failure" in failed.content
     finally:
         await mgr.aclose()
+        current_process_launch.reset(launch_token)
 
 
 async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch):
@@ -100,6 +109,19 @@ async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch):
         )
 
     monkeypatch.setattr(httpx2, "AsyncClient", asgi_client)
+    from crew.security.launch import current_process_launch
+
+    async def authorize_remote_call(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "crew.tools.security_guard.authorize_configured_mcp_call",
+        authorize_remote_call,
+    )
+    launch_token = current_process_launch.set(SimpleNamespace(
+        security_context=object(),
+        approval_service=object(),
+    ))
     reg = Registry()
     mgr = MCPClientManager({
         "remote": {
@@ -109,18 +131,23 @@ async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch):
         }
     })
 
-    async with app.router.lifespan_context(app):
-        await mgr.start(reg)
-        await mgr.await_started()
-        try:
-            assert "remote__http_echo" in reg.names()
-            assert seen["headers"] == {"X-MCP-Test": "mcp2"}
-            assert seen["follow_redirects"] is True
-            result = await reg.execute(ToolCall("http-1", "remote__http_echo", {"text": "hi"}))
-            assert not result.is_error
-            assert "http echo: hi" in result.content
-        finally:
-            await mgr.aclose()
+    try:
+        async with app.router.lifespan_context(app):
+            await mgr.start(reg)
+            await mgr.await_started()
+            try:
+                assert "remote__http_echo" in reg.names()
+                assert seen["headers"] == {"X-MCP-Test": "mcp2"}
+                assert seen["follow_redirects"] is True
+                result = await reg.execute(
+                    ToolCall("http-1", "remote__http_echo", {"text": "hi"})
+                )
+                assert not result.is_error
+                assert "http echo: hi" in result.content
+            finally:
+                await mgr.aclose()
+    finally:
+        current_process_launch.reset(launch_token)
 
 
 async def test_mcp_client_empty_config_noop():

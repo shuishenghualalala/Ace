@@ -431,7 +431,9 @@ def test_managed_background_command_is_protocol_data_not_host_argv(tmp_path, mon
 
     assert result == "session"
     assert captured["payload"]["command"][-1].endswith("echo secret")
+    assert captured["payload"]["command"][-2] == "-c"
     assert captured["payload"]["helper_argv"] == [str(tmp_path / "ace-security-runtime")]
+    assert captured["payload"]["full_disk_read"] is False
     # The trusted root is already visible through the broader writable root, so the
     # bridge omits the overlapping read bind just like the foreground broker.
     assert captured["payload"]["readable_roots"] == []
@@ -592,6 +594,7 @@ async def test_background_bridge_forwards_explicit_env_overrides(tmp_path, monke
             "command": ["python", "skill.py"],
             "cwd": str(tmp_path),
             "env_overrides": {"CREW_SEARCH_TICKET": "one-time-ticket-9876"},
+            "full_disk_read": True,
             "result_path": str(result_path),
             "result_nonce": "a" * 32,
         }
@@ -601,6 +604,7 @@ async def test_background_bridge_forwards_explicit_env_overrides(tmp_path, monke
     assert captured["env_overrides"] == {
         "CREW_SEARCH_TICKET": "one-time-ticket-9876"
     }
+    assert captured["full_disk_read"] is True
     metadata = json.loads(result_path.read_text(encoding="utf-8"))
     assert metadata == {
         "nonce": "a" * 32,
@@ -608,6 +612,49 @@ async def test_background_bridge_forwards_explicit_env_overrides(tmp_path, monke
         "capabilities": ["filesystem_sandbox", "process_tree_cleanup"],
         "exit_code": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_background_bridge_separates_host_trusted_path(tmp_path, monkeypatch):
+    """The Desktop bridge must not feed its own PATH through untrusted overrides."""
+    from crew.security import background_runner
+
+    captured = {}
+
+    class _Runtime:
+        def __init__(self, _helper_argv):
+            pass
+
+        async def execute(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                exit_code=0,
+                stdout="",
+                stderr="",
+                capabilities=RuntimeCapabilities(
+                    backend="macos_seatbelt",
+                    filesystem_sandbox=True,
+                    process_tree_cleanup=True,
+                    managed_network=False,
+                    full_disk_read=True,
+                ),
+            )
+
+    monkeypatch.setattr(background_runner, "NativeRuntimeClient", _Runtime)
+    trusted = os.pathsep.join((str(tmp_path / "bin"), str(tmp_path / "tools")))
+    exit_code = await background_runner._run(
+        {
+            "helper_argv": ["runtime"],
+            "command": ["ls"],
+            "cwd": str(tmp_path),
+            "env_overrides": {"PATH": trusted, "PYTHONUNBUFFERED": "1"},
+            "full_disk_read": True,
+        }
+    )
+
+    assert exit_code == 0
+    assert captured["trusted_path"] == trusted
+    assert captured["env_overrides"] == {"PYTHONUNBUFFERED": "1"}
 
 
 def test_background_process_result_is_audited(tmp_path):

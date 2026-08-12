@@ -582,7 +582,10 @@ def shell_argv(command: str) -> tuple[str, ...]:
         )
         return (str(Path(executable).resolve()), "-NoProfile", "-Command", script)
     executable = shutil.which("bash") or "/bin/sh"
-    return (str(Path(executable).resolve()), "-lc", command)
+    # Managed runtimes intentionally set HOME to the host user directory so
+    # paths such as ~/Desktop resolve correctly. A non-login shell prevents
+    # that UX improvement from implicitly sourcing host profile scripts.
+    return (str(Path(executable).resolve()), "-c", command)
 
 
 def runtime_platform_key(

@@ -271,6 +271,7 @@
       <li><code>.git</code>、<code>.agents</code>、<code>.crew</code> 等项目元数据重新覆盖成只读。</li>
       <li>Ace 数据库、认证、配置、审计、日志和 owner 凭据路径使用更具体的不可升级拒绝。</li>
       <li>网络是独立能力：能读文件不等于能联网；没有精确网络规则时，命令保持离线。</li>
+      <li>内置终端的 <code>HOME</code>/<code>USERPROFILE</code> 指向宿主用户目录，因此 <code>~/Desktop</code> 与文件工具看到的是同一位置；这只改变路径语义，不自动赋予写权限。外部智能体若投影凭据文件，仍使用一次性私有 HOME。</li>
     </ul>
 
     <pre><code>受管模式基础视图
@@ -351,10 +352,15 @@ Ace 私有路径  ────────────────────�
       <thead><tr><th>字段</th><th>含义</th><th>审批与执行</th></tr></thead>
       <tbody>
         <tr><td><code>use_default</code></td><td>不扩大当前会话的沙箱能力。</td><td>请求批准模式仍询问命令本身；批准后按基础 profile 执行。</td></tr>
-        <tr><td><code>with_additional_permissions</code></td><td>留在沙箱内，增加明确文件根、网络目标或本地监听能力。</td><td>审批面板逐条展示扩张范围；批准后 overlay 进入 Native Runtime 请求。</td></tr>
+        <tr><td><code>with_additional_permissions</code></td><td>留在沙箱内，增加明确宿主文件根、网络目标或本地监听能力。</td><td>宿主绝对路径可以直接加入沙箱视图；审批面板逐条展示范围，批准后 overlay 进入 Native Runtime 请求，不需要脱离沙箱。</td></tr>
         <tr><td><code>require_escalated</code></td><td>仅当前完整命令脱离沙箱，使用宿主用户权限。</td><td>必须提供原因并明确批准；session 授权仍绑定完整命令与 cwd，不会切换整个对话。</td></tr>
       </tbody>
     </table>
+
+    <div class="scenario">
+      <strong>示例：删除桌面上的一个截图</strong>
+      <p>推荐调用 <code>file_delete</code> 并传入宿主绝对路径。结构化工具先把删除动作绑定到该文件，再按当前模式申请精确写权限。若必须使用终端，命令目标也必须是无变量、无通配符的宿主绝对路径，并且 <code>with_additional_permissions.filesystem</code> 中的 <code>read_write</code> 根必须覆盖同一路径。仅批准 <code>rm screenshot.png</code> 只会操作当前 cwd，批准桌面路径并不会重写命令中的相对路径；<code>require_escalated</code> 不是普通桌面文件操作的修复手段。</p>
+    </div>
 
     <pre><code>Agent 提交终端动作
         │
@@ -472,7 +478,7 @@ once / session 临时 grant
 
     <h3>5.1 基础权限</h3>
     <ul>
-      <li>项目会话把项目根设为可读写根；未选择项目的普通会话使用 owner 隔离的 <code>task_workspaces/&lt;workspace-id&gt;</code> 作为有效工作目录和可写根。系统提示会把这个 host 生成的 cwd 明确标为可信起点；沙箱私有 <code>HOME</code>/<code>USERPROFILE</code> 只用于隔离，不可用来反推工作空间。cwd 必须位于该根内，不能再出现“进程 cwd 已落到任务目录、沙箱却没有可写根”的断链。</li>
+      <li>项目会话把项目根设为可读写根；未选择项目的普通会话使用 owner 隔离的 <code>task_workspaces/&lt;workspace-id&gt;</code> 作为有效工作目录和可写根。系统提示会把这个 host 生成的 cwd 与宿主 HOME 明确标为可信路径。内置终端用宿主 HOME 解析 <code>~</code>，但 cwd 仍是工作空间，且 HOME 下只有基础只读或已批准的精确写权限；外部智能体的投影凭据使用私有 HOME。</li>
       <li>路径在判断前会解析为最终规范路径；符号链接、junction 和 TOCTOU 交换由文件工具与平台测试覆盖。</li>
       <li>写文件系统根目录被永久拒绝。</li>
       <li>在请求批准与替我审批中，Ace 数据目录、security DB 及其 WAL/SHM/journal 属于不可升级拒绝。</li>
@@ -488,6 +494,7 @@ once / session 临时 grant
 
     <h2 id="execution">6. 进程执行：所有受管命令汇聚到一个边界</h2>
     <p><code>compile_process_launch</code> 在每个 turn 入口根据可信上下文编译一次 <code>ProcessLaunch</code>。审批通过后，命中的 grant/rule 把额外权限写入该启动快照；前台、后台进程和 captured adapter 都把同一 overlay 交给 Native Runtime。终端还支持 <code>use_default</code>、<code>with_additional_permissions</code> 与 <code>require_escalated</code>：最后一种必须提供原因并单独批准，只让当前完整命令脱离沙箱，不会切换整个对话模式。</p>
+    <p>前台与后台桥接请求都会显式传递 <code>full_disk_read</code>，避免策略层显示“广泛只读”、原生运行层却仍从空文件系统启动。终端结果同时返回实际 cwd、HOME、执行边界、批准决定和实际应用的路径/网络权限，Agent 不应再把沙箱内精确扩权误述为失败或“文件工具绕过了沙箱”。</p>
     <p>默认任务目录可能位于受保护运行时 home 的更深层。Broker 会在前台和后台共用同一个文件计划编译器：当一个 deny 是已认证工作区或已激活 Skill 只读根的严格祖先时，不把这个冲突的祖先 deny 交给原生后端；精确 deny、工作区内受保护元数据和 deny 的子路径仍保留。各后端保持 default-deny，因此该 carve-out 不会让同级凭据、数据库或其他 owner 目录变成可见资源。</p>
 
     <pre><code>SecurityContext + 会话模式
@@ -518,7 +525,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     <ul>
       <li>stdin 只允许一次性载荷，默认上限 1 MiB。</li>
       <li>环境覆盖必须使用合法变量名，禁止覆盖 <code>ACE_SECURITY_*</code>、<code>ACE_BUNDLED_*</code> 和代理保留变量，总体默认上限 256 KiB。</li>
-      <li>各原生后端从受控环境构建子进程环境；macOS 明确 <code>env_clear</code>，使用私有 HOME/TMPDIR。受管 PATH 会保留系统命令目录，并把随包 Python/Node/npm/npx 置于最前；开发态没有随包运行时时，只读开放当前开发 Node 的 launcher 目录、真实版本根和 npm 包根，不再因为 <code>bin/</code> 位于某个 prefix 下就开放整个 prefix。</li>
+      <li>各原生后端从受控环境构建子进程环境；内置终端在 <code>full_disk_read</code> 受管基线中使用宿主 HOME，但 shell 以非登录模式启动，不隐式加载用户 profile。TMPDIR 仍由平台沙箱控制。携带 <code>home_files</code> 的外部智能体始终使用私有投影 HOME，避免凭据落入宿主目录。受管 PATH 会保留系统命令目录，并把随包 Python/Node/npm/npx 置于最前。</li>
       <li>用户显式激活的 Skill 根会重新对照当前 Skill 注册表和 realpath，匹配后仅作为本轮只读根继承到 terminal；伪造、移动或被替换的 Skill activation 失败关闭。Skill 的额外数据目录、虚拟环境和外部程序不会由 Skill 根隐式获得权限。</li>
       <li>stdout 与 stderr 总量默认限制为 2 MiB，单帧最多 64 KiB；超限会停止进程。</li>
       <li>返回模型和任务日志前，会按注入的秘密值精确脱敏，并再执行通用敏感文本脱敏。</li>
@@ -583,7 +590,24 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     <h3>7.1 搜索、网页提取、Wiki URL 与灵感 Automation</h3>
     <p><code>web_search</code>、<code>web_extract</code>、Wiki URL 抓取和灵感 <code>http_json</code> Automation 共用 <code>crew/security/outbound.py</code>：只接受公开 HTTP(S)，拒绝 URL 凭据、localhost、私网、链路本地与保留地址；每次重定向重新校验，并只连接已经校验为公网的数字地址，避免 DNS 检查后再次解析。响应体有硬大小上限。网页工具和 Agent 手动 Automation 还会把精确 host/port/protocol 交给安全服务：请求批准模式等待 owner 决定，替我审批和完全访问权限可自动审核公开目标，跨域重定向逐目标授权，所有决定进入网络审计。完全访问不会改变某个专用工具自身“仅公网 URL”的输入契约，但可以通过宿主命令使用完整网络能力。灵感预览响应同时设置 <code>connect-src 'none'</code>，生成页面不能另开一条未审核的 Chromium 联网旁路。</p>
 
-    <h3>7.2 进程内 HTTP 支持上游代理级联</h3>
+    <h3>7.2 工具入口审计：Skill、Wiki、视觉与 MCP</h3>
+    <p>沙箱只约束进入 Native Runtime 的进程，不能自动覆盖 Gateway 进程内的 Python 工具。因此任何接受模型路径、URL 或远端工具参数的 handler，都必须先进入同一套结构化授权。当前工具面按下面的契约收口：</p>
+    <table>
+      <thead><tr><th>入口</th><th>授权与执行方式</th><th>关键边界</th></tr></thead>
+      <tbody>
+        <tr><td><code>file_read</code>、<code>file_write</code>、<code>file_delete</code>、<code>patch</code>、<code>glob</code>、<code>grep</code></td><td>规范化真实路径后调用文件策略；批准后重新授权，再使用 identity-checked 文件操作。</td><td>目录 grant 只覆盖后代，文件 grant 只覆盖自身，只读不能升级为写；失败结果不广播为成功文件变更。</td></tr>
+        <tr><td><code>vision_analyze</code></td><td>复用 <code>file_read</code> 的路径授权，并用防符号链接/竞态的 verified read 读取图片头。</td><td>不能仅凭模型传入路径直接读取宿主文件，也不能通过读取期间替换目标绕过判断。</td></tr>
+        <tr><td><code>skill_view</code>、Skill package、激活 Skill 根</td><td>每次读取前后重新校验注册根与 realpath；<code>SKILL.md</code> 和 <code>PACKAGE.md</code> 使用同一 contained traversal。</td><td>外部软链、junction、悬空链接和扫描竞态失败关闭；显式激活的 Skill 根只以只读方式进入本轮 <code>ProcessLaunch</code>。</td></tr>
+        <tr><td><code>skills_repair</code></td><td>dry-run 只审计；真正修改前按待修复的精确 Skill 目录申请写权限。</td><td>审批不会让 Skill 目录变成全局可写，修复器仍拒绝越界链接和非注册目录。</td></tr>
+        <tr><td>Wiki 附件与 URL 来源</td><td>附件只接受当前轮 host 登记的上传路径；URL 抓取在初始目标和每个跨 authority 重定向上分别做网络授权。</td><td>Wiki 自身页面、RawSource 和索引只落在 owner/KB 隔离的应用存储根；网页抓取不能借重定向访问未展示目标。</td></tr>
+        <tr><td>HTTP/SSE MCP 工具</td><td>调用前把配置的 endpoint、完整工具名和规范化参数摘要绑定成一次 exec-style 动作，并把精确 host/port/protocol 作为额外网络权限审批。</td><td>缺少当前会话安全上下文时失败关闭；本地/私网 MCP 必须由审批明确展示并允许，参数变化不会复用“始终允许”的旧动作。</td></tr>
+        <tr><td>stdio MCP</td><td>默认不允许 Gateway 直接启动宿主进程；仅操作者显式启用的 disabled 上下文可使用。</td><td>已经以宿主身份启动的 worker 不能被后续受管会话复用；通用 managed 双向 stdio 未实现时明确 unavailable。</td></tr>
+      </tbody>
+    </table>
+    <div class="callout warn"><strong>拒绝不是换工具的提示：</strong>结构化文件工具与 terminal 是两条都受安全服务控制的执行路径。前者由 Gateway 对单个动作实施路径策略，后者由 Native Runtime 对整个进程树实施操作系统隔离。用户明确拒绝任一安全审批后，当前 turn 建立统一拒绝栅栏并停止；后续 <code>glob</code>、<code>file_read</code>、Wiki、Skill、MCP 或 terminal 调用不会再执行。请求批准模式还会关闭工具预热与安全调用并发，防止另一个读取工具在审批结果到达前先完成。</div>
+    <p>批准后若 Native Runtime 返回 <code>runtime_crashed</code>、<code>runtime_protocol_mismatch</code> 或 <code>sandbox_unavailable</code>，这属于安全基础设施故障，不表示路径“在沙箱外”。终端把这些结果标记为真实工具错误并结束当前 turn，Agent 不得改用结构化文件工具掩盖故障。Desktop 的受管启动桥把宿主组装的工具链 <code>PATH</code> 从普通环境覆盖中分离：模型仍不能覆盖 PATH，但批准后的进程能够使用随包 Python/Node 与系统命令目录。</p>
+
+    <h3>7.3 进程内 HTTP 支持上游代理级联</h3>
     <p><code>outbound.py</code> 的安全口径与 Native Runtime 受管代理一致：<strong>安全意味着“经过策略判断”，不是“直连目标”</strong>。判断通过后，默认把流量级联到用户已有的上游代理，由代理负责到达目标；没有上游代理时才直连。代理解析优先级（高到低）：调用方显式传入 → 配置 <code>network.upstream_proxy</code>（<code>load_config</code> 加载后注入为进程级默认）→ 环境变量 <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>/<code>ALL_PROXY</code>（大小写都读）。支持 <code>http://</code>、<code>https://</code>、<code>socks5://</code>、<code>socks5h://</code>，纯标准库实现，三平台行为一致。</p>
     <ul>
       <li>HTTP/HTTPS 代理走 <code>CONNECT host:port</code> 隧道；authority 始终带端口，CONNECT 握手限时后回到阻塞模式再做 TLS。</li>
@@ -593,7 +617,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
       <li>私网目标拒绝、URL 凭据拒绝、重定向逐目标授权、响应大小上限在代理模式下全部保留。</li>
     </ul>
 
-    <h3>7.3 浏览器上传边界</h3>
+    <h3>7.4 浏览器上传边界</h3>
     <p>上传和拖放先按结构化文件读取策略授权源路径；受管模式的广泛只读基线允许读取工作目录外的普通文件，但 Ace 私有路径与显式拒绝路径仍不可见。读取通过后，Python 在账号浏览器目录下创建一次性 <code>approved-uploads/&lt;nonce&gt;</code>，安全快照普通文件或目录，拒绝符号链接、junction/reparse point 与特殊文件，并执行总字节和条目数护栏。Electron Host 再独立验证暂存根、目标 realpath 和整棵目录；Playwright 操作结束后立即清理该次暂存区。Host 不再接受工作目录原始路径，也不再使用与 Playwright 能力不一致的 256 个顶层路径硬限制。</p>
 
     <h2 id="protocol">8. 原生协议与运行组件完整性</h2>
@@ -713,6 +737,7 @@ helper 响应
         <tr><td>浏览器网络</td><td>Chromium 全部 HTTP、HTTPS 与 WebSocket 连接强制经过认证的 DNS-pinning policy proxy；私网与元数据地址默认拒绝。</td><td>需要访问本机开发服务时，必须通过 <code>allowed_private_hosts</code>/<code>allowed_private_cidrs</code> 做部署级显式例外。</td></tr>
         <tr><td>普通/Wiki 工作目录</td><td>没有项目根时使用 owner 隔离任务目录作为 cwd 与可写根；Wiki Agent 同样消费有效工作目录。</td><td>Host 拥有的更具体任务根可以从宽泛运行时目录保护中 carve out；数据库、身份、审计和仓库元数据的更具体不可升级保护仍优先。</td></tr>
         <tr><td>网页与 Wiki 出站</td><td>搜索、提取和 Wiki URL 统一做公开地址校验、重定向复检、DNS 地址固定、响应上限与网络审批/审计。</td><td>不把应用内 HTTP 请求当成“不是命令所以无需审核”；也不允许它访问本机或内网服务。</td></tr>
+        <tr><td>Skill / 视觉 / 远程 MCP 工具</td><td>Skill 元数据与资源读取统一做 registered-root/realpath 前后校验；视觉读取进入文件策略；远程 MCP 调用绑定 endpoint、完整工具名与参数摘要。</td><td>Gateway 进程内工具不受 Native Runtime 自动覆盖，必须在 handler 入口显式授权；缺失会话上下文时失败关闭。</td></tr>
         <tr><td>浏览器上传</td><td>源文件先走广泛只读与保护路径判断，再复制到账号隔离的一次性暂存区；Host 只接受该根下的普通文件/安全目录。</td><td>工作目录外普通文件可以读取并上传；Ace 私有路径和显式拒绝路径仍不可见，Host 也不能直接读取任意宿主路径。</td></tr>
         <tr><td>替我审批</td><td>基础沙箱内的普通终端命令自动执行；危险动作、权限扩张和监听端口仍询问。</td><td>自动执行只省去不必要的提示，不扩大文件或网络权限。</td></tr>
         <tr><td>Codex / Claude Code 外援</td><td>受管模式使用 Native Runtime 内的一次性 captured 兼容路径，并为精确模型服务目标单独审批；不会回退到宿主裸进程。</td><td>基础回答与工作目录内操作可用；结构化工具事件、MCP、恢复与双向流能力在兼容路径中明确降级。</td></tr>
@@ -738,6 +763,8 @@ helper 响应
         <tr><td>crew/security/launch.py<br>crew/security/broker.py</td><td>编译 ProcessLaunch，把 profile 翻译为唯一的原生执行请求。</td></tr>
         <tr><td>crew/security/runtime_client.py</td><td>helper 完整性检查、v3 协议、能力验证、输出限制与进程回收。</td></tr>
         <tr><td>crew/security/outbound.py<br>crew/tools/web_tools.py</td><td>应用内公开 HTTP(S) 校验、固定连接、搜索结果解析与网络审批。</td></tr>
+        <tr><td>crew/wiki/tools.py<br>crew/tools/mcp_client.py</td><td>Wiki 初始/重定向目标逐项授权；远程 MCP 调用绑定 endpoint 与完整参数摘要，缺少会话安全上下文时失败关闭。</td></tr>
+        <tr><td>crew/agent/skills.py<br>crew/tools/skills_tools.py</td><td>Skill 与 package 注册根/realpath 校验、只读运行根编译，以及修复动作的精确目录写授权。</td></tr>
         <tr><td>crew/agent/external/cli_adapter.py<br>crew/agent/external/codex_adapter.py</td><td>外部智能体受管一次性兼容、provider 网络 overlay、原生可执行文件解析与能力降级。</td></tr>
         <tr><td>crew/browser/manager.py<br>desktop/src/main/browser-host.ts</td><td>浏览器源文件授权、安全上传暂存、Host 二次校验与清理。</td></tr>
         <tr><td>crew/security/audit.py</td><td>owner 级 SQLite 审计、脱敏、保留期与关键事件持久化。</td></tr>
