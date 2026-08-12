@@ -967,9 +967,9 @@ def formation_auto_decision(
     coverage = plan.get("coverage") if isinstance(plan.get("coverage"), dict) else {}
     confidence = plan.get("confidence") if isinstance(plan.get("confidence"), dict) else {}
     team_spec = baseline.get("team_spec") if isinstance(baseline.get("team_spec"), dict) else {}
-    execution_profile = (
-        team_spec.get("execution_profile")
-        if isinstance(team_spec.get("execution_profile"), dict)
+    task_profile = (
+        team_spec.get("task_profile")
+        if isinstance(team_spec.get("task_profile"), dict)
         else {}
     )
     policy = team_spec.get("policy") if isinstance(team_spec.get("policy"), dict) else {}
@@ -988,7 +988,7 @@ def formation_auto_decision(
         reasons.append("capability_evidence_below_0.75")
     if str(team_spec.get("uncertainty") or "high") != "low":
         reasons.append("team_spec_uncertainty")
-    if str(execution_profile.get("complexity") or "multi_role") not in {"simple", "focused"}:
+    if str(task_profile.get("complexity") or "multi_role") not in {"simple", "focused"}:
         reasons.append("structured_multi_role_task")
     if list(plan.get("warnings") or []):
         reasons.append("formation_warnings")

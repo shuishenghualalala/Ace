@@ -221,8 +221,8 @@ def test_fast_team_suggestion_returns_team_spec_and_testing_roles():
         ],
     )
 
-    assert result["team_spec"]["execution_profile"]["intent"] == "testing"
-    assert result["team_spec"]["execution_profile"]["needs_build"] is False
+    assert result["team_spec"]["task_profile"]["intent"] == "testing"
+    assert result["team_spec"]["execution_profile"] == {}
     role_keys = [member["role_key"] for member in result["members"]]
     assert "qa_engineer" in role_keys
     assert "fullstack_developer" not in role_keys
@@ -1223,7 +1223,7 @@ def test_auto_gate_skips_ai_only_for_complete_high_confidence_simple_plan():
         },
         "team_spec": {
             "uncertainty": "low",
-            "execution_profile": {"complexity": "focused"},
+            "task_profile": {"complexity": "focused"},
             "policy": {"risk_flags": []},
             "planning": {"missing_info": []},
         },
@@ -1255,7 +1255,7 @@ def test_auto_gate_audits_complex_or_low_evidence_plan():
         },
         "team_spec": {
             "uncertainty": "low",
-            "execution_profile": {"complexity": "multi_role"},
+            "task_profile": {"complexity": "multi_role"},
             "policy": {"risk_flags": []},
             "planning": {"missing_info": []},
         },

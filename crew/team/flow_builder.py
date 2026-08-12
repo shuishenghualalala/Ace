@@ -304,7 +304,7 @@ def build_default_workflow_nodes(
         return [], []
     team_spec = team_spec if team_spec is not None else build_team_spec({"goal": goal})
     execution_profile = team_spec.execution_profile
-    planning = planning_modes(execution_profile)
+    planning = planning_modes({"planning": team_spec.planning})
     required_roles = list(team_spec.team_requirements.get("roles") or [])
     required_lanes = set(team_spec.team_requirements.get("workflow_lanes") or [])
     task_title = goal_title(goal)
@@ -314,7 +314,7 @@ def build_default_workflow_nodes(
             "title": f"Leader 拆分任务：{task_title}",
             "detail": (
                 f"根据用户目标拆分团队任务、确定依赖、验收标准和协作顺序：{goal}\n"
-                f"TeamSpec：{execution_profile.get('intent', 'mixed')}/{execution_profile.get('complexity', 'focused')}，"
+                f"TeamSpec：{team_spec.task_profile.get('intent', 'mixed')}/{team_spec.task_profile.get('complexity', 'focused')}，"
                 f"建议协作模式 {team_spec.collaboration_mode}，角色 {'、'.join(required_roles) or '按现有成员'}。"
             ),
             "assignee": "leader",

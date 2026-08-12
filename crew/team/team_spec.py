@@ -31,6 +31,7 @@ class TeamSpec:
     version: int
     goal: str
     collaboration_mode: str = "leader_mesh"
+    task_profile: dict[str, str] = field(default_factory=dict)
     execution_profile: dict[str, Any] = field(default_factory=dict)
     team_requirements: dict[str, Any] = field(default_factory=dict)
     planning: dict[str, Any] = field(default_factory=dict)
@@ -92,28 +93,44 @@ def _normalize_deliverables(value: Any) -> list[dict[str, str]]:
 
 def _default_execution_profile(source: Mapping[str, Any]) -> dict[str, Any]:
     explicit = _mapping(source.get("execution_profile"))
+    runtime_keys = (
+        "requested_mode",
+        "selected_mode",
+        "budget",
+        "turn_kind",
+        "turn_decision_source",
+        "profile_source",
+    )
+    profile: dict[str, Any] = {}
+    for key in runtime_keys:
+        if key in explicit:
+            profile[key] = explicit[key]
+        elif key in source:
+            profile[key] = source[key]
+    return profile
+
+
+def _default_task_profile(source: Mapping[str, Any]) -> dict[str, str]:
+    explicit = _mapping(source.get("task_profile"))
+    legacy = _mapping(source.get("execution_profile"))
     return {
-        "intent": str(explicit.get("intent") or source.get("intent") or "mixed"),
-        "complexity": str(explicit.get("complexity") or source.get("complexity") or "focused"),
+        "intent": str(
+            explicit.get("intent")
+            or source.get("intent")
+            or legacy.get("intent")
+            or "mixed"
+        ),
+        "complexity": str(
+            explicit.get("complexity")
+            or source.get("complexity")
+            or legacy.get("complexity")
+            or "focused"
+        ),
         "deliverable_shape": str(
-            explicit.get("deliverable_shape") or source.get("deliverable_shape") or "unknown"
-        ),
-        # These fields remain during migration for old consumers.  They are
-        # copied only when explicitly supplied; they are never inferred here.
-        "needs_build": _explicit_bool(
-            explicit.get("needs_build") if "needs_build" in explicit else source.get("needs_build")
-        ),
-        "needs_verification": _explicit_bool(
-            explicit.get("needs_verification")
-            if "needs_verification" in explicit else source.get("needs_verification")
-        ),
-        "needs_docs": _explicit_bool(
-            explicit.get("needs_docs") if "needs_docs" in explicit else source.get("needs_docs")
-        ),
-        "required_lanes": _text_list(
-            explicit.get("required_lanes")
-            if "required_lanes" in explicit else source.get("required_lanes"),
-            limit=8,
+            explicit.get("deliverable_shape")
+            or source.get("deliverable_shape")
+            or legacy.get("deliverable_shape")
+            or "unknown"
         ),
     }
 
@@ -121,7 +138,6 @@ def _default_execution_profile(source: Mapping[str, Any]) -> dict[str, Any]:
 def _explicit_workflow_lanes(
     source: Mapping[str, Any],
     requirements: Mapping[str, Any],
-    execution_profile: Mapping[str, Any],
 ) -> list[str]:
     """Return the canonical workflow lanes from explicit input only.
 
@@ -134,7 +150,7 @@ def _explicit_workflow_lanes(
     if explicit_lanes is None:
         explicit_lanes = source.get("workflow_lanes")
     if explicit_lanes is None:
-        explicit_lanes = execution_profile.get("required_lanes")
+        explicit_lanes = _mapping(source.get("execution_profile")).get("required_lanes")
     lanes = _text_list(explicit_lanes, limit=8)
     legacy_lanes = {
         "needs_build": "build",
@@ -142,11 +158,8 @@ def _explicit_workflow_lanes(
         "needs_docs": "docs",
     }
     for flag, lane in legacy_lanes.items():
-        explicit_value = (
-            execution_profile.get(flag)
-            if flag in execution_profile
-            else source.get(flag)
-        )
+        legacy_profile = _mapping(source.get("execution_profile"))
+        explicit_value = legacy_profile.get(flag) if flag in legacy_profile else source.get(flag)
         if _explicit_bool(explicit_value):
             lanes.append(lane)
     return _unique(lanes, limit=8)
@@ -154,6 +167,7 @@ def _explicit_workflow_lanes(
 
 def _build_normalized_spec(source: Mapping[str, Any]) -> TeamSpec:
     requirements_input = _mapping(source.get("team_requirements"))
+    task_profile = _default_task_profile(source)
     execution_profile = _default_execution_profile(source)
     explicit_capabilities = requirements_input.get("capabilities")
     if explicit_capabilities is None:
@@ -166,9 +180,7 @@ def _build_normalized_spec(source: Mapping[str, Any]) -> TeamSpec:
         else source.get("required_roles"),
         limit=8,
     )
-    lanes = _explicit_workflow_lanes(source, requirements_input, execution_profile)
-    if not execution_profile["required_lanes"]:
-        execution_profile["required_lanes"] = list(lanes)
+    lanes = _explicit_workflow_lanes(source, requirements_input)
 
     planning_input = _mapping(source.get("planning"))
     policy_input = _mapping(source.get("policy"))
@@ -226,6 +238,7 @@ def _build_normalized_spec(source: Mapping[str, Any]) -> TeamSpec:
         version=3,
         goal=raw_goal,
         collaboration_mode=str(source.get("collaboration_mode") or "leader_mesh"),
+        task_profile=task_profile,
         execution_profile=execution_profile,
         team_requirements={
             "roles": roles,
@@ -256,3 +269,94 @@ def build_team_spec(source: TeamSpecInput = None) -> TeamSpec:
     if isinstance(source, Mapping):
         return _build_normalized_spec(source)
     return _build_normalized_spec({"goal": str(source or "")})
+
+
+def team_spec_from_planning_decision(
+    base_spec: TeamSpec,
+    decision: Any,
+) -> TeamSpec:
+    """Project one structured PlanningDecision into the shared TeamSpec.
+
+    PlanningDecision understands the free-form goal once.  This function is
+    the data-contract boundary: downstream Formation and Workflow consumers
+    receive the same normalized capabilities, lanes, deliverables and risk
+    information instead of interpreting the prompt independently.
+    """
+
+    capabilities = normalize_capabilities([
+        *(base_spec.team_requirements.get("capabilities") or []),
+        *(
+            capability
+            for unit in decision.work_units
+            for capability in unit.required_capabilities
+        ),
+        *(["review", "verification"] if decision.quality_policy in {
+            "independent_review", "evaluator_optimizer",
+        } else []),
+    ])
+    lane_by_kind = {
+        "plan": "plan",
+        "research": "plan",
+        "analysis": "plan",
+        "design": "design",
+        "build": "build",
+        "verify": "verify",
+        "docs": "docs",
+    }
+    lanes = list(dict.fromkeys([
+        *(base_spec.team_requirements.get("workflow_lanes") or []),
+        *(
+            lane_by_kind[unit.kind]
+            for unit in decision.work_units
+            if unit.kind in lane_by_kind
+        ),
+        *(["verify"] if decision.quality_policy in {
+            "independent_review", "evaluator_optimizer",
+        } else []),
+    ]))
+    decision_deliverables = [
+        {
+            "type": str(unit.kind or "answer"),
+            "description": str(unit.expected_output or unit.objective).strip(),
+        }
+        for unit in decision.work_units
+        if str(unit.expected_output or unit.objective).strip()
+    ]
+    planning = {
+        **dict(base_spec.planning or {}),
+        "strategy": "llm_dag",
+        "reflection_policy": "after_planning" if decision.quality_policy != "none" else "none",
+        "missing_info": list(decision.critical_missing_info),
+    }
+    requirements = {
+        **dict(base_spec.team_requirements or {}),
+        "capabilities": capabilities,
+        "workflow_lanes": lanes,
+    }
+    notes = [
+        "TeamSpec 已由 PlanningDecision 的结构化工作单元生成；下游不再从用户目标重复推断。",
+        *list(base_spec.planner_notes or []),
+    ]
+    return TeamSpec(
+        **{
+            **base_spec.to_dict(),
+            "task_profile": dict(base_spec.task_profile or {}),
+            "team_requirements": requirements,
+            "planning": planning,
+            "deliverables": [
+                *list(base_spec.deliverables or []),
+                *decision_deliverables,
+            ][:8],
+            "success_criteria": list(dict.fromkeys([
+                *list(base_spec.success_criteria or []),
+                *(
+                    str(unit.expected_output or unit.objective).strip()
+                    for unit in decision.work_units
+                    if str(unit.expected_output or unit.objective).strip()
+                ),
+            ]))[:8],
+            "risk_level": decision.risk_level,
+            "uncertainty": decision.semantic_uncertainty,
+            "planner_notes": list(dict.fromkeys(notes))[:8],
+        }
+    )

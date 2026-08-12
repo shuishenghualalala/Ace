@@ -112,7 +112,7 @@ def analyze_team_policy(
             consent_required=True,
         ))
 
-    if len(members) <= 1 and str(spec.execution_profile.get("complexity") or "focused") != "simple":
+    if len(members) <= 1 and str(spec.task_profile.get("complexity") or "focused") != "simple":
         warnings.append(TeamPolicyWarning(
             code="understaffed_team",
             severity="warning",

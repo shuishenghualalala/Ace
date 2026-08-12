@@ -7216,17 +7216,22 @@ class InProcessTeamManager(TeamManager):
         required_workflow = bool(team_cfg.get("required_workflow", True))
         raw_team_spec = envelope.params.get("team_spec")
         team_spec = raw_team_spec if isinstance(raw_team_spec, dict) else None
+        explicit_profile = envelope.params.get("team_execution_profile")
+        route_team_spec = team_spec
+        if route_team_spec is None and isinstance(explicit_profile, dict):
+            route_team_spec = {"goal": str(envelope.query or ""), "execution_profile": explicit_profile}
         base_turn_decision = self.turn_router.route(
             str(envelope.query or ""),
-            team_spec=team_spec,
+            team_spec=route_team_spec,
         )
         intent_spec = (
             base_turn_decision.diagnostics.get("team_spec")
             if isinstance(base_turn_decision.diagnostics.get("team_spec"), dict)
             else {}
         )
-        intent_profile = intent_spec.get("execution_profile") if isinstance(intent_spec.get("execution_profile"), dict) else {}
-        explicit_profile = envelope.params.get("team_execution_profile")
+        if team_spec is None and intent_spec:
+            team_spec = intent_spec
+        intent_profile = intent_spec.get("task_profile") if isinstance(intent_spec.get("task_profile"), dict) else {}
         explicit_mode = (
             str(explicit_profile.get("requested_mode") or "").strip().lower()
             if isinstance(explicit_profile, dict)

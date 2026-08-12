@@ -43,9 +43,9 @@ class TeamTurnRouter:
         reason = (
             spec.planner_notes[0]
             if spec.planner_notes
-            else str(spec.execution_profile.get("intent") or "mixed")
+            else str(spec.task_profile.get("intent") or "mixed")
         )
-        profile = spec.execution_profile if isinstance(spec.execution_profile, dict) else {}
+        profile = spec.task_profile if isinstance(spec.task_profile, dict) else {}
         planning = spec.planning if isinstance(spec.planning, dict) else {}
         workflow_lanes = set(spec.team_requirements.get("workflow_lanes") or [])
         intent = str(profile.get("intent") or "mixed").strip().lower()

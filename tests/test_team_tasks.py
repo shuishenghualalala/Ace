@@ -80,16 +80,23 @@ def _structured_team_spec(
     needs_verification: bool = False,
     needs_docs: bool = False,
 ) -> dict:
+    workflow_lanes = []
+    if needs_build:
+        workflow_lanes.append("build")
+    if needs_verification:
+        workflow_lanes.append("verify")
+    if needs_docs:
+        workflow_lanes.append("docs")
     return {
         "goal": goal,
-        "execution_profile": {
+        "task_profile": {
             "intent": intent,
             "complexity": complexity,
-            "needs_build": needs_build,
-            "needs_verification": needs_verification,
-            "needs_docs": needs_docs,
         },
-        "team_requirements": {"capabilities": list(capabilities)},
+        "team_requirements": {
+            "capabilities": list(capabilities),
+            "workflow_lanes": workflow_lanes,
+        },
     }
 
 
@@ -2840,9 +2847,8 @@ def test_team_spec_does_not_infer_workflow_from_testing_words():
 
     for goal in goals:
         spec = build_team_spec(goal)
-        assert spec.execution_profile["intent"] == "mixed"
-        assert spec.execution_profile["needs_build"] is False
-        assert spec.execution_profile["needs_verification"] is False
+        assert spec.task_profile["intent"] == "mixed"
+        assert spec.team_requirements["workflow_lanes"] == []
         assert spec.team_requirements["roles"] == []
         assert spec.team_requirements["capabilities"] == []
         assert spec.deliverables == []
@@ -4289,8 +4295,8 @@ def test_testing_goal_without_build_member_does_not_create_build_node():
         intent="testing",
         needs_verification=True,
     ))
-    assert collaboration_spec.execution_profile["intent"] == "testing"
-    assert collaboration_spec.execution_profile["needs_build"] is False
+    assert collaboration_spec.task_profile["intent"] == "testing"
+    assert collaboration_spec.team_requirements["workflow_lanes"] == ["verify"]
 
     nodes, edges = tm._default_workflow_nodes(
         team,
@@ -4324,10 +4330,9 @@ def test_testing_goal_without_build_member_does_not_create_build_node():
 def test_unstructured_goal_profile_does_not_embed_execution_mode():
     spec = build_team_spec("有贪吃蛇小游戏么")
 
-    assert spec.execution_profile["intent"] == "mixed"
-    assert spec.execution_profile["needs_build"] is False
-    assert spec.execution_profile["needs_verification"] is False
-    assert spec.execution_profile["needs_docs"] is False
+    assert spec.task_profile["intent"] == "mixed"
+    assert spec.execution_profile == {}
+    assert spec.team_requirements["workflow_lanes"] == []
     assert spec.uncertainty == "high"
 
 
@@ -4342,11 +4347,71 @@ def test_team_spec_projects_legacy_execution_flags_to_canonical_workflow_lanes()
     })
 
     assert spec.team_requirements["workflow_lanes"] == ["build", "verify", "docs"]
-    # Old fields remain readable for migration callers, but Team consumers use
-    # the canonical workflow_lanes contract above.
-    assert spec.execution_profile["needs_build"] is True
-    assert spec.execution_profile["needs_verification"] is True
-    assert spec.execution_profile["needs_docs"] is True
+    # Old fields are accepted as input only; normalized TeamSpec exposes the
+    # canonical workflow_lanes contract and keeps execution_profile runtime-only.
+    assert spec.execution_profile == {}
+
+
+def test_team_spec_keeps_task_semantics_out_of_execution_profile():
+    spec = build_team_spec({
+        "goal": "输出研究方案",
+        "task_profile": {
+            "intent": "research",
+            "complexity": "multi_role",
+            "deliverable_shape": "proposal",
+        },
+        "execution_profile": {
+            "requested_mode": "standard",
+            "budget": {"max_nodes": 5},
+            "intent": "implementation",
+            "needs_build": True,
+        },
+        "team_requirements": {"workflow_lanes": ["plan", "docs"]},
+    })
+
+    assert spec.task_profile == {
+        "intent": "research",
+        "complexity": "multi_role",
+        "deliverable_shape": "proposal",
+    }
+    assert spec.execution_profile == {
+        "requested_mode": "standard",
+        "budget": {"max_nodes": 5},
+    }
+    assert spec.team_requirements["workflow_lanes"] == ["plan", "docs", "build"]
+
+
+def test_team_graph_planner_emits_runtime_only_execution_profile():
+    tm, _ = _team(config=Config(
+        team_config={
+            "members": [{
+                "member_id": "dev",
+                "name": "dev",
+                "role": "负责开发实现",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "build"},
+            }],
+        },
+    ))
+    team = tm._build_team("runtime-profile-contract")
+    plan = TeamGraphPlanner().plan(
+        team,
+        "开发一个小工具",
+        execution_profile={
+            "requested_mode": "fast",
+            "intent": "implementation",
+            "complexity": "focused",
+            "needs_build": True,
+        },
+    )
+
+    assert plan.spec.task_profile["intent"] == "implementation"
+    assert plan.spec.team_requirements["workflow_lanes"] == ["build"]
+    assert plan.spec.execution_profile == {
+        "requested_mode": "fast",
+        "selected_mode": "fast",
+        "budget": {},
+    }
 
 
 def test_planning_decision_rejects_work_unit_without_capability_contract():
@@ -4453,7 +4518,8 @@ def test_team_spec_v3_records_requirements_deliverables_and_consent_policy():
     assert "backend" in spec.team_requirements["capabilities"]
     assert spec.policy["consent_required_actions"]
     assert any("不得绕过用户指定团队" in item for item in spec.policy["consent_required_actions"])
-    assert payload["execution_profile"]["needs_build"] is True
+    assert payload["task_profile"]["intent"] == "implementation"
+    assert payload["team_requirements"]["workflow_lanes"] == ["build", "verify"]
     assert "backend" in payload["team_requirements"]["capabilities"]
     assert payload["policy"]["staffing_strategy"] == "suggest_only"
     assert {item["type"] for item in payload["deliverables"]} >= {"code", "test_report"}
@@ -4473,8 +4539,8 @@ def test_team_spec_normalizes_explicit_capability_aliases_only():
     })
 
     assert spec.team_requirements["capabilities"] == ["testing", "documentation"]
-    assert spec.execution_profile["needs_build"] is False
-    assert spec.execution_profile["needs_verification"] is False
+    assert spec.task_profile["intent"] == "mixed"
+    assert spec.execution_profile == {}
     assert spec.deliverables == [{"type": "proposal", "description": "方案"}]
 
 
@@ -6033,7 +6099,7 @@ def test_team_graph_planner_fast_mode_overrides_default_build_verification():
 
     assert [node["id"] for node in graph_plan.nodes] == ["leader_plan", "fast_execute", "leader_summary"]
     assert graph_plan.edges == [["leader_plan", "fast_execute"], ["fast_execute", "leader_summary"]]
-    assert graph_plan.spec.to_dict()["execution_profile"]["needs_verification"] is False
+    assert graph_plan.spec.team_requirements["workflow_lanes"] == []
 
 
 async def test_team_graph_planner_auto_fast_uses_work_unit_capability_contract():
