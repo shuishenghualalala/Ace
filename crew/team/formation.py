@@ -368,14 +368,14 @@ def role_key_for_capabilities(capabilities: list[str]) -> str:
 
 def _required_capabilities(_text: str, team_spec: Any) -> list[str]:
     required = normalize_capabilities(team_spec.team_requirements.get("capabilities") or [])
-    profile = team_spec.execution_profile
-    if bool(profile.get("needs_build")) and not {
+    workflow_lanes = set(team_spec.team_requirements.get("workflow_lanes") or [])
+    if "build" in workflow_lanes and not {
         "frontend", "backend", "implementation",
     }.intersection(required):
         required.append("implementation")
-    if bool(profile.get("needs_verification")):
+    if "verify" in workflow_lanes:
         required.append("verification")
-    if bool(profile.get("needs_docs")):
+    if "docs" in workflow_lanes or "release" in workflow_lanes:
         required.append("documentation")
     return [capability for capability in normalize_capabilities(required) if capability != "planning"]
 
@@ -691,12 +691,10 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
 
     required_capabilities = _required_capabilities(text, team_spec)
     requested_capabilities = normalize_capabilities(payload.get("required_capabilities") or [])
-    custom_capability_text = " ".join(
-        str(item).strip()
-        for item in (payload.get("custom_capabilities") or [])
-        if str(item).strip()
-    )
-    custom_requested_capabilities = capabilities_from_text(custom_capability_text) if custom_capability_text else []
+    # Custom capabilities are now an explicit capability-key list.  Natural
+    # language descriptions belong in the PlanningDecision input boundary and
+    # must not be reinterpreted here by a second keyword table.
+    custom_requested_capabilities = normalize_capabilities(payload.get("custom_capabilities") or [])
     required_capabilities = list(dict.fromkeys([
         *required_capabilities,
         *requested_capabilities,

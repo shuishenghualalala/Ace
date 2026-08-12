@@ -260,7 +260,8 @@ def goal_title(goal: str) -> str:
 
 
 def goal_needs_build(goal: str) -> bool:
-    return bool(build_team_spec(goal).execution_profile.get("needs_build"))
+    spec = build_team_spec(goal)
+    return "build" in set(spec.team_requirements.get("workflow_lanes") or [])
 
 
 def team_goal_uses_shared_workspace(goal: str) -> bool:
@@ -305,6 +306,7 @@ def build_default_workflow_nodes(
     execution_profile = team_spec.execution_profile
     planning = planning_modes(execution_profile)
     required_roles = list(team_spec.team_requirements.get("roles") or [])
+    required_lanes = set(team_spec.team_requirements.get("workflow_lanes") or [])
     task_title = goal_title(goal)
     nodes: list[dict[str, Any]] = [
         {
@@ -398,7 +400,7 @@ def build_default_workflow_nodes(
         )
         for index, member in enumerate(lanes.get("design", []))
     ]
-    needs_build = bool(execution_profile.get("needs_build"))
+    needs_build = "build" in required_lanes
     build_members = lanes.get("build", []) if needs_build else []
     if needs_build and not build_members:
         build_members = [
@@ -435,7 +437,7 @@ def build_default_workflow_nodes(
         )
         for index, member in enumerate(build_members)
     ]
-    needs_verification = bool(execution_profile.get("needs_verification"))
+    needs_verification = "verify" in required_lanes
     verify_members = lanes.get("verify", []) if needs_verification else []
     verify_templates = {
         member.member_id: verify_role_template(member, task_title, goal)
@@ -529,7 +531,7 @@ def build_default_workflow_nodes(
     leader_review_ids = [*review_after_plan_ids, *leader_review_ids]
     docs_release_members = (
         [*lanes.get("docs", []), *lanes.get("release", [])]
-        if (bool(execution_profile.get("needs_docs")) or needs_build)
+        if ("docs" in required_lanes or "release" in required_lanes or needs_build)
         else []
     )
     docs_parent_ids = verify_ids or leader_review_ids or build_ids or design_ids or ["leader_plan"]
@@ -556,7 +558,7 @@ def build_default_workflow_nodes(
         terminal_ids,
         node_metadata("summary", label="汇总结论、验收反馈", key="team_lead"),
     )
-    if not needs_build and not needs_verification and not bool(execution_profile.get("needs_docs")):
+    if not needs_build and not needs_verification and not ({"docs", "release"} & required_lanes):
         return nodes, edges
     if len(nodes) > 2:
         return nodes, edges

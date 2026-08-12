@@ -4415,8 +4415,6 @@ class InProcessTeamManager(TeamManager):
             "requested_mode": mode,
             "profile_source": "user_followup",
         }
-        if mode == "fast":
-            profile["needs_verification"] = False
         return profile
 
     def _ensure_runtime_plan(

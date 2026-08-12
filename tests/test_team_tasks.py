@@ -4331,6 +4331,24 @@ def test_unstructured_goal_profile_does_not_embed_execution_mode():
     assert spec.uncertainty == "high"
 
 
+def test_team_spec_projects_legacy_execution_flags_to_canonical_workflow_lanes():
+    spec = build_team_spec({
+        "goal": "完成实现、验证和文档交付",
+        "execution_profile": {
+            "needs_build": True,
+            "needs_verification": True,
+            "needs_docs": True,
+        },
+    })
+
+    assert spec.team_requirements["workflow_lanes"] == ["build", "verify", "docs"]
+    # Old fields remain readable for migration callers, but Team consumers use
+    # the canonical workflow_lanes contract above.
+    assert spec.execution_profile["needs_build"] is True
+    assert spec.execution_profile["needs_verification"] is True
+    assert spec.execution_profile["needs_docs"] is True
+
+
 def test_planning_decision_rejects_work_unit_without_capability_contract():
     with pytest.raises(ValueError, match="missing required_capabilities"):
         coerce_planning_decision({
@@ -4849,6 +4867,11 @@ async def test_team_graph_planner_standard_compiles_semantic_parallel_work_units
     assert graph_plan.workflow_plan["planning"]["quality_policy"] == "independent_review"
     assert graph_plan.workflow_plan["planning"]["planning_decision"]["status"] == "success"
     assert isinstance(graph_plan.workflow_plan["planning"]["planning_decision"]["elapsed_ms"], int)
+    assert set(graph_plan.spec.team_requirements["capabilities"]) >= {
+        "research", "analysis", "synthesis", "review", "verification",
+    }
+    assert set(graph_plan.spec.team_requirements["workflow_lanes"]) >= {"plan", "verify"}
+    assert graph_plan.spec.deliverables
 
 
 async def test_team_graph_planner_drops_reserved_leader_control_work_units():
@@ -6421,7 +6444,6 @@ async def test_team_mode_confirmation_followup_sets_execution_profile(monkeypatc
     assert captured["execution_profile"] == {
         "requested_mode": "fast",
         "profile_source": "user_followup",
-        "needs_verification": False,
     }
 
 

@@ -1418,7 +1418,7 @@ def test_fast_team_suggestion_keeps_build_as_primary_role_and_honors_custom_capa
     result = fast_team_suggestion(
         {
             "name": "像素小游戏开发团队",
-            "custom_capabilities": ["全栈开发", "前端设计"],
+            "custom_capabilities": ["implementation", "design"],
             "required_capabilities": ["design", "frontend", "implementation", "testing", "verification"],
             "execution_profile": {"needs_build": True, "needs_verification": True},
         },
@@ -1431,6 +1431,19 @@ def test_fast_team_suggestion_keeps_build_as_primary_role_and_honors_custom_capa
     assert {"design", "frontend", "implementation"} <= required
     assert {"implementation", "testing", "verification"} <= set(developer["capabilities"])
     assert developer["role_key"] in {"frontend_developer", "fullstack_developer"}
+
+
+def test_fast_team_suggestion_does_not_infer_capabilities_from_custom_text():
+    result = fast_team_suggestion(
+        {
+            "name": "文本能力输入测试",
+            "custom_capabilities": ["全栈开发", "前端设计"],
+        },
+        [{"id": "hermes_1", "name": "Hermes", "provider": "hermes"}],
+    )
+
+    assert result["formation_plan"]["coverage"]["required"] == []
+    assert len(result["members"]) == 1
 
 
 def test_fast_team_suggestion_skips_unavailable_agent_profiles():

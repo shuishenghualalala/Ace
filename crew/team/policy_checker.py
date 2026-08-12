@@ -101,7 +101,8 @@ def analyze_team_policy(
 
     leader_like = [member for member in members if member.member_id == "leader" or flow_builder.workflow_lane(member) == "lead"]
     verify_members = [member for member in members if flow_builder.workflow_lane(member) == "verify"]
-    if bool(spec.execution_profile.get("needs_verification")) and not verify_members:
+    required_lanes = set(spec.team_requirements.get("workflow_lanes") or [])
+    if "verify" in required_lanes and not verify_members:
         warnings.append(TeamPolicyWarning(
             code="leader_testing_conflict",
             severity="warning",

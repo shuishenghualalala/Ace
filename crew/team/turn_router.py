@@ -47,6 +47,7 @@ class TeamTurnRouter:
         )
         profile = spec.execution_profile if isinstance(spec.execution_profile, dict) else {}
         planning = spec.planning if isinstance(spec.planning, dict) else {}
+        workflow_lanes = set(spec.team_requirements.get("workflow_lanes") or [])
         intent = str(profile.get("intent") or "mixed").strip().lower()
         complexity = str(profile.get("complexity") or "focused").strip().lower()
         missing_info = [item for item in list(planning.get("missing_info") or []) if str(item or "").strip()]
@@ -70,10 +71,7 @@ class TeamTurnRouter:
                 reason=decision.reason,
                 diagnostics={**diagnostics, "turn_source": "simple_chat"},
             )
-        needs_build = bool(profile.get("needs_build"))
-        needs_verification = bool(profile.get("needs_verification"))
-        needs_docs = bool(profile.get("needs_docs"))
-        mode = "fast" if intent == "question" and not needs_build and not needs_verification and not needs_docs else "standard"
+        mode = "fast" if intent == "question" and not workflow_lanes else "standard"
         decision = new_workflow_decision(mode, reason, source="team_spec_profile")
         return TeamTurnDecision(
             turn_kind=decision.turn_kind,

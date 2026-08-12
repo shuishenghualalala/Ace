@@ -118,6 +118,40 @@ def _default_execution_profile(source: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _explicit_workflow_lanes(
+    source: Mapping[str, Any],
+    requirements: Mapping[str, Any],
+    execution_profile: Mapping[str, Any],
+) -> list[str]:
+    """Return the canonical workflow lanes from explicit input only.
+
+    ``needs_*`` is accepted as a compatibility input for existing callers, but
+    it is immediately projected into ``team_requirements.workflow_lanes``.
+    Consumers should use that canonical field instead of the legacy flags.
+    """
+
+    explicit_lanes = requirements.get("workflow_lanes")
+    if explicit_lanes is None:
+        explicit_lanes = source.get("workflow_lanes")
+    if explicit_lanes is None:
+        explicit_lanes = execution_profile.get("required_lanes")
+    lanes = _text_list(explicit_lanes, limit=8)
+    legacy_lanes = {
+        "needs_build": "build",
+        "needs_verification": "verify",
+        "needs_docs": "docs",
+    }
+    for flag, lane in legacy_lanes.items():
+        explicit_value = (
+            execution_profile.get(flag)
+            if flag in execution_profile
+            else source.get(flag)
+        )
+        if _explicit_bool(explicit_value):
+            lanes.append(lane)
+    return _unique(lanes, limit=8)
+
+
 def _build_normalized_spec(source: Mapping[str, Any]) -> TeamSpec:
     requirements_input = _mapping(source.get("team_requirements"))
     execution_profile = _default_execution_profile(source)
@@ -132,12 +166,7 @@ def _build_normalized_spec(source: Mapping[str, Any]) -> TeamSpec:
         else source.get("required_roles"),
         limit=8,
     )
-    lanes = _text_list(
-        requirements_input.get("workflow_lanes")
-        if requirements_input.get("workflow_lanes") is not None
-        else execution_profile.get("required_lanes"),
-        limit=8,
-    )
+    lanes = _explicit_workflow_lanes(source, requirements_input, execution_profile)
     if not execution_profile["required_lanes"]:
         execution_profile["required_lanes"] = list(lanes)
 

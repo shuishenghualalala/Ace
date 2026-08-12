@@ -111,14 +111,35 @@ def _merged_execution_profile(spec: TeamSpec, execution_profile: dict[str, Any] 
             profile[key] = {**dict(profile.get(key) or {}), **value}
         else:
             profile[key] = value
+    workflow_lanes = list(spec.team_requirements.get("workflow_lanes") or [])
+    workflow_lanes.extend(str(item).strip() for item in (profile.get("required_lanes") or []) if str(item).strip())
+    workflow_lanes.extend(str(item).strip() for item in (incoming.get("workflow_lanes") or []) if str(item).strip())
+    for flag, lane in (
+        ("needs_build", "build"),
+        ("needs_verification", "verify"),
+        ("needs_docs", "docs"),
+    ):
+        if flag not in incoming:
+            continue
+        if bool(incoming.get(flag)):
+            workflow_lanes.append(lane)
+        else:
+            workflow_lanes = [item for item in workflow_lanes if item != lane]
+    profile["required_lanes"] = list(dict.fromkeys(workflow_lanes))
     requested_mode = normalize_planning_mode(incoming.get("requested_mode") or "auto")
     profile["requested_mode"] = requested_mode
-    if requested_mode == "fast" and "needs_verification" not in incoming:
-        profile["needs_verification"] = False
-        lanes = [lane for lane in list(profile.get("required_lanes") or []) if lane != "verify"]
-        profile["required_lanes"] = lanes
     profile.setdefault("budget", {})
     return profile
+
+
+def _spec_with_workflow_lanes(spec: TeamSpec, profile: dict[str, Any]) -> TeamSpec:
+    requirements = dict(spec.team_requirements or {})
+    requirements["workflow_lanes"] = list(dict.fromkeys(
+        str(item).strip()
+        for item in (profile.get("required_lanes") or [])
+        if str(item).strip()
+    ))
+    return replace(spec, team_requirements=requirements)
 
 
 FastPrimary = TeamMemberSpec | str
@@ -164,7 +185,7 @@ def _select_fast_verifier(
     primary_id: str,
     profile: dict[str, Any],
 ) -> TeamMemberSpec | None:
-    if not bool(profile.get("needs_verification")):
+    if "verify" not in set(profile.get("required_lanes") or []):
         return None
     verifiers = [
         member
@@ -456,11 +477,8 @@ def _standard_node_required(raw: dict[str, Any], profile: dict[str, Any]) -> boo
     lane = _node_lane(raw)
     if lane in {"lead", "summary"}:
         return True
-    if lane == "build" and profile.get("needs_build") is True:
-        return True
-    if lane == "verify" and profile.get("needs_verification") is True:
-        return True
-    if lane in {"docs", "release"} and profile.get("needs_docs") is True:
+    required_lanes = set(profile.get("required_lanes") or [])
+    if lane in required_lanes or (lane == "release" and "docs" in required_lanes):
         return True
     return False
 
@@ -845,6 +863,94 @@ def _planning_team_spec_summary(spec: TeamSpec, profile: dict[str, Any]) -> dict
         "uncertainty": str(spec.uncertainty or "low"),
         "missing_info": [_compact_text(item, 140) for item in (planning.get("missing_info") or [])][:6],
     }
+
+
+def _team_spec_from_planning_decision(
+    base_spec: TeamSpec,
+    decision: PlanningDecision,
+) -> TeamSpec:
+    """Project the semantic intake result back into the shared TeamSpec.
+
+    The free-form goal is understood once by PlanningDecision.  Downstream
+    Formation/Workflow consumers then receive one normalized requirement
+    contract instead of independently interpreting the prompt.
+    """
+
+    capabilities = normalize_capabilities([
+        *(base_spec.team_requirements.get("capabilities") or []),
+        *(
+            capability
+            for unit in decision.work_units
+            for capability in unit.required_capabilities
+        ),
+        *([
+            "review", "verification"
+        ] if decision.quality_policy in {"independent_review", "evaluator_optimizer"} else []),
+    ])
+    lane_by_kind = {
+        "plan": "plan",
+        "research": "plan",
+        "analysis": "plan",
+        "design": "design",
+        "build": "build",
+        "verify": "verify",
+        "docs": "docs",
+    }
+    lanes = list(dict.fromkeys([
+        *(base_spec.team_requirements.get("workflow_lanes") or []),
+        *(
+            lane_by_kind[unit.kind]
+            for unit in decision.work_units
+            if unit.kind in lane_by_kind
+        ),
+        *([
+            "verify"
+        ] if decision.quality_policy in {"independent_review", "evaluator_optimizer"} else []),
+    ]))
+    decision_deliverables = [
+        {
+            "type": str(unit.kind or "answer"),
+            "description": str(unit.expected_output or unit.objective).strip(),
+        }
+        for unit in decision.work_units
+        if str(unit.expected_output or unit.objective).strip()
+    ]
+    planning = {
+        **dict(base_spec.planning or {}),
+        "strategy": "llm_dag",
+        "reflection_policy": "after_planning" if decision.quality_policy != "none" else "none",
+        "missing_info": list(decision.critical_missing_info),
+    }
+    deliverables = [
+        *list(base_spec.deliverables or []),
+        *decision_deliverables,
+    ][:8]
+    requirements = {
+        **dict(base_spec.team_requirements or {}),
+        "capabilities": capabilities,
+        "workflow_lanes": lanes,
+    }
+    notes = [
+        "TeamSpec 已由 PlanningDecision 的结构化工作单元生成；下游不再从用户目标重复推断。",
+        *list(base_spec.planner_notes or []),
+    ]
+    return replace(
+        base_spec,
+        team_requirements=requirements,
+        planning=planning,
+        deliverables=deliverables,
+        success_criteria=list(dict.fromkeys([
+            *list(base_spec.success_criteria or []),
+            *(
+                str(unit.expected_output or unit.objective).strip()
+                for unit in decision.work_units
+                if str(unit.expected_output or unit.objective).strip()
+            ),
+        ]))[:8],
+        risk_level=decision.risk_level,
+        uncertainty=decision.semantic_uncertainty,
+        planner_notes=list(dict.fromkeys(notes))[:8],
+    )
 
 
 def _team_members_for_planning_prompt(members: list[TeamMemberSpec]) -> list[dict[str, Any]]:
@@ -1948,10 +2054,12 @@ class TeamGraphPlanner:
             spec_source = {"goal": goal, **spec_source}
         base_spec = build_team_spec(spec_source)
         profile = _merged_execution_profile(base_spec, execution_profile)
+        base_spec = _spec_with_workflow_lanes(base_spec, profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         selected_mode: PlanningMode = "fast" if requested_mode == "fast" else "standard"
         fallback_from = "ai" if requested_mode == "ai" else None
         profile.update({"requested_mode": requested_mode, "selected_mode": selected_mode})
+        base_spec = _spec_with_workflow_lanes(base_spec, profile)
         spec = replace(base_spec, execution_profile=profile)
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
         policy_report = analyze_team_policy(spec=spec, members=members)
@@ -2010,6 +2118,7 @@ class TeamGraphPlanner:
             spec_source = {"goal": goal, **spec_source}
         base_spec = build_team_spec(spec_source)
         profile = _merged_execution_profile(base_spec, execution_profile)
+        base_spec = _spec_with_workflow_lanes(base_spec, profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
         if provider is None or requested_mode == "fast":
@@ -2109,7 +2218,11 @@ class TeamGraphPlanner:
                 workflow_plan=fallback_plan,
             )
 
+        if decision is not None:
+            base_spec = _team_spec_from_planning_decision(base_spec, decision)
+            profile["required_lanes"] = list(base_spec.team_requirements.get("workflow_lanes") or [])
         profile.update({"requested_mode": requested_mode, "selected_mode": selected_mode})
+        base_spec = _spec_with_workflow_lanes(base_spec, profile)
         spec = replace(base_spec, execution_profile=profile)
         policy_report = analyze_team_policy(spec=spec, members=members)
 
