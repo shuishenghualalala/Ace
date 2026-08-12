@@ -112,6 +112,17 @@
     .card { padding: 16px 17px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
     .card strong { display: block; margin-bottom: 5px; }
     .card p { margin: 0; font-size: 14px; }
+    .mode-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+    .mode-card { padding: 17px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+    .mode-card h3 { margin: 0 0 8px; font-size: 17px; }
+    .mode-card p { margin: 6px 0; font-size: 14px; }
+    .mode-card .mode-key { color: var(--text); font-weight: 650; }
+    .mode-card.request { border-top: 4px solid var(--accent); }
+    .mode-card.auto { border-top: 4px solid var(--green); }
+    .mode-card.full { border-top: 4px solid var(--red); }
+    .scenario { margin: 16px 0; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--soft); }
+    .scenario strong { display: block; margin-bottom: 5px; }
+    .scenario p { margin: 4px 0; }
     .layers { display: grid; gap: 8px; margin: 18px 0; }
     .layer {
       display: grid;
@@ -145,6 +156,7 @@
     @media (max-width: 640px) {
       .layout { padding: 34px 18px 72px; }
       .cards { grid-template-columns: 1fr; }
+      .mode-grid { grid-template-columns: 1fr; }
       .layer { grid-template-columns: 1fr; gap: 2px; }
       h1 { font-size: 27px; }
       table { display: block; overflow-x: auto; }
@@ -155,7 +167,7 @@
 <div class="layout">
   <main>
     <h1>Ace 安全系统</h1>
-    <div class="subtitle">能力、信任边界与完整执行链 · 面向维护者的单页架构导读</div>
+    <div class="subtitle">从产品模式到操作系统边界 · 面向开发者的技术分享与架构导读</div>
 
     <p class="lead">Ace 的安全模块不是一个“危险命令关键词列表”，而是一条由宿主掌握的执行链：先从可信会话状态构造权限上下文，再对具体动作做授权判断。请求批准与替我审批会把命令交给原生运行组件，由操作系统限制文件、网络和进程能力；用户明确选择完全访问权限时则以宿主用户权限执行，仅保留不可覆盖的破坏性 hardline、显式拒绝规则、进程回收与审计。</p>
 
@@ -227,19 +239,149 @@
 
     <div class="callout warn"><strong>威胁模型边界：</strong>原生运行组件共享宿主内核，它是会话级进程隔离，不是虚拟机，也不承诺抵御内核漏洞、管理员/root 权限攻击或已控制宿主账号的攻击者。</div>
 
-    <h2 id="modes">3. 三种模式：审批策略与执行边界</h2>
-    <p>界面上的模式不是只换一个提示频率。请求批准与替我审批编译为 <code>MANAGED</code> profile；完全访问权限编译为 <code>DISABLED</code> profile，由宿主直接执行，同时继续经过终端永久 hardline、进程生命周期和审计链路。</p>
+    <h2 id="modes">3. 三种模式：同一套沙箱，两种审批策略，一个宿主模式</h2>
+    <p>理解 Ace 模式最重要的一点，是把<strong>“何时询问用户”</strong>和<strong>“进程最终能做什么”</strong>分开。前者是审批策略，后者是执行边界。请求批准与替我审批虽然提示频率不同，但使用相同的 workspace-write 原生沙箱；完全访问权限才会取消文件与网络沙箱，转为宿主用户权限。</p>
 
+    <div class="mode-grid">
+      <div class="mode-card request">
+        <h3>请求批准</h3>
+        <p class="mode-key">看清每次变更，再执行</p>
+        <p>普通读取不打扰用户；Agent 命令、文件写入和联网动作逐项确认。</p>
+        <p><span class="tag">MANAGED</span><span class="tag">ApprovalPolicy.REQUEST</span></p>
+      </div>
+      <div class="mode-card auto">
+        <h3>替我审批</h3>
+        <p class="mode-key">在既定边界内自动工作</p>
+        <p>不改变沙箱能力，只把确定处于基础边界内的动作自动放行。</p>
+        <p><span class="tag">MANAGED</span><span class="tag">ApprovalPolicy.AUTO_REVIEW</span></p>
+      </div>
+      <div class="mode-card full">
+        <h3>完全访问权限</h3>
+        <p class="mode-key">显式信任当前会话</p>
+        <p>不启用原生文件或网络沙箱，命令按当前登录用户的宿主权限执行。</p>
+        <p><span class="tag">DISABLED</span><span class="tag">ApprovalPolicy.NEVER</span></p>
+      </div>
+    </div>
+
+    <h3 id="mode-baseline">3.1 两个受管模式共享什么</h3>
+    <p><code>settings_for_mode</code> 会把请求批准和替我审批都编译成 <code>PermissionProfileKind.MANAGED</code>，并设置 <code>full_disk_read=true</code>。这不是“全盘完全访问”，而是<strong>宿主文件广泛可读、只有明确根可写</strong>：</p>
+    <ul>
+      <li>macOS/Linux 的普通宿主文件默认只读；Windows 枚举系统目录和用户目录中的非敏感顶层路径作为可读根，不递归改整盘 ACL。</li>
+      <li>当前工作空间、<code>TMPDIR</code>/<code>TEMP</code> 和平台临时目录可写。</li>
+      <li><code>.git</code>、<code>.agents</code>、<code>.crew</code> 等项目元数据重新覆盖成只读。</li>
+      <li>Ace 数据库、认证、配置、审计、日志和 owner 凭据路径使用更具体的不可升级拒绝。</li>
+      <li>网络是独立能力：能读文件不等于能联网；没有精确网络规则时，命令保持离线。</li>
+    </ul>
+
+    <pre><code>受管模式基础视图
+
+宿主文件系统  ───────────────────────────────► 广泛只读
+当前工作空间  ───────────────────────────────► 读写
+系统临时目录  ───────────────────────────────► 读写
+项目元数据    ───────────────────────────────► 只读覆盖
+Ace 私有路径  ───────────────────────────────► 拒绝覆盖
+网络          ───────────────────────────────► 默认关闭，按目标开放</code></pre>
+
+    <p>因此，“批准一条命令”和“让命令离开沙箱”是两件不同的事。普通批准只允许动作开始，命令仍受上述文件和网络边界约束；只有审批界面明确显示额外权限或脱离沙箱时，执行能力才扩大。</p>
+
+    <h3 id="mode-request">3.2 请求批准：让用户控制动作发生的时机</h3>
+    <p>请求批准适合需要审阅 Agent 行为、处理陌生仓库或执行高影响任务的场景。它采用受管沙箱，同时把主动变更的决定留给用户。</p>
     <table>
-      <thead><tr><th>模式</th><th>命令审批</th><th>文件基础权限</th><th>始终保留的边界</th></tr></thead>
+      <thead><tr><th>动作</th><th>是否询问</th><th>批准后的执行方式</th></tr></thead>
       <tbody>
-        <tr><td><b>请求批准</b></td><td>普通文件读取无需询问；每条 Agent 终端命令、写入动作和网络访问都需确认。</td><td>宿主文件系统广泛只读；工作空间与系统临时目录可写，空间外写入需精确授权。</td><td>原生沙箱、受管网络、保护路径、进程树回收与永久 hardline。</td></tr>
-        <tr><td><b>替我审批</b></td><td>沙箱内命令、工作空间/临时目录操作和公开 HTTP 自动放行；空间外写入、私网、额外网络能力与脱沙箱仍询问。</td><td>与“请求批准”相同；获批路径或网络权限作为 overlay 进入本次原生启动。</td><td>启用前要求原生文件沙箱 live probe 通过；永久 hardline 仍拒绝。</td></tr>
-        <tr><td><b>完全访问权限</b></td><td>普通动作不询问，命令继承当前登录用户权限。</td><td>不限制为工作空间或用户 HOME；文件和网络使用宿主权限。</td><td>永久 hardline、显式永久拒绝、进程树回收、输出脱敏和审计。</td></tr>
+        <tr><td>读取工作空间或项目外普通文件</td><td>不询问</td><td>按广泛只读基线读取；Ace 私有路径和显式拒绝路径仍不可见。</td></tr>
+        <tr><td>结构化文件写入、补丁、删除</td><td>每次询问</td><td>工作空间内动作仍由基础可写根约束；项目外写入同时携带精确路径 overlay。</td></tr>
+        <tr><td>Agent 发起的终端命令</td><td>每条询问</td><td>默认以 <code>use_default</code> 留在原生沙箱中执行。</td></tr>
+        <tr><td>应用内公开 HTTP 或终端联网</td><td>询问</td><td>应用 HTTP 按精确目标放行；终端必须声明精确网络权限后进入受管代理。</td></tr>
+        <tr><td>私网、监听端口、项目外写入、脱离沙箱</td><td>明确询问并展示范围</td><td>只把已展示的路径、目标或命令写入本次启动策略。</td></tr>
       </tbody>
     </table>
 
-    <p>完全访问权限只作用于当前会话。在空白输入框中选择时，它会作为一次性预设交给即将创建的对话，创建成功后立即回退为请求批准，不会被后续新会话静默继承。模式改变后，Gateway 会撤销旧模式下尚未处理的审批；已经由用户明确授予的 session grant 会保留到真正结束会话，登出则按 owner 清理所有临时权限。</p>
+    <div class="scenario">
+      <strong>示例：Agent 要执行 <code>npm test</code></strong>
+      <p>Desktop 先展示完整命令与 cwd。用户点“仅这一次”后，Ace 消费一次性 grant，重新从当前模式编译 <code>ProcessLaunch</code>，再由 Native Runtime 启动命令。命令可以读取系统依赖并写工作空间/临时目录，但不能改写项目外文件或直接联网。</p>
+    </div>
+
+    <h3 id="mode-auto">3.3 替我审批：自动化的是决策，不是权限</h3>
+    <p>替我审批适合日常可信项目。它和请求批准使用完全相同的受管 profile，差别仅在 <code>ApprovalPolicy.AUTO_REVIEW</code>：安全服务可以自动确认“现有沙箱本来就允许”的低风险动作。</p>
+    <table>
+      <thead><tr><th>自动放行</th><th>仍需用户批准</th></tr></thead>
+      <tbody>
+        <tr><td>普通文件读取</td><td>项目外写入或额外文件权限</td></tr>
+        <tr><td>工作空间/临时目录内的结构化操作</td><td>终端新增精确网络权限或监听本地端口</td></tr>
+        <tr><td>分类为可在当前沙箱内执行的终端命令</td><td>危险命令分类、私网目标和额外网络能力</td></tr>
+        <tr><td>应用内经过公开地址校验的 HTTP 请求</td><td><code>require_escalated</code> 脱离沙箱执行</td></tr>
+      </tbody>
+    </table>
+    <p>启用替我审批前，Gateway 必须完成真实 Native Runtime live probe。探针会证明项目外普通文件可读、项目外不可写、工作空间可写、项目元数据不可改写；探针失败时模式切换返回错误 ACK，不会只更新界面文字。</p>
+
+    <div class="scenario">
+      <strong>示例：Agent 修改工作空间代码并运行测试</strong>
+      <p>结构化补丁和沙箱内测试命令自动通过；如果测试脚本随后尝试写入 <code>~/Documents</code>，操作系统沙箱会拒绝。Agent 必须重新提出带精确目录权限的请求，用户批准后该目录才进入启动 overlay。</p>
+    </div>
+
+    <h3 id="mode-full">3.4 完全访问权限：明确切换为宿主执行</h3>
+    <p>完全访问权限不是“更宽的 workspace-write”，而是 <code>PermissionProfileKind.DISABLED</code>。<code>compile_process_launch</code> 不再附带 Native Runtime helper，进程直接继承当前 Ace 宿主用户在操作系统上的文件与网络权限。</p>
+    <ul>
+      <li>普通动作不逐项询问，工作空间外文件和宿主网络不再由原生沙箱拦截。</li>
+      <li>宿主 OS ACL、文件所有权、企业策略等仍然有效；Ace 不可能越过宿主用户本身没有的权限。</li>
+      <li>永久 hardline、用户创建的显式拒绝规则、进程树回收、输出脱敏和审计仍执行。</li>
+      <li>受管模式中的 Ace 私有路径 deny 不再作为文件沙箱规则生效，因此这是需要用户明确确认的高信任模式。</li>
+    </ul>
+
+    <div class="callout danger"><strong>风险提示：</strong>完全访问下，一条普通 shell 命令理论上可以访问当前用户可访问的所有文件和网络资源。它应当用于用户理解并信任当前任务、且逐项授权会实质阻碍工作的场景，不应作为排查普通路径权限问题的默认开关。</div>
+
+    <h3 id="mode-compare">3.5 同一个动作，在三种模式中会发生什么</h3>
+    <table>
+      <thead><tr><th>动作</th><th>请求批准</th><th>替我审批</th><th>完全访问权限</th></tr></thead>
+      <tbody>
+        <tr><td>读取 <code>~/Documents/report.txt</code></td><td>直接只读</td><td>直接只读</td><td>按宿主用户权限读取</td></tr>
+        <tr><td>修改工作空间源码</td><td>询问；批准后在沙箱内写入</td><td>基础边界内自动写入</td><td>直接按宿主权限写入</td></tr>
+        <tr><td>修改项目外普通目录</td><td>询问精确路径权限</td><td>询问精确路径权限</td><td>不询问，宿主权限允许即执行</td></tr>
+        <tr><td>终端执行普通测试</td><td>询问；仍在沙箱内</td><td>分类安全后在沙箱内自动执行</td><td>不询问，直接宿主执行</td></tr>
+        <tr><td>应用内访问公开 HTTPS</td><td>询问精确目标</td><td>公开地址校验后自动放行</td><td>专用工具仍做输入校验；宿主命令可直接联网</td></tr>
+        <tr><td>终端访问网络</td><td>申请精确目标并询问</td><td>申请精确目标并询问</td><td>直接使用宿主网络</td></tr>
+        <tr><td>脱离沙箱运行单条命令</td><td>明确警告并询问</td><td>明确警告并询问</td><td>已经处于宿主执行</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="command-boundary">3.6 单条命令的三种执行边界</h3>
+    <p>会话模式之外，终端动作还携带一个只作用于本命令的 <code>sandbox_permissions</code>。它不会创建第四种会话模式：</p>
+    <table>
+      <thead><tr><th>字段</th><th>含义</th><th>审批与执行</th></tr></thead>
+      <tbody>
+        <tr><td><code>use_default</code></td><td>不扩大当前会话的沙箱能力。</td><td>请求批准模式仍询问命令本身；批准后按基础 profile 执行。</td></tr>
+        <tr><td><code>with_additional_permissions</code></td><td>留在沙箱内，增加明确文件根、网络目标或本地监听能力。</td><td>审批面板逐条展示扩张范围；批准后 overlay 进入 Native Runtime 请求。</td></tr>
+        <tr><td><code>require_escalated</code></td><td>仅当前完整命令脱离沙箱，使用宿主用户权限。</td><td>必须提供原因并明确批准；session 授权仍绑定完整命令与 cwd，不会切换整个对话。</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code>Agent 提交终端动作
+        │
+        ├─ use_default ──────────────► 当前 MANAGED profile
+        │
+        ├─ with_additional_permissions
+        │       └─ 用户批准 ─────────► MANAGED profile + 精确 overlay
+        │
+        └─ require_escalated
+                └─ 用户批准 ─────────► 仅本命令 DISABLED / 宿主执行</code></pre>
+
+    <h3 id="mode-lifecycle">3.7 模式切换为什么以 Gateway ACK 为准</h3>
+    <p>Desktop 选择模式后不会先假定成功。Gateway 校验上下文与本机能力，更新 <code>SecurityService</code> 中的会话模式并返回 ACK；只有 ACK 成功，界面才展示新模式。模式变化会撤销旧模式下尚未处理的审批，并停止继续使用旧 <code>ProcessLaunch</code> 快照的 turn。下一轮执行重新从安全服务编译策略。</p>
+    <p>模式切换不会撤销用户已经明确授予的本次对话权限；这些 grant 绑定 OS user、owner、workspace 和 session，在真正结束会话、登出或 Gateway 重启时清理。完全访问只作用于当前会话；空白输入框中的选择是即将创建会话的一次性预设，不会静默继承给后续会话。</p>
+
+    <h3>3.8 实际使用时怎么选</h3>
+    <table>
+      <thead><tr><th>场景</th><th>建议模式</th><th>原因</th></tr></thead>
+      <tbody>
+        <tr><td>第一次打开陌生仓库、审计脚本、处理敏感项目</td><td>请求批准</td><td>每条命令和变更都经过人眼确认，同时保留广泛只读能力，Agent 仍能完成分析。</td></tr>
+        <tr><td>日常维护自己的项目、连续改代码和跑测试</td><td>替我审批</td><td>工作空间内自动工作，越过文件或网络边界时再询问，减少无意义打断。</td></tr>
+        <tr><td>可信任务确实要操作多个宿主目录、系统工具或复杂本机网络</td><td>完全访问权限</td><td>避免反复声明大量精确权限，但需要接受宿主级访问风险。</td></tr>
+        <tr><td>只有一条可信命令确实无法在沙箱内完成</td><td>保持受管模式，使用 <code>require_escalated</code></td><td>只扩大这一条完整命令，不把整个对话切到完全访问。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout ok"><strong>推荐默认值：</strong>陌生任务从“请求批准”开始；确认工作流稳定后切到“替我审批”。只有任务本身需要宿主级能力时才使用“完全访问权限”，不要把它当作修复普通文件权限问题的办法。</div>
 
     <h2 id="authority">4. 授权模型：动作、规则与临时能力</h2>
 
@@ -283,6 +425,47 @@ once / session 临时 grant
     </table>
 
     <p>审批请求本身有随机 nonce、有效期、上下文、动作摘要和额外权限。Desktop 会逐条显示额外文件根、访问级别、精确网络目标与本地监听能力；提交决定时必须同时满足登录 owner、workspace、session、task 与 nonce。动作相同但权限范围不同的请求不会复用同一个 pending、grant 或永久规则。</p>
+
+    <h3>4.4 一次批准如何真正进入执行边界</h3>
+    <p>旧问题的根源是“UI 记录了允许，但实际执行仍拿旧沙箱策略”。现在审批结果不是提示状态，而是一份可执行权限数据。完整链路如下：</p>
+
+    <pre><code>1. Agent 提交动作
+   └─ NormalizedAction + AdditionalPermissionProfile
+
+2. SecurityApprovalService 判断需要审批
+   └─ 创建 request：action digest + 权限范围 + nonce + 上下文
+
+3. Desktop 展示并提交 decision
+   └─ Gateway 校验 owner/workspace/session/task/nonce
+
+4. 后端生成 grant 或 exact rule
+   └─ once / session / always 的作用域各自落地
+
+5. 工具用同一个规范化动作重新授权
+   └─ 命中 grant/rule，取回获批 AdditionalPermissionProfile
+
+6. compile_process_launch 重新读取当前会话模式
+   └─ base PermissionProfile + 获批 overlay
+
+7. SecurityExecutionBroker 编译原生请求
+   └─ writable/readable/readonly/denied roots + network rules
+
+8. Native Runtime 建立 OS 边界后启动命令
+   └─ 批准的能力在这里才真正生效</code></pre>
+
+    <p>目录授权可以覆盖其后代，单文件授权只覆盖该文件；只读授权不能匹配写入请求。网络授权按 host、port、protocol 精确匹配。<code>require_escalated</code> 是唯一把当前命令编译成宿主执行的普通审批类型，而且即使选择“本次对话”，仍必须匹配完整命令和 cwd。</p>
+
+    <h3>4.5 四个按钮不是四种安全模式</h3>
+    <p>会话模式回答“默认如何审批和执行”，审批按钮回答“当前已经展示的动作要记多久”。两者是正交关系：请求批准和替我审批都可以产生 once/session/always 授权；完全访问通常不产生逐项审批。</p>
+    <table>
+      <thead><tr><th>按钮</th><th>动作记忆</th><th>权限记忆</th><th>不会发生什么</th></tr></thead>
+      <tbody>
+        <tr><td>仅这一次</td><td>仅当前完整动作，匹配后消费。</td><td>仅当前请求展示的路径/网络/监听或执行边界。</td><td>不会自动允许第二次相同动作。</td></tr>
+        <tr><td>本次对话</td><td>无额外权限的动作仍精确匹配；脱沙箱命令精确匹配。</td><td>目录、文件和网络范围可在当前 owner/workspace/session 内复用。</td><td>不会跨对话、跨 workspace 或跨账号复用。</td></tr>
+        <tr><td>始终允许此操作</td><td>保存完整规范化动作摘要。</td><td>同时保存该动作获批的精确 overlay。</td><td>不会因相同 argv 前缀而允许额外尾随参数。</td></tr>
+        <tr><td>拒绝</td><td>不创建动作授权。</td><td>不创建任何权限，并进入短暂冷却。</td><td>不会写入一条允许规则。</td></tr>
+      </tbody>
+    </table>
 
     <h2 id="filesystem">5. 文件系统：结构化工具与任意命令的双层边界</h2>
     <p>文件访问存在两条路径：内置 file/patch/search 工具先走 Python 结构化策略；请求批准与替我审批下的 shell 或外部适配器最终走原生运行组件。前者能理解具体“读、写、补丁、删除”，后者负责防止任意子进程绕开工具层。完全访问权限不应用下述受管目录边界，只保留文件系统根写入与终端永久 hardline。</p>
@@ -328,7 +511,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
       <li>helper 缺失、完整性错误、握手失败、能力不足、协议乱序或异常退出均返回稳定错误码。</li>
       <li>一个 monotonic deadline 覆盖启动、请求、输出和退出全过程。</li>
       <li>取消、超时、输出超过上限和协议错误都会终止 helper 及其进程树。</li>
-      <li>受管模式暂不支持需要长期双向 stdio 的宿主子进程；此类调用会明确拒绝，不静默降级。</li>
+      <li>原生协议具备双向 stdio 能力；尚未接入该 transport 的外部 adapter 会明确拒绝或使用已声明的受管兼容路径，不静默降级为宿主裸进程。</li>
     </ul>
 
     <h3>6.2 输入、环境与输出</h3>
@@ -578,7 +761,7 @@ helper 响应
         <tr><td>Python 安全套件</td><td>上下文、模式、文件竞态、审批生命周期、规则、审计、Gateway API、执行面清单。</td><td><code>pytest tests/security tests/gateway/test_security_api.py</code></td></tr>
         <tr><td>Rust 单元/对抗测试</td><td>协议、路径计划、平台沙箱、ACL/token/job/WFP、代理策略与重放防护。</td><td><code>cargo test --manifest-path security-runtime/Cargo.toml --release --locked</code></td></tr>
         <tr><td>Desktop 单元测试</td><td>安全中心、审批、规则、审计、模式与安装流程。</td><td><code>npm test --prefix desktop</code></td></tr>
-        <tr><td>真实平台矩阵</td><td>工作空间写入、外部 secret 拒绝、元数据可读不可写、离线直连失败、批准目标代理可达。</td><td><code>python tests/security/security_matrix.py --platform … --runtime …</code></td></tr>
+        <tr><td>真实平台矩阵</td><td>工作空间写入、项目外普通读取、项目外写入拒绝、元数据可读不可写、离线直连失败、批准目标代理可达。</td><td><code>python tests/security/security_matrix.py --platform … --runtime …</code></td></tr>
         <tr><td>发布 staging</td><td>release/locked 构建、manifest、摘要、平台架构与打包路径。</td><td><code>desktop/scripts/prepare-security-runtime.mjs</code> 与 <code>verify-security-runtime.mjs</code></td></tr>
       </tbody>
     </table>
@@ -590,7 +773,7 @@ helper 响应
     <ol>
       <li><b>权限来自宿主事实，不来自模型参数。</b> owner、workspace、cwd 和模式由 Gateway 重建。</li>
       <li><b>授权的是精确动作和精确权限，不是模糊意图。</b> 规则和 grant 同时绑定规范化动作与额外权限 overlay。</li>
-      <li><b>审批不能替代隔离。</b> 用户允许后，命令仍进入平台原生沙箱，只在基础 profile 上叠加已显示并批准的权限。</li>
+      <li><b>普通批准不能替代隔离。</b> 用户允许后，命令仍进入平台原生沙箱，只在基础 profile 上叠加已显示并批准的权限；只有明确的单命令脱沙箱或完全访问会走宿主执行。</li>
       <li><b>没有证据就不宣称安全。</b> helper、协议、live probe、审计和真实 runner 共同构成可验证链路。</li>
     </ol>
 
@@ -603,6 +786,10 @@ helper 响应
       <a href="#overview">1. 十分钟全景</a>
       <a href="#threat-model">2. 安全目标</a>
       <a href="#modes">3. 三种模式</a>
+      <a href="#mode-request">↳ 请求批准</a>
+      <a href="#mode-auto">↳ 替我审批</a>
+      <a href="#mode-full">↳ 完全访问</a>
+      <a href="#command-boundary">↳ 单命令边界</a>
       <a href="#authority">4. 授权模型</a>
       <a href="#filesystem">5. 文件系统</a>
       <a href="#execution">6. 进程执行</a>
