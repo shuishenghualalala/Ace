@@ -245,8 +245,8 @@
     <div class="mode-grid">
       <div class="mode-card request">
         <h3>请求批准</h3>
-        <p class="mode-key">看清每次变更，再执行</p>
-        <p>普通读取不打扰用户；Agent 命令、文件写入和联网动作逐项确认。</p>
+        <p class="mode-key">沙箱内直接工作，扩权时确认</p>
+        <p>普通受限命令与工作空间写入直接执行；危险动作和超出基础边界的能力逐项确认。</p>
         <p><span class="tag">MANAGED</span><span class="tag">ApprovalPolicy.REQUEST</span></p>
       </div>
       <div class="mode-card auto">
@@ -285,14 +285,15 @@ Ace 私有路径  ────────────────────�
 
     <p>因此，“批准一条命令”和“让命令离开沙箱”是两件不同的事。普通批准只允许动作开始，命令仍受上述文件和网络边界约束；只有审批界面明确显示额外权限或脱离沙箱时，执行能力才扩大。</p>
 
-    <h3 id="mode-request">3.2 请求批准：让用户控制动作发生的时机</h3>
-    <p>请求批准适合需要审阅 Agent 行为、处理陌生仓库或执行高影响任务的场景。它采用受管沙箱，同时把主动变更的决定留给用户。</p>
+    <h3 id="mode-request">3.2 请求批准：在真正扩大权限时询问</h3>
+    <p>请求批准采用受管沙箱。只要动作能够在当前边界内完成，普通命令和工作空间变更不会弹框；命令被分类为高风险、要求新增文件或网络能力、监听端口，或者请求离开沙箱时才创建审批。审批策略因此不会阻碍受限环境内的正常开发循环。</p>
     <table>
       <thead><tr><th>动作</th><th>是否询问</th><th>批准后的执行方式</th></tr></thead>
       <tbody>
         <tr><td>读取工作空间或项目外普通文件</td><td>不询问</td><td>按广泛只读基线读取；Ace 私有路径和显式拒绝路径仍不可见。</td></tr>
-        <tr><td>结构化文件写入、补丁、删除</td><td>每次询问</td><td>工作空间内动作仍由基础可写根约束；项目外写入同时携带精确路径 overlay。</td></tr>
-        <tr><td>Agent 发起的终端命令</td><td>每条询问</td><td>默认以 <code>use_default</code> 留在原生沙箱中执行。</td></tr>
+        <tr><td>工作空间内的结构化写入、补丁、删除</td><td>不询问</td><td>由基础可写根与项目元数据只读覆盖共同约束。</td></tr>
+        <tr><td>普通终端命令</td><td>不询问</td><td>以 <code>use_default</code> 留在原生沙箱中执行。</td></tr>
+        <tr><td>高风险命令</td><td>明确询问</td><td>批准只允许该动作开始，不会自动扩大沙箱能力。</td></tr>
         <tr><td>应用内公开 HTTP 或终端联网</td><td>询问</td><td>应用 HTTP 按精确目标放行；终端必须声明精确网络权限后进入受管代理。</td></tr>
         <tr><td>私网、监听端口、项目外写入、脱离沙箱</td><td>明确询问并展示范围</td><td>只把已展示的路径、目标或命令写入本次启动策略。</td></tr>
       </tbody>
@@ -300,7 +301,7 @@ Ace 私有路径  ────────────────────�
 
     <div class="scenario">
       <strong>示例：Agent 要执行 <code>npm test</code></strong>
-      <p>Desktop 先展示完整命令与 cwd。用户点“仅这一次”后，Ace 消费一次性 grant，重新从当前模式编译 <code>ProcessLaunch</code>，再由 Native Runtime 启动命令。命令可以读取系统依赖并写工作空间/临时目录，但不能改写项目外文件或直接联网。</p>
+      <p>这条普通命令不弹审批，直接由 Native Runtime 在当前 profile 内启动。它可以读取系统依赖并写工作空间/临时目录，但不能改写项目外文件或直接联网；只有测试流程要求扩大这些能力时才出现审批。</p>
     </div>
 
     <h3 id="mode-auto">3.3 替我审批：自动化的是决策，不是权限</h3>
@@ -337,9 +338,9 @@ Ace 私有路径  ────────────────────�
       <thead><tr><th>动作</th><th>请求批准</th><th>替我审批</th><th>完全访问权限</th></tr></thead>
       <tbody>
         <tr><td>读取 <code>~/Documents/report.txt</code></td><td>直接只读</td><td>直接只读</td><td>按宿主用户权限读取</td></tr>
-        <tr><td>修改工作空间源码</td><td>询问；批准后在沙箱内写入</td><td>基础边界内自动写入</td><td>直接按宿主权限写入</td></tr>
+        <tr><td>修改工作空间源码</td><td>基础边界内直接写入</td><td>基础边界内直接写入</td><td>直接按宿主权限写入</td></tr>
         <tr><td>修改项目外普通目录</td><td>询问精确路径权限</td><td>询问精确路径权限</td><td>不询问，宿主权限允许即执行</td></tr>
-        <tr><td>终端执行普通测试</td><td>询问；仍在沙箱内</td><td>分类安全后在沙箱内自动执行</td><td>不询问，直接宿主执行</td></tr>
+        <tr><td>终端执行普通测试</td><td>在沙箱内直接执行</td><td>分类安全后在沙箱内直接执行</td><td>不询问，直接宿主执行</td></tr>
         <tr><td>应用内访问公开 HTTPS</td><td>询问精确目标</td><td>公开地址校验后自动放行</td><td>专用工具仍做输入校验；宿主命令可直接联网</td></tr>
         <tr><td>终端访问网络</td><td>申请精确目标并询问</td><td>申请精确目标并询问</td><td>直接使用宿主网络</td></tr>
         <tr><td>脱离沙箱运行单条命令</td><td>明确警告并询问</td><td>明确警告并询问</td><td>已经处于宿主执行</td></tr>
@@ -351,9 +352,9 @@ Ace 私有路径  ────────────────────�
     <table>
       <thead><tr><th>字段</th><th>含义</th><th>审批与执行</th></tr></thead>
       <tbody>
-        <tr><td><code>use_default</code></td><td>不扩大当前会话的沙箱能力。</td><td>请求批准模式仍询问命令本身；批准后按基础 profile 执行。</td></tr>
+        <tr><td><code>use_default</code></td><td>不扩大当前会话的沙箱能力。</td><td>普通命令直接按基础 profile 执行；高风险分类仍可单独触发动作审批。</td></tr>
         <tr><td><code>with_additional_permissions</code></td><td>留在沙箱内，增加明确宿主文件根、网络目标或本地监听能力。</td><td>宿主绝对路径可以直接加入沙箱视图；审批面板逐条展示范围，批准后 overlay 进入 Native Runtime 请求，不需要脱离沙箱。</td></tr>
-        <tr><td><code>require_escalated</code></td><td>仅当前完整命令脱离沙箱，使用宿主用户权限。</td><td>必须提供原因并明确批准；session 授权仍绑定完整命令与 cwd，不会切换整个对话。</td></tr>
+        <tr><td><code>require_escalated</code></td><td>请求让当前完整命令使用宿主用户权限。</td><td>必须提供 <code>justification</code> 并明确批准；批准后该命令真正离开沙箱，可访问宿主用户能访问的文件与网络，包括 Ace 控制面数据。授权仍只绑定完整命令和 cwd。</td></tr>
       </tbody>
     </table>
 
@@ -370,7 +371,7 @@ Ace 私有路径  ────────────────────�
         │       └─ 用户批准 ─────────► MANAGED profile + 精确 overlay
         │
         └─ require_escalated
-                └─ 用户批准 ─────────► 仅本命令 DISABLED / 宿主执行</code></pre>
+                └─ 用户批准 ─────────► 当前完整命令宿主执行</code></pre>
 
     <h3 id="mode-lifecycle">3.7 模式切换为什么以 Gateway ACK 为准</h3>
     <p>Desktop 选择模式后不会先假定成功。Gateway 校验上下文与本机能力，更新 <code>SecurityService</code> 中的会话模式并返回 ACK；只有 ACK 成功，界面才展示新模式。模式变化会撤销旧模式下尚未处理的审批，并停止继续使用旧 <code>ProcessLaunch</code> 快照的 turn。下一轮执行重新从安全服务编译策略。</p>
@@ -380,7 +381,7 @@ Ace 私有路径  ────────────────────�
     <table>
       <thead><tr><th>场景</th><th>建议模式</th><th>原因</th></tr></thead>
       <tbody>
-        <tr><td>第一次打开陌生仓库、审计脚本、处理敏感项目</td><td>请求批准</td><td>每条命令和变更都经过人眼确认，同时保留广泛只读能力，Agent 仍能完成分析。</td></tr>
+        <tr><td>第一次打开陌生仓库、审计脚本、处理敏感项目</td><td>请求批准</td><td>普通命令和工作区变更在受管沙箱内直接执行；扩大路径、网络、监听或宿主权限时经过人眼确认。</td></tr>
         <tr><td>日常维护自己的项目、连续改代码和跑测试</td><td>替我审批</td><td>工作空间内自动工作，越过文件或网络边界时再询问，减少无意义打断。</td></tr>
         <tr><td>可信任务确实要操作多个宿主目录、系统工具或复杂本机网络</td><td>完全访问权限</td><td>避免反复声明大量精确权限，但需要接受宿主级访问风险。</td></tr>
         <tr><td>只有一条可信命令确实无法在沙箱内完成</td><td>保持受管模式，使用 <code>require_escalated</code></td><td>只扩大这一条完整命令，不把整个对话切到完全访问。</td></tr>
@@ -424,13 +425,13 @@ once / session 临时 grant
       <thead><tr><th>选择</th><th>实际产生的权限</th><th>何时失效</th></tr></thead>
       <tbody>
         <tr><td>仅这一次</td><td>当前完整动作和已展示权限的单次 grant。</td><td>成功匹配一次后消费，或审批 TTL 到期。</td></tr>
-        <tr><td>本次对话</td><td>文件目录覆盖后代、文件仅覆盖自身、网络按精确目标复用；脱沙箱仍绑定完整命令与 cwd。</td><td>会话真正结束、登出或 Gateway 重启；切换模式不会撤销。</td></tr>
-        <tr><td>始终允许此操作</td><td>持久保存完整规范化动作；旧 exec-prefix 允许规则停用，尾随参数变化必须重新批准。</td><td>按 owner/workspace 隔离，直到用户禁用或删除。</td></tr>
+        <tr><td>本次对话</td><td>把已展示的目录、文件、网络和监听能力合入该会话的有效 permission profile；后续普通命令会自动继承，不要求模型重复声明。脱沙箱授权仍绑定完整命令与 cwd。</td><td>会话真正结束、登出或 Gateway 重启；切换模式不会撤销。</td></tr>
+        <tr><td>始终允许此操作</td><td>默认持久保存完整规范化动作；只有审批卡明确展示宿主校验过的安全命令前缀时，才可保存该前缀。</td><td>按 owner/workspace/cwd 隔离，直到用户禁用或删除。</td></tr>
         <tr><td>拒绝</td><td>不创建权限，并建立短暂拒绝冷却。</td><td>冷却结束后可以重新发起新审批。</td></tr>
       </tbody>
     </table>
 
-    <p>审批请求本身有随机 nonce、有效期、上下文、动作摘要和额外权限。Desktop 会逐条显示额外文件根、访问级别、精确网络目标与本地监听能力；提交决定时必须同时满足登录 owner、workspace、session、task 与 nonce。动作相同但权限范围不同的请求不会复用同一个 pending、grant 或永久规则。</p>
+    <p>审批请求本身有随机 nonce、有效期、上下文、Ace 工具名、动作摘要和额外权限。Desktop 会逐条显示额外文件根、访问级别、精确网络目标与本地监听能力；提交决定时必须同时满足登录 owner、workspace、session、task 与 nonce。动作相同但权限范围或 Ace 工具入口不同的请求不会复用同一个动作 grant 或永久规则。会话 permission profile 只复用已展示的能力范围，因此 <code>terminal</code> 批准的目录可以被 <code>file_write</code>/<code>patch</code>/<code>file_delete</code> 使用，精确网络目标也可以被 <code>web_search</code>/<code>web_extract</code> 使用；动作规则则不会从 <code>terminal</code> 串到 <code>publish_site</code>、远程 MCP 或外部 Agent 的合成执行动作。</p>
 
     <h3>4.4 一次批准如何真正进入执行边界</h3>
     <p>旧问题的根源是“UI 记录了允许，但实际执行仍拿旧沙箱策略”。现在审批结果不是提示状态，而是一份可执行权限数据。完整链路如下：</p>
@@ -444,7 +445,7 @@ once / session 临时 grant
 3. Desktop 展示并提交 decision
    └─ Gateway 校验 owner/workspace/session/task/nonce
 
-4. 后端生成 grant 或 exact rule
+4. 后端生成 grant、exact rule 或已校验的 prefix rule
    └─ once / session / always 的作用域各自落地
 
 5. 工具用同一个规范化动作重新授权
@@ -459,7 +460,7 @@ once / session 临时 grant
 8. Native Runtime 建立 OS 边界后启动命令
    └─ 批准的能力在这里才真正生效</code></pre>
 
-    <p>目录授权可以覆盖其后代，单文件授权只覆盖该文件；只读授权不能匹配写入请求。网络授权按 host、port、protocol 精确匹配。<code>require_escalated</code> 是唯一把当前命令编译成宿主执行的普通审批类型，而且即使选择“本次对话”，仍必须匹配完整命令和 cwd。</p>
+    <p>目录授权可以覆盖其后代，单文件授权只覆盖该文件；只读授权不能匹配写入请求。网络授权按 host、port、protocol 精确匹配。会话能力与原始动作分离，后续命令会继承已批准的精确范围。<code>require_escalated</code> 不进入这份可复用 profile；once/session 都只能为完整命令重试提供宿主权限，安全前缀则只属于 <code>terminal</code> 的明确 always 规则。</p>
 
     <h3>4.5 四个按钮不是四种安全模式</h3>
     <p>会话模式回答“默认如何审批和执行”，审批按钮回答“当前已经展示的动作要记多久”。两者是正交关系：请求批准和替我审批都可以产生 once/session/always 授权；完全访问通常不产生逐项审批。</p>
@@ -467,8 +468,8 @@ once / session 临时 grant
       <thead><tr><th>按钮</th><th>动作记忆</th><th>权限记忆</th><th>不会发生什么</th></tr></thead>
       <tbody>
         <tr><td>仅这一次</td><td>仅当前完整动作，匹配后消费。</td><td>仅当前请求展示的路径/网络/监听或执行边界。</td><td>不会自动允许第二次相同动作。</td></tr>
-        <tr><td>本次对话</td><td>无额外权限的动作仍精确匹配；脱沙箱命令精确匹配。</td><td>目录、文件和网络范围可在当前 owner/workspace/session 内复用。</td><td>不会跨对话、跨 workspace 或跨账号复用。</td></tr>
-        <tr><td>始终允许此操作</td><td>保存完整规范化动作摘要。</td><td>同时保存该动作获批的精确 overlay。</td><td>不会因相同 argv 前缀而允许额外尾随参数。</td></tr>
+        <tr><td>本次对话</td><td>普通动作不需要重复匹配原始命令；脱沙箱命令仍精确匹配。</td><td>目录、文件和网络范围会合入当前 owner/workspace/session 的有效 profile。</td><td>不会跨对话、跨 workspace 或跨账号复用。</td></tr>
+        <tr><td>始终允许此操作</td><td>默认保存完整规范化动作；只有 Ace <code>terminal</code> 的 <code>require_escalated</code> 审批卡展示安全前缀时，才按前缀和 cwd 匹配。</td><td>同时保存该动作获批的精确 overlay。</td><td>不会接受界面未展示的前缀；shell、解释器、提权器和删除命令不能保存为 allow 前缀。</td></tr>
         <tr><td>拒绝</td><td>不创建动作授权。</td><td>不创建任何权限，并进入短暂冷却。</td><td>不会写入一条允许规则。</td></tr>
       </tbody>
     </table>
@@ -482,18 +483,18 @@ once / session 临时 grant
       <li>路径在判断前会解析为最终规范路径；符号链接、junction 和 TOCTOU 交换由文件工具与平台测试覆盖。</li>
       <li>写文件系统根目录被永久拒绝。</li>
       <li>在请求批准与替我审批中，Ace 数据目录、security DB 及其 WAL/SHM/journal 属于不可升级拒绝。</li>
-      <li>在请求批准与替我审批中，workspace 下的 <code>.git</code>、<code>.agents</code>、<code>.crew</code> 是不可升级的只读元数据；结构化文件工具和任意受管 shell 都能读取，但不能创建、修改、重命名或删除。</li>
+      <li>在请求批准与替我审批中，workspace 下的 <code>.git</code>、<code>.agents</code>、<code>.crew</code> 默认是只读元数据；需要提交、暂存或维护项目配置时，会以整个元数据目录为真实原生边界展示并申请写权限。Ace 数据库、凭据与宿主配置仍不可升级。</li>
     </ul>
 
     <h3>5.2 权限合并规则</h3>
     <p>基础 profile 与用户追加授权按路径具体程度合并：更深的路径比父目录更具体，同等具体时 deny 获胜；标记为 <code>escalatable=false</code> 的拒绝和只读项永远不能被追加授权升级为写入。终端只能申请已存在的精确文件或目录；创建新文件时申请已存在的父目录，文件系统根写入永不开放。</p>
 
     <div class="callout">
-      <strong>原生命令的只读 carve-out：</strong>Broker 把不可升级的 <code>READ</code> entry 编译为协议字段 <code>readonly_roots</code>。helper 握手必须声明同名能力，否则 Gateway 按协议不兼容失败关闭。Linux 在可写 bind 之上重新挂载只读路径；Windows 为账户与 capability SID 同时授予读取并拒绝写入/删除；macOS 在 writable allow 之后为目标本身与子路径追加 <code>deny file-write*</code>。路径必须位于显式可写根内，符号链接/reparse point 会被拒绝；路径尚不存在时仍保护“创建目标本身”。
+      <strong>原生命令的只读 carve-out：</strong>Broker 把工作空间可写根内部的 <code>READ</code> entry 编译为协议字段 <code>readonly_roots</code>。helper 握手必须声明同名能力，否则 Gateway 按协议不兼容失败关闭。Linux 在可写 bind 之上重新挂载只读路径；Windows 为账户与 capability SID 同时授予读取并拒绝写入/删除；macOS 在 writable allow 之后为目标本身与子路径追加 <code>deny file-write*</code>。只有标记可升级且审批 overlay 覆盖相同目录时才移除此 carve-out；不可升级项始终保留。
     </div>
 
     <h2 id="execution">6. 进程执行：所有受管命令汇聚到一个边界</h2>
-    <p><code>compile_process_launch</code> 在每个 turn 入口根据可信上下文编译一次 <code>ProcessLaunch</code>。审批通过后，命中的 grant/rule 把额外权限写入该启动快照；前台、后台进程和 captured adapter 都把同一 overlay 交给 Native Runtime。终端还支持 <code>use_default</code>、<code>with_additional_permissions</code> 与 <code>require_escalated</code>：最后一种必须提供原因并单独批准，只让当前完整命令脱离沙箱，不会切换整个对话模式。</p>
+    <p><code>compile_process_launch</code> 在每个 turn 入口根据可信上下文编译 <code>ProcessLaunch</code>。审批通过后，命中的 grant/rule 与会话 permission profile 合并后写入启动快照；前台、后台进程和 captured adapter 都把同一 overlay 交给 Native Runtime。Ace <code>terminal</code> 支持 <code>use_default</code>、<code>with_additional_permissions</code> 与 <code>require_escalated</code>，并接受 <code>justification</code>；<code>prefix_rule</code> 只能与 <code>require_escalated</code> 一起使用，不属于 <code>publish_site</code>、MCP 或其他合成执行工具。</p>
     <p>前台与后台桥接请求都会显式传递 <code>full_disk_read</code>，避免策略层显示“广泛只读”、原生运行层却仍从空文件系统启动。终端结果同时返回实际 cwd、HOME、执行边界、批准决定和实际应用的路径/网络权限，Agent 不应再把沙箱内精确扩权误述为失败或“文件工具绕过了沙箱”。</p>
     <p>默认任务目录可能位于受保护运行时 home 的更深层。Broker 会在前台和后台共用同一个文件计划编译器：当一个 deny 是已认证工作区或已激活 Skill 只读根的严格祖先时，不把这个冲突的祖先 deny 交给原生后端；精确 deny、工作区内受保护元数据和 deny 的子路径仍保留。各后端保持 default-deny，因此该 carve-out 不会让同级凭据、数据库或其他 owner 目录变成可见资源。</p>
 
@@ -703,6 +704,7 @@ helper 响应
         <tr><td>Windows 沙箱身份/WFP</td><td>Desktop security state + 系统配置</td><td>安装后持久化，卸载时回收。</td></tr>
       </tbody>
     </table>
+    <p>旧版 allow 规则没有 Ace <code>tool_name</code>，无法判断它当初是由 <code>terminal</code>、<code>file_write</code>、<code>web_extract</code> 还是合成工具展示。Gateway 升级时会将这类无工具身份的旧 allow 规则禁用并写入审计，避免它们在新工具路由上变成跨工具授权；旧 deny 规则继续全局生效。</p>
 
     <h3>11.2 审计写入也属于授权事务</h3>
     <p>审批决定、规则创建/禁用/删除和秘密注入是关键事件，无法持久写入时会让授权失败并回滚刚创建的 grant 或规则。普通事件可进入有界内存缓冲，后续成功写入时再刷新。这样不会出现“执行已经放行，但决定没有证据”的静默状态。</p>

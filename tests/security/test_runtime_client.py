@@ -14,6 +14,7 @@ from crew.security.runtime_client import (
     RuntimeCapabilities,
     RuntimeErrorCode,
     ShellVerdict,
+    is_likely_sandbox_denied,
 )
 from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
 from crew.security.models import (
@@ -172,6 +173,34 @@ for frame in frames:
     if mode == "slow-stream":
         time.sleep(0.06)
 '''
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "output", "backend", "expected"),
+    [
+        (1, "Permission denied", "macos_seatbelt", True),
+        (101, "Read-only file system", "linux_bwrap", True),
+        (159, "", "linux_bwrap", True),
+        (127, "command not found", "linux_bwrap", False),
+        (1, "Permission denied", "host_unconfined", False),
+        (0, "Permission denied", "windows_sandbox_account", False),
+    ],
+)
+def test_sandbox_denial_detection_is_conservative(
+    exit_code: int,
+    output: str,
+    backend: str,
+    expected: bool,
+) -> None:
+    assert (
+        is_likely_sandbox_denied(
+            exit_code,
+            "",
+            output,
+            backend=backend,
+        )
+        is expected
+    )
 
 
 _INTERACTIVE_HELPER = r'''

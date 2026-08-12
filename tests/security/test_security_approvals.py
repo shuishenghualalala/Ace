@@ -337,8 +337,22 @@ def test_always_returns_persistent_rule_but_immediate_grant_stays_exact(tmp_path
     clock = _Clock()
     manager = _manager(clock)
     context = _context(tmp_path)
-    action = normalize_exec_action(["git", "status", "--short"], tmp_path)
-    request = manager.create(context, action, "terminal")
+    action = normalize_exec_action(
+        ["bash", "-lc", "git status --short"],
+        tmp_path,
+        raw_command="git status --short",
+        shell_kind="bash",
+        parsed_commands=(("git", "status", "--short"),),
+    )
+    request = manager.create(
+        context,
+        action,
+        "terminal",
+        additional_permissions=AdditionalPermissionProfile(
+            sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+        ),
+        proposed_argv_prefix=["git", "status"],
+    )
 
     outcome = manager.decide(
         request.request_id,
@@ -351,8 +365,10 @@ def test_always_returns_persistent_rule_but_immediate_grant_stays_exact(tmp_path
     assert outcome.grant is not None
     assert outcome.persistent_rule is not None
     assert outcome.persistent_rule.scope is RuleScope.ALWAYS
-    assert outcome.persistent_rule.exact_digest == action.digest
-    assert outcome.persistent_rule.argv_prefix == ()
+    assert outcome.persistent_rule.exact_digest == ""
+    assert outcome.persistent_rule.argv_prefix == ("git", "status")
+    assert outcome.persistent_rule.allow_prefix_authority
+    assert outcome.persistent_rule.matches(action)
 
 
 def test_shell_digest_is_stable_across_classifier_evidence(tmp_path: Path) -> None:
@@ -372,7 +388,7 @@ def test_shell_digest_is_stable_across_classifier_evidence(tmp_path: Path) -> No
     assert base.digest == classified.digest
 
 
-def test_shell_always_uses_exact_action_not_wrapper_prefix(tmp_path: Path) -> None:
+def test_shell_wrapper_cannot_be_saved_as_prefix(tmp_path: Path) -> None:
     clock = _Clock()
     manager = _manager(clock)
     context = _context(tmp_path)
@@ -383,26 +399,17 @@ def test_shell_always_uses_exact_action_not_wrapper_prefix(tmp_path: Path) -> No
     )
     request = manager.create(context, action, "terminal")
 
-    outcome = manager.decide(
-        request.request_id,
-        request.nonce,
-        ApprovalDecision.ALWAYS,
-        context,
-        always_argv_prefix=["pwsh", "-NoProfile", "-Command"],
-    )
-
-    assert outcome.persistent_rule is not None
-    assert outcome.persistent_rule.exact_digest == action.digest
-    assert outcome.persistent_rule.argv_prefix == ()
-    changed = normalize_exec_action(
-        ["pwsh", "-NoProfile", "-Command", "Remove-Item -Recurse C:\\"],
-        tmp_path,
-        raw_command="Remove-Item -Recurse C:\\",
-    )
-    assert not outcome.persistent_rule.matches(changed)
+    with pytest.raises(ApprovalError, match="审批时展示"):
+        manager.decide(
+            request.request_id,
+            request.nonce,
+            ApprovalDecision.ALWAYS,
+            context,
+            always_argv_prefix=["pwsh", "-NoProfile", "-Command"],
+        )
 
 
-def test_legacy_always_prefix_is_ignored_and_exact_action_is_persisted(tmp_path: Path) -> None:
+def test_unshown_always_prefix_is_rejected(tmp_path: Path) -> None:
     clock = _Clock()
     manager = _manager(clock)
     context = _context(tmp_path)
@@ -412,15 +419,41 @@ def test_legacy_always_prefix_is_ignored_and_exact_action_is_persisted(tmp_path:
         "terminal",
     )
 
-    outcome = manager.decide(
-        request.request_id,
-        request.nonce,
-        ApprovalDecision.ALWAYS,
-        context,
-        always_argv_prefix=["git", "diff"],
-    )
-    assert outcome.persistent_rule is not None
-    assert outcome.persistent_rule.exact_digest == request.action_digest
+    with pytest.raises(ApprovalError, match="审批时展示"):
+        manager.decide(
+            request.request_id,
+            request.nonce,
+            ApprovalDecision.ALWAYS,
+            context,
+            always_argv_prefix=["git", "diff"],
+        )
+
+
+def test_non_terminal_tool_cannot_propose_exec_prefix(tmp_path: Path) -> None:
+    manager = _manager(_Clock())
+
+    with pytest.raises(ValueError, match="terminal"):
+        manager.create(
+            _context(tmp_path),
+            normalize_exec_action(["tool", "publish"], tmp_path),
+            "publish_site",
+            additional_permissions=AdditionalPermissionProfile(
+                sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+            ),
+            proposed_argv_prefix=["tool", "publish"],
+        )
+
+
+def test_terminal_prefix_requires_escalated_permissions(tmp_path: Path) -> None:
+    manager = _manager(_Clock())
+
+    with pytest.raises(ValueError, match="require_escalated"):
+        manager.create(
+            _context(tmp_path),
+            normalize_exec_action(["tool", "publish"], tmp_path),
+            "terminal",
+            proposed_argv_prefix=["tool", "publish"],
+        )
 
 
 def test_reject_creates_no_grant_or_persistent_deny(tmp_path: Path) -> None:

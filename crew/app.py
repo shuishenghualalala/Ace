@@ -398,7 +398,7 @@ class CrewApp:
                     ),
                     rule_id=rule_id,
                     action_type="rule_disabled",
-                    decision="migration_disabled_legacy_prefix",
+                    decision="migration_disabled_legacy_unscoped_allow",
                 )
             )
         self.security_service = SecurityApprovalService(

@@ -39,9 +39,9 @@ class _ApprovalOnlyService:
         *,
         tool_name,
         risk_class,
-        **_kwargs,
+        **kwargs,
     ):
-        self.actions.append((context, action, tool_name, risk_class))
+        self.actions.append((context, action, tool_name, risk_class, kwargs))
         return False, {"request_id": "approval-1"}
 
     async def await_decision(self, request_id):
@@ -72,7 +72,7 @@ class _FullAccessService:
         "a=rm; $a -rf /tmp/example",
     ],
 )
-async def test_every_managed_terminal_command_requires_host_authorization(
+async def test_every_managed_terminal_command_crosses_host_authorization(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     command: str,
@@ -100,9 +100,10 @@ async def test_every_managed_terminal_command_requires_host_authorization(
 
     assert '"error_code": "approval_expired"' in result
     assert len(service.actions) == 1
-    _ctx, action, tool_name, risk_class = service.actions[0]
+    _ctx, action, tool_name, risk_class, kwargs = service.actions[0]
     assert tool_name == "terminal"
     assert risk_class in {"shell_command", "dangerous_command"}
+    assert kwargs["requires_approval"] is (risk_class == "dangerous_command")
     assert action.raw_command == command
     assert command in action.argv[-1]
 
@@ -151,7 +152,7 @@ async def test_full_access_does_not_depend_on_native_classifier_or_permission_ov
     assert payload["applied_permissions"]["sandbox_permissions"] == "use_default"
 
 
-def test_terminal_permission_request_is_exact_and_protected_metadata_stays_read_only(
+def test_terminal_permission_request_is_exact_and_project_metadata_is_escalatable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -198,14 +199,27 @@ def test_terminal_permission_request_is_exact_and_protected_metadata_stays_read_
     )
     assert redundant.empty
 
-    with pytest.raises(ToolError, match="受保护路径"):
-        _parse_additional_permissions(
-            {"filesystem": [{"root": str(metadata), "access": "read_write"}]},
-            cwd=workspace,
-            security_context=context,
-            mode=ConversationPermissionMode.AUTO_REVIEW,
-            db_path=tmp_path / "crew.db",
-        )
+    metadata_permission = _parse_additional_permissions(
+        {"filesystem": [{"root": str(metadata), "access": "read_write"}]},
+        cwd=workspace,
+        security_context=context,
+        mode=ConversationPermissionMode.AUTO_REVIEW,
+        db_path=tmp_path / "crew.db",
+    )
+    assert metadata_permission.filesystem == (
+        FilesystemEntry(metadata, FilesystemAccess.READ_WRITE),
+    )
+
+    metadata_child = metadata / "index"
+    metadata_child.write_text("index", encoding="utf-8")
+    promoted = _parse_additional_permissions(
+        {"filesystem": [{"root": str(metadata_child), "access": "read_write"}]},
+        cwd=workspace,
+        security_context=context,
+        mode=ConversationPermissionMode.AUTO_REVIEW,
+        db_path=tmp_path / "crew.db",
+    )
+    assert promoted.filesystem == metadata_permission.filesystem
     with pytest.raises(ToolError, match="已存在路径"):
         _parse_additional_permissions(
             {"filesystem": [{"root": str(tmp_path / "missing"), "access": "read"}]},

@@ -289,7 +289,7 @@ def test_compile_process_launch_uses_explicit_external_security_setting(
     assert launch.external_managed is False
 
 
-def test_require_escalated_compiles_only_that_launch_to_host_authority(tmp_path: Path) -> None:
+def test_require_escalated_uses_host_boundary_after_explicit_approval(tmp_path: Path) -> None:
     context = SecurityContext(
         os_user="test-user",
         owner_account_id="owner-a",
@@ -308,14 +308,11 @@ def test_require_escalated_compiles_only_that_launch_to_host_authority(tmp_path:
             sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED
         ),
     )
-    ordinary = compile_process_launch(
-        context,
-        ConversationPermissionMode.REQUEST_APPROVAL,
-        db_path=tmp_path / "security.db",
-    )
-
     assert launch.managed is False
-    assert ordinary.managed is True
+    assert (
+        launch.additional_permissions.sandbox_permissions
+        is SandboxPermissions.REQUIRE_ESCALATED
+    )
 
 
 @pytest.mark.asyncio
@@ -439,7 +436,7 @@ def test_managed_background_command_is_protocol_data_not_host_argv(tmp_path, mon
     assert captured["payload"]["readable_roots"] == []
 
 
-def test_managed_background_keeps_immutable_read_only_carve_out(tmp_path, monkeypatch):
+def test_managed_background_keeps_base_read_only_carve_out(tmp_path, monkeypatch):
     registry = ProcessRegistry()
     captured = {}
     protected = tmp_path / ".git"
@@ -449,7 +446,7 @@ def test_managed_background_keeps_immutable_read_only_carve_out(tmp_path, monkey
             PermissionProfileKind.MANAGED,
             filesystem=(
                 *launch.profile.filesystem,
-                FilesystemEntry(protected, FilesystemAccess.READ, escalatable=False),
+                FilesystemEntry(protected, FilesystemAccess.READ, escalatable=True),
             ),
         ),
         launch.helper_argv,
@@ -464,6 +461,38 @@ def test_managed_background_keeps_immutable_read_only_carve_out(tmp_path, monkey
     registry.spawn_security("git status", launch=launch, cwd=str(tmp_path))
 
     assert captured["payload"]["readonly_roots"] == [str(protected.resolve())]
+
+
+def test_approved_metadata_write_removes_read_only_carve_out(tmp_path, monkeypatch):
+    registry = ProcessRegistry()
+    captured = {}
+    protected = tmp_path / ".git"
+    protected.mkdir()
+    launch = _managed(tmp_path)
+    launch = ProcessLaunch(
+        PermissionProfile(
+            PermissionProfileKind.MANAGED,
+            filesystem=(
+                *launch.profile.filesystem,
+                FilesystemEntry(protected, FilesystemAccess.READ, escalatable=True),
+            ),
+        ),
+        launch.helper_argv,
+        launch.trusted_readable_roots,
+        additional_permissions=AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(protected, FilesystemAccess.READ_WRITE),)
+        ),
+    )
+
+    def record(command, payload, **kwargs):
+        captured.update(command=command, payload=payload, kwargs=kwargs)
+        return "session"
+
+    monkeypatch.setattr(registry, "_spawn_managed_bridge", record)
+    registry.spawn_security("git commit", launch=launch, cwd=str(tmp_path))
+
+    assert captured["payload"]["readonly_roots"] == []
+    assert str(protected.resolve()) in captured["payload"]["writable_roots"]
 
 
 def test_managed_background_carves_workspace_from_parent_deny(tmp_path, monkeypatch):

@@ -12,6 +12,8 @@ from crew.security.models import (
     NetworkEntry,
     NetworkPolicy,
     PermissionProfileKind,
+    SandboxPermissions,
+    merge_additional_permissions,
 )
 from crew.security.policy import filesystem_operation_allowed, settings_for_mode
 
@@ -35,6 +37,25 @@ def test_ui_modes_map_to_two_independent_security_axes(tmp_path: Path) -> None:
 def test_unknown_ui_mode_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="未知对话安全模式"):
         settings_for_mode("unknown", tmp_path)  # type: ignore[arg-type]
+
+
+def test_permission_merge_keeps_strongest_same_root_access(tmp_path: Path) -> None:
+    root = tmp_path / "approved"
+
+    merged = merge_additional_permissions(
+        AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(root, FilesystemAccess.READ),)
+        ),
+        AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(root, FilesystemAccess.READ_WRITE),)
+        ),
+    )
+
+    assert merged.filesystem == (FilesystemEntry(root, FilesystemAccess.READ_WRITE),)
+    assert (
+        merged.sandbox_permissions
+        is SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS
+    )
 
 
 def test_managed_profile_is_broadly_read_only_and_workspace_writable(
@@ -120,6 +141,31 @@ def test_non_escalatable_read_only_root_cannot_be_upgraded_to_write(tmp_path: Pa
     assert not filesystem_operation_allowed(
         profile,
         additional,
+        protected,
+        FilesystemOperation.WRITE,
+    )
+
+
+def test_escalatable_read_only_root_requires_exact_write_overlay(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    protected = workspace / ".git"
+    profile = settings_for_mode(
+        ConversationPermissionMode.REQUEST_APPROVAL,
+        workspace,
+        deny_entries=(FilesystemEntry(protected, FilesystemAccess.READ, escalatable=True),),
+    ).profile
+
+    assert not filesystem_operation_allowed(
+        profile,
+        AdditionalPermissionProfile(),
+        protected,
+        FilesystemOperation.WRITE,
+    )
+    assert filesystem_operation_allowed(
+        profile,
+        AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(protected, FilesystemAccess.READ_WRITE),)
+        ),
         protected,
         FilesystemOperation.WRITE,
     )

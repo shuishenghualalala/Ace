@@ -26,6 +26,7 @@ from crew.security.models import (
     PermissionProfile,
     PermissionProfileKind,
     SandboxPermissions,
+    merge_additional_permissions,
 )
 from crew.security.policy import settings_for_mode
 from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
@@ -154,25 +155,9 @@ async def execute_captured(
         host_env = {**(env if env is not None else os.environ), **env_overrides}
 
     action = _execution_action(argv, cwd)
-    effective_permissions = AdditionalPermissionProfile(
-        filesystem=(
-            *launch.additional_permissions.filesystem,
-            *additional_permissions.filesystem,
-        ),
-        network=(
-            *launch.additional_permissions.network,
-            *additional_permissions.network,
-        ),
-        allow_local_binding=(
-            launch.additional_permissions.allow_local_binding
-            or additional_permissions.allow_local_binding
-        ),
-        sandbox_permissions=(
-            additional_permissions.sandbox_permissions
-            if additional_permissions.sandbox_permissions
-            is not SandboxPermissions.USE_DEFAULT
-            else launch.additional_permissions.sandbox_permissions
-        ),
+    effective_permissions = merge_additional_permissions(
+        launch.additional_permissions,
+        additional_permissions,
     )
     if launch.managed:
         from crew.security.broker import ExecutionRequest, SecurityExecutionBroker

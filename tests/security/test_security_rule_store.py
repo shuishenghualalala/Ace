@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from crew.security.actions import normalize_exec_action, normalize_network_action
-from crew.security.models import AdditionalPermissionProfile, FilesystemAccess, FilesystemEntry
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    FilesystemAccess,
+    FilesystemEntry,
+    SandboxPermissions,
+)
 from crew.security.rule_store import RuleStoreCorruptError, SQLiteRuleStore
 from crew.security.rules import ActionRule, RuleScope
 
@@ -59,6 +64,35 @@ def test_reopen_disables_legacy_allow_prefix_rules(tmp_path: Path) -> None:
         owner_account_id="owner-a",
         workspace_id="project-a",
     ) == [(legacy, False)]
+    reopened.close()
+
+
+def test_reopen_keeps_host_validated_allow_prefix_rule(tmp_path: Path) -> None:
+    db = tmp_path / "crew.db"
+    store = SQLiteRuleStore(db)
+    rule = ActionRule.exec_prefix(
+        ["git", "status"],
+        cwd=tmp_path,
+        additional_permissions=AdditionalPermissionProfile(
+            sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+        ),
+        allow_authority=True,
+        tool_name="terminal",
+    )
+    store.create(
+        rule,
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    )
+    store.close()
+
+    reopened = SQLiteRuleStore(db)
+    assert reopened.list(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    ) == [rule]
     reopened.close()
 
 

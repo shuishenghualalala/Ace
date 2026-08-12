@@ -69,6 +69,32 @@ def assess_file_action(
     return FilePolicyAssessment(FilePolicyResult.REQUIRE_APPROVAL, "项目外路径需要额外授权")
 
 
+def approvable_file_permission_root(
+    context: SecurityContext,
+    target: str | Path,
+    *,
+    db_path: str | Path,
+) -> Path:
+    """Return the native permission boundary that must be shown to the user.
+
+    Protected project metadata is enforced as a directory-level read-only
+    carve-out on every native backend.  A write to one child therefore needs an
+    explicit grant for that displayed directory; silently approving a child and
+    opening the parent would make the UI scope dishonest.
+    """
+    resolved = Path(target).expanduser().resolve(strict=False)
+    candidates = [
+        entry.root
+        for entry in _protected_entries(context, db_path)
+        if entry.access is FilesystemAccess.READ
+        and entry.escalatable
+        and _contains(entry.root, resolved)
+    ]
+    if not candidates:
+        return resolved
+    return max(candidates, key=lambda root: len(root.parts))
+
+
 def _protected_entries(context: SecurityContext, db_path: str | Path) -> tuple[FilesystemEntry, ...]:
     denied = [
         FilesystemEntry(Path(db_path), FilesystemAccess.DENY, escalatable=False),
@@ -107,7 +133,7 @@ def _protected_entries(context: SecurityContext, db_path: str | Path) -> tuple[F
             FilesystemEntry(
                 context.workspace_root / name,
                 FilesystemAccess.READ,
-                escalatable=False,
+                escalatable=True,
             )
             for name in (".git", ".agents", ".crew")
         )

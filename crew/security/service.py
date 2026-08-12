@@ -21,7 +21,11 @@ from crew.security.approvals import (
 )
 from crew.security.audit import AuditEvent, SQLiteSecurityAudit, format_action_for_audit
 from crew.security.context import SecurityContext
-from crew.security.file_policy import FilePolicyResult, assess_file_action
+from crew.security.file_policy import (
+    FilePolicyResult,
+    approvable_file_permission_root,
+    assess_file_action,
+)
 from crew.security.grants import GrantRegistry
 from crew.security.models import (
     EMPTY_ADDITIONAL_PERMISSIONS,
@@ -30,10 +34,13 @@ from crew.security.models import (
     FilesystemAccess,
     FilesystemEntry,
     NetworkEntry,
+    SandboxPermissions,
+    additional_permissions_cover,
+    merge_additional_permissions,
     serialize_additional_permissions,
 )
 from crew.security.rule_store import SQLiteRuleStore
-from crew.security.rules import RuleDecision, choose_rule
+from crew.security.rules import ActionRule, RuleDecision, choose_rule
 
 # 与请求 TTL 对齐的等待上限：超过则按 fail-closed 处理（等同拒绝），避免工具永久挂起。
 _DECIDE_WAIT_TIMEOUT = 300.0
@@ -261,6 +268,7 @@ class SecurityApprovalService:
         risk_class: str,
         preview: str = "",
         additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
+        proposed_argv_prefix: Sequence[str] | None = None,
     ) -> dict:
         """Create or reuse one exact pending request without performing the action."""
         request, created = self.approvals.create_or_get(
@@ -270,6 +278,7 @@ class SecurityApprovalService:
             risk_class=risk_class,
             preview=preview,
             additional_permissions=additional_permissions,
+            proposed_argv_prefix=proposed_argv_prefix,
         )
         # Register even for a reused request. The prior caller may have timed out or
         # been cancelled while the approval itself remains pending; a new caller must
@@ -325,6 +334,7 @@ class SecurityApprovalService:
         # that this authorize matches before its durable audit commits, then roll it
         # back after execution has already started (H-7).
         with self._decision_lock:
+            session_permissions = self.grants.session_permissions(context)
             rules = self.rules.list(
                 os_user=context.os_user,
                 owner_account_id=context.owner_account_id,
@@ -332,26 +342,41 @@ class SecurityApprovalService:
             )
             # Persisted DENY is explicit owner policy and must short-circuit base
             # allow, FULL_ACCESS, allow rules, and transient grants.
-            if any(rule.decision is RuleDecision.DENY and rule.matches(action) for rule in rules):
+            if any(
+                rule.decision is RuleDecision.DENY
+                and _rule_applies_to_tool(rule, tool_name)
+                and rule.matches(action)
+                for rule in rules
+            ):
                 self._audit_file(context, action, "deny", "always_deny_rule", tool_name)
                 return FilePolicyResult.DENY, "persistent_deny_rule", None
-            asks_for_workspace_write = (
-                mode is ConversationPermissionMode.REQUEST_APPROVAL
-                and action.operation != "read"
-            )
-            if assessment.result is FilePolicyResult.ALLOW and not asks_for_workspace_write:
+            if assessment.result is FilePolicyResult.ALLOW:
                 self._audit_file(context, action, "allow", "base_profile", tool_name)
                 return assessment.result, assessment.reason, None
 
-            selected = choose_rule(rules, action)
+            selected = choose_rule(
+                (rule for rule in rules if _rule_applies_to_tool(rule, tool_name)),
+                action,
+            )
             if selected is not None and selected.decision is RuleDecision.ALLOW:
                 self._audit_file(context, action, "allow", "always_rule", tool_name)
                 return FilePolicyResult.ALLOW, "always_rule", None
-            requested_permissions = _file_action_permissions(action)
+            requested_permissions = _file_action_permissions(
+                action,
+                permission_root=approvable_file_permission_root(
+                    context,
+                    action.path,
+                    db_path=self.db_path,
+                ),
+            )
+            if additional_permissions_cover(session_permissions, requested_permissions):
+                self._audit_file(context, action, "allow", "session_permissions", tool_name)
+                return FilePolicyResult.ALLOW, "session_permissions", None
             grant = self.grants.authorize_action(
                 context,
                 action,
                 additional_permissions=requested_permissions,
+                tool_name=tool_name,
             )
             if grant is not None:
                 self._audit_file(context, action, "allow", "runtime_grant", tool_name)
@@ -364,9 +389,7 @@ class SecurityApprovalService:
             action,
             tool_name=tool_name,
             risk_class=(
-                "workspace_file_write"
-                if asks_for_workspace_write
-                else "external_file_write" if action.operation != "read" else "external_file_read"
+                "external_file_write" if action.operation != "read" else "external_file_read"
             ),
             preview=preview,
             additional_permissions=requested_permissions,
@@ -383,6 +406,7 @@ class SecurityApprovalService:
         requires_approval: bool = True,
         additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
         preview: str = "",
+        proposed_argv_prefix: Sequence[str] | None = None,
     ) -> ExecAuthorization:
         """Authorize one exact command according to the selected conversation mode."""
         mode = self.mode_for(context)
@@ -397,12 +421,18 @@ class SecurityApprovalService:
         # end_session/logout terminal sweep so a grant published in the issue window
         # cannot be consumed after the session ended (H-6).
         with self._decision_lock:
+            session_permissions = self.grants.session_permissions(context)
             rules = self.rules.list(
                 os_user=context.os_user,
                 owner_account_id=context.owner_account_id,
                 workspace_id=context.workspace_id,
             )
-            if any(rule.decision is RuleDecision.DENY and rule.matches(action) for rule in rules):
+            if any(
+                rule.decision is RuleDecision.DENY
+                and _rule_applies_to_tool(rule, tool_name)
+                and rule.matches(action)
+                for rule in rules
+            ):
                 self._audit_exec(context, action, "deny", "always_deny_rule", tool_name)
                 return ExecAuthorization(False)
             if mode is ConversationPermissionMode.FULL_ACCESS:
@@ -413,32 +443,71 @@ class SecurityApprovalService:
                     rule
                     for rule in rules
                     if rule.decision is RuleDecision.ALLOW
-                    and rule.additional_permissions == additional_permissions
+                    and _rule_applies_to_tool(rule, tool_name)
+                    and (
+                        additional_permissions.empty
+                        or additional_permissions_cover(
+                            rule.additional_permissions,
+                            additional_permissions,
+                        )
+                    )
                 ),
                 action,
             )
-            if (
-                selected is not None
-                and selected.decision is RuleDecision.ALLOW
-                and selected.additional_permissions == additional_permissions
-            ):
+            if selected is not None and selected.decision is RuleDecision.ALLOW:
                 self._audit_exec(context, action, "allow", "always_rule", tool_name)
-                return ExecAuthorization(True, additional_permissions=selected.additional_permissions)
+                return ExecAuthorization(
+                    True,
+                    additional_permissions=merge_additional_permissions(
+                        session_permissions,
+                        selected.additional_permissions,
+                    ) if selected.additional_permissions.sandbox_permissions
+                    is not SandboxPermissions.REQUIRE_ESCALATED else selected.additional_permissions,
+                )
             grant = self.grants.authorize_action(
                 context,
                 action,
                 additional_permissions=additional_permissions,
+                tool_name=tool_name,
             )
             if grant is not None:
                 self._audit_exec(context, action, "allow", "runtime_grant", tool_name)
-                return ExecAuthorization(True, additional_permissions=grant.additional_permissions)
-        if (
-            mode is ConversationPermissionMode.AUTO_REVIEW
-            and not requires_approval
-            and additional_permissions.empty
-        ):
-            self._audit_exec(context, action, "allow", "auto_review", tool_name)
-            return ExecAuthorization(True)
+                return ExecAuthorization(
+                    True,
+                    additional_permissions=(
+                        grant.additional_permissions
+                        if grant.additional_permissions.sandbox_permissions
+                        is SandboxPermissions.REQUIRE_ESCALATED
+                        else merge_additional_permissions(
+                            session_permissions,
+                            grant.additional_permissions,
+                        )
+                    ),
+                )
+            if (
+                mode in {
+                    ConversationPermissionMode.REQUEST_APPROVAL,
+                    ConversationPermissionMode.AUTO_REVIEW,
+                }
+                and not requires_approval
+                and additional_permissions.empty
+            ):
+                self._audit_exec(context, action, "allow", "base_profile", tool_name)
+                return ExecAuthorization(True, additional_permissions=session_permissions)
+            if (
+                not additional_permissions.empty
+                and additional_permissions.sandbox_permissions
+                is not SandboxPermissions.REQUIRE_ESCALATED
+                and additional_permissions_cover(session_permissions, additional_permissions)
+            ):
+                self._audit_exec(context, action, "allow", "session_permissions", tool_name)
+                return ExecAuthorization(
+                    True,
+                    additional_permissions=merge_additional_permissions(
+                        session_permissions,
+                        additional_permissions,
+                    ),
+                )
         request = self.request_action(
             context,
             action,
@@ -446,6 +515,7 @@ class SecurityApprovalService:
             risk_class=risk_class,
             additional_permissions=additional_permissions,
             preview=preview,
+            proposed_argv_prefix=proposed_argv_prefix,
         )
         self._audit_exec(context, action, "ask", "approval_required", tool_name)
         return ExecAuthorization(False, request)
@@ -464,7 +534,12 @@ class SecurityApprovalService:
                 owner_account_id=context.owner_account_id,
                 workspace_id=context.workspace_id,
             )
-            if any(rule.decision is RuleDecision.DENY and rule.matches(action) for rule in rules):
+            if any(
+                rule.decision is RuleDecision.DENY
+                and _rule_applies_to_tool(rule, tool_name)
+                and rule.matches(action)
+                for rule in rules
+            ):
                 self._audit_exec(context, action, "deny", "always_deny_rule", tool_name)
                 return ExecAuthorization(False)
         self._audit_exec(context, action, "allow", "desktop_user_gesture", tool_name)
@@ -487,26 +562,41 @@ class SecurityApprovalService:
             self._audit_network(context, action, "deny", "recent_user_rejection", tool_name)
             return ExecAuthorization(False)
         with self._decision_lock:
+            session_permissions = self.grants.session_permissions(context)
             rules = self.rules.list(
                 os_user=context.os_user,
                 owner_account_id=context.owner_account_id,
                 workspace_id=context.workspace_id,
             )
-            if any(rule.decision is RuleDecision.DENY and rule.matches(action) for rule in rules):
+            if any(
+                rule.decision is RuleDecision.DENY
+                and _rule_applies_to_tool(rule, tool_name)
+                and rule.matches(action)
+                for rule in rules
+            ):
                 self._audit_network(context, action, "deny", "always_deny_rule", tool_name)
                 return ExecAuthorization(False)
             selected = choose_rule(
-                (rule for rule in rules if rule.decision is RuleDecision.ALLOW),
+                (
+                    rule
+                    for rule in rules
+                    if rule.decision is RuleDecision.ALLOW
+                    and _rule_applies_to_tool(rule, tool_name)
+                ),
                 action,
             )
             if selected is not None:
                 self._audit_network(context, action, "allow", "always_rule", tool_name)
                 return ExecAuthorization(True)
             requested_permissions = _network_action_permissions(action, public_target)
+            if additional_permissions_cover(session_permissions, requested_permissions):
+                self._audit_network(context, action, "allow", "session_permissions", tool_name)
+                return ExecAuthorization(True, additional_permissions=session_permissions)
             grant = self.grants.authorize_action(
                 context,
                 action,
                 additional_permissions=requested_permissions,
+                tool_name=tool_name,
             )
             if grant is not None:
                 self._audit_network(context, action, "allow", "runtime_grant", tool_name)
@@ -904,6 +994,8 @@ def _public_request(request, *, include_nonce: bool) -> dict:
     }
     if request.preview:
         payload["preview"] = request.preview
+    if request.proposed_argv_prefix:
+        payload["proposed_argv_prefix"] = list(request.proposed_argv_prefix)
     if include_nonce:
         payload["nonce"] = request.nonce
     return payload
@@ -920,14 +1012,18 @@ def _permissions_summary(profile: AdditionalPermissionProfile) -> str:
     )
 
 
-def _file_action_permissions(action: NormalizedAction) -> AdditionalPermissionProfile:
+def _file_action_permissions(
+    action: NormalizedAction,
+    *,
+    permission_root: Path | None = None,
+) -> AdditionalPermissionProfile:
     access = (
         FilesystemAccess.READ
         if action.operation == "read"
         else FilesystemAccess.READ_WRITE
     )
     return AdditionalPermissionProfile(
-        filesystem=(FilesystemEntry(Path(action.path), access),)
+        filesystem=(FilesystemEntry(permission_root or Path(action.path), access),)
     )
 
 
@@ -954,6 +1050,17 @@ def _session_key(context: SecurityContext) -> tuple[str, str, str, str]:
         context.workspace_id,
         context.session_id,
     )
+
+
+def _rule_applies_to_tool(rule: ActionRule, tool_name: str) -> bool:
+    """Keep Ace action rules scoped to the tool surface that displayed them.
+
+    Historical deny rules remain global so an owner block cannot disappear after
+    migration. Historical allow rules without a tool identity carry no authority.
+    """
+    if rule.tool_name:
+        return rule.tool_name == str(tool_name).strip()
+    return rule.decision is RuleDecision.DENY
 
 
 def _rejection_key(

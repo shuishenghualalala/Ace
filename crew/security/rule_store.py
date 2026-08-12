@@ -33,7 +33,7 @@ class SQLiteRuleStore:
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
         self.migrated_legacy_rules = tuple(
-            self._writer.execute(self._disable_legacy_allow_prefixes)
+            self._writer.execute(self._disable_legacy_unscoped_allow_rules)
         )
 
     @staticmethod
@@ -58,8 +58,8 @@ class SQLiteRuleStore:
         )
 
     @staticmethod
-    def _disable_legacy_allow_prefixes(conn) -> list[tuple[str, str, str, str]]:
-        """Disable broad allow rules that predate complete-action persistence."""
+    def _disable_legacy_unscoped_allow_rules(conn) -> list[tuple[str, str, str, str]]:
+        """Disable allow rules that predate host-validated Ace tool scoping."""
         rows = conn.execute(
             "SELECT rule_id, os_user, owner_account_id, workspace_id, payload_json "
             "FROM security_rules WHERE enabled = 1"
@@ -72,8 +72,14 @@ class SQLiteRuleStore:
                 continue
             if (
                 payload.get("decision") == RuleDecision.ALLOW.value
-                and payload.get("argv_prefix")
-                and not str(payload.get("exact_digest", "")).strip()
+                and (
+                    not str(payload.get("tool_name", "")).strip()
+                    or (
+                        payload.get("argv_prefix")
+                        and not str(payload.get("exact_digest", "")).strip()
+                        and payload.get("allow_prefix_authority") is not True
+                    )
+                )
             ):
                 disabled.append(
                     (
@@ -123,6 +129,8 @@ class SQLiteRuleStore:
                 "additional_permissions": serialize_additional_permissions(
                     rule.additional_permissions
                 ),
+                "allow_prefix_authority": rule.allow_prefix_authority,
+                "tool_name": rule.tool_name,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -255,6 +263,8 @@ def _decode_rule(row) -> ActionRule:
             additional_permissions=deserialize_additional_permissions(
                 payload.get("additional_permissions")
             ),
+            allow_prefix_authority=payload.get("allow_prefix_authority") is True,
+            tool_name=str(payload.get("tool_name", "")).strip(),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RuleStoreCorruptError(f"规则 {rule_id} payload 损坏") from exc

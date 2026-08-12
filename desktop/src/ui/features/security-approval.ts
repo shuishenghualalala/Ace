@@ -22,7 +22,7 @@ export const SECURITY_APPROVAL_CHOICES: readonly SecurityApprovalChoice[] = [
 
 /** toolbar chip 的三选一：value/label/desc 由本模块（类型所有者）统一提供。 */
 export const SECURITY_MODE_OPTIONS: { value: ConversationSecurityMode; label: string; desc: string }[] = [
-  { value: 'request_approval', label: '请求批准', desc: '普通读取免询问；命令、写入和联网需确认' },
+  { value: 'request_approval', label: '请求批准', desc: '沙箱内命令和工作区写入直接执行；扩权与高风险操作需确认' },
   { value: 'auto_review', label: '替我审批', desc: '沙箱内与公开网络自动放行，越界再问' },
   { value: 'full_access', label: '完全访问权限', desc: '使用当前宿主用户权限，不启用沙箱' },
 ];
@@ -91,8 +91,8 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
   ];
   if (kind === 'exec') {
     if (sandboxPermissions === 'require_escalated') {
-      lines.push('执行边界：脱离沙箱，仅本命令将获得宿主用户可访问的全部范围');
-      lines.push('警告：该命令可读取或修改工作区外文件，并可直接使用宿主网络。');
+      lines.push('执行边界：请求当前完整命令使用宿主用户权限');
+      lines.push('警告：该命令将离开沙箱，可访问宿主用户能访问的文件和网络，包括 Ace 自身数据。');
     } else if (sandboxPermissions === 'with_additional_permissions') {
       lines.push('执行边界：留在沙箱内，并增加下方明确权限');
     } else {
@@ -109,6 +109,10 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
     }
     if (argv.length) lines.push(`${rawCommand ? '最终执行参数' : '完整命令'}：${argv.join(' ')}`);
     if (action['cwd']) lines.push(`工作目录：${String(action['cwd'])}`);
+    const proposedPrefix = Array.isArray(request['proposed_argv_prefix'])
+      ? request['proposed_argv_prefix'].map(String)
+      : [];
+    if (proposedPrefix.length) lines.push(`可保存的命令前缀：${proposedPrefix.join(' ')}`);
   } else if (kind === 'file') {
     if (action['path']) lines.push(`文件：${String(action['path'])}`);
     lines.push(`文件操作：${fileOperationLabel(String(action['operation'] ?? ''))}`);
@@ -325,10 +329,13 @@ export function bindSecurityApprovalUi(): () => void {
       if (submitting || !visibleRequest || !state.activeSessionId) return;
       const decision = button.dataset['securityDecision'] as SecurityApprovalChoice;
       if (!SECURITY_APPROVAL_CHOICES.includes(decision)) return;
-      // always 会持久保存上面展示的完整动作；shell wrapper 只按完整命令精确匹配，
-      // 不允许用 pwsh/bash 固定前缀泛化为未来任意脚本。
+      const proposedPrefix = Array.isArray(visibleRequest['proposed_argv_prefix'])
+        ? visibleRequest['proposed_argv_prefix'].map(String)
+        : [];
       if (decision === 'always'
-        && !window.confirm('「始终允许」会持久保存上面展示的完整动作。只有命令、工作目录和执行参数完全一致时才会自动放行；任何变化都会重新询问。确定要持久授权吗？')) {
+        && !window.confirm(proposedPrefix.length
+          ? `「始终允许」会在当前项目和工作目录保存命令前缀：${proposedPrefix.join(' ')}。后续匹配此前缀的命令会自动放行。确定要持久授权吗？`
+          : '「始终允许」会持久保存上面展示的完整动作。只有命令、工作目录和执行参数完全一致时才会自动放行；任何变化都会重新询问。确定要持久授权吗？')) {
         return;
       }
       const workspaceId = String(visibleRequest['workspace_id'] ?? 'default');
@@ -346,6 +353,9 @@ export function bindSecurityApprovalUi(): () => void {
           requestId,
           taskId,
           decision,
+          ...(decision === 'always' && proposedPrefix.length
+            ? { alwaysArgvPrefix: proposedPrefix }
+            : {}),
         });
         if (!result?.ok) {
           notify(`审批失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}`);

@@ -170,12 +170,22 @@ TERMINAL_SCHEMA = {
             },
             "permission_reason": {
                 "type": "string",
-                "description": "向用户说明为何需要额外权限，不参与授权匹配。",
+                "description": "向用户说明为何需要额外权限，不参与授权匹配；保留用于兼容旧调用。",
+            },
+            "justification": {
+                "type": "string",
+                "description": "向用户说明为何需要额外权限；与 permission_reason 等价，优先使用此字段。",
             },
             "sandbox_permissions": {
                 "type": "string",
                 "enum": ["use_default", "with_additional_permissions", "require_escalated"],
-                "description": "use_default 使用当前沙箱；with_additional_permissions 在沙箱内扩权；require_escalated 经批准后仅本命令使用宿主权限。",
+                "description": "use_default 使用当前沙箱；with_additional_permissions 在沙箱内扩权；require_escalated 经批准后仅本命令使用宿主用户权限，包括宿主用户可访问的 Ace 文件。",
+            },
+            "prefix_rule": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 2,
+                "description": "仅 require_escalated 可用的始终允许前缀建议；必须是当前唯一静态命令的安全前缀。",
             },
         },
         "required": ["command"],
@@ -302,7 +312,11 @@ def _parse_additional_permissions(
     sandbox_permissions: object = None,
 ):
     """Validate model-requested authority before it can appear in an approval."""
-    from crew.security.file_policy import _is_filesystem_root, _protected_entries
+    from crew.security.file_policy import (
+        _is_filesystem_root,
+        _protected_entries,
+        approvable_file_permission_root,
+    )
     from crew.security.models import (
         EMPTY_ADDITIONAL_PERMISSIONS,
         AdditionalPermissionProfile,
@@ -366,7 +380,16 @@ def _parse_additional_permissions(
             raise ToolError("文件权限不能申请 deny")
         if access is FilesystemAccess.READ_WRITE and _is_filesystem_root(root):
             raise ToolError("不能申请文件系统根目录的写权限")
-        filesystem_entries.append(FilesystemEntry(root, access))
+        permission_root = (
+            approvable_file_permission_root(
+                security_context,
+                root,
+                db_path=db_path,
+            )
+            if access is FilesystemAccess.READ_WRITE
+            else root
+        )
+        filesystem_entries.append(FilesystemEntry(permission_root, access))
     if sum(len(str(entry.root)) for entry in filesystem_entries) > 32_768:
         raise ToolError("额外文件权限路径总长度不能超过 32768")
 
@@ -528,15 +551,28 @@ async def handle_terminal(
                 and has_permission_entries
             ):
                 raise ToolError("require_escalated 不能与 additional_permissions 同时使用")
-        permission_reason = args.get("permission_reason", "")
+        permission_reason = args.get("justification", args.get("permission_reason", ""))
         if not isinstance(permission_reason, str) or len(permission_reason) > 1000:
-            raise ToolError("permission_reason 必须是长度不超过 1000 的字符串")
+            raise ToolError("justification 必须是长度不超过 1000 的字符串")
         if (
             requested_permissions.sandbox_permissions
             is SandboxPermissions.REQUIRE_ESCALATED
             and not permission_reason.strip()
         ):
-            raise ToolError("require_escalated 必须提供 permission_reason")
+            raise ToolError("require_escalated 必须提供 justification")
+        prefix_rule = args.get("prefix_rule")
+        if prefix_rule is not None and (
+            not isinstance(prefix_rule, list)
+            or len(prefix_rule) < 2
+            or any(not isinstance(token, str) or not token for token in prefix_rule)
+        ):
+            raise ToolError("prefix_rule 必须是至少包含两个非空字符串的数组")
+        if (
+            prefix_rule is not None
+            and requested_permissions.sandbox_permissions
+            is not SandboxPermissions.REQUIRE_ESCALATED
+        ):
+            raise ToolError("prefix_rule 只能与 require_escalated 一起使用")
         final_argv = shell_argv(command)
         shell_kind = "powershell" if os.name == "nt" else "bash"
         classification = None
@@ -578,6 +614,7 @@ async def handle_terminal(
             ),
             additional_permissions=requested_permissions,
             preview=permission_reason,
+            proposed_argv_prefix=prefix_rule,
         )
         authorized, approval = authorization
         granted_permissions = getattr(
@@ -654,7 +691,7 @@ async def handle_terminal(
                 inherited_launch.trusted_readable_roots if inherited_launch is not None else ()
             ),
         )
-        applied_permissions = granted_permissions or EMPTY_ADDITIONAL_PERMISSIONS
+        applied_permissions = launch.additional_permissions
         terminal_metadata = {
             "execution_boundary": "sandbox" if launch.managed else "host",
             "effective_home": str(Path.home().expanduser().resolve(strict=False)),
@@ -834,6 +871,7 @@ async def handle_terminal(
             "runtime_protocol_mismatch": "安全运行时协议不匹配，命令未执行",
             "sandbox_unavailable": "当前平台的安全沙箱不可用，命令未执行",
             "sandbox_denied": "安全沙箱拒绝执行该命令",
+            "policy_denied": "安全策略拒绝执行该命令",
             "network_unavailable": "安全运行时无法建立获批的网络边界",
             "timeout": "安全运行时执行超时",
             "output_truncated": "安全运行时输出超过限制",
@@ -848,6 +886,14 @@ async def handle_terminal(
                 "error_code": session.stable_error_code,
                 "cwd": cwd,
                 "command": command,
+                "output": text,
+                "retryable": session.stable_error_code == "sandbox_denied",
+                "retry_hint": (
+                    "请根据错误输出申请精确的 additional_permissions 后重试；"
+                    "若仍需宿主用户权限，使用 require_escalated 并明确说明原因。"
+                    if session.stable_error_code == "sandbox_denied"
+                    else ""
+                ),
                 **terminal_metadata,
             },
             ensure_ascii=False,

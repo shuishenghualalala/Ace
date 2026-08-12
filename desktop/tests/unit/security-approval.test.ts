@@ -123,7 +123,8 @@ describe('security approval UI model', () => {
 
     expect(sandboxed).toContain('执行边界：仅在当前沙箱内执行');
     expect(expanded).toContain('执行边界：留在沙箱内，并增加下方明确权限');
-    expect(escalated).toContain('执行边界：脱离沙箱');
+    expect(escalated).toContain('执行边界：请求当前完整命令使用宿主用户权限');
+    expect(escalated).toContain('包括 Ace 自身数据');
     expect(escalated).toContain('本次对话仍绑定完整命令与工作目录');
     expect(approvalBoundaryLabel({ action: { kind: 'exec' } })).toBe('仅在当前沙箱内执行');
     expect(approvalBoundaryLabel({

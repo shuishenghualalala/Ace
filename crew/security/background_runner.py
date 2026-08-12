@@ -8,7 +8,11 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError
+from crew.security.runtime_client import (
+    NativeRuntimeClient,
+    NativeRuntimeError,
+    is_likely_sandbox_denied,
+)
 
 
 async def _run(payload: dict) -> int:
@@ -54,18 +58,24 @@ async def _run(payload: dict) -> int:
         )
         return 125
     capabilities = asdict(result.capabilities)
-    _write_result(
-        payload,
-        {
-            "sandbox_backend": str(capabilities.pop("backend", "")),
-            "capabilities": [
-                key
-                for key, value in capabilities.items()
-                if value is True or key == "wsl_version" and value is not None
-            ],
-            "exit_code": result.exit_code,
-        },
+    sandbox_denied = is_likely_sandbox_denied(
+        result.exit_code,
+        result.stdout,
+        result.stderr,
+        backend=str(result.capabilities.backend),
     )
+    metadata = {
+        "sandbox_backend": str(capabilities.pop("backend", "")),
+        "capabilities": [
+            key
+            for key, value in capabilities.items()
+            if value is True or key == "wsl_version" and value is not None
+        ],
+        "exit_code": result.exit_code,
+    }
+    if sandbox_denied:
+        metadata["stable_error_code"] = "sandbox_denied"
+    _write_result(payload, metadata)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     return result.exit_code

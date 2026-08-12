@@ -61,9 +61,37 @@ class RuntimeErrorCode(StrEnum):
     RUNTIME_PROTOCOL_MISMATCH = "runtime_protocol_mismatch"
     RUNTIME_CRASHED = "runtime_crashed"
     SANDBOX_DENIED = "sandbox_denied"
+    POLICY_DENIED = "policy_denied"
     NETWORK_UNAVAILABLE = "network_unavailable"
     TIMEOUT = "timeout"
     OUTPUT_TRUNCATED = "output_truncated"
+
+
+_SANDBOX_DENIAL_KEYWORDS = (
+    "operation not permitted",
+    "permission denied",
+    "read-only file system",
+    "seccomp",
+    "sandbox",
+    "landlock",
+    "failed to write file",
+)
+
+
+def is_likely_sandbox_denied(
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    *,
+    backend: str,
+) -> bool:
+    """Conservatively identify a failed command caused by a managed boundary."""
+    if not backend or backend == "host_unconfined" or exit_code == 0:
+        return False
+    combined = f"{stderr}\n{stdout}".lower()
+    if any(keyword in combined for keyword in _SANDBOX_DENIAL_KEYWORDS):
+        return True
+    return backend == "linux_bwrap" and exit_code == 159
 
 
 class NativeRuntimeError(RuntimeError):

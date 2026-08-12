@@ -104,16 +104,14 @@ async def test_external_read_is_allowed_without_approval(secured_app, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_request_mode_asks_for_workspace_write_and_traversal_outside(secured_app, tmp_path):
+async def test_request_mode_allows_workspace_write_and_traversal_read(secured_app, tmp_path):
     app, project = secured_app
     inside = project / "inside.txt"
     outside = tmp_path / "outside.txt"
     outside.write_text("outside", encoding="utf-8")
     with _security_context(project):
-        written = await _drive(
-            app,
-            ToolCall("w1", "file_write", {"path": str(inside), "content": "inside"}),
-            ApprovalDecision.ONCE,
+        written = await app.registry.execute(
+            ToolCall("w1", "file_write", {"path": str(inside), "content": "inside"})
         )
         escaped = await app.registry.execute(
             ToolCall("r1", "file_read", {"path": "../outside.txt"})
@@ -124,10 +122,15 @@ async def test_request_mode_asks_for_workspace_write_and_traversal_outside(secur
 
 
 @pytest.mark.asyncio
-async def test_once_file_write_approval_is_consumed_only_by_matching_action(secured_app, tmp_path):
+async def test_once_external_file_write_approval_is_consumed_only_by_matching_action(
+    secured_app,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     app, project = secured_app
     outside = tmp_path / "outside.txt"
     outside.write_text("initial", encoding="utf-8")
+    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(project))
     with _security_context(project):
         # r1 阻塞→批准 ONCE→本次调用消费 grant 并成功。
         first = await _drive(
@@ -148,12 +151,12 @@ async def test_once_file_write_approval_is_consumed_only_by_matching_action(secu
             ApprovalDecision.REJECT,
         )
     assert not first.is_error
-    assert other.is_error and "用户未批准" in other.content
-    assert replay.is_error and "用户未批准" in replay.content
+    assert other.is_error and "用户拒绝" in other.content
+    assert replay.is_error and "用户拒绝" in replay.content
 
 
 @pytest.mark.asyncio
-async def test_protected_metadata_and_internal_database_are_not_approvable(secured_app):
+async def test_project_metadata_is_approvable_but_internal_database_is_not(secured_app):
     app, project = secured_app
     git_dir = project / ".git"
     git_dir.mkdir()
@@ -161,16 +164,18 @@ async def test_protected_metadata_and_internal_database_are_not_approvable(secur
     config.write_text("safe", encoding="utf-8")
     with _security_context(project):
         read = await app.registry.execute(ToolCall("r1", "file_read", {"path": str(config)}))
-        write = await app.registry.execute(
-            ToolCall("w1", "file_write", {"path": str(config), "content": "changed"})
+        write = await _drive(
+            app,
+            ToolCall("w1", "file_write", {"path": str(config), "content": "changed"}),
+            ApprovalDecision.ONCE,
         )
         database = await app.registry.execute(
             ToolCall("r2", "file_read", {"path": app.config.db_path})
         )
     assert not read.is_error
-    assert write.is_error and "SECURITY_FILE_DENIED" in write.content
+    assert not write.is_error
     assert database.is_error and "SECURITY_FILE_DENIED" in database.content
-    assert config.read_text(encoding="utf-8") == "safe"
+    assert config.read_text(encoding="utf-8") == "changed"
 
 
 @pytest.mark.asyncio
@@ -211,7 +216,7 @@ async def test_auto_review_allows_external_read_but_requires_external_write_appr
             ApprovalDecision.REJECT,
         )
     assert not read.is_error and "safe" in read.content
-    assert write.is_error and "用户未批准" in write.content
+    assert write.is_error and "用户拒绝" in write.content
 
 
 @pytest.mark.asyncio
@@ -260,14 +265,12 @@ async def test_patch_and_search_use_the_same_evaluator(secured_app, tmp_path):
     external.mkdir()
     (external / "outside.py").write_text("needle\n", encoding="utf-8")
     with _security_context(project):
-        patched = await _drive(
-            app,
+        patched = await app.registry.execute(
             ToolCall(
                 "p1",
                 "patch",
                 {"path": str(source), "old": "old", "new": "new"},
-            ),
-            ApprovalDecision.ONCE,
+            )
         )
         inside_search = await app.registry.execute(
             ToolCall("g1", "grep", {"path": str(project), "pattern": "new"})

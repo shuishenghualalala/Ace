@@ -16,8 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from crew.security.actions import normalize_exec_action
-from crew.security.approvals import ApprovalDecision, ApprovalError, ApprovalManager
+from crew.security.actions import (
+    normalize_exec_action,
+    normalize_file_action,
+    normalize_network_action,
+)
+from crew.security.approvals import ApprovalDecision, ApprovalManager
 from crew.security.audit import SQLiteSecurityAudit
 from crew.security.context import SecurityContext
 from crew.security.grants import GrantRegistry
@@ -26,6 +30,8 @@ from crew.security.models import (
     ConversationPermissionMode,
     FilesystemAccess,
     FilesystemEntry,
+    NetworkEntry,
+    SandboxPermissions,
 )
 from crew.security.rule_store import SQLiteRuleStore
 from crew.security.rules import ActionRule, RuleDecision, RuleScope
@@ -259,7 +265,260 @@ def test_auto_review_runs_sandbox_local_commands_but_asks_for_expansion(tmp_path
         additional_permissions=additional,
     )
     assert approved.allowed
-    assert approved.additional_permissions == additional
+    assert approved.additional_permissions.filesystem == additional.filesystem
+    assert (
+        approved.additional_permissions.sandbox_permissions
+        is SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS
+    )
+
+
+def test_request_mode_runs_sandbox_command_and_inherits_session_permissions(
+    tmp_path: Path,
+) -> None:
+    approvals, _grants, _audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    outside = tmp_path / "approved-output"
+    outside.mkdir()
+    permission = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),),
+        sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+    )
+    approved_action = normalize_exec_action(["tool", "write"], tmp_path)
+    request = approvals.create(
+        context,
+        approved_action,
+        "terminal",
+        additional_permissions=permission,
+    )
+    service.decide(
+        context,
+        request_id=request.request_id,
+        nonce=request.nonce,
+        decision=ApprovalDecision.SESSION,
+    )
+
+    different_action = service.authorize_exec_action(
+        context,
+        normalize_exec_action(["tool", "list"], tmp_path),
+        tool_name="terminal",
+        risk_class="shell_command",
+        requires_approval=False,
+    )
+
+    assert different_action.allowed
+    assert different_action.additional_permissions.filesystem == permission.filesystem
+    assert (
+        different_action.additional_permissions.sandbox_permissions
+        is SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS
+    )
+
+
+def test_validated_persistent_prefix_reuses_approved_permission_scope(
+    tmp_path: Path,
+) -> None:
+    _approvals, _grants, _audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    permission = AdditionalPermissionProfile(
+        sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+    )
+    first = normalize_exec_action(
+        ["bash", "-lc", "tool publish one"],
+        tmp_path,
+        raw_command="tool publish one",
+        shell_kind="bash",
+        parsed_commands=(("tool", "publish", "one"),),
+    )
+    authorization = service.authorize_exec_action(
+        context,
+        first,
+        tool_name="terminal",
+        risk_class="shell_command",
+        additional_permissions=permission,
+        proposed_argv_prefix=["tool", "publish"],
+    )
+    assert authorization.request is not None
+    service.decide(
+        context,
+        request_id=authorization.request["request_id"],
+        nonce=authorization.request["nonce"],
+        decision=ApprovalDecision.ALWAYS,
+        always_argv_prefix=["tool", "publish"],
+    )
+    second = normalize_exec_action(
+        ["bash", "-lc", "tool publish two"],
+        tmp_path,
+        raw_command="tool publish two",
+        shell_kind="bash",
+        parsed_commands=(("tool", "publish", "two"),),
+    )
+
+    reused = service.authorize_exec_action(
+        context,
+        second,
+        tool_name="terminal",
+        risk_class="shell_command",
+        additional_permissions=permission,
+    )
+
+    assert reused.allowed
+    assert (
+        reused.additional_permissions.sandbox_permissions
+        is SandboxPermissions.REQUIRE_ESCALATED
+    )
+
+
+@pytest.mark.parametrize("decision", [ApprovalDecision.ONCE, ApprovalDecision.SESSION])
+def test_exact_escalation_grant_preserves_host_execution_request(
+    tmp_path: Path,
+    decision: ApprovalDecision,
+) -> None:
+    approvals, _grants, _audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["tool", "host-operation"], tmp_path)
+    permissions = AdditionalPermissionProfile(
+        sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+    )
+    request = approvals.create(
+        context,
+        action,
+        "terminal",
+        additional_permissions=permissions,
+    )
+    service.decide(
+        context,
+        request_id=request.request_id,
+        nonce=request.nonce,
+        decision=decision,
+    )
+
+    authorized = service.authorize_exec_action(
+        context,
+        action,
+        tool_name="terminal",
+        risk_class="shell_command",
+        additional_permissions=permissions,
+    )
+
+    assert authorized.allowed
+    assert authorized.additional_permissions == permissions
+
+
+def test_terminal_session_directory_permission_is_shared_with_ace_file_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approvals, _grants, _audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(tmp_path))
+    permission = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),),
+        sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+    )
+    command = normalize_exec_action(["tool", "write-outside"], tmp_path)
+    request = approvals.create(
+        context,
+        command,
+        "terminal",
+        additional_permissions=permission,
+    )
+    service.decide(
+        context,
+        request_id=request.request_id,
+        nonce=request.nonce,
+        decision=ApprovalDecision.SESSION,
+    )
+
+    result, reason, pending = service.authorize_file_action(
+        context,
+        normalize_file_action(outside / "result.txt", "write"),
+        tool_name="file_write",
+    )
+
+    assert result.value == "allow"
+    assert reason == "session_permissions"
+    assert pending is None
+
+
+def test_terminal_session_network_permission_is_shared_with_ace_web_tools(
+    tmp_path: Path,
+) -> None:
+    approvals, _grants, _audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    permission = AdditionalPermissionProfile(
+        network=(NetworkEntry("api.example.com", 443, "https"),),
+        sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+    )
+    command = normalize_exec_action(["tool", "fetch"], tmp_path)
+    request = approvals.create(
+        context,
+        command,
+        "terminal",
+        additional_permissions=permission,
+    )
+    service.decide(
+        context,
+        request_id=request.request_id,
+        nonce=request.nonce,
+        decision=ApprovalDecision.SESSION,
+    )
+
+    result = service.authorize_network_action(
+        context,
+        normalize_network_action("api.example.com", 443, "https"),
+        tool_name="web_extract",
+        public_target=True,
+    )
+
+    assert result.allowed
+    assert result.additional_permissions.network == permission.network
+
+
+def test_terminal_persistent_rule_does_not_authorize_ace_synthetic_exec_tool(
+    tmp_path: Path,
+) -> None:
+    _approvals, _grants, _audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    action = normalize_exec_action(
+        ["bash", "-lc", "tool publish one"],
+        tmp_path,
+        raw_command="tool publish one",
+        shell_kind="bash",
+        parsed_commands=(("tool", "publish", "one"),),
+    )
+    authorization = service.authorize_exec_action(
+        context,
+        action,
+        tool_name="terminal",
+        risk_class="dangerous_command",
+        additional_permissions=AdditionalPermissionProfile(
+            sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+        ),
+        proposed_argv_prefix=["tool", "publish"],
+    )
+    assert authorization.request is not None
+    service.decide(
+        context,
+        request_id=authorization.request["request_id"],
+        nonce=authorization.request["nonce"],
+        decision=ApprovalDecision.ALWAYS,
+        always_argv_prefix=["tool", "publish"],
+    )
+
+    synthetic = service.authorize_exec_action(
+        context,
+        action,
+        tool_name="publish_site",
+        risk_class="site_build",
+        requires_approval=True,
+        additional_permissions=AdditionalPermissionProfile(
+            sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+        ),
+    )
+
+    assert not synthetic.allowed
+    assert synthetic.request is not None
 
 
 def test_set_mode_revokes_pending_and_returns_idempotently(tmp_path: Path) -> None:

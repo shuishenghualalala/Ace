@@ -124,6 +124,103 @@ class AdditionalPermissionProfile:
 EMPTY_ADDITIONAL_PERMISSIONS = AdditionalPermissionProfile()
 
 
+def merge_additional_permissions(
+    *profiles: AdditionalPermissionProfile,
+) -> AdditionalPermissionProfile:
+    """Merge effective sandbox permissions without weakening an explicit boundary.
+
+    Session permissions are capabilities, not command approvals.  They are merged
+    into later sandbox launches independently from the command that originally
+    requested them.  ``require_escalated`` is deliberately not made sticky by
+    this helper; callers must keep unsandboxed authority bound to the exact
+    approved command.
+    """
+    filesystem: list[FilesystemEntry] = []
+    network: list[NetworkEntry] = []
+    allow_local_binding = False
+    uses_additional_permissions = False
+    for profile in profiles:
+        for entry in profile.filesystem:
+            if entry not in filesystem:
+                filesystem.append(entry)
+        for entry in profile.network:
+            if entry not in network:
+                network.append(entry)
+        allow_local_binding = allow_local_binding or profile.allow_local_binding
+        uses_additional_permissions = uses_additional_permissions or bool(
+            profile.filesystem or profile.network or profile.allow_local_binding
+        )
+    strongest_by_root: dict[Path, FilesystemEntry] = {}
+    for entry in filesystem:
+        existing = strongest_by_root.get(entry.root)
+        if existing is None or (
+            existing.access is FilesystemAccess.READ
+            and entry.access is FilesystemAccess.READ_WRITE
+        ):
+            strongest_by_root[entry.root] = entry
+    normalized_filesystem: list[FilesystemEntry] = []
+    for entry in sorted(strongest_by_root.values(), key=lambda item: len(item.root.parts)):
+        covered = False
+        for existing in normalized_filesystem:
+            try:
+                entry.root.relative_to(existing.root)
+            except ValueError:
+                continue
+            if existing.access is FilesystemAccess.READ_WRITE or (
+                existing.access is FilesystemAccess.READ
+                and entry.access is FilesystemAccess.READ
+            ):
+                covered = True
+                break
+        if not covered:
+            normalized_filesystem.append(entry)
+    return AdditionalPermissionProfile(
+        filesystem=tuple(normalized_filesystem),
+        network=tuple(network),
+        allow_local_binding=allow_local_binding,
+        sandbox_permissions=(
+            SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS
+            if uses_additional_permissions
+            else SandboxPermissions.USE_DEFAULT
+        ),
+    )
+
+
+def additional_permissions_cover(
+    granted: AdditionalPermissionProfile,
+    requested: AdditionalPermissionProfile,
+) -> bool:
+    """Return whether one approved sandbox profile covers a requested subset."""
+    if (
+        requested.sandbox_permissions is SandboxPermissions.REQUIRE_ESCALATED
+        or granted.sandbox_permissions is SandboxPermissions.REQUIRE_ESCALATED
+    ):
+        return granted == requested
+    if requested.allow_local_binding and not granted.allow_local_binding:
+        return False
+    if any(entry not in granted.network for entry in requested.network):
+        return False
+    for requested_entry in requested.filesystem:
+        covered = False
+        for granted_entry in granted.filesystem:
+            try:
+                requested_entry.root.relative_to(granted_entry.root)
+            except ValueError:
+                continue
+            if requested_entry.access is FilesystemAccess.READ_WRITE:
+                covered = granted_entry.access is FilesystemAccess.READ_WRITE
+            else:
+                covered = granted_entry.access in {
+                    FilesystemAccess.READ,
+                    FilesystemAccess.READ_WRITE,
+                }
+            if covered:
+                break
+        if not covered:
+            return False
+    return True
+
+
 def serialize_additional_permissions(profile: AdditionalPermissionProfile) -> dict[str, Any]:
     """Serialize an immutable permission overlay for approval, persistence, and runtime IO."""
     return {

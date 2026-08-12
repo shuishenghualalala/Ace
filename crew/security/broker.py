@@ -359,19 +359,42 @@ def compile_runtime_filesystem_roots(
     readable = list(dict.fromkeys(trusted_readable_roots))
     readonly: list[Path] = []
     denied: list[Path] = []
-    for entry in (*profile.filesystem, *additional.filesystem):
+    base_writes = tuple(
+        entry.root
+        for entry in profile.filesystem
+        if entry.access is FilesystemAccess.READ_WRITE
+    )
+    approved_writes = tuple(
+        entry.root
+        for entry in additional.filesystem
+        if entry.access is FilesystemAccess.READ_WRITE
+    )
+    for entry in profile.filesystem:
         if entry.access is FilesystemAccess.READ_WRITE:
             if entry.root not in writable:
                 writable.append(entry.root)
         elif entry.access is FilesystemAccess.READ:
-            # Immutable entries below writable roots use the native read-only
-            # carve-out contract. Missing metadata paths remain valid so the
-            # runtime can prevent their later creation.
-            target = readonly if not entry.escalatable else readable
+            # A read-only base entry below a writable root must remain a native
+            # carve-out until an additional profile explicitly grants write.
+            # ``escalatable`` controls whether that overlay is legal; it must not
+            # weaken the base launch before approval exists.
+            write_approved = entry.escalatable and any(
+                entry.root == root or root in entry.root.parents for root in approved_writes
+            )
+            inside_writable = any(
+                entry.root == root or root in entry.root.parents for root in base_writes
+            )
+            target = readonly if inside_writable and not write_approved else readable
             if entry.root not in target:
                 target.append(entry.root)
         elif entry.access is FilesystemAccess.DENY and entry.root not in denied:
             denied.append(entry.root)
+    for entry in additional.filesystem:
+        if entry.access is FilesystemAccess.READ_WRITE:
+            if entry.root not in writable:
+                writable.append(entry.root)
+        elif entry.access is FilesystemAccess.READ and entry.root not in readable:
+            readable.append(entry.root)
 
     # A trusted/runtime root below a writable root is already visible through the
     # write bind. Forwarding both makes Linux reject an overlapping mount plan.

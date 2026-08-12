@@ -13,8 +13,9 @@ from crew.security.context import SecurityContext
 from crew.security.models import (
     EMPTY_ADDITIONAL_PERMISSIONS,
     AdditionalPermissionProfile,
-    FilesystemAccess,
     SandboxPermissions,
+    additional_permissions_cover,
+    merge_additional_permissions,
 )
 from crew.security.rules import RuleScope
 
@@ -36,6 +37,7 @@ class ExecutionGrant:
     task_id: str
     expires_monotonic: float | None
     additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
+    tool_name: str = ""
 
 
 class GrantRegistry:
@@ -54,6 +56,7 @@ class GrantRegistry:
         *,
         expires_monotonic: float | None,
         additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
+        tool_name: str = "",
     ) -> ExecutionGrant:
         if scope not in {RuleScope.ONCE, RuleScope.SESSION}:
             raise ValueError("execution grant 只支持 once/session")
@@ -69,6 +72,7 @@ class GrantRegistry:
             task_id=context.task_id,
             expires_monotonic=expires_monotonic,
             additional_permissions=additional_permissions,
+            tool_name=str(tool_name).strip(),
         )
         with self._lock:
             self._grants[grant.grant_id] = grant
@@ -136,6 +140,7 @@ class GrantRegistry:
         action: NormalizedAction,
         *,
         additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
+        tool_name: str = "",
     ) -> ExecutionGrant | None:
         """Authorize by exact action when a tool retry does not carry a grant ID."""
         with self._lock:
@@ -145,6 +150,8 @@ class GrantRegistry:
                     self._grants.pop(grant_id, None)
                     continue
                 if not _context_matches(grant, context):
+                    continue
+                if tool_name and grant.tool_name and grant.tool_name != tool_name:
                     continue
                 exact_action_required = (
                     grant.scope is RuleScope.ONCE
@@ -159,7 +166,7 @@ class GrantRegistry:
                     continue
                 if not exact_action_required and grant.action_kind is not action.kind:
                     continue
-                if not _permissions_cover(
+                if not additional_permissions_cover(
                     grant.additional_permissions,
                     additional_permissions,
                 ):
@@ -168,6 +175,33 @@ class GrantRegistry:
                     self._grants.pop(grant_id, None)
                 return grant
         return None
+
+    def session_permissions(self, context: SecurityContext) -> AdditionalPermissionProfile:
+        """Return sandbox permissions approved for the rest of this conversation.
+
+        Unlike an execution approval, a filesystem/network permission describes
+        a reusable capability.  Keep it independent from the original action so
+        later commands can consume the approved scope without asking the model to
+        repeat the same ``additional_permissions`` payload.  Unsandboxed grants
+        remain exact-command only and are never included here.
+        """
+        with self._lock:
+            now = self._clock()
+            profiles: list[AdditionalPermissionProfile] = []
+            for grant_id, grant in list(self._grants.items()):
+                if grant.expires_monotonic is not None and now > grant.expires_monotonic:
+                    self._grants.pop(grant_id, None)
+                    continue
+                if grant.scope is not RuleScope.SESSION or not _same_session(grant, context):
+                    continue
+                if (
+                    grant.additional_permissions.empty
+                    or grant.additional_permissions.sandbox_permissions
+                    is SandboxPermissions.REQUIRE_ESCALATED
+                ):
+                    continue
+                profiles.append(grant.additional_permissions)
+        return merge_additional_permissions(*profiles)
 
     def revoke(self, grant_id: str) -> bool:
         """Revoke one grant during fail-closed coordination rollback."""
@@ -188,35 +222,3 @@ def _same_session(grant: ExecutionGrant, context: SecurityContext) -> bool:
         and grant.workspace_id == context.workspace_id
         and grant.session_id == context.session_id
     )
-
-
-def _permissions_cover(
-    granted: AdditionalPermissionProfile,
-    requested: AdditionalPermissionProfile,
-) -> bool:
-    """Return whether a displayed session scope covers the requested subset."""
-    if granted.sandbox_permissions is not requested.sandbox_permissions:
-        return False
-    if requested.allow_local_binding and not granted.allow_local_binding:
-        return False
-    if any(entry not in granted.network for entry in requested.network):
-        return False
-    for requested_entry in requested.filesystem:
-        covered = False
-        for granted_entry in granted.filesystem:
-            try:
-                requested_entry.root.relative_to(granted_entry.root)
-            except ValueError:
-                continue
-            if requested_entry.access is FilesystemAccess.READ_WRITE:
-                covered = granted_entry.access is FilesystemAccess.READ_WRITE
-            else:
-                covered = granted_entry.access in {
-                    FilesystemAccess.READ,
-                    FilesystemAccess.READ_WRITE,
-                }
-            if covered:
-                break
-        if not covered:
-            return False
-    return True
