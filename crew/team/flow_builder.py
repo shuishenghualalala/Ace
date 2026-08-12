@@ -292,11 +292,16 @@ def team_goal_uses_shared_workspace(goal: str) -> bool:
     return any(marker in text for marker in shared_markers)
 
 
-def build_default_workflow_nodes(team: Any, goal: str) -> tuple[list[dict[str, Any]], list[Any]]:
+def build_default_workflow_nodes(
+    team: Any,
+    goal: str,
+    *,
+    team_spec: Any | None = None,
+) -> tuple[list[dict[str, Any]], list[Any]]:
     members = list(team.members.values())
     if not members:
         return [], []
-    team_spec = build_team_spec(goal)
+    team_spec = team_spec if team_spec is not None else build_team_spec({"goal": goal})
     execution_profile = team_spec.execution_profile
     planning = planning_modes(execution_profile)
     required_roles = list(team_spec.team_requirements.get("roles") or [])

@@ -70,6 +70,29 @@ from crew.team.workspace_guard import check_workspace_guard, classify_external_p
 from crew.tools.registry import Registry, register_builtin_tools
 
 
+def _structured_team_spec(
+    goal: str,
+    *,
+    capabilities: list[str] | tuple[str, ...] = (),
+    intent: str = "implementation",
+    complexity: str = "focused",
+    needs_build: bool = False,
+    needs_verification: bool = False,
+    needs_docs: bool = False,
+) -> dict:
+    return {
+        "goal": goal,
+        "execution_profile": {
+            "intent": intent,
+            "complexity": complexity,
+            "needs_build": needs_build,
+            "needs_verification": needs_verification,
+            "needs_docs": needs_docs,
+        },
+        "team_requirements": {"capabilities": list(capabilities)},
+    }
+
+
 class RoleProvider(LLMProvider):
     """Leader 委派给 coder；coder 调 terminal 后给出结果。"""
 
@@ -2297,7 +2320,12 @@ async def test_team_leader_delegates_to_teammate():
     tm, tasks = _team()
     final = None
     team_internal = []
-    async for ch in tm.interact(Envelope.of("组队算1+1", session_id="t1", mode="team")):
+    async for ch in tm.interact(Envelope.of(
+        "组队算1+1",
+        session_id="t1",
+        mode="team",
+        params={"team_spec": _structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], needs_build=True)},
+    )):
         if ch.kind == "team_internal":
             team_internal.append(ch)
         if ch.kind == "final":
@@ -2361,7 +2389,12 @@ async def test_team_plan_persists_to_kanban_store_and_history_events(tmp_path):
     store = SQLiteKanbanStore(tmp_path / "team-kanban.db")
     owner_store = store.for_owner("local")
     tm, _ = _team(kanban_store=store)
-    chunks = [ch async for ch in tm.interact(Envelope.of("组队算1+1", session_id="persist-team", mode="team"))]
+    chunks = [ch async for ch in tm.interact(Envelope.of(
+        "组队算1+1",
+        session_id="persist-team",
+        mode="team",
+        params={"team_spec": _structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], needs_build=True)},
+    ))]
     assert any(ch.kind == "team_internal" for ch in chunks)
 
     plan = tm.read_plan("persist-team", owner_account_id="local")["plan"]
@@ -2631,7 +2664,12 @@ async def test_team_required_workflow_dispatches_when_leader_does_not_delegate()
             return await super().chat(messages, tools)
 
     tm, tasks = _team(PassiveLeaderProvider())
-    chunks = [ch async for ch in tm.interact(Envelope.of("实现一个小功能", session_id="workflow_s1", mode="team"))]
+    chunks = [ch async for ch in tm.interact(Envelope.of(
+        "实现一个小功能",
+        session_id="workflow_s1",
+        mode="team",
+        params={"team_spec": _structured_team_spec("实现一个小功能", capabilities=["implementation"], needs_build=True)},
+    ))]
     final = next(ch.body["text"] for ch in chunks if ch.kind == "final")
 
     assert "本次团队任务已完成" in final
@@ -2656,7 +2694,11 @@ def test_team_required_workflow_single_member_title_uses_goal():
     )
     tm, _ = _team(config=config)
     team = tm._build_team("single_member_s1")
-    nodes, edges = tm._default_workflow_nodes(team, "写一个贪吃蛇小游戏，像素风")
+    nodes, edges = tm._default_workflow_nodes(
+        team,
+        "写一个贪吃蛇小游戏，像素风",
+        team_spec=_structured_team_spec("写一个贪吃蛇小游戏，像素风", capabilities=["design", "implementation"], needs_build=True),
+    )
 
     assert [node["id"] for node in nodes] == ["leader_plan", "build_design_1", "build_1", "leader_review", "leader_summary"]
     assert ["leader_plan", "build_design_1"] in edges
@@ -2687,7 +2729,11 @@ def test_team_workflow_lane_reuses_role_catalog_without_member_metadata():
     )
     tm, _ = _team(config=config)
     team = tm._build_team("catalog_lane_s1")
-    nodes, edges = tm._default_workflow_nodes(team, "组队算1+1")
+    nodes, edges = tm._default_workflow_nodes(
+        team,
+        "组队算1+1",
+        team_spec=_structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], needs_build=True),
+    )
 
     assert [node["id"] for node in nodes] == [
         "leader_plan",
@@ -2747,7 +2793,17 @@ def test_team_required_workflow_generates_role_lane_dag():
     )
     tm, _ = _team(config=config)
     team = tm._build_team("lane_dag_s1")
-    nodes, edges = tm._default_workflow_nodes(team, "写一个贪吃蛇小游戏，像素风")
+    nodes, edges = tm._default_workflow_nodes(
+        team,
+        "写一个贪吃蛇小游戏，像素风",
+        team_spec=_structured_team_spec(
+            "写一个贪吃蛇小游戏，像素风",
+            capabilities=["design", "implementation", "testing", "verification", "documentation"],
+            needs_build=True,
+            needs_verification=True,
+            needs_docs=True,
+        ),
+    )
 
     assert [node["id"] for node in nodes] == [
         "leader_plan",
@@ -2775,32 +2831,7 @@ def test_team_required_workflow_generates_role_lane_dag():
     assert ["handoff_1", "leader_summary"] in edges
 
 
-def test_team_spec_links_intake_and_workflow_for_testing_only_goal():
-    config = Config(
-        max_iterations=3,
-        team_config={
-            "members": [
-                {
-                    "member_id": "dev",
-                    "name": "dev",
-                    "role": "负责开发实现",
-                    "executor": "builtin",
-                    "metadata": {"workflow_lane": "build"},
-                    "capabilities": ["frontend"],
-                },
-                {
-                    "member_id": "qa",
-                    "name": "qa",
-                    "role": "负责测试验证",
-                    "executor": "builtin",
-                    "metadata": {"workflow_lane": "verify"},
-                    "capabilities": ["test"],
-                },
-            ]
-        },
-    )
-    tm, _ = _team(config=config)
-    team = tm._build_team("testing_spec_s1")
+def test_team_spec_does_not_infer_workflow_from_testing_words():
     goals = [
         "帮我测试一下之前开发的贪吃蛇，不需要开发新功能",
         "帮我测试一下开发的俄罗斯方块小游戏",
@@ -2809,15 +2840,13 @@ def test_team_spec_links_intake_and_workflow_for_testing_only_goal():
 
     for goal in goals:
         spec = build_team_spec(goal)
-        nodes, edges = tm._default_workflow_nodes(team, goal)
-
-        assert spec.execution_profile["intent"] == "testing"
+        assert spec.execution_profile["intent"] == "mixed"
         assert spec.execution_profile["needs_build"] is False
-        assert [node["id"] for node in nodes] == ["leader_plan", "verify_qa_plan_1", "leader_review", "verify_qa_verify_1", "leader_summary"]
-        assert all(not node["id"].startswith("build_") for node in nodes)
-        assert ["verify_qa_plan_1", "leader_review"] in edges
-        assert ["leader_review", "verify_qa_verify_1"] in edges
-        assert nodes[0]["detail"].count("TeamSpec") == 1
+        assert spec.execution_profile["needs_verification"] is False
+        assert spec.team_requirements["roles"] == []
+        assert spec.team_requirements["capabilities"] == []
+        assert spec.deliverables == []
+        assert spec.uncertainty == "high"
 
 
 def test_team_delegate_workspace_isolates_abstract_team_turns(tmp_path, monkeypatch):
@@ -3815,7 +3844,11 @@ def test_team_uses_external_team_selected_leader():
     assert team.leader.executor.config.display_session_id == "team_selected_leader"
     assert team.leader.executor.config.control_session_id == "team_selected_leader"
 
-    nodes, edges = tm._default_workflow_nodes(team, "开发一个贪吃蛇游戏")
+    nodes, edges = tm._default_workflow_nodes(
+        team,
+        "开发一个贪吃蛇游戏",
+        team_spec=_structured_team_spec("开发一个贪吃蛇游戏", capabilities=["implementation"], needs_build=True),
+    )
     assert [node["id"] for node in nodes] == ["leader_plan", "build_design_1", "build_1", "leader_review", "leader_summary"]
     assert nodes[1]["assignee"] == "hh"
     assert nodes[1]["metadata"]["workflow_lane"] == "design"
@@ -4250,11 +4283,20 @@ def test_testing_goal_without_build_member_does_not_create_build_node():
     ))
     team = tm._build_team("test-only")
 
-    collaboration_spec = build_team_spec("测试一下团队协作")
+    collaboration_spec = build_team_spec(_structured_team_spec(
+        "测试一下团队协作",
+        capabilities=["testing", "verification"],
+        intent="testing",
+        needs_verification=True,
+    ))
     assert collaboration_spec.execution_profile["intent"] == "testing"
     assert collaboration_spec.execution_profile["needs_build"] is False
 
-    nodes, edges = tm._default_workflow_nodes(team, "测试一下团队协作")
+    nodes, edges = tm._default_workflow_nodes(
+        team,
+        "测试一下团队协作",
+        team_spec=collaboration_spec.to_dict(),
+    )
 
     node_ids = {node["id"] for node in nodes}
     assert not any(node_id.startswith("build_") for node_id in node_ids)
@@ -4279,12 +4321,14 @@ def test_testing_goal_without_build_member_does_not_create_build_node():
     assert ["security_engineer_verify_2", "leader_summary"] in edges
 
 
-def test_lightweight_question_profile_does_not_embed_execution_mode():
+def test_unstructured_goal_profile_does_not_embed_execution_mode():
     spec = build_team_spec("有贪吃蛇小游戏么")
 
-    assert spec.execution_profile["intent"] == "question"
+    assert spec.execution_profile["intent"] == "mixed"
     assert spec.execution_profile["needs_build"] is False
     assert spec.execution_profile["needs_verification"] is False
+    assert spec.execution_profile["needs_docs"] is False
+    assert spec.uncertainty == "high"
 
 
 def test_planning_decision_rejects_work_unit_without_capability_contract():
@@ -4310,7 +4354,7 @@ def test_team_turn_router_returns_team_turn_decision():
     assert chat_decision.diagnostics["turn_source"] == "simple_chat"
     assert isinstance(fast_decision, TeamTurnDecision)
     assert fast_decision.is_new_workflow is True
-    assert fast_decision.execution_mode == "fast"
+    assert fast_decision.execution_mode == "standard"
     assert fast_decision.diagnostics["turn_source"] == "task_profile"
 
 
@@ -4358,7 +4402,31 @@ async def test_ai_planner_uses_llm_single_dag():
 
 
 def test_team_spec_v3_records_requirements_deliverables_and_consent_policy():
-    spec = build_team_spec("指定当前团队开发登录接口并做安全测试，不要自动换人")
+    spec = build_team_spec({
+        "goal": "指定当前团队开发登录接口并做安全测试，不要自动换人",
+        "execution_profile": {
+            "intent": "implementation",
+            "complexity": "multi_role",
+            "needs_build": True,
+            "needs_verification": True,
+        },
+        "team_requirements": {
+            "capabilities": ["backend", "implementation", "testing", "verification"],
+        },
+        "deliverables": [
+            {"type": "code", "description": "可运行的接口实现"},
+            {"type": "test_report", "description": "安全测试结果"},
+        ],
+        "success_criteria": ["登录接口可运行", "安全测试结果可追踪"],
+        "policy": {
+            "user_team_locked": True,
+            "staffing_strategy": "suggest_only",
+            "constraints": ["不得绕过用户指定团队直接换人或补员"],
+            "consent_required_actions": ["不得绕过用户指定团队直接换人或补员"],
+        },
+        "risk_level": "high",
+        "uncertainty": "low",
+    })
     payload = spec.to_dict()
 
     assert spec.version == 3
@@ -4377,6 +4445,19 @@ def test_team_spec_v3_records_requirements_deliverables_and_consent_policy():
     assert "task_kind" not in payload
     assert "required_roles" not in payload
     assert "needs_build" not in payload
+
+
+def test_team_spec_normalizes_explicit_capability_aliases_only():
+    spec = build_team_spec({
+        "goal": "输出一份可审阅的方案",
+        "team_requirements": {"capabilities": ["qa", "docs", "qa"]},
+        "deliverables": [{"type": "proposal", "description": "方案"}],
+    })
+
+    assert spec.team_requirements["capabilities"] == ["testing", "documentation"]
+    assert spec.execution_profile["needs_build"] is False
+    assert spec.execution_profile["needs_verification"] is False
+    assert spec.deliverables == [{"type": "proposal", "description": "方案"}]
 
 
 def test_team_graph_planner_warns_without_mutating_user_team():
@@ -4398,7 +4479,16 @@ def test_team_graph_planner_warns_without_mutating_user_team():
     team = tm._build_team("graph-policy")
     before_members = list(team.members)
 
-    graph_plan = TeamGraphPlanner().plan(team, "开发一个登录接口并完成测试验收")
+    graph_plan = TeamGraphPlanner().plan(
+        team,
+        "开发一个登录接口并完成测试验收",
+        team_spec=_structured_team_spec(
+            "开发一个登录接口并完成测试验收",
+            capabilities=["backend", "implementation", "testing", "verification"],
+            needs_build=True,
+            needs_verification=True,
+        ),
+    )
 
     assert list(team.members) == before_members
     assert graph_plan.policy_report.user_team_locked is True
@@ -4451,6 +4541,12 @@ def test_team_graph_planner_standard_profile_uses_default_role_dag():
         team,
         "开发一个登录接口并完成测试验收",
         execution_profile={"requested_mode": "standard"},
+        team_spec=_structured_team_spec(
+            "开发一个登录接口并完成测试验收",
+            capabilities=["planning", "backend", "implementation", "testing", "verification"],
+            needs_build=True,
+            needs_verification=True,
+        ),
     )
 
     node_ids = {node["id"] for node in graph_plan.nodes}
@@ -4661,6 +4757,12 @@ def test_team_graph_planner_standard_budget_trims_optional_nodes():
             "needs_docs": False,
             "budget": {"max_nodes": 5},
         },
+        team_spec=_structured_team_spec(
+            "开发一个登录接口并完成测试验收",
+            capabilities=["planning", "backend", "implementation", "testing", "verification"],
+            needs_build=True,
+            needs_verification=True,
+        ),
     )
 
     node_ids = [node["id"] for node in graph_plan.nodes]
@@ -5713,6 +5815,11 @@ async def test_team_graph_planner_ai_missing_capability_contract_falls_back_to_s
         tm._build_team("ai-missing-capabilities"),
         "开发一个登录接口",
         execution_profile={"requested_mode": "ai"},
+        team_spec=_structured_team_spec(
+            "开发一个登录接口",
+            capabilities=["backend", "implementation"],
+            needs_build=True,
+        ),
         provider=MissingCapabilityGraphProvider(),
     )
 
@@ -5743,6 +5850,11 @@ async def test_team_graph_planner_standard_async_falls_back_to_role_dag_when_dec
         team,
         "开发一个登录接口",
         execution_profile={"requested_mode": "standard"},
+        team_spec=_structured_team_spec(
+            "开发一个登录接口",
+            capabilities=["backend", "implementation"],
+            needs_build=True,
+        ),
         provider=FailingGraphProvider(),
     )
 
@@ -5842,6 +5954,12 @@ def test_team_graph_planner_fast_profile_builds_minimal_dag():
             "needs_verification": False,
             "budget": {"max_retries": 1, "max_nodes": 3},
         },
+        team_spec=_structured_team_spec(
+            "做一个可运行的小工具",
+            capabilities=["implementation", "testing", "verification"],
+            needs_build=True,
+            needs_verification=True,
+        ),
     )
 
     assert [node["id"] for node in graph_plan.nodes] == ["leader_plan", "fast_execute", "leader_summary"]
@@ -6182,7 +6300,16 @@ async def test_auto_fast_turn_decision_creates_fast_teamplan_without_planning_de
 
     chunks = [
         chunk
-        async for chunk in tm.interact(Envelope.of("有贪吃蛇小游戏么", session_id="auto-fast-turn", mode="team"))
+        async for chunk in tm.interact(Envelope.of(
+            "有贪吃蛇小游戏么",
+            session_id="auto-fast-turn",
+            mode="team",
+            params={"team_spec": _structured_team_spec(
+                "有贪吃蛇小游戏么",
+                intent="question",
+                complexity="simple",
+            )},
+        ))
     ]
 
     plan = tm.read_plan("auto-fast-turn")["plan"]
@@ -6338,6 +6465,12 @@ async def test_team_runtime_auto_falls_back_to_standard_when_planning_decision_i
         "帮我开发一个2048小游戏",
         "",
         owner_account_id="local",
+        team_spec=_structured_team_spec(
+            "帮我开发一个2048小游戏",
+            capabilities=["implementation", "testing", "verification"],
+            needs_build=True,
+            needs_verification=True,
+        ),
     )
 
     assert plan is not None
@@ -6886,6 +7019,12 @@ async def test_team_runtime_display_end_to_end_for_parallel_qa_and_security(tmp_
             "测试一下贪吃蛇",
             session_id="team-e2e-display",
             mode="team",
+            params={"team_spec": _structured_team_spec(
+                "测试一下贪吃蛇",
+                capabilities=["testing", "verification", "review"],
+                intent="testing",
+                needs_verification=True,
+            )},
         ))
     ]
     internal = [chunk for chunk in chunks if chunk.kind == "team_internal"]

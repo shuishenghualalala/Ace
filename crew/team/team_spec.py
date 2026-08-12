@@ -1,18 +1,22 @@
-"""TeamSpec: shared task intake profile for team suggestion and execution.
+"""TeamSpec: the structured task contract shared by Team subsystems.
 
-The first version is deliberately local and deterministic. It gives the
-JiuwenSwarm-style flow a shared structure without making team creation wait on
-an LLM call: understand the user goal, choose collaboration shape, then let
-team suggestion and TeamPlan generation consume the same profile.
+``TeamSpec`` describes what a user task explicitly requires.  It does not
+choose members, trigger runtime staffing, or infer a workflow from business
+words in a free-form prompt.  Formation and runtime planning consume the
+normalized contract, while semantic interpretation belongs to their own
+input boundary (for example, a structured form or ``PlanningDecision``).
+
+The string input accepted by :func:`build_team_spec` is a migration boundary
+for older callers.  It preserves the goal text and deliberately leaves all
+task requirements unspecified; it is not a keyword-based fallback.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
-from crew.team.capabilities import capabilities_from_text, normalize_capabilities
+from crew.team.capabilities import normalize_capabilities
 
 
 TeamIntent = Literal["chat", "question", "research", "implementation", "testing", "documentation", "mixed"]
@@ -41,348 +45,185 @@ class TeamSpec:
         return asdict(self)
 
 
-def _contains_any(text: str, words: tuple[str, ...]) -> bool:
-    return any(word in text for word in words)
+TeamSpecInput = Mapping[str, Any] | TeamSpec | str | None
 
 
-def _unique(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(value for value in values if value))
+def _unique(values: list[str], *, limit: int = 8) -> list[str]:
+    return list(dict.fromkeys(value.strip() for value in values if value.strip()))[:limit]
 
 
-def _signal_goal(goal: str) -> str:
-    """Use the first three structured goal points for staffing inference.
-
-    The fourth point describes acceptance governance.  Generic phrases such as
-    "Leader 审阅并汇总" must not fabricate a reviewer or writer requirement.
-    """
-
-    lines = str(goal or "").splitlines()
-    structured: dict[int, str] = {}
-    prefix: list[str] = []
-    for line in lines:
-        match = re.match(
-            r"^\s*([1-4])[.、]\s*(?:负责范围|所需能力|交付结果|验收标准)\s*[:：]?\s*(.*)$",
-            line,
-        )
-        if match:
-            structured[int(match.group(1))] = match.group(2).strip()
-        elif not structured and line.strip():
-            prefix.append(line.strip())
-    if structured:
-        return "\n".join([*prefix, *(structured.get(index, "") for index in (1, 2, 3))])
-    return str(goal or "")
+def _text_list(value: Any, *, limit: int = 8) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    return _unique([str(item).strip() for item in values], limit=limit)
 
 
-def _make_team_spec(
-    *,
-    goal: str,
-    intent: TeamIntent,
-    complexity: TeamComplexity,
-    collaboration_mode: str = "leader_mesh",
-    roles: list[str] | None = None,
-    lanes: list[str] | None = None,
-    capabilities: list[str] | None = None,
-    needs_build: bool = False,
-    needs_verification: bool = False,
-    needs_docs: bool = False,
-    reasons: list[str] | None = None,
-    plan_strategy: PlanStrategy = "rule_dag",
-    staffing_strategy: StaffingStrategy = "suggest_only",
-    reflection_policy: ReflectionPolicy = "on_failure",
-    constraints: list[str] | None = None,
-    success_criteria: list[str] | None = None,
-    risk_flags: list[str] | None = None,
-    missing_info: list[str] | None = None,
-    consent_required_actions: list[str] | None = None,
-) -> TeamSpec:
-    normalized_lanes = _unique(list(lanes or []))[:6]
-    deliverables: list[dict[str, str]] = []
-    if needs_build:
-        deliverables.append({"type": "code", "description": "可运行、可验证的实现产物"})
-    if needs_verification:
-        deliverables.append({"type": "test_report", "description": "验证路径、结果和质量结论"})
-    if needs_docs:
-        deliverables.append({"type": "documentation", "description": "可交接的说明、记录或报告"})
-    if not deliverables and intent not in {"chat"}:
-        deliverables.append({"type": "answer", "description": "针对用户目标的可检查结论"})
-    normalized_risks = _unique(list(risk_flags or []))[:6]
-    normalized_missing = _unique(list(missing_info or []))[:6]
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _explicit_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return default
+
+
+def _normalize_deliverables(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            item_type = str(item.get("type") or "").strip()
+            description = str(item.get("description") or "").strip()
+            if item_type or description:
+                normalized.append({"type": item_type or "answer", "description": description})
+        elif str(item).strip():
+            normalized.append({"type": "answer", "description": str(item).strip()})
+    return normalized[:8]
+
+
+def _default_execution_profile(source: Mapping[str, Any]) -> dict[str, Any]:
+    explicit = _mapping(source.get("execution_profile"))
+    return {
+        "intent": str(explicit.get("intent") or source.get("intent") or "mixed"),
+        "complexity": str(explicit.get("complexity") or source.get("complexity") or "focused"),
+        "deliverable_shape": str(
+            explicit.get("deliverable_shape") or source.get("deliverable_shape") or "unknown"
+        ),
+        # These fields remain during migration for old consumers.  They are
+        # copied only when explicitly supplied; they are never inferred here.
+        "needs_build": _explicit_bool(
+            explicit.get("needs_build") if "needs_build" in explicit else source.get("needs_build")
+        ),
+        "needs_verification": _explicit_bool(
+            explicit.get("needs_verification")
+            if "needs_verification" in explicit else source.get("needs_verification")
+        ),
+        "needs_docs": _explicit_bool(
+            explicit.get("needs_docs") if "needs_docs" in explicit else source.get("needs_docs")
+        ),
+        "required_lanes": _text_list(
+            explicit.get("required_lanes")
+            if "required_lanes" in explicit else source.get("required_lanes"),
+            limit=8,
+        ),
+    }
+
+
+def _build_normalized_spec(source: Mapping[str, Any]) -> TeamSpec:
+    requirements_input = _mapping(source.get("team_requirements"))
+    execution_profile = _default_execution_profile(source)
+    explicit_capabilities = requirements_input.get("capabilities")
+    if explicit_capabilities is None:
+        explicit_capabilities = source.get("required_capabilities")
+    capabilities = normalize_capabilities(_text_list(explicit_capabilities, limit=16))
+
+    roles = _text_list(
+        requirements_input.get("roles")
+        if requirements_input.get("roles") is not None
+        else source.get("required_roles"),
+        limit=8,
+    )
+    lanes = _text_list(
+        requirements_input.get("workflow_lanes")
+        if requirements_input.get("workflow_lanes") is not None
+        else execution_profile.get("required_lanes"),
+        limit=8,
+    )
+    if not execution_profile["required_lanes"]:
+        execution_profile["required_lanes"] = list(lanes)
+
+    planning_input = _mapping(source.get("planning"))
+    policy_input = _mapping(source.get("policy"))
+    missing_info = _text_list(
+        planning_input.get("missing_info")
+        if planning_input.get("missing_info") is not None
+        else source.get("missing_info"),
+        limit=8,
+    )
+    risk_flags = _text_list(policy_input.get("risk_flags"), limit=8)
+    constraints = _text_list(
+        policy_input.get("constraints")
+        if policy_input.get("constraints") is not None
+        else source.get("constraints"),
+        limit=8,
+    )
+    consent_actions = _text_list(policy_input.get("consent_required_actions"), limit=8)
+    success_criteria = _text_list(source.get("success_criteria"), limit=8)
+    deliverables = _normalize_deliverables(source.get("deliverables"))
+
+    has_structured_requirements = bool(
+        capabilities or roles or lanes or deliverables or success_criteria
+    )
+    raw_goal = str(source.get("goal") or "").strip()
+    explicit_uncertainty = str(source.get("uncertainty") or "").strip()
+    uncertainty = explicit_uncertainty or ("low" if has_structured_requirements else "high")
+    explicit_risk_level = str(source.get("risk_level") or "").strip()
+    risk_level = explicit_risk_level or ("high" if risk_flags else "low")
+
+    planning = {
+        "strategy": str(planning_input.get("strategy") or "direct"),
+        "reflection_policy": str(planning_input.get("reflection_policy") or "on_failure"),
+        "missing_info": missing_info,
+        "build_plan_mode": str(planning_input.get("build_plan_mode") or "auto"),
+        "verify_plan_mode": str(planning_input.get("verify_plan_mode") or "required"),
+        "user_review_gate": str(planning_input.get("user_review_gate") or "on_risk"),
+    }
+    policy = {
+        "user_team_locked": _explicit_bool(policy_input.get("user_team_locked"), True),
+        "staffing_strategy": str(policy_input.get("staffing_strategy") or "suggest_only"),
+        "constraints": constraints,
+        "risk_flags": risk_flags,
+        "consent_required_actions": consent_actions,
+    }
+    planner_notes = _text_list(source.get("planner_notes"), limit=8)
+    if not raw_goal:
+        planner_notes = _unique(["用户目标为空，需要先补充任务目标。", *planner_notes])
+    elif not has_structured_requirements:
+        planner_notes = _unique([
+            "仅收到非结构化目标文本；未推断角色、能力或交付阶段。",
+            *planner_notes,
+        ])
+
     return TeamSpec(
         version=3,
-        goal=goal,
-        collaboration_mode=collaboration_mode,
-        execution_profile={
-            "intent": intent,
-            "complexity": complexity,
-            "deliverable_shape": "unknown",
-            "needs_build": bool(needs_build),
-            "needs_verification": bool(needs_verification),
-            "needs_docs": bool(needs_docs),
-            "required_lanes": normalized_lanes,
-        },
-        team_requirements={
-            "roles": _unique(list(roles or []))[:6],
-            "workflow_lanes": normalized_lanes,
-            "capabilities": normalize_capabilities(capabilities or []),
-        },
-        planning={
-            "strategy": plan_strategy,
-            "reflection_policy": reflection_policy,
-            "missing_info": normalized_missing,
-            "build_plan_mode": "auto",
-            "verify_plan_mode": "required",
-            "user_review_gate": "on_risk",
-        },
-        policy={
-            "user_team_locked": True,
-            "staffing_strategy": staffing_strategy,
-            "constraints": _unique(list(constraints or []))[:6],
-            "risk_flags": normalized_risks,
-            "consent_required_actions": _unique(list(consent_required_actions or []))[:6],
-        },
-        deliverables=deliverables,
-        success_criteria=_unique(list(success_criteria or []))[:6],
-        risk_level="high" if normalized_risks else ("medium" if complexity == "multi_role" else "low"),
-        uncertainty="high" if normalized_missing else "low",
-        planner_notes=_unique(list(reasons or []))[:6],
-    )
-
-
-def build_team_spec(goal: str) -> TeamSpec:
-    """Build a deterministic TeamSpec from the user goal.
-
-    The role vocabulary intentionally matches ``crew.team.roles`` presets so it
-    can be consumed by both Gateway team suggestion and TeamManager DAG building.
-    """
-    raw_goal = str(goal or "").strip()
-    signal_goal = _signal_goal(raw_goal)
-    text = " ".join(signal_goal.split()).lower()
-    if not text:
-        return TeamSpec(
-            version=3,
-            goal=raw_goal,
-            execution_profile={
-                "intent": "question",
-                "complexity": "simple",
-                "deliverable_shape": "unknown",
-                "needs_build": False,
-                "needs_verification": False,
-                "needs_docs": False,
-                "required_lanes": [],
-            },
-            team_requirements={"roles": [], "workflow_lanes": [], "capabilities": []},
-            planning={
-                "strategy": "direct",
-                "reflection_policy": "none",
-                "success_criteria": [],
-                "missing_info": ["用户目标为空"],
-                "build_plan_mode": "auto",
-                "verify_plan_mode": "required",
-                "user_review_gate": "on_risk",
-            },
-            policy={"user_team_locked": True, "staffing_strategy": "suggest_only", "constraints": [], "risk_flags": [], "consent_required_actions": []},
-            planner_notes=["用户输入为空，需要先追问目标。"],
-        )
-
-    simple_phrases = {
-        "你好", "您好", "hello", "hi", "hey", "谢谢", "感谢", "辛苦", "在吗",
-        "收到", "好的", "好", "ok", "确认", "继续", "谢谢你", "辛苦了",
-    }
-    normalized_simple = text.strip(" ，,。.!！?？;；:：~～")
-    if normalized_simple in simple_phrases:
-        return TeamSpec(
-            version=3,
-            goal=raw_goal,
-            execution_profile={
-                "intent": "chat",
-                "complexity": "simple",
-                "deliverable_shape": "unknown",
-                "needs_build": False,
-                "needs_verification": False,
-                "needs_docs": False,
-                "required_lanes": [],
-            },
-            team_requirements={"roles": [], "workflow_lanes": [], "capabilities": []},
-            planning={
-                "strategy": "direct",
-                "reflection_policy": "none",
-                "success_criteria": [],
-                "missing_info": [],
-                "build_plan_mode": "auto",
-                "verify_plan_mode": "required",
-                "user_review_gate": "on_risk",
-            },
-            policy={"user_team_locked": True, "staffing_strategy": "suggest_only", "constraints": [], "risk_flags": [], "consent_required_actions": []},
-            planner_notes=["这是轻量聊天，不需要创建团队任务。"],
-        )
-
-    roles: list[str] = []
-    lanes: list[str] = []
-    reasons: list[str] = []
-    constraints: list[str] = []
-    success_criteria: list[str] = []
-    capabilities: list[str] = []
-    risk_flags: list[str] = []
-    consent_actions: list[str] = []
-    needs_build = False
-    needs_verification = False
-    needs_docs = False
-    task_kind: TeamIntent = "mixed"
-    testing_intent = _contains_any(text, ("测试", "验证", "验收", "检查", "回归", "质量", "评测", "test", "verify", "qa"))
-    explicit_no_build = _contains_any(text, ("不需要开发", "无需开发", "不用开发", "不要开发", "不开发", "不需要开发新功能"))
-    historical_build_ref = _contains_any(text, (
-        "之前开发", "已经开发", "已开发", "原来开发", "以前开发",
-        "开发的", "实现的", "写好的", "做好的", "现有的", "已有的",
-    ))
-    build_intent = _contains_any(
-        text,
-        ("开发", "实现", "编码", "写一个", "做一个", "修复", "改造", "新增", "重构", "bug", "工程", "代码", "执行", "跑", "完成", "build", "implement", "fix", "code"),
-    )
-    collaboration_intent = _contains_any(text, ("组队", "协作", "团队执行", "派活"))
-    collaboration_requires_build = collaboration_intent and not testing_intent
-
-    if _contains_any(text, ("产品", "需求", "prd", "用户故事", "验收标准", "范围", "方案", "规划")):
-        roles.append("product_manager")
-        lanes.append("plan")
-        capabilities.extend(["requirements", "analysis"])
-        success_criteria.append("需求边界、交付物和验收标准清晰。")
-        reasons.append("识别到需求/方案拆解，需要规划角色。")
-    if _contains_any(text, ("调研", "研究", "资料", "竞品", "分析")):
-        roles.append("research_analyst")
-        roles.append("technical_writer")
-        lanes.extend(["plan", "docs"])
-        capabilities.extend(["information_retrieval", "research", "analysis", "synthesis"])
-        success_criteria.append("结论有来源、分析过程可追踪。")
-        task_kind = "research"
-        reasons.append("识别到研究分析任务，需要资料整理和结论输出。")
-    if _contains_any(text, ("ui", "ux", "界面", "交互", "视觉", "像素", "设计")):
-        roles.append("ui_designer")
-        lanes.append("design")
-        capabilities.append("design")
-        reasons.append("识别到界面/体验诉求，需要设计约束。")
-    if _contains_any(text, ("前端", "react", "vue", "浏览器", "css", "web", "页面")):
-        roles.append("frontend_developer")
-        lanes.append("build")
-        capabilities.extend(["frontend", "implementation"])
-        needs_build = True
-    if _contains_any(text, ("后端", "接口", "api", "数据库", "服务端", "鉴权", "登录")):
-        roles.append("backend_developer")
-        lanes.append("build")
-        capabilities.extend(["backend", "implementation"])
-        needs_build = True
-    if build_intent and not (testing_intent and (explicit_no_build or historical_build_ref) and not _contains_any(text, ("修复", "改造", "新增", "实现"))):
-        if not any(role in roles for role in ("frontend_developer", "backend_developer")):
-            roles.append("fullstack_developer")
-        lanes.append("build")
-        needs_build = True
-        task_kind = "implementation"
-        capabilities.append("implementation")
-        success_criteria.append("实现产物可运行、可验证，并说明修改范围。")
-        reasons.append("识别到实现/修复类任务，需要工程执行。")
-    if collaboration_requires_build and not roles:
-        roles.append("fullstack_developer")
-        lanes.append("build")
-        needs_build = True
-        task_kind = "implementation"
-        capabilities.append("implementation")
-        reasons.append("识别到团队执行/派活诉求，默认配置执行角色。")
-    if testing_intent:
-        roles.append("qa_engineer")
-        lanes.append("verify")
-        needs_verification = True
-        capabilities.extend(["testing", "verification"])
-        success_criteria.append("测试路径、失败场景和验收结论明确。")
-        if not needs_build:
-            task_kind = "testing"
-        reasons.append("识别到测试/验证诉求，需要质量验证角色。")
-    if _contains_any(text, ("文档", "报告", "总结", "综述", "写作", "说明", "记录", "材料")):
-        roles.append("technical_writer")
-        lanes.append("docs")
-        needs_docs = True
-        capabilities.extend(["documentation", "synthesis"])
-        success_criteria.append("交付记录、产物引用和风险说明完整。")
-        if task_kind == "mixed":
-            task_kind = "documentation"
-        reasons.append("识别到文档/交付诉求，需要整理输出。")
-
-    if _contains_any(text, ("权限", "隐私", "安全", "生产", "支付", "删除", "迁移", "上线", "发布")):
-        risk_flags.append("high_impact_or_security_sensitive")
-        consent_actions.append("高影响或安全敏感任务发生补员、改派或执行破坏性操作前需要用户确认。")
-    if _contains_any(text, ("不要", "不让", "指定", "必须", "只能", "固定团队", "就用这些人")):
-        constraints.append("用户表达了成员或执行方式偏好，团队调整必须先告知并征得确认。")
-        consent_actions.append("不得绕过用户指定团队直接换人或补员。")
-
-    detected_capabilities = capabilities_from_text(text)
-    if not needs_build:
-        detected_capabilities = [item for item in detected_capabilities if item != "implementation"]
-    capabilities.extend(detected_capabilities)
-    if not roles and set(capabilities) & {"information_retrieval", "research", "analysis", "synthesis"}:
-        roles.append("research_analyst")
-        lanes.append("plan")
-        if set(capabilities) & {"synthesis", "documentation"}:
-            roles.append("technical_writer")
-            lanes.append("docs")
-        task_kind = "research"
-        reasons.append("识别到通用检索或分析能力需求，配置研究分析角色。")
-    if "review" in capabilities and "independent_reviewer" not in roles:
-        roles.append("independent_reviewer")
-        lanes.append("verify")
-
-    if not roles:
-        roles = ["technical_writer"]
-        lanes = ["docs"]
-        task_kind = "question"
-        reasons.append("未识别到多角色执行目标，优先由 Leader 或整理角色处理。")
-
-    if needs_build and not needs_verification:
-        roles.append("qa_engineer")
-        lanes.append("verify")
-        needs_verification = True
-        capabilities.extend(["testing", "verification"])
-        reasons.append("开发任务默认补充验证角色，保证可交付。")
-
-    roles = _unique(roles)
-    lanes = _unique(lanes)
-    if len(roles) <= 1 and not needs_build:
-        complexity: TeamComplexity = "focused"
-        collaboration_mode = "leader_relay"
-    elif len(roles) <= 2:
-        complexity = "focused"
-        collaboration_mode = "leader_mesh"
-    else:
-        complexity = "multi_role"
-        collaboration_mode = "swarm"
-
-    if risk_flags:
-        reflection_policy: ReflectionPolicy = "high_risk"
-    elif needs_build or needs_verification:
-        reflection_policy = "on_failure"
-    else:
-        reflection_policy = "before_final"
-    plan_strategy: PlanStrategy = "rule_dag"
-    if complexity == "multi_role":
-        plan_strategy = "llm_dag"
-    if task_kind in {"research", "mixed"} and "plan" in lanes:
-        plan_strategy = "planning_role_first"
-    if task_kind == "question" and not needs_build and not needs_verification and not needs_docs:
-        reasons.append("轻量问题不需要完整 Standard DAG，可由 TeamTurnDecision 选择 Fast 协作路径。")
-    return _make_team_spec(
         goal=raw_goal,
-        intent=task_kind,
-        complexity=complexity,
-        collaboration_mode=collaboration_mode,
-        roles=roles[:6],
-        lanes=lanes[:6],
-        needs_build=needs_build,
-        needs_verification=needs_verification,
-        needs_docs=needs_docs,
-        reasons=reasons[:6],
-        plan_strategy=plan_strategy,
-        staffing_strategy="suggest_only",
-        reflection_policy=reflection_policy,
-        constraints=_unique(constraints)[:6],
-        success_criteria=_unique(success_criteria)[:6],
-        capabilities=_unique(capabilities),
-        risk_flags=_unique(risk_flags)[:6],
-        consent_required_actions=_unique(consent_actions)[:6],
+        collaboration_mode=str(source.get("collaboration_mode") or "leader_mesh"),
+        execution_profile=execution_profile,
+        team_requirements={
+            "roles": roles,
+            "workflow_lanes": lanes,
+            "capabilities": capabilities,
+        },
+        planning=planning,
+        policy=policy,
+        deliverables=deliverables,
+        success_criteria=success_criteria,
+        risk_level=risk_level,
+        uncertainty=uncertainty,
+        planner_notes=planner_notes,
     )
+
+
+def build_team_spec(source: TeamSpecInput = None) -> TeamSpec:
+    """Normalize one explicit TeamSpec input.
+
+    Preferred input is a mapping containing ``goal`` plus structured fields
+    such as ``team_requirements``, ``deliverables`` and ``success_criteria``.
+    Passing a string is supported only for migration: its text is retained as
+    ``goal`` and no role, capability, intent, deliverable, or workflow stage
+    is inferred from that text.
+    """
+    if isinstance(source, TeamSpec):
+        return source
+    if isinstance(source, Mapping):
+        return _build_normalized_spec(source)
+    return _build_normalized_spec({"goal": str(source or "")})

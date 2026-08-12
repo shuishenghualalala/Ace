@@ -19,7 +19,7 @@ from crew.team.capabilities import normalize_capabilities, normalize_capability
 from crew.team.models import TeamMemberSpec
 from crew.team.policy_checker import TeamPolicyReport, analyze_team_policy
 from crew.team.result_presenter import workflow_lane_order
-from crew.team.team_spec import TeamSpec, build_team_spec
+from crew.team.team_spec import TeamSpec, TeamSpecInput, build_team_spec
 from crew.team.workflow_plan import (
     PlanningDecision,
     PlanningMode,
@@ -555,8 +555,9 @@ def _build_standard_workflow_nodes(
     team: Any,
     goal: str,
     profile: dict[str, Any],
+    team_spec: TeamSpec,
 ) -> tuple[list[dict[str, Any]], list[Any], list[str]]:
-    raw_nodes, raw_edges = flow_builder.build_default_workflow_nodes(team, goal)
+    raw_nodes, raw_edges = flow_builder.build_default_workflow_nodes(team, goal, team_spec=team_spec)
     trimmed_nodes, trimmed_edges, notes = _apply_standard_budget(raw_nodes, raw_edges, profile)
     return trimmed_nodes, trimmed_edges, notes
 
@@ -1940,8 +1941,12 @@ class TeamGraphPlanner:
         team: Any,
         goal: str,
         execution_profile: dict[str, Any] | None = None,
+        team_spec: TeamSpecInput = None,
     ) -> TeamGraphPlan:
-        base_spec = build_team_spec(goal)
+        spec_source = team_spec if team_spec is not None else {"goal": goal}
+        if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
+            spec_source = {"goal": goal, **spec_source}
+        base_spec = build_team_spec(spec_source)
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         selected_mode: PlanningMode = "fast" if requested_mode == "fast" else "standard"
@@ -1960,7 +1965,7 @@ class TeamGraphPlanner:
             )
             plan_strategy = "fast_minimal_path"
         else:
-            raw_nodes, raw_edges, budget_notes = _build_standard_workflow_nodes(team, goal, profile)
+            raw_nodes, raw_edges, budget_notes = _build_standard_workflow_nodes(team, goal, profile, spec)
             plan_strategy = "standard_role_dag"
         nodes, edges, notes = _normalize_nodes_with_graph(
             goal=goal,
@@ -1996,15 +2001,19 @@ class TeamGraphPlanner:
         goal: str,
         execution_profile: dict[str, Any] | None = None,
         *,
+        team_spec: TeamSpecInput = None,
         provider: Any | None = None,
         planning_progress: PlanningProgressCallback | None = None,
     ) -> TeamGraphPlan:
-        base_spec = build_team_spec(goal)
+        spec_source = team_spec if team_spec is not None else {"goal": goal}
+        if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
+            spec_source = {"goal": goal, **spec_source}
+        base_spec = build_team_spec(spec_source)
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
         if provider is None or requested_mode == "fast":
-            return self.plan(team, goal, execution_profile=profile)
+            return self.plan(team, goal, execution_profile=profile, team_spec=spec_source)
 
         decision: PlanningDecision | None = None
         decision_error = ""
@@ -2050,7 +2059,12 @@ class TeamGraphPlanner:
         elif requested_mode == "ai":
             selected_mode = "ai"
         else:
-            fallback = self.plan(team, goal, execution_profile={**profile, "requested_mode": "standard"})
+            fallback = self.plan(
+                team,
+                goal,
+                execution_profile={**profile, "requested_mode": "standard"},
+                team_spec=spec_source,
+            )
             await _notify_planning_progress(
                 planning_progress,
                 phase="fallback",

@@ -642,7 +642,9 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
     slots = [slot for slot in raw_slots if isinstance(slot, dict)] if has_slots else []
     text = _goal_text(payload, include_workflow=not has_slots)
     description = str(payload.get("description") or "").strip()
-    team_spec = build_team_spec(_goal_text(payload, include_workflow=True))
+    team_spec_input = dict(payload)
+    team_spec_input["goal"] = _goal_text(payload, include_workflow=True)
+    team_spec = build_team_spec(team_spec_input)
     constraints = FormationConstraints() if has_slots else _extract_constraints(text, all_agents)
 
     agent_by_id = {str(agent.get("id") or ""): agent for agent in all_agents}
@@ -876,9 +878,12 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         sum(assessment_confidences) / len(assessment_confidences)
         if assessment_confidences else 0.15
     )
+    # No explicit requirement is not proof of full coverage.  Keep the Fast
+    # baseline conservative so an underspecified TeamSpec cannot skip the
+    # Formation review path by reporting a false 100% match.
     coverage_confidence = (
         len(covered_capabilities) / len(required_capabilities)
-        if required_capabilities else 1.0
+        if required_capabilities else 0.0
     )
     requirement_confidence = 0.85 if description or text else 0.4
     if constraints.conflicts:
@@ -1766,7 +1771,9 @@ def build_team_draft(payload: dict[str, Any], agents: list[dict[str, Any]]) -> d
     if leader_id not in agent_by_id:
         leader_id = ""
     goal = "\n".join(item for item in (name, description) if item).strip()
-    spec = build_team_spec(goal)
+    team_spec_input = dict(payload)
+    team_spec_input["goal"] = goal
+    spec = build_team_spec(team_spec_input)
     required_capabilities = _required_capabilities(goal, spec)
     draft_slots = payload.get("draft_slots")
     requested_slots = [slot for slot in draft_slots if isinstance(slot, dict)] if isinstance(draft_slots, list) else []

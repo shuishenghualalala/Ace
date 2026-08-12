@@ -210,7 +210,11 @@ def _draft_stream_events(response) -> list[dict]:
 
 def test_fast_team_suggestion_returns_team_spec_and_testing_roles():
     result = fast_team_suggestion(
-        {"description": "帮我测试一下之前开发的贪吃蛇，不需要开发新功能"},
+        {
+            "description": "帮我测试一下之前开发的贪吃蛇，不需要开发新功能",
+            "required_capabilities": ["testing", "verification"],
+            "execution_profile": {"intent": "testing", "needs_verification": True},
+        },
         [
             {"id": "agent_kimi", "name": "Kimi Writer", "provider": "kimi", "model": "moonshot"},
             {"id": "agent_codex", "name": "Codex Coder", "provider": "codex", "model": "code"},
@@ -242,7 +246,12 @@ def test_team_draft_keeps_leader_separate_from_suggested_role_slots():
 
 def test_team_draft_description_uses_four_point_goal_outline():
     draft = build_team_draft(
-        {"name": "像素游戏开发", "leader_agent_id": "agent_b"},
+        {
+            "name": "像素游戏开发",
+            "leader_agent_id": "agent_b",
+            "required_capabilities": ["implementation", "testing", "verification"],
+            "execution_profile": {"needs_build": True, "needs_verification": True},
+        },
         [
             {"id": "agent_a", "name": "A", "provider": "codex", "model": "code"},
             {"id": "agent_b", "name": "B", "provider": "claude", "model": "code"},
@@ -655,6 +664,7 @@ def test_empty_confirmed_slots_keep_only_leader_and_ignore_stale_workflow_assign
             "workflow": "开发建议【B】担任，测试建议【C】担任。",
             "leader_agent_id": "agent_a",
             "slots": [],
+            "required_capabilities": ["implementation", "testing", "verification", "documentation"],
         },
         agents,
     )
@@ -1349,6 +1359,8 @@ async def test_fast_suggest_uses_local_rules_without_llm(tmp_path, monkeypatch, 
                 "name": "开发团队",
                 "description": "开发一个带登录和后台管理的 Web 系统",
                 "formation_mode": "fast",
+                "required_capabilities": ["frontend", "backend", "implementation"],
+                "execution_profile": {"needs_build": True},
             },
         )
 
@@ -1384,7 +1396,12 @@ def test_fast_team_suggestion_uses_minimal_capability_cover_not_provider_brand()
         {"id": "agent_c", "name": "C", "provider": "hermes", "model": "code"},
     ]
     result = fast_team_suggestion(
-        {"name": "研发团队", "description": "开发一个前端页面和后端接口，并整理交付文档"},
+        {
+            "name": "研发团队",
+            "description": "开发一个前端页面和后端接口，并整理交付文档",
+            "required_capabilities": ["frontend", "backend", "implementation", "documentation"],
+            "execution_profile": {"needs_build": True, "needs_docs": True},
+        },
         agents,
     )
 
@@ -1402,6 +1419,8 @@ def test_fast_team_suggestion_keeps_build_as_primary_role_and_honors_custom_capa
         {
             "name": "像素小游戏开发团队",
             "custom_capabilities": ["全栈开发", "前端设计"],
+            "required_capabilities": ["design", "frontend", "implementation", "testing", "verification"],
+            "execution_profile": {"needs_build": True, "needs_verification": True},
         },
         [{"id": "hermes_1", "name": "Hermes", "provider": "hermes"}],
     )
@@ -1432,7 +1451,12 @@ def test_fast_team_suggestion_skips_unavailable_agent_profiles():
     ready["profile"] = build_agent_profile(ready).to_dict()
 
     result = fast_team_suggestion(
-        {"name": "像素小游戏开发团队", "description": "实现并测试像素小游戏"},
+        {
+            "name": "像素小游戏开发团队",
+            "description": "实现并测试像素小游戏",
+            "required_capabilities": ["implementation", "testing"],
+            "execution_profile": {"needs_build": True, "needs_verification": True},
+        },
         [degraded, ready],
     )
 
@@ -1519,6 +1543,10 @@ def test_fast_team_suggestion_forms_non_coding_team_from_shared_capabilities():
         {
             "name": "法律咨询团队",
             "description": "检索资料并分析论证，汇总结论后独立复核，输出咨询报告。",
+            "required_capabilities": [
+                "information_retrieval", "research", "analysis", "synthesis",
+                "review", "verification", "documentation",
+            ],
         },
         agents,
     )
@@ -1550,7 +1578,12 @@ def test_fast_team_suggestion_user_can_assign_kimi_to_development():
         {"id": "codex_1", "name": "Codex Backend Coder", "provider": "codex", "model": "code"},
     ]
     result = fast_team_suggestion(
-        {"name": "研发团队", "description": "开发一个 Web 页面和后端接口，让 Kimi 做前端开发，Hermes 写文档"},
+        {
+            "name": "研发团队",
+            "description": "开发一个 Web 页面和后端接口，让 Kimi 做前端开发，Hermes 写文档",
+            "required_capabilities": ["frontend", "backend", "implementation", "documentation"],
+            "execution_profile": {"needs_build": True, "needs_docs": True},
+        },
         agents,
     )
 

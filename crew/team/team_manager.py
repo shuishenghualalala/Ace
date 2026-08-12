@@ -4266,8 +4266,14 @@ class InProcessTeamManager(TeamManager):
     def _goal_needs_build(goal: str) -> bool:
         return flow_builder.goal_needs_build(goal)
 
-    def _default_workflow_nodes(self, team: Team, goal: str) -> tuple[list[dict[str, Any]], list[Any]]:
-        plan = self.graph_planner.plan(team, goal)
+    def _default_workflow_nodes(
+        self,
+        team: Team,
+        goal: str,
+        *,
+        team_spec: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[Any]]:
+        plan = self.graph_planner.plan(team, goal, team_spec=team_spec)
         return plan.nodes, plan.edges
 
     def _team_execution_profile(self, envelope: Envelope) -> dict[str, Any] | None:
@@ -4421,12 +4427,18 @@ class InProcessTeamManager(TeamManager):
         external_team_id: str,
         owner_account_id: str = "",
         execution_profile: dict[str, Any] | None = None,
+        team_spec: dict[str, Any] | None = None,
     ) -> TeamPlan | None:
         plan_key = self._key(session_id, owner_account_id)
         existing = self._plans.get(plan_key)
         if existing is not None:
             return existing
-        graph_plan = self.graph_planner.plan(team, goal, execution_profile=execution_profile)
+        graph_plan = self.graph_planner.plan(
+            team,
+            goal,
+            execution_profile=execution_profile,
+            team_spec=team_spec,
+        )
         nodes, edges = graph_plan.nodes, graph_plan.edges
         if not nodes:
             return None
@@ -4457,6 +4469,7 @@ class InProcessTeamManager(TeamManager):
         external_team_id: str,
         owner_account_id: str = "",
         execution_profile: dict[str, Any] | None = None,
+        team_spec: dict[str, Any] | None = None,
         planning_progress: Callable[[dict[str, Any]], Any] | None = None,
     ) -> TeamPlan | None:
         plan_key = self._key(session_id, owner_account_id)
@@ -4467,6 +4480,7 @@ class InProcessTeamManager(TeamManager):
             team,
             goal,
             execution_profile=execution_profile,
+            team_spec=team_spec,
             provider=self._provider_for_owner(owner_account_id),
             planning_progress=planning_progress,
         )
@@ -5560,6 +5574,7 @@ class InProcessTeamManager(TeamManager):
         external_team_id: str,
         owner_account_id: str,
         execution_profile: dict[str, Any] | None,
+        team_spec: dict[str, Any] | None = None,
     ) -> AsyncIterator[tuple[ResponseChunk | None, TeamPlan | None]]:
         queue: asyncio.Queue[ResponseChunk] = asyncio.Queue()
 
@@ -5573,6 +5588,7 @@ class InProcessTeamManager(TeamManager):
             external_team_id,
             owner_account_id=owner_account_id,
             execution_profile=execution_profile,
+            team_spec=team_spec,
             planning_progress=on_progress,
         ))
         while not task.done():
@@ -5593,6 +5609,7 @@ class InProcessTeamManager(TeamManager):
         team: Team,
         external_team_id: str,
         execution_profile: dict[str, Any] | None = None,
+        team_spec: dict[str, Any] | None = None,
     ) -> AsyncIterator[ResponseChunk]:
         goal = str(envelope.query or "").strip()
         explicit_profile = envelope.params.get("team_execution_profile")
@@ -5610,6 +5627,7 @@ class InProcessTeamManager(TeamManager):
             external_team_id=external_team_id,
             owner_account_id=envelope.user_id,
             execution_profile=resolved_execution_profile,
+            team_spec=team_spec,
         ):
             if planning_chunk is not None:
                 yield planning_chunk
@@ -7198,7 +7216,12 @@ class InProcessTeamManager(TeamManager):
             return
         team_cfg = self.config.team_config or {}
         required_workflow = bool(team_cfg.get("required_workflow", True))
-        base_turn_decision = self.turn_router.route(str(envelope.query or ""))
+        raw_team_spec = envelope.params.get("team_spec")
+        team_spec = raw_team_spec if isinstance(raw_team_spec, dict) else None
+        base_turn_decision = self.turn_router.route(
+            str(envelope.query or ""),
+            team_spec=team_spec,
+        )
         intent_spec = (
             base_turn_decision.diagnostics.get("team_spec")
             if isinstance(base_turn_decision.diagnostics.get("team_spec"), dict)
@@ -7239,6 +7262,7 @@ class InProcessTeamManager(TeamManager):
                 team=team,
                 external_team_id=external_team_id,
                 execution_profile=execution_profile,
+                team_spec=team_spec,
             ):
                 yield chunk
             return

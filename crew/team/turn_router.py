@@ -6,15 +6,40 @@ profile; execution mode is inferred here from that profile.
 
 from __future__ import annotations
 
-from crew.team.team_spec import build_team_spec
+from crew.team.team_spec import TeamSpec, TeamSpecInput, build_team_spec
 from crew.team.turn_decision import TeamTurnDecision, direct_chat_decision, new_workflow_decision
+
+
+_SIMPLE_CHAT_PHRASES = {
+    "你好", "您好", "hello", "hi", "hey", "谢谢", "感谢", "辛苦", "在吗",
+    "收到", "好的", "好", "ok", "确认", "继续", "谢谢你", "辛苦了",
+}
+
+
+def _is_simple_chat(goal: str) -> bool:
+    normalized = " ".join(str(goal or "").strip().split()).strip(" ，,。.!！?？;；:：~～").lower()
+    return normalized in _SIMPLE_CHAT_PHRASES
 
 
 class TeamTurnRouter:
     """Fast local router backed by TeamSpec."""
 
-    def route(self, goal: str) -> TeamTurnDecision:
-        spec = build_team_spec(goal)
+    def route(self, goal: str, *, team_spec: TeamSpecInput = None) -> TeamTurnDecision:
+        if isinstance(team_spec, TeamSpec):
+            spec_source: TeamSpecInput = team_spec
+        elif isinstance(team_spec, dict):
+            spec_source = {"goal": goal, **team_spec}
+        elif _is_simple_chat(goal):
+            spec_source = {
+                "goal": goal,
+                "execution_profile": {
+                    "intent": "chat",
+                    "complexity": "simple",
+                },
+            }
+        else:
+            spec_source = goal
+        spec = build_team_spec(spec_source)
         reason = (
             spec.planner_notes[0]
             if spec.planner_notes
