@@ -20,7 +20,7 @@ describe('security approval UI model', () => {
 
   it('offers only the three Crew security modes', () => {
     expect(SECURITY_MODE_OPTIONS.map((option) => option.label)).toEqual([
-      '每次询问',
+      '请求批准',
       '替我审批',
       '完全访问权限',
     ]);
@@ -44,11 +44,11 @@ describe('security approval UI model', () => {
     expect(reject).toHaveBeenCalledOnce();
   });
 
-  it('lets a blank composer select full access once without later inheritance', async () => {
+  it('does not persist full access as a blank-composer preset', async () => {
     await expect(selectNextConversationMode('full_access', () => true)).resolves.toBe(true);
     await assignSecurityMode('full-access-conversation');
     await assignSecurityMode('after-full-access');
-    expect(securityModeForSession('full-access-conversation')).toBe('full_access');
+    expect(securityModeForSession('full-access-conversation')).toBe('request_approval');
     expect(securityModeForSession('after-full-access')).toBe('request_approval');
   });
 
@@ -102,6 +102,28 @@ describe('security approval UI model', () => {
     expect(summary).toContain('额外网络权限：uploads.example.com:443（https）');
     expect(summary).toContain('额外权限：允许监听本地端口');
     expect(summary).toContain('申请说明：上传构建产物');
+  });
+
+  it('distinguishes sandbox, additional-permission and escalated command boundaries', () => {
+    const sandboxed = formatApprovalSummary({
+      action: { kind: 'exec', raw_command: 'git status', argv: ['git', 'status'], cwd: '/work' },
+    });
+    const expanded = formatApprovalSummary({
+      action: { kind: 'exec', raw_command: 'cat /opt/report', argv: ['cat', '/opt/report'], cwd: '/work' },
+      additional_permissions: {
+        sandbox_permissions: 'with_additional_permissions',
+        filesystem: [{ root: '/opt/report', access: 'read' }],
+      },
+    });
+    const escalated = formatApprovalSummary({
+      action: { kind: 'exec', raw_command: 'system-tool', argv: ['system-tool'], cwd: '/work' },
+      additional_permissions: { sandbox_permissions: 'require_escalated' },
+    });
+
+    expect(sandboxed).toContain('执行边界：仅在当前沙箱内执行');
+    expect(expanded).toContain('执行边界：留在沙箱内，并增加下方明确权限');
+    expect(escalated).toContain('执行边界：脱离沙箱');
+    expect(escalated).toContain('本次对话仍绑定完整命令与工作目录');
   });
 
   it('explains managed external-agent network expansion in user-facing language', () => {

@@ -155,6 +155,7 @@ async def _probe_runtime(
         workspace.mkdir()
         host_secret = parent / "host-secret"
         host_secret.write_text("probe", encoding="ascii")
+        outside_marker = parent / "outside-marker"
         marker = workspace / "probe-marker"
         metadata_root = workspace / ".git"
         metadata_root.mkdir()
@@ -166,36 +167,36 @@ async def _probe_runtime(
                 "cmd.exe",
                 "/d",
                 "/c",
-                f'echo ok>"{marker}" & echo changed>"{metadata_file}" & type "{host_secret}"',
-            )
-        elif system == "linux":
-            command = (
-                "/bin/sh",
-                "-c",
-                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; cat "$3" >/dev/null',
-                "ace-probe",
-                str(marker),
-                str(metadata_file),
-                str(host_secret),
+                f'echo ok>"{marker}" & echo changed>"{metadata_file}" & '
+                f'echo changed>"{outside_marker}" & type "{host_secret}"',
             )
         elif system in {"linux", "darwin"}:
             command = (
                 "/bin/sh",
                 "-c",
-                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; cat "$3" >/dev/null',
+                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; '
+                'printf changed > "$3" 2>/dev/null || true; cat "$4"',
                 "ace-probe",
                 str(marker),
                 str(metadata_file),
+                str(outside_marker),
                 str(host_secret),
             )
         else:
             return None
+        readable_roots: tuple[Path, ...] = ()
+        if system == "windows":
+            from crew.security.launch import _windows_full_disk_read_roots
+
+            readable_roots = _windows_full_disk_read_roots()
         try:
             result = await NativeRuntimeClient(helper_argv).execute(
                 command=command,
                 cwd=workspace,
                 writable_roots=(workspace,),
+                readable_roots=readable_roots,
                 readonly_roots=(metadata_root,),
+                full_disk_read=True,
                 network_enabled=network_enabled,
                 timeout=10,
                 max_output_bytes=4096,
@@ -208,12 +209,21 @@ async def _probe_runtime(
         try:
             marker_ready = marker.is_file() and marker.read_text(encoding="ascii").startswith("ok")
             metadata_ready = metadata_file.read_text(encoding="ascii") == metadata_sentinel
+            outside_write_denied = not outside_marker.exists()
         except (OSError, UnicodeError):
             marker_ready = False
             metadata_ready = False
+            outside_write_denied = False
         return (
             result.capabilities
-            if marker_ready and metadata_ready and result.exit_code != 0
+            if (
+                marker_ready
+                and metadata_ready
+                and outside_write_denied
+                and result.exit_code == 0
+                and "probe" in result.stdout
+                and result.capabilities.full_disk_read
+            )
             else None
         )
 
@@ -497,7 +507,7 @@ def create_security_router(crew) -> APIRouter:
                 else (
                     "文件沙箱 live probe 已通过；联网管控探针失败"
                     if filesystem
-                    else "原生防护 live probe 失败或主机读取隔离未生效"
+                    else "原生防护 live probe 失败或只读基线未生效"
                 )
             )
         elif helper_present:

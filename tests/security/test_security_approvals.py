@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from crew.security.actions import normalize_exec_action
+from crew.security.actions import normalize_exec_action, normalize_file_action
 from crew.security.approvals import (
     ApprovalDecision,
     ApprovalError,
@@ -12,7 +12,12 @@ from crew.security.approvals import (
 )
 from crew.security.context import SecurityContext
 from crew.security.grants import GrantError, GrantRegistry
-from crew.security.models import AdditionalPermissionProfile, FilesystemAccess, FilesystemEntry
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    FilesystemAccess,
+    FilesystemEntry,
+    SandboxPermissions,
+)
 from crew.security.rules import RuleScope
 
 
@@ -238,6 +243,72 @@ def test_session_grant_survives_pending_revocation_until_session_end(tmp_path: P
         grants.authorize(grant.grant_id, context, action)
 
 
+def test_session_filesystem_grant_covers_descendants_without_write_upgrade(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    grants = GrantRegistry(clock=clock)
+    manager = ApprovalManager(grants, clock=clock)
+    context = _context(tmp_path)
+    root = tmp_path / "approved"
+    root.mkdir()
+    action = normalize_file_action(root, "read")
+    permissions = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(root, FilesystemAccess.READ),)
+    )
+    request = manager.create(
+        context,
+        action,
+        "file_read",
+        additional_permissions=permissions,
+    )
+    manager.decide(request.request_id, request.nonce, ApprovalDecision.SESSION, context)
+
+    assert grants.authorize_action(
+        context,
+        normalize_file_action(root / "nested.txt", "read"),
+        additional_permissions=AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(root / "nested.txt", FilesystemAccess.READ),)
+        ),
+    ) is not None
+    assert grants.authorize_action(
+        context,
+        normalize_file_action(root / "nested.txt", "write"),
+        additional_permissions=AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(root / "nested.txt", FilesystemAccess.READ_WRITE),)
+        ),
+    ) is None
+
+
+def test_session_escalated_grant_stays_bound_to_exact_command(tmp_path: Path) -> None:
+    clock = _Clock()
+    grants = GrantRegistry(clock=clock)
+    manager = ApprovalManager(grants, clock=clock)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["tool", "one"], tmp_path)
+    permissions = AdditionalPermissionProfile(
+        sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED
+    )
+    request = manager.create(
+        context,
+        action,
+        "terminal",
+        additional_permissions=permissions,
+    )
+    manager.decide(request.request_id, request.nonce, ApprovalDecision.SESSION, context)
+
+    assert grants.authorize_action(
+        context,
+        action,
+        additional_permissions=permissions,
+    ) is not None
+    assert grants.authorize_action(
+        context,
+        normalize_exec_action(["tool", "two"], tmp_path),
+        additional_permissions=permissions,
+    ) is None
+
+
 def test_pending_revocation_does_not_revoke_session_grant(tmp_path: Path) -> None:
     clock = _Clock()
     grants = GrantRegistry(clock=clock)
@@ -280,7 +351,8 @@ def test_always_returns_persistent_rule_but_immediate_grant_stays_exact(tmp_path
     assert outcome.grant is not None
     assert outcome.persistent_rule is not None
     assert outcome.persistent_rule.scope is RuleScope.ALWAYS
-    assert outcome.persistent_rule.argv_prefix == ("git", "status")
+    assert outcome.persistent_rule.exact_digest == action.digest
+    assert outcome.persistent_rule.argv_prefix == ()
 
 
 def test_shell_digest_is_stable_across_classifier_evidence(tmp_path: Path) -> None:
@@ -330,7 +402,7 @@ def test_shell_always_uses_exact_action_not_wrapper_prefix(tmp_path: Path) -> No
     assert not outcome.persistent_rule.matches(changed)
 
 
-def test_invalid_always_prefix_does_not_consume_request(tmp_path: Path) -> None:
+def test_legacy_always_prefix_is_ignored_and_exact_action_is_persisted(tmp_path: Path) -> None:
     clock = _Clock()
     manager = _manager(clock)
     context = _context(tmp_path)
@@ -340,20 +412,15 @@ def test_invalid_always_prefix_does_not_consume_request(tmp_path: Path) -> None:
         "terminal",
     )
 
-    with pytest.raises(ApprovalError, match="token prefix"):
-        manager.decide(
-            request.request_id,
-            request.nonce,
-            ApprovalDecision.ALWAYS,
-            context,
-            always_argv_prefix=["git", "diff"],
-        )
-    assert manager.decide(
+    outcome = manager.decide(
         request.request_id,
         request.nonce,
-        ApprovalDecision.ONCE,
+        ApprovalDecision.ALWAYS,
         context,
-    ).grant is not None
+        always_argv_prefix=["git", "diff"],
+    )
+    assert outcome.persistent_rule is not None
+    assert outcome.persistent_rule.exact_digest == request.action_digest
 
 
 def test_reject_creates_no_grant_or_persistent_deny(tmp_path: Path) -> None:

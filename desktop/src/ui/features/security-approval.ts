@@ -22,13 +22,13 @@ export const SECURITY_APPROVAL_CHOICES: readonly SecurityApprovalChoice[] = [
 
 /** toolbar chip 的三选一：value/label/desc 由本模块（类型所有者）统一提供。 */
 export const SECURITY_MODE_OPTIONS: { value: ConversationSecurityMode; label: string; desc: string }[] = [
-  { value: 'request_approval', label: '请求批准', desc: '每条命令都问我' },
-  { value: 'auto_review', label: '替我审批', desc: '沙箱内自动放行，越界再问' },
-  { value: 'full_access', label: '完全访问权限', desc: '宽权限受管：安全控制面仍隔离' },
+  { value: 'request_approval', label: '请求批准', desc: '普通读取免询问；命令、写入和联网需确认' },
+  { value: 'auto_review', label: '替我审批', desc: '沙箱内与公开网络自动放行，越界再问' },
+  { value: 'full_access', label: '完全访问权限', desc: '使用当前宿主用户权限，不启用沙箱' },
 ];
 
 export const FULL_ACCESS_CONFIRMATION =
-  '完全访问会在原生安全运行时中开放当前项目和用户目录的广泛读写，普通动作不再逐条询问；Crew 数据库、授权规则、审计、凭据和系统级硬边界仍隔离。确定只对当前对话启用吗？';
+  '完全访问会让当前对话直接使用你的宿主系统用户权限，不再启用原生文件或网络沙箱，也不逐项审批；永久安全红线、拒绝规则、审计与进程回收仍保留。确定启用吗？';
 
 export function modeLabel(mode: ConversationSecurityMode): string {
   if (mode === 'full_access') return '完全访问权限';
@@ -62,6 +62,7 @@ function riskClassLabel(riskClass: string, toolName: string): string {
   if (riskClass === 'external_file_write') return '修改项目外文件';
   if (riskClass === 'dangerous_command') return '执行高风险命令';
   if (riskClass === 'shell_command') return '执行命令';
+  if (riskClass === 'external_agent_network') return '启动外部智能体并允许其访问模型服务';
   return riskClass || '需要人工确认';
 }
 
@@ -80,6 +81,8 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
   const intent = channelFileIntent(toolName);
   const riskClass = String(request['risk_class'] ?? action['risk_class'] ?? '');
   const argv = Array.isArray(action['argv']) ? action['argv'].map(String) : [];
+  const additional = (request['additional_permissions'] ?? {}) as Record<string, unknown>;
+  const sandboxPermissions = String(additional['sandbox_permissions'] ?? 'use_default');
   const lines = [
     // gateway schema 吐的是 risk_class（非 risk_level）；两层都兜一层以防上游变动。
     `风险：${riskClassLabel(riskClass, toolName)}`,
@@ -87,6 +90,14 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
     `操作：${actionKindLabel(kind)}`,
   ];
   if (kind === 'exec') {
+    if (sandboxPermissions === 'require_escalated') {
+      lines.push('执行边界：脱离沙箱，仅本命令将获得宿主用户可访问的全部范围');
+      lines.push('警告：该命令可读取或修改工作区外文件，并可直接使用宿主网络。');
+    } else if (sandboxPermissions === 'with_additional_permissions') {
+      lines.push('执行边界：留在沙箱内，并增加下方明确权限');
+    } else {
+      lines.push('执行边界：仅在当前沙箱内执行');
+    }
     const rawCommand = String(action['raw_command'] ?? '');
     // raw_command 是用户/模型提交的原始命令，也是用户真正要确认的内容；argv 是系统最终执行
     // 详情（Windows 可能含 UTF-8 初始化前导）。两者都显示，避免内部前导淹没具体命令或隐藏执行差异。
@@ -108,7 +119,24 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
     const protocol = action['protocol'] ? `（${String(action['protocol'])}）` : '';
     if (host) lines.push(`联网目标：${host}${port}${protocol}`);
   }
-  lines.push('授权只匹配上面显示的完整动作；任一字符变化都会重新判断。');
+  const filesystem = Array.isArray(additional['filesystem']) ? additional['filesystem'] : [];
+  const network = Array.isArray(additional['network']) ? additional['network'] : [];
+  for (const value of filesystem) {
+    const entry = value as Record<string, unknown>;
+    const access = String(entry['access'] ?? '');
+    lines.push(`额外文件权限（${access === 'read_write' ? '读写' : '只读'}）：${String(entry['root'] ?? '')}`);
+  }
+  for (const value of network) {
+    const entry = value as Record<string, unknown>;
+    lines.push(`额外网络权限：${String(entry['host'] ?? '')}:${String(entry['port'] ?? '')}（${String(entry['protocol'] ?? '')}）`);
+  }
+  if (additional['allow_local_binding'] === true) lines.push('额外权限：允许监听本地端口');
+  if (request['preview'] && kind === 'exec') lines.push(`申请说明：${String(request['preview'])}`);
+  lines.push(
+    sandboxPermissions === 'require_escalated'
+      ? '范围：仅这一次消费一次；本次对话仍绑定完整命令与工作目录；始终允许仅匹配完整动作。'
+      : '范围：仅这一次消费一次；本次对话按已展示路径/网络范围复用；始终允许仅匹配完整动作。',
+  );
   return lines.join('\n');
 }
 
@@ -217,7 +245,7 @@ export function securityModeForSession(sessionId: string): ConversationSecurityM
 function decisionLabel(decision: SecurityApprovalChoice): string {
   if (decision === 'once') return '（仅这一次）';
   if (decision === 'session') return '（本次对话）';
-  if (decision === 'always') return '（始终允许此命令）';
+  if (decision === 'always') return '（始终允许此操作）';
   return '';
 }
 
@@ -290,24 +318,18 @@ export function bindSecurityApprovalUi(): () => void {
       const workspaceId = String(visibleRequest['workspace_id'] ?? 'default');
       const requestId = String(visibleRequest['request_id'] ?? '');
       const taskId = typeof visibleRequest['task_id'] === 'string' ? String(visibleRequest['task_id']) : '';
-      const action = visibleRequest['action'] as { argv?: unknown[] } | undefined;
-      const argvPrefix = (action?.argv ?? []).map(String);
       const sessionId = state.activeSessionId;
       submitting = true;
       decisionButtons.forEach((item) => { item.disabled = true; });
       try {
         // task_id 必须回传：Gateway decide 校验 request.task_id == ctx.task_id，
         // 缺失会被判为上下文不匹配返回 409，并触发 main 侧删除 nonce，之后所有按钮都报"已过期"。
-        // alwaysArgvPrefix 仅在 exec 动作（argv 非空）时携带：文件/网络动作 argv 为空，
-        // 带空数组会被 IPC schema 判为非法（must be a non-empty string array）并 reject，
-        // 这正是历史 bug——文件类"始终允许"点了没反应、框还挂着（决策见变更记录）。
         const result = await window.Crew.securityDecide({
           workspaceId,
           sessionId,
           requestId,
           taskId,
           decision,
-          ...(decision === 'always' && argvPrefix.length ? { alwaysArgvPrefix: argvPrefix } : {}),
         });
         if (!result?.ok) {
           notify(`审批失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}`);

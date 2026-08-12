@@ -111,16 +111,6 @@ async def test_recoverable_decision_error_keeps_waiter_until_valid_retry(tmp_pat
     request = approvals.list_pending(context)[0]
     waiter = asyncio.create_task(service.await_decision(public["request_id"]))
 
-    with pytest.raises(ApprovalError, match="token prefix"):
-        service.decide(
-            context,
-            request_id=request.request_id,
-            nonce=request.nonce,
-            decision=ApprovalDecision.ALWAYS,
-            always_argv_prefix=["git", "diff"],
-        )
-    assert not waiter.done()
-
     service.decide(
         context,
         request_id=request.request_id,

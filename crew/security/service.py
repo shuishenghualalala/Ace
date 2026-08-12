@@ -27,6 +27,9 @@ from crew.security.models import (
     EMPTY_ADDITIONAL_PERMISSIONS,
     AdditionalPermissionProfile,
     ConversationPermissionMode,
+    FilesystemAccess,
+    FilesystemEntry,
+    NetworkEntry,
     serialize_additional_permissions,
 )
 from crew.security.rule_store import SQLiteRuleStore
@@ -344,14 +347,18 @@ class SecurityApprovalService:
             if selected is not None and selected.decision is RuleDecision.ALLOW:
                 self._audit_file(context, action, "allow", "always_rule", tool_name)
                 return FilePolicyResult.ALLOW, "always_rule", None
-            grant = self.grants.authorize_action(context, action)
+            requested_permissions = _file_action_permissions(action)
+            grant = self.grants.authorize_action(
+                context,
+                action,
+                additional_permissions=requested_permissions,
+            )
             if grant is not None:
                 self._audit_file(context, action, "allow", "runtime_grant", tool_name)
                 return FilePolicyResult.ALLOW, "runtime_grant", None
 
-        # AUTO_REVIEW no longer treats every host-external read as low risk. Without
-        # a proven public-file classifier that would include SSH/cloud/browser
-        # credentials. Exact rules/session grants still bypass prompts above.
+        # Reaching this point means the base profile did not cover the requested
+        # write or the path is protected; the approval carries that exact scope.
         request = self.request_action(
             context,
             action,
@@ -362,6 +369,7 @@ class SecurityApprovalService:
                 else "external_file_write" if action.operation != "read" else "external_file_read"
             ),
             preview=preview,
+            additional_permissions=requested_permissions,
         )
         return FilePolicyResult.REQUIRE_APPROVAL, assessment.reason, request
 
@@ -494,7 +502,12 @@ class SecurityApprovalService:
             if selected is not None:
                 self._audit_network(context, action, "allow", "always_rule", tool_name)
                 return ExecAuthorization(True)
-            grant = self.grants.authorize_action(context, action)
+            requested_permissions = _network_action_permissions(action, public_target)
+            grant = self.grants.authorize_action(
+                context,
+                action,
+                additional_permissions=requested_permissions,
+            )
             if grant is not None:
                 self._audit_network(context, action, "allow", "runtime_grant", tool_name)
                 return ExecAuthorization(True)
@@ -511,6 +524,7 @@ class SecurityApprovalService:
             action,
             tool_name=tool_name,
             risk_class="public_network" if public_target else "private_network",
+            additional_permissions=requested_permissions,
         )
         self._audit_network(context, action, "ask", "approval_required", tool_name)
         return ExecAuthorization(False, request)
@@ -903,6 +917,33 @@ def _permissions_summary(profile: AdditionalPermissionProfile) -> str:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def _file_action_permissions(action: NormalizedAction) -> AdditionalPermissionProfile:
+    access = (
+        FilesystemAccess.READ
+        if action.operation == "read"
+        else FilesystemAccess.READ_WRITE
+    )
+    return AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(Path(action.path), access),)
+    )
+
+
+def _network_action_permissions(
+    action: NormalizedAction,
+    public_target: bool,
+) -> AdditionalPermissionProfile:
+    return AdditionalPermissionProfile(
+        network=(
+            NetworkEntry(
+                host=action.host,
+                port=action.port,
+                protocol=action.protocol,
+                allow_private=not public_target,
+            ),
+        )
     )
 
 

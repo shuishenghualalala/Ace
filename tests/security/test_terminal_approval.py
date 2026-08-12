@@ -6,7 +6,7 @@ import pytest
 
 from crew.core.errors import ToolError
 from crew.security.context import SecurityContext
-from crew.security.models import ConversationPermissionMode
+from crew.security.models import ConversationPermissionMode, SandboxPermissions
 from crew.tools.builtin import _parse_additional_permissions, handle_terminal
 
 
@@ -138,6 +138,7 @@ async def test_full_access_does_not_depend_on_native_classifier_or_permission_ov
 
 def test_terminal_permission_request_is_exact_and_protected_metadata_stays_read_only(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
@@ -145,6 +146,7 @@ def test_terminal_permission_request_is_exact_and_protected_metadata_stays_read_
     workspace.mkdir()
     outside.mkdir()
     metadata.mkdir()
+    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(workspace))
     context = SecurityContext(
         os_user="os-a",
         owner_account_id="owner-a",
@@ -196,4 +198,35 @@ def test_terminal_permission_request_is_exact_and_protected_metadata_stays_read_
             security_context=context,
             mode=ConversationPermissionMode.AUTO_REVIEW,
             db_path=tmp_path / "crew.db",
+        )
+
+
+def test_terminal_sandbox_override_validation(tmp_path: Path) -> None:
+    context = SecurityContext(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+        workspace_root=tmp_path,
+        session_id="session-a",
+        request_id="request-a",
+        task_id="task-a",
+        cwd=tmp_path,
+    )
+    escalated = _parse_additional_permissions(
+        None,
+        cwd=tmp_path,
+        security_context=context,
+        mode=ConversationPermissionMode.REQUEST_APPROVAL,
+        db_path=tmp_path / "crew.db",
+        sandbox_permissions="require_escalated",
+    )
+    assert escalated.sandbox_permissions is SandboxPermissions.REQUIRE_ESCALATED
+    with pytest.raises(ToolError, match="sandbox_permissions"):
+        _parse_additional_permissions(
+            None,
+            cwd=tmp_path,
+            security_context=context,
+            mode=ConversationPermissionMode.REQUEST_APPROVAL,
+            db_path=tmp_path / "crew.db",
+            sandbox_permissions="unknown",
         )

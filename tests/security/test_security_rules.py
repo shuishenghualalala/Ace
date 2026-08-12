@@ -29,11 +29,11 @@ def test_exact_file_rule_changes_when_path_or_operation_changes(tmp_path: Path) 
     assert not rule.matches(normalize_file_action(tmp_path / "one.txt", "write"))
 
 
-def test_always_exec_rule_matches_only_displayed_token_prefix(tmp_path: Path) -> None:
+def test_legacy_always_allow_prefix_is_disabled(tmp_path: Path) -> None:
     rule = ActionRule.exec_prefix(["git", "status"], cwd=tmp_path)
 
-    assert rule.matches(normalize_exec_action(["git", "status"], tmp_path))
-    assert rule.matches(normalize_exec_action(["git", "status", "--short"], tmp_path))
+    assert not rule.matches(normalize_exec_action(["git", "status"], tmp_path))
+    assert not rule.matches(normalize_exec_action(["git", "status", "--short"], tmp_path))
     assert not rule.matches(normalize_exec_action(["git", "status-all"], tmp_path))
     assert not rule.matches(normalize_exec_action(["git", "diff"], tmp_path))
     assert not rule.matches(normalize_exec_action(["git", "status"], tmp_path / "other"))

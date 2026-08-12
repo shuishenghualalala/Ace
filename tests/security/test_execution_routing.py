@@ -34,6 +34,7 @@ from crew.security.models import (
     NetworkEntry,
     PermissionProfile,
     PermissionProfileKind,
+    SandboxPermissions,
 )
 from crew.security.runtime_client import NativeRuntimeError, RuntimeCapabilities, RuntimeErrorCode
 from crew.tools.process_registry import ProcessRegistry
@@ -53,11 +54,15 @@ def _managed(tmp_path: Path) -> ProcessLaunch:
 
 
 @pytest.mark.asyncio
-async def test_approved_outside_write_reaches_native_runtime(tmp_path: Path) -> None:
+async def test_approved_outside_write_reaches_native_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
     outside.mkdir()
+    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(workspace))
     target = outside / "approved.txt"
     context = SecurityContext(
         os_user="tester",
@@ -280,8 +285,37 @@ def test_compile_process_launch_uses_explicit_external_security_setting(
         external_security_enabled=False,
     )
 
-    assert launch.managed is True
+    assert launch.managed is False
     assert launch.external_managed is False
+
+
+def test_require_escalated_compiles_only_that_launch_to_host_authority(tmp_path: Path) -> None:
+    context = SecurityContext(
+        os_user="test-user",
+        owner_account_id="owner-a",
+        workspace_id="workspace-a",
+        session_id="session-a",
+        task_id="task-a",
+        request_id="request-a",
+        cwd=tmp_path,
+        workspace_root=tmp_path,
+    )
+    launch = compile_process_launch(
+        context,
+        ConversationPermissionMode.REQUEST_APPROVAL,
+        db_path=tmp_path / "security.db",
+        additional_permissions=AdditionalPermissionProfile(
+            sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED
+        ),
+    )
+    ordinary = compile_process_launch(
+        context,
+        ConversationPermissionMode.REQUEST_APPROVAL,
+        db_path=tmp_path / "security.db",
+    )
+
+    assert launch.managed is False
+    assert ordinary.managed is True
 
 
 @pytest.mark.asyncio

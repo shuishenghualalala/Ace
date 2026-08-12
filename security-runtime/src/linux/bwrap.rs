@@ -40,7 +40,7 @@ impl Drop for BwrapPlan {
     }
 }
 
-/// Build a Codex-shaped bwrap profile: empty root, explicit reads/writes, protected metadata.
+/// Build a bwrap profile with either an empty root or a host-wide read-only root.
 pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
     let cwd = canonical_directory(&request.cwd)?;
     let executable = env::current_exe()
@@ -66,8 +66,13 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         "--die-with-parent".to_string(),
         "--unshare-user".to_string(),
         "--unshare-pid".to_string(),
-        "--tmpfs".to_string(),
-        "/".to_string(),
+    ];
+    if request.full_disk_read {
+        args.extend(["--ro-bind".to_string(), "/".to_string(), "/".to_string()]);
+    } else {
+        args.extend(["--tmpfs".to_string(), "/".to_string()]);
+    }
+    args.extend([
         "--dev".to_string(),
         "/dev".to_string(),
         "--tmpfs".to_string(),
@@ -76,7 +81,7 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         "/run".to_string(),
         "--dir".to_string(),
         "/tmp/ace-home".to_string(),
-    ];
+    ]);
     // Network is always namespaced. Approved traffic reaches only the host proxy
     // through a private Unix socket bridge mounted below the masked /run.
     args.push("--unshare-net".to_string());
@@ -88,11 +93,15 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         PathBuf::from("/run"),
         PathBuf::from("/tmp"),
     ]);
-    let mut visible_roots = Vec::new();
+    let mut visible_roots = if request.full_disk_read {
+        vec![PathBuf::from("/")]
+    } else {
+        Vec::new()
+    };
     for root in PLATFORM_READ_ROOTS
         .iter()
         .map(PathBuf::from)
-        .filter(|path| path.exists())
+        .filter(|path| path.exists() && !request.full_disk_read)
     {
         append_bind(&mut args, &mut created_target_dirs, "--ro-bind", &root)?;
         visible_roots.push(root);
@@ -452,6 +461,7 @@ mod tests {
             readable_roots: vec![],
             readonly_roots: vec![temp.path().join(".git")],
             denied_roots: vec![],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
@@ -481,6 +491,7 @@ mod tests {
             readable_roots: vec![],
             readonly_roots: vec![],
             denied_roots: vec![],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
@@ -517,6 +528,7 @@ mod tests {
             readable_roots: vec![],
             readonly_roots: vec![],
             denied_roots: vec![],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
@@ -532,5 +544,58 @@ mod tests {
             .expect("cwd must not auto-expand policy");
 
         assert!(error.contains("writable root"), "{error}");
+    }
+
+    #[test]
+    fn full_disk_read_mounts_host_root_read_only_before_writable_and_denied_roots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let denied = tempfile::tempdir().unwrap();
+        let request = LinuxRunRequest {
+            command: vec!["/bin/true".to_string()],
+            cwd: workspace.path().to_path_buf(),
+            writable_roots: vec![workspace.path().to_path_buf()],
+            readable_roots: vec![],
+            readonly_roots: vec![],
+            denied_roots: vec![denied.path().to_path_buf()],
+            full_disk_read: true,
+            network_enabled: false,
+            network_rules: vec![],
+            allow_local_binding: false,
+            proxy_socket_dir: None,
+            max_output_bytes: 1024,
+            stdin: None,
+            env_overrides: Default::default(),
+            home_files: Default::default(),
+        };
+
+        let plan = build_args(&request).unwrap();
+        let workspace_path = workspace.path().canonicalize().unwrap();
+        let denied_path = denied.path().canonicalize().unwrap();
+        let root_read = plan
+            .args
+            .windows(3)
+            .position(|window| window == ["--ro-bind", "/", "/"])
+            .unwrap();
+        let workspace_write = plan
+            .args
+            .windows(3)
+            .position(|window| {
+                window[0] == "--bind"
+                    && window[1] == workspace_path.to_string_lossy()
+                    && window[2] == workspace_path.to_string_lossy()
+            })
+            .unwrap();
+        let denied_mask = plan
+            .args
+            .iter()
+            .rposition(|value| value == denied_path.to_string_lossy().as_ref())
+            .unwrap();
+
+        assert!(root_read < workspace_write);
+        assert!(workspace_write < denied_mask);
+        assert!(!plan
+            .args
+            .windows(2)
+            .any(|window| window == ["--tmpfs", "/"]));
     }
 }

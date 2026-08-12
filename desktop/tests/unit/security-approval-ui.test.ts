@@ -102,6 +102,7 @@ describe('security approval always-confirm (U2)', () => {
     await vi.advanceTimersByTimeAsync(0);
     const mw = (window as unknown as { Crew: MockCrew }).Crew;
     expect(mw.securityDecide).toHaveBeenCalledWith(expect.objectContaining({ decision: 'always' }));
+    expect(mw.securityDecide.mock.calls[0]?.[0]).not.toHaveProperty('alwaysArgvPrefix');
     cleanup();
   });
 

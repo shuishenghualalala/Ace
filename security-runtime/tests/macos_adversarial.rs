@@ -75,7 +75,7 @@ fn run_request(request: serde_json::Value) -> Vec<serde_json::Value> {
     stdout.read_line(&mut line).unwrap();
     assert!(line.contains("\"stdin_once\""));
     let envelope = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": token,
         "nonce": format!("macos-adversarial-{}", std::process::id()),
         "request": request,

@@ -30,8 +30,8 @@ from crew.security.models import (
 _FAKE_HELPER = r'''
 import base64, json, os, sys, time
 mode = sys.argv[1]
-version = 999 if mode == "bad-ready" else 2
-ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output", "readonly_roots"]}
+version = 999 if mode == "bad-ready" else 3
+ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output", "readonly_roots", "full_disk_read"]}
 if mode == "missing-ready-capability":
     ready["capabilities"] = ["stdin_once"]
 print(json.dumps(ready), flush=True)
@@ -54,7 +54,7 @@ if request["request"].get("op") == "classify_shell":
         "reason": "test",
     }
     print(json.dumps({
-        "version": 2, "nonce": request["nonce"], "seq": 0,
+        "version": 3, "nonce": request["nonce"], "seq": 0,
         "type": "classified", "classification": classification,
     }), flush=True)
     raise SystemExit
@@ -84,6 +84,7 @@ capabilities = {
     "filesystem_sandbox": mode != "missing-capability",
     "process_tree_cleanup": True,
     "managed_network": mode in {"network-ok", "windows-network-ok"},
+    "full_disk_read": bool(payload.get("full_disk_read")),
     "local_binding_control": mode == "local-binding-ok",
     "explicit_handle_inheritance": mode in {"windows-ok", "windows-network-ok"},
     "windows_restricted_token": mode in {"windows-ok", "windows-network-ok"},
@@ -93,7 +94,7 @@ capabilities = {
 }
 frames = [
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 0,
         "type": "started",
@@ -101,21 +102,21 @@ frames = [
         "capabilities": capabilities,
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 1,
         "type": "stdout",
         "data_b64": base64.b64encode(b"sandboxed").decode(),
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 2,
         "type": "stderr",
         "data_b64": base64.b64encode(b"notice").decode(),
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 3,
         "type": "completed",
@@ -140,7 +141,7 @@ elif mode == "premature-eof":
     frames = frames[:1]
 elif mode == "extra-after-terminal":
     frames.append({
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 4,
         "type": "completed",
@@ -148,7 +149,7 @@ elif mode == "extra-after-terminal":
     })
 elif mode == "error-before-start":
     frames = [{
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 0,
         "type": "error",
@@ -157,7 +158,7 @@ elif mode == "error-before-start":
     }]
 elif mode == "repeated-output":
     frames.insert(2, {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 2,
         "type": "stdout",
@@ -177,12 +178,12 @@ import base64, json, sys
 
 print(json.dumps({
     "type": "ready",
-    "version": 2,
-    "capabilities": ["stdin_once", "stream_output", "stdin_bidirectional", "readonly_roots"],
+    "version": 3,
+    "capabilities": ["stdin_once", "stream_output", "stdin_bidirectional", "readonly_roots", "full_disk_read"],
 }), flush=True)
 open_request = json.loads(sys.stdin.readline())
 print(json.dumps({
-    "version": 2,
+    "version": 3,
     "nonce": open_request["nonce"],
     "seq": 0,
     "type": "started",
@@ -192,6 +193,7 @@ print(json.dumps({
         "filesystem_sandbox": True,
         "process_tree_cleanup": True,
         "managed_network": False,
+        "full_disk_read": bool(open_request["request"].get("full_disk_read")),
     },
 }), flush=True)
 seq = 1
@@ -200,7 +202,7 @@ for line in sys.stdin:
     if request["op"] == "interactive_write":
         data = base64.b64decode(request["data_b64"])
         print(json.dumps({
-            "version": 2,
+            "version": 3,
             "nonce": open_request["nonce"],
             "seq": seq,
             "type": "stdout",
@@ -209,7 +211,7 @@ for line in sys.stdin:
         seq += 1
     elif request["op"] == "interactive_close":
         print(json.dumps({
-            "version": 2,
+            "version": 3,
             "nonce": open_request["nonce"],
             "seq": seq,
             "type": "completed",
@@ -627,6 +629,7 @@ async def test_broker_preserves_read_write_deny_and_network_semantics(tmp_path):
     ]
     assert runtime.kwargs["denied_roots"] == [tmp_path / "deny"]
     assert runtime.kwargs["readonly_roots"] == []
+    assert runtime.kwargs["full_disk_read"] is False
     assert runtime.kwargs["network_enabled"] is False
 
 

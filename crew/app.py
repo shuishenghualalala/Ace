@@ -36,7 +36,8 @@ from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
 from crew.security.approvals import ApprovalManager
-from crew.security.audit import SQLiteSecurityAudit
+from crew.security.audit import AuditEvent, SQLiteSecurityAudit
+from crew.security.context import SecurityContext
 from crew.security.grants import GrantRegistry
 from crew.security.rule_store import SQLiteRuleStore
 from crew.security.service import SecurityApprovalService
@@ -380,6 +381,26 @@ class CrewApp:
         self.security_approvals = ApprovalManager(self.security_grants)
         self.security_rules = SQLiteRuleStore(config.db_path, wal_enabled=config.sqlite_wal)
         self.security_audit = SQLiteSecurityAudit(config.db_path, wal_enabled=config.sqlite_wal)
+        for rule_id, os_user, owner_account_id, workspace_id in (
+            self.security_rules.migrated_legacy_rules
+        ):
+            self.security_audit.record(
+                AuditEvent.for_rule(
+                    SecurityContext(
+                        os_user=os_user,
+                        owner_account_id=owner_account_id,
+                        workspace_id=workspace_id,
+                        workspace_root=None,
+                        session_id="security-migration",
+                        request_id="security-migration",
+                        task_id="",
+                        cwd=None,
+                    ),
+                    rule_id=rule_id,
+                    action_type="rule_disabled",
+                    decision="migration_disabled_legacy_prefix",
+                )
+            )
         self.security_service = SecurityApprovalService(
             self.security_approvals,
             self.security_grants,

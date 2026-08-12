@@ -45,7 +45,7 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
     let request = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": token,
         "nonce": "windows-native-sandbox-nonce",
         "request": {

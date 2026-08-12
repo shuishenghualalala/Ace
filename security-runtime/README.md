@@ -20,7 +20,7 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 | 托管网络 | WFP 仅放行 loopback 代理 | 网络命名空间 + 用户态代理 | 仅放行本次随机 loopback 代理端口 |
 | 保护元数据 | 读取 ACE + deny-write ACE | bwrap 只读覆盖 | Seatbelt 写拒绝覆盖宽写根 |
 | 身份持久化 | DPAPI 加密凭证 | 不需要 | 不需要 |
-| 输出、stdin、协议鉴权 | 统一 v2 契约 | 同 | 同 |
+| 输出、stdin、协议鉴权 | 统一 v3 契约 | 同 | 同 |
 
 ### 1.1 Windows 后端要点
 
@@ -166,7 +166,7 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 ```
 
 脚本做三件事：`cargo build --release` → 复制到 `security-runtime/bin/` → 重算
-`runtime-manifest.json` 的 `source_hash`。协议 v2 不兼容 v1，Python 源码、runtime
+`runtime-manifest.json` 的 `source_hash`。协议 v3 增加全局只读能力标记，不兼容旧版协议；Python 源码、runtime
 二进制和 manifest 必须作为同一发布单元更新；不允许协议降级或 managed 失败后回退 host。
 
 ### 3.2 手动
@@ -308,7 +308,7 @@ ace-security-runtime --inner-seccomp ...              # Linux seccomp 内层（�
 
 ### 5.3 协议调用方
 
-`crew/security/runtime_client.py:NativeRuntimeClient.execute`：spawn runtime → 校验 v2
+`crew/security/runtime_client.py:NativeRuntimeClient.execute`：spawn runtime → 校验 v3
 `ready` 能力 → 发一个 `run` 请求 → 严格收集 `started/output/terminal/EOF` → 返回最终
 结果。一个 monotonic deadline 覆盖完整交换；timeout、cancel、协议错误和输出超限均回收
 helper/沙箱进程树。host 侧不直接碰沙箱账户/WFP/bwrap。
@@ -325,7 +325,7 @@ cargo test                                    # macOS（包含 Seatbelt 对抗�
 ```
 
 契约测试（`tests/`）覆盖：
-- `protocol.rs` — v2 事件形状、输入/帧限制、token/nonce 防重放。
+- `protocol.rs` — v3 事件形状、输入/帧限制、token/nonce 防重放。
 - `windows_acl.rs` — ACL lease 仅合并/回收 Ace 自己的 principal。
 - `windows_job.rs` — Job Object kill-on-close，Resume 前已 assign。
 - `windows_readiness.rs` — native gate 要求已安装 identity fixture。
@@ -336,7 +336,7 @@ cargo test                                    # macOS（包含 Seatbelt 对抗�
 - `linux_bwrap.rs` / `linux_adversarial.rs` — bwrap 隔离、一次性 stdin、环境变量、
   实时 stdout/stderr、共享输出上限与对抗用例；必须在 Linux 运行，Windows 交叉编译
   不能替代运行证据。
-- `macos_adversarial.rs` — Seatbelt 工作区写入、外部读取/写入拒绝和元数据可读不可写；
+- `macos_adversarial.rs` — Seatbelt 工作区写入、显式 denied 外部路径拒绝和元数据可读不可写；
   `tests/security/security_matrix.py --platform macos` 另测离线直连与规则代理。
 
 ---
@@ -366,7 +366,7 @@ security-runtime/
 2. **改源码必须重 build**：否则 prebuilt runtime 与源码漂移，漂移检测会让对应平台的 banner 报 stale。
 3. **WFP GUID 稳定**：`wfp.rs` 里 7 个 GUID 是安装期锚点，**不可改**（改了会导致旧过滤器残留）。
 4. **Windows runtime 以 UAC 运行**：code review 时改本目录的 PR 必须走严格审查——这是供应链信任的落点。
-5. **协议与产物原子升级**：v2 不提供 v1 兼容或 host fallback；修改帧语义必须提升
+5. **协议与产物原子升级**：v3 不提供旧版兼容或 host fallback；修改帧语义必须提升
    `PROTOCOL_VERSION`，同时更新 Python、Rust、测试、预编译产物和 manifest。
 
 ---

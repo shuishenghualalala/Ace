@@ -29,6 +29,14 @@ class PermissionProfileKind(StrEnum):
     DISABLED = "disabled"
 
 
+class SandboxPermissions(StrEnum):
+    """Per-command relationship with the conversation sandbox."""
+
+    USE_DEFAULT = "use_default"
+    WITH_ADDITIONAL_PERMISSIONS = "with_additional_permissions"
+    REQUIRE_ESCALATED = "require_escalated"
+
+
 class NetworkPolicy(StrEnum):
     RESTRICTED = "restricted"
     UNRESTRICTED = "unrestricted"
@@ -91,6 +99,7 @@ class PermissionProfile:
     network: NetworkPolicy = NetworkPolicy.RESTRICTED
     network_entries: tuple[NetworkEntry, ...] = ()
     allow_local_binding: bool = False
+    full_disk_read: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,10 +109,16 @@ class AdditionalPermissionProfile:
     filesystem: tuple[FilesystemEntry, ...] = ()
     network: tuple[NetworkEntry, ...] = ()
     allow_local_binding: bool = False
+    sandbox_permissions: SandboxPermissions = SandboxPermissions.USE_DEFAULT
 
     @property
     def empty(self) -> bool:
-        return not self.filesystem and not self.network and not self.allow_local_binding
+        return (
+            not self.filesystem
+            and not self.network
+            and not self.allow_local_binding
+            and self.sandbox_permissions is SandboxPermissions.USE_DEFAULT
+        )
 
 
 EMPTY_ADDITIONAL_PERMISSIONS = AdditionalPermissionProfile()
@@ -132,6 +147,7 @@ def serialize_additional_permissions(profile: AdditionalPermissionProfile) -> di
             for entry in profile.network
         ],
         "allow_local_binding": profile.allow_local_binding,
+        "sandbox_permissions": profile.sandbox_permissions.value,
     }
 
 
@@ -168,6 +184,9 @@ def deserialize_additional_permissions(payload: object) -> AdditionalPermissionP
         filesystem=filesystem,
         network=network,
         allow_local_binding=_optional_bool(payload, "allow_local_binding", False),
+        sandbox_permissions=SandboxPermissions(
+            str(payload.get("sandbox_permissions", SandboxPermissions.USE_DEFAULT.value))
+        ),
     )
 
 

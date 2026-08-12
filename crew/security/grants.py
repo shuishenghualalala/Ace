@@ -8,9 +8,14 @@ from dataclasses import dataclass
 from typing import Callable
 from uuid import uuid4
 
-from crew.security.actions import NormalizedAction
+from crew.security.actions import ActionKind, NormalizedAction
 from crew.security.context import SecurityContext
-from crew.security.models import EMPTY_ADDITIONAL_PERMISSIONS, AdditionalPermissionProfile
+from crew.security.models import (
+    EMPTY_ADDITIONAL_PERMISSIONS,
+    AdditionalPermissionProfile,
+    FilesystemAccess,
+    SandboxPermissions,
+)
 from crew.security.rules import RuleScope
 
 
@@ -23,6 +28,7 @@ class ExecutionGrant:
     grant_id: str
     scope: RuleScope
     action_digest: str
+    action_kind: ActionKind
     os_user: str
     owner_account_id: str
     workspace_id: str
@@ -55,6 +61,7 @@ class GrantRegistry:
             grant_id=uuid4().hex,
             scope=scope,
             action_digest=action.digest,
+            action_kind=action.kind,
             os_user=context.os_user,
             owner_account_id=context.owner_account_id,
             workspace_id=context.workspace_id,
@@ -137,10 +144,24 @@ class GrantRegistry:
                 if grant.expires_monotonic is not None and now > grant.expires_monotonic:
                     self._grants.pop(grant_id, None)
                     continue
-                if (
-                    grant.action_digest != action.digest
-                    or grant.additional_permissions != additional_permissions
-                    or not _context_matches(grant, context)
+                if not _context_matches(grant, context):
+                    continue
+                exact_action_required = (
+                    grant.scope is RuleScope.ONCE
+                    or grant.additional_permissions.empty
+                    or additional_permissions.empty
+                    or grant.additional_permissions.sandbox_permissions
+                    is SandboxPermissions.REQUIRE_ESCALATED
+                )
+                if exact_action_required and grant.action_digest != action.digest:
+                    continue
+                if exact_action_required and grant.additional_permissions != additional_permissions:
+                    continue
+                if not exact_action_required and grant.action_kind is not action.kind:
+                    continue
+                if not _permissions_cover(
+                    grant.additional_permissions,
+                    additional_permissions,
                 ):
                     continue
                 if grant.scope is RuleScope.ONCE:
@@ -167,3 +188,35 @@ def _same_session(grant: ExecutionGrant, context: SecurityContext) -> bool:
         and grant.workspace_id == context.workspace_id
         and grant.session_id == context.session_id
     )
+
+
+def _permissions_cover(
+    granted: AdditionalPermissionProfile,
+    requested: AdditionalPermissionProfile,
+) -> bool:
+    """Return whether a displayed session scope covers the requested subset."""
+    if granted.sandbox_permissions is not requested.sandbox_permissions:
+        return False
+    if requested.allow_local_binding and not granted.allow_local_binding:
+        return False
+    if any(entry not in granted.network for entry in requested.network):
+        return False
+    for requested_entry in requested.filesystem:
+        covered = False
+        for granted_entry in granted.filesystem:
+            try:
+                requested_entry.root.relative_to(granted_entry.root)
+            except ValueError:
+                continue
+            if requested_entry.access is FilesystemAccess.READ_WRITE:
+                covered = granted_entry.access is FilesystemAccess.READ_WRITE
+            else:
+                covered = granted_entry.access in {
+                    FilesystemAccess.READ,
+                    FilesystemAccess.READ_WRITE,
+                }
+            if covered:
+                break
+        if not covered:
+            return False
+    return True

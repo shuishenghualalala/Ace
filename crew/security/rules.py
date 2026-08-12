@@ -81,7 +81,9 @@ class ActionRule:
             return False
         if self.exact_digest:
             return action.digest == self.exact_digest
-        if self.kind is not ActionKind.EXEC or not self.argv_prefix:
+        # Legacy broad allow prefixes no longer carry authority. Persistent deny
+        # prefixes remain active so escalation cannot bypass an owner block rule.
+        if self.decision is not RuleDecision.DENY:
             return False
         return (
             action.cwd == self.cwd

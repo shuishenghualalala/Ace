@@ -569,12 +569,14 @@ mod tests {
             readable_roots: vec![],
             readonly_roots: vec![],
             denied_roots: vec![],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
             max_output_bytes: 1024,
             stdin: None,
             env_overrides: Default::default(),
+            home_files: Default::default(),
         };
 
         assert_eq!(

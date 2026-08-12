@@ -157,10 +157,10 @@
     <h1>Ace 安全系统</h1>
     <div class="subtitle">能力、信任边界与完整执行链 · 面向维护者的单页架构导读</div>
 
-    <p class="lead">Ace 的安全模块不是一个“危险命令关键词列表”，而是一条由宿主掌握的执行链：先从可信会话状态构造权限上下文，再对具体动作做授权判断。每次询问与替我审批会把命令交给原生运行组件，由操作系统限制文件、网络和进程能力；用户明确选择完全访问权限时则以宿主用户权限执行，仅保留不可覆盖的破坏性 hardline、显式拒绝规则、进程回收与审计。</p>
+    <p class="lead">Ace 的安全模块不是一个“危险命令关键词列表”，而是一条由宿主掌握的执行链：先从可信会话状态构造权限上下文，再对具体动作做授权判断。请求批准与替我审批会把命令交给原生运行组件，由操作系统限制文件、网络和进程能力；用户明确选择完全访问权限时则以宿主用户权限执行，仅保留不可覆盖的破坏性 hardline、显式拒绝规则、进程回收与审计。</p>
 
     <div class="callout ok">
-      <strong>先记住一个结论：</strong>每次询问与替我审批使用受管原生沙箱；完全访问权限是用户显式选择的宿主权限模式。完全访问不逐项申请目录或网络权限，但文件系统根删除、磁盘格式化、无条件清空数据库、关机等永久 hardline 仍不能执行。
+      <strong>先记住一个结论：</strong>请求批准与替我审批使用受管原生沙箱；完全访问权限是用户显式选择的宿主权限模式。完全访问不逐项申请目录或网络权限，但文件系统根删除、磁盘格式化、无条件清空数据库、关机等永久 hardline 仍不能执行。
     </div>
 
     <h2 id="overview">1. 十分钟全景</h2>
@@ -188,7 +188,7 @@
                          SecurityExecutionBroker
                                     │
                                     ▼
-                    每任务 Native Runtime（协议 v2）
+                    每任务 Native Runtime（协议 v3）
                                     │
                     ┌───────────────┼───────────────┐
                     ▼               ▼               ▼
@@ -199,9 +199,9 @@
 
     <h3>1.1 当前已经提供的能力</h3>
     <div class="cards">
-      <div class="card"><strong>会话级安全模式</strong><p>每次询问、替我审批、完全访问权限；模式变化会使旧的待审批失效，并停止仍使用旧启动快照的活动 turn。</p></div>
-      <div class="card"><strong>动作与权限审批</strong><p>支持仅一次、当前会话、始终允许、拒绝；审批同时绑定精确动作、额外文件/网络权限与 owner/workspace/session/task。</p></div>
-      <div class="card"><strong>原生文件沙箱</strong><p>前两档默认允许工作空间，拒绝 Ace 数据目录与数据库；项目元数据由结构化工具和各平台后端分层保护。</p></div>
+      <div class="card"><strong>会话级安全模式</strong><p>请求批准、替我审批、完全访问权限；模式变化会使旧的待审批失效，并停止仍使用旧启动快照的活动 turn。</p></div>
+      <div class="card"><strong>动作与权限审批</strong><p>支持仅这一次、本次对话、始终允许此操作、拒绝；审批同时绑定精确动作、额外文件/网络权限与 owner/workspace/session/task。</p></div>
+      <div class="card"><strong>原生文件沙箱</strong><p>前两档采用广泛只读基线，工作空间和系统临时目录可写；Ace 私有数据与项目元数据由结构化工具和各平台后端分层保护。</p></div>
       <div class="card"><strong>受管网络</strong><p>命令默认不能直接出网；联网按精确主机、端口、协议进入代理，并执行私网与元数据地址检查。</p></div>
       <div class="card"><strong>进程生命周期</strong><p>超时、取消、协议错误和输出超限都会回收 helper 与子进程树，避免命令脱离会话继续运行。</p></div>
       <div class="card"><strong>安全审计</strong><p>记录授权来源、动作摘要、规则生命周期和稳定错误码；按 owner 隔离、敏感信息脱敏、默认保留 30 天。</p></div>
@@ -218,7 +218,7 @@
         <tr><td>模型伪造工作空间、账号或当前目录</td><td>SecurityContext 从 Gateway 认证信息、owner 级 workspace store 和 host contextvars 重建。</td></tr>
         <tr><td>审批 A，执行成 B</td><td>动作规范化后绑定 argv、原始 shell 文本、cwd 等关键事实；额外文件/网络权限独立绑定到请求、grant、永久规则和最终启动快照。</td></tr>
         <tr><td>命令绕过 Python 工具检查</td><td>所有受管进程最终进入原生运行组件，操作系统边界不依赖命令名称。</td></tr>
-        <tr><td>子进程读取工作空间外秘密</td><td>默认只授予明确根目录；无匹配权限即拒绝，不把宿主 HOME 和环境整体继承进去。</td></tr>
+        <tr><td>子进程修改工作空间外文件或读取 Ace 私有数据</td><td>宿主文件系统默认只读，写入只授予工作空间、临时目录和明确获批路径；Ace 私有数据由更具体 deny 重新覆盖。</td></tr>
         <tr><td>进程直接联网绕过业务规则</td><td>沙箱只允许到本次受管代理的路径；代理再检查目标并固定 DNS 解析结果。</td></tr>
         <tr><td>审批被重放或跨会话复用</td><td>审批请求有 nonce、TTL、精确上下文和一次性消费语义；once grant 使用后立即删除。</td></tr>
         <tr><td>替换随应用或仓库提供的安全 helper</td><td>运行前校验固定路径；产物 manifest 存在时强制核对目标平台/架构和二进制 SHA-256。</td></tr>
@@ -228,18 +228,18 @@
     <div class="callout warn"><strong>威胁模型边界：</strong>原生运行组件共享宿主内核，它是会话级进程隔离，不是虚拟机，也不承诺抵御内核漏洞、管理员/root 权限攻击或已控制宿主账号的攻击者。</div>
 
     <h2 id="modes">3. 三种模式：审批策略与执行边界</h2>
-    <p>界面上的模式不是只换一个提示频率。每次询问与替我审批编译为 <code>MANAGED</code> profile；完全访问权限编译为 <code>DISABLED</code> profile，由宿主直接执行，同时继续经过终端永久 hardline、进程生命周期和审计链路。</p>
+    <p>界面上的模式不是只换一个提示频率。请求批准与替我审批编译为 <code>MANAGED</code> profile；完全访问权限编译为 <code>DISABLED</code> profile，由宿主直接执行，同时继续经过终端永久 hardline、进程生命周期和审计链路。</p>
 
     <table>
       <thead><tr><th>模式</th><th>命令审批</th><th>文件基础权限</th><th>始终保留的边界</th></tr></thead>
       <tbody>
-        <tr><td><b>每次询问</b></td><td>每条终端命令和每次结构化文件修改都询问；只读操作在基础权限内直接执行。</td><td>当前工作空间是基础范围；空间外读写仍需要精确授权。</td><td>原生沙箱、受管网络、保护路径、进程树回收与永久 hardline。</td></tr>
-        <tr><td><b>替我审批</b></td><td>工作空间内命令和文件操作自动执行；只有额外文件/网络权限或本地端口监听询问。</td><td>与“每次询问”相同；空间外权限批准后作为精确 overlay 传给本次原生启动。</td><td>启用前要求原生文件沙箱 live probe 通过；永久 hardline 仍拒绝。</td></tr>
+        <tr><td><b>请求批准</b></td><td>普通文件读取无需询问；每条 Agent 终端命令、写入动作和网络访问都需确认。</td><td>宿主文件系统广泛只读；工作空间与系统临时目录可写，空间外写入需精确授权。</td><td>原生沙箱、受管网络、保护路径、进程树回收与永久 hardline。</td></tr>
+        <tr><td><b>替我审批</b></td><td>沙箱内命令、工作空间/临时目录操作和公开 HTTP 自动放行；空间外写入、私网、额外网络能力与脱沙箱仍询问。</td><td>与“请求批准”相同；获批路径或网络权限作为 overlay 进入本次原生启动。</td><td>启用前要求原生文件沙箱 live probe 通过；永久 hardline 仍拒绝。</td></tr>
         <tr><td><b>完全访问权限</b></td><td>普通动作不询问，命令继承当前登录用户权限。</td><td>不限制为工作空间或用户 HOME；文件和网络使用宿主权限。</td><td>永久 hardline、显式永久拒绝、进程树回收、输出脱敏和审计。</td></tr>
       </tbody>
     </table>
 
-    <p>完全访问权限只作用于当前会话。在空白输入框中选择时，它会作为一次性预设交给即将创建的对话，创建成功后立即回退为每次询问，不会被后续新会话静默继承。模式改变后，Gateway 会撤销旧模式下尚未处理的审批；已经由用户明确授予的 session grant 会保留到真正结束会话，登出则按 owner 清理所有临时权限。</p>
+    <p>完全访问权限只作用于当前会话。在空白输入框中选择时，它会作为一次性预设交给即将创建的对话，创建成功后立即回退为请求批准，不会被后续新会话静默继承。模式改变后，Gateway 会撤销旧模式下尚未处理的审批；已经由用户明确授予的 session grant 会保留到真正结束会话，登出则按 owner 清理所有临时权限。</p>
 
     <h2 id="authority">4. 授权模型：动作、规则与临时能力</h2>
 
@@ -275,9 +275,9 @@ once / session 临时 grant
     <table>
       <thead><tr><th>选择</th><th>实际产生的权限</th><th>何时失效</th></tr></thead>
       <tbody>
-        <tr><td>仅一次</td><td>内存中的 exact-action grant；若审批包含额外权限，grant 同时携带完全相同的 overlay。</td><td>成功匹配一次后消费，或审批 TTL 到期。</td></tr>
-        <tr><td>当前会话</td><td>绑定 OS user、owner、workspace、session、动作摘要和权限 overlay 的内存 grant。</td><td>会话真正结束、登出或 Gateway 重启。</td></tr>
-        <tr><td>始终允许</td><td>写入 SQLite 的 owner/workspace 级不可变规则，动作和额外权限共同持久化并共同匹配。shell 命令使用完整动作摘要；结构化直接 argv 才能使用 token prefix。</td><td>用户在安全中心禁用或删除。</td></tr>
+        <tr><td>仅这一次</td><td>当前完整动作和已展示权限的单次 grant。</td><td>成功匹配一次后消费，或审批 TTL 到期。</td></tr>
+        <tr><td>本次对话</td><td>文件目录覆盖后代、文件仅覆盖自身、网络按精确目标复用；脱沙箱仍绑定完整命令与 cwd。</td><td>会话真正结束、登出或 Gateway 重启；切换模式不会撤销。</td></tr>
+        <tr><td>始终允许此操作</td><td>持久保存完整规范化动作；旧 exec-prefix 允许规则停用，尾随参数变化必须重新批准。</td><td>按 owner/workspace 隔离，直到用户禁用或删除。</td></tr>
         <tr><td>拒绝</td><td>不创建权限，并建立短暂拒绝冷却。</td><td>冷却结束后可以重新发起新审批。</td></tr>
       </tbody>
     </table>
@@ -285,15 +285,15 @@ once / session 临时 grant
     <p>审批请求本身有随机 nonce、有效期、上下文、动作摘要和额外权限。Desktop 会逐条显示额外文件根、访问级别、精确网络目标与本地监听能力；提交决定时必须同时满足登录 owner、workspace、session、task 与 nonce。动作相同但权限范围不同的请求不会复用同一个 pending、grant 或永久规则。</p>
 
     <h2 id="filesystem">5. 文件系统：结构化工具与任意命令的双层边界</h2>
-    <p>文件访问存在两条路径：内置 file/patch/search 工具先走 Python 结构化策略；每次询问与替我审批下的 shell 或外部适配器最终走原生运行组件。前者能理解具体“读、写、补丁、删除”，后者负责防止任意子进程绕开工具层。完全访问权限不应用下述受管目录边界，只保留文件系统根写入与终端永久 hardline。</p>
+    <p>文件访问存在两条路径：内置 file/patch/search 工具先走 Python 结构化策略；请求批准与替我审批下的 shell 或外部适配器最终走原生运行组件。前者能理解具体“读、写、补丁、删除”，后者负责防止任意子进程绕开工具层。完全访问权限不应用下述受管目录边界，只保留文件系统根写入与终端永久 hardline。</p>
 
     <h3>5.1 基础权限</h3>
     <ul>
       <li>项目会话把项目根设为可读写根；未选择项目的普通会话使用 owner 隔离的 <code>task_workspaces/&lt;workspace-id&gt;</code> 作为有效工作目录和可写根。系统提示会把这个 host 生成的 cwd 明确标为可信起点；沙箱私有 <code>HOME</code>/<code>USERPROFILE</code> 只用于隔离，不可用来反推工作空间。cwd 必须位于该根内，不能再出现“进程 cwd 已落到任务目录、沙箱却没有可写根”的断链。</li>
       <li>路径在判断前会解析为最终规范路径；符号链接、junction 和 TOCTOU 交换由文件工具与平台测试覆盖。</li>
       <li>写文件系统根目录被永久拒绝。</li>
-      <li>在每次询问与替我审批中，Ace 数据目录、security DB 及其 WAL/SHM/journal 属于不可升级拒绝。</li>
-      <li>在每次询问与替我审批中，workspace 下的 <code>.git</code>、<code>.agents</code>、<code>.crew</code> 是不可升级的只读元数据；结构化文件工具和任意受管 shell 都能读取，但不能创建、修改、重命名或删除。</li>
+      <li>在请求批准与替我审批中，Ace 数据目录、security DB 及其 WAL/SHM/journal 属于不可升级拒绝。</li>
+      <li>在请求批准与替我审批中，workspace 下的 <code>.git</code>、<code>.agents</code>、<code>.crew</code> 是不可升级的只读元数据；结构化文件工具和任意受管 shell 都能读取，但不能创建、修改、重命名或删除。</li>
     </ul>
 
     <h3>5.2 权限合并规则</h3>
@@ -304,7 +304,7 @@ once / session 临时 grant
     </div>
 
     <h2 id="execution">6. 进程执行：所有受管命令汇聚到一个边界</h2>
-    <p><code>compile_process_launch</code> 在每个 turn 入口根据可信上下文编译一次 <code>ProcessLaunch</code>。审批通过后，命中的 grant/rule 把额外权限写入该启动快照；前台、后台进程和 captured adapter 都把同一 overlay 交给 Native Runtime。模型不能传入 helper 路径，也不能自行选择宿主裸跑。</p>
+    <p><code>compile_process_launch</code> 在每个 turn 入口根据可信上下文编译一次 <code>ProcessLaunch</code>。审批通过后，命中的 grant/rule 把额外权限写入该启动快照；前台、后台进程和 captured adapter 都把同一 overlay 交给 Native Runtime。终端还支持 <code>use_default</code>、<code>with_additional_permissions</code> 与 <code>require_escalated</code>：最后一种必须提供原因并单独批准，只让当前完整命令脱离沙箱，不会切换整个对话模式。</p>
     <p>默认任务目录可能位于受保护运行时 home 的更深层。Broker 会在前台和后台共用同一个文件计划编译器：当一个 deny 是已认证工作区或已激活 Skill 只读根的严格祖先时，不把这个冲突的祖先 deny 交给原生后端；精确 deny、工作区内受保护元数据和 deny 的子路径仍保留。各后端保持 default-deny，因此该 carve-out 不会让同级凭据、数据库或其他 owner 目录变成可见资源。</p>
 
     <pre><code>SecurityContext + 会话模式
@@ -398,7 +398,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     </div>
 
     <h3>7.1 搜索、网页提取、Wiki URL 与灵感 Automation</h3>
-    <p><code>web_search</code>、<code>web_extract</code>、Wiki URL 抓取和灵感 <code>http_json</code> Automation 共用 <code>crew/security/outbound.py</code>：只接受公开 HTTP(S)，拒绝 URL 凭据、localhost、私网、链路本地与保留地址；每次重定向重新校验，并只连接已经校验为公网的数字地址，避免 DNS 检查后再次解析。响应体有硬大小上限。网页工具和 Agent 手动 Automation 还会把精确 host/port/protocol 交给安全服务：每次询问模式等待 owner 决定，替我审批和完全访问权限可自动审核公开目标，跨域重定向逐目标授权，所有决定进入网络审计。完全访问不会改变某个专用工具自身“仅公网 URL”的输入契约，但可以通过宿主命令使用完整网络能力。灵感预览响应同时设置 <code>connect-src 'none'</code>，生成页面不能另开一条未审核的 Chromium 联网旁路。</p>
+    <p><code>web_search</code>、<code>web_extract</code>、Wiki URL 抓取和灵感 <code>http_json</code> Automation 共用 <code>crew/security/outbound.py</code>：只接受公开 HTTP(S)，拒绝 URL 凭据、localhost、私网、链路本地与保留地址；每次重定向重新校验，并只连接已经校验为公网的数字地址，避免 DNS 检查后再次解析。响应体有硬大小上限。网页工具和 Agent 手动 Automation 还会把精确 host/port/protocol 交给安全服务：请求批准模式等待 owner 决定，替我审批和完全访问权限可自动审核公开目标，跨域重定向逐目标授权，所有决定进入网络审计。完全访问不会改变某个专用工具自身“仅公网 URL”的输入契约，但可以通过宿主命令使用完整网络能力。灵感预览响应同时设置 <code>connect-src 'none'</code>，生成页面不能另开一条未审核的 Chromium 联网旁路。</p>
 
     <h3>7.2 进程内 HTTP 支持上游代理级联</h3>
     <p><code>outbound.py</code> 的安全口径与 Native Runtime 受管代理一致：<strong>安全意味着“经过策略判断”，不是“直连目标”</strong>。判断通过后，默认把流量级联到用户已有的上游代理，由代理负责到达目标；没有上游代理时才直连。代理解析优先级（高到低）：调用方显式传入 → 配置 <code>network.upstream_proxy</code>（<code>load_config</code> 加载后注入为进程级默认）→ 环境变量 <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>/<code>ALL_PROXY</code>（大小写都读）。支持 <code>http://</code>、<code>https://</code>、<code>socks5://</code>、<code>socks5h://</code>，纯标准库实现，三平台行为一致。</p>
@@ -411,16 +411,16 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     </ul>
 
     <h3>7.3 浏览器上传边界</h3>
-    <p>上传和拖放先按结构化文件读取策略授权源路径；工作目录外文件会进入同一审批流。批准后，Python 在账号浏览器目录下创建一次性 <code>approved-uploads/&lt;nonce&gt;</code>，安全快照普通文件或目录，拒绝符号链接、junction/reparse point 与特殊文件，并执行总字节和条目数护栏。Electron Host 再独立验证暂存根、目标 realpath 和整棵目录；Playwright 操作结束后立即清理该次暂存区。Host 不再接受工作目录原始路径，也不再使用与 Playwright 能力不一致的 256 个顶层路径硬限制。</p>
+    <p>上传和拖放先按结构化文件读取策略授权源路径；受管模式的广泛只读基线允许读取工作目录外的普通文件，但 Ace 私有路径与显式拒绝路径仍不可见。读取通过后，Python 在账号浏览器目录下创建一次性 <code>approved-uploads/&lt;nonce&gt;</code>，安全快照普通文件或目录，拒绝符号链接、junction/reparse point 与特殊文件，并执行总字节和条目数护栏。Electron Host 再独立验证暂存根、目标 realpath 和整棵目录；Playwright 操作结束后立即清理该次暂存区。Host 不再接受工作目录原始路径，也不再使用与 Playwright 能力不一致的 256 个顶层路径硬限制。</p>
 
     <h2 id="protocol">8. 原生协议与运行组件完整性</h2>
 
     <h3>8.1 每任务、经认证、可验证的 stdio 协议</h3>
-    <p>Gateway 每次执行都会启动新的 helper，通过 stdio 交换 NDJSON；helper 不监听网络端口。协议版本为 v2：</p>
+    <p>Gateway 每次执行都会启动新的 helper，通过 stdio 交换 NDJSON；helper 不监听网络端口。协议版本为 v3：</p>
 
     <pre><code>helper 启动
   └─ 从 ACE_SECURITY_RUNTIME_TOKEN 读取随机启动令牌（至少 32 字节）
-  └─ ready { version: 2, capabilities: [stdin_once, stream_output] }
+  └─ ready { version: 3, capabilities: [stdin_once, stream_output, full_disk_read] }
 
 host 请求
   └─ { version, token, nonce, request }
@@ -460,13 +460,14 @@ helper 响应
     </table>
 
     <h3>9.1 Linux：namespace + bubblewrap + seccomp</h3>
-    <p>Linux 以空根和显式 bind 构建文件视图，开启 user、PID 与 network namespace，挂载受控 <code>/proc</code>，并设置父进程退出联动。内层在执行命令前应用 <code>no_new_privs</code> 与 seccomp。系统 bwrap 优先；随包 bwrap 必须通过摘要和 fd 固定校验。WSL1 缺少所需 namespace 能力，因此直接拒绝而不是弱化运行。</p>
+    <p>Linux 的 workspace-write profile 先把宿主根目录 <code>ro-bind</code> 为只读，再覆盖工作空间与临时目录的可写 bind，最后重新覆盖项目元数据与 Ace 私有 deny；同时开启 user、PID 与 network namespace，挂载受控 <code>/proc</code>，并设置父进程退出联动。内层在执行命令前应用 <code>no_new_privs</code> 与 seccomp。WSL1 缺少所需 namespace 能力，因此直接拒绝。</p>
 
     <h3>9.2 Windows：低权限身份 + ACL + WFP + Job</h3>
+    <p>Windows 不递归修改磁盘根 ACL。Host 枚举 Windows、Program Files、ProgramData、工作目录与用户目录中非敏感顶层路径作为只读根，并排除 <code>.ssh</code>、<code>.aws</code>、<code>.azure</code>、<code>.kube</code>、<code>.docker</code>、<code>.gnupg</code>、<code>.config</code> 等目录；额外读取或写入通过精确 ACL lease 添加，并在进程结束时清理。</p>
     <p>安装期创建 offline/online 两个技术账户并持久化受保护身份状态。每次命令在跨进程 mutex 内下发临时 ACL lease，使用 restricted token 和 capability SID 启动，只继承显式句柄，再放入 kill-on-close Job Object。可写根内的受保护元数据对账户和 capability SID 都使用“允许读 + 拒绝写/删除”的窄 ACL，避免父目录的写权限向下继承成修改能力。offline 账户不能联网；online 账户由 WFP 只允许到运行组件固定的本机代理端口。命令结束后先关闭代理，再回收 ACL lease。</p>
 
     <h3>9.3 macOS：Seatbelt deny-default profile</h3>
-    <p>macOS 每次运行生成独立 Seatbelt profile，并通过系统 <code>/usr/bin/sandbox-exec</code> 启动。profile 从 <code>deny default</code> 开始，只开放系统运行所需读取、明确 readable/writable roots、命令本身和私有 HOME；对这些根的父目录只开放 <code>file-read-metadata</code>，让 Node 等运行时可以 realpath/lstat 穿行到已授权根，但不能读取父目录中的文件内容。随后对 <code>readonly_roots</code> 的目标本身与全部子路径拒绝写操作，因此相对路径、绝对路径以及尚未创建的元数据目录都不能穿过父级 writable allow。用户路径通过 <code>-D</code> 参数进入策略，避免路径内容成为 profile 语法。在线模式只允许本次代理的精确 loopback 端口；离线模式没有出网 allow。helper 为子命令建立独立进程组，取消或退出时整体清理。</p>
+    <p>macOS 每次运行生成独立 Seatbelt profile，并通过系统 <code>/usr/bin/sandbox-exec</code> 启动。workspace-write profile 开放全局文件读取，但文件写入只开放工作空间、临时目录和精确获批根；随后对 <code>readonly_roots</code> 与 denied roots 重新施加更具体的拒绝。用户路径通过 <code>-D</code> 参数进入策略，避免路径内容成为 profile 语法。在线模式只允许本次代理的精确 loopback 端口；离线模式没有出网 allow。helper 为子命令建立独立进程组，取消或退出时整体清理。</p>
 
     <h2 id="control-plane">10. 安全控制面：为什么普通网页不能替用户授权</h2>
     <p>安全中心能切换模式、处理审批、启停/删除永久规则、查看和导出审计。这些接口不仅要求 Gateway 登录态，还要求由 Electron main 持有的实例密钥签发 Desktop security proof。</p>
@@ -509,7 +510,7 @@ helper 响应
     </ul>
 
     <h2 id="capabilities">12. 安全中心展示的是实测能力，不是文件存在</h2>
-    <p><code>/api/security/capabilities</code> 不会因为 helper 文件存在就声称沙箱有效。Gateway 会创建临时 workspace、外部 secret、marker 和带哨兵内容的 <code>.git/config</code>，让 helper 同时尝试“写入允许目录”“读取禁止目录”和“改写应当可读但不可写的元数据”。只有 marker 成功写入、secret 未泄漏、元数据哨兵保持原样且能力帧有效，文件沙箱才通过 live probe；联网能力使用独立的受管网络探针。</p>
+    <p><code>/api/security/capabilities</code> 不会因为 helper 文件存在就声称沙箱有效。Gateway 会创建临时 workspace、项目外普通文件、项目外写入 marker 和带哨兵内容的 <code>.git/config</code>，让 helper 同时尝试“写入允许目录”“读取项目外普通文件”“写入项目外路径”和“改写应当可读但不可写的元数据”。只有工作区 marker 成功写入、项目外普通读取成功、项目外写入失败、元数据哨兵保持原样且能力帧声明 <code>full_disk_read</code>，文件沙箱才通过 live probe；联网能力使用独立的受管网络探针。</p>
 
     <p>安全中心据此展示：</p>
     <ul>
@@ -529,7 +530,7 @@ helper 响应
         <tr><td>浏览器网络</td><td>Chromium 全部 HTTP、HTTPS 与 WebSocket 连接强制经过认证的 DNS-pinning policy proxy；私网与元数据地址默认拒绝。</td><td>需要访问本机开发服务时，必须通过 <code>allowed_private_hosts</code>/<code>allowed_private_cidrs</code> 做部署级显式例外。</td></tr>
         <tr><td>普通/Wiki 工作目录</td><td>没有项目根时使用 owner 隔离任务目录作为 cwd 与可写根；Wiki Agent 同样消费有效工作目录。</td><td>Host 拥有的更具体任务根可以从宽泛运行时目录保护中 carve out；数据库、身份、审计和仓库元数据的更具体不可升级保护仍优先。</td></tr>
         <tr><td>网页与 Wiki 出站</td><td>搜索、提取和 Wiki URL 统一做公开地址校验、重定向复检、DNS 地址固定、响应上限与网络审批/审计。</td><td>不把应用内 HTTP 请求当成“不是命令所以无需审核”；也不允许它访问本机或内网服务。</td></tr>
-        <tr><td>浏览器上传</td><td>源文件先走读取授权，再复制到账号隔离的一次性审批暂存区；Host 只接受该根下的普通文件/安全目录。</td><td>批准工作目录外文件后可以正常上传，但授权不会扩大成 Browser Host 可读取任意宿主路径。</td></tr>
+        <tr><td>浏览器上传</td><td>源文件先走广泛只读与保护路径判断，再复制到账号隔离的一次性暂存区；Host 只接受该根下的普通文件/安全目录。</td><td>工作目录外普通文件可以读取并上传；Ace 私有路径和显式拒绝路径仍不可见，Host 也不能直接读取任意宿主路径。</td></tr>
         <tr><td>替我审批</td><td>基础沙箱内的普通终端命令自动执行；危险动作、权限扩张和监听端口仍询问。</td><td>自动执行只省去不必要的提示，不扩大文件或网络权限。</td></tr>
         <tr><td>Codex / Claude Code 外援</td><td>受管模式使用 Native Runtime 内的一次性 captured 兼容路径，并为精确模型服务目标单独审批；不会回退到宿主裸进程。</td><td>基础回答与工作目录内操作可用；结构化工具事件、MCP、恢复与双向流能力在兼容路径中明确降级。</td></tr>
         <tr><td>项目元数据</td><td>三平台受管 shell 都实现可读、不可写的 <code>readonly_roots</code>；旧 helper 不声明能力会失败关闭。</td><td>保护只覆盖进入 Native Runtime 的受管进程，不扩展成宿主上所有进程的系统级防篡改。</td></tr>
@@ -552,7 +553,7 @@ helper 响应
         <tr><td>crew/security/service.py</td><td>规则/grant/审批/审计的判定顺序与并发事务边界。</td></tr>
         <tr><td>crew/security/approvals.py<br>crew/security/grants.py<br>crew/security/rules.py</td><td>审批 nonce/TTL、临时能力、永久规则匹配。</td></tr>
         <tr><td>crew/security/launch.py<br>crew/security/broker.py</td><td>编译 ProcessLaunch，把 profile 翻译为唯一的原生执行请求。</td></tr>
-        <tr><td>crew/security/runtime_client.py</td><td>helper 完整性检查、v2 协议、能力验证、输出限制与进程回收。</td></tr>
+        <tr><td>crew/security/runtime_client.py</td><td>helper 完整性检查、v3 协议、能力验证、输出限制与进程回收。</td></tr>
         <tr><td>crew/security/outbound.py<br>crew/tools/web_tools.py</td><td>应用内公开 HTTP(S) 校验、固定连接、搜索结果解析与网络审批。</td></tr>
         <tr><td>crew/agent/external/cli_adapter.py<br>crew/agent/external/codex_adapter.py</td><td>外部智能体受管一次性兼容、provider 网络 overlay、原生可执行文件解析与能力降级。</td></tr>
         <tr><td>crew/browser/manager.py<br>desktop/src/main/browser-host.ts</td><td>浏览器源文件授权、安全上传暂存、Host 二次校验与清理。</td></tr>

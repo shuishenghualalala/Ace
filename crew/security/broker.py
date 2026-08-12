@@ -327,6 +327,7 @@ class SecurityExecutionBroker:
             "readable_roots": readable,
             "readonly_roots": readonly,
             "denied_roots": denied,
+            "full_disk_read": request.permission_profile.full_disk_read,
             "network_enabled": bool(network_rules),
             "network_rules": network_rules,
             "allow_local_binding": (

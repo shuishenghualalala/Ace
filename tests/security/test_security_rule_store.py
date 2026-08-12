@@ -36,6 +36,32 @@ def test_expanding_rule_creates_new_record_instead_of_mutating(tmp_path: Path) -
     store.close()
 
 
+def test_reopen_disables_legacy_allow_prefix_rules(tmp_path: Path) -> None:
+    db = tmp_path / "crew.db"
+    store = SQLiteRuleStore(db)
+    legacy = ActionRule.exec_prefix(["git", "status"], cwd=tmp_path)
+    store.create(
+        legacy,
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    )
+    store.close()
+
+    reopened = SQLiteRuleStore(db)
+    assert reopened.list(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    ) == []
+    assert reopened.list_with_status(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    ) == [(legacy, False)]
+    reopened.close()
+
+
 def test_rule_round_trip_keeps_redacted_approval_description(tmp_path: Path) -> None:
     store = SQLiteRuleStore(tmp_path / "crew.db")
     rule = replace(

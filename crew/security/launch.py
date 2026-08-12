@@ -25,6 +25,7 @@ from crew.security.models import (
     ConversationPermissionMode,
     PermissionProfile,
     PermissionProfileKind,
+    SandboxPermissions,
 )
 from crew.security.policy import settings_for_mode
 from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
@@ -165,6 +166,12 @@ async def execute_captured(
         allow_local_binding=(
             launch.additional_permissions.allow_local_binding
             or additional_permissions.allow_local_binding
+        ),
+        sandbox_permissions=(
+            additional_permissions.sandbox_permissions
+            if additional_permissions.sandbox_permissions
+            is not SandboxPermissions.USE_DEFAULT
+            else launch.additional_permissions.sandbox_permissions
         ),
     )
     if launch.managed:
@@ -463,6 +470,14 @@ def compile_process_launch(
     """
     protected = _protected_entries(context, db_path)
     profile = settings_for_mode(mode, context.workspace_root, deny_entries=protected).profile
+    if (
+        additional_permissions.sandbox_permissions
+        is SandboxPermissions.REQUIRE_ESCALATED
+    ):
+        profile = PermissionProfile(
+            kind=PermissionProfileKind.DISABLED,
+            network=profile.network,
+        )
     from crew.agent.skills import get_builtin_skills_dir
     from crew.state.home import managed_runtime_read_roots
 
@@ -476,6 +491,8 @@ def compile_process_launch(
             if (root := Path(value).expanduser()).exists()
         ),
     ]
+    if os.name == "nt" and profile.full_disk_read:
+        trusted_roots.extend(_windows_full_disk_read_roots())
     trusted_roots = list(dict.fromkeys(trusted_roots))
     return ProcessLaunch(
         profile=profile,
@@ -493,6 +510,49 @@ def compile_process_launch(
         approval_service=approval_service,
         additional_permissions=additional_permissions,
     )
+
+
+_WINDOWS_SENSITIVE_TOP_LEVEL = frozenset(
+    {
+        ".ssh",
+        ".tsh",
+        ".brev",
+        ".gnupg",
+        ".aws",
+        ".azure",
+        ".kube",
+        ".docker",
+        ".config",
+        ".npm",
+        ".pki",
+        ".terraform.d",
+        ".crew",
+        ".ace",
+    }
+)
+
+
+def _windows_full_disk_read_roots() -> tuple[Path, ...]:
+    """Enumerate precise Windows read roots without recursive drive ACL changes."""
+    roots: list[Path] = []
+    for name in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        value = os.environ.get(name)
+        if value:
+            root = Path(value).expanduser().resolve(strict=False)
+            if root.exists() and root not in roots:
+                roots.append(root)
+    home = Path.home().expanduser().resolve(strict=False)
+    try:
+        children = tuple(home.iterdir())
+    except OSError:
+        children = ()
+    for child in children:
+        if child.name.lower() in _WINDOWS_SENSITIVE_TOP_LEVEL:
+            continue
+        resolved = child.resolve(strict=False)
+        if resolved.exists() and resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
 
 
 def _additional_permissions_summary(launch: ProcessLaunch) -> str:

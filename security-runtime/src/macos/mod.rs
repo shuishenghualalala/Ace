@@ -40,6 +40,7 @@ pub struct MacOsRunRequest {
     pub readable_roots: Vec<PathBuf>,
     pub readonly_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
+    pub full_disk_read: bool,
     pub network_enabled: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,
     pub allow_local_binding: bool,
@@ -143,6 +144,7 @@ fn run_with_control(
                 filesystem_sandbox: true,
                 process_tree_cleanup: true,
                 managed_network: request.network_enabled,
+                full_disk_read: request.full_disk_read,
                 system_bwrap: false,
                 bundled_bwrap: false,
                 wsl_version: None,
@@ -329,6 +331,9 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
 
     let mut parameters = Vec::new();
     let mut read_rules = Vec::new();
+    if request.full_disk_read {
+        read_rules.push("(allow file-read*)".to_string());
+    }
     for (index, root) in PLATFORM_READ_ROOTS.iter().enumerate() {
         push_subpath_rule(
             &mut parameters,
@@ -812,6 +817,7 @@ mod tests {
             readable_roots: vec![],
             readonly_roots: vec![workspace.join(".agents")],
             denied_roots: vec![workspace.join(".git")],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
@@ -843,6 +849,22 @@ mod tests {
             .profile
             .contains("deny file-read* (literal (param \"READONLY_ROOT_0\"))"));
         assert!(!plan.profile.contains("allow network-outbound"));
+    }
+
+    #[test]
+    fn full_disk_read_keeps_explicit_denies_and_write_boundaries() {
+        let workspace = tempfile::tempdir().unwrap();
+        let denied = tempfile::tempdir().unwrap();
+        let mut value = request(workspace.path());
+        value.full_disk_read = true;
+        value.denied_roots = vec![denied.path().to_path_buf()];
+
+        let plan = build_plan(&value, None).unwrap();
+
+        assert!(plan.profile.contains("(allow file-read*)"));
+        assert!(plan.profile.contains("DENIED_READ_ROOT_0"));
+        assert!(plan.profile.contains("DENIED_WRITE_ROOT_0"));
+        assert!(plan.profile.contains("deny file-write*"));
     }
 
     #[test]

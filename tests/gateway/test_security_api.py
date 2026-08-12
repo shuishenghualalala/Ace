@@ -158,6 +158,47 @@ async def test_strict_auto_review_requires_live_native_runtime(api, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_live_probe_checks_broad_read_and_narrow_write_boundaries(monkeypatch):
+    from crew.gateway.routers import security as security_router
+
+    captured: dict[str, object] = {}
+    capabilities = RuntimeCapabilities(
+        backend="test",
+        filesystem_sandbox=True,
+        process_tree_cleanup=True,
+        managed_network=False,
+        full_disk_read=True,
+    )
+
+    class FakeRuntimeClient:
+        def __init__(self, helper_argv):
+            captured["helper_argv"] = helper_argv
+
+        async def execute(self, **kwargs):
+            captured.update(kwargs)
+            workspace = Path(kwargs["cwd"])
+            (workspace / "probe-marker").write_text("ok", encoding="ascii")
+            return SimpleNamespace(
+                exit_code=0,
+                stdout="probe",
+                stderr="",
+                capabilities=capabilities,
+            )
+
+    monkeypatch.setattr(security_router, "NativeRuntimeClient", FakeRuntimeClient)
+
+    result = await security_router._probe_runtime(
+        ("runtime",),
+        system="darwin",
+        network_enabled=False,
+    )
+
+    assert result is capabilities
+    assert captured["full_disk_read"] is True
+    assert captured["writable_roots"] == (captured["cwd"],)
+
+
+@pytest.mark.asyncio
 async def test_full_access_selection_does_not_depend_on_native_runtime(api, monkeypatch):
     async def unavailable_runtime():
         raise AssertionError("full access must not probe the managed runtime")
@@ -457,14 +498,17 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
             network_enabled = kwargs["network_enabled"]
             calls.append(network_enabled)
             assert kwargs["readonly_roots"] == (Path(kwargs["cwd"]) / ".git",)
+            assert kwargs["readable_roots"] == (readable_root,)
             Path(kwargs["cwd"]).joinpath("probe-marker").write_text("ok", encoding="ascii")
             return SimpleNamespace(
-                exit_code=1,
+                exit_code=0,
+                stdout="probe",
                 capabilities=RuntimeCapabilities(
                     backend="windows_sandbox_account",
                     filesystem_sandbox=True,
                     process_tree_cleanup=True,
                     managed_network=network_enabled,
+                    full_disk_read=True,
                     explicit_handle_inheritance=True,
                     windows_restricted_token=True,
                     windows_acl=True,
@@ -479,6 +523,12 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         lambda: (str(helper),),
     )
     monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
+    readable_root = tmp_path / "readable"
+    readable_root.mkdir()
+    monkeypatch.setattr(
+        "crew.security.launch._windows_full_disk_read_roots",
+        lambda: (readable_root,),
+    )
     monkeypatch.setattr("crew.gateway.routers.security.NativeRuntimeClient", FakeRuntimeClient)
 
     path = "/api/security/capabilities"
@@ -509,17 +559,20 @@ async def test_capabilities_probe_macos_runtime(api, tmp_path, monkeypatch):
             assert command[:3] == (
                 "/bin/sh",
                 "-c",
-                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; cat "$3" >/dev/null',
+                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; '
+                'printf changed > "$3" 2>/dev/null || true; cat "$4"',
             )
             assert kwargs["readonly_roots"] == (Path(command[5]).parent,)
             Path(command[4]).write_text("ok", encoding="ascii")
             return SimpleNamespace(
-                exit_code=1,
+                exit_code=0,
+                stdout="probe",
                 capabilities=RuntimeCapabilities(
                     backend="macos_seatbelt",
                     filesystem_sandbox=True,
                     process_tree_cleanup=True,
                     managed_network=network_enabled,
+                    full_disk_read=True,
                     local_binding_control=True,
                 ),
             )

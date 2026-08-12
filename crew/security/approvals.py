@@ -361,25 +361,14 @@ def _always_rule(
     prefix: Sequence[str] | None,
     additional_permissions: AdditionalPermissionProfile,
 ) -> ActionRule:
-    if action.kind is not ActionKind.EXEC or action.raw_command:
-        # Shell wrappers (pwsh -Command / bash -lc) make argv-prefix authority unsafe:
-        # the wrapper prefix is identical for every future script. Bind the complete
-        # user-visible command + final argv digest instead; direct argv may still use
-        # the narrower structured prefix path below.
-        return ActionRule.exact(
-            action,
-            scope=RuleScope.ALWAYS,
-            additional_permissions=additional_permissions,
-        )
-    chosen = tuple(prefix) if prefix is not None else action.argv
-    rule = ActionRule.exec_prefix(
-        chosen,
-        cwd=action.cwd,
+    # The API still accepts the legacy prefix for compatibility, but persistent
+    # authority is always bound to the complete normalized action.
+    del prefix
+    return ActionRule.exact(
+        action,
+        scope=RuleScope.ALWAYS,
         additional_permissions=additional_permissions,
     )
-    if not rule.matches(action):
-        raise ApprovalError("always argv prefix 不是已批准命令的 token prefix")
-    return rule
 
 
 def _new_request(

@@ -92,8 +92,8 @@ describe('Security Center view', () => {
       audits: [],
     });
 
-    expect(view.element.textContent).toContain('执行命令或修改文件前都询问');
-    expect(view.element.textContent).toContain('除永久禁止的破坏性操作外全部放行');
+    expect(view.element.textContent).toContain('普通读取免询问；命令、写入和联网需确认');
+    expect(view.element.textContent).toContain('使用当前宿主用户权限，不启用沙箱');
     expect(view.element.textContent).toContain('D:/work/<img src=x onerror=alert(1)>');
     expect(view.element.querySelector('.security-center__rule-detail')?.textContent)
       .toContain('操作：读取文件');

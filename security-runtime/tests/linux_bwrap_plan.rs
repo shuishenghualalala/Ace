@@ -15,6 +15,7 @@ mod linux {
         pub readable_roots: Vec<PathBuf>,
         pub readonly_roots: Vec<PathBuf>,
         pub denied_roots: Vec<PathBuf>,
+        pub full_disk_read: bool,
         pub network_enabled: bool,
         pub network_rules: Vec<()>,
         pub allow_local_binding: bool,

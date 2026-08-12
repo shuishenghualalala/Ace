@@ -27,11 +27,9 @@ def test_linux_profile_uses_codex_shaped_boundaries():
         assert required in source
     for protected in ('".git"', '".agents"', '".crew"'):
         assert protected in source
-    assert '"--tmpfs".to_string(),\n        "/".to_string(),' in source
-    assert (
-        '"--ro-bind".to_string(),\n        "/".to_string(),\n        "/".to_string(),'
-        not in source
-    )
+    assert '"--tmpfs".to_string(), "/".to_string()' in source
+    assert '"--ro-bind".to_string()' in source
+    assert "request.full_disk_read" in source
     assert "writable.push(cwd.clone())" not in source
     assert "sandbox cwd must be inside an explicit writable root" in source
 

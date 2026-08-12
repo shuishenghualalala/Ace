@@ -37,16 +37,23 @@ def test_unknown_ui_mode_fails_closed(tmp_path: Path) -> None:
         settings_for_mode("unknown", tmp_path)  # type: ignore[arg-type]
 
 
-def test_managed_profile_defaults_to_workspace_only(tmp_path: Path) -> None:
+def test_managed_profile_is_broadly_read_only_and_workspace_writable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(workspace))
     profile = settings_for_mode(ConversationPermissionMode.REQUEST_APPROVAL, workspace).profile
 
     assert filesystem_operation_allowed(
         profile, AdditionalPermissionProfile(), workspace / "src" / "app.py", FilesystemOperation.WRITE
     )
-    assert not filesystem_operation_allowed(
+    assert filesystem_operation_allowed(
         profile, AdditionalPermissionProfile(), tmp_path / "outside.txt", FilesystemOperation.READ
+    )
+    assert not filesystem_operation_allowed(
+        profile, AdditionalPermissionProfile(), tmp_path / "outside.txt", FilesystemOperation.WRITE
     )
 
 

@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -103,7 +104,7 @@ def _check_terminal_command(command: str) -> tuple[bool, str | None, str | None]
 
 TERMINAL_SCHEMA = {
     "name": "terminal",
-    "description": "在当前工作目录的原生沙箱中执行 shell 命令。访问项目外路径、联网或监听端口时必须声明 additional_permissions；非空权限会展示给用户审批并在批准后传入沙箱。",
+    "description": "执行 shell 命令。默认使用当前沙箱；可申请明确的额外权限，或说明原因后申请仅本命令脱离沙箱。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -157,6 +158,11 @@ TERMINAL_SCHEMA = {
                 "type": "string",
                 "description": "向用户说明为何需要额外权限，不参与授权匹配。",
             },
+            "sandbox_permissions": {
+                "type": "string",
+                "enum": ["use_default", "with_additional_permissions", "require_escalated"],
+                "description": "use_default 使用当前沙箱；with_additional_permissions 在沙箱内扩权；require_escalated 经批准后仅本命令使用宿主权限。",
+            },
         },
         "required": ["command"],
     },
@@ -170,6 +176,7 @@ def _parse_additional_permissions(
     security_context: Any,
     mode: Any,
     db_path: Path,
+    sandbox_permissions: object = None,
 ):
     """Validate model-requested authority before it can appear in an approval."""
     from crew.security.file_policy import _is_filesystem_root, _protected_entries
@@ -180,11 +187,18 @@ def _parse_additional_permissions(
         FilesystemEntry,
         FilesystemOperation,
         NetworkEntry,
+        SandboxPermissions,
     )
     from crew.security.policy import filesystem_operation_allowed, settings_for_mode
 
+    try:
+        sandbox_override = SandboxPermissions(
+            str(sandbox_permissions or SandboxPermissions.USE_DEFAULT.value)
+        )
+    except ValueError as exc:
+        raise ToolError("sandbox_permissions 值无效") from exc
     if raw is None:
-        return AdditionalPermissionProfile()
+        return AdditionalPermissionProfile(sandbox_permissions=sandbox_override)
     if not isinstance(raw, dict):
         raise ToolError("additional_permissions 必须是对象")
     unknown = set(raw) - {"filesystem", "network", "allow_local_binding"}
@@ -262,6 +276,7 @@ def _parse_additional_permissions(
         filesystem=tuple(dict.fromkeys(filesystem_entries)),
         network=tuple(dict.fromkeys(network_entries)),
         allow_local_binding=allow_local_binding,
+        sandbox_permissions=sandbox_override,
     )
     base = settings_for_mode(
         mode,
@@ -289,6 +304,7 @@ def _parse_additional_permissions(
         filesystem=tuple(effective_filesystem),
         network=profile.network,
         allow_local_binding=profile.allow_local_binding,
+        sandbox_permissions=profile.sandbox_permissions,
     )
 
 
@@ -330,11 +346,13 @@ async def handle_terminal(
         from crew.security.models import (
             EMPTY_ADDITIONAL_PERMISSIONS,
             ConversationPermissionMode,
+            SandboxPermissions,
         )
         from crew.security.runtime_client import NativeRuntimeClient
 
         security_context = build_security_context(workspace_store)
         mode = security_service.mode_for(security_context)
+        explicit_sandbox_permissions = args.get("sandbox_permissions")
         requested_permissions = (
             EMPTY_ADDITIONAL_PERMISSIONS
             if mode is ConversationPermissionMode.FULL_ACCESS
@@ -344,11 +362,46 @@ async def handle_terminal(
                 security_context=security_context,
                 mode=mode,
                 db_path=security_service.db_path,
+                sandbox_permissions=explicit_sandbox_permissions,
             )
         )
+        has_permission_entries = bool(
+            requested_permissions.filesystem
+            or requested_permissions.network
+            or requested_permissions.allow_local_binding
+        )
+        if mode is not ConversationPermissionMode.FULL_ACCESS:
+            if explicit_sandbox_permissions is None and has_permission_entries:
+                requested_permissions = replace(
+                    requested_permissions,
+                    sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+                )
+            elif (
+                requested_permissions.sandbox_permissions
+                is SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS
+                and not has_permission_entries
+            ):
+                raise ToolError("with_additional_permissions 必须声明非空 additional_permissions")
+            elif (
+                requested_permissions.sandbox_permissions is SandboxPermissions.USE_DEFAULT
+                and has_permission_entries
+            ):
+                raise ToolError("use_default 不能与非空 additional_permissions 同时使用")
+            elif (
+                requested_permissions.sandbox_permissions
+                is SandboxPermissions.REQUIRE_ESCALATED
+                and has_permission_entries
+            ):
+                raise ToolError("require_escalated 不能与 additional_permissions 同时使用")
         permission_reason = args.get("permission_reason", "")
         if not isinstance(permission_reason, str) or len(permission_reason) > 1000:
             raise ToolError("permission_reason 必须是长度不超过 1000 的字符串")
+        if (
+            requested_permissions.sandbox_permissions
+            is SandboxPermissions.REQUIRE_ESCALATED
+            and not permission_reason.strip()
+        ):
+            raise ToolError("require_escalated 必须提供 permission_reason")
         final_argv = shell_argv(command)
         shell_kind = "powershell" if os.name == "nt" else "bash"
         classification = None

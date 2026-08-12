@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 
-RUNTIME_PROTOCOL_VERSION = 2
+RUNTIME_PROTOCOL_VERSION = 3
 _MAX_REQUEST_FRAME = 2 * 1024 * 1024
 _MAX_PROTOCOL_FRAME = 128 * 1024
 _MAX_OUTPUT_CHUNK = 64 * 1024
@@ -48,7 +48,7 @@ _RESERVED_ENV_NAMES = frozenset(
 )
 _RESERVED_ENV_PREFIXES = ("ACE_SECURITY_", "ACE_BUNDLED_")
 _REQUIRED_READY_CAPABILITIES = frozenset(
-    {"stdin_once", "stream_output", "readonly_roots"}
+    {"stdin_once", "stream_output", "readonly_roots", "full_disk_read"}
 )
 _INTERACTIVE_READY_CAPABILITIES = _REQUIRED_READY_CAPABILITIES | {"stdin_bidirectional"}
 _LOGGER = logging.getLogger(__name__)
@@ -91,6 +91,7 @@ class RuntimeCapabilities:
     filesystem_sandbox: bool
     process_tree_cleanup: bool
     managed_network: bool
+    full_disk_read: bool = False
     system_bwrap: bool = False
     bundled_bwrap: bool = False
     wsl_version: int | None = None
@@ -113,6 +114,7 @@ class RuntimeCapabilities:
             filesystem_sandbox=value.get("filesystem_sandbox") is True,
             process_tree_cleanup=value.get("process_tree_cleanup") is True,
             managed_network=value.get("managed_network") is True,
+            full_disk_read=value.get("full_disk_read") is True,
             system_bwrap=value.get("system_bwrap") is True,
             bundled_bwrap=value.get("bundled_bwrap") is True,
             wsl_version=_optional_int(value.get("wsl_version")),
@@ -164,6 +166,7 @@ class NativeInteractiveSession:
         stderr_task: asyncio.Task[bytes],
         timeout: float,
         max_output_bytes: int,
+        full_disk_read: bool,
     ) -> None:
         self._client = client
         self.process = process
@@ -171,6 +174,7 @@ class NativeInteractiveSession:
         self._stderr_task = stderr_task
         self._timeout = max(0.1, float(timeout or 0.0))
         self._max_output_bytes = max_output_bytes
+        self._full_disk_read = full_disk_read
         self._next_seq = 0
         self._output_bytes = 0
         self._write_lock = asyncio.Lock()
@@ -220,6 +224,11 @@ class NativeInteractiveSession:
                     raise NativeRuntimeError(
                         RuntimeErrorCode.SANDBOX_UNAVAILABLE,
                         "native runtime lacks required managed capabilities",
+                    )
+                if capabilities.full_disk_read is not self._full_disk_read:
+                    raise NativeRuntimeError(
+                        RuntimeErrorCode.SANDBOX_UNAVAILABLE,
+                        "native runtime did not apply the requested read boundary",
                     )
                 continue
             if frame_type == "stdout" and nonce == self._open_nonce:
@@ -391,6 +400,7 @@ class NativeRuntimeClient:
         readable_roots: Sequence[Path] = (),
         readonly_roots: Sequence[Path] = (),
         denied_roots: Sequence[Path] = (),
+        full_disk_read: bool = False,
         network_enabled: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
@@ -418,6 +428,7 @@ class NativeRuntimeClient:
             "readable_roots": [str(path.resolve(strict=True)) for path in readable_roots],
             "readonly_roots": [str(path.resolve(strict=False)) for path in readonly_roots],
             "denied_roots": [str(path.resolve(strict=False)) for path in denied_roots],
+            "full_disk_read": bool(full_disk_read),
             "network_enabled": network_enabled,
             "network_rules": [dict(rule) for rule in network_rules],
             "allow_local_binding": allow_local_binding,
@@ -457,6 +468,7 @@ class NativeRuntimeClient:
                 max_output_bytes=max_output_bytes,
                 network_enabled=network_enabled,
                 allow_local_binding=allow_local_binding,
+                full_disk_read=full_disk_read,
                 on_started=on_started,
                 on_output=on_output,
             )
@@ -489,6 +501,7 @@ class NativeRuntimeClient:
         readable_roots: Sequence[Path] = (),
         readonly_roots: Sequence[Path] = (),
         denied_roots: Sequence[Path] = (),
+        full_disk_read: bool = False,
         network_enabled: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
@@ -513,6 +526,7 @@ class NativeRuntimeClient:
             "readable_roots": [str(path.resolve(strict=True)) for path in readable_roots],
             "readonly_roots": [str(path.resolve(strict=False)) for path in readonly_roots],
             "denied_roots": [str(path.resolve(strict=False)) for path in denied_roots],
+            "full_disk_read": bool(full_disk_read),
             "network_enabled": network_enabled,
             "network_rules": [dict(rule) for rule in network_rules],
             "allow_local_binding": allow_local_binding,
@@ -551,6 +565,7 @@ class NativeRuntimeClient:
                 stderr_task=stderr_task,
                 timeout=timeout,
                 max_output_bytes=max_output_bytes,
+                full_disk_read=full_disk_read,
             )
             assert process.stdin is not None
             process.stdin.write(request_frame)
@@ -574,6 +589,7 @@ class NativeRuntimeClient:
         max_output_bytes: int,
         network_enabled: bool,
         allow_local_binding: bool,
+        full_disk_read: bool,
         on_started: Callable[[int | None], None] | None,
         on_output: Callable[[Literal["stdout", "stderr"]], None] | None,
     ) -> RuntimeCommandResult:
@@ -624,6 +640,11 @@ class NativeRuntimeClient:
                     raise NativeRuntimeError(
                         RuntimeErrorCode.SANDBOX_UNAVAILABLE,
                         "native runtime lacks required managed capabilities",
+                    )
+                if capabilities.full_disk_read is not full_disk_read:
+                    raise NativeRuntimeError(
+                        RuntimeErrorCode.SANDBOX_UNAVAILABLE,
+                        "native runtime did not apply the requested read boundary",
                     )
                 if capabilities.is_windows_backend and not all(
                     (

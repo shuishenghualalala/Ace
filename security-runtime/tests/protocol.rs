@@ -7,7 +7,7 @@ fn protocol_contract_is_versioned_and_tcp_free() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let protocol = fs::read_to_string(format!("{manifest}/src/protocol.rs")).unwrap();
     let main = fs::read_to_string(format!("{manifest}/src/main.rs")).unwrap();
-    assert!(protocol.contains("PROTOCOL_VERSION: u16 = 2"));
+    assert!(protocol.contains("PROTOCOL_VERSION: u16 = 3"));
     assert!(protocol.contains("MAX_REQUEST_FRAME_BYTES"));
     assert!(protocol.contains("MAX_STDIN_BYTES"));
     assert!(protocol.contains("MAX_ENV_BYTES"));
@@ -35,13 +35,13 @@ fn startup_token_and_nonce_replay_are_enforced() {
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
     assert!(line.contains("\"type\":\"ready\""));
-    assert!(line.contains("\"version\":2"));
+    assert!(line.contains("\"version\":3"));
     assert!(line.contains("\"stdin_once\""));
     assert!(line.contains("\"stream_output\""));
     assert!(line.contains("\"readonly_roots\""));
 
     let request = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": token,
         "nonce": "nonce-longer-than-sixteen",
         "request": {"op": "run", "command": [], "cwd": "."}
@@ -85,7 +85,7 @@ fn token_mismatch_returns_protocol_mismatch() {
     assert!(line.contains("\"type\":\"ready\""));
 
     let request = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": "b".repeat(48),
         "nonce": "nonce-longer-than-sixteen",
         "request": {"op": "run", "command": [], "cwd": "."}
@@ -163,7 +163,7 @@ fn invalid_process_inputs_are_rejected_before_command_handling() {
     stdout.read_line(&mut line).unwrap();
 
     let invalid_stdin = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": token,
         "nonce": "invalid-stdin-nonce-long",
         "request": {
@@ -183,7 +183,7 @@ fn invalid_process_inputs_are_rejected_before_command_handling() {
     assert!(!line.contains("***"));
 
     let reserved_environment = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": token,
         "nonce": "invalid-environment-nonce",
         "request": {

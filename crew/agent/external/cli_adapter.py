@@ -289,7 +289,11 @@ async def _authorized_external_launch(
     from crew.security.actions import normalize_exec_action
     from crew.security.approvals import ApprovalDecision
     from crew.security.launch import current_process_launch
-    from crew.security.models import AdditionalPermissionProfile, NetworkEntry
+    from crew.security.models import (
+        AdditionalPermissionProfile,
+        NetworkEntry,
+        SandboxPermissions,
+    )
     from crew.security.outbound import parse_public_http_target
 
     launch = current_process_launch.get()
@@ -328,6 +332,7 @@ async def _authorized_external_launch(
         filesystem=launch.additional_permissions.filesystem,
         network=network,
         allow_local_binding=launch.additional_permissions.allow_local_binding,
+        sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
     )
     action = normalize_exec_action(
         (str(Path(executable_path).expanduser().resolve(strict=False)), "external-agent", provider),

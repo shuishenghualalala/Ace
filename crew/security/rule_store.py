@@ -32,6 +32,9 @@ class SQLiteRuleStore:
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        self.migrated_legacy_rules = tuple(
+            self._writer.execute(self._disable_legacy_allow_prefixes)
+        )
 
     @staticmethod
     def _init_schema(conn) -> None:
@@ -53,6 +56,39 @@ class SQLiteRuleStore:
             "CREATE INDEX IF NOT EXISTS idx_security_rules_scope "
             "ON security_rules(os_user, owner_account_id, workspace_id, enabled)"
         )
+
+    @staticmethod
+    def _disable_legacy_allow_prefixes(conn) -> list[tuple[str, str, str, str]]:
+        """Disable broad allow rules that predate complete-action persistence."""
+        rows = conn.execute(
+            "SELECT rule_id, os_user, owner_account_id, workspace_id, payload_json "
+            "FROM security_rules WHERE enabled = 1"
+        ).fetchall()
+        disabled: list[tuple[str, str, str, str]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (
+                payload.get("decision") == RuleDecision.ALLOW.value
+                and payload.get("argv_prefix")
+                and not str(payload.get("exact_digest", "")).strip()
+            ):
+                disabled.append(
+                    (
+                        str(row["rule_id"]),
+                        str(row["os_user"]),
+                        str(row["owner_account_id"]),
+                        str(row["workspace_id"]),
+                    )
+                )
+        if disabled:
+            conn.executemany(
+                "UPDATE security_rules SET enabled = 0 WHERE rule_id = ?",
+                ((rule_id,) for rule_id, _os, _owner, _workspace in disabled),
+            )
+        return disabled
 
     def create(
         self,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 from crew.security.models import (
@@ -31,8 +33,21 @@ def settings_for_mode(
         ConversationPermissionMode.FULL_ACCESS,
     }:
         raise ValueError(f"未知对话安全模式: {mode!r}")
-    filesystem = (
-        (FilesystemEntry(workspace_root, FilesystemAccess.READ_WRITE),) if workspace_root else ()
+    writable_roots: list[Path] = []
+    if workspace_root is not None:
+        writable_roots.append(workspace_root)
+    temp_candidates = [Path(tempfile.gettempdir())]
+    if os.name != "nt":
+        temp_candidates.append(Path("/tmp"))
+    for candidate in temp_candidates:
+        try:
+            resolved = candidate.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved not in writable_roots:
+            writable_roots.append(resolved)
+    filesystem = tuple(
+        FilesystemEntry(root, FilesystemAccess.READ_WRITE) for root in writable_roots
     )
     if mode is ConversationPermissionMode.FULL_ACCESS:
         # 完全访问权限明确选择宿主用户权限，不再编译文件或网络沙箱。
@@ -47,6 +62,7 @@ def settings_for_mode(
 
     profile = PermissionProfile(
         kind=PermissionProfileKind.MANAGED,
+        full_disk_read=True,
         filesystem=(*filesystem, *deny_entries),
         network=NetworkPolicy.RESTRICTED,
     )
@@ -95,7 +111,7 @@ def filesystem_operation_allowed(
         if _contains(entry.root, resolved)
     ]
     if not matches:
-        return False
+        return operation is FilesystemOperation.READ and profile.full_disk_read
     specificity = max(len(entry.root.parts) for entry in matches)
     selected = [entry for entry in matches if len(entry.root.parts) == specificity]
     if any(entry.access is FilesystemAccess.DENY for entry in selected):
