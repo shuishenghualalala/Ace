@@ -39,7 +39,7 @@ from crew.tools.output_filters import strip_ansi, truncate_output
 from crew.tools.redact import redact_sensitive_text
 from crew.tools.registry import Registry
 from crew.tools.security_guard import authorize_file_tool
-from crew.tools.terminal_guard import detect_dangerous_command, detect_hardline_command
+from crew.tools.terminal_guard import classify_command, detect_dangerous_command, detect_hardline_command
 
 FILE_READ_SCHEMA = {
     "name": "file_read",
@@ -111,6 +111,13 @@ def _check_terminal_command(command: str) -> tuple[bool, str | None, str | None]
         return (
             False,
             f"DANGEROUS: {dangerous_desc}. 需要宿主运行时向用户申请批准。",
+            "approval_required",
+        )
+    verdict, reason = classify_command(command)
+    if verdict == "ask":
+        return (
+            False,
+            f"SECURITY CHECK: {reason}. 需要宿主运行时向用户申请批准。",
             "approval_required",
         )
     return True, None, None

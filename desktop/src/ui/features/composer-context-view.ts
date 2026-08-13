@@ -47,34 +47,6 @@ function createChip(
   return button;
 }
 
-function createFileQaHint(): HTMLElement {
-  const hint = document.createElement('div');
-  const text = document.createElement('span');
-  const install = document.createElement('button');
-  const close = document.createElement('button');
-  hint.id = 'chat-fileqa-hint';
-  hint.className = 'mw-context-notice';
-  hint.hidden = true;
-  text.className = 'mw-context-notice__copy';
-  text.append(
-    document.createTextNode('文档类附件（PDF / Word / Excel / PPT）需安装 '),
-    Object.assign(document.createElement('strong'), { textContent: '文件问答' }),
-    document.createTextNode(' 技能才能解析内容'),
-  );
-  install.type = 'button';
-  install.id = 'chat-fileqa-install-btn';
-  install.className = 'mw-context-notice__action';
-  install.textContent = '安装技能';
-  close.type = 'button';
-  close.id = 'chat-fileqa-close-btn';
-  close.className = 'mw-context-notice__close';
-  close.title = '关闭提示';
-  close.setAttribute('aria-label', '关闭提示');
-  close.append(createIcon('icon-close', { size: 16 }));
-  hint.append(createIcon('icon-file', { className: 'mw-context-notice__icon', size: 18 }), text, install, close);
-  return hint;
-}
-
 function createWorkflowRecommendation(): HTMLElement {
   const recommendation = document.createElement('div');
   const text = document.createElement('span');
@@ -141,7 +113,6 @@ function createBeforeInput(): DocumentFragment {
   fragment.append(
     sitesMode,
     input,
-    createFileQaHint(),
     preview,
     siteAnnotationPreview,
     blueprintAnnotationPreview,

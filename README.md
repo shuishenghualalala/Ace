@@ -329,8 +329,22 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 
 ```bash
 source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
+
+# 交互对话（默认）
 python -m crew.cli
+
+# 非交互运行与自动化输出
+python -m crew.cli run "整理下载目录" --output-format json
+python -m crew.cli cron list --json
+python -m crew.cli security pending --session-id <sid> --json
+
+# 查看完整命令树
+python -m crew.cli --help
 ```
+
+CLI 进程内直调后端 service，不依赖 Gateway；所有子命令支持 `--json` 结构化输出，
+覆盖配置、会话、工作空间、任务、定时任务、Wiki、技能、MCP、插件、渠道、外部
+Runtime/Agent/Team、浏览器、动态看板、场景、安全审批/规则/审计、站点与工作台。
 
 ## 📦 构建桌面发行包（可选）
 
@@ -404,6 +418,16 @@ npm run check
 pytest -m e2e
 ```
 
+需要批量验证复杂任务、Wiki、外援等后端功能，并保留每轮日志时，使用独立场景 runner：
+
+```bash
+python scripts/run_e2e_batch.py --category complex_tasks
+python scripts/run_e2e_batch.py --case write_file --report-dir build/e2e
+```
+
+每个 case 会独立输出 `transcript.jsonl`、`llm.jsonl`、`crew.log` 和工作区前后快照，报告与
+新增场景的方法见 [后端 E2E 测试指南](docs/testing/e2e-testing.md)。
+
 ## 📁 配置与本地数据
 
 哪些文件该提交、哪些文件碰都别碰（指 Git）：
@@ -465,4 +489,3 @@ pytest -m e2e
 本项目采用 [Apache License 2.0](LICENSE) 开源许可。项目致谢见 [NOTICE](NOTICE)。
 
 ---
-

@@ -13,6 +13,7 @@ import {
   syncSessionModelUi,
 } from './session-model';
 import { syncExternalAgentsFeatureUi } from './external-agents-feature';
+import { syncSecurityModuleFeatureUi } from './security-mode';
 
 let dropdownOpen = false;
 
@@ -197,9 +198,11 @@ export async function loadConfig(): Promise<void> {
     state.configModel = resolveComposerModelLabel();
     syncModelUi();
     syncExternalAgentsFeatureUi();
+    syncSecurityModuleFeatureUi();
     return;
   } catch {
     state.config = null;
     syncExternalAgentsFeatureUi();
+    syncSecurityModuleFeatureUi();
   }
 }

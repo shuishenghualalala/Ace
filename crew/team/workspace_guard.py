@@ -8,7 +8,7 @@ import re
 import shlex
 from typing import Any, Literal
 
-from crew.tools.terminal_guard import detect_dangerous_command, detect_hardline_command
+from crew.tools.terminal_guard import classify_command, detect_dangerous_command, detect_hardline_command
 
 
 SEARCH_TOOL_NAMES = {
@@ -298,6 +298,15 @@ def classify_external_permission(
             return WorkspacePermissionDecision(
                 "ask",
                 f"命令可能产生不可逆副作用：{dangerous_reason or 'dangerous command'}。",
+                tool_name=tool_name or "terminal",
+                target=_compact_target(command),
+                operation="execute",
+            )
+        sec_verdict, sec_reason = classify_command(inspected_command)
+        if sec_verdict == "ask":
+            return WorkspacePermissionDecision(
+                "ask",
+                f"命令触发安全检查：{sec_reason}。",
                 tool_name=tool_name or "terminal",
                 target=_compact_target(command),
                 operation="execute",

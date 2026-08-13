@@ -14,7 +14,6 @@ import {
 } from '../state';
 import { messageStore } from '../stores/stores';
 import { imageDisplayUrl } from '../tool-screenshot';
-import { showConfirmDialog } from '../ui-feedback';
 import { openImageViewer } from './image-viewer';
 import { queryPrimaryComposer } from './composer-scope';
 
@@ -72,46 +71,7 @@ export function uniqueClipboardFiles(data: ClipboardFileSource): File[] {
   return uniqueFiles(itemFiles);
 }
 
-// ---- 文档类附件提示 ----
-// 默认上传链路只把 pdf/word/excel/ppt 当「二进制文件」传路径给模型（读不到内容），
-// 真正解析需要可选技能 file-qa。这里检测到这类附件且未安装时，弹引导条一键安装。
-const DOC_EXTS = new Set(['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']);
-const FILE_QA_SLUG = 'file-qa';
-/** file-qa 是否已安装的会话级缓存：null=未查询。避免每次渲染都打 /api/skills。 */
-let fileQaInstalledCache: boolean | null = null;
 let attachmentController: AbortController | null = null;
-
-function extOf(name: string): string {
-  const i = name.lastIndexOf('.');
-  return i < 0 ? '' : name.slice(i).toLowerCase();
-}
-
-function hasDocAttachment(): boolean {
-  return state.attachments.some((a) => DOC_EXTS.has(extOf(a.name)));
-}
-
-async function isFileQaInstalled(): Promise<boolean> {
-  if (fileQaInstalledCache != null) return fileQaInstalledCache;
-  try {
-    const skills = await backendApi.skills();
-    fileQaInstalledCache = skills.some((s) => s.slug === FILE_QA_SLUG);
-  } catch {
-    fileQaInstalledCache = false;
-  }
-  return fileQaInstalledCache;
-}
-
-/** 按当前附件状态 + file-qa 安装状态，决定是否显示引导条。 */
-async function refreshFileQaHint(): Promise<void> {
-  const hint = $('#chat-fileqa-hint');
-  if (!hint) return;
-  // 无文档类附件、或已装 file-qa → 隐藏；否则提示安装。
-  if (!hasDocAttachment() || (await isFileQaInstalled())) {
-    hint.hidden = true;
-    return;
-  }
-  hint.hidden = false;
-}
 
 /**
  * 渲染待发附件预览。图片 → 缩略图卡片（真实预览，可点击查看大图，对齐微信/图三）；
@@ -122,7 +82,6 @@ export function renderAttachmentPreview(): void {
   const box = queryPrimaryComposer('[data-attachment-preview]');
   if (!box) return;
   renderAttachmentList(box, state.attachments, removeMainAttachment);
-  void refreshFileQaHint();
 }
 
 /** 把附件列表渲染进指定预览容器：主对话（before-input 槽位）与 Wiki 面板共用同一套卡片结构。 */
@@ -285,7 +244,6 @@ export function bindAttachments(): () => void {
   const unbindPaste = chatInput
     ? bindFilePaste(chatInput, (files) => void handleFileSelect(files))
     : () => {};
-  bindFileQaHintActions(signal);
   return () => {
     if (!attachmentController) return;
     attachmentController.abort();
@@ -322,43 +280,6 @@ export function bindFilePaste(
     target.removeEventListener('paste', handlePaste);
     delete target.dataset.pasteUploadBound;
   };
-}
-
-/** 引导条交互：一键安装 file-qa；关闭按钮本次会话隐藏（附件变化后仍会按规则重判）。 */
-function bindFileQaHintActions(signal: AbortSignal): void {
-  $('#chat-fileqa-install-btn')?.addEventListener('click', async () => {
-    const btn = $('#chat-fileqa-install-btn') as HTMLButtonElement | null;
-    if (btn) btn.disabled = true;
-    try {
-      // 与技能页同一个 /api/skills/{slug}/install 端点，同样落到 get_crew_home()/skills
-      // ——机器级共享，影响本机所有登录账号。技能页会明确告知，这条引导条入口不能悄悄装。
-      const agreed = await showConfirmDialog({
-        title: '确认全局安装技能',
-        message:
-          '技能是本机全局共享能力，安装结果对本机所有登录账号生效。'
-          + '确定安装「文件问答」吗？',
-        confirmText: '全局安装',
-        cancelText: '取消',
-      });
-      if (!agreed) return;
-      const res = await backendApi.installSkill(FILE_QA_SLUG);
-      if (res.ok) {
-        fileQaInstalledCache = true;
-        notify('「文件问答」技能已安装，可解析 PDF/Word/Excel/PPT 附件');
-        await refreshFileQaHint();
-      } else {
-        notify('安装失败，请前往技能页手动安装');
-      }
-    } catch {
-      notify('安装失败，请前往技能页手动安装');
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }, { signal });
-  $('#chat-fileqa-close-btn')?.addEventListener('click', () => {
-    const hint = $('#chat-fileqa-hint');
-    if (hint) hint.hidden = true;
-  }, { signal });
 }
 
 /**

@@ -1,3 +1,6 @@
+import type { BackendConfig } from '../backend-client';
+import { state } from '../state';
+
 export interface SecurityCapabilities {
   platform?: string;
   helper_present?: boolean;
@@ -5,6 +8,24 @@ export interface SecurityCapabilities {
   managed_network?: boolean;
   local_binding_control?: boolean;
   detail?: string;
+}
+
+/** 安全模块总开关：后端 /api/config 返回 security.enabled，Ace 默认关闭。 */
+export function securityModuleEnabled(config: BackendConfig | null | undefined = state.config): boolean {
+  return config?.security?.enabled === true;
+}
+
+/** 配置加载完成后通知安全入口同步可用状态。 */
+export function syncSecurityModuleFeatureUi(): void {
+  window.dispatchEvent(new CustomEvent('security:config-change'));
+}
+
+/** 订阅安全模块配置变更，handler 会立即执行一次以同步当前状态。 */
+export function bindSecurityModuleFeatureUi(onChange: (enabled: boolean) => void): () => void {
+  const handler = (): void => onChange(securityModuleEnabled());
+  window.addEventListener('security:config-change', handler);
+  handler();
+  return () => window.removeEventListener('security:config-change', handler);
 }
 
 /** Gateway uses Python names; Electron uses Node names. Unknown stays unknown. */
