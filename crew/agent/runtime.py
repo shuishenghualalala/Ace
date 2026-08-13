@@ -675,6 +675,11 @@ class SingleAgent(Agent):
         # 子 Agent 的 ``model=inherit`` 读取父 Agent 实际生效能力；会话绑定模型、
         # owner 模型与全局模型因此走同一条能力约束链。
         current_model_capabilities.set(self.model_capabilities)
+        # 同理继承父 Agent 实际生效的 Provider：父会话可能绑定 owner 级模型，
+        # 此时 app 级 provider 是无 Key 的 FakeProvider，不能让子 Agent 继承它。
+        from crew.core.runctx import current_provider
+
+        current_provider.set(self.provider)
         # 暴露当前生效 skill 范围，供 delegate_task 子 agent 继承父（含 expert）的技能
         current_skill_scope.set((self.enabled_skills, self.disabled_skills))
         # 同步当前已展开的 skill packages，供 build_skills_index_prompt 展开内部 skills

@@ -67,6 +67,7 @@ export type ChunkKind =
   | "workflow_progress"
   | "wiki_cards"
   | "wiki_ingest_progress"
+  | "wiki_changed"
   | "team_internal";
 
 export interface TodoItem {

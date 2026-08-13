@@ -777,6 +777,12 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             return next;
           });
         });
+      } else if (c.kind === "wiki_changed") {
+        // Wiki 数据被本会话（含其委派的 Wiki 子代理）修改：广播给 WikiHub 等视图刷新，
+        // 避免知识库/页面变更后必须重新进入页面才能看到。
+        window.dispatchEvent(
+          new CustomEvent("crew:wiki-changed", { detail: c.body?.changes ?? [] }),
+        );
       } else if (c.kind === "status") {
         const msg = c.body.message ?? "";
         if (c.body.activity === "context_compaction") {

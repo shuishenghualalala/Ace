@@ -404,6 +404,23 @@ export default function WikiHub({
     refreshKbs();
   }, [refreshKbs]);
 
+  // 其他会话（如主对话委派的 Wiki 子代理）或本页 Wiki 会话改动 Wiki 数据后，
+  // 后端会推 wiki_changed；收到后刷新知识库列表与当前库页面，避免必须重新进入页面。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const changes = (e as CustomEvent).detail as
+        | Array<{ kb_id?: string; change_type?: string }>
+        | undefined;
+      if (!Array.isArray(changes) || changes.length === 0) return;
+      void refreshKbs();
+      if (changes.some((ch) => !ch.kb_id || ch.kb_id === kbId)) {
+        void refreshPages();
+      }
+    };
+    window.addEventListener("crew:wiki-changed", handler);
+    return () => window.removeEventListener("crew:wiki-changed", handler);
+  }, [refreshKbs, refreshPages, kbId]);
+
   // 新用户首次进入 Wiki 时，若没有任何知识库，自动初始化 default
   useEffect(() => {
     if (hasAutoInitRef.current) return;

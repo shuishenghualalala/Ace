@@ -1186,6 +1186,13 @@ class CrewApp:
         provider = self.provider
         sub_profile: ModelProfile | None = None
         inherited_capabilities = current_model_capabilities.get()
+        # model=inherit 时优先继承父 Agent 运行时实际生效的 Provider（经 contextvar）；
+        # 仅在无父上下文（如测试直接构造）时回退 app 级 self.provider。
+        from crew.core.runctx import current_provider
+
+        parent_provider = current_provider.get()
+        if parent_provider is not None:
+            provider = parent_provider
         effective_capabilities: list[str] | None = (
             list(inherited_capabilities) if inherited_capabilities is not None else None
         )
