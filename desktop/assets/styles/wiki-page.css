@@ -49,8 +49,9 @@
   /* 面板间不留缝：分隔由单边 1px 发丝线承担（VSCode 风格，避免两条边框线并行） */
   gap: 0;
   /* 底部不留 padding：三条竖向分隔线（对话↔面板、目录↔详情）直接伸到窗口底边，
-     对齐主对话 mw-chat-template 整列通高的版式；对话栏底部留白由 disclaimer 自带 padding 承担 */
-  padding: var(--mw-space-5) var(--mw-space-8) 0;
+     对齐主对话 mw-chat-template 整列通高的版式；对话栏底部留白由 disclaimer 自带 padding 承担。
+     右侧同样不留 padding：知识库面板（自带背景色）直接顶到窗口右边，滚动条贴窗缘（VSCode 风格） */
+  padding: var(--mw-space-5) 0 0 var(--mw-space-8);
 }
 
 /* 右侧知识库面板：整体固定宽度（内联 width，拖拽可调），内部目录 + 详情横向排布 */
@@ -174,8 +175,7 @@
   display: flex;
   align-items: center;
   gap: var(--mw-space-1);
-  margin: 0 auto var(--mw-space-3);
-  max-width: 760px;
+  margin: 0 0 var(--mw-space-3);
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -938,8 +938,7 @@
 }
 
 .wiki-detail__header {
-  margin: 0 auto 28px;
-  max-width: 760px;
+  margin: 0 0 28px;
 }
 
 .wiki-detail__badges {
@@ -1052,21 +1051,18 @@
 }
 
 .wiki-editor {
-  max-width: 760px;
   min-height: 320px;
-  margin: 0 auto;
+  margin: 0;
   cursor: text;
 }
 
 /* Home.md 是阅读型首页，不沿用聊天消息的紧凑 Markdown 排版。 */
 .wiki-home-document {
-  max-width: 860px;
-  margin: 0 auto;
+  margin: 0;
   padding-bottom: 72px;
 }
 
 .wiki-home-document .wiki-detail__header {
-  max-width: 760px;
   margin-bottom: 22px;
   padding-bottom: 22px;
   border-bottom: 1px solid var(--mw-border-subtle);
@@ -1078,8 +1074,7 @@
 }
 
 .wiki-home-document .wiki-detail__content {
-  max-width: 760px;
-  margin: 0 auto;
+  margin: 0;
   color: var(--mw-text-primary);
   font-size: var(--mw-font-sm);
   line-height: 1.85;
@@ -1253,8 +1248,7 @@
 }
 
 .wiki-related-pages {
-  max-width: 760px;
-  margin: 32px auto 72px;
+  margin: 32px 0 72px;
   padding-top: 22px;
   border-top: 1px solid var(--mw-border-subtle);
 }
@@ -1994,7 +1988,7 @@
 /* 窄窗口：目录区收窄，避免挤压详情区 */
 @media (max-width: 1100px) {
   .wiki-body {
-    padding: var(--mw-space-4) var(--mw-space-5) 0;
+    padding: var(--mw-space-4) 0 0 var(--mw-space-5);
   }
 
   .wiki-list-pane {

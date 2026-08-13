@@ -291,6 +291,43 @@ export function approvalBoundaryLabel(request: Record<string, unknown>): string 
   return '仅在当前沙箱内执行';
 }
 
+// Wiki Agent 会话固定归属 workspace=wiki（与 wiki-agent.ts 的 WIKI_AGENT_WORKSPACE_ID 一致，
+// 后端契约）；在独立 Wiki tab 里对话，state.activeSessionId 永远指向主聊天会话。
+const WIKI_AGENT_WORKSPACE_ID = 'wiki';
+// 轮询的会话上限：主聊天 + 本次运行打开过的少量 Wiki 会话，避免轮询扇出失控。
+const MAX_POLL_SESSIONS = 5;
+
+/**
+ * 审批轮询覆盖的会话：主聊天活跃会话 + Wiki Agent 会话。
+ *
+ * Wiki 会话在独立视图里运行，activeSessionId 不会指向它；只看活跃会话时，wiki 回合里
+ * 需要审批的工具调用（写文件、跑命令）在 UI 上无从批准，只能挂到 300s TTL 超时按拒绝
+ * 处理（实测一次「生成 PDF」连撞三次审批墙，25 分钟耗在等待上）。
+ */
+function approvalPollCandidates(): Array<{ sessionId: string; workspaceId: string }> {
+  const seen = new Set<string>();
+  const candidates: Array<{ sessionId: string; workspaceId: string }> = [];
+  const push = (sessionId: string | null | undefined, workspaceId: string | undefined): void => {
+    const id = String(sessionId ?? '').trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    candidates.push({ sessionId: id, workspaceId: workspaceId ?? 'default' });
+  };
+  const active = state.activeSessionId;
+  if (active) {
+    push(
+      active,
+      state.sessions.find((item) => item.id === active)?.workspaceId
+        ?? state.currentWorkspaceId
+        ?? 'default',
+    );
+  }
+  for (const row of state.sessions) {
+    if (row.workspaceId === WIKI_AGENT_WORKSPACE_ID) push(row.id, row.workspaceId);
+  }
+  return candidates.slice(0, MAX_POLL_SESSIONS);
+}
+
 export function bindSecurityApprovalUi(): () => void {
   const panel = $('#composer-approval-panel') as HTMLElement | null;
   const summary = $('#composer-approval-summary');
@@ -298,6 +335,9 @@ export function bindSecurityApprovalUi(): () => void {
   const decisionButtons = Array.from(
     panel?.querySelectorAll<HTMLButtonElement>('[data-security-decision]') ?? [],
   );
+  // 面板在主 Composer 内的原始挂载位（approval 槽位）：全局浮动展示时要临时
+  // 挂到 body 下，收回时需归位，否则主聊天的本地 overlay 模式会找不到面板。
+  const panelHome = panel?.parentElement ?? null;
   let visibleRequest: Record<string, unknown> | null = null;
   let polling = false;
   let submitting = false;
@@ -306,29 +346,61 @@ export function bindSecurityApprovalUi(): () => void {
   const REFETCH_INTERVAL_MS = 5000;
   let lastPollAt = 0;
 
-  const showOverlay = (): void => {
-    container?.classList.add('is-approving');
-    panel?.setAttribute('aria-hidden', 'false');
+  const showOverlay = (request: Record<string, unknown>): void => {
+    if (!panel) return;
+    const requestSession = String(request['session_id'] ?? '').trim();
+    const isActiveSession = Boolean(requestSession) && requestSession === state.activeSessionId;
+    if (isActiveSession || !panelHome) {
+      // 主聊天会话的审批：盖在其输入框上层（既有行为）。
+      if (panel.parentElement !== panelHome) panelHome?.appendChild(panel);
+      panel.classList.remove('composer-approval-panel--global');
+      container?.classList.add('is-approving');
+    } else {
+      // 其他会话（如 Wiki 问答，独立 tab、主聊天输入框整体不可见）的审批：
+      // 面板挂到 body 下浮动展示，否则会随隐藏的 tab 一起消失，
+      // 用户永远看不到审批请求，工具只能干等 300s 超时按拒绝处理。
+      container?.classList.remove('is-approving');
+      if (panel.parentElement !== document.body) document.body.appendChild(panel);
+      panel.classList.add('composer-approval-panel--global');
+    }
+    panel.setAttribute('aria-hidden', 'false');
   };
   const hideOverlay = (): void => {
     container?.classList.remove('is-approving');
+    if (panel) {
+      panel.classList.remove('composer-approval-panel--global');
+      if (panelHome && panel.parentElement !== panelHome) panelHome.appendChild(panel);
+    }
     panel?.setAttribute('aria-hidden', 'true');
   };
 
   const poll = async (): Promise<void> => {
-    if (polling || submitting || !state.activeSessionId || !window.Crew?.securityPending) return;
+    if (polling || submitting || !window.Crew?.securityPending) return;
     // 已有可见请求时，节流到 5s 重拉一次以检测后端作废；无可见请求时每秒轮询照旧。
     if (visibleRequest && Date.now() - lastPollAt < REFETCH_INTERVAL_MS) return;
+    const candidates = approvalPollCandidates();
+    if (!candidates.length) return;
     polling = true;
     lastPollAt = Date.now();
     try {
-      const workspaceId = state.sessions.find((item) => item.id === state.activeSessionId)?.workspaceId
-        ?? state.currentWorkspaceId
-        ?? 'default';
-      const result = await window.Crew.securityPending({ workspaceId, sessionId: state.activeSessionId });
-      const body = result?.body as { requests?: Array<Record<string, unknown>> } | undefined;
-      const request = body?.requests?.[0];
-      if (!result?.ok || !request) {
+      // 后端 pending 按 (owner, workspace, session) 过滤，必须逐会话查询。
+      const results = await Promise.all(
+        candidates.map((candidate) =>
+          window.Crew.securityPending({
+            workspaceId: candidate.workspaceId,
+            sessionId: candidate.sessionId,
+          }).catch(() => null)),
+      );
+      let request: Record<string, unknown> | null = null;
+      for (const result of results) {
+        const body = result?.body as { requests?: Array<Record<string, unknown>> } | undefined;
+        const first = body?.requests?.[0];
+        if (result?.ok && first) {
+          request = first;
+          break;
+        }
+      }
+      if (!request) {
         // 之前有可见请求但现在拉不到了 -> 后端已作废或已处理，撤掉 overlay。
         if (visibleRequest) {
           visibleRequest = null;
@@ -338,7 +410,7 @@ export function bindSecurityApprovalUi(): () => void {
       }
       visibleRequest = request;
       if (summary) summary.textContent = formatApprovalSummary(request);
-      showOverlay();
+      showOverlay(request);
     } catch {
       // Gateway unavailable is reported by the existing backend status guard.
     } finally {
@@ -348,7 +420,7 @@ export function bindSecurityApprovalUi(): () => void {
 
   decisionButtons.forEach((button) => {
     button.addEventListener('click', async () => {
-      if (submitting || !visibleRequest || !state.activeSessionId) return;
+      if (submitting || !visibleRequest) return;
       const decision = button.dataset['securityDecision'] as SecurityApprovalChoice;
       if (!SECURITY_APPROVAL_CHOICES.includes(decision)) return;
       const proposedPrefix = Array.isArray(visibleRequest['proposed_argv_prefix'])
@@ -363,7 +435,10 @@ export function bindSecurityApprovalUi(): () => void {
       const workspaceId = String(visibleRequest['workspace_id'] ?? 'default');
       const requestId = String(visibleRequest['request_id'] ?? '');
       const taskId = typeof visibleRequest['task_id'] === 'string' ? String(visibleRequest['task_id']) : '';
-      const sessionId = state.activeSessionId;
+      // 决策必须回传到发起请求的会话（pending 按 session 过滤、decide 校验上下文匹配），
+      // 不能用主聊天活跃会话——Wiki 会话的审批用 activeSessionId 会被后端判为上下文不匹配。
+      const sessionId = String(visibleRequest['session_id'] ?? '').trim() || state.activeSessionId;
+      if (!sessionId) return;
       submitting = true;
       decisionButtons.forEach((item) => { item.disabled = true; });
       try {
