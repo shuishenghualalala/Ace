@@ -162,25 +162,102 @@
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
+  display: flex;
   /* 与目录之间唯一的分隔线 */
   border-left: 1px solid var(--mw-border-subtle);
   background: var(--mw-bg-surface);
-  padding: var(--mw-space-4) var(--mw-space-5);
 }
 
-/* ── 详情面板多 tab 栏（pill chip，视觉对齐 Inspector workspace tab，类名独立不耦合） ── */
+/* ── 详情编辑器组（VSCode 式双组拆分：最多 2 组，row/column 两方向） ── */
 
-#wiki-page-tabs {
+.wiki-detail-groups {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.wiki-detail-groups[data-orientation="column"] {
+  flex-direction: column;
+}
+
+.wiki-detail-group {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 组间 1px 发丝线（把手命中区骑缝，不额外占视觉空间） */
+.wiki-sash--group + .wiki-detail-group {
+  border-left: 1px solid var(--mw-border-subtle);
+}
+
+.wiki-detail-groups[data-orientation="column"] > .wiki-sash--group + .wiki-detail-group {
+  border-top: 1px solid var(--mw-border-subtle);
+  border-left: none;
+}
+
+/* 滚动与内边距下沉到各组内容区（tab 栏固定在组顶不随正文滚动） */
+.wiki-detail-group__content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--mw-space-5) var(--mw-space-4);
+}
+
+/* 聚焦组弱强调：激活 tab 描边带一点主题色（很轻，不破坏现有观感） */
+.wiki-detail-group.is-focused .wiki-tab.is-active {
+  border-color: color-mix(in srgb, var(--mw-action-primary) 45%, var(--mw-border-subtle));
+}
+
+/* tab 拖拽落点：组主体 = 移动落点；详情区四边缘 = 拆分落点（伪元素 overlay，不额外加 DOM） */
+.wiki-detail-group.is-drop-target::after,
+.wiki-detail-groups[data-drop-edge]::after {
+  position: absolute;
+  z-index: var(--mw-z-base);
+  border: 1px solid var(--mw-action-primary);
+  background: color-mix(in srgb, var(--mw-action-primary) 12%, transparent);
+  content: '';
+  pointer-events: none;
+}
+
+.wiki-detail-group.is-drop-target::after {
+  inset: 0;
+}
+
+.wiki-detail-groups[data-drop-edge="left"]::after {
+  inset: 0 50% 0 0;
+}
+
+.wiki-detail-groups[data-drop-edge="right"]::after {
+  inset: 0 0 0 50%;
+}
+
+.wiki-detail-groups[data-drop-edge="top"]::after {
+  inset: 0 0 50% 0;
+}
+
+.wiki-detail-groups[data-drop-edge="bottom"]::after {
+  inset: 50% 0 0 0;
+}
+
+/* ── 组内多 tab 栏（pill chip，视觉对齐 Inspector workspace tab，类名独立不耦合） ── */
+
+.wiki-tabs {
   display: flex;
   align-items: center;
   gap: var(--mw-space-1);
   margin: 0 0 var(--mw-space-3);
+  padding: var(--mw-space-4) var(--mw-space-5) 0;
   overflow-x: auto;
   scrollbar-width: none;
 }
 
-#wiki-page-tabs::-webkit-scrollbar {
+.wiki-tabs::-webkit-scrollbar {
   display: none;
 }
 
@@ -2031,6 +2108,30 @@
     border-left: none;
     border-top: 1px solid var(--mw-border-subtle);
   }
+
+  /* 窄窗口：详情双组强制上下堆叠（row 拆分的两组横向太挤），组间把手随之换横向 */
+  .wiki-detail-groups[data-orientation="row"] {
+    flex-direction: column;
+  }
+
+  .wiki-detail-groups[data-orientation="row"] > .wiki-sash--group {
+    width: auto;
+    height: 16px;
+    margin: calc(var(--mw-space-2) * -1) 0;
+    cursor: row-resize;
+  }
+
+  .wiki-detail-groups[data-orientation="row"] > .wiki-sash--group::after {
+    inset: 50% 0 auto;
+    width: auto;
+    height: 4px;
+    transform: translateY(-50%);
+  }
+
+  .wiki-detail-groups[data-orientation="row"] > .wiki-sash--group + .wiki-detail-group {
+    border-top: 1px solid var(--mw-border-subtle);
+    border-left: none;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -2479,9 +2580,29 @@
   margin: 0 calc(var(--mw-space-2) * -1);
 }
 
+/* 详情双组间把手：上下堆叠（column）时换横向几何与 row-resize 光标 */
+.wiki-detail-groups[data-orientation="column"] > .wiki-sash--group {
+  width: auto;
+  height: 16px;
+  margin: calc(var(--mw-space-2) * -1) 0;
+  cursor: row-resize;
+}
+
+.wiki-detail-groups[data-orientation="column"] > .wiki-sash--group::after {
+  inset: 50% 0 auto;
+  width: auto;
+  height: 4px;
+  transform: translateY(-50%);
+}
+
 body.wiki-resizing {
   user-select: none;
   cursor: col-resize;
+}
+
+body.wiki-resizing-y {
+  user-select: none;
+  cursor: row-resize;
 }
 
 /* ── Wiki 界面导览 ── */
