@@ -39,7 +39,7 @@ class RuleBasedTeamIntentRouter:
     """
 
     def route(self, goal: str) -> TeamIntentDecision:
-        spec = build_team_spec(goal)
+        spec = build_team_spec({"goal": goal})
         profile = spec.task_profile if isinstance(spec.task_profile, dict) else {}
         intent = str(profile.get("intent") or "mixed").strip().lower()
         complexity = str(profile.get("complexity") or "focused").strip().lower()

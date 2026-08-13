@@ -76,17 +76,8 @@ def _structured_team_spec(
     capabilities: list[str] | tuple[str, ...] = (),
     intent: str = "implementation",
     complexity: str = "focused",
-    needs_build: bool = False,
-    needs_verification: bool = False,
-    needs_docs: bool = False,
+    workflow_lanes: list[str] | tuple[str, ...] = (),
 ) -> dict:
-    workflow_lanes = []
-    if needs_build:
-        workflow_lanes.append("build")
-    if needs_verification:
-        workflow_lanes.append("verify")
-    if needs_docs:
-        workflow_lanes.append("docs")
     return {
         "goal": goal,
         "task_profile": {
@@ -95,7 +86,7 @@ def _structured_team_spec(
         },
         "team_requirements": {
             "capabilities": list(capabilities),
-            "workflow_lanes": workflow_lanes,
+            "workflow_lanes": list(workflow_lanes),
         },
     }
 
@@ -762,15 +753,9 @@ class JsonProfileProvider(RoleProvider):
             self.profile_calls += 1
             return ChatResponse(text="""
 {
-  "intent": "implementation",
-  "complexity": "focused",
-  "requested_mode": "fast",
-  "deliverable_shape": "artifact",
-  "needs_build": true,
-  "needs_verification": false,
-  "needs_docs": false,
-  "required_lanes": ["build"],
-  "budget": {"max_nodes": 3}
+  "task_profile": {"intent": "implementation", "complexity": "focused", "deliverable_shape": "artifact"},
+  "execution_profile": {"requested_mode": "fast", "budget": {"max_nodes": 3}},
+  "team_requirements": {"workflow_lanes": ["build"]}
 }
 """)
         return await super().chat(messages, tools)
@@ -2331,7 +2316,7 @@ async def test_team_leader_delegates_to_teammate():
         "组队算1+1",
         session_id="t1",
         mode="team",
-        params={"team_spec": _structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], needs_build=True)},
+        params={"team_spec": _structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], workflow_lanes=("build",))},
     )):
         if ch.kind == "team_internal":
             team_internal.append(ch)
@@ -2400,7 +2385,7 @@ async def test_team_plan_persists_to_kanban_store_and_history_events(tmp_path):
         "组队算1+1",
         session_id="persist-team",
         mode="team",
-        params={"team_spec": _structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], needs_build=True)},
+        params={"team_spec": _structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], workflow_lanes=("build",))},
     ))]
     assert any(ch.kind == "team_internal" for ch in chunks)
 
@@ -2675,7 +2660,7 @@ async def test_team_required_workflow_dispatches_when_leader_does_not_delegate()
         "实现一个小功能",
         session_id="workflow_s1",
         mode="team",
-        params={"team_spec": _structured_team_spec("实现一个小功能", capabilities=["implementation"], needs_build=True)},
+        params={"team_spec": _structured_team_spec("实现一个小功能", capabilities=["implementation"], workflow_lanes=("build",))},
     ))]
     final = next(ch.body["text"] for ch in chunks if ch.kind == "final")
 
@@ -2704,7 +2689,7 @@ def test_team_required_workflow_single_member_title_uses_goal():
     nodes, edges = tm._default_workflow_nodes(
         team,
         "写一个贪吃蛇小游戏，像素风",
-        team_spec=_structured_team_spec("写一个贪吃蛇小游戏，像素风", capabilities=["design", "implementation"], needs_build=True),
+        team_spec=_structured_team_spec("写一个贪吃蛇小游戏，像素风", capabilities=["design", "implementation"], workflow_lanes=("build",)),
     )
 
     assert [node["id"] for node in nodes] == ["leader_plan", "build_design_1", "build_1", "leader_review", "leader_summary"]
@@ -2739,7 +2724,7 @@ def test_team_workflow_lane_reuses_role_catalog_without_member_metadata():
     nodes, edges = tm._default_workflow_nodes(
         team,
         "组队算1+1",
-        team_spec=_structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], needs_build=True),
+        team_spec=_structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], workflow_lanes=("build",)),
     )
 
     assert [node["id"] for node in nodes] == [
@@ -2806,9 +2791,7 @@ def test_team_required_workflow_generates_role_lane_dag():
         team_spec=_structured_team_spec(
             "写一个贪吃蛇小游戏，像素风",
             capabilities=["design", "implementation", "testing", "verification", "documentation"],
-            needs_build=True,
-            needs_verification=True,
-            needs_docs=True,
+            workflow_lanes=("build", "verify", "docs"),
         ),
     )
 
@@ -2845,8 +2828,11 @@ def test_team_spec_does_not_infer_workflow_from_testing_words():
         "测试之前开发好的俄罗斯方块游戏",
     ]
 
+    with pytest.raises(TypeError, match="不再接受字符串目标"):
+        build_team_spec(goals[0])
+
     for goal in goals:
-        spec = build_team_spec(goal)
+        spec = build_team_spec({"goal": goal})
         assert spec.task_profile["intent"] == "mixed"
         assert spec.team_requirements["workflow_lanes"] == []
         assert spec.team_requirements["roles"] == []
@@ -3853,7 +3839,7 @@ def test_team_uses_external_team_selected_leader():
     nodes, edges = tm._default_workflow_nodes(
         team,
         "开发一个贪吃蛇游戏",
-        team_spec=_structured_team_spec("开发一个贪吃蛇游戏", capabilities=["implementation"], needs_build=True),
+        team_spec=_structured_team_spec("开发一个贪吃蛇游戏", capabilities=["implementation"], workflow_lanes=("build",)),
     )
     assert [node["id"] for node in nodes] == ["leader_plan", "build_design_1", "build_1", "leader_review", "leader_summary"]
     assert nodes[1]["assignee"] == "hh"
@@ -4293,7 +4279,7 @@ def test_testing_goal_without_build_member_does_not_create_build_node():
         "测试一下团队协作",
         capabilities=["testing", "verification"],
         intent="testing",
-        needs_verification=True,
+        workflow_lanes=("verify",),
     ))
     assert collaboration_spec.task_profile["intent"] == "testing"
     assert collaboration_spec.team_requirements["workflow_lanes"] == ["verify"]
@@ -4328,7 +4314,7 @@ def test_testing_goal_without_build_member_does_not_create_build_node():
 
 
 def test_unstructured_goal_profile_does_not_embed_execution_mode():
-    spec = build_team_spec("有贪吃蛇小游戏么")
+    spec = build_team_spec({"goal": "有贪吃蛇小游戏么"})
 
     assert spec.task_profile["intent"] == "mixed"
     assert spec.execution_profile == {}
@@ -4336,20 +4322,12 @@ def test_unstructured_goal_profile_does_not_embed_execution_mode():
     assert spec.uncertainty == "high"
 
 
-def test_team_spec_projects_legacy_execution_flags_to_canonical_workflow_lanes():
-    spec = build_team_spec({
-        "goal": "完成实现、验证和文档交付",
-        "execution_profile": {
-            "needs_build": True,
-            "needs_verification": True,
-            "needs_docs": True,
-        },
-    })
-
-    assert spec.team_requirements["workflow_lanes"] == ["build", "verify", "docs"]
-    # Old fields are accepted as input only; normalized TeamSpec exposes the
-    # canonical workflow_lanes contract and keeps execution_profile runtime-only.
-    assert spec.execution_profile == {}
+def test_team_spec_rejects_legacy_execution_flags():
+    with pytest.raises(ValueError, match="needs_build"):
+        build_team_spec({
+            "goal": "完成实现、验证和文档交付",
+            "execution_profile": {"needs_build": True},
+        })
 
 
 def test_team_spec_keeps_task_semantics_out_of_execution_profile():
@@ -4363,8 +4341,6 @@ def test_team_spec_keeps_task_semantics_out_of_execution_profile():
         "execution_profile": {
             "requested_mode": "standard",
             "budget": {"max_nodes": 5},
-            "intent": "implementation",
-            "needs_build": True,
         },
         "team_requirements": {"workflow_lanes": ["plan", "docs"]},
     })
@@ -4378,7 +4354,7 @@ def test_team_spec_keeps_task_semantics_out_of_execution_profile():
         "requested_mode": "standard",
         "budget": {"max_nodes": 5},
     }
-    assert spec.team_requirements["workflow_lanes"] == ["plan", "docs", "build"]
+    assert spec.team_requirements["workflow_lanes"] == ["plan", "docs"]
 
 
 def test_team_graph_planner_emits_runtime_only_execution_profile():
@@ -4399,10 +4375,12 @@ def test_team_graph_planner_emits_runtime_only_execution_profile():
         "开发一个小工具",
         execution_profile={
             "requested_mode": "fast",
-            "intent": "implementation",
-            "complexity": "focused",
-            "needs_build": True,
         },
+        team_spec=_structured_team_spec(
+            "开发一个小工具",
+            capabilities=["implementation"],
+            workflow_lanes=("build",),
+        ),
     )
 
     assert plan.spec.task_profile["intent"] == "implementation"
@@ -4487,14 +4465,10 @@ async def test_ai_planner_uses_llm_single_dag():
 def test_team_spec_v3_records_requirements_deliverables_and_consent_policy():
     spec = build_team_spec({
         "goal": "指定当前团队开发登录接口并做安全测试，不要自动换人",
-        "execution_profile": {
-            "intent": "implementation",
-            "complexity": "multi_role",
-            "needs_build": True,
-            "needs_verification": True,
-        },
-        "team_requirements": {
-            "capabilities": ["backend", "implementation", "testing", "verification"],
+            "task_profile": {"intent": "implementation", "complexity": "multi_role"},
+            "team_requirements": {
+                "capabilities": ["backend", "implementation", "testing", "verification"],
+                "workflow_lanes": ["build", "verify"],
         },
         "deliverables": [
             {"type": "code", "description": "可运行的接口实现"},
@@ -4569,8 +4543,7 @@ def test_team_graph_planner_warns_without_mutating_user_team():
         team_spec=_structured_team_spec(
             "开发一个登录接口并完成测试验收",
             capabilities=["backend", "implementation", "testing", "verification"],
-            needs_build=True,
-            needs_verification=True,
+            workflow_lanes=("build", "verify"),
         ),
     )
 
@@ -4628,8 +4601,7 @@ def test_team_graph_planner_standard_profile_uses_default_role_dag():
         team_spec=_structured_team_spec(
             "开发一个登录接口并完成测试验收",
             capabilities=["planning", "backend", "implementation", "testing", "verification"],
-            needs_build=True,
-            needs_verification=True,
+            workflow_lanes=("build", "verify"),
         ),
     )
 
@@ -4775,11 +4747,8 @@ def test_team_graph_planner_standard_question_stays_role_dag_without_inquiry_or_
         "你们团队现在有哪些成员",
         execution_profile={
             "requested_mode": "standard",
-            "intent": "question",
-            "needs_build": False,
-            "needs_verification": False,
-            "needs_docs": False,
         },
+        team_spec=_structured_team_spec("你们团队现在有哪些成员", intent="question", complexity="simple"),
     )
 
     node_ids = [node["id"] for node in graph_plan.nodes]
@@ -4836,16 +4805,12 @@ def test_team_graph_planner_standard_budget_trims_optional_nodes():
         "开发一个登录接口并完成测试验收",
         execution_profile={
             "requested_mode": "standard",
-            "needs_build": True,
-            "needs_verification": True,
-            "needs_docs": False,
             "budget": {"max_nodes": 5},
         },
         team_spec=_structured_team_spec(
             "开发一个登录接口并完成测试验收",
             capabilities=["planning", "backend", "implementation", "testing", "verification"],
-            needs_build=True,
-            needs_verification=True,
+            workflow_lanes=("build", "verify"),
         ),
     )
 
@@ -5907,7 +5872,7 @@ async def test_team_graph_planner_ai_missing_capability_contract_falls_back_to_s
         team_spec=_structured_team_spec(
             "开发一个登录接口",
             capabilities=["backend", "implementation"],
-            needs_build=True,
+            workflow_lanes=("build",),
         ),
         provider=MissingCapabilityGraphProvider(),
     )
@@ -5942,7 +5907,7 @@ async def test_team_graph_planner_standard_async_falls_back_to_role_dag_when_dec
         team_spec=_structured_team_spec(
             "开发一个登录接口",
             capabilities=["backend", "implementation"],
-            needs_build=True,
+            workflow_lanes=("build",),
         ),
         provider=FailingGraphProvider(),
     )
@@ -6039,15 +6004,12 @@ def test_team_graph_planner_fast_profile_builds_minimal_dag():
         "做一个可运行的小工具",
         execution_profile={
             "requested_mode": "fast",
-            "deliverable_shape": "artifact",
-            "needs_verification": False,
             "budget": {"max_retries": 1, "max_nodes": 3},
         },
         team_spec=_structured_team_spec(
             "做一个可运行的小工具",
             capabilities=["implementation", "testing", "verification"],
-            needs_build=True,
-            needs_verification=True,
+            workflow_lanes=("build",),
         ),
     )
 
@@ -6187,11 +6149,8 @@ def test_team_graph_planner_fast_question_prefers_plan_or_docs_before_verify():
         "你们团队擅长做什么工作",
         execution_profile={
             "requested_mode": "fast",
-            "intent": "question",
-            "needs_build": False,
-            "needs_verification": False,
-            "needs_docs": False,
         },
+        team_spec=_structured_team_spec("你们团队擅长做什么工作", intent="question", complexity="simple"),
     )
 
     assert [node["id"] for node in graph_plan.nodes] == ["leader_plan", "fast_execute", "leader_summary"]
@@ -6222,11 +6181,8 @@ def test_team_graph_planner_fast_question_uses_leader_before_build_when_no_docs_
         "今天天气怎么样，你的团队成员都准备好了么",
         execution_profile={
             "requested_mode": "fast",
-            "intent": "question",
-            "needs_build": False,
-            "needs_verification": False,
-            "needs_docs": False,
         },
+        team_spec=_structured_team_spec("今天天气怎么样，你的团队成员都准备好了么", intent="question", complexity="simple"),
     )
 
     assert [node["id"] for node in graph_plan.nodes] == ["leader_plan", "fast_execute", "leader_summary"]
@@ -6265,9 +6221,8 @@ def test_team_graph_planner_fast_profile_adds_lightweight_verify_when_requested(
         "快速完成当前页面调整",
         execution_profile={
             "requested_mode": "fast",
-            "deliverable_shape": "artifact",
-            "needs_verification": True,
         },
+        team_spec=_structured_team_spec("快速完成当前页面调整", workflow_lanes=("verify",)),
     )
 
     assert [node["id"] for node in graph_plan.nodes] == [
@@ -6307,11 +6262,12 @@ async def test_team_fast_question_leader_runs_model_and_summarizes_user_goal():
         params={
             "team_execution_profile": {
                 "requested_mode": "fast",
-                "intent": "question",
-                "needs_build": False,
-                "needs_verification": False,
-                "needs_docs": False,
-            }
+            },
+            "team_spec": _structured_team_spec(
+                "今天天气怎么样，你的团队成员都准备好了么",
+                intent="question",
+                complexity="simple",
+            ),
         },
     )
 
@@ -6359,7 +6315,8 @@ def test_team_runtime_accepts_fast_execution_profile():
         "快速完成一个 demo",
         "",
         owner_account_id="local",
-        execution_profile={"requested_mode": "fast", "needs_verification": False, "budget": {"max_retries": 1}},
+        execution_profile={"requested_mode": "fast", "budget": {"max_retries": 1}},
+        team_spec={"goal": "快速完成一个 demo"},
     )
 
     assert plan is not None
@@ -6556,8 +6513,7 @@ async def test_team_runtime_auto_falls_back_to_standard_when_planning_decision_i
         team_spec=_structured_team_spec(
             "帮我开发一个2048小游戏",
             capabilities=["implementation", "testing", "verification"],
-            needs_build=True,
-            needs_verification=True,
+            workflow_lanes=("build", "verify"),
         ),
     )
 
@@ -6600,7 +6556,8 @@ def test_team_runtime_reflection_inserts_diagnostic_replan_node():
         "开发一个登录接口",
         "",
         owner_account_id="local",
-        execution_profile={"requested_mode": "fast", "needs_verification": False},
+        execution_profile={"requested_mode": "fast"},
+        team_spec={"goal": "开发一个登录接口"},
     )
     assert plan is not None
     node = plan.nodes["fast_execute"]
@@ -6634,7 +6591,8 @@ def test_runtime_diagnostic_node_persists_workflow_revision_and_replaces_depende
         "快速完成一个小工具",
         "",
         owner_account_id="local",
-        execution_profile={"requested_mode": "fast", "needs_verification": False},
+        execution_profile={"requested_mode": "fast"},
+        team_spec={"goal": "快速完成一个小工具"},
     )
     assert plan is not None
 
@@ -7111,7 +7069,7 @@ async def test_team_runtime_display_end_to_end_for_parallel_qa_and_security(tmp_
                 "测试一下贪吃蛇",
                 capabilities=["testing", "verification", "review"],
                 intent="testing",
-                needs_verification=True,
+                workflow_lanes=("verify",),
             )},
         ))
     ]

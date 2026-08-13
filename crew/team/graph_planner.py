@@ -95,15 +95,17 @@ def _merged_execution_profile(spec: TeamSpec, execution_profile: dict[str, Any] 
     allowed_keys = {
         "requested_mode",
         "selected_mode",
-        "needs_build",
-        "needs_verification",
-        "needs_docs",
-        "required_lanes",
         "budget",
         "turn_kind",
         "turn_decision_source",
         "profile_source",
     }
+    unknown = sorted(set(incoming) - allowed_keys)
+    if unknown:
+        raise ValueError(
+            "TeamGraphPlanner.execution_profile 只允许运行控制字段，非法字段："
+            + ", ".join(unknown)
+        )
     for key, value in incoming.items():
         if value is None:
             continue
@@ -113,37 +115,10 @@ def _merged_execution_profile(spec: TeamSpec, execution_profile: dict[str, Any] 
             profile[key] = {**dict(profile.get(key) or {}), **value}
         else:
             profile[key] = value
-    workflow_lanes = list(spec.team_requirements.get("workflow_lanes") or [])
-    legacy_profile = spec.execution_profile if isinstance(spec.execution_profile, dict) else {}
-    workflow_lanes.extend(str(item).strip() for item in (legacy_profile.get("required_lanes") or []) if str(item).strip())
-    workflow_lanes.extend(str(item).strip() for item in (incoming.get("required_lanes") or []) if str(item).strip())
-    workflow_lanes.extend(str(item).strip() for item in (incoming.get("workflow_lanes") or []) if str(item).strip())
-    for flag, lane in (
-        ("needs_build", "build"),
-        ("needs_verification", "verify"),
-        ("needs_docs", "docs"),
-    ):
-        if flag not in incoming:
-            continue
-        if bool(incoming.get(flag)):
-            workflow_lanes.append(lane)
-        else:
-            workflow_lanes = [item for item in workflow_lanes if item != lane]
-    profile["required_lanes"] = list(dict.fromkeys(workflow_lanes))
     requested_mode = normalize_planning_mode(incoming.get("requested_mode") or "auto")
     profile["requested_mode"] = requested_mode
     profile.setdefault("budget", {})
     return profile
-
-
-def _spec_with_workflow_lanes(spec: TeamSpec, profile: dict[str, Any]) -> TeamSpec:
-    requirements = dict(spec.team_requirements or {})
-    requirements["workflow_lanes"] = list(dict.fromkeys(
-        str(item).strip()
-        for item in (profile.get("required_lanes") or [])
-        if str(item).strip()
-    ))
-    return replace(spec, team_requirements=requirements)
 
 
 def _runtime_execution_profile(profile: dict[str, Any]) -> dict[str, Any]:
@@ -156,23 +131,6 @@ def _runtime_execution_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "profile_source",
     }
     return {key: value for key, value in profile.items() if key in runtime_keys}
-
-
-def _spec_with_legacy_task_profile(
-    spec: TeamSpec,
-    execution_profile: dict[str, Any] | None,
-) -> TeamSpec:
-    """Project legacy semantic profile input into the structured task profile."""
-
-    incoming = execution_profile if isinstance(execution_profile, dict) else {}
-    legacy_fields = {
-        key: str(incoming[key]).strip()
-        for key in ("intent", "complexity", "deliverable_shape")
-        if incoming.get(key) is not None and str(incoming[key]).strip()
-    }
-    if not legacy_fields:
-        return spec
-    return replace(spec, task_profile={**dict(spec.task_profile or {}), **legacy_fields})
 
 
 FastPrimary = TeamMemberSpec | str
@@ -221,9 +179,9 @@ def _select_fast_verifier(
     members: list[TeamMemberSpec],
     *,
     primary_id: str,
-    profile: dict[str, Any],
+    required_lanes: set[str],
 ) -> TeamMemberSpec | None:
-    if "verify" not in set(profile.get("required_lanes") or []):
+    if "verify" not in required_lanes:
         return None
     verifiers = [
         member
@@ -239,6 +197,7 @@ def _build_fast_workflow_nodes(
     profile: dict[str, Any],
     *,
     required_capabilities: list[str] | None = None,
+    required_lanes: set[str] | None = None,
     capability_source: str = "team_spec",
     task_profile: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[Any]]:
@@ -285,7 +244,11 @@ def _build_fast_workflow_nodes(
     for parent in execute_parents:
         edges.append([parent, "fast_execute"])
     summary_parent = "fast_execute"
-    verifier = _select_fast_verifier(members, primary_id=primary_id, profile=profile)
+    verifier = _select_fast_verifier(
+        members,
+        primary_id=primary_id,
+        required_lanes=set(required_lanes or []),
+    )
     if verifier is not None:
         verifier_metadata = flow_builder.member_node_metadata(verifier, "verify")
         verifier_metadata.update({
@@ -509,14 +472,13 @@ def _budget_max_nodes(profile: dict[str, Any]) -> int | None:
     return max_nodes if max_nodes > 0 else None
 
 
-def _standard_node_required(raw: dict[str, Any], profile: dict[str, Any]) -> bool:
+def _standard_node_required(raw: dict[str, Any], required_lanes: set[str]) -> bool:
     node_id = _node_id(raw)
     if node_id in {"leader_plan", "leader_summary"}:
         return True
     lane = _node_lane(raw)
     if lane in {"lead", "summary"}:
         return True
-    required_lanes = set(profile.get("required_lanes") or [])
     if lane in required_lanes or (lane == "release" and "docs" in required_lanes):
         return True
     return False
@@ -565,6 +527,7 @@ def _apply_standard_budget(
     raw_nodes: list[dict[str, Any]],
     raw_edges: list[Any],
     profile: dict[str, Any],
+    required_lanes: set[str],
 ) -> tuple[list[dict[str, Any]], list[Any], list[str]]:
     max_nodes = _budget_max_nodes(profile)
     if max_nodes is None or len(raw_nodes) <= max_nodes:
@@ -584,7 +547,7 @@ def _apply_standard_budget(
     candidates = [
         (removable_priority.get(_node_lane(node), 5), -index, _node_id(node))
         for index, node in enumerate(raw_nodes)
-        if _node_id(node) and not _standard_node_required(node, profile)
+        if _node_id(node) and not _standard_node_required(node, required_lanes)
     ]
     removed_ids: list[str] = []
     for _, _, node_id in sorted(candidates):
@@ -615,7 +578,10 @@ def _build_standard_workflow_nodes(
     team_spec: TeamSpec,
 ) -> tuple[list[dict[str, Any]], list[Any], list[str]]:
     raw_nodes, raw_edges = flow_builder.build_default_workflow_nodes(team, goal, team_spec=team_spec)
-    trimmed_nodes, trimmed_edges, notes = _apply_standard_budget(raw_nodes, raw_edges, profile)
+    required_lanes = set(team_spec.team_requirements.get("workflow_lanes") or [])
+    trimmed_nodes, trimmed_edges, notes = _apply_standard_budget(
+        raw_nodes, raw_edges, profile, required_lanes
+    )
     return trimmed_nodes, trimmed_edges, notes
 
 
@@ -739,6 +705,7 @@ def _semantic_standard_workflow_nodes(
     goal: str,
     decision: PlanningDecision,
     profile: dict[str, Any],
+    required_lanes: set[str],
 ) -> tuple[list[dict[str, Any]], list[Any], list[str], float]:
     members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
     task_title = flow_builder.goal_title(goal)
@@ -854,7 +821,12 @@ def _semantic_standard_workflow_nodes(
         "metadata": flow_builder.node_metadata("summary", label="汇总结论、验收反馈", key="team_lead"),
     })
     edges.extend([[parent_id, "leader_summary"] for parent_id in summary_parents])
-    nodes, edges, budget_notes = _apply_standard_budget(nodes, edges, profile)
+    nodes, edges, budget_notes = _apply_standard_budget(
+        nodes,
+        edges,
+        profile,
+        required_lanes,
+    )
     coverage = min(assigned_coverage) if assigned_coverage else 0.0
     notes = [
         "Standard Team 使用 PlanningDecision 语义工作单元编译通用 DAG。",
@@ -887,7 +859,7 @@ def _planning_team_spec_summary(spec: TeamSpec, profile: dict[str, Any]) -> dict
         "intent": str(spec.task_profile.get("intent") or "mixed"),
         "complexity": str(spec.task_profile.get("complexity") or "focused"),
         "required_capabilities": normalize_capabilities(requirements.get("capabilities") or []),
-        "required_lanes": [
+        "workflow_lanes": [
             str(item)
             for item in (requirements.get("workflow_lanes") or [])
             if str(item).strip()
@@ -2004,14 +1976,11 @@ class TeamGraphPlanner:
         if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
             spec_source = {"goal": goal, **spec_source}
         base_spec = build_team_spec(spec_source)
-        base_spec = _spec_with_legacy_task_profile(base_spec, execution_profile)
         profile = _merged_execution_profile(base_spec, execution_profile)
-        base_spec = _spec_with_workflow_lanes(base_spec, profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         selected_mode: PlanningMode = "fast" if requested_mode == "fast" else "standard"
         fallback_from = "ai" if requested_mode == "ai" else None
         profile.update({"requested_mode": requested_mode, "selected_mode": selected_mode})
-        base_spec = _spec_with_workflow_lanes(base_spec, profile)
         spec = replace(base_spec, execution_profile=_runtime_execution_profile(profile))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
         policy_report = analyze_team_policy(spec=spec, members=members)
@@ -2022,6 +1991,7 @@ class TeamGraphPlanner:
                 goal,
                 profile,
                 required_capabilities=normalize_capabilities(spec.team_requirements.get("capabilities") or []),
+                required_lanes=set(spec.team_requirements.get("workflow_lanes") or []),
                 task_profile=spec.task_profile,
             )
             plan_strategy = "fast_minimal_path"
@@ -2070,9 +2040,7 @@ class TeamGraphPlanner:
         if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
             spec_source = {"goal": goal, **spec_source}
         base_spec = build_team_spec(spec_source)
-        base_spec = _spec_with_legacy_task_profile(base_spec, execution_profile)
         profile = _merged_execution_profile(base_spec, execution_profile)
-        base_spec = _spec_with_workflow_lanes(base_spec, profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
         if provider is None or requested_mode == "fast":
@@ -2174,9 +2142,7 @@ class TeamGraphPlanner:
 
         if decision is not None:
             base_spec = team_spec_from_planning_decision(base_spec, decision)
-            profile["required_lanes"] = list(base_spec.team_requirements.get("workflow_lanes") or [])
         profile.update({"requested_mode": requested_mode, "selected_mode": selected_mode})
-        base_spec = _spec_with_workflow_lanes(base_spec, profile)
         spec = replace(base_spec, execution_profile=_runtime_execution_profile(profile))
         policy_report = analyze_team_policy(spec=spec, members=members)
 
@@ -2195,6 +2161,7 @@ class TeamGraphPlanner:
                 goal,
                 profile,
                 required_capabilities=fast_required_capabilities,
+                required_lanes=set(spec.team_requirements.get("workflow_lanes") or []),
                 capability_source="work_unit_summary" if decision is not None else "team_spec",
                 task_profile=spec.task_profile,
             )
@@ -2237,7 +2204,11 @@ class TeamGraphPlanner:
 
         if selected_mode == "standard" and decision is not None:
             raw_nodes, raw_edges, semantic_notes, coverage = _semantic_standard_workflow_nodes(
-                team, goal, decision, profile
+                team,
+                goal,
+                decision,
+                profile,
+                set(spec.team_requirements.get("workflow_lanes") or []),
             )
             nodes, edges, normalize_notes = _normalize_nodes_with_graph(
                 goal=goal,
@@ -2302,7 +2273,12 @@ class TeamGraphPlanner:
             notes = [f"AI Planner LLM DAG 耗时 {elapsed_ms}ms。", *llm_notes, *notes]
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else None
-            fallback = self.plan(team, goal, execution_profile={**profile, "requested_mode": "standard"})
+            fallback = self.plan(
+                team,
+                goal,
+                execution_profile={**profile, "requested_mode": "standard"},
+                team_spec=spec,
+            )
             _annotate_planner_metrics(
                 fallback.nodes,
                 status="fallback",

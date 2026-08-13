@@ -4309,7 +4309,11 @@ class InProcessTeamManager(TeamManager):
             return base_profile
         if turn_decision.turn_kind != "new_workflow" or turn_decision.execution_mode != "fast":
             return None
-        profile = dict(intent_profile)
+        profile = {
+            key: intent_profile[key]
+            for key in ("requested_mode", "selected_mode", "budget", "profile_source")
+            if key in intent_profile
+        }
         profile["requested_mode"] = "fast"
         profile["turn_kind"] = turn_decision.turn_kind
         profile["turn_decision_source"] = str(turn_decision.diagnostics.get("source") or "")
@@ -7218,8 +7222,6 @@ class InProcessTeamManager(TeamManager):
         team_spec = raw_team_spec if isinstance(raw_team_spec, dict) else None
         explicit_profile = envelope.params.get("team_execution_profile")
         route_team_spec = team_spec
-        if route_team_spec is None and isinstance(explicit_profile, dict):
-            route_team_spec = {"goal": str(envelope.query or ""), "execution_profile": explicit_profile}
         base_turn_decision = self.turn_router.route(
             str(envelope.query or ""),
             team_spec=route_team_spec,

@@ -32,13 +32,13 @@ class TeamTurnRouter:
         elif _is_simple_chat(goal):
             spec_source = {
                 "goal": goal,
-                "execution_profile": {
+                "task_profile": {
                     "intent": "chat",
                     "complexity": "simple",
                 },
             }
         else:
-            spec_source = goal
+            spec_source = {"goal": goal}
         spec = build_team_spec(spec_source)
         reason = (
             spec.planner_notes[0]

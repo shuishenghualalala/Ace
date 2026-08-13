@@ -1,15 +1,4 @@
-"""TeamSpec: the structured task contract shared by Team subsystems.
-
-``TeamSpec`` describes what a user task explicitly requires.  It does not
-choose members, trigger runtime staffing, or infer a workflow from business
-words in a free-form prompt.  Formation and runtime planning consume the
-normalized contract, while semantic interpretation belongs to their own
-input boundary (for example, a structured form or ``PlanningDecision``).
-
-The string input accepted by :func:`build_team_spec` is a migration boundary
-for older callers.  It preserves the goal text and deliberately leaves all
-task requirements unspecified; it is not a keyword-based fallback.
-"""
+"""TeamSpec: the structured task contract shared by Team subsystems."""
 
 from __future__ import annotations
 
@@ -46,7 +35,30 @@ class TeamSpec:
         return asdict(self)
 
 
-TeamSpecInput = Mapping[str, Any] | TeamSpec | str | None
+TeamSpecInput = Mapping[str, Any] | TeamSpec | None
+
+_RUNTIME_EXECUTION_KEYS = frozenset({
+    "requested_mode",
+    "selected_mode",
+    "budget",
+    "turn_kind",
+    "turn_decision_source",
+    "profile_source",
+})
+_TASK_PROFILE_KEYS = frozenset({"intent", "complexity", "deliverable_shape"})
+_TEAM_REQUIREMENT_KEYS = frozenset({"roles", "workflow_lanes", "capabilities"})
+_LEGACY_TOP_LEVEL_KEYS = frozenset({
+    "intent",
+    "complexity",
+    "deliverable_shape",
+    "required_capabilities",
+    "required_roles",
+    "workflow_lanes",
+    "required_lanes",
+    "needs_build",
+    "needs_verification",
+    "needs_docs",
+})
 
 
 def _unique(values: list[str], *, limit: int = 8) -> list[str]:
@@ -93,45 +105,27 @@ def _normalize_deliverables(value: Any) -> list[dict[str, str]]:
 
 def _default_execution_profile(source: Mapping[str, Any]) -> dict[str, Any]:
     explicit = _mapping(source.get("execution_profile"))
-    runtime_keys = (
-        "requested_mode",
-        "selected_mode",
-        "budget",
-        "turn_kind",
-        "turn_decision_source",
-        "profile_source",
-    )
-    profile: dict[str, Any] = {}
-    for key in runtime_keys:
-        if key in explicit:
-            profile[key] = explicit[key]
-        elif key in source:
-            profile[key] = source[key]
-    return profile
+    unknown = sorted(set(explicit) - _RUNTIME_EXECUTION_KEYS)
+    if unknown:
+        raise ValueError(
+            "TeamSpec.execution_profile 只允许运行控制字段，非法字段："
+            + ", ".join(unknown)
+        )
+    return {key: explicit[key] for key in _RUNTIME_EXECUTION_KEYS if key in explicit}
 
 
 def _default_task_profile(source: Mapping[str, Any]) -> dict[str, str]:
     explicit = _mapping(source.get("task_profile"))
-    legacy = _mapping(source.get("execution_profile"))
+    unknown = sorted(set(explicit) - _TASK_PROFILE_KEYS)
+    if unknown:
+        raise ValueError(
+            "TeamSpec.task_profile 只允许任务语义字段，非法字段："
+            + ", ".join(unknown)
+        )
     return {
-        "intent": str(
-            explicit.get("intent")
-            or source.get("intent")
-            or legacy.get("intent")
-            or "mixed"
-        ),
-        "complexity": str(
-            explicit.get("complexity")
-            or source.get("complexity")
-            or legacy.get("complexity")
-            or "focused"
-        ),
-        "deliverable_shape": str(
-            explicit.get("deliverable_shape")
-            or source.get("deliverable_shape")
-            or legacy.get("deliverable_shape")
-            or "unknown"
-        ),
+        "intent": str(explicit.get("intent") or "mixed"),
+        "complexity": str(explicit.get("complexity") or "focused"),
+        "deliverable_shape": str(explicit.get("deliverable_shape") or "unknown"),
     }
 
 
@@ -139,45 +133,31 @@ def _explicit_workflow_lanes(
     source: Mapping[str, Any],
     requirements: Mapping[str, Any],
 ) -> list[str]:
-    """Return the canonical workflow lanes from explicit input only.
-
-    ``needs_*`` is accepted as a compatibility input for existing callers, but
-    it is immediately projected into ``team_requirements.workflow_lanes``.
-    Consumers should use that canonical field instead of the legacy flags.
-    """
-
-    explicit_lanes = requirements.get("workflow_lanes")
-    if explicit_lanes is None:
-        explicit_lanes = source.get("workflow_lanes")
-    if explicit_lanes is None:
-        explicit_lanes = _mapping(source.get("execution_profile")).get("required_lanes")
-    lanes = _text_list(explicit_lanes, limit=8)
-    legacy_lanes = {
-        "needs_build": "build",
-        "needs_verification": "verify",
-        "needs_docs": "docs",
-    }
-    for flag, lane in legacy_lanes.items():
-        legacy_profile = _mapping(source.get("execution_profile"))
-        explicit_value = legacy_profile.get(flag) if flag in legacy_profile else source.get(flag)
-        if _explicit_bool(explicit_value):
-            lanes.append(lane)
-    return _unique(lanes, limit=8)
+    del source
+    return _text_list(requirements.get("workflow_lanes"), limit=8)
 
 
 def _build_normalized_spec(source: Mapping[str, Any]) -> TeamSpec:
+    legacy_fields = sorted(set(source) & _LEGACY_TOP_LEVEL_KEYS)
+    if legacy_fields:
+        raise ValueError(
+            "TeamSpec 必须使用结构化字段，禁止旧兼容字段："
+            + ", ".join(legacy_fields)
+        )
     requirements_input = _mapping(source.get("team_requirements"))
+    unknown_requirements = sorted(set(requirements_input) - _TEAM_REQUIREMENT_KEYS)
+    if unknown_requirements:
+        raise ValueError(
+            "TeamSpec.team_requirements 只允许 roles、workflow_lanes、capabilities，非法字段："
+            + ", ".join(unknown_requirements)
+        )
     task_profile = _default_task_profile(source)
     execution_profile = _default_execution_profile(source)
     explicit_capabilities = requirements_input.get("capabilities")
-    if explicit_capabilities is None:
-        explicit_capabilities = source.get("required_capabilities")
     capabilities = normalize_capabilities(_text_list(explicit_capabilities, limit=16))
 
     roles = _text_list(
-        requirements_input.get("roles")
-        if requirements_input.get("roles") is not None
-        else source.get("required_roles"),
+        requirements_input.get("roles"),
         limit=8,
     )
     lanes = _explicit_workflow_lanes(source, requirements_input)
@@ -258,17 +238,20 @@ def _build_normalized_spec(source: Mapping[str, Any]) -> TeamSpec:
 def build_team_spec(source: TeamSpecInput = None) -> TeamSpec:
     """Normalize one explicit TeamSpec input.
 
-    Preferred input is a mapping containing ``goal`` plus structured fields
-    such as ``team_requirements``, ``deliverables`` and ``success_criteria``.
-    Passing a string is supported only for migration: its text is retained as
-    ``goal`` and no role, capability, intent, deliverable, or workflow stage
-    is inferred from that text.
+    Input must be a mapping containing ``goal`` plus structured fields such as
+    ``task_profile``, ``team_requirements`` and ``deliverables``.  A free-form
+    string is deliberately rejected so that this contract has no hidden
+    migration or keyword-inference path.
     """
     if isinstance(source, TeamSpec):
         return source
     if isinstance(source, Mapping):
         return _build_normalized_spec(source)
-    return _build_normalized_spec({"goal": str(source or "")})
+    if source is None:
+        return _build_normalized_spec({})
+    raise TypeError(
+        "build_team_spec 只接受 TeamSpec、结构化 Mapping 或 None；不再接受字符串目标。"
+    )
 
 
 def team_spec_from_planning_decision(

@@ -260,7 +260,7 @@ def goal_title(goal: str) -> str:
 
 
 def goal_needs_build(goal: str) -> bool:
-    spec = build_team_spec(goal)
+    spec = build_team_spec({"goal": goal})
     return "build" in set(spec.team_requirements.get("workflow_lanes") or [])
 
 

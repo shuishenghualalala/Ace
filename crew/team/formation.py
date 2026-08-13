@@ -380,6 +380,38 @@ def _required_capabilities(_text: str, team_spec: Any) -> list[str]:
     return [capability for capability in normalize_capabilities(required) if capability != "planning"]
 
 
+def _formation_team_spec_input(payload: dict[str, Any], goal: str) -> dict[str, Any]:
+    """Build the canonical TeamSpec envelope from the formation request."""
+
+    requirements = dict(payload.get("team_requirements") or {})
+    requested_capabilities = payload.get("required_capabilities")
+    if requested_capabilities is not None and "capabilities" not in requirements:
+        requirements["capabilities"] = requested_capabilities
+    requested_roles = payload.get("required_roles")
+    if requested_roles is not None and "roles" not in requirements:
+        requirements["roles"] = requested_roles
+    task_profile = payload.get("task_profile")
+    return {
+        "goal": goal,
+        "task_profile": dict(task_profile) if isinstance(task_profile, dict) else {},
+        "team_requirements": requirements,
+        **{
+            key: payload[key]
+            for key in (
+                "collaboration_mode",
+                "planning",
+                "policy",
+                "deliverables",
+                "success_criteria",
+                "risk_level",
+                "uncertainty",
+                "planner_notes",
+            )
+            if key in payload
+        },
+    }
+
+
 def _role_key_for_capabilities(capabilities: list[str]) -> str:
     caps = set(capabilities)
     if {"frontend", "backend"}.issubset(caps):
@@ -642,8 +674,10 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
     slots = [slot for slot in raw_slots if isinstance(slot, dict)] if has_slots else []
     text = _goal_text(payload, include_workflow=not has_slots)
     description = str(payload.get("description") or "").strip()
-    team_spec_input = dict(payload)
-    team_spec_input["goal"] = _goal_text(payload, include_workflow=True)
+    team_spec_input = _formation_team_spec_input(
+        payload,
+        _goal_text(payload, include_workflow=True),
+    )
     team_spec = build_team_spec(team_spec_input)
     constraints = FormationConstraints() if has_slots else _extract_constraints(text, all_agents)
 
@@ -1769,8 +1803,7 @@ def build_team_draft(payload: dict[str, Any], agents: list[dict[str, Any]]) -> d
     if leader_id not in agent_by_id:
         leader_id = ""
     goal = "\n".join(item for item in (name, description) if item).strip()
-    team_spec_input = dict(payload)
-    team_spec_input["goal"] = goal
+    team_spec_input = _formation_team_spec_input(payload, goal)
     spec = build_team_spec(team_spec_input)
     required_capabilities = _required_capabilities(goal, spec)
     draft_slots = payload.get("draft_slots")

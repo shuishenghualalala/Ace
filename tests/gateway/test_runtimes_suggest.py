@@ -213,7 +213,8 @@ def test_fast_team_suggestion_returns_team_spec_and_testing_roles():
         {
             "description": "帮我测试一下之前开发的贪吃蛇，不需要开发新功能",
             "required_capabilities": ["testing", "verification"],
-            "execution_profile": {"intent": "testing", "needs_verification": True},
+            "task_profile": {"intent": "testing"},
+            "team_requirements": {"workflow_lanes": ["verify"]},
         },
         [
             {"id": "agent_kimi", "name": "Kimi Writer", "provider": "kimi", "model": "moonshot"},
@@ -250,7 +251,7 @@ def test_team_draft_description_uses_four_point_goal_outline():
             "name": "像素游戏开发",
             "leader_agent_id": "agent_b",
             "required_capabilities": ["implementation", "testing", "verification"],
-            "execution_profile": {"needs_build": True, "needs_verification": True},
+            "team_requirements": {"workflow_lanes": ["build", "verify"]},
         },
         [
             {"id": "agent_a", "name": "A", "provider": "codex", "model": "code"},
@@ -698,8 +699,8 @@ def test_external_team_persists_team_spec(tmp_path, monkeypatch):
     crew = build_app(enable_team=False)
     agents = _seed_agents(crew)
     spec = {
-        "version": 2,
-        "execution_profile": {"intent": "implementation"},
+        "version": 3,
+        "task_profile": {"intent": "implementation"},
         "team_requirements": {"roles": ["frontend_developer", "qa_engineer"]},
     }
 
@@ -1360,7 +1361,7 @@ async def test_fast_suggest_uses_local_rules_without_llm(tmp_path, monkeypatch, 
                 "description": "开发一个带登录和后台管理的 Web 系统",
                 "formation_mode": "fast",
                 "required_capabilities": ["frontend", "backend", "implementation"],
-                "execution_profile": {"needs_build": True},
+                "team_requirements": {"workflow_lanes": ["build"]},
             },
         )
 
@@ -1400,7 +1401,7 @@ def test_fast_team_suggestion_uses_minimal_capability_cover_not_provider_brand()
             "name": "研发团队",
             "description": "开发一个前端页面和后端接口，并整理交付文档",
             "required_capabilities": ["frontend", "backend", "implementation", "documentation"],
-            "execution_profile": {"needs_build": True, "needs_docs": True},
+            "team_requirements": {"workflow_lanes": ["build", "docs"]},
         },
         agents,
     )
@@ -1420,7 +1421,7 @@ def test_fast_team_suggestion_keeps_build_as_primary_role_and_honors_custom_capa
             "name": "像素小游戏开发团队",
             "custom_capabilities": ["implementation", "design"],
             "required_capabilities": ["design", "frontend", "implementation", "testing", "verification"],
-            "execution_profile": {"needs_build": True, "needs_verification": True},
+            "team_requirements": {"workflow_lanes": ["build", "verify"]},
         },
         [{"id": "hermes_1", "name": "Hermes", "provider": "hermes"}],
     )
@@ -1468,7 +1469,7 @@ def test_fast_team_suggestion_skips_unavailable_agent_profiles():
             "name": "像素小游戏开发团队",
             "description": "实现并测试像素小游戏",
             "required_capabilities": ["implementation", "testing"],
-            "execution_profile": {"needs_build": True, "needs_verification": True},
+            "team_requirements": {"workflow_lanes": ["build", "verify"]},
         },
         [degraded, ready],
     )
@@ -1595,7 +1596,7 @@ def test_fast_team_suggestion_user_can_assign_kimi_to_development():
             "name": "研发团队",
             "description": "开发一个 Web 页面和后端接口，让 Kimi 做前端开发，Hermes 写文档",
             "required_capabilities": ["frontend", "backend", "implementation", "documentation"],
-            "execution_profile": {"needs_build": True, "needs_docs": True},
+            "team_requirements": {"workflow_lanes": ["build", "docs"]},
         },
         agents,
     )
