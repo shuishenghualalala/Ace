@@ -377,6 +377,43 @@ Ace 私有路径  ────────────────────�
         └─ require_escalated
                 └─ 用户批准 ─────────► 当前完整命令宿主执行</code></pre>
 
+
+    <h3 id="command-validators">3.6.1 终端命令多层安全验证</h3>
+    <p>终端命令在通过 hardline（无条件阻止）和 dangerous（需要宿主批准）两道正则防线之后，还要经过 <code>classify_command</code> 多层独立验证器。每个验证器独立检查命令的一个安全维度，任一触发即要求用户确认。验证器按执行顺序分为预检查、早期验证器和主验证器三组。</p>
+
+    <table>
+      <thead><tr><th>#</th><th>验证器</th><th>检测内容</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>控制字符</td><td>0x00-0x08 等不可打印字符，可绕过其他检查</td></tr>
+        <tr><td>2</td><td>单引号反斜杠 bug</td><td>shell-quote 与 bash 对单引号内反斜杠处理不一致</td></tr>
+        <tr><td>3</td><td>空命令</td><td>允许空命令通过</td></tr>
+        <tr><td>4</td><td>不完整命令</td><td>tab 开头、flag 开头、操作符开头的片段</td></tr>
+        <tr><td>5</td><td>安全命令替换</td><td>允许 <code>$(cat &lt;&lt;'EOF'...)</code> 形式的安全 heredoc</td></tr>
+        <tr><td>6</td><td>git commit</td><td>允许带简单引号消息的 commit，阻断重定向注入</td></tr>
+        <tr><td>7</td><td>jq 命令</td><td>阻断 <code>system()</code>、<code>-f</code>、<code>--rawfile</code> 等危险用法</td></tr>
+        <tr><td>8</td><td>混淆 flag</td><td>引号包裹的 flag 名可隐藏真实参数</td></tr>
+        <tr><td>9</td><td>shell 元字符</td><td>引号内 <code>;|&amp;</code> 可导致 find/grep 参数注入</td></tr>
+        <tr><td>10</td><td>危险变量</td><td>重定向或管道中的 <code>$VAR</code> 可被操纵</td></tr>
+        <tr><td>11</td><td>注释引号不同步</td><td><code>#</code> 注释中的引号可扰乱引号状态追踪器</td></tr>
+        <tr><td>12</td><td>引号内换行</td><td>引号内换行后跟 <code>#</code> 行可隐藏内容</td></tr>
+        <tr><td>13</td><td>回车</td><td>双引号外的回车导致 token 化差异</td></tr>
+        <tr><td>14</td><td>换行</td><td>非续行的换行可分隔多条命令</td></tr>
+        <tr><td>15</td><td>IFS 注入</td><td><code>$IFS</code> 可绕过正则验证</td></tr>
+        <tr><td>16</td><td>/proc/environ</td><td><code>/proc/*/environ</code> 可暴露环境变量密钥</td></tr>
+        <tr><td>17</td><td>危险模式</td><td>反引号、<code>$()</code>、<code>${}</code>、<code>&lt;()</code> 等命令替换</td></tr>
+        <tr><td>18</td><td>重定向</td><td>未引用的 <code>&lt;</code> 和 <code>&gt;</code> 可读写任意文件</td></tr>
+        <tr><td>19</td><td>转义空白</td><td>反斜杠转义空白可改变命令解析</td></tr>
+        <tr><td>20</td><td>转义操作符</td><td>反斜杠转义操作符可隐藏命令结构</td></tr>
+        <tr><td>21</td><td>Unicode 空白</td><td>U+00A0 等 Unicode 空白可导致解析不一致</td></tr>
+        <tr><td>22</td><td>中间 #</td><td>非空白后的 <code>#</code> 在不同解析器中行为不同</td></tr>
+        <tr><td>23</td><td>花括号展开</td><td><code>{a,b}</code> 可绕过权限检查</td></tr>
+        <tr><td>24</td><td>Zsh 危险命令</td><td>zmodload、sysopen、ztcp 等可绕过安全检查</td></tr>
+        <tr><td>25</td><td>畸形 token</td><td>不平衡分隔符 + 命令分隔符可导致注入</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout"><strong>设计原则：</strong>每个验证器独立运作，假设其他验证器可能被绕过。即使命令替换检查被绕过，路径约束和 IFS 检测仍然可以拦截。这种"假设每一层都可能失效"的纵深防御是安全关键系统的根本方法论。</div>
+
     <h3 id="mode-lifecycle">3.7 模式切换为什么以 Gateway ACK 为准</h3>
     <p>Desktop 选择模式后不会先假定成功。Gateway 校验上下文与本机能力，更新 <code>SecurityService</code> 中的会话模式并返回 ACK；只有 ACK 成功，界面才展示新模式。模式变化会撤销旧模式下尚未处理的审批，并停止继续使用旧 <code>ProcessLaunch</code> 快照的 turn。下一轮执行重新从安全服务编译策略。</p>
     <p>模式切换不会撤销用户已经明确授予的本次对话权限；这些 grant 绑定 OS user、owner、workspace 和 session，在真正结束会话、登出或 Gateway 重启时清理。完全访问只作用于当前会话；空白输入框中的选择是即将创建会话的一次性预设，不会静默继承给后续会话。</p>
