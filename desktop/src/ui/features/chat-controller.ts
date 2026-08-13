@@ -137,6 +137,9 @@ let openSessionFn: OpenSessionFn = async () => {};
 let setTabFn: (tab: TabKey) => void = () => {};
 let queueEditDraft: { sessionId: string } | null = null;
 let teamIdentityRefreshBound = false;
+const ttftVisibleLoggedRequests = new Set<string>();
+const ttftRenderLoggedRequests = new Set<string>();
+const ttftRequestStartedAt = new Map<string, number>();
 
 interface DispatchOptions {
   subScenario?: string;
@@ -509,6 +512,18 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
   const target = resolveStreamingTurnTarget(sid, assistantId);
   if (!target) return false;
   const { turnEl, msg } = target;
+  const book = bookFor(sid);
+  const requestId = book.activeRequestId;
+  if (requestId && msg.content && !ttftRenderLoggedRequests.has(requestId)) {
+    ttftRenderLoggedRequests.add(requestId);
+    logStream('render', 'ttft-first-dom-patch', {
+      sid,
+      request_id: requestId,
+      assistantId,
+      contentLen: msg.content.length,
+      elapsedMs: msg.turnStartedAt != null ? Math.max(0, Date.now() - msg.turnStartedAt) : undefined,
+    });
+  }
   const textEl = turnEl.querySelector<HTMLElement>(`[data-text-for="${assistantId}"]`);
   if (textEl) {
     textEl.classList.remove('typing-inline');
@@ -1058,6 +1073,25 @@ export function applyChunk(chunk: ChatChunk): void {
     return;
   }
 
+  const requestIdForPerf = chunk.request_id || bookFor(sid).activeRequestId;
+  if (
+    requestIdForPerf
+    && parsed.kind === 'delta'
+    && typeof parsed.body.text === 'string'
+    && parsed.body.text.length > 0
+    && !ttftVisibleLoggedRequests.has(requestIdForPerf)
+  ) {
+    ttftVisibleLoggedRequests.add(requestIdForPerf);
+    logStream('apply-chunk', 'ttft-first-visible-text', {
+      sid,
+      request_id: requestIdForPerf,
+      textLen: parsed.body.text.length,
+      elapsedMs: ttftRequestStartedAt.has(requestIdForPerf)
+        ? Math.max(0, Date.now() - (ttftRequestStartedAt.get(requestIdForPerf) as number))
+        : undefined,
+    });
+  }
+
   const book = bookFor(sid);
   const reqId = chunkRequestId(parsed, chunk.request_id);
   const gate = resolveTurnGate(parsed.kind, reqId, {
@@ -1252,6 +1286,11 @@ export function applyChunk(chunk: ChatChunk): void {
   // final / error：触发 finalize + usage + 全量重渲染
   if (result.finalize) {
     logStream('apply-chunk', 'finalize-turn', { sid, kind: parsed.kind });
+    if (reqId) {
+      ttftVisibleLoggedRequests.delete(reqId);
+      ttftRenderLoggedRequests.delete(reqId);
+      ttftRequestStartedAt.delete(reqId);
+    }
     streamingPatchCoalescer.clear();
     if (result.turn) {
       recordUsageTurn(
@@ -1468,12 +1507,15 @@ export async function dispatchWs(
   renderChat();
   syncTurnDurationTicker();
   jumpChatToBottom();
+  const clientTs = Date.now();
+  ttftRequestStartedAt.set(requestId, clientTs);
   logStream('dispatch', 'send-ws', {
     sessionId,
     requestId,
     mode,
     queryLen: query.length,
     backendConnected: state.backendConnected,
+    clientTs,
   });
   // 专用 Wiki Agent 经注册口提供本会话的 wiki_kb_id。
   const wikiExtras = wikiSendExtrasResolver?.(sessionId) ?? null;
@@ -1494,6 +1536,7 @@ export async function dispatchWs(
   });
   if (!ok) {
     logStream('dispatch', 'send-ws-failed', { sessionId, requestId });
+    ttftRequestStartedAt.delete(requestId);
     discardEmptyOptimisticAssistant(sessionId);
     appendMessage(sessionId, 'error', '服务未连接，请稍后重试。');
     setBusyWithUi(sessionId, false);

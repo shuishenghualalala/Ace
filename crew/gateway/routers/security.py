@@ -286,10 +286,12 @@ def create_security_router(crew) -> APIRouter:
                     status_code=409,
                     detail="替我审批需要已通过 live probe 的原生文件沙箱",
                 )
+        requested_mode = ConversationPermissionMode(payload.mode)
         changed = crew.security_service.set_mode(
             ctx,
-            ConversationPermissionMode(payload.mode),
+            requested_mode,
         )
+        effective_mode = crew.security_service.mode_for(ctx)
         if changed and crew.dispatcher.status(
             payload.session_id,
             owner_account_id=ctx.owner_account_id,
@@ -301,7 +303,7 @@ def create_security_router(crew) -> APIRouter:
                 reason="安全模式已切换，请重新执行当前操作",
                 owner_account_id=ctx.owner_account_id,
             )
-        return {"mode": payload.mode}
+        return {"mode": effective_mode.value}
 
     @router.get("/pending")
     async def pending(

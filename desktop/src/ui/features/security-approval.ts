@@ -149,8 +149,25 @@ const sessionModes = new Map<string, ConversationSecurityMode>();
 // 新对话必须再次确认（决策 #95），避免一次确认后静默继承最高权限。
 const nextConversationModes = new Map<string, ConversationSecurityMode>();
 
+function acknowledgedMode(
+  result: { body?: unknown } | undefined,
+  fallback: ConversationSecurityMode,
+): ConversationSecurityMode {
+  const value = String((result?.body as { mode?: unknown } | undefined)?.mode ?? '');
+  return value === 'request_approval' || value === 'auto_review' || value === 'full_access'
+    ? value
+    : fallback;
+}
+
+function configuredDefaultMode(): ConversationSecurityMode {
+  const configured = state.config?.security?.default_mode;
+  return configured === 'request_approval' || configured === 'auto_review' || configured === 'full_access'
+    ? configured
+    : 'request_approval';
+}
+
 function presetForWorkspace(workspaceId: string): ConversationSecurityMode {
-  return nextConversationModes.get(workspaceId) ?? 'request_approval';
+  return nextConversationModes.get(workspaceId) ?? configuredDefaultMode();
 }
 
 function announceModeChange(): void {
@@ -192,18 +209,20 @@ export async function selectNextConversationMode(
       notify('安全模式切换失败：Desktop 安全桥不可用');
       return false;
     }
+    let effectiveMode = mode;
     try {
       const result = await setMode({ workspaceId, sessionId: sid, mode });
       if (!result?.ok) {
         notify(`安全模式切换失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}`);
         return false;
       }
+      effectiveMode = acknowledgedMode(result, mode);
     } catch (err) {
       notify(`安全模式切换失败：${String((err as Error)?.message ?? err)}`);
       return false;
     }
     // Gateway ACK 后才更新 renderer 状态，避免 UI 显示 full_access 但后端仍在 managed（或相反）。
-    sessionModes.set(sid, mode);
+    sessionModes.set(sid, effectiveMode);
   }
   if (mode !== 'full_access') {
     nextConversationModes.set(workspaceId, mode);
@@ -232,6 +251,9 @@ export async function assignSecurityMode(
           notify(`安全模式初始化失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}，已回退到逐次审批`);
           return 'request_approval';
         }
+        const effective = acknowledgedMode(result, preset);
+        sessionModes.set(sessionId, effective);
+        return effective;
       } catch (err) {
         notify(`安全模式初始化失败：${String((err as Error)?.message ?? err)}，已回退到逐次审批`);
         return 'request_approval';
@@ -243,7 +265,7 @@ export async function assignSecurityMode(
 }
 
 export function securityModeForSession(sessionId: string): ConversationSecurityMode {
-  return sessionModes.get(sessionId) ?? 'request_approval';
+  return sessionModes.get(sessionId) ?? configuredDefaultMode();
 }
 
 function decisionLabel(decision: SecurityApprovalChoice): string {

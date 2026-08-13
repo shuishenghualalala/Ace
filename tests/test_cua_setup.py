@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from crew.security.settings import configure_security
 from crew.tools.cua_setup import CuaDriverSetupService, _is_at_spi_installed, task_to_dict
 
 pytestmark = pytest.mark.asyncio
@@ -24,7 +25,7 @@ def service() -> CuaDriverSetupService:
 
 @pytest.fixture(autouse=True)
 def _compatibility_mode_for_legacy_installer_tests(monkeypatch):
-    monkeypatch.setenv("ACE_STRICT_SECURITY", "0")
+    configure_security(enabled=False)
 
 
 @pytest.fixture
@@ -76,7 +77,7 @@ async def test_strict_mode_refuses_unverified_remote_installer(
     service: CuaDriverSetupService,
     monkeypatch,
 ):
-    monkeypatch.setenv("ACE_STRICT_SECURITY", "1")
+    configure_security(enabled=True)
     monkeypatch.delenv("ACE_CUA_INSTALL_SHA256_LINUX", raising=False)
     with patch("crew.tools.cua_setup._find_cua_binary", return_value=None):
         task = SimpleNamespace(add_log=MagicMock())

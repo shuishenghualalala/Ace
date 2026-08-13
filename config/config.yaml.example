@@ -63,6 +63,9 @@ gateway:
   admin_accounts: []
   max_active_runs: 4
   max_queue_depth_per_session: 20
+# 安全模块总开关。false 表示默认使用当前宿主用户的完全访问权限，不启用沙箱和审批。
+security:
+  enabled: false
 # 默认使用邮箱区分本机租户（不验证邮箱所有权）。local 为免登录，remote 为验证码登录。
 auth:
   mode: email  # local | email | remote

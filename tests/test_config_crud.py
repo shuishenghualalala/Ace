@@ -126,6 +126,24 @@ def test_load_config_defaults_external_security_to_disabled(tmp_path: Path):
     assert loaded.external_security_enabled is False
 
 
+def test_load_config_defaults_security_to_disabled(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert loaded.security_enabled is False
+
+
+def test_load_config_reads_enabled_security(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("security:\n  enabled: true\n", encoding="utf-8")
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert loaded.security_enabled is True
+
+
 def test_add_model_rejects_empty_id(cfg: Config):
     with pytest.raises(ValueError, match="不能为空"):
         cfg.add_model({"id": "", "name": "x"})

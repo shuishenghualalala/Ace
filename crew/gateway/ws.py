@@ -729,6 +729,13 @@ def create_ws_router(
                     user_id=owner,
                     mode=mode,
                 )
+                log.info(
+                    "[PERF] gateway_request_received request_id=%s session=%s query_len=%d mode=%s",
+                    envelope.request_id,
+                    envelope.session_id,
+                    len(query),
+                    envelope.mode,
+                )
                 if external_team_id:
                     envelope.params["external_team_id"] = external_team_id
                 intent = str(data.get("intent") or "").strip()

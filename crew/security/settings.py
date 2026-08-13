@@ -1,18 +1,19 @@
-"""Low-level security compatibility settings."""
+"""Process-wide security settings loaded from the application config."""
 
 from __future__ import annotations
 
-import os
+_configured_security_enabled = False
+
+
+def configure_security(*, enabled: bool) -> None:
+    """Publish the trusted config value for low-level callers."""
+    global _configured_security_enabled
+    _configured_security_enabled = bool(enabled)
 
 
 def strict_security_enabled() -> bool:
-    """Return True unless compatibility mode was explicitly enabled."""
-    return os.getenv("ACE_STRICT_SECURITY", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+    """Return the trusted application-config security state."""
+    return _configured_security_enabled
 
 
 def websocket_transport_block_reason(url: str) -> str | None:

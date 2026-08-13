@@ -407,6 +407,7 @@ class CrewApp:
             self.security_rules,
             self.security_audit,
             db_path=config.db_path,
+            security_enabled=config.security_enabled,
         )
         # Gateway 级单活登录事实源；HTTP/WS、Cron 与渠道只消费这一份租约。
         self.active_owner = ActiveOwnerLeaseStore(
@@ -2550,6 +2551,9 @@ def _browser_manager_from_plugins(plugins: PluginManager):
 def build_app(config: Config | None = None, *, enable_team: bool = True) -> CrewApp:
     """工厂：从配置构建一个 CrewApp。"""
     cfg = config or load_config()
+    from crew.security.settings import configure_security
+
+    configure_security(enabled=cfg.security_enabled)
     setup_logging(cfg.log_level, cfg.log_file, llm_trace=cfg.llm_trace)
     if cfg.gateway_dev_mode:
         log.warning(

@@ -439,9 +439,11 @@ class BuiltinExecutor(AgentExecutor):
             hook_started = time.perf_counter()
             pre_llm_result = await self.plugins.pre_llm_call(ctx.session_id, api_messages)
             log.info(
-                "[PERF] pre_llm_hooks    %.3fs  (messages=%d)",
+                "[PERF] pre_llm_hooks    %.3fs  (messages=%d) request_id=%s session=%s",
                 time.perf_counter() - hook_started,
                 len(api_messages),
+                rid,
+                ctx.session_id,
             )
             if isinstance(pre_llm_result, dict) and pre_llm_result.get("action") == "block":
                 block_text = pre_llm_result.get("response", "")
@@ -896,6 +898,22 @@ class BuiltinExecutor(AgentExecutor):
                     event_elapsed = time.perf_counter() - t0
                     if first_event is None:
                         first_event = event_elapsed
+                        first_kind = (
+                            "reasoning" if chunk.reasoning_content else
+                            "text" if chunk.delta_text else
+                            "tool" if chunk.tool_call_generating or chunk.ready_tool_call else
+                            "done" if chunk.done else "other"
+                        )
+                        log.info(
+                            "[PERF] llm_first_event request_id=%s session=%s provider=%s model=%s "
+                            "elapsed=%.3fs kind=%s",
+                            rid,
+                            session_id,
+                            _prov_name,
+                            _prov_model,
+                            event_elapsed,
+                            first_kind,
+                        )
                     if chunk.reasoning_content and first_reasoning is None:
                         first_reasoning = event_elapsed
                     if chunk.reasoning_content and not chunk.done:
@@ -910,6 +928,15 @@ class BuiltinExecutor(AgentExecutor):
                     if chunk.delta_text:
                         if first_text is None:
                             first_text = event_elapsed
+                            log.info(
+                                "[PERF] llm_first_text request_id=%s session=%s provider=%s model=%s "
+                                "elapsed=%.3fs",
+                                rid,
+                                session_id,
+                                _prov_name,
+                                _prov_model,
+                                event_elapsed,
+                            )
                         accumulated += chunk.delta_text
                         emitted = True
                         yield ResponseChunk.delta(rid, chunk.delta_text, next_seq())
@@ -958,7 +985,8 @@ class BuiltinExecutor(AgentExecutor):
                 log.info(
                     "[PERF] llm prov=%d  middleware=%.3fs  first_event=%.3fs  "
                     "first_reasoning=%.3fs  first_text=%.3fs  ttft=%.3fs  total=%.3fs  "
-                    "messages=%d  chars=%d  tools=%d  tokens_approx=%d",
+                    "messages=%d  chars=%d  tools=%d  tokens_approx=%d  request_id=%s session=%s "
+                    "provider=%s model=%s",
                     prov_idx,
                     middleware_ready if middleware_ready is not None else -1.0,
                     first_event if first_event is not None else -1.0,
@@ -970,6 +998,10 @@ class BuiltinExecutor(AgentExecutor):
                     message_chars,
                     len(tools or []),
                     len(accumulated) // 4,
+                    rid,
+                    session_id,
+                    _prov_name,
+                    _prov_model,
                 )
                 result.update(
                     text=accumulated, tool_calls=tool_calls,

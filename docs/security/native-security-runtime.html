@@ -171,6 +171,10 @@
 
     <p class="lead">Ace 的安全模块不是一个“危险命令关键词列表”，而是一条由宿主掌握的执行链：先从可信会话状态构造权限上下文，再对具体动作做授权判断。请求批准与替我审批会把命令交给原生运行组件，由操作系统限制文件、网络和进程能力；用户明确选择完全访问权限时则以宿主用户权限执行，仅保留不可覆盖的破坏性 hardline、显式拒绝规则、进程回收与审计。</p>
 
+    <div class="callout warn">
+      <strong>2026-08-13 配置变更：</strong><code>config/config.yaml</code> 的 <code>security.enabled</code> 是安全模块总开关，默认值为 <code>false</code>。关闭时所有会话强制使用 <code>full_access</code>，不启动原生沙箱或审批链路；设置为 <code>true</code> 并重启 Gateway 后，才启用请求批准、替我审批和会话级模式切换。该配置在 macOS、Linux 与 Windows 使用同一解析路径。
+    </div>
+
     <div class="callout ok">
       <strong>先记住一个结论：</strong>请求批准与替我审批使用受管原生沙箱；完全访问权限是用户显式选择的宿主权限模式。完全访问不逐项申请目录或网络权限，但文件系统根删除、磁盘格式化、无条件清空数据库、关机等永久 hardline 仍不能执行。
     </div>

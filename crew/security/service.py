@@ -156,12 +156,14 @@ class SecurityApprovalService:
         audit: SQLiteSecurityAudit,
         *,
         db_path: str | Path,
+        security_enabled: bool = True,
     ) -> None:
         self.approvals = approvals
         self.grants = grants
         self.rules = rules
         self.audit = audit
         self.db_path = Path(db_path)
+        self.security_enabled = bool(security_enabled)
         self._mode_lock = threading.Lock()
         # Serializes approval-decide (grant issue → durable audit → rollback) against
         # grant consumption in authorize_*. Without this, a concurrent authorize could
@@ -181,12 +183,14 @@ class SecurityApprovalService:
         decisions from the old policy; the Gateway uses the return value to stop
         the current turn so its captured ProcessLaunch cannot outlive the switch.
         """
+        if not self.security_enabled:
+            mode = ConversationPermissionMode.FULL_ACCESS
         key = _session_key(context)
         with self._decision_lock:
             with self._mode_lock:
                 previous = self._session_modes.get(
                     key,
-                    ConversationPermissionMode.REQUEST_APPROVAL,
+                    self._default_mode,
                 )
                 if previous is mode:
                     return False
@@ -225,8 +229,16 @@ class SecurityApprovalService:
         with self._mode_lock:
             return self._session_modes.get(
                 _session_key(context),
-                ConversationPermissionMode.REQUEST_APPROVAL,
+                self._default_mode,
             )
+
+    @property
+    def _default_mode(self) -> ConversationPermissionMode:
+        return (
+            ConversationPermissionMode.REQUEST_APPROVAL
+            if self.security_enabled
+            else ConversationPermissionMode.FULL_ACCESS
+        )
 
     def revoke_owner(self, owner_account_id: str) -> int:
         """Drop owner-scoped in-memory modes, pending approvals, and transient grants."""

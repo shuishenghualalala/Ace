@@ -429,6 +429,10 @@ export interface BackendConfig {
   external_agents?: {
     enabled?: boolean;
   };
+  security?: {
+    enabled?: boolean;
+    default_mode?: 'request_approval' | 'auto_review' | 'full_access';
+  };
 }
 
 export interface Workspace {

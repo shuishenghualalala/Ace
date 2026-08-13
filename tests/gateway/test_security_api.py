@@ -62,7 +62,11 @@ def api(tmp_path, monkeypatch):
     key_file.chmod(0o600)
     monkeypatch.setenv("CREW_HOME", str(crew_home))
     crew = build_app(
-        config=Config(db_path=str(tmp_path / "crew.db"), plugins_enabled=[]),
+        config=Config(
+            db_path=str(tmp_path / "crew.db"),
+            plugins_enabled=[],
+            security_enabled=True,
+        ),
         enable_team=False,
     )
     app = create_app(crew)
@@ -122,9 +126,7 @@ async def test_gateway_security_headers_cover_authentication_failures(api):
 @pytest.mark.asyncio
 async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
     api,
-    monkeypatch,
 ):
-    monkeypatch.setenv("ACE_STRICT_SECURITY", "0")
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await _put_json(
@@ -134,6 +136,40 @@ async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
         )
     assert response.status_code == 200
     assert response.json() == {"mode": "auto_review"}
+
+
+@pytest.mark.asyncio
+async def test_disabled_security_forces_full_access(tmp_path, monkeypatch):
+    crew_home = tmp_path / ".crew"
+    key_dir = crew_home / ".gateway-instance"
+    key_dir.mkdir(parents=True, mode=0o700)
+    key_file = key_dir / "gateway-instance.key"
+    key_file.write_text(_KEY.hex(), encoding="ascii")
+    key_file.chmod(0o600)
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    crew = build_app(
+        config=Config(
+            db_path=str(tmp_path / "disabled-security.db"),
+            plugins_enabled=[],
+            security_enabled=False,
+        ),
+        enable_team=False,
+    )
+    app = create_app(crew)
+    transport = ASGITransport(app=app, client=("127.0.0.1", 12345))
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await _put_json(
+                client,
+                "/api/security/mode",
+                {"workspace_id": "default", "session_id": "s1", "mode": "request_approval"},
+            )
+        assert response.status_code == 200
+        assert response.json() == {"mode": "full_access"}
+    finally:
+        crew.security_rules.close()
+        crew.security_audit.close()
+        crew.active_owner.close()
 
 
 @pytest.mark.asyncio

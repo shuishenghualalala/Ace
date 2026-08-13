@@ -265,6 +265,10 @@ class Config:
     gateway_max_active_runs: int = 4      # 不同 session 同时运行的全局上限
     gateway_max_queue_depth_per_session: int = 20  # 单 session 等待队列上限
 
+    # --- security ---
+    # 默认关闭：工具以当前宿主用户权限运行，不启用沙箱或审批链路。
+    security_enabled: bool = False
+
     # --- authentication ---
     # local：本机免登录；email：本机邮箱租户入口；remote：通过用户配置的认证服务登录。
     # 显式 remote 优先于 gateway.dev_mode，便于在开发启动方式下联调登录。
@@ -1438,6 +1442,12 @@ def load_config(config_path: str | Path | None = None) -> Config:
             0,
             int(gw.get("max_queue_depth_per_session", cfg.gateway_max_queue_depth_per_session)),
         )
+        security = data.get("security", {})
+        if isinstance(security, dict):
+            cfg.security_enabled = _as_bool(
+                security.get("enabled"),
+                cfg.security_enabled,
+            )
         auth = data.get("auth", {})
         if isinstance(auth, dict):
             mode = str(auth.get("mode", cfg.auth_mode) or cfg.auth_mode).strip().lower()
@@ -1651,6 +1661,10 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 external=ac.get("external", {}) or {},
                 internal=ac.get("internal", {}) or {},
             )
+
+    from crew.security.settings import configure_security
+
+    configure_security(enabled=cfg.security_enabled)
 
     # config.yaml 里的 runtime.crew_home 需要等 yaml 解析后才知道；
     # 加载 {crew_home}/.env 后刷新已构建的模型 profile key。

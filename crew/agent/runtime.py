@@ -812,7 +812,12 @@ class SingleAgent(Agent):
 
         prefix_len = len(llm_messages)  # 记录执行前长度，用于回收本轮新增
 
-        log.info("[PERF] pre_llm_setup      %.3fs  total", time.perf_counter() - t0)
+        log.info(
+            "[PERF] pre_llm_setup      %.3fs  total request_id=%s session=%s",
+            time.perf_counter() - t0,
+            envelope.request_id,
+            sid,
+        )
 
         # 4. 组执行上下文，委托 executor（executor 把本轮新消息追加到 llm_messages）
         effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)

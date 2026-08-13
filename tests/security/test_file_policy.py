@@ -78,7 +78,11 @@ async def _drive(app, tc: ToolCall, decision: ApprovalDecision, *, always_argv_p
 def secured_app(tmp_path, monkeypatch):
     monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
     app = build_app(
-        Config(db_path=str(tmp_path / "crew.db"), plugins_enabled=[]),
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            plugins_enabled=[],
+            security_enabled=True,
+        ),
         enable_team=False,
     )
     project = tmp_path / "project"
