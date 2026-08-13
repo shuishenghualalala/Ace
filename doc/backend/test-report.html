@@ -5177,6 +5177,17 @@ cd web &amp;&amp; npm run build
   </section>
 
   <section class="rounded-2xl border border-cyan-700 bg-slate-900/70 p-6 mt-6">
+    <h2 class="text-xl font-bold mb-3">2026-08-13 Runtime 补员拒绝与 Workflow 可行性（第二阶段）</h2>
+    <ul>
+      <li><b>拒绝语义：</b>用户拒绝补员后，当前节点不再继续执行，清空当前 assignee，保存 previous_assignee，并进入 blocked；补员回执不再声称“之后仍可以继续”。</li>
+      <li><b>依赖影响：</b>沿 DAG 下游依赖链记录 blocked_by_nodes 并保持 pending；没有依赖的并行节点仍可运行。</li>
+      <li><b>已有成员改派：</b>如果团队已有其他成员完整覆盖当前节点能力，Runtime 直接改派，不弹补员确认，并记录 assignment history 与 Workflow revision。</li>
+      <li><b>看板投影：</b>Web/Desktop 对空 assignee 的阻塞节点显示“待分配”，同时展示原主责；Kanban 恢复后仍保持该状态。</li>
+      <li><b>回归：</b><code>tests/test_team_tasks.py</code>：<code>191 passed / 1 skipped</code>；Web TaskBoard：<code>12 passed</code>；Desktop Team board：<code>8 passed</code>；持久化阻塞投影用例通过。</li>
+    </ul>
+  </section>
+
+  <section class="rounded-2xl border border-cyan-700 bg-slate-900/70 p-6 mt-6">
     <h2 class="text-xl font-bold mb-3">2026-08-13 Team 能力缺口统一入口（第一阶段）</h2>
     <ul>
       <li><b>实现：</b>新增 <code>CapabilityCoverage</code> 与 <code>evaluate_capability_coverage()</code>；Formation/Runtime 使用标准 <code>AgentProfile</code>，DAG admission 使用 Formation 已确认的成员能力快照，三者共用同一确定性覆盖计算入口，不新增 <code>EffectiveAgentProfile</code>。</li>

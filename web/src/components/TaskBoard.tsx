@@ -226,6 +226,7 @@ function normalizeStatus(task: Task): FlowStatus {
 function ownerOf(task: Task): string {
   const assignee = String(task.assignee || task.progress?.assignee || "").trim();
   if (assignee) return assignee;
+  if (task.status === "blocked" && task.progress?.runtime_blocking) return "待分配";
   if (task.kind === "team") return "Team";
   if (task.kind === "subagent") return "Subagent";
   if (task.kind === "agent_turn") return "Leader";
@@ -361,7 +362,8 @@ function artifactPaths(task: Task): string[] {
   const fromOutput = String(task.output_ref || "")
     .split(/\r?\n/)
     .map((item) => item.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((path) => !/(?:^|[\\/])tasks[\\/][^\\/]+\.json$/i.test(path));
   return Array.from(new Set([...fromProgress, ...fromOutput]));
 }
 
@@ -1113,7 +1115,7 @@ export default function TaskBoard({
               <i />
             </span>
             <div>
-              <strong>{displayNodes.length ? "团队 DAG 工作流" : "等待团队工作流"}</strong>
+              <strong>{displayNodes.length ? "团队工作流" : "等待团队工作流"}</strong>
               <p>
                 {nextNode
                   ? allTeamNodesCompleted ? `已完成：${nextNode.title}` : `当前节点：${nextNode.title}`
@@ -1143,7 +1145,7 @@ export default function TaskBoard({
                 <div>
                   <strong>
                     {member.name}
-                    {member.isLeader && <span className="leader-flag" aria-label="Leader" title="Leader" />}
+                    {member.isLeader && <span className="pixel-flag" aria-label="Leader" title="Leader" />}
                   </strong>
                   <p>{member.role}</p>
                 </div>
@@ -1212,6 +1214,9 @@ export default function TaskBoard({
                                     <section className="flow-node__brief" aria-label="节点摘要">
                                       <div className="flow-node__meta-line">
                                         <span>负责人 {displayAgentName(node.owner)}</span>
+                                        {node.owner === "待分配" && String(node.raw.progress?.previous_assignee || "").trim() && (
+                                          <span>原主责 {displayAgentName(String(node.raw.progress?.previous_assignee || ""))}</span>
+                                        )}
                                         <span>{statusLabel[node.status]}</span>
                                         {duration && <span>{duration}</span>}
                                       </div>

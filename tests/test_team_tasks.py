@@ -48,7 +48,7 @@ from crew.team.agent_profile import (
     evaluate_capability_coverage,
 )
 from crew.team.history_projection import team_internal_history_items
-from crew.team.models import TeamPlan, TeamPlanEdge, TeamPlanNode
+from crew.team.models import RuntimeStaffingRequest, TeamPlan, TeamPlanEdge, TeamPlanNode
 from crew.team.result_presenter import (
     assignment_text,
     node_dict_assignment_text,
@@ -4584,6 +4584,195 @@ def test_runtime_staffing_does_not_trigger_when_assigned_member_is_covered():
         owner_account_id="",
         max_attempts=2,
     ) is None
+
+
+def test_runtime_blocking_marks_only_dependency_chain_and_clears_assignee():
+    tm, _ = _team()
+    blocked = TeamPlanNode(
+        node_id="build",
+        title="实现",
+        assignee="kk",
+        metadata={"required_capabilities": ["testing"]},
+    )
+    dependent = TeamPlanNode(node_id="verify", title="验证", assignee="hh")
+    independent = TeamPlanNode(node_id="docs", title="整理说明", assignee="hh")
+    plan = TeamPlan(
+        team_session_id="runtime-blocking-scope",
+        goal="完成任务",
+        nodes={node.node_id: node for node in (blocked, dependent, independent)},
+        edges=[TeamPlanEdge(parent_id="build", child_id="verify")],
+    )
+    request = RuntimeStaffingRequest(
+        request_id="staffing_declined_scope",
+        trigger_node_id="build",
+        trigger_type="capability_gap",
+        required_capabilities=["testing"],
+        reason="缺少 testing",
+        status="declined",
+    )
+
+    tm._mark_runtime_blocked(
+        plan,
+        blocked,
+        owner_account_id="local",
+        request=request,
+        result_summary="用户拒绝补员，当前节点没有可执行主责，已阻塞。",
+    )
+
+    assert blocked.status == "blocked"
+    assert blocked.assignee == ""
+    assert blocked.metadata["previous_assignee"] == "kk"
+    assert plan.status == "blocked"
+    feasibility = blocked.metadata["runtime_blocking"]["feasibility"]
+    assert feasibility["blocking_nodes"] == ["build"]
+    assert feasibility["blocked_dependency_nodes"] == ["verify"]
+    assert "docs" in feasibility["runnable_nodes"]
+    assert dependent.status == "pending"
+    assert independent.status == "pending"
+
+
+def test_runtime_blocking_persists_unassigned_owner_to_team_board(tmp_path):
+    store = SQLiteKanbanStore(tmp_path / "runtime-blocked-board.db")
+    tm, _ = _team(kanban_store=store)
+    node = TeamPlanNode(
+        node_id="build",
+        title="实现",
+        assignee="kk",
+        metadata={"required_capabilities": ["testing"]},
+    )
+    plan = TeamPlan(team_session_id="runtime-blocked-board", goal="执行测试", nodes={"build": node})
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+    tm._persist_team_plan(
+        plan,
+        owner_account_id="local",
+        workflow_plan={
+            "version": 1,
+            "revision": 1,
+            "nodes": [{"id": "build", "title": "实现", "assignee_id": "kk"}],
+            "edges": [],
+        },
+    )
+    request = RuntimeStaffingRequest(
+        request_id="staffing_declined_board",
+        trigger_node_id="build",
+        trigger_type="capability_gap",
+        required_capabilities=["testing"],
+        reason="缺少 testing",
+        status="declined",
+    )
+
+    tm._mark_runtime_blocked(
+        plan,
+        node,
+        owner_account_id="local",
+        request=request,
+        result_summary="用户拒绝补员，当前节点没有可执行主责，已阻塞。",
+    )
+
+    projected = tm.task_projection_for_session("runtime-blocked-board", owner_account_id="local")
+    assert projected[0]["assignee"] == ""
+    assert projected[0]["status"] == "blocked"
+    assert projected[0]["progress"]["runtime_blocking"]["status"] == "blocked"
+    assert projected[0]["progress"]["previous_assignee"] == "kk"
+
+
+def test_blocked_workflow_result_does_not_claim_completion():
+    tm, _ = _team()
+    plan = TeamPlan(team_session_id="blocked-result", goal="执行测试", status="blocked")
+    plan.nodes = {
+        "verify": TeamPlanNode(
+            node_id="verify",
+            title="测试验证",
+            assignee="",
+            status="blocked",
+            result_summary="用户拒绝补员，当前节点没有可执行主责。",
+            metadata={"runtime_blocking": {"status": "blocked"}},
+        ),
+    }
+
+    result = tm._format_workflow_result(plan)
+
+    assert result.startswith("团队工作流已阻塞")
+    assert "团队工作流完成" not in result
+    assert "主责：待分配" in result
+
+
+@pytest.mark.asyncio
+async def test_runtime_staffing_decline_blocks_node_without_fake_continuation(monkeypatch):
+    tm, _ = _team()
+    node = TeamPlanNode(
+        node_id="build",
+        title="实现",
+        assignee="kk",
+        metadata={"required_capabilities": ["testing"]},
+    )
+    plan = TeamPlan(team_session_id="runtime-decline", goal="执行测试", nodes={"build": node})
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+    team = tm._build_team(plan.team_session_id)
+    trigger = {
+        "trigger_type": "capability_gap",
+        "required_capabilities": ["testing"],
+        "reason": "当前负责人 kk 未覆盖 testing",
+    }
+
+    async def fake_send(session_id, questions, **kwargs):
+        return session_id, "runtime-decline-question"
+
+    async def fake_wait(session_id, question_id, **kwargs):
+        return [{"id": "runtime-decline-question", "answers": ["decline"]}]
+
+    async def fake_status(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("crew.team.team_manager.send_followup_question_to", fake_send)
+    monkeypatch.setattr("crew.team.team_manager.wait_for_answer", fake_wait)
+    monkeypatch.setattr("crew.team.team_manager.send_followup_status_to", fake_status)
+    monkeypatch.setattr(
+        tm,
+        "_runtime_staffing_candidates",
+        lambda *args, **kwargs: [{"candidate_type": "runtime", "model_id": "testing-model"}],
+    )
+
+    _, status = await tm._handle_runtime_staffing(
+        Envelope.of("执行测试", session_id=plan.team_session_id, mode="team", user_id="local"),
+        plan,
+        node,
+        team,
+        trigger,
+    )
+
+    assert status == "declined"
+    assert node.status == "blocked"
+    assert node.assignee == ""
+    assert node.metadata["runtime_staffing"]["status"] == "declined"
+    assert node.metadata["runtime_blocking"]["reason"] == "staffing_declined"
+    assert plan.status == "blocked"
+
+
+def test_runtime_staffing_reassigns_existing_member_before_prompting_user():
+    tm, _ = _team(config=Config(
+        team_config={
+            "members": [
+                {"member_id": "kk", "name": "kk", "executor": "builtin", "capabilities": ["implementation"]},
+                {"member_id": "hh", "name": "hh", "executor": "builtin", "capabilities": ["testing"]},
+            ],
+        },
+    ))
+    team = tm._build_team("runtime-reassign")
+    node = TeamPlanNode(
+        node_id="verify",
+        title="验证",
+        assignee="kk",
+        metadata={"required_capabilities": ["testing"]},
+    )
+    plan = TeamPlan(team_session_id="runtime-reassign", goal="验证", nodes={"verify": node})
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+
+    trigger = tm._runtime_staffing_trigger(team, node, owner_account_id="local", max_attempts=2)
+
+    assert trigger is not None
+    assert trigger["trigger_type"] == "existing_member_reassignment"
+    assert trigger["replacement_assignee"] == "hh"
 
 
 def test_team_turn_router_returns_team_turn_decision():

@@ -141,7 +141,7 @@ external_runtime
   </ul>
 
   <h2>2.2 Runtime 识别到组队与执行的稳定链路</h2>
-  <p>Runtime 发现、Agent 能力画像、Formation、DAG 编译和运行时执行是连续但职责独立的五段链路。Formation、DAG admission 与 Runtime staffing 共用解析后的标准 <code>AgentProfile</code> 和同一个能力覆盖计算入口；它们只在需求范围、候选池和触发时机上不同。不允许 Team Formation 根据 provider 名称猜测协议，也不允许 RuntimeAdapter 参与团队选人。</p>
+  <p>Runtime 发现、Agent 能力画像、Formation、DAG 编译和运行时执行是连续但职责独立的五段链路。Formation 与 Runtime staffing 使用解析后的标准 <code>AgentProfile</code>；DAG admission 使用 Formation 已确认的成员能力快照；三者共用同一个能力覆盖计算入口，只在需求范围、候选池和触发时机上不同。不允许 Team Formation 根据 provider 名称猜测协议，也不允许 RuntimeAdapter 参与团队选人。</p>
   <div class="mermaid-wrap"><div class="mermaid">
 flowchart TD
   Descriptor["RuntimeDescriptor<br/>预置常见 Runtime 的静态发现声明"] --> Resolver["跨平台 Resolver<br/>env → PATH → 用户目录 → login shell → App"]
@@ -682,7 +682,16 @@ flowchart LR
     <li><b>禁止回填：</b>执行边界不得从标题、detail、用户 Prompt、assignee Profile 或成员 assigned capabilities 临时猜测需求；如果契约不存在，应在规划/变更 schema 处失败或回退，而不是静默派活。</li>
   </ul>
 
-  <h2>22. 后续 TODO 边界</h2>
+  <h2>22. Runtime 补员拒绝与 Workflow 可行性（2026-08-13）</h2>
+  <p>补员确认不是普通暂停。用户拒绝补员后，当前节点必须停止执行；如果没有其它现有成员可承担，节点清空当前 <code>assignee</code>，并把原负责人保存为 <code>previous_assignee</code>。看板显示“待分配”，不能继续显示旧成员为主责。</p>
+  <ul>
+    <li><b>已有成员可承担：</b>Runtime 不弹补员确认，直接创建本轮确定性改派，保存原负责人和改派原因，并重置节点为 pending。</li>
+    <li><b>没有可承担成员：</b>只阻塞当前节点；沿 DAG 依赖链的后续节点保持等待并记录 <code>blocked_by_nodes</code>；没有依赖的并行节点仍可继续。</li>
+    <li><b>Workflow 结论：</b>关键节点无法执行时 Workflow 状态为 <code>blocked</code>，不能返回“已完成”；只有节点恢复、明确允许降级/跳过，或用户调整任务后才能重新形成可完成路径。</li>
+    <li><b>持久化：</b><code>runtime_blocking</code> 保存拒绝/无候选原因、补员请求、能力要求和可行性快照；Kanban task 的 assignee 同步为空，避免内存态与看板态分裂。</li>
+  </ul>
+
+  <h2>23. 后续 TODO 边界</h2>
   <p class="warn">以下是 2026-07-12 确认后的后续开发清单。当前阶段不引入 TeamManifest；Dynamic Kanban 五表边界成立，后续动态工作流继续复用现有存储，不另起一套 Workflow 表。</p>
   <table><thead><tr><th>优先级</th><th>方向</th><th>目标与边界</th></tr></thead><tbody>
     <tr><td>完成</td><td>CLI 与 ACP 协作能力对齐</td><td>ACP 与 Claude stream-json 消费 <code>RuntimeExecutionRequest.mcp_servers</code>；Codex app-server 消费 <code>dynamic_tools</code> 并通过 <code>item/tool/call</code> 回调。三者最终都进入同一个 InteractionBridge，工具面由服务端 Binding 的 <code>standalone/team + leader/member</code> 决定。</td></tr>

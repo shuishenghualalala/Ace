@@ -107,6 +107,12 @@ def node_display_progress(
         "display_subject",
         "display_action",
         "full_title",
+        "runtime_staffing",
+        "runtime_blocking",
+        "runtime_reassignment",
+        "previous_assignee",
+        "unassigned_reason",
+        "blocked_by_nodes",
     ):
         if key in meta:
             progress[key] = meta[key]
