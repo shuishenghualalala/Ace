@@ -15,6 +15,7 @@ export type FeatureState = 'available' | 'unavailable' | 'hidden';
 
 export interface ShellFeatureStates {
   agents?: FeatureState;
+  security?: FeatureState;
   work?: Partial<Record<WorkLocation, FeatureState>>;
 }
 
@@ -63,9 +64,11 @@ export function resolveShellNavigation(
     ...item,
     featureState: item.id === 'agents'
       ? (features.agents ?? 'hidden')
-      : isWorkLocation(item.id)
-        ? (features.work?.[item.id] ?? 'unavailable')
-        : 'available',
+      : item.id === 'security'
+        ? (features.security ?? 'unavailable')
+        : isWorkLocation(item.id)
+          ? (features.work?.[item.id] ?? 'unavailable')
+          : 'available',
   }));
   return items.filter((item) => item.featureState !== 'hidden') as ShellNavigationItem[];
 }

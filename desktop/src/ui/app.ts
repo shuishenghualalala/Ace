@@ -142,6 +142,10 @@ import {
   externalAgentsEnabled,
 } from './features/external-agents-feature';
 import {
+  bindSecurityModuleFeatureUi,
+  securityModuleEnabled,
+} from './features/security-mode';
+import {
   isWorkLocation,
   type ShellLocation,
   type WorkLocation,
@@ -842,6 +846,7 @@ function mountApplicationShell(
     },
     features: {
       agents: externalAgentsEnabled() ? 'available' : 'hidden',
+      security: securityModuleEnabled() ? 'available' : 'unavailable',
       work: WORK_FEATURE_STATES,
     },
     onNavigate: (location: ShellLocation, productMode: ProductMode) => {
@@ -922,6 +927,9 @@ function mountApplicationShell(
   const disposeExternalAgentsFeature = bindExternalAgentsFeatureUi((enabled) => {
     shell.setFeatures({ agents: enabled ? 'available' : 'hidden' });
   });
+  const disposeSecurityModuleFeature = bindSecurityModuleFeatureUi((enabled) => {
+    shell.setFeatures({ security: enabled ? 'available' : 'unavailable' });
+  });
   syncProductMode(productModeStore.get().productMode);
 
   return {
@@ -936,6 +944,7 @@ function mountApplicationShell(
       shell.slots.historyActions.remove();
       rendererRoot.element.insertBefore(legacyOutlet, rendererRoot.overlayHost);
       disposeExternalAgentsFeature();
+      disposeSecurityModuleFeature();
       setNotificationClickHandler(null);
       shell.dispose();
       shell.element.remove();

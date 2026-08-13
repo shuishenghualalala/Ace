@@ -53,6 +53,7 @@ import {
   externalAgentInitial,
   externalAgentTone,
 } from './external-agent-avatar';
+import { securityModuleEnabled } from './security-mode';
 
 type ComposerEntry = ComposerMode | 'external';
 
@@ -688,6 +689,11 @@ function syncComposerModelChip(): void {
 function syncSecurityModeChip(): void {
   const label = document.getElementById('chat-security-mode-btn-label');
   if (label) label.textContent = modeLabel(currentSecurityMode());
+  const btn = document.getElementById('chat-security-mode-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+  const enabled = securityModuleEnabled();
+  btn.disabled = !enabled;
+  btn.title = enabled ? '请求批准' : '功能正在开发中，敬请期待';
 }
 
 function renderSecurityModePopover(): void {
@@ -1051,6 +1057,7 @@ export function bindComposerToolbar(): () => void {
   syncSecurityModeChip();
   window.addEventListener('craft:mode-change', () => syncCraftLabel(), { signal });
   window.addEventListener('security:mode-change', () => syncSecurityModeChip(), { signal });
+  window.addEventListener('security:config-change', () => syncSecurityModeChip(), { signal });
   window.addEventListener('workspace:context-changed', () => syncComposerWorkspaceLabel(), { signal });
   window.addEventListener('session:changed', () => {
     syncComposerWorkspaceLabel();

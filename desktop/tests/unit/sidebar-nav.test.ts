@@ -40,4 +40,28 @@ describe('resolveShellNavigation', () => {
 
     shell.dispose();
   });
+
+  it('marks the security item unavailable when the security module is off', () => {
+    const navigation = resolveShellNavigation('assistant', { security: 'unavailable' });
+    expect(navigation).toContainEqual(expect.objectContaining({
+      id: 'security',
+      featureState: 'unavailable',
+    }));
+  });
+
+  it('disables the security nav item and shows the developing hint when off', () => {
+    localStorage.clear();
+    const shell = createApplicationShell({
+      features: { security: 'unavailable' },
+      storage: localStorage,
+    });
+    document.body.replaceChildren(shell.element);
+
+    const security = shell.element.querySelector<HTMLButtonElement>('[data-shell-location="security"]');
+    expect(security?.disabled).toBe(true);
+    expect(security?.title).toBe('功能正在开发中，敬请期待');
+    expect(security?.querySelector('.mw-shell-nav-item__availability')).toBeNull();
+
+    shell.dispose();
+  });
 });
