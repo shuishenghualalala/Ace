@@ -1387,7 +1387,7 @@ export default function WikiHub({
                 </div>
               </header>
               {sessionId ? (
-                <ChatPanel {...chatProps} />
+                <ChatPanel {...chatProps} onWikiLink={handleWikiLink} />
               ) : (
                 <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
               )}

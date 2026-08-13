@@ -53,6 +53,8 @@ export interface Props {
   onCancelEdit?: () => void;
   /** 附件上传归属（wiki 会话时传入）：透传给 Composer 的上传调用 */
   uploadContext?: { sessionId?: string; kbId?: string };
+  /** 传入后回答正文中的 [[Wiki 页面名]] 引用渲染为可点击链接（Wiki 问答场景）。 */
+  onWikiLink?: (title: string) => void;
 }
 
 const SKILL_ICONS: Record<string, string> = {
@@ -100,6 +102,7 @@ export default function ChatPanel({
   onCancelEdit,
   todos = [],
   uploadContext,
+  onWikiLink,
 }: Props) {
   const [skills, setSkills] = useState<Skill[]>([]);
   const isEmpty = messages.length === 0 && !busy && !followupQuestion && !isTeamSession;
@@ -283,6 +286,7 @@ export default function ChatPanel({
             teamMembers={teamMembers}
             showEmptyState={!isTeamSession}
             currentAgentLabel={currentAgentLabel}
+            onWikiLink={onWikiLink}
           />
           <QueuePanel
             queue={pendingQueue}
