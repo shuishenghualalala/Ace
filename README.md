@@ -418,6 +418,16 @@ npm run check
 pytest -m e2e
 ```
 
+需要批量验证复杂任务、Wiki、外援等后端功能，并保留每轮日志时，使用独立场景 runner：
+
+```bash
+python scripts/run_e2e_batch.py --category complex_tasks
+python scripts/run_e2e_batch.py --case write_file --report-dir build/e2e
+```
+
+每个 case 会独立输出 `transcript.jsonl`、`llm.jsonl`、`crew.log` 和工作区前后快照，报告与
+新增场景的方法见 [后端 E2E 测试指南](docs/testing/e2e-testing.md)。
+
 ## 📁 配置与本地数据
 
 哪些文件该提交、哪些文件碰都别碰（指 Git）：
