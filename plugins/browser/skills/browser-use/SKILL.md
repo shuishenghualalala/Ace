@@ -92,6 +92,8 @@ click(ref) / drag(start_ref, end_ref) / type(ref, text) / fill_form(fields)
 
 网页表单没有事务，所以 `fill_form` **不是原子操作**。途中失败会返回 `status: partial` 或 `status: uncertain` 与 `completed_count`：前者表示已有若干项确定完成，后者表示当前一项是否生效未知。两种情况都不要自动重放整批；先重新观察，让用户核对后再决定。成功时只返回一份真实最终 snapshot，不另加逐字段中间结果。Crew 不会把调用参数值写进 UI、工具历史或轨迹；但网页本身若把业务结果渲染在页面上，最终 snapshot 会如实显示该页面内容。
 
+**同页面连续操作优先用 `batch`：** 一串可预期的元素级步骤（连点、填写、勾选、滚动、按键、等待，支持 `click/drag/type/fill_form/select/check/hover/scroll/press/keydown/keyup/wait/find`，单批上限 20 步）合并成一次调用，避免每步一次 LLM 往返。所有 ref 必须来自**同一份最新 snapshot**；中间步骤不重新观察页面，末步执行后返回一次最新 snapshot。只适用于页面内容可预期的直线流程：一旦某步会引发导航/弹窗/内容重排，或下一步要根据上一步的结果决定，就停在 batch 之外单独调用。默认任一步失败即中止（`stop_on_error`），返回 `completed_count` 与失败断点，不要重放已完成步骤；传 `stop_on_error=false` 则继续跑完并给出每步状态。
+
 **搜索流程（首选一步到位）：** `navigate` → 从返回结果找搜索框 ref → **一次调用 `type(ref, text, submit=true)`**：在搜索框里填词并原子按 Enter 提交，宿主在同一步内完成"填入+回车"，中间没有会失效的窗口。**不要**再拆成 `type` → 单独 `click` 搜索按钮 / `press(Enter)`——那样每一步之间页面都可能变（尤其打字弹出的联想下拉会遮挡按钮、提交会导航），旧 ref 就失效，正是"页面身份已变化 / 搜索框被遮挡 / 值没更新"这些反复失败的来源。只有目标明确不是"输入即提交"型（比如要先在联想下拉里选一项）时，才退回单独的 `click`。
 
 ## 四、会话与标签页

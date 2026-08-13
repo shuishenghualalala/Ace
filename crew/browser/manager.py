@@ -180,6 +180,10 @@ _OUTPUT_GUARD_MULTIPLIER = 20
 # 护栏的绝对下限：不论调用方传什么，低于这个量都不截断。
 _OUTPUT_GUARD_FLOOR = 600_000
 
+# 批量模式（browser_use batch）中间步骤跳过后置观察时的占位结果文本。
+# 批量调用方只用它拼每步一行的简报；最终观察由末步或显式 snapshot 提供。
+DEFERRED_OBSERVATION_NOTE = "已执行（批量中间步骤，跳过中间观察）"
+
 
 def _truncate_snapshot_at_line(text: str, limit: int) -> tuple[str, str]:
     """只在远超期望规模时按行截断，并如实报出截断原因。
@@ -343,6 +347,10 @@ class _Session:
     mode: str = "ai"
     last_action: str = ""
     last_error: str = ""
+    # 批量执行（browser_use batch）的中间步骤置 True：跳过后置 snapshot。
+    # 每次 snapshot 都会换 generation、重铸 ref——中间观察会让后续预规划步骤的
+    # ref 全部失效，所以批量模式只在末步观察一次。由 set_observation_deferred 维护。
+    defer_post_observation: bool = False
     screenshot_id: str = ""
     screenshot_host_epoch: str = ""
     screenshot_generation: int = 0
@@ -471,6 +479,18 @@ class BrowserManager:
     def capability_generation(self, owner_account_id: str) -> int:
         """该 owner 当前的 Browser 能力代次（未撤销过为 0，单调递增）。"""
         return self._capability_generations.get(str(owner_account_id or ""), 0)
+
+    async def set_observation_deferred(
+        self, owner_account_id: str, session_id: str, deferred: bool
+    ) -> None:
+        """批量执行开关：中间步骤跳过后置观察（见 _Session.defer_post_observation）。
+
+        批量调用方负责 try/finally 复位；会话级标志，不影响其它会话。
+        """
+        owner = await self._owner(owner_account_id)
+        async with owner.lock:
+            session = self._session(owner, session_id)
+            session.defer_post_observation = deferred
 
     def _bump_capability_generation(self, owner_account_id: str) -> int:
         owner_id = str(owner_account_id or "")
@@ -3164,6 +3184,13 @@ class BrowserManager:
         *,
         workdir: str,
     ) -> str:
+        if session.defer_post_observation:
+            # 批量中间步骤：不重新 snapshot（换代会让后续预规划 ref 全部失效）。
+            # 仍做一次 _select 对齐弹窗/活动标签页；坐标截图随页面变化失效照旧。
+            # 对话框等待等异常会推迟到下一个动作或末步观察时暴露，不会丢。
+            await self._select(owner, session)
+            self._clear_screenshot(session)
+            return DEFERRED_OBSERVATION_NOTE
         try:
             # Navigation/click/input events can synchronously open and activate
             # an unlabeled popup. Reconcile against native tab state before any
