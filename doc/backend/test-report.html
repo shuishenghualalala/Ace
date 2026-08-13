@@ -5261,6 +5261,17 @@ cd web &amp;&amp; npm run build
     </ul>
   </section>
 
+  <section class="rounded-2xl border border-amber-700 bg-slate-900/70 p-6 mt-6">
+    <h2 class="text-xl font-bold mb-3">2026-08-13 Team 阻塞节点恢复闭环（第三阶段）</h2>
+    <ul>
+      <li><b>恢复动作：</b>新增节点级“重试原成员、重新分配、放弃节点”三种动作；重新分配只允许当前团队成员，并复用统一 <code>evaluate_capability_coverage()</code> 校验。</li>
+      <li><b>持久化恢复：</b>进程内 TeamPlan 不存在时，从最近 Team Kanban workflow、workflow_plan、tasks、dependencies 和 node events 恢复原 DAG；恢复不重新规划、不新增节点。</li>
+      <li><b>执行闭环：</b>新增 <code>POST /api/session/{id}/team/recover</code>；改派/重试后节点回到 pending 并异步继续 ready 分支，放弃后节点保持 blocked，依赖链等待，独立分支可继续。</li>
+      <li><b>测试：</b><code>tests/test_team_tasks.py</code> 新增恢复行为 6 项并通过；Team 定向回归 <code>196 passed / 1 skipped</code>；Gateway 定向回归 <code>21 passed</code>；Web TaskBoard <code>12 passed</code>；Desktop Team 看板 <code>8 passed</code>；Web/ Desktop TypeScript 检查与 Python <code>py_compile</code> 通过。</li>
+      <li><b>范围：</b>不新增数据库表、TeamSpec 字段或顶层模块；只改 Team Runtime、既有 sessions router、两端团队看板和对应文档。</li>
+    </ul>
+  </section>
+
   <footer class="border-t border-slate-700 mt-12 pt-6 text-center text-sm text-slate-500">
     Crew 测试报告 · 后续每次开发交付前更新本报告
   </footer>

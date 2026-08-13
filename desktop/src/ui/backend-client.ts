@@ -81,8 +81,50 @@ export interface RuntimeModelProfile {
   label: string;
   provider?: string;
   default?: boolean;
+  loaded?: boolean;
+  has_key?: boolean;
   capabilities?: string[];
   thinking_levels?: string[];
+}
+
+export interface TeamMemberModelBinding {
+  member_id: string;
+  member_name: string;
+  is_leader: boolean;
+  runtime_id?: string;
+  model_profile_id?: string;
+  model_label?: string;
+  model_switchable?: boolean;
+  status?: string;
+  active_task_count?: number;
+  unavailable_reason?: string | null;
+  models?: RuntimeModelProfile[];
+}
+
+export interface SessionModelBindingResponse {
+  ok: boolean;
+  source?: 'crew' | 'external' | 'team';
+  scope?: 'team' | 'team_member';
+  session_id?: string;
+  external_team_id?: string;
+  model_binding_revision?: number;
+  model_profile_id?: string;
+  pending_model_profile_id?: string | null;
+  model_label?: string;
+  pending_label?: string | null;
+  has_pending?: boolean;
+  pending?: boolean;
+  models?: RuntimeModelProfile[];
+  model_switchable?: boolean;
+  runtime_id?: string;
+  external_agent_id?: string;
+  member_id?: string;
+  member_name?: string;
+  is_leader?: boolean;
+  status?: string;
+  active_task_count?: number;
+  unavailable_reason?: string | null;
+  members?: TeamMemberModelBinding[];
 }
 
 export interface AgentProfile {
@@ -1612,44 +1654,20 @@ export const backendApi = {
   },
 
   getSessionModel: (sessionId: string) =>
-    getJSON<{
-      ok: boolean;
-      source?: 'crew' | 'external';
-      model_profile_id: string;
-      pending_model_profile_id?: string | null;
-      model_label?: string;
-      pending_label?: string | null;
-      has_pending?: boolean;
-      models?: RuntimeModelProfile[];
-      model_switchable?: boolean;
-      runtime_id?: string;
-      external_agent_id?: string;
-    }>(`/api/session/${encodeURIComponent(sessionId)}/model`),
+    getJSON<SessionModelBindingResponse>(`/api/session/${encodeURIComponent(sessionId)}/model`),
 
   setSessionModel: (
     sessionId: string,
     modelProfileId: string,
-    opts?: { workspace_id?: string; title?: string },
+    opts?: { workspace_id?: string; title?: string; member_id?: string },
   ) =>
-    getJSON<{
-      ok: boolean;
-      source?: 'crew' | 'external';
-      model_profile_id: string;
-      pending_model_profile_id?: string | null;
-      model_label?: string;
-      pending_label?: string | null;
-      has_pending?: boolean;
-      pending?: boolean;
-      models?: RuntimeModelProfile[];
-      model_switchable?: boolean;
-      runtime_id?: string;
-      external_agent_id?: string;
-    }>(`/api/session/${encodeURIComponent(sessionId)}/model`, {
+    getJSON<SessionModelBindingResponse>(`/api/session/${encodeURIComponent(sessionId)}/model`, {
       method: 'PUT',
       ...jsonBody({
         model_profile_id: modelProfileId,
         workspace_id: opts?.workspace_id,
         title: opts?.title,
+        member_id: opts?.member_id,
       }),
     }),
 
@@ -1727,6 +1745,24 @@ export const backendApi = {
       body: JSON.stringify({ reason }),
       headers: { 'Content-Type': 'application/json' },
     }),
+  recoverTeamNode: (
+    sessionId: string,
+    nodeId: string,
+    action: 'reassign' | 'retry' | 'abandon',
+    replacementAssignee = '',
+  ) =>
+    getJSON<{ ok: boolean; node?: Task; error?: string }>(
+      `/api/session/${encodeURIComponent(sessionId)}/team/recover`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          node_id: nodeId,
+          action,
+          replacement_assignee: replacementAssignee,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+      },
+    ),
   cronJobs: (sessionId?: string) => {
     const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
     return getJSON<CronJobList>(`/api/cron/jobs${q}`);

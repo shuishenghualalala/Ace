@@ -20,6 +20,11 @@ interface Props {
   onJumpToMessage?: (messageId: string) => void;
   onClose: () => void;
   onCancel: (taskId: string) => Promise<void>;
+  onRecover: (
+    nodeId: string,
+    action: "reassign" | "retry" | "abandon",
+    replacementAssignee?: string,
+  ) => Promise<void>;
 }
 
 type FlowStatus = "pending" | "running" | "blocked" | "completed" | "failed" | "cancelled";
@@ -809,10 +814,12 @@ export default function TaskBoard({
   onJumpToMessage,
   onClose,
   onCancel,
+  onRecover,
 }: Props) {
   const [runtime, setRuntime] = useState<RuntimeConcurrency | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [expandedTurns, setExpandedTurns] = useState<Set<string>>(new Set());
+  const [recoveryAssignees, setRecoveryAssignees] = useState<Record<string, string>>({});
   const [filesOpen, setFilesOpen] = useState(false);
   const [, setKnownTurnIds] = useState<Set<string>>(new Set());
   const [stableProgress, setStableProgress] = useState<StableProgress>({
@@ -827,6 +834,7 @@ export default function TaskBoard({
     nodes: [],
   });
   const isTeamMode = mode === "team";
+  const availableTeamMembers = configuredTeamMembers ?? [];
 
   useEffect(() => {
     setFilesOpen(false);
@@ -1266,6 +1274,59 @@ export default function TaskBoard({
                                   </>
                                 );
                               })()}
+                              {node.status === "blocked" && (
+                                <div className="flow-node__actions flow-node__recovery-actions">
+                                  <span>阻塞节点处理</span>
+                                  {String(node.raw.progress?.previous_assignee || "").trim() && (
+                                    <button
+                                      className="mini-cancel"
+                                      type="button"
+                                      onClick={() => void onRecover(
+                                        node.id,
+                                        "retry",
+                                        String(node.raw.progress?.previous_assignee || "").trim(),
+                                      )}
+                                    >
+                                      重试原成员
+                                    </button>
+                                  )}
+                                  {availableTeamMembers.filter((member) => !member.isLeader && member.name).length > 0 && (
+                                    <>
+                                      <select
+                                        className="mini-recovery-select"
+                                        aria-label="选择恢复成员"
+                                        value={recoveryAssignees[node.id] || availableTeamMembers.find((member) => !member.isLeader && member.name)?.name || ""}
+                                        onChange={(event) => setRecoveryAssignees((current) => ({
+                                          ...current,
+                                          [node.id]: event.target.value,
+                                        }))}
+                                      >
+                                        {availableTeamMembers
+                                          .filter((member) => !member.isLeader && member.name)
+                                          .map((member) => <option key={member.name} value={member.name}>{member.name}</option>)}
+                                      </select>
+                                      <button
+                                        className="mini-cancel"
+                                        type="button"
+                                        onClick={() => void onRecover(
+                                          node.id,
+                                          "reassign",
+                                          recoveryAssignees[node.id] || availableTeamMembers.find((member) => !member.isLeader && member.name)?.name || "",
+                                        )}
+                                      >
+                                        重新分配
+                                      </button>
+                                    </>
+                                  )}
+                                  <button
+                                    className="mini-cancel"
+                                    type="button"
+                                    onClick={() => void onRecover(node.id, "abandon")}
+                                  >
+                                    放弃节点
+                                  </button>
+                                </div>
+                              )}
                               {["pending", "running"].includes(node.raw.status) && (
                                 <div className="flow-node__actions">
                                   <button className="mini-cancel" onClick={() => void onCancel(node.raw.task_id || node.raw.id)}>

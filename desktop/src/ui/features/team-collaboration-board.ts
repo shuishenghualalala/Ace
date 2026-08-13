@@ -905,7 +905,14 @@ function renderFiles(sessionId: string, files: SessionFileItem[]): string {
   </section>`;
 }
 
-function renderNode(sessionId: string, node: TeamFlowNode, nodes: TeamFlowNode[], messages: ChatMessage[], leaderName: string): string {
+function renderNode(
+  sessionId: string,
+  node: TeamFlowNode,
+  nodes: TeamFlowNode[],
+  messages: ChatMessage[],
+  leaderName: string,
+  members: TeamBoardMember[],
+): string {
   const isExpanded = expandedNodes.get(sessionId)?.has(node.id) || false;
   const dependency = dependencyLabel(node, nodes);
   const displayAgent = node.owner.toLowerCase() === 'leader' ? leaderName : node.owner;
@@ -922,13 +929,17 @@ function renderNode(sessionId: string, node: TeamFlowNode, nodes: TeamFlowNode[]
   const toolCount = logs.filter((entry) => entry.kind === 'tool').length;
   const executionOpen = openExecutions.get(sessionId)?.has(node.id) || false;
   const summaryItems = node.summaryItems.length ? node.summaryItems : [node.summary];
+  const recoveryMembers = members.filter((member) => !member.isLeader && member.name);
+  const recoveryActions = node.status === 'blocked'
+    ? `<div class="flow-node__actions flow-node__recovery-actions"><span>阻塞节点处理</span>${previousAssignee ? `<button class="mini-cancel" type="button" data-team-recover-action="retry" data-team-recover-node="${htmlAttr(node.id)}" data-team-recover-assignee="${htmlAttr(previousAssignee)}">重试原成员</button>` : ''}${recoveryMembers.length ? `<select class="mini-recovery-select" data-team-recovery-assignee="${htmlAttr(node.id)}" aria-label="选择恢复成员">${recoveryMembers.map((member) => `<option value="${htmlAttr(member.name)}">${escapeHtml(member.name)}</option>`).join('')}</select><button class="mini-cancel" type="button" data-team-recover-action="reassign" data-team-recover-node="${htmlAttr(node.id)}">重新分配</button>` : ''}<button class="mini-cancel" type="button" data-team-recover-action="abandon" data-team-recover-node="${htmlAttr(node.id)}">放弃节点</button></div>`
+    : '';
   return `<article class="flow-node is-${node.status}"><div class="flow-node__card">
     <button class="flow-node__summary-btn" type="button" data-team-node="${htmlAttr(node.id)}" aria-expanded="true"><div class="flow-node__top"><span class="agent-chip">主责：${escapeHtml(displayAgent)}</span><span class="flow-status is-${node.status}">${statusLabel[node.status]}</span></div><strong class="flow-node__title" title="${htmlAttr(node.fullTitle || node.title)}">${escapeHtml(node.title)}</strong>${dependency ? `<span class="flow-node__dependency">依赖：${escapeHtml(dependency)}</span>` : ''}<span class="flow-node__hint">收起详情</span></button>
     <div class="flow-node__detail">
       <section class="flow-node__brief" aria-label="节点摘要"><div class="flow-node__meta-line"><span>负责人 ${escapeHtml(displayAgent)}</span>${assignmentDetail}<span>${statusLabel[node.status]}</span>${duration ? `<span>${duration}</span>` : ''}</div>${node.fullTitle && node.fullTitle !== node.title ? `<p class="flow-node__full-title">节点任务：${escapeHtml(node.fullTitle)}</p>` : ''}<ul class="flow-node__brief-list">${summaryItems.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></section>
       ${paths.length ? `<section class="flow-node__artifacts"><span>产物</span>${paths.map((path) => `<button type="button" data-team-open-path="${htmlAttr(path)}" title="${htmlAttr(path)}"><i class="flow-node__file-icon" aria-hidden="true"></i><strong>${escapeHtml(fileNameOf(path))}</strong></button>`).join('')}</section>` : ''}
       <details class="flow-node__execution" data-team-execution="${htmlAttr(node.id)}"${executionOpen ? ' open' : ''}><summary><span>执行详情</span><em>${logs.length} 条事件${toolCount ? ` · ${toolCount} 个工具` : ''}</em></summary>${logs.length ? `<div class="flow-node__timeline">${logs.map((entry) => `<article class="flow-log is-${entry.kind}"><span class="flow-log__icon" aria-hidden="true">${logIcon(entry)}</span><div class="flow-log__body"><strong>${escapeHtml(entry.title)}</strong><pre>${escapeHtml(entry.body)}</pre></div></article>`).join('')}</div>` : '<p class="flow-node__log-empty">暂无执行日志</p>'}</details>
-      ${['pending', 'running'].includes(node.raw.status) ? `<div class="flow-node__actions"><button class="mini-cancel" type="button" data-team-cancel-task="${htmlAttr(node.raw.task_id || node.raw.id)}">取消节点</button></div>` : ''}
+      ${recoveryActions}${['pending', 'running'].includes(node.raw.status) ? `<div class="flow-node__actions"><button class="mini-cancel" type="button" data-team-cancel-task="${htmlAttr(node.raw.task_id || node.raw.id)}">取消节点</button></div>` : ''}
     </div>
   </div></article>`;
 }
@@ -1002,7 +1013,7 @@ export function buildTeamCollaborationBoardHtml(sessionId: string | null | undef
     detail: [strategy || tier, currentTurn ? `${currentTurn.stages.length}层` : '', `${currentNodes.length}节点`].filter(Boolean).join(' · '),
   } : null;
 
-  const flowHtml = nodes.length ? `<section class="flow-map" aria-label="团队运行流程">${turns.map((turn, turnIndex) => `<section class="flow-turn is-${turn.status}"><button class="flow-turn__head" type="button" data-team-turn="${htmlAttr(turn.id)}" aria-expanded="${expanded.has(turn.id)}"><span>${turnIndex + 1}</span><div><strong>${escapeHtml(turn.title)}</strong><em>${statusLabel[turn.status]}</em></div></button>${expanded.has(turn.id) ? turn.stages.map((stage) => `<div class="flow-stage is-${stageStatus(stage)}"><div class="flow-stage__rail"><span>${stage.depth + 1}</span><i></i></div><div class="flow-stage__nodes">${stage.nodes.map((node) => renderNode(sessionId, node, nodes, state.messages[sessionId] || [], leaderName)).join('')}</div></div>`).join('') : ''}</section>`).join('')}</section>` : `<div class="board__empty board__empty--cute"><span class="pixel-empty" aria-hidden="true"></span><strong>${snapshot.loaded ? '还没有流程节点' : '正在加载协作流程'}</strong><p>${snapshot.loaded ? '点击团队派活或开始 Team 会话后，这里会按节点展示负责人、进度和小结。' : '正在读取团队成员、任务节点和运行状态。'}</p></div>`;
+  const flowHtml = nodes.length ? `<section class="flow-map" aria-label="团队运行流程">${turns.map((turn, turnIndex) => `<section class="flow-turn is-${turn.status}"><button class="flow-turn__head" type="button" data-team-turn="${htmlAttr(turn.id)}" aria-expanded="${expanded.has(turn.id)}"><span>${turnIndex + 1}</span><div><strong>${escapeHtml(turn.title)}</strong><em>${statusLabel[turn.status]}</em></div></button>${expanded.has(turn.id) ? turn.stages.map((stage) => `<div class="flow-stage is-${stageStatus(stage)}"><div class="flow-stage__rail"><span>${stage.depth + 1}</span><i></i></div><div class="flow-stage__nodes">${stage.nodes.map((node) => renderNode(sessionId, node, nodes, state.messages[sessionId] || [], leaderName, members)).join('')}</div></div>`).join('') : ''}</section>`).join('')}</section>` : `<div class="board__empty board__empty--cute"><span class="pixel-empty" aria-hidden="true"></span><strong>${snapshot.loaded ? '还没有流程节点' : '正在加载协作流程'}</strong><p>${snapshot.loaded ? '点击团队派活或开始 Team 会话后，这里会按节点展示负责人、进度和小结。' : '正在读取团队成员、任务节点和运行状态。'}</p></div>`;
 
   return `<div class="inspector-team-collaboration"><aside class="team-collaboration-board">
     <div class="board__head"><div><span class="board__title-row">协作看板<button class="board-files-btn${filesOpen.has(sessionId) ? ' is-active' : ''}" type="button" data-team-files aria-expanded="${filesOpen.has(sessionId)}" title="查看当前 session 文件清单">${folderIconHtml()}${files.length ? `<i>${files.length}</i>` : ''}</button></span><em>Team Flow</em></div><div class="board__actions"><button class="team-board-close" type="button" data-team-close title="收起">×</button></div></div>
@@ -1101,6 +1112,26 @@ export function activateTeamCollaborationBoard(sessionId: string | null | undefi
         button.disabled = false;
         notify(`取消节点失败：${error instanceof Error ? error.message : String(error)}`);
       });
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-team-recover-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const action = button.dataset.teamRecoverAction as 'reassign' | 'retry' | 'abandon' | undefined;
+      const nodeId = button.dataset.teamRecoverNode;
+      if (!action || !nodeId) return;
+      const selected = document.querySelector<HTMLSelectElement>(
+        `[data-team-recovery-assignee="${CSS.escape(nodeId)}"]`,
+      )?.value || button.dataset.teamRecoverAssignee || '';
+      button.disabled = true;
+      void backendApi.recoverTeamNode(sessionId, nodeId, action, selected)
+        .then((result) => {
+          if (!result.ok) throw new Error(result.error || '节点恢复失败');
+          return refreshTeamCollaborationBoard(sessionId);
+        })
+        .catch((error) => {
+          button.disabled = false;
+          notify(`节点恢复失败：${error instanceof Error ? error.message : String(error)}`);
+        });
     });
   });
   document.querySelector<HTMLButtonElement>('[data-team-files]')?.addEventListener('click', () => {

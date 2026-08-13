@@ -231,6 +231,7 @@ class InProcessTeamManager(TeamManager):
         # 所有成员委派协程的唯一注册表。既持有 detached task 的强引用，
         # 也覆盖 DAG 并行节点；按 (owner, session) 索引同时服务 stop 与 logout。
         self._delegate_tasks: dict[TeamKey, set[asyncio.Task[Any]]] = {}
+        self._recovery_tasks: dict[TeamKey, asyncio.Task[Any]] = {}
         self._staffing_locks: dict[TeamKey, asyncio.Lock] = {}
         self.turn_router = TeamTurnRouter()
         self.graph_planner = TeamGraphPlanner()
@@ -293,6 +294,20 @@ class InProcessTeamManager(TeamManager):
             if candidate[1] == session_id:
                 return candidate
         return key
+
+    def _session_external_team_id(self, session_id: str, owner_account_id: str = "") -> str:
+        getter = getattr(self.session_store, "get_agent_config", None)
+        if not callable(getter):
+            return ""
+        try:
+            config = getter(
+                _visible_session_id(session_id),
+                owner_account_id=owner_account_id,
+            )
+        except Exception:  # noqa: BLE001 - recovery must not hide the original error
+            return ""
+        team_config = config.get("team") if isinstance(config, dict) else {}
+        return str((team_config or {}).get("external_team_id") or "").strip()
 
     def _external_team_specs(
         self,
@@ -700,6 +715,175 @@ class InProcessTeamManager(TeamManager):
             workflow_plan=workflow_plan,
         )
         return {"ok": True, "plan": plan.to_dict()}
+
+    def _hydrate_persisted_team_plan(
+        self,
+        session_id: str,
+        *,
+        node_id: str = "",
+        owner_account_id: str = "",
+    ) -> TeamPlan | None:
+        """从 Dynamic Kanban 恢复最近的 TeamPlan，供用户恢复阻塞节点。
+
+        Team Runtime 的内存计划只在进程生命周期内存在；看板则是持久化事实源。
+        这里只恢复已有图和节点状态，不重新规划、不生成新节点，避免恢复操作
+        意外改变原始 DAG。
+        """
+        store = self._kanban_store_for_owner(owner_account_id)
+        if store is None:
+            return None
+        try:
+            workflows = store.list_workflows_by_session_prefix(_visible_session_id(session_id))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("读取持久化 TeamPlan 失败 session=%s err=%s", session_id, exc)
+            return None
+
+        candidates = [
+            workflow
+            for workflow in workflows
+            if str((getattr(workflow, "context", {}) or {}).get("source") or "") == "team"
+            and str((getattr(workflow, "context", {}) or {}).get("owner_account_id") or "")
+            == str(owner_account_id or "")
+        ]
+        candidates.sort(
+            key=lambda workflow: float(getattr(workflow, "updated_at", 0) or getattr(workflow, "created_at", 0) or 0),
+            reverse=True,
+        )
+        target_node_id = str(node_id or "").strip()
+        requested_session_id = str(session_id or "").strip()
+        for workflow in candidates:
+            workflow_session_id = str(getattr(workflow, "session_id", "") or "").strip()
+            if requested_session_id and workflow_session_id != requested_session_id \
+                    and not workflow_session_id.startswith(f"{requested_session_id}::turn::"):
+                continue
+            try:
+                board = store.get_board_state(workflow.id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("读取 TeamPlan 看板失败 workflow=%s err=%s", workflow.id, exc)
+                continue
+            events = list(board.get("events") or [])
+            task_to_node, attempts, event_metadata = self._node_event_index(events)
+            tasks = list(board.get("tasks") or [])
+            task_by_node: dict[str, dict[str, Any]] = {}
+            for task in tasks:
+                task_key = str(task.get("id") or "").strip()
+                mapped_node_id = task_to_node.get(task_key, task_key)
+                if mapped_node_id:
+                    task_by_node[mapped_node_id] = task
+
+            workflow_plan = dict(
+                board.get("workflow_plan")
+                or (getattr(workflow, "context", {}) or {}).get("workflow_plan")
+                or {}
+            )
+            raw_nodes: dict[str, dict[str, Any]] = {
+                str(raw.get("id") or raw.get("node_id") or "").strip(): dict(raw)
+                for raw in workflow_plan.get("nodes") or []
+                if isinstance(raw, dict) and str(raw.get("id") or raw.get("node_id") or "").strip()
+            }
+            for event in sorted(events, key=lambda item: float(item.get("ts") or 0)):
+                if str(event.get("event_type") or "") != "team_plan_created":
+                    continue
+                for raw in (event.get("payload") or {}).get("nodes") or []:
+                    if isinstance(raw, dict):
+                        raw_id = str(raw.get("node_id") or raw.get("id") or "").strip()
+                        if raw_id:
+                            raw_nodes[raw_id] = {**raw_nodes.get(raw_id, {}), **dict(raw)}
+            node_ids = list(dict.fromkeys([*raw_nodes, *task_by_node]))
+            if target_node_id and target_node_id not in node_ids:
+                continue
+            if not node_ids:
+                continue
+
+            metadata_by_node = {node_key: dict(value) for node_key, value in event_metadata.items()}
+            latest_node_events: dict[str, dict[str, Any]] = {}
+            for event in sorted(events, key=lambda item: float(item.get("ts") or 0)):
+                if str(event.get("event_type") or "") != "team_node_updated":
+                    continue
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                event_node_id = str(payload.get("node_id") or "").strip()
+                if event_node_id:
+                    latest_node_events[event_node_id] = dict(payload)
+
+            plan = TeamPlan(
+                team_session_id=str(getattr(workflow, "session_id", "") or session_id),
+                goal=str(
+                    (workflow_plan.get("task") or {}).get("goal")
+                    or getattr(workflow, "title", "")
+                    or "团队工作流"
+                ).strip(),
+                plan_id=str(
+                    (getattr(workflow, "context", {}) or {}).get("team_plan_id")
+                    or f"persisted_{workflow.id}"
+                ),
+            )
+            for current_node_id in node_ids:
+                raw = raw_nodes.get(current_node_id, {})
+                task = task_by_node.get(current_node_id, {})
+                event_payload = latest_node_events.get(current_node_id, {})
+                raw_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+                metadata = {**dict(raw_metadata), **dict(metadata_by_node.get(current_node_id) or {})}
+                if raw.get("required_capabilities") and "required_capabilities" not in metadata:
+                    metadata["required_capabilities"] = list(raw.get("required_capabilities") or [])
+                assignee = str(
+                    task.get("assignee")
+                    if task.get("assignee") is not None
+                    else raw.get("assignee_id") or raw.get("assignee") or ""
+                ).strip()
+                plan.nodes[current_node_id] = TeamPlanNode(
+                    node_id=current_node_id,
+                    title=str(raw.get("display_title") or raw.get("title") or task.get("title") or current_node_id),
+                    detail=str(raw.get("detail") or task.get("detail") or raw.get("title") or current_node_id),
+                    assignee=assignee,
+                    status=self._taskboard_status(str(task.get("status") or "pending")),
+                    result_summary=str(task.get("result_summary") or event_payload.get("result_summary") or ""),
+                    artifact_refs=list(task.get("artifact_paths") or []),
+                    delegate_task_id=str(event_payload.get("delegate_task_id") or ""),
+                    attempt_count=attempts.get(current_node_id, int(task.get("retry_count") or 0)),
+                    last_error=(
+                        str(task.get("result_summary") or event_payload.get("last_error") or "")
+                        if str(task.get("status") or "") in {"failed", "blocked"}
+                        else str(event_payload.get("last_error") or "")
+                    ),
+                    metadata=metadata,
+                )
+
+            raw_edges = workflow_plan.get("edges") or []
+            edges: list[TeamPlanEdge] = []
+            for raw_edge in raw_edges:
+                if not isinstance(raw_edge, dict):
+                    continue
+                parent_id = str(raw_edge.get("from") or raw_edge.get("parent_id") or "").strip()
+                child_id = str(raw_edge.get("to") or raw_edge.get("child_id") or "").strip()
+                if parent_id in plan.nodes and child_id in plan.nodes:
+                    edges.append(TeamPlanEdge(parent_id=parent_id, child_id=child_id))
+            if not edges:
+                task_to_node_id = {str(task.get("id") or ""): node_key for node_key, task in task_by_node.items()}
+                for dependency in board.get("dependencies") or []:
+                    parent_id = task_to_node_id.get(str(dependency.get("parent_task_id") or ""))
+                    child_id = task_to_node_id.get(str(dependency.get("child_task_id") or ""))
+                    if parent_id and child_id:
+                        edges.append(TeamPlanEdge(parent_id=parent_id, child_id=child_id))
+            unique_edges: list[TeamPlanEdge] = []
+            seen_edges: set[tuple[str, str]] = set()
+            for edge in edges:
+                edge_key = (edge.parent_id, edge.child_id)
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    unique_edges.append(edge)
+            plan.edges = unique_edges
+            self._refresh_plan_status(plan)
+            key = self._key(plan.team_session_id, owner_account_id)
+            self._plans[key] = plan
+            self._plan_workflows[key] = str(workflow.id)
+            for current_node_id, task in task_by_node.items():
+                task_id = str(task.get("id") or "").strip()
+                if task_id:
+                    self._plan_node_tasks[(owner_account_id, plan.team_session_id, current_node_id)] = task_id
+            if target_node_id and target_node_id not in plan.nodes:
+                continue
+            return plan
+        return None
 
     def read_plan(self, session_id: str, owner_account_id: str = "") -> dict[str, Any]:
         plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
@@ -1542,7 +1726,7 @@ class InProcessTeamManager(TeamManager):
         replacement = str(trigger.get("replacement_assignee") or "").strip()
         if not replacement or replacement not in team.members:
             raise ValueError("已有成员改派目标无效")
-        previous = node.assignee
+        previous = node.assignee or str((node.metadata or {}).get("previous_assignee") or "")
         metadata = dict(node.metadata or {})
         history = list(metadata.get("runtime_assignment_history") or [])
         history.append({
@@ -1561,14 +1745,29 @@ class InProcessTeamManager(TeamManager):
             "required_capabilities": list(trigger.get("required_capabilities") or []),
             "reason": str(trigger.get("reason") or ""),
         }
+        recovery_action = str(trigger.get("recovery_action") or "").strip()
+        if recovery_action:
+            metadata["runtime_recovery"] = {
+                "action": recovery_action,
+                "status": "applied",
+                "previous_assignee": previous,
+                "replacement_assignee": replacement,
+                "changed_at": time.time(),
+            }
         metadata.pop("runtime_staffing_trigger", None)
         metadata.pop("runtime_staffing_trigger_reason", None)
+        metadata.pop("runtime_blocking", None)
         node.assignee = replacement
         node.metadata = metadata
         node.update(
             status="pending",
-            result_summary="已有团队成员可以承担，已自动改派并准备重新执行。",
+            result_summary=(
+                "已请求重试，等待重新执行。"
+                if recovery_action == "retry"
+                else "已有团队成员可以承担，已自动改派并准备重新执行。"
+            ),
             delegate_task_id="",
+            attempt_count=0,
             last_error="",
             allow_reopen=True,
         )
@@ -1589,6 +1788,341 @@ class InProcessTeamManager(TeamManager):
         )
         self._sync_kanban_node(plan, node, owner_account_id=owner_account_id)
         return team
+
+    def _member_capability_coverage(
+        self,
+        team: Team,
+        member_id: str,
+        required_capabilities: list[str],
+        *,
+        owner_account_id: str,
+    ) -> Any:
+        """Resolve one current Team member through the shared coverage model."""
+
+        member = team.members.get(str(member_id or "").strip())
+        if member is None:
+            return evaluate_capability_coverage(
+                required_capabilities,
+                capability_sets={},
+                assigned_agent_ids=[str(member_id or "")],
+            )
+        if member.executor == "external" and member.external_agent_id:
+            agent_id = str(member.external_agent_id).strip()
+            profiles: dict[str, Any] = {}
+            if self.external_store is not None:
+                try:
+                    agent = self.external_store.get_agent(
+                        agent_id,
+                        owner_account_id=owner_account_id,
+                    )
+                    model_id = str(member.model or "").strip()
+                    profile_payload = agent.get("profile") if isinstance(agent, dict) else {}
+                    profile_version = str(
+                        agent.get("profile_version")
+                        or (profile_payload.get("version") if isinstance(profile_payload, dict) else "")
+                        or ""
+                    )
+                    cache_key = (owner_account_id, agent_id, model_id, profile_version)
+                    profile = self._runtime_profile_cache.get(cache_key)
+                    if profile is None:
+                        profile = build_agent_profile(agent, model_id=model_id or None)
+                        self._runtime_profile_cache[cache_key] = profile
+                    profiles[agent_id] = profile
+                except Exception as exc:  # noqa: BLE001 - unknown profile is a real runtime fact
+                    log.debug("无法解析 Team 成员 AgentProfile agent=%s err=%s", agent_id, exc)
+            return evaluate_capability_coverage(
+                required_capabilities,
+                profiles,
+                assigned_agent_ids=[agent_id],
+            )
+        capabilities = normalize_capabilities(member.capabilities)
+        if not capabilities:
+            capabilities = normalize_capabilities(
+                flow_builder.member_node_metadata(member).get("required_capabilities") or []
+            )
+        return evaluate_capability_coverage(
+            required_capabilities,
+            capability_sets={member.member_id: capabilities},
+            assigned_agent_ids=[member.member_id],
+        )
+
+    def _clear_recovery_dependency_marks(
+        self,
+        plan: TeamPlan,
+        resolved_node_id: str,
+        *,
+        owner_account_id: str,
+    ) -> None:
+        for candidate in plan.nodes.values():
+            metadata = dict(candidate.metadata or {})
+            blockers = [
+                str(item).strip()
+                for item in (metadata.get("blocked_by_nodes") or [])
+                if str(item).strip() and str(item).strip() != resolved_node_id
+            ]
+            if blockers:
+                metadata["blocked_by_nodes"] = list(dict.fromkeys(blockers))
+            else:
+                metadata.pop("blocked_by_nodes", None)
+            candidate.metadata = metadata
+            if candidate.node_id != resolved_node_id:
+                self._sync_kanban_node(plan, candidate, owner_account_id=owner_account_id)
+
+    def _mark_node_abandoned(
+        self,
+        plan: TeamPlan,
+        node: TeamPlanNode,
+        *,
+        owner_account_id: str,
+        reason: str,
+    ) -> None:
+        previous_assignee = node.assignee or str((node.metadata or {}).get("previous_assignee") or "")
+        metadata = dict(node.metadata or {})
+        metadata["previous_assignee"] = previous_assignee
+        metadata["unassigned_reason"] = reason
+        metadata["runtime_recovery"] = {
+            "action": "abandon",
+            "status": "applied",
+            "previous_assignee": previous_assignee,
+            "changed_at": time.time(),
+        }
+        metadata["runtime_blocking"] = {
+            "status": "blocked",
+            "reason": "node_abandoned",
+            "previous_assignee": previous_assignee,
+        }
+        node.metadata = metadata
+        node.assignee = ""
+        node.update(
+            status="blocked",
+            result_summary="用户选择放弃该节点，依赖此节点的后续工作无法继续。",
+            last_error=reason,
+            allow_reopen=True,
+        )
+        feasibility = self._workflow_feasibility(plan, node.node_id)
+        for dependent_id in feasibility["blocked_dependency_nodes"]:
+            dependent = plan.nodes.get(dependent_id)
+            if dependent is None:
+                continue
+            dependent.metadata = {
+                **dict(dependent.metadata or {}),
+                "blocked_by_nodes": list(dict.fromkeys([
+                    *list((dependent.metadata or {}).get("blocked_by_nodes") or []),
+                    node.node_id,
+                ])),
+            }
+            self._sync_kanban_node(plan, dependent, owner_account_id=owner_account_id)
+        self._refresh_plan_status(plan)
+        self._sync_kanban_node(plan, node, owner_account_id=owner_account_id)
+
+    def recover_plan_node(
+        self,
+        session_id: str,
+        *,
+        node_id: str,
+        action: str,
+        replacement_assignee: str = "",
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        """Apply one user-directed recovery action to a blocked Team node.
+
+        This method only changes the durable plan state. The caller can then start
+        the normal Team Runtime loop, which reuses the current plan and only runs
+        nodes that are ready after the local repair.
+        """
+
+        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        if plan is None:
+            plan = self._hydrate_persisted_team_plan(
+                session_id,
+                node_id=node_id,
+                owner_account_id=owner_account_id,
+            )
+        if plan is None:
+            raise ValueError("当前 Team session 尚未创建 TeamPlan")
+        node = plan.nodes.get(str(node_id or "").strip())
+        if node is None:
+            raise ValueError(f"未知 TeamPlan 节点: {node_id}")
+        if node.status not in {"blocked", "failed", "needs_info"} and not (node.metadata or {}).get("runtime_blocking"):
+            raise ValueError("当前节点不是可恢复状态")
+        action = str(action or "").strip().lower()
+        plan_session_id = plan.team_session_id
+        external_team_id = self._session_external_team_id(plan_session_id, owner_account_id)
+        team = self._get_or_create(
+            plan_session_id,
+            external_team_id=external_team_id,
+            owner_account_id=owner_account_id,
+        )
+        required = normalize_capabilities((node.metadata or {}).get("required_capabilities") or [])
+        previous_assignee = str(node.assignee or (node.metadata or {}).get("previous_assignee") or "").strip()
+
+        if action in {"reassign", "retry"}:
+            target = str(replacement_assignee or (node.assignee if action == "retry" else "") or previous_assignee).strip()
+            if not target or target in {"leader", "Crew", CREW_BUILTIN_AGENT_ID}:
+                raise ValueError("恢复节点需要选择一名现有团队成员")
+            if target not in team.teammates:
+                raise ValueError(f"未知或不可委派团队成员: {target}")
+            if action == "reassign":
+                coverage = self._member_capability_coverage(
+                    team,
+                    target,
+                    required,
+                    owner_account_id=owner_account_id,
+                )
+                if coverage.status != "covered":
+                    missing = list(dict.fromkeys([
+                        *coverage.missing,
+                        *coverage.unavailable,
+                        *coverage.unknown,
+                    ]))
+                    raise ValueError(
+                        f"成员 {target} 不覆盖当前节点所需能力：{'、'.join(missing) or '能力画像不可用'}"
+                    )
+            if node.assignee != target:
+                self._apply_existing_member_reassignment(
+                    plan,
+                    node,
+                    team,
+                    {
+                        "replacement_assignee": target,
+                        "required_capabilities": required,
+                        "reason": "用户从阻塞节点恢复入口选择已有团队成员。",
+                        "recovery_action": action,
+                    },
+                    owner_account_id=owner_account_id,
+                )
+            else:
+                metadata = dict(node.metadata or {})
+                metadata.pop("runtime_blocking", None)
+                metadata["runtime_recovery"] = {
+                    "action": "retry",
+                    "status": "applied",
+                    "previous_assignee": previous_assignee,
+                    "replacement_assignee": target,
+                    "changed_at": time.time(),
+                }
+                node.metadata = metadata
+                node.update(
+                    status="pending",
+                    result_summary="已请求重试，等待重新执行。",
+                    delegate_task_id="",
+                    attempt_count=0,
+                    last_error="",
+                    allow_reopen=True,
+                )
+                self._persist_assignment_revision(
+                    plan,
+                    node,
+                    owner_account_id=owner_account_id,
+                    reason="retry_blocked_node",
+                    delta={"recovered_node": {"node_id": node.node_id, "action": action, "assignee": target}},
+                )
+            self._clear_recovery_dependency_marks(
+                plan,
+                node.node_id,
+                owner_account_id=owner_account_id,
+            )
+        elif action in {"abandon", "cancel"}:
+            self._mark_node_abandoned(
+                plan,
+                node,
+                owner_account_id=owner_account_id,
+                reason="用户从阻塞节点恢复入口选择放弃该节点。",
+            )
+        else:
+            raise ValueError("不支持的节点恢复动作")
+
+        plan.updated_at = node.updated_at
+        self._refresh_plan_status(plan)
+        self._record_team_event(
+            session_id,
+            owner_account_id=owner_account_id,
+            event_type="team_node_recovery",
+            actor="user",
+            node_id=node.node_id,
+            payload={
+                "node_id": node.node_id,
+                "action": "abandon" if action in {"abandon", "cancel"} else action,
+                "previous_assignee": previous_assignee,
+                "assignee": node.assignee,
+                "required_capabilities": required,
+            },
+        )
+        self._sync_kanban_node(plan, node, owner_account_id=owner_account_id)
+        recovery_scheduled = self._schedule_plan_recovery(plan, owner_account_id=owner_account_id)
+        return {
+            "ok": True,
+            "session_id": plan.team_session_id,
+            "plan": plan.to_dict(),
+            "node": node.to_dict(),
+            "recovery_scheduled": recovery_scheduled,
+        }
+
+    async def _resume_recovered_plan(self, plan_session_id: str, owner_account_id: str) -> None:
+        external_team_id = self._session_external_team_id(plan_session_id, owner_account_id)
+        team = self._get_or_create(
+            plan_session_id,
+            external_team_id=external_team_id,
+            owner_account_id=owner_account_id,
+        )
+        workspace_id = "default"
+        workspace_getter = getattr(self.session_store, "get_workspace_id", None)
+        if callable(workspace_getter):
+            try:
+                workspace_id = str(
+                    workspace_getter(_visible_session_id(plan_session_id), owner_account_id=owner_account_id)
+                    or "default"
+                )
+            except Exception:  # noqa: BLE001
+                workspace_id = "default"
+        envelope = Envelope.of(
+            "继续执行已恢复的团队工作流",
+            session_id=plan_session_id,
+            channel="team_recovery",
+            user_id=owner_account_id,
+            workspace_id=workspace_id,
+            mode="team",
+            params={
+                "external_team_id": external_team_id,
+                "team_recovery": True,
+            },
+        )
+        async for _chunk in self._run_required_workflow(
+            envelope,
+            team=team,
+            external_team_id=external_team_id,
+        ):
+            pass
+
+    def _schedule_plan_recovery(self, plan: TeamPlan, *, owner_account_id: str) -> bool:
+        key = self._key(plan.team_session_id, owner_account_id)
+        current = self._recovery_tasks.get(key)
+        if current is not None and not current.done():
+            return False
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # 单元测试或同步控制面调用没有 running loop；状态已持久化，
+            # 后续由异步 HTTP 入口或下一次 Team turn 继续执行。
+            return False
+        task = asyncio.create_task(
+            self._resume_recovered_plan(plan.team_session_id, owner_account_id),
+            name=f"team-recovery:{plan.team_session_id}",
+        )
+        self._recovery_tasks[key] = task
+
+        def _cleanup(completed: asyncio.Task[Any]) -> None:
+            if self._recovery_tasks.get(key) is completed:
+                self._recovery_tasks.pop(key, None)
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Team 节点恢复后重新执行失败 session=%s err=%s", plan.team_session_id, exc)
+
+        task.add_done_callback(_cleanup)
+        return True
 
     def _record_team_event(
         self,

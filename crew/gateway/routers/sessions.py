@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.agent.external.runtime_profile import canonical_runtime_model_id, normalize_runtime_models
+from crew.core.errors import ToolError
 from crew.agent.loop.tool_result_display import (
     SUBAGENT_FULL_RESULT_TOOLS,
     tool_result_detail_for_ui,
@@ -623,10 +624,18 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             if isinstance(metadata.get("runtime_capabilities"), dict)
             else {}
         )
+        # Kimi 0.26 may persist a fallback catalog from provider/list after
+        # session/new omitted models. Older stored profiles have the catalog
+        # but missed the capability bit; the probe stage is the explicit proof
+        # that this catalog came from Kimi's model-switch capable fallback.
+        kimi_catalog_fallback = (
+            str(runtime.get("provider") or "").strip().lower() == "kimi"
+            and metadata.get("probe_stage") == "acp_session_new+kimi_provider_list"
+        )
         return bool(
             metadata.get("availability_status") == "ready"
             and models
-            and capabilities.get("model_switch")
+            and (capabilities.get("model_switch") or kimi_catalog_fallback)
         )
 
     def external_session_model_binding(session_id: str, owner: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
@@ -1316,6 +1325,35 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+    @router.post("/api/session/{session_id}/team/recover")
+    async def recover_team_node(
+        request: Request,
+        session_id: str,
+        payload: dict | None = None,
+    ) -> JSONResponse:
+        """恢复 Team 阻塞节点，并由 Team Runtime 继续可执行分支。"""
+        owner = _owner(request)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        team_manager = getattr(crew, "team", None)
+        recover = getattr(team_manager, "recover_plan_node", None)
+        if not callable(recover):
+            return JSONResponse({"ok": False, "error": "Team Runtime 不可用"}, status_code=409)
+        body = payload or {}
+        try:
+            result = recover(
+                session_id,
+                node_id=str(body.get("node_id") or ""),
+                action=str(body.get("action") or ""),
+                replacement_assignee=str(body.get("replacement_assignee") or ""),
+                owner_account_id=owner,
+            )
+            return JSONResponse(result)
+        except (ValueError, ToolError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except KeyError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
 
     @router.get("/api/tasks/{task_or_session_id}")
     async def task_or_legacy_session(request: Request, task_or_session_id: str) -> JSONResponse:

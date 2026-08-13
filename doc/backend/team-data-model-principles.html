@@ -691,7 +691,20 @@ flowchart LR
     <li><b>持久化：</b><code>runtime_blocking</code> 保存拒绝/无候选原因、补员请求、能力要求和可行性快照；Kanban task 的 assignee 同步为空，避免内存态与看板态分裂。</li>
   </ul>
 
-  <h2>23. 后续 TODO 边界</h2>
+  <h2>23. 阻塞节点恢复闭环（2026-08-13）</h2>
+  <p>阻塞后的恢复属于 Team Runtime 的局部修复，不重新生成 TeamSpec 或重规划整张 DAG。用户只能对当前阻塞节点执行“重试原成员”“改派现有成员”或“放弃节点”；恢复入口继续复用同一份节点能力契约和 <code>evaluate_capability_coverage()</code>。</p>
+  <table><thead><tr><th>动作</th><th>状态变化</th><th>边界</th></tr></thead><tbody>
+    <tr><td><code>retry</code></td><td>恢复原负责人、清除本次阻塞标记、节点回到 <code>pending</code>。</td><td>只要求原负责人仍属于当前 Team；若再次执行暴露能力缺口，Runtime 重新按正常规则处理。</td></tr>
+    <tr><td><code>reassign</code></td><td>改为当前团队已有成员、清除阻塞标记、节点回到 <code>pending</code>，写入 WorkflowPlan revision。</td><td>只允许当前 Team 成员；能力不覆盖时拒绝，不在恢复入口偷偷补员。</td></tr>
+    <tr><td><code>abandon</code></td><td>节点保持 <code>blocked</code>，依赖该节点的后续节点继续等待；无依赖分支仍可执行。</td><td>不伪造完成结果，不自动删除 DAG 节点。</td></tr>
+  </tbody></table>
+  <ul>
+    <li><b>持久化恢复：</b>进程内没有 TeamPlan 时，从最近的 Team Dynamic Kanban workflow、workflow_plan、tasks、dependencies 和 node events 恢复原图；恢复过程不调用 Planner、不新增节点。</li>
+    <li><b>执行闭环：</b><code>POST /api/session/{id}/team/recover</code> 只提交动作和节点，服务端先原子更新计划/看板，再由 Team Runtime 继续当前计划中已满足依赖的节点。</li>
+    <li><b>数据对象：</b>不新增表和顶层模块；<code>runtime_recovery</code>、<code>runtime_blocking</code>、<code>previous_assignee</code> 继续作为 TeamPlanNode metadata，并通过既有 <code>team_node_recovery</code>、<code>team_node_updated</code> 与 <code>workflow_plan_revised</code> 事件留痕。</li>
+  </ul>
+
+  <h2>24. 后续 TODO 边界</h2>
   <p class="warn">以下是 2026-07-12 确认后的后续开发清单。当前阶段不引入 TeamManifest；Dynamic Kanban 五表边界成立，后续动态工作流继续复用现有存储，不另起一套 Workflow 表。</p>
   <table><thead><tr><th>优先级</th><th>方向</th><th>目标与边界</th></tr></thead><tbody>
     <tr><td>完成</td><td>CLI 与 ACP 协作能力对齐</td><td>ACP 与 Claude stream-json 消费 <code>RuntimeExecutionRequest.mcp_servers</code>；Codex app-server 消费 <code>dynamic_tools</code> 并通过 <code>item/tool/call</code> 回调。三者最终都进入同一个 InteractionBridge，工具面由服务端 Binding 的 <code>standalone/team + leader/member</code> 决定。</td></tr>

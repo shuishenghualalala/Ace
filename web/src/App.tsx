@@ -729,6 +729,16 @@ export default function App() {
             await api.cancelTask(taskId);
             await refreshTasks();
           }}
+          onRecover={async (nodeId, action, replacementAssignee) => {
+            const result = await api.recoverTeamNode(
+              currentSessionId,
+              nodeId,
+              action,
+              replacementAssignee,
+            );
+            if (!result.ok) throw new Error(result.error || "节点恢复失败");
+            await refreshTasks();
+          }}
         />
       )}
       {modal.open && (

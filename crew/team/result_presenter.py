@@ -110,6 +110,7 @@ def node_display_progress(
         "runtime_staffing",
         "runtime_blocking",
         "runtime_reassignment",
+        "runtime_recovery",
         "previous_assignee",
         "unassigned_reason",
         "blocked_by_nodes",

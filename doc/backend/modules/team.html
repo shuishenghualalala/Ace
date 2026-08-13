@@ -373,4 +373,13 @@ graph TD
   <li><b>验证：</b><code>tests/test_team_tasks.py</code> 全量 181 passed / 1 skipped；<code>tests/gateway/test_runtimes_suggest.py</code> 与 <code>tests/test_external_agents.py</code> 合计 180 passed。</li>
 </ul>
 
+<h2>143. 2026-08-13 Team 阻塞节点恢复闭环</h2>
+<ul>
+  <li><b>用户动作：</b>Web/Desktop 团队看板对阻塞节点提供“重试原成员”“重新分配”“放弃节点”；重新分配只列当前团队成员，服务端再次校验节点能力覆盖，不接受任意字符串绕过。</li>
+  <li><b>后端入口：</b>新增 <code>POST /api/session/{id}/team/recover</code>，复用 <code>InProcessTeamManager.recover_plan_node()</code>。接口只负责节点级恢复，不重新调用 TeamSpec/Planner。</li>
+  <li><b>持久化：</b>如果进程内没有 TeamPlan，TeamManager 从最近 Team Kanban workflow 恢复原节点、依赖、metadata 和 task 映射；改派沿用既有 WorkflowPlan revision 原子更新，节点事件追加 <code>team_node_recovery</code>。</li>
+  <li><b>继续执行：</b>恢复改派/重试后节点回到 pending，由 Team Runtime 继续当前计划中 ready 的分支；放弃节点保持 blocked，依赖链等待，独立分支不受影响。</li>
+  <li><b>模块边界：</b>不新增数据库表、TeamSpec 字段或顶层模块；能力判断仍统一使用 <code>evaluate_capability_coverage()</code>，恢复状态通过既有 TeamPlanNode metadata 与 Dynamic Kanban 事件表达。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

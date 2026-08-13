@@ -4028,7 +4028,7 @@ button { font-family: inherit; cursor: pointer; }
 }
 .team-member {
   display: grid;
-  grid-template-columns: 22px 1fr;
+  grid-template-columns: 28px 1fr;
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -4042,14 +4042,14 @@ button { font-family: inherit; cursor: pointer; }
   background: rgba(255,250,241,.78);
 }
 .team-member__crew-avatar {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   border-width: 1px;
-  border-radius: 7px;
+  border-radius: 8px;
 }
 .team-member__crew-avatar .msg-agent-logo {
-  width: 15px;
-  height: 15px;
+  width: 22px;
+  height: 22px;
 }
 .team-member strong {
   display: flex;
@@ -4059,36 +4059,6 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 12px;
   line-height: 1.2;
 }
-.leader-flag {
-  position: relative;
-  width: 12px;
-  height: 12px;
-  flex: 0 0 12px;
-  display: inline-block;
-}
-.leader-flag::before {
-  content: "";
-  position: absolute;
-  left: 2px;
-  top: 2px;
-  width: 1px;
-  height: 9px;
-  background: #3f342a;
-}
-.leader-flag::after {
-  content: "";
-  position: absolute;
-  left: 4px;
-  top: 2px;
-  width: 6px;
-  height: 5px;
-  background: #f0c36d;
-  border: 1px solid #3f342a;
-  border-left: 0;
-  border-radius: 1px 2px 2px 1px;
-  box-shadow: inset -1px -1px rgba(105,91,72,.12);
-}
-
 .team-create {
   --team-ink: #1a1a1a;
   --team-paper: #fff;
@@ -5654,6 +5624,17 @@ button { font-family: inherit; cursor: pointer; }
   font-weight: 800;
 }
 .mini-cancel:hover { border-color: #695b48; color: #3f342a; }
+.mini-recovery-select {
+  min-width: 92px;
+  height: 24px;
+  border: 1px solid rgba(105,91,72,.22);
+  border-radius: 8px;
+  background: #fffaf1;
+  color: #695b48;
+  font-size: 11px;
+  font-weight: 700;
+}
+.flow-node__recovery-actions { justify-content: flex-start; flex-wrap: wrap; }
 .board-alert {
   border: 1px solid rgba(171,99,76,.26);
   border-radius: 16px;

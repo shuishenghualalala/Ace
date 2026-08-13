@@ -4775,6 +4775,204 @@ def test_runtime_staffing_reassigns_existing_member_before_prompting_user():
     assert trigger["replacement_assignee"] == "hh"
 
 
+def _recovery_team_config() -> Config:
+    return Config(team_config={
+        "members": [
+            {
+                "member_id": "kk",
+                "name": "kk",
+                "executor": "builtin",
+                "capabilities": ["implementation"],
+            },
+            {
+                "member_id": "hh",
+                "name": "hh",
+                "executor": "builtin",
+                "capabilities": ["testing"],
+            },
+        ],
+    })
+
+
+def _blocked_recovery_plan(session_id: str) -> TeamPlan:
+    blocked = TeamPlanNode(
+        node_id="verify",
+        title="验证",
+        detail="验证实现结果",
+        assignee="kk",
+        metadata={"required_capabilities": ["testing"]},
+    )
+    dependent = TeamPlanNode(node_id="summary", title="汇总", assignee="hh")
+    independent = TeamPlanNode(node_id="docs", title="整理说明", assignee="hh")
+    plan = TeamPlan(
+        team_session_id=session_id,
+        goal="完成验证和说明",
+        nodes={node.node_id: node for node in (blocked, dependent, independent)},
+        edges=[TeamPlanEdge(parent_id="verify", child_id="summary")],
+    )
+    return plan
+
+
+def test_recover_plan_node_reassigns_persisted_blocked_node(tmp_path):
+    store = SQLiteKanbanStore(tmp_path / "team-recovery.db")
+    tm, _ = _team(config=_recovery_team_config(), kanban_store=store)
+    plan = _blocked_recovery_plan("persisted-recovery")
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+    tm._persist_team_plan(
+        plan,
+        owner_account_id="local",
+        workflow_plan={
+            "version": 1,
+            "revision": 1,
+            "task": {"goal": plan.goal},
+            "nodes": [
+                {
+                    "id": "verify",
+                    "title": "验证",
+                    "assignee_id": "kk",
+                    "required_capabilities": ["testing"],
+                },
+                {"id": "summary", "title": "汇总", "assignee_id": "hh"},
+                {"id": "docs", "title": "整理说明", "assignee_id": "hh"},
+            ],
+            "edges": [{"from": "verify", "to": "summary"}],
+        },
+    )
+    tm._mark_runtime_blocked(
+        plan,
+        plan.nodes["verify"],
+        owner_account_id="local",
+        request=RuntimeStaffingRequest(
+            request_id="recovery-staffing",
+            trigger_node_id="verify",
+            trigger_type="capability_gap",
+            required_capabilities=["testing"],
+            reason="kk 不具备 testing",
+            status="declined",
+        ),
+        result_summary="用户拒绝补员，当前节点已阻塞。",
+    )
+
+    recovered_tm, _ = _team(config=_recovery_team_config(), kanban_store=store)
+    result = recovered_tm.recover_plan_node(
+        "persisted-recovery",
+        node_id="verify",
+        action="reassign",
+        replacement_assignee="hh",
+        owner_account_id="local",
+    )
+
+    node = result["node"]
+    assert result["recovery_scheduled"] is False
+    assert node["status"] == "pending"
+    assert node["assignee"] == "hh"
+    assert "runtime_blocking" not in node["metadata"]
+    assert "blocked_by_nodes" not in result["plan"]["nodes"][1]["metadata"]
+    projected = recovered_tm.task_projection_for_session("persisted-recovery", owner_account_id="local")
+    verify = next(item for item in projected if item["progress"].get("plan_node_id") == "verify")
+    assert verify["assignee"] == "hh"
+    assert verify["status"] == "pending"
+
+
+def test_recover_plan_node_reuses_capability_coverage_and_rejects_invalid_member():
+    tm, _ = _team(config=_recovery_team_config())
+    plan = _blocked_recovery_plan("recovery-capability")
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+    tm._mark_runtime_blocked(
+        plan,
+        plan.nodes["verify"],
+        owner_account_id="local",
+        request=RuntimeStaffingRequest(
+            request_id="recovery-capability-staffing",
+            trigger_node_id="verify",
+            trigger_type="capability_gap",
+            required_capabilities=["testing"],
+            reason="kk 不具备 testing",
+            status="declined",
+        ),
+        result_summary="用户拒绝补员，当前节点已阻塞。",
+    )
+
+    with pytest.raises(ValueError, match="testing"):
+        tm.recover_plan_node(
+            "recovery-capability",
+            node_id="verify",
+            action="reassign",
+            replacement_assignee="kk",
+            owner_account_id="local",
+        )
+
+
+def test_abandon_recovery_keeps_dependent_node_blocked_but_preserves_independent_branch():
+    tm, _ = _team(config=_recovery_team_config())
+    plan = _blocked_recovery_plan("recovery-abandon")
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+    tm._mark_runtime_blocked(
+        plan,
+        plan.nodes["verify"],
+        owner_account_id="local",
+        request=RuntimeStaffingRequest(
+            request_id="recovery-abandon-staffing",
+            trigger_node_id="verify",
+            trigger_type="capability_gap",
+            required_capabilities=["testing"],
+            reason="kk 不具备 testing",
+            status="declined",
+        ),
+        result_summary="用户拒绝补员，当前节点已阻塞。",
+    )
+
+    result = tm.recover_plan_node(
+        "recovery-abandon",
+        node_id="verify",
+        action="abandon",
+        owner_account_id="local",
+    )
+
+    assert result["node"]["metadata"]["runtime_blocking"]["reason"] == "node_abandoned"
+    assert plan.status == "blocked"
+    assert plan.nodes["summary"].metadata["blocked_by_nodes"] == ["verify"]
+    assert "blocked_by_nodes" not in plan.nodes["docs"].metadata
+
+
+@pytest.mark.asyncio
+async def test_recovery_schedules_team_runtime_resume(monkeypatch):
+    tm, _ = _team(config=_recovery_team_config())
+    plan = _blocked_recovery_plan("recovery-schedule")
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+    tm._mark_runtime_blocked(
+        plan,
+        plan.nodes["verify"],
+        owner_account_id="local",
+        request=RuntimeStaffingRequest(
+            request_id="recovery-schedule-staffing",
+            trigger_node_id="verify",
+            trigger_type="capability_gap",
+            required_capabilities=["testing"],
+            reason="kk 不具备 testing",
+            status="declined",
+        ),
+        result_summary="用户拒绝补员，当前节点已阻塞。",
+    )
+    resumed: list[str] = []
+
+    async def fake_resume(session_id: str, owner_account_id: str) -> None:
+        resumed.append(f"{owner_account_id}:{session_id}")
+
+    monkeypatch.setattr(tm, "_resume_recovered_plan", fake_resume)
+    result = tm.recover_plan_node(
+        "recovery-schedule",
+        node_id="verify",
+        action="reassign",
+        replacement_assignee="hh",
+        owner_account_id="local",
+    )
+    await asyncio.sleep(0)
+
+    assert result["recovery_scheduled"] is True
+    assert resumed == ["local:recovery-schedule"]
+
+
 def test_team_turn_router_returns_team_turn_decision():
     router = TeamTurnRouter()
 
@@ -7948,6 +8146,53 @@ def test_team_parent_session_history_aggregates_child_sessions(auth_headers):
         "team_parent::turn::r1::kk",
     ]
     assert [item["role"] for item in response.json()] == ["team_internal", "team_internal"]
+
+
+def test_team_recovery_gateway_routes_node_action_to_team_manager(auth_headers):
+    calls: list[dict] = []
+
+    class Store:
+        def session_belongs_to(self, session_id: str, owner_account_id: str):
+            return session_id == "team_recovery" and owner_account_id == "A:uid-a"
+
+        def get_agent_config(self, session_id: str, owner_account_id: str = ""):
+            return {"executor": "team"}
+
+    class Team:
+        def recover_plan_node(self, session_id: str, **kwargs):
+            calls.append({"session_id": session_id, **kwargs})
+            return {"ok": True, "node": {"node_id": kwargs["node_id"]}}
+
+    class Crew:
+        session_store = Store()
+        team = Team()
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def attach_test_account(request, call_next):
+        request.state.account = AccountContext(owner_account_id="A:uid-a")
+        return await call_next(request)
+
+    app.include_router(create_sessions_router(Crew(), dispatcher=None))
+    response = TestClient(app).post(
+        "/api/session/team_recovery/team/recover",
+        headers=auth_headers,
+        json={
+            "node_id": "verify",
+            "action": "reassign",
+            "replacement_assignee": "hh",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [{
+        "session_id": "team_recovery",
+        "node_id": "verify",
+        "action": "reassign",
+        "replacement_assignee": "hh",
+        "owner_account_id": "A:uid-a",
+    }]
 
 
 def test_team_parent_session_history_prefers_kanban_events_over_child_sessions(auth_headers):
