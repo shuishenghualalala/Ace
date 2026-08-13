@@ -15,6 +15,7 @@ from crew.core.types import ChatResponse, Message
 from crew.dynamickanban.models import PlanEdge, PlanNode, PlanResult
 from crew.dynamickanban.plan_graph import PlanGraph
 from crew.team import flow_builder
+from crew.team.agent_profile import evaluate_capability_coverage
 from crew.team.capabilities import normalize_capabilities, normalize_capability
 from crew.team.models import TeamMemberSpec
 from crew.team.policy_checker import TeamPolicyReport, analyze_team_policy
@@ -277,6 +278,32 @@ def _build_fast_workflow_nodes(
 
 def _member_by_id(team: Any) -> dict[str, TeamMemberSpec]:
     return dict((getattr(team, "members", {}) or {}))
+
+
+def _member_capability_sets(team: Any) -> dict[str, list[str]]:
+    """Return the confirmed Formation capability assignment for DAG admission."""
+
+    result: dict[str, list[str]] = {}
+    for member in (getattr(team, "members", {}) or {}).values():
+        if not member.member_id:
+            continue
+        capabilities = normalize_capabilities(member.capabilities or [])
+        if not capabilities:
+            capabilities = normalize_capabilities(
+                flow_builder.member_node_metadata(member).get("required_capabilities") or []
+            )
+        result[member.member_id] = capabilities
+    return result
+
+
+def _member_metadata_sets(team: Any) -> dict[str, dict[str, Any]]:
+    """Return member identity metadata used when admission changes assignees."""
+
+    return {
+        member.member_id: flow_builder.member_node_metadata(member)
+        for member in (getattr(team, "members", {}) or {}).values()
+        if member.member_id
+    }
 
 
 def _member_lane_for_assignee(member_map: dict[str, TeamMemberSpec], assignee: str, fallback: str = "other") -> str:
@@ -1732,6 +1759,8 @@ def _normalize_nodes_with_graph(
     valid_roles: list[str],
     execution_profile: dict[str, Any] | None = None,
     plan_strategy: str = "rule_dag_with_plan_graph",
+    member_capabilities: dict[str, list[str]] | None = None,
+    member_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[list[str]], list[str]]:
     raw_nodes, normalized_raw_edges, id_notes = _normalize_raw_graph_ids(raw_nodes, raw_edges)
     plan_nodes: list[PlanNode] = []
@@ -1762,6 +1791,12 @@ def _normalize_nodes_with_graph(
     graph_notes = _ensure_leader_summary_terminal(graph)
 
     normalized_nodes: list[dict[str, Any]] = []
+    capability_notes: list[str] = []
+    capability_sets = {
+        str(member_id): normalize_capabilities(capabilities)
+        for member_id, capabilities in (member_capabilities or {}).items()
+        if str(member_id).strip()
+    }
     ordered_nodes = [
         graph.nodes[node.id]
         for node in plan_nodes
@@ -1797,6 +1832,58 @@ def _normalize_nodes_with_graph(
             )
         if not is_control_node and not is_leader_direct and not required_capabilities:
             raise ValueError(f"execution node {node.id} missing required_capabilities")
+        coverage = None
+        assignment_reason = ""
+        previous_assignee = node.assignee or "leader"
+        if required_capabilities and not is_control_node and not is_leader_direct:
+            coverage = evaluate_capability_coverage(
+                required_capabilities,
+                capability_sets=capability_sets,
+                assigned_agent_ids=[previous_assignee],
+            )
+            if coverage.status != "covered":
+                replacement = next(
+                    (
+                        member_id
+                        for member_id, capabilities in capability_sets.items()
+                        if member_id != previous_assignee
+                        and evaluate_capability_coverage(
+                            required_capabilities,
+                            capability_sets={member_id: capabilities},
+                            assigned_agent_ids=[member_id],
+                        ).status == "covered"
+                    ),
+                    "",
+                )
+                if replacement:
+                    node.assignee = replacement
+                    assignment_reason = "已有成员完整覆盖节点能力，规划阶段确定性修正负责人。"
+                    replacement_metadata = dict((member_metadata or {}).get(replacement) or {})
+                    for key in (
+                        "role_label",
+                        "role_key",
+                        "formation_plan_version",
+                        "formation_scope_key",
+                        "responsibility_mission",
+                        "expected_outputs",
+                    ):
+                        if key in replacement_metadata:
+                            metadata[key] = replacement_metadata[key]
+                        else:
+                            metadata.pop(key, None)
+                    coverage = evaluate_capability_coverage(
+                        required_capabilities,
+                        capability_sets=capability_sets,
+                        assigned_agent_ids=[replacement],
+                    )
+                    capability_notes.append(
+                        f"节点 {node.id} 已从 {previous_assignee} 改派给 {replacement}：{assignment_reason}"
+                    )
+                else:
+                    capability_notes.append(
+                        f"节点 {node.id} 生成时未找到能完整覆盖 "
+                        f"{'、'.join(required_capabilities)} 的现有成员；保留计划缺口，运行前不得伪装为已覆盖。"
+                    )
         metadata.update({
             "workflow_lane": lane,
             "required_capabilities": required_capabilities,
@@ -1818,6 +1905,17 @@ def _normalize_nodes_with_graph(
             "execution_events": list(metadata.get("execution_events") or []),
             "execution_contract": _node_contract(goal, node, metadata),
         })
+        if coverage is not None:
+            metadata["capability_coverage"] = coverage.to_dict()
+            metadata["capability_status"] = coverage.status
+            if assignment_reason:
+                metadata.update({
+                    "assignment_source": "existing_member_reassignment",
+                    "previous_assignee": previous_assignee,
+                    "assignment_reason": assignment_reason,
+                })
+            elif coverage.status != "covered":
+                metadata["capability_gap_source"] = "dag_admission"
         normalized_nodes.append({
             "id": node.id,
             "title": node.title,
@@ -1829,9 +1927,10 @@ def _normalize_nodes_with_graph(
     normalized_edges = [[edge.parent_id, edge.child_id] for edge in graph.edges]
     notes = [
         "复用 Dynamic Kanban PlanGraph 完成 Team DAG 校验。",
-        "当前版本尊重用户团队配置，仅输出补员/角色风险建议，不自动换人。",
+        "当前版本尊重用户团队配置；仅在现有成员完整覆盖时做本轮确定性改派，不新增成员。",
         *id_notes,
         *graph_notes,
+        *capability_notes,
     ]
     if plan_strategy == "fast_minimal_path":
         notes.insert(0, "Fast Team 使用 workflow_lane 极简协作 DAG：leader_plan -> fast_execute -> leader_summary，必要时插入 fast_verify。")
@@ -2005,6 +2104,8 @@ class TeamGraphPlanner:
             valid_roles=_valid_member_ids(team),
             execution_profile=profile,
             plan_strategy=plan_strategy,
+            member_capabilities=_member_capability_sets(team),
+            member_metadata=_member_metadata_sets(team),
         )
         if plan_strategy == "standard_role_dag" and budget_notes:
             notes = [*budget_notes, *notes]
@@ -2172,6 +2273,8 @@ class TeamGraphPlanner:
                 valid_roles=_valid_member_ids(team),
                 execution_profile=profile,
                 plan_strategy="fast_minimal_path",
+                member_capabilities=_member_capability_sets(team),
+                member_metadata=_member_metadata_sets(team),
             )
             confidence = confidence_dimensions(decision, capability_coverage=1.0) if decision else {
                 "requirement": 0.68, "topology": 1.0, "capability": 1.0, "overall": 0.68,
@@ -2217,6 +2320,8 @@ class TeamGraphPlanner:
                 valid_roles=_valid_member_ids(team),
                 execution_profile=profile,
                 plan_strategy="standard_semantic_dag",
+                member_capabilities=_member_capability_sets(team),
+                member_metadata=_member_metadata_sets(team),
             )
             confidence = confidence_dimensions(decision, capability_coverage=coverage)
             await _notify_planning_progress(
@@ -2268,6 +2373,8 @@ class TeamGraphPlanner:
                 valid_roles=_valid_member_ids(team),
                 execution_profile=profile,
                 plan_strategy="ai_single_dag",
+                member_capabilities=_member_capability_sets(team),
+                member_metadata=_member_metadata_sets(team),
             )
             _annotate_planner_metrics(nodes, status="success", elapsed_ms=elapsed_ms)
             notes = [f"AI Planner LLM DAG 耗时 {elapsed_ms}ms。", *llm_notes, *notes]

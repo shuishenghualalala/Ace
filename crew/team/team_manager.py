@@ -55,6 +55,7 @@ from crew.state.team_member_model import materialize_team_member_model_bindings
 from crew.team import flow_builder
 from crew.team import result_presenter as team_presenter
 from crew.team.bus import TeamBus, register_team_bus_tools
+from crew.team.agent_profile import build_agent_profile, evaluate_capability_coverage
 from crew.team.capabilities import normalize_capabilities
 from crew.team.delegate_tool import (
     TEAM_RESULT_STATUSES,
@@ -224,6 +225,7 @@ class InProcessTeamManager(TeamManager):
         self._plan_workflows: dict[TeamKey, str] = {}
         self._plan_node_tasks: dict[tuple[str, str, str], str] = {}
         self._planning_missing_info: dict[TeamKey, list[str]] = {}
+        self._runtime_profile_cache: dict[tuple[str, str, str, str], Any] = {}
         self._active_lock = threading.Lock()
         self._active_children: dict[TeamKey, dict[str, dict[str, Any]]] = {}
         # 所有成员委派协程的唯一注册表。既持有 detached task 的强引用，
@@ -2454,7 +2456,7 @@ class InProcessTeamManager(TeamManager):
             return None
 
         explicit_trigger = str((node.metadata or {}).get("runtime_staffing_trigger") or "").strip()
-        if explicit_trigger:
+        if explicit_trigger and explicit_trigger != "capability_gap":
             return {
                 "trigger_type": explicit_trigger,
                 "required_capabilities": required,
@@ -2477,45 +2479,65 @@ class InProcessTeamManager(TeamManager):
             }
 
         assigned = team.members.get(node.assignee)
+        profiles: dict[str, Any] = {}
+        capability_sets: dict[str, list[str]] = {}
+        assigned_agent_ids: list[str] = []
         if assigned is not None and assigned.executor == "external" and assigned.external_agent_id:
+            assigned_agent_id = str(assigned.external_agent_id).strip()
+            assigned_agent_ids.append(assigned_agent_id)
             try:
                 assigned_agent = self.external_store.get_agent(
-                    assigned.external_agent_id,
+                    assigned_agent_id,
                     owner_account_id=owner_account_id,
                 )
-                assigned_ready = bool(rank_staffing_candidates(required, [assigned_agent], limit=1))
-            except Exception:  # noqa: BLE001 - 不可读取本身就是运行时不可用事实
-                assigned_ready = False
-            if not assigned_ready:
-                return {
-                    "trigger_type": "agent_unavailable",
-                    "required_capabilities": required,
-                    "reason": f"当前成员 {node.assignee} 的 Runtime/model 不可用或画像已不满足节点硬能力。",
-                }
+                model_id = str(assigned.model or "").strip()
+                profile_payload = assigned_agent.get("profile") if isinstance(assigned_agent, dict) else {}
+                profile_version = str(
+                    assigned_agent.get("profile_version")
+                    or (profile_payload.get("version") if isinstance(profile_payload, dict) else "")
+                    or ""
+                )
+                cache_key = (owner_account_id, assigned_agent_id, model_id, profile_version)
+                profile = self._runtime_profile_cache.get(cache_key)
+                if profile is None:
+                    profile = build_agent_profile(
+                        assigned_agent,
+                        model_id=model_id or None,
+                    )
+                    self._runtime_profile_cache[cache_key] = profile
+                profiles[assigned_agent_id] = profile
+            except Exception as exc:  # noqa: BLE001 - 不可读取本身就是运行时不可用事实
+                log.debug(
+                    "无法解析当前节点成员 AgentProfile agent=%s err=%s",
+                    assigned_agent_id,
+                    exc,
+                )
+        elif assigned is not None:
+            assigned_agent_ids.append(node.assignee)
+            capability_sets[node.assignee] = normalize_capabilities(assigned.capabilities)
+            if not capability_sets[node.assignee]:
+                capability_sets[node.assignee] = normalize_capabilities(
+                    flow_builder.member_node_metadata(assigned).get("required_capabilities") or []
+                )
 
-        covered: set[str] = set()
-        current_agents: list[dict[str, Any]] = []
-        for spec in team.members.values():
-            if spec.executor == "external" and spec.external_agent_id:
-                try:
-                    current_agents.append(self.external_store.get_agent(
-                        spec.external_agent_id,
-                        owner_account_id=owner_account_id,
-                    ))
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("跳过不可读取的 Runtime Team Agent agent=%s err=%s", spec.external_agent_id, exc)
-                    continue
-            else:
-                covered.update(normalize_capabilities(spec.capabilities))
-        for capability in required:
-            if rank_staffing_candidates([capability], current_agents, limit=1):
-                covered.add(capability)
-        missing = [capability for capability in required if capability not in covered]
-        if missing:
+        coverage = evaluate_capability_coverage(
+            required,
+            profiles,
+            capability_sets=capability_sets,
+            assigned_agent_ids=assigned_agent_ids,
+        )
+        if coverage.status in {"unavailable", "unknown"}:
+            return {
+                "trigger_type": "agent_unavailable",
+                "required_capabilities": list(required),
+                "reason": f"当前成员 {node.assignee} 的 Runtime/model 不可用或能力画像无法确认。",
+            }
+        if coverage.status != "covered":
+            missing = list(dict.fromkeys([*coverage.missing, *coverage.unavailable, *coverage.unknown]))
             return {
                 "trigger_type": "capability_gap",
                 "required_capabilities": missing,
-                "reason": f"当前 Runtime Team 缺少硬能力：{'、'.join(missing)}。",
+                "reason": f"当前节点负责人 {node.assignee} 未覆盖硬能力：{'、'.join(missing)}。",
             }
         return None
 

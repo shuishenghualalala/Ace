@@ -12,6 +12,10 @@ from typing import Any
 
 from crew.team import agent_profile as _agent_profile
 from crew.team.agent_profile import AgentProfile, build_agent_profile
+from crew.team.agent_profile import (
+    evaluate_capability_coverage,
+    is_agent_profile_available,
+)
 from crew.team.capabilities import (
     CAPABILITIES,
     CAPABILITY_LABELS,
@@ -322,11 +326,16 @@ def rank_staffing_candidates(
         if not agent_id or agent_id in excluded or is_crew_builtin_agent(agent_id):
             continue
         profile = build_agent_profile(agent)
-        if not _profile_available_for_formation(profile):
+        if not is_agent_profile_available(profile):
             continue
-        covered = [capability for capability in required if profile.score(capability) >= 0.5]
-        if len(covered) != len(required):
+        coverage = evaluate_capability_coverage(
+            required,
+            {agent_id: profile},
+            assigned_agent_ids=[agent_id],
+        )
+        if coverage.status != "covered":
             continue
+        covered = list(coverage.covered)
         capability_evidence = {
             capability: {
                 "score": round(profile.score(capability), 4),
@@ -605,14 +614,14 @@ def _choose_minimal_team(
             capability in uncovered
             and agent_id not in constraints.excluded_agent_ids
             and profile is not None
-            and _profile_available_for_formation(profile)
+            and is_agent_profile_available(profile)
         ):
             assignment.setdefault(agent_id, []).append(capability)
             uncovered.remove(capability)
     for agent_id in constraints.required_agent_ids:
         if agent_id != leader_id and agent_id not in constraints.excluded_agent_ids:
             profile = profiles.get(agent_id)
-            if profile is None or not _profile_available_for_formation(profile):
+            if profile is None or not is_agent_profile_available(profile):
                 continue
             assigned = assignment.setdefault(agent_id, [])
             if not assigned and uncovered:
@@ -631,9 +640,14 @@ def _choose_minimal_team(
             if not agent_id or agent_id == leader_id or agent_id in constraints.excluded_agent_ids:
                 continue
             profile = profiles[agent_id]
-            if not _profile_available_for_formation(profile):
+            if not is_agent_profile_available(profile):
                 continue
-            cover = [cap for cap in uncovered if profile.score(cap) >= 0.5]
+            coverage = evaluate_capability_coverage(
+                uncovered,
+                {agent_id: profile},
+                assigned_agent_ids=[agent_id],
+            )
+            cover = list(coverage.covered)
             if not cover:
                 continue
             score = sum(profile.score(cap) for cap in cover)
@@ -647,9 +661,14 @@ def _choose_minimal_team(
                 if not agent_id or agent_id == leader_id or agent_id in constraints.excluded_agent_ids:
                     continue
                 profile = profiles[agent_id]
-                if not _profile_available_for_formation(profile):
+                if not is_agent_profile_available(profile):
                     continue
-                cover = list(uncovered)
+                coverage = evaluate_capability_coverage(
+                    uncovered,
+                    {agent_id: profile},
+                    assigned_agent_ids=[agent_id],
+                )
+                cover = list(coverage.covered)
                 score = sum(profile.score(cap) for cap in cover)
                 if score > best_score:
                     best_agent = agent
@@ -664,7 +683,7 @@ def _choose_minimal_team(
 
 
 def _profile_available_for_formation(profile: AgentProfile) -> bool:
-    return profile.availability == "ready" and profile.model.get("binding_status") != "missing"
+    return is_agent_profile_available(profile)
 
 
 def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) -> dict[str, Any]:
@@ -889,16 +908,25 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         )
         member["responsibility_markdown"] = member["role"]
 
-    covered_capabilities = list(dict.fromkeys(
-        capability
-        for member in members
-        for capability in member.get("assigned_capabilities") or []
-        if capability in required_capabilities
-    ))
-    uncovered_capabilities = [
-        capability for capability in required_capabilities
-        if capability not in covered_capabilities
-    ]
+    formation_profiles = {
+        agent_id: profiles[agent_id]
+        for agent_id in (
+            str(member.get("agent_id") or "")
+            for member in members
+        )
+        if agent_id in profiles
+    }
+    formation_coverage = evaluate_capability_coverage(
+        required_capabilities,
+        formation_profiles,
+        assigned_agent_ids=formation_profiles.keys(),
+    )
+    covered_capabilities = list(formation_coverage.covered)
+    uncovered_capabilities = list(dict.fromkeys([
+        *formation_coverage.missing,
+        *formation_coverage.unavailable,
+        *formation_coverage.unknown,
+    ]))
     assessment_confidences = [
         profiles[member["agent_id"]].confidence(capability)
         for member in members

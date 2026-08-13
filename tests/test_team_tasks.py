@@ -39,7 +39,13 @@ from crew.team.graph_planner import (
     DEFAULT_PLANNING_DECISION_TIMEOUT,
     PLANNING_DECISION_MAX_TOKENS,
     TeamGraphPlanner,
+    _normalize_nodes_with_graph,
     schedule_planning_provider_warmup,
+)
+from crew.team.agent_profile import (
+    AgentProfile,
+    CapabilityAssessment,
+    evaluate_capability_coverage,
 )
 from crew.team.history_projection import team_internal_history_items
 from crew.team.models import TeamPlan, TeamPlanEdge, TeamPlanNode
@@ -4402,6 +4408,182 @@ def test_planning_decision_rejects_work_unit_without_capability_contract():
                 "required_capabilities": [],
             }],
         })
+
+
+def test_capability_coverage_is_shared_and_deterministic():
+    profile = AgentProfile(
+        agent_id="kk",
+        capabilities={
+            "implementation": CapabilityAssessment(0.9, 0.9),
+            "testing": CapabilityAssessment(0.2, 0.8),
+        },
+    )
+
+    covered = evaluate_capability_coverage(
+        ["implementation"],
+        {"kk": profile},
+        assigned_agent_ids=["kk"],
+    )
+    missing = evaluate_capability_coverage(
+        ["testing"],
+        {"kk": profile},
+        assigned_agent_ids=["kk"],
+    )
+
+    assert covered.status == "covered"
+    assert covered.covered_by == {"implementation": ["kk"]}
+    assert missing.status == "missing"
+    assert missing.missing == ["testing"]
+
+
+def test_dag_admission_reassigns_node_to_existing_member_with_full_coverage():
+    tm, _ = _team(config=Config(
+        team_config={
+            "members": [
+                {
+                    "member_id": "kk",
+                    "name": "kk",
+                    "role": "负责开发",
+                    "executor": "builtin",
+                    "capabilities": ["implementation"],
+                    "metadata": {"workflow_lane": "build"},
+                },
+                {
+                    "member_id": "hh",
+                    "name": "hh",
+                    "role": "负责测试",
+                    "executor": "builtin",
+                    "capabilities": ["testing"],
+                    "metadata": {"workflow_lane": "verify"},
+                },
+            ],
+        },
+    ))
+    team = tm._build_team("capability-admission")
+    graph_plan = TeamGraphPlanner().plan(
+        team,
+        "执行测试",
+        execution_profile={"requested_mode": "ai"},
+        team_spec=_structured_team_spec(
+            "执行测试",
+            capabilities=["testing"],
+            workflow_lanes=("verify",),
+        ),
+    )
+
+    # Fast/Standard compilers choose by the member capability assignment. The
+    # direct admission helper is also covered by the AI planner path below;
+    # this assertion protects the persisted node contract.
+    verify_nodes = [
+        node for node in graph_plan.nodes
+        if node["metadata"].get("required_capabilities") == ["testing"]
+    ]
+    assert verify_nodes
+    assert all(node["assignee"] == "hh" for node in verify_nodes)
+
+
+def test_dag_admission_records_uncovered_node_instead_of_hiding_it_in_runtime():
+    tm, _ = _team(config=Config(
+        team_config={
+            "members": [
+                {
+                    "member_id": "kk",
+                    "name": "kk",
+                    "role": "负责开发",
+                    "executor": "builtin",
+                    "capabilities": ["implementation"],
+                    "metadata": {"workflow_lane": "build"},
+                },
+                {
+                    "member_id": "hh",
+                    "name": "hh",
+                    "role": "负责分析",
+                    "executor": "builtin",
+                    "capabilities": ["analysis"],
+                    "metadata": {"workflow_lane": "plan"},
+                },
+            ],
+        },
+    ))
+    team = tm._build_team("capability-admission-gap")
+    graph_plan = TeamGraphPlanner().plan(
+        team,
+        "做测试",
+        execution_profile={"requested_mode": "fast"},
+        team_spec=_structured_team_spec(
+            "做测试",
+            capabilities=["testing"],
+            workflow_lanes=("verify",),
+        ),
+    )
+
+    execute = next(node for node in graph_plan.nodes if node["id"] == "fast_execute")
+    assert execute["metadata"]["capability_status"] == "missing"
+    assert execute["metadata"]["capability_gap_source"] == "dag_admission"
+    assert "testing" in execute["metadata"]["capability_coverage"]["missing"]
+
+
+def test_dag_admission_reassigns_existing_member_and_refreshes_role_metadata():
+    nodes, _, _ = _normalize_nodes_with_graph(
+        goal="执行测试",
+        raw_nodes=[{
+            "id": "verify",
+            "title": "验证实现",
+            "detail": "验证实现结果",
+            "assignee": "kk",
+            "metadata": {
+                "workflow_lane": "verify",
+                "role_label": "开发成员",
+                "role_key": "implementation",
+                "required_capabilities": ["testing"],
+            },
+        }],
+        raw_edges=[],
+        valid_roles=["kk", "hh"],
+        member_capabilities={"kk": ["implementation"], "hh": ["testing"]},
+        member_metadata={
+            "kk": {"role_label": "开发成员", "role_key": "implementation"},
+            "hh": {"role_label": "测试成员", "role_key": "testing"},
+        },
+    )
+
+    node = nodes[0]
+    assert node["assignee"] == "hh"
+    assert node["metadata"]["role_label"] == "测试成员"
+    assert node["metadata"]["role_key"] == "testing"
+    assert node["metadata"]["assignment_source"] == "existing_member_reassignment"
+    assert node["metadata"]["previous_assignee"] == "kk"
+
+
+def test_runtime_staffing_does_not_trigger_when_assigned_member_is_covered():
+    tm, _ = _team(config=Config(
+        team_config={
+            "members": [{
+                "member_id": "kk",
+                "name": "kk",
+                "role": "负责实现",
+                "executor": "builtin",
+                "capabilities": ["implementation"],
+                "metadata": {"workflow_lane": "build"},
+            }],
+        },
+    ))
+    team = tm._build_team("runtime-covered")
+    node = TeamPlanNode(
+        node_id="build",
+        title="实现",
+        assignee="kk",
+        metadata={
+            "required_capabilities": ["implementation"],
+            "runtime_staffing_trigger": "capability_gap",
+        },
+    )
+    assert tm._runtime_staffing_trigger(
+        team,
+        node,
+        owner_account_id="",
+        max_attempts=2,
+    ) is None
 
 
 def test_team_turn_router_returns_team_turn_decision():
