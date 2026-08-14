@@ -11,6 +11,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
+from crew.core.envelope import Envelope, ResponseChunk
 from crew.team.bus import TeamBus
 from crew.team.models import MessageType, new_id
 
@@ -64,11 +65,13 @@ class TeamCommunicationRouter:
         session_id: str,
         member_names: list[str],
         on_mention: Callable[[dict[str, Any]], Any] | None = None,
+        ask_coordinator: TeamAskCoordinator | None = None,
     ) -> None:
         self.bus = bus
         self.session_id = session_id
         self.member_names = list(member_names)
         self.on_mention = on_mention
+        self.ask_coordinator = ask_coordinator
 
     async def route(
         self,
@@ -125,8 +128,175 @@ class TeamCommunicationRouter:
             return {}
         result = self.on_mention(event)
         if inspect.isawaitable(result):
-            return await cast(Awaitable[Any], result)
+            result = await cast(Awaitable[Any], result)
+        if intent == "ask" and self.ask_coordinator is not None:
+            answer = await self.ask_coordinator.answer(event)
+            event["answer"] = answer
+            if isinstance(result, dict) and result:
+                return {**result, "answer": answer}
+            return answer
         return result
+
+
+class TeamAskCoordinator:
+    """把 ask 消息转换成一次目标 Agent 的临时通信回合。"""
+
+    def __init__(
+        self,
+        *,
+        bus: TeamBus,
+        session_id: str,
+        resolve_agent: Callable[[str], Any | None],
+        owner_account_id: str = "",
+        on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
+    ) -> None:
+        self.bus = bus
+        self.session_id = session_id
+        self.resolve_agent = resolve_agent
+        self.owner_account_id = owner_account_id
+        self.on_chunk = on_chunk
+
+    async def answer(self, event: dict[str, Any]) -> dict[str, Any]:
+        targets = [
+            str(target or "").strip()
+            for target in list(event.get("expanded_to") or [])
+            if str(target or "").strip()
+        ]
+        if len(targets) != 1:
+            raise ValueError("team_mention(ask) 必须且只能 @ 一个团队成员")
+        target = targets[0]
+        sender = str(event.get("from") or "agent").strip() or "agent"
+        request_id = str(event.get("request_id") or "").strip()
+        request_message = dict(event.get("message") or {})
+        request_message_id = str(request_message.get("message_id") or "").strip()
+        if not request_id or not request_message_id:
+            raise ValueError("ask 请求缺少 request_id 或 message_id")
+
+        agent = self.resolve_agent(target)
+        if agent is None:
+            return self._publish_failure(
+                event,
+                target=target,
+                sender=sender,
+                request_id=request_id,
+                request_message_id=request_message_id,
+                reason=f"目标成员不可用：{target}",
+            )
+
+        turn_session_id = f"{self.session_id}::turn::{request_id}::{target}"
+        member_session_id = f"{self.session_id}::{target}"
+        owner = str(event.get("owner_account_id") or self.owner_account_id or "local")
+        workspace_id = str(event.get("workspace_id") or "default")
+        node_id = str(event.get("node_id") or "")
+        task_id = str(event.get("task_id") or "")
+        question = str(event.get("content") or event.get("text") or "").strip()
+        prompt = "\n".join([
+            "这是一次团队内部通信回合，不是新的工作任务。",
+            f"发起成员：{sender}",
+            f"当前节点：{node_id or '未关联节点'}",
+            f"问题：{question}",
+            "请直接回答问题；不要派发任务、修改 TeamPlan、创建产物，也不要继续调用 team_mention。",
+        ])
+        envelope = Envelope.of(
+            prompt,
+            session_id=turn_session_id,
+            request_id=request_id,
+            channel="team_communication",
+            user_id=owner,
+            workspace_id=workspace_id,
+            mode="agent",
+            params={
+                "task_session_id": self.session_id,
+                "team_session_id": self.session_id,
+                "member_session_id": member_session_id,
+                "agent_id": target,
+                "communication_kind": "ask_answer",
+                "communication_request_id": request_id,
+                "reply_to": request_message_id,
+                "team_node_id": node_id,
+                "task_id": task_id,
+                "workspace_instructions": (
+                    "当前是只读的 Team ask 回答回合。只回答发起成员的问题，"
+                    "不要把它当作新的 DAG 节点或正式任务。"
+                ),
+            },
+        )
+        final_text = ""
+        delta_text: list[str] = []
+        error_text = ""
+        async for chunk in agent.run(envelope):
+            if self.on_chunk is not None:
+                maybe = self.on_chunk(target, chunk)
+                if inspect.isawaitable(maybe):
+                    await cast(Awaitable[Any], maybe)
+            if chunk.kind == "delta":
+                delta_text.append(str(chunk.body.get("text") or ""))
+            elif chunk.kind == "final":
+                final_text = str(chunk.body.get("text") or "").strip()
+            elif chunk.kind == "error":
+                error_text = str(chunk.body.get("message") or "目标成员回答失败").strip()
+
+        answer_text = final_text or "".join(delta_text).strip()
+        if error_text or not answer_text:
+            return self._publish_failure(
+                event,
+                target=target,
+                sender=sender,
+                request_id=request_id,
+                request_message_id=request_message_id,
+                reason=error_text or "目标成员未返回有效回答",
+            )
+
+        answer_message = self.bus.send(
+            team_session_id=self.session_id,
+            sender_member_id=target,
+            recipient_member_ids=[sender],
+            content=answer_text,
+            message_type="answer",
+            intent="answer",
+            request_id=request_id,
+            node_id=node_id,
+            task_id=task_id,
+            thread_id=str(event.get("thread_id") or node_id or task_id),
+            reply_to=request_message_id,
+        )
+        return {
+            "status": "answered",
+            "request_id": request_id,
+            "answer": answer_text,
+            "reply_to": request_message_id,
+            "message": answer_message.to_dict(),
+        }
+
+    def _publish_failure(
+        self,
+        event: dict[str, Any],
+        *,
+        target: str,
+        sender: str,
+        request_id: str,
+        request_message_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        answer_message = self.bus.send(
+            team_session_id=self.session_id,
+            sender_member_id=target,
+            recipient_member_ids=[sender],
+            content=reason,
+            message_type="answer",
+            intent="answer",
+            request_id=request_id,
+            node_id=str(event.get("node_id") or ""),
+            task_id=str(event.get("task_id") or ""),
+            reply_to=request_message_id,
+        )
+        return {
+            "status": "failed",
+            "request_id": request_id,
+            "answer": reason,
+            "reply_to": request_message_id,
+            "message": answer_message.to_dict(),
+        }
 
 
 __all__ = [

@@ -3339,7 +3339,7 @@ async def test_builtin_and_external_mentions_share_communication_router_contract
         node_id="game_design",
         task_id="task_43",
     )
-    assert external_result == {}
+    assert external_result["status"] == "answered"
     external_team = tm._get_or_create("communication_external_s1")
     external_message = external_team.bus.read(
         team_session_id="communication_external_s1",
@@ -3351,6 +3351,49 @@ async def test_builtin_and_external_mentions_share_communication_router_contract
     assert external_message["node_id"] == "game_design"
     assert external_message["task_id"] == "task_43"
     assert external_message["message_type"] == "decision_request"
+
+
+@pytest.mark.asyncio
+async def test_team_ask_runs_target_agent_and_publishes_reply():
+    class AskAnswerProvider(RoleProvider):
+        async def chat(self, messages, tools=None):
+            last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+            if "这是一次团队内部通信回合" in last_user:
+                return ChatResponse(text="只输出小游戏方案，不进入开发实现。")
+            return await super().chat(messages, tools)
+
+    tm, _tasks = _team(provider=AskAnswerProvider())
+    team = tm._build_team("communication_ask_s1")
+    member_token = current_agent_id.set("coder")
+    try:
+        result = await team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-ask-execute",
+                "team_mention",
+                {
+                    "to": ["leader"],
+                    "intent": "ask",
+                    "content": "用户只需要小游戏方案吗？",
+                    "node_id": "game_design",
+                    "task_id": "task_42",
+                },
+            )
+        )
+    finally:
+        current_agent_id.reset(member_token)
+
+    assert not result.is_error
+    payload = json.loads(result.content)
+    answer = payload["result"]["answer"]
+    assert payload["result"]["status"] == "answered"
+    assert answer == "只输出小游戏方案，不进入开发实现。"
+    messages = team.bus.list_messages("communication_ask_s1")
+    request = next(item for item in messages if item["message_type"] == "decision_request")
+    reply = next(item for item in messages if item["message_type"] == "answer")
+    assert reply["reply_to"] == request["message_id"]
+    assert reply["request_id"] == request["request_id"]
+    assert reply["sender_member_id"] == "leader"
+    assert reply["recipient_member_ids"] == ["coder"]
 
 
 async def test_external_team_mention_propagates_current_active_skill(monkeypatch):

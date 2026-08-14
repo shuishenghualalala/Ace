@@ -57,7 +57,7 @@ from crew.team import result_presenter as team_presenter
 from crew.team.bus import TeamBus, register_team_bus_tools
 from crew.team.agent_profile import build_agent_profile, evaluate_capability_coverage
 from crew.team.capabilities import normalize_capabilities
-from crew.team.communication import TeamCommunicationRouter
+from crew.team.communication import TeamAskCoordinator, TeamCommunicationRouter
 from crew.team.delegate_tool import (
     TEAM_RESULT_STATUSES,
     register_delegate_tool,
@@ -7652,11 +7652,19 @@ class InProcessTeamManager(TeamManager):
                 on_task_finished=_finish_plan_from_delegate_task,
             )
 
+        team_agents: dict[str, Agent] = {}
+        ask_coordinator = TeamAskCoordinator(
+            bus=bus,
+            session_id=session_id,
+            resolve_agent=lambda member: team_agents.get(member),
+            owner_account_id=owner_account_id,
+        )
         communication_router = TeamCommunicationRouter(
             bus=bus,
             session_id=session_id,
             member_names=list(member_map.keys()),
             on_mention=_on_team_mention,
+            ask_coordinator=ask_coordinator,
         )
 
         # 1) 队友：共享基础工具
@@ -7690,6 +7698,7 @@ class InProcessTeamManager(TeamManager):
                 team_session_id=session_id,
                 owner_account_id=owner_account_id,
             )
+            team_agents[m.member_id] = teammates[m.member_id]
 
         # 2) Leader 专属注册表 = 基础工具 + delegate
         leader_registry = self._clone_registry()
@@ -7817,6 +7826,7 @@ class InProcessTeamManager(TeamManager):
             owner_account_id=owner_account_id,
             tool_filter=leader_visible_tools,
         )
+        team_agents["leader"] = leader
         direct_leader = self._new_agent(
             direct_leader_registry,
             leader_spec.system_prompt or leader_prompt([m.to_dict() for m in members]),
@@ -7887,6 +7897,8 @@ class InProcessTeamManager(TeamManager):
             "node_id": str(node_id or ""),
             "task_id": str(task_id or ""),
             "thread_id": str(node_id or ""),
+            "owner_account_id": owner_account_id,
+            "workspace_id": "default",
             "result_status": str(result_status or ""),
             "artifacts": list(artifacts or []),
             "artifact_refs": list(artifacts or []),

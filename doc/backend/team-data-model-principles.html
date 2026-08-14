@@ -733,6 +733,15 @@ flowchart LR
     <code>TeamMessage(message_type="answer", reply_to=request_id)</code> 返回原发起 Agent。
   </p>
 
+  <h2>23B. Team 通信重构：阶段 2 已落地（2026-08-14）</h2>
+  <ul>
+    <li><b>触发：</b><code>TeamCommunicationRouter</code> 发布 <code>ask</code> 请求后，调用同一 Team 模块内的 <code>TeamAskCoordinator</code>；目标必须是一个具体团队成员。</li>
+    <li><b>执行：</b>AskCoordinator 复用目标 Agent、<code>Envelope</code>、<code>SingleAgent.run()</code> 和 <code>ResponseChunk</code>，使用 <code>team_session::turn::request_id::member</code> sidechain 保存该通信回合。</li>
+    <li><b>回答：</b>目标 Agent 的最终文本写入 <code>TeamMessage(message_type="answer", intent="answer")</code>，并设置 <code>reply_to=原请求 message_id</code>、<code>request_id=原 ask request_id</code>；原 <code>team_mention</code> 调用得到结构化 <code>status/answer/reply_to/message</code>。</li>
+    <li><b>任务边界：</b>通信回合不创建 TaskManager 任务、不增加 TeamPlan 节点、不生成 DAG 产物；<code>assign</code> 仍保持正式任务执行链。</li>
+    <li><b>未完成边界：</b>本阶段暂不处理同一 Agent 并发 ask 的排队、超时、取消和环路限制，统一放入下一阶段。</li>
+  </ul>
+
   <h2>24. 后续 TODO 边界</h2>
   <p class="warn">以下是 2026-07-12 确认后的后续开发清单。当前阶段不引入 TeamManifest；Dynamic Kanban 五表边界成立，后续动态工作流继续复用现有存储，不另起一套 Workflow 表。</p>
   <table><thead><tr><th>优先级</th><th>方向</th><th>目标与边界</th></tr></thead><tbody>

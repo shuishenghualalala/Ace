@@ -399,4 +399,13 @@ graph TD
   <li><b>验证：</b><code>tests/test_team_tasks.py</code> 200 passed / 1 skipped；内置与外部 mention 均覆盖同一 request 消息契约，通信模块独立 Ruff 检查通过。</li>
 </ul>
 
+<h2>146. 2026-08-14 Team Ask 请求-响应阶段二</h2>
+<ul>
+  <li><b>自动回答：</b><code>TeamAskCoordinator</code> 接收 Router 发布的 ask 请求，校验单目标后直接唤醒目标 <code>SingleAgent</code>；不再依赖目标 Agent 主动调用 <code>team_read_messages</code>。</li>
+  <li><b>现有协议复用：</b>通信回合使用 <code>Envelope</code>，消费 <code>ResponseChunk</code> 的 delta/final/error，并复用目标 Agent 原有工具面和模型绑定。</li>
+  <li><b>回复关联：</b>答案写回已有 <code>TeamBus</code>，消息类型为 <code>answer</code>，通过 <code>reply_to=request_message_id</code> 和同一 <code>request_id</code> 关联原 ask。</li>
+  <li><b>不进入工作流：</b>ask 只创建 sidechain 通信回合，不创建 TaskManager 任务、TeamPlan 节点或产物；正式 assign 链路不变。</li>
+  <li><b>下一阶段：</b>补充 per-agent 通信锁/队列、超时、取消、失败状态和环路检测，避免同一 Agent 并发执行多个通信回合。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

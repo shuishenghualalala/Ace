@@ -344,6 +344,8 @@ def make_mention_handler(
             "thread_id": str(args.get("thread_id") or ""),
             "workflow_run_id": str(args.get("workflow_run_id") or ""),
             "request_id": str(args.get("request_id") or ""),
+            "owner_account_id": current_owner_account_id.get(),
+            "workspace_id": current_workspace_id.get(),
             "text": _mention_text(targets, content),
             "content": content,
             "artifacts": list(args.get("artifacts") or []),
