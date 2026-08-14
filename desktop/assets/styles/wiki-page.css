@@ -251,6 +251,10 @@
   display: flex;
   align-items: center;
   gap: var(--mw-space-1);
+  /* 固定栏高不参与纵向收缩：长文场景下正文 flex basis 巨大，收缩按 basis 比例分摊，
+     tab 栏会被挤掉十几 px，且 overflow-x:auto 使 overflow-y 也算作 auto（滚动条隐藏），
+     表现为 tab 底部被齐平裁掉（对齐 web 端 .wiki-tabs 的 flex-shrink: 0）。 */
+  flex-shrink: 0;
   margin: 0 0 var(--mw-space-3);
   padding: var(--mw-space-4) var(--mw-space-5) 0;
   overflow-x: auto;
@@ -608,26 +612,8 @@
   pointer-events: none;
 }
 
-/* 模型 chip：挂在对话面板 Composer 的 toolbar-left 槽位（复用 composer-chip 全局样式） */
-.wiki-agent-pane__model {
-  display: inline-flex;
-  min-width: 0;
-  max-width: 62%;
-  min-height: 28px;
-  align-items: center;
-  gap: var(--mw-space-1);
-  padding: 0 var(--mw-space-2);
-  border: 1px solid var(--mw-border-default);
-  border-radius: var(--mw-radius-2);
-  background: var(--mw-bg-surface);
-  color: var(--mw-text-primary);
-}
-
-.wiki-agent-pane__model .composer-chip__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* 模型 chip / 附件按钮 / 上下文环：与主对话共用 mw-context-chip / mw-button--ghost /
+   mw-context-ring 全局样式（composer-context-view 工厂生成），本页不再单独覆盖。 */
 
 .wiki-agent-pane__disclaimer {
   flex: 0 0 auto;

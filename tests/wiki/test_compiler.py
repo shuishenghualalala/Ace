@@ -1326,10 +1326,10 @@ async def test_plan_ingest_reports_analysis_progress(store, compiler):
 
     await compiler.plan_ingest("src_prog", use_chunking=True, chunk_size=1000, progress=_progress)
 
-    assert events[0].startswith("正在分析来源内容")
-    # 分块进度：至少出现一次「已完成/总块数」形式
-    assert any("块）" in e and "/" in e for e in events)
-    assert any("生成页面变更计划" in e for e in events)
+    assert events[0].startswith("正在通读素材")
+    # 分段进度：至少出现一次「已完成/总段数」形式
+    assert any("段）" in e and "/" in e for e in events)
+    assert any("盘算要改哪些页面" in e for e in events)
 
 
 async def test_plan_ingest_without_progress_callback_still_works(store, compiler):

@@ -53,9 +53,9 @@ export function sessionMessageModelLabel(sessionId: string | null | undefined, m
   return model?.name || model?.model || value;
 }
 
-/** 当前 Composer 应高亮的模型 id（含 pending 预览）。 */
-export function activeComposerModelId(): string {
-  const sid = state.activeSessionId;
+/** 当前 Composer 应高亮的模型 id（含 pending 预览）；缺省取全局活跃会话。 */
+export function activeComposerModelId(sessionId?: string | null): string {
+  const sid = sessionId === undefined ? state.activeSessionId : sessionId;
   if (!sid) return state.config?.active_model_id || '';
   const binding = bindingsBySession.get(sid);
   if (binding?.pending_model_profile_id) return binding.pending_model_profile_id;
@@ -101,13 +101,18 @@ export function findModelOption(modelId: string): ModelOption | undefined {
   return models.find((m) => m.id === modelId) ?? profiles.find((m) => m.id === modelId);
 }
 
+/** 指定模型的上下文窗口（缺失/≤0 时回退默认值）。 */
+export function modelContextWindow(modelId: string): number {
+  const w = findModelOption(modelId)?.context_window;
+  return typeof w === 'number' && w > 0 ? w : DEFAULT_CONTEXT_WINDOW;
+}
+
 /**
  * 当前会话绑定模型的上下文窗口（缺失/≤0 时回退默认值）。
  * 供 Inspector「上下文」页与 Composer 上下文圆环共用，确保两处口径一致。
  */
 export function resolveSessionModelWindow(): number {
-  const w = findModelOption(activeComposerModelId())?.context_window;
-  return typeof w === 'number' && w > 0 ? w : DEFAULT_CONTEXT_WINDOW;
+  return modelContextWindow(activeComposerModelId());
 }
 
 /** Composer 内联标签文案。 */
@@ -154,11 +159,12 @@ export function applySessionModelBinding(sessionId: string, binding: SessionMode
   bindingsBySession.set(sessionId, binding);
   if (sessionId === state.activeSessionId) {
     syncSessionModelUi();
-    // 会话级模型变化 → 通知 Inspector「上下文」页与 Composer 上下文圆环刷新。
-    // 沿用现有 window 事件模式（session:changed / inspector:button-toggled），保持本模块与 inspector 解耦。
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('session:model-changed', { detail: { sessionId } }));
-    }
+  }
+  // 会话级模型变化 → 通知 Inspector「上下文」页与 Composer 上下文圆环刷新。
+  // 非活跃会话（如 Wiki 内嵌会话）也派发，监听方按 detail.sessionId 自行过滤；
+  // 沿用现有 window 事件模式（session:changed / inspector:button-toggled），保持本模块与 inspector 解耦。
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('session:model-changed', { detail: { sessionId } }));
   }
 }
 
@@ -195,12 +201,17 @@ export async function loadSessionModel(sessionId: string): Promise<SessionModelB
   }
 }
 
-export async function setSessionModel(modelId: string): Promise<void> {
-  let sid = state.activeSessionId;
+/**
+ * 切换会话模型。缺省作用于全局活跃会话（主对话）；显式传入 sessionId 时作用于
+ * 指定会话（如 Wiki 内嵌会话），workspaceId 缺省取主 Composer 工作区。
+ */
+export async function setSessionModel(modelId: string, sessionId?: string, workspaceId?: string): Promise<void> {
+  let sid = sessionId ?? state.activeSessionId;
   if (!sid) {
     sid = ensureComposerDraftSession();
     if (!sid) return;
   }
+  const targetWorkspaceId = workspaceId ?? composerWorkspaceId();
   const busy = isBusySession(sid);
   try {
     const current = bindingsBySession.get(sid);
@@ -214,7 +225,7 @@ export async function setSessionModel(modelId: string): Promise<void> {
         return;
       }
       const binding = await backendApi.setSessionModel(sid, modelId, {
-        workspace_id: composerWorkspaceId(),
+        workspace_id: targetWorkspaceId,
       });
       if (isDraftSession(sid)) setDraftSessionModelId(binding.model_profile_id);
       applySessionModelBinding(sid, binding);
@@ -234,7 +245,7 @@ export async function setSessionModel(modelId: string): Promise<void> {
       return;
     }
     const binding = await backendApi.setSessionModel(sid, modelId, {
-      workspace_id: composerWorkspaceId(),
+      workspace_id: targetWorkspaceId,
     });
     applySessionModelBinding(sid, binding);
     const label = binding.pending_label || binding.model_label || modelLabelForId(modelId);
@@ -284,10 +295,11 @@ export function syncSessionModelAvailabilityUi(): void {
   }
 }
 
-export function composerModelOptions(): ComposerModelOption[] {
-  const binding = state.activeSessionId ? bindingsBySession.get(state.activeSessionId) : undefined;
+export function composerModelOptions(sessionId?: string | null): ComposerModelOption[] {
+  const sid = sessionId === undefined ? state.activeSessionId : sessionId;
+  const binding = sid ? bindingsBySession.get(sid) : undefined;
   if (binding?.source === 'external') {
-    const selectable = Boolean(binding.model_switchable) && !isBusySession(state.activeSessionId || '');
+    const selectable = Boolean(binding.model_switchable) && !isBusySession(sid || '');
     return (binding.models || []).map((model) => ({
       id: model.id,
       label: model.label || model.id,

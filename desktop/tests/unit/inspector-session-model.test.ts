@@ -349,7 +349,7 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
     window.removeEventListener('session:model-changed', handler);
   });
 
-  it('非当前会话的绑定变化不派发事件', () => {
+  it('非当前会话的绑定变化也派发事件（detail 带 sessionId，监听方自行过滤）', () => {
     const handler = vi.fn();
     window.addEventListener('session:model-changed', handler);
     applySessionModelBinding('other-sess', {
@@ -358,7 +358,9 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
       has_pending: false,
       pending: false,
     });
-    expect(handler).not.toHaveBeenCalled();
+    // Wiki 内嵌会话等非活跃会话的 chip/上下文环靠这个事件刷新；Inspector 仍只按活跃会话重拉。
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect((handler.mock.calls[0]?.[0] as CustomEvent).detail?.sessionId).toBe('other-sess');
     window.removeEventListener('session:model-changed', handler);
   });
 });

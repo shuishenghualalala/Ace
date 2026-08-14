@@ -1176,7 +1176,7 @@ class WikiCompiler:
             )
         if progress is not None:
             try:
-                await progress("正在生成页面变更计划…")
+                await progress("正在盘算要改哪些页面…")
             except Exception:  # noqa: BLE001
                 pass
         analysis_stats = {
@@ -2247,9 +2247,9 @@ class WikiCompiler:
                 pass
 
         if len(chunks) > 1:
-            await _emit(f"正在分析来源内容（共 {len(chunks)} 块）…")
+            await _emit(f"正在通读素材（共 {len(chunks)} 段）…")
         else:
-            await _emit("正在分析来源内容…")
+            await _emit("正在通读素材…")
 
         semaphore = asyncio.Semaphore(_ANALYZE_CHUNK_CONCURRENCY)
         cached_chunks = _load_analysis_cache(cache_path)
@@ -2300,7 +2300,7 @@ class WikiCompiler:
             except Exception as exc:  # noqa: BLE001
                 log.warning("Wiki 分块分析异常，跳过该块: %s", exc)
             if len(chunks) > 1:
-                await _emit(f"正在分析来源内容（{len(results_by_index)}/{len(chunks)} 块）…")
+                await _emit(f"正在通读素材（{len(results_by_index)}/{len(chunks)} 段）…")
 
         results = [
             results_by_index.get(

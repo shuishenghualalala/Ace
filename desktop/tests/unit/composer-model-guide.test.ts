@@ -70,14 +70,14 @@ describe('底部模型选择器的配置引导入口', () => {
     bindComposerToolbar();
     document.getElementById('chat-model-picker-inline-btn')?.click();
 
-    const popover = document.getElementById('chat-model-inline-popover');
+    const popover = document.querySelector('.composer-select-popover--model');
     const help = popover?.querySelector<HTMLButtonElement>('[data-model-tour-open]');
     expect(help?.textContent?.trim()).toBe('?');
     expect(help?.getAttribute('aria-label')).toBe('打开模型配置引导');
 
     help?.click();
 
-    expect(document.getElementById('chat-model-inline-popover')).toBeNull();
+    expect(document.querySelector('.composer-select-popover--model')).toBeNull();
     expect(document.querySelector('.model-tour')).not.toBeNull();
     expect(document.querySelector('.wiki-tour__title')?.textContent).toBe('先配置一个自己的模型');
   });
