@@ -72,6 +72,9 @@ def is_unsupported_image_input_error(
             "not allowed",
             "invalidparameter",
             "invalid parameter",
+            # serde 风格反序列化拒绝（如 DeepSeek 端点 "unknown variant `image_url`,
+            # expected `text`"）：端点的消息 schema 根本不认识 image 变体。
+            "unknown variant",
             "不支持",
             "不具备",
         )
