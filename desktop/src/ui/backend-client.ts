@@ -1758,6 +1758,12 @@ export const backendApi = {
     getJSON<{ used_tokens: number; max_tokens: number; ratio: number }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
   browserState: (sessionId: string) =>
     getJSON<{ ok: boolean; state: BrowserPageState }>(`/api/browser/${encodeURIComponent(sessionId)}/state`),
+  /** 读取指定标签页的正文（@ 提及标签页、存入 Wiki 共用）。ok:false 时带 error。 */
+  browserReadTab: (sessionId: string, tabId: string) =>
+    getJSON<{ ok: boolean; title: string; url: string; text: string; error?: string }>(
+      `/api/browser/${encodeURIComponent(sessionId)}/read-tab`,
+      { method: 'POST', ...jsonBody({ tab_id: tabId }) },
+    ),
   // record_* 动作返回 `recording` 而不是 `state`：录制态与页面控制态是正交的
   // 两件事，录制不改变 ControlMode，所以不复用 state 字段。
   browserControl: (sessionId: string, action: string, value = '') =>
@@ -2152,6 +2158,12 @@ export const backendApi = {
       withKb('/api/wiki/ingest', kbId),
       { method: 'POST', ...jsonBody({ source_id: sourceId, session_id: sessionId ?? '' }) },
     ),
+  /** 把一段正文直接存进 Wiki（如浏览器标签页）；kb_id 缺省时后端回落默认 KB。 */
+  wikiCaptureText: (payload: { title: string; content: string; source_url?: string; kb_id?: string }) =>
+    getJSON<{ ok: boolean; source_id: string; pages: WikiPage[] }>('/api/wiki/capture', {
+      method: 'POST',
+      ...jsonBody(payload),
+    }),
   wikiCancelIngest: (sourceId: string, kbId?: string) =>
     getJSON<{ ok: boolean; cancelled?: boolean }>(withKb('/api/wiki/ingest/cancel', kbId), {
       method: 'POST',
@@ -2722,7 +2734,7 @@ export const workApi = {
   // 引用
   listReferences: (targetSessionId: string) =>
     getJSON<{ items: WorkReference[]; count: number }>(`/api/work/references?target_session_id=${encodeURIComponent(targetSessionId)}`),
-  createReference: (payload: { target_session_id: string; reference_type: string; source_id: string; source_link?: string }) =>
+  createReference: (payload: { target_session_id: string; reference_type: string; source_id: string; source_link?: string; snapshot_summary?: string }) =>
     getJSON<WorkReference>('/api/work/references', { method: 'POST', ...jsonBody(payload) }),
   deleteReference: (referenceId: string) =>
     getJSON<{ ok: boolean }>(`/api/work/references/${encodeURIComponent(referenceId)}`, { method: 'DELETE' }),

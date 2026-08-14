@@ -139,6 +139,32 @@ def _read_attachment(path: str) -> str:
     return f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
 
 
+def _format_browser_tab_references(refs: object) -> str:
+    """把 @browser_tab 引用的标签页正文格式化为可注入上下文的块。"""
+    if not isinstance(refs, list) or not refs:
+        return ""
+    lines = [
+        "# 用户引用的浏览器标签页",
+        "用户在消息中通过 @browser_tab 显式引用了以下标签页，正文为发送时的只读快照：",
+    ]
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        tab_id = str(ref.get("tab_id") or "")
+        error = str(ref.get("error") or "").strip()
+        if error:
+            lines.append(f"\n## 标签页 {tab_id}\n（浏览器标签页内容不可用：{error}）")
+            continue
+        title = str(ref.get("title") or "").strip() or "(无标题)"
+        url = str(ref.get("url") or "").strip()
+        text = str(ref.get("text") or "").strip() or "(页面正文为空)"
+        header = f"\n## {title}"
+        if url:
+            header += f"\nURL: {url}"
+        lines.append(f"{header}\n{text}")
+    return "\n".join(lines)
+
+
 def _format_subagent_notifications(pending: object) -> str:
     """把后台子 agent 的完成结果格式化为可注入上下文的 system-reminder 块。"""
     if not isinstance(pending, list) or not pending:
@@ -500,6 +526,10 @@ class SingleAgent(Agent):
         task_block = _format_task_notifications(envelope.params.get("task_notifications"))
         if task_block:
             reminder_parts.append(task_block)
+        # 对话 @浏览器标签页：发送时解析注入的正文快照（含失败占位）
+        tab_block = _format_browser_tab_references(envelope.params.get("browser_tab_references"))
+        if tab_block:
+            reminder_parts.append(tab_block)
         client_intent_block = _format_client_intent(envelope)
         if client_intent_block:
             reminder_parts.append(client_intent_block)

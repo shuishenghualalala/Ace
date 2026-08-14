@@ -6,7 +6,7 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from 'vitest';
-import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput } from '../../src/ui/features/composer-mention';
+import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, fetchBrowserTabMentions, filterBrowserTabs, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, workMentionText } from '../../src/ui/features/composer-mention';
 
 describe('detectTrigger', () => {
   it('行首 @ 触发', () => {
@@ -258,5 +258,38 @@ describe('renderChip（只显示名字，文件引用使用类型图标）', () 
     const visible = compactMentionText(item);
     expect(visible).toBe('@Ace/desktop');
     expect(serializeMentionInput(`查看 ${visible} 怎么`)).toBe('查看 @folder:Ace/desktop 怎么');
+  });
+});
+
+describe('browser_tab 提及', () => {
+  it('@browser_tab: 识别为 chip token（AT_RE 前缀）', () => {
+    const v = '总结下 @browser_tab:tab-1 的内容';
+    const tokens = iterChipTokens(v, new Set());
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toEqual({ start: 4, end: 4 + '@browser_tab:tab-1'.length, kind: 'at' });
+    expect(v.slice(tokens[0]!.start, tokens[0]!.end)).toBe('@browser_tab:tab-1');
+  });
+
+  it('workMentionText 生成 @browser_tab:<id>', () => {
+    expect(workMentionText({ entity_type: 'browser_tab', id: 'tab-1', title: '示例页面' }))
+      .toBe('@browser_tab:tab-1');
+  });
+
+  it('filterBrowserTabs 按 title/url 过滤，标题回落 url', () => {
+    const tabs = [
+      { id: 'tab-1', label: '标签 1', url: 'https://example.com/a', title: '示例页面' },
+      { id: 'tab-2', label: '标签 2', url: 'https://foo.bar/b', title: '' },
+    ];
+    expect(filterBrowserTabs(tabs, '示例')).toEqual([
+      { entity_type: 'browser_tab', id: 'tab-1', title: '示例页面', source_link: 'https://example.com/a' },
+    ]);
+    expect(filterBrowserTabs(tabs, 'FOO.BAR')[0]?.title).toBe('https://foo.bar/b');
+    expect(filterBrowserTabs(tabs, '')).toHaveLength(2);
+    expect(filterBrowserTabs(tabs, '不相干')).toEqual([]);
+  });
+
+  it('无浏览器会话时 provider 静默返回空数组', async () => {
+    // 测试环境 state.activeSessionId 为 null，不应发起任何请求
+    await expect(fetchBrowserTabMentions('')).resolves.toEqual([]);
   });
 });

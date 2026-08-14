@@ -1644,7 +1644,7 @@ async def test_close_tab_then_new_tab_in_same_manager(plugin_tool):
     assert "example.com/2" not in str(listed)
 
 
-async def test_functional_build_never_accepts_approval_tokens(plugin_tool, ctx_vars):
+async def test_approval_approver_rejects_unissued_tokens(plugin_tool, ctx_vars):
     tool, manager, _driver, _prefs = plugin_tool
     await manager.navigate(OWNER, SESSION, "https://example.com")
 
@@ -1659,8 +1659,8 @@ async def test_functional_build_never_accepts_approval_tokens(plugin_tool, ctx_v
     finally:
         current_tool_call_id.reset(token_call)
 
-    # Revocation does not need to clear a token store because no such store
-    # exists in the functional build.
+    # 令牌表只认签发过的 token；revoke 移除 owner 后，未消费的令牌也因
+    # 会话消失而失效，伪造 token 同样确认失败。
     await manager.revoke_owner(OWNER)
     token_call = current_tool_call_id.set("call-approval")
     try:

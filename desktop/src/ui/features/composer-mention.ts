@@ -21,7 +21,7 @@
  *  - **发送守卫**：popup 打开时，index.ts 的 Enter→发送 必须让位（见 isMentionOpen）。
  */
 
-import { backendApi, type CompleteItem, type Skill, type WorkPreference } from '../backend-client';
+import { backendApi, type BrowserPageState, type CompleteItem, type Skill, type WorkPreference } from '../backend-client';
 import { createIcon, type IconId } from '../components/icon';
 import { setRuntimeStyle, clearRuntimeStyle } from '../components/runtime-style';
 import { $, state } from '../state';
@@ -54,8 +54,8 @@ interface MentionItem {
   text: string;
   display: string;
   meta: string;
-  /** 图标类型：slash / folder / image / file。 */
-  sig: 'slash' | 'folder' | 'image' | 'file';
+  /** 图标类型：slash / folder / image / file / tab（浏览器标签页）。 */
+  sig: 'slash' | 'folder' | 'image' | 'file' | 'tab';
   workResult?: MentionResult;
 }
 
@@ -322,22 +322,56 @@ function activeWorkspaceId(): string {
     : composerWorkspaceId();
 }
 
+/** 标签页候选标题：页面标题优先，其次 URL，再次标签序号。 */
+function browserTabTitle(tab: BrowserPageState['tabs'][number]): string {
+  return tab.title.trim() || tab.url.trim() || tab.label.trim() || tab.id;
+}
+
+/** 按 query 过滤浏览器标签页并映射为提及候选（title/url 子串匹配）。纯函数，可单测。 */
+export function filterBrowserTabs(tabs: BrowserPageState['tabs'], query: string): MentionResult[] {
+  const q = query.trim().toLowerCase();
+  return tabs
+    .filter((tab) => !q || tab.title.toLowerCase().includes(q) || tab.url.toLowerCase().includes(q))
+    .map((tab) => ({
+      entity_type: 'browser_tab' as const,
+      id: tab.id,
+      title: browserTabTitle(tab),
+      source_link: tab.url,
+    }));
+}
+
+/**
+ * 浏览器标签页本地 provider（不走 /api/work/mentions）：拉当前会话的标签页列表。
+ * 无浏览器会话 / 接口未就绪 / 失败时静默返回空数组，不影响文件与 work 候选。
+ */
+export async function fetchBrowserTabMentions(query: string): Promise<MentionResult[]> {
+  const sessionId = state.activeSessionId;
+  if (!sessionId) return [];
+  try {
+    const result = await backendApi.browserState(sessionId);
+    return filterBrowserTabs(result.state?.tabs ?? [], query);
+  } catch {
+    return [];
+  }
+}
+
 async function fetchFileItems(token: string): Promise<MentionItem[]> {
   const rowsPromise = backendApi.complete(token, { workspaceId: activeWorkspaceId() });
   const workPromise = productModeStore.get().productMode === 'work'
     ? searchMentions(token.slice(1), activeWorkspaceId())
     : Promise.resolve([]);
-  const [rows, workResults] = await Promise.all([rowsPromise, workPromise]);
+  const browserPromise = fetchBrowserTabMentions(token.slice(1));
+  const [rows, workResults, browserResults] = await Promise.all([rowsPromise, workPromise, browserPromise]);
   return (rows as CompleteItem[]).map<MentionItem>((r) => ({
     text: r.text,
     display: r.display,
     meta: r.meta,
     sig: r.type === 'folder' ? 'folder' : r.type === 'image' ? 'image' : 'file',
-  })).concat(workResults.map((result) => ({
+  })).concat(workResults.concat(browserResults).map((result) => ({
     text: workMentionText(result),
     display: result.title,
     meta: result.entity_type === 'agent_session' ? 'Agent 会话快照' : result.entity_type === 'work_session' ? 'Work 会话' : ENTITY_META[result.entity_type],
-    sig: 'file' as const,
+    sig: result.entity_type === 'browser_tab' ? 'tab' as const : 'file' as const,
     workResult: result,
   })));
 }
@@ -431,12 +465,13 @@ const ENTITY_META: Record<MentionResult['entity_type'], string> = {
   agent_session: 'Agent 会话快照',
   personal_knowledge: '个人知识',
   source_record: '来源记录',
+  browser_tab: '浏览器标签页',
 };
 
 // ---------------- chip token 识别（覆盖层 + 整段删共用） ----------------
 
-// 已解析的 @ 提及：必须是 @file:/@folder:/@image: 前缀（complete_path 的回填格式）
-const AT_RE = /(?:^|\s)(@(?:file|folder|image|work_item|work_session|agent_session|personal_knowledge|source_record):[^\s@]+)/g;
+// 已解析的 @ 提及：必须是 @file:/@folder:/@image:/@work_*:/@browser_tab: 等已知前缀
+const AT_RE = /(?:^|\s)(@(?:file|folder|image|work_item|work_session|agent_session|personal_knowledge|source_record|browser_tab):[^\s@]+)/g;
 
 function compactCanonicalMentionsInInput(): void {
   if (!input) return;
@@ -605,6 +640,7 @@ function createSig(sig: MentionItem['sig']): HTMLElement {
     folder: 'icon-folder',
     image: 'icon-image',
     file: 'icon-file',
+    tab: 'process-web',
   };
   const element = document.createElement('span');
   element.className = `mention-pop__sig mention-pop__sig--${sig}`;

@@ -27,12 +27,14 @@
 .mw-browser-inspector .browser-chrome-btn,
 .mw-browser-inspector .browser-icon-btn,
 .mw-browser-inspector .browser-tab__select,
+.mw-browser-inspector .browser-tab__wiki,
 .mw-browser-inspector .browser-tab__close {
   color: var(--mw-text-secondary);
 }
 
 .mw-browser-inspector .browser-chrome-btn:hover,
 .mw-browser-inspector .browser-icon-btn:hover,
+.mw-browser-inspector .browser-tab__wiki:hover,
 .mw-browser-inspector .browser-tab__close:hover {
   background: var(--mw-bg-subtle);
   color: var(--mw-text-primary);
@@ -41,6 +43,7 @@
 .mw-browser-inspector .browser-chrome-btn:focus-visible,
 .mw-browser-inspector .browser-icon-btn:focus-visible,
 .mw-browser-inspector .browser-tab__select:focus-visible,
+.mw-browser-inspector .browser-tab__wiki:focus-visible,
 .mw-browser-inspector .browser-tab__close:focus-visible,
 .mw-browser-inspector .browser-url:focus-visible {
   outline: 2px solid var(--mw-focus-ring);

@@ -8,6 +8,15 @@ from typing import Any, Literal
 
 BrowserControlMode = Literal["ai", "human", "paused"]
 
+# 动作治理档位（governance_mode）的合法取值：
+# - off：全部放行，不弹任何审批（兼容旧行为）
+# - confirm_sensitive：默认。提交表单/回车/上传/下载/接受弹窗/页面内执行代码等
+#   传「或高危」动作弹一次性审批卡；普通读写动作不打扰
+# - confirm_writes：所有写交互（click/type/press/select/check/drag/fill_form/drop）
+#   也弹审批
+# - read_only：写交互与高危动作直接拒绝
+GOVERNANCE_MODES = frozenset({"off", "confirm_sensitive", "confirm_writes", "read_only"})
+
 
 @dataclass
 class BrowserConfig:
@@ -38,6 +47,8 @@ class BrowserConfig:
     # LoopbackPolicyProxy 的实际 DNS/连接路径，不是只做展示的配置项。
     allowed_private_hosts: list[str] = field(default_factory=list)
     allowed_private_cidrs: list[str] = field(default_factory=list)
+    # 浏览器动作治理档位，取值见 GOVERNANCE_MODES。非法值回落默认档。
+    governance_mode: str = "confirm_sensitive"
 
     @classmethod
     def from_raw(cls, raw: Any) -> "BrowserConfig":
@@ -65,6 +76,11 @@ class BrowserConfig:
         for name in ("enabled", "headed"):
             if name in values:
                 values[name] = bool(values[name])
+        if "governance_mode" in values:
+            mode = str(values["governance_mode"]).strip()
+            values["governance_mode"] = (
+                mode if mode in GOVERNANCE_MODES else defaults.governance_mode
+            )
         return cls(**values)
 
     def public_dict(self) -> dict[str, Any]:

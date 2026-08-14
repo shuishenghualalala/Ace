@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from crew.browser.driver import BrowserDriverError
 from crew.browser.electron_bridge import electron_browser_bridge
 from crew.browser.electron_driver import runtime_doctor
+from crew.browser.tab_reading import read_tab_content
 from crew.gateway.auth import (
     AuthenticationError,
     account_from_request,
@@ -178,6 +179,35 @@ def create_browser_router(crew) -> APIRouter:
         if mgr is None:
             return JSONResponse({"ok": False, "error": "Browser Use 未启用"}, status_code=503)
         return JSONResponse({"ok": True, "state": mgr.state(owner, session_id)})
+
+    @router.post("/api/browser/{session_id}/read-tab")
+    async def browser_read_tab(request: Request, session_id: str, payload: dict) -> JSONResponse:
+        """只读提取指定标签页的标题/URL/正文（对话 @浏览器标签页 与存 Wiki 共用）。
+
+        用户从面板发起的只读观察动作，不参与任何审批；host 不在线、标签页已关闭、
+        人工接管中等失败一律返回 ok:false + error，不 500。
+        """
+        owner = account_from_request(request).owner_account_id
+        if not _browser_instance_token_matches(request.headers):
+            return JSONResponse({"ok": False, "error": "实例校验失败"}, status_code=401)
+        if not owned(session_id, owner):
+            return JSONResponse({"ok": False, "error": "会话不存在"}, status_code=404)
+        if not allowed(session_id, owner):
+            return JSONResponse({"ok": False, "error": "该会话未开放 Browser Use"}, status_code=403)
+        mgr = manager()
+        if mgr is None:
+            return JSONResponse({"ok": False, "error": "Browser Use 未启用"}, status_code=503)
+        # 页面正文最终会流向模型上下文，按 browser_use 能力做工具级过滤（与面板动作一致）。
+        if not tools_allowed(session_id, owner, ("browser_use",)):
+            return JSONResponse({"ok": False, "error": "该浏览器操作未开放"}, status_code=403)
+        tab_id = str(payload.get("tab_id") or "").strip()
+        if not tab_id:
+            return JSONResponse({"ok": False, "error": "缺少 tab_id"}, status_code=400)
+        try:
+            result = await read_tab_content(mgr, owner, session_id, tab_id)
+        except BrowserDriverError as exc:
+            return JSONResponse({"ok": False, "error": _safe_error(exc)}, status_code=409)
+        return JSONResponse({"ok": True, **result})
 
     @router.delete("/api/browser/data")
     async def clear_browser_data(request: Request) -> JSONResponse:

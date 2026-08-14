@@ -393,6 +393,63 @@ class _Owner:
     closed_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+@dataclass(frozen=True)
+class _ApprovalGrant:
+    """一次 ask 审批签发的待确认授权（一次性、限时有效）。
+
+    digest 绑定「工具名 + 参数」，generation/ref 绑定审批那一刻的页面观察；
+    任一漂移都说明审批到的已经不是要执行的东西，授权作废（防 TOCTOU）。
+    """
+
+    owner: str
+    session_id: str
+    digest: str
+    generation: int
+    ref: str
+    expires_at: float
+
+
+# 一次性审批令牌有效期：审批卡挂着期间页面随时可能变，超过即要求重新观察。
+_APPROVAL_TOKEN_TTL_SECONDS = 120.0
+
+# 写交互动作：confirm_writes 档升级为 ask，read_only 档直接 deny。
+# keydown/keyup/mouse_* 是构不成完整语义的低层原语，不在此列（Enter 按下
+# 由敏感分类单独兜住）。
+_GOVERNANCE_WRITES = frozenset(
+    {
+        "browser_click",
+        "browser_type",
+        "browser_press",
+        "browser_select",
+        "browser_check",
+        "browser_drag",
+        "browser_fill_form",
+        "browser_drop",
+    }
+)
+
+# batch 步骤 action → 逻辑工具名。与 plugins/browser 的 _BATCHABLE_ACTIONS
+# 同一词表；manager 不反向 import 插件（Crew 定规范、插件适配 Crew）。
+_GOVERNANCE_BATCH_STEPS = {
+    "click": "browser_click",
+    "drag": "browser_drag",
+    "type": "browser_type",
+    "fill_form": "browser_fill_form",
+    "select": "browser_select",
+    "check": "browser_check",
+    "hover": "browser_hover",
+    "scroll": "browser_scroll",
+    "press": "browser_press",
+    "keydown": "browser_keydown",
+    "keyup": "browser_keyup",
+    "wait": "browser_wait",
+    "find": "browser_find",
+}
+
+# 页面内执行代码：ask 时禁止「本次对话允许」复用，每次都必须单独确认。
+_GOVERNANCE_NO_ALLOW_ALWAYS = frozenset({"browser_evaluate", "browser_run_code_unsafe"})
+
+
 class BrowserManager:
     def __init__(self, config: BrowserConfig, driver: BrowserDriver | None = None) -> None:
         self.config = config
@@ -415,6 +472,9 @@ class BrowserManager:
         # 能力代次：用户关闭/重开 Browser 能力时单调递增。旧代次的
         # ref、截图与标签页句柄一律不可复用（见 revoke_owner）。
         self._capability_generations: dict[str, int] = {}
+        # 一次性审批令牌：token -> 授权记录。发 ask 时签发，confirm_approval
+        # 弹出并校验页面代次/ref 未变；插入时惰性清理过期项，表不会无界增长。
+        self._approval_tokens: dict[str, _ApprovalGrant] = {}
         self._closed = False
 
     def available(self) -> bool:
@@ -10153,6 +10213,139 @@ class BrowserManager:
         )
         return True
 
+    def _governance_session(self, owner_id: str, session_id: str) -> _Session | None:
+        owner = self._owners.get(str(owner_id or ""))
+        return owner.sessions.get(str(session_id or "")) if owner else None
+
+    def _sensitive_reason(
+        self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
+    ) -> str | None:
+        """传/高危动作的审批原因（confirm_sensitive 档）；普通动作返回 None。"""
+        if tool_name == "browser_type":
+            if args.get("submit") is True:
+                return "将输入文本并自动提交（模拟回车），可能直接发出搜索、订单或表单"
+            return None
+        if tool_name in {"browser_press", "browser_keydown"}:
+            if str(args.get("key") or "").strip().lower() in {"enter", "numpadenter"}:
+                return "将按下回车键，可能提交表单或确认页面上的操作"
+            return None
+        if tool_name == "browser_click":
+            # submit 型点击：经 ref 查本代 snapshot 里宿主显式标注的提交控件。
+            # 查不到元素信息时按普通点击放行，不误伤。
+            session = self._governance_session(owner_id, session_id)
+            stored = session.refs.get(str(args.get("ref") or "")) if session else None
+            native = stored.split("\n", 1)[0] if stored else ""
+            if native and session is not None and session.ref_actions.get(native) == "submit":
+                return "将点击页面上的提交按钮，可能直接提交表单或触发确认"
+            return None
+        if tool_name == "browser_upload":
+            return "将向当前网站上传本地文件"
+        if tool_name == "browser_drop":
+            if args.get("paths"):
+                return "将把本地文件拖放到当前网站（等同于上传）"
+            return None
+        if tool_name == "browser_download":
+            return "将从当前网站下载文件到本地磁盘"
+        if tool_name == "browser_dialog":
+            if str(args.get("action") or "") == "accept":
+                return "将接受页面弹出的对话框（等同点击“确认”）"
+            return None
+        if tool_name == "browser_evaluate":
+            return "将在页面内执行任意 JavaScript，可读取并改写页面全部内容"
+        if tool_name == "browser_run_code_unsafe":
+            return "将执行任意 Playwright 自动化代码（最高危动作）"
+        if tool_name == "browser_batch":
+            # 整批取最高危级别：任一敏感步骤则整批 ask。
+            steps = args.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if not isinstance(step, dict):
+                        continue
+                    sub_name = _GOVERNANCE_BATCH_STEPS.get(str(step.get("action") or ""))
+                    if not sub_name:
+                        continue
+                    reason = self._sensitive_reason(sub_name, step, owner_id, session_id)
+                    if reason is not None:
+                        return f"批量操作包含敏感步骤 {step.get('action')}：{reason}"
+            return None
+        return None
+
+    def _batch_has_write(self, args: dict[str, Any]) -> bool:
+        steps = args.get("steps")
+        if not isinstance(steps, list):
+            return False
+        return any(
+            isinstance(step, dict)
+            and _GOVERNANCE_BATCH_STEPS.get(str(step.get("action") or ""))
+            in _GOVERNANCE_WRITES
+            for step in steps
+        )
+
+    @staticmethod
+    def _approval_digest(tool_name: str, args: dict[str, Any]) -> str:
+        try:
+            payload = json.dumps(
+                [tool_name, args], ensure_ascii=False, sort_keys=True, default=str
+            )
+        except (TypeError, ValueError):
+            payload = repr([tool_name, args])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _issue_approval_token(
+        self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
+    ) -> str:
+        now = time.monotonic()
+        for token, grant in list(self._approval_tokens.items()):
+            if grant.expires_at <= now:
+                del self._approval_tokens[token]
+        session = self._governance_session(owner_id, session_id)
+        token = uuid.uuid4().hex
+        self._approval_tokens[token] = _ApprovalGrant(
+            owner=str(owner_id or ""),
+            session_id=str(session_id or ""),
+            digest=self._approval_digest(tool_name, args),
+            generation=session.generation if session else -1,
+            ref=str(args.get("ref") or ""),
+            expires_at=now + _APPROVAL_TOKEN_TTL_SECONDS,
+        )
+        return token
+
+    def _governance_gate(
+        self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
+    ) -> ToolPermissionDecision | None:
+        """动作治理：各分支参数/ref 校验通过后，按 governance_mode 决定放行/审批/拒绝。"""
+        mode = str(getattr(self.config, "governance_mode", "") or "confirm_sensitive")
+        if mode == "off":
+            return None
+        sensitive = self._sensitive_reason(tool_name, args, owner_id, session_id)
+        if tool_name == "browser_batch":
+            is_write = self._batch_has_write(args)
+        else:
+            is_write = tool_name in _GOVERNANCE_WRITES
+        if mode == "read_only":
+            if sensitive is not None or is_write:
+                return ToolPermissionDecision(
+                    "deny",
+                    "浏览器当前为只读模式（governance_mode=read_only），"
+                    "写交互与高危动作被拒绝",
+                )
+            return None
+        if sensitive is None and not (mode == "confirm_writes" and is_write):
+            return None
+        reason = sensitive or (
+            "批量操作包含写交互步骤，可能改变页面状态"
+            if tool_name == "browser_batch"
+            else f"将执行写交互 {tool_name.removeprefix('browser_')}，可能改变页面状态"
+        )
+        # 无交互环境（子 agent 等无 push_fn）下 ask 会被 fail-closed 成拒绝。
+        reason += "（子任务等无法弹审批的环境会被直接拒绝，可改用 takeover 交还用户操作）"
+        return ToolPermissionDecision(
+            "ask",
+            reason,
+            allow_always=tool_name not in _GOVERNANCE_NO_ALLOW_ALWAYS,
+            approval_token=self._issue_approval_token(tool_name, args, owner_id, session_id),
+        )
+
     def permission_for(
         self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
     ) -> ToolPermissionDecision | None:
@@ -10185,8 +10378,9 @@ class BrowserManager:
                     )
             # fill_form never submits. Strict schema, latest-generation refs
             # and Host-side per-field exact-Locator checks are sufficient for
-            # ordinary form completion; no extra confirmation round-trip.
-            return None
+            # ordinary form completion; confirm_sensitive 档不额外审批，
+            # confirm_writes/read_only 档由治理层统一处理。
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name in {
             "browser_select",
             "browser_check",
@@ -10201,24 +10395,24 @@ class BrowserManager:
                     "deny", "表单目标的 ref 不属于当前页面或已失效"
                 )
             if tool_name in {"browser_hover", "browser_drop"}:
-                return None
+                return self._governance_gate(tool_name, args, owner_id, session_id)
             if tool_name == "browser_select":
                 try:
                     self._validated_select_values(args.get("values"))
                 except BrowserDriverError as exc:
                     return ToolPermissionDecision("deny", str(exc))
-                return None
+                return self._governance_gate(tool_name, args, owner_id, session_id)
             if type(args.get("checked")) is not bool:
                 return ToolPermissionDecision("deny", "check checked 必须是 boolean")
-            return None
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name in {"browser_upload", "browser_download"}:
-            # 路径、大小、ref 与目标标签页都在真正执行路径中重新验证。工具调用
-            # 本身就是执行请求，不再插入第二次审批往返。
-            return None
+            # 路径、大小、ref 与目标标签页都在真正执行路径中重新验证；此处按
+            # 治理档位决定是否加一次性审批（confirm_sensitive 起默认 ask）。
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_dialog":
-            return None
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_click" and args.get("screenshot_id"):
-            return None
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_click":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10237,8 +10431,9 @@ class BrowserManager:
             except BrowserDriverError as exc:
                 return ToolPermissionDecision("deny", str(exc))
             # Element clicks always dispatch the real Playwright Locator action.
-            # There is no href-direct-open substitution and no approval pause.
-            return None
+            # There is no href-direct-open substitution; 提交型点击由治理层
+            # 按需加一次性审批。
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_drag":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10252,7 +10447,7 @@ class BrowserManager:
                 return ToolPermissionDecision(
                     "deny", "drag 的 start_ref/end_ref 不属于当前页面或已失效"
                 )
-            return None
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_type":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10268,7 +10463,7 @@ class BrowserManager:
                 or type(args.get("slowly", False)) is not bool
             ):
                 return ToolPermissionDecision("deny", "type 参数无效")
-            return None
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name in {"browser_press", "browser_keydown", "browser_keyup"}:
             key = args.get("key")
             ref = str(args.get("ref") or "")
@@ -10287,7 +10482,7 @@ class BrowserManager:
                     return ToolPermissionDecision(
                         "deny", "press 的 ref 不属于当前页面或已失效"
                     )
-            return None
+            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_wait":
             try:
                 self._validated_wait(
@@ -10302,7 +10497,9 @@ class BrowserManager:
             return None
         elif tool_name == "browser_tabs" and args.get("action") == "new":
             return None
-        return None
+        # 其余动作（evaluate/run_code_unsafe/batch/screenshot/mouse_*/network 等）
+        # 无参数级校验，直接进治理档判定。
+        return self._governance_gate(tool_name, args, owner_id, session_id)
 
     @staticmethod
     def _tool_call_id() -> str:
@@ -10318,10 +10515,25 @@ class BrowserManager:
         owner_id: str,
         session_id: str,
     ) -> bool:
-        # The functional resolver never issues approval challenges. Keep this
-        # callback only because the generic tool-runner interface expects one.
-        del token, tool_name, args, owner_id, session_id
-        return False
+        """确认一次性审批令牌：无论成败都弹出，杜绝重放。"""
+        grant = self._approval_tokens.pop(str(token or ""), None)
+        if grant is None:
+            return False
+        if (
+            grant.expires_at <= time.monotonic()
+            or grant.owner != str(owner_id or "")
+            or grant.session_id != str(session_id or "")
+            or grant.digest != self._approval_digest(tool_name, args)
+        ):
+            return False
+        # 防 TOCTOU：审批之后页面换代或目标 ref 失效，授权自动作废。
+        session = self._governance_session(owner_id, session_id)
+        current_generation = session.generation if session else -1
+        if current_generation != grant.generation:
+            return False
+        if grant.ref and (session is None or grant.ref not in session.refs):
+            return False
+        return True
 
     def state(self, owner_id: str, session_id: str) -> dict[str, Any]:
         owner = self._owners.get(str(owner_id or ""))

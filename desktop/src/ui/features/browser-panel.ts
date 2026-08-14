@@ -519,6 +519,12 @@ export function bindBrowserPanel(): void {
   tabStrip?.addEventListener('click', (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-browser-tab]');
     const close = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-browser-close-tab]');
+    const saveWiki = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-browser-save-wiki]');
+    if (saveWiki) {
+      event.stopPropagation();
+      void saveTabToWiki(saveWiki.dataset.browserSaveWiki || '');
+      return;
+    }
     if (close) {
       event.stopPropagation();
       void sendHumanControl('close_tab', close.dataset.browserCloseTab || '');
@@ -674,6 +680,27 @@ async function ensureHumanControl(
 async function sendHumanControl(action: string, value = ''): Promise<void> {
   if (!action || !(await ensureHumanControl('chrome'))) return;
   await sendControl(action, value);
+}
+
+/**
+ * 标签页「存入知识库」：read-tab 取正文后交给 wiki capture 编译入库。
+ * 只读页面内容，不触发接管；读取/入库失败都要把原因说出来。
+ */
+async function saveTabToWiki(tabId: string): Promise<void> {
+  const sessionId = currentSession();
+  if (!sessionId || !tabId) return;
+  try {
+    const read = await backendApi.browserReadTab(sessionId, tabId);
+    if (!read.ok) {
+      notify(`无法读取标签页：${read.error || '未知原因'}`);
+      return;
+    }
+    const title = read.title.trim() || read.url.trim() || '未命名页面';
+    await backendApi.wikiCaptureText({ title, content: read.text, source_url: read.url });
+    notify(`已存入知识库：${title}`);
+  } catch (error) {
+    notify(`存入知识库失败：${(error as Error).message}`);
+  }
 }
 
 /** 录制态。只由本模块的按钮驱动——模型没有任何录制控制工具。 */

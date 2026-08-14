@@ -11,7 +11,7 @@ import type { WorkReference } from '../../backend-client';
 
 export interface MentionResult {
   entity_type: 'work_item' | 'work_session' | 'agent_session'
-    | 'personal_knowledge' | 'source_record';
+    | 'personal_knowledge' | 'source_record' | 'browser_tab';
   id: string;
   title: string;
   workspace_id?: string;
@@ -29,6 +29,7 @@ const ENTITY_LABELS: Record<MentionResult['entity_type'], string> = {
   agent_session: 'Agent',
   personal_knowledge: '个人知识',
   source_record: '来源',
+  browser_tab: '标签页',
 };
 
 /** 搜索提及候选；空查询返回空数组。 */
@@ -54,6 +55,18 @@ export async function selectMention(
     const reference = await workApi.createAgentSessionReference({
       target_session_id: targetWorkSessionId,
       source_session_id: result.id,
+    });
+    return { result, reference };
+  }
+  if (result.entity_type === 'browser_tab') {
+    // 浏览器标签页：标题存 snapshot_summary、URL 存 source_link；
+    // 发送时后端按 @browser_tab:<id> 注入标签页正文。
+    const reference = await workApi.createReference({
+      target_session_id: targetWorkSessionId,
+      reference_type: 'browser_tab',
+      source_id: result.id,
+      snapshot_summary: result.title,
+      ...(result.source_link ? { source_link: result.source_link } : {}),
     });
     return { result, reference };
   }

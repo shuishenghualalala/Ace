@@ -2339,6 +2339,27 @@ class CrewApp:
         except Exception:  # noqa: BLE001 - 空间不存在则忽略
             envelope.params["workspace_instructions"] = ""
 
+    async def _inject_browser_tab_references(self, envelope: Envelope) -> None:
+        """把 ``@browser_tab:<id>`` 引用的标签页正文并入 envelope.params。
+
+        注入点与 referenced_paths 同层（发送时解析）；解析/读取失败只产生占位
+        条目或整体跳过，**不阻断发送**。消费方为 runtime 的 user_reminder 块。
+        """
+        from crew.gateway.context import resolve_browser_tab_references
+
+        try:
+            refs = await resolve_browser_tab_references(
+                envelope.query,
+                manager=getattr(self, "browser_manager", None),
+                owner_account_id=envelope.user_id,
+                session_id=envelope.session_id,
+            )
+        except Exception:  # noqa: BLE001 - 引用解析失败不阻断发送
+            log.exception("解析 @browser_tab 引用失败")
+            refs = []
+        if refs:
+            envelope.params["browser_tab_references"] = refs
+
     def _on_subagent_background_done(self, session_id: str, result: dict) -> None:
         """后台子 agent 完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
         # 1) 入队，供下一轮 handle() 注入主 agent 上下文（限长，防无限堆积）
@@ -2416,6 +2437,7 @@ class CrewApp:
             token = current_push_fn.set(_push_for_owner)
         try:
             self._enrich_workspace(envelope)
+            await self._inject_browser_tab_references(envelope)
             from crew.agent.skills import trusted_skill_roots_from_params
             from crew.security.context import build_gateway_security_context
             from crew.security.launch import compile_process_launch

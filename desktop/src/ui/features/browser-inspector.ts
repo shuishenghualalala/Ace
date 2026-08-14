@@ -52,9 +52,11 @@ export function replaceBrowserTabs(
     const label = document.createElement('span');
     label.textContent = tabTitle(tab);
     select.appendChild(label);
+    const saveWiki = iconButton('存入知识库', 'icon-wiki', 'browser-tab__wiki');
+    saveWiki.dataset.browserSaveWiki = tab.id;
     const close = iconButton('关闭标签页', 'icon-close', 'browser-tab__close');
     close.dataset.browserCloseTab = tab.id;
-    item.append(select, close);
+    item.append(select, saveWiki, close);
     strip.appendChild(item);
   }
 }

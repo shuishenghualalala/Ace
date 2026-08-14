@@ -133,8 +133,11 @@ body.browser-workbench-maximized #chat-inspector {
 
 .browser-tab__select svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; }
 .browser-tab__select span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--mw-type-caption-size); line-height: 1; }
+.browser-tab__wiki,
 .browser-tab__close { display: grid; place-items: center; width: 24px; height: 24px; margin-right: var(--mw-space-1); padding: 0; border: 0; border-radius: var(--mw-radius-3); background: transparent; color: inherit; cursor: pointer; }
+.browser-tab__wiki:hover:not(:disabled),
 .browser-tab__close:hover:not(:disabled) { background: var(--mw-bg-selected); color: var(--mw-text-primary); }
+.browser-tab__wiki svg,
 .browser-tab__close svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
 .browser-tab--empty { padding: 0 var(--mw-space-2); font-size: var(--mw-type-caption-size); border-color: var(--mw-border-subtle); background: var(--mw-bg-selected); color: var(--mw-text-primary); }
 

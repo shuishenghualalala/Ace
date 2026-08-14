@@ -14,6 +14,8 @@ from uuid import uuid4
 
 from crew.state.logging import get_logger
 from crew.state.home import get_owner_runtime_home, task_workspace_path
+from crew.browser.driver import BrowserDriverError
+from crew.browser.tab_reading import read_tab_content
 
 log = get_logger("context")
 
@@ -22,6 +24,13 @@ _ATTACHMENT_MARKER_RE = re.compile(r"^附件「([^」]+)」位于[：:]\s*(.+)$"
 _STRUCTURED_PATH_REFERENCE_RE = re.compile(
     r"(?:^|\s)@(?P<kind>file|folder|image):(?P<path>[^\s@]+)"
 )
+# 桌面端 Composer 的 @浏览器标签页 token：id 为字母数字/中划线/下划线。
+_BROWSER_TAB_REFERENCE_RE = re.compile(
+    r"(?:^|\s)@browser_tab:(?P<tab_id>[A-Za-z0-9_-]+)"
+)
+# 单个标签页注入上限：正文在 read_tab_content 内已截到 8000，注入上下文再收紧，
+# 防止一个长页面挤占整轮对话。
+_BROWSER_TAB_TEXT_LIMIT = 4000
 
 
 def _get_upload_dir(owner_account_id: str | None = None) -> Path:
@@ -128,6 +137,51 @@ def resolve_structured_path_references(
             continue
         seen.add(key)
         refs.append({"path": key, "resource_type": resource_type})
+    return refs
+
+
+async def resolve_browser_tab_references(
+    query: str,
+    *,
+    manager: Any,
+    owner_account_id: str,
+    session_id: str,
+) -> list[dict[str, str]]:
+    """解析消息里的 ``@browser_tab:<id>`` 引用，发送时取回标签页正文。
+
+    与 @file: 的授权语义不同：浏览器标签页没有可授予的文件路径，只能在发送时
+    把正文快照并入上下文（消费方为 runtime 的 browser_tab_references 块）。
+    标签页已关闭/无浏览器会话/人工接管中等情况返回带原因的占位条目，
+    **不阻断发送**。
+    """
+    tab_ids: list[str] = []
+    for match in _BROWSER_TAB_REFERENCE_RE.finditer(str(query or "")):
+        tab_id = match.group("tab_id")
+        if tab_id not in tab_ids:
+            tab_ids.append(tab_id)
+    if not tab_ids:
+        return []
+    refs: list[dict[str, str]] = []
+    for tab_id in tab_ids:
+        if manager is None:
+            refs.append({"tab_id": tab_id, "error": "Browser Use 未启用"})
+            continue
+        try:
+            content = await read_tab_content(
+                manager,
+                owner_account_id,
+                session_id,
+                tab_id,
+                max_chars=_BROWSER_TAB_TEXT_LIMIT,
+            )
+        except BrowserDriverError as exc:
+            refs.append({"tab_id": tab_id, "error": str(exc)[:200]})
+            continue
+        except Exception as exc:  # noqa: BLE001 - 单条引用失败不阻断发送
+            log.warning("读取浏览器标签页引用失败 tab=%s: %s", tab_id, exc)
+            refs.append({"tab_id": tab_id, "error": f"读取失败: {exc}"[:200]})
+            continue
+        refs.append({"tab_id": tab_id, **content})
     return refs
 
 

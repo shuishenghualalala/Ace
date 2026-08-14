@@ -542,6 +542,10 @@ _WIKI_CAPTURE_TEXT_SCHEMA = {
                 "type": "string",
                 "description": "可选来源平台，如 wechat、zhihu、x、xiaohongshu",
             },
+            "source_url": {
+                "type": "string",
+                "description": "可选来源 URL（如网页地址），写入 RawSource.source_url 供溯源",
+            },
             **_KB_ID_PARAM,
         },
         "required": ["title", "content"],
@@ -871,6 +875,7 @@ def register_wiki_tools(
         kb_id: str,
         session_id: str = "",
         source_platform: str = "",
+        source_url: str = "",
     ) -> str:
         import time
         import uuid
@@ -899,6 +904,7 @@ def register_wiki_tools(
             source_kind=material_kind,
             source_platform="crew" if source_type == "session" else source_platform,
             adapter_name="builtin-session" if source_type == "session" else "builtin-text",
+            source_url=str(source_url or "").strip() or None,
         )
         store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
         parsed_path, page, duplicate = _save_parsed_source(
@@ -929,6 +935,7 @@ def register_wiki_tools(
             _kb_id(args),
             current_session_id.get(),
             str(args.get("source_platform") or ""),
+            str(args.get("source_url") or ""),
         )
 
     def _handle_capture_session(args: dict[str, Any]) -> str:
