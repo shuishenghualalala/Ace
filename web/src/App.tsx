@@ -11,7 +11,7 @@ import WorkspaceModal from "./components/WorkspaceModal";
 import { useSessions } from "./hooks/useSessions";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { externalAgentsAvailable } from "./lib/featureFlags";
 import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, Workspace } from "./types";
 
@@ -27,6 +27,8 @@ export function resolveWikiAgentSessionId(
 }
 
 const CONFIG_RETRY_INTERVAL_MS = 3000;
+const TASKS_POLL_INTERVAL_MS = 2000;
+const TASKS_POLL_MAX_INTERVAL_MS = 60_000;
 
 export function isExternalAgentSession(session: Session | undefined): boolean {
   const kind = session?.agent_binding?.kind;
@@ -177,11 +179,15 @@ export default function App() {
   const { sessions, refresh: refreshSessions } = useSessions();
   const { workspaces, refresh: refreshWorkspaces } = useWorkspaces();
 
-  const refreshTasks = useCallback(async () => {
+  const refreshTasks = useCallback(async (): Promise<"ok" | "retry" | "stop"> => {
     try {
       setTasks(await api.tasks(currentSessionId));
-    } catch {
+      return "ok";
+    } catch (err) {
       setTasks([]);
+      // 会话不存在/不属于当前账户（404）：继续轮询无意义，停止直到切换会话
+      if (err instanceof ApiError && err.status === 404) return "stop";
+      return "retry";
     }
   }, [currentSessionId]);
 
@@ -284,9 +290,21 @@ export default function App() {
 
   useEffect(() => {
     if (!boardOpen) return;
-    void refreshTasks();
-    const timer = window.setInterval(() => void refreshTasks(), 2000);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let timer: number | undefined;
+    let delay = TASKS_POLL_INTERVAL_MS;
+    const tick = async () => {
+      const result = await refreshTasks();
+      if (cancelled || result === "stop") return;
+      // 可恢复错误（网络/5xx）指数退避，成功即重置；切换会话时 effect 随 refreshTasks 重建，退避同步重置
+      delay = result === "ok" ? TASKS_POLL_INTERVAL_MS : Math.min(delay * 2, TASKS_POLL_MAX_INTERVAL_MS);
+      timer = window.setTimeout(() => void tick(), delay);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [boardOpen, refreshTasks]);
 
   useEffect(() => {

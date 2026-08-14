@@ -389,6 +389,29 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
   const afterFinalRef = useRef(onAfterFinal);
   afterFinalRef.current = onAfterFinal;
 
+  // task 流式事件一轮可能来几十次：全量刷新（会话列表 + /api/tasks）做 1s 节流，
+  // 避免每个 task 事件都各打一次请求（404 场景下会形成风暴）
+  const afterFinalThrottleRef = useRef<{ last: number; timer: ReturnType<typeof setTimeout> | undefined }>({ last: 0, timer: undefined });
+  const fireAfterFinalThrottled = useCallback(() => {
+    const state = afterFinalThrottleRef.current;
+    const now = Date.now();
+    const elapsed = now - state.last;
+    if (state.timer !== undefined) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    if (elapsed >= 1000) {
+      state.last = now;
+      afterFinalRef.current();
+    } else {
+      state.timer = setTimeout(() => {
+        state.timer = undefined;
+        state.last = Date.now();
+        afterFinalRef.current();
+      }, 1000 - elapsed);
+    }
+  }, []);
+
   // 当前会话 id（供 chunk 缺 session_id 时容错回退）
   const currentSidRef = useRef(currentSessionId);
   currentSidRef.current = currentSessionId;
@@ -700,7 +723,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
           book.awaitingAssistantAfterTool = true;
         }
       } else if (c.kind === "task") {
-        onAfterFinal();
+        fireAfterFinalThrottled();
       } else if (c.kind === "team_internal") {
         book.hadTeamInternal = true;
         setQueue(sid, "");
