@@ -68,17 +68,11 @@ RUN pip install --no-cache-dir \
 COPY crew ./crew
 RUN pip install --no-cache-dir --no-deps .
 
-COPY web ./web
 COPY config ./config
 COPY plugins ./plugins
 
-COPY web/package.json web/package-lock.json ./web/
-RUN cd web && npm install --no-audit --no-fund
-RUN cd web && npm run build
-
 RUN pyinstaller --name crew-gateway \
     --onedir \
-    --add-data "web/dist:web/dist" \
     --add-data "config:config" \
     --add-data "crew/skills:crew/skills" \
     --add-data "crew/scenarios:crew/scenarios" \

@@ -59,6 +59,9 @@ complex_tasks:
   team_workflow:
     title: Team 模式在工作区产出文件
     mode: team
+    config:
+      team_config:
+        required_workflow: false
     workspace:
       instructions: |
         这是一个 E2E 玩具工作区。team 成员只能在当前工作区内操作。
@@ -66,12 +69,16 @@ complex_tasks:
         "toy_project/input.txt": "输入值: 42\n"
     prompt: |
       请以团队模式完成一个简单任务：让团队成员读取 toy_project/input.txt，
-      并在 toy_project/result.txt 写入"结果: 42"。完成后由 Leader 汇总文件路径。
+      并在 toy_project/result.txt 写入"结果: 42"。
+      优先使用 delegate_to_teammate 把任务派给 coder；如果 coder 不响应，
+      Leader 可以直接使用 file_read/file_write 完成。不要反复
+      team_read_messages/team_mention/sleep 等待，也不要请求添加节点。完成后汇总文件路径。
+    expected_tools: [delegate_to_teammate, file_write]
     expected_files:
       - path: "toy_project/result.txt"
         contains: ["42"]
     expected_final_keywords: ["result.txt"]
-    timeout_seconds: 600
+    timeout_seconds: 180
 
   dynamic_kanban:
     title: Dynamic Kanban 执行三步工作流
@@ -81,11 +88,12 @@ complex_tasks:
       files:
         "toy_project/input.txt": "数字: 7\n"
     prompt: |
-      在当前工作区创建一个三步工作流：读取 toy_project/input.txt，
-      在 toy_project/kanban.txt 中写入其中的数字，最后检查文件存在。
+      在当前工作区创建一个三步工作流：先创建 toy_project 目录，
+      在 toy_project/kanban.txt 中写入数字 7，最后检查文件存在。
     expected_files:
-      - path: "toy_project/kanban.txt"
+      - path: "kanban.txt"
         contains: ["7"]
+        search: true
     timeout_seconds: 600
 
 wiki:

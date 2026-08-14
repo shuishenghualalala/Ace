@@ -281,6 +281,9 @@ const api = {
   installUpdatePackage: (): Promise<VersionUpdatePackageResult> =>
     ipcRenderer.invoke('update:install-package'),
   getUpdateState: (): Promise<UpdateStateSnapshot> => ipcRenderer.invoke('update:get-state'),
+  /** 打开 GitHub Releases 中当前系统对应的安装包下载页（由主进程按平台/架构匹配）。 */
+  openLatestReleaseDownload: (): Promise<{ ok: boolean; url?: string }> =>
+    ipcRenderer.invoke('release:open-latest-download'),
 
   // 登录态单源（P1-3）：主进程推送当前登录态 + userInfo，renderer 据此驱动 UI
   onSessionState: (cb: (s: AuthStateSnapshot) => void) => {

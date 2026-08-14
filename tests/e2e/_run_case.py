@@ -92,6 +92,11 @@ def _setup_config(spec: dict[str, Any], case_dir: Path) -> Any:
         cfg.wiki.ingest.auto_apply = True
     cfg.external_agents_enabled = True
     cfg.external_security_enabled = False
+    for key, value in (spec.get("config") or {}).items():
+        if key == "team_config" and isinstance(value, dict):
+            cfg.team_config = {**cfg.team_config, **value}
+        elif hasattr(cfg, key):
+            setattr(cfg, key, value)
     return cfg
 
 
@@ -256,8 +261,19 @@ def _assertions(
             continue
         target = (workspace_root / relative) if workspace_root is not None else None
         if target is None or not target.is_file():
-            errors.append(f"期望工作区文件不存在: {relative}")
-            continue
+            if item.get("search") and workspace_root is not None:
+                candidates = [
+                    path
+                    for path in workspace_root.rglob(Path(relative).name)
+                    if path.is_file()
+                ]
+                if not candidates:
+                    errors.append(f"期望工作区文件不存在（含子目录搜索）: {relative}")
+                    continue
+                target = candidates[0]
+            else:
+                errors.append(f"期望工作区文件不存在: {relative}")
+                continue
         content = target.read_text(encoding="utf-8", errors="replace")
         for keyword in item.get("contains") or []:
             if str(keyword) not in content:

@@ -1,8 +1,5 @@
 <div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo.svg">
-    <img src="assets/logo.svg" alt="Crew Logo" width="180">
-  </picture>
+  <img src="assets/logo.png" alt="Ace Logo" width="180">
   <h1>Crew — 开源版 WorkBuddy：住在你电脑里的 AI 打工人</h1>
   <p><i>Open WorkBuddy: an open-source, local-first multi-agent workbench with skills, automation, a knowledge base, and your own models.</i></p>
   <p>
@@ -30,14 +27,14 @@ Wiki 里存着上周的会议纪要和个人笔记，Agent 随取随用，再也
 
 本机装好的 Codex、Claude Code、Kimi 也能一键接入当外援，谁家擅长什么就让谁上，不偏心。
 
+模型随便接：OpenAI 兼容、Anthropic 协议都能用，用自己的 API Key，想换哪家换哪家，钥匙一直攥在你手里。
+
+系统随便装：macOS（Intel / Apple 芯片）、Linux（麒麟 / 统信）、Windows 都有对应安装包，装完即用。
+
 <div align="center">
   <img src="assets/screenshot_desktop.png" alt="Crew Desktop UI" width="700">
 </div>
 
-> [!NOTE]
-> **发布状态：源码预览版。** 接口和数据格式不承诺稳定，暂不建议直接扛关键生产环境。
-> 目前只以 Git 源码检出方式交付，还没有 PyPI/wheel 或正式安装器——`pyproject.toml`
-> 的构建产物并不是包含桌面端与 Web 端的完整发行包，别被它骗了。
 
 ## 📖 目录
 
@@ -45,6 +42,7 @@ Wiki 里存着上周的会议纪要和个人笔记，Agent 随取随用，再也
 - [🤔 为什么选择 Crew？](#-为什么选择-crew)
 - [🧰 环境要求](#-环境要求)
 - [🚀 快速开始](#-快速开始)
+- [🗺️ 开发计划](#-开发计划)
 - [🧠 配置模型](#-配置模型)
 - [🔐 账号与租户登录](#-账号与租户登录)
 - [🧩 技能与插件](#-技能与插件)
@@ -97,14 +95,30 @@ Wiki 里存着上周的会议纪要和个人笔记，Agent 随取随用，再也
 |------|------|
 | Python | 3.11 或更高 |
 | [uv](https://docs.astral.sh/uv/) | 当前稳定版 |
-| Node.js | 22.12 或更高；仅 Desktop / Web 开发需要 |
-| npm | 10 或更高；仅 Desktop / Web 开发需要 |
+| Node.js | 22.12 或更高；仅 Desktop 开发需要 |
+| npm | 10 或更高；仅 Desktop 开发需要 |
 
 ## 🚀 快速开始
 
-从 clone 到跑起来，快过等一杯奶茶。
+### 1. 下载安装包（推荐）
 
-### 1. 安装后端与创建本地配置
+到 [GitHub Releases](https://github.com/shuishenghualalala/Ace/releases) 下载对应系统的安装包：
+
+| 你的系统 | 安装包 |
+|------|------|
+| macOS（Apple 芯片 M 系列） | `crew-desktop_<版本>_arm64.dmg` |
+| macOS（Intel） | `crew-desktop_<版本>_x64.dmg` |
+| Linux 统信 UOS（amd64） | `crew-desktop_<版本>_uos_amd64.deb` |
+| Linux 麒麟 Kylin（amd64） | `crew-desktop_<版本>_kylin_amd64.deb` |
+| Windows 10/11（x64） | `Crew_Setup_v<版本>.exe` |
+
+下载后直接安装即可。桌面端「设置 → 关于我们 → 更新」会自动按当前系统/架构匹配最新安装包。
+
+### 2. 从源码构建
+
+构建前请确认环境满足[环境要求](#-环境要求)：Python 3.11+、[uv](https://docs.astral.sh/uv/)、Node.js 22.12+、npm 10+。
+
+#### macOS / Linux
 
 ```bash
 git clone https://github.com/shuishenghualalala/Ace.git
@@ -112,102 +126,50 @@ cd Ace
 
 # 安装 Python 依赖
 uv venv .venv --python 3.11
-source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
+source .venv/bin/activate
 uv pip install -e ".[dev,wiki]"
 
-# 创建本地配置和环境变量文件；两者均已被 Git 忽略
-cp config/config.yaml.example config/config.yaml  # Windows: Copy-Item config/config.yaml.example config/config.yaml
-cp config/.env.example config/.env     # Windows PowerShell: Copy-Item config/.env.example .env
-```
+# 创建本地配置和环境变量文件（两者均已被 Git 忽略）
+cp config/config.yaml.example config/config.yaml
+cp config/.env.example config/.env
 
-`wiki` 额外依赖用于解析 PDF、DOCX、XLSX、PPTX 等上传文件；旧格式 DOC、XLS、PPT 还需要
-系统安装 LibreOffice。基础对话场景可安装 `.[dev]`。使用飞书/Lark 渠道时，另行安装
-`uv pip install -e ".[feishu]"`，再前往“设置 → 渠道”配置账号。
-
-### 2A. 启动桌面端
-
-需要测试邮箱租户登录时，使用普通模式启动：
-
-```bash
+# 启动桌面端
 cd desktop
-npm install
-npm start
-```
-
-`npm start` 会构建 Desktop、自动启动托管 Gateway，并读取仓库根目录的
-`config/config.yaml`。默认配置为 `auth.mode: email`，首次打开会要求填写邮箱；不发送
-验证码，邮箱仅用于区分本机租户。登录后可进入“设置 → 模型 → 添加模型”配置真实模型。
-
-日常开发且不需要测试登录流程时，可使用：
-
-```bash
-cd desktop
-npm run dev
-```
-
-`npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，因此不会显示
-邮箱登录页——开发时少一步登录，多一份清净。两种命令都不需要另外手动启动 Gateway。
-
-#### macOS 安全运行组件
-
-Apple Silicon（M 系列、`uname -m` 输出 `arm64`）所需的安全运行组件已经按架构提交到
-仓库，拉取源码后可直接执行 `npm run dev`，不需要安装 Rust 或 Cargo。Desktop 启动时会
-校验产物声明的平台、架构、二进制 SHA-256 和 Rust 源码摘要，不匹配时拒绝启用受管执行——
-宁可不跑，也不乱跑。
-
-Intel Mac（`uname -m` 输出 `x86_64`）目前需要本机编译一次：
-
-```bash
-# 首次安装编译工具链
-xcode-select --install
-brew install rustup
-export PATH="$(brew --prefix rustup)/bin:$PATH"
-rustup default stable
-
-# 在 Ace 仓库根目录编译并放入本机 staging
-cargo build \
-  --manifest-path security-runtime/Cargo.toml \
-  --release \
-  --locked
-
-node desktop/scripts/prepare-security-runtime.mjs \
-  --runtime security-runtime/target/release/ace-security-runtime \
-  --output desktop/security-runtime-bin
-
-node desktop/scripts/verify-security-runtime.mjs \
-  desktop/security-runtime-bin
-
-npm run dev --prefix desktop
-```
-
-本机 staging 目录已被 Git 忽略。维护者发布 Intel 预编译文件、以及修改 Rust 安全运行组件
-后的重建要求，见 [security-runtime/README.md](security-runtime/README.md)。正式 DMG 会在
-目标平台重新构建并装入 runtime，安装包使用者无需安装 Rust。
-
-维护者也可以在 GitHub Actions 手动运行 **security-prebuilt**。它会分别在 Apple Silicon、
-Intel Mac、Windows x64 和 Linux x64 原生 runner 上构建与测试，产出带 SHA-256 manifest 和
-GitHub build provenance 的压缩包；打 `v*` tag 时会附加到 GitHub Release。同事只需使用对应
-平台的预编译目录，不需要安装 Cargo。证书是可选增强：未配置证书仍会生成可验证产物，配置
-Developer ID/Authenticode secrets 后才会额外执行系统签名。
-
-### 2B. 启动 Web 端
-
-分别在两个终端中，从仓库根目录运行：
-
-```bash
-# 终端 1：启动 Gateway（REST / WebSocket）
-source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m crew.gateway.server
-```
-
-```bash
-# 终端 2：启动 Web 开发服务器
-cd web
 npm install
 npm run dev
 ```
 
-浏览器打开 `http://localhost:5173`。Web 开发服务器会把 `/api` 和 `/ws` 请求代理到默认监听 `127.0.0.1:8000` 的 Gateway。
+#### Windows（PowerShell）
+
+```powershell
+git clone https://github.com/shuishenghualalala/Ace.git
+cd Ace
+
+# 安装 Python 依赖
+uv venv .venv --python 3.11
+.\.venv\Scripts\Activate.ps1
+uv pip install -e ".[dev,wiki]"
+
+# 创建本地配置和环境变量文件（两者均已被 Git 忽略）
+Copy-Item config\config.yaml.example config\config.yaml
+Copy-Item config\.env.example .env
+
+# 启动桌面端
+cd desktop
+npm install
+npm run dev
+```
+
+`wiki` 额外依赖用于解析 PDF、DOCX、XLSX、PPTX 等上传文件；基础对话场景可安装 `.[dev]`。
+`npm run dev` 会传入 `--dev`，使用隔离的开发 Owner 和数据目录，且会自动启动托管 Gateway，
+无需手动启动后端。
+
+## 🗺️ 开发计划
+
+- [x] ~~v1.1.1 版本发布！支持 macOS（Intel / Apple 芯片）、Linux（麒麟 / 统信）、Windows~~
+- [ ] 安全模块
+- [ ] 浏览器操作
+- [ ] 接入更多智能体
 
 ## 🧠 配置模型
 
@@ -257,7 +219,7 @@ MY_MODEL_API_KEY=your-api-key
 
 ## 🔐 账号与租户登录
 
-Ace 默认使用 `auth.mode: email`：首次启动只需填写邮箱，不发送验证码，邮箱会规范化为小写并生成 `email:<邮箱>` 数据 owner。该模式用于本机多租户数据隔离，不验证邮箱所有权；同一台电脑上的使用者可以输入其他邮箱切换租户。
+Crew支持多租户空间隔离， 默认使用 `auth.mode: email`：首次启动只需填写邮箱，不发送验证码，邮箱会规范化为小写并生成 `email:<邮箱>` 数据 owner。该模式用于本机多租户数据隔离，不验证邮箱所有权；同一台电脑上的使用者可以输入其他邮箱切换租户。
 
 如需保留单机免登录行为，可改为 `auth.mode: local`，此时使用 `local` 作为数据 owner。
 如需接入自己的手机号验证码认证服务，在本地 `config/config.yaml` 中启用远程模式：
@@ -320,131 +282,6 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 还需要屏幕录制权限。安装来源和完整边界见 [CUA Driver 说明](crew/skills/cua-driver/references/setup.md)。
 图片和视频理解服务的环境变量见 `config/.env.example`；没有完整配置时不会发送媒体数据。
 视频上传还需要用户逐次确认。项目运行不依赖远程技能市场。
-
-## 🔧 其他启动方式
-
-### CLI
-
-一般给命令行爱好者或其他agent使用.jpg：
-
-```bash
-source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
-
-# 交互对话（默认）
-python -m crew.cli
-
-# 非交互运行与自动化输出
-python -m crew.cli run "整理下载目录" --output-format json
-python -m crew.cli cron list --json
-python -m crew.cli security pending --session-id <sid> --json
-
-# 查看完整命令树
-python -m crew.cli --help
-```
-
-CLI 进程内直调后端 service，不依赖 Gateway；所有子命令支持 `--json` 结构化输出，
-覆盖配置、会话、工作空间、任务、定时任务、Wiki、技能、MCP、插件、渠道、外部
-Runtime/Agent/Team、浏览器、动态看板、场景、安全审批/规则/审计、站点与工作台。
-
-## 📦 构建桌面发行包（可选）
-
-当前仓库提供本地构建脚本，但不发布预编译安装包，也不包含代码签名、公证和自动更新服务。
-构建过程会下载 Electron、Python、Node.js 等运行时，可能占用数 GB 磁盘空间——动手前先看看硬盘余量。
-
-### Electron 裸目录
-
-在目标操作系统上运行对应命令：
-
-```bash
-cd desktop
-npm ci
-npm run dist:linux   # Linux x64 → desktop/release/linux-unpacked/
-npm run dist:win     # Windows x64 → desktop/release/win-unpacked/
-npm run dist:mac     # macOS x64 + arm64 → desktop/release/
-```
-
-这些产物适合本地验证或作为下游发行流程的输入，不保证是已签名、已公证的正式安装器。更多配置说明见
-[Desktop 文档](desktop/README.md#本地预打包)。
-
-### Linux UOS / Kylin `.deb`
-
-需要 Docker 和 PowerShell 7。从仓库根目录运行：
-
-```powershell
-pwsh ./deb-package/pack_deb.ps1 -Version 0.1.0 -Platform UOS
-pwsh ./deb-package/pack_deb.ps1 -Version 0.1.0 -Platform Kylin
-```
-
-不传 `-Platform` 时会依次构建 UOS 和 Kylin 两个 amd64 安装包。产物位于仓库根目录，
-文件名形如 `crew-desktop_0.1.0_uos_amd64.deb`。
-
-### Windows 安装器
-
-需要 Windows、PowerShell、uv、Node.js/npm 和
-[Inno Setup 6](https://jrsoftware.org/isinfo.php)。从仓库根目录运行：
-
-```powershell
-pwsh ./deb-package/pack_exe.ps1 -Version 0.1.0
-```
-
-产物位于 `dist/installer/`。安装包会携带 Gateway、Desktop，以及供技能脚本使用的
-Python 和 Node.js 运行时。
-
-## ✅ 验证安装
-
-装完可以验证是否有问题：
-
-```bash
-# Web 构建与测试
-cd web
-npm install
-npm run build
-npm test
-cd ..
-
-# Python 测试（默认跳过需要真实模型和网络的 e2e 用例）
-pytest
-
-# Desktop 完整检查
-cd desktop
-npm install
-npm run check
-```
-
-如需运行真实模型端到端测试，请从仓库根目录执行以下命令。测试会调用本地配置的外部模型或
-服务，可能发送测试数据、消耗额度或产生费用；运行前请确认 API Key、端点和测试数据：
-
-```bash
-pytest -m e2e
-```
-
-需要批量验证复杂任务、Wiki、外援等后端功能，并保留每轮日志时，使用独立场景 runner：
-
-```bash
-python scripts/run_e2e_batch.py --category complex_tasks
-python scripts/run_e2e_batch.py --case write_file --report-dir build/e2e
-```
-
-每个 case 会独立输出 `transcript.jsonl`、`llm.jsonl`、`crew.log` 和工作区前后快照，报告与
-新增场景的方法见 [后端 E2E 测试指南](docs/testing/e2e-testing.md)。
-
-## 📁 配置与本地数据
-
-哪些文件该提交、哪些文件碰都别碰（指 Git）：
-
-| 路径 | 用途 | 是否应提交 |
-|------|------|------------|
-| `config/config.yaml.example` | 可发布的默认结构化配置模板 | 是 |
-| `config/config.yaml` | 本地模型、Gateway、MCP 和工具配置 | 否 |
-| `config/.env.example` | 环境变量模板，不含真实值 | 是 |
-| 项目根目录 `.env` / `config/.env` | 手工配置或 CLI 使用的 API Key、Token 等本地敏感配置 | 否 |
-| `${CREW_HOME}/accounts/acct_<hash(local)>/.env` | `auth.mode: local` 时由设置页保存的模型 API Key；默认 `${CREW_HOME}` 为 `~/.Crew` | 否 |
-| `${DESKTOP_USER_DATA}/gateway-dev/accounts/acct_<hash(dev:dev)>/.env` | `npm run dev` 的隔离开发环境中由设置页保存的模型 API Key | 否 |
-| `${CREW_HOME}/accounts/acct_<hash(providerId:userId)>/.env` | `auth.mode: remote` 时由设置页保存的模型 API Key，每个登录用户相互隔离 | 否 |
-| `~/.Crew/` / `.Crew/` / `.crew/` | 用户配置、会话和运行时数据 | 否 |
-| `crew_data/` | 本地数据库 | 否 |
-
-`${CREW_HOME}` 可通过同名环境变量覆盖；未覆盖时，示例配置中的 `.Crew` 会解析为用户主目录下的 `~/.Crew`。`${DESKTOP_USER_DATA}` 是 Electron 为当前 Desktop 应用分配的用户数据目录。`acct_<hash(...)>` 是由 owner ID 稳定计算出的隐私保护目录名，磁盘上不会直接出现 `local`、用户 ID 或手机号；远程模式下的 `providerId:userId` 仅用于本机派生该目录名。
 
 ## 🧱 代码结构
 
