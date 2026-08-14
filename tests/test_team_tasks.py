@@ -3483,6 +3483,66 @@ async def test_team_ask_timeout_returns_expired_and_replies():
     assert reply["reply_to"] == request["message_id"]
 
 
+@pytest.mark.asyncio
+async def test_team_ask_history_projects_request_status_and_reply_without_new_node_or_artifact(tmp_path):
+    class AskAnswerProvider(RoleProvider):
+        async def chat(self, messages, tools=None):
+            last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+            if "这是一次团队内部通信回合" in last_user:
+                return ChatResponse(text="只回答当前问题，不创建工作流节点。")
+            return await super().chat(messages, tools)
+
+    store = SQLiteKanbanStore(tmp_path / "communication-history.db")
+    tm, _tasks = _team(provider=AskAnswerProvider(), kanban_store=store)
+    team = tm._build_team("communication_history_s1", owner_account_id="local")
+    tm.create_plan(
+        "communication_history_s1",
+        goal="团队通信测试",
+        nodes=[{
+            "id": "game_design",
+            "title": "方案确认",
+            "detail": "确认方案边界",
+            "assignee": "coder",
+        }],
+        owner_account_id="local",
+    )
+    before_nodes = {
+        str(node.get("node_id") or node.get("id") or "")
+        for node in tm.read_plan("communication_history_s1", owner_account_id="local")["plan"]["nodes"]
+    }
+
+    member_token = current_agent_id.set("coder")
+    try:
+        result = await team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-ask-history",
+                "team_mention",
+                {
+                    "to": ["leader"],
+                    "intent": "ask",
+                    "content": "只确认方案，不要继续开发。",
+                    "node_id": "game_design",
+                },
+            )
+        )
+    finally:
+        current_agent_id.reset(member_token)
+
+    assert not result.is_error
+    history = tm.event_history_for_session("communication_history_s1", owner_account_id="local")
+    communication = [item for item in history if item["event_type"] == "team_communication"]
+    assert [item["communication_kind"] for item in communication] == ["ask_request", "ask_answer"]
+    assert communication[0]["communication_status"] == "answered"
+    assert communication[1]["request_id"] == communication[0]["request_id"]
+    assert communication[1]["reply_to"]
+    after_nodes = {
+        str(node.get("node_id") or node.get("id") or "")
+        for node in tm.read_plan("communication_history_s1", owner_account_id="local")["plan"]["nodes"]
+    }
+    assert after_nodes == before_nodes
+    assert team.bus.list_artifacts("communication_history_s1") == []
+
+
 async def test_external_team_mention_propagates_current_active_skill(monkeypatch):
     tm, _tasks = _team()
     tm._get_or_create("external_skill_team")

@@ -731,6 +731,16 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   font-style: normal;
   font-weight: 500;
 }
+.chat-messages.web-flow .team-internal__communication-status {
+  color: var(--mw-text-secondary);
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 500;
+  line-height: 1;
+  padding: 3px 7px;
+}
 
 .chat-messages.web-flow .team-internal__bubble {
   display: inline-block;

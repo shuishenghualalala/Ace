@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.team.bus import TeamBus
 from crew.team.models import MessageType, new_id
+
+log = logging.getLogger(__name__)
 
 MENTION_MESSAGE_TYPES: dict[str, MessageType] = {
     "submit": "result",
@@ -158,6 +161,7 @@ class TeamAskCoordinator:
         resolve_agent: Callable[[str], Any | None],
         owner_account_id: str = "",
         on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
+        on_lifecycle: Callable[[dict[str, Any]], Any] | None = None,
         timeout_seconds: float = 30.0,
     ) -> None:
         self.bus = bus
@@ -165,6 +169,7 @@ class TeamAskCoordinator:
         self.resolve_agent = resolve_agent
         self.owner_account_id = owner_account_id
         self.on_chunk = on_chunk
+        self.on_lifecycle = on_lifecycle
         self.timeout_seconds = max(0.1, float(timeout_seconds))
         self._locks: dict[str, asyncio.Lock] = {}
         self._active_paths: dict[str, tuple[str, ...]] = {}
@@ -188,6 +193,8 @@ class TeamAskCoordinator:
         if not request_id or not request_message_id:
             raise ValueError("ask 请求缺少 request_id 或 message_id")
 
+        await self._emit_lifecycle(event, "waiting_reply")
+
         path = [
             str(item or "").strip()
             for item in list(event.get("communication_path") or [])
@@ -196,7 +203,7 @@ class TeamAskCoordinator:
         if sender not in path:
             path.append(sender)
         if target in path:
-            return self._publish_failure(
+            return await self._publish_failure(
                 event,
                 target=target,
                 sender=sender,
@@ -209,7 +216,7 @@ class TeamAskCoordinator:
 
         agent = self.resolve_agent(target)
         if agent is None:
-            return self._publish_failure(
+            return await self._publish_failure(
                 event,
                 target=target,
                 sender=sender,
@@ -262,10 +269,11 @@ class TeamAskCoordinator:
         if queued:
             event["communication_status"] = "queued"
             self.bus.update_status(request_message_id, "queued")
+            await self._emit_lifecycle(event, "queued")
         try:
             await asyncio.wait_for(lock.acquire(), timeout=self.timeout_seconds)
         except TimeoutError:
-            return self._publish_failure(
+            return await self._publish_failure(
                 event,
                 target=target,
                 sender=sender,
@@ -278,6 +286,7 @@ class TeamAskCoordinator:
         try:
             event["communication_status"] = "delivered"
             self.bus.update_status(request_message_id, "delivered")
+            await self._emit_lifecycle(event, "delivered")
             self._active_paths[target] = tuple(event["communication_path"])
             final_text = ""
             delta_text: list[str] = []
@@ -300,7 +309,7 @@ class TeamAskCoordinator:
             try:
                 await asyncio.wait_for(_run(), timeout=self.timeout_seconds)
             except TimeoutError:
-                return self._publish_failure(
+                return await self._publish_failure(
                     event,
                     target=target,
                     sender=sender,
@@ -311,11 +320,12 @@ class TeamAskCoordinator:
                 )
             except asyncio.CancelledError:
                 self.bus.update_status(request_message_id, "cancelled")
+                await self._emit_lifecycle(event, "cancelled")
                 raise
 
             answer_text = final_text or "".join(delta_text).strip()
             if error_text or not answer_text:
-                return self._publish_failure(
+                return await self._publish_failure(
                     event,
                     target=target,
                     sender=sender,
@@ -339,19 +349,21 @@ class TeamAskCoordinator:
                 reply_to=request_message_id,
             )
             self.bus.update_status(request_message_id, "answered")
-            return {
+            result = {
                 "status": "answered",
                 "request_id": request_id,
                 "answer": answer_text,
                 "reply_to": request_message_id,
                 "message": answer_message.to_dict(),
             }
+            await self._emit_lifecycle(event, "answered", result=result)
+            return result
         finally:
             if self._active_paths.get(target) == tuple(event.get("communication_path") or ()):
                 self._active_paths.pop(target, None)
             lock.release()
 
-    def _publish_failure(
+    async def _publish_failure(
         self,
         event: dict[str, Any],
         *,
@@ -375,13 +387,38 @@ class TeamAskCoordinator:
             task_id=str(event.get("task_id") or ""),
             reply_to=request_message_id,
         )
-        return {
+        result = {
             "status": status,
             "request_id": request_id,
             "answer": reason,
             "reply_to": request_message_id,
             "message": answer_message.to_dict(),
         }
+        await self._emit_lifecycle(event, status, result=result)
+        return result
+
+    async def _emit_lifecycle(
+        self,
+        event: dict[str, Any],
+        status: str,
+        *,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        """把 ask 状态交给 TeamManager 的既有事件投影。"""
+
+        if self.on_lifecycle is None:
+            return
+        snapshot = dict(event)
+        snapshot["communication_status"] = status
+        if result is not None:
+            snapshot["communication_result"] = dict(result)
+        try:
+            maybe = self.on_lifecycle(snapshot)
+            if inspect.isawaitable(maybe):
+                await cast(Awaitable[Any], maybe)
+        except Exception as exc:  # noqa: BLE001
+            # 可观测性不能影响真实 ask 的回答结果。
+            log.warning("记录 Team ask 生命周期失败 request=%s err=%s", event.get("request_id"), exc)
 
 
 __all__ = [

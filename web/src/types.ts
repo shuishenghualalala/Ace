@@ -648,6 +648,8 @@ export interface UiMessage {
   mentionFrom?: string;
   mentionTo?: string[];
   mentionIntent?: string;
+  communicationKind?: string;
+  communicationStatus?: string;
   displayMode?: "chat" | "collapsible" | string;
   collapsedTitle?: string;
   processText?: string;

@@ -86,6 +86,19 @@ function highlightMentionMarkdown(text: string): string {
   );
 }
 
+function communicationStatusLabel(status?: string): string {
+  return ({
+    published: "已发送",
+    waiting_reply: "等待回答",
+    queued: "排队中",
+    delivered: "回答中",
+    answered: "已回答",
+    failed: "回答失败",
+    expired: "已超时",
+    cancelled: "已取消",
+  } as Record<string, string>)[String(status || "").trim()] || "";
+}
+
 export default function TeamAgentTurnBubble({ message, isStreaming = false, teamMembers }: Props) {
   const identity = resolveIdentity(message, teamMembers);
   const state = buildAgentTurnState([{
@@ -93,6 +106,9 @@ export default function TeamAgentTurnBubble({ message, isStreaming = false, team
     text: highlightMentionMarkdown(message.text),
   }], isStreaming);
   const processText = (message.processText || "").trim();
+  const communicationStatus = message.communicationKind === "ask_request"
+    ? communicationStatusLabel(message.communicationStatus)
+    : "";
   const isCollapsible = message.displayMode === "collapsible";
   const isPlanningProgress = message.eventType === "team_planning_progress";
   const afterContent = (
@@ -124,6 +140,9 @@ export default function TeamAgentTurnBubble({ message, isStreaming = false, team
       processClassName="team-internal__agent-process"
       collapsibleTitle={isCollapsible ? (message.collapsedTitle || "执行过程") : undefined}
       afterContent={afterContent}
+      nameSuffix={communicationStatus ? (
+        <span className="team-internal__communication-status">{communicationStatus}</span>
+      ) : undefined}
     />
   );
 }

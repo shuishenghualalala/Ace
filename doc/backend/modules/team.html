@@ -417,4 +417,13 @@ graph TD
   <li><b>验证：</b><code>tests/test_team_tasks.py</code> 203 passed / 1 skipped；覆盖单目标回答、同目标串行队列、超时过期和回复关联。</li>
 </ul>
 
+<h2>148. 2026-08-14 Team Ask 历史投影与 UI 可观测阶段四</h2>
+<ul>
+  <li><b>事件复用：</b>请求事件、生命周期状态和 answer 都复用既有 Team Kanban event；不新增消息表，不把 ask 伪装成 TaskManager 任务或 TeamPlan 节点。</li>
+  <li><b>历史投影：</b><code>event_history_for_session()</code> 接收 <code>team_communication</code>，按 <code>request_id</code> 把 <code>ask_lifecycle</code> 状态回填到原请求，仅输出 ask request 与 ask answer/失败两条 Team 内部消息。</li>
+  <li><b>前端：</b>Web 与 Desktop 的 Team 内部气泡透传 <code>communication_kind/communication_status</code>；请求侧显示发送、等待、排队、回答中、已回答、失败、超时、取消等状态，回答侧保留正文和 <code>reply_to</code> 关联。</li>
+  <li><b>恢复与边界：</b>重新打开 Team session 时从既有 Kanban event 恢复请求/回答状态；ask 不生成 DAG、任务或产物，正式 <code>assign</code> 执行完全不变。</li>
+  <li><b>验证：</b>新增 Kanban 历史投影回归，覆盖请求状态最终回填、answer 关联、无新增节点和无产物；Team ask 定向回归 5 passed，Web history/message 回归 24 passed，Web typecheck 通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

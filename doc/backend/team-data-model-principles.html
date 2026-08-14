@@ -751,6 +751,20 @@ flowchart LR
     <li><b>数据边界：</b>仍不新增数据库表或 DAG 节点；状态和生命周期复用 TeamMessage 与 TeamBus events，第三阶段未改变正式任务执行链。</li>
   </ul>
 
+  <h2>23D. Team 通信历史投影阶段 4 已落地（2026-08-14）</h2>
+  <p>
+    ask 的运行事实仍以 Team Bus 的 <code>TeamMessage</code> 与状态事件为准；用户可见历史复用既有
+    Team Kanban event 和 <code>event_history_for_session → team_internal_history_items</code> 投影链路，
+    不新增消息表、DAG 节点或产物实体。
+  </p>
+  <ul>
+    <li><b>请求事件：</b><code>team_communication/ask_request</code> 保存发起成员、目标、<code>request_id</code>、节点/任务关联和请求文本。</li>
+    <li><b>生命周期事件：</b><code>ask_lifecycle</code> 只保存 <code>waiting_reply/queued/delivered/cancelled/expired/failed</code> 等状态；历史投影按 <code>request_id</code> 回填请求气泡，不把中间状态渲染成多条聊天消息。</li>
+    <li><b>回答事件：</b><code>ask_answer</code> 复用原 answer 消息的 <code>reply_to</code> 和 <code>request_id</code>；请求与回答在历史中形成可恢复的两条协作消息。</li>
+    <li><b>前端显示：</b>Web/Desktop 共用字段 <code>communication_kind/communication_status</code>；请求气泡显示“等待回答/排队中/回答中/已回答/失败”等状态，回答正文单独展示。</li>
+    <li><b>边界：</b>ask 生命周期不会创建 TaskManager 任务、TeamPlan 节点、DAG revision 或 TeamArtifact；<code>assign</code> 的正式工作流链路保持不变。</li>
+  </ul>
+
   <h2>24. 后续 TODO 边界</h2>
   <p class="warn">以下是 2026-07-12 确认后的后续开发清单。当前阶段不引入 TeamManifest；Dynamic Kanban 五表边界成立，后续动态工作流继续复用现有存储，不另起一套 Workflow 表。</p>
   <table><thead><tr><th>优先级</th><th>方向</th><th>目标与边界</th></tr></thead><tbody>

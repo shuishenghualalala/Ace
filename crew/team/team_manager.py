@@ -2155,6 +2155,63 @@ class InProcessTeamManager(TeamManager):
         except Exception as exc:  # noqa: BLE001
             log.warning("Team 事件同步到 kanban store 失败 session=%s type=%s err=%s", session_id, event_type, exc)
 
+    def _record_team_communication_lifecycle(
+        self,
+        session_id: str,
+        owner_account_id: str,
+        event: dict[str, Any],
+    ) -> None:
+        """把 ask 的生命周期投影到既有 Team 内部历史。"""
+
+        result = dict(event.get("communication_result") or {})
+        request_message = dict(event.get("message") or {})
+        answer_message = dict(result.get("message") or {})
+        sender = str(event.get("from") or "agent").strip() or "agent"
+        targets = [
+            str(item or "").strip()
+            for item in list(event.get("expanded_to") or event.get("to") or [])
+            if str(item or "").strip()
+        ]
+        target = str(answer_message.get("sender_member_id") or (targets[0] if targets else "agent"))
+        status = str(event.get("communication_status") or result.get("status") or "").strip()
+        if not status:
+            return
+        answer_text = str(result.get("answer") or answer_message.get("content") or "").strip()
+        payload = {
+            "text": answer_text,
+            "agent_id": CREW_BUILTIN_AGENT_ID if is_crew_builtin_display_id(target) else target,
+            "agent_name": "Crew" if is_crew_builtin_display_id(target) else target,
+            "agent_role": "leader" if target == "leader" else "",
+            "source_session_id": f"{session_id}::{target}",
+            "is_leader": target == "leader",
+            "display_mode": "chat",
+            "event_type": "team_communication",
+            "node_id": str(event.get("node_id") or request_message.get("node_id") or ""),
+            "mention_from": target,
+            "mention_to": [sender],
+            "mention_intent": "answer",
+            "result_status": "pass" if status == "answered" else status,
+            "artifacts": [],
+            "message_id": str(answer_message.get("message_id") or ""),
+            "request_id": str(event.get("request_id") or request_message.get("request_id") or ""),
+            "reply_to": str(answer_message.get("reply_to") or request_message.get("message_id") or ""),
+            "task_id": str(event.get("task_id") or request_message.get("task_id") or ""),
+            "thread_id": str(event.get("thread_id") or request_message.get("thread_id") or ""),
+            "communication_status": status,
+            "communication_kind": "ask_answer" if answer_text else "ask_lifecycle",
+            "communication_request_text": str(
+                event.get("content") or event.get("text") or request_message.get("content") or ""
+            ).strip(),
+        }
+        self._record_team_event(
+            session_id,
+            owner_account_id=owner_account_id,
+            event_type="team_communication",
+            actor=payload["agent_id"],
+            node_id=payload["node_id"],
+            payload=payload,
+        )
+
     async def _handle_team_mention(
         self,
         session_id: str,
@@ -2187,6 +2244,7 @@ class InProcessTeamManager(TeamManager):
             "ack": "team_ack",
             "review": "team_review",
             "decision": "team_decision",
+            "ask": "team_communication",
         }.get(intent, "team_decision")
         raw_from = str(event.get("from") or "agent")
         display_agent_id = CREW_BUILTIN_AGENT_ID if is_crew_builtin_display_id(raw_from) else raw_from
@@ -2211,6 +2269,7 @@ class InProcessTeamManager(TeamManager):
             "task_id": str(event.get("task_id") or (event.get("message") or {}).get("task_id") or ""),
             "thread_id": str(event.get("thread_id") or (event.get("message") or {}).get("thread_id") or ""),
             "communication_status": str(event.get("communication_status") or ""),
+            "communication_kind": "ask_request" if intent == "ask" else "",
         }
         self._record_team_event(
             session_id,
@@ -2501,12 +2560,13 @@ class InProcessTeamManager(TeamManager):
             return []
         workflow_ids = self._team_workflow_ids_for_session(sid, owner_account_id)
         items: list[dict[str, Any]] = []
+        communication_status_by_request: dict[str, str] = {}
         for workflow_id in workflow_ids:
             try:
                 events = store.list_events(workflow_id, limit=500)
             except Exception:  # noqa: BLE001
                 continue
-            for event in events:
+            for event in sorted(events, key=lambda item: float(item.ts or 0)):
                 payload = dict(event.payload or {})
                 if event.event_type not in {
                     "team_assign",
@@ -2516,8 +2576,18 @@ class InProcessTeamManager(TeamManager):
                     "team_review",
                     "team_decision",
                     "team_summary",
+                    "team_communication",
                 }:
                     continue
+                if event.event_type == "team_communication":
+                    request_id = str(payload.get("request_id") or "").strip()
+                    communication_kind = str(payload.get("communication_kind") or "").strip()
+                    if request_id and communication_kind in {"ask_lifecycle", "ask_answer"}:
+                        communication_status_by_request[request_id] = str(
+                            payload.get("communication_status") or ""
+                        ).strip()
+                    if communication_kind == "ask_lifecycle":
+                        continue
                 text = str(payload.get("text") or "").strip()
                 if _is_team_chat_noise(text):
                     continue
@@ -2542,10 +2612,22 @@ class InProcessTeamManager(TeamManager):
                     "mention_from": str(payload.get("mention_from") or ""),
                     "mention_to": list(payload.get("mention_to") or []),
                     "mention_intent": str(payload.get("mention_intent") or ""),
+                    "request_id": str(payload.get("request_id") or ""),
+                    "reply_to": str(payload.get("reply_to") or ""),
+                    "communication_kind": str(payload.get("communication_kind") or ""),
+                    "communication_status": str(payload.get("communication_status") or ""),
                     "timestamp": float(event.ts or 0),
                     **({"turn_started_at": payload.get("turn_started_at")} if payload.get("turn_started_at") is not None else {}),
                     **({"turn_duration": payload.get("turn_duration")} if payload.get("turn_duration") is not None else {}),
                 })
+        for item in items:
+            request_id = str(item.get("request_id") or "").strip()
+            if (
+                request_id
+                and item.get("communication_kind") == "ask_request"
+                and request_id in communication_status_by_request
+            ):
+                item["communication_status"] = communication_status_by_request[request_id]
         items.sort(key=lambda item: float(item.get("timestamp") or 0))
         return items
 
@@ -7658,6 +7740,11 @@ class InProcessTeamManager(TeamManager):
             session_id=session_id,
             resolve_agent=lambda member: team_agents.get(member),
             owner_account_id=owner_account_id,
+            on_lifecycle=lambda event: self._record_team_communication_lifecycle(
+                session_id,
+                owner_account_id,
+                event,
+            ),
         )
         communication_router = TeamCommunicationRouter(
             bus=bus,

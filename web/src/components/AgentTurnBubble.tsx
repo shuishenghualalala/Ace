@@ -27,6 +27,7 @@ interface Props {
   processClassName?: string;
   collapsibleTitle?: string;
   afterContent?: ReactNode;
+  nameSuffix?: ReactNode;
   onApprovePlan?: () => void;
   onRejectPlan?: () => void;
   onRejectAndExitPlan?: () => void;
@@ -42,6 +43,7 @@ export default function AgentTurnBubble({
   processClassName = "",
   collapsibleTitle,
   afterContent,
+  nameSuffix,
   onApprovePlan,
   onRejectPlan,
   onRejectAndExitPlan,
@@ -116,6 +118,7 @@ export default function AgentTurnBubble({
         <div className={`msg__name${className.includes("team-internal") ? " team-internal__name" : ""}`}>
           {className.includes("team-internal") ? <strong>{identity.name}</strong> : identity.name}
           {identity.role && <em>{identity.role}</em>}
+          {nameSuffix}
         </div>
         {collapsibleTitle ? (
           <details className="team-internal__collapse">

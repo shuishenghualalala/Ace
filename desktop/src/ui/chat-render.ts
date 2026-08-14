@@ -116,6 +116,8 @@ export interface ChatMessage {
   mentionFrom?: string | undefined;
   mentionTo?: string[] | undefined;
   mentionIntent?: string | undefined;
+  communicationKind?: string | undefined;
+  communicationStatus?: string | undefined;
   displayMode?: string | undefined;
   collapsedTitle?: string | undefined;
   processText?: string | undefined;
@@ -1307,6 +1309,19 @@ function renderTeamArtifacts(artifacts: TeamArtifactCard[] | undefined): HTMLEle
 }
 
 /** Web TeamAgentTurnBubble 的 Desktop TypeScript DOM 等价实现。 */
+function teamCommunicationStatusLabel(status?: string): string {
+  return ({
+    published: '已发送',
+    waiting_reply: '等待回答',
+    queued: '排队中',
+    delivered: '回答中',
+    answered: '已回答',
+    failed: '回答失败',
+    expired: '已超时',
+    cancelled: '已取消',
+  } as Record<string, string>)[String(status || '').trim()] || '';
+}
+
 export function renderTeamInternalMessage(message: ChatMessage, isStreaming = false): HTMLElement {
   const isPlanning = message.eventType === 'team_planning_progress';
   const isCrew = String(message.agentId || '').trim() === CREW_BUILTIN_AGENT_ID;
@@ -1388,6 +1403,15 @@ export function renderTeamInternalMessage(message: ChatMessage, isStreaming = fa
       const em = document.createElement('em');
       em.textContent = role;
       nameEl.appendChild(em);
+    }
+    if (message.communicationKind === 'ask_request') {
+      const status = teamCommunicationStatusLabel(message.communicationStatus);
+      if (status) {
+        const badge = document.createElement('span');
+        badge.className = 'team-internal__communication-status';
+        badge.textContent = status;
+        nameEl.appendChild(badge);
+      }
     }
   }
 

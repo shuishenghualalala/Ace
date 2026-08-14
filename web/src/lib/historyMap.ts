@@ -20,6 +20,8 @@ export interface BackendHistoryItem {
   mention_from?: string;
   mention_to?: string[];
   mention_intent?: string;
+  communication_kind?: string;
+  communication_status?: string;
   display_mode?: string;
   collapsed_title?: string;
   process_text?: string;
@@ -108,6 +110,8 @@ export function mapHistoryItem(item: BackendHistoryItem): UiMessage {
     mentionFrom: item.mention_from,
     mentionTo: item.mention_to,
     mentionIntent: item.mention_intent,
+    communicationKind: item.communication_kind,
+    communicationStatus: item.communication_status,
     displayMode: item.display_mode,
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,
