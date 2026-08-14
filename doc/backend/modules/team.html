@@ -408,4 +408,13 @@ graph TD
   <li><b>下一阶段：</b>补充 per-agent 通信锁/队列、超时、取消、失败状态和环路检测，避免同一 Agent 并发执行多个通信回合。</li>
 </ul>
 
+<h2>147. 2026-08-14 Team Ask 并发与生命周期阶段三</h2>
+<ul>
+  <li><b>串行保护：</b>AskCoordinator 按目标成员维护通信锁，同一 Agent 的多个 ask 排队，避免并发进入同一个 <code>SingleAgent</code> 实例。</li>
+  <li><b>状态留痕：</b>TeamBus 新增消息状态更新事件，记录 <code>waiting_reply</code>、<code>queued</code>、<code>delivered</code>、<code>answered</code>、<code>failed</code>、<code>expired</code>、<code>cancelled</code>。</li>
+  <li><b>超时/失败：</b>排队和执行均有边界；过期请求返回结构化失败 answer，并保持 <code>reply_to</code> 关联，取消不会伪装成普通失败。</li>
+  <li><b>环路：</b>通信回合保留 <code>communication_path</code>，目标已存在于路径时拒绝继续 ask，避免模型互相唤醒形成无限循环。</li>
+  <li><b>验证：</b><code>tests/test_team_tasks.py</code> 203 passed / 1 skipped；覆盖单目标回答、同目标串行队列、超时过期和回复关联。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

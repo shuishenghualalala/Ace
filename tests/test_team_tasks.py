@@ -3396,6 +3396,93 @@ async def test_team_ask_runs_target_agent_and_publishes_reply():
     assert reply["recipient_member_ids"] == ["coder"]
 
 
+@pytest.mark.asyncio
+async def test_team_ask_serializes_same_target_and_records_queue_status():
+    class SlowAskProvider(RoleProvider):
+        async def chat(self, messages, tools=None):
+            last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+            if "这是一次团队内部通信回合" in last_user:
+                await asyncio.sleep(0.04)
+                return ChatResponse(text=f"已回答：{last_user.split('问题：', 1)[-1].splitlines()[0]}")
+            return await super().chat(messages, tools)
+
+    tm, _tasks = _team(provider=SlowAskProvider())
+    team = tm._build_team("communication_queue_s1")
+    coordinator = team.communication_router.ask_coordinator
+    assert coordinator is not None
+    coordinator.timeout_seconds = 1.0
+    member_token = current_agent_id.set("coder")
+    try:
+        first = asyncio.create_task(team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-ask-queue-1",
+                "team_mention",
+                {"to": ["leader"], "intent": "ask", "content": "问题一"},
+            )
+        ))
+        await asyncio.sleep(0.005)
+        second = asyncio.create_task(team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-ask-queue-2",
+                "team_mention",
+                {"to": ["leader"], "intent": "ask", "content": "问题二"},
+            )
+        ))
+        first_result, second_result = await asyncio.gather(first, second)
+    finally:
+        current_agent_id.reset(member_token)
+
+    assert not first_result.is_error
+    assert not second_result.is_error
+    assert json.loads(first_result.content)["result"]["status"] == "answered"
+    assert json.loads(second_result.content)["result"]["status"] == "answered"
+    messages = team.bus.list_messages("communication_queue_s1")
+    requests = [item for item in messages if item["message_type"] == "decision_request"]
+    assert len(requests) == 2
+    assert all(item["status"] == "answered" for item in requests)
+    assert any(
+        item["type"] == "message_status_changed" and item["status"] == "queued"
+        for item in team.bus.events("communication_queue_s1")
+    )
+
+
+@pytest.mark.asyncio
+async def test_team_ask_timeout_returns_expired_and_replies():
+    class TimeoutAskProvider(RoleProvider):
+        async def chat(self, messages, tools=None):
+            last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+            if "这是一次团队内部通信回合" in last_user:
+                await asyncio.sleep(0.05)
+                return ChatResponse(text="不会及时返回")
+            return await super().chat(messages, tools)
+
+    tm, _tasks = _team(provider=TimeoutAskProvider())
+    team = tm._build_team("communication_timeout_s1")
+    coordinator = team.communication_router.ask_coordinator
+    assert coordinator is not None
+    coordinator.timeout_seconds = 0.01
+    member_token = current_agent_id.set("coder")
+    try:
+        result = await team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-ask-timeout",
+                "team_mention",
+                {"to": ["leader"], "intent": "ask", "content": "请快速回答"},
+            )
+        )
+    finally:
+        current_agent_id.reset(member_token)
+
+    assert not result.is_error
+    payload = json.loads(result.content)["result"]
+    assert payload["status"] == "expired"
+    messages = team.bus.list_messages("communication_timeout_s1")
+    request = next(item for item in messages if item["message_type"] == "decision_request")
+    reply = next(item for item in messages if item["message_type"] == "answer")
+    assert request["status"] == "expired"
+    assert reply["reply_to"] == request["message_id"]
+
+
 async def test_external_team_mention_propagates_current_active_skill(monkeypatch):
     tm, _tasks = _team()
     tm._get_or_create("external_skill_team")

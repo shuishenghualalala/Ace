@@ -7,6 +7,7 @@ Team Bus，并调用现有的 TeamManager 回调。它不启动 Agent、不创�
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
@@ -88,13 +89,19 @@ class TeamCommunicationRouter:
         if not targets:
             raise ValueError("to 不能为空，且必须是 leader、user、all 或团队成员")
         event["to"] = targets
+        intent = str(event.get("intent") or "broadcast").strip()
+        if intent == "ask" and self.ask_coordinator is not None:
+            inherited_path = self.ask_coordinator.active_path_for(
+                str(event.get("from") or "").strip()
+            )
+            if inherited_path and not event.get("communication_path"):
+                event["communication_path"] = inherited_path
         expanded = list(
             expanded_targets
             if expanded_targets is not None
             else expand_mention_targets(targets, member_names=self.member_names)
         )
         event["expanded_to"] = expanded
-        intent = str(event.get("intent") or "broadcast").strip()
         event.setdefault("message", None)
 
         if intent in {"ask", "review"} and not str(event.get("request_id") or "").strip():
@@ -117,6 +124,8 @@ class TeamCommunicationRouter:
                 requires_ack=intent in {"ask", "review"},
                 priority=int(event.get("priority") or 0),
             )
+            if intent == "ask":
+                self.bus.update_status(message.message_id, "waiting_reply")
             event["message"] = message.to_dict()
             event["communication_status"] = "published"
         elif intent == "assign":
@@ -149,12 +158,19 @@ class TeamAskCoordinator:
         resolve_agent: Callable[[str], Any | None],
         owner_account_id: str = "",
         on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
+        timeout_seconds: float = 30.0,
     ) -> None:
         self.bus = bus
         self.session_id = session_id
         self.resolve_agent = resolve_agent
         self.owner_account_id = owner_account_id
         self.on_chunk = on_chunk
+        self.timeout_seconds = max(0.1, float(timeout_seconds))
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._active_paths: dict[str, tuple[str, ...]] = {}
+
+    def active_path_for(self, member_id: str) -> list[str]:
+        return list(self._active_paths.get(str(member_id or "").strip(), ()))
 
     async def answer(self, event: dict[str, Any]) -> dict[str, Any]:
         targets = [
@@ -171,6 +187,25 @@ class TeamAskCoordinator:
         request_message_id = str(request_message.get("message_id") or "").strip()
         if not request_id or not request_message_id:
             raise ValueError("ask 请求缺少 request_id 或 message_id")
+
+        path = [
+            str(item or "").strip()
+            for item in list(event.get("communication_path") or [])
+            if str(item or "").strip()
+        ]
+        if sender not in path:
+            path.append(sender)
+        if target in path:
+            return self._publish_failure(
+                event,
+                target=target,
+                sender=sender,
+                request_id=request_id,
+                request_message_id=request_message_id,
+                reason=f"检测到 Team 通信环路：{' → '.join([*path, target])}",
+                status="failed",
+            )
+        event["communication_path"] = [*path, target]
 
         agent = self.resolve_agent(target)
         if agent is None:
@@ -215,58 +250,106 @@ class TeamAskCoordinator:
                 "reply_to": request_message_id,
                 "team_node_id": node_id,
                 "task_id": task_id,
+                "communication_path": [*path, target],
                 "workspace_instructions": (
                     "当前是只读的 Team ask 回答回合。只回答发起成员的问题，"
                     "不要把它当作新的 DAG 节点或正式任务。"
                 ),
             },
         )
-        final_text = ""
-        delta_text: list[str] = []
-        error_text = ""
-        async for chunk in agent.run(envelope):
-            if self.on_chunk is not None:
-                maybe = self.on_chunk(target, chunk)
-                if inspect.isawaitable(maybe):
-                    await cast(Awaitable[Any], maybe)
-            if chunk.kind == "delta":
-                delta_text.append(str(chunk.body.get("text") or ""))
-            elif chunk.kind == "final":
-                final_text = str(chunk.body.get("text") or "").strip()
-            elif chunk.kind == "error":
-                error_text = str(chunk.body.get("message") or "目标成员回答失败").strip()
-
-        answer_text = final_text or "".join(delta_text).strip()
-        if error_text or not answer_text:
+        lock = self._locks.setdefault(target, asyncio.Lock())
+        queued = lock.locked()
+        if queued:
+            event["communication_status"] = "queued"
+            self.bus.update_status(request_message_id, "queued")
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=self.timeout_seconds)
+        except TimeoutError:
             return self._publish_failure(
                 event,
                 target=target,
                 sender=sender,
                 request_id=request_id,
                 request_message_id=request_message_id,
-                reason=error_text or "目标成员未返回有效回答",
+                reason=f"等待 {target} 的通信回合超时",
+                status="expired",
             )
 
-        answer_message = self.bus.send(
-            team_session_id=self.session_id,
-            sender_member_id=target,
-            recipient_member_ids=[sender],
-            content=answer_text,
-            message_type="answer",
-            intent="answer",
-            request_id=request_id,
-            node_id=node_id,
-            task_id=task_id,
-            thread_id=str(event.get("thread_id") or node_id or task_id),
-            reply_to=request_message_id,
-        )
-        return {
-            "status": "answered",
-            "request_id": request_id,
-            "answer": answer_text,
-            "reply_to": request_message_id,
-            "message": answer_message.to_dict(),
-        }
+        try:
+            event["communication_status"] = "delivered"
+            self.bus.update_status(request_message_id, "delivered")
+            self._active_paths[target] = tuple(event["communication_path"])
+            final_text = ""
+            delta_text: list[str] = []
+            error_text = ""
+
+            async def _run() -> None:
+                nonlocal final_text, error_text
+                async for chunk in agent.run(envelope):
+                    if self.on_chunk is not None:
+                        maybe = self.on_chunk(target, chunk)
+                        if inspect.isawaitable(maybe):
+                            await cast(Awaitable[Any], maybe)
+                    if chunk.kind == "delta":
+                        delta_text.append(str(chunk.body.get("text") or ""))
+                    elif chunk.kind == "final":
+                        final_text = str(chunk.body.get("text") or "").strip()
+                    elif chunk.kind == "error":
+                        error_text = str(chunk.body.get("message") or "目标成员回答失败").strip()
+
+            try:
+                await asyncio.wait_for(_run(), timeout=self.timeout_seconds)
+            except TimeoutError:
+                return self._publish_failure(
+                    event,
+                    target=target,
+                    sender=sender,
+                    request_id=request_id,
+                    request_message_id=request_message_id,
+                    reason=f"{target} 的通信回合执行超时",
+                    status="expired",
+                )
+            except asyncio.CancelledError:
+                self.bus.update_status(request_message_id, "cancelled")
+                raise
+
+            answer_text = final_text or "".join(delta_text).strip()
+            if error_text or not answer_text:
+                return self._publish_failure(
+                    event,
+                    target=target,
+                    sender=sender,
+                    request_id=request_id,
+                    request_message_id=request_message_id,
+                    reason=error_text or "目标成员未返回有效回答",
+                    status="failed",
+                )
+
+            answer_message = self.bus.send(
+                team_session_id=self.session_id,
+                sender_member_id=target,
+                recipient_member_ids=[sender],
+                content=answer_text,
+                message_type="answer",
+                intent="answer",
+                request_id=request_id,
+                node_id=node_id,
+                task_id=task_id,
+                thread_id=str(event.get("thread_id") or node_id or task_id),
+                reply_to=request_message_id,
+            )
+            self.bus.update_status(request_message_id, "answered")
+            return {
+                "status": "answered",
+                "request_id": request_id,
+                "answer": answer_text,
+                "reply_to": request_message_id,
+                "message": answer_message.to_dict(),
+            }
+        finally:
+            if self._active_paths.get(target) == tuple(event.get("communication_path") or ()):
+                self._active_paths.pop(target, None)
+            lock.release()
 
     def _publish_failure(
         self,
@@ -277,7 +360,9 @@ class TeamAskCoordinator:
         request_id: str,
         request_message_id: str,
         reason: str,
+        status: str = "failed",
     ) -> dict[str, Any]:
+        self.bus.update_status(request_message_id, status)
         answer_message = self.bus.send(
             team_session_id=self.session_id,
             sender_member_id=target,
@@ -291,7 +376,7 @@ class TeamAskCoordinator:
             reply_to=request_message_id,
         )
         return {
-            "status": "failed",
+            "status": status,
             "request_id": request_id,
             "answer": reason,
             "reply_to": request_message_id,

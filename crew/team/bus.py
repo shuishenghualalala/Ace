@@ -111,6 +111,26 @@ class TeamBus:
                 if msg.team_session_id == team_session_id
             ]
 
+    def update_status(self, message_id: str, status: str) -> TeamMessage:
+        """更新消息生命周期状态并留下可观测事件。"""
+
+        normalized = str(status or "").strip()
+        if not normalized:
+            raise ValueError("消息状态不能为空")
+        with self._lock:
+            message = self._messages.get(str(message_id or "").strip())
+            if message is None:
+                raise KeyError(f"未知 TeamMessage: {message_id}")
+            previous = message.status
+            message.status = normalized
+            self._events.setdefault(message.team_session_id, []).append({
+                "type": "message_status_changed",
+                "message_id": message.message_id,
+                "previous_status": previous,
+                "status": normalized,
+            })
+            return message
+
     def events(self, team_session_id: str) -> list[dict[str, Any]]:
         with self._lock:
             return list(self._events.get(team_session_id, []))

@@ -742,6 +742,15 @@ flowchart LR
     <li><b>未完成边界：</b>本阶段暂不处理同一 Agent 并发 ask 的排队、超时、取消和环路限制，统一放入下一阶段。</li>
   </ul>
 
+  <h2>23C. Team 通信重构：阶段 3 已落地（2026-08-14）</h2>
+  <ul>
+    <li><b>单 Agent 串行：</b>AskCoordinator 按目标成员维护通信锁，同一目标的多个 ask 不会并发调用同一个 <code>SingleAgent</code>。</li>
+    <li><b>生命周期：</b>请求消息会经历 <code>waiting_reply → queued/delivered → answered/failed/expired/cancelled</code>，状态变化由 TeamBus 事件记录。</li>
+    <li><b>超时与取消：</b>排队等待和目标 Agent 通信回合均受超时约束；超时写入 <code>expired</code> 并发布带 <code>reply_to</code> 的失败 answer，取消则标记 <code>cancelled</code> 后保留取消语义。</li>
+    <li><b>环路保护：</b>通信回合携带 <code>communication_path</code>，检测到目标已在路径中时拒绝继续转发，避免 Team Agent 之间形成无限 ask 链。</li>
+    <li><b>数据边界：</b>仍不新增数据库表或 DAG 节点；状态和生命周期复用 TeamMessage 与 TeamBus events，第三阶段未改变正式任务执行链。</li>
+  </ul>
+
   <h2>24. 后续 TODO 边界</h2>
   <p class="warn">以下是 2026-07-12 确认后的后续开发清单。当前阶段不引入 TeamManifest；Dynamic Kanban 五表边界成立，后续动态工作流继续复用现有存储，不另起一套 Workflow 表。</p>
   <table><thead><tr><th>优先级</th><th>方向</th><th>目标与边界</th></tr></thead><tbody>
