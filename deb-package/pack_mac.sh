@@ -1,15 +1,17 @@
 #!/bin/bash
 # =============================================================================
-# Crew macOS (Apple Silicon) DMG 打包脚本
+# Crew macOS DMG 打包脚本
 # -----------------------------------------------------------------------------
-# 产物：crew-desktop_${VERSION}_arm64.dmg
+# 产物：crew-desktop_${VERSION}_${ARCH}.dmg（ARCH = arm64 / x64）
 # 组成：crew-desktop.app（Electron）+ Contents/Resources/crew-gateway（PyInstaller）
 #       + _internal/runtimes（内嵌 Python standalone + Node.js portable）
 #       + ace-security-runtime（macOS Seatbelt 安全运行组件）
-# 运行环境：macOS arm64 主机（PyInstaller / Electron 均不可交叉构建 Mac 二进制）
+# 运行环境：macOS 主机，目标架构必须与主机架构一致
+# （PyInstaller / Electron 均不可交叉构建 Mac 二进制）
 # 用法：
-#   ./deb-package/pack_mac.sh            # 版本号取 deb-package/version.txt
-#   ./deb-package/pack_mac.sh 0.29.0     # 显式指定版本号
+#   ./deb-package/pack_mac.sh                    # 版本取 version.txt，架构取本机
+#   ./deb-package/pack_mac.sh 0.29.0             # 显式指定版本号
+#   ./deb-package/pack_mac.sh 0.29.0 arm64       # 显式指定架构（arm64/x64）
 # =============================================================================
 set -euo pipefail
 
@@ -19,18 +21,43 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 VERSION="${1:-$(tr -d '[:space:]' < "$SCRIPT_DIR/version.txt")}"
-DMG_NAME="crew-desktop_${VERSION}_arm64.dmg"
+ARCH="${2:-$(uname -m)}"
+case "$ARCH" in
+    arm64 | aarch64)
+        ARCH="arm64"
+        ELECTRON_ARCH="--arm64"
+        PYTHON_ARCH="aarch64-apple-darwin"
+        NODE_ARCH="darwin-arm64"
+        ;;
+    x86_64 | amd64)
+        ARCH="x64"
+        ELECTRON_ARCH="--x64"
+        PYTHON_ARCH="x86_64-apple-darwin"
+        NODE_ARCH="darwin-x64"
+        ;;
+    *)
+        echo "❌ 不支持的架构: $ARCH（仅支持 arm64/x64）" >&2
+        exit 1
+        ;;
+esac
+DMG_NAME="crew-desktop_${VERSION}_${ARCH}.dmg"
 BUNDLED_PYTHON_VERSION="3.11.9"
 BUNDLED_NODE_VERSION="20.18.3"
 
-if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
-    echo "❌ 本脚本必须在 macOS arm64 (Apple Silicon) 主机上运行" >&2
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    arm64 | aarch64) HOST_ARCH="arm64" ;;
+    x86_64 | amd64) HOST_ARCH="x64" ;;
+esac
+if [ "$(uname -s)" != "Darwin" ] || [ "$HOST_ARCH" != "$ARCH" ]; then
+    echo "❌ 本脚本必须在 macOS ${ARCH} 主机上运行（当前主机为 ${HOST_ARCH}）" >&2
     exit 1
 fi
 
 echo "==========================================="
 echo " Crew macOS 安装包构建"
 echo " 版本: $VERSION"
+echo " 架构: $ARCH"
 echo " 产物: $DMG_NAME"
 echo "==========================================="
 
@@ -66,19 +93,13 @@ command -v npm  >/dev/null || { echo "❌ 未找到 npm" >&2; exit 1; }
 command -v cargo >/dev/null || { echo "❌ 未找到 cargo，请先安装 Rust stable 工具链" >&2; exit 1; }
 command -v hdiutil >/dev/null || { echo "❌ 未找到 hdiutil（应为 macOS 自带）" >&2; exit 1; }
 
-# ----- 1) web 前端构建（gateway 内嵌管理台静态资源） -----
+# ----- 1) PyInstaller 打包 crew-gateway -----
 echo ""
-echo "→ [1/7] 构建 web 前端..."
-(cd web && npm install --no-audit --no-fund && npm run build)
-
-# ----- 2) PyInstaller 打包 crew-gateway -----
-echo ""
-echo "→ [2/7] PyInstaller 打包 crew-gateway..."
+echo "→ [1/6] PyInstaller 打包 crew-gateway..."
 venv_pip_install --no-deps .
 rm -rf dist build
 .venv/bin/pyinstaller --name crew-gateway \
     --onedir --noconfirm --clean \
-    --add-data "web/dist:web/dist" \
     --add-data "config:config" \
     --add-data "crew/skills:crew/skills" \
     --add-data "crew/scenarios:crew/scenarios" \
@@ -104,16 +125,16 @@ cp config/.env.example dist/crew-gateway/config/.env.example
 cp config/config.yaml.example dist/crew-gateway/config/config.yaml.example
 echo "✓ crew-gateway 打包完成"
 
-# ----- 3) 内嵌运行时（Python standalone + Node.js portable） -----
+# ----- 2) 内嵌运行时（Python standalone + Node.js portable） -----
 echo ""
-echo "→ [3/7] 下载内嵌运行时..."
+echo "→ [2/6] 下载内嵌运行时..."
 RUNTIMES="dist/crew-gateway/_internal/runtimes"
 mkdir -p "$RUNTIMES/python" "$RUNTIMES/node"
 
 # 代理/网络抖动环境下 HTTP2 易断（curl 16/SSL EOF），统一走 HTTP1.1 + 全错误重试
 CURL_OPTS=(-fsSL --http1.1 --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20)
 
-PYTHON_REL="indygreg/python-build-standalone/releases/download/20240415/cpython-${BUNDLED_PYTHON_VERSION}+20240415-aarch64-apple-darwin-install_only.tar.gz"
+PYTHON_REL="indygreg/python-build-standalone/releases/download/20240415/cpython-${BUNDLED_PYTHON_VERSION}+20240415-${PYTHON_ARCH}-install_only.tar.gz"
 curl "${CURL_OPTS[@]}" "https://github.com/${PYTHON_REL}" -o /tmp/crew-python.tar.gz
 tar -xzf /tmp/crew-python.tar.gz -C "$RUNTIMES/python" --strip-components=1
 rm /tmp/crew-python.tar.gz
@@ -127,7 +148,7 @@ ln -sf python3 "$RUNTIMES/python/bin/python"
 "$RUNTIMES/python/bin/python3" -c "from mcp.server.fastmcp import FastMCP; print('✓ mcp.server.fastmcp importable')"
 
 curl "${CURL_OPTS[@]}" \
-    "https://npmmirror.com/mirrors/node/v${BUNDLED_NODE_VERSION}/node-v${BUNDLED_NODE_VERSION}-darwin-arm64.tar.gz" \
+    "https://npmmirror.com/mirrors/node/v${BUNDLED_NODE_VERSION}/node-v${BUNDLED_NODE_VERSION}-${NODE_ARCH}.tar.gz" \
     -o /tmp/crew-node.tar.gz
 tar -xzf /tmp/crew-node.tar.gz -C "$RUNTIMES/node" --strip-components=1
 rm /tmp/crew-node.tar.gz
@@ -135,9 +156,9 @@ rm /tmp/crew-node.tar.gz
 chmod -R 755 "$RUNTIMES"
 echo "✓ 内嵌运行时就绪（Python ${BUNDLED_PYTHON_VERSION} + Node v${BUNDLED_NODE_VERSION}）"
 
-# ----- 4) macOS 原生安全运行组件 -----
+# ----- 3) macOS 原生安全运行组件 -----
 echo ""
-echo "→ [4/7] 构建并校验 macOS 安全运行组件..."
+echo "→ [3/6] 构建并校验 macOS 安全运行组件..."
 cargo build --manifest-path security-runtime/Cargo.toml --release --locked
 node desktop/scripts/prepare-security-runtime.mjs \
     --runtime security-runtime/target/release/ace-security-runtime \
@@ -145,18 +166,18 @@ node desktop/scripts/prepare-security-runtime.mjs \
 node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
 echo "✓ macOS Seatbelt 安全运行组件已就绪"
 
-# ----- 5) Electron 桌面端构建（mac dir target） -----
+# ----- 4) Electron 桌面端构建（mac dir target） -----
 echo ""
-echo "→ [5/7] 构建 crew-desktop Electron 客户端..."
+echo "→ [4/6] 构建 crew-desktop Electron 客户端..."
 # Electron / electron-builder 二进制统一走 npmmirror（GitHub 直连在代理环境下易超时，与 Dockerfile.pack 同源）
 export ELECTRON_MIRROR="${ELECTRON_MIRROR:-https://npmmirror.com/mirrors/electron/}"
 export ELECTRON_BUILDER_BINARIES_MIRROR="${ELECTRON_BUILDER_BINARIES_MIRROR:-https://npmmirror.com/mirrors/electron-builder-binaries/}"
 (cd desktop && npm ci --no-audit --no-fund)
 
 # 注入版本号与平台标识（须在 npm ci 之后，避免被 lockfile 校验覆盖）
-node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('desktop/package.json','utf8'));p.version='${VERSION}';p.platform='macOS arm64';fs.writeFileSync('desktop/package.json',JSON.stringify(p,null,2)+'\n');"
+node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('desktop/package.json','utf8'));p.version='${VERSION}';p.platform='macOS ${ARCH}';fs.writeFileSync('desktop/package.json',JSON.stringify(p,null,2)+'\n');"
 
-(cd desktop && npm run build && npx electron-builder --mac --arm64 --config electron-builder.yml)
+(cd desktop && npm run build && npx electron-builder --mac "$ELECTRON_ARCH" --config electron-builder.yml)
 
 APP_PATH="$(find desktop/release -maxdepth 2 -name 'crew-desktop.app' -print -quit)"
 if [ -z "$APP_PATH" ]; then
@@ -165,18 +186,18 @@ if [ -z "$APP_PATH" ]; then
 fi
 echo "✓ Electron 客户端: $APP_PATH"
 
-# ----- 6) 组装 .app：gateway 放进 Contents/Resources/crew-gateway -----
+# ----- 5) 组装 .app：gateway 放进 Contents/Resources/crew-gateway -----
 # desktop 主进程约定路径：path.join(process.resourcesPath, 'crew-gateway', 'crew-gateway')
 echo ""
-echo "→ [6/7] 组装 .app..."
+echo "→ [5/6] 组装 .app..."
 rm -rf "$APP_PATH/Contents/Resources/crew-gateway"
 cp -R dist/crew-gateway "$APP_PATH/Contents/Resources/crew-gateway"
 chmod -R 755 "$APP_PATH/Contents/Resources/crew-gateway"
 echo "✓ gateway 已嵌入 $APP_PATH/Contents/Resources/crew-gateway"
 
-# ----- 7) 生成 DMG -----
+# ----- 6) 生成 DMG -----
 echo ""
-echo "→ [7/7] 生成 DMG..."
+echo "→ [6/6] 生成 DMG..."
 STAGE="$(mktemp -d /tmp/crew-dmg-stage.XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -R "$APP_PATH" "$STAGE/crew-desktop.app"

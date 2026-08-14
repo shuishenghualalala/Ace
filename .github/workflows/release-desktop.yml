@@ -1,0 +1,232 @@
+name: release-desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要打包的 Git tag（例如 v1.1.0）
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-desktop-${{ github.event_name == 'push' && github.ref || github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  mac-arm64:
+    name: macOS arm64 DMG
+    runs-on: macos-15
+    timeout-minutes: 180
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${TAG_INPUT#v}"
+            if [ -z "$VERSION" ]; then
+              echo "手动触发时必须填写 tag（例如 v1.1.0）" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag || '' }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Prepare Python environment
+        run: uv sync --extra dev
+      - name: Build DMG
+        run: ./deb-package/pack_mac.sh "${{ steps.version.outputs.version }}" arm64
+      - name: Stage release assets
+        run: |
+          mkdir -p release-output
+          mv "crew-desktop_${{ steps.version.outputs.version }}_arm64.dmg" release-output/
+          mv package-size-report-mac.txt release-output/package-size-report-mac-arm64.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-mac-arm64
+          path: release-output/*
+
+  mac-x64:
+    name: macOS x64 DMG
+    runs-on: macos-15-intel
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${TAG_INPUT#v}"
+            if [ -z "$VERSION" ]; then
+              echo "手动触发时必须填写 tag（例如 v1.1.0）" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag || '' }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Prepare Python environment
+        run: uv sync --extra dev
+      - name: Build DMG
+        run: ./deb-package/pack_mac.sh "${{ steps.version.outputs.version }}" x64
+      - name: Stage release assets
+        run: |
+          mkdir -p release-output
+          mv "crew-desktop_${{ steps.version.outputs.version }}_x64.dmg" release-output/
+          mv package-size-report-mac.txt release-output/package-size-report-mac-x64.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-mac-x64
+          path: release-output/*
+
+  linux:
+    name: Linux UOS + Kylin deb
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${TAG_INPUT#v}"
+            if [ -z "$VERSION" ]; then
+              echo "手动触发时必须填写 tag（例如 v1.1.0）" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag || '' }}
+      - name: Build UOS and Kylin packages
+        shell: bash
+        run: pwsh ./deb-package/pack_deb.ps1 -Version "$VERSION"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+      - name: Stage release assets
+        run: |
+          mkdir -p release-output
+          mv "crew-desktop_${{ steps.version.outputs.version }}_uos_amd64.deb" release-output/
+          mv "crew-desktop_${{ steps.version.outputs.version }}_kylin_amd64.deb" release-output/
+          mv package-size-report-uos.txt release-output/
+          mv package-size-report-kylin.txt release-output/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: release-output/*
+
+  windows:
+    name: Windows x64 installer
+    runs-on: windows-2025
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${TAG_INPUT#v}"
+            if [ -z "$VERSION" ]; then
+              echo "手动触发时必须填写 tag（例如 v1.1.0）" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag || '' }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress --yes
+      - name: Build Windows installer
+        shell: pwsh
+        run: ./deb-package/pack_exe.ps1 -Version "$env:VERSION"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-output | Out-Null
+          Copy-Item "dist\installer\Crew_Setup_v$env:VERSION.exe" release-output\
+          Copy-Item "dist\package-size-report-windows.txt" release-output\
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: release-output/*
+
+  release:
+    name: Publish GitHub release
+    needs: [mac-arm64, mac-x64, linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ needs.mac-arm64.outputs.version }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --generate-notes
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber

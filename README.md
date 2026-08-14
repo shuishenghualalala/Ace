@@ -36,8 +36,8 @@ Wiki 里存着上周的会议纪要和个人笔记，Agent 随取随用，再也
 
 > [!NOTE]
 > **发布状态：源码预览版。** 接口和数据格式不承诺稳定，暂不建议直接扛关键生产环境。
-> 目前只以 Git 源码检出方式交付，还没有 PyPI/wheel 或正式安装器——`pyproject.toml`
-> 的构建产物并不是包含桌面端与 Web 端的完整发行包，别被它骗了。
+> 桌面端安装包通过 GitHub Release 发布（macOS arm64/x64 DMG、Linux UOS/Kylin deb、
+> Windows 安装器），当前未做代码签名与公证；`pyproject.toml` 的构建产物不是完整发行包。
 
 ## 📖 目录
 
@@ -348,7 +348,11 @@ Runtime/Agent/Team、浏览器、动态看板、场景、安全审批/规则/审
 
 ## 📦 构建桌面发行包（可选）
 
-当前仓库提供本地构建脚本，但不发布预编译安装包，也不包含代码签名、公证和自动更新服务。
+当前仓库提供本地构建脚本，并可通过 GitHub Actions 的 `release-desktop` 工作流在推送
+`v*` tag 时自动构建 macOS（arm64/x64）、Linux（UOS/Kylin）和 Windows 安装包并上传到
+GitHub Release；也可以在 Actions 页面手动选择已有 tag 构建。产物未做代码签名、公证和
+自动更新服务。完整发布说明见 [release-packaging](docs/deploy/release-packaging.html)。
+
 构建过程会下载 Electron、Python、Node.js 等运行时，可能占用数 GB 磁盘空间——动手前先看看硬盘余量。
 
 ### Electron 裸目录
