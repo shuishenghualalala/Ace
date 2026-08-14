@@ -206,7 +206,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release-output | Out-Null
-          Copy-Item "dist\installer\Crew_Setup_v$env:VERSION.exe" release-output\
+          Copy-Item "dist\Crew_Setup_v$env:VERSION.exe" release-output\
           Copy-Item "dist\package-size-report-windows.txt" release-output\
         env:
           VERSION: ${{ steps.version.outputs.version }}
