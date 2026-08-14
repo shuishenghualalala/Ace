@@ -57,7 +57,7 @@ Write-Host " 版本: $Version" -ForegroundColor Cyan
 Write-Host "===========================================" -ForegroundColor Cyan
 
 # -----------------------------------------------------------------------------
-# 1-4 步与之前相同：构建环境准备与前后端编译
+# 1-4 步与之前相同：构建环境准备与桌面端编译
 # -----------------------------------------------------------------------------
 if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
     Write-Host "正在创建 uv 虚拟环境..." -ForegroundColor Yellow
@@ -69,13 +69,6 @@ if (-not (Test-Path ".\.venv\Scripts\pyinstaller.exe")) {
     uv pip install -e ".[dev]"
     uv pip install pyinstaller
 }
-
-Write-Host "正在构建 Web 前端..." -ForegroundColor Yellow
-Push-Location web
-try {
-    if (-not (Test-Path "node_modules")) { npm install --no-audit --no-fund }
-    npm run build
-} finally { Pop-Location }
 
 Write-Host "正在构建 Electron 桌面端..." -ForegroundColor Yellow
 Push-Location desktop
@@ -135,7 +128,6 @@ if (-not (Test-Path (Join-Path $packConfigDir "config.yaml.example"))) {
 $pyinstallerArgs = @(
     "--name", "crew-gateway",
     "--onedir",
-    "--add-data", "web\dist;web\dist",
     "--add-data", "$packConfigDir;config",
     "--add-data", "crew\skills;crew\skills",
     "--add-data", "crew\scenarios;crew\scenarios",

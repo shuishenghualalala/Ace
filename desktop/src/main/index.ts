@@ -126,6 +126,12 @@ import {
   verifyPackageIntegrity,
   verifyPackageSignature,
 } from './update/update-integrity';
+import {
+  GITHUB_REPO,
+  githubReleasesPageUrl,
+  resolveGithubReleaseDownloadUrl,
+  resolveGithubReleaseTarget,
+} from './update/github-release';
 import { evaluateVersionUpdate } from './version-compare';
 import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
@@ -2857,6 +2863,25 @@ function registerIpc() {
   trustedHandle('update:install-package', async () => installDownloadedUpdate());
 
   trustedHandle('update:get-state', (): UpdateStateSnapshot => readUpdateState());
+
+  // 打开 GitHub Releases 当前系统对应的安装包下载页。查询失败 / 无匹配资产时回退到 releases 列表页。
+  trustedHandle('release:open-latest-download', async () => {
+    const fallback = { ok: false, url: githubReleasesPageUrl() };
+    try {
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Crew-Desktop' },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return fallback;
+      const release = (await res.json()) as { assets?: Array<{ name: string; browser_download_url: string }> };
+      const assets = release.assets ?? [];
+      const target = resolveGithubReleaseTarget();
+      const url = resolveGithubReleaseDownloadUrl(assets, target) ?? githubReleasesPageUrl();
+      return { ok: true, url };
+    } catch {
+      return fallback;
+    }
+  });
 
   trustedHandle('feedback:submit', async (_e, raw: unknown) => {
     const args = parseOrThrow(FeedbackSubmitArgs.parse(raw), 'feedback:submit');
