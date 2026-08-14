@@ -318,7 +318,7 @@ RUN ln -sf /opt/crew-gateway/crew-gateway usr/bin/crew-gateway
 
 # ----- 6) 核心：启动包装脚本 (crew-desktop) -----
 # 在打包阶段直接生成，负责：初始化用户目录 -> 启动 UI（UI 内部 spawn gateway）
-RUN cat > usr/bin/crew-desktop << 'WRAPPER_EOF'
+RUN cat > usr/bin/crew-desktop <<"WRAPPER_EOF"
 #!/bin/sh
 set -e
 
@@ -349,7 +349,7 @@ Description: Crew - 多智能体平台（网关服务与桌面客户端）\n 本
 
 # ----- 8) 安装后脚本 (postinst) -----
 # 负责：清理旧版 systemd 自启 → 刷新桌面缓存 → 为已登录用户创建快捷方式
-RUN cat << 'POSTINST_EOF' > DEBIAN/postinst
+RUN cat <<"POSTINST_EOF" > DEBIAN/postinst
 #!/bin/sh
 set -e
 
@@ -433,7 +433,7 @@ RUN sed -i -e 's/\r$//' -e "s/@@BUILD_VERSION@@/${BUILD_VERSION}/g" DEBIAN/posti
     && chmod 755 DEBIAN/postinst
 
 # ----- 9) 卸载前脚本 (prerm) -----
-RUN cat << 'PRERM_EOF' > DEBIAN/prerm
+RUN cat <<"PRERM_EOF" > DEBIAN/prerm
 #!/bin/sh
 set -e
 
