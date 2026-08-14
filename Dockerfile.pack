@@ -118,9 +118,8 @@ RUN mkdir -p dist/crew-gateway/config \
 # -----------------------------------------------------------------------------
 # Native security runtime and bundled bubblewrap are build-time artifacts.
 # -----------------------------------------------------------------------------
-FROM docker.m.daocloud.io/library/rust:1.85-slim-buster AS security-runtime-builder
-RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list \
-    && apt-get update -o Acquire::Check-Valid-Until=false \
+FROM docker.m.daocloud.io/library/rust:1.85-slim-bookworm AS security-runtime-builder
+RUN apt-get update -o Acquire::Check-Valid-Until=false \
     && apt-get install -y --no-install-recommends bubblewrap ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /security-runtime

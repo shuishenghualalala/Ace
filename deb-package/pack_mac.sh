@@ -29,14 +29,14 @@ case "$ARCH" in
         PYTHON_ARCH="aarch64-apple-darwin"
         NODE_ARCH="darwin-arm64"
         ;;
-    x86_64 | amd64)
+    x64 | x86_64 | amd64)
         ARCH="x64"
         ELECTRON_ARCH="--x64"
         PYTHON_ARCH="x86_64-apple-darwin"
         NODE_ARCH="darwin-x64"
         ;;
     *)
-        echo "❌ 不支持的架构: $ARCH（仅支持 arm64/x64）" >&2
+        echo "❌ 不支持的架构: ${ARCH}（仅支持 arm64/x64）" >&2
         exit 1
         ;;
 esac
