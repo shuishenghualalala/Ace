@@ -57,6 +57,7 @@ from crew.team import result_presenter as team_presenter
 from crew.team.bus import TeamBus, register_team_bus_tools
 from crew.team.agent_profile import build_agent_profile, evaluate_capability_coverage
 from crew.team.capabilities import normalize_capabilities
+from crew.team.communication import TeamCommunicationRouter
 from crew.team.delegate_tool import (
     TEAM_RESULT_STATUSES,
     register_delegate_tool,
@@ -160,6 +161,7 @@ class Team:
     leader_spec: TeamMemberSpec
     members: dict[str, TeamMemberSpec]
     bus: TeamBus
+    communication_router: TeamCommunicationRouter
     external_team_id: str = ""
     runtime_members: dict[str, TeamMemberSpec] = field(default_factory=dict)
 
@@ -2203,6 +2205,12 @@ class InProcessTeamManager(TeamManager):
             "mention_intent": intent,
             "result_status": result_status,
             "artifacts": list(event.get("artifacts") or []),
+            "message_id": str((event.get("message") or {}).get("message_id") or ""),
+            "request_id": str(event.get("request_id") or (event.get("message") or {}).get("request_id") or ""),
+            "reply_to": str((event.get("message") or {}).get("reply_to") or ""),
+            "task_id": str(event.get("task_id") or (event.get("message") or {}).get("task_id") or ""),
+            "thread_id": str(event.get("thread_id") or (event.get("message") or {}).get("thread_id") or ""),
+            "communication_status": str(event.get("communication_status") or ""),
         }
         self._record_team_event(
             session_id,
@@ -7644,6 +7652,13 @@ class InProcessTeamManager(TeamManager):
                 on_task_finished=_finish_plan_from_delegate_task,
             )
 
+        communication_router = TeamCommunicationRouter(
+            bus=bus,
+            session_id=session_id,
+            member_names=list(member_map.keys()),
+            on_mention=_on_team_mention,
+        )
+
         # 1) 队友：共享基础工具
         teammates: dict[str, Agent] = {}
         for m in members:
@@ -7665,6 +7680,7 @@ class InProcessTeamManager(TeamManager):
                 member_names=list(member_map.keys()),
                 allow_user=False,
                 on_mention=_on_team_mention,
+                communication_router=communication_router,
             )
             teammates[m.member_id] = self._new_agent(
                 registry,
@@ -7692,6 +7708,7 @@ class InProcessTeamManager(TeamManager):
             member_id="leader",
             member_names=list(member_map.keys()),
             on_mention=_on_team_mention,
+            communication_router=communication_router,
         )
         direct_leader_registry = self._clone_registry()
         register_team_bus_tools(
@@ -7708,6 +7725,7 @@ class InProcessTeamManager(TeamManager):
             member_id="leader",
             member_names=list(member_map.keys()),
             on_mention=_on_team_mention,
+            communication_router=communication_router,
         )
 
         def _mark_plan_from_delegate_task(task: dict[str, Any]) -> None:
@@ -7822,6 +7840,7 @@ class InProcessTeamManager(TeamManager):
             leader_spec=leader_spec,
             members=member_map,
             bus=bus,
+            communication_router=communication_router,
             external_team_id=external_team_id,
             runtime_members=runtime_member_map,
         )
@@ -7845,6 +7864,7 @@ class InProcessTeamManager(TeamManager):
         intent: str,
         content: str,
         node_id: str = "",
+        task_id: str = "",
         result_status: str = "",
         artifacts: list[str] | None = None,
         questions: list[dict[str, Any]] | None = None,
@@ -7865,19 +7885,16 @@ class InProcessTeamManager(TeamManager):
             "intent": str(intent or "broadcast"),
             "content": str(content or ""),
             "node_id": str(node_id or ""),
+            "task_id": str(task_id or ""),
+            "thread_id": str(node_id or ""),
             "result_status": str(result_status or ""),
             "artifacts": list(artifacts or []),
+            "artifact_refs": list(artifacts or []),
             "questions": list(questions or []),
             "title": str(title or ""),
             "task_payload_meta": dict(task_payload_meta or {}),
         }
-        return await self._handle_team_mention(
-            session_id,
-            owner_account_id,
-            event,
-            teammates=team.teammates,
-            bus=team.bus,
-        )
+        return await team.communication_router.route(event)
 
     async def request_delegate(
         self,

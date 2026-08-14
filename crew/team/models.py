@@ -175,6 +175,9 @@ class TeamMessage:
     recipient_member_ids: tuple[str, ...]
     content: str
     message_type: MessageType = "question"
+    intent: str = ""
+    request_id: str = ""
+    node_id: str = ""
     task_id: str = ""
     thread_id: str = ""
     reply_to: str = ""

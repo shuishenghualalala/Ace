@@ -259,6 +259,7 @@ class InteractionBridge:
                             "intent": {"type": "string", "enum": mention_intents},
                             "content": {"type": "string"},
                             "node_id": {"type": "string"},
+                            "task_id": {"type": "string"},
                             "result_status": {
                                 "type": "string",
                                 "enum": list(TEAM_RESULT_STATUSES),
@@ -390,6 +391,7 @@ class InteractionBridge:
                 intent=intent,
                 content=content,
                 node_id=str(data.get("node_id") or "").strip(),
+                task_id=str(data.get("task_id") or "").strip(),
                 result_status=result_status,
                 artifacts=list(data.get("artifact_refs") or []),
                 questions=list(data.get("questions") or []),

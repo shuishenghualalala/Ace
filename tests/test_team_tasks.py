@@ -28,6 +28,7 @@ from crew.state.config import Config, load_config
 from crew.tasks.runtime import TaskRuntime
 from crew.tasks.task_manager import InMemoryTaskManager, LegacyTaskManagerAdapter
 from crew.team.delegate_tool import run_delegate_to_teammate
+from crew.team.bus import TeamBus
 from crew.security.launch import ProcessLaunch, current_process_launch
 from crew.security.models import (
     FilesystemAccess,
@@ -3273,6 +3274,83 @@ async def test_team_mention_assign_requires_existing_plan_node():
     assert "不能委派给 researcher" in mismatch.content
     assert tasks.list("mention_guard_s1") == []
     assert tm.read_plan("mention_guard_s1")["plan"]["nodes"][0]["status"] == "pending"
+
+
+def test_team_bus_message_contract_keeps_request_reply_context():
+    bus = TeamBus()
+    message = bus.send(
+        team_session_id="communication_contract_s1",
+        sender_member_id="coder",
+        recipient_member_ids=["leader"],
+        content="请确认方案范围",
+        message_type="decision_request",
+        intent="ask",
+        request_id="comm_ask_1",
+        node_id="game_design",
+        task_id="task_42",
+    )
+
+    assert message.intent == "ask"
+    assert message.request_id == "comm_ask_1"
+    assert message.node_id == "game_design"
+    assert message.task_id == "task_42"
+    assert message.thread_id == "game_design"
+    assert message.to_dict()["recipient_member_ids"] == ["leader"]
+
+
+@pytest.mark.asyncio
+async def test_builtin_and_external_mentions_share_communication_router_contract():
+    tm, _tasks = _team()
+    builtin_team = tm._build_team("communication_builtin_s1")
+
+    member_token = current_agent_id.set("coder")
+    try:
+        result = await builtin_team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-ask-contract",
+                "team_mention",
+                {
+                    "to": ["leader"],
+                    "intent": "ask",
+                    "content": "用户只需要方案吗？",
+                    "node_id": "game_design",
+                    "task_id": "task_42",
+                },
+            )
+        )
+    finally:
+        current_agent_id.reset(member_token)
+
+    assert not result.is_error
+    builtin_payload = json.loads(result.content)
+    builtin_message = builtin_payload["mention"]["message"]
+    assert builtin_message["intent"] == "ask"
+    assert builtin_message["request_id"]
+    assert builtin_message["node_id"] == "game_design"
+    assert builtin_message["task_id"] == "task_42"
+    assert builtin_message["message_type"] == "decision_request"
+
+    external_result = await tm.external_team_mention(
+        "communication_external_s1",
+        member_id="coder",
+        to=["leader"],
+        intent="ask",
+        content="请确认是否只输出方案",
+        node_id="game_design",
+        task_id="task_43",
+    )
+    assert external_result == {}
+    external_team = tm._get_or_create("communication_external_s1")
+    external_message = external_team.bus.read(
+        team_session_id="communication_external_s1",
+        member_id="leader",
+        consume=False,
+    )[0].to_dict()
+    assert external_message["intent"] == "ask"
+    assert external_message["request_id"]
+    assert external_message["node_id"] == "game_design"
+    assert external_message["task_id"] == "task_43"
+    assert external_message["message_type"] == "decision_request"
 
 
 async def test_external_team_mention_propagates_current_active_skill(monkeypatch):

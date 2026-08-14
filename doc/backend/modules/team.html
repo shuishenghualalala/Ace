@@ -390,4 +390,13 @@ graph TD
   <li><b>验证：</b>覆盖 stale RuntimeStaffingRequest 清理、恢复不重规划、轻量直答无产物、阻塞恢复与既有 Team 全量回归。</li>
 </ul>
 
+<h2>145. 2026-08-14 Team 通信统一入口阶段一</h2>
+<ul>
+  <li><b>统一入口：</b>内置 Agent 的 <code>team_mention</code> 与外部 Runtime 的 MCP/Gateway mention 都经过 <code>TeamCommunicationRouter</code>，再进入现有 TeamManager 语义处理。</li>
+  <li><b>消息契约：</b>已有 <code>TeamMessage</code> 增加 <code>intent</code>、<code>request_id</code>、<code>node_id</code>；<code>task_id</code> 继续复用已有字段，外部入口同步接收节点任务关联信息。</li>
+  <li><b>Ask 边界：</b>阶段一只完成 request 消息发布和关联字段，不自动唤醒 Agent；<code>team_read_messages</code> 仍是主动读取工具。AskCoordinator、Envelope 通信回合和 answer/reply 在下一阶段接入。</li>
+  <li><b>复用边界：</b><code>assign</code> 保持 <code>TeamPlan → TaskManager → run_delegate_to_teammate</code>；阶段一没有新增 Agent 执行协议、DAG 节点、数据库表或顶层模块，仅增加 <code>crew/team/communication.py</code>。</li>
+  <li><b>验证：</b><code>tests/test_team_tasks.py</code> 200 passed / 1 skipped；内置与外部 mention 均覆盖同一 request 消息契约，通信模块独立 Ruff 检查通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

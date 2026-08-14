@@ -705,6 +705,34 @@ flowchart LR
     <li><b>数据对象：</b>不新增表和顶层模块；<code>runtime_recovery</code>、<code>runtime_blocking</code>、<code>previous_assignee</code> 继续作为 TeamPlanNode metadata，并通过既有 <code>team_node_recovery</code>、<code>team_node_updated</code> 与 <code>workflow_plan_revised</code> 事件留痕。</li>
   </ul>
 
+  <h2>23A. Team 通信重构：阶段 1 已落地（2026-08-14）</h2>
+  <p>
+    本阶段只统一通信入口和消息契约，不启动目标 Agent，也不把 <code>ask</code> 转成新的 DAG 节点。
+    内置 Agent 的 <code>team_mention</code> 工具与外部 Runtime 的 MCP/Gateway 入口现在都经过同一个
+    <code>TeamCommunicationRouter</code>；正式任务仍由现有 <code>run_delegate_to_teammate</code> 执行。
+  </p>
+  <div class="mermaid-wrap"><div class="mermaid">
+flowchart LR
+  Builtin["内置 team_mention"] --> Router["TeamCommunicationRouter"]
+  External["MCP / Gateway team_mention"] --> Router
+  Router --> Bus["TeamBus.publish"]
+  Router --> Manager["TeamManager 业务回调"]
+  Bus --> Message["TeamMessage<br/>intent / request_id / node_id / task_id"]
+  Manager --> Plan["assign 仍走现有 TeamPlan / delegate"]
+  </div></div>
+  <ul>
+    <li><code>TeamBus</code> 仍然只保存消息、mailbox 和事件，不负责唤醒模型。</li>
+    <li><code>ask</code> 现在会生成稳定的 <code>request_id</code>，并把 <code>node_id/task_id</code> 一并写入消息，后续可通过 <code>reply_to</code> 关联答案。</li>
+    <li><code>team_read_messages</code> 的职责没有改变：主动读取普通消息；阶段 2 才接入 ask 的自动执行和回答。</li>
+    <li>本阶段没有新增数据库表、Agent 执行协议或 DAG 节点类型，只新增 <code>crew/team/communication.py</code> 作为 Team 内通信子模块。</li>
+  </ul>
+  <h3>阶段 2 的接入边界</h3>
+  <p>
+    阶段 2 将复用现有 <code>Envelope</code>、<code>SingleAgent.run</code> 和 <code>ResponseChunk</code>，由 AskCoordinator
+    把 <code>decision_request</code> 转成目标 Agent 的临时通信回合；该回合不进入 TaskManager，不创建新的 TeamPlan 节点，完成后通过
+    <code>TeamMessage(message_type="answer", reply_to=request_id)</code> 返回原发起 Agent。
+  </p>
+
   <h2>24. 后续 TODO 边界</h2>
   <p class="warn">以下是 2026-07-12 确认后的后续开发清单。当前阶段不引入 TeamManifest；Dynamic Kanban 五表边界成立，后续动态工作流继续复用现有存储，不另起一套 Workflow 表。</p>
   <table><thead><tr><th>优先级</th><th>方向</th><th>目标与边界</th></tr></thead><tbody>
