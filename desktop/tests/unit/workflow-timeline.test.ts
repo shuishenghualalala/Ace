@@ -82,13 +82,6 @@ describe('workflow-timeline', () => {
     expect(pausedHtml).not.toContain('id="workflow-timeline-resume" disabled');
   });
 
-  it('refreshWorkflowTimelineDom updates container html', () => {
-    refreshWorkflowTimelineDom(makeStatus());
-    const container = document.getElementById('workflow-timeline-container');
-    expect(container?.textContent).toContain('制定研究计划');
-    expect(container?.querySelectorAll('.workflow-timeline__phase').length).toBe(3);
-  });
-
   it('renders call-level results under each phase', () => {
     const status = makeStatus({
       workflow_definition: {

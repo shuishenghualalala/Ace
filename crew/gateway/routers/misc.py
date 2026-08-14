@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 
 from fastapi import APIRouter, Request
@@ -22,10 +23,78 @@ from crew.gateway.instance_auth import (
     create_gateway_instance_proof,
     is_valid_gateway_instance_challenge,
 )
+from crew.state.logging import get_logger
+from crew.wiki.capture import capture_upload_to_wiki
+
+log = get_logger("gateway.routers.misc")
 
 
 def create_misc_router(crew) -> APIRouter:
     router = APIRouter()
+
+    # 后台任务引用集合：防 GC 提前回收，完成回调里统一清理。
+    _wiki_capture_tasks: set[asyncio.Task] = set()
+
+    def _on_wiki_capture_done(task: asyncio.Task) -> None:
+        _wiki_capture_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.warning("聊天附件自动收入 Wiki 任务异常: %s", exc)
+
+    def _resolve_capture_kb_id(owner: str, session_id: str, kb_id: str) -> str:
+        """解析上传附件应落入的知识库：显式 kb_id（校验存在）> session 绑定 > default。"""
+        if kb_id:
+            if kb_id == "default":
+                return "default"
+            store = getattr(crew, "_wiki_store", None)
+            try:
+                existing = {kb.id for kb in store.list_kbs(owner)} if store is not None else set()
+            except Exception:  # noqa: BLE001
+                existing = set()
+            if kb_id in existing:
+                return kb_id
+            log.warning("上传附件指定的知识库不存在，回落 default: %s", kb_id)
+            return "default"
+        if session_id:
+            manager = getattr(crew, "wiki_manager", None)
+            if manager is not None:
+                try:
+                    return str(manager.get_kb_id(session_id, owner_account_id=owner) or "default")
+                except Exception:  # noqa: BLE001
+                    log.warning("查询会话知识库绑定失败，回落 default: %s", session_id)
+        return "default"
+
+    def _schedule_wiki_capture(
+        request: Request,
+        filename: str,
+        content: bytes,
+        session_id: str = "",
+        kb_id: str = "",
+    ) -> None:
+        """上传成功后把附件后台收入对应 wiki 知识库（wiki.capture_attachments 控制）。"""
+        store = getattr(crew, "_wiki_store", None)
+        wiki_cfg = getattr(getattr(crew, "config", None), "wiki", None)
+        if store is None or wiki_cfg is None:
+            return
+        if not wiki_cfg.enabled or not wiki_cfg.capture_attachments:
+            return
+        owner = account_from_request(request).owner_account_id
+        task = asyncio.create_task(
+            capture_upload_to_wiki(
+                store,
+                getattr(crew, "_wiki_compiler", None),
+                wiki_cfg,
+                filename,
+                content,
+                owner_account_id=owner,
+                kb_id=_resolve_capture_kb_id(owner, session_id, kb_id),
+                provider=getattr(crew, "provider", None),
+            )
+        )
+        _wiki_capture_tasks.add(task)
+        task.add_done_callback(_on_wiki_capture_done)
 
     def _components(request: Request) -> dict:
         startup_status = str(
@@ -249,11 +318,13 @@ def create_misc_router(crew) -> APIRouter:
     # ---- 附件与路径 ----
     @router.post("/api/upload")
     async def upload_file(request: Request, payload: dict) -> JSONResponse:
-        """上传文件附件。body: {filename, content(base64)}。"""
+        """上传文件附件。body: {filename, content(base64), session_id?, kb_id?}。"""
         from crew.gateway.auth import account_from_request
 
         filename = payload.get("filename", "untitled")
         content_b64 = payload.get("content", "")
+        session_id = str(payload.get("session_id") or "").strip()
+        kb_id = str(payload.get("kb_id") or "").strip()
         # 体积上限：解码后约 20 MiB（b64 ≈ 27 MiB）。在 b64decode 之前拦截，避免把
         # 超大 base64 字符串先解成内存 bytes 造成 RSS 尖峰。
         # 20 * 1024 * 1024 * 4/3 ≈ 27_962_026，向上取整到 28 MiB 留余量。
@@ -272,6 +343,7 @@ def create_misc_router(crew) -> APIRouter:
             )
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        _schedule_wiki_capture(request, filename, content_bytes, session_id=session_id, kb_id=kb_id)
         return JSONResponse(meta)
 
     @router.get("/api/complete")

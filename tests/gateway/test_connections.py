@@ -71,16 +71,6 @@ async def test_buffer_survives_disconnect(conn: ConnectionManager):
     # 缓存保留
     assert len(conn._chunk_buffers[key]) == 3
 
-    # 新连接注册并回放
-    ws2 = _FakeWS()
-    conn.register("s1", ws2)
-    await conn.replay("s1", ws2, after_gateway_sequence=1)
-
-    # 只回放 > 1 的帧
-    assert len(ws2.sent) == 2
-    assert ws2.sent[0]["kind"] == "tool"
-    assert ws2.sent[1]["kind"] == "final"
-
 
 @pytest.mark.asyncio
 async def test_replay_respects_after_sequence(conn: ConnectionManager):
@@ -469,10 +459,3 @@ async def test_tool_result_remains_rate_limited():
     assert conn._pending_payloads[key][0]["body"]["phase"] == "result"
     conn.unregister_all(ws, {"s1"})
     await asyncio.sleep(0)
-
-
-def test_tool_planning_status_is_priority_payload():
-    assert ConnectionManager._is_priority_payload({
-        "kind": "status",
-        "body": {"activity": "tool_planning", "message": "正在规划工具调用…"},
-    })

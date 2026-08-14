@@ -24,6 +24,42 @@ class BrowserNetworkDenied(ValueError):
     pass
 
 
+_METADATA_ADDRESSES = frozenset(
+    {
+        ipaddress.ip_address("168.63.129.16"),
+        ipaddress.ip_address("169.254.169.253"),
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("100.100.100.200"),
+        ipaddress.ip_address("fd00:ec2::254"),
+    }
+)
+_NAT64_PREFIXES = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
+
+
+def _embedded_ipv4(value: ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address, ...]:
+    candidates: list[ipaddress.IPv4Address] = []
+    if value.ipv4_mapped is not None:
+        candidates.append(value.ipv4_mapped)
+    if value.sixtofour is not None:
+        candidates.append(value.sixtofour)
+    if value.teredo is not None:
+        candidates.extend(value.teredo)
+    if any(value in network for network in _NAT64_PREFIXES) or int(value) >> 32 == 0:
+        candidates.append(ipaddress.IPv4Address(int(value) & 0xFFFFFFFF))
+    return tuple(dict.fromkeys(candidates))
+
+
+def _is_sensitive_address(value: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if value in _METADATA_ADDRESSES or not value.is_global or getattr(value, "is_site_local", False):
+        return True
+    if isinstance(value, ipaddress.IPv6Address):
+        return any(_is_sensitive_address(item) for item in _embedded_ipv4(value))
+    return False
+
+
 def _normalized_host(host: str) -> str:
     raw = str(host or "").strip()
     if not raw:
@@ -61,26 +97,36 @@ class BrowserNetworkPolicy:
     def __init__(self, config: BrowserConfig) -> None:
         self.config = config
         self._blocked_hosts = {_normalized_host(item) for item in config.blocked_hosts}
+        self._allowed_private_hosts = {
+            _normalized_host(item) for item in config.allowed_private_hosts
+        }
+        try:
+            self._allowed_private_networks = tuple(
+                ipaddress.ip_network(item, strict=False)
+                for item in config.allowed_private_cidrs
+            )
+        except ValueError as exc:
+            raise BrowserNetworkDenied("allowed_private_cidrs 包含无效网段") from exc
 
     def validate_navigation_url(self, url: str) -> str:
-        """Return the caller's navigation target without applying a URL policy.
+        """Validate direct numeric network targets before they reach Chromium.
 
-        Navigation semantics belong to Playwright/Chromium.  In particular,
-        ``about:``, ``data:``, ``file:``, extension/custom schemes and URLs
-        containing credentials are all meaningful in real browser workflows.
-        Rejecting them here made the Python facade a smaller, subtly different
-        browser than the engine it wraps.
-
-        The policy object remains available to the legacy opt-in loopback
-        proxy, but it is no longer an authorization boundary for ordinary
-        browser navigation.
+        DNS names are resolved and pinned by ``LoopbackPolicyProxy``. Non-network
+        browser schemes retain Chromium semantics and are governed by the Browser
+        Host's separate artifact/file boundaries.
         """
         raw = str(url or "")
         if not raw.strip():
             raise BrowserNetworkDenied("URL 不能为空")
-        # ``urlsplit`` is intentionally not used as a validator.  Its accepted
-        # grammar is not Chromium's URL parser (and it rejects otherwise useful
-        # custom-scheme inputs such as malformed-looking opaque payloads).
+        parsed = urlsplit(raw)
+        if parsed.scheme.lower() in {"http", "https", "ws", "wss"} and parsed.hostname:
+            host = self.validate_hostname(parsed.hostname)
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                pass
+            else:
+                self.validate_ip(host, host)
         return raw
 
     def validate_hostname(self, hostname: str) -> str:
@@ -92,15 +138,17 @@ class BrowserNetworkPolicy:
         return host
 
     def validate_ip(self, hostname: str, value: str) -> str:
-        # Browser automation must preserve Chromium's reachability. Localhost,
-        # RFC1918, link-local, metadata, IPv4-mapped and transition addresses
-        # are therefore accepted by default. ``blocked_hosts`` remains an
-        # explicit deployment override, not an implicit product denylist.
-        self.validate_hostname(hostname)
+        host = self.validate_hostname(hostname)
         try:
             ip = ipaddress.ip_address(value)
         except ValueError as exc:
             raise BrowserNetworkDenied("DNS 返回了无效 IP") from exc
+        host_allowed = host in self._allowed_private_hosts or any(
+            host.endswith(f".{item}") for item in self._allowed_private_hosts
+        )
+        cidr_allowed = any(ip in network for network in self._allowed_private_networks)
+        if not host_allowed and not cidr_allowed and _is_sensitive_address(ip):
+            raise BrowserNetworkDenied("默认禁止访问本机、私网或云元数据地址")
         return str(ip)
 
     async def resolve(self, hostname: str, port: int) -> ResolvedTarget:
@@ -131,15 +179,7 @@ class BrowserNetworkPolicy:
 
 
 class LoopbackPolicyProxy:
-    """Small HTTP CONNECT proxy that resolves and pins every target.
-
-    This is a legacy opt-in compatibility component; normal BrowserHost traffic
-    uses Chromium's native network stack. The proxy accepts every syntactically
-    valid destination by default and only applies an explicitly configured
-    ``blocked_hosts`` deployment override. HTTPS and WebSocket CONNECT tunnels
-    are opened to the resolved numeric address so one request uses one DNS
-    result consistently.
-    """
+    """Authenticated policy proxy that resolves, validates and pins every target."""
 
     def __init__(self, policy: BrowserNetworkPolicy) -> None:
         self.policy = policy

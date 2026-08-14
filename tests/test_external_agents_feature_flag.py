@@ -67,6 +67,10 @@ async def test_disabled_flag_hides_management_api_and_rejects_new_external_bindi
         config_response = await client.get("/api/config")
         assert config_response.status_code == 200
         assert config_response.json()["external_agents"] == {"enabled": False}
+        assert config_response.json()["security"] == {
+            "enabled": False,
+            "default_mode": "full_access",
+        }
 
         external_list = await client.get("/api/external-agents")
         assert external_list.status_code == 403

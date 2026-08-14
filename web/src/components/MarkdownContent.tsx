@@ -32,32 +32,56 @@ const DEFAULT_STEP_THRESHOLD = 2000;
 
 const WIKILINK_SCHEME = "wikilink://";
 
+/** 代码围栏状态机，供 linkifyWikiLinks 和 splitBlocks 共用。 */
+class FenceTracker {
+  private state: { marker: string; indent: string } | null = null;
+
+  get inside(): boolean {
+    return this.state !== null;
+  }
+
+  /** 处理一行文本，根据围栏状态决定进入/退出。 */
+  process(line: string): void {
+    const match = line.match(FENCE_RE);
+    if (this.state) {
+      if (match && this.isCloseMatch(match)) {
+        this.state = null;
+      }
+    } else if (match) {
+      this.state = { marker: match[2], indent: match[1] };
+    }
+  }
+
+  private isCloseMatch(
+    match: RegExpMatchArray,
+  ): boolean {
+    const state = this.state!;
+    return (
+      match[1] === state.indent &&
+      (match[3] ?? "").trim() === "" &&
+      match[2].startsWith(state.marker[0]) &&
+      match[2].length >= state.marker.length
+    );
+  }
+}
+
+const FENCE_RE = /^([ \t]*)(`{3,}|~{3,})([^\n]*)$/;
+
 /**
  * 把正文中的 [[页面标题]] 转成 markdown 链接 [标题](wikilink://标题)，
  * 交由 a 渲染器统一处理为可点击的双链。代码围栏内的内容原样保留。
  */
 function linkifyWikiLinks(text: string): string {
-  const lines = text.split("\n");
-  let inFence: { marker: string; indent: string } | null = null;
-  return lines
+  const fence = new FenceTracker();
+  return text
+    .split("\n")
     .map((line) => {
-      const fenceMatch = line.match(/^([ \t]*)(`{3,}|~{3,})([^\n]*)$/);
-      if (inFence) {
-        if (
-          fenceMatch &&
-          fenceMatch[1] === inFence.indent &&
-          (fenceMatch[3] ?? "").trim() === "" &&
-          fenceMatch[2].startsWith(inFence.marker[0]) &&
-          fenceMatch[2].length >= inFence.marker.length
-        ) {
-          inFence = null;
-        }
+      if (fence.inside) {
+        fence.process(line);
         return line;
       }
-      if (fenceMatch) {
-        inFence = { marker: fenceMatch[2], indent: fenceMatch[1] };
-        return line;
-      }
+      fence.process(line);
+      if (fence.inside) return line; // 本行是围栏起始行
       return line.replace(/\[\[([^\]]+)\]\]/g, (_m, title: string) => {
         const trimmed = title.trim();
         if (!trimmed) return _m;
@@ -69,10 +93,9 @@ function linkifyWikiLinks(text: string): string {
 
 /** 把 markdown 拆成相互独立的渲染块。代码围栏与 GFM 表格必须整体出现，否则 fold 会切断结构。 */
 function splitBlocks(text: string): string[] {
-  const lines = text.split("\n");
   const blocks: string[] = [];
   const current: string[] = [];
-  let inFence: { marker: string; indent: string } | null = null;
+  const fence = new FenceTracker();
 
   const flush = (): void => {
     if (current.length === 0) return;
@@ -81,29 +104,19 @@ function splitBlocks(text: string): string[] {
     current.length = 0;
   };
 
-  for (const line of lines) {
+  for (const line of text.split("\n")) {
     const trimmed = line.trim();
 
-    if (inFence) {
+    if (fence.inside) {
       current.push(line);
-      const fenceMatch = line.match(/^([ \t]*)(`{3,}|~{3,})([^\n]*)$/);
-      if (
-        fenceMatch &&
-        fenceMatch[1] === inFence.indent &&
-        (fenceMatch[3] ?? "").trim() === "" &&
-        fenceMatch[2].startsWith(inFence.marker[0]) &&
-        fenceMatch[2].length >= inFence.marker.length
-      ) {
-        flush();
-        inFence = null;
-      }
+      fence.process(line);
+      if (!fence.inside) flush(); // 围栏关闭
       continue;
     }
 
-    const fenceMatch = line.match(/^([ \t]*)(`{3,}|~{3,})([^\n]*)$/);
-    if (fenceMatch) {
+    fence.process(line);
+    if (fence.inside) {
       flush();
-      inFence = { marker: fenceMatch[2], indent: fenceMatch[1] };
       current.push(line);
       continue;
     }

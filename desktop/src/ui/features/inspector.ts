@@ -1,11 +1,11 @@
 /**
- * 聊天右侧 Inspector 面板
+ * 聊天右侧 Inspector 面板（codex / opencode 风格）
  *
  * Tab：Context / Files / Plan / Kanban / 协作（仅 Team Session）/ Browser
  *
  * 关键：
  *   - Context Tab 末尾加"原始消息"列表（user/assistant 完整 JSON + messageID + 时间）
- *     这是检查器需要展示的核心信息
+ *     这是 codex/opencode 都有的核心信息
  *   - 上下文字段显示：会话信息 + 用量进度条 + 输入/输出 token + 缓存
  *     + 构成饼图 + 成本 + 系统提示 + **原始消息 JSON**
  *
@@ -15,8 +15,8 @@
  * 后端如提供 usage 接口，调用 setUsageSnapshot 覆盖即可。
  */
 
-import { backendApi } from '../backend-client';
 import DOMPurify from 'dompurify';
+import { backendApi } from '../backend-client';
 import { $, escapeHtml, state, getBookTodos, getBookFileChanges, isDynamicKanbanSession, notify } from '../state';
 import { sessionStore } from '../stores/stores';
 import type { ChatMessage, PlanReviewStatus } from '../chat-render';
@@ -34,6 +34,8 @@ import {
   stopTeamCollaborationPolling,
   teamCollaborationTaskCount,
 } from './team-collaboration-board';
+import { isStudioView } from './studio-chrome-state';
+import { setRuntimeStyle, setRuntimeToken } from '../components/runtime-style';
 import {
   findModelOption,
   modelLabelForId,
@@ -41,7 +43,7 @@ import {
   resolveSessionModelWindow,
   isExternalTeamSession,
 } from './session-model';
-import { renderDiffPanelHtml, applyDiffSyntaxHighlights, buildDiffFromTexts, countDiffRows, expandCollapsedRegion, type BackendDiffRow, type DiffRegionExpandMap } from '../diff-lines';
+import { renderDiffPanelHtml, applyDiffSyntaxHighlights, buildDiffFromTexts, countDiffRows, expandCollapsedRegion, clearDiffExpandsForPath, type BackendDiffRow, type DiffRegionExpandMap } from '../diff-lines';
 import { isPlanDocumentPath } from '../plan-document-path';
 import { renderMarkdownHtml } from '../markdown';
 import {
@@ -53,13 +55,10 @@ import {
 } from '../file-preview';
 import {
   bindBrowserPanel,
-  closeBrowserWorkspaceTab,
-  getBrowserWorkspaceState,
   hideBrowserPanelView,
   openUserBrowser,
   releaseUserBrowserControl,
   renderBrowserPanel,
-  selectBrowserWorkspaceTab,
   syncBrowserPanelSession,
 } from './browser-panel';
 import {
@@ -67,9 +66,20 @@ import {
   composerWorkspaceId,
   ensureComposerDraftSession,
 } from './workspaces';
+import {
+  mountInspectorShell,
+  type InspectorTabKey,
+} from '../layouts/inspector-shell';
 import { showFileOpenMenu } from './file-open-menu';
+import { InspectorSessionUiStore } from './inspector-context-files';
+import {
+  createPlanBoardUiState,
+  isPlanActionable,
+  planStatusLabel,
+  syncPlanBoardUiSession,
+} from './inspector-workflow';
 
-type TabKey = 'files' | 'context' | 'plan' | 'kanban' | 'collaboration' | 'browser';
+type TabKey = InspectorTabKey;
 
 interface FileChange {
   path: string;
@@ -78,8 +88,16 @@ interface FileChange {
   removed: number;
   status: 'modified' | 'added' | 'deleted';
   diff: DiffRow[];
-  binary?: boolean | undefined;
 }
+
+type InspectorFileSummary = {
+  path: string;
+  name?: string;
+  added?: number;
+  removed?: number;
+  status?: 'modified' | 'added' | 'deleted';
+  diff?: DiffRow[];
+};
 
 type DiffRow = BackendDiffRow;
 
@@ -269,7 +287,7 @@ function computeContextStats(): ContextStats {
     cacheRead,
     cacheWrite,
     workingDir: '~/Projects/Crew',
-    systemPrompt: '你是 Crew，一个面向协作与知识工作场景的智能助手。请通过已启用的工具和消息渠道提供帮助，所有回复优先以中文给出。',
+    systemPrompt: '你是 Crew，一个面向日常工作的智能助手。你需要帮助用户完成信息整理、分析、协作与自动化任务，所有回复优先以中文给出。',
     breakdown: [
       { label: '用户', tokens: userTokens, tone: 'user' as const },
       { label: '助手', tokens: assistantTokens, tone: 'assistant' as const },
@@ -380,6 +398,8 @@ function resetFileDiffCache(sessionId: string | null): void {
   fileContentHydrateInflight.clear();
   fileContentErrors.clear();
   fileViewMode.clear();
+  fileEditMode.clear();
+  fileSaveInflight.clear();
   fileMissingOnDisk.clear();
   expandedFiles.clear();
   diffExpandsByPath.clear();
@@ -388,7 +408,6 @@ function resetFileDiffCache(sessionId: string | null): void {
 function extractFileChangesFromMessages(): FileChange[] {
   const messages = getActiveMessages();
   const byPath = new Map<string, FileChange>();
-  // 旧历史兜底：先收集 file_write 路径。
   for (const m of messages) {
     for (const tc of m.toolCalls ?? []) {
       if (!isFileWriteTool(tc.name)) continue;
@@ -404,10 +423,9 @@ function extractFileChangesFromMessages(): FileChange[] {
       });
     }
   }
-  // turnFileChanges 包含 terminal 间接生成的 PPT/Word/PDF 等结果文件，优先级高于
-  // tool_call 路径兜底。重启后后端累计 file_changes 为空，Files 看板必须从这里恢复。
-  for (const m of messages) {
-    for (const file of m.turnFileChanges ?? []) {
+  // Persisted turn summaries cover files created indirectly by terminal tools.
+  for (const message of messages) {
+    for (const file of message.turnFileChanges ?? []) {
       if (!file.path || isPlanDocumentPath(file.path)) continue;
       const status = file.status === 'added' || file.status === 'deleted' || file.status === 'modified'
         ? file.status
@@ -476,6 +494,12 @@ function computeFileChanges(): FileChange[] {
   return merged.filter((f) => f.status === 'deleted' || !fileMissingOnDisk.has(f.path));
 }
 
+function fileChangeFromPath(path: string): FileChange {
+  const name = path.split(/[\\/]/).pop() || path;
+  return { path, name, added: 0, removed: 0, status: 'modified', diff: [] };
+}
+
+/** 文件消息卡打开看板时，优先展示该条消息涉及的文件；无范围时展示整个会话。 */
 function currentFileChanges(): FileChange[] {
   const files = computeFileChanges();
   const prioritize = (items: FileChange[]): FileChange[] => {
@@ -486,30 +510,16 @@ function currentFileChanges(): FileChange[] {
     const byPath = new Map(files.map((file) => [file.path, file]));
     return prioritize(scopedFileChanges.map((file) => {
       const full = byPath.get(file.path);
-      return full ? { ...file, ...full, name: file.name || full.name } : file;
+      return full ? { ...file, ...full, name: file.name || full.name } : {
+        ...fileChangeFromPath(file.path),
+        ...file,
+        name: file.name || fileChangeFromPath(file.path).name,
+      };
     }));
   }
   if (!scopedFilePaths?.length) return prioritize(files);
   const byPath = new Map(files.map((file) => [file.path, file]));
   return prioritize(scopedFilePaths.map((path) => byPath.get(path) ?? fileChangeFromPath(path)));
-}
-
-function fileChangeFromPath(path: string): FileChange {
-  const name = path.split(/[\\/]/).pop() || path;
-  return { path, name, added: 0, removed: 0, status: 'modified', diff: [] };
-}
-
-function rememberOpenFileTab(path: string, file?: FileChange): void {
-  if (!path) return;
-  if (!openFileTabs.includes(path)) openFileTabs.push(path);
-  const fallback = file ?? currentFileChanges().find((item) => item.path === path) ?? fileChangeFromPath(path);
-  openFileTabChanges.set(path, fallback);
-}
-
-function currentFileChangeForPath(path: string): FileChange | undefined {
-  return currentFileChanges().find((item) => item.path === path)
-    ?? openFileTabChanges.get(path)
-    ?? fileChangeFromPath(path);
 }
 
 async function hydrateFileDiffIfNeeded(filePath: string): Promise<void> {
@@ -524,7 +534,7 @@ async function hydrateFileDiffIfNeeded(filePath: string): Promise<void> {
   let listChanged = false;
   try {
     // 先静默探测，避免对已删临时文件调用 readTextFile 刷主进程 ENOENT
-    if (window.Crew.pathExists && !(await window.Crew.pathExists(filePath))) {
+    if (window.Crew?.pathExists && !(await window.Crew.pathExists(filePath))) {
       fileMissingOnDisk.add(filePath);
       fileDiffCache.set(filePath, []);
       expandedFiles.delete(filePath);
@@ -555,19 +565,27 @@ async function hydrateFileDiffIfNeeded(filePath: string): Promise<void> {
   if (activeTab === 'files') renderBody();
 }
 
-/** 兼容现有调用；同时注入离线 CSP，禁止预览内容访问网络。 */
+/** Build an offline HTML preview document without inheriting host privileges. */
 export function buildHtmlPreviewDocument(filePath: string, source: string): string {
   return buildOfflinePreviewDocument(filePath, source);
 }
 
 async function hydrateFileContentIfNeeded(filePath: string): Promise<void> {
   const kind = filePreviewKind(filePath);
-  if (kind === 'code' || kind === 'legacy-office' || fileContentHydrateInflight.has(filePath)) return;
-  if (fileContentCache.has(filePath) || fileBinaryCache.has(filePath) || fileMissingOnDisk.has(filePath)) return;
+  if (
+    kind === 'code'
+    || kind === 'legacy-office'
+    || fileContentHydrateInflight.has(filePath)
+    || fileContentCache.has(filePath)
+    || fileBinaryCache.has(filePath)
+    || fileMissingOnDisk.has(filePath)
+  ) {
+    return;
+  }
   fileContentHydrateInflight.add(filePath);
   fileContentErrors.delete(filePath);
   try {
-    if (window.Crew.pathExists && !(await window.Crew.pathExists(filePath))) {
+    if (window.Crew?.pathExists && !(await window.Crew.pathExists(filePath))) {
       fileContentErrors.set(filePath, '文件不存在，无法生成页面预览');
     } else if (isTextPreviewKind(kind) && window.Crew?.readTextFile) {
       const text = await window.Crew.readTextFile(filePath);
@@ -580,8 +598,11 @@ async function hydrateFileContentIfNeeded(filePath: string): Promise<void> {
     } else {
       fileContentErrors.set(filePath, '当前环境不支持读取此文件');
     }
-  } catch (err) {
-    fileContentErrors.set(filePath, `页面预览加载失败：${err instanceof Error ? err.message : String(err)}`);
+  } catch (error) {
+    fileContentErrors.set(
+      filePath,
+      `页面预览加载失败：${error instanceof Error ? error.message : String(error)}`,
+    );
   } finally {
     fileContentHydrateInflight.delete(filePath);
   }
@@ -635,41 +656,8 @@ function getPendingPlanDoc(): { plan: string; planFile: string; status: PlanRevi
   };
 }
 
-function planStatusLabel(status: PlanReviewStatus): string {
-  switch (status) {
-    case 'pending': return '等待审批';
-    case 'editing':
-    case 'revising': return '继续修改中';
-    case 'approved': return '已批准';
-    case 'readonly': return '已批准';
-    case 'rejected': return '已拒绝';
-    case 'cancelled': return '已取消';
-    case 'empty': return '计划为空';
-    default: return status;
-  }
-}
-
-/** 看板可审阅动作：待批 / 修订中 / 空计划可编辑后批准。 */
-function isPlanActionable(status: PlanReviewStatus): boolean {
-  return status === 'pending' || status === 'editing' || status === 'revising' || status === 'empty';
-}
-
 /** Plan 看板本地 UI 态：跨 refreshInspector 保留编辑草稿，避免 todo 刷新冲掉输入。 */
-const planBoardUi: {
-  sessionId: string | null;
-  mode: 'preview' | 'edit';
-  draft: string | null;
-  otherOpen: boolean;
-  otherText: string;
-  busy: boolean;
-} = {
-  sessionId: null,
-  mode: 'preview',
-  draft: null,
-  otherOpen: false,
-  otherText: '',
-  busy: false,
-};
+const planBoardUi = createPlanBoardUiState();
 
 export type PlanBoardActions = {
   /** 批准：传入当前看板正文（含手改）。 */
@@ -696,14 +684,7 @@ export function resetPlanBoardDraft(nextPlan?: string): void {
 }
 
 function syncPlanBoardSession(sessionId: string | null): void {
-  if (planBoardUi.sessionId !== sessionId) {
-    planBoardUi.sessionId = sessionId;
-    planBoardUi.mode = 'preview';
-    planBoardUi.draft = null;
-    planBoardUi.otherOpen = false;
-    planBoardUi.otherText = '';
-    planBoardUi.busy = false;
-  }
+  syncPlanBoardUiSession(planBoardUi, sessionId);
 }
 
 /** 重渲前从 DOM 捞回草稿，防止 todo_updated 刷新冲掉用户输入。 */
@@ -724,18 +705,55 @@ function currentPlanDraft(fallback: string): string {
 
 let activeTab: TabKey = 'context';
 const openCoreTabs = new Set<TabKey>(['context']);
-const openFileTabs: string[] = [];
-const openFileTabChanges = new Map<string, FileChange>();
-let activeFilePath: string | null = null;
-let scopedFilePaths: string[] | null = null;
-let scopedFileChanges: FileChange[] | null = null;
 let workspaceMenuMode: 'new' | 'open' = 'new';
 /** Files tab 已展开的文件路径集合（可多开，互不互斥）。 */
 const expandedFiles = new Set<string>();
+let scopedFilePaths: string[] | null = null;
+let scopedFileChanges: FileChange[] | null = null;
 /** 各文件 diff 折叠区已揭开行数（path → regionStart → {top,bottom}）。 */
 const diffExpandsByPath = new Map<string, DiffRegionExpandMap>();
 let expandedMsg: string | null = null;
 let inspectorOpen = false; // 默认收起；首屏不由代码自动打开
+const inspectorSessionUi = new InspectorSessionUiStore();
+let inspectorUiSessionId: string | null = null;
+
+function syncInspectorSessionUi(): void {
+  const nextSessionId = state.activeSessionId;
+  if (nextSessionId === inspectorUiSessionId) return;
+  inspectorSessionUi.save(inspectorUiSessionId, {
+    tab: activeTab,
+    expandedFiles: [...expandedFiles],
+    expandedMessage: expandedMsg,
+  });
+  const restored = inspectorSessionUi.load(nextSessionId);
+  activeTab = restored.tab;
+  expandedFiles.clear();
+  for (const path of restored.expandedFiles) expandedFiles.add(path);
+  expandedMsg = restored.expandedMessage;
+  diffExpandsByPath.clear();
+  inspectorUiSessionId = nextSessionId;
+}
+
+function isFileExpanded(path: string): boolean {
+  return expandedFiles.has(path);
+}
+
+function toggleFileExpanded(path: string): boolean {
+  if (expandedFiles.has(path)) {
+    expandedFiles.delete(path);
+    // 折叠文件卡 → 丢弃临时揭开行数，下次展开重新全折
+    clearDiffExpandsForPath(diffExpandsByPath, path);
+    return false;
+  }
+  expandedFiles.add(path);
+  return true;
+}
+
+function ensureFileExpanded(path: string): void {
+  if (path) expandedFiles.add(path);
+}
+
+let customViewOpen = false;
 
 function getDiffExpands(path: string): DiffRegionExpandMap {
   return diffExpandsByPath.get(path) ?? {};
@@ -792,9 +810,9 @@ function renderInspectorHeader(): string {
         <div class="inspector-context__row"><span class="inspector-context__row-label">输入 token</span><span class="inspector-context__row-value">${fmtNum(c.inputTokens)}</span></div>
         <div class="inspector-context__row"><span class="inspector-context__row-label">输出 token</span><span class="inspector-context__row-value">${fmtNum(c.outputTokens)}</span></div>
         <div class="inspector-context__row"><span class="inspector-context__row-label">缓存读/写</span><span class="inspector-context__row-value">${fmtNum(c.cacheRead)} / ${fmtNum(c.cacheWrite)}</span></div>
-        <div class="inspector-context__row"><span class="inspector-context__row-label">创建时间</span><span class="inspector-context__row-value inspector-context__row-value--mono">${escapeHtml(c.startedAt)}</span></div>
-        <div class="inspector-context__row"><span class="inspector-context__row-label">最后活动</span><span class="inspector-context__row-value inspector-context__row-value--mono">${escapeHtml(c.lastActiveAt)}</span></div>
-        <div class="inspector-context__row inspector-context__row--full" style="grid-column: 1 / -1"><span class="inspector-context__row-label">会话 ID</span><span class="inspector-context__row-value inspector-context__row-value--mono">${escapeHtml(c.sessionId)}</span></div>
+        <div class="inspector-context__row"><span class="inspector-context__row-label">创建时间</span><span class="inspector-context__row-value">${escapeHtml(c.startedAt)}</span></div>
+        <div class="inspector-context__row"><span class="inspector-context__row-label">最后活动</span><span class="inspector-context__row-value">${escapeHtml(c.lastActiveAt)}</span></div>
+        <div class="inspector-context__row inspector-context__row--full"><span class="inspector-context__row-label">会话 ID</span><span class="inspector-context__row-value">${escapeHtml(c.sessionId)}</span></div>
       </div>
     </div>
   `;
@@ -813,7 +831,7 @@ function renderContextUsage(): string {
           <span><strong>${fmtNum(c.usedTokens)}</strong> / ${fmtNum(c.contextWindow)}</span>
         </div>
         <div class="inspector-bar">
-          <div class="inspector-bar__fill ${fillClass}" style="width: ${pct.toFixed(1)}%"></div>
+          <div class="inspector-bar__fill ${fillClass}" data-inspector-width="${pct.toFixed(1)}"></div>
         </div>
         <div class="inspector-bar-legend">
           <span class="inspector-bar-legend__item"><span class="inspector-bar-legend__dot inspector-bar-legend__dot--input"></span>输入 ${fmtNum(c.inputTokens)}</span>
@@ -826,7 +844,7 @@ function renderContextUsage(): string {
           <span><strong>${fmtNum(c.cacheRead)}</strong> / ${fmtNum(c.cacheWrite)}</span>
         </div>
         <div class="inspector-bar">
-          <div class="inspector-bar__fill inspector-bar__fill--cache" style="width: ${Math.min(100, (c.cacheRead / Math.max(1, c.contextWindow)) * 100 * 2).toFixed(1)}%;"></div>
+          <div class="inspector-bar__fill inspector-bar__fill--cache" data-inspector-width="${Math.min(100, (c.cacheRead / Math.max(1, c.contextWindow)) * 100 * 2).toFixed(1)}"></div>
         </div>
       </div>
       <div class="inspector-meter">
@@ -848,8 +866,8 @@ function renderContextBreakdown(): string {
   return `
     <div class="inspector-section">
       <h4 class="inspector-section__title">上下文拆分</h4>
-      <div class="inspector-bar" style="height:10px; border-radius:5px; overflow:hidden; display:flex; margin-bottom:8px;">
-        ${segs.map((b) => `<div class="inspector-bar__fill--${b.tone}" style="width:${b.pct.toFixed(1)}%; height:100%;"></div>`).join('')}
+      <div class="inspector-bar inspector-bar--breakdown">
+        ${segs.map((b) => `<div class="inspector-bar__fill--${b.tone}" data-inspector-width="${b.pct.toFixed(1)}"></div>`).join('')}
       </div>
       <div class="inspector-breakdown">
         ${c.breakdown.map((b) => {
@@ -996,9 +1014,13 @@ function renderFiles(): string {
       }
     }
   }
-  const title = scopedFilePaths?.length ? '本条消息改动' : '本次会话改动';
+  const scoped = Boolean(scopedFilePaths?.length || scopedFileChanges?.length);
+  const title = scoped ? '本条消息改动' : '本次会话改动';
   if (files.length === 0) {
-    return `<div class="inspector-files__head"><div class="inspector-files__titles"><h4 class="inspector-section__title">${title}</h4><span class="inspector-section__hint">0 个文件</span></div></div><div class="inspector-empty">${scopedFilePaths?.length ? '这条消息关联的文件已不在当前改动列表中。' : '会话内没有文件改动记录。可在配置中心打开「文件跟踪」或在消息中使用 <code>write_file</code> / <code>edit_file</code> 等工具触发跟踪。'}</div>`;
+    const empty = scoped
+      ? '这条消息关联的文件已不在当前改动列表中。'
+      : '会话内没有文件改动记录。可在配置中心打开「文件跟踪」或在消息中使用 <code>write_file</code> / <code>edit_file</code> 等工具触发跟踪。';
+    return `<div class="inspector-files__head"><div class="inspector-files__titles"><h4 class="inspector-section__title">${title}</h4><span class="inspector-section__hint">0 个文件</span></div></div><div class="inspector-empty">${empty}</div>`;
   }
   const add = sumAdd(files);
   const del = sumDel(files);
@@ -1034,9 +1056,6 @@ const FILE_REVEAL_ICON = `
     <path d="M10 14 21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M21 14v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
-  <svg class="inspector-file__reveal-chevron" width="9" height="9" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-    <path d="m3 4.5 3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-  </svg>
 `;
 
 const FILE_CHEV_ICON = `
@@ -1059,31 +1078,6 @@ const FILE_VIEW_ICON = `
   </svg>
 `;
 
-function isBoardEditableKind(kind: FilePreviewKind): boolean {
-  return kind === 'markdown' || kind === 'docx' || kind === 'pptx' || kind === 'xlsx';
-}
-
-function renderFileEditContent(file: FileChange, kind: FilePreviewKind): string {
-  const source = fileContentCache.get(file.path);
-  const binary = fileBinaryCache.get(file.path);
-  const error = fileContentErrors.get(file.path);
-  if (error) return `<div class="inspector-file__preview-state">${escapeHtml(error)}</div>`;
-  if (kind === 'markdown') {
-    if (source == null) return '<div class="inspector-file__preview-state">正在加载 Markdown…</div>';
-    return `<textarea class="inspector-file-editor inspector-file-editor--markdown" data-file-editor="${escapeHtml(file.path)}" spellcheck="false">${escapeHtml(source)}</textarea>`;
-  }
-  if ((kind === 'docx' || kind === 'pptx') && binary) {
-    const loadingLabel = kind === 'docx' ? 'Word 页面' : 'PPT 幻灯片';
-    return `<div class="inspector-office-preview inspector-office-preview--${kind} inspector-office-page-editor-host" data-office-page-editor="${escapeHtml(file.path)}" data-office-kind="${kind}">
-      <div class="inspector-file__preview-state">正在打开可编辑${loadingLabel}…</div>
-    </div>`;
-  }
-  if (kind === 'xlsx' && binary) {
-    return `<div class="inspector-office-editor inspector-office-editor--xlsx" data-office-editor="${escapeHtml(file.path)}" data-office-kind="xlsx"><div class="inspector-file__preview-state">正在加载工作表编辑器…</div></div>`;
-  }
-  return renderPendingFileLoadState(file.path, `正在加载${previewLabel(kind)}…`);
-}
-
 function previewLabel(kind: FilePreviewKind): string {
   const labels: Record<FilePreviewKind, string> = {
     html: '页面预览',
@@ -1100,8 +1094,32 @@ function previewLabel(kind: FilePreviewKind): string {
   return labels[kind];
 }
 
-function renderPendingFileLoadState(path: string, label: string): string {
-  return `<div class="inspector-file__preview-state" data-file-load-pending="${escapeHtml(path)}">${escapeHtml(label)}</div>`;
+function isBoardEditableKind(kind: FilePreviewKind): boolean {
+  return kind === 'markdown' || kind === 'docx' || kind === 'pptx' || kind === 'xlsx';
+}
+
+function renderPendingFileLoadState(filePath: string, label: string): string {
+  return `<div class="inspector-file__preview-state" data-file-load-pending="${escapeHtml(filePath)}">${escapeHtml(label)}</div>`;
+}
+
+function renderFileEditContent(file: FileChange, kind: FilePreviewKind): string {
+  const source = fileContentCache.get(file.path);
+  const binary = fileBinaryCache.get(file.path);
+  const error = fileContentErrors.get(file.path);
+  if (error) return `<div class="inspector-file__preview-state">${escapeHtml(error)}</div>`;
+  if (kind === 'markdown') {
+    return source == null
+      ? renderPendingFileLoadState(file.path, '正在加载 Markdown…')
+      : `<textarea class="inspector-file-editor inspector-file-editor--markdown" data-file-editor="${escapeHtml(file.path)}" spellcheck="false">${escapeHtml(source)}</textarea>`;
+  }
+  if ((kind === 'docx' || kind === 'pptx') && binary) {
+    const label = kind === 'docx' ? 'Word 页面' : 'PPT 幻灯片';
+    return `<div class="inspector-office-preview inspector-office-preview--${kind} inspector-office-page-editor-host" data-office-page-editor="${escapeHtml(file.path)}" data-office-kind="${kind}"><div class="inspector-file__preview-state">正在打开可编辑${label}…</div></div>`;
+  }
+  if (kind === 'xlsx' && binary) {
+    return `<div class="inspector-office-editor inspector-office-editor--xlsx" data-office-editor="${escapeHtml(file.path)}" data-office-kind="xlsx"><div class="inspector-file__preview-state">正在加载工作表编辑器…</div></div>`;
+  }
+  return renderPendingFileLoadState(file.path, `正在加载${previewLabel(kind)}…`);
 }
 
 function renderFilePreviewContent(file: FileChange, kind: FilePreviewKind): string {
@@ -1110,10 +1128,10 @@ function renderFilePreviewContent(file: FileChange, kind: FilePreviewKind): stri
   const error = fileContentErrors.get(file.path);
   if (error) return `<div class="inspector-file__preview-state">${escapeHtml(error)}</div>`;
   if (kind === 'legacy-office') {
-    return '<div class="inspector-file__preview-state">旧版 .doc / .ppt 为二进制格式，离线预览暂不支持。请另存为 .docx / .pptx 后查看。</div>';
+    return '<div class="inspector-file__preview-state">旧版 .doc / .ppt 暂不支持离线预览，请另存为 .docx / .pptx。</div>';
   }
   if (kind === 'html' && source != null) {
-    return `<iframe class="inspector-file__preview-frame" title="${escapeHtml(file.name)} 页面预览" sandbox="allow-scripts allow-modals" srcdoc="${escapeHtml(buildOfflinePreviewDocument(file.path, source))}"></iframe>`;
+    return `<iframe class="inspector-file__preview-frame" title="${escapeHtml(file.name)} 页面预览" sandbox="allow-scripts allow-modals" srcdoc="${escapeHtml(buildHtmlPreviewDocument(file.path, source))}"></iframe>`;
   }
   if (kind === 'svg' && source != null) {
     return `<div class="inspector-file__svg-preview"><img alt="${escapeHtml(file.name)}" data-file-svg-preview="${escapeHtml(file.path)}"></div>`;
@@ -1127,58 +1145,63 @@ function renderFilePreviewContent(file: FileChange, kind: FilePreviewKind): stri
       : `<div class="inspector-file__image-preview"><img alt="${escapeHtml(file.name)}" data-file-binary-preview="${escapeHtml(file.path)}"></div>`;
   }
   if ((kind === 'docx' || kind === 'pptx' || kind === 'xlsx') && binary) {
-    const loadingLabel = kind === 'docx' ? '文档' : kind === 'pptx' ? '幻灯片' : '工作簿';
-    return `<div class="inspector-office-preview inspector-office-preview--${kind}" data-office-preview="${escapeHtml(file.path)}" data-office-kind="${kind}"><div class="inspector-file__preview-state">正在渲染${loadingLabel}…</div></div>`;
+    const label = kind === 'docx' ? '文档' : kind === 'pptx' ? '幻灯片' : '工作簿';
+    return `<div class="inspector-office-preview inspector-office-preview--${kind}" data-office-preview="${escapeHtml(file.path)}" data-office-kind="${kind}"><div class="inspector-file__preview-state">正在渲染${label}…</div></div>`;
   }
   return renderPendingFileLoadState(file.path, `正在加载${previewLabel(kind)}…`);
 }
 
-function renderFileViewer(f: FileChange): string {
-  const codeHtml = f.diff.length > 0
-    ? renderDiffPanelHtml(f.diff, { escapeHtml, filename: f.name, expands: getDiffExpands(f.path) })
-    : fileDiffHydrateInflight.has(f.path)
+function renderFileViewer(file: FileChange): string {
+  const kind = filePreviewKind(file.path);
+  const previewable = file.status !== 'deleted' && kind !== 'code';
+  const hasCodeView = previewable && isTextPreviewKind(kind);
+  const editable = file.status !== 'deleted' && isBoardEditableKind(kind);
+  const editing = editable && fileEditMode.has(file.path);
+  const saving = fileSaveInflight.has(file.path);
+  const viewMode: FileViewMode = hasCodeView
+    ? (fileViewMode.get(file.path) ?? 'preview')
+    : previewable ? 'preview' : 'code';
+  const codeHtml = file.diff.length > 0
+    ? renderDiffPanelHtml(file.diff, {
+      escapeHtml,
+      filename: file.name,
+      expands: getDiffExpands(file.path),
+    })
+    : fileDiffHydrateInflight.has(file.path)
       ? '<div class="inspector-file__diff-empty">正在读取文件 diff…</div>'
-      : f.status === 'deleted'
+      : file.status === 'deleted'
         ? '<div class="inspector-file__diff-empty">文件已删除（本轮曾修改后移除）</div>'
         : '<div class="inspector-file__diff-empty">暂无 diff 内容（可尝试重新展开或确认文件仍在本地）</div>';
-  const previewKind = filePreviewKind(f.path);
-  const previewable = f.status !== 'deleted' && previewKind !== 'code';
-  const hasCodeView = previewable && isTextPreviewKind(previewKind);
-  const editable = f.status !== 'deleted' && isBoardEditableKind(previewKind);
-  const editing = editable && fileEditMode.has(f.path);
-  const saving = fileSaveInflight.has(f.path);
-  const viewMode: FileViewMode = hasCodeView
-    ? (fileViewMode.get(f.path) ?? 'preview')
-    : previewable ? 'preview' : 'code';
-  const previewHtml = renderFilePreviewContent(f, previewKind);
-  const editHtml = renderFileEditContent(f, previewKind);
-  const editButtons = editable
-    ? `<div class="inspector-file__viewer-actions">
-        ${editing ? `<button type="button" class="inspector-file__icon-toggle" data-file-edit-toggle="${escapeHtml(f.path)}" aria-label="切换到查看模式" title="查看">${FILE_VIEW_ICON}</button>`
-      : `<button type="button" class="inspector-file__icon-toggle" data-file-edit-toggle="${escapeHtml(f.path)}" aria-label="切换到编辑模式" title="编辑">${FILE_EDIT_ICON}</button>`}
-        ${editing ? `<button type="button" class="inspector-file__save" data-file-save="${escapeHtml(f.path)}" ${saving ? 'disabled' : ''}>${saving ? '保存中…' : '保存'}</button>` : ''}
-      </div>`
+  if (!previewable) return codeHtml;
+  const editControls = editable
+    ? `${editing
+      ? `<button type="button" class="inspector-file__icon-toggle" data-file-edit-toggle="${escapeHtml(file.path)}" aria-label="切换到查看模式" title="查看">${FILE_VIEW_ICON}</button>`
+      : `<button type="button" class="inspector-file__icon-toggle" data-file-edit-toggle="${escapeHtml(file.path)}" aria-label="切换到编辑模式" title="编辑">${FILE_EDIT_ICON}</button>`}
+      ${editing ? `<button type="button" class="inspector-file__save" data-file-save="${escapeHtml(file.path)}" ${saving ? 'disabled' : ''}>${saving ? '保存中…' : '保存'}</button>` : ''}`
     : '';
-  const viewerHtml = previewable
-    ? `<div class="inspector-file__viewer">
+  return `<div class="inspector-file__viewer">
         <div class="inspector-file__viewer-toolbar">
-          <span class="inspector-file__viewer-label">${editing ? '编辑' : viewMode === 'preview' ? previewLabel(previewKind) : '代码改动'}</span>
+          <span class="inspector-file__viewer-label">${editing ? '编辑' : viewMode === 'preview' ? previewLabel(kind) : '代码改动'}</span>
           <div class="inspector-file__viewer-actions">
-            ${hasCodeView && !editing ? `<button type="button" class="inspector-file__view-toggle" data-file-view-toggle="${escapeHtml(f.path)}" aria-pressed="${viewMode === 'code'}">${viewMode === 'preview' ? '查看代码' : '查看预览'}</button>` : ''}
-            ${editButtons}
+            ${hasCodeView && !editing ? `<button type="button" class="inspector-file__view-toggle" data-file-view-toggle="${escapeHtml(file.path)}" aria-pressed="${viewMode === 'code'}">${viewMode === 'preview' ? '查看代码' : '查看预览'}</button>` : ''}
+            ${editControls}
           </div>
         </div>
-        ${editing ? editHtml : viewMode === 'preview' ? previewHtml : codeHtml}
-      </div>`
-    : codeHtml;
-  return viewerHtml;
+        ${editing
+          ? renderFileEditContent(file, kind)
+          : viewMode === 'preview'
+            ? renderFilePreviewContent(file, kind)
+            : codeHtml}
+      </div>`;
 }
 
 function renderFile(f: FileChange): string {
+  const isActive = isFileExpanded(f.path);
   const iconChar = f.status === 'added' ? '+' : f.status === 'deleted' ? '−' : 'M';
   const iconTone = f.status === 'added' ? 'added' : f.status === 'deleted' ? 'deleted' : 'modified';
   const statusLabel = f.status === 'added' ? '新增' : f.status === 'deleted' ? '删除' : '修改';
   const { dir, name } = splitFilePathDisplay(f.path);
+  const viewerHtml = renderFileViewer(f);
   const addHtml = f.added > 0 ? `<span class="inspector-file__add">+${formatInspectorDiffCount(f.added)}</span>` : '';
   const delHtml = f.removed > 0 ? `<span class="inspector-file__del">-${formatInspectorDiffCount(f.removed)}</span>` : '';
   const revealDisabled = f.status === 'deleted';
@@ -1186,9 +1209,9 @@ function renderFile(f: FileChange): string {
     ? `<button type="button" class="inspector-file__reveal is-disabled" disabled title="文件已删除" aria-label="文件已删除">${FILE_REVEAL_ICON}</button>`
     : `<button type="button" class="inspector-file__reveal" data-file-reveal="${escapeHtml(f.path)}" title="打开方式" aria-label="${escapeHtml(name)} 的打开方式" aria-haspopup="menu" aria-expanded="false">${FILE_REVEAL_ICON}</button>`;
   return `
-    <article class="inspector-file inspector-file--${iconTone}" data-file-path="${escapeHtml(f.path)}" data-file-status="${escapeHtml(f.status)}">
+    <article class="inspector-file inspector-file--${iconTone}${isActive ? ' is-active' : ''}" data-file-path="${escapeHtml(f.path)}" data-file-status="${escapeHtml(f.status)}">
       <div class="inspector-file__head-row">
-        <button type="button" class="inspector-file__head" data-file-toggle aria-label="在标签页中打开 ${escapeHtml(name)}">
+        <button type="button" class="inspector-file__head" data-file-toggle aria-expanded="${isActive}">
           <span class="inspector-file__icon inspector-file__icon--${iconTone}" aria-hidden="true">${iconChar}</span>
           <span class="inspector-file__copy">
             <span class="inspector-file__pathline" title="${escapeHtml(f.path)}">${dir ? `<span class="inspector-file__path-dir">${escapeHtml(dir)}</span>` : ''}<span class="inspector-file__path-name">${escapeHtml(name)}</span></span>
@@ -1201,48 +1224,20 @@ function renderFile(f: FileChange): string {
         </button>
         ${revealBtn}
       </div>
+      ${isActive ? `<div class="inspector-file__diff">${viewerHtml}</div>` : ''}
     </article>
-  `;
-}
-
-function renderFileTabView(f: FileChange): string {
-  const iconTone = f.status === 'added' ? 'added' : f.status === 'deleted' ? 'deleted' : 'modified';
-  const statusLabel = f.status === 'added' ? '新增' : f.status === 'deleted' ? '删除' : '修改';
-  const { dir, name } = splitFilePathDisplay(f.path);
-  const addHtml = f.added > 0 ? `<span class="inspector-file__add">+${formatInspectorDiffCount(f.added)}</span>` : '';
-  const delHtml = f.removed > 0 ? `<span class="inspector-file__del">-${formatInspectorDiffCount(f.removed)}</span>` : '';
-  const revealBtn = f.status === 'deleted'
-    ? `<button type="button" class="inspector-file__reveal is-disabled" disabled title="文件已删除" aria-label="文件已删除">${FILE_REVEAL_ICON}</button>`
-    : `<button type="button" class="inspector-file__reveal" data-file-reveal="${escapeHtml(f.path)}" title="打开方式" aria-label="${escapeHtml(name)} 的打开方式" aria-haspopup="menu" aria-expanded="false">${FILE_REVEAL_ICON}</button>`;
-  return `
-    <section class="inspector-file-tab-view inspector-file-tab-view--${iconTone}" data-file-path="${escapeHtml(f.path)}" data-file-status="${escapeHtml(f.status)}">
-      <div class="inspector-file-tab-view__header">
-        <div class="inspector-file-tab-view__titles">
-          <div class="inspector-file-tab-view__name" title="${escapeHtml(f.path)}">${dir ? `<span class="inspector-file__path-dir">${escapeHtml(dir)}</span>` : ''}<span class="inspector-file__path-name">${escapeHtml(name)}</span></div>
-          <div class="inspector-file-tab-view__meta">
-            <span class="inspector-file__status-badge inspector-file__status-badge--${iconTone}">${statusLabel}</span>
-            <span class="inspector-file__stats">${addHtml}${delHtml}</span>
-          </div>
-        </div>
-        ${revealBtn}
-      </div>
-      <div class="inspector-file-tab-view__content">${renderFileViewer(f)}</div>
-    </section>
   `;
 }
 
 function mountFilePreviews(root: HTMLElement): void {
   root.querySelectorAll<HTMLElement>('[data-file-load-pending]').forEach((element) => {
-    const path = element.getAttribute('data-file-load-pending');
-    if (!path) return;
-    void hydrateFileContentIfNeeded(path);
+    const filePath = element.getAttribute('data-file-load-pending');
+    if (filePath) void hydrateFileContentIfNeeded(filePath);
   });
   root.querySelectorAll<HTMLImageElement>('[data-file-svg-preview]').forEach((image) => {
-    const path = image.getAttribute('data-file-svg-preview');
-    const source = path ? fileContentCache.get(path) : undefined;
+    const filePath = image.getAttribute('data-file-svg-preview');
+    const source = filePath ? fileContentCache.get(filePath) : undefined;
     if (!source) return;
-    // SVG 作为 image 文档渲染，脚本不会执行；再做一次白名单净化，移除事件与
-    // foreignObject，保持离线矢量显示且不把不可信 SVG 注入宿主 DOM。
     const sanitized = DOMPurify.sanitize(source, {
       USE_PROFILES: { svg: true, svgFilters: true },
       FORBID_TAGS: ['script', 'foreignObject'],
@@ -1251,18 +1246,19 @@ function mountFilePreviews(root: HTMLElement): void {
     image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(sanitized)}`;
   });
   root.querySelectorAll<HTMLElement>('[data-file-binary-preview]').forEach((element) => {
-    const path = element.getAttribute('data-file-binary-preview');
-    const payload = path ? fileBinaryCache.get(path) : undefined;
+    const filePath = element.getAttribute('data-file-binary-preview');
+    const payload = filePath ? fileBinaryCache.get(filePath) : undefined;
     if (!payload) return;
     const dataUrl = `data:${payload.mimeType};base64,${payload.base64}`;
-    if (element instanceof HTMLIFrameElement) element.src = dataUrl;
-    else if (element instanceof HTMLImageElement) element.src = dataUrl;
+    if (element instanceof HTMLIFrameElement || element instanceof HTMLImageElement) {
+      element.src = dataUrl;
+    }
   });
   root.querySelectorAll<HTMLElement>('[data-office-preview]').forEach((container) => {
     if (container.dataset.previewMounted === 'true') return;
-    const path = container.getAttribute('data-office-preview');
+    const filePath = container.getAttribute('data-office-preview');
     const kind = container.getAttribute('data-office-kind');
-    const payload = path ? fileBinaryCache.get(path) : undefined;
+    const payload = filePath ? fileBinaryCache.get(filePath) : undefined;
     if (!payload || (kind !== 'docx' && kind !== 'pptx' && kind !== 'xlsx')) return;
     container.dataset.previewMounted = 'true';
     void import('../office-preview')
@@ -1272,51 +1268,51 @@ function mountFilePreviews(root: HTMLElement): void {
         else if (kind === 'pptx') await renderPptxPreview(payload.base64, container);
         else await renderXlsxPreview(payload.base64, container);
       })
-      .catch((err: unknown) => {
+      .catch((error: unknown) => {
         if (!container.isConnected) return;
-        container.innerHTML = `<div class="inspector-file__preview-state">${escapeHtml(`预览渲染失败：${err instanceof Error ? err.message : String(err)}`)}</div>`;
+        container.innerHTML = `<div class="inspector-file__preview-state">${escapeHtml(`预览渲染失败：${error instanceof Error ? error.message : String(error)}`)}</div>`;
       });
   });
   root.querySelectorAll<HTMLElement>('[data-office-page-editor]').forEach((container) => {
     if (container.dataset.previewMounted === 'true') return;
-    const path = container.getAttribute('data-office-page-editor');
+    const filePath = container.getAttribute('data-office-page-editor');
     const kind = container.getAttribute('data-office-kind');
-    const payload = path ? fileBinaryCache.get(path) : undefined;
+    const payload = filePath ? fileBinaryCache.get(filePath) : undefined;
     if (!payload || (kind !== 'docx' && kind !== 'pptx')) return;
     container.dataset.previewMounted = 'true';
     void import('../office-preview')
       .then(async ({ renderDocxPreview, renderPptxPreview }) => {
         if (!container.isConnected) return;
-        if (kind === 'docx') await renderDocxPreview(payload.base64, container, { editable: true });
-        else await renderPptxPreview(payload.base64, container, { editable: true });
+        if (kind === 'docx') {
+          await renderDocxPreview(payload.base64, container, { editable: true });
+        } else {
+          await renderPptxPreview(payload.base64, container, { editable: true });
+        }
       })
-      .catch((err: unknown) => {
+      .catch((error: unknown) => {
         if (!container.isConnected) return;
-        container.innerHTML = `<div class="inspector-file__preview-state">${escapeHtml(`编辑页面打开失败：${err instanceof Error ? err.message : String(err)}`)}</div>`;
+        container.innerHTML = `<div class="inspector-file__preview-state">${escapeHtml(`编辑页面打开失败：${error instanceof Error ? error.message : String(error)}`)}</div>`;
       });
   });
   root.querySelectorAll<HTMLElement>('[data-office-editor]').forEach((container) => {
     if (container.dataset.editorMounted === 'true') return;
-    const path = container.getAttribute('data-office-editor');
+    const filePath = container.getAttribute('data-office-editor');
     const kind = container.getAttribute('data-office-kind');
-    const payload = path ? fileBinaryCache.get(path) : undefined;
-    if (!payload || (kind !== 'docx' && kind !== 'pptx' && kind !== 'xlsx')) return;
+    const payload = filePath ? fileBinaryCache.get(filePath) : undefined;
+    if (!payload || kind !== 'xlsx') return;
     container.dataset.editorMounted = 'true';
     void import('../office-edit')
       .then(async ({ extractXlsxSheet }) => {
-        if (!container.isConnected) return;
-        if (kind !== 'xlsx') return;
         const sheet = await extractXlsxSheet(payload.base64);
-        if (!container.isConnected) return;
+        if (!container.isConnected || !filePath) return;
         const { mountXlsxEditor } = await import('../xlsx-editor');
-        if (!container.isConnected) return;
-        container.innerHTML = `<div class="inspector-xlsx-editor" data-xlsx-editor="${escapeHtml(path || '')}"></div>`;
-        const root = container.querySelector<HTMLElement>('[data-xlsx-editor]');
-        if (root) mountXlsxEditor(root, sheet);
+        container.innerHTML = `<div class="inspector-xlsx-editor" data-xlsx-editor="${escapeHtml(filePath)}"></div>`;
+        const editor = container.querySelector<HTMLElement>('[data-xlsx-editor]');
+        if (editor) mountXlsxEditor(editor, sheet);
       })
-      .catch((err: unknown) => {
+      .catch((error: unknown) => {
         if (!container.isConnected) return;
-        container.innerHTML = `<div class="inspector-file__preview-state">${escapeHtml(`编辑内容加载失败：${err instanceof Error ? err.message : String(err)}`)}</div>`;
+        container.innerHTML = `<div class="inspector-file__preview-state">${escapeHtml(`编辑内容加载失败：${error instanceof Error ? error.message : String(error)}`)}</div>`;
       });
   });
 }
@@ -1508,23 +1504,17 @@ function renderBody(): void {
   // Detach the native remote view first so it can never cover stale UI bounds.
   hideBrowserPanelView();
   let html = '';
-  if (activeTab === 'files') {
-    if (activeFilePath) {
-      const file = currentFileChangeForPath(activeFilePath);
-      html = file
-        ? renderFileTabView(file)
-        : '<div class="inspector-empty">这个文件已不在当前会话的改动列表中。</div>';
-    } else {
-      html = renderFiles();
-    }
-  }
+  if (activeTab === 'files') html = renderFiles();
   else if (activeTab === 'context') html = renderContext();
   else if (activeTab === 'plan') html = renderPlan();
   else if (activeTab === 'kanban') html = renderKanban();
   else if (activeTab === 'collaboration') html = renderCollaboration();
-  else if (activeTab === 'browser') html = renderBrowserPanel({ workspaceChrome: true });
+  else if (activeTab === 'browser') html = renderBrowserPanel();
   body.classList.toggle('is-team-collaboration', activeTab === 'collaboration');
   body.innerHTML = html;
+  body.querySelectorAll<HTMLElement>('[data-inspector-width]').forEach((fill) => {
+    setRuntimeStyle(fill, 'width', `${fill.dataset.inspectorWidth ?? '0'}%`);
+  });
   if (activeTab === 'kanban') activateKanbanInspectorTab();
   if (activeTab === 'collaboration') activateTeamCollaborationBoard();
   if (activeTab === 'files') applyDiffSyntaxHighlights(body, escapeHtml);
@@ -1554,203 +1544,64 @@ const TAB_ICONS: Record<TabKey, string> = {
 
 const TAB_CLOSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>';
 
-function browserTabTitle(tab: ReturnType<typeof getBrowserWorkspaceState>['tabs'][number]): string {
-  return tab.title.trim() || (tab.url && tab.url !== 'about:blank' ? tab.url : '新标签页');
-}
-
-function renderWorkspaceTab(
-  id: string,
-  label: string,
-  icon: string,
-  active: boolean,
-  count?: number,
-): string {
+function renderWorkspaceTab(id: string, label: string, icon: string, active: boolean, count?: number): string {
   return `<div class="chat-inspector__tab${active ? ' is-active' : ''}" role="presentation">
-    <button type="button" class="chat-inspector__tab-select" data-workspace-tab="${escapeHtml(id)}"
-      role="tab" aria-selected="${active}" title="${escapeHtml(label)}">
-      ${icon}<span class="chat-inspector__tab-label">${escapeHtml(label)}</span>
-      ${typeof count === 'number' ? `<span class="chat-inspector__tab-count">${count}</span>` : ''}
+    <button type="button" class="chat-inspector__tab-select" data-workspace-tab="${escapeHtml(id)}" role="tab" aria-selected="${active}" title="${escapeHtml(label)}">
+      ${icon}<span class="chat-inspector__tab-label">${escapeHtml(label)}</span>${typeof count === 'number' ? `<span class="chat-inspector__tab-count">${count}</span>` : ''}
     </button>
-    <button type="button" class="chat-inspector__tab-close" data-workspace-tab-close="${escapeHtml(id)}"
-      aria-label="关闭 ${escapeHtml(label)}" title="关闭标签页">${TAB_CLOSE_ICON}</button>
+    <button type="button" class="chat-inspector__tab-close" data-workspace-tab-close="${escapeHtml(id)}" aria-label="关闭 ${escapeHtml(label)}" title="关闭标签页">${TAB_CLOSE_ICON}</button>
   </div>`;
 }
 
-function renderTabs(): void {
-  const teamSession = isExternalTeamSession();
-  if (activeTab === 'collaboration' && !teamSession) {
-    stopTeamCollaborationPolling();
-    activeTab = 'context';
-  }
-  if (teamSession) openCoreTabs.add('collaboration');
-  else openCoreTabs.delete('collaboration');
-  // 兼容仍挂载旧静态节点的轻量测试/嵌入壳；正式页面使用下面的动态 Tab。
-  const legacyCollaborationTab = document.getElementById('ins-collaboration-tab');
-  if (legacyCollaborationTab) {
-    legacyCollaborationTab.hidden = !teamSession;
-    legacyCollaborationTab.classList.toggle('is-hidden', !teamSession);
-  }
-  const legacyCollaborationCount = document.getElementById('ins-collaboration-count');
-  if (legacyCollaborationCount) legacyCollaborationCount.textContent = String(teamCollaborationTaskCount());
-  const tabs = document.getElementById('chat-inspector-tabs');
-  const files = currentFileChanges();
-  const tasks = (state.kanbanBoard as { tasks?: unknown[] } | null)?.tasks;
-  const counts: Partial<Record<TabKey, number>> = {
-    context: computeOriginalMessages().length,
-    files: files.length,
-    kanban: tasks?.length ?? 0,
-    collaboration: teamCollaborationTaskCount(),
-  };
-  const browser = getBrowserWorkspaceState();
-  const coreHtml = [...openCoreTabs]
-    .filter((tab) => tab !== 'browser' && (tab !== 'collaboration' || teamSession))
-    .map((tab) => renderWorkspaceTab(
-      `core:${tab}`,
-      TAB_LABELS[tab],
-      TAB_ICONS[tab],
-      activeTab === tab && !activeFilePath,
-      counts[tab],
-    )).join('');
-  const fileHtml = openFileTabs.map((path) => {
-    const file = files.find((item) => item.path === path) ?? openFileTabChanges.get(path);
-    return renderWorkspaceTab(
-      `file:${path}`,
-      file?.name || splitFilePathDisplay(path).name,
-      TAB_ICONS.files,
-      activeTab === 'files' && activeFilePath === path,
-    );
-  }).join('');
-  const browserHtml = browser.tabs.length > 0
-    ? browser.tabs.map((tab) => renderWorkspaceTab(
-      `browser:${tab.id}`,
-      browserTabTitle(tab),
-      TAB_ICONS.browser,
-      activeTab === 'browser' && browser.tab_id === tab.id,
-    )).join('')
-    : activeTab === 'browser'
-      ? renderWorkspaceTab('browser:new', '新标签页', TAB_ICONS.browser, true)
-      : '';
-  if (tabs) tabs.innerHTML = coreHtml + fileHtml + browserHtml;
-  renderInspectorTabMenu();
-  updateOpenTabMenuToggleVisibility();
-  window.requestAnimationFrame?.(() => updateOpenTabMenuToggleVisibility());
+function createInspectorTabIcon(markup: string): SVGElement {
+  // TAB_ICONS is a local constant map, not renderer input. Parse it as a
+  // static SVG node so menu labels and ids never cross an HTML interpolation
+  // boundary.
+  const parsed = new DOMParser().parseFromString(markup, 'image/svg+xml').documentElement;
+  if (parsed.nodeName.toLowerCase() !== 'svg') throw new Error('invalid inspector tab icon');
+  return document.importNode(parsed, true) as unknown as SVGElement;
 }
 
-function activateWorkspaceTab(id: string): void {
-  if (id.startsWith('core:')) {
-    const tab = id.slice(5) as TabKey;
-    openCoreTabs.add(tab);
-    if (tab === 'files') {
-      scopedFilePaths = null;
-      scopedFileChanges = null;
-    }
-    activeFilePath = null;
-    setTab(tab);
-    return;
-  }
-  if (id.startsWith('file:')) {
-    const path = id.slice(5);
-    rememberOpenFileTab(path);
-    activeFilePath = path;
-    setTab('files');
-    ensureInspectorWidthForFileDiff();
-    void hydrateFileDiffIfNeeded(path);
-    void hydrateFileContentIfNeeded(path);
-    return;
-  }
-  if (id.startsWith('browser:')) {
-    const tabId = id.slice(8);
-    setTab('browser');
-    if (tabId && tabId !== 'new') selectBrowserWorkspaceTab(tabId);
-  }
-}
-
-function fallbackWorkspaceTab(): void {
-  activeFilePath = null;
-  const fallback = [...openCoreTabs].find((tab) => tab !== 'collaboration' || isExternalTeamSession());
-  if (fallback) {
-    setTab(fallback);
-    return;
-  }
-  openCoreTabs.add('context');
-  setTab('context');
-}
-
-function closeWorkspaceTab(id: string): void {
-  if (id.startsWith('core:')) {
-    const tab = id.slice(5) as TabKey;
-    openCoreTabs.delete(tab);
-    if (activeTab === tab && !activeFilePath) fallbackWorkspaceTab();
-    else renderTabs();
-    return;
-  }
-  if (id.startsWith('file:')) {
-    const path = id.slice(5);
-    const index = openFileTabs.indexOf(path);
-    if (index >= 0) openFileTabs.splice(index, 1);
-    openFileTabChanges.delete(path);
-    expandedFiles.delete(path);
-    if (activeFilePath === path) fallbackWorkspaceTab();
-    else renderTabs();
-    return;
-  }
-  if (id.startsWith('browser:')) {
-    const tabId = id.slice(8);
-    if (tabId && tabId !== 'new') closeBrowserWorkspaceTab(tabId);
-    else fallbackWorkspaceTab();
-  }
-}
-
-function openWorkspaceEntry(id: string): void {
-  if (id === 'browser' || id === 'browser:new') {
-    openBrowserWorkbench({ createTab: id === 'browser:new' });
-    return;
-  }
-  const tab = id as TabKey;
-  if (!['context', 'files', 'plan', 'kanban', 'collaboration'].includes(tab)) return;
-  if (tab === 'collaboration' && !isExternalTeamSession()) return;
-  openCoreTabs.add(tab);
-  if (tab === 'files') {
-    scopedFilePaths = null;
-    scopedFileChanges = null;
-  }
-  activeFilePath = null;
-  setTab(tab);
+function appendInspectorTabMenuItem(
+  menu: HTMLElement,
+  item: { id: string; label: string; icon: string },
+  attribute: 'data-workspace-tab' | 'data-workspace-entry',
+): void {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.setAttribute('role', 'menuitem');
+  button.setAttribute(attribute, item.id);
+  button.append(createInspectorTabIcon(item.icon));
+  const label = document.createElement('span');
+  label.textContent = item.label;
+  button.append(label);
+  menu.append(button);
 }
 
 function renderInspectorTabMenu(): void {
   const menu = document.getElementById('inspector-tab-menu');
   if (!menu) return;
+  const teamSession = isExternalTeamSession();
+  menu.replaceChildren();
   if (workspaceMenuMode === 'open') {
-    const teamSession = isExternalTeamSession();
-    const browser = getBrowserWorkspaceState();
-    const items = [
-      ...[...openCoreTabs]
-        .filter((tab) => tab !== 'collaboration' || teamSession)
-        .map((tab) => ({ id: `core:${tab}`, label: TAB_LABELS[tab], icon: TAB_ICONS[tab] })),
-      ...openFileTabs.map((path) => ({
-        id: `file:${path}`,
-        label: splitFilePathDisplay(path).name,
-        icon: TAB_ICONS.files,
-      })),
-      ...browser.tabs.map((tab) => ({
-        id: `browser:${tab.id}`,
-        label: browserTabTitle(tab),
-        icon: TAB_ICONS.browser,
-      })),
-      ...(activeTab === 'browser' && browser.tabs.length === 0
-        ? [{ id: 'browser:new', label: '新标签页', icon: TAB_ICONS.browser }]
-        : []),
-    ];
-    menu.innerHTML = `
-      <div class="chat-inspector__tab-menu-label">已打开</div>
-      ${items.map((item) => `<button type="button" role="menuitem" data-workspace-tab="${escapeHtml(item.id)}">
-        ${item.icon}<span>${escapeHtml(item.label)}</span>
-      </button>`).join('') || '<div class="chat-inspector__tab-menu-empty">暂无标签页</div>'}`;
+    const items = [...openCoreTabs]
+      .filter((tab) => tab !== 'collaboration' || teamSession)
+      .map((tab) => ({ id: `core:${tab}`, label: TAB_LABELS[tab], icon: TAB_ICONS[tab] }));
+    const heading = document.createElement('div');
+    heading.className = 'chat-inspector__tab-menu-label';
+    heading.textContent = '已打开';
+    menu.append(heading);
+    if (items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'chat-inspector__tab-menu-empty';
+      empty.textContent = '暂无标签页';
+      menu.append(empty);
+    } else {
+      items.forEach((item) => appendInspectorTabMenuItem(menu, item, 'data-workspace-tab'));
+    }
     return;
   }
-  const teamSession = isExternalTeamSession();
-  const entries: Array<{ id: string; label: string; icon: string; hint?: string }> = [
+  const entries: Array<{ id: string; label: string; icon: string }> = [
     { id: 'context', label: TAB_LABELS.context, icon: TAB_ICONS.context },
     { id: 'files', label: TAB_LABELS.files, icon: TAB_ICONS.files },
     { id: 'plan', label: TAB_LABELS.plan, icon: TAB_ICONS.plan },
@@ -1758,11 +1609,11 @@ function renderInspectorTabMenu(): void {
     ...(teamSession ? [{ id: 'collaboration', label: TAB_LABELS.collaboration, icon: TAB_ICONS.collaboration }] : []),
     { id: 'browser:new', label: TAB_LABELS.browser, icon: TAB_ICONS.browser },
   ];
-  menu.innerHTML = `
-    <div class="chat-inspector__tab-menu-label">新增页面</div>
-    ${entries.map((item) => `<button type="button" role="menuitem" data-workspace-entry="${escapeHtml(item.id)}">
-      ${item.icon}<span>${escapeHtml(item.label)}</span>${item.hint ? `<kbd>${escapeHtml(item.hint)}</kbd>` : ''}
-    </button>`).join('')}`;
+  const heading = document.createElement('div');
+  heading.className = 'chat-inspector__tab-menu-label';
+  heading.textContent = '新增页面';
+  menu.append(heading);
+  entries.forEach((item) => appendInspectorTabMenuItem(menu, item, 'data-workspace-entry'));
 }
 
 function updateOpenTabMenuToggleVisibility(): void {
@@ -1771,7 +1622,6 @@ function updateOpenTabMenuToggleVisibility(): void {
   if (!tabs || !toggle) return;
   const overflow = tabs.scrollWidth > tabs.clientWidth + 1;
   toggle.hidden = !overflow;
-  toggle.classList.toggle('is-hidden', !overflow);
   if (!overflow && workspaceMenuMode === 'open') {
     const menu = document.getElementById('inspector-tab-menu');
     if (menu) menu.hidden = true;
@@ -1779,19 +1629,84 @@ function updateOpenTabMenuToggleVisibility(): void {
   }
 }
 
-function collectOfficeEditorBlocks(path: string): string[] {
-  return collectOfficeEditorBlockEdits(path).map((edit) => edit.text);
+function activateWorkspaceTab(id: string): void {
+  if (!id.startsWith('core:')) {
+    if (id === 'browser:new') openBrowserWorkbench({ createTab: true });
+    return;
+  }
+  const tab = id.slice(5) as TabKey;
+  if (!TAB_LABELS[tab] || (tab === 'collaboration' && !isExternalTeamSession())) return;
+  openCoreTabs.add(tab);
+  if (tab === 'files') {
+    scopedFilePaths = null;
+    scopedFileChanges = null;
+  }
+  setTab(tab);
+}
+
+function closeWorkspaceTab(id: string): void {
+  if (!id.startsWith('core:')) return;
+  const tab = id.slice(5) as TabKey;
+  openCoreTabs.delete(tab);
+  if (activeTab === tab) {
+    const fallback = [...openCoreTabs].find((candidate) => candidate !== 'collaboration' || isExternalTeamSession());
+    setTab(fallback || 'context');
+    openCoreTabs.add(fallback || 'context');
+  } else {
+    renderTabs();
+  }
+}
+
+function openWorkspaceEntry(id: string): void {
+  if (id === 'browser:new') {
+    openBrowserWorkbench({ createTab: true });
+    return;
+  }
+  activateWorkspaceTab(`core:${id}`);
+}
+
+function renderTabs(): void {
+  syncInspectorSessionUi();
+  const teamSession = isExternalTeamSession();
+  if (activeTab === 'collaboration' && !teamSession) {
+    stopTeamCollaborationPolling();
+    activeTab = 'context';
+  }
+  if (teamSession) openCoreTabs.add('collaboration');
+  else openCoreTabs.delete('collaboration');
+  if (activeTab !== 'browser') openCoreTabs.add(activeTab);
+  const tasks = (state.kanbanBoard as { tasks?: unknown[] } | null)?.tasks;
+  const counts: Partial<Record<TabKey, number>> = {
+    context: computeOriginalMessages().length,
+    files: currentFileChanges().length,
+    kanban: tasks?.length ?? 0,
+    collaboration: teamCollaborationTaskCount(),
+  };
+  const tabs = document.getElementById('chat-inspector-tabs');
+  if (tabs) {
+    tabs.innerHTML = [...openCoreTabs]
+      .filter((tab) => tab !== 'collaboration' || teamSession)
+      .map((tab) => renderWorkspaceTab(`core:${tab}`, TAB_LABELS[tab], TAB_ICONS[tab], activeTab === tab, counts[tab]))
+      .join('');
+  }
+  renderInspectorTabMenu();
+  updateOpenTabMenuToggleVisibility();
+  window.requestAnimationFrame?.(() => updateOpenTabMenuToggleVisibility());
 }
 
 function collectOfficeBlockElements(scope: ParentNode): HTMLElement[] {
-  const directBlocks = Array.from(scope.querySelectorAll<HTMLElement>('[data-office-block]'));
-  const shadowBlocks = Array.from(scope.querySelectorAll<HTMLElement>('*'))
-    .flatMap((element) => (element.shadowRoot ? collectOfficeBlockElements(element.shadowRoot) : []));
-  return [...directBlocks, ...shadowBlocks];
+  const direct = Array.from(scope.querySelectorAll<HTMLElement>('[data-office-block]'));
+  const nested = Array.from(scope.querySelectorAll<HTMLElement>('*'))
+    .flatMap((element) => (
+      element.shadowRoot ? collectOfficeBlockElements(element.shadowRoot) : []
+    ));
+  return [...direct, ...nested];
 }
 
-function collectOfficeEditorBlockEdits(path: string): Array<{ index: number; text: string }> {
-  const root = document.querySelector<HTMLElement>(`[data-office-page-editor="${CSS.escape(path)}"]`);
+function collectOfficeEditorBlockEdits(filePath: string): Array<{ index: number; text: string }> {
+  const root = document.querySelector<HTMLElement>(
+    `[data-office-page-editor="${CSS.escape(filePath)}"]`,
+  );
   if (!root) return [];
   return collectOfficeBlockElements(root)
     .map((block) => ({
@@ -1799,85 +1714,89 @@ function collectOfficeEditorBlockEdits(path: string): Array<{ index: number; tex
       text: block instanceof HTMLTextAreaElement ? block.value : (block.textContent ?? ''),
     }))
     .filter((edit) => Number.isFinite(edit.index))
-    .sort((a, b) => a.index - b.index);
+    .sort((left, right) => left.index - right.index);
 }
 
-function invalidateFilePreviewCache(path: string): void {
-  fileContentCache.delete(path);
-  fileBinaryCache.delete(path);
-  fileContentErrors.delete(path);
-  fileDiffCache.delete(path);
-  fileMissingOnDisk.delete(path);
+function invalidateFilePreviewCache(filePath: string): void {
+  fileContentCache.delete(filePath);
+  fileBinaryCache.delete(filePath);
+  fileContentErrors.delete(filePath);
+  fileDiffCache.delete(filePath);
+  fileMissingOnDisk.delete(filePath);
 }
 
-async function saveFileEditor(path: string): Promise<void> {
-  if (fileSaveInflight.has(path)) return;
-  const kind = filePreviewKind(path);
+async function saveFileEditor(filePath: string): Promise<void> {
+  if (fileSaveInflight.has(filePath)) return;
+  const kind = filePreviewKind(filePath);
   try {
     if (kind === 'markdown') {
-      const editor = document.querySelector<HTMLTextAreaElement>(`[data-file-editor="${CSS.escape(path)}"]`);
+      const editor = document.querySelector<HTMLTextAreaElement>(
+        `[data-file-editor="${CSS.escape(filePath)}"]`,
+      );
       if (!editor) throw new Error('未找到 Markdown 编辑器');
       if (!window.Crew?.writeTextFile) throw new Error('当前环境不支持保存文本文件');
       const value = editor.value;
-      fileSaveInflight.add(path);
+      fileSaveInflight.add(filePath);
       renderBody();
-      await window.Crew.writeTextFile(path, value);
-      invalidateFilePreviewCache(path);
-      fileContentCache.set(path, value);
+      await window.Crew.writeTextFile(filePath, value);
+      invalidateFilePreviewCache(filePath);
+      fileContentCache.set(filePath, value);
     } else if (kind === 'docx' || kind === 'pptx') {
-      const payload = fileBinaryCache.get(path);
-      const edits = collectOfficeEditorBlockEdits(path);
+      const payload = fileBinaryCache.get(filePath);
+      const edits = collectOfficeEditorBlockEdits(filePath);
       if (!payload?.base64) throw new Error('原 Office 文件未加载，无法保存');
       if (edits.length === 0) throw new Error('未找到 Office 编辑内容');
       if (!window.Crew?.writeFileBase64) throw new Error('当前环境不支持保存 Office 文件');
-      fileSaveInflight.add(path);
+      fileSaveInflight.add(filePath);
       renderBody();
-      const editor = await import('../office-edit');
-      const blocks = kind === 'pptx'
-        ? (await editor.loadPptxEditBlocks(payload.base64)).map((block) => block.text)
-        : collectOfficeEditorBlocks(path);
+      const officeEdit = await import('../office-edit');
+      let blocks = edits.map((edit) => edit.text);
       if (kind === 'pptx') {
-        edits.forEach((edit) => {
-          blocks[edit.index] = edit.text;
-        });
+        blocks = (await officeEdit.loadPptxEditBlocks(payload.base64))
+          .map((block) => block.text);
+        for (const edit of edits) blocks[edit.index] = edit.text;
       }
       const base64 = kind === 'docx'
-        ? await editor.patchDocxBlocks(payload.base64, blocks)
-        : await editor.patchPptxBlocks(payload.base64, blocks);
-      await window.Crew.writeFileBase64(path, base64);
-      invalidateFilePreviewCache(path);
-      fileBinaryCache.set(path, { base64, mimeType: kind === 'docx'
-        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        : 'application/vnd.openxmlformats-officedocument.presentationml.presentation' });
+        ? await officeEdit.patchDocxBlocks(payload.base64, blocks)
+        : await officeEdit.patchPptxBlocks(payload.base64, blocks);
+      await window.Crew.writeFileBase64(filePath, base64);
+      invalidateFilePreviewCache(filePath);
+      fileBinaryCache.set(filePath, {
+        base64,
+        mimeType: kind === 'docx'
+          ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          : 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      });
     } else if (kind === 'xlsx') {
-      if (!window.Crew?.writeFileBase64) throw new Error('当前环境不支持保存 Excel 文件');
-      const payload = fileBinaryCache.get(path);
+      const payload = fileBinaryCache.get(filePath);
+      const root = document.querySelector<HTMLElement>(
+        `[data-xlsx-editor="${CSS.escape(filePath)}"]`,
+      );
       if (!payload?.base64) throw new Error('原 Excel 文件未加载，无法保存');
-      const root = document.querySelector<HTMLElement>(`[data-xlsx-editor="${CSS.escape(path)}"]`);
       if (!root) throw new Error('未找到 Excel 编辑器');
+      if (!window.Crew?.writeFileBase64) throw new Error('当前环境不支持保存 Excel 文件');
       const { collectXlsxEditorPatch } = await import('../xlsx-editor');
       const patch = collectXlsxEditorPatch(root);
       if (!patch) throw new Error('Excel 编辑状态已失效，请重新打开编辑模式');
-      fileSaveInflight.add(path);
+      fileSaveInflight.add(filePath);
       renderBody();
       const { patchXlsxGrid } = await import('../office-edit');
       const base64 = await patchXlsxGrid(payload.base64, patch);
-      await window.Crew.writeFileBase64(path, base64);
-      invalidateFilePreviewCache(path);
-      fileBinaryCache.set(path, {
+      await window.Crew.writeFileBase64(filePath, base64);
+      invalidateFilePreviewCache(filePath);
+      fileBinaryCache.set(filePath, {
         base64,
         mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       });
     } else {
       throw new Error('此文件类型暂不支持看板内编辑');
     }
-    fileEditMode.delete(path);
-    await hydrateFileContentIfNeeded(path);
+    fileEditMode.delete(filePath);
     notify('已保存文件');
-  } catch (err) {
-    notify(`保存失败：${err instanceof Error ? err.message : String(err)}`);
+  } catch (error) {
+    notify(`保存失败：${error instanceof Error ? error.message : String(error)}`);
   } finally {
-    fileSaveInflight.delete(path);
+    fileSaveInflight.delete(filePath);
     renderBody();
   }
 }
@@ -1888,13 +1807,13 @@ function bindBodyEvents(): void {
       const card = el.closest('.inspector-file') as HTMLElement | null;
       const path = card?.getAttribute('data-file-path');
       if (path) {
-        rememberOpenFileTab(path);
-        activeFilePath = path;
-        renderTabs();
+        const opened = toggleFileExpanded(path);
         renderBody();
-        ensureInspectorWidthForFileDiff();
-        void hydrateFileDiffIfNeeded(path);
-        void hydrateFileContentIfNeeded(path);
+        if (opened) {
+          ensureInspectorWidthForFileDiff();
+          void hydrateFileDiffIfNeeded(path);
+          void hydrateFileContentIfNeeded(path);
+        }
       }
     });
   });
@@ -1906,40 +1825,38 @@ function bindBodyEvents(): void {
       if (targetPath) void showFileOpenMenu(el, targetPath);
     });
   });
-  document.querySelectorAll<HTMLButtonElement>('[data-file-view-toggle]').forEach((el) => {
-    el.addEventListener('click', (event) => {
+  document.querySelectorAll<HTMLButtonElement>('[data-file-view-toggle]').forEach((element) => {
+    element.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const path = el.getAttribute('data-file-view-toggle');
-      if (!path) return;
-      const current = fileViewMode.get(path) ?? 'preview';
-      fileViewMode.set(path, current === 'preview' ? 'code' : 'preview');
+      const filePath = element.getAttribute('data-file-view-toggle');
+      if (!filePath) return;
+      const current = fileViewMode.get(filePath) ?? 'preview';
+      fileViewMode.set(filePath, current === 'preview' ? 'code' : 'preview');
       renderBody();
-      if (fileViewMode.get(path) === 'preview') void hydrateFileContentIfNeeded(path);
-    });
-  });
-  document.querySelectorAll<HTMLButtonElement>('[data-file-edit-toggle]').forEach((el) => {
-    el.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const path = el.getAttribute('data-file-edit-toggle');
-      if (!path) return;
-      if (fileEditMode.has(path)) {
-        fileEditMode.delete(path);
-        renderBody();
-        return;
+      if (fileViewMode.get(filePath) === 'preview') {
+        void hydrateFileContentIfNeeded(filePath);
       }
-      fileEditMode.add(path);
-      renderBody();
-      void hydrateFileContentIfNeeded(path);
     });
   });
-  document.querySelectorAll<HTMLButtonElement>('[data-file-save]').forEach((el) => {
-    el.addEventListener('click', (event) => {
+  document.querySelectorAll<HTMLButtonElement>('[data-file-edit-toggle]').forEach((element) => {
+    element.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const path = el.getAttribute('data-file-save');
-      if (path) void saveFileEditor(path);
+      const filePath = element.getAttribute('data-file-edit-toggle');
+      if (!filePath) return;
+      if (fileEditMode.has(filePath)) fileEditMode.delete(filePath);
+      else fileEditMode.add(filePath);
+      renderBody();
+      if (fileEditMode.has(filePath)) void hydrateFileContentIfNeeded(filePath);
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-file-save]').forEach((element) => {
+    element.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const filePath = element.getAttribute('data-file-save');
+      if (filePath) void saveFileEditor(filePath);
     });
   });
   // unmodified 折叠条：上下箭头每次揭开 20 行上下文。
@@ -1950,7 +1867,7 @@ function bindBodyEvents(): void {
       const edge = el.getAttribute('data-diff-expand');
       if (edge !== 'top' && edge !== 'bottom') return;
       const row = el.closest('[data-diff-region-start]') as HTMLElement | null;
-      const card = el.closest('.inspector-file, .inspector-file-tab-view') as HTMLElement | null;
+      const card = el.closest('.inspector-file') as HTMLElement | null;
       const path = card?.getAttribute('data-file-path');
       const startRaw = row?.getAttribute('data-diff-region-start');
       if (!path || startRaw == null) return;
@@ -2092,26 +2009,30 @@ async function handlePlanBoardAction(action: string): Promise<void> {
 }
 
 function setTab(tab: TabKey): void {
+  syncInspectorSessionUi();
   if (tab === 'collaboration' && !isExternalTeamSession()) return;
+  if (tab !== 'browser') openCoreTabs.add(tab);
   if (activeTab === 'browser' && tab !== 'browser') releaseUserBrowserControl();
   if (activeTab === 'kanban' && tab !== 'kanban') {
     disconnectKanbanObserver();
   }
   if (activeTab === 'collaboration' && tab !== 'collaboration') stopTeamCollaborationPolling();
-  if (tab !== 'files') activeFilePath = null;
-  if (tab !== 'browser') openCoreTabs.add(tab);
   activeTab = tab;
   document.body.classList.toggle('browser-workbench-open', tab === 'browser' && inspectorOpen);
+  if (tab !== 'browser') document.body.classList.remove('browser-workbench-maximized');
   renderTabs();
   renderBody();
   if (tab === 'files' && expandedFiles.size > 0) {
     ensureInspectorWidthForFileDiff();
-    for (const path of expandedFiles) void hydrateFileDiffIfNeeded(path);
+    for (const path of expandedFiles) {
+      void hydrateFileDiffIfNeeded(path);
+      void hydrateFileContentIfNeeded(path);
+    }
   }
   if (tab === 'collaboration' && state.activeSessionId) startTeamCollaborationPolling(state.activeSessionId);
 }
 
-/** 当前是否允许展开看板/检查器。Dynamic Kanban 会话即使尚无消息也可打开任务 Tab。 */
+/** 当前是否允许展开看板/检查器。专家团会话即使尚无消息也可打开任务 Tab。 */
 function canOpenInspector(): boolean {
   if (!state.activeSessionId) return false;
   if (isDynamicKanbanSession(state.activeSessionId)) return true;
@@ -2138,9 +2059,9 @@ function hasConversationInfo(): boolean {
   });
 }
 
-/** 看板 / 检查器仅对话页可用。 */
+/** 看板 / 检查器仅「对话」子页可用，工作室视图下禁用。 */
 function canShowInspectorUi(): boolean {
-  return state.activeTab === 'chat';
+  return state.activeTab === 'chat' && !isStudioView();
 }
 
 /** 同步右侧「看板」入口可用态。 */
@@ -2163,6 +2084,20 @@ export function syncInspectorToggleState(): void {
     : '当前没有对话信息，先发起一次对话再打开看板';
   toggle.setAttribute('aria-label', toggle.title);
 
+  const browserToggle = document.getElementById('browser-workbench-toggle') as HTMLButtonElement | null;
+  if (browserToggle) {
+    const browserVisible = isChat && canShowInspectorUi();
+    const browserActive = inspectorOpen && activeTab === 'browser';
+    browserToggle.hidden = !browserVisible;
+    browserToggle.disabled = false;
+    browserToggle.classList.toggle('is-active', browserActive);
+    browserToggle.setAttribute('aria-expanded', String(browserActive));
+    const running = document.getElementById('browser-workbench-status')?.classList.contains('is-running');
+    browserToggle.setAttribute(
+      'aria-label',
+      `${browserActive ? '关闭' : '打开'}浏览器，${running ? '运行中' : '未运行'}`,
+    );
+  }
 }
 
 /** 展开看板并切换到指定 Tab。
@@ -2170,50 +2105,55 @@ export function syncInspectorToggleState(): void {
  *  未指定路径时，若当前尚无展开项，则展开会话改动列表的第一项，避免打开后全是折叠态。 */
 export function openInspectorToTab(
   tab: TabKey = 'context',
-  options?: { expandFilePath?: string | null; filePaths?: string[] | null; fileChanges?: FileChange[] | null },
+  options?: {
+    expandFilePath?: string | null;
+    filePaths?: string[] | null;
+    fileChanges?: InspectorFileSummary[] | null;
+  },
 ): void {
+  syncInspectorSessionUi();
   if (!canShowInspectorUi()) return;
   if (!canOpenInspector() && !(tab === 'browser' && state.activeSessionId)) {
     closeInspector();
     syncInspectorToggleState();
     return;
   }
+  if (activeTab === 'browser' && tab !== 'browser') releaseUserBrowserControl();
   inspectorOpen = true;
+  customViewOpen = false;
   activeTab = tab;
+  disableInspectorSurfaceAutoWidth();
+  document.body.classList.remove('site-annotation-workbench-open');
+  document.body.classList.remove('blueprint-surface-open');
   if (tab !== 'browser') openCoreTabs.add(tab);
   document.body.classList.toggle('browser-workbench-open', tab === 'browser');
+  if (tab !== 'browser') document.body.classList.remove('browser-workbench-maximized');
   if (tab === 'files') {
-    // 首次进入某会话时先完成缓存会话切换；resetFileDiffCache 会清空上一会话的展开态。
     computeFileChanges();
     scopedFilePaths = options?.filePaths?.length
       ? Array.from(new Set(options.filePaths.filter((path) => typeof path === 'string' && path.trim()).map((path) => path.trim())))
       : null;
     scopedFileChanges = options?.fileChanges?.length
-      ? options.fileChanges
-        .filter((file) => file?.path)
-        .map((file) => ({
-          path: file.path,
-          name: file.name || file.path.split(/[\\/]/).pop() || file.path,
-          added: file.added || 0,
-          removed: file.removed || 0,
-          status: file.status === 'added' || file.status === 'deleted' || file.status === 'modified' ? file.status : 'modified',
-          diff: file.diff || [],
-          binary: file.binary,
-        }))
+      ? options.fileChanges.filter((file) => file?.path).map((file) => ({
+        path: file.path,
+        name: file.name || file.path.split(/[\\/]/).pop() || file.path,
+        added: file.added || 0,
+        removed: file.removed || 0,
+        status: file.status === 'added' || file.status === 'deleted' || file.status === 'modified' ? file.status : 'modified',
+        diff: file.diff || [],
+      }))
       : null;
+    const files = currentFileChanges();
     const wanted = options?.expandFilePath?.trim() || '';
-    if (wanted && scopedFilePaths?.length) {
-      activeFilePath = null;
-    } else if (wanted) {
-      rememberOpenFileTab(wanted);
-      activeFilePath = wanted;
-    } else {
-      activeFilePath = null;
+    if (wanted) {
+      ensureFileExpanded(wanted);
+    } else if (expandedFiles.size === 0) {
+      const first = files[0];
+      if (first) ensureFileExpanded(first.path);
     }
   } else {
     scopedFilePaths = null;
     scopedFileChanges = null;
-    activeFilePath = null;
   }
   document.body.classList.add('inspector-open');
   $('#chat-inspector')?.classList.add('is-open');
@@ -2223,11 +2163,7 @@ export function openInspectorToTab(
     startTeamCollaborationPolling(state.activeSessionId);
   }
   renderBody();
-  if (activeTab === 'files' && activeFilePath) {
-    ensureInspectorWidthForFileDiff();
-    void hydrateFileDiffIfNeeded(activeFilePath);
-    void hydrateFileContentIfNeeded(activeFilePath);
-  } else if (activeTab === 'files' && expandedFiles.size > 0) {
+  if (activeTab === 'files' && expandedFiles.size > 0) {
     ensureInspectorWidthForFileDiff();
     for (const path of expandedFiles) {
       void hydrateFileDiffIfNeeded(path);
@@ -2235,6 +2171,24 @@ export function openInspectorToTab(
     }
   }
   syncInspectorToggleState();
+}
+
+/** 打开由功能模块提供内容的自定义看板，并保持看板自身的开关状态一致。 */
+export function openInspectorCustomView(): boolean {
+  if (!canShowInspectorUi() || !state.activeSessionId) return false;
+  if (activeTab === 'browser') {
+    releaseUserBrowserControl();
+    hideBrowserPanelView();
+  }
+  if (activeTab === 'collaboration') stopTeamCollaborationPolling();
+  inspectorOpen = true;
+  customViewOpen = true;
+  activeTab = 'context';
+  document.body.classList.remove('browser-workbench-open', 'browser-workbench-maximized', 'inspector-workspace-maximized');
+  document.body.classList.add('inspector-open');
+  $('#chat-inspector')?.classList.add('is-open');
+  syncInspectorToggleState();
+  return true;
 }
 
 function openInspector(): void {
@@ -2252,14 +2206,21 @@ export function defaultInspectorTabForSession(
 }
 
 /** Open the session-scoped Browser workbench independently of model tool disclosure. */
-export function openBrowserWorkbench(options: { createTab?: boolean } = {}): void {
+export function openBrowserWorkbench(
+  options: { createTab?: boolean; url?: string } = {},
+): void {
   if (!canShowInspectorUi()) return;
   const sessionId = state.activeSessionId || ensureComposerDraftSession();
   if (!sessionId) return;
   openInspectorToTab('browser');
   if (browserOpeningSession === sessionId) return;
   const revision = ++browserOpeningRevision;
-  void prepareBrowserWorkbench(sessionId, options.createTab !== false, revision);
+  void prepareBrowserWorkbench(
+    sessionId,
+    options.createTab !== false,
+    options.url?.trim() ?? '',
+    revision,
+  );
 }
 
 let browserOpeningSession = '';
@@ -2268,6 +2229,7 @@ let browserOpeningRevision = 0;
 async function prepareBrowserWorkbench(
   sessionId: string,
   createTab: boolean,
+  url: string,
   revision: number,
 ): Promise<void> {
   if (browserOpeningSession === sessionId) return;
@@ -2282,8 +2244,19 @@ async function prepareBrowserWorkbench(
     // backend ownership, cleanup and later model Browser tools on one identity.
     commitDraftSession(sessionId, '浏览器', '内置浏览器');
     syncBrowserPanelSession(sessionId);
-    if (createTab) await openUserBrowser('', true);
-    else await openUserBrowser();
+    // `createTab: false` is the observer-only path used when the first
+    // browser_use tool card auto-expands the workbench. The panel has already
+    // subscribed through renderBody()/bindBrowserPanel(), including while no
+    // tab exists. Calling openUserBrowser() here used to create a blank *user*
+    // tab and switch the whole session to human mode, racing the AI's first
+    // browser_navigate action.
+    if (createTab) {
+      if (url) await openUserBrowser(url, true, { confirmTakeover: true });
+      else await openUserBrowser('', true);
+    }
+    // Auto-open (watching the AI) is passive: never create a human blank tab,
+    // just subscribe and wait for the AI's first tab to appear.
+    else await openUserBrowser('', false, { createIfEmpty: false });
   } catch (error) {
     notify(`浏览器启动失败：${(error as Error).message}`);
   } finally {
@@ -2297,9 +2270,10 @@ export function closeInspector(): void {
   if (activeTab === 'browser') releaseUserBrowserControl();
   if (activeTab === 'collaboration') stopTeamCollaborationPolling();
   inspectorOpen = false;
+  customViewOpen = false;
   hideBrowserPanelView();
   document.body.classList.remove('inspector-open');
-  document.body.classList.remove('browser-workbench-open', 'browser-workbench-maximized', 'inspector-workspace-maximized');
+  document.body.classList.remove('browser-workbench-open', 'browser-workbench-maximized', 'inspector-workspace-maximized', 'inspector-surface-auto-width', 'site-annotation-workbench-open', 'blueprint-surface-open');
   $('#chat-inspector')?.classList.remove('is-open');
   syncInspectorToggleState();
 }
@@ -2323,10 +2297,11 @@ const INSPECTOR_DEFAULT_WIDTH = 320;
 /** 展开文件 diff 时自动加宽到默认的 1.5 倍 */
 const INSPECTOR_FILES_EXPANDED_WIDTH = 480;
 /** 常规拖拽宽度上限；放大使用独立的工作区覆盖态。 */
-const INSPECTOR_MAX_WIDTH = 760;
+const INSPECTOR_MAX_WIDTH = 1200;
+const INSPECTOR_SURFACE_MIN_WIDTH = 560;
 
 function effectiveMaxInspectorWidth(): number {
-  const vwCap = Math.floor(window.innerWidth * 0.62);
+  const vwCap = Math.floor(window.innerWidth * 0.72);
   return Math.max(INSPECTOR_MIN_WIDTH, Math.min(INSPECTOR_MAX_WIDTH, vwCap));
 }
 
@@ -2354,7 +2329,11 @@ function loadInspectorWidth(): number {
 
 function applyInspectorWidth(width: number, persist: boolean): void {
   const w = clampWidth(width);
-  document.documentElement.style.setProperty('--inspector-width', `${w}px`);
+  setRuntimeToken(document.documentElement, '--mw-inspector-width', `${w}px`);
+  const handle = document.getElementById('chat-inspector-resize-handle');
+  handle?.setAttribute('aria-valuemin', String(INSPECTOR_MIN_WIDTH));
+  handle?.setAttribute('aria-valuemax', String(effectiveMaxInspectorWidth()));
+  handle?.setAttribute('aria-valuenow', String(w));
   if (persist) {
     try {
       localStorage.setItem(INSPECTOR_WIDTH_KEY, String(w));
@@ -2364,66 +2343,114 @@ function applyInspectorWidth(width: number, persist: boolean): void {
   }
 }
 
+function applyResponsiveSurfaceWidth(): void {
+  const target = Math.max(INSPECTOR_SURFACE_MIN_WIDTH, Math.floor(window.innerWidth * 0.52));
+  applyInspectorWidth(target, false);
+}
+
+export function enableInspectorSurfaceAutoWidth(): void {
+  document.body.classList.add('inspector-surface-auto-width');
+  applyResponsiveSurfaceWidth();
+}
+
+export function disableInspectorSurfaceAutoWidth(): void {
+  if (!document.body.classList.contains('inspector-surface-auto-width')) return;
+  document.body.classList.remove('inspector-surface-auto-width');
+  applyInspectorWidth(loadInspectorWidth(), false);
+}
+
 function bindInspectorResize(): void {
   const handle = document.getElementById('chat-inspector-resize-handle');
   if (!handle) return;
   // 启动时立即恢复用户上次拖出来的宽度
   applyInspectorWidth(loadInspectorWidth(), false);
 
-  let dragging = false;
+  let pointerId: number | null = null;
   let startX = 0;
   let startWidth = 0;
 
-  const onMove = (e: MouseEvent): void => {
-    if (!dragging) return;
+  const onMove = (e: PointerEvent): void => {
+    if (pointerId !== e.pointerId) return;
     // 把手在面板左侧，向左拖 = 变宽
     const delta = startX - e.clientX;
     applyInspectorWidth(startWidth + delta, false);
   };
 
-  const onUp = (): void => {
-    if (!dragging) return;
-    dragging = false;
+  const onUp = (e: PointerEvent): void => {
+    if (pointerId !== e.pointerId) return;
+    if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+    pointerId = null;
     handle.classList.remove('is-dragging');
     document.body.classList.remove('inspector-resizing');
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    // mouseup 时再持久化，避免拖拽过程中频繁写 localStorage
+    // 手势结束时再持久化，避免拖拽过程中频繁写 localStorage
     try {
-      const cur = parseInt(document.documentElement.style.getPropertyValue('--inspector-width'), 10);
+      const cur = parseInt(document.documentElement.style.getPropertyValue('--mw-inspector-width'), 10);
       if (!isNaN(cur)) localStorage.setItem(INSPECTOR_WIDTH_KEY, String(clampWidth(cur)));
     } catch {
       /* ignore */
     }
   };
 
-  handle.addEventListener('mousedown', (e: MouseEvent) => {
+  handle.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (e.button !== 0) return;
     const inspector = document.getElementById('chat-inspector');
     if (!inspector) return;
-    dragging = true;
+    document.body.classList.remove('inspector-surface-auto-width');
+    pointerId = e.pointerId;
+    handle.setPointerCapture(e.pointerId);
     startX = e.clientX;
     startWidth = inspector.getBoundingClientRect().width;
     handle.classList.add('is-dragging');
     document.body.classList.add('inspector-resizing');
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
     e.preventDefault();
+  });
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onUp);
+  handle.addEventListener('pointercancel', onUp);
+
+  handle.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    document.body.classList.remove('inspector-surface-auto-width');
+    const current = document.getElementById('chat-inspector')?.getBoundingClientRect().width
+      || loadInspectorWidth();
+    const next = event.key === 'Home' ? INSPECTOR_MIN_WIDTH
+      : event.key === 'End' ? effectiveMaxInspectorWidth()
+        : current + (event.key === 'ArrowLeft' ? 24 : -24);
+    applyInspectorWidth(next, true);
   });
 
   // 双击复位到默认宽度
   handle.addEventListener('dblclick', () => {
+    document.body.classList.remove('inspector-surface-auto-width');
     applyInspectorWidth(INSPECTOR_DEFAULT_WIDTH, true);
   });
 
   window.addEventListener('resize', () => {
-    const cur = parseInt(document.documentElement.style.getPropertyValue('--inspector-width'), 10);
+    if (document.body.classList.contains('inspector-surface-auto-width')) {
+      applyResponsiveSurfaceWidth();
+      return;
+    }
+    const cur = parseInt(document.documentElement.style.getPropertyValue('--mw-inspector-width'), 10);
     if (Number.isFinite(cur) && cur > 0) {
       applyInspectorWidth(clampWidth(cur), false);
     }
   });
 }
 
+function toggleInspectorMaximized(): void {
+  const maximized = document.body.classList.toggle('inspector-workspace-maximized');
+  const button = document.getElementById('inspector-maximize');
+  button?.setAttribute('aria-pressed', String(maximized));
+  button?.setAttribute('aria-label', maximized ? '还原预览' : '放大预览');
+  if (button) button.title = maximized ? '还原预览' : '放大预览';
+  window.dispatchEvent(new CustomEvent('inspector:layout-changed', { detail: { maximized } }));
+  window.dispatchEvent(new Event('resize'));
+}
+
 function bindInspector(): void {
+  const inspectorRoot = document.getElementById('chat-inspector');
+  if (inspectorRoot) mountInspectorShell(inspectorRoot);
   // 启动时读取已保存的「默认展开」偏好；只有在没有 saved setting（首次打开）
   // 或者 saved setting 显式为 false 时，才保持收起。
   try {
@@ -2451,16 +2478,20 @@ function bindInspector(): void {
       return;
     }
     const tab = target.closest<HTMLButtonElement>('[data-workspace-tab]');
-    if (tab) activateWorkspaceTab(tab.dataset.workspaceTab || '');
+    if (tab) {
+      const id = tab.dataset.workspaceTab || '';
+      if (!inspectorOpen && id.startsWith('core:')) openInspectorToTab(id.slice(5) as TabKey);
+      else activateWorkspaceTab(id);
+    }
   });
   tabStrip?.addEventListener('keydown', (event) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-    const tabs = Array.from(tabStrip.querySelectorAll<HTMLButtonElement>('.chat-inspector__tab-select'));
-    const current = tabs.indexOf(document.activeElement as HTMLButtonElement);
-    if (current < 0 || tabs.length < 2) return;
+    const buttons = Array.from(tabStrip.querySelectorAll<HTMLButtonElement>('.chat-inspector__tab-select'));
+    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (current < 0 || buttons.length < 2) return;
     event.preventDefault();
     const delta = event.key === 'ArrowLeft' ? -1 : 1;
-    tabs[(current + delta + tabs.length) % tabs.length]?.focus();
+    buttons[(current + delta + buttons.length) % buttons.length]?.focus();
   });
   const newTabToggle = document.getElementById('inspector-new-browser-tab') as HTMLButtonElement | null;
   const pickerToggle = document.getElementById('inspector-tab-picker-toggle') as HTMLButtonElement | null;
@@ -2475,22 +2506,23 @@ function bindInspector(): void {
     if (mode === 'open' && pickerToggle?.hidden) return;
     const sameMode = workspaceMenuMode === mode;
     workspaceMenuMode = mode;
-    const open = Boolean(pickerMenu?.hidden);
-    setWorkspaceMenuOpen(open || !sameMode);
+    setWorkspaceMenuOpen(Boolean(pickerMenu?.hidden) || !sameMode);
   };
   newTabToggle?.addEventListener('click', () => toggleWorkspaceMenu('new'));
   pickerToggle?.addEventListener('click', () => toggleWorkspaceMenu('open'));
   pickerMenu?.addEventListener('click', (event) => {
-    const entry = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-workspace-entry]');
+    const target = event.target as HTMLElement;
+    const entry = target.closest<HTMLButtonElement>('[data-workspace-entry]');
     if (entry) {
       openWorkspaceEntry(entry.dataset.workspaceEntry || '');
       setWorkspaceMenuOpen(false);
       return;
     }
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-workspace-tab]');
-    if (!button) return;
-    activateWorkspaceTab(button.dataset.workspaceTab || '');
-    setWorkspaceMenuOpen(false);
+    const tab = target.closest<HTMLButtonElement>('[data-workspace-tab]');
+    if (tab) {
+      activateWorkspaceTab(tab.dataset.workspaceTab || '');
+      setWorkspaceMenuOpen(false);
+    }
   });
   document.addEventListener('click', (event) => {
     if (pickerMenu?.hidden) return;
@@ -2499,16 +2531,9 @@ function bindInspector(): void {
     setWorkspaceMenuOpen(false);
   });
   document.getElementById('inspector-maximize')?.addEventListener('click', () => {
-    const maximized = document.body.classList.toggle('inspector-workspace-maximized');
-    const button = document.getElementById('inspector-maximize');
-    button?.setAttribute('aria-pressed', String(maximized));
-    button?.setAttribute('aria-label', maximized ? '还原看板' : '放大看板');
-    if (button) button.title = maximized ? '还原看板' : '放大看板';
-    window.dispatchEvent(new CustomEvent('inspector:layout-changed', { detail: { maximized } }));
-    window.dispatchEvent(new Event('resize'));
+    toggleInspectorMaximized();
   });
   window.addEventListener('resize', updateOpenTabMenuToggleVisibility);
-  document.getElementById('inspector-close')?.addEventListener('click', closeInspector);
   const toggleBtn = document.getElementById('task-board-toggle') as HTMLButtonElement | null;
   toggleBtn?.addEventListener('click', () => {
     if (!canOpenInspector()) {
@@ -2519,30 +2544,20 @@ function bindInspector(): void {
     else openInspector();
     window.dispatchEvent(new CustomEvent('inspector:button-toggled', { detail: { open: inspectorOpen } }));
   });
+  document.getElementById('inspector-close')?.addEventListener('click', closeInspector);
+  const browserToggle = document.getElementById('browser-workbench-toggle') as HTMLButtonElement | null;
+  browserToggle?.addEventListener('click', () => {
+    if (inspectorOpen && activeTab === 'browser') closeInspector();
+    else openBrowserWorkbench();
+  });
   window.addEventListener('browser-workbench:command', ((event: Event) => {
     const action = (event as CustomEvent<{ action?: string }>).detail?.action;
-    if (action === 'close') {
-      if (activeTab === 'browser') fallbackWorkspaceTab();
-      else closeInspector();
-    }
+    if (action === 'close') closeInspector();
     if (action === 'open-existing') openBrowserWorkbench({ createTab: false });
     if (action === 'maximize') {
-      const maximized = document.body.classList.toggle('inspector-workspace-maximized');
-      const button = document.getElementById('inspector-maximize');
-      button?.setAttribute('aria-pressed', String(maximized));
-      button?.setAttribute('aria-label', maximized ? '还原看板' : '放大看板');
-      if (button) button.title = maximized ? '还原看板' : '放大看板';
-      window.dispatchEvent(new CustomEvent('inspector:layout-changed', { detail: { maximized } }));
-      window.dispatchEvent(new Event('resize'));
+      toggleInspectorMaximized();
     }
   }) as EventListener);
-  window.addEventListener('browser-panel:state-changed', () => {
-    renderTabs();
-    if (inspectorOpen && activeTab === 'browser') {
-      const body = document.getElementById('chat-inspector-body');
-      if (body && !body.querySelector('[data-browser-panel]')) renderBody();
-    }
-  });
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
       e.preventDefault();
@@ -2559,7 +2574,6 @@ function bindInspector(): void {
     syncBrowserPanelSession(state.activeSessionId);
     if (isExternalTeamSession(state.activeSessionId) && state.activeSessionId) {
       void refreshTeamCollaborationBoard(state.activeSessionId);
-      if (inspectorOpen) setTab('collaboration');
     } else {
       stopTeamCollaborationPolling();
     }
@@ -2633,6 +2647,10 @@ export function invalidateFileDiffCachePaths(paths: string[]): void {
 
 export function refreshInspector(): void {
   // 始终刷新（即便关闭）以便 tab 计数 / 状态准确；关闭时不渲染 body 节省开销。
+  if (customViewOpen) {
+    syncInspectorToggleState();
+    return;
+  }
   renderTabs();
   syncInspectorToggleState();
   if (inspectorOpen) renderBody();
@@ -2644,6 +2662,10 @@ export function refreshInspector(): void {
  * 正文仍由 todo_updated / file_changes / plan_review / setUsageSnapshot 等路径全量 refresh。
  */
 export function refreshInspectorChrome(): void {
+  if (customViewOpen) {
+    syncInspectorToggleState();
+    return;
+  }
   renderTabs();
   syncInspectorToggleState();
 }

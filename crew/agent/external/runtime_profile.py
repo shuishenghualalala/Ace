@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
-
 
 RuntimeAvailability = Literal["ready", "degraded", "unavailable"]
 ModelBindingStatus = Literal["valid", "missing", "unverified"]
@@ -18,9 +19,10 @@ class RuntimeModelProfile:
     default: bool = False
     capabilities: tuple[str, ...] = ()
     thinking_levels: tuple[str, ...] = ()
+    context_window: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": self.id,
             "label": self.label or self.id,
             "provider": self.provider,
@@ -28,6 +30,9 @@ class RuntimeModelProfile:
             "capabilities": list(self.capabilities),
             "thinking_levels": list(self.thinking_levels),
         }
+        if self.context_window is not None:
+            payload["context_window"] = self.context_window
+        return payload
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,19 @@ def normalize_runtime_models(raw: Any) -> list[RuntimeModelProfile]:
         seen.add(model_id)
         capabilities = payload.get("capabilities") or []
         thinking = payload.get("thinking_levels") or payload.get("thinkingLevels") or []
+        raw_context_window = (
+            payload.get("context_window")
+            if payload.get("context_window") is not None
+            else payload.get("contextWindow")
+            if payload.get("contextWindow") is not None
+            else payload.get("max_context_tokens")
+        )
+        try:
+            context_window = int(raw_context_window) if raw_context_window is not None else None
+        except (TypeError, ValueError):
+            context_window = None
+        if context_window is not None and context_window <= 0:
+            context_window = None
         result.append(RuntimeModelProfile(
             id=model_id,
             label=str(payload.get("label") or payload.get("name") or model_id).strip() or model_id,
@@ -125,6 +143,7 @@ def normalize_runtime_models(raw: Any) -> list[RuntimeModelProfile]:
             if isinstance(capabilities, list) else (),
             thinking_levels=tuple(str(item).strip() for item in thinking if str(item).strip())
             if isinstance(thinking, list) else (),
+            context_window=context_window,
         ))
     return result
 
@@ -165,3 +184,66 @@ def model_binding_status(runtime: dict[str, Any] | None, model_id: str) -> Model
     if not isinstance(metadata, dict) or metadata.get("availability_status") != "ready":
         return "unverified"
     return "valid" if runtime_model(runtime, model_id) is not None else "missing"
+
+
+def runtime_execution_features(
+    runtime: dict[str, Any] | None,
+    model_id: str,
+) -> dict[str, Any]:
+    """Return normalized hard execution features for one Runtime model."""
+
+    payload = runtime if isinstance(runtime, dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    runtime_capabilities = (
+        metadata.get("runtime_capabilities")
+        if isinstance(metadata.get("runtime_capabilities"), dict)
+        else {}
+    )
+    model = runtime_model(payload, model_id)
+    model_capabilities = {
+        str(item or "").strip().lower()
+        for item in (model.capabilities if model is not None else ())
+        if str(item or "").strip()
+    }
+    return {
+        "text": model is not None,
+        "tools": bool(
+            "tools" in model_capabilities
+            or "tool_use" in model_capabilities
+            or runtime_capabilities.get("tool_events")
+        ),
+        "images": bool(
+            "images" in model_capabilities
+            or "vision" in model_capabilities
+            or runtime_capabilities.get("images")
+        ),
+        "context_window": model.context_window if model is not None else None,
+    }
+
+
+def runtime_model_fingerprint(runtime: dict[str, Any] | None, model_id: str) -> str:
+    """Fingerprint only model facts that affect profile or execution behavior."""
+
+    payload = runtime if isinstance(runtime, dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    runtime_capabilities = (
+        metadata.get("runtime_capabilities")
+        if isinstance(metadata.get("runtime_capabilities"), dict)
+        else {}
+    )
+    canonical_id = canonical_runtime_model_id(payload, model_id)
+    model = runtime_model(payload, canonical_id)
+    semantic = {
+        "runtime_id": str(payload.get("id") or ""),
+        "model_id": canonical_id,
+        "capabilities": sorted(model.capabilities) if model is not None else [],
+        "thinking_levels": sorted(model.thinking_levels) if model is not None else [],
+        "context_window": model.context_window if model is not None else None,
+        "execution_features": runtime_execution_features(payload, canonical_id),
+        "runtime_capabilities": {
+            key: bool(runtime_capabilities.get(key))
+            for key in ("model_switch", "images", "tool_events")
+        },
+    }
+    encoded = json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()

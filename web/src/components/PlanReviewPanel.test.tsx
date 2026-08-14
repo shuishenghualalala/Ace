@@ -21,21 +21,8 @@ describe("PlanReviewCard", () => {
     expect(html).toContain("等待审批");
     expect(html).toContain("做事情");
     expect(html).toContain("批准并执行");
-  });
-
-  it("pending 计划：渲染批准/继续修改按钮", () => {
-    const review: PlanReview = {
-      plan: "# 我的计划\n做事情",
-      planFile: "/tmp/plan.md",
-      status: "pending",
-    };
-    const html = renderToStaticMarkup(
-      <PlanReviewCard review={review} onApprove={noop} onReject={noop} />,
-    );
-    expect(html).toContain("批准并执行");
     expect(html).toContain("继续修改");
     expect(html).toContain("拒绝并退出");
-    expect(html).toContain("等待审批");
   });
 
   it("empty 计划：不渲染审批按钮，显示「计划为空」提示", () => {

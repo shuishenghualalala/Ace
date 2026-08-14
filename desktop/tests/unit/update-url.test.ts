@@ -30,31 +30,36 @@ describe('detectUpdatePlatform', () => {
 
 describe('buildUpdateUrl', () => {
   afterEach(() => {
-    delete process.env.CREW_DOWNLOAD_BASE_URL;
+    delete process.env.ACE_DOWNLOAD_BASE_URL;
   });
 
-  it('Windows → Inno Setup exe 模板', () => {
-    expect(buildUpdateUrl('0.23.59', 'windows')).toBe(
-      `${DEFAULT_DOWNLOAD_BASE_URL}Crew_Setup_v0.23.59.exe`,
-    );
-  });
-
-  it('Linux → deb 模板（UOS/麒麟/标准 Debian 共用）', () => {
-    expect(buildUpdateUrl('0.23.59', 'linux')).toBe(
-      `${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_amd64.deb`,
-    );
-  });
-
-  it('macOS → dmg 模板（仅 Apple Silicon）', () => {
-    expect(buildUpdateUrl('0.23.59', 'mac')).toBe(
-      `${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_arm64.dmg`,
-    );
-  });
-
-  it('支持带前缀的版本号', () => {
-    expect(buildUpdateUrl('v0.23.59', 'windows')).toBe(
-      `${DEFAULT_DOWNLOAD_BASE_URL}Crew_Setup_v0.23.59.exe`,
-    );
+  it.each([
+    {
+      name: 'Windows → Inno Setup exe 模板',
+      version: '0.23.59',
+      platform: 'windows',
+      expected: `${DEFAULT_DOWNLOAD_BASE_URL}Crew_Setup_v0.23.59.exe`,
+    },
+    {
+      name: 'Linux → deb 模板（UOS/麒麟/标准 Debian 共用）',
+      version: '0.23.59',
+      platform: 'linux',
+      expected: `${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_amd64.deb`,
+    },
+    {
+      name: 'macOS → dmg 模板（仅 Apple Silicon）',
+      version: '0.23.59',
+      platform: 'mac',
+      expected: `${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_arm64.dmg`,
+    },
+    {
+      name: '支持带前缀的版本号',
+      version: 'v0.23.59',
+      platform: 'windows',
+      expected: `${DEFAULT_DOWNLOAD_BASE_URL}Crew_Setup_v0.23.59.exe`,
+    },
+  ])('$name', ({ version, platform, expected }) => {
+    expect(buildUpdateUrl(version, platform)).toBe(expected);
   });
 
   it('不支持的平台抛错', () => {
@@ -62,7 +67,7 @@ describe('buildUpdateUrl', () => {
   });
 
   it('自定义下载基址（自动补斜杠）', () => {
-    process.env.CREW_DOWNLOAD_BASE_URL = 'http://example.test/downloads';
+    process.env.ACE_DOWNLOAD_BASE_URL = 'http://example.test/downloads';
     expect(downloadBaseUrl()).toBe('http://example.test/downloads/');
     expect(buildUpdateUrl('1.2.3', 'linux')).toBe('http://example.test/downloads/crew-desktop_1.2.3_amd64.deb');
   });

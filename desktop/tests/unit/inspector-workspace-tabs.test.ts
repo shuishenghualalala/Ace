@@ -3,7 +3,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { backendApi, type BrowserPageState } from '../../src/ui/backend-client';
-import { bindInspectorUi, openInspectorToTab } from '../../src/ui/features/inspector';
+import {
+  bindInspectorUi,
+  enableInspectorSurfaceAutoWidth,
+  openInspectorToTab,
+} from '../../src/ui/features/inspector';
 import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
 import { setActiveSessionId } from '../../src/ui/state';
 
@@ -134,6 +138,7 @@ describe('Inspector browser-style workspace tabs', () => {
 
     document.getElementById('inspector-maximize')?.click();
     expect(document.body.classList.contains('inspector-workspace-maximized')).toBe(true);
+    expect(document.getElementById('inspector-maximize')?.getAttribute('aria-label')).toBe('还原预览');
 
     document.getElementById('inspector-new-browser-tab')?.click();
     expect(document.getElementById('inspector-tab-menu')?.hidden).toBe(false);
@@ -160,7 +165,24 @@ describe('Inspector browser-style workspace tabs', () => {
     expect(document.getElementById('inspector-tab-menu')?.textContent).not.toContain('任务');
 
     await vi.waitFor(() => {
-      expect(backendApi.ensureSession).toHaveBeenCalled();
+    expect(backendApi.ensureSession).toHaveBeenCalled();
     });
+  });
+
+  it('sizes generated surfaces with the window and lets the divider take over', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1600, configurable: true });
+    bindInspectorUi();
+    enableInspectorSurfaceAutoWidth();
+    expect(document.body.classList.contains('inspector-surface-auto-width')).toBe(true);
+    expect(document.documentElement.style.getPropertyValue('--inspector-width')).toBe('832px');
+
+    Object.defineProperty(window, 'innerWidth', { value: 1000, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    expect(document.documentElement.style.getPropertyValue('--inspector-width')).toBe('560px');
+
+    const handle = document.getElementById('chat-inspector-resize-handle') as HTMLElement;
+    handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(document.body.classList.contains('inspector-surface-auto-width')).toBe(false);
+    expect(handle.getAttribute('aria-valuenow')).toBeTruthy();
   });
 });

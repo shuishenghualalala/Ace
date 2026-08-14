@@ -101,7 +101,7 @@ class SessionDispatcher:
         hook_registry.register("session:end", self._on_session_end)
 
     def _handle_session_end(self, event_type: str, context: dict) -> None:
-        """session:end 钩子：清掉本会话的 start 标记与残留 task 引用。"""
+        """session:end 钩子：清掉本会话状态并回收 transient security authority。"""
         sid = str((context or {}).get("session_id") or "")
         if not sid:
             return
@@ -111,6 +111,10 @@ class SessionDispatcher:
             self._sessions_started.discard(key)
             self._tasks.pop(key, None)
             self._active_exec_session_ids.pop(key, None)
+        security_service = getattr(self._controller, "security_service", None)
+        end_session = getattr(security_service, "end_session", None)
+        if owner and callable(end_session):
+            end_session(owner, sid)
 
     # ------------------------------------------------------------------ #
     @staticmethod

@@ -16,6 +16,8 @@ function escapeHtml(text: string): string {
 
 const PERMISSION_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>`;
 const PERMISSION_NOTICE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>`;
+const STAFFING_ICON = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 20a6 6 0 0 0-12 0"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M16 11h6"/></svg>`;
+const STAFFING_CHECK_ICON = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
 
 interface PermissionPromptParts {
   action: string;
@@ -205,7 +207,7 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
 function permissionButtonClass(label: string, value: string): string {
   const choice = `${label} ${value}`.toLowerCase();
   if (/allow_once|允许一次|允许本次/.test(choice)) return ' permission-dialog__button--primary';
-  if (/always|始终允许/.test(choice)) return ' permission-dialog__button--persistent';
+  if (/always|session_exact|始终允许|本次对话/.test(choice)) return ' permission-dialog__button--persistent';
   return ' permission-dialog__button--secondary';
 }
 
@@ -221,6 +223,38 @@ function followupSourceHtml(question: PendingFollowup): string {
   return `<div class="followup-card__source">${escapeHtml(agentName)} 正在询问</div>`;
 }
 
+export function isRuntimeStaffingFollowup(
+  question: PendingFollowup | null | undefined,
+): boolean {
+  return question?.origin?.mentionIntent === 'runtime_staffing';
+}
+
+function followupOptionsHtml(
+  question: PendingFollowup['questions'][number],
+  options = question.options,
+  includeFreeText = question.allowFreeText,
+): string {
+  const inputType = question.multiSelect ? 'checkbox' : 'radio';
+  const optionHtml = options.map((option) => {
+    const description = option.description
+      ? `<span class="followup-card__option-description">${escapeHtml(option.description)}</span>`
+      : '';
+    return `
+      <label class="followup-card__option">
+        <input type="${inputType}" name="followup_${escapeHtml(question.id)}" value="${escapeHtml(option.value)}" data-qid="${escapeHtml(question.id)}" />
+        <span class="followup-card__option-copy"><span>${escapeHtml(option.label)}</span>${description}</span>
+      </label>`;
+  }).join('');
+  const freeTextOption = includeFreeText ? `
+      <label class="followup-card__option followup-card__option--free">
+        <input type="${inputType}" name="followup_${escapeHtml(question.id)}" value="${FREE_TEXT_OPTION}" data-qid="${escapeHtml(question.id)}" data-free="1" />
+        <span>其他（自定义输入）</span>
+      </label>
+      <input type="text" class="followup-card__free-input" data-qid="${escapeHtml(question.id)}" placeholder="请输入你的回答…" hidden />`
+    : '';
+  return `${optionHtml}${freeTextOption}`;
+}
+
 function permissionDialogHtml(question: PendingFollowup): string {
   const firstQuestion = question.questions[0];
   const presentation = permissionPresentation(question);
@@ -229,7 +263,7 @@ function permissionDialogHtml(question: PendingFollowup): string {
   const rank = (label: string, value: string): number => {
     const choice = `${label} ${value}`.toLowerCase();
     if (/deny|拒绝/.test(choice)) return 0;
-    if (/always|始终允许/.test(choice)) return 1;
+    if (/always|session_exact|始终允许|本次对话/.test(choice)) return 1;
     return 2;
   };
   const orderedOptions = [...options].sort(
@@ -259,41 +293,80 @@ function permissionDialogHtml(question: PendingFollowup): string {
     </div>`;
 }
 
+function staffingStatusHtml(question: PendingFollowup): string {
+  const status = question.status ?? 'applying';
+  const noteParts = (question.note ?? '').split('\n').map((part) => part.trim()).filter(Boolean);
+  const defaultTitle = status === 'applied'
+    ? '协作助手已加入，继续开工'
+    : status === 'declined'
+      ? '好，这次先不添加'
+      : status === 'failed'
+        ? '这位助手暂时没能加入'
+        : '正在邀请协作助手加入……';
+  const title = noteParts[0] ?? defaultTitle;
+  const detail = noteParts.slice(1).join(' ');
+  const icon = status === 'applying'
+    ? '<span class="staffing-dialog__spinner" aria-hidden="true"></span>'
+    : STAFFING_CHECK_ICON;
+  return `
+    <div class="followup-card followup-card--staffing followup-card--staffing-status followup-card--staffing-${escapeHtml(status)}" data-followup-id="${escapeHtml(question.questionId)}" role="status" aria-live="polite" aria-busy="${status === 'applying' ? 'true' : 'false'}">
+      <div class="staffing-dialog__status-icon">${icon}</div>
+      <div class="staffing-dialog__status-copy">
+        <div class="followup-card__title">${escapeHtml(title)}</div>
+        ${detail ? `<div class="followup-card__subtitle">${escapeHtml(detail)}</div>` : ''}
+      </div>
+    </div>`;
+}
+
+function staffingDialogHtml(question: PendingFollowup): string {
+  if (['applying', 'applied', 'declined', 'failed'].includes(question.status ?? '')) {
+    return staffingStatusHtml(question);
+  }
+  const firstQuestion = question.questions[0];
+  const dialogId = `staffing-${question.questionId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const candidates = firstQuestion?.options.filter((option) => option.value !== 'decline') ?? [];
+  const decline = firstQuestion?.options.find((option) => option.value === 'decline');
+  return `
+    <div class="followup-card followup-card--staffing" data-followup-id="${escapeHtml(question.questionId)}" role="alertdialog" aria-modal="true" aria-labelledby="${dialogId}-title" aria-describedby="${dialogId}-description" tabindex="-1">
+      <div class="staffing-dialog__source">
+        <span class="session__team-logo" aria-hidden="true"><i></i><i></i></span>
+        <span>团队需要你的确认</span>
+      </div>
+      <div class="followup-card__header staffing-dialog__header">
+        <span class="followup-card__header-icon staffing-dialog__header-icon">${STAFFING_ICON}</span>
+        <div class="followup-card__header-copy">
+          <div class="followup-card__title" id="${dialogId}-title">${escapeHtml(question.title || '给这项任务找一位帮手？')}</div>
+          <div class="followup-card__subtitle" id="${dialogId}-description">${escapeHtml(firstQuestion?.question ?? '')}</div>
+        </div>
+      </div>
+      <div class="staffing-dialog__body">
+        ${question.note ? `<div class="staffing-dialog__scope">${STAFFING_CHECK_ICON}<span>${escapeHtml(question.note)}</span></div>` : ''}
+        <div class="followup-card__question" data-qid="${escapeHtml(firstQuestion?.id ?? '')}">
+          <div class="followup-card__qtext staffing-dialog__choice-title">选择一位协作助手</div>
+          <div class="followup-card__options" role="radiogroup" aria-label="选择一位协作助手">
+            ${firstQuestion ? followupOptionsHtml(firstQuestion, candidates, false) : ''}
+          </div>
+        </div>
+      </div>
+      <div class="staffing-dialog__actions">
+        <button type="button" class="followup-card__dismiss" data-action="staffing-decline" data-staffing-qid="${escapeHtml(firstQuestion?.id ?? '')}" data-staffing-value="${escapeHtml(decline?.value ?? 'decline')}">${escapeHtml(decline?.label ?? '这次先不添加')}</button>
+        <button type="button" class="followup-card__submit" data-action="submit" disabled>确认并继续</button>
+      </div>
+    </div>`;
+}
+
 /** 渲染追问卡片 HTML。 */
 export function renderFollowupCard(question: PendingFollowup): string {
+  if (isRuntimeStaffingFollowup(question)) return staffingDialogHtml(question);
   const isPermission = question.recordHistory === false;
   if (isPermission) return permissionDialogHtml(question);
   const blocks = question.questions
     .map((q) => {
-      const inputType = q.multiSelect ? 'checkbox' : 'radio';
-      const opts = q.options
-        .map((opt) => {
-          const safeLabel = escapeHtml(opt.label);
-          const safeValue = escapeHtml(opt.value);
-          const descriptionText = opt.description || '';
-          const description = descriptionText
-            ? `<span class="followup-card__option-description">${escapeHtml(descriptionText)}</span>`
-            : '';
-          return `
-            <label class="followup-card__option">
-              <input type="${inputType}" name="followup_${escapeHtml(q.id)}" value="${safeValue}" data-qid="${escapeHtml(q.id)}" />
-              <span class="followup-card__option-copy"><span>${safeLabel}</span>${description}</span>
-            </label>`;
-        })
-        .join('');
-      const freeTextOption = q.allowFreeText ? `
-            <label class="followup-card__option followup-card__option--free">
-              <input type="${inputType}" name="followup_${escapeHtml(q.id)}" value="${FREE_TEXT_OPTION}" data-qid="${escapeHtml(q.id)}" data-free="1" />
-              <span>其他（自定义输入）</span>
-            </label>
-            <input type="text" class="followup-card__free-input" data-qid="${escapeHtml(q.id)}" placeholder="请输入你的回答…" hidden />`
-        : '';
       return `
         <div class="followup-card__question" data-qid="${escapeHtml(q.id)}">
           <div class="followup-card__qtext">${escapeHtml(q.question)}</div>
           <div class="followup-card__options" role="${q.multiSelect ? 'group' : 'radiogroup'}" aria-label="${escapeHtml(q.question)}">
-            ${opts}
-            ${freeTextOption}
+            ${followupOptionsHtml(q)}
           </div>
         </div>`;
     })
@@ -332,9 +405,11 @@ export function formatFollowupAnswerMessage(
 /** 渲染追问卡片为 DOM 节点（供 chat-controller keyed-diff 使用）。 */
 export function renderFollowupCardElement(question: PendingFollowup): HTMLElement {
   const wrap = document.createElement('div');
-  wrap.className = question.recordHistory === false
-    ? 'followup-card-wrap followup-card-wrap--permission'
-    : 'followup-card-wrap';
+  wrap.className = isRuntimeStaffingFollowup(question)
+    ? 'followup-card-wrap followup-card-wrap--staffing'
+    : question.recordHistory === false
+      ? 'followup-card-wrap followup-card-wrap--permission'
+      : 'followup-card-wrap';
   wrap.innerHTML = renderFollowupCard(question);
   return wrap;
 }
@@ -470,6 +545,15 @@ export function bindFollowupCard(root: HTMLElement, bindings: FollowupBindings):
     const action = btn.getAttribute('data-action');
     if (action === 'cancel') {
       bindings.onCancel(questionId);
+      return;
+    }
+    if (action === 'staffing-decline') {
+      const qid = btn.getAttribute('data-staffing-qid') ?? '';
+      const value = btn.getAttribute('data-staffing-value') ?? 'decline';
+      if (!qid) return;
+      btn.disabled = true;
+      if (submitBtn) submitBtn.disabled = true;
+      bindings.onSubmit(questionId, [{ question_id: qid, answers: [value] }]);
       return;
     }
     if (action === 'submit') {

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-
-AGENT_PROFILE_VERSION = 3
+AGENT_PROFILE_VERSION = 4
 
 # Keep the existing capability keys stable and extend them with domain-neutral
 # research, reasoning and review capabilities.  The order is also the stable

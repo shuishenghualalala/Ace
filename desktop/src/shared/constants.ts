@@ -42,7 +42,7 @@ export const SAFE_STORAGE_UNAVAILABLE_TAG = 'safe_storage_unavailable';
 /** IPC 参数校验失败的统一错误码（区别于业务错误）。 */
 export const IPC_ARG_VALIDATION_FAILED = 'IPC_ARG_VALIDATION_FAILED';
 
-/** Desktop prefs 路径名。 */
+/** 应用启动时 desktop prefs 路径名。 */
 export const DESKTOP_PREFS_FILENAME = 'desktop-prefs.json';
 
 /** 渲染层 notify 动画 / 移除时长（ms）。 */

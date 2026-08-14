@@ -41,6 +41,12 @@ import {
   detectDuplicateSelectors,
 } from '../../scripts/detect-duplicate-selectors.mjs';
 
+// 6. audit-design-system
+import {
+  auditDesignSystem,
+  hasDesignViolations,
+} from '../../scripts/audit-design-system.mjs';
+
 let tempDir: string;
 let cssDir: string;
 
@@ -235,7 +241,7 @@ describe('audit-dead-css-vars / auditDeadCssVars (integrated)', () => {
     mkdirSync(join(dir, 'styles'), { recursive: true });
     writeFileSync(
       join(dir, 'styles', 'main.css'),
-      '.a { color: var(--bg); } .b { color: var(--unknown); }',
+      '.a { color: var(--bg); } .b { color: var(--unknown); } .c { left: var(--mw-runtime-left); }',
     );
     writeFileSync(join(dir, 'styles', 'variables.css'), ':root { --bg: #fff; }');
     mkdirSync(join(dir, 'src'), { recursive: true });
@@ -247,7 +253,7 @@ describe('audit-dead-css-vars / auditDeadCssVars (integrated)', () => {
       variablesPath: join(dir, 'styles', 'variables.css'),
     });
 
-    expect(out.summary.totalRefs).toBe(2);
+    expect(out.summary.totalRefs).toBe(3);
     expect(out.summary.deadRefs).toBe(1);
     expect(out.refs[0].name).toBe('--unknown');
     rmSync(dir, { recursive: true, force: true });
@@ -301,7 +307,43 @@ describe('detect-duplicate-selectors / detectDuplicateSelectors', () => {
   });
 });
 
-/* ─── 6. check-security ───────────────────────────────────── */
+/* ─── 6. audit-design-system ──────────────────────────────── */
+
+describe('audit-design-system', () => {
+  it('reports raw geometry, effects, important and visual inline styles', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'design-system-audit-'));
+    mkdirSync(join(dir, 'assets', 'styles'), { recursive: true });
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(
+      join(dir, 'assets', 'styles', 'feature.css'),
+      '.a { padding: 8px; border-radius: 16px; background: linear-gradient(red, blue); backdrop-filter: blur(2px); transition: all 160ms; color: red !important; --legacy-accent: red; }',
+    );
+    writeFileSync(join(dir, 'assets', 'sprite.svg'), '<svg><path fill="var(--mw-status-danger,#f00)" /></svg>');
+    writeFileSync(join(dir, 'src', 'feature.ts'), "el.style.width = '10px'; el.style.display = 'none'; el.style.setProperty('--mw-raw', 'x'); const html = `<div style=\"color: red\"></div>`;");
+    writeFileSync(join(dir, 'assets', 'index.html'), '<div style="color: red"></div>');
+
+    const report = auditDesignSystem({
+      stylesDir: join(dir, 'assets', 'styles'),
+      srcDir: join(dir, 'src'),
+      assetsDir: join(dir, 'assets'),
+    });
+
+    expect(report.summary.spacing).toBe(1);
+    expect(report.summary.radius).toBe(1);
+    expect(report.summary.gradient).toBe(1);
+    expect(report.summary.effects).toBe(1);
+    expect(report.summary.motionLiterals).toBe(1);
+    expect(report.summary.transitionAll).toBe(1);
+    expect(report.summary.important).toBe(1);
+    expect(report.summary.customProperties).toBe(1);
+    expect(report.summary.embeddedColors).toBe(1);
+    expect(report.summary.inlineStyles).toBe(4);
+    expect(hasDesignViolations(report)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+/* ─── 7. check-security ───────────────────────────────────── */
 
 function runSecurityFixture(name: 'safe' | 'unsafe') {
   const script = join(process.cwd(), 'scripts', 'check-security.mjs');

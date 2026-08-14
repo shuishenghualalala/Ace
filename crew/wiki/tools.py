@@ -16,8 +16,11 @@ from crew.core.runctx import (
     current_push_fn,
     current_request_id,
     current_session_id,
+    emit_tool_progress,
 )
 from crew.tools.registry import Registry, tool_error, tool_result
+from crew.tools.security_guard import authorize_network_tool
+from crew.security.outbound import PublicRedirectApprovalRequired, parse_public_http_target
 
 from .compiler import WikiCompiler
 from .config import WikiConfig
@@ -47,6 +50,7 @@ from .prompts import (
     WIKI_FETCH_URL_PROMPT,
     WIKI_REFRESH_SOURCE_PROMPT,
     WIKI_LINT_PROMPT,
+    WIKI_LIST_INBOX_PROMPT,
     WIKI_LIST_KBS_PROMPT,
     WIKI_LIST_SOURCES_PROMPT,
     WIKI_ORIENT_PROMPT,
@@ -85,6 +89,7 @@ WIKI_READ_TOOLS = [
     "wiki_read",
     "wiki_list_sources",
     "wiki_list_kbs",
+    "wiki_list_inbox",
 ]
 
 WIKI_MANAGE_TOOLS = [
@@ -344,6 +349,23 @@ _WIKI_LIST_KBS_SCHEMA = {
     "name": "wiki_list_kbs",
     "description": WIKI_LIST_KBS_PROMPT,
     "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+_WIKI_LIST_INBOX_SCHEMA = {
+    "name": "wiki_list_inbox",
+    "description": WIKI_LIST_INBOX_PROMPT,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "最多返回多少条，默认 50",
+                "default": 50,
+            },
+            **_KB_ID_PARAM,
+        },
+        "required": [],
+    },
 }
 
 _WIKI_UPDATE_PAGE_SCHEMA = {
@@ -606,6 +628,8 @@ def register_wiki_tools(
     manager: WikiSessionManager,
     config: WikiConfig | None = None,
     session_store: Any = None,
+    workspace_store: Any = None,
+    security_service: Any = None,
 ) -> None:
     """把 Wiki 工具注册到 registry（toolset='wiki'）。"""
 
@@ -1168,7 +1192,7 @@ def register_wiki_tools(
             return tool_error("禁止删除 default 知识库")
 
         owner = _owner()
-        pages = store.list_all(owner_account_id=owner, kb_id=kb_id, limit=10000)
+        page_count = store.count_pages(owner_account_id=owner, kb_id=kb_id)
         raws = store.list_raws(owner_account_id=owner, kb_id=kb_id)
 
         confirmed = _consume_confirmation(args, action="delete_kb", kb_id=kb_id)
@@ -1179,7 +1203,7 @@ def register_wiki_tools(
                 payload={"kb_id": kb_id},
                 summary=f"删除知识库 {kb_id}",
                 impact={
-                    "pages": len(pages),
+                    "pages": page_count,
                     "raw_sources": len(raws),
                     "cannot_undo": True,
                 },
@@ -1204,10 +1228,7 @@ def register_wiki_tools(
         if raw is None:
             return tool_error(f"Raw source 不存在: {source_id}")
 
-        linked_pages = [
-            page for page in store.list_all(owner_account_id=_owner(), kb_id=kb_id, limit=10000)
-            if source_id in page.sources
-        ]
+        linked_pages = store.list_pages_by_source(source_id, owner_account_id=_owner(), kb_id=kb_id)
 
         confirmed = _consume_confirmation(args, action="delete_source", kb_id=kb_id)
         if confirmed is None:
@@ -1473,6 +1494,40 @@ def register_wiki_tools(
             count=len(kbs),
         )
 
+    def _handle_list_inbox(args: dict[str, Any]) -> str:
+        """列出已解析且系统建议深度整理、但尚未 ingest 的素材。"""
+        limit = max(1, int(args.get("limit", 50)))
+        kb_id = _kb_id(args)
+        raws = store.list_raws(owner_account_id=_owner(), kb_id=kb_id)
+        inbox = [
+            raw
+            for raw in raws
+            if raw.is_current
+            and (raw.parse_status or "pending") == "parsed"
+            and raw.ingest_recommend
+            and raw.ingest_status in ("pending", "recommended", "failed")
+        ]
+        inbox = sorted(inbox, key=lambda r: r.created_at, reverse=True)[:limit]
+        return tool_result(
+            sources=[
+                {
+                    "source_id": r.id,
+                    "title": r.title,
+                    "source_type": r.source_type,
+                    "doc_type": r.doc_type,
+                    "summary": r.summary,
+                    "tags": r.tags,
+                    "ingest_recommend": r.ingest_recommend,
+                    "ingest_reason": r.ingest_reason,
+                    "ingest_status": r.ingest_status,
+                    "created_at": r.created_at,
+                }
+                for r in inbox
+            ],
+            count=len(inbox),
+            kb_id=kb_id,
+        )
+
     def _handle_create_page(args: dict[str, Any]) -> str:
         from .schemas import WikiPage, WikiRelation
 
@@ -1704,6 +1759,8 @@ def register_wiki_tools(
             kb_id=kb_id,
             chunk_size=chunk_size,
             use_chunking=use_chunking,
+            # LLM 分析耗时较长：把阶段进度推到前端工具行（无推送通道时 no-op）。
+            progress=emit_tool_progress,
         )
         analysis_failed = any(
             str(issue).startswith("LLM 分析失败:")
@@ -1824,7 +1881,45 @@ def register_wiki_tools(
             issues=result.issues,
         )
 
-    def _capture_url(
+    async def _authorized_web_fetch(url: str) -> tuple[str, str]:
+        """Authorize the initial authority and every cross-authority redirect."""
+        next_target = url
+        allowed: set[tuple[str, int, str]] = set()
+        for _attempt in range(6):
+            await authorize_network_tool(
+                next_target,
+                tool_name="wiki_fetch_url",
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
+            allowed.add(parse_public_http_target(next_target).authority)
+            try:
+                return await asyncio.to_thread(
+                    fetch_url_to_markdown,
+                    url,
+                    15.0,
+                    allowed,
+                )
+            except PublicRedirectApprovalRequired as exc:
+                next_target = exc.url
+        raise ValueError("网页重定向次数过多")
+
+    async def _authorized_youtube_fetch(url: str) -> tuple[str, str]:
+        """Authorize both a shared short URL and the fixed transcript service host."""
+        targets = [url]
+        original = parse_public_http_target(url)
+        if original.host not in {"youtube.com", "www.youtube.com"}:
+            targets.append("https://www.youtube.com/")
+        for target in targets:
+            await authorize_network_tool(
+                target,
+                tool_name="wiki_fetch_url",
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
+        return await asyncio.to_thread(fetch_youtube_transcript, url)
+
+    async def _capture_url(
         url: str,
         title: str,
         kb_id: str,
@@ -1902,9 +1997,9 @@ def register_wiki_tools(
         for _attempt in range(2):
             try:
                 if platform == "youtube":
-                    markdown_text, video_id = fetch_youtube_transcript(url)
+                    markdown_text, video_id = await _authorized_youtube_fetch(url)
                 else:
-                    markdown_text, final_url = fetch_url_to_markdown(url)
+                    markdown_text, final_url = await _authorized_web_fetch(url)
                 markdown_text = validate_parsed_text(markdown_text, url)
                 last_error = None
                 break
@@ -2022,17 +2117,17 @@ def register_wiki_tools(
             message="URL 内容已抓取、通过质量检查并发布为可搜索的全文 Source 页面。",
         )
 
-    def _handle_fetch_url(args: dict[str, Any]) -> str:
+    async def _handle_fetch_url(args: dict[str, Any]) -> str:
         url = str(args.get("url", "")).strip()
         if not url:
             return tool_error("缺少 url")
-        return _capture_url(
+        return await _capture_url(
             url,
             str(args.get("title", "")).strip(),
             _kb_id(args),
         )
 
-    def _handle_refresh_source(args: dict[str, Any]) -> str:
+    async def _handle_refresh_source(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()
         if not source_id:
             return tool_error("缺少 source_id")
@@ -2042,7 +2137,7 @@ def register_wiki_tools(
             return tool_error(f"Raw source 不存在: {source_id}")
         if raw.source_type != "url" or not raw.source_url:
             return tool_error("只有带 source_url 的 URL RawSource 可以刷新")
-        return _capture_url(raw.source_url, raw.title, kb_id, refresh_from=raw)
+        return await _capture_url(raw.source_url, raw.title, kb_id, refresh_from=raw)
 
     async def _handle_digest(args: dict[str, Any]) -> str:
         topic = str(args.get("topic") or "").strip()
@@ -2070,24 +2165,25 @@ def register_wiki_tools(
         (_WIKI_SEARCH_SCHEMA, _handle_search, False, "🗂️", "搜索 Wiki", "搜索 Wiki", "wiki search keyword pages find"),
         (_WIKI_READ_SCHEMA, _handle_read, False, "📄", "读取 Wiki 页面", "读取 Wiki 页面", "wiki read page content view"),
         (_WIKI_LINT_SCHEMA, _handle_lint, True, "🧹", "检查 Wiki", "检查 Wiki", "wiki lint check quality issues broken links orphan"),
-        (_WIKI_CREATE_KB_SCHEMA, _handle_create_kb, False, "📚", "创建知识库", "创建知识库 {{kb_id}}", "wiki create knowledge base new kb"),
-        (_WIKI_DELETE_KB_SCHEMA, _handle_delete_kb, False, "🗑️", "删除知识库", "删除知识库 {{kb_id}}", "wiki delete knowledge base remove kb"),
-        (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除 Raw Source {{source_id}}", "wiki delete raw source remove"),
-        (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {{source_id}}", "wiki parse source reparse document extract text"),
+        (_WIKI_CREATE_KB_SCHEMA, _handle_create_kb, False, "📚", "创建知识库", "创建知识库 {kb_id}", "wiki create knowledge base new kb"),
+        (_WIKI_DELETE_KB_SCHEMA, _handle_delete_kb, False, "🗑️", "删除知识库", "删除知识库 {kb_id}", "wiki delete knowledge base remove kb"),
+        (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除 Raw Source {source_id}", "wiki delete raw source remove"),
+        (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {source_id}", "wiki parse source reparse document extract text"),
         (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出 Raw Sources", "列出 Raw Sources", "wiki list sources raw files pending parsed failed"),
         (_WIKI_LIST_KBS_SCHEMA, _handle_list_kbs, False, "📚", "列出知识库", "列出知识库", "wiki list knowledge bases kbs"),
-        (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {{page_id}}", "wiki update page edit content tags related aliases"),
-        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {{source_id}}", "wiki plan ingest preview changes proposed pages"),
-        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {{source_id}}", "wiki apply ingest write pages confirm plan"),
-        (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, False, "🌐", "抓取网页", "抓取网页 {{url}}", "wiki fetch url webpage scrape crawl import"),
-        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, False, "🔄", "刷新网页来源", "刷新来源 {{source_id}}", "wiki refresh url source drift version"),
-        (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {{topic}}", "wiki digest synthesis comparison multi source"),
-        (_WIKI_CAPTURE_ATTACHMENT_SCHEMA, _handle_capture_attachment, False, "📎", "捕获 Wiki 附件", "捕获附件 {{path}}", "wiki capture attachment file import upload"),
-        (_WIKI_CAPTURE_TEXT_SCHEMA, _handle_capture_text, False, "📝", "捕获 Wiki 文本", "捕获文本 {{title}}", "wiki capture text snippet import note"),
-        (_WIKI_CAPTURE_SESSION_SCHEMA, _handle_capture_session, False, "💬", "沉淀会话", "沉淀会话 {{session_id}}", "wiki capture session conversation import chat"),
-        (_WIKI_CREATE_PAGE_SCHEMA, _handle_create_page, False, "📄", "创建 Wiki 页面", "创建页面 {{title}}", "wiki create page new manual write"),
+        (_WIKI_LIST_INBOX_SCHEMA, _handle_list_inbox, False, "📥", "列出待整理素材", "列出待整理素材", "wiki list inbox pending sources recommend ingest"),
+        (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {page_id}", "wiki update page edit content tags related aliases"),
+        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {source_id}", "wiki plan ingest preview changes proposed pages"),
+        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {source_id}", "wiki apply ingest write pages confirm plan"),
+        (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, True, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
+        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, True, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
+        (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {topic}", "wiki digest synthesis comparison multi source"),
+        (_WIKI_CAPTURE_ATTACHMENT_SCHEMA, _handle_capture_attachment, False, "📎", "捕获 Wiki 附件", "捕获附件 {path}", "wiki capture attachment file import upload"),
+        (_WIKI_CAPTURE_TEXT_SCHEMA, _handle_capture_text, False, "📝", "捕获 Wiki 文本", "捕获文本 {title}", "wiki capture text snippet import note"),
+        (_WIKI_CAPTURE_SESSION_SCHEMA, _handle_capture_session, False, "💬", "沉淀会话", "沉淀会话 {session_id}", "wiki capture session conversation import chat"),
+        (_WIKI_CREATE_PAGE_SCHEMA, _handle_create_page, False, "📄", "创建 Wiki 页面", "创建页面 {title}", "wiki create page new manual write"),
         (_WIKI_DELETE_PAGES_SCHEMA, _handle_delete_pages, False, "🗑️", "删除 Wiki 页面", "删除 Wiki 页面", "wiki delete pages remove"),
-        (_WIKI_RENAME_PAGE_SCHEMA, _handle_rename_page, False, "✏️", "重命名 Wiki 页面", "重命名 {{page_id}}", "wiki rename page title change"),
+        (_WIKI_RENAME_PAGE_SCHEMA, _handle_rename_page, False, "✏️", "重命名 Wiki 页面", "重命名 {page_id}", "wiki rename page title change"),
     ]
     read_tools = set(WIKI_READ_TOOLS)
     for schema, handler, is_async, emoji, display_name, ui_label, search_hint in _TOOLS:

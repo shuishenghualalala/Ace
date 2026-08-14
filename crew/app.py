@@ -35,6 +35,12 @@ from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
+from crew.security.approvals import ApprovalManager
+from crew.security.audit import AuditEvent, SQLiteSecurityAudit
+from crew.security.context import SecurityContext
+from crew.security.grants import GrantRegistry
+from crew.security.rule_store import SQLiteRuleStore
+from crew.security.service import SecurityApprovalService
 from crew.state.config import (
     Config,
     ModelProfile,
@@ -371,6 +377,38 @@ class CrewApp:
         self.workspace_store = workspace_store
         self.memory = memory
         self.plugins = plugins
+        self.security_grants = GrantRegistry()
+        self.security_approvals = ApprovalManager(self.security_grants)
+        self.security_rules = SQLiteRuleStore(config.db_path, wal_enabled=config.sqlite_wal)
+        self.security_audit = SQLiteSecurityAudit(config.db_path, wal_enabled=config.sqlite_wal)
+        for rule_id, os_user, owner_account_id, workspace_id in (
+            self.security_rules.migrated_legacy_rules
+        ):
+            self.security_audit.record(
+                AuditEvent.for_rule(
+                    SecurityContext(
+                        os_user=os_user,
+                        owner_account_id=owner_account_id,
+                        workspace_id=workspace_id,
+                        workspace_root=None,
+                        session_id="security-migration",
+                        request_id="security-migration",
+                        task_id="",
+                        cwd=None,
+                    ),
+                    rule_id=rule_id,
+                    action_type="rule_disabled",
+                    decision="migration_disabled_legacy_unscoped_allow",
+                )
+            )
+        self.security_service = SecurityApprovalService(
+            self.security_approvals,
+            self.security_grants,
+            self.security_rules,
+            self.security_audit,
+            db_path=config.db_path,
+            security_enabled=config.security_enabled,
+        )
         # Gateway 级单活登录事实源；HTTP/WS、Cron 与渠道只消费这一份租约。
         self.active_owner = ActiveOwnerLeaseStore(
             config.db_path,
@@ -413,6 +451,8 @@ class CrewApp:
         self.team = None
         # Dynamic Kanban 管理器延迟装配（见 build_app）
         self.dynamic_kanban = None
+        # Work 业务域组合服务（由 build_app 装配；不进入 core）。
+        self.work_service = None
         self.channel_bindings = None
         # 用户级插件开关偏好（由 build_app 装配后赋值）
         self.plugin_prefs = None
@@ -434,6 +474,9 @@ class CrewApp:
         # 外部 Team 的内置 Leader/规划器会跨多个请求复用 Agent，因此 owner 默认
         # Provider 也需由 App 持有并统一关闭；普通一次性生成接口仍走 owner_provider。
         self._owner_team_providers: dict[str, LLMProvider] = {}
+        # Team 内置成员的显式模型绑定。key 含 owner 与 profile id，避免不同
+        # 账号或不同模型错误复用同一个持久连接。
+        self._owner_team_member_model_providers: dict[tuple[str, str], LLMProvider] = {}
         # 默认模型切换时，已有 Team/Dynamic Kanban 后台任务可能仍持有旧客户端。
         # 保留强引用到 shutdown，避免后台化后已脱离 Dispatcher 的任务被提前断流。
         self._stale_owner_team_providers: dict[int, LLMProvider] = {}
@@ -740,14 +783,20 @@ class CrewApp:
             if external_agent_id and not str(executor_config.get("external_agent_id") or "").strip():
                 executor_config["external_agent_id"] = external_agent_id
 
-        user_type = str(resolved.get("user_type") or cfg.access_control.user_type).strip().lower()
-        if user_type not in ("external", "internal"):
-            user_type = cfg.access_control.user_type
-        ac = cfg.access_control.resolve_for(user_type)
         # 显式参数优先；仅在调用方未传时回退 ContextVar（兼容直接测 _make_agent 的旧路径）
         from crew.core.runctx import current_owner_account_id
 
         owner = str(owner_account_id or current_owner_account_id.get() or "").strip()
+        requested_user_type = str(resolved.get("user_type") or "").strip().lower()
+        resolver = getattr(cfg.access_control, "user_type_for_owner", None)
+        user_type = (
+            resolver(owner, requested=requested_user_type)
+            if callable(resolver)
+            else requested_user_type or cfg.access_control.user_type
+        )
+        if user_type not in ("external", "internal"):
+            user_type = cfg.access_control.user_type
+        ac = cfg.access_control.resolve_for(user_type)
         owner_profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         # 先选出最终 profile 再创建客户端，避免 Owner 默认模型随后被 session
         # 覆盖时遗留一个无人持有的连接池。没有动态 profile 才借用 App 全局 Provider。
@@ -1137,6 +1186,13 @@ class CrewApp:
         provider = self.provider
         sub_profile: ModelProfile | None = None
         inherited_capabilities = current_model_capabilities.get()
+        # model=inherit 时优先继承父 Agent 运行时实际生效的 Provider（经 contextvar）；
+        # 仅在无父上下文（如测试直接构造）时回退 app 级 self.provider。
+        from crew.core.runctx import current_provider
+
+        parent_provider = current_provider.get()
+        if parent_provider is not None:
+            provider = parent_provider
         effective_capabilities: list[str] | None = (
             list(inherited_capabilities) if inherited_capabilities is not None else None
         )
@@ -1296,6 +1352,14 @@ class CrewApp:
 
         prepare_inbound_channel_envelope(self, envelope)
 
+        command = str(envelope.params.get("channel_session_command") or "")
+        if command:
+            yield ResponseChunk.final(
+                envelope.request_id,
+                "已新建对话，接下来的消息将从空白上下文开始。",
+            )
+            return
+
         token = None
         if self._push_payload_fn is not None:
             async def _push_for_owner(session_id: str, payload: dict) -> None:
@@ -1412,6 +1476,11 @@ class CrewApp:
         except Exception:  # noqa: BLE001
             log.exception("后台进程崩溃恢复失败")
         await self.tasks.start()
+        if self.work_service is not None:
+            try:
+                await self.work_service.start()
+            except Exception:  # noqa: BLE001
+                log.exception("WorkService 启动失败")
         if self.browser_manager is not None:
             try:
                 await self.browser_manager.startup()
@@ -1426,6 +1495,11 @@ class CrewApp:
                 log.exception("MCP Client 启动失败")
         if start_cron:
             await self.start_cron()
+        if getattr(self, "sites", None) is not None:
+            try:
+                await self.sites.start()
+            except Exception:  # noqa: BLE001
+                log.exception("Sites Blueprint 调度器启动失败")
         # 启动会话过期定时器
         if self.config.session_idle_timeout > 0:
             self._expiry_task = asyncio.create_task(self._session_expiry_loop())
@@ -1516,9 +1590,11 @@ class CrewApp:
         providers = list({
             **self._stale_owner_team_providers,
             **{id(provider): provider for provider in self._owner_team_providers.values()},
+            **{id(provider): provider for provider in self._owner_team_member_model_providers.values()},
             **{id(provider): provider for provider in self._auxiliary_providers},
         }.values())
         self._owner_team_providers.clear()
+        self._owner_team_member_model_providers.clear()
         self._stale_owner_team_providers.clear()
         self._auxiliary_providers.clear()
         for provider in providers:
@@ -1595,6 +1671,13 @@ class CrewApp:
         await self.dispatcher.shutdown()
         if self.cron_service is not None:
             await self.cron_service.stop()
+        if self.work_service is not None:
+            try:
+                await self.work_service.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("WorkService 停止失败")
+        if getattr(self, "sites", None) is not None:
+            await self.sites.stop()
         # One-shot Subagents own dynamic providers and must finish their finally blocks
         # before AgentManager/global Provider shutdown.
         subagent_tasks = {task for task in self._subagent_bg_tasks if not task.done()}
@@ -1627,6 +1710,10 @@ class CrewApp:
         if bindings is not None and hasattr(bindings, "close"):
             bindings.close()
         self.active_owner.close()
+        if self.work_service is not None:
+            self.work_service.close()
+        self.security_rules.close()
+        self.security_audit.close()
 
     async def reload_mcp_manager(self) -> None:
         """热重载 MCPClientManager：关闭现有连接并用当前 config.mcp_servers 重新启动。
@@ -1746,12 +1833,38 @@ class CrewApp:
         self._owner_team_providers[owner] = provider
         return provider
 
+    def owner_team_member_model_provider(
+        self,
+        owner_account_id: str = "",
+        model_profile_id: str = "",
+    ) -> LLMProvider:
+        """Return the App-owned Provider for one explicitly bound Team member."""
+        owner = str(owner_account_id or "").strip()
+        model_id = str(model_profile_id or "").strip()
+        if not model_id or model_id == self.config.owner_default_model_id(owner):
+            return self.owner_team_provider(owner)
+        profiles = self.owner_model_profiles(owner) if owner else self.config.model_profiles
+        profile = profiles.get(model_id)
+        if profile is None or not profile.loaded or not profile.has_key:
+            return self.owner_team_provider(owner)
+        key = (owner, model_id)
+        cached = self._owner_team_member_model_providers.get(key)
+        if cached is not None:
+            return cached
+        provider = build_provider_for_profile(profile, self.config.stream_read_timeout)
+        self._owner_team_member_model_providers[key] = provider
+        return provider
+
     def _invalidate_owner_team_provider(self, owner_account_id: str = "") -> None:
         owner = str(owner_account_id or "").strip()
         if owner:
             provider = self._owner_team_providers.pop(owner, None)
             if provider is not None and provider is not self.provider:
                 self._stale_owner_team_providers[id(provider)] = provider
+            for key in [key for key in self._owner_team_member_model_providers if key[0] == owner]:
+                provider = self._owner_team_member_model_providers.pop(key)
+                if provider is not self.provider:
+                    self._stale_owner_team_providers[id(provider)] = provider
             drop = getattr(self.team, "drop_owner_teams", None)
             if callable(drop):
                 drop(owner)
@@ -1760,8 +1873,15 @@ class CrewApp:
                 drop_kanban(owner)
             return
 
-        providers = list({id(provider): provider for provider in self._owner_team_providers.values()}.values())
+        providers = list({
+            id(provider): provider
+            for provider in [
+                *self._owner_team_providers.values(),
+                *self._owner_team_member_model_providers.values(),
+            ]
+        }.values())
         self._owner_team_providers.clear()
+        self._owner_team_member_model_providers.clear()
         for provider in providers:
             if provider is not self.provider:
                 self._stale_owner_team_providers[id(provider)] = provider
@@ -1999,8 +2119,9 @@ class CrewApp:
             profiles[model_id] = profile
             cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
             self.agents.drop_owner(owner)
-            if active_model_id == model_id:
-                self._invalidate_owner_team_provider(owner)
+            # Team 内置成员可以显式绑定非默认 profile；更新任意 profile
+            # 都要淘汰对应 Team/Provider 缓存，下一轮才会使用新配置。
+            self._invalidate_owner_team_provider(owner)
         else:
             profile = cfg.update_model(model_id, payload)
             cfg.persist_model_profiles()
@@ -2088,6 +2209,7 @@ class CrewApp:
                     self._schedule_provider_retirement(old_provider)
         elif owner:
             cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
+            self._invalidate_owner_team_provider(owner)
         else:
             cfg.persist_model_profiles()
             self._invalidate_owner_team_provider()
@@ -2184,10 +2306,15 @@ class CrewApp:
     def _enrich_workspace(self, envelope: Envelope) -> None:
         """把工作空间的 instructions 注入到 envelope.params，供内核构建 system prompt。"""
         try:
-            if "workspace_instructions" not in envelope.params:
+            if (
+                "workspace_instructions" not in envelope.params
+                or "workspace_root_path" not in envelope.params
+            ):
                 ws = self.workspace_store.get(envelope.workspace_id, owner_account_id=envelope.user_id)
-                envelope.params["workspace_instructions"] = ws.get("instructions", "")
-                envelope.params["workspace_root_path"] = ws.get("root_path", "") or ""
+                if "workspace_instructions" not in envelope.params:
+                    envelope.params["workspace_instructions"] = ws.get("instructions", "")
+                if "workspace_root_path" not in envelope.params:
+                    envelope.params["workspace_root_path"] = ws.get("root_path", "") or ""
             workspace_root = str(envelope.params.get("workspace_root_path") or "").strip()
             if not workspace_root:
                 from crew.state.home import task_workspace_path
@@ -2198,6 +2325,9 @@ class CrewApp:
                         owner_account_id=envelope.user_id,
                     )
                 )
+                # Keep the workdir selected by SingleAgent and the root used to
+                # compile ProcessLaunch identical for the default workspace.
+                envelope.params["workspace_root_path"] = workspace_root
             from crew.gateway.context import resolve_structured_path_references
 
             referenced_paths = resolve_structured_path_references(
@@ -2286,6 +2416,32 @@ class CrewApp:
             token = current_push_fn.set(_push_for_owner)
         try:
             self._enrich_workspace(envelope)
+            from crew.agent.skills import trusted_skill_roots_from_params
+            from crew.security.context import build_gateway_security_context
+            from crew.security.launch import compile_process_launch
+
+            security_context = build_gateway_security_context(
+                self.workspace_store,
+                owner_account_id=envelope.user_id,
+                workspace_id=envelope.workspace_id,
+                session_id=envelope.session_id,
+                task_id=str(envelope.params.get("task_id") or ""),
+                request_id=envelope.request_id,
+                cwd=envelope.params.get("workspace_root_path") or None,
+            )
+            envelope.params["_security_process_launch"] = compile_process_launch(
+                security_context,
+                self.security_service.mode_for(security_context),
+                db_path=self.security_service.db_path,
+                external_security_enabled=getattr(
+                    self.config,
+                    "external_security_enabled",
+                    False,
+                ),
+                audit=self.security_service.audit,
+                approval_service=self.security_service,
+                trusted_readable_roots=trusted_skill_roots_from_params(envelope.params),
+            )
             config_session_id = str(envelope.params.get("task_session_id") or envelope.session_id)
             if not getattr(self.config, "external_agents_enabled", True):
                 agent_config = self._session_agent_config(
@@ -2351,7 +2507,7 @@ def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float
         temperature=profile.temperature,
         max_tokens=profile.max_tokens,
         timeout=stream_read_timeout if stream_read_timeout is not None else profile.timeout,
-        vision=profile.vision,
+        vision=profile.supports_vision,
     )
 
 
@@ -2366,7 +2522,7 @@ def build_provider(cfg: Config) -> LLMProvider:
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
             timeout=cfg.stream_read_timeout,
-            vision=cfg.vision,
+            vision=cfg.active_model.supports_vision,
         )
         log.info("使用 %s Provider，profile=%s model=%s base_url=%s", cfg.provider, cfg.active_model_id, cfg.model, cfg.base_url or "默认")
         return provider
@@ -2402,6 +2558,9 @@ def _browser_manager_from_plugins(plugins: PluginManager):
 def build_app(config: Config | None = None, *, enable_team: bool = True) -> CrewApp:
     """工厂：从配置构建一个 CrewApp。"""
     cfg = config or load_config()
+    from crew.security.settings import configure_security
+
+    configure_security(enabled=cfg.security_enabled)
     setup_logging(cfg.log_level, cfg.log_file, llm_trace=cfg.llm_trace)
     if cfg.gateway_dev_mode:
         log.warning(
@@ -2418,7 +2577,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     ac = cfg.access_control.resolve_for()
 
     registry = Registry()
-    register_builtin_tools(registry)
 
     session_store = SQLiteSessionStore(cfg.db_path)
     workspace_store = SQLiteWorkspaceStore(cfg.db_path)
@@ -2455,12 +2613,46 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     cfg.apply_platform_config_bridges(platform_registry.all_entries())
 
     app = CrewApp(cfg, provider, registry, session_store, workspace_store, memory, plugins)
+    # Plugins are discovered before CrewApp constructs the security service.
+    # Publish these live dependencies afterward; plugin tools retain the shared
+    # services mapping and therefore see the production authorization boundary.
+    plugins.services.update(
+        {
+            "workspace_store": workspace_store,
+            "security_service": app.security_service,
+        }
+    )
+    register_builtin_tools(
+        registry,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
+    from crew.sites import SQLiteSiteStore, SiteManager
+    from crew.tools.blueprint_tools import register_blueprint_tools
+    from crew.tools.site_tools import register_site_tools
+
+    app.sites = SiteManager(SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal))
+    register_site_tools(
+        registry,
+        app.sites,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
+    register_blueprint_tools(
+        registry,
+        app.sites,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
     # Browser 能力由 plugins/browser 插件装配（创建 BrowserManager、注册 browser_use）。
     # 系统级禁用/未加载时保持 None，面板路由与 startup/aclose 已有 None 兜底。
     app.browser_manager = _browser_manager_from_plugins(plugins)
     app.channel_bindings = channel_bindings
     app.plugin_prefs = plugin_prefs
     app.external_agents = external_agents
+    from crew.gateway.channel_sessions import register_channel_session_tools
+
+    register_channel_session_tools(registry, session_store)
     register_external_agent_tools(
         registry,
         external_agents,
@@ -2526,6 +2718,54 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         app.wiki_manager,
         config=cfg.wiki,
         session_store=session_store,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
+
+    from crew.work.briefs import WorkBriefStore
+    from crew.work.items import WorkItemStore
+    from crew.work.knowledge import WorkKnowledgeStore
+    from crew.work.preferences import WorkPreferenceStore
+    from crew.work.references import WorkReferenceStore
+    from crew.work.service import LLMPreferenceExtractor, WorkService
+    from crew.work.settings import WorkSettingsStore
+    from crew.work.sources import WorkSourceStore
+    from crew.work.templates import WorkTemplateStore
+
+    async def _notify_work_owner(owner_account_id: str, payload: dict[str, Any]) -> None:
+        if app._notify_owner_fn is not None:
+            await app._notify_owner_fn(owner_account_id, payload)
+
+    app.work_service = WorkService(
+        references=WorkReferenceStore(
+            cfg.db_path,
+            session_store=session_store,
+            wal_enabled=cfg.sqlite_wal,
+        ),
+        preferences=WorkPreferenceStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        items=WorkItemStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        sources=WorkSourceStore(
+            cfg.db_path,
+            approved_source_keys=set(),
+            adapters={},
+            wal_enabled=cfg.sqlite_wal,
+        ),
+        briefs=WorkBriefStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        settings=WorkSettingsStore(
+            cfg.db_path,
+            workspace_store=workspace_store,
+            wal_enabled=cfg.sqlite_wal,
+        ),
+        templates=WorkTemplateStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        knowledge=WorkKnowledgeStore(
+            cfg.db_path,
+            wiki_store=app._wiki_store,
+            wal_enabled=cfg.sqlite_wal,
+        ),
+        session_store=session_store,
+        workspace_store=workspace_store,
+        preference_extractor=LLMPreferenceExtractor(provider),
+        preference_notifier=_notify_work_owner,
     )
 
     # subagent：预设注册表 + delegate_task / run_agent / collect_subagent（toolset='subagent'）
@@ -2701,6 +2941,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                 kanban_store=dk_store,
                 drain_subagent_notifications=app.pop_subagent_notifications,
                 provider_for_owner=app.owner_team_provider,
+                provider_for_member_model=app.owner_team_member_model_provider,
             )
         )
 

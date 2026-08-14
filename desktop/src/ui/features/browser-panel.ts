@@ -1,7 +1,9 @@
 /** Trusted browser chrome around a sandboxed Electron WebContentsView. */
 
 import { backendApi, type BrowserPageState } from '../backend-client';
-import { escapeHtml, notify, state } from '../state';
+import { notify, state } from '../state';
+import { createBrowserInspector, replaceBrowserTabs } from './browser-inspector';
+import { queryPrimaryComposer } from './composer-scope';
 
 type BrowserEvent =
   | { type: 'state'; state: BrowserPageState }
@@ -46,21 +48,18 @@ let nativeViewMounted = false;
 let lastNativeLayoutKey = '';
 let pendingNativeLayoutKey = '';
 let humanControlPromise: Promise<boolean> | null = null;
+/** 待用户确认的页面接管请求。非空 = 确认条可见；确认/忽略/AI 后续动作时清空。 */
+let takeoverPromptTab = '';
+/** 主框架加载失败（宿主 did-fail-load，已排除 ERR_ABORTED）。非空时收起原生视图、显示错误遮罩。 */
+let loadFailure: { tabLabel: string; url: string; description: string } | null = null;
 
-const GLOBE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>';
-const PLUS_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
 const CLOSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>';
-const EXPAND_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>';
-const BACK_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>';
-const FORWARD_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>';
-const RELOAD_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>';
 // 实心圆——通用的「录制」符号，与旁边描边风格的导航图标刻意区分开。
 const RECORD_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/></svg>';
 const NOTE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4v16M14 4v16"/></svg>';
 const RESUME_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8z" fill="currentColor" stroke="none"/></svg>';
 const STOP_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></svg>';
-
 function currentSession(): string { return state.activeSessionId || ''; }
 
 function defaultState(): BrowserPageState {
@@ -106,30 +105,6 @@ function displayUrl(value: string): string {
   return isBlankBrowserUrl(value) ? '' : value;
 }
 
-function tabDisplayTitle(tab: BrowserPageState['tabs'][number]): string {
-  if (isBlankBrowserUrl(tab.url)) return '新标签页';
-  return tab.title.trim() || tab.url.trim() || '新标签页';
-}
-
-function renderTabStrip(value: BrowserPageState): string {
-  const items = value.tabs.length
-    ? value.tabs.map((tab) => {
-      const label = tabDisplayTitle(tab);
-      return `
-      <div class="browser-tab ${tab.id === value.tab_id ? 'is-active' : ''}" role="presentation">
-        <button type="button" class="browser-tab__select" data-browser-tab="${escapeHtml(tab.id)}"
-          title="${escapeHtml(label)}" role="tab"
-          aria-selected="${tab.id === value.tab_id ? 'true' : 'false'}">
-          ${GLOBE_ICON}<span>${escapeHtml(label)}</span>
-        </button>
-        <button type="button" class="browser-tab__close" data-browser-close-tab="${escapeHtml(tab.id)}"
-          aria-label="关闭标签页" title="关闭标签页">${CLOSE_ICON}</button>
-      </div>`;
-    }).join('')
-    : '<span class="browser-tab browser-tab--empty">新标签页</span>';
-  return items;
-}
-
 function detachNativeView(force = false): void {
   if (!force && !nativeViewMounted && !lastNativeLayoutKey && !pendingNativeLayoutKey) return;
   nativeLayoutRequestGeneration += 1;
@@ -137,7 +112,7 @@ function detachNativeView(force = false): void {
   lastNativeLayoutKey = '';
   pendingNativeLayoutKey = '';
   const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
-  if (empty && pageState?.tab_id) empty.hidden = false;
+  if (empty && pageState?.tab_id && !loadFailureVisible()) empty.hidden = false;
   void window.Crew?.browserViewHide?.();
 }
 
@@ -176,6 +151,8 @@ export function syncBrowserPanelSession(sessionId: string | null): void {
   socketOpen = false;
   streamStateRevision += 1;
   pageState = null;
+  takeoverPromptTab = '';
+  loadFailure = null;
   // Remove stale tab chrome/status immediately. Waiting for the next session's
   // REST/WS state leaves a window where old tabLabel is paired with new sessionId.
   patchChrome();
@@ -251,14 +228,56 @@ function bindGlobalListener(): void {
   if (typeof disposeNavigationListener === 'function') browserListenerDisposers.push(disposeNavigationListener);
   const disposeInteractionListener = window.Crew?.onBrowserViewInteractionRequested?.((event) => {
     if (event.tabLabel !== pageState?.tab_label || pageState.mode === 'human') return;
-    void ensureHumanControl('page');
+    // 页面内的真实输入不再静默接管：白屏/加载失败页面上的误触也会走到这里。
+    // 先挂一条非模态确认条，点「接管」才走 takeover；点「忽略」或 AI 后续
+    // 动作成功都会把它冲掉。
+    takeoverPromptTab = event.tabLabel;
+    renderTakeoverPrompt();
   });
   if (typeof disposeInteractionListener === 'function') browserListenerDisposers.push(disposeInteractionListener);
+  const disposeLoadFailedListener = window.Crew?.onBrowserViewLoadFailed?.((event) => {
+    if (event.tabLabel !== pageState?.tab_label) return;
+    loadFailure = {
+      tabLabel: event.tabLabel,
+      url: event.url,
+      description: event.errorDescription,
+    };
+    patchChrome();
+  });
+  if (typeof disposeLoadFailedListener === 'function') browserListenerDisposers.push(disposeLoadFailedListener);
 }
+
+/** 确认条只挂在 chrome 区：stage 上的任何 HTML 浮层都会被原生 WebContentsView 盖住。 */
+function renderTakeoverPrompt(): void {
+  const banner = document.querySelector<HTMLElement>('[data-browser-takeover]');
+  if (!banner) return;
+  banner.hidden = !(
+    takeoverPromptTab
+    && pageState?.tab_label === takeoverPromptTab
+    && pageState.mode !== 'human'
+  );
+}
+
+function loadFailureVisible(): boolean {
+  return Boolean(loadFailure && loadFailure.tabLabel === pageState?.tab_label);
+}
+
+function renderLoadFailure(): void {
+  const overlay = document.querySelector<HTMLElement>('[data-browser-load-error]');
+  if (!overlay) return;
+  const visible = loadFailureVisible();
+  overlay.hidden = !visible;
+  if (!visible || !loadFailure) return;
+  const url = overlay.querySelector<HTMLElement>('[data-browser-load-error-url]');
+  if (url) url.textContent = loadFailure.url;
+  const description = overlay.querySelector<HTMLElement>('[data-browser-load-error-description]');
+  if (description) description.textContent = loadFailure.description;}
 
 async function refreshPanelNavigation(tabLabel: string): Promise<void> {
   const sessionId = currentSession();
   if (!sessionId || !tabLabel || pageState?.tab_label !== tabLabel) return;
+  // did-navigate 已提交 = 新页面加载成功，旧的加载失败遮罩必须让位。
+  if (loadFailure?.tabLabel === tabLabel) loadFailure = null;
   const result = await window.Crew?.browserViewGetNavigation?.({ sessionId, tabLabel });
   if (
     !result?.ok
@@ -307,6 +326,11 @@ function applyEvent(event: BrowserEvent): void {
     // not rendered in the compact user browser chrome.
     return;
   } else if (event.type === 'action') {
+    // AI 还在正常出动作，说明刚才那条接管确认条是误触——自动收起，不打断流程。
+    if (takeoverPromptTab) {
+      takeoverPromptTab = '';
+      renderTakeoverPrompt();
+    }
     return;
   } else if (
     event.type === 'recording_limit'
@@ -350,61 +374,11 @@ function isInternalControlNotice(message: string): boolean {
   return /(?:人工接管|用户正在接管|浏览器动作已暂停|控制模式)/.test(message);
 }
 
-export function getBrowserWorkspaceState(): BrowserPageState {
-  return pageState || defaultState();
-}
-
-export function selectBrowserWorkspaceTab(tabId: string): void {
-  if (tabId) void sendHumanControl('select_tab', tabId);
-}
-
-export function closeBrowserWorkspaceTab(tabId: string): void {
-  if (tabId) void sendHumanControl('close_tab', tabId);
-}
-
-export function renderBrowserPanel(options: { workspaceChrome?: boolean } = {}): string {
+export function renderBrowserPanel(): string {
   const value = pageState || defaultState();
-  const hasPage = Boolean(value.tab_id);
-  const blankPage = !hasPage || isBlankBrowserUrl(value.url);
-  const canUseNavigation = hasPage;
   const maximized = document.body.classList.contains('browser-workbench-maximized');
-  return `
-    <section class="browser-panel${options.workspaceChrome ? ' browser-panel--workspace' : ''}" data-browser-panel aria-label="Crew 应用内浏览器">
-      ${options.workspaceChrome ? '' : `<div class="browser-tabbar">
-        <div class="browser-tab-strip" data-browser-tab-strip role="tablist" aria-label="当前会话标签页">${renderTabStrip(value)}</div>
-        <button type="button" class="browser-chrome-btn" data-browser-new-tab aria-label="新建标签页" title="新建标签页">${PLUS_ICON}</button>
-        <button type="button" class="browser-chrome-btn" data-browser-shell="maximize"
-          aria-label="${maximized ? '还原' : '展开'}浏览器" title="${maximized ? '还原' : '展开'}浏览器"
-          aria-pressed="${maximized}">${EXPAND_ICON}</button>
-        <button type="button" class="browser-chrome-btn" data-browser-shell="close" aria-label="关闭浏览器面板" title="关闭浏览器面板">${CLOSE_ICON}</button>
-      </div>`}
-      <div class="browser-toolbar">
-        <div class="browser-nav" role="toolbar" aria-label="浏览器导航">
-          <button type="button" class="browser-icon-btn" data-browser-action="back" aria-label="后退" title="后退" ${!canUseNavigation || !value.can_go_back ? 'disabled' : ''}>${BACK_ICON}</button>
-          <button type="button" class="browser-icon-btn" data-browser-action="forward" aria-label="前进" title="前进" ${!canUseNavigation || !value.can_go_forward ? 'disabled' : ''}>${FORWARD_ICON}</button>
-          <button type="button" class="browser-icon-btn" data-browser-action="reload" aria-label="刷新" title="刷新" ${!canUseNavigation || blankPage ? 'disabled' : ''}>${RELOAD_ICON}</button>
-          <span class="browser-rec-slot" data-browser-rec-controls>${recordingControlsMarkup()}</span>
-        </div>
-        <input class="browser-url" data-browser-url type="text" value="${escapeHtml(displayUrl(value.url))}"
-          aria-label="网页地址" placeholder="输入网址或搜索内容" autocomplete="off" spellcheck="false"
-          inputmode="url" ${value.mode !== 'human' && hasPage ? 'readonly' : ''}>
-        <form class="browser-note" data-browser-note hidden>
-          <input class="browser-note__input" data-browser-note-input type="text" autocomplete="off"
-            aria-label="给这一步加说明" placeholder="这一步要说明什么？例如：这个工单号每次都不同">
-          <button type="submit" class="browser-note__btn browser-note__btn--primary">保存</button>
-          <button type="button" class="browser-note__btn" data-browser-note-cancel>取消</button>
-        </form>
-        <div class="browser-recording" data-browser-recording role="status" aria-live="polite" hidden></div>
-      </div>
-      <div class="browser-stage ${value.mode === 'human' ? 'is-interactive' : ''}" data-browser-stage aria-label="沙箱浏览器视图">
-        <div class="browser-empty" data-browser-empty ${hasPage && !blankPage && nativeViewMounted ? 'hidden' : ''}>
-          <span class="browser-empty__icon">${GLOBE_ICON}</span>
-          <strong data-browser-empty-title>${blankPage ? '开始浏览' : '正在打开页面…'}</strong>
-          <span data-browser-empty-description>${blankPage ? '输入 URL 以打开页面' : '页面加载后将在此显示'}</span>
-        </div>
-        <div class="browser-status" data-browser-status role="status" aria-live="polite"></div>
-      </div>
-    </section>`;
+  return createBrowserInspector(value, { maximized, nativeViewMounted }).outerHTML;
+
 }
 
 /**
@@ -497,6 +471,20 @@ export function bindBrowserPanel(): void {
   document.querySelectorAll<HTMLButtonElement>('[data-browser-action]').forEach((button) => {
     button.addEventListener('click', () => void sendHumanControl(button.dataset.browserAction || ''));
   });
+  document.querySelectorAll<HTMLButtonElement>('[data-browser-takeover-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const confirmed = button.dataset.browserTakeoverAction === 'confirm';
+      takeoverPromptTab = '';
+      renderTakeoverPrompt();
+      if (confirmed) void ensureHumanControl('page');
+    });
+  });
+  document.querySelector<HTMLButtonElement>('[data-browser-load-retry]')?.addEventListener('click', () => {
+    // 「重试」是显式 chrome 动作：与工具栏刷新同语义，先接管再重新加载。
+    loadFailure = null;
+    patchChrome();
+    void sendHumanControl('reload');
+  });
   bindRecordingControls();
 
   renderBrowserRecordingBar();
@@ -578,7 +566,7 @@ function normalizeUserUrl(value: string): string {
   const raw = value.trim();
   if (!raw) return '';
   // 纯数字必须走搜索。否则 URL 构造器会把它当成隐式 IPv4 地址解析
-  //（例如纯数字搜索词被转为 IPv4 地址），导致浏览器代理加载失败。
+  //（例如 "10086" -> "https://0.0.39.102/"），导致浏览器代理加载失败。
   if (/^[0-9]+$/.test(raw)) {
     return buildBaiduSearchUrl(raw);
   }
@@ -594,6 +582,12 @@ export type BrowserOpenDestination = 'in_app' | 'cancelled' | 'failed';
 type OpenUserBrowserOptions = {
   /** Creating a user tab changes the whole Crew browser session to human control. */
   confirmTakeover?: boolean;
+  /**
+   * Passive opens (auto-opening the panel to watch the AI) must not create a
+   * blank human tab when the session has no page yet — that would flip the
+   * whole session into human mode before the AI's first action lands.
+   */
+  createIfEmpty?: boolean;
 };
 
 async function approveHumanControl(sessionId: string): Promise<boolean> {
@@ -619,7 +613,8 @@ export async function openUserBrowser(
     // Clicking the global Browser entry is also how users watch an AI-owned
     // tab.  Merely revealing that tab must not silently switch the whole
     // session into human mode.  Only create a blank human tab when the
-    // session truly has no browser page yet.
+    // session truly has no browser page yet — and never on passive opens,
+    // which race ahead of the AI's first tab and would lock the AI out.
     if (!value.trim() && !newTab) {
       const existing = pageState?.tab_id
         ? pageState
@@ -627,7 +622,7 @@ export async function openUserBrowser(
       if (currentSession() !== sessionId) return 'failed';
       if (!isBrowserPageState(existing)) throw new Error('浏览器状态响应格式无效');
       applyPageState(existing);
-      if (existing.tab_id) {
+      if (existing.tab_id || options.createIfEmpty === false) {
         await ensureConnection(sessionId);
         return 'in_app';
       }
@@ -1090,7 +1085,7 @@ export function renderBrowserRecordingBar(): void {
 export function compileLastRecording(): boolean {
   const lastRecording = lastRecordingBySession.get(currentSession());
   if (!lastRecording || lastRecording.incomplete) return false;
-  const input = document.querySelector<HTMLTextAreaElement>('#chat-input');
+  const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
   if (!input) return false;
   const prompt = `把我刚才在浏览器里的这段录制编译成一个技能。\n`
     + `录制 ID：${lastRecording.recordingId}\n`
@@ -1211,7 +1206,6 @@ function visibleBlockingOverlay(): boolean {
   const candidates = document.querySelectorAll<HTMLElement>([
     '[aria-modal="true"]',
     '.modal-overlay',
-    '.workspace-modal-overlay',
     '.usage-edit-overlay',
     '.chat-image-viewer',
     '#force-update-overlay',
@@ -1265,6 +1259,7 @@ function syncNativeViewLayout(): void {
     || !document.contains(stage)
     || document.visibilityState !== 'visible'
     || visibleBlockingOverlay()
+    || loadFailureVisible()
   ) {
     detachNativeView();
     return;
@@ -1411,8 +1406,15 @@ function patchChrome(): void {
     );
   }
   document.querySelector<HTMLElement>('[data-browser-stage]')?.classList.toggle('is-interactive', value.mode === 'human');
+  renderTakeoverPrompt();
+  renderLoadFailure();
   const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
-  if (empty) empty.hidden = Boolean(value.tab_id && !isBlankBrowserUrl(value.url) && nativeViewMounted);
+  // 加载失败时白屏的原生视图已被收起（syncNativeViewLayout 不再挂载），
+  // 空态提示也不能露出来——那一屏只能有错误遮罩。
+  if (empty) {
+    empty.hidden = loadFailureVisible()
+      || Boolean(value.tab_id && !isBlankBrowserUrl(value.url) && nativeViewMounted);
+  }
   const blankPage = !value.tab_id || isBlankBrowserUrl(value.url);
   const emptyTitle = document.querySelector<HTMLElement>('[data-browser-empty-title]');
   if (emptyTitle) emptyTitle.textContent = blankPage ? '开始浏览' : '正在打开页面…';
@@ -1421,8 +1423,7 @@ function patchChrome(): void {
     emptyDescription.textContent = blankPage ? '输入 URL 以打开页面' : '页面加载后将在此显示';
   }
   const strip = document.querySelector<HTMLElement>('[data-browser-tab-strip]');
-  if (strip) strip.innerHTML = renderTabStrip(value);
-  window.dispatchEvent(new CustomEvent('browser-panel:chrome-changed'));
+  if (strip) replaceBrowserTabs(strip, value);
   document.querySelectorAll<HTMLButtonElement>('[data-browser-action]').forEach((button) => {
     const action = button.dataset.browserAction || '';
     const canUseNavigation = Boolean(value.tab_id);

@@ -7,14 +7,23 @@ import json
 import httpx
 import pytest
 
+from crew.agent.executor import BuiltinExecutor, ExecutionContext
+from crew.core.errors import ProviderError
 from crew.core.types import Message
+from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
+from crew.tools.registry import Registry, tool_result
 
 pytestmark = pytest.mark.asyncio
 
 
-def _provider(handler) -> AnthropicProvider:
-    provider = AnthropicProvider(api_key="sk-ant", base_url="https://anthropic.test", model="claude-test")
+def _provider(handler, *, vision: bool = True) -> AnthropicProvider:
+    provider = AnthropicProvider(
+        api_key="sk-ant",
+        base_url="https://anthropic.test",
+        model="claude-test",
+        vision=vision,
+    )
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return provider
 
@@ -90,6 +99,108 @@ async def test_stream_emits_text_ready_tool_and_done():
     assert done.tool_calls[0].name == "search"
 
 
+async def test_stream_never_marks_incomplete_tool_arguments_ready():
+    async def stream_body():
+        events = [
+            ("message_start", {"message": {"usage": {"input_tokens": 2}}}),
+            ("content_block_start", {"index": 0, "content_block": {"type": "tool_use", "id": "toolu_bad", "name": "file_read"}}),
+            ("content_block_delta", {"index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"path":"half'}}),
+            ("content_block_stop", {"index": 0}),
+            ("message_delta", {"delta": {"stop_reason": "max_tokens"}, "usage": {"output_tokens": 4096}}),
+            ("message_stop", {}),
+        ]
+        for event, data in events:
+            yield f"event: {event}\n".encode()
+            yield f"data: {json.dumps(data)}\n\n".encode()
+
+    provider = _provider(lambda _request: httpx.Response(200, content=stream_body()))
+    chunks = [chunk async for chunk in provider.stream_chat([Message.user("read")])]
+    await provider.aclose()
+
+    assert not any(chunk.ready_tool_call is not None for chunk in chunks)
+    done = next(chunk for chunk in chunks if chunk.done)
+    assert done.finish_reason == "max_tokens"
+    assert done.tool_calls[0].arguments == {"_raw": '{"path":"half'}
+
+
+async def test_long_tool_arguments_recover_end_to_end_through_provider_and_executor():
+    """真实 SSE 分片经 Provider 解析后，Executor 应提高额度并只执行完整长参数。"""
+    long_content = "x" * 20_000
+    complete_input = json.dumps(
+        {"path": "large.txt", "content": long_content},
+        ensure_ascii=False,
+    )
+    request_max_tokens: list[int] = []
+    request_count = 0
+
+    def sse_response(events):
+        async def stream_body():
+            for event, data in events:
+                yield f"event: {event}\n".encode()
+                yield f"data: {json.dumps(data)}\n\n".encode()
+
+        return httpx.Response(200, content=stream_body())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        body = json.loads(request.content.decode("utf-8"))
+        request_max_tokens.append(body["max_tokens"])
+        if request_count == 1:
+            tool_input = complete_input[: len(complete_input) // 2]
+            stop_reason = "max_tokens"
+        elif request_count == 2:
+            tool_input = complete_input
+            stop_reason = "tool_use"
+        else:
+            return sse_response([
+                ("message_start", {"message": {"usage": {"input_tokens": 2}}}),
+                ("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}}),
+                ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "done"}}),
+                ("content_block_stop", {"index": 0}),
+                ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+                ("message_stop", {}),
+            ])
+        return sse_response([
+            ("message_start", {"message": {"usage": {"input_tokens": 2}}}),
+            ("content_block_start", {"index": 0, "content_block": {"type": "tool_use", "id": f"toolu_{request_count}", "name": "file_write"}}),
+            ("content_block_delta", {"index": 0, "delta": {"type": "input_json_delta", "partial_json": tool_input}}),
+            ("content_block_stop", {"index": 0}),
+            ("message_delta", {"delta": {"stop_reason": stop_reason}, "usage": {"output_tokens": 4096}}),
+            ("message_stop", {}),
+        ])
+
+    provider = _provider(handler)
+    received: list[dict] = []
+    registry = Registry()
+    registry.register(
+        name="file_write",
+        toolset="file",
+        schema={"name": "file_write", "parameters": {}},
+        handler=lambda arguments: received.append(arguments) or tool_result(ok=True),
+        is_async=False,
+    )
+    executor = BuiltinExecutor(provider, registry, PluginManager())
+    ctx = ExecutionContext(
+        session_id="long-tool",
+        request_id="request",
+        system_prompt="system",
+        messages=[Message.user("write a long file")],
+        query="write a long file",
+    )
+
+    chunks = [chunk async for chunk in executor.execute(ctx)]
+    await provider.aclose()
+
+    assert request_max_tokens == [4096, 64_000, 64_000]
+    assert len(received) == 1
+    assert received[0]["path"] == "large.txt"
+    assert received[0]["content"] == long_content
+    assert not any(chunk.kind == "error" for chunk in chunks)
+    assert chunks[-1].kind == "final"
+    assert chunks[-1].body["text"] == "done"
+
+
 async def test_multimodal_message_after_tool_result_uses_anthropic_image_block():
     seen: dict = {}
 
@@ -122,3 +233,57 @@ async def test_multimodal_message_after_tool_result_uses_anthropic_image_block()
         "type": "image",
         "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
     }
+
+
+async def test_text_only_anthropic_provider_replaces_image_with_notice():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "继续"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    provider = _provider(handler, vision=False)
+    image = Message(
+        role="user",
+        content="浏览器截图",
+        content_parts=[
+            {"type": "text", "text": "浏览器截图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    )
+    await provider.chat([image])
+    await provider.aclose()
+
+    blocks = seen["body"]["messages"][0]["content"]
+    assert not any(block.get("type") == "image" for block in blocks)
+    assert any("当前模型不支持视觉输入" in block.get("text", "") for block in blocks)
+
+
+async def test_anthropic_image_rejection_has_structured_capability_error():
+    provider = _provider(
+        lambda _request: httpx.Response(
+            400,
+            text="Model does not support image input: image_url",
+        )
+    )
+    image = Message(
+        role="user",
+        content="",
+        content_parts=[
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        await provider.chat([image])
+    await provider.aclose()
+
+    assert raised.value.category == "unsupported_capability"
+    assert raised.value.capability == "vision"

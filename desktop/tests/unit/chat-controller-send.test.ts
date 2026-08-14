@@ -2,33 +2,12 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+// 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
+import './helpers/mock-chat-controller-deps';
 import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage } from '../../src/ui/features/chat-controller';
 import { enqueuePending, getPendingQueue } from '../../src/ui/state';
 import { __resetAllStoresForTest, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 
-vi.mock('../../src/ui/features/running-intro', () => ({ syncRunningIntroSlot: vi.fn() }));
-vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
-vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));
-vi.mock('../../src/ui/features/kanban-board', () => ({
-  refreshKanbanBoard: vi.fn(async () => undefined),
-  renderKanbanBoard: vi.fn(),
-}));
-vi.mock('../../src/ui/features/inspector', () => ({
-  isInspectorOpen: vi.fn(() => false),
-  openInspectorToTab: vi.fn(),
-  refreshInspector: vi.fn(),
-  refreshInspectorChrome: vi.fn(),
-}));
-vi.mock('../../src/ui/features/composer-toolbar', () => ({
-  syncComposerModelLabel: vi.fn(),
-  syncComposerWorkspaceLabel: vi.fn(),
-}));
-vi.mock('../../src/ui/features/model-picker', () => ({ syncModelUi: vi.fn() }));
-vi.mock('../../src/ui/features/system-page', () => ({ renderSystemOverview: vi.fn() }));
-vi.mock('../../src/ui/features/attachments', () => ({
-  takeAttachmentsForSend: vi.fn(() => []),
-  renderAttachmentPreview: vi.fn(),
-}));
 vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/ui/features/session-model')>();
   return {
@@ -68,10 +47,10 @@ beforeEach(() => {
     <section id="welcome-panel"></section>
     <section id="chat-panel" hidden>
       <div id="chat-messages"></div>
-      <div id="chat-queue-slot"></div>
+      <div class="chat-queue-slot"></div>
       <div id="composer-controls"></div>
-      <div id="chat-running-intro"></div>
-      <textarea id="chat-input"></textarea>
+      <div class="chat-running-intro"></div>
+      <textarea data-composer-input></textarea>
     </section>
   `;
 });

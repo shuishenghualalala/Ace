@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+import urllib.parse
 from collections.abc import Awaitable
 from contextvars import ContextVar
 from pathlib import Path
@@ -188,7 +189,10 @@ _SHORT_SOURCE_THRESHOLD = 1_000
 _LONG_SOURCE_ENTITY_LIMIT = 5
 _LONG_SOURCE_TOPIC_LIMIT = 3
 _SHORT_SOURCE_ENTITY_LIMIT = 3
-_ANALYSIS_MAX_TOKENS = 2_500
+# 推理型模型（如 deepseek-v4 系列）会先烧掉一笔不可见的推理 token，过小的
+# 上限会让正文一个字都吐不出来（实测空返回）；这里只是上限而非目标，
+# 非推理模型不受影响。
+_ANALYSIS_MAX_TOKENS = 20_000
 
 
 def _split_into_semantic_chunks(content: str, max_size: int = _CHUNK_SIZE_CHARS) -> list[str]:
@@ -1099,8 +1103,11 @@ class WikiCompiler:
         chunk_size: int | None = None,
         use_chunking: bool | None = None,
         skip_index: bool = False,
+        progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> PlanResult:
-        """对 source 做只读分析，返回变更计划，不写入任何页面。"""
+        """对 source 做只读分析，返回变更计划，不写入任何页面。
+
+        progress：可选阶段进度回调（LLM 分析耗时较长，供前端展示当前阶段）。"""
         self.init_kb(owner_account_id, kb_id)
 
         raw = self.store.load_raw(source_id, owner_account_id, kb_id)
@@ -1158,6 +1165,7 @@ class WikiCompiler:
                 chunk_size=chunk_size,
                 use_chunking=use_chunking,
                 cache_path=cache_path,
+                progress=progress,
             )
         except Exception as exc:  # noqa: BLE001
             return PlanResult(
@@ -1166,6 +1174,11 @@ class WikiCompiler:
                 source_content_sha256=raw.content_sha256 or "",
                 issues=issues + [f"LLM 分析失败: {exc}"],
             )
+        if progress is not None:
+            try:
+                await progress("正在生成页面变更计划…")
+            except Exception:  # noqa: BLE001
+                pass
         analysis_stats = {
             str(key): int(value)
             for key, value in (analysis.get("_analysis_meta") or {}).items()
@@ -1213,6 +1226,7 @@ class WikiCompiler:
             analysis.get("source_summary"),
             planned_entities,
             planned_topics,
+            kb_id=kb_id,
         )
         existing_source = self.store.get_source_page(source_id, owner_account_id, kb_id)
         if existing_source is not None:
@@ -2189,6 +2203,7 @@ class WikiCompiler:
         chunk_size: int | None = None,
         use_chunking: bool | None = None,
         cache_path: Path | None = None,
+        progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """提取轻量知识单元，并确定性聚合为页面规划输入。
 
@@ -2197,6 +2212,8 @@ class WikiCompiler:
             use_chunking: 是否对长文档启用分块分析，None 按长度自动判断。
             cache_path: 可选的 source 级分块缓存文件。每个成功块立即持久化，
                 失败或取消后重试只处理未完成块。
+            progress: 可选的阶段进度回调（耗时 LLM 分析对调用方完全黑盒，
+                分块场景按完成块数上报，异常静默不影响分析）。
         """
         started_at = time.monotonic()
         effective_chunk_size = max(
@@ -2220,6 +2237,19 @@ class WikiCompiler:
                 effective_chunk_size,
                 len(chunks),
             )
+
+        async def _emit(text: str) -> None:
+            if progress is None:
+                return
+            try:
+                await progress(text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if len(chunks) > 1:
+            await _emit(f"正在分析来源内容（共 {len(chunks)} 块）…")
+        else:
+            await _emit("正在分析来源内容…")
 
         semaphore = asyncio.Semaphore(_ANALYZE_CHUNK_CONCURRENCY)
         cached_chunks = _load_analysis_cache(cache_path)
@@ -2269,6 +2299,8 @@ class WikiCompiler:
                     _save_analysis_cache(cache_path, cache_state)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Wiki 分块分析异常，跳过该块: %s", exc)
+            if len(chunks) > 1:
+                await _emit(f"正在分析来源内容（{len(results_by_index)}/{len(chunks)} 块）…")
 
         results = [
             results_by_index.get(
@@ -2310,10 +2342,12 @@ class WikiCompiler:
         warnings: list[str] = []
         for attempt in range(_ANALYZE_CHUNK_MAX_RETRIES + 1):
             try:
+                # 推理型模型的"思考" token 与正文共享预算：文档越大推理消耗越多，
+                # 首轮预算可能全被推理烧掉导致正文为空；重试时预算翻倍兜底。
                 text = await chat_text(
                     self._provider_for_owner(self._analysis_owner.get()),
                     messages,
-                    max_tokens=_ANALYSIS_MAX_TOKENS,
+                    max_tokens=_ANALYSIS_MAX_TOKENS * (attempt + 1),
                 )
                 if not text:
                     raise ValueError("LLM 返回为空")
@@ -2382,6 +2416,7 @@ class WikiCompiler:
             source_summary,
             entities or [],
             topics or [],
+            kb_id=kb_id,
         )
         summary = (
             str((source_summary or {}).get("one_sentence") or "").strip()
@@ -2405,7 +2440,7 @@ class WikiCompiler:
                     target_dir,
                     filename_from_title(existing.title),
                 )
-                existing.file_path = str(target_path.relative_to(base))
+                existing.file_path = target_path.relative_to(base).as_posix()
             existing.content = page_content
             existing.summary = summary
             existing.related = []
@@ -2421,9 +2456,9 @@ class WikiCompiler:
             page_type="source",
             title=title,
             content=page_content,
-            file_path=str(
-                unique_file_path(target_dir, filename_from_title(title)).relative_to(base)
-            ),
+            file_path=unique_file_path(target_dir, filename_from_title(title))
+            .relative_to(base)
+            .as_posix(),
             sources=[source_id],
             tags=[],
             summary=summary,
@@ -2766,6 +2801,7 @@ def _build_source_page_content(
     source_summary: dict[str, Any] | None = None,
     entities: list[dict[str, Any]] | None = None,
     topics: list[dict[str, Any]] | None = None,
+    kb_id: str = "default",
 ) -> str:
     summary_data = source_summary if isinstance(source_summary, dict) else {}
     summary = (
@@ -2794,16 +2830,9 @@ def _build_source_page_content(
         if raw.source_url:
             original_ref = raw.source_url
         elif raw.original_path:
-            original_path = Path(raw.original_path)
-            parts = original_path.parts
-            if "raw" in parts:
-                raw_index = parts.index("raw")
-                relative = Path(*parts[raw_index:]).as_posix()
-                # Source Summary 位于 wiki/sources/{source_kind}/，回到 Vault 根目录
-                # 需要三级相对路径。
-                original_ref = f"[打开原始文件](../../../{relative})"
-            else:
-                original_ref = raw.original_ref or original_path.name
+            # 统一使用 Gateway 下载接口，避免相对路径在前端/桌面端解析不一致。
+            encoded_kb = urllib.parse.quote(kb_id, safe="")
+            original_ref = f"[打开原始文件](/api/wiki/sources/{raw.id}/file?kb_id={encoded_kb})"
         else:
             original_ref = raw.original_ref
     lines = [

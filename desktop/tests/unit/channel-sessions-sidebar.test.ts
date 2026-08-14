@@ -8,14 +8,7 @@ import { __resetAllStoresForTest, sessionStore, workspaceStore } from '../../src
 import { renderWorkspaceHistory } from '../../src/ui/features/workspaces';
 import { isChannelSessionId } from '../../src/ui/features/channel-sessions';
 import type { SessionRow } from '../../src/ui/state';
-
-function mountHistoryList(): HTMLElement {
-  const list = document.createElement('div');
-  list.id = 'history-list';
-  document.body.innerHTML = '';
-  document.body.appendChild(list);
-  return list;
-}
+import { mountHistoryList } from './helpers/history-list';
 
 function channelSession(id: string, platform = 'feishu'): SessionRow {
   return {

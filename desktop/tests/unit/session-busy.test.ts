@@ -1,11 +1,43 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+/** @vitest-environment happy-dom */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { openTurnForRequest, resumeSessionGeneration, syncSessionLiveFromBackend } from '../../src/ui/features/session-busy';
 import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
-import { patchBook } from '../../src/ui/state';
+import { patchBook, setActiveSessionId } from '../../src/ui/state';
+import { syncRunningIntroSlot } from '../../src/ui/features/running-intro';
 
-beforeEach(() => __resetAllStoresForTest());
+beforeEach(() => {
+  __resetAllStoresForTest();
+  document.body.innerHTML = '<div class="chat-running-intro"></div>';
+});
+
+afterEach(() => {
+  sessionStore.set({ busySessions: {} });
+  syncRunningIntroSlot();
+  vi.useRealTimers();
+});
 
 describe('syncSessionLiveFromBackend', () => {
+  it('重复同步相同运行提示时保留机器人节点和动画进度', () => {
+    vi.useFakeTimers();
+    setActiveSessionId('sid-1');
+    sessionStore.set({ busySessions: { 'sid-1': true } });
+
+    syncRunningIntroSlot();
+    const slot = document.querySelector<HTMLElement>('.chat-running-intro')!;
+    const intro = slot.firstElementChild;
+    const logo = slot.querySelector('.running-intro__logo');
+    const logoImage = logo?.querySelector<HTMLImageElement>('.running-intro__agent-logo');
+
+    expect(logoImage?.getAttribute('src')).toBe('./crew-jump-agent.png');
+    expect(logo?.querySelector('svg')).toBeNull();
+
+    syncRunningIntroSlot();
+
+    expect(slot.firstElementChild).toBe(intro);
+    expect(slot.querySelector('.running-intro__logo')).toBe(logo);
+    expect(slot.querySelector('.running-intro__agent-logo')).toBe(logoImage);
+  });
+
   it('live=running → busy true + turnSealed false', () => {
     syncSessionLiveFromBackend('sid-1', 'running');
     expect(sessionStore.get().busySessions['sid-1']).toBe(true);

@@ -15,7 +15,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from crew.app import CrewApp, build_app
-from crew.gateway.auth import AuthenticationError, authenticate_http_request, is_loopback_client
+from crew.gateway.auth import (
+    AuthenticationError,
+    authenticate_http_request,
+    is_loopback_client,
+    is_loopback_host,
+)
 from crew.gateway.auth_policy import requires_gateway_auth
 from crew.gateway.broadcast import make_broadcasting_handler
 from crew.gateway.channel_config import channel_raw as resolved_channel_raw
@@ -29,6 +34,7 @@ from crew.gateway.helpers import (
     ExternalAgentsDisabledError,
 )
 from crew.gateway.hooks import hook_registry
+from crew.security.settings import strict_security_enabled
 from crew.gateway.interaction_bridge import create_interaction_router, interaction_bridge
 from crew.gateway.logout import LogoutCoordinator
 from crew.gateway.platform_registry import platform_registry
@@ -47,7 +53,10 @@ from crew.gateway.routers.runtimes import create_runtimes_router
 from crew.gateway.routers.scenarios import create_scenarios_router
 from crew.gateway.routers.sessions import create_sessions_router
 from crew.gateway.routers.system import create_system_router
+from crew.gateway.routers.security import create_security_router
+from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.routers.wiki import create_wiki_router
+from crew.gateway.routers.work import create_work_router
 from crew.gateway.ws import create_ws_router
 from crew.state.active_owner import ActiveOwnerConflict
 from crew.state.logging import get_logger
@@ -139,6 +148,10 @@ def _wire_delivery_senders(
 
 def create_app(crew: CrewApp | None = None) -> FastAPI:
     crew = crew or build_app()
+    gateway_is_loopback = is_loopback_host(crew.config.gateway_host)
+    compatibility_dev_bind = crew.config.gateway_dev_mode and not strict_security_enabled()
+    if not gateway_is_loopback and not compatibility_dev_bind:
+        raise RuntimeError("production or strict gateway must bind to a loopback host")
     # 会话调度器在 CrewApp 内共享：gateway、cron、后续平台入口走同一队列/全局并发上限。
     dispatcher = crew.dispatcher
     log.info("调度器忙时策略: %s", crew.config.gateway_busy_mode)
@@ -177,6 +190,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         cron_service=crew.cron_service,
         team_manager=crew.team,
         interaction_bridge=interaction_bridge,
+        security_service=crew.security_service,
     )
     crew.logout_coordinator = logout_coordinator
     startup_ready = asyncio.Event()
@@ -273,7 +287,14 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             # 触发 gateway:shutdown hook
             await hook_registry.emit("gateway:shutdown", {})
 
-    api = FastAPI(title="Crew Gateway", lifespan=lifespan)
+    publish_api_docs = crew.config.gateway_dev_mode and not strict_security_enabled()
+    api = FastAPI(
+        title="Crew Gateway",
+        lifespan=lifespan,
+        docs_url="/docs" if publish_api_docs else None,
+        redoc_url="/redoc" if publish_api_docs else None,
+        openapi_url="/openapi.json" if publish_api_docs else None,
+    )
 
     @api.exception_handler(ExternalAgentsDisabledError)
     async def external_agents_disabled_handler(
@@ -345,6 +366,18 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             request.state.account = account
         return await call_next(request)
 
+    @api.middleware("http")
+    async def add_gateway_security_headers(request: Request, call_next):
+        """Apply browser hardening headers to every response, including auth failures."""
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     # 各 router 工厂按需声明依赖（多数只要 crew），显式挂载，不套不透明的依赖 bundle。
     api.include_router(create_config_router(crew, dispatcher))
     api.include_router(create_remote_auth_router(crew.config))
@@ -360,9 +393,12 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_plugins_router(crew))
     api.include_router(create_mcp_setup_router(crew))
     api.include_router(create_wiki_router(crew))
+    api.include_router(create_work_router(crew))
+    api.include_router(create_sites_router(crew))
     api.include_router(create_mcp_servers_router(crew))
     api.include_router(create_interaction_router(interaction_bridge, crew))
     api.include_router(create_system_router(crew))
+    api.include_router(create_security_router(crew))
     api.include_router(
         create_ws_router(
             crew,

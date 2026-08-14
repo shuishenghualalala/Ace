@@ -67,6 +67,7 @@ export type ChunkKind =
   | "workflow_progress"
   | "wiki_cards"
   | "wiki_ingest_progress"
+  | "wiki_changed"
   | "team_internal";
 
 export interface TodoItem {
@@ -620,6 +621,15 @@ export interface TeamArtifactCard {
   kind?: "document" | "spreadsheet" | "presentation" | "image" | "html" | "text" | "data" | string;
 }
 
+export interface TurnFileChangeSummary {
+  path: string;
+  name: string;
+  added: number;
+  removed: number;
+  status: "added" | "modified" | "deleted";
+  binary?: boolean;
+}
+
 export interface UiMessage {
   id: string;
   role: MsgRole;
@@ -643,6 +653,8 @@ export interface UiMessage {
   collapsedTitle?: string;
   processText?: string;
   artifacts?: TeamArtifactCard[];
+  /** Files added, modified or deleted by this exact Agent turn. */
+  turnFileChanges?: TurnFileChangeSummary[];
   /** 用户消息携带的附件（图像预览等） */
   attachments?: Attachment[];
   timestamp?: number;

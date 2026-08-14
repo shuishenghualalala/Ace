@@ -1,8 +1,9 @@
 /**
- * renderChat 使用的纯逻辑 keyed 增量渲染 diff。
+ * 纯逻辑渲染单元 diff（X3b — keyed incremental rendering for renderChat）。
  *
- * 每帧渲染目标被建模成有序的 render unit 列表，跨帧维护 Map<key, node>，
- * 只重写真正变化的单元，避免长会话在每个流式分片中重建整棵 DOM 树。
+ * 背景：X3a 把 renderChat 改成「每帧全量构建所有 message 节点 + container.replaceChildren」，
+ * 在 500 条消息的长会话里每个流式分片都重建整棵 DOM 树。X3b 把每帧的渲染目标建模成
+ * 一个有序的「render unit」列表，跨帧维护 Map<key, node>，只重写真正变化的单元。
  *
  * 这里只放 **可单测的纯逻辑** —— 不碰 DOM、不读 state、无模块级副作用。
  * diffRenderUnits(prev, next) → DiffOp[]，由 chat-controller 侧应用到真实 DOM。
@@ -11,7 +12,7 @@
  *  - chat 单元顺序是 append-mostly（消息只追加；编辑是 truncate-then-append；回合极少乱序），
  *    所以算法简单且正确即可：按 key 配对，sig 相同→reuse，sig 不同→patch，新 key→append，
  *    prev 中不再存在的 key→remove。move（同 key 位置变化）按 remove+append 处理（保守、正确）。
- *  - **确定性**：相同 prev/next 永远产生相同的 op 列表。
+ *  - **确定性**：相同 prev/next 永远产生相同的 op 列表（这是单元可测、X3b 安全的根基）。
  *  - 顺序：apply 阶段用 appendChild-move 兜底保证最终 DOM 顺序 == next 顺序，
  *    因此 diff 只需声明「这个 key 还要不要、要不要重写」，不需要 emit 精确的 move op。
  */

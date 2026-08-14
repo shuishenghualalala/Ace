@@ -1,0 +1,1244 @@
+/* Studio is a scoped product skin. It remaps semantic tokens only inside #chat-tab.
+ * The import graph places this file in the final `skins` layer, so it does not
+ * need selector-specific `` overrides. */
+
+.chat-subnav {
+  display: none;
+  align-items: center;
+  gap: var(--mw-space-1);
+  padding: var(--mw-space-1);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-full);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-secondary);
+}
+
+body.history-workspace-active .chat-subnav {
+  display: inline-flex;
+}
+
+/* work 模式无工作室概念：隐藏「对话/工作室」子导航，仅通用助手需要。
+   放在 history-workspace-active 规则之后，同特异性下后定义胜出——work 进 chat tab 时
+   不会因 history-workspace-active 而显示。 */
+body.product-mode-work .chat-subnav {
+  display: none;
+}
+
+.chat-subnav-item {
+  min-height: 28px;
+  padding: 0 var(--mw-space-4);
+  border: 1px solid transparent;
+  border-radius: var(--mw-radius-full);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-subnav-item:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.chat-subnav-item.active {
+  border-color: var(--mw-border-default);
+  background: var(--mw-bg-selected);
+  color: var(--mw-text-selected);
+  font-weight: 600;
+}
+
+#chat-tab.active.studio-mode {
+  --mw-studio-panel-width: clamp(320px, 42%, 460px);
+  --mw-studio-font: var(--mw-font-mono);
+  --mw-bg-canvas: var(--mw-studio-canvas);
+  --mw-bg-surface: var(--mw-studio-parchment);
+  --mw-bg-subtle: var(--mw-studio-parchment-soft);
+  --mw-bg-selected: var(--mw-studio-parchment-strong);
+  --mw-border-subtle: var(--mw-studio-gold);
+  --mw-border-default: var(--mw-studio-brown);
+  --mw-border-strong: var(--mw-studio-brown-dark);
+  --mw-text-primary: var(--mw-studio-brown-dark);
+  --mw-text-secondary: var(--mw-studio-brown);
+  --mw-text-muted: var(--mw-studio-muted);
+  --mw-text-selected: var(--mw-studio-brown-dark);
+
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  align-items: stretch;
+  background: var(--mw-bg-canvas);
+  color: var(--mw-text-primary);
+}
+
+#chat-tab.active.studio-mode #welcome-panel,
+#chat-tab.active.studio-mode #chat-panel,
+#chat-tab.active.chat-mode .mw-studio {
+  display: none;
+}
+
+body.studio-mode #chat-inspector,
+body.studio-mode .task-board-toggle,
+body.studio-mode .top-bar-browser-actions {
+  display: none;
+}
+
+.mw-studio {
+  position: relative;
+  z-index: 0;
+  display: grid;
+  width: var(--mw-studio-content-width, 100%);
+  max-width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  align-self: center;
+  overflow: hidden;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  background: var(--mw-studio-canvas);
+  font-family: var(--mw-studio-font);
+}
+
+.studio-stage-webview {
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  grid-area: 1 / 1;
+  background: var(--mw-studio-canvas);
+}
+
+.studio-stage-status {
+  z-index: 2;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--mw-space-4);
+  padding: var(--mw-space-8);
+  grid-area: 1 / 1;
+  background: var(--mw-studio-canvas);
+  color: var(--mw-studio-parchment);
+  text-align: center;
+}
+
+.studio-stage-status[hidden] {
+  display: none;
+}
+
+.studio-return-chat {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: var(--mw-space-2);
+  padding: 0 var(--mw-space-4);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.studio-return-chat[hidden] {
+  display: none;
+}
+
+.studio-chrome {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  pointer-events: none;
+  font-family: var(--mw-studio-font);
+}
+
+.studio-chrome[hidden] {
+  display: none;
+}
+
+.studio-panel-stack {
+  position: absolute;
+  top: var(--mw-space-3);
+  right: var(--mw-space-3);
+  display: flex;
+  max-width: calc(100% - 2 * var(--mw-space-3));
+  flex-direction: column;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+body.studio-panel-open .studio-panel-stack {
+  bottom: var(--mw-space-3);
+  width: var(--mw-studio-panel-width);
+  align-items: stretch;
+}
+
+body.studio-panel-collapsed .studio-panel-stack {
+  width: 44px;
+}
+
+.studio-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: var(--mw-space-1);
+  padding: 0;
+  pointer-events: auto;
+}
+
+body.studio-panel-open .studio-toolbar {
+  padding: var(--mw-space-2) var(--mw-space-2) var(--mw-space-1);
+  background: var(--mw-studio-parchment);
+  border: 2px solid var(--mw-studio-brown-dark);
+  border-bottom: 0;
+  border-radius: var(--mw-radius-2) var(--mw-radius-2) 0 0;
+  box-shadow: -2px 0 8px var(--mw-studio-shadow);
+}
+
+body.studio-panel-collapsed .studio-toolbar {
+  flex-direction: column;
+}
+
+.studio-toolbar-btn,
+.studio-panel-collapse {
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 2px solid var(--mw-studio-brown-dark);
+  border-radius: var(--mw-radius-1);
+  background: var(--mw-studio-parchment);
+  color: var(--mw-studio-brown);
+  cursor: pointer;
+  image-rendering: pixelated;
+  transition: var(--mw-transition-interactive);
+}
+
+.studio-toolbar-btn {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  box-shadow:
+    2px 2px 0 var(--mw-studio-brown-dark),
+    inset -1px -1px 0 var(--mw-studio-shadow-soft);
+}
+
+.studio-toolbar-btn:hover,
+.studio-panel-collapse:hover {
+  background: var(--mw-studio-parchment-deep);
+  color: var(--mw-studio-brown-dark);
+}
+
+.studio-toolbar-btn:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--mw-studio-brown-dark);
+}
+
+.studio-toolbar-btn.is-active {
+  background: var(--mw-studio-parchment-strong);
+  outline: 2px solid var(--mw-studio-gold);
+  outline-offset: 1px;
+  color: var(--mw-studio-brown-dark);
+}
+
+.studio-side-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  border-left: 3px solid var(--mw-studio-brown-dark);
+  border-radius: 0 0 var(--mw-radius-2) var(--mw-radius-2);
+  background: var(--mw-studio-parchment);
+  box-shadow: -4px 0 12px var(--mw-studio-shadow-strong);
+  color: var(--mw-studio-brown-dark);
+  pointer-events: auto;
+}
+
+.studio-side-panel[hidden] {
+  display: none;
+}
+
+.studio-panel-collapse {
+  width: 36px;
+  height: auto;
+  flex-basis: 36px;
+  border: 0;
+  border-right: 2px solid var(--mw-studio-brown-dark);
+  border-radius: 0;
+  background: var(--mw-studio-parchment-strong);
+  color: var(--mw-studio-brown);
+}
+
+body.studio-panel-collapsed .studio-panel-body {
+  display: none;
+}
+
+.studio-panel-body,
+.studio-panel-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.studio-panel-pane[hidden] {
+  display: none;
+}
+
+.studio-chat-messages {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--mw-space-3) var(--mw-space-4) var(--mw-space-4);
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-sm);
+  line-height: 1.55;
+  color: var(--mw-studio-brown-dark);
+}
+
+.studio-chat-messages .messages__inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mw-space-3);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.studio-chat-messages .msg,
+.studio-chat-messages .msg__body,
+.studio-chat-messages .msg__text,
+.studio-chat-messages .chat-markdown,
+.studio-chat-messages .msg__file-changes {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.studio-chat-messages .msg {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--mw-space-2);
+  width: 100%;
+}
+
+.studio-chat-messages .msg__body {
+  flex: 1 1 auto;
+  /* 勿用 hidden：会裁掉 markdown 有序/无序列表的 outside 标记 */
+  overflow: visible;
+  color: var(--mw-studio-brown-dark);
+}
+
+/* 工作室侧栏已有独立角色，对话区不再展示助手头像 */
+.studio-chat-messages .msg__avatar {
+  display: none;
+}
+
+/* 用户消息：镜像助手布局——正文列在右、称谓在上、正文在下 */
+.studio-chat-messages .msg.user {
+  justify-content: flex-end;
+  align-items: flex-start;
+}
+
+.studio-chat-messages .msg.user .msg__body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: 0 1 auto;
+  max-width: min(80%, 100%);
+  text-align: right;
+}
+
+.studio-chat-messages .msg.user .msg__name {
+  margin-bottom: var(--mw-space-1);
+  text-align: right;
+  font-size: var(--mw-font-xs);
+}
+
+.studio-chat-messages .msg.user .msg__text {
+  width: fit-content;
+  max-width: 100%;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  box-sizing: border-box;
+}
+
+.studio-chat-messages .msg.user .msg__footer {
+  justify-content: flex-end;
+}
+
+.studio-chat-messages .msg__name {
+  font-size: var(--mw-font-xs);
+  line-height: 1.35;
+}
+
+.studio-chat-messages .msg__text {
+  font-size: var(--mw-font-sm);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 全局深色主题会把文字染白，羊皮纸背景上需强制棕色系 */
+body.studio-mode .studio-chat-messages,
+body.studio-mode .studio-chat-messages .msg__name,
+body.studio-mode .studio-chat-messages .msg__meta,
+body.studio-mode .studio-chat-messages .msg__text,
+body.studio-mode .studio-chat-messages .msg__body,
+body.studio-mode .studio-chat-messages .msg__content,
+body.studio-mode .studio-chat-messages .chat-markdown,
+body.studio-mode .studio-chat-messages .chat-markdown p,
+body.studio-mode .studio-chat-messages .chat-markdown li,
+body.studio-mode .studio-chat-messages .chat-markdown strong,
+body.studio-mode .studio-chat-messages .chat-markdown th,
+body.studio-mode .studio-chat-messages .chat-markdown td,
+body.studio-mode .studio-chat-messages .msg__foldable > summary,
+body.studio-mode .studio-chat-messages .msg__fold-label,
+body.studio-mode .studio-chat-messages .process-timeline__icon,
+body.studio-mode .studio-chat-messages .process-timeline__row,
+body.studio-mode .studio-chat-messages .process-timeline__content,
+body.studio-mode .studio-chat-messages .process-timeline__duration,
+body.studio-mode .studio-chat-messages .process-code-block__title,
+body.studio-mode .studio-chat-messages .plan-review-card__title,
+body.studio-mode .studio-chat-messages .plan-review-card__content,
+body.studio-mode .studio-chat-messages .queue-hint-card,
+body.studio-mode .studio-chat-messages .empty,
+body.studio-mode .studio-chat-messages .empty h2 {
+  color: var(--mw-studio-brown-dark);
+}
+
+/* 时间线/代码块在羊皮纸底色上的适配 */
+body.studio-mode .studio-chat-messages .process-timeline__icon {
+  background: var(--mw-studio-parchment);
+}
+
+body.studio-mode .studio-chat-messages .process-timeline__item:not(:last-child)::after {
+  border-left-color: var(--mw-studio-border-soft);
+}
+
+body.studio-mode .studio-chat-messages .process-code-block,
+body.studio-mode .studio-chat-messages .process-timeline__thinking {
+  background: var(--mw-studio-parchment-soft);
+}
+
+body.studio-mode .studio-chat-messages .msg__meta,
+body.studio-mode .studio-chat-messages .process-timeline__narration,
+body.studio-mode .studio-chat-messages .process-timeline__thinking {
+  color: var(--mw-studio-muted-deep);
+}
+
+body.studio-mode .studio-chat-messages .chat-markdown tbody tr:nth-child(odd) td {
+  background: var(--mw-studio-parchment-soft);
+}
+
+body.studio-mode .studio-chat-messages .chat-markdown tbody tr:nth-child(even) td {
+  background: var(--mw-studio-parchment-deep);
+}
+
+body.studio-mode .studio-chat-messages .chat-markdown th {
+  background: var(--mw-studio-parchment-strong);
+  border-color: var(--mw-studio-brown);
+}
+
+body.studio-mode .studio-chat-messages .chat-markdown .chat-md-code {
+  background: var(--mw-studio-ink);
+  color: var(--mw-studio-text-light);
+  border-color: var(--mw-studio-brown-dark);
+  /* 窄侧栏：长行必须可横滚，不能被父级 overflow:hidden 裁断 */
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+body.studio-mode .studio-chat-messages .process-code-block pre,
+body.studio-mode .studio-chat-messages .chat-markdown code {
+  color: var(--mw-code-text);
+}
+
+body.studio-mode .studio-chat-messages .chat-markdown .chat-md-code code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 窄栏下完整落在抽屉内，不被裁切 */
+body.studio-mode .studio-chat-messages .msg__file-changes,
+body.studio-mode .studio-chat-messages .tool-card,
+body.studio-mode .studio-chat-messages .plan-review-card,
+body.studio-mode .studio-chat-messages .chat-markdown,
+body.studio-mode .studio-chat-messages .msg__foldable {
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+body.studio-mode .studio-chat-messages .msg__file-changes {
+  overflow: hidden;
+  padding: var(--mw-space-2) var(--mw-space-2);
+  margin-top: var(--mw-space-2);
+  font-size: var(--mw-type-caption-size);
+}
+
+body.studio-mode .studio-chat-messages .msg__file-changes__path,
+body.studio-mode .studio-chat-messages .msg__file-changes__name,
+body.studio-mode .studio-chat-messages .chat-markdown td,
+body.studio-mode .studio-chat-messages .chat-markdown th {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 整段 markdown 勿设 overflow-x：会裁掉 ol/ul 的 outside 序号/项目符号 */
+body.studio-mode .studio-chat-messages .chat-markdown {
+  overflow-x: visible;
+  max-width: 100%;
+}
+
+body.studio-mode .studio-chat-messages .chat-markdown ul,
+body.studio-mode .studio-chat-messages .chat-markdown ol {
+  padding-left: 1.35em;
+  list-style-position: outside;
+}
+
+body.studio-mode .studio-chat-messages .chat-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  box-sizing: border-box;
+}
+
+body.studio-mode .studio-chat-messages .chat-markdown code,
+body.studio-mode .studio-chat-messages .msg__file-changes__path {
+  overflow-wrap: anywhere;
+}
+
+/* studio 侧栏消息操作按钮：匹配棕色主题 */
+body.studio-mode .studio-chat-messages .msg-action-btn,
+body.studio-mode .studio-chat-messages .chat-copy-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-studio-muted-deep);
+  border: none;
+}
+
+body.studio-mode .studio-chat-messages .msg-action-btn:hover,
+body.studio-mode .studio-chat-messages .chat-copy-btn:hover {
+  background: var(--mw-studio-overlay-soft);
+  color: var(--mw-studio-ink-soft);
+  border: none;
+}
+
+body.studio-mode .studio-chat-messages .chat-edit-btn {
+  background: transparent;
+  color: var(--mw-studio-muted-deep);
+}
+
+body.studio-mode .studio-chat-messages .chat-edit-btn:hover {
+  background: var(--mw-studio-danger-overlay);
+  border: none;
+  color: var(--mw-studio-danger);
+}
+
+.studio-history-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--mw-space-2);
+  margin: var(--mw-space-3) var(--mw-space-3) var(--mw-space-2);
+  padding: var(--mw-space-1) var(--mw-space-2);
+  background: var(--mw-studio-cream);
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  color: var(--mw-studio-brown);
+}
+
+.studio-history-search {
+  flex: 1 1 0;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-sm);
+  color: var(--mw-studio-brown-dark);
+  outline: none;
+}
+
+.studio-history-section-label {
+  padding: var(--mw-space-1) var(--mw-space-3) var(--mw-space-2);
+  font-size: var(--mw-font-xs);
+  color: var(--mw-studio-muted);
+  font-family: var(--mw-studio-font);
+}
+
+.studio-history-section-label--major {
+  padding-top: var(--mw-space-1);
+  font-size: var(--mw-font-sm);
+  font-weight: 700;
+  color: var(--mw-studio-brown);
+  letter-spacing: 0.04em;
+}
+
+.studio-history-group-label {
+  padding: var(--mw-space-1) var(--mw-space-3) var(--mw-space-1) var(--mw-space-4);
+  font-size: var(--mw-font-xs);
+  font-weight: 600;
+  color: var(--mw-studio-muted);
+  font-family: var(--mw-studio-font);
+}
+
+.studio-history-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mw-space-1);
+}
+
+.studio-history-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--mw-space-2) var(--mw-space-3);
+}
+
+.studio-history-list .history-empty,
+.studio-history-list .history-empty--inline {
+  padding: var(--mw-space-6) var(--mw-space-3);
+  text-align: center;
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-sm);
+  color: var(--mw-studio-muted);
+}
+
+/* 工作室历史行：覆盖 history.css 深色主题 token，复用侧栏 compact 结构 */
+.studio-history-list .history-item.history-item--compact {
+  display: flex;
+  align-items: center;
+  gap: var(--mw-space-1);
+  width: 100%;
+  min-height: 26px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: var(--mw-radius-1);
+  background: transparent;
+  cursor: default;
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-sm);
+  color: var(--mw-studio-brown-dark);
+}
+
+.studio-history-list .history-item.history-item--compact::before {
+  display: none;
+  content: none;
+}
+
+.studio-history-list .history-item-main {
+  display: flex;
+  align-items: center;
+  gap: var(--mw-space-1);
+  flex: 1;
+  min-width: 0;
+  min-height: 26px;
+  padding: var(--mw-space-1) var(--mw-space-1) var(--mw-space-1) var(--mw-space-2);
+  border: 2px solid transparent;
+  border-radius: var(--mw-radius-1);
+  background: transparent;
+  color: var(--mw-studio-brown-dark);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--mw-studio-font);
+  box-shadow: none;
+}
+
+.studio-history-list .history-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+}
+
+.studio-history-list .history-item-trailing {
+  flex-shrink: 0;
+  color: var(--mw-studio-muted);
+  font-size: var(--mw-font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-history-list .history-item-menu-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: var(--mw-space-1);
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--mw-radius-1);
+  background: transparent;
+  color: var(--mw-studio-muted);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.studio-history-list .history-item:hover .history-item-menu-btn,
+.studio-history-list .history-item-menu-btn:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.studio-history-list .history-item-menu-btn:hover {
+  background: var(--mw-studio-parchment-deep);
+  border-color: var(--mw-studio-gold);
+  color: var(--mw-studio-brown-dark);
+}
+
+/* 行容器保持透明，只有内层 main 高亮 */
+.studio-history-list .history-item.history-item--compact:hover,
+.studio-history-list .history-item.history-item--compact.active {
+  background: transparent;
+}
+
+.studio-history-list .history-item.history-item--compact:hover .history-item-main {
+  background: var(--mw-studio-parchment-deep);
+  border-color: var(--mw-studio-gold);
+}
+
+.studio-history-list .history-item.history-item--compact.active .history-item-main {
+  background: var(--mw-studio-parchment-strong);
+  border-color: var(--mw-studio-brown);
+  font-weight: 600;
+}
+
+#chat-tab.active.studio-mode .chat-composer,
+#chat-tab.active.studio-mode .chat-disclaimer {
+  width: var(--mw-studio-content-width, 100%);
+  max-width: 100%;
+  align-self: center;
+}
+
+#chat-tab.active.studio-mode .chat-composer {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 0;
+  /* 左右无内边距：与上方 Studio 场景 / 侧栏外缘对齐 */
+  padding: 0 0 var(--mw-space-1);
+  border-top: none;
+  gap: var(--mw-space-1);
+  box-sizing: border-box;
+  font-family: var(--mw-studio-font);
+  background: var(--mw-studio-canvas);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-input-container {
+  /* 实色 fallback：linear-gradient 只写入 background-image，background-color 需单独给出
+     浅色，避免透明底（也满足"浅色像素 chrome"的可测断言）。 */
+  background-color: var(--mw-studio-parchment);
+  background-image: none;
+  border: 3px solid var(--mw-studio-brown-dark);
+  border-radius: var(--mw-radius-2);
+  /* 横向不外扩，避免右缘超出侧栏；保留向下像素投影 */
+  box-shadow:
+    0 3px 0 var(--mw-studio-brown-dark),
+    inset 0 0 0 1px var(--mw-studio-gold),
+    inset 0 2px 0 var(--mw-studio-highlight);
+  padding: var(--mw-space-2) var(--mw-space-3) var(--mw-space-2);
+  image-rendering: pixelated;
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-input-row {
+  background: transparent;
+}
+
+#chat-tab.active.studio-mode .chat-composer textarea {
+  background: transparent;
+  /* 保持透明：正文由 .chat-input-overlay 绘制；勿用实色覆盖，否则会与遮罩叠字 */
+  color: transparent;
+  caret-color: var(--mw-studio-ink);
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-md);
+  border: none;
+  box-shadow: none;
+}
+
+/* 工作室羊皮纸底 + 全局深色主题时占位符/遮罩需单独用深灰 */
+#chat-tab.active.studio-mode .chat-composer textarea::placeholder {
+  color: var(--mw-studio-text);
+  opacity: 1;
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-input-overlay {
+  color: var(--mw-studio-ink);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-input-toolbar {
+  background: var(--mw-studio-parchment-strong);
+  border-top: 2px solid var(--mw-studio-brown);
+  border-radius: 0 0 var(--mw-radius-1) var(--mw-radius-1);
+  margin: var(--mw-space-1) -var(--mw-space-3) -var(--mw-space-2);
+  padding: var(--mw-space-2) var(--mw-space-2) var(--mw-space-2);
+  gap: var(--mw-space-1);
+}
+
+#chat-tab.active.studio-mode .chat-composer .composer-chip {
+  background: transparent;
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-xs);
+  font-weight: 600;
+}
+
+#chat-tab.active.studio-mode .chat-composer .composer-chip:hover,
+#chat-tab.active.studio-mode .chat-composer .composer-chip.is-open {
+  background: var(--mw-studio-olive-soft);
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .composer-chip__icon,
+#chat-tab.active.studio-mode .chat-composer .composer-chip__chevron {
+  stroke: currentColor;
+  color: inherit;
+  opacity: 0.82;
+}
+
+#chat-tab.active.studio-mode .chat-composer .composer-chip__label {
+  color: inherit;
+}
+
+#chat-tab.active.studio-mode .chat-composer .composer-workspace-chip.is-named .composer-chip__label {
+  color: var(--mw-studio-brown);
+}
+
+/* 执行中提示 / 队列 / Todo 改为浮层，避免挤占 Studio 场景高度导致画布缩放闪烁 */
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro,
+#chat-tab.active.studio-mode .chat-composer .chat-queue-slot,
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% - 4px);
+  z-index: 8;
+  margin: 0;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+/* 队列 / Todo 在抽屉展开时避让右侧面板 */
+body.studio-panel-open #chat-tab.active.studio-mode .chat-composer .chat-queue-slot,
+body.studio-panel-open #chat-tab.active.studio-mode .chat-composer .chat-todo-slot {
+  right: calc(var(--mw-studio-panel-width) + 10px);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-queue-slot,
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot {
+  pointer-events: auto;
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot .desktop-todo-panel {
+  --mw-todo-accent: var(--mw-studio-brown);
+  --mw-todo-accent-soft: var(--mw-studio-parchment-deep);
+  --mw-todo-ring-track: var(--mw-studio-parchment-strong);
+  border-color: var(--mw-studio-brown-dark);
+  background: var(--mw-studio-parchment);
+  box-shadow: 2px 2px 0 var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  pointer-events: auto;
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot .desktop-todo-panel__count {
+  background: var(--mw-studio-parchment-deep);
+  color: var(--mw-studio-brown-dark);
+  border: 1px solid var(--mw-studio-brown);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot .desktop-todo-panel__current,
+#chat-tab.active.studio-mode .chat-composer .chat-todo-slot .desktop-todo-panel__caret {
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro .running-intro {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: var(--mw-space-1) var(--mw-space-2);
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  box-shadow: none;
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro .running-intro__logo,
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro .running-intro__status,
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro .running-intro__ad {
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-toolbar-btn,
+#chat-tab.active.studio-mode .chat-composer .chat-action-btn {
+  background: var(--mw-studio-parchment-deep);
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-xs);
+  box-shadow: 1px 1px 0 var(--mw-studio-brown-dark);
+  max-width: none;
+  height: 30px;
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-toolbar-btn:hover,
+#chat-tab.active.studio-mode .chat-composer .chat-action-btn:hover,
+#chat-tab.active.studio-mode .chat-composer .chat-toolbar-btn.is-open {
+  background: var(--mw-studio-olive-soft);
+  border-color: var(--mw-studio-brown-dark);
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer #chat-send-btn {
+  background: var(--mw-studio-rose);
+  border-color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer #chat-stop-btn {
+  background: var(--mw-studio-rose-strong);
+  border-color: var(--mw-studio-danger-strong);
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-toolbar-divider {
+  background: var(--mw-studio-gold);
+}
+
+#chat-tab.active.studio-mode .chat-composer .composer-edit-banner {
+  background: var(--mw-studio-parchment-deep);
+  border: 2px solid var(--mw-studio-brown);
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  border-radius: var(--mw-radius-1);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview {
+  background: transparent;
+  border: none;
+  padding: 0 0 var(--mw-space-1);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-chip,
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview-item {
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  background: var(--mw-studio-parchment-soft);
+  box-shadow: 2px 2px 0 var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  image-rendering: pixelated;
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-chip:hover,
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview-item:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--mw-studio-brown-dark);
+  border-color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-chip__name,
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-chip__meta,
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview-name,
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview-meta {
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-chip__icon,
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview-file__icon {
+  background: var(--mw-studio-parchment-strong);
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-chip__remove,
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview-remove {
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  background: var(--mw-studio-parchment-deep);
+  color: var(--mw-studio-brown-dark);
+  box-shadow: 1px 1px 0 var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-chip__remove:hover,
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview-remove:hover {
+  background: var(--mw-studio-olive-soft);
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-preview-image {
+  border-radius: var(--mw-radius-1);
+  border: 2px solid var(--mw-studio-brown);
+  image-rendering: pixelated;
+}
+
+/* 图片缩略图卡片：牛皮纸态沿用 chip 的棕边 + 投影 + 像素感 */
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-thumb__view {
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  box-shadow: 2px 2px 0 var(--mw-studio-brown-dark);
+  image-rendering: pixelated;
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-thumb__view:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--mw-studio-brown-dark);
+  border-color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-thumb__meta {
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-attachment-thumb .chat-attachment-chip__remove {
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  background: var(--mw-studio-parchment-deep);
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-queue-panel {
+  background: var(--mw-studio-parchment-soft);
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  color: var(--mw-studio-brown-dark);
+}
+
+#chat-tab.active.studio-mode .chat-composer .chat-running-intro {
+  background: var(--mw-studio-parchment);
+  border: 3px solid var(--mw-studio-brown-dark);
+  border-bottom: none;
+  border-radius: var(--mw-radius-2) var(--mw-radius-2) 0 0;
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  box-shadow: none;
+}
+
+/* ---------- Studio 浮层下拉（Craft / 模型 / 技能 / 专家 / 工作空间） ---------- */
+body.studio-mode .composer-floating-popover,
+body.studio-mode .composer-select-popover {
+  background: var(--mw-studio-parchment);
+  border: 3px solid var(--mw-studio-brown-dark);
+  border-radius: var(--mw-radius-2);
+  padding: var(--mw-space-2);
+  box-shadow:
+    4px 4px 0 var(--mw-studio-brown-dark),
+    inset 0 0 0 1px var(--mw-studio-gold);
+  font-family: var(--mw-studio-font);
+  image-rendering: pixelated;
+  color: var(--mw-studio-brown-dark);
+}
+
+body.studio-mode .composer-select-popover__divider {
+  background: var(--mw-studio-brown);
+  margin: var(--mw-space-1) var(--mw-space-1);
+}
+
+body.studio-mode .composer-select-popover__section {
+  color: var(--mw-studio-muted);
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+body.studio-mode .composer-select-popover__empty {
+  color: var(--mw-studio-muted);
+  font-family: var(--mw-studio-font);
+}
+
+body.studio-mode .composer-select-popover__search .chat-popover-search-input,
+body.studio-mode .chat-popover-search-input {
+  background: var(--mw-studio-cream);
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-sm);
+  box-shadow: inset 0 1px 0 var(--mw-studio-highlight-strong);
+}
+
+body.studio-mode .composer-select-popover__search .chat-popover-search-input::placeholder,
+body.studio-mode .chat-popover-search-input::placeholder {
+  color: var(--mw-studio-muted-light);
+}
+
+body.studio-mode .composer-select-popover__search .chat-popover-search-input:focus,
+body.studio-mode .chat-popover-search-input:focus {
+  border-color: var(--mw-studio-brown-dark);
+  outline: none;
+  box-shadow: inset 0 1px 0 var(--mw-studio-highlight-strong), 0 0 0 1px var(--mw-studio-gold);
+}
+
+body.studio-mode .composer-select-item,
+body.studio-mode .composer-popover-option {
+  border-radius: var(--mw-radius-1);
+  background: transparent;
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+}
+
+body.studio-mode .composer-select-item:hover,
+body.studio-mode .composer-popover-option:hover {
+  background: var(--mw-studio-parchment-deep);
+}
+
+body.studio-mode .composer-select-item.is-selected,
+body.studio-mode .composer-popover-option.is-selected {
+  background: var(--mw-studio-parchment-strong);
+  box-shadow: inset 0 0 0 1px var(--mw-studio-brown);
+}
+
+body.studio-mode .composer-select-item__title,
+body.studio-mode .composer-popover-option__label {
+  color: var(--mw-studio-brown-dark);
+  font-weight: 700;
+}
+
+body.studio-mode .composer-select-item__desc,
+body.studio-mode .composer-popover-option__desc,
+body.studio-mode .composer-popover-option__meta {
+  color: var(--mw-studio-muted-deep);
+}
+
+body.studio-mode .composer-select-item__desc--warn {
+  color: var(--mw-studio-danger-strong);
+}
+
+body.studio-mode .composer-select-item__check {
+  color: var(--mw-studio-brown);
+  stroke: currentColor;
+}
+
+body.studio-mode .composer-select-item__icon {
+  border: 2px solid var(--mw-studio-brown);
+  border-radius: var(--mw-radius-1);
+  background: var(--mw-studio-parchment-deep);
+  color: var(--mw-studio-brown-dark);
+  box-shadow: 1px 1px 0 var(--mw-studio-brown-dark);
+}
+
+body.studio-mode .composer-select-item__icon--model {
+  background: var(--mw-studio-brown-dark);
+  color: var(--mw-studio-parchment-soft);
+  border-color: var(--mw-studio-brown-dark);
+}
+
+body.studio-mode .composer-select-item__icon--skill {
+  background: var(--mw-studio-parchment-deep);
+  color: var(--mw-studio-brown-dark);
+  border-color: var(--mw-studio-brown);
+}
+
+body.studio-mode .composer-select-item__icon--tone-0,
+body.studio-mode .composer-select-item__icon--tone-1,
+body.studio-mode .composer-select-item__icon--tone-2,
+body.studio-mode .composer-select-item__icon--tone-3,
+body.studio-mode .composer-select-item__icon--tone-4 {
+  background: var(--mw-studio-parchment-deep);
+  color: var(--mw-studio-brown-dark);
+}
+
+body.studio-mode .composer-select-item--nav .composer-select-item__arrow {
+  color: var(--mw-studio-muted);
+}
+
+/* ---------- Studio 会话操作菜单（置顶 / 重命名 / 导出 / 归档 / 删除） ---------- */
+body.studio-mode .context-menu {
+  background: var(--mw-studio-parchment);
+  border: 3px solid var(--mw-studio-brown-dark);
+  border-radius: var(--mw-radius-2);
+  padding: var(--mw-space-1);
+  box-shadow:
+    4px 4px 0 var(--mw-studio-brown-dark),
+    inset 0 0 0 1px var(--mw-studio-gold);
+  font-family: var(--mw-studio-font);
+  image-rendering: pixelated;
+  gap: var(--mw-space-1);
+}
+
+body.studio-mode .context-menu-item {
+  color: var(--mw-studio-brown-dark);
+  font-family: var(--mw-studio-font);
+  font-size: var(--mw-font-sm);
+  font-weight: 600;
+  padding: var(--mw-space-2) var(--mw-space-3);
+  border-radius: var(--mw-radius-1);
+  border: 2px solid transparent;
+}
+
+body.studio-mode .context-menu-item:hover:not(:disabled) {
+  background: var(--mw-studio-parchment-deep);
+  border-color: var(--mw-studio-gold);
+  color: var(--mw-studio-brown-dark);
+}
+
+body.studio-mode .context-menu-item:disabled {
+  color: var(--mw-studio-muted-light);
+  opacity: 0.65;
+}
+
+body.studio-mode .context-menu-item[data-danger='true'] {
+  color: var(--mw-studio-danger-strong);
+}
+
+body.studio-mode .context-menu-item[data-danger='true']:hover:not(:disabled) {
+  background: var(--mw-studio-danger-bg);
+  border-color: var(--mw-studio-danger-strong);
+  color: var(--mw-studio-danger-text);
+}
+
+#chat-tab.active.studio-mode .chat-disclaimer {
+  display: block;
+  margin: 0;
+  padding: var(--mw-space-1) 0 var(--mw-space-1);
+  font-size: var(--mw-font-xxs);
+  color: var(--mw-studio-text-on-dark);
+  background: var(--mw-studio-canvas);
+  text-align: center;
+}
+
+@media (max-width: 960px) {
+  #chat-tab.active.studio-mode {
+    --mw-studio-panel-width: min(52%, 400px);
+  }
+
+  .studio-panel-stack {
+    top: var(--mw-space-2);
+    right: var(--mw-space-2);
+  }
+
+  body.studio-panel-open .studio-panel-stack {
+    bottom: var(--mw-space-2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-studio *,
+  .mw-studio *::before,
+  .mw-studio *::after {
+    scroll-behavior: auto;
+    transition: none;
+  }
+}

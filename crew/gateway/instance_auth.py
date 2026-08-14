@@ -12,6 +12,8 @@ import hmac
 import os
 import re
 import stat
+import threading
+import time
 from pathlib import Path
 
 from crew.state.home import get_crew_home
@@ -25,6 +27,7 @@ _CHALLENGE_RE = re.compile(r"[0-9a-f]{64}\Z")
 _KEY_RE = re.compile(rb"[0-9a-f]{64}\Z")
 _PROOF_CONTEXT = b"crew-gateway-instance-v1\x00"
 _ACCESS_TOKEN_CONTEXT = b"crew-gateway-browser-access-v1\x00"
+_SECURITY_CONTEXT = b"crew-security-desktop-v1\x00"
 
 
 def _key_path() -> Path:
@@ -119,6 +122,57 @@ def verify_gateway_instance_access_token(token: str) -> bool:
     return hmac.compare_digest(str(token), expected)
 
 
+_PROOF_NONCE_RE = re.compile(r"[0-9a-f]{32}\Z")
+_PROOF_TTL_SECONDS = 30.0
+_PROOF_NONCE_TABLE_LIMIT = 4096
+_used_proof_nonces: dict[str, float] = {}
+_used_proof_lock = threading.Lock()
+
+
+def _consume_proof_nonce(nonce: str, timestamp: int) -> bool:
+    now = time.time()
+    expires = timestamp + _PROOF_TTL_SECONDS + 5
+    with _used_proof_lock:
+        if len(_used_proof_nonces) > _PROOF_NONCE_TABLE_LIMIT:
+            for stale in [key for key, exp in _used_proof_nonces.items() if exp < now]:
+                del _used_proof_nonces[stale]
+        if nonce in _used_proof_nonces:
+            return False
+        _used_proof_nonces[nonce] = expires
+        return True
+
+
+def verify_desktop_security_proof(
+    proof: str,
+    *,
+    method: str,
+    path: str,
+    body: bytes,
+    now: float | None = None,
+) -> bool:
+    """Verify a short-lived, one-time proof for privileged security endpoints."""
+    try:
+        timestamp_raw, nonce, supplied = str(proof).split(":", 2)
+        timestamp = int(timestamp_raw)
+    except (TypeError, ValueError):
+        return False
+    current = int(time.time() if now is None else now)
+    if abs(current - timestamp) > 30:
+        return False
+    if not re.fullmatch(r"[0-9a-f]{64}", supplied) or not _PROOF_NONCE_RE.fullmatch(nonce):
+        return False
+    key = _load_instance_key()
+    if key is None:
+        return False
+    body_hash = hashlib.sha256(body).hexdigest()
+    message = (
+        _SECURITY_CONTEXT
+        + f"{timestamp}\n{nonce}\n{method.upper()}\n{path}\n{body_hash}".encode("utf-8")
+    )
+    expected = hmac.new(key, message, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, supplied) and _consume_proof_nonce(nonce, timestamp)
+
+
 __all__ = [
     "GATEWAY_INSTANCE_CHALLENGE_HEADER",
     "GATEWAY_INSTANCE_DIRECTORY",
@@ -127,4 +181,5 @@ __all__ = [
     "create_gateway_instance_proof",
     "is_valid_gateway_instance_challenge",
     "verify_gateway_instance_access_token",
+    "verify_desktop_security_proof",
 ]

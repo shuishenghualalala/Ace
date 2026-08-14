@@ -1,7 +1,7 @@
 /**
  * 后端 HTTP 客户端：gateway 后端（FastAPI /api/...）的类型化封装。
  *
- * - 默认 base URL 读取 localStorage 键 `crew.gatewayBase`，
+ * - 默认 base URL 读取 localStorage 键 `Crew.gatewayBase`，
  *   缺省回落到 `http://127.0.0.1:8000`。
  * - 桌面端通过 `window.Crew.gatewayFetch` 走 Electron 主进程 IPC，
  *   避免浏览器 CORS / 端口限制；web 端直接走 fetch。
@@ -31,8 +31,10 @@ export type ChunkKind =
   | 'cron_session_created'
   | 'cron_session_updated'
   | 'audit_updated'
+  | 'work_event'
   | 'wiki_ingest_progress'
   | 'wiki_cards'
+  | 'wiki_summary'
   | 'wiki_changed'
   | 'ping'
   | 'pong';
@@ -275,7 +277,7 @@ export interface BackendSession {
   updated_at: number;
   created_at?: number;
   workspace_id: string;
-  /** 后端可选字段；缺省视为 false。 */
+  /** 后端 2026-06-29 起新增，旧后端可能不返回，缺省视为 false。 */
   archived?: boolean;
   pinned?: boolean;
   model_profile_id?: string;
@@ -421,13 +423,15 @@ export interface BackendConfig {
   has_key: boolean;
   base_url: string;
   active_model_id: string;
-  /** Owner 默认兜底模型；active_model_id 保留用于兼容旧 Gateway。 */
-  default_model_id?: string;
   models: ModelOption[];
   model_profiles?: ModelOption[];
   is_gateway_admin?: boolean;
   external_agents?: {
     enabled?: boolean;
+  };
+  security?: {
+    enabled?: boolean;
+    default_mode?: 'request_approval' | 'auto_review' | 'full_access';
   };
 }
 
@@ -440,6 +444,110 @@ export interface Workspace {
   hidden?: boolean;
   created_at?: number;
   updated_at?: number;
+}
+
+export interface LocalSite {
+  id: string;
+  workspace_id: string;
+  session_id: string;
+  name: string;
+  description: string;
+  source_path: string;
+  build_command: string;
+  output_directory: string;
+  active_release_id: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SiteAnnotation {
+  id: string;
+  site_id: string;
+  release_id: string;
+  route: string;
+  selector: string;
+  element_tag: string;
+  element_text: string;
+  comment: string;
+  context: Record<string, unknown>;
+  status: 'open' | 'resolved' | 'rejected';
+  created_at: number;
+  updated_at: number;
+}
+
+export interface InspirationItem {
+  id: string;
+  kind: 'site' | 'canvas';
+  title: string;
+  description: string;
+  workspaceId: string;
+  sessionId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InspirationAnnotation {
+  id: string;
+  inspirationId: string;
+  inspirationKind: 'site' | 'canvas' | 'widget';
+  targetKind: 'site_dom' | 'canvas' | 'widget' | 'widget_dom';
+  canvasId: string;
+  widgetId: string;
+  mountId: string;
+  revisionId: string;
+  route: string;
+  selector: string;
+  elementTag: string;
+  elementText: string;
+  comment: string;
+  context: Record<string, unknown>;
+  status: 'open' | 'resolved' | 'rejected';
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InspirationDetail extends InspirationItem {
+  site?: LocalSite;
+  canvas?: BlueprintCanvas;
+  widgets?: Record<string, BlueprintWidget>;
+  annotations: InspirationAnnotation[];
+}
+
+export interface InspirationSurface {
+  kind: 'inspiration';
+  mode: 'site' | 'canvas' | 'widget';
+  inspirationId?: string;
+  siteId?: string;
+  canvasId?: string;
+  widgetId?: string;
+  sessionId: string;
+  title: string;
+  status?: 'preparing' | 'ready';
+  revisionId?: string;
+  resourceRevision?: number;
+}
+
+export interface BlueprintLayout {
+  mode: 'grid' | 'free'; x: number; y: number; w: number; h: number;
+}
+
+export interface CanvasPlacement {
+  mountId: string; canvasId: string; widgetId: string; layout: BlueprintLayout;
+  zOrder: number; viewState: Record<string, unknown>; createdAt: number; updatedAt: number;
+}
+
+export interface BlueprintCanvas {
+  id: string; workspaceId: string; sessionId: string; title: string; purpose: string;
+  widgetCount?: number; placements?: CanvasPlacement[]; createdAt: number; updatedAt: number;
+}
+
+export interface BlueprintWidget {
+  id: string; workspaceId: string; title: string; description: string; workspacePath: string;
+  slots: Record<string, unknown>; events: Record<string, unknown>;
+  latestData: Record<string, unknown>; status: string; error: string; lastRun: string;
+  bindings: { main?: string }; createdAt: number; updatedAt: number;
+  resourceRevision: number;
+  validation?: { status: 'valid' | 'invalid'; issues: Array<{ code: string; message: string }>; entry: string };
 }
 
 export interface Attachment {
@@ -491,6 +599,13 @@ export interface SkillStore {
   /** ~/.agents/skills 中未安装的本地 skill（跨 agent 共享，软链安装）。 */
   local?: OptionalSkill[];
   evolution?: EvolutionConfig;
+}
+
+/** /api/tools 返回的单个工具行（外援等工具选择器用）。 */
+export interface ToolInfo {
+  name: string;
+  toolset: string;
+  display_name?: string;
 }
 
 export interface SubScenario {
@@ -666,6 +781,7 @@ export interface PlatformRow {
   running?: boolean;
   live_connected?: boolean;
   error?: string;
+  error_kind?: 'network' | string;
   description?: string;
   install_hint?: string;
   detail?: Record<string, unknown>;
@@ -721,7 +837,7 @@ export interface LogEntry {
 }
 
 export interface ChatChunk {
-  kind: ChunkKind;
+  kind: ChunkKind | 'security_approval';
   body: Record<string, unknown>;
   is_final: boolean;
   sequence: number;
@@ -742,6 +858,7 @@ export interface FollowupQuestion {
     type?: string;
     agent_name?: string;
     origin_session_id?: string;
+    mention_intent?: string;
   };
   questions: {
     id: string;
@@ -767,8 +884,11 @@ export interface SendPayload {
   attachments?: Attachment[];
   sub_scenario?: string;
   client_intent?: 'revision';
-  /** 专用 Wiki Agent 本轮携带的知识库。 */
+  /** Wiki 模式：本轮携带的 KB 与联网搜索开关（对齐 web useChat 的字段名）。 */
   wiki_kb_id?: string;
+  web_search_enabled?: boolean;
+  /** Work 模式：仅本轮不应用的偏好 ID。 */
+  work_disabled_preference_ids?: string[];
 }
 
 const DEFAULT_GATEWAY = 'http://127.0.0.1:8000';
@@ -801,7 +921,7 @@ function CrewBridge(): CrewBridge | undefined {
 }
 
 function gatewayBase(): string {
-  return localStorage.getItem('crew.gatewayBase') || DEFAULT_GATEWAY;
+  return localStorage.getItem('Crew.gatewayBase') || DEFAULT_GATEWAY;
 }
 
 function wsBase(): string {
@@ -948,6 +1068,7 @@ async function streamExternalTeamDraft(
   return latest;
 }
 
+/** Stream Fast draft → AI review/final, preferring Electron's cancellable bridge. */
 async function streamExternalTeamSuggestion(
   payload: object,
   options?: ExternalTeamSuggestionStreamOptions,
@@ -1007,6 +1128,7 @@ async function streamExternalTeamSuggestion(
   return latest;
 }
 
+/** Pair one bridge request with one listener and cancel both on abort or settlement. */
 async function streamExternalTeamSuggestionBridge(
   payload: object,
   options: ExternalTeamSuggestionStreamOptions | undefined,
@@ -1243,10 +1365,10 @@ export interface CuaDriverStatus {
 // ── LLM Wiki 类型（与 web/src/types.ts 同形，为后续上传/图谱等阶段铺路）──
 
 export type WikiPageStatus = 'published' | 'deprecated';
-export type WikiPageType = 'entity' | 'topic' | 'source' | 'comparison' | 'synthesis';
+export type WikiPageType = 'entity' | 'concept' | 'topic' | 'source' | 'comparison' | 'synthesis';
+export type WikiConfidence = 'high' | 'medium' | 'low';
 export type WikiSourceType = 'upload' | 'url' | 'session' | 'paste' | 'image' | 'video';
 export type WikiParseStatus = 'pending' | 'parsed' | 'failed';
-export type WikiConfidence = 'high' | 'medium' | 'low';
 export type WikiViewMode = 'timeline' | 'tree' | 'type' | 'graph';
 
 export interface WikiKB {
@@ -1280,24 +1402,8 @@ export interface WikiPage {
   relations?: WikiRelation[];
 }
 
-export interface WikiVaultDocument {
-  name: 'Home.md' | 'index.md';
-  path: string;
-  content: string;
-  updated_at: number;
-}
-
-export interface WikiRelation {
-  target: string;
-  relation: string;
-}
-
-export interface WikiEvidence {
-  source_id: string;
-  locator?: string;
-  excerpt?: string;
-}
-
+export interface WikiRelation { target: string; relation: string; }
+export interface WikiEvidence { source_id: string; locator?: string; excerpt?: string; }
 export interface WikiClaim {
   statement: string;
   evidence: WikiEvidence[];
@@ -1345,6 +1451,13 @@ export interface WikiSourcePage {
 /** source_id -> 原始文件元信息 的映射 */
 export type WikiSourceFiles = Record<string, { original_path: string; file_type?: string; title?: string }>;
 
+export interface WikiVaultDocument {
+  name: 'Home.md' | 'index.md';
+  path: string;
+  content: string;
+  updated_at: number;
+}
+
 export interface WikiGraph {
   nodes: WikiGraphNode[];
   edges: WikiGraphEdge[];
@@ -1384,6 +1497,12 @@ export interface WikiCardsChunk extends Omit<ChatChunk, 'kind' | 'body'> {
   body: { pages?: WikiPage[]; cards?: WikiPage[] };
 }
 
+/** wiki_summary 帧：进入 Wiki 模式时后端推送的 KB 概览卡（body 为 WikiSummary）。 */
+export interface WikiSummaryChunk extends Omit<ChatChunk, 'kind' | 'body'> {
+  kind: 'wiki_summary';
+  body: WikiSummary;
+}
+
 export interface WikiUploadResult {
   ok: boolean;
   source_id: string;
@@ -1399,7 +1518,82 @@ export interface WikiUploadResult {
   issues?: string[];
 }
 
+export interface WikiSummary {
+  summary: string;
+  kb_id: string;
+  page_count?: number;
+  source_count?: number;
+  generated_at?: number;
+  status: 'ready' | 'generating' | 'empty' | 'stale';
+}
+
 export const backendApi = {
+  inspirations: () => getJSON<{ ok: boolean; inspirations: InspirationItem[] }>(
+    '/api/sites/inspirations',
+  ),
+  inspiration: (inspirationId: string) => getJSON<{ ok: boolean; inspiration: InspirationDetail }>(
+    `/api/sites/inspirations/${encodeURIComponent(inspirationId)}`,
+  ),
+  deleteInspiration: (inspirationId: string) => getJSON<{ ok: boolean }>(
+    `/api/sites/inspirations/${encodeURIComponent(inspirationId)}`, { method: 'DELETE' },
+  ),
+  exportInspiration: (inspirationId: string) => getJSON<{
+    ok: boolean; archive_path: string; filename: string;
+  }>(`/api/sites/inspirations/${encodeURIComponent(inspirationId)}/export`, {
+    method: 'POST', ...jsonBody({}),
+  }),
+  createInspirationAnnotation: (inspirationId: string, payload: Record<string, unknown>) =>
+    getJSON<{ ok: boolean; annotation: InspirationAnnotation }>(
+      `/api/sites/inspirations/${encodeURIComponent(inspirationId)}/annotations`,
+      { method: 'POST', ...jsonBody(payload) },
+    ),
+  updateInspirationAnnotation: (
+    inspirationId: string, annotationId: string, status: InspirationAnnotation['status'],
+  ) => getJSON<{ ok: boolean; annotation: InspirationAnnotation }>(
+    `/api/sites/inspirations/${encodeURIComponent(inspirationId)}/annotations/${encodeURIComponent(annotationId)}`,
+    { method: 'PATCH', ...jsonBody({ status }) },
+  ),
+  canvases: () => getJSON<{ ok: boolean; canvases: BlueprintCanvas[] }>('/api/sites/canvases'),
+  canvas: (canvasId: string) => getJSON<{
+    ok: boolean; canvas: BlueprintCanvas; widgets: Record<string, BlueprintWidget>;
+  }>(`/api/sites/canvases/${encodeURIComponent(canvasId)}`),
+  updateCanvasPlacement: (canvasId: string, mountId: string, payload: Record<string, unknown>) =>
+    getJSON<{ ok: boolean; placement: CanvasPlacement }>(
+      `/api/sites/canvases/${encodeURIComponent(canvasId)}/placements/${encodeURIComponent(mountId)}`,
+      { method: 'PATCH', ...jsonBody(payload) },
+    ),
+  widget: (widgetId: string) => getJSON<{ ok: boolean; widget: BlueprintWidget }>(
+    `/api/sites/widgets/${encodeURIComponent(widgetId)}`,
+  ),
+  emitWidget: (widgetId: string, value: unknown = null) => getJSON<{
+    ok: boolean; run: Record<string, unknown>; widget: BlueprintWidget;
+  }>(`/api/sites/widgets/${encodeURIComponent(widgetId)}/emit`, {
+    method: 'POST', ...jsonBody({ name: 'submit', value }),
+  }),
+  sites: (workspaceId?: string) => getJSON<{ ok: boolean; sites: LocalSite[] }>(
+    `/api/sites${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`,
+  ),
+  site: (siteId: string) => getJSON<{
+    ok: boolean; site: LocalSite; releases: Array<Record<string, unknown>>; annotations: SiteAnnotation[];
+  }>(`/api/sites/${encodeURIComponent(siteId)}`),
+  publishSite: (siteId: string) => getJSON<{ ok: boolean; site: LocalSite }>(
+    `/api/sites/${encodeURIComponent(siteId)}/publish`, { method: 'POST', ...jsonBody({}) },
+  ),
+  deleteSite: (siteId: string) => getJSON<{ ok: boolean }>(
+    `/api/sites/${encodeURIComponent(siteId)}`, { method: 'DELETE' },
+  ),
+  createSiteAnnotation: (siteId: string, payload: Record<string, unknown>) =>
+    getJSON<{ ok: boolean; annotation: SiteAnnotation }>(
+      `/api/sites/${encodeURIComponent(siteId)}/annotations`, { method: 'POST', ...jsonBody(payload) },
+    ),
+  updateSiteAnnotation: (siteId: string, annotationId: string, status: SiteAnnotation['status']) =>
+    getJSON<{ ok: boolean; annotation: SiteAnnotation }>(
+      `/api/sites/${encodeURIComponent(siteId)}/annotations/${encodeURIComponent(annotationId)}`,
+      { method: 'PATCH', ...jsonBody({ status }) },
+    ),
+  exportSite: (siteId: string) => getJSON<{ ok: boolean; archive_path: string; filename: string }>(
+    `/api/sites/${encodeURIComponent(siteId)}/export`, { method: 'POST', ...jsonBody({}) },
+  ),
   config: () => getJSON<BackendConfig>('/api/config'),
   switchModel: (modelId: string) =>
     getJSON<BackendConfig>('/api/config/model', { method: 'POST', ...jsonBody({ model_id: modelId }) }),
@@ -1611,7 +1805,9 @@ export const backendApi = {
   // 运行时（外部 Agent runtime 检测）
   runtimes: () => getJSON<ExternalRuntime[]>('/api/runtimes'),
   scanRuntimes: () => getJSON<ExternalRuntime[]>('/api/runtimes/scan', { method: 'POST' }),
-  // 外部 Agent / Runtime / Team
+  deleteRuntime: (id: string) =>
+    getJSON<{ ok: boolean }>(`/api/runtimes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // 外部 Agent：作为外援页的实时数据源
   externalAgents: () => getJSON<ExternalAgent[]>('/api/external-agents'),
   createExternalAgent: (agent: {
     name: string;
@@ -1687,7 +1883,7 @@ export const backendApi = {
   ) => streamExternalTeamSuggestion(payload, options),
   deleteExternalTeam: (id: string) =>
     getJSON<{ ok: boolean }>(`/api/external-teams/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  // 会话 agent-config：写入选中的外援智能体 / 执行器
+  // 会话 agent-config：写入选中的外援 / 执行器
   getSessionAgentConfig: (sessionId: string) =>
     getJSON<SessionAgentConfig>(`/api/session/${encodeURIComponent(sessionId)}/agent-config`),
   setSessionAgentConfig: (sessionId: string, config: SessionAgentConfig) =>
@@ -1710,8 +1906,15 @@ export const backendApi = {
     return getJSON<{ items: LogEntry[]; total: number }>(`/api/system/logs${qs ? `?${qs}` : ''}`);
   },
 
-  upload: (filename: string, contentBase64: string) =>
-    getJSON<Attachment>('/api/upload', { method: 'POST', ...jsonBody({ filename, content: contentBase64 }) }),
+  upload: (filename: string, contentBase64: string, opts?: { sessionId?: string | undefined; kbId?: string | undefined }) => {
+    const body: { filename: string; content: string; session_id?: string; kb_id?: string } = {
+      filename,
+      content: contentBase64,
+    };
+    if (opts?.sessionId) body.session_id = opts.sessionId;
+    if (opts?.kbId) body.kb_id = opts.kbId;
+    return getJSON<Attachment>('/api/upload', { method: 'POST', ...jsonBody(body) });
+  },
   complete: (query: string, opts?: { cwd?: string; workspaceId?: string }) => {
     const params = new URLSearchParams({ query });
     if (opts?.cwd) params.set('cwd', opts.cwd);
@@ -1725,6 +1928,19 @@ export const backendApi = {
     getJSON<{ ok: boolean }>(`/api/skills/${encodeURIComponent(slug)}/install`, { method: 'POST' }),
   uninstallSkill: (slug: string) =>
     getJSON<{ ok: boolean }>(`/api/skills/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+  /** 从 base64 zip 安装远程技能（Skill Hub）。网关本地解压落盘，不触外网。 */
+  installFromZip: (slug: string, content: string, version?: string, hubId?: string) => {
+    const body: { slug: string; content: string; version?: string; hub_id?: string } = { slug, content };
+    if (version) body.version = version;
+    if (hubId) body.hub_id = hubId;
+    return getJSON<{ ok: boolean; slug?: string; name?: string }>('/api/skills/install-from-zip', {
+      method: 'POST',
+      ...jsonBody(body),
+    });
+  },
+  /** 读取远程 Skill Hub 安装时写入的 .hub-meta.json 侧车；本地技能返回 {}。 */
+  skillMeta: (slug: string) =>
+    getJSON<{ hubId?: string; version?: string }>(`/api/skills/${encodeURIComponent(slug)}/meta`),
 
   /** 更新自进化配置 */
   updateEvolution: (config: Partial<EvolutionConfig>) =>
@@ -1734,6 +1950,7 @@ export const backendApi = {
     }),
 
   toolsets: () => getJSON<string[]>('/api/toolsets'),
+  tools: () => getJSON<ToolInfo[]>('/api/tools'),
 
   scenarios: (count = 4) => getJSON<Scenario[]>(`/api/scenarios?count=${count}`),
   scenarioIntroLines: (count = 8) => getJSON<string[]>(`/api/scenarios/intro-lines?count=${count}`),
@@ -1835,7 +2052,7 @@ export const backendApi = {
       { method: 'POST' },
     ),
 
-  // ── LLM Wiki 知识库（/api/wiki/*）──
+  // ── LLM Wiki 知识库（/api/wiki/*，Phase 1 只读浏览 + Phase 2 上传/编译/删除）──
 
   /** Wiki Agent 专用会话：默认复用当前 KB 最近会话，也可显式新建。 */
   wikiAgentSession: (kbId?: string, opts?: { forceNew?: boolean }) =>
@@ -1861,10 +2078,7 @@ export const backendApi = {
     getJSON<{ ok: boolean; kb: WikiKB }>('/api/wiki/kbs', { method: 'POST', ...jsonBody(payload) }),
   /** 删除知识库及其全部页面（后端禁止删除 default）。 */
   wikiDeleteKB: (kbId: string) =>
-    getJSON<{ ok: boolean; deleted_session_ids?: string[] }>(
-      `/api/wiki/kbs/${encodeURIComponent(kbId)}`,
-      { method: 'DELETE' },
-    ),
+    getJSON<{ ok: boolean }>(`/api/wiki/kbs/${encodeURIComponent(kbId)}`, { method: 'DELETE' }),
   wikiVaultDocument: (name: 'Home.md' | 'index.md', kbId?: string) =>
     getJSON<{ ok: boolean; document: WikiVaultDocument }>(
       withKb(`/api/wiki/vault-documents/${encodeURIComponent(name)}`, kbId),
@@ -1891,16 +2105,19 @@ export const backendApi = {
       source_pages: WikiSourcePage[];
       relation_pages: WikiRelationPage[];
     }>(withKb(`/api/wiki/pages/${encodeURIComponent(id)}`, kbId)),
-  wikiSearch: (query: string, kbId?: string, topK = 5) =>
+  wikiCreatePage: (
+    payload: Pick<WikiPage, 'title' | 'content'> & Partial<Pick<WikiPage, 'page_type' | 'status'>>,
+    kbId?: string,
+  ) =>
     getJSON<{
       ok: boolean;
-      pages: WikiPage[];
+      page: WikiPage;
       source_titles: WikiSourceTitles;
       source_files: WikiSourceFiles;
-    }>(withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId)),
+    }>(withKb('/api/wiki/pages', kbId), { method: 'POST', ...jsonBody(payload) }),
   wikiUpdatePage: (
     id: string,
-    payload: Pick<WikiPage, 'title' | 'content' | 'tags' | 'sources' | 'relations'>,
+    payload: Partial<Pick<WikiPage, 'title' | 'content' | 'tags' | 'sources' | 'relations'>>,
     kbId?: string,
   ) =>
     getJSON<{
@@ -1914,9 +2131,16 @@ export const backendApi = {
       method: 'PUT',
       ...jsonBody(payload),
     }),
+  wikiSearch: (query: string, kbId?: string, topK = 5) =>
+    getJSON<{
+      ok: boolean;
+      pages: WikiPage[];
+      source_titles: WikiSourceTitles;
+      source_files: WikiSourceFiles;
+    }>(withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId)),
   wikiSummary: (kbId?: string, force?: boolean) =>
-    getJSON<{ ok: boolean; summary: string; kb_id: string; page_count?: number; source_count?: number; generated_at?: number; status: 'ready' | 'generating' | 'empty' | 'stale' }>(withKb(`/api/wiki/summary${force ? '?force=true' : ''}`, kbId)),
-  /** 知识图谱：全量节点 + 关系边，不走分页。 */
+    getJSON<{ ok: boolean } & WikiSummary>(withKb(`/api/wiki/summary${force ? '?force=true' : ''}`, kbId)),
+  /** 知识图谱（Phase 3）：全量节点 + 关系边，不走分页。 */
   wikiGraph: (kbId?: string) =>
     getJSON<{ ok: boolean; graph: WikiGraph }>(withKb('/api/wiki/graph', kbId)),
   /** 上传本地文件（走主进程 gateway:upload IPC，一次一个文件）。 */
@@ -2015,6 +2239,10 @@ export class BackendChatSocket {
             });
             return;
           }
+          if (frame?.kind === 'security_approval') {
+            window.dispatchEvent(new CustomEvent('security:approval-pending', { detail: frame }));
+            return;
+          }
           logStream('ws-renderer', 'proxy-event-message', {
             kind: frame.kind,
             request_id: frame.request_id,
@@ -2106,6 +2334,9 @@ export class BackendChatSocket {
           workspace_id?: string;
           /** 看板手改 / 批准时附带的计划正文 */
           plan?: string;
+          /** Wiki 模式（wiki_enter）：目标知识库与联网搜索开关 */
+          kb_id?: string;
+          web_search_enabled?: boolean;
         }
       | { action: 'followup_answer'; session_id: string; question_id: string; answers: FollowupAnswer[] }
       | { action: 'followup_cancel'; session_id: string; question_id: string }
@@ -2162,7 +2393,7 @@ export class BackendChatSocket {
    * 从本地订阅集移除会话。**不向 gateway 发送 unsubscribe**：当前 gateway
    * (crew/gateway/ws.py) 未实现该动作，且未识别动作会被当作空 query 的对话回合
    * `_spawn`，造成幽灵 turn。仅客户端裁剪 Set——下次重连 `resubscribe()` 只发
-   * 剩余会话，gateway 状态随之收敛，避免无效订阅占用内存和重连带宽。
+   * 剩余会话，gateway 状态随之收敛。修 P2-1 的内存增长 + 重连全量重发带宽。
    */
   unsubscribe(sessionIds: string[]): void {
     const toRemove = new Set(sessionIds.map((id) => id.trim()).filter(Boolean));
@@ -2195,6 +2426,21 @@ export class BackendChatSocket {
 
   planExit(sessionId: string): Promise<boolean> {
     return this.send({ action: 'plan_exit', session_id: sessionId });
+  }
+
+  /** 进入 Wiki 模式（Phase 4）：对齐 web ws.ts wikiEnter，kb_id / web_search_enabled 可选。 */
+  wikiEnter(sessionId: string, kbId?: string, webSearchEnabled?: boolean): Promise<boolean> {
+    return this.send({
+      action: 'wiki_enter',
+      session_id: sessionId,
+      ...(kbId ? { kb_id: kbId } : {}),
+      ...(webSearchEnabled ? { web_search_enabled: true } : {}),
+    });
+  }
+
+  /** 退出 Wiki 模式（Phase 4）。 */
+  wikiExit(sessionId: string): Promise<boolean> {
+    return this.send({ action: 'wiki_exit', session_id: sessionId });
   }
 
   planReject(sessionId: string): Promise<boolean> {
@@ -2249,3 +2495,577 @@ export class BackendChatSocket {
     this.subscribedSessions.clear();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Work 办公域客户端：复用既有 gatewayFetch / getJSON / jsonBody，不复制 fetch/WS。
+// 端点与 crew/gateway/routers/work.py 对齐；类型与后端 asdict()/to_dict() 对齐。
+// ---------------------------------------------------------------------------
+
+export type WorkHistoryEntityType =
+  | 'work_session'
+  | 'work_item_session'
+  | 'work_item'
+  | 'agent_session';
+export interface WorkHistoryEntry {
+  id: string;
+  entity_type: WorkHistoryEntityType;
+  session_id: string | null;
+  title: string;
+  workspace_id: string | null;
+  updated_at: number;
+  work_item_id: string | null;
+  archived: boolean;
+  pinned: boolean;
+  read_only: boolean;
+  open_mode: 'work' | 'assistant';
+}
+
+export interface WorkSession {
+  session_id: string;
+  title: string;
+  workspace_id: string;
+  product_mode: 'work';
+}
+
+export interface WorkItem {
+  item_id: string;
+  owner_account_id: string;
+  title: string;
+  description?: string;
+  category?: string | null;
+  related_system?: string | null;
+  workspace_id?: string | null;
+  processing_session_id?: string | null;
+  business_status?: string;
+  execution_status?: string;
+  sync_status?: string;
+  priority?: string;
+  disposition?: string;
+  source?: {
+    connector_key: string;
+    external_id: string;
+    external_version: string;
+  } | null;
+  due_at?: number | null;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkReference {
+  reference_id: string;
+  target_session_id: string;
+  reference_type: string;
+  source_id: string;
+  target_item_id?: string | null;
+  snapshot_version?: string;
+  snapshot_summary?: string;
+  source_link?: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkPreference {
+  owner_account_id: string;
+  preference_id: string;
+  category: string;
+  content: string;
+  scope: 'global' | 'item_type' | 'workspace' | 'source';
+  scope_id: string | null;
+  status: 'active' | 'paused';
+  auto_enabled: boolean;
+  evidence_session_count: number;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkSourceState {
+  owner_account_id: string;
+  connector_key: string;
+  enabled: boolean;
+  status: 'disabled' | 'idle' | 'syncing' | 'ready' | 'error' | 'unavailable';
+  cursor?: string | null;
+  last_error?: string;
+  last_synced_at?: number | null;
+  updated_at: number;
+}
+
+export interface WorkSourceRecord {
+  owner_account_id: string;
+  record_id: string;
+  connector_key: string;
+  external_id: string;
+  external_version: string;
+  title: string;
+  kind: string;
+  source_status: string;
+  due_at: number | null;
+  source_url: string;
+  normalized: Record<string, unknown>;
+  pending_writeback: Record<string, unknown>;
+  conflict_external: Record<string, unknown>;
+  conflict_local: Record<string, unknown>;
+  sync_status: string;
+  updated_at: number;
+}
+
+export interface WorkKnowledgePage {
+  id: string;
+  page_type: string;
+  title: string;
+  content?: string;
+  summary?: string | null;
+  tags?: string[];
+  sources?: unknown[];
+  related?: unknown[];
+  aliases?: string[];
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface WorkTemplate {
+  owner_account_id: string;
+  template_id: string;
+  source: 'system' | 'organization' | 'personal';
+  name: string;
+  description: string;
+  category: string;
+  blueprint: Record<string, unknown>;
+  version: number;
+  usage_count: number;
+  last_used_at?: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkDashboard {
+  brief: {
+    brief_id: string;
+    business_date: string;
+    workspace_id: string | null;
+    content: Record<string, unknown>;
+    version: number;
+    archived: boolean;
+    created_at: number;
+    updated_at: number;
+  } | null;
+}
+
+export interface WorkPeriodReport {
+  report_id: string | null;
+  period: 'day' | 'week' | 'month';
+  period_start: string;
+  period_end: string;
+  workspace_id: string | null;
+  metrics: {
+    created: number;
+    completed: number;
+    in_progress: number;
+    overdue: number;
+    completion_rate: number;
+    status_counts: Record<string, number>;
+    category_counts: Record<string, number>;
+  };
+  archived: boolean;
+  generated_at: number;
+  archived_at: number | null;
+}
+
+export interface WorkIndexStatus {
+  enabled: boolean;
+  state: string;
+  updated_at: number;
+}
+export interface WorkItemEvent {
+  event_id: string;
+  owner_account_id: string;
+  item_id: string;
+  event_type: string;
+  actor: string;
+  before_state?: Record<string, unknown> | null;
+  after_state?: Record<string, unknown> | null;
+  created_at: number;
+}
+
+export const workApi = {
+  // 历史
+  createSession: (payload: { workspace_id: string; title: string }) =>
+    getJSON<WorkSession>('/api/work/sessions', { method: 'POST', ...jsonBody(payload) }),
+  history: () => getJSON<{ entries: WorkHistoryEntry[]; count: number }>('/api/work/history'),
+  // 事项
+  listItems: (workspaceId?: string | null) => {
+    const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return getJSON<{ items: WorkItem[]; count: number }>(`/api/work/items${query}`);
+  },
+  createItem: (payload: { title: string; workspace_id?: string; [k: string]: unknown }) =>
+    getJSON<WorkItem>('/api/work/items', { method: 'POST', ...jsonBody(payload) }),
+  getItem: (itemId: string) => getJSON<WorkItem>(`/api/work/items/${encodeURIComponent(itemId)}`),
+  updateItem: (itemId: string, payload: { expected_version: number; title?: string; [k: string]: unknown }) =>
+    getJSON<WorkItem>(`/api/work/items/${encodeURIComponent(itemId)}`, { method: 'PATCH', ...jsonBody(payload) }),
+  actOnItem: (itemId: string, payload: { action: string; expected_version: number; due_at?: number }) =>
+    getJSON<WorkItem>(`/api/work/items/${encodeURIComponent(itemId)}/actions`, { method: 'POST', ...jsonBody(payload) }),
+  startItemProcessingSession: (itemId: string, payload: { expected_version: number }) =>
+    getJSON<WorkItem>(`/api/work/items/${encodeURIComponent(itemId)}/processing-session`, {
+      method: 'POST',
+      ...jsonBody(payload),
+    }),
+  getItemActivity: (itemId: string) =>
+    getJSON<{ events: WorkItemEvent[]; count: number }>(`/api/work/items/${encodeURIComponent(itemId)}/activity`),
+  saveItemKnowledge: (itemId: string, full = true) =>
+    getJSON<{ page: WorkKnowledgePage }>(`/api/work/items/${encodeURIComponent(itemId)}/knowledge`, {
+      method: 'POST',
+      ...jsonBody({ full }),
+    }),
+  deleteItem: (itemId: string, payload: { expected_version: number; confirm: string }) =>
+    getJSON<{ ok: boolean }>(`/api/work/items/${encodeURIComponent(itemId)}`, { method: 'DELETE', ...jsonBody(payload) }),
+  // 引用
+  listReferences: (targetSessionId: string) =>
+    getJSON<{ items: WorkReference[]; count: number }>(`/api/work/references?target_session_id=${encodeURIComponent(targetSessionId)}`),
+  createReference: (payload: { target_session_id: string; reference_type: string; source_id: string; source_link?: string }) =>
+    getJSON<WorkReference>('/api/work/references', { method: 'POST', ...jsonBody(payload) }),
+  deleteReference: (referenceId: string) =>
+    getJSON<{ ok: boolean }>(`/api/work/references/${encodeURIComponent(referenceId)}`, { method: 'DELETE' }),
+  refreshReference: (referenceId: string) =>
+    getJSON<WorkReference>(`/api/work/references/${encodeURIComponent(referenceId)}/refresh`, { method: 'POST' }),
+  // 偏好
+  // @ 提及搜索（事项 / 会话 / 知识 / 来源记录）
+  searchMentions: async (query: string, workspaceId?: string | null) => {
+    const params = new URLSearchParams({ q: query });
+    if (workspaceId) params.set('workspace_id', workspaceId);
+    return (await getJSON<{ items: Array<{ entity_type: string; id: string; title: string; workspace_id?: string; source_link?: string }>; count: number }>(`/api/work/mentions?${params}`)).items;
+  },
+  createAgentSessionReference: (payload: { target_session_id: string; source_session_id: string }) =>
+    getJSON<WorkReference>('/api/work/references/agent-session', { method: 'POST', ...jsonBody(payload) }),
+  getPreferenceSettings: () => getJSON<{ auto_learning_enabled: boolean }>('/api/work/preferences/settings'),
+  setPreferenceSettings: (enabled: boolean) =>
+    getJSON<{ auto_learning_enabled: boolean }>('/api/work/preferences/settings', { method: 'PUT', ...jsonBody({ auto_learning_enabled: enabled }) }),
+  listPreferences: () => getJSON<{ items: WorkPreference[]; count: number }>('/api/work/preferences'),
+  createPreference: (payload: { category: string; content: string }) =>
+    getJSON<WorkPreference>('/api/work/preferences', {
+      method: 'POST',
+      ...jsonBody(payload),
+    }),
+  updatePreference: (preferenceId: string, payload: {
+    expected_version: number;
+    content?: string;
+    scope?: WorkPreference['scope'];
+    scope_id?: string | null;
+    status?: WorkPreference['status'];
+  }) =>
+    getJSON<WorkPreference>(`/api/work/preferences/${encodeURIComponent(preferenceId)}`, { method: 'PATCH', ...jsonBody(payload) }),
+  deletePreference: (preferenceId: string, expectedVersion: number) =>
+    getJSON<{ ok: boolean }>(`/api/work/preferences/${encodeURIComponent(preferenceId)}`, {
+      method: 'DELETE',
+      ...jsonBody({ expected_version: expectedVersion }),
+    }),
+  // 来源
+  listSources: () => getJSON<{ items: WorkSourceState[]; count: number }>('/api/work/sources'),
+  toggleSource: (connectorKey: string, enabled: boolean) =>
+    getJSON<WorkSourceState>(`/api/work/sources/${encodeURIComponent(connectorKey)}`, { method: 'PUT', ...jsonBody({ enabled }) }),
+  refreshSource: (connectorKey: string) =>
+    getJSON<WorkSourceState>(`/api/work/sources/${encodeURIComponent(connectorKey)}/refresh`, { method: 'POST', ...jsonBody({}) }),
+  deleteSourceLocalData: (connectorKey: string) =>
+    getJSON<{ ok: boolean; deleted_records: number }>(`/api/work/sources/${encodeURIComponent(connectorKey)}/data`, {
+      method: 'DELETE',
+      ...jsonBody({ confirm: 'delete_work_source_local_data' }),
+    }),
+  listSourceRecords: (connectorKey?: string) => {
+    const query = connectorKey ? `?connector_key=${encodeURIComponent(connectorKey)}` : '';
+    return getJSON<{ items: WorkSourceRecord[]; count: number }>(`/api/work/sources/records${query}`);
+  },
+  resolveSourceConflict: (recordId: string, resolution: 'external' | 'local') =>
+    getJSON<WorkSourceRecord>(`/api/work/sources/records/${encodeURIComponent(recordId)}/resolve`, {
+      method: 'POST',
+      ...jsonBody({ resolution }),
+    }),
+  // 看板
+  getDashboard: (workspaceId?: string | null) => {
+    const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return getJSON<WorkDashboard>(`/api/work/dashboard${query}`);
+  },
+  refreshDashboard: (workspaceId?: string | null) =>
+    getJSON<WorkDashboard>('/api/work/dashboard/refresh', {
+      method: 'POST',
+      ...jsonBody(workspaceId ? { workspace_id: workspaceId } : {}),
+    }),
+  archiveDashboard: (workspaceId?: string | null) =>
+    getJSON<WorkDashboard>('/api/work/dashboard/archive', {
+      method: 'POST',
+      ...jsonBody(workspaceId ? { workspace_id: workspaceId } : {}),
+    }),
+  getReport: (
+    period: WorkPeriodReport['period'],
+    anchor: string,
+    workspaceId?: string | null,
+  ) => {
+    const query = new URLSearchParams({ period, anchor });
+    if (workspaceId) query.set('workspace_id', workspaceId);
+    return getJSON<{ report: WorkPeriodReport }>(`/api/work/reports?${query}`);
+  },
+  archiveReport: (
+    period: WorkPeriodReport['period'],
+    anchor: string,
+    workspaceId?: string | null,
+  ) =>
+    getJSON<{ report: WorkPeriodReport }>('/api/work/reports/archive', {
+      method: 'POST',
+      ...jsonBody({
+        period,
+        anchor,
+        ...(workspaceId ? { workspace_id: workspaceId } : {}),
+      }),
+    }),
+  // 设置
+  getSettings: () => getJSON<Record<string, unknown>>('/api/work/settings'),
+  putSettings: (payload: Record<string, unknown>) =>
+    getJSON<Record<string, unknown>>('/api/work/settings', { method: 'PUT', ...jsonBody(payload) }),
+  // 模板
+  listTemplates: () => getJSON<{ items: WorkTemplate[]; count: number }>('/api/work/templates'),
+  createTemplate: (payload: { name: string; description?: string; category?: string; blueprint?: Record<string, unknown> }) =>
+    getJSON<WorkTemplate>('/api/work/templates', { method: 'POST', ...jsonBody(payload) }),
+  updateTemplate: (templateId: string, payload: { name?: string; description?: string; category?: string; blueprint?: Record<string, unknown> }) =>
+    getJSON<WorkTemplate>(`/api/work/templates/${encodeURIComponent(templateId)}`, { method: 'PATCH', ...jsonBody(payload) }),
+  deleteTemplate: (templateId: string) =>
+    getJSON<{ ok: boolean }>(`/api/work/templates/${encodeURIComponent(templateId)}`, { method: 'DELETE', ...jsonBody({}) }),
+  instantiateTemplate: (templateId: string, payload: Record<string, unknown>) =>
+    getJSON<WorkItem>(`/api/work/templates/${encodeURIComponent(templateId)}/instantiate`, { method: 'POST', ...jsonBody(payload) }),
+  // 知识
+  listPersonalKnowledge: () => getJSON<{ items: WorkKnowledgePage[]; count: number }>('/api/work/knowledge/personal'),
+  savePersonalKnowledge: (payload: { title: string; content: string }) =>
+    getJSON<{ page: WorkKnowledgePage }>('/api/work/knowledge/personal', { method: 'POST', ...jsonBody(payload) }),
+  listOrganizationKnowledge: () => getJSON<{
+    items: WorkKnowledgePage[];
+    count: number;
+    available: boolean;
+  }>('/api/work/knowledge/organization'),
+  requestPublish: (payload: { page_id: string; target: string }) =>
+    getJSON<{ request_id: string; status: string }>('/api/work/knowledge/publish', { method: 'POST', ...jsonBody(payload) }),
+  listPublishRequests: () => getJSON<{ items: Record<string, unknown>[]; count: number }>('/api/work/knowledge/publish'),
+  // Workspace 索引状态
+  getIndexStatus: (workspaceId: string) =>
+    getJSON<WorkIndexStatus>(`/api/work/workspaces/${encodeURIComponent(workspaceId)}/index`),
+  setIndexStatus: (workspaceId: string, payload: { enabled?: boolean; state?: string }) =>
+    getJSON<WorkIndexStatus>(`/api/work/workspaces/${encodeURIComponent(workspaceId)}/index`, { method: 'PUT', ...jsonBody(payload) }),
+  deleteIndexStatus: (workspaceId: string) =>
+    getJSON<{ ok: boolean }>(`/api/work/workspaces/${encodeURIComponent(workspaceId)}/index`, { method: 'DELETE' }),
+};
+
+// ---------------------------------------------------------------------------
+// 办公系统客户端（邮件 / 待办 / 日程 / 会议）：复用 gatewayFetch / getJSON / jsonBody，不复制 fetch。
+// 端点与 crew/api/{mail,todo,schedule,meeting}_router.py 对齐。四个 GET /latest 是后台
+// MailTodoRefresher 的只读内存快照（不触发外部调用）；其余为实时调用。响应业务失败为 200 壳
+// {ok:false,error,code}，由调用方按 ok 判定。
+// ---------------------------------------------------------------------------
+
+/** 后台定时刷新的只读快照形态（四个 /latest 通用）。data=null 表示首轮未完成/账号切换/开关关闭。 */
+export interface OfficeSnapshot<T> {
+  ok: boolean;
+  data: T | null;
+  fetched_at: number | null;
+  stale: boolean;
+  error: string | null;
+}
+
+// ── 邮件（139 邮箱）──
+/** /api/mail/search 与 /api/mail/latest 的单封邮件摘要。mid 为内部标识，用于详情/转发入参。 */
+export interface MailMessage {
+  subject: string;
+  from: string;
+  sendDate?: string;
+  summary?: string;
+  mid: string;
+  read?: boolean;
+  readStatus?: string;
+  /** 可选的详情跳转地址。 */
+  detail_link?: string;
+  [k: string]: unknown;
+}
+export interface MailSearchData {
+  count: number;
+  results: MailMessage[];
+}
+export interface MailSearchResponse {
+  ok: boolean;
+  count: number;
+  results: MailMessage[];
+  error?: string;
+  code?: string;
+}
+export interface MailDetailResponse {
+  ok: boolean;
+  subject: string;
+  content: string;
+  from: string;
+  error?: string;
+  code?: string;
+}
+export interface MailSendResponse {
+  ok: boolean;
+  message?: string;
+  attachment_names?: string[];
+  cc?: string;
+  error?: string;
+  code?: string;
+}
+export interface MailForwardResponse {
+  ok: boolean;
+  message?: string;
+  subject?: string;
+  error?: string;
+  code?: string;
+}
+export interface OfficeMailCompose {
+  to: string;
+  subject: string;
+  content: string;
+  cc?: string;
+  attachments?: string[];
+}
+
+// ── 待办（总部待办）──
+/** 待办 dataList 元素为上游原始 ViewEntry，含跳转链接 url。 */
+export interface TodoItem {
+  itemTitle: string;
+  systemName?: string;
+  drafterName?: string;
+  itemCreateTime?: string;
+  url?: string;
+  [k: string]: unknown;
+}
+export interface TodoGroup {
+  groupName: string;
+  count: number;
+  dataList: TodoItem[];
+  [k: string]: unknown;
+}
+export interface TodoData {
+  summary?: string;
+  groups: TodoGroup[];
+  counts?: unknown[];
+}
+export interface TodoFetchResponse extends TodoData {
+  ok: boolean;
+  error?: string;
+  code?: string;
+}
+export interface TodoCategoriesResponse {
+  ok: boolean;
+  categories: unknown[];
+  error?: string;
+  code?: string;
+}
+
+// ── 日程（企业日程）──
+/** 日程 results 元素为上游原始字段，含 scheduleId（改/删时的 schdule_id）。 */
+export interface ScheduleItem {
+  scheduleId: string;
+  scheduleTheme?: string;
+  scheduleStartDate?: string;
+  scheduleStartTime?: string;
+  scheduleEndTime?: string;
+  scheduleEndDate?: string;
+  [k: string]: unknown;
+}
+export interface ScheduleData {
+  total: number;
+  pages: number;
+  count: number;
+  results: ScheduleItem[];
+}
+export interface ScheduleSearchResponse extends ScheduleData {
+  ok: boolean;
+  error?: string;
+  code?: string;
+}
+export interface ScheduleSyncResponse {
+  ok: boolean;
+  schduleId?: string;
+  error?: string;
+  code?: string;
+}
+export interface OfficeScheduleSync {
+  operate_id: 0 | 1 | 2;
+  theme: string;
+  start_date: string;
+  start_time: string;
+  end_date: string;
+  end_time: string;
+  remind_mode: number;
+  schdule_id?: string;
+  remark?: string;
+  schedule_priority?: number;
+  meeting_no?: string;
+  meeting_code?: string;
+  meeting_place?: string;
+  user_ids?: string[];
+  presenter?: string;
+  related_url?: string;
+  back_url_pc?: string;
+}
+
+// ── 会议（智慧会议待参会议）──
+/** status: 1 已发布 / 2 进行中 / 3 暂停；详情跳转地址由服务端提供。 */
+export interface MeetingItem {
+  infoId: number;
+  infoName: string;
+  status: number;
+  time: string;
+  conferenceTypeName?: string;
+  url?: string;
+  [k: string]: unknown;
+}
+export interface MeetingData {
+  wait_count: number;
+  meetings: MeetingItem[];
+}
+export interface MeetingPendingResponse extends MeetingData {
+  ok: boolean;
+  error?: string;
+  code?: string;
+}
+
+export const officeApi = {
+  // 邮件
+  mailLatest: () => getJSON<OfficeSnapshot<MailSearchData>>('/api/mail/latest'),
+  mailSearch: (payload: {
+    search_subject?: string;
+    search_from?: string;
+    search_content?: string;
+    read_status?: 0 | 1;
+    channel?: string;
+  }) => getJSON<MailSearchResponse>('/api/mail/search', { method: 'POST', ...jsonBody(payload) }),
+  mailDetail: (mid: string) =>
+    getJSON<MailDetailResponse>('/api/mail/detail', { method: 'POST', ...jsonBody({ mid }) }),
+  mailSend: (payload: OfficeMailCompose) =>
+    getJSON<MailSendResponse>('/api/mail/send', { method: 'POST', ...jsonBody(payload) }),
+  mailForward: (mid: string, to: string) =>
+    getJSON<MailForwardResponse>('/api/mail/forward', { method: 'POST', ...jsonBody({ mid, to }) }),
+  // 待办
+  todoLatest: () => getJSON<OfficeSnapshot<TodoData>>('/api/todo/latest'),
+  todoFetch: (payload: {
+    type: 'DB' | 'DY';
+    url_type?: 'HOME' | 'MORE';
+    fetch_group_id?: string[];
+    my_assistant_enum?: 'ALL' | 'URGENT' | 'OVERDUE';
+  }) => getJSON<TodoFetchResponse>('/api/todo/fetch', { method: 'POST', ...jsonBody(payload) }),
+  todoCategories: (fetch_data_type: 'DB' | 'DY' = 'DB') =>
+    getJSON<TodoCategoriesResponse>('/api/todo/categories', {
+      method: 'POST',
+      ...jsonBody({ fetch_data_type }),
+    }),
+  // 日程
+  scheduleLatest: () => getJSON<OfficeSnapshot<ScheduleData>>('/api/schedule/latest'),
+  scheduleSearch: (payload: {
+    start_time: string;
+    end_time: string;
+    page_num?: number;
+    page_size?: number;
+    theme?: string;
+  }) => getJSON<ScheduleSearchResponse>('/api/schedule/search', { method: 'POST', ...jsonBody(payload) }),
+  scheduleSync: (payload: OfficeScheduleSync) =>
+    getJSON<ScheduleSyncResponse>('/api/schedule/sync', { method: 'POST', ...jsonBody(payload) }),
+  // 会议
+  meetingLatest: () => getJSON<OfficeSnapshot<MeetingData>>('/api/meeting/latest'),
+  meetingPending: () => getJSON<MeetingPendingResponse>('/api/meeting/pending'),
+};

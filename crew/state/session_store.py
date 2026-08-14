@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from crew.core.interfaces import SessionStore
 from crew.core.types import Message, ToolCall
@@ -78,6 +79,17 @@ class SQLiteSessionStore(SessionStore):
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS channel_session_routes (
+                owner_account_id TEXT NOT NULL,
+                session_key     TEXT NOT NULL,
+                session_id      TEXT NOT NULL,
+                updated_at      REAL NOT NULL,
+                PRIMARY KEY (owner_account_id, session_key)
+            )
+            """
+        )
         cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         migrations = {
             "owner_account_id": "ALTER TABLE sessions ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''",
@@ -102,6 +114,10 @@ class SQLiteSessionStore(SessionStore):
         self._migrate_sessions_pk(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_updated ON sessions(owner_account_id, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_workspace ON sessions(owner_account_id, workspace_id, updated_at DESC)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_channel_session_routes_active "
+            "ON channel_session_routes(owner_account_id, session_id)"
+        )
 
     def _migrate_sessions_pk(self, conn) -> None:
         """Migrate sessions from global session_id to owner-scoped identity."""
@@ -616,6 +632,56 @@ class SQLiteSessionStore(SessionStore):
         self._writer.execute(_write)
         return self.get_agent_config(session_id, owner_account_id=owner_account_id) or {}
 
+    def update_agent_config(
+        self,
+        session_id: str,
+        updater: Callable[[dict[str, Any]], dict[str, Any]],
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        """Atomically read, transform, and persist one Session AgentConfig."""
+
+        now = self._now_iso()
+
+        def _write(conn):
+            row = conn.execute(
+                """
+                SELECT config_json, created_at
+                FROM session_agent_config
+                WHERE session_id = ? AND owner_account_id = ?
+                """,
+                (session_id, owner_account_id),
+            ).fetchone()
+            try:
+                current = json.loads(str(row[0] or "{}")) if row is not None else {}
+            except json.JSONDecodeError:
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            updated = updater(dict(current))
+            if not isinstance(updated, dict):
+                raise TypeError("AgentConfig updater 必须返回 dict")
+            if updated == current:
+                return current
+            created_at = str(row[1] or now) if row is not None else now
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO session_agent_config (
+                    session_id, owner_account_id, config_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    owner_account_id,
+                    json.dumps(updated, ensure_ascii=False),
+                    created_at,
+                    now,
+                ),
+            )
+            return updated
+
+        self._writer.execute(_write)
+        return self.get_agent_config(session_id, owner_account_id=owner_account_id) or {}
+
     def get_agent_config(self, session_id: str, owner_account_id: str = "") -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
@@ -640,3 +706,50 @@ class SQLiteSessionStore(SessionStore):
                 (session_id, owner_account_id),
             )
         self._writer.execute(_write)
+
+    # ---- 渠道稳定 key -> 当前实际 session ----
+    def get_channel_session(self, session_key: str, owner_account_id: str = "") -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT session_id FROM channel_session_routes "
+                "WHERE owner_account_id = ? AND session_key = ?",
+                (owner_account_id, session_key),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def set_channel_session(
+        self,
+        session_key: str,
+        session_id: str,
+        owner_account_id: str = "",
+    ) -> None:
+        now = time.time()
+
+        def _write(conn):
+            conn.execute(
+                """
+                INSERT INTO channel_session_routes (
+                    owner_account_id, session_key, session_id, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(owner_account_id, session_key) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    updated_at = excluded.updated_at
+                """,
+                (owner_account_id, session_key, session_id, now),
+            )
+
+        self._writer.execute(_write)
+
+    def get_channel_session_key(
+        self,
+        session_id: str,
+        owner_account_id: str = "",
+    ) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT session_key FROM channel_session_routes "
+                "WHERE owner_account_id = ? AND session_id = ? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (owner_account_id, session_id),
+            ).fetchone()
+        return str(row[0]) if row else None

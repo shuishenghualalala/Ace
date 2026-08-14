@@ -17,14 +17,18 @@ import asyncio
 import inspect
 import random
 import time
+from dataclasses import replace
 from typing import Any, AsyncIterator
 
 from crew.agent.executor.base import AgentExecutor, ExecutionContext
 from crew.agent.loop import (
     CONTINUATION_PROMPT,
     EMPTY_RETRY_NUDGE,
+    ESCALATED_MAX_OUTPUT_TOKENS,
     STREAM_INTERRUPT_PROMPT,
     STREAM_INTERRUPT_STATUS_MESSAGE,
+    TOOL_ARGUMENTS_RECOVERY_LIMIT,
+    TOOL_ARGUMENTS_RECOVERY_PROMPT,
     IterationBudget,
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
@@ -40,7 +44,7 @@ from crew.agent.loop.tool_dispatch_helpers import plan_tool_calls
 from crew.core.envelope import ResponseChunk
 from crew.core.errors import ProviderError
 from crew.core.interfaces import LLMProvider, ToolRegistry
-from crew.core.types import Message, ToolResult
+from crew.core.types import IMAGE_INPUT_UNAVAILABLE_NOTICE, Message, ToolResult
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger
 from crew.tools.policy import ToolDisclosureMode
@@ -54,6 +58,36 @@ from crew.tools.tool_search import (
 )
 
 log = get_logger("agent.executor")
+
+VISION_CAPABILITY_RECOVERY_PROMPT = (
+    "当前模型刚刚拒绝了图片输入，本轮已切换为非视觉模式。不要声称已经看过图片。"
+    "如果任务涉及网页，请优先使用 browser snapshot、DOM、文本提取等非视觉方式继续；"
+    "如果图片内容无法通过文本方式获得，请明确告知用户当前配置的模型没有视觉能力，"
+    "需要切换到支持视觉的模型。"
+)
+
+
+def _without_image_inputs(messages: list[Message]) -> list[Message]:
+    """Build a request-only text view while preserving canonical multimodal history."""
+    sanitized: list[Message] = []
+    for message in messages:
+        parts = message.content_parts or []
+        if not any(
+            str(part.get("type") or "").lower() in {"image", "image_url", "input_image"}
+            for part in parts
+        ):
+            sanitized.append(message)
+            continue
+        text_parts = [
+            str(part.get("text") or "").strip()
+            for part in parts
+            if part.get("type") == "text" and str(part.get("text") or "").strip()
+        ]
+        text_parts.append(IMAGE_INPUT_UNAVAILABLE_NOTICE)
+        sanitized.append(
+            replace(message, content="\n".join(text_parts), content_parts=None)
+        )
+    return sanitized
 
 def _dump_prompt(ctx: ExecutionContext, view: list, tools: list | None, iteration: int) -> None:
     """DEBUG 级别：打印本轮发送给 LLM 的完整 prompt（system + messages + tools）。"""
@@ -306,9 +340,13 @@ class BuiltinExecutor(AgentExecutor):
         )
         empty_retries = 0
         continuation_count = 0
+        tool_args_recovery_count = 0
+        max_output_tokens_override: int | None = None
+        max_output_tokens_escalated = False
         stream_continuation_count = 0
         streamed_text = ""  # 流式中断续写累计文本
         overflow_mode = False  # 命中上下文溢出后，发给 LLM 的视图持续走 force_compact
+        vision_downgraded = False  # 上游实际拒绝图片后，本轮余下请求只发送文本视图
 
         from crew.core.runctx import current_agent_workdir, current_session_id
         current_session_id.set(ctx.session_id)
@@ -350,6 +388,7 @@ class BuiltinExecutor(AgentExecutor):
             #   每轮 compact_view 做水位压缩，未触水位时近乎零成本。
             #   overflow_mode 是 provider 报溢出后的紧急兜底，从全量 ctx.messages 重新激进压缩。
             if overflow_mode and self.compactor is not None:
+                yield ResponseChunk.compaction_event(rid, True, next_seq())
                 try:
                     from crew.core.runctx import current_owner_account_id
 
@@ -368,24 +407,43 @@ class BuiltinExecutor(AgentExecutor):
                 except Exception as exc:  # noqa: BLE001
                     log.warning("force_compact 失败，按原视图发送：%s", exc)
                     view_messages = list(ctx.messages)
+                finally:
+                    yield ResponseChunk.compaction_event(rid, False, next_seq())
             elif self.compactor is not None:
-                view_messages = await self.compactor.compact_view(
+                will_compact_view = getattr(self.compactor, "will_compact_view", None)
+                show_compaction = bool(will_compact_view and will_compact_view(
                     view_messages,
                     ctx.session_id,
                     owner_account_id=owner_account_id,
-                )
+                ))
+                if show_compaction:
+                    yield ResponseChunk.compaction_event(rid, True, next_seq())
+                try:
+                    view_messages = await self.compactor.compact_view(
+                        view_messages,
+                        ctx.session_id,
+                        owner_account_id=owner_account_id,
+                    )
+                finally:
+                    if show_compaction:
+                        yield ResponseChunk.compaction_event(rid, False, next_seq())
             view = view_messages
             api_messages = [system_msg]
             if deferred_tools_message:
                 api_messages.append(Message.user(deferred_tools_message, is_meta=True))
             api_messages.extend(view)
             api_messages = self._maybe_append_todo_reminder(api_messages, ctx.session_id)
+            if vision_downgraded:
+                api_messages = _without_image_inputs(api_messages)
+                api_messages.append(Message.system_reminder(VISION_CAPABILITY_RECOVERY_PROMPT))
             hook_started = time.perf_counter()
             pre_llm_result = await self.plugins.pre_llm_call(ctx.session_id, api_messages)
             log.info(
-                "[PERF] pre_llm_hooks    %.3fs  (messages=%d)",
+                "[PERF] pre_llm_hooks    %.3fs  (messages=%d) request_id=%s session=%s",
                 time.perf_counter() - hook_started,
                 len(api_messages),
+                rid,
+                ctx.session_id,
             )
             if isinstance(pre_llm_result, dict) and pre_llm_result.get("action") == "block":
                 block_text = pre_llm_result.get("response", "")
@@ -401,10 +459,49 @@ class BuiltinExecutor(AgentExecutor):
 
             # ---- 调模型（流式重试 + 溢出压缩 + provider 故障转移 + 流式中途中断）----
             result: dict[str, Any] = {}
-            async for ev in self._call_model(api_messages, tools, rid, next_seq, result, control, runner, ctx.session_id):
+            async for ev in self._call_model(
+                api_messages,
+                tools,
+                rid,
+                next_seq,
+                result,
+                control,
+                runner,
+                ctx.session_id,
+                max_tokens=max_output_tokens_override,
+            ):
                 yield ev
             # 估算 prompt 固定开销（系统/技能·上下文/工具定义），并入 usage 透传到前端 breakdown
             result.setdefault("usage", {})["prompt_breakdown"] = _estimate_prompt_overhead(ctx, view, tools)
+            unsupported_capability = str(result.get("unsupported_capability") or "")
+            if unsupported_capability:
+                if unsupported_capability == "vision" and not vision_downgraded:
+                    vision_downgraded = True
+                    budget.refund()
+                    from crew.core.runctx import current_model_capabilities
+
+                    capabilities = current_model_capabilities.get()
+                    if capabilities is not None:
+                        current_model_capabilities.set(tuple(
+                            item for item in capabilities
+                            if str(item).strip().lower() != "vision"
+                        ))
+                    log.warning(
+                        "模型拒绝图片输入，切换为非视觉模式后重试 session=%s",
+                        ctx.session_id,
+                    )
+                    yield ResponseChunk.status_event(
+                        rid,
+                        "当前模型不支持图片，正在改用非视觉方式继续…",
+                        next_seq(),
+                    )
+                    continue
+                yield ResponseChunk.error(
+                    rid,
+                    str(result.get("provider_error") or "当前模型不支持所需能力"),
+                    next_seq(),
+                )
+                return
             if result.get("overflow"):
                 if self.compactor is not None and not overflow_mode:
                     # 首次命中溢出：静默开启压缩模式并重试本轮（退还本轮预算）
@@ -470,6 +567,40 @@ class BuiltinExecutor(AgentExecutor):
                     ctx.session_id,
                     len(tool_calls),
                 )
+                configured_max_tokens = getattr(self.provider, "max_tokens", None)
+                if (
+                    not max_output_tokens_escalated
+                    and (
+                        not isinstance(configured_max_tokens, int)
+                        or configured_max_tokens < ESCALATED_MAX_OUTPUT_TOKENS
+                    )
+                ):
+                    max_output_tokens_escalated = True
+                    max_output_tokens_override = ESCALATED_MAX_OUTPUT_TOKENS
+                    budget.refund()
+                    log.info(
+                        "工具参数被截断，提高输出上限至 %d 后重试 session=%s",
+                        ESCALATED_MAX_OUTPUT_TOKENS,
+                        ctx.session_id,
+                    )
+                    continue
+                max_output_tokens_override = None
+                if tool_args_recovery_count < TOOL_ARGUMENTS_RECOVERY_LIMIT:
+                    tool_args_recovery_count += 1
+                    budget.refund()
+                    recovery_message = Message.user(
+                        TOOL_ARGUMENTS_RECOVERY_PROMPT,
+                        is_meta=True,
+                    )
+                    ctx.messages.append(recovery_message)
+                    view_messages.append(recovery_message)
+                    log.info(
+                        "工具参数截断，第 %d/%d 次拆分续写 session=%s",
+                        tool_args_recovery_count,
+                        TOOL_ARGUMENTS_RECOVERY_LIMIT,
+                        ctx.session_id,
+                    )
+                    continue
                 yield ResponseChunk.error(
                     rid,
                     "TOOL_ARGUMENTS_INCOMPLETE: 模型输出的工具参数不完整，未执行任何工具。",
@@ -579,6 +710,29 @@ class BuiltinExecutor(AgentExecutor):
                 yield ev
             view_messages.extend(ctx.messages[_pre_batch_len:])
 
+            # 用户拒绝的是本轮目标的执行边界。继续把拒绝结果交给模型会诱发它改用
+            # 另一种工具完成同一目标，因此拒绝后直接结束本轮。
+            if runner.approval_rejected:
+                async for _fc in self._emit_final(
+                    rid,
+                    next_seq,
+                    ctx.session_id,
+                    owner_account_id,
+                    "操作未执行：你拒绝了本轮安全审批。",
+                ):
+                    yield _fc
+                return
+            if runner.security_boundary_failed:
+                async for _fc in self._emit_final(
+                    rid,
+                    next_seq,
+                    ctx.session_id,
+                    owner_account_id,
+                    "操作未执行：安全运行时发生故障，请检查运行时状态后重试。",
+                ):
+                    yield _fc
+                return
+
             # Plan 模式提交审批后，本轮必须立即停住，等待用户 approve/reject。
             # 不能再把 exit_plan_mode 的工具结果喂回模型，否则弱模型可能继续执行计划。
             if self.plan_manager is not None and self.plan_manager.is_awaiting_approval(
@@ -648,6 +802,7 @@ class BuiltinExecutor(AgentExecutor):
         control=None,
         runner=None,
         session_id: str = "",
+        max_tokens: int | None = None,
     ) -> AsyncIterator[ResponseChunk]:
         """调模型一轮：流式 yield delta，结果写入 result。
 
@@ -669,8 +824,6 @@ class BuiltinExecutor(AgentExecutor):
         providers = provider_chain(self.provider, self.fallback_providers)
         prov_idx = 0
         attempt = 0
-        tool_planning_emitted = False
-
         while True:
             provider = providers[prov_idx]
             accumulated = ""
@@ -693,6 +846,8 @@ class BuiltinExecutor(AgentExecutor):
                 _prov_base_url = getattr(provider, "base_url", "") or ""
 
                 request = {"messages": api_messages, "tools": tools}
+                if max_tokens is not None:
+                    request["max_tokens"] = max_tokens
                 mw = await self.plugins.apply_llm_request_middleware(
                     request,
                     session_id=session_id,
@@ -705,10 +860,27 @@ class BuiltinExecutor(AgentExecutor):
                 effective_request = mw.payload if isinstance(mw.payload, dict) else request
                 effective_tools = effective_request.get("tools", tools)
 
-                def _stream(req):
+                def _stream(req, active_provider=provider):
                     messages_arg = req["messages"] if "messages" in req else api_messages
                     tools_arg = req["tools"] if "tools" in req else tools
-                    return provider.stream_chat(messages_arg, tools=tools_arg)
+                    max_tokens_arg = req.get("max_tokens", max_tokens)
+                    if max_tokens_arg is None:
+                        return active_provider.stream_chat(messages_arg, tools=tools_arg)
+                    try:
+                        stream_params = inspect.signature(active_provider.stream_chat).parameters
+                        accepts_max_tokens = "max_tokens" in stream_params or any(
+                            param.kind == inspect.Parameter.VAR_KEYWORD
+                            for param in stream_params.values()
+                        )
+                    except (TypeError, ValueError):
+                        accepts_max_tokens = True
+                    if accepts_max_tokens:
+                        return active_provider.stream_chat(
+                            messages_arg,
+                            tools=tools_arg,
+                            max_tokens=max_tokens_arg,
+                        )
+                    return active_provider.stream_chat(messages_arg, tools=tools_arg)
 
                 stream = await self.plugins.run_llm_execution_middleware(
                     effective_request,
@@ -726,11 +898,24 @@ class BuiltinExecutor(AgentExecutor):
                     event_elapsed = time.perf_counter() - t0
                     if first_event is None:
                         first_event = event_elapsed
+                        first_kind = (
+                            "reasoning" if chunk.reasoning_content else
+                            "text" if chunk.delta_text else
+                            "tool" if chunk.tool_call_generating or chunk.ready_tool_call else
+                            "done" if chunk.done else "other"
+                        )
+                        log.info(
+                            "[PERF] llm_first_event request_id=%s session=%s provider=%s model=%s "
+                            "elapsed=%.3fs kind=%s",
+                            rid,
+                            session_id,
+                            _prov_name,
+                            _prov_model,
+                            event_elapsed,
+                            first_kind,
+                        )
                     if chunk.reasoning_content and first_reasoning is None:
                         first_reasoning = event_elapsed
-                        if effective_tools and not tool_planning_emitted:
-                            tool_planning_emitted = True
-                            yield ResponseChunk.tool_planning_event(rid, next_seq())
                     if chunk.reasoning_content and not chunk.done:
                         merged_reasoning = self._merge_streaming_reasoning(
                             reasoning,
@@ -743,6 +928,15 @@ class BuiltinExecutor(AgentExecutor):
                     if chunk.delta_text:
                         if first_text is None:
                             first_text = event_elapsed
+                            log.info(
+                                "[PERF] llm_first_text request_id=%s session=%s provider=%s model=%s "
+                                "elapsed=%.3fs",
+                                rid,
+                                session_id,
+                                _prov_name,
+                                _prov_model,
+                                event_elapsed,
+                            )
                         accumulated += chunk.delta_text
                         emitted = True
                         yield ResponseChunk.delta(rid, chunk.delta_text, next_seq())
@@ -791,7 +985,8 @@ class BuiltinExecutor(AgentExecutor):
                 log.info(
                     "[PERF] llm prov=%d  middleware=%.3fs  first_event=%.3fs  "
                     "first_reasoning=%.3fs  first_text=%.3fs  ttft=%.3fs  total=%.3fs  "
-                    "messages=%d  chars=%d  tools=%d  tokens_approx=%d",
+                    "messages=%d  chars=%d  tools=%d  tokens_approx=%d  request_id=%s session=%s "
+                    "provider=%s model=%s",
                     prov_idx,
                     middleware_ready if middleware_ready is not None else -1.0,
                     first_event if first_event is not None else -1.0,
@@ -803,6 +998,10 @@ class BuiltinExecutor(AgentExecutor):
                     message_chars,
                     len(tools or []),
                     len(accumulated) // 4,
+                    rid,
+                    session_id,
+                    _prov_name,
+                    _prov_model,
                 )
                 result.update(
                     text=accumulated, tool_calls=tool_calls,
@@ -884,6 +1083,16 @@ class BuiltinExecutor(AgentExecutor):
                 # 上下文溢出：静默交主循环压缩后重试本轮（不向用户吐 error 帧）
                 if is_context_overflow(exc) and self.compactor is not None:
                     result["overflow"] = True
+                    return
+                if (
+                    isinstance(exc, ProviderError)
+                    and exc.category == "unsupported_capability"
+                    and exc.capability
+                ):
+                    result.update(
+                        unsupported_capability=exc.capability,
+                        provider_error=str(exc),
+                    )
                     return
                 retryable = isinstance(exc, ProviderError) and exc.retryable
                 if retryable and attempt < self.max_retries:

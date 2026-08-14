@@ -1,39 +1,60 @@
 /**
  * 桌面端渲染层共享状态与 DOM 工具。
  *
- * 状态由 `src/ui/stores/stores.ts` 中的 7 个领域 store 管理。本文件提供统一的
- * `state` 代理和显式 mutator：读取转发到对应 store 的 `.get()`，写入转发到 `.set()`。
+ * 状态架构过渡说明：
+ * - 历史版本：38 字段单例 `state` 对象，10+ 模块直接读写
+ * - 现版本（Stage 2 commit 5）：38 字段已拆分到 `src/ui/stores/stores.ts` 的 7 个 store
+ *   中。本文件保留 `state` 对象作为"代理 shim"——所有读操作转发到对应 store 的 `.get()`，
+ *   所有写操作转发到对应 store 的 `.set()`。
+ * - 后续 commit 7：删 shim，全部代码改用 `xxxStore.get() / .set()`。
+ *
+ * 这样既不阻塞 Stage 2/3 的安全修复（C-4 删 restoreSession 等），也避免一次大爆炸。
  */
 
 import type {
   Attachment,
   BackendConfig,
   BackendSession,
+  CronJob,
   Mode,
   Task,
   Workspace,
 } from './backend-client';
-import type { ChatMessage, PendingMessage, PlanReviewStatus, SessionStatus } from './chat-render';
+import type { ChatMessage, PendingMessage, PlanReviewStatus, SessionStatus, ToolCallInfo } from './chat-render';
+import type { BackendChatSocket } from './backend-client';
 import {
   sessionStore,
   messageStore,
   taskStore,
   configStore,
   workspaceStore,
+  authStore,
   uiStore,
   cronStore,
+  externalStore,
   type SessionStoreState,
   type MessageStoreState,
   type TaskStoreState,
   type ConfigStoreState,
   type WorkspaceStoreState,
+  type AuthStoreState,
   type UiStoreState,
   type CronJobStoreState,
+  type ExternalStoreState,
 } from './stores/stores';
 // stream-reassembly 零依赖（不 import state/features），故 state.ts 可安全 import 无循环。
 import { resetSession as resetReassembly } from './stream-reassembly';
 
-export type TabKey = 'chat' | 'agents' | 'skills' | 'wiki' | 'cron' | 'audit' | 'system';
+export type TabKey =
+  | 'chat'
+  | 'agents'
+  | 'skills'
+  | 'wiki'
+  | 'sites'
+  | 'cron'
+  | 'security'
+  | 'audit'
+  | 'system';
 export type SystemPanelKey = 'overview' | 'logs' | 'usage';
 export type ComposerMode = 'craft' | 'plan' | 'ask';
 
@@ -68,7 +89,14 @@ export interface PendingFollowup {
   title: string;
   /** false for permission side-channel prompts: keep the current assistant turn intact. */
   recordHistory: boolean;
-  origin?: { type?: string; agentName?: string; originSessionId?: string };
+  status?: string;
+  note?: string;
+  origin?: {
+    type?: string;
+    agentName?: string;
+    originSessionId?: string;
+    mentionIntent?: string;
+  };
   questions: Array<{
     id: string;
     question: string;
@@ -99,6 +127,8 @@ export interface FileChange {
   diff: DiffRow[];
   /** 二进制结果文件没有可统计的文本行数，但仍应保留在文件改动卡中。 */
   binary?: boolean;
+  /** 元数据快照版本，仅用于区分连续两轮相同行数的修改，不进入卡片展示。 */
+  revision?: string;
 }
 
 export interface DeltaSpan {
@@ -126,7 +156,7 @@ export interface Bookkeeping {
   prevTurnFileSignature: Record<string, string> | null;
   /** 本轮 assistant 正文的有序 delta 分片；用于修复 WS 回放/实时交错导致的流式文字乱序。 */
   deltaSpans: DeltaSpan[];
-  /** 兼容旧后端：没有 delta_start/delta_end 的分片仍按到达顺序追加到当前前缀。 */
+  /** 兼容旧后端：没有 delta_start/delta_end 的分片仍按到达顺序追加到此前缀。 */
   legacyDeltaText: string;
   /**
    * 本轮是否已 final/error 封口。true 时忽略迟到的 delta/tool 上的 running hint，
@@ -155,6 +185,7 @@ export type FeedbackStatus = 'PENDING' | 'PROCESSING' | 'RESOLVED' | 'CLOSED';
 
 export interface FeedbackListItem {
   id: number;
+  staffCode?: string | undefined;
   title: string;
   description?: string | undefined;
   images?: string | undefined;
@@ -164,6 +195,14 @@ export interface FeedbackListItem {
   updatedAt?: string | undefined;
 }
 
+export interface UserInfo {
+  staffCode?: string;
+  staffName?: string;
+  staffUid?: string;
+  pid?: string;
+  uid?: string;
+}
+
 /** 旧 AppState 接口（保留以兼容外部 import）。 */
 export interface AppState extends
   SessionStoreState,
@@ -171,8 +210,10 @@ export interface AppState extends
   TaskStoreState,
   ConfigStoreState,
   WorkspaceStoreState,
+  AuthStoreState,
   Omit<UiStoreState, 'socket'>,
-  CronJobStoreState {
+  CronJobStoreState,
+  ExternalStoreState {
   // socket 在新架构里属于 uiStore；旧字段名 `socket` 转发到 uiStore.socket
   socket: import('./backend-client').BackendChatSocket | null;
 }
@@ -194,8 +235,10 @@ function buildSnapshot(): AppState {
   const t = taskStore.get();
   const c = configStore.get();
   const w = workspaceStore.get();
+  const a = authStore.get();
   const u = uiStore.get();
   const cr = cronStore.get();
+  const ex = externalStore.get();
   return {
     sessions: s.sessions,
     backendSessions: s.backendSessions,
@@ -208,7 +251,6 @@ function buildSnapshot(): AppState {
     editFromIdx: s.editFromIdx,
     userFoldedTurns: s.userFoldedTurns,
     userUnfoldedTurns: s.userUnfoldedTurns,
-    activeExternalTeamIdBySession: s.activeExternalTeamIdBySession,
     messages: m.messages,
     queueHints: m.queueHints,
     pendingQueues: m.pendingQueues,
@@ -231,6 +273,8 @@ function buildSnapshot(): AppState {
     historyFilter: w.historyFilter,
     selectedSessions: w.selectedSessions,
     manageMode: w.manageMode,
+    userInfo: a.userInfo,
+    isLoggedIn: a.isLoggedIn,
     activeTab: u.activeTab,
     activeSystemPanel: u.activeSystemPanel,
     backendConnected: u.backendConnected,
@@ -242,6 +286,7 @@ function buildSnapshot(): AppState {
     cronJobScope: cr.cronJobScope,
     cronJobDetailId: cr.cronJobDetailId,
     cronDeleteConfirmId: cr.cronDeleteConfirmId,
+    activeExternalTeamIdBySession: ex.activeExternalTeamIdBySession,
     unreadCompletedSessions: s.unreadCompletedSessions,
   };
 }
@@ -259,7 +304,6 @@ const FIELD_TO_STORE: Record<string, () => unknown> = {
   editFromIdx: () => sessionStore,
   userFoldedTurns: () => sessionStore,
   userUnfoldedTurns: () => sessionStore,
-  activeExternalTeamIdBySession: () => sessionStore,
   messages: () => messageStore,
   queueHints: () => messageStore,
   pendingQueues: () => messageStore,
@@ -282,6 +326,8 @@ const FIELD_TO_STORE: Record<string, () => unknown> = {
   historyFilter: () => workspaceStore,
   selectedSessions: () => workspaceStore,
   manageMode: () => workspaceStore,
+  userInfo: () => authStore,
+  isLoggedIn: () => authStore,
   activeTab: () => uiStore,
   activeSystemPanel: () => uiStore,
   backendConnected: () => uiStore,
@@ -293,6 +339,7 @@ const FIELD_TO_STORE: Record<string, () => unknown> = {
   cronJobScope: () => cronStore,
   cronJobDetailId: () => cronStore,
   cronDeleteConfirmId: () => cronStore,
+  activeExternalTeamIdBySession: () => externalStore,
 };
 
 /** 旧 state 对象（Proxy：读实时合并快照，写转发到对应 store）。 */
@@ -382,7 +429,7 @@ export function newSessionId(): string {
 }
 
 /**
- * 判断当前会话是否处于 Dynamic Kanban 模式。
+ * 判断某会话是否处于 Dynamic Kanban 模式：当前会话 state.mode === 'dynamic_kanban'。
  */
 export function isDynamicKanbanSession(sessionId: string | null | undefined): boolean {
   if (!sessionId) return false;
@@ -429,7 +476,7 @@ export function isSessionUnreadComplete(sessionId: string): boolean {
   return sessionStore.get().unreadCompletedSessions.has(sessionId);
 }
 
-/** 确保某 session 的消息数组存在并返回它。 */
+/** 确保某 session 的消息数组存在并返回它（Phase 2 T1 关键写入口）。 */
 export function ensureSessionMessages(sessionId: string): ChatMessage[] {
   const cur = messageStore.get().messages[sessionId];
   if (cur) return cur;
@@ -438,13 +485,13 @@ export function ensureSessionMessages(sessionId: string): ChatMessage[] {
   return messageStore.get().messages[sessionId] ?? next;
 }
 
-/** 用整批替换某 session 的消息，用于历史回填。 */
+/** 用整批替换某 session 的消息（Phase 2 T2：历史回填）。 */
 export function replaceSessionMessages(sessionId: string, list: ChatMessage[]): ChatMessage[] {
   messageStore.set({ messages: { ...messageStore.get().messages, [sessionId]: list } });
   return messageStore.get().messages[sessionId] ?? list;
 }
 
-/** 向某 session 的消息数组追加一条，用于历史失败回填 error 消息。 */
+/** 向某 session 的消息数组追加一条（Phase 2 T2：历史失败回填 error 消息）。 */
 export function appendSessionMessage(sessionId: string, msg: ChatMessage): void {
   const cur = messageStore.get().messages[sessionId] ?? [];
   messageStore.set({ messages: { ...messageStore.get().messages, [sessionId]: [...cur, msg] } });
@@ -461,7 +508,7 @@ export function truncateMessagesFrom(sessionId: string, idx: number): ChatMessag
   return removed;
 }
 
-/** 重置某 session 的整本 bookkeeping，并在 history 写回后清空残余流式状态。 */
+/** 重置某 session 的整本 bookkeeping（Phase 2 T2：history 写回后清空残余流式状态）。 */
 export function resetBook(sessionId: string): void {
   sessionStore.set({
     books: {
@@ -497,7 +544,7 @@ export function patchBook(sessionId: string, patch: Partial<Bookkeeping>): void 
   sessionStore.set({ books: { ...sessionStore.get().books, [sessionId]: next } });
 }
 
-// ---------- queue / edit / interrupt / withdraw 显式 mutator ----------
+// ---------- T4：queue / edit / interrupt / withdraw 显式 mutator ----------
 
 /** 取出某 session 的 pending queue（引用，便于直接 update）。 */
 export function getPendingQueue(sessionId: string): PendingMessage[] {
@@ -629,13 +676,13 @@ export function clearAttachments(): void {
   messageStore.set({ attachments: [] });
 }
 
-// ---------- workspace / draft / 删除会话 / 订阅清理 ----------
+// ---------- T5：workspace / draft / 删除会话 / 订阅清理 ----------
 
 /** 清理某 session 的完整运行时痕迹：messages / books / sessionStatuses /
  *  busySessions / queueHints / editFromIdx / pendingQueues。订阅交给调用方通过
  *  addSubscribedSessions / BackendChatSocket.unsubscribe 处理。 */
 export function removeSessionState(sessionId: string): void {
-  // 会话删除时清掉对应 delta 重组缓冲，防止状态泄漏。
+  // 修法3：会话删除 → 清掉它的 delta 重组缓冲，防泄漏。
   resetReassembly(sessionId);
   const curMessages = messageStore.get().messages;
   if (sessionId in curMessages) {
@@ -832,12 +879,7 @@ export function setSelectedSessions(map: Record<string, boolean>): void {
 
 /** 设置某 session 绑定的外源 Team id。 */
 export function setActiveExternalTeamForSession(sessionId: string, teamId: string): void {
-  sessionStore.set({
-    activeExternalTeamIdBySession: {
-      ...sessionStore.get().activeExternalTeamIdBySession,
-      [sessionId]: teamId,
-    },
-  });
+  externalStore.set({ activeExternalTeamIdBySession: { ...externalStore.get().activeExternalTeamIdBySession, [sessionId]: teamId } });
 }
 
 /**

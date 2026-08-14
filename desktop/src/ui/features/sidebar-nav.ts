@@ -1,34 +1,74 @@
-/**
- * 左侧导航栏展开/收起（#sidebar-expand-btn 占位 UI 接线）。
- *
- * 窄轨（默认 52px）仅图标；展开后显示导航文字标签，便于辨认 Tab。
- */
+/** Canonical Application Shell navigation inventory and feature-state resolver. */
 
-const STORAGE_KEY = 'crew.sidebarNavExpanded';
+import type { IconId } from '../components/icon';
+import type { ProductMode } from '../stores/product-mode-store';
+import type { TabKey } from '../state';
 
-function applyExpanded(expanded: boolean): void {
-  const sidebar = document.getElementById('sidebar');
-  sidebar?.classList.toggle('sidebar-nav-expanded', expanded);
-  const btn = document.getElementById('sidebar-expand-btn');
-  if (btn) {
-    btn.setAttribute('aria-expanded', String(expanded));
-    btn.title = expanded ? '收起导航' : '展开导航';
-    btn.setAttribute('aria-label', btn.title);
-  }
+export type WorkLocation =
+  | 'workbench'
+  | 'items'
+  | 'workspaces'
+  | 'knowledge'
+  | 'templates';
+export type ShellLocation = TabKey | WorkLocation;
+export type FeatureState = 'available' | 'unavailable' | 'hidden';
+
+export interface ShellFeatureStates {
+  agents?: FeatureState;
+  security?: FeatureState;
+  work?: Partial<Record<WorkLocation, FeatureState>>;
 }
 
-export function applySidebarNavExpanded(): void {
-  const stored = localStorage.getItem(STORAGE_KEY) === 'true';
-  applyExpanded(stored);
+export interface ShellNavigationItem {
+  id: ShellLocation;
+  label: string;
+  icon: IconId;
+  featureState: FeatureState;
 }
 
-export function bindSidebarExpand(): void {
-  applySidebarNavExpanded();
-  document.getElementById('sidebar-expand-btn')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const sidebar = document.getElementById('sidebar');
-    const next = !sidebar?.classList.contains('sidebar-nav-expanded');
-    localStorage.setItem(STORAGE_KEY, String(next));
-    applyExpanded(next);
-  });
+type ShellNavigationDefinition = Omit<ShellNavigationItem, 'featureState'>;
+
+const SHARED_NAVIGATION: ReadonlyArray<ShellNavigationDefinition> = [
+  { id: 'wiki', label: 'Wiki', icon: 'icon-wiki' },
+  { id: 'cron', label: '任务', icon: 'process-clock' },
+  { id: 'security', label: '安全', icon: 'icon-security' },
+  { id: 'system', label: '系统', icon: 'icon-folder' },
+];
+
+const ASSISTANT_NAVIGATION: ReadonlyArray<ShellNavigationDefinition> = [
+  { id: 'chat', label: '对话', icon: 'process-thinking' },
+  { id: 'agents', label: '外援', icon: 'icon-external-agent' },
+  { id: 'skills', label: '技能', icon: 'process-skill' },
+  { id: 'sites', label: '灵感', icon: 'icon-inspiration' },
+  ...SHARED_NAVIGATION,
+];
+
+const WORK_NAVIGATION: ReadonlyArray<ShellNavigationDefinition> = [
+  { id: 'workbench', label: '工作', icon: 'icon-task' },
+  { id: 'items', label: '计划', icon: 'process-clock' },
+  { id: 'knowledge', label: '知识', icon: 'icon-wiki' },
+  ...SHARED_NAVIGATION,
+];
+
+export function isWorkLocation(location: ShellLocation): location is WorkLocation {
+  return ['workbench', 'items', 'workspaces', 'knowledge', 'templates'].includes(location);
+}
+
+/** Returns the one canonical top-level navigation inventory for a product mode. */
+export function resolveShellNavigation(
+  productMode: ProductMode,
+  features: ShellFeatureStates = {},
+): ShellNavigationItem[] {
+  const inventory = productMode === 'assistant' ? ASSISTANT_NAVIGATION : WORK_NAVIGATION;
+  const items = inventory.map((item) => ({
+    ...item,
+    featureState: item.id === 'agents'
+      ? (features.agents ?? 'hidden')
+      : item.id === 'security'
+        ? (features.security ?? 'unavailable')
+        : isWorkLocation(item.id)
+          ? (features.work?.[item.id] ?? 'unavailable')
+          : 'available',
+  }));
+  return items.filter((item) => item.featureState !== 'hidden') as ShellNavigationItem[];
 }

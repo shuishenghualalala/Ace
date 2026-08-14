@@ -1,4 +1,4 @@
-"""基于正则的密钥脱敏，用于日志和工具输出（实现 agent/redact.py）。
+"""基于正则的密钥脱敏，用于日志和工具输出（复用自 Hermes agent/redact.py）。
 
 在命令输出/日志进入模型上下文或落盘前，匹配并打码 API key、token、凭据等。
 
@@ -168,9 +168,12 @@ _FORM_BODY_RE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*(?:&[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*)+$"
 )
 
-# 已知前缀合并成一个 alternation
+# 已知前缀合并成一个 alternation。
+# ponytail: 不用 lookbehind/lookaround -- 贪婪量词 {10,} 已保证匹配到 token 边界，
+# 而 lookbehind (?<![A-Za-z0-9_-]) 会在 ANSI 转义包裹密钥时漏报（[31m 的 m、
+# 033[31m 的 1 都是 alphanumeric，阻断匹配）。安全脱敏宁可多打码也不漏报。
 _PREFIX_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
+    r"(" + "|".join(_PREFIX_PATTERNS) + r")"
 )
 
 
@@ -462,12 +465,47 @@ def _has_http_method_substring(text: str) -> bool:
     return any(method in upper for method in _HTTP_METHOD_SUBSTRINGS)
 
 
-class RedactingFormatter(logging.Formatter):
-    """会对所有日志消息脱敏的日志 formatter。"""
+# Env var keys whose VALUES are treated as secrets for precise-value redaction.
+# Matches the key-name classes spec §7.3/§37 says to strip from child envs.
+# Stems are matched as full ``_``/``-``-delimited components so that unrelated keys
+# containing a substring (AUTHOR, AUTHORITY, KEYCLOAK, MANAGER) are NOT over-redacted.
+_SENSITIVE_ENV_KEY_RE = re.compile(
+    r"(?:^|[_-])(pass(word|wd)?|secret|token|ticket|api[_-]?key|auth|credential|private[_-]?key|"
+    r"access[_-]?key|client[_-]?secret|refresh[_-]?token|bearer)(?:$|[_-])",
+    re.IGNORECASE,
+)
 
-    def __init__(self, fmt=None, datefmt=None, style='%', **kwargs):
-        super().__init__(fmt, datefmt, style, **kwargs)
 
-    def format(self, record: logging.LogRecord) -> str:
-        original = super().format(record)
-        return redact_sensitive_text(original)
+def sensitive_env_values(env: dict[str, str] | None) -> list[str]:
+    """Return the VALUES of env entries whose KEY names a secret class.
+
+    These are the precise secret values injected into a task's child process; they are
+    redacted verbatim from process output regardless of shape (spec §7.3/§109).
+    """
+    if not env:
+        return []
+    out: list[str] = []
+    for key, value in env.items():
+        value = value if isinstance(value, str) else str(value)
+        if value and len(value) >= 4 and _SENSITIVE_ENV_KEY_RE.search(str(key)):
+            out.append(value)
+    return out
+
+
+def redact_secret_values(text: str | None, values) -> str | None:
+    """Always-on exact-match redaction of explicit secret values.
+
+    Unlike :func:`redact_sensitive_text`, this is NOT disable-able via
+    ``CREW_REDACT_SECRETS`` — it is a hard security boundary for values the host
+    knowingly injected into a task (spec §109 "项目环境不能关闭"). Any exact
+    occurrence of a supplied value is replaced; non-matching text is untouched.
+    """
+    if not text or not values:
+        return text
+    if not isinstance(text, str):
+        text = str(text)
+    for value in values:
+        if not value or len(value) < 4:
+            continue
+        text = text.replace(value, "***REDACTED***")
+    return text

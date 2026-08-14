@@ -1,5 +1,5 @@
 /**
- * Wiki 知识库页：知识浏览与右栏 Wiki Agent 对话（对齐 web WikiHub）。
+ * Wiki 知识库页：左侧 Wiki Agent 对话主区 + 右侧知识库面板（目录+详情）（对齐 web WikiHub）。
  *
  * 数据源：GET /api/wiki/kbs + /api/wiki/pages（brief=1 分页）+ /api/wiki/pages/{id} + /api/wiki/summary
  *         + /api/wiki/graph（Phase 3 图谱，由 features/wiki-graph.ts 消费）
@@ -8,19 +8,20 @@
  *         + POST /api/wiki/kbs（新建 KB，内联表单）+ POST /api/wiki/init（无 KB 自动初始化）
  *         + DELETE /api/wiki/kbs/{id}（删除 KB，default 不可删）
  *
- * 布局：
- *   1. 页头：KB 选择器（下拉）+ 新建 KB + 上传 + 批量管理（「问 Wiki」已下线：
- *      右栏对话面板常驻，无需入口按钮）
+ * 布局（左对话主区 / 右知识库面板）：
+ *   1. 页头：KB 选择器（下拉）+ 新建 KB + 上传 + 批量管理 + 知识库面板收起/展开
+ *      （「问 Wiki」已下线：对话面板常驻主区，无需入口按钮）
  *   2. 上传任务面板：每个 source 的进度条 + 阶段文案 + 错误态；进度经 WS
  *      wiki_ingest_progress 帧（chat-controller 回调转发）实时更新
- *   3. 左栏列表：分页「加载更多」；条目 = 标题 + 类型徽标 + 更新时间 + 摘要；
- *      单条删除按钮；批量管理模式下条目变 checkbox 选择；
- *      「图谱」视图下左栏替换为图谱画布（features/wiki-graph.ts，本文件只注入容器 + 回调）
- *   3.5 分栏把手：列表 | 详情 | 对话之间可拖拽调宽（localStorage 持久化，双击复位；图谱模式无列表把手）
- *   4. 右栏详情：标题 + 元信息 + Markdown 正文；未选中时显示 KB 概览 / 空态；
+ *   3. 左侧主区：Wiki Agent 对话面板（features/wiki-agent.ts 挂载，常驻，弹性宽度）
+ *   4. 右侧知识库面板（.wiki-browser-pane，可拖拽调宽、可整体收起）：
+ *      目录列表：分页「加载更多」；条目 = 标题 + 类型徽标 + 更新时间 + 摘要；
+ *      单条 ⋯ 操作菜单（打开/重命名/删除）；批量管理模式下条目变 checkbox 选择；
+ *      「图谱」视图下列表区域替换为图谱画布（features/wiki-graph.ts，本文件只注入容器 + 回调）
+ *   5. 分栏把手：对话主区与知识库面板之间可拖拽调宽（localStorage 持久化，双击复位）
+ *   6. 面板内详情：标题 + 元信息 + Markdown 正文；未选中时显示 KB 概览 / 空态；
  *      Home.md（知识库概览）的「推荐问题」小节会被后处理成提问按钮，
- *      点击直接把问题发给右栏 Wiki Agent（decorateHomeQuestions + [data-wiki-ask] 委托）
- *   5. 最右栏：Wiki Agent 对话面板（features/wiki-agent.ts 挂载，常驻）
+ *      点击直接把问题发给 Wiki Agent（decorateHomeQuestions + [data-wiki-ask] 委托）
  *
  * 边界态：未登录显示登录引导态（不发请求）；没有任何 KB 时自动初始化 default
  * （对齐 web WikiHub，后端幂等，只自动试一次，失败靠重新进入本页重试）。
@@ -42,13 +43,14 @@ import {
 import { $, escapeHtml, notify, state } from '../state';
 import { renderMarkdownHtml } from '../markdown';
 import { mountFoldedMarkdown, type FoldedMarkdownHandle } from '../markdown-fold';
-import { showConfirmDialog } from '../ui-feedback';
+import { showContextMenu, type ContextMenuItem } from '../lib/context-menu';
+import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
 import { __resetWikiGraphForTest, invalidateWikiGraph, mountWikiGraph } from './wiki-graph';
 import { mountWikiEditor, type WikiEditorHandle } from './wiki-editor';
 import { maybeStartWikiTourOnce, startWikiTour } from './wiki-tour';
 
 // ── Wiki Agent 入口（Phase 4） ──
-// 「上传」按钮（打开右栏附件选择）与失败任务「让 AI 处理」共用同一挂点；回调由 index.ts
+// 「上传」按钮（打开对话区附件选择）与失败任务「让 AI 处理」共用同一挂点；回调由 index.ts
 // 组合根注入（接到 features/wiki-agent.ts 的 openWikiAgent，本文件不 import wiki-agent 内部）。
 
 export interface WikiAgentAssist {
@@ -64,7 +66,7 @@ export interface WikiAgentEntryRequest {
   assist?: WikiAgentAssist;
   /** 直接发往 Wiki Agent 的提问（Home.md 推荐问题点击）。 */
   prompt?: string;
-  /** 聚焦右栏并打开标准 Composer 附件选择。 */
+  /** 聚焦对话主区并打开标准 Composer 附件选择。 */
   openAttachment?: boolean;
 }
 
@@ -102,7 +104,7 @@ function fireWikiAgentEntry(assist?: WikiAgentAssist, openAttachment = false): v
   });
 }
 
-/** Home.md 推荐问题点击：把问题直接发给右栏 Wiki Agent。 */
+/** Home.md 推荐问题点击：把问题直接发给 Wiki Agent。 */
 function fireWikiAgentPrompt(prompt: string): void {
   const text = prompt.trim();
   if (!view.kbId || !text) return;
@@ -166,6 +168,7 @@ const FOLDER_ORDER = new Map<string, number>(
 /** 页面类型元数据：order 同时驱动文件树排序与类型视图分组顺序（一张表，防双表漂移）。 */
 export const TYPE_META: Record<WikiPageType, { order: number; label: string; shortLabel: string }> = {
   entity: { order: 0, label: '关键词', shortLabel: '关键词' },
+  concept: { order: 0, label: '概念', shortLabel: '概念' },
   topic: { order: 1, label: '话题', shortLabel: '话题' },
   source: { order: 2, label: '来源摘要', shortLabel: '摘要' },
   comparison: { order: 3, label: '对比分析', shortLabel: '对比' },
@@ -227,10 +230,7 @@ export function buildFileTree(pages: WikiPage[]): WikiTreeFolder {
   );
 
   for (const page of pages) {
-    const parts = (page.file_path || '')
-      .split('/')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const parts = normalizeVaultPath(page.file_path).split('/').filter(Boolean);
     if (parts[0] !== 'wiki') continue;
     let current = root;
 
@@ -289,15 +289,29 @@ function sortTree(node: WikiTreeFolder): void {
 
 /** file_path 的全部祖先目录路径（选中页面时自动展开）。 */
 export function ancestorPaths(filePath: string): string[] {
-  const parts = (filePath || '')
-    .split('/')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const parts = normalizeVaultPath(filePath).split('/').filter(Boolean);
   const paths: string[] = [];
   for (let i = 1; i < parts.length; i++) {
     paths.push(parts.slice(0, i).join('/'));
   }
   return paths;
+}
+
+const VAULT_PAGE_DIRS = new Set(['entities', 'topics', 'sources', 'comparisons', 'synthesis']);
+
+/**
+ * 归一化 Vault 相对路径：旧版种子/历史页面的 file_path 可能没有 wiki/ 前缀
+ * （如 entities/xxx.md），统一补成 wiki/ 前缀，保证文件树能识别。
+ */
+export function normalizeVaultPath(filePath: string): string {
+  const parts = (filePath || '')
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length > 0 && parts[0] !== 'wiki' && VAULT_PAGE_DIRS.has(parts[0])) {
+    return ['wiki', ...parts].join('/');
+  }
+  return parts.join('/');
 }
 
 export interface WikiTypeGroup {
@@ -403,6 +417,74 @@ function errMsg(err: unknown): string {
   return (err as Error).message;
 }
 
+// ── 详情面板多 Tab ──
+
+/** 详情面板顶部打开的 tab：Wiki 页面或 vault 文档（Home.md/index.md）。 */
+export type WikiOpenTab = { kind: 'page'; id: string } | { kind: 'doc'; name: 'Home.md' | 'index.md' };
+
+/** tab 的稳定标识（DOM data-* 与详情签名比对共用）。 */
+function tabKey(tab: WikiOpenTab): string {
+  return tab.kind === 'page' ? `page:${tab.id}` : `doc:${tab.name}`;
+}
+
+/** 追加 tab（同 key 去重，已存在时返回原数组）。 */
+function openTabUnique(tabs: WikiOpenTab[], tab: WikiOpenTab): WikiOpenTab[] {
+  return tabs.some((t) => tabKey(t) === tabKey(tab)) ? tabs : [...tabs, tab];
+}
+
+/** 关闭 tab：返回新列表与下一个激活 key；关闭激活 tab 时相邻优先右侧，无相邻则为 null。 */
+function closeTabByKey(
+  tabs: WikiOpenTab[],
+  key: string,
+  activeKey: string | null,
+): { tabs: WikiOpenTab[]; nextActiveKey: string | null } {
+  const index = tabs.findIndex((t) => tabKey(t) === key);
+  if (index < 0) return { tabs, nextActiveKey: activeKey };
+  const next = tabs.filter((_, i) => i !== index);
+  if (activeKey !== key) return { tabs: next, nextActiveKey: activeKey };
+  const neighbor = next[index] ?? next[index - 1] ?? null;
+  return { tabs: next, nextActiveKey: neighbor ? tabKey(neighbor) : null };
+}
+
+// ── 详情编辑器组（VSCode 式双组拆分：最多 2 组，row/column 两方向，同一页面全局只开一个组） ──
+
+/** 一个详情编辑器组：独立 tab 栏 + 内容区 + 编辑器实例 + 保存状态。 */
+export interface WikiDetailGroup {
+  id: string;
+  tabs: WikiOpenTab[];
+  selectedId: string | null;
+  selectedDocumentName: 'Home.md' | 'index.md' | null;
+}
+
+/** 组 id 自增（g1/g2…）；reloadAll/reset 重建状态后新组取新 id，旧保活签名随之失效。 */
+let groupSeq = 0;
+
+function createDetailGroup(): WikiDetailGroup {
+  groupSeq += 1;
+  return { id: `g${groupSeq}`, tabs: [], selectedId: null, selectedDocumentName: null };
+}
+
+/** 当前聚焦组（树点击 / 外部打开落在该组）；activeGroupId 失效时回落第一组。 */
+function activeGroup(): WikiDetailGroup {
+  return view.detailGroups.find((g) => g.id === view.activeGroupId) ?? view.detailGroups[0];
+}
+
+function groupById(groupId: string): WikiDetailGroup | null {
+  return view.detailGroups.find((g) => g.id === groupId) ?? null;
+}
+
+/** 组内激活 tab 的 key（组内未打开任何详情时为 null）。 */
+function groupActiveKey(group: WikiDetailGroup): string | null {
+  if (group.selectedId) return `page:${group.selectedId}`;
+  if (group.selectedDocumentName) return `doc:${group.selectedDocumentName}`;
+  return null;
+}
+
+/** 跨组查重：tab key 所在的组（拆分/移动/打开共用以保证全局唯一）。 */
+function findTabOwner(key: string): WikiDetailGroup | null {
+  return view.detailGroups.find((g) => g.tabs.some((t) => tabKey(t) === key)) ?? null;
+}
+
 // ── 页面视图状态 ──
 
 interface WikiViewState {
@@ -415,11 +497,14 @@ interface WikiViewState {
   loading: boolean;
   loadingMore: boolean;
   view: WikiListView;
-  selectedId: string | null;
-  selectedDocumentName: 'Home.md' | 'index.md' | null;
-  vaultDocument: WikiVaultDocument | null;
-  /** vault 文档（Home.md/index.md）加载中标记。 */
-  detailLoading: boolean;
+  /** 详情编辑器组（始终 ≥1 个，初始 1 个空组；最多 2 个）。 */
+  detailGroups: WikiDetailGroup[];
+  /** 聚焦组 id：树点击 / 外部打开落在该组；点击组内任意处更新。 */
+  activeGroupId: string;
+  /** 两组排列方向（拆分动作时写入；单组时无意义）。 */
+  groupOrientation: 'row' | 'column';
+  /** vault 文档（Home.md/index.md）内容缓存（按文档名；两组可同时各开一份文档）。 */
+  vaultDocuments: Partial<Record<'Home.md' | 'index.md', WikiVaultDocument>>;
   /** 已加载完整正文的页面（pageId → WikiPage）；列表接口只返回 brief。 */
   pageDetails: Record<string, WikiPage>;
   /** 页面详情接口返回的来源摘要页（pageId → 可跳转来源）。 */
@@ -442,6 +527,7 @@ interface WikiViewState {
 }
 
 function initialViewState(): WikiViewState {
+  const detailGroup = createDetailGroup();
   return {
     kbs: [],
     kbId: null,
@@ -451,10 +537,10 @@ function initialViewState(): WikiViewState {
     loading: false,
     loadingMore: false,
     view: 'timeline',
-    selectedId: null,
-    selectedDocumentName: null,
-    vaultDocument: null,
-    detailLoading: false,
+    detailGroups: [detailGroup],
+    activeGroupId: detailGroup.id,
+    groupOrientation: 'row',
+    vaultDocuments: {},
     pageDetails: {},
     sourcePages: {},
     relationPages: {},
@@ -482,7 +568,7 @@ let kbCreateDraft = '';
 let kbCreateSubmitting = false;
 let wikiChangedBound = false;
 
-// ── 分栏宽度：拖拽 + 双击复位 + localStorage 持久化（列表栏 / 图谱栏 / 对话栏共用一套机制） ──
+// ── 分栏宽度：拖拽 + 双击复位 + localStorage 持久化（知识库面板 / 图谱视图共用一套机制） ──
 
 export interface PaneWidthStore {
   clamp(w: number): number;
@@ -525,11 +611,13 @@ export function createPaneWidthStore(opts: { key: string; min: number; max?: num
 /**
  * 分栏把手拖拽：mousedown 起监听 document move/up，拖动中只改内联样式（不重渲染不丢事件），
  * mouseup 提交持久化，双击复位。sign = -1 用于把手在面板左缘的场景（向左拖变宽）。
+ * axis = 'y' 用于上下堆叠的组间把手（clientY 驱动，cursor 换 row-resize）。
  */
 export function bindPaneSash(
   sash: HTMLElement,
   opts: {
     sign?: 1 | -1;
+    axis?: 'x' | 'y';
     startWidth: () => number;
     onStart?: () => void;
     onDrag: (w: number) => void;
@@ -538,22 +626,25 @@ export function bindPaneSash(
   },
 ): void {
   const sign = opts.sign ?? 1;
+  const axis = opts.axis ?? 'x';
+  const resizingClass = axis === 'y' ? 'wiki-resizing-y' : 'wiki-resizing';
+  const coord = (e: MouseEvent): number => (axis === 'y' ? e.clientY : e.clientX);
   sash.addEventListener('mousedown', (e) => {
-    const startX = e.clientX;
+    const startPos = coord(e);
     const startW = opts.startWidth();
     let current = startW;
     sash.classList.add('is-dragging');
-    document.body.classList.add('wiki-resizing');
+    document.body.classList.add(resizingClass);
     opts.onStart?.();
     const onMove = (ev: MouseEvent): void => {
-      current = startW + sign * (ev.clientX - startX);
+      current = startW + sign * (coord(ev) - startPos);
       opts.onDrag(current);
     };
     const onUp = (): void => {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       sash.classList.remove('is-dragging');
-      document.body.classList.remove('wiki-resizing');
+      document.body.classList.remove(resizingClass);
       opts.onCommit(current);
     };
     document.addEventListener('mousemove', onMove);
@@ -563,15 +654,75 @@ export function bindPaneSash(
   sash.addEventListener('dblclick', () => opts.onReset());
 }
 
-const WIKI_LIST_DEFAULT_WIDTH = 340;
-const listWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiListWidth.v1', min: 240, max: 640, vwFactor: 0.5 });
-/** 图谱栏宽度（仅图谱视图）：null = 与详情栏按 1.5:1 弹性分配；拖拽后固定为像素值并持久化，双击复位回弹性。 */
-const graphWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphWidth.v1', min: 280, vwFactor: 0.7 });
+const WIKI_BROWSER_DEFAULT_WIDTH = 500;
+/** 右侧知识库面板（目录+详情）宽度：可拖拽 + 持久化。 */
+const browserWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiBrowserWidth.v2', min: 340, max: 1000, vwFactor: 0.7 });
+const WIKI_CATALOG_DEFAULT_WIDTH = 240;
+/** 面板内目录宽度：可拖拽 + 持久化（仅列表/树/类型视图；图谱模式目录走 1.5:1 比例分配，不内联宽度）。 */
+const catalogWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiCatalogWidth.v1', min: 200, max: 480, vwFactor: 0.5 });
+/** 图谱视图下面板宽度（仅图谱视图）：null = 沿用 browserWidth；拖拽后固定为像素值并持久化，双击复位。 */
+const graphWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphWidth.v2', min: 280, vwFactor: 0.7 });
+/** 图谱画布（目录区）宽度（仅图谱视图）：null = 与详情 1.5:1 弹性分配；拖拽后固定像素并持久化，双击恢复弹性。 */
+const graphCanvasWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiGraphCanvasWidth.v1', min: 240, max: 800, vwFactor: 0.5 });
 
-let listWidth = listWidthStore.load() ?? WIKI_LIST_DEFAULT_WIDTH;
+/** 详情双组比例（百分比，第一组占比）：钳制 20~80，localStorage 持久化，双击复位 50（清存储）。 */
+const WIKI_DETAIL_SPLIT_KEY = 'crew.desktop.wikiDetailSplit.v1';
+const groupSplitStore = {
+  clamp(ratio: number): number {
+    if (!Number.isFinite(ratio)) return 50;
+    return Math.max(20, Math.min(80, Math.round(ratio)));
+  },
+  load(): number | null {
+    try {
+      const raw = localStorage.getItem(WIKI_DETAIL_SPLIT_KEY);
+      if (!raw) return null;
+      const parsed = parseInt(raw, 10);
+      return Number.isFinite(parsed) ? groupSplitStore.clamp(parsed) : null;
+    } catch {
+      return null;
+    }
+  },
+  persist(ratio: number | null): void {
+    try {
+      if (ratio == null) localStorage.removeItem(WIKI_DETAIL_SPLIT_KEY);
+      else localStorage.setItem(WIKI_DETAIL_SPLIT_KEY, String(ratio));
+    } catch {
+      /* quota / disabled */
+    }
+  },
+};
+
+let browserWidth = browserWidthStore.load() ?? WIKI_BROWSER_DEFAULT_WIDTH;
+let catalogWidth = catalogWidthStore.load() ?? WIKI_CATALOG_DEFAULT_WIDTH;
 let graphWidth: number | null = graphWidthStore.load();
+let graphCanvasWidth: number | null = graphCanvasWidthStore.load();
+/** 详情双组第一组占比（%）：两组时生效，组间把手拖拽更新。 */
+let groupSplitRatio = groupSplitStore.load() ?? 50;
+
+const WIKI_BROWSER_OPEN_KEY = 'crew.desktop.wikiBrowserOpen.v1';
+/** 右侧知识库面板展开/收起（持久化，默认展开）。收起走 CSS 隐藏，DOM 保留，编辑器/详情保活不受影响。 */
+let wikiBrowserOpen = ((): boolean => {
+  try {
+    return localStorage.getItem(WIKI_BROWSER_OPEN_KEY) !== '0';
+  } catch {
+    return true;
+  }
+})();
+
+/** 收起/展开右侧知识库面板并持久化（页头按钮与 Wiki Agent 面板头按钮共用）。 */
+export function toggleWikiBrowser(): void {
+  wikiBrowserOpen = !wikiBrowserOpen;
+  try {
+    localStorage.setItem(WIKI_BROWSER_OPEN_KEY, wikiBrowserOpen ? '1' : '0');
+  } catch {
+    /* quota / disabled */
+  }
+  renderShell();
+}
 /** 正在加载详情的 pageId（防重复点击重复请求）。 */
 const loadingDetails = new Set<string>();
+/** 正在加载的 vault 文档名（按文档名；两组可同时各开一份文档）。 */
+const loadingVaultDocs = new Set<string>();
 
 /** 测试钩子：覆盖 view 状态（单测用）。 */
 export function __setWikiViewForTest(patch: Partial<WikiViewState>): void {
@@ -582,6 +733,13 @@ export function __setWikiViewForTest(patch: Partial<WikiViewState>): void {
 function resetWikiViewState(): void {
   view = initialViewState();
   graphWidth = null;
+  graphCanvasWidth = null;
+  // 收起状态重新从 localStorage 读取（登录态变化后尊重用户持久化偏好，测试 stub 恒 null → 默认展开）
+  try {
+    wikiBrowserOpen = localStorage.getItem(WIKI_BROWSER_OPEN_KEY) !== '0';
+  } catch {
+    wikiBrowserOpen = true;
+  }
   loadSeq = 0;
   autoInitAttempted = false;
   initializedKbIds.clear();
@@ -589,6 +747,12 @@ function resetWikiViewState(): void {
   kbCreateDraft = '';
   kbCreateSubmitting = false;
   loadingDetails.clear();
+  loadingVaultDocs.clear();
+  // 编辑器组运行时装（编辑器/折叠/计时器/脏标记）全部释放，防 observer 与计时器泄漏。
+  for (const groupId of Array.from(groupDetails.keys())) disposeGroupDetail(groupId);
+  lastDetailSigs.clear();
+  lastGroupsKey = null;
+  tabDrag = null;
 }
 
 /** 测试钩子：重置为初始状态（单测用）。 */
@@ -601,6 +765,11 @@ export function __resetWikiViewForTest(): void {
 }
 
 // ── 渲染 ──
+
+/** 工具栏/标签用线性图标（crew-ui-symbols 雪碧图，风格与全局一致）。 */
+function uiIcon(symbolId: string): string {
+  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="./crew-ui-symbols.svg#${symbolId}"></use></svg>`;
+}
 
 function wikiIcon(name: 'folder' | 'caret', size: number): string {
   if (name === 'folder') {
@@ -638,14 +807,14 @@ function selectionMark(pageId: string): { checkedClass: string; checkHtml: strin
   };
 }
 
-/** 单条删除按钮（批量选择模式下隐藏）。 */
-function deletePageBtnHtml(page: WikiPage): string {
+/** 单条 ⋯ 操作菜单按钮（批量选择模式下隐藏），与会话条目的 ⋯ 菜单同款。 */
+function pageMenuBtnHtml(page: WikiPage): string {
   if (view.selecting) return '';
-  return `<button type="button" class="wiki-item__delete" data-delete-id="${escapeHtml(page.id)}" data-delete-title="${escapeHtml(page.title)}" title="删除页面" aria-label="删除页面">×</button>`;
+  return `<button type="button" class="wiki-item__menu" data-page-menu="${escapeHtml(page.id)}" title="页面操作" aria-label="页面操作">${uiIcon('icon-more')}</button>`;
 }
 
 function listItemHtml(page: WikiPage, compact = false): string {
-  const active = page.id === view.selectedId ? ' is-active' : '';
+  const active = page.id === activeGroup().selectedId ? ' is-active' : '';
   const { checkedClass, checkHtml } = selectionMark(page.id);
   const tags = page.tags.length
     ? `<span class="wiki-item__tags">${page.tags.map((t) => `<span class="wiki-item__tag">${escapeHtml(t)}</span>`).join('')}</span>`
@@ -662,7 +831,7 @@ function listItemHtml(page: WikiPage, compact = false): string {
         <span class="wiki-item__summary">${escapeHtml(summaryOf(page))}</span>
         <span class="wiki-item__meta">${tags}<span class="wiki-item__time">${escapeHtml(time)}</span></span>
       </button>
-      ${deletePageBtnHtml(page)}
+      ${pageMenuBtnHtml(page)}
     </li>
   `;
 }
@@ -718,7 +887,7 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
           </li>`;
       }
       if (node.kind === 'document') {
-        const active = node.name === view.selectedDocumentName ? ' is-active' : '';
+        const active = node.name === activeGroup().selectedDocumentName ? ' is-active' : '';
         return `
           <li class="wiki-tree__item wiki-tree__item--document${active}" data-vault-document="${escapeHtml(node.name)}">
             <button type="button" class="wiki-tree__label" style="padding-left: ${depth * 16 + 6}px">
@@ -727,9 +896,9 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
             </button>
           </li>`;
       }
-      const active = node.page.id === view.selectedId ? ' is-active' : '';
+      const active = node.page.id === activeGroup().selectedId ? ' is-active' : '';
       const { checkedClass, checkHtml } = selectionMark(node.page.id);
-      // 删除按钮是 <li> 的独立子元素（button 不能嵌套 button），
+      // ⋯ 菜单按钮是 <li> 的独立子元素（button 不能嵌套 button），
       // 由 CSS 绝对定位到文件名左侧的缩进空隙里，悬停时淡入。
       return `
         <li class="wiki-tree__item${view.selecting ? ' wiki-item--selecting' : ''}${active}${checkedClass}" data-page-id="${escapeHtml(node.page.id)}" style="--tree-indent: ${treeIndentPx(depth)}px">
@@ -738,7 +907,7 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
             ${typeBadge(node.page.page_type)}
             <span class="wiki-tree__title">${escapeHtml(node.page.title)}</span>
           </button>
-          ${deletePageBtnHtml(node.page)}
+          ${pageMenuBtnHtml(node.page)}
         </li>`;
     })
     .join('');
@@ -822,7 +991,7 @@ function relationLabel(item: WikiRelationPage): string {
   }[item.relation] || `反向${label}`;
 }
 
-/** 页面详情 article HTML（Wiki 页右栏与 Phase 4 对话流 overlay 共用）。所有插值 escapeHtml。 */
+/** 页面详情 article HTML（Wiki 页详情区与 Phase 4 对话流 overlay 共用）。所有插值 escapeHtml。 */
 export function wikiDetailArticleHtml(page: WikiPage, opts: WikiDetailArticleOptions): string {
   const sourcePills = opts.sourcePages?.length
     ? opts.sourcePages.map((target) => `
@@ -913,25 +1082,53 @@ export function decorateHomeQuestions(container: HTMLElement): void {
   list?.remove();
 }
 
-function detailHtml(): string {
-  if (view.selectedDocumentName) {
-    if (view.detailLoading || !view.vaultDocument) {
+/** 组内顶部的多 tab 栏（pill chip，视觉对齐 Inspector 的 workspace tab；空组不渲染）。chip 可拖拽（拆分/移动）。 */
+function wikiGroupTabsHtml(group: WikiDetailGroup): string {
+  if (group.tabs.length === 0) return '';
+  const active = groupActiveKey(group);
+  const chips = group.tabs
+    .map((tab) => {
+      const key = tabKey(tab);
+      const title =
+        tab.kind === 'doc'
+          ? vaultDocumentLabel(tab.name)
+          : view.pageDetails[tab.id]?.title ?? view.pages.find((p) => p.id === tab.id)?.title ?? tab.id;
+      return `<div class="wiki-tab${key === active ? ' is-active' : ''}" data-wiki-tab-chip="${escapeHtml(key)}" draggable="true">
+        <button type="button" class="wiki-tab__select" data-wiki-tab="${escapeHtml(key)}" title="${escapeHtml(title)}"><span class="wiki-tab__label">${escapeHtml(title)}</span></button>
+        <button type="button" class="wiki-tab__close" data-wiki-tab-close="${escapeHtml(key)}" title="关闭" aria-label="关闭 ${escapeHtml(title)}">×</button>
+      </div>`;
+    })
+    .join('');
+  return `<div class="wiki-tabs" role="tablist">${chips}</div>`;
+}
+
+function detailHtml(group: WikiDetailGroup): string {
+  if (group.selectedDocumentName) {
+    const doc = view.vaultDocuments[group.selectedDocumentName];
+    if (loadingVaultDocs.has(group.selectedDocumentName) || !doc) {
       return `<div class="wiki-detail__empty"><p class="wiki-detail__empty-hint">加载文档中…</p></div>`;
     }
-    const isHome = view.vaultDocument.name === 'Home.md';
+    const isHome = doc.name === 'Home.md';
     return `
       <article class="wiki-detail${isHome ? ' wiki-home-document' : ''}">
         <header class="wiki-detail__header">
           <div class="wiki-detail__badges"><span class="wiki-badge">${isHome ? '概览' : '文件'}</span></div>
-          <h2 class="wiki-detail__title">${escapeHtml(vaultDocumentLabel(view.vaultDocument.name))}</h2>
+          <h2 class="wiki-detail__title">${escapeHtml(vaultDocumentLabel(doc.name))}</h2>
           <div class="wiki-detail__meta">
-            <span>更新于 ${escapeHtml(formatWikiTime(view.vaultDocument.updated_at))}</span>
+            <span>更新于 ${escapeHtml(formatWikiTime(doc.updated_at))}</span>
           </div>
         </header>
         <div class="md-body chat-markdown wiki-detail__content" data-wiki-fold-content></div>
       </article>`;
   }
-  if (!view.selectedId) {
+  if (!group.selectedId) {
+    // 两组时的空组：纯空态提示（对齐 VSCode 空编辑器组），不再重复展示 KB 概览。
+    if (view.detailGroups.length > 1) {
+      return `
+        <div class="wiki-detail__empty">
+          <p class="wiki-detail__empty-hint">拖拽 tab 到此处，或从目录打开页面</p>
+        </div>`;
+    }
     const summary = view.kbSummary
       ? `<div class="wiki-overview">
           <div class="wiki-overview__title">知识库概览</div>
@@ -944,15 +1141,16 @@ function detailHtml(): string {
     return `
       <div class="wiki-detail__empty">
         ${summary}
-        <p class="wiki-detail__empty-hint">选择左侧页面查看详情，或在右侧对话栏基于知识库提问</p>
+        <p class="wiki-detail__empty-hint">选择右侧页面查看详情，或在左侧对话栏基于知识库提问</p>
       </div>`;
   }
-  if (loadingDetails.has(view.selectedId) && !view.pageDetails[view.selectedId]) {
+  const selectedId = group.selectedId;
+  if (loadingDetails.has(selectedId) && !view.pageDetails[selectedId]) {
     return `<div class="wiki-detail__empty"><p class="wiki-detail__empty-hint">加载页面详情中…</p></div>`;
   }
-  const page = view.pageDetails[view.selectedId] ?? view.pages.find((p) => p.id === view.selectedId);
+  const page = view.pageDetails[selectedId] ?? view.pages.find((p) => p.id === selectedId);
   if (!page) {
-    return `<div class="wiki-detail__empty"><p class="wiki-detail__empty-hint">选择左侧页面查看详情</p></div>`;
+    return `<div class="wiki-detail__empty"><p class="wiki-detail__empty-hint">选择右侧页面查看详情</p></div>`;
   }
   return wikiDetailArticleHtml(page, {
     sourcePages: view.sourcePages[page.id],
@@ -960,17 +1158,37 @@ function detailHtml(): string {
   });
 }
 
-/** 当前详情正文的增量渲染句柄（详情子树重建时先 dispose，防 observer 泄漏）。 */
-let detailFoldHandle: FoldedMarkdownHandle | null = null;
-let detailEditorHandle: WikiEditorHandle | null = null;
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
+/** 单个编辑器组的运行时装：fold 增量渲染句柄（子树重建时先 dispose，防 observer 泄漏）、
+ * TipTap 编辑器、自动保存计时器与脏标记（dirty 仅 scheduleWikiPageSave 置位；看一眼不置位，避免浏览也刷 updated_at）。 */
+interface WikiGroupDetail {
+  editor: WikiEditorHandle | null;
+  fold: FoldedMarkdownHandle | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  dirty: boolean;
+}
+
+/** 各编辑器组的运行时装（groupId → 实例）；组回收/重建时 dispose 并删除。 */
+const groupDetails = new Map<string, WikiGroupDetail>();
+
+function groupDetail(groupId: string): WikiGroupDetail {
+  let detail = groupDetails.get(groupId);
+  if (!detail) {
+    detail = { editor: null, fold: null, timer: null, dirty: false };
+    groupDetails.set(groupId, detail);
+  }
+  return detail;
+}
+
 let localSaveInFlight = false;
 let ignoreWikiChangedUntil = 0;
-/** 详情有未保存的真实编辑（仅 scheduleWikiPageSave 置位；看一眼不置位，避免浏览也刷 updated_at）。 */
-let detailDirty = false;
 
-function setWikiSaveState(stateValue: 'dirty' | 'saving' | 'saved' | 'error'): void {
-  const target = document.querySelector<HTMLElement>('#wiki-page-root [data-wiki-save-state]');
+/** 组容器（DOM 查询一律收敛到组内，避免双组时互相串扰）。 */
+function groupContainerEl(groupId: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`#wiki-page-root [data-wiki-group="${groupId}"]`);
+}
+
+function setWikiSaveState(groupId: string, stateValue: 'dirty' | 'saving' | 'saved' | 'error'): void {
+  const target = groupContainerEl(groupId)?.querySelector<HTMLElement>('[data-wiki-save-state]');
   if (!target) return;
   target.dataset.state = stateValue;
   target.textContent = {
@@ -981,10 +1199,10 @@ function setWikiSaveState(stateValue: 'dirty' | 'saving' | 'saved' | 'error'): v
   }[stateValue];
 }
 
-function pageDraftFromDom(page: WikiPage, content: string): WikiPage {
-  const root = document.querySelector<HTMLElement>('#wiki-page-root');
+function pageDraftFromDom(groupId: string, page: WikiPage, content: string): WikiPage {
+  const container = groupContainerEl(groupId);
   const value = (selector: string): string =>
-    root?.querySelector<HTMLInputElement>(selector)?.value ?? '';
+    container?.querySelector<HTMLInputElement>(selector)?.value ?? '';
   return {
     ...page,
     title: value('[data-wiki-title]').trim() || page.title,
@@ -992,12 +1210,13 @@ function pageDraftFromDom(page: WikiPage, content: string): WikiPage {
   };
 }
 
-async function saveWikiPageDraft(pageId: string): Promise<void> {
+async function saveWikiPageDraft(groupId: string, pageId: string): Promise<void> {
   if (!view.kbId) return;
+  const group = groupById(groupId);
   const current = view.pageDetails[pageId];
-  if (!current || view.selectedId !== pageId) return;
-  const draft = pageDraftFromDom(current, detailEditorHandle?.flush() ?? current.content ?? '');
-  setWikiSaveState('saving');
+  if (!current || !group || group.selectedId !== pageId) return;
+  const draft = pageDraftFromDom(groupId, current, groupDetails.get(groupId)?.editor?.flush() ?? current.content ?? '');
+  setWikiSaveState(groupId, 'saving');
   localSaveInFlight = true;
   try {
     const result = await backendApi.wikiUpdatePage(pageId, {
@@ -1020,35 +1239,50 @@ async function saveWikiPageDraft(pageId: string): Promise<void> {
     if (listIndex >= 0) view.pages[listIndex] = { ...view.pages[listIndex], ...result.page };
     view.sourceTitles = { ...view.sourceTitles, ...(result.source_titles || {}) };
     ignoreWikiChangedUntil = Date.now() + 1200;
-    detailDirty = false;
-    setWikiSaveState('saved');
+    const detail = groupDetails.get(groupId);
+    if (detail) detail.dirty = false;
+    setWikiSaveState(groupId, 'saved');
     invalidateWikiGraph();
   } catch (error) {
-    setWikiSaveState('error');
+    setWikiSaveState(groupId, 'error');
     notify(`保存 Wiki 页面失败：${errMsg(error)}`);
   } finally {
     localSaveInFlight = false;
   }
 }
 
-function scheduleWikiPageSave(pageId: string): void {
-  detailDirty = true;
-  setWikiSaveState('dirty');
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    void saveWikiPageDraft(pageId);
+function scheduleWikiPageSave(groupId: string, pageId: string): void {
+  const detail = groupDetail(groupId);
+  detail.dirty = true;
+  setWikiSaveState(groupId, 'dirty');
+  if (detail.timer) clearTimeout(detail.timer);
+  detail.timer = setTimeout(() => {
+    detail.timer = null;
+    void saveWikiPageDraft(groupId, pageId);
   }, 700);
 }
 
-function disposeDetailEditor(): void {
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
+/** 释放组的编辑器/折叠/计时器并从 Map 删除（组回收、子树重建、状态重置共用）。 */
+function disposeGroupDetail(groupId: string): void {
+  const detail = groupDetails.get(groupId);
+  if (!detail) return;
+  if (detail.timer) clearTimeout(detail.timer);
+  detail.editor?.destroy();
+  detail.fold?.dispose();
+  groupDetails.delete(groupId);
+}
+
+/** 组内当前选中页有未保存编辑时立即落盘（切 tab/移组/重命名前的统一 flush 口）。 */
+function flushGroupDirty(group: WikiDetailGroup): void {
+  const detail = groupDetails.get(group.id);
+  if (!group.selectedId || !detail?.editor || !detail.dirty) return;
+  // 保存即刻在途：先清计时器与脏标记，防同 tick 链式调用（移组 + 切相邻 tab）重复 flush。
+  if (detail.timer) {
+    clearTimeout(detail.timer);
+    detail.timer = null;
   }
-  detailEditorHandle?.destroy();
-  detailEditorHandle = null;
-  detailDirty = false;
+  detail.dirty = false;
+  void saveWikiPageDraft(group.id, group.selectedId);
 }
 
 async function resolveAndOpenWikiPage(title: string): Promise<boolean> {
@@ -1057,8 +1291,6 @@ async function resolveAndOpenWikiPage(title: string): Promise<boolean> {
     [page.title, ...page.aliases].some((value) => value.trim().toLocaleLowerCase() === normalized),
   );
   if (local) {
-    view.selectedDocumentName = null;
-    view.vaultDocument = null;
     selectWikiPage(local.id, { expandTree: true });
     return true;
   }
@@ -1075,8 +1307,6 @@ async function resolveAndOpenWikiPage(title: string): Promise<boolean> {
     if (!view.pages.some((page) => page.id === target.id)) view.pages.push(target);
     view.pageDetails = { ...view.pageDetails, [target.id]: target };
     view.sourceTitles = { ...view.sourceTitles, ...(result.source_titles || {}) };
-    view.selectedDocumentName = null;
-    view.vaultDocument = null;
     selectWikiPage(target.id, { expandTree: true });
     return true;
   } catch (error) {
@@ -1086,8 +1316,8 @@ async function resolveAndOpenWikiPage(title: string): Promise<boolean> {
 }
 
 /**
- * 详情栏内容签名：renderShell 全量重建时，签名未变则保留现有详情子树
- * （fold 增量渲染的 observer 与已解析正文一并存活，避免每次点击都重跑 markdown 解析）。
+ * 组详情内容签名：renderShell 全量重建时，签名未变的组保留现有子树
+ * （fold 增量渲染的 observer、TipTap 编辑器与已解析正文一并存活，避免每次点击都重跑 markdown 解析）。
  */
 interface DetailSig {
   selectedId: string | null;
@@ -1095,16 +1325,19 @@ interface DetailSig {
   sourceTitles: WikiSourceTitles;
   kbSummary: { summary: string; page_count?: number | undefined; source_count?: number | undefined; generated_at?: number | undefined; status: string } | null;
   loading: boolean;
+  /** 组内 tab 列表 + 激活 tab：tab 增删/切换时组子树需重建 tab 栏。 */
+  tabsKey: string;
 }
 
-function currentDetailSig(): DetailSig {
-  const selectedId = view.selectedId;
+function currentDetailSig(group: WikiDetailGroup): DetailSig {
+  const selectedId = group.selectedId;
   return {
     selectedId,
     page: selectedId ? view.pageDetails[selectedId] ?? view.pages.find((p) => p.id === selectedId) ?? null : null,
     sourceTitles: view.sourceTitles,
     kbSummary: selectedId ? null : view.kbSummary,
     loading: selectedId ? loadingDetails.has(selectedId) : false,
+    tabsKey: `${group.tabs.map(tabKey).join('|')}#${groupActiveKey(group) ?? ''}`,
   };
 }
 
@@ -1116,19 +1349,34 @@ function sameDetailSig(a: DetailSig, b: DetailSig): boolean {
     a.kbSummary?.summary === b.kbSummary?.summary &&
     a.kbSummary?.page_count === b.kbSummary?.page_count &&
     a.kbSummary?.source_count === b.kbSummary?.source_count &&
-    a.loading === b.loading
+    a.loading === b.loading &&
+    a.tabsKey === b.tabsKey
   );
 }
 
-let lastDetailSig: DetailSig | null = null;
+/** 各组上一轮渲染的详情签名（groupId → DetailSig）；组结构（数量/方向/id）另由 lastGroupsKey 兜底。 */
+const lastDetailSigs = new Map<string, DetailSig>();
+let lastGroupsKey: string | null = null;
+
+/** 组结构签名：组数量/id/方向变化时强制所有组子树重建（保活比对的前提）。 */
+function currentGroupsKey(): string {
+  return `${view.groupOrientation}#${view.detailGroups.map((g) => g.id).join('|')}`;
+}
 
 /** 列表滚动记忆：renderShell 全量重建后按 视图+KB 恢复 scrollTop，避免点击条目滚动条跳回顶部。 */
 let listScrollMemory: { key: string; top: number } | null = null;
 
-/** 左栏内联样式：列表视图固定持久化宽度；图谱视图未拖拽时弹性分配（无内联样式），拖拽后固定像素。 */
-function listPaneStyleAttr(): string {
-  if (view.view !== 'graph') return ` style="width: ${listWidth}px"`;
-  return graphWidth != null ? ` style="width: ${graphWidth}px; flex: 0 0 auto"` : '';
+/** 知识库面板内联宽度：列表/树/类型视图固定持久化宽度；图谱视图拖拽后固定像素，未拖拽时沿用 browserWidth。 */
+function browserPaneStyleAttr(): string {
+  if (view.view === 'graph' && graphWidth != null) return ` style="width: ${graphWidth}px"`;
+  return ` style="width: ${browserWidth}px"`;
+}
+
+/** 目录/图谱画布内联宽度：列表/树/类型视图固定目录宽度，用 flex 简写输出，压过 CSS 里 240px/窄窗口 220px 的 flex-basis 档位；
+ * 图谱模式未拖拽时走 1.5:1 比例分配不内联，拖拽后内联固定像素压过 --graph 的 flex 1.5。 */
+function catalogPaneStyleAttr(): string {
+  if (view.view === 'graph') return graphCanvasWidth != null ? ` style="flex: 0 0 ${graphCanvasWidth}px"` : '';
+  return ` style="flex: 0 0 ${catalogWidth}px"`;
 }
 
 function renderShell(): void {
@@ -1144,16 +1392,17 @@ function renderShell(): void {
         .join('')
     : '<option value="" selected>暂无知识库</option>';
 
-  const viewTabs: Array<{ key: WikiListView; label: string }> = [
-    { key: 'timeline', label: '时间线' },
-    { key: 'tree', label: '文件树' },
-    { key: 'type', label: '类型' },
-    { key: 'graph', label: '图谱' },
+  // 视图标签只显示图标（对齐 web WikiHub），原文字保留在 title/aria-label 供悬停提示与无障碍。
+  const viewTabs: Array<{ key: WikiListView; label: string; icon: string }> = [
+    { key: 'timeline', label: '时间线', icon: 'icon-history' },
+    { key: 'tree', label: '文件树', icon: 'icon-folder-line' },
+    { key: 'type', label: '类型', icon: 'icon-tag' },
+    { key: 'graph', label: '图谱', icon: 'icon-graph' },
   ];
   const tabs = viewTabs
     .map(
       (t) =>
-        `<button type="button" class="hub-segment__item${view.view === t.key ? ' is-active' : ''}" data-wiki-view="${t.key}">${t.label}</button>`,
+        `<button type="button" class="hub-segment__item${view.view === t.key ? ' is-active' : ''}" data-wiki-view="${t.key}" title="${t.label}" aria-label="${t.label}">${uiIcon(t.icon)}</button>`,
     )
     .join('');
 
@@ -1173,7 +1422,7 @@ function renderShell(): void {
         <div class="v2-empty__desc">${emptyDesc}</div>
       </div>`;
   } else {
-    // 图谱视图：左栏列表区域整体替换为图谱画布（挂载点由 mountWikiGraph 接管）。
+    // 图谱视图：目录列表区域整体替换为图谱画布（挂载点由 mountWikiGraph 接管）。
     const graphMode = view.view === 'graph';
     const listBody = graphMode
       ? '<div class="wiki-graph-mount" data-graph-mount></div>'
@@ -1190,53 +1439,93 @@ function renderShell(): void {
                 </svg>
               </div>
               <p class="wiki-list__empty-text">知识库还没有内容</p>
-              <p class="wiki-list__empty-hint">点击右上角「上传」，或直接拖拽文件到右侧问答栏</p>
+              <p class="wiki-list__empty-hint">点击右上角「上传」，或直接拖拽文件到左侧问答栏</p>
             </div>`
           : `${listViewHtml()}${loadMoreHtml()}`;
+    // 详情区：1~2 个编辑器组 + 组间把手（两组时），方向由拆分动作决定。
+    const groupSashHtml =
+      view.detailGroups.length > 1
+        ? `<div class="wiki-sash wiki-sash--group" data-wiki-group-sash role="separator" aria-orientation="${view.groupOrientation === 'column' ? 'horizontal' : 'vertical'}" title="拖拽调整分组比例，双击复位"></div>`
+        : '';
+    const detailGroupsHtml = view.detailGroups
+      .map((group, index) => {
+        const flexStyle =
+          view.detailGroups.length > 1
+            ? ` style="flex: ${index === 0 ? groupSplitRatio : 100 - groupSplitRatio} 1 0"`
+            : '';
+        return `
+          <section class="wiki-detail-group${group.id === view.activeGroupId ? ' is-focused' : ''}" data-wiki-group="${group.id}"${flexStyle}>
+            ${wikiGroupTabsHtml(group)}
+            <div class="wiki-detail-group__content">${detailHtml(group)}</div>
+          </section>`;
+      })
+      .join(groupSashHtml);
     body = `
-      <div class="wiki-body${graphMode ? ' wiki-body--graph' : ''}">
-        <div class="wiki-list-pane${graphMode ? ' wiki-list-pane--graph' : ''}"${listPaneStyleAttr()}>
-          ${batchBarHtml()}
-          <nav class="hub-segment wiki-view-tabs" aria-label="列表视图">${tabs}</nav>
-          <div class="wiki-list-scroll${graphMode ? ' wiki-list-scroll--graph' : ''}">${listBody}</div>
-        </div>
-        <div class="wiki-sash" data-wiki-sash role="separator" aria-orientation="vertical" title="拖拽调整左栏宽度，双击复位"></div>
-        <div class="wiki-detail-pane">${detailHtml()}</div>
-        <div class="wiki-sash" data-wiki-agent-sash role="separator" aria-orientation="vertical" title="拖拽调整对话栏宽度，双击复位"></div>
+      <div class="wiki-body">
         <aside class="wiki-agent-pane" data-wiki-agent-panel aria-label="Wiki Agent 对话"></aside>
+        <div class="wiki-sash" data-wiki-browser-sash role="separator" aria-orientation="vertical" title="拖拽调整知识库面板宽度，双击复位"></div>
+        <div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
+          <div class="wiki-list-pane"${catalogPaneStyleAttr()}>
+            ${batchBarHtml()}
+            <nav class="hub-segment wiki-view-tabs" aria-label="列表视图">${tabs}</nav>
+            <div class="wiki-list-scroll${graphMode ? ' wiki-list-scroll--graph' : ''}">${listBody}</div>
+          </div>
+          ${graphMode
+            ? '<div class="wiki-sash wiki-sash--inner" data-wiki-graph-canvas-sash role="separator" aria-orientation="vertical" title="拖拽调整图谱宽度，双击恢复弹性比例"></div>'
+            : '<div class="wiki-sash wiki-sash--inner" data-wiki-catalog-sash role="separator" aria-orientation="vertical" title="拖拽调整目录宽度，双击复位"></div>'}
+          <div class="wiki-detail-pane">
+            <div class="wiki-detail-groups" data-orientation="${view.groupOrientation}">${detailGroupsHtml}</div>
+          </div>
+        </div>
       </div>`;
   }
 
   const uploadDisabled = !view.kbId;
   const batchToggle =
     view.kbId && !view.selecting && view.pages.length > 0 && view.view !== 'graph'
-      ? '<button type="button" class="hub-refresh-btn" data-batch-toggle title="批量选择页面以批量删除">批量管理</button>'
+      ? `<button type="button" class="hub-refresh-btn" data-batch-toggle title="批量选择页面以批量删除" aria-label="批量管理">${uiIcon('icon-checks')}</button>`
       : '';
   // 重建代价高的三棵子树在状态未变时保留活节点，避免每次点击都推倒重来：
   // 对话面板（整段会话重渲染 + markdown 重解析 + 强制滚底）、详情栏（fold observer 与
   // 已解析正文）、图谱画布（SVG 全量重建 + 逐节点重绑事件，wiki-graph 内部另有签名比对）。
   const liveAgentPanel = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
   const keepAgentPanel = view.kbId && liveAgentPanel?.dataset.kbId === view.kbId ? liveAgentPanel : null;
-  const keepAgentSash = keepAgentPanel ? root.querySelector<HTMLElement>('[data-wiki-agent-sash]') : null;
-  const detailSigNow = currentDetailSig();
-  const liveDetailPane = root.querySelector<HTMLElement>('.wiki-detail-pane');
-  const keepDetailPane = liveDetailPane && !view.selectedDocumentName && lastDetailSig && sameDetailSig(lastDetailSig, detailSigNow) ? liveDetailPane : null;
+  // 面板节点虽被保留，但 innerHTML 重建会把它短暂 detach，浏览器把内部滚动位置
+  // 重置为 0（对话跳回最早消息）。与 listScrollMemory 同理：先记后恢复。
+  const agentMessagesScrollTop =
+    keepAgentPanel?.querySelector<HTMLElement>('[data-wiki-agent-messages]')?.scrollTop ?? 0;
+  // 组结构未变时按组比对签名收集可保留的子树；结构（数量/id/方向）一变全部重建。
+  const groupsKeyNow = currentGroupsKey();
+  const detailSigNowByGroup = new Map(view.detailGroups.map((g) => [g.id, currentDetailSig(g)] as const));
+  const keepGroups = new Map<string, HTMLElement>();
+  if (lastGroupsKey === groupsKeyNow) {
+    for (const group of view.detailGroups) {
+      const live = root.querySelector<HTMLElement>(`[data-wiki-group="${group.id}"]`);
+      const lastSig = lastDetailSigs.get(group.id);
+      const sigNow = detailSigNowByGroup.get(group.id);
+      // vault 文档（Home.md/index.md）走 fold 增量渲染，不在签名内，选中即强制重建（对齐原单面板行为）。
+      if (live && !group.selectedDocumentName && lastSig && sigNow && sameDetailSig(lastSig, sigNow)) {
+        keepGroups.set(group.id, live);
+      }
+    }
+  }
   const keepGraphMount = view.view === 'graph' ? root.querySelector<HTMLElement>('[data-graph-mount]') : null;
   const liveListScroll = root.querySelector<HTMLElement>('.wiki-list-scroll');
   if (liveListScroll && listScrollMemory) listScrollMemory.top = liveListScroll.scrollTop;
   root.innerHTML = `
-    <div class="page-shell page-shell--wiki">
+    <div class="page-shell page-shell--wiki${wikiBrowserOpen ? '' : ' wiki-browser-collapsed'}">
       <header class="page-header page-header--hub">
         <div class="page-header__copy">
           <h1 class="page-header__title">Wiki <span class="accent">知识库</span></h1>
-          <p class="page-header__desc">大模型自动整理的本地知识库笔记，按时间线、文件夹或类型浏览。</p>
+          <p class="page-header__desc">都什么年代了，还在古法记笔记？？</p>
         </div>
         <div class="page-header__actions">
           <select id="wiki-kb-select" class="wiki-kb-select" title="选择知识库" aria-label="选择知识库"${view.kbs.length === 0 ? ' disabled' : ''}>${kbOptions}</select>
-          <button type="button" class="hub-refresh-btn" data-kb-create-toggle title="新建知识库">新建</button>
-          <button type="button" class="hub-refresh-btn" data-kb-delete title="删除当前知识库、原始素材及专属 Wiki 问答历史（内置知识库不可删）"${!view.kbId || view.kbId === DEFAULT_KB_ID || view.kbId === TUTORIAL_KB_ID ? ' disabled' : ''}>删除</button>
-          <button type="button" class="hub-refresh-btn" data-upload title="上传文件到知识库"${uploadDisabled ? ' disabled' : ''}>上传</button>
+          <button type="button" class="hub-refresh-btn" data-kb-create-toggle title="新建知识库" aria-label="新建知识库">${uiIcon('icon-plus')}</button>
+          <button type="button" class="hub-refresh-btn" data-kb-delete title="删除当前知识库、原始素材及专属 Wiki 问答历史（内置知识库不可删）" aria-label="删除知识库"${!view.kbId || view.kbId === DEFAULT_KB_ID || view.kbId === TUTORIAL_KB_ID ? ' disabled' : ''}>${uiIcon('icon-trash')}</button>
+          <button type="button" class="hub-refresh-btn" data-upload title="上传文件到知识库" aria-label="上传文件"${uploadDisabled ? ' disabled' : ''}>${uiIcon('icon-upload')}</button>
           ${batchToggle}
+          <button type="button" class="hub-refresh-btn" data-wiki-browser-toggle title="收起/展开知识库面板" aria-label="知识库面板" aria-pressed="${wikiBrowserOpen}">${uiIcon('icon-panel-right')}</button>
           <button type="button" class="hub-refresh-btn hub-refresh-btn--help" data-wiki-tour title="使用导览" aria-label="使用导览">?</button>
         </div>
       </header>
@@ -1249,58 +1538,76 @@ function renderShell(): void {
   if (keepAgentPanel) {
     const placeholder = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
     if (placeholder) {
-      if (keepAgentSash) root.querySelector<HTMLElement>('[data-wiki-agent-sash]')?.replaceWith(keepAgentSash);
       placeholder.replaceWith(keepAgentPanel);
       agentPanelKept = true;
+      const messagesEl = keepAgentPanel.querySelector<HTMLElement>('[data-wiki-agent-messages]');
+      if (messagesEl && agentMessagesScrollTop > 0) messagesEl.scrollTop = agentMessagesScrollTop;
     }
   }
-  const detailPlaceholder = root.querySelector<HTMLElement>('.wiki-detail-pane');
-  const detailKept = !!(keepDetailPane && detailPlaceholder);
-  if (keepDetailPane && detailPlaceholder) detailPlaceholder.replaceWith(keepDetailPane);
+  // 各组占位节点随 innerHTML 重新生成，签名未变的组子树换回复用。
+  const keptGroupIds = new Set<string>();
+  for (const [groupId, liveGroup] of keepGroups) {
+    const placeholder = root.querySelector<HTMLElement>(`[data-wiki-group="${groupId}"]`);
+    if (placeholder) {
+      placeholder.replaceWith(liveGroup);
+      keptGroupIds.add(groupId);
+    }
+  }
+  // 聚焦组不在签名内：被保留的子树可能带着旧的 is-focused，按当前 activeGroupId 同步一次。
+  root.querySelectorAll('.wiki-detail-group').forEach((el) => {
+    el.classList.toggle('is-focused', el.getAttribute('data-wiki-group') === view.activeGroupId);
+  });
   if (keepGraphMount) root.querySelector<HTMLElement>('[data-graph-mount]')?.replaceWith(keepGraphMount);
   const listScrollKey = `${view.kbId ?? ''}:${view.view}`;
   const listScroll = root.querySelector<HTMLElement>('.wiki-list-scroll');
   if (listScroll && listScrollMemory?.key === listScrollKey) listScroll.scrollTop = listScrollMemory.top;
   listScrollMemory = { key: listScrollKey, top: listScroll?.scrollTop ?? 0 };
   bindEvents();
-  // Wiki 页面使用常驻 TipTap 编辑器；Home/index 是系统文档，继续只读增量渲染。
-  if (!detailKept || view.selectedDocumentName) {
-    detailFoldHandle?.dispose();
-    detailFoldHandle = null;
-    disposeDetailEditor();
-    if (view.selectedId) {
-      const page = view.pageDetails[view.selectedId] ?? view.pages.find((p) => p.id === view.selectedId);
-      const target = root.querySelector<HTMLElement>('[data-wiki-editor]');
-      if (target && page?.content !== undefined) {
-        detailEditorHandle = mountWikiEditor({
-          element: target,
-          markdown: page.content || '',
-          onChange: () => scheduleWikiPageSave(page.id),
-          onWikiLink: (title) => void resolveAndOpenWikiPage(title),
-        });
+  // Wiki 页面使用常驻 TipTap 编辑器；Home/index 是系统文档，继续只读增量渲染。按组挂载/补挂。
+  const mountGroupEditor = (group: WikiDetailGroup, target: HTMLElement, page: WikiPage): void => {
+    const detail = groupDetail(group.id);
+    detail.editor?.destroy();
+    detail.editor = mountWikiEditor({
+      element: target,
+      markdown: page.content || '',
+      onChange: () => scheduleWikiPageSave(group.id, page.id),
+      onWikiLink: (title) => void resolveAndOpenWikiPage(title),
+    });
+  };
+  for (const group of view.detailGroups) {
+    const section = root.querySelector<HTMLElement>(`[data-wiki-group="${group.id}"]`);
+    if (!section) continue;
+    if (!keptGroupIds.has(group.id)) {
+      // 子树被重建：先释放旧实例（防 observer/编辑器泄漏），再按组内当前选中挂载。
+      disposeGroupDetail(group.id);
+      if (group.selectedId) {
+        const page = view.pageDetails[group.selectedId] ?? view.pages.find((p) => p.id === group.selectedId);
+        const target = section.querySelector<HTMLElement>('[data-wiki-editor]');
+        if (target && page?.content !== undefined) mountGroupEditor(group, target, page);
+      } else if (group.selectedDocumentName) {
+        const doc = view.vaultDocuments[group.selectedDocumentName];
+        const target = section.querySelector<HTMLElement>('[data-wiki-fold-content]');
+        if (target && doc?.content) {
+          groupDetail(group.id).fold = mountFoldedMarkdown(target, doc.content);
+          if (doc.name === 'Home.md') decorateHomeQuestions(target);
+        }
       }
-    } else if (view.vaultDocument?.content) {
-      const target = root.querySelector<HTMLElement>('[data-wiki-fold-content]');
-      if (target) {
-        detailFoldHandle = mountFoldedMarkdown(target, view.vaultDocument.content);
-        if (view.vaultDocument.name === 'Home.md') decorateHomeQuestions(target);
+    } else if (group.selectedId) {
+      // 子树被保留但编辑器挂载点为空（如上次渲染时正文未就绪）：补挂。
+      const target = section.querySelector<HTMLElement>('[data-wiki-editor]');
+      const page = view.pageDetails[group.selectedId] ?? view.pages.find((item) => item.id === group.selectedId);
+      if (target && page?.content !== undefined && target.childElementCount === 0) {
+        mountGroupEditor(group, target, page);
       }
     }
   }
-  if (view.selectedId) {
-    const target = root.querySelector<HTMLElement>('[data-wiki-editor]');
-    const page = view.pageDetails[view.selectedId] ?? view.pages.find((item) => item.id === view.selectedId);
-    if (target && page?.content !== undefined && target.childElementCount === 0) {
-      detailEditorHandle?.destroy();
-      detailEditorHandle = mountWikiEditor({
-        element: target,
-        markdown: page.content || '',
-        onChange: () => scheduleWikiPageSave(page.id),
-        onWikiLink: (title) => void resolveAndOpenWikiPage(title),
-      });
-    }
+  // 无 KB 空态分支不渲染详情组：清空签名，下次重建全部重来。
+  const groupsRendered = !!root.querySelector('.wiki-detail-groups');
+  lastGroupsKey = groupsRendered ? groupsKeyNow : null;
+  lastDetailSigs.clear();
+  if (groupsRendered) {
+    for (const [groupId, sig] of detailSigNowByGroup) lastDetailSigs.set(groupId, sig);
   }
-  lastDetailSig = detailPlaceholder ? detailSigNow : null;
   if (view.kbId && !agentPanelKept) {
     const panel = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
     if (panel) {
@@ -1314,7 +1621,7 @@ function renderShell(): void {
     if (mount) {
       mountWikiGraph(mount, view.kbId, {
         onSelectPage: selectWikiPage,
-        getSelectedId: () => view.selectedId,
+        getSelectedId: () => activeGroup().selectedId,
       });
     }
   }
@@ -1390,8 +1697,10 @@ async function loadPages(): Promise<void> {
     view.pageOffset = view.pages.length;
     view.hasMore = view.pages.length >= PAGE_LIMIT;
     view.sourceTitles = res.source_titles || {};
-    if (view.selectedId && !view.pages.some((p) => p.id === view.selectedId)) {
-      view.selectedId = null;
+    for (const group of view.detailGroups) {
+      if (group.selectedId && !view.pages.some((p) => p.id === group.selectedId)) {
+        group.selectedId = null;
+      }
     }
   } catch (err) {
     if (seq !== loadSeq) return;
@@ -1445,15 +1754,38 @@ async function loadPageDetail(pageId: string): Promise<void> {
 }
 
 /**
- * 选中页面并展示详情（列表条目 / 树节点 / 相关页链接 / 图谱节点共用）。
+ * 选中页面并展示详情（列表条目 / 树节点 / 相关页链接 / 图谱节点共用），默认落在聚焦组。
+ * 同一页面全局只能存在于一个组：已在别的组打开时聚焦该组该 tab，而不是重复打开。
  * 树视图按需展开祖先目录；本地无完整正文时直接进加载态拉取（brief 条目无正文；
  * 图谱节点可能不在已分页加载的列表里），避免先闪一帧空正文再切加载文案。
  */
-function selectWikiPage(pageId: string, opts?: { expandTree?: boolean }): void {
-  if (pageId === view.selectedId) return;
-  const previousId = view.selectedId;
-  if (previousId && detailEditorHandle && detailDirty) void saveWikiPageDraft(previousId);
-  view.selectedId = pageId;
+function selectWikiPage(pageId: string, opts?: { expandTree?: boolean; groupId?: string }): void {
+  const target = (opts?.groupId ? groupById(opts.groupId) : activeGroup()) ?? view.detailGroups[0];
+  if (!target) return;
+  const key = `page:${pageId}`;
+  const owner = findTabOwner(key);
+  if (owner && owner.id !== target.id) {
+    // 已在另一组打开：聚焦该组该 tab（全局唯一约束）。
+    view.activeGroupId = owner.id;
+    const ownedTab = owner.tabs.find((t) => tabKey(t) === key);
+    if (ownedTab && groupActiveKey(owner) !== key) activateTabInGroup(owner, ownedTab);
+    else renderShell();
+    return;
+  }
+  // 从 vault 文档（Home.md/index.md）切回页面：清掉组内文档态，否则 detailHtml 仍优先显示文档。
+  // 图谱节点点击走 onSelectPage 直接调这里，不经过列表条目的清理逻辑，必须在这里兜底。
+  const hadDocument = target.selectedDocumentName !== null;
+  target.selectedDocumentName = null;
+  target.tabs = openTabUnique(target.tabs, { kind: 'page', id: pageId });
+  view.activeGroupId = target.id;
+  if (pageId === target.selectedId) {
+    // 已选中但详情停在文档态时，重渲染让详情切回页面。
+    if (hadDocument) renderShell();
+    return;
+  }
+  const previousId = target.selectedId;
+  if (previousId) flushGroupDirty(target);
+  target.selectedId = pageId;
   if (opts?.expandTree && view.view === 'tree') {
     const page = view.pages.find((p) => p.id === pageId);
     if (page) {
@@ -1469,27 +1801,221 @@ function selectWikiPage(pageId: string, opts?: { expandTree?: boolean }): void {
   renderShell();
 }
 
-async function loadVaultDocument(name: 'Home.md' | 'index.md'): Promise<void> {
+async function loadVaultDocument(name: 'Home.md' | 'index.md', opts?: { groupId?: string }): Promise<void> {
   if (!view.kbId) return;
+  const target = (opts?.groupId ? groupById(opts.groupId) : activeGroup()) ?? view.detailGroups[0];
+  if (!target) return;
+  const key = `doc:${name}`;
+  const owner = findTabOwner(key);
+  if (owner && owner.id !== target.id) {
+    // 已在另一组打开：聚焦该组该 tab（全局唯一约束）。
+    view.activeGroupId = owner.id;
+    const ownedTab = owner.tabs.find((t) => tabKey(t) === key);
+    if (ownedTab && groupActiveKey(owner) !== key) activateTabInGroup(owner, ownedTab);
+    else renderShell();
+    return;
+  }
   const seq = loadSeq;
-  view.selectedId = null;
-  view.selectedDocumentName = name;
-  view.vaultDocument = null;
-  view.detailLoading = true;
+  target.selectedId = null;
+  target.selectedDocumentName = name;
+  target.tabs = openTabUnique(target.tabs, { kind: 'doc', name });
+  view.activeGroupId = target.id;
+  loadingVaultDocs.add(name);
   renderShell();
   try {
     const res = await backendApi.wikiVaultDocument(name, view.kbId);
-    if (seq !== loadSeq || view.selectedDocumentName !== name) return;
-    view.vaultDocument = res.document;
+    if (seq !== loadSeq) return;
+    view.vaultDocuments = { ...view.vaultDocuments, [name]: res.document };
   } catch (err) {
     if (seq === loadSeq) {
       notify(`加载 ${name} 失败：${(err as Error).message}`);
-      view.selectedDocumentName = null;
+      for (const group of view.detailGroups) {
+        if (group.selectedDocumentName === name) group.selectedDocumentName = null;
+      }
     }
   } finally {
-    if (seq === loadSeq) view.detailLoading = false;
+    if (seq === loadSeq) loadingVaultDocs.delete(name);
   }
   renderShell();
+}
+
+/** 激活组内某个 tab（tab 点击 / 拆分移动后落焦点共用）；页面走 selectWikiPage，文档走 loadVaultDocument。 */
+function activateTabInGroup(group: WikiDetailGroup, tab: WikiOpenTab): void {
+  view.activeGroupId = group.id;
+  if (tab.kind === 'page') {
+    selectWikiPage(tab.id, { groupId: group.id });
+  } else {
+    // 切到只读 vault 文档前 flush 脏编辑（loadVaultDocument 自身不做，对齐 selectWikiPage 的行为）。
+    flushGroupDirty(group);
+    void loadVaultDocument(tab.name, { groupId: group.id });
+  }
+}
+
+/**
+ * 跨组移动 tab：源组移除（正编辑则先 flush 脏稿，源组切到相邻 tab），目标组接收并激活。
+ */
+function moveTabToGroup(key: string, targetGroupId: string): void {
+  const source = findTabOwner(key);
+  const target = groupById(targetGroupId);
+  if (!source || !target || source.id === target.id) return;
+  const tab = source.tabs.find((t) => tabKey(t) === key);
+  if (!tab) return;
+  if (groupActiveKey(source) === key) flushGroupDirty(source);
+  const wasActive = groupActiveKey(source) === key;
+  const { tabs, nextActiveKey } = closeTabByKey(source.tabs, key, groupActiveKey(source));
+  source.tabs = tabs;
+  target.tabs = openTabUnique(target.tabs, tab);
+  if (wasActive) {
+    // 源组切到相邻 tab（无相邻则回空态）；焦点随后落到目标组。
+    const neighbor = source.tabs.find((t) => tabKey(t) === nextActiveKey);
+    if (neighbor) {
+      activateTabInGroup(source, neighbor);
+    } else {
+      source.selectedId = null;
+      source.selectedDocumentName = null;
+      disposeGroupDetail(source.id);
+    }
+  }
+  activateTabInGroup(target, tab);
+}
+
+/**
+ * 把 tab 按方向拆到第二组：单组时创建第二组（方向记入 groupOrientation）并迁入，
+ * 拆的是组内唯一 tab 时源组变空态（允许空组存在，对齐 VSCode）；已有两组时退化为移到另一组。
+ */
+function splitGroupToOrientation(key: string, orientation: 'row' | 'column'): void {
+  const source = findTabOwner(key);
+  if (!source) return;
+  if (view.detailGroups.length >= 2) {
+    const other = view.detailGroups.find((g) => g.id !== source.id);
+    if (other) moveTabToGroup(key, other.id);
+    return;
+  }
+  view.groupOrientation = orientation;
+  const next = createDetailGroup();
+  view.detailGroups = [...view.detailGroups, next];
+  moveTabToGroup(key, next.id);
+}
+
+/** 回收空组（两组时某组最后一个 tab 被关掉）：释放编辑器/计时器，剩余组恢复通栏。 */
+function collapseGroup(groupId: string): void {
+  disposeGroupDetail(groupId);
+  lastDetailSigs.delete(groupId);
+  view.detailGroups = view.detailGroups.filter((g) => g.id !== groupId);
+  if (view.detailGroups.length === 0) view.detailGroups = [createDetailGroup()];
+  view.activeGroupId = view.detailGroups[0].id;
+  renderShell();
+}
+
+/**
+ * 关闭某组内的一个 tab。关闭激活 tab 时切到相邻 tab（右侧优先）；
+ * 有未保存编辑时先弹确认（确认即保存后关闭），关闭非激活 tab 只更新 tab 栏；
+ * 两组时关掉某组最后一个 tab 直接回收该组。
+ */
+async function closeWikiTab(key: string): Promise<void> {
+  const group = findTabOwner(key);
+  if (!group) return;
+  view.activeGroupId = group.id;
+  const activeKey = groupActiveKey(group);
+  const closingActive = activeKey !== null && key === activeKey;
+  if (closingActive && group.selectedId && groupDetails.get(group.id)?.dirty) {
+    const confirmed = await showConfirmDialog({
+      title: '关闭页面',
+      message: '当前页面有未保存的修改，关闭前需要先保存。',
+      confirmText: '保存并关闭',
+    });
+    if (!confirmed) return;
+    await saveWikiPageDraft(group.id, group.selectedId);
+  }
+  const { tabs, nextActiveKey } = closeTabByKey(group.tabs, key, activeKey);
+  group.tabs = tabs;
+  if (tabs.length === 0 && view.detailGroups.length > 1) {
+    collapseGroup(group.id);
+    return;
+  }
+  if (!closingActive) {
+    // 关闭非激活 tab：编辑器与当前详情不动，仅 tab 栏重渲染。
+    renderShell();
+    return;
+  }
+  const next = tabs.find((t) => tabKey(t) === nextActiveKey);
+  if (next) {
+    activateTabInGroup(group, next);
+    return;
+  }
+  // 组内最后一个 tab 被关掉（单组）：回到空态。
+  group.selectedId = null;
+  group.selectedDocumentName = null;
+  disposeGroupDetail(group.id);
+  renderShell();
+}
+
+// ── Tab 拖拽（拖到另一组 = 移动；拖到详情区四边缘 = 按方向拆分） ──
+
+/** 拖拽落点：group:<id> = 移到该组；edge:left|right = row 拆分，edge:top|bottom = column 拆分。 */
+export type WikiDropZone = `group:${string}` | 'edge:left' | 'edge:right' | 'edge:top' | 'edge:bottom';
+
+/** 进行中的 tab 拖拽（模块级变量，不用 dataTransfer 存复杂数据）。 */
+let tabDrag: { tabKey: string; sourceGroupId: string } | null = null;
+/** 当前高亮的落点（dragover 命中；dragleave/dragend/drop 清除）。 */
+let currentDropZone: WikiDropZone | null = null;
+
+/** drop 核心逻辑（纯状态操作，可单测）：事件处理器只做 zone 判定后调用它。 */
+export function resolveTabDrop(tabKey: string, sourceGroupId: string, zone: WikiDropZone): void {
+  if (zone.startsWith('group:')) {
+    const targetGroupId = zone.slice('group:'.length);
+    if (targetGroupId !== sourceGroupId) moveTabToGroup(tabKey, targetGroupId);
+    return;
+  }
+  const edge = zone.slice('edge:'.length);
+  splitGroupToOrientation(tabKey, edge === 'left' || edge === 'right' ? 'row' : 'column');
+}
+
+/** 由鼠标坐标判定落点：两组时命中某组主体即移动落点；单组时四边缘区（各 25%）为拆分落点，中心区为同组 no-op。 */
+function dropZoneAtPoint(container: HTMLElement, x: number, y: number): WikiDropZone | null {
+  const sections = Array.from(container.querySelectorAll<HTMLElement>('[data-wiki-group]'));
+  if (sections.length === 0) return null;
+  if (sections.length === 2) {
+    for (const section of sections) {
+      const rect = section.getBoundingClientRect();
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+        return `group:${section.getAttribute('data-wiki-group') ?? ''}`;
+      }
+    }
+    return null;
+  }
+  const onlyGroupId = sections[0].getAttribute('data-wiki-group') ?? '';
+  const rect = container.getBoundingClientRect();
+  // 测试环境（happy-dom）rect 恒 0：无法判定边缘，按同组落点处理（no-op）。
+  if (rect.width <= 0 || rect.height <= 0) return `group:${onlyGroupId}`;
+  const relX = (x - rect.left) / rect.width;
+  const relY = (y - rect.top) / rect.height;
+  if (relX < 0.25) return 'edge:left';
+  if (relX > 0.75) return 'edge:right';
+  if (relY < 0.25) return 'edge:top';
+  if (relY > 0.75) return 'edge:bottom';
+  return `group:${onlyGroupId}`;
+}
+
+/** 落点高亮：组落点加 is-drop-target，边缘落点在容器上标 data-drop-edge（CSS 画 overlay）。 */
+function highlightDropZone(container: HTMLElement, zone: WikiDropZone | null): void {
+  if (zone === currentDropZone) return;
+  clearDropZoneHighlight(container);
+  currentDropZone = zone;
+  if (!zone) return;
+  if (zone.startsWith('group:')) {
+    container
+      .querySelector<HTMLElement>(`[data-wiki-group="${zone.slice('group:'.length)}"]`)
+      ?.classList.add('is-drop-target');
+  } else {
+    container.dataset.dropEdge = zone.slice('edge:'.length);
+  }
+}
+
+function clearDropZoneHighlight(container: HTMLElement): void {
+  currentDropZone = null;
+  delete container.dataset.dropEdge;
+  container.querySelectorAll('.is-drop-target').forEach((el) => el.classList.remove('is-drop-target'));
 }
 
 /** KB 概览只用于详情空态展示，失败静默（不打扰主流程）。 */
@@ -1500,7 +2026,7 @@ async function loadKbSummary(): Promise<void> {
     const res = await backendApi.wikiSummary(view.kbId);
     if (seq !== loadSeq) return;
     view.kbSummary = res.status === 'ready' && res.summary ? { summary: res.summary, page_count: res.page_count, source_count: res.source_count, generated_at: res.generated_at, status: res.status } : null;
-    if (!view.selectedId) renderShell();
+    if (!activeGroup().selectedId) renderShell();
   } catch {
     /* 概览加载失败不提示 */
   }
@@ -1512,16 +2038,20 @@ async function reloadAll(): Promise<void> {
   view.pages = [];
   view.pageOffset = 0;
   view.hasMore = false;
-  view.selectedId = null;
-  view.selectedDocumentName = null;
-  view.vaultDocument = null;
-  view.detailLoading = false;
+  // 编辑器组重置为单个空组：旧组运行时装（编辑器/计时器）全部释放。
+  for (const group of view.detailGroups) disposeGroupDetail(group.id);
+  const detailGroup = createDetailGroup();
+  view.detailGroups = [detailGroup];
+  view.activeGroupId = detailGroup.id;
+  view.groupOrientation = 'row';
+  view.vaultDocuments = {};
   view.pageDetails = {};
   view.sourcePages = {};
   view.relationPages = {};
   view.kbSummary = null;
   view.expandedPaths = new Set<string>(DEFAULT_EXPANDED_PATHS);
   loadingDetails.clear();
+  loadingVaultDocs.clear();
   // 图谱数据同属本 KB，整页重载一并失效（下次 mount 重新拉取）。
   invalidateWikiGraph();
   view.loading = true;
@@ -1534,7 +2064,7 @@ async function reloadAll(): Promise<void> {
   void loadKbSummary();
 }
 
-// 文件附件统一从右栏 Composer 进入 Wiki Agent 工作流；页面不再编排上传或 ingest。
+// 文件附件统一从对话区 Composer 进入 Wiki Agent 工作流；页面不再编排上传或 ingest。
 // ── 新建 KB（对齐 web WikiHub：kb_id 限英文/数字/下划线，name 缺省同 id） ──
 
 // kb_id 即磁盘目录名（crew/wiki/store/_filesystem.py），后端 normalize_kb_id 只 trim 不限字符集，
@@ -1599,14 +2129,36 @@ async function handleDeleteKb(): Promise<void> {
   }
 }
 
-// ── 删除（Phase 2） ──
+// ── 单条操作（重命名 / 删除，Phase 2） ──
 
-/** 删除后重新加载列表与概览（互不依赖，并行）；删的是当前选中页时清空详情栏。 */
+/** 删除后重新加载列表与概览（互不依赖，并行）；删的是某组当前选中页时清空该组详情栏。 */
 async function refreshAfterDelete(deletedIds: string[]): Promise<void> {
-  if (view.selectedId && deletedIds.includes(view.selectedId)) {
-    view.selectedId = null;
+  for (const group of view.detailGroups) {
+    if (group.selectedId && deletedIds.includes(group.selectedId)) {
+      group.selectedId = null;
+    }
   }
   await Promise.all([loadPages(), loadKbSummary()]);
+}
+
+/** 重命名：应用内输入弹窗（Electron 不支持 window.prompt），只更新 title，后端缺省字段沿用旧值。 */
+async function handleRenamePage(page: WikiPage): Promise<void> {
+  const next = await showPromptDialog({ title: '重命名页面', defaultValue: page.title });
+  const title = next?.trim();
+  if (!title || title === page.title) return;
+  // 正打开该页且有未保存草稿时先落盘，避免 loadPages 的重渲染把草稿冲掉（同 selectWikiPage 的切换保存）。
+  const owner = findTabOwner(`page:${page.id}`);
+  if (owner && owner.selectedId === page.id) flushGroupDirty(owner);
+  try {
+    const result = await backendApi.wikiUpdatePage(page.id, { title }, view.kbId ?? undefined);
+    notify('已重命名页面');
+    // 详情缓存同步新标题（若正打开该页），列表刷新与删除后一致走 loadPages。
+    const detail = view.pageDetails[page.id];
+    if (detail) view.pageDetails = { ...view.pageDetails, [page.id]: { ...detail, title: result.page.title } };
+    await loadPages();
+  } catch (err) {
+    notify(`重命名失败：${errMsg(err)}`);
+  }
 }
 
 async function handleDeletePage(pageId: string, title: string): Promise<void> {
@@ -1656,6 +2208,19 @@ export function openWikiPageInHub(pageId: string): boolean {
 }
 
 // ── 事件绑定 ──
+
+/** 调主进程用系统默认程序打开 Wiki 来源的原始文件（docx → Word/WPS 等）。 */
+async function openWikiSourceFile(sourceId: string, kbId?: string): Promise<void> {
+  if (!window.Crew?.openWikiSourceFile) {
+    notify('当前环境不支持打开原始文件');
+    return;
+  }
+  try {
+    await window.Crew.openWikiSourceFile(sourceId, kbId);
+  } catch (error) {
+    notify(`打开原始文件失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 function bindEvents(): void {
   // 选择器必须限定在本页容器内：各 tab 页常驻 DOM（隐藏而非移除），
@@ -1715,12 +2280,30 @@ function bindEvents(): void {
   });
   onClick('[data-bulk-delete]', () => void handleBulkDelete());
 
-  onClick('[data-delete-id]', (btn, e) => {
-    // 删除按钮在条目内部，阻止冒泡避免触发选中/打开详情。
+  onClick('[data-page-menu]', (btn, e) => {
+    // ⋯ 菜单按钮在条目内部，阻止冒泡避免触发选中/打开详情。
     e.stopPropagation();
-    const id = btn.getAttribute('data-delete-id') ?? '';
-    if (!id) return;
-    void handleDeletePage(id, btn.getAttribute('data-delete-title') ?? '');
+    const id = btn.getAttribute('data-page-menu') ?? '';
+    const page = view.pages.find((p) => p.id === id);
+    if (!page) return;
+    showContextMenu(btn, [
+      {
+        id: 'open',
+        label: '打开',
+        onSelect: () => selectWikiPage(page.id, { expandTree: true }),
+      },
+      {
+        id: 'rename',
+        label: '重命名',
+        onSelect: () => void handleRenamePage(page),
+      },
+      {
+        id: 'delete',
+        label: '删除',
+        danger: true,
+        onSelect: () => void handleDeletePage(page.id, page.title),
+      },
+    ]);
   });
   onClick('[data-kb-create-toggle]', () => {
     kbCreateOpen = !kbCreateOpen;
@@ -1730,6 +2313,7 @@ function bindEvents(): void {
     }
   });
   onClick('[data-wiki-tour]', () => startWikiTour());
+  onClick('[data-wiki-browser-toggle]', () => toggleWikiBrowser());
   onClick('[data-kb-create-cancel]', () => {
     kbCreateOpen = false;
     kbCreateDraft = '';
@@ -1752,34 +2336,74 @@ function bindEvents(): void {
     });
   });
 
-  // ── 左栏分栏把手：列表/树/类型视图调 listWidth；图谱视图调 graphWidth（null=弹性分配，拖过后固定像素） ──
-  $$w('[data-wiki-sash]').forEach((sash) => {
-    const pane = root.querySelector<HTMLElement>('.wiki-list-pane');
+  // ── 知识库面板把手（在面板左缘，sign=-1）：列表/树/类型视图调 browserWidth；图谱视图调 graphWidth（null=沿用 browserWidth） ──
+  $$w('[data-wiki-browser-sash]').forEach((sash) => {
+    const pane = root.querySelector<HTMLElement>('.wiki-browser-pane');
     if (!pane) return;
     bindPaneSash(sash, {
-      // 图谱模式弹性分配时 listWidth 不反映当前宽度，取实际测量值
-      startWidth: () => (view.view === 'graph' ? pane.getBoundingClientRect().width : listWidth),
+      sign: -1, // 把手在面板左缘：向左拖变宽、向右拖变窄
+      // 图谱模式 browserWidth 不反映当前宽度（可能已被 graphWidth 覆盖），取实际测量值
+      startWidth: () => (view.view === 'graph' ? pane.getBoundingClientRect().width : browserWidth),
       onDrag: (w) => {
         if (view.view === 'graph') {
           graphWidth = graphWidthStore.clamp(w);
-          // 弹性分配下 width 不生效（flex-basis: 0），需同步切为固定尺寸
-          pane.style.flex = '0 0 auto';
           pane.style.width = `${graphWidth}px`;
         } else {
-          listWidth = listWidthStore.clamp(w);
-          pane.style.width = `${listWidth}px`;
+          browserWidth = browserWidthStore.clamp(w);
+          pane.style.width = `${browserWidth}px`;
         }
       },
-      onCommit: () => (view.view === 'graph' ? graphWidthStore.persist(graphWidth) : listWidthStore.persist(listWidth)),
-      // 双击复位：列表回默认宽度；图谱回 1.5:1 弹性分配
+      onCommit: () => (view.view === 'graph' ? graphWidthStore.persist(graphWidth) : browserWidthStore.persist(browserWidth)),
+      // 双击复位：列表回默认宽度；图谱清掉拖拽固定像素，回退到 browserWidth
       onReset: () => {
         if (view.view === 'graph') {
           graphWidth = null;
           graphWidthStore.persist(null);
         } else {
-          listWidth = WIKI_LIST_DEFAULT_WIDTH;
-          listWidthStore.persist(listWidth);
+          browserWidth = WIKI_BROWSER_DEFAULT_WIDTH;
+          browserWidthStore.persist(browserWidth);
         }
+        renderShell();
+      },
+    });
+  });
+
+  // ── 目录内层把手（在目录右缘，sign=+1）：往右拖目录变宽；仅列表/树/类型视图渲染（图谱模式目录走比例分配） ──
+  $$w('[data-wiki-catalog-sash]').forEach((sash) => {
+    const pane = root.querySelector<HTMLElement>('.wiki-list-pane');
+    if (!pane) return;
+    bindPaneSash(sash, {
+      startWidth: () => catalogWidth,
+      onDrag: (w) => {
+        catalogWidth = catalogWidthStore.clamp(w);
+        pane.style.flex = `0 0 ${catalogWidth}px`;
+      },
+      onCommit: () => catalogWidthStore.persist(catalogWidth),
+      // 双击复位默认目录宽度
+      onReset: () => {
+        catalogWidth = WIKI_CATALOG_DEFAULT_WIDTH;
+        catalogWidthStore.persist(catalogWidth);
+        renderShell();
+      },
+    });
+  });
+
+  // ── 图谱画布内层把手（在画布右缘，sign=+1）：往右拖画布变宽；仅图谱视图渲染，双击清除固定像素恢复 1.5:1 弹性比例 ──
+  $$w('[data-wiki-graph-canvas-sash]').forEach((sash) => {
+    const pane = root.querySelector<HTMLElement>('.wiki-list-pane');
+    if (!pane) return;
+    bindPaneSash(sash, {
+      // 未拖拽时画布是弹性宽度（graphCanvasWidth 为 null），起始宽度取实际测量值
+      startWidth: () => graphCanvasWidth ?? pane.getBoundingClientRect().width,
+      onDrag: (w) => {
+        graphCanvasWidth = graphCanvasWidthStore.clamp(w);
+        pane.style.flex = `0 0 ${graphCanvasWidth}px`;
+      },
+      onCommit: () => graphCanvasWidthStore.persist(graphCanvasWidth),
+      // 双击复位：清掉拖拽固定像素，回到 1.5:1 弹性分配
+      onReset: () => {
+        graphCanvasWidth = null;
+        graphCanvasWidthStore.persist(null);
         renderShell();
       },
     });
@@ -1797,15 +2421,14 @@ function bindEvents(): void {
       renderShell();
       return;
     }
-    // 从 vault 文档（Home.md/index.md）切回页面时清掉文档态，否则 detailHtml 仍优先显示文档。
-    view.selectedDocumentName = null;
-    view.vaultDocument = null;
     selectWikiPage(id, { expandTree: true });
   });
 
   $$w<HTMLInputElement>('[data-wiki-title]').forEach((input) => {
+    const groupId = input.closest('[data-wiki-group]')?.getAttribute('data-wiki-group') ?? '';
     input.addEventListener('input', () => {
-      if (view.selectedId) scheduleWikiPageSave(view.selectedId);
+      const group = groupById(groupId);
+      if (group?.selectedId) scheduleWikiPageSave(group.id, group.selectedId);
     });
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
@@ -1817,23 +2440,141 @@ function bindEvents(): void {
   onClick('[data-source-page-id]', (pill) => {
     const pageId = pill.getAttribute('data-source-page-id');
     if (!pageId) return;
-    view.selectedDocumentName = null;
-    view.vaultDocument = null;
     selectWikiPage(pageId, { expandTree: true });
   });
   onClick('[data-related-page-id]', (item) => {
     const pageId = item.getAttribute('data-related-page-id');
     if (!pageId) return;
-    view.selectedDocumentName = null;
-    view.vaultDocument = null;
     selectWikiPage(pageId, { expandTree: true });
   });
 
   onClick('[data-vault-document]', (item) => {
     const name = item.getAttribute('data-vault-document');
     if (name !== 'Home.md' && name !== 'index.md') return;
-    if (name === view.selectedDocumentName && view.vaultDocument) return;
+    const group = activeGroup();
+    if (name === group.selectedDocumentName && view.vaultDocuments[name]) return;
     void loadVaultDocument(name);
+  });
+
+  // ── 详情编辑器组：tab 激活/关闭/右键拆分菜单 + 点击组内更新聚焦组 ──
+  $$w('.wiki-detail-group').forEach((section) => {
+    // mousedown 即切换聚焦组（先于 focus/click），只改 class 不重渲染，避免打扰编辑。
+    section.addEventListener('mousedown', () => {
+      const groupId = section.getAttribute('data-wiki-group') ?? '';
+      if (!groupId || view.activeGroupId === groupId) return;
+      view.activeGroupId = groupId;
+      $$w('.wiki-detail-group').forEach((el) => el.classList.toggle('is-focused', el === section));
+    });
+  });
+  onClick('[data-wiki-tab]', (btn) => {
+    const key = btn.getAttribute('data-wiki-tab') ?? '';
+    const group = groupById(btn.closest('[data-wiki-group]')?.getAttribute('data-wiki-group') ?? '');
+    if (!key || !group) return;
+    if (key === groupActiveKey(group)) {
+      view.activeGroupId = group.id;
+      return;
+    }
+    const tab = group.tabs.find((t) => tabKey(t) === key);
+    if (!tab) return;
+    activateTabInGroup(group, tab);
+  });
+  onClick('[data-wiki-tab-close]', (btn, e) => {
+    // 关闭按钮在 chip 内部，阻止冒泡避免触发激活。
+    e.stopPropagation();
+    const key = btn.getAttribute('data-wiki-tab-close') ?? '';
+    if (key) void closeWikiTab(key);
+  });
+  $$w('[data-wiki-tab-chip]').forEach((chip) => {
+    // tab 右键菜单：单组时「向右拆分」「向下拆分」；两组时「移到另一组」。
+    chip.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const key = chip.getAttribute('data-wiki-tab-chip') ?? '';
+      const owner = key ? findTabOwner(key) : null;
+      if (!key || !owner) return;
+      const items: ContextMenuItem[] =
+        view.detailGroups.length < 2
+          ? [
+              { id: 'split-right', label: '向右拆分', onSelect: () => splitGroupToOrientation(key, 'row') },
+              { id: 'split-down', label: '向下拆分', onSelect: () => splitGroupToOrientation(key, 'column') },
+            ]
+          : [
+              {
+                id: 'move-to-other',
+                label: '移到另一组',
+                onSelect: () => {
+                  const other = view.detailGroups.find((g) => g.id !== owner.id);
+                  if (other) moveTabToGroup(key, other.id);
+                },
+              },
+            ];
+      showContextMenu(chip, items);
+    });
+    // tab 拖拽：dragstart 记录 { tabKey, sourceGroupId }（模块级变量），落点由详情区 dragover/drop 判定。
+    chip.addEventListener('dragstart', (e) => {
+      const key = chip.getAttribute('data-wiki-tab-chip') ?? '';
+      const groupId = chip.closest('[data-wiki-group]')?.getAttribute('data-wiki-group') ?? '';
+      if (!key || !groupId) return;
+      tabDrag = { tabKey: key, sourceGroupId: groupId };
+      (e as DragEvent).dataTransfer?.setData('text/plain', key);
+    });
+    chip.addEventListener('dragend', () => {
+      tabDrag = null;
+      const container = root.querySelector<HTMLElement>('.wiki-detail-groups');
+      if (container) clearDropZoneHighlight(container);
+    });
+  });
+
+  // 拖拽经过详情区：dragover 判定落点并高亮（两组时只有组落点；单组时四边缘为拆分落点）。
+  const detailGroupsEl = root.querySelector<HTMLElement>('.wiki-detail-groups');
+  if (detailGroupsEl) {
+    detailGroupsEl.addEventListener('dragover', (e) => {
+      if (!tabDrag) return;
+      e.preventDefault();
+      highlightDropZone(detailGroupsEl, dropZoneAtPoint(detailGroupsEl, e.clientX, e.clientY));
+    });
+    detailGroupsEl.addEventListener('dragleave', (e) => {
+      const related = (e as DragEvent).relatedTarget as Node | null;
+      if (!related || !detailGroupsEl.contains(related)) clearDropZoneHighlight(detailGroupsEl);
+    });
+    detailGroupsEl.addEventListener('drop', (e) => {
+      if (!tabDrag) return;
+      e.preventDefault();
+      const zone = dropZoneAtPoint(detailGroupsEl, e.clientX, e.clientY);
+      const drag = tabDrag;
+      tabDrag = null;
+      clearDropZoneHighlight(detailGroupsEl);
+      if (zone) resolveTabDrop(drag.tabKey, drag.sourceGroupId, zone);
+    });
+  }
+
+  // ── 组间把手（两组时渲染）：row 方向调宽度比，column 方向调高度比；比例持久化，双击复位 50% ──
+  $$w('[data-wiki-group-sash]').forEach((sash) => {
+    const container = root.querySelector<HTMLElement>('.wiki-detail-groups');
+    const sections = container?.querySelectorAll<HTMLElement>('.wiki-detail-group');
+    const first = sections?.[0];
+    const second = sections?.[1];
+    if (!container || !first || !second) return;
+    const axis = view.groupOrientation === 'column' ? 'y' : 'x';
+    // 容器尺寸换算「像素↔百分比」；happy-dom 等 rect 为 0 的环境回落 1000px 假定尺寸。
+    const containerSize = (): number =>
+      (axis === 'y' ? container.getBoundingClientRect().height : container.getBoundingClientRect().width) || 1000;
+    bindPaneSash(sash, {
+      axis,
+      startWidth: () => (groupSplitRatio / 100) * containerSize(),
+      onDrag: (w) => {
+        groupSplitRatio = groupSplitStore.clamp((w / containerSize()) * 100);
+        first.style.flex = `${groupSplitRatio} 1 0`;
+        second.style.flex = `${100 - groupSplitRatio} 1 0`;
+      },
+      onCommit: () => groupSplitStore.persist(groupSplitRatio),
+      // 双击复位 50%（清存储，回默认）；直接改内联比例，不走 renderShell（保活子树会带回旧内联值）。
+      onReset: () => {
+        groupSplitRatio = 50;
+        groupSplitStore.persist(null);
+        first.style.flex = '50 1 0';
+        second.style.flex = '50 1 0';
+      },
+    });
   });
 
   onClick('[data-tree-path]', (btn) => {
@@ -1848,6 +2589,20 @@ function bindEvents(): void {
   if (root.dataset.wikiRelBound !== 'true') {
     root.dataset.wikiRelBound = 'true';
     root.addEventListener('click', (e) => {
+      // 「打开原始文件」链接（/api/wiki/sources/{id}/file）：web 端相对地址
+      // 指向 gateway 可直接打开；桌面端渲染进程够不到 gateway，拦截后交给
+      // 主进程查询原始路径并用系统默认程序打开。
+      const fileLink = (e.target as HTMLElement).closest('a[href*="/api/wiki/sources/"]') as HTMLAnchorElement | null;
+      if (fileLink) {
+        const href = fileLink.getAttribute('href') ?? '';
+        const match = href.match(/\/api\/wiki\/sources\/([^/?]+)\/file(?:\?|$)/);
+        if (match) {
+          e.preventDefault();
+          const kbFromHref = new URLSearchParams(href.split('?')[1] ?? '').get('kb_id');
+          void openWikiSourceFile(decodeURIComponent(match[1]), kbFromHref || undefined);
+          return;
+        }
+      }
       const askBtn = (e.target as HTMLElement).closest('[data-wiki-ask]') as HTMLElement | null;
       if (askBtn) {
         fireWikiAgentPrompt(askBtn.getAttribute('data-wiki-ask') ?? '');

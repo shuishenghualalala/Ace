@@ -134,6 +134,192 @@ export const GatewayFetchArgs = {
   },
 };
 
+export type SecurityApprovalDecision = 'once' | 'session' | 'always' | 'reject';
+
+export interface SecurityPendingArgs {
+  workspaceId: string;
+  sessionId: string;
+  taskId?: string;
+}
+
+export const SecurityPendingArgs = {
+  parse(raw: unknown): ParseResult<SecurityPendingArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const workspaceId = StringSchema.parse(raw['workspaceId'], 'workspaceId');
+    if (!workspaceId.ok) return workspaceId;
+    const sessionId = StringSchema.parse(raw['sessionId'], 'sessionId');
+    if (!sessionId.ok) return sessionId;
+    const taskId = OptionalStringSchema.parse(raw['taskId'], 'taskId');
+    if (!taskId.ok) return taskId;
+    return { ok: true, value: { workspaceId: workspaceId.value, sessionId: sessionId.value, ...(taskId.value ? { taskId: taskId.value } : {}) } };
+  },
+};
+
+export interface SecurityModeArgs {
+  workspaceId: string;
+  sessionId: string;
+  mode: 'request_approval' | 'auto_review' | 'full_access';
+}
+
+export const SecurityModeArgs = {
+  parse(raw: unknown): ParseResult<SecurityModeArgs> {
+    const base = SecurityPendingArgs.parse(raw);
+    if (!base.ok) return base;
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const mode = raw['mode'];
+    if (!['request_approval', 'auto_review', 'full_access'].includes(String(mode))) {
+      return fail('mode', 'must be request_approval, auto_review, or full_access');
+    }
+    return {
+      ok: true,
+      value: {
+        workspaceId: base.value.workspaceId,
+        sessionId: base.value.sessionId,
+        mode: mode as SecurityModeArgs['mode'],
+      },
+    };
+  },
+};
+
+export interface SecurityDecisionArgs extends SecurityPendingArgs {
+  requestId: string;
+  decision: SecurityApprovalDecision;
+  alwaysArgvPrefix?: string[];
+}
+
+export const SecurityDecisionArgs = {
+  parse(raw: unknown): ParseResult<SecurityDecisionArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const base = SecurityPendingArgs.parse(raw);
+    if (!base.ok) return base;
+    const requestId = StringSchema.parse(raw['requestId'], 'requestId');
+    if (!requestId.ok) return requestId;
+    const decision = raw['decision'];
+    if (!['once', 'session', 'always', 'reject'].includes(String(decision))) {
+      return fail('decision', 'must be once, session, always, or reject');
+    }
+    let alwaysArgvPrefix: string[] | undefined;
+    if (raw['alwaysArgvPrefix'] !== undefined) {
+      if (!Array.isArray(raw['alwaysArgvPrefix']) || raw['alwaysArgvPrefix'].length === 0) {
+        return fail('alwaysArgvPrefix', 'must be a non-empty string array');
+      }
+      alwaysArgvPrefix = [];
+      for (const [index, token] of raw['alwaysArgvPrefix'].entries()) {
+        const parsed = StringSchema.parse(token, `alwaysArgvPrefix.${index}`);
+        if (!parsed.ok) return parsed;
+        alwaysArgvPrefix.push(parsed.value);
+      }
+    }
+    return {
+      ok: true,
+      value: {
+        ...base.value,
+        requestId: requestId.value,
+        decision: decision as SecurityApprovalDecision,
+        ...(alwaysArgvPrefix ? { alwaysArgvPrefix } : {}),
+      },
+    };
+  },
+};
+
+export interface SecurityWorkspaceArgs { workspaceId: string }
+export const SecurityWorkspaceArgs = {
+  parse(raw: unknown): ParseResult<SecurityWorkspaceArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const workspaceId = StringSchema.parse(raw['workspaceId'], 'workspaceId');
+    return workspaceId.ok ? { ok: true, value: { workspaceId: workspaceId.value } } : workspaceId;
+  },
+};
+
+export interface SecurityRuleMutationArgs extends SecurityWorkspaceArgs {
+  ruleId: string;
+  enabled?: boolean;
+}
+export const SecurityRuleMutationArgs = {
+  parse(raw: unknown): ParseResult<SecurityRuleMutationArgs> {
+    const base = SecurityWorkspaceArgs.parse(raw);
+    if (!base.ok) return base;
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const ruleId = StringSchema.parse(raw['ruleId'], 'ruleId');
+    if (!ruleId.ok) return ruleId;
+    if (raw['enabled'] !== undefined && typeof raw['enabled'] !== 'boolean') {
+      return fail('enabled', 'expected boolean');
+    }
+    return { ok: true, value: { ...base.value, ruleId: ruleId.value, ...(typeof raw['enabled'] === 'boolean' ? { enabled: raw['enabled'] } : {}) } };
+  },
+};
+
+export interface SecurityAuditArgs {
+  offset?: number;
+  limit?: number;
+  actionType?: '' | 'approval_requested' | 'approval_decision' | 'exec_decision'
+    | 'file_decision' | 'network_decision' | 'exec_result' | 'rule_created'
+    | 'rule_disabled' | 'rule_deleted' | 'audit_purged';
+  decision?: '' | 'allow' | 'deny' | 'pending' | 'ask' | 'once' | 'session'
+    | 'always' | 'reject' | 'completed' | 'failed' | 'cancelled' | 'error'
+    | 'enabled' | 'disabled' | 'deleted';
+  sessionId?: string;
+  sort?: 'newest' | 'oldest';
+}
+export const SecurityAuditArgs = {
+  parse(raw: unknown): ParseResult<SecurityAuditArgs> {
+    if (raw === undefined) return { ok: true, value: {} };
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const value: SecurityAuditArgs = {};
+    for (const key of ['offset', 'limit'] as const) {
+      const item = raw[key];
+      if (item !== undefined && (!Number.isInteger(item) || Number(item) < 0)) return fail(key, 'expected non-negative integer');
+      if (item !== undefined) value[key] = Number(item);
+    }
+    const actionType = raw['actionType'];
+    const actionTypes = [
+      '', 'approval_requested', 'approval_decision', 'exec_decision', 'file_decision',
+      'network_decision', 'exec_result', 'rule_created', 'rule_disabled', 'rule_deleted',
+      'audit_purged',
+    ];
+    if (actionType !== undefined && !actionTypes.includes(String(actionType))) {
+      return fail('actionType', 'unexpected audit action type');
+    }
+    if (actionType !== undefined) {
+      value.actionType = String(actionType) as NonNullable<SecurityAuditArgs['actionType']>;
+    }
+    const decision = raw['decision'];
+    const decisions = [
+      '', 'allow', 'deny', 'pending', 'ask', 'once', 'session', 'always', 'reject',
+      'completed', 'failed', 'cancelled', 'error', 'enabled', 'disabled', 'deleted',
+    ];
+    if (decision !== undefined && !decisions.includes(String(decision))) {
+      return fail('decision', 'unexpected audit decision');
+    }
+    if (decision !== undefined) {
+      value.decision = String(decision) as NonNullable<SecurityAuditArgs['decision']>;
+    }
+    const sessionId = raw['sessionId'];
+    if (sessionId !== undefined && (typeof sessionId !== 'string' || sessionId.length > 160)) {
+      return fail('sessionId', 'expected string up to 160 characters');
+    }
+    if (typeof sessionId === 'string') value.sessionId = sessionId.trim();
+    const sort = raw['sort'];
+    if (sort !== undefined && sort !== 'newest' && sort !== 'oldest') {
+      return fail('sort', 'expected newest or oldest');
+    }
+    if (sort === 'newest' || sort === 'oldest') value.sort = sort;
+    return { ok: true, value };
+  },
+};
+
+export interface SecuritySetupArgs { action: 'install' | 'repair' | 'uninstall' }
+export const SecuritySetupArgs = {
+  parse(raw: unknown): ParseResult<SecuritySetupArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const action = raw['action'];
+    if (action !== 'install' && action !== 'repair' && action !== 'uninstall') {
+      return fail('action', 'expected install, repair, or uninstall');
+    }
+    return { ok: true, value: { action } };
+  },
+};
+
 /**
  * gateway:upload args。
  * 与 gateway:fetch 相同的 hostname 白名单 + 主进程 host 钳制；
@@ -240,6 +426,23 @@ export const ShellOpenPathArgs = {
   },
 };
 
+/** Workspace directory probes identify a server-owned Workspace, never a renderer path. */
+export interface WorkspaceDirectoryArgs {
+  workspaceId: string;
+}
+
+export const WorkspaceDirectoryArgs = {
+  parse(raw: unknown): ParseResult<WorkspaceDirectoryArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    if ('path' in raw || 'allowedRoot' in raw) {
+      return fail('args.path', 'renderer-provided paths are not allowed');
+    }
+    const workspaceId = StringSchema.parse(raw['workspaceId'], 'workspaceId');
+    if (!workspaceId.ok) return workspaceId;
+    return { ok: true, value: { workspaceId: workspaceId.value } };
+  },
+};
+
 /** shell:openPathWith args。applicationId 必须由 shell:listOpenApplications 返回。 */
 export interface ShellOpenPathWithArgs {
   path: string;
@@ -260,6 +463,38 @@ export const ShellOpenPathWithArgs = {
         applicationId: applicationId.value,
       },
     };
+  },
+};
+
+/**
+ * wiki:openSourceFile args（仅结构校验）。
+ * 渲染进程只传 sourceId/kbId，文件路径由主进程向 gateway 查询来源元数据后
+ * 自行校验（必须在 CREW_HOME 内）再打开，渲染进程无法伪造任意路径。
+ */
+export interface WikiOpenSourceFileArgs {
+  sourceId: string;
+  kbId?: string;
+}
+
+export const WikiOpenSourceFileArgs = {
+  parse(raw: unknown): ParseResult<WikiOpenSourceFileArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const sourceId = StringSchema.parse(raw['sourceId'], 'sourceId');
+    if (!sourceId.ok) return sourceId;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(sourceId.value)) {
+      return fail('sourceId', 'invalid characters');
+    }
+    const value: WikiOpenSourceFileArgs = { sourceId: sourceId.value };
+    const kbId = raw['kbId'];
+    if (kbId !== undefined && kbId !== null) {
+      const k = StringSchema.parse(kbId, 'kbId');
+      if (!k.ok) return k;
+      if (/[/\\:]/.test(k.value) || k.value.includes('\0') || k.value.length > 64) {
+        return fail('kbId', 'invalid characters');
+      }
+      value.kbId = k.value;
+    }
+    return { ok: true, value };
   },
 };
 
@@ -300,6 +535,7 @@ export const ShellWriteFileBase64Args = {
 export interface UpdateStartDownloadArgs {
   version: string;
   type: 'force' | 'reminder';
+  url?: string | undefined;
 }
 
 export const UpdateStartDownloadArgs = {
@@ -312,7 +548,11 @@ export const UpdateStartDownloadArgs = {
     if (rawType !== 'force' && rawType !== 'reminder') {
       return fail('type', 'must be force or reminder');
     }
-    return { ok: true, value: { version: version.value.trim(), type: rawType } };
+    const url = raw['url'];
+    if (url !== undefined && typeof url !== 'string') {
+      return fail('url', 'must be string');
+    }
+    return { ok: true, value: { version: version.value.trim(), type: rawType, url: url as string | undefined } };
   },
 };
 
@@ -356,6 +596,7 @@ export interface FeedbackSubmitArgs {
   title: string;
   description: string;
   images?: Array<{ name: string; dataUrl: string }>;
+  userId?: string;
 }
 
 export const FeedbackSubmitArgs = {
@@ -389,8 +630,12 @@ export const FeedbackSubmitArgs = {
       }
     }
 
+    const userId = OptionalStringSchema.parse(raw['userId'], 'userId');
+    if (!userId.ok) return userId;
+
     const value: FeedbackSubmitArgs = { title: title.value, description: description.value };
     if (images !== undefined) value.images = images;
+    if (userId.value !== undefined) value.userId = userId.value;
     return { ok: true, value };
   },
 };
@@ -398,7 +643,7 @@ export const FeedbackSubmitArgs = {
 /**
  * feedback:list args.
  * page: positive int (default 1), size: positive int capped at 100 (default 20),
- * status: optional enum.
+ * status: optional enum, staffCode: optional non-empty string.
  *
  * Note: the values here are the validated/normalized defaults; the consumer
  * (feedback-service) widens them to Partial<FeedbackListRequest>.
@@ -407,6 +652,7 @@ export interface FeedbackListArgs {
   page: number;
   size: number;
   status?: 'PENDING' | 'PROCESSING' | 'RESOLVED' | 'CLOSED';
+  staffCode?: string;
 }
 
 const FEEDBACK_LIST_MAX_SIZE = 100;
@@ -451,24 +697,15 @@ export const FeedbackListArgs = {
       value.status = statusRaw;
     }
 
-    return { ok: true, value };
-  },
-};
-
-/** feedback:delete args. id: positive integer (服务端记录主键). */
-export interface FeedbackDeleteArgs {
-  id: number;
-}
-
-export const FeedbackDeleteArgs = {
-  parse(raw: unknown): ParseResult<FeedbackDeleteArgs> {
-    if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const idRaw = (raw as Record<string, unknown>)['id'];
-    if (typeof idRaw !== 'number' || !Number.isFinite(idRaw) || !Number.isInteger(idRaw)) {
-      return fail('id', 'expected positive integer');
+    // staffCode: optional non-empty string
+    const staffCodeRaw = (raw as Record<string, unknown>)['staffCode'];
+    if (staffCodeRaw !== undefined) {
+      const sc = StringSchema.parse(staffCodeRaw, 'staffCode');
+      if (!sc.ok) return sc;
+      value.staffCode = sc.value;
     }
-    if (idRaw <= 0) return fail('id', 'must be >= 1');
-    return { ok: true, value: { id: idRaw } };
+
+    return { ok: true, value };
   },
 };
 
@@ -568,5 +805,50 @@ export const DialogSelectFolderArgs = {
     if (raw === undefined || raw === null) return { ok: true, value: {} };
     if (!isPlainObject(raw)) return fail('args', 'expected object');
     return { ok: true, value: {} };
+  },
+};
+
+export interface DialogSaveLocalExportArgs {
+  sourcePath: string;
+  suggestedName: string;
+}
+
+/** 将后端在 Crew Home 内生成的 ZIP 复制到用户通过保存对话框选择的位置。 */
+export const DialogSaveLocalExportArgs = {
+  parse(raw: unknown): ParseResult<DialogSaveLocalExportArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const sourcePath = StringSchema.parse(raw['sourcePath'], 'sourcePath');
+    if (!sourcePath.ok) return sourcePath;
+    const suggestedName = StringSchema.parse(raw['suggestedName'], 'suggestedName');
+    if (!suggestedName.ok) return suggestedName;
+    if (!ABSOLUTE_PATH_RE.test(sourcePath.value)) return fail('sourcePath', 'must be an absolute path');
+    if (suggestedName.value.includes('/') || suggestedName.value.includes('\\') || suggestedName.value.includes('\0')) {
+      return fail('suggestedName', 'must be a plain filename');
+    }
+    if (!suggestedName.value.toLowerCase().endsWith('.zip')) return fail('suggestedName', 'must end with .zip');
+    return { ok: true, value: { sourcePath: sourcePath.value, suggestedName: suggestedName.value } };
+  },
+};
+
+export interface InspirationWindowArgs {
+  inspirationId: string;
+  title?: string;
+}
+
+/** 灵感悬浮窗只能打开后端生成的受控 site/canvas 标识，不能接收任意 URL。 */
+export const InspirationWindowArgs = {
+  parse(raw: unknown): ParseResult<InspirationWindowArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const inspirationId = StringSchema.parse(raw['inspirationId'], 'inspirationId');
+    if (!inspirationId.ok) return inspirationId;
+    if (!/^(?:site|canvas)_[0-9a-f]{12}$/i.test(inspirationId.value)) {
+      return fail('inspirationId', 'must be a site_* or canvas_* id');
+    }
+    const title = OptionalStringSchema.parse(raw['title'], 'title');
+    if (!title.ok) return title;
+    if ((title.value || '').length > 200) return fail('title', 'max 200 chars');
+    const value: InspirationWindowArgs = { inspirationId: inspirationId.value };
+    if (title.value !== undefined) value.title = title.value;
+    return { ok: true, value };
   },
 };

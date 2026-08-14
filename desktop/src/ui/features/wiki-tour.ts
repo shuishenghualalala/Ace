@@ -3,9 +3,11 @@
  *
  * 入口：首次进入 Wiki 页自动启动一次（localStorage 标记，见 maybeStartWikiTourOnce），
  * 之后可通过页头「?」按钮随时重新启动（startWikiTour）。
- * 纯文字教程和界面对应不起来，导览直接把每个功能的位置指给用户看。
+ * 卡片视觉复用模型与外援导览的 mw-tour-card，直接把每个功能的位置指给用户看。
  * 目标元素不存在时（如未登录态缺少对话栏）自动跳过该步。
  */
+
+import { setRuntimeStyle } from '../components/runtime-style';
 
 const TOUR_SEEN_KEY = 'crew.desktop.wikiTourSeen.v1';
 const HIGHLIGHT_PADDING = 6;
@@ -19,12 +21,12 @@ interface TourStep {
   desc: string;
 }
 
-/** 使用引导只讲两件事：有疑问问右侧智能体；完整教程在「教程」知识库。 */
+/** 使用引导只讲两件事：有疑问问左侧智能体；完整教程在「教程」知识库。 */
 const TOUR_STEPS: TourStep[] = [
   {
     selector: '[data-wiki-agent-panel]',
     title: '有疑问？先问这里的智能体',
-    desc: '右侧对话栏的 Wiki Agent 就是你的使用助手：功能怎么用、操作出了什么问题、想让它帮你整理内容……直接用大白话问它，什么都能解答。把 AI 当助手来沟通，是最快的用法。',
+    desc: '左侧对话区的 Wiki Agent 就是你的使用助手：功能怎么用、操作出了什么问题、想让它帮你整理内容……直接用大白话问它，什么都能解答。把 AI 当助手来沟通，是最快的用法。',
   },
   {
     selector: '#wiki-kb-select',
@@ -91,7 +93,7 @@ function placeTooltip(tooltip: HTMLElement, rect: DOMRect): void {
   let top: number;
 
   if (rect.left > vw * 0.6 && rect.left - TOOLTIP_GAP - tipW > VIEWPORT_MARGIN) {
-    // 目标靠右（如 Wiki Agent 面板）：气泡放左侧，垂直方向与目标顶部对齐并夹取。
+    // 目标靠右（如知识库面板）：气泡放左侧，垂直方向与目标顶部对齐并夹取。
     left = rect.left - TOOLTIP_GAP - tipW;
     top = clamp(rect.top, VIEWPORT_MARGIN, vh - tipH - VIEWPORT_MARGIN);
   } else {
@@ -104,8 +106,8 @@ function placeTooltip(tooltip: HTMLElement, rect: DOMRect): void {
     left = clamp(rect.left + rect.width / 2 - tipW / 2, VIEWPORT_MARGIN, vw - tipW - VIEWPORT_MARGIN);
   }
 
-  tooltip.style.left = `${Math.round(left)}px`;
-  tooltip.style.top = `${Math.round(top)}px`;
+  setRuntimeStyle(tooltip, 'left', `${Math.round(left)}px`);
+  setRuntimeStyle(tooltip, 'top', `${Math.round(top)}px`);
 }
 
 function showStep(index: number): void {
@@ -122,10 +124,10 @@ function showStep(index: number): void {
   const tooltip = container.querySelector<HTMLElement>('.wiki-tour__tooltip');
   if (!highlight || !tooltip) return;
 
-  highlight.style.left = `${step.rect.left - HIGHLIGHT_PADDING}px`;
-  highlight.style.top = `${step.rect.top - HIGHLIGHT_PADDING}px`;
-  highlight.style.width = `${step.rect.width + HIGHLIGHT_PADDING * 2}px`;
-  highlight.style.height = `${step.rect.height + HIGHLIGHT_PADDING * 2}px`;
+  setRuntimeStyle(highlight, 'left', `${step.rect.left - HIGHLIGHT_PADDING}px`);
+  setRuntimeStyle(highlight, 'top', `${step.rect.top - HIGHLIGHT_PADDING}px`);
+  setRuntimeStyle(highlight, 'width', `${step.rect.width + HIGHLIGHT_PADDING * 2}px`);
+  setRuntimeStyle(highlight, 'height', `${step.rect.height + HIGHLIGHT_PADDING * 2}px`);
 
   tooltip.querySelector('.wiki-tour__title')!.textContent = step.title;
   tooltip.querySelector('.wiki-tour__desc')!.textContent = step.desc;
@@ -133,7 +135,7 @@ function showStep(index: number): void {
 
   const prevBtn = tooltip.querySelector<HTMLButtonElement>('[data-tour-prev]')!;
   const nextBtn = tooltip.querySelector<HTMLButtonElement>('[data-tour-next]')!;
-  prevBtn.disabled = current === 0;
+  prevBtn.hidden = current === 0;
   nextBtn.textContent = current === steps.length - 1 ? '完成' : '下一步';
 
   // 先更新内容再测量定位（内容高度影响放置方向）。
@@ -151,18 +153,18 @@ export function startWikiTour(): void {
   container.innerHTML = `
     <div class="wiki-tour__mask"></div>
     <div class="wiki-tour__highlight"></div>
-    <div class="wiki-tour__tooltip" role="dialog" aria-label="界面导览">
-      <div class="wiki-tour__title"></div>
+    <aside class="wiki-tour__tooltip mw-tour-card" role="dialog" aria-label="界面导览">
+      <div class="mw-tour-card__top"><span class="mw-tour-card__spark" aria-hidden="true"></span><span class="wiki-tour__progress"></span></div>
+      <strong class="wiki-tour__title"></strong>
       <p class="wiki-tour__desc"></p>
-      <div class="wiki-tour__foot">
-        <span class="wiki-tour__progress"></span>
-        <div class="wiki-tour__actions">
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--ghost" data-tour-skip>跳过</button>
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--ghost" data-tour-prev>上一步</button>
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--primary" data-tour-next>下一步</button>
+      <div class="mw-tour-card__actions">
+        <button type="button" class="mw-tour-card__quiet" data-tour-skip>跳过</button>
+        <div class="mw-tour-card__steps">
+          <button type="button" class="mw-tour-card__secondary" data-tour-prev>上一步</button>
+          <button type="button" class="mw-tour-card__primary" data-tour-next>下一步</button>
         </div>
       </div>
-    </div>`;
+    </aside>`;
 
   container.querySelector('[data-tour-skip]')!.addEventListener('click', closeWikiTour);
   container.querySelector('[data-tour-prev]')!.addEventListener('click', () => showStep(current - 1));

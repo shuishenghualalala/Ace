@@ -45,7 +45,7 @@ import {
   type AnyChatChunk,
   type ReducerSnapshot,
 } from '../../src/ui/reducers/chat-reducer';
-import { __resetAllStoresForTest, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 import { patchBook, setBookTodos, setBusy, type Bookkeeping } from '../../src/ui/state';
 
 const { mockOpenSession, mockLoadBackendHistory, mockShowConfirmDialog, mockOpenModelSelectPopover } = vi.hoisted(() => ({
@@ -73,6 +73,7 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       sessionTodos: vi.fn(),
       getSessionModel: vi.fn(),
       setSessionModel: vi.fn(),
+      deleteSession: vi.fn(async () => ({ ok: true })),
       sessions: vi.fn(async () => []),
       channelSessions: vi.fn(async () => ({ platforms: [] })),
     },
@@ -114,6 +115,7 @@ vi.mock('../../src/ui/features/system-page', () => ({ renderSystemOverview: vi.f
 vi.mock('../../src/ui/features/attachments', () => ({
   takeAttachmentsForSend: vi.fn(() => []),
   renderAttachmentPreview: vi.fn(),
+  renderAttachmentList: vi.fn(),
   bindFilePaste: vi.fn(),
   bindFileDrop: vi.fn(),
 }));
@@ -137,6 +139,7 @@ const api = backendApi as unknown as {
   sessionTodos: ReturnType<typeof vi.fn>;
   getSessionModel: ReturnType<typeof vi.fn>;
   setSessionModel: ReturnType<typeof vi.fn>;
+  deleteSession: ReturnType<typeof vi.fn>;
 };
 
 const mockSelectFile = vi.fn();
@@ -185,9 +188,10 @@ async function enterWiki(): Promise<string> {
 
 /** 发送一条消息并返回 payload 的 request_id。 */
 async function sendAndGetRequestId(text: string): Promise<string> {
-  const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
+  const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
   input.value = text;
-  document.querySelector<HTMLFormElement>('[data-wiki-agent-form]')!.requestSubmit();
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')!.click();
   await vi.waitFor(() => expect(socket().send).toHaveBeenCalled());
   const payload = socket().send.mock.calls.at(-1)?.[0] as { request_id: string };
   return payload.request_id;
@@ -212,6 +216,8 @@ beforeEach(() => {
     value: localStorageStub,
   });
   configStore.set({ configModel: 'test-model' });
+  // Composer（主对话本体）未登录会禁用输入/发送；测试默认已登录。
+  authStore.set({ isLoggedIn: true });
   workspaceStore.set({
     currentWorkspaceId: 'default',
     workspaces: [{ id: 'default', name: '对话', description: '', instructions: '' }],
@@ -234,11 +240,11 @@ beforeEach(() => {
     <section id="chat-panel" hidden>
       <div id="chat-messages"></div>
       <div id="chat-wiki-slot"></div>
-      <div id="chat-queue-slot"></div>
-      <div id="chat-todo-slot"></div>
+      <div class="chat-queue-slot"></div>
+      <div class="chat-todo-slot"></div>
       <div id="composer-controls"></div>
-      <div id="chat-running-intro"></div>
-      <textarea id="chat-input"></textarea>
+      <div class="chat-running-intro"></div>
+      <textarea data-composer-input></textarea>
     </section>
     <section id="wiki-tab" class="tab-pane"><div id="wiki-page-root"></div></section>
   `;
@@ -317,6 +323,49 @@ describe('wiki_cards 渲染', () => {
     expect(viewBtn?.textContent).toBe('查看');
   });
 
+  it('点卡片「查看」打开详情时不动左侧对话（DOM 与滚动位置保持）', async () => {
+    await enterWiki();
+    const rid = await sendAndGetRequestId('查一下');
+    applyChunk({
+      kind: 'final',
+      body: { text: '这是答案' },
+      session_id: WIKI_SID,
+      request_id: rid,
+      sequence: 2,
+      is_final: true,
+    } as ChatChunk);
+    applyChunk({
+      kind: 'wiki_cards',
+      body: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法' })] },
+      session_id: WIKI_SID,
+      request_id: rid,
+      sequence: 3,
+      is_final: false,
+    } as ChatChunk);
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-view-page]')).not.toBeNull());
+
+    const messages = document.querySelector<HTMLElement>('[data-wiki-agent-messages]')!;
+    const cardsPanel = messages.querySelector('.wiki-cards-panel');
+    // 记录滚动写入：谁动了 scrollTop 一览无遗
+    const scrollWrites: number[] = [];
+    let scrollValue = 456;
+    Object.defineProperty(messages, 'scrollTop', {
+      get: () => scrollValue,
+      set: (v: number) => { scrollWrites.push(v); scrollValue = v; },
+      configurable: true,
+    });
+
+    (document.querySelector('[data-wiki-view-page]') as HTMLElement).click();
+    await vi.waitFor(() => expect(api.wikiPage).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(messages.isConnected).toBe(true);
+    expect(messages.querySelector('.wiki-cards-panel')).toBe(cardsPanel);
+    // renderShell 重建时短暂 detach 会重置浏览器滚动位置,修复后应恢复为记住的值
+    expect(scrollWrites).toContain(456);
+    expect(scrollValue).toBe(456);
+  });
+
   it('旧 request_id 的迟到 wiki_cards 被 turn gate 丢弃', async () => {
     await enterWiki();
     const rid = await sendAndGetRequestId('查一下');
@@ -374,11 +423,10 @@ describe('反向注入 prompt', () => {
 // ── wiki-page 入口挂点 ──
 
 describe('wiki-page 入口挂点', () => {
-  it('Wiki Composer 的 hidden 按钮规则同时覆盖发送和停止按钮', () => {
-    const css = readFileSync('assets/styles/wiki-page.css', 'utf8');
-    expect(css).toMatch(
-      /\.wiki-agent-pane__composer\s+\.chat-stop-btn\[hidden\],\s*\.wiki-agent-pane__composer\s+\.send-btn\[hidden\]\s*\{\s*display:\s*none;/,
-    );
+  it('Wiki Composer 的发送/停止按钮显隐走 Composer 全局 [hidden] 规则', () => {
+    // 重构后 Wiki 对话用主对话 Composer 本体（mw-composer），按钮显隐由 composer.css 统一承担。
+    const css = readFileSync('assets/styles/composer.css', 'utf8');
+    expect(css).toMatch(/\.mw-composer\s+\[hidden\]\s*\{\s*display:\s*none;/);
   });
 
   it('Wiki 页面渲染三栏右侧 Agent，并在当前页发送到按 KB 隔离的会话', async () => {
@@ -401,7 +449,7 @@ describe('wiki-page 入口挂点', () => {
     expect(messages.classList.contains('chat-messages')).toBe(true);
     expect(messages.classList.contains('web-flow')).toBe(true);
     expect(panel.textContent).not.toContain('已连接');
-    expect(panel.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')?.placeholder)
+    expect(panel.querySelector<HTMLTextAreaElement>('[data-composer-input]')?.placeholder)
       .toBe('基于知识库提问');
     // 空态标语 + 底部免责声明
     await vi.waitFor(() => {
@@ -411,10 +459,10 @@ describe('wiki-page 入口挂点', () => {
     expect(api.wikiAgentSession).toHaveBeenCalledWith('default');
     expect(mockOpenSession).not.toHaveBeenCalled();
 
-    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
     input.value = '总结当前知识库';
-    document.querySelector<HTMLFormElement>('[data-wiki-agent-form]')!
-      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')!.click();
 
     await vi.waitFor(() => expect(socket().send).toHaveBeenCalled());
     const payload = socket().send.mock.calls.at(-1)?.[0] as Record<string, unknown>;
@@ -422,6 +470,51 @@ describe('wiki-page 入口挂点', () => {
     expect(payload.query).toBe('总结当前知识库');
     expect(payload.wiki_kb_id).toBe('default');
     expect(uiStore.get().activeTab).toBe('wiki');
+  });
+
+  it('面板内消息复制按钮可用（不依赖 #chat-messages 的全局委托）', async () => {
+    uiStore.set({ activeTab: 'wiki' });
+    await refreshWikiData();
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+
+    const messages = document.querySelector<HTMLElement>('[data-wiki-agent-messages]')!;
+    messages.innerHTML = '<button type="button" class="chat-copy-btn" data-copy="复制这段">复制</button>';
+    messages.querySelector<HTMLButtonElement>('.chat-copy-btn')!.click();
+
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('复制这段'));
+  });
+
+  it('历史对话浮层支持删除非当前会话', async () => {
+    uiStore.set({ activeTab: 'wiki' });
+    await refreshWikiData();
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+
+    api.wikiAgentSessions.mockResolvedValue({
+      ok: true,
+      kb_id: 'default',
+      sessions: [
+        { session_id: WIKI_SID, title: '当前会话', updated_at: NOW, message_count: 2 },
+        { session_id: 'wiki-old-1', title: '旧会话', updated_at: NOW - 60, message_count: 1 },
+      ],
+    });
+
+    document.querySelector<HTMLButtonElement>('[data-wiki-agent-history]')!.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-wiki-agent-history-delete="wiki-old-1"]')).not.toBeNull();
+    });
+
+    document.querySelector<HTMLButtonElement>('[data-wiki-agent-history-delete="wiki-old-1"]')!.click();
+
+    await vi.waitFor(() => expect(api.deleteSession).toHaveBeenCalledWith('wiki-old-1'));
+    expect(mockShowConfirmDialog).toHaveBeenCalled();
+    // 删的不是当前会话：不触发切换/新建。
+    expect(api.wikiAgentSession).not.toHaveBeenCalledWith('default', { forceNew: true });
   });
 
   it('删除 KB 后清理内嵌会话缓存，同名 KB 会重新向后端取会话', async () => {
@@ -480,9 +573,10 @@ describe('wiki-page 入口挂点', () => {
     expect(document.querySelector('[data-wiki-agent-messages]')?.textContent)
       .not.toContain('只属于默认知识库的旧消息');
 
-    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
     input.value = '查询新知识库';
-    document.querySelector<HTMLFormElement>('[data-wiki-agent-form]')!.requestSubmit();
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')!.click();
     await vi.waitFor(() => expect(socket().send).toHaveBeenCalled());
     const payload = socket().send.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     expect(payload.session_id).toBe(otherSessionId);
@@ -492,9 +586,9 @@ describe('wiki-page 入口挂点', () => {
   it('右栏 Composer 接线粘贴 / 拖拽上传（复用 attachments 通用绑定）', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-input]')).not.toBeNull());
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull());
 
-    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
     const panel = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
     expect(vi.mocked(bindFilePaste)).toHaveBeenCalledWith(input, expect.any(Function));
     // 拖拽热区是整个问答面板（拖到消息区也能传），且重复挂载不重复绑定
@@ -504,19 +598,19 @@ describe('wiki-page 入口挂点', () => {
   it('运行中只显示停止按钮，点击后停止当前 Wiki 会话并恢复发送按钮', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-send]')).not.toBeNull());
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel] [data-composer-send]')).not.toBeNull());
 
     setBusy(WIKI_SID, true);
     await vi.waitFor(() => {
-      expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-send]')?.hidden).toBe(true);
-      expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-stop]')?.hidden).toBe(false);
+      expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')?.hidden).toBe(true);
+      expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-stop]')?.hidden).toBe(false);
     });
 
-    document.querySelector<HTMLButtonElement>('[data-wiki-agent-stop]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-stop]')!.click();
     expect(socket().stop).toHaveBeenCalledWith(WIKI_SID);
     await vi.waitFor(() => {
-      expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-send]')?.hidden).toBe(false);
-      expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-stop]')?.hidden).toBe(true);
+      expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')?.hidden).toBe(false);
+      expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-stop]')?.hidden).toBe(true);
     });
   });
 
@@ -548,7 +642,7 @@ describe('wiki-page 入口挂点', () => {
     });
 
     await vi.waitFor(() => {
-      expect(document.querySelector('[data-wiki-agent-todo]')?.textContent).toContain('解析附件');
+      expect(document.querySelector('[data-wiki-agent-panel] .chat-todo-slot')?.textContent).toContain('解析附件');
       expect(document.querySelector('.followup-card')?.textContent).toContain('要整理哪些内容？');
     });
     const option = document.querySelector<HTMLInputElement>('.followup-card input[value="all"]')!;
@@ -605,7 +699,7 @@ describe('wiki-page 入口挂点', () => {
     });
     expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
     expect(sessionStore.get().sessions.some((session) => session.id === newSessionId)).toBe(true);
-    expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')?.value).toBe('');
+    expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')?.value).toBe('');
   });
 
   it('历史按钮只列当前 KB 会话，点击后切换并恢复对应历史', async () => {
@@ -640,7 +734,7 @@ describe('wiki-page 入口挂点', () => {
       expect(mockLoadBackendHistory).toHaveBeenCalledWith(oldSessionId);
       expect(api.sessionTodos).toHaveBeenCalledWith(oldSessionId);
       expect(api.getSessionModel).toHaveBeenCalledWith(oldSessionId);
-      expect(document.querySelector('[data-wiki-agent-todo]')?.textContent).toContain('旧会话待办');
+      expect(document.querySelector('[data-wiki-agent-panel] .chat-todo-slot')?.textContent).toContain('旧会话待办');
     });
     expect(document.querySelector<HTMLElement>('[data-wiki-agent-history-popover]')?.hidden).toBe(true);
   });
@@ -673,90 +767,46 @@ describe('wiki-page 入口挂点', () => {
     expect(mockOpenSession).not.toHaveBeenCalled();
   });
 
-  it('展开/收窄按钮切换宽栏档位，renderShell 重建面板后保持', async () => {
+  it('面板头按钮收起/展开知识库面板，renderShell 重建后面板活节点保留', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
     await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-expand]')).not.toBeNull());
 
     const panel = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
-    expect(panel.classList.contains('wiki-agent-pane--wide')).toBe(false);
+    expect(document.querySelector('.page-shell--wiki')?.classList.contains('wiki-browser-collapsed')).toBe(false);
 
     document.querySelector<HTMLElement>('[data-wiki-agent-expand]')!.click();
-    expect(panel.classList.contains('wiki-agent-pane--wide')).toBe(true);
+    expect(document.querySelector('.page-shell--wiki')?.classList.contains('wiki-browser-collapsed')).toBe(true);
 
-    // wiki 页重渲染保留面板活节点（KB 未变）：宽档位直接存活
-    renderWikiPage();
+    // wiki 页重渲染保留面板活节点（KB 未变）：按钮仍在同一面板上
     const rebuilt = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
     expect(rebuilt).toBe(panel);
-    expect(rebuilt.classList.contains('wiki-agent-pane--wide')).toBe(true);
 
     rebuilt.querySelector<HTMLElement>('[data-wiki-agent-expand]')!.click();
-    expect(rebuilt.classList.contains('wiki-agent-pane--wide')).toBe(false);
+    expect(document.querySelector('.page-shell--wiki')?.classList.contains('wiki-browser-collapsed')).toBe(false);
   });
 
-  it('对话栏宽度可拖拽调整并持久化，双击手柄复位，展开按钮清除自定义宽度', async () => {
-    // beforeEach 把 localStorage 换成恒 null 的 stub；本用例换成 Map 实现以验证持久化链路
-    const store = new Map<string, string>();
-    Object.defineProperty(window, 'localStorage', {
-      configurable: true,
-      writable: true,
-      value: {
-        getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
-        setItem: (k: string, v: string) => { store.set(k, v); },
-        removeItem: (k: string) => { store.delete(k); },
-        clear: () => { store.clear(); },
-      },
-    });
+  it('对话面板为弹性主区：无独立宽度手柄与内联宽度', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-sash]')).not.toBeNull());
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel]')).not.toBeNull());
 
     const panel = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
-    const sash = document.querySelector<HTMLElement>('[data-wiki-agent-sash]')!;
     expect(panel.style.width).toBe('');
-
-    // happy-dom 的 getBoundingClientRect 恒为 0：startX=500 → move 到 100 即加宽 400px
-    sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 500 }));
-    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 100 }));
-    expect(panel.style.width).toBe('400px');
-    document.dispatchEvent(new MouseEvent('mouseup', {}));
-    expect(localStorage.getItem('crew.desktop.wikiAgentWidth.v1')).toBe('400');
-
-    // wiki 页重渲染保留面板活节点：内联自定义宽度天然存活
-    renderWikiPage();
-    const rebuilt = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
-    expect(rebuilt).toBe(panel);
-    expect(rebuilt.style.width).toBe('400px');
-
-    // 展开/收窄按钮回退到 CSS 档位：清除内联宽度与持久化值
-    rebuilt.querySelector<HTMLElement>('[data-wiki-agent-expand]')!.click();
-    expect(rebuilt.style.width).toBe('');
-    expect(localStorage.getItem('crew.desktop.wikiAgentWidth.v1')).toBeNull();
-    expect(rebuilt.classList.contains('wiki-agent-pane--wide')).toBe(true);
-    rebuilt.querySelector<HTMLElement>('[data-wiki-agent-expand]')!.click();
-
-    // 再次拖出自定义宽度后，双击手柄复位
-    const rebuiltSash = document.querySelector<HTMLElement>('[data-wiki-agent-sash]')!;
-    rebuiltSash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 500 }));
-    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 200 }));
-    document.dispatchEvent(new MouseEvent('mouseup', {}));
-    expect(rebuilt.style.width).toBe('300px');
-    rebuiltSash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-    expect(rebuilt.style.width).toBe('');
-    expect(localStorage.getItem('crew.desktop.wikiAgentWidth.v1')).toBeNull();
+    expect(document.querySelector('[data-wiki-agent-sash]')).toBeNull();
   });
 
   it('输入草稿在 renderShell 后保留', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-input]')).not.toBeNull());
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull());
 
-    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
     input.value = '写到一半的草稿';
     input.dispatchEvent(new Event('input', { bubbles: true }));
 
     renderWikiPage();
-    const rebuilt = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
+    const rebuilt = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
     expect(rebuilt).toBe(input);
     expect(rebuilt.value).toBe('写到一半的草稿');
   });
@@ -764,10 +814,12 @@ describe('wiki-page 入口挂点', () => {
   it('IME 合成中按 Enter 不发送，普通 Enter 发送', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-input]')).not.toBeNull());
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull());
 
-    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-input]')!;
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
     input.value = '你好';
+    // 让 Composer 感知草稿（hasDraft → 发送按钮可用），与真实输入路径一致。
+    input.dispatchEvent(new Event('input', { bubbles: true }));
 
     // 中文输入法选字 Enter：isComposing=true，不应触发发送
     const imeEnter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
@@ -781,21 +833,6 @@ describe('wiki-page 入口挂点', () => {
     await vi.waitFor(() => expect(socket().send).toHaveBeenCalled());
     const payload = socket().send.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     expect(payload.query).toBe('你好');
-  });
-
-  it('上传按钮只请求打开右栏 Composer 附件选择', async () => {
-    const spy = vi.fn();
-    setWikiAgentEntryHandler(spy);
-    await refreshWikiData();
-
-    document.querySelector<HTMLElement>('[data-upload]')!.dispatchEvent(new Event('click'));
-    expect(spy).toHaveBeenCalledWith({
-      kbId: 'default',
-      kbName: '默认知识库',
-      openAttachment: true,
-    });
-    expect(api.wikiUpload).not.toHaveBeenCalled();
-    expect(api.wikiIngest).not.toHaveBeenCalled();
   });
 });
 

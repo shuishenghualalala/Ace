@@ -22,6 +22,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -136,6 +137,158 @@ def _bundled_runtime_paths() -> list[str]:
 
     log.info(f"[bundled_runtime] Returning paths: {paths}")
     return paths
+
+
+def _managed_system_path_dirs() -> list[str]:
+    """Return OS-owned executable directories that the native sandbox exposes read-only."""
+    if os.name == "nt":
+        system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+        return [str(Path(system_root) / "System32"), system_root]
+    if sys.platform == "darwin":
+        return ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    return ["/usr/local/bin", "/usr/bin", "/bin"]
+
+
+def _development_node_toolchain() -> tuple[list[str], tuple[Path, ...]]:
+    """Expose the developer machine's Node toolchain when no packaged runtime exists."""
+    if getattr(sys, "frozen", False):
+        return [], ()
+    path_dirs: list[str] = []
+    readable_roots: list[Path] = []
+    for name in ("node", "npm", "npx"):
+        value = shutil.which(name)
+        if not value:
+            continue
+        source = Path(value).expanduser()
+        wrapper = source.resolve(strict=False)
+        path_dir = str(source.parent.resolve(strict=False))
+        if path_dir not in path_dirs:
+            path_dirs.append(path_dir)
+        wrapper_dir = Path(path_dir)
+        if wrapper_dir.is_dir() and wrapper_dir not in readable_roots:
+            readable_roots.append(wrapper_dir)
+        # Unix npm/npx are commonly symlinks into <prefix>/lib/node_modules/npm/bin;
+        # Node itself commonly lives in <prefix-or-version>/bin. Expose the smallest
+        # package/version root plus the launcher directory. Do not expose the complete
+        # Homebrew/user prefix merely because one executable lives below its bin/.
+        if wrapper.parent != wrapper_dir:
+            runtime_root = (
+                wrapper.parent.parent
+                if wrapper.parent.name.lower() == "bin"
+                else wrapper.parent
+            )
+            if runtime_root.exists() and runtime_root not in readable_roots:
+                readable_roots.append(runtime_root)
+    return path_dirs, tuple(readable_roots)
+
+
+def _development_python_toolchain() -> tuple[list[str], tuple[Path, ...]]:
+    """Expose the developer machine's Python interpreter when no packaged runtime exists.
+
+    打包态用 ``_internal/runtimes/python`` 整目录可读模拟；开发态用当前解释器
+    (``sys.executable``) 定位 venv，把 venv 根目录与真实解释器根目录都作为 readable
+    root 暴露，让沙箱里 ``python3`` 既能被 PATH 解析、又能 import venv 里装好的包。
+
+    venv 往往跨两个目录树：``.venv/``（pyvenv.cfg + site-packages）与解释器真实
+    根目录（uv/pyenv 创建的 ``.venv/bin/python`` 是符号链接，指向 ``~/.local/share/uv/
+    python/.../bin/python3``，其动态库与标准库在同级 ``lib/`` 下）。只放行 venv 根
+    会导致 ``libpython*.dylib`` 被沙箱拦截（dyld 报错），所以两个根目录都要放行。
+    非 venv 解释器（系统 python）降级为只放行解释器所在 bin 目录，避免误放行 ``/usr``。
+    """
+    if getattr(sys, "frozen", False):
+        return [], ()
+    executable = Path(sys.executable).expanduser()
+    if not executable.is_file():
+        return [], ()
+    bin_dir = executable.parent.resolve(strict=False)
+    path_dirs = [str(bin_dir)] if bin_dir.is_dir() else []
+
+    roots: list[Path] = []
+
+    # ① 向上找 venv 根：含 pyvenv.cfg 的目录，或 bin 同级有 lib/<py>/site-packages。
+    venv_root: Path | None = None
+    for candidate in (bin_dir, *bin_dir.parents):
+        if (candidate / "pyvenv.cfg").is_file():
+            venv_root = candidate
+            break
+    if venv_root is None:
+        # conda 环境没有 pyvenv.cfg，靠 bin 同级存在 lib/python*/site-packages 识别。
+        for candidate in (bin_dir, *bin_dir.parents):
+            lib = candidate / "lib"
+            if lib.is_dir() and any(
+                child.is_dir() and (child / "site-packages").is_dir()
+                for child in lib.iterdir()
+                if child.name.startswith("python")
+            ):
+                venv_root = candidate
+                break
+    if venv_root is not None:
+        roots.append(venv_root.resolve(strict=False))
+
+    # ② 解析符号链接后的真实解释器根目录（含 lib/ 动态库 + 标准库）。
+    # uv/pyenv 的 venv python 是符号链接；自包含解释器（indygreg/Homebrew）解析后
+    # 通常仍在 venv 内或自身目录，此时与 venv_root 相同，去重后不会重复放行。
+    real_executable = executable.resolve(strict=True)
+    real_root = real_executable.parent.parent.resolve(strict=False)
+    if real_root != venv_root and real_root.is_dir() and (real_root / "lib").is_dir():
+        # 只放行带 lib/ 的根（能装下 libpython*.dylib/标准库），避免误放行上层目录。
+        if real_root not in roots:
+            roots.append(real_root)
+
+    if not roots:
+        # 非 venv（系统 python）：保守只放行 bin 目录，不放大到 /usr。
+        roots.append(bin_dir)
+    return path_dirs, tuple(roots)
+
+
+def _development_runtime_toolchain() -> tuple[list[str], tuple[Path, ...]]:
+    """Combine the dev-mode Python and Node toolchains into one PATH + readable set."""
+    py_dirs, py_roots = _development_python_toolchain()
+    node_dirs, node_roots = _development_node_toolchain()
+    # 保序去重合并 PATH 目录与 readable roots。
+    path_dirs: list[str] = []
+    for d in (*py_dirs, *node_dirs):
+        if d not in path_dirs:
+            path_dirs.append(d)
+    roots: list[Path] = []
+    for r in (*py_roots, *node_roots):
+        if r not in roots:
+            roots.append(r)
+    return path_dirs, tuple(roots)
+
+
+def managed_runtime_read_roots() -> tuple[Path, ...]:
+    """Return read-only runtime roots needed by managed terminal commands."""
+    roots = list(bundled_runtime_roots())
+    if not roots:
+        _paths, development_roots = _development_runtime_toolchain()
+        roots.extend(development_roots)
+    canonical = sorted(
+        dict.fromkeys(root.resolve(strict=True) for root in roots if root.exists()),
+        key=lambda value: len(value.parts),
+    )
+    return tuple(
+        root
+        for index, root in enumerate(canonical)
+        if not any(parent == root or parent in root.parents for parent in canonical[:index])
+    )
+
+
+def bundled_runtime_roots() -> tuple[Path, ...]:
+    """Return canonical packaged Python/Node roots trusted by managed execution.
+
+    These roots are added to the managed sandbox's trusted-readable allowlist so
+    the bundled interpreter/runtime stays usable inside the sandbox. Only
+    meaningful in frozen (packaged) mode; dev runs return an empty tuple.
+    """
+    if not getattr(sys, "frozen", False):
+        return ()
+    runtimes_dir = Path(sys.executable).parent / "_internal" / "runtimes"
+    return tuple(
+        runtime.resolve(strict=True)
+        for name in ("python", "node")
+        if (runtime := runtimes_dir / name).is_dir()
+    )
 
 
 def bundled_python_executable() -> str | None:
@@ -305,6 +458,22 @@ def runtime_env_overrides(
         existing_pythonpath = os.environ.get("PYTHONPATH", "")
         values["PYTHONPATH"] = _prepend_path_unique([str(user_site)], existing_pythonpath)
 
+    return values
+
+
+def managed_runtime_env_overrides(
+    env_file: str | Path | None = None,
+    *,
+    owner_account_id: str | None = None,
+) -> dict[str, str]:
+    """Build a child environment without ambient executable/module paths."""
+    values = runtime_env_overrides(env_file, owner_account_id=owner_account_id)
+    runtime_paths = _bundled_runtime_paths()
+    if not runtime_paths:
+        runtime_paths, _roots = _development_runtime_toolchain()
+    values["PATH"] = _prepend_path_unique(runtime_paths, os.pathsep.join(_managed_system_path_dirs()))
+    values.pop("PYTHONPATH", None)
+    values.pop("PIP_USER", None)
     return values
 
 
@@ -659,6 +828,37 @@ def agent_workspace_path(
         create=create,
     )
     path = root / "agents" / safe_path_segment(agent_id, "main")
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def external_session_workspace_path(
+    workspace_id: str,
+    session_id: str,
+    external_agent_id: str,
+    *,
+    owner_account_id: str | None = None,
+    create: bool = True,
+) -> Path:
+    """Return the isolated default workspace for one external Agent session.
+
+    Explicit ``cwd`` and user-bound ``workspace_root_path`` continue to take
+    precedence in ``SingleAgent``.  This path only replaces the old shared
+    fallback for new, unbound external sessions.
+    """
+
+    root = task_workspace_path(
+        workspace_id,
+        owner_account_id=owner_account_id,
+        create=create,
+    )
+    path = (
+        root
+        / "external_sessions"
+        / safe_path_segment(session_id, "session")
+        / safe_path_segment(external_agent_id, "agent")
+    )
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path

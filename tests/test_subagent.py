@@ -96,14 +96,21 @@ def test_registry_user_overrides_builtin(tmp_path, monkeypatch):
 
 # ── 3. 工具过滤：禁嵌套 + 白名单交集 ────────────────────────────────────────
 
-def test_subagent_tool_filter_blocks_nesting():
+def test_subagent_tool_filter_blacklist():
+    """🔴 工具黑名单：禁嵌套（delegate_task/run_agent/delegate_to_external_agent）
+    + 写副作用工具（memory/cron/feishu/wiki_*），正常只读工具保留。"""
     app = build_app(config=Config(max_iterations=5))
-    # 继承全量（toolsets=None）也不能拿到 delegate_task / run_agent
+    # 继承全量（toolsets=None）也不能拿到嵌套委派工具
     inherited = app._subagent_tool_filter(None, None)
     assert "delegate_task" not in inherited
     assert "run_agent" not in inherited
     assert "delegate_to_external_agent" not in inherited
-    assert "file_read" in inherited
+    # 写副作用工具同样被过滤
+    assert "memory" not in inherited
+    assert "cron_create" not in inherited
+    assert not any(n.startswith("feishu") for n in inherited)
+    assert not any(name.startswith("wiki_") for name in inherited)
+    assert "file_read" in inherited  # 正常只读工具仍在
 
 
 def test_subagent_tool_filter_whitelist():
@@ -116,10 +123,13 @@ def test_subagent_tool_filter_whitelist():
 
 def test_run_agent_schema_enum_matches_registry():
     reg = SubagentRegistry()
-    schema = build_run_agent_schema(reg.names())
+    schema = build_run_agent_schema(reg.list())
     assert schema["name"] == "run_agent"
     assert set(schema["parameters"]["properties"]["agent_type"]["enum"]) == set(reg.names())
     assert schema["parameters"]["required"] == ["agent_type", "goal"]
+    # 描述里应包含每个 agent 的 description（whenToUse 语义）
+    for agent in reg.list():
+        assert agent.description in schema["description"]
 
 
 def test_delegate_task_schema():
@@ -256,6 +266,9 @@ async def test_delegate_task_batch_without_goal_passes_schema():
     )
     assert not result.is_error, f"纯 tasks 模式被拒：{result.content}"
     payload = json.loads(result.content)
+    # 同步路径返回 results 数组（非 launched 单对象）
+    assert isinstance(payload.get("results"), list)
+    assert len(payload["results"]) == 2
     labels = {r["agent"] for r in payload["results"]}
     assert labels == {"task#0", "task#1"}
     assert all(r["status"] == "completed" for r in payload["results"])
@@ -283,18 +296,6 @@ async def test_delegate_task_caps_task_count():
     assert result.is_error and ("最多委派" in result.content or "Too many tasks" in result.content)
 
 
-def test_subagent_tool_filter_blocks_side_effect_tools():
-    """🔴 工具黑名单：子 agent 拿不到 memory / cron / feishu 等写副作用工具。"""
-    app = build_app(config=Config(max_iterations=5))
-    inherited = app._subagent_tool_filter(None, None)
-    assert "memory" not in inherited
-    assert "cron_create" not in inherited
-    assert not any(n.startswith("feishu") for n in inherited)
-    assert "delegate_to_external_agent" not in inherited
-    assert not any(name.startswith("wiki_") for name in inherited)
-    assert "file_read" in inherited  # 正常只读工具仍在
-
-
 def test_subagent_inherits_parent_final_authorization_snapshot():
     app = build_app(config=Config(max_iterations=5))
     token = current_authorized_tool_names.set(frozenset({"file_read"}))
@@ -307,10 +308,32 @@ def test_subagent_inherits_parent_final_authorization_snapshot():
 
 def test_lightweight_prompt_skips_global_context():
     """🔴 上下文隔离：lightweight 子 agent 不注入全局 workspace/记忆。"""
+    app = build_app(config=Config(max_iterations=5))
+    child = app._make_subagent(
+        {"system_prompt": "x", "toolsets": None, "tools": None,
+         "model": "inherit", "max_iterations": 5}
+    )
+    assert child.lightweight is True
     light = build_prompt_parts(workspace_instructions="组织规则X", lightweight=True)
     full = build_prompt_parts(workspace_instructions="组织规则X", lightweight=False)
     assert "组织规则X" not in light["user_reminder"]
     assert "组织规则X" in full["user_reminder"]
+
+
+def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
+    parts = build_prompt_parts(cwd=str(tmp_path), lightweight=True)
+
+    assert f"当前工作目录：`{tmp_path.resolve()}`" in parts["user_reminder"]
+    assert "不要用它推导、验证或重建当前工作空间路径" in parts["user_reminder"]
+
+
+def test_workspace_prompt_explains_managed_host_paths_and_file_expansion(tmp_path):
+    reminder = build_prompt_parts(cwd=str(tmp_path), lightweight=True)["user_reminder"]
+
+    assert "宿主用户目录" in reminder
+    assert "with_additional_permissions" in reminder
+    assert "不需要 `require_escalated`" in reminder
+    assert "不要把文件工具称为绕过沙箱" in reminder
 
 
 def test_active_subagents_interrupt_cascade():
@@ -540,6 +563,11 @@ async def test_run_agent_background_launch_and_collect():
     assert res["summary"].strip()
     # 看板状态也更新为 done
     assert app.subagent_tasks.get(task_id)["status"] == "done"
+    # 完成后 wait=False 轮询同样取到结构化结果
+    polled = await app.registry.execute(
+        ToolCall("b2p", "collect_subagent", {"task_id": task_id, "wait": False})
+    )
+    assert json.loads(polled.content)["status"] == "completed"
 
 
 async def test_background_completion_auto_injected_next_turn():
@@ -736,21 +764,6 @@ async def test_delegate_task_background_auto_injected_next_turn():
     assert "后台子任务完成通知" in block
     assert "delegate_task" in block  # 文案泛化后含 delegate_task
     assert ("", "s-dbg") not in app._subagent_pending  # 排空后不重复注入
-
-
-async def test_delegate_task_sync_path_unchanged():
-    """不传 run_in_background -> 仍走同步 _run_children（gather 阻塞返回 results 数组）。"""
-    app = build_app(config=Config(max_iterations=5))
-    result = await app.registry.execute(
-        ToolCall("dbg5", "delegate_task",
-                 {"tasks": [{"goal": "任务A"}, {"goal": "任务B"}]})
-    )
-    assert not result.is_error
-    payload = json.loads(result.content)
-    # 同步路径返回 results 数组（非 launched 单对象）
-    assert isinstance(payload.get("results"), list)
-    assert len(payload["results"]) == 2
-    assert {r["agent"] for r in payload["results"]} == {"task#0", "task#1"}
 
 
 # ── 7. 多智能体 member 后台 delegate_task 通知回到发起 member ────────────────

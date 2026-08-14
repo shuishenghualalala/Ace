@@ -15,10 +15,21 @@ from crew.app import build_app
 from crew.core.interfaces import Channel, MessageHandler
 from crew.gateway import channel_config
 from crew.gateway.platform_registry import PlatformConfig, PlatformEntry, platform_registry
+from crew.gateway.routers.channels import _platform_error_kind
 from crew.gateway.server import create_app
 from crew.state.config import load_config, owner_overlay_config_path, resolve_writable_env_path, write_env_key
 
 OWNER_A = "A:uid-a"
+
+
+def test_weixin_network_error_is_classified_for_frontend():
+    error = (
+        "Cannot connect to host ilinkai.weixin.qq.com:443 ssl:default "
+        "[nodename nor servname provided, or not known]"
+    )
+    assert _platform_error_kind("weixin", error) == "network"
+    assert _platform_error_kind("weixin", "微信会话已过期") == ""
+    assert _platform_error_kind("feishu", error) == ""
 
 
 def _owner_overlay_path(_tmp_path: Path, owner_account_id: str = OWNER_A) -> Path:
@@ -277,95 +288,87 @@ async def test_owner_env_secret_is_used_when_connecting_securechat(channel_api, 
     assert "SECURECHAT_SECRET_KEY=securechat-secret" in env_text
 
 
-def test_bound_owner_channel_restores_on_gateway_startup(channel_api, auth_headers):
+def _assert_channel_restores_on_gateway_startup(
+    channel_api,
+    auth_headers,
+    *,
+    entry_factory,
+    platform: str,
+    config_payload: dict,
+    dummy_cls,
+    extra_assert=None,
+):
+    """绑定 owner 的渠道在 gateway 重启后按 owner overlay 恢复运行。"""
     app, config_yaml = channel_api
     old_entries = list(platform_registry.all_entries())
-    DummySecureChatChannel.starts = 0
-    securechat_entry = _dummy_securechat_entry()
+    dummy_cls.starts = 0
+    entry = entry_factory()
     platform_registry._entries.clear()
-    platform_registry.register(securechat_entry)
+    platform_registry.register(entry)
     try:
         with TestClient(app) as client:
             saved = client.put(
-                "/api/platforms/securechat/config",
-                json={
-                    "enabled": True,
-                    "config": {"wsUrl": "wss://securechat.example/ws", "clientId": "client-1"},
-                    "secrets": {"secretKey": "securechat-secret"},
-                },
+                f"/api/platforms/{platform}/config",
+                json=config_payload,
                 headers=auth_headers,
             )
             assert saved.status_code == 200, saved.text
-            connected = client.post("/api/platforms/securechat/connect", headers=auth_headers)
+            connected = client.post(f"/api/platforms/{platform}/connect", headers=auth_headers)
             assert connected.status_code == 200, connected.text
             assert connected.json()["ok"] is True
-            assert DummySecureChatChannel.starts == 1
-            assert app.state.crew.channel_bindings.get_binding("securechat") == "A:uid-a"
+            assert dummy_cls.starts == 1
+            assert app.state.crew.channel_bindings.get_binding(platform) == "A:uid-a"
 
         cfg = load_config(config_path=str(config_yaml))
         crew = build_app(config=cfg, enable_team=False)
         platform_registry._entries.clear()
-        platform_registry.register(securechat_entry)
+        platform_registry.register(entry)
         restarted = create_app(crew)
         restarted.state.crew = crew
         with TestClient(restarted) as client:
             restored = client.get("/api/platforms", headers=auth_headers)
     finally:
         platform_registry._entries.clear()
-        for entry in old_entries:
-            platform_registry.register(entry)
+        for old in old_entries:
+            platform_registry.register(old)
 
     assert restored.status_code == 200, restored.text
-    row = next(item for item in restored.json() if item["name"] == "securechat")
+    row = next(item for item in restored.json() if item["name"] == platform)
     assert row["running"] is True
     assert row["has_account"] is True
-    assert DummySecureChatChannel.starts == 2
+    assert dummy_cls.starts == 2
+    if extra_assert is not None:
+        extra_assert()
+
+
+def test_bound_owner_channel_restores_on_gateway_startup(channel_api, auth_headers):
+    _assert_channel_restores_on_gateway_startup(
+        channel_api,
+        auth_headers,
+        entry_factory=_dummy_securechat_entry,
+        platform="securechat",
+        config_payload={
+            "enabled": True,
+            "config": {"wsUrl": "wss://securechat.example/ws", "clientId": "client-1"},
+            "secrets": {"secretKey": "securechat-secret"},
+        },
+        dummy_cls=DummySecureChatChannel,
+    )
 
 
 def test_bound_testchat_channel_restores_on_gateway_startup(channel_api, auth_headers):
-    app, config_yaml = channel_api
-    old_entries = list(platform_registry.all_entries())
-    DummyChannel.starts = 0
-    DummyChannel.stops = 0
-    testchat_entry = _dummy_testchat_entry()
-    platform_registry._entries.clear()
-    platform_registry.register(testchat_entry)
-    try:
-        with TestClient(app) as client:
-            saved = client.put(
-                "/api/platforms/testchat/config",
-                json={
-                    "enabled": True,
-                    "config": {"serverUrl": "wss://dummy.example/ws"},
-                    "secrets": {"TESTCHAT_API_KEY": "sk-secret"},
-                },
-                headers=auth_headers,
-            )
-            assert saved.status_code == 200, saved.text
-            connected = client.post("/api/platforms/testchat/connect", headers=auth_headers)
-            assert connected.status_code == 200, connected.text
-            assert connected.json()["ok"] is True
-            assert DummyChannel.starts == 1
-            assert app.state.crew.channel_bindings.get_binding("testchat") == "A:uid-a"
-
-        cfg = load_config(config_path=str(config_yaml))
-        crew = build_app(config=cfg, enable_team=False)
-        platform_registry._entries.clear()
-        platform_registry.register(testchat_entry)
-        restarted = create_app(crew)
-        restarted.state.crew = crew
-        with TestClient(restarted) as client:
-            restored = client.get("/api/platforms", headers=auth_headers)
-    finally:
-        platform_registry._entries.clear()
-        for entry in old_entries:
-            platform_registry.register(entry)
-
-    assert restored.status_code == 200, restored.text
-    row = next(item for item in restored.json() if item["name"] == "testchat")
-    assert row["running"] is True
-    assert row["has_account"] is True
-    assert DummyChannel.starts == 2
+    _assert_channel_restores_on_gateway_startup(
+        channel_api,
+        auth_headers,
+        entry_factory=_dummy_testchat_entry,
+        platform="testchat",
+        config_payload={
+            "enabled": True,
+            "config": {"serverUrl": "wss://dummy.example/ws"},
+            "secrets": {"TESTCHAT_API_KEY": "sk-secret"},
+        },
+        dummy_cls=DummyChannel,
+    )
 
 
 def test_bound_owner_channel_wins_over_global_config_on_gateway_startup(channel_api, auth_headers):
@@ -450,50 +453,23 @@ def test_platform_status_detail_redacts_owner_env_secret(channel_api, auth_heade
 
 
 def test_bound_feishu_channel_restores_on_gateway_startup(channel_api, auth_headers):
-    app, config_yaml = channel_api
-    old_entries = list(platform_registry.all_entries())
-    DummyFeishuChannel.starts = 0
-    DummyFeishuChannel.started_configs = []
-    feishu_entry = _dummy_feishu_entry()
-    platform_registry._entries.clear()
-    platform_registry.register(feishu_entry)
-    try:
-        with TestClient(app) as client:
-            saved = client.put(
-                "/api/platforms/feishu/config",
-                json={
-                    "enabled": True,
-                    "config": {"appId": "owner-app"},
-                    "secrets": {"appSecret": "owner-secret"},
-                },
-                headers=auth_headers,
-            )
-            assert saved.status_code == 200, saved.text
-            connected = client.post("/api/platforms/feishu/connect", headers=auth_headers)
-            assert connected.status_code == 200, connected.text
-            assert connected.json()["ok"] is True
-            assert app.state.crew.channel_bindings.get_binding("feishu") == "A:uid-a"
+    def _check_started_config():
+        assert DummyFeishuChannel.started_configs[-1]["appId"] == "owner-app"
+        assert DummyFeishuChannel.started_configs[-1]["appSecret"] == "owner-secret"
 
-        cfg = load_config(config_path=str(config_yaml))
-        crew = build_app(config=cfg, enable_team=False)
-        platform_registry._entries.clear()
-        platform_registry.register(feishu_entry)
-        restarted = create_app(crew)
-        restarted.state.crew = crew
-        with TestClient(restarted) as client:
-            restored = client.get("/api/platforms", headers=auth_headers)
-    finally:
-        platform_registry._entries.clear()
-        for entry in old_entries:
-            platform_registry.register(entry)
-
-    assert restored.status_code == 200, restored.text
-    row = next(item for item in restored.json() if item["name"] == "feishu")
-    assert row["running"] is True
-    assert row["has_account"] is True
-    assert DummyFeishuChannel.starts == 2
-    assert DummyFeishuChannel.started_configs[-1]["appId"] == "owner-app"
-    assert DummyFeishuChannel.started_configs[-1]["appSecret"] == "owner-secret"
+    _assert_channel_restores_on_gateway_startup(
+        channel_api,
+        auth_headers,
+        entry_factory=_dummy_feishu_entry,
+        platform="feishu",
+        config_payload={
+            "enabled": True,
+            "config": {"appId": "owner-app"},
+            "secrets": {"appSecret": "owner-secret"},
+        },
+        dummy_cls=DummyFeishuChannel,
+        extra_assert=_check_started_config,
+    )
 
 
 @pytest.mark.asyncio
@@ -692,7 +668,28 @@ async def test_delete_platform_account_clears_id_and_key_but_keeps_fixed_url(cha
 
 
 @pytest.mark.asyncio
-async def test_reconnect_rejects_overlapping_operation(channel_api, auth_headers):
+@pytest.mark.parametrize(
+    "blocked_request, expected_error",
+    [
+        (
+            lambda client: client.post("/api/platforms/testchat/disconnect"),
+            "正在重连",
+        ),
+        (
+            lambda client: client.put(
+                "/api/platforms/testchat/config",
+                json={"enabled": True, "config": {"serverUrl": "wss://other.example/ws"}},
+            ),
+            None,
+        ),
+        (
+            lambda client: client.delete("/api/platforms/testchat/account"),
+            None,
+        ),
+    ],
+    ids=["disconnect", "save-config", "delete-account"],
+)
+async def test_operation_rejects_during_reconnect(channel_api, auth_headers, blocked_request, expected_error):
     app, _config_yaml = channel_api
     DummyChannel.stop_delay = 0.05
     transport = ASGITransport(app=app)
@@ -710,67 +707,13 @@ async def test_reconnect_rejects_overlapping_operation(channel_api, auth_headers
 
         reconnect = asyncio.create_task(client.post("/api/platforms/testchat/reconnect"))
         await asyncio.sleep(0)
-        blocked = await client.post("/api/platforms/testchat/disconnect")
+        blocked = await blocked_request(client)
         reconnect_resp = await reconnect
 
     assert reconnect_resp.status_code == 200
     assert blocked.status_code == 409
-    assert "正在重连" in blocked.json()["error"]
-
-
-@pytest.mark.asyncio
-async def test_save_platform_config_rejects_during_reconnect(channel_api, auth_headers):
-    app, _config_yaml = channel_api
-    DummyChannel.stop_delay = 0.05
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        await client.put(
-            "/api/platforms/testchat/config",
-            json={
-                "enabled": True,
-                "config": {"serverUrl": "wss://dummy.example/ws"},
-                "secrets": {"TESTCHAT_API_KEY": "sk-secret"},
-            },
-        )
-        assert (await client.post("/api/platforms/testchat/connect")).status_code == 200
-        import asyncio
-
-        reconnect = asyncio.create_task(client.post("/api/platforms/testchat/reconnect"))
-        await asyncio.sleep(0)
-        blocked = await client.put(
-            "/api/platforms/testchat/config",
-            json={"enabled": True, "config": {"serverUrl": "wss://other.example/ws"}},
-        )
-        reconnect_resp = await reconnect
-
-    assert reconnect_resp.status_code == 200
-    assert blocked.status_code == 409
-
-
-@pytest.mark.asyncio
-async def test_delete_platform_account_rejects_during_reconnect(channel_api, auth_headers):
-    app, _config_yaml = channel_api
-    DummyChannel.stop_delay = 0.05
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
-        await client.put(
-            "/api/platforms/testchat/config",
-            json={
-                "enabled": True,
-                "config": {"serverUrl": "wss://dummy.example/ws"},
-                "secrets": {"TESTCHAT_API_KEY": "sk-secret"},
-            },
-        )
-        assert (await client.post("/api/platforms/testchat/connect")).status_code == 200
-        import asyncio
-
-        reconnect = asyncio.create_task(client.post("/api/platforms/testchat/reconnect"))
-        await asyncio.sleep(0)
-        blocked = await client.delete("/api/platforms/testchat/account")
-        reconnect_resp = await reconnect
-
-    assert reconnect_resp.status_code == 200
-    assert blocked.status_code == 409
+    if expected_error is not None:
+        assert expected_error in blocked.json()["error"]
 
 
 @pytest.mark.asyncio

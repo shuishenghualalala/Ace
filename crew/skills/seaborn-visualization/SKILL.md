@@ -1,8 +1,14 @@
 ---
 name: seaborn-visualization
-description: charting, plotting, graphing, visualization, seaborn, matplotlib, pandas reports, Chinese chart labels, and data-viz code in Daimon's managed Python runtime. Covers both interactive runs via the Bash tool and Blueprint Automation code execution.
+description: charting, plotting, graphing, visualization, seaborn, matplotlib, pandas
+  reports, Chinese chart labels, and data-viz code in Daimon's managed Python runtime.
+  Covers both interactive runs via the Bash tool and Blueprint Automation code execution.
+metadata:
+  skillCategoryName: 通用办公
+  zh_name: Seaborn 数据可视化
+  zh_description: 图表绘制、统计可视化、Seaborn/Matplotlib/Pandas 报表生成，支持中文图表标签，覆盖交互式运行和蓝图自动化代码执行。
+  query_examples: 绘制图表, 数据可视化, 生成统计报表
 ---
-
 # Seaborn Visualization
 
 Use this skill for charting, plotting, graphing, visualization, seaborn, matplotlib, pandas, Chinese chart labels, visual reports, and data-viz code in Daimon's managed Python runtime.

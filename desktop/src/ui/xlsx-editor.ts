@@ -1,5 +1,6 @@
 import type { XlsxGridPatch } from './office-edit';
 import type { XlsxPreviewSheet } from './xlsx-preview';
+import { setRuntimeStyle } from './components/runtime-style';
 
 const MIN_COLUMN_WIDTH = 48;
 const MAX_COLUMN_WIDTH = 420;
@@ -76,7 +77,7 @@ function renderEditor(root: HTMLElement, model: XlsxEditorModel): void {
       <table class="inspector-xlsx-editor__table">
         <colgroup>
           <col class="inspector-xlsx-editor__row-number-column">
-          ${model.columnWidths.map((width, column) => `<col data-xlsx-column-width="${column}" style="width:${width}px">`).join('')}
+          ${model.columnWidths.map((_, column) => `<col data-xlsx-column-width="${column}">`).join('')}
         </colgroup>
         <thead><tr><th class="inspector-xlsx-editor__corner"></th>${model.columnWidths.map((_, column) => `
           <th data-xlsx-column="${column}" class="${selectedClass(model, 'column', column).trim()}">
@@ -87,7 +88,7 @@ function renderEditor(root: HTMLElement, model: XlsxEditorModel): void {
               data-xlsx-resize-column="${column}" aria-hidden="true"></span>
           </th>`).join('')}</tr></thead>
         <tbody>${model.rows.map((row, rowIndex) => `
-          <tr data-xlsx-row="${rowIndex}" style="height:${model.rowHeights[rowIndex]}px">
+          <tr data-xlsx-row="${rowIndex}">
             <th data-xlsx-row-header="${rowIndex}" class="${selectedClass(model, 'row', rowIndex).trim()}">
               <span>${rowIndex + 1}</span>
               <button type="button" class="inspector-xlsx-editor__insert inspector-xlsx-editor__insert--row"
@@ -101,6 +102,14 @@ function renderEditor(root: HTMLElement, model: XlsxEditorModel): void {
           </tr>`).join('')}</tbody>
       </table>
     </div>`;
+  root.querySelectorAll<HTMLElement>('[data-xlsx-column-width]').forEach((column) => {
+    const index = Number(column.dataset.xlsxColumnWidth);
+    if (Number.isInteger(index)) setRuntimeStyle(column, 'width', `${model.columnWidths[index] ?? MIN_COLUMN_WIDTH}px`);
+  });
+  root.querySelectorAll<HTMLElement>('[data-xlsx-row]').forEach((row) => {
+    const index = Number(row.dataset.xlsxRow);
+    if (Number.isInteger(index)) setRuntimeStyle(row, 'height', `${model.rowHeights[index] ?? MIN_ROW_HEIGHT}px`);
+  });
   bindEditorEvents(root, model);
 }
 
@@ -178,8 +187,8 @@ function openContextMenu(root: HTMLElement, model: XlsxEditorModel, x: number, y
   const menu = document.createElement('div');
   menu.className = 'inspector-xlsx-editor__context-menu';
   menu.setAttribute('role', 'menu');
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
+  setRuntimeStyle(menu, 'left', `${x}px`);
+  setRuntimeStyle(menu, 'top', `${y}px`);
   menu.innerHTML = `
     <button type="button" role="menuitem" data-xlsx-clear-selection>清空整${noun}内容</button>
     <button type="button" role="menuitem" class="is-danger" data-xlsx-delete-selection>删除整${noun}</button>`;
@@ -211,11 +220,11 @@ function bindResize(
       if (kind === 'column') {
         model.columnWidths[index] = clamp(original + delta, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
         const column = root.querySelector<HTMLElement>(`[data-xlsx-column-width="${index}"]`);
-        if (column) column.style.width = `${model.columnWidths[index]}px`;
+        if (column) setRuntimeStyle(column, 'width', `${model.columnWidths[index]}px`);
       } else {
         model.rowHeights[index] = clamp(original + delta, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT);
         const row = root.querySelector<HTMLElement>(`[data-xlsx-row="${index}"]`);
-        if (row) row.style.height = `${model.rowHeights[index]}px`;
+        if (row) setRuntimeStyle(row, 'height', `${model.rowHeights[index]}px`);
       }
     };
     const end = (): void => {

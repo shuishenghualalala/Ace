@@ -1,0 +1,62 @@
+/**
+ * Utility owner for data-driven layout values published by TypeScript.
+ * `revert-layer` preserves the component/feature declaration when a value is
+ * not supplied, so one bridge class is safe on mixed-purpose elements.
+ */
+
+[hidden] {
+  display: none;
+}
+
+.mw-runtime-style {
+  aspect-ratio: var(--mw-runtime-aspect-ratio, revert-layer);
+  border-radius: var(--mw-runtime-border-radius, revert-layer);
+  border-bottom-width: var(--mw-runtime-border-bottom-width, revert-layer);
+  border-left-width: var(--mw-runtime-border-left-width, revert-layer);
+  border-right-width: var(--mw-runtime-border-right-width, revert-layer);
+  border-top-width: var(--mw-runtime-border-top-width, revert-layer);
+  bottom: var(--mw-runtime-bottom, revert-layer);
+  box-sizing: var(--mw-runtime-box-sizing, revert-layer);
+  color: var(--mw-runtime-color, revert-layer);
+  cursor: var(--mw-runtime-cursor, revert-layer);
+  font-family: var(--mw-runtime-font-family, revert-layer);
+  font-size: var(--mw-runtime-font-size, revert-layer);
+  font-style: var(--mw-runtime-font-style, revert-layer);
+  font-variant: var(--mw-runtime-font-variant, revert-layer);
+  font-weight: var(--mw-runtime-font-weight, revert-layer);
+  height: var(--mw-runtime-height, revert-layer);
+  left: var(--mw-runtime-left, revert-layer);
+  letter-spacing: var(--mw-runtime-letter-spacing, revert-layer);
+  line-height: var(--mw-runtime-line-height, revert-layer);
+  max-height: var(--mw-runtime-max-height, revert-layer);
+  max-width: var(--mw-runtime-max-width, revert-layer);
+  min-height: var(--mw-runtime-min-height, revert-layer);
+  min-width: var(--mw-runtime-min-width, revert-layer);
+  opacity: var(--mw-runtime-opacity, revert-layer);
+  overflow: var(--mw-runtime-overflow, revert-layer);
+  overflow-wrap: var(--mw-runtime-overflow-wrap, revert-layer);
+  overflow-x: var(--mw-runtime-overflow-x, revert-layer);
+  overflow-y: var(--mw-runtime-overflow-y, revert-layer);
+  padding-bottom: var(--mw-runtime-padding-bottom, revert-layer);
+  padding-left: var(--mw-runtime-padding-left, revert-layer);
+  padding-right: var(--mw-runtime-padding-right, revert-layer);
+  padding-top: var(--mw-runtime-padding-top, revert-layer);
+  pointer-events: var(--mw-runtime-pointer-events, revert-layer);
+  position: var(--mw-runtime-position, revert-layer);
+  right: var(--mw-runtime-right, revert-layer);
+  text-align: var(--mw-runtime-text-align, revert-layer);
+  text-indent: var(--mw-runtime-text-indent, revert-layer);
+  text-transform: var(--mw-runtime-text-transform, revert-layer);
+  tab-size: var(--mw-runtime-tab-size, revert-layer);
+  text-decoration: var(--mw-runtime-text-decoration, revert-layer);
+  top: var(--mw-runtime-top, revert-layer);
+  transform: var(--mw-runtime-transform, revert-layer);
+  user-select: var(--mw-runtime-user-select, revert-layer);
+  visibility: var(--mw-runtime-visibility, revert-layer);
+  white-space: var(--mw-runtime-white-space, revert-layer);
+  word-spacing: var(--mw-runtime-word-spacing, revert-layer);
+  width: var(--mw-runtime-width, revert-layer);
+  word-wrap: var(--mw-runtime-word-wrap, revert-layer);
+  z-index: var(--mw-runtime-z-index, revert-layer);
+  zoom: var(--mw-runtime-zoom, revert-layer);
+}

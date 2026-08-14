@@ -63,6 +63,9 @@ gateway:
   admin_accounts: []
   max_active_runs: 4
   max_queue_depth_per_session: 20
+# 安全模块总开关。false 表示默认使用当前宿主用户的完全访问权限，不启用沙箱和审批。
+security:
+  enabled: false
 # 默认使用邮箱区分本机租户（不验证邮箱所有权）。local 为免登录，remote 为验证码登录。
 auth:
   mode: email  # local | email | remote
@@ -84,6 +87,9 @@ team:
 # 外部智能体与外部 Team 的产品入口开关。关闭时仅隐藏/禁用，历史数据仍保留。
 external_agents:
   enabled: true
+  # true: 外援经过 Ace native runtime；false: 外援按旧 runtime 直联。
+  # 默认 false；该开关不影响内建工具的会话安全边界。
+  security_enabled: false
 
 subagent:
   max_concurrent: 3
@@ -180,12 +186,20 @@ access_control:
     disabled_skills: ["browser-use"]   # browser-use skill 依赖内置浏览器；external 的 browser toolset 已在 disabled_toolsets 里禁用，避免展示无法使用的“死 skill”
 
 wiki:
+  # 聊天中上传的附件是否自动收入 default 知识库。
+  # true（默认）：保存原文件并解析成 markdown，并自动生成轻量摘要/标签；
+  # 深度整理（生成 entity/topic/relationship）默认不自动执行，需要用户确认。
+  capture_attachments: true
   ingest:
     # 是否在深度整理计划生成成功后自动应用计划。
-    # true（默认）：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
-    # false：plan 后展示创建/更新/跳过计划并等待用户确认，后续回合再 apply。
+    # true：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
+    # false（默认）：plan 后展示创建/更新/跳过计划并等待用户确认，后续回合再 apply。
     # 该配置只影响实体/概念/主题/关系的深度整理；删除、归档、视频外传仍必须人工确认。
-    auto_apply: true
+    auto_apply: false
+    # 捕获后是否自动生成轻量摘要、标签和是否建议整理的标记（第二层）。
+    auto_summarize: true
+    # 捕获后是否自动深度整理（第三层）。默认关闭，避免自动把临时文件写入知识库。
+    auto_ingest: false
   # Wiki 数据独立存储目录。留空时保持现状：
   # {runtime.crew_home}/accounts/{owner_hash}/wiki_lib/。
   # 也可通过 CREW_WIKI_HOME 环境变量覆盖。
@@ -194,3 +208,16 @@ wiki:
   # Wiki 提取需要稳定、快速的结构化输出，独立于主对话模型。
   # 可填 llm.models 下的 profile key；留空时跟随主模型。
   model: ""
+
+# 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
+# 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，
+# 而不是强制直连。留空时回退到环境变量
+# HTTP_PROXY / HTTPS_PROXY / ALL_PROXY（大小写都读）。
+# 能直连外网的服务器留空即可；需要代理的开发机设 HTTPS_PROXY 即可，
+# 也可在此直接填，如 http://127.0.0.1:7890 或 socks5h://127.0.0.1:7890。
+network:
+  # 上游代理地址。支持 http:// https:// socks5:// socks5h://，可带 user:pass@。
+  # 留空 = 读环境变量（推荐，跨环境零配置）。
+  upstream_proxy: ""
+  # 是否允许代理本身监听在 127.0.0.1/::1（本地 Clash 等场景）。
+  allow_loopback_proxy: true

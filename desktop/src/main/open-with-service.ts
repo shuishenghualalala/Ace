@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'child_process';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -50,6 +50,7 @@ const MAC_FRIENDLY_APPLICATION_NAMES: Record<string, string> = {
 };
 
 let macCatalogPromise: Promise<MacCatalogEntry[]> | null = null;
+const PROCESS_TREE_KILL_TIMEOUT_MS = 2_000;
 
 function normalizedExtension(filePath: string): string {
   return path.extname(filePath).replace(/^\./, '').trim().toLowerCase();
@@ -112,16 +113,84 @@ export function macApplicationSupportsExtension(
     .some((contentType) => application.contentTypes.has(contentType));
 }
 
-function execFileText(command: string, args: string[], timeout = 8_000): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, {
-      encoding: 'utf8',
-      maxBuffer: 4 * 1024 * 1024,
-      timeout,
+function terminateChildProcessTree(child: ReturnType<typeof spawn>): Promise<void> {
+  const pid = child.pid;
+  if (!pid) {
+    child.kill('SIGKILL');
+    return Promise.resolve();
+  }
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore',
       windowsHide: true,
-    }, (error, stdout) => {
+    });
+    const timer = setTimeout(() => {
+      killer.kill();
+      child.kill('SIGKILL');
+      finish();
+    }, PROCESS_TREE_KILL_TIMEOUT_MS);
+    killer.once('error', () => {
+      child.kill('SIGKILL');
+      finish();
+    });
+    killer.once('close', finish);
+  });
+}
+
+export function execFileText(command: string, args: string[], timeout = 8_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+    });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    let terminating = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (error) reject(error);
-      else resolve(stdout);
+      else resolve(Buffer.concat(chunks).toString('utf8'));
+    };
+    const abort = (error: Error): void => {
+      if (settled || terminating) return;
+      terminating = true;
+      child.stdout.destroy();
+      void terminateChildProcessTree(child).then(() => finish(error));
+    };
+    const timer = setTimeout(() => {
+      abort(new Error(`${command} timed out`));
+    }, timeout);
+    child.stdout.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 4 * 1024 * 1024) {
+        abort(new Error(`${command} output exceeded 4 MiB`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.once('error', (error) => finish(error));
+    child.once('close', (code) => {
+      if (terminating) return;
+      finish(code === 0 ? undefined : new Error(`${command} exited with code ${code}`));
     });
   });
 }

@@ -383,11 +383,20 @@ class Registry(ToolRegistry):
             return ToolResult(tool_call.id, tool.name, f"工具异常: {exc}", is_error=True)
 
 
-def register_builtin_tools(registry: Registry) -> None:
+def register_builtin_tools(
+    registry: Registry,
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> None:
     """注册所有内置工具。"""
     from crew.tools.builtin import register_builtin_tools as _register_builtin_tools
 
-    _register_builtin_tools(registry)
+    _register_builtin_tools(
+        registry,
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
 
 
 def _wrap_tool_use_error(tool_name: str, message: str, deprecation_note: str = "") -> str:

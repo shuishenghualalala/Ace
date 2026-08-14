@@ -1,6 +1,6 @@
 /**
  * 单会话导出：拉取 /api/session/{id} 消息历史，下载 JSON。
- * 将会话数据整理为可下载的 JSON 文件。
+ * 参考 hermes-agent session-export.ts，适配 Crew backendApi。
  */
 
 import { backendApi } from '../backend-client';

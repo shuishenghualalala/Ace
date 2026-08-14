@@ -6,6 +6,7 @@ import pptxWasm from 'pptx-svg/wasm';
 import { base64ToArrayBuffer, buildOfflinePreviewDocument } from './file-preview';
 import { fitPptxSlideSvg, toPptxPreviewError } from './pptx-runtime';
 import { loadXlsxPreviewWorkbook, type XlsxPreviewSheet } from './xlsx-preview';
+import { clearRuntimeStyle, setRuntimeStyle } from './components/runtime-style';
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
@@ -85,7 +86,7 @@ function createZoomController(
   let target: HTMLElement | null = null;
   const clampZoom = (next: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(next * 10) / 10));
   const computeFitScale = (): number => {
-    surface.style.setProperty('zoom', '1');
+    setRuntimeStyle(surface, 'zoom', '1');
     const viewportWidth = Math.max(0, viewport.clientWidth - 36);
     const targetWidth = target
       ? Math.max(target.scrollWidth, target.getBoundingClientRect().width)
@@ -94,7 +95,7 @@ function createZoomController(
   };
   const apply = (next: number): void => {
     zoom = clampZoom(next);
-    surface.style.setProperty('zoom', String(fitScale * zoom));
+    setRuntimeStyle(surface, 'zoom', String(fitScale * zoom));
     label.textContent = `${Math.round(zoom * 100)}%`;
     zoomOut.disabled = zoom <= MIN_ZOOM;
     zoomIn.disabled = zoom >= MAX_ZOOM;
@@ -166,9 +167,9 @@ function createXlsxZoomController(
   const clampZoom = (next: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(next * 10) / 10));
 
   const measureNaturalSize = (): { width: number; height: number } => {
-    content.style.transform = 'scale(1)';
-    sizer.style.removeProperty('width');
-    sizer.style.removeProperty('height');
+    setRuntimeStyle(content, 'transform', 'scale(1)');
+    clearRuntimeStyle(sizer, 'width');
+    clearRuntimeStyle(sizer, 'height');
     const width = target ? Math.max(target.scrollWidth, target.getBoundingClientRect().width) : content.scrollWidth;
     const height = content.scrollHeight;
     measuredSize = { width: Math.max(1, width), height: Math.max(1, height) };
@@ -179,9 +180,9 @@ function createXlsxZoomController(
     zoom = clampZoom(next);
     const scale = fitScale * zoom;
     const { width, height } = measuredSize ?? measureNaturalSize();
-    content.style.transform = `scale(${scale})`;
-    sizer.style.width = `${Math.ceil(width * scale)}px`;
-    sizer.style.height = `${Math.ceil(height * scale)}px`;
+    setRuntimeStyle(content, 'transform', `scale(${scale})`);
+    setRuntimeStyle(sizer, 'width', `${Math.ceil(width * scale)}px`);
+    setRuntimeStyle(sizer, 'height', `${Math.ceil(height * scale)}px`);
     label.textContent = `${Math.round(zoom * 100)}%`;
     zoomOut.disabled = zoom <= MIN_ZOOM;
     zoomIn.disabled = zoom >= MAX_ZOOM;
@@ -335,20 +336,20 @@ function makePptxTextOverlay(
   overlay.value = text;
   overlay.textContent = text;
   overlay.dataset.originalText = text;
-  overlay.style.left = `${Math.max(0, (left / slideWidth) * 100)}%`;
-  overlay.style.top = `${Math.max(0, (top / slideHeight) * 100)}%`;
-  overlay.style.minWidth = `${Math.min(80, Math.max(12, ((text.length * fontSize * 0.6) / slideWidth) * 100))}%`;
+  setRuntimeStyle(overlay, 'left', `${Math.max(0, (left / slideWidth) * 100)}%`);
+  setRuntimeStyle(overlay, 'top', `${Math.max(0, (top / slideHeight) * 100)}%`);
+  setRuntimeStyle(overlay, 'minWidth', `${Math.min(80, Math.max(12, ((text.length * fontSize * 0.6) / slideWidth) * 100))}%`);
   overlay.dataset.minWidthPx = String(Math.max(box.width ?? 0, 80, text.length * fontSize * 0.6));
   overlay.dataset.maxWidthPx = String(Math.max(160, slideWidth - left - 12));
-  if (box.width) overlay.style.width = `${box.width}px`;
+  if (box.width) setRuntimeStyle(overlay, 'width', `${box.width}px`);
   if (box.height) {
-    overlay.style.height = `${box.height}px`;
-    overlay.style.lineHeight = `${box.height}px`;
+    setRuntimeStyle(overlay, 'height', `${box.height}px`);
+    setRuntimeStyle(overlay, 'lineHeight', `${box.height}px`);
   }
-  overlay.style.fontSize = `${Math.max(10, fontSize)}px`;
-  overlay.style.setProperty('--ppt-text-color', fill);
-  overlay.style.fontFamily = fontFamily;
-  overlay.style.fontWeight = fontWeight;
+  setRuntimeStyle(overlay, 'fontSize', `${Math.max(10, fontSize)}px`);
+  setRuntimeStyle(overlay, 'color', fill);
+  setRuntimeStyle(overlay, 'fontFamily', fontFamily);
+  setRuntimeStyle(overlay, 'fontWeight', fontWeight);
   return overlay;
 }
 
@@ -410,10 +411,11 @@ function pptxStageLayoutBox(
   slideWidth: number,
   slideHeight: number,
 ): { width: number; height: number; svgWidth: number; svgHeight: number } {
-  const styleWidth = cssPxValue(stage.style.width);
+  const computedStage = window.getComputedStyle(stage);
+  const styleWidth = cssPxValue(computedStage.width);
   const viewport = svgViewportSize(svgRoot, slideWidth, slideHeight);
   const width = stage.clientWidth || styleWidth || stageRect.width || PPTX_BASE_WIDTH;
-  const styleHeight = cssPxValue(stage.style.height);
+  const styleHeight = cssPxValue(computedStage.height);
   const height = stage.clientHeight
     || styleHeight
     || (width > 0 ? width * (viewport.height / viewport.width) : stageRect.height);
@@ -448,20 +450,21 @@ function pptxOverlayText(overlay: HTMLElement): string {
 
 function resizePptxTextOverlayToContent(overlay: HTMLTextAreaElement, metrics: PptxTextOverlayMetrics): void {
   const mirror = document.createElement('span');
-  mirror.style.position = 'absolute';
-  mirror.style.visibility = 'hidden';
-  mirror.style.whiteSpace = 'pre';
-  mirror.style.fontFamily = overlay.style.fontFamily;
-  mirror.style.fontSize = overlay.style.fontSize;
-  mirror.style.fontWeight = overlay.style.fontWeight;
-  mirror.style.fontStyle = overlay.style.fontStyle;
-  mirror.style.letterSpacing = overlay.style.letterSpacing;
+  const overlayStyle = window.getComputedStyle(overlay);
+  setRuntimeStyle(mirror, 'position', 'absolute');
+  setRuntimeStyle(mirror, 'visibility', 'hidden');
+  setRuntimeStyle(mirror, 'whiteSpace', 'pre');
+  setRuntimeStyle(mirror, 'fontFamily', overlayStyle.fontFamily);
+  setRuntimeStyle(mirror, 'fontSize', overlayStyle.fontSize);
+  setRuntimeStyle(mirror, 'fontWeight', overlayStyle.fontWeight);
+  setRuntimeStyle(mirror, 'fontStyle', overlayStyle.fontStyle);
+  setRuntimeStyle(mirror, 'letterSpacing', overlayStyle.letterSpacing);
   mirror.textContent = overlay.value || ' ';
   overlay.ownerDocument.body.appendChild(mirror);
   const desiredWidth = Math.ceil(mirror.getBoundingClientRect().width + 18);
   mirror.remove();
   const nextWidth = Math.min(metrics.maxWidthPx, Math.max(metrics.minWidthPx, desiredWidth));
-  overlay.style.width = `${nextWidth}px`;
+  setRuntimeStyle(overlay, 'width', `${nextWidth}px`);
   overlay.scrollLeft = overlay.scrollWidth;
 }
 
@@ -477,16 +480,16 @@ function copyPptxTextVisualStyle(node: SVGTextElement, overlay: HTMLElement): vo
   const letterSpacing = attr('letter-spacing') ?? computed.letterSpacing;
   const textDecoration = attr('text-decoration') ?? computed.textDecoration;
   const textAnchor = attr('text-anchor') ?? computed.textAnchor;
-  if (fill && fill !== 'none') overlay.style.setProperty('--ppt-text-color', fill);
-  if (fontSize) overlay.style.fontSize = fontSize;
-  if (fontFamily) overlay.style.fontFamily = fontFamily;
-  if (fontWeight) overlay.style.fontWeight = fontWeight;
-  if (fontStyle) overlay.style.fontStyle = fontStyle;
-  if (letterSpacing) overlay.style.letterSpacing = letterSpacing;
-  if (textDecoration) overlay.style.textDecoration = textDecoration;
-  if (textAnchor === 'middle') overlay.style.textAlign = 'center';
-  else if (textAnchor === 'end') overlay.style.textAlign = 'right';
-  else overlay.style.textAlign = 'left';
+  if (fill && fill !== 'none') setRuntimeStyle(overlay, 'color', fill);
+  if (fontSize) setRuntimeStyle(overlay, 'fontSize', fontSize);
+  if (fontFamily) setRuntimeStyle(overlay, 'fontFamily', fontFamily);
+  if (fontWeight) setRuntimeStyle(overlay, 'fontWeight', fontWeight);
+  if (fontStyle) setRuntimeStyle(overlay, 'fontStyle', fontStyle);
+  if (letterSpacing) setRuntimeStyle(overlay, 'letterSpacing', letterSpacing);
+  if (textDecoration) setRuntimeStyle(overlay, 'textDecoration', textDecoration);
+  if (textAnchor === 'middle') setRuntimeStyle(overlay, 'textAlign', 'center');
+  else if (textAnchor === 'end') setRuntimeStyle(overlay, 'textAlign', 'right');
+  else setRuntimeStyle(overlay, 'textAlign', 'left');
 }
 
 function alignPptxTextOverlays(
@@ -524,21 +527,21 @@ function alignPptxTextOverlays(
     if (declaredBox.height && !hasMeasuredRect) {
       heightPx = Math.max(heightPx, declaredBox.height * scaleY);
     }
-    overlay.style.left = `${Math.max(0, (leftPx / stageBox.width) * 100)}%`;
-    overlay.style.top = `${Math.max(0, (topPx / stageBox.height) * 100)}%`;
+    setRuntimeStyle(overlay, 'left', `${Math.max(0, (leftPx / stageBox.width) * 100)}%`);
+    setRuntimeStyle(overlay, 'top', `${Math.max(0, (topPx / stageBox.height) * 100)}%`);
     const maxWidthPx = Math.max(widthPx, stageBox.width - leftPx - 12);
-    overlay.style.width = `${widthPx}px`;
+    setRuntimeStyle(overlay, 'width', `${widthPx}px`);
     overlay.dataset.minWidthPx = String(widthPx);
     overlay.dataset.maxWidthPx = String(maxWidthPx);
     const fontPx = hasHeightHint
       ? calibratedPptxOverlayFontSize(node, declaredBox.fontSize, heightPx, scaleY)
       : fallbackFontPx;
     heightPx = Math.max(heightPx, fontPx * 1.15);
-    overlay.style.height = `${heightPx}px`;
-    overlay.style.minHeight = `${heightPx}px`;
+    setRuntimeStyle(overlay, 'height', `${heightPx}px`);
+    setRuntimeStyle(overlay, 'minHeight', `${heightPx}px`);
     copyPptxTextVisualStyle(node, overlay);
-    overlay.style.fontSize = `${fontPx}px`;
-    overlay.style.lineHeight = `${Math.max(heightPx, fontPx * 1.15)}px`;
+    setRuntimeStyle(overlay, 'fontSize', `${fontPx}px`);
+    setRuntimeStyle(overlay, 'lineHeight', `${Math.max(heightPx, fontPx * 1.15)}px`);
   });
 }
 
@@ -552,19 +555,18 @@ function countPptxSvgTextBlocks(source: string): number {
 }
 
 function editablePptxShadowStyles(): string {
-  return `<style>
+  return `
     :host{display:block;width:100%;height:100%}
-    svg{display:block;width:100%!important;height:100%!important;max-width:100%;max-height:100%}
+    svg{display:block;width:100%;height:100%;max-width:100%;max-height:100%}
     .inspector-office-page-editor__svg-source-text{pointer-events:none}
     .inspector-office-page-editor__svg-source-text.is-editing,
     .inspector-office-page-editor__svg-source-text.is-dirty{opacity:0}
     .inspector-office-page-editor__ppt-layer{position:absolute;inset:0;z-index:2;overflow:hidden;pointer-events:none}
-    .inspector-office-page-editor__ppt-textbox{position:absolute;box-sizing:border-box;min-height:20px;padding:0;border:1px solid transparent;border-radius:3px;background:transparent;color:transparent!important;caret-color:#2563eb;cursor:text;line-height:normal;outline:none;overflow:hidden;pointer-events:auto;resize:none;white-space:pre}
+    .inspector-office-page-editor__ppt-textbox{position:absolute;box-sizing:border-box;min-height:20px;padding:0;border:1px solid transparent;border-radius:var(--mw-radius-1);background:transparent;color:transparent;caret-color:var(--mw-action-primary);cursor:text;line-height:normal;outline:none;overflow:hidden;pointer-events:auto;resize:none;white-space:pre}
     .inspector-office-page-editor__ppt-textbox.is-editing,
-    .inspector-office-page-editor__ppt-textbox.is-dirty{color:var(--ppt-text-color,currentColor)!important}
-    .inspector-office-page-editor__ppt-textbox:hover{border-color:rgba(37,99,235,.45)}
-    .inspector-office-page-editor__ppt-textbox:focus{border-color:rgba(37,99,235,.85);box-shadow:0 0 0 2px rgba(37,99,235,.24)}
-  </style>`;
+    .inspector-office-page-editor__ppt-textbox.is-dirty{color:var(--mw-runtime-color,currentColor)}
+    .inspector-office-page-editor__ppt-textbox:hover{border-color:var(--mw-focus-ring)}
+    .inspector-office-page-editor__ppt-textbox:focus{border-color:var(--mw-focus-ring);box-shadow:var(--mw-action-glow)}`;
 }
 
 function markPptxSlideEditable(
@@ -732,22 +734,27 @@ export async function renderPptxPreview(
       FORBID_ATTR: ['onload', 'onclick', 'onerror'],
     });
     const fitted = { ...fittedRaw, svg: sanitizedSvg };
-    stage.style.width = `${PPTX_BASE_WIDTH}px`;
+    setRuntimeStyle(stage, 'width', `${PPTX_BASE_WIDTH}px`);
     if (options.editable) {
-      stage.style.aspectRatio = `${fitted.width} / ${fitted.height}`;
+      setRuntimeStyle(stage, 'aspectRatio', `${fitted.width} / ${fitted.height}`);
       const shadow = stage.shadowRoot ?? stage.attachShadow({ mode: 'open' });
       const style = document.createElement('style');
       style.textContent = editablePptxShadowStyles();
-      const slide = document.createElement('template');
-      // fitted.svg was sanitized with the SVG-only DOMPurify profile above.
-      slide.innerHTML = fitted.svg;
-      shadow.replaceChildren(style, slide.content.cloneNode(true));
+      const parsed = new DOMParser().parseFromString(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${fitted.width}" height="${fitted.height}" viewBox="0 0 ${fitted.width} ${fitted.height}">${fitted.svg}</svg>`,
+        'image/svg+xml',
+      );
+      const svg = parsed.documentElement;
+      if (parsed.querySelector('parsererror') || svg.localName !== 'svg') {
+        throw new Error('PPT 页面 SVG 无法解析');
+      }
+      shadow.replaceChildren(style, document.importNode(svg, true));
       markPptxSlideEditable(stage, shadow, fitted.width, fitted.height, editableSlideBlockOffsets[currentIndex] ?? 0);
     } else {
-      frame.style.aspectRatio = `${fitted.width} / ${fitted.height}`;
+      setRuntimeStyle(frame, 'aspectRatio', `${fitted.width} / ${fitted.height}`);
       frame.srcdoc = buildOfflinePreviewDocument(
         '',
-        `<style>html,body{width:100%;height:100%;margin:0;background:#fff;overflow:hidden}svg{display:block;width:100%!important;height:100%!important;max-width:100%;max-height:100%}</style>${fitted.svg}`,
+        `<style>html,body{width:100%;height:100%;margin:0;background:var(--mw-bg-canvas);overflow:hidden}svg{display:block;width:100%;height:100%;max-width:100%;max-height:100%}</style>${fitted.svg}`,
       );
     }
     zoom.refreshFit();
@@ -777,11 +784,11 @@ function renderXlsxTable(sheet: XlsxPreviewSheet): HTMLElement {
   table.setAttribute('aria-label', `工作表 ${sheet.name}`);
   const colgroup = document.createElement('colgroup');
   const rowNumberColumn = document.createElement('col');
-  rowNumberColumn.style.width = '48px';
+  setRuntimeStyle(rowNumberColumn, 'width', '48px');
   colgroup.appendChild(rowNumberColumn);
   for (const width of sheet.columnWidths) {
     const column = document.createElement('col');
-    column.style.width = `${width}px`;
+    setRuntimeStyle(column, 'width', `${width}px`);
     colgroup.appendChild(column);
   }
   table.appendChild(colgroup);
@@ -810,7 +817,7 @@ function renderXlsxTable(sheet: XlsxPreviewSheet): HTMLElement {
   for (let row = 0; row < sheet.rowCount; row += 1) {
     const tableRow = document.createElement('tr');
     const height = sheet.rowHeights.get(row);
-    if (height) tableRow.style.height = `${height}px`;
+    if (height) setRuntimeStyle(tableRow, 'height', `${height}px`);
     const rowHeading = document.createElement('th');
     rowHeading.scope = 'row';
     rowHeading.textContent = String(row + 1);

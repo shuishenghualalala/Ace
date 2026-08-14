@@ -4,7 +4,7 @@
  * 监听主进程推送的 `backend:status` IPC 事件（周期健康检查 /api/health），
  * 当后端不可用时展示全局遮罩阻断用户操作，恢复后自动隐藏。
  *
- * 本守卫只负责本地 Gateway 可用性，不承担用户身份判断。
+ * 与 auth-gate（登录墙）正交：登录墙管身份，此守卫管后端服务可用性。
  *
  * 慢启动容错：遮罩持续超过 SLOW_THRESHOLD_MS 后，从「光秃秃转圈」升级为
  * 「仍在准备中（已等 Ns）+ 查看日志 / 重试 / 继续等待」，把无限静默转圈变成
@@ -61,12 +61,10 @@ function applyBackendOverlay(connected: boolean): void {
   const el = resolveOverlay();
   if (!el) return;
   if (connected) {
-    el.style.display = 'none';
+    el.hidden = true;
     stopSlowTimer();
   } else {
-    el.style.display = '';
-    // Remove `hidden` attribute if present so display style takes effect
-    el.removeAttribute('hidden');
+    el.hidden = false;
     startSlowTimer();
   }
 }
@@ -90,19 +88,21 @@ function stopSlowTimer(): void {
 function tickSlow(): void {
   const elapsed = Date.now() - overlayShownAt;
   if (elapsed < SLOW_THRESHOLD_MS || slowDismissed) return;
-  const elapsedEl = document.getElementById(ELAPSED_ID);
-  if (elapsedEl) {
-    elapsedEl.textContent = `仍在准备中（已等待 ${Math.round(elapsed / 1000)} 秒）`;
-    elapsedEl.style.display = '';
-  }
-  const actions = document.getElementById(ACTIONS_ID);
-  if (actions) actions.style.display = '';
+    const elapsedEl = document.getElementById(ELAPSED_ID);
+    if (elapsedEl) {
+      elapsedEl.textContent = `仍在准备中（已等待 ${Math.round(elapsed / 1000)} 秒）`;
+      elapsedEl.hidden = false;
+    }
+    const actions = document.getElementById(ACTIONS_ID);
+    if (actions) actions.hidden = false;
   bindSlowButtons();
 }
 
 function hideSlowActions(): void {
-  document.getElementById(ELAPSED_ID)?.setAttribute('style', 'display:none');
-  document.getElementById(ACTIONS_ID)?.setAttribute('style', 'display:none');
+  const elapsed = document.getElementById(ELAPSED_ID);
+  const actions = document.getElementById(ACTIONS_ID);
+  if (elapsed) elapsed.hidden = true;
+  if (actions) actions.hidden = true;
 }
 
 function bindSlowButtons(): void {
@@ -143,11 +143,11 @@ function showLogHint(text: string): void {
   }
   // 提示是多行命令——按 •或换行分段显示，避免一长串挤成一团。
   hint.textContent = text;
-  hint.style.display = '';
+  hint.hidden = false;
 }
 
 /**
- * gateway 晚于登录 hydrate 就绪时：补连 WS，并刷新模型配置。
+ * gateway 晚于登录 hydrate 就绪时：补连 WS 并重拉配置。
  * 失败吞掉——下一次 backend:status / socket 自重连会再试。
  */
 async function recoverAfterBackendConnected(): Promise<void> {
@@ -158,9 +158,10 @@ async function recoverAfterBackendConnected(): Promise<void> {
     if (socket && typeof socket.connect === 'function' && !socket.isGatewayProxyOpen()) {
       socket.connect();
     }
-    await Promise.allSettled([
+    const recoveries: Promise<unknown>[] = [
       import('./model-picker').then((module) => module.loadConfig()),
-    ]);
+    ];
+    await Promise.allSettled(recoveries);
   } finally {
     recoverInFlight = false;
   }
@@ -194,8 +195,8 @@ export function initBackendStatusGuard(): void {
       : '';
     if (warning && warning !== lastComponentWarning) notify(warning);
     lastComponentWarning = warning;
-    // 假阴性恢复：冷启动时登录 hydrate 打到未就绪 gateway，模型配置/WS 可能为空；
-    // health 转正后补一次。
+    // 假阴性恢复：冷启动时登录 hydrate 打到未就绪 gateway，配置/WS 会空着；
+    // health 转正后补一次，避免一直「服务未连接」。
     if (connected && !wasConnected) {
       void recoverAfterBackendConnected();
     }

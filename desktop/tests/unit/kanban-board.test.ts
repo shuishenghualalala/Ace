@@ -32,21 +32,13 @@ describe('buildKanbanInspectorHtml', () => {
     state.tasks = [];
   });
 
-  it('不再包含 Mermaid 相关 DOM 或脚本', () => {
+  it('检查器输出：不含 Mermaid 与工作目录按钮，包含 workflow timeline 容器', () => {
     const html = buildKanbanInspectorHtml();
     expect(html.toLowerCase()).not.toContain('mermaid');
     expect(html).not.toContain('flowchart');
     expect(html).not.toContain('.mermaid');
-  });
-
-  it('不再包含看板顶部的工作目录按钮', () => {
-    const html = buildKanbanInspectorHtml();
     expect(html).not.toContain('id="kanban-workspace"');
     expect(html).not.toContain('打开工作目录');
-  });
-
-  it('包含 workflow timeline 容器', () => {
-    const html = buildKanbanInspectorHtml();
     expect(html).toContain('workflow-timeline-container');
   });
 

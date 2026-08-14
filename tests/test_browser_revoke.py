@@ -55,8 +55,6 @@ async def test_renew_capability_clears_page_observations_without_approval_state(
     generation = manager.renew_capability("owner-a")
 
     assert generation == 1
-    assert not hasattr(manager, "_pending_approvals")
-    assert not hasattr(manager, "_granted_approvals")
     assert not session.refs
     assert session.screenshot_id == ""
     assert session.page_marker == ""
@@ -96,8 +94,6 @@ async def test_revoke_keeps_functional_build_free_of_approval_tokens(browser):
     assert manager.permission_for(
         "browser_download", {"ref": "p1:e5"}, "owner-b", "session-a"
     ) is None
-    assert not hasattr(manager, "_pending_approvals")
-    assert not hasattr(manager, "_granted_approvals")
 
     await manager.revoke_owner("owner-a")
 
@@ -122,8 +118,6 @@ async def test_revoke_blocks_actions_and_removes_owner(browser):
     assert not any(
         data.get("owner") == owner_before.runtime_key for data in driver.tabs.values()
     )
-    # 磁盘 Profile 目录保留
-    assert owner_before.profile_dir.parent.exists() or True  # profile 按需创建，不断言删除
 
 
 async def test_revoked_owner_inflight_action_is_interrupted(browser):

@@ -51,11 +51,13 @@ export interface ToolChunk {
   kind: 'tool';
   body: {
     tool_call_id?: string;
-    phase?: 'generating' | 'start' | 'result' | 'end' | 'error';
+    phase?: 'generating' | 'start' | 'result' | 'end' | 'error' | 'progress';
     name?: string;
     ui_label?: string;
     args?: string;
     detail?: string;
+    /** phase=progress 时的阶段进度文案。 */
+    text?: string;
   };
   sequence: number;
   session_id?: string;
@@ -68,7 +70,7 @@ export interface StatusChunk {
     agent_avatar?: string;
     detail?: string;
     control?: boolean;
-    activity?: 'tool_planning' | string;
+    activity?: string;
   };
   sequence: number;
   session_id?: string;
@@ -128,7 +130,12 @@ export interface FollowupQuestionChunk {
     record_history?: boolean;
     status?: string;
     note?: string;
-    origin?: { type?: string; agent_name?: string; origin_session_id?: string };
+    origin?: {
+      type?: string;
+      agent_name?: string;
+      origin_session_id?: string;
+      mention_intent?: string;
+    };
     questions?: Array<{
       id?: string;
       question?: string;
@@ -226,6 +233,7 @@ export interface TeamInternalChunk {
     collapsed_title?: string;
     process_text?: string;
     artifacts?: ChatMessage['artifacts'];
+    turn_file_changes?: ChatMessage['turnFileChanges'];
     thinking?: unknown;
     tool_calls?: unknown[];
     turn_started_at?: number;
@@ -333,7 +341,9 @@ export function resolveBusyTransition(
   kind: ChatChunkKind,
   statusHint: StatusHint | undefined,
   turnSealed = false,
+  presentationOnly = false,
 ): boolean | null {
+  if (presentationOnly) return null;
   if (USER_WAIT_CHUNK_KINDS.has(kind)) return false;
   if (statusHint === 'running' || statusHint === 'queued') {
     if (turnSealed) return null;
@@ -432,6 +442,8 @@ export interface ToolUpsert {
   status: ToolCallInfo['status'];
   startedAt: number;
   duration?: number;
+  /** 运行中工具的阶段进度文案（phase=progress 帧携带，完成时清除）。 */
+  progressText?: string;
 }
 
 // ---------- 7 个 reducer ----------
@@ -711,7 +723,16 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
   else if (existing?.args) toolUpsert.args = existing.args;
 
   const phase = chunk.body.phase;
-  if (phase === 'generating' || phase === 'start') {
+  if (phase === 'progress') {
+    // 进度帧：保持运行态、仅更新阶段文案——不能落入下面的完成分支（否则工具行被提前标成 done）。
+    if (existing) {
+      toolUpsert.status = existing.status === 'generating' ? 'generating' : 'running';
+      toolUpsert.startedAt = existing.startedAt;
+      if (existing.duration != null) toolUpsert.duration = existing.duration;
+    }
+    if (typeof chunk.body.text === 'string' && chunk.body.text) toolUpsert.progressText = chunk.body.text;
+    else if (existing?.progressText) toolUpsert.progressText = existing.progressText;
+  } else if (phase === 'generating' || phase === 'start') {
     // 新建
   } else {
     if (existing) {
@@ -757,6 +778,7 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
     status: toolUpsert.status,
     startedAt: toolUpsert.startedAt,
     duration: toolUpsert.duration,
+    progressText: toolUpsert.progressText,
   });
   book.toolMap = newToolMap;
 
@@ -850,7 +872,7 @@ export function statusReducer(chunk: StatusChunk, snapshot: ReducerSnapshot): Re
       timestamp: snapshot.now,
       agentName: typeof chunk.body.agent_name === 'string' ? chunk.body.agent_name : undefined,
       agentAvatar: typeof chunk.body.agent_avatar === 'string' ? chunk.body.agent_avatar : undefined,
-      // 瞬时活动提示（如 tool_planning「正在规划工具调用…」）：渲染层据此做
+      // 瞬时活动提示：渲染层据此做
       // 「live 只留最新、完成即隐藏」的过滤，避免进度提示在回合结束后残留。
       activity: typeof chunk.body.activity === 'string' ? chunk.body.activity : undefined,
     },
@@ -887,7 +909,7 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
     const startedAt = snapshot.messages.find((m) => m.id === assistantId)?.turnStartedAt;
     turnDurationMs = snapshot.now - (startedAt ?? snapshot.now);
     if (book.firstChunkAt != null && startedAt != null) firstTokenMs = book.firstChunkAt - startedAt;
-    // 配合 stream-reassembly 的按序重组：累积正文以 gateway_sequence 为序号权威，
+    // 修法2（配合 stream-reassembly 的按序重组）：累积正文现已按 gateway_sequence 重组为序号权威，
     // 乱序不再需要这里兜底。覆盖只在「final.text 是累积正文的超集前缀」时发生——即 acc 是 text 的
     // 前缀（text.startsWith(acc)），此时 text ⊇ acc，覆盖只补全（单段回合丢尾帧的合法恢复），不丢
     // 任何已累积文字。其它情况一律保留累积正文：多步回合的 final 只含末段（builtin executor，
@@ -1053,6 +1075,31 @@ export function planReviewReducer(chunk: PlanReviewChunk, snapshot: ReducerSnaps
 export function followupQuestionReducer(chunk: FollowupQuestionChunk, snapshot: ReducerSnapshot): ReducerResult {
   const book = { ...snapshot.book };
   const status = typeof chunk.body.status === 'string' ? chunk.body.status : '';
+  const current = book.pendingFollowup;
+  const targetsCurrent = !chunk.body.question_id || current?.questionId === chunk.body.question_id;
+  const isRuntimeStaffing = current?.origin?.mentionIntent === 'runtime_staffing';
+  if (
+    current
+    && targetsCurrent
+    && isRuntimeStaffing
+    && ['resolved', 'applying', 'applied', 'declined', 'failed'].includes(status)
+  ) {
+    book.pendingFollowup = {
+      ...current,
+      status: status === 'resolved' ? 'applying' : status,
+      ...(typeof chunk.body.note === 'string' && chunk.body.note.trim()
+        ? { note: chunk.body.note.trim() }
+        : {}),
+    };
+    return {
+      messageUpserts: [],
+      toolUpserts: [],
+      replaceBook: book,
+      statusHint: undefined,
+      queueHint: undefined,
+      finalize: false,
+    };
+  }
   if (['expired', 'cancelled', 'resolved'].includes(status)) {
     if (!chunk.body.question_id || book.pendingFollowup?.questionId === chunk.body.question_id) {
       book.pendingFollowup = null;
@@ -1072,11 +1119,18 @@ export function followupQuestionReducer(chunk: FollowupQuestionChunk, snapshot: 
     ...(typeof chunk.body.origin.origin_session_id === 'string'
       ? { originSessionId: chunk.body.origin.origin_session_id }
       : {}),
+    ...(typeof chunk.body.origin.mention_intent === 'string'
+      ? { mentionIntent: chunk.body.origin.mention_intent }
+      : {}),
   } : undefined;
   book.pendingFollowup = {
     questionId: typeof chunk.body.question_id === 'string' ? chunk.body.question_id : '',
     title: typeof chunk.body.title === 'string' ? chunk.body.title : '',
     recordHistory: chunk.body.record_history !== false,
+    ...(status ? { status } : {}),
+    ...(typeof chunk.body.note === 'string' && chunk.body.note.trim()
+      ? { note: chunk.body.note.trim() }
+      : {}),
     ...(origin ? { origin } : {}),
     questions: (chunk.body.questions ?? []).map((q) => ({
       id: typeof q.id === 'string' ? q.id : '',
@@ -1155,7 +1209,7 @@ function fileChangeSignature(f: FileChange): string {
   for (const r of f.diff) {
     h = (Math.imul(h, 33) ^ r.kind.charCodeAt(0) ^ r.text.length) | 0;
   }
-  return `${f.status}|${f.added}|${f.removed}|${f.binary ? 1 : 0}|${h >>> 0}`;
+  return `${f.status}|${f.added}|${f.removed}|${f.binary ? 1 : 0}|${f.revision || ''}|${h >>> 0}`;
 }
 
 /** 整份 fileChanges 快照 → path→签名 映射，存入 book.prevTurnFileSignature 供下一轮差集。 */
@@ -1333,7 +1387,7 @@ export function workflowProgressReducer(chunk: WorkflowProgressChunk, snapshot: 
   }
 
   // workflow 完成/失败/暂停时：释放 busy，并把最后一条有内容的角色输出提升为最终回复。
-  // Dynamic Kanban 会话里，角色输出就是交付物；synthesize 后的 final chunk 可能因
+  // Dynamic Kanban 的专家团会话里，角色输出就是交付物；synthesize 后的 final chunk 可能因
   // 后台化、限流或静默检测没有到达桌面端，导致会话一直转圈。这里用 workflow_progress 的
   // 终态作为兜底，确保左侧消息列表的转圈能消失。
   let statusHint: StatusHint | undefined = payload.status === 'running' ? 'running' : undefined;

@@ -165,6 +165,21 @@ async def test_crew_disk_cleanup_plugin_lists_safe_temp_candidates(tmp_path, mon
     assert "old.log" in result.content
 
 
+async def test_crew_disk_cleanup_quick_requires_one_time_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    plugins.discover_and_load([Path("plugins")], enabled=["crew_disk_cleanup"])
+
+    decision = await registry.resolve_permission(
+        ToolCall("c1", "crew_disk_cleanup", {"action": "quick", "older_than_hours": 24})
+    )
+
+    assert decision is not None
+    assert decision.behavior == "ask"
+    assert decision.allow_always is False
+
+
 async def test_feishu_plugin_registers_but_hides_without_credentials(monkeypatch):
     monkeypatch.delenv("FEISHU_APP_ID", raising=False)
     monkeypatch.delenv("FEISHU_APP_SECRET", raising=False)
@@ -181,7 +196,16 @@ async def test_feishu_doc_read_uses_tenant_token(monkeypatch):
     monkeypatch.setenv("FEISHU_APP_ID", "app_id")
     monkeypatch.setenv("FEISHU_APP_SECRET", "app_secret")
     registry = Registry()
-    plugins = PluginManager(registry=registry)
+    authorized = []
+
+    async def authorize(url, **kwargs):
+        authorized.append((url, kwargs["tool_name"]))
+
+    monkeypatch.setattr("crew.tools.security_guard.authorize_network_tool", authorize)
+    plugins = PluginManager(
+        registry=registry,
+        services={"workspace_store": object(), "security_service": object()},
+    )
     plugins.discover_and_load([Path("plugins")], enabled=["feishu"])
 
     module = sys.modules["crew_runtime_plugins.feishu"]
@@ -201,6 +225,7 @@ async def test_feishu_doc_read_uses_tenant_token(monkeypatch):
     assert calls[0]["body"] == {"app_id": "app_id", "app_secret": "app_secret"}
     assert calls[1]["token"] == "tenant-token"
     assert calls[1]["path"] == "/open-apis/docx/v1/documents/doc123/raw_content"
+    assert authorized == [("https://open.feishu.cn", "feishu_doc_read")]
 
 
 def test_platform_plugin_registers_feishu_channel(monkeypatch):
@@ -446,7 +471,7 @@ def register(ctx):
 
     result = await plugins.run_tool_execution_middleware("demo", request.payload, terminal)
     assert result == {"wrapped": {"text": "secret", "masked": True, "executed": True}}
-    assert await plugins.run_plugin_command("/hello venus") == "hello venus"
+    assert await plugins.run_plugin_command("/hello world") == "hello world"
     assert plugins.api_routers[0][0] == "mw-plugin"
 
 

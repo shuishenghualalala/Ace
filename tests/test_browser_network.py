@@ -217,28 +217,40 @@ async def test_console_output_is_wrapped_in_its_own_tag(network_tool):
     assert "</untrusted_browser_content>" not in result
 
 
-async def test_落盘路径保持字节精确不做包裹(network_tool, tmp_path):
+@pytest.mark.parametrize(
+    ("part", "index", "filename", "exact"),
+    [
+        ("response-body", 3, "body.txt", "</untrusted_browser_content>&<raw>\n雪🙂"),
+        ("request-body", 2, "payload.txt", "\0<xml>&\r\n雪🙂"),
+    ],
+    ids=["response-body", "request-body"],
+)
+async def test_落盘路径保持字节精确不做包裹(network_tool, tmp_path, part, index, filename, exact):
     """需要字节精确的是文件，不是模型上下文。
 
     包裹与转义只加在返回给模型的那条路上；写给用户/工具的文件必须逐字节等于
     线上报文，否则拿去做 diff、喂给解析器、算哈希全都不对。
     """
     tool, _manager, driver, _tmp_path = network_tool
-    exact = "</untrusted_browser_content>&<raw>\n雪🙂"
     driver.network_detail_payload["text"] = exact
 
     result = await tool.handler(
         {
             "action": "network_request",
-            "index": 3,
-            "part": "response-body",
-            "filename": "body.txt",
+            "index": index,
+            "part": part,
+            "filename": filename,
         }
     )
 
-    assert "<untrusted_browser_network>" not in result
-    written = next(tmp_path.rglob("body.txt"))
-    assert written.read_text("utf-8") == exact
+    if part == "response-body":
+        assert "<untrusted_browser_network>" not in result
+        written = next(tmp_path.rglob(filename))
+        assert written.read_text("utf-8") == exact
+    else:
+        path = Path(result)
+        assert path == tmp_path / "downloads" / "browser" / filename
+        assert path.read_bytes() == exact.encode("utf-8")
 
 
 async def test_binary_response_body_is_materialized_byte_exactly(network_tool):
@@ -264,24 +276,3 @@ async def test_binary_response_body_is_materialized_byte_exactly(network_tool):
     assert path.parent == tmp_path / "downloads" / "browser"
     assert path.suffix == ".jpg"
     assert path.read_bytes() == body
-
-
-async def test_filename_saves_exact_text_body_in_the_task_download_directory(
-    network_tool,
-):
-    tool, _manager, driver, tmp_path = network_tool
-    exact = "\0<xml>&\r\n雪🙂"
-    driver.network_detail_payload["text"] = exact
-
-    result = await tool.handler(
-        {
-            "action": "network_request",
-            "index": 2,
-            "part": "request-body",
-            "filename": "payload.txt",
-        }
-    )
-
-    path = Path(result)
-    assert path == tmp_path / "downloads" / "browser" / "payload.txt"
-    assert path.read_bytes() == exact.encode("utf-8")

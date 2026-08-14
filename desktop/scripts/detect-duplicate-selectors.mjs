@@ -4,7 +4,7 @@
  * Scans a CSS file for selectors that appear more than once. The script
  * focuses on the same selector with potentially different declaration
  * blocks (cascade wars) — these are the real maintenance bomb in
- * theme.css where patches stack over time.
+ * the production stylesheet where patches stack over time.
  *
  * Pure Node, no external deps.
  *
@@ -133,7 +133,7 @@ if (isCli()) {
   const failOnDifferentValue = args.includes('--fail-on-different-value');
   // Drop flag(s) before resolving the positional file path.
   const positional = args.filter((a) => !a.startsWith('--'));
-  const target = resolve(positional[0] ?? 'assets/styles/theme.css');
+  const target = resolve(positional[0] ?? 'assets/styles/index.css');
   if (!existsSync(target)) {
     process.stderr.write(`detect-duplicate-selectors: file not found: ${target}\n`);
     process.exit(2);

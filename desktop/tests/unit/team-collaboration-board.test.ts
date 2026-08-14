@@ -184,7 +184,7 @@ describe('协作看板 HTML', () => {
     expect(html).toContain('Team Flow');
     expect(html).toContain('团队 DAG 工作流');
     expect(html).toContain('Crew');
-    expect(html).toContain('href="./crew-ui-symbols.svg#avatar-headphones"');
+    expect(html).toContain('href="#avatar-headphones"');
     expect(html).not.toContain('assistant.png');
     expect(html).not.toContain('Crew 内置智能体');
     expect(html).toContain('Leader 统筹团队协作，负责项目计划与验收把关');
@@ -199,21 +199,6 @@ describe('协作看板 HTML', () => {
     expect(html).toContain('全局排队');
     expect(html).toContain('活跃子任务');
     expect(html).not.toContain('React');
-
-    expect(resolveTeamCollaborationMember(SESSION_ID, {
-      id: 'leader-event',
-      role: 'team_internal',
-      content: '开始规划',
-      timestamp: 1,
-      agentId: 'leader',
-      agentName: 'leader',
-      isLeader: true,
-    })).toMatchObject({
-      agentId: 'crew::builtin',
-      name: 'Crew',
-      isLeader: true,
-    });
-    expect(resolveTeamCollaborationName(SESSION_ID)).toBe('产品研发团队');
 
     document.body.innerHTML = html;
     activateTeamCollaborationBoard(SESSION_ID);

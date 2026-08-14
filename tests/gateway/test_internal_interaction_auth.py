@@ -6,10 +6,10 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from crew.core.runctx import current_owner_account_id
 from crew.gateway.auth_policy import requires_gateway_auth
 from crew.gateway.interaction_bridge import InteractionBridge, create_interaction_router
-from crew.core.runctx import current_owner_account_id
-
+from crew.security.models import NetworkAccess
 
 INTERNAL_BINDING_PATHS = (
     "/api/internal/interactions/ask",
@@ -58,6 +58,47 @@ def test_interaction_binding_inherits_runtime_owner_context():
     assert binding.owner_account_id == "A:uid-a"
 
 
+def test_interaction_mcp_preserves_binding_env_and_only_allows_gateway_callback():
+    bridge = InteractionBridge()
+    bridge.configure(push_fn=lambda *_: None, gateway_url="http://127.0.0.1:8123")
+    binding = bridge.create_binding(
+        owner_account_id="A:uid-a",
+        display_session_id="main",
+        origin_session_id="main::agent",
+        agent_name="Kimi",
+        ttl_seconds=30,
+    )
+    assert binding is not None
+
+    config = bridge.mcp_server_config(binding)
+    env = {item["name"]: item["value"] for item in config["env"]}
+    assert env["CREW_INTERACTION_TOKEN"] == binding.token
+
+    permissions = bridge.local_callback_permissions(binding)
+    assert len(permissions.network) == 1
+    entry = permissions.network[0]
+    assert (entry.host, entry.port, entry.protocol) == ("127.0.0.1", 8123, "http")
+    assert entry.access is NetworkAccess.ALLOW
+    assert entry.allow_private is True
+    assert entry.escalatable is False
+
+
+def test_interaction_callback_rejects_non_loopback_gateway():
+    bridge = InteractionBridge()
+    bridge.configure(push_fn=lambda *_: None, gateway_url="https://example.com:443")
+    binding = bridge.create_binding(
+        owner_account_id="A:uid-a",
+        display_session_id="main",
+        origin_session_id="main::agent",
+        agent_name="Kimi",
+        ttl_seconds=30,
+    )
+    assert binding is not None
+
+    with pytest.raises(RuntimeError, match="loopback"):
+        bridge.local_callback_permissions(binding)
+
+
 def test_remove_owner_revokes_only_that_owners_bindings():
     """Logout 撤销 A 时不能误删 B 的独立短期 binding。"""
     bridge = InteractionBridge()
@@ -81,6 +122,43 @@ def test_remove_owner_revokes_only_that_owners_bindings():
     assert bridge.remove_owner("A:uid-a") == 1
     assert bridge.resolve_binding(binding_a.token) is None
     assert bridge.resolve_binding(binding_b.token) is binding_b
+
+
+def test_dynamic_team_mention_schema_exposes_only_role_allowed_intents():
+    bridge = InteractionBridge()
+    bridge.configure(push_fn=lambda *_: None, gateway_url="http://127.0.0.1:8000")
+    bindings = {
+        role: bridge.create_binding(
+            owner_account_id="A:uid-a",
+            display_session_id=f"display-{role}",
+            origin_session_id=f"team::{role}",
+            agent_name=role,
+            ttl_seconds=30,
+            context_type="team",
+            team_session_id="team",
+            member_id=role,
+            team_role=role,
+        )
+        for role in ("leader", "member")
+    }
+
+    allowed = {
+        "leader": ["assign", "submit", "review", "ask", "broadcast", "handoff"],
+        "member": ["submit", "review", "ask", "handoff"],
+    }
+    for role, binding in bindings.items():
+        assert binding is not None
+        mention = next(
+            tool
+            for tool in bridge.dynamic_tool_specs(binding)
+            if tool["name"] == "team_mention"
+        )
+        assert mention["inputSchema"]["properties"]["intent"]["enum"] == allowed[role]
+        assert mention["inputSchema"]["properties"]["result_status"]["enum"] == [
+            "pass",
+            "fail",
+            "blocked",
+        ]
 
 
 @pytest.mark.asyncio
@@ -198,6 +276,16 @@ async def test_team_binding_enforces_role_identity_and_own_plan_node():
                 "to": ["leader"],
                 "intent": "submit",
                 "content": "done",
+                "result_status": "pass",
+            },
+        )
+        missing_status = await client.post(
+            "/api/internal/team/mention",
+            headers=headers,
+            json={
+                "to": ["leader"],
+                "intent": "submit",
+                "content": "done",
             },
         )
         own_update = await client.post(
@@ -214,7 +302,10 @@ async def test_team_binding_enforces_role_identity_and_own_plan_node():
     assert ask.status_code == 403
     assert create.status_code == 403
     assert spoof.status_code == 200
+    assert missing_status.status_code == 400
+    assert "result_status" in missing_status.json()["error"]
     assert seen["mention"][1]["member_id"] == "coder"
+    assert seen["mention"][1]["result_status"] == "pass"
     assert own_update.status_code == 200
     assert seen["update"][1]["node_id"] == "mine"
     assert other_update.status_code == 403

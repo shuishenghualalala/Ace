@@ -1,4 +1,4 @@
-import type { PlanReview, ToolCallInfo, UiMessage } from "../types";
+import type { PlanReview, ToolCallInfo, TurnFileChangeSummary, UiMessage } from "../types";
 
 export type ProcessTimelineItem =
   | { kind: "thinking"; id: string; content: string; done: boolean }
@@ -22,6 +22,7 @@ export interface AgentTurnState {
   processItems: ProcessTimelineItem[];
   responses: AgentTurnResponse[];
   planReviews: AgentTurnPlanReview[];
+  fileChanges: TurnFileChangeSummary[];
   toolCount: number;
   commandCount: number;
   hasThinking: boolean;
@@ -53,6 +54,7 @@ export const emptyAgentTurnState = (): AgentTurnState => ({
   processItems: [],
   responses: [],
   planReviews: [],
+  fileChanges: [],
   toolCount: 0,
   commandCount: 0,
   hasThinking: false,
@@ -200,6 +202,11 @@ export function buildAgentTurnState(messages: UiMessage[], isStreaming: boolean)
   let state = emptyAgentTurnState();
 
   messages.forEach((message, index) => {
+    if (message.turnFileChanges?.length) {
+      const merged = new Map(state.fileChanges.map((file) => [file.path, file]));
+      for (const file of message.turnFileChanges) merged.set(file.path, file);
+      state = { ...state, fileChanges: Array.from(merged.values()) };
+    }
     state = reduceAgentTurnEvent(state, {
       type: "timing",
       turnStartedAt: message.turnStartedAt,

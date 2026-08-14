@@ -16,60 +16,9 @@ import {
 } from '../../src/main/browser/playwright-actions';
 
 import type { ActionContext } from '../../src/main/browser/playwright-actions';
-import type {
-  FingerprintResult,
-  RefRecord,
-} from '../../src/main/browser/playwright-snapshot';
+import type { RefRecord } from '../../src/main/browser/playwright-snapshot';
 import type { Locator, Page } from '../../src/main/browser/playwright-compat';
-
-function materialState(
-  material: string,
-  overrides: Partial<Omit<FingerprintResult, 'security'>> = {},
-): Record<string, unknown> {
-  const tag = overrides.tag ?? 'button';
-  const inputType = overrides.inputType ?? 'button';
-  return {
-    material,
-    navigation: '',
-    downloadNavigation: '',
-    action: '',
-    actionKind: 'activate',
-    accessibleRole: 'button',
-    accessibleName: 'Submit',
-    documentBaseURI: 'https://example.test/',
-    documentURL: 'https://example.test/',
-    tag,
-    inputType,
-    contentEditable: overrides.contentEditable ?? false,
-    fieldProbe: {
-      type: inputType,
-      autocomplete: '',
-      name: '',
-      id: '',
-      placeholder: '',
-      ariaLabel: '',
-      labelText: '',
-    },
-    complete: true,
-    ...overrides,
-  };
-}
-
-function attestedMaterial(
-  material: string,
-  tag = 'button',
-  inputType = 'button',
-  tier = 'plain',
-  contentEditable = false,
-): string {
-  return [
-    material,
-    `attested-tag\0${tag}`,
-    `attested-input-type\0${inputType}`,
-    `attested-content-editable\0${contentEditable}`,
-    `attested-field-tier\0${tier}`,
-  ].join('\n');
-}
+import { attestedMaterial, materialState } from './helpers/playwright-material';
 
 function snapshotPage(
   raw: string | (() => string),
@@ -762,7 +711,7 @@ function actionFixture(options: {
   const ctx: ActionContext = {
     page,
     refs: new Map([['@e1', {
-      ...actionRecord(hash(attestedMaterial(state.material, tag, inputType))),
+      ...actionRecord(hash(attestedMaterial(state.material, { tag, inputType }))),
       role,
       name,
       actionKind,

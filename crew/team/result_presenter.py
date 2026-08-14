@@ -95,6 +95,8 @@ def node_display_progress(
         "agent_log_style",
         "execution_events",
         "execution_contract",
+        "required_capabilities",
+        "capability_source",
         "runtime_reflections",
         "policy_report",
         "planner",

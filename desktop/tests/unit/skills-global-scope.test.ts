@@ -7,7 +7,13 @@ const source = readFileSync(
   'utf8',
 );
 
-describe('global Skill management copy', () => {
+describe('global capability management copy', () => {
+  it('uses the Ace capability hub APIs', () => {
+    expect(source).toContain('createCapabilityHubView');
+    expect(source).toContain('export function activateSkillsPage');
+    expect(source).toContain('export function bindSkillsPageLifecycle');
+  });
+
   it('states host-wide impact before install and uninstall', () => {
     expect(source).toContain('技能是本机全局共享能力');
     expect(source).toContain('安装结果对本机所有登录账号生效');

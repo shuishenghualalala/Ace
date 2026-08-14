@@ -9,9 +9,19 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from crew.core.errors import ProviderError
+from crew.core.errors import (
+    ProviderError,
+    contains_image_input,
+    is_unsupported_image_input_error,
+)
 from crew.core.interfaces import LLMProvider
-from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
+from crew.core.types import (
+    IMAGE_INPUT_UNAVAILABLE_NOTICE,
+    ChatResponse,
+    Message,
+    StreamChunk,
+    ToolCall,
+)
 from crew.state.logging import llm_trace
 
 _ANTHROPIC_VERSION = "2023-06-01"
@@ -70,7 +80,11 @@ def _to_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _messages_payload(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
+def _messages_payload(
+    messages: list[Message],
+    *,
+    vision: bool = True,
+) -> tuple[str, list[dict[str, Any]]]:
     system_parts: list[str] = []
     out: list[dict[str, Any]] = []
     for message in messages:
@@ -107,6 +121,7 @@ def _messages_payload(messages: list[Message]) -> tuple[str, list[dict[str, Any]
             continue
         if message.content_parts:
             blocks: list[dict[str, Any]] = []
+            removed_image = False
             for part in message.content_parts:
                 if part.get("type") == "text":
                     text = str(part.get("text") or "")
@@ -114,6 +129,9 @@ def _messages_payload(messages: list[Message]) -> tuple[str, list[dict[str, Any]
                         blocks.append({"type": "text", "text": text})
                     continue
                 if part.get("type") != "image_url":
+                    continue
+                if not vision:
+                    removed_image = True
                     continue
                 image = part.get("image_url")
                 url = image.get("url") if isinstance(image, dict) else image
@@ -129,6 +147,8 @@ def _messages_payload(messages: list[Message]) -> tuple[str, list[dict[str, Any]
                             },
                         }
                     )
+            if removed_image:
+                blocks.append({"type": "text", "text": IMAGE_INPUT_UNAVAILABLE_NOTICE})
             out.append({"role": "user", "content": blocks or _text_blocks(message.text_content)})
         else:
             out.append({"role": "user", "content": _text_blocks(message.text_content)})
@@ -199,6 +219,7 @@ class AnthropicProvider(LLMProvider):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.vision = vision
 
     async def aclose(self) -> None:
         """Close the owned HTTP client exactly once, including concurrent callers."""
@@ -215,7 +236,7 @@ class AnthropicProvider(LLMProvider):
         *,
         max_tokens_override: int | None = None,
     ) -> dict[str, Any]:
-        system, converted = _messages_payload(messages)
+        system, converted = _messages_payload(messages, vision=self.vision)
         effective_max_tokens = (
             max_tokens_override if max_tokens_override is not None
             else (self.max_tokens or _DEFAULT_MAX_TOKENS)
@@ -255,10 +276,16 @@ class AnthropicProvider(LLMProvider):
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             llm_trace("error", {"session_id": session, "model": self.model, "error": exc.response.text})
+            unsupported_image = is_unsupported_image_input_error(
+                exc.response.text,
+                request_has_images=contains_image_input(payload["messages"]),
+                status=status,
+            )
             raise ProviderError(
                 f"Anthropic 调用失败: HTTP {status}: {exc.response.text}",
-                retryable=_retryable(exc, status),
-                category=_category(exc, status),
+                retryable=False if unsupported_image else _retryable(exc, status),
+                category="unsupported_capability" if unsupported_image else _category(exc, status),
+                capability="vision" if unsupported_image else None,
             ) from exc
         except Exception as exc:  # noqa: BLE001
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
@@ -308,7 +335,10 @@ class AnthropicProvider(LLMProvider):
                 args = {"_raw": raw}
             tool = ToolCall(id=acc.get("id", ""), name=acc.get("name", ""), arguments=args)
             assembled.append(tool)
-            return tool
+            # 残缺 JSON 仍需保留到 done 帧，供 executor 结合 stop_reason 进入截断恢复；
+            # 但绝不能作为 ready_tool_call 提前派发，否则 file_read 等并发安全工具可能
+            # 在 message_delta 告知 max_tokens 之前已经用半截参数开始执行。
+            return None if set(args) == {"_raw"} else tool
 
         try:
             async with self._client.stream("POST", self._url, headers=self._headers, json=payload) as response:
@@ -369,10 +399,16 @@ class AnthropicProvider(LLMProvider):
                         data_lines.append(line[5:].strip())
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
+            unsupported_image = is_unsupported_image_input_error(
+                exc.response.text,
+                request_has_images=contains_image_input(payload["messages"]),
+                status=status,
+            )
             raise ProviderError(
                 f"Anthropic 流式调用失败: HTTP {status}: {exc.response.text}",
-                retryable=_retryable(exc, status),
-                category=_category(exc, status),
+                retryable=False if unsupported_image else _retryable(exc, status),
+                category="unsupported_capability" if unsupported_image else _category(exc, status),
+                capability="vision" if unsupported_image else None,
             ) from exc
         except Exception as exc:  # noqa: BLE001
             raise ProviderError(

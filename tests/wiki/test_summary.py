@@ -33,6 +33,26 @@ def summarizer(store, provider):
     return WikiSummarizer(store, provider)
 
 
+class _FailingProvider(FakeProvider):
+    async def chat(self, messages: list[Message], tools=None, *, max_tokens=None):
+        raise RuntimeError("boom")
+
+
+def _save_topic_page(store, title, content, page_id="topic_1"):
+    """往 default KB 写入一个 topic 页面（summary/intro 用例的公共前置数据）。"""
+    store.save_page(
+        WikiPage(
+            id=page_id,
+            page_type="topic",
+            title=title,
+            content=content,
+            file_path="",
+        ),
+        "",
+        "default",
+    )
+
+
 def test_kb_summary_schema_roundtrip():
     s = KBSummary(
         summary="hello",
@@ -82,17 +102,7 @@ async def test_empty_kb_returns_empty_summary(summarizer, store):
 
 @pytest.mark.asyncio
 async def test_summary_generation_caches_result(summarizer, store, provider):
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="测试主题",
-            content="这是测试主题的内容，用来验证摘要生成。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "测试主题", "这是测试主题的内容，用来验证摘要生成。")
     summary = await summarizer.generate_kb_summary("", "default")
     assert summary.status == "ready"
     assert summary.page_count == 1
@@ -108,32 +118,12 @@ async def test_summary_generation_caches_result(summarizer, store, provider):
 
 @pytest.mark.asyncio
 async def test_page_change_triggers_refresh(summarizer, store, provider):
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="旧主题",
-            content="旧内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "旧主题", "旧内容。")
     await summarizer.generate_kb_summary("", "default")
     calls_after_first = len(provider.calls)
 
     # 新增页面，应触发重新生成
-    store.save_page(
-        WikiPage(
-            id="topic_2",
-            page_type="topic",
-            title="新主题",
-            content="新内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "新主题", "新内容。", page_id="topic_2")
     second = await summarizer.generate_kb_summary("", "default")
     assert second.page_count == 2
     assert len(provider.calls) == calls_after_first + 1
@@ -141,17 +131,7 @@ async def test_page_change_triggers_refresh(summarizer, store, provider):
 
 @pytest.mark.asyncio
 async def test_force_regenerates_even_when_unchanged(summarizer, store, provider):
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="主题",
-            content="内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "主题", "内容。")
     await summarizer.generate_kb_summary("", "default")
     calls_after_first = len(provider.calls)
     await summarizer.generate_kb_summary("", "default", force=True)
@@ -163,17 +143,7 @@ async def test_source_count_excludes_unparsed_raws(summarizer, store, provider):
     """pending/failed 的 raw 不会编译成页面，source_count 只统计 parsed。"""
     from crew.wiki.schemas import RawSource
 
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="主题",
-            content="内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "主题", "内容。")
     store.save_raw(
         RawSource(id="s1", title="已解析.pdf", source_type="upload", parsed_path="x", parse_status="parsed"),
         "",
@@ -195,22 +165,8 @@ async def test_source_count_excludes_unparsed_raws(summarizer, store, provider):
 
 @pytest.mark.asyncio
 async def test_generate_kb_summary_is_safe_when_provider_fails(store):
-    class FailingProvider(FakeProvider):
-        async def chat(self, messages: list[Message], tools=None, *, max_tokens=None):
-            raise RuntimeError("boom")
-
-    summarizer = WikiSummarizer(store, FailingProvider())
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="主题",
-            content="内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    summarizer = WikiSummarizer(store, _FailingProvider())
+    _save_topic_page(store, "主题", "内容。")
     summary = await summarizer.generate_kb_summary("", "default")
     assert summary.status == "stale"
     cached = store.get_kb_summary("", "default")
@@ -272,17 +228,7 @@ async def test_home_intro_empty_kb(summarizer, store, provider):
 
 @pytest.mark.asyncio
 async def test_home_intro_generates_and_caches(summarizer, store, provider):
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="测试主题",
-            content="这是测试主题的内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "测试主题", "这是测试主题的内容。")
     intro, changed = await summarizer.generate_home_intro("", "default")
     assert changed is True
     assert intro.status == "ready"
@@ -315,17 +261,7 @@ async def test_home_intro_generates_questions_from_marked_output(store):
         ]
     )
     summarizer = WikiSummarizer(store, provider)
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="测试主题",
-            content="这是测试主题的内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "测试主题", "这是测试主题的内容。")
     intro, changed = await summarizer.generate_home_intro("", "default")
     assert changed is True
     assert intro.text == "这个知识库聚焦多智能体协作。"
@@ -340,31 +276,11 @@ async def test_home_intro_generates_questions_from_marked_output(store):
 
 @pytest.mark.asyncio
 async def test_home_intro_regenerates_on_content_change(summarizer, store, provider):
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="旧主题",
-            content="旧内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "旧主题", "旧内容。")
     await summarizer.generate_home_intro("", "default")
     calls_after_first = len(provider.calls)
 
-    store.save_page(
-        WikiPage(
-            id="topic_2",
-            page_type="topic",
-            title="新主题",
-            content="新内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "新主题", "新内容。", page_id="topic_2")
     intro, changed = await summarizer.generate_home_intro("", "default")
     assert changed is True
     assert len(provider.calls) == calls_after_first + 1
@@ -372,17 +288,7 @@ async def test_home_intro_regenerates_on_content_change(summarizer, store, provi
 
 @pytest.mark.asyncio
 async def test_home_intro_regenerates_when_cached_prompt_version_is_old(summarizer, store, provider):
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="测试主题",
-            content="这是测试主题的内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    _save_topic_page(store, "测试主题", "这是测试主题的内容。")
     store.set_home_intro(
         HomeIntro(
             text="旧版导读",
@@ -403,22 +309,8 @@ async def test_home_intro_regenerates_when_cached_prompt_version_is_old(summariz
 
 @pytest.mark.asyncio
 async def test_home_intro_is_safe_when_provider_fails(store):
-    class FailingProvider(FakeProvider):
-        async def chat(self, messages: list[Message], tools=None, *, max_tokens=None):
-            raise RuntimeError("boom")
-
-    summarizer = WikiSummarizer(store, FailingProvider())
-    store.save_page(
-        WikiPage(
-            id="topic_1",
-            page_type="topic",
-            title="主题",
-            content="内容。",
-            file_path="",
-        ),
-        "",
-        "default",
-    )
+    summarizer = WikiSummarizer(store, _FailingProvider())
+    _save_topic_page(store, "主题", "内容。")
     intro, changed = await summarizer.generate_home_intro("", "default")
     assert changed is False
     assert intro.status == "empty"

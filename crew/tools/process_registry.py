@@ -1,7 +1,7 @@
 """后台进程注册表 —— 管理 terminal(background=true) 启动的进程。
 
-用于 tools/process_registry.py 裁剪而来。Crew 是本地单机场景，故砍掉
-Crew 的 PTY 交互 / Docker·SSH·Modal sandbox 后端 / crash-recovery checkpoint /
+对照 Hermes tools/process_registry.py 裁剪而来。Crew 是本地单机场景，故砍掉
+Hermes 的 PTY 交互 / Docker·SSH·Modal sandbox 后端 / crash-recovery checkpoint /
 gateway watcher 路由 / 跨 session 全局熔断器，只保留本地进程真正需要的核心：
 
   - 输出捕获（reader 线程 + 200KB 滚动缓冲，替代原来的 DEVNULL 丢弃）
@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import shutil
+import signal
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -28,11 +30,36 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import crew as _crew_pkg
 from crew.core.runctx import current_owner_account_id
+from crew.security.launch import (
+    ProcessLaunch,
+    audit_execution_result,
+    serialize_profile,
+    shell_argv,
+)
+from crew.security.models import serialize_additional_permissions
 from crew.tools.output_filters import strip_ansi
 from crew.tools.registry import tool_error
 
 SessionKey = tuple[str, str]
+
+# Trust root for the managed background bridge subprocess. The bridge must import
+# ``crew`` only from the installed package location, never from the task ``cwd``:
+# ``python -m crew.security.background_runner`` puts ``cwd`` on ``sys.path[0]`` and a
+# workspace-dropped ``crew/security/background_runner.py`` (plus a fake
+# ``crew/security/runtime_client.py``) would execute on the host *before* the native
+# helper, classifier, or sandbox ever run (H-1). The launcher below runs under
+# ``-I`` (no PYTHONPATH / user site) and rebuilds ``sys.path`` to drop ``cwd`` and
+# prepend only this trusted root.
+_CREW_TRUST_ROOT = str(Path(_crew_pkg.__file__).resolve().parent.parent)
+_BACKGROUND_BRIDGE_LAUNCHER = (
+    "import sys; "
+    "sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "
+    f"sys.path.insert(0, {_CREW_TRUST_ROOT!r}); "
+    "from crew.security.background_runner import main; "
+    "raise SystemExit(main())"
+)
 
 # ---- 限制项 ----
 MAX_OUTPUT_CHARS = 200_000      # 200KB 滚动输出缓冲
@@ -143,8 +170,15 @@ class ProcessSession:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, repr=False)
+    _secret_values: tuple[str, ...] = field(default=(), repr=False)
     task_id: str = ""
     output_ref: str = ""
+    _security_launch: ProcessLaunch | None = field(default=None, repr=False)
+    _security_action: Any | None = field(default=None, repr=False)
+    _security_result_path: Path | None = field(default=None, repr=False)
+    _security_result_nonce: str = field(default="", repr=False)
+    stable_error_code: str = ""
+    sandbox_backend: str = ""
 
 
 class ProcessRegistry:
@@ -183,6 +217,21 @@ class ProcessRegistry:
 
     # ----- 启动 -----
 
+    @staticmethod
+    def _child_env(
+        owner_account_id: str,
+        *,
+        managed: bool = False,
+    ) -> tuple[dict[str, str], tuple[str, ...]]:
+        """Build the explicit child environment and identify injected secrets."""
+        from crew.state.home import managed_runtime_env_overrides, runtime_env_overrides
+        from crew.tools.redact import sensitive_env_values
+
+        build_env = managed_runtime_env_overrides if managed else runtime_env_overrides
+        values = build_env(owner_account_id=owner_account_id)
+        values["PYTHONUNBUFFERED"] = "1"
+        return values, tuple(sensitive_env_values(values))
+
     def spawn_local(
         self,
         command: str,
@@ -194,11 +243,14 @@ class ProcessRegistry:
         notify_on_complete: bool = False,
         task_id: str = "",
         output_ref: str = "",
+        _security_launch: ProcessLaunch | None = None,
+        _security_action: Any | None = None,
     ) -> ProcessSession:
         """本地后台启动一条命令，立即返回（非阻塞）。
 
         输出由 daemon reader 线程读入滚动缓冲，可经 poll/log/wait 取回。
         """
+        child_env, secret_values = self._child_env(owner_account_id)
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
             command=command,
@@ -210,13 +262,13 @@ class ProcessRegistry:
             watch_patterns=list(watch_patterns or []),
             task_id=task_id,
             output_ref=output_ref,
+            _secret_values=secret_values,
+            _security_launch=_security_launch,
+            _security_action=_security_action,
         )
 
         env = dict(os.environ)
-        from crew.state.home import runtime_env_overrides
-
-        env.update(runtime_env_overrides(owner_account_id=owner_account_id))
-        env["PYTHONUNBUFFERED"] = "1"  # 强制 python 脚本不缓冲，后台输出实时可见
+        env.update(child_env)
         popen_args: list[str] | str = command
         shell = True
         if _IS_WINDOWS:
@@ -291,6 +343,146 @@ class ProcessRegistry:
         self._write_checkpoint()
         return session
 
+    def spawn_security(
+        self,
+        command: str,
+        *,
+        launch: ProcessLaunch,
+        cwd: str | None = None,
+        **session_options: Any,
+    ) -> ProcessSession:
+        """Start through the host-owned security decision; managed never uses a user argv."""
+        from crew.security.actions import normalize_exec_action
+
+        resolved_cwd = Path(cwd or os.getcwd()).resolve(strict=True)
+        command_argv = shell_argv(command)
+        action = normalize_exec_action(command_argv, resolved_cwd)
+        if not launch.managed:
+            return self.spawn_local(
+                command,
+                cwd=str(resolved_cwd),
+                _security_launch=launch,
+                _security_action=action,
+                **session_options,
+            )
+        owner_account_id = str(session_options.get("owner_account_id") or "")
+        child_env, secret_values = self._child_env(
+            owner_account_id,
+            managed=True,
+        )
+        from crew.security.broker import compile_runtime_filesystem_roots
+
+        profile = serialize_profile(launch.profile)
+        additional = serialize_additional_permissions(launch.additional_permissions)
+        writable, readable, readonly, denied = compile_runtime_filesystem_roots(
+            launch.profile,
+            launch.additional_permissions,
+            launch.trusted_readable_roots,
+        )
+        network_rules = []
+        for entry in [*profile["network_entries"], *additional["network"]]:
+            network_rules.append(
+                {
+                    "host": entry["host"],
+                    "port": entry["port"],
+                    "protocol": entry["protocol"],
+                    "allow": entry["access"] == "allow",
+                    "allow_private": entry["allow_private"],
+                    "escalatable": entry["escalatable"],
+                }
+            )
+        payload = {
+            "version": 1,
+            "helper_argv": list(launch.helper_argv),
+            "command": list(command_argv),
+            "cwd": str(resolved_cwd),
+            "writable_roots": [str(root) for root in writable],
+            "readable_roots": [str(root) for root in readable],
+            "readonly_roots": [str(root) for root in readonly],
+            "denied_roots": [str(root) for root in denied],
+            "full_disk_read": bool(profile["full_disk_read"]),
+            "network_rules": network_rules,
+            "allow_local_binding": (
+                profile["allow_local_binding"] or additional["allow_local_binding"]
+            ),
+            "env_overrides": child_env,
+        }
+        return self._spawn_managed_bridge(
+            command,
+            payload,
+            cwd=cwd,
+            secret_values=secret_values,
+            security_launch=launch,
+            security_action=action,
+            **session_options,
+        )
+
+    def _spawn_managed_bridge(
+        self,
+        command: str,
+        payload: dict[str, Any],
+        *,
+        cwd: str | None,
+        session_key: str = "",
+        owner_account_id: str = "",
+        watch_patterns: list[str] | None = None,
+        notify_on_complete: bool = False,
+        task_id: str = "",
+        output_ref: str = "",
+        secret_values: tuple[str, ...] = (),
+        security_launch: ProcessLaunch | None = None,
+        security_action: Any | None = None,
+    ) -> ProcessSession:
+        """Launch only the fixed Ace bridge; command is sent through stdin."""
+        result_dir = _checkpoint_path().parent
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_fd, result_name = tempfile.mkstemp(
+            prefix=".security-result-",
+            suffix=".json",
+            dir=result_dir,
+        )
+        os.close(result_fd)
+        result_path = Path(result_name)
+        result_nonce = uuid.uuid4().hex
+        payload = {
+            **payload,
+            "result_path": str(result_path),
+            "result_nonce": result_nonce,
+        }
+        session = ProcessSession(
+            id=f"proc_{uuid.uuid4().hex[:12]}", command=command, session_key=session_key,
+            owner_account_id=owner_account_id, cwd=cwd or os.getcwd(), started_at=time.time(),
+            notify_on_complete=notify_on_complete, watch_patterns=list(watch_patterns or []),
+            task_id=task_id, output_ref=output_ref, _secret_values=secret_values,
+            _security_launch=security_launch, _security_action=security_action,
+            _security_result_path=result_path, _security_result_nonce=result_nonce,
+        )
+        flags = _WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER],
+                shell=False, text=True, encoding="utf-8", errors="replace", cwd=session.cwd,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                preexec_fn=None if _IS_WINDOWS else os.setsid, creationflags=flags,
+            )
+        except Exception:
+            result_path.unlink(missing_ok=True)
+            raise
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        proc.stdin.close()
+        session.process = proc
+        session.pid = proc.pid
+        with self._lock:
+            self._prune_if_needed()
+            self._running[session.id] = session
+        reader = threading.Thread(target=self._reader_loop, args=(session,), daemon=True, name=f"proc-reader-{session.id}")
+        session._reader_thread = reader
+        reader.start()
+        self._write_checkpoint()
+        return session
+
     def _heartbeat_loop(self, session: ProcessSession) -> None:
         interval = float(getattr(self._task_runtime, "heartbeat_interval", 10.0))
         while not session.exited:
@@ -304,18 +496,84 @@ class ProcessRegistry:
 
     # ----- reader 线程 -----
 
+    @staticmethod
+    def _redact_private_output(
+        output: str,
+        secret_values: tuple[str, ...],
+        *,
+        truncated: bool,
+        max_output_chars: int,
+    ) -> str:
+        """Expose only complete, redacted output after a secret-bearing child exits."""
+        from crew.tools.redact import redact_secret_values, redact_sensitive_text
+
+        if truncated:
+            # The rolling buffer can begin inside a secret. Drop one maximum-secret
+            # width, then move past any complete secret crossing that cut.
+            start = max(len(value) for value in secret_values) - 1
+            while True:
+                advanced = start
+                for value in secret_values:
+                    offset = output.find(value)
+                    while offset >= 0:
+                        end = offset + len(value)
+                        if offset < start < end:
+                            advanced = max(advanced, end)
+                        offset = output.find(value, offset + 1)
+                if advanced == start:
+                    break
+                start = advanced
+            output = output[start:]
+        redacted = redact_secret_values(output, secret_values)
+        return redact_sensitive_text(redacted, force=True)[-max_output_chars:]
+
+    def _publish_output(self, session: ProcessSession, chunk: str) -> None:
+        """Publish already-safe output to every observer of a process session."""
+        with session._lock:
+            session.output_buffer += chunk
+            if len(session.output_buffer) > session.max_output_chars:
+                session.output_buffer = session.output_buffer[-session.max_output_chars:]
+            output_chars = len(session.output_buffer)
+            output_tail = strip_ansi(session.output_buffer[-1000:])
+        if session.output_ref:
+            try:
+                path = Path(session.output_ref)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as output_file:
+                    output_file.write(chunk)
+            except OSError:
+                pass
+        if self._task_runtime is not None and session.task_id:
+            try:
+                self._task_runtime.touch_activity(
+                    session.task_id,
+                    {
+                        "pid": session.pid,
+                        "output_chars": output_chars,
+                        "output_tail": output_tail,
+                    },
+                )
+            except Exception:
+                pass
+        self._check_watch_patterns(session, chunk)
+
     def _reader_loop(self, session: ProcessSession) -> None:
         """daemon 线程：持续读取 Popen stdout 到滚动缓冲。
 
         用 buffer.read1(4096) + 增量 UTF-8 解码器，而不是文本模式 read(4096)——后者会
         阻塞到填满 4096 字符或 EOF，小增量输出（如 `for i ...; do echo $i; sleep`）期间
         reader 一直阻塞、output_buffer 不增长，前台 terminal 的 onProgress 进度流就只能
-        在进程退出时一次性吐出全部内容，支持逐行实时进度。
+        在进程退出时一次性吐全部（对齐 OCC Stage5 onProgress 需要 line-level 实时增量）。
         read1 有数据即返回，增量解码器正确拼接跨 chunk 的多字节字符（含 emoji）。
         """
         import codecs
 
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        private_output = ""
+        private_output_truncated = False
+        private_limit = session.max_output_chars
+        if session._secret_values:
+            private_limit += max(len(value) for value in session._secret_values) - 1
         try:
             while True:
                 # buffer 在 text-mode Popen 上仍可用（底层 BufferedReader）；非 text 模式直接 read1
@@ -341,31 +599,13 @@ class ProcessRegistry:
                 chunk = decoder.decode(raw)
                 if not chunk:
                     continue  # 多字节字符跨 chunk，等下一片再输出
-                with session._lock:
-                    session.output_buffer += chunk
-                    if len(session.output_buffer) > session.max_output_chars:
-                        session.output_buffer = session.output_buffer[-session.max_output_chars:]
-                if session.output_ref:
-                    try:
-                        path = Path(session.output_ref)
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        with path.open("a", encoding="utf-8") as output_file:
-                            output_file.write(chunk)
-                    except OSError:
-                        pass
-                if self._task_runtime is not None and session.task_id:
-                    try:
-                        self._task_runtime.touch_activity(
-                            session.task_id,
-                            {
-                                "pid": session.pid,
-                                "output_chars": len(session.output_buffer),
-                                "output_tail": strip_ansi(session.output_buffer[-1000:]),
-                            },
-                        )
-                    except Exception:
-                        pass
-                self._check_watch_patterns(session, chunk)
+                if session._secret_values:
+                    private_output += chunk
+                    if len(private_output) > private_limit:
+                        private_output = private_output[-private_limit:]
+                        private_output_truncated = True
+                else:
+                    self._publish_output(session, chunk)
         except Exception:  # noqa: BLE001 - reader 异常按读取结束处理
             pass
         finally:
@@ -373,17 +613,78 @@ class ProcessRegistry:
                 # flush 增量解码器尾部（无尾字节，防御性）
                 tail = decoder.decode(b"", final=True)
                 if tail:
-                    with session._lock:
-                        session.output_buffer += tail
+                    if session._secret_values:
+                        private_output += tail
+                        if len(private_output) > private_limit:
+                            private_output = private_output[-private_limit:]
+                            private_output_truncated = True
+                    else:
+                        self._publish_output(session, tail)
             except Exception:  # noqa: BLE001
                 pass
+            if session._secret_values:
+                safe_output = self._redact_private_output(
+                    private_output,
+                    session._secret_values,
+                    truncated=private_output_truncated,
+                    max_output_chars=session.max_output_chars,
+                )
+                if safe_output:
+                    self._publish_output(session, safe_output)
             try:
                 session.process.wait(timeout=5)
             except Exception:  # noqa: BLE001
                 pass
             session.exited = True
             session.exit_code = session.process.returncode
+            self._audit_process_result(session)
             self._move_to_finished(session)
+
+    @staticmethod
+    def _audit_process_result(session: ProcessSession) -> None:
+        launch = session._security_launch
+        action = session._security_action
+        if launch is None or action is None:
+            return
+        result: dict[str, Any] = {}
+        if session._security_result_path is not None:
+            try:
+                candidate = json.loads(session._security_result_path.read_text(encoding="utf-8"))
+                if candidate.get("nonce") == session._security_result_nonce:
+                    result = candidate
+            except (OSError, json.JSONDecodeError):
+                pass
+            finally:
+                try:
+                    session._security_result_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        stable_error_code = str(result.get("stable_error_code") or "")
+        exit_code = result.get("exit_code", session.exit_code)
+        try:
+            parsed_exit_code = int(exit_code) if exit_code is not None else None
+        except (TypeError, ValueError):
+            parsed_exit_code = session.exit_code
+        if launch.managed and not result:
+            stable_error_code = "runtime_crashed"
+        session.stable_error_code = stable_error_code
+        session.sandbox_backend = str(result.get("sandbox_backend") or "")
+        audit_execution_result(
+            launch,
+            action,
+            tool_name="terminal",
+            decision=(
+                "error"
+                if stable_error_code
+                else "completed" if parsed_exit_code == 0 else "failed"
+            ),
+            sandbox_backend=str(
+                result.get("sandbox_backend") or ("" if launch.managed else "host_unconfined")
+            ),
+            capabilities=tuple(str(value) for value in result.get("capabilities", ())),
+            exit_code=parsed_exit_code,
+            stable_error_code=stable_error_code,
+        )
 
     def _check_watch_patterns(self, session: ProcessSession, new_text: str) -> None:
         """扫描新输出中的 watch_patterns 并按限流排队通知。

@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 
 const isDev = process.argv.includes('--dev');
+const isVisual = process.argv.includes('--visual');
 const rootDir = process.cwd();
 const distDir = path.join(rootDir, 'dist');
 const mainOut = path.join(distDir, 'main');
@@ -73,6 +74,20 @@ async function main() {
     logLevel: 'info',
   });
 
+  // 灵感便利贴使用独立 preload，只暴露关闭入口，不继承主窗口能力。
+  await esbuild.build({
+    entryPoints: [path.join(rootDir, 'src/main/inspiration-sticky-preload.ts')],
+    outfile: path.join(mainOut, 'inspiration-sticky-preload.js'),
+    bundle: true,
+    platform: 'node',
+    target: 'node18',
+    format: 'cjs',
+    external: ['electron'],
+    sourcemap: isDev,
+    minify: !isDev,
+    logLevel: 'info',
+  });
+
   // 1. 合并原 desktop 的所有 CSS 模块（从源目录直接读，不依赖 dist）
   //    KaTeX 的 katex.min.css 通过 @import 引入，里面 url() 引用了 woff2/woff/ttf 字体；
   //    用 dataurl loader 把字体内联成 base64（桌面端离线，体积可接受），避免 file:// 加载外部字体失败。
@@ -117,7 +132,7 @@ async function main() {
     logLevel: 'info',
   });
 
-  // 3. Wiki 图谱布局 Worker：零依赖力导向布局，独立 iife 产物。
+  // 3. Wiki 图谱布局 Worker（Phase 3）：零依赖自研力导向布局，独立 iife 产物。
   //    renderer 以 `new Worker('./wiki-graph-layout.worker.js')` 加载——主窗口
   //    loadFile(dist/assets/index.html)，相对路径相对 index.html 解析；
   //    实测 Electron 43 + file:// + CSP script-src 'self' 下 file Worker 可用。
@@ -163,10 +178,60 @@ async function main() {
   html = html.replace(/<link\s+rel="stylesheet"\s+href="\.\/styles\/index\.css"\s*\/?>/g, '');
   // 关键：去掉 type="module"，否则 file:// 协议下被同源策略阻止
   html = html.replace(/<script\s+type="module"\s+src="\.\/renderer\.js"><\/script>/, '<script src="./renderer.js"></script>');
+  // file:// 下 Chromium 不解析外部 <use href="./sprite.svg#id">。
+  // 构建时从唯一生产源注入 symbols，页面只引用本地 #semantic-id。
+  const sprite = (await fs.readFile(path.join(assetsSrc, 'crew-ui-symbols.svg'), 'utf8'))
+    .replace('<svg ', '<svg id="mw-icon-sprite" aria-hidden="true" ');
+  html = html.replace(/(<body\b[^>]*>)/i, `$1\n${sprite}`);
   const styleTag = `<style>\n${css}\n</style>`;
   // 插到 </head> 之前
   html = html.replace('</head>', `${styleTag}\n</head>`);
   await fs.writeFile(htmlPath, html, 'utf8');
+
+  if (isVisual) {
+    const visualOut = path.join(distDir, 'visual');
+    await copyDir(assetsOut, visualOut);
+    await esbuild.build({
+      stdin: {
+        contents: `
+          import { startFixtureRenderer } from './src/ui/preview/fixture-adapter.ts';
+          let disposeRenderer = null;
+          const start = () => {
+            if (!disposeRenderer) disposeRenderer = startFixtureRenderer();
+          };
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', start, { once: true });
+          } else {
+            start();
+          }
+          window.addEventListener('pagehide', () => {
+            disposeRenderer?.();
+            disposeRenderer = null;
+          }, { once: true });
+        `,
+        loader: 'ts',
+        resolveDir: rootDir,
+        sourcefile: 'visual-entry.ts',
+      },
+      outfile: path.join(visualOut, 'renderer.js'),
+      bundle: true,
+      platform: 'browser',
+      target: 'es2020',
+      format: 'iife',
+      external: ['mermaid'],
+      loader: {
+        '.md': 'text',
+        '.wasm': 'binary',
+      },
+      define: {
+        __HELP_DOC_VERSION__: JSON.stringify(helpDocVersion),
+        'import.meta.url': 'window.location.href',
+      },
+      sourcemap: isDev,
+      minify: !isDev,
+      logLevel: 'info',
+    });
+  }
 
   console.log('✓ Build complete');
 }

@@ -3,6 +3,7 @@ import type { AppConfig, Attachment, ExternalAgent, Session, Skill, TeamExecutio
 import { api } from "../api";
 import { externalAgentsAvailable } from "../lib/featureFlags";
 import AttachmentList from "./AttachmentList";
+import ExternalAgentAvatar from "./ExternalAgentAvatar";
 
 interface Props {
   config: AppConfig | null;
@@ -35,6 +36,8 @@ interface Props {
   subScenario?: string;
   editDraft?: { messageId: string; text: string } | null;
   onCancelEdit?: () => void;
+  /** 附件上传归属（wiki 会话时传入）：后端把附件收入对应知识库 */
+  uploadContext?: { sessionId?: string; kbId?: string };
 }
 
 export default function Composer({
@@ -66,11 +69,11 @@ export default function Composer({
   subScenario,
   editDraft,
   onCancelEdit,
+  uploadContext,
 }: Props) {
   const externalAgentsEnabled = externalAgentsAvailable(config);
   const [text, setText] = useState("");
   const [atOpen, setAtOpen] = useState(false);
-  const [, setAtQuery] = useState("");
   const [atResults, setAtResults] = useState<
     { text: string; display: string; meta: string; type: string }[]
   >([]);
@@ -225,22 +228,27 @@ export default function Composer({
     onCancelEdit?.();
   };
 
-  /** 上传 File 列表并追加到 attachments（复用：文件选择 / 粘贴 / 拖拽） */
+  /** 上传 File 列表并追加到 attachments（复用：文件选择 / 粘贴 / 拖拽）。并行上传。 */
   const uploadFiles = async (files: File[]) => {
-    const newAtts: Attachment[] = [...attachments];
-    for (const file of files) {
-      try {
+    const results = await Promise.allSettled(
+      files.map(async (file) => {
         const content = await readFileAsBase64(file);
-        const result = await api.upload(file.name, content);
-        newAtts.push({
+        const result = await api.upload(file.name, content, uploadContext);
+        return {
           id: result.id,
           name: result.name,
           path: result.path,
           type: result.type as Attachment["type"],
           previewUrl: result.previewUrl,
-        });
-      } catch (err) {
-        console.error("上传失败:", err);
+        };
+      }),
+    );
+    const newAtts: Attachment[] = [...attachments];
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        newAtts.push(r.value);
+      } else {
+        console.error("上传失败:", r.reason);
       }
     }
     onAttachmentsChange(newAtts);
@@ -324,10 +332,8 @@ export default function Composer({
     const atMatch = textBeforeCursor.match(/@(\w*)$/);
     if (atMatch) {
       atIndexRef.current = cursorPos - atMatch[0].length;
-      const query = atMatch[1];
-      setAtQuery(query);
       setAtOpen(true);
-      api.complete(query).then(setAtResults).catch(() => setAtResults([]));
+      api.complete(atMatch[1]).then(setAtResults).catch(() => setAtResults([]));
     } else {
       setAtOpen(false);
     }
@@ -732,13 +738,7 @@ export default function Composer({
                 onClick={toggleAgents}
                 type="button"
               >
-                <svg className="nav-agent-logo composer-agent-logo" width="16" height="16" viewBox="3 3 18 18" aria-hidden="true">
-                  <path className="nav-agent-logo__blob" d="M5.2 13.2c0-4.5 2.9-6.9 6.8-6.9 4.5 0 7 2.8 7 6.2 0 3.8-2.5 5.5-7.2 5.5-4.3 0-6.6-1.4-6.6-4.8Z"/>
-                  <path className="nav-agent-logo__cap" d="M9 6.7c.7-1.1 1.7-1.7 3.1-1.7 1.3 0 2.3.5 3 1.5"/>
-                  <path className="nav-agent-logo__shine nav-agent-logo__shine--left" d="M9.6 10.8v1.9"/>
-                  <path className="nav-agent-logo__shine nav-agent-logo__shine--right" d="M14.4 10.8v1.9"/>
-                  <path className="nav-agent-logo__pixel" d="M18.8 8.2h1.5M19.55 7.45v1.5"/>
-                </svg>
+                <ExternalAgentAvatar agent={currentAgentLabel || { provider: "external" }} size="compact" />
                 外援
               </button>
               {agentsOpen && (
@@ -761,6 +761,7 @@ export default function Composer({
                         onClick={() => selectAgent(agent)}
                         type="button"
                       >
+                        <ExternalAgentAvatar agent={agent} size="compact" />
                         <span className="skills-popover__name">{agent.provider}</span>
                         <span className="skills-popover__desc">{agent.name}</span>
                         {agent.model && <span className="skills-popover__badge">{agent.model}</span>}

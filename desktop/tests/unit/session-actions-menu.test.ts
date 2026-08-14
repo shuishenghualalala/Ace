@@ -6,19 +6,12 @@ import { __resetAllStoresForTest, sessionStore } from '../../src/ui/stores/store
 import { renderWorkspaceHistory } from '../../src/ui/features/workspaces';
 import { openSessionActionsMenu } from '../../src/ui/features/session-actions';
 import { showContextMenu } from '../../src/ui/lib/context-menu';
+import { mountHistoryList } from './helpers/history-list';
 
 vi.mock('../../src/ui/lib/context-menu', () => ({
   showContextMenu: vi.fn(),
   dismissContextMenu: vi.fn(),
 }));
-
-function mountHistoryList(): HTMLElement {
-  const list = document.createElement('div');
-  list.id = 'history-list';
-  document.body.innerHTML = '';
-  document.body.appendChild(list);
-  return list;
-}
 
 beforeEach(() => {
   __resetAllStoresForTest();

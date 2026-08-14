@@ -133,6 +133,32 @@ def test_scan_skills_skips_external_symlink(tmp_path, monkeypatch):
     assert "/escaped" not in scan_skills()
 
 
+def test_scan_skills_skips_package_metadata_symlink_outside_root(tmp_path, monkeypatch):
+    """PACKAGE.md cannot expose a file outside its registered package directory."""
+    from crew.agent import skills as skills_mod
+
+    builtin_dir = tmp_path / "builtin"
+    user_dir = tmp_path / "user"
+    package_dir = builtin_dir / "unsafe-package"
+    outside = tmp_path / "outside-package.md"
+    package_dir.mkdir(parents=True)
+    user_dir.mkdir()
+    outside.write_text("---\nname: escaped-package\n---\nsecret", encoding="utf-8")
+    _symlink_or_skip(outside, package_dir / "PACKAGE.md")
+    member = package_dir / "member"
+    member.mkdir()
+    (member / "SKILL.md").write_text("---\nname: member\n---\nbody", encoding="utf-8")
+
+    monkeypatch.setattr(skills_mod, "get_builtin_skills_dir", lambda: builtin_dir)
+    monkeypatch.setattr(skills_mod, "get_user_skills_dir", lambda: user_dir)
+    monkeypatch.setattr(skills_mod, "get_plugin_skill_roots", lambda: ())
+    skills_mod._cache = {}
+    skills_mod._cache_key = ()
+
+    assert "/escaped-package/member" not in skills_mod.scan_skills()
+    assert "/escaped-package" not in skills_mod.get_skill_packages()
+
+
 def test_scan_skills_prunes_directory_symlink_cycle(tmp_path, monkeypatch):
     """root 内目录环必须被剪枝，合法 Skill 仍只发现一次。"""
     builtin_dir = tmp_path / "builtin"
@@ -363,39 +389,28 @@ def test_build_skills_index_prompt_uses_cache(skills_dir):
     assert skills_mod._skills_index_cache
 
 
-def test_build_skills_index_prompt_with_enabled(skills_dir):
+@pytest.mark.parametrize(
+    "kwargs,greet_present,custom_present",
+    [
+        ({"enabled": ["greet"]}, True, False),
+        ({"disabled": ["greet"]}, False, True),
+        ({"enabled": ["*"]}, True, True),
+        ({"enabled": []}, False, False),
+        ({"disabled": ["*"]}, False, False),
+    ],
+    ids=[
+        "with_enabled",
+        "with_disabled",
+        "star_means_all",
+        "empty_enabled_blocks_all",
+        "star_disabled_blocks_all",
+    ],
+)
+def test_build_skills_index_prompt_filter(skills_dir, kwargs, greet_present, custom_present):
     scan_skills()
-    prompt = build_skills_index_prompt(enabled=["greet"])
-    assert "/greet" in prompt
-    assert "/custom" not in prompt
-
-
-def test_build_skills_index_prompt_with_disabled(skills_dir):
-    scan_skills()
-    prompt = build_skills_index_prompt(disabled=["greet"])
-    assert "/greet" not in prompt
-    assert "/custom" in prompt
-
-
-def test_build_skills_index_prompt_star_means_all(skills_dir):
-    scan_skills()
-    prompt = build_skills_index_prompt(enabled=["*"])
-    assert "/greet" in prompt
-    assert "/custom" in prompt
-
-
-def test_build_skills_index_prompt_empty_enabled_blocks_all(skills_dir):
-    scan_skills()
-    prompt = build_skills_index_prompt(enabled=[])
-    assert "/greet" not in prompt
-    assert "/custom" not in prompt
-
-
-def test_build_skills_index_prompt_star_disabled_blocks_all(skills_dir):
-    scan_skills()
-    prompt = build_skills_index_prompt(disabled=["*"])
-    assert "/greet" not in prompt
-    assert "/custom" not in prompt
+    prompt = build_skills_index_prompt(**kwargs)
+    assert ("/greet" in prompt) is greet_present
+    assert ("/custom" in prompt) is custom_present
 
 
 
@@ -881,6 +896,16 @@ def test_list_optional_skills_not_installed(optional_env):
     assert any(s["slug"] == "opt-skill" for s in optional)
 
 
+def test_missing_optional_catalog_is_an_empty_source(optional_env, monkeypatch, caplog):
+    missing = optional_env["opt_dir"].parent / "missing-optional"
+    monkeypatch.setattr("crew.agent.skills.get_optional_skills_dir", lambda: missing)
+
+    with caplog.at_level("WARNING", logger="crew.agent.skills"):
+        assert list_optional_skills() == []
+
+    assert "skill_root_missing" not in caplog.text
+
+
 def test_list_optional_skills_category(optional_env):
     scan_skills()
     optional = list_optional_skills()
@@ -1040,10 +1065,27 @@ def test_builtin_skills_are_generic_only():
     }
     assert skill_mds == {
         "agent-guide/SKILL.md",
+        "automation/SKILL.md",
+        "binding/SKILL.md",
+        "blueprint/SKILL.md",
+        "canvas/SKILL.md",
+        "content-research-writer/SKILL.md",
         "crew-wiki-curator/SKILL.md",
         "cua-driver/SKILL.md",
+        "docx/SKILL.md",
+        "find-skill-skillhub/SKILL.md",
         "image-understanding/SKILL.md",
+        "md-to-pdf/SKILL.md",
+        "pdf/SKILL.md",
+        "process-doc/SKILL.md",
+        "scientific-problem-selection/SKILL.md",
+        "seaborn-visualization/SKILL.md",
+        "skill-creator/SKILL.md",
         "video-understanding/SKILL.md",
+        "webapp-building/SKILL.md",
+        "widget/SKILL.md",
+        "widgetdesign/SKILL.md",
+        "xlsx/SKILL.md",
     }
     for relative_path in skill_mds:
         content = (builtin_dir / relative_path).read_text(encoding="utf-8")
@@ -1529,9 +1571,10 @@ def test_skill_view_old_alias_still_works(package_env):
 def test_skill_activation_uses_same_resolved_skill_metadata(tmp_path, monkeypatch):
     from crew.agent.skills import (
         SkillActivation,
-        skill_activations_from_params,
         build_skill_activation,
         scan_skills,
+        skill_activations_from_params,
+        trusted_skill_roots_from_params,
     )
 
     builtin_dir = tmp_path / "builtin"
@@ -1578,6 +1621,14 @@ def test_skill_activation_uses_same_resolved_skill_metadata(tmp_path, monkeypatc
     )
     assert restored == (context,)
     assert isinstance(restored[0], SkillActivation)
+    assert trusted_skill_roots_from_params(
+        {"active_skills": [context.to_dict()]}
+    ) == (skill_dir.resolve(),)
+
+    forged = context.to_dict()
+    forged["skill_root"] = str(tmp_path)
+    with pytest.raises(ValueError, match="发生变化"):
+        trusted_skill_roots_from_params({"active_skills": [forged]})
 
 
 def test_install_skill_from_dir_is_governed(tmp_path, monkeypatch):

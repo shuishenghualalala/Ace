@@ -1,0 +1,274 @@
+/**
+ * Renderer foundations: reset, typography, focus, scrolling and base motion.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-width: 320px;
+  height: 100%;
+}
+
+/* Component display rules must never override the native hidden contract. */
+[hidden][hidden] {
+  display: none;
+}
+
+html {
+  background: var(--mw-bg-canvas);
+  scroll-behavior: smooth;
+}
+
+body,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+figure,
+blockquote,
+pre,
+dl,
+dd {
+  margin: 0;
+}
+
+body {
+  overflow-x: hidden;
+  background: var(--mw-bg-canvas);
+  color: var(--mw-text-primary);
+  font: var(--mw-type-body-weight) var(--mw-type-body-size) / var(--mw-type-body-line)
+    var(--mw-font-sans);
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#mw-icon-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* External SVG <use> documents do not inherit :root custom properties. */
+.mw-icon {
+  --mw-symbol-line: currentColor;
+  --mw-symbol-shell: var(--mw-symbol-shell-light);
+  --mw-symbol-face: var(--mw-symbol-face-light);
+  --mw-symbol-accent: var(--mw-symbol-accent-light);
+  --mw-symbol-accent-alt: var(--mw-symbol-accent-alt-light);
+}
+
+:root[data-theme='dark'] .mw-icon {
+  --mw-symbol-shell: var(--mw-symbol-shell-dark);
+  --mw-symbol-face: var(--mw-dark-surface);
+  --mw-symbol-accent: var(--mw-symbol-accent-dark);
+  --mw-symbol-accent-alt: var(--mw-symbol-accent-alt-dark);
+}
+
+.mw-icon.mw-icon--monochrome,
+:root[data-theme='dark'] .mw-icon.mw-icon--monochrome {
+  --mw-symbol-shell: var(--mw-symbol-face);
+  --mw-symbol-accent: var(--mw-symbol-line);
+  --mw-symbol-accent-alt: var(--mw-symbol-line);
+}
+
+:root[data-theme='dark'] .mw-icon--template-image image {
+  filter: invert(1);
+}
+
+button,
+input,
+select,
+textarea {
+  color: inherit;
+  font: inherit;
+}
+
+.md-body,
+.chat-markdown,
+.chat-messages.web-flow .msg__text,
+.chat-messages.web-flow .md-body,
+#chat-messages.web-flow .msg__text,
+#chat-messages.web-flow .md-body,
+.chat-bubble,
+.process-timeline__content,
+.process-timeline__thinking {
+  font-size: var(--mw-font-content-size);
+}
+
+textarea,
+.input-container textarea,
+.chat-composer textarea,
+.chat-input-container textarea,
+.cron-field textarea {
+  font-size: var(--mw-font-editor-size);
+}
+
+button,
+label,
+select,
+input[type='checkbox'],
+input[type='radio'] {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+table {
+  border-spacing: 0;
+  border-collapse: collapse;
+}
+
+a {
+  color: var(--mw-text-link);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: 2px;
+}
+
+h1 {
+  font-size: var(--mw-type-page-size);
+  font-weight: var(--mw-type-page-weight);
+  line-height: var(--mw-type-page-line);
+}
+
+h2 {
+  font-size: var(--mw-type-dialog-size);
+  font-weight: var(--mw-type-dialog-weight);
+  line-height: var(--mw-type-dialog-line);
+}
+
+h3 {
+  font-size: var(--mw-type-section-size);
+  font-weight: var(--mw-type-section-weight);
+  line-height: var(--mw-type-section-line);
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--mw-font-mono);
+}
+
+:not(pre) > code,
+kbd,
+samp {
+  padding: var(--mw-space-1) var(--mw-space-1);
+  border-radius: var(--mw-radius-1);
+  background: var(--mw-bg-subtle);
+  font-size: var(--mw-type-code-size);
+  line-height: var(--mw-type-code-line);
+}
+
+pre {
+  max-width: 100%;
+  overflow: auto;
+  padding: var(--mw-space-4);
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-code-bg);
+  color: var(--mw-code-text);
+  font-size: var(--mw-type-code-size);
+  line-height: var(--mw-type-code-line);
+}
+
+p,
+li,
+dd,
+td,
+th,
+:not(pre) > code,
+kbd,
+samp {
+  overflow-wrap: anywhere;
+}
+
+::selection {
+  background: var(--mw-bg-selected);
+  color: var(--mw-text-selected);
+}
+
+::-webkit-scrollbar {
+  width: var(--mw-space-2);
+  height: var(--mw-space-2);
+}
+
+::-webkit-scrollbar-track {
+  background: var(--mw-bg-subtle);
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid var(--mw-bg-subtle);
+  border-radius: var(--mw-radius-full);
+  background: var(--mw-border-strong);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--mw-text-muted);
+}
+
+/* Retained while legacy overlays still reference these shared motion names. */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(var(--mw-space-2));
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --mw-duration-fast: 0.01ms;
+    --mw-duration-normal: 0.01ms;
+    --mw-duration-slow: 0.01ms;
+  }
+
+  html {
+    scroll-behavior: auto;
+  }
+}

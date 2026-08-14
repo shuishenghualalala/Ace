@@ -394,8 +394,15 @@ export const api = {
     getJSON<Workspace>(`/api/workspace/${id}`, { method: "PUT", ...jsonBody(w) }),
   deleteWorkspace: (id: string) => getJSON(`/api/workspace/${id}`, { method: "DELETE" }),
   // 附件与上下文
-  upload: (filename: string, contentBase64: string) =>
-    getJSON<Attachment>("/api/upload", { method: "POST", ...jsonBody({ filename, content: contentBase64 }) }),
+  upload: (filename: string, contentBase64: string, opts?: { sessionId?: string; kbId?: string }) => {
+    const body: { filename: string; content: string; session_id?: string; kb_id?: string } = {
+      filename,
+      content: contentBase64,
+    };
+    if (opts?.sessionId) body.session_id = opts.sessionId;
+    if (opts?.kbId) body.kb_id = opts.kbId;
+    return getJSON<Attachment>("/api/upload", { method: "POST", ...jsonBody(body) });
+  },
   complete: (query: string) =>
     getJSON<{ text: string; display: string; meta: string; type: string }[]>(`/api/complete?query=${encodeURIComponent(query)}`),
   skills: () => getJSON<Skill[]>("/api/skills"),
@@ -408,10 +415,14 @@ export const api = {
   scenarioIntroLines: (count = 8) => getJSON<CrewIntroLine[]>(`/api/scenarios/intro-lines?count=${count}`),
   scenarioLoadingStatuses: (count = 8) => getJSON<CrewLoadingStatus[]>(`/api/scenarios/loading-status?count=${count}`),
   // Wiki
-  wikiAgentSession: (kbId?: string) =>
+  wikiAgentSession: (kbId?: string, opts?: { forceNew?: boolean }) =>
     getJSON<{ ok: boolean; session_id: string; kb_id: string }>(
-      withKb("/api/wiki/agent-session", kbId),
+      `${withKb("/api/wiki/agent-session", kbId)}${opts?.forceNew ? `${kbId ? "&" : "?"}force_new=true` : ""}`,
       { method: "POST" },
+    ),
+  wikiAgentSessions: (kbId?: string) =>
+    getJSON<{ ok: boolean; kb_id: string; sessions: Session[] }>(
+      withKb("/api/wiki/agent-sessions", kbId),
     ),
   wikiKBs: () => getJSON<{ ok: boolean; kbs: WikiKB[] }>("/api/wiki/kbs"),
   wikiCreateKB: (payload: { kb_id: string; name?: string }) =>

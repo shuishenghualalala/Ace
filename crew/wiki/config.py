@@ -77,18 +77,30 @@ class WikiMultimodalConfig:
 class WikiIngestConfig:
     """Wiki 深度整理流程配置。"""
 
-    auto_apply: bool = True  # plan 成功后是否自动应用；关闭时恢复计划展示与人工确认
+    # plan 成功后是否自动应用；默认 false，要求用户对深度整理先确认
+    auto_apply: bool = False
+    # 捕获后是否自动生成轻量摘要（第二层）
+    auto_summarize: bool = True
+    # 捕获后是否自动深度整理（第三层）；默认关闭，避免污染知识库
+    auto_ingest: bool = False
 
     @classmethod
     def from_raw(cls, raw: Any) -> "WikiIngestConfig":
         if not isinstance(raw, dict):
             return cls()
-        value = raw.get("auto_apply")
-        if isinstance(value, bool):
-            return cls(auto_apply=value)
-        if isinstance(value, str):
-            return cls(auto_apply=value.strip().lower() in {"1", "true", "yes", "on"})
-        return cls()
+
+        def _bool(value: Any, default: bool) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return default
+
+        return cls(
+            auto_apply=_bool(raw.get("auto_apply"), False),
+            auto_summarize=_bool(raw.get("auto_summarize"), True),
+            auto_ingest=_bool(raw.get("auto_ingest"), False),
+        )
 
 
 @dataclass
@@ -100,6 +112,7 @@ class WikiConfig:
 
     enabled: bool = True          # 是否启用 Wiki 与相关 API
     model: str = ""               # 编译/摘要使用的模型档案 id（llm.models 下的 key）；空 = 跟随主模型
+    capture_attachments: bool = True  # 聊天附件上传后是否自动收入 default 知识库
     storage: WikiStorageConfig = field(default_factory=WikiStorageConfig)
     ingest: WikiIngestConfig = field(default_factory=WikiIngestConfig)
     multimodal: WikiMultimodalConfig = field(default_factory=WikiMultimodalConfig)
@@ -123,6 +136,7 @@ class WikiConfig:
         return cls(
             enabled=_bool(raw.get("enabled"), True),
             model=str(raw.get("model") or "").strip(),
+            capture_attachments=_bool(raw.get("capture_attachments"), True),
             storage=WikiStorageConfig.from_raw(storage_raw),
             ingest=WikiIngestConfig.from_raw(ingest_raw),
             multimodal=WikiMultimodalConfig.from_raw(mm_raw) if isinstance(mm_raw, dict) else WikiMultimodalConfig(),

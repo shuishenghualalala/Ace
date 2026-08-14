@@ -5,12 +5,20 @@ import type {
   VersionUpdatePayload,
 } from '../../shared/types';
 import { notify } from '../state';
+import { setRuntimeStyle } from '../components/runtime-style';
+import { sessionStore } from '../stores/stores';
+import {
+  closeAccountOverlay,
+  ensureAccountOverlay,
+  openAccountOverlay,
+} from './account-overlays';
 
 type VersionUpdatePhase = 'idle' | 'available' | 'downloading' | 'paused' | 'downloaded' | 'installing' | 'error';
 
 interface DownloadArgs {
   version: string;
   type: 'force' | 'reminder';
+  url?: string | undefined;
 }
 
 interface VersionUpdateBridge {
@@ -24,6 +32,11 @@ interface VersionUpdateBridge {
   getUpdateState?: () => Promise<UpdateStateSnapshot>;
   appQuit?: () => Promise<void>;
   getAppVersion?: () => Promise<{ version?: string; label?: string }>;
+  heartbeat?: (version?: string) => Promise<{
+    success?: boolean;
+    message?: string;
+    data?: { version?: string; update?: string; url?: string };
+  }>;
 }
 
 const FALLBACK_VERSION = '2.0.0';
@@ -33,6 +46,7 @@ let pendingUpdate: VersionUpdatePayload | null = null;
 let phase: VersionUpdatePhase = 'idle';
 let percent: number | null = null;
 let bound = false;
+let unsubscribeSessionStore: (() => void) | null = null;
 
 function bridge(): VersionUpdateBridge | undefined {
   return (window as Window & { Crew?: VersionUpdateBridge }).Crew;
@@ -40,6 +54,10 @@ function bridge(): VersionUpdateBridge | undefined {
 
 function isForce(): boolean {
   return pendingUpdate?.type === 'force';
+}
+
+function hasBusySessions(): boolean {
+  return Object.values(sessionStore.get().busySessions).some(Boolean);
 }
 
 function updateButton(): HTMLButtonElement | null {
@@ -70,7 +88,6 @@ function renderUpdateButton(): void {
   button.classList.toggle('is-error', phase === 'error');
   // downloading 可点击（=暂停）；仅 installing 禁用
   button.disabled = phase === 'installing';
-  button.style.setProperty('--version-update-progress', `${percent ?? (phase === 'downloaded' ? 100 : 0)}%`);
 
   button.title =
     phase === 'downloading'
@@ -95,8 +112,6 @@ function renderUpdateButton(): void {
 }
 
 function openInstallModal(): void {
-  const modal = document.getElementById('version-install-modal') as HTMLElement | null;
-  if (!modal) return;
   const versionEl = document.getElementById('version-install-version');
   const messageEl = document.getElementById('version-install-message');
 
@@ -105,36 +120,48 @@ function openInstallModal(): void {
     messageEl.textContent = pendingUpdate?.message || '更新包已下载完成，是否现在安装？安装程序启动后应用会退出。';
   }
 
-  modal.style.display = 'flex';
-  modal.classList.add('show');
-  document.getElementById('version-install-now')?.focus();
+  openAccountOverlay('version-install-modal', {
+    initialFocus: document.getElementById('version-install-now') ?? undefined,
+  });
 }
 
 function closeInstallModal(): void {
-  const modal = document.getElementById('version-install-modal') as HTMLElement | null;
-  if (!modal) return;
-  modal.classList.remove('show');
-  modal.style.display = 'none';
-}
-
-function forceOverlay(): HTMLElement | null {
-  return document.getElementById('force-update-overlay');
+  closeAccountOverlay('version-install-modal');
 }
 
 function showForceOverlay(): void {
-  const el = forceOverlay();
-  if (el) el.hidden = false;
+  openAccountOverlay('force-update-overlay', {
+    dismissible: false,
+    initialFocus: document.getElementById('force-update-action') ?? undefined,
+  });
   renderForceOverlay();
 }
 
 function hideForceOverlay(): void {
-  const el = forceOverlay();
-  if (el) el.hidden = true;
+  closeAccountOverlay('force-update-overlay');
+}
+
+function syncForceOverlay(): void {
+  if (!isForce()) return;
+  if (hasBusySessions()) {
+    hideForceOverlay();
+    return;
+  }
+  const overlay = document.getElementById('force-update-overlay');
+  if (overlay?.hidden || !overlay?.classList.contains('show')) {
+    showForceOverlay();
+  } else {
+    renderForceOverlay();
+  }
 }
 
 function renderForceOverlay(): void {
   const msg = document.getElementById('force-update-message');
   if (msg) msg.textContent = pendingUpdate?.message || '当前版本过低，请更新后继续使用。';
+  const version = document.getElementById('force-update-version');
+  if (version) {
+    version.textContent = pendingUpdate?.version ? `版本 ${pendingUpdate.version}` : '新版本';
+  }
 
   const btn = document.getElementById('force-update-action') as HTMLButtonElement | null;
   if (btn) {
@@ -162,7 +189,7 @@ function renderForceOverlay(): void {
     progress.classList.toggle('is-active', active);
   }
   const fill = document.getElementById('force-update-progress-fill');
-  if (fill) fill.style.width = `${percent ?? (phase === 'downloaded' ? 100 : 0)}%`;
+  if (fill) setRuntimeStyle(fill, 'width', `${percent ?? (phase === 'downloaded' ? 100 : 0)}%`);
   const txt = document.getElementById('force-update-progress-text');
   if (txt) {
     txt.textContent =
@@ -188,15 +215,21 @@ function triggerDownload(mode: 'start' | 'retry'): void {
     notify('更新版本信息缺失，请稍后重试');
     return;
   }
-  const args: DownloadArgs = { version: pendingUpdate.version, type: pendingUpdate.type };
+  const args: DownloadArgs = { version: pendingUpdate.version, type: pendingUpdate.type, url: pendingUpdate.url };
+  console.log('[VersionUpdate] triggerDownload:', mode, args);
   setPhase('downloading', 0);
   const promise = mode === 'retry' ? bridge()?.retryDownload?.(args) : bridge()?.startDownload?.(args);
   promise?.then((r) => {
+    console.log('[VersionUpdate] download result:', r);
     if (r && !r.success && r.message) notify(r.message);
   });
 }
 
 async function installDownloadedUpdate(): Promise<void> {
+  if (hasBusySessions()) {
+    notify('当前仍有会话在执行，请等待完成后再安装更新');
+    return;
+  }
   closeInstallModal();
   setPhase('installing', 100);
   const result = await bridge()?.installUpdatePackage?.();
@@ -208,6 +241,7 @@ async function installDownloadedUpdate(): Promise<void> {
 }
 
 function handleVersionUpdate(payload: VersionUpdatePayload): void {
+  console.log('[VersionUpdate] handleVersionUpdate:', payload);
   if (!payload?.version) {
     notify(payload?.message || '发现新版本，但无法确定版本号');
     return;
@@ -219,15 +253,15 @@ function handleVersionUpdate(payload: VersionUpdatePayload): void {
     (phase === 'downloading' || phase === 'paused' || phase === 'downloaded' || phase === 'installing')
   ) {
     pendingUpdate = { ...payload };
-    if (isForce()) renderForceOverlay();
+    if (isForce()) syncForceOverlay();
     return;
   }
 
   pendingUpdate = payload;
   if (payload.type === 'force') {
-    // force：盖全屏阻断层，阻断使用直到更新成功
+    // force：先让运行中的会话收尾，空闲后再阻断使用。
     setPhase('available', 0);
-    showForceOverlay();
+    syncForceOverlay();
   } else {
     // reminder：侧边栏常驻提醒
     hideForceOverlay();
@@ -237,6 +271,7 @@ function handleVersionUpdate(payload: VersionUpdatePayload): void {
 }
 
 function handleDownloadProgress(payload: VersionUpdateDownloadProgressPayload): void {
+  console.log('[VersionUpdate] handleDownloadProgress:', payload);
   if (payload.phase === 'downloading') {
     setPhase('downloading', payload.percent);
   } else if (payload.phase === 'paused') {
@@ -261,10 +296,6 @@ function handleDownloadProgress(payload: VersionUpdateDownloadProgressPayload): 
     setPhase('error', percent);
     if (payload.message) notify(payload.message);
   }
-}
-
-async function checkVersionUpdateNow(): Promise<void> {
-  notify(`当前版本：${currentVersionLabel}。请通过项目发布页检查更新。`);
 }
 
 async function syncCurrentVersionLabel(): Promise<void> {
@@ -302,9 +333,14 @@ async function restoreFromState(): Promise<void> {
 export function bindVersionUpdateUi(): void {
   if (bound) return;
   bound = true;
+  ensureAccountOverlay('version-install-modal');
+  ensureAccountOverlay('force-update-overlay');
 
   bridge()?.onVersionUpdate?.(handleVersionUpdate);
   bridge()?.onVersionUpdateDownloadProgress?.(handleDownloadProgress);
+  unsubscribeSessionStore = sessionStore.subscribe((next, previous) => {
+    if (next.busySessions !== previous.busySessions) syncForceOverlay();
+  });
   void syncCurrentVersionLabel();
   void restoreFromState();
 
@@ -333,10 +369,7 @@ export function bindVersionUpdateUi(): void {
     void installDownloadedUpdate();
   });
   document.getElementById('version-install-later')?.addEventListener('click', closeInstallModal);
-  document.getElementById('version-install-modal')?.addEventListener('click', (event) => {
-    if (event.target === event.currentTarget) closeInstallModal();
-  });
-
+  document.getElementById('version-install-close')?.addEventListener('click', closeInstallModal);
   // force 阻断层：立即更新 / 退出
   document.getElementById('force-update-action')?.addEventListener('click', () => {
     if (phase === 'downloaded') {
@@ -351,16 +384,19 @@ export function bindVersionUpdateUi(): void {
     triggerDownload(phase === 'error' ? 'retry' : 'start');
   });
   document.getElementById('force-update-exit')?.addEventListener('click', () => {
+    if (!isForce() || hasBusySessions()) return;
     void bridge()?.appQuit?.();
   });
 
   document.getElementById('set-check-update')?.addEventListener('click', () => {
-    void checkVersionUpdateNow();
+    void window.Crew?.openExternal?.('https://github.com/shuishenghualalala/Ace/releases');
   });
   renderUpdateButton();
 }
 
 export function resetVersionUpdateUiForTest(): void {
+  unsubscribeSessionStore?.();
+  unsubscribeSessionStore = null;
   pendingUpdate = null;
   phase = 'idle';
   percent = null;

@@ -59,6 +59,9 @@ button { font-family: inherit; cursor: pointer; }
   display: grid; place-items: center;
   color: var(--text);
 }
+.sidebar__logo img {
+  width: 100%; height: 100%; object-fit: contain;
+}
 .sidebar__name {
   font-weight: 800;
   font-size: 13px;
@@ -137,6 +140,9 @@ button { font-family: inherit; cursor: pointer; }
 .nav-item:hover { background: var(--bg-hover); color: var(--text); }
 .nav-item.active { background: var(--bg-active); color: var(--text); font-weight: 600; }
 .nav-item svg { flex-shrink: 0; }
+.sidebar-agent-icon {
+  width: 16px; height: 16px; flex: 0 0 16px; object-fit: contain;
+}
 .nav-agent-logo {
   overflow: visible;
   color: var(--black);
@@ -170,22 +176,11 @@ button { font-family: inherit; cursor: pointer; }
 .nav-item:hover .nav-agent-logo__blob {
   fill: none;
 }
-.composer-agent-logo .nav-agent-logo__blob {
-  fill: none;
-  stroke-width: 1.65;
-}
-.composer-agent-logo .nav-agent-logo__cap {
-  stroke-width: 1.45;
-}
-.composer-agent-logo .nav-agent-logo__shine {
-  stroke-width: 1.55;
-}
-.composer-agent-logo .nav-agent-logo__pixel {
-  stroke-width: 1.35;
-}
-.toolbar-btn:hover .composer-agent-logo .nav-agent-logo__blob,
-.toolbar-btn--active .composer-agent-logo .nav-agent-logo__blob {
-  fill: none;
+.composer-agent-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  object-fit: contain;
 }
 .nav-item--disabled { opacity: .4; cursor: default; pointer-events: none; }
 
@@ -280,20 +275,66 @@ button { font-family: inherit; cursor: pointer; }
 .session.active .session__check {
   opacity: 1;
 }
+
+/* Provider-specific pixel palette: stable provider hash, shared across all avatar sizes. */
+.agent-provider-tone-0,
+.agent-provider-tone-1,
+.agent-provider-tone-2,
+.agent-provider-tone-3,
+.agent-provider-tone-4,
+.agent-provider-tone-5 {
+  --agent-provider-fill: var(--bg);
+  --agent-provider-ink: color-mix(in srgb, var(--text) 10%, transparent);
+  --agent-provider-pattern-size: 8px 8px;
+}
+.agent-provider-tone-0 {
+  /* Kimi: quiet diagonal pixel stripe. */
+  --agent-provider-pattern: linear-gradient(135deg, transparent 0 40%, var(--agent-provider-ink) 40% 56%, transparent 56% 100%);
+  --agent-provider-pattern-size: 10px 10px;
+}
+.agent-provider-tone-1 {
+  /* Codex: two-by-two checker. */
+  --agent-provider-pattern: conic-gradient(var(--agent-provider-ink) 0 25%, transparent 0 50%, var(--agent-provider-ink) 0 75%, transparent 0);
+}
+.agent-provider-tone-2 {
+  /* Hermes: restrained vertical bars. */
+  --agent-provider-pattern: repeating-linear-gradient(90deg, var(--agent-provider-ink) 0 1px, transparent 1px 4px);
+}
+.agent-provider-tone-3 {
+  /* Claude: restrained horizontal bars. */
+  --agent-provider-pattern: repeating-linear-gradient(0deg, var(--agent-provider-ink) 0 1px, transparent 1px 4px);
+}
+.agent-provider-tone-4 {
+  /* Gemini: two quiet pixel dots. */
+  --agent-provider-pattern: radial-gradient(circle at 25% 25%, var(--agent-provider-ink) 0 1px, transparent 1.1px), radial-gradient(circle at 75% 75%, var(--agent-provider-ink) 0 1px, transparent 1.1px);
+  --agent-provider-pattern-size: 10px 10px;
+}
+.agent-provider-tone-5 {
+  /* Sites/other slot: compact plus. */
+  --agent-provider-pattern: linear-gradient(90deg, transparent 0 38%, var(--agent-provider-ink) 38% 62%, transparent 62%), linear-gradient(0deg, transparent 0 38%, var(--agent-provider-ink) 38% 62%, transparent 62%);
+  --agent-provider-pattern-size: 10px 10px;
+}
+
 .session__agent-badge {
   width: 18px;
   height: 18px;
   flex: 0 0 18px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--border-strong);
+  border: 2px solid #4b4239;
   border-radius: 5px;
-  background: transparent;
-  color: var(--text);
-  font-size: 10px;
-  font-weight: 800;
+  background-color: var(--agent-provider-fill, #fffaf1);
+  background-image: var(--agent-provider-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--agent-provider-pattern-size, 8px 8px);
+  color: #3f342a;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 950;
   line-height: 1;
-  box-shadow: inset -1px -1px rgba(0,0,0,.08);
+  image-rendering: pixelated;
+  box-shadow: inset -1px -1px rgba(105,91,72,.12);
 }
 .board-session-badge {
   width: 36px;
@@ -646,7 +687,9 @@ button { font-family: inherit; cursor: pointer; }
     linear-gradient(90deg, rgba(112, 128, 91, .06) 1px, transparent 1px),
     linear-gradient(0deg, rgba(112, 128, 91, .06) 1px, transparent 1px),
     #fffdf7;
-  background-size: 8px 8px;
+  background-repeat: no-repeat;
+  background-position: right 4px top 4px;
+  background-size: 6px 6px;
   color: #22251f;
   padding: 12px;
   box-shadow: 4px 4px 0 rgba(70, 79, 61, .16);
@@ -835,6 +878,12 @@ button { font-family: inherit; cursor: pointer; }
   border-radius: 8px;
   padding: 12px;
   background: var(--bg);
+}
+.runtime-external-agent-icon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  object-fit: contain;
 }
 .agent-card__main { flex: 1; min-width: 0; }
 .agent-card__title {
@@ -1218,7 +1267,9 @@ button { font-family: inherit; cursor: pointer; }
     linear-gradient(90deg, rgba(26,26,26,.035) 1px, transparent 1px),
     linear-gradient(0deg, rgba(26,26,26,.035) 1px, transparent 1px),
     var(--bg);
-  background-size: 8px 8px;
+  background-repeat: no-repeat;
+  background-position: right 3px top 3px;
+  background-size: 6px 6px;
 }
 .team-member-card.is-builtin .team-member-card__mark {
   border-radius: 6px;
@@ -1371,6 +1422,40 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text);
   font-size: 12px;
   font-weight: 800;
+}
+.external-agent-avatar {
+  position: relative;
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  border: 2px solid #4b4239;
+  border-radius: 10px;
+  background-color: var(--agent-provider-fill, #fffaf1);
+  background-image: var(--agent-provider-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--agent-provider-pattern-size, 8px 8px);
+  color: #3f342a;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 950;
+  line-height: 1;
+  image-rendering: pixelated;
+  box-shadow: inset -3px -3px rgba(105, 91, 72, .12);
+}
+.external-agent-avatar > span {
+  display: grid;
+  place-items: center;
+}
+.external-agent-avatar--compact {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+  border-width: 2px;
+  border-radius: 8px;
+  font-size: 12px;
 }
 .pixel-badge {
   width: 22px;
@@ -1934,40 +2019,10 @@ button { font-family: inherit; cursor: pointer; }
   box-shadow: none;
 }
 .msg-agent-logo {
-  overflow: visible;
-  color: currentColor;
-}
-.msg-agent-logo__head {
-  fill: #fff;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.msg-agent-logo__hat {
-  fill: #fff;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.msg-agent-logo__hair {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.82;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 1;
-}
-.msg-agent-logo__hair--tip {
-  opacity: 1;
-}
-.msg-agent-logo__eye {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.95;
-  stroke-linecap: round;
-  opacity: 1;
+  display: block;
+  width: 25px;
+  height: 25px;
+  object-fit: contain;
 }
 .msg__body { min-width: 0; flex: 1; position: relative; }
 .msg__name { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
@@ -2126,6 +2181,105 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 12px;
   font-style: normal;
 }
+.turn-file-changes {
+  width: min(620px, 100%);
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.turn-file-changes__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--border);
+}
+.turn-file-changes__header strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+.turn-file-changes__totals,
+.turn-file-changes__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.turn-file-changes em {
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.35;
+  background: var(--bg-hover);
+  color: var(--text-3);
+}
+.turn-file-changes em.is-added,
+.turn-file-changes em.is-modified {
+  color: var(--text-2);
+  background: var(--bg-soft);
+}
+.turn-file-changes em.is-removed,
+.turn-file-changes em.is-deleted {
+  color: var(--text);
+  background: var(--bg-active);
+}
+.turn-file-changes__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.turn-file-changes__list li + li {
+  border-top: 1px solid var(--border);
+}
+.turn-file-changes__list button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 11px;
+  border: 0;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.turn-file-changes__list button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.turn-file-changes__list button:disabled {
+  cursor: default;
+}
+.turn-file-changes__path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.turn-file-changes__path > span {
+  color: var(--text-3);
+}
+.turn-file-changes__path > strong {
+  font-weight: 600;
+}
+.turn-file-changes__more {
+  width: 100%;
+  padding: 7px 11px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
 .team-internal__bubble--tone-0:not(.is-crew) {
   background: rgba(45, 46, 44, .035);
   border-color: rgba(45, 46, 44, .09);
@@ -2234,6 +2388,31 @@ button { font-family: inherit; cursor: pointer; }
   margin-left: 40px; /* 与 .msg__avatar(28px) + gap(12px) 对齐 */
 }
 .line-status { font-family: var(--sans); font-style: italic; }
+
+.context-compaction-notice {
+  --context-compaction-accent: #965858;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 20px 10px;
+  min-height: 28px;
+  color: var(--text, #252632);
+  font-size: 13px;
+  line-height: 1.45;
+  animation: context-compaction-in .22s ease-out;
+}
+.context-compaction-notice__logo { flex: 0 0 18px; color: var(--context-compaction-accent); animation: context-compaction-breathe 1.4s ease-in-out infinite; }
+.context-compaction-notice__logo .nav-agent-logo__blob { fill: color-mix(in srgb, var(--context-compaction-accent) 14%, transparent); stroke: currentColor; }
+.context-compaction-notice strong { flex: 0 0 auto; color: var(--context-compaction-accent); font-weight: 650; }
+.context-compaction-notice > span { min-width: 0; color: var(--muted, #737683); }
+@keyframes context-compaction-breathe { 50% { opacity: .55; transform: translateY(-1px); } }
+@keyframes context-compaction-in { from { opacity: 0; transform: translateY(5px); } }
+@media (prefers-reduced-motion: reduce) {
+  .context-compaction-notice, .context-compaction-notice__logo { animation: none; }
+}
+@media (prefers-color-scheme: dark) {
+  .context-compaction-notice { --context-compaction-accent: #c77b7b; }
+}
 .line-error {
   font-size: 13px; color: #a0703c;
   border: 1px solid #e8ddd0; background: #faf6f1; border-radius: 8px;
@@ -3382,6 +3561,11 @@ button { font-family: inherit; cursor: pointer; }
   z-index: 100;
   overflow: hidden;
 }
+.agents-popover {
+  max-height: min(420px, calc(100vh - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .skills-popover__search {
   display: flex;
   align-items: center;
@@ -3476,6 +3660,10 @@ button { font-family: inherit; cursor: pointer; }
   cursor: pointer;
   transition: background .1s;
   overflow: hidden;
+}
+.skills-popover__item .external-agent-avatar {
+  align-self: center;
+  margin-right: 1px;
 }
 .skills-popover__item:hover { background: var(--bg-hover); }
 .skills-popover__item:disabled {
@@ -3923,7 +4111,7 @@ button { font-family: inherit; cursor: pointer; }
     linear-gradient(90deg, rgba(26,26,26,.04) 1px, transparent 1px),
     linear-gradient(0deg, rgba(26,26,26,.04) 1px, transparent 1px),
     rgba(var(--team-accent-rgb), .045);
-  background-size: 8px 8px;
+  background-size: 6px 6px;
   box-shadow: inset -2px -2px rgba(26,26,26,.06), 0 4px 0 rgba(26,26,26,.05);
 }
 .team-create__heading h2 { margin: 0; color: var(--team-ink); }
@@ -5083,6 +5271,19 @@ button { font-family: inherit; cursor: pointer; }
   border-width: 2px;
   border-radius: 10px;
   font-size: 13px;
+  box-shadow: inset -2px -2px rgba(105,91,72,.12);
+}
+.agent-avatar--message.agent-avatar--external {
+  background-color: var(--agent-provider-fill, #fffaf1);
+  background-image: var(--agent-provider-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--agent-provider-pattern-size, 8px 8px);
+  color: #3f342a;
+  border-color: #4b4239;
+  font-family: var(--mono);
+  font-weight: 950;
+  image-rendering: pixelated;
   box-shadow: inset -2px -2px rgba(105,91,72,.12);
 }
 .agent-avatar--hero {
@@ -6268,6 +6469,10 @@ button { font-family: inherit; cursor: pointer; }
   margin-top: auto;
 }
 .wiki-card__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   padding: 6px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -6341,6 +6546,82 @@ button { font-family: inherit; cursor: pointer; }
 }
 .wiki-overlay__close:hover {
   background: var(--bg-hover);
+}
+
+/* WikiPageTabs：详情面板顶部的多 Tab 栏（视觉对齐 desktop Inspector 的 pill tab） */
+.wiki-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 8px 10px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.wiki-tabs::-webkit-scrollbar { display: none; }
+.wiki-tabs__tab {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 5px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.wiki-tabs__tab:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.wiki-tabs__tab.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+.wiki-tabs__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.wiki-tabs__close {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+}
+.wiki-tabs__close:hover {
+  background: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+/* Tab 栏固定在详情面板顶部，正文区域独立滚动 */
+.wiki-browser__detail.wiki-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.wiki-browser__detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* WikiPageView */
@@ -6638,8 +6919,202 @@ button { font-family: inherit; cursor: pointer; }
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  border-left: 1px solid var(--border);
   background: var(--bg);
+}
+
+/* Wiki 对话区面板：头部（新建 / 历史）+ ChatPanel */
+.wiki-chat-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.wiki-chat-pane__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.wiki-chat-pane__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-chat-pane__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.wiki-chat-history {
+  position: relative;
+}
+
+.wiki-chat-history__popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: min(300px, calc(100vw - 32px));
+  max-height: 360px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .12);
+  z-index: 120;
+}
+
+.wiki-chat-history__heading {
+  padding: 3px 8px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.wiki-chat-history__empty {
+  margin: 0;
+  padding: 10px 8px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.wiki-chat-history__item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+}
+
+.wiki-chat-history__item--active {
+  background: var(--bg-active);
+}
+
+.wiki-chat-history__item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 7px;
+}
+
+.wiki-chat-history__item-main:hover {
+  background: var(--bg-active);
+}
+
+.wiki-chat-history__item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.wiki-chat-history__item-time {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.wiki-chat-history__item-delete {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.wiki-chat-history__item-delete:hover {
+  color: var(--danger, #d33);
+  background: var(--bg-active);
+}
+
+/* 右侧知识库扩展面板：目录（固定宽）+ 详情（弹性）；
+   与对话区的分隔线由 ResizablePanels 的 sash 发丝线承担，这里不再加 border，避免两条线并行 */
+.wiki-browser {
+  display: flex;
+  min-width: 0;
+  background: var(--bg);
+}
+
+.wiki-browser__catalog {
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  /* 窄栏（≤240px）时列表项退化为紧凑行：隐藏摘要与标签，对齐 VSCode 侧栏体感 */
+  container-type: inline-size;
+}
+
+@container (max-width: 240px) {
+  .wiki-browser__catalog .wiki-list-item__summary,
+  .wiki-browser__catalog .wiki-list-item__tags {
+    display: none;
+  }
+}
+
+/* 图谱视图：目录区与详情区 1.2:1 弹性分配，给图谱更大空间 */
+.wiki-browser--graph .wiki-browser__catalog {
+  flex: 1.2 1 0;
+}
+
+.wiki-browser--graph .wiki-browser__detail {
+  flex: 1 1 0;
+}
+
+.wiki-browser__detail {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 目录↔详情 分隔把手：8px 隐形命中区骑在目录的 1px 边线上，悬停显示 */
+.wiki-browser__sash {
+  flex: 0 0 8px;
+  align-self: stretch;
+  margin: 0 -4px;
+  position: relative;
+  cursor: col-resize;
+  z-index: 6;
+}
+
+.wiki-browser__sash::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 14px;
+  bottom: 14px;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: transparent;
+  transition: background-color 0.12s;
+}
+
+.wiki-browser__sash:hover::after {
+  background: var(--border-strong);
 }
 
 .wiki-tree {
@@ -6964,6 +7439,9 @@ button { font-family: inherit; cursor: pointer; }
 
 .wiki-view-switcher__tab {
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 5px 4px;
   border: 1px solid transparent;
   border-radius: 7px;
@@ -7876,18 +8354,32 @@ button { font-family: inherit; cursor: pointer; }
     display: flex;
     flex-direction: column;
   }
-  .wiki-tree {
+  .wiki-hub__chat {
+    height: 40vh;
+    min-height: 280px;
+    border-bottom: 1px solid var(--border);
+  }
+  .wiki-browser {
+    flex: 1;
+    min-height: 0;
+    border-left: none;
+    flex-direction: column;
+  }
+  .wiki-browser__catalog {
+    flex: 0 0 auto;
     width: 100%;
     max-width: none;
     border-right: none;
     border-bottom: 1px solid var(--border);
     max-height: 35vh;
   }
-  .wiki-hub__chat {
-    border-left: none;
-    border-top: 1px solid var(--border);
-    height: 40vh;
-    min-height: 280px;
+  .wiki-browser--graph .wiki-browser__catalog {
+    flex: 0 0 auto;
+    max-height: none;
+  }
+  .wiki-browser__detail {
+    flex: 1;
+    min-height: 0;
   }
   .wiki-tree__actions {
     opacity: 1;
@@ -7991,62 +8483,4 @@ button { font-family: inherit; cursor: pointer; }
 .wiki-sources-view__actions .wiki-card__btn {
   padding: 4px 10px;
   font-size: 12px;
-}
-/* Provider-neutral remote login. Local mode never renders this surface. */
-.auth-page {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: #f5f7fb;
-  color: #172033;
-}
-
-.auth-card {
-  width: min(420px, 100%);
-  display: grid;
-  gap: 16px;
-  padding: 32px;
-  border: 1px solid #e3e8f1;
-  border-radius: 20px;
-  background: #fff;
-  box-shadow: 0 18px 50px rgba(30, 52, 90, 0.12);
-}
-
-.auth-brand { color: #316ff6; font-weight: 800; letter-spacing: .08em; }
-.auth-card h1 { margin: 0; font-size: 28px; }
-.auth-card p { margin: 0; color: #667085; line-height: 1.6; }
-.auth-card label { display: grid; gap: 8px; font-size: 14px; font-weight: 600; }
-.auth-card input {
-  min-width: 0;
-  padding: 11px 12px;
-  border: 1px solid #d4dbe7;
-  border-radius: 10px;
-  font: inherit;
-}
-.auth-code-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
-.auth-code-row button, .auth-submit {
-  padding: 10px 14px;
-  border: 0;
-  border-radius: 10px;
-  background: #316ff6;
-  color: #fff;
-  font-weight: 700;
-  cursor: pointer;
-}
-.auth-code-row button:disabled, .auth-submit:disabled { opacity: .55; cursor: default; }
-.auth-message { padding: 10px 12px; border-radius: 10px; background: #eef4ff; color: #344054; font-size: 13px; }
-.auth-message.is-error { background: #fff0f0; color: #b42318; }
-.auth-logout {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 100;
-  padding: 8px 12px;
-  border: 1px solid #d5dce8;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .94);
-  color: #475467;
-  box-shadow: 0 4px 16px rgba(30, 52, 90, .12);
-  cursor: pointer;
 }

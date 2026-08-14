@@ -41,14 +41,14 @@ export function showConfirmDialog({
     // 用 includes 而非全等：「全局卸载」这类带限定词的破坏性动作同样要红色警示。
     okBtn.classList.toggle('is-danger', confirmText.includes('卸载') || confirmText.includes('删除'));
 
-    dialog.style.display = 'flex';
+    dialog.hidden = false;
     dialog.classList.add('show');
 
     let settled = false;
 
     const cleanup = (): void => {
       dialog.classList.remove('show');
-      dialog.style.display = 'none';
+      dialog.hidden = true;
       okBtn.removeEventListener('click', onConfirm);
       cancelBtn.removeEventListener('click', onCancel);
       dialog.removeEventListener('click', onOverlayClick);
@@ -75,5 +75,80 @@ export function showConfirmDialog({
     cancelBtn.addEventListener('click', onCancel);
     dialog.addEventListener('click', onOverlayClick);
     document.addEventListener('keydown', onEsc);
+  });
+}
+
+interface PromptDialogOptions {
+  title?: string;
+  defaultValue?: string;
+  confirmText?: string;
+  cancelText?: string;
+}
+
+/**
+ * 显示单行输入对话框，返回 Promise<string | null>（取消/关闭为 null）。
+ * - Enter 确认，Esc 取消，点击 overlay 关闭区域取消
+ * - Electron 不支持 window.prompt，统一走 #prompt-dialog 静态 HTML
+ */
+export function showPromptDialog({
+  title = '输入',
+  defaultValue = '',
+  confirmText = '确认',
+  cancelText = '取消',
+}: PromptDialogOptions = {}): Promise<string | null> {
+  return new Promise((resolve) => {
+    const dialog = document.getElementById('prompt-dialog');
+    const titleEl = document.getElementById('prompt-title');
+    const inputEl = document.getElementById('prompt-input') as HTMLInputElement | null;
+    const okBtn = document.getElementById('prompt-ok');
+    const cancelBtn = document.getElementById('prompt-cancel');
+
+    if (!dialog || !titleEl || !inputEl || !okBtn || !cancelBtn) {
+      resolve(null);
+      return;
+    }
+
+    titleEl.textContent = title;
+    okBtn.textContent = confirmText;
+    cancelBtn.textContent = cancelText;
+    inputEl.value = defaultValue;
+
+    dialog.style.display = 'flex';
+    dialog.classList.add('show');
+    inputEl.focus();
+    inputEl.select();
+
+    let settled = false;
+
+    const cleanup = (): void => {
+      dialog.classList.remove('show');
+      dialog.style.display = 'none';
+      okBtn.removeEventListener('click', onConfirm);
+      cancelBtn.removeEventListener('click', onCancel);
+      dialog.removeEventListener('click', onOverlayClick);
+      document.removeEventListener('keydown', onKeydown);
+    };
+
+    const finish = (result: string | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const onConfirm = () => finish(inputEl.value);
+    const onCancel = () => finish(null);
+    const onOverlayClick = (e: Event) => {
+      if (e.target === dialog) finish(null);
+    };
+    const onKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') finish(null);
+      else if (e.key === 'Enter') finish(inputEl.value);
+    };
+
+    okBtn.addEventListener('click', onConfirm);
+    cancelBtn.addEventListener('click', onCancel);
+    dialog.addEventListener('click', onOverlayClick);
+    document.addEventListener('keydown', onKeydown);
   });
 }

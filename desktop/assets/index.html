@@ -4,284 +4,73 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval' 'sha256-B/M+BVh7RFhMt9kxztiRcOxDpEVniaftLwTWFZi8KT8='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: crew-file:; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self' file:; base-uri 'none'; form-action 'none'">
-  <title>Crew</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval' 'sha256-KOd1fEcG2rHoWpv/CS3jUa7om4aCS8rgf4jFycpjkxg='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: crew-file:; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-src 'self' file: ace-site:; base-uri 'none'; form-action 'none'">  <title>Crew</title>
   <!--
-    FOUC guard: runs synchronously BEFORE the
+    FOUC guard (Task 6.1.2 / D4.1.1): runs synchronously BEFORE the
     stylesheet, so the first painted frame already has the right theme
-    + accent. Without this, dark users see a flash of light background
+    Without this, dark users see a flash of light background
     on every cold start because the renderer can't apply data-theme
     until JS loads.
     - Reads the same crew.settings key the Settings UI writes.
     - Resolves 'system' via matchMedia (single source of truth).
-    - Sets data-theme on :root + inline --v2-primary / --mm-accent
-      to skip the accent FOUC. (Theme switching is :root[data-theme]
-      -only; body.theme-dark / .theme-light were fully migrated in
-      6.4.7.)
+    - Sets data-theme on :root before the stylesheet is evaluated.
   -->
   <script>
     (function () {
       try {
-        var launchMode = new URLSearchParams(window.location.search).get('launchMode');
-        document.documentElement.dataset.launchMode = launchMode === 'dev' ? 'dev' : 'account';
         var raw = localStorage.getItem('crew.settings');
         var s = raw ? JSON.parse(raw) : {};
-        var themeMode = s.themeMode === 'light' || s.themeMode === 'dark' ||
-                       s.themeMode === 'sepia' || s.themeMode === 'hc' ||
-                       s.themeMode === 'sidebar-gray' ? s.themeMode : 'sidebar-gray';
-        var accent = s.accent === 'indigo' || s.accent === 'violet' || s.accent === 'cyan' ? s.accent : 'blue';
+        var themeMode = s.themeMode === 'light' || s.themeMode === 'dark' ? s.themeMode :
+                        s.themeMode === 'hc' || s.themeMode === 'high-contrast' ? 'dark' : 'system';
         var resolved = themeMode === 'system'
           ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
           : themeMode;
-        var accentColors = { blue: '#2563eb', indigo: '#4f46e5', violet: '#7c5cff', cyan: '#0891b2' };
         document.documentElement.dataset.theme = resolved;
-        document.documentElement.dataset.accent = accent;
-        var color = accentColors[accent];
-        document.documentElement.style.setProperty('--v2-primary', color);
-        document.body && (document.body.style.setProperty('--mm-accent', color));
+        document.documentElement.dataset.themeMode = themeMode;
       } catch (_e) { /* localStorage blocked / JSON parse failed — fall through, settings.ts will re-apply on init */ }
     })();
   </script>
   <link rel="stylesheet" href="./styles/index.css" />
 </head>
 
-<body class="welcome-active auth-wall-active">
+<body class="welcome-active">
+  <div id="renderer-root" data-renderer-root>
+    <div id="renderer-legacy-outlet" data-renderer-scope="legacy">
 <!-- 智能体运行环境准备中全局遮罩（由 backend-status-guard 控制显隐） -->
-  <div id="backend-loading-overlay" class="backend-loading-overlay" style="display:none;">
+  <div id="backend-loading-overlay" class="backend-loading-overlay" hidden>
     <div class="backend-loading-card">
       <div class="backend-loading-spinner"></div>
       <p class="backend-loading-text">智能体运行环境准备中，请稍等</p>
-      <p id="backend-loading-elapsed" class="backend-loading-elapsed" style="display:none;"></p>
-      <div id="backend-loading-actions" class="backend-loading-actions" style="display:none;">
+      <p id="backend-loading-elapsed" class="backend-loading-elapsed" hidden></p>
+      <div id="backend-loading-actions" class="backend-loading-actions" hidden>
         <button id="backend-loading-log" class="backend-loading-btn" type="button">查看日志</button>
         <button id="backend-loading-retry" class="backend-loading-btn backend-loading-btn-primary" type="button">重试</button>
         <button id="backend-loading-dismiss" class="backend-loading-btn" type="button">继续等待</button>
       </div>
     </div>
-  </div>
-  <div class="title-bar" id="title-bar">
-    <div class="title-bar-drag">
-      <span class="title-bar-title"></span>
     </div>
-    <div class="title-bar-controls">
-      <button class="title-bar-btn title-bar-minimize" id="title-bar-minimize" title="最小化" aria-label="最小化">
-        <svg viewBox="0 0 24 24" width="12" height="12">
-          <path d="M4 12h16" stroke="currentColor" stroke-width="2" fill="none" />
-        </svg>
-      </button>
-      <button class="title-bar-btn title-bar-maximize" id="title-bar-maximize" title="最大化" aria-label="最大化">
-        <svg viewBox="0 0 24 24" width="12" height="12" class="maximize-icon">
-          <rect x="4" y="4" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" rx="1" />
-        </svg>
-      </button>
-      <button class="title-bar-btn title-bar-close" id="title-bar-close" title="关闭" aria-label="关闭">
-        <svg viewBox="0 0 24 24" width="12" height="12">
-          <path d="M6 6l12 12M6 18L18 6" stroke="currentColor" stroke-width="2" fill="none" />
-        </svg>
-      </button>
+    <div id="legacy-context-content">
+      <div id="session-history-root"></div>
     </div>
-  </div>
-
-  <div class="app-shell">
-    <aside class="sidebar" id="sidebar">
-      <nav class="sidebar-nav">
-        <div class="nav-section nav-section-primary">
-          <button class="nav-item active" data-tab="chat">
-            <span class="nav-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            </span>
-            <span>对话</span>
-          </button>
-          <button class="nav-item" data-tab="agents" hidden>
-            <span class="nav-icon" aria-hidden="true">
-              <svg class="nav-agent-logo" width="18" height="18" viewBox="3 3 18 18" aria-hidden="true">
-                <path class="nav-agent-logo__blob" d="M5.2 13.2c0-4.5 2.9-6.9 6.8-6.9 4.5 0 7 2.8 7 6.2 0 3.8-2.5 5.5-7.2 5.5-4.3 0-6.6-1.4-6.6-4.8Z"></path>
-                <path class="nav-agent-logo__cap" d="M9 6.7c.7-1.1 1.7-1.7 3.1-1.7 1.3 0 2.3.5 3 1.5"></path>
-                <path class="nav-agent-logo__shine nav-agent-logo__shine--left" d="M9.6 10.8v1.9"></path>
-                <path class="nav-agent-logo__shine nav-agent-logo__shine--right" d="M14.4 10.8v1.9"></path>
-                <path class="nav-agent-logo__pixel" d="M18.8 8.2h1.5M19.55 7.45v1.5"></path>
-              </svg>
-            </span>
-            <span>外援</span>
-          </button>
-          <button class="nav-item" data-tab="skills">
-            <span class="nav-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-            </span>
-            <span>技能</span>
-          </button>
-          <button class="nav-item" data-tab="wiki">
-            <span class="nav-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/></svg>
-            </span>
-            <span>Wiki</span>
-          </button>
-         <button class="nav-item" data-tab="cron">
-            <span class="nav-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-            </span>
-            <span>任务</span>
-         </button>
-          <button class="nav-item" data-tab="audit">
-            <span class="nav-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3.5 8.5-7 9-3.5-.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
-            </span>
-            <span>审计</span>
-          </button>
-          <button class="nav-item" data-tab="system">
-            <span class="nav-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
-            </span>
-            <span>系统</span>
-          </button>
-        </div>
-
-        <div class="sidebar-header">
-          <div class="sidebar-brand">
-            <img class="brand-logo-icon" src="./icon.png" alt="Crew" decoding="async" />
-          </div>
-        </div>
-
-        <div class="nav-section nav-section-more">
-          <div class="nav-section-title nav-section-title-menu">
-            <span class="nav-section-title-label">
-              <span class="nav-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24">
-                  <path d="M6 12h.01M12 12h.01M18 12h.01" />
-                </svg>
-              </span>
-              <span>更多</span>
-            </span>
-          </div>
-          <div class="more-menu show" id="more-menu"></div>
-        </div>
-
-        <div class="nav-section nav-section-static" id="history-workspace-shell">
-          <div class="history-panel-body" id="history-panel-body">
-            <div id="history-search-container" class="history-search-container">
-              <div class="history-search-input-wrapper">
-                <span class="history-search-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24">
-                    <circle cx="11" cy="11" r="6.5" />
-                    <path d="M16 16l4.5 4.5" />
-                  </svg>
-                </span>
-                <input type="text" id="history-search-input" placeholder="搜索最近对话..." class="history-search-input" />
-                <button id="history-search-clear" class="history-search-clear" aria-label="清空搜索" style="display: none;">
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M7 7l10 10M17 7 7 17" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="history-actions-bar">
-              <button class="btn-new-conversation" id="new-chat-sidebar-btn" type="button" title="新建对话" aria-label="新建对话">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-                <span>新建对话</span>
-              </button>
-              <div class="history-actions-icons">
-                <button class="history-icon-btn" id="workspace-add-btn" type="button" title="新建工作空间" aria-label="新建工作空间">
-                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-                    <path d="M12 11v6M9 14h6" />
-                  </svg>
-                </button>
-                <button class="history-icon-btn" id="history-manage-btn-inline" title="管理历史对话" aria-label="管理历史对话">
-                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div id="history-list" class="history-list history-sidebar-v2"></div>
-          </div>
-        </div>
-      </nav>
-
-      <div class="sidebar-footer">
-        <div class="sidebar-utility-actions" aria-label="系统快捷入口">
-          <button class="nav-item sidebar-utility-item sidebar-utility-item--update" type="button" id="version-update-sidebar-btn" title="下载更新" aria-label="下载更新" hidden>
-            <span class="version-update-ring" aria-hidden="true">
-              <span class="nav-icon version-update-icon">
-                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" focusable="false" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M12 4v11" class="version-update-arrow"/>
-                  <path d="m8 11 4 4 4-4" class="version-update-arrow"/>
-                  <path d="M5 20h14"/>
-                </svg>
-              </span>
-            </span>
-            <span class="version-update-percent" id="version-update-percent" hidden>0%</span>
-          </button>
-          <button class="nav-item sidebar-utility-item sidebar-utility-item--settings sidebar-utility-item--icon-only" type="button" id="settings-btn" title="设置" aria-label="设置">
-            <span class="nav-icon settings-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" focusable="false" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-              </svg>
-            </span>
-          </button>
-          <button class="nav-item sidebar-utility-item" type="button" id="feedback-btn" title="反馈" aria-label="反馈">
-            <span class="nav-icon settings-icon" aria-hidden="true">
-              <svg viewBox="-4 -3 32 30" xmlns="http://www.w3.org/2000/svg" focusable="false">
-                <path d="M12 11.3c0-1 .5-1.9 1.4-2.3A3 3 0 1 0 9 6.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-                <path d="M12 15.8a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Z" fill="currentColor" />
-                <path d="M25 5v8a6 6 0 0 1-6 6h-6.6l-4 3.6A1.4 1.4 0 0 1 6 21.6V19H5a6 6 0 0 1-6-6V5a6 6 0 0 1 6-6h14a6 6 0 0 1 6 6Z" fill="none" stroke="currentColor" stroke-width="2" />
-              </svg>
-            </span>
-          </button>
-        </div>
-        <div class="user-info" id="user-section" hidden>
-          <button type="button" class="user-avatar-btn" aria-label="查看账户信息" title="账户信息">
-            <span class="user-avatar" id="sidebar-user-avatar">我</span>
-          </button>
-          <div class="user-details">
-            <div class="user-name" id="sidebar-user-name">—</div>
-            <div class="user-email" id="sidebar-user-email">—</div>
-          </div>
-        </div>
-      </div>
-      <div class="sidebar-resize-handle" id="sidebar-resize-handle" title="拖拽调整导航宽度" aria-hidden="true"></div>
-    </aside>
 
     <main class="main-content">
-      <div id="history-workspace-dock" class="history-workspace-dock"></div>
       <div class="top-bar">
         <div class="top-bar-leading">
           <div class="chat-subnav-row">
-            <div class="chat-subnav" id="chat-subnav">
-              <button class="chat-subnav-item active" data-subtab="chat" type="button">对话</button>
-            </div>
-            <div class="top-bar-history-actions">
-            <button type="button" class="history-panel-toggle history-panel-toggle--topbar" id="history-panel-toggle"
-              aria-label="折叠历史对话" aria-expanded="true" title="折叠历史对话">
-              <!-- 展开态：面板 + 左箭头（折叠历史） -->
-              <svg class="history-panel-toggle__icon history-panel-toggle__icon--collapse" viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="3.5" width="14" height="13" rx="1.8"/>
-                <line x1="7.25" y1="3.5" x2="7.25" y2="16.5"/>
-                <path d="M11.75 8.5 10 10l1.75 1.5"/>
-              </svg>
-              <!-- 缩进态：面板 + 右箭头（展开历史） -->
-              <svg class="history-panel-toggle__icon history-panel-toggle__icon--expand" viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="3.5" width="14" height="13" rx="1.8"/>
-                <line x1="7.25" y1="3.5" x2="7.25" y2="16.5"/>
-                <path d="M10.25 8.5 12 10l-1.75 1.5"/>
-              </svg>
-            </button>
-            <button type="button" class="history-collapsed-new-chat" id="history-collapsed-new-chat" hidden
-              title="新建对话" aria-label="新建对话">
-              <svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M5 4.75h6.75a1.75 1.75 0 0 1 1.75 1.75V11a1.75 1.75 0 0 1-1.75 1.75H8.25L5.5 15.25V6.5A1.75 1.75 0 0 1 5 4.75z"/>
-                <path d="M13.75 3.75v2.75"/>
-                <path d="M12.375 5.125h2.75"/>
-              </svg>
-            </button>
-          </div>
           </div>
         </div>
         <div class="top-bar-browser-actions">
+          <div class="site-annotation-entry" id="site-annotation-entry" hidden>
+            <button type="button" class="site-annotation-entry__button" id="site-annotation-button"
+              title="批注灵感" aria-label="批注灵感" aria-haspopup="menu" aria-expanded="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4.5A2.5 2.5 0 0 1 4 13.5z"/>
+                <path d="M9 9h6"/>
+              </svg>
+              <span>批注</span>
+            </button>
+            <div class="site-annotation-entry__menu" id="site-annotation-menu" role="menu" hidden></div>
+          </div>
           <button type="button" class="browser-workbench-toggle" id="browser-workbench-toggle"
             title="打开浏览器 (Ctrl/⌘+Shift+B)" aria-label="打开浏览器" aria-expanded="false" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -294,53 +83,9 @@
       </div>
 
       <!-- 右侧 Inspector：独立于 #chat-tab，与顶栏同列贯穿整高 -->
-      <aside class="chat-inspector" id="chat-inspector" aria-label="会话检查器">
-        <div class="chat-inspector__resize-handle" id="chat-inspector-resize-handle" title="拖拽调整检查器宽度" aria-hidden="true"></div>
-        <header class="chat-inspector__head">
-          <div class="chat-inspector__tabs" id="chat-inspector-tabs" role="tablist" aria-label="看板页面"></div>
-          <div class="chat-inspector__tab-picker">
-            <button type="button" id="inspector-new-browser-tab" class="chat-inspector__chrome-btn"
-              title="新增看板页面" aria-label="新增看板页面" aria-haspopup="menu" aria-expanded="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-            </button>
-            <button type="button" id="inspector-tab-picker-toggle" class="chat-inspector__chrome-btn is-hidden" hidden
-              title="查看已打开页面" aria-label="查看已打开页面" aria-haspopup="menu" aria-expanded="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
-            </button>
-            <div id="inspector-tab-menu" class="chat-inspector__tab-menu" role="menu" hidden></div>
-          </div>
-          <button type="button" id="inspector-maximize" class="chat-inspector__chrome-btn"
-            title="放大看板" aria-label="放大看板" aria-pressed="false">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>
-          </button>
-          <button type="button" id="inspector-close" class="chat-inspector__chrome-btn"
-            title="收起看板" aria-label="收起看板">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
-          </button>
-        </header>
-        <div class="chat-inspector__workspace">
-          <div class="chat-inspector__body" id="chat-inspector-body">
-            <!-- 内容由 features/inspector.ts 渲染 -->
-          </div>
-        </div>
-      </aside>
-
+      <aside class="chat-inspector" id="chat-inspector" aria-label="会话检查器"></aside>
       <section id="chat-tab" class="tab-pane active chat-mode">
-        <div class="welcome-container" id="welcome-panel">
-          <div class="welcome-header">
-            <div class="welcome-icon">
-              <img class="welcome-logo" src="./icon.png" alt="Crew" decoding="async" />
-            </div>
-            <h1 class="welcome-title">Hi, 我是<span class="welcome-title__brand">Crew</span></h1>
-            <p class="welcome-subtitle">今天想从哪里开始？</p>
-          </div>
-          <div class="scenario-heading">
-            <span class="scenario-heading__title">推荐场景</span>
-            <button type="button" id="scenario-refresh" class="scenario-refresh" aria-label="换一批推荐场景">换一换</button>
-          </div>
-          <div class="feature-cards" id="scenario-cards"></div>
-          <div class="scenario-items" id="scenario-items" hidden></div>
-        </div>
+        <section id="welcome-panel"></section>
 
         <div class="chat-main" id="chat-panel" hidden>
           <div id="chat-messages" class="chat-messages web-flow"></div>
@@ -355,126 +100,28 @@
           <div id="task-board-panel" hidden></div>
         </div>
 
-        <div class="chat-composer">
-          <div id="chat-queue-slot"></div>
-          <div id="chat-running-intro" hidden></div>
-          <div id="chat-todo-slot"></div>
-          <div id="composer-edit-banner" class="composer-edit-banner">
-            <span class="composer-edit-banner__icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-            </span>
-            <span class="composer-edit-banner__text">正在编辑消息，修改后重新发送</span>
-            <button type="button" class="composer-edit-banner__cancel" id="composer-edit-cancel" title="取消编辑" aria-label="取消编辑">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-            </button>
-          </div>
-          <input type="file" id="chat-file-input" class="chat-file-input" multiple hidden />
-          <div class="input-container chat-input-container" id="chat-input-container">
-            <div id="chat-fileqa-hint" class="chat-fileqa-hint" hidden>
-              <span class="chat-fileqa-hint__icon" aria-hidden="true">📄</span>
-              <span class="chat-fileqa-hint__text">文档类附件（PDF / Word / Excel / PPT）需安装 <strong>文件问答</strong> 技能才能解析内容</span>
-              <button type="button" class="chat-fileqa-hint__install" id="chat-fileqa-install-btn">安装技能</button>
-              <button type="button" class="chat-fileqa-hint__close" id="chat-fileqa-close-btn" title="关闭提示" aria-label="关闭提示">×</button>
-            </div>
-            <div id="chat-attachment-preview" class="chat-attachment-preview" hidden></div>
-            <div id="chat-scenario-chip" class="scenario-chip" hidden></div>
-            <div id="chat-workflow-recommendation" class="chat-workflow-recommendation" hidden>
-              <svg class="chat-workflow-recommendation__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14" aria-hidden="true">
-                <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
-              </svg>
-              <span class="chat-workflow-recommendation__text" id="chat-workflow-recommendation-text">该任务适合走 Dynamic Workflow</span>
-              <button type="button" class="chat-workflow-recommendation__btn" id="chat-workflow-recommendation-btn">启动工作流</button>
-              <button type="button" class="chat-workflow-recommendation__close" id="chat-workflow-recommendation-close" aria-label="关闭">×</button>
-            </div>
-            <div class="chat-input-row">
-              <textarea id="chat-input" placeholder="输入消息..." rows="1"></textarea>
-            </div>
-            <div class="chat-input-toolbar" id="chat-input-toolbar">
-              <div class="chat-input-toolbar-left">
-                <div class="chat-craft-picker-inline" id="chat-craft-picker-inline">
-                  <button type="button" class="composer-chip" id="chat-craft-btn" title="Craft · Plan · Ask" aria-haspopup="listbox" aria-expanded="false">
-                    <svg class="composer-chip__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
-                      <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z" />
-                    </svg>
-                    <span class="composer-chip__label" id="chat-craft-btn-label">智能体</span>
-                    <svg class="composer-chip__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11" aria-hidden="true">
-                      <path d="m6 9 6 6 6-6" />
-                    </svg>
-                  </button>
-                </div>
-                <div class="chat-model-picker-inline" id="chat-model-picker-inline">
-                  <button type="button" class="composer-chip" id="chat-model-picker-inline-btn" title="选择模型" aria-haspopup="listbox" aria-expanded="false">
-                    <svg class="composer-chip__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
-                      <path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5" />
-                      <path d="M8.5 8.5v.01" />
-                      <path d="M16 15.5v.01" />
-                      <path d="M12 12v.01" />
-                    </svg>
-                    <span class="composer-chip__label" id="chat-model-picker-inline-label">模型</span>
-                    <svg class="composer-chip__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11" aria-hidden="true">
-                      <path d="m6 9 6 6 6-6" />
-                    </svg>
-                  </button>
-                </div>
-                <div class="chat-skills-picker-inline" id="chat-skills-picker-inline">
-                  <button type="button" class="composer-chip" id="chat-skills-btn" title="技能" aria-haspopup="listbox" aria-expanded="false">
-                    <svg class="composer-chip__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
-                      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-                    </svg>
-                    <span class="composer-chip__label">技能</span>
-                    <svg class="composer-chip__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11" aria-hidden="true">
-                      <path d="m6 9 6 6 6-6" />
-                    </svg>
-                  </button>
-                </div>
-                <div class="chat-workflow-toggle-inline" id="chat-workflow-toggle-inline" hidden>
-                  <button type="button" class="composer-chip" id="chat-workflow-workdir-btn" title="打开产物目录" disabled>
-                    <svg class="composer-chip__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
-                      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-                    </svg>
-                    <span class="composer-chip__label">产物目录</span>
-                  </button>
-                </div>
-
-             </div>
-              <div class="chat-input-toolbar-right">
-                <div class="composer-workspace-slot" id="chat-workspace-row" hidden>
-                  <button type="button" class="composer-chip composer-workspace-chip" id="chat-workspace-btn" title="选择项目空间" aria-haspopup="listbox" aria-expanded="false">
-                    <svg class="composer-chip__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
-                      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-                    </svg>
-                    <span class="composer-chip__label" id="chat-workspace-btn-label">工作空间</span>
-                    <svg class="composer-chip__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11" aria-hidden="true">
-                      <path d="m6 9 6 6 6-6" />
-                    </svg>
-                  </button>
-                </div>
-                <button type="button" id="chat-context-ring-btn" class="chat-action-btn composer-context-ring" hidden title="上下文占用" aria-label="上下文占用">
-                  <span class="composer-context-ring__pct" id="chat-context-ring-pct" aria-hidden="true">0%</span>
-                  <svg class="composer-context-ring__svg" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                    <circle class="composer-context-ring__track" cx="12" cy="12" r="9" fill="none" stroke-width="2.5" />
-                    <circle class="composer-context-ring__progress" cx="12" cy="12" r="9" fill="none" stroke-width="2.5" stroke-linecap="round" transform="rotate(-90 12 12)" />
-                  </svg>
-                </button>
-                <button id="chat-attach-btn" class="chat-action-btn chat-attach-inline" type="button" title="添加附件" aria-label="添加附件">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                  </svg>
-                </button>
-                <div class="input-controls composer-controls" id="composer-controls">
-                  <!-- 主区不再放「引导」按钮：回车=发送/排队；引导仅在待发队列卡片上显式提供，避免入口歧义。steerGeneration 仍保留。 -->
-                  <button id="chat-stop-btn" class="chat-action-btn chat-stop-btn" type="button" title="停止生成" aria-label="停止">■</button>
-                  <button id="chat-send-btn" class="chat-action-btn send-btn" title="发送" aria-label="发送" type="button">
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
-                    </svg>
-                  </button>
-                </div>
+        <div id="chat-composer-root"></div>
+        <div id="composer-context-staging" hidden>
+          <div data-composer-context-source="approval">
+            <div id="composer-approval-panel" class="composer-approval-panel" aria-hidden="true" role="dialog" aria-label="需要你的批准">
+              <div class="composer-approval-panel__head">
+                <span class="composer-approval-panel__title">需要你的批准</span>
+                <span class="composer-approval-panel__hint">请核对执行边界与记忆范围</span>
               </div>
+              <pre id="composer-approval-summary" class="composer-approval-panel__summary"></pre>
+              <div class="composer-approval-panel__actions">
+                <button class="btn btn-danger" type="button" data-security-decision="reject">拒绝</button>
+                <button class="btn btn-primary" type="button" data-security-decision="once">仅这一次</button>
+                <button class="btn btn-ghost" type="button" data-security-decision="session">本次对话</button>
+                <button class="btn btn-ghost" type="button" data-security-decision="always">始终允许此操作</button>              </div>
             </div>
           </div>
         </div>
-        <p class="chat-disclaimer" id="chat-disclaimer">内容由 AI 生成，请仔细甄别</p>
+        <p class="chat-disclaimer studio-disclaimer" id="chat-disclaimer">内容由 AI 生成，请仔细甄别</p>
+      </section>
+
+      <section id="expert-tab" class="tab-pane">
+        <div id="expert-page-root" class="expert-page-root"></div>
       </section>
 
       <section id="agents-tab" class="tab-pane">
@@ -485,17 +132,25 @@
         <div id="skills-page-root" class="skills-page-root"></div>
       </section>
 
+
       <section id="wiki-tab" class="tab-pane">
         <div id="wiki-page-root"></div>
+      </section>
+
+      <section id="sites-tab" class="tab-pane">
+        <div id="sites-page-root" class="sites-page-root"></div>
       </section>
 
       <section id="cron-tab" class="tab-pane">
         <div id="cron-page-root" class="cron-page-root"></div>
       </section>
 
-      <section id="audit-tab" class="tab-pane">
-        <div id="audit-page-root" class="audit-page-root"></div>
+      <section id="security-tab" class="tab-pane">
+        <div id="security-page-root" class="security-page-root"></div>
       </section>
+
+
+      <!-- 配置（连接 / 模型）已并入设置弹窗，原 config-tab 不再使用。 -->
 
       <!-- 渠道连接弹层：脱离 config-tab 单独挂在 body，保持全局可见。 -->
       <div class="channel-connect-overlay" id="model-connect-overlay" hidden>
@@ -569,8 +224,9 @@
             <p class="channel-connect-desc">配置 MCP Server，保存后将自动连接并注册其工具。</p>
             <form class="channel-connect-form" id="mcp-server-form">
               <div class="channel-connect-field">
-                <label class="channel-connect-label" for="mcp-name">服务名称 <span class="channel-connect-required">*</span> <span class="channel-connect-label__tip">（编辑后不可修改）</span></label>
-                <input class="channel-connect-input" id="mcp-name" placeholder="仅字母、数字、下划线、连字符，例如 filesystem" />
+                <label class="channel-connect-label" for="mcp-name">服务名称 <span class="channel-connect-required">*</span></label>
+                <input class="channel-connect-input" id="mcp-name" placeholder="例如 bocha 或 filesystem" />
+                <span class="channel-connect-hint">仅字母、数字、下划线、连字符；编辑后不可修改</span>
               </div>
               <div class="channel-connect-field">
                 <span class="channel-connect-label">传输类型</span>
@@ -592,18 +248,19 @@
               <div class="channel-connect-field" id="mcp-stdio-wrap">
                 <label class="channel-connect-label" for="mcp-command">Command <span class="channel-connect-required">*</span></label>
                 <input class="channel-connect-input" id="mcp-command" placeholder="例如 npx 或 ${CREW_PYTHON}" />
-                <label class="channel-connect-label channel-connect-stacked-label" for="mcp-args">Args（逗号分隔）</label>
+                <label class="channel-connect-label channel-connect-label--spaced" for="mcp-args">Args（逗号分隔）</label>
                 <input class="channel-connect-input" id="mcp-args" placeholder="例如 -y, @modelcontextprotocol/server-filesystem, /tmp" />
               </div>
               <div class="channel-connect-field" id="mcp-remote-wrap" hidden>
                 <label class="channel-connect-label" for="mcp-url">URL <span class="channel-connect-required">*</span></label>
                 <input class="channel-connect-input" id="mcp-url" placeholder="https://mcp-server.example.com/mcp" />
-                <label class="channel-connect-label channel-connect-stacked-label" for="mcp-headers">Headers（每行 Key: Value）</label>
+                <label class="channel-connect-label channel-connect-label--spaced" for="mcp-headers">Headers（每行 Key: Value）</label>
                 <textarea class="channel-connect-input" id="mcp-headers" rows="2" placeholder="Authorization: Bearer ..."></textarea>
               </div>
               <div class="channel-connect-field">
-                <label class="channel-connect-label" for="mcp-env">环境变量（每行 KEY=VALUE） <span class="channel-connect-label__tip">（密钥类变量编辑时留空则保留原值）</span></label>
-                <textarea class="channel-connect-input" id="mcp-env" rows="2" placeholder="API_KEY=sk-...&#10;ENV=prod"></textarea>
+                <label class="channel-connect-label" for="mcp-env">环境变量（每行 KEY=VALUE）</label>
+                <textarea class="channel-connect-input" id="mcp-env" rows="3" placeholder="API_KEY=sk-...&#10;ENV=prod"></textarea>
+                <span class="channel-connect-hint">密钥类变量编辑时留空则保留原值</span>
               </div>
             </form>
             <div class="channel-connect-actions model-connect-actions">
@@ -638,148 +295,12 @@
       </div>
 
       <section id="system-tab" class="tab-pane">
-        <div class="system-page-shell page-shell">
-            <header class="hub-section-header system-section-header page-header page-header--hub">
-              <div class="hub-section-header-copy page-header__copy">
-                <h2 class="hub-section-title page-header__title">系统总览</h2>
-                <p class="hub-section-desc page-header__desc">快速了解系统当前的运行状况。更多详细信息（如运行日志、使用统计）可在‘设置’中查看。</p>
-              </div>
-            </header>
-
-              <div class="kpi-row">
-                <div class="kpi-card">
-                  <div class="kpi-card__icon is-green">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                  </div>
-                  <div class="kpi-card__copy">
-                    <div class="kpi-card__label">运行时长</div>
-                    <div class="kpi-card__value" id="sys-kpi-uptime">—</div>
-                  </div>
-                </div>
-                <div class="kpi-card">
-                  <div class="kpi-card__icon">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
-                  </div>
-                  <div class="kpi-card__copy">
-                    <div class="kpi-card__label">活跃 / 并发上限</div>
-                    <div class="kpi-card__value" id="sys-kpi-cpu">—</div>
-                  </div>
-                </div>
-                <div class="kpi-card">
-                  <div class="kpi-card__icon is-violet">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v14"/><path d="M3 9h18M3 15h18"/></svg>
-                  </div>
-                  <div class="kpi-card__copy">
-                    <div class="kpi-card__label">累计 token</div>
-                    <div class="kpi-card__value" id="sys-kpi-memory">—</div>
-                  </div>
-                </div>
-                <div class="kpi-card">
-                  <div class="kpi-card__icon is-amber">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
-                  </div>
-                  <div class="kpi-card__copy">
-                    <div class="kpi-card__label">会话数 / 任务数</div>
-                    <div class="kpi-card__value" id="sys-kpi-tasks">—</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="system-cards" style="margin-top:24px">
-                <div class="sys-v2-resources">
-                  <div class="sys-v2-resources__head">
-                    <h3 class="sys-v2-resources__title">资源占用</h3>
-                    <span class="sys-v2-resources__hint">
-                      <span id="sys-refresh-stamp">暂无数据</span>
-                      <button type="button" class="sys-v2-resources__refresh" id="sys-resources-refresh" title="立即刷新" aria-label="立即刷新">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M8 16H3v5"/></svg>
-                      </button>
-                    </span>
-                  </div>
-                  <div class="sys-v2-resources__error" id="sys-resources-error" hidden></div>
-                  <div class="sys-v2-resources__process" id="sys-process-meta" hidden></div>
-                  <div class="sys-v2-bar">
-                    <span class="sys-v2-bar__lbl">CPU</span>
-                    <div class="sys-v2-bar__track"><div class="sys-v2-bar__fill" id="sys-bar-cpu" style="width:0%"></div></div>
-                    <span class="sys-v2-bar__val" id="sys-bar-cpu-val">—</span>
-                  </div>
-                  <div class="sys-v2-bar">
-                    <span class="sys-v2-bar__lbl">内存</span>
-                    <div class="sys-v2-bar__track"><div class="sys-v2-bar__fill is-violet" id="sys-bar-mem" style="width:0%"></div></div>
-                    <span class="sys-v2-bar__val" id="sys-bar-mem-val">—</span>
-                  </div>
-                  <div class="sys-v2-bar">
-                    <span class="sys-v2-bar__lbl">磁盘</span>
-                    <div class="sys-v2-bar__track"><div class="sys-v2-bar__fill" id="sys-bar-disk" style="width:0%"></div></div>
-                    <span class="sys-v2-bar__val" id="sys-bar-disk-val">—</span>
-                  </div>
-                  <div class="sys-v2-bar">
-                    <span class="sys-v2-bar__lbl">网络</span>
-                    <div class="sys-v2-bar__track"><div class="sys-v2-bar__fill is-warn" id="sys-bar-net" style="width:0%"></div></div>
-                    <span class="sys-v2-bar__val" id="sys-bar-net-val">—</span>
-                  </div>
-                </div>
-
-                <div class="sys-v2-services">
-                  <div class="sys-v2-services__head">
-                    <h3 class="sys-v2-services__title">活跃服务</h3>
-                    <span class="sys-v2-resources__hint" id="sys-services-hint">—</span>
-                  </div>
-                  <div class="sys-v2-table" id="sys-services-table">
-                    <div class="sys-v2-table__empty">暂无服务状态</div>
-                  </div>
-                </div>
-              </div>
-        </div>
+        <div id="system-page-root" class="system-page-root"></div>
       </section>
     </main>
   </div>
 
-  <div class="workspace-modal-overlay" id="workspace-modal">
-    <div class="workspace-modal">
-      <h3 id="ws-modal-title">编辑工作空间</h3>
-      <p class="workspace-modal__hint">项目提示词会在该工作空间下每次新对话时自动注入 Agent，类似 Claude 项目的 CLAUDE.md 或 Codex 的 AGENTS.md。</p>
-      <p class="workspace-modal__path" id="ws-modal-path" hidden></p>
-      <label>名称<input id="ws-modal-name" type="text" placeholder="例如：my-project" readonly /></label>
-      <label>项目提示词<textarea id="ws-modal-instr" rows="5" placeholder="可在此编写本项目专属提示词，例如技术栈、代码规范、常用命令等。留空则不注入。"></textarea></label>
-      <div class="workspace-modal__danger">
-        <button type="button" class="btn btn-ghost" id="ws-modal-hide">隐藏项目</button>
-        <button type="button" class="btn btn-danger" id="ws-modal-delete">删除项目</button>
-      </div>
-      <div class="workspace-modal__actions">
-        <button type="button" class="btn btn-ghost" id="ws-modal-cancel">取消</button>
-        <button type="button" class="btn btn-primary" id="ws-modal-submit">保存</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-overlay" id="login-modal" style="display: flex;">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h3 class="modal-title"><span id="login-title">使用邮箱进入 Ace</span></h3>
-      </div>
-      <div class="modal-body">
-        <div class="form-group">
-          <label class="form-label" id="login-identifier-label" for="login-phone">邮箱</label>
-          <input type="email" class="form-input" id="login-phone" placeholder="请输入邮箱" maxlength="128" autocomplete="email" />
-        </div>
-        <div class="form-group" id="login-code-group" hidden>
-          <label class="form-label" for="login-code">验证码</label>
-          <div class="form-input-with-btn">
-            <input type="text" class="form-input" id="login-code" placeholder="请输入验证码" maxlength="32" autocomplete="one-time-code" />
-            <button class="btn-get-code" id="login-get-code" type="button">获取验证码</button>
-          </div>
-        </div>
-        <div class="login-message" id="login-message" hidden role="alert"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-cancel" id="login-quit" type="button">退出程序</button>
-        <button class="btn-primary" id="login-submit" type="button">进入 Ace</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="confirm-dialog" class="modal-overlay" style="display: none;">
+  <div id="confirm-dialog" class="modal-overlay" hidden>
     <div class="modal-content confirm-dialog-content confirm-dialog-v2">
       <div class="modal-header">
         <h3 class="modal-title" id="confirm-title">确认操作</h3>
@@ -794,13 +315,13 @@
     </div>
   </div>
 
-  <div id="prompt-dialog" class="modal-overlay" style="display: none;">
+  <div id="prompt-dialog" class="modal-overlay" hidden>
     <div class="modal-content confirm-dialog-content confirm-dialog-v2">
       <div class="modal-header">
         <h3 class="modal-title" id="prompt-title">输入</h3>
       </div>
       <div class="modal-body">
-        <input class="form-input" id="prompt-input" type="text" autocomplete="off" style="width: 100%;" />
+        <input class="form-input" id="prompt-input" type="text" autocomplete="off" />
       </div>
       <div class="modal-footer">
         <button class="btn-cancel" id="prompt-cancel">取消</button>
@@ -809,66 +330,8 @@
     </div>
   </div>
 
-  <div id="version-install-modal" class="modal-overlay" style="display: none;">
-    <div class="modal-content version-install-dialog">
-      <div class="modal-header">
-        <h3 class="modal-title">安装更新</h3>
-      </div>
-      <div class="modal-body">
-        <div class="version-install-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3v10"/>
-            <path d="m8 9 4 4 4-4"/>
-            <path d="M5 20h14"/>
-          </svg>
-        </div>
-        <div class="version-install-copy">
-          <div class="version-install-version" id="version-install-version">新版本</div>
-          <p id="version-install-message">更新包已下载完成，是否现在安装？安装程序启动后应用会退出。</p>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-cancel" id="version-install-later" type="button">稍后</button>
-        <button class="btn-primary" id="version-install-now" type="button">现在安装</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- force 强制更新阻断层：必须更新后才能使用，否则退出 -->
-  <div id="force-update-overlay" hidden>
-    <div class="force-update-card">
-      <h3 class="force-update-title">必须更新到最新版本</h3>
-      <p class="force-update-message" id="force-update-message">当前版本过低，请更新后继续使用。</p>
-      <div class="force-update-progress" id="force-update-progress">
-        <div class="force-update-progress-bar"><div class="force-update-progress-fill" id="force-update-progress-fill"></div></div>
-        <div class="force-update-progress-text" id="force-update-progress-text">准备下载…</div>
-      </div>
-      <div class="force-update-actions">
-        <button class="btn-cancel" id="force-update-exit" type="button">退出</button>
-        <button class="btn-primary" id="force-update-action" type="button">立即更新</button>
-      </div>
-    </div>
-  </div>
-
-
-  <!-- 归档会话历史预览 -->
-  <div id="session-preview-modal" class="modal-overlay session-preview-modal" style="display: none;">
-    <div class="modal-content session-preview-modal__content">
-      <div class="modal-header">
-        <h3 class="modal-title" id="session-preview-title">会话预览</h3>
-        <button class="modal-close" id="session-preview-close" type="button" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-body session-preview-modal__body">
-        <div id="session-preview-messages" class="chat-messages web-flow session-preview-messages"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-cancel" id="session-preview-done" type="button">关闭</button>
-      </div>
-    </div>
-  </div>
-
   <!-- 会话管理弹窗 -->
-  <div id="session-manage-modal" class="modal-overlay" style="display: none;">
+  <div id="session-manage-modal" class="modal-overlay" hidden>
     <div class="modal-content session-manage-modal__content">
       <div class="modal-header">
         <h3 class="modal-title">
@@ -890,7 +353,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
             删除选中
           </button>
-          <label class="manage-show-archived-label" style="margin-left:auto;">
+          <label class="manage-show-archived-label">
             <input type="checkbox" id="manage-show-archived" />
             <span>显示归档</span>
           </label>
@@ -903,193 +366,73 @@
     </div>
   </div>
 
-  <!-- 反馈页弹窗 -->
-  <div id="feedback-modal" class="modal-overlay" style="display: none;">
-    <div class="modal-content feedback-modal-content" style="max-width: 720px;">
-      <div class="modal-header">
-        <h3 class="modal-title">问题反馈</h3>
-        <button class="modal-close" id="feedback-modal-close" type="button" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-body feedback-body">
-        <div class="settings-card feedback-form-card">
-          <div class="feedback-form-grid">
-            <div class="feedback-field feedback-field-span-2">
-              <label class="form-label" for="feedback-title">问题标题</label>
-              <div class="feedback-input-wrap">
-                <input id="feedback-title" class="form-input feedback-title-input" type="text" placeholder="请输入问题标题" maxlength="120" />
-                <span id="feedback-title-count" class="feedback-char-count">0/120</span>
-              </div>
-            </div>
-            <div class="feedback-field feedback-field-span-2">
-              <label class="form-label" for="feedback-description">问题描述</label>
-              <textarea id="feedback-description" class="form-input feedback-textarea" rows="3" placeholder="请尽量描述复现步骤、预期结果和实际结果"></textarea>
-            </div>
-            <div class="feedback-field feedback-field-span-2">
-              <label class="form-label">问题截图（最多 10 张）</label>
-              <div class="feedback-upload-card">
-                <div class="feedback-upload-meta">
-                  <span class="form-hint">支持点击上传或粘贴图片</span>
-                  <span id="feedback-screenshot-count" class="feedback-upload-count">0/10</span>
-                </div>
-                <div id="feedback-screenshot-preview" class="feedback-upload-preview"></div>
-              </div>
-            </div>
-          </div>
-          <div class="hub-actions feedback-actions">
-            <button id="feedback-submit-btn" class="btn btn-primary btn-sm" type="button">提交反馈</button>
-            <button id="feedback-reset-btn" class="btn btn-sm" type="button">清空内容</button>
-          </div>
-        </div>
-        <div class="settings-card feedback-history-card">
-          <h3 class="settings-title">提交记录</h3>
-          <div id="feedback-history-list" class="feedback-history-list">
-            <div class="entity-empty">暂无提交记录</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- 设置弹窗（侧栏齿轮按钮触发，内部：左 tab + 右表单） -->
-  <div id="settings-modal" class="modal-overlay">
-    <div class="modal-content">
-      <div class="modal-body">
-        <nav class="set-v2-nav" id="settings-nav">
-          <div class="set-v2-nav__title" data-i18n="settings.nav.title">设置</div>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="account">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            <span data-i18n="settings.nav.account">账户信息</span>
-          </button>
-          <button type="button" class="set-v2-nav__item is-active" data-settings-pane="general">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            <span data-i18n="settings.nav.general">通用设置</span>
-          </button>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="model">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 0-4 4v1H6a3 3 0 0 0-3 3v9a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3v-9a3 3 0 0 0-3-3h-2V6a4 4 0 0 0-4-4Zm-2 5V6a2 2 0 1 1 4 0v1h-4Z"/></svg>
-            <span data-i18n="settings.nav.models">模型</span>
-          </button>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="channel">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-            <span data-i18n="settings.nav.channels">渠道</span>
-          </button>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="mcp">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/><path d="M6 6h.01M6 18h.01"/></svg>
-            <span data-i18n="settings.nav.mcp">MCP 服务</span>
-          </button>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="sys-logs">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
-            <span data-i18n="settings.nav.logs">运行日志</span>
-          </button>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="sys-usage">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/><circle cx="12" cy="12" r="10"/></svg>
-            <span data-i18n="settings.nav.usage">使用统计</span>
-          </button>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="library">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span data-i18n="settings.nav.library">项目与会话</span>
-          </button>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="data">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.66 4.03 3 9 3s9-1.34 9-3V5M3 11v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6"/></svg>
-            <span data-i18n="settings.nav.data">数据管理</span>
-          </button>
-          <button type="button" class="set-v2-nav__item" data-settings-pane="about">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 10v6M12 7.5h.01"/></svg>
-            <span data-i18n="settings.nav.about">关于我们</span>
-          </button>
-        </nav>
+  <div id="settings-pane-staging" hidden>
+        <div class="set-v2-pane" id="settings-pane-account">
+          <div class="set-v2-pane__title">账户</div>
+          <div class="set-v2-pane__desc">管理登录账户与会话隔离。</div>
 
-        <div class="set-v2-pane" id="settings-pane-account" hidden>
-          <div class="set-v2-pane__title">账户信息</div>
-          <div class="set-v2-pane__desc">远程认证启用后，账号数据按认证提供方与用户 ID 隔离。</div>
-          <div class="set-v2-section">
+          <div class="set-v2-section" id="set-account-section">
+            <!-- 已登录视图 -->
             <div class="set-account-card" id="set-account-logged-in" hidden>
               <div class="set-account-card__hero">
-                <div class="set-account-card__avatar" id="set-account-avatar">我</div>
+                <div class="set-account-card__avatar" id="set-account-avatar" aria-hidden="true">A</div>
                 <div class="set-account-card__body">
-                  <div class="set-account-card__name" id="set-account-name">—</div>
+                  <div class="set-account-card__name" id="set-account-name">-</div>
                   <div class="set-account-card__eyebrow">
-                    <span class="set-account-card__badge">已登录</span>
-                    <span class="set-account-card__sub" id="set-account-provider">—</span>
+                    <span class="set-account-card__badge" id="set-account-provider">本机模式</span>
                   </div>
                 </div>
               </div>
               <div class="set-account-card__list">
                 <div class="set-account-card__row">
-                  <div class="set-account-card__label">用户 ID</div>
-                  <div class="set-account-card__value" id="set-account-user-id">—</div>
+                  <div class="set-account-card__label" id="set-account-contact-label">手机号</div>
+                  <div class="set-account-card__value" id="set-account-phone">-</div>
                 </div>
                 <div class="set-account-card__row">
-                  <div class="set-account-card__label" id="set-account-contact-label">手机号</div>
-                  <div class="set-account-card__value" id="set-account-phone">—</div>
+                  <div class="set-account-card__label">用户 ID</div>
+                  <div class="set-account-card__value" id="set-account-user-id">-</div>
                 </div>
               </div>
               <div class="set-account-card__actions">
-                <button type="button" class="set-v2-btn set-v2-btn--danger" id="set-account-logout">退出登录</button>
+                <button type="button" class="set-v2-btn set-v2-btn--danger" id="set-account-logout" hidden>退出登录</button>
               </div>
             </div>
+
+            <!-- 未登录视图 -->
             <div class="set-account-empty" id="set-account-logged-out">
               <div class="set-account-empty__icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>
               </div>
-              <div class="set-account-empty__title" id="set-account-empty-title" data-i18n="account.localMode">本地模式</div>
-              <div class="set-account-empty__desc" id="set-account-empty-desc" data-i18n="account.noLoginNeeded">当前无需登录。</div>
-              <button type="button" class="set-v2-btn set-v2-btn--primary" id="set-account-go-login" hidden data-i18n="account.goLogin">前往登录</button>
+              <div class="set-account-empty__title" id="set-account-empty-title">尚未登录</div>
+              <div class="set-account-empty__desc" id="set-account-empty-desc">登录后，会话、模型配置和 Wiki 数据将按用户隔离。</div>
+              <button type="button" class="set-v2-btn set-v2-btn--primary" id="set-account-go-login" hidden>前往登录</button>
             </div>
           </div>
         </div>
 
         <div class="set-v2-pane" id="settings-pane-general">
-          <div class="set-v2-pane__title" data-i18n="settings.general">通用设置</div>
-          <div class="set-v2-pane__desc" data-i18n="settings.general.desc">调整界面外观、输入习惯与启动行为。</div>
+          <div class="set-v2-pane__title">通用设置</div>
+          <div class="set-v2-pane__desc">调整界面外观与应用行为。</div>
 
           <div class="set-v2-section">
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.language">界面语言</div>
-                <div class="set-v2-row__desc" data-i18n="settings.language.desc">切换界面显示语言，跟随系统将自动检测操作系统语言。</div>
-              </div>
-              <div class="set-v2-row__control">
-                <select class="set-v2-select" id="set-language">
-                  <option value="system" data-i18n="settings.language.system">跟随系统</option>
-                  <option value="zh-CN" data-i18n="settings.language.zhCN">简体中文</option>
-                  <option value="en" data-i18n="settings.language.en">English</option>
-                </select>
-              </div>
-            </div>
-            <div class="set-v2-row">
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.themeMode">外观模式</div>
-                <div class="set-v2-row__desc" data-i18n="settings.themeMode.desc">跟随系统切换，或手动指定浅色/深色主题。</div>
+                <div class="set-v2-row__label">外观模式</div>
+                <div class="set-v2-row__desc">跟随系统切换，或手动指定浅色/深色主题。</div>
               </div>
               <div class="set-v2-row__control">
                 <select class="set-v2-select" id="set-theme-mode">
-                  <option value="system" data-i18n="settings.themeMode.system">跟随系统</option>
-                  <option value="light" data-i18n="settings.themeMode.light">浅色（默认蓝）</option>
-                  <option value="dark" data-i18n="settings.themeMode.dark">深色（默认蓝）</option>
-                  <option value="sepia" data-i18n="settings.themeMode.sepia">护眼米色</option>
-                  <option value="sidebar-gray" data-i18n="settings.themeMode.sidebarGray">侧栏灰色</option>
-                  <option value="hc" data-i18n="settings.themeMode.hc">高对比度</option>
+                  <option value="system">跟随系统</option>
+                  <option value="light">浅色</option>
+                  <option value="dark">深色</option>
                 </select>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.accent">强调色</div>
-                <div class="set-v2-row__desc" data-i18n="settings.accent.desc">主按钮、选中态与链接的颜色。</div>
-              </div>
-              <div class="set-v2-row__control">
-                <select class="set-v2-select" id="set-accent">
-                  <option value="blue" data-i18n="settings.accent.blue">科技蓝</option>
-                  <option value="indigo" data-i18n="settings.accent.indigo">商务靛蓝</option>
-                  <option value="violet" data-i18n="settings.accent.violet">活力紫</option>
-                  <option value="cyan" data-i18n="settings.accent.cyan">清亮青</option>
-                </select>
-              </div>
-            </div>
-            <div class="set-v2-row">
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.uiFontSize">界面字号</div>
-                <div class="set-v2-row__desc" data-i18n="settings.uiFontSize.desc">控制导航、按钮、表格、设置项等 UI 文本。</div>
+                <div class="set-v2-row__label">界面字号</div>
+                <div class="set-v2-row__desc">控制导航、按钮、表格、设置项等 UI 文本。</div>
               </div>
               <div class="set-v2-row__control">
                 <div class="set-v2-range-wrap">
@@ -1098,17 +441,17 @@
                   </div>
                   <input type="range" class="set-v2-range" id="set-ui-font-size" min="12" max="18" step="1" value="14" />
                   <div class="set-v2-range__markers">
-                    <span data-i18n="common.small">小</span>
-                    <span data-i18n="common.default">默认</span>
-                    <span data-i18n="common.large">大</span>
+                    <span>小</span>
+                    <span>默认</span>
+                    <span>大</span>
                   </div>
                 </div>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.contentFontSize">正文字号</div>
-                <div class="set-v2-row__desc" data-i18n="settings.contentFontSize.desc">控制对话消息、Markdown 正文和长文本阅读区。</div>
+                <div class="set-v2-row__label">正文字号</div>
+                <div class="set-v2-row__desc">控制对话消息、Markdown 正文和长文本阅读区。</div>
               </div>
               <div class="set-v2-row__control">
                 <div class="set-v2-range-wrap">
@@ -1117,36 +460,17 @@
                   </div>
                   <input type="range" class="set-v2-range" id="set-content-font-size" min="12" max="20" step="1" value="14" />
                   <div class="set-v2-range__markers">
-                    <span data-i18n="common.small">小</span>
-                    <span data-i18n="common.default">默认</span>
-                    <span data-i18n="common.large">大</span>
+                    <span>小</span>
+                    <span>默认</span>
+                    <span>大</span>
                   </div>
                 </div>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.editorFontSize">编辑器字号</div>
-                <div class="set-v2-row__desc" data-i18n="settings.editorFontSize.desc">控制输入框、表单文本框和可编辑内容。</div>
-              </div>
-              <div class="set-v2-row__control">
-                <div class="set-v2-range-wrap">
-                  <div class="set-v2-range-wrap__head">
-                    <span class="set-v2-range-wrap__value" id="set-editor-font-size-value">14px</span>
-                  </div>
-                  <input type="range" class="set-v2-range" id="set-editor-font-size" min="12" max="20" step="1" value="14" />
-                  <div class="set-v2-range__markers">
-                    <span data-i18n="common.small">小</span>
-                    <span data-i18n="common.default">默认</span>
-                    <span data-i18n="common.large">大</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="set-v2-row">
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.terminalFontSize">终端/代码字号</div>
-                <div class="set-v2-row__desc" data-i18n="settings.terminalFontSize.desc">控制代码块、日志、工具参数和等宽文本。</div>
+                <div class="set-v2-row__label">终端/代码字号</div>
+                <div class="set-v2-row__desc">控制代码块、日志、工具参数和等宽文本。</div>
               </div>
               <div class="set-v2-row__control">
                 <div class="set-v2-range-wrap">
@@ -1155,81 +479,67 @@
                   </div>
                   <input type="range" class="set-v2-range" id="set-terminal-font-size" min="11" max="18" step="1" value="12" />
                   <div class="set-v2-range__markers">
-                    <span data-i18n="common.small">小</span>
-                    <span data-i18n="common.default">默认</span>
-                    <span data-i18n="common.large">大</span>
+                    <span>小</span>
+                    <span>默认</span>
+                    <span>大</span>
                   </div>
                 </div>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.fontFamily">字体</div>
-                <div class="set-v2-row__desc" data-i18n="settings.fontFamily.desc">系统已默认安装 PingFang SC / Microsoft YaHei。</div>
+                <div class="set-v2-row__label">字体</div>
+                <div class="set-v2-row__desc">系统已默认安装 PingFang SC / Microsoft YaHei。</div>
               </div>
               <div class="set-v2-row__control">
                 <select class="set-v2-select" id="set-font-family">
-                  <option value="system" data-i18n="settings.fontFamily.system">系统默认</option>
-                  <option value="noto" data-i18n="settings.fontFamily.noto">思源黑体</option>
-                  <option value="inter" data-i18n="settings.fontFamily.inter">Inter</option>
+                  <option value="system">系统默认</option>
+                  <option value="noto">思源黑体</option>
+                  <option value="inter">Inter</option>
                 </select>
               </div>
             </div>
           </div>
 
           <div class="set-v2-section">
-            <div class="set-v2-row" hidden>
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">启动时自动连接</div>
-                <div class="set-v2-row__desc">启动时自动连接 crew.gateway.server。</div>
-              </div>
-              <div class="set-v2-row__control">
-                <label class="set-v2-switch"><input type="checkbox" id="set-start-connect" checked><span class="set-v2-switch__track"></span></label>
-              </div>
-            </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.autoStart">开机自启</div>
-                <div class="set-v2-row__desc" data-i18n="settings.autoStart.desc">登录系统时自动启动 Crew。</div>
+                <div class="set-v2-row__label">开机自启</div>
+                <div class="set-v2-row__desc">登录系统时自动启动 Crew。</div>
               </div>
               <div class="set-v2-row__control">
                 <label class="set-v2-switch"><input type="checkbox" id="set-auto-start"><span class="set-v2-switch__track"></span></label>
               </div>
             </div>
+            <!--
+              ponytail: 严格安全服务尚未就绪，当前默认兼容模式并隐藏此开关。
+              上游 HTTPS 与安装校验服务就绪后再恢复。
+            -->
+            <div class="set-v2-row" hidden>
+              <div class="set-v2-row__copy">
+                <div class="set-v2-row__label">严格安全约束</div>
+                <div class="set-v2-row__desc">开启后要求安全传输与安装完整性校验；受管隔离始终保持启用。</div>
+              </div>
+              <div class="set-v2-row__control">
+                <label class="set-v2-switch"><input type="checkbox" id="set-strict-security"><span class="set-v2-switch__track"></span></label>
+              </div>
+            </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.closeBehavior">关闭窗口</div>
-                <div class="set-v2-row__desc" data-i18n="settings.closeBehavior.desc">关闭窗口时是隐藏到托盘还是直接退出。</div>
+                <div class="set-v2-row__label">关闭窗口</div>
+                <div class="set-v2-row__desc">关闭窗口时是隐藏到托盘还是直接退出。</div>
               </div>
               <div class="set-v2-row__control">
                 <select class="set-v2-select" id="set-close-behavior">
-                  <option value="tray" data-i18n="settings.closeBehavior.tray">最小化到托盘</option>
-                  <option value="quit" data-i18n="settings.closeBehavior.quit">直接退出应用</option>
-                  <option value="ask" data-i18n="settings.closeBehavior.ask">询问我</option>
+                  <option value="tray">最小化到托盘</option>
+                  <option value="quit">直接退出应用</option>
+                  <option value="ask">询问我</option>
                 </select>
               </div>
             </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.enterToSend">Enter 发送消息</div>
-                <div class="set-v2-row__desc" data-i18n="settings.enterToSend.desc">关闭后，Enter 仅换行，发送需用 Cmd/Ctrl + Enter。</div>
-              </div>
-              <div class="set-v2-row__control">
-                <label class="set-v2-switch"><input type="checkbox" id="set-enter-send" checked><span class="set-v2-switch__track"></span></label>
-              </div>
-            </div>
-            <div class="set-v2-row">
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.streaming">流式输出</div>
-                <div class="set-v2-row__desc" data-i18n="settings.streaming.desc">实时显示 Agent 输出（关闭后一次性返回）。</div>
-              </div>
-              <div class="set-v2-row__control">
-                <label class="set-v2-switch"><input type="checkbox" id="set-streaming" checked><span class="set-v2-switch__track"></span></label>
-              </div>
-            </div>
-            <div class="set-v2-row">
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.inspectorOpen">右侧检查器（默认显示）</div>
+                <div class="set-v2-row__label">右侧检查器（默认显示）</div>
                 <div class="set-v2-row__desc">对话页右侧的文件改动 / 上下文 / 计划三 Tab 面板。</div>
               </div>
               <div class="set-v2-row__control">
@@ -1239,177 +549,15 @@
           </div>
         </div>
 
-        <div class="set-v2-pane" id="settings-pane-model" hidden>
-          <div class="set-v2-pane__title">模型</div>
-          <div class="set-v2-pane__desc">管理对话模型配置并设置新会话的默认模型；当前默认：<span id="cfg-stat-active">—</span>。</div>
-          <div class="model-page-head">
-            <button type="button" class="set-v2-btn set-v2-btn--primary" id="cfg-model-add">添加模型</button>
-          </div>
-          <div id="cfg-model-list" class="conn-list" role="list"></div>
-        </div>
+        <div class="set-v2-pane" id="settings-pane-model" hidden></div>
+        <div class="set-v2-pane" id="settings-pane-channel" hidden></div>
+        <div class="set-v2-pane" id="settings-pane-mcp" hidden></div>
+        <div class="set-v2-pane" id="settings-pane-work" hidden></div>
 
-        <div class="set-v2-pane" id="settings-pane-channel" hidden>
-          <div class="set-v2-pane__title">渠道</div>
-          <div class="set-v2-pane__desc">接入消息渠道，让 Agent 跨平台响应。</div>
-          <div class="cfg-page-v3__panel active" id="config-panel-channel">
-            <div class="conn-list">
-              <article class="conn-row" data-channel="feishu" tabindex="0" role="button">
-                <div class="conn-row__icon conn-row__icon--feishu">
-                  <img src="./image/channels/feishu-icon.png" alt="" />
-                </div>
-                <div class="conn-row__copy">
-                  <div class="conn-row__name">飞书</div>
-                  <span class="conn-row__status channel-status-chip" data-channel-status>
-                    <span class="channel-status-dot"></span>
-                    <span class="channel-overview-status">未配置</span>
-                  </span>
-                </div>
-                <button type="button" class="conn-row__btn" data-channel-toggle="feishu">连接</button>
-              </article>
-              <article class="conn-row" data-channel="weixin" tabindex="0" role="button">
-                <div class="conn-row__icon conn-row__icon--weixin">
-                  <img src="./image/channels/weixin-icon.png" alt="" />
-                </div>
-                <div class="conn-row__copy">
-                  <div class="conn-row__name">微信</div>
-                  <span class="conn-row__status channel-status-chip" data-channel-status>
-                    <span class="channel-status-dot"></span>
-                    <span class="channel-overview-status">未配置</span>
-                  </span>
-                </div>
-                <button type="button" class="conn-row__btn" data-channel-toggle="weixin">连接</button>
-              </article>
-            </div>
-          </div>
-        </div>
-
-        <div class="set-v2-pane" id="settings-pane-mcp" hidden>
-          <div class="set-v2-pane__title">MCP 服务</div>
-          <div class="set-v2-pane__desc">管理 MCP Server，让 Agent 调用外部工具（搜索、文件系统、计算机操作等）。</div>
-          <div class="model-page-head">
-            <button type="button" class="set-v2-btn set-v2-btn--primary" id="mcp-server-add">添加服务</button>
-          </div>
-          <article class="conn-row cua-driver-card" id="cua-driver-card">
-            <div class="conn-row__icon cua-conn-row__icon" aria-hidden="true">🖥️</div>
-            <div class="conn-row__copy">
-              <div class="conn-row__name">Computer Use（桌面自动化）</div>
-              <div class="conn-row__desc" id="cua-driver-desc">检测中…</div>
-            </div>
-            <button type="button" class="conn-row__btn" id="cua-driver-action">一键安装</button>
-          </article>
-          <div id="cua-driver-progress" class="cua-driver-progress" hidden></div>
-          <div id="mcp-server-list" class="conn-list" role="list"></div>
-        </div>
-
-        <div class="set-v2-pane" id="settings-pane-sys-logs" hidden>
-          <div class="set-v2-pane__title">运行日志</div>
-          <div class="set-v2-pane__desc">本地服务实时日志流（环形缓冲，最近 2000 条）。支持按级别与关键词筛选。</div>          <div class="system-logs-toolbar">
-            <div class="system-logs-toolbar__left">
-              <select class="set-v2-select" id="sys-logs-level">
-                <option value="">全部级别</option>
-                <option value="DEBUG">DEBUG</option>
-                <option value="INFO">INFO</option>
-                <option value="WARNING">WARNING</option>
-                <option value="ERROR">ERROR</option>
-                <option value="CRITICAL">CRITICAL</option>
-              </select>
-              <input type="text" class="system-logs-search" id="sys-logs-keyword" placeholder="搜索日志关键词..." />
-            </div>
-            <div class="system-logs-toolbar__right">
-              <label class="system-logs-auto">
-                <input type="checkbox" id="sys-logs-auto-refresh" />
-                <span>自动刷新</span>
-              </label>
-              <span class="system-logs-count">共 <strong id="sys-logs-count">0</strong> 条</span>
-              <button type="button" class="hub-refresh-btn" id="sys-logs-refresh" title="刷新">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>
-                刷新
-              </button>
-            </div>
-          </div>
-          <div class="system-logs-card">
-            <div id="sys-logs-list" class="system-logs-feed">
-              <div class="system-logs-empty">
-                <div class="system-logs-empty__title">等待加载</div>
-                <div class="system-logs-empty__desc">打开此页时自动拉取最新日志。</div>
-              </div>
-            </div>
-          </div>
-          <div id="sys-logs-pager" class="system-logs-pager"></div>
-        </div>
-
-        <div class="set-v2-pane" id="settings-pane-sys-usage" hidden>
-          <div class="set-v2-pane__title">使用统计</div>
-          <div class="set-v2-pane__desc">Token 用量、会话与模型消耗明细。</div>
-          <div id="usage-page-root" class="usage-page-root"></div>
-        </div>
-
-        <div class="set-v2-pane" id="settings-pane-library" hidden>
-          <div class="set-v2-pane__title">项目与会话</div>
-          <div class="set-v2-pane__desc">管理本地项目空间与已归档对话；点击归档会话可预览历史。</div>
-          <div class="settings-library-accordion" id="settings-library-accordion">
-            <section class="library-accordion-item is-open" data-library-section="projects">
-              <button type="button" class="library-accordion-header" data-library-toggle="projects" aria-expanded="true">
-                <span class="library-accordion-header__icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
-                </span>
-                <span class="library-accordion-header__copy">
-                  <span class="library-accordion-header__title">项目空间</span>
-                  <span class="library-accordion-header__desc">已注册的本地工作目录</span>
-                </span>
-                <span class="library-accordion-header__count" id="settings-library-projects-count">0</span>
-                <svg class="library-accordion-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-              </button>
-              <div class="library-accordion-panel" data-library-panel="projects">
-                <div id="settings-library-projects" class="library-accordion-panel__inner"></div>
-              </div>
-            </section>
-            <section class="library-accordion-item is-open" data-library-section="sessions">
-              <button type="button" class="library-accordion-header" data-library-toggle="sessions" aria-expanded="true">
-                <span class="library-accordion-header__icon library-accordion-header__icon--sessions" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                </span>
-                <span class="library-accordion-header__copy">
-                  <span class="library-accordion-header__title">归档会话</span>
-                  <span class="library-accordion-header__desc">已隐藏的主列表对话，点击卡片预览</span>
-                </span>
-                <span class="library-accordion-header__count" id="settings-library-sessions-count">0</span>
-                <svg class="library-accordion-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-              </button>
-              <div class="library-accordion-panel" data-library-panel="sessions">
-                <div id="settings-library-sessions" class="library-accordion-panel__inner"></div>
-              </div>
-            </section>
-          </div>
-        </div>
-
-        <div class="set-v2-pane" id="settings-pane-data" hidden>
-          <div class="set-v2-pane__title" data-i18n="settings.data.title">数据管理</div>
-          <div class="set-v2-pane__desc" data-i18n="settings.data.desc">清除缓存、导出/导入工作空间与会话。</div>
-          <div class="set-v2-section">
-            <div class="set-v2-row">
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.clearCache.label">清除缓存</div>
-                <div class="set-v2-row__desc" data-i18n="settings.clearCache.desc">清空本地草稿与未发送的附件。</div>
-              </div>
-              <div class="set-v2-row__control"><button class="set-v2-btn" type="button" id="set-clear-cache" data-i18n="settings.clearCache.btn">清除</button></div>
-            </div>
-            <div class="set-v2-row">
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.exportSessions.label">导出全部会话</div>
-                <div class="set-v2-row__desc" data-i18n="settings.exportSessions.desc">导出所有会话的元数据与完整消息正文（JSON，可能较慢）。</div>
-              </div>
-              <div class="set-v2-row__control"><button class="set-v2-btn" type="button" id="set-export-sessions" data-i18n="settings.exportSessions">导出</button></div>
-            </div>
-            <div class="set-v2-row">
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label" data-i18n="settings.resetAll.label">重置全部设置</div>
-                <div class="set-v2-row__desc" data-i18n="settings.resetAll.desc">恢复默认设置，会话与登录态保持不变。</div>
-              </div>
-              <div class="set-v2-row__control"><button class="set-v2-btn set-v2-btn--danger" type="button" id="set-reset-all" data-i18n="settings.resetAll.btn">重置</button></div>
-            </div>
-          </div>
-        </div>
+        <div class="set-v2-pane" id="settings-pane-sys-logs" hidden></div>
+        <div class="set-v2-pane" id="settings-pane-sys-usage" hidden></div>
+        <div class="set-v2-pane" id="settings-pane-library" hidden></div>
+        <div class="set-v2-pane" id="settings-pane-data" hidden></div>
 
         <div class="set-v2-pane" id="settings-pane-about" hidden>
           <div class="set-v2-pane__title">关于我们</div>
@@ -1424,9 +572,21 @@
               </div>
               <div class="set-v2-about__actions">
                 <button type="button" class="set-v2-btn set-v2-btn--primary" id="set-check-update">更新</button>
+                <button type="button" class="set-v2-btn" id="set-view-changelog">版本日志</button>
               </div>
             </div>
             <div class="set-v2-link-list">
+              <a class="set-v2-link-item" href="#" id="set-link-official">
+                <span class="set-v2-link-item__left">
+                  <span class="set-v2-link-item__icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                  </span>
+                  <span>进入官网</span>
+                </span>
+                <span class="set-v2-link-item__arrow">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+                </span>
+              </a>
               <a class="set-v2-link-item" href="#" id="set-link-docs">
                 <span class="set-v2-link-item__left">
                   <span class="set-v2-link-item__icon">
@@ -1438,12 +598,45 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
                 </span>
               </a>
+              <a class="set-v2-link-item" href="#" id="set-link-contact" hidden>
+                <span class="set-v2-link-item__left">
+                  <span class="set-v2-link-item__icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><path d="m22 6-10 7L2 6"/></svg>
+                  </span>
+                  <span>联系我们</span>
+                </span>
+                <span class="set-v2-link-item__arrow">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+                </span>
+              </a>
             </div>
           </div>
         </div>
+  </div>
+
+  <!-- 登录墙：email/remote 模式下未登录时显示，覆盖全部 UI -->
+  <div id="login-modal" class="login-modal" hidden role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <div class="login-modal__card">
+      <div class="login-modal__header">
+        <h2 id="login-title" class="login-modal__title">登录 Ace</h2>
+        <button type="button" id="login-quit" class="login-modal__quit" aria-label="退出应用">×</button>
       </div>
-      <button class="modal-close" id="settings-modal-close" type="button" aria-label="关闭" style="position:absolute;top:18px;right:20px;width:32px;height:32px;border-radius:8px;border:none;background:transparent;color:var(--text-muted);font-size:22px;line-height:1;cursor:pointer;transition:all .15s ease;">×</button>
+      <div class="login-modal__body">
+        <div id="login-message" class="login-message" hidden></div>
+        <div class="login-modal__field">
+          <label id="login-identifier-label" class="login-modal__label" for="login-phone">手机号</label>
+          <input id="login-phone" class="login-modal__input" type="tel" autocomplete="tel" placeholder="请输入手机号" maxlength="32" />
+        </div>
+        <div id="login-code-group" class="login-modal__field login-modal__code-row">
+          <input id="login-code" class="login-modal__input" type="text" autocomplete="one-time-code" placeholder="验证码" maxlength="8" />
+          <button type="button" id="login-get-code" class="login-modal__code-btn">获取验证码</button>
+        </div>
+        <button type="button" id="login-submit" class="login-modal__submit">登录</button>
+      </div>
     </div>
+  </div>
+
+    <div id="renderer-overlay-host" aria-label="应用浮层"></div>
   </div>
 
   <script type="module" src="./renderer.js"></script>

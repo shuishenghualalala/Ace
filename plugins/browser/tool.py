@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from crew.browser.driver import BrowserDriverError
-from crew.browser.manager import BrowserManager
+from crew.browser.manager import DEFERRED_OBSERVATION_NOTE, BrowserManager
 from crew.core.runctx import (
     current_agent_workdir,
     current_model_capabilities,
@@ -24,6 +24,7 @@ from crew.core.runctx import (
 )
 from crew.core.types import ToolPermissionDecision
 from crew.state.plugin_preferences import plugin_effective_enabled, plugin_role_allowed
+from crew.tools.security_guard import authorize_file_tool
 
 PLUGIN_KEY = "browser"
 TOOL_NAME = "browser_use"
@@ -124,7 +125,33 @@ _ACTION_LOGICAL: dict[str, tuple[str, str | None]] = {
     "dialog_dismiss": ("browser_dialog", "dismiss"),
     "takeover": ("browser_takeover", "takeover"),
     "pause": ("browser_takeover", "pause"),
+    "batch": ("browser_batch", None),
 }
+
+# batch 步骤只允许「同一页面内的元素级动作」：它们的 ref 全部来自当前最新
+# snapshot，执行中间不重新观察（每次 snapshot 换代会重铸 ref），末步统一观察。
+# 跨页导航/标签页/上传下载/坐标鼠标/截图观察类动作各有独立语义，不放进来。
+_BATCHABLE_ACTIONS = frozenset(
+    {
+        "click",
+        "drag",
+        "type",
+        "fill_form",
+        "select",
+        "check",
+        "hover",
+        "scroll",
+        "press",
+        "keydown",
+        "keyup",
+        "wait",
+        "find",
+    }
+)
+# 单批步数上限：够覆盖表单+多步操作流，又不至于让一次调用变成失控脚本。
+_BATCH_MAX_STEPS = 20
+# 中间步骤结果压缩到这个长度以内（find 的命中上下文等小结果保留原文）。
+_BATCH_STEP_RESULT_LIMIT = 300
 
 
 def _action_variant(action: str, *required: str) -> dict[str, Any]:
@@ -263,6 +290,7 @@ _ACTION_VARIANTS: list[dict[str, Any]] = [
     _action_variant("dialog_dismiss"),
     _action_variant("takeover"),
     _action_variant("pause"),
+    _action_variant("batch", "steps"),
 ]
 
 BROWSER_USE_SCHEMA: dict[str, Any] = {
@@ -278,6 +306,10 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
         "type 必须同时传 ref 和 text；press 的 ref 可选，不传时作用于页面当前焦点。"
         "搜索请一步到位：type 时带 submit=true（在输入框 ref 上填词并回车提交），"
         "不要拆成 type 再单独 click 搜索按钮或 press Enter——那样中间页面易变、旧 ref 会失效。"
+        "同一页面内一串可预期的连续操作（连点、填写、勾选、滚动、按键等），"
+        "优先用 batch 一次下发：steps 里每步是一个完整动作对象，中间不重新观察、"
+        "全部 ref 必须来自同一个最新 snapshot，执行完返回一次最新 snapshot；"
+        "比逐步调用快得多。涉及跨页导航或需要根据上一步结果决定的动作不要用 batch。"
         "fill_form 接受任意数量的 textbox/combobox/checkbox/radio/slider typed fields，"
         "先全量预检再依次执行，绝不自动提交；"
         "navigate/click/drag/mouse_click/mouse_drag/drop/type/fill_form/"
@@ -661,6 +693,27 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
                 ),
             },
             "full": {"type": "boolean", "default": False, "description": "snapshot 取完整快照"},
+            "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {"type": "object"},
+                "description": (
+                    "batch 必填：按顺序执行的步骤，每步是一个完整的 browser_use 参数对象"
+                    "（含自己的 action 及参数）。仅支持同页面元素级动作：click/drag/type/"
+                    "fill_form/select/check/hover/scroll/press/keydown/keyup/wait/find；"
+                    "所有 ref 必须来自同一个最新 snapshot，中间步骤不重新观察页面，"
+                    "末步执行后返回一次最新 snapshot。"
+                ),
+            },
+            "stop_on_error": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "batch 专用：任一步失败即中止并报告断点（默认）；"
+                    "false 则继续执行后续步骤，结果里给出每步状态"
+                ),
+            },
         },
         "required": ["action"],
         "oneOf": _ACTION_VARIANTS,
@@ -691,7 +744,53 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "vision": ("question",),
     "network_request": ("index",),
     "evaluate": ("function",),
+    "batch": ("steps",),
 }
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…（已截断）"
+
+
+def _batch_step_summary(result: Any) -> str:
+    """中间步骤结果压缩成一行：snapshot/观察类载荷不随批量结果回传。"""
+    if not isinstance(result, str):
+        return "ok"
+    if result == DEFERRED_OBSERVATION_NOTE or result.startswith(_FRESH_SNAPSHOT_PREFIX):
+        # 正常路径下中间步结果是 DEFERRED_OBSERVATION_NOTE；snapshot 前缀是防御分支。
+        return "ok"
+    # find 命中上下文等小结果保留（截断），模型可据此判断后续步骤。
+    return f"ok - {_truncate_text(result, _BATCH_STEP_RESULT_LIMIT)}"
+
+
+def _validate_batch_args(args: dict[str, Any]) -> str | None:
+    """batch 的逐步校验：白名单 + 每步递归走 validate_args 的完整条件校验。"""
+    steps = args.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return "browser_use batch 的 steps 必须是非空数组"
+    if len(steps) > _BATCH_MAX_STEPS:
+        return f"browser_use batch 单批最多 {_BATCH_MAX_STEPS} 步"
+    if "stop_on_error" in args and type(args.get("stop_on_error")) is not bool:
+        return "browser_use batch 的 stop_on_error 必须是 boolean"
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            return f"browser_use batch 第 {index + 1} 步必须是 object"
+        step_action = str(step.get("action") or "")
+        if step_action == "batch":
+            return "browser_use batch 不支持嵌套 batch"
+        if step_action not in _BATCHABLE_ACTIONS:
+            return (
+                f"browser_use batch 第 {index + 1} 步动作 "
+                f"{step_action or '<missing>'} 不可批量：仅支持 "
+                f"{'/'.join(sorted(_BATCHABLE_ACTIONS))}"
+                "；跨页导航、上传下载、坐标鼠标、截图观察类动作请单独调用"
+            )
+        invalid = validate_args(step)
+        if invalid:
+            return f"browser_use batch 第 {index + 1} 步参数无效：{invalid}"
+    return None
 
 
 def validate_args(args: dict[str, Any]) -> str | None:
@@ -717,6 +816,8 @@ def validate_args(args: dict[str, Any]) -> str | None:
             or (value == "" and field != "text")
         ):
             return f"browser_use {action} 缺少必填参数: {field}"
+    if action == "batch":
+        return _validate_batch_args(args)
     if action == "type":
         text = args.get("text")
         if not isinstance(text, str):
@@ -1021,10 +1122,30 @@ def _logical_call(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 class BrowserUseTool:
     """持有 BrowserManager 与能力判定依赖，向 PluginContext 注册单一 browser_use。"""
 
-    def __init__(self, manager: BrowserManager, config: Any, plugin_prefs: Any) -> None:
+    def __init__(
+        self,
+        manager: BrowserManager,
+        config: Any,
+        plugin_prefs: Any,
+        services: dict[str, Any] | None = None,
+    ) -> None:
         self._manager = manager
         self._config = config
         self._plugin_prefs = plugin_prefs
+        self._services = services if services is not None else {}
+
+    async def _authorized_upload_paths(self, paths: list[Any]) -> list[str]:
+        authorized: list[str] = []
+        for raw_path in paths:
+            target = await authorize_file_tool(
+                {"path": str(raw_path)},
+                operation="read",
+                tool_name="browser_upload",
+                workspace_store=self._services.get("workspace_store"),
+                security_service=self._services.get("security_service"),
+            )
+            authorized.append(str(target))
+        return authorized
 
     # ---- 能力判定 ----
 
@@ -1097,6 +1218,18 @@ class BrowserUseTool:
         # 检查点中断或返回 uncertain，绝不自动重试。
         generation = self._manager.capability_generation(owner)
         action = str(args.get("action") or "")
+        if action in {"upload", "drop"} and args.get("paths"):
+            args = dict(args)
+            args["paths"] = await self._authorized_upload_paths(list(args["paths"]))
+        if action == "batch":
+            # 批量步进不进下方 dispatch 表（表按单步参数构建）；lease/能力复查与
+            # 单步一致，步骤循环由 _run_batch 负责。
+            with self._manager.capability_lease(owner, generation):
+                denied = self._check_capability()
+                if denied:
+                    raise BrowserDriverError(denied)
+                self._manager.ensure_capability_current(owner, generation)
+                return await self._run_batch(args, owner, session, workdir)
         dispatch: dict[str, Callable[[], Any]] = {
             "navigate": lambda: self._manager.navigate(
                 owner, session, str(args.get("url") or ""), workdir=workdir
@@ -1378,6 +1511,86 @@ class BrowserUseTool:
             self._manager.note_action_outcome(owner, session, action, ok=True)
         return self._action_result(action, result)
 
+    async def _run_batch(self, args: dict[str, Any], owner: str, session: str, workdir: str) -> Any:
+        """顺序执行批量步骤：中间步骤延后观察，末步恢复观察并回传最新 snapshot。
+
+        每步递归走 handler 单步全流程（校验/能力复查/lease/失败证据），批量层只负责
+        观察延后开关、失败断点语义和结果聚合——中间步的 snapshot 不回传（每次都换代
+        重铸 ref，逐步观察反而让后续预规划 ref 失效），最终只给一次最新观察。
+        """
+        steps = list(args.get("steps") or [])
+        stop_on_error = bool(args.get("stop_on_error", True))
+        total = len(steps)
+        lines: list[str] = []
+        final_result: Any = None
+        failed = 0
+        await self._manager.set_observation_deferred(owner, session, True)
+        try:
+            for index, step in enumerate(steps):
+                step_action = str(step.get("action") or "")
+                is_last = index == total - 1
+                if is_last:
+                    # 末步恢复正常观察：它的后置 snapshot 就是整批的最终观察。
+                    await self._manager.set_observation_deferred(owner, session, False)
+                try:
+                    result = await self.handler(step)
+                except BrowserDriverError as exc:
+                    failed += 1
+                    if stop_on_error:
+                        raise self._batch_abort_error(exc, index, total, step_action) from None
+                    lines.append(
+                        f"step {index + 1}/{total} {step_action}: failed - "
+                        f"{_truncate_text(str(exc), _BATCH_STEP_RESULT_LIMIT)}"
+                    )
+                    continue
+                if is_last:
+                    final_result = result
+                else:
+                    lines.append(
+                        f"step {index + 1}/{total} {step_action}: {_batch_step_summary(result)}"
+                    )
+        finally:
+            await self._manager.set_observation_deferred(owner, session, False)
+        status = "success" if failed == 0 else "partial"
+        head = [
+            "<browser_action_result>",
+            "action: batch",
+            f"status: {status}",
+            f"steps: {total - failed}/{total} 已完成",
+            *lines,
+        ]
+        if isinstance(final_result, str) and final_result.startswith("<browser_action_result>"):
+            # 末步是 mutation：它的信封（fresh_snapshot + 指引）连同最新 snapshot 原样附上。
+            head.append("</browser_action_result>")
+            return "\n".join(head) + "\n" + final_result
+        if final_result is not None:
+            head.append(f"final_result: {_truncate_text(str(final_result), 2000)}")
+        head.append("next: 批量步骤已执行完；如需最新页面状态请调用 snapshot。")
+        head.append("</browser_action_result>")
+        return "\n".join(head)
+
+    @staticmethod
+    def _batch_abort_error(
+        exc: BrowserDriverError, index: int, total: int, step_action: str
+    ) -> BrowserDriverError:
+        """stop_on_error 中止时的断点报告：已完成步数 + 失败步原因，禁止重放已完成步骤。"""
+        completed = index  # 前 index 步已成功
+        return BrowserDriverError(
+            "<browser_action_result>\n"
+            "action: batch\n"
+            "status: partial\n"
+            f"completed_count: {completed}\n"
+            f"failed_step: {index + 1}/{total} action={step_action}\n"
+            f"reason: {exc}\n"
+            f"next: 前 {completed} 步已生效，后续步骤未执行。不要重放已完成步骤；"
+            "根据 reason 处理失败后从断点继续。\n"
+            "</browser_action_result>",
+            code=getattr(exc, "code", ""),
+            phase=getattr(exc, "phase", ""),
+            partial=completed > 0,
+            completed_count=completed,
+        )
+
     @staticmethod
     def _evidence_block(evidence: dict[str, Any]) -> str:
         """把证据包渲染成模型可读的行。字段名保持稳定，便于模型据以判断。"""
@@ -1557,7 +1770,7 @@ def register_browser_use_tool(
     config: Any,
     plugin_prefs: Any,
 ) -> BrowserUseTool:
-    tool = BrowserUseTool(manager, config, plugin_prefs)
+    tool = BrowserUseTool(manager, config, plugin_prefs, ctx.services)
     ctx.register_tool(
         name=TOOL_NAME,
         toolset="browser",

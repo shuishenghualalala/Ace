@@ -25,15 +25,6 @@ function extractBodyText(html: string): string {
 }
 
 describe("AgentTurn", () => {
-  it("工具规划状态进入实时过程时间线", () => {
-    const html = renderHtml(
-      [{ id: "planning", role: "status", text: "正在规划工具调用…" }],
-      true,
-    );
-    expect(html).toContain("正在规划工具调用…");
-    expect(html).toContain("msg__foldable");
-  });
-
   it("单条 assistant text 渲染为正文，不进入时间线", () => {
     const messages: UiMessage[] = [
       { id: "a1", role: "assistant", text: "这是最终回复。" },
@@ -76,6 +67,26 @@ describe("AgentTurn", () => {
 
     expect(timeline).toContain("中间步骤说明。");
     expect(body).toContain("正在输出最终回复…");
+  });
+
+  it("外部 Agent 回合复用文件改动卡并禁用已删除文件", () => {
+    const html = renderHtml([{
+      id: "external-1",
+      role: "assistant",
+      text: "修改完成。",
+      turnFileChanges: [
+        { path: "/work/app.ts", name: "app.ts", added: 12, removed: 2, status: "modified" },
+        { path: "/work/old.ts", name: "old.ts", added: 0, removed: 4, status: "deleted" },
+      ],
+    }]);
+
+    expect(html).toContain("已编辑 2 个文件");
+    expect(html).toContain("app.ts");
+    expect(html).toContain("old.ts");
+    expect(html).toContain("修改");
+    expect(html).toContain("删除");
+    expect(html).toContain('data-file-status="deleted"');
+    expect(html).toContain("disabled");
   });
 
 });

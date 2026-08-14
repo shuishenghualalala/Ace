@@ -180,6 +180,10 @@ _OUTPUT_GUARD_MULTIPLIER = 20
 # 护栏的绝对下限：不论调用方传什么，低于这个量都不截断。
 _OUTPUT_GUARD_FLOOR = 600_000
 
+# 批量模式（browser_use batch）中间步骤跳过后置观察时的占位结果文本。
+# 批量调用方只用它拼每步一行的简报；最终观察由末步或显式 snapshot 提供。
+DEFERRED_OBSERVATION_NOTE = "已执行（批量中间步骤，跳过中间观察）"
+
 
 def _truncate_snapshot_at_line(text: str, limit: int) -> tuple[str, str]:
     """只在远超期望规模时按行截断，并如实报出截断原因。
@@ -343,6 +347,10 @@ class _Session:
     mode: str = "ai"
     last_action: str = ""
     last_error: str = ""
+    # 批量执行（browser_use batch）的中间步骤置 True：跳过后置 snapshot。
+    # 每次 snapshot 都会换 generation、重铸 ref——中间观察会让后续预规划步骤的
+    # ref 全部失效，所以批量模式只在末步观察一次。由 set_observation_deferred 维护。
+    defer_post_observation: bool = False
     screenshot_id: str = ""
     screenshot_host_epoch: str = ""
     screenshot_generation: int = 0
@@ -471,6 +479,18 @@ class BrowserManager:
     def capability_generation(self, owner_account_id: str) -> int:
         """该 owner 当前的 Browser 能力代次（未撤销过为 0，单调递增）。"""
         return self._capability_generations.get(str(owner_account_id or ""), 0)
+
+    async def set_observation_deferred(
+        self, owner_account_id: str, session_id: str, deferred: bool
+    ) -> None:
+        """批量执行开关：中间步骤跳过后置观察（见 _Session.defer_post_observation）。
+
+        批量调用方负责 try/finally 复位；会话级标志，不影响其它会话。
+        """
+        owner = await self._owner(owner_account_id)
+        async with owner.lock:
+            session = self._session(owner, session_id)
+            session.defer_post_observation = deferred
 
     def _bump_capability_generation(self, owner_account_id: str) -> int:
         owner_id = str(owner_account_id or "")
@@ -807,12 +827,7 @@ class BrowserManager:
                                 self._cleanup_expired_artifacts,
                                 home / "browser" / "artifacts",
                             )
-                            # The browser connects directly by default.  A
-                            # mandatory Python HTTP/1.1 proxy changed Chromium
-                            # networking semantics (HTTP/2, WebSocket, auth,
-                            # downloads and custom schemes) and made the
-                            # Playwright facade less compatible with upstream.
-                            current.initialized = True
+                            await self._start_owner_proxy(current)
                     except BaseException:
                         # Publish the tombstone before releasing current.lock.
                         # A waiter can therefore never reinitialize and return
@@ -834,16 +849,18 @@ class BrowserManager:
                 raise
 
     async def _start_owner_proxy(self, owner: _Owner) -> None:
-        """Initialize a direct-network owner.
-
-        Kept as a compatibility entry point for lifecycle code that used to
-        require a temporary policy proxy.  Existing in-memory legacy proxies
-        are closed; new owners intentionally pass an empty ``proxy_url`` so
-        Electron/Chromium retains its native networking stack.
-        """
-        if owner.proxy is not None:
-            await owner.proxy.aclose()
-            owner.proxy = None
+        """Create the authenticated DNS-pinning boundary before browser use."""
+        if not self.driver.requires_policy_proxy():
+            owner.initialized = True
+            return
+        if owner.proxy is None:
+            proxy = LoopbackPolicyProxy(self.policy)
+            try:
+                await proxy.start()
+            except BaseException:
+                await proxy.aclose()
+                raise
+            owner.proxy = proxy
         owner.initialized = True
 
     def _cleanup_expired_artifacts(self, root: Path) -> None:
@@ -1362,6 +1379,11 @@ class BrowserManager:
             if expected_dialogs
             else None
         )
+        staged_files, upload_stage = await asyncio.to_thread(
+            self._stage_approved_uploads,
+            owner,
+            files,
+        )
         try:
             download_root = self._prepare_download_dir(session, workdir)
             if wire_expected_dialogs:
@@ -1375,7 +1397,7 @@ class BrowserManager:
                     payload={
                         "trigger_selector": trigger_selector,
                         "input_selector": input_selector,
-                        "files": files,
+                        "files": staged_files,
                     },
                     timeout=timeout,
                     proxy_url=owner.proxy.url if owner.proxy else "",
@@ -1388,7 +1410,7 @@ class BrowserManager:
                     target_id=self._active_tab(session).target_id,
                     trigger_selector=trigger_selector,
                     input_selector=input_selector,
-                    files=files,
+                    files=staged_files,
                     timeout=timeout,
                     proxy_url=owner.proxy.url if owner.proxy else "",
                     download_dir=download_root,
@@ -1403,6 +1425,12 @@ class BrowserManager:
         except BrowserOperationCancelled as exc:
             await self._apply_driver_lifecycle_failure(owner, session, exc)
             raise
+        finally:
+            await asyncio.to_thread(
+                self._cleanup_approved_upload_stage,
+                upload_stage,
+                owner.profile_dir.parent / "approved-uploads",
+            )
 
     def _new_tab(self, session: _Session) -> _Tab:
         session.counter += 1
@@ -3156,6 +3184,13 @@ class BrowserManager:
         *,
         workdir: str,
     ) -> str:
+        if session.defer_post_observation:
+            # 批量中间步骤：不重新 snapshot（换代会让后续预规划 ref 全部失效）。
+            # 仍做一次 _select 对齐弹窗/活动标签页；坐标截图随页面变化失效照旧。
+            # 对话框等待等异常会推迟到下一个动作或末步观察时暴露，不会丢。
+            await self._select(owner, session)
+            self._clear_screenshot(session)
+            return DEFERRED_OBSERVATION_NOTE
         try:
             # Navigation/click/input events can synchronously open and activate
             # an unlabeled popup. Reconcile against native tab state before any
@@ -8915,6 +8950,134 @@ class BrowserManager:
         return resolved
 
     @staticmethod
+    def _is_reparse_point(info: os.stat_result) -> bool:
+        """Return whether a Windows entry is a junction or other reparse point."""
+        attributes = int(getattr(info, "st_file_attributes", 0) or 0)
+        marker = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0) or 0)
+        return bool(marker and attributes & marker)
+
+    def _stage_approved_uploads(
+        self,
+        owner: _Owner,
+        paths: list[str],
+    ) -> tuple[list[str], Path | None]:
+        """Snapshot authorized upload inputs into the Host-owned staging root."""
+        if not paths:
+            return [], None
+
+        approved_root = owner.profile_dir.parent / "approved-uploads"
+        approved_root.mkdir(parents=True, exist_ok=True)
+        try:
+            root = approved_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise BrowserDriverError("无法创建浏览器上传审批暂存目录") from exc
+        if root != approved_root.absolute() or root.is_symlink():
+            raise BrowserDriverError("浏览器上传审批暂存目录不安全")
+
+        stage = root / uuid.uuid4().hex
+        try:
+            stage.mkdir(mode=0o700)
+        except OSError as exc:
+            raise BrowserDriverError("无法创建浏览器上传暂存区") from exc
+
+        limit = int(getattr(self.config, "max_transfer_bytes", 0) or 0)
+        copied_bytes = 0
+        copied_entries = 0
+
+        def reserve(info: os.stat_result) -> None:
+            nonlocal copied_bytes, copied_entries
+            copied_entries += 1
+            if copied_entries > 10_000:
+                raise BrowserDriverError("上传目录包含过多文件")
+            copied_bytes += max(0, int(info.st_size))
+            if limit > 0 and copied_bytes > limit:
+                raise BrowserDriverError(
+                    f"上传内容超过 {limit} 字节传输上限；请缩小范围后重试",
+                    code="transfer_too_large",
+                )
+
+        def copy_file(source: Path, destination: Path, info: os.stat_result) -> None:
+            if not stat.S_ISREG(info.st_mode) or self._is_reparse_point(info):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            reserve(info)
+            flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+            flags |= int(getattr(os, "O_NOFOLLOW", 0))
+            try:
+                descriptor = os.open(source, flags)
+                with os.fdopen(descriptor, "rb", closefd=True) as reader:
+                    opened = os.fstat(reader.fileno())
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or self._is_reparse_point(opened)
+                        or (
+                            getattr(info, "st_ino", 0)
+                            and getattr(opened, "st_ino", 0)
+                            and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)
+                        )
+                    ):
+                        raise BrowserDriverError("上传文件在审批后发生变化")
+                    with destination.open("xb") as writer:
+                        shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                    finished = os.fstat(reader.fileno())
+                    if (
+                        opened.st_size != finished.st_size
+                        or opened.st_mtime_ns != finished.st_mtime_ns
+                    ):
+                        raise BrowserDriverError("上传文件在复制期间发生变化")
+            except BrowserDriverError:
+                raise
+            except OSError as exc:
+                raise BrowserDriverError("上传文件无法安全读取") from exc
+
+        def copy_entry(source: Path, destination: Path) -> None:
+            try:
+                info = source.lstat()
+            except OSError as exc:
+                raise BrowserDriverError("上传文件不存在或不可读取") from exc
+            if stat.S_ISLNK(info.st_mode) or self._is_reparse_point(info):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            if stat.S_ISREG(info.st_mode):
+                copy_file(source, destination, info)
+                return
+            if not stat.S_ISDIR(info.st_mode):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            destination.mkdir(mode=0o700)
+            try:
+                children = sorted(source.iterdir(), key=lambda item: item.name)
+            except OSError as exc:
+                raise BrowserDriverError("上传目录无法读取") from exc
+            for child in children:
+                copy_entry(child, destination / child.name)
+
+        staged: list[str] = []
+        try:
+            for index, raw in enumerate(paths):
+                source = Path(raw)
+                # Indexing prevents duplicate basenames from colliding while the
+                # original basename remains visible to the browser upload API.
+                destination = stage / f"{index:03d}" / source.name
+                destination.parent.mkdir(mode=0o700)
+                copy_entry(source, destination)
+                staged.append(str(destination))
+            return staged, stage
+        except BaseException:
+            self._cleanup_approved_upload_stage(stage, root)
+            raise
+
+    @staticmethod
+    def _cleanup_approved_upload_stage(stage: Path | None, approved_root: Path) -> None:
+        if stage is None:
+            return
+        try:
+            root = approved_root.resolve(strict=True)
+            candidate = stage.resolve(strict=True)
+            if candidate.parent != root or not re.fullmatch(r"[0-9a-f]{32}", candidate.name):
+                return
+            shutil.rmtree(candidate)
+        except OSError:
+            log.warning("failed to clean browser upload staging directory: %s", stage)
+
+    @staticmethod
     def _validated_drop_data(data: Any) -> dict[str, str] | None:
         if data is None:
             return None
@@ -8960,31 +9123,43 @@ class BrowserManager:
             session = self._session(owner, session_id)
             self._require_ai(owner, session)
             native = self._native_ref(session, ref)
-            drop_args = [native]
-            for path in resolved:
-                drop_args.extend(["--path", path])
-            if checked_data is not None:
-                if checked_data:
-                    for mime, value in checked_data.items():
-                        drop_args.extend(["--data", mime, value])
-                else:
-                    # The argv wire otherwise cannot distinguish official
-                    # ``data: {}`` from an entirely absent payload.
-                    drop_args.append("--empty-data")
-            await self._run(
+            staged, upload_stage = await asyncio.to_thread(
+                self._stage_approved_uploads,
                 owner,
-                session,
-                "drop",
-                drop_args,
-                mutating=True,
-                workdir=workdir,
+                resolved,
             )
-            session.last_action = f"拖放到 {ref}"
-            return await self._observe_after_mutation(
-                owner,
-                session,
-                workdir=workdir,
-            )
+            try:
+                drop_args = [native]
+                for path in staged:
+                    drop_args.extend(["--path", path])
+                if checked_data is not None:
+                    if checked_data:
+                        for mime, value in checked_data.items():
+                            drop_args.extend(["--data", mime, value])
+                    else:
+                        # The argv wire otherwise cannot distinguish official
+                        # ``data: {}`` from an entirely absent payload.
+                        drop_args.append("--empty-data")
+                await self._run(
+                    owner,
+                    session,
+                    "drop",
+                    drop_args,
+                    mutating=True,
+                    workdir=workdir,
+                )
+                session.last_action = f"拖放到 {ref}"
+                return await self._observe_after_mutation(
+                    owner,
+                    session,
+                    workdir=workdir,
+                )
+            finally:
+                await asyncio.to_thread(
+                    self._cleanup_approved_upload_stage,
+                    upload_stage,
+                    owner.profile_dir.parent / "approved-uploads",
+                )
 
     async def upload(
         self, owner_id: str, session_id: str, ref: str, paths: list[str], *, workdir: str = ""
@@ -8999,31 +9174,43 @@ class BrowserManager:
             session = self._session(owner, session_id)
             self._require_ai(owner, session)
             await self._select_checked(owner, session, workdir=workdir)
-            if ref:
-                native = self._native_ref(session, ref)
-                await self._run(
-                    owner,
-                    session,
-                    "upload",
-                    [native, *resolved],
-                    mutating=True,
-                    workdir=workdir,
-                )
-            else:
-                await self._run(
-                    owner,
-                    session,
-                    "file_upload",
-                    resolved if resolved else ["--cancel"],
-                    mutating=True,
-                    workdir=workdir,
-                )
-            session.last_action = (
-                f"上传 {len(resolved)} 个文件"
-                if resolved
-                else ("清空文件输入" if ref else "取消文件选择")
+            staged, upload_stage = await asyncio.to_thread(
+                self._stage_approved_uploads,
+                owner,
+                resolved,
             )
-            return await self._observe_after_mutation(owner, session, workdir=workdir)
+            try:
+                if ref:
+                    native = self._native_ref(session, ref)
+                    await self._run(
+                        owner,
+                        session,
+                        "upload",
+                        [native, *staged],
+                        mutating=True,
+                        workdir=workdir,
+                    )
+                else:
+                    await self._run(
+                        owner,
+                        session,
+                        "file_upload",
+                        staged if staged else ["--cancel"],
+                        mutating=True,
+                        workdir=workdir,
+                    )
+                session.last_action = (
+                    f"上传 {len(resolved)} 个文件"
+                    if resolved
+                    else ("清空文件输入" if ref else "取消文件选择")
+                )
+                return await self._observe_after_mutation(owner, session, workdir=workdir)
+            finally:
+                await asyncio.to_thread(
+                    self._cleanup_approved_upload_stage,
+                    upload_stage,
+                    owner.profile_dir.parent / "approved-uploads",
+                )
 
     async def download(
         self, owner_id: str, session_id: str, ref: str, filename: str = "", *, workdir: str = ""
@@ -9399,6 +9586,7 @@ class BrowserManager:
     ) -> str:
         async with owner.lock:
             session = self._session(owner, session_id)
+            previous_mode = session.mode
             if not trusted_user:
                 self._require_model_control(owner, session)
             elif action in {"takeover", "return", "pause"}:
@@ -9457,6 +9645,16 @@ class BrowserManager:
                 owner.owner,
                 session.session_id,
                 {"type": "state", "state": self._page_state(owner, session).public_dict()},
+            )
+            # 接管来源排查口：白屏误触与真实手势都会走到这里，日志里必须能
+            # 区分是谁（trusted_user=用户 UI / 否则为模型）把模式切走的。
+            log.info(
+                "browser control mode changed: session=%s %s -> %s (action=%s, trusted_user=%s)",
+                session_id,
+                previous_mode,
+                session.mode,
+                action,
+                trusted_user,
             )
             return _bounded(
                 {

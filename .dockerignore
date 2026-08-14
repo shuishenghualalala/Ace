@@ -11,6 +11,7 @@ build/
 dist/
 .pytest_cache/
 crew_data/
+security-runtime/bin/
 uv.lock
 verify_cython_protection.py
 
@@ -23,6 +24,7 @@ web/dist/
 desktop/node_modules/
 desktop/dist/
 desktop/release/
+desktop/security-runtime-bin/
 
 # .deb 构建产物
 *.deb
@@ -38,6 +40,7 @@ CLAUDE.md
 .Crew/
 .*Work/
 .crew/
+.codex-quarantine/
 .git-commands.md
 
 # 环境与系统（真实 .env 永不进入构建上下文；.env.example 仍会保留）
@@ -53,6 +56,7 @@ config/config.yaml
 
 # 文档与测试（构建不需要）
 docs/
+design/
 tests/
 TODO/
 scripts/

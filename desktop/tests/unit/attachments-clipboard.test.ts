@@ -68,10 +68,10 @@ describe('clipboard attachment binding', () => {
     vi.restoreAllMocks();
     __resetAllStoresForTest();
     document.body.innerHTML = `
-      <div id="chat-input-container">
-        <textarea id="chat-input"></textarea>
+      <div class="chat-input-container">
+        <textarea data-composer-input></textarea>
       </div>
-      <div id="chat-attachment-preview"></div>
+      <div data-attachment-preview></div>
     `;
   });
 
@@ -98,7 +98,7 @@ describe('clipboard attachment binding', () => {
     Object.defineProperty(paste, 'clipboardData', {
       value: clipboardSource([fromFiles], [fromItems]),
     });
-    document.getElementById('chat-input')?.dispatchEvent(paste);
+    document.querySelector('[data-composer-input]')?.dispatchEvent(paste);
 
     await vi.waitFor(() => expect(upload).toHaveBeenCalledOnce());
     expect(upload).toHaveBeenCalledWith('image.png', expect.any(String));

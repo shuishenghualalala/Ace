@@ -1,0 +1,334 @@
+/* Work 办公助手外壳：历史侧栏、页面槽、来源标识。白色简约系，沿用 tokens。 */
+
+.mw-work-context {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--mw-space-3);
+  overflow-y: auto;
+}
+
+.mw-work-overview {
+  width: calc(100% - 48px);
+  min-width: 0;
+  height: 100%;
+  box-sizing: border-box;
+  margin: auto;
+  /* 顶部顶头：问候语紧贴工作区顶；只在底部留翻页余量。 */
+  padding-block: 0 var(--mw-space-5);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+#chat-tab.work-overview-active .mw-work-overview {
+  grid-row: 1;
+  grid-column: 1;
+}
+
+/*
+ * 事项会话态 grid：item-context 占 row 1，chat-panel 占 row 2，composer/disclaimer 顺延。
+ * 选择器刻意带上 .tab-pane.active.chat-mode 以提升优先级，压过 layouts.css 的
+ * `.tab-pane#chat-tab.active.chat-mode` 基础规则（容器 (1,3,0) / 子元素 (2,3,0)）。
+ * 否则 4 行 grid 不生效，item-context 与 chat-panel 同落 row 1 重叠，「事项详情」按钮
+ * 会被拉伸到满高、贴到右侧。详见 docs/frontend/work-mode-panel.html 的 detail-head 约束。
+ */
+.tab-pane#chat-tab.active.chat-mode.work-item-active {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+}
+
+.tab-pane#chat-tab.active.chat-mode.work-item-active .mw-work-item-context {
+  grid-row: 1;
+}
+
+.tab-pane#chat-tab.active.chat-mode.work-item-active #chat-panel {
+  grid-row: 2;
+}
+
+.tab-pane#chat-tab.active.chat-mode.work-item-active .chat-composer {
+  grid-row: 3;
+}
+
+.tab-pane#chat-tab.active.chat-mode.work-item-active .chat-disclaimer {
+  grid-row: 4;
+}
+
+.mw-work-knowledge-context {
+  display: grid;
+  align-content: start;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-3) var(--mw-space-2);
+}
+
+.mw-work-knowledge-context__search {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding-inline: var(--mw-space-3);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+  font: inherit;
+}
+
+.mw-work-knowledge-context__item {
+  min-height: 38px;
+  padding-inline: var(--mw-space-3);
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mw-work-knowledge-context__item:hover,
+.mw-work-knowledge-context__item[aria-current='page'] {
+  background: var(--mw-bg-selected);
+}
+
+/*
+ * Work 历史侧栏：视觉语言对齐 mw-session-history（通用助手），保证跨模式体感一致。
+ * 仅 work 作用域类，复用三层 Token；行样式参考 session-history.css 的 __row（强调条 +
+ * compact 字号 + hover/selected 过渡）。信息结构（事项按日期分组 + 对话分区）保留 Work 特有。
+ */
+.mw-work-history {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: var(--mw-space-3);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+}
+
+.mw-work-history__actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.mw-work-history__create {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+  cursor: pointer;
+}
+
+.mw-work-history__create:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.mw-work-history__search {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--mw-space-2);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+  font: inherit;
+}
+
+.mw-work-history__search:hover {
+  border-color: var(--mw-border-strong);
+}
+
+.mw-work-history__search:focus {
+  border-color: var(--mw-focus-ring);
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: 1px;
+}
+
+.mw-work-history__list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.mw-work-history__item-section,
+.mw-work-history__conversation-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mw-space-1);
+}
+
+.mw-work-history__group {
+  display: grid;
+  gap: var(--mw-space-1);
+}
+
+.mw-work-history__group-summary {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-1) var(--mw-space-2);
+  border-radius: var(--mw-radius-2);
+  color: var(--mw-text-secondary);
+  cursor: pointer;
+  font-size: var(--mw-type-label-size);
+  font-weight: var(--mw-type-label-weight);
+  list-style: none;
+}
+
+.mw-work-history__group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.mw-work-history__group-summary::before {
+  width: 12px;
+  color: var(--mw-text-muted);
+  content: '›';
+  font-size: var(--mw-font-xl);
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: var(--mw-transition-interactive);
+}
+
+.mw-work-history__group[open] > .mw-work-history__group-summary::before {
+  transform: rotate(90deg);
+}
+
+.mw-work-history__group-summary:hover {
+  background: var(--mw-bg-subtle);
+}
+
+.mw-work-history__group-count {
+  margin-inline-start: auto;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  font-weight: var(--mw-type-compact-weight);
+}
+
+.mw-work-history__conversation-section {
+  margin-top: var(--mw-space-3);
+  padding-top: var(--mw-space-3);
+  border-top: 1px solid var(--mw-border-subtle);
+}
+
+.mw-work-history__section-title {
+  margin: 0;
+  padding: var(--mw-space-2) var(--mw-space-2) var(--mw-space-1);
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  font-weight: var(--mw-type-label-weight);
+}
+
+.mw-work-history__row {
+  position: relative;
+  display: grid;
+  width: 100%;
+  min-height: 30px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--mw-space-2);
+  padding: 0 var(--mw-space-2);
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    var(--mw-transition-interactive);
+}
+
+/* 左侧强调条：选中时亮起主色，与 mw-session-history__row::before 一致。 */
+.mw-work-history__row::before {
+  position: absolute;
+  inset: var(--mw-space-2) auto var(--mw-space-2) 0;
+  width: 3px;
+  border-radius: var(--mw-radius-full);
+  background: transparent;
+  content: '';
+}
+
+.mw-work-history__row:hover {
+  background: var(--mw-bg-subtle);
+}
+
+.mw-work-history__row[data-active='true'] {
+  background: var(--mw-bg-selected);
+  color: var(--mw-text-selected);
+}
+
+.mw-work-history__row[data-active='true']::before {
+  background: var(--mw-action-primary);
+}
+
+.mw-work-history__row[data-read-only='true'] {
+  color: var(--mw-text-secondary);
+}
+
+.mw-work-history__icon {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: var(--mw-text-secondary);
+}
+
+.mw-work-history__title {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: var(--mw-type-compact-size);
+  font-weight: var(--mw-type-compact-weight);
+  line-height: var(--mw-type-compact-line);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* kind 作为内联 muted 身份标签，与 mw-session-history__identity 一致，不再做突兀的徽标。 */
+.mw-work-history__kind {
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  line-height: var(--mw-type-caption-line);
+  font-weight: var(--mw-type-label-weight);
+  background: transparent;
+  padding: 0;
+}
+
+.mw-work-history__empty {
+  margin: 0;
+  padding: var(--mw-space-4) var(--mw-space-2);
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-label-size);
+  text-align: center;
+}
+
+.mw-work-page {
+  padding: var(--mw-space-6) var(--mw-space-8);
+  overflow-y: auto;
+}
+
+.mw-work-page__heading {
+  margin: 0 0 var(--mw-space-4);
+  font-size: var(--mw-type-section-size);
+  font-weight: var(--mw-type-section-weight);
+  color: var(--mw-text-primary);
+}
+
+@media (max-width: 960px) {
+  .mw-work-overview {
+    width: min(100% - 24px, 760px);
+  }
+}

@@ -566,13 +566,22 @@ class FeishuChannel(Channel):
         await asyncio.to_thread(self._send_sync, parsed, "text", proto.reply_content(text), True)
 
     async def _send_file(self, parsed: dict[str, Any], path: str) -> None:
+        from crew.tools.security_guard import authorize_file_tool
+
+        approved_path = await authorize_file_tool(
+            {"path": path},
+            operation="read",
+            tool_name="feishu_send_file",
+            workspace_store=getattr(self._app, "workspace_store", None),
+            security_service=getattr(self._app, "security_service", None),
+        )
         if proto.is_image_file(path):
-            key = await filemod.upload_image(self._client, path)
+            key = await filemod.upload_image(self._client, str(approved_path))
             if key:
                 await asyncio.to_thread(self._send_sync, parsed, "image",
                                         json.dumps({"image_key": key}), True)
         else:
-            key = await filemod.upload_file(self._client, path)
+            key = await filemod.upload_file(self._client, str(approved_path))
             if key:
                 await asyncio.to_thread(self._send_sync, parsed, "file",
                                         json.dumps({"file_key": key}), True)

@@ -1,0 +1,209 @@
+/**
+ * Auth login wall + top-bar account trigger styles.
+ *
+ * Uses HEAD's --mw-* design tokens. The login wall is a full-screen flex
+ * overlay shown when the auth mode is email/remote and the user is not
+ * logged in. The account pane is owned by settings.css so its geometry stays unified.
+ */
+
+/* ---- Login wall overlay ---- */
+
+.login-modal {
+  position: fixed;
+  inset: 0;
+  z-index: var(--mw-z-busy);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--mw-space-6);
+  background: var(--mw-bg-overlay);
+}
+
+.login-modal[hidden] {
+  display: none;
+}
+
+.login-modal__card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--mw-bg-surface);
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-4);
+  box-shadow: var(--mw-shadow-overlay);
+  overflow: hidden;
+}
+
+.login-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--mw-space-5) var(--mw-space-5) var(--mw-space-3);
+}
+
+.login-modal__title {
+  margin: 0;
+  font-size: var(--mw-type-dialog-size);
+  line-height: var(--mw-type-dialog-line);
+  font-weight: var(--mw-type-dialog-weight);
+  color: var(--mw-text-primary);
+}
+
+.login-modal__quit {
+  -webkit-app-region: no-drag;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-font-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.login-modal__quit:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.login-modal__quit:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: -2px;
+}
+
+.login-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mw-space-4);
+  padding: 0 var(--mw-space-5) var(--mw-space-5);
+}
+
+.login-modal__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mw-space-2);
+}
+
+.login-modal__label {
+  font-size: var(--mw-type-label-size);
+  line-height: var(--mw-type-label-line);
+  font-weight: var(--mw-type-label-weight);
+  color: var(--mw-text-secondary);
+}
+
+.login-modal__input {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--mw-space-3);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+  font: var(--mw-type-body-size)/var(--mw-type-body-line) var(--mw-font-sans);
+}
+
+.login-modal__input:focus {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: -2px;
+  border-color: var(--mw-border-strong);
+}
+
+.login-modal__input::placeholder {
+  color: var(--mw-text-muted);
+}
+
+.login-modal__code-row {
+  flex-direction: row;
+  align-items: stretch;
+  gap: var(--mw-space-2);
+}
+
+.login-modal__code-row .login-modal__input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.login-modal__code-btn {
+  flex: 0 0 auto;
+  height: 36px;
+  padding: 0 var(--mw-space-3);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+  font: var(--mw-type-label-size)/var(--mw-type-label-line) var(--mw-font-sans);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.login-modal__code-btn:hover:not(:disabled) {
+  background: var(--mw-bg-selected);
+}
+
+.login-modal__code-btn:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: -2px;
+}
+
+.login-modal__code-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.login-modal__submit {
+  height: 38px;
+  border: 0;
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-action-primary);
+  color: var(--mw-action-primary-text);
+  font: var(--mw-type-label-weight) var(--mw-type-body-size)/var(--mw-type-body-line) var(--mw-font-sans);
+  cursor: pointer;
+}
+
+.login-modal__submit:hover:not(:disabled) {
+  background: var(--mw-action-primary-hover);
+}
+
+.login-modal__submit:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: -2px;
+}
+
+.login-modal__submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- Login message (error / success / info) ---- */
+
+.login-message {
+  padding: var(--mw-space-2) var(--mw-space-3);
+  border-radius: var(--mw-radius-3);
+  font-size: var(--mw-type-compact-size);
+  line-height: var(--mw-type-compact-line);
+}
+
+.login-message--error {
+  background: var(--mw-danger-soft);
+  color: var(--mw-danger);
+}
+
+.login-message--success {
+  background: var(--mw-success-soft);
+  color: var(--mw-success);
+}
+
+.login-message--info {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-secondary);
+}
+
+/* ---- Body auth-wall-active: lock scroll when wall is up ---- */
+
+body.auth-wall-active {
+  overflow: hidden;
+}
+

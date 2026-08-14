@@ -81,9 +81,11 @@ export function renderPagination(model: PaginationModel, opts: PaginationOptions
         </label>
       </div>
       <div class="mm-pager__nav" role="navigation" aria-label="分页">
+        <button type="button" class="mm-pager__btn" data-${prefix}-page="first"${page <= 1 ? ' disabled' : ''} aria-label="首页" title="首页">&laquo;</button>
         <button type="button" class="mm-pager__btn" data-${prefix}-page="prev"${page <= 1 ? ' disabled' : ''} aria-label="上一页">&lt;</button>
         ${numBtns}
         <button type="button" class="mm-pager__btn" data-${prefix}-page="next"${page >= pages ? ' disabled' : ''} aria-label="下一页">&gt;</button>
+        <button type="button" class="mm-pager__btn" data-${prefix}-page="last"${page >= pages ? ' disabled' : ''} aria-label="尾页" title="尾页">&raquo;</button>
         <label class="mm-pager__jump">
           <span>跳转</span>
           <input type="number" class="mm-pager__jump-input" data-${prefix}-jump min="1" max="${pages}" placeholder="${page}" aria-label="跳转到页码" />
@@ -111,8 +113,10 @@ export function bindPagination(id: string, handlers: PaginationBindHandlers): vo
       if (!raw || btn.hasAttribute('disabled')) return;
       const current = Number(root.querySelector('.mm-pager__num.is-active')?.textContent ?? '1');
       const max = Number(root.querySelector('.mm-pager__jump-input')?.getAttribute('max') ?? '1');
-      if (raw === 'prev') handlers.onPageChange(Math.max(1, current - 1));
+      if (raw === 'first') handlers.onPageChange(1);
+      else if (raw === 'prev') handlers.onPageChange(Math.max(1, current - 1));
       else if (raw === 'next') handlers.onPageChange(Math.min(max, current + 1));
+      else if (raw === 'last') handlers.onPageChange(max);
       else handlers.onPageChange(Number(raw));
     });
   });

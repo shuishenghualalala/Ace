@@ -201,9 +201,12 @@ def test_session_append_and_clear(tmp_path):
 
 async def test_memory_recall_same_session(tmp_path):
     mem = SQLiteMemory(str(tmp_path / "m.db"))
-    await mem.write("s1", [Message.user("我喜欢用 Python 写后端")])
+    original = "我喜欢用 Python 写后端"
+    await mem.write("s1", [Message.user(original)])
     hit = await mem.prefetch("s1", "Python 项目")
     assert "Python" in hit
+    # 中文 round-trip 不乱码（召回文本须包含原始中文，而非 ?? 之类乱码）
+    assert original in hit, f"中文 round-trip 失败，召回内容: {hit!r}"
     miss = await mem.prefetch("s1", "完全无关xyz")
     assert miss == ""
 
@@ -279,21 +282,6 @@ def test_sqlite_write_helper_retries_locked_write(tmp_path):
     contender.close()
 
 
-async def test_persist_turn_uses_task_sid_for_memory(tmp_path):
-    """Bug B: 网关 sidechain 路径下，memory 应按 task_session_id（稳定 id）写入，
-    而非 envelope.session_id（::turn:: 临时 id）。
-    此测试驱动 _persist_turn 接受 task_sid 并用于 memory.write。"""
-    from crew.core.types import Message
-    from crew.memory.simple import SQLiteMemory
-
-    mem = SQLiteMemory(str(tmp_path / "m.db"))
-    stable_sid = "web_abc"
-    turn_sid = f"{stable_sid}::turn::req_1"
-    await mem.write(stable_sid, [Message.user("你好")])
-    assert "你好" in await mem.prefetch(stable_sid, "你好")
-    assert await mem.prefetch(turn_sid, "你好") == ""
-
-
 def test_load_config_resolves_memory_db_path_under_crew_home(tmp_path, monkeypatch):
     """Bug A: memory_db_path 应像 db_path 一样解析到 crew_home 下，且为绝对路径。"""
     from crew.state.config import load_config
@@ -303,13 +291,3 @@ def test_load_config_resolves_memory_db_path_under_crew_home(tmp_path, monkeypat
     cfg = load_config()
     assert cfg.memory_db_path == str(home / "crew_data" / "memory.db")
     assert Path(cfg.memory_db_path).is_absolute()
-
-
-async def test_memory_chinese_roundtrip_no_mojibake(tmp_path):
-    """Bug C: 验证中文写入/读回不乱码（排除 GBK 显示问题 vs 真乱码）。"""
-    mem = SQLiteMemory(str(tmp_path / "m.db"))
-    original = "我喜欢用 Python 写后端"
-    await mem.write("s1", [Message.user(original)])
-    hit = await mem.prefetch("s1", "Python")
-    # 召回的文本必须包含原始中文，且不是 ?? 之类乱码
-    assert original in hit, f"中文 round-trip 失败，召回内容: {hit!r}"

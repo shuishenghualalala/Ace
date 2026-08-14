@@ -2,10 +2,9 @@
  * audit-dead-css-vars.mjs
  *
  * Scans the assets/styles CSS tree and src TS code for
- * `var(--X, fallback)` references where --X is not defined in
- * variables.css. These "dead" references silently fall back to the
- * literal color in the second argument, defeating the point of the
- * token system.
+ * `var(--X, fallback)` references where --X is not defined in the
+ * token layer or by a component owner. Local component variables are valid
+ * contracts; unresolved legacy aliases are not.
  *
  * The script only flags unfulfilled references (where --X is not
  * defined anywhere). It does NOT flag references intended to cascade
@@ -25,6 +24,8 @@ import { walkCssFiles } from './audit-css-leaks.mjs';
 
 const VAR_REF_PATTERN = /var\(\s*(--[a-zA-Z0-9_-]+)\s*(?:,\s*([^)]*))?\s*\)/g;
 const VAR_DEF_PATTERN = /(--[a-zA-Z0-9_-]+)\s*:/g;
+const TS_VAR_DEF_PATTERN = /setProperty\(\s*['"](--[a-zA-Z0-9_-]+)['"]/g;
+const RUNTIME_CONTRACT_PREFIX = '--mw-runtime-';
 
 /**
  * Extract the set of CSS variable definitions in `text`.
@@ -82,12 +83,17 @@ export function findVarReferences(text) {
  * }}
  */
 export function auditDeadCssVars({ stylesDir, srcDir, variablesPath }) {
-  const variablesText = readFileSync(variablesPath, 'utf8');
-  const defined = parseDefinedVariables(variablesText);
-
   const cssFiles = walkCssFiles(resolve(stylesDir));
+  const defined = parseDefinedVariables(readFileSync(variablesPath, 'utf8'));
+  for (const file of cssFiles) {
+    for (const name of parseDefinedVariables(readFileSync(file, 'utf8'))) defined.add(name);
+  }
   // Restrict TS walk to ui + main (skip tests / node_modules).
   const tsFiles = walkTsFiles(resolve(srcDir));
+  for (const file of tsFiles) {
+    const text = readFileSync(file, 'utf8');
+    for (const match of text.matchAll(TS_VAR_DEF_PATTERN)) defined.add(match[1]);
+  }
 
   /** @type {typeof auditDeadCssVars extends (o: any) => infer R ? R extends { refs: infer U } ? U : never : never} */
   const refs = [];
@@ -98,7 +104,7 @@ export function auditDeadCssVars({ stylesDir, srcDir, variablesPath }) {
     const text = readFileSync(file, 'utf8');
     for (const r of findVarReferences(text)) {
       totalRefs += 1;
-      if (!defined.has(r.name)) {
+      if (!defined.has(r.name) && !r.name.startsWith(RUNTIME_CONTRACT_PREFIX)) {
         refs.push({
           file: relative(process.cwd(), file),
           line: r.line,
@@ -174,10 +180,11 @@ function isCli() {
 if (isCli()) {
   const args = process.argv.slice(2);
   const json = args.includes('--json');
+  const strict = args.includes('--strict');
   const report = auditDeadCssVars({
     stylesDir: 'assets/styles',
     srcDir: 'src',
-    variablesPath: 'assets/styles/variables.css',
+    variablesPath: 'assets/styles/tokens.css',
   });
 
   if (json) {
@@ -191,5 +198,9 @@ if (isCli()) {
         `  ${r.file}:${r.line}  ${r.name}${r.fallback ? `  (fallback: ${r.fallback})` : ''}\n`,
       );
     }
+  }
+
+  if (strict && report.summary.deadRefs > 0) {
+    process.exitCode = 1;
   }
 }

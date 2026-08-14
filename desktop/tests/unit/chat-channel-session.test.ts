@@ -6,6 +6,8 @@
  * 否则会重复插入一条相同的用户气泡。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
+import './helpers/mock-chat-controller-deps';
 import {
   _resetTurnDurationTickerForTests,
   applyChunk,
@@ -22,34 +24,6 @@ vi.mock('../../src/ui/features/workspaces', () => ({
   createSessionInWorkspace: vi.fn(() => 'sid-1'),
   isDraftSession: vi.fn(() => false),
   getSessionAgentDisplay: vi.fn(() => null),
-}));
-
-vi.mock('../../src/ui/features/running-intro', () => ({ syncRunningIntroSlot: vi.fn() }));
-vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
-vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));
-vi.mock('../../src/ui/features/kanban-board', () => ({
-  refreshKanbanBoard: vi.fn(async () => undefined),
-  renderKanbanBoard: vi.fn(),
-}));
-vi.mock('../../src/ui/features/inspector', () => ({
-  isInspectorOpen: vi.fn(() => false),
-  openInspectorToTab: vi.fn(),
-  refreshInspector: vi.fn(),
-  refreshInspectorChrome: vi.fn(),
-  resetPlanBoardDraft: vi.fn(),
-  invalidateFileDiffCachePaths: vi.fn(),
-  setUsageSnapshot: vi.fn(),
-  revealPathInFolder: vi.fn(),
-}));
-vi.mock('../../src/ui/features/composer-toolbar', () => ({
-  syncComposerModelLabel: vi.fn(),
-  syncComposerWorkspaceLabel: vi.fn(),
-}));
-vi.mock('../../src/ui/features/model-picker', () => ({ syncModelUi: vi.fn() }));
-vi.mock('../../src/ui/features/system-page', () => ({ renderSystemOverview: vi.fn() }));
-vi.mock('../../src/ui/features/attachments', () => ({
-  takeAttachmentsForSend: vi.fn(() => []),
-  renderAttachmentPreview: vi.fn(),
 }));
 
 const SID = 'agent:main:weixin:dm:u1';
@@ -78,9 +52,9 @@ beforeEach(() => {
   document.body.innerHTML = `
     <div id="welcome-panel"></div>
     <div id="chat-panel" hidden><div id="chat-messages"></div></div>
-    <div id="chat-todo-slot"></div>
+    <div class="chat-todo-slot"></div>
     <div id="composer-controls"></div>
-    <div id="chat-running-intro"></div>
+    <div class="chat-running-intro"></div>
   `;
 });
 

@@ -118,6 +118,77 @@ describe('followupQuestionReducer', () => {
       questions: [{ allowFreeText: false }],
     });
   });
+
+  it('preserves the structured runtime staffing variant and lifecycle state', () => {
+    const initial = followupQuestionReducer({
+      kind: 'followup_question',
+      sequence: 1,
+      body: {
+        question_id: 'staffing-1',
+        title: '给这项任务找一位帮手？',
+        note: '仅用于本次任务，不会加入或修改原团队。',
+        record_history: false,
+        origin: {
+          type: 'team_control',
+          agent_name: 'Leader',
+          mention_intent: 'runtime_staffing',
+        },
+        questions: [{
+          id: 'runtime_staffing:req-1',
+          question: '当前成员暂时无法使用。',
+          options: [{ label: '现有协作助手', value: 'candidate:0' }],
+          allowFreeText: false,
+          multiSelect: false,
+        }],
+      },
+    }, makeSnapshot());
+    const pending = initial.replaceBook?.pendingFollowup;
+    expect(pending).toMatchObject({
+      questionId: 'staffing-1',
+      note: '仅用于本次任务，不会加入或修改原团队。',
+      origin: { mentionIntent: 'runtime_staffing' },
+    });
+
+    const applying = followupQuestionReducer({
+      kind: 'followup_question',
+      sequence: 2,
+      body: {
+        question_id: 'staffing-1',
+        status: 'resolved',
+      },
+    }, makeSnapshot({ book: { ...emptyBook(), pendingFollowup: pending ?? null } }));
+    expect(applying.replaceBook?.pendingFollowup?.status).toBe('applying');
+
+    const applied = followupQuestionReducer({
+      kind: 'followup_question',
+      sequence: 3,
+      body: {
+        question_id: 'staffing-1',
+        status: 'applied',
+        note: '协作助手已加入，继续开工。',
+      },
+    }, makeSnapshot({ book: applying.replaceBook ?? emptyBook() }));
+    expect(applied.replaceBook?.pendingFollowup).toMatchObject({
+      status: 'applied',
+      note: '协作助手已加入，继续开工。',
+    });
+  });
+
+  it('keeps the existing resolved behavior for non-staffing permissions', () => {
+    const permission = {
+      questionId: 'permission-1',
+      title: '权限确认',
+      recordHistory: false,
+      questions: [],
+    };
+    const result = followupQuestionReducer({
+      kind: 'followup_question',
+      sequence: 2,
+      body: { question_id: 'permission-1', status: 'resolved' },
+    }, makeSnapshot({ book: { ...emptyBook(), pendingFollowup: permission } }));
+
+    expect(result.replaceBook?.pendingFollowup).toBeNull();
+  });
 });
 
 describe('deltaReducer', () => {
@@ -128,6 +199,8 @@ describe('deltaReducer', () => {
     expect(r.queueHint).toBe('');
     expect(r.messageUpserts.length).toBe(1);
     expect(r.messageUpserts[0]?.op).toBe('append');
+    expect(r.messageUpserts[0]?.message?.role).toBe('assistant');
+    expect(r.messageUpserts[0]?.message?.content).toBe('hello');
     // 工具前不确定阶段标 process，避免旁白冒充正文触发自动折
     expect(r.messageUpserts[0]?.message?.segmentRole).toBe('process');
     expect(r.replaceBook?.assistantId).not.toBeNull();
@@ -376,6 +449,9 @@ describe('toolReducer', () => {
     );
     expect(r.toolUpserts[0]?.status).toBe('running');
     expect(r.replaceBook?.toolMap.get('t1')?.name).toBe('web_search');
+    // tool 帧把 toolCalls patch 到 assistant 消息
+    const toolPatch = r.messageUpserts.find((u) => u.op === 'patch');
+    expect(toolPatch && toolPatch.op === 'patch' ? toolPatch.patch.toolCalls?.[0]?.toolCallId : undefined).toBe('t1');
   });
 
   it('keeps generating and start as one desktop tool card', () => {
@@ -442,6 +518,39 @@ describe('toolReducer', () => {
       { ...snap, now: 150 },
     );
     expect(r.replaceBook?.toolMap.get('t1')?.status).toBe('error');
+  });
+
+  it('keeps running and records stage text on progress phase', () => {
+    const toolMap = new Map();
+    toolMap.set('t1', {
+      toolCallId: 't1', name: 'wiki_plan_ingest', args: '{}', status: 'running' as const, startedAt: 100,
+    });
+    const snap = makeSnapshot({ book: { ...emptyBook(), toolMap } });
+    const r = toolReducer(
+      { kind: 'tool', body: { tool_call_id: 't1', phase: 'progress', text: '正在分析来源内容（2/5 块）…' }, sequence: 2 },
+      { ...snap, now: 200 },
+    );
+    const updated = r.replaceBook?.toolMap.get('t1');
+    // 进度帧不得把工具行提前标成完成
+    expect(updated?.status).toBe('running');
+    expect(updated?.progressText).toBe('正在分析来源内容（2/5 块）…');
+    expect(updated?.duration).toBeUndefined();
+  });
+
+  it('clears stage text when the tool completes', () => {
+    const toolMap = new Map();
+    toolMap.set('t1', {
+      toolCallId: 't1', name: 'wiki_plan_ingest', args: '{}', status: 'running' as const, startedAt: 100,
+      progressText: '正在分析来源内容（2/5 块）…',
+    });
+    const snap = makeSnapshot({ book: { ...emptyBook(), toolMap } });
+    const r = toolReducer(
+      { kind: 'tool', body: { tool_call_id: 't1', phase: 'end', detail: 'done' }, sequence: 3 },
+      { ...snap, now: 300 },
+    );
+    const updated = r.replaceBook?.toolMap.get('t1');
+    expect(updated?.status).toBe('done');
+    expect(updated?.progressText).toBeUndefined();
   });
 });
 
@@ -698,6 +807,14 @@ describe('planReviewReducer', () => {
     expect(r.replaceBook?.pendingPlan).toEqual({ plan: 'step 1...', planFile: '/tmp/p.md', status: 'pending' });
     expect(r.replaceBook?.planActive).toBe(true);
     expect(r.statusHint).toBe('idle');
+    // planReview 挂到回合消息（无 assistantId 时 append 一条空 assistant 消息）
+    expect(r.messageUpserts).toHaveLength(1);
+    expect(r.messageUpserts[0]?.op).toBe('append');
+    expect(r.messageUpserts[0]?.message?.planReview).toMatchObject({
+      plan: 'step 1...',
+      planFile: '/tmp/p.md',
+      status: 'pending',
+    });
   });
 });
 
@@ -862,6 +979,7 @@ describe('reduceChunk dispatch', () => {
     );
     expect(r.messageUpserts).toEqual([]);
     expect(r.finalize).toBe(false);
+    expect(r.statusHint).toBeUndefined();
   });
 });
 
@@ -936,6 +1054,32 @@ describe('finalReducer per-turn file changes', () => {
     });
     const r2 = finalReducer({ kind: 'final', body: { text: 'yo' }, sequence: 2 }, { ...snap2, now: 2500 });
     expect(turnFilesOf(r2, id2)).toEqual([{ path: 'crew/a.py', name: 'a.py', added: 5, removed: 2, status: 'modified' }]);
+  });
+
+  it('includes a metadata-only edit when revision changes but line counts stay equal', () => {
+    const id1 = 'm-revision-1';
+    const fileA1 = { ...fc('crew/a.py', 0, 0, 'modified', ''), revision: '100:20' };
+    const r1 = finalReducer(
+      { kind: 'final', body: { text: 'first' }, sequence: 1 },
+      makeSnapshot({
+        messages: [{ id: id1, role: 'assistant', content: 'first', timestamp: 1000, streaming: true }],
+        book: { ...emptyBook(), assistantId: id1, fileChanges: [fileA1] },
+      }),
+    );
+
+    const id2 = 'm-revision-2';
+    const fileA2 = { ...fileA1, revision: '200:20' };
+    const r2 = finalReducer(
+      { kind: 'final', body: { text: 'second' }, sequence: 2 },
+      makeSnapshot({
+        messages: [{ id: id2, role: 'assistant', content: 'second', timestamp: 2000, streaming: true }],
+        book: { ...r1.replaceBook!, assistantId: id2, fileChanges: [fileA2] },
+      }),
+    );
+
+    expect(turnFilesOf(r2, id2)).toEqual([
+      { path: 'crew/a.py', name: 'a.py', added: 0, removed: 0, status: 'modified' },
+    ]);
   });
 
   it('emits no turnFileChanges patch when nothing changed this turn', () => {

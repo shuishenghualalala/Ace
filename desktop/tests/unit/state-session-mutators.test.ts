@@ -52,17 +52,13 @@ describe('session mutators', () => {
     expect(sessionStore.get().busySessions['sid-1']).toBe(true);
   });
 
-  it('setSessionStatus writes the per-session status map', () => {
+  it('per-session setters write their respective store maps', () => {
     setSessionStatus('sid-1', 'queued');
     expect(sessionStore.get().sessionStatuses['sid-1']).toBe('queued');
-  });
 
-  it('setQueueHint writes the per-session queue hint map', () => {
     setQueueHint('sid-1', '正在排队…');
     expect(messageStore.get().queueHints['sid-1']).toBe('正在排队…');
-  });
 
-  it('setCurrentWorkspaceId writes workspace selection', () => {
     setCurrentWorkspaceId('ws-2');
     expect(workspaceStore.get().currentWorkspaceId).toBe('ws-2');
   });

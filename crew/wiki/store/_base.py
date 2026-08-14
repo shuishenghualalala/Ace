@@ -277,6 +277,27 @@ class WikiStore(ABC):
         brief: bool = False,
     ) -> list[WikiPage]: ...
 
+    def count_pages(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> int:
+        """返回知识库中的页面总数。默认通过 list_all(brief=True) 计数，子类应覆盖为高效实现。"""
+        return len(self.list_all(owner_account_id=owner_account_id, kb_id=kb_id, limit=100000, brief=True))
+
+    def list_pages_by_source(
+        self,
+        source_id: str,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> list[WikiPage]:
+        """返回引用了指定 source 的页面列表（brief 模式，不含正文）。默认通过 list_all 过滤。"""
+        return [
+            page
+            for page in self.list_all(owner_account_id=owner_account_id, kb_id=kb_id, limit=100000, brief=True)
+            if source_id in page.sources
+        ]
+
     @abstractmethod
     def search(
         self,

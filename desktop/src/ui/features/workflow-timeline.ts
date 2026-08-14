@@ -1,7 +1,7 @@
 /**
  * Dynamic Workflow 阶段时间线（替代/补充 Mermaid 任务依赖图）。
  *
- * 基于 /api/dynamic-kanban/{sid}/status 返回的 workflow definition
+ * 基于团队定义的 workflow_template.phases + /api/dynamic-kanban/{sid}/status
  * 实时展示当前执行到哪一阶段、验证门状态、失败回退阶段。
  */
 
@@ -132,7 +132,7 @@ export function buildWorkflowTimelineHtml(status: DynamicKanbanStatus | null): s
     return `
       <div class="workflow-timeline">
         ${controls}
-        <div class="workflow-timeline__empty">当前工作流暂无阶段信息。</div>
+        <div class="workflow-timeline__empty">暂无阶段信息：当前 workflow 未配置阶段。</div>
       </div>
     `;
   }

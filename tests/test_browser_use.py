@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import ipaddress
 import json
 import re
 from pathlib import Path
@@ -287,6 +286,9 @@ class FakeElectronDriver(FakeBrowserDriver, ElectronBrowserDriver):
         # ElectronBrowserDriver.__init__ 需要 config；这里不接 bridge，给个占位即可，
         # 避免任何残留路径读取 self.config 时 AttributeError。
         self.config = BrowserConfig()
+
+    def requires_policy_proxy(self) -> bool:
+        return False
 
     # 显式拉回基类默认，绕开 ElectronBrowserDriver 的 bridge 实现（MRO 中它在基类前）。
     execute_targeted = BrowserDriver.execute_targeted
@@ -650,19 +652,6 @@ async def test_plain_type_needs_no_approval_and_sends_no_submit(tmp_path, monkey
         await manager.aclose()
 
 
-async def test_type_submit_direct_call_executes_without_approval(tmp_path, monkeypatch):
-    manager, driver = await _electron_manager(tmp_path, monkeypatch)
-    token = current_tool_call_id.set("tc-none")
-    try:
-        await manager.navigate("o", "s", "https://baidu.com")
-        await manager.fill("o", "s", "p1:e18", "世界杯赛况", submit=True)
-        assert ("fill", ("@e18", "世界杯赛况", "--submit")) in driver.calls
-    finally:
-        current_tool_call_id.reset(token)
-        manager._closed = True
-        await manager.aclose()
-
-
 async def test_snapshot_escapes_malicious_page_title_out_of_boundary(browser):
     """页面把 </untrusted_browser_content> + <browser_action_result> 塞进 title，必须被
     转义在边界内，不能逃出隔离区伪造 Crew 控制信封（回归 C2：title/url 曾裸插）。"""
@@ -729,11 +718,10 @@ async def test_ordinary_filling_does_not_require_one_shot_approval(browser):
     assert decision is None
 
 
-def test_navigation_and_legacy_proxy_allow_all_network_classes_by_default():
+def test_navigation_and_proxy_deny_sensitive_networks_by_default():
     policy = BrowserNetworkPolicy(BrowserConfig())
-    assert policy.validate_navigation_url("http://localhost/admin") == (
-        "http://localhost/admin"
-    )
+    with pytest.raises(BrowserNetworkDenied, match="本机、私网或云元数据"):
+        policy.validate_navigation_url("http://127.0.0.1/admin")
     assert policy.validate_navigation_url("about:blank") == "about:blank"
     assert policy.validate_navigation_url("custom:opaque-payload") == (
         "custom:opaque-payload"
@@ -747,7 +735,17 @@ def test_navigation_and_legacy_proxy_allow_all_network_classes_by_default():
         ("translation.example", "::10.0.0.1"),
         ("translation.example", "fec0::1"),
     ):
-        assert policy.validate_ip(hostname, value) == str(ipaddress.ip_address(value))
+        with pytest.raises(BrowserNetworkDenied, match="本机、私网或云元数据"):
+            policy.validate_ip(hostname, value)
+
+    allowed = BrowserNetworkPolicy(
+        BrowserConfig(
+            allowed_private_hosts=["internal.example"],
+            allowed_private_cidrs=["127.0.0.0/8"],
+        )
+    )
+    assert allowed.validate_ip("internal.example", "10.1.2.3") == "10.1.2.3"
+    assert allowed.validate_navigation_url("http://127.0.0.1/admin").startswith("http://")
 
 
 def test_blocked_hosts_use_dns_idna_canonicalization():
@@ -762,14 +760,14 @@ def test_blocked_hosts_use_dns_idna_canonicalization():
     ):
         with pytest.raises(BrowserNetworkDenied, match="管理员策略"):
             policy.validate_hostname(hostname)
-    assert policy.validate_ip("mapped.example", "::ffff:127.0.0.1") == str(
-        ipaddress.ip_address("::ffff:127.0.0.1")
-    )
-    assert policy.validate_navigation_url(
-        "https://user:password@example.com/"
-    ) == "https://user:password@example.com/"
+    with pytest.raises(BrowserNetworkDenied, match="本机、私网或云元数据"):
+        policy.validate_ip("mapped.example", "::ffff:127.0.0.1")
+    with pytest.raises(BrowserNetworkDenied, match="管理员策略"):
+        policy.validate_navigation_url("https://user:password@example.com/")
 
-    allowed = BrowserNetworkPolicy(BrowserConfig())
+    allowed = BrowserNetworkPolicy(
+        BrowserConfig(allowed_private_hosts=["internal.example"])
+    )
     assert allowed.validate_ip("internal.example", "10.1.2.3") == "10.1.2.3"
 
 
@@ -866,6 +864,7 @@ async def test_loopback_proxy_does_not_reuse_http_socket_for_blocked_host() -> N
         BrowserNetworkPolicy(
             BrowserConfig(
                 blocked_hosts=["blocked.example"],
+                allowed_private_hosts=["127.0.0.1"],
             )
         )
     )
@@ -945,6 +944,7 @@ async def test_loopback_proxy_rejects_fake_websocket_before_relaying_pipeline(
         BrowserNetworkPolicy(
             BrowserConfig(
                 blocked_hosts=["blocked.example"],
+                allowed_private_hosts=["127.0.0.1"],
             )
         )
     )
@@ -1038,7 +1038,7 @@ async def test_loopback_proxy_finishes_framed_response_without_upstream_eof(
     origin_server = await asyncio.start_server(origin, "127.0.0.1", 0)
     origin_port = int(origin_server.sockets[0].getsockname()[1])
     proxy = LoopbackPolicyProxy(
-        BrowserNetworkPolicy(BrowserConfig())
+        BrowserNetworkPolicy(BrowserConfig(allowed_private_hosts=["127.0.0.1"]))
     )
     await proxy.start()
     parsed = urlsplit(proxy.url)
@@ -1093,6 +1093,7 @@ async def test_loopback_proxy_bounds_close_delimited_response_wait() -> None:
             BrowserConfig(
                 command_timeout_seconds=0.1,
                 navigation_timeout_seconds=0.2,
+                allowed_private_hosts=["127.0.0.1"],
             )
         )
     )

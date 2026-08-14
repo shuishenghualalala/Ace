@@ -97,7 +97,7 @@ def test_parse_legacy_xls_converts_with_libreoffice(monkeypatch, tmp_path):
         (output_dir / "legacy.xlsx").write_bytes(b"converted")
         return MagicMock(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(parser_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr("crew.security.launch.execute_captured_sync", fake_run)
     assert "工作表" in parse_document_to_markdown(source)
 
 
@@ -542,26 +542,23 @@ def test_parse_xlsx_ignores_dimension_padding_beyond_col_cap(monkeypatch):
     assert "|  |" not in result
 
 
-def test_parse_xlsx_missing_dependency(monkeypatch):
-    """未安装 openpyxl 时应抛出 MissingDependencyError。"""
-    monkeypatch.setitem(sys.modules, "openpyxl", None)
+@pytest.mark.parametrize(
+    "module_name,extension,dependency",
+    [
+        ("openpyxl", "xlsx", "openpyxl"),
+        ("pptx", "pptx", "python-pptx"),
+        ("docx", "docx", "python-docx"),
+    ],
+)
+def test_parse_missing_dependency(monkeypatch, module_name, extension, dependency):
+    """未安装对应依赖时应抛出 MissingDependencyError。"""
+    monkeypatch.setitem(sys.modules, module_name, None)
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "test.xlsx"
-        path.write_bytes(b"fake xlsx bytes")
+        path = Path(tmp) / f"test.{extension}"
+        path.write_bytes(b"fake bytes")
         with pytest.raises(MissingDependencyError) as exc_info:
             parse_document_to_markdown(path)
-    assert exc_info.value.dependency == "openpyxl"
-
-
-def test_parse_pptx_missing_dependency(monkeypatch):
-    """未安装 python-pptx 时应抛出 MissingDependencyError。"""
-    monkeypatch.setitem(sys.modules, "pptx", None)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "test.pptx"
-        path.write_bytes(b"fake pptx bytes")
-        with pytest.raises(MissingDependencyError) as exc_info:
-            parse_document_to_markdown(path)
-    assert exc_info.value.dependency == "python-pptx"
+    assert exc_info.value.dependency == dependency
 
 
 def test_parse_xlsx_repairs_empty_fill_tags():
@@ -742,17 +739,6 @@ def test_parse_docx_extracts_paragraphs_and_tables_in_order(monkeypatch):
     # 表格应夹在段落中间，而不是被丢弃
     assert result.index("省经规范前言") < result.index("| 指标 | 数值 |")
     assert result.index("| 指标 | 数值 |") < result.index("省经规范结语")
-
-
-def test_parse_docx_missing_dependency(monkeypatch):
-    """未安装 python-docx 时应抛出 MissingDependencyError。"""
-    monkeypatch.setitem(sys.modules, "docx", None)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "test.docx"
-        path.write_bytes(b"fake docx bytes")
-        with pytest.raises(MissingDependencyError) as exc_info:
-            parse_document_to_markdown(path)
-    assert exc_info.value.dependency == "python-docx"
 
 
 def test_parse_docx_extracts_table_inside_content_control():

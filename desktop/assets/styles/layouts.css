@@ -1,0 +1,213 @@
+/**
+ * Shared page skeletons. Feature CSS owns content inside slots, never the
+ * template columns, fixed rows or scroll chain.
+ */
+
+#renderer-root,
+#renderer-legacy-outlet {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#renderer-overlay-host {
+  display: contents;
+}
+
+.page-shell {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--mw-bg-canvas);
+  color: var(--mw-text-primary);
+}
+
+.page-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--mw-space-5);
+  padding: var(--mw-space-6) var(--mw-space-8) var(--mw-space-4);
+}
+
+.page-header__copy {
+  min-width: 0;
+}
+
+.page-header__title {
+  margin: 0;
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-page-size);
+  font-weight: var(--mw-type-page-weight);
+  line-height: var(--mw-type-page-line);
+}
+
+.page-header__desc {
+  max-width: 72ch;
+  margin: var(--mw-space-1) 0 0;
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-body-size);
+  line-height: var(--mw-type-body-line);
+}
+
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--mw-space-2);
+  flex-wrap: wrap;
+}
+
+.mw-page-template {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--mw-bg-canvas);
+  color: var(--mw-text-primary);
+}
+
+/* 列宽唯一来源是 shell.css 的 .mw-application-shell__body.mw-shell-template 系列规则
+  （--mw-app-rail-width token）；这里只保留 display，不再写 grid-template-columns——
+  createShellTemplate 的唯一调用方（application-shell.ts）总会加 __body 类，
+  裸 .mw-shell-template 的列定义到不了任何真实元素。 */
+.mw-shell-template {
+  display: grid;
+}
+
+.mw-shell-template__rail {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--mw-border-subtle);
+  background: var(--mw-bg-sidebar);
+}
+
+.mw-shell-template__context {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--mw-border-subtle);
+  background: var(--mw-bg-warm);
+}
+
+.mw-shell-template__main {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.mw-shell-template__inspector {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--mw-border-subtle);
+  background: var(--mw-bg-surface);
+}
+
+.mw-hub-template {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.mw-hub-template {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+.mw-hub-template__header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--mw-space-5);
+  padding: var(--mw-space-6);
+}
+
+.mw-hub-template__navigation,
+.mw-hub-template__filters {
+  min-width: 0;
+  padding: 0 var(--mw-space-6) var(--mw-space-3);
+}
+
+.mw-hub-template__results {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--mw-space-3) var(--mw-space-6) var(--mw-space-6);
+}
+
+.mw-hub-heading {
+  display: grid;
+  min-width: 0;
+  gap: var(--mw-space-1);
+}
+
+.mw-hub-heading__title {
+  margin: 0;
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-page-size);
+  font-weight: var(--mw-type-page-weight);
+  line-height: var(--mw-type-page-line);
+}
+
+.mw-hub-heading__description {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-body-size);
+  line-height: var(--mw-type-body-line);
+}
+
+.mw-hub-actions {
+  display: flex;
+  align-items: center;
+}
+
+/* 注：.mw-chat-template / .mw-master-detail / .mw-settings-template / .mw-board-template /
+   .mw-inspector-template 的整套规则已删除——对应工厂（page-templates.ts）没有任何调用方，
+   这些选择器（含其中的 56px 栏宽硬编码）到不了真实元素。
+   导航栏宽的唯一来源：tokens.css 的 --mw-app-rail-width / --mw-app-rail-width-compact。 */
+
+.tab-pane#chat-tab.active.chat-mode {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto;
+}
+
+.tab-pane#chat-tab.active.chat-mode #welcome-panel,
+.tab-pane#chat-tab.active.chat-mode #chat-panel,
+.tab-pane#chat-tab.active.chat-mode #task-board-panel {
+  min-width: 0;
+  min-height: 0;
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.tab-pane#chat-tab.active.chat-mode .chat-composer {
+  min-width: 0;
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.tab-pane#chat-tab.active.chat-mode .chat-disclaimer {
+  min-width: 0;
+  grid-column: 1;
+  grid-row: 3;
+  margin: 0;
+  padding: var(--mw-space-1) var(--mw-space-4) var(--mw-space-2);
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  line-height: var(--mw-type-caption-line);
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .page-header {
+    padding: var(--mw-space-5) var(--mw-space-5) var(--mw-space-3);
+  }
+}

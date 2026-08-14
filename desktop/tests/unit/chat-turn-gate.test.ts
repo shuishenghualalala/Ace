@@ -4,6 +4,8 @@
  * 回合身份边界：applyChunk 必须在写入消息 / book / status 前拒收旧 request 的生成帧。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
+import './helpers/mock-chat-controller-deps';
 import {
   _resetTurnDurationTickerForTests,
   applyChunk,
@@ -22,34 +24,6 @@ vi.mock('../../src/ui/features/workspaces', () => ({
   createSessionInWorkspace: vi.fn(() => 'sid-1'),
   isDraftSession: vi.fn(() => false),
   getSessionAgentDisplay: vi.fn(() => null),
-}));
-
-vi.mock('../../src/ui/features/running-intro', () => ({ syncRunningIntroSlot: vi.fn() }));
-vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
-vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));
-vi.mock('../../src/ui/features/kanban-board', () => ({
-  refreshKanbanBoard: vi.fn(async () => undefined),
-  renderKanbanBoard: vi.fn(),
-}));
-vi.mock('../../src/ui/features/inspector', () => ({
-  isInspectorOpen: vi.fn(() => false),
-  openInspectorToTab: vi.fn(),
-  refreshInspector: vi.fn(),
-  refreshInspectorChrome: vi.fn(),
-  resetPlanBoardDraft: vi.fn(),
-  invalidateFileDiffCachePaths: vi.fn(),
-  setUsageSnapshot: vi.fn(),
-  revealPathInFolder: vi.fn(),
-}));
-vi.mock('../../src/ui/features/composer-toolbar', () => ({
-  syncComposerModelLabel: vi.fn(),
-  syncComposerWorkspaceLabel: vi.fn(),
-}));
-vi.mock('../../src/ui/features/model-picker', () => ({ syncModelUi: vi.fn() }));
-vi.mock('../../src/ui/features/system-page', () => ({ renderSystemOverview: vi.fn() }));
-vi.mock('../../src/ui/features/attachments', () => ({
-  takeAttachmentsForSend: vi.fn(() => []),
-  renderAttachmentPreview: vi.fn(),
 }));
 
 function chunk(kind: ChatChunk['kind'], requestId: string, body: Record<string, unknown> = {}): ChatChunk {
@@ -82,9 +56,9 @@ beforeEach(() => {
   document.body.innerHTML = `
     <div id="welcome-panel"></div>
     <div id="chat-panel" hidden><div id="chat-messages"></div></div>
-    <div id="chat-todo-slot"></div>
+    <div class="chat-todo-slot"></div>
     <div id="composer-controls"></div>
-    <div id="chat-running-intro"></div>
+    <div class="chat-running-intro"></div>
   `;
 });
 
@@ -137,6 +111,63 @@ describe('applyChunk turn identity gate', () => {
 
     expect(document.querySelector('.msg__fold-spinner')).toBe(spinner);
     expect(document.querySelector('.process-timeline__thinking')?.textContent).toBe('第一段思考第二段思考');
+  });
+
+  it('连续正文分片只更新正文并保留气泡、头像和模型信息节点', async () => {
+    vi.useFakeTimers();
+    openTurn('req-delta-stable');
+    patchBook('sid-1', { assistantId: 'turn-delta-stable' });
+    appendSessionMessage('sid-1', {
+      id: 'turn-delta-stable',
+      role: 'assistant',
+      content: '第一段正文',
+      model: 'deepseek-v4-flash-ark',
+      timestamp: Date.now(),
+      turnStartedAt: Date.now() - 1_000,
+      streaming: true,
+      segmentRole: 'answer',
+    });
+    renderChat();
+    const bubble = document.querySelector('.msg[data-streaming="true"]');
+    const avatar = bubble?.querySelector('.msg__avatar');
+    const model = bubble?.querySelector('.msg__meta');
+
+    applyChunk(chunk('delta', 'req-delta-stable', { text: '第二段正文' }));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(document.querySelector('.msg[data-streaming="true"]')).toBe(bubble);
+    expect(document.querySelector('.msg[data-streaming="true"] .msg__avatar')).toBe(avatar);
+    expect(document.querySelector('.msg[data-streaming="true"] .msg__meta')).toBe(model);
+    expect(document.querySelector('.msg__text')?.textContent).toContain('第二段正文');
+  });
+
+  it('流式 thinking 在内部滚动区位于底部时继续跟随新增内容', async () => {
+    vi.useFakeTimers();
+    openTurn('req-thinking-scroll');
+    patchBook('sid-1', { assistantId: 'turn-thinking-scroll' });
+    appendSessionMessage('sid-1', {
+      id: 'turn-thinking-scroll',
+      role: 'assistant',
+      content: '',
+      thinking: '第一段思考',
+      timestamp: Date.now(),
+      turnStartedAt: Date.now() - 1_000,
+      streaming: true,
+    });
+    renderChat();
+    const thinking = document.querySelector<HTMLElement>('.process-timeline__thinking')!;
+    Object.defineProperty(thinking, 'clientHeight', { configurable: true, value: 100 });
+    Object.defineProperty(thinking, 'scrollHeight', {
+      configurable: true,
+      get: () => (thinking.textContent?.length ?? 0) * 20,
+    });
+    thinking.scrollTop = thinking.scrollHeight - thinking.clientHeight;
+
+    applyChunk(chunk('thinking', 'req-thinking-scroll', { text: '第二段思考' }));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(thinking.textContent).toBe('第一段思考第二段思考');
+    expect(thinking.scrollTop).toBe(thinking.scrollHeight);
   });
 
   it('tool/generating 分片到达后立即渲染运行中时间线项（不等到 result）', () => {
@@ -346,7 +377,7 @@ describe('applyChunk turn identity gate', () => {
 
     expect((document.getElementById('welcome-panel') as HTMLElement).hidden).toBe(true);
     expect((document.getElementById('chat-panel') as HTMLElement).hidden).toBe(false);
-    expect(document.querySelector('#chat-todo-slot .desktop-todo-panel')?.textContent).toContain('Write tests');
+    expect(document.querySelector('.chat-todo-slot .desktop-todo-panel')?.textContent).toContain('Write tests');
   });
 
   it('drops stale request-scoped auxiliary frames from a previous request', () => {

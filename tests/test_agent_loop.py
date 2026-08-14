@@ -8,7 +8,10 @@ resilience(空响应重试/截断续写/溢出兜底压缩/provider 故障转移
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import AsyncIterator
+
+import pytest
 
 from crew.agent.executor import BuiltinExecutor, ExecutionContext
 from crew.agent.loop import (
@@ -495,6 +498,71 @@ async def test_loop_failover_to_fallback_provider():
     assert ctx.messages[-1].model == "fallback-model"
 
 
+async def test_loop_recovers_from_unsupported_image_input_in_text_mode():
+    class RejectImageOnce(LLMProvider):
+        def __init__(self) -> None:
+            self.calls: list[list[Message]] = []
+
+        async def chat(self, messages, tools=None):  # pragma: no cover
+            return ChatResponse()
+
+        async def stream_chat(self, messages, tools=None):
+            self.calls.append(list(messages))
+            if len(self.calls) == 1:
+                raise ProviderError(
+                    "Model do not support image input",
+                    category="unsupported_capability",
+                    capability="vision",
+                )
+            yield StreamChunk(delta_text="已改用网页文本信息继续")
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+    provider = RejectImageOnce()
+    image = Message(
+        role="user",
+        content="查看网页",
+        content_parts=[
+            {"type": "text", "text": "查看网页"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    )
+    chunks = await _collect(_executor(provider), _ctx([image]))
+
+    assert len(provider.calls) == 2
+    assert provider.calls[0][1].content_parts is not None
+    second_parts = [part for message in provider.calls[1] for part in (message.content_parts or [])]
+    assert not any(part.get("type") == "image_url" for part in second_parts)
+    second_text = "\n".join(message.text_content for message in provider.calls[1])
+    assert "不要声称已经看过图片" in second_text
+    assert any(chunk.kind == "status" and "非视觉方式" in chunk.body["message"] for chunk in chunks)
+    assert not any(chunk.kind == "error" for chunk in chunks)
+    assert chunks[-1].body["text"] == "已改用网页文本信息继续"
+
+
+async def test_loop_does_not_repeat_unsupported_capability_recovery_forever():
+    provider = RaiseThenScript(
+        ProviderError(
+            "Model do not support image input",
+            category="unsupported_capability",
+            capability="vision",
+        ),
+        fail_times=2,
+        script=[],
+    )
+    image = Message(
+        role="user",
+        content="查看图片",
+        content_parts=[
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    )
+    chunks = await _collect(_executor(provider), _ctx([image]))
+
+    assert provider.stream_calls == 2
+    assert sum(chunk.kind == "status" for chunk in chunks) == 1
+    assert chunks[-1].kind == "error"
+
+
 # --------------------------------------------------------------------------- #
 # 5. 并行工具执行
 # --------------------------------------------------------------------------- #
@@ -945,8 +1013,8 @@ async def test_tool_runner_authorizes_each_batch_item_independently():
 def test_is_tool_parallel_safe_classification():
     assert is_tool_parallel_safe(ToolCall("1", "file_read", {"path": "/tmp/a"}))
     assert is_tool_parallel_safe(ToolCall("2", "web_search", {"q": "x"}))
-    assert is_tool_parallel_safe(ToolCall("4", "terminal", {"command": "ls -la"}))
-    assert is_tool_parallel_safe(ToolCall("4b", "terminal", {"command": "git diff --stat"}))
+    assert not is_tool_parallel_safe(ToolCall("4", "terminal", {"command": "ls -la"}))
+    assert not is_tool_parallel_safe(ToolCall("4b", "terminal", {"command": "git diff --stat"}))
     # 写/复杂命令/未知工具：不安全
     assert not is_tool_parallel_safe(ToolCall("3", "file_write", {"path": "/tmp/a", "content": "x"}))
     assert not is_tool_parallel_safe(ToolCall("4c", "terminal", {"command": "echo x > out.txt"}))
@@ -1339,6 +1407,79 @@ async def test_run_batch_emits_start_when_not_started_id():
     assert phases == ["start", "result"]
 
 
+async def test_explicit_security_rejection_fences_later_tools_in_same_batch():
+    reg = Registry()
+    calls: list[str] = []
+
+    async def terminal(_args):
+        calls.append("terminal")
+        return json.dumps({
+            "success": False,
+            "error": "用户拒绝了该命令",
+            "error_code": "approval_rejected",
+        }, ensure_ascii=False)
+
+    async def glob_handler(_args):
+        calls.append("glob")
+        return tool_result(files=["secret.txt"])
+
+    reg.register(
+        name="terminal",
+        toolset="terminal",
+        schema={"name": "terminal", "parameters": {}},
+        handler=terminal,
+        is_async=True,
+    )
+    reg.register(
+        name="glob",
+        toolset="file",
+        schema={"name": "glob", "parameters": {}},
+        handler=glob_handler,
+        is_async=True,
+    )
+    runner = _runner(reg, parallel_enabled=False)
+    messages: list[Message] = []
+    tool_calls = [
+        ToolCall("t1", "terminal", {"command": "ls ~/Desktop"}),
+        ToolCall("g1", "glob", {"path": "~/Desktop", "pattern": "*"}),
+    ]
+
+    _ = [chunk async for chunk in runner.run_batch(
+        tool_calls, messages, "rid", _seq_counter(),
+    )]
+
+    assert calls == ["terminal"]
+    assert runner.approval_rejected is True
+    assert "approval_rejected_turn_stopped" in messages[-1].content
+
+
+async def test_security_runtime_failure_is_a_real_tool_error():
+    reg = Registry()
+    reg.register(
+        name="terminal",
+        toolset="terminal",
+        schema={"name": "terminal", "parameters": {}},
+        handler=lambda _args: json.dumps({
+            "success": False,
+            "error": "安全运行时异常退出，命令未执行",
+            "error_code": "runtime_crashed",
+        }, ensure_ascii=False),
+    )
+    runner = _runner(reg, parallel_enabled=False)
+    messages: list[Message] = []
+
+    chunks = [chunk async for chunk in runner.run_batch(
+        [ToolCall("t1", "terminal", {"command": "ls ~/Desktop"})],
+        messages,
+        "rid",
+        _seq_counter(),
+    )]
+
+    assert runner.security_boundary_failed is True
+    assert any(chunk.body.get("phase") == "result" for chunk in chunks)
+    assert messages[-1].content.endswith('"runtime_crashed"}')
+
+
 class ReadyStreamProvider(LLMProvider):
     """第一轮流式吐 ready_tool_call（逐个）后 done；流尾 await gate 证明工具已并行起跑。"""
 
@@ -1459,102 +1600,52 @@ class VisibleReadyStreamProvider(LLMProvider):
         yield StreamChunk(done=True, tool_calls=[self._tool_call], finish_reason="tool_calls")
 
 
-async def test_ready_tool_call_emits_visible_start_before_stream_continues():
-    """safe 工具 ready 时立即显示 start；run_batch 后续只补 result，不重复 start。"""
-    reg = Registry()
-    reg.register(
-        name="file_read",
-        toolset="file",
-        schema={"name": "file_read", "parameters": {}},
-        handler=lambda a: tool_result(path=a.get("path")),
-        is_async=False,
-        override=True,
-    )
-    release_after_start = asyncio.Event()
-    tc = ToolCall("r1", "file_read", {"path": "/tmp/a.txt"})
-    provider = VisibleReadyStreamProvider(tc, release_after_start)
-    ex = _executor(provider, reg)
+@pytest.mark.parametrize(
+    ("tool_name", "call_id", "args", "handler", "sanitized_args"),
+    [
+        ("file_read", "r1", {"path": "/tmp/a.txt"}, lambda a: tool_result(path=a.get("path")), None),
+        (
+            "file_write",
+            "w1",
+            {"path": "/tmp/crew_test_unsafe.html", "content": "x"},
+            lambda a: tool_result(ok=True),
+            '{"path": "/tmp/crew_test_unsafe.html"}',
+        ),
+    ],
+    ids=["safe", "unsafe"],
+)
+async def test_ready_tool_call_emits_visible_start_before_stream_continues(
+    tool_name, call_id, args, handler, sanitized_args
+):
+    """safe/unsafe 工具 ready 时立即显示 start；run_batch 后续只补 result，不重复 start。
 
-    stream = ex.execute(_ctx())
-    try:
-        first = await asyncio.wait_for(stream.__anext__(), timeout=0.5)
-        assert first.kind == "tool"
-        assert first.body["phase"] == "start"
-        assert first.body["tool_call_id"] == "r1"
-        assert not provider.continued_after_ready.is_set()
-
-        release_after_start.set()
-        rest = [c async for c in stream]
-    finally:
-        release_after_start.set()
-        await stream.aclose()
-
-    tool_events = [first, *[c for c in rest if c.kind == "tool"]]
-    starts = [c for c in tool_events if c.body["phase"] == "start"]
-    results = [c for c in tool_events if c.body["phase"] == "result"]
-    assert [c.body["tool_call_id"] for c in starts] == ["r1"]
-    assert [c.body["tool_call_id"] for c in results] == ["r1"]
-
-
-async def test_reasoning_with_available_tools_emits_planning_status_first():
-    """模型只流 reasoning、尚未揭晓 tool_calls 时，先给 UI 可见反馈。"""
-    class ReasoningProvider:
-        async def stream_chat(self, messages, tools=None, **kwargs):
-            yield StreamChunk(reasoning_content="正在判断应使用哪个工具")
-            yield StreamChunk(delta_text="直接回答")
-            yield StreamChunk(done=True, finish_reason="stop")
-
-    executor = _executor(ReasoningProvider())
-    seq = 0
-
-    def next_seq():
-        nonlocal seq
-        seq += 1
-        return seq
-
-    tools = [{"type": "function", "function": {"name": "file_write", "parameters": {}}}]
-    chunks = [
-        c async for c in executor._call_model(
-            [Message.user("hi")], tools, "r", next_seq, {}, session_id="s",
-        )
-    ]
-    planning_idx = next(
-        i for i, c in enumerate(chunks)
-        if c.kind == "status" and c.body.get("activity") == "tool_planning"
-    )
-    thinking_idx = next(i for i, c in enumerate(chunks) if c.kind == "thinking")
-    assert chunks[planning_idx].body["message"] == "正在规划工具调用…"
-    assert planning_idx < thinking_idx
-
-
-async def test_unsafe_ready_tool_call_emits_visible_start_before_stream_continues():
-    """unsafe 工具（file_write）ready 时也立即显示 start。
-
-    start 事件与 prewarm 解耦，仅用于及时展示；实际执行仍由 run_batch 使用完整参数完成。
+    unsafe 的 start 事件与 prewarm 解耦，仅用于及时展示（参数脱敏）；实际执行仍由
+    run_batch 使用完整参数完成。
     """
     reg = Registry()
     reg.register(
-        name="file_write",
+        name=tool_name,
         toolset="file",
-        schema={"name": "file_write", "parameters": {}},
-        handler=lambda a: tool_result(ok=True),
+        schema={"name": tool_name, "parameters": {}},
+        handler=handler,
         is_async=False,
         override=True,
     )
     release_after_start = asyncio.Event()
-    tc = ToolCall("w1", "file_write", {"path": "/tmp/crew_test_unsafe.html", "content": "x"})
+    tc = ToolCall(call_id, tool_name, args)
     provider = VisibleReadyStreamProvider(tc, release_after_start)
     ex = _executor(provider, reg)
 
     stream = ex.execute(_ctx())
     try:
-        # 修复后：unsafe 也提前发 start，第一个 chunk 即 tool start，不等 release
+        # 修复后：safe/unsafe 都提前发 start，第一个 chunk 即 tool start，不等 release
         first = await asyncio.wait_for(stream.__anext__(), timeout=0.5)
         assert first.kind == "tool"
         assert first.body["phase"] == "start"
-        assert first.body["tool_call_id"] == "w1"
-        assert first.body["args"] == '{"path": "/tmp/crew_test_unsafe.html"}'
-        assert "content" not in first.body["detail"]
+        assert first.body["tool_call_id"] == call_id
+        if sanitized_args is not None:
+            assert first.body["args"] == sanitized_args
+            assert "content" not in first.body["detail"]
         assert not provider.continued_after_ready.is_set()
 
         release_after_start.set()
@@ -1566,8 +1657,8 @@ async def test_unsafe_ready_tool_call_emits_visible_start_before_stream_continue
     tool_events = [first, *[c for c in rest if c.kind == "tool"]]
     starts = [c for c in tool_events if c.body["phase"] == "start"]
     results = [c for c in tool_events if c.body["phase"] == "result"]
-    assert [c.body["tool_call_id"] for c in starts] == ["w1"]
-    assert [c.body["tool_call_id"] for c in results] == ["w1"]
+    assert [c.body["tool_call_id"] for c in starts] == [call_id]
+    assert [c.body["tool_call_id"] for c in results] == [call_id]
 
 
 class SeenThenReadyProvider(LLMProvider):

@@ -1,6 +1,6 @@
 """文件操作工具：glob、grep、patch。
 
-glob/grep 提供以下文件检索能力：
+glob/grep 参考 OCC（Open-Claude-Code）的 GlobTool/GrepTool 设计：
   - glob：按 glob 模式找文件，结果按修改时间倒序
   - grep：按正则搜内容，支持 content/files_with_matches/count 三种输出模式
 
@@ -16,8 +16,10 @@ import difflib
 import logging
 import os
 import re
+import stat
 import subprocess
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,9 +31,13 @@ from crew.tools.file_utils import (
     _detect_line_ending,
     _has_binary_extension,
     _normalize_line_endings,
-    _resolve_path,
     _strip_bom,
     _truncate,
+    FileConflictError,
+    atomic_replace_bytes,
+    read_verified_bytes,
+    snapshot_file,
+    stat_verified_file,
 )
 from crew.tools.managed_tools import (
     ChecksumMismatchError,
@@ -39,6 +45,7 @@ from crew.tools.managed_tools import (
     ensure_ripgrep,
 )
 from crew.tools.registry import Registry, tool_result
+from crew.tools.security_guard import authorize_file_tool
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +79,11 @@ _RG_TYPE_MAP: dict[str, list[str]] = {
 
 async def _resolve_rg() -> str | None:
     """三级解析可用 rg 路径：managed → 系统 → None（调用方走 Python 兜底）。"""
+    from crew.security.launch import current_process_launch
+
+    launch = current_process_launch.get()
+    if launch is not None and launch.managed:
+        return None
     try:
         path = await ensure_ripgrep()
     except ChecksumMismatchError:
@@ -110,7 +122,7 @@ def _run_rg(args: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, st
 
 
 def _split_glob_filter(glob_str: str) -> list[str]:
-    """按空格/逗号拆分 glob 过滤，保留 {...} 花括号整体不拆。"""
+    """按空格/逗号拆分 glob 过滤，保留 {...} 花括号整体不拆（对齐 OCC GrepTool）。"""
     result: list[str] = []
     for part in glob_str.split():
         if "{" in part or "}" in part:
@@ -121,7 +133,7 @@ def _split_glob_filter(glob_str: str) -> list[str]:
 
 
 def _compile_glob_pattern(pattern: str) -> Callable[[str], bool]:
-    """编译 glob 工具的递归匹配模式：前缀 **/ 并启用 DOTMATCH。"""
+    """编译 glob 工具的递归匹配模式：前缀 **/ + DOTMATCH（对齐 deepagents compile_recursive_glob）。"""
     compiled = wcglob.compile("**/" + pattern.lstrip("/"), flags=_WCGLOB_FLAGS | wcglob.DOTMATCH)
 
     def matcher(rel_path: str) -> bool:
@@ -146,17 +158,34 @@ def _compile_grep_include(pattern: str) -> Callable[[str], bool]:
 
 
 def _sort_files_by_mtime(base: Path, rel_paths: list[str]) -> list[str]:
-    """按 mtime 倒序排列，mtime 相同按路径升序；stat 失败时 mtime=0。"""
+    """按 mtime 倒序排（最新在前，对齐 OCC GrepTool），mtime 相同按路径升序 tiebreaker。stat 失败 mtime=0。"""
     def mtime(rel: str) -> float:
         try:
-            return (base / rel).stat().st_mtime
-        except OSError:
+            return stat_verified_file(base / rel).st_mtime
+        except (FileConflictError, OSError):
             return 0.0
     return sorted(rel_paths, key=lambda r: (-mtime(r), r))
 
 
+def _prune_linked_directories(dirpath: str, dirnames: list[str]) -> None:
+    """Prevent os.walk from traversing symlinks and Windows reparse directories."""
+    kept: list[str] = []
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    for name in dirnames:
+        try:
+            metadata = os.lstat(Path(dirpath) / name)
+        except OSError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            continue
+        if reparse_flag and getattr(metadata, "st_file_attributes", 0) & reparse_flag:
+            continue
+        kept.append(name)
+    dirnames[:] = kept
+
+
 def _apply_pagination(items: list[str], head_limit: int, offset: int) -> tuple[list[str], bool]:
-    """Crew applyHeadLimit 语义：head_limit=0 不限；否则 slice(offset, offset+limit)。"""
+    """OCC applyHeadLimit 语义：head_limit=0 不限；否则 slice(offset, offset+limit)。"""
     if head_limit == 0:
         return items[offset:], False
     page = items[offset:offset + head_limit]
@@ -191,7 +220,7 @@ GLOB_SCHEMA = {
         "按 glob 模式查找文件（如 **/*.py、*.md、src/**/*.{ts,tsx}）。"
         "始终用 glob 做按文件名的查找，不要用 terminal 去跑 `find` 或 `ls`——"
         "glob 已针对权限与访问做过优化，体验更好、更易审查。\n"
-        "结果按修改时间排序（最旧在前），"
+        "结果按修改时间排序（最旧在前，对齐 OCC glob），"
         "自动排除 .git/__pycache__/node_modules/.venv 等噪音目录。"
         "底层优先用 ripgrep，不可用时退回 Python 实现。"
     ),
@@ -207,11 +236,22 @@ GLOB_SCHEMA = {
 }
 
 
-async def handle_glob(args: dict[str, Any]) -> str:
+async def handle_glob(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
     pattern = str(args.get("pattern", "")).strip()
     if not pattern:
         raise ToolError("pattern 不能为空")
-    root = _resolve_path(str(args.get("path") or "."))
+    root = await authorize_file_tool(
+        args,
+        operation="read",
+        tool_name="glob",
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
     if not root.exists() or not root.is_dir():
         raise ToolError(f"搜索目录不存在或不是目录: {root}")
     limit = max(1, _int_arg(args, "limit", 100))
@@ -260,6 +300,7 @@ def _glob_via_python(pattern: str, root: Path) -> list[str]:
     found: list[tuple[float, str]] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _NOISE_DIRS]
+        _prune_linked_directories(dirpath, dirnames)
         if time.monotonic() > deadline:
             break
         for fn in filenames:
@@ -273,11 +314,11 @@ def _glob_via_python(pattern: str, root: Path) -> list[str]:
             if not matcher(rel):
                 continue
             try:
-                mtime = full.stat().st_mtime
-            except OSError:
-                mtime = 0.0
+                mtime = stat_verified_file(full).st_mtime
+            except (FileConflictError, OSError):
+                continue
             found.append((mtime, rel))
-    # mtime 升序（最旧在前），mtime 相同时 path 升序
+    # mtime 升序（最旧在前，对齐 OCC GlobTool 的 --sort=modified），path 升序 tiebreaker
     found.sort(key=lambda x: (x[0], x[1]))
     return [rel for _, rel in found]
 
@@ -323,11 +364,22 @@ GREP_SCHEMA = {
 }
 
 
-async def handle_grep(args: dict[str, Any]) -> str:
+async def handle_grep(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
     pattern = str(args.get("pattern", "")).strip()
     if not pattern:
         raise ToolError("pattern 不能为空")
-    target = _resolve_path(str(args.get("path") or "."))
+    target = await authorize_file_tool(
+        args,
+        operation="read",
+        tool_name="grep",
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
     if not target.exists():
         raise ToolError(f"搜索路径不存在: {target}")
     output_mode = str(args.get("output_mode") or "files_with_matches")
@@ -354,7 +406,7 @@ def _grep_context_params(args: dict[str, Any]) -> tuple[int, int]:
 
 
 def _grep_via_rg(rg: str, args: dict[str, Any], target: Path, output_mode: str) -> str:
-    """组装 rg 参数并格式化输出。"""
+    """对齐 OCC GrepTool 的 rg 参数组装与输出格式化。"""
     pattern = str(args.get("pattern", ""))
     case_insensitive = _bool_arg(args, "-i", False)
     show_line_numbers = _bool_arg(args, "-n", True)
@@ -482,7 +534,7 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
     file_lines: dict[str, list[str]] = {}  # 只有有匹配的文件存全部行（content 上下文用）
     file_counts: dict[str, int] = {}
 
-    def search_file(full: Path) -> None:
+    def search_file(full: Path, *, follow_symlink: bool = False) -> None:
         try:
             rel = full.relative_to(root).as_posix()
         except ValueError:
@@ -491,15 +543,22 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
             return
         if _has_binary_extension(full):
             return
-        try:
-            if full.stat().st_size > _DEFAULT_MAX_FILE_BYTES:
+        # 拒绝遍历到的符号链接：工作区内的文件 symlink 可能指向授权根外，跟随它读取
+        # 会绕过文件读取审批与 native sandbox（H-4）。os.walk 已 followlinks=False
+        # 不递归目录 symlink；这里在 open 前按 lstat 拒绝文件 symlink。单文件 target
+        # 由上层授权层 canonicalize 后授权，显式 follow_symlink=True 放行。
+        if not follow_symlink:
+            try:
+                if full.is_symlink():
+                    return
+            except OSError:
                 return
-        except OSError:
-            return
         try:
-            with full.open(encoding="utf-8", errors="strict") as fh:
-                lines_list = fh.readlines()
-        except (UnicodeDecodeError, OSError):
+            content = read_verified_bytes(full)
+            if len(content) > _DEFAULT_MAX_FILE_BYTES:
+                return
+            lines_list = content.decode("utf-8", errors="strict").splitlines(keepends=True)
+        except (FileConflictError, UnicodeDecodeError, OSError):
             return
         if multiline:
             # 整文件 search：DOTALL 让 . 匹配换行，定位匹配起始行号（兜底不完美，但跨行能命中）
@@ -520,10 +579,11 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
                         file_lines[rel] = lines_list
 
     if target.is_file():
-        search_file(target)
+        search_file(target, follow_symlink=True)
     else:
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             dirnames[:] = [d for d in dirnames if d not in _NOISE_DIRS]
+            _prune_linked_directories(dirpath, dirnames)
             if time.monotonic() > deadline:
                 break
             for fn in filenames:
@@ -551,7 +611,7 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
         if not page:
             return tool_result(success=True, output_mode=output_mode, content="No matches found",
                                num_matches=0, num_files=0)
-        # num_matches 只计算当前页：先分页再累加。
+        # num_matches 只算 page 内（对齐 OCC/rg 路径：applyHeadLimit 先分页再累加）
         total = 0
         for line in page:
             idx = line.rfind(":")
@@ -611,8 +671,19 @@ PATCH_SCHEMA = {
 }
 
 
-def handle_patch(args: dict[str, Any]) -> str:
-    path = _resolve_path(str(args.get("path", "")))
+async def handle_patch(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
+    path = await authorize_file_tool(
+        args,
+        operation="patch",
+        tool_name="patch",
+        workspace_store=workspace_store,
+        security_service=security_service,
+    )
     old = str(args.get("old", ""))
     new = str(args.get("new", ""))
     count = int(args.get("count", 1))
@@ -626,7 +697,8 @@ def handle_patch(args: dict[str, Any]) -> str:
     if not old:
         raise ToolError("old 不能为空")
 
-    text_bytes = path.read_bytes()
+    version = snapshot_file(path)
+    text_bytes = version.data
     text = text_bytes.decode("utf-8", errors="replace")
     text, had_bom = _strip_bom(text)
     original_ending = _detect_line_ending(text)
@@ -642,8 +714,7 @@ def handle_patch(args: dict[str, Any]) -> str:
     if had_bom and not updated.startswith("﻿"):
         updated = "﻿" + updated
 
-    with path.open("w", encoding="utf-8", newline="") as f:
-        f.write(updated)
+    atomic_replace_bytes(path, updated.encode("utf-8"), version)
 
     diff = "".join(
         difflib.unified_diff(
@@ -667,12 +738,21 @@ def handle_patch(args: dict[str, Any]) -> str:
 # 注册
 # ---------------------------------------------------------------------------
 
-def register_file_tools(registry: Registry) -> None:
+def register_file_tools(
+    registry: Registry,
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> None:
     registry.register(
         name="glob",
         toolset="file",
         schema=GLOB_SCHEMA,
-        handler=handle_glob,
+        handler=partial(
+            handle_glob,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
         is_async=True,
         display_name="查找文件",
 ui_label_template="查找 {pattern}",
@@ -683,7 +763,11 @@ ui_label_template="查找 {pattern}",
         name="grep",
         toolset="file",
         schema=GREP_SCHEMA,
-        handler=handle_grep,
+        handler=partial(
+            handle_grep,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
         is_async=True,
         display_name="搜索内容",
         ui_label_template="搜索 {pattern}",
@@ -692,8 +776,12 @@ ui_label_template="查找 {pattern}",
         name="patch",
         toolset="file",
         schema=PATCH_SCHEMA,
-        handler=handle_patch,
-        is_async=False,
+        handler=partial(
+            handle_patch,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
+        is_async=True,
         display_name="修改文件",
         ui_label_template="修改 {path}",
 always_load=True,

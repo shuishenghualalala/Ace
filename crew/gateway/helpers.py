@@ -149,6 +149,14 @@ def config_body(
         "external_agents": {
             "enabled": bool(getattr(crew.config, "external_agents_enabled", True)),
         },
+        "security": {
+            "enabled": bool(getattr(crew.config, "security_enabled", False)),
+            "default_mode": (
+                "request_approval"
+                if getattr(crew.config, "security_enabled", False)
+                else "full_access"
+            ),
+        },
     }
 
 
@@ -251,6 +259,8 @@ def session_agent_label(
     getter = getattr(crew.session_store, "get_agent_config", None)
     config = getter(session_id, owner_account_id=owner_account_id) if callable(getter) else None
     executor = str((config or {}).get("executor") or "builtin").lower()
+    if bool((config or {}).get("inspiration_creation") or (config or {}).get("site_creation")):
+        return {"name": "灵感", "provider": "sites", "display_badge": "◇"}
     if executor == "team":
         team_cfg = (config or {}).get("team") if isinstance((config or {}).get("team"), dict) else {}
         external_team_id = str(team_cfg.get("external_team_id") or "").strip()

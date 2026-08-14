@@ -28,8 +28,12 @@ _TITLE_TIMEOUT = 10.0
 
 
 def _sanitize_title_text(text: str) -> str:
-    """去掉标题生成里不应持久化的演示/调试前缀。"""
+    """去掉标题生成里不应持久化的演示/调试前缀和思考标签。"""
     cleaned = str(text or "").strip()
+    # 思考型模型可能把 <think>...</think> 内联在正文里返回（未走 reasoning_content
+    # 通道），成对块和孤立标签都要剥掉，避免标签残片混进标题。
+    cleaned = re.sub(r"<think>.*?</think>", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"</?think>", " ", cleaned, flags=re.IGNORECASE).strip()
     for prefix in ("[fake] 收到:", "[fake] 收到：", "[fake]"):
         if cleaned.lower().startswith(prefix.lower()):
             cleaned = cleaned[len(prefix):].strip()

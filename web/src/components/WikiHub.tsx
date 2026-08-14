@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import type { WikiIngestProgress, WikiKB, WikiPage, WikiRelationPage, WikiSourceFiles, WikiSourceTitles, WikiVaultDocument, WikiViewMode } from "../types";
+import type { Session, WikiIngestProgress, WikiKB, WikiPage, WikiRelationPage, WikiSourceFiles, WikiSourceTitles, WikiVaultDocument, WikiViewMode } from "../types";
 import WikiPageView from "./WikiPageView";
 import WikiFileTree from "./WikiFileTree";
 import WikiTimelineView from "./WikiTimelineView";
@@ -8,13 +8,24 @@ import WikiTypeView from "./WikiTypeView";
 import WikiGraphView from "./WikiGraphView";
 import ChatPanel from "./ChatPanel";
 import WikiIcon from "./WikiIcon";
+import type { WikiIconName } from "./WikiIcon";
+import WikiPageTabs from "./WikiPageTabs";
 import type { Props as ChatPanelProps } from "./ChatPanel";
 import { ResizablePanels } from "./ResizablePanels";
 import { ancestorPaths, buildFileTree, findPageByTitle, splitHomeQuestions, vaultDocumentLabel } from "../lib/wikiTree";
+import type { WikiOpenTab } from "../lib/wikiTabs";
+import { closeTab, openTab, tabKey } from "../lib/wikiTabs";
 import MarkdownContent from "./MarkdownContent";
 
 type UploadJobStatus = "uploading" | "ingesting" | "done" | "error" | "cancelled";
 const PAGE_LIMIT = 200;
+const HIDDEN_STYLE = { display: "none" } as const;
+const LOAD_MORE_HINT_STYLE = {
+  padding: "12px",
+  textAlign: "center" as const,
+  color: "var(--text-3)",
+  fontSize: "12px",
+};
 
 // LLM 分析阶段实际耗时很长，前端用这些本地真实阶段文案循环显示，
 // 让用户感觉后台一直在工作，而不是卡在"LLM 分析内容"。
@@ -51,6 +62,12 @@ interface Props {
   onKbChange: (id: string) => void;
   sessionId: string;
   wikiProgress?: Record<string, WikiIngestProgress> | null;
+  /** 新建 Wiki 对话（force_new），与桌面端「新建对话」一致。 */
+  onNewSession: () => Promise<void> | void;
+  /** 切换到历史 Wiki 对话。 */
+  onSelectSession: (sessionId: string) => void;
+  /** 删除 Wiki 对话。 */
+  onDeleteSession: (sessionId: string) => Promise<void> | void;
 }
 
 export default function WikiHub({
@@ -59,6 +76,9 @@ export default function WikiHub({
   onKbChange,
   sessionId,
   wikiProgress,
+  onNewSession,
+  onSelectSession,
+  onDeleteSession,
 }: Props) {
   const [kbs, setKbs] = useState<WikiKB[]>([]);
   const [pages, setPages] = useState<WikiPage[]>([]);
@@ -71,6 +91,8 @@ export default function WikiHub({
   const [sourceTitles, setSourceTitles] = useState<WikiSourceTitles>({});
   const [sourceFiles, setSourceFiles] = useState<WikiSourceFiles>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** 详情面板已打开的 Tab（页面 / Vault 文档），顶部 Tab 栏可切换、关闭。 */
+  const [openTabs, setOpenTabs] = useState<WikiOpenTab[]>([]);
   const [selectedDocumentName, setSelectedDocumentName] = useState<"Home.md" | "index.md" | null>(null);
   const [vaultDocument, setVaultDocument] = useState<WikiVaultDocument | null>(null);
   const [initializedKbId, setInitializedKbId] = useState<string | null>(null);
@@ -84,6 +106,216 @@ export default function WikiHub({
   const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
   const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
   const [uploadJobsExpanded, setUploadJobsExpanded] = useState(true);
+  // 知识库面板内 目录列宽（目录↔详情 分隔线可拖拽），localStorage 持久化。
+  const CATALOG_MIN = 200;
+  const CATALOG_MAX = 480;
+  const CATALOG_DEFAULT = 240;
+  const [catalogWidth, setCatalogWidth] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem("crew:wiki-catalog-width");
+      const n = raw ? Number(raw) : NaN;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 200), 480) : 240;
+    } catch {
+      return 240;
+    }
+  });
+  const catalogDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  // onUp 闭包里拿不到最新 state，用 ref 镜像当前目录宽度用于拖拽结束时持久化。
+  const catalogWidthRef = useRef(catalogWidth);
+  catalogWidthRef.current = catalogWidth;
+
+  // Wiki 对话历史浮层（与桌面端一致：新建 / 切换 / 删除）。
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historySessions, setHistorySessions] = useState<Session[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [creatingChat, setCreatingChat] = useState(false);
+  const historyRef = useRef<HTMLDivElement>(null);
+
+  const refreshHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await api.wikiAgentSessions(kbId);
+      setHistorySessions(res.sessions);
+    } catch {
+      setHistorySessions([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [kbId]);
+
+  // 切 KB 时收起浮层并清空缓存，避免展示上一个 KB 的会话。
+  useEffect(() => {
+    setHistoryOpen(false);
+    setHistorySessions([]);
+  }, [kbId]);
+
+  // 点击浮层外部时收起。
+  useEffect(() => {
+    if (!historyOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
+        setHistoryOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [historyOpen]);
+
+  const toggleHistory = () => {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    if (next) refreshHistory();
+  };
+
+  const handleNewChat = async () => {
+    if (creatingChat) return;
+    if (chatProps.busy) {
+      setMessage("请先停止当前 Wiki Agent 任务");
+      return;
+    }
+    setCreatingChat(true);
+    try {
+      await onNewSession();
+      setHistoryOpen(false);
+    } catch (err) {
+      setMessage(`新建 Wiki 对话失败：${(err as Error).message}`);
+    } finally {
+      setCreatingChat(false);
+    }
+  };
+
+  const handleSelectChat = (sid: string) => {
+    onSelectSession(sid);
+    setHistoryOpen(false);
+  };
+
+  const handleDeleteChat = async (sid: string) => {
+    if (sid === sessionId && chatProps.busy) {
+      setMessage("该对话正在生成，请先停止再删除");
+      return;
+    }
+    if (!confirm("确定要删除这条 Wiki 对话吗？该操作不可撤销。")) return;
+    try {
+      await onDeleteSession(sid);
+    } catch (err) {
+      setMessage(`删除 Wiki 对话失败：${(err as Error).message}`);
+      return;
+    }
+    if (historyOpen) refreshHistory();
+  };
+
+  const handleCatalogSashDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    catalogDragRef.current = { startX: e.clientX, startWidth: catalogWidth };
+    const onMove = (ev: MouseEvent) => {
+      const start = catalogDragRef.current;
+      if (!start) return;
+      const next = Math.min(Math.max(start.startWidth + (ev.clientX - start.startX), CATALOG_MIN), CATALOG_MAX);
+      setCatalogWidth(next);
+    };
+    const onUp = () => {
+      catalogDragRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      // 拖拽结束时持久化一次，避免拖动过程中频繁写 storage
+      try {
+        window.localStorage.setItem("crew:wiki-catalog-width", String(catalogWidthRef.current));
+      } catch {
+        // ignore storage errors
+      }
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
+  const handleCatalogSashReset = () => {
+    setCatalogWidth(CATALOG_DEFAULT);
+    try {
+      window.localStorage.setItem("crew:wiki-catalog-width", String(CATALOG_DEFAULT));
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  // 图谱模式下 图谱↔详情 分隔线同样可拖：拖动时按像素固定画布宽度（240–800），
+  // 双击复位为弹性比例分配（CSS 1.2:1）。null 表示弹性。
+  const GRAPH_MIN = 240;
+  const GRAPH_MAX = 800;
+  const [graphCanvasWidth, setGraphCanvasWidth] = useState<number | null>(() => {
+    try {
+      const raw = window.localStorage.getItem("crew:wiki-graph-width");
+      const n = raw ? Number(raw) : NaN;
+      return Number.isFinite(n) ? Math.min(Math.max(n, GRAPH_MIN), GRAPH_MAX) : null;
+    } catch {
+      return null;
+    }
+  });
+  const graphDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const graphCanvasWidthRef = useRef(graphCanvasWidth);
+  graphCanvasWidthRef.current = graphCanvasWidth;
+
+  const handleGraphSashDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    // 弹性态下起始宽度取画布当前实际宽度
+    const catalogEl = (e.currentTarget as HTMLElement).previousElementSibling as HTMLElement | null;
+    const startWidth = graphCanvasWidth ?? catalogEl?.getBoundingClientRect().width ?? 400;
+    graphDragRef.current = { startX: e.clientX, startWidth };
+    const onMove = (ev: MouseEvent) => {
+      const start = graphDragRef.current;
+      if (!start) return;
+      const next = Math.min(Math.max(start.startWidth + (ev.clientX - start.startX), GRAPH_MIN), GRAPH_MAX);
+      setGraphCanvasWidth(next);
+    };
+    const onUp = () => {
+      graphDragRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      try {
+        const w = graphCanvasWidthRef.current;
+        if (w !== null) window.localStorage.setItem("crew:wiki-graph-width", String(w));
+      } catch {
+        // ignore storage errors
+      }
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
+  const handleGraphSashReset = () => {
+    setGraphCanvasWidth(null);
+    try {
+      window.localStorage.removeItem("crew:wiki-graph-width");
+    } catch {
+      // ignore storage errors
+    }
+  };
+  // 右侧知识库面板（目录+详情）展开/收起，持久化到 localStorage。
+  const [browserOpen, setBrowserOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem("crew:wiki-browser-open") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggleBrowser = () => {
+    setBrowserOpen((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("crew:wiki-browser-open", next ? "1" : "0");
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
 
   const { activeCount, hasDoneJobs } = useMemo(() => {
     const activeCount = uploadJobs.filter((j) => j.status === "uploading" || j.status === "ingesting").length;
@@ -172,6 +404,23 @@ export default function WikiHub({
     refreshKbs();
   }, [refreshKbs]);
 
+  // 其他会话（如主对话委派的 Wiki 子代理）或本页 Wiki 会话改动 Wiki 数据后，
+  // 后端会推 wiki_changed；收到后刷新知识库列表与当前库页面，避免必须重新进入页面。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const changes = (e as CustomEvent).detail as
+        | Array<{ kb_id?: string; change_type?: string }>
+        | undefined;
+      if (!Array.isArray(changes) || changes.length === 0) return;
+      void refreshKbs();
+      if (changes.some((ch) => !ch.kb_id || ch.kb_id === kbId)) {
+        void refreshPages();
+      }
+    };
+    window.addEventListener("crew:wiki-changed", handler);
+    return () => window.removeEventListener("crew:wiki-changed", handler);
+  }, [refreshKbs, refreshPages, kbId]);
+
   // 新用户首次进入 Wiki 时，若没有任何知识库，自动初始化 default
   useEffect(() => {
     if (hasAutoInitRef.current) return;
@@ -227,6 +476,10 @@ export default function WikiHub({
   useEffect(() => {
     const timer = setInterval(() => {
       setUploadJobs((prev) => {
+        // 无活跃任务时跳过，避免空转。
+        if (prev.every((j) => j.status === "done" || j.status === "error" || j.status === "cancelled")) {
+          return prev;
+        }
         let changed = false;
         const next = prev.map((job) => {
           if (job.status === "done" || job.status === "error" || job.status === "cancelled") {
@@ -340,6 +593,7 @@ export default function WikiHub({
     setSelectedId(null);
     setSelectedDocumentName(null);
     setVaultDocument(null);
+    setOpenTabs([]);
     setSelectedIds(new Set());
     setPageDetails({});
     setRelationPages({});
@@ -619,6 +873,8 @@ export default function WikiHub({
     setSelectedId(null);
     setSelectedDocumentName(name);
     setVaultDocument(null);
+    // 每次打开都登记为 Tab（已存在则保持原顺序），激活 doc Tab 也复用这里重新拉取。
+    setOpenTabs((prev) => openTab(prev, { kind: "doc", name }).tabs);
     try {
       const res = await api.wikiVaultDocument(name, kbId);
       setVaultDocument(res.document);
@@ -628,20 +884,82 @@ export default function WikiHub({
     }
   }, [kbId]);
 
+  /** 打开页面 Tab：与目录点击一致，清掉 vault 文档态。 */
+  const openPageTab = useCallback((id: string) => {
+    setSelectedDocumentName(null);
+    setVaultDocument(null);
+    setSelectedId(id);
+    setOpenTabs((prev) => openTab(prev, { kind: "page", id }).tabs);
+  }, []);
+
+  /** 当前激活 Tab 的 key：page tab ↔ selectedId 且无文档选中；doc tab ↔ selectedDocumentName。 */
+  const activeWikiTabKey = selectedDocumentName
+    ? tabKey({ kind: "doc", name: selectedDocumentName })
+    : selectedId
+      ? tabKey({ kind: "page", id: selectedId })
+      : null;
+
+  /** 激活已有 Tab：doc Tab 总是重新走 loadVaultDocument 拉取最新内容。 */
+  const activateWikiTab = useCallback(
+    (tab: WikiOpenTab) => {
+      if (tab.kind === "page") {
+        openPageTab(tab.id);
+      } else {
+        void loadVaultDocument(tab.name);
+      }
+    },
+    [openPageTab, loadVaultDocument],
+  );
+
+  /** 关闭 Tab：web 端 wiki 只读无编辑，关闭无需确认。 */
+  const closeWikiTab = useCallback(
+    (key: string) => {
+      const { tabs: nextTabs, nextActiveKey } = closeTab(openTabs, key, activeWikiTabKey);
+      setOpenTabs(nextTabs);
+      // 关闭的不是激活 Tab 时，选中态保持不变。
+      if (nextActiveKey === activeWikiTabKey) return;
+      if (!nextActiveKey) {
+        setSelectedId(null);
+        setSelectedDocumentName(null);
+        setVaultDocument(null);
+        return;
+      }
+      const nextTab = nextTabs.find((t) => tabKey(t) === nextActiveKey);
+      if (!nextTab) return;
+      if (nextTab.kind === "page") {
+        setSelectedDocumentName(null);
+        setVaultDocument(null);
+        setSelectedId(nextTab.id);
+      } else {
+        void loadVaultDocument(nextTab.name);
+      }
+    },
+    [openTabs, activeWikiTabKey, loadVaultDocument],
+  );
+
+  /** Tab 标题：page 用页面标题（详情缓存优先），doc 用固定文案。 */
+  const wikiTabTitles = useMemo(() => {
+    const titles: Record<string, string> = {};
+    for (const tab of openTabs) {
+      if (tab.kind === "page") {
+        titles[tabKey(tab)] =
+          pageDetails[tab.id]?.title ?? pages.find((p) => p.id === tab.id)?.title ?? tab.id;
+      } else {
+        titles[tabKey(tab)] = vaultDocumentLabel(tab.name);
+      }
+    }
+    return titles;
+  }, [openTabs, pageDetails, pages]);
+
   /**
    * 点击正文 [[Wiki 双链]]：先按标题/别名在已加载页面里精确匹配，
    * 找不到再走搜索接口兜底（对齐桌面端 resolveAndOpenWikiPage）。
    */
   const handleWikiLink = useCallback(
     async (title: string) => {
-      const openPage = (pageId: string) => {
-        setSelectedDocumentName(null);
-        setVaultDocument(null);
-        setSelectedId(pageId);
-      };
       const local = findPageByTitle(pages, title);
       if (local) {
-        openPage(local.id);
+        openPageTab(local.id);
         return;
       }
       try {
@@ -655,12 +973,12 @@ export default function WikiHub({
         setPageDetails((prev) => ({ ...prev, [target.id]: target }));
         setSourceTitles((prev) => ({ ...prev, ...(res.source_titles || {}) }));
         setSourceFiles((prev) => ({ ...prev, ...(res.source_files || {}) }));
-        openPage(target.id);
+        openPageTab(target.id);
       } catch (err) {
         setMessage(`打开 Wiki 页面失败：${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    [pages, kbId],
+    [pages, kbId, openPageTab],
   );
 
   useEffect(() => {
@@ -703,9 +1021,7 @@ export default function WikiHub({
       selectedIds,
       highlightedIds,
       onSelectPage: (p: WikiPage) => {
-        setSelectedDocumentName(null);
-        setVaultDocument(null);
-        setSelectedId(p.id);
+        openPageTab(p.id);
       },
       onToggleSelect: handleToggleSelect,
       onDelete: handleDelete,
@@ -730,7 +1046,10 @@ export default function WikiHub({
             kbId={kbId}
             pages={pages}
             selectedId={selectedId}
-            onSelectPage={(p) => setSelectedId(p.id)}
+            onSelectPage={(p) => {
+              // 与列表点击一致：清掉 vault 文档态，否则详情仍停在 Home.md/index.md
+              openPageTab(p.id);
+            }}
           />
         );
       case "timeline":
@@ -757,11 +1076,11 @@ export default function WikiHub({
     }
   };
 
-  const viewTabs: { key: WikiViewMode; label: string }[] = [
-    { key: "timeline", label: "时间" },
-    { key: "tree", label: "文件夹" },
-    { key: "type", label: "类型" },
-    { key: "graph", label: "图谱" },
+  const viewTabs: { key: WikiViewMode; label: string; icon: WikiIconName }[] = [
+    { key: "timeline", label: "时间", icon: "history" },
+    { key: "tree", label: "文件夹", icon: "folder" },
+    { key: "type", label: "类型", icon: "tags" },
+    { key: "graph", label: "图谱", icon: "graph" },
   ];
 
   return (
@@ -787,31 +1106,42 @@ export default function WikiHub({
             ))}
             {kbs.length === 0 && <option value="default">默认知识库</option>}
           </select>
-          <button className="wiki-card__btn" onClick={handleCreateKb} type="button">
-            新建知识库
+          <button className="wiki-card__btn" onClick={handleCreateKb} type="button" title="新建知识库" aria-label="新建知识库">
+            <WikiIcon name="plus" size={15} />
           </button>
           <button
             className="wiki-card__btn"
             onClick={handleDeleteKb}
             type="button"
             disabled={kbId === "default" || kbId === "tutorial"}
+            title="删除知识库"
+            aria-label="删除知识库"
           >
-            删除知识库
+            <WikiIcon name="trash" size={15} />
           </button>
           <div className="wiki-hub__bulk">
-            <button className="wiki-card__btn" onClick={handleSelectAll} type="button">
-              全选
+            <button className="wiki-card__btn" onClick={handleSelectAll} type="button" title="全选" aria-label="全选">
+              <WikiIcon name="check-square" size={15} />
             </button>
-            <button className="wiki-card__btn" onClick={handleDeselectAll} type="button" disabled={selectedIds.size === 0}>
-              取消全选
+            <button
+              className="wiki-card__btn"
+              onClick={handleDeselectAll}
+              type="button"
+              disabled={selectedIds.size === 0}
+              title="取消全选"
+              aria-label="取消全选"
+            >
+              <WikiIcon name="square" size={15} />
             </button>
             <button
               className="wiki-card__btn wiki-card__btn--danger"
               onClick={handleBulkDelete}
               type="button"
               disabled={selectedIds.size === 0}
+              title="删除选中"
+              aria-label="删除选中"
             >
-              删除选中
+              <WikiIcon name="trash" size={15} />
             </button>
           </div>
 
@@ -820,14 +1150,25 @@ export default function WikiHub({
             onClick={() => fileRef.current?.click()}
             type="button"
             disabled={!sessionId}
+            title="上传文件"
+            aria-label="上传文件"
           >
-            上传文件
+            <WikiIcon name="upload" size={15} />
+          </button>
+          <button
+            className={`wiki-card__btn ${browserOpen ? "wiki-card__btn--primary" : ""}`}
+            onClick={toggleBrowser}
+            type="button"
+            title={browserOpen ? "收起知识库面板" : "展开知识库面板"}
+            aria-label={browserOpen ? "收起知识库面板" : "展开知识库面板"}
+          >
+            <WikiIcon name="panel-right" size={15} />
           </button>
           <input
             ref={fileRef}
             type="file"
             multiple
-            style={{ display: "none" }}
+            style={HIDDEN_STYLE}
             accept=".txt,.md,.pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.bmp,.gif,.mp4,.mov,.webm,.avi,.mkv"
             onChange={(e) => {
               const files = e.target.files;
@@ -973,15 +1314,103 @@ export default function WikiHub({
         <div className="wiki-hub__empty">加载中…</div>
       ) : (
         <ResizablePanels
-          storageKey="wiki-hub-layout"
+          storageKey="wiki-hub-layout-v2"
           className="wiki-hub-layout__body"
         >
+          {/* 对话为主区域（flexible，不传 defaultWidth），知识库目录+详情收进右侧扩展面板 */}
+          <ResizablePanels.Panel id="chat" className="wiki-hub__chat">
+            <div className="wiki-chat-pane">
+              <header className="wiki-chat-pane__header">
+                <span className="wiki-chat-pane__title">
+                  Wiki 问答 · {kbs.find((kb) => kb.id === kbId)?.name || kbId}
+                </span>
+                <div className="wiki-chat-pane__actions">
+                  <button
+                    className="wiki-card__btn"
+                    type="button"
+                    onClick={handleNewChat}
+                    disabled={creatingChat || !sessionId}
+                    title="新建对话"
+                    aria-label="新建 Wiki 对话"
+                  >
+                    <WikiIcon name="plus" size={15} />
+                  </button>
+                  <div className="wiki-chat-history" ref={historyRef}>
+                    <button
+                      className={`wiki-card__btn ${historyOpen ? "wiki-card__btn--primary" : ""}`}
+                      type="button"
+                      onClick={toggleHistory}
+                      title="查看历史"
+                      aria-label="查看 Wiki 对话历史"
+                      aria-expanded={historyOpen}
+                    >
+                      <WikiIcon name="history" size={15} />
+                    </button>
+                    {historyOpen && (
+                      <div className="wiki-chat-history__popover" role="dialog" aria-label="Wiki 对话历史">
+                        <div className="wiki-chat-history__heading">历史对话</div>
+                        {historyLoading ? (
+                          <p className="wiki-chat-history__empty">正在加载…</p>
+                        ) : historySessions.length === 0 ? (
+                          <p className="wiki-chat-history__empty">暂无历史对话</p>
+                        ) : (
+                          historySessions.map((s) => (
+                            <div
+                              key={s.session_id}
+                              className={`wiki-chat-history__item ${s.session_id === sessionId ? "wiki-chat-history__item--active" : ""}`}
+                            >
+                              <button
+                                type="button"
+                                className="wiki-chat-history__item-main"
+                                onClick={() => handleSelectChat(s.session_id)}
+                              >
+                                <span className="wiki-chat-history__item-title">{s.title || "新对话"}</span>
+                                <span className="wiki-chat-history__item-time">
+                                  {s.updated_at ? new Date(s.updated_at * 1000).toLocaleString() : ""}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                className="wiki-chat-history__item-delete"
+                                onClick={() => handleDeleteChat(s.session_id)}
+                                title="删除对话"
+                                aria-label="删除 Wiki 对话"
+                              >
+                                <WikiIcon name="trash" size={13} />
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </header>
+              {sessionId ? (
+                <ChatPanel {...chatProps} />
+              ) : (
+                <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
+              )}
+            </div>
+          </ResizablePanels.Panel>
+
+          {browserOpen && (
           <ResizablePanels.Panel
-            id="tree"
-            defaultWidth={320}
-            minWidth={180}
-            maxWidth={900}
-            className="wiki-tree"
+            id="browser"
+            defaultWidth={500}
+            minWidth={360}
+            maxWidth={1100}
+            className={`wiki-browser ${viewMode === "graph" ? "wiki-browser--graph" : ""}`}
+          >
+          <div
+            className="wiki-browser__catalog wiki-tree"
+            style={
+              viewMode === "graph"
+                ? graphCanvasWidth !== null
+                  ? { flex: `0 0 ${graphCanvasWidth}px` }
+                  : undefined
+                : { flex: `0 0 ${catalogWidth}px` }
+            }
           >
             <div className="wiki-view-switcher">
               {viewTabs.map((tab) => (
@@ -990,8 +1419,10 @@ export default function WikiHub({
                   className={`wiki-view-switcher__tab ${viewMode === tab.key ? "wiki-view-switcher__tab--active" : ""}`}
                   onClick={() => setViewMode(tab.key)}
                   type="button"
+                  title={tab.label}
+                  aria-label={tab.label}
                 >
-                  {tab.label}
+                  <WikiIcon name={tab.icon} size={15} />
                 </button>
               ))}
             </div>
@@ -1008,7 +1439,7 @@ export default function WikiHub({
                   </svg>
                 </div>
                 <p className="wiki-tree__empty-text">知识库还没有内容</p>
-                <p className="wiki-tree__empty-hint">点击右上角「上传」，或直接拖拽文件到右侧问答栏</p>
+                <p className="wiki-tree__empty-hint">点击右上角「上传」，或直接拖拽文件到左侧问答栏</p>
               </div>
             ) : (
               renderLeftView()
@@ -1017,14 +1448,33 @@ export default function WikiHub({
               <div
                 ref={loadMoreRef}
                 className="wiki-tree__load-more"
-                style={{ padding: "12px", textAlign: "center", color: "var(--text-3)", fontSize: "12px" }}
+                style={LOAD_MORE_HINT_STYLE}
               >
                 {loadingMore ? "加载中…" : "滚动加载更多"}
               </div>
             )}
-          </ResizablePanels.Panel>
+          </div>
 
-          <ResizablePanels.Panel id="main" className="wiki-panel">
+          <div
+            className="wiki-browser__sash"
+            onMouseDown={viewMode === "graph" ? handleGraphSashDown : handleCatalogSashDown}
+            onDoubleClick={viewMode === "graph" ? handleGraphSashReset : handleCatalogSashReset}
+            role="separator"
+            aria-label="调整目录宽度"
+            aria-orientation="vertical"
+            title={viewMode === "graph" ? "拖拽调整图谱宽度，双击恢复弹性比例" : "拖拽调整目录宽度，双击复位"}
+          />
+
+          <div className="wiki-browser__detail wiki-panel">
+            {/* 已打开页面/文档的 Tab 栏：固定在详情面板顶部，内容区独立滚动 */}
+            <WikiPageTabs
+              tabs={openTabs}
+              activeKey={activeWikiTabKey}
+              titles={wikiTabTitles}
+              onActivate={activateWikiTab}
+              onClose={closeWikiTab}
+            />
+            <div className="wiki-browser__detail-body">
             {selectedDocumentName ? (
               vaultDocument ? (
                 <div className="wiki-page-view wiki-page-view--inline">
@@ -1078,7 +1528,7 @@ export default function WikiHub({
                 sourceFiles={sourceFiles}
                 kbId={kbId}
                 inline
-                onNavigate={(pageId) => setSelectedId(pageId)}
+                onNavigate={(pageId) => openPageTab(pageId)}
                 onWikiLink={handleWikiLink}
                 pages={pages}
                 relationPages={relationPages[selectedPage.id] ?? []}
@@ -1088,21 +1538,10 @@ export default function WikiHub({
                 <p>选择左侧页面查看详情</p>
               </div>
             )}
+            </div>
+          </div>
           </ResizablePanels.Panel>
-
-          <ResizablePanels.Panel
-            id="chat"
-            defaultWidth={360}
-            minWidth={260}
-            maxWidth={600}
-            className="wiki-hub__chat"
-          >
-            {sessionId ? (
-              <ChatPanel {...chatProps} />
-            ) : (
-              <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
-            )}
-          </ResizablePanels.Panel>
+          )}
         </ResizablePanels>
       )}
 

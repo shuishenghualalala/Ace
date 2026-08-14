@@ -17,6 +17,7 @@ from crew.core.types import ChatResponse, ToolCall
 from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.state.session_store import SQLiteSessionStore
+from crew.state.home import task_workspace_path
 from crew.state.workspace_store import SQLiteWorkspaceStore
 from crew.tools.registry import Registry
 
@@ -48,6 +49,40 @@ def test_default_workspace_protected(tmp_path):
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
     with pytest.raises(ValueError):
         store.delete("default")
+
+
+def test_builtin_wiki_workspace_auto_created(tmp_path):
+    """wiki 内置工作空间：Wiki Agent 会话的 workspace_id="wiki" 查不到时幂等自建。"""
+    store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
+    ws = store.get("wiki", owner_account_id="owner-a")
+    assert ws["name"] == "Wiki 知识库"
+    assert ws["hidden"] is True
+    # 幂等，且按账号隔离
+    assert store.get("wiki", owner_account_id="owner-a")["id"] == "wiki"
+    assert all(w["id"] != "wiki" for w in store.list(owner_account_id="owner-b"))
+
+
+def test_builtin_wiki_workspace_protected(tmp_path):
+    store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
+    store.get("wiki")  # 先确保存在
+    with pytest.raises(ValueError):
+        store.delete("wiki")
+
+
+def test_unknown_workspace_still_missing(tmp_path):
+    """内置之外的 id 不放开校验：不存在仍抛 KeyError。"""
+    store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
+    with pytest.raises(KeyError):
+        store.get("ghost")
+
+
+def test_inmemory_store_mirrors_builtin_workspaces():
+    store = InMemoryWorkspaceStore()
+    assert store.get("wiki")["hidden"] is True
+    store.delete("wiki")  # mock 对齐既有 default 行为：内置空间删除被忽略
+    assert store.get("wiki")["id"] == "wiki"
+    with pytest.raises(KeyError):
+        store.get("ghost")
 
 
 def test_session_list_filtered_by_workspace(tmp_path):
@@ -128,13 +163,19 @@ def test_workspace_delete_can_be_wrapped_with_session_delete_in_one_transaction(
     assert [row["session_id"] for row in sess_store.list_sessions(ws["id"])] == ["s1"]
 
 
-def test_placeholder_title_replaced_on_save(tmp_path):
-    """占位标题「新会话」应在 save 时被首条 user 消息 fallback 覆盖。"""
+def test_save_title_fallback_defaults_to_first_user_message(tmp_path):
+    """save 的标题 fallback：占位标题「新会话」或未传 title_fallback（None 保持旧行为，
+    兼容未传该参数的调用方）时，都以首条 user 消息截断作为标题。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
+    # 占位标题被首条 user 消息覆盖
     store.ensure_session("s1", title="新会话")
     store.save("s1", [Message.user("帮我写一段 Python 脚本")])
     s1 = next(s for s in store.list_sessions() if s["session_id"] == "s1")
     assert s1["title"] == "帮我写一段 Python 脚本"
+    # title_fallback=None（旧行为）同样取首条 user 消息
+    store.save("s-legacy", [Message.user("帮我看看天气")], title_fallback=None)
+    row = next(s for s in store.list_sessions() if s["session_id"] == "s-legacy")
+    assert row["title"] == "帮我看看天气"
 
 
 def test_save_does_not_overwrite_workspace_id_on_update(tmp_path):
@@ -176,7 +217,9 @@ def test_save_title_fallback_none_keeps_legacy_behavior(tmp_path):
     assert row["title"] == "帮我看看天气"
 
 
-def test_app_enrich_workspace():
+def test_app_enrich_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(tmp_path / "task-output"))
     ws_store = InMemoryWorkspaceStore()
     ws = ws_store.create("空间X", instructions="遵守X规范", owner_account_id="local")
     app = CrewApp(
@@ -191,7 +234,39 @@ def test_app_enrich_workspace():
     env = Envelope.of("hi", session_id="s1", workspace_id=ws["id"], user_id="local")
     app._enrich_workspace(env)
     assert env.params["workspace_instructions"] == "遵守X规范"
-    assert env.params["workspace_root_path"] == ""
+    assert env.params["workspace_root_path"] == str(
+        task_workspace_path(ws["id"], owner_account_id="local")
+    )
+
+
+def test_app_enrich_workspace_fills_root_when_instructions_are_preassembled(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(tmp_path / "task-output"))
+    ws_store = InMemoryWorkspaceStore()
+    ws = ws_store.create("空间X", instructions="遵守X规范", owner_account_id="local")
+    app = CrewApp(
+        Config(),
+        FakeProvider(),
+        Registry(),
+        InMemorySessionStore(),
+        ws_store,
+        NullMemory(),
+        PluginManager(),
+    )
+    env = Envelope.of(
+        "hi",
+        session_id="s1",
+        workspace_id=ws["id"],
+        user_id="local",
+        params={"workspace_instructions": "已由上游装配"},
+    )
+
+    app._enrich_workspace(env)
+
+    assert env.params["workspace_instructions"] == "已由上游装配"
+    assert env.params["workspace_root_path"] == str(
+        task_workspace_path(ws["id"], owner_account_id="local")
+    )
 
 
 async def test_single_agent_writes_relative_artifacts_to_task_workspace(tmp_path, monkeypatch):

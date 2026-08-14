@@ -292,23 +292,21 @@ def test_role_layer_overrides_user_optin(tmp_path):
         # 弱模型漏传 text 时最容易发。text="" 单独仍是合法的（清空字段）。
         {"action": "type", "ref": "p1:e1", "text": "", "submit": True},
         {"action": "type", "ref": "p1:e1", "text": "   ", "submit": True},
+        # batch：嵌套、非白名单动作、空步骤、超上限、坏步骤参数、坏开关都要拒
+        {"action": "batch"},
+        {"action": "batch", "steps": []},
+        {"action": "batch", "steps": [{"action": "batch", "steps": [{"action": "press", "key": "Enter"}]}]},
+        {"action": "batch", "steps": [{"action": "navigate", "url": "https://example.com"}]},
+        {"action": "batch", "steps": [{"action": "snapshot"}]},
+        {"action": "batch", "steps": [{"action": "upload", "paths": ["a.txt"]}]},
+        {"action": "batch", "steps": [{"action": "click"}]},
+        {"action": "batch", "steps": ["click"]},
+        {"action": "batch", "steps": [{"action": "press", "key": "Enter"}] * 21},
+        {"action": "batch", "steps": [{"action": "press", "key": "Enter"}], "stop_on_error": "yes"},
     ],
 )
 def test_validate_args_rejects_invalid_combinations(args):
     assert validate_args(args) is not None
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        # text="" 且不提交 —— 清空字段，合法
-        {"action": "type", "ref": "p1:e1", "text": "", "submit": False},
-        # 有内容 + 提交 —— 正常的搜索
-        {"action": "type", "ref": "p1:e1", "text": "工单", "submit": True},
-    ],
-)
-def test_type_empty_text_is_only_rejected_together_with_submit(args):
-    assert validate_args(args) is None
 
 
 @pytest.mark.parametrize(
@@ -369,6 +367,8 @@ def test_type_empty_text_is_only_rejected_together_with_submit(args):
             "submit": True,
         },
         {"action": "type", "ref": "p1:e1", "text": ""},
+        # 有内容 + 提交 —— 正常的搜索
+        {"action": "type", "ref": "p1:e1", "text": "工单", "submit": True},
         {"action": "select", "ref": "p1:e1", "values": ["one", "two"]},
         {"action": "select", "ref": "p1:e1", "values": []},
         {"action": "select", "ref": "p1:e1", "values": [""]},
@@ -423,6 +423,18 @@ def test_type_empty_text_is_only_rejected_together_with_submit(args):
         {"action": "dialog_dismiss"},
         {"action": "takeover"},
         {"action": "pause"},
+        {
+            "action": "batch",
+            "steps": [
+                {"action": "type", "ref": "p1:e1", "text": "工单", "submit": True},
+                {"action": "click", "ref": "p1:e2"},
+            ],
+        },
+        {
+            "action": "batch",
+            "steps": [{"action": "scroll", "direction": "down"}],
+            "stop_on_error": False,
+        },
     ],
 )
 def test_validate_args_accepts_every_supported_action(args):
@@ -606,6 +618,7 @@ def test_click_schema_keeps_ref_and_coordinate_modes_mutually_exclusive():
 def test_action_mapping_covers_all_logical_tools():
     logical_names = {logical for logical, _sub in _ACTION_LOGICAL.values()}
     assert logical_names == _OLD_BROWSER_TOOLS | {
+        "browser_batch",
         "browser_evaluate",
         "browser_network_request",
         "browser_network_requests",
@@ -729,6 +742,91 @@ async def test_find_invalid_regex_preserves_host_error_code(plugin_tool, ctx_var
 
     assert caught.value.code == "invalid_find_query"
     assert "Invalid regular expression" in str(caught.value)
+
+
+async def test_batch_executes_steps_with_one_final_observation(plugin_tool, ctx_vars):
+    tool, _manager, driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+    snapshots_after_navigate = sum(
+        command == "snapshot" for command, _args in driver.calls
+    )
+
+    result = await tool.handler(
+        {
+            "action": "batch",
+            "steps": [
+                {"action": "type", "ref": "p1:e18", "text": "九寨沟"},
+                {"action": "click", "ref": "p1:e17"},
+            ],
+        }
+    )
+
+    assert result.startswith("<browser_action_result>")
+    assert "action: batch" in result
+    assert "status: success" in result
+    assert "steps: 2/2" in result
+    assert "step 1/2 type: ok" in result
+    # 末步的后置 snapshot 作为整批最终观察原样附上。
+    assert "fresh_snapshot: true" in result
+    # 中间步骤不重新观察：全程只有 navigate 一次 + 末步一次 snapshot。
+    assert (
+        sum(command == "snapshot" for command, _args in driver.calls)
+        == snapshots_after_navigate + 1
+    )
+    # 步骤按序下发到宿主（原生 ref）；中间步的 ref 来自同一个 p1 generation。
+    assert ("fill", ("@e18", "九寨沟")) in driver.calls
+    assert ("click", ("@e17",)) in driver.calls
+
+
+async def test_batch_aborts_at_failing_step_and_reports_breakpoint(plugin_tool, ctx_vars):
+    tool, _manager, driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+
+    with pytest.raises(BrowserDriverError) as caught:
+        await tool.handler(
+            {
+                "action": "batch",
+                "steps": [
+                    {"action": "click", "ref": "p1:e17"},
+                    {"action": "click", "ref": "p1:e99"},  # 不存在的 ref
+                    {"action": "click", "ref": "p1:e18"},
+                ],
+            }
+        )
+
+    message = str(caught.value)
+    assert "action: batch" in message
+    assert "status: partial" in message
+    assert "completed_count: 1" in message
+    assert "failed_step: 2/3" in message
+    # 第三步未执行：宿主只收到一次 click。
+    assert sum(command == "click" for command, _args in driver.calls) == 1
+    # 延后观察标志已复位（finally）：失败步未触发重新观察（无 code 不走 stale-ref
+    # 重观察分支），generation 仍是 p1；之后的 mutation 照常回传后置 snapshot。
+    recovered = await tool.handler({"action": "click", "ref": "p1:e17"})
+    assert "fresh_snapshot: true" in recovered
+
+
+async def test_batch_continue_on_error_collects_per_step_status(plugin_tool, ctx_vars):
+    tool, _manager, _driver, _prefs = plugin_tool
+    await tool.handler({"action": "navigate", "url": "https://example.com"})
+
+    result = await tool.handler(
+        {
+            "action": "batch",
+            "stop_on_error": False,
+            "steps": [
+                {"action": "click", "ref": "p1:e99"},  # 失败
+                {"action": "find", "text": "search"},  # 仍执行
+            ],
+        }
+    )
+
+    assert "status: partial" in result
+    assert "steps: 1/2" in result
+    assert "step 1/2 click: failed" in result
+    # 末步（find）结果原文附上。
+    assert "Found 1 match" in result
 
 
 @pytest.mark.parametrize(
@@ -1045,20 +1143,20 @@ async def test_official_mouse_resize_and_drop_actions_dispatch_exact_wire(
         }
     )
     assert "fresh_snapshot: true" in dropped
-    assert (
-        "drop",
-        (
-            "@e18",
-            "--path",
-            str(upload),
-            "--data",
-            "text/plain",
-            "--path",
-            "--data",
-            "text/uri-list",
-            "https://example.com/item",
-        ),
-    ) in driver.calls
+    drop_call = next(call for call in reversed(driver.calls) if call[0] == "drop")
+    staged_path = Path(drop_call[1][2])
+    assert drop_call[1][:2] == ("@e18", "--path")
+    assert staged_path.name == upload.name
+    assert "approved-uploads" in staged_path.parts
+    assert drop_call[1][3:] == (
+        "--data",
+        "text/plain",
+        "--path",
+        "--data",
+        "text/uri-list",
+        "https://example.com/item",
+    )
+    assert not staged_path.exists()
 
     latest_ref = re.findall(r"\[ref=(p\d+:e18)\]", dropped)[-1]
     await tool.handler({"action": "drop", "ref": latest_ref, "data": {}})

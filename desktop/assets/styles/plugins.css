@@ -6,24 +6,24 @@
 .plugins-list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--mw-space-3);
 }
 
 .plugin-item {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 16px 18px;
-    background: var(--surface);
-    border: 1px solid rgba(71, 125, 247, 0.12);
-    border-radius: 18px;
-    box-shadow: 0 14px 28px rgba(26, 34, 51, 0.06);
-    transition: all .15s;
+    gap: var(--mw-space-3);
+    padding: var(--mw-space-4) var(--mw-space-4);
+    background: var(--mw-bg-surface);
+    border: 1px solid color-mix(in srgb, var(--mw-status-info) 12%, transparent);
+    border-radius: var(--mw-radius-4);
+    box-shadow: 0 14px 28px color-mix(in srgb, var(--mw-status-info) 6%, transparent);
+    transition: var(--mw-transition-interactive);
     overflow: hidden;
 }
 
 .plugin-item:hover {
-    border-color: rgba(71, 125, 247, 0.32);
+    border-color: color-mix(in srgb, var(--mw-status-info) 32%, transparent);
     transform: translateY(-1px);
 }
 
@@ -31,14 +31,14 @@
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--mw-space-3);
     flex-wrap: wrap;
 }
 
 .plugin-info {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--mw-space-1);
     min-width: 0;
     flex: 1;
 }
@@ -46,78 +46,78 @@
 .plugin-title-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--mw-space-2);
     flex-wrap: wrap;
 }
 
 .plugin-name {
-    font-size: var(--font-md);
+    font-size: var(--mw-type-body-size);
     font-weight: 700;
-    color: var(--tx);
+    color: var(--mw-text-primary);
 }
 
 .plugin-version {
-    font-size: var(--font-xs);
-    color: var(--tx3);
-    font-family: var(--mono);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-muted);
+    font-family: var(--mw-font-mono);
 }
 
 .plugin-desc {
-    font-size: var(--font-sm);
-    color: var(--tx2);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-secondary);
     line-height: 1.6;
     word-break: break-word;
 }
 
 .plugin-path {
-    font-size: var(--font-xs);
-    color: var(--tx3);
-    font-family: var(--mono);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-muted);
+    font-family: var(--mw-font-mono);
     word-break: break-all;
-    padding-top: 8px;
-    border-top: 1px dashed rgba(71, 125, 247, 0.14);
+    padding-top: var(--mw-space-2);
+    border-top: 1px dashed color-mix(in srgb, var(--mw-status-info) 14%, transparent);
 }
 
 .plugin-chip {
     display: inline-flex;
     align-items: center;
-    padding: 3px 8px;
-    border-radius: 999px;
-    font-size: var(--font-xs);
+    padding: var(--mw-space-1) var(--mw-space-2);
+    border-radius: var(--mw-radius-full);
+    font-size: var(--mw-type-caption-size);
     font-weight: 700;
 }
 
 .plugin-chip.is-online {
-    color: var(--green);
-    background: var(--green-dim);
+    color: var(--mw-status-success);
+    background: var(--mw-status-success-bg);
 }
 
 .plugin-chip.is-offline {
-    color: var(--tx2);
-    background: rgba(154, 163, 178, 0.14);
+    color: var(--mw-text-secondary);
+    background: color-mix(in srgb, var(--mw-text-primary) 14%, transparent);
 }
 
 .plugin-chip.is-neutral {
-    color: var(--accent);
-    background: rgba(71, 125, 247, 0.12);
+    color: var(--mw-action-primary);
+    background: color-mix(in srgb, var(--mw-status-info) 12%, transparent);
 }
 
 .plugin-chip.is-warn {
-    color: #b87300;
-    background: rgba(255, 184, 0, 0.14);
+    color: var(--mw-status-warning);
+    background: color-mix(in srgb, var(--mw-status-warning) 14%, transparent);
 }
 
 .plugin-chip.is-danger {
-    color: var(--red);
-    background: var(--red-dim);
+    color: var(--mw-status-danger);
+    background: var(--mw-status-danger-bg);
 }
 
 .plugin-uninstall-btn {
-    color: var(--red);
+    color: var(--mw-status-danger);
 }
 
 .plugin-uninstall-btn:hover {
-    background: var(--red-dim);
+    background: var(--mw-status-danger-bg);
 }
 
 .plugins-empty-state {
@@ -125,64 +125,64 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 40px;
+    padding: var(--mw-space-10);
     text-align: center;
 }
 
 .plugins-empty-icon {
-    font-size: var(--font-3xl);
-    margin-bottom: 12px;
+    font-size: var(--mw-type-page-size);
+    margin-bottom: var(--mw-space-3);
 }
 
 .plugins-empty-text {
-    font-size: var(--font-sm);
-    color: var(--tx3);
+    font-size: var(--mw-type-caption-size);
+    color: var(--mw-text-muted);
 }
 
 .plugin-install-section {
-    margin-top: 24px;
-    padding: 16px;
-    background: var(--bg1);
-    border-radius: var(--r2);
+    margin-top: var(--mw-space-6);
+    padding: var(--mw-space-4);
+    background: var(--mw-bg-surface);
+    border-radius: var(--mw-radius-4);
 }
 
 .plugin-install-title {
-    font-size: var(--font-md);
+    font-size: var(--mw-type-body-size);
     font-weight: 600;
-    color: var(--tx);
-    margin-bottom: 12px;
+    color: var(--mw-text-primary);
+    margin-bottom: var(--mw-space-3);
 }
 
 .plugin-install-actions {
     display: flex;
-    gap: 12px;
+    gap: var(--mw-space-3);
 }
 
 .plugin-status-badge {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: var(--font-xs);
+    gap: var(--mw-space-1);
+    padding: var(--mw-space-1) var(--mw-space-2);
+    border-radius: var(--mw-radius-4);
+    font-size: var(--mw-type-caption-size);
     font-weight: 500;
 }
 
 .plugin-status-badge.active {
-    background: var(--green-dim);
-    color: var(--green);
+    background: var(--mw-status-success-bg);
+    color: var(--mw-status-success);
 }
 
 .plugin-status-badge.inactive {
-    background: var(--bg2);
-    color: var(--tx3);
+    background: var(--mw-bg-subtle);
+    color: var(--mw-text-muted);
 }
 
 .plugin-status-badge.error {
-    background: var(--red-dim);
-    color: var(--red);
+    background: var(--mw-status-danger-bg);
+    color: var(--mw-status-danger);
 }
 
 .plugin-note {
-    color: #b87300;
+    color: var(--mw-status-warning);
 }

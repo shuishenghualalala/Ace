@@ -1,7 +1,8 @@
 /**
  * 后端历史 → 前端 ChatMessage 的纯映射（无 DOM / 无副作用）。
- * 包含 makeSessionTitle / guessAttachmentType / parseAttachmentMarkers /
- * mapBackendHistoryItem 等无副作用转换。
+ *
+ * 从 ui/index.ts 抽出（X2）：guessAttachmentType / parseAttachmentMarkers /
+ * mapBackendHistoryItem 原样搬迁，行为等价。
  */
 
 import {
@@ -151,7 +152,7 @@ export async function filterExistingTurnFileChanges(
 }
 
 /** 把后端 turn_file_changes 规范成前端 TurnFileChangeSummary。 */
-function normalizeTurnFileChanges(
+export function normalizeTurnFileChanges(
   raw: BackendHistoryFileChange[] | undefined,
 ): TurnFileChangeSummary[] | undefined {
   if (!raw?.length) return undefined;
@@ -162,14 +163,19 @@ function normalizeTurnFileChanges(
     if (isPlanDocumentPath(path)) continue;
     const status =
       f.status === 'added' || f.status === 'deleted' || f.status === 'modified' ? f.status : 'modified';
-    out.push({
+    const normalized = {
       path,
       name: typeof f.name === 'string' && f.name.trim() ? f.name : fileNameFromPath(path),
       added: typeof f.added === 'number' && Number.isFinite(f.added) ? f.added : 0,
       removed: typeof f.removed === 'number' && Number.isFinite(f.removed) ? f.removed : 0,
       status,
       ...(f.binary ? { binary: true } : {}),
-    });
+    } satisfies TurnFileChangeSummary;
+    // 与实时 reducer 保持一致：空文本文件的 metadata-only added 不形成可读改动卡。
+    if (!normalized.binary && normalized.status === 'added' && normalized.added === 0 && normalized.removed === 0) {
+      continue;
+    }
+    out.push(normalized);
   }
   return out.length > 0 ? out : undefined;
 }
@@ -246,7 +252,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
       duration: tc.duration != null ? Math.round(tc.duration * 1000) : 0,
     })),
   };
-  if (role === 'assistant') {
+  if (role === 'assistant' || role === 'team_internal') {
     // 落库摘要保留准确 +/-；terminal 结果用于补充未落库的最终文件。
     const persisted = normalizeTurnFileChanges(item.turn_file_changes);
     const inferred = inferTurnFileChangesFromToolCalls(
@@ -255,7 +261,10 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     const merged = new Map<string, TurnFileChangeSummary>();
     for (const file of persisted ?? []) merged.set(file.path, file);
     for (const file of inferred) if (!merged.has(file.path)) merged.set(file.path, file);
-    if (merged.size > 0) base.turnFileChanges = Array.from(merged.values());
+    if (merged.size > 0) {
+      base.turnFileChanges = Array.from(merged.values());
+      if (persisted?.length) base.turnFileChangesPersistedPaths = persisted.map((file) => file.path);
+    }
   }
   if (role === 'user') {
     const parsed = parseAttachmentMarkers(item.content);

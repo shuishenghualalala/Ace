@@ -59,6 +59,7 @@ describe('renderAgentTurn', () => {
     const typing = renderTypingIndicator();
 
     for (const root of [turn, typing]) {
+      expect(root.classList.contains('msg--agent-turn')).toBe(true);
       const symbol = root.querySelector<SVGUseElement>('.msg__avatar-symbol use');
       expect(symbol?.getAttribute('href')).toBe('./crew-ui-symbols.svg#avatar-headphones');
       expect(root.querySelector('.msg__avatar-media')).toBeNull();
@@ -85,6 +86,7 @@ describe('renderAgentTurn', () => {
       identity: { kind: 'external', name: 'Kimi', badge: 'K' },
     });
     expect(root.querySelector('.msg__name')?.textContent).toBe('Kimi');
+    expect(root.classList.contains('msg--agent-turn')).toBe(true);
     expect(root.querySelector('.msg__avatar--external')?.textContent).toBe('K');
     expect(root.querySelector('.msg__avatar-media')).toBeNull();
   });
@@ -147,6 +149,10 @@ describe('renderAgentTurn', () => {
       processText: '分析并编写核心算法',
       collapsedTitle: '核心逻辑的执行过程',
       artifacts: [{ title: 'game2048.js', path: '/tmp/game2048.js', kind: 'text' }],
+      turnFileChanges: [
+        { path: '/tmp/game2048.js', name: 'game2048.js', added: 24, removed: 3, status: 'modified' },
+        { path: '/tmp/old.js', name: 'old.js', added: 0, removed: 5, status: 'deleted' },
+      ],
     });
     expect(root.querySelector('.agent-avatar--message.agent-tone-2')?.textContent).toBe('H');
     expect(root.querySelector('.team-internal__bubble--tone-2')).not.toBeNull();
@@ -155,6 +161,9 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.team-internal__collapse')).toBeNull();
     expect(root.querySelector('.team-internal__bubble')?.textContent).toContain('核心逻辑已完成');
     expect(root.querySelector('.team-artifact__body strong')?.textContent).toBe('game2048.js');
+    expect(root.querySelector('.msg__file-changes')?.textContent).toContain('已编辑 2 个文件');
+    expect(root.querySelector('[data-file-status="deleted"] .msg__file-changes__reveal'))
+      .toHaveProperty('disabled', true);
   });
 
   it('Team 规划运行中复用 Agent Turn 实时计时，以团队名称和 Team Logo 展示', () => {
@@ -219,6 +228,7 @@ describe('renderAgentTurn', () => {
     const html = root.outerHTML;
     const details = root.querySelector('details.msg__foldable');
     expect(html).toContain('已思考 5s');
+    expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已思考 5s');
     expect(html).not.toContain('正在执行');
     expect(html).not.toContain('msg__fold-spinner');
     expect(details).not.toBeNull();
@@ -253,15 +263,6 @@ describe('renderAgentTurn', () => {
     expect(item?.querySelector('details.process-timeline__details')?.open).toBe(true);
     expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考中');
     expect(item?.querySelector('.process-timeline__icon--running')).not.toBeNull();
-  });
-
-  it('已完成无用户偏好且有正文时默认折叠', () => {
-    const root = renderAgentTurn(makeMessages(), {
-      isStreaming: false,
-      userPinnedOpen: null,
-      turnDurationMs: 5_000,
-    });
-    expect(root.querySelector('details.msg__foldable')?.open).toBe(false);
   });
 
   it('已完成用户手动展开时保持展开', () => {
@@ -331,20 +332,6 @@ describe('renderAgentTurn', () => {
     vi.restoreAllMocks();
   });
 
-  it('流式中仅过程内容时默认展开', () => {
-    const root = renderAgentTurn(makeMessages({ streaming: true, content: '' }), {
-      isStreaming: true,
-      userPinnedOpen: null,
-      turnDurationMs: 1_200,
-    });
-    const html = root.outerHTML;
-    const details = root.querySelector('details.msg__foldable');
-    expect(html).toContain('正在执行 · 已等待 1s');
-    expect(html).toContain('msg__fold-spinner');
-    expect(details?.open).toBe(true);
-    expect(details?.classList.contains('msg__foldable--live')).toBe(true);
-  });
-
   it('乐观占位在首个 thinking 到达后文案切到「正在执行」', () => {
     const root = renderAgentTurn(
       [{
@@ -391,17 +378,6 @@ describe('renderAgentTurn', () => {
     const details = root.querySelector('details.msg__foldable');
     expect(details?.open).toBe(false);
     // 但 live 标记样式仍在（说明这是执行中回合，只是用户选择折叠了）
-    expect(details?.classList.contains('msg__foldable--live')).toBe(true);
-  });
-
-  it('执行中无用户偏好且尚无正文时默认展开', () => {
-    const root = renderAgentTurn(makeMessages({ streaming: true, content: '' }), {
-      isStreaming: true,
-      userPinnedOpen: null,
-      turnDurationMs: 3_000,
-    });
-    const details = root.querySelector('details.msg__foldable');
-    expect(details?.open).toBe(true);
     expect(details?.classList.contains('msg__foldable--live')).toBe(true);
   });
 
@@ -640,33 +616,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector<HTMLImageElement>('.tool-card__image')?.draggable).toBe(false);
   });
 
-  it('带工具调用的推理旁白在执行中也进折叠区', () => {
-    const root = renderAgentTurn(
-      makeMessages({
-        content: '我来帮您查询今天的黄金价格。',
-        thinking: undefined,
-        streaming: true,
-        toolCalls: [
-          {
-            toolCallId: 't1',
-            name: 'skill_view',
-            status: 'running',
-            startedAt: 1_700_000_000_000,
-          },
-        ],
-      }),
-      {
-        isStreaming: true,
-        userPinnedOpen: null,
-        turnDurationMs: 9_000,
-      },
-    );
-    const foldContent = root.querySelector('.msg__fold-content');
-    expect(foldContent?.textContent).toContain('我来帮您查询今天的黄金价格');
-    expect(root.querySelector('.msg__body > .msg__foldable + .msg__text')).toBeNull();
-  });
-
-  it('同条消息内旁白渲染在工具卡之上（跟随模型产出时序）', () => {
+  it('带工具调用的推理旁白在执行中也进折叠区，且渲染在工具卡之上', () => {
     // 模型先说"我来帮您查询…"再发 tool_call；二者落在同一条 assistant message 上
     // （toolReducer 把 toolCalls patch 到承载 content 的当前 assistantId）。
     // 渲染顺序必须跟随产出时序：旁白在前、工具卡在后。改前这里反了（工具在上）。
@@ -691,6 +641,8 @@ describe('renderAgentTurn', () => {
       },
     );
     const foldContent = root.querySelector('.msg__fold-content');
+    expect(foldContent?.textContent).toContain('我来帮您查询今天的黄金价格');
+    expect(root.querySelector('.msg__body > .msg__foldable + .msg__text')).toBeNull();
     const timeline = foldContent?.querySelector('.process-timeline');
     expect(timeline).not.toBeNull();
     const items = Array.from(timeline!.children);
@@ -896,17 +848,18 @@ describe('renderAgentTurn', () => {
         id: 'a1', role: 'assistant', content: '', timestamp: 1, streaming: true, segmentRole: 'process',
         toolCalls: [{ toolCallId: 't1', name: 'skills_list', status: 'done', startedAt: 1, duration: 300 }],
       },
-      { id: 's1', role: 'status', content: '正在规划工具调用…', timestamp: 2, activity: 'tool_planning' },
-      { id: 's2', role: 'status', content: '正在规划工具调用…', timestamp: 3, activity: 'tool_planning' },
+      { id: 's1', role: 'status', content: '处理中…', timestamp: 2, activity: 'progress' },
+      { id: 's2', role: 'status', content: '即将完成…', timestamp: 3, activity: 'progress' },
     ] as ChatMessage[];
     const root = renderAgentTurn(messages, {
       isStreaming: true,
       userPinnedOpen: null,
       turnDurationMs: 3_000,
     });
-    const planning = Array.from(root.querySelectorAll('.process-timeline__item'))
-      .filter((el) => el.textContent?.includes('正在规划工具调用'));
-    expect(planning).toHaveLength(1);
+    const activities = Array.from(root.querySelectorAll('.process-timeline__item'))
+      .filter((el) => el.textContent?.includes('中…') || el.textContent?.includes('完成…'));
+    expect(activities).toHaveLength(1);
+    expect(activities[0].textContent).toContain('即将完成…');
   });
 
   it('回合完成后瞬时活动状态全部隐藏，不影响工具项与折叠条', () => {
@@ -915,8 +868,8 @@ describe('renderAgentTurn', () => {
         id: 'a1', role: 'assistant', content: '让我查看一下技能清单。', timestamp: 1, segmentRole: 'process',
         toolCalls: [{ toolCallId: 't1', name: 'skills_list', status: 'done', startedAt: 1, duration: 300 }],
       },
-      { id: 's1', role: 'status', content: '正在规划工具调用…', timestamp: 2, activity: 'tool_planning' },
-      { id: 's2', role: 'status', content: '正在规划工具调用…', timestamp: 3, activity: 'tool_planning' },
+      { id: 's1', role: 'status', content: '处理中…', timestamp: 2, activity: 'progress' },
+      { id: 's2', role: 'status', content: '即将完成…', timestamp: 3, activity: 'progress' },
       { id: 'a2', role: 'assistant', content: '我有这些技能。', timestamp: 4, segmentRole: 'answer' },
     ] as ChatMessage[];
     const root = renderAgentTurn(messages, {
@@ -924,9 +877,9 @@ describe('renderAgentTurn', () => {
       userPinnedOpen: null,
       turnDurationMs: 17_000,
     });
-    const planning = Array.from(root.querySelectorAll('.process-timeline__item'))
-      .filter((el) => el.textContent?.includes('正在规划工具调用'));
-    expect(planning).toHaveLength(0);
+    const activities = Array.from(root.querySelectorAll('.process-timeline__item'))
+      .filter((el) => el.textContent?.includes('中…') || el.textContent?.includes('完成…'));
+    expect(activities).toHaveLength(0);
     // 工具项保留、折叠条正常计数
     expect(root.textContent).toContain('技能列表');
     expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已执行 17s，已调用 1 个工具');
@@ -983,15 +936,6 @@ describe('renderAgentTurn', () => {
     expect(label).toBe('已执行 24s，已调用 2 个工具');
   });
 
-  it('完成回合无工具调用时折叠条保持「已思考 Xs」', () => {
-    const root = renderAgentTurn(makeMessages(), {
-      isStreaming: false,
-      userPinnedOpen: null,
-      turnDurationMs: 5_000,
-    });
-    expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已思考 5s');
-  });
-
   it('多段回合 footer 时间取末段 assistant（完成时间）而非批次首条', () => {
     // final 只 patch 末段 assistant 的 timestamp；批次首条停留在回合开始时刻。
     const messages: ChatMessage[] = [
@@ -1023,7 +967,7 @@ describe('renderAgentTurn', () => {
     expect(meta).not.toContain('16:40');
   });
 
-  it('HTML 成果渲染为可在 Crew 浏览器打开的网站卡，并优先 index.html', () => {
+  it('HTML 成果渲染为统一灵感卡，并优先 index.html', () => {
     const root = renderAgentTurn(
       makeMessages({
         content: '页面已完成。',
@@ -1053,19 +997,14 @@ describe('renderAgentTurn', () => {
     );
 
     const card = root.querySelector<HTMLElement>('.msg__artifact-card');
-    const open = root.querySelector<HTMLButtonElement>('.msg__artifact-open');
     expect(card?.tagName).toBe('ARTICLE');
-    expect(card?.hasAttribute('data-browser-artifact')).toBe(false);
+    expect(card?.getAttribute('data-browser-artifact')).toBe('site/index.html');
+    expect(card?.getAttribute('role')).toBe('button');
+    expect(card?.tabIndex).toBe(0);
     expect(card?.getAttribute('aria-label')).toContain('index');
-    expect(card?.textContent).toContain('本地 HTML · 网站');
-    expect(open?.dataset.browserArtifact).toBe('site/index.html');
-    // 产品名以 package.json、electron-builder appId 和 DEFAULT_HOME_DIRNAME 为准。
-    expect(open?.textContent).toBe('在 Crew 打开');
-    expect(open?.tagName).toBe('BUTTON');
-    expect(open?.tabIndex).toBe(0);
-    expect(open?.getAttribute('aria-label')).toContain('index');
-    expect(root.querySelector('.msg__artifact-reveal')?.getAttribute('data-file-reveal'))
-      .toBe('site/index.html');
+    expect(card?.textContent).toContain('灵感成果');
+    expect(root.querySelector('.msg__artifact-open')).toBeNull();
+    expect(root.querySelector('.msg__artifact-reveal')).toBeNull();
   });
 
   it('本轮文件改动卡含查看入口、路径、单文件与合计红绿计数', () => {

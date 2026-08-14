@@ -6,6 +6,7 @@ import AgentAvatarLogo from "./AgentAvatarLogo";
 import { AgentProcessFold } from "./AgentProcessTimeline";
 import MarkdownContent from "./MarkdownContent";
 import { PlanReviewCard } from "./PlanReviewPanel";
+import TurnFileChangesCard from "./TurnFileChangesCard";
 
 export interface AgentTurnIdentity {
   name: string;
@@ -13,6 +14,7 @@ export interface AgentTurnIdentity {
   role?: string;
   tone?: number;
   crewLogo?: boolean;
+  external?: boolean;
 }
 
 interface Props {
@@ -80,6 +82,7 @@ export default function AgentTurnBubble({
           <MarkdownContent content={response.content} isStreaming={response.streaming} />
         </div>
       ))}
+      <TurnFileChangesCard files={state.fileChanges} />
       {state.showTyping && (
         <div className="msg__text md-body typing-inline">
           <span />
@@ -105,7 +108,7 @@ export default function AgentTurnBubble({
           <AgentAvatarLogo />
         </div>
       ) : (
-        <span className={`agent-avatar agent-avatar--message agent-tone-${identity.tone ?? 0}`}>
+        <span className={`agent-avatar agent-avatar--message${identity.external ? ` agent-avatar--external agent-provider-tone-${identity.tone ?? 0}` : ` agent-tone-${identity.tone ?? 0}`}`}>
           {identity.badge?.trim() || "?"}
         </span>
       )}

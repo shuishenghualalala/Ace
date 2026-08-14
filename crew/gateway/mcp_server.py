@@ -275,6 +275,7 @@ def build_interaction_mcp_server(
             intent: str,
             content: str,
             node_id: str = "",
+            result_status: str = "",
             artifact_refs: list[str] | None = None,
             questions: list[dict[str, Any]] | None = None,
             title: str = "",
@@ -282,7 +283,8 @@ def build_interaction_mcp_server(
             """Send a governed mention inside the current Crew Team.
 
             Identity and role come from the server-side binding. Members use
-            submit/review/ask/handoff; only the Leader may assign or contact user.
+            submit/review/ask/handoff; submit requires result_status
+            pass/fail/blocked. Only the Leader may assign or contact user.
             """
             response = await asyncio.to_thread(
                 _post_internal,
@@ -294,6 +296,7 @@ def build_interaction_mcp_server(
                     "intent": intent,
                     "content": content,
                     "node_id": node_id,
+                    "result_status": result_status,
                     "artifact_refs": artifact_refs or [],
                     "questions": questions or [],
                     "title": title,

@@ -4,7 +4,7 @@
 1. 平台检测；
 2. 安装 CUA Driver 二进制；
 3. 安装系统依赖（Linux）；
-4. 按平台启动并保活 daemon；
+4. 启动并保活 daemon；
 5. 更新 config.yaml；
 6. 热重载 MCPClientManager。
 """
@@ -12,27 +12,30 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import platform
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from crew.state.logging import get_logger
+from crew.security.settings import strict_security_enabled
 
 log = get_logger("tools.cua_setup")
 
 
-# 官方安装脚本（macOS/Linux curl | bash / Windows irm | iex）
-_CUA_INSTALL_URL_POSIX = "https://cua.ai/driver/install.sh"
+# 安装脚本（Linux curl | bash / Windows irm | iex）
+_CUA_INSTALL_URL_LINUX = "https://cua.ai/driver/install.sh"
 _CUA_INSTALL_URL_WINDOWS = "https://cua.ai/driver/install.ps1"
-_CUA_MACOS_APP = Path("/Applications/CuaDriver.app")
 
 # 会强制动态链接器加载「打包内嵌」库（libssl/libcrypto 等）的环境变量。
 # gateway 是 PyInstaller --onedir 产物，其 bootloader 会把 _internal/ 写进
@@ -62,6 +65,26 @@ def _clean_system_env() -> dict[str, str]:
     for var in _LD_TAINT_VARS:
         env.pop(var, None)
     return env
+
+
+def _download_verified_installer(url: str, target: Path, expected_sha256: str) -> None:
+    """Download a small HTTPS installer script and verify its pinned SHA-256."""
+    if not url.lower().startswith("https://"):
+        raise RuntimeError("严格安全约束要求 CUA 安装脚本使用 HTTPS")
+    expected = expected_sha256.strip().lower()
+    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+        raise RuntimeError("CUA 安装脚本 SHA-256 配置格式无效")
+    request = urllib.request.Request(url, headers={"User-Agent": "Crew"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if not str(response.geturl()).lower().startswith("https://"):
+            raise RuntimeError("CUA 安装脚本重定向到了非 HTTPS 地址")
+        data = response.read(4 * 1024 * 1024 + 1)
+    if len(data) > 4 * 1024 * 1024:
+        raise RuntimeError("CUA 安装脚本超过 4 MiB 上限")
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        raise RuntimeError("CUA 安装脚本 SHA-256 校验失败")
+    target.write_bytes(data)
 
 
 @dataclass
@@ -173,16 +196,14 @@ class CuaDriverSetupService:
         # 1. 检测平台
         task.update_step("detect_platform", "running")
         plat = task.platform
-        if plat not in ("linux", "macos", "windows"):
+        if plat not in ("linux", "windows", "macos"):
             raise RuntimeError(f"不支持的操作系统: {plat}")
         task.update_step("detect_platform", "success", plat)
 
         # 2. 安装二进制
         task.update_step("install_binary", "running")
         binary_path = await self._ensure_binary(task, plat, force_reinstall)
-        version = await _run_command(
-            [binary_path, "--version"], timeout=10, env=_clean_system_env()
-        )
+        version = await _run_command([binary_path, "--version"], timeout=10, env=_clean_system_env())
         task.update_step("install_binary", "success", version.strip() or str(binary_path))
 
         # 3. 安装系统依赖（仅 Linux）
@@ -203,9 +224,7 @@ class CuaDriverSetupService:
         cfg.set_mcp_server(
             "cua-driver",
             {
-                # 安装脚本可能把程序写入当前 Gateway 尚未包含在 PATH 的目录。
-                # 使用本次安装解析到的绝对路径，确保热重载后即可启动 MCP。
-                "command": binary_path,
+                "command": "cua-driver",
                 "args": ["mcp"],
                 "env": {},
             },
@@ -216,7 +235,9 @@ class CuaDriverSetupService:
         # 6. 热重载 MCP
         task.update_step("reload_mcp", "running")
         await crew.reload_mcp_manager()
-        tool_names = [name for name in crew.registry.names() if name.startswith("cua-driver__")]
+        tool_names = [
+            name for name in crew.registry.names() if name.startswith("cua-driver__")
+        ]
         task.update_step("reload_mcp", "success", f"{len(tool_names)} tools registered")
 
         task.finish("success")
@@ -224,41 +245,79 @@ class CuaDriverSetupService:
     # ------------------------------------------------------------------ #
     # 平台相关
     # ------------------------------------------------------------------ #
-    async def _ensure_binary(self, task: SetupTask, plat: str, force_reinstall: bool) -> str:
+    async def _ensure_binary(
+        self, task: SetupTask, plat: str, force_reinstall: bool
+    ) -> str:
         binary = _find_cua_binary(plat)
-        macos_app = _find_cua_app() if plat == "macos" else None
-        if binary and not force_reinstall and (plat != "macos" or macos_app):
+        if binary and not force_reinstall:
             task.add_log(f"已找到 cua-driver: {binary}")
             return binary
 
-        if plat == "macos" and binary and not macos_app:
-            task.add_log("已找到 cua-driver 命令，但缺少 CuaDriver.app；将运行官方安装程序补齐应用")
-
         # Linux 冻结态优先用预制二进制：信创系统 glibc 太旧(buster 2.28)，
         # 联网 curl|bash 装的官方 gnu 版需 glibc≥2.30 跑不起来(GLIBC_2.29 not found)。
-        # 若下游 .deb 选择内嵌预制版，可兼容 glibc≤2.28，且不依赖联网下载。
+        # 预制版随 .deb 内嵌、glibc≤2.28 兼容，既不联网也不受 glibc 限制。
         # force_reinstall 时预制版也无法重装(它是打包产物)，直接复用即可。
         if plat == "linux" and getattr(sys, "frozen", False):
             prebaked = _find_cua_binary(plat)
             if prebaked:
                 task.add_log(f"使用预制 cua-driver（信创 glibc 兼容版）: {prebaked}")
                 return prebaked
-            task.add_log(
-                "未找到预制 cua-driver，回退联网下载（注意：信创系统可能因 glibc 过旧失败）"
-            )
+            task.add_log("未找到预制 cua-driver，回退联网下载（注意：信创系统可能因 glibc 过旧失败）")
 
         if force_reinstall and binary:
             task.add_log("force_reinstall=True，重新安装")
 
         if plat in ("linux", "macos"):
-            script_url = _CUA_INSTALL_URL_POSIX
+            # macOS 与 Linux 复用同一个 install.sh（curl|bash，bash 脚本，跨 *nix 通用）。
+            # 见 SKILL.md：「/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"」。
+            script_url = _CUA_INSTALL_URL_LINUX
+            checksum_env = "ACE_CUA_INSTALL_SHA256_LINUX"
+        else:
+            script_url = _CUA_INSTALL_URL_WINDOWS
+            checksum_env = "ACE_CUA_INSTALL_SHA256_WINDOWS"
+
+        strict_security = strict_security_enabled()
+        if strict_security:
+            checksum = os.getenv(checksum_env, "").strip()
+            if not checksum:
+                raise RuntimeError(
+                    f"严格安全约束已阻止未验证的 CUA 安装；请配置 {checksum_env} SHA-256"
+                )
+            with tempfile.TemporaryDirectory(prefix="crew-cua-") as temporary_dir:
+                suffix = ".sh" if plat == "linux" else ".ps1"
+                script_path = Path(temporary_dir) / f"install{suffix}"
+                await asyncio.to_thread(
+                    _download_verified_installer,
+                    script_url,
+                    script_path,
+                    checksum,
+                )
+                cmd = (
+                    ["/bin/bash", str(script_path)]
+                    if plat == "linux"
+                    else [
+                        "powershell",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_path),
+                    ]
+                )
+                task.add_log(f"执行已校验安装脚本: {script_url}")
+                await _run_command_streaming(
+                    cmd,
+                    timeout=300,
+                    stdout_cb=task.add_log,
+                    stderr_cb=lambda line: task.add_log(f"[stderr] {line}"),
+                    env=_clean_system_env(),
+                )
+        elif plat == "linux":
             cmd = [
                 "/bin/bash",
                 "-c",
-                f"curl -fsSL {shlex.quote(script_url)} | /bin/bash",
+                f'curl -fsSL {shlex.quote(script_url)} | bash',
             ]
         else:
-            script_url = _CUA_INSTALL_URL_WINDOWS
             cmd = [
                 "powershell",
                 "-ExecutionPolicy",
@@ -267,24 +326,21 @@ class CuaDriverSetupService:
                 f"irm {script_url} | iex",
             ]
 
-        task.add_log(f"下载安装脚本: {script_url}")
-        await _run_command_streaming(
-            cmd,
-            timeout=300,
-            stdout_cb=task.add_log,
-            stderr_cb=lambda line: task.add_log(f"[stderr] {line}"),
-            # curl 是系统二进制：剥离 LD_LIBRARY_PATH，避免加载打包的未打国密补丁 libssl
-            env=_clean_system_env(),
-        )
+        if not strict_security:
+            task.add_log(f"兼容模式下载安装脚本: {script_url}")
+            await _run_command_streaming(
+                cmd,
+                timeout=300,
+                stdout_cb=task.add_log,
+                stderr_cb=lambda line: task.add_log(f"[stderr] {line}"),
+                # curl 是系统二进制：剥离 LD_LIBRARY_PATH，避免加载打包的未打国密补丁 libssl
+                env=_clean_system_env(),
+            )
 
         # 安装后重新定位（gateway 进程 PATH 不会动态刷新，shutil.which 可能仍查不到）
         binary = _find_cua_binary(plat)
         if not binary:
             raise RuntimeError("安装完成后仍找不到 cua-driver 命令，请检查 PATH")
-        if plat == "macos" and not _find_cua_app():
-            raise RuntimeError(
-                "安装完成后仍找不到 /Applications/CuaDriver.app，请检查安装日志和目录权限"
-            )
         task.add_log(f"已定位 cua-driver: {binary}")
         return binary
 
@@ -334,13 +390,7 @@ class CuaDriverSetupService:
         if "gnome" in desktop:
             try:
                 await _run_command(
-                    [
-                        "gsettings",
-                        "set",
-                        "org.gnome.desktop.interface",
-                        "toolkit-accessibility",
-                        "true",
-                    ],
+                    ["gsettings", "set", "org.gnome.desktop.interface", "toolkit-accessibility", "true"],
                     timeout=10,
                     env=_clean_system_env(),
                 )
@@ -363,10 +413,8 @@ class CuaDriverSetupService:
             await self._start_daemon_linux(task, binary)
         elif plat == "macos":
             await self._start_daemon_macos(task, binary)
-        elif plat == "windows":
+        else:
             await self._start_daemon_windows(task, binary)
-        else:  # _do_setup 已做平台校验，此处仅作防御
-            raise RuntimeError(f"不支持的操作系统: {plat}")
 
     async def _start_daemon_linux(self, task: SetupTask, binary: str) -> None:
         """Linux 下启动 daemon。
@@ -391,14 +439,8 @@ class CuaDriverSetupService:
                     "WantedBy=default.target\n",
                     encoding="utf-8",
                 )
-                await _run_command(
-                    ["systemctl", "--user", "daemon-reload"], timeout=15, env=_clean_system_env()
-                )
-                await _run_command(
-                    ["systemctl", "--user", "enable", "--now", service_name],
-                    timeout=15,
-                    env=_clean_system_env(),
-                )
+                await _run_command(["systemctl", "--user", "daemon-reload"], timeout=15, env=_clean_system_env())
+                await _run_command(["systemctl", "--user", "enable", "--now", service_name], timeout=15, env=_clean_system_env())
                 task.add_log("已启用 systemd --user cua-driver 服务")
             except Exception as exc:  # noqa: BLE001
                 task.add_log(f"systemd 方式启动失败，回退直接启动: {exc}")
@@ -407,9 +449,7 @@ class CuaDriverSetupService:
         if not systemd_available:
             # 用 nohup 后台启动
             proc = await asyncio.create_subprocess_exec(
-                "nohup",
-                binary,
-                "serve",
+                "nohup", binary, "serve",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -421,21 +461,33 @@ class CuaDriverSetupService:
         await _wait_for_daemon(binary, timeout=30)
 
     async def _start_daemon_macos(self, task: SetupTask, binary: str) -> None:
-        """通过 CuaDriver.app 启动 macOS daemon，确保权限归属到稳定应用身份。"""
-        app = _find_cua_app()
-        if not app:
-            raise RuntimeError("未找到 /Applications/CuaDriver.app，无法安全启动 macOS CUA Driver")
+        """macOS 下启动 daemon。
 
-        await _run_command(
-            ["open", "-n", "-g", "-a", "CuaDriver", "--args", "serve"],
-            timeout=15,
+        install.sh 在 macOS 上安装为 .app bundle（CuaDriver.app），故用 ``open -a``
+        启动而非直接执行二进制（见 SKILL.md「open -n -g -a CuaDriver --args serve」）。
+        macOS 没有 Linux 的 systemd --user，也没有 Windows 的 autostart 动词
+        （PLATFORMS.md：「Linux 没有 macOS 上的 autostart 动词」），故直接后台起
+        CuaDriver.app 并等待 status 就绪。首次启动需用户在「系统设置 → 隐私与安全性」
+        授予辅助功能权限，否则 daemon 起来但 AX 调用不可用（不阻断安装流程）。
+        """
+        # 若已有 daemon 在跑则跳过（_start_daemon 入口已查过 status，这里兜底）
+        try:
+            status = await _run_command([binary, "status"], timeout=10, env=_clean_system_env())
+            if "running" in status.lower() or "ok" in status.lower():
+                task.add_log("macOS daemon 已在运行")
+                return
+        except Exception as exc:  # noqa: BLE001
+            task.add_log(f"macOS daemon 未运行: {exc}")
+
+        proc = await asyncio.create_subprocess_exec(
+            "open", "-n", "-g", "-a", "CuaDriver", "--args", "serve",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL,
             env=_clean_system_env(),
         )
-        task.add_log(f"已通过 {app} 启动 daemon")
-        task.add_log(
-            "首次使用请在“系统设置 → 隐私与安全性”中授予 CuaDriver 辅助功能权限；"
-            "使用截图、SOM 或视觉模式时还需授予屏幕录制权限"
-        )
+        task.add_log(f"macOS daemon 启动（CuaDriver.app），pid={proc.pid}")
+
         await _wait_for_daemon(binary, timeout=30)
 
     async def _start_daemon_windows(self, task: SetupTask, binary: str) -> None:
@@ -448,8 +500,7 @@ class CuaDriverSetupService:
 
         # 当前会话启动
         proc = await asyncio.create_subprocess_exec(
-            binary,
-            "serve",
+            binary, "serve",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             stdin=asyncio.subprocess.DEVNULL,
@@ -470,15 +521,11 @@ class CuaDriverSetupService:
         daemon_running = False
         if installed:
             try:
-                version = (
-                    await _run_command([binary, "--version"], timeout=10, env=_clean_system_env())
-                ).strip()
+                version = (await _run_command([binary, "--version"], timeout=10, env=_clean_system_env())).strip()
             except Exception:  # noqa: BLE001
                 pass
             try:
-                status_out = (
-                    await _run_command([binary, "status"], timeout=10, env=_clean_system_env())
-                ).strip()
+                status_out = (await _run_command([binary, "status"], timeout=10, env=_clean_system_env())).strip()
                 daemon_running = "running" in status_out.lower() or "ok" in status_out.lower()
             except Exception:  # noqa: BLE001
                 pass
@@ -490,7 +537,9 @@ class CuaDriverSetupService:
             "binary": binary,
             "version": version,
             "daemon_running": daemon_running,
-            "mcp_enabled": any(name.startswith("cua-driver__") for name in registry.names()),
+            "mcp_enabled": any(
+                name.startswith("cua-driver__") for name in registry.names()
+            ),
             "tools_registered": tool_names,
         }
 
@@ -566,16 +615,6 @@ def _exists_resolved(path: str) -> str | None:
     return None
 
 
-def _find_cua_app() -> str | None:
-    """定位 macOS CuaDriver.app；daemon 必须由该稳定应用身份启动。"""
-    try:
-        if _CUA_MACOS_APP.is_dir():
-            return str(_CUA_MACOS_APP)
-    except OSError:
-        return None
-    return None
-
-
 def _find_cua_binary(plat: str) -> str | None:
     """定位 cua-driver 可执行文件。
 
@@ -597,17 +636,13 @@ def _find_cua_binary(plat: str) -> str | None:
         Path.home() / ".local" / "bin" / "cua-driver",
         Path.home() / ".cargo" / "bin" / "cua-driver",
     ]
-    if plat == "macos":
-        candidates.insert(0, _CUA_MACOS_APP / "Contents" / "MacOS" / "cua-driver")
-    # 冻结态可选预置二进制：下游发行包可以把 cua-driver 放到
-    # _internal/runtimes/cua-driver/bin/（见 _bundled_runtime_paths）。官方 Crew
-    # 源码与自构建安装包不携带该第三方二进制，通常会继续走按需安装流程。
+    # 冻结态预制二进制：信创 deb 把 glibc≤2.28 兼容版 cua-driver 预制到
+    # _internal/runtimes/cua-driver/bin/（见 _bundled_runtime_paths）。联网装的
+    # 官方 gnu 版需 glibc≥2.30，信创系统跑不起来，故优先定位预制版。
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).parent
         # PyInstaller --onedir: exe 在 crew-gateway/，runtimes 在 _internal/runtimes/
-        candidates.insert(
-            0, exe_dir / "_internal" / "runtimes" / "cua-driver" / "bin" / "cua-driver"
-        )
+        candidates.insert(0, exe_dir / "_internal" / "runtimes" / "cua-driver" / "bin" / "cua-driver")
     if plat == "windows":
         localappdata = os.environ.get("LOCALAPPDATA")
         if localappdata:
@@ -638,30 +673,40 @@ def _is_at_spi_installed() -> bool:
             text=True,
             timeout=5,
             check=False,
+            env=_clean_system_env(),
         )
         return result.returncode == 0
     except Exception:  # noqa: BLE001
         return False
 
 
-async def _run_command(cmd: list[str], timeout: float, env: dict[str, str] | None = None) -> str:
-    """运行命令并返回 stdout。
+async def _run_command(
+    cmd: list[str],
+    timeout: float,
+    env: dict[str, str] | None = None,
+) -> str:
+    """运行安装期/检测命令并返回 stdout。
+
+    CUA Driver 安装是本地安装期操作（见 mcp_setup.py 路由说明的"本地操作"）：装二进制、
+    起 daemon、写本地 config，均为固定 argv 的宿主操作，**不是会话内模型命令**。因此这里
+    直接宿主执行，不走会话边界 ``execute_captured``（后者在无 launch 时 fail-closed，会把
+    安装期检测/安装路径打成 500）。会话内的 managed CUA 流式命令仍由 ``_run_command_streaming``
+    经 ``execute_captured`` 走 broker。
 
     ``env`` 默认 None（继承 gateway 全环境，含打包内嵌库路径）。调用 *系统* 二进制
     （curl/apt/gsettings/systemctl 等）时必须传 ``_clean_system_env()``，否则
     PyInstaller bootloader 泄漏的 LD_LIBRARY_PATH 会让系统 libcurl 加载到打包的、
     未打国密补丁的 libssl → relocation error。
     """
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
     try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
         raise RuntimeError(f"命令超时: {' '.join(cmd)}")
 
     text = stdout.decode("utf-8", errors="replace").strip()
@@ -683,6 +728,16 @@ async def _run_command_streaming(
 
     ``env`` 同 ``_run_command``：调用系统二进制时传 ``_clean_system_env()``。
     """
+    from crew.security.launch import current_process_launch, execute_captured
+
+    launch = current_process_launch.get()
+    if launch is not None and launch.managed:
+        # 会话内 managed CUA 命令：经会话边界走 broker（含秘密脱敏）。
+        result = await execute_captured(tuple(cmd), cwd=Path.cwd().resolve(), timeout=timeout)
+        if stdout_cb is not None:
+            for line in result.stdout.splitlines():
+                stdout_cb(line)
+        return
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -690,9 +745,7 @@ async def _run_command_streaming(
         env=env,
     )
 
-    async def _read_stream(
-        stream: asyncio.StreamReader | None, cb: Callable[[str], None] | None
-    ) -> None:
+    async def _read_stream(stream: asyncio.StreamReader | None, cb: Callable[[str], None] | None) -> None:
         if stream is None or cb is None:
             return
         while True:

@@ -306,6 +306,23 @@ def _is_live_connected(name: str, detail: dict[str, Any]) -> bool:
     return bool(detail.get("connected"))
 
 
+def _platform_error_kind(name: str, error: Any) -> str:
+    """把可安全展示的连接异常归类，供前端给出可执行提示。"""
+    if name.strip().lower() != "weixin":
+        return ""
+    message = str(error or "").lower()
+    network_markers = (
+        "cannot connect to host",
+        "nodename nor servname provided",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "connection refused",
+        "network is unreachable",
+        "connection timed out",
+    )
+    return "network" if any(marker in message for marker in network_markers) else ""
+
+
 async def _wait_for_live_connected(channel_manager, name: str) -> tuple[bool, str]:
     """连接后等待真实握手成功；无探针的渠道（测试桩）直接通过。"""
     if not _channel_supports_live_probe(channel_manager, name):
@@ -342,6 +359,10 @@ def _enrich_platform_row(
     if detail:
         row["detail"] = _redact(detail, secret_values)
     row["live_connected"] = _is_live_connected(name, detail) if detail else False
+    error = row.get("error") or detail.get("last_error")
+    error_kind = _platform_error_kind(name, error)
+    if error_kind:
+        row["error_kind"] = error_kind
     return row
 
 

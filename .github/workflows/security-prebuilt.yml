@@ -1,0 +1,151 @@
+name: security-prebuilt
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            executable: ace-security-runtime
+          - platform: darwin-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            executable: ace-security-runtime
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            executable: ace-security-runtime
+          - platform: win32-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            executable: ace-security-runtime.exe
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: cargo build --manifest-path security-runtime/Cargo.toml --release --locked --target ${{ matrix.target }}
+      - name: Prepare Windows sandbox identity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:ACE_SECURITY_STATE_DIR | Out-Null
+          & "security-runtime/target/${{ matrix.target }}/release/ace-security-runtime.exe" --windows-setup $env:ACE_SECURITY_STATE_DIR
+          if ($LASTEXITCODE -ne 0) { throw 'Windows sandbox setup failed' }
+        env:
+          ACE_SECURITY_STATE_DIR: ${{ runner.temp }}/ace-security-state
+      - run: cargo test --manifest-path security-runtime/Cargo.toml --release --locked --target ${{ matrix.target }}
+        env:
+          ACE_REQUIRE_NATIVE_TESTS: "1"
+          ACE_WINDOWS_NATIVE_STATE_DIR: ${{ runner.temp }}/ace-security-state
+          ACE_SECURITY_STATE_DIR: ${{ runner.temp }}/ace-security-state
+      - name: Sign macOS helper when Developer ID is configured
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
+        shell: bash
+        run: |
+          keychain="$RUNNER_TEMP/ace-signing.keychain-db"
+          certificate="$RUNNER_TEMP/ace-signing.p12"
+          printf '%s' "$MACOS_CERTIFICATE" | openssl base64 -d -A > "$certificate"
+          security create-keychain -p temporary "$keychain"
+          security unlock-keychain -p temporary "$keychain"
+          security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temporary "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n '1s/.*"\(.*\)".*/\1/p')"
+          test -n "$identity"
+          codesign --force --options runtime --timestamp --keychain "$keychain" --sign "$identity" "security-runtime/target/${{ matrix.target }}/release/ace-security-runtime"
+      - name: Sign Windows helper when Authenticode certificate is configured
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP 'ace-signing.pfx'
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $signtool) {
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $signtool) { throw 'signtool.exe was not found' }
+          & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:WINDOWS_CERTIFICATE_PASSWORD "security-runtime/target/${{ matrix.target }}/release/ace-security-runtime.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed' }
+      - name: Stage runtime
+        shell: bash
+        run: |
+          extra=()
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            extra=(--bwrap /usr/bin/bwrap --bwrap-license /usr/share/doc/bubblewrap/copyright --bwrap-version "$(dpkg-query -W -f='${Version}' bubblewrap)")
+          fi
+          node desktop/scripts/prepare-security-runtime.mjs \
+            --runtime "security-runtime/target/${{ matrix.target }}/release/${{ matrix.executable }}" \
+            --output "security-runtime/prebuilt/${{ matrix.platform }}" "${extra[@]}"
+      - run: node desktop/scripts/verify-security-runtime.mjs security-runtime/prebuilt/${{ matrix.platform }}
+      - name: Package prebuilt
+        shell: bash
+        run: tar -C security-runtime/prebuilt -czf "ace-security-runtime-${{ matrix.platform }}.tar.gz" "${{ matrix.platform }}"
+      - uses: actions/attest@v4
+        with:
+          subject-path: ace-security-runtime-${{ matrix.platform }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ace-security-runtime-${{ matrix.platform }}
+          path: ace-security-runtime-${{ matrix.platform }}.tar.gz
+      - name: Remove Windows sandbox identity
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: '& "security-runtime/target/${{ matrix.target }}/release/ace-security-runtime.exe" --windows-uninstall $env:ACE_SECURITY_STATE_DIR'
+        env:
+          ACE_SECURITY_STATE_DIR: ${{ runner.temp }}/ace-security-state
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create checksums
+        working-directory: release-assets
+        run: sha256sum ace-security-runtime-*.tar.gz > SHA256SUMS
+      - uses: actions/attest@v4
+        with:
+          subject-path: release-assets/SHA256SUMS
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber

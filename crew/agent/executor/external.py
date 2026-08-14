@@ -16,15 +16,17 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal
+from typing import Any, Literal
 
-from crew.agent.external.cli_adapter import ExternalCliConfig, ExternalCliError, run_external_cli
+from crew.agent.executor.base import AgentExecutor, ExecutionContext
 from crew.agent.external.acp_adapter import (
     AcpAdapterError,
     AcpPermissionRequest,
 )
+from crew.agent.external.cli_adapter import ExternalCliConfig, ExternalCliError, run_external_cli
 from crew.agent.external.codex_adapter import CodexAdapterError
 from crew.agent.external.runtime_adapter import (
     ExternalStreamEvent,
@@ -33,15 +35,24 @@ from crew.agent.external.runtime_adapter import (
     get_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import canonical_runtime_model_id
-from crew.agent.external.runtime_registry import resolve_runtime_adapter_id
+from crew.agent.external.runtime_registry import (
+    resolve_runtime_adapter_id,
+    resolve_runtime_credential_home_paths,
+    resolve_runtime_network_endpoints,
+)
+from crew.agent.file_changes import (
+    TurnFileChangeTracker,
+    persist_file_changes,
+    workspace_change_coordinator,
+)
 from crew.agent.skills import SkillActivation
-from crew.agent.executor.base import AgentExecutor, ExecutionContext
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import drain_followup_answer_messages
 from crew.core.runctx import current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.state.home import get_owner_runtime_home
-from crew.team.workspace_guard import classify_external_permission, check_workspace_guard
+from crew.security.models import AdditionalPermissionProfile
+from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +83,7 @@ class ExternalExecutorConfig:
     timeout: float = 120.0
     external_store: Any = None
     interaction_bridge: Any = None
+    plan_manager: Any = None
     crew_session_id: str = ""  # Team 模式可显式传 member_session_id 作为原生 session 绑定键
     display_session_id: str = ""  # Team 模式下 MCP/followup 应回到父 Team session
     control_session_id: str = ""  # TeamPlan/delegate 等控制面仍绑定当前 Team 运行 session
@@ -648,6 +660,8 @@ def _permission_question(
     normalized = str(tool_name or "").strip().lower()
     if operation == "read":
         action = "读取文件"
+    elif normalized == "file_delete":
+        action = "删除文件"
     elif operation == "write":
         action = "写入或修改文件"
     elif operation == "network":
@@ -853,6 +867,64 @@ class ExternalExecutor(AgentExecutor):
         self.config = _coerce(config, ExternalExecutorConfig)
 
     async def execute(self, ctx: ExecutionContext) -> AsyncIterator[ResponseChunk]:
+        """Run one external turn under an owned workspace change lease.
+
+        The wrapper is intentionally protocol-neutral: ACP/Codex/Hermes tool
+        events enrich exact path diffs, while CLI/client turns are completed by
+        the same before/after workspace snapshot.  The existing implementation
+        below remains focused on Runtime/session semantics.
+        """
+
+        cwd = str(ctx.cwd or self.config.cwd or ".")
+        async with workspace_change_coordinator.lease([cwd]):
+            tracker = TurnFileChangeTracker(cwd)
+            tool_arguments: dict[str, tuple[str, dict[str, Any]]] = {}
+            last_sequence = 0
+            emitted_terminal = False
+            async for chunk in self._execute_impl(ctx):
+                last_sequence = max(last_sequence, int(chunk.sequence or 0))
+                if chunk.kind == "tool":
+                    body = dict(chunk.body or {})
+                    tool_id = str(body.get("tool_call_id") or "")
+                    tool_name = str(body.get("name") or "")
+                    phase = str(body.get("phase") or "")
+                    if phase == "start":
+                        try:
+                            arguments = json.loads(str(body.get("args") or "{}"))
+                        except (json.JSONDecodeError, TypeError):
+                            arguments = {}
+                        if not isinstance(arguments, dict):
+                            arguments = {}
+                        if tool_id:
+                            tool_arguments[tool_id] = (tool_name, arguments)
+                        tracker.capture_tool_start(tool_name, arguments)
+                    elif phase in {"result", "error"}:
+                        saved_name, arguments = tool_arguments.get(tool_id, (tool_name, {}))
+                        tracker.capture_tool_end(saved_name or tool_name, arguments)
+                if chunk.kind in {"final", "error"} and not emitted_terminal:
+                    changes = tracker.finalize()
+                    if changes:
+                        is_team = bool(str((ctx.params or {}).get("team_session_id") or "").strip())
+                        files = changes
+                        if not is_team:
+                            files = persist_file_changes(
+                                self.config.plan_manager,
+                                ctx.session_id,
+                                changes,
+                                owner_account_id=current_owner_account_id.get(),
+                            )
+                        file_sequence = int(chunk.sequence or last_sequence + 1)
+                        chunk.sequence = file_sequence + 1
+                        yield ResponseChunk(
+                            ctx.request_id,
+                            kind="file_changes",
+                            body={"files": files},
+                            sequence=file_sequence,
+                        )
+                    emitted_terminal = True
+                yield chunk
+
+    async def _execute_impl(self, ctx: ExecutionContext) -> AsyncIterator[ResponseChunk]:
         if not self.config.external_agent_id:
             yield ResponseChunk.error(ctx.request_id, "ExternalExecutor 缺少 external_agent_id")
             return
@@ -878,6 +950,14 @@ class ExternalExecutor(AgentExecutor):
         prompt = ctx.query
         protocol = str(runtime.get("protocol") or "").lower()
         runtime_metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
+        credential_home_paths = resolve_runtime_credential_home_paths(
+            provider=provider,
+            metadata=runtime_metadata,
+        )
+        network_endpoints = resolve_runtime_network_endpoints(
+            provider=provider,
+            metadata=runtime_metadata,
+        )
         adapter_id = resolve_runtime_adapter_id(
             provider=provider,
             protocol=protocol,
@@ -1049,6 +1129,13 @@ class ExternalExecutor(AgentExecutor):
                             else []
                         )
                     )
+                    additional_permissions = (
+                        bridge.local_callback_permissions(interaction_binding)
+                        if mcp_servers
+                        and interaction_binding is not None
+                        and callable(getattr(bridge, "local_callback_permissions", None))
+                        else None
+                    )
                     dynamic_tools = (
                         bridge.dynamic_tool_specs(interaction_binding)
                         if use_dynamic_control_tools
@@ -1098,6 +1185,9 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=adapter_system_prompt,
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        credential_home_paths=credential_home_paths,
+                        network_endpoints=network_endpoints,
+                        additional_permissions=additional_permissions or AdditionalPermissionProfile(),
                         mcp_servers=mcp_servers,
                         dynamic_tools=dynamic_tools,
                         dynamic_tool_handler=dynamic_tool_handler,
@@ -1207,6 +1297,8 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=_external_system_prompt(agent, runtime, effective_model),
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        credential_home_paths=credential_home_paths,
+                        network_endpoints=network_endpoints,
                         timeout=self.config.timeout,
                     )
                 )

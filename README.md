@@ -3,7 +3,8 @@
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo.svg">
     <img src="assets/logo.svg" alt="Crew Logo" width="180">
   </picture>
-  <h1>Crew — 本地多智能体工作台</h1>
+  <h1>Crew — 开源版 WorkBuddy：住在你电脑里的 AI 打工人</h1>
+  <p><i>Open WorkBuddy: an open-source, local-first multi-agent workbench with skills, automation, a knowledge base, and your own models.</i></p>
   <p>
     <a href="https://github.com/shuishenghualalala/Ace/stargazers"><img src="https://img.shields.io/github/stars/shuishenghualalala/Ace?style=flat-square&color=F4D98B" alt="Stars"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
@@ -13,44 +14,52 @@
   
 </div>
 
-> 每天在 ChatGPT 和 Claude 之间来回切，文件散落各处，Agent 做完就忘，换个会话又要重新交代一遍——于是我们决定做一个能常驻本机、记住一切、还能组队干活的工作台。Crew 的名字就是这么来的：一群 Agent 像船员一样各司其职，你当船长。
+> 你是不是也这样：每天在 ChatGPT 和 Claude 之间反复横跳，文件散落各处，Agent 干完活转头就忘，换个会话还得把需求重新交代一遍？
+>
+> 我们受够了，于是搓了一个能常驻本机、记住一切、还能组队干活的工作台。Crew 的名字就是这么来的：一群 Agent 像船员一样各司其职，你当船长。🏴‍☠️
+>
+> 定位上，Crew 是开源版 WorkBuddy：和 WorkBuddy 一样，它是一个坐在你电脑里干活的 AI 同事——装技能、连服务、操作本地文件、接管浏览器、定时跑任务、多 Agent 并行协作；不同的是，Crew 完全开源（Apache 2.0）、数据全部留在本机，模型用你自己的 API Key，OpenAI 兼容与 Anthropic 协议均可接入。你的钥匙开你的门，就这么简单。
 
-### 能做什么
+### 🎬 能做什么
 
-早上打开 Crew，跟 Agent 说"帮我把下载文件夹按日期整理"，它直接动手。Wiki 里存着上周的会议纪要，Agent 能随时检索引用。想写一个需求文档？拉上 Explore Agent 做调研、Plan Agent 拆任务、Wiki Agent 归档，你只需要审核——Team 模式让多个 Agent 像真实团队一样并行协作。
+早上打开 Crew，丢下一句"帮我把下载文件夹按日期整理"，它直接动手，你连窗口都不用切。
 
-<div align="center">
-  <img src="assets/screenshot_web.png" alt="Crew Web UI" width="700">
-</div>
+Wiki 里存着上周的会议纪要和个人笔记，Agent 随取随用，再也不用一个背景讲三遍。
+
+想写需求文档？拉上 Explore Agent 做调研、Plan Agent 拆任务、Wiki Agent 归档，你只负责点头和摇头——Team 模式让多个 Agent 像真实团队一样并行协作。
+
+本机装好的 Codex、Claude Code、Kimi 也能一键接入当外援，谁家擅长什么就让谁上，不偏心。
 
 <div align="center">
   <img src="assets/screenshot_desktop.png" alt="Crew Desktop UI" width="700">
 </div>
 
 > [!NOTE]
-> 发布状态：源码预览版。接口和数据格式不承诺稳定，暂不建议直接用于关键生产环境。
-> 本版本以 Git 源码检出方式交付；尚未发布 PyPI/wheel 或正式安装器，`pyproject.toml`
-> 的构建产物不代表包含桌面端与 Web 端的完整发行包。
+> **发布状态：源码预览版。** 接口和数据格式不承诺稳定，暂不建议直接扛关键生产环境。
+> 目前只以 Git 源码检出方式交付，还没有 PyPI/wheel 或正式安装器——`pyproject.toml`
+> 的构建产物并不是包含桌面端与 Web 端的完整发行包，别被它骗了。
 
-## 目录
+## 📖 目录
 
-- [核心能力](#核心能力)
-- [为什么选择 Crew？](#为什么选择-crew)
-- [环境要求](#环境要求)
-- [快速开始](#快速开始)
-- [配置模型](#配置模型)
-- [可选的账号登录](#可选的账号登录)
-- [技能与插件](#技能与插件)
-- [其他启动方式](#其他启动方式)
-- [构建桌面发行包](#构建桌面发行包可选)
-- [验证安装](#验证安装)
-- [配置与本地数据](#配置与本地数据)
-- [代码结构](#代码结构)
-- [参与贡献](#参与贡献)
-- [安全提示](#安全提示)
-- [开源许可](#开源许可)
+- [✨ 核心能力](#-核心能力)
+- [🤔 为什么选择 Crew？](#-为什么选择-crew)
+- [🧰 环境要求](#-环境要求)
+- [🚀 快速开始](#-快速开始)
+- [🧠 配置模型](#-配置模型)
+- [🔐 账号与租户登录](#-账号与租户登录)
+- [🧩 技能与插件](#-技能与插件)
+- [🔧 其他启动方式](#-其他启动方式)
+- [📦 构建桌面发行包（可选）](#-构建桌面发行包可选)
+- [✅ 验证安装](#-验证安装)
+- [📁 配置与本地数据](#-配置与本地数据)
+- [🧱 代码结构](#-代码结构)
+- [🤝 参与贡献](#-参与贡献)
+- [🔒 安全提示](#-安全提示)
+- [📜 开源许可](#-开源许可)
 
-## 核心能力
+## ✨ 核心能力
+
+能聊、能记、能动手、能组队、能扩展。展开说就是这些——
 
 | 模块 | 能力 |
 |------|------|
@@ -65,7 +74,9 @@
 | Skill 自进化（实验性） | 从会话提取轨迹、分析 Skill 使用情况，并生成优化建议或新 Skill；默认关闭，完整周期可能写入用户 Skill，详见[自进化说明](crew/evolution/README.md) |
 | 安全与数据边界 | 默认仅监听本机、可选远程认证、owner 级数据隔离、本地密钥存储、工具访问控制与审批、浏览器网络/文件边界，以及 Desktop IPC 安全门禁 |
 
-## 为什么选择 Crew？
+## 🤔 为什么选择 Crew？
+
+因为数据该待在你的硬盘上，钥匙该攥在你手里。横向对比一下：
 
 | | Crew | OpenClaw | CodeBuddy Code |
 |---|:---:|:---:|:---:|
@@ -78,7 +89,9 @@
 | **浏览器** | ✅ 内置接管式浏览器 | ✅ 标签页 Copilot | ❌ |
 | **任务调度** | ✅ 后台任务 + 定时 | ✅ Cron | ❌ |
 
-## 环境要求
+## 🧰 环境要求
+
+门槛不高的啦：
 
 | 依赖 | 版本 |
 |------|------|
@@ -87,7 +100,9 @@
 | Node.js | 22.12 或更高；仅 Desktop / Web 开发需要 |
 | npm | 10 或更高；仅 Desktop / Web 开发需要 |
 
-## 快速开始
+## 🚀 快速开始
+
+从 clone 到跑起来，快过等一杯奶茶。
 
 ### 1. 安装后端与创建本地配置
 
@@ -131,7 +146,49 @@ npm run dev
 ```
 
 `npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，因此不会显示
-邮箱登录页。两种命令都不需要另外手动启动 Gateway。
+邮箱登录页——开发时少一步登录，多一份清净。两种命令都不需要另外手动启动 Gateway。
+
+#### macOS 安全运行组件
+
+Apple Silicon（M 系列、`uname -m` 输出 `arm64`）所需的安全运行组件已经按架构提交到
+仓库，拉取源码后可直接执行 `npm run dev`，不需要安装 Rust 或 Cargo。Desktop 启动时会
+校验产物声明的平台、架构、二进制 SHA-256 和 Rust 源码摘要，不匹配时拒绝启用受管执行——
+宁可不跑，也不乱跑。
+
+Intel Mac（`uname -m` 输出 `x86_64`）目前需要本机编译一次：
+
+```bash
+# 首次安装编译工具链
+xcode-select --install
+brew install rustup
+export PATH="$(brew --prefix rustup)/bin:$PATH"
+rustup default stable
+
+# 在 Ace 仓库根目录编译并放入本机 staging
+cargo build \
+  --manifest-path security-runtime/Cargo.toml \
+  --release \
+  --locked
+
+node desktop/scripts/prepare-security-runtime.mjs \
+  --runtime security-runtime/target/release/ace-security-runtime \
+  --output desktop/security-runtime-bin
+
+node desktop/scripts/verify-security-runtime.mjs \
+  desktop/security-runtime-bin
+
+npm run dev --prefix desktop
+```
+
+本机 staging 目录已被 Git 忽略。维护者发布 Intel 预编译文件、以及修改 Rust 安全运行组件
+后的重建要求，见 [security-runtime/README.md](security-runtime/README.md)。正式 DMG 会在
+目标平台重新构建并装入 runtime，安装包使用者无需安装 Rust。
+
+维护者也可以在 GitHub Actions 手动运行 **security-prebuilt**。它会分别在 Apple Silicon、
+Intel Mac、Windows x64 和 Linux x64 原生 runner 上构建与测试，产出带 SHA-256 manifest 和
+GitHub build provenance 的压缩包；打 `v*` tag 时会附加到 GitHub Release。同事只需使用对应
+平台的预编译目录，不需要安装 Cargo。证书是可选增强：未配置证书仍会生成可验证产物，配置
+Developer ID/Authenticode secrets 后才会额外执行系统签名。
 
 ### 2B. 启动 Web 端
 
@@ -152,7 +209,9 @@ npm run dev
 
 浏览器打开 `http://localhost:5173`。Web 开发服务器会把 `/api` 和 `/ws` 请求代理到默认监听 `127.0.0.1:8000` 的 Gateway。
 
-## 配置模型
+## 🧠 配置模型
+
+Crew 不绑定任何模型厂商，你有哪家的 Key，就用哪家的模型。
 
 ### 方式一：在桌面端配置（推荐）
 
@@ -165,7 +224,7 @@ npm run dev
 外部 Team 规划、组队描述生成和 Dynamic Kanban 编排等辅助推理使用当前账号的默认模型，不跟随单个会话的模型切换。
 Wiki 编译与摘要默认遵循同一规则；如需独立模型，可在配置中显式设置 `wiki.model`。
 
-Crew 支持 OpenAI 兼容接口和 Anthropic Messages 接口。API Key 只会写入当前 owner 的本地 `.env`，不会写入 `config.yaml`、返回给前端或发送给远程认证服务。不同运行模式的具体落盘位置见[配置与本地数据](#配置与本地数据)。
+Crew 支持 OpenAI 兼容接口和 Anthropic Messages 接口。API Key 只会写入当前 owner 的本地 `.env`，不会写入 `config.yaml`、返回给前端或发送给远程认证服务——密钥这东西，知道的人越少越好。不同运行模式的具体落盘位置见[配置与本地数据](#-配置与本地数据)。
 
 ### 方式二：通过配置文件配置
 
@@ -194,9 +253,9 @@ MY_MODEL_API_KEY=your-api-key
 ```
 
 保存配置后重启 Crew Gateway。不要把真实 API Key 写入 `config/config.yaml`、源码、测试或 README；
-本地 `config/config.yaml` 和 `.env` 均不应提交。
+本地 `config/config.yaml` 和 `.env` 均不应提交。真的，别提交，血的教训都是别人的，但也可以是你的。
 
-## 账号与租户登录
+## 🔐 账号与租户登录
 
 Ace 默认使用 `auth.mode: email`：首次启动只需填写邮箱，不发送验证码，邮箱会规范化为小写并生成 `email:<邮箱>` 数据 owner。该模式用于本机多租户数据隔离，不验证邮箱所有权；同一台电脑上的使用者可以输入其他邮箱切换租户。
 
@@ -240,9 +299,9 @@ export CREW_AUTH_BASE_URL=https://auth.example.com
 拼接。Gateway 代理外部认证请求并签发本机 HttpOnly 会话 Cookie，Desktop 通过系统安全存储
 保存该会话。占位地址不会被请求；启用 remote 但未配置有效地址时，登录页会明确提示配置。
 
-## 技能与插件
+## 🧩 技能与插件
 
-仓库随附六个与产品功能直接关联的 Skill：
+Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随附六个与产品功能直接关联的 Skill：
 
 | Skill | 来源 | 用途 |
 |-------|------|------|
@@ -262,19 +321,35 @@ export CREW_AUTH_BASE_URL=https://auth.example.com
 图片和视频理解服务的环境变量见 `config/.env.example`；没有完整配置时不会发送媒体数据。
 视频上传还需要用户逐次确认。项目运行不依赖远程技能市场。
 
-## 其他启动方式
+## 🔧 其他启动方式
 
 ### CLI
 
+一般给命令行爱好者或其他agent使用.jpg：
+
 ```bash
 source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
+
+# 交互对话（默认）
 python -m crew.cli
+
+# 非交互运行与自动化输出
+python -m crew.cli run "整理下载目录" --output-format json
+python -m crew.cli cron list --json
+python -m crew.cli security pending --session-id <sid> --json
+
+# 查看完整命令树
+python -m crew.cli --help
 ```
 
-## 构建桌面发行包（可选）
+CLI 进程内直调后端 service，不依赖 Gateway；所有子命令支持 `--json` 结构化输出，
+覆盖配置、会话、工作空间、任务、定时任务、Wiki、技能、MCP、插件、渠道、外部
+Runtime/Agent/Team、浏览器、动态看板、场景、安全审批/规则/审计、站点与工作台。
+
+## 📦 构建桌面发行包（可选）
 
 当前仓库提供本地构建脚本，但不发布预编译安装包，也不包含代码签名、公证和自动更新服务。
-构建过程会下载 Electron、Python、Node.js 等运行时，可能占用数 GB 磁盘空间。
+构建过程会下载 Electron、Python、Node.js 等运行时，可能占用数 GB 磁盘空间——动手前先看看硬盘余量。
 
 ### Electron 裸目录
 
@@ -288,7 +363,7 @@ npm run dist:win     # Windows x64 → desktop/release/win-unpacked/
 npm run dist:mac     # macOS x64 + arm64 → desktop/release/
 ```
 
-这些产物适合本地验证或作为下游发行流程的输入，不是已签名的正式安装器。更多配置说明见
+这些产物适合本地验证或作为下游发行流程的输入，不保证是已签名、已公证的正式安装器。更多配置说明见
 [Desktop 文档](desktop/README.md#本地预打包)。
 
 ### Linux UOS / Kylin `.deb`
@@ -315,7 +390,9 @@ pwsh ./deb-package/pack_exe.ps1 -Version 0.1.0
 产物位于 `dist/installer/`。安装包会携带 Gateway、Desktop，以及供技能脚本使用的
 Python 和 Node.js 运行时。
 
-## 验证安装
+## ✅ 验证安装
+
+装完可以验证是否有问题：
 
 ```bash
 # Web 构建与测试
@@ -341,7 +418,19 @@ npm run check
 pytest -m e2e
 ```
 
-## 配置与本地数据
+需要批量验证复杂任务、Wiki、外援等后端功能，并保留每轮日志时，使用独立场景 runner：
+
+```bash
+python scripts/run_e2e_batch.py --category complex_tasks
+python scripts/run_e2e_batch.py --case write_file --report-dir build/e2e
+```
+
+每个 case 会独立输出 `transcript.jsonl`、`llm.jsonl`、`crew.log` 和工作区前后快照，报告与
+新增场景的方法见 [后端 E2E 测试指南](docs/testing/e2e-testing.md)。
+
+## 📁 配置与本地数据
+
+哪些文件该提交、哪些文件碰都别碰（指 Git）：
 
 | 路径 | 用途 | 是否应提交 |
 |------|------|------------|
@@ -357,7 +446,9 @@ pytest -m e2e
 
 `${CREW_HOME}` 可通过同名环境变量覆盖；未覆盖时，示例配置中的 `.Crew` 会解析为用户主目录下的 `~/.Crew`。`${DESKTOP_USER_DATA}` 是 Electron 为当前 Desktop 应用分配的用户数据目录。`acct_<hash(...)>` 是由 owner ID 稳定计算出的隐私保护目录名，磁盘上不会直接出现 `local`、用户 ID 或手机号；远程模式下的 `providerId:userId` 仅用于本机派生该目录名。
 
-## 代码结构
+## 🧱 代码结构
+
+我们的架构：
 
 | 模块 | 职责 |
 |------|------|
@@ -379,11 +470,13 @@ pytest -m e2e
 | `desktop` | Electron 桌面端 |
 | `web` | Web 客户端 |
 
-## 参与贡献
+## 🤝 参与贡献
 
-欢迎提交 Issue 和 Pull Request。开始前请阅读 [贡献指南](CONTRIBUTING.md)；安全漏洞请按照 [安全政策](SECURITY.md) 私下报告。
+欢迎提交 Issue 和 Pull Request——Bug 也好，想法也好，甚至只是来围观都行。开始前请阅读 [贡献指南](CONTRIBUTING.md)；安全漏洞请按照 [安全政策](SECURITY.md) 私下报告，给修复留点时间。
 
-## 安全提示
+## 🔒 安全提示
+
+玩笑归玩笑，安全是认真的：
 
 - Crew 提供 owner 级数据隔离、工具访问控制、浏览器敏感动作的一次性审批、私网和文件边界、
   密钥脱敏以及 Desktop IPC 校验；这些机制不能替代对第三方工具和外部服务的信任审查。
@@ -391,15 +484,8 @@ pytest -m e2e
 - 不要在公开 Issue、日志或截图中暴露 API Key、Token、Cookie 和本地文件内容。
 - 将 Gateway 暴露到非本机网络前，请自行增加身份认证、TLS、网络边界和最小权限控制；默认配置面向本机使用。
 
-## 开源许可
+## 📜 开源许可
 
 本项目采用 [Apache License 2.0](LICENSE) 开源许可。项目致谢见 [NOTICE](NOTICE)。
 
 ---
-
-<p align="center">
-  <a href="https://star-history.com/#shuishenghualalala/Ace&Date">
-    <img src="https://api.star-history.com/svg?repos=shuishenghualalala/Ace&type=Date" alt="Star History" width="500">
-  </a>
-</p>
-

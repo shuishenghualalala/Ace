@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
   <defs>
     <style>
-      .line{fill:none;stroke:var(--crew-line,#514b43);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
-      .thin{fill:none;stroke:var(--crew-line,#514b43);stroke-width:1.45;stroke-linecap:round;stroke-linejoin:round}
-      .shell{fill:var(--crew-shell,#c7d9e6);stroke:var(--crew-line,#514b43);stroke-width:1.8;stroke-linejoin:round}
-      .face{fill:var(--crew-face,#f7f5ee);stroke:var(--crew-line,#514b43);stroke-width:1.45}
-      .accent{fill:var(--crew-accent,#b8c6af);stroke:var(--crew-line,#514b43);stroke-width:1.55;stroke-linejoin:round}
-      .accent2{fill:var(--crew-accent-2,#e7d29b);stroke:var(--crew-line,#514b43);stroke-width:1.55;stroke-linejoin:round}
-      .ink{fill:var(--crew-line,#514b43)}
-      .paper{fill:var(--crew-face,#f7f5ee)}
+      .line{fill:none;stroke:var(--mw-symbol-line);stroke-width:var(--mw-symbol-line-width,1.8);stroke-linecap:round;stroke-linejoin:round}
+      .thin{fill:none;stroke:var(--mw-symbol-line);stroke-width:var(--mw-symbol-thin-width,1.45);stroke-linecap:round;stroke-linejoin:round}
+      .shell{fill:var(--mw-symbol-shell);stroke:var(--mw-symbol-line);stroke-width:var(--mw-symbol-line-width,1.8);stroke-linejoin:round}
+      .face{fill:var(--mw-symbol-face);stroke:var(--mw-symbol-line);stroke-width:var(--mw-symbol-thin-width,1.45)}
+      .accent{fill:var(--mw-symbol-accent);stroke:var(--mw-symbol-line);stroke-width:var(--mw-symbol-accent-width,1.55);stroke-linejoin:round}
+      .accent2{fill:var(--mw-symbol-accent-alt);stroke:var(--mw-symbol-line);stroke-width:var(--mw-symbol-accent-width,1.55);stroke-linejoin:round}
+      .ink{fill:var(--mw-symbol-line)}
+      .paper{fill:var(--mw-symbol-face)}
     </style>
 
     <symbol id="avatar-base" viewBox="0 0 32 32">
@@ -16,7 +16,7 @@
       <rect class="shell" x="5" y="7" width="22" height="19" rx="7"/>
       <rect class="face" x="8.3" y="10.1" width="15.4" height="12.5" rx="5"/>
       <circle class="ink" cx="13" cy="16.4" r="1.05"/><circle class="ink" cx="19" cy="16.4" r="1.05"/>
-      <path d="M9.2 10.9c1.7-1.5 4.2-2.2 6.4-2.2" fill="none" stroke="white" stroke-width="1.25" stroke-linecap="round" opacity=".75"/>
+      <path d="M9.2 10.9c1.7-1.5 4.2-2.2 6.4-2.2" fill="none" stroke="var(--mw-white)" stroke-width="1.25" stroke-linecap="round" opacity=".75"/>
     </symbol>
     <symbol id="avatar-cap" viewBox="0 0 32 32">
       <use href="#avatar-base"/>
@@ -26,8 +26,8 @@
     <symbol id="avatar-sunglasses" viewBox="0 0 32 32">
       <use href="#avatar-base"/>
       <path class="thin" d="M8.7 15.1h2.1m10.4 0h2.1m-6.1 0h-2.4"/>
-      <circle cx="12.8" cy="15.9" r="3" fill="var(--crew-line,#514b43)" opacity=".88"/><circle cx="19.2" cy="15.9" r="3" fill="var(--crew-line,#514b43)" opacity=".88"/>
-      <path d="M11.6 14.7c.7-.5 1.4-.6 2-.5m4.4.5c.7-.5 1.4-.6 2-.5" fill="none" stroke="white" stroke-width=".8" stroke-linecap="round" opacity=".65"/>
+      <circle cx="12.8" cy="15.9" r="3" fill="var(--mw-symbol-line)" opacity=".88"/><circle cx="19.2" cy="15.9" r="3" fill="var(--mw-symbol-line)" opacity=".88"/>
+      <path d="M11.6 14.7c.7-.5 1.4-.6 2-.5m4.4.5c.7-.5 1.4-.6 2-.5" fill="none" stroke="var(--mw-white)" stroke-width=".8" stroke-linecap="round" opacity=".65"/>
     </symbol>
     <symbol id="avatar-headphones" viewBox="0 0 32 32">
       <use href="#avatar-base"/>
@@ -36,9 +36,9 @@
     </symbol>
     <symbol id="avatar-wizard" viewBox="0 0 32 32">
       <use href="#avatar-base"/>
-      <path d="M10.3 8.7 15.1 0l8.1 8.7Z" fill="var(--crew-accent,#c8bfd4)" stroke="var(--crew-line,#514b43)" stroke-width="1.55" stroke-linejoin="round"/>
+      <path d="M10.3 8.7 15.1 0l8.1 8.7Z" fill="var(--mw-symbol-accent)" stroke="var(--mw-symbol-line)" stroke-width="1.55" stroke-linejoin="round"/>
       <path class="accent2" d="M7.4 8.2h17.8l-1.4 2.5H8.9Z"/>
-      <path d="m16 3.4.55 1.1 1.2.2-.87.85.2 1.2L16 6.2l-1.08.55.2-1.2-.87-.85 1.2-.2Z" fill="var(--crew-face,#f7f5ee)"/>
+      <path d="m16 3.4.55 1.1 1.2.2-.87.85.2 1.2L16 6.2l-1.08.55.2-1.2-.87-.85 1.2-.2Z" fill="var(--mw-symbol-face)"/>
     </symbol>
     <symbol id="avatar-detective" viewBox="0 0 32 32">
       <use href="#avatar-base"/>
@@ -71,7 +71,7 @@
     </symbol>
     <symbol id="team-design" viewBox="0 0 32 32">
       <use href="#team-general"/>
-      <path class="accent2" d="m21.5 20.5 5.8-5.8 2 2-5.8 5.8-3.2 1.2Z"/><circle cx="9.2" cy="25.2" r="1.3" fill="var(--crew-accent,#b8c6af)"/>
+      <path class="accent2" d="m21.5 20.5 5.8-5.8 2 2-5.8 5.8-3.2 1.2Z"/><circle cx="9.2" cy="25.2" r="1.3" fill="var(--mw-symbol-accent)"/>
     </symbol>
     <symbol id="team-review" viewBox="0 0 32 32">
       <use href="#team-general"/>
@@ -92,40 +92,73 @@
 
     <symbol id="skill-badge" viewBox="0 0 32 32">
       <path class="shell" d="m8.5 5 17 2.5v19l-17-2.5Z"/>
-      <path d="m5.5 7 3-2v19l-3 2.5Z" fill="var(--crew-accent,#b8c6af)" stroke="var(--crew-line,#514b43)" stroke-width="1.6" stroke-linejoin="round"/>
-      <path d="m8.5 24 17 2.5-2.5 2-15-2-2.5 0Z" fill="var(--crew-face,#f7f5ee)" stroke="var(--crew-line,#514b43)" stroke-width="1.6" stroke-linejoin="round"/>
-      <path d="m11 8 12 1.5" fill="none" stroke="white" stroke-width="1.15" stroke-linecap="round" opacity=".75"/>
-      <path d="m23 26.5-15-2v2l15 2" fill="none" stroke="#d7d1c4" stroke-width=".8"/>
-      <path d="m14 11 8 1v10l-8-1Z" fill="var(--crew-face,#f7f5ee)" stroke="var(--crew-line,#514b43)" stroke-width="1.25" stroke-linejoin="round"/>
+      <path d="m5.5 7 3-2v19l-3 2.5Z" fill="var(--mw-symbol-accent)" stroke="var(--mw-symbol-line)" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="m8.5 24 17 2.5-2.5 2-15-2-2.5 0Z" fill="var(--mw-symbol-face)" stroke="var(--mw-symbol-line)" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="m11 8 12 1.5" fill="none" stroke="var(--mw-white)" stroke-width="1.15" stroke-linecap="round" opacity=".75"/>
+      <path d="m23 26.5-15-2v2l15 2" fill="none" stroke="var(--mw-border-default)" stroke-width=".8"/>
+      <path d="m14 11 8 1v10l-8-1Z" fill="var(--mw-symbol-face)" stroke="var(--mw-symbol-line)" stroke-width="1.25" stroke-linejoin="round"/>
+    </symbol>
+
+    <symbol id="plugin-badge" viewBox="0 0 32 32">
+      <path class="shell" d="M6 7h8v5.2a3 3 0 1 0 4 0V7h8v8h-5.2a3 3 0 1 0 0 4H26v8h-8v-5.2a3 3 0 1 0-4 0V27H6v-8h5.2a3 3 0 1 0 0-4H6Z"/>
+      <path class="thin" d="M8.5 9.5H12m8 0h3.5M8.5 24.5H12m8 0h3.5"/>
     </symbol>
 
     <symbol id="icon-plus" viewBox="0 0 24 24"><path class="line" d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-panel-collapse" viewBox="0 0 24 24"><rect class="line" x="3" y="4" width="18" height="16" rx="2"/><path class="thin" d="M9 4v16"/><path class="line" d="m7 9-3 3 3 3"/></symbol>
+    <symbol id="icon-chat-new" viewBox="0 0 24 24"><path class="line" d="M4 5h11a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H9l-5 3Z"/><path class="line" d="M18 3v6m-3-3h6"/></symbol>
     <symbol id="icon-send" viewBox="0 0 24 24"><path class="line" d="m3.5 11 16.8-7-5.2 16-3.8-6.1Zm7.8 2.9 9-9.9"/></symbol>
     <symbol id="icon-stop" viewBox="0 0 24 24"><rect class="accent" x="6" y="6" width="12" height="12" rx="2"/></symbol>
     <symbol id="icon-refresh" viewBox="0 0 24 24"><path class="line" d="M19 8V4l-2 2a8 8 0 1 0 2.1 8.2M19 4h-4"/></symbol>
+    <symbol id="icon-expand" viewBox="0 0 24 24"><path class="line" d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></symbol>
     <symbol id="icon-search" viewBox="0 0 24 24"><circle class="line" cx="10.5" cy="10.5" r="6"/><path class="line" d="m15 15 5 5"/></symbol>
     <symbol id="icon-filter" viewBox="0 0 24 24"><path class="line" d="M4 6h16M7 12h10m-7 6h4"/><circle class="accent" cx="15" cy="6" r="1.4"/><circle class="accent" cx="9" cy="12" r="1.4"/><circle class="accent" cx="13" cy="18" r="1.4"/></symbol>
     <symbol id="icon-settings" viewBox="0 0 24 24"><circle class="line" cx="12" cy="12" r="3"/><path class="line" d="m12 3 1 2.1 2.3.7 2.2-.7 1.4 1.4-.7 2.2.7 2.3 2.1 1v2l-2.1 1-.7 2.3.7 2.2-1.4 1.4-2.2-.7-2.3.7-1 2.1h-2l-1-2.1-2.3-.7-2.2.7-1.4-1.4.7-2.2-.7-2.3-2.1-1v-2l2.1-1 .7-2.3-.7-2.2 1.4-1.4 2.2.7 2.3-.7 1-2.1Z"/></symbol>
     <symbol id="icon-more" viewBox="0 0 24 24"><circle class="ink" cx="5" cy="12" r="1.5"/><circle class="ink" cx="12" cy="12" r="1.5"/><circle class="ink" cx="19" cy="12" r="1.5"/></symbol>
     <symbol id="icon-attachment" viewBox="0 0 24 24"><path class="line" d="m9 12.5 5.9-5.9a3 3 0 0 1 4.2 4.2l-7.7 7.7a5 5 0 0 1-7.1-7.1l7.5-7.5m-4.3 11.4 7.2-7.2"/></symbol>
     <symbol id="icon-file" viewBox="0 0 24 24"><path class="line" d="M6 3h8l4 4v14H6Z"/><path class="thin" d="M14 3v5h4M9 13h6m-6 4h6"/></symbol>
-    <symbol id="icon-folder" viewBox="0 0 24 24"><path class="accent2" d="M3 6h7l2 2h9v11H3Z"/></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path class="line" d="M3 6h7l2 2h9v11H3Z"/></symbol>
     <symbol id="icon-code" viewBox="0 0 24 24"><path class="line" d="m8.5 7-5 5 5 5m7-10 5 5-5 5M14 4l-4 16"/></symbol>
     <symbol id="icon-task" viewBox="0 0 24 24"><rect class="line" x="5" y="4" width="14" height="17" rx="2"/><path class="line" d="m8.5 10 1.4 1.4 2.5-2.7M8.5 16l1.4 1.4 2.5-2.7M14 10h2m-2 6h2"/></symbol>
     <symbol id="icon-check" viewBox="0 0 24 24"><path class="line" d="m5 12.5 4.2 4.2L19 7"/></symbol>
     <symbol id="icon-warning" viewBox="0 0 24 24"><path class="accent2" d="m12 3 9 17H3Z"/><path class="line" d="M12 9v5m0 3v.1"/></symbol>
-    <symbol id="icon-error" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="var(--crew-danger,#a66e6e)" opacity=".18" stroke="var(--crew-danger,#a66e6e)" stroke-width="1.8"/><path d="m9 9 6 6m0-6-6 6" fill="none" stroke="var(--crew-danger,#a66e6e)" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="icon-security" viewBox="0 0 24 24"><path class="line" d="M12 3 20 6v6c0 4.8-3.2 8-8 9-4.8-1-8-4.2-8-9V6Z"/><path class="line" d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="icon-error" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="var(--mw-status-danger)" opacity=".18" stroke="var(--mw-status-danger)" stroke-width="1.8"/><path d="m9 9 6 6m0-6-6 6" fill="none" stroke="var(--mw-status-danger)" stroke-width="1.8" stroke-linecap="round"/></symbol>
     <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path class="line" d="m6 9 6 6 6-6"/></symbol>
     <symbol id="icon-chevron-up" viewBox="0 0 24 24"><path class="line" d="m6 15 6-6 6 6"/></symbol>
     <symbol id="icon-back" viewBox="0 0 24 24"><path class="line" d="m10 5-7 7 7 7M3 12h17"/></symbol>
     <symbol id="icon-close" viewBox="0 0 24 24"><path class="line" d="m6 6 12 12m0-12L6 18"/></symbol>
-    <symbol id="icon-agent" viewBox="0 0 24 24"><rect class="shell" x="4" y="6" width="16" height="14" rx="5"/><path class="line" d="M12 6V3"/><circle class="accent" cx="12" cy="2.5" r="1"/><circle class="ink" cx="9" cy="13" r="1"/><circle class="ink" cx="15" cy="13" r="1"/></symbol>
+    <symbol id="icon-agent" viewBox="0 0 24 24"><rect class="shell" x="4" y="6" width="16" height="14" rx="5"/><path class="line" d="M12 6V3"/><circle class="ink" cx="12" cy="2.5" r="1"/><circle class="ink" cx="9" cy="13" r="1"/><circle class="ink" cx="15" cy="13" r="1"/></symbol>
     <symbol id="icon-team" viewBox="0 0 24 24"><circle class="line" cx="12" cy="8" r="3"/><circle class="line" cx="5.5" cy="12" r="2.5"/><circle class="line" cx="18.5" cy="12" r="2.5"/><path class="line" d="M7 20c.3-3.2 2-4.8 5-4.8s4.7 1.6 5 4.8M2 19c.2-2.4 1.4-3.6 3.5-3.6M22 19c-.2-2.4-1.4-3.6-3.5-3.6"/></symbol>
-    <symbol id="status-running" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3" fill="none" stroke="var(--crew-primary,#607d90)" stroke-width="1.6"/><path d="M9 8.5v7l6-3.5Z" fill="var(--crew-primary,#607d90)"/></symbol>
+    <symbol id="icon-expert-picker" viewBox="0 0 24 24"><use href="#icon-agent"/><path class="accent2" d="m17 4 1 2 2.2.3-1.6 1.6.4 2.2-2-1-2 1 .4-2.2-1.6-1.6 2.2-.3Z"/></symbol>
+    <symbol id="icon-wiki" viewBox="0 0 24 24"><path class="line" d="M4 4.5h6.2c1.1 0 1.8.5 1.8 1.5v14c0-1-.7-1.5-1.8-1.5H4Zm16 0h-6.2c-1.1 0-1.8.5-1.8 1.5v14c0-1 .7-1.5 1.8-1.5H20Z"/><path class="thin" d="M7 8h2.5M7 11h2.5m5-3H17m-2.5 3H17"/></symbol>
+    <symbol id="icon-image" viewBox="0 0 24 24"><rect class="line" x="3" y="4" width="18" height="16" rx="2"/><circle class="accent2" cx="9" cy="9" r="1.5"/><path class="line" d="m5 17 4.5-4.5 3 3 2-2L19 17"/></symbol>
+    <symbol id="icon-inspiration" viewBox="0 0 24 24"><rect class="line" x="3" y="4" width="18" height="16" rx="2"/><path class="line" d="M3 9h18M7 6.5h.01M10 6.5h.01"/></symbol>
+
+    <symbol id="process-thinking" viewBox="0 0 24 24"><path class="line" d="M9 18h6M10 22h4M8.2 14.3a6 6 0 1 1 7.6 0c-.7.5-1.1 1.2-1.3 2H9.5c-.2-.8-.6-1.5-1.3-2Z"/></symbol>
+    <symbol id="process-write" viewBox="0 0 24 24"><path class="line" d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+    <symbol id="process-read" viewBox="0 0 24 24"><path class="line" d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2Zm20 0h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7Z"/></symbol>
+    <symbol id="process-web" viewBox="0 0 24 24"><circle class="line" cx="12" cy="12" r="10"/><path class="line" d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></symbol>
+    <symbol id="process-todo" viewBox="0 0 24 24"><path class="line" d="m3 17 2 2 4-4M3 7l2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
+    <symbol id="process-memory" viewBox="0 0 24 24"><ellipse class="line" cx="12" cy="5" rx="9" ry="3"/><path class="line" d="M3 5v14a9 3 0 0 0 18 0V5M3 12a9 3 0 0 0 18 0"/></symbol>
+    <symbol id="process-skill" viewBox="0 0 24 24"><path class="line" d="m12 2 2.4 7.2H22l-6 4.8 2.3 7.2-6.3-4.5-6.3 4.5L8 14 2 9.2h7.6Z"/></symbol>
+    <symbol id="process-clock" viewBox="0 0 24 24"><circle class="line" cx="12" cy="12" r="9"/><path class="line" d="M12 8v4l3 2"/></symbol>
+    <symbol id="process-terminal" viewBox="0 0 24 24"><rect class="line" x="4" y="5" width="16" height="14" rx="2"/><path class="line" d="m8 9 3 3-3 3M13 15h3"/></symbol>
+    <symbol id="process-error" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="var(--mw-status-danger)" stroke-width="1.8"/><path d="M12 7v6M12 17h.01" fill="none" stroke="var(--mw-status-danger)" stroke-width="1.8" stroke-linecap="round"/></symbol>
+
+    <symbol id="status-running" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3" fill="none" stroke="var(--mw-action-primary)" stroke-width="1.6"/><path d="M9 8.5v7l6-3.5Z" fill="var(--mw-action-primary)"/></symbol>
     <symbol id="status-waiting" viewBox="0 0 24 24"><path class="line" d="M7 3h10M7 21h10M8 4c0 4 3 4.8 4 8-1 3.2-4 4-4 8m8-16c0 4-3 4.8-4 8 1 3.2 4 4 4 8"/><path class="accent2" d="M9.4 17.5h5.2L12 14.2Z"/></symbol>
-    <symbol id="status-complete" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4" fill="var(--crew-success,#809786)" opacity=".2" stroke="var(--crew-success,#809786)" stroke-width="1.6"/><path d="m8 12 2.7 2.7L16.5 9" fill="none" stroke="var(--crew-success,#809786)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="status-complete" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4" fill="var(--mw-status-success)" opacity=".2" stroke="var(--mw-status-success)" stroke-width="1.6"/><path d="m8 12 2.7 2.7L16.5 9" fill="none" stroke="var(--mw-status-success)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="loading-dots" viewBox="0 0 24 24"><rect class="ink" x="3" y="10" width="4" height="4" rx="1"/><rect class="ink" x="10" y="10" width="4" height="4" rx="1" opacity=".65"/><rect class="ink" x="17" y="10" width="4" height="4" rx="1" opacity=".3"/></symbol>
-    <symbol id="loading-frame" viewBox="0 0 24 24"><path d="M12 3h6v3h3v6h-3V8h-2V6h-4Zm0 18H6v-3H3v-6h3v4h2v2h4Z" fill="var(--crew-primary,#607d90)"/></symbol>
-    <symbol id="loading-stream" viewBox="0 0 24 24"><rect x="3" y="7" width="3" height="10" rx="1" fill="var(--crew-primary,#607d90)" opacity=".3"/><rect x="8" y="4" width="3" height="16" rx="1" fill="var(--crew-primary,#607d90)" opacity=".55"/><rect x="13" y="8" width="3" height="8" rx="1" fill="var(--crew-primary,#607d90)" opacity=".8"/><rect x="18" y="6" width="3" height="12" rx="1" fill="var(--crew-primary,#607d90)"/></symbol>
+    <symbol id="loading-frame" viewBox="0 0 24 24"><path d="M12 3h6v3h3v6h-3V8h-2V6h-4Zm0 18H6v-3H3v-6h3v4h2v2h4Z" fill="var(--mw-action-primary)"/></symbol>
+    <symbol id="loading-stream" viewBox="0 0 24 24"><rect x="3" y="7" width="3" height="10" rx="1" fill="var(--mw-action-primary)" opacity=".3"/><rect x="8" y="4" width="3" height="16" rx="1" fill="var(--mw-action-primary)" opacity=".55"/><rect x="13" y="8" width="3" height="8" rx="1" fill="var(--mw-action-primary)" opacity=".8"/><rect x="18" y="6" width="3" height="12" rx="1" fill="var(--mw-action-primary)"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path class="line" d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/></symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24"><path class="line" d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+    <symbol id="icon-checks" viewBox="0 0 24 24"><path class="line" d="m3 17 2 2 4-4M3 7l2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
+    <symbol id="icon-panel-right" viewBox="0 0 24 24"><rect class="line" x="3" y="3" width="18" height="18" rx="2"/><path class="line" d="M15 3v18"/></symbol>
+    <symbol id="icon-history" viewBox="0 0 24 24"><path class="line" d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M12 7v5l4 2"/></symbol>
+    <symbol id="icon-tag" viewBox="0 0 24 24"><path class="line" d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42zM7.5 7.5h.01"/></symbol>
+    <symbol id="icon-graph" viewBox="0 0 24 24"><circle class="line" cx="18" cy="5" r="3"/><circle class="line" cx="6" cy="12" r="3"/><circle class="line" cx="18" cy="19" r="3"/><path class="line" d="m8.59 13.51 6.83 3.98M15.41 6.51l-6.82 3.98"/></symbol>
+    <symbol id="icon-folder-line" viewBox="0 0 24 24"><path class="line" d="M3 6h7l2 2h9v11H3Z"/></symbol>
   </defs>
 </svg>

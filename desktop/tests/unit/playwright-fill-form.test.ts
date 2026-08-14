@@ -9,6 +9,7 @@ import {
 
 import type { Locator, Page } from '../../src/main/browser/playwright-compat';
 import type { RefRecord } from '../../src/main/browser/playwright-snapshot';
+import { attestedMaterial, materialState } from './helpers/playwright-material';
 
 interface TargetSpec {
   selector: string;
@@ -26,43 +27,6 @@ interface TargetSpec {
   onMutation?: () => void;
   mutationError?: Error;
   count?: number | (() => number);
-}
-
-function attestedMaterial(spec: TargetSpec, material: string): string {
-  return [
-    material,
-    `attested-tag\0${spec.tag}`,
-    `attested-input-type\0${spec.inputType}`,
-    `attested-content-editable\0${Boolean(spec.contentEditable)}`,
-    'attested-field-tier\0plain',
-  ].join('\n');
-}
-
-function materialState(spec: TargetSpec, material: string): Record<string, unknown> {
-  return {
-    material,
-    navigation: '',
-    downloadNavigation: '',
-    action: '',
-    actionKind: spec.actionKind,
-    accessibleRole: spec.role,
-    accessibleName: spec.name,
-    documentBaseURI: 'https://example.test/',
-    documentURL: 'https://example.test/',
-    tag: spec.tag,
-    inputType: spec.inputType,
-    contentEditable: Boolean(spec.contentEditable),
-    fieldProbe: {
-      type: spec.inputType,
-      autocomplete: '',
-      name: '',
-      id: '',
-      placeholder: '',
-      ariaLabel: '',
-      labelText: '',
-    },
-    complete: true,
-  };
 }
 
 function formFixture(specs: TargetSpec[]): {
@@ -101,7 +65,14 @@ function formFixture(specs: TargetSpec[]): {
           return candidate === argument.value ? (spec.optionMatches ?? 1) : 0;
         }
         calls.push(`fingerprint:${spec.selector}`);
-        return materialState(spec, state.get(spec.selector) ?? '');
+        return materialState(state.get(spec.selector) ?? '', {
+          actionKind: spec.actionKind,
+          accessibleRole: spec.role,
+          accessibleName: spec.name,
+          tag: spec.tag,
+          inputType: spec.inputType,
+          contentEditable: Boolean(spec.contentEditable),
+        });
       }),
       ariaSnapshot: vi.fn(async () => {
         calls.push(`aria:${spec.selector}`);
@@ -149,7 +120,11 @@ function formFixture(specs: TargetSpec[]): {
       securityKey: `key:${index + 1}`,
       security: spec.missingSecurity
         ? ''
-        : hash(attestedMaterial(spec, state.get(spec.selector) ?? '')),
+        : hash(attestedMaterial(state.get(spec.selector) ?? '', {
+          tag: spec.tag,
+          inputType: spec.inputType,
+          contentEditable: Boolean(spec.contentEditable),
+        })),
       navigation: '',
       downloadNavigation: '',
       action: '',

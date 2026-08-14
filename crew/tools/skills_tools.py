@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from crew.agent.skills import (
-    get_skill_packages,
     audit_skills,
     get_package_members,
     get_skill_packages,
@@ -22,11 +22,12 @@ from crew.agent.skills import (
 from crew.core.errors import ToolError
 from crew.core.runctx import current_active_skill_packages, current_skill_scope
 from crew.tools.registry import Registry, tool_result
+from crew.tools.security_guard import authorize_file_tool
 
 
 SKILLS_LIST_SCHEMA = {
     "name": "skills_list",
-    "description": "列出当前智能体/上下文中允许使用的技能 metadata。",
+    "description": "列出当前专家/上下文中允许使用的技能 metadata。",
     "parameters": {
         "type": "object",
         "properties": {"category": {"type": "string", "description": "可选分类过滤"}},
@@ -64,7 +65,7 @@ SKILL_PACKAGE_OPEN_SCHEMA = {
 
 SKILLS_AUDIT_SCHEMA = {
     "name": "skills_audit",
-    "description": "检测 skills 的中文展示 metadata、中文 query 示例和目录安全性。",
+    "description": "检测 skills 的中文展示 metadata、中文 query 示例，以及旧项目固定路径引用。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -83,7 +84,7 @@ SKILLS_AUDIT_SCHEMA = {
 
 SKILLS_REPAIR_SCHEMA = {
     "name": "skills_repair",
-    "description": "显式修复 skills：调用模型补全中文 metadata 和技能分类。",
+    "description": "显式修复 skills：调用模型补全中文 metadata，并把旧路径迁移为 CREW_SESSION_FILE/CREW_ENV_FILE。",
     "parameters": {
         "type": "object",
         "properties": {
@@ -131,7 +132,7 @@ def _current_skill_scope() -> tuple[list[str] | None, list[str] | None]:
 
 
 def handle_skills_list(args: dict[str, Any]) -> str:
-    """列出当前智能体/上下文允许的技能。委托 crew.agent.skills.list_skills()，统一真相源。
+    """列出当前专家/上下文允许的技能。委托 crew.agent.skills.list_skills()，统一真相源。
 
     可选 category 过滤：技能 frontmatter 有 category 字段时生效。
     """
@@ -168,8 +169,11 @@ def handle_skill_view(args: dict[str, Any]) -> str:
     # 1. 先尝试作为 package 读取
     pkg = resolve_package(name)
     if pkg is not None:
-        pkg_md_path = Path(pkg["package_md_path"])
-        content = pkg_md_path.read_text(encoding="utf-8", errors="replace")
+        from crew.agent.skills import _registered_skill_dir, read_skill_text, resolve_skill_path
+
+        package_dir = _registered_skill_dir(Path(pkg["package_dir"]))
+        pkg_md_path = resolve_skill_path(Path(pkg["package_md_path"]), package_dir)
+        content = read_skill_text(pkg_md_path, package_dir, errors="replace")
         return tool_result(
             success=True,
             name=pkg["name"],
@@ -273,7 +277,7 @@ def handle_skill_package_open(args: dict[str, Any]) -> str:
         if _skill_allowed(m["slug"], enabled, disabled, m.get("aliases"))
     ]
     if not allowed_members:
-        raise ToolError(f"package {name} 在当前任务上下文中不可用")
+        raise ToolError(f"package {name} 在当前专家上下文中不可用")
 
     # 加入当前激活集合
     try:
@@ -308,7 +312,33 @@ def handle_skills_audit(args: dict[str, Any]) -> str:
     return tool_result(success=True, **result)
 
 
-async def handle_skills_repair(args: dict[str, Any]) -> str:
+async def handle_skills_repair(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
+    if not bool(args.get("dry_run", False)):
+        from crew.agent.skills import _is_metadata_finding
+
+        pending = audit_skills(
+            include_optional=bool(args.get("include_optional", False)),
+            only=str(args.get("only") or "").strip() or None,
+        )
+        for item in pending.get("skills") or []:
+            findings = item.get("findings") if isinstance(item, dict) else None
+            if not isinstance(findings, list) or not any(
+                isinstance(finding, dict) and _is_metadata_finding(finding)
+                for finding in findings
+            ):
+                continue
+            await authorize_file_tool(
+                {"path": str(item.get("skill_dir") or "")},
+                operation="write",
+                tool_name="skills_repair",
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
     result = await repair_skills(
         include_optional=bool(args.get("include_optional", False)),
         only=str(args.get("only") or "").strip() or None,
@@ -317,7 +347,12 @@ async def handle_skills_repair(args: dict[str, Any]) -> str:
     return tool_result(success=True, **result)
 
 
-def register_skills_tools(registry: Registry) -> None:
+def register_skills_tools(
+    registry: Registry,
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> None:
     registry.register(
         name="skills_list",
         toolset="skills",
@@ -366,7 +401,11 @@ def register_skills_tools(registry: Registry) -> None:
         name="skills_repair",
         toolset="skills",
         schema=SKILLS_REPAIR_SCHEMA,
-        handler=handle_skills_repair,
+        handler=partial(
+            handle_skills_repair,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
         is_async=True,
         display_name="修复技能",
         ui_label_template="修复技能",

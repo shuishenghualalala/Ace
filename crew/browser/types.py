@@ -11,14 +11,7 @@ BrowserControlMode = Literal["ai", "human", "paused"]
 
 @dataclass
 class BrowserConfig:
-    # ── 已移除的配置项（不要再加回来，除非同时接上执行路径） ────────────
-    #
-    # `allowed_private_hosts` / `allowed_private_cidrs` / `allow_file_urls`
-    # 曾经存在，但对应的执行路径（私网/元数据地址拦截、URL scheme 白名单）
-    # 已按产品决定整体移除。它们在配置里留了一段时间**却没有任何消费方**——
-    # 运维照着文档配上，以为限制生效了，实际不执行。
-    #
-    # `max_tabs_per_session` 同样移除：标签页护栏在 Electron 宿主里
+    # `max_tabs_per_session` 不在这里暴露：标签页护栏在 Electron 宿主里
     # （browser-host.ts 的 MAX_TABS_PER_SESSION），而 Python 配置**到不了宿主**
     # ——没有这条通道。真正的保护在宿主那边；在这里留一个到不了执行点的数字，
     # 就是又一个骗人的旋钮。
@@ -41,6 +34,10 @@ class BrowserConfig:
     max_transfer_bytes: int = 104_857_600
     artifact_ttl_hours: int = 24
     blocked_hosts: list[str] = field(default_factory=list)
+    # 私网、loopback、link-local 和云元数据地址默认拒绝。这里的例外会进入
+    # LoopbackPolicyProxy 的实际 DNS/连接路径，不是只做展示的配置项。
+    allowed_private_hosts: list[str] = field(default_factory=list)
+    allowed_private_cidrs: list[str] = field(default_factory=list)
 
     @classmethod
     def from_raw(cls, raw: Any) -> "BrowserConfig":
@@ -61,7 +58,7 @@ class BrowserConfig:
         ):
             if name in values:
                 values[name] = max(0, int(values[name]))
-        for name in ("blocked_hosts",):
+        for name in ("blocked_hosts", "allowed_private_hosts", "allowed_private_cidrs"):
             if name in values:
                 value = values[name]
                 values[name] = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []

@@ -61,6 +61,12 @@ class RuntimeCandidate:
                 **(self.metadata or {}),
                 "launch_args": list(self.launch_args),
                 "adapter_id": self.adapter_id,
+                "credential_home_paths": list(
+                    (self.metadata or {}).get("credential_home_paths", ())
+                ),
+                "network_endpoints": list(
+                    (self.metadata or {}).get("network_endpoints", ())
+                ),
             },
         }
 
@@ -283,6 +289,11 @@ def _scan_descriptors(descriptors: tuple[RuntimeDescriptor, ...]) -> list[Runtim
 
 
 def _detect_version(path: str) -> str:
+    from crew.security.launch import current_process_launch
+
+    launch = current_process_launch.get()
+    if launch is not None and launch.managed:
+        return "managed-probe-unavailable"
     for args in ([path, "--version"], [path, "-v"]):
         try:
             proc = subprocess.run(
@@ -390,6 +401,8 @@ def _candidate_from_path(
             "descriptor_id": probe.descriptor_id,
             "display_badge": probe.display_badge,
             "adapter_id": probe.adapter_id or probe.protocol,
+            "credential_home_paths": list(probe.credential_home_paths),
+            "network_endpoints": list(probe.network_endpoints),
             "resolution_source": resolution_source,
         },
     )

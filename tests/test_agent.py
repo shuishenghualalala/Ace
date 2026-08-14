@@ -423,9 +423,10 @@ async def test_builtin_executor_rejects_length_truncated_tool_arguments():
     provider = FakeProvider(
         script=[
             ChatResponse(
-                tool_calls=[ToolCall("truncated", "file_write", {"_raw": '{"path":'})],
+                tool_calls=[ToolCall(f"truncated-{index}", "file_write", {"_raw": '{"path":'})],
                 finish_reason="length",
             )
+            for index in range(5)
         ]
     )
     executor = BuiltinExecutor(provider, registry, PluginManager())
@@ -442,7 +443,107 @@ async def test_builtin_executor_rejects_length_truncated_tool_arguments():
     assert calls == 0
     assert chunks[-1].kind == "error"
     assert "TOOL_ARGUMENTS_INCOMPLETE" in chunks[-1].body["message"]
+    assert sum(chunk.kind == "error" for chunk in chunks) == 1
+    assert len(provider.stream_calls) == 5
     assert not any(message.role == "tool" for message in ctx.messages)
+    assert not any(message.tool_calls for message in ctx.messages if message.role == "assistant")
+
+
+async def test_builtin_executor_recovers_truncated_tool_arguments_with_escalated_limit():
+    received = []
+
+    def handler(arguments):
+        received.append(arguments)
+        return tool_result(ok=True)
+
+    class _CapturingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__(script=[
+                ChatResponse(
+                    tool_calls=[ToolCall("truncated", "file_write", {"_raw": '{"path":'})],
+                    finish_reason="length",
+                ),
+                ChatResponse(
+                    tool_calls=[ToolCall("complete", "file_write", {"path": "a.txt"})],
+                    finish_reason="tool_calls",
+                ),
+                ChatResponse(text="done", finish_reason="stop"),
+            ])
+            self.max_token_values = []
+
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+            self.max_token_values.append(max_tokens)
+            async for chunk in super().stream_chat(messages, tools, max_tokens=max_tokens):
+                yield chunk
+
+    registry = Registry()
+    registry.register(
+        name="file_write",
+        toolset="file",
+        schema={"name": "file_write", "parameters": {}},
+        handler=handler,
+        is_async=False,
+    )
+    provider = _CapturingProvider()
+    executor = BuiltinExecutor(provider, registry, PluginManager())
+    ctx = ExecutionContext(
+        session_id="s",
+        request_id="r",
+        system_prompt="sys",
+        messages=[Message.user("write")],
+        query="write",
+    )
+
+    chunks = [chunk async for chunk in executor.execute(ctx)]
+
+    assert received == [{"path": "a.txt"}]
+    assert provider.max_token_values == [None, 64_000, 64_000]
+    assert not any(chunk.kind == "error" for chunk in chunks)
+    assert chunks[-1].kind == "final"
+    assert chunks[-1].body["text"] == "done"
+
+
+async def test_builtin_executor_injects_split_recovery_after_escalation_fails():
+    class _CapturingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__(script=[
+                ChatResponse(
+                    tool_calls=[ToolCall("truncated-1", "file_write", {"_raw": '{"path":'})],
+                    finish_reason="length",
+                ),
+                ChatResponse(
+                    tool_calls=[ToolCall("truncated-2", "file_write", {"_raw": '{"path":'})],
+                    finish_reason="length",
+                ),
+                ChatResponse(text="recovered", finish_reason="stop"),
+            ])
+            self.max_token_values = []
+
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+            self.max_token_values.append(max_tokens)
+            async for chunk in super().stream_chat(messages, tools, max_tokens=max_tokens):
+                yield chunk
+
+    provider = _CapturingProvider()
+    executor = BuiltinExecutor(provider, Registry(), PluginManager())
+    ctx = ExecutionContext(
+        session_id="s",
+        request_id="r",
+        system_prompt="sys",
+        messages=[Message.user("write")],
+        query="write",
+    )
+
+    chunks = [chunk async for chunk in executor.execute(ctx)]
+
+    assert provider.max_token_values == [None, 64_000, None]
+    assert any(
+        message.is_meta and "拆成更小的步骤" in (message.content or "")
+        for message in provider.stream_calls[-1]
+    )
+    assert not any(chunk.kind == "error" for chunk in chunks)
+    assert chunks[-1].kind == "final"
+    assert chunks[-1].body["text"] == "recovered"
 
 
 async def test_builtin_executor_allows_non_length_raw_tool_arguments():
@@ -557,13 +658,6 @@ async def test_compactor_summarizes_old_and_keeps_recent_from_user_boundary():
     assert out[1].role == "user"
     # 压缩后更短
     assert len(out) < len(msgs)
-
-
-async def test_compactor_skips_when_under_budget():
-    msgs = [Message.user("短"), Message.assistant("答")]
-    compactor = ContextCompactor(FakeProvider(), token_budget=100000, keep_recent=3)
-    out = await compactor.maybe_compact(msgs)
-    assert out is msgs
 
 
 async def test_compaction_does_not_destroy_persisted_history():

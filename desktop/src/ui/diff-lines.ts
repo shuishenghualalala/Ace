@@ -1,8 +1,8 @@
 /**
  * Unified diff 解析与 Inspector 渲染辅助。
  *
- * 去掉 git 头与 `@@` 噪音、靠色条区分增删、追踪新旧行号，
- * 并对长段未改动上下文做折叠。
+ * 借鉴 Hermes `diff-lines.tsx`：去掉 git 头与 `@@` 噪音、靠色条区分增删、
+ * 追踪新旧行号，并对长段未改动上下文做折叠（Cursor 风格）。
  */
 
 export type DiffKind = 'add' | 'context' | 'remove';
@@ -523,7 +523,7 @@ const DIFF_SKIP_CHEV_DOWN = `<svg width="12" height="12" viewBox="0 0 24 24" fil
 const DIFF_SKIP_CHEV_UP = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M18 15l-6-6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 /**
- * 生成 Inspector 文件卡片内的 diff HTML。
+ * 生成 Inspector 文件卡片内的 diff HTML（Cursor / Codex 风格）。
  * 单行 = 行号 + +/- 标记 + 代码；长段未改动折叠为可上下展开的 unmodified 条。
  */
 export function renderDiffPanelHtml(

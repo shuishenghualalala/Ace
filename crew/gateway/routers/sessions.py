@@ -20,13 +20,20 @@ from crew.core.types import Message, ToolCall, tool_arguments_for_ui
 from crew.gateway.auth import account_from_request
 from crew.gateway.helpers import require_external_agents_enabled, with_session_agent_labels
 from crew.gateway.hooks import hook_registry
+from crew.security.settings import strict_security_enabled
 from crew.state.session_store import SessionOwnershipError, is_placeholder_title
+from crew.state.team_member_model import (
+    TeamMemberModelBindingError,
+    materialize_team_member_model_bindings,
+    set_team_member_model_binding,
+)
 from crew.team.history_projection import (
     is_duplicate_team_parent_final,
     team_internal_history_items,
     team_tasks_with_plan_projection,
     team_visible_history_items,
 )
+from crew.team.roles import CREW_BUILTIN_AGENT_ID, is_crew_builtin_agent
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +58,14 @@ def _tool_result_for_history(tool_call: ToolCall, paired_results: dict[str, str]
     # {"results":[...]} JSON 渲染任务描述/最终回复/执行摘要，否则重开会话后
     # 卡片只剩任务描述。走 tool_result_detail_for_ui 与 live 路径同一出口。
     if tool_call.name in SUBAGENT_FULL_RESULT_TOOLS:
+        return tool_result_detail_for_ui(
+            tool_call.name, paired_results.get(tool_call.id, "")
+        )
+    if tool_call.name in {"Widget", "Canvas"} and tool_call.arguments.get("action") == "show":
+        return tool_result_detail_for_ui(
+            tool_call.name, paired_results.get(tool_call.id, "")
+        )
+    if tool_call.name == "publish_site":
         return tool_result_detail_for_ui(
             tool_call.name, paired_results.get(tool_call.id, "")
         )
@@ -601,6 +616,19 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             executor == "team" and bool(str(team.get("external_team_id") or "").strip())
         )
 
+    def runtime_model_switchable(runtime: dict[str, Any], models: list[Any]) -> bool:
+        metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
+        capabilities = (
+            metadata.get("runtime_capabilities")
+            if isinstance(metadata.get("runtime_capabilities"), dict)
+            else {}
+        )
+        return bool(
+            metadata.get("availability_status") == "ready"
+            and models
+            and capabilities.get("model_switch")
+        )
+
     def external_session_model_binding(session_id: str, owner: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
         getter = getattr(crew.session_store, "get_agent_config", None)
         if not callable(getter):
@@ -641,8 +669,6 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             ).strip(),
         )
         selected_profile = next((item for item in models if item.id == selected), None)
-        protocol = str(runtime.get("protocol") or "").strip().lower()
-        ready = metadata.get("availability_status") == "ready"
         body = {
             "ok": True,
             "source": "external",
@@ -653,11 +679,152 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             "has_pending": False,
             "pending": False,
             "models": [item.to_dict() for item in models],
-            "model_switchable": bool(ready and models and protocol in {"acp", "cli"}),
+            "model_switchable": runtime_model_switchable(runtime, models),
             "runtime_id": str(runtime.get("id") or ""),
             "external_agent_id": external_agent_id,
         }
         return body, config
+
+    def team_session_model_binding(
+        session_id: str,
+        owner: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        getter = getattr(crew.session_store, "get_agent_config", None)
+        if not callable(getter):
+            return None
+        raw = getter(session_id, owner_account_id=owner)
+        if not isinstance(raw, dict):
+            return None
+        team_config = raw.get("team") if isinstance(raw.get("team"), dict) else {}
+        if (
+            str(raw.get("executor") or "").strip().lower() != "team"
+            or not str(team_config.get("external_team_id") or "").strip()
+        ):
+            return None
+        require_external_agents_enabled(crew)
+        stored, team = materialize_team_member_model_bindings(
+            crew.session_store,
+            crew.external_agents,
+            session_id,
+            owner_account_id=owner,
+            builtin_model_id=crew.config.owner_default_model_id(owner),
+        )
+        stored_team = stored.get("team") if isinstance(stored.get("team"), dict) else {}
+        bindings = (
+            stored_team.get("member_model_bindings")
+            if isinstance(stored_team.get("member_model_bindings"), dict)
+            else {}
+        )
+        leader_agent_id = str(team.get("leader_agent_id") or "")
+        team_member_state = getattr(crew.team, "team_member_switch_state", None)
+        dispatcher_state = dispatcher.status(session_id, owner_account_id=owner)
+        session_is_running = dispatcher_state.get("live") != "idle"
+        owner_profiles = crew.owner_model_profiles(owner)
+        owner_default_model_id = crew.config.owner_default_model_id(owner)
+        members: list[dict[str, Any]] = []
+        for team_member in team.get("members") or []:
+            if not isinstance(team_member, dict):
+                continue
+            agent_id = str(team_member.get("agent_id") or "").strip()
+            binding = bindings.get(agent_id) if isinstance(bindings.get(agent_id), dict) else {}
+            selected_model_id = str(binding.get("model_id") or "").strip()
+            if is_crew_builtin_agent(agent_id):
+                models = [
+                    {
+                        "id": profile.id,
+                        "label": profile.label,
+                        "provider": profile.provider,
+                        "default": profile.id == owner_default_model_id,
+                        "capabilities": list(profile.capabilities),
+                        "context_window": profile.context_window,
+                        "loaded": profile.loaded,
+                        "has_key": profile.has_key,
+                    }
+                    for profile in owner_profiles.values()
+                ]
+                selected = owner_profiles.get(selected_model_id)
+                switchable = any(
+                    profile.loaded and profile.has_key
+                    for profile in owner_profiles.values()
+                )
+                unavailable_reason = (
+                    None
+                    if switchable
+                    else "没有可用的内置模型配置"
+                )
+                runtime_id = "builtin"
+                model_label = selected.label if selected is not None else selected_model_id
+            else:
+                agent, runtime = crew.external_agents.agent_with_runtime(
+                    agent_id,
+                    owner_account_id=owner,
+                )
+                metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
+                normalized_models = normalize_runtime_models(metadata.get("models"))
+                models = [item.to_dict() for item in normalized_models]
+                selected = next((item for item in normalized_models if item.id == selected_model_id), None)
+                switchable = runtime_model_switchable(runtime, normalized_models)
+                if metadata.get("availability_status") != "ready":
+                    unavailable_reason = "成员运行时当前不可用"
+                elif not normalized_models:
+                    unavailable_reason = "成员运行时未提供模型目录"
+                elif not switchable:
+                    unavailable_reason = "成员运行时不支持保留会话的模型切换"
+                else:
+                    unavailable_reason = None
+                runtime_id = str(runtime.get("id") or agent.get("runtime_id") or "")
+                model_label = selected.label if selected is not None else selected_model_id
+            is_leader = agent_id == leader_agent_id
+            # API/持久化用外部 agent id；Team 运行时则以 member_id 路由，
+            # 对外部普通成员该 id 优先是 agent_name。忙闲判断必须映射到后者。
+            runtime_member_id = (
+                "leader"
+                if is_leader
+                else CREW_BUILTIN_AGENT_ID
+                if is_crew_builtin_agent(agent_id)
+                else str(team_member.get("agent_name") or agent_id)
+            )
+            state = (
+                team_member_state(
+                    session_id,
+                    runtime_member_id,
+                    owner_account_id=owner,
+                )
+                if callable(team_member_state)
+                else {}
+            )
+            active_task_count = int(state.get("active_task_count") or 0)
+            # Leader 的执行由 dispatcher 管理，而 teammate 的执行由
+            # TeamManager 的 child registry 管理；两者合起来才是成员级状态。
+            if is_leader and session_is_running:
+                status = "running"
+                active_task_count = max(1, active_task_count)
+            else:
+                status = str(state.get("status") or "idle")
+            members.append({
+                "member_id": agent_id,
+                "member_name": str(team_member.get("agent_name") or agent_id),
+                "is_leader": is_leader,
+                "runtime_id": runtime_id,
+                "model_profile_id": selected_model_id,
+                "model_label": model_label,
+                "binding_source": str(binding.get("binding_source") or ""),
+                "binding_revision": int(binding.get("revision") or 0),
+                "status": status,
+                "active_task_count": active_task_count,
+                "model_switchable": switchable,
+                "unavailable_reason": unavailable_reason,
+                "models": models,
+            })
+        return {
+            "ok": True,
+            "source": "team",
+            "scope": "team",
+            "session_id": session_id,
+            "external_team_id": str(team.get("id") or ""),
+            "model_binding_revision": int(stored_team.get("model_binding_revision") or 0),
+            "members": members,
+        }, stored
 
     @router.get("/api/session/{session_id}/model")
     async def get_session_model(request: Request, session_id: str) -> JSONResponse:
@@ -665,9 +832,32 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
         try:
+            team_binding = team_session_model_binding(session_id, owner)
             external = external_session_model_binding(session_id, owner)
+        except TeamMemberModelBindingError as exc:
+            return JSONResponse({"ok": False, "code": exc.code, "error": exc.message}, status_code=409)
         except KeyError:
             return JSONResponse({"ok": False, "error": "外部智能体或运行时不存在"}, status_code=409)
+        if team_binding is not None:
+            body = team_binding[0]
+            member_id = str(request.query_params.get("member_id") or "").strip()
+            if not member_id:
+                return JSONResponse(body)
+            member = next((item for item in body["members"] if item["member_id"] == member_id), None)
+            if member is None:
+                return JSONResponse(
+                    {"ok": False, "code": "session_or_member_not_found", "error": "Team 成员不存在"},
+                    status_code=404,
+                )
+            return JSONResponse({
+                "ok": True,
+                "source": "team",
+                "scope": "team_member",
+                "session_id": session_id,
+                "external_team_id": body["external_team_id"],
+                "model_binding_revision": body["model_binding_revision"],
+                **member,
+            })
         if external is not None:
             return JSONResponse(external[0])
         return JSONResponse(crew.read_session_model_binding(session_id, owner_account_id=owner))
@@ -698,9 +888,145 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
 
         st = dispatcher.status(session_id, owner_account_id=owner)
         try:
+            team_binding = team_session_model_binding(session_id, owner)
             external = external_session_model_binding(session_id, owner)
+        except TeamMemberModelBindingError as exc:
+            return JSONResponse({"ok": False, "code": exc.code, "error": exc.message}, status_code=409)
         except KeyError:
             return JSONResponse({"ok": False, "error": "外部智能体或运行时不存在"}, status_code=409)
+        if team_binding is not None:
+            binding_body = team_binding[0]
+            member_id = str(payload.get("member_id") or "").strip()
+            if not member_id:
+                return JSONResponse(
+                    {"ok": False, "code": "member_required", "error": "Team 模型切换必须指定 member_id"},
+                    status_code=400,
+                )
+            member = next(
+                (item for item in binding_body["members"] if item["member_id"] == member_id),
+                None,
+            )
+            if member is None:
+                return JSONResponse(
+                    {"ok": False, "code": "session_or_member_not_found", "error": "Team 成员不存在"},
+                    status_code=404,
+                )
+            if model_id == str(member.get("model_profile_id") or ""):
+                return JSONResponse({
+                    "ok": True,
+                    "source": "team",
+                    "scope": "team_member",
+                    "session_id": session_id,
+                    "external_team_id": binding_body["external_team_id"],
+                    "model_binding_revision": binding_body["model_binding_revision"],
+                    **member,
+                })
+            if member.get("status") != "idle":
+                return JSONResponse(
+                    {"ok": False, "code": "member_busy", "error": "目标成员运行中，请在任务结束后切换模型"},
+                    status_code=409,
+                )
+            if is_crew_builtin_agent(member_id):
+                profile = crew.owner_model_profiles(owner).get(model_id)
+                if profile is None or not profile.loaded:
+                    return JSONResponse(
+                        {"ok": False, "code": "model_not_available", "error": "所选模型不可用"},
+                        status_code=400,
+                    )
+                if not profile.has_key:
+                    return JSONResponse(
+                        {"ok": False, "code": "model_not_available", "error": "所选模型未配置 API Key"},
+                        status_code=409,
+                    )
+                runtime_id = "builtin"
+                canonical_model_id = profile.id
+            else:
+                try:
+                    agent, runtime = crew.external_agents.agent_with_runtime(
+                        member_id,
+                        owner_account_id=owner,
+                    )
+                except KeyError:
+                    return JSONResponse(
+                        {"ok": False, "code": "session_or_member_not_found", "error": "Team 成员不存在"},
+                        status_code=404,
+                    )
+                metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
+                models = normalize_runtime_models(metadata.get("models"))
+                canonical_model_id = canonical_runtime_model_id(runtime, model_id)
+                selected = next((item for item in models if item.id == canonical_model_id), None)
+                if selected is None:
+                    return JSONResponse(
+                        {"ok": False, "code": "model_not_in_runtime", "error": "所选模型不属于目标成员运行时"},
+                        status_code=400,
+                    )
+                if not runtime_model_switchable(runtime, models):
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "code": "runtime_model_switch_unsupported",
+                            "error": "目标成员运行时不支持保留会话的模型切换",
+                        },
+                        status_code=409,
+                    )
+                crew.external_agents.resolve_agent_profile(
+                    agent["id"],
+                    canonical_model_id,
+                    owner_account_id=owner,
+                )
+                runtime_id = str(runtime.get("id") or agent.get("runtime_id") or "")
+            expected_revision_raw = payload.get("expected_revision")
+            try:
+                expected_revision = (
+                    int(expected_revision_raw)
+                    if expected_revision_raw is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    {"ok": False, "code": "invalid_revision", "error": "expected_revision 必须是整数"},
+                    status_code=400,
+                )
+            try:
+                set_team_member_model_binding(
+                    crew.session_store,
+                    session_id,
+                    owner_account_id=owner,
+                    agent_id=member_id,
+                    runtime_id=runtime_id,
+                    model_id=canonical_model_id,
+                    binding_source=(
+                        "restored_from_agent_default"
+                        if bool(payload.get("restore_default"))
+                        else "session_override"
+                    ),
+                    expected_revision=expected_revision,
+                )
+            except TeamMemberModelBindingError as exc:
+                status_code = 404 if exc.code == "session_or_member_not_found" else 409
+                return JSONResponse(
+                    {"ok": False, "code": exc.code, "error": exc.message},
+                    status_code=status_code,
+                )
+            drop_team = getattr(crew.team, "drop_session_team", None)
+            if callable(drop_team):
+                drop_team(session_id, owner_account_id=owner)
+            refreshed = team_session_model_binding(session_id, owner)
+            if refreshed is None:  # pragma: no cover - binding cannot change executor here
+                return JSONResponse({"ok": False, "error": "Team 模型绑定读取失败"}, status_code=500)
+            refreshed_body = refreshed[0]
+            refreshed_member = next(
+                item for item in refreshed_body["members"] if item["member_id"] == member_id
+            )
+            return JSONResponse({
+                "ok": True,
+                "source": "team",
+                "scope": "team_member",
+                "session_id": session_id,
+                "external_team_id": refreshed_body["external_team_id"],
+                "model_binding_revision": refreshed_body["model_binding_revision"],
+                **refreshed_member,
+            })
         if external is not None:
             binding, config = external
             if st.get("live") != "idle":
@@ -759,6 +1085,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         if not callable(getter):
             return JSONResponse({})
         config = getter(session_id, owner_account_id=owner) or {}
+        if strict_security_enabled():
+            config = {key: value for key, value in config.items() if key != "user_type"}
         if is_external_session_config(config):
             require_external_agents_enabled(crew)
         return JSONResponse(config)
@@ -768,6 +1096,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         owner = _owner(request)
         raw_config = payload.get("config") if isinstance(payload.get("config"), dict) else payload
         config = {k: v for k, v in raw_config.items() if k not in {"workspace_id", "title"}}
+        if strict_security_enabled():
+            config.pop("user_type", None)
         executor = str(config.get("executor") or "").strip().lower()
         if executor not in {"builtin", "client", "external", "acp", "team"}:
             return JSONResponse(
@@ -820,35 +1150,29 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     status_code=404,
                 )
 
-        if executor in {"external", "acp"} and external_agent_id:
-            try:
-                _, runtime = crew.external_agents.agent_with_runtime(
-                    external_agent_id,
-                    owner_account_id=owner,
-                )
-            except KeyError:
-                return JSONResponse(
-                    {"ok": False, "error": "外援智能体不存在或无权访问"},
-                    status_code=404,
-                )
-            metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
-            availability = str(metadata.get("availability_status") or "").strip().lower()
-            if availability in {"degraded", "unavailable"}:
-                return JSONResponse(
-                    {"ok": False, "error": "外援智能体的运行时当前不可用，请重新探测"},
-                    status_code=409,
-                )
-        if executor == "team" and external_team_id:
-            try:
-                crew.external_agents.get_team(
-                    external_team_id,
-                    owner_account_id=owner,
-                )
-            except KeyError:
-                return JSONResponse(
-                    {"ok": False, "error": "外援团队不存在或无权访问"},
-                    status_code=404,
-                )
+        if executor == "team":
+            # Member model bindings are server-owned Session state.  A client
+            # may update Team selection/configuration but cannot forge or reset
+            # the materialized model/revision map.
+            team_config = dict(team_config)
+            team_config.pop("member_model_bindings", None)
+            team_config.pop("model_binding_revision", None)
+            getter = getattr(crew.session_store, "get_agent_config", None)
+            existing_config = (
+                getter(session_id, owner_account_id=owner)
+                if callable(getter)
+                else None
+            )
+            existing_team = (
+                existing_config.get("team")
+                if isinstance(existing_config, dict) and isinstance(existing_config.get("team"), dict)
+                else {}
+            )
+            if str(existing_team.get("external_team_id") or "").strip() == external_team_id:
+                for key in ("member_model_bindings", "model_binding_revision"):
+                    if key in existing_team:
+                        team_config[key] = existing_team[key]
+            config["team"] = team_config
 
         workspace_id = str(payload.get("workspace_id") or raw_config.get("workspace_id") or "default")
         title = str(payload.get("title") or raw_config.get("title") or "新会话")

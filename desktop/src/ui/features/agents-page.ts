@@ -5,12 +5,12 @@ import {
   type ExternalTeam,
   type ExternalTeamRole,
   type ExternalTeamSuggestion,
-  type FormationStaffingGap,
   type FormationPlan,
   type RequiredAgentConflict,
   type RuntimeModelProfile,
   type SessionAgentBinding,
 } from '../backend-client';
+import { setRuntimeStyle } from '../components/runtime-style';
 import {
   $,
   $$,
@@ -25,10 +25,16 @@ import { STORAGE_KEYS } from '../../shared/storage-keys';
 import { loadSessionModel, syncSessionModelAvailabilityUi } from './session-model';
 import { refreshAllSessions } from './workspaces';
 import {
+  createAgentHubView,
+  type AgentHubState,
+  type AgentHubView,
+} from './agent-hub';
+import {
   EXTERNAL_AGENTS_DISABLED_MESSAGE,
   externalAgentsEnabled,
 } from './external-agents-feature';
 import { renderMarkdownHtml } from '../markdown';
+import { showConfirmDialog } from '../ui-feedback';
 
 type AgentsTab = 'mine' | 'runtime' | 'create-agent' | 'create-team';
 type AgentsSelectOption = {
@@ -36,7 +42,6 @@ type AgentsSelectOption = {
   label: string;
   description?: string;
   badge?: string;
-  triggerBadge?: string;
 };
 type EnsureChatSessionFn = () => string;
 type SessionAgentAssignedFn = (
@@ -45,10 +50,6 @@ type SessionAgentAssignedFn = (
   modelLabel?: string,
   agentBinding?: SessionAgentBinding,
 ) => void;
-type PendingTemporaryMember = FormationStaffingGap & {
-  runtime_id: string;
-  model_id: string;
-};
 type FormationUiStatus =
   | 'idle'
   | 'fast_loading'
@@ -58,13 +59,12 @@ type FormationUiStatus =
   | 'ready_partial';
 type AgentsGuideMode = 'hidden' | 'welcome' | 'tour';
 type AgentsGuideStepNumber = 1 | 2 | 3;
-type AgentsGuideStep = {
-  progress: '1/3' | '2/3' | '3/3';
-  title: string;
-  body: string;
-  target: string;
-  side: 'left' | 'right';
-};
+
+export interface ExternalConversationCatalog {
+  agents: ExternalAgent[];
+  teams: ExternalTeam[];
+  runtimes: ExternalRuntime[];
+}
 
 export interface ExternalConversationCatalog {
   agents: ExternalAgent[];
@@ -74,18 +74,10 @@ export interface ExternalConversationCatalog {
 
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 
-const TABS: Record<AgentsTab, string> = {
-  mine: '我的阵容',
-  runtime: '发现外援',
-  'create-agent': '添加外援',
-  'create-team': '组建团队',
-};
-
+const TEAM_DRAFT_DEBOUNCE_MS = 600;
 const AGENTS_GUIDE_HIGHLIGHT_PADDING = 6;
 const AGENTS_GUIDE_TOOLTIP_GAP = 12;
 const AGENTS_GUIDE_VIEWPORT_MARGIN = 12;
-
-const TEAM_DRAFT_DEBOUNCE_MS = 600;
 
 const TEAM_REQUIRED_CAPABILITIES = [
   { key: 'information_retrieval', label: '检索', prompt: '必须包含信息检索能力。' },
@@ -152,16 +144,12 @@ let memberRoleMeta: Record<string, ExternalTeamRole> = {};
 let teamSpec: Record<string, unknown> | null = null;
 let formationPlan: FormationPlan | null = null;
 let formationStatus: FormationUiStatus = 'idle';
-let formationStartedAt: number | null = null;
 let formationElapsedMs = 0;
 let formationImprovements: string[] = [];
 let formationAiAttempted = false;
 let formationRequestSeq = 0;
 let formationRequestAbort: AbortController | null = null;
 let formationElapsedTimer: number | null = null;
-let staffingDecision: FormationStaffingGap[] = [];
-let staffingSelections: PendingTemporaryMember[] = [];
-let pendingTemporaryMembers: PendingTemporaryMember[] = [];
 let teamRolesLocked = false;
 let requiredTeamAgentIds: string[] = [];
 let excludedTeamAgentIds: string[] = [];
@@ -175,61 +163,51 @@ let showTeamConstraints = false;
 let showCustomCapabilityInput = false;
 let agentsSelectPopover: HTMLElement | null = null;
 let agentsSelectGlobalBound = false;
+let agentHubView: AgentHubView | null = null;
 let agentsGuideMode: AgentsGuideMode = 'hidden';
 let agentsGuideStep: AgentsGuideStepNumber = 1;
 let agentsGuideLayoutFrame: number | null = null;
-let agentsGuideAutoScrolledStep: AgentsGuideStepNumber | null = null;
 let initialRuntimeScanStarted = false;
 
-function invalidateFormationDecision(): void {
-  formationRequestAbort?.abort();
-  formationRequestAbort = null;
-  formationRequestSeq += 1;
-  stopFormationElapsedTimer();
-  teamRolesLocked = false;
-  formationStatus = 'idle';
-  formationStartedAt = null;
-  formationElapsedMs = 0;
-  formationImprovements = [];
-  formationAiAttempted = false;
-  busy = false;
-  staffingDecision = [];
-  staffingSelections = [];
-  pendingTemporaryMembers = [];
-}
-
 function stopFormationElapsedTimer(): void {
-  if (formationElapsedTimer == null) return;
+  if (formationElapsedTimer === null) return;
   window.clearInterval(formationElapsedTimer);
   formationElapsedTimer = null;
 }
 
 function startFormationElapsedTimer(startedAt: number): void {
   stopFormationElapsedTimer();
-  formationStartedAt = startedAt;
   formationElapsedMs = 0;
   formationElapsedTimer = window.setInterval(() => {
-    if (formationStartedAt == null) return;
-    formationElapsedMs = Date.now() - formationStartedAt;
+    formationElapsedMs = Date.now() - startedAt;
     $$('[data-formation-elapsed]').forEach((element) => {
       element.textContent = formatTeamDraftElapsed(formationElapsedMs);
     });
   }, 1000);
 }
 
-function finishFormationElapsedTimer(startedAt: number): void {
-  formationElapsedMs = Date.now() - startedAt;
-  formationStartedAt = null;
+function invalidateFormationDecision(): void {
+  formationRequestAbort?.abort();
+  formationRequestAbort = null;
+  formationRequestSeq += 1;
   stopFormationElapsedTimer();
+  formationStatus = 'idle';
+  formationElapsedMs = 0;
+  formationImprovements = [];
+  formationAiAttempted = false;
+  teamRolesLocked = false;
+  busy = false;
 }
 
-function resolveFormationUiStatus(
-  suggestion: Pick<ExternalTeamSuggestion, 'requested_formation_mode' | 'selected_formation_mode' | 'fallback_reason' | 'ai_material_improvements'>,
-): Exclude<FormationUiStatus, 'idle' | 'fast_loading' | 'ai_reviewing'> {
+function resolveFormationUiStatus(suggestion: ExternalTeamSuggestion): FormationUiStatus {
   if (suggestion.selected_formation_mode === 'ai' && suggestion.ai_material_improvements?.length) {
     return 'ready_improved';
   }
-  if (['no_material_improvement', 'quality_regressed', 'baseline_coverage_regressed'].includes(suggestion.fallback_reason)) {
+  if ([
+    'no_material_improvement',
+    'quality_regressed',
+    'baseline_coverage_regressed',
+  ].includes(suggestion.fallback_reason || '')) {
     return 'ready_unchanged';
   }
   if (
@@ -248,16 +226,37 @@ function runtimeStatus(runtime: ExternalRuntime): 'ready' | 'degraded' | 'unavai
   return 'unavailable';
 }
 
+function externalActionError(prefix: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error || '');
+  if (
+    detail.includes('external_agents_disabled')
+    || detail.includes('功能已在配置中关闭')
+    || detail.includes('外援功能暂未开放')
+  ) {
+    return EXTERNAL_AGENTS_DISABLED_MESSAGE;
+  }
+  return `${prefix}：${detail || '未知错误'}`;
+}
+
 function runtimeWasReplaced(runtime: ExternalRuntime): boolean {
   return runtime.metadata?.lifecycle_status === 'replaced'
     && typeof runtime.metadata?.replaced_by_runtime_id === 'string';
 }
 
-const RUNTIME_STATUS_LABEL = {
-  ready: '随时可用',
-  degraded: '已找到，模型信息还没准备好',
-  unavailable: '暂时不可用',
-};
+function runtimeStatusDetail(runtime: ExternalRuntime): string {
+  const status = runtimeStatus(runtime);
+  if (status === 'ready') return '';
+  const probe = runtime.metadata?.probe;
+  const probeRecord = probe && typeof probe === 'object'
+    ? probe as Record<string, unknown>
+    : undefined;
+  const errorCode = String(probeRecord?.error_code || '').trim();
+  const probeMessage = String(probeRecord?.message || '').trim();
+  if (errorCode === 'models_empty') return '运行时没有返回可用模型，可点“再找找”重试';
+  if (probeMessage) return probeMessage;
+  if (status === 'degraded') return '已找到工具，但这次没能读取模型目录，可点“再找找”重试';
+  return '当前未找到可执行文件；确认不再需要后可删除这条记录';
+}
 
 function runtimeModelOptions(runtimeId: string): RuntimeModelProfile[] {
   const runtime = runtimes.find((item) => item.id === runtimeId);
@@ -296,33 +295,11 @@ function agentsSelectOptions(key: string): AgentsSelectOption[] {
       ...(model.default ? { badge: '默认' } : {}),
     }));
   }
-  if (key.startsWith('staffing-runtime:')) {
-    return runtimes
-      .filter((runtime) => runtimeStatus(runtime) === 'ready')
-      .map((runtime) => ({
-        value: runtime.id,
-        label: runtime.name || runtime.provider,
-        description: `${providerLabel(runtime.provider)} · ${runtime.protocol || runtime.version || 'runtime'}`,
-      }));
-  }
-  if (key.startsWith('staffing-model:')) {
-    const index = Number(key.slice('staffing-model:'.length));
-    const runtimeId = staffingSelections[index]?.runtime_id || '';
-    return runtimeModelOptions(runtimeId).map((model) => ({
-      value: model.id,
-      label: model.label,
-      description: model.label === model.id ? model.provider || model.id : model.id,
-      ...(model.default ? { badge: '默认' } : {}),
-    }));
-  }
   if (key === 'team-leader') {
     return teamAgentOptions().filter(agentReadyForFormation).map((agent) => ({
       value: agent.id,
       label: agent.name,
       description: agentProviderDisplay(agent.provider),
-      ...(agent.id === CREW_BUILTIN_AGENT_ID
-        ? { badge: '内置', triggerBadge: '内置' }
-        : {}),
     }));
   }
   if (key === 'team-required-agent') {
@@ -371,10 +348,7 @@ function renderAgentsSelect(
         aria-expanded="false"
         ${disabled ? 'disabled' : ''}
       >
-        <span class="agent-form-select__value">
-          <span class="agent-form-select__value-label">${escapeHtml(selected?.label || placeholder)}</span>
-          ${selected?.triggerBadge ? `<span class="agent-form-select__trigger-badge">${escapeHtml(selected.triggerBadge)}</span>` : ''}
-        </span>
+        <span>${escapeHtml(selected?.label || placeholder)}</span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
       </button>
     </div>
@@ -402,42 +376,19 @@ function applyAgentsSelect(key: string, value: string): void {
     render();
     return;
   }
-  if (key.startsWith('staffing-runtime:')) {
-    const index = Number(key.slice('staffing-runtime:'.length));
-    const models = runtimeModelOptions(value);
-    const runtime = runtimes.find((item) => item.id === value);
-    const defaultModel = String(runtime?.metadata?.default_model_id || '');
-    if (staffingSelections[index]) {
-      staffingSelections[index] = {
-        ...staffingSelections[index],
-        runtime_id: value,
-        model_id: defaultModel || models[0]?.id || '',
-      };
-    }
-    render();
-    return;
-  }
-  if (key.startsWith('staffing-model:')) {
-    const index = Number(key.slice('staffing-model:'.length));
-    if (staffingSelections[index]) {
-      staffingSelections[index] = { ...staffingSelections[index], model_id: value };
-    }
-    render();
-    return;
-  }
   if (key === 'team-leader') {
     changeLeader(value);
     return;
   }
   if (key === 'team-required-agent') {
     if (value && !requiredTeamAgentIds.includes(value)) requiredTeamAgentIds = [...requiredTeamAgentIds, value];
-    invalidateFormationDecision();
+    teamRolesLocked = false;
     render();
     return;
   }
   if (key === 'team-excluded-agent') {
     if (value && !excludedTeamAgentIds.includes(value)) excludedTeamAgentIds = [...excludedTeamAgentIds, value];
-    invalidateFormationDecision();
+    teamRolesLocked = false;
     render();
     return;
   }
@@ -447,7 +398,7 @@ function applyAgentsSelect(key: string, value: string): void {
     memberRoleKeys[agentId] = value;
     if (meta) memberRoleMeta[agentId] = meta;
     memberRoles[agentId] = defaultRoleFor(agentId, value);
-    invalidateFormationDecision();
+    teamRolesLocked = false;
     render();
   }
 }
@@ -488,11 +439,11 @@ function openAgentsSelect(trigger: HTMLElement): void {
 
   const rect = trigger.getBoundingClientRect();
   const width = Math.min(360, Math.max(280, rect.width));
-  popover.style.width = `${width}px`;
+  setRuntimeStyle(popover, 'width', `${width}px`);
   const height = popover.offsetHeight || 180;
   const openUp = window.innerHeight - rect.bottom < height + 12 && rect.top > height + 12;
-  popover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`;
-  popover.style.top = openUp ? `${Math.max(8, rect.top - height - 6)}px` : `${rect.bottom + 6}px`;
+  setRuntimeStyle(popover, 'left', `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`);
+  setRuntimeStyle(popover, 'top', openUp ? `${Math.max(8, rect.top - height - 6)}px` : `${rect.bottom + 6}px`);
 
   popover.querySelectorAll<HTMLElement>('[data-agents-select-value]').forEach((option) => {
     option.addEventListener('click', (event) => {
@@ -523,9 +474,8 @@ function teamAgentOptions(): ExternalAgent[] {
   return [
     {
       id: CREW_BUILTIN_AGENT_ID,
-      name: 'Crew',
+      name: 'Crew 内置智能体',
       provider: 'crew',
-      display_badge: 'M',
       runtime_id: '',
       model: 'builtin',
       system_prompt: '',
@@ -542,18 +492,6 @@ function agentNameById(agentId: string): string {
 
 function externalModelLabel(agent: ExternalAgent): string {
   return (agent.model || agent.provider || agent.name || '').trim();
-}
-
-function externalActionError(prefix: string, error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error || '');
-  if (
-    detail.includes('external_agents_disabled')
-    || detail.includes('功能已在配置中关闭')
-    || detail.includes('外援功能暂未开放')
-  ) {
-    return EXTERNAL_AGENTS_DISABLED_MESSAGE;
-  }
-  return `${prefix}：${detail || '未知错误'}`;
 }
 
 function formatTeamDraftElapsed(elapsedMs: number): string {
@@ -764,13 +702,15 @@ function buildTeamConstraintText(): string {
 }
 
 async function refresh(): Promise<void> {
-  const [catalog, nextRoles] = await Promise.all([
-    loadExternalConversationCatalog(),
+  const [nextRuntimes, nextAgents, nextTeams, nextRoles] = await Promise.all([
+    backendApi.runtimes().catch(() => []),
+    backendApi.externalAgents().catch(() => []),
+    backendApi.externalTeams().catch(() => []),
     backendApi.externalTeamRoles().catch(() => []),
   ]);
-  runtimes = catalog.runtimes;
-  agents = catalog.agents;
-  teams = catalog.teams;
+  runtimes = nextRuntimes;
+  agents = nextAgents;
+  teams = nextTeams;
   rolePresets = nextRoles;
   if (!rolePresets.some((role) => role.key === 'project_manager')) {
     rolePresets = [
@@ -787,9 +727,7 @@ async function refresh(): Promise<void> {
 }
 
 export async function loadExternalConversationCatalog(): Promise<ExternalConversationCatalog> {
-  if (!externalAgentsEnabled()) {
-    return { agents: [], teams: [], runtimes: [] };
-  }
+  if (!externalAgentsEnabled()) return { agents: [], teams: [], runtimes: [] };
   const [nextRuntimes, nextAgents, nextTeams] = await Promise.all([
     backendApi.runtimes(),
     backendApi.externalAgents(),
@@ -805,86 +743,19 @@ export async function loadExternalConversationCatalog(): Promise<ExternalConvers
   };
 }
 
-function renderTabs(): string {
-  return `
-    <div class="agents-tabs" role="tablist" aria-label="外援中心视图">
-      ${(Object.keys(TABS) as AgentsTab[]).map((tab) => `
-        <button type="button" class="agents-tab${activeTab === tab ? ' active' : ''}" data-agents-tab="${tab}" role="tab">
-          ${TABS[tab]}
-        </button>
-      `).join('')}
-    </div>
-  `;
-}
-
-function renderAgentCard(agent: ExternalAgent): string {
-  const meta = [
-    agent.model || '默认模型',
-    agent.status || 'ready',
-    agent.runtime_id ? `runtime ${agent.runtime_id}` : '',
-  ].filter(Boolean).join(' · ');
-  const tags = (agent.capabilities?.length ? agent.capabilities : agent.tags || []).slice(0, 4);
-  return `
-    <article class="mine-agent-card agents-display-card" data-agent-id="${escapeHtml(agent.id)}">
-      <div class="pixel-avatar" aria-hidden="true"><span>${escapeHtml(agent.display_badge || '?')}</span></div>
-      <div class="mine-agent-card__body">
-        <div class="mine-agent-card__head">
-          <strong>${escapeHtml(agent.name || '未命名外援')}</strong>
-          <span>${escapeHtml(providerLabel(agent.provider))}</span>
-        </div>
-        <div class="mine-agent-card__meta">${escapeHtml(meta || agent.description || '外部智能体')}</div>
-        ${tags.length ? `<div class="agents-display-tags">${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
-      </div>
-      <div class="mine-card-quick-actions">
-        <button type="button" class="agent-btn" data-use-agent="${escapeHtml(agent.id)}">派活</button>
-        <button type="button" class="pixel-action-btn" data-delete-agent="${escapeHtml(agent.id)}" title="删除" aria-label="删除 ${escapeHtml(agent.name)}">×</button>
-      </div>
-    </article>
-  `;
-}
-
 function teamLeaderName(team: ExternalTeam): string {
   if (!team.leader_agent_id) return '未指定 Leader';
-  return team.leader_agent_id === CREW_BUILTIN_AGENT_ID ? 'Crew' : agentNameById(team.leader_agent_id);
+  return team.leader_agent_id === CREW_BUILTIN_AGENT_ID ? 'Crew 内置智能体' : agentNameById(team.leader_agent_id);
 }
 
 function teamMemberCount(team: ExternalTeam): number {
   return Array.isArray(team.members) ? team.members.length : 0;
 }
 
-function renderTeamCard(team: ExternalTeam): string {
-  const leaderAgent = teamAgentOptions().find((agent) => agent.id === team.leader_agent_id);
-  const leaderInitial = leaderAgent?.display_badge || '?';
-  return `
-    <article class="team-tile agents-team-card" data-team-id="${escapeHtml(team.id)}" role="button" tabindex="0" aria-label="查看团队 ${escapeHtml(team.name || '未命名团队')} 的组队明细">
-      <div class="team-tile__top">
-        <div class="pixel-avatar pixel-avatar--leader" aria-hidden="true"><span>${escapeHtml(leaderInitial)}</span></div>
-        <div>
-          <strong>${escapeHtml(team.name || '未命名团队')}</strong>
-          <p>${escapeHtml(team.description || `Leader：${teamLeaderName(team)}`)}</p>
-        </div>
-      </div>
-      <div class="team-badge-row">
-        ${(team.members || []).slice(0, 5).map((member) => {
-          const memberName = agentNameById(member.agent_id);
-          return `<span class="pixel-badge" title="${escapeHtml(memberName)}">${escapeHtml(member.display_badge || '?')}</span>`;
-        }).join('')}
-        ${teamMemberCount(team) > 5 ? `<em>+${teamMemberCount(team) - 5}</em>` : ''}
-        ${teamMemberCount(team) === 0 ? '<em>暂无成员</em>' : ''}
-      </div>
-      <div class="team-tile__quick-actions">
-        <button type="button" class="agent-btn" data-use-team="${escapeHtml(team.id)}">派活</button>
-        <button type="button" class="pixel-action-btn" data-delete-team="${escapeHtml(team.id)}" title="删除" aria-label="删除 ${escapeHtml(team.name)}">×</button>
-      </div>
-    </article>
-  `;
-}
-
 function renderTeamDetail(): string {
   const team = teams.find((item) => item.id === activeTeamId);
   if (!team) return '';
   const leader = teamAgentOptions().find((agent) => agent.id === team.leader_agent_id);
-  const leaderName = teamLeaderName(team);
   const workflow = String(team.instructions || team.workflow || '').trim();
   const members = [...(team.members || [])].sort((left, right) => {
     if (left.agent_id === team.leader_agent_id) return -1;
@@ -896,11 +767,11 @@ function renderTeamDetail(): string {
       <div class="team-modal team-detail-modal" role="dialog" aria-modal="true" aria-labelledby="team-detail-title">
         <div class="team-modal__head">
           <div class="team-modal__title">
-            <div class="pixel-avatar pixel-avatar--leader" aria-hidden="true"><span>${escapeHtml(leader?.display_badge || '?')}</span></div>
+            <div class="formation-avatar formation-avatar--leader" aria-hidden="true"><span>${escapeHtml(leader?.display_badge || '?')}</span></div>
             <div>
               <span>团队</span>
               <strong id="team-detail-title">${escapeHtml(team.name || '未命名团队')}</strong>
-              <p>Leader：${escapeHtml(leaderName)}</p>
+              <p>Leader：${escapeHtml(teamLeaderName(team))}</p>
             </div>
           </div>
           <button type="button" class="agent-icon-btn" data-team-detail-close>关闭</button>
@@ -909,14 +780,12 @@ function renderTeamDetail(): string {
           <section class="team-modal__section">
             <h3>团队描述</h3>
             <p class="team-modal__plain">${escapeHtml(team.description)}</p>
-          </section>
-        ` : ''}
+          </section>` : ''}
         ${workflow ? `
           <section class="team-modal__section">
             <h3>团队工作流</h3>
             <div class="md-body chat-markdown team-modal__md">${renderMarkdownHtml(workflow)}</div>
-          </section>
-        ` : ''}
+          </section>` : ''}
         <section class="team-modal__section">
           <h3>成员职责</h3>
           <div class="team-modal__members">
@@ -924,107 +793,25 @@ function renderTeamDetail(): string {
               const agent = teamAgentOptions().find((item) => item.id === member.agent_id);
               const isLeader = member.agent_id === team.leader_agent_id;
               const name = member.agent_name || agent?.name || member.agent_id;
-              const provider = agent?.provider || 'external';
               const roleMeta = [member.role_label, member.workflow_lane].filter(Boolean).join(' · ');
               return `
                 <article class="team-modal-member${isLeader ? ' is-leader' : ''}">
                   <div class="team-modal-member__head">
-                    <span class="pixel-badge">${escapeHtml(member.display_badge || agent?.display_badge || '?')}</span>
+                    <span class="formation-member-badge">${escapeHtml(member.display_badge || agent?.display_badge || '?')}</span>
                     <div>
                       <strong>${escapeHtml(name)}${isLeader ? '<span class="pixel-flag" title="Leader" aria-label="Leader"></span>' : ''}</strong>
-                      <p>${escapeHtml(provider)}${isLeader ? ' · Leader' : ''}</p>
+                      <p>${escapeHtml(agent?.provider || 'external')}${isLeader ? ' · Leader' : ''}</p>
                       ${roleMeta ? `<p>${escapeHtml(roleMeta)}</p>` : ''}
                     </div>
                   </div>
                   <div class="md-body chat-markdown team-modal__md">${renderMarkdownHtml(member.role || '未填写职责')}</div>
-                </article>
-              `;
+                </article>`;
             }).join('')}
             ${members.length ? '' : '<div class="agents-empty">暂无团队成员</div>'}
           </div>
         </section>
       </div>
-    </div>
-  `;
-}
-
-function renderMine(): string {
-  return `
-    <section class="agents-section">
-      <div class="agents-section__bar">
-        <div class="agents-section__intro">
-          <h2>我的外援</h2>
-          <p>已经加入阵容、随时可以派活的 AI 帮手。</p>
-        </div>
-        <span class="agents-count">${agents.length} 位</span>
-      </div>
-      ${agents.length
-        ? `<div class="mine-agent-grid">${agents.map(renderAgentCard).join('')}</div>`
-        : `
-          <div class="agents-empty agents-empty--wide agents-empty--actionable">
-            <strong>阵容还是空的</strong>
-            <span>先去看看这台电脑上有哪些 AI 工具可以来帮忙。</span>
-            <button type="button" data-agents-go-tab="runtime">去发现外援</button>
-          </div>
-        `}
-    </section>
-    <section class="agents-section agents-section__bar--spaced">
-      <div class="agents-section__bar">
-        <div class="agents-section__intro">
-          <h2>我的团队</h2>
-          <p>把擅长不同工作的外援组合起来，一起完成复杂任务。</p>
-        </div>
-        <span class="agents-count">${teams.length} 支</span>
-      </div>
-      ${teams.length
-        ? `<div class="team-tile-grid">${teams.map(renderTeamCard).join('')}</div>`
-        : `
-          <div class="agents-empty agents-empty--wide agents-empty--actionable">
-            <strong>还没有小队</strong>
-            <span>${agents.length ? '外援已经在阵容里了，可以把他们组织成一支小队。' : '外援到位后，可以把他们组织成一支小队。'}</span>
-            ${agents.length ? '<button type="button" data-agents-go-tab="create-team">去组个团队</button>' : ''}
-          </div>
-        `}
-    </section>
-  `;
-}
-
-function renderRuntime(): string {
-  const visibleRuntimes = runtimes.filter((runtime) => !runtimeWasReplaced(runtime));
-  return `
-    <section class="agents-section">
-      <div class="agents-section__bar">
-        <div class="agents-section__intro">
-          <h2>发现外援</h2>
-          <p>Crew 会寻找这台电脑里已经安装、可以协作的 AI 工具。</p>
-        </div>
-        <button type="button" class="agent-btn agent-btn--dark" data-scan-runtimes ${busy ? 'disabled' : ''}>${runtimeScanning ? '正在找…' : '再找找'}</button>
-      </div>
-      ${visibleRuntimes.length
-        ? `<div class="agents-list">${visibleRuntimes.map((runtime) => `
-          <article class="agent-card">
-            <div class="agent-card__main">
-              <div class="agent-card__title">
-                <span class="runtime-status-dot runtime-status-dot--${runtimeStatus(runtime)}" title="${RUNTIME_STATUS_LABEL[runtimeStatus(runtime)]}" aria-label="${RUNTIME_STATUS_LABEL[runtimeStatus(runtime)]}"></span>
-                <span class="agent-pill">${escapeHtml(providerLabel(runtime.provider))}</span>
-                ${escapeHtml(runtime.name || runtime.provider)}
-              </div>
-              <div class="agent-card__meta">
-                ${escapeHtml(RUNTIME_STATUS_LABEL[runtimeStatus(runtime)])}
-                ${runtime.version ? ` · ${escapeHtml(runtime.version)}` : ''}
-              </div>
-            </div>
-            <button type="button" class="pixel-use-btn" data-runtime-id="${escapeHtml(runtime.id)}" ${runtimeStatus(runtime) === 'ready' ? '' : 'disabled'} title="${runtimeStatus(runtime) === 'ready' ? `使用 ${escapeHtml(runtime.name || runtime.provider)}` : RUNTIME_STATUS_LABEL[runtimeStatus(runtime)]}">
-              <span class="pixel-use-btn__spark" aria-hidden="true"></span>
-              使用
-            </button>
-          </article>
-        `).join('')}</div>`
-        : `<div class="agents-empty agents-empty--wide agents-empty--plain">${runtimeScanning
-          ? '正在看看这台电脑上有哪些外援…'
-          : '这次还没找到外援。确认已安装支持的 AI 工具后，再找找。'}</div>`}
-    </section>
-  `;
+    </div>`;
 }
 
 function renderCreateAgent(): string {
@@ -1034,15 +821,15 @@ function renderCreateAgent(): string {
       <h2>添加外援</h2>
       <div class="agents-form__field">
         <span>可用外援</span>
-        ${renderAgentsSelect('agent-runtime', agentRuntimeId, '选择一位可用外援')}
+        ${renderAgentsSelect('agent-runtime', agentRuntimeId, '请选择外援')}
       </div>
       <label>
         <span>外援称呼</span>
-        <input id="agents-name-input" value="${escapeHtml(agentName)}" placeholder="例如：Codex 开发搭档" maxlength="64" />
+        <input id="agents-name-input" value="${escapeHtml(agentName)}" placeholder="给外援起个名字" maxlength="64" />
       </label>
       <div class="agents-form__field">
         <span>使用模型</span>
-        ${renderAgentsSelect('agent-model', agentModel, models.length ? '选择模型' : '这位外援暂时没有可选模型', !models.length)}
+        ${renderAgentsSelect('agent-model', agentModel, models.length ? '请选择模型' : '当前运行时没有可选模型', !models.length)}
       </div>
       <button type="button" class="agent-btn agent-btn--dark" data-create-agent ${busy || !agentRuntimeId || !agentModel ? 'disabled' : ''}>加入我的外援</button>
     </section>
@@ -1173,7 +960,6 @@ function selectedReviewAgents(): ExternalAgent[] {
 
 function renderMemberReview(): string {
   const reviewAgents = selectedReviewAgents();
-  const formationRunning = formationStatus === 'fast_loading' || formationStatus === 'ai_reviewing';
   if (!reviewAgents.length) return '<div class="agents-empty">还没有成员。点击“智能组队”后会生成建议阵容。</div>';
   return `
     <div class="team-review-list">
@@ -1184,76 +970,20 @@ function renderMemberReview(): string {
             <div class="team-review-card__head">
               <strong>${escapeHtml(agent.name)}</strong>
               <span>${agent.id === teamLeaderId ? 'Leader' : escapeHtml(memberRoleMeta[agent.id]?.label || roleKey)}</span>
-              ${agent.id !== teamLeaderId ? `<button type="button" class="pixel-action-btn" data-remove-member="${escapeHtml(agent.id)}" aria-label="移除 ${escapeHtml(agent.name)}" ${formationRunning ? 'disabled' : ''}>×</button>` : ''}
+              ${agent.id !== teamLeaderId ? `<button type="button" class="pixel-action-btn" data-remove-member="${escapeHtml(agent.id)}" aria-label="移除 ${escapeHtml(agent.name)}">×</button>` : ''}
             </div>
             <label>
               <span>角色</span>
-              ${renderAgentsSelect(`member-role:${agent.id}`, roleKey, '选择角色', formationRunning || rolePresets.length === 0)}
+              ${renderAgentsSelect(`member-role:${agent.id}`, roleKey, '选择角色', rolePresets.length === 0)}
             </label>
             <label>
               <span>职责</span>
-              <textarea data-member-role="${escapeHtml(agent.id)}" rows="5" ${formationRunning ? 'disabled' : ''}>${escapeHtml(memberRoles[agent.id] || defaultRoleFor(agent.id, roleKey))}</textarea>
+              <textarea data-member-role="${escapeHtml(agent.id)}" rows="5">${escapeHtml(memberRoles[agent.id] || defaultRoleFor(agent.id, roleKey))}</textarea>
             </label>
           </article>
         `;
       }).join('')}
     </div>
-  `;
-}
-
-function renderFormationProgress(): string {
-  if (formationStatus === 'idle') return '';
-  const running = formationStatus === 'fast_loading' || formationStatus === 'ai_reviewing';
-  const finished = formationStatus.startsWith('ready_');
-  const resultText = formationStatus === 'ready_improved'
-    ? '团队方案已优化，成员分工和能力覆盖已经更新。'
-    : formationStatus === 'ready_unchanged'
-      ? '团队方案已检查，当前成员和分工已经合适，无需调整。'
-      : '初步团队方案已生成，智能检查暂未完成，你仍然可以使用当前方案。';
-  const reviewStepClass = formationStatus === 'ai_reviewing'
-    ? 'is-active'
-    : formationStatus === 'ready_partial'
-      ? 'is-warning'
-      : finished
-        ? 'is-done'
-        : '';
-  return `
-    <section class="formation-progress formation-progress--${formationStatus}" aria-live="polite">
-      <div class="formation-progress__head">
-        <div>
-          <strong>${escapeHtml(teamName.trim() || '我的团队')}</strong>
-          <span>
-            ${running
-              ? `正在智能组队 · <b data-formation-elapsed>${escapeHtml(formatTeamDraftElapsed(formationElapsedMs))}</b>`
-              : escapeHtml(resultText)}
-          </span>
-        </div>
-        ${formationStatus === 'ready_partial'
-          ? '<button class="agent-btn" type="button" data-recheck-formation>重新检查</button>'
-          : ''}
-      </div>
-      <ol class="formation-progress__steps">
-        <li class="${formationStatus === 'fast_loading' ? 'is-active' : 'is-done'}">
-          <i aria-hidden="true">${formationStatus === 'fast_loading' ? '·' : '✓'}</i>
-          <span>生成初步方案</span>
-        </li>
-        <li class="${reviewStepClass}">
-          <i aria-hidden="true">${formationStatus === 'ready_partial' ? '!' : finished ? '✓' : '·'}</i>
-          <span>
-            智能检查优化${formationStatus === 'ai_reviewing' || (finished && formationAiAttempted)
-              ? ` · <b data-formation-elapsed>${escapeHtml(formatTeamDraftElapsed(formationElapsedMs))}</b>`
-              : ''}
-          </span>
-        </li>
-        <li class="${finished ? 'is-done' : ''}">
-          <i aria-hidden="true">${finished ? '✓' : '·'}</i>
-          <span>方案已就绪</span>
-        </li>
-      </ol>
-      ${formationStatus === 'ready_improved' && formationImprovements.length
-        ? `<div class="formation-progress__improvements">${formationImprovements.slice(0, 3).map((item) => `<span>✓ ${escapeHtml(item)}</span>`).join('')}</div>`
-        : ''}
-    </section>
   `;
 }
 
@@ -1286,69 +1016,42 @@ function renderTeamConstraintDecision(): string {
   `;
 }
 
-function renderStaffingDecision(): string {
-  if (!staffingDecision.length) return '';
+function renderFormationProgress(): string {
+  if (formationStatus === 'idle') return '';
+  const running = formationStatus === 'fast_loading' || formationStatus === 'ai_reviewing';
+  const finished = formationStatus.startsWith('ready_');
+  const resultText = formationStatus === 'ready_improved'
+    ? '团队方案已优化，成员分工和能力覆盖已经更新。'
+    : formationStatus === 'ready_unchanged'
+      ? '团队方案已检查，当前成员和分工已经合适，无需调整。'
+      : '初步团队方案已生成，智能检查暂未完成，你仍然可以使用当前方案。';
+  const reviewStepClass = formationStatus === 'ai_reviewing'
+    ? 'is-active'
+    : formationStatus === 'ready_partial'
+      ? 'is-warning'
+      : finished ? 'is-done' : '';
   return `
-    <div class="team-modal-backdrop">
-      <div class="team-modal agents-decision-modal formation-staffing-modal" role="dialog" aria-modal="true" aria-labelledby="formation-staffing-title">
-        <div class="formation-staffing-modal__head">
-          <span class="team-mark team-mark--hero" aria-hidden="true"><i></i><i></i></span>
-          <div>
-            <h2 id="formation-staffing-title">${escapeHtml(teamName || '我的团队')}建议补充 ${staffingSelections.length} 名临时成员</h2>
-            <p>现有成员仍有明确的能力缺口。你可以采用推荐配置、切换运行时和模型，或明确保留当前团队并接受这些缺口。</p>
-          </div>
-        </div>
-        <div class="agents-decision-list">
-          ${staffingSelections.map((selection, index) => `
-            <article class="agents-decision-item">
-              <strong>${escapeHtml(selection.role_label)}</strong>
-              <p>${escapeHtml(selection.reason)}</p>
-              <div class="agents-display-tags">
-                ${selection.required_capabilities.map((capability) => `<span>${escapeHtml(teamCapabilityLabel(capability))}</span>`).join('')}
-              </div>
-              <div class="formation-staffing-modal__selects">
-                ${renderAgentsSelect(`staffing-runtime:${index}`, selection.runtime_id, '请选择运行时')}
-                ${renderAgentsSelect(`staffing-model:${index}`, selection.model_id, '请选择模型', !selection.runtime_id)}
-              </div>
-            </article>
-          `).join('')}
-        </div>
-        <div class="team-modal__actions">
-          <button type="button" class="agent-btn" data-staffing-decline>仍使用当前团队</button>
-          <button
-            type="button"
-            class="agent-btn agent-btn--dark"
-            data-staffing-confirm
-            ${staffingSelections.some((item) => !item.runtime_id || !item.model_id) ? 'disabled' : ''}
-          >同意创建临时成员</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderPendingTemporaryMembers(): string {
-  if (!pendingTemporaryMembers.length) return '';
-  return `
-    <div class="team-review-section team-temporary-review">
-      <div class="team-review-section__head">
+    <section class="formation-progress formation-progress--${formationStatus}" aria-live="polite">
+      <div class="formation-progress__head">
         <div>
-          <strong>待创建的临时成员</strong>
-          <span>只会在确认创建团队时生成，并由该团队管理生命周期。</span>
+          <strong>${escapeHtml(teamName.trim() || '我的团队')}</strong>
+          <span>${running
+            ? `正在智能组队 · <b data-formation-elapsed>${escapeHtml(formatTeamDraftElapsed(formationElapsedMs))}</b>`
+            : escapeHtml(resultText)}</span>
         </div>
-        <em>${pendingTemporaryMembers.length} 人</em>
+        ${formationStatus === 'ready_partial'
+          ? '<button class="agent-btn" type="button" data-recheck-formation>重新检查</button>'
+          : ''}
       </div>
-      <div class="agents-decision-list">
-        ${pendingTemporaryMembers.map((member) => `
-          <article class="agents-decision-item">
-            <strong>${escapeHtml(member.role_label)}</strong>
-            <p>${escapeHtml(member.reason)}</p>
-            <small>${escapeHtml(runtimes.find((runtime) => runtime.id === member.runtime_id)?.name || member.runtime_id)} · ${escapeHtml(runtimeModelOptions(member.runtime_id).find((model) => model.id === member.model_id)?.label || member.model_id)}</small>
-          </article>
-        `).join('')}
-      </div>
-    </div>
-  `;
+      <ol class="formation-progress__steps">
+        <li class="${formationStatus === 'fast_loading' ? 'is-active' : 'is-done'}"><i aria-hidden="true">${formationStatus === 'fast_loading' ? '·' : '✓'}</i><span>生成初步方案</span></li>
+        <li class="${reviewStepClass}"><i aria-hidden="true">${formationStatus === 'ready_partial' ? '!' : finished ? '✓' : '·'}</i><span>智能检查优化${formationStatus === 'ai_reviewing' || (finished && formationAiAttempted) ? ` · <b data-formation-elapsed>${escapeHtml(formatTeamDraftElapsed(formationElapsedMs))}</b>` : ''}</span></li>
+        <li class="${finished ? 'is-done' : ''}"><i aria-hidden="true">${finished ? '✓' : '·'}</i><span>方案已就绪</span></li>
+      </ol>
+      ${formationStatus === 'ready_improved' && formationImprovements.length
+        ? `<div class="formation-progress__improvements">${formationImprovements.slice(0, 3).map((item) => `<span>✓ ${escapeHtml(item)}</span>`).join('')}</div>`
+        : ''}
+    </section>`;
 }
 
 function renderCreateTeam(): string {
@@ -1363,7 +1066,7 @@ function renderCreateTeam(): string {
       <div class="team-create__heading">
         <span class="team-mark team-mark--hero team-create__team-mark" aria-hidden="true"><i></i><i></i></span>
         <div>
-          <h2>${teamRolesLocked ? '确认阵容' : '组建团队'}</h2>
+          <h2>${teamRolesLocked ? '确认阵容' : '创建团队'}</h2>
           <p>${teamRolesLocked ? '阵容已经配好，看看成员和分工是否合适。' : '告诉我团队要做什么，成员和职责交给我来搭。'}</p>
         </div>
         <div class="team-create__steps" aria-label="创建进度">
@@ -1387,7 +1090,7 @@ function renderCreateTeam(): string {
           <div class="agents-form__field team-create__leader">
             <span>Leader <em>已默认推荐</em></span>
             ${renderAgentsSelect('team-leader', teamLeaderId, '使用系统推荐 Leader')}
-            <small>Crew 会负责拆任务、盯进度和收口；你也可以换成其他外援。</small>
+            <small>Crew 会负责拆任务、盯进度和收口；你也可以换成其他 Agent。</small>
           </div>
           <div class="team-constraints">
             <button class="team-constraints__toggle" type="button" aria-expanded="${showTeamConstraints ? 'true' : 'false'}" data-toggle-team-constraints>
@@ -1398,12 +1101,12 @@ function renderCreateTeam(): string {
               <div class="team-constraints__body">
                 <p>只有明确的人选或能力要求才需要设置，其他情况直接智能组队即可。</p>
                 <div class="team-constraint-row">
-                  <div><strong>必须包含</strong><small>这些外援一定会进入团队</small></div>
+                  <div><strong>必须包含</strong><small>这些 Agent 一定会进入团队</small></div>
                   ${renderConstraintSelect('required')}
                   <div class="team-constraint-values">${renderConstraintValues('required')}</div>
                 </div>
                 <div class="team-constraint-row">
-                  <div><strong>排除成员</strong><small>这些外援不会进入团队</small></div>
+                  <div><strong>排除成员</strong><small>这些 Agent 不会进入团队</small></div>
                   ${renderConstraintSelect('excluded')}
                   <div class="team-constraint-values">${renderConstraintValues('excluded')}</div>
                 </div>
@@ -1420,15 +1123,15 @@ function renderCreateTeam(): string {
                       <button type="button" ${customTeamCapabilityInput.trim() ? '' : 'disabled'} data-add-custom-capability>添加</button>
                     </div>
                   ` : ''}
-                  ${customTeamCapabilities.length ? '<small class="team-capability-note">你填写的能力会一起提交，系统会从现有外援中尽量匹配。</small>' : ''}
+                  ${customTeamCapabilities.length ? '<small class="team-capability-note">你填写的能力会一起提交，系统会从现有 Agent 中尽量匹配。</small>' : ''}
                 </div>
               </div>
             ` : ''}
           </div>
           <div class="team-create__primary-action">
             <div>
-              <strong>智能组队</strong>
-              <span>根据目标和约束自动生成合适阵容。</span>
+              <strong>准备好了</strong>
+              <span>确认目标和约束后，一键生成合适阵容。</span>
             </div>
             <button type="button" class="pixel-summon-btn" data-suggest-team ${busy || !teamName.trim() ? 'disabled' : ''}>
               ${busy ? '智能组队中…' : '智能组队'}
@@ -1462,7 +1165,6 @@ function renderCreateTeam(): string {
             </div>
             ${renderMemberReview()}
           </div>
-          ${renderPendingTemporaryMembers()}
           ${renderCoverageChips()}
           ${teamWorkflow ? `
             <details class="team-workflow-preview">
@@ -1472,12 +1174,12 @@ function renderCreateTeam(): string {
           ` : ''}
           <label>
             <span>团队工作流 / 说明</span>
-            <textarea id="team-workflow-input" rows="4" placeholder="智能组队会生成建议工作流，也可以手动修改。" ${busy ? 'disabled' : ''}>${escapeHtml(teamWorkflow)}</textarea>
+            <textarea id="team-workflow-input" rows="4" placeholder="智能组队会生成建议工作流，也可以手动修改。">${escapeHtml(teamWorkflow)}</textarea>
           </label>
           <div class="team-create__review-actions">
-            <button type="button" class="agent-btn" data-return-team-setup ${busy ? 'disabled' : ''}>返回修改</button>
+            <button type="button" class="agent-btn" data-return-team-setup>返回修改</button>
             <button type="button" class="agent-btn" data-suggest-team ${busy ? 'disabled' : ''}>重新组队</button>
-            <button type="button" class="agent-btn agent-btn--dark" data-create-team ${busy || !reviewAgents.length ? 'disabled' : ''}>确认组建</button>
+            <button type="button" class="agent-btn agent-btn--dark" data-create-team ${busy || !reviewAgents.length ? 'disabled' : ''}>创建团队</button>
           </div>
         </div>
       `}
@@ -1485,299 +1187,57 @@ function renderCreateTeam(): string {
   `;
 }
 
-function currentAgentsGuideStep(): AgentsGuideStep {
-  if (agentsGuideStep === 1) {
-    return {
-      progress: '1/3',
-      title: '先认识一下附近的帮手',
-      body: '这里会列出电脑上可用的 AI 工具。点“再找找”可以主动刷新，但引导不会替你操作。',
-      target: '[data-scan-runtimes]',
-      side: 'left',
-    };
-  }
-  if (agentsGuideStep === 2) {
-    return {
-      progress: '2/3',
-      title: '把合适的外援加入阵容',
-      body: '选择一位可用外援，起个顺口的称呼并确认模型；这里只带你认位置，不用真的创建。',
-      target: '[data-agents-select-key="agent-runtime"]',
-      side: 'right',
-    };
-  }
-  if (activeTab === 'create-team') {
-    return {
-      progress: '3/3',
-      title: '复杂任务，还可以拉一支小队',
-      body: '选好 Leader 和需要的外援，Crew 会帮你整理分工与协作方式。',
-      target: '.team-create__heading',
-      side: 'left',
-    };
-  }
-  return agents.length
-    ? {
-        progress: '3/3',
-        title: '准备好，就可以直接派活',
-        body: '点“派活”让外援接手当前任务；复杂任务还可以把多位外援拉进团队。',
-        target: '[data-use-agent]',
-        side: 'left',
-      }
-    : {
-        progress: '3/3',
-        title: '外援到位后，就能派活或组队',
-        body: '现在还没有已加入的外援。之后从“添加外援”加入一位，就会在我的阵容里看到“派活”。',
-        target: '[data-agents-tab="create-agent"]',
-        side: 'left',
-      };
+function createLegacyAgentForm(): HTMLElement | undefined {
+  if (activeTab !== 'create-agent' && activeTab !== 'create-team') return undefined;
+  const host = document.createElement('div');
+  host.className = 'mw-agent-hub__legacy-form';
+  host.innerHTML = activeTab === 'create-agent'
+    ? renderCreateAgent()
+    : `${renderCreateTeam()}${renderTeamConstraintDecision()}`;
+  return host;
 }
 
-function guideTabForStep(step: AgentsGuideStepNumber): AgentsTab {
-  if (step === 1) return 'runtime';
-  if (step === 2) return 'create-agent';
-  return 'mine';
+function agentHubState(): AgentHubState {
+  const form = createLegacyAgentForm();
+  return {
+    tab: activeTab,
+    agents: agents.map((agent) => ({
+      id: agent.id,
+      name: agent.name || '未命名智能体',
+      provider: providerLabel(agent.provider),
+      ...(agent.display_badge ? { displayBadge: agent.display_badge } : {}),
+      detail: [
+        agent.model || '默认模型',
+        agent.status || 'ready',
+        agent.runtime_id ? `runtime ${agent.runtime_id}` : '',
+      ].filter(Boolean).join(' · ') || agent.description || '外部智能体',
+      tags: (agent.capabilities?.length ? agent.capabilities : agent.tags || []).slice(0, 4),
+      available: agentReadyForFormation(agent),
+    })),
+    teams: teams.map((team) => ({
+      id: team.id,
+      name: team.name || '未命名团队',
+      description: team.description || `Leader：${teamLeaderName(team)}`,
+      memberCount: teamMemberCount(team),
+      available: true,
+    })),
+    runtimes: runtimes.filter((runtime) => !runtimeWasReplaced(runtime)).map((runtime) => ({
+      id: runtime.id,
+      name: runtime.name || runtime.provider,
+      provider: providerLabel(runtime.provider),
+      detail: runtime.version || providerLabel(runtime.provider),
+      statusDetail: runtimeStatusDetail(runtime),
+      availability: runtimeStatus(runtime),
+    })),
+    loading: busy && !runtimeScanning && activeTab !== 'create-team',
+    scanning: runtimeScanning,
+    message,
+    featureEnabled: externalAgentsEnabled(),
+    ...(form ? { form } : {}),
+  };
 }
 
-function clampGuidePosition(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), Math.max(min, max));
-}
-
-function clearAgentsGuideTargets(): void {
-  document.querySelectorAll('.agents-guide-target').forEach((target) => {
-    target.classList.remove('agents-guide-target');
-  });
-}
-
-function cancelAgentsGuideLayout(): void {
-  if (agentsGuideLayoutFrame == null) return;
-  window.cancelAnimationFrame(agentsGuideLayoutFrame);
-  agentsGuideLayoutFrame = null;
-}
-
-function removeAgentsGuidePortal(): void {
-  cancelAgentsGuideLayout();
-  document.querySelector('[data-agents-guide-portal]')?.remove();
-  clearAgentsGuideTargets();
-}
-
-function renderAgentsGuideMarkup(): string {
-  if (agentsGuideMode === 'welcome') {
-    return `
-      <aside class="agents-guide-bubble agents-guide-bubble--welcome" data-agents-guide role="dialog" aria-label="外援中心新手引导">
-        <div class="agents-guide-bubble__top">
-          <span class="agents-guide-bubble__spark" aria-hidden="true"></span>
-          <span>外援小向导</span>
-          <button type="button" data-agents-guide-skip aria-label="稍后再看外援引导" title="稍后再说">×</button>
-        </div>
-        <strong>第一次来外援中心？</strong>
-        <p>用 30 秒认识发现、添加和派活，之后你可以随时点右上角“?”再看一遍。</p>
-        <div class="agents-guide-bubble__actions agents-guide-bubble__actions--welcome">
-          <button type="button" class="agents-guide-bubble__dismiss" data-agents-guide-skip>稍后再说</button>
-          <button type="button" class="agents-guide-bubble__action" data-agents-guide-start>开始看看</button>
-        </div>
-      </aside>
-    `;
-  }
-
-  const step = currentAgentsGuideStep();
-  return `
-    <aside class="agents-guide-bubble" data-agents-guide role="dialog" aria-label="外援中心引导：${step.progress}">
-      <div class="agents-guide-bubble__top">
-        <span class="agents-guide-bubble__spark" aria-hidden="true"></span>
-        <span>${step.progress}</span>
-        <button type="button" data-agents-guide-skip aria-label="跳过外援引导" title="跳过">×</button>
-      </div>
-      <strong>${escapeHtml(step.title)}</strong>
-      <p>${escapeHtml(step.body)}</p>
-      <div class="agents-guide-bubble__actions">
-        <button type="button" class="agents-guide-bubble__locate" data-agents-guide-locate>定位到操作</button>
-        <div class="agents-guide-bubble__steps">
-          <button type="button" class="agents-guide-bubble__quiet" data-agents-guide-skip>跳过</button>
-          ${agentsGuideStep > 1
-            ? '<button type="button" class="agents-guide-bubble__dismiss" data-agents-guide-previous>上一步</button>'
-            : ''}
-          <button type="button" class="agents-guide-bubble__action" data-agents-guide-next>${agentsGuideStep === 3 ? '完成' : '下一步'}</button>
-        </div>
-      </div>
-    </aside>
-  `;
-}
-
-function updateAgentsGuideBubble(portal: HTMLElement): void {
-  const template = document.createElement('template');
-  template.innerHTML = renderAgentsGuideMarkup().trim();
-  const next = template.content.firstElementChild as HTMLElement | null;
-  if (!next) return;
-
-  const current = portal.querySelector<HTMLElement>('[data-agents-guide]');
-  if (!current) {
-    portal.appendChild(next);
-    return;
-  }
-  current.className = next.className;
-  current.setAttribute('aria-label', next.getAttribute('aria-label') || '外援中心引导');
-  current.innerHTML = next.innerHTML;
-}
-
-function placeAgentsGuideTooltip(
-  tooltip: HTMLElement,
-  targetRect: DOMRect,
-  preferredSide: AgentsGuideStep['side'],
-): void {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const tooltipRect = tooltip.getBoundingClientRect();
-  const tooltipWidth = tooltipRect.width || 332;
-  const tooltipHeight = tooltipRect.height || 176;
-  const leftPosition = targetRect.left - AGENTS_GUIDE_TOOLTIP_GAP - tooltipWidth;
-  const rightPosition = targetRect.right + AGENTS_GUIDE_TOOLTIP_GAP;
-  const canPlaceLeft = leftPosition >= AGENTS_GUIDE_VIEWPORT_MARGIN;
-  const canPlaceRight = rightPosition + tooltipWidth <= vw - AGENTS_GUIDE_VIEWPORT_MARGIN;
-
-  let left: number;
-  let top: number;
-  if ((preferredSide === 'left' && canPlaceLeft) || !canPlaceRight) {
-    left = canPlaceLeft ? leftPosition : rightPosition;
-    top = targetRect.top + targetRect.height / 2 - tooltipHeight / 2;
-  } else {
-    left = rightPosition;
-    top = targetRect.top + targetRect.height / 2 - tooltipHeight / 2;
-  }
-
-  if (!canPlaceLeft && !canPlaceRight) {
-    left = targetRect.left + targetRect.width / 2 - tooltipWidth / 2;
-    top = targetRect.bottom + AGENTS_GUIDE_TOOLTIP_GAP;
-    if (top + tooltipHeight > vh - AGENTS_GUIDE_VIEWPORT_MARGIN) {
-      top = targetRect.top - AGENTS_GUIDE_TOOLTIP_GAP - tooltipHeight;
-    }
-  }
-
-  tooltip.style.left = `${Math.round(clampGuidePosition(
-    left,
-    AGENTS_GUIDE_VIEWPORT_MARGIN,
-    vw - tooltipWidth - AGENTS_GUIDE_VIEWPORT_MARGIN,
-  ))}px`;
-  tooltip.style.top = `${Math.round(clampGuidePosition(
-    top,
-    AGENTS_GUIDE_VIEWPORT_MARGIN,
-    vh - tooltipHeight - AGENTS_GUIDE_VIEWPORT_MARGIN,
-  ))}px`;
-}
-
-function layoutAgentsGuidePortal(): void {
-  if (agentsGuideMode !== 'tour') return;
-  const portal = document.querySelector<HTMLElement>('[data-agents-guide-portal][data-guide-mode="tour"]');
-  const highlight = portal?.querySelector<HTMLElement>('[data-agents-guide-highlight]');
-  const tooltip = portal?.querySelector<HTMLElement>('[data-agents-guide]');
-  if (!portal || !highlight || !tooltip) return;
-
-  const step = currentAgentsGuideStep();
-  const target = document.querySelector<HTMLElement>(step.target);
-  clearAgentsGuideTargets();
-  target?.classList.add('agents-guide-target');
-
-  if (!target) {
-    highlight.hidden = true;
-    tooltip.style.left = `${Math.max(AGENTS_GUIDE_VIEWPORT_MARGIN, window.innerWidth - 344)}px`;
-    tooltip.style.top = `${Math.max(AGENTS_GUIDE_VIEWPORT_MARGIN, window.innerHeight - 200)}px`;
-    return;
-  }
-
-  if (agentsGuideAutoScrolledStep !== agentsGuideStep) {
-    agentsGuideAutoScrolledStep = agentsGuideStep;
-    target.scrollIntoView?.({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-  }
-
-  const rect = target.getBoundingClientRect();
-  if (rect.width < 4 || rect.height < 4) {
-    highlight.hidden = true;
-    return;
-  }
-
-  highlight.hidden = false;
-  highlight.style.left = `${Math.round(rect.left - AGENTS_GUIDE_HIGHLIGHT_PADDING)}px`;
-  highlight.style.top = `${Math.round(rect.top - AGENTS_GUIDE_HIGHLIGHT_PADDING)}px`;
-  highlight.style.width = `${Math.round(rect.width + AGENTS_GUIDE_HIGHLIGHT_PADDING * 2)}px`;
-  highlight.style.height = `${Math.round(rect.height + AGENTS_GUIDE_HIGHLIGHT_PADDING * 2)}px`;
-  placeAgentsGuideTooltip(tooltip, rect, step.side);
-}
-
-function scheduleAgentsGuideLayout(): void {
-  if (agentsGuideMode !== 'tour') return;
-  cancelAgentsGuideLayout();
-  agentsGuideLayoutFrame = window.requestAnimationFrame(() => {
-    agentsGuideLayoutFrame = null;
-    layoutAgentsGuidePortal();
-  });
-}
-
-function renderAgentsGuidePortal(): void {
-  if (agentsGuideMode === 'hidden') {
-    removeAgentsGuidePortal();
-    return;
-  }
-  const root = $('#agents-page-root');
-  const pane = root?.closest('.tab-pane');
-  if (pane && !pane.classList.contains('active')) {
-    removeAgentsGuidePortal();
-    return;
-  }
-
-  const wantedMode = agentsGuideMode === 'tour' ? 'tour' : 'welcome';
-  let portal = document.querySelector<HTMLElement>('[data-agents-guide-portal]');
-  if (portal?.dataset.guideMode !== wantedMode) {
-    removeAgentsGuidePortal();
-    portal = null;
-  }
-  if (!portal) {
-    portal = document.createElement('div');
-    portal.setAttribute('data-agents-guide-portal', '');
-    portal.dataset.guideMode = wantedMode;
-    if (wantedMode === 'tour') {
-      portal.innerHTML = `
-        <div class="agents-guide-mask" data-agents-guide-mask aria-hidden="true"></div>
-        <div class="agents-guide-highlight" data-agents-guide-highlight aria-hidden="true"></div>
-      `;
-    }
-    document.body.appendChild(portal);
-  }
-
-  portal.className = wantedMode === 'tour'
-    ? 'agents-guide-portal agents-guide-portal--tour'
-    : 'agents-guide-portal agents-guide-portal--right';
-  updateAgentsGuideBubble(portal);
-
-  if (wantedMode === 'tour') layoutAgentsGuidePortal();
-  else clearAgentsGuideTargets();
-}
-
-function finishAgentsGuide(): void {
-  agentsGuideMode = 'hidden';
-  agentsGuideAutoScrolledStep = null;
-  saveToStorage(STORAGE_KEYS.externalAgentsGuideDismissed, true);
-  render();
-}
-
-function setAgentsGuideStep(step: AgentsGuideStepNumber): void {
-  agentsGuideMode = 'tour';
-  agentsGuideStep = step;
-  activeTab = guideTabForStep(step);
-  activeTeamId = '';
-  message = '';
-  render();
-}
-
-function startAgentsGuide(): void {
-  agentsGuideAutoScrolledStep = null;
-  setAgentsGuideStep(1);
-}
-
-function locateAgentsGuideTarget(): void {
-  if (agentsGuideMode !== 'tour') return;
-  const target = document.querySelector<HTMLElement>(currentAgentsGuideStep().target);
-  target?.scrollIntoView?.({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-  scheduleAgentsGuideLayout();
-}
-
-function changeAgentsTab(next: AgentsTab): void {
+function selectAgentHubTab(next: AgentsTab): void {
   activeTab = next;
   if (agentsGuideMode === 'tour') {
     agentsGuideStep = next === 'runtime' ? 1 : next === 'create-agent' ? 2 : 3;
@@ -1787,99 +1247,367 @@ function changeAgentsTab(next: AgentsTab): void {
   render();
 }
 
-/** 面板滚动记忆：render 全量重建后按标签页恢复 scrollTop，避免点击团队卡片/开关详情弹窗时滚动条跳回顶部。 */
-let panelScrollMemory: { tab: AgentsTab; top: number } | null = null;
+function selectRuntime(runtimeId: string): void {
+  agentRuntimeId = runtimeId;
+  agentName = '';
+  selectRuntimeModel(agentRuntimeId);
+  activeTab = 'create-agent';
+  message = '已选择外援，可以继续加入阵容。';
+  render();
+}
 
-function renderShell(): string {
-  const body = activeTab === 'runtime'
-    ? renderRuntime()
-    : activeTab === 'create-agent'
-      ? renderCreateAgent()
-      : activeTab === 'create-team'
-        ? renderCreateTeam()
-        : renderMine();
-  return `
-    <div class="agents-panel page-shell page-shell--agents">
-      <header class="agents-panel__head">
-        <div>
-          <h1>外援中心</h1>
-          <p>发现电脑里的 AI 帮手，加入阵容、直接派活，或者拉上他们一起组队。</p>
+function guideTarget(): {
+  progress: string;
+  title: string;
+  body: string;
+  selector: string;
+} {
+  if (agentsGuideStep === 1) {
+    return {
+      progress: '1/3',
+      title: '先认识一下附近的帮手',
+      body: '这里会列出电脑上可用的 AI 工具。点“再找找”可以主动刷新。',
+      selector: '[data-scan-runtimes]',
+    };
+  }
+  if (agentsGuideStep === 2) {
+    return {
+      progress: '2/3',
+      title: '把合适的外援加入阵容',
+      body: '选择一位可用外援，起个顺口的称呼并确认模型。',
+      selector: '[data-agents-select-key="agent-runtime"]',
+    };
+  }
+  return {
+    progress: '3/3',
+    title: agents.length ? '准备好，就可以直接派活' : '外援到位后，就能派活或组队',
+    body: agents.length
+      ? '点“派活”让外援接手当前任务；复杂任务还可以把多位外援拉进团队。'
+      : '从“添加外援”加入一位，就会在我的阵容里看到“派活”。',
+    selector: agents.length ? '[data-use-agent]' : '[data-agents-tab="create-agent"]',
+  };
+}
+
+function clampGuidePosition(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function cancelAgentsGuideLayout(): void {
+  if (agentsGuideLayoutFrame === null) return;
+  window.cancelAnimationFrame(agentsGuideLayoutFrame);
+  agentsGuideLayoutFrame = null;
+}
+
+function clearAgentsGuideTarget(): void {
+  document.querySelectorAll('.agents-guide-target').forEach((target) => {
+    target.classList.remove('agents-guide-target');
+  });
+}
+
+function placeAgentsGuideBubble(bubble: HTMLElement, rect: DOMRect): void {
+  const bubbleRect = bubble.getBoundingClientRect();
+  const bubbleWidth = bubbleRect.width || 320;
+  const bubbleHeight = bubbleRect.height || 176;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  let left = rect.left + rect.width / 2 - bubbleWidth / 2;
+  let top = rect.bottom + AGENTS_GUIDE_TOOLTIP_GAP;
+  if (top + bubbleHeight > viewportHeight - AGENTS_GUIDE_VIEWPORT_MARGIN) {
+    top = rect.top - AGENTS_GUIDE_TOOLTIP_GAP - bubbleHeight;
+  }
+  if (rect.left > viewportWidth * 0.6
+    && rect.left - AGENTS_GUIDE_TOOLTIP_GAP - bubbleWidth > AGENTS_GUIDE_VIEWPORT_MARGIN) {
+    left = rect.left - AGENTS_GUIDE_TOOLTIP_GAP - bubbleWidth;
+    top = rect.top + rect.height / 2 - bubbleHeight / 2;
+  }
+
+  setRuntimeStyle(
+    bubble,
+    'left',
+    `${Math.round(clampGuidePosition(
+      left,
+      AGENTS_GUIDE_VIEWPORT_MARGIN,
+      viewportWidth - bubbleWidth - AGENTS_GUIDE_VIEWPORT_MARGIN,
+    ))}px`,
+  );
+  setRuntimeStyle(
+    bubble,
+    'top',
+    `${Math.round(clampGuidePosition(
+      top,
+      AGENTS_GUIDE_VIEWPORT_MARGIN,
+      viewportHeight - bubbleHeight - AGENTS_GUIDE_VIEWPORT_MARGIN,
+    ))}px`,
+  );
+}
+
+function layoutAgentsGuide(): void {
+  if (agentsGuideMode !== 'tour') return;
+  const portal = document.querySelector<HTMLElement>('[data-agents-guide-portal]');
+  const highlight = portal?.querySelector<HTMLElement>('[data-agents-guide-highlight]');
+  const bubble = portal?.querySelector<HTMLElement>('[data-agents-guide]');
+  const target = document.querySelector<HTMLElement>(guideTarget().selector);
+  if (!highlight || !bubble || !target) return;
+
+  const rect = target.getBoundingClientRect();
+  if (rect.width < 4 || rect.height < 4) {
+    highlight.hidden = true;
+    return;
+  }
+
+  highlight.hidden = false;
+  setRuntimeStyle(highlight, 'left', `${Math.round(rect.left - AGENTS_GUIDE_HIGHLIGHT_PADDING)}px`);
+  setRuntimeStyle(highlight, 'top', `${Math.round(rect.top - AGENTS_GUIDE_HIGHLIGHT_PADDING)}px`);
+  setRuntimeStyle(
+    highlight,
+    'width',
+    `${Math.round(rect.width + AGENTS_GUIDE_HIGHLIGHT_PADDING * 2)}px`,
+  );
+  setRuntimeStyle(
+    highlight,
+    'height',
+    `${Math.round(rect.height + AGENTS_GUIDE_HIGHLIGHT_PADDING * 2)}px`,
+  );
+  placeAgentsGuideBubble(bubble, rect);
+}
+
+function scheduleAgentsGuideLayout(): void {
+  cancelAgentsGuideLayout();
+  agentsGuideLayoutFrame = window.requestAnimationFrame(() => {
+    agentsGuideLayoutFrame = null;
+    layoutAgentsGuide();
+  });
+}
+
+function onAgentsGuideKeydown(event: KeyboardEvent): void {
+  if (agentsGuideMode !== 'tour') return;
+  if (event.key === 'Escape') finishAgentsGuide();
+  if (event.key === 'ArrowLeft' && agentsGuideStep > 1) {
+    setAgentsGuideStep((agentsGuideStep - 1) as AgentsGuideStepNumber);
+  }
+  if (event.key === 'ArrowRight') {
+    if (agentsGuideStep === 3) finishAgentsGuide();
+    else setAgentsGuideStep((agentsGuideStep + 1) as AgentsGuideStepNumber);
+  }
+}
+
+function onAgentsGuideResize(): void {
+  scheduleAgentsGuideLayout();
+}
+
+function bindAgentsGuideWindowEvents(): void {
+  document.removeEventListener('keydown', onAgentsGuideKeydown);
+  window.removeEventListener('resize', onAgentsGuideResize);
+  document.addEventListener('keydown', onAgentsGuideKeydown);
+  window.addEventListener('resize', onAgentsGuideResize);
+}
+
+function unbindAgentsGuideWindowEvents(): void {
+  document.removeEventListener('keydown', onAgentsGuideKeydown);
+  window.removeEventListener('resize', onAgentsGuideResize);
+}
+
+function removeAgentsGuide(): void {
+  cancelAgentsGuideLayout();
+  unbindAgentsGuideWindowEvents();
+  document.querySelector('[data-agents-guide-portal]')?.remove();
+  clearAgentsGuideTarget();
+}
+
+function finishAgentsGuide(): void {
+  agentsGuideMode = 'hidden';
+  saveToStorage(STORAGE_KEYS.externalAgentsGuideDismissed, true);
+  render();
+}
+
+function setAgentsGuideStep(step: AgentsGuideStepNumber): void {
+  agentsGuideMode = 'tour';
+  agentsGuideStep = step;
+  activeTab = step === 1 ? 'runtime' : step === 2 ? 'create-agent' : 'mine';
+  activeTeamId = '';
+  message = '';
+  render();
+}
+
+function renderAgentsGuide(): void {
+  if (agentsGuideMode === 'hidden') {
+    removeAgentsGuide();
+    return;
+  }
+  const root = $('#agents-page-root');
+  const pane = root?.closest('.tab-pane');
+  if (pane && !pane.classList.contains('active')) {
+    removeAgentsGuide();
+    return;
+  }
+
+  const target = agentsGuideMode === 'tour' ? guideTarget() : null;
+  let portal = document.querySelector<HTMLElement>('[data-agents-guide-portal]');
+  if (!portal) {
+    portal = document.createElement('div');
+    portal.dataset.agentsGuidePortal = '';
+    document.body.appendChild(portal);
+  }
+  portal.dataset.guideMode = agentsGuideMode;
+
+  if (agentsGuideMode === 'welcome') {
+    cancelAgentsGuideLayout();
+    unbindAgentsGuideWindowEvents();
+    clearAgentsGuideTarget();
+    portal.className = 'agents-guide-portal agents-guide-portal--right';
+    portal.innerHTML = `
+      <aside class="agents-guide-bubble mw-tour-card" data-agents-guide role="dialog" aria-label="外援中心新手引导">
+        <div class="mw-tour-card__top"><span class="mw-tour-card__spark" aria-hidden="true"></span><span>外援小向导</span></div>
+        <strong>第一次来外援中心？</strong>
+        <p>用 30 秒认识发现、添加和派活。</p>
+        <div class="mw-tour-card__actions mw-tour-card__actions--welcome">
+          <button type="button" class="mw-tour-card__secondary" data-agents-guide-skip>稍后再说</button>
+          <button type="button" class="mw-tour-card__primary" data-agents-guide-start>开始看看</button>
         </div>
-        <button type="button" class="agents-guide-replay" data-agents-guide-open title="重新查看外援引导" aria-label="重新查看外援引导">?</button>
-      </header>
-      ${renderTabs()}
-      ${message ? `<div class="agents-message">${escapeHtml(message)}</div>` : ''}
-      ${body}
-      ${renderTeamConstraintDecision()}
-      ${renderStaffingDecision()}
-      ${renderTeamDetail()}
-    </div>
-  `;
+      </aside>`;
+    portal.querySelector<HTMLElement>('[data-agents-guide-skip]')?.addEventListener(
+      'click',
+      finishAgentsGuide,
+    );
+    portal.querySelector<HTMLElement>('[data-agents-guide-start]')?.addEventListener(
+      'click',
+      () => setAgentsGuideStep(1),
+    );
+    return;
+  }
+
+  const isExistingTour = portal.classList.contains('agents-guide-portal--tour');
+  portal.className = 'agents-guide-portal agents-guide-portal--tour';
+  if (!isExistingTour) {
+    portal.innerHTML = `
+      <div class="agents-guide-mask" data-agents-guide-mask></div>
+      <div class="agents-guide-highlight" data-agents-guide-highlight hidden></div>
+      <aside class="agents-guide-bubble mw-tour-card" data-agents-guide role="dialog" aria-label="外援中心引导：${target?.progress}">
+        <div class="mw-tour-card__top"><span class="mw-tour-card__spark" aria-hidden="true"></span><span data-agents-guide-progress></span></div>
+        <strong data-agents-guide-title></strong>
+        <p data-agents-guide-body></p>
+        <div class="mw-tour-card__actions">
+          <button type="button" class="mw-tour-card__quiet" data-agents-guide-skip>跳过</button>
+          <div class="mw-tour-card__steps">
+            <button type="button" class="mw-tour-card__secondary" data-agents-guide-previous>上一步</button>
+            <button type="button" class="mw-tour-card__primary" data-agents-guide-next></button>
+          </div>
+        </div>
+      </aside>`;
+    portal.querySelector<HTMLElement>('[data-agents-guide-skip]')?.addEventListener(
+      'click',
+      finishAgentsGuide,
+    );
+    portal.querySelector<HTMLElement>('[data-agents-guide-previous]')?.addEventListener('click', () => {
+      if (agentsGuideStep > 1) {
+        setAgentsGuideStep((agentsGuideStep - 1) as AgentsGuideStepNumber);
+      }
+    });
+    portal.querySelector<HTMLElement>('[data-agents-guide-next]')?.addEventListener('click', () => {
+      if (agentsGuideStep === 3) finishAgentsGuide();
+      else setAgentsGuideStep((agentsGuideStep + 1) as AgentsGuideStepNumber);
+    });
+    portal.addEventListener('wheel', (event) => {
+      const results = root?.querySelector<HTMLElement>('.mw-hub-template__results');
+      if (!results) return;
+      event.preventDefault();
+      results.scrollBy({ top: event.deltaY, behavior: 'auto' });
+      scheduleAgentsGuideLayout();
+    }, { passive: false });
+  }
+
+  const bubble = portal.querySelector<HTMLElement>('[data-agents-guide]');
+  if (bubble) bubble.setAttribute('aria-label', `外援中心引导：${target?.progress}`);
+  const progress = portal.querySelector<HTMLElement>('[data-agents-guide-progress]');
+  const title = portal.querySelector<HTMLElement>('[data-agents-guide-title]');
+  const body = portal.querySelector<HTMLElement>('[data-agents-guide-body]');
+  const previous = portal.querySelector<HTMLButtonElement>('[data-agents-guide-previous]');
+  const next = portal.querySelector<HTMLButtonElement>('[data-agents-guide-next]');
+  if (progress) progress.textContent = target?.progress || '';
+  if (title) title.textContent = target?.title || '';
+  if (body) body.textContent = target?.body || '';
+  if (previous) previous.hidden = agentsGuideStep === 1;
+  if (next) next.textContent = agentsGuideStep === 3 ? '完成' : '下一步';
+
+  clearAgentsGuideTarget();
+  if (target) document.querySelector<HTMLElement>(target.selector)?.classList.add('agents-guide-target');
+  bindAgentsGuideWindowEvents();
+  scheduleAgentsGuideLayout();
 }
 
 function render(): void {
   closeAgentsSelect();
   const root = $('#agents-page-root');
   if (!root) return;
-  const livePanel = root.querySelector<HTMLElement>('.agents-panel');
-  if (livePanel && panelScrollMemory) panelScrollMemory.top = livePanel.scrollTop;
-  root.innerHTML = renderShell();
-  const panel = root.querySelector<HTMLElement>('.agents-panel');
-  if (panel && panelScrollMemory?.tab === activeTab) panel.scrollTop = panelScrollMemory.top;
-  panelScrollMemory = { tab: activeTab, top: panel?.scrollTop ?? 0 };
-  renderAgentsGuidePortal();
+  if (agentHubView && !agentHubView.element.isConnected) {
+    agentHubView.dispose();
+    agentHubView = null;
+  }
+  if (!agentHubView) {
+    agentHubView = createAgentHubView({
+      state: agentHubState(),
+      onTabChange: (tab) => selectAgentHubTab(tab),
+      onUseAgent: (id) => {
+        const agent = agents.find((item) => item.id === id);
+        if (agent) void useAgent(agent);
+      },
+      onDeleteAgent: (id) => {
+        const agent = agents.find((item) => item.id === id);
+        if (agent) void deleteAgent(agent);
+      },
+      onUseTeam: (id) => {
+        const team = teams.find((item) => item.id === id);
+        if (team) void useTeam(team);
+      },
+      onDeleteTeam: (id) => {
+        const team = teams.find((item) => item.id === id);
+        if (team) void deleteTeam(team);
+      },
+      onUseRuntime: selectRuntime,
+      onDeleteRuntime: (id) => {
+        const runtime = runtimes.find((item) => item.id === id);
+        if (runtime) void deleteRuntime(runtime);
+      },
+      onScanRuntimes: () => void scanRuntimes(),
+      onOpenGuide: () => setAgentsGuideStep(1),
+    });
+    root.replaceChildren(agentHubView.element);
+  } else {
+    agentHubView.update(agentHubState());
+  }
+  root.querySelector('[data-team-detail-backdrop]')?.remove();
+  if (activeTeamId) root.insertAdjacentHTML('beforeend', renderTeamDetail());
+  renderAgentsGuide();
   bind();
 }
 
 function bind(): void {
-  $$('[data-agents-tab]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const next = button.getAttribute('data-agents-tab') as AgentsTab | null;
-      if (!next) return;
-      changeAgentsTab(next);
-    });
-  });
-  $$('[data-agents-go-tab]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const next = button.getAttribute('data-agents-go-tab') as AgentsTab | null;
-      if (next) changeAgentsTab(next);
-    });
-  });
-  $$('[data-agents-guide-skip]').forEach((button) => {
-    button.addEventListener('click', finishAgentsGuide);
-  });
-  $('[data-agents-guide-open]')?.addEventListener('click', startAgentsGuide);
-  $('[data-agents-guide-start]')?.addEventListener('click', startAgentsGuide);
-  $('[data-agents-guide-previous]')?.addEventListener('click', () => {
-    if (agentsGuideStep > 1) setAgentsGuideStep((agentsGuideStep - 1) as AgentsGuideStepNumber);
-  });
-  $('[data-agents-guide-next]')?.addEventListener('click', () => {
-    if (agentsGuideStep === 3) finishAgentsGuide();
-    else setAgentsGuideStep((agentsGuideStep + 1) as AgentsGuideStepNumber);
-  });
-  $('[data-agents-guide-locate]')?.addEventListener('click', locateAgentsGuideTarget);
-  const guidePortal = $('[data-agents-guide-portal]');
-  if (guidePortal) guidePortal.onwheel = (event) => {
-    const panel = $('.agents-panel');
-    if (!panel) return;
-    event.preventDefault();
-    panel.scrollBy({ top: event.deltaY, behavior: 'auto' });
-    scheduleAgentsGuideLayout();
-  };
-  $('.agents-panel')?.addEventListener('scroll', scheduleAgentsGuideLayout, { passive: true });
-  $('[data-scan-runtimes]')?.addEventListener('click', () => {
-    void scanRuntimes();
-  });
-  $$('[data-runtime-id]').forEach((button) => {
-    button.addEventListener('click', () => {
-      agentRuntimeId = button.getAttribute('data-runtime-id') || '';
-      agentName = '';
-      selectRuntimeModel(agentRuntimeId);
-      activeTab = 'create-agent';
-      if (agentsGuideMode === 'tour') agentsGuideStep = 2;
-      message = `已经选好 ${runtimes.find((item) => item.id === agentRuntimeId)?.name || '这位外援'}，再起个顺口的称呼吧。`;
+  $$('[data-team-id]').forEach((card) => {
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    const open = (event: Event): void => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('[data-use-team], [data-delete-team]')) return;
+      activeTeamId = card.getAttribute('data-team-id') || '';
       render();
+    };
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', (event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key !== 'Enter' && key !== ' ') return;
+      event.preventDefault();
+      open(event);
     });
+  });
+  $('[data-team-detail-close]')?.addEventListener('click', () => {
+    activeTeamId = '';
+    render();
+  });
+  $('[data-team-detail-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target !== event.currentTarget) return;
+    activeTeamId = '';
+    render();
   });
   $$('[data-agents-select-key]').forEach((trigger) => {
     trigger.addEventListener('click', (event) => {
@@ -1896,65 +1624,7 @@ function bind(): void {
     void createAgent();
   });
   bindTeamForm();
-  bindCardActions();
   bindDecisionModal();
-  bindStaffingModal();
-}
-
-function bindCardActions(): void {
-  $$('[data-team-id]').forEach((card) => {
-    const open = (): void => {
-      activeTeamId = card.getAttribute('data-team-id') || '';
-      render();
-    };
-    card.addEventListener('click', open);
-    card.addEventListener('keydown', (event) => {
-      if ((event as KeyboardEvent).key !== 'Enter' && (event as KeyboardEvent).key !== ' ') return;
-      event.preventDefault();
-      open();
-    });
-  });
-  $$('[data-delete-agent]').forEach((button) => {
-    button.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const id = button.getAttribute('data-delete-agent');
-      const agent = agents.find((item) => item.id === id);
-      if (agent) void deleteAgent(agent);
-    });
-  });
-  $$('[data-delete-team]').forEach((button) => {
-    button.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const id = button.getAttribute('data-delete-team');
-      const team = teams.find((item) => item.id === id);
-      if (team) void deleteTeam(team);
-    });
-  });
-  $$('[data-use-agent]').forEach((button) => {
-    button.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const id = button.getAttribute('data-use-agent');
-      const agent = agents.find((item) => item.id === id);
-      if (agent) void useAgent(agent);
-    });
-  });
-  $$('[data-use-team]').forEach((button) => {
-    button.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const id = button.getAttribute('data-use-team');
-      const team = teams.find((item) => item.id === id);
-      if (team) void useTeam(team);
-    });
-  });
-  $('[data-team-detail-close]')?.addEventListener('click', () => {
-    activeTeamId = '';
-    render();
-  });
-  $('[data-team-detail-backdrop]')?.addEventListener('click', (event) => {
-    if (event.target !== event.currentTarget) return;
-    activeTeamId = '';
-    render();
-  });
 }
 
 function bindTeamForm(): void {
@@ -1994,7 +1664,7 @@ function bindTeamForm(): void {
     button.addEventListener('click', () => {
       const value = button.getAttribute('data-remove-required-agent') || '';
       requiredTeamAgentIds = requiredTeamAgentIds.filter((id) => id !== value);
-      invalidateFormationDecision();
+      teamRolesLocked = false;
       render();
     });
   });
@@ -2002,7 +1672,7 @@ function bindTeamForm(): void {
     button.addEventListener('click', () => {
       const value = button.getAttribute('data-remove-excluded-agent') || '';
       excludedTeamAgentIds = excludedTeamAgentIds.filter((id) => id !== value);
-      invalidateFormationDecision();
+      teamRolesLocked = false;
       render();
     });
   });
@@ -2010,7 +1680,7 @@ function bindTeamForm(): void {
     button.addEventListener('click', () => {
       const value = button.getAttribute('data-required-capability') || '';
       toggleListValue(requiredTeamCapabilities, value, !requiredTeamCapabilities.includes(value));
-      invalidateFormationDecision();
+      teamRolesLocked = false;
       render();
     });
   });
@@ -2036,7 +1706,7 @@ function bindTeamForm(): void {
     button.addEventListener('click', () => {
       const value = button.getAttribute('data-remove-custom-capability') || '';
       customTeamCapabilities = customTeamCapabilities.filter((item) => item !== value);
-      invalidateFormationDecision();
+      teamRolesLocked = false;
       render();
     });
   });
@@ -2092,23 +1762,6 @@ function bindDecisionModal(): void {
   });
 }
 
-function bindStaffingModal(): void {
-  $('[data-staffing-decline]')?.addEventListener('click', () => {
-    staffingDecision = [];
-    staffingSelections = [];
-    pendingTemporaryMembers = [];
-    message = '已保留当前团队；未覆盖能力和风险仍保留在组队方案中。';
-    render();
-  });
-  $('[data-staffing-confirm]')?.addEventListener('click', () => {
-    if (staffingSelections.some((item) => !item.runtime_id || !item.model_id)) return;
-    pendingTemporaryMembers = staffingSelections.map((item) => ({ ...item }));
-    staffingDecision = [];
-    message = '已加入临时成员配置；创建团队时才会生成该成员。';
-    render();
-  });
-}
-
 function toggleListValue(list: string[], value: string, enabled: boolean): void {
   if (!value) return;
   if (enabled) {
@@ -2126,7 +1779,7 @@ function addCustomCapability(): void {
     customTeamCapabilities.push(capability);
   }
   customTeamCapabilityInput = '';
-  invalidateFormationDecision();
+  teamRolesLocked = false;
   render();
 }
 
@@ -2139,7 +1792,7 @@ function changeLeader(agentId: string): void {
   memberRoleKeys[teamLeaderId] = memberRoleKeys[teamLeaderId] || 'project_manager';
   const meta = roleMetaForKey('project_manager');
   if (meta) memberRoleMeta[teamLeaderId] = meta;
-  invalidateFormationDecision();
+  teamRolesLocked = false;
   render();
 }
 
@@ -2149,7 +1802,7 @@ function removeMember(agentId: string): void {
   delete memberRoles[agentId];
   delete memberRoleKeys[agentId];
   delete memberRoleMeta[agentId];
-  invalidateFormationDecision();
+  teamRolesLocked = false;
   render();
 }
 
@@ -2189,10 +1842,7 @@ function applyTeamSuggestion(suggestion: ExternalTeamSuggestion): void {
   message = suggestion.reasons?.join(' ') || '已根据团队目标和约束生成组队建议';
 }
 
-async function requestTeamSuggestion(
-  requiredAgentIds: string[],
-  forceRequiredAgentIds: string[] = [],
-): Promise<void> {
+async function requestTeamSuggestion(requiredAgentIds: string[], forceRequiredAgentIds: string[] = []): Promise<void> {
   formationRequestAbort?.abort();
   const controller = new AbortController();
   formationRequestAbort = controller;
@@ -2205,14 +1855,11 @@ async function requestTeamSuggestion(
   formationAiAttempted = false;
   startFormationElapsedTimer(startedAt);
   message = '';
-  staffingDecision = [];
-  staffingSelections = [];
-  pendingTemporaryMembers = [];
   render();
   try {
     const constraints = buildTeamConstraintText();
     const description = [teamDescription.trim(), constraints && `组队约束：\n${constraints}`].filter(Boolean).join('\n\n');
-    const requestPayload = {
+    const request = {
       name: teamName.trim(),
       description,
       workflow: teamWorkflow.trim(),
@@ -2223,7 +1870,7 @@ async function requestTeamSuggestion(
       required_capabilities: requiredTeamCapabilities,
       custom_capabilities: customTeamCapabilities,
     };
-    const suggestion = await backendApi.suggestExternalTeamAuto(requestPayload, {
+    const suggestion = await backendApi.suggestExternalTeamAuto(request, {
       signal: controller.signal,
       onSuggestion: (snapshot, phase) => {
         if (requestSeq !== formationRequestSeq) return;
@@ -2261,17 +1908,8 @@ async function requestTeamSuggestion(
     applyTeamSuggestion(suggestion);
     formationStatus = resolveFormationUiStatus(suggestion);
     formationImprovements = suggestion.ai_material_improvements || [];
-    if (suggestion.staffing_decision_required && suggestion.staffing_gaps?.length) {
-      staffingDecision = suggestion.staffing_gaps;
-      staffingSelections = suggestion.staffing_gaps.map((gap) => ({
-        ...gap,
-        runtime_id: gap.recommended_runtime_id,
-        model_id: gap.recommended_model_id,
-      }));
-    }
   } catch (error) {
-    if (requestSeq !== formationRequestSeq) return;
-    if ((error as Error).name === 'AbortError') return;
+    if (requestSeq !== formationRequestSeq || (error as Error).name === 'AbortError') return;
     formationStatus = fastApplied ? 'ready_partial' : 'idle';
     message = fastApplied
       ? '初步团队方案已保留，智能检查暂未完成'
@@ -2279,7 +1917,8 @@ async function requestTeamSuggestion(
   } finally {
     if (requestSeq === formationRequestSeq) {
       formationRequestAbort = null;
-      finishFormationElapsedTimer(startedAt);
+      formationElapsedMs = Date.now() - startedAt;
+      stopFormationElapsedTimer();
       busy = false;
       render();
     }
@@ -2290,19 +1929,14 @@ async function scanRuntimes(): Promise<void> {
   const startedAt = performance.now();
   busy = true;
   runtimeScanning = true;
-  message = '正在看看这台电脑上有哪些外援…';
+  message = '正在探测本机运行时与模型，请稍候…';
   render();
   try {
     runtimes = await backendApi.scanRuntimes();
-    const readyCount = runtimes.filter((runtime) => runtimeStatus(runtime) === 'ready').length;
     const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
-    message = readyCount > 0
-      ? `发现 ${readyCount} 个可用外援啦！选一个使用吧。用时 ${elapsed} 秒`
-      : runtimes.length > 0
-        ? `找到了 ${runtimes.length} 个外援，但暂时都还没准备好。稍后可以再找找。`
-        : '这次还没找到外援。确认已安装支持的 AI 工具后，再找找。';
+    message = `已刷新 ${runtimes.length} 个运行时，耗时 ${elapsed} 秒`;
   } catch (error) {
-    message = `这次没找成功，请稍后再找找。${(error as Error).message ? `（${(error as Error).message}）` : ''}`;
+    message = `刷新运行时失败：${(error as Error).message}`;
   } finally {
     runtimeScanning = false;
     busy = false;
@@ -2310,14 +1944,36 @@ async function scanRuntimes(): Promise<void> {
   }
 }
 
+async function deleteRuntime(runtime: ExternalRuntime): Promise<void> {
+  const confirmed = await showConfirmDialog({
+    title: '删除运行时记录',
+    message: `删除“${runtime.name || runtime.provider}”的发现记录？如果工具仍安装在电脑上，下次点“再找找”时它会重新出现。`,
+    confirmText: '删除',
+  });
+  if (!confirmed) return;
+  busy = true;
+  message = '';
+  render();
+  try {
+    await backendApi.deleteRuntime(runtime.id);
+    runtimes = runtimes.filter((item) => item.id !== runtime.id);
+    message = `已删除 ${runtime.name || runtime.provider}`;
+  } catch (error) {
+    message = `删除运行时失败：${(error as Error).message}`;
+  } finally {
+    busy = false;
+    render();
+  }
+}
+
 async function createAgent(): Promise<void> {
   if (!agentRuntimeId) {
-    message = '先选择一位可用外援';
+    message = '请选择运行时';
     render();
     return;
   }
   if (!agentModel) {
-    message = '再为这位外援选择一个模型';
+    message = '请选择模型';
     render();
     return;
   }
@@ -2327,7 +1983,7 @@ async function createAgent(): Promise<void> {
   try {
     const runtime = runtimes.find((item) => item.id === agentRuntimeId);
     const payload: Parameters<typeof backendApi.createExternalAgent>[0] = {
-      name: agentName.trim() || `${runtime?.name || 'AI'} 外援`,
+      name: agentName.trim() || `${runtime?.name || '外部'}智能体`,
       runtime_id: agentRuntimeId,
     };
     payload.model = agentModel.trim();
@@ -2337,10 +1993,9 @@ async function createAgent(): Promise<void> {
     agentName = '';
     agentModel = '';
     activeTab = 'mine';
-    if (agentsGuideMode === 'tour') agentsGuideStep = 3;
-    message = `新外援「${created.name}」到位！现在可以派活，也可以拉它进团队。`;
+    message = `已添加外援 ${created.name}`;
   } catch (error) {
-    message = `这位外援暂时没能加入：${(error as Error).message}`;
+    message = `添加外援失败：${(error as Error).message}`;
   } finally {
     busy = false;
     render();
@@ -2411,18 +2066,6 @@ async function createTeam(): Promise<void> {
     }
     if (teamSpec) payload.team_spec = teamSpec;
     if (confirmedFormationPlan) payload.formation_plan = confirmedFormationPlan;
-    if (pendingTemporaryMembers.length) {
-      payload.temporary_members = pendingTemporaryMembers.map((member) => ({
-        gap_id: member.gap_id,
-        name: `${teamName.trim() || '团队'} · 临时${member.role_label}`,
-        role_key: member.role_key,
-        required_capabilities: member.required_capabilities,
-        responsibility_focus: member.responsibility_focus,
-        reason: member.reason,
-        runtime_id: member.runtime_id,
-        model_id: member.model_id,
-      }));
-    }
     const created = await backendApi.createExternalTeam(payload);
     await refresh();
     resetTeamForm();
@@ -2437,11 +2080,8 @@ async function createTeam(): Promise<void> {
 }
 
 function resetTeamForm(): void {
+  invalidateFormationDecision();
   cancelDescriptionDraftRequest();
-  formationRequestAbort?.abort();
-  formationRequestAbort = null;
-  formationRequestSeq += 1;
-  stopFormationElapsedTimer();
   teamNameComposing = false;
   teamName = '';
   teamDescription = '';
@@ -2457,14 +2097,6 @@ function resetTeamForm(): void {
   memberRoleMeta = {};
   teamSpec = null;
   formationPlan = null;
-  formationStatus = 'idle';
-  formationStartedAt = null;
-  formationElapsedMs = 0;
-  formationImprovements = [];
-  formationAiAttempted = false;
-  staffingDecision = [];
-  staffingSelections = [];
-  pendingTemporaryMembers = [];
   teamRolesLocked = false;
   requiredTeamAgentIds = [];
   excludedTeamAgentIds = [];
@@ -2477,14 +2109,14 @@ function resetTeamForm(): void {
 }
 
 async function deleteAgent(agent: ExternalAgent): Promise<void> {
-  if (!window.confirm(`移除外援「${agent.name}」？`)) return;
+  if (!window.confirm(`删除智能体「${agent.name}」？`)) return;
   busy = true;
   message = '';
   render();
   try {
     await backendApi.deleteExternalAgent(agent.id);
     await refresh();
-    message = `已从阵容中移除 ${agent.name}`;
+    message = `已删除 ${agent.name}`;
   } catch (error) {
     message = `删除失败：${(error as Error).message}`;
   } finally {
@@ -2515,9 +2147,9 @@ export async function useAgent(agent: ExternalAgent): Promise<void> {
     notify(EXTERNAL_AGENTS_DISABLED_MESSAGE);
     return;
   }
-  const sessionId = ensureChatSession?.() || '';
+  const sessionId = ensureChatSession?.() || state.activeSessionId || '';
   if (!sessionId) {
-    notify('无法创建对话，请先登录后再派活。');
+    notify('无法创建对话，请先登录后再选择智能体。');
     return;
   }
   try {
@@ -2553,7 +2185,7 @@ export async function useTeam(team: ExternalTeam): Promise<void> {
     notify(EXTERNAL_AGENTS_DISABLED_MESSAGE);
     return;
   }
-  const sessionId = ensureChatSession?.() || '';
+  const sessionId = ensureChatSession?.() || state.activeSessionId || '';
   if (!sessionId) {
     notify('无法创建对话，请先登录后再选择团队。');
     return;
@@ -2608,14 +2240,20 @@ export function renderAgentsPage(): void {
   render();
 }
 
-export function bindAgentsTab(onTab: () => void): void {
-  document.querySelector('[data-tab="agents"]')?.addEventListener('click', () => {
-    if (!externalAgentsEnabled()) return;
-    activeTab = 'mine';
-    activeTeamId = '';
-    onTab();
-    void loadAgentsPage();
-  });
+export function activateAgentsPage(): void {
+  activeTab = 'mine';
+  void loadAgentsPage();
+}
+
+export function disposeAgentsPage(): void {
+  closeAgentsSelect();
+  removeAgentsGuide();
+  invalidateFormationDecision();
+  cancelDescriptionDraftRequest();
+  activeTab = 'mine';
+  activeTeamId = '';
+  agentHubView?.dispose();
+  agentHubView = null;
 }
 
 export async function initAgentsPage(options: {
@@ -2624,12 +2262,8 @@ export async function initAgentsPage(options: {
 } = {}): Promise<void> {
   ensureChatSession = options.ensureChatSession || null;
   onSessionAgentAssigned = options.onSessionAgentAssigned || null;
-  activeTab = 'mine';
-  activeTeamId = '';
-  message = '';
   initialRuntimeScanStarted = false;
   agentsGuideStep = 1;
-  agentsGuideAutoScrolledStep = null;
   agentsGuideMode = loadFromStorage(STORAGE_KEYS.externalAgentsGuideDismissed, false)
     ? 'hidden'
     : 'welcome';
@@ -2641,21 +2275,11 @@ export async function initAgentsPage(options: {
       closeAgentsSelect();
     });
     document.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape') return;
-      closeAgentsSelect();
-      if (agentsGuideMode === 'tour') {
-        finishAgentsGuide();
-        return;
-      }
-      if (activeTeamId) {
-        activeTeamId = '';
-        render();
-      }
+      if (event.key === 'Escape') closeAgentsSelect();
     });
     document.addEventListener('click', (event) => {
       const tab = (event.target as HTMLElement).closest<HTMLElement>('[data-tab]');
-      if (tab && tab.dataset.tab !== 'agents') removeAgentsGuidePortal();
+      if (tab && tab.dataset.tab !== 'agents') removeAgentsGuide();
     });
-    window.addEventListener('resize', scheduleAgentsGuideLayout);
   }
 }

@@ -19,14 +19,17 @@ import {
   groupByType,
   groupPagesByDate,
   refreshWikiData,
+  resolveTabDrop,
   setWikiAgentEntryHandler,
   setWikiAgentKbDeletedHandler,
   summaryOf,
 } from '../../src/ui/features/wiki-page';
 import { __resetAllStoresForTest, sessionStore } from '../../src/ui/stores/stores';
+import { showContextMenu } from '../../src/ui/lib/context-menu';
 
-const { mockShowConfirmDialog } = vi.hoisted(() => ({
+const { mockShowConfirmDialog, mockShowPromptDialog } = vi.hoisted(() => ({
   mockShowConfirmDialog: vi.fn(async () => true),
+  mockShowPromptDialog: vi.fn(async () => null as string | null),
 }));
 
 vi.mock('../../src/ui/backend-client', () => ({
@@ -52,6 +55,12 @@ vi.mock('../../src/ui/backend-client', () => ({
 
 vi.mock('../../src/ui/ui-feedback', () => ({
   showConfirmDialog: mockShowConfirmDialog,
+  showPromptDialog: mockShowPromptDialog,
+}));
+
+vi.mock('../../src/ui/lib/context-menu', () => ({
+  showContextMenu: vi.fn(),
+  dismissContextMenu: vi.fn(),
 }));
 
 const api = backendApi as unknown as {
@@ -102,6 +111,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(() => {
   vi.clearAllMocks();
   mockShowConfirmDialog.mockResolvedValue(true);
+  mockShowPromptDialog.mockResolvedValue(null);
   __resetAllStoresForTest();
   sessionStore.set({ activeSessionId: 'sid-1' });
   __resetWikiViewForTest();
@@ -590,6 +600,429 @@ describe('点击条目加载详情', () => {
   });
 });
 
+describe('详情面板多 Tab', () => {
+  const groupEls = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('#wiki-page-root [data-wiki-group]'));
+  const tabKeys = (groupIndex = 0): string[] =>
+    Array.from(groupEls()[groupIndex]?.querySelectorAll('[data-wiki-tab]') ?? []).map(
+      (el) => el.getAttribute('data-wiki-tab') ?? '',
+    );
+  const activeKey = (groupIndex = 0): string | null =>
+    groupEls()[groupIndex]
+      ?.querySelector('.wiki-tab.is-active [data-wiki-tab]')
+      ?.getAttribute('data-wiki-tab') ?? null;
+  const clickTab = (key: string): void => {
+    document.querySelector(`[data-wiki-tab="${key}"]`)?.dispatchEvent(new Event('click'));
+  };
+  const clickClose = (key: string): void => {
+    document.querySelector(`[data-wiki-tab-close="${key}"]`)?.dispatchEvent(new Event('click', { bubbles: true }));
+  };
+  const openPage = (id: string): void => {
+    document.querySelector(`[data-page-id="${id}"]`)?.dispatchEvent(new Event('click'));
+  };
+
+  beforeEach(() => {
+    api.wikiPages.mockResolvedValue(
+      pagesResult([makePage({ id: 'p1', title: '页面一' }), makePage({ id: 'p2', title: '页面二' })]),
+    );
+    api.wikiPage.mockImplementation(async (id: string) => ({
+      ok: true,
+      page: makePage({ id, title: id === 'p1' ? '页面一' : '页面二', content: '正文' }),
+      source_titles: {},
+      source_files: {},
+    }));
+  });
+
+  it('打开页面/文档产生 tab，激活态跟随当前详情', async () => {
+    await refreshWikiData();
+    // 进入 KB 默认打开 Home.md，成为第一个 tab。
+    expect(tabKeys()).toEqual(['doc:Home.md']);
+    expect(activeKey()).toBe('doc:Home.md');
+
+    openPage('p1');
+    await vi.waitFor(() => {
+      expect(tabKeys()).toEqual(['doc:Home.md', 'page:p1']);
+      expect(activeKey()).toBe('page:p1');
+    });
+
+    clickTab('doc:Home.md');
+    await vi.waitFor(() => {
+      expect(activeKey()).toBe('doc:Home.md');
+      expect(document.querySelector('.wiki-detail.wiki-home-document')).not.toBeNull();
+    });
+  });
+
+  it('重复打开同一页面去重，不产生重复 tab', async () => {
+    await refreshWikiData();
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+
+    openPage('p1');
+    openPage('p1');
+    await flush();
+    expect(tabKeys()).toEqual(['doc:Home.md', 'page:p1']);
+  });
+
+  it('关闭激活 tab 时相邻 tab 接管（右侧优先）', async () => {
+    await refreshWikiData();
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+    openPage('p2');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p2'));
+
+    // 激活中间的 p1 再关闭：右侧的 p2 接管。
+    clickTab('page:p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+    clickClose('page:p1');
+    await vi.waitFor(() => {
+      expect(tabKeys()).toEqual(['doc:Home.md', 'page:p2']);
+      expect(activeKey()).toBe('page:p2');
+      expect((document.querySelector('[data-wiki-title]') as HTMLInputElement | null)?.value).toBe('页面二');
+    });
+
+    // 关闭末尾的 p2：左侧的 Home.md 接管。
+    clickClose('page:p2');
+    await vi.waitFor(() => {
+      expect(tabKeys()).toEqual(['doc:Home.md']);
+      expect(activeKey()).toBe('doc:Home.md');
+      expect(document.querySelector('.wiki-detail.wiki-home-document')).not.toBeNull();
+    });
+  });
+
+  it('关闭非激活 tab 不影响当前详情', async () => {
+    await refreshWikiData();
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+    openPage('p2');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p2'));
+
+    clickClose('page:p1');
+    await vi.waitFor(() => expect(tabKeys()).toEqual(['doc:Home.md', 'page:p2']));
+    expect(activeKey()).toBe('page:p2');
+    expect((document.querySelector('[data-wiki-title]') as HTMLInputElement | null)?.value).toBe('页面二');
+  });
+
+  it('切 KB（reloadAll）清空 tabs，仅保留新 KB 的 Home.md', async () => {
+    await refreshWikiData();
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey()).toBe('page:p1'));
+    openPage('p2');
+    await vi.waitFor(() => expect(tabKeys()).toEqual(['doc:Home.md', 'page:p1', 'page:p2']));
+
+    const select = document.querySelector('#wiki-kb-select') as HTMLSelectElement;
+    select.value = 'work';
+    select.dispatchEvent(new Event('change'));
+
+    await vi.waitFor(() => {
+      expect(tabKeys()).toEqual(['doc:Home.md']);
+      expect(activeKey()).toBe('doc:Home.md');
+    });
+  });
+});
+
+describe('详情编辑器组（拆分 / 移动 / 关闭 / 拖拽落点）', () => {
+  const groupEls = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('#wiki-page-root [data-wiki-group]'));
+  const tabKeys = (groupIndex = 0): string[] =>
+    Array.from(groupEls()[groupIndex]?.querySelectorAll('[data-wiki-tab]') ?? []).map(
+      (el) => el.getAttribute('data-wiki-tab') ?? '',
+    );
+  const activeKey = (groupIndex = 0): string | null =>
+    groupEls()[groupIndex]
+      ?.querySelector('.wiki-tab.is-active [data-wiki-tab]')
+      ?.getAttribute('data-wiki-tab') ?? null;
+  const orientation = (): string | null =>
+    document.querySelector('.wiki-detail-groups')?.getAttribute('data-orientation') ?? null;
+  const groupIdAt = (index: number): string => groupEls()[index]?.getAttribute('data-wiki-group') ?? '';
+  const openPage = (id: string): void => {
+    document.querySelector(`[data-page-id="${id}"]`)?.dispatchEvent(new Event('click'));
+  };
+  const clickClose = (key: string): void => {
+    document.querySelector(`[data-wiki-tab-close="${key}"]`)?.dispatchEvent(new Event('click', { bubbles: true }));
+  };
+  const focusGroup = (index: number): void => {
+    groupEls()[index]?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  };
+  /** 右键 tab chip，返回 showContextMenu 收到的菜单项（showContextMenu 已 mock）。 */
+  const tabMenuItems = (key: string) => {
+    const chip = document.querySelector(`[data-wiki-tab-chip="${key}"]`) as HTMLElement | null;
+    expect(chip).not.toBeNull();
+    chip!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    const call = vi.mocked(showContextMenu).mock.calls.at(-1);
+    expect(call).toBeTruthy();
+    return call![1];
+  };
+  /** 打开 p1/p2 并「向右拆分」p2，落成 g1=[Home,p1] / g2=[p2] 的双组基准态。 */
+  const setupTwoGroups = async (): Promise<void> => {
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey(0)).toBe('page:p1'));
+    openPage('p2');
+    await vi.waitFor(() => expect(activeKey(0)).toBe('page:p2'));
+    tabMenuItems('page:p2').find((i) => i.id === 'split-right')!.onSelect();
+    await vi.waitFor(() => expect(groupEls()).toHaveLength(2));
+  };
+
+  beforeEach(async () => {
+    api.wikiPages.mockResolvedValue(
+      pagesResult([
+        makePage({ id: 'p1', title: '页面一' }),
+        makePage({ id: 'p2', title: '页面二' }),
+        makePage({ id: 'p3', title: '页面三' }),
+      ]),
+    );
+    api.wikiPage.mockImplementation(async (id: string) => ({
+      ok: true,
+      page: makePage({ id, title: { p1: '页面一', p2: '页面二', p3: '页面三' }[id] ?? id, content: '正文' }),
+      source_titles: {},
+      source_files: {},
+    }));
+    await refreshWikiData();
+  });
+
+  it('右键「向右拆分」创建第二组、迁移 tab 并写入 row 方向', async () => {
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey(0)).toBe('page:p1'));
+    openPage('p2');
+    await vi.waitFor(() => expect(activeKey(0)).toBe('page:p2'));
+
+    const items = tabMenuItems('page:p2');
+    expect(items.map((i) => i.id)).toEqual(['split-right', 'split-down']);
+    expect(items.map((i) => i.label)).toEqual(['向右拆分', '向下拆分']);
+    items.find((i) => i.id === 'split-right')!.onSelect();
+
+    await vi.waitFor(() => {
+      expect(groupEls()).toHaveLength(2);
+      expect(orientation()).toBe('row');
+      // 拆的是激活 tab：源组回落相邻 tab，目标组激活被拆 tab
+      expect(tabKeys(0)).toEqual(['doc:Home.md', 'page:p1']);
+      expect(activeKey(0)).toBe('page:p1');
+      expect(tabKeys(1)).toEqual(['page:p2']);
+      expect(activeKey(1)).toBe('page:p2');
+    });
+    // 组间把手出现；新拆出的组获得焦点
+    expect(document.querySelector('[data-wiki-group-sash]')).not.toBeNull();
+    expect(groupEls()[1].classList.contains('is-focused')).toBe(true);
+    expect((document.querySelector('[data-wiki-group-sash]') as HTMLElement).getAttribute('aria-orientation')).toBe('vertical');
+  });
+
+  it('右键「向下拆分」写入 column 方向', async () => {
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey(0)).toBe('page:p1'));
+
+    tabMenuItems('page:p1').find((i) => i.id === 'split-down')!.onSelect();
+
+    await vi.waitFor(() => {
+      expect(groupEls()).toHaveLength(2);
+      expect(orientation()).toBe('column');
+      expect(tabKeys(0)).toEqual(['doc:Home.md']);
+      expect(tabKeys(1)).toEqual(['page:p1']);
+    });
+    expect((document.querySelector('[data-wiki-group-sash]') as HTMLElement).getAttribute('aria-orientation')).toBe('horizontal');
+  });
+
+  it('拆的是组内唯一 tab 时源组变空态（允许空组存在）', async () => {
+    // 初始仅 doc:Home.md 一个 tab
+    expect(tabKeys(0)).toEqual(['doc:Home.md']);
+    tabMenuItems('doc:Home.md').find((i) => i.id === 'split-right')!.onSelect();
+
+    await vi.waitFor(() => {
+      expect(groupEls()).toHaveLength(2);
+      expect(tabKeys(0)).toEqual([]);
+      expect(tabKeys(1)).toEqual(['doc:Home.md']);
+    });
+    expect(groupEls()[0].textContent).toContain('拖拽 tab 到此处');
+  });
+
+  it('已有两组时右键菜单退化为「移到另一组」', async () => {
+    await setupTwoGroups();
+
+    const items = tabMenuItems('page:p1');
+    expect(items.map((i) => i.id)).toEqual(['move-to-other']);
+    items[0].onSelect();
+
+    await vi.waitFor(() => {
+      expect(groupEls()).toHaveLength(2);
+      expect(tabKeys(0)).toEqual(['doc:Home.md']);
+      expect(tabKeys(1)).toEqual(['page:p2', 'page:p1']);
+      expect(activeKey(1)).toBe('page:p1');
+    });
+  });
+
+  it('两组时关掉某组最后一个 tab：回收该组，剩余组恢复通栏', async () => {
+    await setupTwoGroups();
+
+    clickClose('page:p2');
+    await vi.waitFor(() => {
+      expect(groupEls()).toHaveLength(1);
+      expect(tabKeys(0)).toEqual(['doc:Home.md', 'page:p1']);
+      expect(activeKey(0)).toBe('page:p1');
+    });
+    expect(document.querySelector('[data-wiki-group-sash]')).toBeNull();
+  });
+
+  it('同一页面全局只能开一个组：点击已开页面聚焦所在组而非重复打开', async () => {
+    await setupTwoGroups();
+    focusGroup(0);
+    expect(groupEls()[0].classList.contains('is-focused')).toBe(true);
+
+    openPage('p2');
+    await vi.waitFor(() => {
+      // 不产生重复 tab，焦点落到 p2 所在的 g2
+      expect(groupEls()).toHaveLength(2);
+      expect(tabKeys(0)).toEqual(['doc:Home.md', 'page:p1']);
+      expect(tabKeys(1)).toEqual(['page:p2']);
+      expect(groupEls()[1].classList.contains('is-focused')).toBe(true);
+    });
+  });
+
+  it('点击组内更新聚焦组，树/列表点击落到聚焦组', async () => {
+    await setupTwoGroups();
+    // 焦点初始在 g2（拆分落点），点击 g1 内部切回 g1
+    focusGroup(0);
+    expect(groupEls()[0].classList.contains('is-focused')).toBe(true);
+    expect(groupEls()[1].classList.contains('is-focused')).toBe(false);
+
+    openPage('p3');
+    await vi.waitFor(() => {
+      expect(tabKeys(0)).toEqual(['doc:Home.md', 'page:p1', 'page:p3']);
+      expect(activeKey(0)).toBe('page:p3');
+      expect(tabKeys(1)).toEqual(['page:p2']);
+    });
+  });
+
+  it('per-group 保存：A 组编辑置脏不影响 B 组保存态，自动保存只提交 A 组', async () => {
+    // 双组搭建走真实计时器（vi.waitFor 轮询），编辑/保存防抖再切 fake timers。
+    await setupTwoGroups();
+    vi.useFakeTimers();
+    try {
+      const titleA = groupEls()[0].querySelector<HTMLInputElement>('[data-wiki-title]');
+      expect(titleA?.value).toBe('页面一');
+      titleA!.value = '页面一改';
+      titleA!.dispatchEvent(new Event('input'));
+
+      // A 组置脏，B 组保存态不受影响
+      expect(groupEls()[0].querySelector('[data-wiki-save-state]')?.textContent).toBe('等待保存…');
+      expect(groupEls()[1].querySelector('[data-wiki-save-state]')?.textContent).toBe('已保存');
+
+      await vi.advanceTimersByTimeAsync(701);
+      expect(api.wikiUpdatePage).toHaveBeenCalledTimes(1);
+      expect(api.wikiUpdatePage).toHaveBeenCalledWith(
+        'p1',
+        expect.objectContaining({ title: '页面一改', content: '正文' }),
+        'default',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('拆分/移动前 flush 源组脏稿（不等 700ms 防抖）', async () => {
+    vi.useFakeTimers();
+    try {
+      openPage('p1');
+      await vi.runAllTimersAsync();
+
+      const titleA = groupEls()[0].querySelector<HTMLInputElement>('[data-wiki-title]');
+      titleA!.value = '页面一改';
+      titleA!.dispatchEvent(new Event('input'));
+      expect(api.wikiUpdatePage).not.toHaveBeenCalled();
+
+      // 脏稿状态下拆分 p1：立即 flush 保存
+      tabMenuItems('page:p1').find((i) => i.id === 'split-right')!.onSelect();
+      expect(api.wikiUpdatePage).toHaveBeenCalledWith(
+        'p1',
+        expect.objectContaining({ title: '页面一改' }),
+        'default',
+      );
+      await vi.runAllTimersAsync();
+      // 防抖计时器不再重复保存
+      expect(api.wikiUpdatePage).toHaveBeenCalledTimes(1);
+      expect(tabKeys(1)).toEqual(['page:p1']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('组间把手：拖拽调比例（钳制 20/80）并持久化，双击复位 50%', async () => {
+    await setupTwoGroups();
+    // 默认 50/50（happy-dom 把 flex 简写归一化为 0px 基准）
+    expect(groupEls()[0].style.flex).toBe('50 1 0px');
+    expect(groupEls()[1].style.flex).toBe('50 1 0px');
+
+    const sash = document.querySelector('[data-wiki-group-sash]') as HTMLElement;
+    // happy-dom 容器 rect 恒 0 → 按 1000px 假定尺寸换算：起点 50% = 500px
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 600, bubbles: true }));
+    expect(groupEls()[0].style.flex).toBe('60 1 0px');
+    expect(groupEls()[1].style.flex).toBe('40 1 0px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiDetailSplit.v1')).toBe('60');
+
+    // 大幅右拖超过上限 → 钳到 80
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
+    expect(groupEls()[0].style.flex).toBe('80 1 0px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiDetailSplit.v1')).toBe('80');
+
+    // 双击复位 50%（清存储）
+    sash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiDetailSplit.v1')).toBeNull();
+    expect(groupEls()[0].style.flex).toBe('50 1 0px');
+    expect(groupEls()[1].style.flex).toBe('50 1 0px');
+  });
+
+  it('resolveTabDrop：edge 拆分 / group 移动 / 同组 no-op / 两组时 edge 退化为移动', async () => {
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey(0)).toBe('page:p1'));
+    const g1 = groupIdAt(0);
+
+    // edge:right → row 拆分
+    resolveTabDrop('page:p1', g1, 'edge:right');
+    await vi.waitFor(() => {
+      expect(groupEls()).toHaveLength(2);
+      expect(orientation()).toBe('row');
+      expect(tabKeys(1)).toEqual(['page:p1']);
+    });
+    const g2 = groupIdAt(1);
+
+    // group:<id> → 跨组移动（doc:Home.md 从 g1 移到 g2，g1 变空组）
+    resolveTabDrop('doc:Home.md', g1, `group:${g2}`);
+    await vi.waitFor(() => {
+      expect(tabKeys(0)).toEqual([]);
+      expect(tabKeys(1)).toEqual(['page:p1', 'doc:Home.md']);
+    });
+
+    // group:同组 → no-op
+    resolveTabDrop('page:p1', g2, `group:${g2}`);
+    await flush();
+    expect(groupEls()).toHaveLength(2);
+    expect(tabKeys(1)).toEqual(['page:p1', 'doc:Home.md']);
+
+    // 已有两组时 edge 退化为移到另一组（方向不变）
+    resolveTabDrop('page:p1', g2, 'edge:bottom');
+    await vi.waitFor(() => {
+      expect(groupEls()).toHaveLength(2);
+      expect(orientation()).toBe('row');
+      expect(tabKeys(0)).toEqual(['page:p1']);
+      expect(tabKeys(1)).toEqual(['doc:Home.md']);
+    });
+  });
+
+  it('resolveTabDrop：edge:top → column 拆分', async () => {
+    openPage('p1');
+    await vi.waitFor(() => expect(activeKey(0)).toBe('page:p1'));
+
+    resolveTabDrop('page:p1', groupIdAt(0), 'edge:top');
+    await vi.waitFor(() => {
+      expect(groupEls()).toHaveLength(2);
+      expect(orientation()).toBe('column');
+      expect(tabKeys(0)).toEqual(['doc:Home.md']);
+      expect(tabKeys(1)).toEqual(['page:p1']);
+    });
+  });
+});
+
 describe('错误处理', () => {
   it('KB 加载失败时 notify 提示并显示「加载失败」空态（而非误导的「暂无知识库」）', async () => {
     api.wikiKBs.mockRejectedValue(new Error('网络异常'));
@@ -843,96 +1276,210 @@ describe('删除知识库', () => {
 describe('分栏拖拽', () => {
   it('列表模式与图谱模式都有把手', async () => {
     await refreshWikiData();
-    expect(document.querySelector('[data-wiki-sash]')).not.toBeNull();
+    expect(document.querySelector('[data-wiki-browser-sash]')).not.toBeNull();
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
-    expect(document.querySelector('[data-wiki-sash]')).not.toBeNull();
+    expect(document.querySelector('[data-wiki-browser-sash]')).not.toBeNull();
   });
 
-  it('图谱模式：默认弹性分配（无内联宽度），拖拽后固定像素并持久化，双击复位回弹性', async () => {
+  it('图谱模式：默认沿用面板宽度，拖拽后固定像素并持久化，双击复位回默认', async () => {
     await refreshWikiData();
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
-    const pane = document.querySelector('.wiki-list-pane') as HTMLElement;
-    // 弹性分配：无内联 width/flex 覆盖
-    expect(pane.style.width).toBe('');
-    expect(pane.style.flex).toBe('');
-
-    const sash = document.querySelector('[data-wiki-sash]') as HTMLElement;
-    // happy-dom 的 getBoundingClientRect 恒为 0：startX=0 → move 到 500 即拖出 500px
-    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
-    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 500, bubbles: true }));
+    const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
+    // 未拖拽：沿用知识库面板默认宽度
     expect(pane.style.width).toBe('500px');
-    expect(pane.style.flex).toBe('0 0 auto');
+
+    const sash = document.querySelector('[data-wiki-browser-sash]') as HTMLElement;
+    // happy-dom 的 getBoundingClientRect 恒为 0：startX=500 → move 到 0，sign=-1 即拖出 500px
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 0, bubbles: true }));
+    expect(pane.style.width).toBe('500px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    expect(localStorage.getItem('crew.desktop.wikiGraphWidth.v1')).toBe('500');
+    expect(localStorage.getItem('crew.desktop.wikiGraphWidth.v2')).toBe('500');
 
     // 重渲染后固定宽度存活
     document.querySelector('[data-wiki-view="timeline"]')?.dispatchEvent(new Event('click'));
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
-    const rebuilt = document.querySelector('.wiki-list-pane') as HTMLElement;
+    const rebuilt = document.querySelector('.wiki-browser-pane') as HTMLElement;
     expect(rebuilt.style.width).toBe('500px');
-    expect(rebuilt.style.flex).toBe('0 0 auto');
 
-    // 双击复位回弹性分配
-    document.querySelector('[data-wiki-sash]')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-    const reset = document.querySelector('.wiki-list-pane') as HTMLElement;
-    expect(reset.style.width).toBe('');
-    expect(reset.style.flex).toBe('');
-    expect(localStorage.getItem('crew.desktop.wikiGraphWidth.v1')).toBeNull();
+    // 双击复位回默认面板宽度
+    document.querySelector('[data-wiki-browser-sash]')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    const reset = document.querySelector('.wiki-browser-pane') as HTMLElement;
+    expect(reset.style.width).toBe('500px');
+    expect(localStorage.getItem('crew.desktop.wikiGraphWidth.v2')).toBeNull();
   });
 
   it('拖拽调宽并持久化，超过下限被钳制', async () => {
     await refreshWikiData();
-    const pane = document.querySelector('.wiki-list-pane') as HTMLElement;
-    expect(pane.style.width).toBe('340px');
+    const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
+    expect(pane.style.width).toBe('500px');
 
-    const sash = document.querySelector('[data-wiki-sash]') as HTMLElement;
+    const sash = document.querySelector('[data-wiki-browser-sash]') as HTMLElement;
+    // 把手在面板左缘（sign=-1）：向右拖变窄
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 560, bubbles: true }));
-    expect(pane.style.width).toBe('400px');
+    expect(pane.style.width).toBe('440px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    expect(localStorage.getItem('crew.desktop.wikiListWidth.v1')).toBe('400');
+    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v2')).toBe('440');
 
-    // 大幅左拖超过下限 → 钳到 240
+    // 大幅右拖超过下限 → 钳到 340
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
-    document.dispatchEvent(new MouseEvent('mousemove', { clientX: -5000, bubbles: true }));
-    expect(pane.style.width).toBe('240px');
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
+    expect(pane.style.width).toBe('340px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    expect(localStorage.getItem('crew.desktop.wikiListWidth.v1')).toBe('240');
+    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v2')).toBe('340');
   });
 
   it('双击复位默认宽度并持久化', async () => {
     await refreshWikiData();
-    const sash = document.querySelector('[data-wiki-sash]') as HTMLElement;
+    const sash = document.querySelector('[data-wiki-browser-sash]') as HTMLElement;
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 600, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
 
     sash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
+    expect(pane.style.width).toBe('500px');
+    expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v2')).toBe('500');
+  });
+
+  it('目录内层把手：默认 240，往右拖变宽，钳制 200/480，双击复位', async () => {
+    await refreshWikiData();
     const pane = document.querySelector('.wiki-list-pane') as HTMLElement;
-    expect(pane.style.width).toBe('340px');
-    expect(localStorage.getItem('crew.desktop.wikiListWidth.v1')).toBe('340');
+    expect(pane.style.flex).toBe('0 0 240px');
+
+    const sash = document.querySelector('[data-wiki-catalog-sash]') as HTMLElement;
+    expect(sash).not.toBeNull();
+    // 把手在目录右缘（sign=+1）：往右拖目录变宽
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 560, bubbles: true }));
+    expect(pane.style.flex).toBe('0 0 300px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('300');
+
+    // 大幅左拖超过下限 → 钳到 200
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: -5000, bubbles: true }));
+    expect(pane.style.flex).toBe('0 0 200px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('200');
+
+    // 大幅右拖超过上限 → 钳到 480
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
+    expect(pane.style.flex).toBe('0 0 480px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('480');
+
+    // 双击复位默认目录宽度
+    sash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    const reset = document.querySelector('.wiki-list-pane') as HTMLElement;
+    expect(reset.style.flex).toBe('0 0 240px');
+    expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('240');
+  });
+
+  it('图谱模式：无内层目录把手，目录不内联宽度', async () => {
+    await refreshWikiData();
+    document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
+    expect(document.querySelector('[data-wiki-catalog-sash]')).toBeNull();
+    expect((document.querySelector('.wiki-list-pane') as HTMLElement).style.flex).toBe('');
+  });
+
+  it('图谱画布内层把手：默认弹性无内联，拖拽固定像素并持久化，钳制 240/800，双击恢复弹性', async () => {
+    // vwFactor=0.5 的视口上限会压过 800 上限（happy-dom 默认 innerWidth 1024 → 上限 512），先拉宽视口再测钳制
+    Object.defineProperty(window, 'innerWidth', { value: 2000, configurable: true });
+    await refreshWikiData();
+    document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
+    const pane = document.querySelector('.wiki-list-pane') as HTMLElement;
+    const sash = document.querySelector('[data-wiki-graph-canvas-sash]') as HTMLElement;
+    expect(sash).not.toBeNull();
+    expect(document.querySelector('[data-wiki-catalog-sash]')).toBeNull();
+    // 未拖拽：1.5:1 弹性分配，无内联 flex
+    expect(pane.style.flex).toBe('');
+
+    // happy-dom 的 getBoundingClientRect 恒为 0：startX=0 → move 到 400，sign=+1 即拖出 400px
+    sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 400, bubbles: true }));
+    expect(pane.style.flex).toBe('0 0 400px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('400');
+
+    // 重渲染后固定像素存活（压过 --graph 的弹性比例）
+    document.querySelector('[data-wiki-view="timeline"]')?.dispatchEvent(new Event('click'));
+    document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
+    const rebuilt = document.querySelector('.wiki-list-pane') as HTMLElement;
+    expect(rebuilt.style.flex).toBe('0 0 400px');
+
+    // 大幅左拖超过下限 → 钳到 240
+    const sash2 = document.querySelector('[data-wiki-graph-canvas-sash]') as HTMLElement;
+    sash2.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: -5000, bubbles: true }));
+    expect(rebuilt.style.flex).toBe('0 0 240px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('240');
+
+    // 大幅右拖超过上限 → 钳到 800
+    sash2.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
+    expect(rebuilt.style.flex).toBe('0 0 800px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('800');
+
+    // 双击复位：恢复弹性（无内联 flex），存储清除
+    sash2.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    const reset = document.querySelector('.wiki-list-pane') as HTMLElement;
+    expect(reset.style.flex).toBe('');
+    expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBeNull();
+    Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true });
   });
 });
 
-describe('Wiki Agent 对话面板（三栏布局）', () => {
-  it('列表 | 详情 | 对话三栏：面板容器常驻，页头无「问 Wiki」按钮', async () => {
+describe('知识库面板收起/展开', () => {
+  it('页头按钮收起后面板与把手被隐藏（DOM 保留），再点展开恢复', async () => {
     await refreshWikiData();
-    // cmcc 路线：右栏是 wiki-agent.ts 挂载的 .wiki-agent-pane，常驻不拖拽。
+    expect(document.querySelector('.page-shell--wiki')?.classList.contains('wiki-browser-collapsed')).toBe(false);
+
+    document.querySelector<HTMLElement>('[data-wiki-browser-toggle]')?.click();
+    const shell = document.querySelector('.page-shell--wiki') as HTMLElement;
+    expect(shell.classList.contains('wiki-browser-collapsed')).toBe(true);
+    // 收起走 CSS 隐藏：面板 DOM 仍在，详情保活逻辑不受影响
+    expect(document.querySelector('.wiki-browser-pane')).not.toBeNull();
+
+    document.querySelector<HTMLElement>('[data-wiki-browser-toggle]')?.click();
+    expect(document.querySelector('.page-shell--wiki')?.classList.contains('wiki-browser-collapsed')).toBe(false);
+  });
+});
+
+describe('Wiki Agent 对话面板（左对话 / 右知识库面板布局）', () => {
+  it('对话主区常驻，页头无「问 Wiki」按钮', async () => {
+    await refreshWikiData();
+    // cmcc 路线：左主区是 wiki-agent.ts 挂载的 .wiki-agent-pane，常驻不拖拽。
     const pane = document.querySelector('.wiki-agent-pane') as HTMLElement;
     expect(pane).not.toBeNull();
     expect(pane.getAttribute('data-wiki-agent-panel')).not.toBeNull();
     expect(document.querySelector('[data-wiki-agent]')).toBeNull();
   });
 
-  it('图谱模式：对话面板与列表把手共存', async () => {
+  it('图谱模式：对话面板与知识库面板把手共存', async () => {
     await refreshWikiData();
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
-    expect(document.querySelector('[data-wiki-sash]')).not.toBeNull();
+    expect(document.querySelector('[data-wiki-browser-sash]')).not.toBeNull();
     expect(document.querySelector('.wiki-agent-pane')).not.toBeNull();
   });
 });
 
 describe('移植的纯逻辑（wikiTree）', () => {
+  it('buildFileTree 兼容旧版无 wiki/ 前缀的页面路径', () => {
+    const root = buildFileTree([
+      makePage({ id: 'legacy', title: '旧页面', file_path: 'entities/旧页面.md', page_type: 'entity' }),
+    ]);
+    const wiki = root.children[0];
+    if (wiki.kind !== 'folder') throw new Error('expected folder');
+    const entities = wiki.children.find((node) => node.kind === 'folder' && node.name === 'entities');
+    if (entities?.kind !== 'folder') throw new Error('expected entities folder');
+    expect(entities.children.map((node) => (node.kind === 'page' ? node.page.title : node.name))).toContain('旧页面');
+  });
+
   it('buildFileTree 只展示 Wiki Vault，并预置来源类型与根文档', () => {
     const root = buildFileTree([
       makePage({ id: 'p1', title: '论文', file_path: 'wiki/sources/pdfs/论文.md', page_type: 'source' }),
@@ -1024,11 +1571,11 @@ describe('Agent-first 写入边界', () => {
     expect(root().querySelector('.wiki-upload-jobs')).toBeNull();
   });
 
-  it('渲染单条删除与批量管理入口（default 不渲染编译入口）', async () => {
+  it('渲染单条 ⋯ 菜单与批量管理入口（default 不渲染编译入口）', async () => {
     api.wikiPages.mockResolvedValue(pagesResult([makePage({ id: 'p1' })]));
     await refreshWikiData();
-    // 单条删除按钮（非批量模式下显示）+ 批量管理按钮均存在；直接编译入口不渲染。
-    expect(root().querySelector('[data-delete-id]')).not.toBeNull();
+    // 单条 ⋯ 菜单按钮（非批量模式下显示）+ 批量管理按钮均存在；直接编译入口不渲染。
+    expect(root().querySelector('[data-page-menu]')).not.toBeNull();
     expect(root().querySelector('[data-batch-toggle]')).not.toBeNull();
     expect(root().querySelector('[data-bulk-delete]')).toBeNull();
     expect(root().querySelector('[data-compile]')).toBeNull();
@@ -1048,5 +1595,66 @@ describe('Agent-first 写入边界', () => {
     expect(root().querySelector('[data-page-edit]')).toBeNull();
     expect(root().querySelector('[data-page-editor]')).toBeNull();
     expect(root().querySelector('.wiki-detail__path')).toBeNull();
+  });
+});
+
+// ── 条目 ⋯ 操作菜单 ──
+
+describe('条目 ⋯ 操作菜单', () => {
+  const root = () => document.querySelector('#wiki-page-root') as HTMLElement;
+
+  /** 渲染一个页面条目并点击其 ⋯ 按钮，返回 showContextMenu 收到的锚点与菜单项。 */
+  async function openPageMenu(pageId = 'p1') {
+    api.wikiPages.mockResolvedValue(pagesResult([makePage({ id: pageId, title: '原标题' })]));
+    await refreshWikiData();
+    const btn = root().querySelector(`[data-page-menu="${pageId}"]`) as HTMLElement | null;
+    expect(btn).not.toBeNull();
+    btn!.dispatchEvent(new Event('click'));
+    expect(showContextMenu).toHaveBeenCalledTimes(1);
+    const [anchor, items] = vi.mocked(showContextMenu).mock.calls[0];
+    return { anchor, btn: btn!, items };
+  }
+
+  it('点击 ⋯ 弹出 打开/重命名/删除 菜单，删除为 danger', async () => {
+    const { anchor, btn, items } = await openPageMenu();
+    expect(anchor).toBe(btn);
+    expect(items.map((i) => i.id)).toEqual(['open', 'rename', 'delete']);
+    expect(items.map((i) => i.label)).toEqual(['打开', '重命名', '删除']);
+    expect(items.find((i) => i.id === 'delete')?.danger).toBe(true);
+  });
+
+  it('「打开」选中页面并加载详情', async () => {
+    const { items } = await openPageMenu();
+    items.find((i) => i.id === 'open')?.onSelect();
+    await vi.waitFor(() => expect(api.wikiPage).toHaveBeenCalledWith('p1', 'default'));
+  });
+
+  it('「重命名」输入新标题后调 wikiUpdatePage 仅更新 title', async () => {
+    mockShowPromptDialog.mockResolvedValue('  新标题  ');
+    const { items } = await openPageMenu();
+    void items.find((i) => i.id === 'rename')?.onSelect();
+    await vi.waitFor(() =>
+      expect(api.wikiUpdatePage).toHaveBeenCalledWith('p1', { title: '新标题' }, 'default'),
+    );
+  });
+
+  it('「重命名」空标题或未变更不发请求', async () => {
+    const { items } = await openPageMenu();
+    const rename = items.find((i) => i.id === 'rename');
+
+    mockShowPromptDialog.mockResolvedValueOnce('   ');
+    await rename?.onSelect();
+    expect(api.wikiUpdatePage).not.toHaveBeenCalled();
+
+    mockShowPromptDialog.mockResolvedValueOnce('原标题');
+    await rename?.onSelect();
+    expect(api.wikiUpdatePage).not.toHaveBeenCalled();
+  });
+
+  it('「删除」复用确认弹窗 + wikiDeletePage', async () => {
+    const { items } = await openPageMenu();
+    void items.find((i) => i.id === 'delete')?.onSelect();
+    await vi.waitFor(() => expect(api.wikiDeletePage).toHaveBeenCalledWith('p1', 'default'));
+    expect(mockShowConfirmDialog).toHaveBeenCalled();
   });
 });

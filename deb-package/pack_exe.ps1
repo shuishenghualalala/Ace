@@ -87,6 +87,13 @@ try {
     # 清理 electron-builder 旧产物：win-unpacked 若残留，electron-builder 可能复用
     # 旧 asar（含旧 version），导致「装新版桌面端仍显示旧版本号」。
     if (Test-Path "release") { Remove-Item "release" -Recurse -Force }
+    Write-Host "正在构建原生安全 runtime..." -ForegroundColor Yellow
+    cargo build --release --manifest-path "..\security-runtime\Cargo.toml"
+    if ($LASTEXITCODE -ne 0) { throw "cargo build security-runtime 失败 (exit $LASTEXITCODE)" }
+    node scripts/prepare-security-runtime.mjs --runtime "..\security-runtime\target\release\ace-security-runtime.exe"
+    if ($LASTEXITCODE -ne 0) { throw "准备 security-runtime 失败 (exit $LASTEXITCODE)" }
+    npm run security:verify
+    if ($LASTEXITCODE -ne 0) { throw "security-runtime 校验失败 (exit $LASTEXITCODE)" }
     npm run dist:win
     # PowerShell 的 $ErrorActionPreference=Stop 对 native 命令(npm)不生效——
     # npm 失败只设 $LASTEXITCODE，不抛异常，脚本会继续跑后续步骤（PyInstaller），
@@ -281,7 +288,8 @@ if (-not (Test-Path $pythonCacheExe)) {
     Write-Host "正在为内嵌 Python 安装技能依赖包..." -ForegroundColor Yellow
     & $pythonExe -m pip install --no-warn-script-location `
         requests lxml python-pptx openpyxl xlsxwriter `
-        beautifulsoup4 markdown charset-normalizer 2>&1 | Out-Null
+        beautifulsoup4 markdown charset-normalizer `
+        reportlab matplotlib pikepdf pdfplumber markdown2 "xhtml2pdf>=0.2.15" pypdfium2 Pillow defusedxml pandas 2>&1 | Out-Null
     # markitdown 核心（跳过重型可选依赖 onnxruntime/sympy/numpy）
     & $pythonExe -m pip install --no-warn-script-location --no-deps `
         markitdown 2>&1 | Out-Null
@@ -316,6 +324,23 @@ if (-not (Test-Path $mcpPkgDir)) {
     }
 } else {
     Write-Host "✓ 内嵌 Python 已含 mcp 包" -ForegroundColor Green
+}
+
+# 确保办公技能（xlsx/docx/pdf）依赖已装（幂等，不依赖缓存是否首次创建）。
+# 这批包是后期增补的，旧缓存缺少它们，技能脚本运行时会 ImportError。以 pandas
+# 目录为标记检测，缺失则整批补装。
+$skillPkgMarker = Join-Path $pythonCacheDir "Lib\site-packages\pandas"
+if (-not (Test-Path $skillPkgMarker)) {
+    Write-Host "内嵌 Python 缺办公技能依赖，正在补装（reportlab/pandas 等）..." -ForegroundColor Yellow
+    & $pythonCacheExe -m pip install --no-warn-script-location `
+        reportlab matplotlib pikepdf pdfplumber markdown2 "xhtml2pdf>=0.2.15" pypdfium2 Pillow defusedxml pandas 2>&1 | Out-Null
+    if (Test-Path $skillPkgMarker) {
+        Write-Host "✓ 办公技能依赖已装入内嵌 Python" -ForegroundColor Green
+    } else {
+        Write-Warning "办公技能依赖安装失败，xlsx/docx/pdf 技能脚本将运行失败"
+    }
+} else {
+    Write-Host "✓ 内嵌 Python 已含办公技能依赖" -ForegroundColor Green
 }
 
 # 复制缓存到 staging

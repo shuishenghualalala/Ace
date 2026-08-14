@@ -3,9 +3,10 @@
  * 这些是整套补全里最易出细微偏差的部分（边界、邮箱误触、前导空白计数），
  * 用固定输入断言，避免依赖 DOM。
  */
+// @vitest-environment happy-dom
 
 import { describe, expect, it } from 'vitest';
-import { computePinyin, detectTrigger, iterChipTokens, mentionTextForSkill, matchSkill, renderChip } from '../../src/ui/features/composer-mention';
+import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput } from '../../src/ui/features/composer-mention';
 
 describe('detectTrigger', () => {
   it('行首 @ 触发', () => {
@@ -134,11 +135,6 @@ describe('拼音匹配（输入 wangye / wyss 搜到中文名）', () => {
     expect(matchSkill(searchSkill, 'wyss', py)).toBe(3);
     expect(matchSkill(searchSkill, 'wys', py)).toBe(3);
   });
-
-  it('不传拼音时退化（不影响 slug/中文名本身的匹配）', () => {
-    expect(matchSkill(searchSkill, '网页')).toBe(5);
-    expect(matchSkill(searchSkill, 'web')).toBe(5); // slug 前缀
-  });
 });
 
 describe('iterChipTokens', () => {
@@ -238,13 +234,29 @@ describe('mentionTextForSkill', () => {
   });
 });
 
-describe('renderChip（只显示名字，标记透明占位）', () => {
-  it('/ skill chip：标记 / 透明，只显示中文名', () => {
+describe('renderChip（只显示名字，文件引用使用类型图标）', () => {
+  it('/ skill chip：保留标记宽度，只显示中文名', () => {
     expect(renderChip('/网页搜索', 'slash')).toEqual({ mark: '/', body: '网页搜索' });
   });
-  it('@ file chip：标记 @file: 透明，只显示路径', () => {
+  it('@ file chip：保留类型标记信息，只显示路径', () => {
     expect(renderChip('@file:src/a.ts', 'at')).toEqual({ mark: '@file:', body: 'src/a.ts' });
     expect(renderChip('@folder:src', 'at')).toEqual({ mark: '@folder:', body: 'src' });
     expect(renderChip('@image:a.png', 'at')).toEqual({ mark: '@image:', body: 'a.png' });
+  });
+
+  it('文件引用覆盖层不暴露内部 folder 标记文字', () => {
+    const nodes = buildChippedNodes('@folder:Ace');
+    const chip = nodes[0] as HTMLElement;
+
+    expect(chip.querySelector('.mention-chip__mark')?.textContent).toBe('');
+    expect(chip.querySelector('.mention-chip__mark .mw-icon')).not.toBeNull();
+    expect(chip.textContent).toBe('Ace');
+  });
+
+  it('选中文件引用使用短 token，发送时还原完整 token', () => {
+    const item = { text: '@folder:Ace/desktop', display: 'desktop', meta: 'Ace/desktop', sig: 'folder' as const };
+    const visible = compactMentionText(item);
+    expect(visible).toBe('@Ace/desktop');
+    expect(serializeMentionInput(`查看 ${visible} 怎么`)).toBe('查看 @folder:Ace/desktop 怎么');
   });
 });

@@ -3,7 +3,9 @@ import { constants as fsConstants, existsSync, realpathSync } from 'node:fs';
 import {
   chmod,
   copyFile,
+  lstat,
   open,
+  readdir,
   rename,
   stat,
   unlink,
@@ -483,9 +485,10 @@ interface BrowserTab {
   downloadDir: string;
   mouseX: number;
   mouseY: number;
-  takeoverRequestAt: number;
   /** 至多 keyboard/pointer/scroll 各一个、按事件类型一次性消费的真人输入证明。 */
   nativeInputProofs: NativeInputProof[];
+  /** 最近一次真实接管请求的时间戳；750ms 内的重复输入只发一次接管请求。 */
+  takeoverRequestAt: number;
   automationDepth: number;
   debuggerReady: Promise<void> | null;
   /** Real flattened CDP child session id → targetInfo (OOPIFs and workers). */
@@ -2455,6 +2458,48 @@ function axProperty(node: AxNode, name: string): unknown {
   return cdpValue(node.properties?.find((property) => property.name === name)?.value);
 }
 
+type DomDescription = {
+  nodeName?: unknown;
+  attributes?: unknown;
+};
+
+function domDescriptionAttributes(node: DomDescription): Map<string, string> {
+  if (node.attributes instanceof Map) {
+    return new Map([...node.attributes.entries()].map(([name, value]) => [
+      String(name).toLocaleLowerCase(),
+      String(value),
+    ]));
+  }
+  const values = Array.isArray(node.attributes) ? node.attributes.map(String) : [];
+  const attributes = new Map<string, string>();
+  for (let index = 0; index + 1 < values.length; index += 2) {
+    attributes.set(values[index]!.toLocaleLowerCase(), values[index + 1]!);
+  }
+  return attributes;
+}
+
+/** Render an editable AX value without ever including password input contents. */
+export function snapshotEditableValue(node: AxNode, domNode: DomDescription): string {
+  const editable = axProperty(node, 'editable');
+  const editableToken = typeof editable === 'string' ? editable.toLocaleLowerCase() : '';
+  if (editable !== true && editableToken !== 'plaintext' && editableToken !== 'richtext') return '';
+  if (domDescriptionAttributes(domNode).get('type')?.toLocaleLowerCase() === 'password') return '';
+  const value = cdpValue(node.value);
+  if (typeof value !== 'string' || !value) return '';
+  return ` value=${JSON.stringify(value.slice(0, 100))}`;
+}
+
+/** Compactly describe a DOM node that intercepted a browser hit test. */
+export function describeHitNode(node: DomDescription): string {
+  const tag = String(node.nodeName ?? '').trim().toLocaleLowerCase() || 'unknown';
+  if (tag === 'unknown') return tag;
+  const attributes = domDescriptionAttributes(node);
+  const id = attributes.get('id');
+  const classes = (attributes.get('class') ?? '').split(/\s+/u).filter(Boolean);
+  const description = `${tag}${id ? `#${id}` : ''}${classes.map((name) => `.${name}`).join('')}`;
+  return description.slice(0, 160);
+}
+
 function isActionableAxNode(node: AxNode, role: string): boolean {
   if (!node.backendDOMNodeId || node.ignored) return false;
   if (axProperty(node, 'disabled') === true) return false;
@@ -3126,7 +3171,11 @@ export class BrowserHost extends EventEmitter {
   }
 
   private parseProxy(proxyUrl: string): ProxyAuthState | null {
-    if (!proxyUrl) return null;
+    if (!proxyUrl) {
+      throw new BrowserHostError('浏览器网络策略代理不可用', {
+        code: 'proxy_required',
+      });
+    }
     let parsed: URL;
     try {
       parsed = new URL(proxyUrl);
@@ -3832,15 +3881,23 @@ export class BrowserHost extends EventEmitter {
       return { tab };
     }
     if (action.name === 'setInputFiles') {
+      const files = await this.approvedUploadFiles(
+        this.ownerOfTab(tab),
+        action.files as string[],
+      );
       await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.upload(ctx, ref, action.files as string[]);
+        await pwActions.upload(ctx, ref, files);
       });
       return { tab };
     }
     if (action.name === 'x-crew-drop') {
+      const files = await this.approvedUploadFiles(
+        this.ownerOfTab(tab),
+        action.files as string[],
+      );
       await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
         await pwActions.drop(ctx, ref, {
-          files: action.files as string[],
+          files,
           data: action.data as Record<string, string>,
         });
       });
@@ -4910,11 +4967,12 @@ export class BrowserHost extends EventEmitter {
         return {};
       case 'drop': {
         const parsed = parseDropArgs(args);
+        const files = await this.approvedUploadFiles(owner, parsed.payload.files ?? []);
         tab.visualEpoch = null;
         await pwActions.drop(
           await this.actionContext(tab, commandTimeoutMs),
           parsed.ref,
-          parsed.payload,
+          { ...parsed.payload, files },
         ).catch(BrowserHost.rethrowAction);
         return {};
       }
@@ -5018,12 +5076,15 @@ export class BrowserHost extends EventEmitter {
         if (args[0] === '--chooser') {
           return await this.pendingFileUpload(tab, args.slice(1), commandDeadlineAt);
         }
-        await pwActions.upload(
-          await this.actionContext(tab, commandTimeoutMs),
-          args[0] ?? '',
-          args.slice(1),
-        )
-          .catch(BrowserHost.rethrowAction);
+        {
+          const files = await this.approvedUploadFiles(owner, args.slice(1));
+          await pwActions.upload(
+            await this.actionContext(tab, commandTimeoutMs),
+            args[0] ?? '',
+            files,
+          )
+            .catch(BrowserHost.rethrowAction);
+        }
         return {};
       case 'file_upload':
         return await this.pendingFileUpload(tab, args, commandDeadlineAt);
@@ -5401,8 +5462,8 @@ export class BrowserHost extends EventEmitter {
         : '',
       mouseX: DEFAULT_VIEWPORT.width / 2,
       mouseY: DEFAULT_VIEWPORT.height / 2,
-      takeoverRequestAt: 0,
       nativeInputProofs: [],
+      takeoverRequestAt: 0,
       automationDepth: 0,
       debuggerReady: null,
       childSessions: new Map(),
@@ -5474,6 +5535,11 @@ export class BrowserHost extends EventEmitter {
     return tab;
   }
 
+  // 控制权只由**显式**动作改变（面板按钮 / browser_use 的 takeover），不再从原生
+  // 输入推断。原先 AI 模式下任何 keyDown/mouseDown/mouseWheel 都会请求接管，而
+  // automationDepth 在 AI 两步之间基本恒为 0——用户只是滚动页面围观就被判成「正在
+  // 手动操作」并暂停 AI；叠加模型没有 return 动作、面板只在关闭时才交还，这是一扇
+  // 单向门。现在：拦截保留（租约外输入仍会和在途自动化抢页面），推断取消，滚轮放行。
   private attachTabEvents(owner: BrowserOwner, tab: BrowserTab): void {
     const contents = tab.view.webContents;
     contents.on('before-input-event', (event, input) => {
@@ -5486,11 +5552,10 @@ export class BrowserHost extends EventEmitter {
         const key = String(native.key || '');
         this.recordNativeInputProof(tab, 'keyboard', ['key', 'input', 'submit'], key);
       }
+      // AI 模式下仍然拦截按键：租约外的原生输入会和自动化抢同一个页面。
+      // 但**不再**据此推断接管——控制权只由显式动作改变。
       if (tab.mode !== 'human' && tab.automationDepth === 0) {
         event.preventDefault();
-        if (String(native.type || '') === 'keyDown') {
-          this.requestHumanInteraction(owner, tab, 'keyboard');
-        }
       }
     });
     // Electron 43 类型定义未包含 before-mouse-event，但运行时与单测均依赖它。
@@ -5509,10 +5574,25 @@ export class BrowserHost extends EventEmitter {
         }
       }
       if (tab.mode !== 'human' && tab.automationDepth === 0) {
-        event.preventDefault();
-        if (type === 'mouseDown' || type === 'mouseWheel') {
+        // 滚轮是**阅读**手势：用户滚动只是想看 AI 在做什么。既不拦截也不影响控制权，
+        // 否则「想看一眼」都做不到。点击/按键仍拦截，避免和在途自动化抢页面。
+        if (type === 'mouseWheel') {
+          // 但必须作废视觉 epoch：坐标点击的 x/y 是从**定格截图**上量的，只在页面
+          // 没动过时成立。放行滚轮意味着页面可能在「截图」与「按坐标点」之间被用户
+          // 滚走——截图上 y=280 是「取消」，滚 200px 后同一坐标成了「删除」，
+          // 而 pageIdentity 不变，dispatch 前的校验发现不了，点击会**静默落错**。
+          // 置空后坐标点击抛 invalid_visual_epoch（「请重新截图」），大声失败而非点错。
+          // ref 点击不受影响：它按元素身份定位，与滚动位置无关。
+          tab.visualEpoch = null;
+          return;
+        }
+        // 只有 mouseDown 算接管手势。滚轮不算：页面白屏/加载失败时用户对着窗口
+        // 随手滚一下是常态，把这种无意输入当成「我要接管」会把控制权从正在
+        // 干活的 AI 手里抢走。输入仍 preventDefault，页面不会因为滚动产生变化。
+        if (type === 'mouseDown') {
           this.requestHumanInteraction(owner, tab, 'pointer');
         }
+        event.preventDefault();
       }
     });
     // Let Chromium/Electron navigate to every scheme the embedding application
@@ -5804,9 +5884,9 @@ export class BrowserHost extends EventEmitter {
     });
     contents.on('did-fail-load', (
       details,
-      _errorCode,
-      _errorDescription,
-      _validatedUrl,
+      errorCode,
+      errorDescription,
+      validatedUrl,
       legacyIsMainFrame,
     ) => {
       const isMainFrame = navigationFlag(details, 'isMainFrame', legacyIsMainFrame);
@@ -5816,6 +5896,17 @@ export class BrowserHost extends EventEmitter {
         // navigation. Keep pending until did-stop-loading/did-navigate proves
         // the WebContents has converged; otherwise bounded polling rejects it.
         tab.navigationPending = true;
+        // ERR_ABORTED(-3) 是新导航打断旧导航的正常信号，不算失败。其余主框架
+        // 加载失败会让面板挂着一块可交互白屏——前端需要知道，才能给出错误
+        // 遮罩而不是让用户去点一块什么都没加载出来的页面。
+        if (Number(errorCode) !== -3) {
+          this.emit('tab-load-failed', {
+            runtimeKey: owner.runtimeKey,
+            label: tab.label,
+            url: typeof validatedUrl === 'string' ? validatedUrl : '',
+            errorDescription: String(errorDescription || ''),
+          });
+        }
       }
     });
     contents.on('did-stop-loading', () => {
@@ -5886,12 +5977,19 @@ export class BrowserHost extends EventEmitter {
     const now = Date.now();
     if (now - tab.takeoverRequestAt < 750) return;
     tab.takeoverRequestAt = now;
+    // 接管请求的来源排查口：白屏误触、真实手势混在一起时，靠这条日志区分
+    // 是键盘还是指针、落在哪个标签页上。
+    console.info(
+      `[browser-host] user interaction requested: source=${source} `
+      + `tab=${tab.label} session=${tab.sessionHash} runtime=${owner.runtimeKey}`,
+    );
     this.emit('user-interaction-requested', {
       runtimeKey: owner.runtimeKey,
       label: tab.label,
       source,
     });
   }
+
 
   private recordNativeInputProof(
     tab: BrowserTab,
@@ -7399,6 +7497,50 @@ export class BrowserHost extends EventEmitter {
     };
   }
 
+  /** Resolve upload inputs only from this account's identity-checked staging root. */
+  private async approvedUploadFiles(
+    owner: BrowserOwner,
+    files: string[],
+  ): Promise<string[]> {
+    if (
+      !Array.isArray(files)
+      || files.some((file) => typeof file !== 'string' || !path.isAbsolute(file))
+    ) {
+      throw new BrowserHostError('上传文件列表无效', { code: 'invalid_upload' });
+    }
+    if (!files.length) return [];
+
+    const rawRoot = path.join(path.dirname(owner.profilePath), 'approved-uploads');
+    try {
+      const root = realpathSync.native(rawRoot);
+      if (!samePath(root, path.resolve(rawRoot))) throw new Error('linked upload root');
+      const validateEntry = async (entry: string): Promise<string> => {
+        const resolved = realpathSync.native(entry);
+        const info = await lstat(entry);
+        if (
+          info.isSymbolicLink()
+          || !samePath(resolved, path.resolve(entry))
+          || !ensureWithin(resolved, root)
+          || (!info.isFile() && !info.isDirectory())
+        ) {
+          throw new Error('invalid upload entry');
+        }
+        if (info.isDirectory()) {
+          const children = await readdir(entry);
+          await Promise.all(children.map((child) => validateEntry(path.join(entry, child))));
+        }
+        return resolved;
+      };
+      return await Promise.all(files.map(async (file) => {
+        return validateEntry(file);
+      }));
+    } catch {
+      throw new BrowserHostError('上传文件不属于账号审批暂存目录', {
+        code: 'invalid_upload_path',
+      });
+    }
+  }
+
   /**
    * Replay one recorded upload without a click/file_upload RPC gap.
    *
@@ -7417,6 +7559,7 @@ export class BrowserHost extends EventEmitter {
   ): Promise<Record<string, unknown>> {
     const ctx = await this.actionContext(tab, timeoutMs);
     const owner = this.ownerOfTab(tab);
+    const files = await this.approvedUploadFiles(owner, payload.files);
     const engine = owner.engine;
     const directUpload = async (): Promise<Record<string, unknown>> => {
       const ref = `@upload-input-${randomUUID()}`;
@@ -7427,10 +7570,10 @@ export class BrowserHost extends EventEmitter {
           payload.inputSelector,
           ctx.hash,
         );
-        await pwActions.upload(ctx, ref, payload.files);
+        await pwActions.upload(ctx, ref, files);
         return {
           via: 'input',
-          uploaded: payload.files.length,
+          uploaded: files.length,
         };
       } finally {
         ctx.refs.delete(ref);
@@ -7466,7 +7609,7 @@ export class BrowserHost extends EventEmitter {
     try {
       // Clearing a file input never needs to open a picker. Avoid an otherwise
       // pointless trigger click and preserve Playwright's [] clear primitive.
-      if (!payload.triggerSelector || payload.files.length === 0) {
+      if (!payload.triggerSelector || files.length === 0) {
         return await directUpload();
       }
 
@@ -7526,11 +7669,11 @@ export class BrowserHost extends EventEmitter {
 
         const multiple = chooser.isMultiple();
         await afterTrigger(
-          () => pwActions.uploadFileChooser(ctx, chooser, payload.files),
+          () => pwActions.uploadFileChooser(ctx, chooser, files),
         );
         return {
           via: 'chooser',
-          uploaded: payload.files.length,
+          uploaded: files.length,
           multiple,
         };
       } finally {
@@ -7563,6 +7706,7 @@ export class BrowserHost extends EventEmitter {
     const cancel = args.length === 0 || (args.length === 1 && args[0] === '--cancel');
     if (!cancel && args.includes('--cancel')) invalidCommandArgs();
     const owner = this.ownerOfTab(tab);
+    const files = cancel ? undefined : await this.approvedUploadFiles(owner, args);
     const chooserTabs = this.sessionFileChooserTabs(owner, tab.sessionHash);
     const selected = owner.engine.hasPendingFileChooser(tab.view)
       ? tab
@@ -7601,7 +7745,7 @@ export class BrowserHost extends EventEmitter {
       });
     }
     const multiple = chooser.isMultiple();
-    await pwActions.uploadFileChooser(ctx, chooser, cancel ? undefined : args)
+    await pwActions.uploadFileChooser(ctx, chooser, files)
       .catch(BrowserHost.rethrowAction);
     return {
       canceled: cancel,
@@ -11466,7 +11610,6 @@ export class BrowserHost extends EventEmitter {
       webContentsId: tab.webContentsId,
       downloadDir: tab.downloadDir,
     });
-    tab.takeoverRequestAt = 0;
     if (this.panel?.tab === tab) {
       if (mode === 'human') tab.view.webContents.focus();
       else this.panel.window.webContents.focus();

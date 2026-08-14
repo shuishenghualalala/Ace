@@ -14,7 +14,6 @@ export interface IpcError {
   /** 调试用，详情。 */
   details?: unknown;
 }
-
 /** 通用返回：成功 / 失败二选一。 */
 export type IpcResult<T> =
   | { ok: true; data: T }
@@ -31,10 +30,26 @@ export interface FeedbackSubmitResult {
 /** desktop prefs（关闭行为）。 */
 export type CloseBehavior = 'tray' | 'quit' | 'ask';
 
+/** 菜单栏图标状态，Renderer 只上报语义状态，具体图片由主进程管理。 */
+export type TrayStatus = 'default' | 'working' | 'notification' | 'done' | 'rest';
+
 export interface DesktopPrefs {
   closeBehavior: CloseBehavior;
+  /** 加密后的 JWT（base64 string）；空表示未登录。 */
+  encryptedJwt?: string;
+  /** 与 encryptedJwt 关联的 userInfo（明文，体积小）。 */
+  userInfo?: UserInfoSnapshot;
 }
 
+export interface UserInfoSnapshot {
+  staffCode?: string;
+  staffName?: string;
+  staffUid?: string;
+  pid?: string;
+  uid?: string;
+}
+
+/** email 租户认证模型（main 引入，待移植到新安全栈后与 UserInfoSnapshot 归并）。 */
 export interface AuthUserSnapshot {
   userId: string;
   phoneNumber: string;

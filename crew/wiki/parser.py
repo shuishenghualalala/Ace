@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -601,43 +600,21 @@ def _parse_html(path: Path) -> str:
     return markdownify(html_content, heading_style="ATX", bullets="-").strip()
 
 
-def fetch_url_to_markdown(url: str, timeout: float = 15.0) -> tuple[str, str]:
+def fetch_url_to_markdown(
+    url: str,
+    timeout: float = 15.0,
+    allowed_targets: set[tuple[str, int, str]] | None = None,
+) -> tuple[str, str]:
     """抓取 URL 并将 HTML 转为 Markdown。返回 (markdown_text, final_url)。"""
-    import ipaddress
-    import socket
-    import urllib.request
-    from urllib.parse import urlsplit
+    from crew.security.outbound import fetch_public_http
 
-    def _validate_public_url(value: str) -> None:
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("Wiki URL 仅允许公开 http/https 地址")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("Wiki URL 不允许内嵌用户名或密码")
-        host = parsed.hostname
-        if host == "localhost" or host.endswith(".localhost"):
-            raise ValueError("Wiki URL 禁止访问 localhost")
-        for result in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80)):
-            address = ipaddress.ip_address(result[4][0])
-            if not address.is_global or address.is_multicast or address.is_reserved:
-                raise ValueError("Wiki URL 禁止访问私网、链路本地或保留地址")
-
-    class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-            _validate_public_url(newurl)
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-    _validate_public_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "Crew/1.0"})
-    opener = urllib.request.build_opener(_SafeRedirectHandler())
-    with opener.open(req, timeout=timeout) as resp:  # noqa: S310
-        raw = resp.read(10_000_001)
-        if len(raw) > 10_000_000:
-            raise ValueError("Wiki URL 响应超过 10 MB 限制")
-        content_type = resp.headers.get_content_type()
-        final_url = resp.geturl()
-
-    charset = resp.headers.get_content_charset() or "utf-8"
+    final_url, raw, content_type, charset = fetch_public_http(
+        url,
+        timeout=timeout,
+        max_bytes=10_000_000,
+        headers={"User-Agent": "Ace/1.0"},
+        allowed_targets=allowed_targets,
+    )
 
     if "html" in content_type:
         try:
@@ -666,13 +643,15 @@ def _parse_legacy_office(path: Path, target_extension: str) -> str:
 
     from tempfile import TemporaryDirectory
 
-    with TemporaryDirectory() as tmp:
+    with TemporaryDirectory(prefix=".ace-office-", dir=path.parent) as tmp:
         output_dir = Path(tmp)
         profile_dir = output_dir / "profile"
         profile_dir.mkdir()
+        from crew.security.launch import execute_captured_sync
+
         try:
-            completed = subprocess.run(
-                [
+            completed = execute_captured_sync(
+                (
                     soffice,
                     f"-env:UserInstallation={profile_dir.as_uri()}",
                     "--headless",
@@ -681,13 +660,12 @@ def _parse_legacy_office(path: Path, target_extension: str) -> str:
                     "--outdir",
                     str(output_dir),
                     str(path),
-                ],
-                capture_output=True,
-                text=True,
+                ),
+                cwd=output_dir,
                 timeout=120,
-                check=False,
+                tool_name="wiki_legacy_office",
             )
-        except subprocess.TimeoutExpired as exc:
+        except TimeoutError as exc:
             raise RuntimeError(f"{path.name} 通过 LibreOffice 转换超时") from exc
         converted = output_dir / f"{path.stem}{target_extension}"
         if completed.returncode != 0 or not converted.is_file():
@@ -817,9 +795,13 @@ def guess_mime_type(path: str | Path, content: bytes | None = None) -> str:
 def parse_document_from_bytes(content: bytes, filename: str) -> str:
     """从内存字节解析文档（临时写文件后解析）。"""
     from tempfile import TemporaryDirectory
+    from crew.security.launch import current_process_launch
 
     ext = _document_extension(filename, content) or ".txt"
-    with TemporaryDirectory() as tmp:
+    launch = current_process_launch.get()
+    workspace_root = launch.security_context.workspace_root if launch and launch.security_context else None
+    temporary_parent = workspace_root if workspace_root and workspace_root.is_dir() else None
+    with TemporaryDirectory(prefix=".ace-wiki-", dir=temporary_parent) as tmp:
         tmp_path = Path(tmp) / f"upload{ext}"
         tmp_path.write_bytes(content)
         return parse_document_to_markdown(tmp_path)

@@ -1,5 +1,5 @@
 /**
- * Wiki 知识图谱视图——wiki-page 的第四种列表视图「图谱」。
+ * Wiki 知识图谱视图（Phase 3）——wiki-page 的第四种列表视图「图谱」。
  *
  * 数据：GET /api/wiki/graph（backendApi.wikiGraph，全量节点 + 关系边，不走分页）。
  * 布局：力导向模拟在 Web Worker 中计算（src/ui/wiki-graph-layout.worker.ts，
@@ -172,7 +172,11 @@ function startLayout(): void {
     : graph.nodes.filter((n) => n.type !== 'source');
   graphState.hiddenSources = graph.nodes.length - filtered.length;
   const input: WikiGraphLayoutInput = {
-    nodes: filtered.map((n) => ({ id: n.id, title: n.title, type: n.type })),
+    nodes: filtered.map((n) => ({
+      id: n.id,
+      title: n.title,
+      type: (n.type === 'concept' ? 'entity' : n.type) as 'entity' | 'topic' | 'source' | 'comparison' | 'synthesis',
+    })),
     edges: graph.edges,
     width: CANVAS_WIDTH,
     height: CANVAS_HEIGHT,

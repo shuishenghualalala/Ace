@@ -1,7 +1,8 @@
 /**
  * 流式渲染相关的纯逻辑（无 DOM / 无模块级副作用），便于在 node 环境单测。
  *
- * - applyFoldState：toggle 事件委托的纯逻辑核心。
+ * 对应 CODE_REVIEW P2-3（renderChat 全量 innerHTML 重绘 + bindFoldableToggles 逐元素挂监听）：
+ * - applyFoldState：toggle 事件委托的纯逻辑核心（替换 bindFoldableToggles 逐元素 addEventListener）。
  * - createChatRenderCoalescer：同一调度窗口内合并多次 render，把流式 delta 30/s 的全量重绘降到每帧 ≤1 次。
  */
 

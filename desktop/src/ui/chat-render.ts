@@ -1,8 +1,10 @@
 /**
- * Crew 对话消息 DOM 渲染。
+ * 对话消息 DOM 渲染 — 对齐 Crew/web MessageItem 结构。
  *
- * 所有 render* 函数返回 DOM 节点（HTMLElement / DocumentFragment），由 renderChat
- * 在 index.ts 侧用 replaceChildren 组装，避免全量字符串拼接带来的 XSS 风险。
+ * X3a（2026-06）：所有 render* 函数改为返回 DOM 节点（HTMLElement / DocumentFragment），
+ * 由 renderChat 在 index.ts 侧用 replaceChildren 组装，彻底消除
+ * `container.innerHTML = \`...${inner.join('')}\`` 这一全量字符串拼接的 XSS 面
+ * （原先任何 render* 一旦忘记 escapeHtml 都会顺着大拼接漏进 DOM）。
  *
  * 安全边界：
  *  - 用户派生文本一律走 textContent / setAttribute（HTML 解析器不会重新解释已构造节点上的属性值）。
@@ -11,7 +13,7 @@
  *    因此不触发 check-security 的 innerHTML-插值规则，也不是 XSS 面。
  */
 
-import type { Attachment, TeamArtifactCard, WikiPage } from './backend-client';
+import type { Attachment, InspirationSurface, TeamArtifactCard, WikiPage } from './backend-client';
 import type { FileChange, TodoItem } from './state';
 import { renderMarkdownHtml, renderMarkdownHtmlStreaming } from './markdown';
 import { escapeHtml } from '../shared/html';
@@ -21,6 +23,7 @@ import { formatToolResultDisplay } from './tool-result';
 import { imageDisplayUrl, isAbsoluteLocalPath, screenshotResultPath } from './tool-screenshot';
 import { buildChippedNodes } from './features/composer-mention';
 import { isPlanDocumentPath } from './plan-document-path';
+import { createIcon, type IconId } from './components/icon';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -45,6 +48,8 @@ export interface ToolCallInfo {
   status: 'generating' | 'running' | 'done' | 'error';
   startedAt: number;
   duration?: number | undefined;
+  /** 运行中的阶段进度文案（phase=progress 帧），完成/失败后为空。 */
+  progressText?: string | undefined;
 }
 
 /** 同回合内 assistant 段的语义角色：过程（进折叠区）vs 最终答案（折叠外可见）。 */
@@ -115,7 +120,7 @@ export interface ChatMessage {
   collapsedTitle?: string | undefined;
   processText?: string | undefined;
   artifacts?: TeamArtifactCard[] | undefined;
-  /** status 消息的瞬时活动标记（如 tool_planning）：这类「正在…」进度提示
+  /** status 消息的瞬时活动标记：这类「正在…」进度提示
    *  会被后续事件取代——渲染时 live 回合只保留最新一条，回合结束后全部隐藏。 */
   activity?: string | undefined;
   /** Dynamic Kanban 工作流进度面板数据。 */
@@ -125,6 +130,9 @@ export interface ChatMessage {
   /** 该回合「仅本轮」文件改动差集（finalReducer 在 final 时推算并 patch 进来）；
    *  chat-render 据此在正文下方渲染「已编辑 N 个文件」卡。 */
   turnFileChanges?: TurnFileChangeSummary[] | undefined;
+  /** 历史中由 Gateway 精确落库的文件路径；旧 tool_call 推断项不在其中。
+   *  精确项不得再按当前磁盘状态做“旧历史补全”，否则跨轮删除会改写原回合语义。 */
+  turnFileChangesPersistedPaths?: string[] | undefined;
   /** 该回合内产生的 plan 审批卡片。 */
   planReview?: {
     plan: string;
@@ -146,6 +154,7 @@ export interface PendingMessage {
   attachments?: Attachment[];
   subScenario?: string;
   planActive?: boolean;
+  workDisabledPreferenceIds?: string[];
   /** revision: 队列项被用户提升为“修订式中断”的下一轮正式输入。 */
   clientIntent?: 'revision';
   /** 已乐观渲染成 user 气泡的消息 id；队列面板隐藏，发送时复用避免重复气泡。 */
@@ -156,7 +165,7 @@ export type SessionStatus = 'idle' | 'running' | 'queued' | 'error';
 
 const CHAT_BOT_AVATAR_SYMBOL = './crew-ui-symbols.svg#avatar-headphones';
 
-/** 对话头像使用 Crew 助手形象；用户消息不显示头像。 */
+/** 对话头像：Q 版耳机机器人。用户消息不显示头像。 */
 function createChatAvatar(): HTMLElement {
   const avatar = document.createElement('div');
   avatar.className = 'msg__avatar bot';
@@ -222,7 +231,7 @@ function createTrustedElement<T extends Element = HTMLElement>(html: string): T 
 
 function renderCopyBtn(text: string): HTMLButtonElement {
   // data-copy 走 setAttribute：HTML 解析器不会重新解释已构造元素上的属性值，
-  // 因此即便 text 含引号/尖括号也不会注入；属性最终由 setAttribute 写入原始文本。
+  // 因此即便 text 含引号/尖括号也不会注入（且这里再把值过一遍 escapeHtml 以保持与原实现字节一致）。
   const btn = createTrustedElement<HTMLButtonElement>(
     `<button type="button" class="chat-copy-btn msg-action-btn" title="复制">${COPY_BTN_SVG}</button>`,
   );
@@ -293,9 +302,9 @@ function buildInlineImage(
 
 /* ---------- 过程时间线（对齐 web AgentProcessTimeline） ---------- */
 
-/** 时间线图标（受信静态 SVG：思考=灯泡 / 状态=时钟 / 错误=叹号；工具按语义分类）。 */
-const PROCESS_TOOL_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="m8 9 3 3-3 3"/><path d="M13 15h3"/></svg>';
-const PROCESS_THINKING_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M8.2 14.3a6 6 0 1 1 7.6 0c-.7.5-1.1 1.2-1.3 2H9.5c-.2-.8-.6-1.5-1.3-2Z"/></svg>';
+/** 时间线图标（受信静态 SVG：思考=灯泡 / 状态=时钟 / 错误=叹号；工具按语义分类，参考 Kimi）。 */
+const PROCESS_TOOL_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#process-terminal"></use></svg>';
+const PROCESS_THINKING_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#process-thinking"></use></svg>';
 const PROCESS_STATUS_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></svg>';
 const PROCESS_ERROR_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6"/><path d="M12 17h.01"/></svg>';
 const PROCESS_WRITE_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -304,7 +313,7 @@ const PROCESS_SEARCH_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><ci
 const PROCESS_WEB_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>';
 const PROCESS_TODO_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>';
 const PROCESS_TEAM_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
-/** 子代理委派卡图标：单人（采用 Task 卡的人形图标，与 team 的多人图标区分）。 */
+/** 子代理委派卡图标：单人（对齐 Hermes Task 卡的人形图标，与 team 的多人图标区分）。 */
 const PROCESS_SUBAGENT_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
 const PROCESS_MEMORY_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>';
 const PROCESS_SKILL_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.4 7.2H22l-6 4.8 2.3 7.2-6.3-4.5-6.3 4.5L8 14 2 9.2h7.6z"/></svg>';
@@ -313,7 +322,7 @@ const PROCESS_SKILL_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><pat
 export type ToolIconKind =
   | 'write' | 'read' | 'search' | 'web' | 'todo' | 'team' | 'memory' | 'skill' | 'cron' | 'terminal';
 
-/** 按工具语义选择图标：写入=笔 / 读取=书 / 搜索=放大镜 / 网页=地球。 */
+/** 按工具语义选时间线图标（参考 Kimi：写入=笔 / 读取=书 / 搜索=放大镜 / 网页=地球…）。 */
 export function toolIconKind(name: string): ToolIconKind {
   const lower = String(name || '').trim().toLowerCase();
   if (['write', 'file_write', 'edit', 'patch', 'apply_patch'].includes(lower)) return 'write';
@@ -387,7 +396,7 @@ function renderThinkingBlock(thinking: string, messageId: string, streaming: boo
   return item;
 }
 
-/* ---------- Subagent 委派卡片（delegate_task / run_agent 专属，采用 Task 卡） ---------- */
+/* ---------- Subagent 委派卡片（delegate_task / run_agent 专属，对齐 Hermes Task 卡） ---------- */
 
 /** 会派生子 agent 的工具：渲染成带边框的独立卡片（任务描述 + 执行摘要），区别于普通工具的单行折叠条。 */
 const SUBAGENT_CARD_TOOLS = new Set(['delegate_task', 'run_agent']);
@@ -612,7 +621,15 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
     details.open = open;
     // 把 foldKey 写到 data-fold-key，toggle 委托据此回写 fold-state。
     details.setAttribute('data-fold-key', foldKey);
-    details.querySelector<HTMLElement>('.process-timeline__title')!.textContent = title;
+    const titleEl = details.querySelector<HTMLElement>('.process-timeline__title')!;
+    titleEl.textContent = title;
+    // 长耗时工具的阶段进度（phase=progress）：折叠状态也可见，跟随标题行。
+    if (isActive && tool.progressText) {
+      const stage = document.createElement('span');
+      stage.className = 'process-timeline__stage';
+      stage.textContent = tool.progressText;
+      titleEl.after(stage);
+    }
     const durSpan = details.querySelector<HTMLElement>('.process-timeline__duration')!;
     if (!initialDuration && !isActive) durSpan.remove();
     const argsSection = details.querySelector<HTMLElement>('[data-section="args"]')!;
@@ -643,7 +660,14 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
       </div>
     </div>`,
   );
-  content.querySelector<HTMLElement>('.process-timeline__title')!.textContent = title;
+  const titleEl = content.querySelector<HTMLElement>('.process-timeline__title')!;
+  titleEl.textContent = title;
+  if (isActive && tool.progressText) {
+    const stage = document.createElement('span');
+    stage.className = 'process-timeline__stage';
+    stage.textContent = tool.progressText;
+    titleEl.after(stage);
+  }
   const durSpan = content.querySelector<HTMLElement>('.process-timeline__duration')!;
   if (!initialDuration && !isActive) durSpan.remove();
   return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, content);
@@ -823,22 +847,26 @@ export interface AgentTurnOptions {
   /** 用户是否手动决定过 open 状态（null=未手动；true=展开；false=折叠） */
   userPinnedOpen: boolean | null;
   /** 整回合推理耗时（ms）。流式中为实时累加值，已结束为最终值；0 表示无可用计时。
-   *  由 renderChat 从回合 assistant 消息的 turnStartedAt/turnDurationMs 推导后传入。 */
+   *  由 renderChat 从回合 assistant 消息的 turnStartedAt/turnDurationMs 推导后传入，
+   *  替代原先用首末消息 timestamp 相减的错误算法（timestamp 不随 patch 更新）。 */
   turnDurationMs: number;
   /** 嵌入式对话可隐藏助手身份行；主对话默认显示。 */
   showAssistantName?: boolean;
-  /** 仅外部 ACP Agent / 外部 Team 传入；缺省继续走 Crew 头像与名称。 */
+  /** 仅外部 ACP Agent / 外部 Team 传入；缺省继续走原 Crew 头像与名称。 */
   identity?: {
     kind: 'external' | 'team';
     name: string;
     badge: string;
+    tone?: number;
+    icon?: IconId;
   };
 }
 
 function createAgentTurnAvatar(identity?: AgentTurnOptions['identity']): HTMLElement {
   if (!identity) return createChatAvatar();
   const avatar = document.createElement('div');
-  avatar.className = `msg__avatar msg__avatar--${identity.kind}`;
+  const toneClass = identity.tone === undefined ? '' : ` agent-provider-tone-${identity.tone}`;
+  avatar.className = `msg__avatar msg__avatar--${identity.kind}${toneClass}`;
   avatar.setAttribute('aria-hidden', 'true');
   if (identity.kind === 'team') {
     const logo = document.createElement('span');
@@ -848,7 +876,8 @@ function createAgentTurnAvatar(identity?: AgentTurnOptions['identity']): HTMLEle
     logo.appendChild(document.createElement('i'));
     avatar.appendChild(logo);
   } else {
-    avatar.textContent = identity.badge;
+    if (identity.icon) avatar.append(createIcon(identity.icon, { size: 20 }));
+    else avatar.textContent = identity.badge;
   }
   return avatar;
 }
@@ -989,7 +1018,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
   // liveness 只看 per-turn 自有信号（isStreaming），不引用 session 全局 busy。
   const isLive = options.isStreaming;
 
-  // 瞬时活动状态（带 activity 的 status，如「正在规划工具调用…」）是会被后续事件
+  // 瞬时活动状态（带 activity 的 status）会被后续事件
   // 取代的进度提示：live 回合只保留最新一条，回合结束后全部隐藏，避免残留/重复。
   let lastActivityIdx = -1;
   messages.forEach((m, i) => {
@@ -1160,8 +1189,12 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
 
   // HTML 成果直接以网站卡打开右侧 Browser workbench；这是确定性 UI 动作，
   // 不需要把 browser 工具暴露给模型。
-  const artifactCard = renderTurnHtmlArtifactCard(messages);
-  if (artifactCard) frag.appendChild(artifactCard);
+  const inspirationCard = renderTurnInspirationSurfaceCard(messages);
+  if (inspirationCard) frag.appendChild(inspirationCard);
+  else {
+    const artifactCard = renderTurnHtmlArtifactCard(messages);
+    if (artifactCard) frag.appendChild(artifactCard);
+  }
 
   // 正文下方：本轮文件改动卡（仅在有改动时出现；final 时由 finalReducer patch 进消息）。
   const fileCard = renderTurnFileChangesCard(messages);
@@ -1178,7 +1211,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
 
   // 组装最终 .msg
   const msg = document.createElement('div');
-  msg.className = 'msg';
+  msg.className = 'msg msg--agent-turn';
   if (isLive) msg.dataset.streaming = 'true';
   msg.dataset.messageId = firstId;
 
@@ -1382,6 +1415,38 @@ function splitFilePath(path: string): { dir: string; name: string } {
   return { dir: path.slice(0, idx + 1), name: path.slice(idx + 1) };
 }
 
+function parseInspirationSurface(raw?: string): InspirationSurface | null {
+  if (!raw) return null;
+  try {
+    const data = JSON.parse(raw) as { surface?: unknown };
+    if (!data.surface || typeof data.surface !== 'object') return null;
+    const surface = data.surface as Record<string, unknown>;
+    if (surface.kind !== 'inspiration' || !['site', 'canvas', 'widget'].includes(String(surface.mode || ''))) return null;
+    if (typeof surface.sessionId !== 'string' || typeof surface.title !== 'string') return null;
+    return surface as unknown as InspirationSurface;
+  } catch { return null; }
+}
+
+function renderTurnInspirationSurfaceCard(messages: ChatMessage[]): HTMLElement | null {
+  const surface = [...messages].reverse().flatMap((message) => [...(message.toolCalls || [])].reverse())
+    .map((tool) => parseInspirationSurface(tool.result)).find(Boolean);
+  if (!surface) return null;
+  const card = document.createElement('article');
+  card.className = 'msg__artifact-card msg__inspiration-card';
+  card.setAttribute('aria-label', `${surface.title}，灵感 App`);
+  const icon = createTrustedElement<HTMLElement>(
+    '<span class="msg__artifact-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.7 5.3a2 2 0 0 1-1.3 1.3L4 11.3l5 1.7a2 2 0 0 1 1.3 1.3L12 20l1.7-5.7A2 2 0 0 1 15 13l5-1.7-5-1.7a2 2 0 0 1-1.3-1.3Z"/></svg></span>',
+  );
+  const copy = document.createElement('div'); copy.className = 'msg__artifact-copy';
+  const title = document.createElement('strong'); title.textContent = surface.title;
+  const detail = document.createElement('span'); detail.textContent = surface.status === 'preparing' ? '正在生成，可实时查看' : '可以使用和批注';
+  copy.append(title, detail);
+  const open = document.createElement('button'); open.type = 'button'; open.className = 'msg__artifact-open';
+  open.dataset.inspirationSurface = JSON.stringify(surface); open.textContent = '打开';
+  card.append(icon, copy, open);
+  return card;
+}
+
 function renderTurnHtmlArtifactCard(messages: ChatMessage[]): HTMLElement | null {
   const candidates = messages
     .flatMap((message) => message.turnFileChanges || [])
@@ -1434,7 +1499,7 @@ function renderTurnHtmlArtifactCard(messages: ChatMessage[]): HTMLElement | null
   return card;
 }
 
-/** 使用千分位格式化增删行数。 */
+/** 格式化增删行数（Codex 风格千分位）。 */
 function formatDiffCount(n: number): string {
   return Math.abs(n).toLocaleString('en-US');
 }
@@ -1516,7 +1581,7 @@ function renderFileChangeItem(f: TurnFileChangeSummary): HTMLLIElement {
   return li;
 }
 
-/** 正文下方「本轮文件改动」卡：点卡/行打开看板 Files；行末悬停打开资源管理器。
+/** 正文下方「本轮文件改动」卡（Codex 风格）：点卡/行打开看板 Files；行末悬停打开资源管理器。
  *  历史回放的一轮会拆成多条 assistant（过程文件、terminal 结果、final），必须按路径合并，
  *  不能只取最后一条，否则最终 PPT 或过程 SVG 会随消息先后关系被覆盖。 */
 function renderTurnFileChangesCard(messages: ChatMessage[]): HTMLElement | null {
@@ -1630,7 +1695,7 @@ function renderTurnFileChangesCard(messages: ChatMessage[]): HTMLElement | null 
   return card;
 }
 
-// ---------- Wiki Agent 结果卡片（对齐 web WikiCard） ----------
+// ---------- Wiki Agent 结果卡片（Phase 4，对齐 web WikiCard） ----------
 
 /** 卡片类型徽标文案（与 wiki-page TYPE_META.shortLabel 同一套语义）。 */
 const WIKI_CARD_TYPE_LABEL: Record<string, string> = {
@@ -2049,7 +2114,7 @@ export const renderConversationPreview = renderConversationSurface;
  *  会由 renderAgentTurn 接管同回合的流式渲染，这里就不再追加，避免出现两个 Crew 头像。 */
 export function renderTypingIndicator(identity?: AgentTurnOptions['identity']): HTMLElement {
   const msg = document.createElement('div');
-  msg.className = 'msg msg--typing';
+  msg.className = 'msg msg--typing msg--agent-turn';
   msg.dataset.messageId = 'typing';
   msg.setAttribute('aria-label', '正在生成');
 
@@ -2082,15 +2147,12 @@ export function renderRunningIntro(status: string, intro: string): HTMLElement {
   const logo = document.createElement('span');
   logo.className = 'running-intro__logo';
   logo.setAttribute('aria-hidden', 'true');
-  logo.appendChild(createTrustedFragment(
-    `<svg class="nav-agent-logo running-intro__agent-logo" width="18" height="18" viewBox="3 3 18 18" aria-hidden="true">
-      <path class="nav-agent-logo__blob" d="M5.2 13.2c0-4.5 2.9-6.9 6.8-6.9 4.5 0 7 2.8 7 6.2 0 3.8-2.5 5.5-7.2 5.5-4.3 0-6.6-1.4-6.6-4.8Z"></path>
-      <path class="nav-agent-logo__cap" d="M9 6.7c.7-1.1 1.7-1.7 3.1-1.7 1.3 0 2.3.5 3 1.5"></path>
-      <path class="nav-agent-logo__shine nav-agent-logo__shine--left" d="M9.6 10.8v1.9"></path>
-      <path class="nav-agent-logo__shine nav-agent-logo__shine--right" d="M14.4 10.8v1.9"></path>
-      <path class="nav-agent-logo__pixel" d="M18.8 8.2h1.5M19.55 7.45v1.5"></path>
-    </svg>`,
-  ));
+  const logoImage = document.createElement('img');
+  logoImage.className = 'running-intro__agent-logo';
+  logoImage.src = './crew-jump-agent.png';
+  logoImage.alt = '';
+  logoImage.draggable = false;
+  logo.appendChild(logoImage);
 
   const textWrap = document.createElement('span');
   textWrap.className = 'running-intro__text';
@@ -2121,9 +2183,9 @@ export function renderQueueHintCard(hint: string): HTMLElement {
 }
 
 export function renderQueuePanelHtml(queue: PendingMessage[], canSteer = true): string {
-  // renderQueueSlot 直接使用 slot.innerHTML；队列内容变化时才重建该独立面板。
+  // 注：renderQueueSlot 直接 slot.innerHTML = renderQueuePanelHtml(...)，X3a 显式 OUT OF SCOPE。
   // 此处保持字符串实现；所有用户派生文本均已 escapeHtml，安全边界已具备。
-  // 卡片贴在输入框上方（#chat-queue-slot），提供待发消息管理：
+  // 卡片贴在输入框上方（.chat-queue-slot），对齐 Codex 的「待发消息」交互：
   //   - 不操作 → 当前任务结束后逐条自动发送队首（consumePending）
   //   - 引导   → 把该项提升为修订式下一轮，并请求当前回复尽快收束
   //   - 编辑   → 回填输入框
@@ -2197,7 +2259,7 @@ export function renderTodoProgressPanelHtml(todos: TodoItem[], open: boolean, pa
   return `
     <section class="desktop-todo-panel${open ? ' desktop-todo-panel--open' : ''}${allDone ? ' desktop-todo-panel--done' : ''}" aria-label="任务进度">
       <button class="desktop-todo-panel__header" type="button" aria-expanded="${open ? 'true' : 'false'}" data-todo-panel-toggle="1"${panelKey ? ` data-todo-panel-key="${escapeHtml(panelKey)}"` : ''}>
-        <span class="desktop-todo-panel__ring" aria-hidden="true" style="--todo-progress:${progress}">
+        <span class="desktop-todo-panel__ring" aria-hidden="true" data-todo-progress="${progress}">
           <span class="desktop-todo-panel__ring-hole"></span>
         </span>
         <span class="desktop-todo-panel__main">
@@ -2245,5 +2307,13 @@ export function renderEmptyState(): HTMLElement {
   desc.textContent = '单 Agent 直接执行任务；切到 Team 模式可组建多智能体协同。';
   div.appendChild(h2);
   div.appendChild(desc);
+  return div;
+}
+
+/** Work 会话空态保持安静；Composer 已经提供唯一的输入入口。 */
+export function renderWorkEmptyState(_hasItem: boolean): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'empty empty--work';
+  div.setAttribute('aria-hidden', 'true');
   return div;
 }

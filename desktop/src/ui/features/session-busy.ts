@@ -2,20 +2,17 @@
  * 会话 busy / 后端 live 状态同步。
  *
  * 从 chat-controller 抽出，避免 index.ts 等与 chat-controller 形成循环依赖。
- * composer 轮播、停止按钮等 UI 仍由此处统一触发 refresh。
+ * Composer 自行订阅会话状态；此处只刷新其余依赖 busy 的界面。
  */
 
 import { resetGatewaySequence } from './gateway-sequence';
 import {
-  $,
   appendSessionMessage,
   ensureSessionBook,
-  isBusySession,
   newMessageId,
   patchBook,
   setBusy,
   setSessionStatus,
-  state,
   type SessionStatus,
 } from '../state';
 import { messageStore } from '../stores/stores';
@@ -29,15 +26,13 @@ export function newTurnRequestId(): string {
   return `req_${Date.now().toString(36)}_${uuid}`;
 }
 
-/** 写入 busy 并刷新 composer 停止按钮、running-intro 槽位（仅反映当前 active 会话）。
- *  状态隔离：仅当 busy 真正变化时才同步 composer / running-intro，避免流式期间
+/** 写入 busy 并刷新依赖会话状态的界面。
+ *  状态隔离：仅当 busy 真正变化时才同步 model / running-intro，避免流式期间
  *  高频重复调用造成无谓 UI 抖动。 */
 export function applyBusyUi(sessionId: string, busy: boolean): void {
   const changed = setBusy(sessionId, busy);
   if (!changed) return;
   if (typeof document === 'undefined') return;
-  const activeBusy = state.activeSessionId ? isBusySession(state.activeSessionId) : false;
-  $('#composer-controls')?.classList.toggle('composer-controls--busy', activeBusy);
   syncSessionModelAvailabilityUi();
   syncRunningIntroSlot();
 }

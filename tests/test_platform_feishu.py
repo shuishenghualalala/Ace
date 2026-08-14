@@ -489,6 +489,14 @@ async def test_handle_error_sent_back():
 
 async def test_handle_outbound_file(tmp_path, monkeypatch):
     ch = _channel()
+    lease = SimpleNamespace(owner_account_id="owner-a")
+    ch._app = SimpleNamespace(
+        workspace_store=object(),
+        security_service=object(),
+        active_owner=SimpleNamespace(current=lambda: lease),
+        channel_bindings=SimpleNamespace(get_binding=lambda _name: "owner-a"),
+        logout_coordinator=SimpleNamespace(is_draining=lambda: False),
+    )
     f = tmp_path / "out.png"
     f.write_bytes(b"x")
     sent = []
@@ -497,8 +505,15 @@ async def test_handle_outbound_file(tmp_path, monkeypatch):
     async def fake_upload_image(client, path):
         return "img_key_1"
 
+    authorized = []
+
+    async def authorize(args, **kwargs):
+        authorized.append((args, kwargs))
+        return f
+
     import plugins.platforms.feishu.adapter as mod
     monkeypatch.setattr(mod.filemod, "upload_image", fake_upload_image)
+    monkeypatch.setattr("crew.tools.security_guard.authorize_file_tool", authorize)
 
     async def handler(env):
         yield ResponseChunk.final(env.request_id, f"见 [FILE:{f}]")
@@ -508,6 +523,8 @@ async def test_handle_outbound_file(tmp_path, monkeypatch):
 
     image_msgs = [content for mt, content in sent if mt == "image"]
     assert image_msgs and json.loads(image_msgs[0]) == {"image_key": "img_key_1"}
+    assert authorized[0][0] == {"path": str(f)}
+    assert authorized[0][1]["operation"] == "read"
 
 
 async def test_send_to_target_creates_message():

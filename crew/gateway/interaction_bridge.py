@@ -13,6 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -22,7 +23,13 @@ from crew.core.errors import ToolError
 from crew.core.followup import CANCELLED_MARKER, send_followup_question_to, wait_for_answer
 from crew.core.runctx import PushFn, current_owner_account_id
 from crew.state.logging import get_logger
-
+from crew.team.delegate_tool import TEAM_RESULT_STATUSES, require_team_result_status
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    NetworkAccess,
+    NetworkEntry,
+    SandboxPermissions,
+)
 
 log = get_logger("interaction_bridge")
 
@@ -57,7 +64,12 @@ class InteractionBridge:
     def configure(self, *, push_fn: PushFn, gateway_url: str, crew: Any | None = None) -> None:
         self.clear()
         self._push_fn = push_fn
-        self._gateway_url = gateway_url.rstrip("/")
+        raw_url = gateway_url.rstrip("/")
+        parsed = urlsplit(raw_url)
+        if parsed.hostname == "localhost":
+            port = f":{parsed.port}" if parsed.port else ""
+            raw_url = urlunsplit(parsed._replace(netloc=f"127.0.0.1{port}"))
+        self._gateway_url = raw_url
         self._crew = crew
 
     @property
@@ -163,6 +175,47 @@ class InteractionBridge:
             ],
         }
 
+    def local_callback_permissions(
+        self,
+        binding: ExternalInteractionBinding,
+    ) -> AdditionalPermissionProfile:
+        """Grant only this Gateway's loopback callback to the managed runtime.
+
+        The interaction MCP proxy runs as a child of the external agent and
+        calls back into this Gateway. Its one-time binding token authenticates
+        the request, while this exact host/port rule prevents the proxy from
+        turning the callback channel into arbitrary localhost or Internet
+        access.
+        """
+
+        if self.resolve_binding(binding.token) is not binding:
+            raise PermissionError("交互绑定不存在或已过期")
+        parsed = urlsplit(self._gateway_url)
+        hostname = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or hostname not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            raise RuntimeError("Crew Interaction Gateway 必须绑定到 loopback")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise RuntimeError("Crew Interaction Gateway URL 不能包含 path/query/fragment")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        host = "::1" if hostname == "::1" else "127.0.0.1"
+        return AdditionalPermissionProfile(
+            network=(
+                NetworkEntry(
+                    host=host,
+                    port=port,
+                    protocol=parsed.scheme,
+                    access=NetworkAccess.ALLOW,
+                    allow_private=True,
+                    escalatable=False,
+                ),
+            ),
+            sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+        )
+
     @classmethod
     def dynamic_tool_specs(cls, binding: ExternalInteractionBinding) -> list[dict[str, Any]]:
         """Return the same governed Crew control surface for app-server clients.
@@ -192,18 +245,31 @@ class InteractionBridge:
                 },
             })
         if binding.context_type == "team":
+            mention_intents = (
+                ["assign", "submit", "review", "ask", "broadcast", "handoff"]
+                if binding.team_role == "leader"
+                else ["submit", "review", "ask", "handoff"]
+            )
             tools.extend([
                 {
                     "type": "function",
                     "name": "team_mention",
-                    "description": "Send a governed mention inside the current Crew Team.",
+                    "description": (
+                        "Send a governed mention inside the current Crew Team. "
+                        "Use exactly one of the intent values allowed by the schema."
+                    ),
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "to": {"type": "array", "items": {"type": "string"}},
-                            "intent": {"type": "string"},
+                            "intent": {"type": "string", "enum": mention_intents},
                             "content": {"type": "string"},
                             "node_id": {"type": "string"},
+                            "result_status": {
+                                "type": "string",
+                                "enum": list(TEAM_RESULT_STATUSES),
+                                "description": "Required for submit: structured node acceptance status.",
+                            },
                             "artifact_refs": {"type": "array", "items": {"type": "string"}},
                             "questions": {"type": "array", "items": {"type": "object"}},
                             "title": {"type": "string"},
@@ -306,6 +372,7 @@ class InteractionBridge:
 
         if name == "team_mention":
             intent = str(data.get("intent") or "broadcast").strip().lower()
+            result_status = require_team_result_status(intent, data.get("result_status"))
             leader_intents = {"assign", "submit", "review", "ask", "broadcast", "handoff"}
             member_intents = {"submit", "review", "ask", "handoff"}
             allowed = leader_intents if binding.team_role == "leader" else member_intents
@@ -329,6 +396,7 @@ class InteractionBridge:
                 intent=intent,
                 content=content,
                 node_id=str(data.get("node_id") or "").strip(),
+                result_status=result_status,
                 artifacts=list(data.get("artifact_refs") or []),
                 questions=list(data.get("questions") or []),
                 title=str(data.get("title") or "").strip(),

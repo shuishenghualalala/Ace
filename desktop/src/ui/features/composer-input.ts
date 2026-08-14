@@ -2,8 +2,10 @@
  * Composer 输入框键盘/IME 处理
  *
  * 将「Enter 发送」与中文/日文/韩文等 IME 合成状态判断抽成可测模块，
- * 供 desktop/src/ui/index.ts 绑定 #chat-input 使用。
+ * 供 Composer（composer-view）绑定 [data-composer-input] 输入框使用。
  */
+
+import { clearRuntimeStyle, setRuntimeStyle } from '../components/runtime-style';
 
 export interface ComposerImeState {
   /** 当前是否处于 composition 合成阶段 */
@@ -61,14 +63,14 @@ export function shouldComposerSend(event: KeyboardEvent, state: ComposerImeState
  * 主对话（index.ts）与 Wiki 右栏 Composer（wiki-agent.ts）共用。
  */
 export function autoresizeTextarea(input: HTMLTextAreaElement, maxHeight: number): void {
-  input.style.height = 'auto';
+  setRuntimeStyle(input, 'height', 'auto');
   const nextHeight = Math.min(input.scrollHeight, maxHeight);
-  input.style.height = `${nextHeight}px`;
-  input.style.overflowY = input.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  setRuntimeStyle(input, 'height', `${nextHeight}px`);
+  setRuntimeStyle(input, 'overflowY', input.scrollHeight > maxHeight ? 'auto' : 'hidden');
 }
 
 /** 发送/清空后还原输入框高度（与 autoresizeTextarea 配对）。 */
 export function resetTextareaHeight(input: HTMLTextAreaElement): void {
-  input.style.height = '';
-  input.style.overflowY = 'hidden';
+  clearRuntimeStyle(input, 'height');
+  setRuntimeStyle(input, 'overflowY', 'hidden');
 }

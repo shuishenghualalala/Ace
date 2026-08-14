@@ -20,8 +20,6 @@ export interface SessionStoreState {
   userUnfoldedTurns: Set<string>;
   /** 后台已完成、用户尚未点进查看的会话（侧栏行尾显示绿点）。 */
   unreadCompletedSessions: Set<string>;
-  /** session_id -> 外部 Team id（空串表示未绑定）。 */
-  activeExternalTeamIdBySession: Record<string, string>;
 }
 
 export const sessionStore: Store<SessionStoreState> = createStore<SessionStoreState>(
@@ -38,7 +36,6 @@ export const sessionStore: Store<SessionStoreState> = createStore<SessionStoreSt
     userFoldedTurns: new Set(),
     userUnfoldedTurns: new Set(),
     unreadCompletedSessions: new Set(),
-    activeExternalTeamIdBySession: {},
   },
   'session',
 );

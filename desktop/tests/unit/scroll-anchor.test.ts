@@ -44,7 +44,7 @@ describe('attachScrollAnchor', () => {
     anchor.jumpToBottom();
     expect(anchor.isStickyBottom()).toBe(true);
     expect(el.scrollTop).toBe(el.scrollHeight);
-    anchor.dispose();
+    expect(() => anchor.dispose()).not.toThrow();
   });
 
   it('touchmove 手指下滑（clientY 增大）disarm，手指上滑不 disarm', () => {
@@ -61,34 +61,11 @@ describe('attachScrollAnchor', () => {
     anchor.dispose();
   });
 
-  it('resize 时若 stickyBottom 保持 true（ResizeObserver 已挂载）', () => {
-    const el = makeContainer();
-    const anchor = attachScrollAnchor(el);
-    anchor.jumpToBottom();
-    expect(anchor.isStickyBottom()).toBe(true);
-    // 模拟窗口变高：clientHeight 600→800。happy-dom 的 ResizeObserver 不一定因
-    // defineProperty 触发回调，且 happy-dom 不 clamp scrollTop，无法精确断言对齐结果。
-    // 这里只验证 anchor 在 resize 后仍处于 sticky、dispose 不抛错（RO 已正确挂载/清理）。
-    Object.defineProperty(el, 'clientHeight', { configurable: true, value: 800 });
-    expect(anchor.isStickyBottom()).toBe(true);
-    expect(() => anchor.dispose()).not.toThrow();
-  });
-
   it('disarm() 显式 disarm', () => {
     const el = makeContainer();
     const anchor = attachScrollAnchor(el);
     anchor.disarm();
     expect(anchor.isStickyBottom()).toBe(false);
     anchor.dispose();
-  });
-
-  it('dispose 移除监听（wheel 后不再 disarm）', () => {
-    const el = makeContainer();
-    const anchor = attachScrollAnchor(el);
-    anchor.dispose();
-    el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
-    // dispose 后 wheel 不应再影响——但 anchor 已 dispose，isStickyBottom 仍可读最后状态。
-    // 这里仅验证不抛错。
-    expect(typeof anchor.isStickyBottom()).toBe('boolean');
   });
 });

@@ -1,0 +1,9 @@
+{
+  "schema": 2,
+  "source_hash": "b6eb53270b3f855cccdccbdc5b5967337626f0de0c7716ea78ee5260c3954a7a",
+  "binary_sha256": "c41db47533b951b8b480eba37aa3f8df5adb6a858ba40e92959407ad5dd9ee21",
+  "binary_name": "ace-security-runtime.exe",
+  "source_files": 34,
+  "built_for": "x86_64-pc-windows-msvc",
+  "note": "由 scripts/build-security-runtime.{ps1,sh} 重新生成；勿手改。source_hash 用于检测源码漂移，binary_sha256 用于 Python/Desktop 启动时校验二进制完整性。"
+}

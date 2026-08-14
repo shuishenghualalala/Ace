@@ -16,9 +16,12 @@ import {
   ShellOpenExternalArgs,
   ShellOpenPathArgs,
   ShellOpenPathWithArgs,
+  WikiOpenSourceFileArgs,
   FeedbackSubmitArgs,
   FeedbackListArgs,
   DialogSelectFileArgs,
+  InspirationWindowArgs,
+  SecurityAuditArgs,
   UpdateStartDownloadArgs,
 } from '../../src/shared/ipc-schemas';
 import { MAX_DIALOG_FILE_BYTES } from '../../src/shared/constants';
@@ -71,6 +74,20 @@ describe('GatewayFetchArgs', () => {
       init: { headers: { bad: 123 as unknown as string } },
     });
     expect(r.ok).toBe(false);
+  });
+});
+
+describe('SecurityAuditArgs', () => {
+  it('accepts every emitted execution and lifecycle filter', () => {
+    expect(SecurityAuditArgs.parse({ actionType: 'network_decision', decision: 'allow' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'exec_result', decision: 'completed' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'rule_disabled', decision: 'disabled' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'audit_purged', decision: 'deleted' }).ok).toBe(true);
+  });
+
+  it('rejects unknown audit filters', () => {
+    expect(SecurityAuditArgs.parse({ actionType: 'unknown' }).ok).toBe(false);
+    expect(SecurityAuditArgs.parse({ decision: 'unknown' }).ok).toBe(false);
   });
 });
 
@@ -140,6 +157,27 @@ describe('ShellOpenPathWithArgs', () => {
       path: '/tmp/report.docx',
       applicationId: '',
     }).ok).toBe(false);
+  });
+});
+
+describe('WikiOpenSourceFileArgs', () => {
+  it('accepts a source id with optional kb id', () => {
+    const withKb = WikiOpenSourceFileArgs.parse({ sourceId: 'upload_e1167aa49635', kbId: 'default' });
+    expect(withKb.ok).toBe(true);
+    const withoutKb = WikiOpenSourceFileArgs.parse({ sourceId: 'upload_e1167aa49635' });
+    expect(withoutKb.ok).toBe(true);
+  });
+
+  it('rejects missing/invalid source ids', () => {
+    expect(WikiOpenSourceFileArgs.parse({}).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: '' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: '../etc/passwd' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'a b' }).ok).toBe(false);
+  });
+
+  it('rejects kb ids with path separators', () => {
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'upload_abc', kbId: '../x' }).ok).toBe(false);
+    expect(WikiOpenSourceFileArgs.parse({ sourceId: 'upload_abc', kbId: 'a/b' }).ok).toBe(false);
   });
 });
 
@@ -228,6 +266,20 @@ describe('DialogSelectFileArgs', () => {
 
   it('rejects non-array filters', () => {
     expect(DialogSelectFileArgs.parse({ filters: 'png' as unknown as never }).ok).toBe(false);
+  });
+});
+
+describe('InspirationWindowArgs', () => {
+  it('accepts only canonical site and canvas ids', () => {
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab' }).ok).toBe(true);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'canvas_abcdef123456', title: '行情' }).ok).toBe(true);
+  });
+
+  it('rejects arbitrary URLs, widget ids, path fragments, and oversized titles', () => {
+    expect(InspirationWindowArgs.parse({ inspirationId: 'https://example.com' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'widget_0123456789ab' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab/../../x' }).ok).toBe(false);
+    expect(InspirationWindowArgs.parse({ inspirationId: 'site_0123456789ab', title: 'x'.repeat(201) }).ok).toBe(false);
   });
 });
 

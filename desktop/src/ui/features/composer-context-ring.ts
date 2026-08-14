@@ -1,5 +1,5 @@
 /**
- * Composer 上下文占比圆环：附件按钮左侧，实时展示当前会话 token 占用。
+ * Composer 上下文占比圆环：模型与发送按钮之间，实时展示当前会话 token 占用。
  */
 
 import { backendApi } from '../backend-client';
@@ -21,13 +21,15 @@ function formatTokenCount(n: number): string {
 }
 
 function setRingProgress(ratio: number): void {
-  const progress = document.querySelector<SVGCircleElement>('#chat-context-ring-btn .composer-context-ring__progress');
+  const progress = document.querySelector<SVGCircleElement>(
+    '#chat-context-ring-btn .mw-context-ring__progress',
+  );
   const btn = $('#chat-context-ring-btn');
   const pctEl = document.getElementById('chat-context-ring-pct');
   if (!progress) return;
   const clamped = Math.max(0, Math.min(1, ratio));
-  progress.style.strokeDasharray = `${RING_CIRC}`;
-  progress.style.strokeDashoffset = `${RING_CIRC * (1 - clamped)}`;
+  progress.setAttribute('stroke-dasharray', String(RING_CIRC));
+  progress.setAttribute('stroke-dashoffset', String(RING_CIRC * (1 - clamped)));
   const pct = Math.round(clamped * 100);
   if (pctEl) pctEl.textContent = pct >= 100 ? '满' : `${pct}%`;
   if (btn) {

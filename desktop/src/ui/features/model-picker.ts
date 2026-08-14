@@ -4,7 +4,8 @@
  */
 
 import { backendApi } from '../backend-client';
-import { $, $$, escapeHtml, state } from '../state';
+import { setRuntimeStyle } from '../components/runtime-style';
+import { $, $$, escapeHtml, notify, state } from '../state';
 import {
   activeComposerModelId,
   resolveComposerModelLabel,
@@ -12,7 +13,7 @@ import {
   syncSessionModelUi,
 } from './session-model';
 import { syncExternalAgentsFeatureUi } from './external-agents-feature';
-import { maybeStartModelTourOnce } from './model-tour';
+import { syncSecurityModuleFeatureUi } from './security-mode';
 
 let dropdownOpen = false;
 
@@ -65,12 +66,9 @@ function renderDropdown(): void {
   });
 }
 
-/** 设置当前用户的默认模型；新会话在没有显式绑定时继承该模型。 */
+/** @deprecated 设置页不再切换全局模型；保留供兼容，内部走 setSessionModel。 */
 export async function switchModel(modelId: string): Promise<void> {
-  state.config = await backendApi.switchModel(modelId);
-  state.configModel = resolveComposerModelLabel();
-  syncModelUi();
-  syncExternalAgentsFeatureUi();
+  await setSessionModel(modelId);
 }
 
 // ── 通用模型选择浮层 ──
@@ -105,7 +103,7 @@ export function openModelSelectPopover(opts: ModelSelectPopoverOptions): () => v
   const popover = document.createElement('div');
   if (opts.id) popover.id = opts.id;
   popover.className = 'composer-floating-popover composer-select-popover';
-  popover.style.width = `${width}px`;
+  setRuntimeStyle(popover, 'width', `${width}px`);
   popover.setAttribute('role', 'listbox');
   popover.setAttribute('aria-label', '选择模型');
   popover.innerHTML = models.length
@@ -137,8 +135,8 @@ export function openModelSelectPopover(opts: ModelSelectPopoverOptions): () => v
     const openUp = rect.top > ph + 12;
     let left = opts.align === 'end' ? rect.right - width : rect.left;
     left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
-    popover.style.left = `${left}px`;
-    popover.style.top = openUp ? `${Math.max(8, rect.top - ph - 6)}px` : `${rect.bottom + 6}px`;
+    setRuntimeStyle(popover, 'left', `${left}px`);
+    setRuntimeStyle(popover, 'top', openUp ? `${Math.max(8, rect.top - ph - 6)}px` : `${rect.bottom + 6}px`);
   };
   requestAnimationFrame(place);
 
@@ -200,10 +198,11 @@ export async function loadConfig(): Promise<void> {
     state.configModel = resolveComposerModelLabel();
     syncModelUi();
     syncExternalAgentsFeatureUi();
-    maybeStartModelTourOnce(state.config);
+    syncSecurityModuleFeatureUi();
     return;
   } catch {
     state.config = null;
     syncExternalAgentsFeatureUi();
+    syncSecurityModuleFeatureUi();
   }
 }

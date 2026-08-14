@@ -1,0 +1,382 @@
+/**
+ * Main chat Composer execution surface. Context pickers keep their existing
+ * owners until C4; this file owns layout, textarea, execution state and queue.
+ */
+
+#chat-composer-root {
+  min-width: 0;
+  flex: 0 0 auto;
+  container-type: inline-size;
+}
+
+.chat-composer.mw-composer {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-width: 0;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-4) var(--mw-space-4) var(--mw-space-3);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+}
+
+.mw-composer__running-slot,
+.mw-composer__queue-slot,
+.mw-composer__edit-banner,
+.mw-composer__input-shell {
+  width: min(var(--mw-chat-content-max-width), 100%);
+  margin-inline: auto;
+}
+
+.mw-composer__running-slot {
+  box-sizing: border-box;
+  padding-inline: var(--mw-space-4);
+}
+
+.mw-composer__input-shell {
+  position: relative;
+  min-width: 0;
+}
+
+.mw-composer__project {
+  position: absolute;
+  z-index: 0;
+  right: 14px;
+  bottom: 100%;
+  left: 14px;
+  display: flex;
+  min-width: 0;
+  height: 64px;
+  align-items: flex-start;
+  padding: var(--mw-space-1) var(--mw-space-3);
+  border-radius: calc(var(--mw-radius-4) + var(--mw-space-1));
+  background: var(--mw-bg-subtle);
+  transform: translateY(50%);
+}
+
+.mw-composer__project[hidden] {
+  display: none;
+}
+
+/* 安全提示出现时，项目选择条不能再浮到提示条上方。 */
+.chat-composer:has(.security-banner.show) .mw-composer__project {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: 100%;
+  height: 32px;
+  align-items: center;
+  padding: 0 var(--mw-space-3);
+  border-radius: var(--mw-radius-4) var(--mw-radius-4) 0 0;
+  transform: none;
+}
+
+.mw-composer__panel {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-3);
+  overflow: visible;
+  border: 1px solid var(--mw-border-default);
+  border-radius: calc(var(--mw-radius-4) + var(--mw-space-1));
+  background: var(--mw-bg-surface);
+  box-shadow: var(--mw-shadow-float);
+  transition:
+    var(--mw-transition-interactive);
+}
+
+.mw-composer__panel:focus-within {
+  border-color: var(--mw-border-strong);
+  box-shadow: var(--mw-shadow-float);
+}
+
+.mw-composer__panel.is-drag-over {
+  border-color: var(--mw-focus-ring);
+  outline: 2px dashed var(--mw-focus-ring);
+  outline-offset: -4px;
+  background: var(--mw-bg-selected);
+}
+
+.mw-composer__context-before,
+.mw-composer__approval {
+  min-width: 0;
+}
+
+.mw-composer__context-before:empty,
+.mw-composer__approval:empty,
+.mw-composer__status:empty,
+.mw-composer [hidden] {
+  display: none;
+}
+
+.mw-composer .mw-composer__input-row {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+.mw-composer .mw-composer__input-row textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  max-height: 180px;
+  padding: 0;
+  overflow-y: hidden;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--mw-text-primary);
+  font: var(--mw-type-body-weight) var(--mw-type-body-size) / var(--mw-type-body-line)
+    var(--mw-font-sans);
+  resize: none;
+  scrollbar-gutter: stable;
+  vertical-align: top;
+}
+
+.mw-composer .mw-composer__input-row textarea::placeholder {
+  color: var(--mw-text-muted);
+}
+
+.mw-composer .mw-composer__input-row textarea:disabled {
+  opacity: 0.6;
+}
+
+.mw-composer__input-overlay {
+  display: contents;
+}
+
+.mw-composer .mw-composer__toolbar {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--mw-space-2);
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.mw-composer .mw-composer__toolbar-left,
+.mw-composer .mw-composer__toolbar-right,
+.mw-composer__controls,
+.mw-composer-queue__actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--mw-space-1);
+}
+
+.mw-composer .mw-composer__toolbar-left {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  scrollbar-width: thin;
+}
+
+.mw-composer .mw-composer__toolbar-right {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+.mw-composer__controls {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.mw-composer__action {
+  --mw-button-height: 30px;
+  border-radius: var(--mw-radius-full);
+}
+
+.mw-composer__action--stop {
+  border-color: var(--mw-status-danger);
+}
+
+.mw-composer__action-loading {
+  display: none;
+}
+
+.mw-composer__action[data-loading='true'] .mw-composer__action-icon {
+  display: none;
+}
+
+.mw-composer__action[data-loading='true'] .mw-composer__action-loading {
+  display: block;
+  animation: mw-control-spin var(--mw-duration-slow) linear infinite;
+}
+
+.mw-composer__status {
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  line-height: var(--mw-type-caption-line);
+}
+
+.mw-composer__edit-banner {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-2) var(--mw-space-3);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-bg-selected);
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-label-size);
+  line-height: var(--mw-type-label-line);
+}
+
+.mw-composer__edit-banner > span {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.mw-composer__edit-banner > button {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-secondary);
+}
+
+.mw-composer__edit-banner > button:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.mw-composer-queue {
+  display: grid;
+  gap: var(--mw-space-1);
+}
+
+.mw-composer-queue__item {
+  display: grid;
+  min-width: 0;
+  min-height: 42px;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-2);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-bg-surface);
+  box-shadow: var(--mw-shadow-raised);
+}
+
+.mw-composer-queue__order {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: var(--mw-radius-full);
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-caption-size);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--mw-type-label-weight);
+}
+
+.mw-composer-queue__text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-body-size);
+  line-height: var(--mw-type-body-line);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mw-composer-queue__actions {
+  flex: 0 0 auto;
+}
+
+.mw-composer-queue__action {
+  display: inline-grid;
+  min-width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0 var(--mw-space-2);
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-caption-size);
+  font-weight: var(--mw-type-label-weight);
+}
+
+.mw-composer-queue__action:hover:not(:disabled) {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.mw-composer-queue__action:disabled {
+  opacity: 0.4;
+}
+
+body.welcome-active .mw-composer {
+  position: relative;
+  gap: 0;
+  padding: 0 var(--mw-space-4);
+  background: transparent;
+}
+
+body.welcome-active .mw-composer__queue-slot,
+body.welcome-active .mw-composer__edit-banner,
+body.welcome-active .mw-composer__input-shell {
+  width: min(720px, 100%);
+}
+
+body.welcome-active .mw-composer__panel {
+  min-height: 96px;
+  gap: var(--mw-space-1);
+  padding: var(--mw-space-3) var(--mw-space-3) var(--mw-space-2);
+}
+
+body.welcome-active .mw-composer .mw-composer__input-row textarea {
+  min-height: 40px;
+}
+
+@media (max-width: 700px) {
+  .mw-composer-queue__item {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .mw-composer-queue__actions {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .mw-composer .mw-composer__toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mw-composer .mw-composer__toolbar-right {
+    justify-content: space-between;
+  }
+}
+
+/* The chat pane can be narrow even when the application window is not. */
+@container (max-width: 700px) {
+  .mw-composer .mw-composer__toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mw-composer .mw-composer__toolbar-right {
+    justify-content: space-between;
+  }
+}
+
+@container (max-width: 420px) {
+  .mw-composer .mw-composer__toolbar-left {
+    overflow: visible;
+    flex-wrap: wrap;
+  }
+}
