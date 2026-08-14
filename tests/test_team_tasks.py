@@ -4903,6 +4903,84 @@ def test_recover_plan_node_reuses_capability_coverage_and_rejects_invalid_member
         )
 
 
+def test_recovery_retry_clears_stale_staffing_request_for_fresh_runtime_decision():
+    tm, _ = _team(config=Config(team_config={
+        "members": [{
+            "member_id": "kk",
+            "name": "kk",
+            "executor": "builtin",
+            "capabilities": ["implementation"],
+        }],
+    }))
+    plan = _blocked_recovery_plan("recovery-fresh-staffing")
+    node = plan.nodes["verify"]
+    node.assignee = ""
+    stale_request = RuntimeStaffingRequest(
+        request_id="stale-declined-request",
+        trigger_node_id=node.node_id,
+        trigger_type="capability_gap",
+        required_capabilities=["testing"],
+        reason="kk 不具备 testing",
+        status="declined",
+        previous_assignee="kk",
+    )
+    node.metadata = {
+        **dict(node.metadata),
+        "previous_assignee": "kk",
+        "runtime_staffing": stale_request.to_dict(),
+        "runtime_blocking": {
+            "status": "blocked",
+            "reason": "staffing_declined",
+            "previous_assignee": "kk",
+        },
+    }
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+
+    result = tm.recover_plan_node(
+        "recovery-fresh-staffing",
+        node_id="verify",
+        action="retry",
+        owner_account_id="local",
+    )
+
+    recovered = result["node"]
+    assert recovered["assignee"] == "kk"
+    assert recovered["status"] == "pending"
+    assert "runtime_staffing" not in recovered["metadata"]
+    assert tm._runtime_staffing_request(plan.nodes["verify"]) is None
+    trigger = tm._runtime_staffing_trigger(
+        tm._build_team("recovery-fresh-staffing"),
+        plan.nodes["verify"],
+        owner_account_id="local",
+        max_attempts=2,
+    )
+    assert trigger is not None
+    assert trigger["trigger_type"] == "capability_gap"
+
+
+@pytest.mark.asyncio
+async def test_recovered_runtime_reuses_existing_plan_without_replanning(monkeypatch):
+    tm, _ = _team(config=_recovery_team_config())
+    plan = _blocked_recovery_plan("recovery-no-replan")
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+    team = tm._build_team(plan.team_session_id, owner_account_id="local")
+
+    async def fail_replan(*args, **kwargs):
+        raise AssertionError("恢复执行不应重新调用 Planner")
+
+    monkeypatch.setattr(tm.graph_planner, "plan_async", fail_replan)
+    reused = await tm._ensure_runtime_plan_async(
+        plan.team_session_id,
+        team,
+        "恢复执行",
+        "",
+        owner_account_id="local",
+    )
+
+    assert reused is plan
+    assert list(reused.nodes) == ["verify", "summary", "docs"]
+
+
 def test_abandon_recovery_keeps_dependent_node_blocked_but_preserves_independent_branch():
     tm, _ = _team(config=_recovery_team_config())
     plan = _blocked_recovery_plan("recovery-abandon")
@@ -7846,6 +7924,7 @@ async def test_simple_message_direct_for_test_team_roles():
 
     assert tm.read_plan("test-team-simple")["plan"] is None
     assert tasks.list("test-team-simple") == []
+    assert tm._build_team("test-team-simple").bus.list_artifacts("test-team-simple") == []
     assert any(chunk.kind == "status" and "直接回复" in str(chunk.body.get("message") or "") for chunk in chunks)
     assert any(chunk.kind == "final" and "你好" in str(chunk.body.get("text") or "") for chunk in chunks)
 

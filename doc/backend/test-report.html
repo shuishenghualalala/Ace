@@ -5272,6 +5272,17 @@ cd web &amp;&amp; npm run build
     </ul>
   </section>
 
+  <section class="rounded-2xl border border-emerald-700 bg-slate-900/70 p-6 mt-6">
+    <h2 class="text-xl font-bold mb-3">2026-08-14 Team Runtime 端到端验收（第四阶段）</h2>
+    <ul>
+      <li><b>恢复闭环：</b>新增回归覆盖阻塞节点重试原成员、清理旧的已结算 RuntimeStaffingRequest、恢复后重新计算能力缺口，以及恢复执行复用原 TeamPlan 而不重新调用 Planner。</li>
+      <li><b>状态一致性：</b>保留阻塞节点的 previous_assignee、runtime_recovery 与事件审计；恢复后节点回到 pending，依赖和独立分支继续遵循既有 DAG 规则。</li>
+      <li><b>产物验收：</b>轻量“你好”直答确认不创建 TeamPlan、Task 或 Team artifact；真实文件变更和结构化审阅方案的产物路径规则保持通过。</li>
+      <li><b>回归：</b><code>tests/test_team_tasks.py</code> 全量回归通过，包含第四阶段新增的恢复请求重置、无重规划和直答无产物用例；Gateway、Web、Desktop 定向检查继续执行。</li>
+      <li><b>范围：</b>没有新增表、顶层模块或 API；修复归属既有 Team Runtime 恢复子模块，文档同步更新。</li>
+    </ul>
+  </section>
+
   <footer class="border-t border-slate-700 mt-12 pt-6 text-center text-sm text-slate-500">
     Crew 测试报告 · 后续每次开发交付前更新本报告
   </footer>

@@ -1754,6 +1754,9 @@ class InProcessTeamManager(TeamManager):
                 "replacement_assignee": replacement,
                 "changed_at": time.time(),
             }
+            # 恢复是一次新的运行决策。旧的 declined/failed request 只代表
+            # 上一次尝试，不能阻止恢复后重新评估当前成员和能力缺口。
+            metadata.pop("runtime_staffing", None)
         metadata.pop("runtime_staffing_trigger", None)
         metadata.pop("runtime_staffing_trigger_reason", None)
         metadata.pop("runtime_blocking", None)
@@ -2001,6 +2004,9 @@ class InProcessTeamManager(TeamManager):
                     "replacement_assignee": target,
                     "changed_at": time.time(),
                 }
+                # retry 也必须从新的 RuntimeStaffingRequest 身份开始，避免
+                # 复用上一次用户拒绝/失败的 request 而直接短路。
+                metadata.pop("runtime_staffing", None)
                 node.metadata = metadata
                 node.update(
                     status="pending",

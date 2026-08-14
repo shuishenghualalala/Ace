@@ -382,4 +382,12 @@ graph TD
   <li><b>模块边界：</b>不新增数据库表、TeamSpec 字段或顶层模块；能力判断仍统一使用 <code>evaluate_capability_coverage()</code>，恢复状态通过既有 TeamPlanNode metadata 与 Dynamic Kanban 事件表达。</li>
 </ul>
 
+<h2>144. 2026-08-14 Team Runtime 恢复验收与补员请求重置</h2>
+<ul>
+  <li><b>恢复语义：</b>“重试原成员”或“重新分配”代表开启一轮新的 Runtime 决策；上一次已结算的补员拒绝/失败不会继续挂在当前节点上阻塞后续能力判断。</li>
+  <li><b>执行保护：</b>恢复继续复用现有 TeamPlan，不重新调用 Planner、不新增 DAG 节点；恢复后的节点仍按当前依赖和能力覆盖重新进入调度。</li>
+  <li><b>产物边界：</b>轻量“你好”直答不创建 TeamPlan、任务或产物；只有真实文件变更、明确提及且存在的文件路径，或需要审阅的结构化方案，才进入 Team artifact。</li>
+  <li><b>验证：</b>覆盖 stale RuntimeStaffingRequest 清理、恢复不重规划、轻量直答无产物、阻塞恢复与既有 Team 全量回归。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

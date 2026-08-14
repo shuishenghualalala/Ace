@@ -701,6 +701,7 @@ flowchart LR
   <ul>
     <li><b>持久化恢复：</b>进程内没有 TeamPlan 时，从最近的 Team Dynamic Kanban workflow、workflow_plan、tasks、dependencies 和 node events 恢复原图；恢复过程不调用 Planner、不新增节点。</li>
     <li><b>执行闭环：</b><code>POST /api/session/{id}/team/recover</code> 只提交动作和节点，服务端先原子更新计划/看板，再由 Team Runtime 继续当前计划中已满足依赖的节点。</li>
+    <li><b>新一轮决策：</b>重试或改派会清除上一次已结算的 <code>RuntimeStaffingRequest</code> 快照；旧的拒绝/失败只保留在事件与 assignment history 中，不能短路恢复后的能力重算或造成空转。</li>
     <li><b>数据对象：</b>不新增表和顶层模块；<code>runtime_recovery</code>、<code>runtime_blocking</code>、<code>previous_assignee</code> 继续作为 TeamPlanNode metadata，并通过既有 <code>team_node_recovery</code>、<code>team_node_updated</code> 与 <code>workflow_plan_revised</code> 事件留痕。</li>
   </ul>
 
