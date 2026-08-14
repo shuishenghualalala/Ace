@@ -84,6 +84,7 @@ import { makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } 
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
+import { renderModelFallbackBanner } from './model-fallback-banner';
 import {
   chunkRequestId,
   isPlanControlStatus,
@@ -247,6 +248,7 @@ export function updateGatewayDot(): void {
 export function updateComposerControls(): void {
   // ComposerView subscribes to stores and owns the execution controls.
   renderSecurityBanner();
+  renderModelFallbackBanner();
 }
 
 export function scrollChatToBottom(): void {

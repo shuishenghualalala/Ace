@@ -16,6 +16,7 @@ import {
   type ComposerModelOption,
 } from './session-model';
 import { syncExternalAgentsFeatureUi } from './external-agents-feature';
+import { maybeStartModelTourOnce } from './model-tour';
 import { syncSecurityModuleFeatureUi } from './security-mode';
 
 let dropdownOpen = false;
@@ -320,6 +321,7 @@ export async function loadConfig(): Promise<void> {
     syncModelUi();
     syncExternalAgentsFeatureUi();
     syncSecurityModuleFeatureUi();
+    maybeStartModelTourOnce(state.config);
     return;
   } catch {
     state.config = null;
