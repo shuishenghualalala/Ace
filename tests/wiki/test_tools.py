@@ -62,6 +62,16 @@ def _set_context(session_id: str = "sid", owner: str = "owner"):
     current_owner_account_id.set(owner)
 
 
+@pytest.fixture(autouse=True)
+def _restore_runctx_defaults():
+    """_set_context 裸 set contextvar 不 reset，值会泄漏给同进程的后续用例
+    （曾导致 tests/test_compact.py 断路器计数的 owner 维度从 "" 变成 "owner"）。
+    每个用例结束后恢复默认值。"""
+    yield
+    current_session_id.set("")
+    current_owner_account_id.set("")
+
+
 @pytest.fixture
 def fs_wiki(tmp_path):
     """真实 FileSystemWikiStore + mock compiler/manager 的工具注册环境（KB 固定为 default）。"""
