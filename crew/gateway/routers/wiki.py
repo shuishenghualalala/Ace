@@ -16,11 +16,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from crew.gateway.auth import account_from_request
 from crew.state.logging import get_logger
 from crew.wiki._utils import is_wiki_agent_session
+from crew.wiki.capture import CaptureError, CaptureValidationError, capture_text_source
 from crew.wiki.parser import (
     MissingDependencyError,
     guess_mime_type,
     parse_document_from_bytes,
-    validate_parsed_text,
 )
 from crew.wiki.schemas import RawSource, WikiRelation
 from crew.wiki.sources import classify_file
@@ -961,8 +961,8 @@ def create_wiki_router(crew) -> APIRouter:
     async def wiki_capture(request: Request):
         """把一段文本（如浏览器标签页正文）存为不可变 RawSource 并发布 Source 页面。
 
-        编排与 wiki_capture_text 工具一致（RawSource → parsed markdown → 去重 →
-        发布全文 Source 页面），但走 HTTP  owner 上下文，供面板「存入 Wiki」使用。
+        与 wiki_capture_text 工具共用 crew.wiki.capture 的入库流水线，
+        这里只做 HTTP 参数解析与响应包装，供面板「存入 Wiki」使用。
         """
         store = getattr(crew, "_wiki_store", None)
         compiler = getattr(crew, "_wiki_compiler", None)
@@ -979,74 +979,42 @@ def create_wiki_router(crew) -> APIRouter:
             kb_id = normalize_kb_id(payload.get("kb_id"))
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        title = str(payload.get("title") or "").strip()
+        title = str(payload.get("title") or "")
         content = str(payload.get("content") or "")
         source_url = str(payload.get("source_url") or "").strip()
-        if not title or not content.strip():
-            return JSONResponse({"ok": False, "error": "标题和内容不能为空"}, status_code=400)
 
         # 面板文本一律按 web 来源归类（material_kind=article），source_url 供溯源。
-        source_id = f"paste_{uuid.uuid4().hex[:12]}"
-        raw = RawSource(
-            id=source_id,
-            title=title,
-            source_type="paste",
-            parsed_path="",
-            file_type="text/markdown",
-            size=len(content.encode("utf-8")),
-            created_at=time.time(),
-            source_kind="article",
-            source_platform="web",
-            adapter_name="builtin-text",
-            source_url=source_url or None,
-        )
-        store.save_raw(raw, owner, kb_id)
         try:
-            text = validate_parsed_text(content, title)
-            raw.parsed_path = str(
-                store.save_parsed_markdown(
-                    source_id,
-                    text,
-                    owner_account_id=owner,
-                    kb_id=kb_id,
-                )
+            outcome = capture_text_source(
+                store,
+                compiler,
+                title=title,
+                content=content,
+                owner_account_id=owner,
+                kb_id=kb_id,
+                source_type="paste",
+                source_platform="web",
+                source_url=source_url,
             )
-            raw.parse_status = "parsed"
-            raw.parse_error = None
-            saved_raw = store.load_raw(source_id, owner_account_id=owner, kb_id=kb_id)
-            if saved_raw is not None:
-                raw.content_sha256 = saved_raw.content_sha256
-            duplicate = store.check_source_duplicate(raw, owner_account_id=owner, kb_id=kb_id)
-            if not isinstance(duplicate, RawSource):
-                duplicate = None
-            raw.is_duplicate = duplicate is not None
-            store.save_raw(raw, owner, kb_id)
-            if duplicate is not None:
-                _finish_page_write(
-                    owner,
-                    kb_id,
-                    f"捕获文本 RawSource {source_id}，内容与 {duplicate.id} 重复，跳过 Source 页面发布",
-                )
-                return {
-                    "ok": True,
-                    "source_id": source_id,
-                    "pages": [],
-                    "duplicate": True,
-                    "duplicate_of": duplicate.id,
-                }
-            page = compiler.publish_source_page(source_id, owner_account_id=owner, kb_id=kb_id)
-        except ValueError as exc:
+        except CaptureValidationError as exc:
+            body: dict[str, Any] = {"ok": False, "error": str(exc)}
+            if exc.source_id:
+                body["source_id"] = exc.source_id
+            return JSONResponse(body, status_code=400)
+        except CaptureError as exc:  # raw 已落库，可让 Wiki Agent 挽救
+            log.warning("Wiki 文本捕获失败 source=%s: %s", exc.source_id, exc)
             return JSONResponse(
-                {"ok": False, "error": str(exc), "source_id": source_id},
-                status_code=400,
-            )
-        except Exception as exc:  # noqa: BLE001 - raw 已落库，可让 Wiki Agent 挽救
-            log.warning("Wiki 文本捕获失败 source=%s: %s", source_id, exc)
-            return JSONResponse(
-                {"ok": False, "error": f"捕获失败: {exc}", "source_id": source_id},
+                {"ok": False, "error": f"捕获失败: {exc}", "source_id": exc.source_id},
                 status_code=500,
             )
-        _finish_page_write(owner, kb_id, f"捕获文本并发布全文 Source 页面 {source_id} ({title})")
-        return {"ok": True, "source_id": source_id, "pages": [page.to_dict(brief=True)]}
+        if outcome.duplicate is not None:
+            return {
+                "ok": True,
+                "source_id": outcome.raw.id,
+                "pages": [],
+                "duplicate": True,
+                "duplicate_of": outcome.duplicate.id,
+            }
+        return {"ok": True, "source_id": outcome.raw.id, "pages": [outcome.page.to_dict(brief=True)]}
 
     return router

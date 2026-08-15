@@ -22,6 +22,7 @@ from crew.tools.registry import Registry, tool_error, tool_result
 from crew.tools.security_guard import authorize_network_tool
 from crew.security.outbound import PublicRedirectApprovalRequired, parse_public_http_target
 
+from .capture import capture_text_source, save_parsed_source
 from .compiler import WikiCompiler
 from .config import WikiConfig
 from .manager import WikiSessionManager
@@ -711,53 +712,20 @@ def register_wiki_tools(
         log_message: str,
     ) -> tuple[str, Any | None, Any | None]:
         """统一保存解析文本，并在发布 Source 页面前完成内容去重。"""
-        text = validate_parsed_text(content, str(raw.title or raw.id))
-        parsed_path = str(
-            store.save_parsed_markdown(
-                raw.id,
-                text,
-                owner_account_id=_owner(),
-                kb_id=kb_id,
-            )
-        )
-        raw.parsed_path = parsed_path
-        raw.parse_status = "parsed"
-        raw.parse_error = None
-        saved_raw = store.load_raw(raw.id, owner_account_id=_owner(), kb_id=kb_id)
-        if saved_raw is not None:
-            raw.content_sha256 = saved_raw.content_sha256
-        duplicate = store.check_source_duplicate(
+        parsed_path, page, duplicate = save_parsed_source(
+            store,
+            compiler,
             raw,
-            owner_account_id=_owner(),
-            kb_id=kb_id,
-        )
-        from .schemas import RawSource
-
-        if not isinstance(duplicate, RawSource):
-            duplicate = None
-        raw.is_duplicate = duplicate is not None
-        store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
-        if duplicate is not None:
-            _finish_write(
-                kb_id,
-                f"解析 source {raw.id}，内容与 {duplicate.id} 重复，跳过 Source 页面发布",
-                "source_duplicate",
-                source_ids=[raw.id],
-            )
-            return parsed_path, None, duplicate
-        page = compiler.publish_source_page(
-            raw.id,
-            owner_account_id=_owner(),
-            kb_id=kb_id,
-        )
-        _finish_write(
+            content,
+            _owner(),
             kb_id,
-            log_message,
-            "source_parsed",
-            source_ids=[raw.id],
-            page_ids=[page.id],
+            log_message=log_message,
         )
-        return parsed_path, page, None
+        if duplicate is not None:
+            _mark_changed(kb_id, "source_duplicate", source_ids=[raw.id])
+        elif page is not None:
+            _mark_changed(kb_id, "source_parsed", source_ids=[raw.id], page_ids=[page.id])
+        return parsed_path, page, duplicate
 
     def _issue_confirmation(
         *,
@@ -877,53 +845,35 @@ def register_wiki_tools(
         source_platform: str = "",
         source_url: str = "",
     ) -> str:
-        import time
-        import uuid
-
-        from .schemas import RawSource
-
-        if not title.strip() or not content.strip():
-            return tool_error("标题和内容不能为空")
-        source_id = f"{source_type}_{uuid.uuid4().hex[:12]}"
-        material_kind = (
-            "session"
-            if source_type == "session"
-            else "article"
-            if source_platform in {"web", "wechat", "zhihu", "x", "xiaohongshu"}
-            else "note"
-        )
-        raw = RawSource(
-            id=source_id,
-            title=title.strip(),
-            source_type=source_type,  # type: ignore[arg-type]
-            parsed_path="",
-            file_type="text/markdown",
-            size=len(content.encode("utf-8")),
-            created_at=time.time(),
-            session_id=session_id or None,
-            source_kind=material_kind,
-            source_platform="crew" if source_type == "session" else source_platform,
-            adapter_name="builtin-session" if source_type == "session" else "builtin-text",
-            source_url=str(source_url or "").strip() or None,
-        )
-        store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
-        parsed_path, page, duplicate = _save_parsed_source(
-            raw,
-            content,
-            kb_id,
-            log_message=f"捕获文本并发布全文 Source 页面 {source_id} ({title.strip()})",
-        )
-        if duplicate is not None:
+        try:
+            outcome = capture_text_source(
+                store,
+                compiler,
+                title=title,
+                content=content,
+                owner_account_id=_owner(),
+                kb_id=kb_id,
+                source_type=source_type,
+                source_platform=source_platform,
+                source_url=source_url,
+                session_id=session_id,
+            )
+        except ValueError as exc:  # 标题/内容为空，或解析文本校验失败
+            return tool_error(str(exc))
+        raw = outcome.raw
+        if outcome.duplicate is not None:
+            _mark_changed(kb_id, "source_duplicate", source_ids=[raw.id])
             return tool_result(
                 source=raw.to_dict(),
-                parsed_path=parsed_path,
+                parsed_path=outcome.parsed_path,
                 duplicate=True,
-                duplicate_of=duplicate.id,
+                duplicate_of=outcome.duplicate.id,
                 message="文本已保存为 RawSource，但内容与已有来源重复，未发布重复 Source 页面。",
             )
+        _mark_changed(kb_id, "source_parsed", source_ids=[raw.id], page_ids=[outcome.page.id])
         return tool_result(
             source=raw.to_dict(),
-            source_page=page.to_dict(brief=True),
+            source_page=outcome.page.to_dict(brief=True),
             message="文本已保存为不可变 RawSource，全文 Source 页面已发布并可搜索。",
         )
 
@@ -1486,14 +1436,15 @@ def register_wiki_tools(
         )
 
     def _handle_list_kbs(args: dict[str, Any]) -> str:
-        kbs = store.list_kbs(owner_account_id=_owner())
+        owner = _owner()
+        kbs = store.list_kbs(owner_account_id=owner)
         return tool_result(
             kbs=[
                 {
                     "kb_id": kb.id,
                     "name": kb.name,
-                    "page_count": kb.summary.page_count,
-                    "source_count": kb.summary.source_count,
+                    "page_count": store.count_pages(owner_account_id=owner, kb_id=kb.id),
+                    "source_count": len(store.list_raws(owner_account_id=owner, kb_id=kb.id)),
                     "vault_path": kb.vault_path,
                 }
                 for kb in kbs
