@@ -5,7 +5,7 @@
  * 主对话与 Wiki 问答面板各实例化一个控制器，label / 浮层 / 圆环各自跟随自己的
  * getSessionId，session:model-changed 按 detail.sessionId 过滤，互不串扰。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { __resetAllStoresForTest, configStore } from '../../src/ui/stores/stores';
 import { createComposerModelControl } from '../../src/ui/features/model-picker';
 import { createContextRingController } from '../../src/ui/features/composer-context-ring';
@@ -153,6 +153,111 @@ describe('createContextRingController', () => {
     ring.refresh();
     expect(els.btn.hidden).toBe(true);
     expect(mockSessionContext).not.toHaveBeenCalled();
+    ring.dispose();
+  });
+});
+
+describe('createContextRingController 事件过滤与节流', () => {
+  const flushMicrotasks = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+  const fireMessagesChanged = (sessionId: string): void => {
+    window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId } }));
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockSessionContext.mockResolvedValue({ used_tokens: 50000 });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('messages:changed 只响应本会话，其他会话的事件直接忽略', async () => {
+    const els = mountRing();
+    const ring = createContextRingController(els, {
+      getSessionId: () => 'sid-b',
+      resolveWindow: () => 100000,
+    });
+    ring.refresh();
+    await flushMicrotasks();
+    expect(mockSessionContext).toHaveBeenCalledTimes(1);
+
+    // 其他会话的流式事件：不拉取，也不挂尾随定时器
+    fireMessagesChanged('sid-other');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mockSessionContext).toHaveBeenCalledTimes(1);
+
+    // 本会话事件：距上次拉取已超 2s，立即拉取
+    fireMessagesChanged('sid-b');
+    await flushMicrotasks();
+    expect(mockSessionContext).toHaveBeenCalledTimes(2);
+    ring.dispose();
+  });
+
+  it('流式期间逐 chunk 事件被节流到 2s 一次，结束后尾随补齐最终用量', async () => {
+    const els = mountRing();
+    const ring = createContextRingController(els, {
+      getSessionId: () => 'sid-b',
+      resolveWindow: () => 100000,
+    });
+    // 模拟流式输出：每 100ms 一个 chunk 事件，持续 3s
+    for (let i = 0; i < 30; i++) {
+      fireMessagesChanged('sid-b');
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    const duringStream = mockSessionContext.mock.calls.length;
+    expect(duringStream).toBeLessThanOrEqual(2); // 首次立即 + 2s 处一次，而非 30 次
+
+    // 流结束后：尾随定时器补齐一次最终刷新
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(mockSessionContext.mock.calls.length).toBe(duringStream + 1);
+
+    // dispose 后不再有任何拉取
+    ring.dispose();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mockSessionContext.mock.calls.length).toBe(duringStream + 1);
+  });
+
+  it('isActive 为 false 时不拉取（切走的 tab 不为看不见的圆环白请求）', async () => {
+    let active = false;
+    const els = mountRing();
+    const ring = createContextRingController(els, {
+      getSessionId: () => 'sid-b',
+      resolveWindow: () => 100000,
+      isActive: () => active,
+    });
+    ring.refresh();
+    await flushMicrotasks();
+    expect(mockSessionContext).not.toHaveBeenCalled();
+    expect(els.btn.hidden).toBe(true);
+
+    active = true;
+    ring.refresh();
+    await flushMicrotasks();
+    expect(mockSessionContext).toHaveBeenCalledTimes(1);
+    ring.dispose();
+  });
+
+  it('session:model-changed 只响应本会话', async () => {
+    const els = mountRing();
+    const ring = createContextRingController(els, {
+      getSessionId: () => 'sid-b',
+      resolveWindow: () => 100000,
+    });
+    ring.refresh();
+    await flushMicrotasks();
+    expect(mockSessionContext).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new CustomEvent('session:model-changed', { detail: { sessionId: 'sid-other' } }));
+    await flushMicrotasks();
+    expect(mockSessionContext).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new CustomEvent('session:model-changed', { detail: { sessionId: 'sid-b' } }));
+    await flushMicrotasks();
+    expect(mockSessionContext).toHaveBeenCalledTimes(2);
     ring.dispose();
   });
 });

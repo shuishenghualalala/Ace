@@ -11,6 +11,12 @@ import { resolveSessionModelWindow } from './session-model';
 const RING_RADIUS = 9;
 const RING_CIRC = 2 * Math.PI * RING_RADIUS;
 
+/**
+ * 事件驱动刷新的最小间隔：流式输出期间 messages:changed 逐 chunk 触发，
+ * 而用量百分比每秒只走约 0.02%，2s 节流在体感上仍是实时的。
+ */
+const EVENT_REFRESH_MIN_INTERVAL_MS = 2000;
+
 /** 将 token 数格式化为 K/M 缩写（与 WorkBuddy 提示风格接近）。 */
 function formatTokenCount(n: number): string {
   const v = Math.max(0, Math.round(n));
@@ -36,6 +42,8 @@ export interface ContextRingControllerOptions {
   getSessionId: () => string | null;
   /** 上下文窗口分母（按本实例会话的绑定模型取）。 */
   resolveWindow: () => number;
+  /** 圆环是否可见（所在 tab 激活）。不可见时不拉取——看不见的圆环不白请求。 */
+  isActive?: () => boolean;
 }
 
 export function createContextRingController(
@@ -46,6 +54,8 @@ export function createContextRingController(
   const { signal } = controller;
   let lastSessionId: string | null = null;
   let inflight: Promise<void> | null = null;
+  let lastFetchAt = 0;
+  let trailingTimer: number | null = null;
 
   const setRingProgress = (ratio: number): void => {
     const clamped = Math.max(0, Math.min(1, ratio));
@@ -73,6 +83,7 @@ export function createContextRingController(
   };
 
   const refresh = (): void => {
+    if (opts.isActive && !opts.isActive()) return;
     const sid = opts.getSessionId();
     if (!sid) {
       hideRing();
@@ -100,17 +111,41 @@ export function createContextRingController(
       }
     };
 
+    lastFetchAt = Date.now();
     inflight = run().finally(() => {
       inflight = null;
     });
+  };
+
+  /** 事件驱动刷新：2s 最小间隔 + 尾随补一次，保证流式结束后拿到最终用量。 */
+  const throttledRefresh = (): void => {
+    const elapsed = Date.now() - lastFetchAt;
+    if (elapsed >= EVENT_REFRESH_MIN_INTERVAL_MS) {
+      refresh();
+    } else if (trailingTimer === null) {
+      trailingTimer = window.setTimeout(() => {
+        trailingTimer = null;
+        throttledRefresh();
+      }, EVENT_REFRESH_MIN_INTERVAL_MS - elapsed);
+    }
+  };
+
+  /** 事件 detail 里带 sessionId 时，只响应本实例会话的变化。 */
+  const isOwnSessionEvent = (event: Event): boolean => {
+    const sid = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+    return !sid || sid === opts.getSessionId();
   };
 
   window.addEventListener('session:changed', () => {
     lastSessionId = null;
     refresh();
   }, { signal });
-  window.addEventListener('messages:changed', () => refresh(), { signal });
-  window.addEventListener('session:model-changed', () => {
+  window.addEventListener('messages:changed', (event) => {
+    if (!isOwnSessionEvent(event)) return;
+    throttledRefresh();
+  }, { signal });
+  window.addEventListener('session:model-changed', (event) => {
+    if (!isOwnSessionEvent(event)) return;
     lastSessionId = null;
     refresh();
   }, { signal });
@@ -118,6 +153,7 @@ export function createContextRingController(
   return {
     refresh,
     dispose() {
+      if (trailingTimer !== null) window.clearTimeout(trailingTimer);
       controller.abort();
     },
   };
@@ -139,7 +175,11 @@ export function bindComposerContextRing(): void {
   mainRingController?.dispose();
   mainRingController = createContextRingController(
     { btn, pct: pctEl, progress },
-    { getSessionId: () => state.activeSessionId, resolveWindow: resolveSessionModelWindow },
+    {
+      getSessionId: () => state.activeSessionId,
+      resolveWindow: resolveSessionModelWindow,
+      isActive: () => state.activeTab === 'chat',
+    },
   );
   mainRingController.refresh();
 }

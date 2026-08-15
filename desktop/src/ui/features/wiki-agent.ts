@@ -761,6 +761,8 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   activeRingControl = createContextRingController(contextView.controls.ring, {
     getSessionId: getEmbeddedSessionId,
     resolveWindow: () => modelContextWindow(activeComposerModelId(getEmbeddedSessionId())),
+    // 切走 Wiki 页后不再为看不见的面板拉取；回到 Wiki 页时 renderShell 重挂载会重建并刷新。
+    isActive: () => state.activeTab === 'wiki',
   });
   activeRingControl.refresh();
   const input = panel.composerRoot.querySelector<HTMLTextAreaElement>('[data-composer-input]');
