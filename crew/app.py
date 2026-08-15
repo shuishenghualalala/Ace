@@ -15,9 +15,8 @@ import inspect
 import re
 import sys
 import time
-import uuid
 from collections import OrderedDict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.compact import ContextCompactor, SummaryStore
@@ -359,7 +358,15 @@ class AgentManager:
         await self.wait_closed()
 
 
+# 存活的 CrewApp 实例注册表：测试中存在不走 ASGI lifespan 的用法（直接
+# ASGITransport 调 app），shutdown 不会被触发；tests/conftest.py 的兜底 fixture
+# 在每个用例后统一关闭，避免 SQLite/WAL 句柄跨用例累积耗尽 fd。
+# 正常 shutdown() 会把自己从表中移除，生产单实例场景开销可忽略。
+_LIVE_APPS: list["CrewApp"] = []
+
+
 class CrewApp:
+
     def __init__(
         self,
         config: Config,
@@ -511,6 +518,7 @@ class CrewApp:
             active_children_fn=self._active_children_snapshot,
             task_runtime=self.tasks,
         )
+        _LIVE_APPS.append(self)
 
     def _on_task_event(self, task: dict[str, Any]) -> None:
         """Push normalized task events to connected clients."""
@@ -1658,6 +1666,8 @@ class CrewApp:
                 return
             await self._shutdown_resources(provider_timeout=timeout)
             self._shutdown_complete = True
+        with suppress(ValueError):
+            _LIVE_APPS.remove(self)
 
     async def _shutdown_resources(self, *, provider_timeout: float) -> None:
         """Execute the ordered App shutdown sequence."""
@@ -1714,6 +1724,17 @@ class CrewApp:
             self.work_service.close()
         self.security_rules.close()
         self.security_audit.close()
+        # 持久化 Store 各持有 SQLite 连接（WAL 下每库占多个 fd），必须随 App 关闭，
+        # 否则测试批量构建 App、热重载等场景会持续累积文件句柄。
+        self.tasks.close()
+        self.summary_store.close()
+        for store in (self.session_store, self.workspace_store, self.memory, self.plugin_prefs):
+            close = getattr(store, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - 继续释放其他 Store
+                    log.exception("关闭 Store 失败: %s", type(store).__name__)
 
     async def reload_mcp_manager(self) -> None:
         """热重载 MCPClientManager：关闭现有连接并用当前 config.mcp_servers 重新启动。
@@ -2881,11 +2902,14 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                 log.debug("cron deliver origin 无外部 sender，fallback 为新建会话")
                 deliver_target = "new_session"
 
-            # 默认/新会话投递：每次触发都新建一个本地会话，便于前端通过未读绿点感知。
-            # "local" 表示显式投递回原绑定会话，保持原行为不新建。
+            # 默认/新会话投递：每个任务一个固定的投递会话（首次触发创建、后续触发追加），
+            # 分钟级任务不再每次触发刷一个同名新会话。"local" 表示显式投递回原绑定会话。
             if deliver_target in {"", "new_session"}:
                 job_name = str(env.params.get("cron_job_name") or "").strip()
-                new_sid = f"cron_{uuid.uuid4().hex[:12]}"
+                new_sid = f"{str(env.params.get('cron_job_id') or 'job')}_feed"
+                already_exists = app.session_store.session_belongs_to(
+                    new_sid, owner_account_id=env.user_id
+                )
                 app.session_store.ensure_session(
                     new_sid,
                     workspace_id=env.workspace_id,
@@ -2893,7 +2917,11 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                     owner_account_id=env.user_id,
                 )
                 env.session_id = new_sid
-                await _notify_cron_session("cron_session_created", env, new_sid)
+                await _notify_cron_session(
+                    "cron_session_updated" if already_exists else "cron_session_created",
+                    env,
+                    new_sid,
+                )
                 deliver_target = "new_session"
 
             if origin is not None and "session_context" not in env.params:
