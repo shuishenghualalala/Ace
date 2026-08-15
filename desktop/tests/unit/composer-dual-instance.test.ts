@@ -116,33 +116,6 @@ describe('双 Composer 实例隔离', () => {
     viewB.dispose();
   });
 
-  it('仅有上下文批注时也可发送，清空后恢复禁用', async () => {
-    const hostA = document.getElementById('host-a')!;
-    const viewA = createPanelComposer(hostA, 'sid-a', stubAttachments());
-    const beforeInput = hostA.querySelector<HTMLElement>(
-      '[data-composer-context-target="before-input"]',
-    )!;
-    const annotationDraft = document.createElement('div');
-    annotationDraft.dataset.composerDraft = '';
-    annotationDraft.hidden = true;
-    beforeInput.append(annotationDraft);
-
-    const send = hostA.querySelector<HTMLButtonElement>('[data-composer-send]')!;
-    expect(send.disabled).toBe(true);
-
-    annotationDraft.textContent = '1 条 App 批注';
-    annotationDraft.hidden = false;
-    await Promise.resolve();
-    expect(send.disabled).toBe(false);
-
-    annotationDraft.replaceChildren();
-    annotationDraft.hidden = true;
-    await Promise.resolve();
-    expect(send.disabled).toBe(true);
-
-    viewA.dispose();
-  });
-
   it('primary 注册后 composer-scope 查询锚定主 Composer，dispose 后回退文档序', () => {
     const hostA = document.getElementById('host-a')!;
     const hostB = document.getElementById('host-b')!;

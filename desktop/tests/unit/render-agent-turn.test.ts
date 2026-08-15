@@ -998,13 +998,14 @@ describe('renderAgentTurn', () => {
 
     const card = root.querySelector<HTMLElement>('.msg__artifact-card');
     expect(card?.tagName).toBe('ARTICLE');
-    expect(card?.getAttribute('data-browser-artifact')).toBe('site/index.html');
-    expect(card?.getAttribute('role')).toBe('button');
-    expect(card?.tabIndex).toBe(0);
     expect(card?.getAttribute('aria-label')).toContain('index');
-    expect(card?.textContent).toContain('灵感成果');
-    expect(root.querySelector('.msg__artifact-open')).toBeNull();
-    expect(root.querySelector('.msg__artifact-reveal')).toBeNull();
+    expect(card?.textContent).toContain('本地 HTML · 网站');
+    // data-browser-artifact 挂在内部「在 Crew 打开」按钮上，不再占整张卡
+    const open = root.querySelector<HTMLElement>('.msg__artifact-open');
+    expect(open?.getAttribute('data-browser-artifact')).toBe('site/index.html');
+    expect(open?.textContent).toContain('在 Crew 打开');
+    const reveal = root.querySelector<HTMLElement>('.msg__artifact-reveal');
+    expect(reveal?.getAttribute('data-file-reveal')).toBe('site/index.html');
   });
 
   it('本轮文件改动卡含查看入口、路径、单文件与合计红绿计数', () => {

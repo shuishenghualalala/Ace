@@ -523,7 +523,7 @@ describe('Playwright MCP action parity', () => {
     }));
   });
 
-  it('classifies an actionability timeout before native dispatch as stale', async () => {
+  it('classifies an actionability timeout before native dispatch as not actionable', async () => {
     const { ctx, start } = actionFixture();
     vi.mocked(start.click).mockRejectedValueOnce(new Error(
       'locator.click: Timeout 12345ms exceeded.\n'
@@ -534,7 +534,7 @@ describe('Playwright MCP action parity', () => {
     ));
 
     await expect(click(ctx, '@e1')).rejects.toMatchObject({
-      code: 'stale_ref',
+      code: 'element_not_actionable',
       phase: 'pre_dispatch',
       uncertain: false,
       partial: false,

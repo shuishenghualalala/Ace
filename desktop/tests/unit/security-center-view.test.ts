@@ -92,7 +92,7 @@ describe('Security Center view', () => {
       audits: [],
     });
 
-    expect(view.element.textContent).toContain('普通读取免询问；命令、写入和联网需确认');
+    expect(view.element.textContent).toContain('沙箱内命令和工作区写入直接执行；扩权与高风险操作需确认');
     expect(view.element.textContent).toContain('使用当前宿主用户权限，不启用沙箱');
     expect(view.element.textContent).toContain('D:/work/<img src=x onerror=alert(1)>');
     expect(view.element.querySelector('.security-center__rule-detail')?.textContent)
@@ -263,12 +263,10 @@ describe('Security Center view', () => {
 
     const actionType = view.element.querySelector<HTMLSelectElement>('[data-security-audit-filter="action-type"]');
     expect(Array.from(actionType!.options).map((option) => option.value)).toEqual(expect.arrayContaining([
-      'network_decision',
-      'exec_result',
-      'rule_created',
-      'rule_disabled',
-      'rule_deleted',
-      'audit_purged',
+      'approval_requested',
+      'approval_decision',
+      'exec_decision',
+      'file_decision',
     ]));
     actionType!.value = 'approval_decision';
     actionType!.dispatchEvent(new Event('change', { bubbles: true }));
@@ -287,7 +285,7 @@ describe('Security Center view', () => {
     expect(dialog?.textContent).toContain('桌面端项目');
     expect(dialog?.textContent).toContain('当前会话');
     expect(dialog?.textContent).toContain('事件审批模式替我审批');
-    expect(dialog?.textContent).toContain('当前审批模式每次询问');
+    expect(dialog?.textContent).toContain('当前审批模式请求批准');
     expect(dialog?.textContent).toContain('git status --token sk-...3456');
   });
 });

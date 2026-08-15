@@ -391,6 +391,9 @@ describe('浏览器录制指示条', () => {
     // 注意 renderBrowserPanel() 读的是模块内的 pageState，不接受参数——所以
     // 必须先让面板真的拿到一个页面状态，不能只把 state 传进渲染函数。
     document.body.innerHTML = renderBrowserPanel();
+    // 生产路径 bindBrowserPanel 在 innerHTML 之后调 renderBrowserRecordingBar()
+    // 注入录制控件（browser-panel.ts:490）；测试直写 innerHTML 要补上这一步。
+    renderBrowserRecordingBar();
     // 空白页也**不禁用**：禁用按钮在 Chromium 里连原生提示都不弹，用户只会看到
     // 一个点不动、也不说为什么的死胡同。空白页按下改为进入预备态（见下一条用例）。
     expect(document.querySelector<HTMLButtonElement>('[data-browser-record="start"]')?.disabled)
@@ -403,6 +406,7 @@ describe('浏览器录制指示条', () => {
     });
     await openUserBrowser();
     document.body.innerHTML = renderBrowserPanel();
+    renderBrowserRecordingBar();
 
     const start = document.querySelector<HTMLButtonElement>('[data-browser-record="start"]');
     expect(start).not.toBeNull();

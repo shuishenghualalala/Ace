@@ -44,7 +44,6 @@ vi.mock('../../src/ui/backend-client', () => ({
     wikiSearch: vi.fn(),
     wikiUpdatePage: vi.fn(),
     wikiVaultDocument: vi.fn(),
-    wikiSummary: vi.fn(),
     wikiUpload: vi.fn(),
     wikiIngest: vi.fn(),
     wikiCancelIngest: vi.fn(),
@@ -74,7 +73,6 @@ const api = backendApi as unknown as {
   wikiSearch: ReturnType<typeof vi.fn>;
   wikiUpdatePage: ReturnType<typeof vi.fn>;
   wikiVaultDocument: ReturnType<typeof vi.fn>;
-  wikiSummary: ReturnType<typeof vi.fn>;
   wikiUpload: ReturnType<typeof vi.fn>;
   wikiIngest: ReturnType<typeof vi.fn>;
   wikiCancelIngest: ReturnType<typeof vi.fn>;
@@ -151,7 +149,6 @@ beforeEach(() => {
       updated_at: NOW,
     },
   }));
-  api.wikiSummary.mockResolvedValue({ ok: true, summary: '', kb_id: 'default', status: 'empty' });
   api.wikiDeletePage.mockResolvedValue({ ok: true });
   api.wikiDeletePages.mockResolvedValue({ ok: true, deleted: [], failed: [] });
   api.wikiCancelIngest.mockResolvedValue({ ok: true, cancelled: true });
@@ -165,7 +162,6 @@ describe('KB 加载与渲染', () => {
         makePage({ id: 'p2', title: 'Vue 笔记', page_type: 'entity', file_path: 'vue.md' }),
       ]),
     );
-    api.wikiSummary.mockResolvedValue({ ok: true, summary: '这是概览', kb_id: 'default', status: 'ready' });
 
     await refreshWikiData();
     await flush();

@@ -65,7 +65,6 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       wikiKBs: vi.fn(),
       wikiInit: vi.fn(),
       wikiPages: vi.fn(),
-      wikiSummary: vi.fn(),
       wikiUpload: vi.fn(),
       wikiIngest: vi.fn(),
       sessionTodos: vi.fn(),
@@ -127,7 +126,6 @@ const api = backendApi as unknown as {
   wikiKBs: ReturnType<typeof vi.fn>;
   wikiInit: ReturnType<typeof vi.fn>;
   wikiPages: ReturnType<typeof vi.fn>;
-  wikiSummary: ReturnType<typeof vi.fn>;
   wikiUpload: ReturnType<typeof vi.fn>;
   wikiIngest: ReturnType<typeof vi.fn>;
   sessionTodos: ReturnType<typeof vi.fn>;
@@ -267,7 +265,6 @@ beforeEach(() => {
   });
   api.wikiInit.mockResolvedValue({ ok: true });
   api.wikiPages.mockResolvedValue({ ok: true, pages: [], source_titles: {}, source_files: {} });
-  api.wikiSummary.mockResolvedValue({ ok: true, summary: '', kb_id: 'default', status: 'empty' });
   api.sessionTodos.mockResolvedValue({ ok: true, todos: [] });
   api.getSessionModel.mockResolvedValue({ ok: true, model_profile_id: 'glm-fast', model_label: 'GLM 快速' });
   api.setSessionModel.mockImplementation(async (_sid: string, id: string) => ({

@@ -3,12 +3,13 @@
  *
  * 渠道会话侧栏：分组渲染、空态隐藏、点击打开会话。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { __resetAllStoresForTest, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
-import { renderWorkspaceHistory } from '../../src/ui/features/workspaces';
+import { createSessionHistoryView, type SessionHistoryView } from '../../src/ui/features/session-history-view';
 import { isChannelSessionId } from '../../src/ui/features/channel-sessions';
 import type { SessionRow } from '../../src/ui/state';
-import { mountHistoryList } from './helpers/history-list';
+
+const CHANNELS_SECTION = '[data-session-section="Crew.historyChannelsCollapsed"]';
 
 function channelSession(id: string, platform = 'feishu'): SessionRow {
   return {
@@ -22,9 +23,34 @@ function channelSession(id: string, platform = 'feishu'): SessionRow {
   };
 }
 
+let view: SessionHistoryView | null = null;
+
+function mountView(openSession: (sessionId: string) => void = () => {}): HTMLElement {
+  const host = document.createElement('div');
+  document.body.innerHTML = '';
+  document.body.append(host);
+  view = createSessionHistoryView(host, {
+    openSession,
+    createSession: vi.fn(),
+    createWorkspace: vi.fn(),
+    manageHistory: vi.fn(),
+    openWorkspace: vi.fn(),
+    refreshSessions: async () => undefined,
+    retrySessions: async () => undefined,
+    retryWorkspaces: async () => undefined,
+    getLoadErrors: () => ({ sessions: null, workspaces: null }),
+  });
+  return host;
+}
+
 beforeEach(() => {
   __resetAllStoresForTest();
   localStorage.clear();
+});
+
+afterEach(() => {
+  view?.dispose();
+  view = null;
 });
 
 describe('isChannelSessionId', () => {
@@ -37,36 +63,38 @@ describe('isChannelSessionId', () => {
 });
 
 describe('渠道侧栏分区', () => {
-  it('原生 DOM 分区头保留 dataset、ARIA、折叠态与 SVG 图标', () => {
-    localStorage.setItem('crew.historyChannelsCollapsed', 'true');
-    mountHistoryList();
-    renderWorkspaceHistory(() => {});
+  it('渠道分区头保留 dataset、ARIA 与折叠态切换', () => {
+    workspaceStore.set({
+      channelSessionGroups: [
+        { platform: 'feishu', label: '飞书', sessions: [channelSession('agent:main:feishu:dm:u1')] },
+      ],
+    });
+    localStorage.setItem('Crew.historyChannelsCollapsed', 'true');
+    mountView();
 
     const header = document.querySelector<HTMLButtonElement>(
-      '.history-section--channels .history-section-header',
+      `${CHANNELS_SECTION} [data-section-toggle]`,
     );
     expect(header).not.toBeNull();
-    expect(header!.dataset.sectionToggle).toBe('crew.historyChannelsCollapsed');
+    expect(header!.dataset.sectionToggle).toBe('Crew.historyChannelsCollapsed');
     expect(header!.getAttribute('aria-expanded')).toBe('false');
-    expect(header!.classList.contains('collapsed')).toBe(true);
-    expect(header!.querySelector('.history-section-caret svg path')?.getAttribute('d'))
-      .toBe('m9 18 6-6-6-6');
+    expect(header!.querySelector('use')?.getAttribute('href')).toBe('#icon-chevron-down');
+    // 折叠时不渲染分区内容
+    expect(document.querySelector(`${CHANNELS_SECTION} .mw-session-history__section-content`)).toBeNull();
 
     header!.click();
     const updated = document.querySelector<HTMLButtonElement>(
-      '.history-section--channels .history-section-header',
+      `${CHANNELS_SECTION} [data-section-toggle]`,
     );
     expect(updated!.getAttribute('aria-expanded')).toBe('true');
-    expect(updated!.classList.contains('collapsed')).toBe(false);
+    expect(document.querySelector(`${CHANNELS_SECTION} .mw-session-history__section-content`)).not.toBeNull();
   });
 
-  it('无渠道分组时隐藏渠道分区', () => {
+  it('无渠道分组时不渲染渠道分区', () => {
     sessionStore.set({ sessions: [{ id: 's1', title: 's1', workspaceId: 'default', updatedAt: 1000, preview: '', badge: '' }] });
-    mountHistoryList();
-    renderWorkspaceHistory(() => {});
-    const section = document.querySelector('.history-section--channels') as HTMLElement;
-    expect(section).not.toBeNull();
-    expect(section.hidden).toBe(true);
+    mountView();
+    expect(document.querySelector(CHANNELS_SECTION)).toBeNull();
+    expect(document.querySelector('[data-session-group="conversation:default"]')).not.toBeNull();
   });
 
   it('有渠道分组时渲染平台文件夹与会话行', () => {
@@ -75,11 +103,10 @@ describe('渠道侧栏分区', () => {
         { platform: 'feishu', label: '飞书', sessions: [channelSession('agent:main:feishu:dm:u1')] },
       ],
     });
-    mountHistoryList();
-    renderWorkspaceHistory(() => {});
-    const section = document.querySelector('.history-section--channels') as HTMLElement;
-    expect(section.hidden).toBe(false);
-    expect(document.querySelector('[data-channel-id="feishu"]')).not.toBeNull();
+    mountView();
+    expect(document.querySelector(CHANNELS_SECTION)).not.toBeNull();
+    expect(document.querySelector('[data-session-group="channel:feishu"]')).not.toBeNull();
+    expect(document.querySelector('[data-channel-toggle="feishu"]')).not.toBeNull();
     expect(document.querySelector('[data-session-id="agent:main:feishu:dm:u1"]')).not.toBeNull();
   });
 
@@ -91,11 +118,10 @@ describe('渠道侧栏分区', () => {
         channelSession('agent:main:testchat:dm:u1', 'testchat'),
       ],
     });
-    mountHistoryList();
-    renderWorkspaceHistory(() => {});
-    const convIds = Array.from(document.querySelectorAll('.conversations-list [data-session-id]')).map(
-      (el) => el.getAttribute('data-session-id'),
-    );
+    mountView();
+    const convIds = Array.from(
+      document.querySelectorAll('[data-session-group="conversation:default"] [data-session-id]'),
+    ).map((el) => el.getAttribute('data-session-id'));
     expect(convIds).toEqual(['s1']);
   });
 
@@ -105,10 +131,9 @@ describe('渠道侧栏分区', () => {
         { platform: 'feishu', label: '飞书', sessions: [channelSession('agent:main:feishu:dm:u1')] },
       ],
     });
-    mountHistoryList();
     const open = vi.fn();
-    renderWorkspaceHistory(open);
-    const row = document.querySelector<HTMLElement>('[data-session-id="agent:main:feishu:dm:u1"]');
+    mountView(open);
+    const row = document.querySelector<HTMLElement>('[data-session-open="agent:main:feishu:dm:u1"]');
     expect(row).not.toBeNull();
     row!.click();
     expect(open).toHaveBeenCalledWith('agent:main:feishu:dm:u1');

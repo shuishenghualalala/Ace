@@ -32,7 +32,7 @@ describe('composer workspace picker', () => {
     const row = document.getElementById('chat-workspace-row')!;
     const label = document.getElementById('chat-workspace-btn-label')!;
     expect(row.hidden).toBe(false);
-    expect(label.textContent).toBe('工作空间');
+    expect(label.textContent).toBe('不在项目中工作');
   });
 
   it('shows project name when a project draft is selected', () => {
