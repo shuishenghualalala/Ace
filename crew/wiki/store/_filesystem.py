@@ -1199,12 +1199,6 @@ class FileSystemWikiStore(WikiStore):
         """程序化 Lint：断链、孤立页面、格式违规、时效性标记。"""
         pages = list(self._iter_pages(owner_account_id, kb_id))
         title_to_id = {p.title: p.id for p in pages}
-        normalized_title_keys = {
-            normalize_page_key(value)
-            for page in pages
-            for value in [page.title, *page.aliases]
-            if normalize_page_key(value)
-        }
         raw_ids = {
             source.id for source in self.list_raws(owner_account_id, kb_id)
         }

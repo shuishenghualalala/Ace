@@ -1274,7 +1274,7 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
     existing.content = "# AgentRuntime\n\n已被外部修改的新内容"
     store.update(existing)
 
-    result = await compiler.apply_ingest("s1")
+    await compiler.apply_ingest("s1")
     page_after = store.get(existing.id)
     assert "已被外部修改的新内容" in page_after.content
     assert "运行时描述" not in page_after.content  # 计划内容未覆盖

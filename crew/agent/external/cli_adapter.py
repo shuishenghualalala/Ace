@@ -36,7 +36,6 @@ from crew.agent.external.runtime_adapter import (
     build_external_runtime_home_files,
     build_external_runtime_network_permissions,
     build_external_runtime_env,
-    build_managed_external_runtime_env,
     open_managed_external_interactive,
     register_runtime_adapter,
 )

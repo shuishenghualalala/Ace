@@ -858,7 +858,6 @@ class BuiltinExecutor(AgentExecutor):
                     base_url=_prov_base_url,
                 )
                 effective_request = mw.payload if isinstance(mw.payload, dict) else request
-                effective_tools = effective_request.get("tools", tools)
 
                 def _stream(req, active_provider=provider):
                     messages_arg = req["messages"] if "messages" in req else api_messages
