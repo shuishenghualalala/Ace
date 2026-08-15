@@ -979,27 +979,6 @@
   color: var(--mw-text-muted);
 }
 
-.wiki-overview {
-  width: 100%;
-  max-width: 640px;
-  padding: var(--mw-space-4) var(--mw-space-5);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-subtle);
-}
-
-.wiki-overview__title {
-  margin-bottom: var(--mw-space-2);
-  font-size: var(--mw-type-caption-size);
-  font-weight: 600;
-  color: var(--mw-text-primary);
-}
-
-.wiki-overview__body {
-  font-size: var(--mw-type-caption-size);
-  color: var(--mw-text-secondary);
-}
-
 .wiki-detail__header {
   margin: 0 0 28px;
 }
@@ -2123,7 +2102,6 @@
 /* ══════════════════════════════════════════════════════════════════
  * Phase 4：Wiki Agent 对话
  * - .wiki-cards-panel / .wiki-card：对话流 wiki_cards 帧的「Wiki 结果」卡片网格
- * - .wiki-summary-card：wiki_summary 帧的 KB 概览卡（含建议追问 chips）
  * - .wiki-overlay：卡片「查看」弹出的页面详情 overlay（复用 .wiki-detail 内部结构）
  * ══════════════════════════════════════════════════════════════════ */
 
@@ -2250,73 +2228,6 @@
 .wiki-card__btn:hover {
   border-color: var(--mw-action-primary);
   background: var(--mw-bg-selected);
-}
-
-/* ── KB 概览卡（wiki_summary 帧） ── */
-
-.wiki-summary-card {
-  margin: var(--mw-space-2) 0;
-  padding: var(--mw-space-3) var(--mw-space-3);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-surface);
-}
-
-.wiki-summary-card__header {
-  display: flex;
-  align-items: center;
-  gap: var(--mw-space-2);
-  color: var(--mw-action-primary);
-  font-size: var(--mw-type-caption-size);
-  font-weight: 600;
-}
-
-.wiki-summary-card__badge {
-  padding: var(--mw-space-1) var(--mw-space-2);
-  border-radius: var(--mw-radius-full);
-  background: var(--mw-status-warning-bg);
-  color: var(--mw-status-warning);
-  font-size: var(--mw-type-caption-size);
-  font-weight: 400;
-  line-height: 16px;
-}
-
-.wiki-summary-card__body {
-  margin-top: var(--mw-space-2);
-  color: var(--mw-text-primary);
-  font-size: var(--mw-type-caption-size);
-  line-height: 1.7;
-  white-space: pre-wrap;
-}
-
-.wiki-summary-card__suggestions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--mw-space-1);
-  margin-top: var(--mw-space-2);
-}
-
-.wiki-summary-card__chip {
-  padding: var(--mw-space-1) var(--mw-space-2);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-full);
-  background: var(--mw-bg-surface);
-  color: var(--mw-action-primary);
-  font-size: var(--mw-type-caption-size);
-  cursor: pointer;
-}
-
-.wiki-summary-card__chip:hover {
-  border-color: var(--mw-action-primary);
-  background: var(--mw-bg-selected);
-}
-
-.wiki-summary-card__meta {
-  display: flex;
-  gap: var(--mw-space-3);
-  margin-top: var(--mw-space-2);
-  color: var(--mw-text-muted);
-  font-size: var(--mw-type-caption-size);
 }
 
 /* ── 页面详情 overlay（wiki_cards「查看」） ── */

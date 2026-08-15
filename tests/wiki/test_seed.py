@@ -57,29 +57,21 @@ def test_seed_creates_tutorial_kb(tmp_path):
     assert "这个知识库还没有内容" not in home
 
 
-def test_seed_writes_prebuilt_summary(tmp_path):
-    """教程库初始化即带手写概览（status=ready），无需 LLM 调用。"""
+def test_seed_writes_prebuilt_home_intro(tmp_path):
+    """教程库初始化即带手写 Home 导读（status=ready），无需 LLM 调用。"""
     store = _make_store(tmp_path)
     assert ensure_tutorial_kb(store) is True
 
-    summary = store.get_kb_summary("", TUTORIAL_KB_ID)
-    assert summary.status == "ready"
-    assert summary.summary
-    assert "LLM Wiki" in summary.summary
-    assert summary.page_count == 13
-    assert summary.source_count == 0
+    # Home.md 导读预置（status=ready），且渲染进 Home.md 而非占位文案。
+    intro = store.get_home_intro("", TUTORIAL_KB_ID)
+    assert intro.status == "ready"
+    assert intro.text
+    assert len(intro.questions) == 3
     # content_hash 与 WikiSummarizer 的刷新判定同源，内容未变时不会触发重生成。
     from crew.wiki.summary import WikiSummarizer
 
     pages = store.list_all(owner_account_id="", kb_id=TUTORIAL_KB_ID, limit=10000)
-    assert summary.content_hash == WikiSummarizer._compute_content_hash(pages, [])
-
-    # Home.md 导读同样预置（status=ready），且渲染进 Home.md 而非占位文案。
-    intro = store.get_home_intro("", TUTORIAL_KB_ID)
-    assert intro.status == "ready"
-    assert intro.text
-    assert intro.content_hash == summary.content_hash
-    assert len(intro.questions) == 3
+    assert intro.content_hash == WikiSummarizer._compute_content_hash(pages, [])
     home = (tmp_path / "wiki_lib" / TUTORIAL_KB_ID / "Home.md").read_text(encoding="utf-8")
     assert intro.text in home
     assert "导读整理中" not in home

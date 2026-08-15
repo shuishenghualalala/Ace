@@ -7,7 +7,6 @@ from typing import Any
 
 from crew.wiki.schemas import (
     HomeIntro,
-    KBSummary,
     KnowledgeBase,
     LintIssue,
     RawSource,
@@ -48,30 +47,6 @@ class WikiStore(ABC):
             if kb.id == kb_id:
                 return kb.vault_path
         return ""
-
-    # ---- kb summary ----
-    def get_kb_summary(
-        self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> KBSummary:
-        """读取知识库摘要元数据；默认实现从 list_kbs 中查找。"""
-        for kb in self.list_kbs(owner_account_id):
-            if kb.id == kb_id:
-                return kb.summary
-        return KBSummary()
-
-    def set_kb_summary(
-        self,
-        summary: KBSummary,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> None:
-        """写入知识库摘要元数据；子类可覆盖以优化写入路径。"""
-        for kb in self.list_kbs(owner_account_id):
-            if kb.id == kb_id:
-                kb.summary = summary
-                return
 
     # ---- home intro ----
     def get_home_intro(

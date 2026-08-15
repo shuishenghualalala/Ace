@@ -34,7 +34,6 @@ export type ChunkKind =
   | 'work_event'
   | 'wiki_ingest_progress'
   | 'wiki_cards'
-  | 'wiki_summary'
   | 'wiki_changed'
   | 'ping'
   | 'pong';
@@ -1497,12 +1496,6 @@ export interface WikiCardsChunk extends Omit<ChatChunk, 'kind' | 'body'> {
   body: { pages?: WikiPage[]; cards?: WikiPage[] };
 }
 
-/** wiki_summary 帧：进入 Wiki 模式时后端推送的 KB 概览卡（body 为 WikiSummary）。 */
-export interface WikiSummaryChunk extends Omit<ChatChunk, 'kind' | 'body'> {
-  kind: 'wiki_summary';
-  body: WikiSummary;
-}
-
 export interface WikiUploadResult {
   ok: boolean;
   source_id: string;
@@ -1516,15 +1509,6 @@ export interface WikiUploadResult {
   message?: string;
   pages?: WikiPage[];
   issues?: string[];
-}
-
-export interface WikiSummary {
-  summary: string;
-  kb_id: string;
-  page_count?: number;
-  source_count?: number;
-  generated_at?: number;
-  status: 'ready' | 'generating' | 'empty' | 'stale';
 }
 
 export const backendApi = {
@@ -2144,8 +2128,6 @@ export const backendApi = {
       source_titles: WikiSourceTitles;
       source_files: WikiSourceFiles;
     }>(withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId)),
-  wikiSummary: (kbId?: string, force?: boolean) =>
-    getJSON<{ ok: boolean } & WikiSummary>(withKb(`/api/wiki/summary${force ? '?force=true' : ''}`, kbId)),
   /** 知识图谱（Phase 3）：全量节点 + 关系边，不走分页。 */
   wikiGraph: (kbId?: string) =>
     getJSON<{ ok: boolean; graph: WikiGraph }>(withKb('/api/wiki/graph', kbId)),

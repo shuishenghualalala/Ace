@@ -29,7 +29,6 @@ import type {
   WikiSourceFiles,
   WikiSourceTitles,
   WikiUploadResult,
-  WikiSummary,
   Workspace,
 } from "./types";
 
@@ -509,10 +508,6 @@ export const api = {
       method: "POST",
       ...jsonBody({ source_id }),
     }),
-  wikiSummary: (kbId?: string, force?: boolean) =>
-    getJSON<{ ok: boolean } & WikiSummary>(
-      withKb(`/api/wiki/summary${force ? "?force=true" : ""}`, kbId),
-    ),
   wikiSourceFileUrl: (sourceId: string, kbId?: string) =>
     withKb(`/api/wiki/sources/${encodeURIComponent(sourceId)}/file`, kbId),
 };

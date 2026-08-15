@@ -133,27 +133,6 @@ def test_wiki_page_detail_returns_outgoing_and_incoming_relations(tmp_path, auth
     }
 
 
-def test_wiki_summary_read_does_not_implicitly_call_llm(tmp_path, auth_headers):
-    from crew.wiki.schemas import KBSummary
-
-    client, app = _client(tmp_path)
-    summarizer = app._wiki_summarizer
-    summarizer.get_summary = MagicMock(
-        return_value=KBSummary(summary="缓存摘要", status="stale")
-    )
-    summarizer.generate_kb_summary = AsyncMock(
-        side_effect=AssertionError("普通 summary GET 不得调用 LLM")
-    )
-
-    res = client.get("/api/wiki/summary", headers=auth_headers)
-
-    assert res.status_code == 200
-    assert res.json()["summary"] == "缓存摘要"
-    assert res.json()["status"] == "stale"
-    summarizer.get_summary.assert_called_once_with(OWNER, "default")
-    summarizer.generate_kb_summary.assert_not_awaited()
-
-
 def test_wiki_agent_session_is_preset_and_isolated_per_kb(tmp_path, auth_headers):
     client, app = _client(tmp_path)
 

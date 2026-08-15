@@ -1,7 +1,7 @@
-"""Wiki 知识库摘要生成与缓存。
+"""Wiki Home.md 导读生成与缓存。
 
-summary 作为 KnowledgeBase 元数据的一部分持久化到 .kb.json，
-Wiki 页面读取时无需实时调用 LLM。
+导读作为知识库元数据的一部分持久化到 .kb.json，
+Wiki 首页读取时无需实时调用 LLM。
 文档上传 / ingest / compile 完成后后台评估是否需要刷新。
 """
 
@@ -17,7 +17,7 @@ from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
 from crew.state.logging import get_logger
 
-from .schemas import HomeIntro, KBSummary, WikiPage
+from .schemas import HomeIntro, WikiPage
 from .store import WikiStore
 from ._llm import chat_text
 
@@ -25,37 +25,12 @@ log = get_logger("wiki.summary")
 
 # 内容截断长度，控制 prompt 大小
 _SUMMARY_PAGE_SNIPPET_CHARS = 800
-# 最多取 N 个页面生成摘要
+# 最多取 N 个页面生成导读
 _SUMMARY_MAX_PAGES = 30
-# 摘要状态 TTL（秒），超过认为陈旧
-_SUMMARY_TTL_SECONDS = 24 * 3600
 # 生成规则变化时更新版本，使旧缓存按新提示词自动失效。
 _SUMMARY_PROMPT_VERSION = "2026-07-31-home-questions-v1"
 
-_SUMMARY_PROMPT = """你是一位知识库整理专家。请根据下面 Wiki 知识库的页面列表与内容片段，
-用 180-300 字中文生成一段整体摘要，让读者快速理解这个知识库讲了什么、解决什么问题。
-
-摘要应包含：
-1. 知识库主题/核心内容。
-2. 主要内容板块及其关系。
-3. 最值得关注的知识、结论或实际价值。
-
-写作限制：
-- 不要提供建议追问、示例问题或操作建议。
-- 不要说明引用了哪些页面、文件或来源，也不要罗列页面标题。
-- 不要写“欢迎打开”“你可以”等产品引导语。
-- 使用紧凑、客观、自然的说明文字，避免堆砌细节。
-
-知识库页面（共 {page_count} 个页面，{source_count} 个来源）：
----
-{context}
----
-
-请直接输出摘要文本，不要 JSON、不要 markdown 代码块、不要标题编号。"""
-
-_EMPTY_SUMMARY_TEXT = "这个知识库还没有页面。上传文档或粘贴文字后，AI 会自动整理并生成摘要。"
-
-# Home.md「内容导读」：与 KBSummary 相互独立，专为首页撰写，
+# Home.md「内容导读」：专为首页撰写，
 # 只在页面/来源内容 hash 变化时重新生成（见 generate_home_intro）。
 _HOME_INTRO_PROMPT = """你是一位知识库策展人。请为知识库「{kb_name}」写一段首页内容导读，
 帮助第一次打开这个库的读者迅速建立整体认知。
@@ -126,7 +101,7 @@ def _strip_code_fence(text: str) -> str:
 
 
 class WikiSummarizer:
-    """生成并缓存知识库级摘要。"""
+    """生成并缓存 Home.md 导读。"""
 
     def __init__(
         self,
@@ -186,126 +161,6 @@ class WikiSummarizer:
                 parts.append(f"- {raw.title}")
         return "\n\n".join(parts)
 
-    def _should_refresh(
-        self,
-        current: KBSummary,
-        pages: list[WikiPage],
-        raws: list[Any],
-        force: bool = False,
-    ) -> bool:
-        """判断是否需要重新生成摘要。"""
-        if force:
-            return True
-        if not pages:
-            # 空知识库：如果当前不是 empty 或没有 summary，需要更新为 empty 提示
-            return current.status != "empty" or not current.summary
-        if current.status in ("generating",):
-            return False
-        if not current.summary:
-            return True
-        if current.page_count != len(pages):
-            return True
-        if current.source_count != len(raws):
-            return True
-        new_hash = self._compute_content_hash(pages, raws)
-        if current.content_hash != new_hash:
-            return True
-        if current.generated_at and (time.time() - current.generated_at) > _SUMMARY_TTL_SECONDS:
-            return True
-        return False
-
-    async def generate_kb_summary(
-        self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-        force: bool = False,
-    ) -> KBSummary:
-        """生成或刷新知识库摘要，并写回 store。"""
-        key = self._key(owner_account_id, kb_id)
-        async with self._lock(owner_account_id, kb_id):
-            current = self.store.get_kb_summary(owner_account_id, kb_id)
-            pages = self.store.list_all(limit=10000, owner_account_id=owner_account_id, kb_id=kb_id)
-            # 只统计解析成功的 source：pending/failed 的 raw 不会编译成页面，
-            # 前端各视图（原始资料列表/图谱）也看不到，计入会让 summary 的
-            # "N 个来源" 与前端实际显示的数量不一致。
-            raws = [
-                r
-                for r in self.store.list_raws(owner_account_id, kb_id)
-                if (r.parse_status or "pending") == "parsed"
-            ]
-
-            if not self._should_refresh(current, pages, raws, force=force):
-                return current
-
-            if not pages:
-                empty = KBSummary(
-                    summary=_EMPTY_SUMMARY_TEXT,
-                    page_count=0,
-                    source_count=0,
-                    content_hash="",
-                    generated_at=time.time(),
-                    status="empty",
-                )
-                self.store.set_kb_summary(empty, owner_account_id, kb_id)
-                return empty
-
-            # 标记生成中，避免前端重复请求时再次触发
-            generating = KBSummary(
-                summary=current.summary,
-                page_count=current.page_count,
-                source_count=current.source_count,
-                content_hash=current.content_hash,
-                generated_at=current.generated_at,
-                status="generating",
-            )
-            self.store.set_kb_summary(generating, owner_account_id, kb_id)
-
-            try:
-                context = self._build_context(pages, raws)
-                prompt = _SUMMARY_PROMPT.format(
-                    page_count=len(pages),
-                    source_count=len(raws),
-                    context=context,
-                )
-                response_text = await chat_text(
-                    self._provider_for_owner(owner_account_id),
-                    [Message.user(prompt)],
-                )
-                summary_text = response_text.strip()
-                if not summary_text:
-                    summary_text = current.summary or _EMPTY_SUMMARY_TEXT
-
-                new_summary = KBSummary(
-                    summary=summary_text,
-                    page_count=len(pages),
-                    source_count=len(raws),
-                    content_hash=self._compute_content_hash(pages, raws),
-                    generated_at=time.time(),
-                    status="ready",
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("生成知识库摘要失败 %s: %s", key, exc)
-                # 保留旧摘要，标记为 stale
-                new_summary = KBSummary(
-                    summary=current.summary or _EMPTY_SUMMARY_TEXT,
-                    page_count=len(pages),
-                    source_count=len(raws),
-                    content_hash=current.content_hash,
-                    generated_at=current.generated_at,
-                    status="stale",
-                )
-
-            self.store.set_kb_summary(new_summary, owner_account_id, kb_id)
-            return new_summary
-
-    def get_summary(
-        self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> KBSummary:
-        """直接读取缓存的摘要（不触发 LLM）。"""
-        return self.store.get_kb_summary(owner_account_id, kb_id)
-
     # ---- Home.md 导读 ----
 
     def get_home_intro(
@@ -331,7 +186,9 @@ class WikiSummarizer:
         async with self._lock(owner_account_id, kb_id):
             current = self.store.get_home_intro(owner_account_id, kb_id)
             pages = self.store.list_all(limit=10000, owner_account_id=owner_account_id, kb_id=kb_id)
-            # 与 generate_kb_summary 一致：只统计解析成功的 source。
+            # 只统计解析成功的 source：pending/failed 的 raw 不会编译成页面，
+            # 前端各视图（原始资料列表/图谱）也看不到，计入会让导读上下文里的
+            # "N 个来源" 与前端实际显示的数量不一致。
             raws = [
                 r
                 for r in self.store.list_raws(owner_account_id, kb_id)

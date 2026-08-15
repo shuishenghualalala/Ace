@@ -1,7 +1,7 @@
 /**
  * Wiki 知识库页：左侧 Wiki Agent 对话主区 + 右侧知识库面板（目录+详情）（对齐 web WikiHub）。
  *
- * 数据源：GET /api/wiki/kbs + /api/wiki/pages（brief=1 分页）+ /api/wiki/pages/{id} + /api/wiki/summary
+ * 数据源：GET /api/wiki/kbs + /api/wiki/pages（brief=1 分页）+ /api/wiki/pages/{id}
  *         + /api/wiki/graph（Phase 3 图谱，由 features/wiki-graph.ts 消费）
  * 写操作：POST /api/wiki/upload（主进程 gateway:upload IPC）+ /api/wiki/ingest(+cancel)
  *         + DELETE /api/wiki/pages/{id} + DELETE /api/wiki/pages（批量）
@@ -41,7 +41,6 @@ import {
   type WikiVaultDocument,
 } from '../backend-client';
 import { $, escapeHtml, notify, state } from '../state';
-import { renderMarkdownHtml } from '../markdown';
 import { mountFoldedMarkdown, type FoldedMarkdownHandle } from '../markdown-fold';
 import { showContextMenu, type ContextMenuItem } from '../lib/context-menu';
 import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
@@ -512,8 +511,6 @@ interface WikiViewState {
   /** 页面详情接口返回的正向与反向结构化关系。 */
   relationPages: Record<string, WikiRelationPage[]>;
   sourceTitles: WikiSourceTitles;
-  /** KB 概览（/api/wiki/summary）；未生成或加载失败时为 null。 */
-  kbSummary: { summary: string; page_count?: number | undefined; source_count?: number | undefined; generated_at?: number | undefined; status: string } | null;
   /** 文件树已展开目录路径。 */
   expandedPaths: Set<string>;
   /** 是否已完成首次加载（避免每次切 tab 都打满量请求）。仅加载成功后置位。 */
@@ -545,7 +542,6 @@ function initialViewState(): WikiViewState {
     sourcePages: {},
     relationPages: {},
     sourceTitles: {},
-    kbSummary: null,
     expandedPaths: new Set<string>(DEFAULT_EXPANDED_PATHS),
     loaded: false,
     kbsLoadFailed: false,
@@ -1129,18 +1125,8 @@ function detailHtml(group: WikiDetailGroup): string {
           <p class="wiki-detail__empty-hint">拖拽 tab 到此处，或从目录打开页面</p>
         </div>`;
     }
-    const summary = view.kbSummary
-      ? `<div class="wiki-overview">
-          <div class="wiki-overview__title">知识库概览</div>
-          <div class="md-body chat-markdown wiki-overview__body">${renderMarkdownHtml(view.kbSummary.summary)}</div>
-          ${view.kbSummary.page_count != null || view.kbSummary.source_count != null
-            ? `<div class="wiki-overview__meta">${view.kbSummary.page_count != null ? `${view.kbSummary.page_count} 个页面` : ''}${view.kbSummary.page_count != null && view.kbSummary.source_count != null ? ' · ' : ''}${view.kbSummary.source_count != null ? `${view.kbSummary.source_count} 个来源` : ''}</div>`
-            : ''}
-        </div>`
-      : '';
     return `
       <div class="wiki-detail__empty">
-        ${summary}
         <p class="wiki-detail__empty-hint">选择右侧页面查看详情，或在左侧对话栏基于知识库提问</p>
       </div>`;
   }
@@ -1323,7 +1309,6 @@ interface DetailSig {
   selectedId: string | null;
   page: WikiPage | null;
   sourceTitles: WikiSourceTitles;
-  kbSummary: { summary: string; page_count?: number | undefined; source_count?: number | undefined; generated_at?: number | undefined; status: string } | null;
   loading: boolean;
   /** 组内 tab 列表 + 激活 tab：tab 增删/切换时组子树需重建 tab 栏。 */
   tabsKey: string;
@@ -1335,7 +1320,6 @@ function currentDetailSig(group: WikiDetailGroup): DetailSig {
     selectedId,
     page: selectedId ? view.pageDetails[selectedId] ?? view.pages.find((p) => p.id === selectedId) ?? null : null,
     sourceTitles: view.sourceTitles,
-    kbSummary: selectedId ? null : view.kbSummary,
     loading: selectedId ? loadingDetails.has(selectedId) : false,
     tabsKey: `${group.tabs.map(tabKey).join('|')}#${groupActiveKey(group) ?? ''}`,
   };
@@ -1346,9 +1330,6 @@ function sameDetailSig(a: DetailSig, b: DetailSig): boolean {
     a.selectedId === b.selectedId &&
     a.page === b.page &&
     a.sourceTitles === b.sourceTitles &&
-    a.kbSummary?.summary === b.kbSummary?.summary &&
-    a.kbSummary?.page_count === b.kbSummary?.page_count &&
-    a.kbSummary?.source_count === b.kbSummary?.source_count &&
     a.loading === b.loading &&
     a.tabsKey === b.tabsKey
   );
@@ -2018,20 +1999,6 @@ function clearDropZoneHighlight(container: HTMLElement): void {
   container.querySelectorAll('.is-drop-target').forEach((el) => el.classList.remove('is-drop-target'));
 }
 
-/** KB 概览只用于详情空态展示，失败静默（不打扰主流程）。 */
-async function loadKbSummary(): Promise<void> {
-  if (!view.kbId) return;
-  const seq = loadSeq;
-  try {
-    const res = await backendApi.wikiSummary(view.kbId);
-    if (seq !== loadSeq) return;
-    view.kbSummary = res.status === 'ready' && res.summary ? { summary: res.summary, page_count: res.page_count, source_count: res.source_count, generated_at: res.generated_at, status: res.status } : null;
-    if (!activeGroup().selectedId) renderShell();
-  } catch {
-    /* 概览加载失败不提示 */
-  }
-}
-
 /** 切 KB / 整页重载（KB 切换、删除、wiki:changed 事件等入口；无页头刷新按钮）。 */
 async function reloadAll(): Promise<void> {
   loadSeq += 1;
@@ -2048,7 +2015,6 @@ async function reloadAll(): Promise<void> {
   view.pageDetails = {};
   view.sourcePages = {};
   view.relationPages = {};
-  view.kbSummary = null;
   view.expandedPaths = new Set<string>(DEFAULT_EXPANDED_PATHS);
   loadingDetails.clear();
   loadingVaultDocs.clear();
@@ -2061,7 +2027,6 @@ async function reloadAll(): Promise<void> {
   if (view.kbId) {
     await loadVaultDocument('Home.md');
   }
-  void loadKbSummary();
 }
 
 // 文件附件统一从对话区 Composer 进入 Wiki Agent 工作流；页面不再编排上传或 ingest。
@@ -2131,14 +2096,14 @@ async function handleDeleteKb(): Promise<void> {
 
 // ── 单条操作（重命名 / 删除，Phase 2） ──
 
-/** 删除后重新加载列表与概览（互不依赖，并行）；删的是某组当前选中页时清空该组详情栏。 */
+/** 删除后重新加载列表；删的是某组当前选中页时清空该组详情栏。 */
 async function refreshAfterDelete(deletedIds: string[]): Promise<void> {
   for (const group of view.detailGroups) {
     if (group.selectedId && deletedIds.includes(group.selectedId)) {
       group.selectedId = null;
     }
   }
-  await Promise.all([loadPages(), loadKbSummary()]);
+  await loadPages();
 }
 
 /** 重命名：应用内输入弹窗（Electron 不支持 window.prompt），只更新 title，后端缺省字段沿用旧值。 */

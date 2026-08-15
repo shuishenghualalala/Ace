@@ -356,15 +356,6 @@ export interface WikiUploadResult {
   issues?: string[];
 }
 
-export interface WikiSummary {
-  summary: string;
-  kb_id: string;
-  page_count?: number;
-  source_count?: number;
-  generated_at?: number;
-  status: "ready" | "generating" | "empty" | "stale";
-}
-
 export interface ExternalRuntime {
   id: string;
   provider: string;

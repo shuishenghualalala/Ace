@@ -13,7 +13,7 @@ from typing import Any
 
 from crew.state.home import get_owner_runtime_home, owner_path_segment
 from crew.state.logging import get_logger
-from crew.wiki.schemas import HomeIntro, KBSummary, KnowledgeBase, LintIssue, RawSource, WikiGraph, WikiOrientation, WikiPage, WikiRelation
+from crew.wiki.schemas import HomeIntro, KnowledgeBase, LintIssue, RawSource, WikiGraph, WikiOrientation, WikiPage, WikiRelation
 from crew.wiki.sources import SOURCE_DIRS
 from crew.wiki._utils import normalize_page_key, query_terms
 from crew.wiki.search import SQLiteFTS5SearchIndex, WikiSearchIndex
@@ -243,26 +243,6 @@ class FileSystemWikiStore(WikiStore):
         meta["relation_schema_version"] = 2
         self._kb_meta_path(base).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
-    def _quick_count(self, base: Path, raw_dir: Path) -> tuple[int, int]:
-        """快速统计 KB 的页面数和 source 数（只数文件，不解序列化）。"""
-        page_count = 0
-        for sub in _PAGE_DIRS:
-            current_dir = base / "wiki" / sub
-            legacy_dir = base / sub
-            if current_dir.exists():
-                page_count += len(list(current_dir.rglob("*.md")))
-            if legacy_dir.exists():
-                page_count += len(list(legacy_dir.glob("*.md")))
-        meta_dir = base / ".crew" / "sources"
-        if meta_dir.exists():
-            raw_count = len(list(meta_dir.glob("*.json")))
-        else:
-            raw_count = len([
-                path for path in raw_dir.glob("*.md")
-                if not path.name.endswith(".parsed.md")
-            ]) if raw_dir.exists() else 0
-        return page_count, raw_count
-
     def list_kbs(self, owner_account_id: str = "") -> list[KnowledgeBase]:
         kbs: dict[str, KnowledgeBase] = {}
         root = self._kb_root(owner_account_id)
@@ -271,42 +251,22 @@ class FileSystemWikiStore(WikiStore):
                 if sub.is_dir():
                     kb_id = sub.name
                     meta = self._read_kb_meta(sub)
-                    summary = KBSummary()
-                    summary_data = meta.get("summary")
-                    if isinstance(summary_data, dict):
-                        summary = KBSummary.from_dict(summary_data)
-                    # 兜底：summary 未生成时，直接从文件系统统计
-                    if summary.status == "empty" or summary.page_count == 0:
-                        raw_dir = self._raw_dir(owner_account_id, kb_id)
-                        page_count, raw_count = self._quick_count(sub, raw_dir)
-                        if page_count > 0:
-                            summary.page_count = page_count
-                            summary.source_count = raw_count
-                            summary.status = "ready"
                     kbs[kb_id] = KnowledgeBase(
                         id=kb_id,
                         name=meta.get("name") or (_DEFAULT_KB_NAME if kb_id == _DEFAULT_KB_ID else kb_id),
                         created_at=float(meta.get("created_at", 0.0) or sub.stat().st_ctime),
                         updated_at=float(meta.get("updated_at", 0.0) or sub.stat().st_mtime),
-                        summary=summary,
                         vault_path=str(sub.resolve()),
                     )
         # 旧版 wiki/ 作为 default KB 回退
         if _DEFAULT_KB_ID not in kbs:
             legacy = self._legacy_dir(owner_account_id)
             if legacy.exists():
-                legacy_raw = self._legacy_raw_dir(owner_account_id)
-                page_count, raw_count = self._quick_count(legacy, legacy_raw)
                 kbs[_DEFAULT_KB_ID] = KnowledgeBase(
                     id=_DEFAULT_KB_ID,
                     name=_DEFAULT_KB_NAME,
                     created_at=legacy.stat().st_ctime,
                     updated_at=legacy.stat().st_mtime,
-                    summary=KBSummary(
-                        page_count=page_count,
-                        source_count=raw_count,
-                        status="ready" if page_count > 0 else "empty",
-                    ),
                     vault_path=str(legacy.resolve()),
                 )
         return list(kbs.values())
@@ -363,37 +323,6 @@ class FileSystemWikiStore(WikiStore):
 
     def _kb_meta_path(self, base: Path) -> Path:
         return base / ".kb.json"
-
-    def get_kb_summary(
-        self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> KBSummary:
-        """直接读取 .kb.json 中的 summary 字段，避免遍历全部知识库。"""
-        base = self._kb_root(owner_account_id) / normalize_kb_id(kb_id)
-        meta = self._read_kb_meta(base)
-        summary_data = meta.get("summary")
-        if isinstance(summary_data, dict):
-            return KBSummary.from_dict(summary_data)
-        return KBSummary()
-
-    def set_kb_summary(
-        self,
-        summary: KBSummary,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> None:
-        """将 summary 写回 .kb.json，同时保留其它元数据字段。"""
-        base = self._kb_root(owner_account_id) / normalize_kb_id(kb_id)
-        meta = self._read_kb_meta(base)
-        meta["summary"] = summary.to_dict()
-        try:
-            self._kb_meta_path(base).write_text(
-                json.dumps(meta, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("写入知识库摘要元数据失败 %s: %s", base, exc)
 
     def get_home_intro(
         self,

@@ -725,23 +725,6 @@ def create_wiki_router(crew) -> APIRouter:
         )
         return {"ok": True, **result}
 
-    @router.get("/summary")
-    async def wiki_summary(request: Request):
-        summarizer = getattr(crew, "_wiki_summarizer", None)
-        if summarizer is None:
-            return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
-        owner = _owner(request)
-        kb_id = _kb_id(request)
-        force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
-        # 普通读取只返回缓存，打开/刷新 Wiki 不能绕过 Agent 隐式调用 LLM。
-        # force=true 是保留给显式管理调用的兼容入口，不参与上传主链路。
-        summary = (
-            await summarizer.generate_kb_summary(owner, kb_id, force=True)
-            if force
-            else summarizer.get_summary(owner, kb_id)
-        )
-        return {"ok": True, **summary.to_dict(), "kb_id": kb_id}
-
     @router.post("/lint")
     async def wiki_lint(request: Request):
         compiler = getattr(crew, "_wiki_compiler", None)

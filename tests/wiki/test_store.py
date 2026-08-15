@@ -1015,7 +1015,7 @@ def test_get_neighbors_respects_kb_id(store: FileSystemWikiStore):
 
 # ---- orientation & log ----
 
-def test_orient_returns_kb_summary_and_stats(store: FileSystemWikiStore):
+def test_orient_returns_stats_and_candidate_index(store: FileSystemWikiStore):
     store.save_page(WikiPage(id="", page_type="topic", title="页面A", content="# 页面A\n\n正文", file_path="", tags=["项目A"]))
     store.save_page(WikiPage(id="", page_type="entity", title="概念B", content="# 概念B\n\n正文", file_path="", aliases=["B"]))
     store.save_raw(RawSource(id="s1", title="来源一", source_type="upload", parsed_path=""))
