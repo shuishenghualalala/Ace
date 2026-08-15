@@ -17,6 +17,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -212,6 +213,8 @@ def setup_logging(level: str = "INFO", log_file: str = "", llm_trace: bool = Fal
     global _CONFIGURED, _RING
     if _CONFIGURED:
         return
+    # CREW_LOG_LEVEL 环境变量优先（CLI 用它把默认压到 WARNING；gateway 不设则不变）
+    level = os.environ.get("CREW_LOG_LEVEL", "").strip() or level
     # Windows 默认 GBK：先切 UTF-8，再挂 RichHandler，避免 emoji/中文刷屏 Logging error。
     _ensure_utf8_stdio()
     log_level = getattr(logging, level.upper(), logging.INFO)
