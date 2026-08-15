@@ -236,7 +236,7 @@ function setModelCapabilities(capabilities?: string[]): void {
   });
 }
 
-function platformStatusText(p: PlatformRow): string {
+export function platformStatusText(p: PlatformRow): string {
   if (p.error_kind === 'network') return '网络异常，请检查网络';
   if (p.error) return `错误：${p.error}`;
   if (p.reason === 'login_required') return '未连接（请先登录）';
