@@ -17,6 +17,25 @@ def registry():
     return r
 
 
+@pytest.fixture(autouse=True)
+def _isolate_task_runtime():
+    """本文件用例不依赖全局 task runtime。
+
+    其他用例（如 gateway 的 build_app）会把 CrewApp 的 TaskRuntime 装进
+    process_registry 单例，用例结束后其 sqlite 连接被关闭；若不摘下，
+    terminal 工具会往已关闭的连接写任务记录（Cannot operate on a closed
+    database）。这里按用例隔离，结束后恢复原值。
+    """
+    from crew.tools.process_registry import process_registry
+
+    saved = process_registry._task_runtime
+    process_registry._task_runtime = None
+    try:
+        yield
+    finally:
+        process_registry._task_runtime = saved
+
+
 async def test_terminal_tool_executes(registry):
     tc = ToolCall(id="c1", name="terminal", arguments={"command": "echo hi-crew"})
     result = await registry.execute(tc)
@@ -93,10 +112,12 @@ async def test_builtin_file_tools_resolve_relative_paths_from_agent_workdir(regi
 async def test_terminal_runs_inside_agent_workdir(registry, tmp_path):
     token = current_agent_workdir.set(str(tmp_path))
     try:
-        result = await registry.execute(ToolCall("c1", "terminal", {"command": "pwd > marker.txt"}))
+        # 输出重定向（>）现需宿主审批（terminal_guard），用 pwd stdout 验证 cwd。
+        result = await registry.execute(ToolCall("c1", "terminal", {"command": "pwd"}))
         assert not result.is_error
-        assert (tmp_path / "marker.txt").read_text(encoding="utf-8").strip() == str(tmp_path)
         payload = json.loads(result.content)
+        assert payload["success"] is True
+        assert payload["output"].strip() == str(tmp_path)
         assert payload["cwd"] == str(tmp_path)
         assert payload["exit_code"] == 0
     finally:

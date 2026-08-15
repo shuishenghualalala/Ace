@@ -1671,6 +1671,12 @@ class CrewApp:
 
     async def _shutdown_resources(self, *, provider_timeout: float) -> None:
         """Execute the ordered App shutdown sequence."""
+        from crew.gateway.hooks import hook_registry
+
+        promote_hook = getattr(self, "_promote_session_model_hook", None)
+        if promote_hook is not None:
+            hook_registry.unregister("agent:end", promote_hook)
+            self._promote_session_model_hook = None
         if self._expiry_task is not None:
             self._expiry_task.cancel()
             try:
@@ -1724,11 +1730,31 @@ class CrewApp:
             self.work_service.close()
         self.security_rules.close()
         self.security_audit.close()
-        # 持久化 Store 各持有 SQLite 连接（WAL 下每库占多个 fd），必须随 App 关闭，
-        # 否则测试批量构建 App、热重载等场景会持续累积文件句柄。
-        self.tasks.close()
-        self.summary_store.close()
-        for store in (self.session_store, self.workspace_store, self.memory, self.plugin_prefs):
+        self._close_persistent_stores()
+
+    def _close_persistent_stores(self) -> None:
+        """关闭 App 持有的全部 SQLite Store 连接。
+
+        每个 Store 一个连接，WAL 模式下每库占多个 fd；不关闭会在测试批量构建
+        App、Gateway 重启等场景持续累积句柄（Errno 24）。尽力关闭，互不影响。
+        """
+        stores = [
+            self.session_store,
+            self.workspace_store,
+            self.memory,
+            self.plugin_prefs,
+            self.summary_store,
+            self.tasks,
+            self.security_rules,
+            self.security_audit,
+            self.channel_bindings,
+            self.active_owner,
+            getattr(self, "cron_store", None),
+            getattr(getattr(self, "dynamic_kanban", None), "store", None),
+            getattr(getattr(self, "sites", None), "store", None),
+            self.work_service,
+        ]
+        for store in stores:
             close = getattr(store, "close", None)
             if callable(close):
                 try:
@@ -3022,6 +3048,9 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
             running_depth=int(ctx.get("running_depth") or 0),
         )
 
+    # 挂到 app 上，shutdown 时反注册：hook_registry 是全局单例，
+    # 不注销会跨实例累积（Gateway 重启 / 测试批量建 App 时 emit 会扇出到所有失效闭包）
+    app._promote_session_model_hook = _promote_session_model_on_agent_end
     hook_registry.register("agent:end", _promote_session_model_on_agent_end)
 
     return app

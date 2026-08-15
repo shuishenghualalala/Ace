@@ -22,6 +22,11 @@ class SQLiteSiteStore:
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
 
+    def close(self) -> None:
+        """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
+        with self._lock:
+            self._conn.close()
+
     @property
     def db_path(self) -> Path:
         return self._path

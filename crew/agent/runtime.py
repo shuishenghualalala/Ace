@@ -768,6 +768,8 @@ class SingleAgent(Agent):
         history.append(user_message)
 
         if is_new and self.enable_title and not self.lightweight:
+            # 只落占位标题，让会话立刻出现在列表里；标题生成延后到主响应结束后
+            # 由 finally 块调度（见下方 _spawn_title_task 调用），不抢占主推理窗口。
             if not self._session_needs_title(task_sid, owner):
                 try:
                     self.session_store.save(
@@ -779,16 +781,6 @@ class SingleAgent(Agent):
                     )
                 except Exception:  # noqa: BLE001
                     log.debug("创建会话标题占位失败 session=%s", task_sid)
-            from crew.core.runctx import current_push_fn
-
-            if self._session_needs_title(task_sid, owner):
-                self._spawn_title_task(
-                    task_sid,
-                    owner,
-                    history,
-                    current_push_fn.get(),
-                    user_only=True,
-                )
 
         # Skill 展开内容写入 canonical history（is_meta=True，前端不渲染但模型可见）
         skill_meta = envelope.params.get("skill_meta")
@@ -1260,13 +1252,11 @@ class SingleAgent(Agent):
         owner: str,
         history: list[Message],
         push_fn,
-        *,
-        user_only: bool = False,
     ) -> None:
         """后台生成会话标题并推送，不阻塞主推理或 final 帧发送。
 
-        首轮开始时使用 ``user_only`` 与主回答并发；回合结束后的兜底调用可携带
-        assistant snippet。同一 (owner, title_sid) 在途任务去重，避免重复 LLM 调用。
+        仅在主响应结束后调度（见 run 的 finally 块），history 已含本轮 assistant
+        内容。同一 (owner, title_sid) 在途任务去重，避免重复 LLM 调用。
         """
         inflight_key = (owner, title_sid)
         if inflight_key in self._title_inflight:
@@ -1278,13 +1268,11 @@ class SingleAgent(Agent):
                 title = await generate_session_title(
                     self.provider,
                     history,
-                    user_only=user_only,
                 )
                 if not title and self._session_needs_title(title_sid, owner):
                     title = await generate_session_title(
                         self.provider,
                         history,
-                        user_only=user_only,
                     )
                 if not title:
                     return

@@ -1074,6 +1074,7 @@ def test_builtin_skills_are_generic_only():
         "cua-driver/SKILL.md",
         "docx/SKILL.md",
         "find-skill-skillhub/SKILL.md",
+        "github-advanced-search/SKILL.md",
         "image-understanding/SKILL.md",
         "md-to-pdf/SKILL.md",
         "pdf/SKILL.md",

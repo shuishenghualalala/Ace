@@ -1549,7 +1549,7 @@ async def test_streaming_reasoning_is_visible_before_answer_delta(caplog):
         "先分析，再结论",
     ]
     assert [c.body["text"] for c in chunks if c.kind == "delta"] == ["答案"]
-    perf_line = next(record.message for record in caplog.records if "[PERF] llm" in record.message)
+    perf_line = next(record.message for record in caplog.records if "[PERF] llm " in record.message)
     assert "first_event=" in perf_line
     assert "first_reasoning=" in perf_line
     assert "first_text=" in perf_line

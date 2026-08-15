@@ -284,6 +284,10 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             await logout_coordinator.shutdown()
             await channel_manager.stop_all()
             await crew.shutdown()
+            # 反注册本实例的渠道会话通知钩子：hook_registry 是全局单例，
+            # create_app 每次调用都会新建闭包，不注销会跨实例累积扇出
+            hook_registry.unregister("agent:start", _notify_channel_session_updated)
+            hook_registry.unregister("agent:end", _notify_channel_session_updated)
             # 触发 gateway:shutdown hook
             await hook_registry.emit("gateway:shutdown", {})
 

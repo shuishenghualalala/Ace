@@ -223,6 +223,9 @@ class WorkService:
             self.preferences,
             self.references,
             self.items,
+            self.knowledge,
+            self.settings,
+            self.templates,
         ):
             store.close()
         self._closed = True
