@@ -175,6 +175,8 @@ export default function App() {
   const [wikiKbId, setWikiKbId] = useState("default");
   const [wikiAgentSession, setWikiAgentSession] = useState<WikiAgentSessionBinding | null>(null);
   const wikiAgentSessionId = resolveWikiAgentSessionId(wikiAgentSession, wikiKbId);
+  /** 主对话里点击 [[Wiki 页面名]] 时待打开的页面标题（跳转 Wiki 视图后由 WikiHub 消费）。 */
+  const [pendingWikiLinkTitle, setPendingWikiLinkTitle] = useState<string | null>(null);
 
   const { sessions, refresh: refreshSessions } = useSessions();
   const { workspaces, refresh: refreshWorkspaces } = useWorkspaces();
@@ -197,6 +199,12 @@ export default function App() {
   }, [refreshSessions, refreshTasks]);
 
   const chat = useChat(currentSessionId, onAfterFinal);
+
+  // 主对话里点击 [[Wiki 页面名]]：跳到 Wiki 视图并打开对应页面（WikiHub 挂载后消费）。
+  const openWikiLinkFromChat = useCallback((title: string) => {
+    setPendingWikiLinkTitle(title);
+    setView("wiki");
+  }, []);
 
   // 进入 Wiki 视图或切换 KB 时，创建/复用该 KB 自己的 Wiki Agent 会话。
   useEffect(() => {
@@ -670,6 +678,8 @@ export default function App() {
             onNewSession={newWikiSession}
             onSelectSession={selectWikiSession}
             onDeleteSession={deleteWikiSession}
+            pendingWikiLinkTitle={pendingWikiLinkTitle}
+            onPendingWikiLinkHandled={() => setPendingWikiLinkTitle(null)}
           />
         ) : (
           <>
@@ -698,6 +708,7 @@ export default function App() {
               attachments={attachments}
               onSend={handleSend}
               onAsk={(text) => handleSend(text, [])}
+              onWikiLink={openWikiLinkFromChat}
               onStop={() => chat.stop(currentSessionId)}
               onSteer={(text) => chat.steer(currentSessionId, text)}
               planActive={chat.planActive}

@@ -223,7 +223,7 @@ export default function AgentTurn({
     });
 
     return { processItems, textParts, fileChanges };
-  }, [messages, isStreaming, onApprovePlan, onRejectPlan, onRejectAndExitPlan]);
+  }, [messages, isStreaming, onApprovePlan, onRejectPlan, onRejectAndExitPlan, onWikiLink]);
 
   const defaultOpen = isStreaming;
   const open = pinnedOpen ?? defaultOpen;
