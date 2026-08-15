@@ -118,7 +118,25 @@ Wiki 里存着上周的会议纪要和个人笔记，Agent 随取随用，再也
 
 构建前请确认环境满足[环境要求](#-环境要求)：Python 3.11+、[uv](https://docs.astral.sh/uv/)、Node.js 22.12+、npm 10+。
 
-#### macOS / Linux
+#### 一键脚本（推荐）
+
+```bash
+# macOS / Linux：克隆后一条命令完成后端 + 配置 + 桌面端构建
+git clone https://github.com/shuishenghualalala/Ace.git
+cd Ace
+bash scripts/install.sh --all
+```
+
+```powershell
+# Windows PowerShell
+git clone https://github.com/shuishenghualalala/Ace.git
+cd Ace
+pwsh ./scripts/install.ps1 -All
+```
+
+不加参数时只安装后端与本地配置模板；`--dev` 追加开发依赖，`--with-web` / `--with-desktop` 按需安装对应前端。也可直接 `curl -fsSL <脚本 raw 地址> | bash`，脚本会先克隆仓库再执行。
+
+#### 手动步骤（macOS / Linux）
 
 ```bash
 git clone https://github.com/shuishenghualalala/Ace.git
