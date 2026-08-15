@@ -176,6 +176,14 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
   const toolName = permissionToolName(question.title);
   const parts = permissionPromptParts(question.questions[0]?.question ?? '');
   const actionObject = parseActionObject(parts.action);
+  if (toolName.startsWith('wiki_')) {
+    return {
+      title: '允许执行 Wiki 操作？',
+      context: 'Wiki 知识库',
+      summary: clipped(parts.action, 160) || '执行知识库变更操作',
+      note: '',
+    };
+  }
   if ((toolName === 'browser_use' || toolName.startsWith('browser_')) && actionObject) {
     return browserPermissionPresentation(normalizedBrowserAction(toolName, actionObject), parts.reason);
   }
@@ -206,8 +214,8 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
 
 function permissionButtonClass(label: string, value: string): string {
   const choice = `${label} ${value}`.toLowerCase();
-  if (/allow_once|允许一次|允许本次/.test(choice)) return ' permission-dialog__button--primary';
-  if (/always|session_exact|始终允许|本次对话/.test(choice)) return ' permission-dialog__button--persistent';
+  if (/allow_once|允许一次|允许本次|确认执行/.test(choice)) return ' permission-dialog__button--primary';
+  if (/always|session_exact|始终允许|本次对话|allow_batch|本批次/.test(choice)) return ' permission-dialog__button--persistent';
   return ' permission-dialog__button--secondary';
 }
 
@@ -262,8 +270,8 @@ function permissionDialogHtml(question: PendingFollowup): string {
   const options = firstQuestion?.options ?? [];
   const rank = (label: string, value: string): number => {
     const choice = `${label} ${value}`.toLowerCase();
-    if (/deny|拒绝/.test(choice)) return 0;
-    if (/always|session_exact|始终允许|本次对话/.test(choice)) return 1;
+    if (/deny|拒绝|取消/.test(choice)) return 0;
+    if (/always|session_exact|始终允许|本次对话|allow_batch|本批次/.test(choice)) return 1;
     return 2;
   };
   const orderedOptions = [...options].sort(

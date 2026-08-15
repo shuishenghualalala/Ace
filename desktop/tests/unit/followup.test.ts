@@ -247,3 +247,43 @@ describe('runtime staffing follow-up presentation', () => {
     expect(html).toContain('>提交</button>');
   });
 });
+
+function wikiConfirmQuestion(): PendingFollowup {
+  return {
+    questionId: 'wiki-confirm-1',
+    title: 'Wiki 操作确认·wiki_delete_source',
+    recordHistory: false,
+    questions: [{
+      id: 'wiki_confirm',
+      question: '即将执行：删除 RawSource upload_x 及关联页面\n\n影响：{"linked_pages": 2, "cannot_undo": true}',
+      options: [
+        { label: '确认执行', value: 'allow_once' },
+        { label: '本批次全部允许', value: 'allow_batch' },
+        { label: '取消', value: 'deny' },
+      ],
+      allowFreeText: false,
+      multiSelect: false,
+    }],
+  };
+}
+
+describe('wiki confirmation presentation', () => {
+  it('renders as a blocking permission dialog with wiki copy', () => {
+    const html = renderFollowupCard(wikiConfirmQuestion());
+    expect(html).toContain('followup-card--permission');
+    expect(html).toContain('允许执行 Wiki 操作？');
+    expect(html).toContain('Wiki 知识库');
+    expect(html).toContain('删除 RawSource upload_x 及关联页面');
+  });
+
+  it('styles 本批次全部允许 as persistent and orders 取消 first', () => {
+    const html = renderFollowupCard(wikiConfirmQuestion());
+    expect(html).toContain('permission-dialog__button--persistent');
+    const denyIdx = html.indexOf('取消');
+    const batchIdx = html.indexOf('本批次全部允许');
+    const onceIdx = html.indexOf('确认执行');
+    expect(denyIdx).toBeGreaterThan(-1);
+    expect(denyIdx).toBeLessThan(batchIdx);
+    expect(batchIdx).toBeLessThan(onceIdx);
+  });
+});

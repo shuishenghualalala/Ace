@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Awaitable, Callable
 
+from crew.core.errors import ToolError
+from crew.core.followup import send_followup_question, wait_for_answer
 from crew.core.runctx import (
     current_attachment_files,
     current_attachment_paths,
@@ -766,6 +769,81 @@ def register_wiki_tools(
             owner_account_id=_owner(),
         )
 
+    async def _ask_blocking_confirmation(
+        *,
+        action: str,
+        kb_id: str,
+        summary: str,
+        impact: dict[str, Any],
+    ) -> str:
+        """阻塞式确认：弹窗挂起等待用户答复，期间 agent 无法执行其他动作。
+
+        返回：
+          confirmed   —— 用户允许（含「本批次全部允许」，已登记会话级授权）
+          cancelled   —— 用户取消
+          timeout     —— 等待超时（默认 300s，无人应答）
+          unavailable —— 无交互通道（cron/CLI/无 WS push），调用方回退被动确认卡
+        """
+        sid = current_session_id.get()
+        owner = _owner()
+        if manager.has_action_grant(sid, action=action, kb_id=kb_id, owner_account_id=owner):
+            return "confirmed"
+        question_text = f"即将执行：{summary}"
+        if impact:
+            question_text += f"\n\n影响：{json.dumps(impact, ensure_ascii=False)}"
+        try:
+            session_id, question_id = await send_followup_question(
+                [
+                    {
+                        "id": "wiki_confirm",
+                        "question": question_text,
+                        "options": [
+                            {"label": "确认执行", "value": "allow_once"},
+                            {"label": "本批次全部允许", "value": "allow_batch"},
+                            {"label": "取消", "value": "deny"},
+                        ],
+                        "allowFreeText": False,
+                    }
+                ],
+                title=f"Wiki 操作确认·wiki_{action}",
+                record_history=False,
+            )
+        except ToolError:
+            return "unavailable"
+        answers = await wait_for_answer(session_id, question_id, timeout=300)
+        if not answers:
+            return "timeout"
+        first = answers[0] if isinstance(answers[0], dict) else {}
+        values = first.get("answers") or []
+        value = str(values[0]).strip() if values else ""
+        if value == "allow_batch":
+            manager.grant_action(sid, action=action, kb_id=kb_id, owner_account_id=owner)
+            return "confirmed"
+        if value == "allow_once":
+            return "confirmed"
+        return "cancelled"
+
+    def _confirmation_result(
+        decision: str,
+        *,
+        action: str,
+        kb_id: str,
+        payload: dict[str, Any],
+        summary: str,
+        impact: dict[str, Any],
+        cancel_message: str,
+    ) -> str | None:
+        """把 _ask_blocking_confirmation 的决定翻译成工具返回；confirmed 时返回 None（继续执行）。"""
+        if decision == "confirmed":
+            return None
+        if decision == "unavailable":
+            return _issue_confirmation(
+                action=action, kb_id=kb_id, payload=payload, summary=summary, impact=impact,
+            )
+        if decision == "timeout":
+            return tool_error("等待确认超时，操作未执行，请重试")
+        return tool_result(cancelled=True, message=cancel_message)
+
     def _capture_bytes(path: str, title: str, kb_id: str) -> str:
         from pathlib import Path
         import shutil
@@ -978,20 +1056,52 @@ def register_wiki_tools(
             )
             return tool_result(**result, auto_applied=True)
         planned_ids = list(result["succeeded"])
-        confirmation = manager.issue_confirmation(
-            current_session_id.get(),
+        decision = await _ask_blocking_confirmation(
             action="apply_batch_ingest",
             kb_id=kb_id,
-            payload={"source_ids": planned_ids},
             summary=f"应用 {len(planned_ids)} 份素材的 Wiki 批量计划",
             impact={
                 "source_ids": planned_ids,
                 "skipped": result["skipped"],
                 "failed": result["failed"],
             },
-            owner_account_id=_owner(),
         )
-        return tool_result(**result, auto_applied=False, **confirmation)
+        if decision == "unavailable":
+            confirmation = manager.issue_confirmation(
+                current_session_id.get(),
+                action="apply_batch_ingest",
+                kb_id=kb_id,
+                payload={"source_ids": planned_ids},
+                summary=f"应用 {len(planned_ids)} 份素材的 Wiki 批量计划",
+                impact={
+                    "source_ids": planned_ids,
+                    "skipped": result["skipped"],
+                    "failed": result["failed"],
+                },
+                owner_account_id=_owner(),
+            )
+            return tool_result(**result, auto_applied=False, **confirmation)
+        if decision == "timeout":
+            return tool_error("等待确认超时，批量计划未应用，可重试")
+        if decision != "confirmed":
+            return tool_result(cancelled=True, message="用户已取消，批量计划未应用")
+        # 阻塞确认通过：直接应用本批计划（planned_ids 即待应用集合）
+        apply_result = await compiler.batch_ingest(
+            source_ids=planned_ids,
+            cursor=0,
+            batch_size=min(len(planned_ids), 5) or 1,
+            apply=True,
+            use_existing_plans=True,
+            owner_account_id=_owner(),
+            kb_id=kb_id,
+        )
+        _mark_changed(
+            kb_id,
+            "batch_ingest_applied",
+            source_ids=apply_result["succeeded"],
+            page_ids=apply_result["page_ids"],
+        )
+        return tool_result(**apply_result, auto_applied=False, confirmed=True)
 
     def _handle_check_duplicate(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()
@@ -1070,6 +1180,34 @@ def register_wiki_tools(
             neighbor_count=len(neighbors),
         )
 
+    async def _apply_lint_fixes(fixes: list[dict[str, str]], kb_id: str) -> str:
+        """应用 lint 安全修复（确认通过后调用；apply_fixes 确认路径与阻塞确认路径共用）。"""
+        completed: list[str] = []
+        failed: list[dict[str, str]] = []
+        for fix in fixes:
+            page_id = str(fix.get("page_id") or "")
+            page = store.get(page_id, owner_account_id=_owner(), kb_id=kb_id)
+            if page is None:
+                failed.append({"page_id": page_id, "error": "页面不存在"})
+                continue
+            expected_title = str(fix.get("title") or "")
+            if page.title != expected_title:
+                failed.append({"page_id": page_id, "error": "页面标题已变化，请重新 lint"})
+                continue
+            page.content = f"# {page.title}\n\n{page.content.lstrip()}"
+            if store.update(page, owner_account_id=_owner(), kb_id=kb_id) is None:
+                failed.append({"page_id": page_id, "error": "写入失败"})
+            else:
+                completed.append(page_id)
+        if completed:
+            _finish_write(
+                kb_id,
+                f"应用 lint 安全修复: {', '.join(completed)}",
+                "lint_fixed",
+                page_ids=completed,
+            )
+        return tool_result(completed=completed, failed=failed)
+
     async def _handle_lint(args: dict[str, Any]) -> str:
         deep = bool(args.get("deep", False))
         kb_id = _kb_id(args)
@@ -1077,31 +1215,7 @@ def register_wiki_tools(
             confirmed = _consume_confirmation(args, action="lint_apply", kb_id=kb_id)
             if confirmed is None:
                 return tool_error("缺少有效的 lint 修复确认；请重新生成修复计划")
-            completed: list[str] = []
-            failed: list[dict[str, str]] = []
-            for fix in confirmed.get("fixes") or []:
-                page_id = str(fix.get("page_id") or "")
-                page = store.get(page_id, owner_account_id=_owner(), kb_id=kb_id)
-                if page is None:
-                    failed.append({"page_id": page_id, "error": "页面不存在"})
-                    continue
-                expected_title = str(fix.get("title") or "")
-                if page.title != expected_title:
-                    failed.append({"page_id": page_id, "error": "页面标题已变化，请重新 lint"})
-                    continue
-                page.content = f"# {page.title}\n\n{page.content.lstrip()}"
-                if store.update(page, owner_account_id=_owner(), kb_id=kb_id) is None:
-                    failed.append({"page_id": page_id, "error": "写入失败"})
-                else:
-                    completed.append(page_id)
-            if completed:
-                _finish_write(
-                    kb_id,
-                    f"应用 lint 安全修复: {', '.join(completed)}",
-                    "lint_fixed",
-                    page_ids=completed,
-                )
-            return tool_result(completed=completed, failed=failed)
+            return await _apply_lint_fixes(confirmed.get("fixes") or [], kb_id)
 
         issues = await compiler.lint(owner_account_id=_owner(), kb_id=kb_id, deep=deep)
         if not bool(args.get("plan_fixes")):
@@ -1118,16 +1232,28 @@ def register_wiki_tools(
                 seen.add(page_id)
         if not fixes:
             return tool_result(issues=issues, repair_plan=[], message="没有可安全自动修复的项目")
-        confirmation = manager.issue_confirmation(
-            current_session_id.get(),
+        decision = await _ask_blocking_confirmation(
             action="lint_apply",
             kb_id=kb_id,
-            payload={"fixes": fixes},
             summary=f"应用 {len(fixes)} 项 Wiki lint 安全修复",
             impact={"pages": fixes, "other_issues_require_manual_review": len(issues) - len(fixes)},
-            owner_account_id=_owner(),
         )
-        return tool_result(issues=issues, repair_plan=fixes, **confirmation)
+        if decision == "unavailable":
+            confirmation = manager.issue_confirmation(
+                current_session_id.get(),
+                action="lint_apply",
+                kb_id=kb_id,
+                payload={"fixes": fixes},
+                summary=f"应用 {len(fixes)} 项 Wiki lint 安全修复",
+                impact={"pages": fixes, "other_issues_require_manual_review": len(issues) - len(fixes)},
+                owner_account_id=_owner(),
+            )
+            return tool_result(issues=issues, repair_plan=fixes, **confirmation)
+        if decision == "timeout":
+            return tool_error("等待确认超时，lint 修复未应用，可重试")
+        if decision != "confirmed":
+            return tool_result(cancelled=True, message="用户已取消，lint 修复未应用")
+        return await _apply_lint_fixes(fixes, kb_id)
 
     def _handle_create_kb(args: dict[str, Any]) -> str:
         kb_id = str(args.get("kb_id", "")).strip()
@@ -1141,7 +1267,7 @@ def register_wiki_tools(
         _finish_write(kb_id, f"创建知识库 {kb_id}", "kb_created", kb_ids=[kb_id])
         return tool_result(kb=kb.to_dict())
 
-    def _handle_delete_kb(args: dict[str, Any]) -> str:
+    async def _handle_delete_kb(args: dict[str, Any]) -> str:
         kb_id = str(args.get("kb_id", "")).strip()
         if not kb_id:
             return tool_error("缺少 kb_id")
@@ -1154,10 +1280,9 @@ def register_wiki_tools(
 
         confirmed = _consume_confirmation(args, action="delete_kb", kb_id=kb_id)
         if confirmed is None:
-            return _issue_confirmation(
+            decision = await _ask_blocking_confirmation(
                 action="delete_kb",
                 kb_id=kb_id,
-                payload={"kb_id": kb_id},
                 summary=f"删除知识库 {kb_id}",
                 impact={
                     "pages": page_count,
@@ -1165,6 +1290,22 @@ def register_wiki_tools(
                     "cannot_undo": True,
                 },
             )
+            if decision == "unavailable":
+                return _issue_confirmation(
+                    action="delete_kb",
+                    kb_id=kb_id,
+                    payload={"kb_id": kb_id},
+                    summary=f"删除知识库 {kb_id}",
+                    impact={
+                        "pages": page_count,
+                        "raw_sources": len(raws),
+                        "cannot_undo": True,
+                    },
+                )
+            if decision == "timeout":
+                return tool_error("等待确认超时，知识库未删除，可重试")
+            if decision != "confirmed":
+                return tool_result(cancelled=True, message=f"用户已取消，未删除知识库: {kb_id}")
 
         try:
             store.append_log([f"删除知识库 {kb_id}"], owner_account_id=owner, kb_id=kb_id)
@@ -1176,7 +1317,7 @@ def register_wiki_tools(
         _mark_changed(kb_id, "kb_deleted", kb_ids=[kb_id])
         return tool_result(message=f"已删除知识库: {kb_id}")
 
-    def _handle_delete_source(args: dict[str, Any]) -> str:
+    async def _handle_delete_source(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()
         if not source_id:
             return tool_error("缺少 source_id")
@@ -1189,10 +1330,9 @@ def register_wiki_tools(
 
         confirmed = _consume_confirmation(args, action="delete_source", kb_id=kb_id)
         if confirmed is None:
-            return _issue_confirmation(
+            decision = await _ask_blocking_confirmation(
                 action="delete_source",
                 kb_id=kb_id,
-                payload={"source_id": source_id},
                 summary=f"删除 RawSource {source_id} 及关联页面",
                 impact={
                     "linked_pages": len(linked_pages),
@@ -1200,7 +1340,23 @@ def register_wiki_tools(
                     "cannot_undo": True,
                 },
             )
-        if str(confirmed.get("source_id") or "") != source_id:
+            if decision == "unavailable":
+                return _issue_confirmation(
+                    action="delete_source",
+                    kb_id=kb_id,
+                    payload={"source_id": source_id},
+                    summary=f"删除 RawSource {source_id} 及关联页面",
+                    impact={
+                        "linked_pages": len(linked_pages),
+                        "linked_page_titles": [p.title for p in linked_pages[:20]],
+                        "cannot_undo": True,
+                    },
+                )
+            if decision == "timeout":
+                return tool_error("等待确认超时，RawSource 未删除，可重试")
+            if decision != "confirmed":
+                return tool_result(cancelled=True, message=f"用户已取消，未删除 RawSource: {source_id}")
+        elif str(confirmed.get("source_id") or "") != source_id:
             return tool_error("确认内容与当前 source 参数不一致，请重新生成确认卡")
 
         ok = store.delete_raw(source_id, owner_account_id=_owner(), kb_id=kb_id)
@@ -1281,14 +1437,25 @@ def register_wiki_tools(
 
         confirmed = _consume_confirmation(args, action="describe_video", kb_id=kb_id)
         if confirmed is None:
-            return _issue_confirmation(
+            decision = await _ask_blocking_confirmation(
                 action="describe_video",
                 kb_id=kb_id,
-                payload={"source_id": source_id},
                 summary=f"将视频 {raw.title} 上传到外部云端进行理解",
                 impact={"external_service": "configured_media_provider", "privacy_risk": True},
             )
-        if str(confirmed.get("source_id") or "") != source_id:
+            if decision == "unavailable":
+                return _issue_confirmation(
+                    action="describe_video",
+                    kb_id=kb_id,
+                    payload={"source_id": source_id},
+                    summary=f"将视频 {raw.title} 上传到外部云端进行理解",
+                    impact={"external_service": "configured_media_provider", "privacy_risk": True},
+                )
+            if decision == "timeout":
+                return tool_error("等待确认超时，视频理解未执行，可重试")
+            if decision != "confirmed":
+                return tool_result(cancelled=True, message="用户已取消，视频理解未执行")
+        elif str(confirmed.get("source_id") or "") != source_id:
             return tool_error("确认内容与当前视频参数不一致，请重新生成确认卡")
         prompt = str(args.get("prompt") or config.multimodal.prompt_video or "")
         try:

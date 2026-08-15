@@ -44,6 +44,9 @@ def wiki_mocks():
     manager = MagicMock(spec=WikiSessionManager)
     # 默认会话活跃 KB：各用例的 kb_active 断言都依赖它，个别用例可自行覆盖。
     manager.get_kb_id.return_value = "kb_active"
+    # 默认无批量授权：MagicMock 默认返回真值会让阻塞确认直接放行，
+    # 需要确认行为的用例应得到被动确认卡（测试环境无 push_fn → unavailable 回退）。
+    manager.has_action_grant.return_value = False
     registry = Registry()
     config = WikiConfig.from_raw({"ingest": {"auto_apply": False}})
     register_wiki_tools(registry, store, compiler, querier, manager, config=config)
@@ -1261,3 +1264,125 @@ async def test_find_source_kb_locates_raw_across_kbs(tmp_path):
 
     assert store.find_source_kb("s1", owner_account_id="owner") == "kb_work"
     assert store.find_source_kb("missing", owner_account_id="owner") is None
+
+
+# ---- 阻塞式确认（_ask_blocking_confirmation） ----
+
+
+def _mock_blocking(monkeypatch, answers):
+    """替换 crew.wiki.tools 里的 followup 发送/等待，返回记录发送次数的列表。"""
+    calls = []
+
+    async def fake_send(questions, title="", *, record_history=True):
+        calls.append({"questions": questions, "title": title, "record_history": record_history})
+        return ("sid", "q1")
+
+    async def fake_wait(session_id, question_id, *, timeout=300.0):
+        return answers
+
+    monkeypatch.setattr("crew.wiki.tools.send_followup_question", fake_send)
+    monkeypatch.setattr("crew.wiki.tools.wait_for_answer", fake_wait)
+    return calls
+
+
+def _delete_source_mocks(wiki_mocks):
+    from crew.wiki.schemas import RawSource
+
+    store = wiki_mocks["store"]
+    store.load_raw.return_value = RawSource(id="s1", title="a.xlsx", source_type="upload", parsed_path="")
+    store.list_pages_by_source.return_value = []
+    store.delete_raw.return_value = True
+    return store
+
+
+async def test_blocking_confirm_allow_once_executes(wiki_mocks, monkeypatch):
+    store = _delete_source_mocks(wiki_mocks)
+    calls = _mock_blocking(monkeypatch, [{"id": "wiki_confirm", "answers": ["allow_once"]}])
+    _set_context()
+
+    await wiki_mocks["registry"].get("wiki_delete_source").run({"source_id": "s1"})
+
+    assert len(calls) == 1
+    assert calls[0]["record_history"] is False
+    store.delete_raw.assert_called_once()
+
+
+async def test_blocking_confirm_deny_skips(wiki_mocks, monkeypatch):
+    store = _delete_source_mocks(wiki_mocks)
+    _mock_blocking(monkeypatch, [{"id": "wiki_confirm", "answers": ["deny"]}])
+    _set_context()
+
+    result = await wiki_mocks["registry"].get("wiki_delete_source").run({"source_id": "s1"})
+
+    import json as _json
+
+    assert _json.loads(result)["cancelled"] is True
+    store.delete_raw.assert_not_called()
+
+
+async def test_blocking_confirm_timeout_aborts(wiki_mocks, monkeypatch):
+    store = _delete_source_mocks(wiki_mocks)
+    _mock_blocking(monkeypatch, [])
+    _set_context()
+
+    result = await wiki_mocks["registry"].get("wiki_delete_source").run({"source_id": "s1"})
+
+    assert "超时" in result
+    store.delete_raw.assert_not_called()
+
+
+async def test_blocking_confirm_allow_batch_grants_session(wiki_mocks, monkeypatch):
+    store = _delete_source_mocks(wiki_mocks)
+    manager = wiki_mocks["manager"]
+    manager.has_action_grant.side_effect = [False, True]
+    calls = _mock_blocking(monkeypatch, [{"id": "wiki_confirm", "answers": ["allow_batch"]}])
+    _set_context()
+
+    tool = wiki_mocks["registry"].get("wiki_delete_source")
+    await tool.run({"source_id": "s1"})
+    await tool.run({"source_id": "s1"})
+
+    # 第一次弹窗确认并登记授权；第二次命中授权直接执行，不再询问
+    manager.grant_action.assert_called_once()
+    assert len(calls) == 1
+    assert store.delete_raw.call_count == 2
+
+
+async def test_blocking_confirm_unavailable_falls_back_to_passive_card(wiki_mocks, monkeypatch):
+    from crew.core.errors import ToolError
+
+    store = _delete_source_mocks(wiki_mocks)
+    wiki_mocks["manager"].issue_confirmation.return_value = {
+        "requires_confirmation": True,
+        "confirmation_id": "wcf_test",
+        "action": "delete_source",
+        "kb_id": "kb_active",
+        "summary": "删除 RawSource s1 及关联页面",
+        "impact": {},
+        "expires_at": 0,
+    }
+
+    async def fake_send(*args, **kwargs):
+        raise ToolError("当前运行环境不支持追问交互（无 push 函数）")
+
+    monkeypatch.setattr("crew.wiki.tools.send_followup_question", fake_send)
+    _set_context()
+
+    result = await wiki_mocks["registry"].get("wiki_delete_source").run({"source_id": "s1"})
+
+    import json as _json
+
+    payload = _json.loads(result)
+    assert payload["requires_confirmation"] is True
+    assert payload["confirmation_id"]
+    store.delete_raw.assert_not_called()
+
+
+def test_action_grant_roundtrip():
+    manager = WikiSessionManager()
+    assert not manager.has_action_grant("s1", action="delete_source", kb_id="kb", owner_account_id="o")
+    manager.grant_action("s1", action="delete_source", kb_id="kb", owner_account_id="o")
+    assert manager.has_action_grant("s1", action="delete_source", kb_id="kb", owner_account_id="o")
+    # 不同 action / 不同会话不受影响
+    assert not manager.has_action_grant("s1", action="delete_kb", kb_id="kb", owner_account_id="o")
+    assert not manager.has_action_grant("s2", action="delete_source", kb_id="kb", owner_account_id="o")
