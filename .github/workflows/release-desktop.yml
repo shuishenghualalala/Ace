@@ -190,6 +190,13 @@ jobs:
           python-version: "3.11"
       - name: Install Inno Setup
         run: choco install innosetup --no-progress --yes
+      - name: Install Inno Setup Chinese language
+        shell: pwsh
+        run: |
+          $langs = "C:\Program Files (x86)\Inno Setup 6\Languages"
+          if (-not (Test-Path $langs)) { New-Item -ItemType Directory -Force $langs | Out-Null }
+          Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile (Join-Path $langs "ChineseSimplified.isl")
+          if (-not (Test-Path (Join-Path $langs "ChineseSimplified.isl"))) { throw "ChineseSimplified.isl was not downloaded" }
       - name: Build Windows installer
         shell: pwsh
         run: ./deb-package/pack_exe.ps1 -Version "$env:VERSION"
@@ -199,7 +206,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release-output | Out-Null
-          Copy-Item "dist\installer\Crew_Setup_v$env:VERSION.exe" release-output\
+          Copy-Item "dist\Crew_Setup_v$env:VERSION.exe" release-output\
           Copy-Item "dist\package-size-report-windows.txt" release-output\
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -216,6 +223,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
