@@ -47,6 +47,11 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
 
+    def close(self) -> None:
+        """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
+        with self._lock:
+            self._conn.close()
+
     def _init_schema(self, conn) -> None:
         conn.execute(
             """
