@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import account_from_request
+from crew.gateway.helpers import safe_public_error
 from crew.state.logging import get_logger
 from crew.work.items import WorkItemConflictError
 from crew.work.preferences import WorkPreferenceConflictError
@@ -36,7 +37,7 @@ def create_work_router(crew) -> APIRouter:
             status_code = 503
         else:
             status_code = 422
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=status_code)
+        return JSONResponse({"ok": False, "error": safe_public_error(exc, "工作区操作失败")}, status_code=status_code)
 
     async def _notify_item(
         owner_account_id: str, action: str, item_id: str, version: int
@@ -74,12 +75,12 @@ def create_work_router(crew) -> APIRouter:
             )
         except ValueError as exc:
             return JSONResponse(
-                {"ok": False, "error": str(exc)},
+                {"ok": False, "error": safe_public_error(exc, "工作区请求无效")},
                 status_code=422,
             )
         except RuntimeError as exc:
             return JSONResponse(
-                {"ok": False, "error": str(exc)},
+                {"ok": False, "error": safe_public_error(exc, "工作区服务不可用")},
                 status_code=503,
             )
         return JSONResponse(created, status_code=201)

@@ -44,3 +44,23 @@ fn process_is_assigned_before_resume() {
             < process.find("ResumeThread(process_info.hThread)").unwrap()
     );
 }
+
+#[test]
+fn default_job_enforces_process_and_memory_limits() {
+    let job = job::KillOnCloseJob::new().unwrap();
+    let limits = job.query_limits().unwrap();
+
+    assert_eq!(
+        limits.active_process_limit,
+        job::DEFAULT_ACTIVE_PROCESS_LIMIT
+    );
+    assert_eq!(
+        limits.process_memory_limit,
+        job::DEFAULT_PROCESS_MEMORY_LIMIT
+    );
+    assert_eq!(limits.job_memory_limit, job::DEFAULT_JOB_MEMORY_LIMIT);
+    assert_eq!(
+        limits.process_user_time_limit_100ns,
+        job::DEFAULT_PROCESS_USER_TIME_LIMIT_100NS
+    );
+}

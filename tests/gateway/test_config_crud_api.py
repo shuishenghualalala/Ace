@@ -324,7 +324,8 @@ async def test_create_model_writes_env(api, tmp_path: Path, auth_headers):
         })
     assert resp.status_code == 201
     env_text = (_owner_overlay_path(tmp_path).parent / ".env").read_text(encoding="utf-8")
-    assert "TEST_DELTA_API_KEY=sk-delta-secret" in env_text
+    assert "sk-delta-secret" not in env_text
+    assert "TEST_DELTA_API_KEY=@ace-secret:v1:" in env_text
 
 
 @pytest.mark.asyncio
@@ -344,6 +345,92 @@ async def test_create_model_rejects_non_api_key_env(api, auth_headers, tmp_path,
     assert resp.status_code == 409
     assert "api_key_env" in resp.json()["error"]
     assert os.environ["CREW_HOME"] == protected_home
+
+
+@pytest.mark.asyncio
+async def test_create_model_rejects_url_credentials_before_storing_key(
+    api,
+    auth_headers,
+    monkeypatch,
+):
+    stored = False
+
+    def fail_if_stored(*_args, **_kwargs):
+        nonlocal stored
+        stored = True
+        raise AssertionError("credential persistence must follow URL validation")
+
+    monkeypatch.setattr(
+        api.state.crew,
+        "_apply_api_key_to_env",
+        fail_if_stored,
+    )
+    transport = ASGITransport(app=api)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        resp = await client.post(
+            "/api/config/models",
+            json={
+                "id": "credential-url",
+                "api_key_env": "TEST_CREDENTIAL_URL_API_KEY",
+                "base_url": (
+                    "https://api.example.test/v1?access_token=query-secret"
+                ),
+                "api_key": "provider-secret-canary",
+            },
+        )
+
+    assert resp.status_code == 409
+    assert stored is False
+    assert "provider-secret-canary" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_create_model_hides_credential_store_failure_details(
+    api,
+    auth_headers,
+    monkeypatch,
+    caplog,
+):
+    canary = "provider-store-secret-canary"
+
+    def fail_storage(*_args, **_kwargs):
+        raise RuntimeError(
+            rf"C:\private\provider.key access_token={canary}"
+        )
+
+    monkeypatch.setattr(
+        api.state.crew,
+        "_apply_api_key_to_env",
+        fail_storage,
+    )
+    transport = ASGITransport(app=api)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        resp = await client.post(
+            "/api/config/models",
+            json={
+                "id": "storage-failure",
+                "api_key_env": "TEST_STORAGE_FAILURE_API_KEY",
+                "base_url": "https://api.example.test/v1",
+                "api_key": canary,
+            },
+        )
+
+    assert resp.status_code == 500
+    assert resp.json() == {
+        "ok": False,
+        "error": "模型配置持久化失败",
+    }
+    assert canary not in resp.text
+    assert canary not in caplog.text
+    assert r"C:\private\provider.key" not in resp.text
 
 
 @pytest.mark.asyncio
@@ -389,12 +476,37 @@ async def test_update_model_success(api, auth_headers):
         resp = await client.put("/api/config/models/alpha", json={
             "temperature": 0.1,
             "base_url": "https://new.example.com/v1",
+            "api_key": "sk-alpha-rebound",
         })
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["profile"]["id"] == "alpha"
     # 拿不到 temperature（public_dict 有），验证一下
     assert data["profile"]["temperature"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_update_model_rejects_reusing_key_for_a_different_origin(
+    api,
+    auth_headers,
+):
+    transport = ASGITransport(app=api)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        resp = await client.put(
+            "/api/config/models/alpha",
+            json={"base_url": "https://attacker.example/v1"},
+        )
+
+    assert resp.status_code == 409
+    assert "重新提交 API Key" in resp.json()["error"]
+    assert (
+        api.state.crew.config.model_profiles["alpha"].base_url
+        == "https://alpha.example.com/v1"
+    )
 
 
 @pytest.mark.asyncio

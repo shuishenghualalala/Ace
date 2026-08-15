@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   readResolvedCrewFile,
+  resolveOwnedFilePath,
   resolveCrewFilePath,
 } from '../../src/main/crew-file-protocol';
 
@@ -37,6 +38,63 @@ afterAll(() => {
 const urlOf = (p: string) => `crew-file://img/${encodeURIComponent(p)}`;
 
 describe('resolveCrewFilePath', () => {
+  it('只解码一次并拒绝二次编码的路径分隔符', () => {
+    const encodedSlash = path.join(path.dirname(pngPath), '%2Fshadow.png');
+    const encodedBackslash = path.join(path.dirname(pngPath), '%5Cshadow.png');
+    fs.writeFileSync(encodedSlash, 'slash');
+    fs.writeFileSync(encodedBackslash, 'backslash');
+    try {
+      expect(resolveCrewFilePath(urlOf(encodedSlash), crewHome, OWNER_SEGMENT)).toBeNull();
+      expect(resolveCrewFilePath(urlOf(encodedBackslash), crewHome, OWNER_SEGMENT)).toBeNull();
+    } finally {
+      fs.rmSync(encodedSlash, { force: true });
+      fs.rmSync(encodedBackslash, { force: true });
+    }
+  });
+
+  it('拒绝 fragment、非约定 host 和 producer 不会生成的明文分隔符', () => {
+    expect(resolveCrewFilePath(`${urlOf(pngPath)}#fragment`, crewHome, OWNER_SEGMENT)).toBeNull();
+    expect(
+      resolveCrewFilePath(
+        urlOf(pngPath).replace('://img/', '://other/'),
+        crewHome,
+        OWNER_SEGMENT,
+      ),
+    ).toBeNull();
+
+    const mixedEncoding = `crew-file://img/${encodeURIComponent(path.dirname(pngPath))}/${encodeURIComponent(path.basename(pngPath))}`;
+    expect(resolveCrewFilePath(mixedEncoding, crewHome, OWNER_SEGMENT)).toBeNull();
+  });
+
+  it('拒绝 NUL、坏转义和 Windows UNC/extended/drive-relative 路径', () => {
+    expect(resolveCrewFilePath(urlOf(`${pngPath}\0`), crewHome, OWNER_SEGMENT)).toBeNull();
+    expect(resolveCrewFilePath(`crew-file://img/${encodeURIComponent(pngPath)}%ZZ`, crewHome, OWNER_SEGMENT)).toBeNull();
+
+    const forbidden = [
+      `\\\\?\\${pngPath}`,
+      `\\\\.\\${pngPath}`,
+      '\\\\server\\share\\shot.png',
+    ];
+    for (const candidate of forbidden) {
+      expect(resolveOwnedFilePath(candidate, crewHome, OWNER_SEGMENT)).toBeNull();
+    }
+    if (process.platform === 'win32') {
+      const driveRelative = pngPath.replace(/^[A-Za-z]:\\/, (drive) => drive.slice(0, 2));
+      expect(resolveOwnedFilePath(driveRelative, crewHome, OWNER_SEGMENT)).toBeNull();
+    }
+  });
+
+  it('只解码一次且保留普通百分号文件名', () => {
+    const percentName = path.join(path.dirname(pngPath), 'a%20b.png');
+    fs.writeFileSync(percentName, 'percent');
+    try {
+      expect(resolveCrewFilePath(urlOf(percentName), crewHome, OWNER_SEGMENT)?.filePath)
+        .toBe(fs.realpathSync(percentName));
+    } finally {
+      fs.rmSync(percentName, { force: true });
+    }
+  });
+
   it('放行 task_workspaces 内的图片文件', () => {
     const resolved = resolveCrewFilePath(urlOf(pngPath), crewHome, OWNER_SEGMENT);
     expect(resolved?.filePath).toBe(fs.realpathSync(pngPath));

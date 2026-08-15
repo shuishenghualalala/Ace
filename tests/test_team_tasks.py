@@ -32,6 +32,7 @@ from crew.team.graph_planner import (
     DEFAULT_PLANNING_DECISION_TIMEOUT,
     PLANNING_DECISION_MAX_TOKENS,
     TeamGraphPlanner,
+    _safe_planning_error,
     schedule_planning_provider_warmup,
 )
 from crew.team.history_projection import team_internal_history_items
@@ -61,6 +62,13 @@ from crew.team.turn_router import TeamTurnRouter
 from crew.team.workflow_plan import coerce_planning_decision
 from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
 from crew.tools.registry import Registry, register_builtin_tools
+
+
+def test_team_planner_error_hides_host_path_and_secret() -> None:
+    message = _safe_planning_error(r"C:\private\provider.json ACCESS_TOKEN=secret")
+
+    assert message == "规划模型调用失败"
+    assert "secret" not in message
 
 
 class RoleProvider(LLMProvider):
@@ -1376,8 +1384,12 @@ def test_team_markdown_artifact_uses_business_filename(tmp_path):
     assert InProcessTeamManager._unique_artifact_path(tmp_path, "功能测试方案.md").name == "功能测试方案-2.md"
 
 
-def test_team_node_owned_artifacts_filters_concurrent_member_artifacts():
+def test_team_node_owned_artifacts_filters_concurrent_member_artifacts(tmp_path):
     tm, _ = _team()
+    plan_path = tmp_path / "test-plan.md"
+    tetris_path = tmp_path / "tetris.html"
+    plan_path.write_text("plan", encoding="utf-8")
+    tetris_path.write_text("tetris", encoding="utf-8")
     node = TeamPlanNode(
         node_id="build_1",
         title="实现：小游戏",
@@ -1385,18 +1397,18 @@ def test_team_node_owned_artifacts_filters_concurrent_member_artifacts():
         assignee="kk",
     )
     artifacts = [
-        {
-            "artifact_id": "a-crew",
-            "owner_member_id": CREW_BUILTIN_AGENT_ID,
-            "task_id": "task-qa",
-            "path": "/tmp/test-plan.md",
-        },
+            {
+                "artifact_id": "a-crew",
+                "owner_member_id": CREW_BUILTIN_AGENT_ID,
+                "task_id": "task-qa",
+                "path": str(plan_path),
+            },
         {
             "artifact_id": "a-kk",
-            "owner_member_id": "kk",
-            "task_id": "task-build",
-            "path": "/tmp/tetris.html",
-        },
+                "owner_member_id": "kk",
+                "task_id": "task-build",
+                "path": str(tetris_path),
+            },
     ]
 
     owned = tm._node_owned_artifacts(artifacts, node=node, task_id="task-build")
@@ -1819,7 +1831,7 @@ def test_team_full_result_is_stored_as_node_owned_reference(tmp_path, monkeypatc
     assert result_path.is_file()
     assert result_path.read_text(encoding="utf-8") == content
     assert result_bytes == len(content.encode("utf-8"))
-    assert ".crew/node-results" in result_ref
+    assert os.sep.join([".crew", "node-results"]) in result_ref
 
 
 def test_team_child_tool_chunk_becomes_node_execution_event():
@@ -1892,6 +1904,7 @@ def test_team_workspace_guard_blocks_parent_task_workspace_search(tmp_path):
 
     assert decision.allowed is False
     assert "当前 Session 授权范围外" in decision.reason
+    assert str(parent) not in decision.reason
 
     raw_decision = check_workspace_guard(
         "terminal",
@@ -6642,6 +6655,75 @@ async def test_runtime_staffing_timeout_never_auto_approves(tmp_path, monkeypatc
     assert send_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_runtime_staffing_failure_redacts_host_path(tmp_path, monkeypatch):
+    external_store = ExternalAgentStore(str(tmp_path / "external.db"))
+    runtime = external_store.upsert_runtime({
+        "id": "runtime-ready",
+        "provider": "custom",
+        "name": "Ready Runtime",
+        "executable_path": "/bin/sh",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "backend-model",
+            "models": [{"id": "backend-model", "capabilities": ["backend"]}],
+        },
+    })
+    external_store.create_agent(
+        owner_account_id="local",
+        name="候选外援",
+        runtime_id=runtime["id"],
+        model="backend-model",
+        system_prompt="负责后端实现",
+    )
+    tm, _ = _team()
+    tm.external_store = external_store
+    team = tm._build_team("runtime-staffing-failure", owner_account_id="local")
+    node = TeamPlanNode(
+        node_id="build",
+        title="实现接口",
+        assignee="不存在的成员",
+        metadata={"required_capabilities": ["backend"]},
+    )
+    plan = TeamPlan(
+        team_session_id="runtime-staffing-failure",
+        goal="实现接口",
+        nodes={"build": node},
+    )
+    tm._plans[tm._key(plan.team_session_id, "local")] = plan
+
+    captured_questions: list[dict] = []
+
+    async def fake_send(session_id, questions, **kwargs):
+        captured_questions.extend(questions)
+        return session_id, "staffing-question"
+
+    async def fake_wait(session_id, question_id, **kwargs):
+        return [{"id": captured_questions[0]["id"], "answers": ["candidate:0"]}]
+
+    def fail_apply(*_args, **_kwargs):
+        raise RuntimeError(r"C:\Users\alice\secret.txt: staffing boom")
+
+    monkeypatch.setattr("crew.team.team_manager.send_followup_question_to", fake_send)
+    monkeypatch.setattr("crew.team.team_manager.wait_for_answer", fake_wait)
+    monkeypatch.setattr(tm, "_apply_runtime_staffing", fail_apply)
+
+    trigger = tm._runtime_staffing_trigger(team, node, owner_account_id="local", max_attempts=2)
+    assert trigger is not None
+    _unchanged, status = await tm._handle_runtime_staffing(
+        Envelope.of("实现接口", session_id=plan.team_session_id, mode="team", user_id="local"),
+        plan,
+        node,
+        team,
+        trigger,
+    )
+
+    assert status == "failed"
+    serialized = str(node.metadata) + str(getattr(node, "result_summary", ""))
+    assert "alice" not in serialized
+    assert "secret.txt" not in serialized
+
+
 def test_leader_summary_uses_current_summary_contract_without_history_fulltext_compat():
     long_answer = (
         "根据当前系统信息，团队有以下成员：\n\n"
@@ -7650,3 +7732,55 @@ async def test_cancel_owner_stops_owner_teams_and_delegates_without_cross_owner_
             if not _t.done():
                 _t.cancel()
         await asyncio.gather(task_a, task_b, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_owner_closes_all_team_credential_clients_before_eviction(
+    monkeypatch,
+):
+    tm, _tasks = _team()
+    closed: list[str] = []
+
+    class Agent:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def aclose(self) -> None:
+            closed.append(self.name)
+
+    owner = "A:uid-a"
+    tm._teams[(owner, "sess-a")] = SimpleNamespace(
+        leader=Agent("leader"),
+        direct_leader=Agent("direct"),
+        teammates={"worker": Agent("worker")},
+    )
+    monkeypatch.setattr(tm, "interrupt", lambda *_args, **_kwargs: True)
+
+    await tm.cancel_owner(owner)
+
+    assert sorted(closed) == ["direct", "leader", "worker"]
+    assert (owner, "sess-a") not in tm._teams
+
+
+@pytest.mark.asyncio
+async def test_cancel_owner_retains_team_when_credential_client_close_fails(
+    monkeypatch,
+):
+    tm, _tasks = _team()
+
+    class BrokenAgent:
+        async def aclose(self) -> None:
+            raise RuntimeError("close failed")
+
+    owner = "A:uid-a"
+    tm._teams[(owner, "sess-a")] = SimpleNamespace(
+        leader=BrokenAgent(),
+        direct_leader=None,
+        teammates={},
+    )
+    monkeypatch.setattr(tm, "interrupt", lambda *_args, **_kwargs: True)
+
+    with pytest.raises(RuntimeError, match="credential client close failed"):
+        await tm.cancel_owner(owner)
+
+    assert (owner, "sess-a") in tm._teams

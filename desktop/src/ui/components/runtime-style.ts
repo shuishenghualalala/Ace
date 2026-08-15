@@ -66,6 +66,7 @@ const RUNTIME_TOKENS = new Set([
   '--mw-font-code-size',
   '--mw-font-sans',
   '--mw-inspector-width',
+  '--inspector-width',
   '--mw-task-board-width',
 ]);
 
@@ -99,10 +100,12 @@ export function setRuntimeStyle(
 ): void {
   element.classList.add('mw-runtime-style');
   element.style.setProperty(runtimeVariable(property), value);
+  element.style.setProperty(property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`), value);
 }
 
 export function clearRuntimeStyle(element: HTMLElement, property: string): void {
   element.style.removeProperty(runtimeVariable(property));
+  element.style.removeProperty(property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`));
   if (!element.getAttribute('style')) element.classList.remove('mw-runtime-style');
 }
 

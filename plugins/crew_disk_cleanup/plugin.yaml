@@ -1,7 +1,11 @@
+schema_version: crew.plugin.v1
 name: crew_disk_cleanup
 version: "0.1.0"
 description: "Inspect and clean Crew temporary files under .crew/tmp and /tmp/crew-*."
 author: "Crew"
 kind: standalone
+capabilities:
+  - tools
+  - filesystem
 provides_tools:
   - crew_disk_cleanup

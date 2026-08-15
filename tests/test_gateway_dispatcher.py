@@ -22,9 +22,10 @@ from crew.core.mocks import InMemorySessionStore
 from crew.core.runctx import current_owner_account_id
 from crew.core.types import Message
 from crew.gateway.channel_manager import ChannelManager
-from crew.gateway.connections import ConnectionManager, _MAX_CONSECUTIVE_FAILURES
-from crew.gateway.dispatcher import BusyMode, SessionDispatcher
+from crew.gateway.connections import _MAX_CONSECUTIVE_FAILURES, ConnectionManager
+from crew.gateway.dispatcher import BusyMode, SessionDispatcher, _action_digest
 from crew.gateway.hooks import hook_registry
+from crew.tasks.runtime import TaskRuntime
 
 OWNER = "local"
 
@@ -261,13 +262,301 @@ async def test_failure_via_exception_persisted():
 
     async def inner(env):
         yield ResponseChunk.delta(env.request_id, "x")
-        raise RuntimeError("boom")
+        raise RuntimeError(r"boom at C:\private\secret.txt token=top-secret-value")
 
     disp = SessionDispatcher(inner, store)
     out = await _drain(disp.run(_env("s1")))
     assert out[-1].kind == "error"  # 兜底产出 error 帧
+    assert out[-1].body["message"] == "服务内部异常，请稍后重试"
     last_status, last_error = store.get_status("s1", owner_account_id="local")
-    assert last_status == "failed" and "boom" in last_error
+    assert last_status == "failed"
+    assert last_error == "服务内部异常，请稍后重试"
+    assert "private" not in str(out[-1].body)
+    assert "top-secret-value" not in str(out[-1].body)
+
+
+async def test_duplicate_request_id_is_rejected_without_second_dispatch():
+    store = InMemorySessionStore()
+    calls = 0
+
+    async def inner(env):
+        nonlocal calls
+        calls += 1
+        yield ResponseChunk.final(env.request_id, "ok")
+
+    disp = SessionDispatcher(inner, store)
+    first = Envelope.of(
+        "first",
+        session_id="s-replay",
+        user_id=OWNER,
+        request_id="request-replay-1",
+    )
+    replay = Envelope.of(
+        "replayed",
+        session_id="s-replay",
+        user_id=OWNER,
+        request_id="request-replay-1",
+    )
+
+    first_result = await _drain(disp.run(first))
+    replay_result = await _drain(disp.run(replay))
+
+    assert first_result[-1].kind == "final"
+    assert replay_result[-1].kind == "error"
+    assert replay_result[-1].body["category"] == "protocol"
+    assert calls == 1
+
+
+async def test_shared_runtime_task_claim_closes_cross_dispatcher_race(tmp_path):
+    class UniqueTaskRuntime(_DummyTaskRuntime):
+        def __init__(self, output_root):
+            super().__init__(output_root)
+            self.claimed: set[str] = set()
+
+        def create_runtime(self, **kwargs: Any) -> dict[str, Any]:
+            task_id = str(kwargs.get("task_id") or "")
+            if not task_id or task_id in self.claimed:
+                raise RuntimeError("duplicate runtime task")
+            self.claimed.add(task_id)
+            result = super().create_runtime(**kwargs)
+            old_task_id = result["task_id"]
+            record = self._tasks.pop(old_task_id)
+            self._tasks[task_id] = record
+            return {"task_id": task_id}
+
+    runtime = UniqueTaskRuntime(tmp_path)
+    store = InMemorySessionStore()
+    calls = 0
+
+    async def inner(env):
+        nonlocal calls
+        calls += 1
+        yield ResponseChunk.final(env.request_id, "ok")
+
+    first = SessionDispatcher(inner, store, task_runtime=runtime)
+    second = SessionDispatcher(inner, store, task_runtime=runtime)
+    envelopes = [
+        Envelope.of(
+            "same logical request",
+            session_id="s-race",
+            user_id=OWNER,
+            request_id="request-cross-worker-1",
+        )
+        for _ in range(2)
+    ]
+
+    results = await asyncio.gather(
+        _drain(first.run(envelopes[0])),
+        _drain(second.run(envelopes[1])),
+    )
+
+    assert calls == 1
+    assert sorted(result[-1].kind for result in results) == ["error", "final"]
+    assert len(runtime.claimed) == 1
+
+
+async def test_persistent_terminal_retry_reuses_result_after_dispatcher_restart(tmp_path):
+    db_path = tmp_path / "tasks.db"
+    store = InMemorySessionStore()
+    calls = 0
+
+    async def inner(env):
+        nonlocal calls
+        calls += 1
+        yield ResponseChunk.final(env.request_id, "persisted result")
+
+    envelope = Envelope.of(
+        "same logical request",
+        session_id="s-persistent-retry",
+        user_id=OWNER,
+        request_id="request-persistent-retry",
+    )
+    runtime = TaskRuntime(str(db_path))
+    first = SessionDispatcher(inner, store, task_runtime=runtime)
+    assert (await _drain(first.run(envelope)))[-1].body["text"] == "persisted result"
+    runtime.close()
+
+    recovered = TaskRuntime(str(db_path))
+    second = SessionDispatcher(inner, store, task_runtime=recovered)
+    replay = await _drain(second.run(envelope))
+    recovered.close()
+
+    assert replay[-1].kind == "final"
+    assert replay[-1].body["text"] == "persisted result"
+    assert calls == 1
+
+
+async def test_persistent_retry_rejects_action_digest_conflict(tmp_path):
+    runtime = TaskRuntime(str(tmp_path / "tasks.db"))
+    store = InMemorySessionStore()
+    calls = 0
+
+    async def inner(env):
+        nonlocal calls
+        calls += 1
+        yield ResponseChunk.final(env.request_id, "should not run")
+
+    first = SessionDispatcher(inner, store, task_runtime=runtime)
+    original = Envelope.of(
+        "original action",
+        session_id="s-digest-conflict",
+        user_id=OWNER,
+        request_id="request-digest-conflict",
+    )
+    await _drain(first.run(original))
+    runtime.close()
+
+    recovered = TaskRuntime(str(tmp_path / "tasks.db"))
+    second = SessionDispatcher(inner, store, task_runtime=recovered)
+    conflict = Envelope.of(
+        "different action",
+        session_id=original.session_id,
+        user_id=OWNER,
+        request_id=original.request_id,
+    )
+    replay = await _drain(second.run(conflict))
+    recovered.close()
+
+    assert replay[-1].kind == "error"
+    assert replay[-1].body["category"] == "protocol"
+    assert calls == 1
+
+
+async def test_concurrent_same_digest_dispatches_inner_once(tmp_path):
+    db_path = tmp_path / "tasks.db"
+    store = InMemorySessionStore()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def inner(env):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        yield ResponseChunk.final(env.request_id, "once")
+
+    envelope = Envelope.of(
+        "concurrent action",
+        session_id="s-concurrent-digest",
+        user_id=OWNER,
+        request_id="request-concurrent-digest",
+    )
+    runtime_a = TaskRuntime(str(db_path))
+    runtime_b = TaskRuntime(str(db_path))
+    first = SessionDispatcher(inner, store, task_runtime=runtime_a)
+    second = SessionDispatcher(inner, store, task_runtime=runtime_b)
+    tasks = [
+        asyncio.create_task(_drain(first.run(envelope))),
+        asyncio.create_task(_drain(second.run(envelope))),
+    ]
+    await started.wait()
+    await asyncio.sleep(0.02)
+    assert calls == 1
+    running_replay = next(task for task in tasks if not task.done())
+    release.set()
+    results = await asyncio.gather(*tasks)
+    runtime_a.close()
+    runtime_b.close()
+
+    assert calls == 1
+    assert sorted(result[-1].kind for result in results) == ["final", "status"]
+    assert running_replay.done()
+
+
+async def test_persistent_running_retry_returns_status_without_reexecution(tmp_path):
+    runtime = TaskRuntime(str(tmp_path / "tasks.db"))
+    envelope = Envelope.of(
+        "running action",
+        session_id="s-running-retry",
+        user_id=OWNER,
+        request_id="request-running-retry",
+    )
+    task_id = SessionDispatcher._turn_task_id(OWNER, envelope.session_id, envelope.request_id)
+    task = runtime.create_runtime(
+        kind="agent_turn",
+        session_id=envelope.session_id,
+        title=envelope.query,
+        request_id=envelope.request_id,
+        task_id=task_id,
+        action_digest=_action_digest(envelope),
+        owner_account_id=OWNER,
+    )
+    runtime.mark_running(task["task_id"])
+    calls = 0
+
+    async def inner(env):
+        nonlocal calls
+        calls += 1
+        yield ResponseChunk.final(env.request_id, "must not run")
+
+    dispatcher = SessionDispatcher(inner, InMemorySessionStore(), task_runtime=runtime)
+    replay = await _drain(dispatcher.run(envelope))
+    runtime.close()
+
+    assert replay[-1].kind == "status"
+    assert "查询" in replay[-1].body["message"]
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("failed", "服务内部异常，请稍后重试"),
+        ("cancelled", "请求已取消"),
+        ("timed_out", "请求处理超时，请查询任务状态"),
+    ],
+)
+async def test_persistent_terminal_failure_replay_uses_stable_message(
+    tmp_path,
+    status,
+    expected,
+):
+    runtime = TaskRuntime(str(tmp_path / "tasks.db"))
+    envelope = Envelope.of(
+        "terminal failure",
+        session_id=f"s-{status}",
+        user_id=OWNER,
+        request_id=f"request-{status}",
+    )
+    task_id = SessionDispatcher._turn_task_id(OWNER, envelope.session_id, envelope.request_id)
+    task = runtime.create_runtime(
+        kind="agent_turn",
+        session_id=envelope.session_id,
+        title=envelope.query,
+        request_id=envelope.request_id,
+        task_id=task_id,
+        action_digest=_action_digest(envelope),
+        owner_account_id=OWNER,
+    )
+    runtime.mark_running(task["task_id"])
+    runtime.finish(
+        task["task_id"],
+        owner_account_id=OWNER,
+        status=status,
+        error="secret persisted error",
+        result="secret persisted result",
+    )
+
+    calls = 0
+
+    async def inner(_env):
+        nonlocal calls
+        calls += 1
+        yield ResponseChunk.final(envelope.request_id, "must not run")
+
+    try:
+        replay = await _drain(
+            SessionDispatcher(inner, InMemorySessionStore(), task_runtime=runtime).run(envelope)
+        )
+    finally:
+        runtime.close()
+
+    assert replay[-1].kind == "error"
+    assert replay[-1].body["message"] == expected
+    assert "secret" not in str(replay[-1].body)
+    assert calls == 0
 
 
 async def test_failure_via_error_chunk_persisted():

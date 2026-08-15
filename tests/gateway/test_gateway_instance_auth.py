@@ -16,8 +16,10 @@ from crew.gateway.instance_auth import (
     GATEWAY_INSTANCE_CHALLENGE_HEADER,
     GATEWAY_INSTANCE_DIRECTORY,
     GATEWAY_INSTANCE_KEY_FILENAME,
+    configure_gateway_launch_key,
 )
 from crew.gateway.routers.misc import create_misc_router
+from crew.gateway.windows_acl import protect_path as protect_windows_path
 
 PROOF_CONTEXT = b"crew-gateway-instance-v1\x00"
 
@@ -34,10 +36,16 @@ def health_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI
 def _write_key(crew_home: Path, encoded: bytes = b"11" * 32) -> Path:
     directory = crew_home / GATEWAY_INSTANCE_DIRECTORY
     directory.mkdir(parents=True, mode=0o700)
-    directory.chmod(0o700)
+    if os.name == "nt":
+        protect_windows_path(directory, directory=True)
+    else:
+        directory.chmod(0o700)
     key_file = directory / GATEWAY_INSTANCE_KEY_FILENAME
     key_file.write_bytes(encoded)
-    key_file.chmod(0o600)
+    if os.name == "nt":
+        protect_windows_path(key_file, directory=False)
+    else:
+        key_file.chmod(0o600)
     return key_file
 
 
@@ -77,6 +85,40 @@ async def test_health_returns_domain_separated_instance_proof(health_app):
 
 
 @pytest.mark.asyncio
+async def test_managed_launch_key_supersedes_same_user_persistent_key(health_app):
+    app, crew_home = health_app
+    _write_key(crew_home, b"23" * 32)
+    launch_key = bytes.fromhex("42" * 32)
+    challenge = "ac" * 32
+    expected = hmac.new(
+        launch_key,
+        PROOF_CONTEXT + challenge.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    persistent_proof = hmac.new(
+        bytes.fromhex("23" * 32),
+        PROOF_CONTEXT + challenge.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    configure_gateway_launch_key(launch_key)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/api/health",
+                headers={GATEWAY_INSTANCE_CHALLENGE_HEADER: challenge},
+            )
+    finally:
+        configure_gateway_launch_key(None)
+
+    assert response.json()["instance_proof"] == expected
+    assert response.json()["instance_proof"] != persistent_proof
+
+
+@pytest.mark.asyncio
 async def test_health_challenge_fails_closed_without_secure_key(health_app):
     app, _ = health_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -89,9 +131,13 @@ async def test_health_challenge_fails_closed_without_secure_key(health_app):
             headers={GATEWAY_INSTANCE_CHALLENGE_HEADER: "cd" * 32},
         )
 
-    assert malformed.status_code == 400
-    assert missing.status_code == 503
-    assert "instance_proof" not in missing.json()
+    assert malformed.status_code == 401
+    assert missing.status_code == 401
+    assert malformed.json() == missing.json() == {
+        "ok": False,
+        "error": "gateway instance verification failed",
+    }
+    assert malformed.headers["content-length"] == missing.headers["content-length"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission and symlink contract")
@@ -104,7 +150,7 @@ async def test_health_rejects_wide_permissions_and_symlink_key(health_app):
     key_file.chmod(0o644)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         wide_file = await client.get("/api/health", headers=challenge_headers)
-    assert wide_file.status_code == 503
+    assert wide_file.status_code == 401
 
     key_file.unlink()
     target = crew_home / "not-the-instance-key"
@@ -113,7 +159,7 @@ async def test_health_rejects_wide_permissions_and_symlink_key(health_app):
     key_file.symlink_to(target)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         symlink = await client.get("/api/health", headers=challenge_headers)
-    assert symlink.status_code == 503
+    assert symlink.status_code == 401
 
     key_file.unlink()
     key_file.write_bytes(b"11" * 32)
@@ -121,4 +167,4 @@ async def test_health_rejects_wide_permissions_and_symlink_key(health_app):
     key_file.parent.chmod(0o755)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         wide_parent = await client.get("/api/health", headers=challenge_headers)
-    assert wide_parent.status_code == 503
+    assert wide_parent.status_code == 401

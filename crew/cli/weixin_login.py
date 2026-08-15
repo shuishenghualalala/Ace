@@ -7,6 +7,11 @@ crew home 的账号文件（{crew_home}/weixin/accounts/{account_id}.json）。a
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    from crew.process_hardening import harden_main_process
+
+    harden_main_process("cli-weixin-login")
+
 import asyncio
 import sys
 

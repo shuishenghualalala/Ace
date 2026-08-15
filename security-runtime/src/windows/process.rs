@@ -8,9 +8,11 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
@@ -26,12 +28,14 @@ use windows_sys::Win32::System::Threading::{
     STARTUPINFOW,
 };
 
+use super::desktop::LaunchDesktop;
 use super::identity::SandboxCredentials;
 use super::job::KillOnCloseJob;
 use super::token::create_restricted_token;
 use super::WindowsRunRequest;
 use crate::protocol::{
-    RuntimeCapabilities, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES, MAX_RESPONSE_FRAME_BYTES,
+    RuntimeCapabilities, RuntimeMessage, StdioInputMessage, MAX_OUTPUT_CHUNK_BYTES,
+    MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
 };
 
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
@@ -40,12 +44,24 @@ const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
 struct RunnerRequest {
     command: Vec<String>,
     cwd: PathBuf,
+    temp_dir: PathBuf,
+    username: String,
     capability_sids: Vec<String>,
     max_output_bytes: usize,
     network_enabled: bool,
+    proxy_url: Option<String>,
     allow_local_binding: bool,
     stdin_b64: Option<String>,
+    stream_stdin: bool,
     env_overrides: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum RunnerInputFrame {
+    Stdin { data_b64: String },
+    StdinClose,
+    Abort,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,24 +82,47 @@ enum RunnerMessage {
     Error(String),
 }
 
-pub fn run_via_account(
+pub struct RunViaAccountContext<'a> {
+    pub temp_dir: &'a Path,
+    pub capability_sids: &'a [String],
+    pub proxy_url: Option<String>,
+    pub capabilities: RuntimeCapabilities,
+    pub stdin_stream: Option<Receiver<StdioInputMessage>>,
+    pub sender: &'a SyncSender<RuntimeMessage>,
+}
+
+pub fn run_via_account<F>(
     credentials: &SandboxCredentials,
     request: &WindowsRunRequest,
-    capability_sids: &[String],
-    capabilities: RuntimeCapabilities,
-    sender: &SyncSender<RuntimeMessage>,
-) -> Result<(), String> {
+    context: RunViaAccountContext<'_>,
+    verify_authorized_paths: F,
+) -> Result<i32, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let RunViaAccountContext {
+        temp_dir,
+        capability_sids,
+        proxy_url,
+        capabilities,
+        stdin_stream,
+        sender,
+    } = context;
     let runner_request = RunnerRequest {
         command: request.command.clone(),
         cwd: request.cwd.clone(),
+        temp_dir: temp_dir.to_path_buf(),
+        username: credentials.username.clone(),
         capability_sids: capability_sids.to_vec(),
         max_output_bytes: request.max_output_bytes,
         network_enabled: request.network_enabled,
+        proxy_url,
         allow_local_binding: request.allow_local_binding,
         stdin_b64: request
             .stdin
             .as_ref()
             .map(|value| BASE64_STANDARD.encode(value)),
+        stream_stdin: stdin_stream.is_some(),
         env_overrides: request.env_overrides.clone(),
     };
     let executable = std::env::current_exe()
@@ -104,8 +143,16 @@ pub fn run_via_account(
     let domain = wide(".");
     let password = wide(&credentials.password);
     let cwd = wide(executable.parent().unwrap_or(Path::new(r"C:\")));
-    let mut environment = environment_block(restricted_environment(false, BTreeMap::new()));
+    let mut environment = environment_block(restricted_environment(
+        false,
+        None,
+        BTreeMap::new(),
+        temp_dir,
+        Some(&credentials.username),
+    )?);
     let flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+    let job = KillOnCloseJob::new()?;
+    job.query_limits()?;
     // Audit W2: CreateProcessWithLogonW cannot accept PROC_THREAD_ATTRIBUTE_HANDLE_LIST
     // (only CreateProcessAsUserW supports the extended STARTUPINFOEXW attribute list).
     // We mitigate by ensuring the only inheritable handles at this point are the three
@@ -138,19 +185,24 @@ pub fn run_via_account(
             GetLastError()
         }));
     }
-    let job = KillOnCloseJob::new()?;
-    if let Err(error) = job.assign(process_info.hProcess) {
+    let runner_process = OwnedHandle(process_info.hProcess);
+    if let Err(error) = job.assign(runner_process.raw()) {
         unsafe {
-            TerminateProcess(process_info.hProcess, 1);
+            TerminateProcess(runner_process.raw(), 1);
             CloseHandle(process_info.hThread);
-            CloseHandle(process_info.hProcess);
+        }
+        return Err(error);
+    }
+    if let Err(error) = verify_authorized_paths() {
+        unsafe {
+            TerminateProcess(runner_process.raw(), 1);
+            CloseHandle(process_info.hThread);
         }
         return Err(error);
     }
     if unsafe { ResumeThread(process_info.hThread) } == u32::MAX {
         unsafe {
             CloseHandle(process_info.hThread);
-            CloseHandle(process_info.hProcess);
         }
         return Err(format!("ResumeThread failed: {}", unsafe {
             GetLastError()
@@ -164,14 +216,26 @@ pub fn run_via_account(
         .write_all(&request_bytes)
         .and_then(|_| child_stdin.parent_file.write_all(b"\n"))
         .map_err(|error| format!("cannot send Windows runner request: {error}"))?;
-    drop(child_stdin);
+    let input_finished = Arc::new(AtomicBool::new(false));
+    let input_writer = match stdin_stream {
+        Some(stream) => Some(spawn_runner_input_writer(
+            child_stdin.into_parent_file_after_child_close(),
+            stream,
+            Arc::clone(&input_finished),
+        )),
+        None => {
+            drop(child_stdin);
+            None
+        }
+    };
 
     let stderr_reader =
         thread::spawn(move || read_capped(&mut child_stderr, MAX_RESPONSE_FRAME_BYTES));
     let mut reader = BufReader::new(child_stdout);
     let mut expected_seq = 0_u64;
     let mut started = false;
-    let mut terminal: Result<(), String> = Err("Windows runner closed before terminal".to_string());
+    let mut terminal: Result<i32, String> =
+        Err("Windows runner closed before terminal".to_string());
     loop {
         let mut line = Vec::new();
         let count = reader
@@ -215,10 +279,7 @@ pub fn run_via_account(
                 forward_runner_output(data_b64, sender, false)?;
             }
             RunnerEvent::Completed { exit_code, .. } if started => {
-                sender
-                    .send(RuntimeMessage::Completed(exit_code))
-                    .map_err(|_| "protocol receiver disconnected".to_string())?;
-                terminal = Ok(());
+                terminal = Ok(exit_code);
                 break;
             }
             RunnerEvent::Error { message, .. } => {
@@ -232,15 +293,16 @@ pub fn run_via_account(
         }
     }
     if terminal.is_err() {
-        unsafe { TerminateProcess(process_info.hProcess, 1) };
+        unsafe { TerminateProcess(runner_process.raw(), 1) };
     }
-    unsafe { WaitForSingleObject(process_info.hProcess, INFINITE) };
+    input_finished.store(true, Ordering::Release);
+    unsafe { WaitForSingleObject(runner_process.raw(), INFINITE) };
     let mut runner_exit = 0_u32;
-    unsafe {
-        GetExitCodeProcess(process_info.hProcess, &mut runner_exit);
-        CloseHandle(process_info.hProcess);
-    }
+    unsafe { GetExitCodeProcess(runner_process.raw(), &mut runner_exit) };
     let (_, stderr_truncated) = stderr_reader.join().unwrap_or_default();
+    if let Some(writer) = input_writer {
+        let _ = writer.join();
+    }
     drop(job);
     if stderr_truncated {
         return Err("Windows sandbox runner diagnostics exceeded the size limit".to_string());
@@ -274,7 +336,11 @@ pub fn runner_main() -> ! {
 }
 
 fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<(), String> {
-    let token = create_restricted_token(&request.capability_sids)?;
+    let token = OwnedHandle(create_restricted_token(&request.capability_sids)?);
+    // Keep the GUI-capable child off the user's interactive desktop. A failure
+    // to create or ACL the private Desktop is a sandbox failure, never a
+    // fallback to Winsta0\\Default.
+    let desktop = LaunchDesktop::prepare()?;
     let child_stdin = Pipe::new(/*parent_reads*/ false)?;
     let child_stdout = Pipe::new(/*parent_reads*/ true)?;
     let child_stderr = Pipe::new(/*parent_reads*/ true)?;
@@ -287,6 +353,7 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
     startup.StartupInfo.hStdInput = child_stdin.child;
     startup.StartupInfo.hStdOutput = child_stdout.child;
     startup.StartupInfo.hStdError = child_stderr.child;
+    startup.StartupInfo.lpDesktop = desktop.startup_info_desktop();
     startup.lpAttributeList = attributes.as_mut_ptr();
     let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let mut command_line = wide(&command_line(&request.command)?);
@@ -299,15 +366,18 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
     }
     let mut environment = environment_block(restricted_environment(
         request.network_enabled,
+        request.proxy_url.as_deref(),
         request.env_overrides,
-    ));
+        &request.temp_dir,
+        Some(&request.username),
+    )?);
     let flags = CREATE_NO_WINDOW
         | CREATE_SUSPENDED
         | CREATE_UNICODE_ENVIRONMENT
         | EXTENDED_STARTUPINFO_PRESENT;
     let ok = unsafe {
         CreateProcessAsUserW(
-            token,
+            token.raw(),
             std::ptr::null(),
             command_line.as_mut_ptr(),
             std::ptr::null_mut(),
@@ -320,7 +390,6 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
             &mut process_info,
         )
     };
-    unsafe { CloseHandle(token) };
     let mut stdin = child_stdin.into_parent_file_after_child_close();
     let stdout = child_stdout.into_parent_file_after_child_close();
     let stderr = child_stderr.into_parent_file_after_child_close();
@@ -329,13 +398,13 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
             GetLastError()
         }));
     }
+    let restricted_process = OwnedHandle(process_info.hProcess);
     // The runner itself is already in the outer kill-on-close Job; children
     // inherit that Job. Suspension closes the assignment/start race.
     if unsafe { ResumeThread(process_info.hThread) } == u32::MAX {
         unsafe {
-            TerminateProcess(process_info.hProcess, 1);
+            TerminateProcess(restricted_process.raw(), 1);
             CloseHandle(process_info.hThread);
-            CloseHandle(process_info.hProcess);
         }
         return Err(format!("ResumeThread failed: {}", unsafe {
             GetLastError()
@@ -345,6 +414,9 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
     let mut writer = RunnerWriter::new(output);
     writer.write(RunnerMessage::Started(process_info.dwProcessId))?;
 
+    let budget = Arc::new(Mutex::new(request.max_output_bytes));
+    let (sender, receiver) = mpsc::sync_channel(64);
+    let (failure_sender, failure_receiver) = mpsc::channel();
     if let Some(encoded) = request.stdin_b64 {
         let value = BASE64_STANDARD
             .decode(encoded)
@@ -352,13 +424,12 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
         thread::spawn(move || {
             let _ = stdin.write_all(&value);
         });
+    } else if request.stream_stdin {
+        spawn_restricted_input_writer(stdin, failure_sender.clone());
     } else {
         drop(stdin);
     }
 
-    let budget = Arc::new(Mutex::new(request.max_output_bytes));
-    let (sender, receiver) = mpsc::sync_channel(64);
-    let (failure_sender, failure_receiver) = mpsc::channel();
     let stdout_reader = spawn_runner_reader(
         stdout,
         Arc::clone(&budget),
@@ -374,25 +445,22 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
         }
         if let Ok(error) = failure_receiver.try_recv() {
             stream_failure = Some(error);
-            unsafe { TerminateProcess(process_info.hProcess, 1) };
+            unsafe { TerminateProcess(restricted_process.raw(), 1) };
             break;
         }
-        match unsafe { WaitForSingleObject(process_info.hProcess, 10) } {
+        match unsafe { WaitForSingleObject(restricted_process.raw(), 10) } {
             WAIT_OBJECT_0 => break,
             WAIT_TIMEOUT => {}
             _ => {
                 stream_failure = Some("cannot wait for restricted child".to_string());
-                unsafe { TerminateProcess(process_info.hProcess, 1) };
+                unsafe { TerminateProcess(restricted_process.raw(), 1) };
                 break;
             }
         }
     }
-    unsafe { WaitForSingleObject(process_info.hProcess, INFINITE) };
+    unsafe { WaitForSingleObject(restricted_process.raw(), INFINITE) };
     let mut exit_code = 0_u32;
-    unsafe {
-        GetExitCodeProcess(process_info.hProcess, &mut exit_code);
-        CloseHandle(process_info.hProcess);
-    }
+    unsafe { GetExitCodeProcess(restricted_process.raw(), &mut exit_code) };
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
     while let Ok(message) = receiver.try_recv() {
@@ -423,6 +491,105 @@ fn forward_runner_output(
     sender
         .send(message)
         .map_err(|_| "protocol receiver disconnected".to_string())
+}
+
+fn spawn_runner_input_writer(
+    mut writer: File,
+    receiver: Receiver<StdioInputMessage>,
+    finished: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !finished.load(Ordering::Acquire) {
+            let frame = match receiver.recv_timeout(Duration::from_millis(10)) {
+                Ok(StdioInputMessage::Data(value)) => RunnerInputFrame::Stdin {
+                    data_b64: BASE64_STANDARD.encode(value),
+                },
+                Ok(StdioInputMessage::Close) => RunnerInputFrame::StdinClose,
+                Ok(StdioInputMessage::Abort) => RunnerInputFrame::Abort,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => RunnerInputFrame::Abort,
+            };
+            let terminal = !matches!(frame, RunnerInputFrame::Stdin { .. });
+            let mut encoded = match serde_json::to_vec(&frame) {
+                Ok(value) => value,
+                Err(_) => return,
+            };
+            encoded.push(b'\n');
+            if encoded.len() > MAX_REQUEST_FRAME_BYTES
+                || writer
+                    .write_all(&encoded)
+                    .and_then(|_| writer.flush())
+                    .is_err()
+            {
+                return;
+            }
+            if terminal {
+                return;
+            }
+        }
+    })
+}
+
+fn spawn_restricted_input_writer(mut writer: File, failure_sender: mpsc::Sender<String>) {
+    thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        loop {
+            let mut line = Vec::new();
+            let count = match reader.read_until(b'\n', &mut line) {
+                Ok(value) => value,
+                Err(_) => {
+                    let _ = failure_sender
+                        .send("authenticated runner stdin could not be read".to_string());
+                    return;
+                }
+            };
+            if count == 0 || line.len() > MAX_REQUEST_FRAME_BYTES {
+                let _ = failure_sender
+                    .send("authenticated runner stdin closed unexpectedly".to_string());
+                return;
+            }
+            let frame: RunnerInputFrame = match serde_json::from_slice(&line) {
+                Ok(value) => value,
+                Err(_) => {
+                    let _ = failure_sender
+                        .send("authenticated runner stdin frame is invalid".to_string());
+                    return;
+                }
+            };
+            match frame {
+                RunnerInputFrame::Stdin { data_b64 } => {
+                    let value = match BASE64_STANDARD.decode(data_b64) {
+                        Ok(value)
+                            if value.len() <= crate::protocol::MAX_STDIO_INPUT_FRAME_BYTES =>
+                        {
+                            value
+                        }
+                        _ => {
+                            let _ = failure_sender
+                                .send("authenticated runner stdin encoding is invalid".to_string());
+                            return;
+                        }
+                    };
+                    if writer
+                        .write_all(&value)
+                        .and_then(|_| writer.flush())
+                        .is_err()
+                    {
+                        let _ = failure_sender
+                            .send("restricted child stdin is unavailable".to_string());
+                        return;
+                    }
+                }
+                RunnerInputFrame::StdinClose => return,
+                RunnerInputFrame::Abort => {
+                    let _ = failure_sender
+                        .send("authenticated runner stdin stream aborted".to_string());
+                    return;
+                }
+            }
+        }
+    });
 }
 
 fn spawn_runner_reader(
@@ -530,6 +697,22 @@ impl<'a, W: Write> RunnerWriter<'a, W> {
         self.seq += 1;
         self.terminal = terminal;
         Ok(())
+    }
+}
+
+struct OwnedHandle(HANDLE);
+
+impl OwnedHandle {
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            unsafe { CloseHandle(self.0) };
+        }
     }
 }
 
@@ -652,8 +835,31 @@ impl Drop for ProcThreadAttributes {
 
 fn restricted_environment(
     network_enabled: bool,
+    proxy_url: Option<&str>,
     env_overrides: BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
+    temp_dir: &Path,
+    username: Option<&str>,
+) -> Result<BTreeMap<String, String>, String> {
+    for name in env_overrides.keys() {
+        if matches!(
+            name.to_ascii_uppercase().as_str(),
+            "ACE_SANDBOX"
+                | "SYSTEMROOT"
+                | "WINDIR"
+                | "COMSPEC"
+                | "PATH"
+                | "TEMP"
+                | "TMP"
+                | "USERNAME"
+                | "USERPROFILE"
+                | "HOMEDRIVE"
+                | "HOMEPATH"
+        ) {
+            return Err(format!(
+                "Windows sandbox environment entry is reserved: {name}"
+            ));
+        }
+    }
     let mut result = BTreeMap::new();
     for name in ["SystemRoot", "WINDIR", "ComSpec"] {
         if let Ok(value) = std::env::var(name) {
@@ -668,15 +874,34 @@ fn restricted_environment(
         "PATH".to_string(),
         format!(r"{system_root}\System32;{system_root}"),
     );
+    let temp = temp_dir.as_os_str().to_string_lossy().into_owned();
+    result.insert("TEMP".to_string(), temp.clone());
+    result.insert("TMP".to_string(), temp);
+    if let Some(username) = username {
+        result.insert("USERNAME".to_string(), username.to_string());
+    }
     result.extend(env_overrides);
+    result.insert(
+        "ACE_SANDBOX".to_string(),
+        "windows-sandbox-account".to_string(),
+    );
     if network_enabled {
-        let proxy = "http://127.0.0.1:43119".to_string();
+        let proxy = proxy_url
+            .filter(|value| {
+                value.starts_with("http://crew:")
+                    && value.ends_with("@127.0.0.1:43119")
+                    && !value.bytes().any(|byte| byte <= 0x20 || byte == 0x7f)
+            })
+            .ok_or_else(|| "managed proxy credential is unavailable".to_string())?
+            .to_string();
         result.insert("HTTP_PROXY".to_string(), proxy.clone());
         result.insert("HTTPS_PROXY".to_string(), proxy.clone());
         result.insert("ALL_PROXY".to_string(), proxy);
         result.insert("NO_PROXY".to_string(), String::new());
+    } else if proxy_url.is_some() {
+        return Err("offline sandbox cannot receive proxy credentials".to_string());
     }
-    result
+    Ok(result)
 }
 
 fn environment_block(values: BTreeMap<String, String>) -> Vec<u16> {

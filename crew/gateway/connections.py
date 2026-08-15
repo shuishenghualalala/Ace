@@ -18,9 +18,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
 import time
 from collections import defaultdict, deque
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import WebSocket
 
@@ -32,6 +35,15 @@ log = get_logger("gateway.connections")
 _MAX_CONSECUTIVE_FAILURES = 3
 # 每个 session 缓存的 WS payload 上限，用于断线重连后回放
 _CHUNK_BUFFER_SIZE = 2000
+# 入站按 socket + owner 双层限流，避免并行连接绕过单连接预算。
+_INBOUND_RATE_WINDOW_S = 10.0
+_MAX_INBOUND_PER_SOCKET = 64
+_MAX_INBOUND_PER_OWNER = 256
+# nonce/request id 在断线后继续保留一段时间，覆盖重连重放。
+_REPLAY_TTL_S = 10 * 60.0
+_REPLAY_TABLE_LIMIT = 10_000
+# 出站也属于 IPC frame；不能把无法 JSON 化或超大对象交给 ASGI server。
+_MAX_OUTBOUND_FRAME_BYTES = 1024 * 1024
 
 
 class ConnectionManager:
@@ -58,6 +70,18 @@ class ConnectionManager:
         )
         self._gateway_seq: dict[tuple[str, str], int] = defaultdict(int)
         self._replay_locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+        # 入站协议状态。同步小临界区用 RLock，兼容测试/回调可能来自其它线程；
+        # 每个 uvicorn worker 仍是独立实例，生产 Gateway 固定单 worker。
+        self._protocol_state_lock = threading.RLock()
+        self._inbound_by_socket: dict[WebSocket, deque[float]] = defaultdict(deque)
+        self._inbound_by_owner: dict[str, deque[float]] = defaultdict(deque)
+        self._ws_client_sequences: dict[WebSocket, int] = {}
+        self._owner_nonces: dict[tuple[str, str], float] = {}
+        self._owner_request_ids: dict[tuple[str, str], tuple[str, float]] = {}
+        # Owner generation fence prevents a push queued before logout from
+        # publishing after close_owner begins.
+        self._owner_epochs: dict[str, int] = {}
+        self._blocked_owners: set[str] = set()
 
     def _key(self, session_id: str, owner_account_id: str | None = None) -> tuple[str, str]:
         """Build the connection key from explicit owner + session."""
@@ -71,6 +95,8 @@ class ConnectionManager:
 
     def register(self, session_id: str, ws: WebSocket, *, owner_account_id: str = "") -> None:
         key = self._key(session_id, owner_account_id)
+        if key[0] and key[0] in self._blocked_owners:
+            return
         self._conns[key].add(ws)
         self._ws_to_sessions[ws].add(key)
         # Do not reset failures until a send actually succeeds. A sequence of
@@ -79,10 +105,119 @@ class ConnectionManager:
     def register_owner(self, owner_account_id: str, ws: WebSocket) -> None:
         """Register an owner-level socket for lightweight account events."""
         owner = str(owner_account_id or "")
-        if not owner:
+        if not owner or owner in self._blocked_owners:
             return
         self._owner_conns[owner].add(ws)
         self._ws_to_owners[ws].add(owner)
+
+    def activate_owner(self, owner_account_id: str) -> None:
+        """Open a fresh authenticated owner generation after cleanup."""
+        owner = str(owner_account_id or "").strip()
+        if owner:
+            self._blocked_owners.discard(owner)
+
+    @staticmethod
+    def _expire_events(events: deque[float], cutoff: float) -> None:
+        while events and events[0] <= cutoff:
+            events.popleft()
+
+    def admit_inbound(
+        self,
+        owner_account_id: str,
+        ws: WebSocket,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Atomically enforce per-socket and per-owner inbound message budgets."""
+        owner = str(owner_account_id or "").strip()
+        current = time.monotonic() if now is None else float(now)
+        cutoff = current - _INBOUND_RATE_WINDOW_S
+        with self._protocol_state_lock:
+            if not owner or owner in self._blocked_owners:
+                return False
+            socket_events = self._inbound_by_socket[ws]
+            owner_events = self._inbound_by_owner[owner]
+            self._expire_events(socket_events, cutoff)
+            self._expire_events(owner_events, cutoff)
+            if (
+                len(socket_events) >= _MAX_INBOUND_PER_SOCKET
+                or len(owner_events) >= _MAX_INBOUND_PER_OWNER
+            ):
+                return False
+            socket_events.append(current)
+            owner_events.append(current)
+            return True
+
+    def _prune_replay_tables(self, now: float) -> None:
+        for key, expiry in list(self._owner_nonces.items()):
+            if expiry <= now:
+                self._owner_nonces.pop(key, None)
+        for key, (_session_id, expiry) in list(self._owner_request_ids.items()):
+            if expiry <= now:
+                self._owner_request_ids.pop(key, None)
+
+    def claim_inbound_identity(
+        self,
+        owner_account_id: str,
+        ws: WebSocket,
+        *,
+        session_id: str = "",
+        request_id: str = "",
+        client_sequence: object = None,
+        nonce: str = "",
+        now: float | None = None,
+    ) -> str | None:
+        """Claim sequence/nonce/request identity, returning a stable rejection code."""
+        owner = str(owner_account_id or "").strip()
+        request = str(request_id or "").strip()
+        session = str(session_id or "").strip()
+        current = time.monotonic() if now is None else float(now)
+        with self._protocol_state_lock:
+            if not owner or owner in self._blocked_owners:
+                return "AUTH_REVOKED"
+            self._prune_replay_tables(current)
+
+            next_sequence: int | None = None
+            if client_sequence is not None:
+                if isinstance(client_sequence, bool) or not isinstance(client_sequence, int):
+                    return "SEQUENCE_INVALID"
+                next_sequence = client_sequence
+                if next_sequence != self._ws_client_sequences.get(ws, 0) + 1:
+                    return "SEQUENCE_INVALID"
+                if not nonce:
+                    return "PROTOCOL_INVALID"
+                if (owner, nonce) in self._owner_nonces:
+                    return "REPLAY_DETECTED"
+
+            if request and (owner, request) in self._owner_request_ids:
+                return "REPLAY_DETECTED"
+
+            # Never evict an unexpired replay claim to make room. Doing so would
+            # turn a nonce/request flood into a replay-window bypass. Capacity
+            # exhaustion is therefore a fail-closed protocol error.
+            if (
+                next_sequence is not None
+                and len(self._owner_nonces) >= _REPLAY_TABLE_LIMIT
+            ) or (
+                request
+                and len(self._owner_request_ids) >= _REPLAY_TABLE_LIMIT
+            ):
+                return "REPLAY_STATE_EXHAUSTED"
+
+            expiry = current + _REPLAY_TTL_S
+            if next_sequence is not None:
+                self._ws_client_sequences[ws] = next_sequence
+                self._owner_nonces[(owner, nonce)] = expiry
+            if request:
+                self._owner_request_ids[(owner, request)] = (session, expiry)
+        return None
+
+    def _cleanup_socket_protocol_state(self, ws: WebSocket) -> None:
+        if self._ws_to_sessions.get(ws) or self._ws_to_owners.get(ws):
+            return
+        with self._protocol_state_lock:
+            self._inbound_by_socket.pop(ws, None)
+            self._ws_client_sequences.pop(ws, None)
 
     def _unregister_owner(self, owner_account_id: str, ws: WebSocket) -> None:
         owner = str(owner_account_id or "")
@@ -100,6 +235,7 @@ class ConnectionManager:
                 self._ws_to_owners.pop(ws, None)
         if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
             self._send_locks.pop(ws, None)
+            self._cleanup_socket_protocol_state(ws)
 
     def _unregister_socket_owners(self, ws: WebSocket, owner_account_id: str = "") -> None:
         owners = {str(owner_account_id or "")} if owner_account_id else set(self._ws_to_owners.get(ws, set()))
@@ -123,6 +259,7 @@ class ConnectionManager:
             self._cleanup_session_state(key)
         if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
             self._send_locks.pop(ws, None)
+            self._cleanup_socket_protocol_state(ws)
 
     def unregister_all(
         self,
@@ -130,11 +267,18 @@ class ConnectionManager:
         session_ids: set[str],
         *,
         owner_account_id: str = "",
-    ) -> None:
+    ) -> set[str]:
         """WS 断开时，从该连接注册的所有 session 里移除。"""
+        orphaned: set[str] = set()
         for sid in session_ids:
+            key = self._key(sid, owner_account_id)
+            was_registered = ws in self._conns.get(key, set())
             self.unregister(sid, ws, owner_account_id=owner_account_id)
+            if was_registered and not self._conns.get(key):
+                orphaned.add(sid)
         self._unregister_socket_owners(ws, owner_account_id)
+        self._cleanup_socket_protocol_state(ws)
+        return orphaned
 
     def _cleanup_session_state(
         self,
@@ -161,6 +305,10 @@ class ConnectionManager:
 
     async def send_socket(self, ws: WebSocket, payload: dict) -> None:
         """向单个 socket 串行发送 payload，供心跳等 per-connection 帧使用。"""
+        payload = self._bounded_outbound_payload(
+            payload,
+            str(payload.get("session_id") or "") if isinstance(payload, dict) else "",
+        )
         lock = self._send_locks.setdefault(ws, asyncio.Lock())
         async with lock:
             await ws.send_json(payload)
@@ -168,7 +316,7 @@ class ConnectionManager:
     async def notify_owner(self, owner_account_id: str, payload: dict) -> None:
         """向某账号下所有已注册 WS 连接广播轻量事件（如渠道会话更新）。"""
         owner = str(owner_account_id or "")
-        if not owner:
+        if not owner or owner in self._blocked_owners:
             return
         sockets: set[WebSocket] = set()
         sockets.update(self._owner_conns.get(owner, set()))
@@ -198,6 +346,8 @@ class ConnectionManager:
         owner = str(owner_account_id or "").strip()
         if not owner:
             return 0
+        self._blocked_owners.add(owner)
+        self._owner_epochs[owner] = self._owner_epochs.get(owner, 0) + 1
         sockets = set(self._owner_conns.get(owner, set()))
         for (owned_by, _session_id), conns in list(self._conns.items()):
             if owned_by == owner:
@@ -226,6 +376,15 @@ class ConnectionManager:
             self._chunk_buffers.pop(key, None)
             self._gateway_seq.pop(key, None)
             self._replay_locks.pop(key, None)
+        with self._protocol_state_lock:
+            self._inbound_by_owner.pop(owner, None)
+            for ws in sockets:
+                self._inbound_by_socket.pop(ws, None)
+                self._ws_client_sequences.pop(ws, None)
+            for key in [item for item in self._owner_nonces if item[0] == owner]:
+                self._owner_nonces.pop(key, None)
+            for key in [item for item in self._owner_request_ids if item[0] == owner]:
+                self._owner_request_ids.pop(key, None)
 
         async def _close(ws: WebSocket) -> None:
             try:
@@ -258,11 +417,15 @@ class ConnectionManager:
         any_ok = False
         for ws in sockets:
             try:
+                if key[0] and key[0] in self._blocked_owners:
+                    break
                 lock = self._send_locks.setdefault(ws, asyncio.Lock())
                 async with lock:
+                    if key[0] and key[0] in self._blocked_owners:
+                        break
                     await ws.send_json(payload)
                 any_ok = True
-            except Exception:
+            except Exception:  # noqa: BLE001 - transport implementations may raise arbitrary send errors
                 dead.append(ws)
         for ws in dead:
             self._conns[key].discard(ws)
@@ -274,6 +437,7 @@ class ConnectionManager:
             self._unregister_socket_owners(ws)
             if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
                 self._send_locks.pop(ws, None)
+                self._cleanup_socket_protocol_state(ws)
         if not self._conns[key]:
             self._conns.pop(key, None)
             # 发送失败导致的死连接清理需要保留失败计数，才能维持连续失败降级语义；
@@ -293,7 +457,10 @@ class ConnectionManager:
         if not payloads or not self._conns.get(key):
             return
         for payload in self._merge_pending_payloads(payloads):
-            await self._do_push(key, payload)
+            await self._do_push(
+                key,
+                self._bounded_outbound_payload(payload, key[1]),
+            )
         self._last_push_ts[key] = time.monotonic()
 
     def _merge_pending_payloads(self, payloads: list[dict]) -> list[dict]:
@@ -422,25 +589,71 @@ class ConnectionManager:
         供断线重连后的 subscribe/resume 回放。
         """
         key = self._key(session_id, owner_account_id)
-
-        # 分配 gateway_sequence 并入回放缓存（无论当前是否有连接）
-        self._gateway_seq[key] += 1
-        payload["gateway_sequence"] = self._gateway_seq[key]
-        self._chunk_buffers[key].append(dict(payload))
-
-        # 连续失败过多，降级为静默（只落库，不推送）
-        if self._consecutive_failures.get(key, 0) >= _MAX_CONSECUTIVE_FAILURES:
-            log.debug("推送降级（连续失败过多）session=%s", self._label(key))
+        owner_epoch = self._owner_epochs.get(key[0], 0)
+        if key[0] and key[0] in self._blocked_owners:
             return
+        payload = self._bounded_outbound_payload(payload, session_id)
 
-        # 无活跃连接不是发送失败：断线期间后台任务继续跑，但不应累计失败导致
-        # 新连接注册后仍被静默降级。
-        if not self._conns.get(key):
-            return
-
-        # 持 replay lock 推送，避免与 replay() 交错导致乱序
+        # Sequence allocation, replay append, and delivery share one lock. This
+        # makes concurrent producers linearizable and prevents replay snapshots
+        # from observing a frame before its sequence is committed.
         async with self._replay_locks[key]:
+            if (
+                key[0]
+                and (
+                    key[0] in self._blocked_owners
+                    or self._owner_epochs.get(key[0], 0) != owner_epoch
+                )
+            ):
+                return
+            self._gateway_seq[key] += 1
+            payload["gateway_sequence"] = self._gateway_seq[key]
+            self._chunk_buffers[key].append(dict(payload))
+
+            # 连续失败过多，降级为静默（只落库，不推送）
+            if self._consecutive_failures.get(key, 0) >= _MAX_CONSECUTIVE_FAILURES:
+                log.debug("推送降级（连续失败过多）session=%s", self._label(key))
+                return
+
+            # 无活跃连接不是发送失败：断线期间后台任务继续跑，但不应累计失败导致
+            # 新连接注册后仍被静默降级。
+            if not self._conns.get(key):
+                return
             await self._push_under_lock(key, payload)
+
+    @staticmethod
+    def _bounded_outbound_payload(payload: object, session_id: str) -> dict:
+        """Return a detached JSON payload or a generic bounded terminal error."""
+        request_id = ""
+        if isinstance(payload, dict) and isinstance(payload.get("request_id"), str):
+            request_id = payload["request_id"][:128]
+        try:
+            if not isinstance(payload, dict):
+                raise TypeError("payload must be an object")
+            encoded = json.dumps(
+                payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(encoded) > _MAX_OUTBOUND_FRAME_BYTES:
+                raise ValueError("payload too large")
+            detached = json.loads(encoded.decode("utf-8"))
+            if not isinstance(detached, dict):
+                raise TypeError("payload must be an object")
+            return detached
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            return {
+                "kind": "error",
+                "body": {
+                    "message": "响应超出协议限制",
+                    "code": "RESPONSE_INVALID",
+                },
+                "is_final": True,
+                "sequence": 0,
+                "request_id": request_id,
+                "session_id": str(session_id)[:256],
+            }
 
     async def _push_under_lock(self, key: tuple[str, str], payload: dict) -> None:
         """在 replay lock 保护下执行限流判断与推送。"""
@@ -522,15 +735,14 @@ class ConnectionManager:
         临时交互帧，如已被回答的 followup_question）。
         """
         key = self._key(session_id, owner_account_id)
+        if key[0] and key[0] in self._blocked_owners:
+            return
         async with self._replay_locks[key]:
             buffer = self._chunk_buffers.get(key)
             if not buffer:
                 return
-            # 先拍快照再逐帧发送：send_json 会让出事件循环，而 push_payload 在
-            # replay lock 外向同一个 deque append，直接迭代会抛
-            # "deque mutated during iteration" 并拆掉整条 WS 连接。
-            # 回放期间新入缓存的帧不在快照里，但 push_payload 会等回放结束
-            # 拿到锁后实时补发，顺序与完整性都不受影响。
+            # 快照让 filter/send 路径不依赖 deque 迭代器；实时 push 会等
+            # replay lock 释放后再分配下一序号并投递，保证严格顺序。
             for payload in list(buffer):
                 if payload.get("gateway_sequence", 0) <= after_gateway_sequence:
                     continue
@@ -561,5 +773,5 @@ class ConnectionManager:
             await self._flush_pending(key)
         except asyncio.CancelledError:
             pass  # 连接断开时 task 被取消，忽略
-        except Exception:  # noqa: BLE001 — 后台 flush 任务的顶层兜底，send 错误已由 _do_push 内层吞掉
+        except Exception:
             log.exception("延迟推送异常 session=%s", self._label(key))

@@ -4,7 +4,7 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "Crew Desktop UI",
-  "main": "dist/main/index.js",
+  "main": "dist/main/bootstrap.js",
   "engines": {
     "node": ">=22.12.0",
     "npm": ">=10"
@@ -12,6 +12,7 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "build:dev": "node esbuild.config.mjs --dev",
+    "release:preflight": "node esbuild.config.mjs --preflight",
     "start": "npm run build && electron .",
     "dev": "npm run build:dev && electron . --dev",
     "typecheck": "tsc --noEmit",

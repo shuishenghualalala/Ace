@@ -2,9 +2,10 @@ use std::env;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -60,19 +61,57 @@ fn find_system(workspace: &Path) -> Option<PathBuf> {
     let workspace = workspace.canonicalize().ok()?;
     env::split_paths(&env::var_os("PATH")?).find_map(|directory| {
         let candidate = directory.join("bwrap").canonicalize().ok()?;
-        if candidate.starts_with(&workspace) || !is_executable(&candidate) {
+        if candidate.starts_with(&workspace)
+            || !is_executable(&candidate)
+            || !is_trusted_system_candidate(&candidate)
+        {
             return None;
         }
-        // A version probe rejects aliases or unrelated workspace binaries.
-        let status = std::process::Command::new(&candidate)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok()?;
-        status.success().then_some(candidate)
+        // A bounded version probe rejects aliases or unrelated workspace binaries.
+        probe_version(&candidate).then_some(candidate)
     })
+}
+
+fn probe_version(candidate: &Path) -> bool {
+    let Ok(mut child) = std::process::Command::new(candidate)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn is_trusted_system_candidate(path: &Path) -> bool {
+    for (index, component) in path.ancestors().enumerate() {
+        let Ok(metadata) = std::fs::symlink_metadata(component) else {
+            return false;
+        };
+        if metadata.file_type().is_symlink() || metadata.mode() & 0o022 != 0 || metadata.uid() != 0
+        {
+            return false;
+        }
+        if (index == 0 && !metadata.is_file()) || (index > 0 && !metadata.is_dir()) {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -121,9 +160,10 @@ fn clear_close_on_exec(fd: i32) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::verify_digest;
+    use super::{is_trusted_system_candidate, probe_version, verify_digest};
     use sha2::{Digest, Sha256};
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn bundled_digest_is_exact() {
@@ -132,5 +172,43 @@ mod tests {
         let expected = format!("{:x}", Sha256::digest(b"trusted"));
         assert!(verify_digest(&mut file, &expected).is_ok());
         assert!(verify_digest(&mut file, &"0".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn system_bwrap_candidate_requires_trusted_ownership_and_modes() {
+        let system_binary = std::path::Path::new("/bin/true").canonicalize().unwrap();
+        assert!(is_trusted_system_candidate(&system_binary));
+
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp.path().join("bwrap");
+        std::fs::copy("/bin/true", &candidate).unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        assert!(!is_trusted_system_candidate(&candidate));
+    }
+
+    #[test]
+    fn user_owned_executable_is_never_a_system_bwrap_candidate() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let current_test_binary = std::env::current_exe().unwrap().canonicalize().unwrap();
+
+        assert!(
+            !is_trusted_system_candidate(&current_test_binary),
+            "a caller-controlled executable must use the digest-pinned bundle path"
+        );
+    }
+
+    #[test]
+    fn system_bwrap_version_probe_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp.path().join("bwrap");
+        std::fs::write(&candidate, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = std::time::Instant::now();
+
+        assert!(!probe_version(&candidate));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

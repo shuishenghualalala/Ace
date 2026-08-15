@@ -2,19 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
+import hmac
+import logging
+import secrets
+import time
 from typing import Literal
 import os
 import platform
 import tempfile
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from crew.gateway.auth import account_from_request
-from crew.gateway.instance_auth import verify_desktop_security_proof
+from crew.gateway.auth import (
+    AuthenticationError,
+    account_from_request,
+    require_admin,
+)
+from crew.gateway.helpers import safe_public_error
 from crew.security.actions import normalize_exec_action, normalize_file_action
 from crew.security.audit import AuditEvent, format_action_for_audit
+from crew.security.alerts import SecurityAlertActionDenied
 from crew.security.approvals import ApprovalDecision, ApprovalError
 from crew.security.context import (
     SecurityContext,
@@ -23,16 +34,25 @@ from crew.security.context import (
     resolve_requested_path,
 )
 from crew.security.launch import shell_argv
+from crew.security.local_path import LocalPathReference
 from crew.security.models import ConversationPermissionMode
-from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError, RuntimeCapabilities
+from crew.security.policy import deserialize_additional_permissions
+from crew.security.runtime_client import (
+    NativeRuntimeClient,
+    NativeRuntimeError,
+    RuntimeCapabilities,
+)
 from crew.security.settings import strict_security_enabled
 from crew.tools.security_guard import _file_change_preview
 
-_PROOF_HEADER = "X-Crew-Security-Proof"
+_LOGGER = logging.getLogger(__name__)
+
 AuditActionType = Literal[
     "",
     "approval_requested",
     "approval_decision",
+    "permission_requested",
+    "permission_decision",
     "exec_decision",
     "file_decision",
 ]
@@ -55,32 +75,79 @@ _AUDIT_FILE_OPERATIONS = {
 }
 
 
-class FakeExecutionInput(BaseModel):
-    workspace_id: str = "default"
-    session_id: str = Field(min_length=1)
-    task_id: str = ""
-    argv: list[str] = Field(min_length=1)
-    cwd: str | None = None
+class _StrictSecurityInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class DecisionInput(BaseModel):
-    workspace_id: str = "default"
-    session_id: str = Field(min_length=1)
-    task_id: str = ""
-    nonce: str = Field(min_length=1)
+class FakeExecutionInput(_StrictSecurityInput):
+    workspace_id: str = Field(default="default", min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=200)
+    task_id: str = Field(min_length=1, max_length=200)
+    argv: list[str] = Field(min_length=1, max_length=256)
+    cwd: str | None = Field(default=None, max_length=32_768)
+
+    @field_validator("argv")
+    @classmethod
+    def _valid_argv(cls, value: list[str]) -> list[str]:
+        if any(not item or "\x00" in item or len(item.encode("utf-8")) > 16_384 for item in value):
+            raise ValueError("argv contains an invalid token")
+        return value
+
+
+class DecisionInput(_StrictSecurityInput):
+    workspace_id: str = Field(default="default", min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=200)
+    task_id: str = Field(min_length=1, max_length=200)
+    nonce: str = Field(min_length=1, max_length=200)
     decision: Literal["once", "session", "always", "reject"]
-    always_argv_prefix: list[str] | None = None
+    always_argv_prefix: list[str] | None = Field(default=None, min_length=1, max_length=256)
+    permissions: dict | None = None
+
+    @field_validator("always_argv_prefix")
+    @classmethod
+    def _valid_prefix(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and any(
+            not item or "\x00" in item or len(item.encode("utf-8")) > 16_384 for item in value
+        ):
+            raise ValueError("always_argv_prefix contains an invalid token")
+        return value
+
+    @field_validator("permissions")
+    @classmethod
+    def _bounded_permissions(cls, value: dict | None) -> dict | None:
+        if (
+            value is not None
+            and len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+            > 64 * 1024
+        ):
+            raise ValueError("permissions exceeds the size limit")
+        return value
 
 
-class RuleMutationInput(BaseModel):
-    workspace_id: str = "default"
+class AlertReportInput(_StrictSecurityInput):
+    kind: Literal[
+        "anomalous_denials",
+        "sandbox_fallback",
+        "manifest_mismatch",
+        "orphan_process",
+        "update_signature_failure",
+        "audit_chain_break",
+    ]
+    detail: str = Field(default="", max_length=512)
+    session_id: str = Field(default="", max_length=200)
+    task_id: str = Field(default="", max_length=200)
+
+
+class RuleMutationInput(_StrictSecurityInput):
+    workspace_id: str = Field(default="default", min_length=1, max_length=200)
     enabled: bool | None = None
 
 
-class SecurityModeInput(BaseModel):
-    workspace_id: str = "default"
-    session_id: str = Field(min_length=1)
-    mode: Literal["request_approval", "auto_review", "full_access"]
+class SecurityModeInput(_StrictSecurityInput):
+    workspace_id: str = Field(default="default", min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=200)
+    mode: Literal["read_only", "request_approval", "auto_review", "full_access"]
+    confirmation_nonce: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 def _history_action_index(messages, context: SecurityContext) -> dict[str, tuple[str, str]]:
@@ -101,7 +168,13 @@ def _history_action_index(messages, context: SecurityContext) -> dict[str, tuple
                     )
                 elif tool_call.name in _AUDIT_FILE_OPERATIONS:
                     operation = _AUDIT_FILE_OPERATIONS[tool_call.name]
-                    target = resolve_requested_path(context, str(args.get("path") or "."))
+                    raw_path = args.get("path")
+                    if raw_path is None or raw_path == "":
+                        raw_path = "."
+                    target = resolve_requested_path(
+                        context,
+                        LocalPathReference.parse(raw_path),
+                    )
                     content_digest, _preview = _file_change_preview(args, operation)
                     action = normalize_file_action(
                         target,
@@ -119,13 +192,9 @@ def _history_action_index(messages, context: SecurityContext) -> dict[str, tuple
 
 
 async def _require_desktop_proof(request: Request) -> None:
-    body = await request.body()
-    if not verify_desktop_security_proof(
-        request.headers.get(_PROOF_HEADER, ""),
-        method=request.method,
-        path=request.url.path,
-        body=body,
-    ):
+    """Require the one-time proof already consumed by Gateway middleware."""
+
+    if not bool(getattr(request.state, "gateway_instance_authenticated", False)):
         raise HTTPException(status_code=403, detail="security desktop proof required")
 
 
@@ -217,6 +286,31 @@ def _state_dir_configured(system: str) -> bool:
 def create_security_router(crew) -> APIRouter:
     """Create host-authority routes; authentication alone cannot approve actions."""
     router = APIRouter(prefix="/api/security")
+    full_access_challenges: dict[tuple[str, str, str], tuple[str, float]] = {}
+    full_access_challenge_ttl = 60.0
+
+    def issue_full_access_challenge(owner: str, workspace_id: str, session_id: str) -> str:
+        now = time.monotonic()
+        for key, (_nonce, expires_at) in list(full_access_challenges.items()):
+            if expires_at <= now:
+                full_access_challenges.pop(key, None)
+        nonce = secrets.token_urlsafe(32)
+        full_access_challenges[(owner, workspace_id, session_id)] = (
+            nonce,
+            now + full_access_challenge_ttl,
+        )
+        return nonce
+
+    def consume_full_access_challenge(
+        owner: str,
+        workspace_id: str,
+        session_id: str,
+        presented: str | None,
+    ) -> bool:
+        record = full_access_challenges.pop((owner, workspace_id, session_id), None)
+        if record is None or record[1] <= time.monotonic() or not presented:
+            return False
+        return hmac.compare_digest(record[0], presented)
 
     def context(request: Request, workspace_id: str, session_id: str, task_id: str = "", cwd=None):
         account = account_from_request(request)
@@ -230,19 +324,51 @@ def create_security_router(crew) -> APIRouter:
                 cwd=cwd,
             )
         except SecurityContextError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=400,
+                detail=safe_public_error(exc, "安全上下文无效"),
+            ) from exc
 
     @router.post("/fake-executions")
     async def create_fake_execution(request: Request, payload: FakeExecutionInput):
         await _require_desktop_proof(request)
-        ctx = context(request, payload.workspace_id, payload.session_id, payload.task_id, payload.cwd)
+        ctx = context(
+            request, payload.workspace_id, payload.session_id, payload.task_id, payload.cwd
+        )
         action = normalize_exec_action(payload.argv, ctx.cwd or ctx.workspace_root or ".")
         return crew.security_service.request_fake_execution(ctx, action)
+
+    @router.get("/full-access-challenge")
+    async def full_access_challenge(
+        request: Request,
+        workspace_id: str = Query("default", min_length=1, max_length=200),
+        session_id: str = Query(..., min_length=1, max_length=200),
+    ):
+        await _require_desktop_proof(request)
+        ctx = context(request, workspace_id, session_id)
+        return {
+            "nonce": issue_full_access_challenge(
+                ctx.owner_account_id,
+                ctx.workspace_id,
+                ctx.session_id,
+            ),
+            "expires_in": int(full_access_challenge_ttl),
+        }
 
     @router.put("/mode")
     async def set_mode(request: Request, payload: SecurityModeInput):
         await _require_desktop_proof(request)
         ctx = context(request, payload.workspace_id, payload.session_id)
+        if payload.mode == ConversationPermissionMode.FULL_ACCESS.value and not consume_full_access_challenge(
+            ctx.owner_account_id,
+            ctx.workspace_id,
+            ctx.session_id,
+            payload.confirmation_nonce,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="完全访问需要新的服务端二次确认 nonce",
+            )
         if (
             payload.mode == ConversationPermissionMode.AUTO_REVIEW.value
             and strict_security_enabled()
@@ -262,11 +388,20 @@ def create_security_router(crew) -> APIRouter:
         changed = crew.security_service.set_mode(
             ctx,
             ConversationPermissionMode(payload.mode),
+            source=(
+                "desktop_native_confirmation"
+                if payload.mode == ConversationPermissionMode.FULL_ACCESS.value
+                else "gateway_owner"
+            ),
         )
-        if changed and crew.dispatcher.status(
-            payload.session_id,
-            owner_account_id=ctx.owner_account_id,
-        ).get("live") != "idle":
+        if (
+            changed
+            and crew.dispatcher.status(
+                payload.session_id,
+                owner_account_id=ctx.owner_account_id,
+            ).get("live")
+            != "idle"
+        ):
             # 每个 turn 在入口捕获一次 ProcessLaunch。模式变化时终止活跃/排队 turn，
             # 否则后续工具仍会沿用旧的 managed/disabled 快照；idle 会话无需误触其它工作流。
             crew.dispatcher.stop(
@@ -274,6 +409,31 @@ def create_security_router(crew) -> APIRouter:
                 reason="安全模式已切换，请重新执行当前操作",
                 owner_account_id=ctx.owner_account_id,
             )
+        if changed:
+            # Mode revocation must reach already-started session resources too:
+            # cancelling the model turn alone leaves background processes or
+            # task-scoped MCP workers alive under the old authority.
+            try:
+                revoke_runtime_tools = getattr(
+                    getattr(crew, "registry", None),
+                    "revoke_runtime_tool_session",
+                    None,
+                )
+                if callable(revoke_runtime_tools):
+                    await revoke_runtime_tools(ctx.owner_account_id, ctx.session_id)
+                from crew.tools.process_registry import process_registry
+
+                await asyncio.to_thread(
+                    process_registry.revoke_session,
+                    ctx.owner_account_id,
+                    ctx.session_id,
+                    reason="SECURITY_MODE_CHANGED",
+                )
+            except Exception as exc:  # noqa: BLE001 - mode revocation fails closed
+                raise HTTPException(
+                    status_code=409,
+                    detail="安全模式已切换，但会话运行资源回收未完成；请重试或重启 Gateway",
+                ) from exc
         return {"mode": payload.mode}
 
     @router.get("/pending")
@@ -292,6 +452,27 @@ def create_security_router(crew) -> APIRouter:
         await _require_desktop_proof(request)
         ctx = context(request, payload.workspace_id, payload.session_id, payload.task_id)
         try:
+            pending_permission = next(
+                (
+                    item
+                    for item in crew.security_service.pending_permissions(ctx)
+                    if item.get("request_id") == request_id
+                ),
+                None,
+            )
+            if pending_permission is not None:
+                granted_permissions = deserialize_additional_permissions(
+                    payload.permissions
+                    if payload.permissions is not None
+                    else pending_permission.get("permissions")
+                )
+                return crew.security_service.decide_permissions(
+                    ctx,
+                    request_id=request_id,
+                    nonce=payload.nonce,
+                    decision=ApprovalDecision(payload.decision),
+                    granted_permissions=granted_permissions,
+                )
             return crew.security_service.decide(
                 ctx,
                 request_id=request_id,
@@ -300,7 +481,15 @@ def create_security_router(crew) -> APIRouter:
                 always_argv_prefix=payload.always_argv_prefix,
             )
         except ApprovalError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=safe_public_error(exc, "审批请求无效"),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=safe_public_error(exc, "审批参数无效"),
+            ) from exc
 
     @router.get("/rules")
     async def list_rules(request: Request, workspace_id: str = Query("default")):
@@ -311,9 +500,7 @@ def create_security_router(crew) -> APIRouter:
             owner_account_id=ctx.owner_account_id,
             workspace_id=ctx.workspace_id,
         )
-        return {
-            "rules": [{**rule.__dict__, "enabled": enabled} for rule, enabled in rules]
-        }
+        return {"rules": [{**rule.__dict__, "enabled": enabled} for rule, enabled in rules]}
 
     @router.patch("/rules/{rule_id}")
     async def mutate_rule(rule_id: str, request: Request, payload: RuleMutationInput):
@@ -339,10 +526,14 @@ def create_security_router(crew) -> APIRouter:
     async def audit(
         request: Request,
         limit: int = Query(100, ge=1, le=100),
-        offset: int = Query(0, ge=0),
+        offset: int = Query(0, ge=0, le=1_000_000),
         action_type: AuditActionType = Query(""),
         decision: AuditDecision = Query(""),
         session_id: str = Query("", max_length=160),
+        workspace_id: str = Query("", max_length=200),
+        task_id: str = Query("", max_length=200),
+        start_time: float | None = Query(None),
+        end_time: float | None = Query(None),
         sort: AuditSort = Query("newest"),
     ):
         await _require_desktop_proof(request)
@@ -355,6 +546,10 @@ def create_security_router(crew) -> APIRouter:
             action_type=action_type,
             decision=decision,
             session_id=session_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            start_time=start_time,
+            end_time=end_time,
             sort=sort,
         )
         sessions = {
@@ -425,13 +620,21 @@ def create_security_router(crew) -> APIRouter:
     async def export_audit(request: Request):
         await _require_desktop_proof(request)
         account = account_from_request(request)
-        return {"jsonl": crew.security_audit.export_jsonl(owner_account_id=account.owner_account_id)}
+        return {
+            "jsonl": crew.security_audit.export_jsonl(owner_account_id=account.owner_account_id)
+        }
 
     @router.post("/audit/purge-expired")
-    async def purge_expired_audit(request: Request, workspace_id: str = Query("default")):
+    async def purge_expired_audit(
+        request: Request,
+        workspace_id: str = Query("default", max_length=200),
+    ):
         await _require_desktop_proof(request)
         ctx = context(request, workspace_id, "audit-ui")
-        deleted = crew.security_audit.purge_expired(owner_account_id=ctx.owner_account_id)
+        deleted = crew.security_audit.purge_expired(
+            owner_account_id=ctx.owner_account_id,
+            workspace_id=ctx.workspace_id,
+        )
         crew.security_audit.record(
             AuditEvent.for_rule(
                 ctx,
@@ -441,6 +644,110 @@ def create_security_router(crew) -> APIRouter:
             )
         )
         return {"deleted": deleted}
+
+    @router.post("/alerts/report")
+    async def report_alert(request: Request, payload: AlertReportInput):
+        await _require_desktop_proof(request)
+        account = account_from_request(request)
+        registry = getattr(crew, "security_alerts", None)
+        if registry is None:
+            raise HTTPException(status_code=409, detail="安全告警服务不可用")
+        try:
+            alert = registry.report(
+                payload.kind,
+                account.owner_account_id,
+                session_id=payload.session_id,
+                task_id=payload.task_id,
+                detail=payload.detail,
+            )
+        except (SecurityAlertActionDenied, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=safe_public_error(exc, "安全告警报告无效"),
+            ) from exc
+        return {
+            "created": alert is not None,
+            "alert": alert.public_dict() if alert is not None else None,
+        }
+
+    @router.get("/alerts")
+    async def list_alerts(request: Request):
+        await _require_desktop_proof(request)
+        account = account_from_request(request)
+        try:
+            require_admin(account, crew.config)
+            is_admin = True
+        except AuthenticationError:
+            is_admin = False
+        registry = getattr(crew, "security_alerts", None)
+        alerts = (
+            registry.snapshot("" if is_admin else account.owner_account_id)
+            if registry is not None
+            else []
+        )
+        return {
+            "admin": is_admin,
+            "alerts": [alert.public_dict() for alert in alerts],
+        }
+
+    @router.post("/alerts/{alert_id}/isolate")
+    async def isolate_alert(alert_id: str, request: Request):
+        await _require_desktop_proof(request)
+        account = account_from_request(request)
+        registry = getattr(crew, "security_alerts", None)
+        if registry is None:
+            raise HTTPException(status_code=409, detail="安全告警服务不可用")
+        alert = registry.get(alert_id)
+        if alert is None or alert.resolved:
+            raise HTTPException(status_code=404, detail="安全告警不存在或已解决")
+        try:
+            require_admin(account, crew.config)
+        except AuthenticationError:
+            if alert.owner_account_id != account.owner_account_id:
+                raise HTTPException(status_code=403, detail="无权操作其他账号的告警")
+        try:
+            changed = registry.isolate(alert_id, require_ui=True)
+        except SecurityAlertActionDenied as exc:
+            raise HTTPException(status_code=409, detail=safe_public_error(exc, "告警操作不可用")) from exc
+        return {"changed": changed}
+
+    @router.post("/alerts/{alert_id}/revoke")
+    async def revoke_alert(alert_id: str, request: Request):
+        await _require_desktop_proof(request)
+        account = account_from_request(request)
+        registry = getattr(crew, "security_alerts", None)
+        if registry is None:
+            raise HTTPException(status_code=409, detail="安全告警服务不可用")
+        alert = registry.get(alert_id)
+        if alert is None or alert.resolved:
+            raise HTTPException(status_code=404, detail="安全告警不存在或已解决")
+        try:
+            require_admin(account, crew.config)
+        except AuthenticationError:
+            if alert.owner_account_id != account.owner_account_id:
+                raise HTTPException(status_code=403, detail="无权操作其他账号的告警")
+        try:
+            changed = registry.revoke(alert_id, require_ui=True)
+        except SecurityAlertActionDenied as exc:
+            raise HTTPException(status_code=409, detail=safe_public_error(exc, "告警操作不可用")) from exc
+        return {"changed": changed}
+
+    @router.post("/alerts/{alert_id}/resolve")
+    async def resolve_alert(alert_id: str, request: Request):
+        await _require_desktop_proof(request)
+        account = account_from_request(request)
+        registry = getattr(crew, "security_alerts", None)
+        if registry is None:
+            raise HTTPException(status_code=409, detail="安全告警服务不可用")
+        alert = registry.get(alert_id)
+        if alert is None:
+            raise HTTPException(status_code=404, detail="安全告警不存在")
+        try:
+            require_admin(account, crew.config)
+        except AuthenticationError:
+            if alert.owner_account_id != account.owner_account_id:
+                raise HTTPException(status_code=403, detail="无权操作其他账号的告警")
+        return {"changed": registry.resolve(alert_id)}
 
     @router.get("/capabilities")
     async def capabilities(request: Request):
@@ -478,6 +785,39 @@ def create_security_router(crew) -> APIRouter:
             detail = "当前设备不支持可用的原生安全运行组件"
         if helper_present and not state_dir_configured:
             detail = "当前 Gateway 未加载安全状态目录，请重启 Crew 后再试"
+        try:
+            probe_context = context(request, "default", "runtime-diagnostics")
+            crew.security_audit.record(
+                AuditEvent.for_runtime_diagnostic(
+                    probe_context,
+                    status="probe_ok" if filesystem else "probe_failed",
+                    component="security-runtime-probe",
+                    backend=system,
+                    capabilities=tuple(
+                        name
+                        for name, enabled in (
+                            ("filesystem_sandbox", filesystem),
+                            ("managed_network", network),
+                            (
+                                "local_binding_control",
+                                bool(
+                                    network
+                                    and network_probe
+                                    and network_probe.local_binding_control
+                                ),
+                            ),
+                        )
+                        if enabled
+                    ),
+                    failure_code=(
+                        ""
+                        if filesystem
+                        else ("runtime_stale" if stale else "probe_failed")
+                    ),
+                )
+            )
+        except Exception:  # noqa: BLE001 - probe diagnostics must not break the UI
+            _LOGGER.exception("runtime probe diagnostic audit write failed")
         return {
             "platform": system,
             "helper_present": helper_present,

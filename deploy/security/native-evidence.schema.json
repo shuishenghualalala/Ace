@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ace.invalid/schemas/native-security-evidence-v2.json",
+  "title": "Ace native security evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "real_runner",
+    "platform",
+    "target_triple",
+    "repository",
+    "commit",
+    "workflow_run",
+    "workflow_name",
+    "workflow_ref",
+    "workflow_job",
+    "workflow_run_attempt",
+    "runner_os",
+    "runner_arch",
+    "artifact_filename",
+    "artifact_sha256",
+    "desktop_staged_artifact_sha256",
+    "source_hash",
+    "cargo_lock_sha256",
+    "runtime_manifest_filename",
+    "runtime_manifest_sha256",
+    "sbom_filename",
+    "sbom_sha256",
+    "sbom_format",
+    "dependency_lock_policy",
+    "vulnerability_threshold",
+    "secret_scan_policy"
+  ],
+  "properties": {
+    "schema": {
+      "const": 2
+    },
+    "status": {
+      "const": "passed"
+    },
+    "real_runner": {
+      "const": true
+    },
+    "platform": {
+      "enum": [
+        "linux",
+        "windows",
+        "macos"
+      ]
+    },
+    "target_triple": {
+      "enum": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin"
+      ]
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[^/\\s]+/[^/\\s]+$",
+      "maxLength": 300
+    },
+    "commit": {
+      "$ref": "#/$defs/sha1"
+    },
+    "workflow_run": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 500
+    },
+    "workflow_name": {
+      "type": "string",
+      "pattern": "^security-(linux|windows|macos)$"
+    },
+    "workflow_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "workflow_job": {
+      "const": "native-security"
+    },
+    "workflow_run_attempt": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "runner_os": {
+      "enum": [
+        "Linux",
+        "Windows",
+        "macOS"
+      ]
+    },
+    "runner_arch": {
+      "enum": [
+        "X64",
+        "ARM64"
+      ]
+    },
+    "artifact_filename": {
+      "$ref": "#/$defs/filename"
+    },
+    "artifact_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "desktop_staged_artifact_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "cargo_lock_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "runtime_manifest_filename": {
+      "const": "runtime-manifest.json"
+    },
+    "runtime_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "sbom_filename": {
+      "type": "string",
+      "pattern": "^security-(linux|windows|macos)-sbom\\.cdx\\.json$"
+    },
+    "sbom_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "sbom_format": {
+      "const": "CycloneDX-1.6"
+    },
+    "dependency_lock_policy": {
+      "const": "committed-and-frozen"
+    },
+    "vulnerability_threshold": {
+      "const": "HIGH,CRITICAL"
+    },
+    "secret_scan_policy": {
+      "const": "required"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "linux"
+          }
+        },
+        "required": [
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target_triple": {
+            "enum": [
+              "x86_64-unknown-linux-gnu",
+              "aarch64-unknown-linux-gnu"
+            ]
+          },
+          "runner_os": {
+            "const": "Linux"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "windows"
+          }
+        },
+        "required": [
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target_triple": {
+            "enum": [
+              "x86_64-pc-windows-msvc",
+              "aarch64-pc-windows-msvc"
+            ]
+          },
+          "runner_os": {
+            "const": "Windows"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "macos"
+          }
+        },
+        "required": [
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target_triple": {
+            "enum": [
+              "x86_64-apple-darwin",
+              "aarch64-apple-darwin"
+            ]
+          },
+          "runner_os": {
+            "const": "macOS"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "filename": {
+      "type": "string",
+      "pattern": "^[^/\\\\\\u0000]+$",
+      "maxLength": 255
+    }
+  }
+}

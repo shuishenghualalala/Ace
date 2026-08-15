@@ -1,15 +1,94 @@
 import * as esbuild from 'esbuild';
 import fs from 'fs/promises';
 import path from 'path';
+import { createPublicKey } from 'crypto';
 
 const isDev = process.argv.includes('--dev');
 const isVisual = process.argv.includes('--visual');
+const isPreflight = process.argv.includes('--preflight');
+const requiresReleaseConfig = isPreflight || (!isDev && !isVisual);
 const rootDir = process.cwd();
 const distDir = path.join(rootDir, 'dist');
 const mainOut = path.join(distDir, 'main');
 const assetsSrc = path.join(rootDir, 'assets');
 const assetsOut = path.join(distDir, 'assets');
 const helpDocSource = path.join(assetsSrc, 'help-docs', 'crew-user-guide.md');
+const { updatePublicKey, updateDownloadBaseUrl } = validateReleaseConfig({
+  downloadBaseUrl: String(process.env.ACE_DOWNLOAD_BASE_URL ?? '').trim(),
+  publicKey: String(process.env.ACE_UPDATE_PUBLIC_KEY ?? '').trim(),
+});
+
+function validateReleaseConfig({ downloadBaseUrl, publicKey }) {
+  const errors = [];
+  let normalizedDownloadBaseUrl = '';
+  try {
+    normalizedDownloadBaseUrl = validateUpdateDownloadBaseUrl(downloadBaseUrl);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
+  }
+  try {
+    validateUpdatePublicKey(publicKey);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
+  }
+  if (errors.length > 0) {
+    throw new Error([
+      'Desktop production release configuration is invalid:',
+      ...errors.map((message) => `- ${message}`),
+      'Set the required release environment values; no artifact was built.',
+    ].join('\n'));
+  }
+  return {
+    updatePublicKey: publicKey,
+    updateDownloadBaseUrl: normalizedDownloadBaseUrl,
+  };
+}
+
+function validateUpdateDownloadBaseUrl(value) {
+  if (!value) {
+    if (requiresReleaseConfig) {
+      throw new Error('Production desktop builds require ACE_DOWNLOAD_BASE_URL');
+    }
+    return '';
+  }
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('ACE_DOWNLOAD_BASE_URL must be an absolute HTTPS URL');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('ACE_DOWNLOAD_BASE_URL must use HTTPS');
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('ACE_DOWNLOAD_BASE_URL must not contain credentials, query, or fragment');
+  }
+  if (!parsed.pathname.endsWith('/')) parsed.pathname += '/';
+  return parsed.href;
+}
+
+function validateUpdatePublicKey(value) {
+  if (!value) {
+    if (requiresReleaseConfig) {
+      throw new Error('Production desktop builds require ACE_UPDATE_PUBLIC_KEY');
+    }
+    return;
+  }
+  try {
+    const key = value.includes('BEGIN PUBLIC KEY')
+      ? createPublicKey(value)
+      : createPublicKey({
+          key: Buffer.from(value, 'base64'),
+          format: 'der',
+          type: 'spki',
+        });
+    if (key.asymmetricKeyType !== 'ed25519') {
+      throw new Error('not Ed25519');
+    }
+  } catch {
+    throw new Error('ACE_UPDATE_PUBLIC_KEY must be an Ed25519 SPKI public key');
+  }
+}
 
 function pad2(value) {
   return String(value).padStart(2, '0');
@@ -55,10 +134,25 @@ async function main() {
     // playwright-core 必须 external：它内部有大量运行时 require（注入脚本源码、
     // 浏览器注册表、驱动包路径），bundle 进来会在打包产物里静默失效。
     external: ['electron', 'ws', 'bufferutil', 'utf-8-validate', 'playwright-core'],
+    define: {
+      __ACE_UPDATE_PUBLIC_KEY__: JSON.stringify(updatePublicKey),
+      __ACE_DOWNLOAD_BASE_URL__: JSON.stringify(updateDownloadBaseUrl),
+    },
     sourcemap: isDev,
     minify: !isDev,
     logLevel: 'info',
   });
+
+  // Packaged main is a dependency-free CommonJS bootstrap. It scrubs ambient
+  // loader/Node/Electron hooks before index.js imports Electron or starts Chromium.
+  await copyFile(
+    path.join(rootDir, 'src/main/bootstrap.cjs'),
+    path.join(mainOut, 'bootstrap.js'),
+  );
+  await copyFile(
+    path.join(rootDir, 'src/main/bootstrap-hardening.cjs'),
+    path.join(mainOut, 'bootstrap-hardening.cjs'),
+  );
 
   // Preload
   await esbuild.build({
@@ -236,7 +330,11 @@ async function main() {
   console.log('✓ Build complete');
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (isPreflight) {
+  console.log('✓ Desktop production release configuration valid; no artifact built');
+} else {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

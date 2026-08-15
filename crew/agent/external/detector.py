@@ -10,12 +10,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import re
 import shutil
-import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -70,16 +68,13 @@ RUNTIME_PROBES = BUILTIN_RUNTIME_DESCRIPTORS
 
 
 def _runtime_id(provider: str, path: str) -> str:
-    digest = hashlib.sha1(f"{provider}:{path}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha1(f"{provider}:{path}".encode()).hexdigest()[:16]
     return f"{provider}_{digest}"
 
 
 def codex_desktop_app_bundle_paths() -> list[str]:
     bundle_names = ("ChatGPT.app", "Codex.app")
-    paths = [
-        f"/Applications/{bundle}/Contents/Resources/codex"
-        for bundle in bundle_names
-    ]
+    paths = [f"/Applications/{bundle}/Contents/Resources/codex" for bundle in bundle_names]
     home = Path.home()
     if home:
         paths.extend(
@@ -95,9 +90,12 @@ def _platform_search_dirs(*, platform_name: str | None = None) -> tuple[str, ...
         candidates = (
             os.getenv("APPDATA", ""),
             os.getenv("PNPM_HOME", ""),
-            str(Path(os.getenv("LOCALAPPDATA", "")) / "Programs") if os.getenv("LOCALAPPDATA") else "",
+            str(Path(os.getenv("LOCALAPPDATA", "")) / "Programs")
+            if os.getenv("LOCALAPPDATA")
+            else "",
             str(Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft" / "WindowsApps")
-            if os.getenv("LOCALAPPDATA") else "",
+            if os.getenv("LOCALAPPDATA")
+            else "",
             str(home / ".local" / "bin"),
             str(home / ".cargo" / "bin"),
             str(home / ".bun" / "bin"),
@@ -121,10 +119,6 @@ def _platform_search_dirs(*, platform_name: str | None = None) -> tuple[str, ...
     return tuple(dict.fromkeys(path for path in candidates if path))
 
 
-_SHELL_COMMAND = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
-_SUPPORTED_LOGIN_SHELLS = {"bash", "zsh", "sh", "dash", "ksh"}
-
-
 def _usable_executable(
     path: str | None,
     *,
@@ -141,50 +135,10 @@ def _usable_executable(
 
 
 def _login_shell_executables(commands: set[str]) -> dict[str, str]:
-    """Resolve missing command names once through a trusted POSIX login shell."""
+    """Fail closed instead of sourcing user-controlled login-shell startup files."""
 
-    if os.name == "nt":
-        return {}
-    safe_commands = sorted({
-        command for command in commands
-        if _SHELL_COMMAND.fullmatch(command)
-    })[:256]
-    if not safe_commands:
-        return {}
-    configured_shell = os.getenv("SHELL", "").strip()
-    if Path(configured_shell).name not in _SUPPORTED_LOGIN_SHELLS:
-        return {}
-    shell = _usable_executable(configured_shell)
-    if shell is None:
-        return {}
-    script = (
-        'for name do '
-        'unalias "$name" 2>/dev/null; unset -f "$name" 2>/dev/null; '
-        'resolved=$(command -v "$name" 2>/dev/null) || continue; '
-        'case "$resolved" in /*) ;; *) continue ;; esac; '
-        'dir=$(dirname "$resolved") && file=$(basename "$resolved") && '
-        'canonical=$(cd "$dir" 2>/dev/null && pwd -P) || continue; '
-        'printf "%s\\t%s/%s\\n" "$name" "$canonical" "$file"; '
-        'done'
-    )
-    try:
-        proc = subprocess.run(
-            [shell, "-ilc", script, "crew-runtime-scan", *safe_commands],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=3,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    result: dict[str, str] = {}
-    for line in (proc.stdout or "").splitlines():
-        command, separator, path = line.partition("\t")
-        usable = _usable_executable(path) if os.path.isabs(path) else None
-        if separator and command in safe_commands and usable:
-            result[command] = usable
-    return result
+    del commands
+    return {}
 
 
 def _resolve_executable(
@@ -209,7 +163,7 @@ def _resolve_executable_with_source(
 ) -> tuple[str | None, str]:
     configured = os.getenv(env_var, "").strip()
     if configured:
-        path = _usable_executable(configured) or _usable_executable(shutil.which(configured))
+        path = _usable_executable(configured) if os.path.isabs(configured) else None
         return (path, "environment") if path else (None, "environment_invalid")
 
     for command in commands:
@@ -217,10 +171,6 @@ def _resolve_executable_with_source(
             path = _usable_executable(command)
             if path:
                 return path, "descriptor_path"
-            continue
-        path = _usable_executable(shutil.which(command))
-        if path:
-            return path, "path"
 
     search_path = os.pathsep.join(_platform_search_dirs())
     for command in commands:
@@ -255,8 +205,7 @@ def _scan_descriptors(descriptors: tuple[RuntimeDescriptor, ...]) -> list[Runtim
         if descriptor.env_var and os.getenv(descriptor.env_var, "").strip():
             continue
         unresolved_commands.update(
-            command for command in descriptor.commands
-            if not os.path.isabs(command)
+            command for command in descriptor.commands if not os.path.isabs(command)
         )
     login_paths = _login_shell_executables(unresolved_commands)
 
@@ -283,30 +232,20 @@ def _scan_descriptors(descriptors: tuple[RuntimeDescriptor, ...]) -> list[Runtim
 
 
 def _detect_version(path: str) -> str:
-    from crew.security.launch import current_process_launch
+    from crew.security.launch import current_process_launch, validate_process_launch
 
     launch = current_process_launch.get()
-    if launch is not None and launch.managed:
-        return "managed-probe-unavailable"
-    for args in ([path, "--version"], [path, "-v"]):
+    if launch is not None:
         try:
-            proc = subprocess.run(
-                args,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=5,
-            )
+            validate_process_launch(launch)
         except Exception:
-            continue
-        text = (proc.stdout or "").strip()
-        if proc.returncode == 0 and text:
-            for line in text.splitlines():
-                clean = line.strip()
-                if clean and not clean.lower().startswith(("warning:", "error:")):
-                    return clean
-            return text.splitlines()[0].strip()
+            return "probe-unavailable"
+        if launch.managed:
+            return "managed-probe-unavailable"
+    # Version flags execute arbitrary third-party code. The synchronous scanner
+    # cannot provide native confinement or bounded async pipe draining, so it
+    # records an unknown version rather than creating an unbrokered host process.
+    del path
     return "unknown"
 
 
@@ -425,7 +364,7 @@ def scan_runtimes() -> list[dict[str, Any]]:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 async def probe_runtime(candidate: RuntimeCandidate) -> RuntimeProfile:

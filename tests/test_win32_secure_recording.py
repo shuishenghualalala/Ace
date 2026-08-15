@@ -15,12 +15,14 @@ from crew.browser.win32_secure_recording import (
     Win32FileIdentity,
     _canonical_windows_path,
     secure_append_recording_line,
+    secure_ensure_recording_marker,
 )
 
 
 OWNER = r"C:\CrewData\owners\account-a"
 DIRECTORY = OWNER + r"\recordings\0123456789abcdef\deadbeef"
 TRACE = DIRECTORY + r"\trace.jsonl"
+MARKER = DIRECTORY + r"\INCOMPLETE"
 
 
 @dataclass
@@ -162,6 +164,17 @@ def test_win32_append_uses_validated_handles_and_flushes() -> None:
     }
     assert len(api.closed) == 6
     assert len(set(api.closed)) == len(api.closed)
+
+
+def test_win32_incomplete_marker_uses_same_private_handle_boundary() -> None:
+    api = FakeWin32RecordingAPI()
+
+    secure_ensure_recording_marker(OWNER, DIRECTORY, api=api)
+    secure_ensure_recording_marker(OWNER, DIRECTORY, api=api)
+
+    marker = api.objects[api.paths[api._key(MARKER)]]
+    assert bytes(marker.data) == b"recording-incomplete\n"
+    assert api.flushed is True
 
 
 def test_ctypes_facade_requests_only_append_authority_for_writer() -> None:

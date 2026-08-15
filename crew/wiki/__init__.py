@@ -30,7 +30,12 @@ from .schemas import (
     WikiPage,
     WikiRelation,
 )
-from .parser import guess_mime_type, parse_document_from_bytes, parse_document_to_markdown
+from .parser import (
+    guess_mime_type,
+    parse_document_from_bytes,
+    parse_document_from_bytes_async,
+    parse_document_to_markdown,
+)
 from .query import WikiQuerier
 from .schemas import HomeIntro, KBSummary
 from .search import SQLiteFTS5SearchIndex, WikiSearchIndex
@@ -67,5 +72,6 @@ __all__ = [
     "SourceType",
     "parse_document_to_markdown",
     "parse_document_from_bytes",
+    "parse_document_from_bytes_async",
     "guess_mime_type",
 ]

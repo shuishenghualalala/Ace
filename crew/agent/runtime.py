@@ -43,6 +43,8 @@ from crew.agent.auxiliary import generate_session_title
 from crew.agent.compact import ContextCompactor
 from crew.agent.executor import AgentExecutor, BuiltinExecutor, ExecutionContext
 from crew.tools.policy import ToolDisclosureMode
+from crew.tools.file_utils import read_verified_bytes, stat_verified_file
+from crew.tools.redact import safe_public_error
 from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.wiki.attachments import get_wiki_agent_attachment_messages
@@ -112,7 +114,7 @@ def _read_image_as_data_url(path: str) -> str | None:
     if mime is None:
         return None
     try:
-        data = p.read_bytes()
+        data = read_verified_bytes(p, max_bytes=20 * 1024 * 1024)
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{mime};base64,{b64}"
     except Exception:
@@ -130,12 +132,14 @@ def _read_attachment(path: str) -> str:
     ext = p.suffix.lower()
     if ext in _TEXT_EXTS:
         try:
-            return p.read_text(encoding="utf-8", errors="replace")[:8000]
+            return read_verified_bytes(p, max_bytes=8 * 1024 * 1024).decode(
+                "utf-8", errors="replace"
+            )[:8000]
         except Exception as exc:
-            return f"[读取失败: {exc}]"
+            return f"[读取失败: {safe_public_error(exc, '读取失败')}]"
 
     # xlsx/docx 等二进制文件：返回摘要（含完整路径，方便 Agent 用工具进一步读取）
-    size = p.stat().st_size
+    size = stat_verified_file(p).st_size
     return f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
 
 
@@ -333,6 +337,7 @@ class SingleAgent(Agent):
                 await asyncio.gather(*title_tasks, return_exceptions=True)
 
             seen: set[int] = set()
+            close_failures: list[Exception] = []
             for provider in self._owned_providers:
                 identity = id(provider)
                 if identity in seen:
@@ -343,8 +348,15 @@ class SingleAgent(Agent):
                     continue
                 try:
                     await close()
-                except Exception:  # noqa: BLE001 - release siblings after one close failure
-                    log.exception("关闭 Agent-owned Provider 失败: %s", type(provider).__name__)
+                except Exception as exc:  # noqa: BLE001 - release siblings first
+                    close_failures.append(exc)
+                    log.error(
+                        "关闭 Agent-owned Provider 失败 provider=%s error_type=%s",
+                        type(provider).__name__,
+                        type(exc).__name__,
+                    )
+            if close_failures:
+                raise RuntimeError("Agent-owned Provider close failed") from close_failures[0]
 
     # ---- 可控性入口（供 CrewApp.steer/interrupt 调用）----
     def steer(self, text: str) -> bool:
@@ -621,6 +633,66 @@ class SingleAgent(Agent):
         return str(task_workspace_path(envelope.workspace_id, owner_account_id=envelope.user_id))
 
     async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
+        from crew.core.runctx import current_model_id, current_turn_id
+
+        from crew.security.launch import (
+            bind_process_launch_task,
+            current_process_launch,
+        )
+
+        launch = envelope.params.get("_security_process_launch")
+        if launch is not None and not str(getattr(launch, "task_id", "") or "").strip():
+            launch = bind_process_launch_task(launch, envelope.request_id)
+        launch_token = current_process_launch.set(launch)
+        turn_token = current_turn_id.set(
+            str(envelope.params.get("turn_id") or envelope.request_id or "").strip()
+        )
+        model_token = current_model_id.set(
+            str(getattr(self.provider, "model", "") or "").strip()
+        )
+        runtime_tool_leases: tuple[tuple[Any, object], ...] = ()
+        try:
+            activate_runtime_tools = getattr(
+                self.registry,
+                "activate_runtime_tool_context",
+                None,
+            )
+            if callable(activate_runtime_tools):
+                task_sid = str(
+                    envelope.params.get("task_session_id") or envelope.session_id
+                )
+                cwd = self._resolve_agent_workdir(
+                    envelope,
+                    task_session_id=task_sid,
+                )
+                runtime_tool_leases = await activate_runtime_tools(
+                    process_launch=launch,
+                    cwd=cwd,
+                )
+            async for chunk in self._run_turn(envelope):
+                yield chunk
+        finally:
+            try:
+                release_runtime_tools = getattr(
+                    self.registry,
+                    "release_runtime_tool_context",
+                    None,
+                )
+                if runtime_tool_leases and callable(release_runtime_tools):
+                    release_task = asyncio.create_task(
+                        release_runtime_tools(runtime_tool_leases)
+                    )
+                    try:
+                        await asyncio.shield(release_task)
+                    except asyncio.CancelledError:
+                        await asyncio.shield(release_task)
+                        raise
+            finally:
+                current_process_launch.reset(launch_token)
+                current_turn_id.reset(turn_token)
+                current_model_id.reset(model_token)
+
+    async def _run_turn(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         if self._closed:
             raise RuntimeError("SingleAgent 已关闭，不能继续执行")
         sid = envelope.session_id
@@ -680,9 +752,6 @@ class SingleAgent(Agent):
         # 同步当前已展开的 skill packages，供 build_skills_index_prompt 展开内部 skills
         active_packages = envelope.params.get("active_skill_packages") or []
         current_active_skill_packages.set(set(active_packages))
-        from crew.security.launch import current_process_launch
-
-        current_process_launch.set(envelope.params.get("_security_process_launch"))
         # 专用 Wiki Agent 自行建立 KB 状态；普通会话不创建 Wiki 会话状态。
         if (
             self.wiki_manager is not None
@@ -879,7 +948,10 @@ class SingleAgent(Agent):
             raise
         except Exception as exc:
             terminal_outcome = "failed"
-            terminal_error_summary = f"{type(exc).__name__}: {exc}"
+            terminal_error_summary = (
+                f"{type(exc).__name__}: "
+                f"{safe_public_error(exc, '执行失败')}"
+            )
             raise
         finally:
             log.info("[PERF] executor_total     %.3fs", time.perf_counter() - t_exec)

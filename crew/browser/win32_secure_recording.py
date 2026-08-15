@@ -25,6 +25,7 @@ from typing import Any, Protocol
 
 
 _TRACE_NAME = "trace.jsonl"
+_INCOMPLETE_NAME = "INCOMPLETE"
 _SESSION_COMPONENT = re.compile(r"[0-9a-f]{16}")
 _RECORDING_COMPONENT = re.compile(r"[0-9a-f]{8,32}")
 
@@ -182,6 +183,8 @@ def _require_trace_file(
     append_handle: Any,
     audit_handle: Any,
     expected_path: str,
+    *,
+    label: str = "录制轨迹",
 ) -> Win32FileIdentity:
     append_identity = api.identity(append_handle)
     audit_identity = api.identity(audit_handle)
@@ -198,7 +201,7 @@ def _require_trace_file(
         != _canonical_windows_path(expected_path)
         or not api.security_is_current_user_only(audit_handle)
     ):
-        raise OSError(errno.EPERM, "Windows 录制轨迹不是当前用户私有的稳定普通文件")
+        raise OSError(errno.EPERM, f"Windows {label}不是当前用户私有的稳定普通文件")
     return append_identity
 
 
@@ -217,11 +220,58 @@ def secure_append_recording_line(
     An independent read-control handle audits the DACL without broadening the
     writer's access mask.
     """
+    _secure_append_recording_file(
+        owner_home,
+        directory,
+        payload,
+        max_bytes,
+        leaf_name=_TRACE_NAME,
+        api=api,
+        only_if_empty=False,
+    )
+
+
+def secure_ensure_recording_marker(
+    owner_home: str | os.PathLike[str],
+    directory: str | os.PathLike[str],
+    *,
+    api: Win32RecordingAPI | None = None,
+) -> None:
+    """Create the fixed-content incomplete marker through the same safe handles.
+
+    The marker is integrity state, not user content, but a pathname-only create
+    would still let a reparse point turn a failed recording into a misleading
+    success.  Existing non-empty markers are left untouched and revalidated.
+    """
+    _secure_append_recording_file(
+        owner_home,
+        directory,
+        b"recording-incomplete\n",
+        128,
+        leaf_name=_INCOMPLETE_NAME,
+        api=api,
+        only_if_empty=True,
+    )
+
+
+def _secure_append_recording_file(
+    owner_home: str | os.PathLike[str],
+    directory: str | os.PathLike[str],
+    payload: bytes,
+    max_bytes: int,
+    *,
+    leaf_name: str,
+    api: Win32RecordingAPI | None,
+    only_if_empty: bool,
+) -> None:
+    if leaf_name not in {_TRACE_NAME, _INCOMPLETE_NAME}:
+        raise ValueError("Windows 录制文件名无效")
     if not isinstance(payload, bytes) or not payload:
         raise ValueError("Windows 录制 payload 必须是非空 bytes")
     if len(payload) > max_bytes:
-        raise OSError(errno.EFBIG, "单条录制事件超过轨迹大小上限")
+        raise OSError(errno.EFBIG, "录制文件超过大小上限")
     owner, parts, trace_path = _validated_recording_paths(owner_home, directory)
+    target_path = ntpath.join(ntpath.dirname(trace_path), leaf_name)
     winapi: Win32RecordingAPI = api if api is not None else CtypesWin32RecordingAPI()
     directory_handles: list[tuple[Any, str, Win32FileIdentity]] = []
     append_handle: Any | None = None
@@ -252,15 +302,19 @@ def secure_append_recording_line(
                 raise
             directory_handles.append((handle, current, identity))
 
-        append_handle, _created = winapi.open_append_file(trace_path)
-        audit_handle = winapi.open_file_audit(trace_path)
+        append_handle, _created = winapi.open_append_file(target_path)
+        audit_handle = winapi.open_file_audit(target_path)
         before = _require_trace_file(
             winapi,
             append_handle,
             audit_handle,
-            trace_path,
+            target_path,
+            label=("录制轨迹" if leaf_name == _TRACE_NAME else "录制完整性标记"),
         )
-        if before.size > max_bytes - len(payload):
+        write_payload = not (only_if_empty and before.size > 0)
+        if before.size > max_bytes or (
+            write_payload and before.size > max_bytes - len(payload)
+        ):
             raise OSError(errno.EFBIG, "录制轨迹超过大小上限")
         # A parent can be renamed only if every open handle allowed delete
         # sharing.  The real facade denies it; this second validation also makes
@@ -277,26 +331,29 @@ def secure_append_recording_line(
             ) != (initial.volume_serial, initial.file_index):
                 raise OSError(errno.EPERM, "Windows 录制目录在追加前被替换")
 
-        view = memoryview(payload)
-        while view:
-            # Do not seek.  FILE_APPEND_DATA without FILE_WRITE_DATA is the
-            # kernel-enforced append primitive for local files; SetFilePointerEx
-            # would require broader GENERIC_READ/GENERIC_WRITE authority and
-            # would reintroduce an arbitrary-offset write surface.
-            written = winapi.write(append_handle, view)
-            if written <= 0 or written > len(view):
-                raise OSError(errno.EIO, "Windows 录制轨迹追加失败")
-            view = view[written:]
-        winapi.flush(append_handle)
+        if write_payload:
+            view = memoryview(payload)
+            while view:
+                # Do not seek.  FILE_APPEND_DATA without FILE_WRITE_DATA is the
+                # kernel-enforced append primitive for local files; SetFilePointerEx
+                # would require broader GENERIC_READ/GENERIC_WRITE authority and
+                # would reintroduce an arbitrary-offset write surface.
+                written = winapi.write(append_handle, view)
+                if written <= 0 or written > len(view):
+                    raise OSError(errno.EIO, "Windows 录制文件追加失败")
+                view = view[written:]
+            winapi.flush(append_handle)
 
         after = _require_trace_file(
             winapi,
             append_handle,
             audit_handle,
-            trace_path,
+            target_path,
+            label=("录制轨迹" if leaf_name == _TRACE_NAME else "录制完整性标记"),
         )
-        if after.size != before.size + len(payload) or after.size > max_bytes:
-            raise OSError(errno.EIO, "Windows 录制轨迹写后大小校验失败")
+        expected_size = before.size + len(payload) if write_payload else before.size
+        if after.size != expected_size or after.size > max_bytes:
+            raise OSError(errno.EIO, "Windows 录制文件写后大小校验失败")
 
         for index, (handle, expected, initial) in enumerate(directory_handles):
             current_identity = (
@@ -349,6 +406,11 @@ _FILE_ALL_ACCESS = 0x001F01FF
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER = 1
 _SDDL_REVISION_1 = 1
+# ``_ensure_private_directory`` uses a protected SYSTEM + OWNER RIGHTS DACL;
+# accept those two maintenance principals while still requiring the current
+# process owner and rejecting every other ACE.
+_SYSTEM_SID = b"\x01\x01\x00\x00\x00\x00\x00\x05\x12\x00\x00\x00"
+_OWNER_RIGHTS_SID = b"\x01\x01\x00\x00\x00\x00\x00\x03\x04\x00\x00\x00"
 
 
 class _SecurityAttributes(ctypes.Structure):
@@ -737,6 +799,10 @@ class CtypesWin32RecordingAPI:
                 self._raise_last_error("无法读取 Windows DACL")
             if acl_info.AceCount < 1:
                 return False
+            system_buffer = ctypes.create_string_buffer(_SYSTEM_SID)
+            owner_rights_buffer = ctypes.create_string_buffer(_OWNER_RIGHTS_SID)
+            system_sid = ctypes.cast(system_buffer, wintypes.LPVOID)
+            owner_rights_sid = ctypes.cast(owner_rights_buffer, wintypes.LPVOID)
             for index in range(acl_info.AceCount):
                 ace = wintypes.LPVOID()
                 if not self._advapi32.GetAce(dacl, index, ctypes.byref(ace)):
@@ -748,9 +814,12 @@ class CtypesWin32RecordingAPI:
                     int(ace.value) + 4, ctypes.POINTER(wintypes.DWORD)
                 ).contents.value
                 ace_sid = wintypes.LPVOID(int(ace.value) + 8)
-                if mask & _FILE_ALL_ACCESS != _FILE_ALL_ACCESS or not self._advapi32.EqualSid(
-                    ace_sid, current_sid
-                ):
+                allowed_principal = (
+                    self._advapi32.EqualSid(ace_sid, current_sid)
+                    or self._advapi32.EqualSid(ace_sid, system_sid)
+                    or self._advapi32.EqualSid(ace_sid, owner_rights_sid)
+                )
+                if mask & _FILE_ALL_ACCESS != _FILE_ALL_ACCESS or not allowed_principal:
                     return False
             return True
         finally:

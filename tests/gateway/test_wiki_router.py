@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,10 +8,51 @@ from starlette.testclient import TestClient
 
 from crew.agent.subagent.definition import build_preset_spec
 from crew.app import build_app
+from crew.gateway.routers.wiki import (
+    _read_upload_bounded,
+    _MAX_WIKI_UPLOAD_BYTES,
+    _WikiUploadTooLarge,
+)
 from crew.gateway.server import create_app
 from crew.state.config import Config
 
 OWNER = "A:uid-a"
+
+
+@pytest.mark.asyncio
+async def test_upload_reader_closes_part_on_stream_faults():
+    closed = []
+
+    def make_upload(chunks, *, declared=None):
+        state = {"i": 0}
+
+        async def read(_size):
+            value = chunks[state["i"]]
+            state["i"] += 1
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        async def close():
+            closed.append(True)
+
+        return SimpleNamespace(size=declared, read=read, close=close)
+
+    cases = [
+        ([b"abc", OSError("disk full")], None),
+        ([b"abc", "not-bytes"], None),
+        ([b"a" * (_MAX_WIKI_UPLOAD_BYTES + 1), b""], None),
+    ]
+    for chunks, declared in cases:
+        closed.clear()
+        with pytest.raises((OSError, ValueError, _WikiUploadTooLarge)):
+            await _read_upload_bounded(make_upload(chunks, declared=declared))
+        assert closed == [True]
+
+    closed.clear()
+    with pytest.raises(_WikiUploadTooLarge):
+        await _read_upload_bounded(make_upload([], declared=_MAX_WIKI_UPLOAD_BYTES + 1))
+    assert closed == []
 
 
 def _client(tmp_path):
@@ -497,6 +539,21 @@ def test_wiki_upload_rejects_missing_file(tmp_path, auth_headers):
     assert "file" in data["error"]
 
 
+def test_wiki_upload_rejects_part_over_limit_before_parser(tmp_path, auth_headers, monkeypatch):
+    import crew.gateway.routers.wiki as wiki_router
+
+    monkeypatch.setattr(wiki_router, "_MAX_WIKI_UPLOAD_BYTES", 4)
+    client, _app = _client(tmp_path)
+    res = client.post(
+        "/api/wiki/upload",
+        headers=auth_headers,
+        data={},
+        files={"file": ("too-large.txt", b"12345", "text/plain")},
+    )
+    assert res.status_code == 413
+    assert res.json() == {"ok": False, "error": "上传文件超过安全上限"}
+
+
 def test_wiki_upload_rejects_empty_file(tmp_path, auth_headers):
     client, _app = _client(tmp_path)
     res = client.post(
@@ -528,10 +585,10 @@ def test_wiki_upload_parse_failure_returns_needs_agent_review(tmp_path, auth_hea
     """文档解析失败时应保存原文件为 raw source，并返回 needs_agent_review 让 Agent 接管。"""
     import crew.gateway.routers.wiki as wiki_router
 
-    def _bad_parse(content, filename):
+    async def _bad_parse(content, filename):
         raise Exception("expected <class 'openpyxl.styles.fills.Fill'>")
 
-    monkeypatch.setattr(wiki_router, "parse_document_from_bytes", _bad_parse)
+    monkeypatch.setattr(wiki_router, "parse_document_from_bytes_async", _bad_parse)
 
     client, app = _client(tmp_path)
     res = client.post(
@@ -888,7 +945,7 @@ def test_wiki_kb_crud_supports_chinese_id(tmp_path, auth_headers):
     data = res.json()
     assert data["kb"]["id"] == "产品知识库"
     assert data["kb"]["name"] == "产品知识库"
-    assert data["kb"]["vault_path"].endswith("/wiki_lib/产品知识库")
+    assert Path(data["kb"]["vault_path"]).as_posix().endswith("/wiki_lib/产品知识库")
 
     res = client.get("/api/wiki/kbs", headers=auth_headers)
     assert any(kb["id"] == "产品知识库" for kb in res.json()["kbs"])

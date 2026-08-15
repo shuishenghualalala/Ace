@@ -281,6 +281,18 @@ beforeEach(() => {
     model_profile_id: id,
     model_label: `模型-${id}`,
   }));
+  // A late session-list refresh (including finalize's 2s timer from an earlier
+  // test in this file) must mirror current rows instead of wiping optimistic
+  // embedded Wiki session rows.
+  api.sessions.mockImplementation(async () => sessionStore.get().sessions.map((session) => ({
+    session_id: session.id,
+    title: session.title,
+    workspace_id: session.workspaceId,
+    updated_at: Math.floor(session.updatedAt / 1000),
+    archived: session.archived === true,
+    pinned: session.pinned === true,
+    message_count: 0,
+  })));
   initWikiAgent();
 });
 
@@ -691,17 +703,26 @@ describe('wiki-page 入口挂点', () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
     await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-new]')).not.toBeNull());
+    await vi.waitFor(() => {
+      expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
+    });
 
     const newSessionId = `wiki-new-${wikiSidSeq}`;
-    api.wikiAgentSession.mockResolvedValueOnce({ ok: true, session_id: newSessionId, kb_id: 'default' });
+    api.wikiAgentSession.mockImplementation(async (kbId: string, opts?: { forceNew?: boolean }) => (
+      opts?.forceNew
+        ? { ok: true, session_id: newSessionId, kb_id: 'default' }
+        : { ok: true, session_id: WIKI_SID, kb_id: 'default' }
+    ));
     document.querySelector<HTMLElement>('[data-wiki-agent-new]')!.click();
 
     await vi.waitFor(() => {
       expect(api.wikiAgentSession).toHaveBeenLastCalledWith('default', { forceNew: true });
       expect(mockLoadBackendHistory).toHaveBeenCalledWith(newSessionId);
     });
-    expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
-    expect(sessionStore.get().sessions.some((session) => session.id === newSessionId)).toBe(true);
+    await vi.waitFor(() => {
+      expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
+      expect(sessionStore.get().sessions.some((session) => session.id === newSessionId)).toBe(true);
+    });
     expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')?.value).toBe('');
   });
 

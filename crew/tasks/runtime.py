@@ -8,21 +8,30 @@ backends (shell/subagent/agent turn/team) remain in their existing modules.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+
+import psutil
 
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.tasks.models import RuntimeTask, TaskKind, normalize_task_status
 from crew.tools.process_registry import terminate_process_tree
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
+
+
+def _host_boot_id() -> str:
+    boot_time = int(psutil.boot_time())
+    return hashlib.sha256(f"ace-task-runtime-boot:{boot_time}".encode("ascii")).hexdigest()
 
 
 class TaskRuntime:
@@ -37,6 +46,8 @@ class TaskRuntime:
         heartbeat_interval: float = 10.0,
         wait_timeout: float = 30.0,
         finished_retention_days: int = 7,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+        boot_id_provider: Callable[[], str] = _host_boot_id,
     ) -> None:
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
         self._lock = threading.RLock()
@@ -45,6 +56,8 @@ class TaskRuntime:
         self.heartbeat_interval = max(0.1, float(heartbeat_interval))
         self.wait_timeout = max(0.0, float(wait_timeout))
         self.finished_retention_days = max(0, int(finished_retention_days))
+        self._monotonic_clock = monotonic_clock
+        self._boot_id_provider = boot_id_provider
         self._workers: dict[str, asyncio.Task[Any]] = {}
         self._cancel_callbacks: dict[str, Callable[[str], Any]] = {}
         self._events: dict[str, asyncio.Event] = {}
@@ -64,6 +77,7 @@ class TaskRuntime:
                 kind TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 request_id TEXT NOT NULL DEFAULT '',
+                action_digest TEXT NOT NULL DEFAULT '',
                 tool_call_id TEXT NOT NULL DEFAULT '',
                 parent_task_id TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
@@ -80,6 +94,9 @@ class TaskRuntime:
                 finished_at REAL,
                 last_activity_at REAL,
                 last_heartbeat_at REAL,
+                monotonic_boot_id TEXT NOT NULL DEFAULT '',
+                started_monotonic REAL,
+                last_activity_monotonic REAL,
                 execution_timeout REAL NOT NULL DEFAULT 0,
                 inactivity_timeout REAL NOT NULL DEFAULT 0,
                 backgrounded INTEGER NOT NULL DEFAULT 0,
@@ -96,6 +113,22 @@ class TaskRuntime:
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(runtime_tasks)").fetchall()}
         if "owner_account_id" not in cols:
             self._conn.execute("ALTER TABLE runtime_tasks ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''")
+        if "action_digest" not in cols:
+            self._conn.execute(
+                "ALTER TABLE runtime_tasks ADD COLUMN action_digest TEXT NOT NULL DEFAULT ''"
+            )
+        if "monotonic_boot_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE runtime_tasks ADD COLUMN monotonic_boot_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "started_monotonic" not in cols:
+            self._conn.execute(
+                "ALTER TABLE runtime_tasks ADD COLUMN started_monotonic REAL"
+            )
+        if "last_activity_monotonic" not in cols:
+            self._conn.execute(
+                "ALTER TABLE runtime_tasks ADD COLUMN last_activity_monotonic REAL"
+            )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runtime_tasks_owner_session "
             "ON runtime_tasks(owner_account_id, session_id, created_at DESC)"
@@ -120,6 +153,7 @@ class TaskRuntime:
         session_id: str,
         title: str,
         request_id: str = "",
+        action_digest: str = "",
         tool_call_id: str = "",
         parent_task_id: str = "",
         detail: str = "",
@@ -142,6 +176,7 @@ class TaskRuntime:
             session_id=session_id,
             title=title,
             request_id=request_id,
+            action_digest=action_digest,
             tool_call_id=tool_call_id,
             parent_task_id=parent_task_id,
             detail=detail,
@@ -231,6 +266,7 @@ class TaskRuntime:
 
     def mark_running(self, task_id: str) -> dict[str, Any]:
         now = time.time()
+        monotonic_now = self._monotonic_clock()
         owner = self._owner_for_task(task_id)
         task = self.update(
             task_id,
@@ -239,6 +275,9 @@ class TaskRuntime:
             started_at=now,
             last_activity_at=now,
             last_heartbeat_at=now,
+            monotonic_boot_id=self._boot_id_provider(),
+            started_monotonic=monotonic_now,
+            last_activity_monotonic=monotonic_now,
         )
         self._emit(task, "started")
         return task
@@ -275,7 +314,10 @@ class TaskRuntime:
 
     def touch_activity(self, task_id: str, progress: dict[str, Any] | None = None) -> dict[str, Any]:
         owner = self._owner_for_task(task_id)
+        task = self.get(task_id, owner_account_id=owner)
         changes: dict[str, Any] = {"last_activity_at": time.time()}
+        if task.get("monotonic_boot_id") == self._boot_id_provider():
+            changes["last_activity_monotonic"] = self._monotonic_clock()
         if progress is not None:
             changes["progress"] = progress
         task = self.update(task_id, owner_account_id=owner, **changes)
@@ -437,7 +479,7 @@ class TaskRuntime:
                 await asyncio.wait_for(event.wait(), timeout=effective)
             else:
                 await event.wait()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task = self.get(task_id, owner_account_id=owner_account_id)
             return {**task, "retrieval_status": "timeout"}
         return {**self.get(task_id, owner_account_id=owner_account_id), "retrieval_status": "success"}
@@ -572,16 +614,47 @@ class TaskRuntime:
     async def _monitor_loop(self) -> None:
         while True:
             await asyncio.sleep(self.monitor_interval)
-            now = time.time()
+            monotonic_now = self._monotonic_clock()
+            boot_id = self._boot_id_provider()
             for task in self.list_tasks(status="running", limit=1000, _all_owners=True):
                 reason = ""
-                if task["execution_timeout"] > 0 and task["started_at"]:
-                    if now - task["started_at"] >= task["execution_timeout"]:
+                has_timeout = (
+                    task["execution_timeout"] > 0
+                    or task["inactivity_timeout"] > 0
+                )
+                if has_timeout and task.get("monotonic_boot_id") != boot_id:
+                    reason = "单调计时身份已失效"
+                started_monotonic = task.get("started_monotonic")
+                activity_monotonic = task.get("last_activity_monotonic")
+                if (
+                    not reason
+                    and task["execution_timeout"] > 0
+                    and isinstance(started_monotonic, (int, float))
+                ):
+                    elapsed = monotonic_now - float(started_monotonic)
+                    if elapsed < 0:
+                        reason = "单调运行计时状态非法"
+                    elif elapsed >= task["execution_timeout"]:
                         reason = f"达到运行上限 {task['execution_timeout']:.0f}s"
-                if not reason and task["inactivity_timeout"] > 0:
-                    activity = task["last_activity_at"] or task["started_at"] or task["created_at"]
-                    if now - activity >= task["inactivity_timeout"]:
+                if (
+                    not reason
+                    and task["inactivity_timeout"] > 0
+                    and isinstance(activity_monotonic, (int, float))
+                ):
+                    idle = monotonic_now - float(activity_monotonic)
+                    if idle < 0:
+                        reason = "单调活动计时状态非法"
+                    elif idle >= task["inactivity_timeout"]:
                         reason = f"无业务活动超过 {task['inactivity_timeout']:.0f}s"
+                if (
+                    not reason
+                    and has_timeout
+                    and (
+                        not isinstance(started_monotonic, (int, float))
+                        or not isinstance(activity_monotonic, (int, float))
+                    )
+                ):
+                    reason = "单调计时状态缺失"
                 if reason:
                     await self._timeout(task["task_id"], reason)
             self.prune_finished()
@@ -598,7 +671,7 @@ class TaskRuntime:
             if asyncio.iscoroutine(value):
                 try:
                     await asyncio.wait_for(value, timeout=3.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
+                except (TimeoutError, asyncio.CancelledError):
                     pass
         elif task["kind"] == "shell":
             self.kill_process_group(int((task.get("progress") or {}).get("pid") or 0), reason)
@@ -653,11 +726,15 @@ class TaskRuntime:
 
         def _write(conn: sqlite3.Connection) -> int:
             rows = conn.execute(
-                "SELECT output_ref FROM runtime_tasks "
+                "SELECT output_ref, owner_account_id FROM runtime_tasks "
                 "WHERE finished_at IS NOT NULL AND finished_at < ?",
                 (cutoff,),
             ).fetchall()
-            refs = [str(r["output_ref"] or "").strip() for r in rows if r["output_ref"]]
+            refs = [
+                (str(r["output_ref"] or "").strip(), str(r["owner_account_id"] or ""))
+                for r in rows
+                if r["output_ref"]
+            ]
             cur = conn.execute(
                 "DELETE FROM runtime_tasks WHERE finished_at IS NOT NULL AND finished_at < ?",
                 (cutoff,),
@@ -666,8 +743,8 @@ class TaskRuntime:
             return int(cur.rowcount)
 
         deleted = self._writer.execute(_write)
-        for ref in pending_refs:
-            self._safe_unlink_output_ref(ref)
+        for ref, owner in pending_refs:
+            self._safe_unlink_output_ref(ref, owner_account_id=owner)
         return deleted
 
     def unlink_session_output_files(self, session_id: str, owner_account_id: str = "") -> int:
@@ -676,13 +753,16 @@ class TaskRuntime:
         n = 0
         for task in tasks:
             ref = str(task.get("output_ref") or "").strip()
-            if ref and self._safe_unlink_output_ref(ref):
+            if ref and self._safe_unlink_output_ref(ref, owner_account_id=owner_account_id):
                 n += 1
             # dispatcher 还会写 tasks/<task_id>.json
             tid = str(task.get("task_id") or "").strip()
             if tid:
                 json_side = self._task_json_beside_ref(ref, tid)
-                if json_side and self._safe_unlink_output_ref(str(json_side)):
+                if json_side and self._safe_unlink_output_ref(
+                    str(json_side),
+                    owner_account_id=owner_account_id,
+                ):
                     n += 1
         return n
 
@@ -696,7 +776,7 @@ class TaskRuntime:
             return None
         return parent / f"{task_id}.json"
 
-    def _safe_unlink_output_ref(self, output_ref: str) -> bool:
+    def _safe_unlink_output_ref(self, output_ref: str, *, owner_account_id: str = "") -> bool:
         """仅删除落在某账号 tasks/ 目录下的文件。"""
         raw = str(output_ref or "").strip()
         if not raw:
@@ -705,6 +785,15 @@ class TaskRuntime:
             path = Path(raw).expanduser().resolve()
         except OSError:
             return False
+        if owner_account_id:
+            try:
+                from crew.state.home import get_owner_runtime_home
+
+                allowed_root = Path(get_owner_runtime_home(owner_account_id)).expanduser().resolve()
+                allowed_tasks = allowed_root / "tasks"
+                path.relative_to(allowed_tasks)
+            except (OSError, ValueError):
+                return False
         # 必须是 .../tasks/<file>，父目录名 tasks
         if path.parent.name != "tasks" or not path.is_file():
             return False
@@ -758,7 +847,7 @@ class TaskRuntime:
                 value = callback(payload)
                 if asyncio.iscoroutine(value):
                     value.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 - completion callbacks must not break runtime cleanup
             return
 
     @staticmethod

@@ -20,7 +20,12 @@ from typing import Any
 
 from crew.state.logging import get_logger
 from crew.team.workspace_guard import normalize_acp_tool_name
-from crew.tools.file_utils import _has_binary_extension
+from crew.tools.file_utils import (
+    FileConflictError,
+    _has_binary_extension,
+    read_verified_bytes,
+    stat_verified_file,
+)
 from crew.tools.redact import redact_sensitive_text
 
 log = get_logger("agent.file_changes")
@@ -76,12 +81,11 @@ def _is_sensitive_file(path: Path) -> bool:
 
 def _read_text_with_limit(path: Path) -> tuple[str | None, bool]:
     try:
-        with path.open("rb") as stream:
-            data = stream.read(FILE_CHANGE_MAX_BYTES + 1)
-    except (OSError, ValueError):
-        return None, False
-    if len(data) > FILE_CHANGE_MAX_BYTES:
+        data = read_verified_bytes(path, max_bytes=FILE_CHANGE_MAX_BYTES)
+    except ValueError:
         return None, True
+    except (FileConflictError, OSError):
+        return None, False
     return data.decode("utf-8", errors="replace"), False
 
 
@@ -131,8 +135,8 @@ def workspace_snapshot(
             try:
                 if path.is_symlink() or not path.is_file():
                     continue
-                stat = path.stat()
-            except OSError:
+                stat = stat_verified_file(path)
+            except (FileConflictError, OSError):
                 continue
             snapshot[str(path.resolve())] = (stat.st_mtime_ns, stat.st_size)
             if len(snapshot) >= max_files:
@@ -203,8 +207,8 @@ def metadata_change(path_text: str, status: str) -> dict[str, Any]:
     diff_rows: list[dict[str, Any]] = []
     if not binary and status != "deleted":
         try:
-            binary = path.stat().st_size > FILE_CHANGE_MAX_BYTES
-        except OSError:
+            binary = stat_verified_file(path).st_size > FILE_CHANGE_MAX_BYTES
+        except (FileConflictError, OSError):
             pass
     if status == "added" and not binary:
         text, oversized = _read_text_with_limit(path)

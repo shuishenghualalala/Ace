@@ -49,6 +49,26 @@ async def test_api_usage(api, auth_headers):
     assert "session_count" in data
 
 
+def test_unhandled_gateway_exception_uses_stable_public_error(api, auth_headers):
+    async def unexpected():
+        raise RuntimeError(r"C:\private\gateway\ACCESS_TOKEN=must-not-leak")
+
+    api.add_api_route("/api/test-unexpected", unexpected, methods=["GET"])
+    api.router.routes.insert(0, api.router.routes.pop())
+    from fastapi.testclient import TestClient
+
+    with TestClient(api, raise_server_exceptions=False) as client:
+        response = client.get("/api/test-unexpected", headers=auth_headers)
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "ok": False,
+        "error": "内部错误",
+        "code": "INTERNAL_ERROR",
+    }
+    assert "must-not-leak" not in response.text
+
+
 @pytest.mark.asyncio
 async def test_api_session_context(api, auth_headers):
     transport = ASGITransport(app=api)

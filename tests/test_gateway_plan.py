@@ -11,9 +11,9 @@ os.environ.setdefault("CREW_API_KEY", "")  # 确保走 FakeProvider
 
 from starlette.testclient import TestClient
 
-from crew.core.types import Message
 from crew.agent.plan import write_plan
 from crew.app import build_app
+from crew.core.types import Message
 from crew.gateway.server import create_app
 from crew.state.config import Config
 
@@ -34,7 +34,7 @@ def _client(tmp_path):
     return TestClient(create_app(crew=app)), app
 
 
-def test_ws_plan_enter_and_reject(tmp_path, auth_headers):
+def test_ws_plan_enter_and_reject(tmp_path, auth_headers, send_ws_json):
     client, app = _client(tmp_path)
     sid = "ws_plan"
     app.session_store.save(
@@ -43,7 +43,7 @@ def test_ws_plan_enter_and_reject(tmp_path, auth_headers):
         owner_account_id=OWNER,
     )
     with client.websocket_connect("/ws", headers=auth_headers) as ws:
-        ws.send_json({"action": "plan_enter", "session_id": sid})
+        send_ws_json(ws, {"action": "plan_enter", "session_id": sid})
         msg = ws.receive_json()
         assert msg["kind"] == "status"
         assert "Plan 模式" in msg["body"]["message"]
@@ -51,21 +51,25 @@ def test_ws_plan_enter_and_reject(tmp_path, auth_headers):
 
         # 模型已写计划、进入待审批后，用户在前端点「继续修改」→ plan_reject
         app.plan_manager.request_approval(sid, owner_account_id=OWNER)
-        ws.send_json({"action": "plan_reject", "session_id": sid})
+        send_ws_json(ws, {"action": "plan_reject", "session_id": sid})
         msg = ws.receive_json()
         assert msg["kind"] == "status"
         assert app.plan_manager.is_active(sid, owner_account_id=OWNER)  # 仍在 plan 模式
         assert not app.plan_manager.is_awaiting_approval(sid, owner_account_id=OWNER)
         assert app.plan_manager.phase(sid, owner_account_id=OWNER) == "revising"
 
-        ws.send_json({"action": "plan_exit", "session_id": sid})
+        send_ws_json(ws, {"action": "plan_exit", "session_id": sid})
         msg = ws.receive_json()
         assert msg["kind"] == "status"
         assert not app.plan_manager.is_active(sid, owner_account_id=OWNER)
         assert app.plan_manager.phase(sid, owner_account_id=OWNER) == "cancelled"
 
 
-def test_ws_plan_reject_and_exit_sets_rejected_phase(tmp_path, auth_headers):
+def test_ws_plan_reject_and_exit_sets_rejected_phase(
+    tmp_path,
+    auth_headers,
+    send_ws_json,
+):
     client, app = _client(tmp_path)
     sid = "ws_plan_reject_exit"
     app.session_store.save(
@@ -76,7 +80,7 @@ def test_ws_plan_reject_and_exit_sets_rejected_phase(tmp_path, auth_headers):
     app.plan_manager.enter(sid, owner_account_id=OWNER)
     app.plan_manager.request_approval(sid, owner_account_id=OWNER)
     with client.websocket_connect("/ws", headers=auth_headers) as ws:
-        ws.send_json({"action": "plan_reject_and_exit", "session_id": sid})
+        send_ws_json(ws, {"action": "plan_reject_and_exit", "session_id": sid})
         msg = ws.receive_json()
         assert msg["kind"] == "status"
         assert "拒绝计划" in msg["body"]["message"]
@@ -84,11 +88,15 @@ def test_ws_plan_reject_and_exit_sets_rejected_phase(tmp_path, auth_headers):
         assert app.plan_manager.phase(sid, owner_account_id=OWNER) == "rejected"
 
 
-def test_ws_first_message_plan_active_enters_plan(tmp_path, auth_headers):
+def test_ws_first_message_plan_active_enters_plan(
+    tmp_path,
+    auth_headers,
+    send_ws_json,
+):
     client, app = _client(tmp_path)
     sid = "ws_plan_first_message"
     with client.websocket_connect("/ws", headers=auth_headers) as ws:
-        ws.send_json({
+        send_ws_json(ws, {
             "session_id": sid,
             "query": "你好",
             "plan_active": True,
@@ -201,7 +209,11 @@ def test_session_plan_rest_approved_is_readonly_approved(tmp_path, auth_headers)
     assert data["has_plan"] is True
 
 
-def test_ws_plan_update_writes_plan_while_awaiting(tmp_path, auth_headers):
+def test_ws_plan_update_writes_plan_while_awaiting(
+    tmp_path,
+    auth_headers,
+    send_ws_json,
+):
     """看板手改：plan_update 在待审批时写回计划文件，并回推更新后的 plan_review。"""
     from crew.agent.plan import read_plan
 
@@ -218,7 +230,7 @@ def test_ws_plan_update_writes_plan_while_awaiting(tmp_path, auth_headers):
 
     edited = "# 手改计划\n\n- A\n- B 用户补充"
     with client.websocket_connect("/ws", headers=auth_headers) as ws:
-        ws.send_json({"action": "plan_update", "session_id": sid, "plan": edited})
+        send_ws_json(ws, {"action": "plan_update", "session_id": sid, "plan": edited})
         # 先收到 status 确认，再收到更新后的 plan_review
         kinds = []
         review = None
@@ -239,7 +251,11 @@ def test_ws_plan_update_writes_plan_while_awaiting(tmp_path, auth_headers):
     assert app.plan_manager.is_awaiting_approval(sid, owner_account_id=OWNER)
 
 
-def test_ws_plan_update_rejected_when_inactive(tmp_path, auth_headers):
+def test_ws_plan_update_rejected_when_inactive(
+    tmp_path,
+    auth_headers,
+    send_ws_json,
+):
     """未进入 Plan 模式时不允许 plan_update。"""
     client, app = _client(tmp_path)
     sid = "ws_plan_update_inactive"
@@ -249,13 +265,17 @@ def test_ws_plan_update_rejected_when_inactive(tmp_path, auth_headers):
         owner_account_id=OWNER,
     )
     with client.websocket_connect("/ws", headers=auth_headers) as ws:
-        ws.send_json({"action": "plan_update", "session_id": sid, "plan": "# x"})
+        send_ws_json(ws, {"action": "plan_update", "session_id": sid, "plan": "# x"})
         msg = ws.receive_json()
         assert msg["kind"] == "status"
         assert "不在 Plan 模式" in msg["body"]["message"]
 
 
-def test_ws_plan_approve_with_edited_plan_persists_before_execute(tmp_path, auth_headers):
+def test_ws_plan_approve_with_edited_plan_persists_before_execute(
+    tmp_path,
+    auth_headers,
+    send_ws_json,
+):
     """看板手改后批准：plan_approve 附带 plan 正文须先落盘，再进入执行。"""
     from crew.agent.plan import read_plan
 
@@ -272,7 +292,7 @@ def test_ws_plan_approve_with_edited_plan_persists_before_execute(tmp_path, auth
 
     edited = "# 手改后批准\n\n- A\n- B 用户补充"
     with client.websocket_connect("/ws", headers=auth_headers) as ws:
-        ws.send_json({
+        send_ws_json(ws, {
             "action": "plan_approve",
             "session_id": sid,
             "mode": "agent",
@@ -291,7 +311,11 @@ def test_ws_plan_approve_with_edited_plan_persists_before_execute(tmp_path, auth
     assert app.plan_manager.phase(sid, owner_account_id=OWNER) == "approved"
 
 
-def test_ws_rejects_empty_query_without_attachments(tmp_path, auth_headers):
+def test_ws_rejects_empty_query_without_attachments(
+    tmp_path,
+    auth_headers,
+    send_ws_json,
+):
     """空 query 且无附件不得起一轮，避免历史写入空 user 污染后续 LLM 调用。"""
     client, app = _client(tmp_path)
     sid = "ws_empty_query"
@@ -301,7 +325,15 @@ def test_ws_rejects_empty_query_without_attachments(tmp_path, auth_headers):
         owner_account_id=OWNER,
     )
     with client.websocket_connect("/ws", headers=auth_headers) as ws:
-        ws.send_json({"query": "", "session_id": sid, "mode": "agent", "workspace_id": "default"})
+        send_ws_json(
+            ws,
+            {
+                "query": "",
+                "session_id": sid,
+                "mode": "agent",
+                "workspace_id": "default",
+            },
+        )
         msg = ws.receive_json()
         assert msg["kind"] == "status"
         assert "为空" in msg["body"]["message"]

@@ -221,6 +221,8 @@ async def test_run_agent_tool_smoke():
         ToolCall("c1", "run_agent", {"agent_type": "Explore", "goal": "说你好"})
     )
     assert not result.is_error
+    assert result.content_trust == "untrusted"
+    assert result.content_source == "subagent"
     # 结构化结果（🟡）：status / summary / duration_seconds / tool_calls
     payload = json.loads(result.content)
     one = payload["results"][0]
@@ -385,6 +387,30 @@ async def test_subagent_closes_child_owned_resources_after_run():
 
     assert result["status"] == "completed"
     assert child.closed is True
+
+
+async def test_subagent_output_is_untrusted_and_errors_are_stable():
+    """子 agent 的输出不参与授权，异常也不能把宿主细节回传给主 agent。"""
+    from crew.core.envelope import ResponseChunk
+
+    async def chunks():
+        yield ResponseChunk.final(
+            "r", "完成 sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"
+        )
+
+    result = await _one_child(lambda _spec: _fake_child(chunks), idle=1, mx=1)
+
+    assert result["content_trust"] == "untrusted"
+    assert result["content_source"] == "subagent"
+    assert "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890" not in result["summary"]
+
+    async def errors():
+        yield ResponseChunk.error("r", r"C:\private\config.yaml ACCESS_TOKEN=secret")
+
+    failed = await _one_child(lambda _spec: _fake_child(errors), idle=1, mx=1)
+    assert failed["status"] == "error"
+    assert failed["summary"] == "子智能体执行失败"
+    assert "config.yaml" not in failed["summary"]
 
 
 async def _one_child(build, *, idle, mx):

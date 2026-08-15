@@ -4,14 +4,43 @@ pub mod proxy_routing;
 pub mod seccomp;
 pub mod wsl;
 
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, SyncSender};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, io::Read, io::Write, thread};
 
-use crate::protocol::{RuntimeCapabilities, RuntimeMessage, MAX_OUTPUT_CHUNK_BYTES};
+pub use crate::protocol::{FilesystemGlobAccess, FilesystemGlobRule};
+use crate::protocol::{
+    RuntimeCapabilities, RuntimeMessage, StdioInputMessage, MAX_OUTPUT_CHUNK_BYTES,
+};
+
+const INNER_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn set_child_resource_limits() -> std::io::Result<()> {
+    const LIMITS: [(libc::c_int, libc::rlim_t); 4] = [
+        (libc::RLIMIT_AS, 4 * 1024 * 1024 * 1024),
+        (libc::RLIMIT_FSIZE, 2 * 1024 * 1024 * 1024),
+        (libc::RLIMIT_NOFILE, 4096),
+        (libc::RLIMIT_NPROC, 256),
+    ];
+    for (resource, value) in LIMITS {
+        let limit = libc::rlimit {
+            rlim_cur: value,
+            rlim_max: value,
+        };
+        // SAFETY: called in Command::pre_exec after fork and before exec; the
+        // structure is initialized and setrlimit is async-signal-safe.
+        if unsafe { libc::setrlimit(resource as _, &limit) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
 
 pub struct LinuxRunRequest {
     pub command: Vec<String>,
@@ -19,18 +48,74 @@ pub struct LinuxRunRequest {
     pub writable_roots: Vec<PathBuf>,
     pub readable_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
+    pub filesystem_globs: Vec<FilesystemGlobRule>,
     pub network_enabled: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,
     pub allow_local_binding: bool,
     pub proxy_socket_dir: Option<PathBuf>,
     pub max_output_bytes: usize,
     pub stdin: Option<Vec<u8>>,
+    pub stdin_stream: Option<Receiver<StdioInputMessage>>,
     pub env_overrides: BTreeMap<String, String>,
 }
 
 pub struct LinuxRuntimeError {
     pub code: &'static str,
     pub message: String,
+}
+
+struct ManagedChild {
+    child: Child,
+    reaped: bool,
+}
+
+impl ManagedChild {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.reaped = true;
+        }
+        Ok(status)
+    }
+
+    fn kill_and_wait(&mut self) -> Option<ExitStatus> {
+        if self.reaped {
+            return None;
+        }
+        let _ = self.child.kill();
+        match self.child.wait() {
+            Ok(status) => {
+                self.reaped = true;
+                Some(status)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        if !self.reaped {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            self.reaped = true;
+        }
+    }
 }
 
 pub fn run(
@@ -51,38 +136,44 @@ pub fn run(
     };
     let bridge = proxy
         .as_ref()
-        .map(|proxy| proxy_routing::HostBridge::start(proxy.address()))
+        .map(|proxy| {
+            proxy_routing::HostBridge::start(
+                proxy.address(),
+                proxy.authorization_header().to_string(),
+            )
+        })
         .transpose()
         .map_err(unavailable)?;
     let mut request = request;
     request.proxy_socket_dir = bridge.as_ref().map(|value| value.socket_dir.clone());
     let source = bwrap_source::locate(&request.cwd).map_err(unavailable)?;
-    let plan = bwrap::build_args(&request).map_err(denied)?;
+    let mut plan = bwrap::build_args(&request).map_err(denied)?;
     let mut command = Command::new(source.executable());
     command.args(&plan.args);
     command
-        .stdin(if request.stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(
+            if request.stdin.is_some() || request.stdin_stream.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            },
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // The limits apply to bubblewrap and are inherited by every process in its
+    // PID namespace, preventing an MCP child from escaping host process budgets.
+    unsafe {
+        command.pre_exec(set_child_resource_limits);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| unavailable(format!("failed to run bubblewrap: {error}")))?;
+    plan.mark_spawned();
     let stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut child = ManagedChild::new(child);
 
-    let mut readiness = vec![0; seccomp::INNER_READY_MARKER.len()];
-    if stderr.read_exact(&mut readiness).is_err() || readiness != seccomp::INNER_READY_MARKER {
-        let _ = child.kill();
-        let status = child.wait().ok().and_then(|value| value.code());
-        if status == Some(seccomp::INNER_SETUP_FAILURE_EXIT) {
-            return Err(denied("inner no_new_privs/seccomp setup failed"));
-        }
-        return Err(denied("bubblewrap did not reach the hardened inner stage"));
-    }
+    await_inner_readiness(&mut stderr, &mut child)?;
 
     sender
         .send(RuntimeMessage::Started {
@@ -105,15 +196,21 @@ pub fn run(
         })
         .map_err(|_| unavailable("protocol receiver disconnected"))?;
 
-    if let Some(stdin) = request.stdin {
-        let mut child_stdin = child.stdin.take().expect("piped stdin");
-        thread::spawn(move || {
-            let _ = child_stdin.write_all(&stdin);
-        });
-    }
-
     let budget = Arc::new(Mutex::new(request.max_output_bytes));
     let (failure_sender, failure_receiver) = mpsc::channel();
+    let input_finished = Arc::new(AtomicBool::new(false));
+    let stdin_writer = if request.stdin.is_some() || request.stdin_stream.is_some() {
+        let child_stdin = child.take_stdin().expect("piped stdin");
+        Some(spawn_stdin_writer(
+            child_stdin,
+            request.stdin,
+            request.stdin_stream,
+            Arc::clone(&input_finished),
+            failure_sender.clone(),
+        ))
+    } else {
+        None
+    };
     let stdout_reader = spawn_reader(
         stdout,
         Arc::clone(&budget),
@@ -131,26 +228,135 @@ pub fn run(
 
     let status = loop {
         if let Ok(failure) = failure_receiver.try_recv() {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill_and_wait();
+            input_finished.store(true, Ordering::Release);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
+            if let Some(writer) = stdin_writer {
+                let _ = writer.join();
+            }
             return Err(failure.into_error());
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(unavailable(format!("cannot wait for bubblewrap: {error}"))),
+            Err(error) => {
+                child.kill_and_wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(unavailable(format!("cannot wait for bubblewrap: {error}")));
+            }
         }
     };
+    input_finished.store(true, Ordering::Release);
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
+    if let Some(writer) = stdin_writer {
+        let _ = writer.join();
+    }
     if let Ok(failure) = failure_receiver.try_recv() {
         return Err(failure.into_error());
     }
+    plan.cleanup().map_err(denied)?;
     sender
         .send(RuntimeMessage::Completed(status.code().unwrap_or(-1)))
         .map_err(|_| unavailable("protocol receiver disconnected"))
+}
+
+fn await_inner_readiness(
+    stderr: &mut ChildStderr,
+    child: &mut ManagedChild,
+) -> Result<(), LinuxRuntimeError> {
+    let fd = stderr.as_raw_fd();
+    let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if original_flags < 0
+        || unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0
+    {
+        child.kill_and_wait();
+        return Err(denied("cannot monitor hardened inner-stage readiness"));
+    }
+
+    let deadline = Instant::now() + INNER_READY_TIMEOUT;
+    let mut readiness = Vec::with_capacity(seccomp::INNER_READY_MARKER.len());
+    loop {
+        let mut buffer = [0_u8; 64];
+        let remaining = seccomp::INNER_READY_MARKER.len() - readiness.len();
+        match stderr.read(&mut buffer[..remaining]) {
+            Ok(0) => {
+                let status = child.try_wait().ok().flatten();
+                restore_blocking(fd, original_flags);
+                return Err(inner_readiness_error(
+                    status.or_else(|| child.kill_and_wait()),
+                    "bubblewrap did not reach the hardened inner stage",
+                ));
+            }
+            Ok(count) => {
+                readiness.extend_from_slice(&buffer[..count]);
+                if !seccomp::INNER_READY_MARKER.starts_with(&readiness) {
+                    let status = child.try_wait().ok().flatten();
+                    restore_blocking(fd, original_flags);
+                    return Err(inner_readiness_error(
+                        status.or_else(|| child.kill_and_wait()),
+                        "bubblewrap did not reach the hardened inner stage",
+                    ));
+                }
+                if readiness == seccomp::INNER_READY_MARKER {
+                    if !restore_blocking(fd, original_flags) {
+                        child.kill_and_wait();
+                        return Err(denied(
+                            "cannot restore sandbox output after inner-stage readiness",
+                        ));
+                    }
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => {
+                restore_blocking(fd, original_flags);
+                return Err(inner_readiness_error(
+                    child.kill_and_wait(),
+                    "cannot read hardened inner-stage readiness",
+                ));
+            }
+        }
+
+        if let Some(status) = child.try_wait().map_err(|error| {
+            unavailable(format!(
+                "cannot inspect bubblewrap during hardened setup: {error}"
+            ))
+        })? {
+            restore_blocking(fd, original_flags);
+            return Err(inner_readiness_error(
+                Some(status),
+                "bubblewrap exited before the hardened inner stage",
+            ));
+        }
+        if Instant::now() >= deadline {
+            let status = child.kill_and_wait();
+            restore_blocking(fd, original_flags);
+            return Err(inner_readiness_error(
+                status,
+                "bubblewrap did not reach the hardened inner stage before timeout",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn restore_blocking(fd: i32, original_flags: i32) -> bool {
+    (unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags) }) >= 0
+}
+
+fn inner_readiness_error(
+    status: Option<ExitStatus>,
+    fallback: impl Into<String>,
+) -> LinuxRuntimeError {
+    if status.and_then(|value| value.code()) == Some(seccomp::INNER_SETUP_FAILURE_EXIT) {
+        denied("inner no_new_privs/seccomp setup failed")
+    } else {
+        denied(fallback)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -163,6 +369,7 @@ enum StreamFailure {
     OutputTruncated,
     ReadFailed,
     ReceiverDisconnected,
+    StdinFailed,
 }
 
 impl StreamFailure {
@@ -174,8 +381,58 @@ impl StreamFailure {
             },
             Self::ReadFailed => unavailable("cannot read sandbox output"),
             Self::ReceiverDisconnected => unavailable("protocol receiver disconnected"),
+            Self::StdinFailed => LinuxRuntimeError {
+                code: "runtime_protocol_mismatch",
+                message: "authenticated sandbox stdin stream failed".to_string(),
+            },
         }
     }
+}
+
+fn spawn_stdin_writer(
+    mut writer: std::process::ChildStdin,
+    once: Option<Vec<u8>>,
+    stream: Option<Receiver<StdioInputMessage>>,
+    finished: Arc<AtomicBool>,
+    failure_sender: mpsc::Sender<StreamFailure>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        if let Some(value) = once {
+            if writer.write_all(&value).is_err() {
+                let _ = failure_sender.send(StreamFailure::StdinFailed);
+            }
+            return;
+        }
+        let Some(stream) = stream else {
+            return;
+        };
+        while !finished.load(Ordering::Acquire) {
+            match stream.recv_timeout(Duration::from_millis(10)) {
+                Ok(StdioInputMessage::Data(value)) => {
+                    if writer
+                        .write_all(&value)
+                        .and_then(|_| writer.flush())
+                        .is_err()
+                    {
+                        let _ = failure_sender.send(StreamFailure::StdinFailed);
+                        return;
+                    }
+                }
+                Ok(StdioInputMessage::Close) => return,
+                Ok(StdioInputMessage::Abort) => {
+                    let _ = failure_sender.send(StreamFailure::StdinFailed);
+                    return;
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    if !finished.load(Ordering::Acquire) {
+                        let _ = failure_sender.send(StreamFailure::StdinFailed);
+                    }
+                    return;
+                }
+            }
+        }
+    })
 }
 
 fn spawn_reader(

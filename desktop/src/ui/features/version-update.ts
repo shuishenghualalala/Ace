@@ -216,11 +216,9 @@ function triggerDownload(mode: 'start' | 'retry'): void {
     return;
   }
   const args: DownloadArgs = { version: pendingUpdate.version, type: pendingUpdate.type, url: pendingUpdate.url };
-  console.log('[VersionUpdate] triggerDownload:', mode, args);
   setPhase('downloading', 0);
   const promise = mode === 'retry' ? bridge()?.retryDownload?.(args) : bridge()?.startDownload?.(args);
   promise?.then((r) => {
-    console.log('[VersionUpdate] download result:', r);
     if (r && !r.success && r.message) notify(r.message);
   });
 }
@@ -241,7 +239,6 @@ async function installDownloadedUpdate(): Promise<void> {
 }
 
 function handleVersionUpdate(payload: VersionUpdatePayload): void {
-  console.log('[VersionUpdate] handleVersionUpdate:', payload);
   if (!payload?.version) {
     notify(payload?.message || '发现新版本，但无法确定版本号');
     return;
@@ -271,7 +268,6 @@ function handleVersionUpdate(payload: VersionUpdatePayload): void {
 }
 
 function handleDownloadProgress(payload: VersionUpdateDownloadProgressPayload): void {
-  console.log('[VersionUpdate] handleDownloadProgress:', payload);
   if (payload.phase === 'downloading') {
     setPhase('downloading', payload.percent);
   } else if (payload.phase === 'paused') {

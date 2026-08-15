@@ -19,9 +19,14 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from crew.agent.external.process_lifecycle import (
+    ExternalProcessBoundaryError,
+    external_runtime_environment,
     finish_process_after_terminal,
-    isolated_process_kwargs,
+    resolve_external_executable,
+    run_trusted_external_probe,
+    spawn_authorized_external_process,
     terminate_process_tree,
+    validate_external_env_overrides,
 )
 from crew.agent.external.runtime_adapter import (
     ExternalPermissionRequest,
@@ -30,7 +35,6 @@ from crew.agent.external.runtime_adapter import (
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
-    build_external_runtime_env,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
@@ -39,6 +43,8 @@ from crew.state.logging import get_logger
 
 
 log = get_logger("agent.cli")
+MAX_EXTERNAL_STREAM_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_EXTERNAL_INPUT_BYTES = 1024 * 1024
 
 
 class ExternalCliError(RuntimeError):
@@ -89,7 +95,9 @@ def _compact_cli_error(
             candidates.append(line)
     if candidates:
         return candidates[-1][:500]
-    return f"进程退出码 {returncode if returncode is not None else 'unknown'}，详细原因已写入服务日志"
+    return (
+        f"进程退出码 {returncode if returncode is not None else 'unknown'}，详细原因已写入服务日志"
+    )
 
 
 def _diagnostic_tail(value: str, *, max_chars: int = 16000) -> str:
@@ -97,6 +105,13 @@ def _diagnostic_tail(value: str, *, max_chars: int = 16000) -> str:
     if len(text) <= max_chars:
         return text
     return f"...<truncated>\n{text[-max_chars:]}"
+
+
+def _bounded_json_line(payload: dict[str, Any]) -> bytes:
+    data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    if len(data) > MAX_EXTERNAL_INPUT_BYTES:
+        raise ExternalCliError("Claude Code 协议输入超过大小上限")
+    return data
 
 
 @dataclass
@@ -166,9 +181,7 @@ def _write_claude_mcp_config(request: RuntimeExecutionRequest) -> str:
     payload = {
         "mcpServers": {
             server.name: {
-                key: value
-                for key, value in server.stdio_config().items()
-                if key != "name"
+                key: value for key, value in server.stdio_config().items() if key != "name"
             }
             for server in request.mcp_servers
         }
@@ -221,7 +234,9 @@ def _parse_codex_models(raw: str) -> tuple[list[RuntimeModelProfile], str]:
     if not isinstance(entries, list):
         return [], ""
     models: list[RuntimeModelProfile] = []
-    default_model_id = str(payload.get("default_model") or payload.get("defaultModel") or "").strip()
+    default_model_id = str(
+        payload.get("default_model") or payload.get("defaultModel") or ""
+    ).strip()
     seen: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
@@ -230,23 +245,38 @@ def _parse_codex_models(raw: str) -> tuple[list[RuntimeModelProfile], str]:
         if not model_id or model_id in seen:
             continue
         seen.add(model_id)
-        levels = entry.get("supported_reasoning_levels") or entry.get("supportedReasoningLevels") or []
-        thinking_levels = tuple(
-            str(level.get("effort") if isinstance(level, dict) else level).strip()
-            for level in levels
-            if str(level.get("effort") if isinstance(level, dict) else level).strip()
-        ) if isinstance(levels, list) else ()
-        is_default = bool(entry.get("default") or entry.get("is_default")) or model_id == default_model_id
+        levels = (
+            entry.get("supported_reasoning_levels") or entry.get("supportedReasoningLevels") or []
+        )
+        thinking_levels = (
+            tuple(
+                str(level.get("effort") if isinstance(level, dict) else level).strip()
+                for level in levels
+                if str(level.get("effort") if isinstance(level, dict) else level).strip()
+            )
+            if isinstance(levels, list)
+            else ()
+        )
+        is_default = (
+            bool(entry.get("default") or entry.get("is_default")) or model_id == default_model_id
+        )
         if is_default and not default_model_id:
             default_model_id = model_id
-        models.append(RuntimeModelProfile(
-            id=model_id,
-            label=str(entry.get("display_name") or entry.get("displayName") or entry.get("name") or model_id).strip(),
-            provider="openai",
-            default=is_default,
-            capabilities=("text", "tools"),
-            thinking_levels=thinking_levels,
-        ))
+        models.append(
+            RuntimeModelProfile(
+                id=model_id,
+                label=str(
+                    entry.get("display_name")
+                    or entry.get("displayName")
+                    or entry.get("name")
+                    or model_id
+                ).strip(),
+                provider="openai",
+                default=is_default,
+                capabilities=("text", "tools"),
+                thinking_levels=thinking_levels,
+            )
+        )
     if not default_model_id and models:
         default_model_id = models[0].id
         first = models[0]
@@ -269,7 +299,9 @@ def _parse_kimi_models(raw: str, summary: str = "") -> tuple[list[RuntimeModelPr
     entries = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(entries, dict):
         return [], ""
-    default_model_id = str(payload.get("default_model") or payload.get("defaultModel") or "").strip()
+    default_model_id = str(
+        payload.get("default_model") or payload.get("defaultModel") or ""
+    ).strip()
     if not default_model_id:
         for line in summary.splitlines():
             if line.strip().lower().startswith("default model:"):
@@ -282,16 +314,22 @@ def _parse_kimi_models(raw: str, summary: str = "") -> tuple[list[RuntimeModelPr
         model_key = str(model_id).strip()
         capabilities = raw_model.get("capabilities") or []
         efforts = raw_model.get("supportEfforts") or raw_model.get("support_efforts") or []
-        models.append(RuntimeModelProfile(
-            id=model_key,
-            label=str(raw_model.get("displayName") or raw_model.get("display_name") or model_key).strip(),
-            provider=model_key.split("/", 1)[0] if "/" in model_key else "kimi",
-            default=model_key == default_model_id,
-            capabilities=tuple(str(item).strip() for item in capabilities if str(item).strip())
-            if isinstance(capabilities, list) else (),
-            thinking_levels=tuple(str(item).strip() for item in efforts if str(item).strip())
-            if isinstance(efforts, list) else (),
-        ))
+        models.append(
+            RuntimeModelProfile(
+                id=model_key,
+                label=str(
+                    raw_model.get("displayName") or raw_model.get("display_name") or model_key
+                ).strip(),
+                provider=model_key.split("/", 1)[0] if "/" in model_key else "kimi",
+                default=model_key == default_model_id,
+                capabilities=tuple(str(item).strip() for item in capabilities if str(item).strip())
+                if isinstance(capabilities, list)
+                else (),
+                thinking_levels=tuple(str(item).strip() for item in efforts if str(item).strip())
+                if isinstance(efforts, list)
+                else (),
+            )
+        )
     if models and default_model_id not in {model.id for model in models}:
         default_model_id = models[0].id
         first = models[0]
@@ -311,30 +349,20 @@ async def _run_probe_command(
     args: list[str],
     *,
     provider: str,
-    env: dict[str, str],
+    custom_env: dict[str, str] | None,
     timeout: float,
 ) -> str:
-    proc = await asyncio.create_subprocess_exec(
+    result = await run_trusted_external_probe(
         executable_path,
         *args,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        **isolated_process_kwargs(),
+        custom_env=custom_env,
+        timeout=timeout,
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.CancelledError:
-        await terminate_process_tree(proc)
-        raise
-    except asyncio.TimeoutError as exc:
-        await terminate_process_tree(proc)
-        raise ExternalCliError(f"{provider} 模型探测超时") from exc
-    if proc.returncode != 0:
-        detail = (stderr or stdout).decode("utf-8", errors="replace").strip()
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
         detail = " ".join(detail.split())[:240]
-        raise ExternalCliError(f"{provider} 模型探测失败: {detail or f'exit={proc.returncode}'}")
-    return stdout.decode("utf-8", errors="replace")
+        raise ExternalCliError(f"{provider} 模型探测失败: {detail or f'exit={result.returncode}'}")
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 async def probe_kimi_model_catalog(
@@ -345,20 +373,19 @@ async def probe_kimi_model_catalog(
 ) -> tuple[list[RuntimeModelProfile], str]:
     """Read Kimi's local model catalog when ACP omits session model state."""
 
-    env = build_external_runtime_env(custom_env)
     raw, summary = await asyncio.gather(
         _run_probe_command(
             executable_path,
             ["provider", "list", "--json"],
             provider="kimi",
-            env=env,
+            custom_env=custom_env,
             timeout=timeout,
         ),
         _run_probe_command(
             executable_path,
             ["provider", "list"],
             provider="kimi",
-            env=env,
+            custom_env=custom_env,
             timeout=timeout,
         ),
     )
@@ -377,12 +404,11 @@ async def probe_cli_runtime(
     provider_key = str(provider or "").strip().lower()
     if provider_key != "codex":
         raise ExternalCliError(f"{provider or 'unknown'} CLI 尚未配置模型探测策略")
-    env = build_external_runtime_env(custom_env)
     raw = await _run_probe_command(
         executable_path,
         ["debug", "models", "--bundled"],
         provider=provider_key,
-        env=env,
+        custom_env=custom_env,
         timeout=timeout,
     )
     models, current = _parse_codex_models(raw)
@@ -439,7 +465,9 @@ def _claude_message_events(
     if not isinstance(content, list):
         return []
     events: list[ExternalStreamEvent] = []
-    is_user = str(message.get("role") or "").lower() == "user" if isinstance(message, dict) else False
+    is_user = (
+        str(message.get("role") or "").lower() == "user" if isinstance(message, dict) else False
+    )
     for block in content:
         if not isinstance(block, dict):
             continue
@@ -459,28 +487,32 @@ def _claude_message_events(
                 tool_names[tool_id] = name
             raw_input = block.get("input")
             args = json.dumps(raw_input, ensure_ascii=False) if raw_input is not None else ""
-            events.append(ExternalStreamEvent(
-                kind="tool",
-                tool=ExternalToolEvent(
-                    name=name,
-                    phase="start",
-                    tool_call_id=tool_id,
-                    args=args,
-                ),
-            ))
+            events.append(
+                ExternalStreamEvent(
+                    kind="tool",
+                    tool=ExternalToolEvent(
+                        name=name,
+                        phase="start",
+                        tool_call_id=tool_id,
+                        args=args,
+                    ),
+                )
+            )
         elif block_type == "tool_result" or (is_user and block.get("tool_use_id")):
             tool_id = str(block.get("tool_use_id") or block.get("toolUseId") or "").strip()
             detail = _extract_text(block.get("content"))
             is_error = bool(block.get("is_error") or block.get("isError"))
-            events.append(ExternalStreamEvent(
-                kind="tool",
-                tool=ExternalToolEvent(
-                    name=tool_names.get(tool_id, "tool"),
-                    phase="error" if is_error else "result",
-                    detail=detail,
-                    tool_call_id=tool_id,
-                ),
-            ))
+            events.append(
+                ExternalStreamEvent(
+                    kind="tool",
+                    tool=ExternalToolEvent(
+                        name=tool_names.get(tool_id, "tool"),
+                        phase="error" if is_error else "result",
+                        detail=detail,
+                        tool_call_id=tool_id,
+                    ),
+                )
+            )
     return events
 
 
@@ -526,7 +558,10 @@ async def _stream_claude_once(
     if blocked:
         raise ExternalCliError(f"严格安全约束已拒绝 Claude Code 宿主流式启动：{blocked}")
     cwd = str(Path(request.cwd or ".").expanduser().resolve())
-    env = build_external_runtime_env(request.custom_env)
+    try:
+        custom_env = validate_external_env_overrides(request.custom_env)
+    except ExternalProcessBoundaryError as exc:
+        raise ExternalCliError(f"Claude Code 环境配置已拒绝: {exc}") from exc
     args = [
         "-p",
         "--input-format",
@@ -547,18 +582,17 @@ async def _stream_claude_once(
         args.extend(["--mcp-config", mcp_config_path])
     args.extend(_filtered_claude_custom_args(request.custom_args))
     try:
-        proc = await asyncio.create_subprocess_exec(
+        proc = await spawn_authorized_external_process(
             request.executable_path,
             *args,
             cwd=cwd,
-            env=env,
+            custom_env=custom_env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=64 * 1024 * 1024,
-            **isolated_process_kwargs(),
         )
-    except OSError as exc:
+    except (OSError, ExternalProcessBoundaryError) as exc:
         if mcp_config_path:
             try:
                 os.remove(mcp_config_path)
@@ -579,7 +613,7 @@ async def _stream_claude_once(
                 return
             stderr_parts.append(chunk)
             if sum(map(len, stderr_parts)) > 64 * 1024:
-                stderr_parts[:] = [b"".join(stderr_parts)[-64 * 1024:]]
+                stderr_parts[:] = [b"".join(stderr_parts)[-64 * 1024 :]]
 
     stderr_task = asyncio.create_task(_drain_stderr())
     emitted_output = False
@@ -600,21 +634,38 @@ async def _stream_claude_once(
         raise ExternalCliError("Claude CLI 未建立 stdin/stdout 管道")
 
     async def _write_initial_prompt() -> None:
-        proc.stdin.write((json.dumps(initial, ensure_ascii=False) + "\n").encode("utf-8"))
+        proc.stdin.write(_bounded_json_line(initial))
         await proc.stdin.drain()
 
     # Multica-compatible ordering: start the writer as a task and immediately
     # drain stdout. Some Claude builds emit startup JSON before reading stdin.
     writer_task = asyncio.create_task(_write_initial_prompt())
+    loop = asyncio.get_running_loop()
+    hard_deadline = loop.time() + max(request.timeout * 4, request.timeout + 900.0)
+    stdout_bytes = 0
 
     try:
         while True:
+            hard_remaining = hard_deadline - loop.time()
+            if hard_remaining <= 0:
+                raise ExternalCliError("Claude Code 调用总时长超时")
             try:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=request.timeout)
+                line = await asyncio.wait_for(
+                    proc.stdout.readline(),
+                    timeout=min(request.timeout, hard_remaining),
+                )
             except asyncio.TimeoutError as exc:
-                raise ExternalCliError("Claude Code 模型响应空闲超时") from exc
+                message = (
+                    "Claude Code 调用总时长超时"
+                    if loop.time() >= hard_deadline
+                    else "Claude Code 模型响应空闲超时"
+                )
+                raise ExternalCliError(message) from exc
             if not line:
                 break
+            stdout_bytes += len(line)
+            if stdout_bytes > MAX_EXTERNAL_STREAM_OUTPUT_BYTES:
+                raise ExternalCliError("Claude Code 输出超过大小上限")
             try:
                 payload = json.loads(line.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:
@@ -651,8 +702,12 @@ async def _stream_claude_once(
             elif event_type == "control_request":
                 raw_request = payload.get("request")
                 raw_request = raw_request if isinstance(raw_request, dict) else {}
-                request_id = str(payload.get("request_id") or raw_request.get("request_id") or "").strip()
-                tool_name = str(raw_request.get("tool_name") or raw_request.get("toolName") or "tool")
+                request_id = str(
+                    payload.get("request_id") or raw_request.get("request_id") or ""
+                ).strip()
+                tool_name = str(
+                    raw_request.get("tool_name") or raw_request.get("toolName") or "tool"
+                )
                 tool_input = raw_request.get("input")
                 permission = ExternalPermissionRequest(
                     request_id=request_id,
@@ -674,7 +729,7 @@ async def _stream_claude_once(
                 )
                 response = _claude_control_response(request_id, decision == "allow", tool_input)
                 await writer_task
-                proc.stdin.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+                proc.stdin.write(_bounded_json_line(response))
                 await proc.stdin.drain()
             elif event_type == "result":
                 terminal_received = True
@@ -694,7 +749,16 @@ async def _stream_claude_once(
             await writer_task
             await finish_process_after_terminal(proc, stdin=proc.stdin)
         else:
-            await proc.wait()
+            remaining = hard_deadline - loop.time()
+            if remaining <= 0:
+                raise ExternalCliError("Claude Code 调用总时长超时")
+            try:
+                await asyncio.wait_for(
+                    proc.wait(),
+                    timeout=min(request.timeout, remaining),
+                )
+            except asyncio.TimeoutError as exc:
+                raise ExternalCliError("Claude Code 进程退出超时") from exc
         stderr = b"".join(stderr_parts).decode("utf-8", errors="replace").strip()
         if proc.returncode and not terminal_received:
             compact = _compact_cli_error(
@@ -810,8 +874,6 @@ class ClaudeStreamJsonAdapter:
 register_runtime_adapter(ClaudeStreamJsonAdapter())
 
 
-
-
 async def run_external_cli(config: ExternalCliConfig) -> str:
     """Run one CLI turn through the security execution boundary."""
 
@@ -853,23 +915,35 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
             process_id,
         )
 
-    env = build_external_runtime_env(config.custom_env)
-
     try:
         from crew.security.launch import execute_captured
 
+        custom_env = validate_external_env_overrides(config.custom_env)
+        env = external_runtime_environment(custom_env)
+        executable = resolve_external_executable(
+            config.executable_path,
+            environment=env,
+        )
+        argv_size = sum(len(str(part).encode("utf-8")) for part in (executable, *args))
+        stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
+        if argv_size > MAX_EXTERNAL_INPUT_BYTES or (
+            stdin_bytes is not None and len(stdin_bytes) > MAX_EXTERNAL_INPUT_BYTES
+        ):
+            raise ExternalCliError(f"{config.provider} CLI 输入超过大小上限")
         result = await execute_captured(
-            (config.executable_path, *args),
+            (executable, *args),
             cwd=Path(cwd),
             env=env,
-            stdin=stdin_text.encode("utf-8") if stdin_text is not None else None,
-            env_overrides=config.custom_env,
+            stdin=stdin_bytes,
+            env_overrides=custom_env,
             timeout=config.timeout,
             on_started=_mark_started,
             on_output=_mark_first_io,
         )
     except FileNotFoundError as exc:
         raise ExternalCliError(f"找不到可执行文件: {config.executable_path}") from exc
+    except ExternalProcessBoundaryError as exc:
+        raise ExternalCliError(f"{config.provider} CLI 环境配置已拒绝: {exc}") from exc
     except (asyncio.TimeoutError, NativeRuntimeError) as exc:
         if isinstance(exc, NativeRuntimeError) and exc.code is not RuntimeErrorCode.TIMEOUT:
             raise

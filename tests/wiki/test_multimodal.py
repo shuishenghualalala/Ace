@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -180,24 +182,30 @@ def test_bundled_image_skill_calls_configured_openai_compatible_endpoint(
     module = _load_script_module("crew_skill_image_understand", _IMAGE_UNDERSTAND_SCRIPT)
     calls = []
 
-    def fake_post(url, **kwargs):
-        calls.append((url, kwargs))
-        return _FakeResponse({"choices": [{"message": {"content": "一张测试图片"}}]})
+    class PinnedClient:
+        def fetch(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return SimpleNamespace(
+                status=200,
+                body=b'{"choices":[{"message":{"content":"\\u4e00\\u5f20\\u6d4b\\u8bd5\\u56fe\\u7247"}}]}',
+                charset="utf-8",
+            )
 
     monkeypatch.setenv("VLM_BASE_URL", "https://vision.example/v1")
     monkeypatch.setenv("VLM_MODEL", "vision-model")
     monkeypatch.setenv("VLM_API_KEY", "fake-key")
-    monkeypatch.setattr(module.requests, "post", fake_post)
+    monkeypatch.setattr(module, "_HTTP", PinnedClient(), raising=False)
 
     result = module.analyze_image(sample_image, "描述图片")
 
     assert result == "一张测试图片"
     assert calls[0][0] == "https://vision.example/v1/chat/completions"
-    body = calls[0][1]["json"]
+    body = json.loads(calls[0][1]["body"])
     assert body["model"] == "vision-model"
     assert body["messages"][0]["content"][1]["image_url"]["url"].startswith(
         "data:image/png;base64,"
     )
+    assert calls[0][1]["max_redirects"] == 0
 
 
 def test_bundled_image_skill_does_not_request_without_configuration(
@@ -207,11 +215,11 @@ def test_bundled_image_skill_does_not_request_without_configuration(
     module = _load_script_module("crew_skill_image_understand", _IMAGE_UNDERSTAND_SCRIPT)
     monkeypatch.delenv("VLM_BASE_URL", raising=False)
     monkeypatch.delenv("VLM_MODEL", raising=False)
-    post = MagicMock()
-    monkeypatch.setattr(module.requests, "post", post)
+    http = MagicMock()
+    monkeypatch.setattr(module, "_HTTP", http)
 
     assert module.analyze_image(sample_image) is None
-    post.assert_not_called()
+    http.fetch.assert_not_called()
 
 
 def test_bundled_video_skill_uses_only_configured_endpoints(
@@ -221,16 +229,19 @@ def test_bundled_video_skill_uses_only_configured_endpoints(
     module = _load_script_module("crew_skill_video_understand", _VIDEO_UNDERSTAND_SCRIPT)
     calls = []
 
-    def fake_post(url, **kwargs):
-        calls.append((url, kwargs))
-        if "files" in kwargs:
-            return _FakeResponse({"data": {"fileUrl": "https://media.example/video/1"}})
-        return _FakeResponse({"choices": [{"message": {"content": "视频描述"}}]})
+    class PinnedClient:
+        def fetch(self, url, **kwargs):
+            calls.append((url, kwargs))
+            if url == "https://upload.example/media":
+                body = b'{"data":{"fileUrl":"https://media.example/video/1"}}'
+            else:
+                body = b'{"choices":[{"message":{"content":"\\u89c6\\u9891\\u63cf\\u8ff0"}}]}'
+            return SimpleNamespace(status=200, body=body, charset="utf-8")
 
     monkeypatch.setenv("VLM_VIDEO_UPLOAD_URL", "https://upload.example/media")
     monkeypatch.setenv("VLM_VIDEO_ANALYZE_URL", "https://analyze.example/video")
     monkeypatch.setenv("VLM_VIDEO_MODEL", "video-model")
-    monkeypatch.setattr(module.requests, "post", fake_post)
+    monkeypatch.setattr(module, "_HTTP", PinnedClient(), raising=False)
 
     video_url = module.upload_video(sample_video, "fake-key")
     result = module.analyze_video(video_url, "描述视频", "fake-key")
@@ -241,3 +252,4 @@ def test_bundled_video_skill_uses_only_configured_endpoints(
         "https://upload.example/media",
         "https://analyze.example/video",
     ]
+    assert all(call[1]["max_redirects"] == 0 for call in calls)

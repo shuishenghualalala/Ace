@@ -516,7 +516,9 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
   }
   const thinkingEl = turnEl.querySelector<HTMLElement>(`[data-thinking-for="${assistantId}"] .process-timeline__thinking`);
   if (thinkingEl && msg.thinking != null) {
+    const wasAtBottom = thinkingEl.scrollHeight - (thinkingEl.scrollTop + thinkingEl.clientHeight) <= 4;
     thinkingEl.textContent = msg.thinking;
+    if (wasAtBottom) thinkingEl.scrollTop = thinkingEl.scrollHeight;
   }
   // 实时计时：以整回合 batch 为准（工具阶段可能无正文 data-text-for，但仍需刷新 label）。
   patchStreamingTurnLabel(sid, assistantId);
@@ -982,7 +984,12 @@ export function applyChunk(chunk: ChatChunk): void {
     return;
   }
   if (chunk.kind === 'channel_session_updated') {
-    const body = (chunk.body ?? {}) as { platform?: string };
+    const body = (chunk.body ?? {}) as { platform?: string; query?: string };
+    const query = typeof body.query === 'string' ? body.query : '';
+    if (query) {
+      const lastUser = [...getMessages(sid)].reverse().find((message) => message.role === 'user');
+      if (!lastUser || lastUser.content !== query) appendMessage(sid, 'user', query);
+    }
     // 渠道会话开始/结束时都确保前端已订阅：开始订阅后才能收到实时 delta，
     // 结束订阅后也能通过 replay 补到可能错过的帧。
     subscribeSessions([sid]);

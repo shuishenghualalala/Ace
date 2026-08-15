@@ -33,7 +33,7 @@ def test_linux_profile_uses_codex_shaped_boundaries():
         not in source
     )
     assert "writable.push(cwd.clone())" not in source
-    assert "sandbox cwd must be inside an explicit writable root" in source
+    assert "sandbox cwd must be inside an explicit authorized root" in source
 
 
 def test_linux_hardening_and_bundle_verification_are_not_optional_fallbacks():
@@ -48,12 +48,19 @@ def test_linux_hardening_and_bundle_verification_are_not_optional_fallbacks():
 
 
 def test_macos_profile_uses_seatbelt_and_exact_managed_proxy_route():
-    source = (RUNTIME / "macos" / "mod.rs").read_text(encoding="utf-8")
-    assert 'const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec"' in source
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            RUNTIME / "macos" / "mod.rs",
+            RUNTIME / "macos" / "profile.rs",
+            RUNTIME / "macos" / "base_policy.sbpl",
+        )
+    )
+    assert 'SANDBOX_EXECUTABLE: &str = "/usr/bin/sandbox-exec"' in source
     assert "(deny default)" in source
     assert "DENIED_ROOT_" in source
-    assert "allow file-write*" in source
-    assert 'remote ip \\"localhost:{port}\\"' in source
+    assert 'allow_rule("file-write*"' in source
+    assert 'remote ip \\"127.0.0.1:{port}\\"' in source
     assert 'backend: "macos_seatbelt"' in source
     assert '.env_clear()' in source
     assert "ACTIVE_PROCESS_GROUP" in source

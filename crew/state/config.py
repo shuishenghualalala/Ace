@@ -5,31 +5,118 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import shutil
+import stat
+import sys
 import threading
+from io import StringIO
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import dotenv_values, load_dotenv
+from dotenv import dotenv_values
 
 from crew.browser.types import BrowserConfig
+from crew.security.mcp_secrets import (
+    mcp_servers_have_plaintext_secrets,
+    prepare_mcp_server_secrets,
+)
+from crew.security.secret_store import (
+    PlatformSecretStore,
+    SecretIdentifier,
+    SecretNotFound,
+    SecretStoreUnavailable,
+)
 from crew.state.access_control import AccessControlConfig
+from crew.state.logging import get_logger
+from crew.tools.file_utils import (
+    FileVersion,
+    atomic_replace_bytes,
+    read_verified_bytes,
+    snapshot_file,
+)
+from crew.tools.redact import argv_contains_sensitive_value
 from crew.wiki.config import WikiConfig
 
-from crew.state.logging import get_logger
-
-import sys
-
-if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     ROOT = Path(sys._MEIPASS)
 else:
     ROOT = Path(__file__).resolve().parents[2]
 log = get_logger("config")
 _CONFIG_WRITE_LOCK = threading.Lock()
+_MAX_CONFIG_FILE_BYTES = 4 * 1024 * 1024
 _LEGACY_CRON_TICK_WARNING_EMITTED = False
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_SENSITIVE_ENV_NAME_RE = re.compile(
+    r"(?:API_?KEY|KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH)$",
+    re.IGNORECASE,
+)
+_PROTECTED_DOTENV_NAMES = frozenset(
+    {
+        "ALL_PROXY",
+        "BASH_ENV",
+        "COMSPEC",
+        "CREW_CONFIG",
+        "CREW_DB_PATH",
+        "CREW_HOME",
+        "CREW_OFFLINE",
+        "CREW_OWNER_ACCOUNT_ID",
+        "CREW_RIPGREP_INSTALLER",
+        "CURL_CA_BUNDLE",
+        "ELECTRON_RUN_AS_NODE",
+        "ENV",
+        "GATEWAY_HOST",
+        "GATEWAY_PORT",
+        "GIT_CONFIG_GLOBAL",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NODE_OPTIONS",
+        "NO_PROXY",
+        "PATH",
+        "PATHEXT",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+    }
+)
+_PROTECTED_DOTENV_PREFIXES = (
+    "ACE_",
+    "CREW_GATEWAY_",
+    "CREW_SECURITY_",
+    "CREW_TASK_",
+    "CORECLR_",
+    "COR_",
+    "DOTNET_",
+    "DYLD_",
+    "LD_",
+    "NODE_",
+    "NPM_CONFIG_",
+    "PYTHON",
+)
+_MISSING_ENV = object()
+_MAX_ENV_FILE_BYTES = 1024 * 1024
+
+
+def _is_protected_dotenv_name(name: str) -> bool:
+    normalized = str(name).upper()
+    return normalized == "ACE_STRICT_SECURITY" or (
+        normalized in _PROTECTED_DOTENV_NAMES or normalized.startswith(_PROTECTED_DOTENV_PREFIXES)
+    )
+
 
 def _default_browser_config() -> BrowserConfig:
     return BrowserConfig()
@@ -51,6 +138,7 @@ def _get_user_config_dir() -> Path:
     """
     if getattr(sys, "frozen", False):
         from crew.state.home import get_crew_home
+
         return get_crew_home()
     return ROOT / "config"
 
@@ -200,11 +288,13 @@ class Config:
     memory_db_path: str = "crew_data/memory.db"  # SQLiteMemory 独立路径，便于测试隔离
     log_level: str = "INFO"
     log_file: str = ""  # 空=不写文件；填路径则同时写文件（支持 ~ 展开）
-    llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
+    llm_trace: bool = False  # 生产默认关闭完整 LLM trace；排查时显式开启并确保 owner 隔离
     max_iterations: int = 0  # 0=无限，靠 auto-compact + guardrail 防失控
     dk_task_timeout_seconds: float = 3600.0  # Dynamic Kanban 单个任务执行超时（秒），0=不限
     dk_verification_gate_enabled: bool = True  # Dynamic Kanban 是否启用 LLM verification gate
-    crew_home: str = ""  # 空=使用默认（冻结态 ~/DEFAULT_HOME_DIRNAME，开发态 ROOT/.crew/），否则使用指定路径
+    crew_home: str = (
+        ""  # 空=使用默认（冻结态 ~/DEFAULT_HOME_DIRNAME，开发态 ROOT/.crew/），否则使用指定路径
+    )
     task_workspace_root: str = ""  # 空={crew_home}/task_workspaces；否则作为任务产物根目录
     sqlite_wal: bool = True  # 是否启用 SQLite WAL + 写锁重试
 
@@ -224,37 +314,43 @@ class Config:
     retry_backoff: float = 1.0
     title_auto: bool = True
     evolution_auto_trigger: bool = False  # 每轮交互结束后自动触发 evolution 轨迹提取
-    evolution_auto_full_cycle: bool = False  # 自动触发时是否执行完整周期（优化+生成），False=仅提取轨迹
+    evolution_auto_full_cycle: bool = (
+        False  # 自动触发时是否执行完整周期（优化+生成），False=仅提取轨迹
+    )
     evolution_visible: bool = False  # Demo 模式：前台可见地执行 evolution（输出状态帧，同步等待）
     agent_client_config: dict[str, Any] = field(default_factory=dict)  # client 执行器配置
-    agent_acp_config: dict[str, Any] = field(default_factory=dict)     # acp 执行器配置
+    agent_acp_config: dict[str, Any] = field(default_factory=dict)  # acp 执行器配置
 
     # --- agent loop 鲁棒性/可控性 ---
-    parallel_tools: bool = True          # 只读工具批次是否并行执行
-    max_parallel_tool_calls: int = 8      # 工具调用默认并发上限
-    empty_retry_max: int = 2             # 空响应最多重试次数
-    continuation_max: int = 2            # 截断续写最多次数
-    stream_read_timeout: float = 120.0    # 流式 read timeout（秒）
-    stream_retry_jitter: bool = True      # LLM 重试 backoff 是否加随机抖动
-    stream_stale_timeout: float = 0.0     # 流 stale 检测（秒，0=关闭）
-    stream_continuation_max: int = 2      # 流式中断续写最多次数
-    fallback_models: list[str] = field(default_factory=list)  # 主 provider 失败时依次切换的 model_profile id
+    parallel_tools: bool = True  # 只读工具批次是否并行执行
+    max_parallel_tool_calls: int = 8  # 工具调用默认并发上限
+    empty_retry_max: int = 2  # 空响应最多重试次数
+    continuation_max: int = 2  # 截断续写最多次数
+    stream_read_timeout: float = 120.0  # 流式 read timeout（秒）
+    stream_retry_jitter: bool = True  # LLM 重试 backoff 是否加随机抖动
+    stream_stale_timeout: float = 0.0  # 流 stale 检测（秒，0=关闭）
+    stream_continuation_max: int = 2  # 流式中断续写最多次数
+    fallback_models: list[str] = field(
+        default_factory=list
+    )  # 主 provider 失败时依次切换的 model_profile id
     # 工具防循环 guardrail
-    guardrail_enabled: bool = True               # 总开关（warn 始终开；下面控制 hard-stop）
-    guardrail_hard_stop: bool = False            # 默认关：日常靠 warn 引导模型调整，hard-stop 仅 opt-in 兜底
-    guardrail_exact_failure_block_after: int = 5 # 同参工具失败 N 次后拦截（需 hard_stop 开启）
+    guardrail_enabled: bool = True  # 总开关（warn 始终开；下面控制 hard-stop）
+    guardrail_hard_stop: bool = False  # 默认关：日常靠 warn 引导模型调整，hard-stop 仅 opt-in 兜底
+    guardrail_exact_failure_block_after: int = 5  # 同参工具失败 N 次后拦截（需 hard_stop 开启）
     guardrail_same_tool_failure_halt_after: int = 8  # 同名工具失败 N 次后硬停（需 hard_stop 开启）
-    guardrail_no_progress_block_after: int = 5   # 只读工具返回相同结果 N 次后拦截（需 hard_stop 开启）
+    guardrail_no_progress_block_after: int = (
+        5  # 只读工具返回相同结果 N 次后拦截（需 hard_stop 开启）
+    )
 
     # --- gateway ---
     gateway_host: str = "127.0.0.1"
     gateway_port: int = 8000
-    gateway_busy_mode: str = "queue"      # queue | interrupt | steer — 忙时策略
+    gateway_busy_mode: str = "queue"  # queue | interrupt | steer — 忙时策略
     gateway_push_min_interval: float = 0.05  # WS 推送最小间隔（秒），0=不限流
     gateway_admin_accounts: list[str] = field(default_factory=list)
     gateway_dev_mode: bool = False  # 开发态旁路：loopback 请求放行开发账号身份（勿用于生产）
     gateway_dev_account: str = "dev:dev"  # 开发环境 owner ID，dev 模式下自动 admin
-    gateway_max_active_runs: int = 4      # 不同 session 同时运行的全局上限
+    gateway_max_active_runs: int = 4  # 不同 session 同时运行的全局上限
     gateway_max_queue_depth_per_session: int = 20  # 单 session 等待队列上限
 
     # --- authentication ---
@@ -268,7 +364,7 @@ class Config:
     auth_timeout_seconds: float = 10.0
     auth_session_ttl_seconds: int = 7 * 24 * 60 * 60
     channels: dict[str, Any] = field(default_factory=dict)  # 外部通道配置
-    platforms: dict[str, Any] = field(default_factory=dict) # 平台插件配置
+    platforms: dict[str, Any] = field(default_factory=dict)  # 平台插件配置
     raw_config: dict[str, Any] = field(default_factory=dict)
 
     # --- team ---
@@ -278,10 +374,12 @@ class Config:
     external_agents_enabled: bool = True
 
     # --- subagent（主 agent 通过 delegate_task / run_agent 调用子 agent）---
-    subagent_max_concurrent: int = 3      # delegate_task 批量子任务的最大并发数
-    subagent_max_tasks: int = 8           # delegate_task 单次最多委派的子任务数（防失控）
-    subagent_max_iterations: int = 200    # 子 agent 单轮工具迭代上限；主 agent 可配置为无限
-    subagent_idle_timeout_seconds: float = 120.0  # 子 agent 空闲（无活动）超时：N 秒零输出才中止（防卡死），0=不限
+    subagent_max_concurrent: int = 3  # delegate_task 批量子任务的最大并发数
+    subagent_max_tasks: int = 8  # delegate_task 单次最多委派的子任务数（防失控）
+    subagent_max_iterations: int = 200  # 子 agent 单轮工具迭代上限；主 agent 可配置为无限
+    subagent_idle_timeout_seconds: float = (
+        120.0  # 子 agent 空闲（无活动）超时：N 秒零输出才中止（防卡死），0=不限
+    )
     subagent_timeout_seconds: float = 1800.0  # 子 agent 绝对运行上限（全局兜底），0=不限
 
     # --- unified long-task runtime ---
@@ -299,7 +397,7 @@ class Config:
 
     # --- mcp / cron ---
     mcp_servers: dict[str, Any] = field(default_factory=dict)  # 外部 MCP server 配置
-    cron_enabled: bool = True          # 是否启动 cron 引擎
+    cron_enabled: bool = True  # 是否启动 cron 引擎
     cron_max_parallel_jobs: int = 2
 
     # --- plugins ---
@@ -307,7 +405,7 @@ class Config:
     plugins_disabled: list[str] = field(default_factory=list)
 
     # --- session ---
-    session_idle_timeout: int = 0      # 会话空闲超时（分钟），0=不自动过期
+    session_idle_timeout: int = 0  # 会话空闲超时（分钟），0=不自动过期
 
     # --- wiki ---
     wiki: WikiConfig = field(default_factory=WikiConfig)
@@ -335,7 +433,9 @@ class Config:
                 timeout=self.timeout,
                 vision=self.vision,
             )
-        return self.model_profiles.get(self.active_model_id) or next(iter(self.model_profiles.values()))
+        return self.model_profiles.get(self.active_model_id) or next(
+            iter(self.model_profiles.values())
+        )
 
     def activate_model(self, model_id: str) -> ModelProfile:
         if model_id not in self.model_profiles:
@@ -357,7 +457,11 @@ class Config:
 
     def public_model_options(self) -> list[dict[str, Any]]:
         """返回给前端对话可用的模型列表：必须 loaded 且已配置 API Key。"""
-        options = [profile.public_dict() for profile in self.model_profiles.values() if profile.loaded and profile.has_key]
+        options = [
+            profile.public_dict()
+            for profile in self.model_profiles.values()
+            if profile.loaded and profile.has_key
+        ]
         # 如果过滤后为空，至少保留当前激活模型，避免前端无选项可选
         if not options and self.active_model_id in self.model_profiles:
             options = [self.model_profiles[self.active_model_id].public_dict()]
@@ -371,7 +475,9 @@ class Config:
         """读取 owner 私有 .env，不污染全局进程环境。"""
         return _load_env_map(resolve_writable_env_path(owner_account_id))
 
-    def _owner_builtin_allows_global_key_fallback(self, owner_account_id: str | None = None) -> bool:
+    def _owner_builtin_allows_global_key_fallback(
+        self, owner_account_id: str | None = None
+    ) -> bool:
         """本地 owner 与隔离开发 owner 可读取进程环境中的模型 Key。"""
         owner = str(owner_account_id or "").strip()
         if owner == "local":
@@ -472,7 +578,9 @@ class Config:
                 return model_id
         return sorted(profiles)[0]
 
-    def owner_active_model_profile(self, owner_account_id: str | None = None) -> ModelProfile | None:
+    def owner_active_model_profile(
+        self, owner_account_id: str | None = None
+    ) -> ModelProfile | None:
         """返回 owner 默认兜底模型 profile（名称保留用于 API 兼容）。"""
         profiles = self.owner_model_profiles(owner_account_id)
         profile = profiles.get(self.owner_active_model_id(owner_account_id))
@@ -485,14 +593,22 @@ class Config:
         """语义化别名：owner 默认兜底模型 id。"""
         return self.owner_active_model_id(owner_account_id)
 
-    def owner_default_model_profile(self, owner_account_id: str | None = None) -> ModelProfile | None:
+    def owner_default_model_profile(
+        self, owner_account_id: str | None = None
+    ) -> ModelProfile | None:
         """语义化别名：owner 默认兜底模型 profile。"""
         return self.owner_active_model_profile(owner_account_id)
 
-    def owner_public_model_options(self, owner_account_id: str | None = None) -> list[dict[str, Any]]:
+    def owner_public_model_options(
+        self, owner_account_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """返回 owner 对话可选模型列表。"""
         profiles = self.owner_model_profiles(owner_account_id)
-        options = [profile.public_dict() for profile in profiles.values() if profile.loaded and profile.has_key]
+        options = [
+            profile.public_dict()
+            for profile in profiles.values()
+            if profile.loaded and profile.has_key
+        ]
         active_id = self.owner_active_model_id(owner_account_id)
         if not options and active_id in profiles:
             options = [profiles[active_id].public_dict()]
@@ -525,7 +641,7 @@ class Config:
             raise ValueError("owner_account_id 不能为空")
         with _CONFIG_WRITE_LOCK:
             yaml_path = owner_overlay_config_path(owner)
-            data = _read_yaml_file(yaml_path)
+            data, expected = _read_yaml_file_snapshot(yaml_path)
             llm = data.get("llm")
             if not isinstance(llm, dict):
                 llm = {}
@@ -538,17 +654,7 @@ class Config:
                 for model_id, profile in model_profiles.items()
                 if not profile.builtin
             }
-            yaml_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-            with tmp_path.open("w", encoding="utf-8") as f:
-                yaml.safe_dump(
-                    data,
-                    f,
-                    allow_unicode=True,
-                    sort_keys=False,
-                    default_flow_style=False,
-                )
-            tmp_path.replace(yaml_path)
+            _atomic_write_yaml(yaml_path, data, expected)
             return yaml_path
 
     def persist_channel_config(
@@ -568,9 +674,11 @@ class Config:
                 return self._persist_owner_channel_config_locked(owner, platform, dict(config_data))
             return self._persist_channel_config_locked(platform, dict(config_data))
 
-    def _persist_owner_channel_config_locked(self, owner_account_id: str, name: str, config_data: dict[str, Any]) -> Path:
+    def _persist_owner_channel_config_locked(
+        self, owner_account_id: str, name: str, config_data: dict[str, Any]
+    ) -> Path:
         yaml_path = owner_overlay_config_path(owner_account_id)
-        data = _read_yaml_file(yaml_path)
+        data, expected = _read_yaml_file_snapshot(yaml_path)
         channels = data.get("channels")
         if not isinstance(channels, dict):
             channels = {}
@@ -590,17 +698,7 @@ class Config:
         merged = {**current, **config_data}
         channels[name] = merged
 
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data,
-                f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
+        _atomic_write_yaml(yaml_path, data, expected)
         return yaml_path
 
     # ---- 模型 profile CRUD（运行时增删改 + 持久化到 config.yaml）----
@@ -714,16 +812,9 @@ class Config:
             raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
 
         yaml_path = Path(self.config_path)
-        if not yaml_path.exists():
-            # 用户配置丢失（极端情况）：从空 dict 开始构建一个最小可用 yaml
-            data: dict[str, Any] = {}
-        else:
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
+        # Snapshot identity and bytes together so publication can reject a concurrent
+        # replacement instead of silently combining incompatible writer views.
+        data, expected = _read_yaml_file_snapshot(yaml_path)
 
         # 仅重写 llm 段，保留其它段（runtime/agent/gateway 等）原样
         llm = data.get("llm")
@@ -740,17 +831,8 @@ class Config:
         # 同步 raw_config（让运行时观察者看到一致状态）
         self.raw_config = data
 
-        # 写回（先写临时文件再原子替换，防止中途崩溃损坏 config.yaml）
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
+        # fsync + identity-checked atomic publication prevents partial/cross-process writes.
+        _atomic_write_yaml(yaml_path, data, expected)
         return yaml_path
 
     def persist_evolution_config(self) -> Path:
@@ -766,15 +848,7 @@ class Config:
             raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
 
         yaml_path = Path(self.config_path)
-        if not yaml_path.exists():
-            data: dict[str, Any] = {}
-        else:
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
+        data, expected = _read_yaml_file_snapshot(yaml_path)
 
         agent = data.get("agent")
         if not isinstance(agent, dict):
@@ -788,16 +862,7 @@ class Config:
 
         self.raw_config = data
 
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
+        _atomic_write_yaml(yaml_path, data, expected)
         return yaml_path
 
     def set_mcp_server(self, name: str, cfg: dict[str, Any]) -> None:
@@ -821,37 +886,32 @@ class Config:
             raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
 
         yaml_path = Path(self.config_path)
-        if yaml_path.exists():
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
-        else:
-            data = {}
+        data, expected = _read_yaml_file_snapshot(yaml_path)
 
         mcp_servers = data.get("mcp_servers")
         if not isinstance(mcp_servers, dict):
             mcp_servers = {}
             data["mcp_servers"] = mcp_servers
 
+        previous_servers = {
+            str(key): dict(value) if isinstance(value, dict) else {}
+            for key, value in mcp_servers.items()
+        }
+        transaction = prepare_mcp_server_secrets(
+            self.mcp_servers or {},
+            previous_servers=previous_servers,
+        )
         mcp_servers.clear()
-        for key, value in (self.mcp_servers or {}).items():
+        for key, value in transaction.protected_servers.items():
             mcp_servers[key] = dict(value) if isinstance(value, dict) else {}
 
+        try:
+            _atomic_write_yaml(yaml_path, data, expected)
+        except BaseException:
+            transaction.rollback()
+            raise
+        self.mcp_servers = transaction.protected_servers
         self.raw_config = data
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
         return yaml_path
 
     def _persist_channel_config_locked(self, name: str, config_data: dict[str, Any]) -> Path:
@@ -859,15 +919,7 @@ class Config:
             raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
 
         yaml_path = Path(self.config_path)
-        if yaml_path.exists():
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
-        else:
-            data = {}
+        data, expected = _read_yaml_file_snapshot(yaml_path)
 
         channels = data.get("channels")
         if not isinstance(channels, dict):
@@ -892,16 +944,7 @@ class Config:
         self.channels[name] = dict(merged)
         self.raw_config = data
 
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
+        _atomic_write_yaml(yaml_path, data, expected)
         return yaml_path
 
     def channel_config(self, name: str, owner_account_id: str | None = None) -> dict[str, Any]:
@@ -1018,6 +1061,21 @@ def _model_capabilities(raw: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(items or ["text", "tools"]))
 
 
+def _credential_free_endpoint_url(value: Any) -> str:
+    base_url = str(value or "")
+    if base_url and argv_contains_sensitive_value((base_url,)):
+        raise ValueError("endpoint URL must not contain credentials")
+    return base_url
+
+
+def _credential_free_endpoint_path(value: Any) -> str:
+    path = str(value or "")
+    probe = f"https://ace.invalid/{path.lstrip('/')}"
+    if path and argv_contains_sensitive_value((probe,)):
+        raise ValueError("endpoint path must not contain credentials")
+    return path
+
+
 def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
     api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
@@ -1028,7 +1086,7 @@ def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
         api_key=api_key,
         api_key_env=api_key_env,
         provider=str(raw.get("provider") or "openai").strip().lower() or "openai",
-        base_url=str(raw.get("base_url") or ""),
+        base_url=_credential_free_endpoint_url(raw.get("base_url")),
         model=str(raw.get("model") or "gpt-4o-mini"),
         temperature=_as_float(raw.get("temperature", 0.7), 0.7),
         max_tokens=_as_int_or_none(raw.get("max_tokens")),
@@ -1042,7 +1100,9 @@ def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
     )
 
 
-def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict[str, str]) -> ModelProfile:
+def _build_owner_model_profile(
+    model_id: str, raw: dict[str, Any], env_map: dict[str, str]
+) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
     api_key = _lookup_api_key(api_key_env, env_map, fallback_global=False)
     return ModelProfile(
@@ -1051,7 +1111,7 @@ def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict
         api_key=api_key,
         api_key_env=api_key_env,
         provider=str(raw.get("provider") or "openai").strip().lower() or "openai",
-        base_url=str(raw.get("base_url") or ""),
+        base_url=_credential_free_endpoint_url(raw.get("base_url")),
         model=str(raw.get("model") or "gpt-4o-mini"),
         temperature=_as_float(raw.get("temperature", 0.7), 0.7),
         max_tokens=_as_int_or_none(raw.get("max_tokens")),
@@ -1079,7 +1139,7 @@ def _build_profile_from_payload(model_id: str, payload: dict[str, Any]) -> Model
         api_key=api_key,
         api_key_env=api_key_env,
         provider=str(payload.get("provider") or "openai").strip().lower() or "openai",
-        base_url=str(payload.get("base_url") or ""),
+        base_url=_credential_free_endpoint_url(payload.get("base_url")),
         model=str(payload.get("model") or "gpt-4o-mini"),
         temperature=_as_float(payload.get("temperature", 0.7), 0.7),
         max_tokens=_as_int_or_none(payload.get("max_tokens")),
@@ -1101,7 +1161,7 @@ def _serialize_profile_for_yaml(profile: ModelProfile) -> dict[str, Any]:
         "name": profile.name or profile.id,
         "api_key_env": profile.api_key_env,
         "provider": profile.provider,
-        "base_url": profile.base_url,
+        "base_url": _credential_free_endpoint_url(profile.base_url),
         "model": profile.model,
         "temperature": profile.temperature,
         "timeout": profile.timeout,
@@ -1142,10 +1202,51 @@ def _lookup_api_key(
 
 
 def _load_env_map(env_path: Path) -> dict[str, str]:
-    if not env_path.is_file():
+    try:
+        content = read_verified_bytes(
+            env_path,
+            max_bytes=_MAX_ENV_FILE_BYTES,
+        ).decode("utf-8")
+        raw = dotenv_values(stream=StringIO(content), interpolate=False)
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        log.warning("ignored unsafe or unreadable owner dotenv file: %s", env_path)
         return {}
-    raw = dotenv_values(env_path)
-    return {str(k): str(v) for k, v in raw.items() if k and v not in (None, "")}
+    values: dict[str, str] = {}
+    store: PlatformSecretStore | None = None
+    for raw_name, raw_value in raw.items():
+        if not raw_name or raw_value in (None, ""):
+            continue
+        name = str(raw_name)
+        if _is_protected_dotenv_name(name):
+            log.warning("ignored protected dotenv variable %s", name)
+            continue
+        value = str(raw_value)
+        if not PlatformSecretStore.is_marker(value):
+            if _SENSITIVE_ENV_NAME_RE.search(name) is not None:
+                try:
+                    write_secret_env_key(
+                        env_path,
+                        name,
+                        value,
+                        sync_process_env=False,
+                    )
+                except (OSError, ValueError, SecretStoreUnavailable):
+                    log.error(
+                        "plaintext owner credential was not loaded because secure migration "
+                        "failed for variable %s",
+                        name,
+                    )
+                    continue
+            values[name] = value
+            continue
+        try:
+            if store is None:
+                store = PlatformSecretStore.platform()
+            identifier = _runtime_env_secret_identifier(env_path, name)
+            values[name] = store.resolve_marker(identifier, value)
+        except (SecretNotFound, SecretStoreUnavailable, ValueError):
+            log.error("owner credential marker validation failed for variable %s", name)
+    return values
 
 
 def owner_overlay_config_path(owner_account_id: str | None = None) -> Path:
@@ -1155,13 +1256,42 @@ def owner_overlay_config_path(owner_account_id: str | None = None) -> Path:
 
 
 def _read_yaml_file(path: Path) -> dict[str, Any]:
+    return _read_yaml_file_snapshot(path)[0]
+
+
+def _read_yaml_file_snapshot(path: Path) -> tuple[dict[str, Any], FileVersion]:
+    """Read and parse one owned YAML snapshot with its publication identity."""
+    expected = snapshot_file(path, max_bytes=_MAX_CONFIG_FILE_BYTES)
     if not path.exists():
-        return {}
+        return {}, expected
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as exc:
+        data = yaml.safe_load(expected.data.decode("utf-8")) or {}
+    except (UnicodeError, yaml.YAMLError) as exc:
         raise RuntimeError(f"config.yaml 解析失败: {path}") from exc
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"config.yaml 顶层必须是对象: {path}")
+    return data, expected
+
+
+def _atomic_write_yaml(
+    path: Path,
+    data: dict[str, Any],
+    expected: FileVersion,
+) -> None:
+    """Publish a strict YAML object with fsync and identity-checked replacement."""
+    content = yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_replace_bytes(
+        path,
+        content,
+        expected,
+        max_bytes=_MAX_CONFIG_FILE_BYTES,
+    )
 
 
 def resolve_writable_env_path(owner_account_id: str | None = None) -> Path:
@@ -1176,19 +1306,24 @@ def resolve_writable_env_path(owner_account_id: str | None = None) -> Path:
     return get_owner_runtime_home(owner_account_id) / ".env"
 
 
-def _replace_text_file(tmp_path: Path, target_path: Path, content: str) -> None:
-    """写入临时文件并替换目标；Windows 锁文件时退回直接覆盖。"""
-    tmp_path.write_text(content, encoding="utf-8")
-    try:
-        tmp_path.replace(target_path)
-    except PermissionError:
-        # Windows 上杀毒/索引器偶发短暂占用 .env 时，os.replace 可能失败。
-        # 直接覆盖仍保持目标内容正确，且比把运行期配置保存中断更可接受。
-        target_path.write_text(content, encoding="utf-8")
-        tmp_path.unlink(missing_ok=True)
+def _replace_text_file(
+    target_path: Path,
+    content: str,
+    *,
+    expected: FileVersion,
+) -> None:
+    """Atomically replace the exact configuration version that was read."""
+    atomic_replace_bytes(
+        target_path,
+        content.encode(),
+        expected,
+        max_bytes=_MAX_ENV_FILE_BYTES,
+    )
 
 
-def write_env_key(env_path: Path, var_name: str, value: str, *, sync_process_env: bool = True) -> None:
+def write_env_key(
+    env_path: Path, var_name: str, value: str, *, sync_process_env: bool = True
+) -> None:
     """把 key=value 写入指定 .env 文件（按行匹配：已存在则替换，否则追加）。
 
     写入后同步到 os.environ，让当前进程立即可用。
@@ -1198,16 +1333,22 @@ def write_env_key(env_path: Path, var_name: str, value: str, *, sync_process_env
         var_name: 环境变量名（必须是合法标识符，由调用方保证）。
         value: 变量值（明文，写入文件时不再转义）。
     """
+    if _ENV_NAME_RE.fullmatch(var_name) is None or _is_protected_dotenv_name(var_name):
+        raise ValueError("environment variable name is not writable")
     with _CONFIG_WRITE_LOCK:
         lines: list[str] = []
         prefix = f"{var_name}="
         replaced = False
+        expected = snapshot_file(
+            env_path,
+            max_bytes=_MAX_ENV_FILE_BYTES,
+        )
 
-        if env_path.exists():
+        if expected.exists:
             try:
-                content = env_path.read_text(encoding="utf-8")
+                content = expected.data.decode("utf-8")
                 lines = content.splitlines()
-            except OSError as exc:
+            except UnicodeDecodeError as exc:
                 raise RuntimeError(f"读取 .env 失败: {env_path}: {exc}") from exc
 
             for i, line in enumerate(lines):
@@ -1227,34 +1368,201 @@ def write_env_key(env_path: Path, var_name: str, value: str, *, sync_process_env
             lines.append(f"{var_name}={value}")
 
         env_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = env_path.with_suffix(env_path.suffix + ".tmp")
-        _replace_text_file(tmp_path, env_path, "\n".join(lines) + "\n")
+        _replace_text_file(
+            env_path,
+            "\n".join(lines) + "\n",
+            expected=expected,
+        )
 
     if sync_process_env:
         os.environ[var_name] = value
 
 
+def _runtime_env_secret_identifier(
+    env_path: Path,
+    var_name: str,
+) -> SecretIdentifier:
+    if _ENV_NAME_RE.fullmatch(var_name) is None or _is_protected_dotenv_name(var_name):
+        raise ValueError("invalid secret environment variable name")
+    canonical_path = str(env_path.expanduser().resolve(strict=False))
+    path_digest = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
+    name_digest = hashlib.sha256(var_name.encode("ascii")).hexdigest()
+    return SecretIdentifier(
+        namespace="runtime-env",
+        scope=f"path-{path_digest}",
+        name=f"var-{name_digest}",
+    )
+
+
+def write_secret_env_key(
+    env_path: Path,
+    var_name: str,
+    value: str,
+    *,
+    sync_process_env: bool = True,
+) -> None:
+    """Persist a runtime credential in the OS keyring and only a bound marker on disk."""
+    identifier = _runtime_env_secret_identifier(env_path, var_name)
+    store = PlatformSecretStore.platform()
+    mutation = store.replace(identifier, value)
+    try:
+        write_env_key(
+            env_path,
+            var_name,
+            store.marker_for_mutation(identifier, mutation),
+            sync_process_env=False,
+        )
+    except Exception:
+        try:
+            store.rollback(mutation)
+        except SecretStoreUnavailable as rollback_exc:
+            raise SecretStoreUnavailable(
+                "secret marker write and keyring rollback failed"
+            ) from rollback_exc
+        raise
+    if sync_process_env:
+        os.environ[var_name] = value
+
+
+def remove_secret_env_key(
+    env_path: Path,
+    var_name: str,
+    *,
+    sync_process_env: bool = True,
+) -> None:
+    """Delete a runtime credential before removing its non-secret disk marker."""
+    identifier = _runtime_env_secret_identifier(env_path, var_name)
+    store = PlatformSecretStore.platform()
+    deletion = store.delete_transactional(identifier)
+    try:
+        remove_env_key(
+            env_path,
+            var_name,
+            sync_process_env=sync_process_env,
+        )
+    except Exception:
+        try:
+            store.rollback_deletion(deletion)
+        except SecretStoreUnavailable as rollback_exc:
+            raise SecretStoreUnavailable(
+                "secret marker removal and keyring rollback failed"
+            ) from rollback_exc
+        raise
+
+
 def remove_env_key(env_path: Path, var_name: str, *, sync_process_env: bool = True) -> None:
     """从 .env 文件和当前进程环境中移除一个变量。"""
+    if _ENV_NAME_RE.fullmatch(var_name) is None or _is_protected_dotenv_name(var_name):
+        raise ValueError("environment variable name is not removable")
     with _CONFIG_WRITE_LOCK:
         lines: list[str] = []
         prefix = f"{var_name}="
         changed = False
-        if env_path.exists():
+        expected = snapshot_file(
+            env_path,
+            max_bytes=_MAX_ENV_FILE_BYTES,
+        )
+        if expected.exists:
             try:
-                for line in env_path.read_text(encoding="utf-8").splitlines():
+                for line in expected.data.decode("utf-8").splitlines():
                     stripped = line.lstrip()
                     if not stripped.startswith("#") and stripped.startswith(prefix):
                         changed = True
                         continue
                     lines.append(line)
-            except OSError as exc:
+            except UnicodeDecodeError as exc:
                 raise RuntimeError(f"读取 .env 失败: {env_path}: {exc}") from exc
         if changed:
-            tmp_path = env_path.with_suffix(env_path.suffix + ".tmp")
-            _replace_text_file(tmp_path, env_path, "\n".join(lines).rstrip() + ("\n" if lines else ""))
+            _replace_text_file(
+                env_path,
+                "\n".join(lines).rstrip() + ("\n" if lines else ""),
+                expected=expected,
+            )
     if sync_process_env:
         os.environ.pop(var_name, None)
+
+
+def _resolve_secret_env_markers(path: Path) -> None:
+    try:
+        values = dotenv_values(path, interpolate=False)
+    except (OSError, ValueError):
+        return
+    marker_entries = {
+        str(name): value
+        for name, value in values.items()
+        if PlatformSecretStore.is_marker(value) and not _is_protected_dotenv_name(str(name))
+    }
+    if not marker_entries:
+        return
+    try:
+        store = PlatformSecretStore.platform()
+    except SecretStoreUnavailable:
+        for name, marker in marker_entries.items():
+            if os.environ.get(name) == marker:
+                os.environ.pop(name, None)
+        log.error("platform secret backend unavailable; runtime credentials not loaded")
+        return
+    for name, marker in marker_entries.items():
+        try:
+            identifier = _runtime_env_secret_identifier(path, name)
+            os.environ[name] = store.resolve_marker(identifier, str(marker))
+        except (SecretNotFound, SecretStoreUnavailable, ValueError):
+            if os.environ.get(name) == marker:
+                os.environ.pop(name, None)
+            log.error("runtime credential marker validation failed for variable %s", name)
+
+
+def _load_env_file(path: Path, *, secure_persisted_secrets: bool = False) -> None:
+    blocked: dict[str, object] = {}
+    try:
+        content = read_verified_bytes(path, max_bytes=_MAX_ENV_FILE_BYTES).decode("utf-8")
+        persisted = dotenv_values(stream=StringIO(content), interpolate=False)
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        log.warning("ignored unsafe or unreadable dotenv file: %s", path)
+        persisted = {}
+    for raw_name in persisted:
+        name = str(raw_name or "")
+        if name and _is_protected_dotenv_name(name):
+            blocked[name] = os.environ.get(name, _MISSING_ENV)
+            log.warning("ignored protected dotenv variable %s", name)
+    if secure_persisted_secrets:
+        for raw_name, raw_value in persisted.items():
+            name = str(raw_name or "")
+            value = str(raw_value or "")
+            if (
+                not name
+                or not value
+                or _is_protected_dotenv_name(name)
+                or PlatformSecretStore.is_marker(value)
+                or _SENSITIVE_ENV_NAME_RE.search(name) is None
+            ):
+                continue
+            previous = os.environ.get(name, _MISSING_ENV)
+            try:
+                write_secret_env_key(
+                    path,
+                    name,
+                    value,
+                    sync_process_env=False,
+                )
+            except (OSError, ValueError, SecretStoreUnavailable):
+                blocked[name] = previous
+                log.error(
+                    "plaintext runtime credential was not loaded because secure migration failed "
+                    "for variable %s",
+                    name,
+                )
+    for raw_name, raw_value in persisted.items():
+        name = str(raw_name or "")
+        if not name or raw_value is None or _is_protected_dotenv_name(name):
+            continue
+        os.environ[name] = str(raw_value)
+    for name, previous in blocked.items():
+        if previous is _MISSING_ENV:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = str(previous)
+    _resolve_secret_env_markers(path)
 
 
 def _load_env_files() -> None:
@@ -1263,37 +1571,50 @@ def _load_env_files() -> None:
     关键场景：PyInstaller --onedir 打包后，源码里的 .env 不会自动进入 _internal/。
     此时用户把 .env 放在 .exe 同级（EXE_DIR）就能生效，无需重打包。
 
-    顺序设计：EXE_DIR 故意放在 cwd 之后，确保用户"打好的包旁边再添加"具备最高优先级。
+    当前工作目录属于任务输入，不作为进程级 dotenv 来源。
     """
-    candidates: list[Path] = [
-        ROOT / "config" / ".env",
-        ROOT / ".env",
-        Path.cwd() / ".env",
-        ROOT / ".crew" / ".env",
+    candidates: list[tuple[Path, bool]] = [
+        (ROOT / "config" / ".env", False),
+        (ROOT / ".env", False),
+        (ROOT / ".crew" / ".env", True),
     ]
     # 用户配置目录（冻结态 ~/.crew，开发态 ROOT/config）
     user_env = _get_user_config_dir() / ".env"
-    if user_env not in candidates:
-        candidates.append(user_env)
+    if all(user_env != path for path, _secure in candidates):
+        candidates.append((user_env, bool(getattr(sys, "frozen", False))))
     # PyInstaller 冻结态：把 .exe 同级路径追加在最后，最高优先级
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).resolve().parent
-        candidates.append(exe_dir / ".env")
+        candidates.append((exe_dir / ".env", True))
         from crew.state.home import get_crew_home
-        candidates.append(get_crew_home() / ".env")
+
+        candidates.append((get_crew_home() / ".env", True))
     env_home = os.environ.get("CREW_HOME", "").strip()
-    env_home = os.getenv("CREW_HOME")
     if env_home:
-        candidates.append(Path(env_home).expanduser() / ".env")
+        candidates.append((Path(env_home).expanduser() / ".env", True))
 
     seen: set[Path] = set()
-    for path in candidates:
-        resolved = path.expanduser().resolve()
+    for path, secure_persisted_secrets in candidates:
+        lexical = path.expanduser().absolute()
+        try:
+            info = lexical.lstat()
+        except OSError:
+            continue
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or getattr(lexical, "is_junction", lambda: False)()
+            or not stat.S_ISREG(info.st_mode)
+        ):
+            log.warning("ignored non-regular dotenv path: %s", lexical)
+            continue
+        resolved = lexical.resolve()
         if resolved in seen:
             continue
         seen.add(resolved)
-        if resolved.is_file():
-            load_dotenv(resolved, override=True)
+        _load_env_file(
+            lexical,
+            secure_persisted_secrets=secure_persisted_secrets,
+        )
 
 
 def _load_crew_home_env_file(crew_home: str | Path | None) -> None:
@@ -1302,7 +1623,7 @@ def _load_crew_home_env_file(crew_home: str | Path | None) -> None:
         return
     path = Path(crew_home).expanduser() / ".env"
     if path.is_file():
-        load_dotenv(path, override=True)
+        _load_env_file(path, secure_persisted_secrets=True)
 
 
 def _refresh_model_profile_keys(cfg: Config) -> None:
@@ -1359,7 +1680,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
     if path.exists():
         # 记录加载路径，供运行时 CRUD 写回使用
         cfg.config_path = str(path)
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = _read_yaml_file(path)
         cfg.raw_config = data if isinstance(data, dict) else {}
         llm = data.get("llm", {})
         cfg.active_model_id = str(llm.get("active", cfg.active_model_id) or cfg.active_model_id)
@@ -1373,7 +1694,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         else:
             cfg.api_key_env = llm.get("api_key_env", cfg.api_key_env)
             cfg.provider = str(llm.get("provider", cfg.provider) or cfg.provider).strip().lower()
-            cfg.base_url = llm.get("base_url", cfg.base_url)
+            cfg.base_url = _credential_free_endpoint_url(llm.get("base_url", cfg.base_url))
             cfg.model = llm.get("model", cfg.model)
             cfg.temperature = llm.get("temperature", cfg.temperature)
             cfg.max_tokens = _as_int_or_none(llm.get("max_tokens", cfg.max_tokens))
@@ -1399,42 +1720,64 @@ def load_config(config_path: str | Path | None = None) -> Config:
         _env_port = os.getenv("GATEWAY_PORT")
         if _env_port and _env_port.strip().isdigit():
             cfg.gateway_port = int(_env_port.strip())
-        cfg.gateway_busy_mode = str(gw.get("busy_mode", cfg.gateway_busy_mode) or cfg.gateway_busy_mode)
-        cfg.gateway_push_min_interval = _as_float(gw.get("push_min_interval", cfg.gateway_push_min_interval), cfg.gateway_push_min_interval)
+        cfg.gateway_busy_mode = str(
+            gw.get("busy_mode", cfg.gateway_busy_mode) or cfg.gateway_busy_mode
+        )
+        cfg.gateway_push_min_interval = _as_float(
+            gw.get("push_min_interval", cfg.gateway_push_min_interval),
+            cfg.gateway_push_min_interval,
+        )
         raw_admins = gw.get("admin_accounts", cfg.gateway_admin_accounts)
         if isinstance(raw_admins, list):
-            cfg.gateway_admin_accounts = [str(item).strip() for item in raw_admins if str(item).strip()]
-        cfg.gateway_dev_mode = bool(gw.get("dev_mode", False)) or os.getenv("CREW_GATEWAY_DEV", "").strip() in {"1", "true", "yes"}
-        cfg.gateway_dev_account = str(gw.get("dev_account", cfg.gateway_dev_account) or "").strip() or cfg.gateway_dev_account
-        cfg.gateway_max_active_runs = max(1, int(gw.get("max_active_runs", cfg.gateway_max_active_runs)))
+            cfg.gateway_admin_accounts = [
+                str(item).strip() for item in raw_admins if str(item).strip()
+            ]
+        cfg.gateway_dev_mode = bool(gw.get("dev_mode", False)) or os.getenv(
+            "CREW_GATEWAY_DEV", ""
+        ).strip() in {"1", "true", "yes"}
+        cfg.gateway_dev_account = (
+            str(gw.get("dev_account", cfg.gateway_dev_account) or "").strip()
+            or cfg.gateway_dev_account
+        )
+        cfg.gateway_max_active_runs = max(
+            1, int(gw.get("max_active_runs", cfg.gateway_max_active_runs))
+        )
         cfg.gateway_max_queue_depth_per_session = max(
             0,
             int(gw.get("max_queue_depth_per_session", cfg.gateway_max_queue_depth_per_session)),
         )
         auth = data.get("auth", {})
+        if "auth" in data and not isinstance(auth, dict):
+            raise RuntimeError("auth 配置必须是对象")
         if isinstance(auth, dict):
             mode = str(auth.get("mode", cfg.auth_mode) or cfg.auth_mode).strip().lower()
-            cfg.auth_mode = mode if mode in {"local", "email", "remote"} else "local"
+            if mode not in {"local", "email", "remote"}:
+                raise RuntimeError(f"auth.mode 不支持: {mode}")
+            cfg.auth_mode = mode
             remote = auth.get("remote", {})
             if isinstance(remote, dict):
                 cfg.auth_provider_id = (
                     str(remote.get("provider_id", cfg.auth_provider_id) or "").strip()
                     or cfg.auth_provider_id
                 )
-                cfg.auth_base_url = str(remote.get("base_url", cfg.auth_base_url) or "").strip()
-                cfg.auth_send_code_path = str(
-                    remote.get("send_code_path", cfg.auth_send_code_path)
-                    or cfg.auth_send_code_path
+                cfg.auth_base_url = _credential_free_endpoint_url(
+                    remote.get("base_url", cfg.auth_base_url)
                 ).strip()
-                cfg.auth_login_path = str(
+                cfg.auth_send_code_path = _credential_free_endpoint_path(
+                    remote.get("send_code_path", cfg.auth_send_code_path) or cfg.auth_send_code_path
+                ).strip()
+                cfg.auth_login_path = _credential_free_endpoint_path(
                     remote.get("login_path", cfg.auth_login_path) or cfg.auth_login_path
                 ).strip()
                 cfg.auth_timeout_seconds = max(
                     1.0,
-                    min(60.0, _as_float(
-                        remote.get("timeout_seconds", cfg.auth_timeout_seconds),
-                        cfg.auth_timeout_seconds,
-                    )),
+                    min(
+                        60.0,
+                        _as_float(
+                            remote.get("timeout_seconds", cfg.auth_timeout_seconds),
+                            cfg.auth_timeout_seconds,
+                        ),
+                    ),
                 )
                 cfg.auth_session_ttl_seconds = max(
                     300,
@@ -1446,7 +1789,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         # 环境变量只覆盖认证服务地址，不改变 local/remote 模式。
         auth_base_url_env = os.getenv("CREW_AUTH_BASE_URL", "").strip()
         if auth_base_url_env:
-            cfg.auth_base_url = auth_base_url_env
+            cfg.auth_base_url = _credential_free_endpoint_url(auth_base_url_env)
         channels = data.get("channels", {})
         cfg.channels = channels if isinstance(channels, dict) else {}
         platforms = data.get("platforms", {})
@@ -1526,7 +1869,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
 
         session_cfg = data.get("session", {})
         if isinstance(session_cfg, dict) and session_cfg:
-            cfg.session_idle_timeout = int(session_cfg.get("idle_timeout_minutes", cfg.session_idle_timeout))
+            cfg.session_idle_timeout = int(
+                session_cfg.get("idle_timeout_minutes", cfg.session_idle_timeout)
+            )
 
         cfg.wiki = WikiConfig.from_raw(data.get("wiki", {}))
 
@@ -1536,15 +1881,17 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.cron_enabled = bool(cron.get("enabled", cfg.cron_enabled))
             global _LEGACY_CRON_TICK_WARNING_EMITTED
             if "tick_seconds" in cron and not _LEGACY_CRON_TICK_WARNING_EMITTED:
-                log.warning(
-                    "已忽略废弃配置 cron.tick_seconds；APScheduler 是唯一生产调度器"
-                )
+                log.warning("已忽略废弃配置 cron.tick_seconds；APScheduler 是唯一生产调度器")
                 _LEGACY_CRON_TICK_WARNING_EMITTED = True
-            cfg.cron_max_parallel_jobs = max(1, int(cron.get("max_parallel_jobs", cfg.cron_max_parallel_jobs)))
+            cfg.cron_max_parallel_jobs = max(
+                1, int(cron.get("max_parallel_jobs", cfg.cron_max_parallel_jobs))
+            )
 
         agent = data.get("agent", {})
         if isinstance(agent, dict) and agent:
-            cfg.agent_executor = str(agent.get("executor", cfg.agent_executor) or cfg.agent_executor)
+            cfg.agent_executor = str(
+                agent.get("executor", cfg.agent_executor) or cfg.agent_executor
+            )
             comp = agent.get("compaction", {}) or {}
             cfg.compaction_enabled = bool(comp.get("enabled", cfg.compaction_enabled))
             cfg.compaction_token_budget = int(comp.get("token_budget", cfg.compaction_token_budget))
@@ -1553,24 +1900,41 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 cfg.compaction_token_budget_ratio,
             )
             cfg.compaction_keep_recent = int(comp.get("keep_recent", cfg.compaction_keep_recent))
-            cfg.compaction_keep_recent_tools = int(comp.get("keep_recent_tools", cfg.compaction_keep_recent_tools))
-            cfg.compaction_l2_incremental = bool(comp.get("l2_incremental", cfg.compaction_l2_incremental))
-            cfg.compaction_l2_delta_threshold = int(comp.get("l2_delta_threshold", cfg.compaction_l2_delta_threshold))
-            cfg.compaction_post_compact_files = int(comp.get("post_compact_files", cfg.compaction_post_compact_files))
+            cfg.compaction_keep_recent_tools = int(
+                comp.get("keep_recent_tools", cfg.compaction_keep_recent_tools)
+            )
+            cfg.compaction_l2_incremental = bool(
+                comp.get("l2_incremental", cfg.compaction_l2_incremental)
+            )
+            cfg.compaction_l2_delta_threshold = int(
+                comp.get("l2_delta_threshold", cfg.compaction_l2_delta_threshold)
+            )
+            cfg.compaction_post_compact_files = int(
+                comp.get("post_compact_files", cfg.compaction_post_compact_files)
+            )
             cfg.compaction_post_compact_max_chars_per_file = int(
-                comp.get("post_compact_max_chars_per_file", cfg.compaction_post_compact_max_chars_per_file)
+                comp.get(
+                    "post_compact_max_chars_per_file",
+                    cfg.compaction_post_compact_max_chars_per_file,
+                )
             )
             cfg.compaction_max_tool_result_chars = int(
                 comp.get("max_tool_result_chars", cfg.compaction_max_tool_result_chars)
             )
             retry = agent.get("retry", {}) or {}
             cfg.retry_max = int(retry.get("max_retries", cfg.retry_max))
-            cfg.retry_backoff = _as_float(retry.get("backoff_seconds", cfg.retry_backoff), cfg.retry_backoff)
+            cfg.retry_backoff = _as_float(
+                retry.get("backoff_seconds", cfg.retry_backoff), cfg.retry_backoff
+            )
             title = agent.get("title", {}) or {}
             cfg.title_auto = bool(title.get("auto", cfg.title_auto))
             evolution = agent.get("evolution", {}) or {}
-            cfg.evolution_auto_trigger = bool(evolution.get("auto_trigger", cfg.evolution_auto_trigger))
-            cfg.evolution_auto_full_cycle = bool(evolution.get("auto_full_cycle", cfg.evolution_auto_full_cycle))
+            cfg.evolution_auto_trigger = bool(
+                evolution.get("auto_trigger", cfg.evolution_auto_trigger)
+            )
+            cfg.evolution_auto_full_cycle = bool(
+                evolution.get("auto_full_cycle", cfg.evolution_auto_full_cycle)
+            )
             cfg.evolution_visible = bool(evolution.get("visible", cfg.evolution_visible))
             cfg.agent_client_config = agent.get("client", {}) or {}
             cfg.agent_acp_config = agent.get("acp", {}) or {}
@@ -1586,28 +1950,40 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 stream_resilience.get("read_timeout", cfg.stream_read_timeout),
                 cfg.stream_read_timeout,
             )
-            cfg.stream_retry_jitter = bool(stream_resilience.get("retry_jitter", cfg.stream_retry_jitter))
+            cfg.stream_retry_jitter = bool(
+                stream_resilience.get("retry_jitter", cfg.stream_retry_jitter)
+            )
             cfg.stream_stale_timeout = _as_float(
                 stream_resilience.get("stale_timeout", cfg.stream_stale_timeout),
                 cfg.stream_stale_timeout,
             )
-            cfg.stream_continuation_max = int(stream_resilience.get("continuation_max", cfg.stream_continuation_max))
+            cfg.stream_continuation_max = int(
+                stream_resilience.get("continuation_max", cfg.stream_continuation_max)
+            )
             fb = agent.get("fallback_models", cfg.fallback_models)
             cfg.fallback_models = list(fb) if isinstance(fb, (list, tuple)) else cfg.fallback_models
             guard = agent.get("guardrail", {}) or {}
             cfg.guardrail_enabled = bool(guard.get("enabled", cfg.guardrail_enabled))
             cfg.guardrail_hard_stop = bool(guard.get("hard_stop", cfg.guardrail_hard_stop))
             cfg.guardrail_exact_failure_block_after = int(
-                guard.get("exact_failure_block_after", cfg.guardrail_exact_failure_block_after))
+                guard.get("exact_failure_block_after", cfg.guardrail_exact_failure_block_after)
+            )
             cfg.guardrail_same_tool_failure_halt_after = int(
-                guard.get("same_tool_failure_halt_after", cfg.guardrail_same_tool_failure_halt_after))
+                guard.get(
+                    "same_tool_failure_halt_after", cfg.guardrail_same_tool_failure_halt_after
+                )
+            )
             cfg.guardrail_no_progress_block_after = int(
-                guard.get("no_progress_block_after", cfg.guardrail_no_progress_block_after))
+                guard.get("no_progress_block_after", cfg.guardrail_no_progress_block_after)
+            )
 
         ac = data.get("access_control", {})
         if isinstance(ac, dict):
             cfg.access_control = AccessControlConfig(
-                user_type=str(ac.get("user_type", cfg.access_control.user_type) or cfg.access_control.user_type),
+                user_type=str(
+                    ac.get("user_type", cfg.access_control.user_type)
+                    or cfg.access_control.user_type
+                ),
                 external=ac.get("external", {}) or {},
                 internal=ac.get("internal", {}) or {},
             )
@@ -1650,7 +2026,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if os.getenv("CREW_API_KEY"):
             profile.api_key = os.environ["CREW_API_KEY"]
         if os.getenv("CREW_BASE_URL"):
-            profile.base_url = os.environ["CREW_BASE_URL"]
+            profile.base_url = _credential_free_endpoint_url(os.environ["CREW_BASE_URL"])
         if os.getenv("CREW_MODEL"):
             profile.model = os.environ["CREW_MODEL"]
         if os.getenv("CREW_TEMPERATURE"):
@@ -1695,12 +2071,14 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if not os.environ.get("CREW_PYTHON"):
             try:
                 from crew.state.home import bundled_python_executable
+
                 _py_exe = bundled_python_executable() or sys.executable
             except Exception:
                 _py_exe = sys.executable
             os.environ["CREW_PYTHON"] = _py_exe
 
     from crew.state.home import export_crew_runtime_env, get_crew_home
+
     home = get_crew_home()
     runtime_env = export_crew_runtime_env(resolve_writable_env_path())
     home = Path(runtime_env["CREW_HOME"])
@@ -1728,5 +2106,15 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if not mem_path.is_absolute():
             mem_path = home / mem_path
         cfg.memory_db_path = str(mem_path)
+
+    if (
+        cfg.config_path
+        and isinstance(cfg.mcp_servers, dict)
+        and mcp_servers_have_plaintext_secrets(cfg.mcp_servers)
+    ):
+        try:
+            cfg.persist_mcp_servers()
+        except (OSError, RuntimeError, ValueError, SecretStoreUnavailable) as exc:
+            raise SecretStoreUnavailable("MCP plaintext credential migration failed") from exc
 
     return cfg

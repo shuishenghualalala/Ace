@@ -224,7 +224,7 @@ function syncComposerWorkspaceLabel(): void {
 
   const id = composerWorkspaceId();
   const isDefault = id === 'default';
-  label.textContent = isDefault ? '不在项目中工作' : workspaceLabel(id);
+  label.textContent = isDefault ? '工作空间' : workspaceLabel(id);
   btn.title = isDefault ? '选择项目' : `项目：${label.textContent}`;
   btn.classList.toggle('is-named', !isDefault);
   btn.classList.remove('is-locked');
@@ -283,7 +283,7 @@ function renderWorkspacePopover(): void {
       <button type="button" class="composer-select-item${current === 'default' ? ' is-selected' : ''}" data-workspace-id="default">
         <span class="composer-select-item__plain-icon"><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-close"></use></svg></span>
         <span class="composer-select-item__body">
-          <span class="composer-select-item__title">不在项目中工作</span>
+          <span class="composer-select-item__title">工作空间</span>
         </span>
         ${current === 'default' ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
       </button>
@@ -439,7 +439,7 @@ function renderCraftPopover(): void {
   const craftIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>`;
   const planIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
   const askIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
-  const externalIcon = spriteIcon('icon-agent', MONOCHROME_ICON_CLASS);
+  const externalIcon = `<span class="composer-external-agent-logo">${spriteIcon('icon-agent', MONOCHROME_ICON_CLASS)}</span>`;
   const modeIcons: Record<ComposerEntry, string> = {
     craft: craftIcon,
     plan: planIcon,

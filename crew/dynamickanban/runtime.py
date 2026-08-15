@@ -35,6 +35,7 @@ from crew.dynamickanban.store import SQLiteKanbanStore
 from crew.state.home import task_workspace_path
 from crew.state.logging import get_logger, log_role_prefix
 from crew.tools.registry import Registry
+from crew.tools.redact import safe_public_error
 
 log = get_logger("dynamickanban.runtime")
 
@@ -788,7 +789,10 @@ class WorkflowRuntime:
         try:
             merged_edges = validate_workflow_dag(all_phase_ids, merged_edges)
         except WorkflowGraphValidationError as exc:
-            raise RuntimeError(f"扩图写回 definition 时 DAG 校验失败: {exc}") from exc
+            raise RuntimeError(
+                f"扩图写回 definition 时 DAG 校验失败: "
+                f"{safe_public_error(exc, 'DAG 校验失败')}"
+            ) from exc
 
         definition.phases.extend(new_phases)
         definition.edges = merged_edges
@@ -1178,11 +1182,11 @@ class WorkflowRuntime:
                 error=f"任务执行超时（超过 {call_timeout:.0f} 秒）",
             )
         except Exception as exc:  # noqa: BLE001
-            log.exception("call %s agent 执行异常", call.id)
+            log.error("call %s agent 执行异常：%s", call.id, type(exc).__name__)
             return AgentCallResult(
                 call_id=call.id,
                 status="failed",
-                error=str(exc),
+                error="任务执行失败：内部错误",
             )
         finally:
             close_fn = getattr(agent, "aclose", None)
@@ -1336,8 +1340,8 @@ class WorkflowRuntime:
                 if chunk.kind == "final":
                     final_text = chunk.body.get("text", "")
         except Exception as exc:  # noqa: BLE001
-            log.exception("verification gate %s 执行异常", phase.id)
-            final_text = str(exc)
+            log.error("verification gate %s 执行异常：%s", phase.id, type(exc).__name__)
+            final_text = "验证执行失败：内部错误"
         finally:
             close_fn = getattr(agent, "aclose", None)
             if callable(close_fn):
@@ -1630,8 +1634,8 @@ class WorkflowRuntime:
             log.info("[DK Runtime] 综合结果完成，耗时 %.2fs", time.time() - synth_start)
             return result
         except Exception as exc:  # noqa: BLE001
-            log.exception("综合结果失败")
-            return warning_text + f"执行结束，但综合结果生成失败：{exc}"
+            log.error("综合结果失败 type=%s", type(exc).__name__)
+            return warning_text + "执行结束，但综合结果生成失败：内部错误"
 
     # ------------------------------------------------------------------ #
     # Utils

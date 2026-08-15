@@ -11,10 +11,12 @@ pytest.importorskip("mcp")  # 未装 mcp 包则跳过
 
 from crew.agent.skills import SkillActivation
 from crew.app import CrewApp
+from crew.core.envelope import ResponseChunk
 from crew.core.mocks import FakeProvider, InMemorySessionStore, InMemoryWorkspaceStore, NullMemory
-from crew.core.types import Message, ToolCall
+from crew.core.types import Message
 from crew.gateway.interaction_bridge import InteractionBridge
 from crew.gateway.mcp_server import build_interaction_mcp_server, build_mcp_server
+from crew.gateway.dispatcher import SessionDispatcher
 from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.tasks.task_manager import InMemoryTaskManager
@@ -53,74 +55,58 @@ def _crew_with_team() -> CrewApp:
     return crew
 
 
+class _BoundMcpCrew:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(auth_mode="local", gateway_dev_mode=False)
+        self.session_store = InMemorySessionStore()
+        self.team = None
+
+        async def inner(envelope):
+            yield ResponseChunk.final(envelope.request_id, "ok")
+
+        self.dispatcher = SessionDispatcher(inner, self.session_store)
+
+    async def dispatch(self, envelope):
+        async for chunk in self.dispatcher.run(envelope):
+            yield chunk
+
+
 # ---- MCP Client ----
 
-async def test_mcp_client_connects_and_calls():
+async def test_mcp_stdio_client_defers_until_task_authorization():
     reg = Registry()
     mgr = MCPClientManager({"echo": {"command": sys.executable, "args": [_FIXTURE]}})
     await mgr.start(reg)
-    await mgr.await_started()  # start 为 fire-and-forget，需显式等待后台注册完成
+    await mgr.await_started()
     try:
-        assert "echo__echo" in reg.names()  # 外部工具已注册
-        registered = reg.get("echo__echo")
-        assert registered.parameters["required"] == ["text"]
-        assert registered.parameters["properties"]["text"]["type"] == "string"
-        res = await reg.execute(ToolCall("1", "echo__echo", {"text": "hi"}))
-        assert not res.is_error
-        assert "echo: hi" in res.content
-
-        failed = await reg.execute(ToolCall("2", "echo__fail", {"message": "expected failure"}))
-        assert failed.is_error
-        assert "expected failure" in failed.content
+        assert "echo__echo" not in reg.names()
+        assert mgr._workers == []
+        [status] = mgr.status()
+        assert status["name"] == "echo"
+        assert status["transport"] == "stdio"
+        assert status["connected"] is False
+        assert status["tools"] == []
+        assert status["error"] == ""
     finally:
         await mgr.aclose()
 
 
-async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch):
-    """HTTP 分支使用 MCP 2 的 streamable_http_client、httpx2 和双元素流。"""
-    import httpx2
-    from mcp.server import MCPServer
-
-    server = MCPServer("http-echo", version="2.0-test")
-
-    @server.tool()
-    def http_echo(text: str) -> str:
-        return f"http echo: {text}"
-
-    app = server.streamable_http_app(stateless_http=True, json_response=True)
-    original_async_client = httpx2.AsyncClient
-    seen: dict[str, object] = {}
-
-    def asgi_client(**kwargs):
-        seen.update(kwargs)
-        return original_async_client(
-            transport=httpx2.ASGITransport(app=app),
-            base_url="http://127.0.0.1:8000",
-            **kwargs,
-        )
-
-    monkeypatch.setattr(httpx2, "AsyncClient", asgi_client)
+async def test_mcp_client_rejects_private_http_endpoint_before_transport():
     reg = Registry()
     mgr = MCPClientManager({
         "remote": {
-            "url": "http://127.0.0.1:8000/mcp",
+            "url": "http://169.254.169.254/latest/meta-data",
             "transport": "http",
-            "headers": {"X-MCP-Test": "mcp2"},
         }
     })
-
-    async with app.router.lifespan_context(app):
-        await mgr.start(reg)
-        await mgr.await_started()
-        try:
-            assert "remote__http_echo" in reg.names()
-            assert seen["headers"] == {"X-MCP-Test": "mcp2"}
-            assert seen["follow_redirects"] is True
-            result = await reg.execute(ToolCall("http-1", "remote__http_echo", {"text": "hi"}))
-            assert not result.is_error
-            assert "http echo: hi" in result.content
-        finally:
-            await mgr.aclose()
+    await mgr.start(reg)
+    await mgr.await_started()
+    try:
+        assert reg.names() == []
+        assert len(mgr._workers) == 1
+        assert "SECURITY_OUTBOUND_DENIED" in mgr._workers[0].error
+    finally:
+        await mgr.aclose()
 
 
 async def test_mcp_client_empty_config_noop():
@@ -135,7 +121,7 @@ async def test_mcp_client_empty_config_noop():
 
 async def test_mcp_server_exposes_tools():
     crew = _crew()
-    server = build_mcp_server(crew)
+    server = build_mcp_server(crew, owner_account_id="local")
     tools = await server.list_tools()
     names = {t.name for t in tools}
     assert {
@@ -150,9 +136,69 @@ async def test_mcp_server_exposes_tools():
     } <= names
 
 
+async def test_session_mcp_schema_does_not_expose_security_context_injection():
+    server = build_mcp_server(_BoundMcpCrew(), owner_account_id="A:uid-a")
+    forbidden = {"sandbox", "sandbox_mode", "approval", "approval_policy", "cwd", "task_id"}
+
+    for tool in await server.list_tools():
+        if tool.name not in {"session_history", "send_message", "session_status"}:
+            continue
+        schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema")
+        assert forbidden.isdisjoint((schema.get("properties") or {}).keys())
+        assert schema.get("additionalProperties") is False
+
+
+async def test_session_mcp_rejects_unknown_security_context_fields():
+    crew = _BoundMcpCrew()
+    crew.session_store.save("same", [Message.user("A")], owner_account_id="A:uid-a")
+    server = build_mcp_server(crew, owner_account_id="A:uid-a")
+
+    with pytest.raises(Exception):
+        await server.call_tool(
+            "session_history",
+            {
+                "session_id": "same",
+                "owner_account_id": "A:uid-a",
+                "cwd": "D:/attacker-controlled",
+            },
+        )
+
+
+async def test_mcp_server_rejects_owner_spoof_against_server_binding():
+    crew = _BoundMcpCrew()
+    crew.session_store.save("same", [Message.user("A")], owner_account_id="A:uid-a")
+    crew.session_store.save("same", [Message.user("B")], owner_account_id="B:uid-b")
+    server = build_mcp_server(crew, owner_account_id="A:uid-a")
+
+    with pytest.raises(Exception, match="MCP"):
+        await server.call_tool(
+            "session_history",
+            {"session_id": "same", "owner_account_id": "B:uid-b"},
+        )
+
+
+async def test_mcp_send_message_requires_idempotency_key_and_rejects_replay():
+    crew = _BoundMcpCrew()
+    crew.session_store.save("mcp-bound", [], owner_account_id="A:uid-a")
+    server = build_mcp_server(crew, owner_account_id="A:uid-a")
+    payload = {
+        "session_id": "mcp-bound",
+        "query": "hello",
+        "request_id": "mcp-request-0001",
+        "owner_account_id": "A:uid-a",
+    }
+
+    first = await server.call_tool("send_message", payload)
+    replay = await server.call_tool("send_message", payload)
+
+    assert '"ok": true' in str(first).lower()
+    assert "REPLAY_DETECTED" in str(replay)
+
+
 async def test_mcp_server_team_plan_tools_call_team_manager():
     crew = _crew_with_team()
-    server = build_mcp_server(crew)
+    crew.session_store.save("mcp_plan_s1", [], owner_account_id="A:uid-a")
+    server = build_mcp_server(crew, owner_account_id="A:uid-a")
     created = await server.call_tool("team_plan_create", {
         "session_id": "mcp_plan_s1",
         "owner_account_id": "A:uid-a",
@@ -176,10 +222,40 @@ async def test_mcp_server_team_plan_tools_call_team_manager():
     assert "completed" in str(updated)
 
 
+async def test_mcp_team_tools_reject_foreign_session_binding():
+    class _TeamSpy:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create_plan(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"ok": True}
+
+    crew = _BoundMcpCrew()
+    team = _TeamSpy()
+    crew.team = team
+    crew.session_store.save("foreign", [], owner_account_id="B:uid-b")
+    server = build_mcp_server(crew, owner_account_id="A:uid-a")
+
+    with pytest.raises(Exception, match="MCP"):
+        await server.call_tool(
+            "team_plan_create",
+            {
+                "session_id": "foreign",
+                "owner_account_id": "A:uid-a",
+                "goal": "should not run",
+                "nodes": [],
+                "edges": [],
+            },
+        )
+
+    assert team.calls == 0
+
+
 async def test_mcp_server_sessions_list_reads_store():
     crew = _crew()
     crew.session_store.save("s1", [Message.user("第一个问题"), Message.assistant("答")], owner_account_id="A:uid-a")
-    server = build_mcp_server(crew)
+    server = build_mcp_server(crew, owner_account_id="A:uid-a")
     result = await server.call_tool("sessions_list", {"owner_account_id": "A:uid-a"})
     assert "s1" in str(result)
 
@@ -194,7 +270,7 @@ async def test_mcp_server_round_trips_through_mcp2_client():
         [Message.user("协议往返")],
         owner_account_id="A:protocol-user",
     )
-    server = build_mcp_server(crew)
+    server = build_mcp_server(crew, owner_account_id="A:protocol-user")
 
     async with Client(server, mode="auto") as client:
         tools = await client.list_tools()
@@ -412,7 +488,7 @@ async def test_interaction_bridge_pushes_followup_with_owner_scope():
 
 async def test_mcp_server_requires_explicit_owner():
     crew = _crew()
-    server = build_mcp_server(crew)
+    server = build_mcp_server(crew, owner_account_id="local")
 
     with pytest.raises(Exception, match="owner_account_id"):
         await server.call_tool("sessions_list", {"owner_account_id": ""})
@@ -424,7 +500,7 @@ async def test_mcp_server_owner_scopes_history_and_status():
     crew.session_store.save("same", [Message.user("B")], owner_account_id="B:uid-b")
     crew.session_store.set_status("same", "completed", "A done", owner_account_id="A:uid-a")
     crew.session_store.set_status("same", "failed", "B failed", owner_account_id="B:uid-b")
-    server = build_mcp_server(crew)
+    server = build_mcp_server(crew, owner_account_id="B:uid-b")
 
     history = await server.call_tool("session_history", {"session_id": "same", "owner_account_id": "B:uid-b"})
     status = await server.call_tool("session_status", {"session_id": "same", "owner_account_id": "B:uid-b"})

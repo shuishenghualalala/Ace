@@ -17,6 +17,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -29,6 +30,11 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from crew.core.runctx import current_owner_account_id
+from crew.tools.redact import (
+    redact_secret_values,
+    redact_sensitive_display_text,
+    sensitive_env_values,
+)
 
 
 def _ensure_utf8_stdio() -> None:
@@ -82,6 +88,37 @@ class RolePrefixFilter(logging.Filter):
         return True
 
 
+def _redact_log_text(value: Any) -> str:
+    text = value if isinstance(value, str) else str(value)
+    text = redact_secret_values(text, sensitive_env_values(dict(os.environ))) or ""
+    return redact_sensitive_display_text(text)
+
+
+class SensitiveLogFilter(logging.Filter):
+    """Redact messages and exception text before any log handler persists them."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, "_sensitive_redacted", False):
+            return True
+        try:
+            message = _redact_log_text(record.getMessage())
+            if record.exc_info:
+                exception_text = logging.Formatter().formatException(record.exc_info)
+                message = f"{message}\n{_redact_log_text(exception_text)}"
+                record.exc_info = None
+                record.exc_text = None
+            record.msg = message
+            record.args = ()
+            record._sensitive_redacted = True  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - logging must remain best effort
+            record.msg = "<log_message_redacted>"
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
+            record._sensitive_redacted = True  # type: ignore[attr-defined]
+        return True
+
+
 @contextlib.contextmanager
 def log_role_prefix(prefix: str | None) -> Iterator[None]:
     """临时设置日志角色前缀的上下文管理器。"""
@@ -103,6 +140,11 @@ _BROWSER_BOUNDARY_RE = re.compile(
     re.DOTALL,
 )
 _DATA_IMAGE_RE = re.compile(r"data:image/[^;,\s]+;base64,[A-Za-z0-9+/=]+", re.DOTALL)
+_SENSITIVE_TRACE_KEY_RE = re.compile(
+    r"(?:^|[-_])(?:authorization|cookie|credential|password|passwd|secret|token|"
+    r"api[-_]?key)(?:$|[-_])",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_llm_trace(value: Any, *, browser_scope: bool = False) -> Any:
@@ -120,7 +162,9 @@ def _sanitize_llm_trace(value: Any, *, browser_scope: bool = False) -> Any:
         )
         clean: dict[str, Any] = {}
         for key, item in value.items():
-            if local_browser and key in {"arguments", "input", "content", "text", "value", "data"}:
+            if _SENSITIVE_TRACE_KEY_RE.search(str(key)):
+                clean[key] = "***"
+            elif local_browser and key in {"arguments", "input", "content", "text", "value", "data"}:
                 clean[key] = "<browser_data_redacted>"
             else:
                 clean[key] = _sanitize_llm_trace(item, browser_scope=local_browser)
@@ -133,7 +177,8 @@ def _sanitize_llm_trace(value: Any, *, browser_scope: bool = False) -> Any:
         if browser_scope:
             return "<browser_data_redacted>"
         text = _BROWSER_BOUNDARY_RE.sub("<browser_content_redacted>", value)
-        return _DATA_IMAGE_RE.sub("<browser_image_redacted>", text)
+        text = _DATA_IMAGE_RE.sub("<browser_image_redacted>", text)
+        return _redact_log_text(text)
     return value
 
 # 环形缓冲容量（条）。足够前端回看近期日志，又不至于无限增长占内存。
@@ -203,6 +248,13 @@ class RingBufferHandler(logging.Handler):
         items = filtered[offset: offset + limit] if limit > 0 else filtered[offset:]
         return {"items": items, "total": total}
 
+    def clear(self) -> int:
+        """Drop every buffered entry; restart-independent admin cleanup."""
+        with self._lock:
+            cleared = len(self._buf)
+            self._buf.clear()
+        return cleared
+
 
 # 进程内单例，setup_logging 时挂到 crew logger，query_logs 时读取。
 _RING: RingBufferHandler | None = None
@@ -239,10 +291,19 @@ def setup_logging(level: str = "INFO", log_file: str = "", llm_trace: bool = Fal
         handlers.append(file_handler)
     # 显式挂到 root，避免 basicConfig 在 root 已有 handler 时变成 no-op
     # 导致环形缓冲（供 /api/system/logs）漏挂。
+    role_filter = RolePrefixFilter()
+    sensitive_filter = SensitiveLogFilter()
+    for existing_handler in root.handlers:
+        existing_handler.addFilter(role_filter)
+        existing_handler.addFilter(sensitive_filter)
     for h in handlers:
+        h.addFilter(role_filter)
+        h.addFilter(sensitive_filter)
         root.addHandler(h)
     # 环形缓冲：捕获 crew.* 全部日志，供 /api/system/logs 查询
     _RING = RingBufferHandler()
+    _RING.addFilter(role_filter)
+    _RING.addFilter(sensitive_filter)
     root.addHandler(_RING)
     # 角色前缀 filter：Dynamic Kanban 场景下自动标识当前执行角色
     root.addFilter(RolePrefixFilter())
@@ -271,6 +332,13 @@ def query_logs(
     )
 
 
+def clear_logs() -> int:
+    """Clear the process-local ring buffer (admin-only surface)."""
+    if _RING is None:
+        return 0
+    return _RING.clear()
+
+
 def _setup_llm_trace(log_file: str = "") -> None:
     """配置专用的 LLM trace logger（crew.llm），独立写 jsonl，不污染主日志/控制台。"""
     global _LLM_TRACE_ENABLED
@@ -285,6 +353,7 @@ def _setup_llm_trace(log_file: str = "") -> None:
     logger.propagate = False  # 只写自己的文件，不冒泡到 root（避免重复/截断）
     handler = logging.FileHandler(trace_path, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(SensitiveLogFilter())
     logger.addHandler(handler)
     _LLM_TRACE_ENABLED = True
 

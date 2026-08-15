@@ -67,6 +67,23 @@ class _Team:
         return 1
 
 
+class _Agents:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def drop_owner_and_wait(self, owner: str, *, timeout: float) -> None:
+        assert timeout > 0
+        self.events.append(f"close-agents:{owner}")
+
+
+class _Providers:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def close_owner_credential_providers(self, owner: str) -> None:
+        self.events.append(f"close-providers:{owner}")
+
+
 class _Cron:
     def __init__(self, events: list[str]) -> None:
         self.events = events
@@ -117,10 +134,27 @@ class _InteractionBridge:
         return 1
 
 
+class _Processes:
+    def __init__(self, events: list[str], *, failed: bool = False) -> None:
+        self.events = events
+        self.failed = failed
+
+    def activate_owner(self, owner: str, **_kwargs) -> None:
+        self.events.append(f"activate-processes:{owner}")
+
+    def revoke_owner(self, owner: str, *, reason: str) -> int:
+        assert reason == "OWNER_LOGOUT"
+        self.events.append(f"revoke-processes:{owner}")
+        if self.failed:
+            raise RuntimeError("cleanup pending")
+        return 1
+
+
 def _coordinator(
     events: list[str],
     *,
     channel_failure: bool = False,
+    process_failure: bool = False,
     requires_restart: bool = False,
 ):
     lease = _Lease(events)
@@ -138,6 +172,9 @@ def _coordinator(
         cron_service=_Cron(events),
         team_manager=_Team(events),
         interaction_bridge=_InteractionBridge(events),
+        agent_manager=_Agents(events),
+        credential_provider_manager=_Providers(events),
+        process_registry=_Processes(events, failed=process_failure),
     )
     return coordinator, lease
 
@@ -156,9 +193,12 @@ async def test_logout_fences_work_then_releases_lease_last():
     assert events == [
         "block-tasks:A:uid-a",
         "revoke-interactions:A:uid-a",
+        "revoke-processes:A:uid-a",
         "unmount-cron:A:uid-a",
         "stop-dispatcher:A:uid-a",
+        "close-agents:A:uid-a",
         "cancel-team:A:uid-a",
+        "close-providers:A:uid-a",
         "cancel-tasks:A:uid-a",
         "stop-channels:login_required",
         "close-connections:A:uid-a",
@@ -201,6 +241,20 @@ async def test_cleanup_failure_keeps_lease_and_drain_fence_for_retry():
 
 
 @pytest.mark.asyncio
+async def test_process_cleanup_failure_keeps_active_owner_lease():
+    events: list[str] = []
+    coordinator, lease = _coordinator(events, process_failure=True)
+
+    with pytest.raises(LogoutCleanupError, match="processes: cleanup pending"):
+        await coordinator.logout("A:uid-a")
+
+    assert lease.current().owner_account_id == "A:uid-a"
+    assert coordinator.is_draining("A:uid-a") is True
+    assert "revoke-processes:A:uid-a" in events
+    assert "release" not in events
+
+
+@pytest.mark.asyncio
 async def test_team_cleanup_failure_keeps_active_owner_lease():
     events: list[str] = []
     coordinator, lease = _coordinator(events)
@@ -211,6 +265,45 @@ async def test_team_cleanup_failure_keeps_active_owner_lease():
     coordinator._team_manager.cancel_owner = fail_team
 
     with pytest.raises(LogoutCleanupError, match="team: still running"):
+        await coordinator.logout("A:uid-a")
+
+    assert lease.current().owner_account_id == "A:uid-a"
+    assert coordinator.is_draining("A:uid-a") is True
+    assert "release" not in events
+
+
+@pytest.mark.asyncio
+async def test_credential_client_close_failure_keeps_active_owner_lease():
+    events: list[str] = []
+    coordinator, lease = _coordinator(events)
+
+    async def fail_close(_owner: str, *, timeout: float) -> None:
+        assert timeout > 0
+        raise RuntimeError("client still holds key")
+
+    coordinator._agent_manager.drop_owner_and_wait = fail_close
+
+    with pytest.raises(LogoutCleanupError, match="credential_clients"):
+        await coordinator.logout("A:uid-a")
+
+    assert lease.current().owner_account_id == "A:uid-a"
+    assert coordinator.is_draining("A:uid-a") is True
+    assert "release" not in events
+
+
+@pytest.mark.asyncio
+async def test_credential_provider_close_failure_keeps_active_owner_lease():
+    events: list[str] = []
+    coordinator, lease = _coordinator(events)
+
+    async def fail_close(_owner: str) -> None:
+        raise RuntimeError("provider still holds key")
+
+    coordinator._credential_provider_manager.close_owner_credential_providers = (
+        fail_close
+    )
+
+    with pytest.raises(LogoutCleanupError, match="credential_providers"):
         await coordinator.logout("A:uid-a")
 
     assert lease.current().owner_account_id == "A:uid-a"

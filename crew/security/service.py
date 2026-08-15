@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Callable
 
-from crew.security.actions import NormalizedAction
+from crew.security.actions import ActionKind, NormalizedAction
 from crew.security.approvals import (
     ApprovalDecision,
     ApprovalError,
@@ -19,12 +23,41 @@ from crew.security.approvals import (
     ApprovalOutcome,
 )
 from crew.security.audit import AuditEvent, SQLiteSecurityAudit, format_action_for_audit
+from crew.security.alerts import SecurityAlertRegistry
 from crew.security.context import SecurityContext
-from crew.security.file_policy import FilePolicyResult, assess_file_action
+from crew.security.file_policy import (
+    FilePolicyResult,
+    _protected_entries,
+    _protected_globs,
+    assess_file_action,
+)
 from crew.security.grants import GrantRegistry
-from crew.security.models import ConversationPermissionMode
+from crew.security.permission_approvals import PermissionApprovalManager
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    ApprovalChannel,
+    ConversationPermissionMode,
+    FilesystemAccess,
+    FilesystemOperation,
+    GranularApprovalConfig,
+    PermissionProfile,
+)
 from crew.security.rule_store import SQLiteRuleStore
-from crew.security.rules import RuleDecision, choose_rule
+from crew.security.policy import (
+    exec_mutation_permissions_ungrantable,
+    exec_permissions_needed_for_action,
+    filesystem_operation_allowed,
+    inferred_exec_mutation_targets,
+    merge_additional_permissions,
+    normalize_additional_permissions,
+    network_operation_allowed,
+    network_operation_explicitly_denied,
+    network_permissions_needed_for_action,
+    permissions_needed_for_action,
+    serialize_additional_permissions,
+    settings_for_mode,
+)
+from crew.security.rules import RuleDecision, RuleScope, choose_rule
 
 # 与请求 TTL 对齐的等待上限：超过则按 fail-closed 处理（等同拒绝），避免工具永久挂起。
 _DECIDE_WAIT_TIMEOUT = 300.0
@@ -42,9 +75,15 @@ class _ApprovalWaiter:
     """
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._futures: dict[str, asyncio.Future[ApprovalOutcome | None]] = {}
-        # request_id -> (session_key, owner)，用于 logout / 模式切换时成批唤醒。
-        self._meta: dict[str, tuple[tuple[str, ...], str]] = {}
+        self._loops: dict[str, asyncio.AbstractEventLoop] = {}
+        # A result is published synchronously under a thread lock before the
+        # event-loop wakeup is scheduled. Timeout arbitration can therefore see a
+        # decision made by a worker thread even if its callback has not run yet.
+        self._results: dict[str, ApprovalOutcome | None] = {}
+        # request_id -> (session_key, owner, task_id)，用于生命周期结束时成批唤醒。
+        self._meta: dict[str, tuple[tuple[str, ...], str, str]] = {}
 
     def register(
         self,
@@ -52,29 +91,71 @@ class _ApprovalWaiter:
         *,
         session_key: tuple[str, ...],
         owner_account_id: str,
+        task_id: str = "",
     ) -> None:
         """为新建的 pending 请求登记一个 future；复用请求不重复登记。"""
-        if request_id in self._futures:
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:  # 无事件循环（单元 registry 直测）→ 不阻塞，decide 仍可正常落地。
             return
-        self._futures[request_id] = loop.create_future()
-        self._meta[request_id] = (session_key, str(owner_account_id))
+        future = loop.create_future()
+        with self._lock:
+            if request_id in self._futures:
+                return
+            self._futures[request_id] = future
+            self._loops[request_id] = loop
+            self._meta[request_id] = (
+                session_key,
+                str(owner_account_id),
+                str(task_id).strip(),
+            )
 
     async def wait(self, request_id: str) -> ApprovalOutcome | None:
         """阻塞至决策到达；请求不存在/超时/被撤销均返回 None（按拒绝处理）。"""
-        future = self._futures.get(request_id)
+        with self._lock:
+            future = self._futures.get(request_id)
         if future is None:
             return None
-        try:
-            return await asyncio.wait_for(future, timeout=_DECIDE_WAIT_TIMEOUT)
-        except TimeoutError:
+        done, _pending = await asyncio.wait(
+            (future,),
+            timeout=_DECIDE_WAIT_TIMEOUT,
+        )
+        if not done:
+            # Keep the future registered. SecurityApprovalService takes its
+            # decision lock after timeout, so it can distinguish "timeout won"
+            # from a concurrent decide() that already published a result.
             return None
+        try:
+            return future.result()
         finally:
-            self._futures.pop(request_id, None)
-            self._meta.pop(request_id, None)
+            self._cleanup(request_id)
+
+    def take_result(
+        self,
+        request_id: str,
+    ) -> tuple[bool, ApprovalOutcome | None]:
+        """Take a result that raced with timeout without cancelling its future."""
+        pending_future: asyncio.Future[ApprovalOutcome | None] | None = None
+        with self._lock:
+            if request_id in self._results:
+                outcome = self._results[request_id]
+                future = self._futures.get(request_id)
+                if future is not None and not future.done():
+                    # take_result() is called by the owning event-loop coroutine
+                    # after its timeout. Complete the shared future before removing
+                    # its registry entry so any concurrent waiter sees the same
+                    # terminal decision rather than timing out independently.
+                    pending_future = future
+                self._cleanup_locked(request_id)
+            else:
+                future = self._futures.get(request_id)
+                if future is None or not future.done():
+                    return False, None
+                outcome = future.result()
+                self._cleanup_locked(request_id)
+        if pending_future is not None:
+            pending_future.set_result(outcome)
+        return True, outcome
 
     def resolve(self, request_id: str, outcome: ApprovalOutcome | None) -> None:
         """Resolve without removing; wait() is the single cleanup owner.
@@ -83,36 +164,84 @@ class _ApprovalWaiter:
         enters wait(). Removing here would make that later wait observe no future
         and treat a valid approval as rejection.
         """
-        future = self._futures.get(request_id)
-        if future is not None and not future.done():
+        with self._lock:
+            future = self._futures.get(request_id)
+            if future is None or request_id in self._results:
+                return
+            self._results[request_id] = outcome
+            loop = self._loops[request_id]
+        try:
+            loop.call_soon_threadsafe(self._deliver, request_id)
+        except RuntimeError:
+            # A closed loop has no live waiter to wake. Keep the synchronous result
+            # available for terminal arbitration and lifecycle cleanup.
+            return
+
+    def _deliver(self, request_id: str) -> None:
+        """Set an asyncio future only from its owning event-loop thread."""
+        with self._lock:
+            future = self._futures.get(request_id)
+            if future is None or request_id not in self._results:
+                return
+            outcome = self._results[request_id]
+        if not future.done():
             future.set_result(outcome)
 
     def cancel_for_session(self, session_key: tuple[str, ...]) -> int:
         """模式切换：把该精确会话上下文下的 pending 等待按 None 唤醒。"""
-        return self._cancel(
-            [rid for rid, (sk, _o) in self._meta.items() if sk == session_key]
-        )
+        with self._lock:
+            request_ids = [rid for rid, (sk, _o, _t) in self._meta.items() if sk == session_key]
+        return self._cancel(request_ids)
 
     def cancel_for_owned_session(self, owner_account_id: str, session_id: str) -> int:
         """真正会话结束：跨 workspace key 清理 owner/session 的等待方。"""
         owner = str(owner_account_id).strip()
         session = str(session_id).strip()
-        return self._cancel(
-            [
+        with self._lock:
+            request_ids = [
                 rid
-                for rid, (key, request_owner) in self._meta.items()
+                for rid, (key, request_owner, _task) in self._meta.items()
                 if request_owner == owner and len(key) >= 4 and key[3] == session
             ]
-        )
+        return self._cancel(request_ids)
+
+    def cancel_for_task(self, owner_account_id: str, session_id: str, task_id: str) -> int:
+        owner = str(owner_account_id).strip()
+        session = str(session_id).strip()
+        task = str(task_id).strip()
+        if not owner or not session or not task:
+            return 0
+        with self._lock:
+            request_ids = [
+                rid
+                for rid, (key, request_owner, request_task) in self._meta.items()
+                if request_owner == owner
+                and request_task == task
+                and len(key) >= 4
+                and key[3] == session
+            ]
+        return self._cancel(request_ids)
 
     def cancel_for_owner(self, owner_account_id: str) -> int:
         owner = str(owner_account_id).strip()
-        return self._cancel([rid for rid, (_sk, o) in self._meta.items() if o == owner])
+        with self._lock:
+            request_ids = [rid for rid, (_sk, o, _task) in self._meta.items() if o == owner]
+        return self._cancel(request_ids)
 
     def _cancel(self, request_ids: list[str]) -> int:
         for rid in request_ids:
             self.resolve(rid, None)
         return len(request_ids)
+
+    def _cleanup(self, request_id: str) -> None:
+        with self._lock:
+            self._cleanup_locked(request_id)
+
+    def _cleanup_locked(self, request_id: str) -> None:
+        self._futures.pop(request_id, None)
+        self._loops.pop(request_id, None)
+        self._results.pop(request_id, None)
+        self._meta.pop(request_id, None)
 
 
 class SecurityApprovalService:
@@ -126,12 +255,19 @@ class SecurityApprovalService:
         audit: SQLiteSecurityAudit,
         *,
         db_path: str | Path,
+        approval_ui_available: Callable[[], bool] | None = None,
+        approval_config: GranularApprovalConfig | None = None,
+        alerts: SecurityAlertRegistry | None = None,
     ) -> None:
         self.approvals = approvals
         self.grants = grants
+        self.permission_approvals = PermissionApprovalManager(grants)
         self.rules = rules
         self.audit = audit
         self.db_path = Path(db_path)
+        self._approval_ui_available = approval_ui_available or _current_approval_ui_available
+        self._approval_config = approval_config or GranularApprovalConfig()
+        self.alerts = alerts
         self._mode_lock = threading.Lock()
         # Serializes approval-decide (grant issue → durable audit → rollback) against
         # grant consumption in authorize_*. Without this, a concurrent authorize could
@@ -141,16 +277,56 @@ class SecurityApprovalService:
         # 阻塞等待中的工具调用；decide/撤销时唤醒。把"审批请求"与"工具执行"重新接通，
         # 否则工具只能抛 ToolError 让模型复述，污染正文且 turn 结束后无人恢复。
         self._waiters = _ApprovalWaiter()
+        self._permission_waiters = _ApprovalWaiter()
         self._session_modes: dict[tuple[str, str, str, str], ConversationPermissionMode] = {}
         self._recent_rejections: dict[tuple[str, str, str, str], float] = {}
+        # Last-observer disconnect is a resumable transport boundary: pending
+        # decisions and transient grants are revoked, and no new authority may
+        # be issued until an authenticated socket subscribes again.
+        self._frozen_sessions: set[tuple[str, str]] = set()
 
-    def set_mode(self, context: SecurityContext, mode: ConversationPermissionMode) -> bool:
-        """Set one conversation mode without revoking prior SESSION grants.
+    def set_alerts(self, alerts: SecurityAlertRegistry | None) -> None:
+        """Attach the owner/admin alert kill switch after host callbacks exist."""
+        self.alerts = alerts
 
-        Returns whether the mode changed.  A change invalidates only pending
-        decisions from the old policy; the Gateway uses the return value to stop
-        the current turn so its captured ProcessLaunch cannot outlive the switch.
+    def _alert_denial_source(self, context: SecurityContext) -> str | None:
+        if self.alerts is None:
+            return None
+        source = self.alerts.should_deny(
+            context.owner_account_id,
+            context.session_id,
+            context.task_id,
+        )
+        return source or None
+
+    def set_mode(
+        self,
+        context: SecurityContext,
+        mode: ConversationPermissionMode,
+        *,
+        source: str = "gateway_owner",
+        reason: str = "",
+    ) -> bool:
+        """Durably audit a mode transition, then revoke the old session authority.
+
+        The Gateway uses the return value to freeze the current turn. Revoking
+        pending requests and transient grants here prevents a retry captured under
+        the old policy from becoming authority after the switch.
         """
+        if not isinstance(mode, ConversationPermissionMode):
+            raise ValueError(f"未知对话安全模式: {mode!r}")
+        normalized_source = _bounded_mode_metadata(
+            source,
+            "mode source",
+            128,
+            allow_empty=False,
+        )
+        normalized_reason = _bounded_mode_metadata(
+            reason,
+            "mode reason",
+            1000,
+            allow_empty=True,
+        )
         key = _session_key(context)
         with self._decision_lock:
             with self._mode_lock:
@@ -160,13 +336,63 @@ class SecurityApprovalService:
                 )
                 if previous is mode:
                     return False
-                self._session_modes[key] = mode
-            # pending 属于旧模式，必须按拒绝唤醒；显式 SESSION grant 属于对话，不在此撤销。
-            # Held under _decision_lock so a concurrent decide() cannot publish a grant
-            # between the mode flip and the pending sweep (mode-switch race, H-6).
+            self.audit.record(
+                AuditEvent.for_mode_change(
+                    context,
+                    previous_mode=previous.value,
+                    current_mode=mode.value,
+                    decision_source=normalized_source,
+                    reason=normalized_reason,
+                )
+            )
+            # Held under _decision_lock so a concurrent decide() cannot publish a
+            # grant between the terminal sweep and the mode publication.
             self.approvals.revoke_pending_session(context)
+            self.permission_approvals.revoke_pending_session(context)
+            self.grants.revoke_context_session(context)
             self._waiters.cancel_for_session(key)
+            self._permission_waiters.cancel_for_session(key)
+            with self._mode_lock:
+                self._session_modes[key] = mode
             return True
+
+    def freeze_session(self, owner_account_id: str, session_id: str) -> int:
+        """Freeze a disconnected session and revoke every transient authority."""
+
+        owner = str(owner_account_id).strip()
+        session = str(session_id).strip()
+        if not owner or not session:
+            return 0
+        with self._decision_lock:
+            self._frozen_sessions.add((owner, session))
+            self._waiters.cancel_for_owned_session(owner, session)
+            self._permission_waiters.cancel_for_owned_session(owner, session)
+            return (
+                self.approvals.end_owned_session(owner, session)
+                + self.permission_approvals.end_owned_session(owner, session)
+                + self.grants.revoke_owned_session(owner, session)
+            )
+
+    def resume_session(self, owner_account_id: str, session_id: str) -> bool:
+        """Resume only after a newly authenticated socket claims the session."""
+
+        owner = str(owner_account_id).strip()
+        session = str(session_id).strip()
+        if not owner or not session:
+            return False
+        with self._decision_lock:
+            was_frozen = (owner, session) in self._frozen_sessions
+            self._frozen_sessions.discard((owner, session))
+            return was_frozen
+
+    def session_is_frozen(self, owner_account_id: str, session_id: str) -> bool:
+        owner = str(owner_account_id).strip()
+        session = str(session_id).strip()
+        with self._decision_lock:
+            return (owner, session) in self._frozen_sessions
+
+    def _context_is_frozen(self, context: SecurityContext) -> bool:
+        return (context.owner_account_id, context.session_id) in self._frozen_sessions
 
     def end_session(self, owner_account_id: str, session_id: str) -> int:
         """Revoke transient authority when an authenticated session truly ends."""
@@ -175,11 +401,10 @@ class SecurityApprovalService:
         if not owner or not session:
             return 0
         with self._decision_lock:
+            self._frozen_sessions.discard((owner, session))
             with self._mode_lock:
                 mode_keys = [
-                    key
-                    for key in self._session_modes
-                    if key[1] == owner and key[3] == session
+                    key for key in self._session_modes if key[1] == owner and key[3] == session
                 ]
                 for key in mode_keys:
                     self._session_modes.pop(key, None)
@@ -189,7 +414,29 @@ class SecurityApprovalService:
                 if not (key[0] == owner and key[2] == session)
             }
             self._waiters.cancel_for_owned_session(owner, session)
-            return len(mode_keys) + self.approvals.end_owned_session(owner, session)
+            self._permission_waiters.cancel_for_owned_session(owner, session)
+            return (
+                len(mode_keys)
+                + self.approvals.end_owned_session(owner, session)
+                + self.permission_approvals.end_owned_session(owner, session)
+                + self.grants.revoke_owned_session(owner, session)
+            )
+
+    def end_task(self, owner_account_id: str, session_id: str, task_id: str) -> int:
+        """Revoke turn-scoped capabilities and wake pending requests on turn end."""
+        owner = str(owner_account_id).strip()
+        session = str(session_id).strip()
+        task = str(task_id).strip()
+        if not owner or not session or not task:
+            return 0
+        with self._decision_lock:
+            self._waiters.cancel_for_task(owner, session, task)
+            self._permission_waiters.cancel_for_task(owner, session, task)
+            return (
+                self.approvals.revoke_pending_task(owner, session, task)
+                + self.grants.revoke_task_identity(owner, session, task)
+                + self.permission_approvals.revoke_pending_task(owner, session, task)
+            )
 
     def mode_for(self, context: SecurityContext) -> ConversationPermissionMode:
         with self._mode_lock:
@@ -198,21 +445,250 @@ class SecurityApprovalService:
                 ConversationPermissionMode.REQUEST_APPROVAL,
             )
 
+    def _base_profile(self, context: SecurityContext):
+        return settings_for_mode(
+            self.mode_for(context),
+            context.workspace_root,
+            deny_entries=_protected_entries(context, self.db_path),
+            deny_globs=_protected_globs(context),
+        ).profile
+
     def revoke_owner(self, owner_account_id: str) -> int:
         """Drop owner-scoped in-memory modes, pending approvals, and transient grants."""
         owner = str(owner_account_id).strip()
         with self._decision_lock:
+            self._frozen_sessions = {key for key in self._frozen_sessions if key[0] != owner}
             with self._mode_lock:
                 mode_keys = [key for key in self._session_modes if key[1] == owner]
                 for key in mode_keys:
                     self._session_modes.pop(key, None)
             self._recent_rejections = {
-                key: expiry
-                for key, expiry in self._recent_rejections.items()
-                if key[0] != owner
+                key: expiry for key, expiry in self._recent_rejections.items() if key[0] != owner
             }
             self._waiters.cancel_for_owner(owner)
-            return len(mode_keys) + self.approvals.revoke_owner(owner)
+            self._permission_waiters.cancel_for_owner(owner)
+            return (
+                len(mode_keys)
+                + self.approvals.revoke_owner(owner)
+                + self.permission_approvals.revoke_owner(owner)
+                + self.grants.revoke_owner(owner)
+            )
+
+    def request_permissions(
+        self,
+        context: SecurityContext,
+        permissions: AdditionalPermissionProfile,
+        *,
+        reason: str = "",
+        tool_name: str = "request_permissions",
+    ) -> dict:
+        with self._decision_lock:
+            return self._request_permissions_locked(
+                context,
+                permissions,
+                reason=reason,
+                tool_name=tool_name,
+            )
+
+    def _request_permissions_locked(
+        self,
+        context: SecurityContext,
+        permissions: AdditionalPermissionProfile,
+        *,
+        reason: str = "",
+        tool_name: str = "request_permissions",
+    ) -> dict:
+        """Create a Codex-style capability request for the current turn."""
+        if self._context_is_frozen(context):
+            raise ApprovalError("会话连接已断开，重新认证连接后才能请求权限", terminal=True)
+        alert_source = self._alert_denial_source(context)
+        if alert_source is not None:
+            self.audit.record_permission(
+                context,
+                normalize_additional_permissions(permissions),
+                action_type="permission_decision",
+                decision="reject",
+                decision_source=alert_source,
+                approval_mode=self.mode_for(context).value,
+                tool_name=tool_name,
+                granted_permissions=AdditionalPermissionProfile(),
+                reason=reason,
+            )
+            raise ApprovalError("安全告警已触发，权限请求自动拒绝", terminal=True)
+        normalized = normalize_additional_permissions(permissions)
+        if self.mode_for(context) is ConversationPermissionMode.READ_ONLY and any(
+            entry.access is FilesystemAccess.READ_WRITE for entry in normalized.filesystem
+        ):
+            raise ApprovalError("只读模式不可升级为文件写入权限", terminal=True)
+        if normalized.allow_local_binding and os.name == "nt":
+            raise ApprovalError("当前 Windows 原生运行时不支持本地端口监听授权")
+        if not _additional_permissions_safe(context, normalized, self.db_path):
+            raise ApprovalError("额外权限包含不可升级的运行时路径")
+        if not self._has_approval_ui(ApprovalChannel.PERMISSION):
+            self.audit.record_permission(
+                context,
+                normalized,
+                action_type="permission_decision",
+                decision="reject",
+                decision_source=self._approval_denial_source(ApprovalChannel.PERMISSION),
+                approval_mode=self.mode_for(context).value,
+                tool_name=tool_name,
+                granted_permissions=AdditionalPermissionProfile(),
+                reason=reason,
+            )
+            raise ApprovalError("当前没有可用审批界面，权限请求已自动拒绝", terminal=True)
+        request, created = self.permission_approvals.create_or_get(
+            context,
+            normalized,
+            reason=reason,
+            tool_name=tool_name,
+        )
+        public = _public_permission_request(request)
+        self._permission_waiters.register(
+            request.request_id,
+            session_key=_session_key(context),
+            owner_account_id=context.owner_account_id,
+            task_id=context.task_id,
+        )
+        if not created:
+            return public
+        try:
+            self.audit.record_permission(
+                replace(context, request_id=request.request_id),
+                normalized,
+                action_type="permission_requested",
+                decision="pending",
+                decision_source="gateway",
+                approval_mode=self.mode_for(context).value,
+                tool_name=request.tool_name,
+                granted_permissions=AdditionalPermissionProfile(),
+                reason=request.reason,
+            )
+        except Exception:
+            self.permission_approvals.cancel(request.request_id, context)
+            self._permission_waiters.resolve(request.request_id, None)
+            raise
+        if not self._push_pending_approval(context, public) and not self._has_approval_ui(
+            ApprovalChannel.PERMISSION
+        ):
+            self.permission_approvals.cancel(request.request_id, context)
+            self._permission_waiters.resolve(request.request_id, None)
+            self.audit.record_permission(
+                replace(context, request_id=request.request_id),
+                normalized,
+                action_type="permission_decision",
+                decision="reject",
+                decision_source=self._approval_denial_source(ApprovalChannel.PERMISSION),
+                approval_mode=self.mode_for(context).value,
+                tool_name=request.tool_name,
+                granted_permissions=AdditionalPermissionProfile(),
+                reason=request.reason,
+            )
+            raise ApprovalError("审批界面不可用，权限请求已自动拒绝", terminal=True)
+        return public
+
+    def pending_permissions(self, context: SecurityContext) -> list[dict]:
+        return [
+            _public_permission_request(request)
+            for request in self.permission_approvals.list_pending(context)
+        ]
+
+    def decide_permissions(
+        self,
+        context: SecurityContext,
+        *,
+        request_id: str,
+        nonce: str,
+        decision: ApprovalDecision,
+        granted_permissions: AdditionalPermissionProfile | None = None,
+    ) -> dict:
+        with self._decision_lock:
+            if self._context_is_frozen(context):
+                raise ApprovalError("会话连接已断开，旧审批不可继续", terminal=True)
+            try:
+                outcome = self.permission_approvals.decide(
+                    request_id,
+                    nonce,
+                    decision,
+                    context,
+                    granted_permissions=granted_permissions,
+                )
+            except ApprovalError as exc:
+                if exc.terminal:
+                    self._permission_waiters.resolve(request_id, None)
+                raise
+            try:
+                self.audit.record_permission(
+                    replace(context, request_id=outcome.request.request_id),
+                    outcome.request.requested_permissions,
+                    action_type="permission_decision",
+                    decision=outcome.decision.value,
+                    decision_source="desktop_user",
+                    rule_scope=outcome.scope.value if outcome.scope else "",
+                    approval_mode=self.mode_for(context).value,
+                    tool_name=outcome.request.tool_name,
+                    granted_permissions=outcome.granted_permissions,
+                    reason=outcome.request.reason,
+                )
+            except Exception:
+                if outcome.grant is not None:
+                    self.grants.revoke_permission(outcome.grant.grant_id)
+                self._permission_waiters.resolve(outcome.request.request_id, None)
+                raise
+            self._permission_waiters.resolve(outcome.request.request_id, outcome)
+            return {
+                "status": "authorized" if outcome.grant is not None else "rejected",
+                "decision": outcome.decision.value,
+                "scope": outcome.scope.value if outcome.scope else "turn",
+                "permissions": serialize_additional_permissions(outcome.granted_permissions),
+            }
+
+    async def await_permission_decision(self, request_id: str):
+        try:
+            outcome = await self._permission_waiters.wait(request_id)
+        except asyncio.CancelledError:
+            with self._decision_lock:
+                request = self.permission_approvals.cancel_pending(request_id)
+                if request is not None:
+                    self._permission_waiters.resolve(request_id, None)
+                    self._permission_waiters.take_result(request_id)
+                    self.audit.record_permission(
+                        _context_for_permission_request(request),
+                        request.requested_permissions,
+                        action_type="permission_decision",
+                        decision="reject",
+                        decision_source="permission_cancelled",
+                        approval_mode=self.mode_for(_context_for_permission_request(request)).value,
+                        tool_name=request.tool_name,
+                        granted_permissions=AdditionalPermissionProfile(),
+                        reason=request.reason,
+                    )
+            raise
+        if outcome is not None:
+            return outcome
+        with self._decision_lock:
+            resolved, raced = self._permission_waiters.take_result(request_id)
+            if resolved:
+                return raced
+            request = self.permission_approvals.cancel_pending(request_id)
+            if request is None:
+                resolved, raced = self._permission_waiters.take_result(request_id)
+                return raced if resolved else None
+            self._permission_waiters.resolve(request_id, None)
+            self._permission_waiters.take_result(request_id)
+            request_context = _context_for_permission_request(request)
+            self.audit.record_permission(
+                request_context,
+                request.requested_permissions,
+                action_type="permission_decision",
+                decision="reject",
+                decision_source="permission_timeout",
+                approval_mode=self.mode_for(request_context).value,
+                tool_name=request.tool_name,
+                granted_permissions=AdditionalPermissionProfile(),
+                reason=request.reason,
+            )
+        return None
 
     def request_fake_execution(
         self,
@@ -237,14 +713,70 @@ class SecurityApprovalService:
         tool_name: str,
         risk_class: str,
         preview: str = "",
+        additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
+    ) -> dict:
+        with self._decision_lock:
+            return self._request_action_locked(
+                context,
+                action,
+                tool_name=tool_name,
+                risk_class=risk_class,
+                preview=preview,
+                additional_permissions=additional_permissions,
+            )
+
+    def _request_action_locked(
+        self,
+        context: SecurityContext,
+        action: NormalizedAction,
+        *,
+        tool_name: str,
+        risk_class: str,
+        preview: str = "",
+        additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
     ) -> dict:
         """Create or reuse one exact pending request without performing the action."""
+        if self._context_is_frozen(context):
+            raise ApprovalError("会话连接已断开，重新认证连接后才能请求审批", terminal=True)
+        channel = _approval_channel_for_action(action)
+        base_profile = self._base_profile(context)
+        effective_additional_permissions = merge_additional_permissions(
+            self.grants.additional_permissions(context),
+            additional_permissions,
+        )
+        effective_profile = replace(
+            base_profile,
+            filesystem=(*base_profile.filesystem, *effective_additional_permissions.filesystem),
+            network_entries=(*base_profile.network_entries, *effective_additional_permissions.network),
+            allow_local_binding=(
+                base_profile.allow_local_binding
+                or effective_additional_permissions.allow_local_binding
+            ),
+        )
+        if not self._has_approval_ui(channel):
+            self.audit.record(
+                AuditEvent.for_action(
+                    context,
+                    action,
+                    action_type="approval_decision",
+                    decision="reject",
+                    decision_source=self._approval_denial_source(channel),
+                    permission_profile_hash=_permission_profile_hash(base_profile),
+                    approval_mode=self.mode_for(context).value,
+                    tool_name=tool_name,
+                    additional_permissions_summary=_permissions_summary(additional_permissions),
+                )
+            )
+            raise ApprovalError("当前没有可用审批界面，请求已自动拒绝", terminal=True)
         request, created = self.approvals.create_or_get(
             context,
             action,
             tool_name,
+            base_profile_hash=_permission_profile_hash(self._base_profile(context)),
             risk_class=risk_class,
             preview=preview,
+            additional_permissions=additional_permissions,
+            effective_profile=effective_profile,
         )
         # Register even for a reused request. The prior caller may have timed out or
         # been cancelled while the approval itself remains pending; a new caller must
@@ -253,23 +785,47 @@ class SecurityApprovalService:
             request.request_id,
             session_key=_session_key(context),
             owner_account_id=context.owner_account_id,
+            task_id=context.task_id,
         )
         if not created:
             return _public_request(request, include_nonce=True)
         event_context = replace(context, request_id=request.request_id)
-        self.audit.record(
-            AuditEvent.for_action(
-                event_context,
-                action,
-                action_type="approval_requested",
-                decision="pending",
-                decision_source="gateway",
-                approval_mode=self.mode_for(context).value,
-                tool_name=tool_name,
+        try:
+            self.audit.record(
+                AuditEvent.for_action(
+                    event_context,
+                    action,
+                    action_type="approval_requested",
+                    decision="pending",
+                    decision_source="gateway",
+                    permission_profile_hash=request.base_profile_hash,
+                    approval_mode=self.mode_for(context).value,
+                    tool_name=tool_name,
+                    additional_permissions_summary=_permissions_summary(additional_permissions),
+                )
             )
-        )
+        except Exception:
+            self.approvals.cancel(request.request_id, context)
+            self._waiters.resolve(request.request_id, None)
+            raise
         public = _public_request(request, include_nonce=True)
-        self._push_pending_approval(context, public)
+        if not self._push_pending_approval(context, public) and not self._has_approval_ui(channel):
+            self.approvals.cancel(request.request_id, context)
+            self._waiters.resolve(request.request_id, None)
+            self.audit.record(
+                AuditEvent.for_action(
+                    event_context,
+                    action,
+                    action_type="approval_decision",
+                    decision="reject",
+                    decision_source=self._approval_denial_source(channel),
+                    permission_profile_hash=request.base_profile_hash,
+                    approval_mode=self.mode_for(context).value,
+                    tool_name=tool_name,
+                    additional_permissions_summary=_permissions_summary(additional_permissions),
+                )
+            )
+            raise ApprovalError("审批界面不可用，请求已自动拒绝", terminal=True)
         return public
 
     def authorize_file_action(
@@ -281,8 +837,39 @@ class SecurityApprovalService:
         preview: str = "",
     ) -> tuple[FilePolicyResult, str, dict | None]:
         """Evaluate base policy, explicit rules, grants, and auto-review in order."""
+        if self.session_is_frozen(context.owner_account_id, context.session_id):
+            self._audit_file(context, action, "deny", "session_disconnected", tool_name)
+            return FilePolicyResult.DENY, "session_disconnected", None
+        alert_source = self._alert_denial_source(context)
+        if alert_source is not None:
+            self._audit_file(context, action, "deny", alert_source, tool_name)
+            return FilePolicyResult.DENY, "安全告警已触发，请求自动拒绝", None
         mode = self.mode_for(context)
-        assessment = assess_file_action(context, action, mode, db_path=self.db_path)
+        base_profile = self._base_profile(context)
+        requested_permissions = permissions_needed_for_action(base_profile, action)
+        active_permissions = self.grants.additional_permissions(context)
+        target = Path(action.path).expanduser().resolve(strict=False)
+        operation = (
+            FilesystemOperation.READ if action.operation == "read" else FilesystemOperation.WRITE
+        )
+        if mode is ConversationPermissionMode.READ_ONLY and operation is FilesystemOperation.WRITE:
+            self._audit_file(context, action, "deny", "read_only_mode", tool_name)
+            return FilePolicyResult.DENY, "只读模式禁止文件写入", None
+        if not requested_permissions.filesystem and not filesystem_operation_allowed(
+            base_profile, active_permissions, target, operation
+        ):
+            self._audit_file(context, action, "deny", "ungrantable_permissions", tool_name)
+            return FilePolicyResult.DENY, "目标路径无法映射为安全的额外权限根", None
+        if not _additional_permissions_safe(context, requested_permissions, self.db_path):
+            self._audit_file(context, action, "deny", "immutable_policy", tool_name)
+            return FilePolicyResult.DENY, "目标权限范围包含不可升级的运行时路径", None
+        assessment = assess_file_action(
+            context,
+            action,
+            mode,
+            db_path=self.db_path,
+            additional=active_permissions,
+        )
         if assessment.result is FilePolicyResult.DENY:
             self._audit_file(context, action, "deny", "immutable_policy", tool_name)
             return assessment.result, assessment.reason, None
@@ -296,6 +883,15 @@ class SecurityApprovalService:
         # that this authorize matches before its durable audit commits, then roll it
         # back after execution has already started (H-7).
         with self._decision_lock:
+            if self._context_is_frozen(context):
+                self._audit_file(
+                    context,
+                    action,
+                    "deny",
+                    "session_disconnected",
+                    tool_name,
+                )
+                return FilePolicyResult.DENY, "session_disconnected", None
             rules = self.rules.list(
                 os_user=context.os_user,
                 owner_account_id=context.owner_account_id,
@@ -307,27 +903,58 @@ class SecurityApprovalService:
                 self._audit_file(context, action, "deny", "always_deny_rule", tool_name)
                 return FilePolicyResult.DENY, "persistent_deny_rule", None
             if assessment.result is FilePolicyResult.ALLOW:
-                self._audit_file(context, action, "allow", "base_profile", tool_name)
+                self._audit_file(
+                    context,
+                    action,
+                    "allow",
+                    "granted_permissions" if active_permissions.filesystem else "base_profile",
+                    tool_name,
+                    additional_permissions=active_permissions,
+                )
                 return assessment.result, assessment.reason, None
 
             selected = choose_rule(rules, action)
-            if selected is not None and selected.decision is RuleDecision.ALLOW:
+            if (
+                selected is not None
+                and selected.decision is RuleDecision.ALLOW
+                and not _has_additional_permissions(requested_permissions)
+            ):
                 self._audit_file(context, action, "allow", "always_rule", tool_name)
                 return FilePolicyResult.ALLOW, "always_rule", None
             grant = self.grants.authorize_action(context, action)
             if grant is not None:
-                self._audit_file(context, action, "allow", "runtime_grant", tool_name)
+                self._audit_file(
+                    context,
+                    action,
+                    "allow",
+                    "runtime_grant",
+                    tool_name,
+                    additional_permissions=grant.additional_permissions,
+                )
                 return FilePolicyResult.ALLOW, "runtime_grant", None
 
         # AUTO_REVIEW no longer treats every host-external read as low risk. Without
         # a proven public-file classifier that would include SSH/cloud/browser
         # credentials. Exact rules/session grants still bypass prompts above.
+        if not self._has_approval_ui(ApprovalChannel.FILE):
+            self._audit_file(
+                context,
+                action,
+                "deny",
+                self._approval_denial_source(ApprovalChannel.FILE),
+                tool_name,
+                additional_permissions=requested_permissions,
+            )
+            return FilePolicyResult.DENY, "当前没有可用审批界面，已自动拒绝", None
         request = self.request_action(
             context,
             action,
             tool_name=tool_name,
-            risk_class="external_file_write" if action.operation != "read" else "external_file_read",
+            risk_class="external_file_write"
+            if action.operation != "read"
+            else "external_file_read",
             preview=preview,
+            additional_permissions=requested_permissions,
         )
         return FilePolicyResult.REQUIRE_APPROVAL, assessment.reason, request
 
@@ -348,11 +975,50 @@ class SecurityApprovalService:
         forbids judging by command name. They are enforced by (a) the file-side policy
         for structured file tools (``file_policy`` denies writes/deletes on protected
         roots) and (b) the native OS sandbox + process-tree kill + wall timeout for
-        arbitrary exec, uniformly across modes including FULL_ACCESS. Until the native
-        runtime is wired, arbitrary-shell hardlines are not yet enforced — that is a
-        runtime task (P3/P4), not a gap in this function's contract.
+        arbitrary exec, uniformly across modes including FULL_ACCESS. The native
+        runtime is the enforcement boundary; this method must not replace it with
+        command-string heuristics.
         """
+        if self.session_is_frozen(context.owner_account_id, context.session_id):
+            self._audit_exec(context, action, "deny", "session_disconnected", tool_name)
+            return False, None
+        alert_source = self._alert_denial_source(context)
+        if alert_source is not None:
+            self._audit_exec(context, action, "deny", alert_source, tool_name)
+            return False, None
         mode = self.mode_for(context)
+        requires_fresh_confirmation = risk_class == "dangerous_command"
+        base_profile = self._base_profile(context)
+        active_permissions = self.grants.additional_permissions(context)
+        effective_profile = replace(
+            base_profile,
+            filesystem=(*base_profile.filesystem, *active_permissions.filesystem),
+            network_entries=(*base_profile.network_entries, *active_permissions.network),
+            allow_local_binding=(
+                base_profile.allow_local_binding or active_permissions.allow_local_binding
+            ),
+        )
+        requested_permissions = exec_permissions_needed_for_action(effective_profile, action)
+        if mode is ConversationPermissionMode.READ_ONLY and any(
+            entry.access is FilesystemAccess.READ_WRITE
+            for entry in requested_permissions.filesystem
+        ):
+            self._audit_exec(context, action, "deny", "read_only_mode", tool_name)
+            return False, None
+        mutation_targets = inferred_exec_mutation_targets(action)
+        if not requested_permissions.filesystem and exec_mutation_permissions_ungrantable(
+            effective_profile, mutation_targets
+        ):
+            self._audit_exec(context, action, "deny", "ungrantable_permissions", tool_name)
+            return False, None
+        if not _additional_permissions_safe(
+            context,
+            requested_permissions,
+            self.db_path,
+            mutation_targets=mutation_targets,
+        ):
+            self._audit_exec(context, action, "deny", "immutable_policy", tool_name)
+            return False, None
         if self._rejection_cooldown_active(context, action):
             self._audit_exec(context, action, "deny", "recent_user_rejection", tool_name)
             return False, None
@@ -361,6 +1027,15 @@ class SecurityApprovalService:
         # end_session/logout terminal sweep so a grant published in the issue window
         # cannot be consumed after the session ended (H-6).
         with self._decision_lock:
+            if self._context_is_frozen(context):
+                self._audit_exec(
+                    context,
+                    action,
+                    "deny",
+                    "session_disconnected",
+                    tool_name,
+                )
+                return False, None
             rules = self.rules.list(
                 os_user=context.os_user,
                 owner_account_id=context.owner_account_id,
@@ -369,27 +1044,152 @@ class SecurityApprovalService:
             if any(rule.decision is RuleDecision.DENY and rule.matches(action) for rule in rules):
                 self._audit_exec(context, action, "deny", "always_deny_rule", tool_name)
                 return False, None
-            if mode is ConversationPermissionMode.FULL_ACCESS:
+            if (
+                mode is ConversationPermissionMode.FULL_ACCESS
+                and not requires_fresh_confirmation
+                and not _has_additional_permissions(requested_permissions)
+            ):
                 self._audit_exec(context, action, "allow", "full_access", tool_name)
                 return True, None
             selected = choose_rule(rules, action)
-            if selected is not None and selected.decision is RuleDecision.ALLOW:
+            if (
+                selected is not None
+                and selected.decision is RuleDecision.ALLOW
+                and not requires_fresh_confirmation
+                and not _has_additional_permissions(requested_permissions)
+            ):
                 self._audit_exec(context, action, "allow", "always_rule", tool_name)
                 return True, None
-            if self.grants.authorize_action(context, action) is not None:
-                self._audit_exec(context, action, "allow", "runtime_grant", tool_name)
-                return True, None
-        if auto_allow:
+            grant = self.grants.authorize_action(context, action)
+            if grant is not None and (
+                not requires_fresh_confirmation or grant.scope is RuleScope.ONCE
+            ):
+                self._audit_exec(
+                    context,
+                    action,
+                    "allow",
+                    "runtime_grant",
+                    tool_name,
+                    additional_permissions=grant.additional_permissions,
+                )
+                return True, {"additional_permissions": grant.additional_permissions}
+        if (
+            auto_allow
+            and not requires_fresh_confirmation
+            and not _has_additional_permissions(requested_permissions)
+        ):
             self._audit_exec(context, action, "allow", "auto_review", tool_name)
             return True, None
+        if not self._has_approval_ui(ApprovalChannel.EXEC):
+            self._audit_exec(
+                context,
+                action,
+                "deny",
+                self._approval_denial_source(ApprovalChannel.EXEC),
+                tool_name,
+                additional_permissions=requested_permissions,
+            )
+            return False, None
         request = self.request_action(
             context,
             action,
             tool_name=tool_name,
             risk_class=risk_class,
+            additional_permissions=requested_permissions,
         )
-        self._audit_exec(context, action, "ask", "approval_required", tool_name)
+        self._audit_exec(
+            context,
+            action,
+            "ask",
+            "approval_required",
+            tool_name,
+            additional_permissions=requested_permissions,
+        )
         return False, request
+
+    def authorize_network_action(
+        self,
+        context: SecurityContext,
+        action: NormalizedAction,
+        *,
+        tool_name: str,
+    ) -> tuple[FilePolicyResult, str, dict | None]:
+        """Authorize one exact network destination before host-mediated I/O."""
+        if action.kind is not ActionKind.NETWORK:
+            raise ValueError("网络授权动作类型无效")
+        if self.session_is_frozen(context.owner_account_id, context.session_id):
+            self._audit_network(context, action, "deny", "session_disconnected", tool_name)
+            return FilePolicyResult.DENY, "session_disconnected", None
+        alert_source = self._alert_denial_source(context)
+        if alert_source is not None:
+            self._audit_network(context, action, "deny", alert_source, tool_name)
+            return FilePolicyResult.DENY, "安全告警已触发，请求自动拒绝", None
+        base_profile = self._base_profile(context)
+        if network_operation_explicitly_denied(base_profile, action):
+            self._audit_network(
+                context,
+                action,
+                "deny",
+                "immutable_policy",
+                tool_name,
+            )
+            return FilePolicyResult.DENY, "网络目标被基础策略明确拒绝", None
+        requested_permissions = network_permissions_needed_for_action(base_profile, action)
+        if self._rejection_cooldown_active(context, action):
+            self._audit_network(context, action, "deny", "recent_user_rejection", tool_name)
+            return FilePolicyResult.DENY, "recent_user_rejection", None
+        with self._decision_lock:
+            if self._context_is_frozen(context):
+                self._audit_network(
+                    context,
+                    action,
+                    "deny",
+                    "session_disconnected",
+                    tool_name,
+                )
+                return FilePolicyResult.DENY, "session_disconnected", None
+            active_permissions = self.grants.additional_permissions(context)
+            rules = self.rules.list(
+                os_user=context.os_user,
+                owner_account_id=context.owner_account_id,
+                workspace_id=context.workspace_id,
+            )
+            if any(rule.decision is RuleDecision.DENY and rule.matches(action) for rule in rules):
+                self._audit_network(context, action, "deny", "always_deny_rule", tool_name)
+                return FilePolicyResult.DENY, "persistent_deny_rule", None
+            if network_operation_allowed(base_profile, active_permissions, action):
+                self._audit_network(context, action, "allow", "base_or_granted", tool_name)
+                return FilePolicyResult.ALLOW, "base_or_granted", None
+            selected = choose_rule(rules, action)
+            if (
+                selected is not None
+                and selected.decision is RuleDecision.ALLOW
+                and not requested_permissions.network
+            ):
+                self._audit_network(context, action, "allow", "always_rule", tool_name)
+                return FilePolicyResult.ALLOW, "always_rule", None
+            grant = self.grants.authorize_action(context, action)
+            if grant is not None:
+                self._audit_network(context, action, "allow", "runtime_grant", tool_name)
+                return FilePolicyResult.ALLOW, "runtime_grant", None
+        if not self._has_approval_ui(ApprovalChannel.NETWORK):
+            self._audit_network(
+                context,
+                action,
+                "deny",
+                self._approval_denial_source(ApprovalChannel.NETWORK),
+                tool_name,
+            )
+            return FilePolicyResult.DENY, "当前没有可用审批界面，已自动拒绝", None
+        request = self.request_action(
+            context,
+            action,
+            tool_name=tool_name,
+            risk_class="network_request",
+            additional_permissions=requested_permissions,
+        )
+        self._audit_network(context, action, "ask", "approval_required", tool_name)
+        return FilePolicyResult.REQUIRE_APPROVAL, "网络目标未获授权", request
 
     def _audit_file(
         self,
@@ -398,6 +1198,7 @@ class SecurityApprovalService:
         decision: str,
         source: str,
         tool_name: str,
+        additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
     ) -> None:
         self.audit.record(
             AuditEvent.for_action(
@@ -408,10 +1209,33 @@ class SecurityApprovalService:
                 decision_source=source,
                 approval_mode=self.mode_for(context).value,
                 tool_name=tool_name,
+                additional_permissions_summary=_permissions_summary(additional_permissions),
             )
         )
 
     def _audit_exec(
+        self,
+        context: SecurityContext,
+        action: NormalizedAction,
+        decision: str,
+        source: str,
+        tool_name: str,
+        additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
+    ) -> None:
+        self.audit.record(
+            AuditEvent.for_action(
+                context,
+                action,
+                action_type="exec_decision",
+                decision=decision,
+                decision_source=source,
+                approval_mode=self.mode_for(context).value,
+                tool_name=tool_name,
+                additional_permissions_summary=_permissions_summary(additional_permissions),
+            )
+        )
+
+    def _audit_network(
         self,
         context: SecurityContext,
         action: NormalizedAction,
@@ -423,7 +1247,7 @@ class SecurityApprovalService:
             AuditEvent.for_action(
                 context,
                 action,
-                action_type="exec_decision",
+                action_type="network_decision",
                 decision=decision,
                 decision_source=source,
                 approval_mode=self.mode_for(context).value,
@@ -435,6 +1259,9 @@ class SecurityApprovalService:
         return [
             _public_request(request, include_nonce=include_nonce)
             for request in self.approvals.list_pending(context)
+        ] + [
+            _public_permission_request(request, include_nonce=include_nonce)
+            for request in self.permission_approvals.list_pending(context)
         ]
 
     async def await_decision(self, request_id: str) -> ApprovalOutcome | None:
@@ -445,7 +1272,60 @@ class SecurityApprovalService:
         这是把"审批请求"与"工具执行"重新接通的关键：工具不再抛 ToolError 让模型
         复述，而是挂起等待，决策到达后自然恢复 agent 循环。
         """
-        return await self._waiters.wait(request_id)
+        try:
+            outcome = await self._waiters.wait(request_id)
+        except asyncio.CancelledError:
+            with self._decision_lock:
+                request = self.approvals.cancel_pending(request_id)
+                if request is not None:
+                    self._waiters.resolve(request_id, None)
+                    self._waiters.take_result(request_id)
+                    request_context = _context_for_action_request(request)
+                    self.audit.record(
+                        AuditEvent.for_action(
+                            request_context,
+                            request.action,
+                            action_type="approval_decision",
+                            decision="reject",
+                            decision_source="approval_cancelled",
+                            permission_profile_hash=request.base_profile_hash,
+                            approval_mode=self.mode_for(request_context).value,
+                            tool_name=request.tool_name,
+                            additional_permissions_summary=_permissions_summary(
+                                request.additional_permissions
+                            ),
+                        )
+                    )
+            raise
+        if outcome is not None:
+            return outcome
+        with self._decision_lock:
+            resolved, raced = self._waiters.take_result(request_id)
+            if resolved:
+                return raced
+            request = self.approvals.cancel_pending(request_id)
+            if request is None:
+                resolved, raced = self._waiters.take_result(request_id)
+                return raced if resolved else None
+            self._waiters.resolve(request_id, None)
+            self._waiters.take_result(request_id)
+            request_context = _context_for_action_request(request)
+            self.audit.record(
+                AuditEvent.for_action(
+                    request_context,
+                    request.action,
+                    action_type="approval_decision",
+                    decision="reject",
+                    decision_source="approval_timeout",
+                    permission_profile_hash=request.base_profile_hash,
+                    approval_mode=self.mode_for(request_context).value,
+                    tool_name=request.tool_name,
+                    additional_permissions_summary=_permissions_summary(
+                        request.additional_permissions
+                    ),
+                )
+            )
+        return None
 
     def decide(
         self,
@@ -456,13 +1336,15 @@ class SecurityApprovalService:
         decision: ApprovalDecision,
         always_argv_prefix: Sequence[str] | None = None,
     ) -> dict:
-        """Apply one decision under the decision lock.
-
-        Holding the lock from grant issue through the durable audit (and any rollback)
-        guarantees no concurrent ``authorize_*`` can consume the grant before its audit
-        commits — closing the H-4 fail-closed rollback race. Fake-execution requests are
-        diagnostic only and may never create reusable production authority.
-        """
+        """Apply one decision under the decision lock."""
+        permission_request = self.permission_approvals.get_pending(request_id, context)
+        if permission_request is not None:
+            return self.decide_permissions(
+                context,
+                request_id=request_id,
+                nonce=nonce,
+                decision=decision,
+            )
         pending = self.approvals.get_pending(request_id, context)
         if (
             pending is not None
@@ -470,6 +1352,12 @@ class SecurityApprovalService:
             and decision in {ApprovalDecision.SESSION, ApprovalDecision.ALWAYS}
         ):
             raise ApprovalError("fake execution 只允许 once 或 reject")
+        if (
+            pending is not None
+            and pending.risk_class == "dangerous_command"
+            and decision not in {ApprovalDecision.ONCE, ApprovalDecision.REJECT}
+        ):
+            raise ApprovalError("高风险命令必须逐次批准")
         with self._decision_lock:
             try:
                 return self._decide_locked(
@@ -496,6 +1384,8 @@ class SecurityApprovalService:
         always_argv_prefix: Sequence[str] | None = None,
     ) -> dict:
         """Apply one decision and compensate grants/rules if durable audit fails."""
+        if self._context_is_frozen(context):
+            raise ApprovalError("会话连接已断开，旧审批不可继续", terminal=True)
         outcome = self.approvals.decide(
             request_id,
             nonce,
@@ -532,10 +1422,16 @@ class SecurityApprovalService:
                     rule_scope=(
                         persisted_rule.scope.value
                         if persisted_rule
-                        else outcome.grant.scope.value if outcome.grant else ""
+                        else outcome.grant.scope.value
+                        if outcome.grant
+                        else ""
                     ),
+                    permission_profile_hash=outcome.request.base_profile_hash,
                     approval_mode=self.mode_for(context).value,
                     tool_name=outcome.request.tool_name,
+                    additional_permissions_summary=_permissions_summary(
+                        outcome.request.additional_permissions
+                    ),
                 )
             )
             if persisted_rule is not None:
@@ -558,6 +1454,7 @@ class SecurityApprovalService:
                 )
             if outcome.grant is not None:
                 self.grants.revoke(outcome.grant.grant_id)
+            self._waiters.resolve(outcome.request.request_id, None)
             raise
         if outcome.decision is ApprovalDecision.REJECT:
             self._recent_rejections[_rejection_key(context, outcome.request.action)] = (
@@ -586,14 +1483,28 @@ class SecurityApprovalService:
                 return False
             return True
 
+    def _has_approval_ui(self, channel: ApprovalChannel) -> bool:
+        if not self._approval_config.allows(channel):
+            return False
+        try:
+            return bool(self._approval_ui_available())
+        except Exception:
+            log.exception("检查安全审批界面状态失败")
+            return False
+
+    def _approval_denial_source(self, channel: ApprovalChannel) -> str:
+        if not self._approval_config.allows(channel):
+            return "approval_channel_disabled"
+        return "approval_ui_unavailable"
+
     @staticmethod
-    def _push_pending_approval(context: SecurityContext, request: dict) -> None:
+    def _push_pending_approval(context: SecurityContext, request: dict) -> bool:
         """Wake the renderer immediately; polling remains the disconnect fallback."""
         from crew.core.runctx import current_push_fn
 
         push = current_push_fn.get()
         if push is None:
-            return
+            return False
         payload = {
             "kind": "security_approval",
             "session_id": context.session_id,
@@ -603,7 +1514,7 @@ class SecurityApprovalService:
             result = push(context.session_id, payload)
         except Exception:
             log.exception("安全审批主动推送失败")
-            return
+            return False
         if inspect.isawaitable(result):
 
             async def finish_push() -> None:
@@ -613,8 +1524,18 @@ class SecurityApprovalService:
                     log.exception("安全审批主动推送失败")
 
             asyncio.create_task(finish_push())
+        return True
 
     def set_rule_enabled(self, context: SecurityContext, rule_id: str, enabled: bool) -> bool:
+        with self._decision_lock:
+            return self._set_rule_enabled_locked(context, rule_id, enabled)
+
+    def _set_rule_enabled_locked(
+        self,
+        context: SecurityContext,
+        rule_id: str,
+        enabled: bool,
+    ) -> bool:
         """Mutate one owner rule and restore its previous state if audit fails."""
         current = self.rules.list(
             os_user=context.os_user,
@@ -654,6 +1575,10 @@ class SecurityApprovalService:
         return True
 
     def delete_rule(self, context: SecurityContext, rule_id: str) -> bool:
+        with self._decision_lock:
+            return self._delete_rule_locked(context, rule_id)
+
+    def _delete_rule_locked(self, context: SecurityContext, rule_id: str) -> bool:
         """Delete one owner rule, restoring it when durable audit cannot commit."""
         matches = [
             rule
@@ -731,17 +1656,132 @@ def _public_request(request, *, include_nonce: bool) -> dict:
         "action": action,
         "action_digest": request.action_digest,
         "tool_name": request.tool_name,
+        "risk_class": request.risk_class,
+        "additional_permissions": serialize_additional_permissions(request.additional_permissions),
+        "base_profile_hash": request.base_profile_hash,
+        **(
+            {"effective_permissions": _serialize_permission_profile(request.effective_profile)}
+            if request.effective_profile is not None
+            else {}
+        ),
         "workspace_id": request.workspace_id,
         "session_id": request.session_id,
         "task_id": request.task_id,
-        "risk_class": request.risk_class,
         "expires_in_seconds": max(0, int(request.expires_monotonic - request.created_monotonic)),
     }
     if request.preview:
         payload["preview"] = request.preview
     if include_nonce:
         payload["nonce"] = request.nonce
+    if request.effective_profile is not None and action.get("kind") == ActionKind.EXEC.value:
+        profile = request.effective_profile
+        payload["effect_disclosure"] = {
+            "filesystem_write_roots": [
+                str(entry.root)
+                for entry in profile.filesystem
+                if entry.access is FilesystemAccess.READ_WRITE
+            ],
+            "network_policy": profile.network.value,
+            "network_entries": serialize_additional_permissions(
+                AdditionalPermissionProfile(network=profile.network_entries)
+            )["network"],
+            "unknown_side_effects": True,
+        }
     return payload
+
+
+def _serialize_permission_profile(profile: PermissionProfile) -> dict:
+    return {
+        "kind": profile.kind.value,
+        "filesystem": [
+            {
+                "root": str(entry.root),
+                "access": entry.access.value,
+                "escalatable": entry.escalatable,
+            }
+            for entry in profile.filesystem
+        ],
+        "filesystem_globs": [
+            {
+                "root": str(entry.root),
+                "pattern": entry.pattern,
+                "access": entry.access.value,
+            }
+            for entry in profile.filesystem_globs
+        ],
+        "network_policy": profile.network.value,
+        "network": serialize_additional_permissions(
+            AdditionalPermissionProfile(network=profile.network_entries)
+        )["network"],
+        "allow_local_binding": profile.allow_local_binding,
+    }
+
+
+def _public_permission_request(request, *, include_nonce: bool = True) -> dict:
+    permissions = serialize_additional_permissions(request.requested_permissions)
+    payload = {
+        "request_type": "permission",
+        "request_id": request.request_id,
+        "action": {"kind": "permission", "operation": "grant"},
+        "action_digest": "",
+        "tool_name": request.tool_name,
+        "risk_class": "permission_request",
+        "reason": request.reason,
+        "additional_permissions": permissions,
+        "permissions": permissions,
+        "workspace_id": request.workspace_id,
+        "session_id": request.session_id,
+        "task_id": request.task_id,
+        "expires_in_seconds": max(0, int(request.expires_monotonic - request.created_monotonic)),
+    }
+    if include_nonce:
+        payload["nonce"] = request.nonce
+    return payload
+
+
+def _permissions_summary(value: AdditionalPermissionProfile) -> str:
+    if not value.filesystem and not value.network and not value.allow_local_binding:
+        return ""
+    return json.dumps(serialize_additional_permissions(value), ensure_ascii=False, sort_keys=True)
+
+
+def _has_additional_permissions(value: AdditionalPermissionProfile) -> bool:
+    return bool(value.filesystem or value.network or value.allow_local_binding)
+
+
+def _additional_permissions_safe(
+    context: SecurityContext,
+    value: AdditionalPermissionProfile,
+    db_path: str | Path,
+    *,
+    mutation_targets: tuple[Path, ...] = (),
+) -> bool:
+    """Reject extra roots that would turn a protected subtree into a writable root."""
+    protected = tuple(
+        entry.root for entry in _protected_entries(context, db_path) if not entry.escalatable
+    )
+    if any(_paths_overlap(root, target) for root in protected for target in mutation_targets):
+        return False
+    for entry in value.filesystem:
+        for root in protected:
+            try:
+                entry.root.relative_to(root)
+            except ValueError:
+                continue
+            return False
+    return True
+
+
+def _is_under(root: Path, target: Path) -> bool:
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return _is_under(left, right) or _is_under(right, left)
 
 
 def _session_key(context: SecurityContext) -> tuple[str, str, str, str]:
@@ -762,4 +1802,101 @@ def _rejection_key(
         context.workspace_id,
         context.session_id,
         action.digest,
+    )
+
+
+def _bounded_mode_metadata(
+    value: object,
+    field: str,
+    maximum: int,
+    *,
+    allow_empty: bool,
+) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} 必须是字符串")
+    normalized = value.strip()
+    if "\x00" in normalized or len(normalized) > maximum or (not allow_empty and not normalized):
+        raise ValueError(f"{field} 无效或超过 {maximum} 字符")
+    return normalized
+
+
+def _current_approval_ui_available() -> bool:
+    from crew.core.runctx import current_push_fn
+
+    return current_push_fn.get() is not None
+
+
+def _approval_channel_for_action(action: NormalizedAction) -> ApprovalChannel:
+    return {
+        ActionKind.EXEC: ApprovalChannel.EXEC,
+        ActionKind.FILE: ApprovalChannel.FILE,
+        ActionKind.NETWORK: ApprovalChannel.NETWORK,
+    }[action.kind]
+
+
+def _permission_profile_hash(profile: PermissionProfile) -> str:
+    payload = {
+        "kind": profile.kind.value,
+        "filesystem": [
+            {
+                "root": str(entry.root),
+                "access": entry.access.value,
+                "escalatable": entry.escalatable,
+            }
+            for entry in profile.filesystem
+        ],
+        "filesystem_globs": [
+            {
+                "root": str(entry.root),
+                "pattern": entry.pattern,
+                "access": entry.access.value,
+            }
+            for entry in profile.filesystem_globs
+        ],
+        "network": profile.network.value,
+        "network_entries": [
+            {
+                "host": entry.host,
+                "port": entry.port,
+                "protocol": entry.protocol,
+                "access": entry.access.value,
+                "allow_private": entry.allow_private,
+                "escalatable": entry.escalatable,
+            }
+            for entry in profile.network_entries
+        ],
+        "allow_local_binding": profile.allow_local_binding,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _context_for_action_request(request) -> SecurityContext:
+    return SecurityContext(
+        os_user=request.os_user,
+        owner_account_id=request.owner_account_id,
+        workspace_id=request.workspace_id,
+        workspace_root=request.workspace_root,
+        session_id=request.session_id,
+        request_id=request.request_id,
+        task_id=request.task_id,
+        cwd=Path(request.action.cwd) if request.action.cwd else request.workspace_root,
+    )
+
+
+def _context_for_permission_request(request) -> SecurityContext:
+    return SecurityContext(
+        os_user=request.os_user,
+        owner_account_id=request.owner_account_id,
+        workspace_id=request.workspace_id,
+        workspace_root=request.workspace_root,
+        session_id=request.session_id,
+        request_id=request.request_id,
+        task_id=request.task_id,
+        cwd=request.workspace_root,
     )

@@ -89,6 +89,7 @@ from crew.team.roles import (
     role_preset,
     teammate_prompt,
 )
+from crew.tools.redact import redact_sensitive_display_text, safe_public_error
 from crew.team.turn_decision import (
     TeamStatusQuery,
     TeamTurnDecision,
@@ -99,8 +100,22 @@ from crew.team.turn_router import TeamTurnRouter
 from crew.tools.registry import Registry
 
 log = get_logger("team")
+
+_TEAM_ERROR_PATH_RE = re.compile(
+    r"(?i)(?:[a-z]:[\\/]|\\\\|/(?:users|home|private|tmp|var|etc|opt|workspace)(?:[\\/]|$))"
+)
+
+
+def _safe_team_error(exc: BaseException) -> str:
+    message = redact_sensitive_display_text(str(exc or "")).strip()
+    if not message or _TEAM_ERROR_PATH_RE.search(message):
+        return "团队请求失败"
+    return message[:500]
 TeamKey = tuple[str, str]
 _RESULT_PATH_RE = re.compile(r"(?P<path>(?:/[^\s`'\"，。；、)\]]+)+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))")
+_RESULT_WIN_PATH_RE = re.compile(
+    r"(?P<path>[A-Za-z]:[\\/][^\s`'\"，。；、)\]]+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))"
+)
 _RESULT_RELATIVE_PATH_RE = re.compile(
     r"(?<![\w/.-])(?P<path>(?:\.?/)?(?:[\w.-]+/)*[\w.-]+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))(?![\w/.-])"
 )
@@ -2949,7 +2964,7 @@ class InProcessTeamManager(TeamManager):
                     )
                 except Exception as exc:  # noqa: BLE001
                     existing.status = "failed"
-                    existing.last_error = str(exc)
+                    existing.last_error = safe_public_error(exc, "Runtime 补员恢复失败")
                     existing.resolved_at = time.time()
                     metadata = dict(node.metadata or {})
                     metadata["runtime_staffing"] = existing.to_dict()
@@ -2959,8 +2974,8 @@ class InProcessTeamManager(TeamManager):
                         node.node_id,
                         owner_account_id=envelope.user_id,
                         status="blocked",
-                        result_summary=f"Runtime 补员恢复应用失败：{exc}",
-                        last_error=str(exc),
+                        result_summary=f"Runtime 补员恢复应用失败：{safe_public_error(exc, '内部错误')}",
+                        last_error=safe_public_error(exc, "Runtime 补员恢复失败"),
                         allow_reopen=True,
                     )
                     return team, "failed"
@@ -3062,7 +3077,7 @@ class InProcessTeamManager(TeamManager):
                 )
                 answers = await wait_for_answer(followup_session_id, question_id)
             except Exception as exc:  # noqa: BLE001
-                request.last_error = str(exc)
+                request.last_error = safe_public_error(exc, "Runtime 补员确认失败")
                 metadata["runtime_staffing"] = request.to_dict()
                 node.metadata = metadata
                 self._mark_plan_node(
@@ -3071,7 +3086,7 @@ class InProcessTeamManager(TeamManager):
                     owner_account_id=envelope.user_id,
                     status="needs_info",
                     result_summary="Runtime 补员确认未完成，未自动补员。",
-                    last_error=str(exc),
+                    last_error=safe_public_error(exc, "Runtime 补员确认失败"),
                     allow_reopen=True,
                 )
                 return team, "awaiting_confirmation"
@@ -3159,7 +3174,7 @@ class InProcessTeamManager(TeamManager):
                 )
             except Exception as exc:  # noqa: BLE001
                 request.status = "failed"
-                request.last_error = str(exc)
+                request.last_error = safe_public_error(exc, "Runtime 补员应用失败")
                 request.resolved_at = time.time()
                 metadata = dict(node.metadata or {})
                 metadata["runtime_staffing"] = request.to_dict()
@@ -3169,8 +3184,8 @@ class InProcessTeamManager(TeamManager):
                     node.node_id,
                     owner_account_id=envelope.user_id,
                     status="blocked",
-                    result_summary=f"Runtime 补员应用失败：{exc}",
-                    last_error=str(exc),
+                    result_summary=f"Runtime 补员应用失败：{safe_public_error(exc, '内部错误')}",
+                    last_error=safe_public_error(exc, "Runtime 补员应用失败"),
                     allow_reopen=True,
                 )
                 await update_followup_status(
@@ -4914,7 +4929,12 @@ class InProcessTeamManager(TeamManager):
 
         raw_paths: list[str] = []
         seen_raw: set[str] = set()
-        for regex in (_RESULT_PATH_RE, _RESULT_RELATIVE_PATH_RE, _RESULT_BACKTICK_PATH_RE):
+        for regex in (
+            _RESULT_PATH_RE,
+            _RESULT_WIN_PATH_RE,
+            _RESULT_RELATIVE_PATH_RE,
+            _RESULT_BACKTICK_PATH_RE,
+        ):
             for match in regex.finditer(str(text or "")):
                 raw = match.group("path").strip().strip("`'\"")
                 if not raw or raw in seen_raw:
@@ -5730,7 +5750,11 @@ class InProcessTeamManager(TeamManager):
                             node.node_id,
                             exc,
                         )
-                        result = self._leader_control_text(plan, node, fallback_error=str(exc))
+                        result = self._leader_control_text(
+                            plan,
+                            node,
+                            fallback_error=safe_public_error(exc, "Leader 节点执行失败"),
+                        )
                 else:
                     result = self._leader_control_text(plan, node)
                 is_review = node.node_id == "leader_review" or node.node_id.startswith("leader_review_")
@@ -7102,7 +7126,7 @@ class InProcessTeamManager(TeamManager):
                         plan_node_id,
                         owner_account_id=owner_account_id,
                         status="failed",
-                        result_summary=str(exc),
+                        result_summary=safe_public_error(exc, "后台派活失败"),
                     )
                 log.warning(
                     "[Team] 后台派活失败 session=%s member=%s node=%s err=%s",
@@ -7149,7 +7173,7 @@ class InProcessTeamManager(TeamManager):
                         plan_node_id,
                         owner_account_id=owner_account_id,
                         status="failed",
-                        result_summary=str(exc),
+                        result_summary=safe_public_error(exc, "后台派活失败"),
                     )
                 raise
             return {
@@ -7189,7 +7213,7 @@ class InProcessTeamManager(TeamManager):
                 owner_account_id=envelope.user_id,
             )
         except ToolError as exc:
-            yield ResponseChunk.error(envelope.request_id, str(exc))
+            yield ResponseChunk.error(envelope.request_id, _safe_team_error(exc))
             return
         status_chunks = await self._try_team_status_query(envelope, team=team)
         if status_chunks is not None:
@@ -7489,6 +7513,11 @@ class InProcessTeamManager(TeamManager):
         owner = str(owner_account_id or "").strip()
         if not owner:
             return 0
+        owner_teams = [
+            team
+            for key, team in self._teams.items()
+            if key[0] == owner
+        ]
         # 1) 枚举该 owner 的 session，并在 interrupt 前拍下 task 强引用。
         sessions: set[str] = set()
         for key in list(self._teams):
@@ -7519,6 +7548,54 @@ class InProcessTeamManager(TeamManager):
                 interrupted += 1
         # interrupt 是同步快速取消；登出边界还要有界等待第一步拍下的 task 真正收敛。
         cancelled_tasks = await self._cancel_and_wait(owner_tasks, reason)
+
+        def credential_agents(team: Any) -> tuple[Any, ...]:
+            teammates = getattr(team, "teammates", {})
+            teammate_values = (
+                tuple(teammates.values())
+                if isinstance(teammates, dict)
+                else ()
+            )
+            return tuple(
+                agent
+                for agent in (
+                    getattr(team, "leader", None),
+                    getattr(team, "direct_leader", None),
+                    *teammate_values,
+                )
+                if agent is not None
+            )
+
+        owner_agents = {
+            id(agent): agent
+            for team in owner_teams
+            for agent in credential_agents(team)
+        }
+        other_agent_ids = {
+            id(agent)
+            for key, team in self._teams.items()
+            if key[0] != owner
+            for agent in credential_agents(team)
+        }
+        if set(owner_agents) & other_agent_ids:
+            raise RuntimeError("Team credential client is shared across owners")
+        close_results = await asyncio.gather(
+            *(
+                close()
+                for agent in owner_agents.values()
+                if callable(close := getattr(agent, "aclose", None))
+            ),
+            return_exceptions=True,
+        )
+        failures = [
+            result
+            for result in close_results
+            if isinstance(result, BaseException)
+        ]
+        if failures:
+            raise RuntimeError(
+                f"Team credential client close failed ({type(failures[0]).__name__})"
+            )
         # 3) destroy 语义清缓存 + 兜底清 _active_children 残留
         for key in [k for k in list(self._teams) if k[0] == owner]:
             self._teams.pop(key, None)

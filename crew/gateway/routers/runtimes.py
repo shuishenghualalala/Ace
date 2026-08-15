@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from crew.agent.external.detector import discover_local_runtimes
 from crew.agent.external.runtime_profile import normalize_runtime_models
@@ -27,7 +27,15 @@ from crew.gateway.helpers import (
     extract_json_object,
     fast_team_suggestion,
     require_external_agents_enabled,
+    safe_public_error,
     suggest_role_description,
+)
+from crew.gateway.streaming import (
+    BoundedStreamingResponse,
+    StreamBudget,
+    StreamLimits,
+    bounded_input,
+    bounded_streaming_response,
 )
 from crew.state.logging import get_logger
 from crew.team.formation import (
@@ -105,6 +113,10 @@ def _draft_cache_key(
 
 def _draft_stream_line(event: dict[str, Any]) -> str:
     return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def _ndjson_stream_error(_reason: str) -> str:
+    return _draft_stream_line({"type": "error", "error": "stream_failed"})
 
 
 def _runtime_availability(runtime: dict[str, Any]) -> dict[str, Any]:
@@ -508,7 +520,7 @@ def create_runtimes_router(crew) -> APIRouter:
         try:
             require_admin(account_from_request(request), crew.config)
         except AuthenticationError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "权限不足")}, status_code=403)
         return None
 
     def _external_store():
@@ -518,7 +530,10 @@ def create_runtimes_router(crew) -> APIRouter:
         return crew.external_agents
 
     @router.post("/api/runtimes/scan")
-    async def scan_external_runtimes() -> JSONResponse:
+    async def scan_external_runtimes(request: Request) -> JSONResponse:
+        denied = _admin_or_403(request)
+        if denied is not None:
+            return denied
         store = _external_store()
         detected = await discover_local_runtimes()
         synced = store.sync_runtimes(detected)
@@ -575,8 +590,8 @@ def create_runtimes_router(crew) -> APIRouter:
         model = str(payload.get("model") or "").strip()
         try:
             runtime = _external_store().get_runtime(runtime_id)
-        except KeyError as exc:
-            return JSONResponse({"ok": False, "error": f"运行时不存在: {exc}"}, status_code=404)
+        except KeyError:
+            return JSONResponse({"ok": False, "error": "运行时不存在"}, status_code=404)
         runtime_state = _runtime_availability(runtime)
         if runtime_state.get("availability_status") != "ready":
             return JSONResponse({"ok": False, "error": "运行时尚未就绪，请重新探测"}, status_code=409)
@@ -595,8 +610,8 @@ def create_runtimes_router(crew) -> APIRouter:
                 custom_args=payload.get("custom_args") or [],
                 custom_env=payload.get("custom_env") or {},
             )
-        except KeyError as exc:
-            return JSONResponse({"ok": False, "error": f"运行时不存在: {exc}"}, status_code=404)
+        except KeyError:
+            return JSONResponse({"ok": False, "error": "运行时不存在"}, status_code=404)
         return JSONResponse(_external_agent_payloads(
             _external_store(),
             [agent],
@@ -612,7 +627,7 @@ def create_runtimes_router(crew) -> APIRouter:
         except KeyError:
             return JSONResponse({"ok": False, "error": "智能体不存在"}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "外部智能体请求无效")}, status_code=400)
         return JSONResponse({"ok": True})
 
     @router.get("/api/external-teams")
@@ -754,12 +769,12 @@ def create_runtimes_router(crew) -> APIRouter:
                 team_spec=payload.get("team_spec") if isinstance(payload.get("team_spec"), dict) else None,
                 formation_plan=formation_plan,
             )
-        except KeyError as exc:
+        except KeyError:
             rollback_temporary_agents()
-            return JSONResponse({"ok": False, "error": f"智能体不存在: {exc}"}, status_code=404)
+            return JSONResponse({"ok": False, "error": "外部团队引用不存在"}, status_code=404)
         except ValueError as exc:
             rollback_temporary_agents()
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "外部智能体请求无效")}, status_code=400)
         except Exception:
             rollback_temporary_agents()
             raise
@@ -894,7 +909,12 @@ def create_runtimes_router(crew) -> APIRouter:
                     "suggestion": final,
                 })
 
-            return StreamingResponse(stream(), media_type="application/x-ndjson")
+            return bounded_streaming_response(
+                request,
+                stream(),
+                media_type="application/x-ndjson",
+                error_event=_ndjson_stream_error,
+            )
 
         started_at = time.perf_counter()
         fast_started_at = time.perf_counter()
@@ -935,7 +955,10 @@ def create_runtimes_router(crew) -> APIRouter:
         return JSONResponse(result)
 
     @router.post("/api/external-teams/draft/description")
-    async def draft_external_team_description(request: Request, payload: dict) -> StreamingResponse:
+    async def draft_external_team_description(
+        request: Request,
+        payload: dict,
+    ) -> BoundedStreamingResponse:
         owner = account_from_request(request).owner_account_id
         agents = _external_store().list_agents(owner_account_id=owner)
         description_payload = {"name": str(payload.get("name") or "").strip()}
@@ -945,6 +968,8 @@ def create_runtimes_router(crew) -> APIRouter:
             description_payload,
             owner_account_id=owner,
         )
+        limits = StreamLimits()
+        budget = StreamBudget(limits)
 
         async def stream():
             yield _draft_stream_line({"type": "draft", "phase": "initial", "draft": initial})
@@ -983,10 +1008,15 @@ def create_runtimes_router(crew) -> APIRouter:
                 last_description = ""
                 finish_reason = ""
                 async with crew.owner_provider(owner) as provider:
-                    async for chunk in provider.stream_chat([
-                        Message.system("你只输出可解析 JSON。"),
-                        Message.user(prompt),
-                    ], max_tokens=640):
+                    async for chunk in bounded_input(
+                        provider.stream_chat([
+                            Message.system("你只输出可解析 JSON。"),
+                            Message.user(prompt),
+                        ], max_tokens=640),
+                        request=request,
+                        limits=limits,
+                        budget=budget,
+                    ):
                         if await request.is_disconnected():
                             return
                         if chunk.finish_reason:
@@ -1048,14 +1078,21 @@ def create_runtimes_router(crew) -> APIRouter:
                 if not await request.is_disconnected():
                     yield _draft_stream_line({"type": "draft", "phase": "fallback", "draft": initial})
 
-        return StreamingResponse(
+        return bounded_streaming_response(
+            request,
             stream(),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            limits=limits,
+            budget=budget,
+            error_event=_ndjson_stream_error,
         )
 
     @router.post("/api/external-teams/draft/formation")
-    async def draft_external_team_formation(request: Request, payload: dict) -> StreamingResponse:
+    async def draft_external_team_formation(
+        request: Request,
+        payload: dict,
+    ) -> BoundedStreamingResponse:
         owner = account_from_request(request).owner_account_id
         agents = _external_store().list_agents(owner_account_id=owner)
         formation_payload = {
@@ -1075,6 +1112,8 @@ def create_runtimes_router(crew) -> APIRouter:
                 sorted(role_catalog, key=lambda item: item["key"]),
             ],
         )
+        limits = StreamLimits()
+        budget = StreamBudget(limits)
 
         async def stream():
             yield _draft_stream_line({"type": "draft", "phase": "initial", "draft": initial})
@@ -1114,10 +1153,15 @@ def create_runtimes_router(crew) -> APIRouter:
             try:
                 raw_text = ""
                 async with crew.owner_provider(owner) as provider:
-                    async for chunk in provider.stream_chat([
-                        Message.system("你只输出可解析 JSON。"),
-                        Message.user(prompt),
-                    ], max_tokens=320):
+                    async for chunk in bounded_input(
+                        provider.stream_chat([
+                            Message.system("你只输出可解析 JSON。"),
+                            Message.user(prompt),
+                        ], max_tokens=320),
+                        request=request,
+                        limits=limits,
+                        budget=budget,
+                    ):
                         if await request.is_disconnected():
                             return
                         raw_text += chunk.delta_text or ""
@@ -1157,14 +1201,39 @@ def create_runtimes_router(crew) -> APIRouter:
                 if not await request.is_disconnected():
                     yield _draft_stream_line({"type": "draft", "phase": "fallback", "draft": initial})
 
-        return StreamingResponse(
+        return bounded_streaming_response(
+            request,
             stream(),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            limits=limits,
+            budget=budget,
+            error_event=_ndjson_stream_error,
         )
 
     @router.post("/api/external-teams/roles/suggest")
     async def suggest_external_team_role(request: Request, payload: dict) -> JSONResponse:
+        allowed = {
+            "agent_id",
+            "role_key",
+            "current_description",
+            "is_leader",
+            "agent_name",
+            "name",
+            "description",
+            "team_description",
+            "workflow",
+        }
+        unknown = sorted(str(key) for key in set(payload) - allowed)
+        if unknown:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "角色建议请求含不支持字段",
+                    "fields": unknown,
+                },
+                status_code=400,
+            )
         agent = None
         agent_id = str(payload.get("agent_id") or "").strip()
         if agent_id:

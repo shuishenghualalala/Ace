@@ -1,4 +1,4 @@
-from crew.cli.main import main
+from crew.cli.entrypoint import main
 
 if __name__ == "__main__":
     main()

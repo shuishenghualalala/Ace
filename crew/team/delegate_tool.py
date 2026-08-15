@@ -18,10 +18,16 @@ from crew.state.logging import get_logger
 from crew.team.bus import TeamBus
 from crew.team.capabilities import CAPABILITIES
 from crew.tools.registry import Registry, tool_result
+from crew.tools.redact import redact_sensitive_display_text
 
 log = get_logger("team")
 
 TEAM_RESULT_STATUSES = ("pass", "fail", "blocked")
+_TEAM_RESULT_MAX_CHARS = 128 * 1024
+
+
+def _safe_team_text(value: Any) -> str:
+    return redact_sensitive_display_text(str(value or ""))[:_TEAM_RESULT_MAX_CHARS]
 
 
 def require_team_result_status(intent: str, value: Any) -> str:
@@ -453,17 +459,18 @@ async def run_delegate_to_teammate(
             if on_child_chunk is not None:
                 on_child_chunk(member, chunk)
             if chunk.kind == "final":
-                final_text = chunk.body.get("text", "")
+                final_text = _safe_team_text(chunk.body.get("text", ""))
             elif chunk.kind == "error":
-                tasks.update_status(task["id"], "failed", chunk.body.get("message", ""))
+                error_text = "队友执行失败"
+                tasks.update_status(task["id"], "failed", error_text)
                 if on_task_finished is not None:
                     on_task_finished({
                         **task,
                         "plan_node_id": plan_node_id,
                         "status": "failed",
-                        "result": chunk.body.get("message", ""),
+                        "result": error_text,
                     })
-                raise ToolError(chunk.body.get("message", "队友执行出错"))
+                raise ToolError(error_text)
     except asyncio.CancelledError:
         tasks.update_status(task["id"], "cancelled", "cancelled")
         if on_task_finished is not None:
@@ -477,15 +484,17 @@ async def run_delegate_to_teammate(
     except ToolError:
         raise
     except Exception as exc:  # noqa: BLE001
-        tasks.update_status(task["id"], "failed", str(exc))
+        error_text = "队友执行失败：内部错误"
+        tasks.update_status(task["id"], "failed", error_text)
         if on_task_finished is not None:
             on_task_finished({
                 **task,
                 "plan_node_id": plan_node_id,
                 "status": "failed",
-                "result": str(exc),
+                "result": error_text,
             })
-        raise ToolError(f"队友 {member} 执行异常: {exc}") from exc
+        log.error("队友 %s 执行异常：%s", member, type(exc).__name__)
+        raise ToolError(error_text) from None
     finally:
         if on_child_done is not None:
             on_child_done(session_id, child_id, owner)

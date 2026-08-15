@@ -6,7 +6,12 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from crew.browser.driver import BrowserDriver, BrowserDriverError, BrowserOperationCancelled
+from crew.browser.driver import (
+    BrowserDriver,
+    BrowserDriverError,
+    BrowserOperationCancelled,
+    _safe_browser_error,
+)
 from crew.browser.electron_bridge import (
     ElectronBridgeCancelled,
     ElectronBridgeError,
@@ -32,7 +37,7 @@ class ElectronBrowserDriver(BrowserDriver):
     def _raise(exc: ElectronBridgeError) -> None:
         code = str(getattr(exc, "code", "") or "")
         error = BrowserDriverError(
-            str(exc),
+            _safe_browser_error(exc),
             uncertain=exc.uncertain,
             browser_stopped=exc.browser_stopped,
             stop_unconfirmed=exc.stop_unconfirmed,
@@ -73,7 +78,7 @@ class ElectronBrowserDriver(BrowserDriver):
             )
         except ElectronBridgeCancelled as exc:
             raise BrowserOperationCancelled(
-                str(exc),
+                _safe_browser_error(exc, fallback="浏览器操作已被用户取消"),
                 uncertain=exc.uncertain,
                 browser_stopped=exc.browser_stopped,
                 stop_unconfirmed=exc.stop_unconfirmed,
@@ -104,6 +109,29 @@ class ElectronBrowserDriver(BrowserDriver):
         # The Chromium runtime is already part of Electron.  A desktop host may
         # connect after the gateway starts, especially under UOS/systemd.
         return bool(self.config.enabled)
+
+    async def configure_proxy(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        endpoint_url: str,
+        credentials: tuple[str, str],
+    ) -> None:
+        """Install proxy credentials through structured RPC, never URL userinfo."""
+
+        username, password = credentials
+        await self._request(
+            owner_session,
+            "configure_proxy",
+            {
+                "profile_dir": str(profile_dir.resolve()),
+                "proxy_url": str(endpoint_url),
+                "proxy_username": str(username),
+                "proxy_password": str(password),
+            },
+            timeout=self.config.command_timeout_seconds + _HOST_RESPONSE_GRACE_SECONDS,
+            mutating=True,
+        )
 
     async def execute(
         self,

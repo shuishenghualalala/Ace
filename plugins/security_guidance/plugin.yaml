@@ -1,8 +1,11 @@
+schema_version: crew.plugin.v1
 name: security_guidance
 version: "0.1.0"
 description: "Warn when file writes or patches contain common unsafe code patterns."
 author: "Crew"
 kind: standalone
+capabilities:
+  - hooks
 provides_hooks:
   - pre_tool_call
   - transform_tool_result

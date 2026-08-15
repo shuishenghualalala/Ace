@@ -2,9 +2,12 @@
 
 import os
 
+import pytest
+
 from crew.gateway.context import (
     _classify_file,
     complete_path,
+    normalize_agent_attachments,
     resolve_structured_path_references,
     save_upload,
 )
@@ -34,6 +37,63 @@ def test_save_upload_owner_scoped(tmp_path, monkeypatch):
     assert "accounts" in meta["path"]
     assert owner_path_segment("owner:user-a") in meta["path"]
     os.remove(meta["path"])
+
+
+def test_save_upload_rejects_binary_over_limit_before_writing(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+
+    with pytest.raises(ValueError):
+        save_upload(
+            "large.bin",
+            b"x" * (20 * 1024 * 1024 + 1),
+            owner_account_id="owner:user-a",
+        )
+
+    assert not list((tmp_path / ".crew").rglob("large*"))
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["", "a" * 256, "bad\nname.txt", 42],
+)
+def test_save_upload_rejects_invalid_or_unbounded_filename_before_writing(
+    tmp_path,
+    monkeypatch,
+    filename,
+):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+
+    with pytest.raises(ValueError):
+        save_upload(filename, b"safe", owner_account_id="owner:user-a")
+
+    assert not (tmp_path / ".crew").exists()
+
+
+def test_normalize_attachments_bounds_list_file_and_inline_content(tmp_path, monkeypatch):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    small = uploads / "small.txt"
+    small.write_text("safe", encoding="utf-8")
+    large = uploads / "large.bin"
+    large.write_bytes(b"x" * (20 * 1024 * 1024 + 1))
+    monkeypatch.setattr("crew.gateway.context._get_upload_dir", lambda _owner: uploads)
+
+    result = normalize_agent_attachments(
+        [
+            {"id": "small", "name": "small.txt", "path": str(small)},
+            {"id": "large", "name": "large.bin", "path": str(large)},
+            {"id": "inline", "name": "inline.txt", "content": "x" * (256 * 1024 + 1)},
+        ]
+        + [
+            {"id": f"extra-{index}", "name": "small.txt", "path": str(small)}
+            for index in range(40)
+        ],
+        "owner:user-a",
+    )
+
+    assert [item["id"] for item in result] == ["small"] + [
+        f"extra-{index}" for index in range(31)
+    ]
 
 
 def test_complete_path(tmp_path, monkeypatch):

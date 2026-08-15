@@ -50,6 +50,14 @@ class _BlockingSendSocket(_Socket):
         await asyncio.Event().wait()
 
 
+class _RawSocket(_Socket):
+    async def receive(self) -> Any:
+        value = await self.incoming.get()
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
 async def _connect(bridge: ElectronBrowserBridge, key: str) -> tuple[_Socket, asyncio.Task]:
     socket = _Socket()
     task = asyncio.create_task(bridge.serve(socket, key))  # type: ignore[arg-type]
@@ -1302,6 +1310,20 @@ def test_bridge_adversarial_sensitive_sentinel_has_zero_selector_target_page_lea
         assert event["value"] == ""
         assert event["key"] == ""
         assert event["hint"] == f"<{tier} field>"
+
+
+@pytest.mark.asyncio
+async def test_bridge_rejects_oversized_host_frame_before_json_dispatch() -> None:
+    bridge = ElectronBrowserBridge()
+    socket = _RawSocket()
+    server = asyncio.create_task(bridge.serve(socket, "crew_0123456789ab"))  # type: ignore[arg-type]
+    await socket.accepted.wait()
+    await socket.incoming.put({
+        "type": "websocket.receive",
+        "text": "{" + "x" * (4 * 1024 * 1024) + "}",
+    })
+    await server
+    assert socket.closed == [(1009, "invalid-browser-host-frame")]
 
 
 def test_bridge_rejects_non_account_runtime_keys() -> None:

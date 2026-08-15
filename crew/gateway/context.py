@@ -6,16 +6,34 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import stat
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
 from crew.state.logging import get_logger
 from crew.state.home import get_owner_runtime_home, task_workspace_path
+from crew.tools.file_utils import (
+    _ensure_private_directory,
+    atomic_replace_bytes,
+    snapshot_file,
+    stat_verified_file,
+)
 
 log = get_logger("context")
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+_MAX_UPLOAD_STORE_BYTES = 256 * 1024 * 1024
+_MAX_REQUEST_ATTACHMENT_BYTES = 128 * 1024 * 1024
+_MAX_ATTACHMENTS = 32
+_MAX_INLINE_ATTACHMENT_CHARS = 100_000
+_MAX_UPLOAD_FILENAME_CHARS = 180
+_UPLOAD_DEDUP_FILE = ".dedup.json"
+_UPLOAD_DEDUP_MAX_ENTRIES = 8192
 
 # 与 runtime / Desktop history-mapping 一致：用户消息里的附件落盘标记。
 _ATTACHMENT_MARKER_RE = re.compile(r"^附件「([^」]+)」位于[：:]\s*(.+)$", re.MULTILINE)
@@ -31,13 +49,192 @@ def _get_upload_dir(owner_account_id: str | None = None) -> Path:
 
 def _ensure_upload_dir(owner_account_id: str | None = None) -> Path:
     upload_dir = _get_upload_dir(owner_account_id)
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(upload_dir)
     return upload_dir
 
 
 # ---------------------------------------------------------------------------
 # 文件上传
 # ---------------------------------------------------------------------------
+@contextmanager
+def _upload_quota_lock(upload_dir: Path):
+    """Hold a cross-process owner-local lock while checking the upload quota."""
+    lock_path = upload_dir / ".quota.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    locked = False
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_size == 0:
+            os.write(descriptor, b"0")
+        actual = lock_path.lstat()
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if (
+            not stat.S_ISREG(actual.st_mode)
+            or getattr(actual, "st_file_attributes", 0) & reparse_flag
+            or (actual.st_dev, actual.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise OSError("上传配额锁不是可验证的普通文件")
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            class _Overlapped(ctypes.Structure):
+                _fields_ = [
+                    ("Internal", wintypes.ULONG),
+                    ("InternalHigh", wintypes.ULONG),
+                    ("Offset", wintypes.DWORD),
+                    ("OffsetHigh", wintypes.DWORD),
+                    ("hEvent", wintypes.HANDLE),
+                ]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.LockFileEx.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(_Overlapped),
+            ]
+            kernel32.UnlockFileEx.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD,
+                wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(_Overlapped),
+            ]
+            overlapped = _Overlapped()
+            if not kernel32.LockFileEx(
+                msvcrt.get_osfhandle(descriptor), 0x00000002, 0, 1, 0,
+                ctypes.byref(overlapped),
+            ):
+                raise OSError("无法锁定上传配额", None, os.strerror(ctypes.get_last_error()))
+            locked = True
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            locked = True
+        yield
+    finally:
+        if locked and os.name == "nt":
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            class _Overlapped(ctypes.Structure):
+                _fields_ = [
+                    ("Internal", wintypes.ULONG),
+                    ("InternalHigh", wintypes.ULONG),
+                    ("Offset", wintypes.DWORD),
+                    ("OffsetHigh", wintypes.DWORD),
+                    ("hEvent", wintypes.HANDLE),
+                ]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.UnlockFileEx.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD,
+                wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(_Overlapped),
+            ]
+            overlapped = _Overlapped()
+            kernel32.UnlockFileEx(
+                msvcrt.get_osfhandle(descriptor), 0, 1, 0,
+                ctypes.byref(overlapped),
+            )
+        elif locked:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _upload_store_bytes(upload_dir: Path) -> int:
+    """Return logical bytes occupied by owner-owned regular upload files."""
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    total = 0
+    with os.scandir(upload_dir) as entries:
+        for entry in entries:
+            if entry.name in {".quota.lock", _UPLOAD_DEDUP_FILE}:
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (
+                stat.S_ISREG(info.st_mode)
+                and not getattr(info, "st_file_attributes", 0) & reparse_flag
+            ):
+                total += info.st_size
+    return total
+
+
+def _upload_dedup_path(upload_dir: Path) -> Path:
+    return upload_dir / _UPLOAD_DEDUP_FILE
+
+
+def _read_upload_dedup_registry(upload_dir: Path) -> dict[str, str]:
+    """Load the owner-local content digest to stored-name dedup registry.
+
+    The registry is a trust boundary: a corrupted or path-injecting entry must
+    fail the upload closed rather than be ignored and allow a duplicate side
+    effect.
+    """
+    path = _upload_dedup_path(upload_dir)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {}
+    if len(raw) > 1_000_000:
+        raise ValueError("上传去重登记表过大")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("上传去重登记表损坏") from None
+    if not isinstance(payload, dict):
+        raise ValueError("上传去重登记表格式无效")
+    registry: dict[str, str] = {}
+    for digest, stored_name in payload.items():
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise ValueError("上传去重摘要无效")
+        if (
+            not isinstance(stored_name, str)
+            or not stored_name
+            or Path(stored_name).name != stored_name
+            or stored_name in {".", ".."}
+        ):
+            raise ValueError("上传去重文件名无效")
+        registry[digest] = stored_name
+    return registry
+
+
+def _write_upload_dedup_registry(upload_dir: Path, registry: dict[str, str]) -> None:
+    payload = json.dumps(
+        registry,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    path = _upload_dedup_path(upload_dir)
+    atomic_replace_bytes(path, payload, snapshot_file(path))
+
+
+def _upload_meta(
+    filename: str,
+    dest: Path,
+    size: int,
+    *,
+    deduplicated: bool,
+) -> dict[str, Any]:
+    return {
+        "id": f"att_{dest.stem}",
+        "name": filename,
+        "path": str(dest),
+        "type": _classify_file(filename),
+        "size": size,
+        # 前端可直接用此 URL 预览图像（/api/uploads 静态服务）
+        "previewUrl": f"/api/uploads/{dest.name}" if _classify_file(filename) == "image" else None,
+        "deduplicated": deduplicated,
+    }
+
 
 def save_upload(
     filename: str,
@@ -51,33 +248,58 @@ def save_upload(
     - 存储文件名内嵌 uuid4，消除同名并发上传的 TOCTOU 覆盖（原文件名仍保留在返回的
       ``name`` 字段供前端展示）。
     """
-    upload_dir = _ensure_upload_dir(owner_account_id)
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or len(filename) > _MAX_UPLOAD_FILENAME_CHARS
+        or any(ord(char) < 0x20 for char in filename)
+        or any(char in filename for char in '/\\<>:"|?*')
+        or filename.endswith((".", " "))
+    ):
+        raise ValueError("非法文件名")
+    if not isinstance(content_bytes, bytes):
+        raise ValueError("附件内容必须是二进制")
+    if len(content_bytes) > _MAX_UPLOAD_BYTES:
+        raise ValueError(f"附件大小超过上限 {_MAX_UPLOAD_BYTES} 字节")
 
     # 校验 filename：禁止路径分隔符与 NUL（防 ../、绝对路径、NUL 注入）
-    if any(sep in filename for sep in ("/", "\\")) or "\x00" in filename:
-        raise ValueError("非法文件名")
     safe_name = Path(filename).name
     if not safe_name or safe_name in (".", ".."):
         raise ValueError("非法文件名")
 
+    upload_dir = _ensure_upload_dir(owner_account_id)
     stem = Path(safe_name).stem or "untitled"
     suffix = Path(safe_name).suffix
-    # 内嵌 uuid 消除 TOCTOU：并发同名上传落不同文件，互不覆盖
-    unique = f"{stem}_{uuid4().hex}{suffix}"
-    dest = upload_dir / unique
-    dest.write_bytes(content_bytes)
+    # 幂等键 = 原始文件名 + 内容摘要：同名同内容重试复用同一文件，不重复落盘。
+    content_digest = hashlib.sha256(safe_name.encode("utf-8") + b"\x00" + content_bytes).hexdigest()
+    with _upload_quota_lock(upload_dir):
+        registry = _read_upload_dedup_registry(upload_dir)
+        existing_name = registry.get(content_digest)
+        if existing_name is not None:
+            existing = upload_dir / existing_name
+            try:
+                existing_version = snapshot_file(existing, max_bytes=_MAX_UPLOAD_BYTES)
+            except FileNotFoundError:
+                existing_version = None
+            if existing_version is not None and existing_version.digest == hashlib.sha256(content_bytes).hexdigest():
+                log.info("附件重复上传已去重: %s", existing)
+                return _upload_meta(filename, existing, len(content_bytes), deduplicated=True)
+            # 文件被回收或内容被替换：丢弃过期登记并重新保存。
+            registry.pop(content_digest, None)
+        if _upload_store_bytes(upload_dir) + len(content_bytes) > _MAX_UPLOAD_STORE_BYTES:
+            raise ValueError(f"owner 上传存储超过上限 {_MAX_UPLOAD_STORE_BYTES} 字节")
+        # 内嵌 uuid 保留不可猜测文件名，同时消除并发同名 TOCTOU。
+        unique = f"{stem}_{uuid4().hex}{suffix}"
+        dest = upload_dir / unique
+        atomic_replace_bytes(dest, content_bytes, snapshot_file(dest))
+        registry[content_digest] = unique
+        # ponytail: 上限内简单淘汰最老登记，超过上限的重放允许重新落盘。
+        while len(registry) > _UPLOAD_DEDUP_MAX_ENTRIES:
+            registry.pop(next(iter(registry)))
+        _write_upload_dedup_registry(upload_dir, registry)
     log.info("附件已保存: %s", dest)
 
-    file_id = f"att_{dest.stem}"
-    return {
-        "id": file_id,
-        "name": filename,
-        "path": str(dest),
-        "type": _classify_file(filename),
-        "size": len(content_bytes),
-        # 前端可直接用此 URL 预览图像（/api/uploads 静态服务）
-        "previewUrl": f"/api/uploads/{dest.name}" if _classify_file(filename) == "image" else None,
-    }
+    return _upload_meta(filename, dest, len(content_bytes), deduplicated=False)
 
 
 def _classify_file(filename: str) -> str:
@@ -86,6 +308,78 @@ def _classify_file(filename: str) -> str:
     if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"):
         return "image"
     return "file"
+
+
+def normalize_agent_attachments(
+    raw_attachments: object,
+    owner_account_id: str,
+) -> list[dict[str, Any]]:
+    """Normalize WebSocket attachments to files owned by the authenticated account.
+
+    The browser normally sends the result of :func:`save_upload`, but the WebSocket
+    payload is still untrusted input.  Keeping only resolved regular files below the
+    owner's upload root prevents a client from turning the prompt-building path into
+    an arbitrary host-file reader.  The agent performs an identity-checked read later
+    to cover the remaining rename/symlink race.
+    """
+    if not isinstance(raw_attachments, list):
+        return []
+    try:
+        uploads_root = Path(
+            os.path.abspath(_get_upload_dir(owner_account_id).expanduser())
+        )
+    except (OSError, ValueError):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    total_bytes = 0
+    for raw in raw_attachments:
+        if len(normalized) >= _MAX_ATTACHMENTS:
+            break
+        if not isinstance(raw, dict):
+            continue
+        raw_path = str(raw.get("path") or "").strip()
+        if not raw_path:
+            # Text-only attachment payloads contain no host path and are safe to
+            # preserve; they never cause a server-side file read.
+            if (
+                isinstance(raw.get("content"), str)
+                and len(raw["content"]) <= _MAX_INLINE_ATTACHMENT_CHARS
+            ):
+                content = raw["content"]
+                content_bytes = len(content.encode("utf-8"))
+                if total_bytes + content_bytes > _MAX_REQUEST_ATTACHMENT_BYTES:
+                    raise ValueError("本轮附件总量超过安全上限")
+                total_bytes += content_bytes
+                normalized.append({
+                    "id": str(raw.get("id") or f"att_{uuid4().hex}"),
+                    "name": str(raw.get("name") or "附件")[:256],
+                    "type": "file",
+                    "content": raw["content"],
+                })
+            continue
+        try:
+            candidate = Path(os.path.abspath(Path(raw_path).expanduser()))
+            candidate.relative_to(uploads_root)
+            size = stat_verified_file(candidate).st_size
+            if size > _MAX_UPLOAD_BYTES:
+                continue
+        except (OSError, ValueError, RuntimeError):
+            continue
+
+        if total_bytes + size > _MAX_REQUEST_ATTACHMENT_BYTES:
+            raise ValueError("本轮附件总量超过安全上限")
+        total_bytes += size
+        name = str(raw.get("name") or candidate.name).replace("\\", "/")
+        name = Path(name).name[:256] or candidate.name
+        normalized.append({
+            "id": str(raw.get("id") or f"att_{uuid4().hex}"),
+            "name": name,
+            "path": str(candidate),
+            "type": _classify_file(name),
+            "size": size,
+        })
+    return normalized
 
 
 def resolve_structured_path_references(

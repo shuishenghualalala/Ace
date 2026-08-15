@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -104,4 +105,82 @@ def test_disable_and_delete_do_not_affect_other_owner(tmp_path: Path) -> None:
         owner_account_id="owner-a",
         workspace_id="project-a",
     )
+    store.close()
+
+
+def test_persisted_rule_payload_rejects_unknown_fields(tmp_path: Path) -> None:
+    db = tmp_path / "crew.db"
+    store = SQLiteRuleStore(db)
+    rule = ActionRule.exec_prefix(["git", "status"], cwd=tmp_path)
+    store.create(
+        rule,
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    )
+    with sqlite3.connect(db) as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT payload_json FROM security_rules WHERE rule_id = ?",
+                (rule.rule_id,),
+            ).fetchone()[0]
+        )
+        payload["unexpected_authority"] = True
+        conn.execute(
+            "UPDATE security_rules SET payload_json = ? WHERE rule_id = ?",
+            (json.dumps(payload), rule.rule_id),
+        )
+
+    with pytest.raises(RuleStoreCorruptError, match="payload"):
+        store.list(
+            os_user="os-a",
+            owner_account_id="owner-a",
+            workspace_id="project-a",
+        )
+    store.close()
+
+
+def test_rule_store_rejects_non_boolean_mutation_inputs(tmp_path: Path) -> None:
+    store = SQLiteRuleStore(tmp_path / "crew.db")
+    rule = ActionRule.exec_prefix(["git", "status"], cwd=tmp_path)
+    store.create(
+        rule,
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    )
+
+    with pytest.raises(ValueError, match="enabled"):
+        store.set_enabled(
+            rule.rule_id,
+            "false",  # type: ignore[arg-type]
+            os_user="os-a",
+            owner_account_id="owner-a",
+            workspace_id="project-a",
+        )
+    store.close()
+
+
+def test_rule_store_rejects_invalid_persisted_enabled_state(tmp_path: Path) -> None:
+    db = tmp_path / "crew.db"
+    store = SQLiteRuleStore(db)
+    rule = ActionRule.exec_prefix(["git", "status"], cwd=tmp_path)
+    store.create(
+        rule,
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+    )
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE security_rules SET enabled = 2 WHERE rule_id = ?",
+            (rule.rule_id,),
+        )
+
+    with pytest.raises(RuleStoreCorruptError, match="enabled"):
+        store.list_with_status(
+            os_user="os-a",
+            owner_account_id="owner-a",
+            workspace_id="project-a",
+        )
     store.close()

@@ -23,10 +23,12 @@ from crew.gateway.instance_auth import (
     create_gateway_instance_proof,
     is_valid_gateway_instance_challenge,
 )
+from crew.gateway.helpers import safe_public_error
 from crew.state.logging import get_logger
 from crew.wiki.capture import capture_upload_to_wiki
 
 log = get_logger("gateway.routers.misc")
+_INSTANCE_VERIFICATION_FAILURE = "gateway instance verification failed"
 
 
 def create_misc_router(crew) -> APIRouter:
@@ -104,14 +106,14 @@ def create_misc_router(crew) -> APIRouter:
             })
         if not is_valid_gateway_instance_challenge(challenge):
             return JSONResponse(
-                {"ok": False, "error": "invalid gateway instance challenge"},
-                status_code=400,
+                {"ok": False, "error": _INSTANCE_VERIFICATION_FAILURE},
+                status_code=401,
             )
         proof = create_gateway_instance_proof(challenge)
         if proof is None:
             return JSONResponse(
-                {"ok": False, "error": "gateway instance identity unavailable"},
-                status_code=503,
+                {"ok": False, "error": _INSTANCE_VERIFICATION_FAILURE},
+                status_code=401,
             )
         return JSONResponse({
             "ok": True,
@@ -150,7 +152,7 @@ def create_misc_router(crew) -> APIRouter:
         try:
             require_admin(account_from_request(request), cfg)
         except AuthenticationError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "权限不足")}, status_code=403)
         changed = False
         if "auto_trigger" in payload:
             cfg.evolution_auto_trigger = bool(payload["auto_trigger"])
@@ -165,7 +167,7 @@ def create_misc_router(crew) -> APIRouter:
             try:
                 cfg.persist_evolution_config()
             except RuntimeError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+                return JSONResponse({"ok": False, "error": safe_public_error(exc, "技能操作失败")}, status_code=500)
         return JSONResponse({
             "ok": True,
             "evolution": {
@@ -177,7 +179,12 @@ def create_misc_router(crew) -> APIRouter:
 
     @router.post("/api/skills/{slug}/install")
     async def skill_install(slug: str, request: Request) -> JSONResponse:
-        owner = account_from_request(request).owner_account_id
+        account = account_from_request(request)
+        try:
+            require_admin(account, getattr(crew, "config", None))
+        except AuthenticationError as exc:
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "权限不足")}, status_code=403)
+        owner = account.owner_account_id
         ok = install_skill(slug, operator_account_id=owner, source="desktop-api")
         if not ok:
             return JSONResponse({"ok": False, "error": "skill 不存在或已安装"}, status_code=400)
@@ -185,7 +192,12 @@ def create_misc_router(crew) -> APIRouter:
 
     @router.delete("/api/skills/{slug}")
     async def skill_uninstall(slug: str, request: Request) -> JSONResponse:
-        owner = account_from_request(request).owner_account_id
+        account = account_from_request(request)
+        try:
+            require_admin(account, getattr(crew, "config", None))
+        except AuthenticationError as exc:
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "权限不足")}, status_code=403)
+        owner = account.owner_account_id
         ok = uninstall_skill(slug, operator_account_id=owner, source="desktop-api")
         if not ok:
             return JSONResponse({"ok": False, "error": "skill 不存在或为内置（不可卸载）"}, status_code=400)
@@ -242,6 +254,8 @@ def create_misc_router(crew) -> APIRouter:
                 "description": manifest.description,
                 "kind": manifest.kind,
                 "enabled": loaded.enabled,
+                "declarative_only": loaded.declarative_only,
+                "execution_trusted": manifest.execution_trusted,
                 "installed": True,
                 "system_allowed": system_allowed,
                 "role_allowed": role_allowed,
@@ -309,8 +323,9 @@ def create_misc_router(crew) -> APIRouter:
                 owner_account_id=account_from_request(request).owner_account_id,
             )
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        _schedule_wiki_capture(request, filename, content_bytes)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "上传请求无效")}, status_code=400)
+        if not meta.get("deduplicated"):
+            _schedule_wiki_capture(request, filename, content_bytes)
         return JSONResponse(meta)
 
     @router.get("/api/complete")

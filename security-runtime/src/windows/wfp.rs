@@ -11,7 +11,8 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{
-    LocalFree, FWP_E_ALREADY_EXISTS, FWP_E_FILTER_NOT_FOUND, FWP_E_NOT_FOUND, HANDLE, HLOCAL,
+    LocalFree, FWP_E_ALREADY_EXISTS, FWP_E_FILTER_NOT_FOUND, FWP_E_NOT_FOUND,
+    FWP_E_PROVIDER_NOT_FOUND, FWP_E_SUBLAYER_NOT_FOUND, HANDLE, HLOCAL,
 };
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
 use windows_sys::Win32::Security::Authorization::{
@@ -34,6 +35,17 @@ const ONLINE_BLOCK_V6: GUID = GUID::from_u128(0xd07399a9_a34e_4858_84ed_dd9f323f
 pub fn install(offline_account: &str, online_account: &str) -> Result<(), String> {
     let engine = Engine::open()?;
     let mut transaction = engine.transaction()?;
+    for key in filter_keys() {
+        delete_filter(engine.handle, &key)?;
+    }
+    allow_missing(
+        unsafe { FwpmSubLayerDeleteByKey0(engine.handle, &SUBLAYER_KEY) },
+        "FwpmSubLayerDeleteByKey0",
+    )?;
+    allow_missing(
+        unsafe { FwpmProviderDeleteByKey0(engine.handle, &PROVIDER_KEY) },
+        "FwpmProviderDeleteByKey0",
+    )?;
     ensure_provider(engine.handle)?;
     ensure_sublayer(engine.handle)?;
     let offline = UserCondition::new(offline_account)?;
@@ -44,10 +56,9 @@ pub fn install(offline_account: &str, online_account: &str) -> Result<(), String
     ] {
         replace_filter(engine.handle, key, layer, &offline, false, false)?;
     }
-    for (key, layer) in [
-        (ONLINE_PERMIT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
-        (ONLINE_PERMIT_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
-    ] {
+    // The managed proxy binds 127.0.0.1 only. Never permit ::1:43119: a
+    // different host process could own that endpoint and become a WFP bypass.
+    for (key, layer) in [(ONLINE_PERMIT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4)] {
         replace_filter(engine.handle, key, layer, &online, true, true)?;
     }
     for (key, layer) in [
@@ -56,20 +67,15 @@ pub fn install(offline_account: &str, online_account: &str) -> Result<(), String
     ] {
         replace_filter(engine.handle, key, layer, &online, false, false)?;
     }
-    transaction.commit()
+    transaction.commit()?;
+    drop(transaction);
+    verify_installed(offline_account, online_account)
 }
 
 pub fn uninstall() -> Result<(), String> {
     let engine = Engine::open()?;
     let mut transaction = engine.transaction()?;
-    for key in [
-        OFFLINE_V4,
-        OFFLINE_V6,
-        ONLINE_PERMIT_V4,
-        ONLINE_PERMIT_V6,
-        ONLINE_BLOCK_V4,
-        ONLINE_BLOCK_V6,
-    ] {
+    for key in filter_keys() {
         delete_filter(engine.handle, &key)?;
     }
     let sublayer = unsafe { FwpmSubLayerDeleteByKey0(engine.handle, &SUBLAYER_KEY) };
@@ -79,87 +85,234 @@ pub fn uninstall() -> Result<(), String> {
     transaction.commit()
 }
 
-/// Verify all Ace WFP filters exist **and** have the expected action,
-/// condition count, and layer key. A filter that exists but was externally
-/// modified (wrong action, missing conditions, wrong layer) must be detected
-/// so the caller can trigger re-install (audit M6).
-pub fn verify_installed() -> Result<(), String> {
+/// Verify every persistent WFP object, including the account security
+/// descriptors and proxy-only conditions. Offline runs also require this:
+/// "no proxy environment" is not an outbound network boundary by itself.
+pub fn verify_installed(offline_account: &str, online_account: &str) -> Result<(), String> {
     let engine = Engine::open()?;
-    // (name, key, layer, action, expected numFilterConditions)
-    let expected: [(&str, GUID, GUID, u32, u32); 6] = [
-        (
+    verify_provider_and_sublayer(engine.handle)?;
+    let offline = UserCondition::new(offline_account)?;
+    let online = UserCondition::new(online_account)?;
+    for expected in [
+        FilterExpectation::block(
             "OFFLINE_V4",
             OFFLINE_V4,
             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            FWP_ACTION_BLOCK,
-            1,
+            &offline,
         ),
-        (
+        FilterExpectation::block(
             "OFFLINE_V6",
             OFFLINE_V6,
             FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            FWP_ACTION_BLOCK,
-            1,
+            &offline,
         ),
-        (
+        FilterExpectation::permit(
             "ONLINE_PERMIT_V4",
             ONLINE_PERMIT_V4,
             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            FWP_ACTION_PERMIT,
-            3,
+            &online,
         ),
-        (
-            "ONLINE_PERMIT_V6",
-            ONLINE_PERMIT_V6,
-            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            FWP_ACTION_PERMIT,
-            3,
-        ),
-        (
+        FilterExpectation::block(
             "ONLINE_BLOCK_V4",
             ONLINE_BLOCK_V4,
             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            FWP_ACTION_BLOCK,
-            1,
+            &online,
         ),
-        (
+        FilterExpectation::block(
             "ONLINE_BLOCK_V6",
             ONLINE_BLOCK_V6,
             FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            FWP_ACTION_BLOCK,
-            1,
+            &online,
         ),
-    ];
-    for (name, key, layer, action, conditions) in expected {
-        let mut filter: *mut FWPM_FILTER0 = null_mut();
-        check(
-            unsafe { FwpmFilterGetByKey0(engine.handle, &key, &mut filter) },
-            "FwpmFilterGetByKey0",
-        )?;
-        let result = unsafe {
-            let f = &*filter;
-            let layer_match = (
-                f.layerKey.data1,
-                f.layerKey.data2,
-                f.layerKey.data3,
-                f.layerKey.data4,
-            ) == (layer.data1, layer.data2, layer.data3, layer.data4);
-            let action_match = f.action.r#type == action;
-            let cond_match = f.numFilterConditions == conditions;
-            if layer_match && action_match && cond_match {
-                Ok(())
-            } else {
-                Err(format!(
-                    "WFP filter {name} mismatch: action=0x{:X} (expected 0x{action:X}), \
-                     conditions={} (expected {conditions}), layer_match={layer_match}",
-                    f.action.r#type, f.numFilterConditions
-                ))
-            }
-        };
+    ] {
+        verify_filter(engine.handle, &expected)?;
+    }
+    verify_filter_absent(engine.handle, &ONLINE_PERMIT_V6)?;
+    Ok(())
+}
+
+struct FilterExpectation<'a> {
+    name: &'static str,
+    key: GUID,
+    layer: GUID,
+    user: &'a UserCondition,
+    permit_proxy: bool,
+}
+
+impl<'a> FilterExpectation<'a> {
+    fn block(name: &'static str, key: GUID, layer: GUID, user: &'a UserCondition) -> Self {
+        Self {
+            name,
+            key,
+            layer,
+            user,
+            permit_proxy: false,
+        }
+    }
+
+    fn permit(name: &'static str, key: GUID, layer: GUID, user: &'a UserCondition) -> Self {
+        Self {
+            name,
+            key,
+            layer,
+            user,
+            permit_proxy: true,
+        }
+    }
+}
+
+fn verify_provider_and_sublayer(engine: HANDLE) -> Result<(), String> {
+    let mut provider: *mut FWPM_PROVIDER0 = null_mut();
+    check(
+        unsafe { FwpmProviderGetByKey0(engine, &PROVIDER_KEY, &mut provider) },
+        "FwpmProviderGetByKey0",
+    )?;
+    if provider.is_null() {
+        return Err("FwpmProviderGetByKey0 returned a null provider".to_string());
+    }
+    let provider_result = unsafe {
+        let provider = &*provider;
+        if guid_eq(&provider.providerKey, &PROVIDER_KEY)
+            && provider.flags & FWPM_PROVIDER_FLAG_PERSISTENT != 0
+        {
+            Ok(())
+        } else {
+            Err("Ace WFP provider is not the expected persistent object".to_string())
+        }
+    };
+    unsafe { FwpmFreeMemory0((&mut provider as *mut *mut FWPM_PROVIDER0).cast()) };
+    provider_result?;
+
+    let mut sublayer: *mut FWPM_SUBLAYER0 = null_mut();
+    check(
+        unsafe { FwpmSubLayerGetByKey0(engine, &SUBLAYER_KEY, &mut sublayer) },
+        "FwpmSubLayerGetByKey0",
+    )?;
+    if sublayer.is_null() {
+        return Err("FwpmSubLayerGetByKey0 returned a null sublayer".to_string());
+    }
+    let sublayer_result = unsafe {
+        let sublayer = &*sublayer;
+        if guid_eq(&sublayer.subLayerKey, &SUBLAYER_KEY)
+            && sublayer.flags & FWPM_SUBLAYER_FLAG_PERSISTENT != 0
+            && sublayer.weight == 0x8000
+            && !sublayer.providerKey.is_null()
+            && guid_eq(&*sublayer.providerKey, &PROVIDER_KEY)
+        {
+            Ok(())
+        } else {
+            Err("Ace WFP sublayer does not match its persistent provider".to_string())
+        }
+    };
+    unsafe { FwpmFreeMemory0((&mut sublayer as *mut *mut FWPM_SUBLAYER0).cast()) };
+    sublayer_result
+}
+
+fn verify_filter(engine: HANDLE, expected: &FilterExpectation<'_>) -> Result<(), String> {
+    let mut filter: *mut FWPM_FILTER0 = null_mut();
+    check(
+        unsafe { FwpmFilterGetByKey0(engine, &expected.key, &mut filter) },
+        "FwpmFilterGetByKey0",
+    )?;
+    if filter.is_null() {
+        return Err(format!(
+            "FwpmFilterGetByKey0 returned a null filter for {}",
+            expected.name
+        ));
+    }
+    let result = unsafe { verify_filter_value(&*filter, expected) };
+    unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
+    result
+}
+
+fn verify_filter_absent(engine: HANDLE, key: &GUID) -> Result<(), String> {
+    let mut filter: *mut FWPM_FILTER0 = null_mut();
+    let status = unsafe { FwpmFilterGetByKey0(engine, key, &mut filter) };
+    if !filter.is_null() {
         unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
-        result?;
+    }
+    if status == FWP_E_FILTER_NOT_FOUND as u32 || status == FWP_E_NOT_FOUND as u32 {
+        Ok(())
+    } else if status == 0 {
+        Err("obsolete IPv6 proxy-permit WFP filter is still installed".to_string())
+    } else {
+        check(status, "FwpmFilterGetByKey0(obsolete IPv6 permit)")
+    }
+}
+
+unsafe fn verify_filter_value(
+    filter: &FWPM_FILTER0,
+    expected: &FilterExpectation<'_>,
+) -> Result<(), String> {
+    let expected_action = if expected.permit_proxy {
+        FWP_ACTION_PERMIT
+    } else {
+        FWP_ACTION_BLOCK
+    };
+    let expected_conditions = if expected.permit_proxy { 3 } else { 1 };
+    let expected_weight = if expected.permit_proxy { 15 } else { 0 };
+    if !guid_eq(&filter.layerKey, &expected.layer)
+        || !guid_eq(&filter.subLayerKey, &SUBLAYER_KEY)
+        || filter.providerKey.is_null()
+        || !guid_eq(&*filter.providerKey, &PROVIDER_KEY)
+        || filter.flags & FWPM_FILTER_FLAG_PERSISTENT == 0
+        || filter.action.r#type != expected_action
+        || filter.numFilterConditions != expected_conditions
+        || filter.weight.r#type != FWP_UINT8
+        || filter.weight.Anonymous.uint8 != expected_weight
+        || filter.filterCondition.is_null()
+    {
+        return Err(format!(
+            "WFP filter {} metadata, action, weight, or condition count mismatch",
+            expected.name
+        ));
+    }
+    let conditions =
+        std::slice::from_raw_parts(filter.filterCondition, filter.numFilterConditions as usize);
+    let user = &conditions[0];
+    if !guid_eq(&user.fieldKey, &FWPM_CONDITION_ALE_USER_ID)
+        || user.matchType != FWP_MATCH_EQUAL
+        || user.conditionValue.r#type != FWP_SECURITY_DESCRIPTOR_TYPE
+        || user.conditionValue.Anonymous.sd.is_null()
+        || !blob_eq(&*user.conditionValue.Anonymous.sd, &expected.user.blob)
+    {
+        return Err(format!(
+            "WFP filter {} account condition mismatch",
+            expected.name
+        ));
+    }
+    if expected.permit_proxy {
+        let port = &conditions[1];
+        let flags = &conditions[2];
+        if !guid_eq(&port.fieldKey, &FWPM_CONDITION_IP_REMOTE_PORT)
+            || port.matchType != FWP_MATCH_EQUAL
+            || port.conditionValue.r#type != FWP_UINT16
+            || port.conditionValue.Anonymous.uint16 != PROXY_PORT
+            || !guid_eq(&flags.fieldKey, &FWPM_CONDITION_FLAGS)
+            || flags.matchType != FWP_MATCH_FLAGS_ALL_SET
+            || flags.conditionValue.r#type != FWP_UINT32
+            || flags.conditionValue.Anonymous.uint32 != FWP_CONDITION_FLAG_IS_LOOPBACK
+        {
+            return Err(format!(
+                "WFP filter {} is not loopback-proxy-only",
+                expected.name
+            ));
+        }
     }
     Ok(())
+}
+
+unsafe fn blob_eq(left: &FWP_BYTE_BLOB, right: &FWP_BYTE_BLOB) -> bool {
+    if left.size != right.size || left.data.is_null() || right.data.is_null() {
+        return false;
+    }
+    std::slice::from_raw_parts(left.data, left.size as usize)
+        == std::slice::from_raw_parts(right.data, right.size as usize)
+}
+
+fn guid_eq(left: &GUID, right: &GUID) -> bool {
+    (left.data1, left.data2, left.data3, left.data4)
+        == (right.data1, right.data2, right.data3, right.data4)
 }
 
 struct Engine {
@@ -413,6 +566,18 @@ fn delete_filter(engine: HANDLE, key: &GUID) -> Result<(), String> {
         "FwpmFilterDeleteByKey0",
     )
 }
+
+fn filter_keys() -> [GUID; 6] {
+    [
+        OFFLINE_V4,
+        OFFLINE_V6,
+        ONLINE_PERMIT_V4,
+        ONLINE_PERMIT_V6,
+        ONLINE_BLOCK_V4,
+        ONLINE_BLOCK_V6,
+    ]
+}
+
 fn check(code: u32, operation: &str) -> Result<(), String> {
     if code == 0 {
         Ok(())
@@ -428,7 +593,12 @@ fn allow_exists(code: u32, operation: &str) -> Result<(), String> {
     }
 }
 fn allow_missing(code: u32, operation: &str) -> Result<(), String> {
-    if code == 0 || code == FWP_E_FILTER_NOT_FOUND as u32 || code == FWP_E_NOT_FOUND as u32 {
+    if code == 0
+        || code == FWP_E_FILTER_NOT_FOUND as u32
+        || code == FWP_E_NOT_FOUND as u32
+        || code == FWP_E_PROVIDER_NOT_FOUND as u32
+        || code == FWP_E_SUBLAYER_NOT_FOUND as u32
+    {
         Ok(())
     } else {
         check(code, operation)

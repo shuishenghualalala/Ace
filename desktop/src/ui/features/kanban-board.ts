@@ -378,22 +378,18 @@ async function openKanbanPath(targetPath: string): Promise<void> {
     return;
   }
   try {
-    const workspaceRoot = resolveKanbanWorkspaceRootPath();
-    const result = await window.Crew.openPath(targetPath, workspaceRoot);
+    const workspaceId = normalizeWorkspaceId(state.currentWorkspaceId);
+    const result = await window.Crew.openPath(targetPath, workspaceId);
     if (result) notify(`打开失败：${result}`);
   } catch (err) {
     notify(`打开失败：${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-/** 从当前看板数据中提取关联的项目工作空间根目录。 */
-function resolveKanbanWorkspaceRootPath(): string | undefined {
-  const board = (state.kanbanBoard || { workflow: undefined }) as {
-    workflow?: { context?: Record<string, unknown> };
-  };
-  const rootPath = board.workflow?.context?.workspace_root_path;
-  const root = typeof rootPath === 'string' ? rootPath.trim() : '';
-  return root || undefined;
+/** Workspace IDs may cross renderer state boundaries, so normalize before IPC. */
+export function normalizeWorkspaceId(value: unknown): string | undefined {
+  const workspaceId = typeof value === 'string' ? value.trim() : '';
+  return workspaceId || undefined;
 }
 
 /** 看板数据更新后，若 Inspector 任务 Tab 已挂载则刷新 DOM。 */

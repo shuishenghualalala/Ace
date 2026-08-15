@@ -167,6 +167,30 @@ _HTTP_REQUEST_TARGET_QUERY_RE = re.compile(
 _FORM_BODY_RE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*(?:&[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*)+$"
 )
+_SENSITIVE_CLI_OPTIONS = frozenset(
+    {
+        "api-key",
+        "apikey",
+        "auth",
+        "authorization",
+        "client-secret",
+        "credential",
+        "password",
+        "passwd",
+        "proxy-password",
+        "secret",
+        "token",
+    }
+)
+_SENSITIVE_CLI_TEXT_RE = re.compile(
+    r"(?i)(?:--?(?:api[-_]?key|auth(?:orization)?|client[-_]?secret|credential|"
+    r"password|passwd|proxy[-_]?password|secret|token))(?:\s+|=)"
+    r"(?:\"[^\"]+\"|'[^']+'|[^\s]+)"
+)
+_SENSITIVE_HEADER_TEXT_RE = re.compile(
+    r"(?i)(?:authorization|cookie|proxy-authorization|x-api-key|x-auth-token)"
+    r"\s*:\s*\S+"
+)
 
 # 已知前缀合并成一个 alternation。
 # ponytail: 不用 lookbehind/lookaround -- 贪婪量词 {10,} 已保证匹配到 token 边界，
@@ -291,6 +315,71 @@ def redact_sensitive_display_text(value: str) -> str:
     if "?" in text and _has_http_method_substring(text):
         text = _redact_http_request_target_query_params(text)
     return text
+
+
+_DISPLAY_HOST_PATH_RE = re.compile(
+    r"(?:(?<![A-Za-z])[A-Za-z]:[\\/]|\\\\|/(?:private|tmp|home|Users|var|workspace|AppData|Windows)/|"
+    r"(?:^|[\s\"'(=])/(?:[^/\s]+/)+[^/\s]*)"
+)
+
+
+def safe_public_error(
+    value: BaseException | object,
+    fallback: str = "请求失败",
+    *,
+    limit: int = 500,
+) -> str:
+    """Bound a user-visible diagnostic without exposing secrets or host paths."""
+    text = redact_sensitive_display_text(str(value or "")).strip()
+    if not text or _DISPLAY_HOST_PATH_RE.search(text):
+        return fallback
+    return text[: max(1, limit)]
+
+
+def argv_contains_sensitive_value(argv) -> bool:
+    """Detect credential values that must never cross an argv boundary."""
+
+    values = [str(item) for item in argv]
+    redact_next = False
+    for index, token in enumerate(values):
+        if redact_next:
+            if token and not token.startswith("-"):
+                return True
+            redact_next = False
+
+        if _PREFIX_RE.search(token) or _JWT_RE.search(token) or _PRIVATE_KEY_RE.search(token):
+            return True
+        if _SENSITIVE_CLI_TEXT_RE.search(token) or _SENSITIVE_HEADER_TEXT_RE.search(token):
+            return True
+
+        option, separator, option_value = token.partition("=")
+        normalized = option.lstrip("-").lower().replace("_", "-")
+        if normalized in _SENSITIVE_CLI_OPTIONS:
+            if separator and option_value:
+                return True
+            redact_next = True
+        elif normalized in {"u", "user", "proxy-user"}:
+            if separator and ":" in option_value:
+                return True
+            if index + 1 < len(values) and ":" in values[index + 1]:
+                return True
+
+        if "://" not in token:
+            continue
+        try:
+            parsed = urlsplit(token)
+            if parsed.username is not None or parsed.password is not None:
+                return True
+            for encoded_fields in (parsed.query, parsed.fragment):
+                for name, value in parse_qsl(
+                    encoded_fields,
+                    keep_blank_values=True,
+                ):
+                    if name.lower() in _SENSITIVE_QUERY_PARAMS and value:
+                        return True
+        except (TypeError, ValueError, UnicodeError):
+            continue
+    return False
 
 
 def _redact_url_query_params(text: str) -> str:

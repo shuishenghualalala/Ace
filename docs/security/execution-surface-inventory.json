@@ -1,0 +1,4565 @@
+{
+  "$schema": "./execution-surface-inventory.schema.json",
+  "schema_version": 1,
+  "inventory_id": "ACE-EXECUTION-SURFACES",
+  "summary_path": "docs/security/execution-surface-inventory.md",
+  "surfaces": [
+    {
+      "id": "ACE-SURF-BROWSER-HOST",
+      "categories": [
+        "browser",
+        "cdp",
+        "upload",
+        "download"
+      ],
+      "path": "desktop/src/main/browser-host.ts",
+      "symbol_or_route": "BrowserHost reviewed Electron and CDP wrappers",
+      "owner": "Browser Security maintainers",
+      "trust_source": "Authenticated owner/task-bound Gateway commands and an isolated Electron BrowserView session",
+      "final_enforcement_point": "desktop/src/main/browser-host.ts permission, navigation, download, upload, and CDP dispatch guards",
+      "fail_closed_behavior": "Unknown CDP methods, missing owner or task bindings, unsafe navigation, denied permissions, and invalid artifact paths are rejected",
+      "tests": [
+        {
+          "id": "BROWSER-HOST-BOUNDARY",
+          "path": "desktop/tests/unit/browser-host.test.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/browser-host.test.ts"
+        }
+      ],
+      "lifecycle_revocation_owner": "BrowserManager owner/session lifecycle and Desktop BrowserHost cleanup",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/browser-host.test.ts"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new Electron session hook, CDP command wrapper, upload source, download sink, or BrowserView navigation path",
+      "primitive_refs": [
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-browser",
+          "primitive": "debugger.sendCommand"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-browser",
+          "primitive": "executeJavaScript"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-browser",
+          "primitive": "setPermissionCheckHandler"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-browser",
+          "primitive": "setPermissionRequestHandler"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-browser",
+          "primitive": "setWindowOpenHandler"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-browser",
+          "primitive": "will-download"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-browser",
+          "primitive": "will-navigate"
+        },
+        {
+          "path": "desktop/src/main/browser/electron-cdp-transport.ts",
+          "kind": "javascript-browser",
+          "primitive": "debugger.sendCommand"
+        },
+        {
+          "path": "desktop/src/main/host-authority-dialog.ts",
+          "kind": "javascript-browser",
+          "primitive": "setWindowOpenHandler"
+        },
+        {
+          "path": "desktop/src/main/host-authority-dialog.ts",
+          "kind": "javascript-browser",
+          "primitive": "will-navigate"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-browser",
+          "primitive": "setWindowOpenHandler"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-browser",
+          "primitive": "will-navigate"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-CUA-SETUP",
+      "categories": [
+        "cua",
+        "installer",
+        "download",
+        "mcp"
+      ],
+      "path": "crew/tools/cua_setup.py",
+      "symbol_or_route": "setup_cua_driver and daemon lifecycle",
+      "owner": "CUA integration maintainers",
+      "trust_source": "Authenticated administrator action with Desktop instance proof and pinned installer metadata",
+      "final_enforcement_point": "crew/tools/cua_setup.py digest verification, restricted environment, install transaction, and daemon registry",
+      "fail_closed_behavior": "Missing admin authority, unsupported platform, digest mismatch, download failure, or rollback failure leaves the CUA driver unavailable",
+      "tests": [
+        {
+          "id": "CUA-AUTH-BOUNDARY",
+          "path": "tests/gateway/test_cua_setup_authorization.py"
+        },
+        {
+          "id": "CUA-LIFECYCLE",
+          "path": "tests/test_cua_setup.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/gateway/test_cua_setup_authorization.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Gateway CUA setup task registry and CUA daemon lifecycle",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/gateway/test_cua_setup_authorization.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Installer URL, digest, daemon argv, platform launcher, MCP registration, or setup route changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-FILE-PYTHON-WRAPPERS",
+      "categories": [
+        "structured-file-read",
+        "structured-file-write",
+        "upload",
+        "download",
+        "plugin",
+        "skill"
+      ],
+      "path": "crew/tools/file_utils.py",
+      "symbol_or_route": "identity-checked Python file wrappers and exact reviewed callers",
+      "owner": "File Capability maintainers",
+      "trust_source": "Canonical owner/workspace capability, pinned parent identity, owned snapshots, or trusted product lifecycle input",
+      "final_enforcement_point": "crew/tools/file_utils.py verified descriptor reads and pinned-parent atomic replacement, with owner-private boundaries in Browser, Plugin, and Wiki callers",
+      "fail_closed_behavior": "Traversal, link or reparse objects, identity changes, oversized or special files, unauthorized roots, and failed atomic publication are rejected",
+      "tests": [
+        {
+          "id": "FILE-POLICY",
+          "path": "tests/security/test_file_policy.py"
+        },
+        {
+          "id": "FILE-RACES",
+          "path": "tests/security/test_file_races.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_file_races.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "SecurityService capability lifecycle plus owning Browser, Plugin, Tool, or Wiki session",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_file_races.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new Python open/read/write primitive under crew/browser, crew/plugins, crew/tools, or crew/wiki",
+      "primitive_refs": [
+        {
+          "path": "crew/browser/manager.py",
+          "kind": "python-file",
+          "primitive": "Path.open"
+        },
+        {
+          "path": "crew/browser/manager.py",
+          "kind": "python-file",
+          "primitive": "os.open"
+        },
+        {
+          "path": "crew/plugins/manager.py",
+          "kind": "python-file",
+          "primitive": "Path.open"
+        },
+        {
+          "path": "crew/plugins/manager.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "crew/plugins/security.py",
+          "kind": "python-file",
+          "primitive": "Path.open"
+        },
+        {
+          "path": "crew/plugins/security.py",
+          "kind": "python-file",
+          "primitive": "Path.read_bytes"
+        },
+        {
+          "path": "crew/plugins/security.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "crew/tools/cua_setup.py",
+          "kind": "python-file",
+          "primitive": "Path.write_bytes"
+        },
+        {
+          "path": "crew/tools/cua_setup.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "crew/tools/file_utils.py",
+          "kind": "python-file",
+          "primitive": "os.open"
+        },
+        {
+          "path": "crew/tools/file_utils.py",
+          "kind": "python-file",
+          "primitive": "os.replace"
+        },
+        {
+          "path": "crew/tools/managed_tools.py",
+          "kind": "python-file",
+          "primitive": "Path.open"
+        },
+        {
+          "path": "crew/tools/pipeline.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "crew/tools/process_registry.py",
+          "kind": "python-file",
+          "primitive": "os.open"
+        },
+        {
+          "path": "crew/tools/skills_tools.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "crew/wiki/archive_security.py",
+          "kind": "python-file",
+          "primitive": "Path.open"
+        },
+        {
+          "path": "crew/wiki/compiler.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "crew/wiki/compiler.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "crew/wiki/manager.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "crew/wiki/manager.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "crew/wiki/parser.py",
+          "kind": "python-file",
+          "primitive": "Path.open"
+        },
+        {
+          "path": "crew/wiki/prompts.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "crew/wiki/seed.py",
+          "kind": "python-file",
+          "primitive": "Path.open"
+        },
+        {
+          "path": "crew/wiki/seed.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "crew/wiki/seed.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "crew/wiki/store/_filesystem.py",
+          "kind": "python-file",
+          "primitive": "Path.open"
+        },
+        {
+          "path": "crew/wiki/store/_filesystem.py",
+          "kind": "python-file",
+          "primitive": "Path.read_bytes"
+        },
+        {
+          "path": "crew/wiki/store/_filesystem.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "crew/wiki/store/_filesystem.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-FILE-DESKTOP-WRAPPERS",
+      "categories": [
+        "structured-file-read",
+        "structured-file-write",
+        "upload",
+        "download",
+        "gateway-ipc"
+      ],
+      "path": "desktop/src/main/index.ts",
+      "symbol_or_route": "reviewed Node filesystem calls behind trustedHandle and private host services",
+      "owner": "Desktop Host maintainers",
+      "trust_source": "Trusted sender validation, strict IPC schemas, user-selected paths, signed product artifacts, and owner-private Browser state",
+      "final_enforcement_point": "Desktop trustedHandle schemas, crew-file protocol identity checks, BrowserHost staging, and update/install file verifiers",
+      "fail_closed_behavior": "Untrusted senders, malformed paths, non-owned files, links, oversized payloads, identity drift, and failed atomic writes are rejected",
+      "tests": [
+        {
+          "id": "ELECTRON-IPC-FILE",
+          "path": "tests/security/test_electron_ipc_contract.py"
+        },
+        {
+          "id": "DESKTOP-IPC-SCHEMA",
+          "path": "desktop/tests/unit/ipc-schemas.test.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/ipc-schemas.test.ts"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop window/session lifecycle and owner-scoped Gateway or Browser cleanup",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/ipc-schemas.test.ts"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new Node fs primitive, renderer path argument, upload staging path, artifact publication, or product-state file",
+      "primitive_refs": [
+        {
+          "path": "desktop/src/main/app-version.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.readFileSync"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.copyFile"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.open"
+        },
+        {
+          "path": "desktop/src/main/browser-host.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.rename"
+        },
+        {
+          "path": "desktop/src/main/crew-file-protocol.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.open"
+        },
+        {
+          "path": "desktop/src/main/crew-session-file.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.readFileSync"
+        },
+        {
+          "path": "desktop/src/main/desktop-prefs.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.readFileSync"
+        },
+        {
+          "path": "desktop/src/main/desktop-prefs.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.writeFileSync"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.copyFile"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.createWriteStream"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.open"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.readFile"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.readFileSync"
+        },
+        {
+          "path": "desktop/src/main/open-with-service.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.readFile"
+        },
+        {
+          "path": "desktop/src/main/selected-file-authority.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.open"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-FILE-RUNTIME-WRAPPERS",
+      "categories": [
+        "structured-file-read",
+        "structured-file-write",
+        "runtime-boundary"
+      ],
+      "path": "security-runtime/src",
+      "symbol_or_route": "reviewed Rust runtime file and state primitives",
+      "owner": "Native Runtime maintainers",
+      "trust_source": "Signed authorization protocol, fixed runtime configuration, protected state roots, and platform-reported identities",
+      "final_enforcement_point": "security-runtime platform modules and protected state implementations",
+      "fail_closed_behavior": "Unexpected object types, unsafe ownership or permissions, identity drift, state corruption, and unsupported platform operations abort execution",
+      "tests": [
+        {
+          "id": "RUNTIME-FILE-BOUNDARY",
+          "path": "tests/security/test_native_runtime_contract.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/protocol.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "Native runtime session and parent broker process",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/protocol.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new Rust fs, File, or OpenOptions primitive in security-runtime/src",
+      "primitive_refs": [
+        {
+          "path": "security-runtime/src/linux/bwrap_source.rs",
+          "kind": "rust-file",
+          "primitive": "File.open"
+        },
+        {
+          "path": "security-runtime/src/linux/proxy_routing.rs",
+          "kind": "rust-file",
+          "primitive": "fs.mutate"
+        },
+        {
+          "path": "security-runtime/src/linux/proxy_routing.rs",
+          "kind": "rust-file",
+          "primitive": "fs.read"
+        },
+        {
+          "path": "security-runtime/src/linux/seccomp.rs",
+          "kind": "rust-file",
+          "primitive": "fs.read"
+        },
+        {
+          "path": "security-runtime/src/linux/wsl.rs",
+          "kind": "rust-file",
+          "primitive": "fs.read"
+        },
+        {
+          "path": "security-runtime/src/macos/mod.rs",
+          "kind": "rust-file",
+          "primitive": "fs.mutate"
+        },
+        {
+          "path": "security-runtime/src/windows/acl.rs",
+          "kind": "rust-file",
+          "primitive": "fs.mutate"
+        },
+        {
+          "path": "security-runtime/src/windows/identity.rs",
+          "kind": "rust-file",
+          "primitive": "fs.mutate"
+        },
+        {
+          "path": "security-runtime/src/windows/path.rs",
+          "kind": "rust-file",
+          "primitive": "File.open"
+        },
+        {
+          "path": "security-runtime/src/windows/process.rs",
+          "kind": "rust-file",
+          "primitive": "File.open"
+        },
+        {
+          "path": "security-runtime/src/windows/readiness.rs",
+          "kind": "rust-file",
+          "primitive": "fs.mutate"
+        },
+        {
+          "path": "security-runtime/src/windows/state.rs",
+          "kind": "rust-file",
+          "primitive": "File.open"
+        },
+        {
+          "path": "security-runtime/src/windows/state.rs",
+          "kind": "rust-file",
+          "primitive": "OpenOptions"
+        },
+        {
+          "path": "security-runtime/src/windows/state.rs",
+          "kind": "rust-file",
+          "primitive": "fs.mutate"
+        },
+        {
+          "path": "security-runtime/src/windows/state.rs",
+          "kind": "rust-file",
+          "primitive": "fs.read"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-NETWORK-PYTHON-WRAPPERS",
+      "categories": [
+        "network",
+        "mcp",
+        "plugin",
+        "skill",
+        "cua",
+        "download"
+      ],
+      "path": "crew/security/outbound.py",
+      "symbol_or_route": "OutboundHttpClient, policy adapters, provider clients, and exact reviewed socket users",
+      "owner": "Network Policy maintainers",
+      "trust_source": "Canonical URL authorization, owner/task scope, pinned DNS result, fixed product endpoint, or sandbox-descendant protocol",
+      "final_enforcement_point": "crew/security/outbound.py connection plans plus caller-specific origin, redirect, proxy, and transfer enforcement",
+      "fail_closed_behavior": "Missing authorization, unsafe address classes, DNS or origin drift, redirect overflow, unsupported response Content-Encoding, transfer limits, and connector failures deny the request",
+      "tests": [
+        {
+          "id": "OUTBOUND-POLICY",
+          "path": "tests/security/test_outbound_policy.py"
+        },
+        {
+          "id": "MCP-NETWORK",
+          "path": "tests/test_mcp_client_lifecycle.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_outbound_policy.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "SecurityService grant lifecycle and the owning provider, MCP, plugin, skill, CUA, or Gateway task",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_outbound_policy.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new Python network client, socket constructor, DNS resolver, transport adapter, redirect path, or ambient proxy use",
+      "primitive_refs": [
+        {
+          "path": "crew/gateway/mcp_server.py",
+          "kind": "python-network",
+          "primitive": "OutboundHttpClient"
+        },
+        {
+          "path": "crew/gateway/routers/remote_auth.py",
+          "kind": "python-network",
+          "primitive": "OutboundHttpClient"
+        },
+        {
+          "path": "crew/plugins/security.py",
+          "kind": "python-network",
+          "primitive": "OutboundHttpClient"
+        },
+        {
+          "path": "crew/providers/anthropic_provider.py",
+          "kind": "python-network",
+          "primitive": "httpx.AsyncClient"
+        },
+        {
+          "path": "crew/providers/openai_provider.py",
+          "kind": "python-network",
+          "primitive": "httpx.AsyncClient"
+        },
+        {
+          "path": "crew/security/outbound.py",
+          "kind": "python-network",
+          "primitive": "socket.getaddrinfo"
+        },
+        {
+          "path": "crew/security/outbound.py",
+          "kind": "python-network",
+          "primitive": "socket.socket"
+        },
+        {
+          "path": "crew/skills/image-understanding/scripts/image_understand.py",
+          "kind": "python-network",
+          "primitive": "OutboundHttpClient"
+        },
+        {
+          "path": "crew/skills/video-understanding/scripts/video_understand.py",
+          "kind": "python-network",
+          "primitive": "OutboundHttpClient"
+        },
+        {
+          "path": "crew/skills/xlsx/scripts/office/soffice.py",
+          "kind": "python-network",
+          "primitive": "socket.socket"
+        },
+        {
+          "path": "crew/tools/cua_setup.py",
+          "kind": "python-network",
+          "primitive": "OutboundHttpClient"
+        },
+        {
+          "path": "crew/tools/managed_tools.py",
+          "kind": "python-network",
+          "primitive": "OutboundHttpClient"
+        },
+        {
+          "path": "crew/tools/mcp_client.py",
+          "kind": "python-network",
+          "primitive": "httpx2.AsyncClient"
+        },
+        {
+          "path": "crew/tools/security_guard.py",
+          "kind": "python-network",
+          "primitive": "OutboundHttpClient"
+        },
+        {
+          "path": "crew/wiki/sources.py",
+          "kind": "python-network",
+          "primitive": "requests.Session"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-NETWORK-PLATFORM-PLUGINS",
+      "categories": [
+        "network",
+        "plugin"
+      ],
+      "path": "plugins/platforms",
+      "symbol_or_route": "Feishu and Weixin fixed platform HTTP and long-poll clients",
+      "owner": "Platform Integration maintainers",
+      "trust_source": "Administrator-configured platform account, fixed vendor API domains, and platform-specific authenticated session state",
+      "final_enforcement_point": "Bundled platform adapter endpoint construction, TLS connector, bounded request timeout, response validation, and Gateway owner lifecycle",
+      "fail_closed_behavior": "Missing dependency or account, invalid configured endpoint, authentication failure, timeout, malformed response, disconnect, or owner revocation stops the platform operation",
+      "tests": [
+        {
+          "id": "PLATFORM-FEISHU",
+          "path": "tests/test_platform_feishu.py"
+        },
+        {
+          "id": "PLATFORM-WEIXIN",
+          "path": "tests/test_platform_weixin.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_platform_weixin.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Platform account owner, adapter connection lifecycle, Gateway logout, and plugin enable state",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_platform_weixin.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Vendor domain, HTTP client, ambient proxy behavior, TLS connector, polling, upload/download, account storage, or reconnect changes",
+      "primitive_refs": [
+        {
+          "path": "plugins/feishu/__init__.py",
+          "kind": "python-network",
+          "primitive": "urllib.request.urlopen"
+        },
+        {
+          "path": "plugins/platforms/feishu/adapter.py",
+          "kind": "python-network",
+          "primitive": "urllib.request.urlopen"
+        },
+        {
+          "path": "plugins/platforms/weixin/adapter.py",
+          "kind": "python-network",
+          "primitive": "aiohttp.ClientSession"
+        },
+        {
+          "path": "plugins/platforms/weixin/ilink.py",
+          "kind": "python-network",
+          "primitive": "aiohttp.ClientSession"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-NETWORK-WEB-CLIENT",
+      "categories": [
+        "network",
+        "gateway-ipc"
+      ],
+      "path": "web/src",
+      "symbol_or_route": "same-origin Gateway REST and WebSocket client",
+      "owner": "Web Gateway Client maintainers",
+      "trust_source": "Browser same-origin policy, authenticated Gateway session, and server-issued owner/session state",
+      "final_enforcement_point": "Gateway HTTP/WebSocket authentication, strict route schemas, owner binding, sequence and replay checks, and server-side capability enforcement",
+      "fail_closed_behavior": "Authentication loss, non-success response, malformed frame, owner or sequence mismatch, disconnect, and Gateway denial stop the client action",
+      "tests": [
+        {
+          "id": "WEB-API-CLIENT",
+          "path": "web/src/api.test.ts"
+        },
+        {
+          "id": "WEB-WS-CLIENT",
+          "path": "web/src/ws.test.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "node-test",
+          "path": "web/src/ws.test.ts"
+        }
+      ],
+      "lifecycle_revocation_owner": "Gateway account/session/logout lifecycle and Web client connection owner",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "node-test",
+          "path": "web/src/ws.test.ts"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new Web fetch, WebSocket, endpoint construction, authentication transport, frame, reconnect, or browser network primitive",
+      "primitive_refs": [
+        {
+          "path": "web/src/api.ts",
+          "kind": "javascript-network",
+          "primitive": "fetch"
+        },
+        {
+          "path": "web/src/ws.ts",
+          "kind": "javascript-network",
+          "primitive": "WebSocket"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-NETWORK-DESKTOP-WRAPPERS",
+      "categories": [
+        "network",
+        "gateway-ipc",
+        "browser",
+        "updater",
+        "download"
+      ],
+      "path": "desktop/src/main/index.ts",
+      "symbol_or_route": "reviewed fetch, WebSocket, and HTTPS request boundaries",
+      "owner": "Desktop Network maintainers",
+      "trust_source": "Loopback Gateway identity proof, pinned product endpoints, signed update metadata, or validated Desktop auth and feedback configuration",
+      "final_enforcement_point": "Desktop URL/origin allowlists, Gateway instance authentication, update URL policy, and BrowserHost proxy requirements",
+      "fail_closed_behavior": "Non-allowlisted schemes or hosts, missing instance proof, protocol mismatch, invalid redirects, and transfer-limit failures reject the connection",
+      "tests": [
+        {
+          "id": "DESKTOP-GATEWAY-IPC",
+          "path": "tests/security/test_electron_ipc_contract.py"
+        },
+        {
+          "id": "UPDATE-URL",
+          "path": "desktop/tests/unit/update-url.test.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/update-url.test.ts"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop app, auth session, update controller, Browser session, and Gateway socket owners",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/update-url.test.ts"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new Desktop fetch, WebSocket, HTTP request, redirect, endpoint, or renderer-accessible network bridge",
+      "primitive_refs": [
+        {
+          "path": "desktop/src/main/auth-session.ts",
+          "kind": "javascript-network",
+          "primitive": "fetch"
+        },
+        {
+          "path": "desktop/src/main/feedback-service.ts",
+          "kind": "javascript-network",
+          "primitive": "fetch"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-network",
+          "primitive": "WebSocket"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-network",
+          "primitive": "fetch"
+        },
+        {
+          "path": "desktop/src/main/site-preview-protocol.ts",
+          "kind": "javascript-network",
+          "primitive": "fetch"
+        },
+        {
+          "path": "desktop/src/main/update/download-controller.ts",
+          "kind": "javascript-network",
+          "primitive": "fetch"
+        },
+        {
+          "path": "desktop/src/main/update/download-controller.ts",
+          "kind": "javascript-network",
+          "primitive": "https.request"
+        },
+        {
+          "path": "desktop/src/ui/backend-client.ts",
+          "kind": "javascript-network",
+          "primitive": "WebSocket"
+        },
+        {
+          "path": "desktop/src/ui/backend-client.ts",
+          "kind": "javascript-network",
+          "primitive": "fetch"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-NETWORK-RUNTIME-WRAPPERS",
+      "categories": [
+        "network",
+        "runtime-boundary"
+      ],
+      "path": "security-runtime/src/network",
+      "symbol_or_route": "native pinned connector and managed proxy listeners",
+      "owner": "Native Network Runtime maintainers",
+      "trust_source": "Signed execution authorization and canonical proxy policy from the broker",
+      "final_enforcement_point": "security-runtime/src/network/connector.rs and platform proxy routing modules",
+      "fail_closed_behavior": "Unapproved addresses, route mismatch, unavailable proxy isolation, timeout, or lifecycle cleanup failure aborts managed networking",
+      "tests": [
+        {
+          "id": "RUNTIME-NETWORK-POLICY",
+          "path": "tests/security/test_native_runtime_contract.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_adversarial.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "Native runtime session and broker cancellation lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_adversarial.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new Rust listener, outbound connector, socket type, proxy bridge, or platform routing mechanism",
+      "primitive_refs": [
+        {
+          "path": "security-runtime/src/linux/proxy_routing.rs",
+          "kind": "rust-network",
+          "primitive": "TcpListener::bind"
+        },
+        {
+          "path": "security-runtime/src/linux/proxy_routing.rs",
+          "kind": "rust-network",
+          "primitive": "TcpStream::connect_timeout"
+        },
+        {
+          "path": "security-runtime/src/network/connector.rs",
+          "kind": "rust-network",
+          "primitive": "TcpStream::connect_timeout"
+        },
+        {
+          "path": "security-runtime/src/network/proxy.rs",
+          "kind": "rust-network",
+          "primitive": "TcpListener::bind"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PLUGIN-EXECUTION",
+      "categories": [
+        "plugin",
+        "skill",
+        "structured-file-read",
+        "structured-file-write",
+        "download"
+      ],
+      "path": "crew/plugins/manager.py",
+      "symbol_or_route": "plugin discovery, install, capability registration, enable, disable, and uninstall",
+      "owner": "Plugin Runtime maintainers",
+      "trust_source": "Bundled provenance or administrator-approved root/signer plus strict manifest and declared capabilities",
+      "final_enforcement_point": "crew/plugins/discovery.py and crew/plugins/security.py provenance checks before crew/plugins/manager.py registration",
+      "fail_closed_behavior": "Unsigned remote executable code, malformed manifests, undeclared capabilities, identity drift, and untrusted native imports remain unavailable",
+      "tests": [
+        {
+          "id": "PLUGIN-EXECUTION-BOUNDARY",
+          "path": "tests/security/test_plugin_execution_boundary.py"
+        },
+        {
+          "id": "PLUGIN-SECURITY",
+          "path": "tests/test_plugin_security.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_plugin_execution_boundary.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Plugin manager owner preference, system enable state, uninstall transaction, and current task capability",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_plugin_execution_boundary.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new plugin source, manifest capability, executable callback, import mechanism, signer, installation, or cleanup path",
+      "primitive_refs": [
+        {
+          "path": "plugins/browser/compile_tool.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "plugins/browser/compile_tool.py",
+          "kind": "python-file",
+          "primitive": "os.open"
+        },
+        {
+          "path": "plugins/browser/workflow_store.py",
+          "kind": "python-file",
+          "primitive": "os.open"
+        },
+        {
+          "path": "plugins/platforms/feishu/adapter.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "plugins/platforms/feishu/adapter.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "plugins/platforms/feishu/files.py",
+          "kind": "python-file",
+          "primitive": "Path.write_bytes"
+        },
+        {
+          "path": "plugins/platforms/feishu/files.py",
+          "kind": "python-file",
+          "primitive": "builtins.open"
+        },
+        {
+          "path": "plugins/platforms/weixin/adapter.py",
+          "kind": "python-file",
+          "primitive": "Path.read_bytes"
+        },
+        {
+          "path": "plugins/platforms/weixin/adapter.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "plugins/platforms/weixin/adapter.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        },
+        {
+          "path": "plugins/platforms/weixin/ilink.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        },
+        {
+          "path": "plugins/platforms/weixin/ilink.py",
+          "kind": "python-file",
+          "primitive": "Path.write_bytes"
+        },
+        {
+          "path": "plugins/platforms/weixin/ilink.py",
+          "kind": "python-file",
+          "primitive": "Path.write_text"
+        }
+      ],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-SKILL-ACTIVATION",
+      "categories": [
+        "skill",
+        "plugin",
+        "structured-file-read"
+      ],
+      "path": "crew/agent/skills.py",
+      "symbol_or_route": "skill discovery and activation into managed tool execution",
+      "owner": "Skill Runtime maintainers",
+      "trust_source": "Bundled read-only skill roots or declarative assets retained from an approved plugin package",
+      "final_enforcement_point": "crew/agent/skills.py path resolution and crew/tools/builtin.py ProcessLaunch boundary",
+      "fail_closed_behavior": "Escaping paths, malformed metadata, executable untrusted plugins, unavailable managed execution, and missing provenance reject activation or execution",
+      "tests": [
+        {
+          "id": "SKILL-BOUNDARY",
+          "path": "tests/test_skills.py"
+        },
+        {
+          "id": "LOCAL-SKILLS",
+          "path": "tests/test_local_skills.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_skills.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Agent session skill registry, plugin uninstall lifecycle, and managed process owner",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_skills.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new skill root, package source, activation route, executable hook, or host-side skill runner",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-UPDATE-PIPELINE",
+      "categories": [
+        "updater",
+        "installer",
+        "network",
+        "download",
+        "structured-file-read",
+        "structured-file-write"
+      ],
+      "path": "desktop/src/main/update",
+      "symbol_or_route": "signed update discovery, bounded download, file verification, and installer handoff",
+      "owner": "Desktop Update maintainers",
+      "trust_source": "Pinned HTTPS update source, Ed25519 signature trust root, platform/architecture metadata, and user install action",
+      "final_enforcement_point": "desktop/src/main/update/download-controller.ts, update-integrity.ts, update-file-security.ts, and update-installer.ts",
+      "fail_closed_behavior": "Insecure URLs, redirect drift, signature or digest mismatch, wrong platform, unsafe package identity, and helper failure block installation",
+      "tests": [
+        {
+          "id": "UPDATE-INTEGRITY",
+          "path": "desktop/tests/unit/update-integrity.test.ts"
+        },
+        {
+          "id": "UPDATE-INSTALLER",
+          "path": "desktop/tests/unit/update-installer.test.ts"
+        },
+        {
+          "id": "UPDATE-FILE-SECURITY",
+          "path": "desktop/tests/unit/update-file-security.test.ts"
+        },
+        {
+          "id": "UPDATE-STATE",
+          "path": "desktop/tests/unit/update-state.test.ts"
+        },
+        {
+          "id": "UPDATE-DOWNLOAD-POLICY",
+          "path": "desktop/tests/unit/update-download-policy.test.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/update-installer.test.ts"
+        },
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/update-download-policy.test.ts"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop update controller and installer completion or cancellation lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/update-installer.test.ts"
+        },
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/update-download-policy.test.ts"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Update origin, redirect policy, signature format, package type, download sink, installer helper, or IPC route changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-GATEWAY-IPC",
+      "categories": [
+        "gateway-ipc",
+        "browser",
+        "upload",
+        "download",
+        "updater",
+        "installer"
+      ],
+      "path": "desktop/src/shared/ipc-channels.ts",
+      "symbol_or_route": "closed renderer-to-main invoke and event channel registries",
+      "owner": "Desktop IPC maintainers",
+      "trust_source": "Sandboxed context-isolated preload and trusted sender/origin validation",
+      "final_enforcement_point": "desktop/src/main/index.ts::trustedHandle with desktop/src/shared/ipc-schemas.ts parsers",
+      "fail_closed_behavior": "Unknown channels, untrusted senders, invalid schemas, oversized payloads, and missing Gateway or Browser identity proof are rejected before dispatch",
+      "tests": [
+        {
+          "id": "ELECTRON-IPC-CONTRACT",
+          "path": "tests/security/test_electron_ipc_contract.py"
+        },
+        {
+          "id": "IPC-SCHEMAS",
+          "path": "desktop/tests/unit/ipc-schemas.test.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop window lifecycle, Gateway socket owner, Browser session owner, and update controller",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any new IPC channel, preload exposure, trustedHandle registration, main-to-renderer event, or renderer event",
+      "primitive_refs": [
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-ipc",
+          "primitive": "ipcMain.handle.bind"
+        },
+        {
+          "path": "desktop/src/main/index.ts",
+          "kind": "javascript-ipc",
+          "primitive": "ipcMain.on.bind"
+        }
+      ],
+      "covered_routes": [
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:app:get-auto-launch-enabled"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:app:get-close-behavior"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:app:get-system-locale"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:app:get-version"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:app:quit"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:app:renderer-initial-state-ready"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:app:set-auto-launch-enabled"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:app:set-close-behavior"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:auth:get-state"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:auth:heartbeat"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:auth:login"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:auth:logout"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:auth:send-code"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:browser-view:get-navigation"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:browser-view:hide"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:browser-view:set-panel"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:browser-ws:close"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:browser-ws:connect"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:clipboard:writeImage"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:dialog:saveLocalExport"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:dialog:selectFile"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:dialog:selectFolder"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:feedback:cancel"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:feedback:image"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:feedback:list"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:feedback:preview"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:feedback:submit"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway-ws:close"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway-ws:connect"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway-ws:send"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway:ensure"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway:fetch"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway:get-status"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway:retry"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway:stream-cancel"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway:stream-start"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:gateway:upload"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:image:showItemInFolder"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:inspiration:close-window"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:inspiration:open-window"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:inspiration:window-state"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:audit"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:audit-export"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:audit-purge"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:alerts"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:alert-isolate"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:alert-revoke"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:alert-resolve"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:capabilities"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:decide"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:delete-rule"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:enable-uac"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:get-strict-security"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:pending"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:rules"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:set-mode"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:set-rule"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:set-strict-security"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:setup"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:security:uac-status"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:listOpenApplications"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:openExternal"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:openPath"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:openPathWith"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:pathExists"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:readFileBase64"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:readTextFile"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:showItemInFolder"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:writeFileBase64"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:shell:writeTextFile"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:update:get-state"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:update:install-package"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:update:pause"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:update:resume"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:update:retry"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:update:start-download"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:wiki:openSourceFile"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:window:close"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:window:isMaximized"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:window:maximize"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:window:minimize"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:workspace:directoryInfo"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:auth:session-state"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:backend:status"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:backend:suppress-overlay"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:browser-view:interaction-requested"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:browser-view:layout-invalidated"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:browser-view:load-failed"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:browser-view:navigation-changed"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:browser-ws:event"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:gateway-ws:event"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:gateway:stream-event"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:inspiration:window-state-changed"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:main:uncaught-error"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:version-update-available"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:version-update-download-progress"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:window:maximized-changed"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "renderer-event:inspiration:sticky-close"
+        }
+      ]
+    },
+    {
+      "id": "ACE-SURF-GATEWAY-ROUTES",
+      "categories": [
+        "gateway-route",
+        "browser",
+        "upload",
+        "download",
+        "plugin",
+        "skill",
+        "cua",
+        "mcp"
+      ],
+      "path": "crew/gateway",
+      "symbol_or_route": "all literal FastAPI HTTP and WebSocket decorators",
+      "owner": "Gateway Security maintainers",
+      "trust_source": "Authenticated local or remote account, Desktop instance proof where required, strict request schema, and explicit owner/admin context",
+      "final_enforcement_point": "crew/gateway/app.py authentication middleware plus route-local owner, role, capability, quota, and protocol guards; crew/gateway/context.py enforces cross-process owner upload store and request attachment-byte quotas; crew/gateway/app.py durably audits authorization denials",
+      "fail_closed_behavior": "Unknown or unauthenticated callers, owner or role mismatch, invalid schema, replay, ambiguous Content-Length/Transfer-Encoding framing, quota exhaustion, unavailable subsystem, logout revocation, or stale owner configuration snapshots are rejected before side effects",
+      "tests": [
+        {
+          "id": "GATEWAY-AUTH-CONTRACT",
+          "path": "tests/gateway/test_auth_contract.py"
+        },
+        {
+          "id": "GATEWAY-ACCOUNT-ISOLATION",
+          "path": "tests/gateway/test_account_isolation.py"
+        },
+        {
+          "id": "GATEWAY-ATTACHMENT-QUOTA",
+          "path": "tests/security/test_attachment_security.py"
+        },
+        {
+          "id": "CONFIG-FAIL-CLOSED",
+          "path": "tests/security/test_security_config_fail_closed.py"
+        },
+        {
+          "id": "REMOTE-OWNER-MATRIX",
+          "path": "tests/gateway/test_security_api.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Gateway account, connection, session, task, logout, and subsystem-specific lifecycle owners",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any added, removed, renamed, or dynamically constructed FastAPI HTTP or WebSocket route, or any upload quota enforcement change",
+      "primitive_refs": [],
+      "covered_routes": [
+        {
+          "path": "crew/gateway/app.py",
+          "route": "GET /"
+        },
+        {
+          "path": "crew/gateway/app.py",
+          "route": "GET /{full_path:path}"
+        },
+        {
+          "path": "crew/gateway/interaction_bridge.py",
+          "route": "POST /api/internal/interactions/ask"
+        },
+        {
+          "path": "crew/gateway/interaction_bridge.py",
+          "route": "POST /api/internal/team/mention"
+        },
+        {
+          "path": "crew/gateway/interaction_bridge.py",
+          "route": "POST /api/internal/team/plan/create"
+        },
+        {
+          "path": "crew/gateway/interaction_bridge.py",
+          "route": "POST /api/internal/team/plan/read"
+        },
+        {
+          "path": "crew/gateway/interaction_bridge.py",
+          "route": "POST /api/internal/team/plan/update"
+        },
+        {
+          "path": "crew/gateway/routers/auth_session.py",
+          "route": "POST /api/auth/logout"
+        },
+        {
+          "path": "crew/gateway/routers/browser.py",
+          "route": "DELETE /api/browser/data"
+        },
+        {
+          "path": "crew/gateway/routers/browser.py",
+          "route": "GET /api/browser/doctor"
+        },
+        {
+          "path": "crew/gateway/routers/browser.py",
+          "route": "GET /api/browser/{session_id}/state"
+        },
+        {
+          "path": "crew/gateway/routers/browser.py",
+          "route": "POST /api/browser/{session_id}/artifact"
+        },
+        {
+          "path": "crew/gateway/routers/browser.py",
+          "route": "POST /api/browser/{session_id}/control"
+        },
+        {
+          "path": "crew/gateway/routers/browser.py",
+          "route": "WEBSOCKET /ws/browser-host"
+        },
+        {
+          "path": "crew/gateway/routers/browser.py",
+          "route": "WEBSOCKET /ws/browser/{session_id}"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "DELETE /api/platforms/{name}/account"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "GET /api/platforms"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "GET /api/platforms/{name}/config"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "POST /api/feishu/events"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "POST /api/platforms/{name}/connect"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "POST /api/platforms/{name}/disconnect"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "POST /api/platforms/{name}/qr-login/start"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "POST /api/platforms/{name}/qr-login/status"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "POST /api/platforms/{name}/reconnect"
+        },
+        {
+          "path": "crew/gateway/routers/channels.py",
+          "route": "PUT /api/platforms/{name}/config"
+        },
+        {
+          "path": "crew/gateway/routers/config.py",
+          "route": "DELETE /api/config/models/{model_id}"
+        },
+        {
+          "path": "crew/gateway/routers/config.py",
+          "route": "GET /api/config"
+        },
+        {
+          "path": "crew/gateway/routers/config.py",
+          "route": "POST /api/config/model"
+        },
+        {
+          "path": "crew/gateway/routers/config.py",
+          "route": "POST /api/config/models"
+        },
+        {
+          "path": "crew/gateway/routers/config.py",
+          "route": "PUT /api/config/models/{model_id}"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "DELETE /api/cron/jobs/{job_id}"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "GET /api/cron/delivery-targets"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "GET /api/cron/jobs"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "GET /api/cron/jobs/{job_id}"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "GET /api/cron/stats"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "POST /api/cron/fires/{fire_id}/retry"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "POST /api/cron/jobs"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "POST /api/cron/jobs/{job_id}/pause"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "POST /api/cron/jobs/{job_id}/resume"
+        },
+        {
+          "path": "crew/gateway/routers/cron.py",
+          "route": "POST /api/cron/jobs/{job_id}/run"
+        },
+        {
+          "path": "crew/gateway/routers/dynamic_kanban.py",
+          "route": "GET /api/dynamic-kanban/{session_id}/board"
+        },
+        {
+          "path": "crew/gateway/routers/dynamic_kanban.py",
+          "route": "GET /api/dynamic-kanban/{session_id}/status"
+        },
+        {
+          "path": "crew/gateway/routers/dynamic_kanban.py",
+          "route": "POST /api/dynamic-kanban/{session_id}/pause"
+        },
+        {
+          "path": "crew/gateway/routers/dynamic_kanban.py",
+          "route": "POST /api/dynamic-kanban/{session_id}/resume"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_servers.py",
+          "route": "DELETE /api/mcp/servers/{name}"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_servers.py",
+          "route": "GET /api/mcp/servers"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_servers.py",
+          "route": "POST /api/mcp/servers"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_servers.py",
+          "route": "POST /api/mcp/servers/{name}/reload"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_servers.py",
+          "route": "PUT /api/mcp/servers/{name}"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_setup.py",
+          "route": "GET /api/mcp/cua-driver/setup/{task_id}"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_setup.py",
+          "route": "GET /api/mcp/cua-driver/status"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_setup.py",
+          "route": "POST /api/mcp/cua-driver/setup"
+        },
+        {
+          "path": "crew/gateway/routers/mcp_setup.py",
+          "route": "POST /api/mcp/cua-driver/setup/{task_id}/cancel"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "DELETE /api/skills/{slug}"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "GET /api/complete"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "GET /api/health"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "GET /api/plugins"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "GET /api/skills"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "GET /api/skills/store"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "GET /api/tools"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "GET /api/toolsets"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "POST /api/skills/{slug}/install"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "POST /api/upload"
+        },
+        {
+          "path": "crew/gateway/routers/misc.py",
+          "route": "PUT /api/skills/evolution"
+        },
+        {
+          "path": "crew/gateway/routers/plugins.py",
+          "route": "DELETE /api/plugins/{plugin_key}"
+        },
+        {
+          "path": "crew/gateway/routers/plugins.py",
+          "route": "GET /api/plugins/states"
+        },
+        {
+          "path": "crew/gateway/routers/plugins.py",
+          "route": "POST /api/plugins/install"
+        },
+        {
+          "path": "crew/gateway/routers/plugins.py",
+          "route": "PUT /api/plugins/{plugin_key}/enabled"
+        },
+        {
+          "path": "crew/gateway/routers/plugins.py",
+          "route": "PUT /api/plugins/{plugin_key}/system-enabled"
+        },
+        {
+          "path": "crew/gateway/routers/remote_auth.py",
+          "route": "GET /api/auth/config"
+        },
+        {
+          "path": "crew/gateway/routers/remote_auth.py",
+          "route": "GET /api/auth/session"
+        },
+        {
+          "path": "crew/gateway/routers/remote_auth.py",
+          "route": "POST /api/auth/login"
+        },
+        {
+          "path": "crew/gateway/routers/remote_auth.py",
+          "route": "POST /api/auth/send-code"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "DELETE /api/external-agents/{agent_id}"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "DELETE /api/external-teams/{team_id}"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "GET /api/external-agents"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "GET /api/external-teams"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "GET /api/external-teams/roles"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "GET /api/runtimes"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "POST /api/external-agents"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "POST /api/external-teams"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "POST /api/external-teams/draft/description"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "POST /api/external-teams/draft/formation"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "POST /api/external-teams/roles/suggest"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "POST /api/external-teams/suggest"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "POST /api/runtimes/register"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "POST /api/runtimes/scan"
+        },
+        {
+          "path": "crew/gateway/routers/scenarios.py",
+          "route": "GET /api/scenarios"
+        },
+        {
+          "path": "crew/gateway/routers/scenarios.py",
+          "route": "GET /api/scenarios/all"
+        },
+        {
+          "path": "crew/gateway/routers/scenarios.py",
+          "route": "GET /api/scenarios/intro-lines"
+        },
+        {
+          "path": "crew/gateway/routers/scenarios.py",
+          "route": "GET /api/scenarios/loading-status"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "DELETE /rules/{rule_id}"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "GET /audit"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "GET /audit/export"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "GET /capabilities"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "GET /full-access-challenge"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "GET /pending"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "GET /rules"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "PATCH /rules/{rule_id}"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "POST /audit/purge-expired"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "GET /alerts"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "POST /alerts/report"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "POST /alerts/{alert_id}/isolate"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "POST /alerts/{alert_id}/revoke"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "POST /alerts/{alert_id}/resolve"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "POST /fake-executions"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "POST /requests/{request_id}/decision"
+        },
+        {
+          "path": "crew/gateway/routers/security.py",
+          "route": "PUT /mode"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "DELETE /api/session/{session_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "DELETE /api/workspace/{workspace_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/channel-sessions"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/runtime/concurrency"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/session/{session_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/session/{session_id}/agent-config"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/session/{session_id}/context"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/session/{session_id}/debug-log"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/session/{session_id}/model"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/session/{session_id}/plan"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/session/{session_id}/status"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/session/{session_id}/todos"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/sessions"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/sessions/status"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/tasks"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/tasks/{task_or_session_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/usage"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "GET /api/workspaces"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "POST /api/session/{session_id}/ensure"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "POST /api/tasks/{task_id}/cancel"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "POST /api/tasks/{task_id}/wait"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "POST /api/workspaces"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "PUT /api/session/{session_id}/agent-config"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "PUT /api/session/{session_id}/archive"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "PUT /api/session/{session_id}/model"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "PUT /api/session/{session_id}/pin"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "PUT /api/session/{session_id}/title"
+        },
+        {
+          "path": "crew/gateway/routers/sessions.py",
+          "route": "PUT /api/workspace/{workspace_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "DELETE /inspirations/{inspiration_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "DELETE /{site_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET "
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /canvases"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /canvases/{canvas_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /canvases/{canvas_id}/render"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /inspirations"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /inspirations/{inspiration_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /widgets/{widget_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /widgets/{widget_id}/render"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /widgets/{widget_id}/render/{asset_path:path}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /{site_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /{site_id}/export"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /{site_id}/preview"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "GET /{site_id}/preview/{asset_path:path}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "PATCH /canvases/{canvas_id}/placements/{mount_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "PATCH /inspirations/{inspiration_id}/annotations/{annotation_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "PATCH /{site_id}/annotations/{annotation_id}"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "POST /automations/{automation_id}/run"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "POST /inspirations/{inspiration_id}/annotations"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "POST /inspirations/{inspiration_id}/export"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "POST /widgets/{widget_id}/emit"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "POST /{site_id}/annotations"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "POST /{site_id}/export"
+        },
+        {
+          "path": "crew/gateway/routers/sites.py",
+          "route": "POST /{site_id}/publish"
+        },
+        {
+          "path": "crew/gateway/routers/system.py",
+          "route": "GET /api/system/logs"
+        },
+        {
+          "path": "crew/gateway/routers/system.py",
+          "route": "DELETE /api/system/logs"
+        },
+        {
+          "path": "crew/gateway/routers/system.py",
+          "route": "GET /api/system/metrics"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "DELETE /kbs/{kb_id}"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "DELETE /pages"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "DELETE /pages/{page_id}"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "DELETE /sources/{source_id}"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /agent-sessions"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /graph"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /kbs"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /pages"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /pages/{page_id}"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /query"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /search"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /sources"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /sources/{source_id}/file"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /summary"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "GET /vault-documents/{document_name}"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /agent-session"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /compile"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /confirmations/{confirmation_id}/cancel"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /ingest"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /ingest/cancel"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /init"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /kbs"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /lint"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /pages"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /upload"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
+          "route": "PUT /pages/{page_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "DELETE /items/{item_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "DELETE /preferences/{preference_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "DELETE /references/{reference_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "DELETE /sources/{connector_key}/data"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "DELETE /templates/{template_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "DELETE /workspaces/{workspace_id}/index"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /dashboard"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /history"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /items"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /items/{item_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /items/{item_id}/activity"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /knowledge/organization"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /knowledge/personal"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /knowledge/publish"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /mentions"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /preferences"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /preferences/settings"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /references"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /reports"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /settings"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /settings/workspaces/{workspace_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /sources"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /sources/records"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /templates"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /templates/{template_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "GET /workspaces/{workspace_id}/index"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "PATCH /items/{item_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "PATCH /preferences/{preference_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "PATCH /templates/{template_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /dashboard/archive"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /dashboard/refresh"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /items"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /items/{item_id}/actions"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /items/{item_id}/knowledge"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /items/{item_id}/processing-session"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /knowledge/personal"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /knowledge/publish"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /preferences"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /references"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /references/agent-session"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /references/{reference_id}/refresh"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /reports/archive"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /sessions"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /sources/records/{record_id}/resolve"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /sources/{connector_key}/refresh"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /templates"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "POST /templates/{template_id}/instantiate"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "PUT /preferences/settings"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "PUT /settings"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "PUT /settings/workspaces/{workspace_id}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "PUT /sources/{connector_key}"
+        },
+        {
+          "path": "crew/gateway/routers/work.py",
+          "route": "PUT /workspaces/{workspace_id}/index"
+        },
+        {
+          "path": "crew/gateway/ws.py",
+          "route": "WEBSOCKET /ws"
+        }
+      ]
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-ACP",
+      "categories": [
+        "process-indirect"
+      ],
+      "path": "crew/agent/external/acp_adapter.py",
+      "symbol_or_route": "ACP bidirectional stdio adapter",
+      "owner": "External Agent maintainers",
+      "trust_source": "Registered absolute ACP runtime plus consumed immutable ProcessLaunch snapshot",
+      "final_enforcement_point": "crew/agent/external/process_lifecycle.py launch validation and snapshot consumption",
+      "fail_closed_behavior": "Managed mode without a native bidirectional transport, missing launch authority, stale identity, timeout, or cleanup failure rejects startup",
+      "tests": [
+        {
+          "id": "ACP-LAUNCH-BOUNDARY",
+          "path": "tests/security/test_acp_launch_boundary.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_acp_launch_boundary.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "External agent session and process lifecycle owner",
+      "status": "fail-closed-unavailable",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_acp_launch_boundary.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "ACP transport, argv, environment, snapshot, permission callback, cancellation, or restart changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-CLI",
+      "categories": [
+        "process-indirect"
+      ],
+      "path": "crew/agent/external/cli_adapter.py",
+      "symbol_or_route": "external CLI conversation and stdio adapter",
+      "owner": "External Agent maintainers",
+      "trust_source": "Registered absolute runtime, fixed protocol argv, and consumed ProcessLaunch snapshot",
+      "final_enforcement_point": "crew/agent/external/process_lifecycle.py launch snapshot and bounded probe authority",
+      "fail_closed_behavior": "Untrusted executable, protocol override, missing snapshot, managed unsupported transport, timeout, or output overflow rejects execution",
+      "tests": [
+        {
+          "id": "EXTERNAL-CLI-BOUNDARY",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "External agent session and process lifecycle owner",
+      "status": "fail-closed-unavailable",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "CLI runtime candidates, protocol argv, environment, probe authority, streaming transport, or cancellation changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-CODEX",
+      "categories": [
+        "process-indirect"
+      ],
+      "path": "crew/agent/external/codex_adapter.py",
+      "symbol_or_route": "Codex app-server bidirectional stdio adapter",
+      "owner": "External Agent maintainers",
+      "trust_source": "Registered Codex runtime identity, fixed app-server protocol, and consumed ProcessLaunch snapshot",
+      "final_enforcement_point": "crew/agent/external/process_lifecycle.py launch validation and snapshot consumption",
+      "fail_closed_behavior": "Managed mode, absent app-server support, missing context, identity drift, timeout, or cleanup failure rejects startup without host fallback",
+      "tests": [
+        {
+          "id": "CODEX-ADAPTER-BOUNDARY",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "External agent session and process lifecycle owner",
+      "status": "fail-closed-unavailable",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Codex protocol, MCP injection, runtime detection, launch snapshot, streaming, or lifecycle changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-DETECTOR",
+      "categories": [
+        "process-indirect"
+      ],
+      "path": "crew/agent/external/detector.py",
+      "symbol_or_route": "external runtime candidate discovery and fixed probes",
+      "owner": "External Agent maintainers",
+      "trust_source": "Operator environment, known Desktop bundle roots, and normalized absolute candidate identities",
+      "final_enforcement_point": "crew/agent/external/process_lifecycle.py bounded control-plane probe",
+      "fail_closed_behavior": "Relative or missing executable, managed session, unsafe environment, timeout, output overflow, and identity mismatch mark the candidate unavailable",
+      "tests": [
+        {
+          "id": "EXTERNAL-RUNTIME-DETECTION",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Runtime registry refresh and probe process lifecycle",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Runtime candidate roots, PATH use, probe argv, environment, timeout, or capability inference changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-BROWSER",
+      "categories": [
+        "process-indirect",
+        "browser",
+        "network",
+        "upload",
+        "download",
+        "structured-file-read",
+        "structured-file-write"
+      ],
+      "path": "crew/browser/manager.py",
+      "symbol_or_route": "model-reachable BrowserManager commands",
+      "owner": "Browser Security maintainers",
+      "trust_source": "Authenticated owner/session/task context, canonical tool arguments, and approved file/network capabilities",
+      "final_enforcement_point": "BrowserManager authorization and owner binding plus Desktop BrowserHost policy proxy and file staging",
+      "fail_closed_behavior": "Missing owner/task context, unavailable host, denied network action, stale file identity, invalid replay, and cleanup failure reject the command",
+      "tests": [
+        {
+          "id": "BROWSER-MANAGER-REVIEW",
+          "path": "tests/test_browser_manager_review.py"
+        },
+        {
+          "id": "BROWSER-USE",
+          "path": "tests/test_browser_use.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_browser_manager_review.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "BrowserManager owner/session/task lifecycle and Desktop BrowserHost",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_browser_manager_review.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any Browser command, host RPC, network capability, upload source, download sink, replay effect, artifact, or cleanup change",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-CRON",
+      "categories": [
+        "process-indirect"
+      ],
+      "path": "crew/cron/scheduler.py",
+      "symbol_or_route": "scheduled agent and tool trigger",
+      "owner": "Cron Runtime maintainers",
+      "trust_source": "Persisted owner-bound schedule and current tool security context",
+      "final_enforcement_point": "Invoked agent/tool SecurityService and ProcessLaunch boundary",
+      "fail_closed_behavior": "Missing owner, revoked schedule, unavailable security context, denied tool action, or execution failure records a failed fire without host bypass",
+      "tests": [
+        {
+          "id": "CRON-SECURITY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Cron job owner, scheduler shutdown, and invoked task lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Schedule source, owner binding, tool dispatch, retry, cancellation, or persistence changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-SITES",
+      "categories": [
+        "process-indirect",
+        "structured-file-read",
+        "structured-file-write"
+      ],
+      "path": "crew/sites/manager.py",
+      "symbol_or_route": "site build, preview, publish, export, and automation commands",
+      "owner": "Sites Runtime maintainers",
+      "trust_source": "Authenticated owner/workspace context and canonical site blueprint",
+      "final_enforcement_point": "crew/sites/manager.py managed ProcessLaunch and owner-scoped site roots",
+      "fail_closed_behavior": "Missing security context, unavailable native broker, invalid site root, failed build, or stale ownership rejects the operation without host build fallback",
+      "tests": [
+        {
+          "id": "SITES-SECURITY",
+          "path": "tests/test_sites.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_sites.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Site owner, automation task, and managed process lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_sites.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Build command, package manager, site root, automation, preview, publish, export, or ProcessLaunch changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-TEAM",
+      "categories": [
+        "process-indirect",
+        "mcp"
+      ],
+      "path": "crew/team/team_manager.py",
+      "symbol_or_route": "teammate task and shared tool dispatch",
+      "owner": "Team Runtime maintainers",
+      "trust_source": "Authenticated parent task, role assignment, workspace scope, and server-issued interaction binding",
+      "final_enforcement_point": "crew/team/workspace_guard.py plus each invoked tool security boundary",
+      "fail_closed_behavior": "Role, owner, workspace, interaction binding, or task lifecycle mismatch rejects dispatch and revokes pending authority",
+      "tests": [
+        {
+          "id": "TEAM-TASKS",
+          "path": "tests/test_team_tasks.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_team_tasks.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Parent team task, teammate runtime, and workspace interaction binding",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_team_tasks.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Team role, workspace binding, shared tool, internal MCP interaction, cancellation, or delegation changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-TERMINAL",
+      "categories": [
+        "process-indirect",
+        "structured-file-read",
+        "structured-file-write"
+      ],
+      "path": "crew/tools/builtin.py",
+      "symbol_or_route": "terminal foreground/background and structured patch entrypoints",
+      "owner": "Execution Broker maintainers",
+      "trust_source": "Canonical model tool call, owner/task context, SecurityService decision, and signed authorization snapshot",
+      "final_enforcement_point": "crew/security/launch.py and crew/tools/process_registry.py ProcessLaunch routing; file mutations use crew/tools/file_utils.py",
+      "fail_closed_behavior": "Missing context, denied approval, unavailable managed runtime, invalid snapshot, or file identity drift rejects the tool without host fallback",
+      "tests": [
+        {
+          "id": "EXECUTION-ROUTING",
+          "path": "tests/security/test_execution_routing.py"
+        },
+        {
+          "id": "FILE-POLICY",
+          "path": "tests/security/test_file_policy.py"
+        },
+        {
+          "id": "APPROVAL-CONTRACT",
+          "path": "tests/security/test_security_approvals.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_routing.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "SecurityService turn/session lifecycle and process registry owner",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_routing.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Terminal, background, patch, file mutation, approval, ProcessLaunch, or model-reachable command entry changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-MANAGED-TOOLS",
+      "categories": [
+        "process-indirect",
+        "download",
+        "updater"
+      ],
+      "path": "crew/tools/managed_tools.py",
+      "symbol_or_route": "ripgrep acquisition, verification, extraction, and fixed version probe",
+      "owner": "Managed Tool maintainers",
+      "trust_source": "Pinned release URL, platform tuple, expected SHA-256 digest, and private cache root",
+      "final_enforcement_point": "crew/tools/managed_tools.py digest, archive, path, atomic install, and fixed argv checks",
+      "fail_closed_behavior": "Unknown platform, network denial, digest mismatch, unsafe archive entry, install race, or probe failure leaves the tool unavailable",
+      "tests": [
+        {
+          "id": "MANAGED-TOOL-INTEGRITY",
+          "path": "tests/security/test_managed_tool_integrity.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_managed_tool_integrity.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed tool cache owner and product maintenance lifecycle",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_managed_tool_integrity.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Tool source, version, digest, archive format, cache root, fixed probe, or managed-mode usage changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-MCP",
+      "categories": [
+        "process-indirect",
+        "mcp",
+        "network"
+      ],
+      "path": "crew/tools/mcp_client.py",
+      "symbol_or_route": "outbound MCP stdio, HTTP, and SSE connection manager",
+      "owner": "MCP Runtime maintainers",
+      "trust_source": "Administrator-approved MCP configuration, identifier-bound secret resolution, owner/task authorization, and pinned command or origin identity",
+      "final_enforcement_point": "crew/tools/mcp_client.py transport gate, command integrity, minimal environment, outbound policy, queue, and lifecycle manager",
+      "fail_closed_behavior": "Stdio remains unavailable without managed transport; unsafe origin, private address, command drift, secret scope, timeout, or revocation closes the worker",
+      "tests": [
+        {
+          "id": "MCP-LIFECYCLE",
+          "path": "tests/test_mcp_client_lifecycle.py"
+        },
+        {
+          "id": "MCP-COMMAND-INTEGRITY",
+          "path": "tests/security/test_mcp_command_integrity.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_mcp_client_lifecycle.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "MCPClientManager server worker plus owner/task SecurityService grants",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_mcp_client_lifecycle.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "MCP transport, SDK client, command, environment, secret field, origin, redirect, queue, timeout, or reconnect changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-INDIRECT-WIKI",
+      "categories": [
+        "process-indirect",
+        "structured-file-read",
+        "structured-file-write",
+        "upload",
+        "download"
+      ],
+      "path": "crew/wiki/parser.py",
+      "symbol_or_route": "Wiki ingest parser and delegated legacy Office conversion",
+      "owner": "Wiki Security maintainers",
+      "trust_source": "Authenticated owner/KB upload, private snapshot, bounded archive/parser input, and delegated ProcessLaunch authority",
+      "final_enforcement_point": "Wiki upload/capture boundaries, archive budgets, parser limits, and brokered LibreOffice conversion",
+      "fail_closed_behavior": "Unauthorized or stale input, unsupported type, archive, byte, PDF page/object, converter scratch disk/entry, or parser output budget, missing broker authority, timeout, or output identity failure rejects ingest",
+      "tests": [
+        {
+          "id": "WIKI-PARSER",
+          "path": "tests/wiki/test_parser.py"
+        },
+        {
+          "id": "ARCHIVE-SECURITY",
+          "path": "tests/security/test_archive_security.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/wiki/test_parser.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Wiki ingest task, knowledge-base owner, and delegated process lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/wiki/test_parser.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Parser type, archive handling, Office conversion, upload source, byte budget, output publication, or cancellation changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-EXTERNAL-LIFECYCLE",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "crew/agent/external/process_lifecycle.py",
+      "symbol_or_route": "validated external process launch, probe, wait, cancel, and tree cleanup",
+      "owner": "External Agent maintainers",
+      "trust_source": "Normalized absolute executable, immutable launch snapshot or bounded fixed-probe authority, canonical cwd, and minimal environment",
+      "final_enforcement_point": "crew/agent/external/process_lifecycle.py launch validation and OS process-tree lifecycle",
+      "fail_closed_behavior": "Missing or replayed authority, executable identity drift, unsafe environment, timeout, output overflow, and cleanup failure reject or terminate the process",
+      "tests": [
+        {
+          "id": "EXTERNAL-PROCESS-LIFECYCLE",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "External agent request, probe authority, and process tree owner",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_external_agents.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Any process primitive, executable resolver, launch snapshot, environment, probe, timeout, cancellation, or cleanup change",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-LAUNCH",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "crew/security/launch.py",
+      "symbol_or_route": "execute_captured and launch routing",
+      "owner": "Execution Broker maintainers",
+      "trust_source": "SecurityService authorization result and one-time signed execution snapshot",
+      "final_enforcement_point": "crew/security/launch.py mode routing and crew/security/runtime_client.py native helper protocol",
+      "fail_closed_behavior": "Missing context, denied authorization, invalid snapshot, unavailable managed helper, unsupported capability, or protocol failure rejects execution without host fallback",
+      "tests": [
+        {
+          "id": "EXECUTION-ROUTING",
+          "path": "tests/security/test_execution_routing.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_routing.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "SecurityService task/turn/session owner and captured process lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_routing.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Mode routing, ProcessLaunch, snapshot, helper argv, disabled compatibility, timeout, output, or cancellation changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SECURITY-LIFECYCLE",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "crew/security/process_lifecycle.py",
+      "symbol_or_route": "captured execution process-tree cleanup",
+      "owner": "Execution Broker maintainers",
+      "trust_source": "Process identity created by the current broker request and kernel-reported fixed system tools",
+      "final_enforcement_point": "crew/security/process_lifecycle.py process-group or verified System32 taskkill cleanup",
+      "fail_closed_behavior": "Unverified PID, executable, creation time, process group, or fixed helper identity is never targeted as a recovered process",
+      "tests": [
+        {
+          "id": "PROCESS-LIFECYCLE",
+          "path": "tests/security/test_execution_routing.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_routing.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Captured execution owner and broker shutdown lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_routing.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Process identity, PID recovery, taskkill path, process group, timeout, cancellation, or cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-RUNTIME-CLIENT",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "crew/security/runtime_client.py",
+      "symbol_or_route": "NativeRuntimeClient helper spawn and authenticated protocol",
+      "owner": "Execution Broker maintainers",
+      "trust_source": "Packaged runtime manifest, expected helper digest, fixed argv, random startup token, and signed authorization snapshot",
+      "final_enforcement_point": "crew/security/runtime_client.py helper identity verification and versioned nonce-bound stdin/stdout protocol",
+      "fail_closed_behavior": "Missing helper, digest or source mismatch, token or nonce error, unknown protocol field, timeout, output overflow, and premature exit reject execution",
+      "tests": [
+        {
+          "id": "RUNTIME-CLIENT",
+          "path": "tests/security/test_runtime_client.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_runtime_client.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "NativeRuntimeClient request, parent broker, and helper process lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_runtime_client.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Helper source, manifest, digest, argv, protocol, token, nonce, capability, timeout, output, or cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-FILE-TOOLS",
+      "categories": [
+        "process-direct",
+        "structured-file-read",
+        "structured-file-write"
+      ],
+      "path": "crew/tools/file_tools.py",
+      "symbol_or_route": "file_read, file_write, glob, grep, and fixed disabled-mode ripgrep",
+      "owner": "File Capability maintainers",
+      "trust_source": "Canonical owner/workspace file authorization and verified managed-tool identity",
+      "final_enforcement_point": "crew/tools/security_guard.py authorization plus crew/tools/file_utils.py identity-checked I/O; fixed ripgrep is disabled in managed mode",
+      "fail_closed_behavior": "Missing security service, denied path, identity drift, link or special file, byte limit, unavailable verified ripgrep, or subprocess failure rejects the operation",
+      "tests": [
+        {
+          "id": "FILE-POLICY",
+          "path": "tests/security/test_file_policy.py"
+        },
+        {
+          "id": "GREP-SYMLINK",
+          "path": "tests/security/test_grep_symlink_escape.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_file_policy.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "SecurityService turn/session capability and file tool request owner",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_file_policy.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "File tool, path resolver, read/write/search primitive, ripgrep identity, environment, result budget, or managed routing changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-PROCESS-REGISTRY",
+      "categories": [
+        "process-direct",
+        "runtime-boundary",
+        "structured-file-write"
+      ],
+      "path": "crew/tools/process_registry.py",
+      "symbol_or_route": "background process spawn, bridge, checkpoint, recovery, and cleanup",
+      "owner": "Execution Broker maintainers",
+      "trust_source": "Owner-bound ProcessLaunch snapshot, verified executable identity, private checkpoint, and current process identity",
+      "final_enforcement_point": "crew/tools/process_registry.py disabled/managed routing, bridge protocol, identity checks, and process-tree cleanup",
+      "fail_closed_behavior": "Missing context, invalid or replayed snapshot, bridge failure, helper unavailability, PID identity mismatch, checkpoint tamper, or cleanup failure rejects or forgets unsafe recovery",
+      "tests": [
+        {
+          "id": "PROCESS-REGISTRY",
+          "path": "tests/test_process_registry.py"
+        },
+        {
+          "id": "BACKGROUND-BRIDGE",
+          "path": "tests/security/test_background_bridge_isolation.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/test_process_registry.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Process registry owner/session lifecycle and broker shutdown",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/test_process_registry.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Background spawn, bridge, checkpoint, process identity, recovery, environment, output, timeout, or cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-DOCX-REDLINING",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/docx/scripts/office/validators/redlining.py",
+      "symbol_or_route": "DOCX redlining validator child tools",
+      "owner": "Document Skill maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox plus fixed validator argv and sandbox filesystem roots",
+      "fail_closed_behavior": "Absent managed parent, unavailable child tool, invalid document, timeout, or nonzero validator result fails the skill operation",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Validator executable, argv, environment, input/output root, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-HTML-PDF",
+      "categories": [
+        "process-direct",
+        "skill",
+        "browser",
+        "cdp",
+        "structured-file-read",
+        "structured-file-write"
+      ],
+      "path": "crew/skills/html-to-pdf/scripts/convert.cjs",
+      "symbol_or_route": "sandboxed Chromium HTML-to-PDF converter",
+      "owner": "Document Skill maintainers",
+      "trust_source": "Bundled converter, native-runtime-only ACE_SANDBOX marker, fixed absolute Chromium identity, and bounded private input/output",
+      "final_enforcement_point": "convert.cjs Chromium sandbox verification, request/navigation denial, resource budgets, private profile, and atomic publication",
+      "fail_closed_behavior": "Missing native marker, unavailable or unsandboxed Chromium, any subresource or navigation, limit breach, crash, orphan, or cleanup failure rejects output",
+      "tests": [
+        {
+          "id": "HTML-PDF-HARDENING",
+          "path": "tests/security/test_html_to_pdf_hardening.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_html_to_pdf_hardening.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task, converter timeout, and Chromium descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_html_to_pdf_hardening.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Chromium candidate, launch flag, sandbox check, resource policy, local/network request, output publication, timeout, or cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-MARKDOWN-PDF",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/md-to-pdf/scripts/md2pdf.py",
+      "symbol_or_route": "Markdown-to-PDF child converter",
+      "owner": "Document Skill maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox plus fixed converter argv and sandbox filesystem roots",
+      "fail_closed_behavior": "Absent managed parent, unavailable converter, invalid input, timeout, or nonzero child result fails the skill operation",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Converter executable, argv, environment, input/output root, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-PDF-CONVERTER",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/pdf/scripts/md2pdf/md2pdf_convert.py",
+      "symbol_or_route": "PDF skill Markdown conversion child",
+      "owner": "Document Skill maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox plus fixed converter argv and sandbox filesystem roots",
+      "fail_closed_behavior": "Absent managed parent, unavailable converter, invalid input, timeout, or nonzero child result fails the skill operation",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Converter executable, argv, environment, input/output root, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-EVAL-VIEWER",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/skill-creator/eval-viewer/generate_review.py",
+      "symbol_or_route": "skill evaluation review generator child processes",
+      "owner": "Skill Creator maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox plus fixed evaluation argv and sandbox filesystem roots",
+      "fail_closed_behavior": "Absent managed parent, invalid evaluation input, unavailable child, timeout, or nonzero result fails generation",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Evaluation child executable, argv, environment, input/output root, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-IMPROVE",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/skill-creator/scripts/improve_description.py",
+      "symbol_or_route": "skill-description improvement evaluator",
+      "owner": "Skill Creator maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox plus fixed evaluator argv and sandbox filesystem roots",
+      "fail_closed_behavior": "Absent managed parent, invalid evaluation input, unavailable child, timeout, or nonzero result fails improvement",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Evaluator executable, argv, environment, input/output root, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-RUN-EVAL",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/skill-creator/scripts/run_eval.py",
+      "symbol_or_route": "skill evaluation case runner",
+      "owner": "Skill Creator maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox plus bounded evaluator argv and sandbox filesystem roots",
+      "fail_closed_behavior": "Absent managed parent, invalid case input, unavailable child, timeout, output limit, or nonzero result fails evaluation",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Evaluation child executable, argv, environment, case input, output limit, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-XLSX-SOFFICE",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/xlsx/scripts/office/soffice.py",
+      "symbol_or_route": "LibreOffice lifecycle and local UNO bridge",
+      "owner": "Spreadsheet Skill maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox, private profile, fixed LibreOffice argv, and local descendant bridge",
+      "fail_closed_behavior": "Absent managed parent, unavailable LibreOffice, local bridge failure, timeout, or nonzero result fails conversion",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task, LibreOffice profile, and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "LibreOffice executable, argv, profile, local socket, input/output root, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-XLSX-REDLINING",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/xlsx/scripts/office/validators/redlining.py",
+      "symbol_or_route": "spreadsheet redlining validator child tools",
+      "owner": "Spreadsheet Skill maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox plus fixed validator argv and sandbox filesystem roots",
+      "fail_closed_behavior": "Absent managed parent, unavailable child tool, invalid document, timeout, or nonzero validator result fails the skill operation",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Validator executable, argv, environment, input/output root, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-SKILL-XLSX-RECALC",
+      "categories": [
+        "process-direct",
+        "skill"
+      ],
+      "path": "crew/skills/xlsx/scripts/recalc.py",
+      "symbol_or_route": "spreadsheet recalculation child process",
+      "owner": "Spreadsheet Skill maintainers",
+      "trust_source": "Bundled read-only skill root executed only as a managed terminal/native-runtime descendant",
+      "final_enforcement_point": "Parent ProcessLaunch native sandbox plus fixed recalculation argv and sandbox filesystem roots",
+      "fail_closed_behavior": "Absent managed parent, unavailable calculator, invalid workbook, timeout, or nonzero result fails recalculation",
+      "tests": [
+        {
+          "id": "SKILL-PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Managed terminal task and native runtime descendant process tree",
+      "status": "sandbox-descendant",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Calculator executable, argv, environment, workbook root, timeout, or host fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-CHECK",
+      "categories": [
+        "process-direct",
+        "dev-only"
+      ],
+      "path": "desktop/scripts/check-security.mjs",
+      "symbol_or_route": "build-time Electron security configuration checks",
+      "owner": "Release Security maintainers",
+      "trust_source": "Trusted source checkout and fixed build/test toolchain",
+      "final_enforcement_point": "desktop/scripts/check-security.mjs fixed checks and release workflow",
+      "fail_closed_behavior": "Missing files, unsafe Electron configuration, child failure, or unexpected output fails the build gate",
+      "tests": [
+        {
+          "id": "PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Release CI job and local build process",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Build check command, child tool, packaged file set, Electron security setting, or release workflow changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-PLAYWRIGHT-PROBE",
+      "categories": [
+        "process-direct",
+        "dev-only",
+        "browser"
+      ],
+      "path": "desktop/scripts/resolve-playwright-candidates.mjs",
+      "symbol_or_route": "build/test Playwright browser candidate probe",
+      "owner": "Desktop Browser build maintainers",
+      "trust_source": "Trusted build environment and fixed candidate roots",
+      "final_enforcement_point": "resolve-playwright-candidates.mjs fixed executable probes and bounded output",
+      "fail_closed_behavior": "Missing candidate, invalid identity, timeout, or probe failure marks the browser unavailable for build/test",
+      "tests": [
+        {
+          "id": "PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop build/test process",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Candidate root, browser executable, probe argv, output parsing, or packaging changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-GATEWAY-AUTH",
+      "categories": [
+        "process-direct",
+        "gateway-ipc"
+      ],
+      "path": "desktop/src/main/gateway-instance-auth.ts",
+      "symbol_or_route": "Windows Gateway instance-key ACL creation and verification helper",
+      "owner": "Desktop Identity maintainers",
+      "trust_source": "Kernel-reported SystemRoot PowerShell identity, owner-derived Crew home, and fixed encoded script",
+      "final_enforcement_point": "gateway-instance-auth.ts fixed absolute PowerShell argv and post-create protected DACL verification",
+      "fail_closed_behavior": "Missing fixed helper, path escape, owner or DACL mismatch, helper failure, or malformed key blocks Gateway instance authentication",
+      "tests": [
+        {
+          "id": "GATEWAY-INSTANCE-AUTH",
+          "path": "desktop/tests/unit/gateway-instance-auth.test.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/gateway-instance-auth.test.ts"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop Gateway process and instance-key rotation lifecycle",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/gateway-instance-auth.test.ts"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "PowerShell path, script, key path, ACL rule, owner verification, instance proof, or rotation changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-MAIN",
+      "categories": [
+        "process-direct",
+        "gateway-ipc",
+        "updater",
+        "browser"
+      ],
+      "path": "desktop/src/main/index.ts",
+      "symbol_or_route": "Gateway spawn/restart, Desktop lifecycle, Browser bridge, and update orchestration",
+      "owner": "Desktop Host maintainers",
+      "trust_source": "Packaged product roots, fixed Gateway argv, trusted IPC sender, signed update state, and owner-bound sockets",
+      "final_enforcement_point": "Desktop trustedHandle, process environment allowlist, Gateway instance proof, BrowserHost, and update installer boundary",
+      "fail_closed_behavior": "Invalid sender or schema, unavailable fixed executable, startup proof failure, unsafe endpoint, update verification failure, and cleanup failure reject the action",
+      "tests": [
+        {
+          "id": "MAIN-PROCESS-HARDENING",
+          "path": "tests/security/test_main_process_hardening.py"
+        },
+        {
+          "id": "ELECTRON-IPC-CONTRACT",
+          "path": "tests/security/test_electron_ipc_contract.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop application, Gateway process, Browser socket, update controller, and window lifecycle",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Gateway argv, process environment, restart, IPC, Browser bridge, update orchestration, shutdown, or recovery changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-OPEN-WITH",
+      "categories": [
+        "process-direct",
+        "structured-file-read"
+      ],
+      "path": "desktop/src/main/open-with-service.ts",
+      "symbol_or_route": "user-directed registered-application discovery and open",
+      "owner": "Desktop Host maintainers",
+      "trust_source": "Explicit Desktop user action, validated local file path, and current OS registered application list",
+      "final_enforcement_point": "open-with-service.ts application allowlist, argv separation, bounded discovery, and tree cleanup",
+      "fail_closed_behavior": "Unregistered application, invalid path, probe timeout or output overflow, launch failure, or cleanup failure rejects open-with",
+      "tests": [
+        {
+          "id": "OPEN-WITH-SECURITY",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop user action and bounded probe/open process lifecycle",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Application discovery, executable identity, argv parsing, file path, timeout, output, or process cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-SECURITY-SETUP",
+      "categories": [
+        "process-direct",
+        "installer"
+      ],
+      "path": "desktop/src/main/security-setup.ts",
+      "symbol_or_route": "Windows one-time elevated native runtime security setup",
+      "owner": "Desktop Installer maintainers",
+      "trust_source": "Explicit Desktop user action and packaged fixed runtime/setup artifact",
+      "final_enforcement_point": "security-setup.ts fixed absolute runtime argv and encoded RunAs PowerShell request",
+      "fail_closed_behavior": "Unsupported platform, unverified packaged runtime, UAC cancellation, helper error, or readiness verification failure leaves setup disabled",
+      "tests": [
+        {
+          "id": "SECURITY-SETUP",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop installer/setup transaction and native runtime readiness owner",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Packaged runtime, elevation helper, fixed argv, UAC flow, readiness, rollback, or IPC setup route changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-UNINSTALL",
+      "categories": [
+        "process-direct",
+        "installer",
+        "structured-file-write"
+      ],
+      "path": "desktop/src/main/uninstall.ts",
+      "symbol_or_route": "signed product uninstall cleanup",
+      "owner": "Desktop Installer maintainers",
+      "trust_source": "User-initiated uninstall from the signed installed product and fixed product-owned paths",
+      "final_enforcement_point": "uninstall.ts fixed cleanup scripts, product-root validation, and OS-specific uninstall lifecycle",
+      "fail_closed_behavior": "Path or installation identity mismatch, script creation failure, unsupported platform, or launcher failure aborts cleanup outside verified roots",
+      "tests": [
+        {
+          "id": "UNINSTALL-BOUNDARY",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop uninstall transaction and operating-system installer lifecycle",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_main_process_hardening.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Cleanup root, script content, launcher, platform behavior, delayed deletion, or installer integration changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-UPDATE-INSTALLER",
+      "categories": [
+        "process-direct",
+        "updater",
+        "installer"
+      ],
+      "path": "desktop/src/main/update/update-installer.ts",
+      "symbol_or_route": "verified package installer launch",
+      "owner": "Desktop Update maintainers",
+      "trust_source": "Downloaded package and detached signature held through verified descriptors, pinned trust root, and matching platform/architecture",
+      "final_enforcement_point": "update-installer.ts descriptor revalidation and fixed platform installer helper or verified Windows EXE launch",
+      "fail_closed_behavior": "Signature, descriptor identity, platform, package type, root-owned helper, launch confirmation, timeout, or stable result mismatch blocks install",
+      "tests": [
+        {
+          "id": "UPDATE-INSTALLER",
+          "path": "desktop/tests/unit/update-installer.test.ts"
+        },
+        {
+          "id": "UPDATE-FILE-SECURITY",
+          "path": "desktop/tests/unit/update-file-security.test.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/update-installer.test.ts"
+        }
+      ],
+      "lifecycle_revocation_owner": "Desktop update controller and installer child lifecycle",
+      "status": "host-fixed",
+      "artifact_refs": [
+        {
+          "type": "node-test",
+          "path": "desktop/tests/unit/update-installer.test.ts"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Package type, signature, descriptor pin, Windows launch, Linux/macOS helper, argv, timeout, or completion handling changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DEV-NPM-AUDIT",
+      "categories": [
+        "process-direct",
+        "dev-only"
+      ],
+      "path": "scripts/audit_runtime_npm.py",
+      "symbol_or_route": "release-time production npm dependency audit",
+      "owner": "Release Security maintainers",
+      "trust_source": "Trusted clean checkout, repository lockfiles, and fixed npm audit argv",
+      "final_enforcement_point": "audit_runtime_npm.py lockfile enumeration, bounded fixed subprocess, and release workflow",
+      "fail_closed_behavior": "Missing lockfile or tool, timeout, malformed result, audit failure, or vulnerable production dependency fails the release gate",
+      "tests": [
+        {
+          "id": "RELEASE-SECURITY-WORKFLOWS",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Release CI job",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Lockfile discovery, npm command, audit policy, timeout, output parser, or release workflow changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DEV-READINESS",
+      "categories": [
+        "process-direct",
+        "dev-only"
+      ],
+      "path": "scripts/check_release_readiness.py",
+      "symbol_or_route": "commit-bound release readiness check",
+      "owner": "Release Security maintainers",
+      "trust_source": "Trusted CI checkout, fixed git executable/argv, and expected repository identity",
+      "final_enforcement_point": "check_release_readiness.py commit, cleanliness, evidence, and fixed git checks",
+      "fail_closed_behavior": "Dirty checkout, commit or origin mismatch, missing or stale evidence, git failure, or timeout blocks release",
+      "tests": [
+        {
+          "id": "RELEASE-READINESS",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Release CI job and evidence retention owner",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Git command, repository identity, clean-checkout rule, evidence requirement, timeout, or release workflow changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DEV-SBOM",
+      "categories": [
+        "process-direct",
+        "dev-only"
+      ],
+      "path": "scripts/generate_security_sbom.py",
+      "symbol_or_route": "deterministic tracked-lockfile SBOM generation",
+      "owner": "Release Security maintainers",
+      "trust_source": "Trusted CI checkout and fixed git ls-files enumeration",
+      "final_enforcement_point": "generate_security_sbom.py tracked-file filter, fixed git argv, bounded timeout, and deterministic CycloneDX writer",
+      "fail_closed_behavior": "Git failure, timeout, invalid lockfile, untracked input, parser error, or output failure blocks SBOM generation",
+      "tests": [
+        {
+          "id": "RELEASE-SECURITY-WORKFLOWS",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Release CI job and SBOM artifact retention owner",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Tracked-file enumeration, lockfile parser, git argv, timeout, SBOM format, or release workflow changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DEV-PARSER-FUZZ",
+      "categories": [
+        "process-direct",
+        "dev-only"
+      ],
+      "path": "scripts/run_parser_fuzz_gate.py",
+      "symbol_or_route": "bounded Python, TypeScript, and Rust parser fuzz gate",
+      "owner": "Release Security maintainers",
+      "trust_source": "Trusted checkout, repository corpus, and fixed Cargo, Pytest, and npm test argv",
+      "final_enforcement_point": "run_parser_fuzz_gate.py corpus budgets, fixed commands, per-command timeouts, and ignored reproduction output root",
+      "fail_closed_behavior": "Corpus overflow, missing tool, parser crash, timeout, nonzero child, or artifact write failure fails the release gate",
+      "tests": [
+        {
+          "id": "PARSER-FUZZ-GATE",
+          "path": "tests/security/test_parser_fuzz_gate.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_parser_fuzz_gate.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Release CI job and fuzz reproduction artifact owner",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_parser_fuzz_gate.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Corpus root, parser language, child command, resource budget, timeout, reproduction artifact, or workflow changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-DEV-RUNTIME-EVIDENCE",
+      "categories": [
+        "process-direct",
+        "dev-only",
+        "structured-file-write"
+      ],
+      "path": "scripts/write_security_runtime_evidence.py",
+      "symbol_or_route": "commit- and runner-bound native runtime evidence writer",
+      "owner": "Release Security maintainers",
+      "trust_source": "Trusted CI runner, clean checkout, expected origin, current commit, and native test outputs",
+      "final_enforcement_point": "write_security_runtime_evidence.py fixed git checks and schema-bound evidence output",
+      "fail_closed_behavior": "Dirty checkout, repository or commit mismatch, untrusted runner, missing native result, git failure, or output error blocks evidence",
+      "tests": [
+        {
+          "id": "RELEASE-SECURITY-WORKFLOWS",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Release CI job and native evidence retention owner",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_release_security_workflows.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Git identity, runner identity, native result format, evidence schema, output root, or workflow changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-RUST-BWRAP-SOURCE",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "security-runtime/src/linux/bwrap_source.rs",
+      "symbol_or_route": "bubblewrap source and identity probe",
+      "owner": "Linux Native Runtime maintainers",
+      "trust_source": "Fixed candidate roots and verified bubblewrap executable identity",
+      "final_enforcement_point": "bwrap_source.rs candidate validation before Linux sandbox plan construction",
+      "fail_closed_behavior": "Missing, non-absolute, unsafe-owner, wrong-mode, changed, or failed bubblewrap candidate leaves managed Linux execution unavailable",
+      "tests": [
+        {
+          "id": "LINUX-BWRAP",
+          "path": "security-runtime/tests/linux_bwrap.rs"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_bwrap.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "Linux runtime request and helper process lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_bwrap.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Bubblewrap source, candidate root, identity, probe argv, fallback, or packaging changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-RUST-LINUX",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "security-runtime/src/linux/mod.rs",
+      "symbol_or_route": "Linux sandbox command launch",
+      "owner": "Linux Native Runtime maintainers",
+      "trust_source": "Authenticated runtime protocol, signed authorization, verified bubblewrap identity, and constructed sandbox plan",
+      "final_enforcement_point": "linux/mod.rs fixed sandbox invocation and lifecycle limits",
+      "fail_closed_behavior": "Missing bubblewrap, invalid plan, namespace or seccomp setup failure, proxy failure, spawn error, or cleanup failure aborts managed execution",
+      "tests": [
+        {
+          "id": "LINUX-BWRAP",
+          "path": "security-runtime/tests/linux_bwrap.rs"
+        },
+        {
+          "id": "LINUX-FAIL-CLOSED",
+          "path": "security-runtime/tests/linux_fail_closed.rs"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_fail_closed.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "Linux runtime request and sandbox descendant process tree",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_fail_closed.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Linux sandbox executable, namespace, mount, seccomp, network, environment, resource, spawn, or cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-RUST-LINUX-PROXY",
+      "categories": [
+        "process-direct",
+        "runtime-boundary",
+        "network"
+      ],
+      "path": "security-runtime/src/linux/proxy_routing.rs",
+      "symbol_or_route": "Linux proxy namespace bridge and helper fork",
+      "owner": "Linux Native Runtime maintainers",
+      "trust_source": "Runtime-created private sockets, fixed loopback ports, and authenticated parent sandbox plan",
+      "final_enforcement_point": "proxy_routing.rs fixed namespace bridge, descriptor ownership, and child lifecycle",
+      "fail_closed_behavior": "Bind, fork, namespace, descriptor, route, timeout, or cleanup failure disables managed networking and aborts the request",
+      "tests": [
+        {
+          "id": "LINUX-ADVERSARIAL",
+          "path": "security-runtime/tests/linux_adversarial.rs"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_adversarial.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "Linux runtime request, proxy bridge, and sandbox descendant lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_adversarial.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Fork, listener, Unix socket, namespace bridge, fixed port, descriptor, tunnel, timeout, or cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-RUST-SECCOMP",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "security-runtime/src/linux/seccomp.rs",
+      "symbol_or_route": "Linux seccomp launcher exec",
+      "owner": "Linux Native Runtime maintainers",
+      "trust_source": "Validated fixed seccomp helper command derived from the native sandbox plan",
+      "final_enforcement_point": "linux/seccomp.rs policy load and exec replacement",
+      "fail_closed_behavior": "Missing policy, invalid command, seccomp load error, exec error, or unsupported architecture aborts managed execution",
+      "tests": [
+        {
+          "id": "LINUX-FAIL-CLOSED",
+          "path": "security-runtime/tests/linux_fail_closed.rs"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_fail_closed.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "Linux runtime request and exec-replaced sandbox child",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/linux_fail_closed.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Seccomp policy, helper command, architecture support, exec behavior, or failure mapping changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-RUST-MACOS",
+      "categories": [
+        "process-direct",
+        "runtime-boundary",
+        "network"
+      ],
+      "path": "security-runtime/src/macos/mod.rs",
+      "symbol_or_route": "macOS sandbox-exec launch and readiness probe",
+      "owner": "macOS Native Runtime maintainers",
+      "trust_source": "Authenticated runtime protocol, generated deny-first Seatbelt profile, and fixed system sandbox-exec identity",
+      "final_enforcement_point": "macos/mod.rs fixed sandbox-exec invocation, profile application, readiness probe, and process-group lifecycle",
+      "fail_closed_behavior": "Profile generation, fixed helper, probe, spawn, network boundary, resource, timeout, or cleanup failure aborts managed execution",
+      "tests": [
+        {
+          "id": "MACOS-PROFILE",
+          "path": "security-runtime/tests/macos_profile.rs"
+        },
+        {
+          "id": "MACOS-ADVERSARIAL",
+          "path": "security-runtime/tests/macos_adversarial.rs"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/macos_adversarial.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "macOS runtime request and sandbox process group",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/macos_adversarial.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Seatbelt profile, sandbox-exec path, probe, filesystem rule, network rule, resource, spawn, or cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-RUST-SHELL",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "security-runtime/src/shell.rs",
+      "symbol_or_route": "fixed shell discovery and classification probes",
+      "owner": "Native Runtime maintainers",
+      "trust_source": "Platform-specific fixed shell candidates and bounded classification input",
+      "final_enforcement_point": "shell.rs absolute candidate validation, fixed argv, minimal environment, timeout, and output limits",
+      "fail_closed_behavior": "Missing fixed shell, unsafe candidate, unsupported syntax, timeout, output overflow, or probe failure rejects classification or execution",
+      "tests": [
+        {
+          "id": "RUNTIME-PROTOCOL",
+          "path": "security-runtime/tests/protocol.rs"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/protocol.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "Native runtime request and bounded shell probe lifecycle",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/protocol.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Shell candidate, parser, fixed argv, environment, classification, timeout, output, or fallback changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-RUST-WINDOWS",
+      "categories": [
+        "process-direct",
+        "runtime-boundary"
+      ],
+      "path": "security-runtime/src/windows/process.rs",
+      "symbol_or_route": "Windows restricted-token process creation",
+      "owner": "Windows Native Runtime maintainers",
+      "trust_source": "Authenticated runtime protocol, restricted token, verified executable descriptor, fixed inherited handles, and protected sandbox state",
+      "final_enforcement_point": "windows/process.rs CreateProcessAsUserW boundary with handle list, environment block, private Desktop ACL, suspended assignment, and Job object; windows/users.rs hides generated accounts in Winlogon UserList",
+      "fail_closed_behavior": "Token, executable, handle, ACL, environment, private Desktop/UserList hardening, process creation, Job assignment, readiness, or cleanup failure terminates or rejects the child",
+      "tests": [
+        {
+          "id": "WINDOWS-SANDBOX",
+          "path": "security-runtime/tests/windows_sandbox.rs"
+        },
+        {
+          "id": "WINDOWS-TOKEN",
+          "path": "security-runtime/tests/windows_token.rs"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/windows_sandbox.rs"
+        }
+      ],
+      "lifecycle_revocation_owner": "Windows runtime request and Job object process tree",
+      "status": "enforced",
+      "artifact_refs": [
+        {
+          "type": "cargo-test",
+          "path": "security-runtime/tests/windows_sandbox.rs"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Windows token, logon fallback, executable descriptor, inherited handle, environment, private Desktop, UserList visibility, Job, readiness, spawn, or cleanup changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    }
+  ]
+}

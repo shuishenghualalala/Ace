@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import ipaddress
 import json
 import re
+import ssl
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
@@ -20,6 +21,7 @@ from crew.browser.security import BrowserNetworkDenied, BrowserNetworkPolicy, Lo
 from crew.browser.tools import BROWSER_SCHEMAS
 from crew.browser.types import BrowserConfig
 from crew.core.runctx import current_tool_call_id
+from crew.security.outbound import OutboundContext
 from crew.state.logging import _sanitize_llm_trace
 
 
@@ -40,6 +42,17 @@ def _fake_security_digest(element_security: dict[str, str]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _proxy_context() -> OutboundContext:
+    return OutboundContext(
+        "browser",
+        "test-session",
+        "test-task",
+        "test-request",
+        "browser_proxy",
+        "test-environment",
+    )
 
 
 class FakeBrowserDriver(BrowserDriver):
@@ -289,6 +302,7 @@ class FakeElectronDriver(FakeBrowserDriver, ElectronBrowserDriver):
         self.config = BrowserConfig()
 
     # 显式拉回基类默认，绕开 ElectronBrowserDriver 的 bridge 实现（MRO 中它在基类前）。
+    configure_proxy = BrowserDriver.configure_proxy
     execute_targeted = BrowserDriver.execute_targeted
     page_guard = BrowserDriver.page_guard
     page_images = BrowserDriver.page_images
@@ -716,15 +730,30 @@ async def test_ordinary_filling_does_not_require_one_shot_approval(browser):
     assert decision is None
 
 
-def test_navigation_and_legacy_proxy_allow_all_network_classes_by_default():
+def test_navigation_and_dns_policy_fail_closed_for_sensitive_destinations():
     policy = BrowserNetworkPolicy(BrowserConfig())
-    assert policy.validate_navigation_url("http://localhost/admin") == (
-        "http://localhost/admin"
-    )
     assert policy.validate_navigation_url("about:blank") == "about:blank"
-    assert policy.validate_navigation_url("custom:opaque-payload") == (
-        "custom:opaque-payload"
+    assert policy.validate_navigation_url(
+        "crew-artifact://0123456789abcdef/index.html"
+    ) == (
+        "crew-artifact://0123456789abcdef/index.html"
     )
+    for unsafe_url in (
+        "http://127.0.0.1/admin",
+        "http://2130706433/admin",
+        "http://localhost/admin",
+        "http://169.254.169.254/latest/meta-data",
+        "https://user:password@example.com/",
+        "file:///private/tmp/secret.txt",
+        "data:text/html,<script>alert(1)</script>",
+        "javascript:alert(document.domain)",
+        "java\tscript:alert(document.domain)",
+        "vbscript:msgbox('unsafe')",
+        "about:srcdoc",
+        "custom:opaque-payload",
+    ):
+        with pytest.raises(BrowserNetworkDenied):
+            policy.validate_navigation_url(unsafe_url)
     for hostname, value in (
         ("metadata.example", "169.254.169.254"),
         ("internal.example", "10.1.2.3"),
@@ -734,7 +763,8 @@ def test_navigation_and_legacy_proxy_allow_all_network_classes_by_default():
         ("translation.example", "::10.0.0.1"),
         ("translation.example", "fec0::1"),
     ):
-        assert policy.validate_ip(hostname, value) == str(ipaddress.ip_address(value))
+        with pytest.raises(BrowserNetworkDenied):
+            policy.validate_ip(hostname, value)
 
 
 def test_blocked_hosts_use_dns_idna_canonicalization():
@@ -749,15 +779,43 @@ def test_blocked_hosts_use_dns_idna_canonicalization():
     ):
         with pytest.raises(BrowserNetworkDenied, match="管理员策略"):
             policy.validate_hostname(hostname)
-    assert policy.validate_ip("mapped.example", "::ffff:127.0.0.1") == str(
-        ipaddress.ip_address("::ffff:127.0.0.1")
-    )
-    assert policy.validate_navigation_url(
-        "https://user:password@example.com/"
-    ) == "https://user:password@example.com/"
+    with pytest.raises(BrowserNetworkDenied):
+        policy.validate_ip("mapped.example", "::ffff:127.0.0.1")
 
-    allowed = BrowserNetworkPolicy(BrowserConfig())
-    assert allowed.validate_ip("internal.example", "10.1.2.3") == "10.1.2.3"
+    explicitly_allowed = BrowserNetworkPolicy(
+        BrowserConfig(allowed_private_hosts=["internal.example"])
+    )
+    assert explicitly_allowed.validate_ip("internal.example", "10.1.2.3") == "10.1.2.3"
+    with pytest.raises(BrowserNetworkDenied):
+        explicitly_allowed.validate_ip("other.example", "10.1.2.3")
+
+
+def test_origin_scoped_policy_defaults_to_deny_for_every_other_public_target():
+    policy = BrowserNetworkPolicy(
+        BrowserConfig(),
+        allowed_origins={("https", "93.184.216.34", 443)},
+        default_allow_public=False,
+    )
+
+    assert (
+        policy.validate_navigation_url("https://93.184.216.34/mcp")
+        == "https://93.184.216.34/mcp"
+    )
+    with pytest.raises(
+        BrowserNetworkDenied,
+        match="destination_not_authorized",
+    ) as denied:
+        policy.validate_navigation_url("https://93.184.216.35/mcp")
+    assert denied.value.code == "destination_not_authorized"
+
+
+def test_network_policy_constructor_defaults_to_deny_public_origins():
+    policy = BrowserNetworkPolicy(BrowserConfig())
+
+    with pytest.raises(BrowserNetworkDenied) as denied:
+        policy.validate_navigation_url("https://93.184.216.34/resource")
+
+    assert denied.value.code == "destination_not_authorized"
 
 
 def test_download_names_cannot_escape_task_directory():
@@ -784,13 +842,55 @@ def test_browser_secrets_and_screenshots_are_removed_from_llm_trace():
     assert "base64,AAAA" not in clean
 
 
+async def test_browser_manager_fails_closed_before_driver_when_proxy_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "crew.browser.manager.get_owner_runtime_home",
+        lambda _owner: Path.cwd() / ".ace-test-temp" / "accounts" / "owner",
+    )
+
+    async def fail_start(_proxy) -> str:
+        raise OSError("proxy failed with password=must-not-leak")
+
+    monkeypatch.setattr(LoopbackPolicyProxy, "start", fail_start)
+    driver = FakeBrowserDriver()
+    manager = BrowserManager(BrowserConfig(), driver)
+    try:
+        with pytest.raises(BrowserDriverError) as denied:
+            await manager.navigate("owner", "session", "https://example.com/")
+        assert denied.value.code == "proxy_unavailable"
+        assert "must-not-leak" not in str(denied.value)
+        assert driver.calls == []
+        owner = manager._owners.get("owner")
+        assert owner is None or (owner.actions_blocked and not owner.initialized)
+    finally:
+        await manager.aclose()
+
+
+def test_browser_manager_never_falls_back_to_credential_bearing_proxy_url() -> None:
+    owner = SimpleNamespace(
+        proxy=SimpleNamespace(
+            url="http://crew:proxy-secret@127.0.0.1:43210",
+        ),
+    )
+
+    assert BrowserManager._proxy_endpoint(owner) == ""
+
+
 async def test_loopback_proxy_requires_per_instance_credentials() -> None:
     proxy = LoopbackPolicyProxy(
         BrowserNetworkPolicy(BrowserConfig(blocked_hosts=["localhost"]))
     )
     await proxy.start()
-    parsed = urlsplit(proxy.url)
-    assert parsed.username == "crew" and parsed.password
+    parsed = urlsplit(proxy.endpoint_url)
+    endpoint = urlsplit(proxy.endpoint_url)
+    assert proxy.url == proxy.endpoint_url
+    assert proxy.credentials[1] not in proxy.url
+    assert endpoint.hostname == "127.0.0.1"
+    assert endpoint.port == parsed.port
+    assert endpoint.username is None and endpoint.password is None
+    assert proxy.credentials[0] == "crew" and proxy.credentials[1]
     try:
         reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
         writer.write(b"CONNECT localhost:80 HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -800,7 +900,7 @@ async def test_loopback_proxy_requires_per_instance_credentials() -> None:
         await writer.wait_closed()
 
         credentials = base64.b64encode(
-            f"{parsed.username}:{parsed.password}".encode("utf-8")
+            f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
         ).decode("ascii")
         reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
         writer.write(
@@ -816,6 +916,381 @@ async def test_loopback_proxy_requires_per_instance_credentials() -> None:
         await writer.wait_closed()
     finally:
         await proxy.aclose()
+
+
+async def test_loopback_proxy_rejects_cross_context_attribution_before_upstream() -> None:
+    context = OutboundContext(
+        "owner-a",
+        "session-a",
+        "task-a",
+        "request-a",
+        "browser_proxy",
+        "environment-a",
+    )
+    other_context = OutboundContext(
+        "owner-a",
+        "session-b",
+        "task-a",
+        "request-a",
+        "browser_proxy",
+        "environment-a",
+    )
+    proxy = LoopbackPolicyProxy(
+        BrowserNetworkPolicy(
+            BrowserConfig(),
+            owner="owner-a",
+            proxy_context=context,
+        )
+    )
+    await proxy.start()
+    parsed = urlsplit(proxy.endpoint_url)
+    other_credentials = proxy.credentials_for(other_context)
+    forged = base64.b64encode(
+        f"{other_credentials[0]}:{other_credentials[1]}".encode(
+            "utf-8"
+        )
+    ).decode("ascii")
+    try:
+        reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+        writer.write(
+            (
+                "CONNECT example.com:443 HTTP/1.1\r\n"
+                "Host: example.com:443\r\n"
+                f"Proxy-Authorization: Basic {forged}\r\n\r\n"
+            ).encode("ascii")
+        )
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=1)
+        assert b"X-Crew-Error-Code: proxy_context_mismatch" in response
+        assert other_credentials[1] not in response.decode("latin-1")
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await proxy.aclose()
+
+
+async def test_loopback_proxy_without_context_fails_closed_at_wire() -> None:
+    proxy = LoopbackPolicyProxy(BrowserNetworkPolicy(BrowserConfig()))
+    await proxy.start()
+    parsed = urlsplit(proxy.endpoint_url)
+    credentials = base64.b64encode(
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
+    ).decode("ascii")
+    try:
+        reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+        writer.write(
+            (
+                "CONNECT example.com:443 HTTP/1.1\r\n"
+                "Host: example.com:443\r\n"
+                f"Proxy-Authorization: Basic {credentials}\r\n\r\n"
+            ).encode("ascii")
+        )
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=1)
+        assert b"X-Crew-Error-Code: proxy_context_required" in response
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await proxy.aclose()
+
+
+async def test_loopback_proxy_rejects_absolute_target_and_host_mismatch_before_connect() -> None:
+    reached_origin = asyncio.Event()
+
+    async def origin(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        reached_origin.set()
+        writer.close()
+        await writer.wait_closed()
+
+    origin_server = await asyncio.start_server(origin, "127.0.0.1", 0)
+    origin_port = int(origin_server.sockets[0].getsockname()[1])
+    proxy = LoopbackPolicyProxy(
+        BrowserNetworkPolicy(
+            BrowserConfig(allowed_private_hosts=["127.0.0.1"]),
+            proxy_context=_proxy_context(),
+        )
+    )
+    await proxy.start()
+    parsed = urlsplit(proxy.endpoint_url)
+    credentials = base64.b64encode(
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
+    ).decode("ascii")
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+        writer.write(
+            (
+                f"GET http://127.0.0.1:{origin_port}/ HTTP/1.1\r\n"
+                "Host: attacker.example\r\n"
+                f"Proxy-Authorization: Basic {credentials}\r\n\r\n"
+            ).encode("ascii")
+        )
+        await writer.drain()
+
+        assert b" 403 " in await asyncio.wait_for(reader.read(), timeout=1)
+        await asyncio.sleep(0.05)
+        assert not reached_origin.is_set()
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await proxy.aclose()
+        origin_server.close()
+        await origin_server.wait_closed()
+
+
+async def test_loopback_proxy_rejects_oversized_request_before_connect() -> None:
+    reached_origin = asyncio.Event()
+
+    async def origin(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        reached_origin.set()
+        writer.close()
+        await writer.wait_closed()
+
+    origin_server = await asyncio.start_server(origin, "127.0.0.1", 0)
+    origin_port = int(origin_server.sockets[0].getsockname()[1])
+    proxy = LoopbackPolicyProxy(
+        BrowserNetworkPolicy(
+            BrowserConfig(
+                allowed_private_hosts=["127.0.0.1"],
+                max_transfer_bytes=4,
+            ),
+            proxy_context=_proxy_context(),
+        )
+    )
+    await proxy.start()
+    parsed = urlsplit(proxy.endpoint_url)
+    credentials = base64.b64encode(
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
+    ).decode("ascii")
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+        writer.write(
+            (
+                f"POST http://127.0.0.1:{origin_port}/ HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{origin_port}\r\n"
+                f"Proxy-Authorization: Basic {credentials}\r\n"
+                "Content-Length: 5\r\n\r\n12345"
+            ).encode("ascii")
+        )
+        await writer.drain()
+
+        assert b" 403 " in await asyncio.wait_for(reader.read(), timeout=1)
+        await asyncio.sleep(0.05)
+        assert not reached_origin.is_set()
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await proxy.aclose()
+        origin_server.close()
+        await origin_server.wait_closed()
+
+
+async def test_loopback_proxy_times_out_incomplete_request_body() -> None:
+    async def origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    origin_server = await asyncio.start_server(origin, "127.0.0.1", 0)
+    origin_port = int(origin_server.sockets[0].getsockname()[1])
+    proxy = LoopbackPolicyProxy(
+        BrowserNetworkPolicy(
+            BrowserConfig(
+                allowed_private_hosts=["127.0.0.1"],
+                command_timeout_seconds=0.05,
+            ),
+            proxy_context=_proxy_context(),
+        )
+    )
+    await proxy.start()
+    parsed = urlsplit(proxy.endpoint_url)
+    credentials = base64.b64encode(
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
+    ).decode("ascii")
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+        writer.write(
+            (
+                f"POST http://127.0.0.1:{origin_port}/ HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{origin_port}\r\n"
+                f"Proxy-Authorization: Basic {credentials}\r\n"
+                "Content-Length: 1\r\n\r\n"
+            ).encode("ascii")
+        )
+        await writer.drain()
+
+        response = await asyncio.wait_for(reader.read(), timeout=0.5)
+        assert response == b"" or b" 403 " in response
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await proxy.aclose()
+        origin_server.close()
+        await origin_server.wait_closed()
+
+
+async def test_loopback_proxy_times_out_incomplete_tls_client_hello() -> None:
+    async def origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    origin_server = await asyncio.start_server(origin, "127.0.0.1", 0)
+    origin_port = int(origin_server.sockets[0].getsockname()[1])
+    proxy = LoopbackPolicyProxy(
+        BrowserNetworkPolicy(
+            BrowserConfig(
+                allowed_private_hosts=["127.0.0.1"],
+                command_timeout_seconds=0.05,
+            ),
+            proxy_context=_proxy_context(),
+        )
+    )
+    await proxy.start()
+    parsed = urlsplit(proxy.endpoint_url)
+    credentials = base64.b64encode(
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
+    ).decode("ascii")
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+        writer.write(
+            (
+                f"CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{origin_port}\r\n"
+                f"Proxy-Authorization: Basic {credentials}\r\n\r\n"
+            ).encode("ascii")
+        )
+        await writer.drain()
+
+        assert b" 200 " in await asyncio.wait_for(
+            reader.readuntil(b"\r\n\r\n"),
+            timeout=0.5,
+        )
+        assert await asyncio.wait_for(reader.read(), timeout=0.5) == b""
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await proxy.aclose()
+        origin_server.close()
+        await origin_server.wait_closed()
+
+
+async def test_loopback_proxy_close_terminates_accepted_clients() -> None:
+    proxy = LoopbackPolicyProxy(BrowserNetworkPolicy(BrowserConfig()))
+    await proxy.start()
+    parsed = urlsplit(proxy.endpoint_url)
+    reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+    await asyncio.sleep(0)
+
+    await proxy.aclose()
+
+    response = await asyncio.wait_for(reader.read(), timeout=0.5)
+    assert response == b"" or b" 403 " in response
+    writer.close()
+    await writer.wait_closed()
+
+
+async def test_loopback_proxy_discards_clients_rejected_by_connection_limit() -> None:
+    class RejectingSlots:
+        async def acquire(self) -> None:
+            raise asyncio.TimeoutError
+
+        def release(self) -> None:
+            pytest.fail("a rejected connection must not release an unowned slot")
+
+    class Writer:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            return None
+
+    proxy = LoopbackPolicyProxy(BrowserNetworkPolicy(BrowserConfig()))
+    proxy._connection_slots = RejectingSlots()  # type: ignore[assignment]
+    writer = Writer()
+    proxy._client_writers.add(writer)  # type: ignore[arg-type]
+
+    await proxy._handle(asyncio.StreamReader(), writer)  # type: ignore[arg-type]
+
+    assert writer.closed
+    assert writer not in proxy._client_writers
+
+
+async def test_loopback_proxy_rejects_connect_sni_authority_mismatch() -> None:
+    received = bytearray()
+    upstream_reached = asyncio.Event()
+
+    async def origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        upstream_reached.set()
+        try:
+            received.extend(await reader.read())
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    origin_server = await asyncio.start_server(origin, "127.0.0.1", 0)
+    origin_port = int(origin_server.sockets[0].getsockname()[1])
+    proxy = LoopbackPolicyProxy(
+        BrowserNetworkPolicy(
+            BrowserConfig(allowed_private_hosts=["127.0.0.1"]),
+            proxy_context=_proxy_context(),
+        )
+    )
+    await proxy.start()
+    parsed = urlsplit(proxy.endpoint_url)
+    credentials = base64.b64encode(
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
+    ).decode("ascii")
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+        writer.write(
+            (
+                f"CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{origin_port}\r\n"
+                f"Proxy-Authorization: Basic {credentials}\r\n\r\n"
+            ).encode("ascii")
+        )
+        await writer.drain()
+        assert b" 200 " in await reader.readuntil(b"\r\n\r\n")
+
+        incoming = ssl.MemoryBIO()
+        outgoing = ssl.MemoryBIO()
+        tls = ssl.create_default_context().wrap_bio(
+            incoming,
+            outgoing,
+            server_side=False,
+            server_hostname="evil.example",
+        )
+        with pytest.raises(ssl.SSLWantReadError):
+            tls.do_handshake()
+        writer.write(outgoing.read())
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), timeout=2) == b""
+        await asyncio.sleep(0.05)
+        assert not upstream_reached.is_set()
+        assert received == b""
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await proxy.aclose()
+        origin_server.close()
+        await origin_server.wait_closed()
 
 
 async def test_loopback_proxy_does_not_reuse_http_socket_for_blocked_host() -> None:
@@ -853,13 +1328,15 @@ async def test_loopback_proxy_does_not_reuse_http_socket_for_blocked_host() -> N
         BrowserNetworkPolicy(
             BrowserConfig(
                 blocked_hosts=["blocked.example"],
-            )
+                allowed_private_hosts=["127.0.0.1"],
+            ),
+            proxy_context=_proxy_context(),
         )
     )
     await proxy.start()
-    parsed = urlsplit(proxy.url)
+    parsed = urlsplit(proxy.endpoint_url)
     credentials = base64.b64encode(
-        f"{parsed.username}:{parsed.password}".encode("utf-8")
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
     ).decode("ascii")
     writer: asyncio.StreamWriter | None = None
     try:
@@ -932,13 +1409,15 @@ async def test_loopback_proxy_rejects_fake_websocket_before_relaying_pipeline(
         BrowserNetworkPolicy(
             BrowserConfig(
                 blocked_hosts=["blocked.example"],
-            )
+                allowed_private_hosts=["127.0.0.1"],
+            ),
+            proxy_context=_proxy_context(),
         )
     )
     await proxy.start()
-    parsed = urlsplit(proxy.url)
+    parsed = urlsplit(proxy.endpoint_url)
     credentials = base64.b64encode(
-        f"{parsed.username}:{parsed.password}".encode("utf-8")
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
     ).decode("ascii")
     writer: asyncio.StreamWriter | None = None
     try:
@@ -946,7 +1425,7 @@ async def test_loopback_proxy_rejects_fake_websocket_before_relaying_pipeline(
         writer.write(
             (
                 f"GET ws://127.0.0.1:{origin_port}/socket HTTP/1.1\r\n"
-                "Host: blocked.example\r\n"
+                        f"Host: 127.0.0.1:{origin_port}\r\n"
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
                 "Sec-WebSocket-Version: 13\r\n"
@@ -1025,12 +1504,15 @@ async def test_loopback_proxy_finishes_framed_response_without_upstream_eof(
     origin_server = await asyncio.start_server(origin, "127.0.0.1", 0)
     origin_port = int(origin_server.sockets[0].getsockname()[1])
     proxy = LoopbackPolicyProxy(
-        BrowserNetworkPolicy(BrowserConfig())
+        BrowserNetworkPolicy(
+            BrowserConfig(allowed_private_hosts=["127.0.0.1"]),
+            proxy_context=_proxy_context(),
+        )
     )
     await proxy.start()
-    parsed = urlsplit(proxy.url)
+    parsed = urlsplit(proxy.endpoint_url)
     credentials = base64.b64encode(
-        f"{parsed.username}:{parsed.password}".encode("utf-8")
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
     ).decode("ascii")
     writer: asyncio.StreamWriter | None = None
     try:
@@ -1080,13 +1562,15 @@ async def test_loopback_proxy_bounds_close_delimited_response_wait() -> None:
             BrowserConfig(
                 command_timeout_seconds=0.1,
                 navigation_timeout_seconds=0.2,
-            )
+                allowed_private_hosts=["127.0.0.1"],
+            ),
+            proxy_context=_proxy_context(),
         )
     )
     await proxy.start()
-    parsed = urlsplit(proxy.url)
+    parsed = urlsplit(proxy.endpoint_url)
     credentials = base64.b64encode(
-        f"{parsed.username}:{parsed.password}".encode("utf-8")
+        f"{proxy.credentials[0]}:{proxy.credentials[1]}".encode("utf-8")
     ).decode("ascii")
     writer: asyncio.StreamWriter | None = None
     try:

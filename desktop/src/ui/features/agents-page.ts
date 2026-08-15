@@ -59,6 +59,10 @@ type FormationUiStatus =
 type AgentsGuideMode = 'hidden' | 'welcome' | 'tour';
 type AgentsGuideStepNumber = 1 | 2 | 3;
 
+const AGENTS_GUIDE_HIGHLIGHT_PADDING = 6;
+const AGENTS_GUIDE_TOOLTIP_GAP = 12;
+const AGENTS_GUIDE_VIEWPORT_MARGIN = 12;
+
 export interface ExternalConversationCatalog {
   agents: ExternalAgent[];
   teams: ExternalTeam[];
@@ -1273,6 +1277,59 @@ function removeAgentsGuide(): void {
   });
 }
 
+function clampAgentsGuidePosition(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function placeAgentsGuideBubble(
+  bubble: HTMLElement,
+  targetRect: DOMRect,
+): void {
+  const bubbleRect = bubble.getBoundingClientRect();
+  const bubbleWidth = bubbleRect.width || 332;
+  const bubbleHeight = bubbleRect.height || 176;
+  const left = targetRect.left - AGENTS_GUIDE_TOOLTIP_GAP - bubbleWidth;
+  const top = targetRect.top + targetRect.height / 2 - bubbleHeight / 2;
+  bubble.style.left = `${Math.round(clampAgentsGuidePosition(
+    left,
+    AGENTS_GUIDE_VIEWPORT_MARGIN,
+    window.innerWidth - bubbleWidth - AGENTS_GUIDE_VIEWPORT_MARGIN,
+  ))}px`;
+  bubble.style.top = `${Math.round(clampAgentsGuidePosition(
+    top,
+    AGENTS_GUIDE_VIEWPORT_MARGIN,
+    window.innerHeight - bubbleHeight - AGENTS_GUIDE_VIEWPORT_MARGIN,
+  ))}px`;
+}
+
+function layoutAgentsGuide(): void {
+  if (agentsGuideMode !== 'tour') return;
+  const portal = document.querySelector<HTMLElement>('[data-agents-guide-portal][data-guide-mode="tour"]');
+  const highlight = portal?.querySelector<HTMLElement>('[data-agents-guide-highlight]');
+  const bubble = portal?.querySelector<HTMLElement>('[data-agents-guide]');
+  const target = document.querySelector<HTMLElement>(guideTarget().selector);
+  if (!portal || !highlight || !bubble) return;
+  document.querySelectorAll('.agents-guide-target').forEach((element) => {
+    element.classList.remove('agents-guide-target');
+  });
+  target?.classList.add('agents-guide-target');
+  if (!target) {
+    highlight.hidden = true;
+    return;
+  }
+  const rect = target.getBoundingClientRect();
+  if (rect.width < 4 || rect.height < 4) {
+    highlight.hidden = true;
+    return;
+  }
+  highlight.hidden = false;
+  highlight.style.left = `${Math.round(rect.left - AGENTS_GUIDE_HIGHLIGHT_PADDING)}px`;
+  highlight.style.top = `${Math.round(rect.top - AGENTS_GUIDE_HIGHLIGHT_PADDING)}px`;
+  highlight.style.width = `${Math.round(rect.width + AGENTS_GUIDE_HIGHLIGHT_PADDING * 2)}px`;
+  highlight.style.height = `${Math.round(rect.height + AGENTS_GUIDE_HIGHLIGHT_PADDING * 2)}px`;
+  placeAgentsGuideBubble(bubble, rect);
+}
+
 function finishAgentsGuide(): void {
   agentsGuideMode = 'hidden';
   saveToStorage(STORAGE_KEYS.externalAgentsGuideDismissed, true);
@@ -1289,19 +1346,42 @@ function setAgentsGuideStep(step: AgentsGuideStepNumber): void {
 }
 
 function renderAgentsGuide(): void {
-  removeAgentsGuide();
-  if (agentsGuideMode === 'hidden') return;
+  if (agentsGuideMode === 'hidden') {
+    removeAgentsGuide();
+    return;
+  }
   const root = $('#agents-page-root');
   const pane = root?.closest('.tab-pane');
-  if (pane && !pane.classList.contains('active')) return;
+  if (pane && !pane.classList.contains('active')) {
+    removeAgentsGuide();
+    return;
+  }
 
   const target = agentsGuideMode === 'tour' ? guideTarget() : null;
-  const portal = document.createElement('div');
-  portal.className = 'agents-guide-portal agents-guide-portal--right';
-  portal.dataset.agentsGuidePortal = '';
-  portal.innerHTML = agentsGuideMode === 'welcome'
+  const wantedMode = agentsGuideMode === 'tour' ? 'tour' : 'welcome';
+  let portal = document.querySelector<HTMLElement>('[data-agents-guide-portal]');
+  if (portal?.dataset.guideMode !== wantedMode) {
+    removeAgentsGuide();
+    portal = null;
+  }
+  if (!portal) {
+    portal = document.createElement('div');
+    portal.dataset.agentsGuidePortal = '';
+    portal.dataset.guideMode = wantedMode;
+    if (wantedMode === 'tour') {
+      portal.innerHTML = `
+        <div class="agents-guide-mask" data-agents-guide-mask aria-hidden="true"></div>
+        <div class="agents-guide-highlight" data-agents-guide-highlight aria-hidden="true"></div>
+      `;
+    }
+    document.body.appendChild(portal);
+  }
+  portal.className = wantedMode === 'tour'
+    ? 'agents-guide-portal agents-guide-portal--tour'
+    : 'agents-guide-portal agents-guide-portal--right';
+  const bubbleMarkup = wantedMode === 'welcome'
     ? `
-      <aside class="agents-guide-bubble" data-agents-guide role="dialog" aria-label="外援中心新手引导">
+      <aside class="agents-guide-bubble agents-guide-bubble--welcome" data-agents-guide role="dialog" aria-label="外援中心新手引导">
         <div class="agents-guide-bubble__top"><span class="agents-guide-bubble__spark" aria-hidden="true"></span><span>外援小向导</span></div>
         <strong>第一次来外援中心？</strong>
         <p>用 30 秒认识发现、添加和派活。</p>
@@ -1324,7 +1404,17 @@ function renderAgentsGuide(): void {
           </div>
         </div>
       </aside>`;
-  document.body.appendChild(portal);
+  const template = document.createElement('template');
+  template.innerHTML = bubbleMarkup.trim();
+  const nextBubble = template.content.firstElementChild as HTMLElement;
+  const bubble = portal.querySelector<HTMLElement>('[data-agents-guide]');
+  if (bubble) {
+    bubble.className = nextBubble.className;
+    bubble.setAttribute('aria-label', nextBubble.getAttribute('aria-label') || '外援中心引导');
+    bubble.innerHTML = nextBubble.innerHTML;
+  } else {
+    portal.append(nextBubble);
+  }
   if (target) document.querySelector<HTMLElement>(target.selector)?.classList.add('agents-guide-target');
 
   portal.querySelectorAll<HTMLElement>('[data-agents-guide-skip]').forEach((button) => {
@@ -1343,18 +1433,22 @@ function renderAgentsGuide(): void {
     else setAgentsGuideStep((agentsGuideStep + 1) as AgentsGuideStepNumber);
   });
   portal.querySelector<HTMLElement>('[data-agents-guide-locate]')?.addEventListener('click', () => {
-    document.querySelector<HTMLElement>(guideTarget().selector)?.scrollIntoView?.({
+    const guideTargetElement = document.querySelector<HTMLElement>(guideTarget().selector);
+    guideTargetElement?.scrollIntoView?.({
       behavior: 'smooth',
       block: 'center',
       inline: 'nearest',
     });
+    layoutAgentsGuide();
   });
-  portal.addEventListener('wheel', (event) => {
-    const results = root?.querySelector<HTMLElement>('.mw-hub-template__results');
-    if (!results) return;
+  portal.onwheel = (event) => {
+    const panel = document.querySelector<HTMLElement>('.agents-panel');
+    if (!panel) return;
     event.preventDefault();
-    results.scrollBy({ top: event.deltaY, behavior: 'auto' });
-  }, { passive: false });
+    panel.scrollBy({ top: event.deltaY, behavior: 'auto' });
+    layoutAgentsGuide();
+  };
+  if (wantedMode === 'tour') layoutAgentsGuide();
 }
 
 function render(): void {
@@ -1400,6 +1494,14 @@ function render(): void {
 }
 
 function bind(): void {
+  $$('[data-runtime-id]').forEach((card) => {
+    card.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('button')) return;
+      const runtimeId = card.getAttribute('data-runtime-id') || '';
+      if (runtimeId) selectRuntime(runtimeId);
+    });
+  });
   $$('[data-team-id]').forEach((card) => {
     card.setAttribute('role', 'button');
     card.setAttribute('tabindex', '0');
@@ -2070,7 +2172,12 @@ export async function initAgentsPage(options: {
       closeAgentsSelect();
     });
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeAgentsSelect();
+      if (event.key !== 'Escape') return;
+      closeAgentsSelect();
+      if (agentsGuideMode !== 'hidden') {
+        agentsGuideMode = 'hidden';
+        render();
+      }
     });
     document.addEventListener('click', (event) => {
       const tab = (event.target as HTMLElement).closest<HTMLElement>('[data-tab]');

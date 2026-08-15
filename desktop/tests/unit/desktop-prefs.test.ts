@@ -9,7 +9,12 @@ const state = vi.hoisted(() => ({
 
 vi.mock('electron', () => ({ app: { getPath: () => state.tmpDir } }));
 
-import { desktopPrefsPath, saveCloseBehaviorPreference } from '../../src/main/desktop-prefs';
+import {
+  desktopPrefsPath,
+  isStrictSecurityEnabled,
+  saveCloseBehaviorPreference,
+  saveStrictSecurityPreference,
+} from '../../src/main/desktop-prefs';
 
 beforeEach(() => {
   state.tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-prefs-'));
@@ -43,5 +48,18 @@ describe('desktop prefs', () => {
     expect(result).toEqual({ closeBehavior: 'tray' });
     expect(raw.closeBehavior).toBe('tray');
     expect(raw.customPreference).toBe('keep-me');
+  });
+
+  it('ignores legacy compatibility preferences and refuses disablement', () => {
+    fs.writeFileSync(
+      desktopPrefsPath(),
+      JSON.stringify({ strictSecurityEnabled: false }),
+    );
+
+    expect(isStrictSecurityEnabled()).toBe(true);
+    expect(() => saveStrictSecurityPreference(false)).toThrow(
+      'strict security cannot be disabled',
+    );
+    expect(isStrictSecurityEnabled()).toBe(true);
   });
 });

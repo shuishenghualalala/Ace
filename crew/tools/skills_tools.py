@@ -21,6 +21,7 @@ from crew.agent.skills import (
 )
 from crew.core.errors import ToolError
 from crew.core.runctx import current_active_skill_packages, current_skill_scope
+from crew.tools.redact import safe_public_error
 from crew.tools.registry import Registry, tool_result
 
 
@@ -206,7 +207,7 @@ def handle_skill_view(args: dict[str, Any]) -> str:
             safe_skill_dir = _registered_skill_dir(skill_dir)
             skill_md = resolve_skill_path(Path(info["skill_md_path"]), safe_skill_dir)
         except SkillPathError as exc:
-            raise ToolError(f"路径越权：{exc}") from exc
+            raise ToolError(safe_public_error(exc, "路径越权")) from exc
         content = info.get("content") or read_skill_text(skill_md, safe_skill_dir, errors="replace")
         return tool_result(
             success=True,

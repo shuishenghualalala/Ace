@@ -240,7 +240,8 @@ async def test_save_platform_config_persists_without_secret(channel_api, auth_he
     assert "apiKey" not in body["config"]
     assert "sk-secret" not in resp.text
     env_text = (_owner_overlay_path(config_yaml.parent).parent / ".env").read_text(encoding="utf-8")
-    assert "TESTCHAT_API_KEY=sk-secret" in env_text
+    assert "sk-secret" not in env_text
+    assert "TESTCHAT_API_KEY=@ace-secret:v1:" in env_text
 
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
     assert persisted["channels"]["testchat"]["enabled"] is True
@@ -285,7 +286,8 @@ async def test_owner_env_secret_is_used_when_connecting_securechat(channel_api, 
     assert "securechat-secret" not in status.text
 
     env_text = (_owner_overlay_path(config_yaml.parent).parent / ".env").read_text(encoding="utf-8")
-    assert "SECURECHAT_SECRET_KEY=securechat-secret" in env_text
+    assert "securechat-secret" not in env_text
+    assert "SECURECHAT_SECRET_KEY=@ace-secret:v1:" in env_text
 
 
 def _assert_channel_restores_on_gateway_startup(
@@ -507,7 +509,8 @@ async def test_owner_env_secret_can_be_reused_when_completing_securechat_config(
     assert "existing-secret" not in saved.text
 
     env_text = (_owner_overlay_path(config_yaml.parent).parent / ".env").read_text(encoding="utf-8")
-    assert "SECURECHAT_SECRET_KEY=existing-secret" in env_text
+    assert "existing-secret" not in env_text
+    assert "SECURECHAT_SECRET_KEY=@ace-secret:v1:" in env_text
 
 
 @pytest.mark.asyncio
@@ -611,7 +614,8 @@ async def test_disconnect_platform_stops_channel_without_deleting_account(channe
     assert body["ok"] is True
     assert body["status"]["running"] is False
     env_text = (_owner_overlay_path(config_yaml.parent).parent / ".env").read_text(encoding="utf-8")
-    assert "TESTCHAT_API_KEY=sk-secret" in env_text
+    assert "sk-secret" not in env_text
+    assert "TESTCHAT_API_KEY=@ace-secret:v1:" in env_text
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
     assert persisted["channels"]["testchat"]["enabled"] is False
     assert persisted["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"

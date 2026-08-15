@@ -2,18 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
-import shutil
-import subprocess
+import stat
 import zipfile
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from crew.security.settings import strict_security_enabled
 from crew.state.logging import get_logger
+from crew.tools.file_utils import (
+    atomic_replace_bytes,
+    capture_file_identity,
+    read_verified_bytes,
+    snapshot_file,
+)
+from crew.tools.redact import safe_public_error
+
+from .archive_security import safe_extract_zip, validate_zip_bytes
 
 log = get_logger("wiki.parser")
+_MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+_MAX_DOCUMENT_OUTPUT_CHARS = 1_000_000
+_MAX_PDF_PAGES = 2_000
+_MAX_PDF_OBJECTS = 100_000
+_DOCUMENT_CONVERTER_TIMEOUT_SECONDS = 120.0
+_DOCUMENT_CONVERTER_MAX_OUTPUT_BYTES = 256 * 1024
+_MAX_CONVERTER_SCRATCH_BYTES = 256 * 1024 * 1024
+_MAX_CONVERTER_SCRATCH_ENTRIES = 16_384
 
 
 class MissingDependencyError(RuntimeError):
@@ -124,10 +141,10 @@ def validate_parsed_text(text: str, filename: str = "") -> str:
 
 def _read_text(path: Path, *, errors: str = "strict") -> str:
     del errors  # 保留旧调用签名；解析质量门不再允许静默 replace。
-    raw = path.read_bytes()
+    raw = read_verified_bytes(path, max_bytes=_MAX_DOCUMENT_BYTES)
     if _looks_binary(raw):
         raise DocumentParseQualityError(f"不支持的二进制文件格式: {path.suffix.lower() or '未知'}")
-    return _decode_text_bytes(raw)
+    return _decode_text_bytes(raw).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _markdown_table_from_rows(rows: list[list[str]]) -> str | None:
@@ -171,6 +188,11 @@ def _parse_pdf(path: Path) -> str:
         raise _on_import_error("pymupdf", "PDF") from exc
 
     doc = fitz.open(str(path))
+    if doc.page_count > _MAX_PDF_PAGES or doc.xref_length() > _MAX_PDF_OBJECTS:
+        doc.close()
+        raise DocumentParseQualityError(
+            f"{path.name} 页数或 PDF 对象数超过解析安全上限"
+        )
     parts: list[str] = []
     for i, page in enumerate(doc):
         page_parts: list[str] = []
@@ -277,39 +299,58 @@ def _parse_xlsx(path: Path) -> str:
     except ImportError as exc:  # pragma: no cover
         raise _on_import_error("openpyxl", "XLSX") from exc
 
-    import shutil
     import zipfile
     from tempfile import TemporaryDirectory
 
+    def _load_workbook(source: Path, *, read_only: bool):
+        # Parse from an owned byte snapshot. Some openpyxl failure paths leave
+        # their input ZipFile open, which must not pin the caller's file on Windows.
+        content = read_verified_bytes(source, max_bytes=_MAX_DOCUMENT_BYTES)
+        return openpyxl.load_workbook(
+            BytesIO(content),
+            data_only=True,
+            read_only=read_only,
+        )
+
     def _try_repair_xlsx(src: Path, dst: Path) -> bool:
         """在原有解析失败兜底链里插入：修复 Excel/WPS 生成的空 <fill/> 标签。"""
-        tmp_dir = src.parent / f".{src.name}.repair.tmp"
         try:
-            with zipfile.ZipFile(src, "r") as zin:
-                zin.extractall(tmp_dir)
+            with TemporaryDirectory(prefix="ace-xlsx-repair-") as repair_tmp:
+                tmp_dir = Path(repair_tmp) / "archive"
+                safe_extract_zip(src, tmp_dir)
 
-            styles_path = tmp_dir / "xl" / "styles.xml"
-            if not styles_path.exists():
-                return False
+                styles_path = tmp_dir / "xl" / "styles.xml"
+                if not styles_path.exists():
+                    return False
 
-            text = styles_path.read_text(encoding="utf-8")
-            repaired = re.sub(r"<fill\s*/>", '<fill><patternFill patternType="none"/></fill>', text)
-            if repaired == text:
-                return False
+                text = read_verified_bytes(
+                    styles_path,
+                    max_bytes=_MAX_DOCUMENT_BYTES,
+                ).decode("utf-8", errors="strict")
+                repaired = re.sub(
+                    r"<fill\s*/>",
+                    '<fill><patternFill patternType="none"/></fill>',
+                    text,
+                )
+                if repaired == text:
+                    return False
 
-            styles_path.write_text(repaired, encoding="utf-8")
-            log.warning("修复 xlsx 空 fill 标签: %s", src)
+                atomic_replace_bytes(
+                    styles_path,
+                    repaired.encode("utf-8"),
+                    snapshot_file(styles_path),
+                    max_bytes=_MAX_DOCUMENT_BYTES,
+                )
+                log.warning("修复 xlsx 空 fill 标签: %s", src)
 
-            with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
-                for file_path in tmp_dir.rglob("*"):
-                    if file_path.is_file():
-                        zout.write(file_path, file_path.relative_to(tmp_dir))
-            return True
+                with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+                    for file_path in tmp_dir.rglob("*"):
+                        if file_path.is_file():
+                            zout.write(file_path, file_path.relative_to(tmp_dir))
+                return True
         except Exception as exc:  # noqa: BLE001
             log.warning("修复 xlsx styles.xml 失败 %s: %s", src, exc)
             return False
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     with TemporaryDirectory() as tmp:
         # read_only 优先：流式读取，只占样式没有值的空单元格不会被物化。
@@ -317,20 +358,20 @@ def _parse_xlsx(path: Path) -> str:
         # 随单元格数线性爆炸（实测 50 万空样式单元格：4s vs 0.0s），是
         # 上传大 xlsx 卡死的主因。
         try:
-            wb = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
+            wb = _load_workbook(path, read_only=True)
         except Exception:
             # 第一层兜底：修复已知的 Excel/WPS 样式 bug 后重试。
             repaired = Path(tmp) / "repaired.xlsx"
             if _try_repair_xlsx(path, repaired):
                 try:
-                    wb = openpyxl.load_workbook(str(repaired), data_only=True, read_only=True)
+                    wb = _load_workbook(repaired, read_only=True)
                 except Exception:
                     log.warning("xlsx 修复后 read_only 仍失败，尝试普通模式读取: %s", path)
-                    wb = openpyxl.load_workbook(str(repaired), data_only=True)
+                    wb = _load_workbook(repaired, read_only=False)
             else:
                 # 没有可修复的已知问题，用普通模式做最后兜底。
                 log.warning("xlsx read_only 解析失败，尝试普通模式读取: %s", path)
-                wb = openpyxl.load_workbook(str(path), data_only=True)
+                wb = _load_workbook(path, read_only=False)
 
         parts: list[str] = []
         remaining_chars = _XLSX_MAX_CHARS
@@ -494,7 +535,7 @@ def _extract_and_describe_image(
     ext = image.ext or "png"
     image_path = tmp_dir / f"pptx_image_{id(shape)}.{ext}"
     try:
-        image_path.write_bytes(image.blob)
+        atomic_replace_bytes(image_path, image.blob, snapshot_file(image_path))
     except Exception:  # noqa: BLE001
         return None
 
@@ -506,11 +547,11 @@ def _extract_and_describe_image(
     except MediaUnderstandingError as exc:
         cache["reason"] = str(exc)
         log.warning("PPT 图片描述失败: %s", exc)
-        return f"[图片内容未解析：{exc}]"
+        return f"[图片内容未解析：{safe_public_error(exc, '图片内容未解析')}]"
     except Exception as exc:  # noqa: BLE001
         cache["reason"] = str(exc)
         log.warning("PPT 图片描述失败: %s", exc)
-        return f"[图片内容未解析：{exc}]"
+        return f"[图片内容未解析：{safe_public_error(exc, '图片内容未解析')}]"
 
 
 def _parse_pptx(path: Path) -> str:
@@ -598,47 +639,34 @@ def _parse_html(path: Path) -> str:
     except ImportError as exc:  # pragma: no cover
         raise _on_import_error("markdownify", "HTML") from exc
 
-    html_content = _decode_text_bytes(path.read_bytes())
+    html_content = _decode_text_bytes(
+        read_verified_bytes(path, max_bytes=_MAX_DOCUMENT_BYTES)
+    )
     return markdownify(html_content, heading_style="ATX", bullets="-").strip()
 
 
-def fetch_url_to_markdown(url: str, timeout: float = 15.0) -> tuple[str, str]:
+def fetch_url_to_markdown(
+    url: str,
+    timeout: float = 15.0,
+    *,
+    authorization: Any | None = None,
+) -> tuple[str, str]:
     """抓取 URL 并将 HTML 转为 Markdown。返回 (markdown_text, final_url)。"""
-    import ipaddress
-    import socket
-    import urllib.request
-    from urllib.parse import urlsplit
+    from crew.tools.security_guard import fetch_authorized_url, fetch_public_url
 
-    def _validate_public_url(value: str) -> None:
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("Wiki URL 仅允许公开 http/https 地址")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("Wiki URL 不允许内嵌用户名或密码")
-        host = parsed.hostname
-        if host == "localhost" or host.endswith(".localhost"):
-            raise ValueError("Wiki URL 禁止访问 localhost")
-        for result in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80)):
-            address = ipaddress.ip_address(result[4][0])
-            if not address.is_global or address.is_multicast or address.is_reserved:
-                raise ValueError("Wiki URL 禁止访问私网、链路本地或保留地址")
-
-    class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-            _validate_public_url(newurl)
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-    _validate_public_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "Crew/1.0"})
-    opener = urllib.request.build_opener(_SafeRedirectHandler())
-    with opener.open(req, timeout=timeout) as resp:  # noqa: S310
-        raw = resp.read(10_000_001)
-        if len(raw) > 10_000_000:
-            raise ValueError("Wiki URL 响应超过 10 MB 限制")
-        content_type = resp.headers.get_content_type()
-        final_url = resp.geturl()
-
-    charset = resp.headers.get_content_charset() or "utf-8"
+    if authorization is None:
+        response = fetch_public_url(url, timeout=timeout, max_bytes=10_000_000)
+    else:
+        plan = authorization.plan(url, method="GET")
+        response = fetch_authorized_url(
+            plan,
+            timeout=timeout,
+            max_bytes=10_000_000,
+        )
+    raw = response.body
+    content_type = response.content_type.split(";", 1)[0].strip().lower()
+    final_url = response.final_url
+    charset = response.charset
 
     if "html" in content_type:
         try:
@@ -652,15 +680,134 @@ def fetch_url_to_markdown(url: str, timeout: float = 15.0) -> tuple[str, str]:
     return raw.decode(charset, errors="replace"), final_url
 
 
-def _parse_legacy_office(path: Path, target_extension: str) -> str:
-    """通过 LibreOffice 把旧版 Office 转成现代格式，再复用现有解析器。"""
-    if strict_security_enabled():
-        raise RuntimeError(
-            "严格安全约束已阻止在 Gateway 宿主上运行 LibreOffice；"
-            f"请先将文件另存为 {target_extension}，或在安全中心启用兼容模式。"
+def _discover_libreoffice(environment: dict[str, str]) -> Path | None:
+    """Resolve LibreOffice only from the exact PATH inherited by the converter."""
+
+    raw_path = environment.get("PATH", "")
+    if not raw_path:
+        return None
+    names = (
+        ("soffice.exe", "soffice.com", "libreoffice.exe")
+        if os.name == "nt"
+        else ("soffice", "libreoffice")
+    )
+    for raw_directory in raw_path.split(os.pathsep):
+        # An empty PATH entry means the current directory. Never authorize that
+        # implicit search behavior for a production converter.
+        directory_text = raw_directory.strip().strip('"')
+        if not directory_text:
+            continue
+        directory = Path(directory_text)
+        if not directory.is_absolute():
+            continue
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file() and (os.name == "nt" or os.access(candidate, os.X_OK)):
+                return candidate
+    return None
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _libreoffice_runtime_root(executable: Path) -> Path:
+    """Return the narrow install tree needed by LibreOffice at runtime."""
+
+    parent = executable.parent
+    if parent.name.casefold() in {"macos", "program"}:
+        return parent.parent
+    return parent
+
+
+def _converter_execution_path(executable: Path) -> str:
+    directories = [executable.parent]
+    if os.name == "nt":
+        from crew.security.process_lifecycle import windows_system_directory
+
+        system_directory = windows_system_directory()
+        if system_directory is not None:
+            system_root = system_directory.parent
+            directories.extend(
+                (
+                    system_directory,
+                    system_root,
+                    system_directory / "Wbem",
+                )
+            )
+    else:
+        directories.extend(
+            Path(value)
+            for value in (
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            )
         )
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
-    if not soffice:
+    return os.pathsep.join(dict.fromkeys(str(directory) for directory in directories))
+
+
+def _scratch_directory_usage(root: Path) -> int:
+    """Fail-closed byte count for one converter scratch tree, without following links."""
+    total = 0
+    entries = 0
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            iterator = os.scandir(directory)
+        except OSError as exc:
+            raise RuntimeError("LibreOffice 临时目录不可读") from exc
+        with iterator:
+            for entry in iterator:
+                entries += 1
+                if entries > _MAX_CONVERTER_SCRATCH_ENTRIES:
+                    raise RuntimeError("LibreOffice 临时目录条目超过安全上限")
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise RuntimeError("LibreOffice 临时目录条目不可验证") from exc
+                if entry.is_symlink():
+                    raise RuntimeError("LibreOffice 临时目录出现符号链接")
+                if stat.S_ISREG(info.st_mode):
+                    total += info.st_size
+                elif stat.S_ISDIR(info.st_mode):
+                    pending.append(entry.path)
+                else:
+                    raise RuntimeError("LibreOffice 临时目录出现非普通文件对象")
+    return total
+
+
+async def _parse_legacy_office_async(path: Path, target_extension: str) -> str:
+    """Convert legacy Office content through the immutable ProcessLaunch boundary."""
+    from crew.security.launch import (
+        current_process_launch,
+        delegate_process_launch_to_private_directory,
+        execute_captured,
+        minimal_inherited_environment,
+        validate_process_launch,
+    )
+    from crew.security.models import FilesystemAccess
+    from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
+
+    launch = current_process_launch.get()
+    validate_process_launch(launch)
+    assert launch is not None  # validate_process_launch rejects None
+    if not launch.managed:
+        raise NativeRuntimeError(
+            RuntimeErrorCode.SANDBOX_UNAVAILABLE,
+            "legacy Office conversion requires the managed native security runtime",
+        )
+
+    environment = minimal_inherited_environment()
+    discovered = _discover_libreoffice(environment)
+    if not discovered:
         raise MissingDependencyError(
             dependency="LibreOffice",
             install_command="安装 LibreOffice，或先将文件另存为现代 Office 格式",
@@ -669,45 +816,141 @@ def _parse_legacy_office(path: Path, target_extension: str) -> str:
                 f"也可以先转换为 {target_extension} 后重新上传"
             ),
         )
+    try:
+        soffice = Path(discovered).expanduser().resolve(strict=True)
+        soffice_identity = capture_file_identity(soffice)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError("LibreOffice 可执行文件身份无法验证") from exc
+    if launch.managed and any(
+        entry.access is FilesystemAccess.READ_WRITE
+        and _path_is_within(soffice, entry.root)
+        for entry in (
+            *launch.profile.filesystem,
+            *launch.additional_permissions.filesystem,
+        )
+    ):
+        raise RuntimeError("LibreOffice 可执行文件位于用户可写授权目录，拒绝启动")
+    runtime_root = _libreoffice_runtime_root(soffice)
 
     from tempfile import TemporaryDirectory
 
-    with TemporaryDirectory() as tmp:
-        output_dir = Path(tmp)
-        profile_dir = output_dir / "profile"
-        profile_dir.mkdir()
+    with TemporaryDirectory(prefix="ace-office-convert-") as tmp:
+        output_dir = Path(tmp).resolve(strict=True)
         try:
-            completed = subprocess.run(
-                [
-                    soffice,
-                    f"-env:UserInstallation={profile_dir.as_uri()}",
-                    "--headless",
-                    "--convert-to",
-                    target_extension.lstrip("."),
-                    "--outdir",
-                    str(output_dir),
-                    str(path),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
+            output_dir.chmod(0o700)
+        except OSError:
+            pass
+
+        source_extension = path.suffix.lower()
+        source_path = output_dir / f"input{source_extension}"
+        source_bytes = read_verified_bytes(path, max_bytes=_MAX_DOCUMENT_BYTES)
+        atomic_replace_bytes(
+            source_path,
+            source_bytes,
+            snapshot_file(source_path),
+            max_bytes=_MAX_DOCUMENT_BYTES,
+        )
+        profile_dir = output_dir / "profile"
+        profile_dir.mkdir(mode=0o700)
+        argv = (
+            str(soffice),
+            f"-env:UserInstallation={profile_dir.as_uri()}",
+            "--headless",
+            "--convert-to",
+            target_extension.lstrip("."),
+            "--outdir",
+            str(output_dir),
+            str(source_path),
+        )
+        if capture_file_identity(soffice) != soffice_identity:
+            raise RuntimeError("LibreOffice 可执行文件在启动前已变化")
+
+        converter_environment = {
+            name: value
+            for name, value in environment.items()
+            if name not in {"COMSPEC", "PATH", "SHELL"}
+        }
+        scratch_text = str(output_dir)
+        for name in (
+            "APPDATA",
+            "HOME",
+            "LOCALAPPDATA",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "USERPROFILE",
+        ):
+            converter_environment[name] = scratch_text
+        converter_environment["PATH"] = _converter_execution_path(soffice)
+        if os.name == "nt":
+            home_drive, home_path = os.path.splitdrive(scratch_text)
+            converter_environment["HOMEDRIVE"] = home_drive
+            converter_environment["HOMEPATH"] = home_path
+            converter_environment["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
+
+        delegated_launch = delegate_process_launch_to_private_directory(
+            launch,
+            output_dir,
+            trusted_readable_roots=(runtime_root,),
+        )
+        token = current_process_launch.set(delegated_launch)
+        try:
+            completed = await execute_captured(
+                argv,
+                cwd=output_dir,
+                timeout=_DOCUMENT_CONVERTER_TIMEOUT_SECONDS,
+                env=converter_environment,
+                env_overrides=converter_environment,
+                max_output_bytes=_DOCUMENT_CONVERTER_MAX_OUTPUT_BYTES,
             )
-        except subprocess.TimeoutExpired as exc:
+        except TimeoutError as exc:
             raise RuntimeError(f"{path.name} 通过 LibreOffice 转换超时") from exc
-        converted = output_dir / f"{path.stem}{target_extension}"
-        if completed.returncode != 0 or not converted.is_file():
+        except NativeRuntimeError as exc:
+            if exc.code is RuntimeErrorCode.TIMEOUT:
+                raise RuntimeError(f"{path.name} 通过 LibreOffice 转换超时") from exc
+            raise
+        finally:
+            current_process_launch.reset(token)
+
+        try:
+            scratch_bytes = _scratch_directory_usage(output_dir)
+        except RuntimeError as exc:
+            raise RuntimeError(f"{path.name} 转换临时目录未通过安全校验") from exc
+        if scratch_bytes > _MAX_CONVERTER_SCRATCH_BYTES:
+            raise RuntimeError(
+                f"{path.name} 转换临时目录超过 {_MAX_CONVERTER_SCRATCH_BYTES} 字节上限"
+            )
+        try:
+            executable_unchanged = capture_file_identity(soffice) == soffice_identity
+        except (OSError, RuntimeError, ValueError):
+            executable_unchanged = False
+        if not executable_unchanged:
+            raise RuntimeError("LibreOffice 可执行文件在运行期间已变化")
+        converted = output_dir / f"{source_path.stem}{target_extension}"
+        if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()
-            raise RuntimeError(f"{path.name} 转换失败: {detail or 'LibreOffice 未生成输出文件'}")
-        return parse_document_to_markdown(converted)
+            raise RuntimeError(f"{path.name} 转换失败: {detail or 'LibreOffice 转换进程失败'}")
+        try:
+            converted_bytes = read_verified_bytes(
+                converted,
+                max_bytes=_MAX_DOCUMENT_BYTES,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"{path.name} 转换失败: LibreOffice 未生成输出文件") from exc
+        return _parse_document_content(converted_bytes, converted.name)
 
 
-def parse_document_to_markdown(path: str | Path) -> str:
-    """把文件解析为 Markdown 文本，并执行统一质量校验。"""
-    p = Path(path)
-    if not p.is_file():
-        raise FileNotFoundError(f"文件不存在: {p}")
+def _parse_legacy_office(path: Path, target_extension: str) -> str:
+    """Synchronous compatibility wrapper; Gateway callers use the async path."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_parse_legacy_office_async(path, target_extension))
+    raise RuntimeError("旧版 Office 转换必须通过异步解析入口或工作线程执行")
 
+
+def _parse_document_path(p: Path) -> str:
+    """Parse a private, identity-checked materialization by its trusted suffix."""
     ext = p.suffix.lower()
     if ext in (".html", ".htm"):
         result = _parse_html(p)
@@ -740,7 +983,60 @@ def parse_document_to_markdown(path: str | Path) -> str:
             # 保留无后缀/自定义后缀的真实文本支持；二进制会被 _read_text 明确拒绝。
             log.warning("未知文件类型 %s，尝试识别为文本", ext)
             result = _read_text(p)
-    return validate_parsed_text(result, p.name)
+    return result
+
+
+def _preflight_document_content(content: bytes, filename: str) -> str:
+    if len(content) > _MAX_DOCUMENT_BYTES:
+        raise DocumentParseQualityError(
+            f"{filename or '文件'} 超过解析大小上限 {_MAX_DOCUMENT_BYTES} 字节"
+        )
+    ext = _document_extension(filename, content) or ".txt"
+    looks_like_zip = content.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"))
+    if looks_like_zip or zipfile.is_zipfile(BytesIO(content)):
+        validate_zip_bytes(content)
+    return ext
+
+
+def _write_private_document_copy(directory: Path, content: bytes, extension: str) -> Path:
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        pass
+    path = directory / f"upload{extension}"
+    atomic_replace_bytes(path, content, snapshot_file(path))
+    return path
+
+
+def _finalize_parsed_document(result: str, filename: str) -> str:
+    if len(result) > _MAX_DOCUMENT_OUTPUT_CHARS:
+        result = (
+            result[:_MAX_DOCUMENT_OUTPUT_CHARS]
+            + "\n\n*[解析输出超过安全上限，已截断]*"
+        )
+    return validate_parsed_text(result, Path(filename).name or "文件")
+
+
+def _parse_document_content(content: bytes, filename: str) -> str:
+    """Preflight untrusted bytes, then parse one private immutable copy."""
+
+    ext = _preflight_document_content(content, filename)
+
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory(prefix="ace-wiki-parse-") as tmp:
+        tmp_dir = Path(tmp)
+        tmp_path = _write_private_document_copy(tmp_dir, content, ext)
+        result = _parse_document_path(tmp_path)
+    return _finalize_parsed_document(result, filename)
+
+
+def parse_document_to_markdown(path: str | Path) -> str:
+    """Identity-check one input file, then parse only its private byte snapshot."""
+
+    p = Path(path)
+    content = read_verified_bytes(p, max_bytes=_MAX_DOCUMENT_BYTES)
+    return _parse_document_content(content, p.name)
 
 
 def _detect_content_extension(content: bytes) -> str:
@@ -821,11 +1117,27 @@ def guess_mime_type(path: str | Path, content: bytes | None = None) -> str:
 
 
 def parse_document_from_bytes(content: bytes, filename: str) -> str:
-    """从内存字节解析文档（临时写文件后解析）。"""
+    """从内存字节经归档预检和私有临时文件解析文档。"""
+
+    return _parse_document_content(content, filename)
+
+
+async def parse_document_from_bytes_async(content: bytes, filename: str) -> str:
+    """Parse without detaching converter cancellation from the Gateway request."""
+    ext = _document_extension(filename, content) or ".txt"
+    legacy_targets = {
+        ".doc": ".docx",
+        ".xls": ".xlsx",
+        ".ppt": ".pptx",
+    }
+    target_extension = legacy_targets.get(ext)
+    if target_extension is None:
+        return await asyncio.to_thread(_parse_document_content, content, filename)
+
+    ext = _preflight_document_content(content, filename)
     from tempfile import TemporaryDirectory
 
-    ext = _document_extension(filename, content) or ".txt"
-    with TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp) / f"upload{ext}"
-        tmp_path.write_bytes(content)
-        return parse_document_to_markdown(tmp_path)
+    with TemporaryDirectory(prefix="ace-wiki-parse-") as tmp:
+        tmp_path = _write_private_document_copy(Path(tmp), content, ext)
+        result = await _parse_legacy_office_async(tmp_path, target_extension)
+    return _finalize_parsed_document(result, filename)

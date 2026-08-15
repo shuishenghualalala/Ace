@@ -17,6 +17,8 @@ current_subagent_notify_session: ContextVar[str] = ContextVar(
     "current_subagent_notify_session", default=""
 )
 current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
+current_turn_id: ContextVar[str] = ContextVar("current_turn_id", default="")
+current_model_id: ContextVar[str] = ContextVar("current_model_id", default="")
 current_tool_call_id: ContextVar[str] = ContextVar("current_tool_call_id", default="")
 current_parent_task_id: ContextVar[str] = ContextVar("current_parent_task_id", default="")
 current_workspace_id: ContextVar[str] = ContextVar("current_workspace_id", default="default")

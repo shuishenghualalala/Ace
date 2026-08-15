@@ -18,6 +18,7 @@ from crew.security.context import (
     path_is_in_workspace,
     resolve_requested_path,
 )
+from crew.security.local_path import LocalPathReference
 
 
 class _WorkspaceStore:
@@ -66,7 +67,10 @@ def test_normal_conversation_has_no_implicit_workspace_or_cwd() -> None:
     assert context.workspace_root is None
     assert context.cwd is None
     with pytest.raises(SecurityContextError, match="没有可信工作目录"):
-        resolve_requested_path(context, "relative.txt")
+        resolve_requested_path(
+            context,
+            LocalPathReference.parse("relative.txt"),
+        )
 
 
 def test_dotdot_is_classified_after_canonical_resolution(tmp_path: Path) -> None:
@@ -76,7 +80,10 @@ def test_dotdot_is_classified_after_canonical_resolution(tmp_path: Path) -> None
     _set_runtime_context(owner="acct-a", workspace="project-1", cwd=root)
     context = build_security_context(store)
 
-    target = resolve_requested_path(context, "../outside.txt")
+    target = resolve_requested_path(
+        context,
+        LocalPathReference.parse("../outside.txt"),
+    )
 
     assert target == (tmp_path / "outside.txt").resolve()
     assert not path_is_in_workspace(context, target)
@@ -96,7 +103,10 @@ def test_symlink_escape_is_classified_by_final_target(tmp_path: Path) -> None:
     _set_runtime_context(owner="acct-a", workspace="project-1", cwd=root)
     context = build_security_context(store)
 
-    target = resolve_requested_path(context, link / "secret.txt")
+    target = resolve_requested_path(
+        context,
+        LocalPathReference.from_host_path(link / "secret.txt"),
+    )
 
     assert target == (outside / "secret.txt").resolve()
     assert not path_is_in_workspace(context, target)

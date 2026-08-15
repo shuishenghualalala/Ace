@@ -33,14 +33,14 @@ PUBLISH_SITE_SCHEMA = {
 
 
 def register_site_tools(registry: Registry, manager) -> None:
-    def publish_site(args):
+    async def publish_site(args):
         owner = current_owner_account_id.get().strip()
         workspace_id = current_workspace_id.get().strip() or "default"
         session_id = current_session_id.get().strip()
         workdir = current_agent_workdir.get().strip()
         if not owner or not workdir:
             raise ValueError("当前会话缺少用户或 Workspace 工作目录")
-        result = manager.publish(
+        result = await manager.publish_async(
             owner=owner, workspace_id=workspace_id, session_id=session_id,
             workspace_root=workdir, source_path=str(args.get("source_path") or ""),
             name=str(args.get("name") or ""), build_command=str(args.get("build_command") or ""),
@@ -62,5 +62,6 @@ def register_site_tools(registry: Registry, manager) -> None:
     registry.register(
         name="publish_site", toolset="sites", schema=PUBLISH_SITE_SCHEMA,
         handler=publish_site, display_name="发布灵感", ui_label_template="发布灵感 {name}",
-        always_load=True, search_hint="部署站点 发布网站 local site publish deploy website",
+        always_load=True, is_async=True,
+        search_hint="部署站点 发布网站 local site publish deploy website",
     )

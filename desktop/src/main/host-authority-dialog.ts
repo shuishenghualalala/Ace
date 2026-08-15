@@ -1,25 +1,6 @@
 import { BrowserWindow, dialog } from 'electron';
 import * as path from 'path';
 
-/** Collect the host user's decision before weakening the global compatibility policy. */
-export async function confirmStrictSecurityDisable(parent: BrowserWindow | null): Promise<boolean> {
-  if (!parent || parent.isDestroyed()) return false;
-  const result = await dialog.showMessageBox(parent, {
-    type: 'warning',
-    title: '关闭严格安全约束',
-    message: '要启用兼容模式吗？',
-    detail: [
-      '兼容模式会放宽旧服务的明文传输、更新/安装完整性校验和默认审批。',
-      '受管会话仍会在原生隔离环境中执行，隔离环境不可用时不会回退到宿主执行。',
-    ].join('\n\n'),
-    buttons: ['保持严格模式', '启用兼容模式'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-  });
-  return result.response === 1;
-}
-
 /** Ask for one host-mutating action without delegating authority to the renderer. */
 export async function confirmCuaDriverInstall(parent: BrowserWindow | null): Promise<boolean> {
   if (!parent || parent.isDestroyed()) return false;
@@ -70,4 +51,36 @@ export async function confirmCuaDriverInstall(parent: BrowserWindow | null): Pro
     });
     void window.loadFile(path.join(__dirname, '../assets/host-authority-dialog.html'));
   });
+}
+
+/** Require an OS-owned second confirmation before requesting full-access mode. */
+export async function confirmFullAccessMode(parent: BrowserWindow | null): Promise<boolean> {
+  if (!parent || parent.isDestroyed()) return false;
+  const result = await dialog.showMessageBox(parent, {
+    type: 'warning',
+    title: '确认开启完全访问',
+    message: '完全访问会扩大文件与命令能力',
+    detail: '仅在你明确知道当前任务需要这些权限时继续。此确认只对本次模式切换有效。',
+    buttons: ['取消', '确认开启'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  return result.response === 1;
+}
+
+/** Require an OS-owned second confirmation for a high-risk command approval. */
+export async function confirmDangerousAction(parent: BrowserWindow | null): Promise<boolean> {
+  if (!parent || parent.isDestroyed()) return false;
+  const result = await dialog.showMessageBox(parent, {
+    type: 'warning',
+    title: '再次确认高风险操作',
+    message: '此操作被识别为高风险命令',
+    detail: '继续可能删除数据、修改系统或影响其他进程。请仅在审批内容与预期完全一致时确认。',
+    buttons: ['取消', '确认执行'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  return result.response === 1;
 }

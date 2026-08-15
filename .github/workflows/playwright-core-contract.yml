@@ -44,13 +44,15 @@ jobs:
         working-directory: desktop
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run check:playwright-boundary
       - run: npm run typecheck
       - run: npm test
@@ -73,8 +75,10 @@ jobs:
     outputs:
       versions: ${{ steps.resolve.outputs.versions }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - id: resolve
@@ -103,13 +107,15 @@ jobs:
       CREW_PLAYWRIGHT_CANDIDATE_VERSION: ${{ matrix.version }}
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: Install candidate without changing the dependency lock
         shell: bash
         run: >-

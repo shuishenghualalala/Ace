@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Any
 
 from crew.core.interfaces import Channel, MessageHandler
+from crew.gateway.helpers import safe_public_error
 from crew.gateway.hooks import hook_registry
 from crew.state.logging import get_logger
 
@@ -52,10 +53,11 @@ class ChannelManager:
         self._states.pop(name, None)
 
     def record_error(self, name: str, error: str) -> None:
-        self._states[name] = ChannelState(running=False, error=error, reason="error")
+        safe_error = safe_public_error(error, "渠道操作失败")
+        self._states[name] = ChannelState(running=False, error=safe_error, reason="error")
         try:
             asyncio.get_running_loop().create_task(
-                self._emit_state_change(name, running=False, error=error)
+                self._emit_state_change(name, running=False, error=safe_error)
             )
         except RuntimeError:
             pass
@@ -94,10 +96,10 @@ class ChannelManager:
                 await self._emit_state_change(ch.name, running=True, error="")
             except Exception as exc:  # noqa: BLE001 — 渠道 start 为平台网络连接，失败面未知；启动循环按渠道隔离
                 state.running = False
-                state.error = str(exc)
+                state.error = safe_public_error(exc, "渠道启动失败")
                 state.reason = "error"
-                log.exception("渠道启动失败: %s", ch.name)
-                await self._emit_state_change(ch.name, running=False, error=str(exc))
+                log.error("渠道启动失败: %s type=%s", ch.name, type(exc).__name__)
+                await self._emit_state_change(ch.name, running=False, error=state.error)
             finally:
                 state.operation = ""
 
@@ -127,7 +129,11 @@ class ChannelManager:
                     if callable(stop):
                         await stop()
                 except Exception as exc:  # noqa: BLE001 — 旧渠道停止失败仍继续尝试新配置，避免配置无法修复坏连接
-                    log.warning("渠道热重连时停止旧实例失败: %s: %s", name, exc)
+                    log.warning(
+                        "渠道热重连时停止旧实例失败: %s type=%s",
+                        name,
+                        type(exc).__name__,
+                    )
 
             self._channels[name] = channel
             self._owners[name] = str(owner_account_id or "").strip()
@@ -146,17 +152,17 @@ class ChannelManager:
                     self._channels[name] = old
                     self._owners[name] = old_owner
                     old_state.running = False
-                    old_state.error = str(exc)
+                    old_state.error = safe_public_error(exc, "渠道启动失败")
                     old_state.operation = ""
                     old_state.reason = "error"
                     self._states[name] = old_state
                 else:
                     state.running = False
-                    state.error = str(exc)
+                    state.error = safe_public_error(exc, "渠道启动失败")
                     state.operation = ""
                     state.reason = "error"
-                log.exception("渠道热重连失败: %s", name)
-                await self._emit_state_change(name, running=False, error=str(exc))
+                log.error("渠道热重连失败: %s type=%s", name, type(exc).__name__)
+                await self._emit_state_change(name, running=False, error=self._states[name].error)
                 return self._states[name]
             return state
 
@@ -175,9 +181,9 @@ class ChannelManager:
             state.reason = "disconnected"
         except Exception as exc:  # noqa: BLE001
             state.running = False
-            state.error = str(exc)
+            state.error = safe_public_error(exc, "渠道停止失败")
             state.reason = "error"
-            log.exception("渠道停止失败: %s", name)
+            log.error("渠道停止失败: %s type=%s", name, type(exc).__name__)
         finally:
             state.operation = ""
         await self._emit_state_change(name, running=False, error=state.error)
@@ -202,10 +208,10 @@ class ChannelManager:
                     await stop()
                 state.error = ""
             except Exception as exc:  # noqa: BLE001 — 渠道 stop 为可选平台生命周期方法，失败面未知；停止循环按渠道隔离
-                state.error = str(exc)
+                state.error = safe_public_error(exc, "渠道停止失败")
                 state.reason = "error"
                 failed.append(ch.name)
-                log.exception("渠道停止失败: %s", ch.name)
+                log.error("渠道停止失败: %s type=%s", ch.name, type(exc).__name__)
             finally:
                 state.running = False
                 if not state.error:
@@ -232,6 +238,10 @@ class ChannelManager:
                 try:
                     row["detail"] = detail_fn()
                 except Exception as exc:  # noqa: BLE001 — status_detail 为渠道鸭子类型可选方法，失败面未知；状态展示不应阻断
-                    log.warning("渠道 %s status_detail 失败: %s", name, exc)
+                    log.warning(
+                        "渠道 %s status_detail 失败 type=%s",
+                        name,
+                        type(exc).__name__,
+                    )
             rows.append(row)
         return rows

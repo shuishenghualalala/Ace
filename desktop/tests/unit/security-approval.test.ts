@@ -19,8 +19,9 @@ describe('security approval UI model', () => {
     expect(SECURITY_APPROVAL_CHOICES).toEqual(['once', 'session', 'always', 'reject']);
   });
 
-  it('offers only the three Crew security modes', () => {
+  it('offers the four explicit Crew security modes', () => {
     expect(SECURITY_MODE_OPTIONS.map((option) => option.label)).toEqual([
+      '只读',
       '请求批准',
       '替我审批',
       '完全访问权限',
@@ -74,6 +75,32 @@ describe('security approval UI model', () => {
     } })).toContain(
       '具体命令：git status\n最终执行参数：pwsh -NoProfile -Command utf8-prefix;git status\n工作目录：D:/work',
     );
+  });
+
+  it('discloses the effective sandbox profile and unknown command side effects', () => {
+    const summary = formatApprovalSummary({
+      action: {
+        kind: 'exec',
+        raw_command: 'python build.py',
+        argv: ['python', 'build.py'],
+        cwd: 'D:/work',
+      },
+      effective_permissions: {
+        kind: 'managed',
+        filesystem: [
+          { root: 'D:/work', access: 'read' },
+          { root: 'D:/work/dist', access: 'read_write' },
+        ],
+        network_policy: 'restricted',
+        network: [{ protocol: 'https', host: 'api.example.com', port: 443 }],
+      },
+    });
+
+    expect(summary).toContain('运行边界：受管沙箱');
+    expect(summary).toContain('可写范围：D:/work/dist');
+    expect(summary).toContain('网络边界：受限/显式目标');
+    expect(summary).toContain('网络目标：https://api.example.com:443');
+    expect(summary).toContain('未知副作用：命令可能组合已授权文件/网络能力');
   });
 
   it('shows the exact path and network target from NormalizedAction fields', () => {

@@ -115,3 +115,20 @@ Thumbs.db
 # doc
 /docs/
 /doc/
+
+# Security capability baseline and its executable applicability ledger are
+# release inputs, not local documentation. Keep only these files visible while
+# leaving the rest of /docs local by default.
+!/docs/
+/docs/*
+!/docs/security/
+/docs/security/*
+!/docs/security/codex-security-capability-baseline.md
+!/docs/security/codex-security-capability-baseline-spec.md
+!/docs/security/codex-security-na-inventory.json
+!/docs/security/codex-security-product-boundary-na-register.md
+!/docs/security/threat-model-and-responsibility-matrix.md
+!/docs/security/plugin-execution-boundary.md
+!/docs/security/execution-surface-inventory.json
+!/docs/security/execution-surface-inventory.schema.json
+!/docs/security/execution-surface-inventory.md

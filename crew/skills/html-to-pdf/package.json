@@ -1,0 +1,16 @@
+{
+  "name": "ace-html-to-pdf-skill",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Fail-closed HTML-to-PDF conversion for Ace managed sandboxes",
+  "main": "scripts/run.cjs",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "puppeteer-core": "25.7.0"
+  }
+}

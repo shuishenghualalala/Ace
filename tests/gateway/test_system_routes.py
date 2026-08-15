@@ -1,10 +1,15 @@
 """系统监控路由测试：/api/system/metrics 与 /api/system/logs。"""
 
+from types import SimpleNamespace
+
 import pytest
+from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
 from crew.core.runctx import current_owner_account_id
+from crew.gateway.auth import AccountContext
+from crew.gateway.routers.system import create_system_router
 from crew.gateway.server import create_app
 from crew.state.config import Config
 from crew.state.logging import get_logger, setup_logging
@@ -154,3 +159,60 @@ async def test_system_logs_local_owner_sees_all_and_remote_is_rejected(api, auth
         f"{marker}-b",
         f"{marker}-system",
     }
+
+
+@pytest.mark.asyncio
+async def test_system_logs_admin_can_clear_ring_buffer(api, auth_headers):
+    """Admin DELETE /api/system/logs empties the process-local ring buffer."""
+    setup_logging(level="DEBUG")
+    log = get_logger("test.system.clear")
+    marker = "clear-ring-marker-823"
+    log.warning(marker)
+
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        before = await client.get("/api/system/logs", params={"q": marker})
+        cleared = await client.delete("/api/system/logs")
+        after = await client.get("/api/system/logs", params={"q": marker})
+
+    assert before.status_code == 200
+    assert before.json()["total"] >= 1
+    assert cleared.status_code == 200
+    assert cleared.json()["ok"] is True
+    assert cleared.json()["cleared"] >= 1
+    assert after.status_code == 200
+    assert after.json()["total"] == 0
+
+
+@pytest.fixture
+def system_auth_app():
+    """System router with header-injected non-local account identity."""
+    config = SimpleNamespace(gateway_admin_accounts=["A:uid-a"])
+    crew = SimpleNamespace(config=config)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def authenticated_account(request: Request, call_next):
+        request.state.account = AccountContext(
+            owner_account_id=request.headers.get("X-Test-Owner", "tenant:user"),
+            provider_id="tenant",
+            user_id="user",
+        )
+        return await call_next(request)
+
+    app.include_router(create_system_router(crew))
+    return app
+
+
+@pytest.mark.asyncio
+async def test_system_logs_non_admin_cannot_clear(system_auth_app):
+    """Non-admin DELETE /api/system/logs is rejected with 403 and no clear."""
+    transport = ASGITransport(app=system_auth_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.delete(
+            "/api/system/logs",
+            headers={"X-Test-Owner": "tenant:user"},
+        )
+
+    assert resp.status_code == 403
+    assert resp.json() == {"ok": False, "error": "需要管理员权限"}

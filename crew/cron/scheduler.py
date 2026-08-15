@@ -17,6 +17,7 @@ from crew.core.interfaces import Scheduler
 from crew.core.runctx import current_owner_account_id
 from crew.cron.jobs import BJ_TZ, CronJobStore, build_trigger
 from crew.state.logging import get_logger
+from crew.tools.redact import safe_public_error
 
 log = get_logger("cron")
 
@@ -297,8 +298,8 @@ class CronService:
                 raise
             except Exception as exc:  # noqa: BLE001
                 status = "failed"
-                error_message = str(exc)
-                log.exception("定时任务 %s 执行失败", job_id)
+                error_message = safe_public_error(exc, "定时任务执行失败")
+                log.error("定时任务 %s 执行失败 type=%s", job_id, type(exc).__name__)
             finally:
                 if self._store.finish_job_run(
                     run_id,
@@ -351,7 +352,7 @@ class CronService:
             recovered = self._store.recover_running_fires_as_abandoned()
             scheduler.start()
         except Exception as exc:
-            self._start_error = str(exc) or type(exc).__name__
+            self._start_error = safe_public_error(exc, "定时任务服务启动失败")
             if self._scheduler is not None:
                 with suppress(Exception):
                     self._scheduler.shutdown(wait=False)

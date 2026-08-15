@@ -705,6 +705,8 @@ function currentPlanDraft(fallback: string): string {
 
 let activeTab: TabKey = 'context';
 const openCoreTabs = new Set<TabKey>(['context']);
+const openFileTabs = new Set<string>();
+let activeFileTabPath: string | null = null;
 let workspaceMenuMode: 'new' | 'open' = 'new';
 /** Files tab 已展开的文件路径集合（可多开，互不互斥）。 */
 const expandedFiles = new Set<string>();
@@ -727,6 +729,8 @@ function syncInspectorSessionUi(): void {
   });
   const restored = inspectorSessionUi.load(nextSessionId);
   activeTab = restored.tab;
+  activeFileTabPath = null;
+  openFileTabs.clear();
   expandedFiles.clear();
   for (const path of restored.expandedFiles) expandedFiles.add(path);
   expandedMsg = restored.expandedMessage;
@@ -751,6 +755,44 @@ function toggleFileExpanded(path: string): boolean {
 
 function ensureFileExpanded(path: string): void {
   if (path) expandedFiles.add(path);
+}
+
+function fileWorkspaceTabId(path: string): string {
+  return `file:${encodeURIComponent(path)}`;
+}
+
+function filePathFromWorkspaceTabId(id: string): string {
+  if (!id.startsWith('file:')) return '';
+  try {
+    return decodeURIComponent(id.slice('file:'.length));
+  } catch {
+    return '';
+  }
+}
+
+function fileWorkspaceTabLabel(path: string): string {
+  return splitFilePathDisplay(path).name || path;
+}
+
+function fileForWorkspaceTab(path: string): FileChange {
+  return currentFileChanges().find((file) => file.path === path) ?? fileChangeFromPath(path);
+}
+
+function renderFileTabView(path: string): string {
+  const file = fileForWorkspaceTab(path);
+  return `<div class="inspector-file-tab-view" data-file-tab-path="${escapeHtml(path)}"><div class="inspector-file-tab-view__title" title="${escapeHtml(file.path)}">${escapeHtml(file.name || file.path)}</div>${renderFileViewer(file)}</div>`;
+}
+
+function openFileWorkspaceTab(path: string): void {
+  if (!path) return;
+  openFileTabs.add(path);
+  activeFileTabPath = path;
+  activeTab = 'files';
+  openCoreTabs.add('files');
+  renderTabs();
+  renderBody();
+  void hydrateFileDiffIfNeeded(path);
+  void hydrateFileContentIfNeeded(path);
 }
 
 let customViewOpen = false;
@@ -1504,7 +1546,9 @@ function renderBody(): void {
   // Detach the native remote view first so it can never cover stale UI bounds.
   hideBrowserPanelView();
   let html = '';
-  if (activeTab === 'files') html = renderFiles();
+  if (activeTab === 'files') {
+    html = activeFileTabPath ? renderFileTabView(activeFileTabPath) : renderFiles();
+  }
   else if (activeTab === 'context') html = renderContext();
   else if (activeTab === 'plan') html = renderPlan();
   else if (activeTab === 'kanban') html = renderKanban();
@@ -1587,17 +1631,23 @@ function renderInspectorTabMenu(): void {
     const items = [...openCoreTabs]
       .filter((tab) => tab !== 'collaboration' || teamSession)
       .map((tab) => ({ id: `core:${tab}`, label: TAB_LABELS[tab], icon: TAB_ICONS[tab] }));
+    const fileItems = [...openFileTabs].map((path) => ({
+      id: fileWorkspaceTabId(path),
+      label: fileWorkspaceTabLabel(path),
+      icon: TAB_ICONS.files,
+    }));
     const heading = document.createElement('div');
     heading.className = 'chat-inspector__tab-menu-label';
     heading.textContent = '已打开';
     menu.append(heading);
-    if (items.length === 0) {
+    if (items.length === 0 && fileItems.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'chat-inspector__tab-menu-empty';
       empty.textContent = '暂无标签页';
       menu.append(empty);
     } else {
       items.forEach((item) => appendInspectorTabMenuItem(menu, item, 'data-workspace-tab'));
+      fileItems.forEach((item) => appendInspectorTabMenuItem(menu, item, 'data-workspace-tab'));
     }
     return;
   }
@@ -1622,6 +1672,7 @@ function updateOpenTabMenuToggleVisibility(): void {
   if (!tabs || !toggle) return;
   const overflow = tabs.scrollWidth > tabs.clientWidth + 1;
   toggle.hidden = !overflow;
+  toggle.classList.toggle('is-hidden', !overflow);
   if (!overflow && workspaceMenuMode === 'open') {
     const menu = document.getElementById('inspector-tab-menu');
     if (menu) menu.hidden = true;
@@ -1630,6 +1681,11 @@ function updateOpenTabMenuToggleVisibility(): void {
 }
 
 function activateWorkspaceTab(id: string): void {
+  if (id.startsWith('file:')) {
+    const path = filePathFromWorkspaceTabId(id);
+    if (path && openFileTabs.has(path)) openFileWorkspaceTab(path);
+    return;
+  }
   if (!id.startsWith('core:')) {
     if (id === 'browser:new') openBrowserWorkbench({ createTab: true });
     return;
@@ -1645,6 +1701,20 @@ function activateWorkspaceTab(id: string): void {
 }
 
 function closeWorkspaceTab(id: string): void {
+  if (id.startsWith('file:')) {
+    const path = filePathFromWorkspaceTabId(id);
+    if (!path) return;
+    openFileTabs.delete(path);
+    if (activeFileTabPath === path) {
+      activeFileTabPath = null;
+      activeTab = 'files';
+      renderTabs();
+      renderBody();
+    } else {
+      renderTabs();
+    }
+    return;
+  }
   if (!id.startsWith('core:')) return;
   const tab = id.slice(5) as TabKey;
   openCoreTabs.delete(tab);
@@ -1684,10 +1754,22 @@ function renderTabs(): void {
   };
   const tabs = document.getElementById('chat-inspector-tabs');
   if (tabs) {
+    const browserTab = activeTab === 'browser'
+      ? renderWorkspaceTab('core:browser', '新标签页', TAB_ICONS.browser, true)
+      : '';
     tabs.innerHTML = [...openCoreTabs]
       .filter((tab) => tab !== 'collaboration' || teamSession)
       .map((tab) => renderWorkspaceTab(`core:${tab}`, TAB_LABELS[tab], TAB_ICONS[tab], activeTab === tab, counts[tab]))
-      .join('');
+      .join('')
+      + browserTab
+      + [...openFileTabs]
+        .map((path) => renderWorkspaceTab(
+          fileWorkspaceTabId(path),
+          fileWorkspaceTabLabel(path),
+          TAB_ICONS.files,
+          activeFileTabPath === path,
+        ))
+        .join('');
   }
   renderInspectorTabMenu();
   updateOpenTabMenuToggleVisibility();
@@ -1807,13 +1889,7 @@ function bindBodyEvents(): void {
       const card = el.closest('.inspector-file') as HTMLElement | null;
       const path = card?.getAttribute('data-file-path');
       if (path) {
-        const opened = toggleFileExpanded(path);
-        renderBody();
-        if (opened) {
-          ensureInspectorWidthForFileDiff();
-          void hydrateFileDiffIfNeeded(path);
-          void hydrateFileContentIfNeeded(path);
-        }
+        openFileWorkspaceTab(path);
       }
     });
   });
@@ -2066,6 +2142,13 @@ function canShowInspectorUi(): boolean {
 
 /** 同步右侧「看板」入口可用态。 */
 export function syncInspectorToggleState(): void {
+  const collaborationTab = document.getElementById('ins-collaboration-tab') as HTMLButtonElement | null;
+  if (collaborationTab) {
+    const visible = isExternalTeamSession(state.activeSessionId);
+    collaborationTab.hidden = !visible;
+    collaborationTab.classList.toggle('is-hidden', !visible);
+    collaborationTab.setAttribute('aria-hidden', String(!visible));
+  }
   const toggle = document.getElementById('task-board-toggle') as HTMLButtonElement | null;
   if (!toggle) return;
 
@@ -2129,6 +2212,8 @@ export function openInspectorToTab(
   document.body.classList.toggle('browser-workbench-open', tab === 'browser');
   if (tab !== 'browser') document.body.classList.remove('browser-workbench-maximized');
   if (tab === 'files') {
+    activeFileTabPath = null;
+    if (!options?.expandFilePath) expandedFiles.clear();
     computeFileChanges();
     scopedFilePaths = options?.filePaths?.length
       ? Array.from(new Set(options.filePaths.filter((path) => typeof path === 'string' && path.trim()).map((path) => path.trim())))
@@ -2143,13 +2228,9 @@ export function openInspectorToTab(
         diff: file.diff || [],
       }))
       : null;
-    const files = currentFileChanges();
     const wanted = options?.expandFilePath?.trim() || '';
     if (wanted) {
       ensureFileExpanded(wanted);
-    } else if (expandedFiles.size === 0) {
-      const first = files[0];
-      if (first) ensureFileExpanded(first.path);
     }
   } else {
     scopedFilePaths = null;
@@ -2330,6 +2411,7 @@ function loadInspectorWidth(): number {
 function applyInspectorWidth(width: number, persist: boolean): void {
   const w = clampWidth(width);
   setRuntimeToken(document.documentElement, '--mw-inspector-width', `${w}px`);
+  setRuntimeToken(document.documentElement, '--inspector-width', `${w}px`);
   const handle = document.getElementById('chat-inspector-resize-handle');
   handle?.setAttribute('aria-valuemin', String(INSPECTOR_MIN_WIDTH));
   handle?.setAttribute('aria-valuemax', String(effectiveMaxInspectorWidth()));

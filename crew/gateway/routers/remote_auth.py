@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 from typing import Any
 from urllib.parse import urljoin, urlparse
-import re
 
-import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import REMOTE_AUTH_COOKIE, account_from_request, create_remote_session_token
+from crew.security.outbound import OutboundDenied, OutboundHttpClient
+from crew.tools.redact import (
+    argv_contains_sensitive_value,
+    redact_sensitive_display_text,
+)
 
 _PLACEHOLDER_HOSTS = {"xxxxx", "xxxxx.example"}
 _EMAIL_RE = re.compile(
     r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
 )
+_REMOTE_AUTH_HTTP = OutboundHttpClient()
 
 
 def _effective_mode(config: Any) -> str:
@@ -41,6 +48,8 @@ def _remote_base_url(config: Any) -> str:
         return ""
     if parsed.username or parsed.password or parsed.hostname.lower() in _PLACEHOLDER_HOSTS:
         return ""
+    if argv_contains_sensitive_value((raw,)):
+        return ""
     return raw
 
 
@@ -54,8 +63,8 @@ def _message(payload: Any, fallback: str) -> str:
         for key in ("message", "error", "detail"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()[:500]
-    return fallback
+                return redact_sensitive_display_text(value.strip())[:500]
+    return redact_sensitive_display_text(fallback)
 
 
 def _payload_data(payload: Any) -> dict[str, Any]:
@@ -71,26 +80,59 @@ def _remote_rejected(payload: Any) -> bool:
     )
 
 
+def _set_session_cookie(
+    response: JSONResponse,
+    request: Request,
+    token: str,
+    *,
+    ttl_seconds: int,
+) -> None:
+    response.set_cookie(
+        REMOTE_AUTH_COOKIE,
+        token,
+        max_age=ttl_seconds,
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+
+
 async def _post_json(config: Any, path: str, body: dict[str, Any]) -> tuple[int, Any]:
     base_url = _remote_base_url(config)
     if not base_url:
         return 503, {"ok": False, "error": "远程认证服务尚未配置"}
     timeout = max(1.0, min(60.0, float(getattr(config, "auth_timeout_seconds", 10.0))))
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            response = await client.post(_endpoint(base_url, path), json=body)
-    except httpx.TimeoutException:
-        return 504, {"ok": False, "error": "认证服务请求超时"}
-    except httpx.TransportError:
+        encoded_body = json.dumps(
+            body,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = await asyncio.to_thread(
+            _REMOTE_AUTH_HTTP.fetch,
+            _endpoint(base_url, path),
+            method="POST",
+            body=encoded_body,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            timeout=timeout,
+            max_bytes=1024 * 1024,
+            max_request_bytes=64 * 1024,
+            max_redirects=0,
+        )
+    except OutboundDenied:
         return 502, {"ok": False, "error": "无法连接认证服务"}
     try:
-        payload = response.json()
-    except ValueError:
+        payload = json.loads(response.body.decode(response.charset))
+    except (LookupError, UnicodeError, ValueError):
         payload = {}
-    if not response.is_success:
+    if not 200 <= response.status < 300:
         return 502, {
             "ok": False,
-            "error": _message(payload, f"认证服务返回 HTTP {response.status_code}"),
+            "error": _message(payload, f"认证服务返回 HTTP {response.status}"),
         }
     return 200, payload
 
@@ -170,17 +212,17 @@ def create_remote_auth_router(config: Any) -> APIRouter:
                     email,
                     ttl_seconds=int(getattr(config, "auth_session_ttl_seconds", 604800)),
                 )
-            except (ValueError, RuntimeError) as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+            except (ValueError, RuntimeError):
+                return JSONResponse(
+                    {"ok": False, "error": "无法创建登录会话"},
+                    status_code=500,
+                )
             response = JSONResponse({"ok": True, "user": {"userId": email, "email": email, "phoneNumber": ""}})
-            response.set_cookie(
-                REMOTE_AUTH_COOKIE,
+            _set_session_cookie(
+                response,
+                request,
                 token,
-                max_age=int(getattr(config, "auth_session_ttl_seconds", 604800)),
-                httponly=True,
-                samesite="strict",
-                secure=False,
-                path="/",
+                ttl_seconds=int(getattr(config, "auth_session_ttl_seconds", 604800)),
             )
             return response
         phone = str(body.get("phoneNumber") or "").strip() if isinstance(body, dict) else ""
@@ -215,8 +257,11 @@ def create_remote_auth_router(config: Any) -> APIRouter:
                 user_id,
                 ttl_seconds=int(getattr(config, "auth_session_ttl_seconds", 604800)),
             )
-        except (ValueError, RuntimeError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+        except (ValueError, RuntimeError):
+            return JSONResponse(
+                {"ok": False, "error": "无法创建登录会话"},
+                status_code=502,
+            )
         phone_number = str(user.get("phoneNumber") or phone).strip()
         display_name = str(user.get("displayName") or "").strip()
         response = JSONResponse(
@@ -229,14 +274,11 @@ def create_remote_auth_router(config: Any) -> APIRouter:
                 },
             }
         )
-        response.set_cookie(
-            REMOTE_AUTH_COOKIE,
+        _set_session_cookie(
+            response,
+            request,
             token,
-            max_age=int(getattr(config, "auth_session_ttl_seconds", 604800)),
-            httponly=True,
-            samesite="strict",
-            secure=False,
-            path="/",
+            ttl_seconds=int(getattr(config, "auth_session_ttl_seconds", 604800)),
         )
         return response
 

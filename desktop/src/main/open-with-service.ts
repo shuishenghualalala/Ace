@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
+import { hardenedChildProcessOptions } from './process-environment';
 
 export interface OpenWithApplication {
   id: string;
@@ -51,6 +52,20 @@ const MAC_FRIENDLY_APPLICATION_NAMES: Record<string, string> = {
 
 let macCatalogPromise: Promise<MacCatalogEntry[]> | null = null;
 const PROCESS_TREE_KILL_TIMEOUT_MS = 2_000;
+const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+const WINDOWS_TASKKILL = 'C:\\Windows\\System32\\taskkill.exe';
+const LINUX_XDG_MIME = '/usr/bin/xdg-mime';
+const LINUX_GIO = '/usr/bin/gio';
+
+function assertFixedExecutable(command: string): void {
+  if (!path.isAbsolute(command)) {
+    throw new Error('open-with helper must use an absolute path');
+  }
+  const info = fs.lstatSync(command);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error('open-with helper must be a regular fixed executable');
+  }
+}
 
 function normalizedExtension(filePath: string): string {
   return path.extname(filePath).replace(/^\./, '').trim().toLowerCase();
@@ -135,10 +150,10 @@ function terminateChildProcessTree(child: ReturnType<typeof spawn>): Promise<voi
       clearTimeout(timer);
       resolve();
     };
-    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+    const killer = spawn(WINDOWS_TASKKILL, ['/PID', String(pid), '/T', '/F'], hardenedChildProcessOptions({
       stdio: 'ignore',
       windowsHide: true,
-    });
+    }));
     const timer = setTimeout(() => {
       killer.kill();
       child.kill('SIGKILL');
@@ -154,11 +169,17 @@ function terminateChildProcessTree(child: ReturnType<typeof spawn>): Promise<voi
 
 export function execFileText(command: string, args: string[], timeout = 8_000): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    try {
+      assertFixedExecutable(command);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const child = spawn(command, args, hardenedChildProcessOptions({
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
       detached: process.platform !== 'win32',
-    });
+    }));
     const chunks: Buffer[] = [];
     let size = 0;
     let settled = false;
@@ -300,7 +321,10 @@ function parseLinuxDesktopFile(desktopPath: string, content: string): LinuxDeskt
 }
 
 async function listLinuxApplications(filePath: string): Promise<OpenWithApplicationInternal[]> {
-  const mimeType = (await execFileText('xdg-mime', ['query', 'filetype', filePath])).trim();
+  const mimeType = (await execFileText(
+    LINUX_XDG_MIME,
+    ['query', 'filetype', filePath],
+  )).trim();
   if (!mimeType) return [];
   const roots = [
     path.join(os.homedir(), '.local', 'share', 'applications'),
@@ -337,7 +361,7 @@ async function listWindowsApplications(filePath: string): Promise<OpenWithApplic
     'if($props){foreach($p in $props.PSObject.Properties){if($p.Name -match "^[a-z]$" -and $p.Value){$names+=[string]$p.Value}}}',
     '$names | Select-Object -Unique | ForEach-Object {@{id=("win:"+$_);name=[IO.Path]::GetFileNameWithoutExtension($_);target=$_}} | ConvertTo-Json -Compress',
   ].join(';');
-  const output = (await execFileText('powershell.exe', [
+  const output = (await execFileText(WINDOWS_POWERSHELL, [
     '-NoProfile',
     '-NonInteractive',
     '-Command',
@@ -381,11 +405,17 @@ export async function listOpenWithApplications(
 
 function spawnDetached(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    try {
+      assertFixedExecutable(command);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const child = spawn(command, args, hardenedChildProcessOptions({
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
-    });
+    }));
     child.once('error', reject);
     child.once('spawn', () => {
       child.unref();
@@ -407,7 +437,7 @@ export async function openFileWithApplication(
     return;
   }
   if (platform === 'linux') {
-    await spawnDetached('gio', [
+    await spawnDetached(LINUX_GIO, [
       'launch',
       application.launchTarget,
       pathToFileURL(filePath).toString(),
@@ -416,7 +446,7 @@ export async function openFileWithApplication(
   }
   if (platform === 'win32') {
     const script = 'Start-Process -FilePath $args[0] -ArgumentList $args[1]';
-    await spawnDetached('powershell.exe', [
+    await spawnDetached(WINDOWS_POWERSHELL, [
       '-NoProfile',
       '-NonInteractive',
       '-Command',

@@ -17,13 +17,28 @@ directories:
   output: release
   buildResources: build
 
+# Required by the ASAR-integrity and app-only-from-ASAR fuses below.
+asar: true
+
 # 只打包运行时必需的产物与 package.json 声明的生产依赖。Electron 本体（含其
 # 内置 Chromium）由 electron-builder 提供——浏览器自动化走 ElectronCdpTransport
 # 驱动应用自己的 WebContentsView，不需要另一个 Chromium 二进制。
 files:
   - dist/**/*
+  # Keep the runtime digest inside the integrity-protected ASAR. The executable
+  # remains an extraResource because it must be directly executable.
+  - security-runtime-bin/runtime-manifest.json
   - package.json
   - "!**/.DS_Store"
+
+# Disable startup channels that run before the JavaScript bootstrap can scrub
+# process.env/argv. App code is loaded only from the builder-created ASAR.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
 
 # 显式排除源码与开发产物，避免进包
 # （main 移除 Playwright-managed Chromium 的意图已天然满足：此处只打包
@@ -35,7 +50,6 @@ extraResources:
       - ace-security-runtime*
       - bwrap
       - runtime-manifest.json
-      - security-runtime.env
       - BWRAP-LICENSE
 
 # Linux target：dir 即"未打包目录"。

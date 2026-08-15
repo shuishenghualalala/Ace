@@ -1,11 +1,21 @@
+schema_version: crew.plugin.v1
 name: browser
 label: 内置浏览器
 version: "1.1.0"
 description: Crew 应用内浏览器自动化：导航、页面操作、标签页、上传下载、对话框与控制权切换。用户可按账号热开关；关闭立即撤销能力并中断在途动作。
 author: "Crew"
 kind: backend
+capabilities:
+  - tools
+  - skills
+  - browser
+  - network
+  - filesystem
 provides_tools:
   - browser_use
+  - record_compile
+  - record_install
+  - record_replay
 ui_hints:
   emoji: 🌐
   capability: browser

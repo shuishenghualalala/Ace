@@ -236,7 +236,7 @@ function setModelCapabilities(capabilities?: string[]): void {
   });
 }
 
-function platformStatusText(p: PlatformRow): string {
+export function platformStatusText(p: PlatformRow): string {
   if (p.error_kind === 'network') return '网络异常，请检查网络';
   if (p.error) return `错误：${p.error}`;
   if (p.reason === 'login_required') return '未连接（请先登录）';
@@ -459,9 +459,42 @@ function modelStatusText(m: ModelOption, isDefault: boolean): string {
   return '已配置';
 }
 
+/** 兼容旧版设置壳；正式页面使用 SettingsIntegrationView。 */
+function renderLegacyConfigModels(): void {
+  const list = document.getElementById('cfg-model-list');
+  const activeLabel = document.getElementById('cfg-stat-active');
+  if (!list || !activeLabel || !state.config) return;
+  const models = state.config.model_profiles ?? state.config.models ?? [];
+  const active = models.find((model) => model.id === state.config?.active_model_id);
+  activeLabel.textContent = active?.name || active?.model || active?.id || '—';
+  list.replaceChildren(...models.map((model) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.modelActivate = model.id;
+    button.textContent = model.name || model.model || model.id;
+    button.disabled = model.id === state.config?.active_model_id;
+    button.addEventListener('click', () => {
+      button.disabled = true;
+      void backendApi.switchModel(model.id)
+        .then((next) => {
+          state.config = next;
+          renderLegacyConfigModels();
+        })
+        .catch(() => {
+          button.disabled = false;
+          notify('模型切换失败，请稍后重试。');
+        });
+    });
+    return button;
+  }));
+}
+
 export async function renderConfigModels(): Promise<void> {
   const view = ensureModelIntegrationView();
-  if (!view) return;
+  if (!view) {
+    renderLegacyConfigModels();
+    return;
+  }
   bindModelFormOnce();
   view.update({ state: 'loading', message: '正在加载模型配置…', items: [] });
   if (!state.config) await loadConfig();

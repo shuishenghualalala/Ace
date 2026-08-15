@@ -25,6 +25,7 @@ import re
 import sys
 import threading
 import time
+from io import StringIO
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -32,7 +33,7 @@ from dotenv import dotenv_values
 logger = logging.getLogger(__name__)
 
 # 项目根目录（crew/state 的上两层）
-if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     ROOT = Path(sys._MEIPASS)
 else:
     ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +48,59 @@ _ENV_LOCK = threading.RLock()
 _RUNTIME_ENV_BASELINE: dict[str, str | None] = {}
 _RUNTIME_ENV_KEYS: set[str] = set()
 _FILE_CACHE: dict[str, tuple[tuple[int, int] | None, object]] = {}
+_PROTECTED_RUNTIME_ENV_NAMES = frozenset(
+    {
+        "ALL_PROXY",
+        "APPDATA",
+        "BASH_ENV",
+        "COMSPEC",
+        "CREW_CONFIG",
+        "CREW_DB_PATH",
+        "CREW_HOME",
+        "CREW_OWNER_ACCOUNT_ID",
+        "ENV",
+        "FTP_PROXY",
+        "GATEWAY_HOST",
+        "GATEWAY_PORT",
+        "GCONV_PATH",
+        "HOME",
+        "HOSTALIASES",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "LOCALAPPDATA",
+        "LOCPATH",
+        "NO_PROXY",
+        "PATH",
+        "PATHEXT",
+        "PERL5OPT",
+        "PSMODULEPATH",
+        "RUBYOPT",
+        "SHELLOPTS",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+        "_JAVA_OPTIONS",
+    }
+)
+_PROTECTED_RUNTIME_ENV_PREFIXES = (
+    "ACE_",
+    "CORECLR_",
+    "COR_",
+    "CREW_GATEWAY_",
+    "CREW_SECURITY_",
+    "CREW_TASK_",
+    "DOTNET_",
+    "DYLD_",
+    "JAVA_TOOL_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "LD_",
+    "NODE_",
+    "NPM_CONFIG_",
+    "PYTHON",
+)
 
 
 def _mask_owner_for_log(owner_account_id: str | None) -> str:
@@ -67,9 +121,10 @@ def _bundled_runtime_paths() -> list[str]:
     解析到打包版本，而非依赖系统安装。
     """
     import logging
+
     log = logging.getLogger(__name__)
 
-    frozen = getattr(sys, 'frozen', False)
+    frozen = getattr(sys, "frozen", False)
     log.debug(f"[bundled_runtime] frozen={frozen}, executable={sys.executable}")
 
     if not frozen:
@@ -78,7 +133,7 @@ def _bundled_runtime_paths() -> list[str]:
 
     # PyInstaller --onedir 模式：exe 在 crew-gateway/，运行时在 crew-gateway/_internal/runtimes/
     exe_dir = Path(sys.executable).parent
-    runtimes_dir = exe_dir / '_internal' / 'runtimes'
+    runtimes_dir = exe_dir / "_internal" / "runtimes"
 
     log.debug(f"[bundled_runtime] Looking for runtimes_dir: {runtimes_dir}")
 
@@ -87,33 +142,35 @@ def _bundled_runtime_paths() -> list[str]:
         return []
 
     paths: list[str] = []
-    python_dir = runtimes_dir / 'python'
-    node_dir = runtimes_dir / 'node'
+    python_dir = runtimes_dir / "python"
+    node_dir = runtimes_dir / "node"
 
     if python_dir.is_dir():
         # Windows: python.exe 在根目录; Linux (indygreg): python3 在 bin/ 子目录
-        python_exe = python_dir / 'python.exe'
-        python_bin = python_dir / 'bin' / 'python3'
+        python_exe = python_dir / "python.exe"
+        python_bin = python_dir / "bin" / "python3"
         if python_exe.exists():
             paths.append(str(python_dir))
             log.debug(f"[bundled_runtime] Found python_dir (Windows): {python_dir}")
         elif python_bin.exists():
-            paths.append(str(python_dir / 'bin'))
+            paths.append(str(python_dir / "bin"))
             log.debug(f"[bundled_runtime] Found python_dir (Linux): {python_dir / 'bin'}")
         else:
-            log.warning(f"[bundled_runtime] python_dir exists but no executable found: {python_dir}")
+            log.warning(
+                f"[bundled_runtime] python_dir exists but no executable found: {python_dir}"
+            )
     else:
         log.warning(f"[bundled_runtime] python_dir not found: {python_dir}")
 
     if node_dir.is_dir():
         # Windows: node.exe 在根目录; Linux: node 在 bin/ 子目录
-        node_exe = node_dir / 'node.exe'
-        node_bin = node_dir / 'bin' / 'node'
+        node_exe = node_dir / "node.exe"
+        node_bin = node_dir / "bin" / "node"
         if node_exe.exists():
             paths.append(str(node_dir))
             log.debug(f"[bundled_runtime] Found node_dir (Windows): {node_dir}")
         elif node_bin.exists():
-            paths.append(str(node_dir / 'bin'))
+            paths.append(str(node_dir / "bin"))
             log.debug(f"[bundled_runtime] Found node_dir (Linux): {node_dir / 'bin'}")
         else:
             log.warning(f"[bundled_runtime] node_dir exists but no executable found: {node_dir}")
@@ -123,10 +180,10 @@ def _bundled_runtime_paths() -> list[str]:
     # 可选的下游发行包可以把 cua-driver 放到 _internal/runtimes/cua-driver/bin/。
     # 检测到预置文件时将目录前置进 PATH，使 config.yaml 中的裸命令可被 MCP
     # 子进程解析；官方 Crew 源码与自构建安装包不携带该第三方二进制。
-    cua_dir = runtimes_dir / 'cua-driver' / 'bin'
+    cua_dir = runtimes_dir / "cua-driver" / "bin"
     if cua_dir.is_dir():
-        cua_exe = cua_dir / 'cua-driver.exe'
-        cua_bin = cua_dir / 'cua-driver'
+        cua_exe = cua_dir / "cua-driver.exe"
+        cua_bin = cua_dir / "cua-driver"
         if cua_exe.exists() or cua_bin.exists():
             paths.append(str(cua_dir))
             log.debug(f"[bundled_runtime] Found cua_driver_dir: {cua_dir}")
@@ -166,21 +223,21 @@ def bundled_python_executable() -> str | None:
     本函数在冻结态下定位打包内嵌的 Python 解释器，供 config.py 设置
     ``CREW_PYTHON``。非冻结态返回 ``None``（调用方应回退到 ``sys.executable``）。
     """
-    if not getattr(sys, 'frozen', False):
+    if not getattr(sys, "frozen", False):
         return None
 
     exe_dir = Path(sys.executable).parent
-    runtimes_dir = exe_dir / '_internal' / 'runtimes'
-    python_dir = runtimes_dir / 'python'
+    runtimes_dir = exe_dir / "_internal" / "runtimes"
+    python_dir = runtimes_dir / "python"
 
     if not python_dir.is_dir():
         return None
 
     # Windows: python.exe 在根目录; macOS/Linux: python3 在 bin/ 子目录
     candidates = [
-        python_dir / 'python.exe',
-        python_dir / 'bin' / 'python3',
-        python_dir / 'bin' / 'python',  # 兜底（符号链接别名）
+        python_dir / "python.exe",
+        python_dir / "bin" / "python3",
+        python_dir / "bin" / "python",  # 兜底（符号链接别名）
     ]
     for c in candidates:
         if c.exists():
@@ -228,7 +285,7 @@ def get_crew_home() -> Path:
             p = Path.home() / p
         return p
     # 打包运行环境下，默认指向用户家目录 ~/DEFAULT_HOME_DIRNAME，避免在只读 /opt 下写入导致失败
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         return Path.home() / DEFAULT_HOME_DIRNAME
     return ROOT / DEFAULT_HOME_DIRNAME
 
@@ -312,10 +369,21 @@ def runtime_env_overrides(
         # Windows: %APPDATA%\Python\Python311\site-packages
         # Linux: ~/.local/lib/python3.11/site-packages
         # 注意：首次运行前目录可能不存在，但仍需设置 PYTHONPATH，pip 会自动创建
-        if sys.platform == 'win32':
-            user_site = Path(os.environ.get("APPDATA", "")) / "Python" / f"Python{sys.version_info.major}{sys.version_info.minor}" / "site-packages"
+        if sys.platform == "win32":
+            user_site = (
+                Path(os.environ.get("APPDATA", ""))
+                / "Python"
+                / f"Python{sys.version_info.major}{sys.version_info.minor}"
+                / "site-packages"
+            )
         else:
-            user_site = Path.home() / ".local" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+            user_site = (
+                Path.home()
+                / ".local"
+                / "lib"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / "site-packages"
+            )
 
         # 无条件设置 PYTHONPATH（目录可能尚未创建，pip install 时会自动创建）
         # 幂等前置：与 PATH 同理，避免反复调用时 user_site 重复累积。
@@ -349,6 +417,13 @@ def _valid_env_key(key: object) -> str:
     return text
 
 
+def _is_protected_runtime_env_name(name: str) -> bool:
+    normalized = name.upper()
+    return normalized in _PROTECTED_RUNTIME_ENV_NAMES or normalized.startswith(
+        _PROTECTED_RUNTIME_ENV_PREFIXES
+    )
+
+
 def _load_runtime_env_map(path: Path) -> dict[str, str]:
     env_map, _ = _load_runtime_env_map_with_cache(path)
     return env_map
@@ -364,10 +439,21 @@ def _load_runtime_env_map_with_cache(path: Path) -> tuple[dict[str, str], bool]:
     if signature is None:
         _FILE_CACHE[cache_key] = (signature, {})
         return {}, False
-    raw = dotenv_values(path)
+    try:
+        from crew.tools.file_utils import read_verified_bytes
+
+        content = read_verified_bytes(path, max_bytes=1024 * 1024).decode("utf-8")
+        raw = dotenv_values(stream=StringIO(content), interpolate=False)
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        logger.warning("ignored unsafe or unreadable runtime env file: %s", path)
+        _FILE_CACHE[cache_key] = (signature, {})
+        return {}, False
     result: dict[str, str] = {}
     for key, value in raw.items():
         name = _valid_env_key(key)
+        if name and _is_protected_runtime_env_name(name):
+            logger.warning("ignored protected runtime env variable %s", name)
+            continue
         if name and value not in (None, ""):
             result[name] = str(value)
     _FILE_CACHE[cache_key] = (signature, dict(result))
@@ -413,6 +499,9 @@ def _merged_runtime_env_map_with_stats(owner_env_path: Path) -> tuple[dict[str, 
 def _apply_runtime_env_map_unlocked(env_map: dict[str, str]) -> None:
     """Apply the merged system+owner env overlay and restore removed keys."""
     global _RUNTIME_ENV_KEYS
+    env_map = {
+        name: value for name, value in env_map.items() if not _is_protected_runtime_env_name(name)
+    }
     new_keys = set(env_map)
 
     for key in sorted(_RUNTIME_ENV_KEYS - new_keys):
@@ -453,7 +542,9 @@ def refresh_owner_runtime_env(
     with _ENV_LOCK:
         env_started = time.perf_counter()
         if load_env_files:
-            env_map, env_cache_hits, env_cache_total = _merged_runtime_env_map_with_stats(Path(values["CREW_ENV_FILE"]))
+            env_map, env_cache_hits, env_cache_total = _merged_runtime_env_map_with_stats(
+                Path(values["CREW_ENV_FILE"])
+            )
         else:
             env_map, env_cache_hits, env_cache_total = {}, 0, 0
         env_ms = (time.perf_counter() - env_started) * 1000.0
@@ -586,7 +677,9 @@ def _owner_runtime_home_for_base(base: Path, owner_account_id: str, *, create: b
             logger.info("已迁移 owner runtime home: %s -> %s", legacy, target)
         except OSError as exc:
             # 保留旧目录比让用户配置/会话突然不可见更稳；新的短 hash 路径会在下次可迁移时使用。
-            logger.warning("迁移 owner runtime home 失败，继续使用旧目录: %s -> %s (%s)", legacy, target, exc)
+            logger.warning(
+                "迁移 owner runtime home 失败，继续使用旧目录: %s -> %s (%s)", legacy, target, exc
+            )
             return legacy
     return target
 
@@ -732,6 +825,7 @@ def external_session_workspace_path(
 # ---------------------------------------------------------------------------
 # 文件加载
 # ---------------------------------------------------------------------------
+
 
 def load_soul_md() -> str | None:
     """从 CREW_HOME/SOUL.md 加载 Agent 身份。

@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ace.invalid/schemas/package-security-evidence-v2.json",
+  "title": "Ace signed package release evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "repository",
+    "commit",
+    "source_hash",
+    "cargo_lock_sha256",
+    "cargo_lock_verified",
+    "desktop_walkthroughs",
+    "update_trust_root",
+    "update_source",
+    "packages",
+    "runtime_evidence_sha256",
+    "runtime_bindings"
+  ],
+  "properties": {
+    "schema": {
+      "const": 2
+    },
+    "status": {
+      "const": "passed"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[^/\\s]+/[^/\\s]+$",
+      "maxLength": 300
+    },
+    "commit": {
+      "$ref": "#/$defs/sha1"
+    },
+    "source_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "cargo_lock_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "cargo_lock_verified": {
+      "const": true
+    },
+    "desktop_walkthroughs": {
+      "$ref": "#/$defs/platformPassed"
+    },
+    "update_trust_root": {
+      "$ref": "#/$defs/updateTrustRoot"
+    },
+    "update_source": {
+      "$ref": "#/$defs/updateSource"
+    },
+    "packages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/packageEvidence"
+        },
+        "windows": {
+          "$ref": "#/$defs/packageEvidence"
+        },
+        "macos": {
+          "$ref": "#/$defs/packageEvidence"
+        }
+      }
+    },
+    "runtime_evidence_sha256": {
+      "$ref": "#/$defs/platformHashes"
+    },
+    "runtime_bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/runtimeBinding"
+        },
+        "windows": {
+          "$ref": "#/$defs/runtimeBinding"
+        },
+        "macos": {
+          "$ref": "#/$defs/runtimeBinding"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "filename": {
+      "type": "string",
+      "pattern": "^[^/\\\\\\u0000]+$",
+      "maxLength": 255
+    },
+    "packageEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filename",
+        "sha256",
+        "signature_verified",
+        "signature"
+      ],
+      "properties": {
+        "filename": {
+          "$ref": "#/$defs/filename"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signature_verified": {
+          "const": true
+        },
+        "signature": {
+          "$ref": "#/$defs/packageSignature"
+        }
+      }
+    },
+    "packageSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "subject_sha256",
+        "identity",
+        "issuer",
+        "verification_run"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "apple-codesign",
+            "authenticode",
+            "gpg-detached",
+            "sigstore"
+          ]
+        },
+        "subject_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "identity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "verification_run": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 500
+        }
+      }
+    },
+    "platformHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/sha256"
+        },
+        "windows": {
+          "$ref": "#/$defs/sha256"
+        },
+        "macos": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "platformPassed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "properties": {
+        "linux": {
+          "const": true
+        },
+        "windows": {
+          "const": true
+        },
+        "macos": {
+          "const": true
+        }
+      }
+    },
+    "updateTrustRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "public_key_sha256",
+        "embedded_verified"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "Ed25519"
+        },
+        "public_key_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "embedded_verified": {
+          "$ref": "#/$defs/platformPassed"
+        }
+      }
+    },
+    "updateSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url",
+        "embedded_verified"
+      ],
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "pattern": "^https://[^?#]+/$",
+          "maxLength": 1000
+        },
+        "embedded_verified": {
+          "$ref": "#/$defs/platformPassed"
+        }
+      }
+    },
+    "runtimeBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_triple",
+        "artifact_sha256",
+        "desktop_staged_artifact_sha256",
+        "runtime_manifest_sha256",
+        "sbom_sha256"
+      ],
+      "properties": {
+        "target_triple": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "desktop_staged_artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sbom_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

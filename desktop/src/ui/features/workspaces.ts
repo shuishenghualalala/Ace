@@ -83,6 +83,7 @@ import {
   setActiveSessionId,
 
   setCurrentWorkspaceId,
+  setExpandedChannel,
 
   setExpandedWorkspace,
 
@@ -191,6 +192,7 @@ function sessionStatusTrailingInner(status: SessionStatus | undefined, sessionId
 
 /** Compatibility entry used by chat-controller while the new view owns the DOM. */
 export function patchSessionRowStatus(sessionId: string, status: SessionStatus): void {
+  if (patchLegacySessionRowStatus(sessionId, status)) return;
   patchMountedSessionHistoryStatus(sessionId, status);
 }
 
@@ -337,6 +339,346 @@ function sessionListComparator<T extends { pinned?: boolean; updatedAt: number }
   const pb = b.pinned ? 1 : 0;
   if (pa !== pb) return pb - pa;
   return b.updatedAt - a.updatedAt;
+}
+
+const LEGACY_PROJECTS_COLLAPSED_KEY = 'crew.historyProjectsCollapsed';
+const LEGACY_CHANNELS_COLLAPSED_KEY = 'crew.historyChannelsCollapsed';
+const LEGACY_CONVERSATIONS_COLLAPSED_KEY = 'crew.historyConversationsCollapsed';
+
+function legacySectionCollapsed(key: string): boolean {
+  return localStorage.getItem(key) === 'true';
+}
+
+function legacySectionHeader(label: string, storageKey: string): HTMLButtonElement {
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = `history-section-header${legacySectionCollapsed(storageKey) ? ' collapsed' : ''}`;
+  header.dataset.sectionToggle = storageKey;
+  header.setAttribute('aria-expanded', String(!legacySectionCollapsed(storageKey)));
+  const title = document.createElement('span');
+  title.className = 'history-section-title';
+  title.textContent = label;
+  const caret = document.createElement('span');
+  caret.className = 'history-section-caret';
+  caret.setAttribute('aria-hidden', 'true');
+  caret.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>';
+  header.append(title, caret);
+  return header;
+}
+
+function legacyHistorySection(
+  modifier: string,
+  label: string,
+  storageKey: string,
+  bodyClass: string,
+): HTMLElement {
+  const section = document.createElement('div');
+  section.className = `history-section history-section--${modifier}`;
+  const body = document.createElement('div');
+  body.className = bodyClass;
+  section.append(legacySectionHeader(label, storageKey), body);
+  return section;
+}
+
+function legacySessionRow(session: SessionRow): HTMLElement {
+  const template = document.createElement('template');
+  template.innerHTML = sessionRowHtml(session).trim();
+  return template.content.firstElementChild as HTMLElement;
+}
+
+function updateLegacySessionRow(row: HTMLElement, session: SessionRow): void {
+  const status = state.sessionStatuses[session.id] as SessionStatus | undefined;
+  row.classList.toggle('active', session.id === state.activeSessionId);
+  row.classList.toggle('history-item--pinned', Boolean(session.pinned));
+  row.classList.remove('history-item--running', 'history-item--queued', 'history-item--error');
+  const statusClass = sessionStatusClass(status).trim();
+  if (statusClass) row.classList.add(statusClass);
+  row.querySelector<HTMLElement>('.history-item-main')?.setAttribute('title', session.title);
+  const title = row.querySelector<HTMLElement>('.history-item-title');
+  if (title) title.textContent = session.title;
+  const leading = row.querySelector<HTMLElement>('.history-item-leading');
+  const leadingHtml = sessionLeadingInner(session);
+  if (leading && leading.innerHTML !== leadingHtml) leading.innerHTML = leadingHtml;
+  const trailing = row.querySelector<HTMLElement>('.history-item-trailing');
+  if (!trailing) return;
+  const desiredSpinner = status === 'running'
+    ? 'history-item-status-spinner--running'
+    : status === 'queued'
+      ? 'history-item-status-spinner--queued'
+      : '';
+  const currentSpinner = trailing.querySelector<HTMLElement>('.history-item-status-spinner');
+  if (desiredSpinner && currentSpinner?.classList.contains(desiredSpinner)) return;
+  trailing.innerHTML = sessionStatusTrailingInner(status, session.id, session.updatedAt);
+}
+
+function legacySessionContainer(
+  container: HTMLElement,
+  desired: SessionRow[],
+  showExpand: boolean,
+  showAllKey: string,
+): void {
+  const existing = new Map<string, HTMLElement>();
+  for (const child of [...container.children] as HTMLElement[]) {
+    const id = child.dataset.sessionId;
+    if (id) existing.set(id, child);
+    else child.remove();
+  }
+  const desiredIds = new Set(desired.map((session) => session.id));
+  for (const [id, row] of existing) if (!desiredIds.has(id)) row.remove();
+
+  let reference: ChildNode | null = container.firstChild;
+  for (const session of desired) {
+    let row = existing.get(session.id);
+    if (!row || !row.isConnected) row = legacySessionRow(session);
+    else updateLegacySessionRow(row, session);
+    if (reference === row) reference = row.nextSibling;
+    else container.insertBefore(row, reference);
+  }
+  if (showExpand) {
+    const expand = document.createElement('button');
+    expand.type = 'button';
+    expand.className = 'ws-block__expand';
+    expand.dataset.wsShowAll = showAllKey;
+    expand.textContent = '展开显示';
+    container.append(expand);
+  }
+  if (desired.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty history-empty--inline';
+    empty.textContent = '暂无对话';
+    container.append(empty);
+  }
+}
+
+function legacyProjectBlock(workspace: Workspace): HTMLElement {
+  const block = document.createElement('section');
+  block.className = 'project-block';
+  block.dataset.projectId = workspace.id;
+  const row = document.createElement('div');
+  row.className = 'project-row';
+  row.dataset.projectToggle = workspace.id;
+  row.setAttribute('aria-expanded', 'true');
+  const label = document.createElement('span');
+  label.className = 'project-label';
+  label.textContent = workspace.name;
+  row.append(label);
+  block.append(row);
+  return block;
+}
+
+function legacyChannelBlock(group: ChannelSessionGroup): HTMLElement {
+  const block = document.createElement('section');
+  block.className = 'project-block channel-folder-block';
+  block.dataset.channelId = group.platform;
+  const row = document.createElement('div');
+  row.className = 'project-row';
+  row.dataset.channelToggle = group.platform;
+  row.setAttribute('aria-expanded', 'true');
+  const label = document.createElement('span');
+  label.className = 'project-label';
+  label.textContent = group.label;
+  row.append(label);
+  block.append(row);
+  return block;
+}
+
+function legacyGroupSessions(
+  block: HTMLElement,
+  sessions: SessionRow[],
+  expanded: boolean,
+  showAllKey: string,
+): void {
+  const current = block.querySelector<HTMLElement>('.project-sessions');
+  if (!expanded) {
+    current?.remove();
+    return;
+  }
+  const list = current ?? document.createElement('div');
+  list.className = 'project-sessions';
+  if (!current) block.append(list);
+  const showAll = state.wsShowAll[showAllKey] === true;
+  const visible = showAll ? sessions : sessions.slice(0, SESSION_HISTORY_GROUP_LIMIT);
+  legacySessionContainer(list, visible, !showAll && sessions.length > SESSION_HISTORY_GROUP_LIMIT, showAllKey);
+}
+
+function legacyReconcileGroups(
+  container: HTMLElement,
+  groups: Workspace[] | ChannelSessionGroup[],
+  kind: 'workspace' | 'channel',
+): void {
+  const groupKey = (group: Workspace | ChannelSessionGroup): string => (
+    kind === 'workspace' ? (group as Workspace).id : (group as ChannelSessionGroup).platform
+  );
+  const existing = new Map<string, HTMLElement>();
+  for (const child of [...container.children] as HTMLElement[]) {
+    const id = kind === 'workspace' ? child.dataset.projectId : child.dataset.channelId;
+    if (id) existing.set(id, child);
+    else child.remove();
+  }
+  const wanted = new Set(groups.map(groupKey));
+  for (const [id, block] of existing) if (!wanted.has(id)) block.remove();
+
+  let reference: ChildNode | null = container.firstChild;
+  for (const group of groups) {
+    const id = groupKey(group);
+    let block = existing.get(id);
+    if (!block || !block.isConnected) {
+      block = kind === 'workspace'
+        ? legacyProjectBlock(group as Workspace)
+        : legacyChannelBlock(group as ChannelSessionGroup);
+    }
+    const sessions = kind === 'workspace'
+      ? state.sessions.filter((session) => session.workspaceId === id)
+      : (group as ChannelSessionGroup).sessions;
+    const visibleSessions = sessions
+      .filter((session) => kind === 'channel' || !isChannelSessionId(session.id))
+      .filter((session) => kind === 'channel' || isSessionVisibleWithExternalAgentsFlag(session))
+      .sort(sessionListComparator);
+    const expanded = kind === 'workspace'
+      ? state.expandedWorkspaces[id] !== false
+      : state.channelExpanded[id] !== false;
+    const showAllKey = kind === 'workspace' ? id : `channel:${id}`;
+    block.querySelector<HTMLElement>('.project-row')?.setAttribute('aria-expanded', String(expanded));
+    legacyGroupSessions(block, visibleSessions, expanded, showAllKey);
+    if (reference === block) reference = block.nextSibling;
+    else container.insertBefore(block, reference);
+  }
+}
+
+function patchLegacySessionRowStatus(sessionId: string, status: SessionStatus): boolean {
+  const list = typeof document === 'undefined' ? null : document.getElementById('history-list');
+  if (!list) return false;
+  const row = [...list.querySelectorAll<HTMLElement>('[data-session-id]')]
+    .find((candidate) => candidate.dataset.sessionId === sessionId);
+  if (!row) return false;
+  row.classList.remove('history-item--running', 'history-item--queued', 'history-item--error');
+  const statusClass = sessionStatusClass(status).trim();
+  if (statusClass) row.classList.add(statusClass);
+  const session = state.sessions.find((item) => item.id === sessionId);
+  const trailing = row.querySelector<HTMLElement>('.history-item-trailing');
+  if (trailing) trailing.innerHTML = sessionStatusTrailingInner(status, sessionId, session?.updatedAt ?? Date.now());
+  return true;
+}
+
+function patchLegacySessionUnread(sessionId: string): void {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  if (!session || state.sessionStatuses[sessionId] === 'running' || state.sessionStatuses[sessionId] === 'queued') return;
+  const list = document.getElementById('history-list');
+  const row = [...(list?.querySelectorAll<HTMLElement>('[data-session-id]') ?? [])]
+    .find((candidate) => candidate.dataset.sessionId === sessionId);
+  const trailing = row?.querySelector<HTMLElement>('.history-item-trailing');
+  if (trailing) trailing.innerHTML = sessionStatusTrailingInner(state.sessionStatuses[sessionId], sessionId, session.updatedAt);
+}
+
+let legacyStatusSubscriptionReady = false;
+function ensureLegacyStatusSubscription(): void {
+  if (legacyStatusSubscriptionReady) return;
+  legacyStatusSubscriptionReady = true;
+  sessionStore.subscribe((next, previous) => {
+    if (!document.getElementById('history-list')) return;
+    const ids = new Set([...Object.keys(previous.sessionStatuses), ...Object.keys(next.sessionStatuses)]);
+    for (const id of ids) {
+      if (previous.sessionStatuses[id] !== next.sessionStatuses[id]) {
+        patchLegacySessionRowStatus(id, next.sessionStatuses[id] ?? 'idle');
+      }
+    }
+    const unreadIds = new Set([...previous.unreadCompletedSessions, ...next.unreadCompletedSessions]);
+    for (const id of unreadIds) {
+      if (previous.unreadCompletedSessions.has(id) !== next.unreadCompletedSessions.has(id)) {
+        patchLegacySessionUnread(id);
+      }
+    }
+  });
+}
+
+function bindLegacyHistoryEvents(list: HTMLElement): void {
+  const marker = list as HTMLElement & { legacyHistoryEventsBound?: boolean };
+  if (marker.legacyHistoryEventsBound) return;
+  marker.legacyHistoryEventsBound = true;
+  list.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement;
+    const menu = target.closest<HTMLElement>('[data-session-menu]');
+    if (menu) {
+      event.stopPropagation();
+      openSessionActionsMenu(menu.dataset.sessionMenu!, menu, refreshSessionsWrapper);
+      return;
+    }
+    const section = target.closest<HTMLElement>('[data-section-toggle]');
+    if (section) {
+      const key = section.dataset.sectionToggle!;
+      localStorage.setItem(key, String(!legacySectionCollapsed(key)));
+      renderWorkspaceHistory(latestOpenSession);
+      return;
+    }
+    const showAll = target.closest<HTMLElement>('[data-ws-show-all]');
+    if (showAll) {
+      setWsShowAll(showAll.dataset.wsShowAll!, true);
+      renderWorkspaceHistory(latestOpenSession);
+      return;
+    }
+    const project = target.closest<HTMLElement>('[data-project-toggle]');
+    if (project) {
+      const id = project.dataset.projectToggle!;
+      setCurrentWorkspaceId(id);
+      setExpandedWorkspace(id, state.expandedWorkspaces[id] === false);
+      renderWorkspaceHistory(latestOpenSession);
+      return;
+    }
+    const channel = target.closest<HTMLElement>('[data-channel-toggle]');
+    if (channel) {
+      const platform = channel.dataset.channelToggle!;
+      setExpandedChannel(platform, state.channelExpanded[platform] === false);
+      renderWorkspaceHistory(latestOpenSession);
+      return;
+    }
+    const row = target.closest<HTMLElement>('[data-session-id]');
+    if (row) void latestOpenSession(row.dataset.sessionId!);
+  });
+}
+
+function renderLegacyHistory(openSession: OpenSessionFn): void {
+  const list = document.getElementById('history-list');
+  if (!list) return;
+  latestOpenSession = openSession;
+  ensureLegacyStatusSubscription();
+  if (!list.querySelector('.history-section--projects')) {
+    list.replaceChildren(
+      legacyHistorySection('projects', '项目', LEGACY_PROJECTS_COLLAPSED_KEY, 'history-folders'),
+      legacyHistorySection('channels', '渠道', LEGACY_CHANNELS_COLLAPSED_KEY, 'channel-folders'),
+      legacyHistorySection('conversations', '对话', LEGACY_CONVERSATIONS_COLLAPSED_KEY, 'conversations-list'),
+    );
+  }
+  list.querySelectorAll<HTMLButtonElement>('[data-section-toggle]').forEach((header) => {
+    const collapsed = legacySectionCollapsed(header.dataset.sectionToggle!);
+    header.classList.toggle('collapsed', collapsed);
+    header.setAttribute('aria-expanded', String(!collapsed));
+  });
+  const filter = state.historyFilter.toLocaleLowerCase().trim();
+  const projects = visibleProjectWorkspaces().filter((workspace) => !filter
+    || matchesFilter(workspace.name, filter)
+    || matchesFilter(workspace.id, filter));
+  const folders = list.querySelector<HTMLElement>('.history-folders')!;
+  legacyReconcileGroups(folders, projects, 'workspace');
+
+  const channelGroups = state.channelSessionGroups;
+  const channels = list.querySelector<HTMLElement>('.history-section--channels')!;
+  channels.hidden = channelGroups.length === 0;
+  legacyReconcileGroups(list.querySelector<HTMLElement>('.channel-folders')!, channelGroups, 'channel');
+
+  const conversations = state.sessions
+    .filter((session) => session.workspaceId === 'default')
+    .filter((session) => !isChannelSessionId(session.id))
+    .filter(isSessionVisibleWithExternalAgentsFlag)
+    .filter((session) => !filter || matchesFilter(session.title, filter) || matchesFilter(session.id, filter))
+    .sort(sessionListComparator);
+  const showAll = state.wsShowAll.default === true;
+  legacySessionContainer(
+    list.querySelector<HTMLElement>('.conversations-list')!,
+    showAll ? conversations : conversations.slice(0, CONVERSATIONS_LIMIT),
+    !showAll && conversations.length > CONVERSATIONS_LIMIT,
+    'default',
+  );
+  bindLegacyHistoryEvents(list);
 }
 
 
@@ -569,6 +911,7 @@ let latestOpenSession: OpenSessionFn = () => {};
 /** Compatibility facade for existing controllers; SessionHistoryView owns the DOM. */
 export function renderWorkspaceHistory(openSession: OpenSessionFn): void {
   latestOpenSession = openSession;
+  renderLegacyHistory(openSession);
   renderSessionHistory();
   if (typeof document !== 'undefined' && document.getElementById('studio-history-list')) {
     renderStudioHistory(openSession);
@@ -1204,7 +1547,7 @@ export function refreshSidebarAfterHydrate(openSession: OpenSessionFn): void {
 
 export async function refreshAllSessions(): Promise<void> {
 
-  if (!isRendererLoggedIn()) return;
+  if (!isRendererLoggedIn() || !state.backendConnected) return;
 
   try {
 

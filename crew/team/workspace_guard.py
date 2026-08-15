@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
+import os
 import re
 import shlex
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from crew.tools.terminal_guard import detect_dangerous_command, detect_hardline_command
-
 
 SEARCH_TOOL_NAMES = {
     "search_files",
@@ -631,9 +631,10 @@ def _terminal_read_paths(command: str, *, cwd: str = "") -> list[Path]:
         if path is not None and str(path) not in TRUSTED_COMMAND_LAUNCHERS:
             paths.append(path)
     try:
-        tokens = shlex.split(command)
+        tokens = shlex.split(command, posix=os.name != "nt")
     except ValueError:
         tokens = command.split()
+    tokens = [token.strip("\"'") for token in tokens]
     for index, token in enumerate(tokens):
         name = Path(token).name
         if name not in READ_COMMANDS:
@@ -660,9 +661,10 @@ def _unwrap_trusted_shell_command(command: str) -> str:
 def _terminal_write_paths(command: str, *, cwd: str = "") -> list[Path]:
     paths: list[Path] = []
     try:
-        tokens = shlex.split(command)
+        tokens = shlex.split(command, posix=os.name != "nt")
     except ValueError:
         tokens = command.split()
+    tokens = [token.strip("\"'") for token in tokens]
     for index, token in enumerate(tokens):
         if token in {">", ">>"} and index + 1 < len(tokens):
             path = _write_token_path(tokens[index + 1], cwd=cwd)
@@ -727,7 +729,13 @@ def _token_path(token: str, *, cwd: str = "") -> Path | None:
     value = str(token or "").strip()
     if not value or value.startswith("-"):
         return None
-    if value in {".", ".."} or value.startswith("./") or value.startswith("../") or value.startswith("/") or "/" in value:
+    if (
+        value in {".", ".."}
+        or value.startswith(("./", "../", "/", "\\\\"))
+        or "/" in value
+        or "\\" in value
+        or Path(value).is_absolute()
+    ):
         return _resolve_path(value, cwd=cwd)
     return None
 
@@ -752,13 +760,12 @@ def _dedupe_paths(paths: list[Path]) -> list[Path]:
 
 
 def _blocked(path: Path, allowed_roots: list[Path], *, access: str) -> WorkspaceGuardDecision:
-    roots = ", ".join(str(root) for root in allowed_roots[:4])
+    del path, allowed_roots
     verb = "写入" if access == "write" else "读取或搜索"
     return WorkspaceGuardDecision(
         False,
         (
             f"外部智能体请求{verb}当前 Session 授权范围外的路径。"
-            f"目标：{path}。当前允许范围：{roots}。"
             "请使用当前工作目录内的相对路径，或使用用户已明确提供的附件、引用、Skill 和团队上游产物。"
         ),
     )

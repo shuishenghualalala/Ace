@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "attestation_signer_workflow": ".github/workflows/release-package-security.yml",
+  "update_public_key_sha256": "",
+  "update_base_url": "",
+  "platforms": {
+    "linux": {
+      "kinds": [
+        "gpg-detached"
+      ],
+      "identities": [],
+      "issuers": []
+    },
+    "windows": {
+      "kinds": [
+        "authenticode"
+      ],
+      "identities": [],
+      "issuers": []
+    },
+    "macos": {
+      "kinds": [
+        "apple-codesign"
+      ],
+      "identities": [],
+      "issuers": []
+    }
+  }
+}

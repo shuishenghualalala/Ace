@@ -4,7 +4,8 @@ glob/grep 参考 OCC（Open-Claude-Code）的 GlobTool/GrepTool 设计：
   - glob：按 glob 模式找文件，结果按修改时间倒序
   - grep：按正则搜内容，支持 content/files_with_matches/count 三种输出模式
 
-底层优先用 ripgrep；rg 解析顺序（managed_tools）：managed rg → 系统 rg → None。
+底层优先用 ripgrep；默认只接受固定版本、固定摘要的 managed rg。
+系统 PATH 上的 rg 仅在操作员显式选择 system installer 时使用。
 rg 不可用时退回纯 Python 实现（wcmatch 编译 glob、re 搜内容），自动排除
 .git/__pycache__/node_modules/.venv 等噪音目录。patch 是文本替换补丁。
 """
@@ -18,22 +19,25 @@ import os
 import re
 import stat
 import subprocess
+import threading
 import time
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import wcmatch.glob as wcglob
 
 from crew.core.errors import ToolError
 from crew.tools.file_utils import (
+    _DEFAULT_MAX_FILE_BYTES,
+    FileConflictError,
     _check_sensitive_path,
     _detect_line_ending,
     _has_binary_extension,
     _normalize_line_endings,
     _strip_bom,
     _truncate,
-    FileConflictError,
     atomic_replace_bytes,
     read_verified_bytes,
     snapshot_file,
@@ -45,7 +49,8 @@ from crew.tools.managed_tools import (
     ensure_ripgrep,
 )
 from crew.tools.registry import Registry, tool_result
-from crew.tools.security_guard import authorize_file_tool
+from crew.tools.redact import safe_public_error
+from crew.tools.security_guard import AuthorizedFileTarget, authorize_file_tool
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +62,15 @@ _NOISE_DIRS = (
 
 _GLOB_DEADLINE_SECONDS = 10
 _GREP_DEADLINE_SECONDS = 15
-_DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024  # 兜底跳过 10MB 以上文件
 _DEFAULT_HEAD_LIMIT = 250
+_MAX_SEARCH_DEPTH = 64
+_MAX_SEARCH_FILES = 50_000
+_MAX_SEARCH_RESULTS = 5_000
+_MAX_SEARCH_CONTEXT_LINES = 100
+_MAX_SEARCH_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_SEARCH_OUTPUT_CHARS = 12_000
+_MAX_RG_STDOUT_BYTES = 2 * 1024 * 1024
+_MAX_RG_STDERR_BYTES = 64 * 1024
 
 _WCGLOB_FLAGS = wcglob.BRACE | wcglob.GLOBSTAR
 
@@ -78,7 +90,7 @@ _RG_TYPE_MAP: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 
 async def _resolve_rg() -> str | None:
-    """三级解析可用 rg 路径：managed → 系统 → None（调用方走 Python 兜底）。"""
+    """Resolve verified rg, or use the in-process bounded fallback."""
     from crew.security.launch import current_process_launch
 
     launch = current_process_launch.get()
@@ -87,7 +99,7 @@ async def _resolve_rg() -> str | None:
     try:
         path = await ensure_ripgrep()
     except ChecksumMismatchError:
-        logger.error("managed rg 校验失败，疑似供应链异常，改用 Python 兜底", exc_info=True)
+        logger.exception("managed rg 校验失败，疑似供应链异常，改用 Python 兜底")
         return None
     except ManagedToolUnavailableError:
         logger.debug("managed rg 不可用，改用 Python 兜底")
@@ -105,20 +117,70 @@ def _noise_glob_args() -> list[str]:
 
 def _run_rg(args: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
     """跑 rg 子进程。exit 1 = 无匹配，视为正常；其他非零退出抛错。"""
+    from crew.security.launch import minimal_inherited_environment
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             args,
             cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            errors="replace",
+            env=minimal_inherited_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise ToolError(f"ripgrep 搜索超时（>{timeout}s）") from exc
     except FileNotFoundError as exc:
-        raise ToolError(f"ripgrep 不可用: {exc}") from exc
-    return proc.returncode, proc.stdout, proc.stderr
+        raise ToolError(safe_public_error(exc, "ripgrep 不可用")) from exc
+
+    stdout = bytearray()
+    stderr = bytearray()
+    overflow = threading.Event()
+
+    def drain(stream, output: bytearray, limit: int) -> None:
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    return
+                remaining = limit - len(output)
+                if remaining > 0:
+                    output.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    overflow.set()
+                    proc.kill()
+                    return
+        finally:
+            stream.close()
+
+    assert proc.stdout is not None and proc.stderr is not None
+    readers = [
+        threading.Thread(
+            target=drain,
+            args=(proc.stdout, stdout, _MAX_RG_STDOUT_BYTES),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=drain,
+            args=(proc.stderr, stderr, _MAX_RG_STDERR_BYTES),
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        return_code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        proc.wait()
+        raise ToolError(f"ripgrep 搜索超时（>{timeout}s）") from exc
+    finally:
+        for reader in readers:
+            reader.join(timeout=2)
+    if overflow.is_set():
+        raise ToolError("ripgrep 搜索输出超过安全上限")
+    return (
+        return_code,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
 
 
 def _split_glob_filter(glob_str: str) -> list[str]:
@@ -184,6 +246,74 @@ def _prune_linked_directories(dirpath: str, dirnames: list[str]) -> None:
     dirnames[:] = kept
 
 
+def _directory_identity(path: Path) -> tuple[int, int, int]:
+    """Capture the directory object used by a bounded search walk."""
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise ToolError("搜索根目录不可用") from exc
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or (reparse_flag and getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise ToolError("搜索根目录不是安全的普通目录")
+    return (int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_ctime_ns))
+
+
+def _assert_directory_identity(path: Path, expected: tuple[int, int, int]) -> None:
+    if _directory_identity(path) != expected:
+        raise ToolError("搜索目录在操作期间发生变化")
+
+
+def _enforce_walk_budget(
+    root: Path,
+    dirpath: str,
+    dirnames: list[str],
+    filenames: list[str],
+    files_seen: int,
+) -> int:
+    try:
+        depth = len(Path(dirpath).relative_to(root).parts)
+    except ValueError as exc:
+        raise ToolError("搜索遍历离开授权根") from exc
+    if depth >= _MAX_SEARCH_DEPTH and dirnames:
+        raise ToolError(f"搜索目录深度超过上限 {_MAX_SEARCH_DEPTH}")
+    files_seen += len(filenames)
+    if files_seen > _MAX_SEARCH_FILES:
+        raise ToolError(f"搜索文件数量超过上限 {_MAX_SEARCH_FILES}")
+    return files_seen
+
+
+def _bounded_head_limit(requested: int) -> int:
+    if requested <= 0:
+        return _MAX_SEARCH_RESULTS
+    return min(requested, _MAX_SEARCH_RESULTS)
+
+
+def _preflight_search_tree(root: Path, *, timeout: int) -> None:
+    """Bound metadata traversal before delegating content search to ripgrep."""
+
+    root_identity = _directory_identity(root)
+    deadline = time.monotonic() + timeout
+    files_seen = 0
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        _assert_directory_identity(root, root_identity)
+        dirnames[:] = [name for name in dirnames if name not in _NOISE_DIRS]
+        _prune_linked_directories(dirpath, dirnames)
+        files_seen = _enforce_walk_budget(
+            root,
+            dirpath,
+            dirnames,
+            filenames,
+            files_seen,
+        )
+        if time.monotonic() > deadline:
+            raise ToolError(f"搜索目录预检超时（>{timeout}s）")
+    _assert_directory_identity(root, root_identity)
+
+
 def _apply_pagination(items: list[str], head_limit: int, offset: int) -> tuple[list[str], bool]:
     """OCC applyHeadLimit 语义：head_limit=0 不限；否则 slice(offset, offset+limit)。"""
     if head_limit == 0:
@@ -191,6 +321,18 @@ def _apply_pagination(items: list[str], head_limit: int, offset: int) -> tuple[l
     page = items[offset:offset + head_limit]
     truncated = len(items) > offset + head_limit
     return page, truncated
+
+
+def _bound_string_items(items: list[str]) -> tuple[list[str], bool]:
+    bounded: list[str] = []
+    chars = 0
+    for item in items:
+        added = len(item) + (1 if bounded else 0)
+        if chars + added > _MAX_SEARCH_OUTPUT_CHARS:
+            return bounded, True
+        bounded.append(item)
+        chars += added
+    return bounded, False
 
 
 def _bool_arg(args: dict[str, Any], key: str, default: bool) -> bool:
@@ -254,16 +396,21 @@ async def handle_glob(
     )
     if not root.exists() or not root.is_dir():
         raise ToolError(f"搜索目录不存在或不是目录: {root}")
-    limit = max(1, _int_arg(args, "limit", 100))
+    limit = min(_MAX_SEARCH_RESULTS, max(1, _int_arg(args, "limit", 100)))
 
-    rg = await _resolve_rg()
-    if rg:
-        files = await asyncio.to_thread(_glob_via_rg, rg, pattern, root, limit)
-    else:
-        files = await asyncio.to_thread(_glob_via_python, pattern, root)
+    # The authorized path is only a pathname.  A native rg process cannot keep
+    # that directory object pinned between approval, traversal, and open.  Keep
+    # the helper for explicit/native callers and use the verified walker at the
+    # model-facing boundary until a dirfd/snapshot implementation exists.
+    files = await asyncio.to_thread(
+        _glob_via_python,
+        pattern,
+        root,
+        max_results=limit,
+    )
 
-    truncated = len(files) > limit
-    page = files[:limit]
+    page, output_truncated = _bound_string_items(files[:limit])
+    truncated = len(files) > limit or output_truncated
     return tool_result(
         success=True,
         pattern=pattern,
@@ -276,36 +423,65 @@ async def handle_glob(
 
 def _glob_via_rg(rg: str, pattern: str, root: Path, limit: int) -> list[str]:
     """rg --files --glob <pattern> --sort=modified --hidden + 噪音排除。返回相对 root 路径。"""
+    _preflight_search_tree(root, timeout=_GLOB_DEADLINE_SECONDS)
     collect = limit + 1  # 多取一个用于判断 truncated
-    cmd = [rg, "--files", "--sort=modified", "--hidden", "--glob", pattern]
+    cmd = [
+        rg,
+        "--files",
+        "--no-follow",
+        "--max-depth",
+        str(_MAX_SEARCH_DEPTH),
+        "--sort=modified",
+        "--hidden",
+        "--glob",
+        pattern,
+    ]
     cmd.extend(_noise_glob_args())
     cmd.extend(["--", "."])
     rc, stdout, _stderr = _run_rg(cmd, root)
+    _assert_directory_identity(root, _directory_identity(root))
     if rc not in (0, 1):
         raise ToolError(f"ripgrep glob 失败 (exit {rc})")
     files: list[str] = []
     for line in stdout.splitlines():
         line = line.strip()
         if line:
-            files.append(line[2:] if line.startswith("./") else line)
+            files.append(line.removeprefix("./"))
             if len(files) >= collect:
                 break
     return files
 
 
-def _glob_via_python(pattern: str, root: Path) -> list[str]:
+def _glob_via_python(
+    pattern: str,
+    root: Path,
+    *,
+    max_results: int = _MAX_SEARCH_RESULTS,
+) -> list[str]:
     """纯 Python glob：os.walk + wcmatch 匹配 + 噪音剪枝 + mtime 倒序。"""
     matcher = _compile_glob_pattern(pattern)
+    root_identity = _directory_identity(root)
     deadline = time.monotonic() + _GLOB_DEADLINE_SECONDS
     found: list[tuple[float, str]] = []
+    files_seen = 0
+    collect = min(max(1, max_results), _MAX_SEARCH_RESULTS) + 1
     for dirpath, dirnames, filenames in os.walk(root):
+        _assert_directory_identity(root, root_identity)
         dirnames[:] = [d for d in dirnames if d not in _NOISE_DIRS]
         _prune_linked_directories(dirpath, dirnames)
+        files_seen = _enforce_walk_budget(
+            root,
+            dirpath,
+            dirnames,
+            filenames,
+            files_seen,
+        )
         if time.monotonic() > deadline:
-            break
+            raise ToolError(f"glob 搜索超时（>{_GLOB_DEADLINE_SECONDS}s）")
         for fn in filenames:
+            _assert_directory_identity(root, root_identity)
             if time.monotonic() > deadline:
-                break
+                raise ToolError(f"glob 搜索超时（>{_GLOB_DEADLINE_SECONDS}s）")
             full = Path(dirpath) / fn
             try:
                 rel = full.relative_to(root).as_posix()
@@ -317,7 +493,9 @@ def _glob_via_python(pattern: str, root: Path) -> list[str]:
                 mtime = stat_verified_file(full).st_mtime
             except (FileConflictError, OSError):
                 continue
-            found.append((mtime, rel))
+            if len(found) < collect:
+                found.append((mtime, rel))
+    _assert_directory_identity(root, root_identity)
     # mtime 升序（最旧在前，对齐 OCC GlobTool 的 --sort=modified），path 升序 tiebreaker
     found.sort(key=lambda x: (x[0], x[1]))
     return [rel for _, rel in found]
@@ -386,9 +564,9 @@ async def handle_grep(
     if output_mode not in ("content", "files_with_matches", "count"):
         raise ToolError(f"output_mode 必须是 content/files_with_matches/count，得到 {output_mode!r}")
 
-    rg = await _resolve_rg()
-    if rg:
-        return await asyncio.to_thread(_grep_via_rg, rg, args, target, output_mode)
+    # See handle_glob: an unpinned native process cannot safely consume the
+    # model-authorized pathname.  The Python walker checks the root identity
+    # and each opened regular file instead.
     return await asyncio.to_thread(_grep_via_python, args, target, output_mode)
 
 
@@ -398,10 +576,10 @@ def _grep_context_params(args: dict[str, Any]) -> tuple[int, int]:
     if ctx is None:
         ctx = args.get("-C")
     if ctx is not None:
-        n = max(0, int(ctx))
+        n = min(_MAX_SEARCH_CONTEXT_LINES, max(0, int(ctx)))
         return n, n
-    before = _int_arg(args, "-B", 0)
-    after = _int_arg(args, "-A", 0)
+    before = min(_MAX_SEARCH_CONTEXT_LINES, max(0, _int_arg(args, "-B", 0)))
+    after = min(_MAX_SEARCH_CONTEXT_LINES, max(0, _int_arg(args, "-A", 0)))
     return before, after
 
 
@@ -413,11 +591,34 @@ def _grep_via_rg(rg: str, args: dict[str, Any], target: Path, output_mode: str) 
     glob_filter = str(args.get("glob") or "").strip()
     file_type = str(args.get("type") or "").strip()
     multiline = _bool_arg(args, "multiline", False)
-    head_limit = _int_arg(args, "head_limit", _DEFAULT_HEAD_LIMIT)
-    offset = _int_arg(args, "offset", 0)
+    head_limit = _bounded_head_limit(_int_arg(args, "head_limit", _DEFAULT_HEAD_LIMIT))
+    offset = min(_MAX_SEARCH_RESULTS, max(0, _int_arg(args, "offset", 0)))
     before, after = _grep_context_params(args)
 
-    cmd: list[str] = [rg, "--hidden", "--max-columns", "500"]
+    target_is_dir = target.is_dir()
+    root = target if target_is_dir else target.parent
+    root_identity = _directory_identity(root)
+    if target_is_dir:
+        _preflight_search_tree(target, timeout=_GREP_DEADLINE_SECONDS)
+    else:
+        try:
+            target_info = stat_verified_file(target)
+        except (FileConflictError, OSError) as exc:
+            raise ToolError("grep 搜索目标不是安全的普通文件") from exc
+        if target_info.st_size > _DEFAULT_MAX_FILE_BYTES:
+            raise ToolError("grep 搜索文件超过读取上限")
+
+    cmd: list[str] = [
+        rg,
+        "--hidden",
+        "--no-follow",
+        "--max-depth",
+        str(_MAX_SEARCH_DEPTH),
+        "--max-filesize",
+        str(_DEFAULT_MAX_FILE_BYTES),
+        "--max-columns",
+        "500",
+    ]
     cmd.extend(_noise_glob_args())
     if multiline:
         cmd.extend(["-U", "--multiline-dotall"])
@@ -450,16 +651,19 @@ def _grep_via_rg(rg: str, args: dict[str, Any], target: Path, output_mode: str) 
         cmd.extend(["--", target.name])
 
     rc, stdout, stderr = _run_rg(cmd, cwd)
+    _assert_directory_identity(root, root_identity)
     if rc not in (0, 1):
-        raise ToolError(f"ripgrep 失败 (exit {rc}): {stderr[:300]}")
+        raise ToolError(safe_public_error(f"ripgrep 失败 (exit {rc}): {stderr[:300]}", "ripgrep 失败"))
 
-    lines = [line[2:] if line.startswith("./") else line for line in stdout.splitlines() if line]
+    lines = [line.removeprefix("./") for line in stdout.splitlines() if line]
     if output_mode == "files_with_matches":
         page, truncated = _apply_pagination(lines, head_limit, offset)
         if not page:
             return tool_result(success=True, output_mode=output_mode, files=[], num_files=0,
                                content="No files found")
         page = _sort_files_by_mtime(target, page)
+        page, output_truncated = _bound_string_items(page)
+        truncated = truncated or output_truncated
         payload: dict[str, Any] = {"success": True, "output_mode": output_mode,
                                    "files": page, "num_files": len(page)}
         if truncated:
@@ -507,8 +711,8 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
     glob_filter = str(args.get("glob") or "").strip()
     file_type = str(args.get("type") or "").strip()
     multiline = _bool_arg(args, "multiline", False)
-    head_limit = _int_arg(args, "head_limit", _DEFAULT_HEAD_LIMIT)
-    offset = _int_arg(args, "offset", 0)
+    head_limit = _bounded_head_limit(_int_arg(args, "head_limit", _DEFAULT_HEAD_LIMIT))
+    offset = min(_MAX_SEARCH_RESULTS, max(0, _int_arg(args, "offset", 0)))
     before, after = _grep_context_params(args)
 
     flags = re.MULTILINE
@@ -519,7 +723,7 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
     try:
         regex = re.compile(pattern, flags)
     except re.error as exc:
-        raise ToolError(f"正则编译失败: {exc}") from exc
+        raise ToolError(safe_public_error(exc, "正则编译失败")) from exc
 
     include_matchers: list[Callable[[str], bool]] = []
     if glob_filter:
@@ -528,13 +732,22 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
         for g in _RG_TYPE_MAP.get(file_type, []):
             include_matchers.append(_compile_grep_include(g))
 
-    root = target if target.is_dir() else target.parent
+    target_is_dir = target.is_dir()
+    root = target if target_is_dir else target.parent
+    root_identity = _directory_identity(root)
     deadline = time.monotonic() + _GREP_DEADLINE_SECONDS
     file_matches: dict[str, list[tuple[int, str]]] = {}  # rel -> [(line_num, line)]
     file_lines: dict[str, list[str]] = {}  # 只有有匹配的文件存全部行（content 上下文用）
     file_counts: dict[str, int] = {}
+    collection_limit = head_limit + offset + 1
+    collected_matches = 0
+    collection_saturated = False
+    files_seen = 0
+    total_bytes_read = 0
 
     def search_file(full: Path, *, follow_symlink: bool = False) -> None:
+        nonlocal collected_matches, collection_saturated, total_bytes_read
+        _assert_directory_identity(root, root_identity)
         try:
             rel = full.relative_to(root).as_posix()
         except ValueError:
@@ -554,11 +767,16 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
             except OSError:
                 return
         try:
-            content = read_verified_bytes(full)
-            if len(content) > _DEFAULT_MAX_FILE_BYTES:
-                return
+            content = read_verified_bytes(full, max_bytes=_DEFAULT_MAX_FILE_BYTES)
+            total_bytes_read += len(content)
+            if total_bytes_read > _MAX_SEARCH_TOTAL_BYTES:
+                raise ToolError(
+                    f"grep 读取总量超过上限 {_MAX_SEARCH_TOTAL_BYTES} 字节"
+                )
             lines_list = content.decode("utf-8", errors="strict").splitlines(keepends=True)
-        except (FileConflictError, UnicodeDecodeError, OSError):
+        except ToolError:
+            raise
+        except (FileConflictError, UnicodeDecodeError, OSError, ValueError):
             return
         if multiline:
             # 整文件 search：DOTALL 让 . 匹配换行，定位匹配起始行号（兜底不完美，但跨行能命中）
@@ -566,34 +784,64 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
             for m in regex.finditer(whole):
                 start_line = whole.count("\n", 0, m.start()) + 1
                 first_line = m.group(0).splitlines()[0] if m.group(0) else ""
-                file_matches.setdefault(rel, []).append((start_line, first_line))
                 file_counts[rel] = file_counts.get(rel, 0) + 1
-                if rel not in file_lines:
-                    file_lines[rel] = lines_list
+                if output_mode == "files_with_matches":
+                    file_matches.setdefault(rel, []).append((start_line, first_line))
+                    return
+                if output_mode == "content":
+                    if collected_matches < collection_limit:
+                        file_matches.setdefault(rel, []).append((start_line, first_line))
+                        file_lines.setdefault(rel, lines_list)
+                        collected_matches += 1
+                    else:
+                        collection_saturated = True
         else:
             for i, line in enumerate(lines_list, 1):
                 if regex.search(line):
-                    file_matches.setdefault(rel, []).append((i, line.rstrip("\n")))
                     file_counts[rel] = file_counts.get(rel, 0) + 1
-                    if rel not in file_lines:
-                        file_lines[rel] = lines_list
+                    if output_mode == "files_with_matches":
+                        file_matches.setdefault(rel, []).append((i, line.rstrip("\n")))
+                        return
+                    if output_mode == "content":
+                        if collected_matches < collection_limit:
+                            file_matches.setdefault(rel, []).append((i, line.rstrip("\n")))
+                            file_lines.setdefault(rel, lines_list)
+                            collected_matches += 1
+                        else:
+                            collection_saturated = True
+        if output_mode == "count" and rel in file_counts:
+            file_matches.setdefault(rel, [])
 
-    if target.is_file():
+    if not target_is_dir:
         search_file(target, follow_symlink=True)
     else:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            _assert_directory_identity(root, root_identity)
             dirnames[:] = [d for d in dirnames if d not in _NOISE_DIRS]
             _prune_linked_directories(dirpath, dirnames)
+            files_seen = _enforce_walk_budget(
+                root,
+                dirpath,
+                dirnames,
+                filenames,
+                files_seen,
+            )
             if time.monotonic() > deadline:
-                break
+                raise ToolError(f"grep 搜索超时（>{_GREP_DEADLINE_SECONDS}s）")
             for fn in filenames:
+                _assert_directory_identity(root, root_identity)
                 if time.monotonic() > deadline:
-                    break
+                    raise ToolError(f"grep 搜索超时（>{_GREP_DEADLINE_SECONDS}s）")
                 search_file(Path(dirpath) / fn)
+
+    _assert_directory_identity(root, root_identity)
 
     if output_mode == "files_with_matches":
         files = _sort_files_by_mtime(root, list(file_matches.keys()))
         page, truncated = _apply_pagination(files, head_limit, offset)
+        truncated = truncated or len(files) > _MAX_SEARCH_RESULTS
+        page, output_truncated = _bound_string_items(page)
+        truncated = truncated or output_truncated
         if not page:
             return tool_result(success=True, output_mode=output_mode, files=[], num_files=0,
                                content="No files found")
@@ -630,20 +878,48 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
 
     # content
     out_lines: list[str] = []
+    output_chars = 0
+    output_saturated = False
+    output_line_limit = head_limit + offset + 1
     for rel in sorted(file_matches.keys()):
+        if output_saturated:
+            break
         full_lines = file_lines.get(rel, [])
         for line_num, _text in file_matches[rel]:
+            if output_saturated:
+                break
             start = max(0, line_num - 1 - before)
             end = min(len(full_lines), line_num + after)
             for j in range(start, end):
                 ln = j + 1
                 text = full_lines[j].rstrip("\n")
-                out_lines.append(f"{rel}:{ln}:{text}" if show_line_numbers else f"{rel}:{text}")
+                rendered = f"{rel}:{ln}:{text}" if show_line_numbers else f"{rel}:{text}"
+                if len(out_lines) >= output_line_limit:
+                    output_saturated = True
+                    break
+                remaining = _MAX_SEARCH_OUTPUT_CHARS - output_chars
+                if remaining <= 0:
+                    output_saturated = True
+                    break
+                separator_size = 1 if out_lines else 0
+                available = remaining - separator_size
+                if available <= 0:
+                    output_saturated = True
+                    break
+                if len(rendered) > available:
+                    out_lines.append(rendered[:available])
+                    output_chars = _MAX_SEARCH_OUTPUT_CHARS
+                    output_saturated = True
+                    break
+                out_lines.append(rendered)
+                output_chars += separator_size + len(rendered)
     page, truncated = _apply_pagination(out_lines, head_limit, offset)
+    truncated = truncated or collection_saturated or output_saturated
     if not page:
         return tool_result(success=True, output_mode=output_mode, content="No matches found", num_lines=0)
     payload = {"success": True, "output_mode": output_mode,
-               "content": _truncate("\n".join(page)), "num_lines": len(page)}
+               "content": _truncate("\n".join(page), limit=_MAX_SEARCH_OUTPUT_CHARS),
+               "num_lines": len(page)}
     if truncated:
         payload["applied_limit"] = head_limit
     if offset:
@@ -677,13 +953,17 @@ async def handle_patch(
     workspace_store: Any | None = None,
     security_service: Any | None = None,
 ) -> str:
-    path = await authorize_file_tool(
+    authorized = await authorize_file_tool(
         args,
         operation="patch",
         tool_name="patch",
         workspace_store=workspace_store,
         security_service=security_service,
+        bind_identity=True,
     )
+    if not isinstance(authorized, AuthorizedFileTarget):
+        raise ToolError("文件授权未绑定目标身份")
+    path = authorized.path
     old = str(args.get("old", ""))
     new = str(args.get("new", ""))
     count = int(args.get("count", 1))
@@ -697,7 +977,13 @@ async def handle_patch(
     if not old:
         raise ToolError("old 不能为空")
 
-    version = snapshot_file(path)
+    try:
+        version = snapshot_file(
+            path,
+            expected_identity=authorized.identity,
+        )
+    except (FileConflictError, OSError, ValueError) as exc:
+        raise ToolError(safe_public_error(exc, "补丁目标身份校验失败")) from exc
     text_bytes = version.data
     text = text_bytes.decode("utf-8", errors="replace")
     text, had_bom = _strip_bom(text)
@@ -714,7 +1000,10 @@ async def handle_patch(
     if had_bom and not updated.startswith("﻿"):
         updated = "﻿" + updated
 
-    atomic_replace_bytes(path, updated.encode("utf-8"), version)
+    try:
+        atomic_replace_bytes(path, updated.encode("utf-8"), version)
+    except (FileConflictError, OSError, ValueError) as exc:
+        raise ToolError(safe_public_error(exc, "补丁写入失败")) from exc
 
     diff = "".join(
         difflib.unified_diff(

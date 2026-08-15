@@ -11,7 +11,6 @@ from crew.core.types import Message
 from crew.gateway.server import create_app
 from crew.state.config import Config
 
-
 OWNER_A = "A:uid-a"
 OWNER_B = "B:uid-b"
 LOCAL_OWNER = "local"
@@ -91,13 +90,23 @@ def test_same_session_id_is_isolated_across_accounts(tmp_path):
     assert [msg.content for msg in store.load("same", owner_account_id=OWNER_B)] == ["hello B"]
 
 
-def test_ws_same_session_id_keeps_local_owner_separate_from_stored_owner(tmp_path):
+def test_ws_same_session_id_keeps_local_owner_separate_from_stored_owner(
+    tmp_path,
+    send_ws_json,
+):
     crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
     crew.session_store.save("same", [Message.user("hello A")], owner_account_id=OWNER_A)
     client = TestClient(create_app(crew))
 
     with client.websocket_connect("/ws") as ws:
-        ws.send_json({"session_id": "same", "query": "hello"})
+        send_ws_json(
+            ws,
+            {
+                "session_id": "same",
+                "query": "hello",
+                "request_id": "account-isolation-request-0001",
+            }
+        )
         # 首帧可能是 model_fallback 等 status，跳过直到业务 delta/final/error
         msg = ws.receive_json()
         for _ in range(10):

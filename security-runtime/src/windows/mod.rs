@@ -1,18 +1,22 @@
 pub mod acl;
+mod desktop;
 pub mod identity;
 pub mod job;
+pub mod path;
 pub mod process;
 pub mod readiness;
 pub mod state;
 pub mod token;
+mod users;
 pub mod wfp;
 
 use std::collections::BTreeMap;
 use std::env;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Receiver, SyncSender};
 
-use crate::protocol::{RuntimeCapabilities, RuntimeMessage};
+use crate::protocol::{RuntimeCapabilities, RuntimeMessage, StdioInputMessage};
 
 pub struct WindowsRunRequest {
     pub command: Vec<String>,
@@ -25,6 +29,7 @@ pub struct WindowsRunRequest {
     pub allow_local_binding: bool,
     pub max_output_bytes: usize,
     pub stdin: Option<Vec<u8>>,
+    pub stdin_stream: Option<Receiver<StdioInputMessage>>,
     pub env_overrides: BTreeMap<String, String>,
 }
 
@@ -34,23 +39,47 @@ pub struct WindowsRuntimeError {
 }
 
 pub fn run(
-    request: WindowsRunRequest,
+    mut request: WindowsRunRequest,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), WindowsRuntimeError> {
+    if request.allow_local_binding {
+        return Err(error(
+            "sandbox_denied",
+            "Windows local binding is unavailable without a dedicated bind-capable identity",
+        ));
+    }
+    let prepared = path::prepare_policy(
+        &request.cwd,
+        &request.writable_roots,
+        &request.readable_roots,
+        &request.denied_roots,
+    )
+    .map_err(|message| error("sandbox_denied", message))?;
+    request.cwd = prepared.cwd;
+    request.writable_roots = prepared.writable_roots;
+    request.readable_roots = prepared.readable_roots;
+    request.denied_roots = prepared.denied_roots;
+
+    identity::validate_runtime_location()
+        .map_err(|message| error("sandbox_unavailable", message))?;
     let state_dir = state_dir().map_err(|message| error("sandbox_unavailable", message))?;
     let readiness = readiness::probe(&state_dir);
     if !readiness.filesystem_sandbox {
         return Err(error("sandbox_unavailable", readiness.detail));
     }
-    if request.network_enabled {
-        wfp::verify_installed().map_err(|message| error("network_unavailable", message))?;
-    }
+    let offline =
+        identity::load(&state_dir).map_err(|message| error("sandbox_unavailable", message))?;
+    let online = identity::load_online(&state_dir)
+        .map_err(|message| error("sandbox_unavailable", message))?;
+    wfp::verify_installed(&offline.username, &online.username)
+        .map_err(|message| error("network_unavailable", message))?;
     let credentials = if request.network_enabled {
-        identity::load_online(&state_dir)
+        &online
     } else {
-        identity::load(&state_dir)
-    }
-    .map_err(|message| error("sandbox_unavailable", message))?;
+        &offline
+    };
+    let policy =
+        crate::network::NetworkPolicy::new(request.network_rules.clone()).map_err(network_error)?;
     // H-20 (SEC-P2-003): the cross-process ACL mutex acquired by ``AclLease``
     // is the serialization boundary for managed runs. We start the proxy
     // *after* acquiring it and drop the proxy *before* releasing it (see the
@@ -65,16 +94,47 @@ pub fn run(
     // safe until then.
     let lease = acl::AclLease::prepare(&state_dir, &credentials.username, &request)
         .map_err(|message| error("sandbox_denied", message))?;
-    let policy =
-        crate::network::NetworkPolicy::new(request.network_rules.clone()).map_err(network_error)?;
+    if let Err(identity_error) = lease.verify_pins() {
+        let cleanup = lease.finish();
+        return Err(match cleanup {
+            Ok(()) => error("sandbox_denied", identity_error),
+            Err(cleanup) => error(
+                "sandbox_denied",
+                format!("{identity_error}; ACL cleanup also failed: {cleanup}"),
+            ),
+        });
+    }
     let proxy = if request.network_enabled {
-        Some(
-            crate::network::proxy::ProxyHandle::start_on(policy, managed_proxy_port())
-                .map_err(network_error)?,
-        )
+        match crate::network::proxy::ProxyHandle::start_on(policy, managed_proxy_port()) {
+            Ok(proxy) => Some(proxy),
+            Err(proxy_error) => {
+                let cleanup = lease.finish();
+                return Err(match cleanup {
+                    Ok(()) => network_error(proxy_error),
+                    Err(cleanup) => error(
+                        "sandbox_denied",
+                        format!(
+                            "{}; ACL cleanup also failed: {cleanup}",
+                            proxy_error.message
+                        ),
+                    ),
+                });
+            }
+        }
     } else {
         None
     };
+    if let Err(identity_error) = lease.verify_pins() {
+        drop(proxy);
+        let cleanup = lease.finish();
+        return Err(match cleanup {
+            Ok(()) => error("sandbox_denied", identity_error),
+            Err(cleanup) => error(
+                "sandbox_denied",
+                format!("{identity_error}; ACL cleanup also failed: {cleanup}"),
+            ),
+        });
+    }
     let capabilities = RuntimeCapabilities {
         backend: "windows_sandbox_account",
         filesystem_sandbox: true,
@@ -88,14 +148,27 @@ pub fn run(
         windows_restricted_token: true,
         windows_acl: true,
         windows_job: true,
-        windows_wfp: request.network_enabled,
+        windows_wfp: true,
     };
+    let proxy_url = proxy.as_ref().map(|proxy| {
+        proxy.proxy_url(SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            managed_proxy_port(),
+        )))
+    });
+    let stdin_stream = request.stdin_stream.take();
     let outcome = process::run_via_account(
-        &credentials,
+        credentials,
         &request,
-        lease.capability_sids(),
-        capabilities,
-        sender,
+        process::RunViaAccountContext {
+            temp_dir: lease.temp_dir(),
+            capability_sids: lease.capability_sids(),
+            proxy_url,
+            capabilities,
+            stdin_stream,
+            sender,
+        },
+        || lease.verify_pins(),
     )
     .map_err(|message| {
         if message.starts_with("OUTPUT_TRUNCATED:") {
@@ -108,8 +181,26 @@ pub fn run(
     // the mutex releases, or the next managed run spuriously fails to bind.
     // Both drops run on every path (Ok and Err).
     drop(proxy);
-    drop(lease);
-    outcome?;
+    let cleanup = lease
+        .finish()
+        .map_err(|message| error("sandbox_denied", message));
+    let exit_code = match (outcome, cleanup) {
+        (Ok(exit_code), Ok(())) => exit_code,
+        (Err(process_error), Ok(())) => return Err(process_error),
+        (Ok(_), Err(cleanup)) => return Err(cleanup),
+        (Err(process_error), Err(cleanup)) => {
+            return Err(error(
+                "sandbox_denied",
+                format!(
+                    "{}; cleanup failure: {}",
+                    process_error.message, cleanup.message
+                ),
+            ))
+        }
+    };
+    sender
+        .send(RuntimeMessage::Completed(exit_code))
+        .map_err(|_| error("sandbox_denied", "protocol receiver disconnected"))?;
     Ok(())
 }
 
@@ -123,9 +214,7 @@ fn state_dir() -> Result<PathBuf, String> {
     let configured = env::var_os("ACE_SECURITY_STATE_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| "ACE_SECURITY_STATE_DIR is not configured".to_string())?;
-    if !configured.is_absolute() {
-        return Err("Windows security state directory must be absolute".to_string());
-    }
+    path::validate_local_absolute(&configured)?;
     Ok(configured)
 }
 

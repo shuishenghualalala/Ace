@@ -34,7 +34,7 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 
 ### 1.2 Linux 后端要点
 
-- **bubblewrap**（`linux/bwrap.rs`）：优先用系统 `bwrap`，缺失时回落到随包 `bwrap`（`ACE_BUNDLED_BWRAP`）。`--ro-bind / /` + 可写根 `--bind` + 受保护路径 `--ro-bind` 覆盖。
+- **bubblewrap**（`linux/bwrap.rs`）：优先用受信系统 `bwrap`，缺失时使用由已验证 runtime manifest 派生路径与摘要的随包 `bwrap`。`--ro-bind / /` + 可写根 `--bind` + 受保护路径 `--ro-bind` 覆盖。
 - **seccomp**（`linux/seccomp.rs`）：`--inner-seccomp` 子命令在子进程内应用 syscall 过滤；网络默认关闭。
 - **WSL**（`linux/wsl.rs`）：检测 WSL 版本；WSL1 不支持 user namespace → 拒绝沙箱执行（不静默降级）。
 - **托管网络**：用户态代理（`network/`）+ seccomp 兜底。
@@ -53,10 +53,12 @@ NDJSON over stdio，**版本化 + 鉴权 + 防重放**：
 ```
 runtime 启动 → 读 ACE_SECURITY_RUNTIME_TOKEN（≥32 字节）
             → stdout 写 {type:"ready", version:2,
-                          capabilities:["stdin_once","stream_output"]}
+                          capabilities:["deny_read_glob_v1",
+                                        "stdin_once","stream_output"]}
 host 每行一个请求：
   {version:2, token, nonce,
    request:{op:"run", command, cwd, writable_roots, ...,
+            filesystem_globs,
             stdin_b64?, env_overrides?}}
   → token 不符 → sandbox_denied
   → nonce 重复或过短 → sandbox_denied
@@ -72,8 +74,15 @@ runtime 每请求回连续事件：
 得到最终 `RuntimeCommandResult`，不会收到原始输出 chunk。
 
 `run` 请求字段：`command[]`, `cwd`, `writable_roots[]`, `readable_roots[]`,
-`denied_roots[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
+`denied_roots[]`, `filesystem_globs[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
 `max_output_bytes`, `stdin_b64?`, `env_overrides?`。
+
+`filesystem_globs` 只接受 `{root, pattern, access:"deny_read"}`。Linux 在构造 bwrap
+计划时扫描 canonical root 下的现有文件和符号链接，不跟随符号链接目录，并同时屏蔽逻辑
+匹配路径及其 canonical target；穿过 sandbox 可写符号链接的规则会在 spawn 前拒绝。
+所有规则合计最多生成 8192 个唯一屏蔽路径（canonical target 也计数），第 8193 个立即
+失败。无效模式、root 缺失/变更、扫描错误和不支持该能力的平台都不会降级为无 glob
+执行；旧 runtime 因缺少 `deny_read_glob_v1` ready capability 也会被 host 拒绝。
 
 固定边界：请求帧 2 MiB、响应帧 128 KiB、单输出 chunk 64 KiB、stdin 1 MiB、
 环境变量名值合计 256 KiB、默认 stdout+stderr 总量 2 MiB。stdin 只写一次并立即关闭；
@@ -104,7 +113,8 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 | Linux | `rustup` + `gcc`/`libc6-dev`；`bubblewrap` 装好（测试需要） |
 | macOS | Rust stable + Xcode Command Line Tools；真实测试不能嵌套在另一个 Seatbelt 会话中 |
 
-依赖见 `Cargo.toml`：`serde/serde_json/rand/base64`（通用）；`libc/seccompiler/sha2`（Linux）；`windows-sys = "0.52"`（Windows，**勿随意升级**——0.59+ 会迁 API 路径，见变更记录）。
+依赖见 `Cargo.toml`：`serde/serde_json/rand/base64`（通用）；`libc/seccompiler/sha2/globset`
+（Linux）；`windows-sys = "0.52"`（Windows，**勿随意升级**——0.59+ 会迁 API 路径，见变更记录）。
 
 ---
 

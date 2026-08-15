@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -63,29 +64,38 @@ class _ActiveOwnerStub:
     def __init__(self) -> None:
         self.claimed: list[str] = []
 
-    def claim(self, owner_account_id: str) -> None:
+    def claim(self, owner_account_id: str):
         self.claimed.append(owner_account_id)
+        return SimpleNamespace(claimed_at=time.time())
 
 
-def _client(connections: _ReplayConnections) -> TestClient:
+def _client(
+    connections: _ReplayConnections,
+    *,
+    security_service=None,
+    browser_manager=None,
+    dispatcher=None,
+) -> TestClient:
     app = FastAPI()
     crew = SimpleNamespace(
         active_owner=_ActiveOwnerStub(),
-        config=SimpleNamespace(),
+        config=SimpleNamespace(auth_session_ttl_seconds=3600),
         session_store=SimpleNamespace(session_belongs_to=lambda _sid, _owner: True),
+        security_service=security_service,
+        browser_manager=browser_manager,
     )
-    dispatcher = SimpleNamespace()
-    channel_manager = SimpleNamespace(status=lambda: [])
+    dispatcher = dispatcher or SimpleNamespace()
+    channel_manager = SimpleNamespace(status=list)
     app.include_router(create_ws_router(crew, dispatcher, connections, channel_manager))
     return TestClient(app)
 
 
-def test_ws_subscribe_replays_after_last_gateway_sequence():
+def test_ws_subscribe_replays_after_last_gateway_sequence(send_ws_json):
     connections = _ReplayConnections()
     client = _client(connections)
 
     with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
-        ws.send_json({
+        send_ws_json(ws, {
             "action": "subscribe",
             "session_id": "s1",
             "sessions": ["s1", "s2"],
@@ -101,23 +111,75 @@ def test_ws_subscribe_replays_after_last_gateway_sequence():
     assert second["body"]["text"] == "replay:s2:8"
 
 
-def test_ws_subscribe_replay_defaults_invalid_sequence_to_zero():
+def test_ws_subscribe_replay_rejects_invalid_sequence_type(send_ws_json):
     connections = _ReplayConnections()
     client = _client(connections)
 
     with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
-        ws.send_json({
+        send_ws_json(ws, {
             "action": "resume",
             "session_id": "s1",
             "last_gateway_sequences": {"s1": "bad"},
         })
         msg = ws.receive_json()
 
-    assert connections.replays == [("s1", 0)]
-    assert msg["gateway_sequence"] == 1
+    assert connections.replays == []
+    assert msg["kind"] == "error"
+    assert msg["body"]["code"] == "PROTOCOL_INVALID"
 
 
-def test_followup_answer_waits_for_gateway_resolution_ack(monkeypatch):
+def test_last_observer_disconnect_revokes_live_session_resources(
+    monkeypatch,
+    send_ws_json,
+):
+    from crew.tools.process_registry import process_registry
+
+    class _OrphanConnections(_ReplayConnections):
+        def unregister_all(self, _socket, _session_ids: set[str], **_kwargs):
+            return set(_session_ids)
+
+    frozen: list[tuple[str, str]] = []
+    stopped: list[tuple[str, str, str]] = []
+    revoked: list[tuple[str, str, str]] = []
+    closed: list[tuple[str, str]] = []
+    security_service = SimpleNamespace(
+        freeze_session=lambda owner, session: frozen.append((owner, session))
+    )
+    dispatcher = SimpleNamespace(
+        stop=lambda session, *, reason, owner_account_id: stopped.append(
+            (owner_account_id, session, reason)
+        )
+    )
+
+    async def close_session(owner: str, session: str) -> None:
+        closed.append((owner, session))
+
+    monkeypatch.setattr(
+        process_registry,
+        "revoke_session",
+        lambda owner, session, *, reason: revoked.append((owner, session, reason)),
+    )
+    connections = _OrphanConnections()
+    client = _client(
+        connections,
+        security_service=security_service,
+        browser_manager=SimpleNamespace(close_session=close_session),
+        dispatcher=dispatcher,
+    )
+
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        send_ws_json(ws, {"action": "subscribe", "session_id": "s1"})
+        ws.receive_json()
+
+    assert len(frozen) == 1
+    owner = frozen[0][0]
+    assert frozen == [(owner, "s1")]
+    assert stopped == [(owner, "s1", "最后一个认证观察者已断开，执行权限已撤销")]
+    assert revoked == [(owner, "s1", "LAST_OBSERVER_DISCONNECTED")]
+    assert closed == [(owner, "s1")]
+
+
+def test_followup_answer_waits_for_gateway_resolution_ack(monkeypatch, send_ws_json):
     from crew.core import followup
 
     resolved = []
@@ -132,7 +194,7 @@ def test_followup_answer_waits_for_gateway_resolution_ack(monkeypatch):
     client = _client(connections)
 
     with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
-        ws.send_json({
+        send_ws_json(ws, {
             "action": "followup_answer",
             "session_id": "s1",
             "question_id": "permission-1",

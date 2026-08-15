@@ -11,9 +11,9 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, CopySid, CreateRestrictedToken, CreateWellKnownSid, GetLengthSid,
     GetTokenInformation, LookupAccountNameW, LookupPrivilegeValueW, SetTokenInformation,
-    TokenDefaultDacl, TokenGroups, TokenUser, ACL, SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES,
-    SID_NAME_USE, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY,
-    TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
+    TokenDefaultDacl, TokenGroups, ACL, SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES, SID_NAME_USE,
+    TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL,
+    TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -107,10 +107,27 @@ pub fn sid_string_for_account(account: &str) -> Result<String, String> {
     Ok(value)
 }
 
+/// Return the current logon SID while the runner still has the account token.
+/// The private Desktop ACL is granted to this SID, matching the restricted
+/// token's logon restriction rather than the interactive user.
+pub(crate) fn current_logon_sid_bytes() -> Result<Vec<u8>, String> {
+    let mut token = 0;
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(format!("OpenProcessToken failed: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    let result = get_logon_sid_bytes(token);
+    unsafe { CloseHandle(token) };
+    result
+}
+
 /// Build a restricted token for the sandbox runner.
 ///
-/// Audit W1: restricting SIDs must include not just the capability SIDs but
-/// also the logon SID, Everyone, and the token-user SID, and the token must
+/// Restricting SIDs include the per-run capability SIDs, logon SID, and
+/// Everyone. The stable technical-account user SID is intentionally omitted:
+/// including it would let account allow ACEs bypass the per-run capability
+/// intersection. The token must
 /// carry a permissive default DACL so the sandboxed process can create
 /// pipes/IPC objects without ACCESS_DENIED under real UAC. This mirrors the
 /// Codex `create_workspace_write_token_with_caps_and_user_from` path (the
@@ -135,14 +152,7 @@ pub fn create_restricted_token(capability_sids: &[String]) -> Result<HANDLE, Str
         }));
     }
     // Gather SIDs needed for both the restricting list and the default DACL.
-    // All three are owned by their Vec and must outlive CreateRestrictedToken.
-    let mut user_sid = match get_user_sid_bytes(base) {
-        Ok(v) => v,
-        Err(error) => {
-            unsafe { CloseHandle(base) };
-            return Err(error);
-        }
-    };
+    // Both are owned by their Vec and must outlive CreateRestrictedToken.
     let mut logon_sid = match get_logon_sid_bytes(base) {
         Ok(v) => v,
         Err(error) => {
@@ -157,23 +167,17 @@ pub fn create_restricted_token(capability_sids: &[String]) -> Result<HANDLE, Str
             return Err(error);
         }
     };
-    let psid_user = user_sid.as_mut_ptr() as *mut c_void;
     let psid_logon = logon_sid.as_mut_ptr() as *mut c_void;
     let psid_everyone = everyone.as_mut_ptr() as *mut c_void;
 
-    // Restricting SIDs order: capabilities..., user SID, logon, Everyone
-    // (Codex token.rs create_token_with_caps_from, elevated path).
-    let mut entries: Vec<SID_AND_ATTRIBUTES> = Vec::with_capacity(local_sids.len() + 3);
+    // Restricting SIDs order: capabilities..., logon, Everyone.
+    let mut entries: Vec<SID_AND_ATTRIBUTES> = Vec::with_capacity(local_sids.len() + 2);
     for sid in &local_sids {
         entries.push(SID_AND_ATTRIBUTES {
             Sid: sid.as_ptr(),
             Attributes: 0,
         });
     }
-    entries.push(SID_AND_ATTRIBUTES {
-        Sid: psid_user,
-        Attributes: 0,
-    });
     entries.push(SID_AND_ATTRIBUTES {
         Sid: psid_logon,
         Attributes: 0,
@@ -350,55 +354,6 @@ fn world_sid() -> Result<Vec<u8>, String> {
         }));
     }
     Ok(buf)
-}
-
-/// Extract the token-user SID bytes from a token (Codex token.rs:279-317).
-fn get_user_sid_bytes(token: HANDLE) -> Result<Vec<u8>, String> {
-    let mut needed: u32 = 0;
-    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed) };
-    if needed == 0 {
-        return Err(format!("TokenUser size query returned 0: {}", unsafe {
-            GetLastError()
-        }));
-    }
-    let mut buf = vec![0_u8; needed as usize];
-    let ok = unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            buf.as_mut_ptr() as *mut c_void,
-            needed,
-            &mut needed,
-        )
-    };
-    if ok == 0 || (needed as usize) < std::mem::size_of::<TOKEN_USER>() {
-        return Err(format!(
-            "GetTokenInformation(TokenUser) failed: {}",
-            unsafe { GetLastError() }
-        ));
-    }
-    let token_user: TOKEN_USER =
-        unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const TOKEN_USER) };
-    let sid_len = unsafe { GetLengthSid(token_user.User.Sid) };
-    if sid_len == 0 {
-        return Err(format!("GetLengthSid(TokenUser) failed: {}", unsafe {
-            GetLastError()
-        }));
-    }
-    let mut out = vec![0_u8; sid_len as usize];
-    if unsafe {
-        CopySid(
-            sid_len,
-            out.as_mut_ptr() as *mut c_void,
-            token_user.User.Sid,
-        )
-    } == 0
-    {
-        return Err(format!("CopySid(TokenUser) failed: {}", unsafe {
-            GetLastError()
-        }));
-    }
-    Ok(out)
 }
 
 /// Extract the logon SID from the token's group list (Codex token.rs:194-277).

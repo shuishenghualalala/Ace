@@ -94,7 +94,7 @@ async def test_list_servers_admin_ok_empty(api):
 
 # ---- CRUD 往返 + 持久化 ----
 
-async def test_create_server_registers_tools_and_persists(api):
+async def test_create_stdio_server_defers_until_task_authorization(api):
     client, crew, config_yaml = api
     resp = await client.post("/api/mcp/servers", json=_echo_payload(), headers=LOCAL_HEADERS)
     assert resp.status_code == 201
@@ -102,21 +102,11 @@ async def test_create_server_registers_tools_and_persists(api):
     assert body["ok"] is True
     srv = body["servers"][0]
     assert srv["name"] == "echo"
-    # create 现为 fire-and-forget（后台连接），响应时可能尚未 connected。
-    # 轮询 status 等后台 worker.start() 完成（echo server 连接快，2s 内）。
-    import asyncio as _asyncio
-    connected_srv = None
-    for _ in range(20):
-        await _asyncio.sleep(0.1)
-        r = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
-        for s in r.json()["servers"]:
-            if s["name"] == "echo" and s["connected"]:
-                connected_srv = s
-                break
-        if connected_srv:
-            break
-    assert connected_srv is not None, "echo server 未在 2s 内连上"
-    assert "echo" in connected_srv["tools"]
+    # No owner/session/task authority exists in this admin request. The config is
+    # pinned now, while process creation is deferred to an authenticated agent turn.
+    assert srv["connected"] is False
+    assert srv["tools"] == []
+    assert srv["error"] == ""
 
     # 内存配置已更新
     assert "echo" in crew.config.mcp_servers
@@ -124,6 +114,32 @@ async def test_create_server_registers_tools_and_persists(api):
     import yaml as _yaml
     data = _yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
     assert "echo" in data["mcp_servers"]
+
+
+async def test_create_persistence_failure_hides_secret_and_rolls_back(
+    api,
+    monkeypatch,
+    caplog,
+):
+    client, crew, _ = api
+    canary = "mcp-secret-canary"
+
+    def fail_persistence():
+        raise RuntimeError(rf"C:\private\config.yaml access_token={canary}")
+
+    monkeypatch.setattr(crew.config, "persist_mcp_servers", fail_persistence)
+    response = await client.post(
+        "/api/mcp/servers",
+        json=_echo_payload("failure"),
+        headers=LOCAL_HEADERS,
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"ok": False, "error": "MCP 配置持久化失败"}
+    assert "failure" not in crew.config.mcp_servers
+    assert canary not in response.text
+    assert canary not in caplog.text
+    assert r"C:\private\config.yaml" not in response.text
 
 
 async def test_create_duplicate_returns_409(api):
@@ -141,6 +157,36 @@ async def test_create_invalid_name_rejected(api):
         headers=LOCAL_HEADERS,
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "name": "url-secret",
+            "url": "https://mcp.example.test/rpc?access_token=canary",
+            "transport": "http",
+        },
+        {
+            "name": "argv-secret",
+            "command": sys.executable,
+            "args": ["--token", "canary"],
+        },
+    ],
+)
+async def test_create_rejects_credential_bearing_url_and_argv(api, payload):
+    client, crew, config_yaml = api
+    before = config_yaml.read_text(encoding="utf-8")
+
+    response = await client.post(
+        "/api/mcp/servers",
+        json=payload,
+        headers=LOCAL_HEADERS,
+    )
+
+    assert response.status_code == 400
+    assert crew.config.mcp_servers == {}
+    assert config_yaml.read_text(encoding="utf-8") == before
 
 
 async def test_create_missing_command_and_url_rejected(api):
@@ -213,7 +259,7 @@ async def test_reload_nonexistent_returns_404(api):
 # ---- 密钥脱敏 ----
 
 async def test_secret_env_redacted_in_get(api):
-    client, _, _ = api
+    client, _, config_yaml = api
     resp = await client.post(
         "/api/mcp/servers",
         json={
@@ -228,5 +274,41 @@ async def test_secret_env_redacted_in_get(api):
     # GET 返回脱敏
     resp = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
     srv = next(s for s in resp.json()["servers"] if s["name"] == "secret")
-    assert srv["config"]["env"]["API_KEY"] == "***"
-    assert srv["config"]["env"]["PATH_EXTRA"] == "/usr/bin"
+    assert srv["config"]["env"]["API_KEY"] == {
+        "source": "local",
+        "value": "***",
+    }
+    assert srv["config"]["env"]["PATH_EXTRA"] == {
+        "source": "local",
+        "value": "/usr/bin",
+    }
+    persisted = config_yaml.read_text(encoding="utf-8")
+    assert "sk-supersecret" not in persisted
+    assert "@ace-secret:v1:" in persisted
+
+
+async def test_secret_http_header_is_keyring_backed_and_redacted(api):
+    client, _, config_yaml = api
+    response = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "remote",
+            "url": "https://mcp.example.invalid/rpc",
+            "transport": "http",
+            "headers": {
+                "Authorization": "Bearer mcp-secret",
+                "X-Trace": "visible",
+            },
+        },
+        headers=LOCAL_HEADERS,
+    )
+
+    assert response.status_code == 201
+    server = next(
+        item for item in response.json()["servers"] if item["name"] == "remote"
+    )
+    assert server["config"]["headers"]["Authorization"] == "***"
+    assert server["config"]["headers"]["X-Trace"] == "visible"
+    persisted = config_yaml.read_text(encoding="utf-8")
+    assert "mcp-secret" not in persisted
+    assert "Authorization: '@ace-secret:v1:" in persisted

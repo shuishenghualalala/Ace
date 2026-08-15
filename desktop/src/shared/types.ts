@@ -22,6 +22,7 @@ export type IpcResult<T> =
 /** feedback service 提交结果（沿用既有返回结构）。 */
 export interface FeedbackSubmitResult {
   success: boolean;
+  canceled?: boolean;
   message?: string;
   resultCode?: string;
   statusCode?: number;
@@ -91,11 +92,33 @@ export interface VersionUpdatePackageResult {
  * - downloaded：已完整下载、可随时安装的包；安装成功 / 被更新版本抢占时清空。
  * - forceLock：force 阻断锁；当本机版本 >= requiredVersion 时清空（更新成功并重启后）。
  */
+export interface UpdateFileIdentity {
+  device: string;
+  inode: string;
+  size: number;
+  mtimeNs: string;
+  ctimeNs: string;
+}
+
+export interface PersistedUpdateSignatureMetadata {
+  schema: 1;
+  version: string;
+  filename: string;
+  package_sha256: string;
+  package_size: number;
+}
+
 export interface DownloadedUpdateRecord {
+  schema: 1;
   filePath: string;
   version: string;
   size: number;
   type: 'force' | 'reminder';
+  packageSha256: string;
+  signatureSha256: string;
+  signatureMetadata: PersistedUpdateSignatureMetadata;
+  packageIdentity: UpdateFileIdentity;
+  signatureIdentity: UpdateFileIdentity;
   message?: string | undefined;
 }
 

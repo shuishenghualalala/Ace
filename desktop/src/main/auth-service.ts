@@ -18,6 +18,12 @@ export type VersionUpdateCallback = (payload: VersionUpdatePayload) => void;
 export type SessionExpiredCallback = () => void | Promise<void>;
 
 export class LoginNewService {
+  setGatewayProofProvider(
+    provider: (method: string, pathname: string, body: string) => string,
+  ): void {
+    desktopAuthSession.setGatewayProofProvider(provider);
+  }
+
   /** 当前认证态（mode / configured / providerId / isLoggedIn / user）。 */
   getState(): AuthStateSnapshot {
     return desktopAuthSession.state();
@@ -70,7 +76,9 @@ export class LoginNewService {
   }
 
   // -- 生命周期钩子（保留签名供主进程调用；行为为空，真正逻辑在 IPC handler 侧）--
-  setStrictSecurityEnabled(_enabled: boolean): void {}
+  setStrictSecurityEnabled(enabled: boolean): void {
+    if (!enabled) throw new Error('strict security cannot be disabled');
+  }
   setSessionExpiredHandler(_cb: SessionExpiredCallback | null): void {}
   setVersionUpdateHandler(_cb: VersionUpdateCallback | null): void {}
   async heartbeat(_version?: string): Promise<{ success: boolean }> {

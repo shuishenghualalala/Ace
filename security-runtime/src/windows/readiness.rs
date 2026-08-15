@@ -19,6 +19,9 @@ pub fn probe(state_dir: &Path) -> Readiness {
     if let Err(error) = super::acl::protect_legacy_state(state_dir) {
         return not_ready(error);
     }
+    if let Err(error) = super::acl::recover_stale(state_dir) {
+        return not_ready(error);
+    }
     // M5: if a prior AclLease::drop logged ACE revoke failures, the sandbox
     // may have residue ACEs -- refuse to report ready until cleared.
     match super::state::read_optional_file(&state_dir.join(ACL_CLEANUP_LOG)) {
@@ -47,8 +50,16 @@ pub fn probe(state_dir: &Path) -> Readiness {
     if let Err(error) = super::token::sid_string_for_account(&online.username) {
         return not_ready(error);
     }
+    if let Err(error) = super::wfp::verify_installed(&credentials.username, &online.username) {
+        return not_ready(error);
+    }
     match super::job::KillOnCloseJob::new() {
-        Ok(job) => drop(job),
+        Ok(job) => {
+            if let Err(error) = job.query_limits() {
+                return not_ready(error);
+            }
+            drop(job);
+        }
         Err(error) => return not_ready(error),
     }
 
@@ -61,8 +72,9 @@ pub fn probe(state_dir: &Path) -> Readiness {
 
     Readiness {
         filesystem_sandbox: true,
-        detail: "Windows sandbox identity, SID, Job, ACL lease, and restricted token are ready"
-            .to_string(),
+        detail:
+            "Windows sandbox identities, WFP, Job limits, ACL lease, and restricted token are ready"
+                .to_string(),
     }
 }
 
@@ -92,15 +104,14 @@ fn probe_acl_and_token(state_dir: &Path, account: &str) -> Result<(), String> {
         allow_local_binding: false,
         max_output_bytes: 4096,
         stdin: None,
+        stdin_stream: None,
         env_overrides: Default::default(),
     };
     let lease = AclLease::prepare(&probe_state, account, &request)?;
     let capability_sids = lease.capability_sids().to_vec();
     let token_handle = super::token::create_restricted_token(&capability_sids)?;
     unsafe { CloseHandle(token_handle) };
-    // Drop the lease -- this revokes the ACEs it applied.
-    drop(lease);
-    // If drop logged failures, the probe dir will contain the cleanup log.
+    lease.finish()?;
     let probe_failed = probe_state.join(ACL_CLEANUP_LOG).exists();
     let _ = fs::remove_dir_all(&probe_state);
     if probe_failed {

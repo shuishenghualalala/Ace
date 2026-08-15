@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
 from crew.gateway.channel_manager import ChannelManager
@@ -128,6 +128,61 @@ async def test_repeated_loopback_requests_share_local_owner(api):
     assert first.status_code == 200
     assert second.status_code == 200
     assert api.state.crew.active_owner.current().owner_account_id == "local"
+
+
+def test_startup_with_persisted_lease_does_not_activate_processes_before_auth(
+    api,
+    monkeypatch,
+):
+    from crew.tools.process_registry import process_registry
+
+    api.state.crew.active_owner.claim("local")
+    calls: list[tuple[str, str, float]] = []
+
+    def record(owner, *, authorization_generation, authorization_expires_at):
+        calls.append((owner, authorization_generation, authorization_expires_at))
+        return {"activated": 0, "cleaned": 0, "frozen": 0}
+
+    monkeypatch.setattr(process_registry, "activate_owner", record)
+
+    with TestClient(api) as client:
+        assert client.get("/api/health").status_code == 200
+
+    assert calls == []
+
+
+def test_authenticated_http_gate_supplies_process_generation(api, monkeypatch):
+    from crew.tools.process_registry import process_registry
+
+    calls: list[tuple[str, str, float]] = []
+
+    def record(owner, *, authorization_generation, authorization_expires_at):
+        calls.append((owner, authorization_generation, authorization_expires_at))
+        return {"activated": 0, "cleaned": 0, "frozen": 0}
+
+    monkeypatch.setattr(process_registry, "activate_owner", record)
+
+    with TestClient(api) as client:
+        response = client.get("/api/sessions")
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    owner, generation, expires_at = calls[0]
+    assert owner == "local"
+    assert len(generation) == 64
+    assert expires_at > time.time()
+
+
+def test_process_output_root_is_created_inside_owner_home(api):
+    from pathlib import Path
+
+    from crew.state.home import get_owner_runtime_home
+
+    output_root = Path(api.state.crew._process_output_root("local"))
+    owner_home = get_owner_runtime_home("local", create=False).resolve(strict=True)
+
+    assert output_root.is_dir()
+    assert output_root.relative_to(owner_home) == Path("tasks")
 
 
 @pytest.mark.asyncio

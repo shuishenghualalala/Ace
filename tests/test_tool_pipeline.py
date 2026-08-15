@@ -29,6 +29,7 @@ from crew.tools.pipeline import (
     load_permission_config,
     truncate_or_persist,
     validate_arguments,
+    validate_input_hook,
 )
 from crew.tools.registry import Registry
 
@@ -72,6 +73,14 @@ def test_validate_arguments(schema, args, expected_err_parts):
         assert err is not None
         for part in expected_err_parts:
             assert part in err
+
+
+def test_validate_input_hook_does_not_echo_host_exception():
+    class Tool:
+        def validate_input(self, _args):
+            raise ValueError(r"C:\private\key.pem ACCESS_TOKEN=must-not-leak")
+
+    assert validate_input_hook(Tool(), {}) == "业务校验异常"
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +183,31 @@ def test_permission_session_allow_overrides():
     assert cfg.check("terminal", "git push", session_id="s1")[0] == "ask"
     cfg.add_session_allow("s1", PermissionRule("terminal", "git push:*", "allow"))
     assert cfg.check("terminal", "git push", session_id="s1")[0] == "allow"
+
+
+def test_permission_persistent_deny_overrides_existing_session_allow():
+    cfg = load_permission_config(
+        [{"tool": "remote__write", "match": "*", "behavior": "deny"}]
+    )
+    cfg.add_session_allow(
+        "s1",
+        PermissionRule(
+            tool="remote__write",
+            match="*",
+            behavior="allow",
+            reason="older approval",
+        ),
+    )
+
+    behavior, reason, _suggested = cfg.check(
+        "remote__write",
+        '{"target": "blocked"}',
+        session_id="s1",
+        default_behavior="ask",
+    )
+
+    assert behavior == "deny"
+    assert reason
 
 
 def test_check_permission_default_behavior_is_forwarded_and_invalid_is_denied():
@@ -376,3 +410,189 @@ async def test_tool_runner_permission_ask_denies_on_reject(monkeypatch):
     )
     assert block is not None
     assert "用户拒绝" in block
+
+
+async def test_strict_mode_mcp_tools_require_per_call_authorization(monkeypatch):
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.plugins.manager import PluginManager
+
+    registry = Registry()
+    registry.register(
+        name="remote__dangerous",
+        toolset="mcp:remote",
+        schema={
+            "name": "remote__dangerous",
+            "parameters": {"type": "object", "properties": {"target": {"type": "string"}}},
+        },
+        handler=lambda _args: "should not run",
+        is_mcp=True,
+    )
+    monkeypatch.setattr("crew.security.settings.strict_security_enabled", lambda: True)
+    monkeypatch.setattr(pipeline, "get_permission_config", lambda: load_permission_config([]))
+
+    runner = ToolRunner(
+        registry=registry,
+        plugins=PluginManager([]),
+        guardrails=ToolCallGuardrailController(),
+        session_id="s1",
+    )
+    block = await runner._check_permission(
+        ToolCall("1", "remote__dangerous", {"target": "outside"})
+    )
+
+    assert block is not None
+    assert json.loads(block)["error"]
+
+
+async def test_strict_mode_mcp_tool_uses_exact_explicit_allow_rule(monkeypatch):
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.plugins.manager import PluginManager
+
+    registry = Registry()
+    registry.register(
+        name="remote__read",
+        toolset="mcp:remote",
+        schema={
+            "name": "remote__read",
+            "parameters": {"type": "object", "properties": {"target": {"type": "string"}}},
+        },
+        handler=lambda _args: "ok",
+        is_mcp=True,
+    )
+    cfg = load_permission_config(
+        [
+            {
+                "tool": "remote__read",
+                "match": '{"target": "allowed"}',
+                "behavior": "allow",
+            }
+        ]
+    )
+    monkeypatch.setattr("crew.security.settings.strict_security_enabled", lambda: True)
+    monkeypatch.setattr(pipeline, "get_permission_config", lambda: cfg)
+
+    runner = ToolRunner(
+        registry=registry,
+        plugins=PluginManager([]),
+        guardrails=ToolCallGuardrailController(),
+        session_id="s1",
+    )
+
+    assert (
+        await runner._check_permission(
+            ToolCall("1", "remote__read", {"target": "allowed"})
+        )
+        is None
+    )
+    assert (
+        await runner._check_permission(
+            ToolCall("2", "remote__read", {"target": "different"})
+        )
+        is not None
+    )
+
+
+async def test_mcp_always_allow_is_scoped_to_canonical_arguments(monkeypatch):
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.plugins.manager import PluginManager
+
+    registry = Registry()
+    registry.register(
+        name="remote__write",
+        toolset="mcp:remote",
+        schema={
+            "name": "remote__write",
+            "parameters": {"type": "object", "properties": {"target": {"type": "string"}}},
+        },
+        handler=lambda _args: "ok",
+        is_mcp=True,
+    )
+    cfg = load_permission_config([])
+    prompts: list[str] = []
+
+    async def fake_send(questions, title="", **_kwargs):
+        prompts.append(questions[0]["question"])
+        return "s1", f"qid-{len(prompts)}"
+
+    async def fake_wait(_sid, _qid, **_kwargs):
+        return [{"id": "perm", "answers": ["always"]}]
+
+    monkeypatch.setattr("crew.security.settings.strict_security_enabled", lambda: True)
+    monkeypatch.setattr(pipeline, "get_permission_config", lambda: cfg)
+    monkeypatch.setattr("crew.agent.loop.tool_runner.send_followup_question", fake_send)
+    monkeypatch.setattr("crew.agent.loop.tool_runner.wait_for_answer", fake_wait)
+    runner = ToolRunner(
+        registry=registry,
+        plugins=PluginManager([]),
+        guardrails=ToolCallGuardrailController(),
+        session_id="s1",
+    )
+
+    assert (
+        await runner._check_permission(
+            ToolCall("1", "remote__write", {"target": "first"})
+        )
+        is None
+    )
+    assert (
+        await runner._check_permission(
+            ToolCall("2", "remote__write", {"target": "second"})
+        )
+        is None
+    )
+    assert len(prompts) == 2
+    assert all(
+        "first" not in rule.match and rule.match.startswith("sha256:")
+        for rule in cfg._session_allows["s1"]
+    )
+
+
+async def test_mcp_permission_card_redacts_secrets_and_bounds_arguments(monkeypatch):
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.plugins.manager import PluginManager
+
+    registry = Registry()
+    registry.register(
+        name="remote__send",
+        toolset="mcp:remote",
+        schema={"name": "remote__send", "parameters": {"type": "object"}},
+        handler=lambda _args: "ok",
+        is_mcp=True,
+    )
+    captured: list[str] = []
+    secret = "sk-test-super-secret-token-123456789"
+
+    async def fake_send(questions, title="", **_kwargs):
+        captured.append(questions[0]["question"])
+        return "s1", "qid"
+
+    async def fake_wait(_sid, _qid, **_kwargs):
+        return [{"id": "perm", "answers": ["deny"]}]
+
+    monkeypatch.setattr("crew.security.settings.strict_security_enabled", lambda: True)
+    monkeypatch.setattr(pipeline, "get_permission_config", lambda: load_permission_config([]))
+    monkeypatch.setattr("crew.agent.loop.tool_runner.send_followup_question", fake_send)
+    monkeypatch.setattr("crew.agent.loop.tool_runner.wait_for_answer", fake_wait)
+    runner = ToolRunner(
+        registry=registry,
+        plugins=PluginManager([]),
+        guardrails=ToolCallGuardrailController(),
+        session_id="s1",
+    )
+
+    assert (
+        await runner._check_permission(
+            ToolCall(
+                "1",
+                "remote__send",
+                {"api_key": secret, "payload": "x" * 20_000},
+            )
+        )
+        is not None
+    )
+    assert secret not in captured[0]
+    assert len(captured[0]) <= 4_500

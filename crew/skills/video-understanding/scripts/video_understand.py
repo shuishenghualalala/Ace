@@ -4,20 +4,26 @@
 from __future__ import annotations
 
 import argparse
+import json
+import mimetypes
 import os
 import re
+import secrets
 import sys
 import unicodedata
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import requests
+from crew.security.outbound import OutboundDenied, OutboundHttpClient
 
 DEFAULT_PROMPT = "描述一下这个视频"
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".webm", ".avi", ".mkv", ".flv", ".m4v"}
 MAX_VIDEO_BYTES = 100 * 1024 * 1024
 MAX_PROMPT_LENGTH = 1000
+_MAX_REQUEST_BYTES = MAX_VIDEO_BYTES + 64 * 1024
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_HTTP = OutboundHttpClient()
 FORBIDDEN_PATTERNS = (
     "ignore previous", "ignore the above", "system prompt", "developer mode",
     "prompt injection", "leak password", "leak secret", "泄露密钥", "系统提示词",
@@ -97,6 +103,31 @@ def _nested_dict(payload: Any) -> dict[str, Any]:
     return payload
 
 
+def _multipart_video(path: Path) -> tuple[bytes, str]:
+    boundary = f"crew-{secrets.token_hex(24)}"
+    filename = "".join(
+        char if 0x20 <= ord(char) < 0x7F and char not in {'"', "\\"} else "_"
+        for char in path.name
+    ) or "video.bin"
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    prefix = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("ascii")
+    suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
+    body = prefix + path.read_bytes() + suffix
+    if len(body) > _MAX_REQUEST_BYTES:
+        raise ValueError("multipart_body_too_large")
+    return body, boundary
+
+
+def _response_json(response: Any) -> Any:
+    if not 200 <= int(response.status) < 300:
+        raise ValueError("non_success_status")
+    return json.loads(response.body.decode(response.charset))
+
+
 def upload_video(video_path: str | Path, api_key: str) -> str | None:
     endpoint = _config_value("VLM_VIDEO_UPLOAD_URL")
     if not endpoint:
@@ -106,16 +137,22 @@ def upload_video(video_path: str | Path, api_key: str) -> str | None:
         return None
     path = Path(video_path)
     try:
-        with path.open("rb") as stream:
-            response = requests.post(
-                endpoint,
-                headers=_headers(api_key),
-                files={"file": (path.name, stream)},
-                timeout=_timeout_seconds(),
-            )
-        response.raise_for_status()
-        data = _nested_dict(response.json())
-    except (requests.RequestException, ValueError, OSError) as exc:
+        body, boundary = _multipart_video(path)
+        response = _HTTP.fetch(
+            endpoint,
+            method="POST",
+            body=body,
+            headers={
+                **_headers(api_key),
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            timeout=_timeout_seconds(),
+            max_bytes=_MAX_RESPONSE_BYTES,
+            max_request_bytes=_MAX_REQUEST_BYTES,
+            max_redirects=0,
+        )
+        data = _nested_dict(_response_json(response))
+    except (OutboundDenied, LookupError, UnicodeError, ValueError, OSError) as exc:
         print(f"错误：视频上传失败 - {type(exc).__name__}")
         return None
     for key in ("fileUrl", "filePath", "url"):
@@ -153,10 +190,22 @@ def analyze_video(video_url: str, prompt: str | None, api_key: str) -> str | Non
     headers = {**_headers(api_key), "Content-Type": "application/json"}
     body = {"model": model, "prompt": safe_prompt, "video": video_url, "stream": False}
     try:
-        response = requests.post(endpoint, headers=headers, json=body, timeout=_timeout_seconds())
-        response.raise_for_status()
-        text = _response_text(response.json())
-    except (requests.RequestException, ValueError) as exc:
+        response = _HTTP.fetch(
+            endpoint,
+            method="POST",
+            body=json.dumps(
+                body,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            headers=headers,
+            timeout=_timeout_seconds(),
+            max_bytes=_MAX_RESPONSE_BYTES,
+            max_request_bytes=64 * 1024,
+            max_redirects=0,
+        )
+        text = _response_text(_response_json(response))
+    except (OutboundDenied, LookupError, UnicodeError, ValueError, OSError) as exc:
         print(f"错误：视频分析失败 - {type(exc).__name__}")
         return None
     if not text:

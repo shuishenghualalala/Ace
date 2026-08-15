@@ -13,10 +13,10 @@ BrowserControlMode = Literal["ai", "human", "paused"]
 class BrowserConfig:
     # ── 已移除的配置项（不要再加回来，除非同时接上执行路径） ────────────
     #
-    # `allowed_private_hosts` / `allowed_private_cidrs` / `allow_file_urls`
-    # 曾经存在，但对应的执行路径（私网/元数据地址拦截、URL scheme 白名单）
-    # 已按产品决定整体移除。它们在配置里留了一段时间**却没有任何消费方**——
-    # 运维照着文档配上，以为限制生效了，实际不执行。
+    # `allowed_private_cidrs` / `allow_file_urls` 曾经存在但没有执行路径，已移除。
+    # `allowed_private_hosts` 只在强制 pinning proxy 中消费：精确主机匹配后，
+    # proxy 为单次连接签发 owner/request 绑定的短期 grant。它不是 CIDR 通配，
+    # metadata 地址即使列出也仍会被统一 outbound policy 拒绝。
     #
     # `max_tabs_per_session` 同样移除：标签页护栏在 Electron 宿主里
     # （browser-host.ts 的 MAX_TABS_PER_SESSION），而 Python 配置**到不了宿主**
@@ -41,6 +41,7 @@ class BrowserConfig:
     max_transfer_bytes: int = 104_857_600
     artifact_ttl_hours: int = 24
     blocked_hosts: list[str] = field(default_factory=list)
+    allowed_private_hosts: list[str] = field(default_factory=list)
 
     @classmethod
     def from_raw(cls, raw: Any) -> "BrowserConfig":
@@ -61,7 +62,7 @@ class BrowserConfig:
         ):
             if name in values:
                 values[name] = max(0, int(values[name]))
-        for name in ("blocked_hosts",):
+        for name in ("blocked_hosts", "allowed_private_hosts"):
             if name in values:
                 value = values[name]
                 values[name] = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []

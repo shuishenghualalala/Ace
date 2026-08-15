@@ -8,15 +8,25 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import zipfile
+from contextvars import Token
 from html import escape
 from pathlib import Path
 from typing import Any
 
 from crew.sites.blueprint import BlueprintManager, BlueprintStore
 from crew.sites.store import SQLiteSiteStore
+from crew.security.actions import normalize_exec_action
+from crew.security.approvals import ApprovalDecision
+from crew.security.context import SecurityContext, build_security_context
+from crew.security.launch import (
+    compile_process_launch,
+    current_process_launch,
+    execute_captured,
+)
+from crew.security.policy import merge_additional_permissions
 from crew.state.home import get_owner_runtime_home, safe_path_segment
+from crew.tools.redact import safe_public_error
 
 
 class SiteBuildError(RuntimeError):
@@ -32,10 +42,20 @@ def _within(path: Path, root: Path) -> bool:
 
 
 class SiteManager:
-    def __init__(self, store: SQLiteSiteStore) -> None:
+    def __init__(
+        self,
+        store: SQLiteSiteStore,
+        *,
+        workspace_store: Any | None = None,
+        security_service: Any | None = None,
+    ) -> None:
         self.store = store
+        self.workspace_store = workspace_store
+        self.security_service = security_service
         self.blueprint = BlueprintManager(
-            BlueprintStore(str(store.db_path), wal_enabled=store.wal_enabled)
+            BlueprintStore(str(store.db_path), wal_enabled=store.wal_enabled),
+            workspace_store=workspace_store,
+            security_service=security_service,
         )
 
     async def start(self) -> None:
@@ -66,7 +86,9 @@ class SiteManager:
             try:
                 package = json.loads((source / "package.json").read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
-                raise SiteBuildError(f"package.json 无法读取: {exc}") from exc
+                raise SiteBuildError(
+                    f"package.json 无法读取: {safe_public_error(exc, 'package.json 无法读取')}"
+                ) from exc
             if "build" in (package.get("scripts") or {}):
                 command = "npm run build"
             if not output:
@@ -79,6 +101,134 @@ class SiteManager:
         if not argv or argv[0] not in {"npm", "pnpm", "yarn", "bun"}:
             raise SiteBuildError("第一版仅允许 npm、pnpm、yarn 或 bun 构建命令")
         return argv, output or "dist"
+
+    def _prepare_publish(
+        self, *, owner: str, workspace_id: str, session_id: str, workspace_root: str,
+        source_path: str, name: str, build_command: str, output_directory: str,
+        site_id: str, description: str,
+    ) -> tuple[Path, list[str], str, bool, dict[str, Any], dict[str, Any]]:
+        source = self._resolve_source(source_path, workspace_root)
+        argv, output = self._defaults(source, build_command, output_directory)
+        is_new = not site_id.strip()
+        site = self.store.upsert_site(
+            owner=owner, workspace_id=workspace_id, session_id=session_id,
+            name=name.strip() or source.name, description=description.strip(), source_path=str(source),
+            build_command=" ".join(argv), output_directory=output, site_id=site_id,
+        )
+        release = self.store.create_release(owner, site["id"])
+        return source, argv, output, is_new, site, release
+
+    def _finish_publish(
+        self, *, owner: str, source: Path, output: str, site: dict[str, Any],
+        release: dict[str, Any], is_new: bool,
+    ) -> dict[str, Any]:
+        try:
+            output_path = (source / output).resolve()
+            if not _within(output_path, source):
+                raise SiteBuildError("构建输出目录不能位于源码目录之外")
+            release_path = self._root(owner) / safe_path_segment(site["id"], "site") / "releases" / release["id"] / "site"
+            manifest = self._copy_release(output_path, release_path)
+            manifest.update({"site_id": site["id"], "release_id": release["id"]})
+            self.store.finish_release(owner, site["id"], release["id"], status="ready", release_path=str(release_path), manifest=manifest)
+        except Exception as exc:
+            self.store.finish_release(
+                owner,
+                site["id"],
+                release["id"],
+                status="failed",
+                error=safe_public_error(exc, "站点发布失败"),
+            )
+            if is_new:
+                self.store.delete_site(owner, site["id"])
+            raise
+        return {"site": self.store.get_site(owner, site["id"]), "release": self.store.get_release(owner, release["id"])}
+
+    def _fail_publish(self, *, owner: str, site: dict[str, Any], release: dict[str, Any], is_new: bool, error: Exception) -> None:
+        self.store.finish_release(
+            owner,
+            site["id"],
+            release["id"],
+            status="failed",
+            error=safe_public_error(error, "站点发布失败"),
+        )
+        if is_new:
+            self.store.delete_site(owner, site["id"])
+
+    @staticmethod
+    def _build_command_text(argv: list[str]) -> str:
+        return shlex.join(argv)
+
+    def _run_build_compat(self, argv: list[str], source: Path) -> None:
+        del argv, source
+        raise SiteBuildError("站点构建必须通过 native security broker")
+
+    async def _run_build_managed(
+        self, *, argv: list[str], source: Path, owner: str,
+        workspace_id: str, session_id: str, workspace_root: str,
+        security_context: SecurityContext | None = None,
+    ) -> None:
+        if self.workspace_store is None or self.security_service is None:
+            raise SiteBuildError("站点构建缺少安全授权上下文")
+        context = security_context or build_security_context(self.workspace_store)
+        expected_root = Path(workspace_root).expanduser().resolve(strict=False)
+        if (
+            context.owner_account_id != owner
+            or context.workspace_id != workspace_id
+            or context.session_id != session_id
+            or context.workspace_root != expected_root
+        ):
+            raise SiteBuildError("站点构建上下文与当前 Workspace 不匹配")
+        action = normalize_exec_action(
+            argv,
+            source,
+            raw_command=self._build_command_text(argv),
+        )
+        authorized, approval = self.security_service.authorize_exec_action(
+            context,
+            action,
+            tool_name="publish_site",
+            risk_class="site_build",
+        )
+        extra = None
+        if not authorized:
+            if approval is None:
+                raise SiteBuildError("站点构建被安全策略拒绝")
+            outcome = await self.security_service.await_decision(approval["request_id"])
+            if outcome is None or outcome.decision is ApprovalDecision.REJECT:
+                raise SiteBuildError("用户未批准站点构建")
+            authorized, approval = self.security_service.authorize_exec_action(
+                context,
+                action,
+                tool_name="publish_site",
+                risk_class="site_build",
+            )
+            if not authorized:
+                raise SiteBuildError("批准后站点构建授权校验失败")
+            if isinstance(approval, dict):
+                extra = approval.get("additional_permissions")
+        from crew.security.models import AdditionalPermissionProfile
+
+        launch = compile_process_launch(
+            context,
+            self.security_service.mode_for(context),
+            db_path=self.security_service.db_path,
+            additional_permissions=merge_additional_permissions(
+                self.security_service.grants.additional_permissions(context),
+                extra or AdditionalPermissionProfile(),
+            ),
+        )
+        token: Token = current_process_launch.set(launch)
+        try:
+            result = await execute_captured(
+                tuple(argv),
+                cwd=source,
+                timeout=180,
+                env_overrides={"CI": "1"},
+            )
+        finally:
+            current_process_launch.reset(token)
+        if result.returncode != 0:
+            raise SiteBuildError((result.stderr or result.stdout or "构建失败")[-6000:])
 
     @staticmethod
     def _copy_release(source_dir: Path, release_dir: Path) -> dict[str, Any]:
@@ -132,37 +282,42 @@ class SiteManager:
         source_path: str, name: str, build_command: str = "", output_directory: str = "",
         site_id: str = "", description: str = "",
     ) -> dict[str, Any]:
-        source = self._resolve_source(source_path, workspace_root)
-        argv, output = self._defaults(source, build_command, output_directory)
-        is_new = not site_id.strip()
-        site = self.store.upsert_site(
-            owner=owner, workspace_id=workspace_id, session_id=session_id,
-            name=name.strip() or source.name, description=description.strip(), source_path=str(source),
-            build_command=" ".join(argv), output_directory=output, site_id=site_id,
+        source, argv, output, is_new, site, release = self._prepare_publish(
+            owner=owner, workspace_id=workspace_id, session_id=session_id, workspace_root=workspace_root,
+            source_path=source_path, name=name, build_command=build_command, output_directory=output_directory,
+            site_id=site_id, description=description,
         )
-        release = self.store.create_release(owner, site["id"])
         try:
             if argv:
-                result = subprocess.run(
-                    argv, cwd=source, capture_output=True, text=True, timeout=180,
-                    env={**os.environ, "CI": "1"}, check=False,
-                )
-                if result.returncode != 0:
-                    detail = (result.stderr or result.stdout or "构建失败")[-6000:]
-                    raise SiteBuildError(detail)
-            output_path = (source / output).resolve()
-            if not _within(output_path, source):
-                raise SiteBuildError("构建输出目录不能位于源码目录之外")
-            release_path = self._root(owner) / safe_path_segment(site["id"], "site") / "releases" / release["id"] / "site"
-            manifest = self._copy_release(output_path, release_path)
-            manifest.update({"site_id": site["id"], "release_id": release["id"]})
-            self.store.finish_release(owner, site["id"], release["id"], status="ready", release_path=str(release_path), manifest=manifest)
+                if self.workspace_store is not None or self.security_service is not None:
+                    raise SiteBuildError("异步站点构建必须通过 publish_async")
+                self._run_build_compat(argv, source)
+            return self._finish_publish(owner=owner, source=source, output=output, site=site, release=release, is_new=is_new)
         except Exception as exc:
-            self.store.finish_release(owner, site["id"], release["id"], status="failed", error=str(exc))
-            if is_new:
-                self.store.delete_site(owner, site["id"])
+            self._fail_publish(owner=owner, site=site, release=release, is_new=is_new, error=exc)
             raise
-        return {"site": self.store.get_site(owner, site["id"]), "release": self.store.get_release(owner, release["id"])}
+
+    async def publish_async(
+        self, *, owner: str, workspace_id: str, session_id: str, workspace_root: str,
+        source_path: str, name: str, build_command: str = "", output_directory: str = "",
+        site_id: str = "", description: str = "", security_context: SecurityContext | None = None,
+    ) -> dict[str, Any]:
+        source, argv, output, is_new, site, release = self._prepare_publish(
+            owner=owner, workspace_id=workspace_id, session_id=session_id, workspace_root=workspace_root,
+            source_path=source_path, name=name, build_command=build_command, output_directory=output_directory,
+            site_id=site_id, description=description,
+        )
+        try:
+            if argv:
+                await self._run_build_managed(
+                    argv=argv, source=source, owner=owner, workspace_id=workspace_id,
+                    session_id=session_id, workspace_root=workspace_root,
+                    security_context=security_context,
+                )
+            return self._finish_publish(owner=owner, source=source, output=output, site=site, release=release, is_new=is_new)
+        except Exception as exc:
+            self._fail_publish(owner=owner, site=site, release=release, is_new=is_new, error=exc)
+            raise
 
     def delete(self, owner: str, site_id: str) -> None:
         self.store.get_site(owner, site_id)

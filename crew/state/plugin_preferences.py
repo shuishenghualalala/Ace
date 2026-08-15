@@ -84,6 +84,21 @@ class PluginPreferencesStore:
             ).fetchall()
         return {str(key): bool(enabled) for key, enabled in rows}
 
+    def delete_plugin(self, plugin_key: str) -> None:
+        """Remove every owner's preference when a plugin is uninstalled."""
+        key = str(plugin_key or "").strip()
+        if not key:
+            raise ValueError("plugin_key 必填")
+
+        def _write(conn: Any) -> None:
+            conn.execute(
+                "DELETE FROM plugin_preferences WHERE plugin_key = ?",
+                (key,),
+            )
+
+        self._writer.execute(_write)
+        log.info("插件偏好已清理 plugin=%s", key)
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

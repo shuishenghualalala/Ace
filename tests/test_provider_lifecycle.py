@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from types import SimpleNamespace
-
+import httpx
 import pytest
 
 from crew.agent.runtime import SingleAgent
@@ -15,6 +15,8 @@ from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
 from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
+from crew.security.outbound import OutboundContext
+from crew.security.provider_proxy import ProviderProxyUnavailable, provider_policy_proxy
 from crew.tools.registry import Registry
 from crew.state.config import Config
 
@@ -52,24 +54,139 @@ class _ClosableProvider(FakeProvider):
 
 @pytest.mark.asyncio
 async def test_openai_provider_aclose_is_concurrently_idempotent(monkeypatch):
+    import openai
+
+    _ = openai.AsyncOpenAI
     client = _AsyncCloseClient()
+    http_client_kwargs: dict[str, object] = {}
+
+    def fake_http_client(**kwargs):
+        http_client_kwargs.update(kwargs)
+        return _AsyncAcloseClient()
+
+    monkeypatch.setattr("crew.providers.openai_provider.httpx.AsyncClient", fake_http_client)
     monkeypatch.setattr("openai.AsyncOpenAI", lambda **_kwargs: client)
     provider = OpenAIProvider(api_key="sk-test")
 
+    assert http_client_kwargs["trust_env"] is False
+    assert http_client_kwargs["follow_redirects"] is False
+    transport = http_client_kwargs["transport"]
+    assert isinstance(transport, httpx.AsyncBaseTransport)
+    assert "proxy" not in http_client_kwargs
+    config = transport._config
+    assert config.username == "crew"
+    assert config.endpoint_url.startswith("http://127.0.0.1:")
+    assert config.password not in repr(transport)
     await asyncio.gather(provider.aclose(), provider.aclose(), provider.aclose())
 
     assert client.close_calls == 1
+    assert provider._client is None
+    assert provider._secret_values == ()
 
 
 @pytest.mark.asyncio
 async def test_anthropic_provider_aclose_is_concurrently_idempotent(monkeypatch):
     client = _AsyncAcloseClient()
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: client)
+    http_client_kwargs: dict[str, object] = {}
+
+    def fake_http_client(**kwargs):
+        http_client_kwargs.update(kwargs)
+        return client
+
+    monkeypatch.setattr("httpx.AsyncClient", fake_http_client)
     provider = AnthropicProvider(api_key="sk-test")
 
+    assert http_client_kwargs["trust_env"] is False
+    assert http_client_kwargs["follow_redirects"] is False
+    transport = http_client_kwargs["transport"]
+    assert isinstance(transport, httpx.AsyncBaseTransport)
+    assert "proxy" not in http_client_kwargs
+    config = transport._config
+    assert config.username == "crew"
+    assert config.endpoint_url.startswith("http://127.0.0.1:")
+    assert config.password not in repr(transport)
     await asyncio.gather(provider.aclose(), provider.aclose(), provider.aclose())
 
     assert client.close_calls == 1
+    assert provider._client is None
+    assert provider._headers == {}
+    assert provider._secret_values == ()
+
+
+@pytest.mark.asyncio
+async def test_provider_proxy_requires_explicit_private_origin_configuration():
+    reached = asyncio.Event()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        await reader.readuntil(b"\r\n\r\n")
+        reached.set()
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+            b"Connection: close\r\n\r\nok"
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = int(server.sockets[0].getsockname()[1])
+    endpoint = f"http://127.0.0.1:{port}/v1"
+    try:
+        with pytest.raises(ProviderProxyUnavailable):
+            provider_policy_proxy(endpoint)
+        assert not reached.is_set()
+
+        allowed_proxy = provider_policy_proxy(endpoint, allow_private=True)
+        async with httpx.AsyncClient(
+            proxy=allowed_proxy.httpx_proxy(),
+            trust_env=False,
+            timeout=2,
+        ) as client:
+            denied = await client.get(endpoint)
+        assert denied.status_code == 403
+        assert not reached.is_set()
+
+        context = OutboundContext(
+            owner="owner-provider",
+            session="session-provider",
+            task="task-provider",
+            request="request-provider",
+            source="test",
+            environment="test-environment",
+        )
+        context_proxy = provider_policy_proxy(
+            endpoint,
+            allow_private=True,
+            context=context,
+        )
+        async with httpx.AsyncClient(
+            proxy=context_proxy.httpx_proxy(),
+            trust_env=False,
+            timeout=2,
+        ) as client:
+            allowed = await client.get(endpoint)
+        assert allowed.status_code == 200
+        assert allowed.text == "ok"
+        assert reached.is_set()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://user:password@api.example.test/v1",
+        "https://api.example.test/v1?api_key=query-secret",
+        "https://api.example.test/v1#access_token=fragment-secret",
+    ],
+)
+def test_provider_proxy_rejects_credentials_in_endpoint_url(endpoint):
+    with pytest.raises(
+        ProviderProxyUnavailable,
+        match="must not contain credentials",
+    ):
+        provider_policy_proxy(endpoint)
 
 
 @pytest.mark.asyncio
@@ -106,11 +223,30 @@ async def test_single_agent_close_failure_does_not_block_other_owned_providers()
         owned_providers=[failed, healthy],
     )
 
-    await agent.aclose()
+    with pytest.raises(RuntimeError, match="Provider close failed"):
+        await agent.aclose()
     await agent.aclose()
 
     assert failed.close_calls == 1
     assert healthy.close_calls == 1
+
+
+def test_provider_errors_redact_exact_nonstandard_credentials(monkeypatch) -> None:
+    openai_client = _AsyncCloseClient()
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **_kwargs: openai_client)
+    openai_secret = "custom-openai-credential-value"
+    openai_provider = OpenAIProvider(api_key=openai_secret)
+    assert openai_secret not in openai_provider._safe_error(
+        RuntimeError(f"upstream echoed {openai_secret}")
+    )
+
+    anthropic_client = _AsyncAcloseClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: anthropic_client)
+    anthropic_secret = "custom-anthropic-credential-value"
+    anthropic_provider = AnthropicProvider(api_key=anthropic_secret)
+    assert anthropic_secret not in anthropic_provider._safe_error(
+        RuntimeError(f"upstream echoed {anthropic_secret}")
+    )
 
 
 @pytest.mark.asyncio

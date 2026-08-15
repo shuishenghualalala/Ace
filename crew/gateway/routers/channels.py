@@ -35,8 +35,14 @@ from crew.gateway.channel_presets import (
     resolve_environment_preset,
 )
 from crew.gateway.channel_sessions import bind_channel_platform_for_owner
+from crew.gateway.helpers import safe_public_error
 from crew.gateway.platform_registry import PlatformConfig, platform_registry
-from crew.state.config import remove_env_key, resolve_writable_env_path, write_env_key
+from crew.state.config import (
+    remove_secret_env_key,
+    resolve_writable_env_path,
+    write_env_key,
+    write_secret_env_key,
+)
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.channels")
@@ -85,14 +91,14 @@ def _redact_secret_text(text: str) -> str:
 
 def _safe_error(error: Any, secret_values: tuple[str, ...] = ()) -> str:
     text = str(error or "")
+    candidates = {secret for secret in secret_values if secret}
     for env_name in os.environ:
         if _is_secret_key(env_name):
             secret = os.getenv(env_name, "")
             if secret:
-                text = text.replace(secret, "***")
-    for secret in secret_values:
-        if secret:
-            text = text.replace(secret, "***")
+                candidates.add(secret)
+    for secret in sorted(candidates, key=len, reverse=True):
+        text = text.replace(secret, "***")
     return _redact_secret_text(text)
 
 
@@ -188,11 +194,24 @@ def _write_env_fields(
     owner_account_id: str = "",
 ) -> None:
     env_path = resolve_writable_env_path(owner_account_id)
-    field_map = {**_PLATFORM_ENV_FIELDS.get(name, {}), **_PLATFORM_SECRET_ENV.get(name, {})}
-    for field, env_name in field_map.items():
+    for field, env_name in _PLATFORM_ENV_FIELDS.get(name, {}).items():
         if field in config and config[field] not in (None, ""):
             value = str(config[field])
-            write_env_key(env_path, env_name, value, sync_process_env=not bool(owner_account_id))
+            write_env_key(
+                env_path,
+                env_name,
+                value,
+                sync_process_env=not bool(owner_account_id),
+            )
+    for field, env_name in _PLATFORM_SECRET_ENV.get(name, {}).items():
+        if field in config and config[field] not in (None, ""):
+            value = str(config[field])
+            write_secret_env_key(
+                env_path,
+                env_name,
+                value,
+                sync_process_env=not bool(owner_account_id),
+            )
     for field, value in secrets.items():
         env_name = _PLATFORM_SECRET_ENV.get(name, {}).get(field)
         if not env_name and field in set(_PLATFORM_SECRET_ENV.get(name, {}).values()):
@@ -201,7 +220,12 @@ def _write_env_fields(
             raise ValueError(f"不支持的密钥字段: {field}")
         if not env_name.replace("_", "").isalnum():
             raise ValueError(f"非法环境变量名: {env_name!r}")
-        write_env_key(env_path, env_name, value, sync_process_env=not bool(owner_account_id))
+        write_secret_env_key(
+            env_path,
+            env_name,
+            value,
+            sync_process_env=not bool(owner_account_id),
+        )
 
 
 def _validate_secret_fields(name: str, secrets: dict[str, str]) -> None:
@@ -369,7 +393,11 @@ def _enrich_platform_row(
 def _remove_secret_envs(name: str, *, owner_account_id: str = "") -> None:
     env_path = resolve_writable_env_path(owner_account_id)
     for env_name in set(_PLATFORM_SECRET_ENV.get(name, {}).values()):
-        remove_env_key(env_path, env_name, sync_process_env=not bool(owner_account_id))
+        remove_secret_env_key(
+            env_path,
+            env_name,
+            sync_process_env=not bool(owner_account_id),
+        )
 
 
 def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
@@ -492,7 +520,10 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         try:
             channel = platform_registry.create_channel(name, cfg)
         except Exception as exc:  # noqa: BLE001 — 插件构造/校验失败必须隔离到目标平台
-            channel_manager.record_error(name, str(exc))
+            channel_manager.record_error(
+                name,
+                safe_public_error(exc, "渠道构造失败"),
+            )
             return False, _single_platform_status(name, owner_account_id)
         if hasattr(channel, "bind_app"):
             channel.bind_app(crew)
@@ -614,7 +645,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         try:
             ok, status = await _restart_platform(platform, owner)
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "平台操作失败")}, status_code=409)
         if ok and getattr(crew, "channel_bindings", None) is not None:
             bind_channel_platform_for_owner(crew, platform, owner)
         error = _safe_error(status.get("error", ""))
@@ -685,7 +716,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         try:
             ok, status = await _restart_platform(platform, owner)
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "平台操作失败")}, status_code=409)
         error = _safe_error(status.get("error", ""))
         return JSONResponse(
             {"ok": ok, "status": {**status, "error": error}, "error": error},
@@ -781,13 +812,18 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         fetched = await ilink.fetch_qr_code()
         if fetched is None:
             return JSONResponse({"ok": False, "error": "获取二维码失败，请稍后重试"}, status_code=500)
+        owner = account_from_request(request).owner_account_id
         qrcode_value, qr_scan_data, qrcode_url = fetched
         svg = ilink.render_qr_svg(qr_scan_data)
         qr_image = ""
         if svg:
             qr_image = "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
         now = time.time()
-        _WEIXIN_QR_STATES[qrcode_value] = {"base_url": ilink.ILINK_BASE_URL, "updated_at": now}
+        _WEIXIN_QR_STATES[qrcode_value] = {
+            "base_url": ilink.ILINK_BASE_URL,
+            "owner_account_id": owner,
+            "updated_at": now,
+        }
         _prune_weixin_qr_states(now)
         return JSONResponse({
             "ok": True,
@@ -803,7 +839,6 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             return JSONResponse({"ok": False, "error": "该平台不支持扫码登录"}, status_code=400)
         try:
             from plugins.platforms.weixin import ilink
-            from plugins.platforms.weixin.config import WeixinSettings
         except ImportError:
             return JSONResponse({"ok": False, "error": "weixin 插件未安装"}, status_code=404)
         try:
@@ -813,8 +848,11 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         qr_id = str(payload.get("qr_id") or "").strip()
         if not qr_id:
             return JSONResponse({"ok": False, "error": "missing qr_id"}, status_code=400)
+        owner = account_from_request(request).owner_account_id
         state = _WEIXIN_QR_STATES.get(qr_id)
-        base_url = state["base_url"] if state else ilink.ILINK_BASE_URL
+        if state is None or state.get("owner_account_id") != owner:
+            return JSONResponse({"ok": False, "error": "qr_id 不存在"}, status_code=404)
+        base_url = state["base_url"]
         status_resp = await ilink.poll_qr_status(qr_id, base_url=base_url)
         if status_resp is None:
             return JSONResponse({"ok": True, "status": "pending"})
@@ -831,17 +869,25 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             user_id = str(status_resp.get("ilink_user_id") or "")
             if not account_id or not token:
                 return JSONResponse({"ok": True, "status": "error", "error": "扫码确认但凭证不完整"})
-            settings = WeixinSettings.from_extra({})
-            ilink.save_account(
-                settings.accounts_dir(),
-                account_id=account_id,
-                token=token,
-                base_url=base_url,
-                user_id=user_id,
+            config = {
+                "accountId": account_id,
+                "baseUrl": base_url,
+                **({"userId": user_id} if user_id else {}),
+            }
+            crew.config.persist_channel_config(
+                platform,
+                _sanitize_for_yaml(platform, True, config),
+                owner_account_id=owner,
+            )
+            _write_env_fields(
+                platform,
+                config,
+                {"token": token},
+                owner_account_id=owner,
             )
             _WEIXIN_QR_STATES.pop(qr_id, None)
             return JSONResponse({
-                "ok": True, "status": "confirmed", "account_id": account_id, "token": token,
+                "ok": True, "status": "confirmed", "account_id": account_id,
             })
         _WEIXIN_QR_STATES[qr_id] = {**_WEIXIN_QR_STATES.get(qr_id, {}), "updated_at": time.time()}
         return JSONResponse({"ok": True, "status": status})

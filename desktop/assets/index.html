@@ -511,17 +511,13 @@
                 <label class="set-v2-switch"><input type="checkbox" id="set-auto-start"><span class="set-v2-switch__track"></span></label>
               </div>
             </div>
-            <!--
-              ponytail: 严格安全服务尚未就绪，当前默认兼容模式并隐藏此开关。
-              上游 HTTPS 与安装校验服务就绪后再恢复。
-            -->
-            <div class="set-v2-row" hidden>
+            <div class="set-v2-row">
               <div class="set-v2-row__copy">
                 <div class="set-v2-row__label">严格安全约束</div>
-                <div class="set-v2-row__desc">开启后要求安全传输与安装完整性校验；受管隔离始终保持启用。</div>
+                <div class="set-v2-row__desc">始终启用：要求安全传输、安装完整性校验与受管隔离。</div>
               </div>
               <div class="set-v2-row__control">
-                <label class="set-v2-switch"><input type="checkbox" id="set-strict-security"><span class="set-v2-switch__track"></span></label>
+                <label class="set-v2-switch"><input type="checkbox" id="set-strict-security" checked disabled><span class="set-v2-switch__track"></span></label>
               </div>
             </div>
             <div class="set-v2-row">

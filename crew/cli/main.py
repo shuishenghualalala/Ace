@@ -8,6 +8,11 @@ slash 命令：
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    from crew.process_hardening import harden_main_process
+
+    harden_main_process("cli")
+
 import asyncio
 import os
 import uuid

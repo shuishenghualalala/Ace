@@ -13,6 +13,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const CREW_FILE_SCHEME = 'crew-file';
+const CREW_FILE_HOST = 'img';
+const REENCODED_PATH_SEPARATOR = /%(?:25)*(?:2f|5c)/i;
+const WINDOWS_RESERVED_NAMES = new Set([
+  'CON', 'PRN', 'AUX', 'NUL',
+  ...Array.from({ length: 9 }, (_, index) => `COM${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `LPT${index + 1}`),
+]);
 
 const IMAGE_CONTENT_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -25,6 +32,14 @@ const IMAGE_CONTENT_TYPES: Record<string, string> = {
   '.ico': 'image/x-icon',
 };
 
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
 function isWithin(base: string, target: string): boolean {
   const relative = path.relative(base, target);
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
@@ -34,6 +49,86 @@ function samePath(left: string, right: string): boolean {
   return process.platform === 'win32'
     ? path.resolve(left).toLocaleLowerCase() === path.resolve(right).toLocaleLowerCase()
     : path.resolve(left) === path.resolve(right);
+}
+
+function isSafeLocalPathSyntax(value: string): boolean {
+  if (!value || hasControlCharacter(value)) return false;
+
+  const normalized = value.replace(/\\/g, '/');
+  const lowerNormalized = normalized.toLowerCase();
+  if (
+    normalized.startsWith('//')
+    || lowerNormalized.startsWith('/??/')
+  ) return false;
+
+  const hasDrive = /^[A-Za-z]:/.test(value);
+  if (hasDrive) {
+    if (!/^[A-Za-z]:[\\/]/.test(value) || process.platform !== 'win32') return false;
+  } else if (process.platform === 'win32') {
+    // Drive-less rooted paths bind to the current drive and are ambiguous.
+    return false;
+  } else if (value.includes('\\')) {
+    // Backslash is a Windows separator, not a portable POSIX URI character.
+    return false;
+  }
+
+  if (process.platform === 'win32') {
+    const remainder = normalized.slice(2);
+    if (remainder.includes(':')) return false;
+    for (const component of remainder.split('/')) {
+      if (!component || component === '.' || component === '..') continue;
+      if (
+        component.endsWith(' ')
+        || component.endsWith('.')
+        || /[<>"|?*]/.test(component)
+        || WINDOWS_RESERVED_NAMES.has(component.split('.', 1)[0].toUpperCase())
+      ) return false;
+    }
+  }
+
+  return path.isAbsolute(value);
+}
+
+function decodeCrewFilePath(rawUrl: string): string | null {
+  if (typeof rawUrl !== 'string' || rawUrl.length > 16_384 || hasControlCharacter(rawUrl)) {
+    return null;
+  }
+  // The producer percent-encodes backslashes. Rejecting literal ones avoids
+  // URL-parser normalization turning a non-producer URI into another path.
+  if (rawUrl.includes('\\')) return null;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.protocol !== `${CREW_FILE_SCHEME}:`
+    || parsed.hostname !== CREW_FILE_HOST
+    || parsed.username !== ''
+    || parsed.password !== ''
+    || parsed.port !== ''
+    || parsed.search
+    || parsed.hash
+    || !parsed.pathname.startsWith('/')
+  ) return null;
+
+  const encodedPath = parsed.pathname.slice(1);
+  // encodeURIComponent(absPath) emits one opaque path component after the
+  // placeholder host. Literal separators would be a different URI grammar.
+  if (!encodedPath || encodedPath.includes('/')) return null;
+
+  let candidate: string;
+  try {
+    candidate = decodeURIComponent(encodedPath);
+  } catch {
+    return null;
+  }
+  if (REENCODED_PATH_SEPARATOR.test(candidate) || !isSafeLocalPathSyntax(candidate)) {
+    return null;
+  }
+  return candidate;
 }
 
 export interface ResolvedOwnedFile {
@@ -84,12 +179,14 @@ export function resolveOwnedFilePath(
   includeSharedTmp = false,
 ): ResolvedOwnedFile | null {
   if (
-    rawPath.length === 0
+    typeof rawPath !== 'string'
+    || typeof crewHome !== 'string'
+    || typeof ownerSegment !== 'string'
+    || rawPath.length === 0
     || rawPath.length > 4_096
-    || rawPath.includes('\0')
     || crewHome.length > 4_096
     || ownerSegment.length > 64
-    || !path.isAbsolute(rawPath)
+    || !isSafeLocalPathSyntax(rawPath)
     || !/^acct_[0-9a-f]{16}$/i.test(ownerSegment)
   ) {
     return null;
@@ -145,22 +242,10 @@ export function resolveCrewFilePath(
   crewHome: string,
   ownerSegment: string,
 ): ResolvedCrewFile | null {
-  if (rawUrl.length > 16_384 || crewHome.length > 4_096 || ownerSegment.length > 64) return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== `${CREW_FILE_SCHEME}:` || parsed.search) return null;
-  const encodedPath = parsed.pathname.replace(/^\/+/, '');
-  if (!encodedPath) return null;
-  let candidate: string;
-  try {
-    candidate = decodeURIComponent(encodedPath);
-  } catch {
-    return null;
-  }
+  if (typeof crewHome !== 'string' || typeof ownerSegment !== 'string') return null;
+  if (crewHome.length > 4_096 || ownerSegment.length > 64) return null;
+  const candidate = decodeCrewFilePath(rawUrl);
+  if (!candidate) return null;
   const contentType = IMAGE_CONTENT_TYPES[path.extname(candidate).toLowerCase()];
   if (!contentType) return null;
   // Channel images may live in the shared crewHome/tmp ingress area. General

@@ -25,6 +25,7 @@ dependencies = [
     "requests>=2.34.2",
     "wcmatch>=8.4",
     "jsonschema>=4.0",
+    "keyring>=25.7.0",
 ]
 
 [project.optional-dependencies]
@@ -105,7 +106,7 @@ Repository = "https://github.com/shuishenghualalala/Ace"
 Issues = "https://github.com/shuishenghualalala/Ace/issues"
 
 [project.scripts]
-crew = "crew.cli.main:main"
+crew = "crew.cli.entrypoint:main"
 
 [build-system]
 requires = ["hatchling"]

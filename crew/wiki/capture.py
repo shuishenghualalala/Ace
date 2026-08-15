@@ -20,15 +20,22 @@ from uuid import uuid4
 
 from crew.core.interfaces import LLMProvider
 from crew.state.logging import get_logger
+from crew.tools.file_utils import atomic_replace_bytes, snapshot_file
+from crew.tools.redact import safe_public_error
 from crew.wiki.config import WikiConfig
 from crew.wiki.multimodal import describe_media, is_image_mime, is_video_mime
-from crew.wiki.parser import MissingDependencyError, guess_mime_type, parse_document_from_bytes
+from crew.wiki.parser import (
+    MissingDependencyError,
+    guess_mime_type,
+    parse_document_from_bytes_async,
+)
 from crew.wiki.schemas import RawSource
 from crew.wiki.source_metadata import generate_source_metadata
 from crew.wiki.sources import classify_file
 from crew.wiki.store._ids import filename_from_title
 
 log = get_logger("wiki.capture")
+_MAX_CAPTURE_BYTES = 20 * 1024 * 1024
 
 
 async def capture_upload_to_wiki(
@@ -45,7 +52,9 @@ async def capture_upload_to_wiki(
 
     永不抛异常；任何失败记日志并尽量把 raw source 标记为 failed。
     """
-    if store is None or not content:
+    if store is None or not isinstance(content, bytes) or not content:
+        return None
+    if len(content) > _MAX_CAPTURE_BYTES:
         return None
     try:
         return await _capture(store, compiler, config, filename, content, owner_account_id, kb_id, provider)
@@ -71,7 +80,12 @@ async def _capture(
 
     ext = Path(filename).suffix.lower() or ".bin"
     original_path = source_dir / f"{source_id}-{filename_from_title(Path(filename).stem)}{ext}"
-    original_path.write_bytes(content)
+    atomic_replace_bytes(
+        original_path,
+        content,
+        snapshot_file(original_path),
+        max_bytes=_MAX_CAPTURE_BYTES,
+    )
 
     is_image = is_image_mime(file_type)
     is_video = not is_image and is_video_mime(file_type)
@@ -137,9 +151,9 @@ async def _capture_media(
         )
     except Exception as exc:  # noqa: BLE001
         raw.parse_status = "failed"
-        raw.parse_error = f"多模态理解失败: {exc}"
+        raw.parse_error = f"多模态理解失败: {safe_public_error(exc, '多模态理解失败')}"
         store.save_raw(raw, owner_account_id, kb_id)
-        log.warning("聊天附件多模态理解失败 source=%s: %s", raw.id, exc)
+        log.warning("聊天附件多模态理解失败 source=%s type=%s", raw.id, type(exc).__name__)
         return
 
     raw.parsed_path = store.save_parsed_markdown(
@@ -187,19 +201,18 @@ async def _capture_document(
 ) -> None:
     """文档/文本：解析成 markdown、生成轻量元数据、发布全文来源页；默认不深度整理。"""
     try:
-        # 解析是 CPU 密集型同步调用，丢线程池避免阻塞事件循环。
-        text = await asyncio.to_thread(parse_document_from_bytes, content, filename)
+        text = await parse_document_from_bytes_async(content, filename)
     except MissingDependencyError as exc:
         raw.parse_status = "failed"
-        raw.parse_error = f"缺少依赖: {exc}"
+        raw.parse_error = f"缺少依赖: {safe_public_error(exc, '缺少所需依赖')}"
         store.save_raw(raw, owner_account_id, kb_id)
-        log.warning("聊天附件解析缺少依赖 source=%s: %s", raw.id, exc)
+        log.warning("聊天附件解析缺少依赖 source=%s type=%s", raw.id, type(exc).__name__)
         return
     except Exception as exc:  # noqa: BLE001
         raw.parse_status = "failed"
-        raw.parse_error = f"解析失败: {exc}"
+        raw.parse_error = f"解析失败: {safe_public_error(exc, '解析失败: 内部错误')}"
         store.save_raw(raw, owner_account_id, kb_id)
-        log.warning("聊天附件解析失败 source=%s: %s", raw.id, exc)
+        log.warning("聊天附件解析失败 source=%s type=%s", raw.id, type(exc).__name__)
         return
 
     raw.parsed_path = store.save_parsed_markdown(raw.id, text, owner_account_id, kb_id)

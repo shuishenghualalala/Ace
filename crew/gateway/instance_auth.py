@@ -1,8 +1,8 @@
 """Desktop 与本机 Gateway 之间的实例身份挑战应答。
 
-该密钥独立于登录 JWT。Desktop 先在基础 ``CREW_HOME`` 中创建密钥，Gateway
-仅在收到一次性 challenge 时读取它并返回 HMAC；因此占用 loopback 端口、但不持有
-密钥的其他服务无法被 Desktop 误认为 Crew Gateway。
+该密钥独立于登录 JWT。打包 Desktop 通过匿名 stdin 管道向其子 Gateway 交付
+每次启动的新密钥；仅开发态独立 Gateway 回退到 ``CREW_HOME`` 中的持久密钥。
+因此只读取同用户状态文件的其他进程无法冒充生产 Gateway 或 Desktop。
 """
 
 from __future__ import annotations
@@ -16,30 +16,65 @@ import threading
 import time
 from pathlib import Path
 
+from crew.gateway.windows_acl import (
+    fd_is_secure as _windows_fd_is_secure,
+)
+from crew.gateway.windows_acl import (
+    path_is_secure as _windows_path_is_secure,
+)
 from crew.state.home import get_crew_home
 
 GATEWAY_INSTANCE_DIRECTORY = ".gateway-instance"
 GATEWAY_INSTANCE_KEY_FILENAME = "gateway-instance.key"
 GATEWAY_INSTANCE_CHALLENGE_HEADER = "X-Crew-Gateway-Challenge"
 GATEWAY_INSTANCE_PROOF_FIELD = "instance_proof"
+GATEWAY_INSTANCE_AUTH_HEADER = "X-Crew-Security-Proof"
 
 _CHALLENGE_RE = re.compile(r"[0-9a-f]{64}\Z")
 _KEY_RE = re.compile(rb"[0-9a-f]{64}\Z")
 _PROOF_CONTEXT = b"crew-gateway-instance-v1\x00"
 _ACCESS_TOKEN_CONTEXT = b"crew-gateway-browser-access-v1\x00"
 _SECURITY_CONTEXT = b"crew-security-desktop-v1\x00"
+_IS_WINDOWS = os.name == "nt"
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_launch_instance_key: bytes | None = None
 
 
 def _key_path() -> Path:
     return get_crew_home() / GATEWAY_INSTANCE_DIRECTORY / GATEWAY_INSTANCE_KEY_FILENAME
 
 
-def _metadata_is_secure(info: os.stat_result, *, directory: bool = False) -> bool:
+def configure_gateway_launch_key(key: bytes | None) -> None:
+    """Use a Desktop-delivered per-process key for this Gateway launch."""
+
+    global _launch_instance_key
+    if key is not None and len(key) != 32:
+        raise ValueError("Gateway launch key must be 32 bytes")
+    _launch_instance_key = bytes(key) if key is not None else None
+
+
+def _metadata_is_secure(
+    info: os.stat_result,
+    *,
+    directory: bool = False,
+    path: Path | None = None,
+    fd: int | None = None,
+) -> bool:
     expected_type = stat.S_ISDIR if directory else stat.S_ISREG
     if not expected_type(info.st_mode):
         return False
-    if os.name == "nt":
-        return True
+    if int(getattr(info, "st_file_attributes", 0)) & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    if _IS_WINDOWS:
+        if (path is None) == (fd is None):
+            return False
+        try:
+            if path is not None:
+                return _windows_path_is_secure(path, directory=directory)
+            assert fd is not None
+            return _windows_fd_is_secure(fd, directory=directory)
+        except (OSError, ValueError):
+            return False
     getuid = getattr(os, "getuid", None)
     if callable(getuid) and info.st_uid != getuid():
         return False
@@ -54,17 +89,26 @@ def _load_instance_key() -> bytes | None:
     检查后被替换的文件当成密钥。任何异常都 fail closed。
     """
 
+    if _launch_instance_key is not None:
+        return _launch_instance_key
+
     path = _key_path()
     try:
         parent = os.lstat(path.parent)
-        if stat.S_ISLNK(parent.st_mode) or not _metadata_is_secure(parent, directory=True):
+        if stat.S_ISLNK(parent.st_mode) or not _metadata_is_secure(
+            parent,
+            directory=True,
+            path=path.parent,
+        ):
             return None
         before = os.lstat(path)
-        if stat.S_ISLNK(before.st_mode) or not _metadata_is_secure(before):
+        if stat.S_ISLNK(before.st_mode) or not _metadata_is_secure(before, path=path):
             return None
 
         flags = os.O_RDONLY
-        if os.name != "nt" and hasattr(os, "O_NOFOLLOW"):
+        if _IS_WINDOWS and hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        if not _IS_WINDOWS and hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(path, flags)
     except (OSError, ValueError):
@@ -74,7 +118,7 @@ def _load_instance_key() -> bytes | None:
         opened = os.fstat(fd)
         if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
             return None
-        if not _metadata_is_secure(opened) or opened.st_size != 64:
+        if not _metadata_is_secure(opened, fd=fd) or opened.st_size != 64:
             return None
         chunks: list[bytes] = []
         remaining = 65
@@ -133,10 +177,11 @@ def _consume_proof_nonce(nonce: str, timestamp: int) -> bool:
     now = time.time()
     expires = timestamp + _PROOF_TTL_SECONDS + 5
     with _used_proof_lock:
-        if len(_used_proof_nonces) > _PROOF_NONCE_TABLE_LIMIT:
-            for stale in [key for key, exp in _used_proof_nonces.items() if exp < now]:
-                del _used_proof_nonces[stale]
+        for stale in [key for key, exp in _used_proof_nonces.items() if exp < now]:
+            del _used_proof_nonces[stale]
         if nonce in _used_proof_nonces:
+            return False
+        if len(_used_proof_nonces) >= _PROOF_NONCE_TABLE_LIMIT:
             return False
         _used_proof_nonces[nonce] = expires
         return True
@@ -150,7 +195,7 @@ def verify_desktop_security_proof(
     body: bytes,
     now: float | None = None,
 ) -> bool:
-    """Verify a short-lived, one-time proof for privileged security endpoints."""
+    """Verify a short-lived, one-time proof bound to the exact request body."""
     try:
         timestamp_raw, nonce, supplied = str(proof).split(":", 2)
         timestamp = int(timestamp_raw)
@@ -167,19 +212,21 @@ def verify_desktop_security_proof(
     body_hash = hashlib.sha256(body).hexdigest()
     message = (
         _SECURITY_CONTEXT
-        + f"{timestamp}\n{nonce}\n{method.upper()}\n{path}\n{body_hash}".encode("utf-8")
+        + f"{timestamp}\n{nonce}\n{method.upper()}\n{path}\n{body_hash}".encode()
     )
     expected = hmac.new(key, message, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, supplied) and _consume_proof_nonce(nonce, timestamp)
 
 
 __all__ = [
+    "GATEWAY_INSTANCE_AUTH_HEADER",
     "GATEWAY_INSTANCE_CHALLENGE_HEADER",
     "GATEWAY_INSTANCE_DIRECTORY",
     "GATEWAY_INSTANCE_KEY_FILENAME",
     "GATEWAY_INSTANCE_PROOF_FIELD",
+    "configure_gateway_launch_key",
     "create_gateway_instance_proof",
     "is_valid_gateway_instance_challenge",
-    "verify_gateway_instance_access_token",
     "verify_desktop_security_proof",
+    "verify_gateway_instance_access_token",
 ]

@@ -36,6 +36,7 @@ from crew.core.runctx import (
 from crew.state.logging import get_logger
 from crew.core.errors import ToolError
 from crew.tools.registry import Registry, tool_error, tool_result
+from crew.tools.redact import redact_sensitive_display_text
 
 log = get_logger("subagent")
 
@@ -346,6 +347,12 @@ def _normalize_skills(skills: Any) -> list[str]:
 
 _PARTIAL_CAP = 2000   # 部分输出缓冲上限（保留尾部）
 _PARTIAL_TAIL = 800   # 中止时附带的部分输出尾部长度
+_SUBAGENT_TEXT_CAP = 128 * 1024
+
+
+def _safe_subagent_text(value: Any, *, limit: int = _SUBAGENT_TEXT_CAP) -> str:
+    """子 agent 输出是内容，不是策略；展示/回传前只做脱敏和有界化。"""
+    return redact_sensitive_display_text(str(value or ""))[:limit]
 
 
 async def _run_one_child(
@@ -439,21 +446,23 @@ async def _run_one_child(
                 last_tool = chunk.body.get("name", "") or last_tool
             elif chunk.kind == "error":
                 status = "error"
-                final_text = chunk.body.get("message", "子智能体执行出错")
+                final_text = "子智能体执行失败"
                 break
             if progress_callback is not None:
                 progress_callback({
                     "tool_calls": tool_calls,
                     "last_tool": last_tool,
-                    "partial_output": (final_text or partial)[-_PARTIAL_TAIL:],
+                    "partial_output": _safe_subagent_text(
+                        final_text or partial, limit=_PARTIAL_TAIL
+                    ),
                     "last_chunk": chunk.kind,
                 })
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - 单个子任务异常不连累其他并行任务
         status = "error"
-        final_text = str(exc)
-        log.exception("子智能体 %s 执行异常", label)
+        final_text = "子智能体执行失败：内部错误"
+        log.error("子智能体 %s 执行异常：%s", label, type(exc).__name__)
     finally:
         try:
             await gen.aclose()
@@ -481,10 +490,12 @@ async def _run_one_child(
     return {
         "agent": label,
         "status": status,
-        "summary": summary,
+        "summary": _safe_subagent_text(summary),
         "duration_seconds": round(time.perf_counter() - started, 2),
         "tool_calls": tool_calls,
         "last_tool": last_tool,
+        "content_trust": "untrusted",
+        "content_source": "subagent",
     }
 
 
@@ -494,7 +505,7 @@ def _build_summary(
 ) -> str:
     """成功直接返回最终文本；中止/出错附诊断 + 部分输出尾部。"""
     if status == "completed":
-        return final_text
+        return _safe_subagent_text(final_text)
     if status == "timeout":
         elapsed = time.perf_counter() - started
         why = "无活动超时" if abort_reason == "idle" else "达到运行上限"
@@ -503,10 +514,11 @@ def _build_summary(
             diag += f"（最后工具：{last_tool}）"
     else:  # error
         diag = final_text or "子智能体执行出错"
-    tail = (final_text or partial).strip()
-    if tail and status != "completed":
-        return f"{diag}\n部分输出：\n{tail[-_PARTIAL_TAIL:]}"
-    return diag
+    tail = _safe_subagent_text(final_text or partial, limit=_PARTIAL_TAIL).strip()
+    safe_diag = _safe_subagent_text(diag)
+    if tail and status != "completed" and tail != safe_diag:
+        return f"{safe_diag}\n部分输出：\n{tail}"
+    return safe_diag
 
 
 async def _run_children(
@@ -575,8 +587,11 @@ async def _run_background(
                   "duration_seconds": 0, "tool_calls": 0}
         raise
     except Exception as exc:  # noqa: BLE001
-        result = {"agent": item["label"], "status": "error", "summary": str(exc),
-                  "duration_seconds": 0, "tool_calls": 0}
+        result = {"agent": item["label"], "status": "error",
+                  "summary": "子智能体执行失败：内部错误", "duration_seconds": 0,
+                  "tool_calls": 0, "content_trust": "untrusted",
+                  "content_source": "subagent"}
+        log.error("后台子智能体 %s 执行异常：%s", item["label"], type(exc).__name__)
     finally:
         # 落任务看板（result 存结构化 JSON）
         try:

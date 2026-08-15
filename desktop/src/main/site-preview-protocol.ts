@@ -27,6 +27,8 @@ function previewErrorDocument(message: string): string {
 <script>const message=${payload};document.getElementById('message').textContent=message;parent.postMessage({type:'ace-site-preview-error',message},'*');</script>`;
 }
 
+const PREVIEW_UPSTREAM_FAILURE = '站点预览请求失败';
+
 export function parseSitePreviewUrl(rawUrl: string): SitePreviewRequest | null {
   if (rawUrl.length > 16_384) return null;
   let parsed: URL;
@@ -78,18 +80,19 @@ export function registerSitePreviewProtocol(resolveGateway: GatewayResolver): vo
       });
       const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
       if (!upstream.ok) {
-        const detail = (await upstream.text()).slice(0, 1000);
-        const message = `Gateway ${upstream.status}：${detail || upstream.statusText}`;
-        console.warn(`[ace-site] ${resolved.assetId}/${resolved.assetPath || 'index.html'} -> ${message}`);
+        console.warn(
+          `[ace-site] ${resolved.assetId}/${resolved.assetPath || 'index.html'} -> ` +
+          `upstream status=${upstream.status}`,
+        );
         if (!resolved.assetPath) {
-          return new Response(previewErrorDocument(message), {
+          return new Response(previewErrorDocument(PREVIEW_UPSTREAM_FAILURE), {
             status: 200,
             headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
           });
         }
-        return new Response(detail || upstream.statusText, {
-          status: upstream.status,
-          headers: { 'Content-Type': contentType, 'Cache-Control': 'no-store' },
+        return new Response(PREVIEW_UPSTREAM_FAILURE, {
+          status: 502,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
         });
       }
       if (!resolved.assetPath && !contentType.toLowerCase().includes('text/html')) {
@@ -111,9 +114,11 @@ export function registerSitePreviewProtocol(resolveGateway: GatewayResolver): vo
         },
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`[ace-site] ${resolved.assetId}/${resolved.assetPath || 'index.html'} failed: ${message}`);
-      return new Response(previewErrorDocument(message), {
+      console.error(
+        `[ace-site] ${resolved.assetId}/${resolved.assetPath || 'index.html'} failed `
+        + `type=${error instanceof Error ? error.name : 'unknown'}`,
+      );
+      return new Response(previewErrorDocument(PREVIEW_UPSTREAM_FAILURE), {
         status: 200,
         headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
       });

@@ -211,7 +211,10 @@ async function syncStrictSecurityFromMain(): Promise<void> {
     const result = await window.Crew?.getStrictSecurityEnabled?.();
     if (!result || typeof result.strictSecurityEnabled !== 'boolean') return;
     const toggle = document.querySelector<HTMLInputElement>('#set-strict-security');
-    if (toggle) toggle.checked = result.strictSecurityEnabled;
+    if (toggle) {
+      toggle.checked = true;
+      toggle.disabled = true;
+    }
   } catch {
     // 主进程不可用时保留 fail-closed 的 checked 默认值。
   }
@@ -415,23 +418,6 @@ function bindControls(): void {
       } catch {
         checkbox.checked = current.autoStart;
         notify('开机自启设置失败');
-      }
-    })();
-  });
-  document.querySelector<HTMLInputElement>('#set-strict-security')?.addEventListener('change', (e) => {
-    const checkbox = e.target as HTMLInputElement;
-    const previous = !checkbox.checked;
-    void (async (): Promise<void> => {
-      try {
-        const result = await window.Crew?.setStrictSecurityEnabled?.(checkbox.checked);
-        if (!result || typeof result.strictSecurityEnabled !== 'boolean') {
-          throw new Error('invalid strict security preference');
-        }
-        checkbox.checked = result.strictSecurityEnabled;
-        notify(result.strictSecurityEnabled ? '已开启严格安全约束，网关正在重启以应用' : '已启用兼容模式，网关正在重启以应用');
-      } catch {
-        checkbox.checked = previous;
-        notify('安全策略设置失败');
       }
     })();
   });

@@ -9,14 +9,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 
-from crew.agent.external.process_lifecycle import isolated_process_kwargs, terminate_process_tree
+from crew.agent.external.process_lifecycle import (
+    ExternalProcessBoundaryError,
+    spawn_authorized_external_process,
+    spawn_trusted_probe_process,
+    terminate_process_tree,
+)
 from crew.agent.external.runtime_adapter import (
     ExternalStreamEvent,
     ExternalToolEvent,
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
-    build_external_runtime_env,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
@@ -26,6 +30,8 @@ from crew.state.logging import get_logger
 log = get_logger("agent.acp")
 
 ACP_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+ACP_INPUT_LIMIT_BYTES = 1024 * 1024
+ACP_STDERR_LIMIT_BYTES = 64 * 1024
 
 
 class AcpAdapterError(RuntimeError):
@@ -93,7 +99,9 @@ def _build_session_new_params(cwd: str, mcp_servers: list[dict[str, Any]]) -> di
     }
 
 
-def _build_session_resume_params(cwd: str, session_id: str, mcp_servers: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_session_resume_params(
+    cwd: str, session_id: str, mcp_servers: list[dict[str, Any]]
+) -> dict[str, Any]:
     """Build ACP session/resume params with provider compatibility fields."""
     return {
         "cwd": cwd,
@@ -109,7 +117,11 @@ def _normalize_permission_request(params: dict[str, Any]) -> AcpPermissionReques
     if not isinstance(tool_call, dict):
         tool_call = {}
     raw_options = params.get("options") or []
-    options = tuple(item for item in raw_options if isinstance(item, dict)) if isinstance(raw_options, list) else ()
+    options = (
+        tuple(item for item in raw_options if isinstance(item, dict))
+        if isinstance(raw_options, list)
+        else ()
+    )
     return AcpPermissionRequest(
         session_id=str(params.get("sessionId") or params.get("session_id") or "").strip(),
         tool_call=dict(tool_call),
@@ -192,6 +204,7 @@ class _JsonRpcClient:
         # runtime tool-call id, so policy can verify the actual workspace path.
         self._permission_tool_inputs: dict[str, dict[str, Any]] = {}
         self.accept_stream_events = True
+        self._output_bytes = 0
 
     async def start(self) -> None:
         self._reader_task = asyncio.create_task(self._read_loop())
@@ -211,7 +224,9 @@ class _JsonRpcClient:
         self.next_id += 1
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self.pending[msg_id] = fut
-        await self._write({"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params or {}})
+        await self._write(
+            {"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params or {}}
+        )
         raw = await fut
         if "error" in raw:
             err = raw.get("error") or {}
@@ -233,6 +248,8 @@ class _JsonRpcClient:
         if not self.proc.stdin:
             raise AcpAdapterError("ACP stdin is closed")
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
+        if len(data) > ACP_INPUT_LIMIT_BYTES:
+            raise AcpAdapterError("ACP 协议输入超过大小上限")
         self.proc.stdin.write(data)
         await self.proc.stdin.drain()
 
@@ -256,6 +273,16 @@ class _JsonRpcClient:
                     await self.event_queue.put(AcpStreamEvent(kind="error", text=message))
                     break
                 if not line:
+                    break
+                self._output_bytes += len(line)
+                if self._output_bytes > ACP_STREAM_LIMIT_BYTES:
+                    message = "ACP stdout 总输出超过读取上限"
+                    err = AcpAdapterError(message)
+                    for fut in self.pending.values():
+                        if not fut.done():
+                            fut.set_exception(err)
+                    self.pending.clear()
+                    await self.event_queue.put(AcpStreamEvent(kind="error", text=message))
                     break
                 try:
                     raw = json.loads(line.decode("utf-8", errors="replace"))
@@ -307,11 +334,13 @@ class _JsonRpcClient:
             await self._write({"jsonrpc": "2.0", "id": msg_id, "result": result})
             self._permission_tool_inputs.pop(_permission_tool_call_id(request.tool_call), None)
             return
-        await self._write({
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "error": {"code": -32601, "message": f"method not found: {method}"},
-        })
+        await self._write(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32601, "message": f"method not found: {method}"},
+            }
+        )
 
     def _handle_notification(self, raw: dict[str, Any]) -> None:
         if not self.accept_stream_events:
@@ -381,7 +410,9 @@ class _JsonRpcClient:
                 or call.get("title")
                 or ""
             )
-        if not isinstance(raw.get("arguments"), dict) and isinstance((snapshot or {}).get("arguments"), dict):
+        if not isinstance(raw.get("arguments"), dict) and isinstance(
+            (snapshot or {}).get("arguments"), dict
+        ):
             raw["arguments"] = dict(snapshot["arguments"])
         if raw:
             call["rawInput"] = raw
@@ -537,7 +568,14 @@ def _extract_tool_event(update_type: str, data: Any) -> AcpToolEvent | None:
     status = str(data.get("status") or data.get("state") or data.get("phase") or "").lower()
     if status in {"failed", "failure", "error", "errored"}:
         phase = "error"
-    elif update_type == "tool_result" or status in {"completed", "complete", "done", "finished", "succeeded", "success"}:
+    elif update_type == "tool_result" or status in {
+        "completed",
+        "complete",
+        "done",
+        "finished",
+        "succeeded",
+        "success",
+    }:
         phase = "result"
     else:
         phase = "start"
@@ -615,14 +653,17 @@ def _extract_session_models(result: Any) -> tuple[list[RuntimeModelProfile], str
         elif "/" in model_id:
             provider = model_id.split("/", 1)[0]
         capabilities = raw.get("capabilities") or []
-        models.append(RuntimeModelProfile(
-            id=model_id,
-            label=str(raw.get("name") or raw.get("label") or model_id).strip() or model_id,
-            provider=provider,
-            default=model_id == current,
-            capabilities=tuple(str(item).strip() for item in capabilities if str(item).strip())
-            if isinstance(capabilities, list) else (),
-        ))
+        models.append(
+            RuntimeModelProfile(
+                id=model_id,
+                label=str(raw.get("name") or raw.get("label") or model_id).strip() or model_id,
+                provider=provider,
+                default=model_id == current,
+                capabilities=tuple(str(item).strip() for item in capabilities if str(item).strip())
+                if isinstance(capabilities, list)
+                else (),
+            )
+        )
     return models, current
 
 
@@ -641,12 +682,18 @@ def _model_config_option_id(result: Any) -> str:
             continue
         category = option.get("category")
         category_name = (
-            str(category.get("type") or category.get("id") or "")
-            if isinstance(category, dict)
-            else str(category or "")
-        ).strip().lower()
+            (
+                str(category.get("type") or category.get("id") or "")
+                if isinstance(category, dict)
+                else str(category or "")
+            )
+            .strip()
+            .lower()
+        )
         if category_name == "model":
-            return str(option.get("id") or option.get("configId") or option.get("config_id") or "").strip()
+            return str(
+                option.get("id") or option.get("configId") or option.get("config_id") or ""
+            ).strip()
     return ""
 
 
@@ -660,50 +707,58 @@ async def probe_acp_runtime(
 ) -> AcpRuntimeProbeResult:
     """Open a throwaway ACP session and return its advertised model catalog."""
 
-    env = build_external_runtime_env(custom_env)
-    proc = await asyncio.create_subprocess_exec(
-        executable_path,
-        *launch_args,
-        env=env,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        limit=ACP_STREAM_LIMIT_BYTES,
-    )
-    client = _JsonRpcClient(proc)
-    await client.start()
-    try:
-        async def _probe() -> AcpRuntimeProbeResult:
-            await client.request("initialize", {
-                "protocolVersion": 1,
-                "clientInfo": {"name": "crew-runtime-discovery", "version": "0.1.0"},
-                "clientCapabilities": {},
-            })
-            with tempfile.TemporaryDirectory(prefix=f"crew-{provider or 'acp'}-probe-") as cwd:
-                result = await client.request("session/new", _build_session_new_params(cwd, []))
-            models, current = _extract_session_models(result)
-            return AcpRuntimeProbeResult(
-                models=models,
-                default_model_id=current,
-                capabilities=RuntimeCapabilities(
-                    session_resume=True,
-                    model_switch=bool(models),
-                    mcp_servers=True,
-                    images=True,
-                    tool_events=True,
-                    streaming=True,
-                    approval=True,
-                ),
+    with tempfile.TemporaryDirectory(prefix=f"crew-{provider or 'acp'}-probe-") as probe_cwd:
+        try:
+            proc = await spawn_trusted_probe_process(
+                executable_path,
+                *launch_args,
+                cwd=probe_cwd,
+                custom_env=custom_env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                limit=ACP_STREAM_LIMIT_BYTES,
             )
+        except ExternalProcessBoundaryError as exc:
+            raise AcpAdapterError(f"{provider or 'ACP'} 运行时探测配置已拒绝: {exc}") from exc
+        client = _JsonRpcClient(proc)
+        await client.start()
+        try:
 
-        return await asyncio.wait_for(_probe(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
-        raise AcpAdapterError(f"{provider or 'ACP'} 运行时探测超时") from exc
-    finally:
-        await client.close()
-        if proc.returncode is None:
-            proc.kill()
-        await proc.wait()
+            async def _probe() -> AcpRuntimeProbeResult:
+                await client.request(
+                    "initialize",
+                    {
+                        "protocolVersion": 1,
+                        "clientInfo": {"name": "crew-runtime-discovery", "version": "0.1.0"},
+                        "clientCapabilities": {},
+                    },
+                )
+                result = await client.request(
+                    "session/new",
+                    _build_session_new_params(probe_cwd, []),
+                )
+                models, current = _extract_session_models(result)
+                return AcpRuntimeProbeResult(
+                    models=models,
+                    default_model_id=current,
+                    capabilities=RuntimeCapabilities(
+                        session_resume=True,
+                        model_switch=bool(models),
+                        mcp_servers=True,
+                        images=True,
+                        tool_events=True,
+                        streaming=True,
+                        approval=True,
+                    ),
+                )
+
+            return await asyncio.wait_for(_probe(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise AcpAdapterError(f"{provider or 'ACP'} 运行时探测超时") from exc
+        finally:
+            await client.close()
+            await terminate_process_tree(proc)
 
 
 def _compact_timeout_detail(value: str, *, max_chars: int = 120) -> str:
@@ -766,24 +821,27 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
         )
     loop = asyncio.get_running_loop()
     total_started_at = loop.time()
-    env = build_external_runtime_env(config.custom_env)
     cwd = str(Path(config.cwd or ".").expanduser().resolve())
     stderr_lines: list[str] = []
     stage_state = {"name": "spawn"}
     provider_label = str(config.provider or Path(config.executable_path).name or "external").strip()
     last_activity = {"text": "准备启动 ACP 子进程"}
-    proc = await asyncio.create_subprocess_exec(
-        config.executable_path,
-        *config.launch_args,
-        *config.custom_args,
-        cwd=cwd,
-        env=env,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        limit=ACP_STREAM_LIMIT_BYTES,
-        **isolated_process_kwargs(),
-    )
+    try:
+        proc = await spawn_authorized_external_process(
+            config.executable_path,
+            *config.launch_args,
+            *config.custom_args,
+            cwd=cwd,
+            custom_env=config.custom_env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=ACP_STREAM_LIMIT_BYTES,
+        )
+    except FileNotFoundError as exc:
+        raise AcpAdapterError(f"找不到可执行文件: {config.executable_path}") from exc
+    except ExternalProcessBoundaryError as exc:
+        raise AcpAdapterError(f"ACP 启动配置已拒绝: {exc}") from exc
     log.info(
         "[PERF] acp_spawn provider=%s elapsed=%.3fs model=%s pid=%s",
         provider_label,
@@ -812,7 +870,9 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
             "reset": False,
         }
 
-        async def _request_stage(name: str, method: str, params: dict[str, Any] | None = None) -> Any:
+        async def _request_stage(
+            name: str, method: str, params: dict[str, Any] | None = None
+        ) -> Any:
             stage_state["name"] = name
             if name == "session/prompt":
                 last_activity["text"] = "已发送 session/prompt，等待外部模型响应"
@@ -841,11 +901,15 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
             return result
 
         async def _run() -> None:
-            await _request_stage("initialize", "initialize", {
-                "protocolVersion": 1,
-                "clientInfo": {"name": "crew", "version": "0.1.0"},
-                "clientCapabilities": {},
-            })
+            await _request_stage(
+                "initialize",
+                "initialize",
+                {
+                    "protocolVersion": 1,
+                    "clientInfo": {"name": "crew", "version": "0.1.0"},
+                    "clientCapabilities": {},
+                },
+            )
             session_id = ""
             session_result: Any = None
             if config.resume_session_id:
@@ -854,7 +918,9 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
                     result = await _request_stage(
                         "session/resume",
                         "session/resume",
-                        _build_session_resume_params(cwd, config.resume_session_id, config.mcp_servers),
+                        _build_session_resume_params(
+                            cwd, config.resume_session_id, config.mcp_servers
+                        ),
                     )
                     session_result = result
                     session_id = _extract_session_id(result) or config.resume_session_id
@@ -892,7 +958,11 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
                         await _request_stage(
                             "session/set_config_option",
                             "session/set_config_option",
-                            {"sessionId": session_id, "configId": config_id, "value": requested_model},
+                            {
+                                "sessionId": session_id,
+                                "configId": config_id,
+                                "value": requested_model,
+                            },
                         )
                     except AcpAdapterError:
                         # 兼容已返回 configOptions、但仍只实现旧 set_model 的 ACP runtime。
@@ -910,10 +980,14 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
             user_text = prompt
             if config.system_prompt:
                 user_text = f"{config.system_prompt}\n\n---\n\n{prompt}"
-            await _request_stage("session/prompt", "session/prompt", {
-                "sessionId": session_id,
-                "prompt": [{"type": "text", "text": user_text}],
-            })
+            await _request_stage(
+                "session/prompt",
+                "session/prompt",
+                {
+                    "sessionId": session_id,
+                    "prompt": [{"type": "text", "text": user_text}],
+                },
+            )
 
         task = asyncio.create_task(_run())
         idle_timeout = max(0.1, float(config.timeout or 0.0))
@@ -945,26 +1019,34 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
                 hard_remaining = hard_deadline - now
                 if hard_remaining <= 0:
                     task.cancel()
-                    proc_state = "running" if proc.returncode is None else f"exited({proc.returncode})"
-                    raise AcpAdapterError(_format_timeout_error(
-                        timeout_kind="hard",
-                        stage=stage_state["name"],
-                        process_state=proc_state,
-                        provider=provider_label,
-                        idle_seconds=loop.time() - started_at,
-                        last_activity=last_activity["text"],
-                    ))
+                    proc_state = (
+                        "running" if proc.returncode is None else f"exited({proc.returncode})"
+                    )
+                    raise AcpAdapterError(
+                        _format_timeout_error(
+                            timeout_kind="hard",
+                            stage=stage_state["name"],
+                            process_state=proc_state,
+                            provider=provider_label,
+                            idle_seconds=loop.time() - started_at,
+                            last_activity=last_activity["text"],
+                        )
+                    )
                 if idle_remaining <= 0:
                     task.cancel()
-                    proc_state = "running" if proc.returncode is None else f"exited({proc.returncode})"
-                    raise AcpAdapterError(_format_timeout_error(
-                        timeout_kind="idle",
-                        stage=stage_state["name"],
-                        process_state=proc_state,
-                        provider=provider_label,
-                        idle_seconds=idle_timeout,
-                        last_activity=last_activity["text"],
-                    ))
+                    proc_state = (
+                        "running" if proc.returncode is None else f"exited({proc.returncode})"
+                    )
+                    raise AcpAdapterError(
+                        _format_timeout_error(
+                            timeout_kind="idle",
+                            stage=stage_state["name"],
+                            process_state=proc_state,
+                            provider=provider_label,
+                            idle_seconds=idle_timeout,
+                            last_activity=last_activity["text"],
+                        )
+                    )
                 try:
                     event = await asyncio.wait_for(
                         client.event_queue.get(),
@@ -1107,8 +1189,7 @@ class AcpRuntimeAdapter:
                 custom_args=request.custom_args,
                 custom_env=request.custom_env,
                 mcp_servers=[
-                    server.stdio_config(env_as_list=True)
-                    for server in request.mcp_servers
+                    server.stdio_config(env_as_list=True) for server in request.mcp_servers
                 ],
                 resume_session_id=request.resume_session_id,
                 timeout=request.timeout,
@@ -1123,10 +1204,16 @@ register_runtime_adapter(AcpRuntimeAdapter())
 async def _read_stderr(proc: asyncio.subprocess.Process, lines: list[str]) -> None:
     if not proc.stderr:
         return
+    retained_bytes = 0
     while True:
-        line = await proc.stderr.readline()
-        if not line:
-            break
-        text = line.decode("utf-8", errors="replace").strip()
+        chunk = await proc.stderr.read(64 * 1024)
+        if not chunk:
+            return
+        remaining = ACP_STDERR_LIMIT_BYTES - retained_bytes
+        if remaining <= 0:
+            continue
+        retained = chunk[:remaining]
+        retained_bytes += len(retained)
+        text = retained.decode("utf-8", errors="replace").strip()
         if text:
             lines.append(text)

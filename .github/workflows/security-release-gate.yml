@@ -1,0 +1,106 @@
+name: security-release-gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full source commit verified by every evidence bundle
+        required: true
+        type: string
+      linux_run_id:
+        description: security-linux workflow run containing attested evidence
+        required: true
+        type: string
+      windows_run_id:
+        description: security-windows workflow run containing attested evidence
+        required: true
+        type: string
+      macos_run_id:
+        description: security-macos workflow run containing attested evidence
+        required: true
+        type: string
+      package_run_id:
+        description: Trusted package-signing workflow run containing attested packages
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      source_commit:
+        required: true
+        type: string
+      linux_run_id:
+        required: true
+        type: string
+      windows_run_id:
+        required: true
+        type: string
+      macos_run_id:
+        required: true
+        type: string
+      package_run_id:
+        required: true
+        type: string
+
+jobs:
+  verify-release:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - name: Download attested Linux evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: security-linux-evidence
+          path: ${{ runner.temp }}/security-evidence/linux
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.linux_run_id }}
+      - name: Download attested Windows evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: security-windows-evidence
+          path: ${{ runner.temp }}/security-evidence/windows
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.windows_run_id }}
+      - name: Download attested macOS evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: security-macos-evidence
+          path: ${{ runner.temp }}/security-evidence/macos
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.macos_run_id }}
+      - name: Download attested signed packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: security-package-evidence
+          path: ${{ runner.temp }}/security-evidence/package
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.package_run_id }}
+      - name: Verify complete security release closure
+        env:
+          ACE_SECURITY_LINUX_EVIDENCE: ${{ runner.temp }}/security-evidence/linux/security-linux-evidence.json
+          ACE_SECURITY_WINDOWS_EVIDENCE: ${{ runner.temp }}/security-evidence/windows/security-windows-evidence.json
+          ACE_SECURITY_MACOS_EVIDENCE: ${{ runner.temp }}/security-evidence/macos/security-macos-evidence.json
+          ACE_SECURITY_PACKAGE_EVIDENCE: ${{ runner.temp }}/security-evidence/package/security-package-evidence.json
+          ACE_SECURITY_PACKAGE_ATTESTATION: ${{ runner.temp }}/security-evidence/package/security-package-evidence.sigstore.json
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/check_release_readiness.py --security-release --json \
+            | tee security-release-gate.json
+      - name: Preserve the blocking gate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-release-gate-report
+          if-no-files-found: error
+          path: security-release-gate.json

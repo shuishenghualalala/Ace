@@ -1,21 +1,51 @@
+import asyncio
+import gc
+import hashlib
+import json
+import os
 import sys
 import tempfile
 import zipfile
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import psutil
 
+from crew.security.context import SecurityContext
+from crew.security.launch import (
+    current_process_launch,
+    finalize_process_launch,
+    issue_process_launch,
+    validate_process_launch,
+)
+from crew.security.models import (
+    FilesystemAccess,
+    FilesystemEntry,
+    PermissionProfile,
+    PermissionProfileKind,
+    NetworkPolicy,
+)
+from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
+from crew.tools.file_utils import FileConflictError
 from crew.wiki.parser import (
     DocumentParseQualityError,
     MissingDependencyError,
     _markdown_table_from_rows,
     guess_mime_type,
     parse_document_from_bytes,
+    parse_document_from_bytes_async,
     parse_document_to_markdown,
 )
+
+
+def _open_fds() -> int:
+    gc.collect()
+    process = psutil.Process()
+    return process.num_handles() if os.name == "nt" else process.num_fds()
 
 
 def test_parse_txt():
@@ -57,6 +87,45 @@ def test_parse_from_bytes_uses_pdf_signature_when_filename_has_no_extension(monk
     assert parse_document_from_bytes(b"%PDF-1.7\nfake", "display title") == "parsed:.pdf"
 
 
+def test_parse_failure_cleans_up_every_temporary_directory(monkeypatch):
+    import crew.wiki.parser as parser_mod
+
+    created: list[Path] = []
+
+    class TrackingTemporaryDirectory(tempfile.TemporaryDirectory):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(Path(self.name))
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", TrackingTemporaryDirectory)
+
+    def fail_pdf(_path):
+        raise RuntimeError("simulated parser failure")
+
+    monkeypatch.setattr(parser_mod, "_parse_pdf", fail_pdf)
+
+    with pytest.raises(RuntimeError, match="simulated parser failure"):
+        parse_document_from_bytes(b"%PDF-1.7\nfake", "display title")
+    assert created
+    for directory in created:
+        assert not directory.exists()
+
+
+def test_malformed_parse_paths_do_not_leak_file_descriptors():
+    parse_document_from_bytes(b"warmup", "warmup.txt")
+    baseline = _open_fds()
+    for payload in (
+        b"%PDF-1.7\n%truncated",
+        b"PK\x03\x04" + b"\x00" * 200,
+        b"PK\x05\x06" + b"\x00" * 40,
+    ):
+        try:
+            parse_document_from_bytes(payload, "malformed")
+        except Exception:
+            pass
+    assert _open_fds() <= baseline + 2
+
+
 def test_parse_from_bytes_detects_ooxml_container_without_extension(monkeypatch):
     import crew.wiki.parser as parser_mod
 
@@ -84,21 +153,471 @@ def test_parse_replacement_character_quality_gate():
         parse_document_from_bytes(("正常文本" + "\ufffd" * 10).encode("utf-8"), "bad.txt")
 
 
+def _converter_launch(tmp_path: Path, *, managed: bool = True):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    context = SecurityContext(
+        os_user="host-user",
+        owner_account_id="owner-a",
+        workspace_id="workspace-a",
+        workspace_root=workspace,
+        session_id="session-a",
+        request_id="request-a",
+        task_id="task-a",
+        cwd=workspace,
+    )
+    if not managed:
+        return issue_process_launch(
+            context,
+            PermissionProfile(PermissionProfileKind.DISABLED),
+        )
+    runtime = tmp_path / "ace-security-runtime"
+    runtime.write_bytes(b"test-runtime")
+    runtime.with_name("runtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "binary_name": runtime.name,
+                "binary_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return issue_process_launch(
+        context,
+        PermissionProfile(
+            PermissionProfileKind.MANAGED,
+            filesystem=(
+                FilesystemEntry(
+                    root=workspace,
+                    access=FilesystemAccess.READ_WRITE,
+                ),
+            ),
+            network=NetworkPolicy.UNRESTRICTED,
+            allow_local_binding=True,
+        ),
+        helper_argv=(str(runtime),),
+    )
+
+
+def _install_fake_soffice(monkeypatch, tmp_path: Path) -> Path:
+    import crew.wiki.parser as parser_mod
+
+    install_dir = tmp_path / "libreoffice" / "program"
+    install_dir.mkdir(parents=True)
+    executable = install_dir / "soffice"
+    executable.write_bytes(b"fake-soffice")
+    executable.chmod(0o700)
+    monkeypatch.setattr(
+        parser_mod,
+        "_discover_libreoffice",
+        lambda _environment: executable,
+    )
+    return executable
+
+
+def test_libreoffice_discovery_does_not_search_current_directory(
+    monkeypatch,
+    tmp_path,
+):
+    import crew.wiki.parser as parser_mod
+
+    executable_name = "soffice.exe" if os.name == "nt" else "soffice"
+    executable = tmp_path / executable_name
+    executable.write_bytes(b"fake-soffice")
+    executable.chmod(0o700)
+    monkeypatch.chdir(tmp_path)
+
+    assert (
+        parser_mod._discover_libreoffice(
+            {"PATH": os.pathsep.join(("", ".", "relative-bin"))}
+        )
+        is None
+    )
+
+
 def test_parse_legacy_xls_converts_with_libreoffice(monkeypatch, tmp_path):
     import crew.wiki.parser as parser_mod
 
     source = tmp_path / "legacy.xls"
     source.write_bytes(b"legacy excel")
-    monkeypatch.setattr(parser_mod.shutil, "which", lambda _name: "/usr/bin/soffice")
+    _install_fake_soffice(monkeypatch, tmp_path)
     monkeypatch.setattr(parser_mod, "_parse_xlsx", lambda _path: "## 工作表: Sheet1\n\n| A |\n| --- |\n| 1 |")
 
-    def fake_run(args, **_kwargs):
+    async def fake_execute(args, **_kwargs):
         output_dir = Path(args[args.index("--outdir") + 1])
-        (output_dir / "legacy.xlsx").write_bytes(b"converted")
-        return MagicMock(returncode=0, stdout="", stderr="")
+        source_path = Path(args[-1])
+        (output_dir / f"{source_path.stem}.xlsx").write_bytes(b"converted")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(parser_mod.subprocess, "run", fake_run)
-    assert "工作表" in parse_document_to_markdown(source)
+    monkeypatch.setattr("crew.security.launch.execute_captured", fake_execute)
+    token = current_process_launch.set(_converter_launch(tmp_path))
+    try:
+        assert "工作表" in parse_document_to_markdown(source)
+    finally:
+        current_process_launch.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_rejects_scratch_usage_over_budget(
+    monkeypatch,
+    tmp_path,
+):
+    import crew.wiki.parser as parser_mod
+
+    source = tmp_path / "legacy.xls"
+    source.write_bytes(b"legacy excel")
+    _install_fake_soffice(monkeypatch, tmp_path)
+    monkeypatch.setattr(parser_mod, "_MAX_CONVERTER_SCRATCH_BYTES", 24)
+
+    async def fake_execute(args, **_kwargs):
+        output_dir = Path(args[args.index("--outdir") + 1])
+        (output_dir / "oversized-profile.dat").write_bytes(b"x" * 32)
+        source_path = Path(args[-1])
+        (output_dir / f"{source_path.stem}.xlsx").write_bytes(b"converted")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("crew.security.launch.execute_captured", fake_execute)
+    token = current_process_launch.set(_converter_launch(tmp_path))
+    try:
+        with pytest.raises(RuntimeError, match="临时目录超过"):
+            await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_uses_managed_boundary_without_ambient_credentials(
+    monkeypatch,
+    tmp_path,
+):
+    import crew.wiki.parser as parser_mod
+
+    executable = _install_fake_soffice(monkeypatch, tmp_path)
+    ambient_bin = tmp_path / "ambient-bin"
+    ambient_bin.mkdir()
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient-aws-secret")
+    monkeypatch.setenv("VLM_API_KEY", "ambient-vlm-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-github-secret")
+    monkeypatch.setenv("COMSPEC", str(ambient_bin / "cmd.exe"))
+    monkeypatch.setenv("PATH", str(ambient_bin))
+    monkeypatch.setenv("SHELL", str(ambient_bin / "sh"))
+    monkeypatch.setattr(
+        parser_mod,
+        "_parse_xlsx",
+        lambda _path: "## 工作表: Sheet1\n\n| A |\n| --- |\n| 1 |",
+    )
+    captured = {}
+
+    async def fake_execute(args, **kwargs):
+        launch = current_process_launch.get()
+        validate_process_launch(launch)
+        assert launch is not None and launch.managed
+        output_dir = Path(kwargs["cwd"])
+        authorization = finalize_process_launch(
+            launch,
+            argv=tuple(args),
+            cwd=output_dir,
+            environment=kwargs["env_overrides"],
+        )
+        source_path = Path(args[-1])
+        (output_dir / f"{source_path.stem}.xlsx").write_bytes(b"converted")
+        captured.update(
+            args=args,
+            authorization=authorization,
+            launch=launch,
+            **kwargs,
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("crew.security.launch.execute_captured", fake_execute)
+    token = current_process_launch.set(_converter_launch(tmp_path, managed=True))
+    try:
+        result = await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+
+    assert "工作表" in result
+    assert captured["args"][0] == str(executable.resolve())
+    assert captured["timeout"] == 120.0
+    assert captured["max_output_bytes"] == 256 * 1024
+    assert captured["env_overrides"] == captured["env"]
+    assert "AWS_SECRET_ACCESS_KEY" not in captured["env"]
+    assert "VLM_API_KEY" not in captured["env"]
+    assert "GITHUB_TOKEN" not in captured["env"]
+    assert "COMSPEC" not in captured["env"]
+    assert "SHELL" not in captured["env"]
+    converter_path = captured["env"]["PATH"].split(os.pathsep)
+    assert converter_path[0] == str(executable.resolve().parent)
+    assert str(ambient_bin) not in converter_path
+    for name in (
+        "APPDATA",
+        "HOME",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+    ):
+        assert captured["env"][name] == str(captured["cwd"])
+    scratch_entries = [
+        entry
+        for entry in captured["launch"].additional_permissions.filesystem
+        if entry.root == captured["cwd"]
+    ]
+    assert len(scratch_entries) == 1
+    assert scratch_entries[0].access is FilesystemAccess.READ_WRITE
+    assert scratch_entries[0].escalatable is False
+    assert captured["launch"].profile.filesystem == ()
+    assert captured["launch"].profile.network is NetworkPolicy.RESTRICTED
+    assert captured["launch"].profile.allow_local_binding is False
+    assert captured["launch"].trusted_readable_roots == (
+        executable.resolve().parent.parent,
+    )
+    assert captured["authorization"].snapshot.writable_roots == (
+        str(captured["cwd"].resolve()),
+    )
+    assert captured["authorization"].snapshot.readable_roots == (
+        str(executable.resolve().parent.parent),
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_rejects_executable_in_writable_capability(
+    monkeypatch,
+    tmp_path,
+):
+    import crew.wiki.parser as parser_mod
+
+    launch = _converter_launch(tmp_path, managed=True)
+    workspace = launch.profile.filesystem[0].root
+    executable = workspace / "soffice"
+    executable.write_bytes(b"workspace-controlled-soffice")
+    executable.chmod(0o700)
+    monkeypatch.setattr(
+        parser_mod,
+        "_discover_libreoffice",
+        lambda _environment: executable,
+    )
+    monkeypatch.setattr(
+        "crew.security.launch.execute_captured",
+        lambda *_args, **_kwargs: pytest.fail("writable converter must not start"),
+    )
+
+    token = current_process_launch.set(launch)
+    try:
+        with pytest.raises(RuntimeError, match="用户可写授权目录"):
+            await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_rejects_executable_changed_during_run(
+    monkeypatch,
+    tmp_path,
+):
+    executable = _install_fake_soffice(monkeypatch, tmp_path)
+
+    async def fake_execute(_args, **_kwargs):
+        executable.write_bytes(b"replaced-soffice")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("crew.security.launch.execute_captured", fake_execute)
+    token = current_process_launch.set(_converter_launch(tmp_path))
+    try:
+        with pytest.raises(RuntimeError, match="运行期间已变化"):
+            await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_refuses_missing_launch_context(monkeypatch):
+    import crew.wiki.parser as parser_mod
+
+    monkeypatch.setattr(
+        parser_mod,
+        "_discover_libreoffice",
+        lambda *_args, **_kwargs: pytest.fail("converter discovery must not run"),
+    )
+    monkeypatch.setattr(
+        "crew.security.launch.execute_captured",
+        lambda *_args, **_kwargs: pytest.fail("converter must not start"),
+    )
+    token = current_process_launch.set(None)
+    try:
+        with pytest.raises(NativeRuntimeError) as caught:
+            await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+    assert caught.value.code is RuntimeErrorCode.SANDBOX_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_refuses_disabled_launch_boundary(
+    monkeypatch,
+    tmp_path,
+):
+    import crew.wiki.parser as parser_mod
+
+    monkeypatch.setattr(
+        parser_mod,
+        "_discover_libreoffice",
+        lambda *_args, **_kwargs: pytest.fail("converter discovery must not run"),
+    )
+    monkeypatch.setattr(
+        "crew.security.launch.execute_captured",
+        lambda *_args, **_kwargs: pytest.fail("converter must not start"),
+    )
+    token = current_process_launch.set(_converter_launch(tmp_path, managed=False))
+    try:
+        with pytest.raises(NativeRuntimeError) as caught:
+            await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+    assert caught.value.code is RuntimeErrorCode.SANDBOX_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_refuses_stale_launch_authority(monkeypatch, tmp_path):
+    import crew.wiki.parser as parser_mod
+
+    stale = replace(_converter_launch(tmp_path), authority_digest="0" * 64)
+    monkeypatch.setattr(
+        parser_mod,
+        "_discover_libreoffice",
+        lambda *_args, **_kwargs: pytest.fail("converter discovery must not run"),
+    )
+    monkeypatch.setattr(
+        "crew.security.launch.execute_captured",
+        lambda *_args, **_kwargs: pytest.fail("converter must not start"),
+    )
+    token = current_process_launch.set(stale)
+    try:
+        with pytest.raises(NativeRuntimeError) as caught:
+            await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+    assert caught.value.code is RuntimeErrorCode.SANDBOX_DENIED
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_rejects_symlink_output_escape(monkeypatch, tmp_path):
+    import crew.wiki.parser as parser_mod
+
+    _install_fake_soffice(monkeypatch, tmp_path)
+    outside = tmp_path / "outside.xlsx"
+    outside.write_bytes(b"outside-secret")
+
+    async def fake_execute(args, **kwargs):
+        output_dir = Path(kwargs["cwd"])
+        converted = output_dir / f"{Path(args[-1]).stem}.xlsx"
+        try:
+            converted.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks are unavailable on this platform")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("crew.security.launch.execute_captured", fake_execute)
+    monkeypatch.setattr(
+        parser_mod,
+        "_parse_xlsx",
+        lambda _path: pytest.fail("escaped output must not be parsed"),
+    )
+    token = current_process_launch.set(_converter_launch(tmp_path))
+    try:
+        with pytest.raises(FileConflictError, match="符号链接|链接|reparse"):
+            await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+    assert outside.read_bytes() == b"outside-secret"
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_timeout_is_bounded(monkeypatch, tmp_path):
+    _install_fake_soffice(monkeypatch, tmp_path)
+
+    async def fake_execute(_args, **kwargs):
+        assert kwargs["timeout"] == 120.0
+        assert kwargs["max_output_bytes"] == 256 * 1024
+        raise TimeoutError
+
+    monkeypatch.setattr("crew.security.launch.execute_captured", fake_execute)
+    token = current_process_launch.set(_converter_launch(tmp_path))
+    try:
+        with pytest.raises(RuntimeError, match="转换超时"):
+            await parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+    finally:
+        current_process_launch.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_legacy_converter_cancellation_reaches_execution_boundary(monkeypatch, tmp_path):
+    _install_fake_soffice(monkeypatch, tmp_path)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_execute(_args, **kwargs):
+        assert kwargs["timeout"] == 120.0
+        assert kwargs["max_output_bytes"] == 256 * 1024
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr("crew.security.launch.execute_captured", fake_execute)
+    token = current_process_launch.set(_converter_launch(tmp_path))
+    try:
+        task = asyncio.create_task(
+            parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        current_process_launch.reset(token)
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_converter_cancellation_releases_launch_and_fds(
+    monkeypatch,
+    tmp_path,
+):
+    _install_fake_soffice(monkeypatch, tmp_path)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_execute(_args, **kwargs):
+        del kwargs
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr("crew.security.launch.execute_captured", fake_execute)
+    launch = _converter_launch(tmp_path)
+    token = current_process_launch.set(launch)
+    baseline = _open_fds()
+    try:
+        task = asyncio.create_task(
+            parse_document_from_bytes_async(b"legacy excel", "legacy.xls")
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert current_process_launch.get() is launch
+    finally:
+        current_process_launch.reset(token)
+    assert cancelled.is_set()
+    assert _open_fds() <= baseline + 2
 
 
 def test_guess_mime_type():
@@ -388,6 +907,27 @@ def test_parse_pptx_image_failure_shows_user_hint(monkeypatch):
     assert "[图片内容未解析：未找到 VLM_API_KEY，请在 .env 中配置]" in result
 
 
+def test_parse_pptx_image_failure_redacts_host_path_and_token(monkeypatch):
+    from crew.wiki.multimodal import MediaUnderstandingError
+
+    monkeypatch.setitem(sys.modules, "pptx", _make_fake_pptx_full())
+    monkeypatch.setattr(
+        "crew.wiki.multimodal.describe_image",
+        lambda path, prompt=None: (_ for _ in ()).throw(
+            MediaUnderstandingError(r"C:\private\key.pem ACCESS_TOKEN=must-not-leak")
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "test.pptx"
+        path.write_bytes(b"fake pptx bytes")
+        result = parse_document_to_markdown(path)
+
+    assert "[图片内容未解析" in result
+    assert r"C:\private\key.pem" not in result
+    assert "must-not-leak" not in result
+
+
 def test_parse_pptx_image_failure_uses_cache(monkeypatch):
     """同一次 PPT 解析中，第一张图片失败后后续图片应复用提示，不再重复调用 VLM。"""
     from crew.wiki.multimodal import MediaUnderstandingError
@@ -507,6 +1047,29 @@ def test_parse_xlsx_truncates_oversized_sheet(monkeypatch):
     assert "r0c3" not in result
     assert "r5c0" not in result
     assert "已截断" in result
+
+
+@pytest.mark.parametrize("pages,objects", [(3, 1), (1, 3)])
+def test_parse_pdf_rejects_page_or_object_bombs(monkeypatch, pages, objects):
+    import crew.wiki.parser as parser_mod
+
+    class FakeDocument:
+        page_count = pages
+
+        def xref_length(self):
+            return objects
+
+        def close(self):
+            pass
+
+    fitz = ModuleType("fitz")
+    fitz.open = lambda _path: FakeDocument()
+    monkeypatch.setitem(sys.modules, "fitz", fitz)
+    monkeypatch.setattr(parser_mod, "_MAX_PDF_PAGES", 2)
+    monkeypatch.setattr(parser_mod, "_MAX_PDF_OBJECTS", 2)
+
+    with pytest.raises(DocumentParseQualityError, match="安全上限"):
+        parser_mod._parse_pdf(Path("bomb.pdf"))
 
 
 def test_parse_xlsx_ignores_dimension_padding_beyond_col_cap(monkeypatch):

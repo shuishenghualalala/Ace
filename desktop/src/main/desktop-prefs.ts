@@ -34,7 +34,7 @@ export function readDesktopPrefsFile(): DesktopPrefs {
 export function writeDesktopPrefsFile(next: DesktopPrefs): void {
   const file = desktopPrefsPath();
   const temporaryFile = `${file}.tmp`;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   try {
     fs.unlinkSync(temporaryFile);
   } catch (err) {
@@ -77,13 +77,16 @@ export function saveCloseBehaviorPreference(behavior: unknown): { closeBehavior:
   return { closeBehavior };
 }
 
-/** Compatibility mode is the default until the strict-security services are available. */
+/** Production security is mandatory; legacy preference files cannot disable it. */
 export function isStrictSecurityEnabled(): boolean {
-  return readDesktopPrefsFile().strictSecurityEnabled === true;
+  return true;
 }
 
 export function saveStrictSecurityPreference(enabled: boolean): { strictSecurityEnabled: boolean } {
+  if (!enabled) {
+    throw new Error('strict security cannot be disabled');
+  }
   const parsed = readDesktopPrefsFile();
-  writeDesktopPrefsFile({ ...parsed, strictSecurityEnabled: enabled });
-  return { strictSecurityEnabled: enabled };
+  writeDesktopPrefsFile({ ...parsed, strictSecurityEnabled: true });
+  return { strictSecurityEnabled: true };
 }

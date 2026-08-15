@@ -532,7 +532,7 @@ async function loadJobDetail(jobId: string, opts: { silent?: boolean } = {}): Pr
   if (!opts.silent) {
     view.detailRunsLoading = true;
     view.detailRuns = [];
-    renderTasksTab();
+    renderTasksTab({ preserveListScroll: true });
   }
   try {
     const detail = await backendApi.cronJobDetail(jobId);
@@ -541,7 +541,7 @@ async function loadJobDetail(jobId: string, opts: { silent?: boolean } = {}): Pr
     if (!opts.silent) view.detailRuns = [];
   } finally {
     view.detailRunsLoading = false;
-    renderTasksTab();
+    renderTasksTab({ preserveListScroll: true });
   }
 }
 
@@ -967,13 +967,20 @@ function ensureCronPage(root: HTMLElement): NonNullable<typeof cronPageSlots> {
   return cronPageSlots;
 }
 
-function renderTasksTab(): void {
+function renderTasksTab(options: { preserveListScroll?: boolean } = {}): void {
   const root = $('#cron-page-root');
   if (!root) return;
   const slots = ensureCronPage(root);
+  const previousScrollTop = options.preserveListScroll
+    ? slots.list.querySelector<HTMLElement>('.cron-list__scroll')?.scrollTop ?? 0
+    : 0;
   slots.kpi.innerHTML = renderKpi();
   slots.toolbar.innerHTML = renderToolbar();
   slots.list.innerHTML = renderList();
+  if (options.preserveListScroll) {
+    const nextScroll = slots.list.querySelector<HTMLElement>('.cron-list__scroll');
+    if (nextScroll) nextScroll.scrollTop = previousScrollTop;
+  }
   slots.drawer.innerHTML = view.drawer === 'create'
     ? renderCreateDrawer()
     : view.drawer === 'detail'
@@ -1100,7 +1107,7 @@ function bindListEvents(): void {
     if (!id) return; /* removed by T22 patch */
     view.selectedId = id;
     view.drawer = 'detail';
-    renderTasksTab();
+    renderTasksTab({ preserveListScroll: true });
     void loadJobDetail(id);
   });
 
@@ -1183,6 +1190,7 @@ function bindListEvents(): void {
 /** 测试钩子：重置委托绑定状态（用于单测）。 */
 export function __resetCronListEventsForTest(): void {
   listEventsBound = false;
+  cronTabBound = false;
   cronPageSlots = null;
 }
 
@@ -1496,6 +1504,23 @@ export async function refreshCronJobs(): Promise<void> {
     // 静默失败
   }
   renderCronTaskBoard();
+}
+
+let cronTabBound = false;
+
+export function bindCronTab(): () => void {
+  if (cronTabBound) return () => undefined;
+  const tab = document.querySelector('[data-tab="cron"]');
+  if (!tab) return () => undefined;
+  cronTabBound = true;
+  const handler = (): void => {
+    void loadCron();
+  };
+  tab.addEventListener('click', handler);
+  return () => {
+    tab.removeEventListener('click', handler);
+    cronTabBound = false;
+  };
 }
 
 export function activateCronPage(): void {

@@ -1,0 +1,987 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "path": "docs/security/codex-security-capability-baseline.md",
+    "expected_id_count": 436,
+    "default_disposition": "APPLICABLE",
+    "override_id_count": 70,
+    "na_id_count": 49,
+    "ace_equiv_id_count": 21
+  },
+  "disposition_groups": [
+    {
+      "name": "external_sandbox_semantics_absent",
+      "surface": "Codex ExternalSandbox mode",
+      "disposition": "N/A",
+      "ids": [
+        "ARCH-013"
+      ],
+      "reason": "Ace does not expose a caller-selectable ExternalSandbox mode. Existing managed and disabled modes remain governed by their own baseline IDs; adding an external-sandbox bypass is not part of the product boundary.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (ARCH-013 row)",
+        "crew/security/models.py (Ace permission modes)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_external_sandbox_mode"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "A caller-selectable already-sandboxed/external execution mode is introduced.",
+        "Any launch path starts skipping the Ace native runtime because a caller claims external isolation."
+      ]
+    },
+    {
+      "name": "codex_arg0_multi_identity_absent",
+      "surface": "Codex single-binary argv0 dispatcher",
+      "disposition": "N/A",
+      "ids": [
+        "ARG0-001"
+      ],
+      "reason": "Ace ships separate Python/Desktop/native entry points and has no Codex-style single binary whose basename selects sandbox, patch, exec, or filesystem helper identities. ARG0-002 remains APPLICABLE because its unsandboxed-write risk must be tested independently.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (ARG0-001/ARG0-002 rows)",
+        "crew/security/launch.py and security-runtime/src/main.rs (separate Ace launch boundary)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_codex_arg0_dispatch"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace combines helper roles into one executable selected by argv0 or argv1.",
+        "An alias or basename starts selecting privileged helper behavior."
+      ]
+    },
+    {
+      "name": "sandbox_escalation_channel_absent",
+      "surface": "Codex Unix in-sandbox escalation protocol",
+      "disposition": "N/A",
+      "ids": [
+        "ESCAL-001"
+      ],
+      "reason": "Ace has no product feature that upgrades a running Unix sandbox through a datagram policy server or execve wrapper. Permission changes must continue through Ace approvals and a new launch rather than an in-sandbox escalation channel.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (ESCAL-001 row)",
+        "crew/security/approvals.py and crew/security/launch.py"
+      ],
+      "forbidden_symbol_rules": [
+        "no_sandbox_escalation_channel"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "A running sandbox can request additional OS privileges without a new Ace launch.",
+        "An execve wrapper, escalation socket, or escalation policy daemon is added."
+      ]
+    },
+    {
+      "name": "execpolicy_starlark_absent",
+      "surface": "Codex execpolicy/Starlark rule engine",
+      "disposition": "N/A",
+      "ids": [
+        "EXEC-015",
+        "EXEC-016"
+      ],
+      "reason": "Ace does not use the Codex execpolicy Starlark language or its banned-prefix migration format. Ace approval-policy and rule-store behavior remains APPLICABLE under the existing PERM/EXEC/ACE controls.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (EXEC-015/EXEC-016 rows)",
+        "crew/security/policy.py and crew/security/rules.py (Ace-native policy path)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_execpolicy_starlark"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace adopts Starlark or another executable command-policy language.",
+        "Ace imports or migrates Codex execpolicy configuration."
+      ]
+    },
+    {
+      "name": "managed_cloud_config_absent",
+      "surface": "Codex cloud managed-config control plane",
+      "disposition": "N/A",
+      "ids": [
+        "MCFG-001",
+        "MCFG-002",
+        "MCFG-003",
+        "MCFG-004",
+        "MCFG-005"
+      ],
+      "reason": "Ace is not adding a cloud-delivered managed-configuration bundle, cache, identity, or refresh service. Local configuration integrity and fail-closed loading remain separately APPLICABLE.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (MCFG-001 through MCFG-005 rows)",
+        "crew/state/config.py (local Ace configuration)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_cloud_control_plane"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Configuration is fetched from a remote policy service.",
+        "A managed bundle cache, tenant policy identity, expiry, HMAC, or background refresh is added."
+      ]
+    },
+    {
+      "name": "cloud_agent_identity_local_equivalents",
+      "surface": "Codex cloud agent identity lifecycle",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "AGID-001",
+        "AGID-004",
+        "AGID-005"
+      ],
+      "reason": "Ace will not add the Codex cloud agent-identity service. The transferable requirements are tracked through Ace owner/session identity, replay resistance, rotation, revocation, and recovery boundaries.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (AGID-001 through AGID-005 rows)",
+        "crew/gateway/auth.py and crew/gateway/instance_auth.py"
+      ],
+      "forbidden_symbol_rules": [
+        "no_cloud_control_plane"
+      ],
+      "equivalent_ace_ids": [
+        "ACE-015",
+        "ACE-017"
+      ],
+      "review_triggers": [
+        "Ace begins signing remote task assertions or registering device/agent identities.",
+        "Ace introduces a remote agent identity endpoint, JWKS, or revocation registry."
+      ]
+    },
+    {
+      "name": "cloud_agent_key_local_equivalent",
+      "surface": "Codex cloud agent signing-key generation",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "AGID-002"
+      ],
+      "reason": "Ace has no Codex agent signing key, but CSPRNG generation and protected local identity-key storage remain requirements for Ace Gateway/session credentials.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (AGID-002 row)",
+        "crew/gateway/auth.py and crew/gateway/instance_auth.py"
+      ],
+      "forbidden_symbol_rules": [
+        "no_cloud_control_plane"
+      ],
+      "equivalent_ace_ids": [
+        "ACE-003"
+      ],
+      "review_triggers": [
+        "Ace adds an Ed25519 or other asymmetric agent identity key.",
+        "Ace changes how Gateway/session identity keys are generated or stored."
+      ]
+    },
+    {
+      "name": "cloud_agent_jwks_absent",
+      "surface": "Codex cloud agent JWKS verifier",
+      "disposition": "N/A",
+      "ids": [
+        "AGID-003"
+      ],
+      "reason": "Ace has no cloud agent assertion format or JWKS issuer/audience trust domain. Ordinary Gateway authentication remains in scope under SEC/IPC/ACE IDs and is not made N/A.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (AGID-003 row)",
+        "crew/gateway/auth.py (non-JWKS Ace authentication)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_cloud_control_plane"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace accepts JWT/JWKS agent assertions.",
+        "An issuer/audience-based remote agent trust domain is introduced."
+      ]
+    },
+    {
+      "name": "vendor_cloud_clients_absent",
+      "surface": "Codex vendor-specific cloud auth/proxy clients",
+      "disposition": "N/A",
+      "ids": [
+        "AWS-001",
+        "CHAT-001",
+        "RAP-001"
+      ],
+      "reason": "Ace is not adding Codex's AWS signing client, ChatGPT backend account client, or responses-api-proxy. Generic credential storage, host binding, stdin/argv secrecy, and provider security remain APPLICABLE under CRED/SEC/NET.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (AWS-001/CHAT-001/RAP-001 rows)",
+        "crew/providers/ and crew/gateway/ (Ace-native provider and Gateway paths)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_cloud_control_plane"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace introduces AWS request signing, a ChatGPT-account backend client, or a responses API credential proxy.",
+        "A vendor-specific cloud credential transport is added."
+      ]
+    },
+    {
+      "name": "workload_identity_absent",
+      "surface": "Codex workload-identity token exchange library",
+      "disposition": "N/A",
+      "ids": [
+        "WID-001",
+        "WID-002",
+        "WID-003",
+        "WID-004"
+      ],
+      "reason": "Ace has no workload-identity assertion file or token-exchange product surface and will not add one as part of this security program. Existing credential and remote-auth controls remain separately APPLICABLE.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (WID-001 through WID-004 rows)",
+        "pyproject.toml (no workload-identity component)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_cloud_control_plane"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace accepts workload identity assertions from files or environment configuration.",
+        "Ace adds OAuth token exchange, federation, or cloud workload credentials."
+      ]
+    },
+    {
+      "name": "codex_code_mode_absent",
+      "surface": "Codex Code Mode, nested tools, transports, and V8 runtime",
+      "disposition": "N/A",
+      "ids": [
+        "CMODE-001",
+        "CMODE-002",
+        "CMODE-003",
+        "CMODE-004",
+        "CMODE-005",
+        "CMODE-006",
+        "CMODE-007",
+        "CMODE-008",
+        "CMODE-009",
+        "CMODE-010"
+      ],
+      "reason": "Ace will not add Codex Code Mode, a model-controlled JavaScript runtime, nested-tool host, or Code Mode stdio/WebSocket/gRPC transport. Ordinary Ace tool execution remains APPLICABLE under EXEC/PROC/ACE.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (CMODE-001 through CMODE-010 rows)",
+        "crew/tools/ and crew/agent/loop/ (direct Ace tool routing, not Code Mode)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_code_mode_product"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "A model-controlled JavaScript/V8 runtime or nested-tool execution host is added.",
+        "A Code Mode stdio, WebSocket, or gRPC listener/transport appears."
+      ]
+    },
+    {
+      "name": "codex_style_inbound_mcp_absent",
+      "surface": "Codex-style inbound MCP execution/configuration server",
+      "disposition": "N/A",
+      "ids": [
+        "MCP-019",
+        "MSRV-001",
+        "MSRV-002",
+        "MSRV-003",
+        "MSRV-004",
+        "MSRV-005"
+      ],
+      "reason": "Ace will not add a Codex-style inbound MCP tool that starts arbitrary agent runs or lets callers override model, cwd, approval, sandbox, instructions, analytics, or arbitrary config. The existing owner-scoped Crew session MCP and token-bound interaction proxy are exact, enumerated exceptions and do not make this Codex surface applicable.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (MCP-019/MSRV-001 through MSRV-005 rows)",
+        "crew/gateway/mcp_server.py:33-208 (owner-scoped session MCP)",
+        "crew/gateway/mcp_server.py:235-361 (token-bound interaction proxy)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_unregistered_inbound_mcp_server"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "A new production MCPServer/FastMCP constructor or inbound MCP module is added.",
+        "The allowed Crew MCP servers accept model, cwd, approval, sandbox, arbitrary config, or unrestricted command execution."
+      ]
+    },
+    {
+      "name": "noise_remote_transport_absent",
+      "surface": "Codex Noise/ML-KEM rendezvous and remote-control product",
+      "disposition": "N/A",
+      "ids": [
+        "IPC-002",
+        "IPC-012",
+        "IPC-015",
+        "REMOTE-001",
+        "REMOTE-002",
+        "REMOTE-005",
+        "REMOTE-006"
+      ],
+      "reason": "Ace will not add Codex's remote-execution relay, Noise hybrid transport, registry-authorized rendezvous bundle, harness-key validation, segmented remote-control stream, or remote client registry. Production Gateway is fail-closed to loopback and the native runtime uses private local stdio; Ace Gateway/runtime/channel authentication remains separately APPLICABLE.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (IPC-015/REMOTE-001 through REMOTE-006 rows)",
+        "crew/gateway/ and crew/security/runtime_client.py (Ace protocols without Noise)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_remote_execution_transport",
+        "no_noise_remote_transport"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace introduces Noise, ML-KEM, rendezvous bundles, harness keys, or a remote-control client registry.",
+        "Ace adds a segmented remote-control transport, non-loopback execution listener, or relay distinct from existing local Gateway messages."
+      ]
+    },
+    {
+      "name": "remote_stream_local_equivalent",
+      "surface": "Codex remote event sequencing and bounded stream lifecycle",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "REMOTE-003",
+        "REMOTE-004"
+      ],
+      "reason": "Ace has no Codex remote-control product, but sequence, replay, gap, backpressure, disconnect, and state-release requirements transfer to Ace Gateway/session streams.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (REMOTE-003/REMOTE-004 rows)",
+        "crew/gateway/connections.py and tests/gateway/test_connections.py"
+      ],
+      "forbidden_symbol_rules": [
+        "no_noise_remote_transport"
+      ],
+      "equivalent_ace_ids": [
+        "ACE-017"
+      ],
+      "review_triggers": [
+        "Gateway replay/sequence semantics change.",
+        "Ace adds another remote event or response-body stream."
+      ]
+    },
+    {
+      "name": "stdio_to_uds_bridge_absent",
+      "surface": "Codex unauthenticated stdio-to-UDS bridge",
+      "disposition": "N/A",
+      "ids": [
+        "UDS-002"
+      ],
+      "reason": "Ace has no stdio-to-UDS forwarding product whose only authorization is socket-directory access. Existing loopback Gateway and stdio MCP paths keep their own authentication and lifecycle requirements.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (UDS-002 row)",
+        "crew/gateway/app.py and crew/gateway/mcp_server.py"
+      ],
+      "forbidden_symbol_rules": [
+        "no_stdio_to_uds_bridge"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "A stdio-to-UDS or generic local socket forwarding bridge is added.",
+        "A local IPC bridge relies only on directory possession without an Ace identity check."
+      ]
+    },
+    {
+      "name": "local_endpoint_protection_equivalent",
+      "surface": "Codex UDS directory ownership and symlink protection",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "UDS-001"
+      ],
+      "reason": "Ace uses authenticated loopback Gateway/session endpoints rather than the Codex UDS directory, so local endpoint ownership, key protection, symlink/reparse resistance, and cleanup are tracked through Ace's local identity and lifecycle IDs.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (UDS-001 row)",
+        "crew/gateway/auth.py, crew/gateway/instance_auth.py, and crew/gateway/app.py"
+      ],
+      "forbidden_symbol_rules": [
+        "no_stdio_to_uds_bridge"
+      ],
+      "equivalent_ace_ids": [
+        "ACE-003",
+        "ACE-017"
+      ],
+      "review_triggers": [
+        "Ace changes its local listener or endpoint storage model.",
+        "Ace adds a Unix-domain socket or named-pipe control endpoint."
+      ]
+    },
+    {
+      "name": "daemon_updater_desktop_equivalent",
+      "surface": "Codex app-server-daemon self-update chain",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "UPD-001",
+        "UPD-002",
+        "UPD-003",
+        "UPD-004"
+      ],
+      "reason": "Ace will not add the Codex Unix app-server-daemon or pipe downloaded installers to /bin/sh. Update-source, signature, rollback, bounded download, cleanup, and artifact provenance requirements are tracked against the existing Ace Desktop updater.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (UPD-001 through UPD-004 rows)",
+        "desktop/src/main/index.ts and docs/security/execution-surface-inventory.md"
+      ],
+      "forbidden_symbol_rules": [
+        "no_codex_daemon_updater"
+      ],
+      "equivalent_ace_ids": [
+        "ACE-013",
+        "ACE-020"
+      ],
+      "review_triggers": [
+        "Ace adds a daemon/self-updater outside the Desktop updater.",
+        "Any update path executes downloaded script text or changes signature/rollback behavior."
+      ]
+    },
+    {
+      "name": "interactive_pty_product_absent",
+      "surface": "Codex PTY/ConPTY interactive terminal product",
+      "disposition": "N/A",
+      "ids": [
+        "PROC-006"
+      ],
+      "reason": "Ace exposes bounded pipe-based command execution and does not expose a PTY/ConPTY allocation, resize, or interactive terminal API. Pipe decoding, ANSI stripping, output budgets, cancellation, and process-tree cleanup remain independently APPLICABLE.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (PROC-006 row)",
+        "crew/tools/process_registry.py and crew/security/runtime_client.py (pipe-only execution)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_interactive_pty_product"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace adds PTY/ConPTY allocation, resize, terminal emulation, or interactive byte streaming.",
+        "A process API begins accepting a pty=true or terminal-mode option."
+      ]
+    },
+    {
+      "name": "tls_mitm_credential_injection_absent",
+      "surface": "Codex TLS MITM credential injection and managed CA",
+      "disposition": "N/A",
+      "ids": [
+        "NET-026",
+        "NET-030"
+      ],
+      "reason": "Ace deliberately uses policy-enforced transparent CONNECT/SNI tunnels and does not decrypt TLS, inject credentials into HTTPS requests, create a MITM CA, or mutate trust stores. Host/port/protocol authorization, DNS pinning, private-address denial, tunnel lifetime, and credential secrecy remain APPLICABLE.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (NET-026/NET-030 rows)",
+        "security-runtime/src/network/proxy.rs and crew/browser/security.py (transparent policy proxy)"
+      ],
+      "forbidden_symbol_rules": [
+        "no_tls_mitm_credential_injection"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace decrypts TLS, inspects HTTPS paths, injects request credentials, or creates a managed CA.",
+        "Any sandbox or browser profile begins receiving a product-managed CA or trust-store mutation."
+      ]
+    },
+    {
+      "name": "rollout_redaction_session_equivalent",
+      "surface": "Codex remote redaction versus persisted rollout",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "DATA-002"
+      ],
+      "reason": "Ace does not use Codex rollout storage, but response redaction must not be confused with deletion of Ace session, task, audit, or checkpoint data.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (DATA-002 row)",
+        "crew/state/session_store.py and crew/security/audit.py"
+      ],
+      "forbidden_symbol_rules": [],
+      "equivalent_ace_ids": [
+        "ACE-017",
+        "ACE-018"
+      ],
+      "review_triggers": [
+        "Ace changes session redaction, deletion, export, or retention behavior.",
+        "A remote response-redaction layer is introduced."
+      ]
+    },
+    {
+      "name": "proxy_diagnostic_redaction_equivalent",
+      "surface": "Codex proxy diagnostic redaction",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "DATA-005"
+      ],
+      "reason": "Ace has no Codex feedback envelope, but proxy and credential values must remain absent from Ace logs, diagnostics, subprocess environments, and exported evidence.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (DATA-005 row)",
+        "crew/security/launch.py and crew/security/audit.py"
+      ],
+      "forbidden_symbol_rules": [],
+      "equivalent_ace_ids": [
+        "ACE-016",
+        "ACE-018"
+      ],
+      "review_triggers": [
+        "Ace adds diagnostic export, support bundles, or proxy configuration logging.",
+        "The inherited-environment allowlist or redaction pipeline changes."
+      ]
+    },
+    {
+      "name": "codex_cloud_product_docs_absent",
+      "surface": "Codex cloud environments and Codex Security/Trusted Access products",
+      "disposition": "N/A",
+      "ids": [
+        "PROD-001",
+        "PROD-002",
+        "PROD-009",
+        "PROD-010"
+      ],
+      "reason": "Ace is not adding Codex cloud setup/agent stages, cloud secret injection, Codex Security scanning service, or Trusted Access governance. Local network, secret, sandbox, and review controls remain separately APPLICABLE.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (PROD-001/PROD-002/PROD-009/PROD-010 rows)",
+        "docs/security/codex-security-capability-baseline-spec.md:29-34"
+      ],
+      "forbidden_symbol_rules": [
+        "no_cloud_control_plane",
+        "no_codex_cloud_security_product"
+      ],
+      "equivalent_ace_ids": [],
+      "review_triggers": [
+        "Ace gains hosted setup/agent environments or stage-specific cloud secret injection.",
+        "Ace adds a cloud security scanner, Trusted Access, entitlement, or cloud remediation service."
+      ]
+    },
+    {
+      "name": "plugin_governance_product_equivalent",
+      "surface": "Codex plugin availability and source-system permissions",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "PROD-003",
+        "PROD-012"
+      ],
+      "reason": "Ace will not copy Codex cloud plugin governance, but plugin/MCP source permissions, action confirmation, global configuration RBAC, domain binding, and audit requirements apply to Ace's existing plugin and MCP products.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (PROD-003/PROD-012 rows)",
+        "crew/plugins/manager.py and crew/gateway/routers/mcp_servers.py"
+      ],
+      "forbidden_symbol_rules": [],
+      "equivalent_ace_ids": [
+        "ACE-002",
+        "ACE-008",
+        "ACE-009",
+        "ACE-018",
+        "ACE-019"
+      ],
+      "review_triggers": [
+        "Plugin/MCP installation, source authentication, action confirmation, or RBAC changes.",
+        "Ace adds a connector catalog, sync service, or remote plugin governance layer."
+      ]
+    },
+    {
+      "name": "skill_governance_product_equivalent",
+      "surface": "Codex workspace/local/plugin skill governance",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "PROD-004"
+      ],
+      "reason": "Ace already has skills and must enforce source, owner, inherited permissions, disablement, and cache invalidation through the Ace execution-surface and dangerous-mode controls rather than adding Codex cloud skill governance.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (PROD-004 row)",
+        "crew/skills/ and docs/security/execution-surface-inventory.md"
+      ],
+      "forbidden_symbol_rules": [],
+      "equivalent_ace_ids": [
+        "ACE-018",
+        "ACE-019"
+      ],
+      "review_triggers": [
+        "Skill discovery, installation, trust source, caching, or execution inheritance changes.",
+        "Ace introduces remote/workspace-managed skill distribution."
+      ]
+    },
+    {
+      "name": "browser_product_equivalent",
+      "surface": "Codex Browser and full CDP governance",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "PROD-005",
+        "PROD-011"
+      ],
+      "reason": "Ace has its own Electron/Chromium Browser and CDP surface. Browser profile, page trust, downloads, local/internal access, sensitive CDP approval, admin policy, owner binding, and cleanup are tracked against the Ace Browser boundary.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (PROD-005/PROD-011 rows)",
+        "crew/browser/manager.py and desktop/src/main/browser-host.ts"
+      ],
+      "forbidden_symbol_rules": [],
+      "equivalent_ace_ids": [
+        "ACE-010"
+      ],
+      "review_triggers": [
+        "Browser profile, navigation, download, upload, permission, or CDP behavior changes.",
+        "A new browser host or browser automation transport is added."
+      ]
+    },
+    {
+      "name": "computer_use_product_equivalent",
+      "surface": "Codex Computer Use product boundary",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "PROD-006"
+      ],
+      "reason": "Ace already has CUA/external-agent adapters. OS application scope, dangerous-action confirmation, file/network/process inheritance, revocation, and compatibility behavior are tracked against the Ace CUA boundary.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (PROD-006 row)",
+        "crew/tools/cua_setup.py and docs/security/execution-surface-inventory.md"
+      ],
+      "forbidden_symbol_rules": [],
+      "equivalent_ace_ids": [
+        "ACE-011"
+      ],
+      "review_triggers": [
+        "CUA installation, daemon, external-agent adapter, or OS permission behavior changes.",
+        "Ace adds another computer-control backend."
+      ]
+    },
+    {
+      "name": "remote_connection_product_equivalent",
+      "surface": "Codex Remote Connection product boundary",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "PROD-007"
+      ],
+      "reason": "Ace will not add Codex Remote Connections, but remote owner authentication, host/session changes, revocation, approval replay, disconnect cleanup, and background process lifecycle apply to Ace Gateway sessions.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (PROD-007 row)",
+        "crew/gateway/ and crew/gateway/connections.py"
+      ],
+      "forbidden_symbol_rules": [
+        "no_noise_remote_transport"
+      ],
+      "equivalent_ace_ids": [
+        "ACE-017"
+      ],
+      "review_triggers": [
+        "Remote authentication, reconnect, replay, revocation, or session lifecycle changes.",
+        "Ace adds remote host/device registration."
+      ]
+    },
+    {
+      "name": "compliance_audit_product_equivalent",
+      "surface": "Codex Compliance API event stream",
+      "disposition": "ACE_EQUIV",
+      "ids": [
+        "PROD-008"
+      ],
+      "reason": "Ace is not adding a cloud Compliance API, but append-only semantics, tenant-scoped query authorization, tamper resistance, retention, pagination, and export controls remain requirements for Ace's local security audit product.",
+      "evidence": [
+        "docs/security/codex-security-capability-baseline.md (PROD-008 row)",
+        "crew/security/audit.py"
+      ],
+      "forbidden_symbol_rules": [
+        "no_cloud_compliance_api"
+      ],
+      "equivalent_ace_ids": [
+        "ACE-018"
+      ],
+      "review_triggers": [
+        "Audit persistence, deletion, query, export, tenancy, or retention changes.",
+        "Ace adds a remote compliance/audit API."
+      ]
+    }
+  ],
+  "required_stronger_negative": [
+    {
+      "id": "ARG0-002",
+      "reason": "The Codex standalone apply-patch alias runs without the session sandbox. Ace must prove that no patch/write alias or alternate entry can bypass its file authorization boundary.",
+      "required_negative_test": "Enumerate every Ace patch/write entry and prove alias, direct-module, malformed argv, and missing-security-context calls deny before filesystem mutation.",
+      "ace_guard_ids": [
+        "ACE-004",
+        "ACE-005"
+      ]
+    },
+    {
+      "id": "CLOUD-001",
+      "reason": "Authentication failure changing the network route is a transferable fail-open pattern even though Ace has no cloud-tasks product.",
+      "required_negative_test": "For every authenticated Ace outbound client, force missing/invalid credentials and prove it neither switches to a default/direct proxy route nor sends the request.",
+      "ace_guard_ids": [
+        "ACE-007",
+        "ACE-008"
+      ]
+    },
+    {
+      "id": "HOOK-001",
+      "reason": "Unsupported allow output continuing the original tool input is a generic authorization fail-open risk, not a hook-product exemption.",
+      "required_negative_test": "Malformed, unknown, incomplete, and unsupported permission decisions must deny; prove the original and updated tool inputs are both not executed.",
+      "ace_guard_ids": [
+        "ACE-004",
+        "ACE-018"
+      ]
+    },
+    {
+      "id": "LNX-017",
+      "reason": "A profile combination silently skipping the filesystem sandbox is a cross-product policy-composition risk.",
+      "required_negative_test": "Exercise every Ace Linux permission/network profile combination and prove required filesystem, process, and network boundaries are never skipped without an explicit dangerous mode.",
+      "ace_guard_ids": [
+        "ACE-004",
+        "ACE-020"
+      ]
+    },
+    {
+      "id": "NET-027",
+      "reason": "An existing proxy address must not suppress private/non-public target validation at the final connection point.",
+      "required_negative_test": "Inject explicit proxy routing for Web, MCP, Browser, updater, and managed runtime traffic; private, loopback, link-local, and rebinding targets must still deny.",
+      "ace_guard_ids": [
+        "ACE-007",
+        "ACE-008",
+        "ACE-010"
+      ]
+    },
+    {
+      "id": "WIN-021",
+      "reason": "Falling back to an unverified original cwd after junction preparation failure is a transferable path-identity fail-open risk.",
+      "required_negative_test": "Force Windows cwd canonicalization/junction/reparse preparation failures and prove Ace denies before process launch rather than using the original path.",
+      "ace_guard_ids": [
+        "ACE-004",
+        "ACE-005"
+      ]
+    },
+    {
+      "id": "WIN-024",
+      "reason": "Treating WFP installation failure as non-fatal can turn restricted networking into direct host networking.",
+      "required_negative_test": "Force every WFP setup/install/verification failure and prove managed-network launch is unavailable, no child starts, and no direct connection occurs.",
+      "ace_guard_ids": [
+        "ACE-007",
+        "ACE-008",
+        "ACE-020"
+      ]
+    }
+  ],
+  "absence_rules": [
+    {
+      "id": "no_external_sandbox_mode",
+      "description": "No caller-selectable ExternalSandbox policy or bypass mode.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\bExternalSandbox\\b",
+        "\\bSandboxPolicy\\s*(?:\\.|::)\\s*External\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_codex_arg0_dispatch",
+      "description": "No Codex-style argv0 multi-identity dispatcher.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\barg0_dispatch(?:_or_else)?\\b",
+        "\\bCODEX_LINUX_SANDBOX_ARG0\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_sandbox_escalation_channel",
+      "description": "No in-sandbox escalation server or execve wrapper.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\b(?:shell_escalation|escalate_server|execve_wrapper)\\b",
+        "\\bcodex-execve-wrapper\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_execpolicy_starlark",
+      "description": "No Codex execpolicy or Starlark policy engine.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\bexecpolicy\\b",
+        "\\bstarlark\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_cloud_control_plane",
+      "description": "No Codex cloud config/tasks, workload identity, or vendor cloud identity client.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\bcloud[_-]?(?:config|tasks)(?:[_-][A-Za-z0-9]+)?\\b",
+        "\\bworkload[_-]?identity\\b",
+        "\\b(?:AwsAuthContext|ChatGptClient|responses[_-]?api[_-]?proxy|AgentIdentityAssertion)\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_code_mode_product",
+      "description": "No Codex Code Mode host/runtime/protocol or jitless model runtime.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\bcode[_-]?mode(?:[_-](?:host|runtime|protocol))?\\b",
+        "--jitless\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_unregistered_inbound_mcp_server",
+      "description": "Only the existing Crew session MCP and bound interaction proxy may construct production MCP servers.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\b(?:MCPServer|FastMCP)\\s*\\(",
+        "from\\s+mcp\\.server(?:\\.[A-Za-z0-9_]+)*\\s+import\\s+(?:MCPServer|FastMCP)"
+      ],
+      "allowed_matches": [
+        {
+          "name": "session_mcp_imports",
+          "path": "crew/gateway/mcp_server.py",
+          "line_regex": "\\s*from mcp\\.server import (?:MCPServer|FastMCP)\\s*",
+          "expected_count": 2
+        },
+        {
+          "name": "sdk_compat_fastmcp_return",
+          "path": "crew/gateway/mcp_server.py",
+          "line_regex": "\\s*return FastMCP\\(name\\)\\s*",
+          "expected_count": 1
+        },
+        {
+          "name": "sdk_compat_mcpserver_return",
+          "path": "crew/gateway/mcp_server.py",
+          "line_regex": "\\s*return MCPServer\\(name, version=__version__\\)\\s*",
+          "expected_count": 1
+        }
+      ]
+    },
+    {
+      "id": "no_remote_execution_transport",
+      "description": "No non-loopback remote-execution listener, relay, or plaintext downgrade transport.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\bremote[_-]?execution[_-]?(?:listener|relay|transport)\\b",
+        "\\bexecution[_-]?(?:relay|rendezvous)\\b",
+        "\\bplaintext[_-]?(?:execution|remote)[_-]?(?:fallback|transport)\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_noise_remote_transport",
+      "description": "No Noise/ML-KEM rendezvous or harness-key remote-control transport.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\bnoise[_-]?(?:channel|rendezvous|transport|identity)\\b",
+        "\\bml[_-]?kem[_-]?768\\b",
+        "\\bharness[_-]?key\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_stdio_to_uds_bridge",
+      "description": "No stdio-to-UDS forwarding bridge.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\bstdio[_-]?to[_-]?uds\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_codex_daemon_updater",
+      "description": "No Codex app-server-daemon or downloaded-script shell updater.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src",
+        "scripts"
+      ],
+      "patterns": [
+        "\\b(?:app[_-]server[_-]daemon|install_latest_standalone)\\b",
+        "/bin/(?:ba)?sh\\s+-s\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_interactive_pty_product",
+      "description": "No PTY/ConPTY allocation, resize, or interactive terminal API.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\bpty\\.(?:spawn|fork|openpty)\\b",
+        "\\b(?:openpty|forkpty|CreatePseudoConsole|ResizePseudoConsole|HPCON)\\b",
+        "\\b(?:pty|conpty)[_-]?(?:mode|resize|stream|session)\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_tls_mitm_credential_injection",
+      "description": "No TLS interception, HTTPS credential-injection hook, managed MITM CA, or trust-store mutation.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\b(?:tls|https)[_-]?(?:intercept|mitm|decrypt)\\b",
+        "\\b(?:mitm|managed)[_-]?(?:ca|certificate_authority)\\b",
+        "\\b(?:install|inject|trust)[_-]?(?:root_ca|mitm_ca)\\b",
+        "\\bcredential[_-]?injection[_-]?hook\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_codex_cloud_security_product",
+      "description": "No Codex Security or Trusted Access cloud product implementation.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\b(?:codex_security|trusted_access)\\b"
+      ],
+      "allowed_matches": []
+    },
+    {
+      "id": "no_cloud_compliance_api",
+      "description": "No cloud Compliance API or remote audit-export product.",
+      "roots": [
+        "crew",
+        "plugins",
+        "desktop/src",
+        "security-runtime/src"
+      ],
+      "patterns": [
+        "\\b(?:compliance_api|remote_compliance|cloud_audit_export)\\b"
+      ],
+      "allowed_matches": []
+    }
+  ]
+}

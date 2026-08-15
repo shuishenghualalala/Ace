@@ -38,6 +38,78 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+const MAX_IPC_PATH_CHARS = 4096;
+const MAX_SECURITY_IDENTIFIER_CHARS = 200;
+const MAX_SECURITY_ARGV_TOKENS = 128;
+const MAX_SECURITY_ARGV_TOKEN_CHARS = 4096;
+const MAX_SECURITY_PERMISSIONS_BYTES = 32 * 1024;
+const MAX_GATEWAY_URL_CHARS = 4096;
+const MAX_GATEWAY_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_GATEWAY_HEADERS = 64;
+const MAX_GATEWAY_HEADER_NAME_CHARS = 128;
+const MAX_GATEWAY_HEADER_VALUE_BYTES = 8 * 1024;
+const MAX_GATEWAY_HEADERS_BYTES = 64 * 1024;
+const MAX_FILE_WRITE_BYTES = MAX_DIALOG_FILE_BYTES;
+const MAX_FILE_WRITE_BASE64_CHARS = Math.ceil(MAX_FILE_WRITE_BYTES / 3) * 4;
+const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']);
+
+function hasControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function parseIpcPath(raw: unknown, field = 'path'): ParseResult<string> {
+  const parsed = StringSchema.parse(raw, field);
+  if (!parsed.ok) return parsed;
+  if (parsed.value.length > MAX_IPC_PATH_CHARS) {
+    return fail(field, `max ${MAX_IPC_PATH_CHARS} chars`);
+  }
+  if (parsed.value.includes('\0')) return fail(field, 'must not contain NUL');
+  return parsed;
+}
+
+function parseSecurityIdentifier(raw: unknown, field: string): ParseResult<string> {
+  const parsed = StringSchema.parse(raw, field);
+  if (!parsed.ok) return parsed;
+  if (parsed.value.length > MAX_SECURITY_IDENTIFIER_CHARS) {
+    return fail(field, `max ${MAX_SECURITY_IDENTIFIER_CHARS} chars`);
+  }
+  if (hasControlCharacters(parsed.value)) {
+    return fail(field, 'must not contain control characters');
+  }
+  return parsed;
+}
+
+function parseSecureUpdateUrl(raw: unknown, field = 'url'): ParseResult<string> {
+  const parsed = StringSchema.parse(raw, field);
+  if (!parsed.ok) return parsed;
+  if (parsed.value.length > MAX_GATEWAY_URL_CHARS) {
+    return fail(field, `max ${MAX_GATEWAY_URL_CHARS} chars`);
+  }
+  let url: URL;
+  try {
+    url = new URL(parsed.value);
+  } catch {
+    return fail(field, 'not a valid URL');
+  }
+  if (
+    url.protocol !== 'https:'
+    || url.username !== ''
+    || url.password !== ''
+    || url.hash !== ''
+  ) {
+    return fail(field, 'must be a credential-free HTTPS URL without a fragment');
+  }
+  return parsed;
+}
+
 // ---------- 基础原子 validator ----------
 
 export const StringSchema = {
@@ -89,6 +161,9 @@ export const GatewayFetchArgs = {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
     const urlResult = StringSchema.parse(raw['url'], 'url');
     if (!urlResult.ok) return urlResult;
+    if (urlResult.value.length > MAX_GATEWAY_URL_CHARS) {
+      return fail('url', `max ${MAX_GATEWAY_URL_CHARS} chars`);
+    }
     let parsedUrl: URL;
     try {
       parsedUrl = new URL(urlResult.value);
@@ -96,6 +171,14 @@ export const GatewayFetchArgs = {
       return fail('url', 'not a valid URL');
     }
     const hostname = parsedUrl.hostname;
+    if (
+      parsedUrl.protocol !== 'http:'
+      || parsedUrl.username !== ''
+      || parsedUrl.password !== ''
+      || parsedUrl.hash !== ''
+    ) {
+      return fail('url', 'must be a credential-free local HTTP URL without a fragment');
+    }
     if (!GATEWAY_FETCH_ALLOWED_HOSTNAMES.has(hostname)) {
       return fail('url.hostname', `must be one of ${Array.from(GATEWAY_FETCH_ALLOWED_HOSTNAMES).join(', ')}`);
     }
@@ -111,18 +194,45 @@ export const GatewayFetchArgs = {
       if (!method.ok) return method;
       const body = OptionalStringSchema.parse(initRaw['body'], 'init.body');
       if (!body.ok) return body;
+      const normalizedMethod = method.value?.toUpperCase();
+      if (normalizedMethod !== undefined && !HTTP_METHODS.has(normalizedMethod)) {
+        return fail('init.method', 'unexpected HTTP method');
+      }
+      if (body.value !== undefined && utf8Length(body.value) > MAX_GATEWAY_BODY_BYTES) {
+        return fail('init.body', `max ${MAX_GATEWAY_BODY_BYTES} UTF-8 bytes`);
+      }
       const headersRaw = initRaw['headers'];
       let headers: Record<string, string> | undefined;
       if (headersRaw !== undefined) {
         if (!isPlainObject(headersRaw)) return fail('init.headers', 'expected object');
+        const entries = Object.entries(headersRaw);
+        if (entries.length > MAX_GATEWAY_HEADERS) {
+          return fail('init.headers', `max ${MAX_GATEWAY_HEADERS} entries`);
+        }
         headers = {};
-        for (const [k, v] of Object.entries(headersRaw)) {
+        let headerBytes = 0;
+        for (const [k, v] of entries) {
           if (typeof v !== 'string') return fail(`init.headers.${k}`, 'expected string');
+          if (
+            k.length === 0
+            || k.length > MAX_GATEWAY_HEADER_NAME_CHARS
+            || hasControlCharacters(k)
+          ) {
+            return fail('init.headers', 'invalid header name');
+          }
+          const valueBytes = utf8Length(v);
+          if (valueBytes > MAX_GATEWAY_HEADER_VALUE_BYTES || hasControlCharacters(v)) {
+            return fail(`init.headers.${k}`, 'header value is invalid or too large');
+          }
+          headerBytes += utf8Length(k) + valueBytes;
+          if (headerBytes > MAX_GATEWAY_HEADERS_BYTES) {
+            return fail('init.headers', `max ${MAX_GATEWAY_HEADERS_BYTES} UTF-8 bytes`);
+          }
           headers[k] = v;
         }
       }
       const initObj: { method?: string; headers?: Record<string, string>; body?: string } = {};
-      if (method.value !== undefined) initObj.method = method.value;
+      if (normalizedMethod !== undefined) initObj.method = normalizedMethod;
       if (body.value !== undefined) initObj.body = body.value;
       if (headers) initObj.headers = headers;
       init = initObj;
@@ -145,12 +255,21 @@ export interface SecurityPendingArgs {
 export const SecurityPendingArgs = {
   parse(raw: unknown): ParseResult<SecurityPendingArgs> {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const workspaceId = StringSchema.parse(raw['workspaceId'], 'workspaceId');
+    const workspaceId = parseSecurityIdentifier(raw['workspaceId'], 'workspaceId');
     if (!workspaceId.ok) return workspaceId;
-    const sessionId = StringSchema.parse(raw['sessionId'], 'sessionId');
+    const sessionId = parseSecurityIdentifier(raw['sessionId'], 'sessionId');
     if (!sessionId.ok) return sessionId;
     const taskId = OptionalStringSchema.parse(raw['taskId'], 'taskId');
     if (!taskId.ok) return taskId;
+    if (
+      taskId.value !== undefined
+      && (
+        taskId.value.length > MAX_SECURITY_IDENTIFIER_CHARS
+        || hasControlCharacters(taskId.value)
+      )
+    ) {
+      return fail('taskId', 'invalid security identifier');
+    }
     return { ok: true, value: { workspaceId: workspaceId.value, sessionId: sessionId.value, ...(taskId.value ? { taskId: taskId.value } : {}) } };
   },
 };
@@ -158,7 +277,7 @@ export const SecurityPendingArgs = {
 export interface SecurityModeArgs {
   workspaceId: string;
   sessionId: string;
-  mode: 'request_approval' | 'auto_review' | 'full_access';
+  mode: 'read_only' | 'request_approval' | 'auto_review' | 'full_access';
 }
 
 export const SecurityModeArgs = {
@@ -167,8 +286,8 @@ export const SecurityModeArgs = {
     if (!base.ok) return base;
     if (!isPlainObject(raw)) return fail('args', 'expected object');
     const mode = raw['mode'];
-    if (!['request_approval', 'auto_review', 'full_access'].includes(String(mode))) {
-      return fail('mode', 'must be request_approval, auto_review, or full_access');
+    if (!['read_only', 'request_approval', 'auto_review', 'full_access'].includes(String(mode))) {
+      return fail('mode', 'must be read_only, request_approval, auto_review, or full_access');
     }
     return {
       ok: true,
@@ -182,9 +301,11 @@ export const SecurityModeArgs = {
 };
 
 export interface SecurityDecisionArgs extends SecurityPendingArgs {
+  taskId: string;
   requestId: string;
   decision: SecurityApprovalDecision;
   alwaysArgvPrefix?: string[];
+  permissions?: Record<string, unknown>;
 }
 
 export const SecurityDecisionArgs = {
@@ -192,7 +313,8 @@ export const SecurityDecisionArgs = {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
     const base = SecurityPendingArgs.parse(raw);
     if (!base.ok) return base;
-    const requestId = StringSchema.parse(raw['requestId'], 'requestId');
+    if (!base.value.taskId) return fail('taskId', 'required for an approval decision');
+    const requestId = parseSecurityIdentifier(raw['requestId'], 'requestId');
     if (!requestId.ok) return requestId;
     const decision = raw['decision'];
     if (!['once', 'session', 'always', 'reject'].includes(String(decision))) {
@@ -203,20 +325,48 @@ export const SecurityDecisionArgs = {
       if (!Array.isArray(raw['alwaysArgvPrefix']) || raw['alwaysArgvPrefix'].length === 0) {
         return fail('alwaysArgvPrefix', 'must be a non-empty string array');
       }
+      if (raw['alwaysArgvPrefix'].length > MAX_SECURITY_ARGV_TOKENS) {
+        return fail('alwaysArgvPrefix', `max ${MAX_SECURITY_ARGV_TOKENS} tokens`);
+      }
       alwaysArgvPrefix = [];
       for (const [index, token] of raw['alwaysArgvPrefix'].entries()) {
         const parsed = StringSchema.parse(token, `alwaysArgvPrefix.${index}`);
         if (!parsed.ok) return parsed;
+        if (
+          parsed.value.length > MAX_SECURITY_ARGV_TOKEN_CHARS
+          || hasControlCharacters(parsed.value)
+        ) {
+          return fail(
+            `alwaysArgvPrefix.${index}`,
+            `max ${MAX_SECURITY_ARGV_TOKEN_CHARS} chars without control characters`,
+          );
+        }
         alwaysArgvPrefix.push(parsed.value);
       }
+    }
+    let permissions: Record<string, unknown> | undefined;
+    if (raw['permissions'] !== undefined) {
+      if (!isPlainObject(raw['permissions'])) return fail('permissions', 'must be an object');
+      let serialized: string;
+      try {
+        serialized = JSON.stringify(raw['permissions']);
+      } catch {
+        return fail('permissions', 'must be JSON serializable');
+      }
+      if (utf8Length(serialized) > MAX_SECURITY_PERMISSIONS_BYTES) {
+        return fail('permissions', `max ${MAX_SECURITY_PERMISSIONS_BYTES} UTF-8 bytes`);
+      }
+      permissions = raw['permissions'] as Record<string, unknown>;
     }
     return {
       ok: true,
       value: {
         ...base.value,
+        taskId: base.value.taskId,
         requestId: requestId.value,
         decision: decision as SecurityApprovalDecision,
         ...(alwaysArgvPrefix ? { alwaysArgvPrefix } : {}),
+        ...(permissions ? { permissions } : {}),
       },
     };
   },
@@ -226,7 +376,7 @@ export interface SecurityWorkspaceArgs { workspaceId: string }
 export const SecurityWorkspaceArgs = {
   parse(raw: unknown): ParseResult<SecurityWorkspaceArgs> {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const workspaceId = StringSchema.parse(raw['workspaceId'], 'workspaceId');
+    const workspaceId = parseSecurityIdentifier(raw['workspaceId'], 'workspaceId');
     return workspaceId.ok ? { ok: true, value: { workspaceId: workspaceId.value } } : workspaceId;
   },
 };
@@ -240,12 +390,24 @@ export const SecurityRuleMutationArgs = {
     const base = SecurityWorkspaceArgs.parse(raw);
     if (!base.ok) return base;
     if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const ruleId = StringSchema.parse(raw['ruleId'], 'ruleId');
+    const ruleId = parseSecurityIdentifier(raw['ruleId'], 'ruleId');
     if (!ruleId.ok) return ruleId;
     if (raw['enabled'] !== undefined && typeof raw['enabled'] !== 'boolean') {
       return fail('enabled', 'expected boolean');
     }
     return { ok: true, value: { ...base.value, ruleId: ruleId.value, ...(typeof raw['enabled'] === 'boolean' ? { enabled: raw['enabled'] } : {}) } };
+  },
+};
+
+export interface SecurityAlertActionArgs {
+  alertId: string;
+}
+export const SecurityAlertActionArgs = {
+  parse(raw: unknown): ParseResult<SecurityAlertActionArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const alertId = parseSecurityIdentifier(raw['alertId'], 'alertId');
+    if (!alertId.ok) return alertId;
+    return { ok: true, value: { alertId: alertId.value } };
   },
 };
 
@@ -255,6 +417,10 @@ export interface SecurityAuditArgs {
   actionType?: '' | 'approval_requested' | 'approval_decision' | 'exec_decision' | 'file_decision';
   decision?: '' | 'allow' | 'deny' | 'pending' | 'ask' | 'once' | 'session' | 'always' | 'reject';
   sessionId?: string;
+  workspaceId?: string;
+  taskId?: string;
+  startTime?: number;
+  endTime?: number;
   sort?: 'newest' | 'oldest';
 }
 export const SecurityAuditArgs = {
@@ -265,6 +431,12 @@ export const SecurityAuditArgs = {
     for (const key of ['offset', 'limit'] as const) {
       const item = raw[key];
       if (item !== undefined && (!Number.isInteger(item) || Number(item) < 0)) return fail(key, 'expected non-negative integer');
+      if (key === 'limit' && item !== undefined && Number(item) > 100) {
+        return fail(key, 'must be <= 100');
+      }
+      if (key === 'offset' && item !== undefined && Number(item) > 1_000_000) {
+        return fail(key, 'must be <= 1000000');
+      }
       if (item !== undefined) value[key] = Number(item);
     }
     const actionType = raw['actionType'];
@@ -284,10 +456,38 @@ export const SecurityAuditArgs = {
       value.decision = String(decision) as NonNullable<SecurityAuditArgs['decision']>;
     }
     const sessionId = raw['sessionId'];
-    if (sessionId !== undefined && (typeof sessionId !== 'string' || sessionId.length > 160)) {
-      return fail('sessionId', 'expected string up to 160 characters');
+    if (sessionId !== undefined && sessionId !== '') {
+      const parsedSession = parseSecurityIdentifier(sessionId, 'sessionId');
+      if (!parsedSession.ok) return parsedSession;
+      value.sessionId = parsedSession.value.trim();
     }
-    if (typeof sessionId === 'string') value.sessionId = sessionId.trim();
+    for (const [input, output] of [
+      ['workspaceId', 'workspaceId'],
+      ['taskId', 'taskId'],
+    ] as const) {
+      const item = raw[input];
+      if (item === undefined || item === '') continue;
+      const parsed = parseSecurityIdentifier(item, input);
+      if (!parsed.ok) return parsed;
+      value[output] = parsed.value.trim();
+    }
+    for (const [input, output] of [
+      ['startTime', 'startTime'],
+      ['endTime', 'endTime'],
+    ] as const) {
+      const item = raw[input];
+      if (item === undefined) continue;
+      const parsed = NumberSchema.parse(item, input);
+      if (!parsed.ok) return parsed;
+      value[output] = parsed.value;
+    }
+    if (
+      value.startTime !== undefined
+      && value.endTime !== undefined
+      && value.startTime > value.endTime
+    ) {
+      return fail('timeRange', 'startTime must be <= endTime');
+    }
     const sort = raw['sort'];
     if (sort !== undefined && sort !== 'newest' && sort !== 'oldest') {
       return fail('sort', 'expected newest or oldest');
@@ -328,11 +528,22 @@ export const GatewayUploadArgs = {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
     const urlResult = StringSchema.parse(raw['url'], 'url');
     if (!urlResult.ok) return urlResult;
+    if (urlResult.value.length > MAX_GATEWAY_URL_CHARS) {
+      return fail('url', `max ${MAX_GATEWAY_URL_CHARS} chars`);
+    }
     let parsedUrl: URL;
     try {
       parsedUrl = new URL(urlResult.value);
     } catch {
       return fail('url', 'not a valid URL');
+    }
+    if (
+      parsedUrl.protocol !== 'http:'
+      || parsedUrl.username !== ''
+      || parsedUrl.password !== ''
+      || parsedUrl.hash !== ''
+    ) {
+      return fail('url', 'must be a credential-free local HTTP URL without a fragment');
     }
     if (!GATEWAY_FETCH_ALLOWED_HOSTNAMES.has(parsedUrl.hostname)) {
       return fail('url.hostname', `must be one of ${Array.from(GATEWAY_FETCH_ALLOWED_HOSTNAMES).join(', ')}`);
@@ -349,13 +560,12 @@ export const GatewayUploadArgs = {
     }
     const files: string[] = [];
     for (let i = 0; i < filesRaw.length; i++) {
-      const f = filesRaw[i];
-      if (typeof f !== 'string') return fail(`files[${i}]`, 'expected string');
-      if (f.length === 0) return fail(`files[${i}]`, 'must be non-empty');
-      if (f.length > 1024) return fail(`files[${i}]`, 'max 1024 chars');
-      if (f.includes('\0')) return fail(`files[${i}]`, 'must not contain NUL');
-      if (!ABSOLUTE_PATH_RE.test(f)) return fail(`files[${i}]`, 'must be an absolute path');
-      files.push(f);
+      const file = parseIpcPath(filesRaw[i], `files[${i}]`);
+      if (!file.ok) return file;
+      if (!ABSOLUTE_PATH_RE.test(file.value)) {
+        return fail(`files[${i}]`, 'must be an absolute path');
+      }
+      files.push(file.value);
     }
 
     return { ok: true, value: { url: urlResult.value, files } };
@@ -391,25 +601,28 @@ export const ShellOpenExternalArgs = {
  * 由主进程注入——因为 `app.getPath()` 只能在 main 侧调用，
  * 不能放进本 shared 文件（会破坏 main/preload/renderer 分层）。
  *
- * allowedRoot: 可选的额外允许根目录。用于项目工作空间场景：产物目录落在用户
- * 选择的项目文件夹下，需要显式授权该根目录。
+ * workspaceId: 可选的 Workspace ID。项目路径必须由主进程通过已鉴权 Gateway
+ * 记录解析；renderer 不得直接扩大允许根目录。
  */
 export interface ShellOpenPathArgs {
   path: string;
-  allowedRoot?: string;
+  workspaceId?: string;
 }
 
 export const ShellOpenPathArgs = {
   parse(raw: unknown): ParseResult<ShellOpenPathArgs> {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const p = StringSchema.parse(raw['path'], 'path');
+    if ('allowedRoot' in raw) {
+      return fail('args.allowedRoot', 'renderer-provided allowed roots are not allowed');
+    }
+    const p = parseIpcPath(raw['path']);
     if (!p.ok) return p;
     const value: ShellOpenPathArgs = { path: p.value };
-    const allowedRoot = raw['allowedRoot'];
-    if (allowedRoot !== undefined && allowedRoot !== null) {
-      const r = StringSchema.parse(allowedRoot, 'allowedRoot');
+    const workspaceId = raw['workspaceId'];
+    if (workspaceId !== undefined && workspaceId !== null) {
+      const r = parseSecurityIdentifier(workspaceId, 'workspaceId');
       if (!r.ok) return r;
-      value.allowedRoot = r.value;
+      value.workspaceId = r.value;
     }
     return { ok: true, value };
   },
@@ -426,7 +639,7 @@ export const WorkspaceDirectoryArgs = {
     if ('path' in raw || 'allowedRoot' in raw) {
       return fail('args.path', 'renderer-provided paths are not allowed');
     }
-    const workspaceId = StringSchema.parse(raw['workspaceId'], 'workspaceId');
+    const workspaceId = parseSecurityIdentifier(raw['workspaceId'], 'workspaceId');
     if (!workspaceId.ok) return workspaceId;
     return { ok: true, value: { workspaceId: workspaceId.value } };
   },
@@ -441,7 +654,7 @@ export interface ShellOpenPathWithArgs {
 export const ShellOpenPathWithArgs = {
   parse(raw: unknown): ParseResult<ShellOpenPathWithArgs> {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const pathResult = StringSchema.parse(raw['path'], 'path');
+    const pathResult = parseIpcPath(raw['path']);
     if (!pathResult.ok) return pathResult;
     const applicationId = StringSchema.parse(raw['applicationId'], 'applicationId');
     if (!applicationId.ok) return applicationId;
@@ -495,10 +708,13 @@ export interface ShellWriteTextFileArgs {
 export const ShellWriteTextFileArgs = {
   parse(raw: unknown): ParseResult<ShellWriteTextFileArgs> {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const p = StringSchema.parse(raw['path'], 'path');
+    const p = parseIpcPath(raw['path']);
     if (!p.ok) return p;
     const content = raw['content'];
     if (typeof content !== 'string') return fail('content', `expected string, got ${typeof content}`);
+    if (utf8Length(content) > MAX_FILE_WRITE_BYTES) {
+      return fail('content', `max ${MAX_FILE_WRITE_BYTES} UTF-8 bytes`);
+    }
     return { ok: true, value: { path: p.value, content } };
   },
 };
@@ -511,10 +727,13 @@ export interface ShellWriteFileBase64Args {
 export const ShellWriteFileBase64Args = {
   parse(raw: unknown): ParseResult<ShellWriteFileBase64Args> {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const p = StringSchema.parse(raw['path'], 'path');
+    const p = parseIpcPath(raw['path']);
     if (!p.ok) return p;
     const base64 = StringSchema.parse(raw['base64'], 'base64');
     if (!base64.ok) return base64;
+    if (base64.value.length > MAX_FILE_WRITE_BASE64_CHARS) {
+      return fail('base64', `max ${MAX_FILE_WRITE_BASE64_CHARS} chars`);
+    }
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64.value)) return fail('base64', 'invalid base64');
     return { ok: true, value: { path: p.value, base64: base64.value } };
   },
@@ -532,16 +751,32 @@ export const UpdateStartDownloadArgs = {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
     const version = StringSchema.parse(raw['version'], 'version');
     if (!version.ok) return version;
-    if (!version.value.trim()) return fail('version', 'must be non-empty');
+    const normalizedVersion = version.value.trim();
+    if (
+      !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,127}$/.test(normalizedVersion)
+      || hasControlCharacters(normalizedVersion)
+    ) {
+      return fail('version', 'must be a bounded release identifier');
+    }
     const rawType = raw['type'];
     if (rawType !== 'force' && rawType !== 'reminder') {
       return fail('type', 'must be force or reminder');
     }
     const url = raw['url'];
-    if (url !== undefined && typeof url !== 'string') {
-      return fail('url', 'must be string');
+    let normalizedUrl: string | undefined;
+    if (url !== undefined) {
+      const parsedUrl = parseSecureUpdateUrl(url);
+      if (!parsedUrl.ok) return parsedUrl;
+      normalizedUrl = parsedUrl.value;
     }
-    return { ok: true, value: { version: version.value.trim(), type: rawType, url: url as string | undefined } };
+    return {
+      ok: true,
+      value: {
+        version: normalizedVersion,
+        type: rawType,
+        ...(normalizedUrl ? { url: normalizedUrl } : {}),
+      },
+    };
   },
 };
 
@@ -552,17 +787,8 @@ export interface UpdateDownloadArgs {
 export const UpdateDownloadArgs = {
   parse(raw: unknown): ParseResult<UpdateDownloadArgs> {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
-    const url = StringSchema.parse(raw['url'], 'url');
+    const url = parseSecureUpdateUrl(raw['url']);
     if (!url.ok) return url;
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(url.value);
-    } catch {
-      return fail('url', 'not a valid URL');
-    }
-    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-      return fail('url.protocol', 'must be http: or https:');
-    }
     return { ok: true, value: { url: url.value } };
   },
 };
@@ -580,16 +806,20 @@ export const UpdateInstallArgs = {
   },
 };
 
-/** feedback:submit args. */
-export interface FeedbackSubmitArgs {
+/** Sanitized feedback draft shared by preview and authorized submit. */
+export interface FeedbackPayloadArgs {
   title: string;
   description: string;
   images?: Array<{ name: string; dataUrl: string }>;
-  userId?: string;
 }
 
-export const FeedbackSubmitArgs = {
-  parse(raw: unknown): ParseResult<FeedbackSubmitArgs> {
+const MAX_FEEDBACK_IMAGES = 9;
+const MAX_FEEDBACK_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_FEEDBACK_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
+const FEEDBACK_DATA_URL_RE =
+  /^data:(image\/(?:gif|jpeg|png|webp));base64,([A-Za-z0-9+/]*={0,2})$/i;
+
+function parseFeedbackPayload(raw: unknown): ParseResult<FeedbackPayloadArgs> {
     if (!isPlainObject(raw)) return fail('args', 'expected object');
     const title = StringSchema.parse(raw['title'], 'title');
     if (!title.ok) return title;
@@ -599,33 +829,108 @@ export const FeedbackSubmitArgs = {
     if (description.value.length > 5000) return fail('description', 'max 5000 chars');
 
     const imagesRaw = raw['images'];
-    let images: FeedbackSubmitArgs['images'];
+    let images: FeedbackPayloadArgs['images'];
     if (imagesRaw !== undefined) {
       if (!Array.isArray(imagesRaw)) return fail('images', 'expected array');
-      if (imagesRaw.length > 9) return fail('images', 'max 9');
+      if (imagesRaw.length > MAX_FEEDBACK_IMAGES) {
+        return fail('images', `max ${MAX_FEEDBACK_IMAGES}`);
+      }
       images = [];
+      let totalImageBytes = 0;
       for (let i = 0; i < imagesRaw.length; i++) {
         const item = imagesRaw[i];
         if (!isPlainObject(item)) return fail(`images[${i}]`, 'expected object');
         const name = StringSchema.parse(item['name'], `images[${i}].name`);
         if (!name.ok) return name;
+        if (
+          name.value.length > 128
+          || /[\/\\]/.test(name.value)
+          || hasControlCharacters(name.value)
+          || name.value === '.'
+          || name.value === '..'
+        ) {
+          return fail(`images[${i}].name`, 'must be a safe leaf name up to 128 chars');
+        }
         const dataUrl = StringSchema.parse(item['dataUrl'], `images[${i}].dataUrl`);
         if (!dataUrl.ok) return dataUrl;
-        if (!dataUrl.value.startsWith('data:')) return fail(`images[${i}].dataUrl`, 'must be data URL');
-        if (dataUrl.value.length > 5 * 1024 * 1024) {
-          return fail(`images[${i}].dataUrl`, 'max 5MB per image');
+        const match = FEEDBACK_DATA_URL_RE.exec(dataUrl.value);
+        if (!match?.[2]) {
+          return fail(
+            `images[${i}].dataUrl`,
+            'must be a base64 GIF, JPEG, PNG, or WebP data URL',
+          );
+        }
+        const base64 = match[2];
+        const padding = base64.endsWith('==') ? 2 : (base64.endsWith('=') ? 1 : 0);
+        const decodedBytes = Math.floor(base64.length * 3 / 4) - padding;
+        if (decodedBytes <= 0 || decodedBytes > MAX_FEEDBACK_IMAGE_BYTES) {
+          return fail(`images[${i}].dataUrl`, `max ${MAX_FEEDBACK_IMAGE_BYTES} decoded bytes`);
+        }
+        totalImageBytes += decodedBytes;
+        if (totalImageBytes > MAX_FEEDBACK_TOTAL_IMAGE_BYTES) {
+          return fail('images', `max ${MAX_FEEDBACK_TOTAL_IMAGE_BYTES} decoded bytes total`);
         }
         images.push({ name: name.value, dataUrl: dataUrl.value });
       }
     }
 
-    const userId = OptionalStringSchema.parse(raw['userId'], 'userId');
-    if (!userId.ok) return userId;
-
-    const value: FeedbackSubmitArgs = { title: title.value, description: description.value };
+    const value: FeedbackPayloadArgs = {
+      title: title.value,
+      description: description.value,
+    };
     if (images !== undefined) value.images = images;
-    if (userId.value !== undefined) value.userId = userId.value;
     return { ok: true, value };
+}
+
+/** feedback:preview args. Previewing never persists or uploads the draft. */
+export type FeedbackPreviewArgs = FeedbackPayloadArgs;
+export const FeedbackPreviewArgs = {
+  parse(raw: unknown): ParseResult<FeedbackPreviewArgs> {
+    return parseFeedbackPayload(raw);
+  },
+};
+
+/** feedback:submit args. A main-process-issued one-time authority is mandatory. */
+export interface FeedbackSubmitArgs extends FeedbackPayloadArgs {
+  authority: string;
+}
+
+export const FeedbackSubmitArgs = {
+  parse(raw: unknown): ParseResult<FeedbackSubmitArgs> {
+    const payload = parseFeedbackPayload(raw);
+    if (!payload.ok) return payload;
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const authority = StringSchema.parse(raw['authority'], 'authority');
+    if (!authority.ok) return authority;
+    if (
+      authority.value.length > 256
+      || hasControlCharacters(authority.value)
+      || !/^[A-Za-z0-9_-]+$/.test(authority.value)
+    ) {
+      return fail('authority', 'must be a bounded opaque token');
+    }
+    return { ok: true, value: { ...payload.value, authority: authority.value } };
+  },
+};
+
+/** feedback:cancel args. Cancellation accepts only the opaque main authority. */
+export interface FeedbackCancelArgs {
+  authority: string;
+}
+
+export const FeedbackCancelArgs = {
+  parse(raw: unknown): ParseResult<FeedbackCancelArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const authority = StringSchema.parse(raw['authority'], 'authority');
+    if (!authority.ok) return authority;
+    if (
+      authority.value.length > 256
+      || hasControlCharacters(authority.value)
+      || !/^[A-Za-z0-9_-]+$/.test(authority.value)
+    ) {
+      return fail('authority', 'must be a bounded opaque token');
+    }
+    return { ok: true, value: { authority: authority.value } };
   },
 };
 
@@ -699,9 +1004,8 @@ export const FeedbackListArgs = {
 };
 
 /**
- * feedback:image args. path 为服务端 images 字段的相对路径(如 'upload/xxx.png')，
- * 或绝对 http(s) URL。主进程据此拼 baseURL 后 fetch，故 path 是信任边界：
- * 拒绝 '..'(防路径穿越)，绝对 URL 仅放行 http/https。
+ * feedback:image args. path 只能是反馈服务同源下的相对路径
+ * （如 'upload/xxx.png'）。主进程据此拼 baseURL 后 fetch，故 path 是信任边界。
  */
 export interface FeedbackImageArgs {
   path: string;
@@ -713,9 +1017,16 @@ export const FeedbackImageArgs = {
     const path = StringSchema.parse(raw['path'], 'path');
     if (!path.ok) return path;
     if (path.value.length > 500) return fail('path', 'max 500 chars');
-    if (path.value.includes('..')) return fail('path', 'must not contain ..');
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(path.value) && !/^https?:\/\//i.test(path.value)) {
-      return fail('path', 'absolute URL must be http/https');
+    if (
+      !path.value
+      || path.value.includes('..')
+      || path.value.includes('\\')
+      || path.value.startsWith('/')
+      || path.value.includes('?')
+      || path.value.includes('#')
+      || /^[a-z][a-z0-9+.-]*:/i.test(path.value)
+    ) {
+      return fail('path', 'must be a same-origin relative path');
     }
     return { ok: true, value: { path: path.value } };
   },

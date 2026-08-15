@@ -91,8 +91,3 @@ const manifest = {
   } } : {}),
 };
 writeFileSync(resolve(output, 'runtime-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-const bwrapRecord = files.find((item) => item.name === 'bwrap');
-writeFileSync(
-  resolve(output, 'security-runtime.env'),
-  bwrapRecord ? `ACE_BUNDLED_BWRAP_SHA256=${bwrapRecord.sha256}\n` : '',
-);

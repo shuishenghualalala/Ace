@@ -152,6 +152,14 @@ export function createBrowserInspector(
   const recordingControls = document.createElement('span');
   recordingControls.className = 'browser-rec-slot';
   recordingControls.dataset.browserRecControls = '';
+  const recordStart = document.createElement('button');
+  recordStart.type = 'button';
+  recordStart.className = 'browser-icon-btn browser-icon-btn--record';
+  recordStart.dataset.browserRecord = 'start';
+  recordStart.setAttribute('aria-label', '开始录制技能');
+  recordStart.title = '开始录制技能 · 把这段操作录成可重放的技能';
+  recordStart.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/></svg>';
+  recordingControls.append(recordStart);
   toolbar.append(navigation, address, note, recordingStatus, recordingControls);
 
   const takeover = document.createElement('div');

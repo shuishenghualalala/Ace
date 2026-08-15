@@ -18,7 +18,11 @@ from crew.agent.loop.tool_result_display import (
 )
 from crew.core.types import Message, ToolCall, tool_arguments_for_ui
 from crew.gateway.auth import account_from_request
-from crew.gateway.helpers import require_external_agents_enabled, with_session_agent_labels
+from crew.gateway.helpers import (
+    require_external_agents_enabled,
+    safe_public_error,
+    with_session_agent_labels,
+)
 from crew.gateway.hooks import hook_registry
 from crew.security.settings import strict_security_enabled
 from crew.state.session_store import SessionOwnershipError, is_placeholder_title
@@ -151,10 +155,9 @@ async def _teardown_session_resources(
 ) -> None:
     """删除会话前回收运行中任务、plan 目录、摘要/记忆/ACP/uploads/task 磁盘产物。
 
-    后台终端进程都挂在 shell task 上（terminal 工具 spawn 时带 task_id，task 的
-    cancel 回调即 ``kill_process_group``，现在会整树杀），故 cancel 这些 task 会
-    连带回收关联进程。会话删除时若不取消，进程会一直跑到自然结束或超时，与
-    "杀不干净"叠加造成内存累积。
+    后台终端进程都挂在 shell task 上；这里先按 owner/session 在进程注册表中
+    建立持久清理 fence，再取消 task。task 的 cancel 回调也会按进程 identity
+    经注册表整树终止，失败则保留 cleanup_pending tombstone 供重试。
 
     同时 ``plan_manager.reset`` 清掉该会话的 ``.crew/plans/<owner>/<sid>/``，
     并清理 compaction / memory / ACP 绑定 / 会话引用的 uploads / task 落盘文件，
@@ -162,6 +165,28 @@ async def _teardown_session_resources(
 
     ``messages_snapshot``：删库后再清盘时传入删前历史，供 uploads 反查路径。
     """
+    from crew.tools.process_registry import ProcessCleanupError, process_registry
+
+    revoke_runtime_tools = getattr(
+        getattr(crew, "registry", None),
+        "revoke_runtime_tool_session",
+        None,
+    )
+    if callable(revoke_runtime_tools):
+        try:
+            await revoke_runtime_tools(owner, session_id)
+        except Exception:  # noqa: BLE001 - continue durable session teardown
+            log.exception("删除会话时运行期工具回收失败")
+    try:
+        process_registry.revoke_session(
+            owner,
+            session_id,
+            reason="SESSION_REVOKED",
+        )
+    except ProcessCleanupError:
+        # The process registry has already persisted cleanup_pending tombstones;
+        # later reaper/startup passes will retry without trusting the deleted row.
+        log.exception("删除会话时后台进程清理未完成，已保留重试 fence")
     try:
         running = crew.tasks.list_tasks(
             session_id=session_id, status="running", owner_account_id=owner, limit=1000
@@ -348,7 +373,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 owner_account_id=owner,
             )
         except SessionOwnershipError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "会话归属校验失败")}, status_code=409)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
         return JSONResponse({"ok": True, "session_id": session_id})
@@ -386,7 +411,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         try:
             return JSONResponse(crew.workspace_store.update(workspace_id, owner_account_id=owner, **payload))
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "会话不存在")}, status_code=404)
 
     @router.delete("/api/workspace/{workspace_id}")
     async def delete_workspace(request: Request, workspace_id: str) -> JSONResponse:
@@ -443,7 +468,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             if not callable(tx):
                 crew.workspace_store.delete(workspace_id, owner_account_id=owner)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "会话请求无效")}, status_code=400)
         for sid in session_ids:
             await hook_registry.emit("session:end", {"session_id": sid, "owner_account_id": owner})
             await _teardown_session_resources(
@@ -881,7 +906,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     owner_account_id=owner,
                 )
             except SessionOwnershipError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+                return JSONResponse({"ok": False, "error": safe_public_error(exc, "会话归属校验失败")}, status_code=409)
 
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
@@ -1071,9 +1096,9 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 busy=busy,
             )
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "会话不存在")}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "会话请求冲突")}, status_code=409)
         return JSONResponse(body)
 
     @router.get("/api/session/{session_id}/agent-config")
@@ -1181,7 +1206,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             try:
                 ensure(session_id, workspace_id=workspace_id, title=title, owner_account_id=owner)
             except SessionOwnershipError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+                return JSONResponse({"ok": False, "error": safe_public_error(exc, "会话归属校验失败")}, status_code=409)
 
         setter = getattr(crew.session_store, "set_agent_config", None)
         if not callable(setter):
@@ -1237,7 +1262,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     ):
                         matched.append(event)
         except OSError as exc:
-            return JSONResponse({"enabled": enabled, "events": [], "error": str(exc)}, status_code=500)
+            return JSONResponse({"enabled": enabled, "events": [], "error": safe_public_error(exc, "调试日志不可用")}, status_code=500)
         events = sorted(matched, key=lambda ev: ev.get("ts", 0))
         return JSONResponse({"enabled": enabled, "events": events})
 
@@ -1315,7 +1340,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 )
             )
         except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"error": safe_public_error(exc, "会话请求无效")}, status_code=400)
 
     @router.get("/api/tasks/{task_or_session_id}")
     async def task_or_legacy_session(request: Request, task_or_session_id: str) -> JSONResponse:
@@ -1338,7 +1363,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             )
             return JSONResponse(task)
         except KeyError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=404)
+            return JSONResponse({"error": safe_public_error(exc, "会话不存在")}, status_code=404)
 
     @router.post("/api/tasks/{task_id}/wait")
     async def wait_task(request: Request, task_id: str, payload: dict | None = None) -> JSONResponse:
@@ -1350,7 +1375,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             )
             return JSONResponse(task)
         except KeyError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=404)
+            return JSONResponse({"error": safe_public_error(exc, "会话不存在")}, status_code=404)
 
     @router.get("/api/runtime/concurrency")
     async def runtime_concurrency() -> JSONResponse:

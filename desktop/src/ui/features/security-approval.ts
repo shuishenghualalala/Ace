@@ -10,7 +10,11 @@ import { $, notify, state } from '../state';
 import { appendMessage, renderChat } from './chat-controller';
 import { queryPrimaryComposer } from './composer-scope';
 
-export type ConversationSecurityMode = 'request_approval' | 'auto_review' | 'full_access';
+export type ConversationSecurityMode =
+  | 'read_only'
+  | 'request_approval'
+  | 'auto_review'
+  | 'full_access';
 export type SecurityApprovalChoice = 'once' | 'session' | 'always' | 'reject';
 
 export const SECURITY_APPROVAL_CHOICES: readonly SecurityApprovalChoice[] = [
@@ -20,8 +24,9 @@ export const SECURITY_APPROVAL_CHOICES: readonly SecurityApprovalChoice[] = [
   'reject',
 ];
 
-/** toolbar chip 的三选一：value/label/desc 由本模块（类型所有者）统一提供。 */
+/** toolbar chip options: value/label/desc are owned by this module. */
 export const SECURITY_MODE_OPTIONS: { value: ConversationSecurityMode; label: string; desc: string }[] = [
+  { value: 'read_only', label: '只读', desc: '允许读取，文件写入始终拒绝' },
   { value: 'request_approval', label: '请求批准', desc: '每条命令都问我' },
   { value: 'auto_review', label: '替我审批', desc: '沙箱内自动放行，越界再问' },
   { value: 'full_access', label: '完全访问权限', desc: '宽权限受管：安全控制面仍隔离' },
@@ -33,6 +38,7 @@ export const FULL_ACCESS_CONFIRMATION =
 export function modeLabel(mode: ConversationSecurityMode): string {
   if (mode === 'full_access') return '完全访问权限';
   if (mode === 'auto_review') return '替我审批';
+  if (mode === 'read_only') return '只读';
   return '请求批准';
 }
 
@@ -40,6 +46,7 @@ function actionKindLabel(kind: string): string {
   if (kind === 'exec') return '执行命令';
   if (kind === 'file') return '文件操作';
   if (kind === 'network') return '联网访问';
+  if (kind === 'permission') return '权限申请';
   return kind || '需要人工确认';
 }
 
@@ -69,9 +76,8 @@ function riskClassLabel(riskClass: string, toolName: string): string {
  * 把后端 pending 请求渲染成人类可读的审批摘要。
  *
  * 字段名必须与后端 NormalizedAction（crew/security/actions.py，经 asdict 下发）严格对齐：
- * exec→argv/cwd、file→path(单数)/operation、network→host/port/protocol。历史实现读的是
- * paths/network/additional_permissions 这三个后端根本不存在的键，导致文件/网络审批只显示
- * 「操作：file」却看不到具体路径或目标——用户无法据此做知情决策。此处按 kind 分支精确读取。
+ * exec→argv/cwd、file→path(单数)/operation、network→host/port/protocol；额外沙箱权限则
+ * 从审批请求的 additional_permissions 读取。此处按 kind 分支精确读取，保证用户能做知情决策。
  */
 export function formatApprovalSummary(request: Record<string, unknown>): string {
   const action = (request['action'] ?? {}) as Record<string, unknown>;
@@ -98,6 +104,29 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
     }
     if (argv.length) lines.push(`${rawCommand ? '最终执行参数' : '完整命令'}：${argv.join(' ')}`);
     if (action['cwd']) lines.push(`工作目录：${String(action['cwd'])}`);
+    const effective = request['effective_permissions'] as Record<string, unknown> | undefined;
+    if (effective) {
+      lines.push(`运行边界：${String(effective['kind']) === 'managed' ? '受管沙箱' : '当前用户权限'}`);
+      const writeRoots = Array.isArray(effective['filesystem'])
+        ? effective['filesystem']
+          .map((item) => item as Record<string, unknown>)
+          .filter((item) => String(item['access']) === 'read_write')
+          .map((item) => String(item['root'] ?? ''))
+          .filter(Boolean)
+        : [];
+      if (writeRoots.length) lines.push(`可写范围：${writeRoots.join('；')}`);
+      const networkPolicy = String(effective['network_policy'] ?? '');
+      if (networkPolicy) lines.push(`网络边界：${networkPolicy === 'unrestricted' ? '非受限' : '受限/显式目标'}`);
+      const networkEntries = Array.isArray(effective['network']) ? effective['network'] : [];
+      if (networkEntries.length) {
+        const targets = networkEntries.map((item) => {
+          const entry = item as Record<string, unknown>;
+          return `${String(entry['protocol'] ?? '')}://${String(entry['host'] ?? '')}:${String(entry['port'] ?? '')}`;
+        });
+        lines.push(`网络目标：${targets.join('；')}`);
+      }
+    }
+    lines.push('未知副作用：命令可能组合已授权文件/网络能力；审批只绑定显示的完整命令与运行边界。');
   } else if (kind === 'file') {
     if (action['path']) lines.push(`文件：${String(action['path'])}`);
     lines.push(`文件操作：${fileOperationLabel(String(action['operation'] ?? ''))}`);
@@ -107,8 +136,29 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
     const port = action['port'] ? `:${String(action['port'])}` : '';
     const protocol = action['protocol'] ? `（${String(action['protocol'])}）` : '';
     if (host) lines.push(`联网目标：${host}${port}${protocol}`);
+  } else if (kind === 'permission') {
+    if (request['reason']) lines.push(`申请理由：${String(request['reason'])}`);
   }
-  lines.push('授权只匹配上面显示的完整动作；任一字符变化都会重新判断。');
+  const extra = request['additional_permissions'] as Record<string, unknown> | undefined;
+  const extraFilesystem = Array.isArray(extra?.['filesystem']) ? extra['filesystem'] : [];
+  const extraNetwork = Array.isArray(extra?.['network']) ? extra['network'] : [];
+  if (extraFilesystem.length || extraNetwork.length || extra?.['allow_local_binding'] === true) {
+    lines.push('批准后额外沙箱权限：');
+    for (const item of extraFilesystem) {
+      const entry = item as Record<string, unknown>;
+      lines.push(`  文件系统：${String(entry['root'] ?? '')}（${String(entry['access'] ?? 'read_write')}）`);
+    }
+    for (const item of extraNetwork) {
+      const entry = item as Record<string, unknown>;
+      const privateScope = entry['allow_private'] === true ? '（允许私网）' : '（仅公网）';
+      lines.push(`  网络：${String(entry['protocol'] ?? '')}://${String(entry['host'] ?? '')}:${String(entry['port'] ?? '')}${privateScope}`);
+    }
+    if (extra?.['allow_local_binding'] === true) lines.push('  允许本地端口监听');
+    lines.push('  额外权限仅绑定本次动作或本次对话，不会变成永久整机权限。');
+  }
+  lines.push(kind === 'permission'
+    ? '授权仅覆盖上面列出的额外权限；未列出的能力仍会被拒绝。'
+    : '授权只匹配上面显示的完整动作；任一字符变化都会重新判断。');
   return lines.join('\n');
 }
 
@@ -267,6 +317,23 @@ export function bindSecurityApprovalUi(): () => void {
         return;
       }
       visibleRequest = request;
+      const extra = request['additional_permissions'] as Record<string, unknown> | undefined;
+      const hasExtraPermissions = Boolean(
+        (Array.isArray(extra?.['filesystem']) && extra['filesystem'].length)
+        || (Array.isArray(extra?.['network']) && extra['network'].length)
+        || extra?.['allow_local_binding'] === true,
+      );
+      const requiresFreshConfirmation = request['risk_class'] === 'dangerous_command';
+      const alwaysButton = panel?.querySelector<HTMLButtonElement>('[data-security-decision="always"]');
+      if (alwaysButton) {
+        alwaysButton.hidden = hasExtraPermissions || requiresFreshConfirmation;
+        alwaysButton.disabled = hasExtraPermissions || requiresFreshConfirmation;
+      }
+      const sessionButton = panel?.querySelector<HTMLButtonElement>('[data-security-decision="session"]');
+      if (sessionButton) {
+        sessionButton.hidden = requiresFreshConfirmation;
+        sessionButton.disabled = requiresFreshConfirmation;
+      }
       if (summary) summary.textContent = formatApprovalSummary(request);
       showOverlay();
     } catch {
@@ -292,6 +359,8 @@ export function bindSecurityApprovalUi(): () => void {
       const taskId = typeof visibleRequest['task_id'] === 'string' ? String(visibleRequest['task_id']) : '';
       const action = visibleRequest['action'] as { argv?: unknown[] } | undefined;
       const argvPrefix = (action?.argv ?? []).map(String);
+      const requestType = String(visibleRequest['request_type'] ?? 'action');
+      const requestedPermissions = visibleRequest['permissions'] as Record<string, unknown> | undefined;
       const sessionId = state.activeSessionId;
       submitting = true;
       decisionButtons.forEach((item) => { item.disabled = true; });
@@ -308,6 +377,9 @@ export function bindSecurityApprovalUi(): () => void {
           taskId,
           decision,
           ...(decision === 'always' && argvPrefix.length ? { alwaysArgvPrefix: argvPrefix } : {}),
+          ...(requestType === 'permission' && decision !== 'reject' && requestedPermissions
+            ? { permissions: requestedPermissions }
+            : {}),
         });
         if (!result?.ok) {
           notify(`审批失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}`);

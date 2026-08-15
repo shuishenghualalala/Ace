@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from crew.security.actions import (
+    ActionKind,
     normalize_exec_action,
     normalize_file_action,
     normalize_network_action,
@@ -72,8 +73,6 @@ def test_deny_wins_over_allow_at_equal_specificity_across_scopes(tmp_path: Path)
     # 同 specificity（同 argv_prefix）时，ALWAYS DENY 不得被 ONCE ALLOW 压倒。
     # 旧实现把 scope_rank 排在 deny 之前，会使 ONCE(3) > ALWAYS(1) 让 allow 赢——
     # P3 exec deny 规则一旦落地即变漏洞。
-    from crew.security.actions import ActionKind
-
     action = normalize_exec_action(["git", "status"], tmp_path)
     always_deny = ActionRule(
         scope=RuleScope.ALWAYS, decision=RuleDecision.DENY, kind=ActionKind.EXEC,
@@ -84,3 +83,23 @@ def test_deny_wins_over_allow_at_equal_specificity_across_scopes(tmp_path: Path)
         argv_prefix=("git",), cwd=str(tmp_path),
     )
     assert choose_rule([once_allow, always_deny], action) == always_deny
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"exact_digest": "a" * 64, "argv_prefix": ("git",), "cwd": "C:/work"},
+        {},
+        {"exact_digest": "not-a-sha256"},
+        {"argv_prefix": ("git",), "cwd": "C:/work", "kind": ActionKind.FILE},
+    ],
+)
+def test_action_rule_rejects_ambiguous_or_malformed_matchers(kwargs: dict) -> None:
+    values = {
+        "scope": RuleScope.ALWAYS,
+        "decision": RuleDecision.ALLOW,
+        "kind": ActionKind.EXEC,
+        **kwargs,
+    }
+    with pytest.raises(ValueError):
+        ActionRule(**values)

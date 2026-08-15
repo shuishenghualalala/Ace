@@ -11,6 +11,50 @@ import https from 'https';
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'host',
+  'content-length',
+]);
+
+/**
+ * Renderer-supplied headers must not override host-owned authentication or
+ * hop-by-hop transport fields. The trusted host Authorization value (if any)
+ * is the only Authorization that survives.
+ */
+export function sanitizeRequestHeaders(
+  headers: Record<string, string>,
+  trustedAuthorization?: string,
+): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (!key || /[\r\n]/.test(key) || /[\r\n]/.test(value)) {
+      throw new Error('请求头包含非法字符');
+    }
+    const lower = key.toLowerCase();
+    if (HOP_BY_HOP_HEADERS.has(lower)) continue;
+    if (lower === 'authorization') {
+      if (trustedAuthorization !== undefined) sanitized[key] = trustedAuthorization;
+      continue;
+    }
+    sanitized[key] = value;
+  }
+  if (
+    trustedAuthorization !== undefined
+    && !Object.keys(sanitized).some((key) => key.toLowerCase() === 'authorization')
+  ) {
+    sanitized['Authorization'] = trustedAuthorization;
+  }
+  return sanitized;
+}
+
 export interface RequestConfig {
   baseURL?: string;
   timeout?: number;
@@ -37,15 +81,20 @@ export interface ResponseResult {
   error?: Error | undefined;
 }
 
-export function isSecureRemoteUrl(url: string, strictSecurityEnabled: boolean): boolean {
-  return !strictSecurityEnabled || new URL(url).protocol === 'https:';
+export function isSecureRemoteUrl(url: string, _strictSecurityEnabled = true): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
 }
 
-/** Reject credential-bearing remote traffic over plaintext unless compatibility mode is explicit. */
+/** Reject credential-bearing remote traffic over plaintext unconditionally. */
 export function requireSecureRemoteUrl(url: string, strictSecurityEnabled: boolean): void {
   if (!isSecureRemoteUrl(url, strictSecurityEnabled)) {
     throw new Error(
-      '严格安全约束要求认证与凭据请求使用 HTTPS；可在安全中心关闭后启用兼容模式',
+      '严格安全约束要求认证与凭据请求使用 HTTPS',
     );
   }
 }
@@ -60,7 +109,7 @@ export class Request {
     this.baseURL = config.baseURL || '';
     this.timeout = config.timeout || 30000;
     this.headers = config.headers || {};
-    this.strictSecurityEnabled = config.strictSecurityEnabled !== false;
+    this.strictSecurityEnabled = true;
   }
 
   setBaseURL(url: string): void {
@@ -68,7 +117,8 @@ export class Request {
   }
 
   setStrictSecurityEnabled(enabled: boolean): void {
-    this.strictSecurityEnabled = enabled;
+    if (!enabled) throw new Error('strict security cannot be disabled');
+    this.strictSecurityEnabled = true;
   }
 
   setHeader(key: string, value: string): void {
@@ -104,32 +154,33 @@ export class Request {
       // path 以 / 开头则去掉，让 URL 构造器在 base 目录下 join
       const normalizedPath = path.startsWith('/') ? path.slice(1) : path;
       urlObj = new URL(normalizedPath, base);
-    } catch (error) {
+    } catch {
       return {
         success: false,
-        message: `Invalid URL: base=${this.baseURL} path=${path}`,
-        error: error as Error,
+        message: '请求地址无效',
       };
     }
     try {
       requireSecureRemoteUrl(urlObj.href, this.strictSecurityEnabled);
-    } catch (error) {
+    } catch {
       return {
         success: false,
-        message: (error as Error).message,
-        error: error as Error,
+        message: '严格安全约束要求认证与凭据请求使用 HTTPS',
       };
     }
 
     // 基础请求头。Connection: close 避免连接池 stale 复用问题；Content-Length
     // 由 body 字节数算出（仅 POST/PUT/DELETE 带 body 时设）。
+    const mergedHeaders = sanitizeRequestHeaders(
+      { ...this.headers, ...headers },
+      this.headers['Authorization'],
+    );
     const requestHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
       'User-Agent': 'Mozilla/5.0',
       'Accept': 'application/json',
+      ...mergedHeaders,
       'Connection': 'close',
-      ...this.headers,
-      ...headers,
     };
 
     let bodyData = '';
@@ -217,7 +268,7 @@ export class Request {
         res.on('end', () => {
           if (rejected) return;
           const result = parseBody(statusCode, responseData);
-          console.log('[Response]', method, urlObj?.toString(), 'Status:', statusCode, 'Body:', result);
+          console.log('[Response]', method, 'Status:', statusCode);
           resolve(result);
         });
 
@@ -227,8 +278,7 @@ export class Request {
           resolve({
             success: false,
             statusCode,
-            message: `网络请求失败: ${err.message}`,
-            error: err as Error,
+            message: '网络请求失败',
           });
         });
       });
@@ -243,16 +293,14 @@ export class Request {
       });
 
       req.on('error', (err: NodeJS.ErrnoException) => {
-        // 严格响应头解析失败时明确记录服务端返回的非法头部。
-        const cause = (err as { cause?: { message?: string } }).cause;
-        const detail = cause?.message || err.code || err.message;
+        // 严格响应头解析失败只记录稳定类别；解析器 detail 可能包含上游
+        // header/token/path，不能进入桌面日志或 renderer error boundary。
         if (err.code === 'HPE_INVALID_HEADER_TOKEN') {
-          console.error('[Request] HTTP 响应头解析错误（服务端返回非法响应头）:', detail);
+          console.error('[Request] HTTP 响应头解析错误（服务端返回非法响应头）');
         }
         resolve({
           success: false,
-          message: `网络请求失败: ${err.message}${err.code ? ` (${err.code})` : ''}`,
-          error: err as Error,
+          message: '网络请求失败',
         });
       });
 
@@ -299,7 +347,7 @@ export class Request {
 }
 
 /** 收完响应体后的统一收尾：HTML 兜底判定 + JSON 解析。 */
-function parseBody(statusCode: number, responseData: string): ResponseResult {
+export function parseBody(statusCode: number, responseData: string): ResponseResult {
   if (responseData.startsWith('<') || responseData.startsWith('<html')) {
     return {
       success: false,
@@ -315,12 +363,11 @@ function parseBody(statusCode: number, responseData: string): ResponseResult {
       statusCode,
       data: result,
     };
-  } catch (e) {
+  } catch {
     return {
       success: false,
       statusCode,
-      message: `JSON 解析失败: ${(e as Error).message}`,
-      raw: responseData,
+      message: '响应格式无效',
     };
   }
 }

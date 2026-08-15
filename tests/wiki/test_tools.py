@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -426,8 +427,12 @@ async def test_wiki_parse_source_success(wiki_mocks, tmp_path, monkeypatch):
     compiler = wiki_mocks["compiler"]
     compiler.publish_source_page.return_value = source_page
 
-    parse_document = MagicMock(return_value="hello world")
-    monkeypatch.setattr(wiki_tools_module, "parse_document_from_bytes", parse_document)
+    parse_document = AsyncMock(return_value="hello world")
+    monkeypatch.setattr(
+        wiki_tools_module,
+        "parse_document_from_bytes_async",
+        parse_document,
+    )
 
     _set_context()
     tool = registry.get("wiki_parse_source")
@@ -436,7 +441,7 @@ async def test_wiki_parse_source_success(wiki_mocks, tmp_path, monkeypatch):
     assert raw.parse_status == "parsed"
     assert raw.parse_error is None
     assert raw.parsed_path == parsed_path
-    parse_document.assert_called_once_with(b"hello world", original.name)
+    parse_document.assert_awaited_once_with(b"hello world", original.name)
     store.save_parsed_markdown.assert_called_once_with("s1", "hello world", owner_account_id="owner", kb_id="kb_active")
     compiler.publish_source_page.assert_called_once_with(
         "s1",
@@ -466,10 +471,14 @@ async def test_wiki_parse_source_failure_updates_status(wiki_mocks, tmp_path, mo
     )
     store.load_raw.return_value = raw
 
-    def _bad_parse(content, filename):
+    async def _bad_parse(content, filename):
         raise Exception("expected <class 'openpyxl.styles.fills.Fill'>")
 
-    monkeypatch.setattr(wiki_tools_module, "parse_document_from_bytes", _bad_parse)
+    monkeypatch.setattr(
+        wiki_tools_module,
+        "parse_document_from_bytes_async",
+        _bad_parse,
+    )
 
     _set_context()
     tool = registry.get("wiki_parse_source")
@@ -880,7 +889,11 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     manager.issue_confirmation.assert_called_once()
 
 
-async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, fs_wiki):
+async def test_capture_attachment_only_accepts_current_turn_allowlist(
+    tmp_path,
+    fs_wiki,
+    monkeypatch,
+):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     allowed = uploads / "current.md"
@@ -891,6 +904,14 @@ async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, 
     store = fs_wiki["store"]
     registry = fs_wiki["registry"]
     current_attachment_paths.set((str(allowed),))
+    original_write_bytes = Path.write_bytes
+
+    def reject_non_atomic_source_write(path, content):
+        if path.parent != uploads:
+            raise AssertionError(f"Wiki attachment used Path.write_bytes: {path}")
+        return original_write_bytes(path, content)
+
+    monkeypatch.setattr(Path, "write_bytes", reject_non_atomic_source_write)
 
     with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
         rejected = await registry.get("wiki_capture_attachment").run({"path": str(old)})
@@ -902,6 +923,37 @@ async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, 
     assert len(raws) == 1
     assert raws[0].title == "current.md"
     current_attachment_paths.set(())
+
+
+async def test_capture_attachment_rejects_replacement_after_identity_binding(
+    tmp_path,
+    fs_wiki,
+    monkeypatch,
+):
+    import crew.wiki.tools as wiki_tools
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    allowed = uploads / "current.md"
+    allowed.write_text("# approved", encoding="utf-8")
+
+    store = fs_wiki["store"]
+    registry = fs_wiki["registry"]
+    current_attachment_paths.set((str(allowed),))
+    real_capture_identity = wiki_tools.capture_file_identity
+
+    def bind_then_replace(path):
+        identity = real_capture_identity(path)
+        path.write_text("# replaced", encoding="utf-8")
+        return identity
+
+    monkeypatch.setattr(wiki_tools, "capture_file_identity", bind_then_replace)
+    with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
+        result = await registry.get("wiki_capture_attachment").run({"path": str(allowed)})
+
+    current_attachment_paths.set(())
+    assert '"source"' not in result
+    assert store.list_raws(owner_account_id="owner", kb_id="default") == []
 
 
 async def test_capture_attachment_uses_original_name_and_content_type_not_display_title(tmp_path, fs_wiki):

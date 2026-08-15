@@ -14,6 +14,7 @@ import {
   type McpServerRow,
   type McpServerPayload,
   type McpTransport,
+  type McpEnvValue,
   type CuaDriverStatus,
   type CuaSetupProgress,
 } from '../backend-client';
@@ -443,13 +444,13 @@ function readMcpForm(): McpServerPayload {
   // env：多行 KEY=VALUE
   const envRaw = value('mcp-env');
   if (envRaw) {
-    const env: Record<string, string> = {};
+    const env: Record<string, McpEnvValue> = {};
     for (const line of envRaw.split(/\r?\n/)) {
       const idx = line.indexOf('=');
       if (idx > 0) {
         const k = line.slice(0, idx).trim();
         const v = line.slice(idx + 1).trim();
-        if (k) env[k] = v;
+        if (k) env[k] = { source: 'local', value: v };
       }
     }
     if (Object.keys(env).length) payload.env = env;
@@ -504,7 +505,11 @@ function fillMcpForm(server?: McpServerRow): void {
     // env：脱敏值（***）不回填，提示留空保留
     const env = server.config.env ?? {};
     const envLines = Object.entries(env)
-      .filter(([, v]) => v !== '***')
+      .map(([k, v]) => {
+        if (typeof v === 'string') return [k, v] as const;
+        return [k, v.source === 'local' ? v.value : ''] as const;
+      })
+      .filter(([, v]) => v !== '***' && v !== '')
       .map(([k, v]) => `${k}=${v}`);
     set('mcp-env', envLines.join('\n'));
     const headers = server.config.headers ?? {};

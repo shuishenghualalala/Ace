@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 import subprocess
+from pathlib import Path
 from typing import Any
 
 
@@ -21,6 +22,38 @@ def isolated_process_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
+def windows_system_directory() -> Path | None:
+    """Return the kernel-reported Windows system directory."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+        if not length or length >= len(buffer):
+            return None
+        return Path(buffer.value).resolve(strict=True)
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        return None
+
+
+def windows_system_executable(name: str) -> str | None:
+    """Resolve a Windows system executable from the kernel directory, never PATH."""
+    if not name or Path(name).name != name:
+        return None
+    try:
+        system_directory = windows_system_directory()
+        if system_directory is None:
+            return None
+        candidate = (system_directory / name).resolve(strict=True)
+        if candidate.parent != system_directory or not candidate.is_file():
+            return None
+        return str(candidate)
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        return None
+
+
 async def terminate_process_tree(
     process: asyncio.subprocess.Process,
     *,
@@ -31,12 +64,19 @@ async def terminate_process_tree(
         if os.name == "nt":
             if process.returncode is not None:
                 return
+            taskkill = windows_system_executable("taskkill.exe")
+            if taskkill is None:
+                raise OSError("trusted taskkill executable is unavailable")
+            from crew.security.launch import minimal_inherited_environment
+
             killer = await asyncio.create_subprocess_exec(
-                "taskkill",
+                taskkill,
                 "/PID",
                 str(process.pid),
                 "/T",
                 "/F",
+                env=minimal_inherited_environment(),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -44,12 +84,12 @@ async def terminate_process_tree(
             await asyncio.wait_for(killer.wait(), timeout=max(1.0, timeout))
         else:
             os.killpg(process.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError, asyncio.TimeoutError):
+    except (TimeoutError, ProcessLookupError, PermissionError, OSError):
         pass
 
     try:
         await asyncio.wait_for(process.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             if os.name != "nt":
                 os.killpg(process.pid, signal.SIGKILL)

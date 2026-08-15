@@ -8,6 +8,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from crew.gateway.auth import account_from_request
+from crew.gateway.helpers import safe_public_error
+from crew.security.context import build_gateway_security_context
 
 
 def create_sites_router(crew) -> APIRouter:
@@ -36,7 +38,7 @@ def create_sites_router(crew) -> APIRouter:
         try:
             return {"ok": True, "inspiration": manager().get_inspiration(owner(request), inspiration_id)}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.delete("/inspirations/{inspiration_id}")
     async def delete_inspiration(inspiration_id: str, request: Request):
@@ -44,7 +46,7 @@ def create_sites_router(crew) -> APIRouter:
             manager().delete_inspiration(owner(request), inspiration_id)
             return {"ok": True}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.post("/inspirations/{inspiration_id}/export")
     async def prepare_inspiration_export(inspiration_id: str, request: Request):
@@ -52,7 +54,7 @@ def create_sites_router(crew) -> APIRouter:
             archive = manager().export_inspiration(owner(request), inspiration_id)
             return {"ok": True, "archive_path": str(archive), "filename": archive.name}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.post("/inspirations/{inspiration_id}/annotations")
     async def create_inspiration_annotation(inspiration_id: str, request: Request):
@@ -77,9 +79,9 @@ def create_sites_router(crew) -> APIRouter:
             )
             return {"ok": True, "annotation": annotation}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.patch("/inspirations/{inspiration_id}/annotations/{annotation_id}")
     async def update_inspiration_annotation(
@@ -95,9 +97,9 @@ def create_sites_router(crew) -> APIRouter:
             )
             return {"ok": True, "annotation": updated}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.get("/canvases")
     async def list_canvases(request: Request):
@@ -117,7 +119,7 @@ def create_sites_router(crew) -> APIRouter:
                 widget["validation"] = manager().blueprint.validate_widget_file(widget)
             return {"ok": True, "canvas": canvas, "widgets": widgets}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.get("/canvases/{canvas_id}/render")
     async def render_canvas(canvas_id: str, request: Request):
@@ -127,7 +129,7 @@ def create_sites_router(crew) -> APIRouter:
                 headers={"Cache-Control": "no-store"},
             )
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.patch("/canvases/{canvas_id}/placements/{mount_id}")
     async def update_canvas_placement(canvas_id: str, mount_id: str, request: Request):
@@ -146,9 +148,9 @@ def create_sites_router(crew) -> APIRouter:
             )
             return {"ok": True, "placement": updated}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.get("/widgets/{widget_id}")
     async def get_widget(widget_id: str, request: Request):
@@ -157,7 +159,7 @@ def create_sites_router(crew) -> APIRouter:
             widget["validation"] = manager().blueprint.validate_widget_file(widget)
             return {"ok": True, "widget": widget}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.get("/widgets/{widget_id}/render")
     async def render_widget(widget_id: str, request: Request):
@@ -186,9 +188,9 @@ def create_sites_router(crew) -> APIRouter:
             html = manager().blueprint.runtime_html(widget, placement)
             return HTMLResponse(html, headers={"Cache-Control": "no-store"})
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.post("/widgets/{widget_id}/emit")
     async def emit_widget_event(widget_id: str, request: Request):
@@ -215,9 +217,9 @@ def create_sites_router(crew) -> APIRouter:
             widget = manager().blueprint.store.get_widget(owner(request), widget_id)
             return {"ok": run["status"] == "succeeded", "run": run, "widget": widget}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except (ValueError, RuntimeError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.post("/automations/{automation_id}/run")
     async def run_automation(automation_id: str, request: Request):
@@ -228,9 +230,9 @@ def create_sites_router(crew) -> APIRouter:
             )
             return {"ok": run["status"] == "succeeded", "run": run}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except (ValueError, RuntimeError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.get("/{site_id}")
     async def get_site(site_id: str, request: Request):
@@ -240,7 +242,7 @@ def create_sites_router(crew) -> APIRouter:
             annotations = manager().store.list_annotations(owner(request), site_id)
             return {"ok": True, "site": site, "releases": releases, "annotations": annotations}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.delete("/{site_id}")
     async def delete_site(site_id: str, request: Request):
@@ -249,7 +251,7 @@ def create_sites_router(crew) -> APIRouter:
             manager().delete(owner(request), site_id)
             return {"ok": True}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.post("/{site_id}/publish")
     async def publish_site(site_id: str, request: Request):
@@ -259,7 +261,14 @@ def create_sites_router(crew) -> APIRouter:
             current = manager().store.get_site(owner(request), site_id)
             workspace = crew.workspace_store.get(current["workspace_id"], owner_account_id=owner(request))
             workspace_root = workspace.get("root_path") or current["source_path"]
-            result = manager().publish(
+            security_context = build_gateway_security_context(
+                crew.workspace_store,
+                owner_account_id=owner(request),
+                workspace_id=current["workspace_id"],
+                session_id=current["session_id"],
+                cwd=workspace_root,
+            )
+            result = await manager().publish_async(
                 owner=owner(request), workspace_id=current["workspace_id"],
                 session_id=current["session_id"], workspace_root=workspace_root,
                 source_path=current["source_path"], name=str(data.get("name") or current["name"]),
@@ -267,12 +276,13 @@ def create_sites_router(crew) -> APIRouter:
                 build_command=str(data.get("build_command") or current["build_command"]),
                 output_directory=str(data.get("output_directory") or current["output_directory"]),
                 site_id=site_id,
+                security_context=security_context,
             )
             return {"ok": True, **result}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except (ValueError, RuntimeError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.get("/{site_id}/preview/{asset_path:path}")
     async def preview(site_id: str, asset_path: str, request: Request):
@@ -324,9 +334,9 @@ def create_sites_router(crew) -> APIRouter:
                 return HTMLResponse(html, headers={"Cache-Control": "no-store"})
             return FileResponse(path)
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.get("/{site_id}/preview")
     async def preview_index(site_id: str, request: Request):
@@ -342,9 +352,9 @@ def create_sites_router(crew) -> APIRouter:
             )
             return {"ok": True, "annotation": annotation}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.patch("/{site_id}/annotations/{annotation_id}")
     async def update_annotation(site_id: str, annotation_id: str, request: Request):
@@ -358,9 +368,9 @@ def create_sites_router(crew) -> APIRouter:
             )
             return {"ok": True, "annotation": annotation}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=400)
 
     @router.get("/{site_id}/export")
     async def export_site(site_id: str, request: Request):
@@ -368,7 +378,7 @@ def create_sites_router(crew) -> APIRouter:
             archive = manager().export(owner(request), site_id)
             return FileResponse(archive, filename=archive.name, media_type="application/zip")
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     @router.post("/{site_id}/export")
     async def prepare_export_site(site_id: str, request: Request):
@@ -376,6 +386,6 @@ def create_sites_router(crew) -> APIRouter:
             archive = manager().export(owner(request), site_id)
             return {"ok": True, "archive_path": str(archive), "filename": archive.name}
         except KeyError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "站点请求失败")}, status_code=404)
 
     return router

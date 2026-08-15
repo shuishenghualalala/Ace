@@ -3996,6 +3996,7 @@ class RecordWorkflowTools:
                 slug=slug,
                 operator_account_id=owner,
                 source="browser-recorder",
+                installation_authorized=True,
             )
         except Exception:  # noqa: BLE001 - installation failures are fail-closed
             installed = False

@@ -12,6 +12,13 @@ from crew.core.types import Message
 from crew.gateway.server import create_app
 
 
+def test_default_config_disables_full_llm_trace():
+    """完整 LLM trace 默认关闭，必须显式开启后才能落盘/查询。"""
+    from crew.state.config import Config
+
+    assert Config().llm_trace is False
+
+
 @pytest.fixture
 def crew_env(tmp_path, monkeypatch):
     """隔离 crew_home，并写入带两个会话事件的 llm.jsonl。"""
@@ -40,11 +47,15 @@ async def test_debug_log_exact_session_match(crew_env, auth_headers, tmp_path):
 
     # 关闭 dev_mode，否则 loopback 身份被劫持成 dev:dev，会话归属校验 404
     crew = build_app(
-        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False, gateway_dev_mode=False),
+        config=Config(
+            db_path=str(tmp_path / "crew.db"),
+            cron_enabled=False,
+            gateway_dev_mode=False,
+            llm_trace=True,
+        ),
         enable_team=False,
     )
     crew.session_store.save("a", [Message.user("debug")], owner_account_id="A:uid-a")
-    assert crew.config.llm_trace is True  # 默认开启
     app = create_app(crew)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
@@ -79,7 +90,12 @@ async def test_debug_log_limit_bounds_result(crew_env, auth_headers, tmp_path):
     from crew.state.config import Config
 
     crew = build_app(
-        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False, gateway_dev_mode=False),
+        config=Config(
+            db_path=str(tmp_path / "crew.db"),
+            cron_enabled=False,
+            gateway_dev_mode=False,
+            llm_trace=True,
+        ),
         enable_team=False,
     )
     crew.session_store.save("a", [Message.user("debug")], owner_account_id="A:uid-a")

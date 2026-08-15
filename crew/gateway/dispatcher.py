@@ -20,14 +20,18 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import hashlib
 import json
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ProviderError, ToolError
-from crew.core.runctx import current_owner_account_id
 from crew.core.interfaces import MessageHandler, SessionStore
+from crew.core.runctx import current_owner_account_id
 from crew.core.types import Message
 from crew.gateway.hooks import hook_registry
 from crew.gateway.outbound import enrich_error_chunk
@@ -35,6 +39,45 @@ from crew.state.logging import get_logger
 
 log = get_logger("gateway.dispatcher")
 SessionKey = tuple[str, str]
+_REQUEST_REPLAY_TTL_S = 10 * 60.0
+_REQUEST_REPLAY_LIMIT = 4096
+_INTERNAL_ERROR_MESSAGE = "服务内部异常，请稍后重试"
+_IN_PROGRESS_MESSAGE = "请求仍在处理中，请查询任务状态"
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
+_PERSISTED_ERROR_MESSAGES = {
+    "failed": _INTERNAL_ERROR_MESSAGE,
+    "cancelled": "请求已取消",
+    "timed_out": "请求处理超时，请查询任务状态",
+}
+
+
+def _action_digest(envelope: Envelope) -> str:
+    payload = {
+        "session_id": envelope.session_id,
+        "channel": envelope.channel,
+        "user_id": envelope.user_id,
+        "user_type": envelope.user_type,
+        "workspace_id": envelope.workspace_id,
+        "mode": envelope.mode,
+        "is_stream": envelope.is_stream,
+        "params": envelope.params,
+        "attachments": envelope.attachments,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+class _AdmissionRejected(RuntimeError):
+    def __init__(self, category: str = "unknown", response: ResponseChunk | None = None) -> None:
+        super().__init__(category)
+        self.category = category
+        self.response = response
 
 
 class BusyMode(enum.Enum):
@@ -90,6 +133,10 @@ class SessionDispatcher:
         # can never emit another frame after the owner logs in again.
         self._owner_epochs: dict[str, int] = {}
         self._blocked_owners: set[str] = set()
+        self._request_claim_lock = threading.RLock()
+        self._request_claims: OrderedDict[
+            tuple[str, str], tuple[str, float]
+        ] = OrderedDict()
         self._closed = False
         # 已触发过 session:start 的会话（每个会话生命周期内只发一次「新会话开始」）。
         self._sessions_started: set[SessionKey] = set()
@@ -136,6 +183,65 @@ class SessionDispatcher:
             lock = asyncio.Lock()
             self._locks[key] = lock
         return lock
+
+    def _claim_request(
+        self,
+        owner_account_id: str,
+        session_id: str,
+        request_id: str,
+    ) -> bool:
+        """Atomically bind one request id to its authenticated owner/session."""
+        owner = str(owner_account_id or "").strip()
+        session = str(session_id or "").strip()
+        request = str(request_id or "").strip()
+        if (
+            not owner
+            or not session
+            or not request
+            or len(owner) > 256
+            or len(session) > 256
+            or len(request) > 128
+        ):
+            return False
+        now = time.monotonic()
+        with self._request_claim_lock:
+            for key, (_bound_session, expiry) in list(self._request_claims.items()):
+                if expiry <= now:
+                    self._request_claims.pop(key, None)
+            key = (owner, request)
+            if key in self._request_claims:
+                return False
+            self._request_claims[key] = (session, now + _REQUEST_REPLAY_TTL_S)
+            self._request_claims.move_to_end(key)
+            while len(self._request_claims) > _REQUEST_REPLAY_LIMIT:
+                self._request_claims.popitem(last=False)
+            return True
+
+    @staticmethod
+    def _turn_task_id(owner_account_id: str, session_id: str, request_id: str) -> str:
+        material = f"{owner_account_id}\x00{session_id}\x00{request_id}".encode()
+        return f"task_turn_{hashlib.sha256(material).hexdigest()[:24]}"
+
+    @staticmethod
+    def _protocol_error(request_id: str, message: str) -> ResponseChunk:
+        chunk = ResponseChunk.error(request_id, message)
+        chunk.body["category"] = "protocol"
+        return chunk
+
+    @staticmethod
+    def _persisted_turn_response(
+        request_id: str,
+        task_id: str,
+        task: dict[str, object],
+    ) -> ResponseChunk:
+        status = str(task.get("status") or "")
+        if status == "completed":
+            return ResponseChunk.final(request_id, str(task.get("result") or ""))
+        if status in _TERMINAL_STATUSES:
+            return ResponseChunk.error(request_id, _PERSISTED_ERROR_MESSAGES[status])
+        chunk = ResponseChunk.status_event(request_id, _IN_PROGRESS_MESSAGE)
+        chunk.body.update({"task_id": task_id, "status": status or "unknown"})
+        return chunk
 
     def _cleanup_if_idle(self, key: SessionKey) -> None:
         """无等待且未运行时回收锁与计数，防止 dict 无限增长。"""
@@ -228,7 +334,7 @@ class SessionDispatcher:
                 try:
                     target_session_id = self._control_session_id(key, key[1])
                     ctrl_fn(target_session_id, reason, owner_account_id=owner)
-                except Exception:  # noqa: BLE001 - logout must continue hard cancellation
+                except Exception:
                     log.exception("Logout 级联中断失败 session=%s", key[1])
             tasks.update(task for task in owned_tasks if not task.done())
         for task in tasks:
@@ -239,7 +345,7 @@ class SessionDispatcher:
                     asyncio.gather(*tasks, return_exceptions=True),
                     timeout=max(0.1, float(timeout)),
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning("Logout 等待 Owner 任务退出超时 owner=%s count=%d", owner, len(tasks))
         return len(tasks)
 
@@ -265,7 +371,7 @@ class SessionDispatcher:
                 asyncio.gather(*tasks, return_exceptions=True),
                 timeout=max(0.1, float(timeout)),
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("Dispatcher shutdown 等待任务退出超时 count=%d", len(tasks))
 
     def _active_children_snapshot(
@@ -279,7 +385,7 @@ class SessionDispatcher:
                     session_id,
                     owner_account_id=owner_account_id,
                 )
-            except Exception:  # noqa: BLE001 — injected active_children_fn 失败面未知，状态查询须容错降级
+            except Exception:
                 log.exception("active children 状态获取失败 session=%s", session_id)
                 return [] if session_id else {}
         team = getattr(self._controller, "team", None)
@@ -287,7 +393,7 @@ class SessionDispatcher:
         if callable(fn):
             try:
                 return fn(session_id, owner_account_id=owner_account_id)
-            except Exception:  # noqa: BLE001 — team.active_children 内部失败面未知，状态查询须容错降级
+            except Exception:
                 log.exception("team active children 状态获取失败 session=%s", session_id)
         return [] if session_id else {}
 
@@ -341,7 +447,7 @@ class SessionDispatcher:
                         bool(ctrl_fn(target_session_id, reason, owner_account_id=key[0]))
                         or did_interrupt
                     )
-                except Exception:  # noqa: BLE001 — controller.interrupt 内部失败面未知，stop 级联中断失败仅记录
+                except Exception:
                     log.exception("显式 stop 级联中断失败 session=%s", target_session_id)
         for task in tasks:
             task.cancel()
@@ -367,7 +473,7 @@ class SessionDispatcher:
                 limit=1000,
                 owner_account_id=owner_account_id,
             )
-        except Exception:  # noqa: BLE001 — runtime task 查询失败不能影响内存 task 取消
+        except Exception:
             log.exception("查询运行任务失败 session=%s", session_id)
             return False
         did_cancel = False
@@ -393,7 +499,7 @@ class SessionDispatcher:
                     error=reason,
                 )
                 did_cancel = True
-            except Exception:  # noqa: BLE001 — 单个任务取消失败不影响其它任务
+            except Exception:
                 log.exception("取消运行任务失败 task=%s", task.get("task_id") or task.get("id"))
         return did_cancel
 
@@ -494,6 +600,10 @@ class SessionDispatcher:
         if owner in self._blocked_owners:
             log.info("Owner 正在退出，拒绝新调度 owner=%s session=%s", owner, sid)
             return
+        if not self._claim_request(owner, sid, rid):
+            log.warning("拒绝重复或未绑定请求 owner=%s session=%s", owner, sid)
+            yield self._protocol_error(rid, "重复或无效请求已拒绝")
+            return
         owner_epoch = self._owner_epochs.get(owner, 0)
         key = self._key(sid, owner)
         lock = self._lock_for(key)
@@ -511,6 +621,11 @@ class SessionDispatcher:
                 envelope.workspace_id,
             )
             envelope.workspace_id = stored_ws
+        try:
+            action_digest = _action_digest(envelope)
+        except (TypeError, ValueError):
+            yield self._protocol_error(rid, "请求参数不支持安全重放")
+            return
 
         # ---- 忙时策略判定（在获取锁之前） ----
         busy = lock.locked()
@@ -548,7 +663,7 @@ class SessionDispatcher:
                 yield ResponseChunk.error(rid, msg)
                 try:
                     self._store.set_status(sid, "failed", msg, owner_account_id=owner)
-                except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，不得覆盖已 yield 的队列满错误
+                except Exception:
                     log.exception("写入队列满状态失败 session=%s", sid)
                 return
             self._waiting[key] = self._waiting.get(key, 0) + 1
@@ -581,10 +696,7 @@ class SessionDispatcher:
                 async with lock:
                     _dequeue_once()
                     global_slot = False
-                    try:
-                        global_slot = await self._acquire_global_slot(key)
-                    except asyncio.CancelledError:
-                        raise
+                    global_slot = await self._acquire_global_slot(key)
                     self._running.add(key)
                     self._running_counts[key] = self._running_counts.get(key, 0) + 1
                     self._running_request_ids[key] = rid
@@ -592,12 +704,15 @@ class SessionDispatcher:
                         self._running_task[key] = current_task
                     runtime_task_id = ""
                     if self._task_runtime is not None:
+                        turn_task_id = self._turn_task_id(owner, sid, rid)
                         try:
                             cfg = getattr(self._controller, "config", None)
                             task = self._task_runtime.create_runtime(
                                 kind="agent_turn",
                                 session_id=sid,
                                 request_id=rid,
+                                action_digest=action_digest,
+                                task_id=turn_task_id,
                                 title=envelope.query[:120] or "Agent turn",
                                 detail=envelope.query,
                                 execution_timeout=getattr(
@@ -637,6 +752,58 @@ class SessionDispatcher:
                             rt_token = current_task_runtime.set(self._task_runtime)
                         except Exception:
                             log.exception("注册 agent_turn 任务失败 session=%s", sid)
+                            replay_response = None
+                            if not runtime_task_id:
+                                try:
+                                    existing = self._task_runtime.get(
+                                        turn_task_id,
+                                        owner_account_id=owner,
+                                    )
+                                    if str(existing.get("action_digest") or "") == action_digest:
+                                        replay_response = self._persisted_turn_response(
+                                            rid,
+                                            turn_task_id,
+                                            existing,
+                                        )
+                                    else:
+                                        replay_response = self._protocol_error(
+                                            rid,
+                                            "请求动作摘要不匹配",
+                                        )
+                                except KeyError:
+                                    # The deterministic task id was not persisted;
+                                    # return a generic admission failure instead of
+                                    # treating a missing task as a replay.
+                                    replay_response = None
+                            else:
+                                try:
+                                    self._task_runtime.finish(
+                                        runtime_task_id,
+                                        owner_account_id=owner,
+                                        status="failed",
+                                        error=_INTERNAL_ERROR_MESSAGE,
+                                    )
+                                except Exception:
+                                    log.exception(
+                                        "回滚未完成 agent_turn 任务失败 task=%s",
+                                        runtime_task_id,
+                                    )
+                            remaining = max(0, self._running_counts.get(key, 1) - 1)
+                            if remaining:
+                                self._running_counts[key] = remaining
+                            else:
+                                self._running_counts.pop(key, None)
+                                self._running.discard(key)
+                                self._running_request_ids.pop(key, None)
+                            if self._running_task.get(key) is current_task:
+                                self._running_task.pop(key, None)
+                            if self._run_task_ids.get(key) == runtime_task_id:
+                                self._run_task_ids.pop(key, None)
+                            self._release_global_slot(key, global_slot)
+                            raise _AdmissionRejected(
+                                "protocol" if replay_response is not None else "unknown",
+                                replay_response,
+                            )
 
                     # 标记会话进入 running，同时刷新 updated_at 防止被后台过期清理误删
                     try:
@@ -754,21 +921,24 @@ class SessionDispatcher:
                         log.info("会话已停止 session=%s", sid)
                         deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
                     except ProviderError as exc:
-                        failed, err = True, str(exc)
+                        failed, err = True, "模型服务暂时不可用，请稍后重试"
                         log.exception("Provider 异常 session=%s", sid)
-                        chunk = ResponseChunk.error(rid, str(exc))
+                        chunk = ResponseChunk.error(rid, err)
                         chunk.body["category"] = exc.category
                         deferred_terminal = chunk
-                    except ToolError as exc:
-                        failed, err = True, str(exc)
+                    except ToolError:
+                        failed, err = True, "工具执行失败，请检查输入后重试"
                         log.exception("工具异常 session=%s", sid)
-                        chunk = ResponseChunk.error(rid, str(exc))
+                        chunk = ResponseChunk.error(rid, err)
                         chunk.body["category"] = "tool"
                         deferred_terminal = chunk
-                    except Exception as exc:  # noqa: BLE001 — inner 执行委托 provider/tool/skill/plan 多条未知路径，请求最外层兜底须吞住并回报错帧
-                        failed, err = True, str(exc)
+                    except Exception as exc:
+                        failed, err = True, _INTERNAL_ERROR_MESSAGE
                         log.exception("会话执行异常 session=%s", sid)
-                        deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, str(exc)), exc)
+                        deferred_terminal = enrich_error_chunk(
+                            ResponseChunk.error(rid, err),
+                            exc,
+                        )
                     finally:
                         if sidechain_id:
                             try:
@@ -840,11 +1010,19 @@ class SessionDispatcher:
                                     )
                             except Exception:
                                 log.exception("完成 agent_turn 任务失败 task=%s", runtime_task_id)
+                        if runtime_task_id:
+                            try:
+                                security_service = getattr(self._controller, "security_service", None)
+                                end_task = getattr(security_service, "end_task", None)
+                                if callable(end_task):
+                                    end_task(owner, sid, runtime_task_id)
+                            except Exception:
+                                log.exception("回收 turn 权限失败 task=%s", runtime_task_id)
                         self._release_global_slot(key, global_slot)
                         try:
-                            status = "stopped" if err.startswith("已停止") or err.startswith("被新消息中断") else ("failed" if failed else "completed")
+                            status = "stopped" if err.startswith(("已停止", "被新消息中断")) else ("failed" if failed else "completed")
                             self._store.set_status(sid, status, err, owner_account_id=owner)
-                        except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
+                        except Exception:
                             log.exception("写入会话状态失败 session=%s", sid)
                         # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
                         # 监听者收到通知后拉到的才是终态。
@@ -859,12 +1037,32 @@ class SessionDispatcher:
                             "queue_depth": queue_depth,
                             "running_depth": remaining,
                         })
+            except _AdmissionRejected as exc:
+                if exc.response is not None:
+                    deferred_terminal = exc.response
+                else:
+                    err = (
+                        "重复请求已拒绝"
+                        if exc.category == "protocol"
+                        else _INTERNAL_ERROR_MESSAGE
+                    )
+                    log.warning(
+                        "Agent turn 准入失败 category=%s session=%s",
+                        exc.category,
+                        sid,
+                    )
+                    try:
+                        self._store.set_status(sid, "failed", err, owner_account_id=owner)
+                    except Exception:
+                        log.exception("写入准入失败状态失败 session=%s", sid)
+                    deferred_terminal = ResponseChunk.error(rid, err)
+                    deferred_terminal.body["category"] = exc.category
             except asyncio.CancelledError:
                 err = self._stop_reasons.get(key, "已停止当前回复")
                 log.info("排队中的会话请求已停止 session=%s", sid)
                 try:
                     self._store.set_status(sid, "stopped", err, owner_account_id=owner)
-                except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，取消分支中不得掩盖已 yield 的停止错误
+                except Exception:
                     log.exception("写入会话状态失败 session=%s", sid)
                 deferred_terminal = ResponseChunk.error(rid, err)
         finally:
@@ -877,13 +1075,13 @@ class SessionDispatcher:
                 if rt_id_token is not None:
                     try:
                         current_task_runtime_id.reset(rt_id_token)
-                    except Exception:
-                        pass
+                    except (LookupError, ValueError):
+                        log.debug("重置 task runtime id 上下文失败", exc_info=True)
                 if rt_token is not None:
                     try:
                         current_task_runtime.reset(rt_token)
-                    except Exception:
-                        pass
+                    except (LookupError, ValueError):
+                        log.debug("重置 task runtime 上下文失败", exc_info=True)
             _dequeue_once()
             if current_task is not None:
                 tasks = self._tasks.get(key)

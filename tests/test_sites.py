@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from crew.agent.loop.tool_result_display import tool_result_detail_for_ui
+from crew.core.errors import ToolError
 from crew.core.runctx import (
     current_agent_workdir,
     current_owner_account_id,
@@ -508,16 +509,16 @@ def test_canvas_offline_export_and_shared_asset_cleanup(
     assert widget_root.is_dir()
 
 
-def test_blueprint_rejects_private_network_and_secret_headers(
-    site_manager: SiteManager, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.asyncio
+async def test_blueprint_rejects_private_network_and_secret_headers(
+    site_manager: SiteManager,
 ) -> None:
     blueprint = site_manager.blueprint
-    monkeypatch.setattr(
-        "crew.sites.blueprint.socket.getaddrinfo",
-        lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 0))],
-    )
-    with pytest.raises(ValueError, match="局域网"):
-        blueprint._assert_public_host("internal.example")
+    with pytest.raises(ToolError, match="authorization_unavailable"):
+        await blueprint._fetch_json(
+            {"url": "https://127.0.0.1/private", "method": "GET"},
+            None,
+        )
     with pytest.raises(ValueError, match="不保存鉴权"):
         blueprint.validate_automation_contract(
             {"kind": "manual"},

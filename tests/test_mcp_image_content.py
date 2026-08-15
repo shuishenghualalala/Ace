@@ -15,13 +15,14 @@ import pytest
 pytest.importorskip("mcp")  # 未装 mcp 包则跳过
 
 from crew.agent.loop.tool_runner import ToolRunner
-from crew.core.types import Message, ToolCall
+from crew.core.types import Message, ToolCall, ToolPermissionDecision
 from crew.tools.mcp_client import _extract_text
 from crew.tools.registry import Registry
 
 # ---------------------------------------------------------------------------
 # _extract_text 单元测试
 # ---------------------------------------------------------------------------
+
 
 def _make_result(*blocks: Any, is_error: bool = False) -> SimpleNamespace:
     return SimpleNamespace(content=list(blocks), is_error=is_error)
@@ -35,20 +36,26 @@ def _image_block(data: str, mime_type: str = "image/png") -> SimpleNamespace:
     return SimpleNamespace(type="image", data=data, mime_type=mime_type)
 
 
-def test_extract_text_plain_still_returns_text():
-    """纯文本结果保持原有行为，不包装 JSON。"""
+def test_extract_text_plain_is_structurally_marked_untrusted():
     result = _make_result(_text_block("hello"), _text_block("world"))
-    assert _extract_text(result) == "hello\nworld"
+    out = json.loads(_extract_text(result))
+    assert out["content"] == "hello\nworld"
+    assert out["content_trust"] == "untrusted"
+    assert out["content_source"] == "mcp"
 
 
-def test_extract_text_empty_returns_placeholder():
-    assert _extract_text(_make_result()) == "(空结果)"
+def test_extract_text_empty_is_explicit():
+    out = json.loads(_extract_text(_make_result()))
+    assert out["content"] == ""
+    assert out["empty"] is True
 
 
 def test_extract_text_error_returns_error_json():
     result = _make_result(_text_block("boom"), is_error=True)
     out = json.loads(_extract_text(result))
     assert out["error"] == "boom"
+    assert out["content_trust"] == "untrusted"
+    assert out["content_source"] == "mcp"
 
 
 def test_extract_text_mixed_returns_json_with_images():
@@ -58,6 +65,7 @@ def test_extract_text_mixed_returns_json_with_images():
     )
     out = json.loads(_extract_text(result))
     assert out["text"] == "AX tree here"
+    assert out["content_trust"] == "untrusted"
     assert len(out["images"]) == 1
     assert out["images"][0]["mime_type"] == "image/png"
     assert out["images"][0]["data"] == "iVBORw0KGgo="
@@ -74,7 +82,10 @@ def test_extract_text_image_only_returns_json():
 def test_extract_text_dict_blocks_are_tolerated():
     """某些 transport 可能把 block 序列化为 dict，需兼容。"""
     result = SimpleNamespace(
-        content=[{"type": "text", "text": "hi"}, {"type": "image", "data": "x", "mimeType": "image/png"}],
+        content=[
+            {"type": "text", "text": "hi"},
+            {"type": "image", "data": "x", "mimeType": "image/png"},
+        ],
         is_error=False,
     )
     out = json.loads(_extract_text(result))
@@ -86,6 +97,7 @@ def test_extract_text_dict_blocks_are_tolerated():
 # ToolRunner 多模态注入测试
 # ---------------------------------------------------------------------------
 
+
 def _make_registry_with_image_tool() -> Registry:
     """构造一个 Registry，其 fake__snapshot 工具返回含图片的 JSON。"""
     reg = Registry()
@@ -95,7 +107,11 @@ def _make_registry_with_image_tool() -> Registry:
             {
                 "text": "window state",
                 "images": [
-                    {"mime_type": "image/png", "data": "iVBORw0KGgo=", "url": "data:image/png;base64,iVBORw0KGgo="}
+                    {
+                        "mime_type": "image/png",
+                        "data": "iVBORw0KGgo=",
+                        "url": "data:image/png;base64,iVBORw0KGgo=",
+                    }
                 ],
             },
             ensure_ascii=False,
@@ -111,6 +127,7 @@ def _make_registry_with_image_tool() -> Registry:
         },
         handler=fake_snapshot,
         is_async=True,
+        permission_resolver=lambda _args: ToolPermissionDecision(behavior="allow"),
     )
     return reg
 
@@ -165,7 +182,11 @@ async def test_tool_runner_non_mcp_images_left_untouched():
             {
                 "text": "local window",
                 "images": [
-                    {"mime_type": "image/png", "data": "iVBORw0KGgo=", "url": "data:image/png;base64,iVBORw0KGgo="}
+                    {
+                        "mime_type": "image/png",
+                        "data": "iVBORw0KGgo=",
+                        "url": "data:image/png;base64,iVBORw0KGgo=",
+                    }
                 ],
             },
             ensure_ascii=False,

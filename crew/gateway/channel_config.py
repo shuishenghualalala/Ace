@@ -9,10 +9,14 @@ PLATFORM_SECRET_ENV: dict[str, dict[str, str]] = {
         "appSecret": "FEISHU_APP_SECRET",
         "app_secret": "FEISHU_APP_SECRET",
     },
+    "weixin": {
+        "token": "WEIXIN_TOKEN",
+    },
 }
 
 PLATFORM_ACCOUNT_FIELDS: dict[str, set[str]] = {
     "feishu": {"appId", "app_id", "appSecret", "app_secret"},
+    "weixin": {"accountId", "account_id", "token"},
 }
 
 PLATFORM_ENV_FIELDS: dict[str, dict[str, str]] = {
@@ -20,6 +24,12 @@ PLATFORM_ENV_FIELDS: dict[str, dict[str, str]] = {
         "appId": "FEISHU_APP_ID",
         "app_id": "FEISHU_APP_ID",
         "domain": "FEISHU_DOMAIN",
+    },
+    "weixin": {
+        "accountId": "WEIXIN_ACCOUNT_ID",
+        "account_id": "WEIXIN_ACCOUNT_ID",
+        "baseUrl": "WEIXIN_BASE_URL",
+        "base_url": "WEIXIN_BASE_URL",
     },
 }
 

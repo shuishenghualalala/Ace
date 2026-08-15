@@ -24,6 +24,7 @@ from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.state.logging import get_logger
 from crew.tools.registry import Registry
+from crew.tools.redact import safe_public_error
 
 log = get_logger("dynamickanban.manager")
 
@@ -379,15 +380,11 @@ class DynamicKanbanManager:
                 scoped_store.quarantine_workflow_definition(
                     workflow.id,
                     {
-                        "error": str(exc),
+                        "error": safe_public_error(exc, "workflow definition 无效"),
                         "target_schema_version": WORKFLOW_DEFINITION_SCHEMA_VERSION,
                     },
                 )
-                log.error(
-                    "stored definition 非法，workflow=%s 已隔离: %s",
-                    workflow.id,
-                    exc,
-                )
+                log.error("stored definition 非法，workflow=%s 已隔离 type=%s", workflow.id, type(exc).__name__)
                 raise
         return await self._orchestrator_for_owner(owner_account_id).build_definition(
             query,

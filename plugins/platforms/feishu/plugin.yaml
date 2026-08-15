@@ -1,9 +1,14 @@
+schema_version: crew.plugin.v1
 name: feishu-platform
 label: 飞书
 version: "0.1.0"
 description: "Feishu/Lark channel adapter plugin for Crew gateway."
 author: "Crew"
 kind: platform
+capabilities:
+  - platforms
+  - network
+  - credentials
 requires_env:
   - name: FEISHU_APP_ID
     description: "Feishu/Lark app ID"

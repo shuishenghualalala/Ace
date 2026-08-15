@@ -86,5 +86,5 @@ class DeliveryRouter:
             ok = await sender(chat_id or "", text, origin)
             return {"ok": bool(ok), "platform": platform}
         except Exception as exc:  # noqa: BLE001 — 平台 sender 为任意平台 API 调用，失败面未知；投递边界须吞住并回传错误
-            log.exception("投递失败 platform=%s", platform)
-            return {"ok": False, "platform": platform, "error": str(exc)}
+            log.error("投递失败 platform=%s type=%s", platform, type(exc).__name__)
+            return {"ok": False, "platform": platform, "error": "投递失败：内部错误"}

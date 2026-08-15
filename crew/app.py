@@ -9,22 +9,27 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import hashlib
 import inspect
+import json
+import os
 import re
 import sys
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Callable, Coroutine
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 
 from crew.agent.compact import ContextCompactor, SummaryStore
 from crew.agent.executor import create_executor
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
 from crew.agent.runtime import SingleAgent
+from crew.agent.skills import configure_skill_filter
 from crew.agent.subagent.definition import build_preset_spec
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
@@ -39,25 +44,25 @@ from crew.security.approvals import ApprovalManager
 from crew.security.audit import SQLiteSecurityAudit
 from crew.security.grants import GrantRegistry
 from crew.security.rule_store import SQLiteRuleStore
+from crew.security.alerts import SecurityAlertRegistry
 from crew.security.service import SecurityApprovalService
+from crew.state._migration import OWNER_TABLE_LABELS, inspect_and_backfill_legacy_owners
+from crew.state.active_owner import ActiveOwnerLeaseStore
 from crew.state.config import (
     Config,
     ModelProfile,
     _build_profile_from_payload,
     is_placeholder_model_profile,
     load_config,
-    remove_env_key,
+    remove_secret_env_key,
     resolve_writable_env_path,
-    write_env_key,
+    write_secret_env_key,
 )
 from crew.state.home import ensure_crew_home
-from crew.agent.skills import configure_skill_filter
 from crew.state.logging import get_logger, setup_logging
-from crew.state._migration import OWNER_TABLE_LABELS, inspect_and_backfill_legacy_owners
 from crew.state.session_store import SQLiteSessionStore
-from crew.state.active_owner import ActiveOwnerLeaseStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
-from crew.tools.registry import Registry, register_builtin_tools
+from crew.tasks import TaskRuntime
 from crew.tools.policy import (
     ToolDisclosureMode,
     exclude_toolsets,
@@ -65,7 +70,7 @@ from crew.tools.policy import (
     ordered_intersection,
     select_requested_tools,
 )
-from crew.tasks import TaskRuntime
+from crew.tools.registry import Registry, register_builtin_tools
 
 log = get_logger("app")
 OwnerSessionKey = tuple[str, str]
@@ -177,6 +182,7 @@ class AgentManager:
         self._pending_close: dict[int, Agent] = {}
         self._closing_ids: set[int] = set()
         self._close_tasks: set[asyncio.Task] = set()
+        self._close_failures: dict[int, str] = {}
         self._leases_drained = asyncio.Event()
         self._leases_drained.set()
         self._accepting = True
@@ -241,8 +247,47 @@ class AgentManager:
         owner = str(owner_account_id or "")
         for key in list(self._cache):
             if key[0] == owner:
-                self._cache.pop(key, None)
-                self._access_ts.pop(key, None)
+                self._evict_key(key)
+
+    async def drop_owner_and_wait(
+        self,
+        owner_account_id: str,
+        *,
+        timeout: float = 5.0,
+    ) -> None:
+        """Retire one owner's agents and prove their credential clients closed."""
+        owner = str(owner_account_id or "")
+        agents = {
+            id(agent): agent
+            for key, agent in self._cache.items()
+            if key[0] == owner
+        }
+        self.drop_owner(owner)
+        if any(
+            cached is agent
+            for agent in agents.values()
+            for cached in self._cache.values()
+        ):
+            raise RuntimeError("owner Agent credential client is shared across owners")
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        while any(self._lease_counts.get(identity, 0) for identity in agents):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("owner Agent credential leases did not drain")
+            await asyncio.sleep(0.01)
+        for identity, agent in agents.items():
+            retired = self._retired.pop(identity, None)
+            if retired is not None:
+                self._schedule_close(agent)
+        await self.wait_closed()
+        failures = [
+            self._close_failures.pop(identity)
+            for identity in agents
+            if identity in self._close_failures
+        ]
+        if failures:
+            raise RuntimeError(
+                f"owner Agent credential client close failed ({failures[0]})"
+            )
 
     def clear(self) -> None:
         for key in list(self._cache):
@@ -330,8 +375,13 @@ class AgentManager:
         try:
             if callable(close):
                 await close()
-        except Exception:  # noqa: BLE001 - one Agent must not block sibling cleanup
-            log.exception("关闭淘汰 Agent 失败: %s", type(agent).__name__)
+        except Exception as exc:  # noqa: BLE001 - one Agent must not block sibling cleanup
+            self._close_failures[identity] = type(exc).__name__
+            log.error(
+                "关闭淘汰 Agent 失败 agent=%s error_type=%s",
+                type(agent).__name__,
+                type(exc).__name__,
+            )
         finally:
             self._closing_ids.discard(identity)
 
@@ -387,6 +437,18 @@ class CrewApp:
             self.security_audit,
             db_path=config.db_path,
         )
+        self.security_alerts = SecurityAlertRegistry(
+            ui_available=lambda: self.security_service._approval_ui_available(),
+            freeze=lambda owner, session, _task: self.security_service.freeze_session(
+                owner,
+                session,
+            ),
+            revoke=lambda owner, _session, _task: self.security_service.revoke_owner(
+                owner
+            ),
+        )
+        self.security_service.set_alerts(self.security_alerts)
+        self.security_audit.set_event_listener(self.security_alerts.observe_event)
         # Gateway 级单活登录事实源；HTTP/WS、Cron 与渠道只消费这一份租约。
         self.active_owner = ActiveOwnerLeaseStore(
             config.db_path,
@@ -458,6 +520,7 @@ class CrewApp:
         # 默认模型切换时，已有 Team/Dynamic Kanban 后台任务可能仍持有旧客户端。
         # 保留强引用到 shutdown，避免后台化后已脱离 Dispatcher 的任务被提前断流。
         self._stale_owner_team_providers: dict[int, LLMProvider] = {}
+        self._stale_owner_team_provider_owners: dict[int, str] = {}
         # 显式功能级模型（当前为 wiki.model）创建的独立 Provider。
         self._auxiliary_providers: list[LLMProvider] = []
         self._shutdown_lock = asyncio.Lock()
@@ -479,6 +542,7 @@ class CrewApp:
         self._notify_owner_fn: Callable[..., Coroutine[Any, Any, None]] | None = None
         # 会话过期定时器
         self._expiry_task: asyncio.Task | None = None
+        self._process_reaper_task: asyncio.Task | None = None
         self.dispatcher = SessionDispatcher(
             self.handle,
             self.session_store,
@@ -489,6 +553,195 @@ class CrewApp:
             active_children_fn=self._active_children_snapshot,
             task_runtime=self.tasks,
         )
+        process_registry.configure_lifecycle(
+            workspace_root_resolver=self._process_workspace_root,
+            output_root_resolver=self._process_output_root,
+            session_validator=self._validate_process_recovery_scope,
+            policy_digest_resolver=self._process_policy_digest,
+            audit_recorder=self._record_process_lifecycle,
+        )
+
+    def _process_workspace_root(
+        self,
+        owner_account_id: str,
+        workspace_id: str,
+    ) -> str:
+        workspace = self.workspace_store.get(
+            workspace_id,
+            owner_account_id=owner_account_id,
+        )
+        configured = str(workspace.get("root_path") or "").strip()
+        if configured:
+            return str(Path(configured).expanduser().resolve(strict=True))
+        from crew.state.home import task_workspace_path
+
+        return str(
+            task_workspace_path(
+                workspace_id,
+                owner_account_id=owner_account_id,
+                create=False,
+            ).resolve(strict=True)
+        )
+
+    @staticmethod
+    def _process_output_root(owner_account_id: str) -> str:
+        from crew.state.home import get_owner_runtime_home
+
+        owner_home = get_owner_runtime_home(
+            owner_account_id,
+            create=True,
+        ).resolve(strict=True)
+        output_root = owner_home / "tasks"
+        output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        resolved = output_root.resolve(strict=True)
+        resolved.relative_to(owner_home)
+        return str(resolved)
+
+    def _validate_process_recovery_scope(
+        self,
+        owner_account_id: str,
+        session_id: str,
+        workspace_id: str,
+        task_id: str,
+    ) -> bool:
+        stored_workspace = self.session_store.get_workspace_id(
+            session_id,
+            owner_account_id=owner_account_id,
+        )
+        if stored_workspace != workspace_id:
+            return False
+        if not task_id:
+            return True
+        try:
+            task = self.tasks.get(
+                task_id,
+                owner_account_id=owner_account_id,
+            )
+        except KeyError:
+            return False
+        return str(task.get("session_id") or "") == session_id
+
+    def _process_policy_digest(
+        self,
+        owner_account_id: str,
+        workspace_id: str,
+        session_id: str,
+        task_id: str,
+    ) -> str:
+        """Hash current owner policy without exposing paths, rules, or grants."""
+        from crew.security.context import build_gateway_security_context
+        from crew.security.launch import compile_process_launch, serialize_profile
+        from crew.security.policy import serialize_additional_permissions
+        from crew.security.snapshot import canonical_json_bytes
+
+        workspace_root = self._process_workspace_root(
+            owner_account_id,
+            workspace_id,
+        )
+        context = build_gateway_security_context(
+            self.workspace_store,
+            owner_account_id=owner_account_id,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            task_id=task_id,
+            cwd=workspace_root,
+        )
+        additional_permissions = self.security_grants.additional_permissions(context)
+        launch = compile_process_launch(
+            context,
+            self.security_service.mode_for(context),
+            db_path=self.security_service.db_path,
+            additional_permissions=additional_permissions,
+        )
+        rules = self.security_rules.list_with_status(
+            os_user=context.os_user,
+            owner_account_id=owner_account_id,
+            workspace_id=workspace_id,
+        )
+        policy = {
+            "additional_permissions": serialize_additional_permissions(
+                launch.additional_permissions
+            ),
+            "profile": serialize_profile(launch.profile),
+            "sandbox_preference": launch.sandbox_preference.value,
+            "sandbox_system_surface": launch.sandbox_system_surface,
+            "sandboxed": launch.sandboxed,
+            "rules": [
+                {
+                    "decision": rule.decision.value,
+                    "enabled": enabled,
+                    "exact_digest": rule.exact_digest,
+                    "kind": rule.kind.value,
+                    "rule_id": rule.rule_id,
+                    "scope": rule.scope.value,
+                }
+                for rule, enabled in rules
+            ],
+            "version": 1,
+        }
+        return hashlib.sha256(canonical_json_bytes(policy)).hexdigest()
+
+    def _record_process_lifecycle(self, payload: dict[str, Any]) -> None:
+        """Persist one secret-free process lifecycle event in the audit chain."""
+        import getpass
+
+        from crew.security.audit import AuditEvent
+        from crew.security.snapshot import canonical_json_bytes
+
+        event_type = str(payload.get("event_type") or "process_lifecycle")
+        process_session_id = str(payload.get("session_id") or "")
+        sandbox_preference = str(payload.get("sandbox_preference") or "")
+        sandbox_surface = str(payload.get("sandbox_system_surface") or "")
+        sandboxed = payload.get("sandboxed") is True
+        event = AuditEvent(
+            event_id=uuid.uuid4().hex,
+            os_user_hash=hashlib.sha256(
+                getpass.getuser().encode("utf-8")
+            ).hexdigest(),
+            owner_account_id=str(payload.get("owner_account_id") or ""),
+            workspace_id=str(payload.get("workspace_id") or ""),
+            session_id=str(payload.get("session_key") or ""),
+            task_id=str(payload.get("task_id") or ""),
+            request_id="",
+            action_type=event_type,
+            normalized_action_hash=hashlib.sha256(
+                canonical_json_bytes(payload)
+            ).hexdigest(),
+            rule_id=process_session_id,
+            rule_scope="process_lifecycle",
+            permission_profile_hash="",
+            additional_permissions_summary="",
+            decision=str(payload.get("decision") or ""),
+            decision_source="process_registry",
+            sandbox_backend=(
+                "native"
+                if sandboxed
+                else "host-forbid"
+                if sandbox_preference == "forbid"
+                else "host"
+            ),
+            capabilities=tuple(
+                item
+                for item in (
+                    f"sandbox_preference:{sandbox_preference}"
+                    if sandbox_preference
+                    else "",
+                    f"system_surface:{sandbox_surface}" if sandbox_surface else "",
+                )
+                if item
+            ),
+            network_target_summary="",
+            exit_code=None,
+            stable_error_code=str(payload.get("reason") or ""),
+            tool_name="process_registry",
+            action_summary=event_type,
+            action_detail=(
+                f"sandbox={sandbox_preference}; "
+                f"resolved={'native' if sandboxed else 'host'}"
+                + (f"; surface={sandbox_surface}" if sandbox_surface else "")
+            ),
+        )
+        self.security_audit.record(event)
 
     def _on_task_event(self, task: dict[str, Any]) -> None:
         """Push normalized task events to connected clients."""
@@ -1437,15 +1690,20 @@ class CrewApp:
                     )
         except Exception:  # noqa: BLE001
             log.exception("legacy owner 检查失败")
-        # 崩溃恢复：按 host PID 重新认领上次未结束的后台进程
+        # 崩溃恢复只建立不可控制的冻结索引；认证 Owner 会在 Gateway 门禁后显式激活。
         try:
             from crew.tools.process_registry import process_registry
 
             recovered = process_registry.recover_from_checkpoint()
             if recovered:
-                log.info("崩溃恢复：认领 %d 个后台进程", recovered)
+                log.info("崩溃恢复：冻结暂存 %d 个后台进程，等待 Owner 重验", recovered)
         except Exception:  # noqa: BLE001
             log.exception("后台进程崩溃恢复失败")
+        if self._process_reaper_task is None:
+            self._process_reaper_task = asyncio.create_task(
+                self._process_reaper_loop(),
+                name="process-authorization-reaper",
+            )
         await self.tasks.start()
         if self.work_service is not None:
             try:
@@ -1567,6 +1825,7 @@ class CrewApp:
         self._owner_team_providers.clear()
         self._owner_team_member_model_providers.clear()
         self._stale_owner_team_providers.clear()
+        self._stale_owner_team_provider_owners.clear()
         self._auxiliary_providers.clear()
         for provider in providers:
             if provider is self.provider:
@@ -1632,6 +1891,13 @@ class CrewApp:
 
     async def _shutdown_resources(self, *, provider_timeout: float) -> None:
         """Execute the ordered App shutdown sequence."""
+        if self._process_reaper_task is not None:
+            self._process_reaper_task.cancel()
+            try:
+                await self._process_reaper_task
+            except asyncio.CancelledError:
+                pass
+            self._process_reaper_task = None
         if self._expiry_task is not None:
             self._expiry_task.cancel()
             try:
@@ -1677,6 +1943,13 @@ class CrewApp:
         if self.browser_manager is not None:
             await self.browser_manager.aclose()
         await self.tasks.stop()
+        from crew.tools.process_registry import ProcessCleanupError, process_registry
+
+        try:
+            process_registry.shutdown_processes()
+        except ProcessCleanupError:
+            # The write-ahead tombstone remains durable for the next startup.
+            log.exception("App shutdown 后台进程清理未完成，已保留重试 fence")
         bindings = getattr(self, "channel_bindings", None)
         if bindings is not None and hasattr(bindings, "close"):
             bindings.close()
@@ -1685,6 +1958,7 @@ class CrewApp:
             self.work_service.close()
         self.security_rules.close()
         self.security_audit.close()
+        process_registry.reset_lifecycle_configuration()
 
     async def reload_mcp_manager(self) -> None:
         """热重载 MCPClientManager：关闭现有连接并用当前 config.mcp_servers 重新启动。
@@ -1742,6 +2016,21 @@ class CrewApp:
                 return
             except Exception:  # noqa: BLE001
                 log.exception("会话过期定时器异常")
+
+    @staticmethod
+    async def _process_reaper_loop() -> None:
+        """Revoke expired generations and retry durable cleanup tombstones."""
+        from crew.tools.process_registry import process_registry
+
+        while True:
+            try:
+                await asyncio.sleep(30.0)
+                await asyncio.to_thread(process_registry.reap_expired_authorizations)
+                await asyncio.to_thread(process_registry.retry_pending_cleanup)
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 - keep retrying durable fences
+                log.exception("后台进程授权过期清理异常")
 
     def owner_model_profiles(self, owner_account_id: str = "") -> dict[str, ModelProfile]:
         return self.config.owner_model_profiles(owner_account_id)
@@ -1832,10 +2121,12 @@ class CrewApp:
             provider = self._owner_team_providers.pop(owner, None)
             if provider is not None and provider is not self.provider:
                 self._stale_owner_team_providers[id(provider)] = provider
+                self._stale_owner_team_provider_owners[id(provider)] = owner
             for key in [key for key in self._owner_team_member_model_providers if key[0] == owner]:
                 provider = self._owner_team_member_model_providers.pop(key)
                 if provider is not self.provider:
                     self._stale_owner_team_providers[id(provider)] = provider
+                    self._stale_owner_team_provider_owners[id(provider)] = owner
             drop = getattr(self.team, "drop_owner_teams", None)
             if callable(drop):
                 drop(owner)
@@ -1844,24 +2135,71 @@ class CrewApp:
                 drop_kanban(owner)
             return
 
-        providers = list({
-            id(provider): provider
-            for provider in [
-                *self._owner_team_providers.values(),
-                *self._owner_team_member_model_providers.values(),
-            ]
-        }.values())
+        provider_owners: dict[int, tuple[LLMProvider, str]] = {}
+        for owner, provider in self._owner_team_providers.items():
+            provider_owners[id(provider)] = (provider, owner)
+        for (owner, _model_id), provider in self._owner_team_member_model_providers.items():
+            provider_owners[id(provider)] = (provider, owner)
         self._owner_team_providers.clear()
         self._owner_team_member_model_providers.clear()
-        for provider in providers:
+        for identity, (provider, owner) in provider_owners.items():
             if provider is not self.provider:
-                self._stale_owner_team_providers[id(provider)] = provider
+                self._stale_owner_team_providers[identity] = provider
+                self._stale_owner_team_provider_owners[identity] = owner
         clear = getattr(self.team, "clear", None)
         if callable(clear):
             clear()
         clear_kanban = getattr(self.dynamic_kanban, "clear_provider_state", None)
         if callable(clear_kanban):
             clear_kanban()
+
+    async def close_owner_credential_providers(self, owner_account_id: str) -> None:
+        """Close every App-owned provider that can retain one owner's key."""
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            raise RuntimeError("owner credential provider cleanup requires an owner")
+        current: dict[int, LLMProvider] = {}
+        provider = self._owner_team_providers.pop(owner, None)
+        if provider is not None and provider is not self.provider:
+            current[id(provider)] = provider
+        for key in [
+            key
+            for key in self._owner_team_member_model_providers
+            if key[0] == owner
+        ]:
+            provider = self._owner_team_member_model_providers.pop(key)
+            if provider is not self.provider:
+                current[id(provider)] = provider
+        for identity, stale_owner in list(
+            self._stale_owner_team_provider_owners.items()
+        ):
+            if stale_owner == owner:
+                provider = self._stale_owner_team_providers.get(identity)
+                if provider is not None:
+                    current[identity] = provider
+        for identity, provider in current.items():
+            self._stale_owner_team_providers[identity] = provider
+            self._stale_owner_team_provider_owners[identity] = owner
+
+        failures: list[str] = []
+        for identity, provider in current.items():
+            close = getattr(provider, "aclose", None)
+            if not callable(close):
+                failures.append(f"{type(provider).__name__}:missing_close")
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 - close siblings, then fail
+                failures.append(f"{type(provider).__name__}:{type(exc).__name__}")
+                continue
+            self._stale_owner_team_providers.pop(identity, None)
+            self._stale_owner_team_provider_owners.pop(identity, None)
+        if failures:
+            raise RuntimeError(
+                f"owner credential provider close failed ({','.join(failures)})"
+            )
 
     @asynccontextmanager
     async def owner_provider(
@@ -1951,7 +2289,7 @@ class CrewApp:
 
     # ---- 模型 profile CRUD（运行时增删改 + 持久化 + Provider 同步）----
     #
-    # 与 use_model 共享副作用路径：写 yaml → 写 env（仅当传 api_key）→ 改 cfg →
+    # 与 use_model 共享副作用路径：写 yaml → 写平台凭据（仅当传 api_key）→ 改 cfg →
     # 激活模型变动时重建 Provider + 清缓存。CRUD 是配置层动作，不切换激活模型，
     # 但删除激活模型时自动切到剩余的第一个（按用户决策）。
     def _apply_api_key_to_env(
@@ -1961,15 +2299,20 @@ class CrewApp:
         *,
         owner_account_id: str = "",
     ) -> str:
-        """把用户填写的 api_key 写入 .env，返回实际 env 文件路径。
+        """把用户填写的 api_key 写入平台凭据存储，返回 marker 文件路径。
 
         - api_key_env 必须是合法模型 API Key 环境变量名；非法时抛 ValueError。
-        - owner 私有 key 只写 owner .env，不再同步全局进程环境，避免跨账号串线。
+        - owner 私有 key 不同步全局进程环境，避免跨账号串线。
         """
         api_key_env = _validate_model_api_key_env(api_key_env)
         env_path = resolve_writable_env_path(owner_account_id)
-        write_env_key(env_path, api_key_env, api_key, sync_process_env=not bool(owner_account_id))
-        log.info("已写入 API Key 到 .env (var=%s, file=%s)", api_key_env, env_path)
+        write_secret_env_key(
+            env_path,
+            api_key_env,
+            api_key,
+            sync_process_env=not bool(owner_account_id),
+        )
+        log.info("已写入 API Key 到平台凭据存储 (var=%s)", api_key_env)
         return str(env_path)
 
     def add_model(self, payload: dict, *, owner_account_id: str = "") -> ModelProfile:
@@ -1980,7 +2323,7 @@ class CrewApp:
                 id: 必填,
                 name, base_url, model, api_key_env, temperature,
                 max_tokens, context_window, timeout: 选填,
-                api_key: 选填明文 key，提供则写入 .env
+                api_key: 选填明文 key，提供则写入平台凭据存储
             }
 
         Raises:
@@ -1999,8 +2342,8 @@ class CrewApp:
 
         api_key_env = _validate_model_api_key_env(payload.get("api_key_env") or "CREW_API_KEY")
         payload = {**payload, "api_key_env": api_key_env, "builtin": False}
+        candidate_profile = _build_profile_from_payload(model_id, payload)
         api_key = str(payload.get("api_key") or "")
-        # 先写 env（让 _build_profile_from_payload 能从 os.environ 取到），再构建 profile
         if api_key:
             self._apply_api_key_to_env(
                 api_key_env,
@@ -2008,7 +2351,7 @@ class CrewApp:
                 owner_account_id=owner_account_id,
             )
         if owner:
-            profile = _build_profile_from_payload(model_id, payload)
+            profile = candidate_profile
             profile.api_key = api_key or cfg.owner_env_map(owner).get(api_key_env, "")
             profiles = cfg.owner_model_profiles(owner)
             profiles[model_id] = profile
@@ -2059,30 +2402,53 @@ class CrewApp:
             payload = {**payload, "api_key_env": api_key_env}
         payload = {**payload, "builtin": profiles[model_id].builtin}
         api_key = str(payload.get("api_key") or "")
+        current = profiles[model_id]
+        merged = {
+            "id": model_id,
+            "name": payload.get("name", current.name),
+            "api_key_env": payload.get("api_key_env", current.api_key_env),
+            "provider": payload.get("provider", current.provider),
+            "base_url": payload.get("base_url", current.base_url),
+            "model": payload.get("model", current.model),
+            "temperature": payload.get("temperature", current.temperature),
+            "max_tokens": payload.get("max_tokens", current.max_tokens),
+            "context_window": payload.get("context_window", current.context_window),
+            "timeout": payload.get("timeout", current.timeout),
+            "loaded": payload.get("loaded", current.loaded),
+            "builtin": current.builtin,
+            "capabilities": payload.get("capabilities", list(current.capabilities)),
+        }
+        candidate_profile = _build_profile_from_payload(model_id, merged)
+        credential_scope_changed = (
+            _credential_audience(
+                payload.get("provider", current.provider),
+                payload.get("base_url", current.base_url),
+            )
+            != _credential_audience(current.provider, current.base_url)
+            or api_key_env != current.api_key_env
+        )
+        configured_key = (
+            cfg.owner_env_map(owner).get(api_key_env, "")
+            if owner
+            else os.environ.get(api_key_env, "")
+        )
+        inherited_key = (
+            configured_key
+            if api_key_env != current.api_key_env
+            else current.api_key or configured_key
+        )
+        if credential_scope_changed and not api_key and inherited_key:
+            raise ValueError(
+                "修改 credential provider、origin 或 key 引用时必须重新提交 API Key"
+            )
         if api_key:
             self._apply_api_key_to_env(
                 api_key_env,
                 api_key,
-                owner_account_id=owner_account_id,
+                owner_account_id=owner,
             )
         if owner:
-            current = profiles[model_id]
-            merged = {
-                "id": model_id,
-                "name": payload.get("name", current.name),
-                "api_key_env": payload.get("api_key_env", current.api_key_env),
-                "provider": payload.get("provider", current.provider),
-                "base_url": payload.get("base_url", current.base_url),
-                "model": payload.get("model", current.model),
-                "temperature": payload.get("temperature", current.temperature),
-                "max_tokens": payload.get("max_tokens", current.max_tokens),
-                "context_window": payload.get("context_window", current.context_window),
-                "timeout": payload.get("timeout", current.timeout),
-                "loaded": payload.get("loaded", current.loaded),
-                "builtin": current.builtin,
-                "capabilities": payload.get("capabilities", list(current.capabilities)),
-            }
-            profile = _build_profile_from_payload(model_id, merged)
+            profile = candidate_profile
             if api_key:
                 profile.api_key = api_key
             else:
@@ -2150,11 +2516,18 @@ class CrewApp:
         if owner:
             removed = profiles.pop(model_id)
             if not any(profile.api_key_env == removed.api_key_env for profile in profiles.values()):
-                remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env, sync_process_env=False)
+                remove_secret_env_key(
+                    resolve_writable_env_path(owner_account_id),
+                    removed.api_key_env,
+                    sync_process_env=False,
+                )
         else:
             removed = cfg.remove_model(model_id)  # 内部校验"最后一个"
             if not any(profile.api_key_env == removed.api_key_env for profile in cfg.model_profiles.values()):
-                remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env)
+                remove_secret_env_key(
+                    resolve_writable_env_path(owner_account_id),
+                    removed.api_key_env,
+                )
         switched_to: str | None = None
         if active_model_id == model_id:
             # 按 id 字典序切到剩余的第一个，行为可预测
@@ -2381,7 +2754,6 @@ class CrewApp:
             self._enrich_workspace(envelope)
             from crew.security.context import build_gateway_security_context
             from crew.security.launch import compile_process_launch
-
             security_context = build_gateway_security_context(
                 self.workspace_store,
                 owner_account_id=envelope.user_id,
@@ -2395,6 +2767,7 @@ class CrewApp:
                 security_context,
                 self.security_service.mode_for(security_context),
                 db_path=self.security_service.db_path,
+                additional_permissions=self.security_grants.additional_permissions(security_context),
             )
             config_session_id = str(envelope.params.get("task_session_id") or envelope.session_id)
             if not getattr(self.config, "external_agents_enabled", True):
@@ -2449,6 +2822,32 @@ class CrewApp:
         finally:
             if token is not None:
                 current_push_fn.reset(token)
+
+
+def _credential_audience(provider_name: str, base_url: str) -> tuple[str, str]:
+    """Return the provider and canonical network origin authorized for a key."""
+    provider = str(provider_name or "openai").strip().lower()
+    configured = str(base_url or "").strip()
+    if not configured:
+        configured = (
+            "https://api.anthropic.com"
+            if provider == "anthropic"
+            else "https://api.openai.com"
+        )
+    parsed = urlsplit(configured)
+    if not parsed.scheme or parsed.hostname is None:
+        return provider, configured
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.rstrip(".").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return provider, configured
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    origin = f"{scheme}://{host}"
+    if port is not None and port != default_port:
+        origin = f"{origin}:{port}"
+    return provider, origin
 
 
 def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float | None = None) -> LLMProvider:
@@ -2507,6 +2906,102 @@ def _browser_manager_from_plugins(plugins: PluginManager):
     if manager is None:
         log.warning("browser 插件已加载但未暴露 BrowserManager")
     return manager
+
+
+def _install_browser_permission_auditor(app: "CrewApp", plugins: PluginManager) -> None:
+    """Wire browser permission decisions into the same durable audit contract."""
+    loaded = plugins.get_plugin("browser")
+    if loaded is None or not loaded.enabled or loaded.manifest.path is None:
+        return
+    module_key = (loaded.manifest.key or loaded.manifest.name).replace("/", "_").replace("-", "_")
+    tool_module = sys.modules.get(f"crew_runtime_plugins.{module_key}.tool")
+    set_auditor = getattr(tool_module, "set_permission_auditor", None)
+    if not callable(set_auditor):
+        return
+
+    from crew.security.audit import AuditEvent
+    from crew.security.context import build_security_context
+
+    def audit_browser_permission(
+        args: dict[str, Any],
+        decision: Any,
+    ) -> None:
+        try:
+            context = build_security_context(app.workspace_store)
+        except Exception:  # noqa: BLE001 - absent trusted context has nothing to audit
+            return
+        try:
+            app.security_service.audit.record(
+                AuditEvent.for_tool_decision(
+                    context,
+                    tool_name="browser_use",
+                    args=args,
+                    decision=decision.behavior,
+                    decision_source="browser_policy",
+                )
+            )
+        except Exception:  # noqa: BLE001 - audit writer has its own fail-closed policy
+            log.exception("browser permission audit write failed")
+
+    set_auditor(audit_browser_permission)
+
+
+def _install_tool_permission_auditor(app: "CrewApp") -> None:
+    """Wire shared ToolRunner permission decisions into the durable audit contract."""
+    from crew.agent.loop import tool_runner as tool_runner_module
+
+    set_auditor = getattr(tool_runner_module, "set_permission_auditor", None)
+    if not callable(set_auditor):
+        return
+
+    from crew.security.audit import AuditEvent
+    from crew.security.context import build_security_context
+
+    def audit_tool_permission(tc: Any, decision: str, source: str) -> None:
+        try:
+            context = build_security_context(app.workspace_store)
+        except Exception:  # noqa: BLE001 - absent trusted context has nothing to audit
+            return
+        try:
+            app.security_service.audit.record(
+                AuditEvent.for_tool_decision(
+                    context,
+                    tool_name=str(getattr(tc, "name", "") or ""),
+                    args=getattr(tc, "arguments", None) or {},
+                    decision=str(decision),
+                    decision_source=str(source),
+                )
+            )
+        except Exception:  # noqa: BLE001 - audit writer has its own fail-closed policy
+            log.exception("tool permission audit write failed")
+
+    set_auditor(audit_tool_permission)
+
+
+def _install_runtime_diagnostic_auditor(app: "CrewApp") -> None:
+    """Wire sanitized native-runtime startup/failure diagnostics into durable audit."""
+    from crew.security import runtime_client as runtime_client_module
+
+    set_auditor = getattr(runtime_client_module, "set_runtime_diagnostic_auditor", None)
+    if not callable(set_auditor):
+        return
+
+    from crew.security.audit import AuditEvent
+    from crew.security.context import build_security_context
+
+    def audit_runtime_diagnostic(**fields: Any) -> None:
+        try:
+            context = build_security_context(app.workspace_store)
+        except Exception:  # noqa: BLE001 - absent trusted context has nothing to audit
+            return
+        try:
+            app.security_service.audit.record(
+                AuditEvent.for_runtime_diagnostic(context, **fields)
+            )
+        except Exception:  # noqa: BLE001 - audit writer has its own fail-closed policy
+            log.exception("runtime diagnostic audit write failed")
+
+    set_auditor(audit_runtime_diagnostic)
 
 
 def build_app(config: Config | None = None, *, enable_team: bool = True) -> CrewApp:
@@ -2573,12 +3068,19 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.tools.blueprint_tools import register_blueprint_tools
     from crew.tools.site_tools import register_site_tools
 
-    app.sites = SiteManager(SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal))
+    app.sites = SiteManager(
+        SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
     register_site_tools(registry, app.sites)
     register_blueprint_tools(registry, app.sites)
     # Browser 能力由 plugins/browser 插件装配（创建 BrowserManager、注册 browser_use）。
     # 系统级禁用/未加载时保持 None，面板路由与 startup/aclose 已有 None 兜底。
     app.browser_manager = _browser_manager_from_plugins(plugins)
+    _install_browser_permission_auditor(app, plugins)
+    _install_tool_permission_auditor(app)
+    _install_runtime_diagnostic_auditor(app)
     app.channel_bindings = channel_bindings
     app.plugin_prefs = plugin_prefs
     app.external_agents = external_agents
@@ -2650,6 +3152,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         app.wiki_manager,
         config=cfg.wiki,
         session_store=session_store,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
     )
 
     from crew.work.briefs import WorkBriefStore

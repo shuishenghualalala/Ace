@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
-from crew.gateway.helpers import config_body
+from crew.gateway.helpers import config_body, safe_public_error
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def create_config_router(crew, dispatcher=None) -> APIRouter:
@@ -22,7 +25,7 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
         try:
             require_admin(account_from_request(request), crew.config)
         except AuthenticationError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "权限不足")}, status_code=403)
         return None
 
     def _is_admin(request: Request) -> bool:
@@ -48,7 +51,7 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
         except KeyError:
             return JSONResponse({"ok": False, "error": f"未知模型配置: {model_id}"}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "模型配置无效")}, status_code=409)
         return JSONResponse(_visible_config_body(request))
 
     # ---- 模型 profile CRUD：运行时增删改 + 持久化到 config.yaml / .env ----
@@ -69,9 +72,13 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
                 owner_account_id=account_from_request(request).owner_account_id,
             )
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
-        except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "模型配置无效")}, status_code=409)
+        except RuntimeError:
+            _LOGGER.error("Model configuration persistence failed action=create")
+            return JSONResponse(
+                {"ok": False, "error": "模型配置持久化失败"},
+                status_code=500,
+            )
         return _config_response(request, model_profile=profile, status=201)
 
     @router.put("/api/config/models/{model_id}")
@@ -92,9 +99,13 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
         except KeyError:
             return JSONResponse({"ok": False, "error": f"模型配置不存在: {model_id}"}, status_code=404)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
-        except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "模型配置无效")}, status_code=409)
+        except RuntimeError:
+            _LOGGER.error("Model configuration persistence failed action=update")
+            return JSONResponse(
+                {"ok": False, "error": "模型配置持久化失败"},
+                status_code=500,
+            )
         return _config_response(request, model_profile=profile)
 
     @router.delete("/api/config/models/{model_id}")
@@ -162,9 +173,13 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
             return JSONResponse({"ok": False, "error": f"模型配置不存在: {model_id}"}, status_code=404)
         except ValueError as exc:
             # 删除最后一个：业务规则不允许
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
-        except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "模型配置无效")}, status_code=409)
+        except RuntimeError:
+            _LOGGER.error("Model configuration persistence failed action=delete")
+            return JSONResponse(
+                {"ok": False, "error": "模型配置持久化失败"},
+                status_code=500,
+            )
         body: dict[str, Any] = {
             "ok": True,
             **_visible_config_body(request),

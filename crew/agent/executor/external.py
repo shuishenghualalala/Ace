@@ -48,6 +48,7 @@ from crew.core.runctx import current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.state.home import get_owner_runtime_home
 from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
+from crew.tools.redact import redact_sensitive_display_text
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,14 @@ def _coerce(config: Any, cls: type) -> Any:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in config.items() if k in known})
     return cls()
+
+
+_EXTERNAL_TEXT_MAX_CHARS = 128 * 1024
+
+
+def _safe_external_text(value: Any, *, limit: int = _EXTERNAL_TEXT_MAX_CHARS) -> str:
+    """External runtime text is untrusted content and must stay bounded/redacted."""
+    return redact_sensitive_display_text(str(value or ""))[:limit]
 
 
 PayloadMode = Literal["single_agent", "team_chat", "team_relay", "team_execute"]
@@ -842,10 +851,10 @@ class ClientExecutor(AgentExecutor):
             output = await _run_client_prompt(ctx.query, self.config, ctx)
         except NotImplementedError as exc:
             raise exc
-        except Exception as exc:  # noqa: BLE001 - 外部 client 失败需要转成对话错误帧
-            yield ResponseChunk.error(ctx.request_id, f"ClientExecutor 调用失败：{exc}")
+        except Exception:  # noqa: BLE001 - 外部 client 失败需要转成对话错误帧
+            yield ResponseChunk.error(ctx.request_id, "ClientExecutor 调用失败：内部错误")
             return
-        output = output or "ClientExecutor 已完成，但没有返回文本输出。"
+        output = _safe_external_text(output) or "ClientExecutor 已完成，但没有返回文本输出。"
         ctx.messages.append(Message.assistant(output))
         yield ResponseChunk.delta(ctx.request_id, output)
         yield ResponseChunk.final(ctx.request_id, output)
@@ -1189,11 +1198,13 @@ class ExternalExecutor(AgentExecutor):
                                 )
                             continue
                         if event.kind == "text" and event.text:
-                            parts.append(event.text)
-                            yield ResponseChunk.delta(ctx.request_id, event.text, next_seq())
+                            text = _safe_external_text(event.text)
+                            parts.append(text)
+                            yield ResponseChunk.delta(ctx.request_id, text, next_seq())
                         elif event.kind == "thinking" and event.text:
-                            thinking_parts.append(event.text)
-                            yield ResponseChunk.thinking_event(ctx.request_id, event.text, next_seq())
+                            thinking = _safe_external_text(event.text)
+                            thinking_parts.append(thinking)
+                            yield ResponseChunk.thinking_event(ctx.request_id, thinking, next_seq())
                         elif event.kind == "error":
                             if adapter_id == "acp-stdio":
                                 raise AcpAdapterError(event.text or "ACP stdout read failed")
@@ -1240,10 +1251,10 @@ class ExternalExecutor(AgentExecutor):
                                 ctx.request_id,
                                 event.tool.name,
                                 event.tool.phase,
-                                event.tool.detail,
+                                _safe_external_text(event.tool.detail, limit=16 * 1024),
                                 next_seq(),
                                 tool_call_id=event.tool.tool_call_id,
-                                args=event.tool.args,
+                                args=_safe_external_text(event.tool.args, limit=16 * 1024),
                             )
                 finally:
                     if interaction_binding is not None:
@@ -1260,9 +1271,9 @@ class ExternalExecutor(AgentExecutor):
                     and self.config.persist_runtime_session
                 ):
                     self.config.external_store.delete_runtime_session_binding(**binding_key)
-                output = "".join(parts).strip()
+                output = _safe_external_text("".join(parts)).strip()
             elif protocol == "cli":
-                output = await run_external_cli(
+                output = _safe_external_text(await run_external_cli(
                     ExternalCliConfig(
                         provider=provider,
                         executable_path=runtime["executable_path"],
@@ -1274,9 +1285,9 @@ class ExternalExecutor(AgentExecutor):
                         custom_env=agent.get("custom_env") or self.config.env,
                         timeout=self.config.timeout,
                     )
-                )
+                ))
             elif protocol == "client":
-                output = await _run_client_prompt(
+                output = _safe_external_text(await _run_client_prompt(
                     prompt,
                     ClientExecutorConfig(
                         module=str(runtime.get("executable_path") or ""),
@@ -1287,7 +1298,7 @@ class ExternalExecutor(AgentExecutor):
                         options=runtime.get("metadata", {}),
                     ),
                     ctx,
-                )
+                ))
             else:
                 output = f"暂不支持的外部智能体协议: {protocol or 'unknown'}"
         except AcpAdapterError as exc:
@@ -1312,9 +1323,9 @@ class ExternalExecutor(AgentExecutor):
             append_pending_followup_answers()
             provider_name = _provider_display_name(provider)
             if "模型响应空闲超时" in str(exc):
-                yield ResponseChunk.error(ctx.request_id, f"{provider_name} 模型响应空闲超时：{exc}")
+                yield ResponseChunk.error(ctx.request_id, f"{provider_name} 模型响应空闲超时")
             else:
-                yield ResponseChunk.error(ctx.request_id, f"{provider_name} ACP 调用失败：{exc}")
+                yield ResponseChunk.error(ctx.request_id, f"{provider_name} ACP 调用失败：内部错误")
             return
         except (ExternalCliError, CodexAdapterError) as exc:
             if runtime_failure_binding_key is not None and runtime_failure_session_id:
@@ -1326,10 +1337,10 @@ class ExternalExecutor(AgentExecutor):
                     )
                 except Exception:
                     pass
-            yield ResponseChunk.error(ctx.request_id, f"外部 CLI 调用失败：{exc}")
+            yield ResponseChunk.error(ctx.request_id, "外部 CLI 调用失败：内部错误")
             return
         except Exception as exc:  # noqa: BLE001 - 外部 agent 失败需要转成对话错误帧
-            yield ResponseChunk.error(ctx.request_id, f"外部智能体调用失败：{exc}")
+            yield ResponseChunk.error(ctx.request_id, "外部智能体调用失败：内部错误")
             return
 
         tool_calls = list(persisted_tools.values()) if structured_adapter else []

@@ -1,13 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants as fsConstants, existsSync, realpathSync } from 'node:fs';
 import {
-  chmod,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  realpathSync,
+} from 'node:fs';
+import {
   copyFile,
   open,
   rename,
   stat,
   unlink,
-  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -57,6 +63,10 @@ import {
   executeUnsafePlaywrightCode,
   RunCodeTimeoutError,
 } from './browser/playwright-run-code';
+import {
+  createSecureExclusiveFile,
+  writeAllToFile,
+} from './update/update-file-security';
 
 import type {
   ActionContext,
@@ -98,9 +108,33 @@ const NATIVE_INPUT_PROOF_TTL_MS = 1_200;
 const ARTIFACT_SCHEME = 'crew-artifact';
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 25_000;
 const DOWNLOAD_DEADLINE_MARGIN_MS = 500;
+const MAX_DOWNLOAD_BYTES = 2_147_483_647;
 const AUTOMATION_FOCUS_CONTINUATION_MS = 5_000;
 const EDITABLE_AX_ROLES = new Set(['combobox', 'searchbox', 'spinbutton', 'textbox']);
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1024, height: 720 });
+const DANGEROUS_NAVIGATION_PROTOCOLS = new Set([
+  'about:',
+  'chrome:',
+  'chrome-extension:',
+  'data:',
+  'devtools:',
+  'file:',
+  'filesystem:',
+  'javascript:',
+  'vbscript:',
+  'view-source:',
+]);
+const ALLOWED_NAVIGATION_PROTOCOLS = new Set([
+  'http:',
+  'https:',
+  'blob:',
+  `${ARTIFACT_SCHEME}:`,
+]);
+const ALLOWED_DOWNLOAD_PROTOCOLS = new Set(['blob:', 'http:', 'https:']);
+// Device/data permissions remain denied until a user-approval capability is
+// carried over the authenticated Host RPC. Only this low-risk UI capability is
+// auto-allowed, and even it still requires an owner-bound secure origin.
+const TRUSTED_ORIGIN_PERMISSION_ALLOWLIST = new Set(['fullscreen']);
 
 type ControlMode = 'ai' | 'human' | 'paused';
 
@@ -144,6 +178,11 @@ interface ProxyAuthState {
   proxyRules: string;
   host: string;
   port: number;
+  username: string;
+  password: string;
+}
+
+interface ProxyCredentials {
   username: string;
   password: string;
 }
@@ -408,8 +447,10 @@ type RefState = RefRecord;
 interface DownloadGrant {
   tabId: string;
   target: string;
+  maxBytes: number;
   claimed: boolean;
   item: DownloadItem | null;
+  sizeListener: ((event: ElectronEvent, state: 'progressing' | 'interrupted') => void) | null;
   actionActive: boolean;
   actionDeadline: number;
   eventBaseline: number;
@@ -2306,8 +2347,73 @@ async function withDeadline<T>(
   }
 }
 
+function hasControlCharacters(value: string): boolean {
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function isAllowedNavigationUrl(value: string): boolean {
+  if (hasControlCharacters(value)) return false;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'about:') return parsed.href === 'about:blank';
+    if (DANGEROUS_NAVIGATION_PROTOCOLS.has(parsed.protocol)) return false;
+    if (!ALLOWED_NAVIGATION_PROTOCOLS.has(parsed.protocol)) return false;
+    if (parsed.username || parsed.password) return false;
+    if (parsed.protocol === 'blob:') {
+      const origin = new URL(parsed.pathname);
+      return origin.protocol === 'http:' || origin.protocol === 'https:';
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function trustedPermissionOrigin(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'https:') return parsed.origin;
+    const hostname = parsed.hostname.toLocaleLowerCase();
+    const loopback = (
+      hostname === 'localhost'
+      || hostname.endsWith('.localhost')
+      || hostname === '[::1]'
+      || /^127(?:\.[0-9]{1,3}){3}$/.test(hostname)
+    );
+    return parsed.protocol === 'http:' && loopback ? parsed.origin : '';
+  } catch {
+    return '';
+  }
+}
+
+function isAllowedDownloadUrl(value: unknown): boolean {
+  if (typeof value !== 'string' || !value) return false;
+  try {
+    const parsed = new URL(value);
+    if (!ALLOWED_DOWNLOAD_PROTOCOLS.has(parsed.protocol)) return false;
+    if (parsed.protocol !== 'blob:') return true;
+    const blobOrigin = new URL(parsed.pathname);
+    return blobOrigin.protocol === 'http:' || blobOrigin.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function safeUrl(value: unknown, { allowBlank = true }: { allowBlank?: boolean } = {}): string {
-  const raw = asString(value, 'url').trim();
+  const untrimmed = asString(value, 'url');
+  const raw = untrimmed.trim();
+  if (raw !== untrimmed) {
+    throw new BrowserHostError('浏览器 URL 无效', { code: 'invalid_url' });
+  }
+  if (hasControlCharacters(untrimmed)) {
+    throw new BrowserHostError('浏览器 URL 协议不允许', {
+      code: 'unsafe_url_scheme',
+    });
+  }
   if (allowBlank && raw === 'about:blank') return raw;
   if (!raw) {
     throw new BrowserHostError('浏览器 URL 无效', { code: 'invalid_url' });
@@ -2333,11 +2439,18 @@ function safeUrl(value: unknown, { allowBlank = true }: { allowBlank?: boolean }
   if (bareLocalHost) {
     candidate = `http://${raw}`;
   }
+  let normalized: string;
   try {
-    return new URL(candidate).toString();
+    normalized = new URL(candidate).toString();
   } catch {
     throw new BrowserHostError('浏览器 URL 无效', { code: 'invalid_url' });
   }
+  if (!isAllowedNavigationUrl(normalized)) {
+    throw new BrowserHostError('浏览器 URL 协议不允许', {
+      code: 'unsafe_url_scheme',
+    });
+  }
+  return normalized;
 }
 
 function httpOrigin(value: string): string {
@@ -2580,6 +2693,15 @@ export class BrowserHost extends EventEmitter {
     super();
   }
 
+  private emitBrowserError(payload: Record<string, unknown>): void {
+    const rawCode = typeof payload.code === 'string' ? payload.code : 'browser_host_error';
+    const code = /^[a-z0-9_-]{1,64}$/.test(rawCode) ? rawCode : 'browser_host_error';
+    this.emit('browser-error', {
+      ...payload,
+      error: `桌面浏览器操作失败（${code}）`,
+    });
+  }
+
   /**
    * Called by the Desktop transport when a recording frame could not be put on
    * the authenticated loopback socket.  EventEmitter listeners are synchronous,
@@ -2623,6 +2745,8 @@ export class BrowserHost extends EventEmitter {
     return this.enqueue(key, async () => {
       this.assertUsable();
       switch (method) {
+        case 'configure_proxy':
+          return this.configureProxy(key, params);
         case 'execute':
           return this.execute(key, params);
         case 'execute_transaction':
@@ -2935,6 +3059,7 @@ export class BrowserHost extends EventEmitter {
     key: string,
     profile: string,
     proxyUrl: string,
+    proxyCredentials?: ProxyCredentials,
   ): Promise<BrowserOwner> {
     const existing = this.owners.get(key);
     if (existing) {
@@ -2949,8 +3074,13 @@ export class BrowserHost extends EventEmitter {
           code: 'profile_mismatch',
         });
       }
-      await this.applyProxy(existing, proxyUrl);
+      await this.applyProxy(existing, proxyUrl, proxyCredentials);
       return existing;
+    }
+    if (!proxyCredentials) {
+      throw new BrowserHostError('浏览器代理凭据必须通过受管配置 RPC 注入', {
+        code: 'proxy_unavailable',
+      });
     }
 
     const bindingKey = pathKey(profile);
@@ -3133,7 +3263,7 @@ export class BrowserHost extends EventEmitter {
     this.owners.set(key, owner);
     this.profileBindings.set(bindingKey, key);
     try {
-      await this.applyProxy(owner, proxyUrl);
+      await this.applyProxy(owner, proxyUrl, proxyCredentials);
       this.configureSession(owner);
       return owner;
     } catch (error) {
@@ -3146,8 +3276,18 @@ export class BrowserHost extends EventEmitter {
   }
 
   private configureSession(owner: BrowserOwner): void {
-    owner.session.setPermissionCheckHandler(() => true);
-    owner.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(true));
+    owner.session.setPermissionCheckHandler((contents, permission, requestingOrigin) => (
+      this.isSessionPermissionAllowed(owner, contents, permission, requestingOrigin)
+    ));
+    owner.session.setPermissionRequestHandler((contents, permission, callback, details) => {
+      callback(this.isSessionPermissionAllowed(
+        owner,
+        contents,
+        permission,
+        details?.requestingUrl ?? '',
+      ));
+    });
+    owner.session.setDevicePermissionHandler(() => false);
     const listener: DownloadListener = (event, item, contents) => {
       this.handleWillDownload(owner, event, item, contents);
     };
@@ -3155,7 +3295,29 @@ export class BrowserHost extends EventEmitter {
     owner.session.on('will-download', listener);
   }
 
+  private isSessionPermissionAllowed(
+    owner: BrowserOwner,
+    contents: WebContents | null,
+    permission: string,
+    requestingUrl: string,
+  ): boolean {
+    if (!contents || !TRUSTED_ORIGIN_PERMISSION_ALLOWLIST.has(permission)) return false;
+    try {
+      if (contents.isDestroyed()) return false;
+      const found = this.tabsByWebContentsId.get(contents.id);
+      if (!found || found.owner !== owner || found.tab.view.webContents !== contents) return false;
+      const requestingOrigin = trustedPermissionOrigin(requestingUrl);
+      const documentOrigin = trustedPermissionOrigin(contents.getURL());
+      return Boolean(requestingOrigin && requestingOrigin === documentOrigin);
+    } catch {
+      return false;
+    }
+  }
+
   private detachSession(owner: BrowserOwner): void {
+    owner.session.setPermissionCheckHandler(null);
+    owner.session.setPermissionRequestHandler(null);
+    owner.session.setDevicePermissionHandler(null);
     const listener = owner.downloadListener;
     if (listener) {
       owner.downloadListener = null;
@@ -3168,26 +3330,47 @@ export class BrowserHost extends EventEmitter {
     owner.artifacts.clear();
   }
 
-  private parseProxy(proxyUrl: string): ProxyAuthState | null {
-    if (!proxyUrl) return null;
+  private parseProxy(
+    proxyUrl: string,
+    credentials?: ProxyCredentials,
+  ): ProxyAuthState {
+    if (!proxyUrl) {
+      throw new BrowserHostError('浏览器强制代理缺失', { code: 'proxy_unavailable' });
+    }
     let parsed: URL;
     try {
       parsed = new URL(proxyUrl);
     } catch {
-      throw new BrowserHostError('浏览器代理配置无效', { code: 'invalid_proxy' });
+      throw new BrowserHostError('浏览器代理配置无效', { code: 'proxy_unavailable' });
     }
-    if (!['http:', 'https:', 'socks4:', 'socks5:'].includes(parsed.protocol)) {
-      throw new BrowserHostError('浏览器代理协议无效', {
-        code: 'invalid_proxy',
+    if (
+      parsed.protocol !== 'http:'
+      || parsed.hostname !== '127.0.0.1'
+      || !parsed.port
+      || parsed.pathname !== '/'
+      || parsed.search
+      || parsed.hash
+      || parsed.username
+      || parsed.password
+    ) {
+      throw new BrowserHostError('浏览器代理必须是无凭据的本机 HTTP 端点', {
+        code: 'proxy_unavailable',
       });
     }
-    const host = parsed.hostname.replace(/^\[|\]$/g, '').toLocaleLowerCase();
-    const defaultPort = parsed.protocol === 'https:'
-      ? 443
-      : parsed.protocol === 'http:'
-        ? 80
-        : 1080;
-    const port = Number(parsed.port || defaultPort);
+    const username = credentials?.username ?? '';
+    const password = credentials?.password ?? '';
+    if (credentials && (username !== 'crew' || password.length < 32 || password.length > 512)) {
+      throw new BrowserHostError('浏览器代理缺少实例凭据', {
+        code: 'proxy_unavailable',
+      });
+    }
+    const host = parsed.hostname;
+    const port = Number(parsed.port);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new BrowserHostError('浏览器代理端口无效', {
+        code: 'proxy_unavailable',
+      });
+    }
     parsed.username = '';
     parsed.password = '';
     parsed.pathname = '';
@@ -3197,27 +3380,38 @@ export class BrowserHost extends EventEmitter {
       proxyRules: `${parsed.protocol}//${parsed.hostname}:${port}`,
       host,
       port,
-      username: decodeURIComponent(new URL(proxyUrl).username),
-      password: decodeURIComponent(new URL(proxyUrl).password),
+      username,
+      password,
     };
   }
 
-  private async applyProxy(owner: BrowserOwner, proxyUrl: string): Promise<void> {
-    const next = this.parseProxy(proxyUrl);
+  private async applyProxy(
+    owner: BrowserOwner,
+    proxyUrl: string,
+    credentials?: ProxyCredentials,
+  ): Promise<void> {
+    const next = this.parseProxy(proxyUrl, credentials);
+    if (!credentials) {
+      if (owner.proxy?.proxyRules === next.proxyRules) return;
+      throw new BrowserHostError('浏览器代理尚未通过受管配置 RPC 认证', {
+        code: 'proxy_unavailable',
+      });
+    }
     if (
-      owner.proxy?.proxyRules === next?.proxyRules &&
-      owner.proxy?.username === next?.username &&
-      owner.proxy?.password === next?.password
+      owner.proxy?.proxyRules === next.proxyRules &&
+      owner.proxy?.username === next.username &&
+      owner.proxy?.password === next.password
     ) {
       return;
     }
     try {
-      await owner.session.setProxy(next
-        ? {
-            mode: 'fixed_servers',
-            proxyRules: next.proxyRules,
-          }
-        : { mode: 'direct' });
+      await owner.session.setProxy({
+        mode: 'fixed_servers',
+        proxyRules: next.proxyRules,
+        // Chromium otherwise bypasses loopback destinations implicitly.
+        // Subtract that built-in bypass so localhost also reaches policy.
+        proxyBypassRules: '<-loopback>',
+      });
       await owner.session.closeAllConnections();
     } catch (error) {
       throw new BrowserHostError(
@@ -3230,6 +3424,20 @@ export class BrowserHost extends EventEmitter {
     // either step fails, a later request must retry instead of trusting stale
     // bookkeeping.
     owner.proxy = next;
+  }
+
+  private async configureProxy(
+    key: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const profile = profilePath(params.profile_dir, key);
+    const proxyUrl = asString(params.proxy_url, 'proxy_url', 4096).trim();
+    const credentials = {
+      username: asString(params.proxy_username, 'proxy_username', 64),
+      password: asString(params.proxy_password, 'proxy_password', 512),
+    };
+    await this.ensureOwner(key, profile, proxyUrl, credentials);
+    return { configured: true };
   }
 
   private atomicEffectEqual(left: AtomicEffect, right: AtomicEffect): boolean {
@@ -5198,7 +5406,7 @@ export class BrowserHost extends EventEmitter {
       // Never block the user's native tab operation because recorder bootstrap
       // failed. The shared trace is explicitly non-compilable instead.
       this.markRecordingStateIncomplete(peer);
-      this.emit('browser-error', {
+      this.emitBrowserError({
         runtimeKey: owner.runtimeKey,
         targetId: tab.targetId,
         code: 'recorder_lazy_join_failed',
@@ -5418,6 +5626,8 @@ export class BrowserHost extends EventEmitter {
         contextIsolation: true,
         sandbox: true,
         webSecurity: true,
+        allowRunningInsecureContent: false,
+        experimentalFeatures: false,
         webviewTag: false,
         devTools: false,
         plugins: false,
@@ -5497,7 +5707,7 @@ export class BrowserHost extends EventEmitter {
     // 逃出去的 promise rejection 在 Node 默认模式下会**终止整个主进程**——
     // 用一次可降级的失败换掉整个应用，是这条 `void` 最坏的一种结局。
     void owner.engine.setAutomationMode(view, initialMode === 'ai').catch((error) => {
-      this.emit('browser-error', {
+      this.emitBrowserError({
         runtimeKey: owner.runtimeKey,
         targetId: '',
         error: error instanceof Error ? error.message : 'setAutomationMode failed',
@@ -5519,7 +5729,7 @@ export class BrowserHost extends EventEmitter {
       await this.ensureDebugger(tab);
     };
     void prepareDebugger().catch((error: unknown) => {
-      this.emit('browser-error', {
+      this.emitBrowserError({
         runtimeKey: owner.runtimeKey,
         targetId: tab.targetId,
         error: error instanceof Error ? error.message : 'debugger attach failed',
@@ -5589,10 +5799,21 @@ export class BrowserHost extends EventEmitter {
         event.preventDefault();
       }
     });
-    // Let Chromium/Electron navigate to every scheme the embedding application
-    // has registered. The Host observes lifecycle events below but does not
-    // impose a second URL policy over the browser engine.
+    const preventUnsafeNavigation = (
+      event: Electron.Event & { url?: string },
+      legacyUrl?: string,
+    ): void => {
+      const requestedUrl = typeof event.url === 'string' ? event.url : legacyUrl ?? '';
+      if (!isAllowedNavigationUrl(requestedUrl)) event.preventDefault();
+    };
+    // Electron has changed these callback payloads across releases. Accept the
+    // structured current event and the legacy second URL argument, but deny
+    // when neither yields an independently valid destination.
+    (contents as any).on('will-navigate', preventUnsafeNavigation);
+    (contents as any).on('will-redirect', preventUnsafeNavigation);
+    (contents as any).on('will-frame-navigate', preventUnsafeNavigation);
     contents.setWindowOpenHandler((details) => {
+      if (!isAllowedNavigationUrl(details.url)) return { action: 'deny' };
       // Chromium has already resolved the user's tab-opening gesture for us.
       // A middle click or Ctrl/Meta+click arrives as `background-tab`; every
       // other disposition (`default`, `foreground-tab`, `new-window`, `other`)
@@ -5622,6 +5843,8 @@ export class BrowserHost extends EventEmitter {
             contextIsolation: true,
             sandbox: true,
             webSecurity: true,
+            allowRunningInsecureContent: false,
+            experimentalFeatures: false,
             webviewTag: false,
             devTools: false,
             plugins: false,
@@ -5664,7 +5887,7 @@ export class BrowserHost extends EventEmitter {
             setImmediate(() => {
               if (popup.view.webContents.isDestroyed()) return;
               void popup.view.webContents.loadURL(details.url).catch((error: unknown) => {
-                this.emit('browser-error', {
+                this.emitBrowserError({
                   runtimeKey: owner.runtimeKey,
                   targetId: popup.targetId,
                   code: 'popup_navigation_failed',
@@ -5722,7 +5945,7 @@ export class BrowserHost extends EventEmitter {
               ).catch((error: unknown) => {
                 inheritedLedger.incomplete = true;
                 inheritedLedger.dropped += 1;
-                this.emit('browser-error', {
+                this.emitBrowserError({
                   runtimeKey: owner.runtimeKey,
                   targetId: popup.targetId,
                   code: 'recorder_popup_partial',
@@ -6086,7 +6309,7 @@ export class BrowserHost extends EventEmitter {
       // explicitly and keep recording everywhere that remains instrumented.
       if (tab.recording === state) {
         this.markRecordingStateIncomplete(state);
-        this.emit('browser-error', {
+        this.emitBrowserError({
           runtimeKey: owner.runtimeKey,
           targetId: tab.targetId,
           code: 'recorder_child_session_failed',
@@ -7516,6 +7739,7 @@ export class BrowserHost extends EventEmitter {
           !samePath(resolved, path.resolve(file))
           || !ensureWithin(resolved, root)
           || !info.isFile()
+          || info.nlink !== 1
         ) {
           throw new Error('invalid upload file');
         }
@@ -8113,8 +8337,7 @@ export class BrowserHost extends EventEmitter {
       width: captured.width,
       height: captured.height,
     };
-    await writeFile(output, captured.image, { mode: 0o600 });
-    await chmod(output, 0o600);
+    await this.writePrivateArtifact(output, captured.image);
     return {
       path: output,
       width: captured.width,
@@ -8207,8 +8430,7 @@ export class BrowserHost extends EventEmitter {
         code: 'invalid_screenshot',
       });
     }
-    await writeFile(output, image, { mode: 0o600 });
-    await chmod(output, 0o600);
+    await this.writePrivateArtifact(output, image);
     return {
       path: output,
       type: parsed.type,
@@ -11024,7 +11246,7 @@ export class BrowserHost extends EventEmitter {
       // faithfully. Keep the diagnostic row, but make the shared recording
       // explicitly incomplete so the UI never offers it as a valid skill.
       this.markRecordingStateIncomplete(state);
-      this.emit('browser-error', {
+      this.emitBrowserError({
         runtimeKey: owner.runtimeKey,
         targetId: tab.targetId,
         code: 'recorder_selector_partial',
@@ -11050,7 +11272,7 @@ export class BrowserHost extends EventEmitter {
       );
       if (!action) {
         this.markRecordingStateIncomplete(state);
-        this.emit('browser-error', {
+        this.emitBrowserError({
           runtimeKey: owner.runtimeKey,
           targetId: tab.targetId,
           code: 'recorder_v11_action_unrepresentable',
@@ -11652,6 +11874,75 @@ export class BrowserHost extends EventEmitter {
     return { denied: true };
   }
 
+  /**
+   * Create a Host artifact exactly once.  The Python side still performs its
+   * pinned-parent identity/digest read before publication; this leaf boundary
+   * prevents an existing link or stale artifact from being overwritten first.
+   */
+  private async writePrivateArtifact(output: string, data: Buffer): Promise<void> {
+    if (data.length > MAX_ARTIFACT_BYTES) {
+      throw new BrowserHostError('截图超过安全大小上限', { code: 'artifact_too_large' });
+    }
+    let opened: ReturnType<typeof createSecureExclusiveFile> | null = null;
+    try {
+      opened = createSecureExclusiveFile(output, 0o600);
+      writeAllToFile(opened.fd, data);
+      fsyncSync(opened.fd);
+      const current = fstatSync(opened.fd, { bigint: true });
+      if (!current.isFile() || current.nlink !== 1n || current.size !== BigInt(data.length)) {
+        throw new Error('artifact identity changed while writing');
+      }
+    } catch (error) {
+      throw new BrowserHostError('截图目标无法安全保存', {
+        code: 'invalid_artifact_path',
+      });
+    } finally {
+      if (opened) closeSync(opened.fd);
+    }
+  }
+
+  /**
+   * The Host may only write to its account-private staging root. The Python
+   * manager publishes the completed file into the already-authorized task
+   * workspace after this boundary returns.
+   */
+  private approvedDownloadTarget(owner: BrowserOwner, rawTarget: string): string {
+    if (!path.isAbsolute(rawTarget)) {
+      throw new BrowserHostError('下载目标必须是绝对路径', { code: 'invalid_download_path' });
+    }
+    const rawRoot = path.join(path.dirname(owner.profilePath), 'approved-downloads');
+    let root: string;
+    try {
+      root = realpathSync.native(rawRoot);
+      if (!samePath(root, path.resolve(rawRoot))) throw new Error('linked download root');
+    } catch {
+      throw new BrowserHostError('下载目标不属于账号审批暂存目录', {
+        code: 'invalid_download_path',
+      });
+    }
+    const target = canonicalPath(rawTarget);
+    const parent = path.dirname(target);
+    try {
+      const parentReal = realpathSync.native(parent);
+      const targetInfo = existsSync(target) ? lstatSync(target) : null;
+      if (
+        samePath(target, root)
+        || !ensureWithin(target, root)
+        || !samePath(parentReal, parent)
+        || !ensureWithin(parentReal, root)
+        || targetInfo && (!targetInfo.isFile() || targetInfo.nlink > 1)
+        || existsSync(rawTarget) && !samePath(target, path.resolve(rawTarget))
+      ) {
+        throw new Error('invalid download target');
+      }
+    } catch {
+      throw new BrowserHostError('下载目标不属于账号审批暂存目录', {
+        code: 'invalid_download_path',
+      });
+    }
+    return target;
+  }
+
   private async download(key: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     const owner = this.requireOwner(key);
     this.verifyProfileIfPresent(owner, params.profile_dir);
@@ -11665,10 +11956,10 @@ export class BrowserHost extends EventEmitter {
     // 提前解析一次，让「ref 不属于当前快照」这类错误在做任何路径/预算校验之前就抛出。
     this.ref(tab, refValue);
     const rawTarget = asString(params.target, 'download target');
-    if (!path.isAbsolute(rawTarget)) {
-      throw new BrowserHostError('下载目标必须是绝对路径', { code: 'invalid_download_path' });
-    }
-    const target = canonicalPath(rawTarget);
+    const target = this.approvedDownloadTarget(owner, rawTarget);
+    const maxBytes = params.max_bytes === undefined
+      ? MAX_DOWNLOAD_BYTES
+      : asPositiveInteger(params.max_bytes, 'max_bytes', MAX_DOWNLOAD_BYTES);
     if (owner.downloadGrant) {
       throw new BrowserHostError('账号已有进行中的下载', { code: 'download_busy' });
     }
@@ -11704,8 +11995,10 @@ export class BrowserHost extends EventEmitter {
       owner.downloadGrant = {
         tabId: tab.tabId,
         target,
+        maxBytes,
         claimed: false,
         item: null,
+        sizeListener: null,
         actionActive: false,
         actionDeadline: 0,
         eventBaseline: owner.downloadEventSequence,
@@ -11903,10 +12196,44 @@ export class BrowserHost extends EventEmitter {
 
   private handleWillDownload(
     owner: BrowserOwner,
-    _event: ElectronEvent,
+    event: ElectronEvent,
     item: DownloadItem,
     contents: WebContents,
   ): void {
+    let downloadUrls: string[] = [];
+    try {
+      downloadUrls = [item.getURL(), ...item.getURLChain()];
+    } catch {
+      downloadUrls = [];
+    }
+    if (!downloadUrls.length || downloadUrls.some((url) => !isAllowedDownloadUrl(url))) {
+      event.preventDefault();
+      try {
+        item.cancel();
+      } catch {
+        // preventDefault is the authoritative cancellation boundary.
+      }
+      const pendingGrant = owner.downloadGrant;
+      const source = pendingGrant ? owner.tabs.get(pendingGrant.tabId) : null;
+      const found = this.tabsByWebContentsId.get(contents.id);
+      const belongsToGrant = Boolean(
+        pendingGrant
+        && found?.owner === owner
+        && (
+          found.tab.tabId === pendingGrant.tabId
+          || source && this.popupDescendsFrom(owner, found.tab, source)
+        ),
+      );
+      if (belongsToGrant) {
+        void this.cancelDownloadGrant(
+          owner,
+          new BrowserHostError('浏览器下载 URL 协议不允许', {
+            code: 'unsafe_download_scheme',
+          }),
+        ).catch(() => undefined);
+      }
+      return;
+    }
     owner.downloadEventSequence += 1;
     const eventSequence = owner.downloadEventSequence;
     const grant = owner.downloadGrant;
@@ -11973,6 +12300,39 @@ export class BrowserHost extends EventEmitter {
       grant.actionActive = false;
       grant.item = item;
       try {
+        this.approvedDownloadTarget(owner, grant.target);
+      } catch {
+        event.preventDefault();
+        void this.cancelDownloadGrant(
+          owner,
+          new BrowserHostError('下载目标不属于账号审批暂存目录', {
+            code: 'invalid_download_path',
+          }),
+        ).catch(() => undefined);
+        return;
+      }
+      const exceedsSizeLimit = (): boolean => {
+        let receivedBytes = 0;
+        let totalBytes = 0;
+        try {
+          receivedBytes = Math.max(0, item.getReceivedBytes());
+          totalBytes = Math.max(0, item.getTotalBytes());
+        } catch {
+          return false;
+        }
+        return receivedBytes > grant.maxBytes || totalBytes > grant.maxBytes;
+      };
+      if (exceedsSizeLimit()) {
+        void this.cancelDownloadGrant(
+          owner,
+          new BrowserHostError('下载超过大小上限', {
+            code: 'download_too_large',
+            uncertain: true,
+          }),
+        ).catch(() => undefined);
+        return;
+      }
+      try {
         item.setSavePath(grant.target);
       } catch (error) {
         owner.engine.registerNativeDownload(found!.tab.view, item);
@@ -11988,9 +12348,28 @@ export class BrowserHost extends EventEmitter {
         return;
       }
       owner.engine.registerNativeDownload(found!.tab.view, item);
+      const sizeListener = (
+        _event: ElectronEvent,
+        _state: 'progressing' | 'interrupted',
+      ): void => {
+        if (owner.downloadGrant !== grant || !exceedsSizeLimit()) return;
+        void this.cancelDownloadGrant(
+          owner,
+          new BrowserHostError('下载超过大小上限', {
+            code: 'download_too_large',
+            uncertain: true,
+          }),
+        ).catch(() => undefined);
+      };
+      grant.sizeListener = sizeListener;
+      item.on('updated', sizeListener);
       item.once('done', (_doneEvent, state) => {
         if (owner.downloadGrant !== grant) return;
         clearTimeout(grant.timer);
+        if (grant.sizeListener) {
+          item.removeListener('updated', grant.sizeListener);
+          grant.sizeListener = null;
+        }
         owner.downloadGrant = null;
         if (state !== 'completed') {
           owner.downloadGrant = grant;
@@ -12041,6 +12420,10 @@ export class BrowserHost extends EventEmitter {
     if (!grant) return;
     clearTimeout(grant.timer);
     owner.downloadGrant = null;
+    if (grant.item && grant.sizeListener) {
+      grant.item.removeListener('updated', grant.sizeListener);
+      grant.sizeListener = null;
+    }
     let cleanupError: BrowserHostError | null = null;
     try {
       await this.cancelDownloadItem(grant);

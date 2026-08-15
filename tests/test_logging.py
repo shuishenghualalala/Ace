@@ -1,8 +1,12 @@
 """LLM 收发 trace 日志测试。"""
 
+import io
 import json
 import logging
+import sys
 import threading
+
+import pytest
 
 import crew.state.logging as clog
 from crew.core.runctx import current_owner_account_id
@@ -63,6 +67,132 @@ def test_llm_trace_injects_current_owner(tmp_path):
     finally:
         current_owner_account_id.reset(token)
         _reset_llm_trace()
+
+
+def test_llm_trace_redacts_credentials_and_url_secrets(tmp_path):
+    _reset_llm_trace()
+    log_file = tmp_path / "logs" / "crew.log"
+    try:
+        clog._setup_llm_trace(str(log_file))
+        clog.llm_trace(
+            "request",
+            {
+                "api_key": "plain-api-secret",
+                "headers": {"Authorization": "Bearer plain-bearer-secret"},
+                "url": (
+                    "https://user:password@example.test/path"
+                    "?access_token=query-secret"
+                ),
+            },
+        )
+
+        persisted = (log_file.parent / "llm.jsonl").read_text(encoding="utf-8")
+        assert "plain-api-secret" not in persisted
+        assert "plain-bearer-secret" not in persisted
+        assert "password@" not in persisted
+        assert "query-secret" not in persisted
+        event = json.loads(persisted)
+        assert event["api_key"] in {"***", "<secret_redacted>"}
+        assert event["headers"]["Authorization"] in {"***", "<secret_redacted>"}
+    finally:
+        _reset_llm_trace()
+
+
+def test_sensitive_log_filter_redacts_message_exception_and_env_secret(monkeypatch):
+    secret = "opaque-runtime-credential"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    try:
+        raise RuntimeError(
+            f"failed with {secret} at "
+            "https://user:password@example.test/?token=query-secret"
+        )
+    except RuntimeError:
+        record = logging.LogRecord(
+            "crew.test.security",
+            logging.ERROR,
+            __file__,
+            1,
+            "Authorization: Bearer %s",
+            (secret,),
+            sys.exc_info(),
+        )
+
+    assert clog.SensitiveLogFilter().filter(record) is True
+    rendered = logging.Formatter("%(message)s").format(record)
+    assert secret not in rendered
+    assert "password@" not in rendered
+    assert "query-secret" not in rendered
+    assert "Traceback" in rendered
+
+
+@pytest.mark.parametrize(
+    "proxy_var",
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"],
+)
+def test_sensitive_log_filter_redacts_proxy_userinfo_and_query(monkeypatch, proxy_var):
+    proxy = (
+        "http://proxy-user:proxy-password@proxy.example.test:3128/"
+        "?access_token=proxy-query-secret"
+    )
+    monkeypatch.setenv(proxy_var, proxy)
+    record = logging.LogRecord(
+        "crew.test.security",
+        logging.INFO,
+        __file__,
+        1,
+        "using proxy %s",
+        (proxy,),
+        None,
+    )
+
+    assert clog.SensitiveLogFilter().filter(record) is True
+    rendered = logging.Formatter("%(message)s").format(record)
+    assert "proxy-password" not in rendered
+    assert "proxy-query-secret" not in rendered
+    assert "proxy.example.test" in rendered
+
+
+def test_setup_logging_secures_preexisting_root_handlers(monkeypatch):
+    root = logging.getLogger()
+    previous_handlers = list(root.handlers)
+    previous_filters = list(root.filters)
+    previous_level = root.level
+    previous_configured = clog._CONFIGURED
+    previous_ring = clog._RING
+    output = io.StringIO()
+    existing = logging.StreamHandler(output)
+    secret = "preexisting-handler-secret"
+    try:
+        for handler in previous_handlers:
+            root.removeHandler(handler)
+        root.addHandler(existing)
+        clog._CONFIGURED = False
+        clog._RING = None
+        monkeypatch.setattr(clog, "_ensure_utf8_stdio", lambda: None)
+        monkeypatch.setattr(
+            clog,
+            "RichHandler",
+            lambda **_kwargs: logging.NullHandler(),
+        )
+
+        clog.setup_logging(level="INFO")
+        logging.getLogger("crew.test.preexisting").error(
+            "Authorization: Bearer %s",
+            secret,
+        )
+
+        assert secret not in output.getvalue()
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+            if handler not in previous_handlers:
+                handler.close()
+        for handler in previous_handlers:
+            root.addHandler(handler)
+        root.filters[:] = previous_filters
+        root.setLevel(previous_level)
+        clog._CONFIGURED = previous_configured
+        clog._RING = previous_ring
 
 
 def test_make_console_disables_legacy_windows():
@@ -137,3 +267,106 @@ def test_ring_buffer_filters_by_causal_owner_and_keeps_raw_thread_logs_system_on
     assert next(item for item in admin["items"] if item["message"] == "causal-system")[
         "owner_account_id"
     ] == ""
+
+
+def test_cross_sink_secret_canary_console_file_and_audit(tmp_path, monkeypatch):
+    from crew.security.audit import AuditEvent, SQLiteSecurityAudit
+    from crew.security.context import SecurityContext
+
+    canary = "sk-crosssinkcanarysecret1234567890"
+    proxies = {
+        "HTTP_PROXY": (
+            "http://http-user:http-password@proxy.example.test:8080/"
+            "?access_token=http-query-secret"
+        ),
+        "HTTPS_PROXY": (
+            "http://https-user:https-password@proxy.example.test:8443/"
+            "?access_token=https-query-secret"
+        ),
+        "ALL_PROXY": (
+            "http://all-user:all-password@proxy.example.test:8888/"
+            "?access_token=all-query-secret"
+        ),
+        "NO_PROXY": (
+            "http://no-user:no-password@proxy.example.test/"
+            "?access_token=no-query-secret"
+        ),
+    }
+    for proxy_var, proxy_value in proxies.items():
+        monkeypatch.setenv(proxy_var, proxy_value)
+
+    logger = logging.getLogger("crew.cross_sink_canary")
+    logger.handlers.clear()
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    logger.addFilter(clog.SensitiveLogFilter())
+
+    console = io.StringIO()
+    log_file = tmp_path / "logs" / "crew.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    console_handler = logging.StreamHandler(console)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    ring_handler = clog.RingBufferHandler()
+    ring_handler.addFilter(clog.SensitiveLogFilter())
+    for handler in (console_handler, file_handler, ring_handler):
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+
+    audit = SQLiteSecurityAudit(
+        tmp_path / "audit.db",
+        integrity_key=b"audit-test-key-material-that-is-32-bytes",
+    )
+    try:
+        for proxy_var, proxy_value in proxies.items():
+            logger.info("secret=%s %s=%s", canary, proxy_var, proxy_value)
+        try:
+            raise ValueError(proxies["HTTPS_PROXY"])
+        except ValueError:
+            logger.exception("proxy request failed")
+        context = SecurityContext(
+            os_user="os-a",
+            owner_account_id="owner-a",
+            workspace_id="project-a",
+            workspace_root=tmp_path,
+            session_id="session-a",
+            request_id="request-a",
+            task_id="task-a",
+            cwd=tmp_path,
+        )
+        audit.record(
+            AuditEvent.for_tool_decision(
+                context,
+                tool_name="browser_use",
+                args={"token": canary, "proxy": proxies["ALL_PROXY"]},
+                decision="deny",
+                decision_source="policy",
+            )
+        )
+        exported = audit.export_jsonl(owner_account_id="owner-a")
+        ring = json.dumps(ring_handler.query(), ensure_ascii=False)
+    finally:
+        audit.close()
+        logger.handlers.clear()
+        logger.filters.clear()
+
+    combined = (
+        console.getvalue()
+        + log_file.read_text(encoding="utf-8")
+        + exported
+        + ring
+    )
+    assert canary not in combined
+    for secret in (
+        "http-password",
+        "https-password",
+        "all-password",
+        "no-password",
+        "http-query-secret",
+        "https-query-secret",
+        "all-query-secret",
+        "no-query-secret",
+    ):
+        assert secret not in combined
+    for proxy_value in proxies.values():
+        assert proxy_value not in combined
+    assert "proxy.example.test" in combined

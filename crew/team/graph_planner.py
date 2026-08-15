@@ -31,6 +31,7 @@ from crew.team.workflow_plan import (
     select_planning_mode,
     workflow_plan_from_graph,
 )
+from crew.tools.redact import redact_sensitive_display_text
 
 DEFAULT_PLANNING_DECISION_TIMEOUT = 30.0
 PLANNING_DECISION_MAX_TOKENS = 4096
@@ -41,6 +42,16 @@ _PLANNING_DECISION_CACHE: dict[str, tuple[float, PlanningDecision]] = {}
 _PLANNING_WARMUP_TASKS: dict[str, asyncio.Task[None]] = {}
 _PLANNING_WARMUP_STATE: dict[str, dict[str, Any]] = {}
 PlanningProgressCallback = Callable[[dict[str, Any]], Any]
+_PLANNER_ERROR_HOST_PATH_RE = re.compile(
+    r"(?i)(?:[a-z]:[\\/]|\\\\|/(?:users|home|private|tmp|var|etc|opt|workspace)(?:[\\/]|$))"
+)
+
+
+def _safe_planning_error(value: BaseException | str) -> str:
+    message = redact_sensitive_display_text(str(value or "")).strip()
+    if not message or _PLANNER_ERROR_HOST_PATH_RE.search(message):
+        return "规划模型调用失败"
+    return message[:500]
 
 
 @dataclass(frozen=True)
@@ -1311,7 +1322,7 @@ async def _planning_provider_warmup(provider: Any) -> None:
         state.update({
             "status": "failed",
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
-            "error": str(exc) or exc.__class__.__name__,
+            "error": _safe_planning_error(exc),
         })
 
 
@@ -1433,12 +1444,12 @@ async def _planning_decision_with_llm(
         ) from exc
     except Exception as exc:
         diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure("provider_error", str(exc) or exc.__class__.__name__, diagnostics) from exc
+        raise PlanningDecisionFailure("provider_error", _safe_planning_error(exc), diagnostics) from exc
     try:
         data = _json_from_text(text)
     except json.JSONDecodeError as exc:
         diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure("invalid_json", str(exc), diagnostics) from exc
+        raise PlanningDecisionFailure("invalid_json", _safe_planning_error(exc), diagnostics) from exc
     except ValueError as exc:
         diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         error_type = (
@@ -1449,14 +1460,14 @@ async def _planning_decision_with_llm(
         error_message = (
             "PlanningDecision produced reasoning but no structured JSON content"
             if error_type.startswith("reasoning_only")
-            else str(exc)
+            else _safe_planning_error(exc)
         )
         raise PlanningDecisionFailure(error_type, error_message, diagnostics) from exc
     try:
         decision = coerce_planning_decision(data, max_work_units=max_work_units + 4)
     except ValueError as exc:
         diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure("schema_invalid", str(exc), diagnostics) from exc
+        raise PlanningDecisionFailure("schema_invalid", _safe_planning_error(exc), diagnostics) from exc
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     diagnostics["elapsed_ms"] = elapsed_ms
     await _notify_planning_progress(
@@ -2026,12 +2037,12 @@ class TeamGraphPlanner:
                 decision_elapsed_ms = decision_call.elapsed_ms
                 decision_diagnostics = dict(decision_call.diagnostics)
             except PlanningDecisionFailure as exc:
-                decision_error = str(exc)
+                decision_error = _safe_planning_error(exc)
                 decision_error_type = exc.error_type
                 decision_diagnostics = dict(exc.diagnostics)
                 decision_elapsed_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else 0
             except Exception as exc:  # noqa: BLE001
-                decision_error = str(exc)
+                decision_error = _safe_planning_error(exc)
                 decision_error_type = "unknown"
                 decision_diagnostics = {}
                 decision_elapsed_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else 0
@@ -2225,7 +2236,7 @@ class TeamGraphPlanner:
                 fallback.nodes,
                 status="fallback",
                 elapsed_ms=elapsed_ms,
-                error=str(exc),
+                error=_safe_planning_error(exc),
             )
             return TeamGraphPlan(
                 spec=fallback.spec,
@@ -2233,7 +2244,7 @@ class TeamGraphPlanner:
                 edges=fallback.edges,
                 policy_report=fallback.policy_report,
                 planner_notes=[
-                    f"AI Planner 失败，耗时 {elapsed_ms if elapsed_ms is not None else 'unknown'}ms，已回退 Standard：{exc}",
+                    f"AI Planner 失败，耗时 {elapsed_ms if elapsed_ms is not None else 'unknown'}ms，已回退 Standard：{_safe_planning_error(exc)}",
                     *fallback.planner_notes,
                 ],
                 workflow_plan={

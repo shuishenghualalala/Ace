@@ -1,8 +1,29 @@
+import fs from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import {
+  execFileText,
   macApplicationSupportsExtension,
   parseMacApplicationManifest,
 } from '../../src/main/open-with-service';
+
+describe('open-with host process boundary', () => {
+  it('rejects executable lookup through PATH', async () => {
+    await expect(execFileText('powershell.exe', [])).rejects.toThrow(
+      /absolute path/,
+    );
+  });
+
+  it('uses fixed system helpers and no process-name cleanup', async () => {
+    const source = await fs.readFile('src/main/open-with-service.ts', 'utf8');
+    expect(source).toContain('C:\\\\Windows\\\\System32\\\\taskkill.exe');
+    expect(source).toContain('/usr/bin/xdg-mime');
+    expect(source).toContain('/usr/bin/gio');
+    expect(source).not.toContain("spawn('taskkill'");
+    expect(source).not.toContain("execFileText('xdg-mime'");
+    expect(source).not.toContain("spawnDetached('gio'");
+    expect(source).not.toContain("spawnDetached('powershell.exe'");
+  });
+});
 
 describe('open-with service macOS manifest matching', () => {
   it('finds an application by declared file extension', () => {

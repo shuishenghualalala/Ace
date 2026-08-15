@@ -9,11 +9,17 @@ from typing import Any
 
 from crew.core.runctx import (
     current_agent_workdir,
+    current_model_id,
     current_owner_account_id,
     current_request_id,
     current_session_id,
     current_task_runtime_id,
+    current_turn_id,
     current_workspace_id,
+)
+from crew.security.local_path import (
+    LocalPathReference,
+    LocalPathReferenceError,
 )
 from crew.state.workspace_store import _normalize_root_path
 
@@ -34,6 +40,8 @@ class SecurityContext:
     request_id: str
     task_id: str
     cwd: Path | None
+    turn_id: str = ""
+    model_id: str = ""
 
 
 def build_security_context(workspace_store: Any) -> SecurityContext:
@@ -58,6 +66,8 @@ def build_security_context(workspace_store: Any) -> SecurityContext:
         session_id=current_session_id.get().strip(),
         request_id=current_request_id.get().strip(),
         task_id=current_task_runtime_id.get().strip(),
+        turn_id=current_turn_id.get().strip(),
+        model_id=current_model_id.get().strip(),
         cwd=cwd,
     )
 
@@ -70,6 +80,8 @@ def build_gateway_security_context(
     session_id: str,
     task_id: str = "",
     request_id: str = "",
+    turn_id: str = "",
+    model_id: str = "",
     cwd: str | Path | None = None,
 ) -> SecurityContext:
     """Build a context from authenticated Gateway identity and owner-scoped storage.
@@ -102,30 +114,44 @@ def build_gateway_security_context(
         session_id=session,
         request_id=str(request_id).strip(),
         task_id=str(task_id).strip(),
+        turn_id=str(turn_id).strip(),
+        model_id=str(model_id).strip(),
         cwd=requested_cwd,
     )
 
 
-def resolve_requested_path(context: SecurityContext, requested: str | Path) -> Path:
-    """Resolve a requested path through existing links before applying policy."""
-    target = Path(requested).expanduser()
-    if not target.is_absolute():
-        if context.cwd is None:
-            raise SecurityContextError("普通对话没有可信工作目录，不能解析相对路径")
-        target = context.cwd / target
+def resolve_requested_path(
+    context: SecurityContext,
+    requested: LocalPathReference,
+) -> Path:
+    """Resolve a typed request only at the host authorization seam."""
+    if not isinstance(requested, LocalPathReference):
+        raise SecurityContextError("文件请求缺少已验证的本地路径引用")
     try:
-        return target.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError) as exc:
+        return requested.resolve_at_boundary(base=context.cwd, strict=False)
+    except LocalPathReferenceError as exc:
+        if "host-owned base" in str(exc):
+            raise SecurityContextError(
+                "普通对话没有可信工作目录，不能解析相对路径"
+            ) from exc
         raise SecurityContextError("路径无法安全解析") from exc
 
 
-def path_is_in_workspace(context: SecurityContext, target: str | Path) -> bool:
+def path_is_in_workspace(
+    context: SecurityContext,
+    target: Path | LocalPathReference,
+) -> bool:
     """Return whether the final canonical target is under the trusted workspace root."""
     if context.workspace_root is None:
         return False
     try:
-        resolve_requested_path(context, target).relative_to(context.workspace_root)
-    except (SecurityContextError, ValueError):
+        resolved = (
+            resolve_requested_path(context, target)
+            if isinstance(target, LocalPathReference)
+            else target.expanduser().resolve(strict=False)
+        )
+        resolved.relative_to(context.workspace_root)
+    except (AttributeError, OSError, SecurityContextError, RuntimeError, ValueError):
         return False
     return True
 

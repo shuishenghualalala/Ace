@@ -1,8 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 2 * 1024 * 1024;
@@ -11,7 +14,15 @@ pub const MAX_ENV_BYTES: usize = 256 * 1024;
 pub const MAX_RESPONSE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
-pub const READY_CAPABILITIES: [&str; 2] = ["stdin_once", "stream_output"];
+pub const MAX_STDIO_INPUT_FRAME_BYTES: usize = 1024 * 1024;
+pub const MAX_STDIO_INPUT_BYTES: usize = 16 * 1024 * 1024;
+pub const READY_CAPABILITIES: [&str; 4] = [
+    "deny_read_glob_v1",
+    "stdin_once",
+    "stream_output",
+    "duplex_stdio_v1",
+];
+const STDIO_MAC_CONTEXT: &[u8] = b"ace-runtime-stdio-v1\0";
 
 /// Stable error codes for the managed-network layer (spec §13).
 ///
@@ -52,6 +63,20 @@ pub struct NetworkRule {
     pub escalatable: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemGlobAccess {
+    DenyRead,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FilesystemGlobRule {
+    pub root: String,
+    pub pattern: String,
+    pub access: FilesystemGlobAccess,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RequestEnvelope {
     pub version: u16,
@@ -78,6 +103,8 @@ pub enum RuntimeRequest {
         #[serde(default)]
         denied_roots: Vec<String>,
         #[serde(default)]
+        filesystem_globs: Vec<FilesystemGlobRule>,
+        #[serde(default)]
         network_enabled: bool,
         #[serde(default)]
         network_rules: Vec<NetworkRule>,
@@ -90,6 +117,30 @@ pub enum RuntimeRequest {
         #[serde(default)]
         env_overrides: BTreeMap<String, String>,
     },
+    RunStdio {
+        command: Vec<String>,
+        cwd: String,
+        #[serde(default)]
+        writable_roots: Vec<String>,
+        #[serde(default)]
+        readable_roots: Vec<String>,
+        #[serde(default)]
+        denied_roots: Vec<String>,
+        #[serde(default)]
+        filesystem_globs: Vec<FilesystemGlobRule>,
+        #[serde(default)]
+        network_enabled: bool,
+        #[serde(default)]
+        network_rules: Vec<NetworkRule>,
+        #[serde(default)]
+        allow_local_binding: bool,
+        #[serde(default = "default_max_output_bytes")]
+        max_output_bytes: usize,
+        #[serde(default = "default_max_stdio_input_bytes")]
+        max_input_bytes: usize,
+        #[serde(default)]
+        env_overrides: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -97,7 +148,27 @@ pub struct ReadyFrame {
     #[serde(rename = "type")]
     pub frame_type: &'static str,
     pub version: u16,
-    pub capabilities: [&'static str; 2],
+    pub capabilities: [&'static str; 4],
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StdioInputFrame {
+    pub version: u16,
+    pub nonce: String,
+    pub seq: u64,
+    #[serde(rename = "type")]
+    pub frame_type: String,
+    #[serde(default)]
+    pub data_b64: String,
+    pub mac: String,
+}
+
+#[derive(Debug)]
+pub enum StdioInputMessage {
+    Data(Vec<u8>),
+    Close,
+    Abort,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,6 +267,10 @@ fn default_max_output_bytes() -> usize {
     DEFAULT_MAX_OUTPUT_BYTES
 }
 
+fn default_max_stdio_input_bytes() -> usize {
+    MAX_STDIO_INPUT_BYTES
+}
+
 fn default_escalatable() -> bool {
     true
 }
@@ -224,6 +299,7 @@ pub fn validate_process_inputs(
     };
 
     let mut encoded_size = 0usize;
+    let mut normalized_names = BTreeSet::new();
     for (name, value) in env_overrides {
         if !valid_environment_name(name) || value.contains('\0') {
             return Err(InputValidationError {
@@ -232,11 +308,7 @@ pub fn validate_process_inputs(
             });
         }
         let normalized = name.to_ascii_uppercase();
-        if matches!(
-            normalized.as_str(),
-            "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "NO_PROXY"
-        ) || normalized.starts_with("ACE_SECURITY_")
-            || normalized.starts_with("ACE_BUNDLED_")
+        if !normalized_names.insert(normalized.clone()) || disallowed_environment_name(&normalized)
         {
             return Err(InputValidationError {
                 code: "sandbox_denied",
@@ -264,6 +336,140 @@ pub fn validate_process_inputs(
     })
 }
 
+fn disallowed_environment_name(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "ACE_SANDBOX"
+            | "ALL_PROXY"
+            | "BASH_ENV"
+            | "COMSPEC"
+            | "ENV"
+            | "GIT_CONFIG_GLOBAL"
+            | "HOME"
+            | "HOMEDRIVE"
+            | "HOMEPATH"
+            | "HTTP_PROXY"
+            | "HTTPS_PROXY"
+            | "NODE_OPTIONS"
+            | "NO_PROXY"
+            | "PATH"
+            | "PERL5OPT"
+            | "PYTHONHOME"
+            | "PYTHONPATH"
+            | "PYTHONSTARTUP"
+            | "RUBYOPT"
+            | "SYSTEMROOT"
+            | "TEMP"
+            | "TMP"
+            | "TMPDIR"
+            | "USERNAME"
+            | "USERPROFILE"
+            | "WINDIR"
+    ) || normalized.starts_with("ACE_SECURITY_")
+        || normalized.starts_with("ACE_BUNDLED_")
+        || normalized.starts_with("DYLD_")
+        || normalized.starts_with("LD_")
+}
+
+pub fn validate_stdio_input_frame(
+    frame: StdioInputFrame,
+    startup_token: &str,
+    expected_nonce: &str,
+    expected_seq: u64,
+    remaining_bytes: usize,
+) -> Result<(StdioInputMessage, usize), InputValidationError> {
+    if frame.version != PROTOCOL_VERSION
+        || frame.seq != expected_seq
+        || !bool::from(frame.nonce.as_bytes().ct_eq(expected_nonce.as_bytes()))
+    {
+        return Err(InputValidationError {
+            code: "runtime_protocol_mismatch",
+            message: "invalid stdio input frame identity",
+        });
+    }
+    if startup_token.len() < 32
+        || !valid_stdio_mac(
+            startup_token,
+            &frame.nonce,
+            frame.seq,
+            &frame.frame_type,
+            &frame.data_b64,
+            &frame.mac,
+        )
+    {
+        return Err(InputValidationError {
+            code: "runtime_protocol_mismatch",
+            message: "invalid stdio input frame authentication",
+        });
+    }
+    match frame.frame_type.as_str() {
+        "stdin" => {
+            let value =
+                BASE64_STANDARD
+                    .decode(&frame.data_b64)
+                    .map_err(|_| InputValidationError {
+                        code: "runtime_protocol_mismatch",
+                        message: "invalid stdio input encoding",
+                    })?;
+            if value.is_empty()
+                || value.len() > MAX_STDIO_INPUT_FRAME_BYTES
+                || value.len() > remaining_bytes
+            {
+                return Err(InputValidationError {
+                    code: "sandbox_denied",
+                    message: "stdio input exceeds the configured limit",
+                });
+            }
+            let retained = value.len();
+            Ok((StdioInputMessage::Data(value), retained))
+        }
+        "stdin_close" if frame.data_b64.is_empty() => Ok((StdioInputMessage::Close, 0)),
+        _ => Err(InputValidationError {
+            code: "runtime_protocol_mismatch",
+            message: "invalid stdio input frame type",
+        }),
+    }
+}
+
+fn valid_stdio_mac(
+    startup_token: &str,
+    nonce: &str,
+    seq: u64,
+    frame_type: &str,
+    data_b64: &str,
+    encoded_mac: &str,
+) -> bool {
+    let Ok(expected) = hex_decode(encoded_mac) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(startup_token.as_bytes()) else {
+        return false;
+    };
+    mac.update(STDIO_MAC_CONTEXT);
+    mac.update(nonce.as_bytes());
+    mac.update(b"\0");
+    mac.update(seq.to_string().as_bytes());
+    mac.update(b"\0");
+    mac.update(frame_type.as_bytes());
+    mac.update(b"\0");
+    mac.update(data_b64.as_bytes());
+    mac.verify_slice(&expected).is_ok()
+}
+
+fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|_| ())?;
+            u8::from_str_radix(text, 16).map_err(|_| ())
+        })
+        .collect()
+}
+
 fn valid_environment_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
@@ -273,12 +479,15 @@ fn valid_environment_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_process_inputs, RuntimeCapabilities, RuntimeEvent, MAX_ENV_BYTES,
-        MAX_OUTPUT_CHUNK_BYTES, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES, MAX_STDIN_BYTES,
-        PROTOCOL_VERSION,
+        validate_process_inputs, validate_stdio_input_frame, FilesystemGlobAccess, RequestEnvelope,
+        RuntimeCapabilities, RuntimeEvent, RuntimeRequest, StdioInputFrame, StdioInputMessage,
+        MAX_ENV_BYTES, MAX_OUTPUT_CHUNK_BYTES, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
+        MAX_STDIN_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES, STDIO_MAC_CONTEXT,
     };
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
     use std::collections::BTreeMap;
 
     fn capabilities() -> RuntimeCapabilities {
@@ -307,6 +516,42 @@ mod tests {
         assert_eq!(MAX_ENV_BYTES, 256 * 1024);
         assert_eq!(MAX_RESPONSE_FRAME_BYTES, 128 * 1024);
         assert_eq!(MAX_OUTPUT_CHUNK_BYTES, 64 * 1024);
+        assert!(READY_CAPABILITIES.contains(&"deny_read_glob_v1"));
+        assert!(READY_CAPABILITIES.contains(&"duplex_stdio_v1"));
+    }
+
+    #[test]
+    fn run_protocol_binds_only_deny_read_glob_rules() {
+        let value = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "token": "token",
+            "nonce": "nonce",
+            "request": {
+                "op": "run",
+                "command": ["true"],
+                "cwd": "/workspace",
+                "filesystem_globs": [{
+                    "root": "/workspace",
+                    "pattern": "**/*.pem",
+                    "access": "deny_read"
+                }]
+            }
+        });
+        let envelope: RequestEnvelope = serde_json::from_value(value.clone()).unwrap();
+        let RuntimeRequest::Run {
+            filesystem_globs, ..
+        } = envelope.request
+        else {
+            panic!("expected run request");
+        };
+        assert_eq!(filesystem_globs.len(), 1);
+        assert_eq!(filesystem_globs[0].root, "/workspace");
+        assert_eq!(filesystem_globs[0].pattern, "**/*.pem");
+        assert_eq!(filesystem_globs[0].access, FilesystemGlobAccess::DenyRead);
+
+        let mut invalid = value;
+        invalid["request"]["filesystem_globs"][0]["access"] = serde_json::json!("allow_read");
+        assert!(serde_json::from_value::<RequestEnvelope>(invalid).is_err());
     }
 
     #[test]
@@ -329,17 +574,70 @@ mod tests {
 
         for name in [
             "INVALID-NAME",
+            "ACE_SANDBOX",
             "HTTP_PROXY",
             "ace_security_runtime_token",
             "ACE_BUNDLED_BWRAP",
+            "PATH",
+            "HOME",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "BASH_ENV",
+            "NODE_OPTIONS",
+            "PYTHONSTARTUP",
         ] {
             let environment = BTreeMap::from([(name.to_string(), "value".to_string())]);
             assert!(validate_process_inputs(None, &environment).is_err());
         }
+        let duplicate_environment = BTreeMap::from([
+            ("SAFE_NAME".to_string(), "one".to_string()),
+            ("safe_name".to_string(), "two".to_string()),
+        ]);
+        assert!(validate_process_inputs(None, &duplicate_environment).is_err());
 
         let oversized_environment =
             BTreeMap::from([("LARGE".to_string(), "x".repeat(MAX_ENV_BYTES))]);
         assert!(validate_process_inputs(None, &oversized_environment).is_err());
+    }
+
+    #[test]
+    fn duplex_input_frames_are_authenticated_sequenced_and_bounded() {
+        let token = "t".repeat(48);
+        let nonce = "nonce-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let data_b64 = BASE64_STANDARD.encode(b"request\n");
+        let mut mac = Hmac::<Sha256>::new_from_slice(token.as_bytes()).unwrap();
+        mac.update(STDIO_MAC_CONTEXT);
+        mac.update(nonce.as_bytes());
+        mac.update(b"\0");
+        mac.update(b"0");
+        mac.update(b"\0stdin\0");
+        mac.update(data_b64.as_bytes());
+        let encoded_mac = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let frame = || StdioInputFrame {
+            version: PROTOCOL_VERSION,
+            nonce: nonce.to_string(),
+            seq: 0,
+            frame_type: "stdin".to_string(),
+            data_b64: data_b64.clone(),
+            mac: encoded_mac.clone(),
+        };
+
+        let (message, retained) =
+            validate_stdio_input_frame(frame(), &token, nonce, 0, 1024).unwrap();
+        assert!(matches!(message, StdioInputMessage::Data(value) if value == b"request\n"));
+        assert_eq!(retained, 8);
+        assert!(validate_stdio_input_frame(frame(), &token, nonce, 1, 1024).is_err());
+        assert!(validate_stdio_input_frame(frame(), &token, "other-nonce", 0, 1024).is_err());
+        assert!(validate_stdio_input_frame(frame(), &token, nonce, 0, 1).is_err());
+
+        let mut tampered = frame();
+        tampered.data_b64 = BASE64_STANDARD.encode(b"tampered\n");
+        assert!(validate_stdio_input_frame(tampered, &token, nonce, 0, 1024).is_err());
     }
 
     #[test]

@@ -31,7 +31,9 @@ def test_skill_mutation_routes_forward_authenticated_owner(monkeypatch):
         request.state.account = AccountContext(owner_account_id="A:uid-a")
         return await call_next(request)
 
-    app.include_router(misc.create_misc_router(SimpleNamespace()))
+    app.include_router(misc.create_misc_router(SimpleNamespace(
+        config=SimpleNamespace(gateway_admin_accounts=["A:uid-a"]),
+    )))
     client = TestClient(app)
 
     assert client.post("/api/skills/demo/install").status_code == 200

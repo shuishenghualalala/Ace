@@ -9,6 +9,7 @@ import { $, notify, state } from '../state';
 import { showConfirmDialog } from '../ui-feedback';
 import {
   createSecurityCenterView,
+  type SecurityAlertView,
   type SecurityCenterSnapshot,
   type SecurityCenterView,
 } from './security-center-view';
@@ -42,9 +43,11 @@ function emptySnapshot(): SecurityCenterSnapshot {
     setupAction: null,
     error: '',
     workspaceId: workspaceId(),
-    strictSecurityEnabled: false,
+    strictSecurityEnabled: true,
     mode: currentSecurityMode(),
     capabilities: null,
+    alerts: [],
+    alertsAdmin: false,
     rules: [],
     audits: [],
     auditPage: 1,
@@ -71,6 +74,9 @@ function ensureSecurityCenter(): SecurityCenterView | null {
       onAuditPageChange: (page) => void loadAuditPage(page, snapshot.auditPageSize ?? 20),
       onAuditPageSizeChange: (size) => void loadAuditPage(1, size),
       onAuditQueryChange: (query) => void loadAuditPage(1, snapshot.auditPageSize ?? 20, query),
+      onAlertIsolate: (alert) => void mutateAlert(alert, 'isolate'),
+      onAlertRevoke: (alert) => void mutateAlert(alert, 'revoke'),
+      onAlertResolve: (alert) => void mutateAlert(alert, 'resolve'),
     });
   }
   if (!root.contains(securityCenterView.element)) root.replaceChildren(securityCenterView.element);
@@ -110,13 +116,17 @@ async function refresh(): Promise<void> {
       sessionId: auditQuery.sessionId,
       sort: auditQuery.sort,
     }),
+    window.Crew?.securityAlerts?.(),
   ]);
   const errors: string[] = [];
 
   const preferenceResult = results[0];
   if (preferenceResult.status === 'fulfilled') {
     const value = preferenceResult.value as { strictSecurityEnabled?: unknown } | undefined;
-    snapshot.strictSecurityEnabled = value?.strictSecurityEnabled === true;
+    snapshot.strictSecurityEnabled = true;
+    if (value?.strictSecurityEnabled !== true) {
+      errors.push('全局安全策略返回了无效状态；已保持严格安全约束');
+    }
   } else {
     errors.push(`全局安全策略：${String(preferenceResult.reason)}`);
   }
@@ -166,6 +176,22 @@ async function refresh(): Promise<void> {
     }
   } else {
     errors.push(`安全审计：${String(auditResult.reason)}`);
+  }
+
+  const alertsResult = results[4];
+  if (alertsResult.status === 'fulfilled') {
+    try {
+      const body = bodyOf<{ alerts?: SecurityAlertView[]; admin?: boolean }>(
+        alertsResult.value as GatewayResult | undefined,
+        '安全告警',
+      );
+      snapshot.alerts = body.alerts ?? [];
+      snapshot.alertsAdmin = body.admin === true;
+    } catch (error) {
+      errors.push(String((error as Error).message || error));
+    }
+  } else {
+    errors.push(`安全告警：${String(alertsResult.reason)}`);
   }
 
   snapshot = { ...snapshot, loading: false, error: errors.join('；') };
@@ -313,6 +339,27 @@ async function loadAuditPage(
     auditQuery: { ...query },
   };
   render();
+}
+
+async function mutateAlert(
+  alert: SecurityAlertView,
+  action: 'isolate' | 'revoke' | 'resolve',
+): Promise<void> {
+  if (snapshot.loading) return;
+  if (action === 'isolate' && !window.confirm('冻结该告警对应的会话并撤销临时授权？')) return;
+  if (action === 'revoke' && !window.confirm('撤销该告警对应账号的权限？此操作需要管理员重新评估。')) return;
+  const result = (
+    action === 'isolate'
+      ? await window.Crew?.securityAlertIsolate?.({ alertId: alert.alert_id })
+      : action === 'revoke'
+        ? await window.Crew?.securityAlertRevoke?.({ alertId: alert.alert_id })
+        : await window.Crew?.securityAlertResolve?.({ alertId: alert.alert_id })
+  ) as GatewayResult | undefined;
+  if (!result?.ok) {
+    notify(`安全告警操作失败：${String((result?.body as { detail?: string } | undefined)?.detail ?? '')}`);
+    return;
+  }
+  await refresh();
 }
 
 async function purgeAudit(): Promise<void> {

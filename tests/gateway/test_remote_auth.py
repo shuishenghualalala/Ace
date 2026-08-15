@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import base64
+import json
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
+from crew.gateway import auth
 from crew.gateway.app import create_app
+from crew.gateway.logout import LogoutCleanupError
 from crew.gateway.platform_registry import platform_registry
+from crew.gateway.routers import remote_auth
+from crew.security.outbound import OutboundHttpResponse
 from crew.state.config import Config, load_config
 
 
@@ -121,6 +128,208 @@ async def test_email_mode_rejects_invalid_email(email_api, email):
     assert response.status_code == 400
 
 
+def test_remote_session_is_bound_to_gateway_instance_and_unique_session(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    first_home = tmp_path / "first"
+    monkeypatch.setenv("CREW_HOME", str(first_home))
+    first = auth.create_remote_session_token("email", "user@example.com", ttl_seconds=600)
+    second = auth.create_remote_session_token("email", "user@example.com", ttl_seconds=600)
+    encoded = first.split(".", 1)[0]
+    payload = json.loads(
+        base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    )
+
+    assert first != second
+    assert payload["aud"] == "ace-gateway-remote-session"
+    assert payload["purpose"] == "owner-authentication"
+    assert len(payload["sid"]) >= 24
+    assert len(payload["instance"]) == 64
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "second"))
+    with pytest.raises(auth.AuthenticationError, match="登录会话无效"):
+        auth.account_from_remote_session_token(
+            first,
+            Config(auth_mode="email"),
+        )
+
+
+def test_remote_session_rotation_revokes_existing_tokens(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    token = auth.create_remote_session_token(
+        "email",
+        "user@example.com",
+        ttl_seconds=600,
+    )
+
+    auth.rotate_remote_session_signing_key()
+
+    with pytest.raises(auth.AuthenticationError, match="登录会话无效"):
+        auth.account_from_remote_session_token(token, Config(auth_mode="email"))
+
+
+def test_remote_session_rotation_rolls_back_unverifiable_store_write(
+    tmp_path,
+    monkeypatch,
+    _isolated_platform_secret_backend,
+) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    token = auth.create_remote_session_token(
+        "email",
+        "user@example.com",
+        ttl_seconds=600,
+    )
+    backend = _isolated_platform_secret_backend
+    original_get = backend.get_password
+    reads = 0
+
+    def fail_verification(service: str, account: str):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            return "corrupt-after-write"
+        return original_get(service, account)
+
+    monkeypatch.setattr(backend, "get_password", fail_verification)
+
+    with pytest.raises(auth.AuthenticationError, match="无法轮换"):
+        auth.rotate_remote_session_signing_key()
+
+    assert (
+        auth.account_from_remote_session_token(
+            token,
+            Config(auth_mode="email"),
+        ).user_id
+        == "user@example.com"
+    )
+
+
+def test_remote_session_creation_rolls_back_unverifiable_store_write(
+    tmp_path,
+    monkeypatch,
+    _isolated_platform_secret_backend,
+) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    backend = _isolated_platform_secret_backend
+    before = dict(backend.values)
+    original_get = backend.get_password
+    reads = 0
+
+    def fail_verification(service: str, account: str):
+        nonlocal reads
+        reads += 1
+        if reads == 3:
+            return "corrupt-after-write"
+        return original_get(service, account)
+
+    monkeypatch.setattr(backend, "get_password", fail_verification)
+
+    with pytest.raises(auth.AuthenticationError, match="无法写入"):
+        auth.create_remote_session_token(
+            "email",
+            "user@example.com",
+            ttl_seconds=600,
+        )
+
+    assert backend.values == before
+    assert not auth._session_key_path().exists()
+
+
+def test_expired_remote_session_has_same_error_as_invalid(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    monkeypatch.setattr(auth.time, "time", lambda: 1000)
+    token = auth.create_remote_session_token(
+        "email",
+        "user@example.com",
+        ttl_seconds=300,
+    )
+    monkeypatch.setattr(auth.time, "time", lambda: 1301)
+
+    with pytest.raises(auth.AuthenticationError) as expired:
+        auth.account_from_remote_session_token(token, Config(auth_mode="email"))
+    with pytest.raises(auth.AuthenticationError) as invalid:
+        auth.account_from_remote_session_token("invalid.token", Config(auth_mode="email"))
+
+    assert str(expired.value) == str(invalid.value) == "登录会话无效"
+
+
+@pytest.mark.asyncio
+async def test_email_login_hides_session_store_failures(email_api, monkeypatch):
+    def fail_session(*_args, **_kwargs):
+        raise RuntimeError(r"C:\Users\owner\.crew\.auth\session.key token=must-not-leak")
+
+    monkeypatch.setattr(remote_auth, "create_remote_session_token", fail_session)
+    transport = ASGITransport(app=email_api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/auth/login",
+            json={"email": "user@example.com"},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["error"] == "无法创建登录会话"
+    assert "session.key" not in response.text
+    assert "must-not-leak" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_email_logout_hides_cleanup_failure_details(
+    email_api,
+    monkeypatch,
+    caplog,
+):
+    canary = "logout-secret-canary"
+
+    async def fail_logout(_owner):
+        raise LogoutCleanupError(
+            rf"C:\private\credential.json access_token={canary}"
+        )
+
+    monkeypatch.setattr(
+        email_api.state.crew.logout_coordinator,
+        "logout",
+        fail_logout,
+    )
+    transport = ASGITransport(app=email_api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        logged_in = await client.post(
+            "/api/auth/login",
+            json={"email": "user@example.com"},
+        )
+        assert logged_in.status_code == 200
+        response = await client.post("/api/auth/logout")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "ok": False,
+        "released": False,
+        "code": "LOGOUT_CLEANUP_FAILED",
+        "error": "注销清理未完成",
+    }
+    assert canary not in response.text
+    assert canary not in caplog.text
+    assert "credential.json" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_email_login_cookie_flags_follow_transport(email_api):
+    transport = ASGITransport(app=email_api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="https://test") as client:
+        response = await client.post(
+            "/api/auth/login",
+            json={"email": "user@example.com"},
+        )
+
+    cookie = response.headers["set-cookie"].lower()
+    assert "httponly" in cookie
+    assert "samesite=strict" in cookie
+    assert "secure" in cookie
+
+
 @pytest.mark.asyncio
 async def test_remote_login_routes_reject_non_loopback_client(remote_api):
     transport = ASGITransport(app=remote_api, client=("203.0.113.10", 12345))
@@ -133,6 +342,70 @@ async def test_remote_login_routes_reject_non_loopback_client(remote_api):
 
     assert config.status_code == 401
     assert login.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_remote_auth_uses_shared_pinned_http_client(monkeypatch):
+    seen: dict[str, object] = {}
+
+    class PinnedClient:
+        def fetch(self, url: str, **kwargs):
+            seen["url"] = url
+            seen["kwargs"] = kwargs
+            return OutboundHttpResponse(
+                final_url=url,
+                status=200,
+                headers={"content-type": "application/json"},
+                body=b'{"ok":true}',
+                content_type="application/json",
+                charset="utf-8",
+            )
+
+    monkeypatch.setattr(remote_auth, "_REMOTE_AUTH_HTTP", PinnedClient(), raising=False)
+    config = type(
+        "RemoteConfig",
+        (),
+        {"auth_base_url": "https://auth.example", "auth_timeout_seconds": 5},
+    )()
+
+    status, payload = await remote_auth._post_json(
+        config,
+        "/auth/send-code",
+        {"phoneNumber": "13800000000"},
+    )
+
+    assert (status, payload) == (200, {"ok": True})
+    assert seen["url"] == "https://auth.example/auth/send-code"
+    assert seen["kwargs"]["max_redirects"] == 0
+
+
+def test_remote_auth_error_message_redacts_url_credentials() -> None:
+    rendered = remote_auth._message(
+        {
+            "error": (
+                "failed at https://user:password@example.test/path"
+                "?access_token=query-secret"
+            )
+        },
+        "fallback",
+    )
+
+    assert "password@" not in rendered
+    assert "query-secret" not in rendered
+
+
+def test_remote_auth_rejects_credential_bearing_base_url() -> None:
+    config = type(
+        "RemoteConfig",
+        (),
+        {
+            "auth_base_url": (
+                "https://auth.example/rpc?access_token=query-secret"
+            )
+        },
+    )()
+
+    assert remote_auth._remote_base_url(config) == ""
 
 
 @pytest.mark.asyncio

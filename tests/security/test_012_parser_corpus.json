@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "campaign": {
+    "seed": 12648430,
+    "ci_cases": 64,
+    "scheduled_cases": 512,
+    "max_cases": 2048,
+    "max_generated_input_bytes": 4096
+  },
+  "frame": {
+    "gateway_valid": [
+      "{\"kind\":\"pong\",\"protocol_version\":1,\"client_sequence\":1,\"nonce\":\"nonce-000000000001\"}",
+      "{\"query\":\"hello\",\"session_id\":\"session-1\",\"request_id\":\"request-1\",\"mode\":\"agent\",\"attachments\":[],\"protocol_version\":1,\"client_sequence\":2,\"nonce\":\"nonce-000000000002\"}",
+      "{\"action\":\"stop\",\"session_id\":\"session-1\",\"protocol_version\":1,\"client_sequence\":3,\"nonce\":\"nonce-000000000003\"}"
+    ],
+    "gateway_invalid": [
+      "",
+      "{",
+      "[]",
+      "null",
+      "{\"kind\":\"pong\"}",
+      "{\"kind\":\"pong\",\"kind\":\"pong\",\"protocol_version\":1,\"client_sequence\":1,\"nonce\":\"nonce-000000000001\"}",
+      "{\"kind\":\"pong\",\"protocol_version\":1,\"client_sequence\":NaN,\"nonce\":\"nonce-000000000001\"}",
+      "{\"kind\":\"pong\",\"protocol_version\":1,\"client_sequence\":1,\"nonce\":\"short\"}",
+      "{\"kind\":\"pong\",\"protocol_version\":1,\"client_sequence\":true,\"nonce\":\"nonce-000000000001\"}",
+      "{\"kind\":\"pong\",\"protocol_version\":1,\"client_sequence\":1,\"nonce\":\"nonce-000000000001\",\"owner_account_id\":\"forged\"}",
+      "{\"action\":\"stop\",\"session_id\":\"session\\u0000forged\",\"protocol_version\":1,\"client_sequence\":1,\"nonce\":\"nonce-000000000001\"}"
+    ],
+    "runtime_valid": [
+      "{\"version\":2,\"token\":\"tttttttttttttttttttttttttttttttt\",\"nonce\":\"nonce-000000000001\",\"request\":{\"op\":\"classify_shell\",\"shell_kind\":\"bash\",\"executable\":\"/bin/bash\",\"raw_command\":\"git status\"}}",
+      "{\"version\":2,\"token\":\"tttttttttttttttttttttttttttttttt\",\"nonce\":\"nonce-000000000002\",\"request\":{\"op\":\"classify_shell\",\"shell_kind\":\"unknown\",\"executable\":\"unknown\",\"raw_command\":\"echo marker\"}}"
+    ],
+    "runtime_invalid": [
+      "",
+      "{",
+      "[]",
+      "null",
+      "{\"version\":2,\"token\":\"tttttttttttttttttttttttttttttttt\",\"nonce\":\"nonce-000000000001\"}",
+      "{\"version\":2,\"token\":7,\"nonce\":\"nonce-000000000001\",\"request\":{\"op\":\"classify_shell\",\"shell_kind\":\"bash\",\"executable\":\"/bin/bash\",\"raw_command\":\"git status\"}}",
+      "{\"version\":2,\"token\":\"tttttttttttttttttttttttttttttttt\",\"token\":\"duplicate\",\"nonce\":\"nonce-000000000001\",\"request\":{\"op\":\"classify_shell\",\"shell_kind\":\"bash\",\"executable\":\"/bin/bash\",\"raw_command\":\"git status\"}}",
+      "{\"version\":2,\"token\":\"tttttttttttttttttttttttttttttttt\",\"nonce\":\"nonce-000000000001\",\"request\":{\"op\":\"unknown\"}}",
+      "{\"version\":2,\"token\":\"tttttttttttttttttttttttttttttttt\",\"nonce\":\"nonce-000000000001\",\"request\":{\"op\":\"classify_shell\",\"shell_kind\":\"bash\",\"executable\":\"/bin/bash\",\"raw_command\":[]}}",
+      "{\"version\":2,\"token\":\"tttttttttttttttttttttttttttttttt\",\"nonce\":\"nonce-000000000001\",\"request\":{\"op\":\"run\",\"command\":\"id\",\"cwd\":\"/tmp\"}}",
+      "{\"version\":2,\"token\":\"tttttttttttttttttttttttttttttttt\",\"nonce\":\"nonce-000000000001\",\"request\":{\"op\":\"classify_shell\",\"shell_kind\":\"bash\",\"executable\":\"/bin/bash\",\"raw_command\":\"git status\"}} trailing"
+    ]
+  },
+  "url": {
+    "canonical_valid": [
+      "https://example.com/",
+      "https://example.com:8443/a/b?x=1",
+      "http://xn--bcher-kva.example/path",
+      "https://[2001:4860:4860::8888]/dns-query"
+    ],
+    "canonical_invalid": [
+      "",
+      " https://example.com/",
+      "https://example.com/ ",
+      "ftp://example.com/file",
+      "file:///etc/passwd",
+      "https://user:password@example.com/",
+      "https://example.com\\@127.0.0.1/",
+      "https://example.com/%zz",
+      "https://metadata.google.internal/latest/meta-data",
+      "https://instance-data/latest",
+      "https://example.com:0/",
+      "https://example.com:65536/",
+      "https://example.com/\u0000x"
+    ],
+    "rust_host_valid": [
+      "example.com",
+      "xn--bcher-kva.example",
+      "127.0.0.1",
+      "::1"
+    ],
+    "rust_host_invalid": [
+      "",
+      " example.com",
+      "example.com ",
+      "example..com",
+      "-example.com",
+      "example-.com",
+      "user@example.com",
+      "example.com/path",
+      "*.example.com",
+      "127.1",
+      "999.999.999.999",
+      "example_.com",
+      "ｅxample.com",
+      "[::1",
+      "example.com\u0000"
+    ],
+    "desktop_gateway_invalid": [
+      "https://127.0.0.1:8000/api/sessions",
+      "http://example.com/api/sessions",
+      "http://user:password@127.0.0.1:8000/api/sessions",
+      "http://127.0.0.1:8000/etc/passwd",
+      "http://127.0.0.1:8000/api/sessions#fragment",
+      "file:///api/sessions",
+      "javascript:alert(1)"
+    ]
+  },
+  "path": {
+    "file_uri_valid": [
+      "file:///workspace/readme.txt",
+      "file://localhost/workspace/a%20b.txt",
+      "file:///workspace/a%2520b.html"
+    ],
+    "file_uri_invalid": [
+      "https://example.com/file.txt",
+      "file://server/share/file.txt",
+      "file:///workspace/a%2fb.html",
+      "file:///workspace/a%5Cb.html",
+      "file:///workspace/a%252fb.html",
+      "file:///workspace/a%255Cb.html",
+      "file:///workspace/%00.txt",
+      "file:///workspace/%ZZ.txt",
+      "file:///workspace/file.txt?query=1",
+      "file:///workspace/file.txt#fragment"
+    ],
+    "ipc_valid": [
+      "/tmp/report.txt",
+      "C:\\workspace\\report.txt"
+    ],
+    "ipc_invalid": [
+      "",
+      "/tmp/a\u0000b",
+      7,
+      null,
+      []
+    ],
+    "windows_valid": [
+      "C:\\workspace\\file.txt",
+      "D:/workspace/nested/file.txt"
+    ],
+    "windows_invalid": [
+      "",
+      "relative\\file.txt",
+      "C:relative",
+      "\\\\server\\share\\file.txt",
+      "\\\\.\\PIPE\\ace",
+      "\\\\?\\C:\\Windows",
+      "C:\\workspace\\bad\u0000name"
+    ]
+  },
+  "command": {
+    "bash_read_only": [
+      "git status",
+      "git diff -- README.md",
+      "cat README.md | head -5",
+      "rg TODO src",
+      "find . -maxdepth 1"
+    ],
+    "bash_must_ask": [
+      "rm -rf /tmp/ace-test-012",
+      "git status; rm -rf /tmp/ace-test-012",
+      "cat $(echo README.md)",
+      "x=cat; $x README.md",
+      "cat README.md > output.txt",
+      "git -c core.pager=cat status",
+      "rg --pre sh pattern .",
+      "find . -exec sh -c 'echo pwned' \\;"
+    ],
+    "powershell_read_only": [
+      "Get-ChildItem",
+      "Get-ChildItem | Measure-Object",
+      "Get-Content README.md",
+      "Get-Location"
+    ],
+    "powershell_must_ask": [
+      "Remove-Item -Recurse C:\\Temp\\ace-test-012",
+      "$cmd='Get-ChildItem'; & $cmd",
+      "Get-Content README.md | Set-Content output.txt",
+      "Get-ChildItem > output.txt",
+      "Invoke-Expression 'Get-ChildItem'",
+      "Start-Process cmd.exe"
+    ],
+    "host_execution_templates": {
+      "bash": "touch '{marker}'",
+      "powershell": "New-Item -ItemType File -Path '{marker}'"
+    }
+  }
+}

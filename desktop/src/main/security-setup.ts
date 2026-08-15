@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { hardenedChildProcessOptions } from './process-environment';
 
 export type SecuritySetupAction = 'install' | 'repair' | 'uninstall';
 export type SecuritySetupResult = {
@@ -13,6 +14,7 @@ export type UacEnableResult = SecuritySetupResult & { restartRequired?: boolean 
 
 const UAC_REGISTRY_KEY = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System';
 const POWERSHELL_UAC_REGISTRY_PATH = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System';
+const WINDOWS_REG = 'C:\\Windows\\System32\\reg.exe';
 let uacRestartRequired = false;
 
 function quotePowerShell(value: string): string {
@@ -21,7 +23,7 @@ function quotePowerShell(value: string): string {
 
 function powershellPath(): string {
   return path.join(
-    process.env['SystemRoot'] || 'C:\\Windows',
+    'C:\\Windows',
     'System32',
     'WindowsPowerShell',
     'v1.0',
@@ -81,11 +83,11 @@ export function parseEnableLuaOutput(output: string): boolean | null {
 }
 
 function readWindowsUacEnabled(): boolean | null {
-  const result = spawnSync('reg.exe', ['query', UAC_REGISTRY_KEY, '/v', 'EnableLUA'], {
+  const result = spawnSync(WINDOWS_REG, ['query', UAC_REGISTRY_KEY, '/v', 'EnableLUA'], hardenedChildProcessOptions({
     encoding: 'utf8',
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'ignore'],
-  });
+  }));
   if (result.error || result.status !== 0) return null;
   return parseEnableLuaOutput(String(result.stdout ?? ''));
 }
@@ -103,30 +105,29 @@ async function runElevatedCommand(
   spawnProcess: typeof spawn,
 ): Promise<SecuritySetupResult> {
   return new Promise((resolve) => {
-    const child: ChildProcess = spawnProcess(command.executable, command.argv, {
+    const child: ChildProcess = spawnProcess(command.executable, command.argv, hardenedChildProcessOptions({
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const output: string[] = [];
+    }));
     let settled = false;
     const finish = (result: SecuritySetupResult): void => {
       if (settled) return;
       settled = true;
       resolve(result);
     };
-    child.stdout?.on('data', (chunk) => output.push(String(chunk)));
-    child.stderr?.on('data', (chunk) => output.push(String(chunk)));
-    child.once('error', (error) => finish({
+    // Drain child pipes without retaining or returning untrusted installer output.
+    child.stdout?.resume();
+    child.stderr?.resume();
+    child.once('error', () => finish({
       ok: false,
       exitCode: null,
-      detail: `无法启动安全防护安装程序：${error.message}`,
+      detail: '无法启动安全防护安装程序',
     }));
     child.once('exit', (code) => {
-      const detail = output.join('').trim();
       finish({
         ok: code === 0,
         exitCode: code,
-        ...(detail ? { detail } : {}),
+        ...(code === 0 ? {} : { detail: '安全防护安装程序未成功完成' }),
       });
     });
   });
@@ -174,6 +175,6 @@ export async function runElevatedSecuritySetup(
   }
   // Create under the interactive user's profile before elevation so inherited ACLs remain
   // readable by that user even when UAC uses an over-the-shoulder administrator credential.
-  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   return runElevatedCommand(buildElevatedSecuritySetup(runtimePath, stateDir, action), spawnProcess);
 }

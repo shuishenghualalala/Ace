@@ -15,6 +15,8 @@ Stage 8（消息发射）。本模块补齐 Crew 缺的三个阶段：
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass, field
@@ -22,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from crew.core.types import ToolCall
+from crew.tools.redact import safe_public_error
 from crew.state.home import get_crew_home
 from crew.state.logging import get_logger
 
@@ -185,6 +188,10 @@ class PermissionRule:
         pattern = self.match
         if pattern == "*" or pattern == "":
             return True
+        if pattern.startswith("sha256:"):
+            expected = pattern.removeprefix("sha256:")
+            actual = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            return len(expected) == 64 and hmac.compare_digest(actual, expected)
         if pattern.endswith(":*"):
             prefix = pattern[:-2]
             return _key_startswith(key, prefix)
@@ -236,11 +243,8 @@ class PermissionConfig:
         """
         if default_behavior not in ("allow", "deny", "ask"):
             default_behavior = "deny"
-        # session allows 优先（用户本轮已授权），命中即 allow
-        for rule in self._session_allows.get(session_id, []):
-            if rule.matches(tool_name, key):
-                return ("allow", rule.reason or "本会话已授权", "")
-        # 显式 deny 优先于 ask 优先于 allow
+        # Persistent deny is a ceiling: an older session approval cannot
+        # override a newly installed administrative/project denial.
         matched_deny = None
         matched_ask = None
         matched_allow = None
@@ -255,6 +259,10 @@ class PermissionConfig:
                 matched_allow = rule
         if matched_deny:
             return ("deny", matched_deny.reason or f"匹配拒绝规则: {matched_deny.match}", "")
+        # Session approvals may override an ask rule, but never a deny ceiling.
+        for rule in self._session_allows.get(session_id, []):
+            if rule.matches(tool_name, key):
+                return ("allow", rule.reason or "本会话已授权", "")
         if matched_ask:
             return ("ask", matched_ask.reason, _suggest_rule(tool_name, key))
         if matched_allow:
@@ -279,6 +287,10 @@ def _suggest_rule(tool_name: str, key: str) -> str:
     if tool_name in {"file_write", "file_read", "patch"}:
         # 路径不便于生成稳定前缀规则，回退到精确
         return key or "*"
+    if "__" in tool_name and key:
+        # MCP names are qualified as server__tool. Persist only a digest so
+        # one approval cannot widen to different arguments or retain secrets.
+        return f"sha256:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
     return "*"
 
 
@@ -408,7 +420,7 @@ def validate_input_hook(
     try:
         msg = fn(args)
     except Exception as exc:  # noqa: BLE001
-        return f"业务校验异常: {exc}"
+        return safe_public_error(exc, "业务校验异常")
     return msg if msg else None
 
 

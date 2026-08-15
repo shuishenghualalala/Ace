@@ -22,14 +22,49 @@ from crew.tools.pipeline import (
     validate_arguments,
     validate_input_hook,
 )
+from crew.tools.redact import redact_sensitive_display_text
 
 log = get_logger("tools")
+
+_TOOL_ERROR_HOST_PATH_RE = re.compile(
+    r"(?i)(?:[a-z]:[\\/]|\\\\|/(?:users|home|private|tmp|var|etc|opt|workspace)(?:[\\/]|$))"
+)
+_SAFE_TOOL_ERROR_CODE_RE = re.compile(r"^SECURITY_[A-Z0-9_]{2,80}$")
+_UNTRUSTED_RESULT_SOURCES = frozenset(
+    {"browser", "external_agent", "file", "mcp", "plugin", "subagent", "web"}
+)
+
+
+def _safe_tool_error_message(exc: BaseException | str, *, limit: int = 500) -> str:
+    """Keep business errors useful while blocking host paths and secrets."""
+    raw = str(exc or "").strip()
+    try:
+        structured = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        structured = None
+    if isinstance(structured, dict):
+        code = str(structured.get("code") or "").strip()
+        if _SAFE_TOOL_ERROR_CODE_RE.fullmatch(code):
+            reason = redact_sensitive_display_text(str(structured.get("reason") or "")).strip()
+            if not reason or _TOOL_ERROR_HOST_PATH_RE.search(reason):
+                reason = "安全策略拒绝"
+            return json.dumps(
+                {"code": code, "reason": reason[:limit]},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+    message = redact_sensitive_display_text(raw).strip()
+    if not message or _TOOL_ERROR_HOST_PATH_RE.search(message):
+        return "工具执行失败：内部错误"
+    return message[:limit]
 
 
 def tool_error(message: str, **extra: Any) -> str:
     """Crew工具错误结果。handler 可直接 return 这个字符串。"""
-    payload: dict[str, Any] = {"error": str(message)}
-    payload.update(extra)
+    payload: dict[str, Any] = dict(extra)
+    # ``error`` is diagnostic text, never caller-controlled metadata.  Keep it
+    # last so an extra field cannot reintroduce a raw secret/path.
+    payload["error"] = _safe_tool_error_message(message)
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -38,6 +73,48 @@ def tool_result(data: Any | None = None, **kwargs: Any) -> str:
     if data is not None and kwargs:
         raise ToolError("tool_result 不能同时传 data 和 kwargs")
     return json.dumps(data if data is not None else kwargs, ensure_ascii=False)
+
+
+def _tool_result_provenance(tool: Tool) -> tuple[str, str]:
+    """Derive result trust from host-owned registration metadata."""
+    source = str(getattr(tool, "result_source", "") or "").strip().lower()
+    toolset = str(getattr(tool, "toolset", "") or "").strip().lower()
+    name = str(getattr(tool, "name", "") or "").strip().lower()
+    if not source:
+        if bool(getattr(tool, "is_mcp", False)) or toolset.startswith("mcp:"):
+            source = "mcp"
+        elif toolset == "web":
+            source = "web"
+        elif toolset in {"file", "vision"} or name == "file_read":
+            source = "file"
+        elif toolset == "browser" or name.startswith("browser_") or name == "record_replay":
+            source = "browser"
+        elif toolset in {"external_agent", "subagent"}:
+            source = toolset
+    if source in _UNTRUSTED_RESULT_SOURCES:
+        return "untrusted", source
+    return "trusted", "tool"
+
+
+def _tool_result(
+    tool: Tool | None,
+    tool_call_id: str,
+    name: str,
+    content: str,
+    *,
+    is_error: bool = False,
+    media: list[Any] | None = None,
+) -> ToolResult:
+    trust, source = _tool_result_provenance(tool) if tool is not None else ("trusted", "tool")
+    return ToolResult(
+        tool_call_id,
+        name,
+        content,
+        is_error=is_error,
+        media=list(media or []),
+        content_trust=trust,
+        content_source=source,
+    )
 
 
 class FunctionTool(Tool):
@@ -67,6 +144,7 @@ class FunctionTool(Tool):
         on_progress: str | None = None,
         permission_resolver: Callable[[dict[str, Any]], ToolPermissionDecision | None] | None = None,
         permission_approver: Callable[[str, dict[str, Any]], bool] | None = None,
+        result_source: str = "",
     ) -> None:
         self.name = name
         self.toolset = toolset
@@ -96,6 +174,7 @@ class FunctionTool(Tool):
         self.on_progress = on_progress
         self.permission_resolver = permission_resolver
         self.permission_approver = permission_approver
+        self.result_source = result_source
 
     def to_schema(self) -> dict[str, Any]:
         function_schema = dict(self.schema)
@@ -139,6 +218,89 @@ class Registry(ToolRegistry):
         self._tools: dict[str, Tool] = {}
         # alias -> canonical name（Crew Stage 1 别名查找）
         self._aliases: dict[str, str] = {}
+        self._runtime_tool_providers: list[Any] = []
+
+    def register_runtime_tool_provider(self, provider: Any) -> None:
+        """Register a task-scoped tool provider by object identity."""
+        if not any(item is provider for item in self._runtime_tool_providers):
+            self._runtime_tool_providers.append(provider)
+
+    def unregister_runtime_tool_provider(self, provider: Any) -> None:
+        self._runtime_tool_providers = [
+            item for item in self._runtime_tool_providers if item is not provider
+        ]
+
+    async def activate_runtime_tool_context(
+        self,
+        **context: Any,
+    ) -> tuple[tuple[Any, object], ...]:
+        """Activate providers before schemas for one task are collected."""
+        leases: list[tuple[Any, object]] = []
+        for provider in tuple(self._runtime_tool_providers):
+            prepare = getattr(provider, "prepare_runtime_tools", None)
+            if not callable(prepare):
+                continue
+            try:
+                lease = prepare(**context)
+                if inspect.isawaitable(lease):
+                    lease = await lease
+            except Exception:  # noqa: BLE001 - one optional provider must not break a turn
+                log.exception(
+                    "运行期工具 Provider 激活失败: %s",
+                    type(provider).__name__,
+                )
+                continue
+            if lease is not None:
+                leases.append((provider, lease))
+        return tuple(leases)
+
+    async def release_runtime_tool_context(
+        self,
+        leases: tuple[tuple[Any, object], ...],
+    ) -> None:
+        """Release task-scoped provider leases in reverse activation order."""
+        for provider, lease in reversed(leases):
+            release = getattr(provider, "release_runtime_tools", None)
+            if not callable(release):
+                continue
+            try:
+                result = release(lease)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001 - continue releasing remaining providers
+                log.exception(
+                    "运行期工具 Provider 释放失败: %s",
+                    type(provider).__name__,
+                )
+
+    async def revoke_runtime_tool_session(
+        self,
+        owner_account_id: str,
+        session_id: str,
+    ) -> None:
+        await self._revoke_runtime_tools(
+            "revoke_session",
+            owner_account_id,
+            session_id,
+        )
+
+    async def revoke_runtime_tool_owner(self, owner_account_id: str) -> None:
+        await self._revoke_runtime_tools("revoke_owner", owner_account_id)
+
+    async def _revoke_runtime_tools(self, method_name: str, *args: str) -> None:
+        for provider in tuple(self._runtime_tool_providers):
+            revoke = getattr(provider, method_name, None)
+            if not callable(revoke):
+                continue
+            try:
+                result = revoke(*args)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001 - continue fencing other providers
+                log.exception(
+                    "运行期工具 Provider 撤销失败: %s",
+                    type(provider).__name__,
+                )
 
     def register(self, tool: Tool | None = None, **kwargs: Any) -> None:
         if tool is None:
@@ -164,6 +326,7 @@ class Registry(ToolRegistry):
                 on_progress=kwargs.get("on_progress"),
                 permission_resolver=kwargs.get("permission_resolver"),
                 permission_approver=kwargs.get("permission_approver"),
+                result_source=kwargs.get("result_source", ""),
             )
         if not tool.name:
             raise ToolError(f"工具缺少 name: {tool!r}")
@@ -346,22 +509,32 @@ class Registry(ToolRegistry):
         try:
             tool, deprecation_note = self._lookup(tool_call.name)
         except ToolNotFoundError as exc:
-            return ToolResult(tool_call.id, tool_call.name, str(exc), is_error=True)
+            del exc
+            return ToolResult(
+                tool_call.id,
+                tool_call.name,
+                f"工具不存在：{tool_call.name}",
+                is_error=True,
+            )
 
         args = tool_call.arguments
         # JSON Schema 结构校验
         schema_err = validate_arguments(tool.name, tool.parameters, args)
         if schema_err:
-            return ToolResult(
-                tool_call.id, tool.name,
+            return _tool_result(
+                tool,
+                tool_call.id,
+                tool.name,
                 _wrap_tool_use_error(tool.name, schema_err, deprecation_note),
                 is_error=True,
             )
         # 业务级 validate 钩子
         biz_err = validate_input_hook(tool, args if isinstance(args, dict) else {})
         if biz_err:
-            return ToolResult(
-                tool_call.id, tool.name,
+            return _tool_result(
+                tool,
+                tool_call.id,
+                tool.name,
                 _wrap_tool_use_error(tool.name, biz_err, deprecation_note),
                 is_error=True,
             )
@@ -375,12 +548,33 @@ class Registry(ToolRegistry):
             content = truncate_or_persist(tool_call.id, tool.name, content, max_chars=max_chars)
             if deprecation_note:
                 content = f"{deprecation_note}\n\n{content}"
-            return ToolResult(tool_call.id, tool.name, content, is_error=False, media=media)
+            return _tool_result(
+                tool,
+                tool_call.id,
+                tool.name,
+                content,
+                media=media,
+            )
         except ToolError as exc:
-            return ToolResult(tool_call.id, tool.name, f"工具执行失败: {exc}", is_error=True)
-        except Exception as exc:  # noqa: BLE001 - 工具内部异常也回灌给模型而非崩溃
+            message = _safe_tool_error_message(exc)
+            if message == "工具执行失败：内部错误":
+                return _tool_result(tool, tool_call.id, tool.name, message, is_error=True)
+            return _tool_result(
+                tool,
+                tool_call.id,
+                tool.name,
+                f"工具执行失败: {message}",
+                is_error=True,
+            )
+        except Exception:  # noqa: BLE001 - 工具内部异常也回灌给模型而非崩溃
             log.exception("工具 %s 异常", tool.name)
-            return ToolResult(tool_call.id, tool.name, f"工具异常: {exc}", is_error=True)
+            return _tool_result(
+                tool,
+                tool_call.id,
+                tool.name,
+                "工具执行失败：内部错误",
+                is_error=True,
+            )
 
 
 def register_builtin_tools(

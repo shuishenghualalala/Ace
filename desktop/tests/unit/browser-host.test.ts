@@ -1,6 +1,16 @@
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { access, mkdtemp, mkdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  access,
+  link,
+  mkdtemp,
+  mkdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -533,6 +543,7 @@ vi.mock('electron', async () => {
     profilePath: string;
     permissionCheck: unknown = null;
     permissionRequest: unknown = null;
+    devicePermission: unknown = null;
     proxy: unknown = null;
     proxyCalls: unknown[] = [];
     clearSteps: string[] = [];
@@ -557,6 +568,10 @@ vi.mock('electron', async () => {
 
     setPermissionRequestHandler(handler: unknown): void {
       this.permissionRequest = handler;
+    }
+
+    setDevicePermissionHandler(handler: unknown): void {
+      this.devicePermission = handler;
     }
 
     async setProxy(proxy: unknown): Promise<void> {
@@ -1291,6 +1306,9 @@ const SESSION_ID = 'session-one';
 const SESSION_HASH = createHash('sha256').update(SESSION_ID).digest('hex').slice(0, 32);
 const TAB_LABEL = `s${SESSION_HASH}-1`;
 const PROXY_URL = 'http://127.0.0.1:43123';
+const PROXY_RULES = PROXY_URL;
+const PROXY_USERNAME = 'crew';
+const PROXY_PASSWORD = 'proxy-secret-0123456789abcdef0123456789';
 const RECORDING_ID = 'aabbccddeeff0011';
 let tempRoot = '';
 let PROFILE = '';
@@ -1311,7 +1329,28 @@ function fakeWindow(): any {
   };
 }
 
-async function createTab(host: BrowserHost): Promise<any> {
+async function configureProxy(
+  host: BrowserHost,
+  runtimeKey = RUNTIME_KEY,
+  profile = PROFILE,
+  proxyUrl = PROXY_URL,
+): Promise<void> {
+  await host.handleRpc({
+    type: 'request',
+    id: 'proxy-config',
+    runtime_key: runtimeKey,
+    method: 'configure_proxy',
+    params: {
+      profile_dir: profile,
+      proxy_url: proxyUrl,
+      proxy_username: PROXY_USERNAME,
+      proxy_password: PROXY_PASSWORD,
+    },
+  });
+}
+
+async function createTab(host: BrowserHost, configure = true): Promise<any> {
+  if (configure) await configureProxy(host);
   const result: any = await host.handleRpc({
     type: 'request',
     id: 'one',
@@ -1341,6 +1380,7 @@ async function executeAtomic(
     downloadDir?: string;
   },
 ): Promise<any> {
+  await configureProxy(host);
   return host.handleRpc({
     runtime_key: RUNTIME_KEY,
     method: 'execute_transaction',
@@ -1371,6 +1411,16 @@ async function snapshot(host: BrowserHost): Promise<void> {
       target_id: currentTargetId,
     },
   });
+}
+
+async function stageApprovedUploads(names: string[]): Promise<string[]> {
+  const root = path.join(path.dirname(PROFILE), 'approved-uploads');
+  await mkdir(root, { recursive: true });
+  return await Promise.all(names.map(async (name) => {
+    const target = path.join(root, name);
+    await writeFile(target, `fixture:${name}`, 'utf8');
+    return await realpath(target);
+  }));
 }
 
 async function setMode(host: BrowserHost, targetId: string, mode: 'ai' | 'human' | 'paused'): Promise<void> {
@@ -2625,6 +2675,7 @@ describe('BrowserHost', () => {
       action: { name: 'openPage', url: 'https://example.com/drop' },
     });
     const targetId = String(opened.pageBindings[0].targetId);
+    const files = await stageApprovedUploads(['外部-a.txt', '外部-b.txt']);
     playwright.calls = [];
 
     await executeAtomic(host, {
@@ -2634,7 +2685,7 @@ describe('BrowserHost', () => {
       action: {
         name: 'x-crew-drop',
         selector: '#drop-zone',
-        files: ['/private/tmp/外部-a.txt', '/private/tmp/外部-b.txt'],
+        files,
         data: {
           'text/plain': 'exact text',
           'text/uri-list': 'https://example.test/a?token=exact#fragment',
@@ -2646,7 +2697,7 @@ describe('BrowserHost', () => {
     expect(playwright.calls).toContainEqual(expect.objectContaining({
       method: 'drop',
       args: [{
-        files: ['/private/tmp/外部-a.txt', '/private/tmp/外部-b.txt'],
+        files,
         data: {
           'text/plain': 'exact text',
           'text/uri-list': 'https://example.test/a?token=exact#fragment',
@@ -2872,7 +2923,7 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
-  it('uses a dedicated persistent Session, grants web capabilities, and keeps renderer isolation', async () => {
+  it('uses a dedicated persistent Session and denies sensitive permissions by default', async () => {
     const window = fakeWindow();
     const host = new BrowserHost(() => window);
 
@@ -2881,49 +2932,194 @@ describe('BrowserHost', () => {
     expect(electron.sessions).toHaveLength(1);
     expect(electron.sessions[0].profilePath).toBe(PROFILE);
     expect(electron.sessions[0].permissionCheck).toBeTypeOf('function');
+    expect(electron.sessions[0].devicePermission).toBeTypeOf('function');
+    expect(electron.sessions[0].devicePermission({ deviceType: 'usb' })).toBe(false);
     expect(electron.sessions[0].proxy).toMatchObject({
       mode: 'fixed_servers',
-      proxyRules: PROXY_URL,
+      proxyRules: PROXY_RULES,
+      proxyBypassRules: '<-loopback>',
     });
-    expect(electron.sessions[0].permissionCheck(
-      electron.views[0].webContents,
+    const contents = electron.views[0].webContents;
+    for (const permission of [
+      'media',
+      'camera',
+      'microphone',
       'geolocation',
+      'notifications',
+      'clipboard-read',
+      'clipboard-sanitized-write',
+      'midi',
+      'midiSysex',
+      'serial',
+      'hid',
+      'usb',
+      'fileSystem',
+    ]) {
+      expect(electron.sessions[0].permissionCheck(
+        contents,
+        permission,
+        'https://example.com',
+      )).toBe(false);
+      const permissionDecision = vi.fn();
+      electron.sessions[0].permissionRequest(
+        contents,
+        permission,
+        permissionDecision,
+        { requestingUrl: 'https://example.com/' },
+      );
+      expect(permissionDecision).toHaveBeenCalledWith(false);
+    }
+    expect(electron.sessions[0].permissionCheck(
+      contents,
+      'fullscreen',
       'https://example.com',
     )).toBe(true);
-    const permissionDecision = vi.fn();
-    electron.sessions[0].permissionRequest(
-      electron.views[0].webContents,
-      'camera',
-      permissionDecision,
-      { requestingUrl: 'https://example.com' },
-    );
-    expect(permissionDecision).toHaveBeenCalledWith(true);
+    expect(electron.sessions[0].permissionCheck(
+      contents,
+      'fullscreen',
+      'https://other.example',
+    )).toBe(false);
+    expect(electron.sessions[0].permissionCheck(
+      contents,
+      'fullscreen',
+      'http://example.com',
+    )).toBe(false);
+    expect(electron.sessions[0].permissionCheck(
+      { id: 999, getURL: () => 'https://example.com/' },
+      'fullscreen',
+      'https://example.com',
+    )).toBe(false);
     expect(electron.views[0].options.webPreferences).toMatchObject({
       session: electron.sessions[0],
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
       webSecurity: true,
+      allowRunningInsecureContent: false,
+      experimentalFeatures: false,
       webviewTag: false,
       devTools: false,
     });
-    for (const eventName of ['will-navigate', 'will-redirect', 'will-frame-navigate']) {
-      for (const url of [
-        'file:///private/tmp/local-workflow.html',
-        'data:text/html,<title>inline</title>',
-        'custom+workflow://tenant/action?ticket=signed-value',
-      ]) {
-        const navigation = { url, preventDefault: vi.fn() };
-        electron.views[0].webContents.emit(eventName, navigation);
-        expect(navigation.preventDefault).not.toHaveBeenCalled();
-      }
-    }
+    const popup = contents.windowOpenHandler({
+      url: 'https://example.com/popup',
+      disposition: 'foreground-tab',
+    });
+    expect(popup.overrideBrowserWindowOptions.webPreferences).toMatchObject({
+      session: electron.sessions[0],
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      experimentalFeatures: false,
+      webviewTag: false,
+      devTools: false,
+    });
     await expect(host.handleRpc({
       runtime_key: RUNTIME_KEY,
       method: 'execute',
       params: { profile_dir: PROFILE, command: 'tab', args: ['list'], proxy_url: '' },
-    })).resolves.toMatchObject({ success: true });
-    expect(electron.sessions[0].proxy).toEqual({ mode: 'direct' });
+    })).rejects.toMatchObject({ code: 'proxy_unavailable' });
+    expect(electron.sessions[0].proxy).toMatchObject({
+      mode: 'fixed_servers',
+      proxyRules: PROXY_RULES,
+    });
+
+    await host.dispose();
+  });
+
+  it('requires structured proxy credentials and rejects credentials in URLs', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await expect(host.handleRpc({
+      runtime_key: RUNTIME_KEY,
+      method: 'execute',
+      params: {
+        profile_dir: PROFILE,
+        command: 'tab',
+        args: ['list'],
+        proxy_url: PROXY_URL,
+      },
+    })).rejects.toMatchObject({ code: 'proxy_unavailable' });
+
+    await createTab(host);
+    for (const proxyUrl of [
+      '',
+      'http://crew:secret@10.0.0.2:43123',
+      `http://${PROXY_USERNAME}:${PROXY_PASSWORD}@127.0.0.1:43123`,
+      'socks5://crew:secret@127.0.0.1:43123',
+      'http://crew:secret@127.0.0.1:43123/path',
+    ]) {
+      await expect(host.handleRpc({
+        runtime_key: RUNTIME_KEY,
+        method: 'execute',
+        params: {
+          profile_dir: PROFILE,
+          command: 'tab',
+          args: ['list'],
+          proxy_url: proxyUrl,
+        },
+      })).rejects.toMatchObject({ code: 'proxy_unavailable' });
+    }
+    await expect(host.handleRpc({
+      runtime_key: RUNTIME_KEY,
+      method: 'configure_proxy',
+      params: {
+        profile_dir: PROFILE,
+        proxy_url: PROXY_URL,
+        proxy_username: PROXY_USERNAME,
+        proxy_password: 'too-short',
+      },
+    })).rejects.toMatchObject({ code: 'proxy_unavailable' });
+    expect(electron.sessions[0].proxy).toMatchObject({
+      mode: 'fixed_servers',
+      proxyRules: PROXY_RULES,
+    });
+    await host.dispose();
+  });
+
+  it('blocks dangerous navigation schemes from commands, renderer events, and popups', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    const created: any = await createTab(host);
+    const contents = electron.views[0].webContents;
+
+    for (const eventName of ['will-navigate', 'will-redirect', 'will-frame-navigate']) {
+      for (const url of [
+        'file:///private/tmp/local-workflow.html',
+        'data:text/html,<title>inline</title>',
+        'javascript:alert(document.domain)',
+        'java\tscript:alert(document.domain)',
+        'vbscript:msgbox("unsafe")',
+      ]) {
+        const navigation = { url, preventDefault: vi.fn() };
+        contents.emit(eventName, navigation);
+        expect(navigation.preventDefault).toHaveBeenCalledOnce();
+      }
+      const safeNavigation = {
+        url: 'crew-artifact://0123456789abcdef/index.html',
+        preventDefault: vi.fn(),
+      };
+      contents.emit(eventName, safeNavigation);
+      expect(safeNavigation.preventDefault).not.toHaveBeenCalled();
+    }
+    for (const url of [
+      'file:///private/tmp/local-workflow.html',
+      'data:text/html,<title>inline</title>',
+      'javascript:alert(1)',
+      'java\tscript:alert(1)',
+    ]) {
+      expect(contents.windowOpenHandler({ url })).toEqual({ action: 'deny' });
+      await expect(host.handleRpc({
+        runtime_key: RUNTIME_KEY,
+        method: 'execute',
+        params: {
+          profile_dir: PROFILE,
+          proxy_url: PROXY_URL,
+          target_id: created.data.targetId,
+          command: 'open',
+          args: [url],
+        },
+      })).rejects.toMatchObject({ code: 'unsafe_url_scheme' });
+    }
 
     await host.dispose();
   });
@@ -3093,10 +3289,11 @@ describe('BrowserHost', () => {
   it('bounds initial-document creation and rolls back the half-created tab', async () => {
     vi.useFakeTimers();
     electron.initialWebContentsURL = '';
-    electron.loadURLGates.set('about:blank', new Promise<void>(() => undefined));
     const host = new BrowserHost(() => fakeWindow());
+    await configureProxy(host);
+    electron.loadURLGates.set('about:blank', new Promise<void>(() => undefined));
 
-    const rejected = createTab(host).catch((error: unknown) => error);
+    const rejected = createTab(host, false).catch((error: unknown) => error);
     for (let turn = 0; turn < 10 && electron.views.length === 0; turn += 1) {
       await Promise.resolve();
     }
@@ -3116,13 +3313,14 @@ describe('BrowserHost', () => {
 
   it('bounds CDP domain enablement and rolls back the half-created tab', async () => {
     vi.useFakeTimers();
+    const host = new BrowserHost(() => fakeWindow());
+    await configureProxy(host);
     electron.debuggerCommandGates.set(
       '\u0000Page.enable',
       new Promise<void>(() => undefined),
     );
-    const host = new BrowserHost(() => fakeWindow());
 
-    const rejected = createTab(host).catch((error: unknown) => error);
+    const rejected = createTab(host, false).catch((error: unknown) => error);
     for (let turn = 0; turn < 10 && electron.views.length === 0; turn += 1) {
       await Promise.resolve();
     }
@@ -3236,11 +3434,18 @@ describe('BrowserHost', () => {
     await setMode(host, created.data.targetId, 'human');
 
     const workspace = path.join(tempRoot, 'workspace');
-    const outside = path.join(tempRoot, 'outside.html');
-    const linked = path.join(workspace, 'index.html');
+    const outsideDirectory = path.join(tempRoot, 'outside');
+    const linkedDirectory = path.join(workspace, 'linked');
+    const outside = path.join(outsideDirectory, 'index.html');
+    const linked = path.join(linkedDirectory, 'index.html');
     await mkdir(workspace, { recursive: true });
+    await mkdir(outsideDirectory, { recursive: true });
     await writeFile(outside, '<!doctype html><title>Outside</title>', 'utf8');
-    await symlink(outside, linked, process.platform === 'win32' ? 'file' : undefined);
+    await symlink(
+      outsideDirectory,
+      linkedDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
 
     await expect(host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -3260,21 +3465,23 @@ describe('BrowserHost', () => {
     const host = new BrowserHost(() => fakeWindow());
     await createTab(host);
     const changedProxy = 'http://127.0.0.1:43124';
+    const configureChangedProxy = () => host.handleRpc({
+      runtime_key: RUNTIME_KEY,
+      method: 'configure_proxy',
+      params: {
+        profile_dir: PROFILE,
+        proxy_url: changedProxy,
+        proxy_username: PROXY_USERNAME,
+        proxy_password: 'proxy-secret-abcdef0123456789abcdef0123456789',
+      },
+    });
 
     electron.failSetProxy = true;
-    await expect(host.handleRpc({
-      runtime_key: RUNTIME_KEY,
-      method: 'execute',
-      params: { profile_dir: PROFILE, command: 'tab', args: ['list'], proxy_url: changedProxy },
-    })).rejects.toMatchObject({ code: 'proxy_unavailable' });
+    await expect(configureChangedProxy()).rejects.toMatchObject({ code: 'proxy_unavailable' });
     expect(electron.sessions[0].proxy).toMatchObject({ proxyRules: expect.stringContaining('43123') });
 
     electron.failSetProxy = false;
-    await expect(host.handleRpc({
-      runtime_key: RUNTIME_KEY,
-      method: 'execute',
-      params: { profile_dir: PROFILE, command: 'tab', args: ['list'], proxy_url: changedProxy },
-    })).resolves.toMatchObject({ success: true });
+    await expect(configureChangedProxy()).resolves.toMatchObject({ configured: true });
     expect(electron.sessions[0].proxyCalls).toHaveLength(3);
     expect(electron.sessions[0].proxy).toMatchObject({ proxyRules: expect.stringContaining('43124') });
     await host.dispose();
@@ -3570,7 +3777,7 @@ describe('BrowserHost', () => {
     }
     expect(electron.views).toHaveLength(65);
     const beyondLegacyLimits = opener.windowOpenHandler({
-      url: 'custom+workflow://example/sixty-sixth-page',
+      url: 'https://example.com/sixty-sixth-page',
     });
     expect(beyondLegacyLimits.action).toBe('allow');
     beyondLegacyLimits.createWindow({});
@@ -3767,6 +3974,7 @@ describe('BrowserHost', () => {
       .update('foreign-session')
       .digest('hex')
       .slice(0, 32);
+    await configureProxy(host, foreignRuntimeKey, foreignProfile);
     await host.handleRpc({
       runtime_key: foreignRuntimeKey,
       method: 'execute',
@@ -3792,6 +4000,10 @@ describe('BrowserHost', () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
     const targetId = created.data.targetId;
+    const [literalPath, secondPath] = await stageApprovedUploads([
+      '--literal-path',
+      'two.txt',
+    ]);
     await snapshot(host);
 
     const execute = (command: string, args: string[] = [], extra: Record<string, unknown> = {}) =>
@@ -3846,8 +4058,8 @@ describe('BrowserHost', () => {
     await execute('resize', ['963.5', '707.25']);
     await execute('drop', [
       '@e1',
-      '--path', '--literal-path',
-      '--path', '/tmp/two.txt',
+      '--path', literalPath,
+      '--path', secondPath,
       '--data', 'text/plain', '--literal-value',
       '--data', 'text/uri-list', 'https://example.test/',
     ]);
@@ -3973,7 +4185,7 @@ describe('BrowserHost', () => {
         method: 'drop',
         ref: 'e1',
         args: [{
-          files: ['--literal-path', '/tmp/two.txt'],
+          files: [literalPath, secondPath],
           data: {
             'text/plain': '--literal-value',
             'text/uri-list': 'https://example.test/',
@@ -4196,8 +4408,8 @@ describe('BrowserHost', () => {
 
     electron.views[0].webContents.emit('before-mouse-event', blocked, { type: 'mouseWheel' });
 
-    // 输入仍被拦截（页面不应响应），但不发起接管请求。
-    expect(blocked.preventDefault).toHaveBeenCalledOnce();
+    // 滚轮作为只读查看手势放行，但不会隐式抢走 AI 控制权。
+    expect(blocked.preventDefault).not.toHaveBeenCalled();
     expect(requested).not.toHaveBeenCalled();
     await host.dispose();
   });
@@ -4648,6 +4860,7 @@ describe('BrowserHost', () => {
   it('routes a popup dialog and file chooser through the shared session modal coordinator', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const [popupFile] = await stageApprovedUploads(['popup.txt']);
     await snapshot(host);
     const opener = electron.views[0].webContents;
     const engine = playwright.engines[0];
@@ -4698,11 +4911,11 @@ describe('BrowserHost', () => {
       isMultiple: () => false,
       setFiles,
     });
-    await expect(executeOnOpener('file_upload', ['/tmp/popup.txt'])).resolves.toMatchObject({
+    await expect(executeOnOpener('file_upload', [popupFile])).resolves.toMatchObject({
       data: { canceled: false, uploaded: 1, multiple: false },
     });
     expect(setFiles).toHaveBeenCalledWith(
-      ['/tmp/popup.txt'],
+      [popupFile],
       { timeout: expect.any(Number) },
     );
     expect(setFiles.mock.calls[0][1]?.timeout).toBeGreaterThan(0);
@@ -4713,6 +4926,10 @@ describe('BrowserHost', () => {
   it('never lets upload_with_trigger consume or mask a sibling popup chooser', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const [openerFile, popupFile] = await stageApprovedUploads([
+      'opener.txt',
+      'popup.txt',
+    ]);
     const opener = electron.views[0].webContents;
     const popupRequest = opener.windowOpenHandler({
       url: 'about:blank',
@@ -4753,18 +4970,18 @@ describe('BrowserHost', () => {
     await expect(executeOnOpener('upload_with_trigger', [], {
       trigger_selector: '#opener-trigger',
       input_selector: '#opener-input',
-      files: ['/tmp/opener.txt'],
+      files: [openerFile],
     })).rejects.toMatchObject({
       code: 'file_chooser_pending',
     });
     expect(popupSetFiles).not.toHaveBeenCalled();
 
-    await expect(executeOnOpener('file_upload', ['/tmp/popup.txt']))
+    await expect(executeOnOpener('file_upload', [popupFile]))
       .resolves.toMatchObject({
         data: { canceled: false, uploaded: 1, multiple: false },
       });
     expect(popupSetFiles).toHaveBeenCalledOnce();
-    expect(popupSetFiles.mock.calls[0]?.[0]).toEqual(['/tmp/popup.txt']);
+    expect(popupSetFiles.mock.calls[0]?.[0]).toEqual([popupFile]);
     expect(popupSetFiles.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
     expect(popupSetFiles.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(15_000);
     await host.dispose();
@@ -4773,6 +4990,7 @@ describe('BrowserHost', () => {
   it('surfaces an action-created file chooser, releases the queue, and joins after upload', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const [actionFile] = await stageApprovedUploads(['from-action.txt']);
     await snapshot(host);
     const setFiles = vi.fn(async (
       _files: string[],
@@ -4804,11 +5022,11 @@ describe('BrowserHost', () => {
     await expect(execute('snapshot')).rejects.toMatchObject({
       code: 'file_chooser_pending',
     });
-    await expect(execute('file_upload', ['/tmp/from-action.txt'])).resolves.toMatchObject({
+    await expect(execute('file_upload', [actionFile])).resolves.toMatchObject({
       data: { canceled: false, uploaded: 1, multiple: false },
     });
     expect(setFiles).toHaveBeenCalledOnce();
-    expect(setFiles.mock.calls[0]?.[0]).toEqual(['/tmp/from-action.txt']);
+    expect(setFiles.mock.calls[0]?.[0]).toEqual([actionFile]);
     expect(setFiles.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
     expect(setFiles.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(15_000);
     await expect(execute('snapshot')).resolves.toMatchObject({ success: true });
@@ -4962,6 +5180,7 @@ describe('BrowserHost', () => {
   it('never resolves multiple pending file choosers by latest-wins guessing', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const [ambiguousFile] = await stageApprovedUploads(['ambiguous.txt']);
     await snapshot(host);
     const firstSetFiles = vi.fn(async () => undefined);
     const secondSetFiles = vi.fn(async () => undefined);
@@ -4991,7 +5210,7 @@ describe('BrowserHost', () => {
     await expect(execute('click', ['@e1'])).rejects.toMatchObject({
       code: 'file_chooser_pending',
     });
-    await expect(execute('file_upload', ['/tmp/ambiguous.txt'])).rejects.toMatchObject({
+    await expect(execute('file_upload', [ambiguousFile])).rejects.toMatchObject({
       code: 'file_chooser_race',
       uncertain: true,
       partial: true,
@@ -5394,6 +5613,14 @@ describe('BrowserHost', () => {
   it('completes, cancels, and consumes one pending browser-native FileChooser', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const [firstFile, secondFile, lateFile, compatibilityFile, expiredFile] =
+      await stageApprovedUploads([
+        'a.txt',
+        'b.txt',
+        'late.txt',
+        'compat.txt',
+        'expired.txt',
+      ]);
     const engine = playwright.engines.at(-1);
     const firstSetFiles = vi.fn(async (
       _files: string[],
@@ -5417,13 +5644,13 @@ describe('BrowserHost', () => {
       },
     });
 
-    await expect(execute('file_upload', ['/tmp/a.txt', '/tmp/b.txt']))
+    await expect(execute('file_upload', [firstFile, secondFile]))
       .resolves.toMatchObject({
         success: true,
         data: { canceled: false, uploaded: 2, multiple: true },
       });
     expect(firstSetFiles).toHaveBeenCalledOnce();
-    expect(firstSetFiles.mock.calls[0]?.[0]).toEqual(['/tmp/a.txt', '/tmp/b.txt']);
+    expect(firstSetFiles.mock.calls[0]?.[0]).toEqual([firstFile, secondFile]);
     expect(firstSetFiles.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
     expect(firstSetFiles.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(15_000);
     expect(engine.pendingFileChooser).toBeNull();
@@ -5438,7 +5665,7 @@ describe('BrowserHost', () => {
     });
     expect(canceledSetFiles).not.toHaveBeenCalled();
 
-    await expect(execute('file_upload', ['/tmp/late.txt'])).rejects.toMatchObject({
+    await expect(execute('file_upload', [lateFile])).rejects.toMatchObject({
       code: 'no_file_chooser',
       uncertain: false,
     });
@@ -5451,12 +5678,12 @@ describe('BrowserHost', () => {
       isMultiple: () => false,
       setFiles: compatibilitySetFiles,
     };
-    await expect(execute('upload', ['--chooser', '/tmp/compat.txt']))
+    await expect(execute('upload', ['--chooser', compatibilityFile]))
       .resolves.toMatchObject({
         data: { canceled: false, uploaded: 1, multiple: false },
       });
     expect(compatibilitySetFiles).toHaveBeenCalledOnce();
-    expect(compatibilitySetFiles.mock.calls[0]?.[0]).toEqual(['/tmp/compat.txt']);
+    expect(compatibilitySetFiles.mock.calls[0]?.[0]).toEqual([compatibilityFile]);
     expect(compatibilitySetFiles.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
     expect(compatibilitySetFiles.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(15_000);
 
@@ -5473,7 +5700,7 @@ describe('BrowserHost', () => {
         proxy_url: PROXY_URL,
         target_id: created.data.targetId,
         command: 'file_upload',
-        args: ['/tmp/expired.txt'],
+        args: [expiredFile],
         command_timeout_ms: 15_000,
         command_deadline_ms: Date.now() - 1,
         mutating: true,
@@ -5487,9 +5714,50 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
+  it('rejects a hard-linked approved upload before handing it to the chooser', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    const created: any = await createTab(host);
+    const [approved] = await stageApprovedUploads(['hardlink-source.txt']);
+    const alias = path.join(path.dirname(approved), 'hardlink-alias.txt');
+    try {
+      fs.linkSync(approved, alias);
+    } catch {
+      await host.dispose();
+      return;
+    }
+    const engine = playwright.engines.at(-1);
+    const setFiles = vi.fn(async () => undefined);
+    engine.pendingFileChooser = {
+      isMultiple: () => false,
+      setFiles,
+    };
+    try {
+      await expect(host.handleRpc({
+        runtime_key: RUNTIME_KEY,
+        method: 'execute',
+        params: {
+          profile_dir: PROFILE,
+          proxy_url: PROXY_URL,
+          target_id: created.data.targetId,
+          command: 'file_upload',
+          args: [alias],
+          mutating: true,
+        },
+      })).rejects.toMatchObject({ code: 'invalid_upload_path' });
+      expect(setFiles).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(alias, { force: true });
+      await host.dispose();
+    }
+  });
+
   it('atomically ignores a stale chooser and waits for this trigger delayed chooser', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const currentFiles = await stageApprovedUploads([
+      'current-a.txt',
+      'current-b.txt',
+    ]);
     const engine = playwright.engines.at(-1);
     const staleSetFiles = vi.fn(async () => undefined);
     const currentSetFiles = vi.fn(async () => undefined);
@@ -5518,7 +5786,7 @@ describe('BrowserHost', () => {
         args: [],
         trigger_selector: '#delayed-upload-trigger',
         input_selector: '#exact-file-input',
-        files: ['/tmp/current-a.txt', '/tmp/current-b.txt'],
+        files: currentFiles,
         mutating: true,
       },
     });
@@ -5531,7 +5799,7 @@ describe('BrowserHost', () => {
     expect(staleSetFiles).not.toHaveBeenCalled();
     expect(currentSetFiles).toHaveBeenCalledOnce();
     expect(currentSetFiles).toHaveBeenCalledWith(
-      ['/tmp/current-a.txt', '/tmp/current-b.txt'],
+      currentFiles,
       { timeout: expect.any(Number) },
     );
     expect(currentSetFiles.mock.calls[0][1]?.timeout).toBeGreaterThan(0);
@@ -5549,10 +5817,10 @@ describe('BrowserHost', () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
     playwright.selectorCounts.set('#missing-trigger', 0);
-    const files = Array.from(
+    const files = await stageApprovedUploads(Array.from(
       { length: 256 },
-      (_, index) => `/tmp/file-${index}.txt`,
-    );
+      (_, index) => `file-${index}.txt`,
+    ));
 
     const result: any = await host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -5607,8 +5875,8 @@ describe('BrowserHost', () => {
     ).toEqual([[]]);
 
     const unboundedFiles = Array.from(
-      { length: 1_025 },
-      (_, index) => `/tmp/unbounded-${index}.txt`,
+      { length: 257 },
+      (_, index) => path.join(path.dirname(files[0]), `unbounded-${index}.txt`),
     );
     await expect(host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -5624,21 +5892,22 @@ describe('BrowserHost', () => {
         files: unboundedFiles,
         mutating: true,
       },
-    })).resolves.toMatchObject({
-      success: true,
-      data: { via: 'input', uploaded: 1_025 },
+    })).rejects.toMatchObject({
+      code: 'invalid_upload',
+      uncertain: false,
     });
     expect(
       playwright.calls.filter(
         (call) => call.method === 'upload' && call.ref === '#exact-file-input',
       ).at(-1)?.args,
-    ).toEqual([unboundedFiles]);
+    ).toEqual([[]]);
     await host.dispose();
   });
 
   it('does not direct-upload after a trigger click becomes uncertain', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const [uploadFile] = await stageApprovedUploads(['must-not-upload.txt']);
     playwright.inputFailure = {
       method: 'Input.dispatchMouseEvent',
       message: 'transport failed after click dispatch began',
@@ -5655,7 +5924,7 @@ describe('BrowserHost', () => {
         args: [],
         trigger_selector: '#uncertain-trigger',
         input_selector: '#exact-file-input',
-        files: ['/tmp/must-not-upload.txt'],
+        files: [uploadFile],
         mutating: true,
       },
     })).rejects.toMatchObject({
@@ -5676,6 +5945,7 @@ describe('BrowserHost', () => {
   it('rejects two chooser events from one trigger instead of choosing the wrong one', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const [ambiguousFile] = await stageApprovedUploads(['ambiguous.txt']);
     const firstSetFiles = vi.fn(async () => undefined);
     const secondSetFiles = vi.fn(async () => undefined);
     playwright.clickHook = (_selector, engine, view) => {
@@ -5700,7 +5970,7 @@ describe('BrowserHost', () => {
         args: [],
         trigger_selector: '#double-chooser-trigger',
         input_selector: '#exact-file-input',
-        files: ['/tmp/ambiguous.txt'],
+        files: [ambiguousFile],
         mutating: true,
       },
     })).rejects.toMatchObject({
@@ -5718,6 +5988,7 @@ describe('BrowserHost', () => {
   it('reports a confirmed trigger plus failed chooser upload as partial progress', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
+    const [disappearedFile] = await stageApprovedUploads(['disappeared.txt']);
     playwright.clickHook = (_selector, engine, view) => {
       engine.emitFileChooser(view, {
         isMultiple: () => false,
@@ -5738,7 +6009,7 @@ describe('BrowserHost', () => {
         args: [],
         trigger_selector: '#chooser-trigger',
         input_selector: '#exact-file-input',
-        files: ['/tmp/disappeared.txt'],
+        files: [disappearedFile],
         mutating: true,
       },
     })).rejects.toMatchObject({
@@ -7405,13 +7676,12 @@ describe('BrowserHost', () => {
     await host.dispose();
   }, 30_000);
 
-  it('publicUrl 对任意 scheme、长查询串和 hash 元数据做精确透传', async () => {
+  it('publicUrl 对受信本地 scheme、长查询串和 hash 元数据做精确透传', async () => {
     const host = new BrowserHost(() => fakeWindow());
     await createTab(host);
     const urls = [
       `https://oa.example/app?metadata=${'m'.repeat(5_000)}#/ticket/detail?id=GD-1&token=abc123`,
-      'file:///private/tmp/workflow.html?ticket=signed-value#step=4',
-      'custom+workflow://tenant/action?payload=%7B%22exact%22%3Atrue%7D#callback',
+      'crew-artifact://tenant/action?payload=%7B%22exact%22%3Atrue%7D#callback',
     ];
     for (const expected of urls) {
       await host.handleRpc({
@@ -7610,7 +7880,9 @@ describe('BrowserHost', () => {
       method: 'Page.captureScreenshot',
       params: { format: 'png', fromSurface: true, captureBeyondViewport: false },
     });
-    expect((await stat(output)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(output)).mode & 0o777).toBe(0o600);
+    }
     await host.dispose();
   });
 
@@ -8121,6 +8393,35 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
+  it('cancels downloads when the final URL or redirect chain uses a dangerous scheme', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    const created: any = await createTab(host);
+    for (const [url, urlChain] of [
+      ['file:///private/tmp/secret.txt', []],
+      ['data:text/plain,inline', ['https://example.com/export']],
+      ['https://example.com/export', ['https://example.com/export', 'javascript:alert(1)']],
+    ] as const) {
+      const { promise } = await beginDownload(host, created.data.targetId);
+      const item = new FakeDownloadItem();
+      item.url = url;
+      item.urlChain = [...urlChain];
+      const event = { preventDefault: vi.fn() };
+
+      electron.sessions[0].emit(
+        'will-download',
+        event,
+        item,
+        electron.views[0].webContents,
+      );
+
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      expect(item.cancelled).toBe(true);
+      expect(item.savePathCalls).toEqual([]);
+      await expect(promise).rejects.toMatchObject({ code: 'unsafe_download_scheme' });
+    }
+    await host.dispose();
+  });
+
   it('settles an explicit grant when setSavePath throws and permits the next download', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
@@ -8154,32 +8455,92 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
-  it('allows an explicit absolute download target outside account roots and ignores size/quarantine policy', async () => {
+  it('rejects an explicit download target outside the account staging root', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
     const arbitraryTarget = path.join(tempRoot, 'user-selected', 'exports', 'large.bin');
-    const { promise } = await beginDownload(host, created.data.targetId, {
-      target: arbitraryTarget,
-      download_dir: path.join(tempRoot, 'unrelated-legacy-quarantine'),
-      max_bytes: 1,
+    await snapshot(host);
+    const promise = host.handleRpc({
+      runtime_key: RUNTIME_KEY,
+      method: 'download',
+      params: {
+        profile_dir: PROFILE,
+        target_id: created.data.targetId,
+        ref: '@e1',
+        target: arbitraryTarget,
+        download_dir: path.join(tempRoot, 'unrelated-legacy-quarantine'),
+        proxy_url: PROXY_URL,
+        max_bytes: 1,
+      },
     });
-    const canonicalTarget = path.join(
-      await realpath(path.dirname(arbitraryTarget)),
-      path.basename(arbitraryTarget),
-    );
+    await expect(promise).rejects.toMatchObject({ code: 'invalid_download_path' });
+    await host.dispose();
+  });
+
+  it('rejects a screenshot output that is an in-account hardlink', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    const created: any = await createTab(host);
+    const artifactDir = path.join(path.dirname(PROFILE), 'artifacts');
+    const victim = path.join(artifactDir, 'victim.png');
+    const output = path.join(artifactDir, 'linked.png');
+    await mkdir(artifactDir, { recursive: true });
+    await writeFile(victim, 'do-not-overwrite');
+    await link(victim, output);
+
+    await expect(host.handleRpc({
+      runtime_key: RUNTIME_KEY,
+      method: 'execute',
+      params: {
+        profile_dir: PROFILE,
+        command: 'screenshot',
+        args: ['--type', 'png', output],
+        proxy_url: PROXY_URL,
+        target_id: created.data.targetId,
+      },
+    })).rejects.toMatchObject({ code: 'invalid_artifact_path' });
+    await expect(stat(victim)).resolves.toMatchObject({ size: 16 });
+    await host.dispose();
+  });
+
+  it('rejects a vision screenshot output that is an in-account hardlink', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    const created: any = await createTab(host);
+    const artifactDir = path.join(path.dirname(PROFILE), 'artifacts');
+    const victim = path.join(artifactDir, 'vision-victim.png');
+    const output = path.join(artifactDir, 'vision-linked.png');
+    await mkdir(artifactDir, { recursive: true });
+    await writeFile(victim, 'do-not-overwrite');
+    await link(victim, output);
+
+    await expect(host.handleRpc({
+      runtime_key: RUNTIME_KEY,
+      method: 'execute',
+      params: {
+        profile_dir: PROFILE,
+        command: 'vision_screenshot',
+        args: [output],
+        proxy_url: PROXY_URL,
+        target_id: created.data.targetId,
+      },
+    })).rejects.toMatchObject({ code: 'invalid_artifact_path' });
+    await expect(stat(victim)).resolves.toMatchObject({ size: 16 });
+    await host.dispose();
+  });
+
+  it('cancels an explicit download when progress crosses its size grant', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    const created: any = await createTab(host);
+    const { promise, target } = await beginDownload(host, created.data.targetId, {
+      max_bytes: 8,
+    });
     const item = new FakeDownloadItem();
-    item.receivedBytes = 10_000_000;
-    item.totalBytes = 10_000_000;
     const event = { preventDefault: vi.fn() };
     electron.sessions[0].emit('will-download', event, item, electron.views[0].webContents);
-    expect(event.preventDefault).not.toHaveBeenCalled();
-    expect(item.savePath).toBe(canonicalTarget);
-    await writeFile(arbitraryTarget, 'complete');
-    item.complete();
-    await expect(promise).resolves.toMatchObject({
-      path: canonicalTarget,
-      bytes: 10_000_000,
-    });
+    expect(item.savePath).toBe(target);
+    item.update(9);
+
+    await expect(promise).rejects.toMatchObject({ code: 'download_too_large' });
+    expect(item.cancelled).toBe(true);
     await host.dispose();
   });
 
@@ -8595,7 +8956,11 @@ describe('BrowserHost', () => {
     const host = new BrowserHost(() => fakeWindow());
     await createTab(host);
     const downloads = Array.from({ length: 4 }, () => ({
-      item: { cancel: vi.fn() },
+      item: {
+        cancel: vi.fn(),
+        getURL: () => 'https://example.com/download',
+        getURLChain: () => [],
+      },
       event: { preventDefault: vi.fn() },
     }));
     for (const { event, item } of downloads) {

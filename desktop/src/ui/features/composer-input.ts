@@ -66,11 +66,15 @@ export function autoresizeTextarea(input: HTMLTextAreaElement, maxHeight: number
   setRuntimeStyle(input, 'height', 'auto');
   const nextHeight = Math.min(input.scrollHeight, maxHeight);
   setRuntimeStyle(input, 'height', `${nextHeight}px`);
+  input.style.height = `${nextHeight}px`;
   setRuntimeStyle(input, 'overflowY', input.scrollHeight > maxHeight ? 'auto' : 'hidden');
+  input.style.overflowY = input.scrollHeight > maxHeight ? 'auto' : 'hidden';
 }
 
 /** 发送/清空后还原输入框高度（与 autoresizeTextarea 配对）。 */
 export function resetTextareaHeight(input: HTMLTextAreaElement): void {
   clearRuntimeStyle(input, 'height');
   setRuntimeStyle(input, 'overflowY', 'hidden');
+  input.style.height = '';
+  input.style.overflowY = 'hidden';
 }

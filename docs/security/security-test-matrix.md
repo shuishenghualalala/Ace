@@ -17,13 +17,61 @@ workflow has executed the real packaged helper on the target OS.
 | SMX-CRASH-001 | crash cleanup | helper/process tree exits and mounts disappear | Job closes; stale ACL manifest repair removes only Ace ACE | process group exits and private temporary home is removed | required |
 | SMX-LOG-001 | secret output/audit | bounded output and redacted audit | bounded output and redacted audit | bounded output and redacted audit | required |
 
-The GitHub `security-linux`, `security-windows`, and `security-macos` checks are the canonical evidence producers.
-Their artifact/log URLs must be attached to a release decision; this document does not claim that
-the current checkout has passed them. Both workflows build with `--release --locked`; the native
-matrix and Desktop staging consume that same path. `scripts/write_security_runtime_evidence.py`
-then rejects a changed staged copy and records repository, commit, workflow run, target triple,
-artifact/source/Cargo.lock/manifest hashes. Debug-runtime results are not release evidence.
+## Release evidence closure
 
-Release readiness consumes the three workflow evidence files plus a package evidence JSON. The
-package evidence must attest `package_signature_verified`, `cargo_lock_verified`, and
-`desktop_walkthrough`; all three are mandatory booleans, not free-form reviewer notes.
+This gate closes REL-001, SUP-012, TEST-007, TEST-013, TEST-014, TEST-015, and
+ACE-020. The GitHub `security-linux`, `security-windows`, and `security-macos`
+checks are the canonical native evidence producers. Their artifact and log URLs
+must be attached to a release decision; this document does not claim that the
+current checkout has passed them.
+
+Each native workflow builds and tests with `--release --locked`, then gives the
+same runtime to Desktop staging with `--source-root security-runtime`.
+`scripts/write_security_runtime_evidence.py` refuses a dirty tracked/untracked
+checkout, a commit or repository mismatch, a platform/target mismatch, a
+manifest mismatch, or changed staged bytes. A native evidence JSON binds the
+full commit, origin repository, Actions run, platform, target triple,
+`workflow_ref`, `runner_os`, `runner_arch`, `source_hash`,
+`cargo_lock_sha256`, `runtime_manifest_sha256`, `artifact_sha256`, and
+`desktop_staged_artifact_sha256`. It also binds the deterministic CycloneDX
+SBOM through `sbom_sha256`; that SBOM includes the attested runtime-manifest files
+(including Linux `bwrap` and its license) plus every committed lock dependency.
+The Linux `bwrap` component carries its distribution package URL/version, and the native workflow
+scans the assembled SBOM against the blocking `HIGH,CRITICAL` vulnerability threshold. The evidence
+also records the frozen-lock, vulnerability-threshold, and secret-scan policies.
+Debug-runtime results and hand-written JSON are not release evidence.
+
+`scripts/check_release_readiness.py --security-release` derives HEAD and the origin repository
+from Git, requires Linux, Windows, and macOS evidence for that exact checkout,
+and blocks modified files, untracked files, local test directories, and ignored
+security runtime artifacts. The tested and Desktop-staged digests must be
+equal. All three native evidence files must then be bound by raw
+`runtime_evidence_sha256` values and matching target/artifact/staged/manifest
+records in one package evidence manifest.
+
+The package evidence manifest must also bind the real Linux, Windows, and macOS
+package files through `packages.<platform>.sha256`, this checkout's source and
+Cargo lock digests, each platform's traceable signature verification, and
+`desktop_walkthroughs` for every platform. `update_trust_root` and `update_source`
+must additionally bind one Ed25519 public-key digest and one fixed HTTPS update
+directory, and prove both were embedded in all three packages. Set
+`ACE_SECURITY_PACKAGE_EVIDENCE` to that manifest and
+`ACE_SECURITY_PACKAGE_ATTESTATION` to the GitHub artifact-attestation bundle
+for the manifest. The committed `deploy/security/package-signing-policy.json`
+must pin that signer workflow, the embedded update-key digest, fixed update source, and exact
+per-platform signature identities and issuers. Environment variables cannot
+replace this trust policy. Release readiness verifies the bundle with
+`gh attestation verify`, pins the signer workflow and source commit, and
+refuses self-hosted attestation signers. The attestation and package signature
+require an external release CI or signing runner; they must not be manufactured locally.
+`.github/workflows/security-release-gate.yml` downloads the three native workflow runs and one
+package-signing run by explicit run ID, then executes this closure. A publishing workflow must call
+that reusable gate as a required job; a standalone manual dispatch is not release authorization.
+On `workflow_dispatch`, each native security workflow attests its evidence JSON,
+runtime manifest, and SBOM in a least-privilege follow-up job. Those native attestations do not
+replace the independent Linux package trust, Windows Authenticode, Apple code
+signing/notarization, or the separately attested package evidence.
+
+Evidence and package inputs should be downloaded outside the source checkout.
+Only a clean aggregation checkout can become `ready`; the current dirty
+development checkout is expected to remain `blocked`.

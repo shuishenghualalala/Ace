@@ -111,10 +111,10 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
   });
   let current = options.state;
 
-  template.element.classList.add('mw-agent-hub');
-  heading.className = 'mw-hub-heading';
+  template.element.classList.add('mw-agent-hub', 'agents-panel');
+  heading.className = 'mw-hub-heading agents-panel__head';
   heading.append(
-    textElement('h1', 'mw-hub-heading__title', '外援'),
+    textElement('h1', 'mw-hub-heading__title', '外援中心'),
     textElement('p', 'mw-hub-heading__description', '发现电脑里的 AI 帮手，加入阵容、直接派活，或者拉上他们一起组队。'),
   );
   actions.className = 'mw-hub-actions';
@@ -132,6 +132,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
   for (const tab of tabs.element.querySelectorAll<HTMLButtonElement>('[data-tab-id]')) {
     tab.dataset.agentsTab = tab.dataset.tabId;
   }
+  tabs.element.classList.add('agents-tabs');
   message.className = 'mw-agent-hub__message';
   message.setAttribute('role', 'status');
   results.className = 'mw-agent-hub__results';
@@ -143,7 +144,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
   const renderMine = (): void => {
     const section = (title: string, count: number): HTMLElement => {
       const header = document.createElement('header');
-      header.className = 'mw-agent-hub__section-header';
+      header.className = 'mw-agent-hub__section-header agents-section__intro';
       header.append(textElement('h2', '', title), createBadge({ label: `${count} 个`, compact: true }));
       return header;
     };
@@ -151,8 +152,8 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
     const teamSection = document.createElement('section');
     const agentGrid = document.createElement('div');
     const teamGrid = document.createElement('div');
-    agentSection.className = 'mw-agent-hub__section';
-    teamSection.className = 'mw-agent-hub__section';
+    agentSection.className = 'mw-agent-hub__section agents-section';
+    teamSection.className = 'mw-agent-hub__section agents-section';
     agentGrid.className = 'mw-agent-hub__grid';
     teamGrid.className = 'mw-agent-hub__grid';
     agentSection.append(section('我的外援', current.agents.length), agentGrid);
@@ -182,7 +183,13 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
       card.append(createIcon('icon-agent', { size: 40 }), copy, cardActions);
       agentGrid.append(card);
     }
-    if (!current.agents.length) agentGrid.append(textElement('p', 'mw-hub-state', '阵容还是空的'));
+    if (!current.agents.length) {
+      agentGrid.append(textElement(
+        'p',
+        'mw-hub-state agents-empty agents-empty--actionable agents-empty--wide',
+        '阵容还是空的',
+      ));
+    }
 
     for (const team of current.teams) {
       const card = document.createElement('article');
@@ -204,7 +211,13 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
       card.append(createIcon('icon-team', { size: 40 }), copy, cardActions);
       teamGrid.append(card);
     }
-    if (!current.teams.length) teamGrid.append(textElement('p', 'mw-hub-state', '还没有小队'));
+    if (!current.teams.length) {
+      teamGrid.append(textElement(
+        'p',
+        'mw-hub-state agents-empty agents-empty--actionable agents-empty--wide',
+        '还没有小队',
+      ));
+    }
     results.append(agentSection, teamSection);
   };
 
@@ -219,7 +232,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
       ...(options.onScanRuntimes ? { onPress: options.onScanRuntimes } : {}),
     });
     scan.element.dataset.scanRuntimes = '';
-    header.className = 'mw-agent-hub__section-header';
+    header.className = 'mw-agent-hub__section-header agents-section__intro';
     header.append(textElement('h2', '', '发现外援'), scan.element);
     list.className = 'mw-agent-hub__runtime-list';
     results.append(header, list);
@@ -231,7 +244,8 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
         tone: runtime.availability === 'ready' ? 'success' : runtime.availability === 'degraded' ? 'warning' : 'danger',
         compact: true,
       });
-      card.className = 'mw-agent-card mw-agent-card--runtime';
+      availability.classList.add('agent-card__meta');
+      card.className = 'mw-agent-card agent-card mw-agent-card--runtime';
       card.dataset.runtimeId = runtime.id;
       copy.className = 'mw-agent-card__copy';
       copy.append(
@@ -276,7 +290,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
     else if (current.tab === 'runtime') renderRuntimes();
     else {
       const formRegion = document.createElement('section');
-      formRegion.className = 'mw-agent-hub__form';
+      formRegion.className = 'mw-agent-hub__form agents-form';
       formRegion.dataset.agentFormRegion = '';
       if (current.form) formRegion.append(current.form);
       else formRegion.append(textElement('p', 'mw-hub-state', '表单正在准备…'));

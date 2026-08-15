@@ -24,13 +24,31 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 from urllib.parse import urlsplit
 
-from crew.browser.driver import BrowserDriver, BrowserDriverError, BrowserOperationCancelled
+from crew.browser.driver import (
+    BrowserDriver,
+    BrowserDriverError,
+    BrowserOperationCancelled,
+    _safe_browser_error,
+)
 from crew.browser.electron_driver import ElectronBrowserDriver
 from crew.browser.security import BrowserNetworkPolicy, LoopbackPolicyProxy, path_is_within
 from crew.browser.types import BrowserConfig, BrowserPageState, BrowserRef
 from crew.core.types import MediaPart, ToolOutput, ToolPermissionDecision
+from crew.security.local_path import LocalPathReference, LocalPathReferenceKind
 from crew.state.home import get_owner_runtime_home
 from crew.state.logging import get_logger
+from crew.tools.file_utils import (
+    FileConflictError,
+    FileIdentity,
+    _ensure_private_directory,
+    atomic_replace_bytes,
+    capture_file_identity,
+    decode_local_file_uri,
+    read_verified_bytes,
+    snapshot_file,
+    stat_verified_file,
+)
+from crew.tools.redact import redact_sensitive_display_text
 
 log = get_logger("browser.manager")
 
@@ -48,6 +66,7 @@ _INVALID_KEY_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 # by the current Electron protocol, so use its protocol ceiling rather than the
 # old configurable product quota.
 _WIRE_MAX_TRANSFER_BYTES = 2_147_483_647
+_MAX_UPLOAD_FILES = 256
 _CLICK_BUTTONS = frozenset({"left", "right", "middle"})
 _CLICK_MODIFIERS = frozenset(
     {"Alt", "Control", "ControlOrMeta", "Meta", "Shift"}
@@ -64,7 +83,6 @@ _DEBUG_SECRET_KEY = re.compile(
     r"session|signature|token)$",
     re.IGNORECASE,
 )
-
 # Optional diagnostic/test override.  Production has no hidden 30-second cap;
 # the configured navigation timeout is authoritative.
 _PAGE_TRANSITION_MAX_SECONDS: float | None = None
@@ -389,7 +407,7 @@ class BrowserManager:
     def __init__(self, config: BrowserConfig, driver: BrowserDriver | None = None) -> None:
         self.config = config
         self.driver = driver or ElectronBrowserDriver(config)
-        self.policy = BrowserNetworkPolicy(config)
+        self.policy = BrowserNetworkPolicy(config, default_allow_public=True)
         self._owners: dict[str, _Owner] = {}
         # (owner, session_id) -> 已登记的只读租约。独立于 _Session 存在，
         # 因为策略要在 session 被创建之前就能登记。
@@ -478,6 +496,26 @@ class BrowserManager:
         self._capability_generations[owner_id] = new_value
         return new_value
 
+    def _wake_owner_subscribers(self, owner_account_id: str) -> None:
+        """Wake Browser WS producers before owner teardown removes their state."""
+        owner_id = str(owner_account_id or "").strip()
+        if not owner_id:
+            return
+        terminal = {
+            "type": "owner_revoked",
+            "code": 4401,
+            "reason": "登录状态已失效",
+        }
+        for (owner, _session_id), queues in list(self._subscribers.items()):
+            if owner != owner_id:
+                continue
+            for queue in list(queues):
+                if queue.full():
+                    with suppress(asyncio.QueueEmpty):
+                        queue.get_nowait()
+                with suppress(asyncio.QueueFull):
+                    queue.put_nowait(terminal)
+
     def renew_capability(self, owner_account_id: str) -> int:
         """重新启用能力时递增代次，并失效旧页面观察句柄。"""
         owner_id = str(owner_account_id or "").strip()
@@ -548,6 +586,7 @@ class BrowserManager:
         # the preference is already disabled and an in-flight action may still
         # hold an older capability generation.
         cancelled = await self._complete_critical(fence_owner())
+        self._wake_owner_subscribers(owner_id)
         log.info("browser capability revoked for owner=%s generation=%d", owner_id, generation)
         if owner is None:
             if cancelled:
@@ -807,12 +846,7 @@ class BrowserManager:
                                 self._cleanup_expired_artifacts,
                                 home / "browser" / "artifacts",
                             )
-                            # The browser connects directly by default.  A
-                            # mandatory Python HTTP/1.1 proxy changed Chromium
-                            # networking semantics (HTTP/2, WebSocket, auth,
-                            # downloads and custom schemes) and made the
-                            # Playwright facade less compatible with upstream.
-                            current.initialized = True
+                            await self._start_owner_proxy(current)
                     except BaseException:
                         # Publish the tombstone before releasing current.lock.
                         # A waiter can therefore never reinitialize and return
@@ -834,17 +868,48 @@ class BrowserManager:
                 raise
 
     async def _start_owner_proxy(self, owner: _Owner) -> None:
-        """Initialize a direct-network owner.
-
-        Kept as a compatibility entry point for lifecycle code that used to
-        require a temporary policy proxy.  Existing in-memory legacy proxies
-        are closed; new owners intentionally pass an empty ``proxy_url`` so
-        Electron/Chromium retains its native networking stack.
-        """
-        if owner.proxy is not None:
-            await owner.proxy.aclose()
+        """Start the authenticated final egress boundary before any Browser RPC."""
+        if owner.proxy is not None and self._proxy_endpoint(owner):
+            owner.initialized = True
+            return
+        proxy = LoopbackPolicyProxy(
+            BrowserNetworkPolicy(
+                self.config,
+                owner=owner.owner,
+                default_allow_public=True,
+            )
+        )
+        try:
+            await proxy.start()
+            endpoint_url = proxy.endpoint_url
+            if not endpoint_url:
+                raise RuntimeError("proxy did not publish an endpoint")
+            await self.driver.configure_proxy(
+                owner.runtime_key,
+                owner.profile_dir,
+                endpoint_url,
+                proxy.credentials,
+            )
+        except BaseException as exc:
+            with suppress(Exception, asyncio.CancelledError):
+                await proxy.aclose()
             owner.proxy = None
+            owner.initialized = False
+            owner.actions_blocked = True
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise BrowserDriverError(
+                "浏览器网络强制代理不可用",
+                code="proxy_unavailable",
+            ) from None
+        owner.proxy = proxy
         owner.initialized = True
+
+    @staticmethod
+    def _proxy_endpoint(owner: _Owner) -> str:
+        if owner.proxy is None:
+            return ""
+        return str(getattr(owner.proxy, "endpoint_url", "") or "")
 
     def _cleanup_expired_artifacts(self, root: Path) -> None:
         if not root.is_dir():
@@ -885,7 +950,7 @@ class BrowserManager:
     def _prepare_download_dir(self, session: _Session, workdir: str = "") -> Path:
         """Create the task download directory without following preset links."""
         if workdir:
-            base = Path(workdir).expanduser().resolve()
+            base = Path(workdir).expanduser().absolute()
             if not base.is_dir():
                 raise BrowserDriverError("当前任务工作区不存在，无法保存下载")
         else:
@@ -893,18 +958,13 @@ class BrowserManager:
                 get_owner_runtime_home(session.owner)
                 / "task_workspaces"
                 / _hash(session.session_id)
-            ).resolve()
-            base.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ).absolute()
 
-        current = base
-        for component in ("downloads", "browser"):
-            candidate = current / component
-            if candidate.is_symlink():
-                raise BrowserDriverError("下载目录包含符号链接；拒绝写入工作区边界之外")
-            candidate.mkdir(exist_ok=True, mode=0o700)
-            if candidate.is_symlink() or candidate.resolve() != candidate.absolute():
-                raise BrowserDriverError("下载目录解析到工作区边界之外；拒绝写入")
-            current = candidate
+        try:
+            _ensure_private_directory(base / "downloads" / "browser")
+        except (FileConflictError, OSError) as exc:
+            raise BrowserDriverError("下载目录包含不安全的路径组件；拒绝写入") from exc
+        current = base / "downloads" / "browser"
         if not path_is_within(current, [base]):
             raise BrowserDriverError("下载目录不能离开当前任务工作区")
         return current
@@ -913,6 +973,19 @@ class BrowserManager:
     def _download_quarantine(owner: _Owner) -> Path:
         return owner.profile_dir.parent / "download-quarantine"
 
+    @staticmethod
+    def _download_staging_target(owner: _Owner, session: _Session, filename: str) -> Path:
+        """Return a unique Host-owned download staging path."""
+        root = owner.profile_dir.parent / "approved-downloads"
+        session_root = root / _hash(session.session_id)
+        try:
+            _ensure_private_directory(session_root)
+        except (FileConflictError, OSError) as exc:
+            raise BrowserDriverError("下载暂存目录包含不安全的路径组件；拒绝写入") from exc
+        if not path_is_within(session_root, [root]):
+            raise BrowserDriverError("下载暂存目录不属于当前账号")
+        return session_root / f"{uuid.uuid4().hex}-{filename}"
+
     def _artifact_dir(self, session: _Session) -> Path:
         path = (
             get_owner_runtime_home(session.owner)
@@ -920,7 +993,10 @@ class BrowserManager:
             / "artifacts"
             / _hash(session.session_id)
         )
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            _ensure_private_directory(path)
+        except (FileConflictError, OSError) as exc:
+            raise BrowserDriverError("浏览器临时目录包含不安全的路径组件") from exc
         with suppress(OSError):
             path.chmod(0o700)
         return path
@@ -1061,7 +1137,7 @@ class BrowserManager:
     ) -> None:
         """Promote driver lifecycle failures consistently across all paths."""
         await self._apply_driver_lifecycle_failure(owner, session, exc)
-        safe_error = str(exc)
+        safe_error = _safe_browser_error(exc)
         code = str(getattr(exc, "code", "") or "")
         canonical_next_state = self._recoverable_next_state(code)
         next_state = canonical_next_state or getattr(exc, "next_state", None)
@@ -1183,7 +1259,7 @@ class BrowserManager:
             else None
         )
         try:
-            proxy_url = owner.proxy.url if owner.proxy else ""
+            proxy_url = self._proxy_endpoint(owner)
             quarantine = self._download_quarantine(owner)
             if command == "download" and len(args) == 2:
                 result = await self.driver.download_bounded(
@@ -1192,7 +1268,7 @@ class BrowserManager:
                     str(args[0]),
                     Path(str(args[1])),
                     target_id=self._active_tab(session).target_id,
-                    max_bytes=_WIRE_MAX_TRANSFER_BYTES,
+                    max_bytes=self._transfer_limit(),
                     timeout=timeout,
                     proxy_url=proxy_url,
                     download_dir=quarantine,
@@ -1299,7 +1375,7 @@ class BrowserManager:
                     expected_dialogs=wire_expected_dialogs,
                     payload={"fields": fields},
                     timeout=batch_timeout,
-                    proxy_url=owner.proxy.url if owner.proxy else "",
+                    proxy_url=self._proxy_endpoint(owner),
                     download_dir=download_root,
                 )
             else:
@@ -1309,7 +1385,7 @@ class BrowserManager:
                     fields,
                     target_id=self._active_tab(session).target_id,
                     timeout=batch_timeout,
-                    proxy_url=owner.proxy.url if owner.proxy else "",
+                    proxy_url=self._proxy_endpoint(owner),
                     download_dir=download_root,
                 )
             await self._ingest_automatic_downloads(owner, session, result)
@@ -1378,7 +1454,7 @@ class BrowserManager:
                         "files": files,
                     },
                     timeout=timeout,
-                    proxy_url=owner.proxy.url if owner.proxy else "",
+                    proxy_url=self._proxy_endpoint(owner),
                     download_dir=download_root,
                 )
             else:
@@ -1390,7 +1466,7 @@ class BrowserManager:
                     input_selector=input_selector,
                     files=files,
                     timeout=timeout,
-                    proxy_url=owner.proxy.url if owner.proxy else "",
+                    proxy_url=self._proxy_endpoint(owner),
                     download_dir=download_root,
                 )
             await self._ingest_automatic_downloads(owner, session, result)
@@ -1439,7 +1515,7 @@ class BrowserManager:
                 owner.profile_dir,
                 target_id=tab.target_id,
                 timeout=self.config.command_timeout_seconds,
-                proxy_url=owner.proxy.url if owner.proxy else "",
+                proxy_url=self._proxy_endpoint(owner),
                 download_dir=self._download_quarantine(owner),
             )
         except BrowserOperationCancelled as exc:
@@ -2534,24 +2610,13 @@ class BrowserManager:
         marker_name = cls._INCOMPLETE_MARKER
         payload = b"recording-incomplete\n"
         if os.name == "nt":
-            # The path is derived exclusively from owner/session/recording ids.
-            # Windows' secure trace writer still validates every data append;
-            # this fixed-content marker carries no page data.
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            marker = directory / marker_name
-            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-            if hasattr(os, "O_BINARY"):
-                flags |= os.O_BINARY
-            fd = os.open(marker, flags, 0o600)
-            try:
-                current = os.fstat(fd)
-                if not stat.S_ISREG(current.st_mode):
-                    raise OSError(errno.EPERM, "录制完整性标记不是普通文件")
-                if current.st_size == 0:
-                    os.write(fd, payload)
-                    os.fsync(fd)
-            finally:
-                os.close(fd)
+            # Keep the marker under the same owner-private, handle-validated
+            # boundary as trace.jsonl; a pathname-only marker can be redirected
+            # through a reparse point and would weaken the clean-stop invariant.
+            from crew.browser.win32_secure_recording import secure_ensure_recording_marker
+
+            _ensure_private_directory(directory)
+            secure_ensure_recording_marker(owner_home, directory)
             return
 
         directory_fd = cls._open_private_recording_directory(owner_home, directory)
@@ -3111,7 +3176,7 @@ class BrowserManager:
                     if timeout_seconds is not None
                     else self.config.command_timeout_seconds
                 ),
-                "proxy_url": owner.proxy.url if owner.proxy else "",
+                "proxy_url": self._proxy_endpoint(owner),
                 "download_dir": self._download_quarantine(owner),
             }
             # Keep the optional optimization source-compatible with external
@@ -3419,7 +3484,7 @@ class BrowserManager:
                     0.001,
                     float(self.config.command_timeout_seconds),
                 ),
-                proxy_url=owner.proxy.url if owner.proxy else "",
+                proxy_url=self._proxy_endpoint(owner),
                 download_dir=self._download_quarantine(owner),
             )
         except BrowserDriverError as exc:
@@ -4863,7 +4928,7 @@ class BrowserManager:
             )
             owner.last_activity = time.monotonic()
             try:
-                proxy_url = owner.proxy.url if owner.proxy else ""
+                proxy_url = self._proxy_endpoint(owner)
                 result = await self.driver.execute_targeted(
                     owner.runtime_key,
                     owner.profile_dir,
@@ -5140,8 +5205,7 @@ class BrowserManager:
         step: dict[str, Any],
         workdir: str,
     ) -> str:
-        paths = self._resolved_upload_paths(
-            owner.owner,
+        entries = self._resolve_upload_entries(
             list(step["paths"]),
             workdir=workdir,
         )
@@ -5164,19 +5228,25 @@ class BrowserManager:
         # Keep the persisted selectors intact until the Host executes them.
         # Splitting locate→click→file_upload across RPCs reintroduces both a
         # selector TOCTOU and the stale one-slot FileChooser race.
-        upload_kwargs = {
-            "trigger_selector": str(step.get("trigger_selector") or ""),
-            "input_selector": str(step["selector"]),
-            "files": paths,
-        }
-        if step.get("dialogs"):
-            upload_kwargs["expected_dialogs"] = step["dialogs"]
-        await self._run_upload_with_trigger(
-            owner,
-            session,
-            workdir=workdir,
-            **upload_kwargs,
-        )
+        staging_root: Path | None = None
+        try:
+            staging_root, paths = self._stage_upload_paths(owner, session, entries)
+            upload_kwargs = {
+                "trigger_selector": str(step.get("trigger_selector") or ""),
+                "input_selector": str(step["selector"]),
+                "files": paths,
+            }
+            if step.get("dialogs"):
+                upload_kwargs["expected_dialogs"] = step["dialogs"]
+            await self._run_upload_with_trigger(
+                owner,
+                session,
+                workdir=workdir,
+                **upload_kwargs,
+            )
+        finally:
+            if staging_root is not None:
+                self._cleanup_upload_staging(staging_root)
 
         session.last_action = (
             f"确定性回放上传 {len(paths)} 个文件"
@@ -5885,7 +5955,7 @@ class BrowserManager:
                 owner.profile_dir,
                 transaction,
                 timeout=operation_timeout,
-                proxy_url=owner.proxy.url if owner.proxy else "",
+                proxy_url=self._proxy_endpoint(owner),
                 download_dir=download_dir,
             )
         except BrowserDriverError as exc:
@@ -7662,7 +7732,7 @@ class BrowserManager:
                 try:
                     native = self._native_ref(session, ref)
                 except ValueError as exc:
-                    raise BrowserDriverError(str(exc)) from None
+                    raise BrowserDriverError(_safe_browser_error(exc)) from None
                 wire = {key: value for key, value in field.items() if key != "ref"}
                 wire["ref"] = native
                 wire_fields.append(wire)
@@ -8147,23 +8217,13 @@ class BrowserManager:
         if not safe_name.lower().endswith(".log"):
             safe_name = f"{safe_name}.log"
         data = text.encode("utf-8")
-        download_root = self._prepare_download_dir(session, workdir)
-        target = download_root / safe_name
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.exists():
-            raise BrowserDriverError("控制台结果目标已存在且不是普通文件")
-        self._guard_transfer_size(data, "写入的内容")
-        await asyncio.to_thread(target.write_bytes, data)
-        saved = await asyncio.to_thread(target.read_bytes) if target.is_file() else b""
-        if (
-            not target.is_file()
-            or not path_is_within(target, [download_root])
-            or saved != data
-        ):
-            with suppress(OSError):
-                target.unlink()
-            raise BrowserDriverError("控制台结果未能完整保存到任务目录")
+        target = await self._publish_task_bytes(
+            session,
+            safe_name,
+            data,
+            workdir=workdir,
+            what="控制台结果",
+        )
         return str(target)
 
     def _guard_transfer_size(self, data: bytes, what: str) -> None:
@@ -8176,12 +8236,166 @@ class BrowserManager:
         护栏很宽（默认 100MB），正常下载/响应体碰不到；它挡的是"一个几 GB 的
         响应把磁盘写满或把内存吃光"。
         """
-        limit = int(getattr(self.config, "max_transfer_bytes", 0) or 0)
-        if limit > 0 and len(data) > limit:
+        limit = self._transfer_limit()
+        if len(data) > limit:
             raise BrowserDriverError(
                 f"{what}超过 {limit} 字节传输上限；请缩小范围后重试",
                 code="transfer_too_large",
             )
+
+    def _transfer_limit(self) -> int:
+        configured = int(getattr(self.config, "max_transfer_bytes", 0) or 0)
+        if configured > 0:
+            return min(configured, _WIRE_MAX_TRANSFER_BYTES)
+        return _WIRE_MAX_TRANSFER_BYTES
+
+    def _publish_task_bytes_sync(
+        self,
+        session: _Session,
+        filename: str,
+        data: bytes,
+        *,
+        workdir: str,
+        what: str,
+    ) -> Path:
+        """Publish bytes through the shared pinned-parent writer."""
+        self._guard_transfer_size(data, what)
+        download_root = self._prepare_download_dir(session, workdir)
+        target = download_root / filename
+        limit = self._transfer_limit()
+        try:
+            expected = snapshot_file(target, max_bytes=limit)
+            atomic_replace_bytes(target, data, expected, max_bytes=limit)
+            verified = read_verified_bytes(
+                target,
+                max_bytes=limit,
+                expected_digest=hashlib.sha256(data).hexdigest(),
+            )
+            if verified != data or not path_is_within(target, [download_root]):
+                raise FileConflictError("发布后的文件校验失败")
+        except (FileConflictError, OSError, ValueError) as exc:
+            raise BrowserDriverError(
+                f"{what}未能完整保存到任务目录",
+                code="file_publish_failed",
+            ) from exc
+        return target
+
+    async def _publish_task_bytes(
+        self,
+        session: _Session,
+        filename: str,
+        data: bytes,
+        *,
+        workdir: str,
+        what: str,
+    ) -> Path:
+        return await asyncio.to_thread(
+            self._publish_task_bytes_sync,
+            session,
+            filename,
+            data,
+            workdir=workdir,
+            what=what,
+        )
+
+    def _publish_artifact_bytes_sync(
+        self,
+        session: _Session,
+        target: Path,
+        data: bytes,
+        *,
+        what: str,
+    ) -> None:
+        """Publish one Host-produced artifact through the shared writer."""
+        self._guard_transfer_size(data, what)
+        limit = self._transfer_limit()
+        artifact_root = self._artifact_dir(session)
+        try:
+            if not path_is_within(target, [artifact_root]):
+                raise FileConflictError("浏览器临时文件离开账号临时目录")
+            expected = snapshot_file(target, max_bytes=limit)
+            atomic_replace_bytes(target, data, expected, max_bytes=limit)
+            verified = read_verified_bytes(
+                target,
+                max_bytes=limit,
+                expected_digest=hashlib.sha256(data).hexdigest(),
+            )
+            if verified != data:
+                raise FileConflictError("浏览器临时文件发布后校验失败")
+        except (FileConflictError, OSError, ValueError) as exc:
+            raise BrowserDriverError(
+                f"{what}未能安全保存",
+                code="artifact_publish_failed",
+            ) from exc
+
+    def _verified_host_artifact_sync(
+        self,
+        session: _Session,
+        expected: Path,
+        actual_path: object,
+        *,
+        what: str,
+    ) -> bytes:
+        """Accept only a verified Host artifact inside the private artifact root."""
+        artifact_root = self._artifact_dir(session)
+        candidate = expected
+        if actual_path:
+            if not isinstance(actual_path, str):
+                raise BrowserDriverError(
+                    f"{what}路径无效",
+                    code="artifact_path_invalid",
+                )
+            candidate = Path(actual_path).expanduser()
+            try:
+                if not candidate.is_absolute() or not path_is_within(
+                    candidate,
+                    [artifact_root],
+                ):
+                    raise FileConflictError("浏览器临时文件不属于账号临时目录")
+                if candidate.absolute() != expected.absolute():
+                    candidate_bytes = read_verified_bytes(
+                        candidate,
+                        max_bytes=self._transfer_limit(),
+                    )
+                    self._publish_artifact_bytes_sync(
+                        session,
+                        expected,
+                        candidate_bytes,
+                        what=what,
+                    )
+            except BrowserDriverError:
+                raise
+            except (FileConflictError, OSError, ValueError) as exc:
+                raise BrowserDriverError(
+                    f"{what}文件未通过安全校验",
+                    code="artifact_path_invalid",
+                ) from exc
+        try:
+            return read_verified_bytes(
+                expected,
+                max_bytes=self._transfer_limit(),
+            )
+        except (FileConflictError, OSError, ValueError) as exc:
+            raise BrowserDriverError(
+                f"{what}文件未通过安全校验",
+                code="artifact_invalid",
+            ) from exc
+
+    async def _verified_host_artifact(
+        self,
+        session: _Session,
+        expected: Path,
+        actual_path: object,
+        *,
+        what: str,
+    ) -> bytes:
+        return await asyncio.to_thread(
+            self._verified_host_artifact_sync,
+            session,
+            expected,
+            actual_path,
+            what=what,
+        )
 
     async def _network_result(
         self,
@@ -8230,23 +8444,13 @@ class BrowserManager:
             filename
             or f"response-{uuid.uuid4().hex[:8]}.{default_extension}"
         )
-        download_root = self._prepare_download_dir(session, workdir)
-        target = download_root / safe_name
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.exists():
-            raise BrowserDriverError("网络结果目标已存在且不是普通文件")
-        self._guard_transfer_size(data, "写入的内容")
-        await asyncio.to_thread(target.write_bytes, data)
-        saved = await asyncio.to_thread(target.read_bytes) if target.is_file() else b""
-        if (
-            not target.is_file()
-            or not path_is_within(target, [download_root])
-            or saved != data
-        ):
-            with suppress(OSError):
-                target.unlink()
-            raise BrowserDriverError("网络结果未能完整保存到任务目录")
+        target = await self._publish_task_bytes(
+            session,
+            safe_name,
+            data,
+            workdir=workdir,
+            what="网络结果",
+        )
         return str(target)
 
     async def network_requests(
@@ -8400,31 +8604,13 @@ class BrowserManager:
                 if not safe_name.lower().endswith(".json"):
                     safe_name = f"{safe_name}.json"
                 data = serialized.encode("utf-8")
-                download_root = self._prepare_download_dir(session, workdir)
-                target = download_root / safe_name
-                if target.is_symlink() or target.is_file():
-                    target.unlink()
-                elif target.exists():
-                    raise BrowserDriverError(
-                        "evaluate 结果目标已存在且不是普通文件"
-                    )
-                self._guard_transfer_size(data, "写入的内容")
-                await asyncio.to_thread(target.write_bytes, data)
-                saved = (
-                    await asyncio.to_thread(target.read_bytes)
-                    if target.is_file()
-                    else b""
+                target = await self._publish_task_bytes(
+                    session,
+                    safe_name,
+                    data,
+                    workdir=workdir,
+                    what="evaluate 结果",
                 )
-                if (
-                    not target.is_file()
-                    or not path_is_within(target, [download_root])
-                    or saved != data
-                ):
-                    with suppress(OSError):
-                        target.unlink()
-                    raise BrowserDriverError(
-                        "evaluate 结果未能完整保存到任务目录"
-                    )
                 return f"evaluation_result_file:\n{target}\n{observation}"
             visible_payload = {
                 key: value
@@ -8465,28 +8651,28 @@ class BrowserManager:
         source = code
         source_filename = ""
         if filename is not None:
-            if (
-                "\x00" in filename
-                or any(0xD800 <= ord(char) <= 0xDFFF for char in filename)
-            ):
-                raise BrowserDriverError("run_code_unsafe filename 无效")
             base = (
                 Path(workdir).expanduser().resolve()
                 if workdir
                 else Path.cwd().resolve()
             )
-            candidate = Path(filename).expanduser()
-            if not candidate.is_absolute():
-                candidate = base / candidate
             try:
-                resolved = candidate.resolve(strict=True)
-                if not resolved.is_file() or not os.access(resolved, os.R_OK):
-                    raise OSError("not a readable file")
-                source = await asyncio.to_thread(
-                    resolved.read_text,
-                    encoding="utf-8",
+                reference = LocalPathReference.parse(filename)
+                resolved = reference.resolve_at_boundary(
+                    base=base,
+                    strict=True,
                 )
-            except (OSError, RuntimeError, UnicodeError) as exc:
+                identity = capture_file_identity(resolved)
+                if not identity.exists or not os.access(resolved, os.R_OK):
+                    raise OSError("not a readable file")
+                source_bytes = await asyncio.to_thread(
+                    read_verified_bytes,
+                    resolved,
+                    max_bytes=self._transfer_limit(),
+                    expected_identity=identity,
+                )
+                source = source_bytes.decode("utf-8")
+            except (FileConflictError, OSError, RuntimeError, UnicodeError, ValueError) as exc:
                 raise BrowserDriverError(
                     "run_code_unsafe filename 不存在、不可读取或不是 UTF-8 文件"
                 ) from exc
@@ -8558,7 +8744,7 @@ class BrowserManager:
                     owner.profile_dir,
                     target_id=tab.target_id,
                     timeout=self.config.command_timeout_seconds,
-                    proxy_url=owner.proxy.url if owner.proxy else "",
+                    proxy_url=self._proxy_endpoint(owner),
                     download_dir=self._download_quarantine(owner),
                 )
             except BrowserDriverError as exc:
@@ -8596,16 +8782,17 @@ class BrowserManager:
                 workdir=workdir,
             )
             actual = _data(result)
-            if isinstance(actual, dict) and actual.get("path"):
-                candidate = Path(str(actual["path"]))
-                if candidate.is_file() and candidate.resolve() != path.resolve():
-                    await asyncio.to_thread(shutil.copyfile, candidate, path)
+            actual_path = actual.get("path") if isinstance(actual, dict) else None
+            image_bytes = await self._verified_host_artifact(
+                session,
+                path,
+                actual_path,
+                what="视觉截图",
+            )
             host_epoch = str(actual.get("host_epoch") or "") if isinstance(actual, dict) else ""
             if host_epoch and re.fullmatch(r"[0-9a-f]{32}", host_epoch) is None:
                 path.unlink(missing_ok=True)
                 raise BrowserDriverError("浏览器返回了无效的视觉截图 epoch")
-            if not path.is_file():
-                raise BrowserDriverError("浏览器未生成截图")
             # The Host screenshot RPC already binds the image to one document
             # and returns a one-shot epoch used by coordinate_click.  One
             # lightweight guard read remains solely to translate image pixels
@@ -8618,7 +8805,7 @@ class BrowserManager:
                 include_security=False,
                 workdir=workdir,
             )
-            width, height = self._png_size(path)
+            width, height = self._png_size_bytes(image_bytes)
             session.screenshot_id = screenshot_id
             session.screenshot_host_epoch = host_epoch
             session.screenshot_generation = session.generation
@@ -8745,23 +8932,22 @@ class BrowserManager:
                 owner, session, "screenshot", screenshot_args, workdir=workdir
             )
             actual = _data(result)
-            if isinstance(actual, dict) and actual.get("path"):
-                candidate = Path(str(actual["path"]))
-                if candidate.is_file() and candidate.resolve() != staging_target.resolve():
-                    await asyncio.to_thread(shutil.copyfile, candidate, staging_target)
-            if not staging_target.is_file():
-                raise BrowserDriverError("浏览器未生成截图")
-            download_root = self._prepare_download_dir(session, workdir)
-            target = download_root / safe_name
-            if target.is_symlink() or target.is_file():
-                target.unlink()
-            elif target.exists():
-                raise BrowserDriverError("截图目标已存在且不是普通文件")
-            await asyncio.to_thread(shutil.move, str(staging_target), str(target))
-            if not target.is_file() or not path_is_within(target, [download_root]):
-                with suppress(OSError):
-                    target.unlink()
-                raise BrowserDriverError("截图目标在保存期间离开任务目录，文件已删除")
+            actual_path = actual.get("path") if isinstance(actual, dict) else None
+            image_bytes = await self._verified_host_artifact(
+                session,
+                staging_target,
+                actual_path,
+                what="页面截图",
+            )
+            target = await self._publish_task_bytes(
+                session,
+                safe_name,
+                image_bytes,
+                workdir=workdir,
+                what="页面截图",
+            )
+            with suppress(OSError):
+                staging_target.unlink()
             session.last_action = "保存页面截图"
             if filename:
                 return str(target)
@@ -8833,7 +9019,7 @@ class BrowserManager:
                     x=css_x,
                     y=css_y,
                     timeout=self.config.command_timeout_seconds,
-                    proxy_url=owner.proxy.url if owner.proxy else "",
+                    proxy_url=self._proxy_endpoint(owner),
                     download_dir=self._prepare_download_dir(session, workdir),
                     expected_epoch=session.screenshot_host_epoch,
                 )
@@ -8876,6 +9062,58 @@ class BrowserManager:
             session.last_action = f"坐标点击 ({x}, {y})"
             return await self._observe_after_mutation(owner, session, workdir=workdir)
 
+    def _resolve_upload_entries(
+        self,
+        paths: list[str],
+        *,
+        workdir: str,
+    ) -> list[tuple[Path, FileIdentity | tuple[int, int, int]]]:
+        if not isinstance(paths, list):
+            raise BrowserDriverError("上传文件列表无效")
+        base = (
+            Path(workdir).expanduser().absolute()
+            if workdir
+            else Path.cwd().absolute()
+        )
+        try:
+            _ensure_private_directory(base)
+        except (FileConflictError, OSError) as exc:
+            raise BrowserDriverError("上传工作区包含不安全的路径组件") from exc
+        resolved: list[tuple[Path, FileIdentity | tuple[int, int, int]]] = []
+        for raw in paths:
+            try:
+                reference = LocalPathReference.parse(raw)
+                lexical = self._lexical_reference_path(reference, base)
+                _ensure_private_directory(lexical.parent)
+                metadata = lexical.lstat()
+                reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                if (
+                    stat.S_ISLNK(metadata.st_mode)
+                    or getattr(metadata, "st_file_attributes", 0) & reparse_flag
+                ):
+                    raise FileConflictError("上传目标是链接或 reparse point")
+                path = reference.resolve_at_boundary(
+                    base=base,
+                    strict=True,
+                )
+                if stat.S_ISREG(metadata.st_mode):
+                    identity = capture_file_identity(path)
+                    stat_verified_file(path)
+                elif not stat.S_ISDIR(metadata.st_mode):
+                    raise FileConflictError("上传目标不是普通文件或目录")
+                else:
+                    identity = self._upload_directory_identity(path)
+            except (FileConflictError, OSError, RuntimeError, ValueError) as exc:
+                raise BrowserDriverError("上传文件不存在或不可读取") from exc
+            # Playwright supports directory paths for ``webkitdirectory`` file
+            # inputs.  Let the engine validate the input element/path pairing.
+            if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+                raise BrowserDriverError("上传目标不是可读取的文件或目录")
+            if not os.access(path, os.R_OK):
+                raise BrowserDriverError("上传目标不是可读取的文件或目录")
+            resolved.append((path, identity))
+        return resolved
+
     def _resolved_upload_paths(
         self,
         _owner_id: str,
@@ -8883,36 +9121,175 @@ class BrowserManager:
         *,
         workdir: str,
     ) -> list[str]:
-        if not isinstance(paths, list):
-            raise BrowserDriverError("上传文件列表无效")
-        base = (
-            Path(workdir).expanduser().resolve()
-            if workdir
-            else Path.cwd().resolve()
+        return [
+            str(path)
+            for path, _identity in self._resolve_upload_entries(
+                paths,
+                workdir=workdir,
+            )
+        ]
+
+    @staticmethod
+    def _upload_directory_identity(path: Path) -> tuple[int, int, int]:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise FileConflictError("上传目录不可用") from exc
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or getattr(metadata, "st_file_attributes", 0) & reparse_flag
+            or not stat.S_ISDIR(metadata.st_mode)
+        ):
+            raise FileConflictError("上传目录不是安全的普通目录")
+        return (int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_ctime_ns))
+
+    def _stage_upload_file(
+        self,
+        source: Path,
+        expected_identity: FileIdentity,
+        target: Path,
+        remaining_bytes: int,
+    ) -> int:
+        if expected_identity.size > remaining_bytes:
+            raise BrowserDriverError(
+                "上传文件总量超过传输上限",
+                code="transfer_too_large",
+            )
+        data = read_verified_bytes(
+            source,
+            max_bytes=remaining_bytes,
+            expected_identity=expected_identity,
         )
-        resolved: list[str] = []
-        for raw in paths:
-            if (
-                not isinstance(raw, str)
-                or not raw
-                or "\x00" in raw
-                or any(0xD800 <= ord(char) <= 0xDFFF for char in raw)
-            ):
-                raise BrowserDriverError("上传文件路径无效")
-            candidate = Path(raw).expanduser()
-            if not candidate.is_absolute():
-                candidate = base / candidate
-            try:
-                path = candidate.resolve(strict=True)
-                path.stat()
-            except (OSError, RuntimeError) as exc:
-                raise BrowserDriverError("上传文件不存在或不可读取") from exc
-            # Playwright supports directory paths for ``webkitdirectory`` file
-            # inputs.  Let the engine validate the input element/path pairing.
-            if not (path.is_file() or path.is_dir()) or not os.access(path, os.R_OK):
-                raise BrowserDriverError("上传目标不是可读取的文件或目录")
-            resolved.append(str(path))
-        return resolved
+        _ensure_private_directory(target.parent)
+        expected = snapshot_file(target, max_bytes=self._transfer_limit())
+        atomic_replace_bytes(
+            target,
+            data,
+            expected,
+            max_bytes=self._transfer_limit(),
+        )
+        read_verified_bytes(
+            target,
+            max_bytes=len(data),
+            expected_digest=hashlib.sha256(data).hexdigest(),
+        )
+        return len(data)
+
+    def _stage_upload_paths(
+        self,
+        owner: _Owner,
+        session: _Session,
+        entries: list[tuple[Path, FileIdentity | tuple[int, int, int]]],
+    ) -> tuple[Path, list[str]]:
+        root = (
+            owner.profile_dir.parent
+            / "approved-uploads"
+            / _hash(session.session_id)
+            / uuid.uuid4().hex
+        )
+        try:
+            _ensure_private_directory(root)
+            total_bytes = 0
+            file_count = 0
+            staged: list[str] = []
+            for index, (source, expected) in enumerate(entries):
+                target_root = root / f"{index:04d}-{source.name}"
+                if isinstance(expected, FileIdentity):
+                    file_count += 1
+                    if file_count > _MAX_UPLOAD_FILES:
+                        raise BrowserDriverError(
+                            "上传文件数量超过安全上限",
+                            code="upload_quota_exceeded",
+                        )
+                    total_bytes += self._stage_upload_file(
+                        source,
+                        expected,
+                        target_root,
+                        self._transfer_limit() - total_bytes,
+                    )
+                    staged.append(str(target_root))
+                    continue
+
+                if self._upload_directory_identity(source) != expected:
+                    raise FileConflictError("上传目录在授权后身份已变化")
+                _ensure_private_directory(target_root)
+                for dirpath, dirnames, filenames in os.walk(
+                    source,
+                    followlinks=False,
+                ):
+                    if self._upload_directory_identity(source) != expected:
+                        raise FileConflictError("上传目录在操作期间发生变化")
+                    current_dir = Path(dirpath)
+                    for dirname in dirnames:
+                        self._upload_directory_identity(current_dir / dirname)
+                    for filename in filenames:
+                        source_file = current_dir / filename
+                        metadata = source_file.lstat()
+                        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                        if (
+                            stat.S_ISLNK(metadata.st_mode)
+                            or getattr(metadata, "st_file_attributes", 0) & reparse_flag
+                        ):
+                            raise FileConflictError("上传目录包含链接或 reparse point")
+                        if not stat.S_ISREG(metadata.st_mode):
+                            raise FileConflictError("上传目录包含非普通文件")
+                        file_count += 1
+                        if file_count > _MAX_UPLOAD_FILES:
+                            raise BrowserDriverError(
+                                "上传文件数量超过安全上限",
+                                code="upload_quota_exceeded",
+                            )
+                        file_identity = capture_file_identity(source_file)
+                        relative = source_file.relative_to(source)
+                        target = target_root / relative
+                        total_bytes += self._stage_upload_file(
+                            source_file,
+                            file_identity,
+                            target,
+                            self._transfer_limit() - total_bytes,
+                        )
+                    if total_bytes > self._transfer_limit():
+                        raise BrowserDriverError(
+                            "上传文件总量超过传输上限",
+                            code="transfer_too_large",
+                        )
+                staged.append(str(target_root))
+            return root, staged
+        except BrowserDriverError:
+            self._cleanup_upload_staging(root)
+            raise
+        except (FileConflictError, OSError, ValueError) as exc:
+            self._cleanup_upload_staging(root)
+            raise BrowserDriverError(
+                "上传文件在暂存时未通过安全校验",
+                code="upload_staging_invalid",
+            ) from exc
+
+    @staticmethod
+    def _cleanup_upload_staging(root: Path) -> None:
+        try:
+            if root.is_symlink():
+                root.unlink()
+            elif root.is_dir():
+                shutil.rmtree(root)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _lexical_reference_path(
+        reference: LocalPathReference,
+        base: Path,
+    ) -> Path:
+        raw = (
+            decode_local_file_uri(reference.raw)
+            if reference.kind is LocalPathReferenceKind.FILE_URI
+            else reference.raw
+        )
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        return Path(os.path.abspath(candidate))
 
     @staticmethod
     def _validated_drop_data(data: Any) -> dict[str, str] | None:
@@ -8945,23 +9322,30 @@ class BrowserManager:
         checked_data = self._validated_drop_data(data)
         if paths is not None and not isinstance(paths, list):
             raise BrowserDriverError("drop paths 必须是本地路径数组")
-        resolved = self._resolved_upload_paths(
-            owner_id,
-            [] if paths is None else paths,
-            workdir=workdir,
-        )
-        # Match pinned Playwright: an explicitly provided empty data object is a
-        # valid payload, while absent data plus no files is not an operation.
-        if not resolved and checked_data is None:
-            raise BrowserDriverError('drop 至少需要非空 "paths" 或显式 "data"')
 
         owner = await self._owner(owner_id)
         async with owner.lock:
             session = self._session(owner, session_id)
             self._require_ai(owner, session)
             native = self._native_ref(session, ref)
+            entries = self._resolve_upload_entries(
+                [] if paths is None else paths,
+                workdir=workdir,
+            )
+            # Match pinned Playwright: an explicitly provided empty data object is a
+            # valid payload, while absent data plus no files is not an operation.
+            if not entries and checked_data is None:
+                raise BrowserDriverError('drop 至少需要非空 "paths" 或显式 "data"')
+            staging_root: Path | None = None
+            staged_paths: list[str] = []
+            if entries:
+                staging_root, staged_paths = self._stage_upload_paths(
+                    owner,
+                    session,
+                    entries,
+                )
             drop_args = [native]
-            for path in resolved:
+            for path in staged_paths:
                 drop_args.extend(["--path", path])
             if checked_data is not None:
                 if checked_data:
@@ -8971,14 +9355,18 @@ class BrowserManager:
                     # The argv wire otherwise cannot distinguish official
                     # ``data: {}`` from an entirely absent payload.
                     drop_args.append("--empty-data")
-            await self._run(
-                owner,
-                session,
-                "drop",
-                drop_args,
-                mutating=True,
-                workdir=workdir,
-            )
+            try:
+                await self._run(
+                    owner,
+                    session,
+                    "drop",
+                    drop_args,
+                    mutating=True,
+                    workdir=workdir,
+                )
+            finally:
+                if staging_root is not None:
+                    self._cleanup_upload_staging(staging_root)
             session.last_action = f"拖放到 {ref}"
             return await self._observe_after_mutation(
                 owner,
@@ -8989,35 +9377,44 @@ class BrowserManager:
     async def upload(
         self, owner_id: str, session_id: str, ref: str, paths: list[str], *, workdir: str = ""
     ) -> str:
-        resolved = self._resolved_upload_paths(
-            owner_id,
-            paths,
-            workdir=workdir,
-        )
         owner = await self._owner(owner_id)
         async with owner.lock:
             session = self._session(owner, session_id)
             self._require_ai(owner, session)
             await self._select_checked(owner, session, workdir=workdir)
-            if ref:
-                native = self._native_ref(session, ref)
-                await self._run(
+            entries = self._resolve_upload_entries(paths, workdir=workdir)
+            resolved = [str(path) for path, _identity in entries]
+            staging_root: Path | None = None
+            staged_paths: list[str] = []
+            if entries:
+                staging_root, staged_paths = self._stage_upload_paths(
                     owner,
                     session,
-                    "upload",
-                    [native, *resolved],
-                    mutating=True,
-                    workdir=workdir,
+                    entries,
                 )
-            else:
-                await self._run(
-                    owner,
-                    session,
-                    "file_upload",
-                    resolved if resolved else ["--cancel"],
-                    mutating=True,
-                    workdir=workdir,
-                )
+            try:
+                if ref:
+                    native = self._native_ref(session, ref)
+                    await self._run(
+                        owner,
+                        session,
+                        "upload",
+                        [native, *staged_paths],
+                        mutating=True,
+                        workdir=workdir,
+                    )
+                else:
+                    await self._run(
+                        owner,
+                        session,
+                        "file_upload",
+                        staged_paths if staged_paths else ["--cancel"],
+                        mutating=True,
+                        workdir=workdir,
+                    )
+            finally:
+                if staging_root is not None:
+                    self._cleanup_upload_staging(staging_root)
             session.last_action = (
                 f"上传 {len(resolved)} 个文件"
                 if resolved
@@ -9035,25 +9432,39 @@ class BrowserManager:
             await self._select_checked(owner, session, workdir=workdir)
             native = self._native_ref(session, ref)
             safe_name = self._safe_download_name(filename)
-            download_root = self._prepare_download_dir(session, workdir)
-            target = download_root / safe_name
-            if target.is_symlink() or target.is_file():
-                target.unlink()
-            elif target.exists():
-                raise BrowserDriverError("下载目标已存在且不是普通文件")
-            await self._run(
-                owner,
-                session,
-                "download",
-                [native, str(target)],
-                mutating=True,
-                workdir=workdir,
-            )
-            if not target.is_file():
-                raise BrowserDriverError(
-                    "下载动作已完成，但目标文件不存在",
-                    uncertain=True,
+            staging_target = self._download_staging_target(owner, session, safe_name)
+            try:
+                await self._run(
+                    owner,
+                    session,
+                    "download",
+                    [native, str(staging_target)],
+                    mutating=True,
+                    workdir=workdir,
                 )
+                try:
+                    data = await asyncio.to_thread(
+                        read_verified_bytes,
+                        staging_target,
+                        max_bytes=self._transfer_limit(),
+                    )
+                except (FileConflictError, OSError, ValueError) as exc:
+                    raise BrowserDriverError(
+                        "下载动作已完成，但暂存文件未通过安全校验",
+                        uncertain=True,
+                        code="download_staging_invalid",
+                    ) from exc
+                target = await self._publish_task_bytes(
+                    session,
+                    safe_name,
+                    data,
+                    workdir=workdir,
+                    what="下载文件",
+                )
+            finally:
+                with suppress(OSError):
+                    if staging_target.is_symlink() or staging_target.exists():
+                        staging_target.unlink()
             record = {"name": target.name, "path": str(target), "created_at": time.time()}
             session.downloads.append(record)
             session.last_action = f"下载 {target.name}"
@@ -9648,14 +10059,14 @@ class BrowserManager:
         cleared = False
         try:
             async with owner.lock:
-                # Cold clears initialize the same direct-network owner shape as
-                # ordinary browser use; no page is created or navigated.
+                # Cold clears initialize the same mandatory-proxy owner shape
+                # as ordinary browser use; no page is created or navigated.
                 await self._start_owner_proxy(owner)
                 result = await self.driver.clear_owner_data(
                     owner.runtime_key,
                     owner.profile_dir,
                     timeout=self.config.command_timeout_seconds,
-                    proxy_url=owner.proxy.url if owner.proxy else "",
+                    proxy_url=self._proxy_endpoint(owner),
                     download_dir=self._download_quarantine(owner),
                 )
                 if result is False:
@@ -9973,7 +10384,7 @@ class BrowserManager:
             try:
                 fields = self._validated_fill_form_fields(args.get("fields"))
             except BrowserDriverError as exc:
-                return ToolPermissionDecision("deny", str(exc))
+                return ToolPermissionDecision("deny", _safe_browser_error(exc))
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
             if session is None:
@@ -10019,15 +10430,20 @@ class BrowserManager:
                 try:
                     self._validated_select_values(args.get("values"))
                 except BrowserDriverError as exc:
-                    return ToolPermissionDecision("deny", str(exc))
+                    return ToolPermissionDecision("deny", _safe_browser_error(exc))
                 return None
             if type(args.get("checked")) is not bool:
                 return ToolPermissionDecision("deny", "check checked 必须是 boolean")
             return None
         elif tool_name in {"browser_upload", "browser_download"}:
-            # 路径、大小、ref 与目标标签页都在真正执行路径中重新验证。工具调用
-            # 本身就是执行请求，不再插入第二次审批往返。
-            return None
+            # Upload/download cross the Browser↔host file boundary. Require a
+            # one-shot user decision; the concrete handler still revalidates
+            # paths, size, ref and target identity after the decision.
+            return ToolPermissionDecision(
+                "ask",
+                "浏览器文件传输需要本次操作的用户确认",
+                allow_always=False,
+            )
         elif tool_name == "browser_dialog":
             return None
         elif tool_name == "browser_click" and args.get("screenshot_id"):
@@ -10048,7 +10464,7 @@ class BrowserManager:
                     args.get("delay_ms", 0),
                 )
             except BrowserDriverError as exc:
-                return ToolPermissionDecision("deny", str(exc))
+                return ToolPermissionDecision("deny", _safe_browser_error(exc))
             # Element clicks always dispatch the real Playwright Locator action.
             # There is no href-direct-open substitution and no approval pause.
             return None
@@ -10088,7 +10504,7 @@ class BrowserManager:
             try:
                 self._validated_key(key)
             except BrowserDriverError as exc:
-                return ToolPermissionDecision("deny", str(exc))
+                return ToolPermissionDecision("deny", _safe_browser_error(exc))
             if tool_name != "browser_press" and ref:
                 return ToolPermissionDecision(
                     "deny", f"{tool_name.removeprefix('browser_')} 不接受 ref"
@@ -10109,7 +10525,7 @@ class BrowserManager:
                     args.get("text_gone", ""),
                 )
             except BrowserDriverError as exc:
-                return ToolPermissionDecision("deny", str(exc))
+                return ToolPermissionDecision("deny", _safe_browser_error(exc))
             return None
         elif tool_name == "browser_navigate":
             return None
@@ -10254,8 +10670,8 @@ class BrowserManager:
         *,
         url: str = "",
         new_tab: bool = False,
-        artifact_path: str = "",
-        artifact_root: str = "",
+        artifact_path: LocalPathReference | None = None,
+        artifact_root: Path | None = None,
     ) -> dict[str, Any]:
         """Open a user-controlled tab without exposing a model tool.
 
@@ -10263,16 +10679,23 @@ class BrowserManager:
         navigation policy remains HTTP(S)-only and models never receive an
         arbitrary file path or file:// capability.
         """
-        if url and artifact_path:
+        if url and artifact_path is not None:
             raise BrowserDriverError("浏览器不能同时打开网页地址和本地 HTML")
         safe_url = self.policy.validate_navigation_url(url) if url else "about:blank"
         preview_file: Path | None = None
         preview_root: Path | None = None
-        if artifact_path:
+        if artifact_path is not None:
             try:
-                preview_file = Path(artifact_path).expanduser().resolve(strict=True)
-                preview_root = Path(artifact_root).expanduser().resolve(strict=True)
-            except (OSError, ValueError) as exc:
+                if not isinstance(artifact_path, LocalPathReference):
+                    raise TypeError("artifact path reference is invalid")
+                if not isinstance(artifact_root, Path):
+                    raise TypeError("artifact root is invalid")
+                preview_root = artifact_root.expanduser().resolve(strict=True)
+                preview_file = artifact_path.resolve_at_boundary(
+                    base=preview_root,
+                    strict=True,
+                )
+            except (OSError, TypeError, ValueError) as exc:
                 raise BrowserDriverError("本地 HTML 文件不存在") from exc
             if (
                 not preview_root.is_dir()
@@ -10380,8 +10803,15 @@ class BrowserManager:
 
     @staticmethod
     def _png_size(path: Path) -> tuple[int, int]:
-        with path.open("rb") as stream:
-            header = stream.read(24)
+        try:
+            header = read_verified_bytes(path, max_bytes=24)
+        except (FileConflictError, OSError, ValueError):
+            return 0, 0
+        return BrowserManager._png_size_bytes(header)
+
+    @staticmethod
+    def _png_size_bytes(data: bytes) -> tuple[int, int]:
+        header = data[:24]
         if len(header) >= 24 and header[:8] == b"\x89PNG\r\n\x1a\n":
             return struct.unpack(">II", header[16:24])
         return 0, 0

@@ -66,6 +66,7 @@ export function approvalChoiceLabel(event: SecurityAuditView): string {
 
 export function modeLabel(value?: string): string {
   const labels: Record<string, string> = {
+    read_only: '只读',
     request_approval: '请求批准',
     auto_review: '替我审批',
     full_access: '完全访问权限',
@@ -76,6 +77,7 @@ export function modeLabel(value?: string): string {
 export function decisionSourceLabel(value?: string): string {
   const labels: Record<string, string> = {
     desktop_user: '用户选择',
+    desktop_native_confirmation: '主机级二次确认',
     gateway: '安全网关',
     immutable_policy: '不可变安全策略',
     recent_user_rejection: '近期用户拒绝',

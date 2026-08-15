@@ -36,5 +36,5 @@ try {
   }
   if ($commands.Count -eq 0) { exit 2 }
   [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-  [Console]::Out.Write(($commands.ToArray() | ConvertTo-Json -Compress -Depth 3))
+  [Console]::Out.Write((ConvertTo-Json -InputObject @($commands.ToArray()) -Compress -Depth 3))
 } catch { exit 2 }

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from crew.core.types import ToolCall, ToolPermissionDecision
+from crew.plugins import manager as plugin_manager
 from crew.plugins.manager import PluginManager
 from crew.state.plugin_preferences import (
     PluginPreferencesStore,
@@ -18,10 +23,15 @@ def _write_lifecycle_plugin(root):
     plugin_dir = root / "lifecycle_plugin"
     plugin_dir.mkdir()
     (plugin_dir / "plugin.yaml").write_text(
-        "\n".join([
+        "\n".join([  # noqa: FLY002 - readable YAML fixture
+            "schema_version: crew.plugin.v1",
             "name: lifecycle_plugin",
             "version: 1.0.0",
             "kind: standalone",
+            "capabilities:",
+            "  - tools",
+            "  - hooks",
+            "  - skills",
             "provides_tools:",
             "  - lifecycle_echo",
             "provides_hooks:",
@@ -85,7 +95,13 @@ def register(ctx):
 def _load(tmp_path):
     _write_lifecycle_plugin(tmp_path)
     registry = Registry()
-    plugins = PluginManager(registry=registry, services={"config": object()})
+    with patch.object(plugin_manager, "get_bundled_plugins_dir", return_value=tmp_path):
+        plugins = PluginManager(
+            registry=registry,
+            services={"config": object()},
+            developer_mode=True,
+            audit_path=tmp_path / "plugin-audit.jsonl",
+        )
     plugins.discover_and_load([tmp_path], enabled=["lifecycle_plugin"])
     return registry, plugins
 
@@ -123,6 +139,7 @@ async def test_unload_plugin_removes_registrations_and_runs_disposers(tmp_path):
     registry, plugins = _load(tmp_path)
     assert registry.names() == ["lifecycle_echo"]
     assert plugins.plugin_skill_roots() != []
+    plugin_module = sys.modules["crew_runtime_plugins.lifecycle_plugin"]
 
     assert plugins.unload_plugin("lifecycle_plugin") is True
 
@@ -131,8 +148,8 @@ async def test_unload_plugin_removes_registrations_and_runs_disposers(tmp_path):
     assert plugins._hooks.get("pre_tool_call", []) == []
     assert plugins._hook_owners.get("pre_tool_call", []) == []
     # disposer 被调用（插件模块级记录）
-    plugin_module = __import__("crew_runtime_plugins.lifecycle_plugin", fromlist=["DISPOSED"])
     assert plugin_module.DISPOSED == ["sync"]
+    assert "crew_runtime_plugins.lifecycle_plugin" not in sys.modules
     # skill root 不再出现
     assert plugins.plugin_skill_roots() == []
     # 插件保留在清单中、标记未启用
@@ -149,7 +166,7 @@ async def test_plugin_skill_root_resolves_against_plugin_dir(tmp_path):
     _, plugins = _load(tmp_path)
     roots = plugins.plugin_skill_roots()
     assert len(roots) == 1
-    assert roots[0].endswith("lifecycle_plugin/skills")
+    assert Path(roots[0]).parts[-2:] == ("lifecycle_plugin", "skills")
 
 
 # ---- PluginPreferencesStore ----
@@ -166,7 +183,12 @@ def test_preferences_store_roundtrip(tmp_path):
         assert store.get_enabled("owner-b", "browser") is None
 
         store.set_enabled("owner-a", "other", True)
+        store.set_enabled("owner-b", "browser", True)
         assert store.list_for_owner("owner-a") == {"browser": False, "other": True}
+        assert store.list_for_owner("owner-b") == {"browser": True}
+
+        store.delete_plugin("browser")
+        assert store.list_for_owner("owner-a") == {"other": True}
         assert store.list_for_owner("owner-b") == {}
     finally:
         store.close()
@@ -179,6 +201,8 @@ def test_preferences_store_requires_owner_and_key(tmp_path):
             store.set_enabled("", "browser", True)
         with pytest.raises(ValueError):
             store.set_enabled("owner-a", "", True)
+        with pytest.raises(ValueError):
+            store.delete_plugin("")
     finally:
         store.close()
 

@@ -5,6 +5,7 @@ use crate::protocol::{NetworkErrorCode, NetworkRule};
 
 #[cfg(test)]
 const METADATA_V4: &str = "169.254.169.254";
+const MAX_DNS_ANSWERS: usize = 32;
 
 /// Structured network-layer error carrying a stable code (spec §13) plus a
 /// human-readable message. Replaces the free-form `String` errors previously
@@ -62,6 +63,12 @@ impl NetworkPolicy {
     ) -> Result<Vec<SocketAddr>, NetworkError> {
         let host = normalize_host(host)
             .map_err(|message| NetworkError::new(NetworkErrorCode::PolicyDenied, message))?;
+        if is_metadata_host(&host) {
+            return Err(NetworkError::new(
+                NetworkErrorCode::PolicyDenied,
+                "cloud metadata endpoints are permanently denied",
+            ));
+        }
         let protocol = protocol.to_ascii_lowercase();
         let matching: Vec<&NetworkRule> = self
             .rules
@@ -95,26 +102,60 @@ impl NetworkPolicy {
                 "approved destination resolved to no address",
             ));
         }
-        let mut seen = HashSet::new();
-        let mut approved = Vec::new();
-        for address in addresses {
-            if is_metadata(address.ip()) {
-                return Err(NetworkError::new(
-                    NetworkErrorCode::PolicyDenied,
-                    "cloud metadata endpoints are permanently denied",
-                ));
-            }
-            if is_local_or_private(address.ip()) && !allow.allow_private {
-                return Err(NetworkError::new(
-                    NetworkErrorCode::PolicyDenied,
-                    "destination resolved to a local or private address",
-                ));
-            }
-            if seen.insert(address) {
-                approved.push(address);
-            }
+        validate_resolved_addresses(
+            addresses,
+            allow.allow_private,
+            host == "localhost" || host.ends_with(".localhost"),
+        )
+    }
+}
+
+fn validate_resolved_addresses(
+    addresses: Vec<SocketAddr>,
+    allow_private: bool,
+    localhost_name: bool,
+) -> Result<Vec<SocketAddr>, NetworkError> {
+    if addresses.len() > MAX_DNS_ANSWERS {
+        return Err(NetworkError::new(
+            NetworkErrorCode::PolicyDenied,
+            "DNS answer limit exceeded",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut approved = Vec::new();
+    for address in addresses {
+        if localhost_name && !is_loopback(address.ip()) {
+            return Err(NetworkError::new(
+                NetworkErrorCode::PolicyDenied,
+                "localhost name resolved to a non-loopback address",
+            ));
         }
-        Ok(approved)
+        if is_metadata(address.ip()) {
+            return Err(NetworkError::new(
+                NetworkErrorCode::PolicyDenied,
+                "cloud metadata endpoints are permanently denied",
+            ));
+        }
+        if is_local_or_private(address.ip()) && !allow_private {
+            return Err(NetworkError::new(
+                NetworkErrorCode::PolicyDenied,
+                "destination resolved to a local or private address",
+            ));
+        }
+        if seen.insert(address) {
+            approved.push(address);
+        }
+    }
+    Ok(approved)
+}
+
+fn is_loopback(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(value) => value.is_loopback(),
+        IpAddr::V6(value) => value
+            .to_ipv4()
+            .map(|mapped| mapped.is_loopback())
+            .unwrap_or_else(|| value.is_loopback()),
     }
 }
 
@@ -132,15 +173,56 @@ fn validate_rule(rule: &NetworkRule) -> Result<(), String> {
 }
 
 fn normalize_host(raw: &str) -> Result<String, String> {
-    let host = raw.trim().trim_end_matches('.').to_ascii_lowercase();
-    if host.is_empty()
-        || host.contains('*')
-        || host.contains('/')
-        || host.contains(':') && host.parse::<IpAddr>().is_err()
+    if raw.is_empty()
+        || raw != raw.trim()
+        || !raw.is_ascii()
+        || raw.bytes().any(|byte| byte <= 0x20 || byte == 0x7f)
     {
         return Err("network host must be one exact hostname or IP".to_string());
     }
-    Ok(host.trim_matches(['[', ']']).to_string())
+    let unbracketed = if let Some(value) = raw.strip_prefix('[') {
+        value
+            .strip_suffix(']')
+            .ok_or_else(|| "network host must be one exact hostname or IP".to_string())?
+    } else {
+        if raw.contains(['[', ']']) {
+            return Err("network host must be one exact hostname or IP".to_string());
+        }
+        raw
+    };
+    if let Ok(address) = unbracketed.parse::<IpAddr>() {
+        return Ok(address.to_string().to_ascii_lowercase());
+    }
+    if unbracketed.contains(':') {
+        return Err("network host must be one exact hostname or IP".to_string());
+    }
+    let host = unbracketed
+        .strip_suffix('.')
+        .unwrap_or(unbracketed)
+        .to_ascii_lowercase();
+    if host.is_empty()
+        || host.ends_with('.')
+        || host.len() > 253
+        || host
+            .chars()
+            .all(|value| value.is_ascii_digit() || value == '.')
+    {
+        return Err("network host must be one exact hostname or IP".to_string());
+    }
+    for label in host.split('.') {
+        let bytes = label.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > 63
+            || !bytes[0].is_ascii_alphanumeric()
+            || !bytes[bytes.len() - 1].is_ascii_alphanumeric()
+            || !bytes
+                .iter()
+                .all(|value| value.is_ascii_alphanumeric() || *value == b'-')
+        {
+            return Err("network host must be one exact hostname or IP".to_string());
+        }
+    }
+    Ok(host)
 }
 
 fn is_metadata(ip: IpAddr) -> bool {
@@ -163,6 +245,18 @@ fn is_metadata(ip: IpAddr) -> bool {
         // 这里显式拒绝，保证"元数据不可升级 deny"在任何 allow_private 放行下仍成立。
         IpAddr::V6(value) => value.segments()[0] == 0xfd00 && value.segments()[1] == 0x0ec2,
     }
+}
+
+fn is_metadata_host(host: &str) -> bool {
+    matches!(
+        host,
+        "instance-data"
+            | "metadata"
+            | "metadata.aws.internal"
+            | "metadata.azure.internal"
+            | "metadata.google.internal"
+    ) || host.ends_with(".metadata.google.internal")
+        || host.ends_with(".metadata.azure.internal")
 }
 
 fn is_local_or_private(ip: IpAddr) -> bool {
@@ -315,6 +409,16 @@ mod tests {
     }
 
     #[test]
+    fn metadata_hostname_is_denied_before_dns_even_with_private_access() {
+        let metadata =
+            NetworkPolicy::new(vec![rule("metadata.google.internal", true, true)]).unwrap();
+        let err = metadata
+            .resolve_allowed("metadata.google.internal", 8080, "http")
+            .unwrap_err();
+        assert_eq!(err.code, NetworkErrorCode::PolicyDenied);
+    }
+
+    #[test]
     fn private_without_allow_private_surfaces_policy_denied_code() {
         let policy = NetworkPolicy::new(vec![rule("100.64.0.1", true, false)]).unwrap();
         let err = policy
@@ -335,5 +439,46 @@ mod tests {
         invalid.protocol = "udp".to_string();
         let err = NetworkPolicy::new(vec![invalid]).unwrap_err();
         assert_eq!(err.code, NetworkErrorCode::PolicyDenied);
+    }
+
+    #[test]
+    fn host_normalization_rejects_ambiguous_or_non_ascii_forms() {
+        assert_eq!(normalize_host("EXAMPLE.COM.").unwrap(), "example.com");
+        assert_eq!(
+            normalize_host("[::ffff:127.0.0.1]").unwrap(),
+            "::ffff:127.0.0.1"
+        );
+        for invalid in [
+            "127.1",
+            "example..com",
+            "-example.com",
+            "example_.com",
+            "user@example.com",
+            "ｅxample.com",
+            " example.com",
+        ] {
+            assert!(
+                normalize_host(invalid).is_err(),
+                "{invalid} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn dns_answer_count_is_bounded_before_connect() {
+        let addresses = (1..=33)
+            .map(|last| SocketAddr::from(([93, 184, 216, last], 443)))
+            .collect();
+        let err = validate_resolved_addresses(addresses, false, false).unwrap_err();
+        assert_eq!(err.code, NetworkErrorCode::PolicyDenied);
+        assert!(err.message.contains("answer limit"));
+    }
+
+    #[test]
+    fn localhost_name_never_matches_a_non_loopback_answer() {
+        let addresses = vec![SocketAddr::from(([93, 184, 216, 34], 443))];
+        let err = validate_resolved_addresses(addresses, true, true).unwrap_err();
+        assert_eq!(err.code, NetworkErrorCode::PolicyDenied);
+        assert!(err.message.contains("localhost"));
     }
 }

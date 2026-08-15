@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +15,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from crew.core.envelope import ResponseChunk
+from crew.gateway.auth import AccountContext
 from crew.gateway.platform_registry import PlatformConfig, platform_registry
 from crew.gateway.routers.channels import create_channels_router
 from crew.plugins.manager import PluginManager
@@ -481,8 +481,29 @@ async def test_poll_failure_marks_disconnected(tmp_path, monkeypatch):
 def _qr_client() -> TestClient:
     """仅挂 channels 路由的轻量 app，扫码接口不触碰 crew 内部状态。"""
     app = FastAPI()
-    router = create_channels_router(SimpleNamespace(), dispatcher=None, channel_manager=None)
+    persisted: list[tuple[str, dict, str]] = []
+    config = SimpleNamespace(
+        persist_channel_config=lambda platform, value, *, owner_account_id="": persisted.append(
+            (platform, value, owner_account_id)
+        )
+    )
+    router = create_channels_router(
+        SimpleNamespace(config=config),
+        dispatcher=None,
+        channel_manager=None,
+    )
     app.include_router(router)
+    app.state.persisted_channel_configs = persisted
+
+    @app.middleware("http")
+    async def attach_account(request, call_next):
+        owner = request.headers.get("X-Test-Owner", "local")
+        request.state.account = AccountContext(
+            owner_account_id=owner,
+            is_local=owner == "local",
+        )
+        return await call_next(request)
+
     return TestClient(app)
 
 
@@ -516,7 +537,25 @@ def test_weixin_qr_login_confirm_persists_account(tmp_path, monkeypatch):
     from crew.gateway.routers import channels as ch_mod
 
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
-    monkeypatch.setattr(ch_mod, "_WEIXIN_QR_STATES", {"qr_abc": {"base_url": "https://ilink", "updated_at": 0}})
+    monkeypatch.setattr(
+        ch_mod,
+        "_WEIXIN_QR_STATES",
+        {
+            "qr_abc": {
+                "base_url": "https://ilink",
+                "owner_account_id": "local",
+                "updated_at": 0,
+            }
+        },
+    )
+    env_writes = []
+    monkeypatch.setattr(
+        ch_mod,
+        "_write_env_fields",
+        lambda platform, config, secrets, *, owner_account_id="": env_writes.append(
+            (platform, config, secrets, owner_account_id)
+        ),
+    )
 
     async def fake_poll(qr_id, base_url):
         return {
@@ -533,16 +572,48 @@ def test_weixin_qr_login_confirm_persists_account(tmp_path, monkeypatch):
     resp = client.post("/api/platforms/weixin/qr-login/status", json={"qr_id": "qr_abc"})
     body = resp.json()
     assert body["status"] == "confirmed" and body["account_id"] == "bot_qr"
-
-    settings = WeixinSettings.from_extra({})
-    persisted = ilink.load_account(settings.accounts_dir(), "bot_qr")
-    assert persisted and persisted["token"] == "tok_qr"
+    assert "token" not in body
+    assert client.app.state.persisted_channel_configs == [
+        (
+            "weixin",
+            {
+                "enabled": True,
+                "_remove_keys": [],
+                "accountId": "bot_qr",
+                "baseUrl": "https://api.example",
+                "userId": "u_qr",
+            },
+            "local",
+        )
+    ]
+    assert env_writes == [
+        (
+            "weixin",
+            {
+                "accountId": "bot_qr",
+                "baseUrl": "https://api.example",
+                "userId": "u_qr",
+            },
+            {"token": "tok_qr"},
+            "local",
+        )
+    ]
 
 
 def test_weixin_qr_login_pending_when_poll_fails(monkeypatch):
     from crew.gateway.routers import channels as ch_mod
 
-    monkeypatch.setattr(ch_mod, "_WEIXIN_QR_STATES", {})
+    monkeypatch.setattr(
+        ch_mod,
+        "_WEIXIN_QR_STATES",
+        {
+            "qr_x": {
+                "base_url": "https://ilink",
+                "owner_account_id": "local",
+                "updated_at": 0,
+            }
+        },
+    )
 
     async def fake_poll(qr_id, base_url):
         return None
@@ -557,7 +628,17 @@ def test_weixin_qr_login_pending_when_poll_fails(monkeypatch):
 def test_weixin_qr_login_redirect_tracks_base_url(monkeypatch):
     from crew.gateway.routers import channels as ch_mod
 
-    monkeypatch.setattr(ch_mod, "_WEIXIN_QR_STATES", {"qr_abc": {"base_url": "https://ilink", "updated_at": 0}})
+    monkeypatch.setattr(
+        ch_mod,
+        "_WEIXIN_QR_STATES",
+        {
+            "qr_abc": {
+                "base_url": "https://ilink",
+                "owner_account_id": "local",
+                "updated_at": 0,
+            }
+        },
+    )
 
     async def fake_poll(qr_id, base_url):
         return {"status": "scaned_but_redirect", "redirect_host": "wx-redirect.example"}
@@ -568,6 +649,36 @@ def test_weixin_qr_login_redirect_tracks_base_url(monkeypatch):
     resp = client.post("/api/platforms/weixin/qr-login/status", json={"qr_id": "qr_abc"})
     assert resp.json()["status"] == "scaned"
     assert ch_mod._WEIXIN_QR_STATES["qr_abc"]["base_url"] == "https://wx-redirect.example"
+
+
+def test_weixin_qr_login_state_is_owner_scoped(monkeypatch):
+    from crew.gateway.routers import channels as ch_mod
+
+    monkeypatch.setattr(
+        ch_mod,
+        "_WEIXIN_QR_STATES",
+        {
+            "qr_owner_a": {
+                "base_url": "https://ilink",
+                "owner_account_id": "owner-a",
+                "updated_at": 0,
+            }
+        },
+    )
+
+    async def unexpected_poll(*_args, **_kwargs):
+        raise AssertionError("another owner must not poll this QR session")
+
+    monkeypatch.setattr(ilink, "poll_qr_status", unexpected_poll)
+    client = _qr_client()
+
+    resp = client.post(
+        "/api/platforms/weixin/qr-login/status",
+        json={"qr_id": "qr_owner_a"},
+        headers={"X-Test-Owner": "owner-b"},
+    )
+
+    assert resp.status_code == 404
 
 
 # --------------------------------------------------------------------------- #

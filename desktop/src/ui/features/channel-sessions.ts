@@ -47,6 +47,7 @@ export function syncChannelSessionsFromBackend(
 }
 
 export async function loadChannelSessions(): Promise<void> {
+  if (!state.backendConnected) return;
   try {
     const { platforms } = await backendApi.channelSessions();
     syncChannelSessionsFromBackend(platforms ?? []);

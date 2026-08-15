@@ -8,19 +8,37 @@ from crew.security.models import (
     ConversationPermissionMode,
     FilesystemAccess,
     FilesystemEntry,
+    FilesystemGlobAccess,
+    FilesystemGlobEntry,
     FilesystemOperation,
-    NetworkPolicy,
     NetworkEntry,
+    NetworkPolicy,
+    PermissionProfile,
     PermissionProfileKind,
 )
 from crew.security.policy import filesystem_operation_allowed, settings_for_mode
 
 
 def test_ui_modes_map_to_two_independent_security_axes(tmp_path: Path) -> None:
+    read_only = settings_for_mode(ConversationPermissionMode.READ_ONLY, tmp_path)
     request = settings_for_mode(ConversationPermissionMode.REQUEST_APPROVAL, tmp_path)
     auto = settings_for_mode(ConversationPermissionMode.AUTO_REVIEW, tmp_path)
     full = settings_for_mode(ConversationPermissionMode.FULL_ACCESS, tmp_path)
 
+    assert read_only.profile.kind is PermissionProfileKind.MANAGED
+    assert read_only.approval_policy is ApprovalPolicy.REQUEST
+    assert filesystem_operation_allowed(
+        read_only.profile,
+        AdditionalPermissionProfile(),
+        tmp_path / "README.md",
+        FilesystemOperation.READ,
+    )
+    assert not filesystem_operation_allowed(
+        read_only.profile,
+        AdditionalPermissionProfile(),
+        tmp_path / "README.md",
+        FilesystemOperation.WRITE,
+    )
     assert request.profile.kind is PermissionProfileKind.MANAGED
     assert request.approval_policy is ApprovalPolicy.REQUEST
     assert auto.profile.kind is PermissionProfileKind.MANAGED
@@ -45,7 +63,10 @@ def test_managed_profile_defaults_to_workspace_only(tmp_path: Path) -> None:
     profile = settings_for_mode(ConversationPermissionMode.REQUEST_APPROVAL, workspace).profile
 
     assert filesystem_operation_allowed(
-        profile, AdditionalPermissionProfile(), workspace / "src" / "app.py", FilesystemOperation.WRITE
+        profile,
+        AdditionalPermissionProfile(),
+        workspace / "src" / "app.py",
+        FilesystemOperation.WRITE,
     )
     assert not filesystem_operation_allowed(
         profile, AdditionalPermissionProfile(), tmp_path / "outside.txt", FilesystemOperation.READ
@@ -58,9 +79,7 @@ def test_non_escalatable_deny_cannot_be_overridden(tmp_path: Path) -> None:
     profile = settings_for_mode(
         ConversationPermissionMode.REQUEST_APPROVAL,
         workspace,
-        deny_entries=(
-            FilesystemEntry(protected, FilesystemAccess.DENY, escalatable=False),
-        ),
+        deny_entries=(FilesystemEntry(protected, FilesystemAccess.DENY, escalatable=False),),
     ).profile
     additional = AdditionalPermissionProfile(
         filesystem=(FilesystemEntry(protected / "audit.db", FilesystemAccess.READ_WRITE),)
@@ -71,7 +90,7 @@ def test_non_escalatable_deny_cannot_be_overridden(tmp_path: Path) -> None:
     )
 
 
-def test_specific_addition_can_override_escalatable_parent_deny(tmp_path: Path) -> None:
+def test_additional_permission_cannot_override_any_base_deny(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     profile = settings_for_mode(
@@ -84,8 +103,15 @@ def test_specific_addition_can_override_escalatable_parent_deny(tmp_path: Path) 
         filesystem=(FilesystemEntry(approved, FilesystemAccess.READ),)
     )
 
-    assert filesystem_operation_allowed(profile, additional, approved, FilesystemOperation.READ)
-    assert not filesystem_operation_allowed(profile, additional, approved, FilesystemOperation.WRITE)
+    assert not filesystem_operation_allowed(
+        profile,
+        additional,
+        approved,
+        FilesystemOperation.READ,
+    )
+    assert not filesystem_operation_allowed(
+        profile, additional, approved, FilesystemOperation.WRITE
+    )
 
 
 def test_network_entry_is_exact_and_canonical() -> None:
@@ -93,3 +119,56 @@ def test_network_entry_is_exact_and_canonical() -> None:
     assert (entry.host, entry.port, entry.protocol) == ("example.com", 443, "https")
     with pytest.raises(ValueError, match="wildcard"):
         NetworkEntry("*.example.com", 443, "https")
+
+
+def test_filesystem_glob_can_only_deny_reads_on_canonical_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),),
+        filesystem_globs=(
+            FilesystemGlobEntry(
+                workspace,
+                "**/*.pem",
+                FilesystemGlobAccess.DENY_READ,
+            ),
+        ),
+    )
+    target = workspace / "nested" / ".." / "secret.pem"
+
+    assert not filesystem_operation_allowed(
+        profile,
+        AdditionalPermissionProfile(),
+        target,
+        FilesystemOperation.READ,
+    )
+    assert filesystem_operation_allowed(
+        profile,
+        AdditionalPermissionProfile(),
+        target,
+        FilesystemOperation.WRITE,
+    )
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "../*.pem",
+        "/absolute/*.pem",
+        "",
+        "safe\x00*.pem",
+        "[unterminated",
+        "foo/**bar",
+        "{one,two}.pem",
+        "foo//bar.pem",
+    ],
+)
+def test_filesystem_glob_rejects_ambiguous_patterns(tmp_path: Path, pattern: str) -> None:
+    with pytest.raises(ValueError):
+        FilesystemGlobEntry(tmp_path, pattern)
+
+
+def test_filesystem_glob_rejects_non_deny_access(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="deny_read"):
+        FilesystemGlobEntry(tmp_path, "*.pem", "allow")  # type: ignore[arg-type]

@@ -14,6 +14,24 @@ from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 _SCHEMA_VERSION = 1
 _MAX_ACTION_SUMMARY_LENGTH = 500
 _MAX_ACTION_DETAIL_LENGTH = 4000
+_RULE_PAYLOAD_FIELDS = {
+    "scope",
+    "decision",
+    "kind",
+    "exact_digest",
+    "argv_prefix",
+    "cwd",
+    "action_summary",
+    "action_detail",
+}
+_RULE_PAYLOAD_REQUIRED_FIELDS = {
+    "scope",
+    "decision",
+    "kind",
+    "exact_digest",
+    "argv_prefix",
+    "cwd",
+}
 
 
 class RuleStoreCorruptError(RuntimeError):
@@ -134,7 +152,14 @@ class SQLiteRuleStore:
                 "ORDER BY created_at ASC, rule_id ASC",
                 identity,
             ).fetchall()
-        return [(_decode_rule(row), bool(row["enabled"])) for row in rows]
+        result: list[tuple[ActionRule, bool]] = []
+        for row in rows:
+            if row["enabled"] not in {0, 1}:
+                raise RuleStoreCorruptError(
+                    f"规则 {row['rule_id']} enabled 状态损坏"
+                )
+            result.append((_decode_rule(row), bool(row["enabled"])))
+        return result
 
     def set_enabled(
         self,
@@ -145,6 +170,9 @@ class SQLiteRuleStore:
         owner_account_id: str,
         workspace_id: str,
     ) -> bool:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled 必须是布尔值")
+        _identifier(rule_id, "rule_id")
         identity = _identity(os_user, owner_account_id, workspace_id)
 
         def _write(conn) -> bool:
@@ -165,6 +193,7 @@ class SQLiteRuleStore:
         owner_account_id: str,
         workspace_id: str,
     ) -> bool:
+        _identifier(rule_id, "rule_id")
         identity = _identity(os_user, owner_account_id, workspace_id)
 
         def _write(conn) -> bool:
@@ -188,16 +217,26 @@ def _decode_rule(row) -> ActionRule:
         raise RuleStoreCorruptError(f"规则 {rule_id} 使用未知 schema version")
     try:
         payload = json.loads(row["payload_json"])
+        if not isinstance(payload, dict):
+            raise ValueError("payload 不是对象")
+        if set(payload) - _RULE_PAYLOAD_FIELDS:
+            raise ValueError("payload 包含未知字段")
+        if not _RULE_PAYLOAD_REQUIRED_FIELDS.issubset(payload):
+            raise ValueError("payload 缺少必需字段")
+        if not isinstance(payload["argv_prefix"], list):
+            raise ValueError("argv_prefix 不是数组")
         prefix = tuple(payload["argv_prefix"])
         if not all(isinstance(token, str) and token for token in prefix):
             raise ValueError("argv_prefix 非字符串数组")
+        if not isinstance(payload["exact_digest"], str) or not isinstance(payload["cwd"], str):
+            raise ValueError("规则匹配字段类型无效")
         rule = ActionRule(
             scope=RuleScope(payload["scope"]),
             decision=RuleDecision(payload["decision"]),
             kind=ActionKind(payload["kind"]),
-            exact_digest=str(payload["exact_digest"]),
+            exact_digest=payload["exact_digest"],
             argv_prefix=prefix,
-            cwd=str(payload["cwd"]),
+            cwd=payload["cwd"],
             rule_id=rule_id,
             action_summary=_display_text(
                 payload.get("action_summary", ""),
@@ -218,10 +257,24 @@ def _decode_rule(row) -> ActionRule:
 
 
 def _identity(os_user: str, owner_account_id: str, workspace_id: str) -> tuple[str, str, str]:
-    values = tuple(str(value).strip() for value in (os_user, owner_account_id, workspace_id))
-    if not all(values):
-        raise ValueError("os_user、owner_account_id、workspace_id 均不能为空")
+    raw_values = (os_user, owner_account_id, workspace_id)
+    if not all(isinstance(value, str) for value in raw_values):
+        raise ValueError("os_user、owner_account_id、workspace_id 必须是字符串")
+    values = tuple(value.strip() for value in raw_values)
+    if not all(values) or any("\x00" in value or len(value) > 512 for value in values):
+        raise ValueError("os_user、owner_account_id、workspace_id 均须为有效非空标识")
     return values
+
+
+def _identifier(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or "\x00" in value
+        or len(value) > 128
+    ):
+        raise ValueError(f"{field} 必须是有效非空字符串")
+    return value
 
 
 def _display_text(value: object, field: str, maximum: int) -> str:

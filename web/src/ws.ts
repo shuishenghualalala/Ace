@@ -1,10 +1,52 @@
 import type { Chunk } from "./types";
 
+const WS_PROTOCOL_VERSION = 1;
+const PROTOCOL_NONCE_RE = /^[A-Za-z0-9._~-]{16,128}$/;
+
+function secureProtocolNonce(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+export class ClientProtocolIdentity {
+  private clientSequence = 0;
+
+  constructor(private readonly nonceFactory: () => string = secureProtocolNonce) {}
+
+  reset(): void {
+    this.clientSequence = 0;
+  }
+
+  encode(payload: object): string {
+    if (
+      payload === null
+      || Array.isArray(payload)
+      || typeof payload !== "object"
+      || this.clientSequence >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new Error("invalid WebSocket protocol frame");
+    }
+    const nonce = this.nonceFactory();
+    if (!PROTOCOL_NONCE_RE.test(nonce)) {
+      throw new Error("invalid WebSocket protocol nonce");
+    }
+    this.clientSequence += 1;
+    return JSON.stringify({
+      ...payload,
+      protocol_version: WS_PROTOCOL_VERSION,
+      client_sequence: this.clientSequence,
+      nonce,
+    });
+  }
+}
+
 /** 自动重连的对话 WebSocket。沿用后端 /ws 协议：发 {query,session_id,mode}，收 Chunk。 */
 export class ChatSocket {
   private ws: WebSocket | null = null;
   private closed = false;
   private connectCount = 0; // 临时诊断：连接序号，排查断连来源
+  private readonly protocolIdentity = new ClientProtocolIdentity();
 
   constructor(
     private onChunk: (c: Chunk) => void,
@@ -16,6 +58,7 @@ export class ChatSocket {
     this.connectCount += 1;
     const n = this.connectCount;
     const proto = location.protocol === "https:" ? "wss" : "ws";
+    this.protocolIdentity.reset();
     this.ws = new WebSocket(`${proto}://${location.host}/ws`);
     this.ws.onopen = () => {
       this.onStatus(true);
@@ -59,8 +102,19 @@ export class ChatSocket {
 
   send(payload: object): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(payload));
-      return true;
+      try {
+        this.ws.send(this.protocolIdentity.encode(payload));
+        return true;
+      } catch {
+        // A failed enqueue may have consumed a sequence locally. Close the
+        // socket so reconnect starts a fresh sequence instead of continuing
+        // with a gap the Gateway must reject.
+        try {
+          this.ws.close(4002, "Protocol identity failed");
+        } catch {
+          // onclose/reconnect remains the only recovery path.
+        }
+      }
     }
     return false;
   }

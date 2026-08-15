@@ -37,6 +37,59 @@ class ActionRule:
     action_summary: str = ""
     action_detail: str = ""
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.scope, RuleScope):
+            raise ValueError("rule scope 无效")
+        if not isinstance(self.decision, RuleDecision):
+            raise ValueError("rule decision 无效")
+        if not isinstance(self.kind, ActionKind):
+            raise ValueError("rule kind 无效")
+        if (
+            not isinstance(self.rule_id, str)
+            or not self.rule_id
+            or len(self.rule_id) > 128
+            or "\x00" in self.rule_id
+        ):
+            raise ValueError("rule_id 无效")
+        if not isinstance(self.exact_digest, str):
+            raise ValueError("exact_digest 必须是字符串")
+        if not isinstance(self.argv_prefix, tuple) or not all(
+            isinstance(token, str)
+            and token
+            and "\x00" not in token
+            and len(token) <= 4096
+            for token in self.argv_prefix
+        ):
+            raise ValueError("argv_prefix 必须是非空字符串 token 元组")
+        if len(self.argv_prefix) > 256:
+            raise ValueError("argv_prefix token 过多")
+        has_exact = bool(self.exact_digest)
+        has_prefix = bool(self.argv_prefix)
+        if has_exact == has_prefix:
+            raise ValueError("规则必须且只能包含 exact_digest 或 argv_prefix")
+        if has_exact:
+            if len(self.exact_digest) != 64 or any(
+                char not in "0123456789abcdef" for char in self.exact_digest
+            ):
+                raise ValueError("exact_digest 必须是 SHA-256 hex")
+            if self.cwd:
+                raise ValueError("exact 规则不得携带 cwd")
+        else:
+            if self.kind is not ActionKind.EXEC:
+                raise ValueError("argv_prefix 只适用于 exec 规则")
+            if (
+                not isinstance(self.cwd, str)
+                or not self.cwd
+                or "\x00" in self.cwd
+                or not Path(self.cwd).is_absolute()
+                or str(Path(self.cwd).expanduser().resolve(strict=False)) != self.cwd
+            ):
+                raise ValueError("argv_prefix cwd 必须是规范化绝对路径")
+        if not isinstance(self.action_summary, str) or len(self.action_summary) > 500:
+            raise ValueError("action_summary 必须是不超过 500 字符的字符串")
+        if not isinstance(self.action_detail, str) or len(self.action_detail) > 4000:
+            raise ValueError("action_detail 必须是不超过 4000 字符的字符串")
+
     @classmethod
     def exact(
         cls,

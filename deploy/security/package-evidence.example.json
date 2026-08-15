@@ -1,8 +1,97 @@
 {
+  "schema": 2,
   "status": "blocked",
-  "package_signature_verified": false,
+  "repository": "",
+  "commit": "",
+  "source_hash": "",
+  "cargo_lock_sha256": "",
   "cargo_lock_verified": false,
-  "desktop_walkthrough": false,
-  "artifact": "",
-  "reviewer": ""
+  "desktop_walkthroughs": {
+    "linux": false,
+    "windows": false,
+    "macos": false
+  },
+  "update_trust_root": {
+    "algorithm": "Ed25519",
+    "public_key_sha256": "",
+    "embedded_verified": {
+      "linux": false,
+      "windows": false,
+      "macos": false
+    }
+  },
+  "update_source": {
+    "base_url": "",
+    "embedded_verified": {
+      "linux": false,
+      "windows": false,
+      "macos": false
+    }
+  },
+  "packages": {
+    "linux": {
+      "filename": "",
+      "sha256": "",
+      "signature_verified": false,
+      "signature": {
+        "kind": "gpg-detached",
+        "subject_sha256": "",
+        "identity": "",
+        "issuer": "",
+        "verification_run": ""
+      }
+    },
+    "windows": {
+      "filename": "",
+      "sha256": "",
+      "signature_verified": false,
+      "signature": {
+        "kind": "authenticode",
+        "subject_sha256": "",
+        "identity": "",
+        "issuer": "",
+        "verification_run": ""
+      }
+    },
+    "macos": {
+      "filename": "",
+      "sha256": "",
+      "signature_verified": false,
+      "signature": {
+        "kind": "apple-codesign",
+        "subject_sha256": "",
+        "identity": "",
+        "issuer": "",
+        "verification_run": ""
+      }
+    }
+  },
+  "runtime_evidence_sha256": {
+    "linux": "",
+    "windows": "",
+    "macos": ""
+  },
+  "runtime_bindings": {
+    "linux": {
+      "target_triple": "",
+      "artifact_sha256": "",
+      "desktop_staged_artifact_sha256": "",
+      "runtime_manifest_sha256": "",
+      "sbom_sha256": ""
+    },
+    "windows": {
+      "target_triple": "",
+      "artifact_sha256": "",
+      "desktop_staged_artifact_sha256": "",
+      "runtime_manifest_sha256": "",
+      "sbom_sha256": ""
+    },
+    "macos": {
+      "target_triple": "",
+      "artifact_sha256": "",
+      "desktop_staged_artifact_sha256": "",
+      "runtime_manifest_sha256": "",
+      "sbom_sha256": ""
+    }
+  }
 }

@@ -3,9 +3,15 @@
 import { safeStorage } from 'electron';
 import type { AuthStateSnapshot, AuthUserSnapshot } from '../shared/types';
 import { readDesktopPrefsFile, writeDesktopPrefsFile } from './desktop-prefs';
+import {
+  DESKTOP_REQUEST_ORIGIN,
+  GATEWAY_INSTANCE_AUTH_HEADER,
+} from './gateway-instance-auth';
 
 const SESSION_COOKIE_NAME = 'crew_auth_session';
 const PREFS_KEY = 'authSession';
+const LEGACY_PREFS_KEYS = ['encryptedJwt', 'userInfo'] as const;
+const MAX_SESSION_COOKIE_CHARS = 8192;
 
 interface AuthConfigPayload {
   ok?: boolean;
@@ -57,12 +63,51 @@ function syntheticUser(userId: string): AuthUserSnapshot {
   return { userId, phoneNumber: '' };
 }
 
+export function isOsBackedSessionStorageAvailable(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  if (platform !== 'linux') return true;
+  try {
+    const backend = safeStorage.getSelectedStorageBackend();
+    return backend !== 'basic_text' && backend !== 'unknown';
+  } catch {
+    return false;
+  }
+}
+
+function validSessionCookie(value: string): boolean {
+  return value.length <= MAX_SESSION_COOKIE_CHARS
+    && /^crew_auth_session=[A-Za-z0-9._~-]+$/.test(value);
+}
+
 export class DesktopAuthSession {
   private mode: AuthStateSnapshot['mode'] = 'unknown';
   private configured = false;
   private providerId = 'custom';
   private cookie = '';
   private user: AuthUserSnapshot | null = null;
+  private gatewayProofProvider: ((method: string, pathname: string, body: string) => string) | null = null;
+
+  setGatewayProofProvider(
+    provider: (method: string, pathname: string, body: string) => string,
+  ): void {
+    this.gatewayProofProvider = provider;
+  }
+
+  private protectedHeaders(
+    method: string,
+    pathname: string,
+    body: string,
+    includeCookie = false,
+  ): Record<string, string> {
+    if (!this.gatewayProofProvider) throw new Error('Gateway instance proof provider unavailable');
+    return {
+      Origin: DESKTOP_REQUEST_ORIGIN,
+      [GATEWAY_INSTANCE_AUTH_HEADER]: this.gatewayProofProvider(method, pathname, body),
+      ...(includeCookie && this.cookie ? { Cookie: this.cookie } : {}),
+    };
+  }
 
   private endpoint(baseUrl: string, pathname: string): string {
     const target = new URL(baseUrl);
@@ -100,7 +145,7 @@ export class DesktopAuthSession {
       if (this.cookie && this.user) {
         const sessionResponse = await fetch(this.endpoint(baseUrl, '/api/auth/session'), {
           method: 'GET',
-          headers: { Cookie: this.cookie },
+          headers: this.protectedHeaders('GET', '/api/auth/session', '', true),
           redirect: 'error',
         }).catch(() => null);
         if (!sessionResponse || !sessionResponse.ok) {
@@ -143,12 +188,25 @@ export class DesktopAuthSession {
     this.user = null;
     const prefs = readDesktopPrefsFile();
     const stored = prefs[PREFS_KEY] as StoredAuthSession | undefined;
-    if (!stored || stored.providerId !== this.providerId || !stored.encryptedCookie) return;
+    if (!stored) {
+      this.clearPersistedSession();
+      return;
+    }
+    if (stored.providerId !== this.providerId || !stored.encryptedCookie) {
+      this.clearPersistedSession();
+      return;
+    }
     const user = normalizedUser(stored.user);
-    if (!user || !safeStorage.isEncryptionAvailable()) return;
+    if (!user || !isOsBackedSessionStorageAvailable()) {
+      this.clearPersistedSession();
+      return;
+    }
     try {
       const cookie = safeStorage.decryptString(Buffer.from(stored.encryptedCookie, 'base64'));
-      if (!cookie.startsWith(`${SESSION_COOKIE_NAME}=`)) return;
+      if (!validSessionCookie(cookie)) {
+        this.clearPersistedSession();
+        return;
+      }
       this.cookie = cookie;
       this.user = user;
     } catch {
@@ -157,9 +215,19 @@ export class DesktopAuthSession {
   }
 
   private persistRemoteSession(): void {
-    if (!this.cookie || !this.user || !safeStorage.isEncryptionAvailable()) return;
+    if (!this.cookie || !this.user || !isOsBackedSessionStorageAvailable()) {
+      this.clearPersistedSession();
+      return;
+    }
     const prefs = readDesktopPrefsFile();
-    const encryptedCookie = safeStorage.encryptString(this.cookie).toString('base64');
+    let encryptedCookie: string;
+    try {
+      encryptedCookie = safeStorage.encryptString(this.cookie).toString('base64');
+    } catch {
+      this.clearPersistedSession();
+      return;
+    }
+    for (const key of LEGACY_PREFS_KEYS) delete prefs[key];
     writeDesktopPrefsFile({
       ...prefs,
       [PREFS_KEY]: {
@@ -172,16 +240,21 @@ export class DesktopAuthSession {
 
   private clearPersistedSession(): void {
     const prefs = readDesktopPrefsFile();
-    if (!(PREFS_KEY in prefs)) return;
+    if (!(PREFS_KEY in prefs) && !LEGACY_PREFS_KEYS.some((key) => key in prefs)) return;
     delete prefs[PREFS_KEY];
+    for (const key of LEGACY_PREFS_KEYS) delete prefs[key];
     writeDesktopPrefsFile(prefs);
   }
 
   async sendCode(baseUrl: string, phoneNumber: string): Promise<Record<string, unknown>> {
+    const body = JSON.stringify({ phoneNumber });
     const response = await fetch(this.endpoint(baseUrl, '/api/auth/send-code'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phoneNumber }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.protectedHeaders('POST', '/api/auth/send-code', body),
+      },
+      body,
       redirect: 'error',
     });
     const payload = parseJson(await response.text());
@@ -193,10 +266,14 @@ export class DesktopAuthSession {
     phoneNumber: string,
     code: string,
   ): Promise<Record<string, unknown>> {
+    const body = JSON.stringify({ phoneNumber, code });
     const response = await fetch(this.endpoint(baseUrl, '/api/auth/login'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phoneNumber, code }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.protectedHeaders('POST', '/api/auth/login', body),
+      },
+      body,
       redirect: 'error',
     });
     const payload = parseJson(await response.text());
@@ -212,10 +289,14 @@ export class DesktopAuthSession {
   }
 
   async loginWithEmail(baseUrl: string, email: string): Promise<Record<string, unknown>> {
+    const body = JSON.stringify({ email });
     const response = await fetch(this.endpoint(baseUrl, '/api/auth/login'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.protectedHeaders('POST', '/api/auth/login', body),
+      },
+      body,
       redirect: 'error',
     });
     const payload = parseJson(await response.text());
@@ -243,7 +324,7 @@ export class DesktopAuthSession {
     }
     const response = await fetch(this.endpoint(baseUrl, '/api/auth/logout'), {
       method: 'POST',
-      headers: { Cookie: this.cookie },
+      headers: this.protectedHeaders('POST', '/api/auth/logout', '', true),
       redirect: 'error',
     });
     const payload = parseJson(await response.text());

@@ -1,0 +1,9 @@
+scan:
+  disable-telemetry: true
+  skip-dirs:
+    - .git
+    - .venv
+    - desktop/node_modules
+
+secret:
+  config: deploy/security/trivy-secret.yaml

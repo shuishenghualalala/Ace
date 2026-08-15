@@ -15,15 +15,17 @@ use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use protocol::{
-    validate_process_inputs, ReadyFrame, RequestEnvelope, RuntimeEvent, RuntimeMessage,
-    RuntimeRequest, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES, PROTOCOL_VERSION,
-    READY_CAPABILITIES,
+    validate_process_inputs, validate_stdio_input_frame, ReadyFrame, RequestEnvelope, RuntimeEvent,
+    RuntimeMessage, RuntimeRequest, StdioInputFrame, StdioInputMessage, MAX_REQUEST_FRAME_BYTES,
+    MAX_RESPONSE_FRAME_BYTES, MAX_STDIO_INPUT_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
 };
 use subtle::ConstantTimeEq;
 
@@ -185,6 +187,33 @@ fn protocol_main() -> Result<(), String> {
             )?;
             continue;
         }
+        if let RuntimeRequest::RunStdio {
+            max_input_bytes, ..
+        } = &envelope.request
+        {
+            if *max_input_bytes == 0 || *max_input_bytes > MAX_STDIO_INPUT_BYTES {
+                write_error(
+                    &mut output,
+                    nonce,
+                    "sandbox_denied",
+                    "stdio input budget is invalid",
+                )?;
+                continue;
+            }
+            let max_input_bytes = *max_input_bytes;
+            // A duplex request exclusively owns this helper. The client waits
+            // for `started` before sending stream frames, so dropping the
+            // initial stdin lock cannot discard read-ahead bytes.
+            drop(reader);
+            stream_stdio_request(
+                envelope.request,
+                nonce,
+                startup_token,
+                max_input_bytes,
+                &mut output,
+            )?;
+            return Ok(());
+        }
         stream_request(envelope.request, nonce, &mut output)?;
     }
     Ok(())
@@ -236,28 +265,80 @@ struct RuntimeFailure {
 fn handle_request(
     request: RuntimeRequest,
     sender: &SyncSender<RuntimeMessage>,
+    stdin_stream: Option<Receiver<StdioInputMessage>>,
 ) -> Result<(), RuntimeFailure> {
     match request {
         RuntimeRequest::ClassifyShell {
             shell_kind,
             executable,
             raw_command,
-        } => sender
-            .send(RuntimeMessage::Classified(shell::classify(
-                &shell_kind,
-                &executable,
-                &raw_command,
-            )))
-            .map_err(|_| RuntimeFailure {
-                code: "runtime_crashed",
-                message: "classification channel closed".to_string(),
-            }),
+        } => {
+            if stdin_stream.is_some() {
+                return Err(RuntimeFailure {
+                    code: "runtime_protocol_mismatch",
+                    message: "classification cannot receive stdio frames".to_string(),
+                });
+            }
+            sender
+                .send(RuntimeMessage::Classified(shell::classify(
+                    &shell_kind,
+                    &executable,
+                    &raw_command,
+                )))
+                .map_err(|_| RuntimeFailure {
+                    code: "runtime_crashed",
+                    message: "classification channel closed".to_string(),
+                })
+        }
+        RuntimeRequest::RunStdio {
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            denied_roots,
+            filesystem_globs,
+            network_enabled,
+            network_rules,
+            allow_local_binding,
+            max_output_bytes,
+            max_input_bytes,
+            env_overrides,
+        } => {
+            if max_input_bytes == 0
+                || max_input_bytes > MAX_STDIO_INPUT_BYTES
+                || stdin_stream.is_none()
+            {
+                return Err(RuntimeFailure {
+                    code: "sandbox_denied",
+                    message: "stdio input channel is unavailable".to_string(),
+                });
+            }
+            handle_request(
+                RuntimeRequest::Run {
+                    command,
+                    cwd,
+                    writable_roots,
+                    readable_roots,
+                    denied_roots,
+                    filesystem_globs,
+                    network_enabled,
+                    network_rules,
+                    allow_local_binding,
+                    max_output_bytes,
+                    stdin_b64: None,
+                    env_overrides,
+                },
+                sender,
+                stdin_stream,
+            )
+        }
         RuntimeRequest::Run {
             command,
             cwd,
             writable_roots,
             readable_roots,
             denied_roots,
+            filesystem_globs,
             network_enabled,
             network_rules,
             allow_local_binding,
@@ -276,6 +357,14 @@ fn handle_request(
                     message: "empty command".to_string(),
                 });
             }
+            #[cfg(not(target_os = "linux"))]
+            if !filesystem_globs.is_empty() {
+                return Err(RuntimeFailure {
+                    code: "sandbox_denied",
+                    message: "filesystem glob deny-read requires Linux native enforcement"
+                        .to_string(),
+                });
+            }
             #[cfg(target_os = "linux")]
             {
                 let request = linux::LinuxRunRequest {
@@ -284,12 +373,14 @@ fn handle_request(
                     writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
                     readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
                     denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                    filesystem_globs,
                     network_enabled,
                     network_rules,
                     allow_local_binding,
                     proxy_socket_dir: None,
                     max_output_bytes,
                     stdin: process_input.stdin,
+                    stdin_stream,
                     env_overrides: process_input.env_overrides,
                 };
                 linux::run(request, sender).map_err(|error| RuntimeFailure {
@@ -310,6 +401,7 @@ fn handle_request(
                     allow_local_binding,
                     max_output_bytes,
                     stdin: process_input.stdin,
+                    stdin_stream,
                     env_overrides: process_input.env_overrides,
                 };
                 macos::run(request, sender).map_err(|error| RuntimeFailure {
@@ -326,10 +418,12 @@ fn handle_request(
                     writable_roots,
                     readable_roots,
                     denied_roots,
+                    filesystem_globs,
                     network_enabled,
                     network_rules,
                     allow_local_binding,
                     max_output_bytes,
+                    stdin_stream,
                     process_input,
                 );
                 Err(RuntimeFailure {
@@ -350,6 +444,7 @@ fn handle_request(
                     allow_local_binding,
                     max_output_bytes,
                     stdin: process_input.stdin,
+                    stdin_stream,
                     env_overrides: process_input.env_overrides,
                 };
                 windows::run(request, sender).map_err(|error| RuntimeFailure {
@@ -367,7 +462,7 @@ fn stream_request<W: Write>(
     output: &mut W,
 ) -> Result<(), String> {
     let (sender, receiver) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
-    let worker = thread::spawn(move || execute_request(request, sender));
+    let worker = thread::spawn(move || execute_request(request, sender, None));
     let mut writer = EventWriter::new(output, nonce);
 
     while let Ok(message) = receiver.recv() {
@@ -385,12 +480,124 @@ fn stream_request<W: Write>(
     Ok(())
 }
 
-fn execute_request(request: RuntimeRequest, sender: SyncSender<RuntimeMessage>) {
-    if let Err(error) = handle_request(request, &sender) {
+fn execute_request(
+    request: RuntimeRequest,
+    sender: SyncSender<RuntimeMessage>,
+    stdin_stream: Option<Receiver<StdioInputMessage>>,
+) {
+    if let Err(error) = handle_request(request, &sender, stdin_stream) {
         let _ = sender.send(RuntimeMessage::Error {
             code: error.code,
             message: error.message,
         });
+    }
+}
+
+fn stream_stdio_request<W: Write>(
+    request: RuntimeRequest,
+    nonce: String,
+    startup_token: String,
+    max_input_bytes: usize,
+    output: &mut W,
+) -> Result<(), String> {
+    let (event_sender, event_receiver) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
+    let (input_sender, input_receiver) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
+    let finished = Arc::new(AtomicBool::new(false));
+    let reader_finished = Arc::clone(&finished);
+    let reader_nonce = nonce.clone();
+    thread::spawn(move || {
+        read_stdio_input(
+            input_sender,
+            startup_token,
+            reader_nonce,
+            max_input_bytes,
+            reader_finished,
+        )
+    });
+    let worker_finished = Arc::clone(&finished);
+    let worker = thread::spawn(move || {
+        execute_request(request, event_sender, Some(input_receiver));
+        worker_finished.store(true, Ordering::Release);
+    });
+    let mut writer = EventWriter::new(output, nonce);
+    while let Ok(message) = event_receiver.recv() {
+        writer.write_message(message)?;
+    }
+    finished.store(true, Ordering::Release);
+    if !writer.terminal {
+        writer.write_message(RuntimeMessage::Error {
+            code: "runtime_crashed",
+            message: "native runtime worker terminated unexpectedly".to_string(),
+        })?;
+    }
+    if worker.join().is_err() && !writer.terminal {
+        return Err("native runtime worker panicked".to_string());
+    }
+    Ok(())
+}
+
+fn read_stdio_input(
+    sender: SyncSender<StdioInputMessage>,
+    startup_token: String,
+    nonce: String,
+    max_input_bytes: usize,
+    finished: Arc<AtomicBool>,
+) {
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut expected_seq = 0_u64;
+    let mut retained = 0_usize;
+    let mut raw = String::new();
+    while !finished.load(Ordering::Acquire) {
+        raw.clear();
+        match reader.read_line(&mut raw) {
+            Ok(0) => {
+                let _ = sender.send(StdioInputMessage::Abort);
+                return;
+            }
+            Ok(_) if raw.len() <= MAX_REQUEST_FRAME_BYTES => {}
+            Ok(_) => {
+                let _ = sender.send(StdioInputMessage::Abort);
+                return;
+            }
+            Err(_) => {
+                let _ = sender.send(StdioInputMessage::Abort);
+                return;
+            }
+        }
+        let frame: StdioInputFrame = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = sender.send(StdioInputMessage::Abort);
+                return;
+            }
+        };
+        let remaining = max_input_bytes.saturating_sub(retained);
+        let (message, consumed) = match validate_stdio_input_frame(
+            frame,
+            &startup_token,
+            &nonce,
+            expected_seq,
+            remaining,
+        ) {
+            Ok(value) => value,
+            Err(_error) => {
+                let _ = sender.send(StdioInputMessage::Abort);
+                return;
+            }
+        };
+        expected_seq = match expected_seq.checked_add(1) {
+            Some(value) => value,
+            None => {
+                let _ = sender.send(StdioInputMessage::Abort);
+                return;
+            }
+        };
+        retained += consumed;
+        let terminal = matches!(message, StdioInputMessage::Close);
+        if sender.send(message).is_err() || terminal {
+            return;
+        }
     }
 }
 

@@ -51,6 +51,9 @@ function makeHandlers(overrides: Partial<SecurityCenterActions> = {}): SecurityC
     onRuleDelete: vi.fn(),
     onAuditExport: vi.fn(),
     onAuditPurge: vi.fn(),
+    onAlertIsolate: vi.fn(),
+    onAlertRevoke: vi.fn(),
+    onAlertResolve: vi.fn(),
     ...overrides,
   };
 }
@@ -117,6 +120,9 @@ describe('Security Center view', () => {
       onRuleDelete: vi.fn(),
       onAuditExport: vi.fn(),
       onAuditPurge: vi.fn(),
+      onAlertIsolate: vi.fn(),
+      onAlertRevoke: vi.fn(),
+      onAlertResolve: vi.fn(),
     });
     view.update({
       loading: false,
@@ -129,9 +135,9 @@ describe('Security Center view', () => {
       audits: [],
     });
 
-    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
-      .toBe(true);
-    expect(view.element.textContent).toContain('当前平台不使用 Windows 原生防护');
+    expect(view.element.querySelector('[data-security-action="install"]')).toBeNull();
+    expect(view.element.querySelector('[data-security-action="uninstall"]')).toBeNull();
+    expect(view.element.textContent).toContain('系统内置原生防护');
   });
 
   it('keeps only the applicable Windows setup action enabled', () => {
@@ -145,6 +151,9 @@ describe('Security Center view', () => {
       onRuleDelete: vi.fn(),
       onAuditExport: vi.fn(),
       onAuditPurge: vi.fn(),
+      onAlertIsolate: vi.fn(),
+      onAlertRevoke: vi.fn(),
+      onAlertResolve: vi.fn(),
     });
     view.update({
       loading: false,
@@ -201,7 +210,7 @@ describe('Security Center view', () => {
     expect(view.element.textContent).toContain('正在安装…');
   });
 
-  it('hides the strict security toggle while Crew auth allows plaintext HTTP', () => {
+  it('renders strict security as a mandatory immutable policy', () => {
     const onStrictSecurityChange = vi.fn();
     const view = createSecurityCenterView(makeHandlers({ onStrictSecurityChange }));
     view.update({
@@ -215,12 +224,12 @@ describe('Security Center view', () => {
       audits: [],
     });
 
-    // ponytail: 严格安全约束开关暂时隐藏——后端 _ALLOW_INSECURE_AUTH_HTTP 已单独放行
-    // Crew 认证 HTTP（见 crew/tools/crew_auth.py），无需用户切全局兼容模式。
-    // 见 security-center-view.ts 的 STRICT_SECURITY_TOGGLE_VISIBLE；上游认证服务切 HTTPS 后
-    // 改回 true，此处应恢复为「toggle 渲染 + checked 反映 snapshot + change 触发回调」。
-    const toggle = view.element.querySelector('[data-security-strict-toggle]');
-    expect(toggle).toBeNull();
+    const toggle = view.element.querySelector<HTMLInputElement>(
+      '[data-security-strict-toggle]',
+    );
+    expect(toggle?.checked).toBe(true);
+    expect(toggle?.disabled).toBe(true);
+    expect(view.element.textContent).toContain('始终启用');
   });
 
   it('filters and sorts audit rows, then opens a redacted detail dialog', () => {

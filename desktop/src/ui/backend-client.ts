@@ -9,6 +9,7 @@
  *   把 HTTP 状态码 + 后端错误信息合成人类可读消息抛给 UI 层。
  */
 import { logStream } from './stream-debug';
+import { GatewayWsProtocolIdentity } from '../shared/gateway-ws-protocol';
 
 export type Mode = 'agent' | 'team' | 'dynamic_kanban';
 export type ChunkKind =
@@ -1296,11 +1297,18 @@ export interface PluginItem {
 /** MCP server 传输类型。 */
 export type McpTransport = 'stdio' | 'http' | 'sse' | 'unknown';
 
+export type McpEnvValue =
+  | { source: 'local'; value: string }
+  | { source: 'remote' };
+
 /** MCP server 运行时配置（密钥类 env 已脱敏为 ***）。 */
 export interface McpServerConfig {
   command?: string;
+  command_sha256?: string;
   args?: string[];
-  env?: Record<string, string>;
+  cwd?: string;
+  stdio_source?: 'local' | 'remote';
+  env?: Record<string, string | McpEnvValue>;
   url?: string;
   transport?: McpTransport;
   headers?: Record<string, string>;
@@ -1321,7 +1329,7 @@ export interface McpServerPayload {
   name?: string;
   command?: string;
   args?: string[];
-  env?: Record<string, string>;
+  env?: Record<string, string | McpEnvValue>;
   url?: string;
   transport?: McpTransport;
   headers?: Record<string, string>;
@@ -2161,6 +2169,7 @@ export type BackendSocketStatusMeta = {
 
 export class BackendChatSocket {
   private ws: WebSocket | null = null;
+  private readonly directProtocolIdentity = new GatewayWsProtocolIdentity();
   private closed = false;
   private usingGatewayProxy = false;
   private gatewayProxyOpen = false;
@@ -2277,6 +2286,7 @@ export class BackendChatSocket {
     }
     logStream('ws-renderer', 'connect-direct-ws', { wsBase: wsBase() });
     const wsUrl = `${wsBase()}/ws`;
+    this.directProtocolIdentity.reset();
     this.ws = new WebSocket(wsUrl);
     this.ws.onopen = () => {
       this.onStatus(true);
@@ -2346,8 +2356,19 @@ export class BackendChatSocket {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return false;
     }
-    this.ws.send(JSON.stringify(payload));
-    return true;
+    try {
+      this.ws.send(this.directProtocolIdentity.encode(payload));
+      return true;
+    } catch {
+      // A failed enqueue may consume a local sequence. Force a reconnect so
+      // the next socket starts from sequence one instead of creating a gap.
+      try {
+        this.ws.close(4002, 'Protocol identity failed');
+      } catch {
+        // onclose/reconnect is the only recovery path.
+      }
+      return false;
+    }
   }
 
   private resubscribe(): void {

@@ -1,8 +1,13 @@
+schema_version: crew.plugin.v1
 name: feishu
 version: "0.1.0"
 description: "Feishu/Lark document and drive comment tools."
 author: "Crew"
 kind: standalone
+capabilities:
+  - tools
+  - network
+  - credentials
 requires_env:
   - name: FEISHU_APP_ID
     description: "Feishu/Lark app ID"

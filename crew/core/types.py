@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import html
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -16,6 +18,19 @@ Role = Literal["system", "user", "assistant", "tool"]
 _FILE_WRITE_UI_ARG_KEYS = ("path", "file_path", "append")
 _BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:[es][1-9]\d*$")
 _FORM_FIELD_TYPES = ("textbox", "combobox", "checkbox", "radio", "slider")
+ContentTrust = Literal["trusted", "untrusted"]
+_UNTRUSTED_RESULT_TAG_RE = re.compile(
+    r"</?untrusted_tool_result\b[^>]*>",
+    re.IGNORECASE,
+)
+
+
+def _escape_untrusted_result_markers(content: str) -> str:
+    """Prevent result text from closing the model-facing trust boundary."""
+    return _UNTRUSTED_RESULT_TAG_RE.sub(
+        lambda match: html.escape(match.group(0), quote=False),
+        content,
+    )
 
 
 def _record_replay_arguments_for_display(
@@ -343,6 +358,41 @@ class ToolResult:
     content: str
     is_error: bool = False
     media: list[MediaPart] = field(default_factory=list)
+    # Handler output is data.  The Registry supplies these fields from the
+    # registered tool boundary; payload text cannot upgrade them.
+    content_trust: ContentTrust = "trusted"
+    content_source: str = "tool"
+
+    @property
+    def is_untrusted(self) -> bool:
+        return self.content_trust != "trusted"
+
+    def content_for_model(self, content: str | None = None) -> str:
+        """Return content with a non-forgeable model-facing trust marker."""
+        value = self.content if content is None else str(content)
+        if not self.is_untrusted:
+            return value
+
+        source = self.content_source if re.fullmatch(
+            r"[A-Za-z0-9_.:-]{1,64}", str(self.content_source or "")
+        ) else "tool"
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload["content_trust"] = "untrusted"
+            payload["content_source"] = source
+            return _escape_untrusted_result_markers(
+                json.dumps(payload, ensure_ascii=False)
+            )
+
+        return (
+            f'<untrusted_tool_result source="{source}">\n'
+            f"{html.escape(value, quote=False)}\n"
+            "</untrusted_tool_result>"
+        )
 
 
 @dataclass

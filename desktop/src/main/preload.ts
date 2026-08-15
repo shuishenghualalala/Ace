@@ -1,7 +1,13 @@
 /**
  * Preload script - exposes Crew desktop APIs to the renderer.
  */
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer as rawIpcRenderer } from 'electron';
+import {
+  isIpcMainToRendererEventChannel,
+  isIpcInvokeChannel,
+  type IpcMainToRendererEventChannel,
+  type IpcInvokeChannel,
+} from '../shared/ipc-channels';
 import type {
   AuthStateSnapshot,
   UpdateStateSnapshot,
@@ -9,7 +15,67 @@ import type {
   VersionUpdatePackageResult,
   VersionUpdatePayload,
 } from '../shared/types';
-import type { SecurityAuditArgs } from '../shared/ipc-schemas';
+import type {
+  SecurityAlertActionArgs,
+  SecurityAuditArgs,
+} from '../shared/ipc-schemas';
+
+function invokeMain(
+  channel: IpcInvokeChannel,
+  ...args: unknown[]
+): ReturnType<typeof rawIpcRenderer.invoke> {
+  if (!isIpcInvokeChannel(channel)) {
+    return Promise.reject(new Error('IPC channel is not allowlisted'));
+  }
+  return rawIpcRenderer.invoke(channel, ...args);
+}
+
+type IpcRendererListener = Parameters<typeof rawIpcRenderer.on>[1];
+
+function onMain(
+  channel: IpcMainToRendererEventChannel,
+  listener: IpcRendererListener,
+): ReturnType<typeof rawIpcRenderer.on> {
+  if (!isIpcMainToRendererEventChannel(channel)) {
+    throw new Error('IPC event channel is not allowlisted');
+  }
+  return rawIpcRenderer.on(channel, listener);
+}
+
+function removeMainListener(
+  channel: IpcMainToRendererEventChannel,
+  listener: IpcRendererListener,
+): ReturnType<typeof rawIpcRenderer.removeListener> {
+  if (!isIpcMainToRendererEventChannel(channel)) {
+    throw new Error('IPC event channel is not allowlisted');
+  }
+  return rawIpcRenderer.removeListener(channel, listener);
+}
+
+const ipcRenderer = {
+  invoke: invokeMain,
+  on: onMain,
+  removeListener: removeMainListener,
+};
+
+type FeedbackPayload = {
+  title: string;
+  description: string;
+  images?: Array<{ name: string; dataUrl: string }>;
+};
+
+type FeedbackPreviewApproval =
+  | {
+    success: true;
+    authority: string;
+    payload: Pick<FeedbackPayload, 'title' | 'description'>;
+    expiresAt: number;
+  }
+  | {
+    success: false;
+    canceled?: boolean;
+    message?: string;
+  };
 
 const api = {
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
@@ -24,11 +90,11 @@ const api = {
   },
 
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', { url }),
-  openPath: (p: string, allowedRoot?: string) =>
-    // 空串/空白 allowedRoot 会触发主进程 IPC 参数校验，统一归一化为 undefined
+  openPath: (p: string, workspaceId?: string) =>
+    // 项目根目录由主进程根据已鉴权 Workspace 记录解析，renderer 不传文件系统根。
     ipcRenderer.invoke('shell:openPath', {
       path: p,
-      allowedRoot: allowedRoot && allowedRoot.trim() ? allowedRoot : undefined,
+      workspaceId: workspaceId && workspaceId.trim() ? workspaceId : undefined,
     }),
   readTextFile: (p: string) => ipcRenderer.invoke('shell:readTextFile', { path: p }) as Promise<string>,
   /** 静默探测路径是否为可读文件；不存在时返回 false，不抛错、不刷主进程 ENOENT 日志。 */
@@ -93,9 +159,25 @@ const api = {
     ipcRenderer.invoke('auth:login', { identifier, code }) as Promise<Record<string, unknown>>,
   authLogout: () => ipcRenderer.invoke('auth:logout') as Promise<Record<string, unknown>>,
 
-  // 反馈
-  submitFeedback: (payload: { title: string; description: string; images?: Array<{ name: string; dataUrl: string }> }) =>
-    ipcRenderer.invoke('feedback:submit', payload),
+  // 反馈：native 主进程预览确认签发一次性授权；renderer 单独调用 submit 无法绕过。
+  previewFeedback: (payload: FeedbackPayload) =>
+    ipcRenderer.invoke('feedback:preview', payload) as Promise<FeedbackPreviewApproval>,
+  submitApprovedFeedback: (payload: FeedbackPayload, authority: string) =>
+    ipcRenderer.invoke('feedback:submit', { ...payload, authority }),
+  cancelFeedback: (authority: string) =>
+    ipcRenderer.invoke('feedback:cancel', { authority }),
+  submitFeedback: async (payload: FeedbackPayload) => {
+    const approval = await ipcRenderer.invoke(
+      'feedback:preview',
+      payload,
+    ) as FeedbackPreviewApproval;
+    if (!approval.success) return approval;
+    return ipcRenderer.invoke('feedback:submit', {
+      ...payload,
+      ...approval.payload,
+      authority: approval.authority,
+    });
+  },
   getFeedbackList: (params: unknown) => ipcRenderer.invoke('feedback:list', params),
   // 附件图片：renderer 无法直连外部主机(CSP/webSecurity)，走主进程 fetch 转 data URL
   getFeedbackImage: (path: string) => ipcRenderer.invoke('feedback:image', { path }),
@@ -140,15 +222,16 @@ const api = {
   securitySetMode: (args: {
     workspaceId: string;
     sessionId: string;
-    mode: 'request_approval' | 'auto_review' | 'full_access';
+    mode: 'read_only' | 'request_approval' | 'auto_review' | 'full_access';
   }) => ipcRenderer.invoke('security:set-mode', args),
   securityDecide: (args: {
     workspaceId: string;
     sessionId: string;
-    taskId?: string;
+    taskId: string;
     requestId: string;
     decision: 'once' | 'session' | 'always' | 'reject';
     alwaysArgvPrefix?: string[];
+    permissions?: Record<string, unknown>;
   }) => ipcRenderer.invoke('security:decide', args),
   securityCapabilities: () => ipcRenderer.invoke('security:capabilities', {}),
   securityRules: (args: { workspaceId: string }) => ipcRenderer.invoke('security:rules', args),
@@ -159,6 +242,13 @@ const api = {
   securityAudit: (args: SecurityAuditArgs = {}) => ipcRenderer.invoke('security:audit', args),
   securityAuditExport: () => ipcRenderer.invoke('security:audit-export', {}),
   securityAuditPurge: (args: { workspaceId: string }) => ipcRenderer.invoke('security:audit-purge', args),
+  securityAlerts: () => ipcRenderer.invoke('security:alerts', {}),
+  securityAlertIsolate: (args: SecurityAlertActionArgs) =>
+    ipcRenderer.invoke('security:alert-isolate', args),
+  securityAlertRevoke: (args: SecurityAlertActionArgs) =>
+    ipcRenderer.invoke('security:alert-revoke', args),
+  securityAlertResolve: (args: SecurityAlertActionArgs) =>
+    ipcRenderer.invoke('security:alert-resolve', args),
   securityUacStatus: () => ipcRenderer.invoke('security:uac-status'),
   securityEnableUac: () => ipcRenderer.invoke('security:enable-uac'),
   securitySetup: (args: { action: 'install' | 'repair' | 'uninstall' }) =>

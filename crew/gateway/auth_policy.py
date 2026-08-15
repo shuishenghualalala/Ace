@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-AUTH_EXEMPT_EXACT = frozenset({
+PUBLIC_AUTH_EXEMPT_EXACT = frozenset({
     "/api/health",
     "/api/auth/config",
-    "/api/auth/send-code",
-    "/api/auth/login",
     "/api/feishu/events",
     "/api/scenarios",
     "/api/scenarios/intro-lines",
@@ -23,12 +21,36 @@ INTERNAL_BINDING_AUTH_EXEMPT_EXACT = frozenset({
     "/api/internal/team/plan/update",
 })
 
+# Login bootstrap is not owner-authenticated yet, but it still must prove that
+# the caller is the paired Desktop before credentials leave the main process.
+INSTANCE_ONLY_AUTH_EXEMPT_EXACT = frozenset({
+    "/api/auth/send-code",
+    "/api/auth/login",
+})
+
+# Compatibility export: these paths are exempt from owner-session auth, not
+# necessarily from paired Desktop instance authentication.
+AUTH_EXEMPT_EXACT = (
+    PUBLIC_AUTH_EXEMPT_EXACT
+    | INTERNAL_BINDING_AUTH_EXEMPT_EXACT
+    | INSTANCE_ONLY_AUTH_EXEMPT_EXACT
+)
+
 
 def requires_gateway_auth(path: str) -> bool:
-    """Return whether a request path must carry gateway auth."""
+    """Return whether a request path must carry owner-session authentication."""
 
     return (
         path.startswith("/api/")
         and path not in AUTH_EXEMPT_EXACT
+    )
+
+
+def requires_gateway_instance_auth(path: str) -> bool:
+    """Return whether a request must prove the paired Desktop instance."""
+
+    return (
+        path.startswith("/api/")
+        and path not in PUBLIC_AUTH_EXEMPT_EXACT
         and path not in INTERNAL_BINDING_AUTH_EXEMPT_EXACT
     )

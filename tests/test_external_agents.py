@@ -11,10 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crew.agent.external import acp_adapter, detector, process_lifecycle, runtime_registry
 from crew.agent.executor.base import ExecutionContext
-from crew.core.envelope import ResponseChunk
-from crew.agent.skills import SkillActivation, SkillEntrypoint
 from crew.agent.executor.external import (
     AcpExecutor,
     ClientExecutor,
@@ -28,22 +25,14 @@ from crew.agent.executor.external import (
     _permission_question,
     _stream_runtime_with_safe_resume,
 )
-from crew.agent.plan import PlanModeManager
-from crew.core.types import Message, ToolCall
-from crew.agent.external.detector import (
-    discover_local_runtimes,
-    scan_claude_runtime,
-    scan_codex_runtime,
-    scan_hermes_runtime,
-    scan_kimi_runtime,
-    scan_runtimes,
-)
+from crew.agent.external import acp_adapter, detector, process_lifecycle, runtime_registry
+from crew.agent.external import tools as external_agent_tools
 from crew.agent.external.acp_adapter import (
     AcpAdapterConfig,
     AcpAdapterError,
-    _JsonRpcClient,
     _build_session_new_params,
     _build_session_resume_params,
+    _JsonRpcClient,
     _permission_result,
     run_acp_prompt,
     stream_acp_events,
@@ -56,17 +45,29 @@ from crew.agent.external.cli_adapter import (
     stream_claude_events,
 )
 from crew.agent.external.codex_adapter import stream_codex_events
+from crew.agent.external.detector import (
+    discover_local_runtimes,
+    scan_claude_runtime,
+    scan_codex_runtime,
+    scan_hermes_runtime,
+    scan_kimi_runtime,
+    scan_runtimes,
+)
 from crew.agent.external.runtime_adapter import (
     ExternalStreamEvent,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
-    build_external_runtime_env,
     runtime_adapter_ids,
 )
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
+from crew.agent.plan import PlanModeManager
+from crew.agent.skills import SkillActivation, SkillEntrypoint
+from crew.core.envelope import ResponseChunk
+from crew.core.types import Message, ToolCall
 from crew.gateway.helpers import role_markdown, suggest_role_description, with_session_agent_labels
-from crew.security.launch import ProcessLaunch, current_process_launch
+from crew.security.context import SecurityContext
+from crew.security.launch import current_process_launch, issue_process_launch
 from crew.security.models import PermissionProfile, PermissionProfileKind
 from crew.state.config import Config
 from crew.team.formation import build_agent_profile, fast_team_suggestion
@@ -76,10 +77,22 @@ from crew.tools.registry import Registry
 
 
 @pytest.fixture(autouse=True)
-def _host_process_launch_for_external_adapter_tests():
+def _host_process_launch_for_external_adapter_tests(tmp_path):
     """测试显式声明兼容模式的宿主执行边界。"""
     token = current_process_launch.set(
-        ProcessLaunch(PermissionProfile(PermissionProfileKind.DISABLED))
+        issue_process_launch(
+            SecurityContext(
+                os_user="test-user",
+                owner_account_id="test-owner",
+                workspace_id="test-workspace",
+                workspace_root=tmp_path,
+                session_id="test-session",
+                request_id="test-request",
+                task_id="test-task",
+                cwd=tmp_path,
+            ),
+            PermissionProfile(PermissionProfileKind.DISABLED),
+        )
     )
     try:
         yield
@@ -87,7 +100,24 @@ def _host_process_launch_for_external_adapter_tests():
         current_process_launch.reset(token)
 
 
-def test_external_runtime_env_inherits_owner_settings_and_blocks_crew_credentials(monkeypatch):
+def _write_fake_python_executable(path: Path, source: str) -> Path:
+    """Create a Python-backed fake executable on POSIX and Windows."""
+
+    if os.name == "nt":
+        script = path.with_suffix(".py")
+        launcher = path.with_suffix(".cmd")
+        script.write_text(source, encoding="utf-8")
+        launcher.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+        )
+        return launcher
+    path.write_text(source, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
+def test_external_runtime_env_allows_only_host_basics_and_explicit_settings(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
     monkeypatch.setenv("HOME", "/Users/test")
     monkeypatch.setenv("JWT", "owner-jwt")
@@ -96,21 +126,20 @@ def test_external_runtime_env_inherits_owner_settings_and_blocks_crew_credential
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://models.example.test/v1")
 
-    env = build_external_runtime_env({
-        "RUNTIME_FLAG": "1",
-        "OPENAI_API_KEY": "explicit-runtime-key",
-        "JWT": "override-must-not-pass",
-        "CREW_ENV_FILE": "/private/.env",
-        "CREW_RUNTIME_SECRET": "must-not-pass",
-    })
+    env = process_lifecycle.external_runtime_environment(
+        {
+            "RUNTIME_FLAG": "1",
+            "OPENAI_API_KEY": "explicit-runtime-key",
+        }
+    )
 
     assert env["PATH"] == "/usr/local/bin:/usr/bin"
     assert env["HOME"] == "/Users/test"
     assert env["RUNTIME_FLAG"] == "1"
     assert env["OPENAI_API_KEY"] == "explicit-runtime-key"
-    assert env["SEARCH_PROVIDER_API_KEY"] == "owner-secret"
-    assert env["ANTHROPIC_API_KEY"] == "anthropic-key"
-    assert env["OPENAI_BASE_URL"] == "https://models.example.test/v1"
+    assert "SEARCH_PROVIDER_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "OPENAI_BASE_URL" not in env
     assert "JWT" not in env
     assert "CREW_INTERNAL_SECRET" not in env
     assert "CREW_ENV_FILE" not in env
@@ -150,10 +179,10 @@ async def test_external_cli_process_receives_sanitized_runtime_env(monkeypatch, 
     await run_external_cli(
         ExternalCliConfig(
             provider="test",
-            executable_path=str(script),
+            executable_path=sys.executable,
             prompt="unused",
             cwd=str(tmp_path),
-            custom_args=["--capture"],
+            custom_args=[str(script), "--capture"],
             custom_env={
                 "RUNTIME_FLAG": "enabled",
                 "CAPTURE_FILE": str(capture_file),
@@ -163,7 +192,7 @@ async def test_external_cli_process_receives_sanitized_runtime_env(monkeypatch, 
 
     assert json.loads(capture_file.read_text(encoding="utf-8")) == {
         "runtime_flag": "enabled",
-        "provider_key": "anthropic-key",
+        "provider_key": None,
         "jwt": None,
         "crew_env": None,
         "crew_secret": None,
@@ -271,28 +300,40 @@ def test_external_permission_guard_allows_reference_read_but_asks_before_overwri
         cwd=str(cwd),
     )
 
-    read = classify_external_permission({
-        "rawInput": {
-            "name": "read_file",
-            "arguments": {"path": str(source)},
-        },
-    }, guard, cwd=str(cwd))
-    write = classify_external_permission({
-        "kind": "edit",
-        "rawInput": {
-            "name": "write_file",
-            "arguments": {"path": str(source), "content": "changed"},
-        },
-    }, guard, cwd=str(cwd))
-    local_command = classify_external_permission({
-        "kind": "execute",
-        "rawInput": {
-            "name": "shell",
-            "arguments": {
-                "command": f"python analyze.py {source}",
+    read = classify_external_permission(
+        {
+            "rawInput": {
+                "name": "read_file",
+                "arguments": {"path": str(source)},
             },
         },
-    }, guard, cwd=str(cwd))
+        guard,
+        cwd=str(cwd),
+    )
+    write = classify_external_permission(
+        {
+            "kind": "edit",
+            "rawInput": {
+                "name": "write_file",
+                "arguments": {"path": str(source), "content": "changed"},
+            },
+        },
+        guard,
+        cwd=str(cwd),
+    )
+    local_command = classify_external_permission(
+        {
+            "kind": "execute",
+            "rawInput": {
+                "name": "shell",
+                "arguments": {
+                    "command": f"python analyze.py {source}",
+                },
+            },
+        },
+        guard,
+        cwd=str(cwd),
+    )
 
     assert read.action == "allow"
     assert write.action == "ask"
@@ -315,28 +356,36 @@ def test_active_skill_outside_workspace_is_readable_without_prompt(tmp_path):
     )
     guard = _permission_guard({}, cwd=str(cwd), active_skills=(active,))
 
-    decision = classify_external_permission({
-        "kind": "execute",
-        "rawInput": {
-            "name": "shell",
-            "arguments": {
-                "command": f"{script} --query 数据合规",
+    decision = classify_external_permission(
+        {
+            "kind": "execute",
+            "rawInput": {
+                "name": "shell",
+                "arguments": {
+                    "command": f"{script} --query 数据合规",
+                },
             },
         },
-    }, guard, cwd=str(cwd))
+        guard,
+        cwd=str(cwd),
+    )
 
     assert decision.action == "allow"
     assert decision.tool_name == "terminal"
 
-    relative = classify_external_permission({
-        "kind": "execute",
-        "rawInput": {
-            "name": "shell",
-            "arguments": {
-                "command": "./scripts/search_tool.py --query 数据合规",
+    relative = classify_external_permission(
+        {
+            "kind": "execute",
+            "rawInput": {
+                "name": "shell",
+                "arguments": {
+                    "command": "./scripts/search_tool.py --query 数据合规",
+                },
             },
         },
-    }, guard, cwd=str(cwd))
+        guard,
+        cwd=str(cwd),
+    )
     assert relative.action == "allow"
     assert relative.target.startswith("./scripts/search_tool.py")
 
@@ -351,20 +400,28 @@ def test_permission_question_names_read_and_write_operations(tmp_path):
         "readable_roots": [str(cwd)],
         "writable_roots": [str(cwd)],
     }
-    read = classify_external_permission({
-        "kind": "execute",
-        "rawInput": {
-            "name": "shell",
-            "arguments": {"command": f"cat {outside}"},
+    read = classify_external_permission(
+        {
+            "kind": "execute",
+            "rawInput": {
+                "name": "shell",
+                "arguments": {"command": f"cat {outside}"},
+            },
         },
-    }, guard, cwd=str(cwd))
-    write = classify_external_permission({
-        "kind": "execute",
-        "rawInput": {
-            "name": "shell",
-            "arguments": {"command": f"tee {outside}"},
+        guard,
+        cwd=str(cwd),
+    )
+    write = classify_external_permission(
+        {
+            "kind": "execute",
+            "rawInput": {
+                "name": "shell",
+                "arguments": {"command": f"tee {outside}"},
+            },
         },
-    }, guard, cwd=str(cwd))
+        guard,
+        cwd=str(cwd),
+    )
 
     assert read.action == "ask"
     assert read.operation == "read"
@@ -413,15 +470,19 @@ async def test_external_cli_cancellation_terminates_runtime_process_tree(tmp_pat
         encoding="utf-8",
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    task = asyncio.create_task(run_external_cli(ExternalCliConfig(
-        provider="test",
-        executable_path=str(script),
-        prompt="wait",
-        custom_args=["run"],
-        custom_env={"PID_FILE": str(pid_file)},
-        cwd=str(tmp_path),
-        timeout=120,
-    )))
+    task = asyncio.create_task(
+        run_external_cli(
+            ExternalCliConfig(
+                provider="test",
+                executable_path=sys.executable,
+                prompt="wait",
+                custom_args=[str(script), "run"],
+                custom_env={"PID_FILE": str(pid_file)},
+                cwd=str(tmp_path),
+                timeout=120,
+            )
+        )
+    )
     for _ in range(100):
         if pid_file.exists():
             break
@@ -434,6 +495,10 @@ async def test_external_cli_cancellation_terminates_runtime_process_tree(tmp_pat
         await task
 
     def alive(pid: int) -> bool:
+        if os.name == "nt":
+            from crew.tools.process_registry import _pid_alive
+
+            return _pid_alive(pid)
         try:
             os.kill(pid, 0)
             return True
@@ -481,13 +546,19 @@ async def test_acp_cancellation_terminates_runtime_process(tmp_path):
         encoding="utf-8",
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    task = asyncio.create_task(run_acp_prompt("wait", AcpAdapterConfig(
-        executable_path=str(script),
-        provider="test",
-        cwd=str(tmp_path),
-        custom_env={"PID_FILE": str(pid_file)},
-        timeout=120,
-    )))
+    task = asyncio.create_task(
+        run_acp_prompt(
+            "wait",
+            AcpAdapterConfig(
+                executable_path=sys.executable,
+                provider="test",
+                launch_args=[str(script)],
+                cwd=str(tmp_path),
+                custom_env={"PID_FILE": str(pid_file)},
+                timeout=120,
+            ),
+        )
+    )
     for _ in range(100):
         if pid_file.exists():
             break
@@ -500,13 +571,19 @@ async def test_acp_cancellation_terminates_runtime_process(tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    if os.name == "nt":
+        from crew.tools.process_registry import _pid_alive
+
+        assert not _pid_alive(pid)
+    else:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 def _fake_kimi(tmp_path):
     script = tmp_path / "kimi"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -554,15 +631,13 @@ def _fake_kimi(tmp_path):
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "nope"}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 def _fake_acp_permission_runtime(tmp_path):
     script = tmp_path / "acp_permission"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -611,10 +686,7 @@ def _fake_acp_permission_runtime(tmp_path):
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 @pytest.mark.asyncio
@@ -641,7 +713,8 @@ async def test_acp_permission_handler_returns_runtime_allow_once(tmp_path):
 
 def _fake_kimi_streamed_permission_runtime(tmp_path):
     script = tmp_path / "acp_kimi_streamed_permission"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -722,10 +795,7 @@ def _fake_kimi_streamed_permission_runtime(tmp_path):
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 @pytest.mark.asyncio
@@ -752,7 +822,8 @@ async def test_kimi_streamed_write_inputs_are_correlated_across_three_permission
 
 def _fake_acp_config_options(tmp_path):
     script = tmp_path / "acp_config_options"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -797,15 +868,13 @@ def _fake_acp_config_options(tmp_path):
                 print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 def _fake_kimi_with_cli_catalog(tmp_path):
     script = tmp_path / "kimi_catalog"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -850,15 +919,13 @@ def _fake_kimi_with_cli_catalog(tmp_path):
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 def _fake_acp_with_tool_events(tmp_path):
     script = tmp_path / "kimi_tools"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -902,15 +969,13 @@ def _fake_acp_with_tool_events(tmp_path):
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 def _fake_cli(tmp_path, name: str, version: str, prefix: str = ""):
     script = tmp_path / name
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             f"""\
             #!/usr/bin/env python3
@@ -933,10 +998,7 @@ def _fake_cli(tmp_path, name: str, version: str, prefix: str = ""):
             print("{name} fake cli")
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 def test_acp_adapter_pairs_anonymous_tool_events():
@@ -945,10 +1007,12 @@ def test_acp_adapter_pairs_anonymous_tool_events():
         {"sessionUpdate": "tool_call", "name": "file_read", "arguments": {"path": "README.md"}},
         {"sessionUpdate": "tool_result", "name": "file_read", "result": "read ok"},
     ):
-        client._handle_notification({
-            "method": "session/update",
-            "params": {"update": update},
-        })
+        client._handle_notification(
+            {
+                "method": "session/update",
+                "params": {"update": update},
+            }
+        )
 
     started = client.event_queue.get_nowait()
     finished = client.event_queue.get_nowait()
@@ -960,15 +1024,17 @@ def test_acp_adapter_pairs_anonymous_tool_events():
 
 def test_acp_adapter_preserves_external_thinking_events():
     client = _JsonRpcClient(SimpleNamespace())
-    client._handle_notification({
-        "method": "session/update",
-        "params": {
-            "update": {
-                "sessionUpdate": "agent_thought_chunk",
-                "content": {"type": "text", "text": "先检查上游产物。"},
+    client._handle_notification(
+        {
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "agent_thought_chunk",
+                    "content": {"type": "text", "text": "先检查上游产物。"},
+                },
             },
-        },
-    })
+        }
+    )
 
     event = client.event_queue.get_nowait()
     assert event.kind == "thinking"
@@ -977,13 +1043,15 @@ def test_acp_adapter_preserves_external_thinking_events():
 
 def test_acp_adapter_accepts_direct_params_and_plain_thinking_text():
     client = _JsonRpcClient(SimpleNamespace())
-    client._handle_notification({
-        "method": "session/update",
-        "params": {
-            "sessionUpdate": "agent_thought_chunk",
-            "text": "先检查运行环境。",
-        },
-    })
+    client._handle_notification(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionUpdate": "agent_thought_chunk",
+                "text": "先检查运行环境。",
+            },
+        }
+    )
 
     event = client.event_queue.get_nowait()
     assert event.kind == "thinking"
@@ -992,7 +1060,8 @@ def test_acp_adapter_accepts_direct_params_and_plain_thinking_text():
 
 def _fake_hermes(tmp_path):
     script = tmp_path / "hermes"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -1007,22 +1076,21 @@ def _fake_hermes(tmp_path):
             print("hermes fake cli")
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 @pytest.mark.parametrize(
     ("fake_factory", "env_var", "scan_fn", "provider", "expected_version", "expected_protocol"),
     [
-        pytest.param(_fake_kimi, "CREW_KIMI_PATH", scan_kimi_runtime, "kimi", "kimi 1.2.3", None, id="kimi"),
+        pytest.param(
+            _fake_kimi, "CREW_KIMI_PATH", scan_kimi_runtime, "kimi", "unknown", None, id="kimi"
+        ),
         pytest.param(
             lambda tmp_path: _fake_cli(tmp_path, "codex", "codex 0.42.0"),
             "CREW_CODEX_PATH",
             scan_codex_runtime,
             "codex",
-            "codex 0.42.0",
+            "unknown",
             "cli",
             id="codex",
         ),
@@ -1031,11 +1099,19 @@ def _fake_hermes(tmp_path):
             "CREW_CLAUDE_ACP_PATH",
             scan_claude_runtime,
             "claude",
-            "claude 2.0.0",
+            "unknown",
             "acp",
             id="claude",
         ),
-        pytest.param(_fake_hermes, "CREW_HERMES_PATH", scan_hermes_runtime, "hermes", None, "acp", id="hermes"),
+        pytest.param(
+            _fake_hermes,
+            "CREW_HERMES_PATH",
+            scan_hermes_runtime,
+            "hermes",
+            None,
+            "acp",
+            id="hermes",
+        ),
     ],
 )
 def test_scan_runtime_uses_env_path(
@@ -1087,14 +1163,20 @@ def test_windows_runtime_search_dirs_and_executable_rules(tmp_path, monkeypatch)
         str(command),
         platform_name="nt",
     ) == str(command.resolve())
-    assert detector._usable_executable(
-        str(command),
-        platform_name="posix",
-    ) is None
+    monkeypatch.setattr(detector.os, "access", lambda _path, _mode: False)
+    assert (
+        detector._usable_executable(
+            str(command),
+            platform_name="posix",
+        )
+        is None
+    )
 
 
 def test_process_launcher_uses_platform_specific_isolation(monkeypatch):
-    monkeypatch.setattr(process_lifecycle.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(
+        process_lifecycle.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False
+    )
     monkeypatch.setattr(process_lifecycle.subprocess, "CREATE_NO_WINDOW", 0x800, raising=False)
 
     assert process_lifecycle.isolated_process_kwargs(platform_name="nt") == {
@@ -1188,10 +1270,9 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
         "hermes": "H",
         "claude-code": "C",
     }
-    assert len({
-        descriptor.display_badge
-        for descriptor in descriptors.values()
-    }) == len(descriptors)
+    assert len({descriptor.display_badge for descriptor in descriptors.values()}) == len(
+        descriptors
+    )
     assert all(
         descriptor.adapter_id == "acp-stdio"
         for descriptor in descriptors.values()
@@ -1273,88 +1354,87 @@ def test_claude_runtime_probe_persists_model_migration_metadata(tmp_path, monkey
 
 def test_runtime_refresh_migrates_only_declared_legacy_agent_model(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    old_runtime = store.upsert_runtime({
-        "id": "claude-model-migration",
-        "provider": "claude-code",
-        "name": "Claude Code",
-        "executable_path": "/bin/claude",
-        "version": "old",
-        "protocol": "cli",
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "default",
-            "models": [{"id": "default", "label": "CLI 默认模型", "default": True}],
-        },
-    })
+    old_runtime = store.upsert_runtime(
+        {
+            "id": "claude-model-migration",
+            "provider": "claude-code",
+            "name": "Claude Code",
+            "executable_path": "/bin/claude",
+            "version": "old",
+            "protocol": "cli",
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "default",
+                "models": [{"id": "default", "label": "CLI 默认模型", "default": True}],
+            },
+        }
+    )
     legacy = store.create_agent(
         name="Legacy Claude",
         runtime_id=old_runtime["id"],
         model="default",
     )
 
-    store.upsert_runtime({
-        **old_runtime,
-        "version": "new",
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "sonnet",
-            "models": [
-                {"id": "sonnet", "label": "Claude Sonnet（当前）", "default": True},
-                {"id": "claude-sonnet-4-5", "label": "Claude Sonnet 4.5"},
-            ],
-            "model_migrations": {"default": "sonnet"},
-        },
-    })
+    store.upsert_runtime(
+        {
+            **old_runtime,
+            "version": "new",
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "sonnet",
+                "models": [
+                    {"id": "sonnet", "label": "Claude Sonnet（当前）", "default": True},
+                    {"id": "claude-sonnet-4-5", "label": "Claude Sonnet 4.5"},
+                ],
+                "model_migrations": {"default": "sonnet"},
+            },
+        }
+    )
 
     assert store.get_agent(legacy["id"])["model"] == "sonnet"
+
+
 def test_runtime_display_badge_reconciles_old_rows_and_unknown_runtimes():
-    assert runtime_registry.resolve_runtime_display_badge(
-        provider="codex",
-        metadata={"display_badge": "OLD"},
-    ) == "X"
-    assert runtime_registry.resolve_runtime_display_badge(
-        provider="legacy-provider",
-        metadata={"descriptor_id": "builtin:claude-code"},
-    ) == "C"
-    assert runtime_registry.resolve_runtime_display_badge(
-        provider="custom-runtime",
-        metadata={"display_badge": " cr "},
-    ) == "CR"
-    assert runtime_registry.resolve_runtime_display_badge(
-        provider="unknown-runtime",
-        metadata={},
-    ) == "U"
+    assert (
+        runtime_registry.resolve_runtime_display_badge(
+            provider="codex",
+            metadata={"display_badge": "OLD"},
+        )
+        == "X"
+    )
+    assert (
+        runtime_registry.resolve_runtime_display_badge(
+            provider="legacy-provider",
+            metadata={"descriptor_id": "builtin:claude-code"},
+        )
+        == "C"
+    )
+    assert (
+        runtime_registry.resolve_runtime_display_badge(
+            provider="custom-runtime",
+            metadata={"display_badge": " cr "},
+        )
+        == "CR"
+    )
+    assert (
+        runtime_registry.resolve_runtime_display_badge(
+            provider="unknown-runtime",
+            metadata={},
+        )
+        == "U"
+    )
 
 
-def test_login_shell_resolution_is_lazy_safe_and_canonical(tmp_path, monkeypatch):
-    executable = _fake_cli(tmp_path, "shell-agent", "shell-agent 1.0.0")
-    calls: list[list[str]] = []
-
-    def fake_run(argv, **kwargs):
-        calls.append(argv)
-        return SimpleNamespace(stdout=f"shell-agent\t{executable}\n")
-
+def test_login_shell_resolution_fails_closed_without_sourcing_profiles(monkeypatch):
     monkeypatch.setenv("SHELL", "/bin/sh")
-    monkeypatch.setattr(detector.subprocess, "run", fake_run)
 
     resolved = detector._login_shell_executables({"shell-agent", "bad command"})
 
-    assert resolved == {"shell-agent": str(executable)}
-    assert len(calls) == 1
-    assert calls[0][1] == "-ilc"
-    assert calls[0][-1] == "shell-agent"
-    assert "unalias" in calls[0][2]
-    assert "unset -f" in calls[0][2]
-    assert "pwd -P" in calls[0][2]
+    assert resolved == {}
 
 
 def test_login_shell_resolution_skips_unsupported_shell(monkeypatch):
     monkeypatch.setenv("SHELL", "/usr/local/bin/fish")
-    monkeypatch.setattr(
-        detector.subprocess,
-        "run",
-        lambda *args, **kwargs: pytest.fail("unsupported shell must not be started"),
-    )
 
     assert detector._login_shell_executables({"claude"}) == {}
 
@@ -1398,14 +1478,32 @@ def test_kimi_acp_falls_back_to_local_cli_model_catalog(tmp_path, monkeypatch):
     assert profile.probe.source == "acp_session_new+kimi_provider_list"
 
 
-def test_scan_codex_runtime_skips_warning_version_lines(tmp_path, monkeypatch):
+def test_scan_codex_runtime_does_not_execute_version_flags(tmp_path, monkeypatch):
     codex = _fake_cli(tmp_path, "codex", "codex 0.42.0", prefix="WARNING: path update failed")
     monkeypatch.setenv("CREW_CODEX_PATH", str(codex))
 
     runtime = scan_codex_runtime()
 
     assert runtime is not None
-    assert runtime.version == "codex 0.42.0"
+    assert runtime.version == "unknown"
+
+
+def test_runtime_detection_ignores_ambient_path_entries(
+    tmp_path,
+    monkeypatch,
+):
+    executable = _fake_cli(tmp_path, "ambient-agent", "untrusted")
+    monkeypatch.delenv("CREW_AMBIENT_AGENT_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(executable.parent))
+    monkeypatch.setattr(detector, "_platform_search_dirs", lambda **_: ())
+
+    resolved, source = detector._resolve_executable_with_source(
+        "CREW_AMBIENT_AGENT_PATH",
+        ("ambient-agent",),
+    )
+
+    assert resolved is None
+    assert source == "not_found"
 
 
 def test_scan_codex_runtime_uses_desktop_bundle_when_not_on_path(tmp_path, monkeypatch):
@@ -1425,13 +1523,15 @@ def test_scan_codex_runtime_uses_desktop_bundle_when_not_on_path(tmp_path, monke
 def test_external_agent_store_is_additive(tmp_path):
     db = tmp_path / "crew.db"
     store = ExternalAgentStore(str(db))
-    runtime = store.upsert_runtime({
-        "id": "kimi_test",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": "/bin/kimi",
-        "version": "1.2.3",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_test",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": "/bin/kimi",
+            "version": "1.2.3",
+        }
+    )
     agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"], model="moonshot")
 
     assert store.list_runtimes()[0]["id"] == "kimi_test"
@@ -1447,12 +1547,14 @@ def test_external_agent_store_is_additive(tmp_path):
 def test_external_runtime_missing_identity_uses_neutral_fallback(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
 
-    runtime = store.upsert_runtime({
-        "id": "unknown-runtime",
-        "provider": " ",
-        "name": "",
-        "executable_path": "/bin/external-agent",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "unknown-runtime",
+            "provider": " ",
+            "name": "",
+            "executable_path": "/bin/external-agent",
+        }
+    )
 
     assert runtime["provider"] == "external"
     assert runtime["name"] == "外援"
@@ -1460,13 +1562,15 @@ def test_external_runtime_missing_identity_uses_neutral_fallback(tmp_path):
 
 def test_external_agents_and_teams_are_owner_private_while_runtime_is_global(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "shared-runtime",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": "/bin/hermes",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "shared-runtime",
+            "provider": "hermes",
+            "name": "Hermes",
+            "executable_path": "/bin/hermes",
+            "protocol": "acp",
+        }
+    )
     agent_a = store.create_agent(
         owner_account_id="owner-a",
         name="Agent A",
@@ -1504,14 +1608,16 @@ def test_external_agents_and_teams_are_owner_private_while_runtime_is_global(tmp
 
 def test_external_agent_profile_v2_uses_generic_capability_evidence(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "research_runtime",
-        "provider": "kimi",
-        "name": "Research Runtime",
-        "executable_path": "/bin/kimi",
-        "version": "1.2.3",
-        "metadata": {"skills": ["文献检索", "研究分析"], "tools": ["web search"]},
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "research_runtime",
+            "provider": "kimi",
+            "name": "Research Runtime",
+            "executable_path": "/bin/kimi",
+            "version": "1.2.3",
+            "metadata": {"skills": ["文献检索", "研究分析"], "tools": ["web search"]},
+        }
+    )
     agent = store.create_agent(
         name="研究分析助手",
         runtime_id=runtime["id"],
@@ -1523,32 +1629,33 @@ def test_external_agent_profile_v2_uses_generic_capability_evidence(tmp_path):
     assert profile["capabilities"]["information_retrieval"]["score"] >= 0.7
     assert profile["capabilities"]["research"]["score"] >= 0.7
     assert profile["capabilities"]["analysis"]["score"] >= 0.7
-    sources = {
-        evidence["source"]
-        for evidence in profile["capabilities"]["research"]["evidence"]
-    }
+    sources = {evidence["source"] for evidence in profile["capabilities"]["research"]["evidence"]}
     assert "runtime_skill" in sources
 
 
 def test_agent_profile_tracks_selected_runtime_model_binding(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "model_runtime",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": "/bin/kimi",
-        "protocol": "acp",
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "kimi/default",
-            "models": [{
-                "id": "kimi/default",
-                "label": "Kimi Default",
-                "default": True,
-                "capabilities": ["text", "tools"],
-            }],
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "model_runtime",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": "/bin/kimi",
+            "protocol": "acp",
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "kimi/default",
+                "models": [
+                    {
+                        "id": "kimi/default",
+                        "label": "Kimi Default",
+                        "default": True,
+                        "capabilities": ["text", "tools"],
+                    }
+                ],
+            },
+        }
+    )
     agent = store.create_agent(
         name="Kimi Model Agent",
         runtime_id=runtime["id"],
@@ -1576,45 +1683,56 @@ def test_agent_profile_tracks_selected_runtime_model_binding(tmp_path):
         "context_window": None,
     }
 
-    store.upsert_runtime({
-        **runtime,
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "kimi/new",
-            "models": [{"id": "kimi/new", "label": "Kimi New", "default": True}],
-        },
-    })
+    store.upsert_runtime(
+        {
+            **runtime,
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "kimi/new",
+                "models": [{"id": "kimi/new", "label": "Kimi New", "default": True}],
+            },
+        }
+    )
     assert store.get_agent(agent["id"])["profile"]["model"]["binding_status"] == "missing"
 
-    store.upsert_runtime({
-        **runtime,
-        "metadata": {
-            "availability_status": "degraded",
-            "models": [],
-            "probe": {"error_code": "probe_failed"},
-        },
-    })
+    store.upsert_runtime(
+        {
+            **runtime,
+            "metadata": {
+                "availability_status": "degraded",
+                "models": [],
+                "probe": {"error_code": "probe_failed"},
+            },
+        }
+    )
     assert store.get_agent(agent["id"])["profile"]["model"]["binding_status"] == "unverified"
 
 
 def test_agent_profile_v4_reuses_lazy_model_overlays(tmp_path):
     db_path = tmp_path / "crew.db"
     store = ExternalAgentStore(str(db_path))
-    runtime = store.upsert_runtime({
-        "id": "overlay-runtime",
-        "provider": "custom",
-        "name": "Overlay Runtime",
-        "executable_path": "/bin/sh",
-        "protocol": "cli",
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "model-b",
-            "models": [
-                {"id": "model-a", "label": "Model A", "capabilities": ["text", "analysis"]},
-                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text", "tools"]},
-            ],
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "overlay-runtime",
+            "provider": "custom",
+            "name": "Overlay Runtime",
+            "executable_path": "/bin/sh",
+            "protocol": "cli",
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "model-b",
+                "models": [
+                    {"id": "model-a", "label": "Model A", "capabilities": ["text", "analysis"]},
+                    {
+                        "id": "model-b",
+                        "label": "Model B",
+                        "default": True,
+                        "capabilities": ["text", "tools"],
+                    },
+                ],
+            },
+        }
+    )
     agent = store.create_agent(name="Overlay Agent", runtime_id=runtime["id"], model="model-b")
 
     def stored_envelope():
@@ -1645,17 +1763,19 @@ def test_agent_profile_v4_reuses_lazy_model_overlays(tmp_path):
 
 def test_agent_profile_materializes_runtime_default_model_for_new_agent(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "default-model-runtime",
-        "provider": "custom",
-        "name": "Default Model Runtime",
-        "executable_path": "/bin/sh",
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "model-default",
-            "models": [{"id": "model-default", "label": "Model Default", "default": True}],
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "default-model-runtime",
+            "provider": "custom",
+            "name": "Default Model Runtime",
+            "executable_path": "/bin/sh",
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "model-default",
+                "models": [{"id": "model-default", "label": "Model Default", "default": True}],
+            },
+        }
+    )
 
     agent = store.create_agent(name="Default Agent", runtime_id=runtime["id"])
 
@@ -1665,21 +1785,28 @@ def test_agent_profile_materializes_runtime_default_model_for_new_agent(tmp_path
 
 def test_agent_profile_observations_are_scoped_to_frozen_model(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "scoped-observation-runtime",
-        "provider": "custom",
-        "name": "Scoped Observation Runtime",
-        "executable_path": "/bin/sh",
-        "protocol": "cli",
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "model-b",
-            "models": [
-                {"id": "model-a", "label": "Model A", "capabilities": ["text"]},
-                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text"]},
-            ],
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "scoped-observation-runtime",
+            "provider": "custom",
+            "name": "Scoped Observation Runtime",
+            "executable_path": "/bin/sh",
+            "protocol": "cli",
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "model-b",
+                "models": [
+                    {"id": "model-a", "label": "Model A", "capabilities": ["text"]},
+                    {
+                        "id": "model-b",
+                        "label": "Model B",
+                        "default": True,
+                        "capabilities": ["text"],
+                    },
+                ],
+            },
+        }
+    )
     agent = store.create_agent(
         owner_account_id="owner-a",
         name="Scoped Agent",
@@ -1687,10 +1814,14 @@ def test_agent_profile_observations_are_scoped_to_frozen_model(tmp_path):
         model="model-b",
     )
     baseline_a = store.resolve_agent_profile(
-        agent["id"], "model-a", owner_account_id="owner-a",
+        agent["id"],
+        "model-a",
+        owner_account_id="owner-a",
     )["capabilities"]["backend"]["score"]
     baseline_b = store.resolve_agent_profile(
-        agent["id"], "model-b", owner_account_id="owner-a",
+        agent["id"],
+        "model-b",
+        owner_account_id="owner-a",
     )["capabilities"]["backend"]["score"]
 
     for index in range(3):
@@ -1710,10 +1841,14 @@ def test_agent_profile_observations_are_scoped_to_frozen_model(tmp_path):
         )
 
     profile_a = store.resolve_agent_profile(
-        agent["id"], "model-a", owner_account_id="owner-a",
+        agent["id"],
+        "model-a",
+        owner_account_id="owner-a",
     )
     profile_b = store.resolve_agent_profile(
-        agent["id"], "model-b", owner_account_id="owner-a",
+        agent["id"],
+        "model-b",
+        owner_account_id="owner-a",
     )
     observations = store.list_agent_profile_observations(agent["id"], owner_account_id="owner-a")
 
@@ -1755,29 +1890,47 @@ def test_agent_profile_model_fingerprint_refreshes_only_affected_overlay(tmp_pat
         return json.loads(raw)["model_overlays"]
 
     before = overlays()
-    store.upsert_runtime({
-        **runtime_payload,
-        "metadata": {
-            **runtime_payload["metadata"],
-            "models": [
-                {"id": "model-a", "label": "Model A 新标签", "capabilities": ["text", "analysis", "tools"]},
-                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text"]},
-            ],
-        },
-    })
+    store.upsert_runtime(
+        {
+            **runtime_payload,
+            "metadata": {
+                **runtime_payload["metadata"],
+                "models": [
+                    {
+                        "id": "model-a",
+                        "label": "Model A 新标签",
+                        "capabilities": ["text", "analysis", "tools"],
+                    },
+                    {
+                        "id": "model-b",
+                        "label": "Model B",
+                        "default": True,
+                        "capabilities": ["text"],
+                    },
+                ],
+            },
+        }
+    )
     changed = overlays()
     assert changed["model-a"]["model_fingerprint"] != before["model-a"]["model_fingerprint"]
     assert changed["model-b"]["model_fingerprint"] == before["model-b"]["model_fingerprint"]
 
-    store.upsert_runtime({
-        **runtime_payload,
-        "metadata": {
-            **runtime_payload["metadata"],
-            "models": [
-                {"id": "model-b", "label": "Model B", "default": True, "capabilities": ["text"]},
-            ],
-        },
-    })
+    store.upsert_runtime(
+        {
+            **runtime_payload,
+            "metadata": {
+                **runtime_payload["metadata"],
+                "models": [
+                    {
+                        "id": "model-b",
+                        "label": "Model B",
+                        "default": True,
+                        "capabilities": ["text"],
+                    },
+                ],
+            },
+        }
+    )
     removed = overlays()
     assert set(removed) == {"model-a", "model-b"}
     assert removed["model-a"]["model"]["label"] == "Model A 新标签"
@@ -1788,17 +1941,19 @@ def test_agent_profile_model_fingerprint_refreshes_only_affected_overlay(tmp_pat
 def test_agent_profile_v4_keeps_legacy_unattributed_observation_audit_only(tmp_path):
     db_path = tmp_path / "crew.db"
     store = ExternalAgentStore(str(db_path))
-    runtime = store.upsert_runtime({
-        "id": "legacy-observation-runtime",
-        "provider": "custom",
-        "name": "Legacy Observation Runtime",
-        "executable_path": "/bin/sh",
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "model-b",
-            "models": [{"id": "model-b", "label": "Model B", "default": True}],
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "legacy-observation-runtime",
+            "provider": "custom",
+            "name": "Legacy Observation Runtime",
+            "executable_path": "/bin/sh",
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "model-b",
+                "models": [{"id": "model-b", "label": "Model B", "default": True}],
+            },
+        }
+    )
     agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"], model="model-b")
     baseline = agent["profile"]["capabilities"]["backend"]["score"]
     with sqlite3.connect(db_path) as conn:
@@ -1820,19 +1975,24 @@ def test_agent_profile_v4_keeps_legacy_unattributed_observation_audit_only(tmp_p
     evidence = refreshed["profile"]["capabilities"]["backend"]["evidence"]
     assert refreshed["profile"]["capabilities"]["backend"]["score"] == baseline
     assert not any(item["source"] == "execution_observation" for item in evidence)
-    assert store.list_agent_profile_observations(agent["id"])[0]["model_binding_source"] == "legacy_unknown"
+    assert (
+        store.list_agent_profile_observations(agent["id"])[0]["model_binding_source"]
+        == "legacy_unknown"
+    )
 
 
 def test_agent_profile_observation_is_idempotent_and_thresholded(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "plain-runtime",
-        "provider": "custom",
-        "name": "Plain Runtime",
-        "executable_path": "/bin/sh",
-        "protocol": "cli",
-        "metadata": {"availability_status": "ready"},
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "plain-runtime",
+            "provider": "custom",
+            "name": "Plain Runtime",
+            "executable_path": "/bin/sh",
+            "protocol": "cli",
+            "metadata": {"availability_status": "ready"},
+        }
+    )
     agent = store.create_agent(
         owner_account_id="owner-a",
         name="Agent A",
@@ -1892,7 +2052,9 @@ def test_agent_profile_observation_is_idempotent_and_thresholded(tmp_path):
         quality_weight=1.0,
     )["agent"]
     backend = settled["profile"]["capabilities"]["backend"]
-    execution_evidence = [item for item in backend["evidence"] if item["source"] == "execution_observation"]
+    execution_evidence = [
+        item for item in backend["evidence"] if item["source"] == "execution_observation"
+    ]
     assert backend["score"] > baseline
     assert execution_evidence[0]["value"].startswith("samples=3; success=3")
     assert settled["profile_version"] == settled["profile"]["version"] == 4
@@ -1900,19 +2062,23 @@ def test_agent_profile_observation_is_idempotent_and_thresholded(tmp_path):
 
 def test_agent_profile_observation_rolls_back_when_profile_refresh_fails(tmp_path, monkeypatch):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "rollback-runtime",
-        "provider": "custom",
-        "name": "Rollback Runtime",
-        "executable_path": "/bin/sh",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "rollback-runtime",
+            "provider": "custom",
+            "name": "Rollback Runtime",
+            "executable_path": "/bin/sh",
+        }
+    )
     agent = store.create_agent(name="Rollback Agent", runtime_id=runtime["id"])
     original_profile = agent["profile"]
 
     def fail_profile_refresh(*args, **kwargs):
         raise RuntimeError("profile refresh failed")
 
-    monkeypatch.setattr("crew.agent.external.store.build_agent_profile_envelope", fail_profile_refresh)
+    monkeypatch.setattr(
+        "crew.agent.external.store.build_agent_profile_envelope", fail_profile_refresh
+    )
     with pytest.raises(RuntimeError, match="profile refresh failed"):
         store.record_agent_profile_observation(
             external_agent_id=agent["id"],
@@ -1931,12 +2097,14 @@ def test_agent_profile_observation_rolls_back_when_profile_refresh_fails(tmp_pat
 
 def test_agent_profile_observation_concurrent_writes_preserve_evidence(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "concurrent-runtime",
-        "provider": "custom",
-        "name": "Concurrent Runtime",
-        "executable_path": "/bin/sh",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "concurrent-runtime",
+            "provider": "custom",
+            "name": "Concurrent Runtime",
+            "executable_path": "/bin/sh",
+        }
+    )
     agent = store.create_agent(name="Concurrent Agent", runtime_id=runtime["id"])
 
     def record(index: int):
@@ -1958,18 +2126,23 @@ def test_agent_profile_observation_concurrent_writes_preserve_evidence(tmp_path)
     assert len(store.list_agent_profile_observations(agent["id"])) == 4
     profile = store.get_agent(agent["id"])["profile"]
     evidence = profile["capabilities"]["backend"]["evidence"]
-    assert any(item["source"] == "execution_observation" and "samples=4" in item["value"] for item in evidence)
+    assert any(
+        item["source"] == "execution_observation" and "samples=4" in item["value"]
+        for item in evidence
+    )
 
 
 def test_runtime_refresh_preserves_agent_profile_observations(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "refresh-runtime",
-        "provider": "custom",
-        "name": "Refresh Runtime",
-        "executable_path": "/bin/sh",
-        "metadata": {"availability_status": "ready"},
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "refresh-runtime",
+            "provider": "custom",
+            "name": "Refresh Runtime",
+            "executable_path": "/bin/sh",
+            "metadata": {"availability_status": "ready"},
+        }
+    )
     agent = store.create_agent(name="Refresh Agent", runtime_id=runtime["id"])
     for index in range(3):
         store.record_agent_profile_observation(
@@ -1983,25 +2156,34 @@ def test_runtime_refresh_preserves_agent_profile_observations(tmp_path):
             quality_weight=0.8,
         )
 
-    store.upsert_runtime({
-        **runtime,
-        "metadata": {"availability_status": "degraded", "tools": ["terminal"]},
-    })
+    store.upsert_runtime(
+        {
+            **runtime,
+            "metadata": {"availability_status": "degraded", "tools": ["terminal"]},
+        }
+    )
     refreshed = store.get_agent(agent["id"])
     evidence = refreshed["profile"]["capabilities"]["backend"]["evidence"]
-    assert any(item["source"] == "execution_observation" and "samples=3" in item["value"] for item in evidence)
+    assert any(
+        item["source"] == "execution_observation" and "samples=3" in item["value"]
+        for item in evidence
+    )
 
 
 def test_agent_profile_observation_is_owner_scoped_and_deleted_with_agent(tmp_path):
     db_path = tmp_path / "crew.db"
     store = ExternalAgentStore(str(db_path))
-    runtime = store.upsert_runtime({
-        "id": "owner-runtime",
-        "provider": "custom",
-        "name": "Owner Runtime",
-        "executable_path": "/bin/sh",
-    })
-    agent = store.create_agent(owner_account_id="owner-a", name="Owner Agent", runtime_id=runtime["id"])
+    runtime = store.upsert_runtime(
+        {
+            "id": "owner-runtime",
+            "provider": "custom",
+            "name": "Owner Runtime",
+            "executable_path": "/bin/sh",
+        }
+    )
+    agent = store.create_agent(
+        owner_account_id="owner-a", name="Owner Agent", runtime_id=runtime["id"]
+    )
 
     with pytest.raises(KeyError):
         store.record_agent_profile_observation(
@@ -2039,26 +2221,30 @@ def test_agent_profile_observation_is_owner_scoped_and_deleted_with_agent(tmp_pa
 
 def test_runtime_sync_only_marks_discovery_managed_runtime_unavailable(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    store.upsert_runtime({
-        "id": "manual-runtime",
-        "provider": "custom",
-        "name": "Manual",
-        "executable_path": "/bin/sh",
-        "protocol": "cli",
-        "metadata": {"availability_status": "ready"},
-    })
-    store.upsert_runtime({
-        "id": "discovered-runtime",
-        "provider": "codex",
-        "name": "Codex",
-        "executable_path": "/bin/sh",
-        "protocol": "cli",
-        "metadata": {
-            "runtime_profile_version": 1,
-            "availability_status": "ready",
-            "models": [{"id": "model-a", "label": "Model A"}],
-        },
-    })
+    store.upsert_runtime(
+        {
+            "id": "manual-runtime",
+            "provider": "custom",
+            "name": "Manual",
+            "executable_path": "/bin/sh",
+            "protocol": "cli",
+            "metadata": {"availability_status": "ready"},
+        }
+    )
+    store.upsert_runtime(
+        {
+            "id": "discovered-runtime",
+            "provider": "codex",
+            "name": "Codex",
+            "executable_path": "/bin/sh",
+            "protocol": "cli",
+            "metadata": {
+                "runtime_profile_version": 1,
+                "availability_status": "ready",
+                "models": [{"id": "model-a", "label": "Model A"}],
+            },
+        }
+    )
 
     runtimes = {runtime["id"]: runtime for runtime in store.sync_runtimes([])}
 
@@ -2083,13 +2269,19 @@ def _hermes_runtime(runtime_id: str, executable_path: str, metadata: dict) -> di
 
 def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    old_runtime = store.upsert_runtime(_hermes_runtime("hermes-old-path", "/old/bin/hermes", {
-        "runtime_descriptor_source": "builtin",
-        "adapter_id": "acp-stdio",
-        "availability_status": "ready",
-        "default_model_id": "hermes/default",
-        "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
-    }))
+    old_runtime = store.upsert_runtime(
+        _hermes_runtime(
+            "hermes-old-path",
+            "/old/bin/hermes",
+            {
+                "runtime_descriptor_source": "builtin",
+                "adapter_id": "acp-stdio",
+                "availability_status": "ready",
+                "default_model_id": "hermes/default",
+                "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
+            },
+        )
+    )
     agent = store.create_agent(
         owner_account_id="owner-a",
         name="Hermes Agent",
@@ -2110,14 +2302,18 @@ def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path)
         adapter_id="acp-stdio",
         native_session_id="native-old",
     )
-    new_runtime = _hermes_runtime("hermes-new-path", "/new/venv/bin/hermes", {
-        "runtime_descriptor_source": "builtin",
-        "descriptor_id": "builtin:hermes",
-        "adapter_id": "acp-stdio",
-        "availability_status": "ready",
-        "default_model_id": "hermes/default",
-        "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
-    })
+    new_runtime = _hermes_runtime(
+        "hermes-new-path",
+        "/new/venv/bin/hermes",
+        {
+            "runtime_descriptor_source": "builtin",
+            "descriptor_id": "builtin:hermes",
+            "adapter_id": "acp-stdio",
+            "availability_status": "ready",
+            "default_model_id": "hermes/default",
+            "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
+        },
+    )
 
     runtimes = {runtime["id"]: runtime for runtime in store.sync_runtimes([new_runtime])}
 
@@ -2130,39 +2326,54 @@ def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path)
     assert runtimes["hermes-old-path"]["metadata"]["lifecycle_status"] == "replaced"
     assert runtimes["hermes-old-path"]["metadata"]["replaced_by_runtime_id"] == "hermes-new-path"
     assert runtimes["hermes-new-path"]["metadata"]["replaces_runtime_ids"] == ["hermes-old-path"]
-    assert store.get_runtime_session_binding(
-        owner_account_id="owner-a",
-        crew_session_id="crew-hermes",
-        external_agent_id=agent["id"],
-        runtime_id=old_runtime["id"],
-        adapter_id="acp-stdio",
-    ) is None
+    assert (
+        store.get_runtime_session_binding(
+            owner_account_id="owner-a",
+            crew_session_id="crew-hermes",
+            external_agent_id=agent["id"],
+            runtime_id=old_runtime["id"],
+            adapter_id="acp-stdio",
+        )
+        is None
+    )
 
 
 def test_runtime_sync_does_not_guess_between_multiple_replacements(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    old_runtime = store.upsert_runtime(_hermes_runtime("hermes-old-path", "/old/bin/hermes", {
-        "runtime_descriptor_source": "builtin",
-        "availability_status": "ready",
-    }))
+    old_runtime = store.upsert_runtime(
+        _hermes_runtime(
+            "hermes-old-path",
+            "/old/bin/hermes",
+            {
+                "runtime_descriptor_source": "builtin",
+                "availability_status": "ready",
+            },
+        )
+    )
     agent = store.create_agent(
         name="Hermes Agent",
         runtime_id=old_runtime["id"],
     )
 
     def replacement(runtime_id: str, path: str) -> dict:
-        return _hermes_runtime(runtime_id, path, {
-            "runtime_descriptor_source": "builtin",
-            "descriptor_id": "builtin:hermes",
-            "availability_status": "ready",
-        })
+        return _hermes_runtime(
+            runtime_id,
+            path,
+            {
+                "runtime_descriptor_source": "builtin",
+                "descriptor_id": "builtin:hermes",
+                "availability_status": "ready",
+            },
+        )
 
     runtimes = {
         runtime["id"]: runtime
-        for runtime in store.sync_runtimes([
-            replacement("hermes-new-a", "/new/a/hermes"),
-            replacement("hermes-new-b", "/new/b/hermes"),
-        ])
+        for runtime in store.sync_runtimes(
+            [
+                replacement("hermes-new-a", "/new/a/hermes"),
+                replacement("hermes-new-b", "/new/b/hermes"),
+            ]
+        )
     }
 
     assert store.get_agent(agent["id"])["runtime_id"] == "hermes-old-path"
@@ -2172,28 +2383,38 @@ def test_runtime_sync_does_not_guess_between_multiple_replacements(tmp_path):
 
 def test_runtime_sync_retires_legacy_path_when_unique_replacement_is_degraded(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    old_runtime = store.upsert_runtime(_hermes_runtime("hermes-old-path", "/old/bin/hermes", {
-        "availability_status": "ready",
-        "default_model_id": "hermes/default",
-        "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
-    }))
+    old_runtime = store.upsert_runtime(
+        _hermes_runtime(
+            "hermes-old-path",
+            "/old/bin/hermes",
+            {
+                "availability_status": "ready",
+                "default_model_id": "hermes/default",
+                "models": [{"id": "hermes/default", "label": "Hermes Default", "default": True}],
+            },
+        )
+    )
     agent = store.create_agent(
         owner_account_id="owner-a",
         name="Hermes Agent",
         runtime_id=old_runtime["id"],
         model="hermes/default",
     )
-    degraded_runtime = _hermes_runtime("hermes-new-path", "/new/venv/bin/hermes", {
-        "runtime_descriptor_source": "builtin",
-        "descriptor_id": "builtin:hermes",
-        "adapter_id": "acp-stdio",
-        "availability_status": "degraded",
-        "models": [],
-        "probe": {
-            "error_code": "probe_failed",
-            "message": "hermes 运行时探测超时",
+    degraded_runtime = _hermes_runtime(
+        "hermes-new-path",
+        "/new/venv/bin/hermes",
+        {
+            "runtime_descriptor_source": "builtin",
+            "descriptor_id": "builtin:hermes",
+            "adapter_id": "acp-stdio",
+            "availability_status": "degraded",
+            "models": [],
+            "probe": {
+                "error_code": "probe_failed",
+                "message": "hermes 运行时探测超时",
+            },
         },
-    })
+    )
 
     runtimes = {runtime["id"]: runtime for runtime in store.sync_runtimes([degraded_runtime])}
 
@@ -2246,21 +2467,25 @@ def test_team_auto_selection_skips_agent_with_missing_runtime_model():
 
 def test_runtime_staffing_managed_agent_is_owner_scoped_idempotent_and_hidden(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "runtime-staffing-ready",
-        "provider": "custom",
-        "name": "Runtime Staffing",
-        "executable_path": "/bin/sh",
-        "metadata": {
-            "availability_status": "ready",
-            "default_model_id": "model-backend",
-            "models": [{
-                "id": "model-backend",
-                "label": "Backend",
-                "capabilities": ["backend", "implementation"],
-            }],
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "runtime-staffing-ready",
+            "provider": "custom",
+            "name": "Runtime Staffing",
+            "executable_path": "/bin/sh",
+            "metadata": {
+                "availability_status": "ready",
+                "default_model_id": "model-backend",
+                "models": [
+                    {
+                        "id": "model-backend",
+                        "label": "Backend",
+                        "capabilities": ["backend", "implementation"],
+                    }
+                ],
+            },
+        }
+    )
 
     first = store.get_or_create_managed_agent(
         owner_account_id="owner-a",
@@ -2301,30 +2526,41 @@ def test_runtime_staffing_managed_agent_is_owner_scoped_idempotent_and_hidden(tm
 def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_path):
     db = tmp_path / "crew.db"
     store = ExternalAgentStore(str(db))
-    runtime = store.upsert_runtime({
-        "id": "legacy_runtime",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": "/bin/kimi",
-        "version": "1.2.3",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "legacy_runtime",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": "/bin/kimi",
+            "version": "1.2.3",
+        }
+    )
     agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"])
     with sqlite3.connect(db) as conn:
         conn.execute(
             "UPDATE external_agent SET profile_json = ?, profile_version = 1 WHERE id = ?",
-            (json.dumps({
-                "version": 1,
-                "agent_id": agent["id"],
-                "capabilities": {"backend": {"score": 0.8, "confidence": 0.8, "evidence": []}},
-            }), agent["id"]),
+            (
+                json.dumps(
+                    {
+                        "version": 1,
+                        "agent_id": agent["id"],
+                        "capabilities": {
+                            "backend": {"score": 0.8, "confidence": 0.8, "evidence": []}
+                        },
+                    }
+                ),
+                agent["id"],
+            ),
         )
 
     refreshed = ExternalAgentStore(str(db)).get_agent(agent["id"])
     with sqlite3.connect(db) as conn:
-        stored_envelope = json.loads(conn.execute(
-            "SELECT profile_json FROM external_agent WHERE id = ?",
-            (agent["id"],),
-        ).fetchone()[0])
+        stored_envelope = json.loads(
+            conn.execute(
+                "SELECT profile_json FROM external_agent WHERE id = ?",
+                (agent["id"],),
+            ).fetchone()[0]
+        )
 
     assert refreshed["profile_version"] == 4
     assert refreshed["profile"]["version"] == 4
@@ -2335,24 +2571,28 @@ def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_pa
 
 def test_external_team_persists_independent_formation_plan(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_test",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": "/bin/kimi",
-        "version": "1.2.3",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_test",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": "/bin/kimi",
+            "version": "1.2.3",
+        }
+    )
     agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"])
     team_spec = {"version": 3, "goal": "开发接口", "required_capabilities": ["backend"]}
     formation_plan = {
         "version": 1,
         "leader_agent_id": agent["id"],
-        "members": [{
-            "agent_id": agent["id"],
-            "role_key": "backend_developer",
-            "assigned_capabilities": ["backend"],
-            "responsibility_markdown": "负责后端实现",
-        }],
+        "members": [
+            {
+                "agent_id": agent["id"],
+                "role_key": "backend_developer",
+                "assigned_capabilities": ["backend"],
+                "responsibility_markdown": "负责后端实现",
+            }
+        ],
         "coverage": {"required": ["backend"], "covered": ["backend"], "uncovered": []},
     }
 
@@ -2361,12 +2601,14 @@ def test_external_team_persists_independent_formation_plan(tmp_path):
         leader_agent_id=agent["id"],
         team_spec=team_spec,
         formation_plan=formation_plan,
-        members=[{
-            "agent_id": agent["id"],
-            "role": "负责后端实现",
-            "role_key": "backend_developer",
-            "assigned_capabilities": ["backend"],
-        }],
+        members=[
+            {
+                "agent_id": agent["id"],
+                "role": "负责后端实现",
+                "role_key": "backend_developer",
+                "assigned_capabilities": ["backend"],
+            }
+        ],
     )
 
     assert team["team_spec"] == team_spec
@@ -2378,23 +2620,27 @@ def test_external_team_persists_independent_formation_plan(tmp_path):
 def test_store_migrates_legacy_embedded_formation_plan(tmp_path):
     db = tmp_path / "crew.db"
     store = ExternalAgentStore(str(db))
-    runtime = store.upsert_runtime({
-        "id": "kimi_test",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": "/bin/kimi",
-        "version": "1.2.3",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_test",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": "/bin/kimi",
+            "version": "1.2.3",
+        }
+    )
     agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"])
     team = store.create_team(
         name="旧团队",
         leader_agent_id=agent["id"],
-        members=[{
-            "agent_id": agent["id"],
-            "role": "负责后端",
-            "role_key": "backend_developer",
-            "assigned_capabilities": ["backend"],
-        }],
+        members=[
+            {
+                "agent_id": agent["id"],
+                "role": "负责后端",
+                "role_key": "backend_developer",
+                "assigned_capabilities": ["backend"],
+            }
+        ],
     )
     legacy_spec = {
         "version": 2,
@@ -2436,13 +2682,15 @@ def test_role_markdown_is_complete():
 
 def test_delete_team_archives_team_and_unblocks_agent_delete(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_test",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": "/bin/kimi",
-        "version": "1.2.3",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_test",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": "/bin/kimi",
+            "version": "1.2.3",
+        }
+    )
     agent = store.create_agent(name="Kimi Leader", runtime_id=runtime["id"])
     team = store.create_team(
         name="研发团队",
@@ -2461,13 +2709,15 @@ def test_team_role_presets_and_suggestion_are_goal_aware():
     roles = all_role_public_payloads()
     assert any(role["key"] == "qa_engineer" for role in roles)
 
-    suggestion = suggest_role_description({
-        "name": "像素风小游戏团队",
-        "description": "写一个贪吃蛇小游戏，像素风",
-        "workflow": "开发完成后测试核心玩法",
-        "agent_name": "QA",
-        "role_key": "qa_engineer",
-    })
+    suggestion = suggest_role_description(
+        {
+            "name": "像素风小游戏团队",
+            "description": "写一个贪吃蛇小游戏，像素风",
+            "workflow": "开发完成后测试核心玩法",
+            "agent_name": "QA",
+            "role_key": "qa_engineer",
+        }
+    )
 
     assert suggestion["key"] == "qa_engineer"
     assert suggestion["workflow_lane"] == "verify"
@@ -2477,13 +2727,15 @@ def test_team_role_presets_and_suggestion_are_goal_aware():
 
 def test_external_team_member_role_metadata_persists(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_test",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": "/bin/kimi",
-        "version": "1.2.3",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_test",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": "/bin/kimi",
+            "version": "1.2.3",
+        }
+    )
     developer = store.create_agent(name="Dev Agent", runtime_id=runtime["id"])
     tester = store.create_agent(name="QA Agent", runtime_id=runtime["id"])
     team = store.create_team(
@@ -2521,25 +2773,33 @@ def test_external_team_member_role_metadata_persists(tmp_path):
 
 def test_external_team_accepts_crew_builtin_as_leader_and_member(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_test",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": "/bin/kimi",
-        "version": "1.2.3",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_test",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": "/bin/kimi",
+            "version": "1.2.3",
+        }
+    )
     writer = store.create_agent(name="Kimi Writer", runtime_id=runtime["id"])
 
     team = store.create_team(
         name="内置 Crew 协作团队",
         leader_agent_id=CREW_BUILTIN_AGENT_ID,
         members=[
-            {"agent_id": CREW_BUILTIN_AGENT_ID, "role": "负责拆解、派活和汇总", "role_key": "tech_lead"},
+            {
+                "agent_id": CREW_BUILTIN_AGENT_ID,
+                "role": "负责拆解、派活和汇总",
+                "role_key": "tech_lead",
+            },
             {"agent_id": writer["id"], "role": "负责文字整理", "role_key": "technical_writer"},
         ],
     )
 
-    builtin = next(member for member in team["members"] if member["agent_id"] == CREW_BUILTIN_AGENT_ID)
+    builtin = next(
+        member for member in team["members"] if member["agent_id"] == CREW_BUILTIN_AGENT_ID
+    )
     assert team["leader_agent_id"] == CREW_BUILTIN_AGENT_ID
     assert builtin["agent_name"] == "Crew 内置智能体"
     assert builtin["agent_provider"] == "crew"
@@ -2552,13 +2812,15 @@ def test_external_team_accepts_crew_builtin_as_leader_and_member(tmp_path):
 async def test_delegate_to_external_agent_runs_kimi_via_acp(tmp_path):
     kimi = _fake_kimi(tmp_path)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_test",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(kimi),
-        "version": "1.2.3",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_test",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": str(kimi),
+            "version": "1.2.3",
+        }
+    )
     agent = store.create_agent(
         name="Kimi Coder",
         runtime_id=runtime["id"],
@@ -2568,21 +2830,91 @@ async def test_delegate_to_external_agent_runs_kimi_via_acp(tmp_path):
     registry = Registry()
     register_external_agent_tools(registry, store)
 
-    result = await registry.execute(ToolCall("c1", "delegate_to_external_agent", {
-        "agent_id": agent["id"],
-        "prompt": "请回答 hello",
-        "cwd": str(tmp_path),
-    }))
+    result = await registry.execute(
+        ToolCall(
+            "c1",
+            "delegate_to_external_agent",
+            {
+                "agent_id": agent["id"],
+                "prompt": "请回答 hello",
+                "cwd": str(tmp_path),
+            },
+        )
+    )
 
     assert not result.is_error
+    assert result.content_trust == "untrusted"
+    assert result.content_source == "external_agent"
     payload = json.loads(result.content)
     assert payload["provider"] == "kimi"
     assert "Kimi收到" in payload["output"]
 
 
+@pytest.mark.asyncio
+async def test_delegate_external_output_is_untrusted_and_errors_are_stable(tmp_path, monkeypatch):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    monkeypatch.setattr(
+        store,
+        "agent_with_runtime",
+        lambda *_args, **_kwargs: ({"id": "agent-1", "provider": "fake"}, {}),
+    )
+
+    class FakeExecutor:
+        def __init__(self, _config):
+            pass
+
+        async def execute(self, ctx):
+            yield ResponseChunk.final(
+                ctx.request_id,
+                "ACCESS_TOKEN=must-not-leak https://user:password@example.test",
+                1,
+            )
+
+    monkeypatch.setattr(external_agent_tools, "ExternalExecutor", FakeExecutor)
+    registry = Registry()
+    external_agent_tools.register_external_agent_tools(registry, store)
+
+    result = await registry.execute(
+        ToolCall(
+            "c1",
+            "delegate_to_external_agent",
+            {"agent_id": "agent-1", "prompt": "hello", "cwd": str(tmp_path)},
+        )
+    )
+
+    payload = json.loads(result.content)
+    assert payload["content_trust"] == "untrusted"
+    assert payload["content_source"] == "external_agent"
+    assert "must-not-leak" not in payload["output"]
+    assert "password" not in payload["output"]
+
+    class FailingExecutor:
+        def __init__(self, _config):
+            pass
+
+        async def execute(self, ctx):
+            yield ResponseChunk.error(
+                ctx.request_id,
+                r"C:\private\external\access_token=must-not-leak",
+                1,
+            )
+
+    monkeypatch.setattr(external_agent_tools, "ExternalExecutor", FailingExecutor)
+    failed = await registry.execute(
+        ToolCall(
+            "c2",
+            "delegate_to_external_agent",
+            {"agent_id": "agent-1", "prompt": "hello", "cwd": str(tmp_path)},
+        )
+    )
+    error_payload = json.loads(failed.content)
+    assert error_payload == {"error": "外部智能体调用失败"}
+
+
 async def test_acp_prompt_reports_early_process_stderr(tmp_path):
     script = tmp_path / "broken_acp"
-    script.write_text(
+    script = _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -2592,9 +2924,7 @@ async def test_acp_prompt_reports_early_process_stderr(tmp_path):
             raise SystemExit(1)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     try:
         await run_acp_prompt(
@@ -2616,7 +2946,8 @@ async def test_acp_prompt_reports_early_process_stderr(tmp_path):
 
 async def test_acp_session_new_sends_mcp_servers_in_camel_and_snake_case(tmp_path):
     script = tmp_path / "strict_acp"
-    script.write_text(
+    script = _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -2657,9 +2988,7 @@ async def test_acp_session_new_sends_mcp_servers_in_camel_and_snake_case(tmp_pat
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     result = await run_acp_prompt(
         "hello",
@@ -2702,14 +3031,16 @@ def test_build_session_resume_params_documents_acp_session_binding():
 
 def test_external_store_saves_acp_session_binding(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "hermes_runtime",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": "/bin/hermes",
-        "version": "1.0.0",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "hermes_runtime",
+            "provider": "hermes",
+            "name": "Hermes",
+            "executable_path": "/bin/hermes",
+            "version": "1.0.0",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Hermes", runtime_id=runtime["id"])
 
     store.save_acp_session_binding(
@@ -2735,14 +3066,16 @@ def test_external_store_saves_acp_session_binding(tmp_path):
 
 def test_external_store_scopes_acp_session_binding_by_owner(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "hermes_runtime",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": "/bin/hermes",
-        "version": "1.0.0",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "hermes_runtime",
+            "provider": "hermes",
+            "name": "Hermes",
+            "executable_path": "/bin/hermes",
+            "version": "1.0.0",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Hermes", runtime_id=runtime["id"])
     key = {
         "crew_session_id": "same_session",
@@ -2762,17 +3095,21 @@ def test_external_store_scopes_acp_session_binding_by_owner(tmp_path):
     assert binding_a["acp_session_id"] == "a1"
     assert binding_b["acp_session_id"] == "b1"
 
-    assert store.delete_acp_bindings_for_session(
-        "same_session",
-        owner_account_id="A:uid-a",
-    ) == 1
+    assert (
+        store.delete_acp_bindings_for_session(
+            "same_session",
+            owner_account_id="A:uid-a",
+        )
+        == 1
+    )
     assert store.get_acp_session_binding(owner_account_id="A:uid-a", **key) is None
     assert store.get_acp_session_binding(owner_account_id="B:uid-b", **key) is not None
 
 
 async def test_acp_resume_drops_replayed_history_before_current_prompt(tmp_path):
     script = tmp_path / "resume_acp"
-    script.write_text(
+    script = _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -2816,12 +3153,11 @@ async def test_acp_resume_drops_replayed_history_before_current_prompt(tmp_path)
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     events = [
-        event async for event in stream_acp_events(
+        event
+        async for event in stream_acp_events(
             "继续",
             AcpAdapterConfig(
                 executable_path=str(script),
@@ -2840,7 +3176,8 @@ async def test_acp_resume_drops_replayed_history_before_current_prompt(tmp_path)
 
 async def test_acp_adapter_uses_idle_timeout_for_active_stream(tmp_path):
     script = tmp_path / "kimi_active"
-    script.write_text(
+    script = _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -2875,12 +3212,11 @@ async def test_acp_adapter_uses_idle_timeout_for_active_stream(tmp_path):
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     events = [
-        event async for event in stream_acp_events(
+        event
+        async for event in stream_acp_events(
             "继续",
             AcpAdapterConfig(
                 executable_path=str(script),
@@ -2895,7 +3231,8 @@ async def test_acp_adapter_uses_idle_timeout_for_active_stream(tmp_path):
 
 async def test_acp_adapter_idle_timeout_names_provider_and_last_activity(tmp_path):
     script = tmp_path / "kimi_hangs_after_tool"
-    script.write_text(
+    script = _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -2930,13 +3267,12 @@ async def test_acp_adapter_idle_timeout_names_provider_and_last_activity(tmp_pat
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     try:
         events = [
-            event async for event in stream_acp_events(
+            event
+            async for event in stream_acp_events(
                 "继续",
                 AcpAdapterConfig(
                     executable_path=str(script),
@@ -2976,14 +3312,16 @@ def test_external_system_prompt_explains_cli_followup_limit():
 async def test_acp_executor_runs_codex_cli(tmp_path):
     codex = _fake_cli(tmp_path, "codex", "codex 0.42.0")
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "codex_test",
-        "provider": "codex",
-        "name": "Codex",
-        "executable_path": str(codex),
-        "version": "0.42.0",
-        "protocol": "cli",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "codex_test",
+            "provider": "codex",
+            "name": "Codex",
+            "executable_path": str(codex),
+            "version": "0.42.0",
+            "protocol": "cli",
+        }
+    )
     agent = store.create_agent(name="Codex Coder", runtime_id=runtime["id"])
     ctx = ExecutionContext(
         session_id="s",
@@ -2995,10 +3333,13 @@ async def test_acp_executor_runs_codex_cli(tmp_path):
     )
 
     chunks = [
-        ch async for ch in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-        }).execute(ctx)
+        ch
+        async for ch in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+            }
+        ).execute(ctx)
     ]
 
     assert chunks[-1].kind == "final"
@@ -3016,14 +3357,16 @@ async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch
 
     monkeypatch.setattr(external_executor, "run_external_cli", fake_run)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "codex-session-model",
-        "provider": "codex",
-        "name": "Codex",
-        "executable_path": "codex",
-        "version": "test",
-        "protocol": "cli",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "codex-session-model",
+            "provider": "codex",
+            "name": "Codex",
+            "executable_path": "codex",
+            "version": "test",
+            "protocol": "cli",
+        }
+    )
     agent = store.create_agent(
         name="Codex Session Model",
         runtime_id=runtime["id"],
@@ -3039,11 +3382,14 @@ async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch
     )
 
     chunks = [
-        chunk async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-            "model": "session-override",
-        }).execute(ctx)
+        chunk
+        async for chunk in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+                "model": "session-override",
+            }
+        ).execute(ctx)
     ]
 
     assert chunks[-1].kind == "final"
@@ -3059,14 +3405,16 @@ async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path
 
     monkeypatch.setattr(external_executor, "run_external_cli", fake_run)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "codex-cli-followup",
-        "provider": "codex",
-        "name": "Codex",
-        "executable_path": "codex",
-        "version": "test",
-        "protocol": "cli",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "codex-cli-followup",
+            "provider": "codex",
+            "name": "Codex",
+            "executable_path": "codex",
+            "version": "test",
+            "protocol": "cli",
+        }
+    )
     agent = store.create_agent(name="Codex CLI", runtime_id=runtime["id"])
     ctx = ExecutionContext(
         session_id="s",
@@ -3078,10 +3426,13 @@ async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path
     )
 
     chunks = [
-        chunk async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-        }).execute(ctx)
+        chunk
+        async for chunk in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+            }
+        ).execute(ctx)
     ]
 
     output = chunks[-1].body["text"]
@@ -3116,13 +3467,19 @@ async def test_codex_cli_detaches_inherited_stdin(tmp_path, monkeypatch):
         return FakeProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    output = await run_external_cli(ExternalCliConfig(
-        provider="codex",
-        executable_path="codex",
-        prompt="hello",
-        model="gpt-test-codex",
-        cwd=str(tmp_path),
-    ))
+    monkeypatch.setattr(
+        "crew.agent.external.cli_adapter.resolve_external_executable",
+        lambda executable, **_kwargs: executable,
+    )
+    output = await run_external_cli(
+        ExternalCliConfig(
+            provider="codex",
+            executable_path="codex",
+            prompt="hello",
+            model="gpt-test-codex",
+            cwd=str(tmp_path),
+        )
+    )
 
     assert output == "codex ok"
     assert captured["stdin"] == asyncio.subprocess.DEVNULL
@@ -3130,14 +3487,16 @@ async def test_codex_cli_detaches_inherited_stdin(tmp_path, monkeypatch):
 
 def test_codex_cli_error_hides_prompt_and_returns_actionable_tail():
     prompt = "这是单智能体会话。用户问题：你用的什么模型"
-    stderr = "\n".join([
-        "Reading additional input from stdin...",
-        "OpenAI Codex v0.145.0-alpha.27",
-        "--------",
-        "user",
-        prompt,
-        "2026-07-21T08:00:00Z ERROR codex_models_manager: failed to refresh available models: timeout waiting for child process to exit",
-    ])
+    stderr = "\n".join(
+        [
+            "Reading additional input from stdin...",
+            "OpenAI Codex v0.145.0-alpha.27",
+            "--------",
+            "user",
+            prompt,
+            "2026-07-21T08:00:00Z ERROR codex_models_manager: failed to refresh available models: timeout waiting for child process to exit",
+        ]
+    )
 
     detail = _compact_cli_error(stderr, "", prompt=prompt, returncode=1)
 
@@ -3149,14 +3508,16 @@ def test_codex_cli_error_hides_prompt_and_returns_actionable_tail():
 async def test_acp_executor_streams_acp_chunks(tmp_path):
     kimi = _fake_kimi(tmp_path)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_stream",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(kimi),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_stream",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": str(kimi),
+            "version": "1.2.3",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Kimi Streamer", runtime_id=runtime["id"])
     ctx = ExecutionContext(
         session_id="s",
@@ -3168,10 +3529,13 @@ async def test_acp_executor_streams_acp_chunks(tmp_path):
     )
 
     chunks = [
-        ch async for ch in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-        }).execute(ctx)
+        ch
+        async for ch in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+            }
+        ).execute(ctx)
     ]
 
     assert chunks[0].kind == "delta"
@@ -3199,7 +3563,8 @@ async def test_acp_prefers_standard_session_config_option_for_model(tmp_path):
 @pytest.mark.parametrize("resume_session_id", ["", "s-current"])
 async def test_acp_skips_redundant_model_update_for_any_runtime(tmp_path, resume_session_id):
     executable = tmp_path / "acp_current_model"
-    executable.write_text(
+    executable = _write_fake_python_executable(
+        executable,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -3253,9 +3618,7 @@ async def test_acp_skips_redundant_model_update_for_any_runtime(tmp_path, resume
                 print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
     output = await run_acp_prompt(
         "hello",
@@ -3274,14 +3637,16 @@ async def test_acp_skips_redundant_model_update_for_any_runtime(tmp_path, resume
 def _payload_agent(tmp_path, runtime_id: str, agent_name: str):
     """构造 ExternalAgentStore + kimi acp runtime + agent，供 payload 测试复用。"""
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": runtime_id,
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(tmp_path / "kimi"),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": runtime_id,
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": str(tmp_path / "kimi"),
+            "version": "1.2.3",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name=agent_name, runtime_id=runtime["id"])
     return store, agent
 
@@ -3313,14 +3678,21 @@ async def test_acp_executor_uses_external_task_payload_for_single_agent(tmp_path
         cwd=str(tmp_path),
     )
 
-    chunks = await _run_executor(monkeypatch, fake_stream, ctx, {
-        "external_agent_id": agent["id"],
-        "external_store": store,
-        "model": "kimi-code/k3",
-    })
+    chunks = await _run_executor(
+        monkeypatch,
+        fake_stream,
+        ctx,
+        {
+            "external_agent_id": agent["id"],
+            "external_store": store,
+            "model": "kimi-code/k3",
+        },
+    )
 
     assert chunks[-1].kind == "final"
-    assert any(chunk.kind == "thinking" and chunk.body["text"] == "先核对测试范围。" for chunk in chunks)
+    assert any(
+        chunk.kind == "thinking" and chunk.body["text"] == "先核对测试范围。" for chunk in chunks
+    )
     assert ctx.messages[-1].thinking == "先核对测试范围。"
     assert "# Crew External Task Payload" in seen["prompt"]
     assert "- team_role: none" in seen["prompt"]
@@ -3357,18 +3729,26 @@ async def test_acp_executor_uses_team_chat_payload_for_team_leader(tmp_path, mon
         cwd=str(tmp_path),
     )
 
-    chunks = await _run_executor(monkeypatch, fake_stream, ctx, {
-        "external_agent_id": agent["id"],
-        "external_store": store,
-        "crew_session_id": "team_s1::leader",
-        "display_session_id": "team_s1",
-        "control_session_id": "team_s1",
-    })
+    chunks = await _run_executor(
+        monkeypatch,
+        fake_stream,
+        ctx,
+        {
+            "external_agent_id": agent["id"],
+            "external_store": store,
+            "crew_session_id": "team_s1::leader",
+            "display_session_id": "team_s1",
+            "control_session_id": "team_s1",
+        },
+    )
 
     assert chunks[-1].kind == "final"
     assert "- team_role: leader" in seen["prompt"]
     assert "- mode:" not in seen["prompt"]
-    assert "以当前用户最新消息和 Current Message/Current Execution Node 为本轮任务目标" in seen["prompt"]
+    assert (
+        "以当前用户最新消息和 Current Message/Current Execution Node 为本轮任务目标"
+        in seen["prompt"]
+    )
     assert "历史上下文只用于理解指代、延续和举例，不能替代本轮任务" in seen["prompt"]
     assert "代表当前团队直接回答用户" in seen["prompt"]
     assert "不派活，不创建 TeamPlan" in seen["prompt"]
@@ -3412,16 +3792,24 @@ async def test_acp_executor_uses_external_task_payload_for_team_member(tmp_path,
         cwd=str(tmp_path),
     )
 
-    chunks = await _run_executor(monkeypatch, fake_stream, ctx, {
-        "external_agent_id": agent["id"],
-        "external_store": store,
-        "crew_session_id": "team_s1::kk",
-        "display_session_id": "team_s1",
-        "control_session_id": "team_s1",
-    })
+    chunks = await _run_executor(
+        monkeypatch,
+        fake_stream,
+        ctx,
+        {
+            "external_agent_id": agent["id"],
+            "external_store": store,
+            "crew_session_id": "team_s1::kk",
+            "display_session_id": "team_s1",
+            "control_session_id": "team_s1",
+        },
+    )
 
     assert chunks[-1].kind == "final"
-    assert any(chunk.kind == "thinking" and chunk.body["text"] == "先核对团队测试范围。" for chunk in chunks)
+    assert any(
+        chunk.kind == "thinking" and chunk.body["text"] == "先核对团队测试范围。"
+        for chunk in chunks
+    )
     prompt_text = str(seen["prompt"])
     system_prompt = str(seen["system_prompt"])
     assert "- mode:" not in prompt_text
@@ -3432,7 +3820,9 @@ async def test_acp_executor_uses_external_task_payload_for_team_member(tmp_path,
     assert "已确认只测试，不开发" in prompt_text
     assert "## Upstream Artifacts" in prompt_text
     assert "/tmp/team-turn/测试方案.md" in prompt_text
-    assert "以当前用户最新消息和 Current Message/Current Execution Node 为本轮任务目标" in prompt_text
+    assert (
+        "以当前用户最新消息和 Current Message/Current Execution Node 为本轮任务目标" in prompt_text
+    )
     assert "历史上下文只用于理解指代、延续和举例，不能替代本轮任务" in prompt_text
     assert "只完成 Current Execution Node" in prompt_text
     assert "不能创建、修改或重排 TeamPlan" in prompt_text
@@ -3448,28 +3838,34 @@ async def test_acp_executor_reuses_bound_acp_session_id(tmp_path, monkeypatch):
     from crew.agent.external.acp_adapter import AcpStreamEvent
 
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "hermes_resume",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": str(tmp_path / "hermes"),
-        "version": "1.0.0",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "hermes_resume",
+            "provider": "hermes",
+            "name": "Hermes",
+            "executable_path": str(tmp_path / "hermes"),
+            "version": "1.0.0",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Hermes", runtime_id=runtime["id"])
     seen_resume_ids = []
 
     async def fake_stream(_prompt, config):
         seen_resume_ids.append(config.resume_session_id)
-        yield AcpStreamEvent(kind="session", session_id="h1", session_resumed=bool(config.resume_session_id))
+        yield AcpStreamEvent(
+            kind="session", session_id="h1", session_resumed=bool(config.resume_session_id)
+        )
         yield AcpStreamEvent(kind="text", text="ok")
 
     monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
 
-    executor = AcpExecutor({
-        "external_agent_id": agent["id"],
-        "external_store": store,
-    })
+    executor = AcpExecutor(
+        {
+            "external_agent_id": agent["id"],
+            "external_store": store,
+        }
+    )
 
     for query in ("first", "second"):
         ctx = ExecutionContext(
@@ -3499,14 +3895,16 @@ async def test_acp_executor_surfaces_acp_stream_error_event(tmp_path, monkeypatc
     from crew.agent.external.acp_adapter import AcpStreamEvent
 
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_long_line",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(tmp_path / "kimi"),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_long_line",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": str(tmp_path / "kimi"),
+            "version": "1.2.3",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Kimi Long Line", runtime_id=runtime["id"])
 
     async def fake_stream(_prompt, _config):
@@ -3523,10 +3921,13 @@ async def test_acp_executor_surfaces_acp_stream_error_event(tmp_path, monkeypatc
         cwd=str(tmp_path),
     )
     chunks = [
-        chunk async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-        }).execute(ctx)
+        chunk
+        async for chunk in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+            }
+        ).execute(ctx)
     ]
 
     assert chunks[-1].kind == "error"
@@ -3537,14 +3938,16 @@ async def test_acp_executor_marks_failed_acp_binding_unsafe_and_skips_resume(tmp
     from crew.agent.external.acp_adapter import AcpStreamEvent
 
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_binding_failure",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(tmp_path / "kimi"),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_binding_failure",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": str(tmp_path / "kimi"),
+            "version": "1.2.3",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Kimi Binding Failure", runtime_id=runtime["id"])
     seen_resume_ids: list[str] = []
     seen_system_prompts: list[str] = []
@@ -3557,16 +3960,20 @@ async def test_acp_executor_marks_failed_acp_binding_unsafe_and_skips_resume(tmp
         seen_system_prompts.append(config.system_prompt)
         if calls == 1:
             yield AcpStreamEvent(kind="session", session_id="bad-session")
-            yield AcpStreamEvent(kind="error", text="ACP 调用超时（stage=session/prompt, process=running）")
+            yield AcpStreamEvent(
+                kind="error", text="ACP 调用超时（stage=session/prompt, process=running）"
+            )
             return
         yield AcpStreamEvent(kind="session", session_id="fresh-session")
         yield AcpStreamEvent(kind="text", text="ok")
 
     monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
-    executor = AcpExecutor({
-        "external_agent_id": agent["id"],
-        "external_store": store,
-    })
+    executor = AcpExecutor(
+        {
+            "external_agent_id": agent["id"],
+            "external_store": store,
+        }
+    )
 
     first_ctx = ExecutionContext(
         session_id="crew_s1",
@@ -3623,14 +4030,16 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
     from crew.agent.external.acp_adapter import AcpStreamEvent
 
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_mcp",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(tmp_path / "kimi"),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_mcp",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": str(tmp_path / "kimi"),
+            "version": "1.2.3",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Kimi MCP", runtime_id=runtime["id"])
     seen = {}
 
@@ -3665,11 +4074,14 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
     )
 
     chunks = [
-        chunk async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-            "interaction_bridge": bridge,
-        }).execute(ctx)
+        chunk
+        async for chunk in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+                "interaction_bridge": bridge,
+            }
+        ).execute(ctx)
     ]
 
     assert seen["binding"]["display_session_id"] == "main"
@@ -3684,22 +4096,29 @@ async def test_acp_executor_persists_followup_answer_when_acp_errors(tmp_path, m
     from crew.core.followup import get_followup_waiter
 
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_error_after_followup",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(tmp_path / "kimi"),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_error_after_followup",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": str(tmp_path / "kimi"),
+            "version": "1.2.3",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Kimi Error", runtime_id=runtime["id"])
 
     waiter = get_followup_waiter()
-    qid = waiter.create("main", [{
-        "id": "q1",
-        "question": "请选择方向",
-        "options": [{"label": "风险分析", "value": "risk"}],
-    }])
+    qid = waiter.create(
+        "main",
+        [
+            {
+                "id": "q1",
+                "question": "请选择方向",
+                "options": [{"label": "风险分析", "value": "risk"}],
+            }
+        ],
+    )
     assert waiter.resolve("main", qid, [{"question_id": "q1", "answers": ["risk"]}])
 
     async def fake_stream(_prompt, _config):
@@ -3717,31 +4136,35 @@ async def test_acp_executor_persists_followup_answer_when_acp_errors(tmp_path, m
     )
 
     chunks = [
-        chunk async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-            "interaction_bridge": SimpleNamespace(create_binding=lambda **_: None),
-        }).execute(ctx)
+        chunk
+        async for chunk in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+                "interaction_bridge": SimpleNamespace(create_binding=lambda **_: None),
+            }
+        ).execute(ctx)
     ]
 
     assert chunks[-1].kind == "error"
     assert any(
-        m.role == "user" and m.is_meta and m.content == "已选择：风险分析"
-        for m in ctx.messages
+        m.role == "user" and m.is_meta and m.content == "已选择：风险分析" for m in ctx.messages
     )
 
 
 async def test_acp_executor_streams_acp_tool_events(tmp_path):
     kimi = _fake_acp_with_tool_events(tmp_path)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "kimi_tools",
-        "provider": "kimi",
-        "name": "Kimi",
-        "executable_path": str(kimi),
-        "version": "1.2.3",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "kimi_tools",
+            "provider": "kimi",
+            "name": "Kimi",
+            "executable_path": str(kimi),
+            "version": "1.2.3",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Kimi Tools", runtime_id=runtime["id"])
     ctx = ExecutionContext(
         session_id="s",
@@ -3753,10 +4176,13 @@ async def test_acp_executor_streams_acp_tool_events(tmp_path):
     )
 
     chunks = [
-        ch async for ch in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-        }).execute(ctx)
+        ch
+        async for ch in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+            }
+        ).execute(ctx)
     ]
     tool_chunks = [ch for ch in chunks if ch.kind == "tool"]
 
@@ -3778,7 +4204,8 @@ async def test_acp_executor_streams_acp_tool_events(tmp_path):
 
 async def test_acp_executor_reports_hermes_missing_acp_dependencies(tmp_path):
     hermes = tmp_path / "hermes"
-    hermes.write_text(
+    hermes = _write_fake_python_executable(
+        hermes,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -3791,18 +4218,18 @@ async def test_acp_executor_reports_hermes_missing_acp_dependencies(tmp_path):
             raise SystemExit(1)
             """
         ),
-        encoding="utf-8",
     )
-    hermes.chmod(hermes.stat().st_mode | stat.S_IXUSR)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "hermes_test",
-        "provider": "hermes",
-        "name": "Hermes",
-        "executable_path": str(hermes),
-        "version": "0.16.0",
-        "protocol": "acp",
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "hermes_test",
+            "provider": "hermes",
+            "name": "Hermes",
+            "executable_path": str(hermes),
+            "version": "0.16.0",
+            "protocol": "acp",
+        }
+    )
     agent = store.create_agent(name="Hermes Coder", runtime_id=runtime["id"])
     ctx = ExecutionContext(
         session_id="s",
@@ -3814,10 +4241,13 @@ async def test_acp_executor_reports_hermes_missing_acp_dependencies(tmp_path):
     )
 
     chunks = [
-        ch async for ch in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-        }).execute(ctx)
+        ch
+        async for ch in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+            }
+        ).execute(ctx)
     ]
 
     assert chunks[-1].kind == "error"
@@ -3828,8 +4258,7 @@ async def test_acp_executor_reports_hermes_missing_acp_dependencies(tmp_path):
 async def test_client_executor_runs_generic_module(tmp_path, monkeypatch):
     module = tmp_path / "fake_client_agent.py"
     module.write_text(
-        "def run_agent(prompt, **kwargs):\n"
-        "    return {'text': 'Client收到: ' + prompt[-5:]}\n",
+        "def run_agent(prompt, **kwargs):\n    return {'text': 'Client收到: ' + prompt[-5:]}\n",
         encoding="utf-8",
     )
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -3846,6 +4275,29 @@ async def test_client_executor_runs_generic_module(tmp_path, monkeypatch):
 
     assert chunks[-1].kind == "final"
     assert chunks[-1].body["text"] == "Client收到: lient"
+
+
+async def test_client_executor_redacts_untrusted_output(tmp_path, monkeypatch):
+    module = tmp_path / "leaky_client_agent.py"
+    module.write_text(
+        "def run_agent(prompt, **kwargs):\n"
+        "    return 'C:\\\\private\\\\out.txt ACCESS_TOKEN=secret-value'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    sys.modules.pop("leaky_client_agent", None)
+    ctx = ExecutionContext(
+        session_id="s",
+        request_id="r",
+        system_prompt="",
+        messages=[],
+        query="hello client",
+    )
+
+    chunks = [ch async for ch in ClientExecutor({"module": "leaky_client_agent"}).execute(ctx)]
+
+    assert chunks[-1].kind == "final"
+    assert "secret-value" not in chunks[-1].body["text"]
 
 
 def test_sessions_include_agent_label_for_sidebar_badge():
@@ -3870,7 +4322,9 @@ def test_sessions_include_agent_label_for_sidebar_badge():
                 {"id": "runtime_kimi", "provider": "kimi", "metadata": {}},
             )
 
-    crew = SimpleNamespace(session_store=ConfigStore(), external_agents=AgentStore(), config=Config())
+    crew = SimpleNamespace(
+        session_store=ConfigStore(), external_agents=AgentStore(), config=Config()
+    )
     sessions = [
         {"session_id": "crew_session", "title": "默认会话"},
         {"session_id": "kimi_session", "title": "Kimi 会话"},
@@ -3979,7 +4433,8 @@ def test_external_prompt_uses_native_runtime_for_normal_skill():
 
 def _fake_claude_stream_runtime(tmp_path):
     script = tmp_path / "claude-stream"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -4040,10 +4495,7 @@ def _fake_claude_stream_runtime(tmp_path):
             assert sys.stdin.readline() == ""
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 @pytest.mark.asyncio
@@ -4059,25 +4511,29 @@ async def test_claude_stream_json_emits_session_text_tools_usage_and_permission(
 
     events = [
         event
-        async for event in stream_claude_events(RuntimeExecutionRequest(
-            executable_path=str(script),
-            provider="claude-code",
-            prompt="hello",
-            model="default",
-            cwd=str(tmp_path),
-            custom_env={
-                "ARGV_FILE": str(argv_file),
-                "MCP_CAPTURE_FILE": str(mcp_capture_file),
-            },
-            mcp_servers=[{
-                "name": "crew-interaction",
-                "command": "/usr/bin/python3",
-                "args": ["-m", "crew.cli"],
-                "env": {"CREW_INTERACTION_TOKEN": "token"},
-            }],
-            permission_handler=allow,
-            timeout=5,
-        ))
+        async for event in stream_claude_events(
+            RuntimeExecutionRequest(
+                executable_path=str(script),
+                provider="claude-code",
+                prompt="hello",
+                model="default",
+                cwd=str(tmp_path),
+                custom_env={
+                    "ARGV_FILE": str(argv_file),
+                    "MCP_CAPTURE_FILE": str(mcp_capture_file),
+                },
+                mcp_servers=[
+                    {
+                        "name": "crew-interaction",
+                        "command": "/usr/bin/python3",
+                        "args": ["-m", "crew.cli"],
+                        "env": {"CREW_INTERACTION_TOKEN": "token"},
+                    }
+                ],
+                permission_handler=allow,
+                timeout=5,
+            )
+        )
     ]
 
     assert events[0].kind == "session"
@@ -4088,11 +4544,13 @@ async def test_claude_stream_json_emits_session_text_tools_usage_and_permission(
         ("start", "tool-1"),
         ("result", "tool-1"),
     ]
-    assert [event.usage for event in events if event.kind == "usage"] == [{
-        "input_tokens": 7,
-        "output_tokens": 3,
-        "total_tokens": 10,
-    }]
+    assert [event.usage for event in events if event.kind == "usage"] == [
+        {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+        }
+    ]
     assert permissions[0].tool_call["rawInput"]["arguments"]["path"] == "README.md"
     argv = json.loads(argv_file.read_text(encoding="utf-8"))
     assert "--input-format" in argv
@@ -4115,7 +4573,8 @@ async def test_claude_stream_json_emits_session_text_tools_usage_and_permission(
 async def test_claude_reports_resume_rejection_to_unified_executor(tmp_path):
     script = tmp_path / "claude-resume"
     calls_file = tmp_path / "claude-resume-calls.txt"
-    script.write_text(
+    script = _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -4138,22 +4597,22 @@ async def test_claude_reports_resume_rejection_to_unified_executor(tmp_path):
             print(json.dumps({"type": "result", "session_id": "fresh-s1"}), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     with pytest.raises(RuntimeResumeRejected):
         _ = [
             event
-            async for event in stream_claude_events(RuntimeExecutionRequest(
-                executable_path=str(script),
-                provider="claude-code",
-                prompt="continue",
-                cwd=str(tmp_path),
-                resume_session_id="missing-s1",
-                custom_env={"CALLS_FILE": str(calls_file)},
-                timeout=2,
-            ))
+            async for event in stream_claude_events(
+                RuntimeExecutionRequest(
+                    executable_path=str(script),
+                    provider="claude-code",
+                    prompt="continue",
+                    cwd=str(tmp_path),
+                    resume_session_id="missing-s1",
+                    custom_env={"CALLS_FILE": str(calls_file)},
+                    timeout=2,
+                )
+            )
         ]
 
     calls = calls_file.read_text(encoding="utf-8").splitlines()
@@ -4202,7 +4661,8 @@ async def test_unified_executor_restarts_once_after_safe_resume_rejection():
 
 def _fake_codex_app_server(tmp_path):
     script = tmp_path / "codex-app"
-    script.write_text(
+    return _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -4309,10 +4769,7 @@ def _fake_codex_app_server(tmp_path):
                     }), flush=True)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
 
 
 @pytest.mark.asyncio
@@ -4328,40 +4785,48 @@ async def test_codex_app_server_gates_turn_events_and_emits_tools_usage_approval
 
     events = [
         event
-        async for event in stream_codex_events(RuntimeExecutionRequest(
-            executable_path=str(script),
-            provider="codex",
-            prompt="work",
-            cwd=str(tmp_path),
-            system_prompt="Crew instructions",
-            custom_env={
-                "THREAD_PARAMS_FILE": str(thread_params_file),
-                "TURN_PARAMS_FILE": str(turn_params_file),
-            },
-            mcp_servers=[{
-                "name": "crew-interaction",
-                "command": "/usr/bin/python3",
-                "args": ["-m", "crew.cli"],
-                "env": {"CREW_INTERACTION_TOKEN": "token"},
-            }],
-            permission_handler=allow,
-            timeout=5,
-        ))
+        async for event in stream_codex_events(
+            RuntimeExecutionRequest(
+                executable_path=str(script),
+                provider="codex",
+                prompt="work",
+                cwd=str(tmp_path),
+                system_prompt="Crew instructions",
+                custom_env={
+                    "THREAD_PARAMS_FILE": str(thread_params_file),
+                    "TURN_PARAMS_FILE": str(turn_params_file),
+                },
+                mcp_servers=[
+                    {
+                        "name": "crew-interaction",
+                        "command": "/usr/bin/python3",
+                        "args": ["-m", "crew.cli"],
+                        "env": {"CREW_INTERACTION_TOKEN": "token"},
+                    }
+                ],
+                permission_handler=allow,
+                timeout=5,
+            )
+        )
     ]
 
     assert events[0].kind == "session"
     assert events[0].session_id == "thread-1"
     assert "".join(event.text for event in events if event.kind == "text") == "codex"
     assert "".join(event.text for event in events if event.kind == "thinking") == "inspect plan"
-    assert [(event.tool.phase, event.tool.tool_call_id) for event in events if event.kind == "tool"] == [
+    assert [
+        (event.tool.phase, event.tool.tool_call_id) for event in events if event.kind == "tool"
+    ] == [
         ("start", "cmd-1"),
         ("result", "cmd-1"),
     ]
-    assert [event.usage for event in events if event.kind == "usage"] == [{
-        "input_tokens": 4,
-        "output_tokens": 2,
-        "total_tokens": 6,
-    }]
+    assert [event.usage for event in events if event.kind == "usage"] == [
+        {
+            "input_tokens": 4,
+            "output_tokens": 2,
+            "total_tokens": 6,
+        }
+    ]
     assert permissions[0].tool_call["rawInput"]["name"] == "shell"
     thread_params = json.loads(thread_params_file.read_text(encoding="utf-8"))
     turn_params = json.loads(turn_params_file.read_text(encoding="utf-8"))
@@ -4392,32 +4857,38 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
 
     events = [
         event
-        async for event in stream_codex_events(RuntimeExecutionRequest(
-            executable_path=str(script),
-            provider="codex",
-            prompt="ask",
-            cwd=str(tmp_path),
-            custom_env={
-                "THREAD_PARAMS_FILE": str(thread_params_file),
-                "EMIT_DYNAMIC_TOOL": "1",
-            },
-            dynamic_tools=[{
-                "type": "function",
-                "name": "ask_followup_question",
-                "description": "Ask",
-                "inputSchema": {"type": "object"},
-            }],
-            dynamic_tool_handler=handle,
-            permission_handler=allow,
-            timeout=5,
-        ))
+        async for event in stream_codex_events(
+            RuntimeExecutionRequest(
+                executable_path=str(script),
+                provider="codex",
+                prompt="ask",
+                cwd=str(tmp_path),
+                custom_env={
+                    "THREAD_PARAMS_FILE": str(thread_params_file),
+                    "EMIT_DYNAMIC_TOOL": "1",
+                },
+                dynamic_tools=[
+                    {
+                        "type": "function",
+                        "name": "ask_followup_question",
+                        "description": "Ask",
+                        "inputSchema": {"type": "object"},
+                    }
+                ],
+                dynamic_tool_handler=handle,
+                permission_handler=allow,
+                timeout=5,
+            )
+        )
     ]
 
-    assert calls == [(
-        "",
-        "ask_followup_question",
-        {"questions": [{"id": "q1", "question": "Pick"}]},
-    )]
+    assert calls == [
+        (
+            "",
+            "ask_followup_question",
+            {"questions": [{"id": "q1", "question": "Pick"}]},
+        )
+    ]
     dynamic_events = [
         event.tool
         for event in events
@@ -4434,7 +4905,8 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
 @pytest.mark.asyncio
 async def test_codex_falls_back_only_when_app_server_is_unsupported(tmp_path):
     script = tmp_path / "codex-legacy"
-    script.write_text(
+    script = _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -4446,19 +4918,19 @@ async def test_codex_falls_back_only_when_app_server_is_unsupported(tmp_path):
             print("legacy result")
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     events = [
         event
-        async for event in stream_codex_events(RuntimeExecutionRequest(
-            executable_path=str(script),
-            provider="codex",
-            prompt="work",
-            cwd=str(tmp_path),
-            timeout=2,
-        ))
+        async for event in stream_codex_events(
+            RuntimeExecutionRequest(
+                executable_path=str(script),
+                provider="codex",
+                prompt="work",
+                cwd=str(tmp_path),
+                timeout=2,
+            )
+        )
     ]
 
     assert [(event.kind, event.text) for event in events] == [("text", "legacy result")]
@@ -4468,7 +4940,8 @@ async def test_codex_falls_back_only_when_app_server_is_unsupported(tmp_path):
 async def test_codex_never_replays_with_legacy_exec_after_turn_started(tmp_path):
     script = tmp_path / "codex-unsafe-fallback"
     calls_file = tmp_path / "codex-calls.txt"
-    script.write_text(
+    script = _write_fake_python_executable(
+        script,
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
@@ -4491,21 +4964,21 @@ async def test_codex_never_replays_with_legacy_exec_after_turn_started(tmp_path)
                     raise SystemExit(3)
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     with pytest.raises(Exception, match="Codex"):
         _ = [
             event
-            async for event in stream_codex_events(RuntimeExecutionRequest(
-                executable_path=str(script),
-                provider="codex",
-                prompt="work",
-                cwd=str(tmp_path),
-                custom_env={"CALLS_FILE": str(calls_file)},
-                timeout=2,
-            ))
+            async for event in stream_codex_events(
+                RuntimeExecutionRequest(
+                    executable_path=str(script),
+                    provider="codex",
+                    prompt="work",
+                    cwd=str(tmp_path),
+                    custom_env={"CALLS_FILE": str(calls_file)},
+                    timeout=2,
+                )
+            )
         ]
 
     calls = calls_file.read_text(encoding="utf-8").splitlines()
@@ -4518,22 +4991,24 @@ async def test_external_executor_uses_claude_runtime_adapter_and_persists_sessio
     script = _fake_claude_stream_runtime(tmp_path)
     argv_file = tmp_path / "executor-claude-argv.json"
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "claude-native",
-        "provider": "claude-code",
-        "name": "Claude Code",
-        "executable_path": str(script),
-        "version": "test",
-        "protocol": "cli",
-        "metadata": {
-            "adapter_id": "claude-stream-json",
-            "models": [
-                {"id": "sonnet", "label": "Claude Sonnet（当前）", "default": True},
-            ],
-            "default_model_id": "sonnet",
-            "model_migrations": {"default": "sonnet"},
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "claude-native",
+            "provider": "claude-code",
+            "name": "Claude Code",
+            "executable_path": str(script),
+            "version": "test",
+            "protocol": "cli",
+            "metadata": {
+                "adapter_id": "claude-stream-json",
+                "models": [
+                    {"id": "sonnet", "label": "Claude Sonnet（当前）", "default": True},
+                ],
+                "default_model_id": "sonnet",
+                "model_migrations": {"default": "sonnet"},
+            },
+        }
+    )
     agent = store.create_agent(
         name="Claude Native",
         runtime_id=runtime["id"],
@@ -4551,16 +5026,20 @@ async def test_external_executor_uses_claude_runtime_adapter_and_persists_sessio
 
     chunks = [
         chunk
-        async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            # Simulate a pre-migration Session override.  The runtime-declared
-            # migration must win before argv and message persistence.
-            "model": "default",
-            "external_store": store,
-        }).execute(ctx)
+        async for chunk in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                # Simulate a pre-migration Session override.  The runtime-declared
+                # migration must win before argv and message persistence.
+                "model": "default",
+                "external_store": store,
+            }
+        ).execute(ctx)
     ]
 
-    assert "".join(chunk.body.get("text", "") for chunk in chunks if chunk.kind == "delta") == "hello"
+    assert (
+        "".join(chunk.body.get("text", "") for chunk in chunks if chunk.kind == "delta") == "hello"
+    )
     assert [chunk.kind for chunk in chunks].count("tool") == 2
     assert chunks[-1].kind == "final"
     assert chunks[-1].body["usage"]["total_tokens"] == 10
@@ -4582,19 +5061,21 @@ async def test_external_executor_uses_claude_runtime_adapter_and_persists_sessio
 async def test_external_executor_uses_codex_app_server_adapter(tmp_path):
     script = _fake_codex_app_server(tmp_path)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "codex-native",
-        "provider": "codex",
-        "name": "Codex",
-        "executable_path": str(script),
-        "version": "test",
-        "protocol": "cli",
-        "metadata": {
-            "runtime_profile_version": 1,
-            "runtime_descriptor_source": "builtin",
-            "models": [{"id": "default", "label": "CLI 默认模型", "default": True}],
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "codex-native",
+            "provider": "codex",
+            "name": "Codex",
+            "executable_path": str(script),
+            "version": "test",
+            "protocol": "cli",
+            "metadata": {
+                "runtime_profile_version": 1,
+                "runtime_descriptor_source": "builtin",
+                "models": [{"id": "default", "label": "CLI 默认模型", "default": True}],
+            },
+        }
+    )
     agent = store.create_agent(
         name="Codex Native",
         runtime_id=runtime["id"],
@@ -4624,15 +5105,22 @@ async def test_external_executor_uses_codex_app_server_adapter(tmp_path):
     )
     chunks = [
         chunk
-        async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-            "interaction_bridge": FakeBridge(),
-        }).execute(ctx)
+        async for chunk in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+                "interaction_bridge": FakeBridge(),
+            }
+        ).execute(ctx)
     ]
 
-    assert "".join(chunk.body.get("text", "") for chunk in chunks if chunk.kind == "delta") == "codex"
-    assert "".join(chunk.body.get("text", "") for chunk in chunks if chunk.kind == "thinking") == "inspect plan"
+    assert (
+        "".join(chunk.body.get("text", "") for chunk in chunks if chunk.kind == "delta") == "codex"
+    )
+    assert (
+        "".join(chunk.body.get("text", "") for chunk in chunks if chunk.kind == "thinking")
+        == "inspect plan"
+    )
     assert chunks[-1].kind == "final"
     assert chunks[-1].body["usage"]["total_tokens"] == 6
     assert ctx.messages[-1].thinking == "inspect plan"
@@ -4651,18 +5139,20 @@ async def test_external_executor_uses_codex_app_server_adapter(tmp_path):
 async def test_codex_dynamic_control_profile_resets_legacy_native_session_once(tmp_path):
     script = _fake_codex_app_server(tmp_path)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
-    runtime = store.upsert_runtime({
-        "id": "codex-native-profile",
-        "provider": "codex",
-        "name": "Codex",
-        "executable_path": str(script),
-        "version": "test",
-        "protocol": "cli",
-        "metadata": {
-            "adapter_id": "codex-app-server",
-            "models": [{"id": "default", "label": "CLI 默认模型", "default": True}],
-        },
-    })
+    runtime = store.upsert_runtime(
+        {
+            "id": "codex-native-profile",
+            "provider": "codex",
+            "name": "Codex",
+            "executable_path": str(script),
+            "version": "test",
+            "protocol": "cli",
+            "metadata": {
+                "adapter_id": "codex-app-server",
+                "models": [{"id": "default", "label": "CLI 默认模型", "default": True}],
+            },
+        }
+    )
     agent = store.create_agent(
         name="Codex Native",
         runtime_id=runtime["id"],
@@ -4706,11 +5196,13 @@ async def test_codex_dynamic_control_profile_resets_legacy_native_session_once(t
     )
     chunks = [
         chunk
-        async for chunk in AcpExecutor({
-            "external_agent_id": agent["id"],
-            "external_store": store,
-            "interaction_bridge": FakeDynamicBridge(),
-        }).execute(ctx)
+        async for chunk in AcpExecutor(
+            {
+                "external_agent_id": agent["id"],
+                "external_store": store,
+                "interaction_bridge": FakeDynamicBridge(),
+            }
+        ).execute(ctx)
     ]
 
     assert chunks[-1].kind == "final"
@@ -4765,8 +5257,7 @@ def test_legacy_acp_bindings_migrate_to_protocol_neutral_session_table(tmp_path)
     assert binding["session_profile"] == ""
     with sqlite3.connect(db_path) as conn:
         tables = {
-            row[0]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
     assert "external_runtime_session_binding" in tables
     assert "external_acp_session_binding" not in tables
@@ -4800,10 +5291,12 @@ async def test_external_executor_emits_and_persists_prompt_file_changes(tmp_path
     )
     chunks = [
         chunk
-        async for chunk in WritingExternalExecutor({
-            "external_agent_id": "agent-1",
-            "plan_manager": manager,
-        }).execute(ctx)
+        async for chunk in WritingExternalExecutor(
+            {
+                "external_agent_id": "agent-1",
+                "plan_manager": manager,
+            }
+        ).execute(ctx)
     ]
 
     assert [chunk.kind for chunk in chunks] == ["file_changes", "final"]
@@ -4813,10 +5306,7 @@ async def test_external_executor_emits_and_persists_prompt_file_changes(tmp_path
     assert files[str(deleted)]["status"] == "deleted"
     assert files[str(existing)]["revision"]
     assert str(tmp_path / "transient.txt") not in files
-    persisted = {
-        item["path"]: item
-        for item in manager.drain_turn_file_changes("external-s1")
-    }
+    persisted = {item["path"]: item for item in manager.drain_turn_file_changes("external-s1")}
     assert set(persisted) == {str(tmp_path / "added.txt"), str(existing), str(deleted)}
 
 
@@ -4856,7 +5346,9 @@ async def test_external_executor_uses_structured_tool_path_for_exact_text_diff(t
     )
     chunks = [
         chunk
-        async for chunk in ToolWritingExternalExecutor({"external_agent_id": "agent-1"}).execute(ctx)
+        async for chunk in ToolWritingExternalExecutor({"external_agent_id": "agent-1"}).execute(
+            ctx
+        )
     ]
 
     files = next(chunk for chunk in chunks if chunk.kind == "file_changes").body["files"]
@@ -4870,14 +5362,16 @@ async def test_external_executor_uses_structured_tool_path_for_exact_text_diff(t
 @pytest.mark.asyncio
 async def test_external_team_member_emits_only_current_node_changes(tmp_path):
     manager = PlanModeManager()
-    manager.file_change_store("member-s1").append({
-        "path": str(tmp_path / "another-agent.txt"),
-        "name": "another-agent.txt",
-        "added": 1,
-        "removed": 0,
-        "status": "added",
-        "diff": [],
-    })
+    manager.file_change_store("member-s1").append(
+        {
+            "path": str(tmp_path / "another-agent.txt"),
+            "name": "another-agent.txt",
+            "added": 1,
+            "removed": 0,
+            "status": "added",
+            "diff": [],
+        }
+    )
     target = tmp_path / "current-agent.txt"
 
     class TeamWritingExternalExecutor(ExternalExecutor):
@@ -4896,10 +5390,12 @@ async def test_external_team_member_emits_only_current_node_changes(tmp_path):
     )
     chunks = [
         chunk
-        async for chunk in TeamWritingExternalExecutor({
-            "external_agent_id": "agent-1",
-            "plan_manager": manager,
-        }).execute(ctx)
+        async for chunk in TeamWritingExternalExecutor(
+            {
+                "external_agent_id": "agent-1",
+                "plan_manager": manager,
+            }
+        ).execute(ctx)
     ]
 
     files = next(chunk for chunk in chunks if chunk.kind == "file_changes").body["files"]
@@ -4948,8 +5444,12 @@ async def test_external_executor_serializes_same_physical_workspace(tmp_path):
     release_first.set()
     first_chunks, second_chunks = await asyncio.gather(first_task, second_task)
     assert order == ["start:first", "end:first", "start:second", "end:second"]
-    first_files = next(chunk for chunk in first_chunks if chunk.kind == "file_changes").body["files"]
-    second_files = next(chunk for chunk in second_chunks if chunk.kind == "file_changes").body["files"]
+    first_files = next(chunk for chunk in first_chunks if chunk.kind == "file_changes").body[
+        "files"
+    ]
+    second_files = next(chunk for chunk in second_chunks if chunk.kind == "file_changes").body[
+        "files"
+    ]
     assert [item["path"] for item in first_files] == [str(tmp_path / "first.txt")]
     assert [item["path"] for item in second_files] == [str(tmp_path / "second.txt")]
 

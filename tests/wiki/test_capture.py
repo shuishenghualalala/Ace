@@ -42,10 +42,10 @@ async def test_capture_document_parsed_into_default_kb(store):
 
 async def test_capture_document_parse_failure_marks_failed(store, monkeypatch):
     """解析失败：不抛异常，raw 标记 failed 供 Agent / 用户挽救。"""
-    def _boom(content, filename):
+    async def _boom(content, filename):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("crew.wiki.capture.parse_document_from_bytes", _boom)
+    monkeypatch.setattr("crew.wiki.capture.parse_document_from_bytes_async", _boom)
     raw = await capture_upload_to_wiki(
         store, None, WikiConfig(), "note.txt", b"hello", owner_account_id="A:uid-a"
     )
@@ -171,3 +171,35 @@ async def test_capture_never_raises(store, monkeypatch):
         await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"x")
         is None
     )
+
+
+async def test_capture_uses_atomic_bounded_write(store, monkeypatch):
+    import crew.wiki.capture as capture_module
+
+    monkeypatch.setattr(capture_module, "_MAX_CAPTURE_BYTES", 4, raising=False)
+    original_write_bytes = Path.write_bytes
+
+    def forbidden_write_bytes(self, data):
+        raise AssertionError(f"Wiki capture used Path.write_bytes: {self}")
+
+    monkeypatch.setattr(Path, "write_bytes", forbidden_write_bytes)
+    try:
+        assert await capture_upload_to_wiki(
+            store,
+            None,
+            WikiConfig(),
+            "note.txt",
+            b"safe",
+            owner_account_id="A:uid-a",
+        ) is not None
+    finally:
+        monkeypatch.setattr(Path, "write_bytes", original_write_bytes)
+
+    assert await capture_upload_to_wiki(
+        store,
+        None,
+        WikiConfig(),
+        "too-large.txt",
+        b"12345",
+        owner_account_id="A:uid-a",
+    ) is None

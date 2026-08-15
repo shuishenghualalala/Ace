@@ -23,6 +23,7 @@ from crew.team.formation import (
     fast_team_suggestion as fast_team_suggestion,
     suggest_role_description as suggest_role_description,
 )
+from crew.tools.redact import redact_sensitive_display_text, safe_public_error
 
 if TYPE_CHECKING:
     from crew.app import CrewApp
@@ -52,7 +53,6 @@ EXTERNAL_AGENTS_DISABLED_BODY = {
     "code": "external_agents_disabled",
     "error": "外部智能体功能已在配置中关闭",
 }
-
 
 class ExternalAgentsDisabledError(RuntimeError):
     """外部智能体产品能力关闭时的统一 Gateway 业务异常。"""

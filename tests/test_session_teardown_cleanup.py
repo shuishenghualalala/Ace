@@ -183,11 +183,13 @@ def test_delete_session_blocked_by_enabled_cron(tmp_path, auth_headers):
     assert app.cron_store.list(session_id=sid, owner_account_id=OWNER) == []
 
 
-def test_task_runtime_unlink_and_prune_removes_disk(tmp_path):
+def test_task_runtime_unlink_and_prune_removes_disk(tmp_path, monkeypatch):
     from crew.tasks.runtime import TaskRuntime
+    from crew.state.home import get_owner_runtime_home
 
     db = tmp_path / "t.db"
-    tasks_dir = tmp_path / "acct" / "tasks"
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    tasks_dir = get_owner_runtime_home(OWNER) / "tasks"
     tasks_dir.mkdir(parents=True)
     runtime = TaskRuntime(str(db), finished_retention_days=0)  # prune 关闭时测 unlink
     log_path = tasks_dir / "task_abc.log"

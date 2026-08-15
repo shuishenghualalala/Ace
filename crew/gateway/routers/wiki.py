@@ -12,15 +12,55 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from crew.gateway.auth import account_from_request
+from crew.gateway.helpers import safe_public_error
 from crew.state.logging import get_logger
 from crew.wiki._utils import is_wiki_agent_session
-from crew.wiki.parser import MissingDependencyError, guess_mime_type, parse_document_from_bytes
+from crew.wiki.parser import (
+    MissingDependencyError,
+    guess_mime_type,
+    parse_document_from_bytes_async,
+)
 from crew.wiki.schemas import RawSource, WikiRelation
 from crew.wiki.sources import classify_file
 from crew.wiki.store import normalize_kb_id
 from crew.wiki.store._ids import filename_from_title
 
 log = get_logger("gateway.routers.wiki")
+
+_MAX_WIKI_UPLOAD_BYTES = 20 * 1024 * 1024
+_WIKI_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
+
+class _WikiUploadTooLarge(Exception):
+    pass
+
+
+async def _read_upload_bounded(uploaded: Any) -> bytes:
+    """Read one multipart part with a limit before handing it to a parser."""
+
+    declared = getattr(uploaded, "size", None)
+    if isinstance(declared, int) and declared > _MAX_WIKI_UPLOAD_BYTES:
+        raise _WikiUploadTooLarge
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            chunk = await uploaded.read(_WIKI_UPLOAD_READ_CHUNK_BYTES)
+            if not chunk:
+                return b"".join(chunks)
+            if not isinstance(chunk, bytes):
+                raise ValueError("上传数据类型无效")
+            total += len(chunk)
+            if total > _MAX_WIKI_UPLOAD_BYTES:
+                raise _WikiUploadTooLarge
+            chunks.append(chunk)
+    except Exception:
+        # Close the underlying part on every failure path so parser, disk-full,
+        # reset, and oversize errors cannot leave the multipart stream open.
+        close = getattr(uploaded, "close", None)
+        if callable(close):
+            await close()
+        raise
 
 
 def create_wiki_router(crew) -> APIRouter:
@@ -197,7 +237,7 @@ def create_wiki_router(crew) -> APIRouter:
         try:
             kb_id = normalize_kb_id(request.query_params.get("kb_id"))
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "Wiki 请求无效")}, status_code=400)
         return {
             "ok": True,
             "kb_id": kb_id,
@@ -214,7 +254,7 @@ def create_wiki_router(crew) -> APIRouter:
         try:
             kb_id = normalize_kb_id(request.query_params.get("kb_id"))
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "Wiki 请求无效")}, status_code=400)
 
         force_new = request.query_params.get("force_new", "").lower() in {"1", "true", "yes"}
 
@@ -289,7 +329,7 @@ def create_wiki_router(crew) -> APIRouter:
         try:
             kb = store.create_kb(kb_id, name=name, owner_account_id=_owner(request))
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "Wiki 请求无效")}, status_code=400)
         return {"ok": True, "kb": kb.to_dict()}
 
     @router.delete("/kbs/{kb_id}")
@@ -306,7 +346,7 @@ def create_wiki_router(crew) -> APIRouter:
         try:
             ok = store.delete_kb(kb_id, owner)
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "Wiki 请求无效")}, status_code=400)
         if not ok:
             return JSONResponse({"ok": False, "error": "知识库不存在"}, status_code=404)
         session_store = getattr(crew, "session_store", None)
@@ -767,11 +807,22 @@ def create_wiki_router(crew) -> APIRouter:
         try:
             form = await request.form()
         except Exception as exc:  # noqa: BLE001
-            return JSONResponse({"ok": False, "error": f"表单解析失败: {exc}"}, status_code=400)
+            return JSONResponse(
+                {"ok": False, "error": f"表单解析失败: {safe_public_error(exc, '表单解析失败')}"},
+                status_code=400,
+            )
         uploaded = form.get("file")
         if uploaded is None:
             return JSONResponse({"ok": False, "error": "缺少 file 字段"}, status_code=400)
-        content = await uploaded.read()
+        try:
+            content = await _read_upload_bounded(uploaded)
+        except _WikiUploadTooLarge:
+            return JSONResponse({"ok": False, "error": "上传文件超过安全上限"}, status_code=413)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                {"ok": False, "error": safe_public_error(exc, "上传文件读取失败")},
+                status_code=400,
+            )
         filename = str(getattr(uploaded, "filename", "upload") or "upload")
         if not content:
             return JSONResponse({"ok": False, "error": "上传文件为空"}, status_code=400)
@@ -836,7 +887,7 @@ def create_wiki_router(crew) -> APIRouter:
                     return JSONResponse(
                         {
                             "ok": False,
-                            "error": str(exc),
+                            "error": safe_public_error(exc, "媒体解析失败"),
                             "source_id": source_id,
                             "source_type": source_type,
                             "needs_confirmation": exc.needs_confirmation,
@@ -896,8 +947,7 @@ def create_wiki_router(crew) -> APIRouter:
         store.save_raw(raw, _owner(request), kb_id)
 
         try:
-            # 解析是 CPU 密集型同步调用，丢线程池避免阻塞事件循环拖垮整个网关。
-            text = await asyncio.to_thread(parse_document_from_bytes, content, filename)
+            text = await parse_document_from_bytes_async(content, filename)
         except asyncio.CancelledError:
             # 请求中断/取消时 raw 不能留在 pending（永远不会被重试，前端也看不到），
             # 标记为 failed，让 Agent / 用户能发现并按失败处理。
@@ -906,7 +956,7 @@ def create_wiki_router(crew) -> APIRouter:
             store.save_raw(raw, _owner(request), kb_id)
             raise
         except MissingDependencyError as exc:
-            error_msg = str(exc)
+            error_msg = safe_public_error(exc, "缺少所需依赖")
             raw.parse_status = "failed"
             raw.parse_error = f"缺少依赖: {error_msg}"
             store.save_raw(raw, _owner(request), kb_id)
@@ -922,8 +972,8 @@ def create_wiki_router(crew) -> APIRouter:
                 status_code=400,
             )
         except Exception as exc:  # noqa: BLE001
-            error_msg = f"解析失败: {exc}"
-            log.warning("Wiki 上传解析失败 source=%s: %s", source_id, error_msg)
+            error_msg = f"解析失败: {safe_public_error(exc, '解析失败: 内部错误')}"
+            log.warning("Wiki 上传解析失败 source=%s type=%s", source_id, type(exc).__name__)
             raw.parse_status = "failed"
             raw.parse_error = error_msg
             store.save_raw(raw, _owner(request), kb_id)

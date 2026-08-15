@@ -151,12 +151,107 @@ def extract_youtube_video_id(url: str) -> str:
     return value
 
 
-def fetch_youtube_transcript(url: str, *, timestamps: bool = True) -> tuple[str, str]:
+def fetch_youtube_transcript(
+    url: str,
+    *,
+    timestamps: bool = True,
+    authorizations: tuple[object, ...] = (),
+) -> tuple[str, str]:
     """返回 ``(markdown, video_id)``；依赖缺失或无字幕时向上抛出。"""
+    import json
+
+    import requests
     from youtube_transcript_api import YouTubeTranscriptApi
 
+    from crew.core.errors import ToolError
+    from crew.security.outbound import canonicalize_host
+    from crew.tools.security_guard import fetch_authorized_url, fetch_public_url
+
     video_id = extract_youtube_video_id(url)
-    transcript = YouTubeTranscriptApi().fetch(video_id)
+    class _PinnedNoRedirectSession(requests.Session):
+        def request(self, *args, **kwargs):
+            method = str(args[0] if args else kwargs.pop("method", "GET")).upper()
+            target = str(args[1] if len(args) > 1 else kwargs.pop("url", ""))
+            params = kwargs.pop("params", None)
+            if params:
+                from urllib.parse import urlencode
+
+                separator = "&" if "?" in target else "?"
+                target += separator + urlencode(params, doseq=True)
+            headers = {str(key): str(value) for key, value in (kwargs.pop("headers", {}) or {}).items()}
+            if self.cookies:
+                headers.setdefault(
+                    "Cookie",
+                    "; ".join(f"{key}={value}" for key, value in self.cookies.get_dict().items()),
+                )
+            body = kwargs.pop("data", None)
+            json_body = kwargs.pop("json", None)
+            if json_body is not None:
+                body = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
+                headers.setdefault("Content-Type", "application/json")
+            if isinstance(body, str):
+                body = body.encode("utf-8")
+            timeout = kwargs.pop("timeout", 15.0)
+            if isinstance(timeout, tuple):
+                timeout = max(timeout)
+            if authorizations:
+                parsed_target = urlparse(target)
+                try:
+                    target_origin = (
+                        parsed_target.scheme.lower(),
+                        canonicalize_host(parsed_target.hostname or ""),
+                        parsed_target.port
+                        or (443 if parsed_target.scheme.lower() == "https" else 80),
+                    )
+                except ValueError as exc:
+                    raise ToolError(
+                        '{"code":"SECURITY_OUTBOUND_DENIED",'
+                        '"reason":"invalid_nested_endpoint"}'
+                    ) from exc
+                authorization = next(
+                    (
+                        item
+                        for item in authorizations
+                        if getattr(item, "origin", None) == target_origin
+                    ),
+                    None,
+                )
+                if authorization is None:
+                    raise ToolError(
+                        '{"code":"SECURITY_OUTBOUND_DENIED",'
+                        '"reason":"authorization_mismatch"}'
+                    )
+                plan = authorization.plan(target, method=method)
+                response = fetch_authorized_url(
+                    plan,
+                    body=body,
+                    headers=headers,
+                    timeout=float(timeout),
+                    max_bytes=10_000_000,
+                )
+            else:
+                response = fetch_public_url(
+                    target,
+                    method=method,
+                    body=body,
+                    headers=headers,
+                    timeout=float(timeout),
+                    max_bytes=10_000_000,
+                )
+            result = requests.Response()
+            result.status_code = response.status
+            result.url = response.final_url
+            result.headers = requests.structures.CaseInsensitiveDict(response.headers)
+            result._content = response.body
+            result.encoding = response.charset
+            result.request = requests.Request(method, target, headers=headers, data=body).prepare()
+            return result
+
+    session = _PinnedNoRedirectSession()
+    try:
+        transcript = YouTubeTranscriptApi(http_client=session).fetch(video_id)
+    finally:
+        session.close()
     lines: list[str] = [f"# YouTube Transcript: {video_id}", ""]
     for snippet in transcript:
         text = str(getattr(snippet, "text", "")).strip()

@@ -23,11 +23,6 @@ import {
 import { bindPagination, renderPagination } from '../pagination';
 import { openDialog } from '../components/overlays';
 
-// ponytail: 严格安全服务尚未就绪，当前默认兼容模式并隐藏此开关。
-// 上游 HTTPS 与安装校验服务就绪后：把此处改回 true，并去掉 assets/index.html 里
-// #set-strict-security 所在 row 的 hidden，即恢复桌面端开关。
-const STRICT_SECURITY_TOGGLE_VISIBLE = false;
-
 export interface SecurityCenterSnapshot {
   loading: boolean;
   setupAction?: 'install' | 'uninstall' | null;
@@ -36,6 +31,8 @@ export interface SecurityCenterSnapshot {
   strictSecurityEnabled: boolean;
   mode: ConversationSecurityMode;
   capabilities: SecurityCapabilities | null;
+  alerts: SecurityAlertView[];
+  alertsAdmin?: boolean;
   rules: SecurityRuleView[];
   audits: SecurityAuditView[];
   auditPage?: number;
@@ -57,6 +54,24 @@ export interface SecurityCenterActions {
   onAuditPageChange?(page: number): void;
   onAuditPageSizeChange?(size: number): void;
   onAuditQueryChange?(query: SecurityAuditQuery): void;
+  onAlertIsolate(alert: SecurityAlertView): void;
+  onAlertRevoke(alert: SecurityAlertView): void;
+  onAlertResolve(alert: SecurityAlertView): void;
+}
+
+export interface SecurityAlertView {
+  alert_id: string;
+  kind: string;
+  owner_account_id: string;
+  session_id: string;
+  task_id: string;
+  detail: string;
+  count: number;
+  first_seen: number;
+  last_seen: number;
+  isolated: boolean;
+  auto_denied: boolean;
+  resolved: boolean;
 }
 
 export interface SecurityCenterView {
@@ -96,7 +111,7 @@ function statusCard(label: string, value: string, detail: string, tone: string):
   return card;
 }
 
-function renderStrictSecuritySection(snapshot: SecurityCenterSnapshot): HTMLElement {
+function renderStrictSecuritySection(): HTMLElement {
   const section = document.createElement('section');
   const row = document.createElement('label');
   const copy = document.createElement('span');
@@ -105,17 +120,17 @@ function renderStrictSecuritySection(snapshot: SecurityCenterSnapshot): HTMLElem
   row.className = 'security-center__preference';
   copy.className = 'security-center__preference-copy';
   toggle.type = 'checkbox';
-  toggle.checked = snapshot.strictSecurityEnabled;
+  toggle.checked = true;
+  toggle.disabled = true;
   toggle.dataset.securityStrictToggle = '';
   toggle.setAttribute('role', 'switch');
+  toggle.setAttribute('aria-label', '严格安全约束（始终启用）');
   copy.append(
     text('strong', 'security-center__preference-title', '严格安全约束'),
     text(
       'span',
       'security-center__section-description',
-      snapshot.strictSecurityEnabled
-        ? '已阻止不安全传输、未验证安装和宽松默认审批。'
-        : '兼容模式放宽旧传输、完整性校验和默认审批；受管隔离仍保持启用。',
+      '始终启用：阻止不安全传输、未验证安装和宽松默认审批。',
     ),
   );
   row.append(copy, toggle);
@@ -282,6 +297,67 @@ function renderRulesSection(snapshot: SecurityCenterSnapshot): HTMLElement {
     const remove = button('删除', 'delete-rule', 'danger');
     remove.dataset.ruleId = String(rule.rule_id ?? '');
     actions.append(toggle, remove);
+    item.append(copy, actions);
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
+
+function alertKindLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    anomalous_denials: '重复异常拒绝',
+    sandbox_fallback: '沙箱降级/失败',
+    manifest_mismatch: '运行组件清单不一致',
+    orphan_process: '异常残留进程',
+    update_signature_failure: '更新签名失败',
+    audit_chain_break: '审计链断裂',
+  };
+  return labels[kind] ?? kind;
+}
+
+function renderAlertsSection(snapshot: SecurityCenterSnapshot): HTMLElement {
+  const section = document.createElement('section');
+  const list = document.createElement('ul');
+  const alerts = snapshot.alerts ?? [];
+  section.className = 'security-center__section';
+  list.className = 'security-center__alert-list';
+  section.append(
+    text('h2', 'security-center__section-title', '聚合安全告警'),
+    text(
+      'p',
+      'security-center__section-description',
+      snapshot.alertsAdmin
+        ? '管理员视图：显示全部账号的未解决告警。'
+        : '相同告警在窗口内聚合去重；隔离会冻结会话，撤销会回收账号权限。',
+    ),
+  );
+  if (!alerts.length) {
+    list.append(text('li', 'security-center__empty', '当前没有未解决的安全告警'));
+  }
+  for (const alert of alerts) {
+    const item = document.createElement('li');
+    const copy = document.createElement('div');
+    const actions = document.createElement('div');
+    item.className = 'security-center__alert';
+    item.dataset.tone = alert.auto_denied ? 'danger' : 'warning';
+    copy.className = 'security-center__alert-copy';
+    actions.className = 'security-center__alert-actions';
+    copy.append(
+      text('strong', 'security-center__alert-title', alertKindLabel(alert.kind)),
+      text('span', 'security-center__alert-meta', `累计 ${alert.count} 次`),
+      text('pre', 'security-center__alert-detail', alert.detail || '无附加详情'),
+    );
+    if (!alert.isolated) {
+      const isolate = button('隔离', 'alert-isolate', 'danger');
+      isolate.dataset.alertId = alert.alert_id;
+      const revoke = button('撤销权限', 'alert-revoke', 'danger');
+      revoke.dataset.alertId = alert.alert_id;
+      actions.append(isolate, revoke);
+    }
+    const resolve = button('标记解决', 'alert-resolve');
+    resolve.dataset.alertId = alert.alert_id;
+    actions.append(resolve);
     item.append(copy, actions);
     list.append(item);
   }
@@ -531,6 +607,14 @@ export function createSecurityCenterView(
     else if (action === 'uninstall') actions.onUninstall();
     else if (action === 'export') actions.onAuditExport();
     else if (action === 'purge') actions.onAuditPurge();
+    else if (action === 'alert-isolate' || action === 'alert-revoke' || action === 'alert-resolve') {
+      const alert = snapshot?.alerts.find(
+        (item) => item.alert_id === target.dataset.alertId,
+      );
+      if (alert && action === 'alert-isolate') actions.onAlertIsolate(alert);
+      if (alert && action === 'alert-revoke') actions.onAlertRevoke(alert);
+      if (alert && action === 'alert-resolve') actions.onAlertResolve(alert);
+    }
     else if (action === 'toggle-rule' || action === 'delete-rule') {
       const rule = snapshot?.rules.find(
         (item) => String(item.rule_id ?? '') === target.dataset.ruleId,
@@ -597,10 +681,11 @@ export function createSecurityCenterView(
           ? '正在加载安全状态…'
           : '';
       content.replaceChildren(
-        ...(STRICT_SECURITY_TOGGLE_VISIBLE ? [renderStrictSecuritySection(nextSnapshot)] : []),
+        renderStrictSecuritySection(),
         renderModeSection(nextSnapshot),
         renderCapabilitySection(nextSnapshot),
         renderRulesSection(nextSnapshot),
+        renderAlertsSection(nextSnapshot),
         renderAuditSection(nextSnapshot),
       );
       bindPagination('security-audit', {

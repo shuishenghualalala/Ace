@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import json
+import math
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Callable, Sequence
 from uuid import uuid4
 
 from crew.security.actions import ActionKind, NormalizedAction
 from crew.security.context import SecurityContext
 from crew.security.grants import ExecutionGrant, GrantRegistry
+from crew.security.models import AdditionalPermissionProfile, PermissionProfile
+from crew.security.policy import normalize_additional_permissions
 from crew.security.rules import ActionRule, RuleScope
 
 # Bounded in-memory state for a long-running gateway. Pending/handled requests are
@@ -23,6 +28,10 @@ _PRUNE_INTERVAL_SECONDS = 30.0
 _PRUNE_GRACE_SECONDS = 60.0
 _MAX_REQUESTS = 1024
 _MAX_PENDING_PER_SESSION = 128
+_MAX_TOOL_NAME_LENGTH = 128
+_MAX_RISK_CLASS_LENGTH = 128
+_MAX_PREVIEW_LENGTH = 4000
+_MAX_ACTION_PAYLOAD_BYTES = 65_536
 
 
 class ApprovalError(RuntimeError):
@@ -50,6 +59,7 @@ class ApprovalRequest:
     os_user: str
     owner_account_id: str
     workspace_id: str
+    workspace_root: Path | None
     session_id: str
     task_id: str
     base_profile_hash: str
@@ -57,6 +67,8 @@ class ApprovalRequest:
     preview: str
     created_monotonic: float
     expires_monotonic: float
+    additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile()
+    effective_profile: PermissionProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +105,8 @@ class ApprovalManager:
         risk_class: str = "unknown",
         preview: str = "",
         ttl_seconds: float = 300.0,
+        additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
+        effective_profile: PermissionProfile | None = None,
     ) -> ApprovalRequest:
         now = self._clock()
         request = _new_request(
@@ -103,6 +117,8 @@ class ApprovalManager:
             risk_class=risk_class,
             preview=preview,
             ttl_seconds=ttl_seconds,
+            additional_permissions=additional_permissions,
+            effective_profile=effective_profile,
             now=now,
         )
         with self._lock:
@@ -121,24 +137,37 @@ class ApprovalManager:
         risk_class: str = "unknown",
         preview: str = "",
         ttl_seconds: float = 300.0,
+        additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
+        effective_profile: PermissionProfile | None = None,
     ) -> tuple[ApprovalRequest, bool]:
         """Atomically reuse one live session/tool/action request or create it."""
         now = self._clock()
-        normalized_tool = str(tool_name).strip()
-        if not normalized_tool:
-            raise ValueError("tool_name 不能为空")
-        if ttl_seconds <= 0:
-            raise ValueError("approval TTL 必须大于 0")
-        action_digest = action.digest
+        candidate = _new_request(
+            context,
+            action,
+            tool_name,
+            base_profile_hash=base_profile_hash,
+            risk_class=risk_class,
+            preview=preview,
+            ttl_seconds=ttl_seconds,
+            additional_permissions=additional_permissions,
+            effective_profile=effective_profile,
+            now=now,
+        )
         with self._lock:
             existing = next(
                 (
                     request
                     for request_id, request in self._requests.items()
                     if request_id not in self._handled
-                    and request.expires_monotonic >= now
-                    and request.tool_name == normalized_tool
-                    and request.action_digest == action_digest
+                    and request.expires_monotonic > now
+                    and request.tool_name == candidate.tool_name
+                    and request.action_digest == candidate.action_digest
+                    and request.additional_permissions == candidate.additional_permissions
+                    and request.effective_profile == candidate.effective_profile
+                    and request.base_profile_hash == candidate.base_profile_hash
+                    and request.risk_class == candidate.risk_class
+                    and request.preview == candidate.preview
                     and _request_context_matches(request, context)
                 ),
                 None,
@@ -146,19 +175,9 @@ class ApprovalManager:
             if existing is not None:
                 return existing, False
             self._ensure_capacity(context, now)
-            request = _new_request(
-                context,
-                action,
-                normalized_tool,
-                base_profile_hash=base_profile_hash,
-                risk_class=risk_class,
-                preview=preview,
-                ttl_seconds=ttl_seconds,
-                now=now,
-            )
-            self._requests[request.request_id] = request
+            self._requests[candidate.request_id] = candidate
             self._maybe_prune(now)
-            return request, True
+            return candidate, True
 
     def _ensure_capacity(self, context: SecurityContext, now: float) -> None:
         """Keep request/tombstone state bounded; reject instead of evicting live authority."""
@@ -166,14 +185,14 @@ class ApprovalManager:
             terminal = [
                 request_id
                 for request_id, request in self._requests.items()
-                if request_id in self._handled or request.expires_monotonic < now
+                if request_id in self._handled or request.expires_monotonic <= now
             ]
             for request_id in terminal:
                 self._requests.pop(request_id, None)
             self._handled.difference_update(terminal)
         pending_for_session = sum(
             request_id not in self._handled
-            and request.expires_monotonic >= now
+            and request.expires_monotonic > now
             and _request_session_matches(request, context)
             for request_id, request in self._requests.items()
         )
@@ -201,40 +220,50 @@ class ApprovalManager:
                 raise ApprovalError("批准请求已处理", terminal=True)
             if not secrets.compare_digest(request.nonce, str(nonce)):
                 raise ApprovalError("批准请求 nonce 不匹配")
-            if self._clock() > request.expires_monotonic:
+            if self._clock() >= request.expires_monotonic:
                 self._handled.add(request_id)
                 raise ApprovalError("批准请求已过期", terminal=True)
             if not _request_context_matches(request, context):
                 raise ApprovalError("批准请求上下文不匹配")
             if request.action.digest != request.action_digest:
                 raise ApprovalError("批准请求动作完整性校验失败")
+            if decision is ApprovalDecision.ALWAYS and (
+                request.additional_permissions.filesystem
+                or request.additional_permissions.network
+                or request.additional_permissions.allow_local_binding
+            ):
+                raise ApprovalError("带额外权限的请求只能批准一次或本次对话")
             persistent_rule = (
                 _always_rule(request.action, always_argv_prefix)
                 if decision is ApprovalDecision.ALWAYS
                 else None
             )
             self._handled.add(request_id)
-
-        if decision is ApprovalDecision.REJECT:
-            return ApprovalOutcome(request=request, decision=decision)
-        if decision is ApprovalDecision.SESSION:
-            grant_scope = RuleScope.SESSION
-            expires = None
-        else:
-            grant_scope = RuleScope.ONCE
-            expires = request.expires_monotonic
-        grant = self._grants.issue(
-            context,
-            request.action,
-            grant_scope,
-            expires_monotonic=expires,
-        )
-        return ApprovalOutcome(
-            request=request,
-            decision=decision,
-            grant=grant,
-            persistent_rule=persistent_rule,
-        )
+            # Grant publication is part of the same lifecycle critical section as
+            # marking the request handled. Session/owner cancellation takes this
+            # lock before revoking grants, so it cannot slip into the handled→issue
+            # window and leave authority alive after cancellation returned.
+            if decision is ApprovalDecision.REJECT:
+                return ApprovalOutcome(request=request, decision=decision)
+            if decision is ApprovalDecision.SESSION:
+                grant_scope = RuleScope.SESSION
+                expires = None
+            else:
+                grant_scope = RuleScope.ONCE
+                expires = request.expires_monotonic
+            grant = self._grants.issue(
+                context,
+                request.action,
+                grant_scope,
+                expires_monotonic=expires,
+                additional_permissions=request.additional_permissions,
+            )
+            return ApprovalOutcome(
+                request=request,
+                decision=decision,
+                grant=grant,
+                persistent_rule=persistent_rule,
+            )
 
     def _maybe_prune(self, now: float) -> None:
         """Bound _requests/_handled growth in a long-running gateway.
@@ -271,7 +300,7 @@ class ApprovalManager:
             if (
                 request is None
                 or request.request_id in self._handled
-                or request.expires_monotonic < now
+                or request.expires_monotonic <= now
                 or not _request_session_matches(request, context)
             ):
                 return None
@@ -284,9 +313,31 @@ class ApprovalManager:
                 request
                 for request_id, request in self._requests.items()
                 if request_id not in self._handled
-                and request.expires_monotonic >= now
+                and request.expires_monotonic > now
                 and _request_session_matches(request, context)
             ]
+
+    def cancel(self, request_id: str, context: SecurityContext) -> bool:
+        """Atomically tombstone one still-pending exact request."""
+        with self._lock:
+            request = self._requests.get(str(request_id))
+            if (
+                request is None
+                or request.request_id in self._handled
+                or not _request_context_matches(request, context)
+            ):
+                return False
+            self._handled.add(request.request_id)
+            return True
+
+    def cancel_pending(self, request_id: str) -> ApprovalRequest | None:
+        """Host-internal timeout cancellation keyed by an unguessable request ID."""
+        with self._lock:
+            request = self._requests.get(str(request_id))
+            if request is None or request.request_id in self._handled:
+                return None
+            self._handled.add(request.request_id)
+            return request
 
     def revoke_pending_session(self, context: SecurityContext) -> int:
         """Invalidate only pending requests when a conversation mode changes.
@@ -307,6 +358,30 @@ class ApprovalManager:
     def end_session(self, context: SecurityContext) -> int:
         """Revoke pending requests and transient grants at true session end."""
         return self.end_owned_session(context.owner_account_id, context.session_id)
+
+    def revoke_pending_task(
+        self,
+        owner_account_id: str,
+        session_id: str,
+        task_id: str,
+    ) -> int:
+        """Invalidate pending action requests when one turn ends."""
+        owner = str(owner_account_id).strip()
+        session = str(session_id).strip()
+        task = str(task_id).strip()
+        if not owner or not session or not task:
+            return 0
+        with self._lock:
+            pending = [
+                request_id
+                for request_id, request in self._requests.items()
+                if request_id not in self._handled
+                and request.owner_account_id == owner
+                and request.session_id == session
+                and request.task_id == task
+            ]
+            self._handled.update(pending)
+        return len(pending)
 
     def end_owned_session(self, owner_account_id: str, session_id: str) -> int:
         """End one authenticated conversation without trusting renderer workspace data."""
@@ -367,13 +442,69 @@ def _new_request(
     risk_class: str,
     preview: str,
     ttl_seconds: float,
+    additional_permissions: AdditionalPermissionProfile,
+    effective_profile: PermissionProfile | None,
     now: float,
 ) -> ApprovalRequest:
-    if ttl_seconds <= 0:
+    if (
+        isinstance(ttl_seconds, bool)
+        or not isinstance(ttl_seconds, (int, float))
+        or not math.isfinite(ttl_seconds)
+        or ttl_seconds <= 0
+    ):
         raise ValueError("approval TTL 必须大于 0")
-    normalized_tool = str(tool_name).strip()
-    if not normalized_tool:
-        raise ValueError("tool_name 不能为空")
+    if not isinstance(action, NormalizedAction):
+        raise ValueError("approval action 必须是规范化 action")
+    for field in (
+        "os_user",
+        "owner_account_id",
+        "workspace_id",
+        "session_id",
+        "task_id",
+    ):
+        value = getattr(context, field)
+        if not isinstance(value, str) or not value.strip() or "\x00" in value:
+            raise ValueError(f"approval context {field} 无效")
+    normalized_tool = _bounded_text(
+        tool_name,
+        "tool_name",
+        _MAX_TOOL_NAME_LENGTH,
+        allow_empty=False,
+        strip=True,
+    )
+    normalized_risk = _bounded_text(
+        risk_class,
+        "risk_class",
+        _MAX_RISK_CLASS_LENGTH,
+        allow_empty=False,
+        strip=True,
+    )
+    normalized_preview = _bounded_text(
+        preview,
+        "preview",
+        _MAX_PREVIEW_LENGTH,
+        allow_empty=True,
+        strip=False,
+    )
+    if not isinstance(base_profile_hash, str):
+        raise ValueError("base_profile_hash 必须是字符串")
+    normalized_profile_hash = base_profile_hash.strip().lower()
+    if normalized_profile_hash and (
+        len(normalized_profile_hash) != 64
+        or any(char not in "0123456789abcdef" for char in normalized_profile_hash)
+    ):
+        raise ValueError("base_profile_hash 必须是 SHA-256 hex")
+    action_payload = json.dumps(
+        asdict(action),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(action_payload) > _MAX_ACTION_PAYLOAD_BYTES:
+        raise ValueError("approval action 结构化内容过大")
+    normalized_permissions = normalize_additional_permissions(additional_permissions)
+    if effective_profile is not None and not isinstance(effective_profile, PermissionProfile):
+        raise ValueError("effective_profile 必须是 PermissionProfile")
     return ApprovalRequest(
         request_id=uuid4().hex,
         nonce=secrets.token_urlsafe(24),
@@ -383,14 +514,37 @@ def _new_request(
         os_user=context.os_user,
         owner_account_id=context.owner_account_id,
         workspace_id=context.workspace_id,
+        workspace_root=context.workspace_root,
         session_id=context.session_id,
         task_id=context.task_id,
-        base_profile_hash=str(base_profile_hash),
-        risk_class=str(risk_class),
-        preview=str(preview),
+        base_profile_hash=normalized_profile_hash,
+        risk_class=normalized_risk,
+        preview=normalized_preview,
         created_monotonic=now,
         expires_monotonic=now + ttl_seconds,
+        additional_permissions=normalized_permissions,
+        effective_profile=effective_profile,
     )
+
+
+def _bounded_text(
+    value: object,
+    field: str,
+    maximum: int,
+    *,
+    allow_empty: bool,
+    strip: bool,
+) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} 必须是字符串")
+    normalized = value.strip() if strip else value
+    if (
+        "\x00" in normalized
+        or len(normalized) > maximum
+        or (not allow_empty and not normalized)
+    ):
+        raise ValueError(f"{field} 无效或超过 {maximum} 字符")
+    return normalized
 
 
 def _request_context_matches(request: ApprovalRequest, context: SecurityContext) -> bool:
@@ -402,5 +556,6 @@ def _request_session_matches(request: ApprovalRequest, context: SecurityContext)
         request.os_user == context.os_user
         and request.owner_account_id == context.owner_account_id
         and request.workspace_id == context.workspace_id
+        and request.workspace_root == context.workspace_root
         and request.session_id == context.session_id
     )

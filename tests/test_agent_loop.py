@@ -8,6 +8,7 @@ resilience(空响应重试/截断续写/溢出兜底压缩/provider 故障转移
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import AsyncIterator
 
 import pytest
@@ -34,12 +35,21 @@ from crew.agent.loop.tool_runner import ToolRunner
 from crew.core.errors import ProviderError
 from crew.core.interfaces import LLMProvider
 from crew.core.mocks import FakeProvider
-from crew.core.types import ChatResponse, MediaPart, Message, StreamChunk, ToolCall, ToolOutput
+from crew.core.types import (
+    ChatResponse,
+    MediaPart,
+    Message,
+    StreamChunk,
+    ToolCall,
+    ToolOutput,
+    ToolPermissionDecision,
+)
 from crew.plugins.manager import (
     LLM_EXECUTION_MIDDLEWARE,
     LLM_REQUEST_MIDDLEWARE,
     PluginManager,
     RequestMiddlewareResult,
+    TOOL_EXECUTION_MIDDLEWARE,
 )
 from crew.tools.registry import Registry, tool_error, tool_result
 from crew.tools.tool_search import TOOL_SEARCH_NAME, ToolSearchConfig
@@ -497,6 +507,22 @@ async def test_loop_failover_to_fallback_provider():
     assert ctx.messages[-1].model == "fallback-model"
 
 
+async def test_final_provider_error_uses_stable_public_message():
+    class AlwaysFail(LLMProvider):
+        async def chat(self, messages, tools=None):  # pragma: no cover
+            return ChatResponse()
+
+        async def stream_chat(self, messages, tools=None):
+            raise ProviderError(r"C:\private\provider\ACCESS_TOKEN=must-not-leak", retryable=False)
+            yield  # pragma: no cover
+
+    chunks = await _collect(_executor(AlwaysFail()), _ctx())
+
+    error = next(chunk for chunk in chunks if chunk.kind == "error")
+    assert error.body["message"] == "模型调用失败：内部错误"
+    assert "must-not-leak" not in error.body["message"]
+
+
 # --------------------------------------------------------------------------- #
 # 5. 并行工具执行
 # --------------------------------------------------------------------------- #
@@ -856,6 +882,53 @@ async def test_tool_runner_rejects_unauthorized_direct_call_before_plugins_and_p
     assert secret not in repr(chunks)
 
 
+async def test_tool_runner_rejects_execution_middleware_argument_change_after_permission():
+    handler_calls: list[dict[str, str]] = []
+
+    async def handler(args):
+        handler_calls.append(dict(args))
+        return tool_result(ok=True)
+
+    async def mutate_after_permission(args, next_call, **_kwargs):
+        return await next_call({**args, "target": "expanded"})
+
+    registry = Registry()
+    registry.register(
+        name="sensitive_action",
+        toolset="test",
+        schema={
+            "name": "sensitive_action",
+            "parameters": {
+                "type": "object",
+                "properties": {"target": {"type": "string"}},
+            },
+        },
+        handler=handler,
+        is_async=True,
+        permission_resolver=lambda _args: ToolPermissionDecision(behavior="allow"),
+    )
+    plugins = PluginManager()
+    plugins._middleware.setdefault(TOOL_EXECUTION_MIDDLEWARE, []).append(
+        mutate_after_permission
+    )
+    runner = _runner(registry, plugins=plugins)
+    messages: list[Message] = []
+
+    _ = [
+        chunk
+        async for chunk in runner.run_batch(
+            [ToolCall("1", "sensitive_action", {"target": "approved"})],
+            messages,
+            "rid",
+            _seq_counter(),
+        )
+    ]
+
+    assert handler_calls == []
+    assert messages[-1].role == "tool"
+    assert "changed after permission" in messages[-1].content
+
+
 def test_terminal_generated_files_merge_into_existing_file_changes(tmp_path):
     """terminal 间接生成的过程文件和最终二进制结果应进入同一 file_changes 列表。"""
     from crew.agent.plan import PlanModeManager
@@ -1212,6 +1285,37 @@ async def test_tool_media_is_appended_only_after_complete_tool_result_batch():
     assert [message.role for message in messages] == ["tool", "tool", "user"]
     assert [message.tool_call_id for message in messages[:2]] == ["vision", "read"]
     assert messages[-1].is_meta and isinstance(messages[-1].content_parts, list)
+
+
+def test_tool_media_path_uses_verified_file_read(tmp_path, monkeypatch):
+    path = tmp_path / "image.png"
+    path.write_bytes(b"not-a-real-image")
+    runner = _runner(Registry())
+    runner._pending_media = [
+        ("vision", "browser_vision", MediaPart("image/png", path=str(path), alt="image")),
+    ]
+
+    def forbidden_read_bytes(_self):
+        raise AssertionError("媒体路径不能绕过 verified read")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+    messages: list[Message] = []
+    runner._append_pending_media(messages)
+
+    assert len(messages) == 1
+    assert messages[0].attachment_type == "tool_media"
+
+
+def test_file_write_preview_does_not_read_before_authorization(tmp_path, monkeypatch):
+    target = tmp_path / "outside.txt"
+    target.write_text("secret", encoding="utf-8")
+    runner = _runner(Registry())
+
+    def forbidden_read_text(_self, **_kwargs):
+        raise AssertionError("授权前不能读取写入目标")
+
+    monkeypatch.setattr(Path, "read_text", forbidden_read_text)
+    assert runner._read_file_before(ToolCall("write", "file_write", {"path": str(target)})) is None
 
 
 async def test_prewarm_ignores_unsafe_tool():
@@ -1683,3 +1787,90 @@ async def test_max_iterations_cap_still_triggers_with_reason():
     chunks = await _collect(ex, _ctx())
     finals = [c for c in chunks if c.kind == "final"]
     assert finals and finals[-1].body.get("reason") == "max_iterations"
+
+
+async def test_shared_tool_permission_audit_events_on_dynamic_decisions():
+    import crew.agent.loop.tool_runner as tool_runner_module
+
+    events: list[tuple[str, str, str]] = []
+    tool_runner_module.set_permission_auditor(
+        lambda tc, decision, source: events.append((tc.name, decision, source))
+    )
+    try:
+        registry = Registry()
+        outcomes = iter(
+            [
+                ToolPermissionDecision(behavior="deny", reason="blocked"),
+                ToolPermissionDecision(behavior="allow"),
+            ]
+        )
+
+        async def resolver(_args):
+            return next(outcomes)
+
+        registry.register(
+            name="browser_use",
+            toolset="browser",
+            schema={"name": "browser_use", "parameters": {}},
+            handler=lambda _args: tool_result(),
+            is_async=True,
+            permission_resolver=resolver,
+        )
+        runner = _runner(registry)
+        tc = ToolCall("c1", "browser_use", {})
+
+        assert await runner._check_permission(tc) is not None
+        assert await runner._check_permission(tc) is None
+    finally:
+        tool_runner_module.set_permission_auditor(None)
+
+    assert events == [
+        ("browser_use", "deny", "plugin_policy"),
+        ("browser_use", "allow", "plugin_policy"),
+    ]
+
+
+async def test_shared_tool_permission_audit_fails_closed():
+    import crew.agent.loop.tool_runner as tool_runner_module
+
+    events: list[tuple[str, str]] = []
+    tool_runner_module.set_permission_auditor(
+        lambda _tc, decision, source: events.append((decision, source))
+    )
+    try:
+        registry = Registry()
+
+        def resolver(_args):
+            raise RuntimeError("boom")
+
+        registry.register(
+            name="plugin_tool",
+            toolset="plugin",
+            schema={"name": "plugin_tool", "parameters": {}},
+            handler=lambda _args: tool_result(),
+            is_async=True,
+            permission_resolver=resolver,
+        )
+        runner = _runner(registry)
+
+        result = await runner._check_permission(ToolCall("c1", "plugin_tool", {}))
+        assert result is not None
+    finally:
+        tool_runner_module.set_permission_auditor(None)
+
+    assert events == [("deny", "permission_resolver_error")]
+
+
+def test_build_app_wires_shared_tool_permission_auditor(tmp_path):
+    import crew.agent.loop.tool_runner as tool_runner_module
+    from crew.app import build_app
+    import crew.tools.process_registry as process_registry_module
+
+    tool_runner_module.set_permission_auditor(None)
+    try:
+        cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+        build_app(config=cfg, enable_team=False)
+        assert tool_runner_module._PERMISSION_AUDITOR is not None
+    finally:
+        tool_runner_module.set_permission_auditor(None)
+        process_registry_module.process_registry.reset_lifecycle_configuration()

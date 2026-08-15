@@ -16,6 +16,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +27,16 @@ RECORDING_V11_PHASE_A_ENV = "CREW_BROWSER_RECORDING_V11_PHASE_A"
 _V11_PAGE_GUID_RE = re.compile(r"^p(?:0|[1-9][0-9]*)$")
 _V11_RECORDING_ID_RE = re.compile(r"^[0-9a-fA-F]{8,32}$")
 _V11_JS_SAFE_INTEGER_MAX = 9_007_199_254_740_991
+_HOST_WS_MAX_FRAME_BYTES = 4 * 1024 * 1024
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate object key")
+        result[key] = value
+    return result
 _V11_MODIFIERS = ("Alt", "Control", "Meta", "Shift")
 _V11_TARGET_FIELDS = frozenset(
     {
@@ -995,7 +1006,7 @@ class ElectronBrowserBridge:
 
         try:
             while True:
-                message = await socket.receive_json()
+                message = await self._receive_host_frame(socket)
                 if not isinstance(message, dict):
                     continue
                 if message.get("type") == "event":
@@ -1026,6 +1037,50 @@ class ElectronBrowserBridge:
             if registration_task is not None and not registration_task.done():
                 registration_task.cancel()
                 await asyncio.gather(registration_task, return_exceptions=True)
+
+    @staticmethod
+    async def _receive_host_frame(socket: WebSocket) -> dict[str, Any]:
+        """Bound and validate the wire frame before JSON parsing."""
+        receive = getattr(socket, "receive", None)
+        if not callable(receive):
+            message = await socket.receive_json()
+            if not isinstance(message, dict):
+                raise WebSocketDisconnect(code=1003, reason="invalid-browser-host-frame")
+            return message
+        event = await receive()
+        if event.get("type") == "websocket.disconnect":
+            raise WebSocketDisconnect(
+                code=int(event.get("code") or 1000),
+                reason="",
+            )
+        if event.get("type") != "websocket.receive":
+            raise WebSocketDisconnect(code=1003, reason="invalid-browser-host-frame")
+        if event.get("bytes") is not None:
+            with suppress(Exception):
+                await socket.close(code=1003, reason="binary-browser-host-frame")
+            raise WebSocketDisconnect(code=1003, reason="binary-browser-host-frame")
+        text = event.get("text")
+        if not isinstance(text, str):
+            with suppress(Exception):
+                await socket.close(code=1003, reason="invalid-browser-host-frame")
+            raise WebSocketDisconnect(code=1003, reason="invalid-browser-host-frame")
+        try:
+            if len(text.encode("utf-8")) > _HOST_WS_MAX_FRAME_BYTES:
+                raise ValueError("frame-too-large")
+            message = json.loads(
+                text,
+                object_pairs_hook=lambda pairs: _strict_json_object(pairs),
+                parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("constant")),
+            )
+        except (UnicodeEncodeError, json.JSONDecodeError, ValueError, RecursionError):
+            with suppress(Exception):
+                await socket.close(code=1009, reason="invalid-browser-host-frame")
+            raise WebSocketDisconnect(code=1009, reason="invalid-browser-host-frame")
+        if not isinstance(message, dict):
+            with suppress(Exception):
+                await socket.close(code=1003, reason="invalid-browser-host-frame")
+            raise WebSocketDisconnect(code=1003, reason="invalid-browser-host-frame")
+        return message
 
     @classmethod
     def _bounded_host_event(cls, value: Any) -> dict[str, Any] | None:

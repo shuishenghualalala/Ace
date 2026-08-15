@@ -8,7 +8,11 @@ from crew.agent.executor.base import ExecutionContext
 from crew.agent.executor.external import ExternalExecutor
 from crew.agent.external.store import ExternalAgentStore
 from crew.core.runctx import current_agent_workdir, current_owner_account_id, current_session_id
+from crew.tools.redact import redact_sensitive_display_text
 from crew.tools.registry import Registry, tool_error, tool_result
+
+
+_EXTERNAL_AGENT_OUTPUT_MAX_CHARS = 128 * 1024
 
 
 DELEGATE_EXTERNAL_AGENT_SCHEMA = {
@@ -78,11 +82,14 @@ def register_external_agent_tools(
             if chunk.kind == "final":
                 output = str(chunk.body.get("text") or "")
             elif chunk.kind == "error":
-                return tool_error(str(chunk.body.get("message") or "外部智能体调用失败"))
+                return tool_error("外部智能体调用失败")
+        safe_output = redact_sensitive_display_text(output)[:_EXTERNAL_AGENT_OUTPUT_MAX_CHARS]
         return tool_result({
             "agent_id": agent_id,
             "provider": provider,
-            "output": output,
+            "output": safe_output,
+            "content_trust": "untrusted",
+            "content_source": "external_agent",
         })
 
     registry.register(

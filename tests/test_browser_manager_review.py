@@ -16,10 +16,18 @@ from pathlib import Path
 import pytest
 
 from crew.browser.driver import BrowserDriver, BrowserDriverError, BrowserOperationCancelled
-from crew.browser.manager import BrowserManager, _bounded
+from crew.browser.manager import BrowserManager, _bounded, _safe_browser_error
 from crew.browser.manager import _ReplayLease as _SuspendedLease
 from crew.browser.types import BrowserConfig
 from crew.core.runctx import current_tool_call_id
+from crew.security.local_path import LocalPathReference
+
+
+def test_browser_error_boundary_hides_host_paths_but_keeps_stable_messages():
+    assert _safe_browser_error("invalid ref") == "invalid ref"
+    safe = _safe_browser_error(r"C:\private\config.yaml ACCESS_TOKEN=secret")
+    assert safe == "浏览器操作失败"
+    assert "secret" not in safe
 
 
 def _png_header(width: int, height: int) -> bytes:
@@ -43,14 +51,24 @@ def _host_security_digest(element_security: dict[str, str]) -> str:
 
 class FakeProxy:
     def __init__(self, _policy) -> None:
-        self.url = "http://127.0.0.1:45678"
+        self.endpoint_url = "http://127.0.0.1:45678"
+        self.credentials = (
+            "crew",
+            "test-proxy-secret-0123456789abcdef0123456789",
+        )
+        self.url = (
+            "http://crew:test-proxy-secret-0123456789abcdef0123456789"
+            "@127.0.0.1:45678"
+        )
         self.closed = False
 
-    async def start(self) -> None:
-        return None
+    async def start(self) -> str:
+        return self.url
 
     async def aclose(self) -> None:
         self.closed = True
+        self.endpoint_url = ""
+        self.url = ""
 
 
 class ReviewDriver(BrowserDriver):
@@ -869,21 +887,27 @@ async def test_close_session_retains_tombstone_when_fail_stop_is_unconfirmed(
         await manager.aclose()
 
 
-async def test_close_session_keeps_direct_permissions_approval_free(browser_env):
+async def test_close_session_keeps_file_transfer_permissions_scoped(browser_env):
     driver = ReviewDriver()
     manager = BrowserManager(BrowserConfig(), driver)
     try:
         await manager.navigate("owner", "session", "https://example.com")
         first_upload = {"ref": "p1:e18", "paths": ["/tmp/file-one"]}
-        assert manager.permission_for(
+        upload_decision = manager.permission_for(
             "browser_upload", first_upload, "owner", "session"
-        ) is None
-        assert manager.permission_for(
+        )
+        assert upload_decision is not None
+        assert upload_decision.behavior == "ask"
+        assert upload_decision.allow_always is False
+        second_decision = manager.permission_for(
             "browser_upload",
             {"ref": "p1:e18", "paths": ["/tmp/file-two"]},
             "owner",
             "session",
-        ) is None
+        )
+        assert second_decision is not None
+        assert second_decision.behavior == "ask"
+        assert second_decision.allow_always is False
 
         await manager.close_session("owner", "session")
 
@@ -1139,7 +1163,7 @@ async def test_snapshot_and_public_state_preserve_exact_browser_content(browser_
         await manager.aclose()
 
 
-async def test_driver_errors_preserve_exact_diagnostics(browser_env):
+async def test_driver_errors_hide_sensitive_diagnostics(browser_env):
     class SecretErrorDriver(ReviewDriver):
         async def execute(
             self, owner_session: str, profile_dir: Path, command: str, args=(), **kwargs
@@ -1156,10 +1180,9 @@ async def test_driver_errors_preserve_exact_diagnostics(browser_env):
         with pytest.raises(BrowserDriverError) as captured:
             await manager.navigate("owner", "session", "https://example.com")
         message = str(captured.value)
-        assert message == (
-            "failed with sk-ant-abcdefghijklmnop at "
-            "https://example.com/?code=oauth-secret"
-        )
+        assert message == "浏览器操作失败"
+        assert "sk-ant-" not in message
+        assert "oauth-secret" not in message
         assert captured.value.uncertain
     finally:
         await manager.aclose()
@@ -2164,6 +2187,24 @@ def test_default_runtime_keeps_playwright_inputs_beyond_legacy_product_caps(tmp_
     ) == [str(upload_directory.resolve())]
 
 
+def test_upload_boundary_rejects_hardlinked_regular_file(tmp_path):
+    source = tmp_path / "source.txt"
+    upload = tmp_path / "upload.txt"
+    source.write_text("payload", encoding="utf-8")
+    try:
+        os.link(source, upload)
+    except OSError:
+        pytest.skip("hardlink creation unavailable")
+
+    manager = BrowserManager(BrowserConfig(), ReviewDriver())
+    with pytest.raises(BrowserDriverError, match="不存在|不可读取"):
+        manager._resolved_upload_paths(
+            "owner",
+            [str(upload)],
+            workdir=str(tmp_path),
+        )
+
+
 def test_recording_is_sealed_only_for_exact_persisted_host_sequence(
     browser_env, monkeypatch, tmp_path
 ):
@@ -2308,15 +2349,19 @@ async def test_recordings_are_scoped_by_recording_id(browser_env, monkeypatch, t
         assert "第一段" in (first / "trace.jsonl").read_text("utf-8")
         assert "第二段" not in (first / "trace.jsonl").read_text("utf-8")
 
-        # 权限：轨迹含真实业务数据，同机其它用户不该能读
-        assert oct((first / "trace.jsonl").stat().st_mode & 0o777) == "0o600"
-        assert oct(first.stat().st_mode & 0o777) == "0o700"
+        # POSIX mode bits are the contract here. Windows uses the native
+        # protected DACL/handle boundary covered by test_win32_secure_recording.
+        if os.name != "nt":
+            assert oct((first / "trace.jsonl").stat().st_mode & 0o777) == "0o600"
+            assert oct(first.stat().st_mode & 0o777) == "0o700"
     finally:
         await manager.aclose()
 
 
 def test_recording_append_rejects_trace_symlink(monkeypatch, tmp_path):
     """An existing trace symlink must never redirect captured page data."""
+    if os.name == "nt":
+        pytest.skip("Windows reparse-point coverage is exercised by the Win32 handle tests")
     monkeypatch.setenv("CREW_HOME", str(tmp_path))
     manager = BrowserManager(BrowserConfig(), ReviewDriver())
     directory = manager.recording_dir("owner-a", "session-1", "deadbeef")
@@ -2339,6 +2384,8 @@ def test_recording_append_rejects_trace_symlink(monkeypatch, tmp_path):
 
 def test_recording_append_rejects_recording_directory_symlink(monkeypatch, tmp_path):
     """Every path component is opened no-follow, including the recording id."""
+    if os.name == "nt":
+        pytest.skip("Windows reparse-point coverage is exercised by the Win32 handle tests")
     monkeypatch.setenv("CREW_HOME", str(tmp_path))
     manager = BrowserManager(BrowserConfig(), ReviewDriver())
     directory = manager.recording_dir("owner-a", "session-1", "badc0ffe")
@@ -2360,6 +2407,8 @@ def test_recording_append_rejects_recording_directory_symlink(monkeypatch, tmp_p
 
 def test_recording_append_detects_post_open_path_replacement(monkeypatch, tmp_path):
     """Replacing trace.jsonl after open cannot redirect or duplicate an append."""
+    if os.name == "nt":
+        pytest.skip("The race is covered by the Windows handle contract on Windows")
     monkeypatch.setenv("CREW_HOME", str(tmp_path))
     manager = BrowserManager(BrowserConfig(), ReviewDriver())
     directory = manager.recording_dir("owner-a", "session-1", "faceb00c")
@@ -2416,6 +2465,8 @@ def test_recording_append_detects_post_open_path_replacement(monkeypatch, tmp_pa
 
 def test_recording_append_detects_open_directory_replacement(monkeypatch, tmp_path):
     """A stable dirfd never follows a replacement directory at the same path."""
+    if os.name == "nt":
+        pytest.skip("The race is covered by the Windows handle contract on Windows")
     monkeypatch.setenv("CREW_HOME", str(tmp_path))
     manager = BrowserManager(BrowserConfig(), ReviewDriver())
     directory = manager.recording_dir("owner-a", "session-1", "decafbad")
@@ -2718,6 +2769,52 @@ async def test_vision_rejects_malformed_host_epoch(browser_env):
         with pytest.raises(BrowserDriverError, match="无效的视觉截图 epoch"):
             await manager.vision("owner", "session", "inspect")
         assert manager._owners["owner"].sessions["session"].screenshot_id == ""
+    finally:
+        await manager.aclose()
+
+
+async def test_vision_rejects_host_screenshot_path_outside_artifacts(browser_env):
+    outside = browser_env / "outside.png"
+
+    class ExternalVisionPathDriver(ReviewDriver):
+        async def execute(self, *args, **kwargs) -> dict:
+            result = await super().execute(*args, **kwargs)
+            if len(args) >= 3 and args[2] == "vision_screenshot":
+                outside.write_bytes(_png_header(20, 10))
+                result["data"]["path"] = str(outside)
+            return result
+
+    manager = BrowserManager(BrowserConfig(), ExternalVisionPathDriver())
+    try:
+        await manager.navigate("owner", "session", "https://example.com")
+        with pytest.raises(BrowserDriverError, match="截图路径|截图文件"):
+            await manager.vision("owner", "session", "inspect")
+        assert not (manager._owners["owner"].sessions["session"].screenshot_id)
+    finally:
+        await manager.aclose()
+
+
+async def test_save_screenshot_rejects_host_path_outside_artifacts(browser_env):
+    outside = browser_env / "outside.png"
+
+    class ExternalScreenshotPathDriver(ReviewDriver):
+        async def execute(self, *args, **kwargs) -> dict:
+            result = await super().execute(*args, **kwargs)
+            if len(args) >= 3 and args[2] == "screenshot":
+                outside.write_bytes(_png_header(20, 10))
+                result["data"]["path"] = str(outside)
+            return result
+
+    manager = BrowserManager(BrowserConfig(), ExternalScreenshotPathDriver())
+    try:
+        await manager.navigate("owner", "session", "https://example.com")
+        with pytest.raises(BrowserDriverError, match="截图路径|截图文件"):
+            await manager.save_screenshot(
+                "owner",
+                "session",
+                filename="outside.png",
+                workdir=str(browser_env),
+            )
     finally:
         await manager.aclose()
 
@@ -3427,8 +3524,8 @@ async def test_user_can_open_blank_browser_preview_workspace_html_and_close_tab(
         previewed = await manager.open_for_user(
             "owner",
             "session",
-            artifact_path=str(page),
-            artifact_root=str(workspace),
+            artifact_path=LocalPathReference.from_host_path(page),
+            artifact_root=workspace,
         )
         assert previewed["mode"] == "human"
         assert previewed["url"].startswith("crew-artifact://")
@@ -3457,8 +3554,8 @@ async def test_user_artifact_preview_rejects_symlink_escape(browser_env):
             await manager.open_for_user(
                 "owner",
                 "session",
-                artifact_path=str(link),
-                artifact_root=str(workspace),
+                artifact_path=LocalPathReference.from_host_path(link),
+                artifact_root=workspace,
             )
     finally:
         await manager.aclose()
@@ -4292,23 +4389,29 @@ async def test_cancelled_owner_initialization_cannot_return_orphan(browser_env, 
         await manager.aclose()
 
 
-async def test_mutating_permissions_do_not_issue_approvals(browser_env):
+async def test_browser_file_transfers_require_one_shot_approval(browser_env):
     manager = BrowserManager(BrowserConfig(), ReviewDriver())
     token = current_tool_call_id.set("approval-prune")
     try:
         await manager.navigate("owner", "session", "https://example.com")
-        assert manager.permission_for(
+        upload_decision = manager.permission_for(
             "browser_upload",
             {"ref": "p1:e18", "paths": ["/tmp/file"]},
             "owner",
             "session",
-        ) is None
-        assert manager.permission_for(
+        )
+        download_decision = manager.permission_for(
             "browser_download",
             {"ref": "p1:e18", "filename": "file.bin"},
             "owner",
             "session",
-        ) is None
+        )
+        assert upload_decision is not None
+        assert upload_decision.behavior == "ask"
+        assert upload_decision.allow_always is False
+        assert download_decision is not None
+        assert download_decision.behavior == "ask"
+        assert download_decision.allow_always is False
         assert manager.permission_for(
             "browser_dialog",
             {"action": "accept", "text": ""},
@@ -4474,7 +4577,8 @@ async def _approve_download(
 ) -> None:
     args = {"ref": "p1:e170", "filename": filename}
     decision = manager.permission_for("browser_download", args, "owner", "session")
-    assert decision is None
+    assert decision is not None
+    assert decision.behavior == "ask"
 
 
 async def test_download_completes_without_global_deny_restoration(browser_env):
@@ -4502,7 +4606,62 @@ async def test_download_completes_without_global_deny_restoration(browser_env):
         await manager.aclose()
 
 
+async def test_download_rejects_hardlinked_host_staging_file(browser_env):
+    source = browser_env / "outside.bin"
+
+    class HardlinkDownloadDriver(DownloadReviewDriver):
+        async def execute(
+            self,
+            owner_session: str,
+            profile_dir: Path,
+            command: str,
+            args=(),
+            **kwargs,
+        ) -> dict:
+            result = await ReviewDriver.execute(
+                self,
+                owner_session,
+                profile_dir,
+                command,
+                args,
+                **kwargs,
+            )
+            if command == "download":
+                target = Path(str(args[1]))
+                source.write_bytes(b"host bytes")
+                target.unlink(missing_ok=True)
+                try:
+                    os.link(source, target)
+                except OSError:
+                    pytest.skip("hardlink creation unavailable")
+            return result
+
+    driver = HardlinkDownloadDriver()
+    manager = BrowserManager(BrowserConfig(), driver)
+    token = current_tool_call_id.set("download-hardlink")
+    workdir = browser_env / "workspace"
+    workdir.mkdir()
+    try:
+        await manager.navigate("owner", "session", "https://example.com")
+        await _approve_download(manager, filename="report.bin")
+        with pytest.raises(BrowserDriverError, match="暂存"):
+            await manager.download(
+                "owner",
+                "session",
+                "p1:e170",
+                "report.bin",
+                workdir=str(workdir),
+            )
+        assert source.read_bytes() == b"host bytes"
+        assert not (workdir / "downloads" / "browser" / "report.bin").exists()
+    finally:
+        current_tool_call_id.reset(token)
+        await manager.aclose()
+
+
 async def test_download_rejects_preexisting_workspace_symlink(browser_env):
+    if os.name == "nt":
+        pytest.skip("Windows reparse-point coverage is exercised by the native staging boundary")
     driver = DownloadReviewDriver()
     manager = BrowserManager(BrowserConfig(), driver)
     token = current_tool_call_id.set("download-symlink")
@@ -4944,13 +5103,24 @@ async def test_clear_owner_data_orders_session_clear_before_close_and_artifacts(
         await manager.aclose()
 
 
-async def test_cold_clear_uses_native_direct_network(browser_env):
+async def test_cold_clear_uses_mandatory_authenticated_proxy(browser_env):
     class ColdClearDriver(ReviewDriver):
         proxy_urls: list[str]
+        proxy_credentials: list[tuple[str, str]]
 
         def __init__(self) -> None:
             super().__init__()
             self.proxy_urls = []
+            self.proxy_credentials = []
+
+        async def configure_proxy(
+            self,
+            _owner_session: str,
+            _profile_dir: Path,
+            _endpoint_url: str,
+            credentials: tuple[str, str],
+        ) -> None:
+            self.proxy_credentials.append(credentials)
 
         async def clear_owner_data(self, *_args, proxy_url: str = "", **_kwargs) -> bool:
             self.proxy_urls.append(proxy_url)
@@ -4966,13 +5136,20 @@ async def test_cold_clear_uses_native_direct_network(browser_env):
         result = await manager.clear_owner_data("never-started-owner")
 
         assert result["cleared"] is True
-        assert driver.proxy_urls == [""]
+        assert driver.proxy_urls == ["http://127.0.0.1:45678"]
+        assert driver.proxy_credentials == [
+            (
+                "crew",
+                "test-proxy-secret-0123456789abcdef0123456789",
+            )
+        ]
+        assert "@" not in driver.proxy_urls[0]
         assert "never-started-owner" not in manager._owners
     finally:
         await manager.aclose()
 
 
-async def test_host_registration_reset_clears_direct_owner_epoch(browser_env):
+async def test_host_registration_reset_closes_owner_policy_proxy(browser_env):
     driver = ReviewDriver()
     manager = BrowserManager(BrowserConfig(), driver)
     try:
@@ -4991,7 +5168,8 @@ async def test_host_registration_reset_clears_direct_owner_epoch(browser_env):
         await manager.reset_host_registration("owner")
 
         assert "owner" not in manager._owners
-        assert proxy is None
+        assert proxy is not None
+        assert proxy.url == ""
         assert not hasattr(manager, "_pending_approvals")
         assert not hasattr(manager, "_granted_approvals")
     finally:

@@ -23,6 +23,7 @@ from crew.core.followup import CANCELLED_MARKER, send_followup_question_to, wait
 from crew.core.runctx import PushFn, current_owner_account_id
 from crew.state.logging import get_logger
 from crew.team.delegate_tool import TEAM_RESULT_STATUSES, require_team_result_status
+from crew.gateway.helpers import safe_public_error
 
 log = get_logger("interaction_bridge")
 
@@ -610,14 +611,14 @@ def create_interaction_router(bridge: InteractionBridge = interaction_bridge, cr
                 payload,
             )
         except ToolError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "交互请求无效")}, status_code=400)
         except PermissionError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "交互请求被拒绝")}, status_code=403)
         except (TypeError, ValueError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "交互请求无效")}, status_code=400)
         except Exception as exc:  # noqa: BLE001 - proxy must return a diagnosable error
             log.exception("External Runtime 控制工具失败 tool=%s", tool_name)
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "交互服务内部错误")}, status_code=500)
         return JSONResponse(result)
 
     @router.post("/api/internal/interactions/ask")

@@ -10,24 +10,32 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import mimetypes
 import time
+from collections.abc import AsyncIterator, Callable
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 from crew.agent.file_changes import (
+    FILE_CHANGE_MAX_BYTES,
     FileMetadataSnapshot,
     metadata_change,
+    resolve_file_path,
     workspace_snapshot,
 )
 from crew.agent.loop.tool_dispatch_helpers import (
     is_tool_parallel_safe,
     segment_consecutive_safe,
-    should_parallelize as should_parallelize,
     should_parallelize_tool_batch,
 )
-from crew.agent.loop.tool_guardrails import ToolCallGuardrailController, append_toolguard_guidance, toolguard_synthetic_result
+from crew.agent.loop.tool_guardrails import (
+    ToolCallGuardrailController,
+    append_toolguard_guidance,
+    toolguard_synthetic_result,
+)
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import (
     drain_followup_answer_messages,
@@ -35,18 +43,54 @@ from crew.core.followup import (
     wait_for_answer,
 )
 from crew.core.interfaces import ToolRegistry
-from crew.core.types import MediaPart, Message, ToolCall, ToolPermissionDecision, ToolResult, tool_arguments_for_ui
+from crew.core.types import (
+    MediaPart,
+    Message,
+    ToolCall,
+    ToolPermissionDecision,
+    ToolResult,
+    tool_arguments_for_ui,
+)
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger, llm_trace
+from crew.team.workspace_guard import check_workspace_guard
+from crew.tools.file_utils import FileConflictError, read_verified_bytes
 from crew.tools.pipeline import (
     check_permission,
     grant_session_allow,
     should_block_for_tool_call,
 )
-from crew.team.workspace_guard import check_workspace_guard
-from crew.tools.tool_search import ToolSearchConfig, dispatch_bridge_tool, is_bridge_tool
+from crew.tools.redact import redact_sensitive_display_text, safe_public_error
+from crew.tools.tool_search import (
+    ToolSearchConfig,
+    dispatch_bridge_tool,
+    is_bridge_tool,
+)
 
 log = get_logger("agent.tool_runner")
+
+_PERMISSION_AUDITOR: Callable[[ToolCall, str, str], None] | None = None
+
+
+def set_permission_auditor(
+    auditor: Callable[[ToolCall, str, str], None] | None,
+) -> None:
+    """Install the host audit hook for shared tool-permission decisions."""
+    global _PERMISSION_AUDITOR
+    _PERMISSION_AUDITOR = auditor
+
+
+def _emit_permission_audit(tc: ToolCall, decision: str, source: str) -> None:
+    if _PERMISSION_AUDITOR is None:
+        return
+    try:
+        _PERMISSION_AUDITOR(tc, decision, source)
+    except Exception:  # noqa: BLE001 - permission audit is best-effort
+        log.exception("tool permission audit failed")
+
+
+class _PostAuthorizationMutation(RuntimeError):
+    """Raised when middleware changes a tool action after authorization."""
 _MAX_TOOL_WORKERS = 8  # Crew run_agent.py / agent.tool_executor default
 class ToolRunner:
     """执行一批工具调用并产出 ResponseChunk 帧；原地把结果回灌进 messages。"""
@@ -150,14 +194,17 @@ class ToolRunner:
 
         # 改写刚追加的 tool message，移除图片 base64，仅保留文本骨架。
         if messages and messages[-1].role == "tool" and messages[-1].tool_call_id == tc.id:
-            messages[-1].content = json.dumps(
-                {"text": text_payload, "images": []},
-                ensure_ascii=False,
+            messages[-1].content = result.content_for_model(
+                json.dumps(
+                    {"text": text_payload, "images": []},
+                    ensure_ascii=False,
+                )
             )
 
         caption = f"[MCP 工具 {tc.name} 返回的截图]"
         if text_payload:
             caption += (f"\n{text_payload}")[:2000]
+        caption = result.content_for_model(caption)
         parts: list[dict[str, Any]] = [{"type": "text", "text": caption}]
         parts.extend(image_parts)
         messages.append(Message(role="user", content="", content_parts=parts, is_meta=True))
@@ -272,7 +319,7 @@ class ToolRunner:
 
     def _record_bridge_discovery(self, bridge_name: str, result: ToolResult) -> None:
         """Record schemas made callable by tool_search."""
-        if result.is_error or bridge_name != "tool_search":
+        if result.is_error or result.is_untrusted or bridge_name != "tool_search":
             return
         try:
             payload = json.loads(result.content)
@@ -309,7 +356,7 @@ class ToolRunner:
                     yield self._start_event(tc, rid, next_seq)
                 self._mark_tool_finished(tc)
                 yield self._result_event(tc, result, rid, next_seq, status="cancelled")
-                messages.append(Message.tool(tc.id, result.content, name=tc.name))
+                messages.append(Message.tool(tc.id, result.content_for_model(), name=tc.name))
                 self._append_followup_answers(messages)
                 continue
             if tc.id not in started_tool_call_ids:
@@ -319,14 +366,16 @@ class ToolRunner:
             result = await self._resolve(tc)
             status = "cancelled" if self._interrupted else ("error" if result.is_error else "ok")
             yield self._result_event(tc, result, rid, next_seq, status=status)
-            messages.append(Message.tool(tc.id, result.content, name=tc.name))
+            messages.append(Message.tool(tc.id, result.content_for_model(), name=tc.name))
             self._attach_mcp_images(tc, result, messages)
             self._queue_media(tc, result)
             self._append_followup_answers(messages)
             if tc.name == "todo":
                 yield self._todo_snapshot_event(rid, next_seq)
             if tc.name == "file_write":
-                yield self._file_change_event(tc, before, rid, next_seq)
+                file_event = self._file_change_event(tc, before, rid, next_seq)
+                if file_event is not None:
+                    yield file_event
             elif tc.name == "terminal":
                 terminal_event = self._terminal_file_change_event(
                     tc, terminal_before, result, rid, next_seq,
@@ -356,14 +405,18 @@ class ToolRunner:
         for tc, result in zip(calls, results):
             status = "cancelled" if "用户中断" in result.content else ("error" if result.is_error else "ok")
             yield self._result_event(tc, result, rid, next_seq, status=status)
-            messages.append(Message.tool(tc.id, result.content, name=tc.name))
+            messages.append(Message.tool(tc.id, result.content_for_model(), name=tc.name))
             self._attach_mcp_images(tc, result, messages)
             self._queue_media(tc, result)
             self._append_followup_answers(messages)
             if tc.name == "todo":
                 yield self._todo_snapshot_event(rid, next_seq)
             if tc.name == "file_write":
-                yield self._file_change_event(tc, before_map.get(tc.id), rid, next_seq)
+                file_event = self._file_change_event(
+                    tc, before_map.get(tc.id), rid, next_seq
+                )
+                if file_event is not None:
+                    yield file_event
 
     def _append_followup_answers(self, messages: list[Message]) -> None:
         """把追问选择作为仅供模型续跑的隐藏 user 消息插入 tool result 之后。"""
@@ -380,8 +433,9 @@ class ToolRunner:
                 return await task
             except asyncio.CancelledError:
                 return self._cancelled_result(tc)
-            except Exception as exc:  # noqa: BLE001
-                return ToolResult(tc.id, tc.name, f"工具异常: {exc}", is_error=True)
+            except Exception:  # noqa: BLE001
+                log.exception("预热工具 %s 异常", tc.name)
+                return ToolResult(tc.id, tc.name, "工具执行失败：内部错误", is_error=True)
         async with self._ensure_sem():
             if self._interrupted:
                 return self._cancelled_result(tc)
@@ -409,8 +463,9 @@ class ToolRunner:
                 results.append(task.result())
             except asyncio.CancelledError:
                 results.append(self._cancelled_result(tc))
-            except Exception as exc:  # noqa: BLE001
-                results.append(ToolResult(tc.id, tc.name, f"工具异常: {exc}", is_error=True))
+            except Exception:  # noqa: BLE001
+                log.exception("并行工具 %s 异常", tc.name)
+                results.append(ToolResult(tc.id, tc.name, "工具执行失败：内部错误", is_error=True))
         return results
 
     # ------------------------------------------------------------------ #
@@ -430,11 +485,14 @@ class ToolRunner:
                 dynamic = await resolver(tc)
             except Exception:  # noqa: BLE001 - permission resolver must fail closed
                 log.exception("工具动态权限判定失败: %s", tc.name)
+                _emit_permission_audit(tc, "deny", "permission_resolver_error")
                 return json.dumps({"error": "工具权限判定失败，已按拒绝处理"}, ensure_ascii=False)
         if dynamic is not None:
             if dynamic.behavior == "allow":
+                _emit_permission_audit(tc, "allow", "plugin_policy")
                 return None
             if dynamic.behavior == "deny":
+                _emit_permission_audit(tc, "deny", "plugin_policy")
                 return json.dumps({"error": dynamic.reason or "该浏览器动作已被安全策略拒绝"}, ensure_ascii=False)
             blocked = await self._ask_permission(
                 tc,
@@ -443,15 +501,18 @@ class ToolRunner:
                 allow_always=dynamic.allow_always,
             )
             if blocked is not None:
+                _emit_permission_audit(tc, "deny", "user_approval")
                 return blocked
             confirmer = getattr(self.registry, "confirm_permission", None)
             if dynamic.approval_token and (
                 not callable(confirmer) or not await confirmer(tc, dynamic)
             ):
+                _emit_permission_audit(tc, "deny", "approval_revalidation")
                 return json.dumps(
                     {"error": "页面或目标在审批后已变化，一次性审批已失效，请重新观察"},
                     ensure_ascii=False,
                 )
+            _emit_permission_audit(tc, "allow", "user_approval")
             return None
         from crew.security.settings import strict_security_enabled
 
@@ -464,7 +525,8 @@ class ToolRunner:
             "grep",
             "patch",
         }
-        if not native_gated and not should_block_for_tool_call(tc):
+        mcp_gated = strict and self._is_mcp_tool(tc.name)
+        if not native_gated and not mcp_gated and not should_block_for_tool_call(tc):
             return None  # 只读类工具默认放行，不打扰用户
         behavior, reason, suggested = check_permission(
             tc.name,
@@ -473,13 +535,21 @@ class ToolRunner:
             default_behavior="allow" if native_gated or not strict else "ask",
         )
         if behavior == "allow":
+            _emit_permission_audit(tc, "allow", "permission_rule")
             return None
         if behavior == "deny":
+            _emit_permission_audit(tc, "deny", "permission_rule")
             return json.dumps(
                 {"error": f"权限拒绝：{reason or '匹配 deny 规则'}"}, ensure_ascii=False
             )
         # ask
-        return await self._ask_permission(tc, reason, suggested)
+        blocked = await self._ask_permission(tc, reason, suggested)
+        _emit_permission_audit(
+            tc,
+            "deny" if blocked is not None else "allow",
+            "user_approval",
+        )
+        return blocked
 
     async def _ask_permission(
         self,
@@ -491,15 +561,36 @@ class ToolRunner:
     ) -> str | None:
         """弹出权限确认框并等待用户选择。返回 None 表示放行，否则返回拒绝原因。"""
         from crew.tools.pipeline import extract_match_key
+        from crew.tools.redact import redact_sensitive_text
 
         key = extract_match_key(tc.name, tc.arguments)
+        if self._is_mcp_tool(tc.name):
+            display_value = json.dumps(
+                tool_arguments_for_ui(tc.name, tc.arguments),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            display_value = f"{tc.name}({display_value})"
+        else:
+            display_value = key
+        display_value = redact_sensitive_text(str(display_value), force=True)
+        if len(display_value) > 3_200:
+            display_digest = hashlib.sha256(
+                display_value.encode("utf-8")
+            ).hexdigest()
+            display_value = (
+                f"{display_value[:3_200]}"
+                f"…[truncated sha256={display_digest}]"
+            )
         # Follow-up cards render plain text. Keep this free of Markdown fences
         # so permission details are readable in every client.
-        question_text = f"即将执行：{key}"
+        question_text = f"即将执行：{display_value}"
         if reason:
-            question_text += f"\n\n原因：{reason}"
+            safe_reason = redact_sensitive_text(str(reason), force=True)[:512]
+            question_text += f"\n\n原因：{safe_reason}"
         if suggested:
-            question_text += f"\n\n始终允许规则：{tc.name}({suggested})"
+            safe_suggested = redact_sensitive_text(str(suggested), force=True)[:256]
+            question_text += f"\n\n始终允许规则：{tc.name}({safe_suggested})"
         options = [{"label": "允许一次", "value": "allow_once"}]
         if allow_always:
             options.append({"label": "始终允许", "value": "always"})
@@ -518,7 +609,11 @@ class ToolRunner:
         except Exception as exc:  # noqa: BLE001 - 无 push_fn 等无法交互环境 → fail-closed
             log.info("权限 ask 无法交互（%s），按拒绝处理: %s", type(exc).__name__, tc.name)
             return json.dumps(
-                {"error": f"需要权限确认但当前环境无法交互：{exc}"}, ensure_ascii=False
+                {
+                    "error": "需要权限确认但当前环境无法交互："
+                    f"{safe_public_error(exc, '交互服务不可用')}"
+                },
+                ensure_ascii=False,
             )
         answers = await wait_for_answer(session_id, qid)
         choice = ""
@@ -554,10 +649,10 @@ class ToolRunner:
             if not data_url and part.path:
                 try:
                     path = Path(part.path)
-                    raw = path.read_bytes()
+                    raw = read_verified_bytes(path, max_bytes=20 * 1024 * 1024)
                     mime = part.mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
                     data_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
-                except OSError as exc:
+                except (FileConflictError, OSError, ValueError) as exc:
                     log.warning("读取工具媒体失败 tool=%s: %s", tool_name, type(exc).__name__)
                     continue
             if not data_url:
@@ -697,10 +792,20 @@ class ToolRunner:
                 )
 
             # 0. plugin request middleware：参数脱敏/改写必须早于 guardrail、hook 与真实执行。
+            middleware_tool_call = ToolCall(
+                id=tc.id,
+                name=tc.name,
+                arguments=deepcopy(tc.arguments),
+                started_at=tc.started_at,
+                duration=tc.duration,
+                result=tc.result,
+                status=tc.status,
+                ui_label=tc.ui_label,
+            )
             mw = await self.plugins.apply_tool_request_middleware(
                 tc.name,
                 tc.arguments,
-                tool_call=tc,
+                tool_call=middleware_tool_call,
                 tool_call_id=tc.id,
                 session_id=self.session_id,
             )
@@ -742,12 +847,54 @@ class ToolRunner:
                 return ToolResult(tc.id, tc.name, perm_block, is_error=True)
 
             # 3. 真正执行
+            approved_tool_name = tc.name
             t = time.perf_counter()
+            try:
+                approved_args_digest = hashlib.sha256(
+                    json.dumps(
+                        tc.arguments,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).digest()
+            except (TypeError, ValueError):
+                return ToolResult(
+                    tc.id,
+                    tc.name,
+                    json.dumps(
+                        {"error": "tool arguments are not canonically serializable"}
+                    ),
+                    is_error=True,
+                )
             # 注入进度 sink，长任务（如 terminal 前台命令）
             # 可在执行中向前端流式发射增量。无 push_fn 时 sink 内部 no-op。
             progress_token = self._install_progress_sink(tc)
             try:
                 async def _execute_with_args(args):
+                    if tc.name != approved_tool_name:
+                        raise _PostAuthorizationMutation(
+                            "tool name changed after permission"
+                        )
+                    try:
+                        execution_args_digest = hashlib.sha256(
+                            json.dumps(
+                                args,
+                                ensure_ascii=False,
+                                allow_nan=False,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        ).digest()
+                    except (TypeError, ValueError) as exc:
+                        raise _PostAuthorizationMutation(
+                            "tool arguments changed after permission"
+                        ) from exc
+                    if execution_args_digest != approved_args_digest:
+                        raise _PostAuthorizationMutation(
+                            "tool arguments changed after permission"
+                        )
                     exec_tc = tc
                     if args is not tc.arguments:
                         exec_tc = ToolCall(
@@ -761,15 +908,29 @@ class ToolRunner:
                         )
                     return await self.registry.execute(exec_tc)
 
-                result = await self.plugins.run_tool_execution_middleware(
-                    tc.name,
-                    tc.arguments,
-                    _execute_with_args,
-                    tool_call=tc,
-                    tool_call_id=tc.id,
-                    session_id=self.session_id,
-                    original_args=mw.original_payload,
-                )
+                try:
+                    result = await self.plugins.run_tool_execution_middleware(
+                        tc.name,
+                        tc.arguments,
+                        _execute_with_args,
+                        tool_call=tc,
+                        tool_call_id=tc.id,
+                        session_id=self.session_id,
+                        original_args=mw.original_payload,
+                    )
+                except _PostAuthorizationMutation:
+                    log.warning(
+                        "tool execution middleware changed arguments after permission: %s",
+                        tc.name,
+                    )
+                    return ToolResult(
+                        tc.id,
+                        tc.name,
+                        json.dumps(
+                            {"error": "tool arguments changed after permission"}
+                        ),
+                        is_error=True,
+                    )
             finally:
                 from crew.core.runctx import current_tool_progress_fn
 
@@ -780,8 +941,18 @@ class ToolRunner:
             result = await self.plugins.transform_tool_result(tc, result)
 
             # 5. guardrail 事后记账（warn/halt → 把指引贴到结果上）
-            failed = True if result.is_error else None
-            post = self.guardrails.after_call(tc.name, tc.arguments, result.content, failed=failed)
+            # Untrusted result text is data, not a guardrail signal.  Only the
+            # host-owned ``is_error`` bit may classify an untrusted call as a
+            # failure; otherwise prompt-injected ``"error"``/``"failed"``
+            # fields could alter loop policy.
+            failed = True if result.is_error else (False if result.is_untrusted else None)
+            guardrail_content = None if result.is_untrusted else result.content
+            post = self.guardrails.after_call(
+                tc.name,
+                tc.arguments,
+                guardrail_content,
+                failed=failed,
+            )
             if post.action in ("warn", "halt"):
                 result = ToolResult(
                     tc.id,
@@ -789,6 +960,8 @@ class ToolRunner:
                     append_toolguard_guidance(result.content, post),
                     is_error=result.is_error,
                     media=list(result.media),
+                    content_trust=result.content_trust,
+                    content_source=result.content_source,
                 )
 
             # 6. plugin 后置观测
@@ -914,6 +1087,11 @@ class ToolRunner:
     def _result_event(self, tc, result: ToolResult, rid, next_seq, *, status: str = "ok") -> ResponseChunk:
         from crew.agent.loop.tool_result_display import tool_result_detail_for_ui
 
+        display_content = (
+            redact_sensitive_display_text(result.content)
+            if result.is_untrusted
+            else result.content
+        )
         llm_trace("tool_result", {
             "session_id": self.session_id,
             "tool_call_id": tc.id,
@@ -923,10 +1101,10 @@ class ToolRunner:
             "content": (
                 "<browser_content_redacted>"
                 if str(tc.name).startswith("browser_") or tc.name == "record_replay"
-                else result.content
+                else display_content
             ),
         })
-        detail = tool_result_detail_for_ui(tc.name, result.content)
+        detail = tool_result_detail_for_ui(tc.name, display_content)
         return ResponseChunk.tool_event(
             rid, tc.name, "result", detail, next_seq(),
             tool_call_id=tc.id,
@@ -989,22 +1167,14 @@ class ToolRunner:
         )
 
     def _read_file_before(self, tc) -> str | None:
-        """file_write 执行前读原文件内容（算 diff 的 before）。不存在 / 读失败返回 None。"""
-        from pathlib import Path
-        from crew.core.runctx import current_agent_workdir
+        """Do not read a write target before the tool's security check runs.
 
-        raw = str((tc.arguments or {}).get("path", ""))
-        if not raw:
-            return None
-        target = Path(raw).expanduser()
-        if not target.is_absolute():
-            cwd = current_agent_workdir.get()
-            if cwd:
-                target = Path(cwd).expanduser() / target
-        try:
-            return target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
-        except Exception:  # noqa: BLE001
-            return None
+        The handler performs the authorization and the write as one operation;
+        reading here would turn a pending external write into an unapproved
+        file-read capability.  The post-write event is deliberately best
+        effort and only reads an authorized workspace path.
+        """
+        return None
 
     def _file_change_event(self, tc, before, rid: str, next_seq: Callable[[], int]) -> ResponseChunk:
         """file_write 后：读 after、算 unified diff、存入 file_change_store、广播 file_changes 帧。"""
@@ -1013,17 +1183,22 @@ class ToolRunner:
         from crew.core.runctx import current_agent_workdir
 
         raw = str((tc.arguments or {}).get("path", ""))
-        target = Path(raw).expanduser()
-        if not target.is_absolute():
-            cwd = current_agent_workdir.get()
-            if cwd:
-                target = Path(cwd).expanduser() / target
+        cwd = current_agent_workdir.get()
+        try:
+            root = resolve_file_path(cwd or Path.cwd())
+            target = resolve_file_path(raw, cwd=root)
+            target.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return None
 
         after = None
         try:
             if target.is_file():
-                after = target.read_text(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
+                after = read_verified_bytes(
+                    target,
+                    max_bytes=FILE_CHANGE_MAX_BYTES,
+                ).decode("utf-8", errors="replace")
+        except (FileConflictError, OSError, ValueError):
             after = None
 
         before_lines = (before or "").splitlines()

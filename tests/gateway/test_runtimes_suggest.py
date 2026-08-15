@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -317,6 +318,30 @@ async def test_team_draft_endpoint_uses_one_llm_call_for_description(tmp_path, m
     assert draft_events[-1]["cache_hit"] is False
     assert len(fake.stream_calls) == 1
     assert len(fake.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_role_suggest_endpoint_exact_rejects_unknown_fields(tmp_path, monkeypatch, auth_headers):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    api = create_app(crew)
+
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        rejected = await client.post(
+            "/api/external-teams/roles/suggest",
+            json={"role_key": "qa_engineer", "agent_name": "测试", "scope": "global", "action": "admin"},
+        )
+        accepted = await client.post(
+            "/api/external-teams/roles/suggest",
+            json={"role_key": "qa_engineer", "agent_name": "测试", "workflow": "验证质量"},
+        )
+
+    assert rejected.status_code == 400
+    assert rejected.json()["ok"] is False
+    assert set(rejected.json()["fields"]) == {"scope", "action"}
+    assert accepted.status_code == 200
+    assert accepted.json()["role"]
 
 
 @pytest.mark.asyncio
@@ -755,7 +780,7 @@ async def test_confirmed_temporary_member_is_owner_private_hidden_and_cleaned_up
         "id": "rt-ready",
         "type": "acp",
         "provider": "generic",
-        "executable_path": "/bin/sh",
+        "executable_path": sys.executable,
         "metadata": {
             "availability_status": "ready",
             "models": [{"id": "model-ready", "label": "Ready Model", "default": True}],
@@ -953,7 +978,7 @@ async def test_valid_formation_ai_gap_is_returned_for_user_confirmation(
         "id": "rt-ready",
         "type": "acp",
         "provider": "generic",
-        "executable_path": "/bin/sh",
+        "executable_path": sys.executable,
         "metadata": {
             "availability_status": "ready",
             "models": [{
@@ -969,7 +994,7 @@ async def test_valid_formation_ai_gap_is_returned_for_user_confirmation(
         "id": "rt-generic",
         "type": "acp",
         "provider": "generic",
-        "executable_path": "/bin/sh",
+        "executable_path": sys.executable,
         "metadata": {
             "availability_status": "ready",
             "models": [{"id": "model-generic", "label": "Generic Model", "default": True}],

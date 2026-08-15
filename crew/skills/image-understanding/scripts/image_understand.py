@@ -5,16 +5,20 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import mimetypes
 import os
 from pathlib import Path
 from typing import Any
 
-import requests
+from crew.security.outbound import OutboundDenied, OutboundHttpClient
 
 DEFAULT_PROMPT = "描述一下这张图片"
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+_MAX_REQUEST_BYTES = 20 * 1024 * 1024
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_HTTP = OutboundHttpClient()
 
 
 def _env_file_value(key: str) -> str:
@@ -126,10 +130,25 @@ def analyze_image(image_path: str | Path, prompt: str | None = None) -> str | No
         "stream": False,
     }
     try:
-        response = requests.post(endpoint, headers=headers, json=body, timeout=_timeout_seconds())
-        response.raise_for_status()
-        text = _response_text(response.json())
-    except (requests.RequestException, ValueError, OSError) as exc:
+        response = _HTTP.fetch(
+            endpoint,
+            method="POST",
+            body=json.dumps(
+                body,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            headers=headers,
+            timeout=_timeout_seconds(),
+            max_bytes=_MAX_RESPONSE_BYTES,
+            max_request_bytes=_MAX_REQUEST_BYTES,
+            max_redirects=0,
+        )
+        if not 200 <= response.status < 300:
+            raise ValueError("non_success_status")
+        payload = json.loads(response.body.decode(response.charset))
+        text = _response_text(payload)
+    except (OutboundDenied, LookupError, UnicodeError, ValueError, OSError) as exc:
         print(f"错误：图片理解请求失败 - {type(exc).__name__}")
         return None
     if not text:

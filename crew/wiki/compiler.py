@@ -16,6 +16,7 @@ from typing import Any, Callable
 from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
 from crew.state.logging import get_logger
+from crew.tools.redact import safe_public_error
 
 from .schemas import (
     CompileResult,
@@ -958,8 +959,9 @@ class WikiCompiler:
                 parsed_path = raw.parsed_path  # type: ignore[union-attr]
                 source_content = _read_parsed(parsed_path)
             except Exception as exc:  # noqa: BLE001
-                await _notify_progress(progress, "done", {"source_id": source_id, "error": f"读取 source 失败: {exc}"})
-                return IngestResult(source_id=source_id, issues=[f"读取 source 失败: {exc}"])
+                error = f"读取 source 失败: {safe_public_error(exc, '读取 source 失败')}"
+                await _notify_progress(progress, "done", {"source_id": source_id, "error": error})
+                return IngestResult(source_id=source_id, issues=[error])
 
         _check_cancelled(cancel_event)
         smooth_stop = asyncio.Event()
@@ -998,8 +1000,9 @@ class WikiCompiler:
             return IngestResult(source_id=source_id, issues=["已取消"])
         except Exception as exc:  # noqa: BLE001
             log.exception("Wiki 分析失败 source=%s", source_id)
-            await _notify_progress(progress, "done", {"source_id": source_id, "error": f"LLM 分析失败: {exc}"})
-            return IngestResult(source_id=source_id, issues=[f"LLM 分析失败: {exc}"])
+            error = f"LLM 分析失败: {safe_public_error(exc, 'LLM 分析失败')}"
+            await _notify_progress(progress, "done", {"source_id": source_id, "error": error})
+            return IngestResult(source_id=source_id, issues=[error])
         finally:
             smooth_stop.set()
             if smooth_task is not None:
@@ -1981,7 +1984,7 @@ class WikiCompiler:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                failed.append({"source_id": source_id, "error": str(exc)})
+                failed.append({"source_id": source_id, "error": safe_public_error(exc, "批量 ingest 失败")})
 
         next_cursor = start + len(selected)
         if next_cursor >= len(candidates):

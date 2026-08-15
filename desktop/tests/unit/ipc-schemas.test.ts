@@ -16,12 +16,22 @@ import {
   ShellOpenExternalArgs,
   ShellOpenPathArgs,
   ShellOpenPathWithArgs,
+  ShellWriteFileBase64Args,
+  ShellWriteTextFileArgs,
   WikiOpenSourceFileArgs,
+  FeedbackPreviewArgs,
   FeedbackSubmitArgs,
   FeedbackListArgs,
   DialogSelectFileArgs,
   InspirationWindowArgs,
+  SecurityAuditArgs,
+  SecurityDecisionArgs,
+  SecurityModeArgs,
+  SecurityPendingArgs,
+  SecurityRuleMutationArgs,
+  SecurityWorkspaceArgs,
   UpdateStartDownloadArgs,
+  WorkspaceDirectoryArgs,
 } from '../../src/shared/ipc-schemas';
 import { MAX_DIALOG_FILE_BYTES } from '../../src/shared/constants';
 
@@ -74,6 +84,28 @@ describe('GatewayFetchArgs', () => {
     });
     expect(r.ok).toBe(false);
   });
+
+  it('rejects oversized network fields and unexpected methods', () => {
+    expect(GatewayFetchArgs.parse({
+      url: `http://127.0.0.1:8000/api/${'x'.repeat(4096)}`,
+    }).ok).toBe(false);
+    expect(GatewayFetchArgs.parse({
+      url: 'http://127.0.0.1:8000/api/sessions',
+      init: { method: 'TRACE' },
+    }).ok).toBe(false);
+    expect(GatewayFetchArgs.parse({
+      url: 'http://127.0.0.1:8000/api/sessions',
+      init: { body: 'x'.repeat(8 * 1024 * 1024 + 1) },
+    }).ok).toBe(false);
+    expect(GatewayFetchArgs.parse({
+      url: 'http://127.0.0.1:8000/api/sessions',
+      init: {
+        headers: Object.fromEntries(
+          Array.from({ length: 65 }, (_, index) => [`x-test-${index}`, 'value']),
+        ),
+      },
+    }).ok).toBe(false);
+  });
 });
 
 describe('ShellOpenExternalArgs', () => {
@@ -109,6 +141,19 @@ describe('ShellOpenPathArgs', () => {
     if (r.ok) expect(r.value.path).toBe('/home/user/cache/foo.log');
   });
 
+  it('accepts a Workspace ID but rejects renderer-provided allowed roots', () => {
+    const withWorkspace = ShellOpenPathArgs.parse({
+      path: '/home/user/project/output.log',
+      workspaceId: 'workspace-123',
+    });
+    expect(withWorkspace.ok).toBe(true);
+    if (withWorkspace.ok) expect(withWorkspace.value.workspaceId).toBe('workspace-123');
+    expect(ShellOpenPathArgs.parse({
+      path: '/etc/passwd',
+      allowedRoot: '/',
+    }).ok).toBe(false);
+  });
+
   it('rejects raw string (positional-arg mismatch)', () => {
     expect(ShellOpenPathArgs.parse('/etc/passwd').ok).toBe(false);
   });
@@ -124,6 +169,104 @@ describe('ShellOpenPathArgs', () => {
 
   it('rejects non-string path', () => {
     expect(ShellOpenPathArgs.parse({ path: 123 }).ok).toBe(false);
+  });
+
+  it('rejects NUL and oversized paths', () => {
+    expect(ShellOpenPathArgs.parse({ path: '/tmp/a\0b' }).ok).toBe(false);
+    expect(ShellOpenPathArgs.parse({ path: `/${'a'.repeat(4096)}` }).ok).toBe(false);
+  });
+});
+
+describe('bounded file IPC payloads', () => {
+  it('rejects text and base64 writes larger than the file boundary', () => {
+    expect(ShellWriteTextFileArgs.parse({
+      path: '/tmp/a.txt',
+      content: 'x'.repeat(20 * 1024 * 1024 + 1),
+    }).ok).toBe(false);
+    expect(ShellWriteFileBase64Args.parse({
+      path: '/tmp/a.bin',
+      base64: 'A'.repeat(Math.ceil((20 * 1024 * 1024) * 4 / 3) + 8),
+    }).ok).toBe(false);
+  });
+});
+
+describe('SecurityPendingArgs', () => {
+  it('accepts the explicit read-only mode and rejects unknown modes', () => {
+    expect(SecurityModeArgs.parse({
+      workspaceId: 'workspace',
+      sessionId: 'session',
+      mode: 'read_only',
+    }).ok).toBe(true);
+    expect(SecurityModeArgs.parse({
+      workspaceId: 'workspace',
+      sessionId: 'session',
+      mode: 'disabled',
+    }).ok).toBe(false);
+  });
+
+  it('rejects oversized or control-character identifiers', () => {
+    expect(SecurityPendingArgs.parse({
+      workspaceId: 'w'.repeat(201),
+      sessionId: 'session',
+    }).ok).toBe(false);
+    expect(SecurityPendingArgs.parse({
+      workspaceId: 'workspace',
+      sessionId: 'session\0forged',
+    }).ok).toBe(false);
+  });
+
+  it('bounds approval identifiers, command prefixes, and permission objects', () => {
+    const base = {
+      workspaceId: 'workspace',
+      sessionId: 'session',
+      taskId: 'task',
+      requestId: 'request',
+      decision: 'always' as const,
+    };
+    expect(SecurityDecisionArgs.parse({
+      ...base,
+      taskId: undefined,
+    }).ok).toBe(false);
+    expect(SecurityDecisionArgs.parse({
+      ...base,
+      requestId: 'r'.repeat(201),
+    }).ok).toBe(false);
+    expect(SecurityDecisionArgs.parse({
+      ...base,
+      alwaysArgvPrefix: Array.from({ length: 129 }, () => 'arg'),
+    }).ok).toBe(false);
+    expect(SecurityDecisionArgs.parse({
+      ...base,
+      alwaysArgvPrefix: ['x'.repeat(4097)],
+    }).ok).toBe(false);
+    expect(SecurityDecisionArgs.parse({
+      ...base,
+      permissions: { detail: 'x'.repeat(64 * 1024) },
+    }).ok).toBe(false);
+    expect(SecurityRuleMutationArgs.parse({
+      workspaceId: 'workspace',
+      ruleId: 'r'.repeat(201),
+    }).ok).toBe(false);
+    expect(SecurityWorkspaceArgs.parse({ workspaceId: 'w'.repeat(201) }).ok).toBe(false);
+    expect(WorkspaceDirectoryArgs.parse({ workspaceId: 'w'.repeat(201) }).ok).toBe(false);
+  });
+});
+
+describe('SecurityAuditArgs', () => {
+  it('bounds workspace, task, pagination, and time filters', () => {
+    const valid = SecurityAuditArgs.parse({
+      workspaceId: 'workspace',
+      taskId: 'task',
+      startTime: 100,
+      endTime: 200,
+      limit: 100,
+    });
+    expect(valid.ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ workspaceId: 'w'.repeat(201) }).ok).toBe(false);
+    expect(SecurityAuditArgs.parse({ taskId: 'task\0forged' }).ok).toBe(false);
+    expect(SecurityAuditArgs.parse({ limit: 101 }).ok).toBe(false);
+    expect(SecurityAuditArgs.parse({ startTime: 200, endTime: 100 }).ok).toBe(false);
+    expect(SecurityAuditArgs.parse({ startTime: Number.POSITIVE_INFINITY }).ok).toBe(false);
   });
 });
 
@@ -179,19 +322,46 @@ describe('UpdateStartDownloadArgs', () => {
   it('rejects invalid type', () => {
     expect(UpdateStartDownloadArgs.parse({ version: '0.23.59', type: 'optional' }).ok).toBe(false);
   });
+
+  it('rejects unbounded versions and insecure or credential-bearing URLs', () => {
+    expect(UpdateStartDownloadArgs.parse({
+      version: 'v'.repeat(129),
+      type: 'force',
+    }).ok).toBe(false);
+    expect(UpdateStartDownloadArgs.parse({
+      version: '0.23.59',
+      type: 'force',
+      url: 'http://updates.example.test/update.exe',
+    }).ok).toBe(false);
+    expect(UpdateStartDownloadArgs.parse({
+      version: '0.23.59',
+      type: 'force',
+      url: 'https://user:password@updates.example.test/update.exe',
+    }).ok).toBe(false);
+    expect(UpdateStartDownloadArgs.parse({
+      version: '0.23.59',
+      type: 'force',
+      url: 'https://updates.example.test/update.exe',
+    }).ok).toBe(true);
+  });
 });
 
 describe('FeedbackSubmitArgs', () => {
   it('accepts valid title + description', () => {
-    expect(FeedbackSubmitArgs.parse({ title: 'Bug', description: 'Steps...' }).ok).toBe(true);
+    expect(FeedbackPreviewArgs.parse({ title: 'Bug', description: 'Steps...' }).ok).toBe(true);
+    expect(FeedbackSubmitArgs.parse({
+      title: 'Bug',
+      description: 'Steps...',
+      authority: 'main-issued-authority',
+    }).ok).toBe(true);
   });
 
   it('rejects title longer than 200 chars', () => {
-    expect(FeedbackSubmitArgs.parse({ title: 'x'.repeat(201), description: 'ok' }).ok).toBe(false);
+    expect(FeedbackPreviewArgs.parse({ title: 'x'.repeat(201), description: 'ok' }).ok).toBe(false);
   });
 
   it('rejects description longer than 5000 chars', () => {
-    expect(FeedbackSubmitArgs.parse({ title: 'ok', description: 'x'.repeat(5001) }).ok).toBe(false);
+    expect(FeedbackPreviewArgs.parse({ title: 'ok', description: 'x'.repeat(5001) }).ok).toBe(false);
   });
 
   it('accepts up to 9 data-url images', () => {
@@ -199,7 +369,7 @@ describe('FeedbackSubmitArgs', () => {
       name: `img${i}.png`,
       dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
     }));
-    expect(FeedbackSubmitArgs.parse({ title: 'ok', description: 'd', images }).ok).toBe(true);
+    expect(FeedbackPreviewArgs.parse({ title: 'ok', description: 'd', images }).ok).toBe(true);
   });
 
   it('rejects 10+ images', () => {
@@ -207,12 +377,12 @@ describe('FeedbackSubmitArgs', () => {
       name: `img${i}.png`,
       dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
     }));
-    expect(FeedbackSubmitArgs.parse({ title: 'ok', description: 'd', images }).ok).toBe(false);
+    expect(FeedbackPreviewArgs.parse({ title: 'ok', description: 'd', images }).ok).toBe(false);
   });
 
   it('rejects image without data: prefix', () => {
     expect(
-      FeedbackSubmitArgs.parse({
+      FeedbackPreviewArgs.parse({
         title: 'ok',
         description: 'd',
         images: [{ name: 'x.png', dataUrl: 'http://evil.com/x.png' }],
@@ -348,6 +518,21 @@ describe('GatewayUploadArgs', () => {
     const r = GatewayUploadArgs.parse({ url: 'http://example.com/api/wiki/upload', files: ['/tmp/a.md'] });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain('hostname');
+  });
+
+  it('rejects upload URLs with credentials, fragments, or unexpected protocols', () => {
+    expect(GatewayUploadArgs.parse({
+      url: 'https://127.0.0.1:8000/api/wiki/upload',
+      files: ['/tmp/a.md'],
+    }).ok).toBe(false);
+    expect(GatewayUploadArgs.parse({
+      url: 'http://user:password@127.0.0.1:8000/api/wiki/upload',
+      files: ['/tmp/a.md'],
+    }).ok).toBe(false);
+    expect(GatewayUploadArgs.parse({
+      url: 'http://127.0.0.1:8000/api/wiki/upload#fragment',
+      files: ['/tmp/a.md'],
+    }).ok).toBe(false);
   });
 
   it('rejects empty / missing files', () => {

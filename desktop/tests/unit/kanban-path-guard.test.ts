@@ -1,28 +1,26 @@
 /**
- * normalizeAllowedRoot 归一化测试。
+ * normalizeWorkspaceId 归一化测试。
  *
- * 后端在无项目工作空间时会把 workflow.context.workspace_root_path 存成 ""，
- * 直接透传给 shell:openPath 会触发 IPC_ARG_VALIDATION_FAILED
- * （allowedRoot: must be non-empty），必须归一化为 undefined。
+ * shell:openPath 只接受 Workspace ID，由主进程从已鉴权 Gateway 记录解析根目录；
+ * 空状态必须归一化为 undefined。
  */
 
 import { describe, expect, it } from 'vitest';
-import { normalizeAllowedRoot } from '../../src/ui/features/kanban-board';
+import { normalizeWorkspaceId } from '../../src/ui/features/kanban-board';
 
-describe('normalizeAllowedRoot', () => {
+describe('normalizeWorkspaceId', () => {
   it('空串 / 空白串 / 非字符串统一归一化为 undefined', () => {
-    expect(normalizeAllowedRoot('')).toBeUndefined();
-    expect(normalizeAllowedRoot('   ')).toBeUndefined();
-    expect(normalizeAllowedRoot('\n\t')).toBeUndefined();
-    expect(normalizeAllowedRoot(undefined)).toBeUndefined();
-    expect(normalizeAllowedRoot(null)).toBeUndefined();
-    expect(normalizeAllowedRoot(123)).toBeUndefined();
-    expect(normalizeAllowedRoot({})).toBeUndefined();
+    expect(normalizeWorkspaceId('')).toBeUndefined();
+    expect(normalizeWorkspaceId('   ')).toBeUndefined();
+    expect(normalizeWorkspaceId('\n\t')).toBeUndefined();
+    expect(normalizeWorkspaceId(undefined)).toBeUndefined();
+    expect(normalizeWorkspaceId(null)).toBeUndefined();
+    expect(normalizeWorkspaceId(123)).toBeUndefined();
+    expect(normalizeWorkspaceId({})).toBeUndefined();
   });
 
-  it('合法路径保留并去除首尾空白', () => {
-    expect(normalizeAllowedRoot('/data/proj')).toBe('/data/proj');
-    expect(normalizeAllowedRoot('  /data/proj  ')).toBe('/data/proj');
-    expect(normalizeAllowedRoot('C:\\work\\proj')).toBe('C:\\work\\proj');
+  it('合法 Workspace ID 保留并去除首尾空白', () => {
+    expect(normalizeWorkspaceId('workspace-123')).toBe('workspace-123');
+    expect(normalizeWorkspaceId('  workspace-123  ')).toBe('workspace-123');
   });
 });

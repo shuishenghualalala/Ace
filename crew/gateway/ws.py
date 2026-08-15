@@ -9,25 +9,36 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import re
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from crew.agent.skills import (
     _parse_frontmatter,
     build_skill_activation,
-    get_skills,
     get_package_members,
+    get_skills,
     install_skill,
     resolve_package,
     resolve_skill,
     resolve_skill_any,
 )
-from crew.core.runctx import current_active_skill_packages
 from crew.core.envelope import Envelope
-from crew.gateway.auth import AuthenticationError, authenticate_websocket
-from crew.scenarios import resolve_binding as resolve_scenario_binding
+from crew.core.followup import get_followup_waiter
+from crew.core.runctx import current_active_skill_packages
+from crew.gateway.auth import (
+    AuthenticationError,
+    authenticate_websocket,
+    process_authority_for_account,
+    require_admin,
+)
+from crew.gateway.broadcast import stream_and_broadcast
+from crew.gateway.context import normalize_agent_attachments
 from crew.gateway.helpers import (
     WS_PING_INTERVAL_S,
     WS_RECEIVE_TIMEOUT_S,
@@ -35,13 +46,402 @@ from crew.gateway.helpers import (
     resolve_session_id,
     status_frame,
 )
-from crew.gateway.broadcast import stream_and_broadcast
 from crew.gateway.session_context import session_context_from_envelope
-from crew.state.logging import get_logger
+from crew.scenarios import resolve_binding as resolve_scenario_binding
 from crew.state.active_owner import ActiveOwnerConflict
-from crew.core.followup import get_followup_waiter
+from crew.state.logging import get_logger
 
 log = get_logger("gateway.ws")
+
+WS_PROTOCOL_VERSION = 1
+WS_MAX_FRAME_BYTES = 1024 * 1024
+WS_MAX_QUERY_CHARS = 128 * 1024
+WS_MAX_PLAN_CHARS = 256 * 1024
+WS_MAX_TEXT_CHARS = 64 * 1024
+WS_MAX_ATTACHMENT_CONTENT_CHARS = 100_000
+WS_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+WS_MAX_REQUEST_ATTACHMENT_BYTES = 128 * 1024 * 1024
+WS_MAX_SESSIONS = 100
+WS_MAX_ATTACHMENTS = 20
+WS_MAX_ANSWERS = 50
+WS_MAX_JSON_DEPTH = 12
+WS_MAX_JSON_NODES = 10_000
+_MAX_IDENTIFIER_CHARS = 256
+_MAX_REQUEST_ID_CHARS = 128
+_MAX_NONCE_CHARS = 128
+_PROTOCOL_FIELDS = frozenset({"protocol_version", "client_sequence", "nonce"})
+_NONCE_RE = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
+
+_MESSAGE_FIELDS = frozenset({
+    "query",
+    "session_id",
+    "request_id",
+    "mode",
+    "workspace_id",
+    "attachments",
+    "sub_scenario",
+    "client_intent",
+    "external_team_id",
+    "team_execution_profile",
+    "team_confirm_execution_mode",
+    "intent",
+    "wiki_ingest",
+    "wiki_kb_id",
+    "kb_id",
+    "wiki_confirmation_id",
+    "web_search_enabled",
+    "work_disabled_preference_ids",
+    "plan_active",
+}) | _PROTOCOL_FIELDS
+
+_ACTION_FIELDS: dict[str, frozenset[str]] = {
+    "subscribe": frozenset({"action", "session_id", "sessions", "last_gateway_sequences"}),
+    "resume": frozenset({"action", "session_id", "sessions", "last_gateway_sequences"}),
+    "stop": frozenset({"action", "session_id"}),
+    "interrupt": frozenset({"action", "session_id"}),
+    "steer": frozenset({"action", "session_id", "text"}),
+    "background": frozenset({"action", "session_id"}),
+    "followup_answer": frozenset({"action", "session_id", "question_id", "answers"}),
+    "followup_cancel": frozenset({"action", "session_id", "question_id"}),
+    "plan_enter": frozenset({"action", "session_id"}),
+    "plan_approve": frozenset({
+        "action", "session_id", "request_id", "mode", "workspace_id", "plan"
+    }),
+    "plan_reject": frozenset({"action", "session_id"}),
+    "plan_reject_and_exit": frozenset({"action", "session_id"}),
+    "plan_exit": frozenset({"action", "session_id"}),
+    "plan_update": frozenset({"action", "session_id", "plan"}),
+    # These are currently compatibility control frames. They are deliberately
+    # schema-bound even though their mode state is handled outside this module.
+    "wiki_enter": frozenset({"action", "session_id", "kb_id", "web_search_enabled"}),
+    "wiki_exit": frozenset({"action", "session_id"}),
+}
+_ACTION_FIELDS = {
+    action: fields | _PROTOCOL_FIELDS for action, fields in _ACTION_FIELDS.items()
+}
+
+
+class WebSocketProtocolError(ValueError):
+    """Fail-closed protocol rejection with a stable public error code."""
+
+    def __init__(self, code: str = "PROTOCOL_INVALID", *, close_code: int | None = None):
+        super().__init__(code)
+        self.code = code
+        self.close_code = close_code
+
+
+def _protocol_error(code: str = "PROTOCOL_INVALID") -> WebSocketProtocolError:
+    return WebSocketProtocolError(code)
+
+
+def _require_string(
+    value: object,
+    *,
+    minimum: int = 0,
+    maximum: int = WS_MAX_TEXT_CHARS,
+    strip_stable: bool = False,
+) -> str:
+    if not isinstance(value, str) or not minimum <= len(value) <= maximum:
+        raise _protocol_error()
+    if "\x00" in value or any(ord(char) < 0x20 and char not in "\t\r\n" for char in value):
+        raise _protocol_error()
+    if strip_stable and value != value.strip():
+        raise _protocol_error()
+    return value
+
+
+def _require_bool(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise _protocol_error()
+    return value
+
+
+def _require_int(value: object, *, minimum: int = 0, maximum: int = (1 << 63) - 1) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise _protocol_error()
+    return value
+
+
+def _validate_json_budget(value: object) -> None:
+    nodes = 0
+
+    def walk(item: object, depth: int) -> None:
+        nonlocal nodes
+        nodes += 1
+        if nodes > WS_MAX_JSON_NODES or depth > WS_MAX_JSON_DEPTH:
+            raise _protocol_error()
+        if item is None or isinstance(item, bool):
+            return
+        if isinstance(item, str):
+            _require_string(item, maximum=WS_MAX_PLAN_CHARS)
+            return
+        if isinstance(item, int):
+            _require_int(item, minimum=-(1 << 63), maximum=(1 << 63) - 1)
+            return
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise _protocol_error()
+            return
+        if isinstance(item, list):
+            if len(item) > WS_MAX_JSON_NODES:
+                raise _protocol_error()
+            for child in item:
+                walk(child, depth + 1)
+            return
+        if isinstance(item, dict):
+            if len(item) > WS_MAX_JSON_NODES:
+                raise _protocol_error()
+            for key, child in item.items():
+                _require_string(key, maximum=_MAX_IDENTIFIER_CHARS)
+                walk(child, depth + 1)
+            return
+        raise _protocol_error()
+
+    walk(value, 0)
+
+
+def _validate_protocol_identity(data: dict[str, Any]) -> None:
+    present = _PROTOCOL_FIELDS.intersection(data)
+    if present != _PROTOCOL_FIELDS:
+        raise _protocol_error()
+    if _require_int(data["protocol_version"], minimum=1, maximum=1) != WS_PROTOCOL_VERSION:
+        raise _protocol_error()
+    _require_int(data["client_sequence"], minimum=1)
+    nonce = _require_string(
+        data["nonce"],
+        minimum=16,
+        maximum=_MAX_NONCE_CHARS,
+        strip_stable=True,
+    )
+    if _NONCE_RE.fullmatch(nonce) is None:
+        raise _protocol_error()
+
+
+def _validate_identifier(value: object, *, maximum: int = _MAX_IDENTIFIER_CHARS) -> str:
+    return _require_string(value, minimum=1, maximum=maximum, strip_stable=True)
+
+
+def _validate_public_session_id(value: object) -> str:
+    session_id = _validate_identifier(value)
+    if "::turn::" in session_id:
+        raise _protocol_error()
+    return session_id
+
+
+def _validate_string_list(
+    value: object,
+    *,
+    maximum_items: int,
+    maximum_string: int = _MAX_IDENTIFIER_CHARS,
+) -> list[str]:
+    if not isinstance(value, list) or len(value) > maximum_items:
+        raise _protocol_error()
+    return [
+        _require_string(item, minimum=1, maximum=maximum_string, strip_stable=True)
+        for item in value
+    ]
+
+
+def _validate_attachments(value: object) -> None:
+    total_bytes = 0
+    if not isinstance(value, list) or len(value) > WS_MAX_ATTACHMENTS:
+        raise _protocol_error()
+    allowed = frozenset({"id", "name", "path", "type", "size", "previewUrl", "content"})
+    for item in value:
+        if not isinstance(item, dict) or not set(item).issubset(allowed):
+            raise _protocol_error()
+        if "id" in item:
+            _validate_identifier(item["id"], maximum=_MAX_REQUEST_ID_CHARS)
+        if "name" in item:
+            _require_string(item["name"], minimum=1, maximum=_MAX_IDENTIFIER_CHARS)
+        if "path" in item:
+            _require_string(item["path"], minimum=1, maximum=4096)
+        if "type" in item and item["type"] not in {"file", "image"}:
+            raise _protocol_error()
+        if "size" in item:
+            _require_int(item["size"], maximum=WS_MAX_ATTACHMENT_BYTES)
+            total_bytes += item["size"]
+        if "previewUrl" in item and item["previewUrl"] is not None:
+            _require_string(item["previewUrl"], maximum=4096)
+        if "content" in item:
+            _require_string(item["content"], maximum=WS_MAX_ATTACHMENT_CONTENT_CHARS)
+            total_bytes += len(item["content"].encode("utf-8"))
+        if total_bytes > WS_MAX_REQUEST_ATTACHMENT_BYTES:
+            raise _protocol_error()
+        if not item.get("path") and "content" not in item:
+            raise _protocol_error()
+
+
+def _validate_answers(value: object) -> None:
+    if not isinstance(value, list) or len(value) > WS_MAX_ANSWERS:
+        raise _protocol_error()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"question_id", "answers"}:
+            raise _protocol_error()
+        _validate_identifier(item["question_id"])
+        _validate_string_list(
+            item["answers"],
+            maximum_items=WS_MAX_ANSWERS,
+            maximum_string=4096,
+        )
+
+
+def validate_ws_message(data: object) -> dict[str, Any]:
+    """Validate one decoded client message with an exact, fail-closed schema."""
+    _validate_json_budget(data)
+    if not isinstance(data, dict):
+        raise _protocol_error()
+    _validate_protocol_identity(data)
+
+    if "kind" in data:
+        if data.get("kind") != "pong" or not set(data).issubset({"kind"} | _PROTOCOL_FIELDS):
+            raise _protocol_error()
+        return data
+
+    action = data.get("action")
+    if action is not None:
+        if not isinstance(action, str) or action not in _ACTION_FIELDS:
+            raise _protocol_error()
+        if not set(data).issubset(_ACTION_FIELDS[action]):
+            raise _protocol_error()
+    elif not set(data).issubset(_MESSAGE_FIELDS):
+        raise _protocol_error()
+
+    _validate_public_session_id(data.get("session_id"))
+
+    if "request_id" in data:
+        _validate_identifier(data["request_id"], maximum=_MAX_REQUEST_ID_CHARS)
+    if "workspace_id" in data:
+        _validate_identifier(data["workspace_id"])
+    if "mode" in data and data["mode"] not in {"agent", "team", "dynamic_kanban"}:
+        raise _protocol_error()
+
+    if action in {"subscribe", "resume"}:
+        if "sessions" in data:
+            sessions = _validate_string_list(
+                data["sessions"],
+                maximum_items=WS_MAX_SESSIONS,
+            )
+            if len(sessions) != len(set(sessions)):
+                raise _protocol_error()
+            for session_id in sessions:
+                _validate_public_session_id(session_id)
+        if "last_gateway_sequences" in data:
+            sequences = data["last_gateway_sequences"]
+            if not isinstance(sequences, dict) or len(sequences) > WS_MAX_SESSIONS:
+                raise _protocol_error()
+            for sid, sequence in sequences.items():
+                _validate_public_session_id(sid)
+                _require_int(sequence)
+    elif action == "steer":
+        _require_string(data.get("text"), minimum=1, maximum=WS_MAX_TEXT_CHARS)
+    elif action == "followup_answer":
+        _validate_identifier(data.get("question_id"))
+        _validate_answers(data.get("answers"))
+    elif action == "followup_cancel":
+        _validate_identifier(data.get("question_id"))
+    elif action == "plan_update":
+        _require_string(data.get("plan"), maximum=WS_MAX_PLAN_CHARS)
+    elif action == "plan_approve":
+        _validate_identifier(data.get("request_id"), maximum=_MAX_REQUEST_ID_CHARS)
+        if "plan" in data:
+            _require_string(data["plan"], maximum=WS_MAX_PLAN_CHARS)
+    elif action == "wiki_enter":
+        if "kb_id" in data:
+            _validate_identifier(data["kb_id"])
+        if "web_search_enabled" in data:
+            _require_bool(data["web_search_enabled"])
+    elif action is None:
+        query = _require_string(data.get("query", ""), maximum=WS_MAX_QUERY_CHARS)
+        attachments = data.get("attachments", [])
+        _validate_attachments(attachments)
+        if query.strip() or attachments:
+            _validate_identifier(data.get("request_id"), maximum=_MAX_REQUEST_ID_CHARS)
+        for field in (
+            "sub_scenario",
+            "client_intent",
+            "external_team_id",
+            "intent",
+            "wiki_kb_id",
+            "kb_id",
+            "wiki_confirmation_id",
+        ):
+            if field in data:
+                _validate_identifier(data[field])
+        for field in (
+            "team_confirm_execution_mode",
+            "wiki_ingest",
+            "web_search_enabled",
+            "plan_active",
+        ):
+            if field in data:
+                _require_bool(data[field])
+        if "work_disabled_preference_ids" in data:
+            _validate_string_list(
+                data["work_disabled_preference_ids"],
+                maximum_items=WS_MAX_SESSIONS,
+            )
+        if "team_execution_profile" in data:
+            profile = data["team_execution_profile"]
+            if not isinstance(profile, dict) or set(profile) != {"requested_mode"}:
+                raise _protocol_error()
+            if profile["requested_mode"] not in {"auto", "fast", "standard", "ai"}:
+                raise _protocol_error()
+    return data
+
+
+def decode_ws_text_frame(text: object) -> dict[str, Any]:
+    """Decode and validate a text frame after enforcing its encoded byte budget."""
+    if not isinstance(text, str):
+        raise WebSocketProtocolError("BINARY_UNSUPPORTED", close_code=1003)
+    if len(text) > WS_MAX_FRAME_BYTES:
+        raise WebSocketProtocolError("FRAME_TOO_LARGE", close_code=1009)
+    try:
+        encoded_size = len(text.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise _protocol_error() from exc
+    if encoded_size > WS_MAX_FRAME_BYTES:
+        raise WebSocketProtocolError("FRAME_TOO_LARGE", close_code=1009)
+
+    def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, child in pairs:
+            if key in value:
+                raise ValueError("duplicate object key")
+            value[key] = child
+        return value
+
+    try:
+        data = json.loads(
+            text,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("constant")),
+            object_pairs_hook=strict_object,
+        )
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise _protocol_error() from exc
+    return validate_ws_message(data)
+
+
+async def receive_ws_message(
+    socket: WebSocket,
+    *,
+    admit: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Receive one raw ASGI frame so binary and byte limits are enforced pre-parse."""
+    event = await socket.receive()
+    event_type = event.get("type")
+    if event_type == "websocket.disconnect":
+        raise WebSocketDisconnect(
+            code=int(event.get("code") or 1000),
+            reason=str(event.get("reason") or ""),
+        )
+    if event_type != "websocket.receive":
+        raise _protocol_error()
+    if admit is not None and not admit():
+        raise WebSocketProtocolError("RATE_LIMITED", close_code=1008)
+    if event.get("bytes") is not None:
+        raise WebSocketProtocolError("BINARY_UNSUPPORTED", close_code=1003)
+    return decode_ws_text_frame(event.get("text"))
 
 
 def normalize_team_execution_profile(raw: object) -> dict[str, object] | None:
@@ -130,16 +530,36 @@ def create_ws_router(
             await socket.close(code=1013, reason="Gateway startup failed")
             return
         owner = account.owner_account_id
+        try:
+            require_admin(account, crew.config)
+            account_is_admin = True
+        except AuthenticationError:
+            account_is_admin = False
         if logout_coordinator is not None and logout_coordinator.is_draining():
             await socket.close(code=4423, reason="Logout in progress")
             return
         try:
-            crew.active_owner.claim(owner)
+            lease = crew.active_owner.claim(owner)
+            generation, expires_at = process_authority_for_account(
+                account,
+                lease_claimed_at=lease.claimed_at,
+                ttl_seconds=crew.config.auth_session_ttl_seconds,
+            )
         except ActiveOwnerConflict:
             await socket.close(code=4423, reason="Active owner conflict")
             return
+        except AuthenticationError:
+            await socket.close(code=4401, reason="Unauthorized")
+            return
         if logout_coordinator is not None:
-            logout_coordinator.activate_owner(owner)
+            logout_coordinator.activate_owner(
+                owner,
+                process_authorization_generation=generation,
+                process_authorization_expires_at=expires_at,
+            )
+        activate_connections = getattr(connections, "activate_owner", None)
+        if callable(activate_connections):
+            activate_connections(owner)
 
         await socket.accept()
         connections.register_owner(owner, socket)
@@ -169,6 +589,10 @@ def create_ws_router(
             if session_id not in registered_sessions:
                 connections.register(session_id, socket, owner_account_id=owner)
                 registered_sessions.add(session_id)
+                security_service = getattr(crew, "security_service", None)
+                resume_session = getattr(security_service, "resume_session", None)
+                if callable(resume_session):
+                    resume_session(owner, session_id)
 
         async def _send_status(session_id: str, message: str) -> None:
             """向该 session 的活跃连接发送状态帧；当前 socket 先确保已订阅。"""
@@ -177,6 +601,20 @@ def create_ws_router(
                 session_id,
                 status_frame(session_id, message),
                 owner_account_id=owner,
+            )
+
+        async def _send_protocol_error(code: str) -> None:
+            await connections.send_socket(
+                socket,
+                {
+                    "kind": "error",
+                    "body": {
+                        "message": "消息协议校验失败",
+                        "code": code,
+                    },
+                    "is_final": True,
+                    "sequence": 0,
+                },
             )
 
         async def _heartbeat() -> None:
@@ -279,7 +717,7 @@ def create_ws_router(
                             },
                             owner_account_id=owner,
                         )
-            except Exception:  # noqa: BLE001 — WS runner 为并发派发的后台 task 顶层，dispatch 已内部回报错帧，此处仅兜底记录
+            except Exception:
                 log.exception("WS runner 异常 session=%s", envelope.session_id)
                 try:
                     await connections.push_payload(
@@ -294,7 +732,7 @@ def create_ws_router(
                         },
                         owner_account_id=owner,
                     )
-                except Exception:  # noqa: BLE001 — 兜底推送失败不得逸出
+                except Exception:
                     log.exception("WS runner 兜底 error chunk 推送失败 session=%s", envelope.session_id)
 
         def _spawn(env: Envelope) -> None:
@@ -307,16 +745,35 @@ def create_ws_router(
             request_id = str(data.get("request_id") or "").strip()
             return {"request_id": request_id} if request_id else {}
 
+        def _admit_frame() -> bool:
+            admit_inbound = getattr(connections, "admit_inbound", None)
+            return not callable(admit_inbound) or bool(admit_inbound(owner, socket))
+
         heartbeat_task = asyncio.create_task(_heartbeat())
         try:
             while True:
                 try:
-                    data = await asyncio.wait_for(socket.receive_json(), timeout=WS_RECEIVE_TIMEOUT_S)
-                except asyncio.TimeoutError:
+                    data = await asyncio.wait_for(
+                        receive_ws_message(socket, admit=_admit_frame),
+                        timeout=WS_RECEIVE_TIMEOUT_S,
+                    )
+                except TimeoutError:
                     log.info("WebSocket 心跳超时，断开连接")
                     break
-                except json.JSONDecodeError:
-                    log.warning("收到非法 JSON 帧，忽略")
+                except WebSocketProtocolError as exc:
+                    if exc.close_code is not None:
+                        if exc.code == "RATE_LIMITED":
+                            try:
+                                await _send_protocol_error(exc.code)
+                            except Exception:
+                                log.debug("发送限流协议错误失败", exc_info=True)
+                        await socket.close(code=exc.close_code, reason=exc.code)
+                        break
+                    log.warning("拒绝非法 WebSocket 消息 code=%s", exc.code)
+                    try:
+                        await _send_protocol_error(exc.code)
+                    except Exception:  # noqa: BLE001 - any socket failure terminates this receive loop
+                        break
                     continue
                 except WebSocketDisconnect:
                     break
@@ -334,6 +791,20 @@ def create_ws_router(
                 ):
                     await socket.close(code=4401, reason="Login required")
                     break
+
+                claim = getattr(connections, "claim_inbound_identity", None)
+                if callable(claim):
+                    identity_error = claim(
+                        owner,
+                        socket,
+                        session_id=str(data.get("session_id") or ""),
+                        request_id=str(data.get("request_id") or ""),
+                        client_sequence=data.get("client_sequence"),
+                        nonce=str(data.get("nonce") or ""),
+                    )
+                    if identity_error:
+                        await _send_protocol_error(identity_error)
+                        continue
 
                 if data.get("kind") == "pong":
                     continue
@@ -570,8 +1041,12 @@ def create_ws_router(
                     continue
 
                 attachments = data.get("attachments", [])
-                if not isinstance(attachments, list):
-                    attachments = []
+                try:
+                    attachments = normalize_agent_attachments(attachments, owner)
+                except ValueError:
+                    if session_id:
+                        await _send_status(session_id, "附件总量超过安全上限")
+                    continue
                 query = data.get("query", "")
                 if not isinstance(query, str):
                     query = str(query or "")
@@ -592,7 +1067,18 @@ def create_ws_router(
                     binding = resolve_scenario_binding(sub_scenario)
                     if binding:
                         # a) 懒加载安装 optional skills（仅装尚未可用的）
-                        for slug in binding.get("skills") or []:
+                        missing_skills = [
+                            slug
+                            for slug in binding.get("skills") or []
+                            if resolve_skill(slug) is None
+                        ]
+                        if missing_skills and not account_is_admin:
+                            await _send_status(
+                                session_id,
+                                "该场景需要管理员先安装可选技能",
+                            )
+                            continue
+                        for slug in missing_skills:
                             if resolve_skill(slug) is None:
                                 try:
                                     install_skill(
@@ -693,10 +1179,7 @@ def create_ws_router(
                         pkg = resolve_package(command)
                         if pkg is not None:
                             pkg_slug = pkg["slug"]
-                            try:
-                                active = set(current_active_skill_packages.get())
-                            except Exception:
-                                active = set()
+                            active = set(current_active_skill_packages.get())
                             if pkg_slug not in active:
                                 active.add(pkg_slug)
                                 current_active_skill_packages.set(active)
@@ -781,6 +1264,66 @@ def create_ws_router(
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
-            connections.unregister_all(socket, registered_sessions, owner_account_id=owner)
+            orphaned_sessions = (
+                connections.unregister_all(
+                    socket,
+                    registered_sessions,
+                    owner_account_id=owner,
+                )
+                or set()
+            )
+            # A disconnected last observer must not leave pending approvals or
+            # session-scoped grants usable by an orphaned turn. Conversation
+            # history remains intact and can be resumed after re-authentication.
+            security_service = getattr(crew, "security_service", None)
+            freeze_session = getattr(security_service, "freeze_session", None)
+            for sid in orphaned_sessions:
+                if callable(freeze_session):
+                    try:
+                        freeze_session(owner, sid)
+                    except Exception:
+                        log.exception("WebSocket 断开权限回收失败 session=%s", sid)
+                try:
+                    dispatcher.stop(
+                        sid,
+                        reason="最后一个认证观察者已断开，执行权限已撤销",
+                        owner_account_id=owner,
+                    )
+                except Exception:
+                    log.exception("WebSocket 断开任务终止失败 session=%s", sid)
+                revoke_runtime_tools = getattr(
+                    getattr(crew, "registry", None),
+                    "revoke_runtime_tool_session",
+                    None,
+                )
+                if callable(revoke_runtime_tools):
+                    try:
+                        await revoke_runtime_tools(owner, sid)
+                    except Exception:
+                        log.exception(
+                            "WebSocket 断开运行期工具回收失败 session=%s",
+                            sid,
+                        )
+                try:
+                    from crew.tools.process_registry import process_registry
+
+                    await asyncio.to_thread(
+                        process_registry.revoke_session,
+                        owner,
+                        sid,
+                        reason="LAST_OBSERVER_DISCONNECTED",
+                    )
+                except Exception:
+                    # ProcessRegistry keeps a durable cleanup tombstone and its
+                    # maintenance loop retries; the frozen session cannot issue
+                    # replacement authority meanwhile.
+                    log.exception("WebSocket 断开进程回收失败 session=%s", sid)
+                browser_manager = getattr(crew, "browser_manager", None)
+                close_browser_session = getattr(browser_manager, "close_session", None)
+                if callable(close_browser_session):
+                    try:
+                        await close_browser_session(owner, sid)
+                    except Exception:
+                        log.exception("WebSocket 断开浏览器回收失败 session=%s", sid)
 
     return router

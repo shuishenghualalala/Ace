@@ -45,12 +45,13 @@ async def test_renew_capability_clears_page_observations_without_approval_state(
     assert session.refs
     tab_ids = set(session.tabs)
 
-    assert manager.permission_for(
+    decision = manager.permission_for(
         "browser_download",
         {"ref": "p1:e5"},
         "owner-a",
         "session-a",
-    ) is None
+    )
+    assert decision is not None and decision.behavior == "ask"
 
     generation = manager.renew_capability("owner-a")
 
@@ -88,12 +89,14 @@ async def test_revoke_keeps_functional_build_free_of_approval_tokens(browser):
     await manager.navigate("owner-a", "session-a", "https://example.com")
     await manager.navigate("owner-b", "session-a", "https://example.com/b")
 
-    assert manager.permission_for(
+    owner_a_decision = manager.permission_for(
         "browser_download", {"ref": "p1:e5"}, "owner-a", "session-a"
-    ) is None
-    assert manager.permission_for(
+    )
+    owner_b_decision = manager.permission_for(
         "browser_download", {"ref": "p1:e5"}, "owner-b", "session-a"
-    ) is None
+    )
+    assert owner_a_decision is not None and owner_a_decision.behavior == "ask"
+    assert owner_b_decision is not None and owner_b_decision.behavior == "ask"
 
     await manager.revoke_owner("owner-a")
 
@@ -118,6 +121,25 @@ async def test_revoke_blocks_actions_and_removes_owner(browser):
     assert not any(
         data.get("owner") == owner_before.runtime_key for data in driver.tabs.values()
     )
+
+
+async def test_revoke_wakes_browser_subscriber_before_owner_teardown(browser):
+    manager, _driver = browser
+    await manager.navigate("owner-a", "session-a", "https://example.com")
+
+    subscription = manager.subscribe("owner-a", "session-a")
+    initial = await anext(subscription)
+    assert initial["type"] == "state"
+
+    await manager.revoke_owner("owner-a")
+    terminal = await asyncio.wait_for(anext(subscription), 2)
+
+    assert terminal == {
+        "type": "owner_revoked",
+        "code": 4401,
+        "reason": "登录状态已失效",
+    }
+    await subscription.aclose()
 
 
 async def test_revoked_owner_inflight_action_is_interrupted(browser):

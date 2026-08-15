@@ -328,7 +328,7 @@ function createFeedbackOverlay(): HTMLElement {
     className: 'feedback-field feedback-field-span-2',
   });
   uploadField.append(
-    element('span', { className: 'form-label', text: '问题截图（最多 10 张）' }),
+    element('span', { className: 'form-label', text: '问题截图（最多 9 张）' }),
   );
   const upload = element('div', { className: 'feedback-upload-card' });
   const uploadMeta = element('div', { className: 'feedback-upload-meta' });
@@ -337,7 +337,7 @@ function createFeedbackOverlay(): HTMLElement {
     element('span', {
       id: 'feedback-screenshot-count',
       className: 'feedback-upload-count',
-      text: '0/10',
+      text: '0/9',
     }),
   );
   upload.append(

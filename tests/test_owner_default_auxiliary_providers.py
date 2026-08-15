@@ -86,3 +86,37 @@ def test_owner_provider_cache_is_evicted_without_dropping_team_plan(tmp_path, mo
     assert app._stale_owner_team_providers[id(provider)] is provider
     assert (owner, "session-a") not in app.team._teams
     assert app.team._plans[(owner, "session-a")] is plan
+
+
+@pytest.mark.asyncio
+async def test_logout_closes_current_and_stale_owner_provider_credentials(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    app = build_app(enable_team=False)
+
+    class ClosableProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    owner = "A:uid-a"
+    current = ClosableProvider()
+    stale = ClosableProvider()
+    other = ClosableProvider()
+    app._owner_team_providers[owner] = current
+    app._owner_team_providers["B:uid-b"] = other
+    app._stale_owner_team_providers[id(stale)] = stale
+    app._stale_owner_team_provider_owners[id(stale)] = owner
+
+    await app.close_owner_credential_providers(owner)
+
+    assert current.closed is True
+    assert stale.closed is True
+    assert other.closed is False
+    assert owner not in app._owner_team_providers
+    assert id(stale) not in app._stale_owner_team_providers

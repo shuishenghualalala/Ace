@@ -42,6 +42,7 @@ def test_get_crew_home_default():
     monkeypatch.delenv("CREW_HOME", raising=False)
     home = get_crew_home()
     from crew.state.home import DEFAULT_HOME_DIRNAME
+
     assert home.name == DEFAULT_HOME_DIRNAME
     # 默认目录跟随实际 checkout 根目录，不依赖仓库文件夹名称。
     assert home.parent == Path(__file__).resolve().parents[1]
@@ -236,9 +237,7 @@ def test_load_config_resolves_task_workspace_root_relative_to_crew_home(tmp_path
     monkeypatch.delenv("CREW_TASK_WORKSPACE_ROOT", raising=False)
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(
-        "runtime:\n"
-        "  task_workspace_root: outputs\n"
-        "  db_path: crew_data/crew.db\n",
+        "runtime:\n  task_workspace_root: outputs\n  db_path: crew_data/crew.db\n",
         encoding="utf-8",
     )
 
@@ -292,16 +291,16 @@ def test_export_crew_runtime_env_owner_scope(tmp_path, monkeypatch):
 
 
 def test_runtime_env_overrides_sets_python_utf8_io(tmp_path, monkeypatch):
-  home = tmp_path / "project" / ".crew"
-  monkeypatch.setenv("CREW_HOME", str(home))
+    home = tmp_path / "project" / ".crew"
+    monkeypatch.setenv("CREW_HOME", str(home))
 
-  values = runtime_env_overrides(owner_account_id="owner:user-a")
+    values = runtime_env_overrides(owner_account_id="owner:user-a")
 
-  assert values["PYTHONIOENCODING"] == "utf-8"
-  if sys.platform == "win32":
-    assert values["PYTHONUTF8"] == "1"
-  else:
-    assert "PYTHONUTF8" not in values
+    assert values["PYTHONIOENCODING"] == "utf-8"
+    if sys.platform == "win32":
+        assert values["PYTHONUTF8"] == "1"
+    else:
+        assert "PYTHONUTF8" not in values
 
 
 def test_owner_runtime_env_does_not_nest_accounts_on_reload(tmp_path, monkeypatch):
@@ -399,11 +398,7 @@ def test_load_config_initializes_local_yaml_from_publishable_example(tmp_path, m
     config_dir.mkdir(parents=True)
     example = config_dir / "config.yaml.example"
     example.write_text(
-        "llm:\n"
-        "  active: default\n"
-        "  models:\n"
-        "    default:\n"
-        "      model: example-model\n",
+        "llm:\n  active: default\n  models:\n    default:\n      model: example-model\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(config_module, "ROOT", root)
@@ -426,9 +421,7 @@ def test_load_config_never_overwrites_existing_local_yaml(tmp_path, monkeypatch)
         encoding="utf-8",
     )
     local = config_dir / "config.yaml"
-    local_content = (
-        "llm:\n  active: local\n  models:\n    local:\n      model: local-model\n"
-    )
+    local_content = "llm:\n  active: local\n  models:\n    local:\n      model: local-model\n"
     local.write_text(local_content, encoding="utf-8")
     monkeypatch.setattr(config_module, "ROOT", root)
     monkeypatch.delenv("CREW_HOME", raising=False)
@@ -509,13 +502,11 @@ def test_refresh_owner_runtime_env_loads_system_and_owner_env(tmp_path, monkeypa
     owner_home = crew_home / "accounts" / owner_path_segment(owner)
     owner_home.mkdir(parents=True)
     (config_dir / ".env").write_text(
-        "CREW_SYSTEM_ONLY=system-v1\n"
-        "CREW_SHARED_KEY=system-v1\n",
+        "CREW_SYSTEM_ONLY=system-v1\nCREW_SHARED_KEY=system-v1\n",
         encoding="utf-8",
     )
     (owner_home / ".env").write_text(
-        "CREW_OWNER_ONLY=owner-v1\n"
-        "CREW_SHARED_KEY=owner-v1\n",
+        "CREW_OWNER_ONLY=owner-v1\nCREW_SHARED_KEY=owner-v1\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(home_module, "ROOT", root)
@@ -530,6 +521,42 @@ def test_refresh_owner_runtime_env_loads_system_and_owner_env(tmp_path, monkeypa
     assert os.environ["CREW_OWNER_ONLY"] == "owner-v1"
     assert os.environ["CREW_SHARED_KEY"] == "owner-v1"
     assert os.environ["CREW_ENV_FILE"] == str(owner_home / ".env")
+
+
+def test_runtime_env_cannot_override_security_or_process_bootstrap(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    config_dir = root / "config"
+    config_dir.mkdir(parents=True)
+    crew_home = tmp_path / ".Crew"
+    owner = "owner:user-a"
+    owner_home = crew_home / "accounts" / owner_path_segment(owner)
+    owner_home.mkdir(parents=True)
+    (config_dir / ".env").write_text(
+        "ACE_STRICT_SECURITY=0\n"
+        "ACE_DESKTOP_SECURITY_RUNTIME=C:\\\\attacker.exe\n"
+        "PYTHONPATH=C:\\\\attacker\n"
+        "PATH=C:\\\\attacker\n"
+        "CREW_HOME=C:\\\\attacker\n"
+        "CREW_ALLOWED_LITERAL=${HOST_ONLY_SECRET}\n",
+        encoding="utf-8",
+    )
+    (owner_home / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setattr(home_module, "ROOT", root)
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    monkeypatch.setenv("ACE_STRICT_SECURITY", "1")
+    monkeypatch.delenv("ACE_DESKTOP_SECURITY_RUNTIME", raising=False)
+    monkeypatch.setenv("PYTHONPATH", "trusted-pythonpath")
+    monkeypatch.setenv("PATH", "trusted-path")
+    monkeypatch.setenv("HOST_ONLY_SECRET", "must-not-expand")
+
+    refresh_owner_runtime_env(owner)
+
+    assert os.environ["ACE_STRICT_SECURITY"] == "1"
+    assert "ACE_DESKTOP_SECURITY_RUNTIME" not in os.environ
+    assert os.environ["PYTHONPATH"] != r"C:\attacker"
+    assert os.environ["PATH"] != r"C:\attacker"
+    assert os.environ["CREW_HOME"] == str(crew_home)
+    assert os.environ["CREW_ALLOWED_LITERAL"] == "${HOST_ONLY_SECRET}"
 
 
 @pytest.mark.parametrize("scope", ["system", "owner"])
@@ -575,9 +602,9 @@ def test_refresh_owner_runtime_env_reuses_unchanged_env_cache(tmp_path, monkeypa
     original_dotenv_values = home_module.dotenv_values
     calls = {"count": 0}
 
-    def counting_dotenv_values(path):
+    def counting_dotenv_values(*args, **kwargs):
         calls["count"] += 1
-        return original_dotenv_values(path)
+        return original_dotenv_values(*args, **kwargs)
 
     monkeypatch.setattr(home_module, "dotenv_values", counting_dotenv_values)
 

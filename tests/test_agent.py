@@ -686,7 +686,13 @@ async def test_compaction_does_not_destroy_persisted_history():
 # ---------------------------------------------------------------------------
 # 会话标题
 # ---------------------------------------------------------------------------
-async def test_new_session_title_generated_and_readable():
+async def test_new_session_title_generated_and_readable(monkeypatch):
+    import crew.agent.runtime as _rt
+
+    async def _fixed_title(provider, messages, *, user_only=False):
+        return "模型摘要标题"
+
+    monkeypatch.setattr(_rt, "generate_session_title", _fixed_title)
     store = InMemorySessionStore()
     agent = _agent(FakeProvider(), session_store=store, enable_title=True)
     async for _ in agent.run(Envelope.of("帮我查一下天气", session_id="st")):
@@ -695,16 +701,21 @@ async def test_new_session_title_generated_and_readable():
     if agent._title_tasks:
         await asyncio.gather(*agent._title_tasks)
     titles = {s["session_id"]: s["title"] for s in store.list_sessions(owner_account_id="local")}
-    # 标题来自模型生成（FakeProvider 回声），非默认首条 user 截断
-    assert titles["st"] and titles["st"] != "帮我查一下天气"
+    assert titles["st"] == "模型摘要标题"
 
 
-async def test_channel_session_title_generated():
+async def test_channel_session_title_generated(monkeypatch):
     """渠道会话（agent:main:*）首轮结束后同样生成自动摘要标题。
 
     复现 bug：_session_needs_title 走 list_sessions 默认排除渠道会话，
     渠道会话永远拿不到摘要标题，侧栏一直显示占位「新对话」。
     """
+    import crew.agent.runtime as _rt
+
+    async def _fixed_title(provider, messages, *, user_only=False):
+        return "渠道摘要标题"
+
+    monkeypatch.setattr(_rt, "generate_session_title", _fixed_title)
     store = InMemorySessionStore()
     agent = _agent(FakeProvider(), session_store=store, enable_title=True)
     sid = "agent:main:weixin:dm:u1"
@@ -716,7 +727,7 @@ async def test_channel_session_title_generated():
         s["session_id"]: s["title"]
         for s in store.list_sessions(owner_account_id="local", exclude_channel_sessions=False)
     }
-    assert titles[sid] and titles[sid] != "帮我查一下天气"
+    assert titles[sid] == "渠道摘要标题"
 
 
 async def test_title_generation_does_not_block_final():
@@ -734,7 +745,7 @@ async def test_title_generation_does_not_block_final():
     import crew.agent.runtime as _rt
     real = _rt.generate_session_title
 
-    async def _hanging_title(provider, messages):
+    async def _hanging_title(provider, messages, *, user_only=False):
         await release.wait()
         return "后台摘要标题"
 
@@ -852,29 +863,8 @@ async def test_title_task_deduplicated_while_inflight():
         _rt.generate_session_title = real
 
 
-async def test_title_spawn_scheduled_only_after_main_response(monkeypatch):
-    """自动标题必须移出主推理窗口，并在主 final 后最多调度一次。"""
-    store = InMemorySessionStore()
-    agent = _agent(FakeProvider(), session_store=store, enable_title=True)
-    events: list[str] = []
-    real_spawn = SingleAgent._spawn_title_task
-
-    def _spy(self, title_sid, owner, history, push_fn):
-        events.append("title")
-        return real_spawn(self, title_sid, owner, history, push_fn)
-
-    monkeypatch.setattr(SingleAgent, "_spawn_title_task", _spy)
-    async for chunk in agent.run(Envelope.of("帮我查天气", session_id="deferred-title")):
-        if chunk.kind == "final":
-            events.append("final")
-    if agent._title_tasks:
-        await asyncio.gather(*agent._title_tasks)
-
-    assert events == ["final", "title"]
-
-
 async def test_main_stream_gets_provider_before_title_request():
-    """容量受限的同一 Provider 中，标题请求不得抢在主流式请求前。"""
+    """容量受限的同一 Provider 中，标题请求可与主回答并发，但不得抢在主流式请求前启动。"""
 
     class _OrderedProvider:
         def __init__(self) -> None:
@@ -899,7 +889,7 @@ async def test_main_stream_gets_provider_before_title_request():
     if agent._title_tasks:
         await asyncio.gather(*agent._title_tasks)
 
-    assert provider.call_order == ["main", "main_done", "title"]
+    assert provider.call_order.index("main") < provider.call_order.index("title")
 
 
 async def test_title_timeout_falls_back_to_first_query():

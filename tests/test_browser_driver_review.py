@@ -89,6 +89,17 @@ def test_electron_driver_classifies_modal_pending_as_recoverable_state(
     }
 
 
+def test_electron_driver_error_hides_host_path_and_secret() -> None:
+    with pytest.raises(BrowserDriverError) as raised:
+        ElectronBrowserDriver._raise(
+            ElectronBridgeError(r"C:\private\config.yaml ACCESS_TOKEN=secret")
+        )
+
+    assert str(raised.value) == "浏览器操作失败"
+    assert r"C:\private" not in str(raised.value)
+    assert "secret" not in str(raised.value)
+
+
 @pytest.mark.asyncio
 async def test_electron_driver_preserves_cancellation_after_remote_lifecycle_failure(
     tmp_path: Path,
@@ -838,6 +849,42 @@ def test_model_update_cache_invalidation_can_be_scoped_to_owner() -> None:
 
     assert manager.peek("session-a", owner_account_id="owner-a") is None
     assert manager.peek("session-b", owner_account_id="owner-b") is owner_b
+
+
+@pytest.mark.asyncio
+async def test_owner_cache_eviction_closes_credential_bearing_agent() -> None:
+    class ClosingAgent:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    manager = AgentManager(lambda _config, owner_account_id="": ClosingAgent())
+    owner_agent = manager.get("session-a", owner_account_id="owner-a")
+    other_agent = manager.get("session-b", owner_account_id="owner-b")
+
+    await manager.drop_owner_and_wait("owner-a")
+
+    assert owner_agent.closed is True
+    assert other_agent.closed is False
+    assert manager.peek("session-a", owner_account_id="owner-a") is None
+    assert manager.peek("session-b", owner_account_id="owner-b") is other_agent
+    manager.clear()
+    await manager.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_owner_cache_eviction_fails_closed_when_credential_client_close_fails() -> None:
+    class BrokenAgent:
+        async def aclose(self) -> None:
+            raise RuntimeError("close failed")
+
+    manager = AgentManager(lambda _config, owner_account_id="": BrokenAgent())
+    manager.get("session-a", owner_account_id="owner-a")
+
+    with pytest.raises(RuntimeError, match="credential client close failed"):
+        await manager.drop_owner_and_wait("owner-a")
 
 
 def test_owner_profile_falls_back_to_effective_global_profile(

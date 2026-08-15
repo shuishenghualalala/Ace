@@ -23,14 +23,37 @@ from crew.core.runctx import (
     current_user_type,
 )
 from crew.core.types import ToolPermissionDecision
+from crew.state.logging import get_logger
 from crew.state.plugin_preferences import plugin_effective_enabled, plugin_role_allowed
 
 PLUGIN_KEY = "browser"
 TOOL_NAME = "browser_use"
+log = get_logger("plugins.browser")
+_PERMISSION_AUDITOR: Callable[[dict[str, Any], ToolPermissionDecision], None] | None = None
 CAPABILITY_DISABLED = (
     "BROWSER_CAPABILITY_DISABLED: 内置浏览器能力已被关闭；"
     "请告知用户在设置中重新开启，不要改用终端、网页搜索或其它自动化机制"
 )
+
+
+def set_permission_auditor(
+    auditor: Callable[[dict[str, Any], ToolPermissionDecision], None] | None,
+) -> None:
+    """Install the host audit hook for browser permission decisions."""
+    global _PERMISSION_AUDITOR
+    _PERMISSION_AUDITOR = auditor
+
+
+def _emit_permission_audit(
+    args: dict[str, Any],
+    decision: ToolPermissionDecision,
+) -> None:
+    if _PERMISSION_AUDITOR is None:
+        return
+    try:
+        _PERMISSION_AUDITOR(args, decision)
+    except Exception:  # noqa: BLE001 - permission audit is best-effort
+        log.exception("browser permission audit failed")
 
 # 真正的后置 snapshot 一定以 Crew 自己写的 page_generation 行紧跟在开边界之后。
 # 对话框待处理载荷走 manager 的 _bounded(safe_dialog)，紧跟开边界的是 JSON '{'，
@@ -1060,21 +1083,30 @@ class BrowserUseTool:
     def permission_resolver(self, args: dict[str, Any]) -> ToolPermissionDecision | None:
         invalid = validate_args(args)
         if invalid:
-            return ToolPermissionDecision("deny", invalid)
+            decision = ToolPermissionDecision("deny", invalid)
+            _emit_permission_audit(args, decision)
+            return decision
         denied = self._check_capability()
         if denied:
-            return self._capability_denied()
+            decision = self._capability_denied()
+            _emit_permission_audit(args, decision)
+            return decision
         if str(args.get("action")) == "vision":
             capabilities = current_model_capabilities.get()
             if capabilities is not None and "vision" not in {
                 str(item).strip().lower() for item in capabilities
             }:
-                return ToolPermissionDecision(
+                decision = ToolPermissionDecision(
                     "deny", "当前模型不具备视觉能力，无法使用 vision；请用 snapshot"
                 )
+                _emit_permission_audit(args, decision)
+                return decision
         owner, session, _workdir = _ctx()
         logical, logical_args = _logical_call(args)
-        return self._manager.permission_for(logical, logical_args, owner, session)
+        decision = self._manager.permission_for(logical, logical_args, owner, session)
+        if decision is not None:
+            _emit_permission_audit(args, decision)
+        return decision
 
     def permission_approver(self, token: str, args: dict[str, Any]) -> bool:
         if self._check_capability():

@@ -128,7 +128,7 @@ async def decide_team_turn(
                 **diagnostics,
                 "status": "fallback",
                 "error_type": exc.__class__.__name__,
-                "error": str(exc)[:240],
+                "error": "团队回合判断失败",
             },
         )
 

@@ -1,5 +1,5 @@
 use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::policy::{NetworkError, NetworkPolicy};
 use crate::protocol::NetworkErrorCode;
@@ -19,8 +19,13 @@ pub fn connect(
 ) -> Result<TcpStream, NetworkError> {
     let addresses = policy.resolve_allowed(host, port, protocol)?;
     let mut last_error = None;
+    let deadline = Instant::now() + timeout;
     for address in addresses {
-        match connect_pinned(address, timeout) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match connect_pinned(address, remaining) {
             Ok(stream) => return Ok(stream),
             Err(error) => last_error = Some(error),
         }

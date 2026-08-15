@@ -294,6 +294,41 @@ async def test_replay_filter_skips_filtered_payloads(conn: ConnectionManager):
     assert [p["kind"] for p in ws2.sent] == ["delta", "final"]
 
 
+@pytest.mark.asyncio
+async def test_pending_delta_merge_reapplies_outbound_frame_limit():
+    conn = ConnectionManager(min_interval=60)
+    ws = _FakeWS()
+    conn.register("s1", ws)
+    conn._last_push_ts[("", "s1")] = time.monotonic()
+    large_text = "x" * (600 * 1024)
+
+    for sequence in (1, 2):
+        await conn.push_payload(
+            "s1",
+            {
+                "kind": "delta",
+                "body": {"text": large_text},
+                "is_final": False,
+                "sequence": sequence,
+                "request_id": "req-large",
+            },
+        )
+    await conn.push_payload(
+        "s1",
+        {
+            "kind": "final",
+            "body": {"text": "done"},
+            "is_final": True,
+            "sequence": 3,
+            "request_id": "req-large",
+        },
+    )
+
+    assert ws.sent[0]["kind"] == "error"
+    assert ws.sent[0]["body"]["code"] == "RESPONSE_INVALID"
+    assert ws.sent[-1]["kind"] == "final"
+
+
 def test_merge_pending_delta_keeps_request_ids_separate(conn: ConnectionManager):
     payloads = [
         {"kind": "delta", "request_id": "req-1", "sequence": 1, "body": {"text": "a", "delta_start": 1, "delta_end": 1}},

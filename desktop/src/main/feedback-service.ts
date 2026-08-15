@@ -3,8 +3,26 @@
  * baseURL 从环境变量 `CREW_FEEDBACK_BASE_URL` 读取；开源版默认不连接任何外部服务。
  */
 
-import { randomUUID } from 'node:crypto';
-import type { FeedbackSubmitArgs, FeedbackListArgs } from '../shared/ipc-schemas';
+import type {
+  FeedbackListArgs,
+  FeedbackPayloadArgs,
+  FeedbackSubmitArgs,
+} from '../shared/ipc-schemas';
+import {
+  FeedbackConsentAuthority,
+  redactFeedbackSecrets,
+  type FeedbackApprovalResult,
+  type FeedbackCancelResult,
+  type FeedbackConsentContext,
+  type FeedbackPreviewResult,
+  type FeedbackSecurityOptions,
+  type FeedbackTraceEntry,
+} from './feedback-security';
+
+export type {
+  FeedbackConsentContext,
+  FeedbackTraceEntry,
+} from './feedback-security';
 
 export const FEEDBACK_CONFIG = {
   baseURL: process.env['CREW_FEEDBACK_BASE_URL']?.trim() || '',
@@ -12,7 +30,14 @@ export const FEEDBACK_CONFIG = {
 };
 
 /** 单张附件图片最大字节数（转 data URL 前的体积上限）。 */
-const MAX_FEEDBACK_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_FEEDBACK_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_FEEDBACK_RESPONSE_BYTES = 2 * 1024 * 1024;
+const ALLOWED_FEEDBACK_IMAGE_TYPES = new Set([
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 export interface FeedbackAttachment {
   name: string;
@@ -21,6 +46,7 @@ export interface FeedbackAttachment {
 
 export interface FeedbackResponse {
   success: boolean;
+  canceled?: boolean | undefined;
   resultCode?: string | undefined;
   statusCode?: number | undefined;
   message?: string | undefined;
@@ -28,6 +54,8 @@ export interface FeedbackResponse {
   isHTML?: boolean | undefined;
   error?: Error | undefined;
 }
+
+export type FeedbackServiceOptions = FeedbackSecurityOptions;
 
 export interface FeedbackListRequest {
   page?: number | undefined;
@@ -62,29 +90,174 @@ export interface FeedbackImageResponse {
   error?: Error | undefined;
 }
 
-function dataUrlToBuffer(dataUrl: string): { buffer: Buffer; mimeType: string; ext: string } | null {
-  const matches = dataUrl.match(/^data:(.+);base64,(.+)$/);
-  if (!matches) return null;
-  const mimeType = matches[1];
-  const base64Data = matches[2];
-  const buffer = Buffer.from(base64Data, 'base64');
-  const ext = mimeType.split('/')[1] || 'png';
-  return { buffer, mimeType, ext };
+const FEEDBACK_STATUSES = new Set<FeedbackListItem['status']>([
+  'PENDING',
+  'PROCESSING',
+  'RESOLVED',
+  'CLOSED',
+]);
+
+function boundedRemoteText(
+  value: unknown,
+  maxChars: number,
+  required = false,
+): string | undefined {
+  if (typeof value !== 'string' || (required && value.length === 0)) return undefined;
+  return redactFeedbackSecrets(value, maxChars);
 }
 
-/**
- * 把 images 字段的相对路径解析为完整 URL；绝对 URL 原样返回。
- * 相对路径的静态文件根当前未确认(实测 4 处候选根 404)，服务端确认后仅需改此一处拼接。
- */
-function resolveImageUrl(baseURL: string, path: string): string {
-  if (/^https?:\/\//i.test(path)) return path;
-  return `${baseURL}/${path.replace(/^\/+/, '')}`;
+function safeFeedbackErrorMessage(
+  error: unknown,
+  fallback: string,
+  maxChars = 300,
+): string {
+  const message = error instanceof Error && typeof error.message === 'string'
+    ? error.message
+    : (typeof error === 'string' ? error : fallback);
+  return redactFeedbackSecrets(message, maxChars);
+}
+
+function parseFeedbackListItem(raw: unknown): FeedbackListItem | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  const id = value['id'];
+  const title = boundedRemoteText(value['title'], 200, true);
+  const status = value['status'];
+  const createdAt = boundedRemoteText(value['createdAt'], 64, true);
+  if (
+    !Number.isSafeInteger(id)
+    || Number(id) < 0
+    || !title
+    || !FEEDBACK_STATUSES.has(status as FeedbackListItem['status'])
+    || !createdAt
+  ) {
+    return null;
+  }
+  const item: FeedbackListItem = {
+    id: Number(id),
+    title,
+    status: status as FeedbackListItem['status'],
+    createdAt,
+  };
+  const description = boundedRemoteText(value['description'], 5000);
+  const images = boundedRemoteText(value['images'], 32 * 1024);
+  const adminReply = value['adminReply'] === null
+    ? null
+    : boundedRemoteText(value['adminReply'], 5000);
+  const updatedAt = boundedRemoteText(value['updatedAt'], 64);
+  if (description !== undefined) item.description = description;
+  if (images !== undefined) item.images = images;
+  if (adminReply !== undefined) item.adminReply = adminReply;
+  if (updatedAt !== undefined) item.updatedAt = updatedAt;
+  return item;
+}
+
+function normalizeFeedbackBaseURL(value: string): string | null {
+  try {
+    const parsed = new URL(value.trim());
+    if (
+      parsed.protocol !== 'https:'
+      || parsed.username
+      || parsed.password
+      || parsed.search
+      || parsed.hash
+    ) {
+      return null;
+    }
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve one server-returned image path without allowing an origin escape. */
+function resolveImageUrl(baseURL: string, imagePath: string): string {
+  if (
+    !imagePath
+    || imagePath.startsWith('/')
+    || imagePath.includes('\\')
+    || imagePath.includes('?')
+    || imagePath.includes('#')
+  ) {
+    throw new Error('反馈图片路径无效');
+  }
+  const base = new URL(`${baseURL}/`);
+  const resolved = new URL(imagePath, base);
+  if (resolved.origin !== base.origin || !resolved.pathname.startsWith(base.pathname)) {
+    throw new Error('反馈图片路径越过服务边界');
+  }
+  return resolved.toString();
+}
+
+async function readBoundedBody(response: Response, maxBytes: number): Promise<Buffer> {
+  const declared = response.headers.get('content-length');
+  if (declared !== null) {
+    const size = Number(declared);
+    if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes) {
+      throw new Error('反馈服务响应过大');
+    }
+  }
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error('反馈服务响应过大');
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function fetchFeedback(
+  url: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const timeoutSignal = AbortSignal.timeout(FEEDBACK_CONFIG.timeout);
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutSignal])
+    : timeoutSignal;
+  const response = await fetch(url, {
+    ...init,
+    redirect: 'error',
+    signal: requestSignal,
+  });
+  if (
+    response.redirected
+    || (response.url !== '' && response.url !== url)
+  ) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // The response is rejected regardless of body cancellation support.
+    }
+    throw new Error('反馈服务响应越过精确请求地址');
+  }
+  return response;
 }
 
 export class FeedbackService {
   private baseURL: string = FEEDBACK_CONFIG.baseURL;
+  private readonly consent: FeedbackConsentAuthority;
+
+  constructor(options: FeedbackServiceOptions = {}) {
+    this.consent = new FeedbackConsentAuthority(options);
+  }
 
   setBaseURL(url: string): void {
+    if (url.trim() && normalizeFeedbackBaseURL(url) === null) {
+      throw new Error('反馈服务地址必须是无凭据、无查询参数的 HTTPS URL');
+    }
     this.baseURL = url;
   }
 
@@ -93,59 +266,76 @@ export class FeedbackService {
   }
 
   private configuredBaseURL(): string | null {
-    const value = this.baseURL.trim().replace(/\/+$/, '');
-    return value || null;
+    return normalizeFeedbackBaseURL(this.baseURL);
   }
 
-  async submitFeedback(args: FeedbackSubmitArgs): Promise<FeedbackResponse> {
+  createPreview(
+    args: FeedbackPayloadArgs,
+    context: FeedbackConsentContext,
+  ): FeedbackPreviewResult {
+    return this.consent.createPreview(args, context, this.configuredBaseURL() !== null);
+  }
+
+  approvePreview(
+    previewId: string,
+    context: FeedbackConsentContext,
+  ): FeedbackApprovalResult {
+    return this.consent.approvePreview(
+      previewId,
+      context,
+      this.configuredBaseURL() !== null,
+    );
+  }
+
+  cancelPreview(
+    previewId: string,
+    context: FeedbackConsentContext,
+  ): FeedbackCancelResult {
+    return this.consent.cancelPreview(previewId, context);
+  }
+
+  cancelFeedback(
+    authority: string,
+    context: FeedbackConsentContext,
+  ): FeedbackCancelResult {
+    return this.consent.cancelFeedback(authority, context);
+  }
+
+  cancelAll(): void {
+    this.consent.cancelAll();
+  }
+
+  readTrace(context: FeedbackConsentContext): FeedbackTraceEntry[] {
+    return this.consent.readTrace(context);
+  }
+
+  clearTrace(context: FeedbackConsentContext): void {
+    this.consent.clearTrace(context);
+  }
+
+  async submitFeedback(
+    args: FeedbackSubmitArgs,
+    context: FeedbackConsentContext,
+  ): Promise<FeedbackResponse> {
+    const baseURL = this.configuredBaseURL();
+    const claimed = this.consent.claimSubmission(args, context, baseURL !== null);
+    if (!claimed.success) return claimed;
+    const { claim } = claimed;
+    let outcome: 'succeeded' | 'failed' | 'canceled' = 'failed';
     try {
-      const baseURL = this.configuredBaseURL();
       if (!baseURL) {
         return { success: false, message: '反馈服务未配置，请设置 CREW_FEEDBACK_BASE_URL' };
       }
-      const form = new FormData();
-      form.append('userInfo', '{}');
-
-      const feedbackForSubmit = {
-        title: args.title,
-        description: args.description,
-        image: [],
-      };
-      form.append('feedback', JSON.stringify(feedbackForSubmit));
-
-      const images = args.images;
-      if (Array.isArray(images) && images.length > 0) {
-        for (const imageData of images) {
-          if (typeof imageData === 'string') {
-            const parsed = dataUrlToBuffer(imageData);
-            if (parsed) {
-              const filename = `screenshot-${Date.now()}-${randomUUID().slice(0, 8)}.${parsed.ext}`;
-              const blob = new Blob([new Uint8Array(parsed.buffer)], { type: parsed.mimeType });
-              form.append('images', blob, filename);
-            }
-          } else if (imageData && typeof imageData === 'object' && 'dataUrl' in imageData) {
-            const parsed = dataUrlToBuffer(imageData.dataUrl);
-            if (parsed) {
-              const filename = imageData.name || `screenshot-${Date.now()}-${randomUUID().slice(0, 8)}.${parsed.ext}`;
-              const blob = new Blob([new Uint8Array(parsed.buffer)], { type: parsed.mimeType });
-              form.append('images', blob, filename);
-            }
-          }
-        }
-      }
 
       const url = `${baseURL}/api/feedback/submit`;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), FEEDBACK_CONFIG.timeout);
-
-      const res = await fetch(url, {
+      const res = await fetchFeedback(url, {
         method: 'POST',
-        body: form,
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-
-      const responseText = await res.text();
+        body: claim.form,
+      }, claim.signal);
+      const responseText = (await readBoundedBody(
+        res,
+        MAX_FEEDBACK_RESPONSE_BYTES,
+      )).toString('utf8');
 
       if (responseText.startsWith('<') || responseText.startsWith('<!')) {
         return {
@@ -156,44 +346,62 @@ export class FeedbackService {
         };
       }
 
-      let result: { resultCode?: string; resultDesc?: string };
+      let result: unknown;
       try {
         result = JSON.parse(responseText);
-      } catch (e) {
+      } catch {
         return {
           success: false,
           statusCode: res.status,
-          message: `JSON 解析失败: ${(e as Error).message}`,
+          message: '反馈服务返回了无效 JSON',
         };
       }
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        return {
+          success: false,
+          statusCode: res.status,
+          message: '反馈服务返回了无效响应',
+        };
+      }
+      const responseRecord = result as Record<string, unknown>;
+      const resultCode = typeof responseRecord['resultCode'] === 'string'
+        ? redactFeedbackSecrets(responseRecord['resultCode'], 64)
+        : undefined;
+      const resultDesc = typeof responseRecord['resultDesc'] === 'string'
+        ? redactFeedbackSecrets(responseRecord['resultDesc'], 1000)
+        : undefined;
 
       const isSuccessStatus = res.status >= 200 && res.status < 300;
-      if (!isSuccessStatus || result.resultCode !== '000000') {
+      if (!isSuccessStatus || resultCode !== '000000') {
         return {
           success: false,
-          resultCode: result.resultCode,
+          resultCode,
           statusCode: res.status,
-          message: result.resultDesc || '提交反馈失败',
-          data: result as unknown as Record<string, unknown>,
+          message: resultDesc || '提交反馈失败',
         };
       }
 
+      outcome = 'succeeded';
       return {
         success: true,
-        resultCode: result.resultCode,
+        resultCode,
         statusCode: res.status,
-        message: result.resultDesc || '反馈提交成功',
-        data: result as unknown as Record<string, unknown>,
+        message: resultDesc || '反馈提交成功',
       };
     } catch (error) {
-      if ((error as Error).name === 'AbortError') {
+      if (claim.isCanceled()) {
+        outcome = 'canceled';
+        return { success: false, canceled: true, message: '反馈提交已取消' };
+      }
+      if (error instanceof Error && error.name === 'AbortError') {
         return { success: false, message: '请求超时' };
       }
       return {
         success: false,
-        message: (error as Error).message || '提交反馈失败',
-        error: error as Error,
+        message: safeFeedbackErrorMessage(error, '提交反馈失败'),
       };
+    } finally {
+      this.consent.completeSubmission(claim.authority, outcome);
     }
   }
 
@@ -208,6 +416,9 @@ export class FeedbackService {
    */
   async getFeedbackList(params: FeedbackListArgs): Promise<FeedbackListResponse> {
     try {
+      if (this.consent.isDisabled()) {
+        return { success: false, message: '组织策略已禁用反馈功能' };
+      }
       const baseURL = this.configuredBaseURL();
       if (!baseURL) {
         return { success: false, message: '反馈服务未配置，请设置 CREW_FEEDBACK_BASE_URL' };
@@ -224,17 +435,14 @@ export class FeedbackService {
         'User-Agent': 'Mozilla/5.0',
         'Accept': 'application/json',
       };
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), FEEDBACK_CONFIG.timeout);
-
-      const res = await fetch(url, {
+      const res = await fetchFeedback(url, {
         method: 'GET',
         headers,
-        signal: controller.signal,
       });
-      clearTimeout(timer);
-
-      const responseText = await res.text();
+      const responseText = (await readBoundedBody(
+        res,
+        MAX_FEEDBACK_RESPONSE_BYTES,
+      )).toString('utf8');
 
       if (responseText.startsWith('<') || responseText.startsWith('<!')) {
         return {
@@ -243,39 +451,60 @@ export class FeedbackService {
         };
       }
 
-      let result: { resultCode?: string; resultDesc?: string; data?: { total?: number; list?: FeedbackListItem[] } };
+      let result: unknown;
       try {
         result = JSON.parse(responseText);
-      } catch (e) {
+      } catch {
         return {
           success: false,
-          message: `JSON 解析失败: ${(e as Error).message}`,
+          message: '反馈服务返回了无效 JSON',
         };
       }
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        return { success: false, message: '反馈服务返回了无效响应' };
+      }
+      const responseRecord = result as Record<string, unknown>;
+      const resultCode = boundedRemoteText(responseRecord['resultCode'], 64);
+      const resultDesc = boundedRemoteText(responseRecord['resultDesc'], 1000);
+      const data = responseRecord['data'];
+      const dataRecord = data && typeof data === 'object' && !Array.isArray(data)
+        ? data as Record<string, unknown>
+        : null;
 
       const isSuccessStatus = res.status >= 200 && res.status < 300;
-      if (!isSuccessStatus || result.resultCode !== '000000') {
+      if (!isSuccessStatus || resultCode !== '000000') {
         return {
           success: false,
-          resultCode: result.resultCode,
-          message: result.resultDesc || '获取反馈列表失败',
+          resultCode,
+          message: resultDesc || '获取反馈列表失败',
         };
       }
+      const totalValue = dataRecord?.['total'];
+      const total = Number.isSafeInteger(totalValue)
+        && Number(totalValue) >= 0
+        ? Math.min(Number(totalValue), 1_000_000_000)
+        : 0;
+      const rawList = dataRecord?.['list'];
+      const list = Array.isArray(rawList)
+        ? rawList
+          .slice(0, params.size)
+          .map(parseFeedbackListItem)
+          .filter((item): item is FeedbackListItem => item !== null)
+        : [];
 
       return {
         success: true,
-        resultCode: result.resultCode,
-        total: result.data?.total ?? 0,
-        list: result.data?.list ?? [],
+        resultCode,
+        total,
+        list,
       };
     } catch (error) {
-      if ((error as Error).name === 'AbortError') {
+      if (error instanceof Error && error.name === 'AbortError') {
         return { success: false, message: '请求超时' };
       }
       return {
         success: false,
-        message: (error as Error).message || '获取反馈列表失败',
-        error: error as Error,
+        message: safeFeedbackErrorMessage(error, '获取反馈列表失败'),
       };
     }
   }
@@ -287,6 +516,9 @@ export class FeedbackService {
    */
   async getFeedbackImage(path: string): Promise<FeedbackImageResponse> {
     try {
+      if (this.consent.isDisabled()) {
+        return { success: false, message: '组织策略已禁用反馈功能' };
+      }
       const baseURL = this.configuredBaseURL();
       if (!baseURL) {
         return { success: false, message: '反馈服务未配置，请设置 CREW_FEEDBACK_BASE_URL' };
@@ -294,28 +526,25 @@ export class FeedbackService {
       const url = resolveImageUrl(baseURL, path);
       const headers: Record<string, string> = { 'User-Agent': 'Mozilla/5.0', 'Accept': 'image/*' };
 
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), FEEDBACK_CONFIG.timeout);
-      const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
-      clearTimeout(timer);
+      const res = await fetchFeedback(url, { method: 'GET', headers });
 
       if (!res.ok) {
         return { success: false, message: `图片加载失败(HTTP ${res.status})` };
       }
-      const contentType = res.headers.get('content-type') || 'image/png';
-      if (!contentType.startsWith('image/')) {
+      const contentType = (res.headers.get('content-type') || '').split(';', 1)[0]?.trim().toLowerCase() || '';
+      if (!ALLOWED_FEEDBACK_IMAGE_TYPES.has(contentType)) {
         return { success: false, message: `响应非图片(${contentType})` };
       }
-      const buffer = Buffer.from(await res.arrayBuffer());
-      if (buffer.length > MAX_FEEDBACK_IMAGE_BYTES) {
-        return { success: false, message: '图片过大' };
-      }
+      const buffer = await readBoundedBody(res, MAX_FEEDBACK_IMAGE_BYTES);
       return { success: true, dataUrl: `data:${contentType};base64,${buffer.toString('base64')}` };
     } catch (error) {
-      if ((error as Error).name === 'AbortError') {
+      if (error instanceof Error && error.name === 'AbortError') {
         return { success: false, message: '请求超时' };
       }
-      return { success: false, message: (error as Error).message || '图片加载失败', error: error as Error };
+      return {
+        success: false,
+        message: safeFeedbackErrorMessage(error, '图片加载失败'),
+      };
     }
   }
 

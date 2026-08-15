@@ -177,7 +177,11 @@ class BuiltinExecutor(AgentExecutor):
                 owner_account_id=owner_account_id,
             )
         except Exception as exc:  # noqa: BLE001 — 对账失败不得阻断 final
-            log.warning("file_changes 对账失败 session=%s: %s", session_id, exc)
+            log.warning(
+                "file_changes 对账失败 session=%s type=%s",
+                session_id,
+                type(exc).__name__,
+            )
             return []
         return [
             ResponseChunk(
@@ -373,7 +377,7 @@ class BuiltinExecutor(AgentExecutor):
                         kwargs["owner_account_id"] = current_owner_account_id.get()
                     view_messages = await force_compact(ctx.messages, ctx.session_id, **kwargs)
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("force_compact 失败，按原视图发送：%s", exc)
+                    log.warning("force_compact 失败，按原视图发送 type=%s", type(exc).__name__)
                     view_messages = list(ctx.messages)
                 finally:
                     yield ResponseChunk.compaction_event(rid, False, next_seq())
@@ -939,7 +943,7 @@ class BuiltinExecutor(AgentExecutor):
                         )
                         return
                     # 流式中途失败：保留已生成文本，尝试续写
-                    exc_info = f"{type(exc).__name__}: {str(exc) or '(无详情)'}"
+                    exc_info = type(exc).__name__
                     log.warning(
                         "LLM 流式中途失败（已 emit %d 字符），原因：%s，尝试续写",
                         len(accumulated), exc_info,
@@ -954,7 +958,7 @@ class BuiltinExecutor(AgentExecutor):
                     if not is_stream_interrupt_recoverable(exc):
                         yield ResponseChunk.error(
                             rid,
-                            f"模型响应中断，已保留已生成内容。错误：{exc}",
+                            "模型响应中断，已保留已生成内容。内部错误",
                             next_seq(),
                         )
                         result["error"] = True
@@ -971,7 +975,7 @@ class BuiltinExecutor(AgentExecutor):
                     delay = self.backoff_seconds * (2 ** (attempt - 1))
                     if self.stream_retry_jitter:
                         delay = delay * (0.5 + random.random() * 0.5)
-                    exc_info = f"{type(exc).__name__}: {str(exc) or '(无详情)'}"
+                    exc_info = type(exc).__name__
                     log.warning("LLM 瞬时失败，第 %d 次重试（%.1fs 后）：%s", attempt, delay, exc_info)
                     await asyncio.sleep(delay)
                     continue
@@ -979,12 +983,12 @@ class BuiltinExecutor(AgentExecutor):
                 if prov_idx + 1 < len(providers):
                     prov_idx += 1
                     attempt = 0
-                    exc_info = f"{type(exc).__name__}: {str(exc) or '(无详情)'}"
+                    exc_info = type(exc).__name__
                     log.warning("provider 故障，切换到 fallback #%d：%s", prov_idx, exc_info)
                     continue
-                log.exception("LLM 调用异常，无 fallback 可用")
+                log.error("LLM 调用异常，无 fallback 可用 type=%s", type(exc).__name__)
                 result["error"] = True
-                yield ResponseChunk.error(rid, str(exc), next_seq())
+                yield ResponseChunk.error(rid, "模型调用失败：内部错误", next_seq())
                 return
 
     @staticmethod

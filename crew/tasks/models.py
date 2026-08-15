@@ -56,6 +56,7 @@ class RuntimeTask:
     session_id: str
     title: str
     request_id: str = ""
+    action_digest: str = ""
     tool_call_id: str = ""
     parent_task_id: str = ""
     status: TaskStatus = "pending"
@@ -71,6 +72,9 @@ class RuntimeTask:
     finished_at: float | None = None
     last_activity_at: float | None = None
     last_heartbeat_at: float | None = None
+    monotonic_boot_id: str = ""
+    started_monotonic: float | None = None
+    last_activity_monotonic: float | None = None
     execution_timeout: float = 0.0
     inactivity_timeout: float = 0.0
     backgrounded: bool = False

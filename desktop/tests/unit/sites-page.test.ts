@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({ protocol: { handle: vi.fn() } }));
 
 import type { LocalSite, SiteAnnotation } from '../../src/ui/backend-client';
-import { parseSitePreviewUrl } from '../../src/main/site-preview-protocol';
+import { protocol } from 'electron';
+import {
+  parseSitePreviewUrl,
+  registerSitePreviewProtocol,
+} from '../../src/main/site-preview-protocol';
 import { buildSiteAnnotationPrompt } from '../../src/ui/features/sites-page';
 
 describe('sites page annotation handoff', () => {
@@ -19,6 +23,37 @@ describe('sites page annotation handoff', () => {
     });
     expect(parseSitePreviewUrl('https://example.com')).toBeNull();
     expect(parseSitePreviewUrl('ace-site://canvas_not-an-id/')).toBeNull();
+  });
+
+  it('does not replay Gateway or upstream error bodies into the preview page', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      {
+        ok: false,
+        status: 404,
+        headers: { get: () => 'text/plain' },
+      } as unknown as Response,
+    );
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(fetchMock as typeof fetch);
+    vi.mocked(protocol.handle).mockClear();
+    registerSitePreviewProtocol(async () => ({
+      baseUrl: 'http://127.0.0.1:8000',
+      headers: () => ({ Authorization: 'Bearer test' }),
+    }));
+    const handler = vi.mocked(protocol.handle).mock.calls.at(-1)?.[1] as (
+      request: { method: string; url: string }
+    ) => Promise<Response>;
+
+    try {
+      const response = await handler({
+        method: 'GET',
+        url: 'ace-site://site_0123456789ab/assets/app.js',
+      });
+      expect(response.status).toBe(502);
+      expect(await response.text()).toBe('站点预览请求失败');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
   it('includes stable source and DOM context and forbids implicit republish', () => {
     const site = {
@@ -194,7 +229,7 @@ describe('sites page annotation handoff', () => {
     expect(main).toContain('frame: false');
     expect(main).toContain('skipTaskbar: true');
     expect(main).toContain("process.platform === 'darwin'");
-    expect(main).toContain("ipcMain.on('inspiration:sticky-close'");
+    expect(main).toContain("trustedOn('inspiration:sticky-close'");
     expect(main).toContain("mainWindow.webContents.send('inspiration:window-state-changed'");
     expect(main).toContain('if (!win.isDestroyed()) win.destroy()');
     expect(main).toContain('sandbox: true');
@@ -204,7 +239,7 @@ describe('sites page annotation handoff', () => {
     expect(main).toContain("segments[1] === 'exports'");
     expect(preload).toContain("ipcRenderer.invoke('inspiration:open-window'");
     expect(preload).toContain("ipcRenderer.on('inspiration:window-state-changed'");
-    expect(stickyPreload).toContain("ipcRenderer.send('inspiration:sticky-close')");
+    expect(stickyPreload).toContain("sendMain('inspiration:sticky-close')");
     expect(stickyPreload).toContain('取消固定并关闭');
     expect(stickyPreload).toContain('-webkit-app-region: drag');
     expect(stickyPreload).toContain('ace-inspiration-sticky-drag-strip');

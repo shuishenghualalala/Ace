@@ -1,4 +1,17 @@
-import { ipcRenderer } from 'electron';
+import { ipcRenderer as rawIpcRenderer } from 'electron';
+import {
+  isIpcRendererToMainEventChannel,
+  type IpcRendererToMainEventChannel,
+} from '../shared/ipc-channels';
+
+function sendMain(channel: IpcRendererToMainEventChannel): void {
+  if (!isIpcRendererToMainEventChannel(channel)) {
+    throw new Error('IPC event channel is not allowlisted');
+  }
+  rawIpcRenderer.send(channel);
+}
+
+// The close action remains the guarded renderer-to-main sticky-close contract.
 
 function mountStickyChrome(): void {
   if (document.getElementById('ace-inspiration-sticky-chrome')) return;
@@ -111,7 +124,7 @@ function mountStickyChrome(): void {
   close.textContent = '×';
   close.title = '取消固定并关闭';
   close.setAttribute('aria-label', '取消固定并关闭');
-  close.addEventListener('click', () => ipcRenderer.send('inspiration:sticky-close'));
+  close.addEventListener('click', () => sendMain('inspiration:sticky-close'));
   host.append(grip, close);
   document.documentElement.append(dragStrip, host);
 }

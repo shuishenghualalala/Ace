@@ -33,9 +33,7 @@ const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
 /// Create the state directory used by identity and ACL persistence.
 pub(crate) fn prepare_directory(path: &Path) -> Result<(), String> {
-    if !path.is_absolute() {
-        return Err("security state directory must be absolute".to_string());
-    }
+    super::path::validate_local_absolute(path)?;
     reject_reparse_components(path)?;
     fs::create_dir_all(path)
         .map_err(|error| format!("cannot create security state directory: {error}"))?;
@@ -259,7 +257,10 @@ fn protect_host_object(path: &Path, container: bool) -> Result<(), String> {
     };
     unsafe { LocalFree(new_dacl as HLOCAL) };
     if update != ERROR_SUCCESS {
-        return Err(format!("SetNamedSecurityInfoW failed: {update}"));
+        return Err(format!(
+            "SetNamedSecurityInfoW failed for {} while protecting host state: {update}",
+            path.display()
+        ));
     }
     verify_protected_host_object(path)
 }
@@ -517,6 +518,17 @@ mod tests {
 
         assert!(error.contains("reparse point"));
         fs::remove_dir(&junction).unwrap();
+    }
+
+    #[test]
+    fn state_directory_rejects_non_local_namespaces() {
+        for path in [
+            Path::new(r"C:relative"),
+            Path::new(r"\\server\share\state"),
+            Path::new(r"\\?\C:\state"),
+        ] {
+            assert!(prepare_directory(path).is_err(), "{}", path.display());
+        }
     }
 
     #[test]

@@ -25,9 +25,10 @@ from crew.core.runctx import (
 )
 from crew.state.access_control import AccessControlConfig
 from crew.state.config import Config
+from crew.state.home import owner_path_segment
 from crew.state.plugin_preferences import PluginPreferencesStore
 from crew.tools.registry import Registry
-from crew.core.types import ToolCall
+from crew.core.types import ToolCall, ToolPermissionDecision
 
 from crew.browser.manager import _bounded
 from plugins.browser.tool import (
@@ -84,6 +85,14 @@ _OLD_BROWSER_TOOLS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _reset_process_registry_lifecycle():
+    import crew.tools.process_registry as process_registry_module
+
+    yield
+    process_registry_module.process_registry.reset_lifecycle_configuration()
+
+
 @pytest.fixture
 def ctx_vars():
     """设置 browser_use 执行期所需的 runctx；每个用例后还原。"""
@@ -105,7 +114,7 @@ async def plugin_tool(tmp_path, monkeypatch):
     """真实 BrowserManager + FakeDriver + 真偏好库上的 BrowserUseTool。"""
     monkeypatch.setattr(
         "crew.browser.manager.get_owner_runtime_home",
-        lambda owner: tmp_path / "accounts" / str(owner),
+        lambda owner: tmp_path / "accounts" / owner_path_segment(owner),
     )
     driver = FakeBrowserDriver()
     manager = BrowserManager(BrowserConfig(), driver)
@@ -162,6 +171,17 @@ def test_plugin_loaded_and_skill_root_registered(tmp_path):
     assert loaded is not None and loaded.enabled
     assert any("browser" in str(root) for root in crew.plugins.plugin_skill_roots())
     assert "/browser-use" in scan_skills()
+
+
+def test_build_app_wires_browser_permission_auditor(tmp_path):
+    import sys
+
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=False)
+
+    tool_module = sys.modules.get("crew_runtime_plugins.browser.tool")
+    assert tool_module is not None
+    assert tool_module._PERMISSION_AUDITOR is not None
 
 
 def test_record_publish_tools_reuse_browser_hot_disable_gate(tmp_path):
@@ -627,6 +647,28 @@ async def test_resolver_forwards_to_manager_when_enabled(plugin_tool, ctx_vars):
     assert decision is None or decision.behavior == "allow"
 
 
+async def test_resolver_audits_deny_via_installed_auditor(plugin_tool, ctx_vars, monkeypatch):
+    from plugins.browser import tool as browser_tool
+
+    tool, manager, _driver, _prefs = plugin_tool
+    seen: list[tuple[dict[str, object], str]] = []
+    monkeypatch.setattr(
+        manager,
+        "permission_for",
+        lambda *_args, **_kwargs: ToolPermissionDecision("deny", "policy deny"),
+    )
+    browser_tool.set_permission_auditor(
+        lambda args, decision: seen.append((args, decision.behavior))
+    )
+    try:
+        args = {"action": "navigate", "url": "https://example.com"}
+        decision = tool.permission_resolver(args)
+        assert decision is not None and decision.behavior == "deny"
+        assert seen == [(args, "deny")]
+    finally:
+        browser_tool.set_permission_auditor(None)
+
+
 async def test_console_forwards_playwright_filters_and_returns_complete_text(
     plugin_tool, ctx_vars
 ):
@@ -888,8 +930,10 @@ async def test_plugin_click_keeps_automatic_download_in_public_session_state(
             "source": "automatic",
         }
     ]
-    assert public_state["downloads"][0]["path"].endswith(
-        "/downloads/browser/export.xlsx"
+    assert Path(public_state["downloads"][0]["path"]).parts[-3:] == (
+        "downloads",
+        "browser",
+        "export.xlsx",
     )
 
 
@@ -1034,20 +1078,19 @@ async def test_official_mouse_resize_and_drop_actions_dispatch_exact_wire(
         }
     )
     assert "fresh_snapshot: true" in dropped
-    assert (
-        "drop",
-        (
-            "@e18",
-            "--path",
-            str(upload),
-            "--data",
-            "text/plain",
-            "--path",
-            "--data",
-            "text/uri-list",
-            "https://example.com/item",
-        ),
-    ) in driver.calls
+    drop_call = next(call for call in driver.calls if call[0] == "drop")
+    assert drop_call[1][0] == "@e18"
+    assert drop_call[1][1] == "--path"
+    assert "approved-uploads" in drop_call[1][2]
+    assert Path(drop_call[1][2]).name.endswith("--payload.txt")
+    assert drop_call[1][3:] == (
+        "--data",
+        "text/plain",
+        "--path",
+        "--data",
+        "text/uri-list",
+        "https://example.com/item",
+    )
 
     latest_ref = re.findall(r"\[ref=(p\d+:e18)\]", dropped)[-1]
     await tool.handler({"action": "drop", "ref": latest_ref, "data": {}})
@@ -1394,7 +1437,7 @@ async def test_screenshot_exports_png_to_task_downloads(plugin_tool, ctx_vars):
 
     path = await tool.handler({"action": "screenshot", "filename": "home"})
     assert path.endswith("home.png")
-    assert "downloads/browser" in path
+    assert Path(path).parts[-3:] == ("downloads", "browser", "home.png")
     assert "--settled" in next(
         args for command, args in reversed(driver.calls) if command == "screenshot"
     )
@@ -1403,7 +1446,7 @@ async def test_screenshot_exports_png_to_task_downloads(plugin_tool, ctx_vars):
     # 默认文件名自动生成且补 .png 后缀
     auto = await tool.handler({"action": "screenshot"})
     assert auto.content.endswith(".png")
-    assert "downloads/browser" in auto.content
+    assert Path(auto.content).parts[-3:-1] == ("downloads", "browser")
     assert auto.media[0].mime_type == "image/png"
     assert auto.media[0].path == auto.content
 

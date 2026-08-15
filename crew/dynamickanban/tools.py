@@ -9,6 +9,8 @@ from crew.core.interfaces import Tool
 from crew.dynamickanban.models import PlanDelta
 from crew.dynamickanban.plan_graph import WorkflowGraphValidationError, validate_dag
 from crew.dynamickanban.store import SQLiteKanbanStore
+from crew.tools.redact import safe_public_error
+from crew.tools.registry import tool_error
 
 
 class _KanbanTool(Tool):
@@ -178,8 +180,8 @@ class AddDependencyTool(_KanbanTool):
         try:
             parent = self.store.get_task(parent_id)
             child = self.store.get_task(child_id)
-        except KeyError as exc:
-            return json.dumps({"ok": False, "error": f"任务不存在: {exc}"}, ensure_ascii=False)
+        except KeyError:
+            return json.dumps({"ok": False, "error": "任务不存在"}, ensure_ascii=False)
         if parent.workflow_id != self.workflow_id or child.workflow_id != self.workflow_id:
             return json.dumps({"ok": False, "error": "依赖任务不属于当前 workflow"}, ensure_ascii=False)
         self.store.add_dependency(parent_id, child_id)
@@ -297,7 +299,10 @@ class PlanNextTool(_KanbanTool):
         try:
             data = json.loads(plan_json)
         except json.JSONDecodeError as exc:
-            return json.dumps({"ok": False, "error": f"plan_json 解析失败: {exc}"}, ensure_ascii=False)
+            return json.dumps(
+                {"ok": False, "error": safe_public_error(exc, "plan_json 解析失败")},
+                ensure_ascii=False,
+            )
         if not isinstance(data, dict):
             return json.dumps({"ok": False, "error": "plan_json 必须是 JSON 对象"}, ensure_ascii=False)
 
@@ -338,7 +343,9 @@ class PlanNextTool(_KanbanTool):
         try:
             self._validate_extension(add_tasks, deps)
         except WorkflowGraphValidationError as exc:
-            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+            error = json.loads(tool_error(str(exc)))
+            error["ok"] = False
+            return json.dumps(error, ensure_ascii=False)
         added = self.store.apply_plan_extension(self.workflow_id, delta)
         definition_synced = False
         sync_error = ""
@@ -346,8 +353,8 @@ class PlanNextTool(_KanbanTool):
             try:
                 self.on_plan_extension(delta, added)
                 definition_synced = True
-            except Exception as exc:  # noqa: BLE001 - 扩图写回 definition 失败不影响看板结果
-                sync_error = str(exc)
+            except Exception:  # noqa: BLE001 - 扩图写回 definition 失败不影响看板结果
+                sync_error = "definition 回写失败"
         self.store.add_event(
             self.workflow_id,
             "plan_expanded",

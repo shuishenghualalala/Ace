@@ -841,6 +841,32 @@ def test_kanban_plan_next_tool(store: SQLiteKanbanStore) -> None:
     assert any(e.event_type == "plan_expanded" for e in events)
 
 
+def test_kanban_plan_next_parse_error_does_not_echo_input_secret(store: SQLiteKanbanStore) -> None:
+    from crew.dynamickanban.tools import create_kanban_registry
+
+    wf = store.create_workflow("s_plan_secret", "秘密回显测试")
+    lead_task = store.add_task(wf.id, "制定大纲", assignee="lead")
+    store.update_task_status(lead_task.id, "done")
+    tools = create_kanban_registry(
+        store, wf.id, actor="worker", valid_roles=["lead", "analyst", "writer"]
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        tools["kanban_plan_next"].run(
+            {
+                "task_id": lead_task.id,
+                "plan_json": '{"add_tasks": [{"title": "x ACCESS_TOKEN=must-not-leak"}',
+            }
+        )
+    )
+    data = json.loads(result)
+    assert data["ok"] is False
+    assert isinstance(data["error"], str)
+    assert "must-not-leak" not in result
+
+
 def test_kanban_plan_next_rejects_cycle_without_mutating_board(
     store: SQLiteKanbanStore,
 ) -> None:

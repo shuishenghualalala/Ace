@@ -13,10 +13,11 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.gateway.auth import account_from_request
+from crew.gateway.streaming import BoundedStreamingResponse, bounded_streaming_response
 
 
 def create_dynamic_kanban_router(crew) -> APIRouter:
@@ -69,13 +70,15 @@ def create_dynamic_kanban_router(crew) -> APIRouter:
     async def dynamic_kanban_resume(
         session_id: str,
         request: Request,
-    ) -> StreamingResponse:
+    ) -> BoundedStreamingResponse:
         dk_manager = _dk_manager()
         if dk_manager is None:
-            return StreamingResponse(
+            return bounded_streaming_response(
+                request,
                 _sse_error("Dynamic Kanban 未启用"),
                 media_type="text/event-stream",
                 status_code=503,
+                error_event=_sse_stream_error,
             )
 
         account = account_from_request(request)
@@ -98,7 +101,8 @@ def create_dynamic_kanban_router(crew) -> APIRouter:
                 yield f"data: {json.dumps(_chunk_to_dict(chunk), ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(
+        return bounded_streaming_response(
+            request,
             event_stream(),
             media_type="text/event-stream",
             headers={
@@ -125,3 +129,14 @@ def _chunk_to_dict(chunk: ResponseChunk) -> dict[str, Any]:
 async def _sse_error(message: str):
     yield f"data: {json.dumps({'kind': 'error', 'body': {'message': message}}, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
+
+
+def _sse_stream_error(_reason: str) -> str:
+    return (
+        "data: "
+        + json.dumps(
+            {"kind": "error", "body": {"message": "流式请求失败"}},
+            ensure_ascii=False,
+        )
+        + "\n\ndata: [DONE]\n\n"
+    )

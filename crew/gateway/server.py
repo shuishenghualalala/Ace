@@ -12,7 +12,12 @@
 
 from __future__ import annotations
 
-from crew.gateway.app import create_app, run  # noqa: F401
+if __name__ == "__main__":
+    from crew.process_hardening import harden_main_process
+
+    harden_main_process("gateway")
+
+from crew.gateway.app import create_app, run
 
 __all__ = ["create_app", "run"]
 

@@ -27,7 +27,12 @@ async def test_debug_log_filters_same_session_id_by_owner(tmp_path, monkeypatch,
     trace.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
     crew = build_app(
-        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False, gateway_dev_mode=False),
+        config=Config(
+            db_path=str(tmp_path / "crew.db"),
+            cron_enabled=False,
+            gateway_dev_mode=False,
+            llm_trace=True,
+        ),
         enable_team=False,
     )
     crew.session_store.save("same", [Message.user("a")], owner_account_id="A:uid-a")

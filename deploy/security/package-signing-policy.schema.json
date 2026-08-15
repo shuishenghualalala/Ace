@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ace.invalid/schemas/package-signing-policy-v1.json",
+  "title": "Ace trusted package signing policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "attestation_signer_workflow",
+    "update_public_key_sha256",
+    "update_base_url",
+    "platforms"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "attestation_signer_workflow": {
+      "type": "string",
+      "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$",
+      "maxLength": 200
+    },
+    "update_public_key_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "update_base_url": {
+      "type": "string",
+      "pattern": "^https://[^?#]+/$",
+      "maxLength": 1000
+    },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "properties": {
+        "linux": {
+          "$ref": "#/$defs/linuxSigner"
+        },
+        "windows": {
+          "$ref": "#/$defs/windowsSigner"
+        },
+        "macos": {
+          "$ref": "#/$defs/macosSigner"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "trustedStrings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "linuxSigner": {
+      "$ref": "#/$defs/signerBase",
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "gpg-detached",
+              "sigstore"
+            ]
+          }
+        }
+      }
+    },
+    "windowsSigner": {
+      "$ref": "#/$defs/signerBase",
+      "properties": {
+        "kinds": {
+          "const": [
+            "authenticode"
+          ]
+        }
+      }
+    },
+    "macosSigner": {
+      "$ref": "#/$defs/signerBase",
+      "properties": {
+        "kinds": {
+          "const": [
+            "apple-codesign"
+          ]
+        }
+      }
+    },
+    "signerBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kinds",
+        "identities",
+        "issuers"
+      ],
+      "properties": {
+        "kinds": {
+          "type": "array"
+        },
+        "identities": {
+          "$ref": "#/$defs/trustedStrings"
+        },
+        "issuers": {
+          "$ref": "#/$defs/trustedStrings"
+        }
+      }
+    }
+  }
+}

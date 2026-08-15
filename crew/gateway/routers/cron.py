@@ -15,6 +15,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import account_from_request
+from crew.gateway.helpers import safe_public_error
 from crew.gateway.platform_registry import platform_registry
 from crew.cron.jobs import format_bj_timestamp
 from crew.state.logging import get_logger
@@ -239,7 +240,7 @@ def create_cron_router(crew) -> APIRouter:
         try:
             store = _store()
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "定时任务服务不可用")}, status_code=503)
         job = store.get(job_id, owner_account_id=_owner(request))
         if job is None:
             return JSONResponse({"ok": False, "error": f"任务不存在: {job_id}"}, status_code=404)
@@ -272,7 +273,7 @@ def create_cron_router(crew) -> APIRouter:
         try:
             store = _store()
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "定时任务服务不可用")}, status_code=503)
         name = str(payload.get("name") or "").strip()
         schedule = str(payload.get("schedule") or "").strip()
         query = str(payload.get("query") or "").strip()
@@ -312,7 +313,7 @@ def create_cron_router(crew) -> APIRouter:
                 owner_account_id=owner,
             )
         except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "定时任务请求无效")}, status_code=400)
         _sync_service(str(job["id"]))
         return JSONResponse(_serialize_job(job), status_code=201)
 
@@ -322,7 +323,7 @@ def create_cron_router(crew) -> APIRouter:
         try:
             store = _store()
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "定时任务服务不可用")}, status_code=503)
         owner = _owner(request)
         job = store.get(job_id, owner_account_id=owner)
         if job is None:
@@ -338,7 +339,7 @@ def create_cron_router(crew) -> APIRouter:
         try:
             store = _store()
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "定时任务服务不可用")}, status_code=503)
         owner = _owner(request)
         job = store.get(job_id, owner_account_id=owner)
         if job is None:
@@ -353,7 +354,7 @@ def create_cron_router(crew) -> APIRouter:
         try:
             store = _store()
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "定时任务服务不可用")}, status_code=503)
         owner = _owner(request)
         job = store.get(job_id, owner_account_id=owner)
         if job is None:
@@ -368,7 +369,7 @@ def create_cron_router(crew) -> APIRouter:
         try:
             store = _store()
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "定时任务服务不可用")}, status_code=503)
         owner = _owner(request)
         job = store.get(job_id, owner_account_id=owner)
         if job is None:
@@ -395,7 +396,7 @@ def create_cron_router(crew) -> APIRouter:
         try:
             store = _store()
         except RuntimeError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
+            return JSONResponse({"ok": False, "error": safe_public_error(exc, "定时任务服务不可用")}, status_code=503)
         owner = _owner(request)
         source = store.get_fire(fire_id, owner_account_id=owner)
         if source is None:

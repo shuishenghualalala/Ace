@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
-import socket
 import threading
 import time
 import uuid
@@ -14,16 +12,21 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urljoin, urlparse
 
-import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from jsonschema import Draft202012Validator
 
+from crew.core.errors import ToolError
 from crew.cron.jobs import BJ_TZ, parse_duration
 from crew.state.home import get_owner_runtime_home, safe_path_segment
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+from crew.tools.redact import safe_public_error
+from crew.tools.security_guard import (
+    authorize_network_url,
+    fetch_authorized_url,
+)
 
 
 def _json(value: Any) -> str:
@@ -474,9 +477,11 @@ class BlueprintStore:
                "FROM site_bindings WHERE owner_account_id=?")
         params: list[Any] = [owner]
         if automation_id:
-            sql += " AND automation_id=?"; params.append(automation_id)
+            sql += " AND automation_id=?"
+            params.append(automation_id)
         if widget_id:
-            sql += " AND widget_id=?"; params.append(widget_id)
+            sql += " AND widget_id=?"
+            params.append(widget_id)
         sql += " ORDER BY created_at DESC"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
@@ -512,8 +517,16 @@ class BlueprintManager:
     MAX_RESPONSE_BYTES = 5 * 1024 * 1024
     MAX_REDIRECTS = 4
 
-    def __init__(self, store: BlueprintStore) -> None:
+    def __init__(
+        self,
+        store: BlueprintStore,
+        *,
+        workspace_store: Any | None = None,
+        security_service: Any | None = None,
+    ) -> None:
         self.store = store
+        self.workspace_store = workspace_store
+        self.security_service = security_service
         self._scheduler: AsyncIOScheduler | None = None
 
     def widget_root(self, owner: str, widget_id: str) -> Path:
@@ -598,33 +611,18 @@ class BlueprintManager:
             self._trigger_for(trigger)
 
     @staticmethod
-    def _assert_public_host(hostname: str) -> None:
-        try:
-            addresses = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-        except socket.gaierror as exc:
-            raise ValueError(f"接口域名无法解析: {hostname}") from exc
-        if not addresses:
-            raise ValueError("接口域名没有可用地址")
-        for item in addresses:
-            address = ipaddress.ip_address(item[4][0].split("%")[0])
-            if not address.is_global:
-                raise ValueError("接口地址不能指向本机、局域网、链路本地或保留网络")
-
-    @staticmethod
     def _assert_no_url_secrets(query: str) -> None:
         secret_names = {"key", "token", "api_key", "apikey", "access_token", "signature", "secret"}
         names = {name.lower() for name, _ in parse_qsl(query, keep_blank_values=True)}
         if names & secret_names:
             raise ValueError("一期公开接口模式不允许在 URL 查询参数中保存密钥")
 
-    async def _check_url(self, raw_url: str) -> None:
-        parsed = urlparse(raw_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-            raise ValueError("接口必须是无内嵌凭据的 HTTP/HTTPS URL")
-        self._assert_no_url_secrets(parsed.query)
-        await asyncio.to_thread(self._assert_public_host, parsed.hostname)
-
     async def _fetch_json(self, execution: dict[str, Any], run_input: Any) -> tuple[dict[str, Any], str]:
+        if self.workspace_store is None or self.security_service is None:
+            raise ToolError(
+                '{"code":"SECURITY_OUTBOUND_DENIED",'
+                '"reason":"authorization_unavailable"}'
+            )
         raw_url = str(execution.get("url") or "").strip()
         method = str(execution.get("method") or "GET").upper()
         if method not in {"GET", "POST"}:
@@ -638,36 +636,49 @@ class BlueprintManager:
         safe_headers = {str(k): str(v) for k, v in headers.items() if str(k).lower() not in {"host", "content-length"}}
         timeout = max(1.0, min(float(execution.get("timeoutSeconds") or 15), 60.0))
         current = raw_url
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
-            for redirect in range(self.MAX_REDIRECTS + 1):
-                await self._check_url(current)
-                async with client.stream(
-                    method, current, headers=safe_headers,
-                    json=run_input if method == "POST" else None,
-                ) as response:
-                    if response.is_redirect:
-                        if redirect == self.MAX_REDIRECTS:
-                            raise ValueError("接口重定向次数过多")
-                        location = response.headers.get("location")
-                        if not location:
-                            raise ValueError("接口返回了无目标的重定向")
-                        current = urljoin(current, location)
-                        continue
-                    response.raise_for_status()
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in response.aiter_bytes():
-                        size += len(chunk)
-                        if size > self.MAX_RESPONSE_BYTES:
-                            raise ValueError("接口响应超过 5 MiB 限制")
-                        chunks.append(chunk)
-                    try:
-                        value = json.loads(b"".join(chunks))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        raise ValueError("接口响应不是有效 JSON") from exc
-                    if not isinstance(value, dict):
-                        value = {"items": value}
-                    return value, f"{method} {urlparse(current).scheme}://{urlparse(current).netloc} -> {response.status_code}"
+        for redirect in range(self.MAX_REDIRECTS + 1):
+            authorized_plan = await authorize_network_url(
+                current,
+                method=method,
+                tool_name="blueprint_automation",
+                workspace_store=self.workspace_store,
+                security_service=self.security_service,
+            )
+            request_body = (
+                json.dumps(run_input, ensure_ascii=False).encode("utf-8")
+                if method == "POST"
+                else None
+            )
+            request_headers = dict(safe_headers)
+            if request_body is not None:
+                request_headers.setdefault("Content-Type", "application/json")
+            response = await asyncio.to_thread(
+                fetch_authorized_url,
+                authorized_plan,
+                body=request_body,
+                headers=request_headers,
+                timeout=timeout,
+                max_bytes=self.MAX_RESPONSE_BYTES,
+                reject_redirects=False,
+            )
+            if 300 <= response.status < 400:
+                if redirect == self.MAX_REDIRECTS:
+                    raise ValueError("接口重定向次数过多")
+                location = response.headers.get("location")
+                if not location:
+                    raise ValueError("接口返回了无目标的重定向")
+                current = urljoin(current, location)
+                continue
+            if response.status < 200 or response.status >= 300:
+                raise ValueError(f"接口返回 HTTP {response.status}")
+            try:
+                value = json.loads(response.body)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("接口响应不是有效 JSON") from exc
+            if not isinstance(value, dict):
+                value = {"items": value}
+            parsed_current = urlparse(current)
+            return value, f"{method} {parsed_current.scheme}://{parsed_current.netloc} -> {response.status}"
         raise RuntimeError("接口请求未产生响应")
 
     async def run_automation(self, owner: str, automation_id: str, *, run_input: Any = None,
@@ -722,9 +733,10 @@ class BlueprintManager:
             finished["deliveryResults"] = delivery_results
             return finished
         except Exception as exc:  # noqa: BLE001 - 运行失败必须统一固化为可检查的终态记录
-            failed = self.store.finish_run(owner, run["id"], status="failed", error=str(exc))
+            error = safe_public_error(exc, "站点自动化运行失败")
+            failed = self.store.finish_run(owner, run["id"], status="failed", error=error)
             for binding in bindings:
-                self.store.set_widget_status(owner, binding["widgetId"], "error", str(exc))
+                self.store.set_widget_status(owner, binding["widgetId"], "error", error)
             return failed
 
     def _trigger_for(self, trigger: dict[str, Any]):

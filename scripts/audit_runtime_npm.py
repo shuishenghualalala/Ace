@@ -3,24 +3,41 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import subprocess
 from pathlib import Path
 
-_SKIP_DIRECTORIES = {".git", ".venv", "dist", "node_modules", "target"}
-
 
 def package_lock_directories(repo_root: Path) -> list[Path]:
-    """Return every source directory containing a package-lock.json."""
-    found: list[Path] = []
-    for current, directories, files in os.walk(repo_root):
-        directories[:] = sorted(
-            name for name in directories if name not in _SKIP_DIRECTORIES
+    """Return source directories for package locks bound to the Git checkout."""
+    repo_root = repo_root.resolve()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--cached", "-z"],
+            capture_output=True,
+            timeout=15,
+            check=False,
         )
-        if "package-lock.json" in files:
-            found.append(Path(current))
-    return sorted(found)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"could not enumerate committed npm lockfiles: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"could not enumerate committed npm lockfiles: {detail or 'git ls-files failed'}"
+        )
+    locks = [
+        repo_root / value.decode("utf-8", errors="surrogateescape")
+        for value in result.stdout.split(b"\0")
+        if value
+        and Path(value.decode("utf-8", errors="surrogateescape")).name
+        == "package-lock.json"
+    ]
+    missing = [path.relative_to(repo_root).as_posix() for path in locks if not path.is_file()]
+    if missing:
+        raise RuntimeError(
+            f"committed npm lockfile is missing from checkout: {', '.join(missing)}"
+        )
+    return sorted(path.parent for path in locks)
 
 
 def main() -> int:
@@ -32,8 +49,12 @@ def main() -> int:
     if npm is None:
         raise SystemExit("npm is unavailable")
 
+    try:
+        lock_directories = package_lock_directories(repo_root)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
     failed: list[str] = []
-    for directory in package_lock_directories(repo_root):
+    for directory in lock_directories:
         relative = directory.relative_to(repo_root).as_posix()
         print(f"auditing runtime npm dependencies: {relative}", flush=True)
         result = subprocess.run(

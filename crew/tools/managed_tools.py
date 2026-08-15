@@ -3,8 +3,10 @@
 该模块让 Crew 的 glob/grep 工具不依赖系统是否预装 rg。解析顺序：
 
     managed rg（本模块自动安装到 {CREW_HOME}/bin）
-      → 系统 PATH 上的 rg
       → Python 纯实现（glob/grep handler 内的兜底）
+
+系统 PATH 上的 rg 只在操作员显式选择 ``CREW_RIPGREP_INSTALLER=system``
+时启用，默认路径不会执行未固定身份的二进制。
 
 纯 stdlib 实现（urllib 下载 / hashlib 校验 / tarfile+zipfile 解压），不引入新依赖。
 RIPGREP_VERSION 与 RIPGREP_ASSETS 的 SHA-256 是唯一真相来源，升级 rg 时两者一起更新。
@@ -17,20 +19,31 @@ RIPGREP_VERSION 与 RIPGREP_ASSETS 的 SHA-256 是唯一真相来源，升级 rg
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import os
 import sys
-from pathlib import Path
+import unicodedata
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from crew.security.outbound import OutboundDenied, OutboundHttpClient
+from crew.tools.file_utils import (
+    FileConflictError,
+    _ensure_private_directory,
+    atomic_replace_bytes,
+    read_verified_bytes,
+    snapshot_file,
+    stat_verified_file,
+)
+
 logger = logging.getLogger(__name__)
+_MANAGED_TOOL_HTTP = OutboundHttpClient()
 
 RIPGREP_VERSION = "14.1.1"
 """pin 的上游 ripgrep 版本。升级时与 RIPGREP_ASSETS 的 SHA-256 一起更新。"""
 
-_RELEASE_URL_PREFIX = (
-    "https://github.com/BurntSushi/ripgrep/releases/download/" + RIPGREP_VERSION
-)
+_RELEASE_URL_PREFIX = "https://github.com/BurntSushi/ripgrep/releases/download/" + RIPGREP_VERSION
 
 RIPGREP_ASSETS: dict[tuple[str, str], tuple[str, str]] = {
     ("darwin", "arm64"): (
@@ -62,8 +75,13 @@ RIPGREP_ASSETS: dict[tuple[str, str], tuple[str, str]] = {
 """`(sys.platform, 归一化 arch) -> (asset 文件名, sha256 hex)`。"""
 
 _DOWNLOAD_TIMEOUT_SECONDS = 120
-_VERSION_CHECK_TIMEOUT_SECONDS = 5
-_DOWNLOAD_CHUNK_BYTES = 1 << 16
+_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024
+_ARCHIVE_MAX_MEMBERS = 256
+_ARCHIVE_MAX_MEMBER_BYTES = 64 * 1024 * 1024
+_ARCHIVE_MAX_TOTAL_BYTES = 128 * 1024 * 1024
+_ARCHIVE_MAX_COMPRESSION_RATIO = 200
+_ARCHIVE_MAX_PATH_CHARS = 512
+_ARCHIVE_MAX_PATH_DEPTH = 12
 
 _ARCH_ALIASES = {
     "aarch64": "arm64",
@@ -167,117 +185,255 @@ def _path_without_managed_bin() -> str | None:
     return os.pathsep.join(parts)
 
 
+def _cached_archive_path(asset: str) -> Path:
+    return _bin_dir() / f".{asset}"
+
+
 def _managed_binary_is_current(binary: Path) -> bool:
-    """磁盘上的 managed rg 是否匹配 RIPGREP_VERSION。
+    """Verify the installed executable against the pinned upstream archive."""
+    import tempfile
 
-    任何具体失败（OSError / 非零退出 / 空输出 / 版本不匹配）都按 stale 处理，
-    让损坏或架构错误的二进制被重新下载。只有 TimeoutExpired「放行」——
-    那通常意味着沙箱化的子进程而非损坏的二进制。
-    """
-    import subprocess
-
+    arch = _normalized_arch()
+    asset_entry = RIPGREP_ASSETS.get((sys.platform, arch or ""))
+    if asset_entry is None:
+        return False
+    asset, archive_digest = asset_entry
+    archive = _cached_archive_path(asset)
     try:
-        result = subprocess.run(
-            [str(binary), "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_VERSION_CHECK_TIMEOUT_SECONDS,
+        _ensure_private_directory(_bin_dir())
+        archive_bytes = read_verified_bytes(
+            archive,
+            max_bytes=_DOWNLOAD_MAX_BYTES,
+            expected_digest=archive_digest,
         )
-    except subprocess.TimeoutExpired:
-        logger.debug("rg --version 探测超时 %s，假定当前", binary)
-        return True
-    except OSError:
+        real_binary = binary.resolve(strict=True)
+        real_binary.relative_to(_bin_dir().resolve(strict=True))
+        installed_bytes = read_verified_bytes(
+            real_binary,
+            max_bytes=_DOWNLOAD_MAX_BYTES,
+        )
+        with tempfile.TemporaryDirectory(
+            prefix=".crew-rg-verify-",
+            dir=_bin_dir(),
+        ) as tmp_str:
+            snapshot = Path(tmp_str) / asset
+            expected_snapshot = snapshot_file(
+                snapshot,
+                max_bytes=_DOWNLOAD_MAX_BYTES,
+            )
+            atomic_replace_bytes(
+                snapshot,
+                archive_bytes,
+                expected_snapshot,
+                max_bytes=_DOWNLOAD_MAX_BYTES,
+            )
+            expected_binary = _extract_rg(snapshot, Path(tmp_str) / "unpacked")
+            expected_bytes = read_verified_bytes(
+                expected_binary,
+                max_bytes=_DOWNLOAD_MAX_BYTES,
+            )
+    except (OSError, RuntimeError, ValueError):
         return False
-    if result.returncode != 0:
-        return False
-    first_line = (result.stdout or "").splitlines()[:1]
-    if not first_line:
-        return False
-    return RIPGREP_VERSION in first_line[0]
+    return hashlib.sha256(installed_bytes).digest() == hashlib.sha256(expected_bytes).digest()
 
 
 def _download_to(url: str, dest: Path) -> None:
-    """流式下载 url 到 dest，端到端 deadline。
-
-    urllib 的 timeout 只约束单次 socket 等待，慢速对端能把传输拖过配置超时，
-    因此分块读之间检查端到端 deadline。非 200 响应在写盘前拒绝，避免下游
-    误导成 SHA-256 失败（被读成供应链异常）。
-    """
-    import time
-    import urllib.error
-    import urllib.request
-
-    deadline = time.monotonic() + _DOWNLOAD_TIMEOUT_SECONDS
-    with (
-        urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as resp,
-        dest.open("wb") as fh,
-    ):
-        status = getattr(resp, "status", None)
-        if status is not None and status != 200:
-            raise urllib.error.URLError(f"意外的 HTTP {status} 响应: {url}")
-        while True:
-            if time.monotonic() > deadline:
-                raise TimeoutError(f"下载超时（>{_DOWNLOAD_TIMEOUT_SECONDS}s）: {url}")
-            chunk = resp.read(_DOWNLOAD_CHUNK_BYTES)
-            if not chunk:
-                break
-            fh.write(chunk)
+    """Download through the shared DNS-pinning client before writing to disk."""
+    response = _MANAGED_TOOL_HTTP.fetch(
+        url,
+        method="GET",
+        timeout=_DOWNLOAD_TIMEOUT_SECONDS,
+        max_bytes=_DOWNLOAD_MAX_BYTES,
+        max_redirects=3,
+    )
+    if response.status != 200:
+        raise OutboundDenied("http_status_rejected")
+    _ensure_private_directory(dest.parent)
+    expected = snapshot_file(dest, max_bytes=_DOWNLOAD_MAX_BYTES)
+    atomic_replace_bytes(
+        dest,
+        response.body,
+        expected,
+        max_bytes=_DOWNLOAD_MAX_BYTES,
+    )
 
 
 def _verify_sha256(path: Path, expected_hex: str) -> None:
     """校验文件 SHA-256，不匹配抛 ChecksumMismatchError。"""
-    digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(chunk)
-    actual = digest.hexdigest()
-    if actual != expected_hex:
-        raise ChecksumMismatchError(
-            f"校验和不匹配 {path.name}: 期望 {expected_hex}, 实际 {actual}"
+    try:
+        read_verified_bytes(
+            path,
+            max_bytes=_DOWNLOAD_MAX_BYTES,
+            expected_digest=expected_hex,
         )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ChecksumMismatchError(f"校验和不匹配或文件身份不安全: {path.name}") from exc
 
 
-def _validate_legacy_tar_member(member, extract_root: Path) -> None:
-    """拒绝解压会逃出 extract_root 或类型不支持的 tar 成员（无 filter 兜底用）。"""
+def _validated_archive_target(name: str, extract_root: Path, error_type: type[Exception]) -> Path:
+    if (
+        not name
+        or len(name) > _ARCHIVE_MAX_PATH_CHARS
+        or "\x00" in name
+        or "\\" in name
+        or name.startswith("/")
+    ):
+        raise error_type(f"拒绝不安全 archive 成员路径 {name!r}")
+    raw_parts = name.rstrip("/").split("/")
+    if (
+        not raw_parts
+        or len(raw_parts) > _ARCHIVE_MAX_PATH_DEPTH
+        or any(part in {"", ".", ".."} for part in raw_parts)
+        or ":" in raw_parts[0]
+    ):
+        raise error_type(f"拒绝不安全 archive 成员路径 {name!r}")
+    relative = PurePosixPath(*raw_parts)
+    target = extract_root.joinpath(*relative.parts)
+    try:
+        target.resolve(strict=False).relative_to(extract_root.resolve(strict=False))
+    except ValueError as exc:
+        raise error_type(f"拒绝解压越界 archive 成员 {name!r}") from exc
+    return target
+
+
+def _write_archive_member(
+    source, target: Path, declared_size: int, error_type: type[Exception]
+) -> None:
+    if declared_size < 0 or declared_size > _ARCHIVE_MAX_MEMBER_BYTES:
+        raise error_type(f"archive 成员超过大小上限: {target.name!r}")
+    try:
+        _ensure_private_directory(target.parent)
+    except (FileConflictError, OSError) as exc:
+        raise error_type("archive 成员父目录不安全") from exc
+    total = 0
+    chunks: list[bytes] = []
+    try:
+        while chunk := source.read(1024 * 1024):
+            total += len(chunk)
+            if total > declared_size or total > _ARCHIVE_MAX_MEMBER_BYTES:
+                raise error_type(f"archive 成员展开大小不可信: {target.name!r}")
+            chunks.append(chunk)
+    except OSError as exc:
+        raise error_type("archive 成员读取失败") from exc
+    if total != declared_size:
+        raise error_type(f"archive 成员声明大小不匹配: {target.name!r}")
+    try:
+        expected = snapshot_file(
+            target,
+            max_bytes=_ARCHIVE_MAX_MEMBER_BYTES,
+        )
+        if expected.exists:
+            raise FileConflictError("archive 成员路径冲突")
+        atomic_replace_bytes(
+            target,
+            b"".join(chunks),
+            expected,
+            max_bytes=_ARCHIVE_MAX_MEMBER_BYTES,
+        )
+    except (FileConflictError, OSError, ValueError) as exc:
+        raise error_type("archive 成员发布失败") from exc
+
+
+def _archive_identity_key(target: Path) -> str:
+    return unicodedata.normalize("NFC", str(target)).casefold()
+
+
+def _extract_tar_data(tf, extract_root: Path, archive_size: int) -> None:
+    """Preflight and stream regular tar members without extractall()."""
     import tarfile
 
-    target = extract_root / member.name
+    members = tf.getmembers()
+    if len(members) > _ARCHIVE_MAX_MEMBERS:
+        raise tarfile.TarError("tar 成员数量超过安全上限")
+    total = 0
+    targets: set[str] = set()
+    prepared: list[tuple[object, Path]] = []
+    for member in members:
+        if not (member.isfile() or member.isdir()):
+            raise tarfile.TarError(f"拒绝解压不支持的 tar 成员 {member.name!r}")
+        target = _validated_archive_target(member.name, extract_root, tarfile.TarError)
+        key = _archive_identity_key(target)
+        if key in targets:
+            raise tarfile.TarError(f"tar 成员路径重复 {member.name!r}")
+        targets.add(key)
+        if member.isfile():
+            if member.size < 0 or member.size > _ARCHIVE_MAX_MEMBER_BYTES:
+                raise tarfile.TarError(f"tar 成员超过大小上限 {member.name!r}")
+            total += member.size
+            if total > _ARCHIVE_MAX_TOTAL_BYTES:
+                raise tarfile.TarError("tar 展开总量超过安全上限")
+        prepared.append((member, target))
+    if archive_size <= 0 or total > archive_size * _ARCHIVE_MAX_COMPRESSION_RATIO:
+        raise tarfile.TarError("tar 压缩比超过安全上限")
+
     try:
-        target.resolve().relative_to(extract_root.resolve())
-    except ValueError as exc:
-        raise tarfile.TarError(f"拒绝解压越界 tar 成员 {member.name!r}") from exc
-    if not (member.isfile() or member.isdir()):
-        raise tarfile.TarError(f"拒绝解压不支持的 tar 成员 {member.name!r}")
-
-
-def _extract_tar_data(tf, extract_root: Path) -> None:
-    """优先用 PEP 706 data filter 解压；旧 Python 无 filter 时走校验过的 legacy 解压。"""
-
-    try:
-        tf.extractall(extract_root, filter="data")
-    except TypeError as exc:
-        if "filter" not in str(exc):
-            raise
-        members = tf.getmembers()
-        for member in members:
-            _validate_legacy_tar_member(member, extract_root)
-        tf.extractall(extract_root, members=members)
+        _ensure_private_directory(extract_root)
+    except (FileConflictError, OSError) as exc:
+        raise tarfile.TarError("tar 解压目录不安全") from exc
+    for member, target in prepared:
+        if member.isdir():
+            try:
+                _ensure_private_directory(target)
+            except (FileConflictError, OSError) as exc:
+                raise tarfile.TarError(f"tar 目录成员路径冲突 {member.name!r}") from exc
+            continue
+        source = tf.extractfile(member)
+        if source is None:
+            raise tarfile.TarError(f"无法读取 tar 成员 {member.name!r}")
+        with source:
+            _write_archive_member(source, target, member.size, tarfile.TarError)
 
 
 def _extract_zip_validated(zf, extract_root: Path) -> None:
-    """逐成员校验路径后解压 zip（防 zip-slip 的纵深防御）。"""
+    """Preflight and stream regular ZIP members with hard resource budgets."""
+    import stat
     import zipfile
 
-    extract_root.mkdir(parents=True, exist_ok=True)
-    root = extract_root.resolve()
-    for member in zf.infolist():
-        target = (extract_root / member.filename).resolve()
-        try:
-            target.relative_to(root)
-        except ValueError as exc:
-            raise zipfile.BadZipFile(f"拒绝解压越界 zip 成员 {member.filename!r}") from exc
-    zf.extractall(extract_root)
+    members = zf.infolist()
+    if len(members) > _ARCHIVE_MAX_MEMBERS:
+        raise zipfile.BadZipFile("zip 成员数量超过安全上限")
+    total = 0
+    targets: set[str] = set()
+    prepared: list[tuple[object, Path]] = []
+    for member in members:
+        target = _validated_archive_target(member.filename, extract_root, zipfile.BadZipFile)
+        key = _archive_identity_key(target)
+        if key in targets:
+            raise zipfile.BadZipFile(f"zip 成员路径重复 {member.filename!r}")
+        targets.add(key)
+        mode = (member.external_attr >> 16) & 0xFFFF
+        file_type = stat.S_IFMT(mode)
+        if file_type and file_type not in {stat.S_IFREG, stat.S_IFDIR}:
+            raise zipfile.BadZipFile(f"拒绝解压不支持的 zip 成员 {member.filename!r}")
+        if member.flag_bits & 0x1:
+            raise zipfile.BadZipFile("拒绝加密 zip 成员")
+        if member.file_size < 0 or member.file_size > _ARCHIVE_MAX_MEMBER_BYTES:
+            raise zipfile.BadZipFile(f"zip 成员超过大小上限 {member.filename!r}")
+        total += member.file_size
+        if total > _ARCHIVE_MAX_TOTAL_BYTES:
+            raise zipfile.BadZipFile("zip 展开总量超过安全上限")
+        if member.file_size > 0 and (
+            member.compress_size <= 0
+            or member.file_size > member.compress_size * _ARCHIVE_MAX_COMPRESSION_RATIO
+        ):
+            raise zipfile.BadZipFile(f"zip 成员压缩比超过安全上限 {member.filename!r}")
+        prepared.append((member, target))
+
+    try:
+        _ensure_private_directory(extract_root)
+    except (FileConflictError, OSError) as exc:
+        raise zipfile.BadZipFile("zip 解压目录不安全") from exc
+    for member, target in prepared:
+        if member.is_dir():
+            try:
+                _ensure_private_directory(target)
+            except (FileConflictError, OSError) as exc:
+                raise zipfile.BadZipFile(
+                    f"zip 目录成员路径冲突 {member.filename!r}"
+                ) from exc
+            continue
+        with zf.open(member, "r") as source:
+            _write_archive_member(source, target, member.file_size, zipfile.BadZipFile)
 
 
 def _extract_rg(archive: Path, extract_root: Path) -> Path:
@@ -290,7 +446,7 @@ def _extract_rg(archive: Path, extract_root: Path) -> Path:
             _extract_zip_validated(zf, extract_root)
     else:
         with tarfile.open(archive, mode="r:*") as tf:
-            _extract_tar_data(tf, extract_root)
+            _extract_tar_data(tf, extract_root, archive.stat().st_size)
     target_name = "rg.exe" if sys.platform == "win32" else "rg"
     for path in extract_root.rglob(target_name):
         if path.is_file():
@@ -308,7 +464,7 @@ def _install_ripgrep_sync(asset: str, sha256: str) -> Path:
     import tempfile
 
     bin_dir = _bin_dir()
-    bin_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(bin_dir)
     url = f"{_RELEASE_URL_PREFIX}/{asset}"
     with tempfile.TemporaryDirectory(prefix=".crew-rg-", dir=bin_dir) as tmp_str:
         tmp = Path(tmp_str)
@@ -319,6 +475,9 @@ def _install_ripgrep_sync(asset: str, sha256: str) -> Path:
         if sys.platform != "win32":
             extracted.chmod(0o755)
         dest = managed_rg_path()
+        cached_archive = _cached_archive_path(asset)
+        archive.chmod(0o600)
+        archive.replace(cached_archive)
         if sys.platform == "win32":
             extracted.replace(dest)
             return dest
@@ -335,10 +494,9 @@ async def ensure_ripgrep() -> Path | None:
 
     1. INSTALLER=system → 用 PATH 上的系统 rg，找不到返回 None
     2. managed rg 已存在且版本匹配 → 直接用
-    3. managed 不存在但 PATH 有系统 rg → 用系统的（managed 一旦存在，pin 版本始终胜出）
-    4. offline → 返回 None（调用方走 Python 兜底）
-    5. 平台不支持 → 用系统 rg 或抛 ManagedToolUnavailableError
-    6. 否则下载 → 校验 → 解压 → 安装 → prepend PATH → 返回路径
+    3. offline → 返回 None（调用方走 Python 兜底）
+    4. 平台不支持 → 抛 ManagedToolUnavailableError
+    5. 否则下载 → 校验 → 解压 → 安装 → prepend PATH → 返回路径
 
     stale 的 managed 二进制不会被主动删除，安装成功时原子覆盖；失败时保留旧版
     比让用户一个 rg 都没有更好。
@@ -362,25 +520,17 @@ async def ensure_ripgrep() -> Path | None:
         prepend_managed_bin_to_path()
         return managed
 
-    if not managed_exists:
-        system_rg = shutil.which("rg")
-        if system_rg:
-            return Path(system_rg)
-
     if is_offline():
         logger.debug("跳过 rg 安装: CREW_OFFLINE 已设置")
         return None
 
     if sys.platform == "android":
-        return non_managed_rg()
+        raise ManagedToolUnavailableError("Android 不支持 managed ripgrep")
 
     import asyncio
 
     arch = _normalized_arch()
     if arch is None:
-        system_rg = non_managed_rg()
-        if system_rg:
-            return system_rg
         raise ManagedToolUnavailableError(
             f"当前架构不支持 managed ripgrep ({sys.platform})，"
             "请手动安装 rg，或设置 CREW_RIPGREP_INSTALLER=system"
@@ -388,9 +538,6 @@ async def ensure_ripgrep() -> Path | None:
 
     asset_entry = RIPGREP_ASSETS.get((sys.platform, arch))
     if asset_entry is None:
-        system_rg = non_managed_rg()
-        if system_rg:
-            return system_rg
         raise ManagedToolUnavailableError(
             f"pin 的 ripgrep {RIPGREP_VERSION} 没有 ({sys.platform}/{arch}) 的 asset，"
             "请手动安装 rg，或设置 CREW_RIPGREP_INSTALLER=system"
@@ -408,7 +555,7 @@ async def ensure_ripgrep() -> Path | None:
         else:
             logger.warning("从 %s 下载 rg 失败", _RELEASE_URL_PREFIX, exc_info=True)
         return None
-    except (urllib.error.URLError, TimeoutError):
+    except (urllib.error.URLError, TimeoutError, OutboundDenied):
         logger.warning("从 %s 下载 rg 失败", _RELEASE_URL_PREFIX, exc_info=True)
         return None
     except (tarfile.TarError, zipfile.BadZipFile, FileNotFoundError):
@@ -418,5 +565,7 @@ async def ensure_ripgrep() -> Path | None:
         logger.warning("rg 安装失败: 无法写入 %s (%s)", _bin_dir(), type(exc).__name__)
         return None
     else:
+        if not _managed_binary_is_current(installed):
+            raise ManagedToolUnavailableError("新安装的 managed ripgrep 完整性验证失败")
         prepend_managed_bin_to_path()
         return installed

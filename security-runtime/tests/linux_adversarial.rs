@@ -48,6 +48,75 @@ fn managed_profile_blocks_outside_and_protected_writes() {
     assert!(!workspace.path().join(".git/config").exists());
 }
 
+#[test]
+fn full_filesystem_write_is_denied_before_started() {
+    let workspace = tempfile::tempdir().unwrap();
+    let events = run_request(serde_json::json!({
+        "op": "run",
+        "command": ["/bin/true"],
+        "cwd": workspace.path(),
+        "writable_roots": ["/"],
+        "network_enabled": false
+    }));
+
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["type"], "error", "{events:?}");
+    assert_eq!(events[0]["code"], "sandbox_denied", "{events:?}");
+    assert!(
+        events[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("filesystem root")),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn protected_metadata_symlink_is_denied_before_started() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), workspace.path().join(".git")).unwrap();
+    let events = run_request(serde_json::json!({
+        "op": "run",
+        "command": ["/bin/true"],
+        "cwd": workspace.path(),
+        "writable_roots": [workspace.path()]
+    }));
+
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["type"], "error", "{events:?}");
+    assert_eq!(events[0]["code"], "sandbox_denied", "{events:?}");
+    assert!(
+        events[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot be a symlink")),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn fresh_proc_does_not_expose_a_host_process() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut host_process = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let events = run_request(serde_json::json!({
+        "op": "run",
+        "command": [
+            "/bin/sh",
+            "-c",
+            format!("test ! -e /proc/{}", host_process.id())
+        ],
+        "cwd": workspace.path(),
+        "writable_roots": [workspace.path()]
+    }));
+    let _ = host_process.kill();
+    let _ = host_process.wait();
+
+    assert_eq!(events.first().unwrap()["type"], "started", "{events:?}");
+    assert_eq!(events.last().unwrap()["type"], "completed", "{events:?}");
+    assert_eq!(events.last().unwrap()["exit_code"], 0, "{events:?}");
+}
+
 fn run_request(request: serde_json::Value) -> Vec<serde_json::Value> {
     let binary = env!("CARGO_BIN_EXE_ace-security-runtime");
     let token = "native-test-token-longer-than-thirty-two-bytes";

@@ -8,11 +8,30 @@ the authenticated Electron main-process browser host.
 from __future__ import annotations
 
 import asyncio
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Sequence
 
 from crew.core.errors import ToolError
+from crew.tools.redact import redact_sensitive_display_text
+
+_BROWSER_ERROR_HOST_PATH_RE = re.compile(
+    r"(?i)(?:[a-z]:[\\/]|\\\\|/(?:users|home|private|tmp|var|etc|opt|workspace)(?:[\\/]|$))"
+)
+
+
+def _safe_browser_error(
+    value: BaseException | str,
+    *,
+    fallback: str = "浏览器操作失败",
+    limit: int = 2000,
+) -> str:
+    """Keep browser recovery codes while hiding host paths and credentials."""
+    message = redact_sensitive_display_text(str(value or "")).strip()
+    if not message or _BROWSER_ERROR_HOST_PATH_RE.search(message):
+        return fallback
+    return message[:limit]
 
 
 class BrowserDriverError(ToolError):
@@ -73,6 +92,17 @@ class BrowserDriver(ABC):
     async def prepare(self) -> bool:
         """Perform optional readiness work before the first browser action."""
         return self.available()
+
+    async def configure_proxy(
+        self,
+        owner_session: str,
+        profile_dir: Path,
+        endpoint_url: str,
+        credentials: tuple[str, str],
+    ) -> None:
+        """Configure structured proxy auth when the transport requires it."""
+
+        del owner_session, profile_dir, endpoint_url, credentials
 
     @abstractmethod
     async def execute(

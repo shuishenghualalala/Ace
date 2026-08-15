@@ -12,7 +12,9 @@ import httpx
 from crew.core.errors import ProviderError
 from crew.core.interfaces import LLMProvider
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
+from crew.security.provider_proxy import provider_policy_proxy
 from crew.state.logging import llm_trace
+from crew.tools.redact import redact_secret_values, redact_sensitive_text
 
 _ANTHROPIC_VERSION = "2023-06-01"
 _DEFAULT_BASE_URL = "https://api.anthropic.com"
@@ -184,13 +186,23 @@ class AnthropicProvider(LLMProvider):
         # 拖慢启动（叠加安全软件扫描可卡 40s）。详见 crew.providers.ssl_context。
         from crew.providers.ssl_context import get_shared_ssl_context
 
+        self._url = _endpoint(base_url)
+        proxy_config = provider_policy_proxy(
+            self._url,
+            allow_private=base_url is not None,
+        )
         self._client = httpx.AsyncClient(
             timeout=timeout,
             verify=get_shared_ssl_context(),
+            trust_env=False,
+            follow_redirects=False,
+            transport=proxy_config.httpx_transport(
+                verify=get_shared_ssl_context(),
+            ),
         )
         self._close_lock = asyncio.Lock()
         self._closed = False
-        self._url = _endpoint(base_url)
+        self._secret_values = (api_key, proxy_config.password)
         self._headers = {
             "x-api-key": api_key,
             "anthropic-version": _ANTHROPIC_VERSION,
@@ -206,7 +218,17 @@ class AnthropicProvider(LLMProvider):
             if self._closed:
                 return
             self._closed = True
-            await self._client.aclose()
+            client = self._client
+            try:
+                await client.aclose()
+            finally:
+                self._client = None  # type: ignore[assignment]
+                self._headers.clear()
+                self._secret_values = ()
+
+    def _safe_error(self, exc: BaseException, detail: str = "") -> str:
+        text = redact_secret_values(detail or str(exc), self._secret_values) or ""
+        return redact_sensitive_text(text, force=True)
 
     def _payload(
         self,
@@ -254,16 +276,18 @@ class AnthropicProvider(LLMProvider):
             data = response.json()
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
-            llm_trace("error", {"session_id": session, "model": self.model, "error": exc.response.text})
+            safe_error = self._safe_error(exc, exc.response.text)
+            llm_trace("error", {"session_id": session, "model": self.model, "error": safe_error})
             raise ProviderError(
-                f"Anthropic 调用失败: HTTP {status}: {exc.response.text}",
+                f"Anthropic 调用失败: HTTP {status}: {safe_error}",
                 retryable=_retryable(exc, status),
                 category=_category(exc, status),
             ) from exc
         except Exception as exc:  # noqa: BLE001
-            llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
+            safe_error = self._safe_error(exc)
+            llm_trace("error", {"session_id": session, "model": self.model, "error": safe_error})
             raise ProviderError(
-                f"Anthropic 调用失败: {exc}",
+                f"Anthropic 调用失败: {safe_error}",
                 retryable=_retryable(exc),
                 category=_category(exc),
             ) from exc
@@ -372,14 +396,16 @@ class AnthropicProvider(LLMProvider):
                         data_lines.append(line[5:].strip())
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
+            safe_error = self._safe_error(exc, exc.response.text)
             raise ProviderError(
-                f"Anthropic 流式调用失败: HTTP {status}: {exc.response.text}",
+                f"Anthropic 流式调用失败: HTTP {status}: {safe_error}",
                 retryable=_retryable(exc, status),
                 category=_category(exc, status),
             ) from exc
         except Exception as exc:  # noqa: BLE001
+            safe_error = self._safe_error(exc)
             raise ProviderError(
-                f"Anthropic 流式调用失败: {exc}",
+                f"Anthropic 流式调用失败: {safe_error}",
                 retryable=_retryable(exc),
                 category=_category(exc),
             ) from exc

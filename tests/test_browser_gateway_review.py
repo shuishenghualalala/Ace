@@ -14,14 +14,33 @@ from fastapi import WebSocketDisconnect
 from crew.browser.types import BrowserConfig
 from crew.core.types import ToolCall, ToolResult, tool_arguments_for_history, tool_arguments_for_ui
 from crew.gateway.auth import AccountContext
+from crew.gateway.connections import ConnectionManager
 from crew.gateway.routers.browser import (
     _browser_access_allowed,
     _browser_instance_token_matches,
     _browser_tool_allowed,
+    _BrowserProtocolError,
+    _receive_browser_message,
     create_browser_router,
 )
+from crew.security.local_path import LocalPathReference
 from crew.tools.registry import Registry
 from crew.plugins.builtin import LoggingPlugin
+
+
+@pytest.mark.asyncio
+async def test_browser_websocket_protocol_rejects_duplicate_and_unknown_fields():
+    class Socket:
+        def __init__(self, text: str):
+            self.text = text
+
+        async def receive(self):
+            return {"type": "websocket.receive", "text": self.text, "bytes": None}
+
+    with pytest.raises(_BrowserProtocolError):
+        await _receive_browser_message(Socket('{"type":"ping","type":"ping"}'))
+    with pytest.raises(_BrowserProtocolError):
+        await _receive_browser_message(Socket('{"type":"control","action":"ping","extra":1}'))
 
 
 @pytest.fixture(autouse=True)
@@ -267,8 +286,8 @@ async def test_artifact_preview_requires_the_browser_use_capability(tmp_path):
             "open_for_user",
             ("dev:dev", "session"),
             {
-                "artifact_path": str(page.resolve()),
-                "artifact_root": str(tmp_path.resolve()),
+                "artifact_path": LocalPathReference.parse(page.name),
+                "artifact_root": tmp_path.resolve(),
                 "new_tab": True,
             },
         )
@@ -455,6 +474,9 @@ async def test_browser_websocket_serializes_sends_and_survives_command_error():
         def __init__(self) -> None:
             self.headers = {"authorization": "Bearer expected-token"}
             self.client = SimpleNamespace(host="testclient")
+            self.state = SimpleNamespace(
+                account=AccountContext(owner_account_id="dev:dev", is_local=True)
+            )
             self.messages = [
                 {"type": "input", "event": {"kind": "mouse"}},
                 ["malformed-message"],
@@ -541,6 +563,10 @@ async def test_browser_websocket_drops_debug_when_browser_use_is_disabled():
         headers = {"authorization": "Bearer expected-token"}
         client = SimpleNamespace(host="testclient")
 
+        state = SimpleNamespace(
+            account=AccountContext(owner_account_id="dev:dev", is_local=True)
+        )
+
         def __init__(self) -> None:
             self.sent: list[dict] = []
             self.received = False
@@ -566,6 +592,226 @@ async def test_browser_websocket_drops_debug_when_browser_use_is_disabled():
     assert any(event.get("type") == "state" for event in socket.sent)
     assert not any(event.get("type") == "frame" for event in socket.sent)
     assert not any(event.get("type") == "debug" for event in socket.sent)
+
+
+async def test_browser_websocket_closes_idle_connection_and_bounds_lifetime(
+    monkeypatch,
+):
+    registry = _registry_with_browser_tool()
+
+    class FakeAccessControl:
+        user_type = "internal"
+
+        def resolve_for(self, _user_type: str) -> dict:
+            return {"enabled_toolsets": ["browser"]}
+
+    class FakeSessionStore:
+        def session_belongs_to(self, session_id: str, owner: str) -> bool:
+            return session_id == "session" and owner == "dev:dev"
+
+        def get_agent_config(self, _session_id: str, *, owner_account_id: str) -> dict:
+            return {"user_type": "internal"}
+
+    class FakeManager:
+        async def subscribe(self, _owner: str, _session_id: str):
+            await asyncio.Event().wait()
+            yield  # pragma: no cover - keeps this an async generator
+
+    class FakeSocket:
+        headers = {"authorization": "Bearer expected-token"}
+        client = SimpleNamespace(host="testclient")
+
+        state = SimpleNamespace(
+            account=AccountContext(owner_account_id="dev:dev", is_local=True)
+        )
+
+        def __init__(self) -> None:
+            self.closed: list[int] = []
+
+        async def accept(self) -> None:
+            return None
+
+        async def close(self, code: int) -> None:
+            self.closed.append(code)
+
+        async def receive_json(self):
+            await asyncio.Event().wait()
+
+        async def send_json(self, _event: dict) -> None:
+            return None
+
+    config = SimpleNamespace(
+        gateway_dev_mode=True,
+        gateway_dev_account="dev:dev",
+        access_control=FakeAccessControl(),
+    )
+    crew = SimpleNamespace(
+        browser_manager=FakeManager(),
+        config=config,
+        registry=registry,
+        session_store=FakeSessionStore(),
+    )
+    monkeypatch.setattr(
+        "crew.gateway.routers.browser._BROWSER_WS_IDLE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "crew.gateway.routers.browser._BROWSER_WS_TOTAL_TIMEOUT_SECONDS",
+        0.1,
+    )
+    router = create_browser_router(crew)
+    endpoint = next(route.endpoint for route in router.routes if route.path == "/ws/browser/{session_id}")
+
+    socket = FakeSocket()
+    await endpoint(socket, "session")
+
+    assert socket.closed == [1001]
+
+
+async def test_browser_websocket_rate_limits_control_frames(monkeypatch):
+    registry = _registry_with_browser_tool()
+
+    class FakeAccessControl:
+        user_type = "internal"
+
+        def resolve_for(self, _user_type: str) -> dict:
+            return {"enabled_toolsets": ["browser"]}
+
+    class FakeSessionStore:
+        def session_belongs_to(self, session_id: str, owner: str) -> bool:
+            return session_id == "session" and owner == "dev:dev"
+
+        def get_agent_config(self, _session_id: str, *, owner_account_id: str) -> dict:
+            return {"user_type": "internal"}
+
+    class FakeManager:
+        async def subscribe(self, _owner: str, _session_id: str):
+            await asyncio.Event().wait()
+            yield  # pragma: no cover - keeps this an async generator
+
+    class FakeSocket:
+        headers = {"authorization": "Bearer expected-token"}
+        client = SimpleNamespace(host="testclient")
+        state = SimpleNamespace(
+            account=AccountContext(owner_account_id="dev:dev", is_local=True)
+        )
+
+        def __init__(self) -> None:
+            self.closed: list[int] = []
+            self.sent: list[dict] = []
+
+        async def accept(self) -> None:
+            return None
+
+        async def close(self, code: int) -> None:
+            self.closed.append(code)
+
+        async def receive_json(self):
+            return {"type": "ping"}
+
+        async def send_json(self, event: dict) -> None:
+            self.sent.append(event)
+
+    crew = SimpleNamespace(
+        browser_manager=FakeManager(),
+        config=SimpleNamespace(
+            gateway_dev_mode=True,
+            gateway_dev_account="dev:dev",
+            access_control=FakeAccessControl(),
+        ),
+        registry=registry,
+        session_store=FakeSessionStore(),
+    )
+    monkeypatch.setattr(
+        "crew.gateway.routers.browser._BROWSER_WS_MAX_MESSAGES_PER_WINDOW",
+        1,
+    )
+    monkeypatch.setattr(
+        "crew.gateway.routers.browser._BROWSER_WS_RATE_WINDOW_SECONDS",
+        10,
+    )
+    router = create_browser_router(crew)
+    endpoint = next(route.endpoint for route in router.routes if route.path == "/ws/browser/{session_id}")
+
+    socket = FakeSocket()
+    await endpoint(socket, "session")
+
+    assert socket.closed == [1013]
+    assert socket.sent == [{"type": "pong"}]
+
+
+async def test_browser_websocket_owner_close_wakes_blocked_stream():
+    registry = _registry_with_browser_tool()
+
+    class FakeAccessControl:
+        user_type = "internal"
+
+        def resolve_for(self, _user_type: str) -> dict:
+            return {"enabled_toolsets": ["browser"]}
+
+    class FakeSessionStore:
+        def session_belongs_to(self, session_id: str, owner: str) -> bool:
+            return session_id == "session" and owner == "dev:dev"
+
+        def get_agent_config(self, _session_id: str, *, owner_account_id: str) -> dict:
+            return {"user_type": "internal"}
+
+    subscriber_started = asyncio.Event()
+
+    class FakeManager:
+        async def subscribe(self, _owner: str, _session_id: str):
+            subscriber_started.set()
+            await asyncio.Event().wait()
+            yield  # pragma: no cover - keeps this an async generator
+
+    class FakeSocket:
+        headers = {"authorization": "Bearer expected-token"}
+        client = SimpleNamespace(host="testclient")
+        state = SimpleNamespace(
+            account=AccountContext(owner_account_id="dev:dev", is_local=True)
+        )
+
+        def __init__(self) -> None:
+            self.closed: list[tuple[int, str]] = []
+
+        async def accept(self) -> None:
+            return None
+
+        async def close(self, code: int, reason: str = "") -> None:
+            self.closed.append((code, reason))
+
+        async def receive_json(self):
+            await asyncio.Event().wait()
+
+        async def send_json(self, _event: dict) -> None:
+            return None
+
+    connections = ConnectionManager()
+    crew = SimpleNamespace(
+        browser_manager=FakeManager(),
+        connections=connections,
+        config=SimpleNamespace(
+            gateway_dev_mode=True,
+            gateway_dev_account="dev:dev",
+            access_control=FakeAccessControl(),
+        ),
+        registry=registry,
+        session_store=FakeSessionStore(),
+    )
+    endpoint = next(
+        route.endpoint
+        for route in create_browser_router(crew).routes
+        if route.path == "/ws/browser/{session_id}"
+    )
+    socket = FakeSocket()
+    endpoint_task = asyncio.create_task(endpoint(socket, "session"))
+
+    await asyncio.wait_for(subscriber_started.wait(), 2)
+    await asyncio.sleep(0)
+    assert await connections.close_owner("dev:dev") == 1
+    await asyncio.wait_for(endpoint_task, 2)
+
+    assert socket.closed == [(4401, "Login required")]
 
 
 class _HostAccessControl:

@@ -14,11 +14,15 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from crew.gateway.auth import account_from_request
+from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
+from crew.gateway.helpers import safe_public_error
+from crew.plugins.manager import PluginSecurityError
 from crew.state.logging import get_logger
 from crew.state.plugin_preferences import plugin_effective_enabled, plugin_role_allowed
 
@@ -63,6 +67,14 @@ def _drop_owner_agent_cache(crew, owner: str) -> None:
         drop_owner(owner)
 
 
+def _drop_all_agent_cache(crew) -> None:
+    """System plugin transitions change every owner's available tool surface."""
+    agents = getattr(crew, "agents", None)
+    clear = getattr(agents, "clear", None)
+    if callable(clear):
+        clear()
+
+
 def _plugin_states(crew, owner: str, user_type: str) -> list[dict]:
     mgr = getattr(crew, "plugins", None)
     prefs = getattr(crew, "plugin_prefs", None)
@@ -89,7 +101,7 @@ def _plugin_states(crew, owner: str, user_type: str) -> list[dict]:
         )
         runtime_state, runtime_error = browser_runtime_status(crew, owner, key)
         effective = policy_effective and runtime_state["ready"]
-        errors = [str(item) for item in (loaded.error, runtime_error) if item]
+        errors = [safe_public_error(item, "插件运行时不可用") for item in (loaded.error, runtime_error) if item]
         states.append(
             {
                 "name": manifest.name,
@@ -99,6 +111,8 @@ def _plugin_states(crew, owner: str, user_type: str) -> list[dict]:
                 "description": manifest.description,
                 "kind": manifest.kind,
                 "enabled": loaded.enabled,
+                "declarative_only": loaded.declarative_only,
+                "execution_trusted": manifest.execution_trusted,
                 "installed": True,
                 "system_allowed": system_allowed,
                 "role_allowed": role_allowed,
@@ -124,6 +138,180 @@ def _plugin_states(crew, owner: str, user_type: str) -> list[dict]:
 def create_plugins_router(crew) -> APIRouter:
     router = APIRouter()
     transition_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+    def _admin_account(request: Request):
+        account = account_from_request(request)
+        try:
+            require_admin(account, crew.config)
+        except AuthenticationError as exc:
+            return None, JSONResponse(
+                {"ok": False, "error": safe_public_error(exc, "权限不足")},
+                status_code=403,
+            )
+        return account, None
+
+    @router.post("/api/plugins/install")
+    async def install_remote_plugin(request: Request, payload: dict) -> JSONResponse:
+        """Install a signed HTTPS bundle; only structured administrator input is accepted."""
+        account, denied = _admin_account(request)
+        if denied is not None:
+            return denied
+        allowed_fields = {"source_url", "sha256", "enabled"}
+        unknown = sorted(str(key) for key in set(payload) - allowed_fields)
+        if unknown:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "插件安装请求含不支持字段",
+                    "fields": unknown,
+                },
+                status_code=400,
+            )
+        source_url = str(payload.get("source_url") or "").strip()
+        digest = str(payload.get("sha256") or "").strip().lower()
+        enabled = payload.get("enabled", False)
+        try:
+            parsed = urlsplit(source_url)
+        except ValueError:
+            parsed = None
+        if (
+            parsed is None
+            or parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            return JSONResponse(
+                {"ok": False, "error": "source_url 必须是无凭据、无 fragment 的 HTTPS URL"},
+                status_code=400,
+            )
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            return JSONResponse(
+                {"ok": False, "error": "sha256 必须是 64 位十六进制摘要"},
+                status_code=400,
+            )
+        if not isinstance(enabled, bool):
+            return JSONResponse(
+                {"ok": False, "error": "enabled 必须是布尔值"},
+                status_code=400,
+            )
+        manager = getattr(crew, "plugins", None)
+        if manager is None:
+            return JSONResponse({"ok": False, "error": "插件系统未就绪"}, status_code=503)
+        try:
+            loaded = await asyncio.to_thread(
+                manager.install_remote_bundle,
+                source_url,
+                expected_sha256=digest,
+                actor_id=account.owner_account_id,
+                enable=enabled,
+            )
+        except PluginSecurityError as exc:
+            return JSONResponse(
+                {"ok": False, "error": safe_public_error(exc, "插件安全校验失败"), "code": exc.code},
+                status_code=400,
+            )
+        except Exception:
+            log.exception("远程插件安装失败")
+            return JSONResponse(
+                {"ok": False, "error": "插件安装失败，请查看 Gateway 日志"},
+                status_code=500,
+            )
+        if loaded.enabled:
+            _drop_all_agent_cache(crew)
+        manifest = loaded.manifest
+        return JSONResponse(
+            {
+                "ok": True,
+                "plugin": {
+                    "name": manifest.name,
+                    "key": manifest.key or manifest.name,
+                    "version": manifest.version,
+                    "enabled": loaded.enabled,
+                    "declarative_only": loaded.declarative_only,
+                    "execution_trusted": manifest.execution_trusted,
+                    "error": loaded.error,
+                    "source": getattr(manifest, "source", "installed"),
+                    "signer_key_id": getattr(manifest, "signer_key_id", ""),
+                    "tree_sha256": getattr(manifest, "tree_sha256", ""),
+                },
+            }
+        )
+
+    @router.put("/api/plugins/{plugin_key}/system-enabled")
+    async def set_system_plugin_enabled(
+        request: Request,
+        plugin_key: str,
+        payload: dict,
+    ) -> JSONResponse:
+        """Enable/disable a host plugin; this is an administrator mutation."""
+        account, denied = _admin_account(request)
+        if denied is not None:
+            return denied
+        if set(payload) != {"enabled"} or not isinstance(payload.get("enabled"), bool):
+            return JSONResponse(
+                {"ok": False, "error": "请求只能包含布尔字段 enabled"},
+                status_code=400,
+            )
+        manager = getattr(crew, "plugins", None)
+        if manager is None:
+            return JSONResponse({"ok": False, "error": "插件系统未就绪"}, status_code=503)
+        key = str(plugin_key or "").strip()
+        try:
+            if payload["enabled"]:
+                ok = await asyncio.to_thread(
+                    manager.enable_plugin,
+                    key,
+                    actor_id=account.owner_account_id,
+                )
+            else:
+                ok = await asyncio.to_thread(
+                    manager.unload_plugin,
+                    key,
+                    actor_id=account.owner_account_id,
+                )
+        except PluginSecurityError as exc:
+            return JSONResponse(
+                {"ok": False, "error": safe_public_error(exc, "插件安全校验失败"), "code": exc.code},
+                status_code=400,
+            )
+        if not ok:
+            return JSONResponse(
+                {"ok": False, "error": "插件不存在或状态未改变"},
+                status_code=404,
+            )
+        _drop_all_agent_cache(crew)
+        return JSONResponse({"ok": True, "key": key, "enabled": payload["enabled"]})
+
+    @router.delete("/api/plugins/{plugin_key}")
+    async def uninstall_plugin(request: Request, plugin_key: str) -> JSONResponse:
+        """Uninstall one signed user plugin and clean all runtime registrations."""
+        account, denied = _admin_account(request)
+        if denied is not None:
+            return denied
+        manager = getattr(crew, "plugins", None)
+        if manager is None:
+            return JSONResponse({"ok": False, "error": "插件系统未就绪"}, status_code=503)
+        key = str(plugin_key or "").strip()
+        try:
+            ok = await asyncio.to_thread(
+                manager.uninstall_plugin,
+                key,
+                actor_id=account.owner_account_id,
+            )
+        except PluginSecurityError as exc:
+            return JSONResponse(
+                {"ok": False, "error": safe_public_error(exc, "插件安全校验失败"), "code": exc.code},
+                status_code=400,
+            )
+        if not ok:
+            return JSONResponse(
+                {"ok": False, "error": "插件不存在或不是可卸载的远程插件"},
+                status_code=404,
+            )
+        _drop_all_agent_cache(crew)
+        return JSONResponse({"ok": True, "key": key})
 
     @router.get("/api/plugins/states")
     async def plugin_states(request: Request) -> JSONResponse:

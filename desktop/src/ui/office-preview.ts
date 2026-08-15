@@ -411,11 +411,10 @@ function pptxStageLayoutBox(
   slideWidth: number,
   slideHeight: number,
 ): { width: number; height: number; svgWidth: number; svgHeight: number } {
-  const computedStage = window.getComputedStyle(stage);
-  const styleWidth = cssPxValue(computedStage.width);
+  const styleWidth = cssPxValue(stage.style.width);
   const viewport = svgViewportSize(svgRoot, slideWidth, slideHeight);
   const width = stage.clientWidth || styleWidth || stageRect.width || PPTX_BASE_WIDTH;
-  const styleHeight = cssPxValue(computedStage.height);
+  const styleHeight = cssPxValue(stage.style.height);
   const height = stage.clientHeight
     || styleHeight
     || (width > 0 ? width * (viewport.height / viewport.width) : stageRect.height);
@@ -480,7 +479,10 @@ function copyPptxTextVisualStyle(node: SVGTextElement, overlay: HTMLElement): vo
   const letterSpacing = attr('letter-spacing') ?? computed.letterSpacing;
   const textDecoration = attr('text-decoration') ?? computed.textDecoration;
   const textAnchor = attr('text-anchor') ?? computed.textAnchor;
-  if (fill && fill !== 'none') setRuntimeStyle(overlay, 'color', fill);
+  if (fill && fill !== 'none') {
+    setRuntimeStyle(overlay, 'color', fill);
+    overlay.style.setProperty('--ppt-text-color', fill);
+  }
   if (fontSize) setRuntimeStyle(overlay, 'fontSize', fontSize);
   if (fontFamily) setRuntimeStyle(overlay, 'fontFamily', fontFamily);
   if (fontWeight) setRuntimeStyle(overlay, 'fontWeight', fontWeight);
@@ -562,9 +564,9 @@ function editablePptxShadowStyles(): string {
     .inspector-office-page-editor__svg-source-text.is-editing,
     .inspector-office-page-editor__svg-source-text.is-dirty{opacity:0}
     .inspector-office-page-editor__ppt-layer{position:absolute;inset:0;z-index:2;overflow:hidden;pointer-events:none}
-    .inspector-office-page-editor__ppt-textbox{position:absolute;box-sizing:border-box;min-height:20px;padding:0;border:1px solid transparent;border-radius:var(--mw-radius-1);background:transparent;color:transparent;caret-color:var(--mw-action-primary);cursor:text;line-height:normal;outline:none;overflow:hidden;pointer-events:auto;resize:none;white-space:pre}
+    .inspector-office-page-editor__ppt-textbox{position:absolute;box-sizing:border-box;min-height:20px;padding:0;border:1px solid transparent;border-radius:var(--mw-radius-1);background:transparent;color:transparent!important;caret-color:var(--mw-action-primary);cursor:text;line-height:normal;outline:none;overflow:hidden;pointer-events:auto;resize:none;white-space:pre}
     .inspector-office-page-editor__ppt-textbox.is-editing,
-    .inspector-office-page-editor__ppt-textbox.is-dirty{color:var(--mw-runtime-color,currentColor)}
+    .inspector-office-page-editor__ppt-textbox.is-dirty{color:var(--ppt-text-color,currentColor)!important}
     .inspector-office-page-editor__ppt-textbox:hover{border-color:var(--mw-focus-ring)}
     .inspector-office-page-editor__ppt-textbox:focus{border-color:var(--mw-focus-ring);box-shadow:var(--mw-action-glow)}`;
 }

@@ -40,9 +40,12 @@ import sys
 import tempfile
 import threading
 import uuid
+from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Optional
 
 # 录制工作流的能力词表：唯一权威在 crew/browser/types.py。
@@ -52,6 +55,18 @@ from crew.browser.types import (
     WORKFLOW_CAPABILITY_ORDER_V2,
     WORKFLOW_CAPABILITY_ORDER_V3,
 )
+from crew.security.capability_discovery import (
+    MAX_CAPABILITY_DISCOVERY_CONCURRENCY,
+    CapabilityDiscoveryBusy,
+    capability_discovery_slot,
+)
+from crew.tools.file_utils import (
+    FileConflictError,
+    _pinned_parent,
+    read_verified_bytes,
+    snapshot_file,
+)
+from crew.tools.redact import safe_public_error
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +128,23 @@ _EXCLUDED_DIRS = frozenset({
     ".pytest_cache", ".mypy_cache", ".ruff_cache",
     ".archive", ".hub", "dist", "build",
 })
+_DISCOVERY_MAX_ROOTS = 32
+_DISCOVERY_MAX_DEPTH = 16
+_DISCOVERY_MAX_DIRECTORIES = 4096
+_DISCOVERY_MAX_ENTRIES = 20_000
+_DISCOVERY_MAX_FILES = 10_000
+_DISCOVERY_MAX_BUNDLES = 512
+_DISCOVERY_MAX_CONCURRENCY = MAX_CAPABILITY_DISCOVERY_CONCURRENCY
+_DISCOVERY_MAX_FILE_BYTES = 1024 * 1024
+_DISCOVERY_STEP_CACHE_LIMIT = 128
 
 # 缓存：(mtime_ns_tuple) → skills_dict
 _cache: dict[str, dict] = {}
 _cache_key: tuple = ()
+_step_discovery_cache: OrderedDict[
+    tuple[str, str, str],
+    tuple[bool, Mapping[str, Any] | str],
+] = OrderedDict()
 _skills_index_cache: dict[tuple, str] = {}
 
 # 安装事实是宿主级全局状态。同步装卸只持有短锁；异步 repair 在生成内容阶段不持锁，
@@ -124,10 +152,12 @@ _skills_index_cache: dict[tuple, str] = {}
 _SKILL_MUTATION_LOCK = threading.RLock()
 _SKILL_AUDIT_LOCK = threading.Lock()
 
-# Package 缓存：package slug → package info
-_packages: dict[str, dict] = {}
-# Package members：package slug → [member full_slug, ...]
-_package_members: dict[str, list[str]] = {}
+# Package 缓存：package slug → package info。
+# 扫描期间使用普通 dict 构建，扫描成功后冻结；公开读取不得拿到可变内部状态。
+_packages: Mapping[str, Any] = {}
+# Package members：package slug → member full_slug tuple。
+# 扫描期间暂时用 list 累积，发布 snapshot 前转成 tuple。
+_package_members: Mapping[str, tuple[str, ...]] = {}
 
 # 全局 skill 过滤器（由 app.py 在启动时根据 access_control 配置）
 _skill_filter: dict[str, list[str] | None] = {"enabled": None, "disabled": None}
@@ -167,13 +197,16 @@ class SkillEntrypoint:
             )
         except (TypeError, ValueError):
             timeout_seconds = 120.0
+        writable_paths = raw.get("writable_paths") or []
+        if not isinstance(writable_paths, list):
+            writable_paths = []
         return cls(
             id=str(raw.get("id") or "").strip(),
             path=str(raw.get("path") or "").strip(),
             runtime=str(raw.get("runtime") or "").strip(),
             writable_paths=tuple(
                 str(item).strip()
-                for item in (raw.get("writable_paths") or [])
+                for item in writable_paths
                 if str(item).strip()
             ),
             side_effect=str(raw.get("side_effect") or "").strip(),
@@ -210,6 +243,15 @@ class SkillActivation:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SkillActivation":
+        required_tools = raw.get("required_tools") or []
+        required_env = raw.get("required_env") or []
+        entrypoints = raw.get("entrypoints") or []
+        if not isinstance(required_tools, list):
+            required_tools = []
+        if not isinstance(required_env, list):
+            required_env = []
+        if not isinstance(entrypoints, list):
+            entrypoints = []
         return cls(
             skill_id=str(raw.get("skill_id") or "").strip(),
             name=str(raw.get("name") or "").strip(),
@@ -217,17 +259,17 @@ class SkillActivation:
             skill_root=str(raw.get("skill_root") or "").strip(),
             required_tools=tuple(
                 str(item).strip()
-                for item in (raw.get("required_tools") or [])
+                for item in required_tools
                 if str(item).strip()
             ),
             required_env=tuple(
                 str(item).strip()
-                for item in (raw.get("required_env") or [])
+                for item in required_env
                 if str(item).strip()
             ),
             entrypoints=tuple(
                 SkillEntrypoint.from_dict(item)
-                for item in (raw.get("entrypoints") or [])
+                for item in entrypoints
                 if isinstance(item, dict)
             ),
         )
@@ -245,7 +287,7 @@ def get_plugin_skill_roots() -> list[Path]:
         return []
     try:
         roots = _plugin_skill_roots_provider() or []
-    except Exception:  # noqa: BLE001 - skill 层不放大插件故障
+    except Exception:
         logger.debug("读取插件 skill roots 失败", exc_info=True)
         return []
     return [Path(root) for root in roots]
@@ -329,6 +371,10 @@ class SkillPathError(ValueError):
         self.path = path
 
 
+class SkillDiscoveryLimitError(RuntimeError):
+    """Skill discovery exceeded an explicit root/traversal/resource budget."""
+
+
 def _trusted_link_target_roots() -> list[Path]:
     """受信任的软链目标根列表。
 
@@ -402,9 +448,13 @@ def resolve_skill_path(path: Path, allowed_root: Path, *, must_exist: bool = Tru
 
 
 def read_skill_text(path: Path, allowed_root: Path, *, errors: str = "strict") -> str:
-    """在读取前后验证同一 resolved target 始终位于 Skill 根内。"""
+    """Read a recognized manifest through the shared identity-checked handle."""
     before = resolve_skill_path(path, allowed_root)
-    content = before.read_text(encoding="utf-8", errors=errors)
+    content = read_verified_bytes(
+        before,
+        max_bytes=_DISCOVERY_MAX_FILE_BYTES,
+        reject_hard_links=True,
+    ).decode("utf-8", errors=errors)
     after = resolve_skill_path(path, allowed_root)
     if after != before:
         raise SkillPathError("skill_path_changed", path, f"Skill 路径在读取期间发生变化: {path}")
@@ -415,8 +465,8 @@ def _containment_finding(exc: SkillPathError) -> dict[str, Any]:
     return {
         "code": exc.code,
         "severity": "error",
-        "file": str(exc.path),
-        "suggestion": str(exc),
+        "file": safe_public_error(str(exc.path), "Skill 路径已隐藏", limit=200),
+        "suggestion": safe_public_error(exc, "Skill 路径 containment 校验失败"),
     }
 
 
@@ -438,7 +488,15 @@ def _is_link_or_reparse(path: Path) -> bool:
     return path.is_symlink() or bool(attrs & reparse_flag)
 
 
-def _walk_contained(skill_root: Path, findings: list[dict[str, Any]] | None = None):
+def _walk_contained(
+    skill_root: Path,
+    findings: list[dict[str, Any]] | None = None,
+    *,
+    max_depth: int | None = None,
+    max_directories: int | None = None,
+    max_entries: int | None = None,
+    max_files: int | None = None,
+):
     """安全遍历 Skill 树；允许 root 内链接，剪枝越界、悬空、环和重复目录。"""
 
     def record(exc: SkillPathError) -> None:
@@ -455,6 +513,9 @@ def _walk_contained(skill_root: Path, findings: list[dict[str, Any]] | None = No
 
     seen: set[str] = set()
     ancestry: dict[str, frozenset[str]] = {_lexical_path_key(skill_root): frozenset()}
+    directories_seen = 0
+    entries_seen = 0
+    files_seen = 0
 
     def onerror(exc: OSError) -> None:
         record(SkillPathError("skill_path_unreadable", Path(exc.filename or skill_root), str(exc)))
@@ -466,6 +527,29 @@ def _walk_contained(skill_root: Path, findings: list[dict[str, Any]] | None = No
         onerror=onerror,
     ):
         current = Path(current_raw)
+        try:
+            depth = len(current.relative_to(skill_root).parts)
+        except ValueError as exc:
+            raise SkillDiscoveryLimitError("Skill 发现遍历离开根目录") from exc
+        directories_seen += 1
+        entries_seen += len(dirs) + len(files)
+        files_seen += len(files)
+        if max_depth is not None and depth > max_depth:
+            raise SkillDiscoveryLimitError(
+                f"Skill 发现目录深度超过上限 {max_depth}"
+            )
+        if max_directories is not None and directories_seen > max_directories:
+            raise SkillDiscoveryLimitError(
+                f"Skill 发现目录数量超过上限 {max_directories}"
+            )
+        if max_entries is not None and entries_seen > max_entries:
+            raise SkillDiscoveryLimitError(
+                f"Skill 发现条目数量超过上限 {max_entries}"
+            )
+        if max_files is not None and files_seen > max_files:
+            raise SkillDiscoveryLimitError(
+                f"Skill 发现文件数量超过上限 {max_files}"
+            )
         parents = ancestry.get(_lexical_path_key(current), frozenset())
         try:
             current_resolved = resolve_skill_path(current, root)
@@ -684,7 +768,7 @@ def _install_local_skill_link(source: Path, target: Path, *, target_root: Path) 
         raise SkillPathError(
             "skill_link_failed",
             target,
-            f"建立本地 skill 软链失败: {target} -> {source_resolved}: {exc}",
+            "建立本地 skill 软链失败",
         ) from exc
     _validate_skill_tree(target, target_root)
 
@@ -1132,7 +1216,7 @@ def _package_description_from_frontmatter(frontmatter: dict, fallback: str) -> s
 def _parse_package_md(package_md: Path) -> dict[str, Any] | None:
     """解析 PACKAGE.md，返回 package info dict；解析失败返回 None。"""
     try:
-        content = package_md.read_text(encoding="utf-8")
+        content = read_skill_text(package_md, package_md.parent)
         fm, body = _parse_frontmatter(content)
         name = str(fm.get("name") or package_md.parent.name).strip()
         if not name:
@@ -1177,7 +1261,13 @@ def _iter_skill_files(skills_dir: Path):
     if not skills_dir.is_dir():
         return
     matches: list[Path] = []
-    for _root, files in _walk_contained(skills_dir):
+    for _root, files in _walk_contained(
+        skills_dir,
+        max_depth=_DISCOVERY_MAX_DEPTH,
+        max_directories=_DISCOVERY_MAX_DIRECTORIES,
+        max_entries=_DISCOVERY_MAX_ENTRIES,
+        max_files=_DISCOVERY_MAX_FILES,
+    ):
         for path in files:
             if path.name != "SKILL.md":
                 continue
@@ -1205,17 +1295,35 @@ def _iter_package_skills(skills_dir: Path):
     if not skills_dir.is_dir():
         return
 
-    for entry in sorted(skills_dir.iterdir()):
+    entries = sorted(skills_dir.iterdir())
+    if len(entries) > _DISCOVERY_MAX_ENTRIES:
+        raise SkillDiscoveryLimitError(
+            f"Skill 发现条目数量超过上限 {_DISCOVERY_MAX_ENTRIES}"
+        )
+    visited_entries = len(entries)
+    bundles_seen = 0
+    for entry in entries:
         if not entry.is_dir() or _is_excluded_dir(entry.name):
             continue
 
         package_md = entry / "PACKAGE.md"
         if package_md.is_file():
+            bundles_seen += 1
+            if bundles_seen > _DISCOVERY_MAX_BUNDLES:
+                raise SkillDiscoveryLimitError(
+                    f"Skill 发现 bundle 数量超过上限 {_DISCOVERY_MAX_BUNDLES}"
+                )
             package_info = _parse_package_md(package_md)
             if package_info is None:
                 continue
             # package 内的 skills：只扫描直接子目录
-            for sub in sorted(entry.iterdir()):
+            package_entries = sorted(entry.iterdir())
+            visited_entries += len(package_entries)
+            if visited_entries > _DISCOVERY_MAX_ENTRIES:
+                raise SkillDiscoveryLimitError(
+                    f"Skill 发现条目数量超过上限 {_DISCOVERY_MAX_ENTRIES}"
+                )
+            for sub in package_entries:
                 if not sub.is_dir() or _is_excluded_dir(sub.name):
                     continue
                 skill_md = sub / "SKILL.md"
@@ -1312,20 +1420,57 @@ def _scan_dir(skills_dir: Path, seen: set[str]) -> dict[str, dict]:
     return result
 
 
+def _discovery_root_identity(root: Path) -> tuple:
+    lexical = Path(os.path.abspath(root.expanduser()))
+    try:
+        before = lexical.lstat()
+    except FileNotFoundError:
+        return ("root", os.path.normcase(str(lexical)), 0, 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or getattr(before, "st_file_attributes", 0) & reparse_flag
+    ):
+        raise SkillDiscoveryLimitError(f"Skill 发现根目录是链接或 reparse point: {lexical}")
+    if not stat.S_ISDIR(before.st_mode):
+        raise SkillDiscoveryLimitError(f"Skill 发现根路径不是目录: {lexical}")
+    try:
+        with _pinned_parent(lexical / ".ace-skill-root-probe"):
+            after = lexical.lstat()
+    except (FileConflictError, OSError) as exc:
+        raise SkillDiscoveryLimitError(f"Skill 发现根目录身份无法验证: {lexical}") from exc
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise SkillDiscoveryLimitError(f"Skill 发现根目录身份发生变化: {lexical}")
+    return (
+        "root",
+        os.path.normcase(str(lexical)),
+        int(after.st_dev),
+        int(after.st_ino),
+    )
+
+
 def _mtime_key() -> tuple:
     """Skill / PACKAGE.md 文件路径与 mtime 组合，用于缓存失效检测。"""
-    key: list[tuple[str, int]] = []
+    key: list[tuple] = []
     plugin_roots = get_plugin_skill_roots()
-    for d in (get_builtin_skills_dir(), get_user_skills_dir(), *plugin_roots):
+    roots = (get_builtin_skills_dir(), get_user_skills_dir(), *plugin_roots)
+    if len({_lexical_path_key(root) for root in roots}) > _DISCOVERY_MAX_ROOTS:
+        raise SkillDiscoveryLimitError(
+            f"Skill 发现根目录数量超过上限 {_DISCOVERY_MAX_ROOTS}"
+        )
+    for d in roots:
+        key.append(_discovery_root_identity(d))
         if not d.is_dir():
-            key.append((str(d), 0))
             continue
         # SKILL.md
         for skill_md in _iter_skill_files(d):
             try:
                 skill_dir = resolve_skill_path(skill_md.parent, d)
                 before = resolve_skill_path(skill_md, skill_dir)
-                mtime_ns = before.stat().st_mtime_ns
+                version = snapshot_file(
+                    before,
+                    max_bytes=_DISCOVERY_MAX_FILE_BYTES,
+                )
                 after = resolve_skill_path(skill_md, skill_dir)
                 if after != before:
                     raise SkillPathError(
@@ -1333,31 +1478,67 @@ def _mtime_key() -> tuple:
                         skill_md,
                         f"Skill 路径在 stat 期间发生变化: {skill_md}",
                     )
-                key.append((str(skill_md), mtime_ns))
-            except (OSError, SkillPathError):
-                key.append((str(skill_md), 0))
+                key.append(
+                    (
+                        str(skill_md),
+                        version.mtime_ns,
+                        version.size,
+                        version.digest,
+                    )
+                )
+            except (OSError, SkillPathError, ValueError):
+                key.append((str(skill_md), 0, 0, ""))
         # PACKAGE.md
-        for root, dirs, files in os.walk(d, followlinks=True):
-            dirs[:] = sorted(
-                sub for sub in dirs
-                if sub not in _EXCLUDED_DIRS and not sub.startswith(".")
-            )
-            if "PACKAGE.md" in files:
-                pkg_md = Path(root) / "PACKAGE.md"
+        for _root, files in _walk_contained(
+            d,
+            max_depth=_DISCOVERY_MAX_DEPTH,
+            max_directories=_DISCOVERY_MAX_DIRECTORIES,
+            max_entries=_DISCOVERY_MAX_ENTRIES,
+            max_files=_DISCOVERY_MAX_FILES,
+        ):
+            for pkg_md in files:
+                if pkg_md.name != "PACKAGE.md":
+                    continue
                 try:
-                    key.append((str(pkg_md), pkg_md.stat().st_mtime_ns))
-                except OSError:
-                    key.append((str(pkg_md), 0))
+                    version = snapshot_file(
+                        pkg_md,
+                        max_bytes=_DISCOVERY_MAX_FILE_BYTES,
+                    )
+                    key.append(
+                        (
+                            str(pkg_md),
+                            version.mtime_ns,
+                            version.size,
+                            version.digest,
+                        )
+                    )
+                except (OSError, ValueError):
+                    key.append((str(pkg_md), 0, 0, ""))
     return tuple(key)
 
 
-def scan_skills() -> dict[str, dict]:
+def _scan_skills_unlocked() -> dict[str, dict]:
     """扫描内置/插件/用户三层目录，返回 {"/slug": info}。
 
     覆盖优先级：user > plugin > builtin（用户 skill 覆盖同名插件/内置 skill）。
     插件层来自已加载插件声明的 skills/ 根（见 configure_plugin_skill_roots）。
     """
     global _cache, _cache_key, _packages, _package_members
+    plugin_roots = get_plugin_skill_roots()
+    configured_roots = [
+        get_builtin_skills_dir(),
+        *plugin_roots,
+        get_user_skills_dir(),
+    ]
+    unique_roots = {
+        _lexical_path_key(root)
+        for root in configured_roots
+    }
+    if len(unique_roots) > _DISCOVERY_MAX_ROOTS:
+        raise SkillDiscoveryLimitError(
+            f"Skill 发现根目录数量超过上限 {_DISCOVERY_MAX_ROOTS}"
+        )
+    before_key = _mtime_key()
 
     # 每次扫描重置 package 缓存，避免旧数据残留
     _packages = {}
@@ -1366,22 +1547,106 @@ def scan_skills() -> dict[str, dict]:
     # 每个目录独立去重，目录间允许同名（上层覆盖下层）
     builtin = _scan_dir(get_builtin_skills_dir(), set())
     plugin: dict[str, dict] = {}
-    for root in get_plugin_skill_roots():
+    for root in plugin_roots:
         plugin.update(_scan_dir(root, set()))
     user = _scan_dir(get_user_skills_dir(), set())
 
     result: dict[str, dict] = {**builtin, **plugin, **user}
+    after_key = _mtime_key()
+    if after_key != before_key:
+        raise SkillDiscoveryLimitError("Skill 发现期间认可文件发生变化")
+    # Package metadata 和成员 identity 与 skill mapping 一样，必须在发布前
+    # 脱离扫描期的可变 builder。否则调用方可以通过 package API 观察/修改
+    # 一个尚未冻结的成员集合，无法满足 request-scoped discovery snapshot。
+    _packages = _freeze_skill_snapshot(_packages)
+    _package_members = MappingProxyType(
+        {key: tuple(members) for key, members in _package_members.items()}
+    )
     _cache = result
-    _cache_key = _mtime_key()
+    _cache_key = after_key
     _skills_index_cache.clear()
     return result
 
 
-def get_skills() -> dict[str, dict]:
+def scan_skills() -> Mapping[str, Any]:
+    """Scan Skills while sharing the process-wide capability discovery quota."""
+
+    try:
+        with capability_discovery_slot():
+            return _freeze_skill_snapshot(_scan_skills_unlocked())
+    except CapabilityDiscoveryBusy as exc:
+        raise SkillDiscoveryLimitError(str(exc)) from exc
+
+
+def _freeze_skill_snapshot(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return a detached, recursively immutable capability snapshot."""
+
+    def freeze(node: Any) -> Any:
+        if isinstance(node, Mapping):
+            return MappingProxyType({key: freeze(item) for key, item in node.items()})
+        if isinstance(node, list):
+            return tuple(freeze(item) for item in node)
+        if isinstance(node, tuple):
+            return tuple(freeze(item) for item in node)
+        if isinstance(node, set):
+            return frozenset(freeze(item) for item in node)
+        return node
+
+    return freeze(dict(value))
+
+
+def _discovery_step_key() -> tuple[str, str, str] | None:
+    from crew.core.runctx import (
+        current_owner_account_id,
+        current_request_id,
+        current_session_id,
+    )
+
+    request_id = str(current_request_id.get() or "").strip()
+    if not request_id:
+        return None
+    return (
+        str(current_owner_account_id.get() or ""),
+        str(current_session_id.get() or ""),
+        request_id,
+    )
+
+
+def _remember_step_discovery(
+    key: tuple[str, str, str],
+    success: bool,
+    value: Mapping[str, Any] | str,
+) -> None:
+    stored = _freeze_skill_snapshot(value) if success else value
+    _step_discovery_cache[key] = (success, stored)
+    _step_discovery_cache.move_to_end(key)
+    while len(_step_discovery_cache) > _DISCOVERY_STEP_CACHE_LIMIT:
+        _step_discovery_cache.popitem(last=False)
+
+
+def get_skills() -> Mapping[str, Any]:
     """返回当前 skills 映射，目录有变化时自动重新扫描。"""
-    if not _cache or _cache_key != _mtime_key():
-        scan_skills()
-    return _cache
+    step_key = _discovery_step_key()
+    if step_key is not None and step_key in _step_discovery_cache:
+        success, cached = _step_discovery_cache[step_key]
+        _step_discovery_cache.move_to_end(step_key)
+        if not success:
+            raise SkillDiscoveryLimitError(str(cached))
+        assert isinstance(cached, Mapping)
+        return cached
+    try:
+        if not _cache or _cache_key != _mtime_key():
+            scan_skills()
+    except Exception as exc:
+        if step_key is not None:
+            _remember_step_discovery(step_key, False, str(exc))
+        raise
+    if step_key is not None:
+        _remember_step_discovery(step_key, True, _cache)
+        _, snapshot = _step_discovery_cache[step_key]
+        assert isinstance(snapshot, Mapping)
+        return snapshot
+    return _freeze_skill_snapshot(_cache)
 
 
 # ── 调度 ──────────────────────────────────────────────────────────────────
@@ -1527,16 +1792,49 @@ def build_skill_activation(
     instruction = build_skill_message(cmd_key, user_instruction, session_id)
     if info is None or instruction is None:
         return None
-    entrypoints = tuple(
-        SkillEntrypoint.from_dict(item)
-        for item in (info.get("entrypoints") or [])
-        if isinstance(item, dict)
-    )
+    try:
+        skill_root = _registered_skill_dir(Path(str(info.get("skill_dir") or "")))
+    except SkillPathError:
+        return None
+    entrypoints: list[SkillEntrypoint] = []
+    for item in (info.get("entrypoints") or []):
+        if not isinstance(item, Mapping):
+            continue
+        entrypoint = SkillEntrypoint.from_dict(item)
+        try:
+            target = resolve_skill_path(skill_root / entrypoint.path, skill_root)
+        except SkillPathError:
+            logger.warning(
+                "跳过越界 Skill 执行入口 skill=%s entrypoint=%s",
+                info.get("slug") or cmd_key,
+                entrypoint.id,
+            )
+            continue
+        if not target.is_file():
+            continue
+        writable_paths: list[str] = []
+        for raw_path in entrypoint.writable_paths:
+            candidate = Path(raw_path)
+            if candidate.is_absolute() or ".." in candidate.parts:
+                continue
+            normalized = candidate.as_posix().strip("/")
+            if normalized:
+                writable_paths.append(normalized)
+        entrypoints.append(
+            SkillEntrypoint(
+                id=entrypoint.id,
+                path=target.relative_to(skill_root).as_posix(),
+                runtime=entrypoint.runtime,
+                writable_paths=tuple(writable_paths),
+                side_effect=entrypoint.side_effect,
+                timeout_seconds=entrypoint.timeout_seconds,
+            )
+        )
     return SkillActivation(
         skill_id=str(info.get("slug") or cmd_key.lstrip("/")).strip(),
         name=str(info.get("display_name") or info.get("name") or cmd_key).strip(),
         instruction=instruction,
-        skill_root=str(info.get("skill_dir") or "").strip(),
+        skill_root=str(skill_root),
         required_tools=tuple(
             str(item).strip()
             for item in (info.get("required_tools") or [])
@@ -1547,19 +1845,61 @@ def build_skill_activation(
             for item in (info.get("required_env") or [])
             if str(item).strip()
         ),
-        entrypoints=entrypoints,
+        entrypoints=tuple(entrypoints),
     )
 
 
 def skill_activations_from_params(params: dict[str, Any] | None) -> tuple[SkillActivation, ...]:
-    """Safely restore the current-turn activation snapshot from Envelope params."""
+    """Restore only snapshots that still match the authoritative installed Skill."""
+    if not isinstance(params, dict):
+        return ()
+    raw_activations = params.get("active_skills") or []
+    if not isinstance(raw_activations, list):
+        return ()
     activations: list[SkillActivation] = []
-    for raw in (dict(params or {}).get("active_skills") or []):
+    for raw in raw_activations:
         if not isinstance(raw, dict):
             continue
         activation = SkillActivation.from_dict(raw)
-        if activation.skill_id and activation.skill_root and activation.instruction:
-            activations.append(activation)
+        if not activation.skill_id or not activation.skill_root or not activation.instruction:
+            continue
+        authoritative = build_skill_activation(f"/{activation.skill_id}")
+        if authoritative is None:
+            continue
+        base_instruction = authoritative.instruction
+        instruction_matches = (
+            activation.instruction == base_instruction
+            or activation.instruction.startswith(
+                base_instruction + "\n\n用户补充指令："
+            )
+        )
+        try:
+            root_matches = Path(activation.skill_root).expanduser().resolve(
+                strict=True
+            ) == Path(authoritative.skill_root).resolve(strict=True)
+        except (OSError, RuntimeError):
+            root_matches = False
+        if (
+            not instruction_matches
+            or activation.name != authoritative.name
+            or not root_matches
+            or activation.required_tools != authoritative.required_tools
+            or activation.required_env != authoritative.required_env
+            or activation.entrypoints != authoritative.entrypoints
+        ):
+            logger.warning("拒绝不匹配当前 Skill 的 activation: %s", activation.skill_id)
+            continue
+        activations.append(
+            SkillActivation(
+                skill_id=authoritative.skill_id,
+                name=authoritative.name,
+                instruction=activation.instruction,
+                skill_root=authoritative.skill_root,
+                required_tools=authoritative.required_tools,
+                required_env=authoritative.required_env,
+                entrypoints=authoritative.entrypoints,
+            )
+        )
     return tuple(activations)
 
 
@@ -1578,7 +1918,7 @@ def resolve_skill_activation_entrypoint(
     declared = {
         str(item.get("id") or ""): SkillEntrypoint.from_dict(item)
         for item in (info.get("entrypoints") or [])
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
+        if isinstance(item, Mapping) and str(item.get("id") or "").strip()
     }
     entrypoint = declared.get(str(entrypoint_id or "").strip())
     if entrypoint is None:
@@ -1761,24 +2101,28 @@ def build_optional_skills_index_prompt(
     return "\n".join(lines)
 
 
-def get_skill_packages() -> dict[str, dict]:
-    """返回所有已扫描的 skill packages 映射：package slug -> package info。"""
+def get_skill_packages() -> Mapping[str, Any]:
+    """返回冻结的 skill package snapshot：package slug -> package info。"""
     get_skills()  # 确保已扫描
-    return dict(_packages)
+    return _packages
 
 
-def get_package_info(package_slug: str) -> dict | None:
-    """根据 slug 返回 package info；不存在返回 None。"""
+def get_package_info(package_slug: str) -> Mapping[str, Any] | None:
+    """根据 slug 返回冻结的 package info；不存在返回 None。"""
     get_skills()
     return _packages.get(package_slug)
 
 
 def get_package_members(package_slug: str) -> list[dict]:
-    """返回指定 package 内所有 skill info 列表；package 不存在返回空列表。"""
+    """返回指定 package 内所有 skill info 列表；package 不存在返回空列表。
+
+    返回的新 list 仅是兼容现有 API 的容器副本；其中每个 member info 以及
+    内部的 member identity 集合均来自冻结 snapshot。
+    """
     skills = get_skills()
     key = f"/{package_slug.lstrip('/')}"
     members: list[dict] = []
-    for member_key in _package_members.get(key, []):
+    for member_key in _package_members.get(key, ()):
         info = skills.get(member_key)
         if info is not None:
             members.append(info)
@@ -2120,7 +2464,7 @@ def validate_generated_skill(source_dir: Path | str, slug: str = "") -> list[str
     try:
         size = skill_md.stat().st_size
     except OSError as exc:
-        return [f"无法读取 SKILL.md：{exc}"]
+        return [safe_public_error(exc, "无法读取 SKILL.md")]
     if size > _GENERATED_SKILL_MD_MAX_BYTES:
         problems.append(
             f"SKILL.md 有 {size} 字节，超过上限 {_GENERATED_SKILL_MD_MAX_BYTES}。"
@@ -2130,7 +2474,7 @@ def validate_generated_skill(source_dir: Path | str, slug: str = "") -> list[str
     try:
         text = skill_md.read_text("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        return [f"SKILL.md 无法按 UTF-8 读取：{exc}"]
+        return [safe_public_error(exc, "SKILL.md 无法按 UTF-8 读取")]
 
     frontmatter, body = _parse_frontmatter(text)
     name = str(frontmatter.get("name") or "").strip()
@@ -2319,6 +2663,7 @@ def install_skill_from_dir(
     operator_account_id: str | None = None,
     source: str = "generated",
     validate: bool = True,
+    installation_authorized: bool = False,
 ) -> bool:
     """把一个已经准备好的 Skill 目录发布到宿主级全局用户目录。
 
@@ -2333,6 +2678,24 @@ def install_skill_from_dir(
     """
     src = Path(source_dir).expanduser()
     slug = slug or src.name
+    if not installation_authorized:
+        try:
+            _append_failed_global_skill_audit(
+                action="install",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=None,
+                error_code="installation_authorization_required",
+            )
+        except OSError:
+            logger.warning("Skill 审计不可写，拒绝未授权安装 slug=%s", slug)
+        logger.warning(
+            "拒绝未经显式授权的 Skill 安装 slug=%s source=%s",
+            slug,
+            source,
+        )
+        return False
     try:
         _append_global_skill_audit(
             action="install",
@@ -2457,7 +2820,7 @@ def _validate_record_replay_markdown(text: str, slug: str) -> list[str]:
         try:
             (probe / "SKILL.md").write_text(text, encoding="utf-8")
         except OSError as exc:
-            return [f"无法暂存待校验内容：{exc}"]
+            return [safe_public_error(exc, "无法暂存待校验内容")]
         return validate_generated_skill(probe, slug)
 
 
@@ -3004,7 +3367,7 @@ def audit_skills(
                 "code": exc.code if isinstance(exc, SkillPathError) else "skill_md_unreadable",
                 "severity": "error",
                 "file": str(skill_md),
-                "suggestion": f"修复 SKILL.md 读取错误: {exc}",
+                "suggestion": f"修复 SKILL.md 读取错误: {safe_public_error(exc, '无法读取 SKILL.md')}",
             }]
             fm = {}
         else:
@@ -3095,7 +3458,7 @@ async def repair_skills(
                 "slug": item["slug"],
                 "name": item["name"],
                 "skill_dir": str(item["skill_dir"]),
-                "error": str(exc),
+                "error": safe_public_error(exc, "技能路径解析失败"),
             })
             continue
         skill_dir = original_skill_dir
@@ -3143,7 +3506,7 @@ async def repair_skills(
                     "slug": item["slug"],
                     "name": item["name"],
                     "skill_dir": str(original_skill_dir),
-                    "error": f"Skill repair staging 失败: {exc}",
+                    "error": safe_public_error(exc, "Skill repair staging 失败"),
                 })
                 continue
         skill_changes: dict[str, Any] = {
@@ -3194,7 +3557,7 @@ async def repair_skills(
                         except Exception as exc:  # noqa: BLE001 - repair 需要继续处理路径修复
                             skill_changes["metadata_errors"].append({
                                 "code": "metadata_generation_failed",
-                                "error": str(exc),
+                                "error": safe_public_error(exc, "技能元数据生成失败"),
                             })
                             generated = {}
                         if generated.get("skillCategoryName") not in SKILL_CATEGORY_NAMES:
@@ -3274,7 +3637,7 @@ async def repair_skills(
                 "slug": item["slug"],
                 "name": item["name"],
                 "skill_dir": str(original_skill_dir),
-                "error": str(exc),
+                "error": safe_public_error(exc, "技能修复失败"),
             })
         finally:
             if staging_root is not None and staging_root.exists():

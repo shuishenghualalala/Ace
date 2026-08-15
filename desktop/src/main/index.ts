@@ -14,12 +14,19 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as net from 'net';
-import { createHash } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { serialize } from 'v8';
 import WebSocket from 'ws';
+import { appendPrivateSync } from './private-append';
 import { BrowserHost, BrowserHostError } from './browser-host';
 import { loginNewServiceInstance } from './auth-service';
-import { submitFeedback, getFeedbackList, getFeedbackImage } from './feedback-service';
+import {
+  feedbackServiceInstance,
+  getFeedbackList,
+  getFeedbackImage,
+  type FeedbackConsentContext,
+} from './feedback-service';
 import {
   readResolvedCrewFile,
   registerCrewFileProtocol,
@@ -41,6 +48,8 @@ import {
 import {
   classifyCuaSetupAuthorityRequest,
   createDesktopSecurityProof,
+  DESKTOP_REQUEST_ORIGIN,
+  GATEWAY_INSTANCE_AUTH_HEADER,
   gatewayInstanceAccessToken,
   probeGatewayInstance,
   type GatewayComponentState,
@@ -68,7 +77,8 @@ import {
 import { logMainStream } from './stream-debug';
 import {
   confirmCuaDriverInstall,
-  confirmStrictSecurityDisable,
+  confirmDangerousAction,
+  confirmFullAccessMode,
 } from './host-authority-dialog';
 import {
   GatewayFetchArgs,
@@ -79,7 +89,9 @@ import {
   ShellOpenPathWithArgs,
   ShellWriteFileBase64Args,
   ShellWriteTextFileArgs,
+  FeedbackPreviewArgs,
   FeedbackSubmitArgs,
+  FeedbackCancelArgs,
   FeedbackListArgs,
   FeedbackImageArgs,
   DialogSelectFileArgs,
@@ -92,6 +104,7 @@ import {
   SecurityModeArgs,
   SecurityWorkspaceArgs,
   SecurityRuleMutationArgs,
+  SecurityAlertActionArgs,
   SecurityAuditArgs,
   SecuritySetupArgs,
   WikiOpenSourceFileArgs,
@@ -107,6 +120,13 @@ import {
   IPC_ARG_VALIDATION_FAILED,
   MAX_DIALOG_FILE_BYTES,
 } from '../shared/constants';
+import {
+  isIpcInvokeChannel,
+  isIpcRendererToMainEventChannel,
+  type IpcInvokeChannel,
+  type IpcRendererToMainEventChannel,
+} from '../shared/ipc-channels';
+import { GatewayWsProtocolIdentity } from '../shared/gateway-ws-protocol';
 import { listOpenWithApplications, openFileWithApplication } from './open-with-service';
 import { handleUninstall, setUninstallDeps } from './uninstall';
 import { currentAppVersion, currentAppVersionLabel } from './app-version';
@@ -126,12 +146,21 @@ import {
 } from './update/update-state';
 import {
   configuredUpdatePublicKey,
-  verifyPackageIntegrity,
-  verifyPackageSignature,
+  verifyUpdateArtifact,
 } from './update/update-integrity';
+import { launchVerifiedDownloadedUpdate } from './update/update-installer';
+import {
+  ensurePrivateUpdateDirectory,
+  removeManagedUpdateFile,
+} from './update/update-file-security';
 import { evaluateVersionUpdate } from './version-compare';
+import { selectedFileAuthority } from './selected-file-authority';
 import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
+import {
+  hardenedChildProcessOptions,
+  sanitizedChildProcessEnvironment,
+} from './process-environment';
 
 // 必须早于 app.whenReady()/BrowserWindow 创建；该开关随同一安装包跨 Windows、macOS、Linux 生效。
 configurePptxWasmRuntime(app.commandLine);
@@ -167,10 +196,21 @@ app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_pro
 
 let mainWindow: BrowserWindow | null = null;
 const inspirationWindows = new Map<string, BrowserWindow>();
+const desktopFeedbackSessionId = randomUUID();
 let managedGateway: ChildProcessWithoutNullStreams | null = null;
+let managedGatewayInstanceKey: Buffer | null = null;
 let ensureGatewayPromise: Promise<{ baseUrl: string; managed: boolean }> | null = null;
-const securityApprovalNonces = new Map<string, string>();
+interface SecurityApprovalAuthority {
+  nonce: string;
+  workspaceId: string;
+  sessionId: string;
+  taskId: string;
+  riskClass: string;
+}
+
+const securityApprovalAuthorities = new Map<string, SecurityApprovalAuthority>();
 const gatewaySockets = new Map<number, WebSocket>();
+const gatewaySocketProtocolIdentities = new WeakMap<WebSocket, GatewayWsProtocolIdentity>();
 const gatewaySocketGenerations = new Map<number, number>();
 const browserSockets = new Map<number, WebSocket>();
 const browserSocketGenerations = new Map<number, number>();
@@ -180,6 +220,27 @@ let browserHostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let browserHostConnectionGeneration = 0;
 let browserHostConnectPending = false;
 let browserHostDisposePromise: Promise<void> | null = null;
+
+function publicBrowserHostError(error: unknown): string {
+  if (!(error instanceof BrowserHostError)) return '桌面浏览器操作失败';
+  const code = /^[a-z0-9_-]{1,64}$/.test(error.code) ? error.code : 'browser_host_error';
+  return `桌面浏览器操作失败（${code}）`;
+}
+
+const SAFE_WS_CLOSE_REASONS = new Set([
+  'reconnect',
+  'renderer-destroyed',
+  'client-close',
+  'switch-session',
+  'invalid-browser-host-request',
+  'browser-host-response-backpressure',
+  'Protocol identity failed',
+]);
+
+function publicWebSocketCloseReason(reason: unknown): string {
+  const text = Buffer.isBuffer(reason) ? reason.toString('utf8') : String(reason ?? '');
+  return SAFE_WS_CLOSE_REASONS.has(text) ? text : 'connection-closed';
+}
 let tray: Tray | null = null;
 
 // Renderer readiness reveal-gate.
@@ -213,6 +274,36 @@ let resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
 // re-invocation prevents duplicate ipcMain handlers (which would otherwise
 // throw "attempt to register a second handler").
 let ipcRegistered = false;
+
+const GATEWAY_LAUNCH_SECRET_STDIN_ENV = 'ACE_GATEWAY_LAUNCH_SECRET_STDIN';
+
+function deliverManagedGatewayLaunchKey(
+  child: ChildProcessWithoutNullStreams,
+  launchKey: Buffer,
+): void {
+  managedGatewayInstanceKey = Buffer.from(launchKey);
+  child.stdin.on('error', (error) => {
+    console.error('[gateway] failed to deliver launch identity:', error);
+  });
+  try {
+    // Keep stdin open as a parent-liveness lease. The Gateway watches for EOF
+    // and shuts itself down if Desktop exits or crashes.
+    child.stdin.write(`${launchKey.toString('hex')}\n`, 'ascii');
+  } finally {
+    launchKey.fill(0);
+  }
+}
+
+function clearManagedGatewayInstanceKey(): void {
+  managedGatewayInstanceKey?.fill(0);
+  managedGatewayInstanceKey = null;
+}
+
+function activeGatewayInstanceKey(): Buffer | undefined {
+  return managedGateway && managedGatewayInstanceKey
+    ? Buffer.from(managedGatewayInstanceKey)
+    : undefined;
+}
 
 const gatewayRestartController = new GatewayRestartController(async () => {
   if (isQuitting) return;
@@ -261,19 +352,28 @@ function getTaskWorkspaceRoot(): string {
  *
  * @param extraRoots 调用方显式授权的额外根目录（如项目工作空间根），必须是绝对路径。
  */
-function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): string {
-  const resolved = path.resolve(rawPath);
-  if (!path.isAbsolute(resolved)) {
+async function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): Promise<string> {
+  if (!path.isAbsolute(rawPath)) {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path must be absolute`);
   }
+  const resolved = path.resolve(rawPath);
   // Deny sensitive security/audit resources even when they sit under an allowed root
   // (M-1): the instance HMAC key (.gateway-instance) and raw cross-owner SQLite must
   // never reach the renderer.
   if (isDeniedShellPath(resolved)) {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path is a sensitive security/audit resource`);
   }
+  let canonical: string;
+  try {
+    canonical = await fs.promises.realpath(resolved);
+  } catch {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path does not exist`);
+  }
+  if (isDeniedShellPath(canonical)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path is a sensitive security/audit resource`);
+  }
   const taskWorkspaceRoot = getTaskWorkspaceRoot();
-  const allowedRoots = [
+  const rootCandidates = [
     app.getPath('userData'),
     app.getPath('downloads'),
     app.getPath('documents'),
@@ -283,11 +383,27 @@ function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): st
     path.dirname(taskWorkspaceRoot),
     ...extraRoots,
   ].map((r) => path.resolve(r));
-  const allowed = allowedRoots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+  const canonicalRoots = (await Promise.all(rootCandidates.map(async (root) => {
+    try {
+      return await fs.promises.realpath(root);
+    } catch {
+      return null;
+    }
+  }))).filter((root): root is string => root !== null);
+  const comparable = (value: string): string =>
+    process.platform === 'win32' ? value.toLowerCase() : value;
+  const canonicalComparable = comparable(canonical);
+  const allowed = canonicalRoots.some((root) => {
+    const rootComparable = comparable(root);
+    return (
+      canonicalComparable === rootComparable
+      || canonicalComparable.startsWith(`${rootComparable}${path.sep}`)
+    );
+  });
   if (!allowed) {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path not under any allowed root`);
   }
-  return resolved;
+  return canonical;
 }
 
 const MANAGED_GATEWAY_PORT = 28180;
@@ -603,8 +719,10 @@ async function connectBrowserHost(): Promise<void> {
     target.search = '';
     target.hash = '';
     const socket = new WebSocket(target.toString(), {
-      headers: gatewayAccessHeaders('/api/browser/'),
-      maxPayload: 0,
+      headers: gatewayAccessHeaders('/ws/browser-host'),
+      // Keep the transport cap aligned with ElectronBridge's pre-JSON frame
+      // budget; the RPC response path has a stricter 2 MiB application cap.
+      maxPayload: 4 * 1024 * 1024,
     });
     browserHostSocket = socket;
 
@@ -650,12 +768,11 @@ async function connectBrowserHost(): Promise<void> {
       }).catch((error: unknown) => {
         if (socket.readyState !== WebSocket.OPEN || socket !== browserHostSocket) return;
         const failure = error instanceof BrowserHostError ? error : null;
-        const message = error instanceof Error ? error.message : '桌面浏览器操作失败';
         const sent = sendBrowserHostFrame(socket, {
           type: 'response',
           id,
           ok: false,
-          error: message,
+          error: publicBrowserHostError(error),
           // 传 code：Python 侧需要据此区分「ref 失效」这类可恢复失败与真正的故障，
           // 靠匹配中文错误文本太脆。
           code: failure?.code ?? '',
@@ -731,11 +848,11 @@ interface DesktopPrefs {
 function logFatal(context: string, err: unknown): void {
   try {
     const logDir = app.getPath('userData');
-    fs.mkdirSync(logDir, { recursive: true });
+    fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
     const logPath = path.join(logDir, 'main-crash.log');
     const ts = new Date().toISOString();
     const msg = `[${ts}] [${context}]\n${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n\n`;
-    fs.appendFileSync(logPath, msg, 'utf8');
+    appendPrivateSync(logPath, msg);
   } catch {
     console.error('[main] failed to write crash log:', err);
   }
@@ -1111,6 +1228,16 @@ function createWindow() {
   });
   if (!browserHostDisposePromise) ensureBrowserHost();
 
+  mainWindow.on('maximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window:maximized-changed', true);
+    }
+  });
+  mainWindow.on('unmaximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window:maximized-changed', false);
+    }
+  });
   mainWindow.loadFile(path.join(__dirname, '../assets/index.html'));
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
@@ -1157,6 +1284,8 @@ function createWindow() {
     }
   };
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    selectedFileAuthority.clearRenderer(mainWindow!.webContents.id);
+    securityApprovalAuthorities.clear();
     browserHost?.hidePanel();
     console.error('[main] Renderer crashed:', details);
     logFatal('render-process-gone', new Error(JSON.stringify(details)));
@@ -1181,6 +1310,10 @@ function createWindow() {
     }
   });
   mainWindow.webContents.on('did-start-navigation', (_event, url, _isInPlace, isMainFrame) => {
+    if (isMainFrame) {
+      selectedFileAuthority.clearRenderer(mainWindow!.webContents.id);
+      securityApprovalAuthorities.clear();
+    }
     const expected = path.join(__dirname, '../assets/index.html');
     if (!isMainFrame || !isTrustedRendererFileUrl(url, expected, RENDERER_LAUNCH_SEARCH)) return;
     browserHost?.hidePanel();
@@ -1202,10 +1335,13 @@ function createWindow() {
     mainWindow?.webContents.send('browser-view:layout-invalidated');
   });
   mainWindow.on('closed', () => {
+    selectedFileAuthority.clearRenderer(mainWindow!.webContents.id);
+    securityApprovalAuthorities.clear();
     if (rendererReadyFallbackTimer) {
       clearTimeout(rendererReadyFallbackTimer);
       rendererReadyFallbackTimer = null;
     }
+    feedbackServiceInstance.cancelAll();
     browserHost?.hidePanel();
     mainWindow = null;
   });
@@ -1254,21 +1390,18 @@ function activeGatewayCrewHome(): string {
 
 function packagedSecurityRuntimeEnv(): Record<string, string> {
   const stateDir = path.join(app.getPath('userData'), 'security');
-  const strictSecurity = isStrictSecurityEnabled() ? '1' : '0';
-  const configured = String(process.env['ACE_SECURITY_RUNTIME'] ?? '').trim();
+  const strictSecurity = '1';
   const runtimeName = process.platform === 'win32'
     ? 'ace-security-runtime.exe'
     : 'ace-security-runtime';
   const platformKey = `${process.platform}-${process.arch}`;
-  const runtimeCandidates = configured
-    ? [configured]
-    : app.isPackaged
-      ? [path.join(process.resourcesPath, runtimeName)]
-      : [
-          path.join(repoRoot(), 'desktop', 'security-runtime-bin', runtimeName),
-          path.join(repoRoot(), 'security-runtime', 'prebuilt', platformKey, runtimeName),
-          path.join(repoRoot(), 'security-runtime', 'bin', runtimeName),
-        ];
+  const runtimeCandidates = app.isPackaged
+    ? [path.join(process.resourcesPath, runtimeName)]
+    : [
+        path.join(repoRoot(), 'desktop', 'security-runtime-bin', runtimeName),
+        path.join(repoRoot(), 'security-runtime', 'prebuilt', platformKey, runtimeName),
+        path.join(repoRoot(), 'security-runtime', 'bin', runtimeName),
+      ];
   const runtime = runtimeCandidates.find((candidate) => path.isAbsolute(candidate) && fs.existsSync(candidate)) ?? '';
   if (!runtime || !path.isAbsolute(runtime) || !fs.existsSync(runtime)) {
     return {
@@ -1276,83 +1409,143 @@ function packagedSecurityRuntimeEnv(): Record<string, string> {
       ACE_STRICT_SECURITY: strictSecurity,
     };
   }
-  const manifestPath = path.join(path.dirname(runtime), 'runtime-manifest.json');
-  if (fs.existsSync(manifestPath)) {
-    try {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
-        files?: Array<{ name?: string; sha256?: string }>;
-        binary_name?: string;
-        binary_sha256?: string;
-        platform?: string;
-        arch?: string;
-      };
-      const declaresPlatform = Boolean(manifest.platform || manifest.arch);
-      if (
-        declaresPlatform
-        && (manifest.platform !== process.platform || manifest.arch !== process.arch)
-      ) {
-        return {
-          ACE_SECURITY_STATE_DIR: stateDir,
-          ACE_STRICT_SECURITY: strictSecurity,
-        };
-      }
-      const expected = manifest.files?.find((item) => item.name === runtimeName)?.sha256
-        ?? (manifest.binary_name === runtimeName ? manifest.binary_sha256 : undefined);
-      const actual = createHash('sha256').update(fs.readFileSync(runtime)).digest('hex');
-      if (!expected || actual !== expected) {
-        return {
-          ACE_SECURITY_STATE_DIR: stateDir,
-          ACE_STRICT_SECURITY: strictSecurity,
-        };
-      }
-    } catch {
+  // Packaged builds keep the trust root inside app.asar, whose integrity is
+  // enforced by Electron's embedded-ASAR fuse. The adjacent manifest remains
+  // useful to the Python verifier, but it is not accepted as the Desktop trust
+  // root because a same-user process could replace it together with the helper.
+  const manifestPath = app.isPackaged
+    ? path.join(app.getAppPath(), 'security-runtime-bin', 'runtime-manifest.json')
+    : path.join(path.dirname(runtime), 'runtime-manifest.json');
+  if (!fs.existsSync(manifestPath)) {
+    return {
+      ACE_SECURITY_STATE_DIR: stateDir,
+      ACE_STRICT_SECURITY: strictSecurity,
+    };
+  }
+  let trustedRuntimeDigest = '';
+  let trustedRuntimeManifestDigest = '';
+  let trustedBundledBwrapDigest = '';
+  try {
+    const manifestBytes = fs.readFileSync(manifestPath);
+    const manifest = JSON.parse(manifestBytes.toString('utf8')) as {
+      schema?: number;
+      files?: Array<{ name?: string; sha256?: string }>;
+      binary_name?: string;
+      binary_sha256?: string;
+      platform?: string;
+      arch?: string;
+    };
+    const declaresPlatform = Boolean(manifest.platform || manifest.arch);
+    if (
+      declaresPlatform
+      && (manifest.platform !== process.platform || manifest.arch !== process.arch)
+    ) {
       return {
         ACE_SECURITY_STATE_DIR: stateDir,
         ACE_STRICT_SECURITY: strictSecurity,
       };
     }
+    const runtimeRecords = manifest.files?.filter((item) => item.name === runtimeName) ?? [];
+    const bwrapRecords = manifest.files?.filter((item) => item.name === 'bwrap') ?? [];
+    const expected = runtimeRecords[0]?.sha256;
+    const actual = createHash('sha256').update(fs.readFileSync(runtime)).digest('hex');
+    if (
+      manifest.schema !== 2
+      || runtimeRecords.length !== 1
+      || bwrapRecords.length > 1
+      || manifest.binary_name !== runtimeName
+      || manifest.binary_sha256 !== expected
+      || !expected
+      || !/^[a-f0-9]{64}$/.test(expected)
+      || actual !== expected
+      || (bwrapRecords.length === 1
+        && !/^[a-f0-9]{64}$/.test(bwrapRecords[0]?.sha256 ?? ''))
+    ) {
+      return {
+        ACE_SECURITY_STATE_DIR: stateDir,
+        ACE_STRICT_SECURITY: strictSecurity,
+      };
+    }
+    trustedRuntimeDigest = actual;
+    trustedRuntimeManifestDigest = createHash('sha256')
+      .update(manifestBytes)
+      .digest('hex');
+    trustedBundledBwrapDigest = bwrapRecords[0]?.sha256 ?? '';
+  } catch {
+    return {
+      ACE_SECURITY_STATE_DIR: stateDir,
+      ACE_STRICT_SECURITY: strictSecurity,
+    };
   }
-  const result: Record<string, string> = {
-    ACE_SECURITY_RUNTIME: runtime,
+  return {
     ACE_SECURITY_STATE_DIR: stateDir,
     ACE_STRICT_SECURITY: strictSecurity,
+    ...(app.isPackaged
+      ? {
+          ACE_DESKTOP_SECURITY_RUNTIME: runtime,
+          ACE_DESKTOP_SECURITY_RUNTIME_SHA256: trustedRuntimeDigest,
+          ACE_DESKTOP_SECURITY_RUNTIME_MANIFEST_SHA256: trustedRuntimeManifestDigest,
+          ...(trustedBundledBwrapDigest
+            ? { ACE_DESKTOP_BUNDLED_BWRAP_SHA256: trustedBundledBwrapDigest }
+            : {}),
+          ACE_SECURITY_RELEASE_MODE: '1',
+        }
+      : {}),
   };
-  if (fs.existsSync(manifestPath)) {
-    try {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
-        files?: Array<{ name?: string; sha256?: string }>;
-      };
-      const bwrap = manifest.files?.find((item) => item.name === 'bwrap');
-      if (bwrap?.sha256) {
-        result['ACE_BUNDLED_BWRAP'] = path.join(process.resourcesPath, 'bwrap');
-        result['ACE_BUNDLED_BWRAP_SHA256'] = bwrap.sha256;
-      }
-    } catch {
-      // Malformed release metadata leaves the bundled fallback unavailable.
-    }
-  }
-  return result;
 }
 
-/** Browser control is privileged even on loopback; bind it to this Gateway instance. */
-function gatewayAccessHeaders(pathname: string): Record<string, string> {
+/** Bind every sensitive Gateway request to this Desktop/Gateway installation. */
+function gatewayAccessHeaders(
+  pathname: string,
+  method = 'GET',
+  body: string | Buffer = '',
+): Record<string, string> {
   const headers: Record<string, string> = {};
+  const proofPath = new URL(pathname, 'http://127.0.0.1').pathname;
   const sessionCookie = loginNewServiceInstance.cookieHeader();
-  if (sessionCookie) headers.Cookie = sessionCookie;
-  if (!pathname.startsWith('/api/browser/')) return headers;
-  headers.Authorization = `Bearer ${gatewayInstanceAccessToken(activeGatewayCrewHome())}`;
+  if (sessionCookie) {
+    headers.Cookie = sessionCookie;
+    headers.Origin = DESKTOP_REQUEST_ORIGIN;
+  }
+  if (proofPath.startsWith('/api/') || proofPath.startsWith('/ws')) {
+    headers[GATEWAY_INSTANCE_AUTH_HEADER] = createActiveGatewaySecurityProof(
+      method,
+      proofPath,
+      body,
+    );
+  }
+  if (proofPath.startsWith('/api/browser/') || proofPath.startsWith('/ws/browser')) {
+    headers.Authorization = `Bearer ${gatewayInstanceAccessToken(
+      activeGatewayCrewHome(),
+      activeGatewayInstanceKey(),
+    )}`;
+  }
   return headers;
 }
 
-/** Sign privileged requests with the same instance key as the active Gateway. */
-function createActiveGatewaySecurityProof(method: string, pathname: string, body: string): string {
+/** Sign requests with the same instance key as the active Gateway. */
+function createActiveGatewaySecurityProof(
+  method: string,
+  pathname: string,
+  body: string | Buffer,
+): string {
+  const instanceKey = activeGatewayInstanceKey();
   return createDesktopSecurityProof(method, pathname, body, {
     crewHome: activeGatewayCrewHome(),
+    ...(instanceKey === undefined ? {} : { instanceKey }),
   });
 }
 
+loginNewServiceInstance.setGatewayProofProvider((method, pathname, body) => (
+  createActiveGatewaySecurityProof(method, pathname, body)
+));
+
 async function probeHealthApi(baseUrl: string) {
-  return probeGatewayInstance(baseUrl, { crewHome: activeGatewayCrewHome() });
+  const instanceKey = activeGatewayInstanceKey();
+  return probeGatewayInstance(baseUrl, {
+    crewHome: activeGatewayCrewHome(),
+    ...(instanceKey === undefined ? {} : { instanceKey }),
+  });
 }
 
 async function gatewayCandidatePresent(baseUrl: string): Promise<boolean> {
@@ -1374,11 +1567,12 @@ function startManagedGateway(): void {
   const root = repoRoot();
   const python = candidatePython();
   const crewHome = activeGatewayCrewHome();
-  const env = {
-    ...process.env,
+  const launchKey = randomBytes(32);
+  const env = sanitizedChildProcessEnvironment({
     CREW_HOME: crewHome,
     GATEWAY_PORT: String(MANAGED_GATEWAY_PORT),
     PYTHONPATH: root,
+    [GATEWAY_LAUNCH_SECRET_STDIN_ENV]: '1',
     ...packagedSecurityRuntimeEnv(),
     ...managedGatewayModeEnv(
       gatewayIdentityMode,
@@ -1388,13 +1582,22 @@ function startManagedGateway(): void {
     PYTHONIOENCODING: 'utf-8',
     ...(process.platform === 'win32' ? { PYTHONUTF8: '1' } : {}),
     // 不注入 CREW_TASK_WORKSPACE_ROOT，让后端从 config.yaml 自行计算
-  };
-  managedGateway = spawn(python, ['-m', 'crew.gateway.server'], {
-    cwd: root,
-    env,
-    windowsHide: true,
   });
+  managedGateway = spawn(
+    python,
+    ['-m', 'crew.gateway.server'],
+    hardenedChildProcessOptions(
+      {
+        cwd: root,
+        windowsHide: true,
+        detached: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+      env,
+    ),
+  );
   const child = managedGateway;
+  deliverManagedGatewayLaunchKey(child, launchKey);
   attachGatewayLog(child);
   writeGatewayLogLine(`[spawn] managed gateway pid=${child.pid} port=${MANAGED_GATEWAY_PORT} python=${python}`);
   child.stdout.on('data', (chunk) => console.log('[gateway]', String(chunk).trim()));
@@ -1403,6 +1606,7 @@ function startManagedGateway(): void {
     console.warn('[gateway] exited', { code, signal });
     if (managedGateway === child) {
       managedGateway = null;
+      clearManagedGatewayInstanceKey();
       ensureGatewayPromise = null;
       logSupervisorDecision('instance-exit', { platform: 'managed', code, signal });
       if (!isQuitting) gatewayRestartController.schedule();
@@ -1412,24 +1616,12 @@ function startManagedGateway(): void {
     console.error('[gateway] managed gateway process error:', error);
     if (managedGateway === child) {
       managedGateway = null;
+      clearManagedGatewayInstanceKey();
       ensureGatewayPromise = null;
       logSupervisorDecision('instance-error', { platform: 'managed', error: String(error) });
       if (!isQuitting) gatewayRestartController.schedule();
     }
   });
-}
-
-/**
- * 回收当前 gateway 进程，使其带着最新的安全偏好（如严格安全约束开关）重启。
- * gateway 仅在 spawn 时读取 ACE_STRICT_SECURITY / ACE_SECURITY_* 等环境变量，
- * 运行中的实例不会热更新；故持久化偏好后必须回收一次。exit handler 会通过
- * gatewayRestartController 自动调度重启，这里只负责触发 exit。
- */
-function recycleGatewayForSecurityChange(): void {
-  const child = managedGateway;
-  if (!child || child.killed || isQuitting) return;
-  logSupervisorDecision('security-change-restart', { generation: gatewayGeneration });
-  child.kill();
 }
 
 // ============================================================================
@@ -1448,29 +1640,29 @@ function startWindowsPackagedGateway(port: number): void {
 
   console.log(`[gateway] Starting packaged Windows gateway on port ${port}:`, gatewayExePath);
 
-  // 清理可能残留的僵尸 gateway 进程（上次 Electron 异常退出未清理）
-  const killStart = Date.now();
-  killZombieGatewayProcesses();
-  console.log(`[gateway] Zombie cleanup took ${Date.now() - killStart}ms`);
-
+  const launchKey = randomBytes(32);
   try {
     const spawnStart = Date.now();
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
-      windowsHide: true,
-      detached: false,
-      // 不注入 CREW_TASK_WORKSPACE_ROOT，让后端从 config.yaml 自行计算
-      env: {
-        ...process.env,
+    managedGateway = spawn(gatewayExePath, [], hardenedChildProcessOptions(
+      {
+        cwd: gatewayDir,
+        windowsHide: true,
+        detached: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+      {
+        // 不注入 CREW_TASK_WORKSPACE_ROOT，让后端从 config.yaml 自行计算
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        [GATEWAY_LAUNCH_SECRET_STDIN_ENV]: '1',
         ...packagedSecurityRuntimeEnv(),
         // 与开发态一致：打包 exe 内嵌 Python 仍可能走 GBK 控制台
         PYTHONIOENCODING: 'utf-8',
         ...(process.platform === 'win32' ? { PYTHONUTF8: '1' } : {}),
       },
-    });
+    ));
     const child = managedGateway;
+    deliverManagedGatewayLaunchKey(child, launchKey);
     console.log(`[gateway] Spawn took ${Date.now() - spawnStart}ms, PID: ${child.pid}`);
 
     // 记录 stdout/stderr 用于诊断启动问题
@@ -1498,6 +1690,7 @@ function startWindowsPackagedGateway(port: number): void {
       // retry 路径，已由 retry 接管，不动新代际状态。
       if (managedGateway === child) {
         managedGateway = null;
+        clearManagedGatewayInstanceKey();
         ensureGatewayPromise = null;
         logSupervisorDecision('instance-exit', { platform: 'win32', code, signal });
         if (!isQuitting) gatewayRestartController.schedule();
@@ -1507,12 +1700,14 @@ function startWindowsPackagedGateway(port: number): void {
       console.error('[gateway] Failed to start Windows packaged gateway:', err);
       if (managedGateway === child) {
         managedGateway = null;
+        clearManagedGatewayInstanceKey();
         ensureGatewayPromise = null;
         logSupervisorDecision('instance-error', { platform: 'win32', error: String(err) });
         if (!isQuitting) gatewayRestartController.schedule();
       }
     });
   } catch (err) {
+    launchKey.fill(0);
     console.error('[gateway] Exception while spawning Windows gateway:', err);
   }
 }
@@ -1532,24 +1727,27 @@ function startMacOSPackagedGateway(port: number): void {
 
   console.log(`[gateway] Starting packaged macOS gateway on port ${port}:`, gatewayExePath);
 
-  // 注意：不在此处调用 killZombieGatewayProcesses()。
-  // macOS 上 killZombieGatewayProcesses 使用 `pkill -f crew-gateway`，
-  // 它会匹配命令行中包含 "crew-gateway" 的所有进程——包括本函数刚刚 spawn
-  // 出来的新 gateway，导致新进程被 SIGTERM 误杀（pkill 是异步的，无法按 PID 排除）。
-  // 僵尸进程清理统一在 before-quit / uninstall 时执行即可。
+  // Never kill by process name here: lifecycle cleanup is bound to the exact
+  // ChildProcess instance so an unrelated same-user process cannot be targeted.
 
+  const launchKey = randomBytes(32);
   try {
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
-      detached: false,
-      env: {
-        ...process.env,
+    managedGateway = spawn(gatewayExePath, [], hardenedChildProcessOptions(
+      {
+        cwd: gatewayDir,
+        detached: false,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+      {
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        [GATEWAY_LAUNCH_SECRET_STDIN_ENV]: '1',
         ...packagedSecurityRuntimeEnv(),
       },
-    });
+    ));
     const child = managedGateway;
+    deliverManagedGatewayLaunchKey(child, launchKey);
 
     attachGatewayLog(child);
     writeGatewayLogLine(`[spawn] packaged mac gateway pid=${child.pid} port=${port} exe=${gatewayExePath}`);
@@ -1560,6 +1758,7 @@ function startMacOSPackagedGateway(port: number): void {
       console.warn('[gateway] macOS packaged gateway exited', { code, signal });
       if (managedGateway === child) {
         managedGateway = null;
+        clearManagedGatewayInstanceKey();
         ensureGatewayPromise = null;
         logSupervisorDecision('instance-exit', { platform: 'darwin', code, signal });
         if (!isQuitting) gatewayRestartController.schedule();
@@ -1569,12 +1768,14 @@ function startMacOSPackagedGateway(port: number): void {
       console.error('[gateway] Failed to start macOS packaged gateway:', err);
       if (managedGateway === child) {
         managedGateway = null;
+        clearManagedGatewayInstanceKey();
         ensureGatewayPromise = null;
         logSupervisorDecision('instance-error', { platform: 'darwin', error: String(err) });
         if (!isQuitting) gatewayRestartController.schedule();
       }
     });
   } catch (err) {
+    launchKey.fill(0);
     console.error('[gateway] Exception while spawning macOS gateway:', err);
   }
 }
@@ -1596,18 +1797,24 @@ function startLinuxPackagedGateway(port: number): void {
 
   console.log(`[gateway] Starting packaged Linux gateway on port ${port}:`, gatewayExePath);
 
+  const launchKey = randomBytes(32);
   try {
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
-      detached: false,
-      env: {
-        ...process.env,
+    managedGateway = spawn(gatewayExePath, [], hardenedChildProcessOptions(
+      {
+        cwd: gatewayDir,
+        detached: false,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+      {
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        [GATEWAY_LAUNCH_SECRET_STDIN_ENV]: '1',
         ...packagedSecurityRuntimeEnv(),
       },
-    });
+    ));
     const child = managedGateway;
+    deliverManagedGatewayLaunchKey(child, launchKey);
 
     attachGatewayLog(child);
     writeGatewayLogLine(`[spawn] packaged linux gateway pid=${child.pid} port=${port} exe=${gatewayExePath}`);
@@ -1618,6 +1825,7 @@ function startLinuxPackagedGateway(port: number): void {
       console.warn('[gateway] Linux packaged gateway exited', { code, signal });
       if (managedGateway === child) {
         managedGateway = null;
+        clearManagedGatewayInstanceKey();
         ensureGatewayPromise = null;
         logSupervisorDecision('instance-exit', { platform: 'linux', code, signal });
         if (!isQuitting) gatewayRestartController.schedule();
@@ -1627,73 +1835,15 @@ function startLinuxPackagedGateway(port: number): void {
       console.error('[gateway] Failed to start Linux packaged gateway:', err);
       if (managedGateway === child) {
         managedGateway = null;
+        clearManagedGatewayInstanceKey();
         ensureGatewayPromise = null;
         logSupervisorDecision('instance-error', { platform: 'linux', error: String(err) });
         if (!isQuitting) gatewayRestartController.schedule();
       }
     });
   } catch (err) {
+    launchKey.fill(0);
     console.error('[gateway] Exception while spawning Linux gateway:', err);
-  }
-}
-
-/**
- * 清理可能残留的僵尸 gateway 进程。
- * 上次 Electron 异常退出时 managedGateway.kill() 可能未执行，
- * 导致旧 gateway 进程占着 8000 端口，新 gateway 无法启动。
- */
-function killZombieGatewayProcesses(): void {
-  if (process.platform === 'win32') {
-    try {
-      // 查找所有 crew-gateway.exe 进程（排除当前 managedGateway）
-      const output = spawn('tasklist', ['/FI', 'IMAGENAME eq crew-gateway.exe', '/FO', 'CSV', '/NH'], {
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-
-      let stdout = '';
-      output.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
-
-      output.on('close', () => {
-        const lines = stdout.split('\n').filter(line => line.includes('crew-gateway.exe'));
-        for (const line of lines) {
-          const match = line.match(/"crew-gateway\.exe","(\d+)"/);
-          if (match) {
-            const pid = parseInt(match[1], 10);
-            // 跳过当前管理的 gateway（如果存在）
-            if (managedGateway && managedGateway.pid === pid) continue;
-
-            console.warn(`[gateway] Killing zombie crew-gateway process: PID ${pid}`);
-            try {
-              spawn('taskkill', ['/PID', String(pid), '/F'], {
-                windowsHide: true,
-                stdio: 'ignore',
-              });
-            } catch (err) {
-              console.error(`[gateway] Failed to kill PID ${pid}:`, err);
-            }
-          }
-        }
-      });
-    } catch (err) {
-      console.warn('[gateway] Failed to enumerate gateway processes:', err);
-    }
-  } else if (process.platform === 'linux') {
-    try {
-      // Linux 打包态 gateway 由本进程 spawn 托管（不再用 systemd user service）。
-      // 只杀当前用户的残留 crew-gateway，避免误杀别的用户各自的 gateway 实例。
-      spawn('pkill', ['-u', String(process.getuid?.() ?? 0), '-f', '/opt/crew-gateway/crew-gateway'], {
-        stdio: 'ignore',
-      });
-    } catch (err) {
-      console.warn('[gateway] Failed to kill Linux gateway processes:', err);
-    }
-  } else if (process.platform === 'darwin') {
-    try {
-      spawn('pkill', ['-f', 'crew-gateway'], { stdio: 'ignore' });
-    } catch (err) {
-      console.warn('[gateway] Failed to kill macOS gateway processes:', err);
-    }
   }
 }
 
@@ -1720,9 +1870,30 @@ function writeGatewayLogLine(line: string): void {
 function attachGatewayLog(child: ChildProcessWithoutNullStreams): void {
   try {
     const file = gatewayLogPath();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const logDirectory = path.dirname(file);
+    ensurePrivateUpdateDirectory(logDirectory);
     gatewayLogStream?.end();
-    gatewayLogStream = fs.createWriteStream(file, { flags: 'w', encoding: 'utf8' });
+    const noFollow = process.platform !== 'win32' && typeof fs.constants.O_NOFOLLOW === 'number'
+      ? fs.constants.O_NOFOLLOW
+      : 0;
+    const fd = fs.openSync(
+      file,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | noFollow,
+      0o600,
+    );
+    try {
+      const info = fs.fstatSync(fd, { bigint: true });
+      if (!info.isFile() || info.nlink !== 1n) throw new Error('unsafe gateway log target');
+      if (process.platform !== 'win32') fs.fchmodSync(fd, 0o600);
+      gatewayLogStream = fs.createWriteStream(file, {
+        fd,
+        encoding: 'utf8',
+        autoClose: true,
+      });
+    } catch {
+      fs.closeSync(fd);
+      throw new Error('unsafe gateway log target');
+    }
     const write = (prefix: string, chunk: Buffer | string): void => {
       const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
       gatewayLogStream?.write(
@@ -1735,8 +1906,8 @@ function attachGatewayLog(child: ChildProcessWithoutNullStreams): void {
     child.on('exit', (code, signal) => {
       writeGatewayLogLine(`[exit] code=${code} signal=${signal}`);
     });
-  } catch (err) {
-    console.error('[gateway] failed to attach startup log:', err);
+  } catch {
+    console.error('[gateway] failed to attach startup log');
   }
 }
 
@@ -1834,6 +2005,7 @@ async function stopManagedGateway(reason: string): Promise<void> {
   const child = managedGateway;
   if (!child) return;
   managedGateway = null;
+  clearManagedGatewayInstanceKey();
   await new Promise<void>((resolve) => {
     let settled = false;
     const finish = () => {
@@ -1849,8 +2021,10 @@ async function stopManagedGateway(reason: string): Promise<void> {
     setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* already dead */ }
       setTimeout(finish, 400);
-    }, 3000);
-    try { child.kill(); } catch { finish(); }
+    }, 8000);
+    try { child.stdin.end(); } catch {
+      try { child.kill(); } catch { finish(); }
+    }
   });
   logSupervisorDecision('instance-exit-superseded', { pid: child.pid ?? -1, reason });
 }
@@ -2031,11 +2205,11 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     }
 
     // 本地启动优先复用 8000 上由用户单独运行的 Gateway。
-    // Linux 打包态除外：由本进程 spawn 托管，不复用外部 gateway（避免复用到别的
-    // 用户的 gateway 导致 instance key 验签失败）。
+    // 所有打包态都由本进程 spawn 并通过匿名 stdin 管道交付本次启动密钥；
+    // 不复用只持有持久安装密钥的外部 Gateway。
     if (
       shouldProbeExternalGateway(gatewayIdentityMode)
-      && !(app.isPackaged && (process.platform === 'win32' || process.platform === 'linux'))
+      && !app.isPackaged
     ) {
       const firstProbe = await probeHealthApi(DEFAULT_GATEWAY_URL);
       const externalPresent = firstProbe.verified
@@ -2178,11 +2352,9 @@ async function securityGatewayRequest(
   const body = payload === undefined ? '' : JSON.stringify(payload);
   const requestPath = new URL(pathname, 'http://127.0.0.1').pathname;
   const headers: Record<string, string> = {
-    ...(requestPath.startsWith('/api/security/')
-      ? { 'X-Crew-Security-Proof': createActiveGatewaySecurityProof(method, requestPath, body) }
-      : {}),
     ...(body ? { 'content-type': 'application/json' } : {}),
     ...(usesRemoteAuth ? { Authorization: `Bearer ${jwt}`, ...identityHeaders } : {}),
+    ...gatewayAccessHeaders(requestPath, method, body),
   };
   const response = await fetch(`${baseUrl}${pathname}`, {
     method,
@@ -2191,6 +2363,18 @@ async function securityGatewayRequest(
   });
   const responseBody = await response.json().catch(() => ({ detail: response.statusText }));
   return { ok: response.ok, status: response.status, body: responseBody };
+}
+
+async function reportUpdateSecurityAlert(detail: string): Promise<void> {
+  try {
+    await securityGatewayRequest('POST', '/api/security/alerts/report', {
+      kind: 'update_signature_failure',
+      detail: detail.slice(0, 512),
+    });
+  } catch {
+    // Alert reporting is best-effort; the update boundary itself already failed closed.
+    console.warn('[update-security] alert-report-unavailable');
+  }
 }
 
 function parseOrThrow<T>(parsed: { ok: true; value: T } | { ok: false; error: string }, channel: string): T {
@@ -2214,12 +2398,116 @@ function assertTrustedRenderer(event: TrustedIpcEvent): void {
   }
 }
 
-const rawIpcHandle = ipcMain.handle.bind(ipcMain);
+function feedbackConsentContext(
+  event: Electron.IpcMainInvokeEvent,
+): FeedbackConsentContext {
+  const senderFrame = event.senderFrame;
+  if (!senderFrame) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: feedback sender frame unavailable`);
+  }
+  return {
+    desktopSessionId: desktopFeedbackSessionId,
+    origin: senderFrame.url,
+    ownerId: currentBrowserOwnerId() ?? 'unauthenticated',
+    webContentsId: event.sender.id,
+  };
+}
 
-function trustedHandle(channel: string, listener: TrustedIpcHandler): void {
+function feedbackConsentDetail(preview: {
+  payload: { title: string; description: string };
+  images: Array<{ name: string; bytes: number; digest: string }>;
+}): string {
+  const attachments = preview.images.length === 0
+    ? '无图片附件'
+    : preview.images.map((image, index) => (
+      `${index + 1}. ${image.name} · ${image.bytes} bytes · SHA-256 ${image.digest.slice(0, 16)}…`
+    )).join('\n');
+  return [
+    `标题：${preview.payload.title}`,
+    '',
+    '描述：',
+    preview.payload.description,
+    '',
+    `附件（${preview.images.length}）：`,
+    attachments,
+    '',
+    '以上是脱敏后的最终上传内容。本次同意仅可使用一次，并会很快过期。',
+  ].join('\n');
+}
+
+function assertTrustedInspirationRenderer(event: TrustedIpcEvent): string {
+  const senderFrame = event.senderFrame;
+  const entry = Array.from(inspirationWindows.entries()).find(
+    ([, win]) => !win.isDestroyed() && win.webContents.id === event.sender.id,
+  );
+  if (!entry || !senderFrame || senderFrame !== event.sender.mainFrame) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: untrusted inspiration IPC sender`);
+  }
+  let source: URL;
+  try {
+    source = new URL(senderFrame.url);
+  } catch {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid inspiration IPC origin`);
+  }
+  if (
+    source.protocol !== 'ace-site:'
+    || source.hostname !== entry[0]
+    || source.pathname !== '/'
+    || source.username !== ''
+    || source.password !== ''
+    || source.port !== ''
+    || source.search !== ''
+    || source.hash !== ''
+  ) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: untrusted inspiration IPC origin`);
+  }
+  return entry[0];
+}
+
+const MAX_TRUSTED_IPC_PAYLOAD_BYTES = 64 * 1024 * 1024;
+
+function assertIpcPayloadSize(args: unknown[]): void {
+  let size: number;
+  try {
+    size = serialize(args).byteLength;
+  } catch {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: IPC payload is not serializable`);
+  }
+  if (size > MAX_TRUSTED_IPC_PAYLOAD_BYTES) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: IPC payload too large`);
+  }
+}
+
+const rawIpcHandle = ipcMain.handle.bind(ipcMain);
+const rawIpcOn = ipcMain.on.bind(ipcMain);
+
+function trustedHandle(channel: IpcInvokeChannel, listener: TrustedIpcHandler): void {
+  if (!isIpcInvokeChannel(channel)) {
+    throw new Error(`refusing to register unallowlisted IPC channel: ${channel}`);
+  }
   rawIpcHandle(channel, (event, ...args) => {
     assertTrustedRenderer(event);
+    assertIpcPayloadSize(args);
     return listener(event, ...args);
+  });
+}
+
+function trustedOn<T>(
+  channel: IpcRendererToMainEventChannel,
+  authenticate: (event: Electron.IpcMainEvent) => T,
+  listener: (event: Electron.IpcMainEvent, identity: T, ...args: unknown[]) => void,
+): void {
+  if (!isIpcRendererToMainEventChannel(channel)) {
+    throw new Error(`refusing to register unallowlisted IPC event channel: ${channel}`);
+  }
+  rawIpcOn(channel, (event, ...args) => {
+    try {
+      const identity = authenticate(event);
+      assertIpcPayloadSize(args);
+      listener(event, identity, ...args);
+    } catch {
+      console.warn(`[ipc] ${channel} rejected`);
+    }
   });
 }
 
@@ -2300,7 +2588,11 @@ function sendVersionUpdateDownloadProgress(payload: VersionUpdateDownloadProgres
 }
 
 function updatesDir(): string {
-  return path.join(app.getPath('userData'), 'updates');
+  const userData = app.getPath('userData');
+  fs.mkdirSync(userData, { recursive: true, mode: 0o700 });
+  const directory = path.join(fs.realpathSync.native(userData), 'updates');
+  ensurePrivateUpdateDirectory(directory);
+  return directory;
 }
 
 /**
@@ -2314,7 +2606,7 @@ function sweepUpdatePartials(): void {
     for (const name of fs.readdirSync(dir)) {
       if (name.endsWith('.part')) {
         try {
-          fs.rmSync(path.join(dir, name), { force: true });
+          removeManagedUpdateFile(path.join(dir, name));
         } catch {
           /* ignore individual file failures */
         }
@@ -2344,7 +2636,7 @@ function cleanupOldPackages(): void {
       const full = path.resolve(path.join(dir, name));
       if (preserved.has(full)) continue;
       try {
-        fs.rmSync(full, { force: true });
+        removeManagedUpdateFile(full);
       } catch {
         /* ignore */
       }
@@ -2372,37 +2664,19 @@ function stopUpdateCleanupMonitor(): void {
 
 /**
  * 安装已下载的更新包（来源：update-state.downloaded，单一可信路径）。
- * 安装前做完整性 + magic-byte 校验；失败保留包供重试，成功则清空 downloaded。
+ * 安装器模块保持已验证文件描述符，启动前再次复核路径身份，并只允许平台固定类型。
  */
+let updateInstallInProgress = false;
+
 async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
+  if (updateInstallInProgress) {
+    return { success: false, message: '更新安装已在进行中' };
+  }
   const downloaded = readUpdateState().downloaded;
   if (!downloaded) {
     return { success: false, message: '没有已下载的更新包' };
   }
-
-  const integrity = verifyPackageIntegrity(downloaded.filePath, downloaded.size);
-  if (!integrity.ok) {
-    sendVersionUpdateDownloadProgress({ phase: 'error', message: integrity.message });
-    // 校验失败的包不可用，清掉状态（文件留给 cleanup 兜底）
-    setDownloadedRecord(null);
-    return { success: false, message: integrity.message };
-  }
-  if (isStrictSecurityEnabled()) {
-    const publicKey = configuredUpdatePublicKey();
-    const signature = publicKey
-      ? verifyPackageSignature(
-          downloaded.filePath,
-          `${downloaded.filePath}.sig`,
-          publicKey,
-        )
-      : { ok: false, message: '严格安全约束已阻止安装：未配置更新签名公钥' };
-    if (!signature.ok) {
-      sendVersionUpdateDownloadProgress({ phase: 'error', message: signature.message });
-      return { success: false, message: signature.message };
-    }
-  }
-
-  const targetPath = path.resolve(downloaded.filePath);
+  updateInstallInProgress = true;
   const quitAfterLaunch = () => {
     setTimeout(() => {
       isQuitting = true;
@@ -2412,81 +2686,30 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
 
   sendVersionUpdateDownloadProgress({ phase: 'installing', percent: 100 });
   try {
-    const ext = path.extname(targetPath).toLowerCase();
-    if (process.platform === 'win32' && ext === '.exe') {
-      // Inno Setup 静默安装（见 deb-package/pack_exe.ps1）；/NORESTART 避免安装器替我们重启
-      const child = spawn(targetPath, ['/SILENT', '/NORESTART'], { detached: true, stdio: 'ignore', windowsHide: true });
-      child.unref();
-      setDownloadedRecord(null); // 包已消费
-      sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
-      quitAfterLaunch();
-      return { success: true, message: '安装程序已启动' };
-    }
-
-    if (process.platform === 'linux' && ext === '.deb') {
-      await fs.promises.chmod(targetPath, 0o644);
-      const usePkexec = typeof process.getuid === 'function' && process.getuid() !== 0;
-      const command = usePkexec ? 'pkexec' : 'dpkg';
-      const args = usePkexec ? ['dpkg', '-i', targetPath] : ['-i', targetPath];
-      const child = spawn(command, args, { detached: true, stdio: 'ignore' });
-      child.unref();
-
-      // 装完自动重启 GUI（对标 Windows 的 Inno postinstall）。
-      // 必须用独立 helper、不能放 deb postinst：postinst 以 root 跑，缺 DISPLAY / XAUTHORITY /
-      // DBUS_SESSION_BUS_ADDRESS，拉不起用户会话 GUI；helper 继承当前 app 的用户会话 env。
-      //
-      // gateway 不再用 systemd user service（改由 desktop 子进程托管），故此处不
-      // systemctl restart。等旧 app 退出后杀掉它 spawn 的旧 gateway（避免占着 8000
-      // 让新 desktop 扫到别的端口），再重启 desktop——新 desktop 的 ensureGateway 会
-      // spawn 新二进制的 gateway。
-      // ponytail 边界（出问题先查这里）：
-      //   1. pkexec 被取消 / dpkg 失败 → deb 没装上，但 helper 仍会重启 GUI。兜底：GUI 起来后
-      //      心跳重新比对版本，forceLock 再次阻断 / reminder 再次提示，不会“假装更新成功”。
-      //   2. crew-desktop 须在 PATH 上（继承自 app 的用户会话 PATH）；若不全则改绝对路径。
-      // helper 参数：$1 = 安装进程 pid（pkexec/dpkg），$2 = 当前 app 主进程 pid。
-      const installPid = child.pid;
-      if (installPid) {
-        const restarter = [
-          'n=0; while kill -0 "$1" 2>/dev/null && [ $n -lt 120 ]; do sleep 0.5; n=$((n+1)); done', // 等安装流程结束（≤60s）
-          'n=0; while kill -0 "$2" 2>/dev/null && [ $n -lt 40 ]; do sleep 0.3; n=$((n+1)); done',  // 等旧 app 退出（≤12s）
-          'sleep 1', // dpkg 换完文件后收尾
-          'pkill -u "$(id -u)" -f /opt/crew-gateway/crew-gateway 2>/dev/null', // 清旧 gateway
-          'sleep 1', // 等端口释放
-          'exec crew-desktop',
-        ].join('; ');
-        spawn(
-          'sh',
-          ['-c', restarter, 'crew-restarter', String(installPid), String(process.pid)],
-          { detached: true, stdio: 'ignore' },
-        ).unref();
+    const result = await launchVerifiedDownloadedUpdate(
+      downloaded,
+      configuredUpdatePublicKey(),
+    );
+    if (result.consumesRecord) {
+      try {
+        setDownloadedRecord(null);
+      } catch {
+        console.warn('[update-security] installed-state-clear-rejected');
       }
-
-      setDownloadedRecord(null);
-      sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
-      quitAfterLaunch();
-      return { success: true, message: '安装程序已启动' };
-    }
-
-    if (process.platform === 'darwin' && ext === '.dmg') {
-      const child = spawn('open', [targetPath], { detached: true, stdio: 'ignore' });
-      child.unref();
-      sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
-      quitAfterLaunch();
-      return { success: true, message: '安装包已打开' };
-    }
-
-    const openError = await shell.openPath(targetPath);
-    if (openError) {
-      sendVersionUpdateDownloadProgress({ phase: 'error', message: openError });
-      return { success: false, message: openError };
     }
     sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
     quitAfterLaunch();
-    return { success: true, message: '安装包已打开' };
+    return { success: true, message: result.message };
   } catch (error) {
-    // 安装启动失败：保留 downloaded，用户可再次点击安装（复用已下载包）
-    sendVersionUpdateDownloadProgress({ phase: 'error', message: (error as Error).message });
-    return { success: false, message: (error as Error).message || '启动安装失败' };
+    updateInstallInProgress = false;
+    const message = error instanceof Error
+      ? error.message.slice(0, 300)
+      : '更新已阻止：启动安装失败';
+    if (/签名|校验|signature/i.test(message)) {
+      void reportUpdateSecurityAlert(message);
+    }
+    sendVersionUpdateDownloadProgress({ phase: 'error', message });
+    return { success: false, message };
   }
 }
 
@@ -2516,11 +2739,30 @@ function restoreUpdateStateOnLaunch(): void {
   }
 
   if (state.downloaded) {
-    if (!fs.existsSync(state.downloaded.filePath)) {
-      // 文件已不在（被清理 / 手动删除）→ 清状态
-      setDownloadedRecord(null);
+    const stillNeeded = evaluateVersionUpdate(
+      state.downloaded.version,
+      localVersion,
+    ).shouldProcess;
+    const publicKey = configuredUpdatePublicKey();
+    const verified = stillNeeded && publicKey
+      ? verifyUpdateArtifact(
+          state.downloaded.filePath,
+          `${state.downloaded.filePath}.sig`,
+          publicKey,
+          state.downloaded.version,
+          state.downloaded,
+        )
+      : { ok: false };
+    if (!verified.ok) {
+      if (publicKey) {
+        void reportUpdateSecurityAlert('启动恢复时更新包签名校验失败');
+      }
+      try {
+        setDownloadedRecord(null);
+      } catch {
+        console.warn('[update-security] stale-state-clear-rejected');
+      }
     } else {
-      // 推送 downloaded 态：渲染层恢复为「可安装」
       sendVersionUpdateDownloadProgress({ phase: 'downloaded', percent: 100 });
     }
   }
@@ -2581,11 +2823,9 @@ function registerIpc() {
     const win = inspirationWindows.get(args.inspirationId);
     return { ok: true, open: Boolean(win && !win.isDestroyed()) };
   });
-  ipcMain.on('inspiration:sticky-close', (event) => {
-    const entry = Array.from(inspirationWindows.entries()).find(
-      ([, win]) => !win.isDestroyed() && win.webContents.id === event.sender.id,
-    );
-    if (entry) closeInspirationWindow(entry[0]);
+  // The guarded registration below preserves the legacy sticky-close main-event contract.
+  trustedOn('inspiration:sticky-close', assertTrustedInspirationRenderer, (_event, inspirationId) => {
+    closeInspirationWindow(inspirationId);
   });
   trustedHandle('app:quit', () => {
     isQuitting = true;
@@ -2595,24 +2835,25 @@ function registerIpc() {
     version: currentAppVersion(app),
     label: currentAppVersionLabel(app),
   }));
-  ipcMain.on('window:maximized', (e) => {
-    assertTrustedRenderer(e);
-    e.sender.send('window:maximized-changed', true);
-  });
-  ipcMain.on('window:unmaximized', (e) => {
-    assertTrustedRenderer(e);
-    e.sender.send('window:maximized-changed', false);
-  });
-
   trustedHandle('shell:openExternal', (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenExternalArgs.parse(raw), 'shell:openExternal');
     return shell.openExternal(args.url);
   });
 
-  trustedHandle('shell:openPath', (_e, raw: unknown) => {
+  trustedHandle('shell:openPath', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:openPath');
-    const extraRoots = args.allowedRoot ? [args.allowedRoot] : [];
-    const resolved = resolveShellAllowedPath(args.path, extraRoots);
+    const extraRoots: string[] = [];
+    if (args.workspaceId) {
+      const workspace = await resolveWorkspaceDirectoryInfo(
+        args.workspaceId,
+        () => securityGatewayRequest('GET', '/api/workspaces'),
+      );
+      if (!workspace.exists || !workspace.canonicalPath) {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: Workspace directory is unavailable`);
+      }
+      extraRoots.push(workspace.canonicalPath);
+    }
+    const resolved = await resolveShellAllowedPath(args.path, extraRoots);
     return shell.openPath(resolved);
   });
 
@@ -2657,7 +2898,7 @@ function registerIpc() {
 
   trustedHandle('shell:readTextFile', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:readTextFile');
-    const resolved = resolveShellAllowedPath(args.path);
+    const resolved = await resolveShellAllowedPath(args.path);
     const stat = await fs.promises.stat(resolved);
     const maxBytes = 512 * 1024;
     if (!stat.isFile()) {
@@ -2716,7 +2957,7 @@ function registerIpc() {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:pathExists');
     let resolved: string;
     try {
-      resolved = resolveShellAllowedPath(args.path);
+      resolved = await resolveShellAllowedPath(args.path);
     } catch {
       return false;
     }
@@ -2737,9 +2978,9 @@ function registerIpc() {
     );
   });
 
-  trustedHandle('shell:showItemInFolder', (_e, raw: unknown) => {
+  trustedHandle('shell:showItemInFolder', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:showItemInFolder');
-    const resolved = resolveShellAllowedPath(args.path);
+    const resolved = await resolveShellAllowedPath(args.path);
     shell.showItemInFolder(resolved);
   });
 
@@ -2830,7 +3071,7 @@ function registerIpc() {
     return { ok: true };
   });
 
-  trustedHandle('dialog:selectFile', async (_e, raw: unknown) => {
+  trustedHandle('dialog:selectFile', async (event, raw: unknown) => {
     const args = parseOrThrow(DialogSelectFileArgs.parse(raw), 'dialog:selectFile');
     const properties: Array<'openFile' | 'multiSelections'> = args.multiSelect
       ? ['openFile', 'multiSelections']
@@ -2844,44 +3085,50 @@ function registerIpc() {
     const maxBytes = args.maxBytes ?? MAX_DIALOG_FILE_BYTES;
 
     if (args.returnType !== 'dataUrl' && args.returnType !== 'object') {
-      return r.filePaths;
+      return Promise.all(
+        r.filePaths.map((filePath) =>
+          selectedFileAuthority.authorize(event.sender.id, filePath, maxBytes)),
+      );
     }
 
     const items = await Promise.all(
       r.filePaths.map(async (filePath) => {
         try {
-          const stat = await fs.promises.stat(filePath);
-          if (stat.size > maxBytes) {
-            return {
-              path: filePath,
-              name: path.basename(filePath),
-              dataUrl: '',
-              error: `FILE_TOO_LARGE: ${stat.size} > ${maxBytes}`,
-            };
-          }
-          const buffer = await fs.promises.readFile(filePath);
-          const ext = path.extname(filePath).slice(1).toLowerCase();
+          const canonicalPath = await selectedFileAuthority.authorize(
+            event.sender.id,
+            filePath,
+            maxBytes,
+          );
+          const selected = await selectedFileAuthority.consume(
+            event.sender.id,
+            canonicalPath,
+            maxBytes,
+          );
+          const ext = path.extname(canonicalPath).slice(1).toLowerCase();
           const mimeType = mimeFromExt(ext);
           if (!ALLOWED_MIME_TYPES.has(mimeType)) {
             return {
-              path: filePath,
-              name: path.basename(filePath),
+              path: canonicalPath,
+              name: path.basename(canonicalPath),
               dataUrl: '',
               error: `MIME_NOT_ALLOWED: ${mimeType}`,
             };
           }
           return {
-            path: filePath,
-            name: path.basename(filePath),
-            dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`,
+            path: canonicalPath,
+            name: path.basename(canonicalPath),
+            dataUrl: `data:${mimeType};base64,${selected.bytes.toString('base64')}`,
           };
-        } catch (err) {
-          return {
-            path: filePath,
-            name: path.basename(filePath),
-            dataUrl: '',
-            error: `READ_FAILED: ${(err as Error).message}`,
-          };
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : '';
+        return {
+          path: filePath,
+          name: path.basename(filePath),
+          dataUrl: '',
+          error: detail.startsWith('FILE_TOO_LARGE')
+            ? 'READ_FAILED: 文件超过大小上限'
+            : 'READ_FAILED: 文件读取未通过安全校验',
+        };
         }
       }),
     );
@@ -2932,36 +3179,81 @@ function registerIpc() {
         `${IPC_ARG_VALIDATION_FAILED}: security:set-strict-security expected boolean`,
       );
     }
-    if (!enabled && !await confirmStrictSecurityDisable(mainWindow)) {
-      return { strictSecurityEnabled: isStrictSecurityEnabled() };
+    if (!enabled) {
+      throw new Error('strict security cannot be disabled');
     }
-    const saved = saveStrictSecurityPreference(enabled);
-    loginNewServiceInstance.setStrictSecurityEnabled(enabled);
-    // 严格安全约束在 gateway 启动时通过 ACE_STRICT_SECURITY 注入；运行中的 gateway
-    // 不会热更新 env，故持久化后回收一次 gateway，使其带着新值重启。
-    recycleGatewayForSecurityChange();
+    const saved = saveStrictSecurityPreference(true);
+    loginNewServiceInstance.setStrictSecurityEnabled(true);
     return saved;
   });
 
   trustedHandle('update:start-download', async (_e, raw: unknown) => {
     const args = parseOrThrow(UpdateStartDownloadArgs.parse(raw), 'update:start-download');
-    return startUpdateDownload({ version: args.version, type: args.type, url: args.url });
+    const result = startUpdateDownload({ version: args.version, type: args.type, url: args.url });
+    if (!result.success && /签名|校验|signature/i.test(result.message ?? '')) {
+      void reportUpdateSecurityAlert(result.message ?? '更新包签名校验失败');
+    }
+    return result;
   });
 
   trustedHandle('update:pause', () => pauseUpdateDownload());
   trustedHandle('update:resume', () => resumeUpdateDownload());
   trustedHandle('update:retry', async (_e, raw: unknown) => {
     const args = parseOrThrow(UpdateStartDownloadArgs.parse(raw), 'update:retry');
-    return retryUpdateDownload({ version: args.version, type: args.type, url: args.url });
+    const result = retryUpdateDownload({ version: args.version, type: args.type, url: args.url });
+    if (!result.success && /签名|校验|signature/i.test(result.message ?? '')) {
+      void reportUpdateSecurityAlert(result.message ?? '更新包签名校验失败');
+    }
+    return result;
   });
 
   trustedHandle('update:install-package', async () => installDownloadedUpdate());
 
   trustedHandle('update:get-state', (): UpdateStateSnapshot => readUpdateState());
 
-  trustedHandle('feedback:submit', async (_e, raw: unknown) => {
+  trustedHandle('feedback:preview', async (event, raw: unknown) => {
+    const args = parseOrThrow(FeedbackPreviewArgs.parse(raw), 'feedback:preview');
+    const context = feedbackConsentContext(event);
+    const preview = feedbackServiceInstance.createPreview(args, context);
+    if (!preview.success) return preview;
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      feedbackServiceInstance.cancelPreview(preview.previewId, context);
+      return { success: false, canceled: true, message: '反馈确认窗口不可用' };
+    }
+    let decision: Electron.MessageBoxReturnValue;
+    try {
+      decision = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        title: '确认提交反馈',
+        message: '请预览并确认本次要上传的反馈',
+        detail: feedbackConsentDetail(preview),
+        buttons: ['取消', '同意并提交'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+    } catch {
+      feedbackServiceInstance.cancelPreview(preview.previewId, context);
+      return { success: false, canceled: true, message: '反馈确认失败，未上传任何内容' };
+    }
+    if (decision.response !== 1) {
+      feedbackServiceInstance.cancelPreview(preview.previewId, context);
+      return { success: false, canceled: true, message: '已取消反馈提交' };
+    }
+    return feedbackServiceInstance.approvePreview(preview.previewId, context);
+  });
+
+  trustedHandle('feedback:submit', async (event, raw: unknown) => {
     const args = parseOrThrow(FeedbackSubmitArgs.parse(raw), 'feedback:submit');
-    return submitFeedback(args);
+    return feedbackServiceInstance.submitFeedback(args, feedbackConsentContext(event));
+  });
+
+  trustedHandle('feedback:cancel', (event, raw: unknown) => {
+    const args = parseOrThrow(FeedbackCancelArgs.parse(raw), 'feedback:cancel');
+    return feedbackServiceInstance.cancelFeedback(
+      args.authority,
+      feedbackConsentContext(event),
+    );
   });
 
   trustedHandle('feedback:list', async (_e, raw: unknown) => {
@@ -2986,8 +3278,12 @@ function registerIpc() {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: auth:heartbeat version must be string|undefined`);
     }
     try {
+      const previousOwner = currentBrowserOwnerId();
       const { baseUrl } = await ensureGateway();
       await loginNewServiceInstance.refreshConfig(baseUrl);
+      if (currentBrowserOwnerId() !== previousOwner) {
+        feedbackServiceInstance.cancelAll();
+      }
     } catch {
       // 心跳不阻塞 UI；失败时沿用旧会话态
     }
@@ -2999,14 +3295,18 @@ function registerIpc() {
   trustedHandle('auth:get-state', async () => {
     const { baseUrl } = await ensureGateway();
     try {
+      const previousOwner = currentBrowserOwnerId();
       const state = await loginNewServiceInstance.refreshConfig(baseUrl);
+      if (currentBrowserOwnerId() !== previousOwner) {
+        feedbackServiceInstance.cancelAll();
+      }
       pushSessionState();
       scheduleBrowserHostConnection();
       return { ok: true, state };
-    } catch (error) {
+    } catch {
       return {
         ok: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: '登录状态获取失败，请重试',
         state: loginNewServiceInstance.getState(),
       };
     }
@@ -3036,6 +3336,7 @@ function registerIpc() {
     if (!identifier || identifier.length > 128) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: auth:login identifier required`);
     }
+    feedbackServiceInstance.cancelAll();
     const { baseUrl } = await ensureGateway();
     const authState = loginNewServiceInstance.getState();
     if (authState.mode === 'remote' && !code) {
@@ -3054,6 +3355,7 @@ function registerIpc() {
   });
 
   trustedHandle('auth:logout', async () => {
+    feedbackServiceInstance.cancelAll();
     const { baseUrl } = await ensureGateway();
     const result = await loginNewServiceInstance.logout(baseUrl);
     if (result.ok) {
@@ -3102,7 +3404,7 @@ function registerIpc() {
       // token-setter for the gateway.
       const DENYLIST = new Set([
         'host', 'connection', 'cookie', 'authorization',
-        'origin', 'referer', 'content-length', 'x-crew-security-proof',
+        'origin', 'referer', 'content-length', GATEWAY_INSTANCE_AUTH_HEADER.toLowerCase(),
       ]);
       const sanitized: Record<string, string> = {};
       const incoming = args.init.headers as Record<string, string>;
@@ -3122,14 +3424,14 @@ function registerIpc() {
         ...identityHeaders,
       };
     }
-    fetchInit.headers = {
-      ...(fetchInit.headers as Record<string, string> | undefined),
-      ...gatewayAccessHeaders(targetUrl.pathname),
-    };
     if (args.init?.body !== undefined) fetchInit.body = args.init.body;
     const proofMethod = (args.init?.method || 'GET').toUpperCase();
     const proofPath = targetUrl.pathname;
     const proofBody = typeof args.init?.body === 'string' ? args.init.body : '';
+    fetchInit.headers = {
+      ...(fetchInit.headers as Record<string, string> | undefined),
+      ...gatewayAccessHeaders(proofPath, proofMethod, proofBody),
+    };
     const cuaAuthority = classifyCuaSetupAuthorityRequest(proofMethod, proofPath, proofBody);
     if (cuaAuthority === 'install') {
       const confirmed = await confirmCuaDriverInstall(mainWindow);
@@ -3143,12 +3445,6 @@ function registerIpc() {
         };
       }
     }
-    if (cuaAuthority !== null) {
-      fetchInit.headers = {
-        ...(fetchInit.headers as Record<string, string> | undefined),
-        'X-Crew-Security-Proof': createActiveGatewaySecurityProof(proofMethod, proofPath, proofBody),
-      };
-    }
     const res = await fetch(targetUrl.toString(), fetchInit);
     const body = await res.text();
     return {
@@ -3161,6 +3457,10 @@ function registerIpc() {
   });
 
   const gatewayStreamControllers = new Map<string, AbortController>();
+  const GATEWAY_STREAM_IDLE_TIMEOUT_MS = 60 * 1000;
+  const GATEWAY_STREAM_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
+  const GATEWAY_STREAM_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+  const GATEWAY_STREAM_MAX_CHUNK_BYTES = 256 * 1024;
 
   trustedHandle('gateway:stream-start', async (event, raw: unknown) => {
     const rawRequest = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
@@ -3192,7 +3492,7 @@ function registerIpc() {
     const headers: Record<string, string> = {};
     const denylist = new Set([
       'host', 'connection', 'cookie', 'authorization',
-      'origin', 'referer', 'content-length',
+      'origin', 'referer', 'content-length', GATEWAY_INSTANCE_AUTH_HEADER.toLowerCase(),
     ]);
     for (const [key, value] of Object.entries(args.init?.headers || {})) {
       if (!denylist.has(key.toLowerCase())) headers[key] = value;
@@ -3201,21 +3501,33 @@ function registerIpc() {
       headers.Authorization = `Bearer ${jwt}`;
       Object.assign(headers, identityHeaders);
     }
-    Object.assign(headers, gatewayAccessHeaders(targetUrl.pathname));
+    const requestMethod = (args.init?.method || 'GET').toUpperCase();
+    const requestBody = typeof args.init?.body === 'string' ? args.init.body : '';
+    Object.assign(
+      headers,
+      gatewayAccessHeaders(targetUrl.pathname, requestMethod, requestBody),
+    );
     const controller = new AbortController();
+    const timeoutSignal = AbortSignal.timeout(GATEWAY_STREAM_TOTAL_TIMEOUT_MS);
+    const requestSignal = AbortSignal.any([controller.signal, timeoutSignal]);
     gatewayStreamControllers.get(streamKey)?.abort();
     gatewayStreamControllers.set(streamKey, controller);
     try {
       const response = await fetch(targetUrl.toString(), {
-        method: args.init?.method || 'GET',
+        method: requestMethod,
         headers,
         ...(args.init?.body !== undefined ? { body: args.init.body } : {}),
-        signal: controller.signal,
+        signal: requestSignal,
       });
+      const responseHeaders = Object.fromEntries(
+        Array.from(response.headers.entries()).filter(([key]) => (
+          key === 'content-type' || key === 'cache-control' || key === 'x-accel-buffering'
+        )),
+      );
       send({
         type: 'head',
         status: response.status,
-        headers: Object.fromEntries(response.headers.entries()),
+        headers: responseHeaders,
       });
       if (!response.body) {
         send({ type: 'end' });
@@ -3223,19 +3535,58 @@ function registerIpc() {
       }
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
+      let totalBytes = 0;
+      const readWithIdleTimeout = async () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([
+            reader.read(),
+            new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error('gateway_stream_idle_timeout')),
+                GATEWAY_STREAM_IDLE_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      };
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readWithIdleTimeout();
         if (done) break;
         const text = decoder.decode(value, { stream: true });
-        if (text) send({ type: 'chunk', text });
+        if (!text) continue;
+        const chunkBytes = Buffer.byteLength(text, 'utf8');
+        totalBytes += chunkBytes;
+        if (
+          chunkBytes > GATEWAY_STREAM_MAX_CHUNK_BYTES
+          || totalBytes > GATEWAY_STREAM_MAX_TOTAL_BYTES
+        ) {
+          await reader.cancel();
+          send({ type: 'error', error: 'Gateway 流响应超过安全上限' });
+          return { ok: false };
+        }
+        send({ type: 'chunk', text });
       }
       const tail = decoder.decode();
-      if (tail) send({ type: 'chunk', text: tail });
+      if (tail) {
+        const tailBytes = Buffer.byteLength(tail, 'utf8');
+        totalBytes += tailBytes;
+        if (
+          tailBytes > GATEWAY_STREAM_MAX_CHUNK_BYTES
+          || totalBytes > GATEWAY_STREAM_MAX_TOTAL_BYTES
+        ) {
+          send({ type: 'error', error: 'Gateway 流响应超过安全上限' });
+          return { ok: false };
+        }
+        send({ type: 'chunk', text: tail });
+      }
       send({ type: 'end' });
       return { ok: response.ok };
     } catch (error) {
       if ((error as Error).name !== 'AbortError') {
-        send({ type: 'error', error: (error as Error).message || 'Gateway 流请求失败' });
+        send({ type: 'error', error: 'Gateway 流请求失败' });
       }
       return { ok: false };
     } finally {
@@ -3271,7 +3622,7 @@ function registerIpc() {
    * 返回 { results }：每个文件一项，shape 与 gateway:fetch 返回一致，
    * 本地失败（读不到/超限/非普通文件）合成为 4xx JSON 错误体。
    */
-  trustedHandle('gateway:upload', async (_e, raw: unknown) => {
+  trustedHandle('gateway:upload', async (event, raw: unknown) => {
     const args = parseOrThrow(GatewayUploadArgs.parse(raw), 'gateway:upload');
 
     interface UploadFileResult {
@@ -3314,36 +3665,55 @@ function registerIpc() {
       ? { Authorization: `Bearer ${jwt}`, ...identityHeaders }
       : {};
 
-    const maxMb = Math.round(GATEWAY_UPLOAD_MAX_FILE_BYTES / 1024 / 1024);
     const results: UploadFileResult[] = [];
     for (const filePath of args.files) {
       let content: Buffer;
+      let canonicalPath: string;
       try {
-        const stat = await fs.promises.stat(filePath);
-        if (!stat.isFile()) {
-          results.push(localFailure(filePath, 400, '不是普通文件'));
-          continue;
-        }
-        if (stat.size === 0) {
+        const selected = await selectedFileAuthority.consume(
+          event.sender.id,
+          filePath,
+          GATEWAY_UPLOAD_MAX_FILE_BYTES,
+        );
+        content = selected.bytes;
+        canonicalPath = selected.canonicalPath;
+        if (content.byteLength === 0) {
           results.push(localFailure(filePath, 400, '文件为空'));
           continue;
         }
-        if (stat.size > GATEWAY_UPLOAD_MAX_FILE_BYTES) {
-          results.push(localFailure(filePath, 413, `文件超过大小上限（${maxMb} MB）`));
-          continue;
-        }
-        content = await fs.promises.readFile(filePath);
       } catch (err) {
-        results.push(localFailure(filePath, 400, `读取文件失败：${(err as Error).message}`));
+        const message = (err as Error).message;
+        results.push(localFailure(
+          filePath,
+          message.includes('FILE_TOO_LARGE') ? 413 : 400,
+          `读取文件失败：${message}`,
+        ));
         continue;
       }
       // 后端 /api/wiki/upload 逐文件接收（字段名 file），一次请求一个文件。
       const form = new FormData();
-      form.append('file', new Blob([new Uint8Array(content)]), path.basename(filePath));
+      form.append('file', new Blob([new Uint8Array(content)]), path.basename(canonicalPath));
+      // Materialize the exact multipart wire body before signing. This removes
+      // the former UNSIGNED-PAYLOAD exception while preserving the boundary.
+      const encoded = new Request(uploadUrl, { method: 'POST', body: form });
+      const wireBody = Buffer.from(await encoded.arrayBuffer());
+      const contentType = encoded.headers.get('content-type');
+      if (!contentType) {
+        results.push(localFailure(filePath, 500, '无法编码 multipart 请求'));
+        continue;
+      }
       try {
-        const res = await fetch(uploadUrl, { method: 'POST', headers: authHeaders, body: form });
+        const res = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            ...authHeaders,
+            'Content-Type': contentType,
+            ...gatewayAccessHeaders(targetUrl.pathname, 'POST', wireBody),
+          },
+          body: new Uint8Array(wireBody),
+        });
         results.push({
-          path: filePath,
+          path: canonicalPath,
           ok: res.ok,
           status: res.status,
           statusText: res.statusText,
@@ -3351,7 +3721,7 @@ function registerIpc() {
           headers: Object.fromEntries(res.headers.entries()),
         });
       } catch (err) {
-        results.push(localFailure(filePath, 502, `上传请求失败：${(err as Error).message}`));
+        results.push(localFailure(filePath, 502, '上传请求失败：Gateway 未响应'));
       }
     }
     return { results };
@@ -3374,7 +3744,17 @@ function registerIpc() {
     const requests = (body.requests ?? []).map((request) => {
       const requestId = typeof request['request_id'] === 'string' ? request['request_id'] : '';
       const nonce = typeof request['nonce'] === 'string' ? request['nonce'] : '';
-      if (requestId && nonce) securityApprovalNonces.set(requestId, nonce);
+      if (requestId && nonce) {
+        securityApprovalAuthorities.set(requestId, {
+          nonce,
+          workspaceId: args.workspaceId,
+          sessionId: args.sessionId,
+          taskId: typeof request['task_id'] === 'string'
+            ? request['task_id']
+            : (args.taskId ?? ''),
+          riskClass: typeof request['risk_class'] === 'string' ? request['risk_class'] : '',
+        });
+      }
       const { nonce: _nonce, ...safe } = request;
       void _nonce;
       return safe;
@@ -3384,30 +3764,66 @@ function registerIpc() {
 
   trustedHandle('security:set-mode', async (_e, raw: unknown) => {
     const args = parseOrThrow(SecurityModeArgs.parse(raw), 'security:set-mode');
+    if (args.mode === 'full_access' && !(await confirmFullAccessMode(mainWindow))) {
+      return {
+        ok: false,
+        status: 409,
+        body: { detail: '完全访问的主机级二次确认已取消' },
+      };
+    }
+    let confirmationNonce: string | undefined;
+    if (args.mode === 'full_access') {
+      const challenge = await securityGatewayRequest(
+        'GET',
+        `/api/security/full-access-challenge?workspace_id=${encodeURIComponent(args.workspaceId)}&session_id=${encodeURIComponent(args.sessionId)}`,
+      );
+      if (!challenge.ok) return challenge;
+      const nonce = (challenge.body as { nonce?: unknown })?.nonce;
+      if (typeof nonce !== 'string' || !nonce) {
+        return { ok: false, status: 409, body: { detail: '完全访问服务端确认不可用' } };
+      }
+      confirmationNonce = nonce;
+    }
     return securityGatewayRequest('PUT', '/api/security/mode', {
       workspace_id: args.workspaceId,
       session_id: args.sessionId,
       mode: args.mode,
+      ...(confirmationNonce ? { confirmation_nonce: confirmationNonce } : {}),
     });
   });
 
   trustedHandle('security:decide', async (_e, raw: unknown) => {
     const args = parseOrThrow(SecurityDecisionArgs.parse(raw), 'security:decide');
-    const nonce = securityApprovalNonces.get(args.requestId);
-    if (!nonce) return { ok: false, status: 409, body: { detail: '批准请求已过期或未加载' } };
+    const authority = securityApprovalAuthorities.get(args.requestId);
+    if (
+      !authority
+      || authority.workspaceId !== args.workspaceId
+      || authority.sessionId !== args.sessionId
+      || authority.taskId !== (args.taskId ?? '')
+    ) {
+      return { ok: false, status: 409, body: { detail: '批准请求已过期、未加载或上下文不匹配' } };
+    }
+    if (
+      authority.riskClass === 'dangerous_command'
+      && args.decision !== 'reject'
+      && !(await confirmDangerousAction(mainWindow))
+    ) {
+      return { ok: false, status: 409, body: { detail: '高风险操作的主机级二次确认已取消' } };
+    }
     const pathname = `/api/security/requests/${encodeURIComponent(args.requestId)}/decision`;
     const result = await securityGatewayRequest('POST', pathname, {
       workspace_id: args.workspaceId,
       session_id: args.sessionId,
       task_id: args.taskId ?? '',
-      nonce,
+      nonce: authority.nonce,
       decision: args.decision,
       ...(args.alwaysArgvPrefix ? { always_argv_prefix: args.alwaysArgvPrefix } : {}),
+      ...(args.permissions ? { permissions: args.permissions } : {}),
     });
     // 仅成功才删 nonce：409 可能是瞬时（task_id 时空不一致等），若删掉会让后续所有点击
     // 都命中上面的"已过期或未加载"分支而无法重试。409 时保留 nonce，交给下一次 /pending
     // 轮询与渲染层错误处理去对账（请求真死了轮询不再返回，overlay 自然撤掉）。
-    if (result.ok) securityApprovalNonces.delete(args.requestId);
+    if (result.ok) securityApprovalAuthorities.delete(args.requestId);
     return result;
   });
 
@@ -3432,6 +3848,10 @@ function registerIpc() {
     if (args.actionType) query.set('action_type', args.actionType);
     if (args.decision) query.set('decision', args.decision);
     if (args.sessionId) query.set('session_id', args.sessionId);
+    if (args.workspaceId) query.set('workspace_id', args.workspaceId);
+    if (args.taskId) query.set('task_id', args.taskId);
+    if (args.startTime !== undefined) query.set('start_time', String(args.startTime));
+    if (args.endTime !== undefined) query.set('end_time', String(args.endTime));
     query.set('sort', args.sort ?? 'newest');
     return securityGatewayRequest('GET', `/api/security/audit?${query.toString()}`);
   });
@@ -3439,6 +3859,29 @@ function registerIpc() {
   trustedHandle('security:audit-purge', async (_e, raw: unknown) => {
     const args = parseOrThrow(SecurityWorkspaceArgs.parse(raw), 'security:audit-purge');
     return securityGatewayRequest('POST', `/api/security/audit/purge-expired?workspace_id=${encodeURIComponent(args.workspaceId)}`);
+  });
+  trustedHandle('security:alerts', async () =>
+    securityGatewayRequest('GET', '/api/security/alerts'));
+  trustedHandle('security:alert-isolate', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityAlertActionArgs.parse(raw), 'security:alert-isolate');
+    return securityGatewayRequest(
+      'POST',
+      `/api/security/alerts/${encodeURIComponent(args.alertId)}/isolate`,
+    );
+  });
+  trustedHandle('security:alert-revoke', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityAlertActionArgs.parse(raw), 'security:alert-revoke');
+    return securityGatewayRequest(
+      'POST',
+      `/api/security/alerts/${encodeURIComponent(args.alertId)}/revoke`,
+    );
+  });
+  trustedHandle('security:alert-resolve', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityAlertActionArgs.parse(raw), 'security:alert-resolve');
+    return securityGatewayRequest(
+      'POST',
+      `/api/security/alerts/${encodeURIComponent(args.alertId)}/resolve`,
+    );
   });
   trustedHandle('security:uac-status', async () => {
     if (process.platform !== 'win32') return { enabled: true };
@@ -3525,12 +3968,14 @@ function registerIpc() {
     httpUrl.search = '';
     httpUrl.hash = '';
 
-    const socket = !usesRemoteAuth
-      ? new WebSocket(httpUrl.toString())
-      : new WebSocket(httpUrl.toString(), {
-          headers: { Authorization: `Bearer ${jwt}`, ...identityHeaders },
-        });
+    const socket = new WebSocket(httpUrl.toString(), {
+      headers: {
+        ...(usesRemoteAuth ? { Authorization: `Bearer ${jwt}`, ...identityHeaders } : {}),
+        ...gatewayAccessHeaders('/ws'),
+      },
+    });
     gatewaySockets.set(senderId, socket);
+    gatewaySocketProtocolIdentities.set(socket, new GatewayWsProtocolIdentity());
     const sendEvent = (payload: Record<string, unknown>): void => {
       if (
         gatewaySocketGenerations.get(senderId) !== generation
@@ -3577,12 +4022,13 @@ function registerIpc() {
       sendEvent({
         type: 'close',
         code,
-        reason: reason.toString(),
+        reason: publicWebSocketCloseReason(reason),
       });
       if (gatewaySockets.get(senderId) === socket) gatewaySockets.delete(senderId);
     });
     socket.on('error', (err) => {
-      sendEvent({ type: 'error', error: err.message });
+      void err;
+      sendEvent({ type: 'error', error: 'WebSocket 连接失败' });
     });
     event.sender.once('destroyed', handleRendererDestroyed);
     return { ok: true };
@@ -3593,8 +4039,17 @@ function registerIpc() {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return { ok: false, error: 'WebSocket 未连接' };
     }
+    const protocolIdentity = gatewaySocketProtocolIdentities.get(socket);
+    if (
+      !protocolIdentity
+      || payload === null
+      || typeof payload !== 'object'
+      || Array.isArray(payload)
+    ) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid gateway WebSocket payload`);
+    }
     let data = '';
-    try { data = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {}); } catch {
+    try { data = protocolIdentity.encode(payload); } catch {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: gateway WebSocket payload must be serializable`);
     }
     if (Buffer.byteLength(data, 'utf8') > 4 * 1024 * 1024) {
@@ -3604,6 +4059,8 @@ function registerIpc() {
       socket.send(data);
       return { ok: true };
     } catch {
+      gatewaySockets.delete(event.sender.id);
+      try { socket.close(4002, 'Protocol identity failed'); } catch { /* best effort */ }
       return { ok: false, error: 'WebSocket 发送失败' };
     }
   });
@@ -3650,7 +4107,7 @@ function registerIpc() {
     target.search = '';
     target.hash = '';
     const socket = new WebSocket(target.toString(), {
-      headers: gatewayAccessHeaders('/api/browser/'),
+      headers: gatewayAccessHeaders(target.pathname),
       maxPayload: 2 * 1024 * 1024,
     });
     browserSockets.set(senderId, socket);
@@ -3674,10 +4131,10 @@ function registerIpc() {
     socket.on('close', (code, reason) => {
       event.sender.removeListener('destroyed', handleRendererDestroyed);
       if (browserSockets.get(senderId) !== socket) return;
-      sendEvent({ type: 'close', sessionId, code, reason: reason.toString() });
+      sendEvent({ type: 'close', sessionId, code, reason: publicWebSocketCloseReason(reason) });
       browserSockets.delete(senderId);
     });
-    socket.on('error', (error) => sendEvent({ type: 'error', sessionId, error: error.message }));
+    socket.on('error', () => sendEvent({ type: 'error', sessionId, error: '浏览器状态连接失败' }));
     event.sender.once('destroyed', handleRendererDestroyed);
     return { ok: true };
   });
@@ -3698,11 +4155,11 @@ function registerIpc() {
     try {
       browserHost.setPanel({ runtimeKey, ...request });
       return { ok: true };
-    } catch (error) {
-      return {
-        ok: false,
-        error: (error instanceof Error ? error.message : '无法挂载浏览器页面').slice(0, 500),
-      };
+      } catch (error) {
+        return {
+          ok: false,
+          error: publicBrowserHostError(error),
+        };
     }
   });
   trustedHandle('browser-view:hide', () => {
@@ -3718,11 +4175,11 @@ function registerIpc() {
         ok: true,
         navigation: browserHost.getPanelNavigation({ runtimeKey, ...request }),
       };
-    } catch (error) {
-      return {
-        ok: false,
-        error: (error instanceof Error ? error.message : '无法读取浏览器导航状态').slice(0, 500),
-      };
+      } catch (error) {
+        return {
+          ok: false,
+          error: publicBrowserHostError(error),
+        };
     }
   });
 
@@ -3820,7 +4277,7 @@ async function bootstrap() {
 
   // 版本更新：配置下载控制器进度回调、清理上次中断的 .part、启动旧包定期清理；
   // 页面就绪后恢复 force 阻断 / 已下载待安装状态（renderer 监听器此时已绑定）。
-  configureUpdateController(sendVersionUpdateDownloadProgress, isStrictSecurityEnabled);
+  configureUpdateController(sendVersionUpdateDownloadProgress);
   sweepUpdatePartials();
   startUpdateCleanupMonitor();
   if (mainWindow) {
@@ -3830,12 +4287,18 @@ async function bootstrap() {
   // 注入卸载模块依赖（托盘「卸载」功能需要访问主进程内部状态）
   setUninstallDeps({
     getMainWindow: () => mainWindow,
-    stopManagedGateway: (timeoutMs = 3000) => {
+    stopManagedGateway: (timeoutMs = 12000) => {
       return new Promise((resolve) => {
-        if (!managedGateway) return resolve();
+        if (!managedGateway) {
+          clearManagedGatewayInstanceKey();
+          return resolve();
+        }
         const gw = managedGateway;
         const done = () => {
-          if (managedGateway === gw) managedGateway = null;
+          if (managedGateway === gw) {
+            managedGateway = null;
+            clearManagedGatewayInstanceKey();
+          }
           resolve();
         };
         gw.once('exit', done);
@@ -3843,11 +4306,12 @@ async function bootstrap() {
           try { gw.kill('SIGKILL'); } catch { /* ignore */ }
           setTimeout(done, 500);
         }, timeoutMs);
-        try { gw.kill(); } catch { /* already dead */ }
+        try { gw.stdin.end(); } catch {
+          try { gw.kill(); } catch { /* already dead */ }
+        }
         gw.once('exit', () => clearTimeout(timer));
       });
     },
-    killZombieGatewayProcesses,
     setQuittingFlag: () => { isQuitting = true; },
     resetQuittingFlag: () => { isQuitting = false; },
     stopBackendHealthMonitor,
@@ -3876,6 +4340,7 @@ app.on('window-all-closed', () => {
 // 优雅关闭：包含网络释放以及后台猎杀
 app.on('before-quit', () => {
   isQuitting = true;
+  feedbackServiceInstance.cancelAll();
   for (const win of inspirationWindows.values()) {
     if (!win.isDestroyed()) win.destroy();
   }
@@ -3893,10 +4358,11 @@ app.on('before-quit', () => {
   }
   // 🌟 新增：彻底猎杀 Electron 托管的 Python 后台进程，防止驻留
   if (managedGateway) {
-    console.log('[main] Killing managed gateway process before quit...');
-    managedGateway.kill();
+    console.log('[main] Closing managed gateway parent-liveness lease before quit...');
+    try { managedGateway.stdin.end(); } catch { managedGateway.kill(); }
     managedGateway = null;
   }
+  clearManagedGatewayInstanceKey();
 });
 
 const gotLock = app.requestSingleInstanceLock();

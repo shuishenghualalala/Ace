@@ -459,7 +459,10 @@ Compression=lzma2
 SolidCompression=yes
 OutputDir=$outputDir
 OutputBaseFilename=$setupFileName
-PrivilegesRequired=lowest
+; Install into the machine Program Files ACL boundary. Per-user installs leave
+; the Gateway, native sandbox helper, and bundled runtimes writable by every
+; same-user process and cannot provide a trustworthy executable boundary.
+PrivilegesRequired=admin
 WizardStyle=modern
 $iconConfig
 

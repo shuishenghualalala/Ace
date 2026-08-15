@@ -16,7 +16,8 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
-from crew.state.logging import query_logs
+from crew.gateway.helpers import safe_public_error
+from crew.state.logging import clear_logs, query_logs
 
 # 路由模块导入时刻 ≈ 网关进程启动时刻，用于计算运行时长。
 # 放模块级而非 lifespan，是因为 create_app() 在 lifespan yield 之前完成，
@@ -123,5 +124,19 @@ def create_system_router(crew) -> APIRouter:
             offset=offset,
         )
         return JSONResponse(result)
+
+    @router.delete("/api/system/logs")
+    async def clear_system_logs(request: Request) -> JSONResponse:
+        """Admin-only ring clear; non-admin callers get 403."""
+        account = account_from_request(request)
+        try:
+            require_admin(account, crew.config)
+        except AuthenticationError as exc:
+            return JSONResponse(
+                {"ok": False, "error": safe_public_error(exc, "权限不足")},
+                status_code=403,
+            )
+        cleared = clear_logs()
+        return JSONResponse({"ok": True, "cleared": cleared})
 
     return router

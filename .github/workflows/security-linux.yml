@@ -7,19 +7,41 @@ on:
 jobs:
   native-security:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
+      - name: Block vulnerable, secret-bearing, or misconfigured release sources
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          cache-dir: ${{ runner.temp }}/trivy-cache
+          trivy-config: deploy/security/trivy.yaml
+          scanners: 'vuln,secret,misconfig'
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: false
+          exit-code: '1'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: '1.97.1'
           components: rustfmt, clippy
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
-          python-version: '3.11'
+          version: '0.11.28'
+          python-version: '3.11.13'
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '22'
-      - run: uv sync --extra dev
+          node-version: '22.18.0'
+      - run: npm ci --ignore-scripts --prefix desktop
+      - run: npm --prefix desktop run typecheck
+      - run: npm --prefix desktop test -- --run tests/unit/bootstrap-hardening.test.ts tests/unit/ipc-schemas.test.ts
+      - run: node desktop/scripts/check-security.mjs
+      - run: uv sync --extra dev --frozen
       - run: python scripts/audit_runtime_npm.py
       - run: cargo build --manifest-path security-runtime/Cargo.toml --release --locked
       - run: cargo check --manifest-path security-runtime/Cargo.toml --all-targets --locked
@@ -32,8 +54,20 @@ jobs:
       - run: python tests/security/security_matrix.py --platform linux --runtime security-runtime/target/release/ace-security-runtime
         env:
           ACE_REQUIRE_NATIVE_SECURITY: '1'
-      - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/release/ace-security-runtime --bwrap /usr/bin/bwrap --bwrap-license /usr/share/doc/bubblewrap/copyright --bwrap-version "$(dpkg-query -W -f='${Version}' bubblewrap)" --output desktop/security-runtime-bin
+      - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/release/ace-security-runtime --source-root security-runtime --bwrap /usr/bin/bwrap --bwrap-license /usr/share/doc/bubblewrap/copyright --bwrap-version "$(dpkg-query -W -f='${Version}' bubblewrap)" --output desktop/security-runtime-bin
       - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
+      - run: python scripts/generate_security_sbom.py --output desktop/security-runtime-bin/security-linux-sbom.cdx.json --runtime-manifest desktop/security-runtime-bin/runtime-manifest.json
+      - name: Block vulnerabilities in assembled Linux runtime
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: sbom
+          scan-ref: desktop/security-runtime-bin/security-linux-sbom.cdx.json
+          cache-dir: ${{ runner.temp }}/trivy-cache
+          scanners: vuln
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: false
+          exit-code: '1'
       - name: Bind Linux evidence to the tested release artifact
         env:
           EVIDENCE_COMMIT: ${{ github.sha }}
@@ -50,7 +84,51 @@ jobs:
           --repository "$EVIDENCE_REPOSITORY"
           --commit "$EVIDENCE_COMMIT"
           --workflow-run "$EVIDENCE_WORKFLOW_RUN"
-      - uses: actions/upload-artifact@v4
+          --sbom desktop/security-runtime-bin/security-linux-sbom.cdx.json
+      - name: Stage Linux SBOM evidence
+        run: cp desktop/security-runtime-bin/security-linux-sbom.cdx.json security-linux-sbom.cdx.json
+      - name: Stage Linux runtime manifest evidence
+        run: cp desktop/security-runtime-bin/runtime-manifest.json runtime-manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-linux-unsigned-evidence
+          if-no-files-found: error
+          path: |
+            security-linux-evidence.json
+            security-linux-sbom.cdx.json
+            runtime-manifest.json
+
+  attest-release-evidence:
+    if: github.event_name == 'workflow_dispatch'
+    needs: native-security
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: security-linux-unsigned-evidence
+      - name: Attest Linux native evidence provenance
+        id: native-attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            security-linux-evidence.json
+            security-linux-sbom.cdx.json
+            runtime-manifest.json
+      - name: Stage Linux provenance bundle
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.native-attestation.outputs.bundle-path }}
+        run: cp "$ATTESTATION_BUNDLE" security-linux-evidence.sigstore.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: security-linux-evidence
-          path: security-linux-evidence.json
+          if-no-files-found: error
+          path: |
+            security-linux-evidence.json
+            security-linux-evidence.sigstore.json
+            security-linux-sbom.cdx.json
+            runtime-manifest.json

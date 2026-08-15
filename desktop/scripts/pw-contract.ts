@@ -136,6 +136,9 @@ function modalPrivateProbe(engine: PlaywrightEngine, page: Page): string {
   });
 }
 
+const contractUserData = path.join(os.tmpdir(), `crew-pw-userdata-${process.pid}`);
+app.setPath('userData', contractUserData);
+
 app.whenReady().then(async () => {
   const crossOriginRequests: string[] = [];
   const crossOriginServer = createServer((request, response) => {
@@ -590,6 +593,42 @@ app.whenReady().then(async () => {
     throw new Error('无法建立 BrowserHost 契约代理');
   }
   const policyProxyURL = `http://127.0.0.1:${policyProxyAddress.port}`;
+  const proxyUsername = 'crew';
+  const proxyPassword = 'pw-contract-proxy-password-0123456789abcdef';
+
+  async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`契约操作超时 ${ms}ms`)), ms);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function managedHost(
+    getWindow: () => BrowserWindow | null,
+    runtimeKey: string,
+    profile: string,
+  ): Promise<BrowserHost> {
+    const host = new BrowserHost(getWindow);
+    await withTimeout(
+      host.handleRpc({
+        runtime_key: runtimeKey,
+        method: 'configure_proxy',
+        params: {
+          profile_dir: profile,
+          proxy_url: policyProxyURL,
+          proxy_username: proxyUsername,
+          proxy_password: proxyPassword,
+        },
+      }),
+      15_000,
+    );
+    return host;
+  }
 
   const host = new AutomationHost();
   const transport = new ElectronCdpTransport();
@@ -917,7 +956,7 @@ app.whenReady().then(async () => {
         pdfContents.close({ waitForBeforeUnload: false });
       }
       pdfHost.dispose();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -2483,7 +2522,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const consoleHost = new BrowserHost(() => panelWindow);
+    const consoleHost = await managedHost(() => panelWindow, runtimeKey, profile);
     try {
       const created = await consoleHost.handleRpc({
         runtime_key: runtimeKey,
@@ -2633,7 +2672,7 @@ app.whenReady().then(async () => {
     } finally {
       await consoleHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -2658,7 +2697,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const downloadHost = new BrowserHost(() => panelWindow);
+    const downloadHost = await managedHost(() => panelWindow, runtimeKey, profile);
     type DownloadEvent = {
       downloadId: string;
       targetId: string;
@@ -2966,7 +3005,7 @@ app.whenReady().then(async () => {
     } finally {
       await downloadHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -2991,7 +3030,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const outputHost = new BrowserHost(() => panelWindow);
+    const outputHost = await managedHost(() => panelWindow, runtimeKey, profile);
     try {
       const created = await outputHost.handleRpc({
         runtime_key: runtimeKey,
@@ -3184,7 +3223,7 @@ app.whenReady().then(async () => {
     } finally {
       await outputHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -3231,6 +3270,31 @@ app.whenReady().then(async () => {
       webPreferences: { sandbox: true },
     });
     const runHost = new BrowserHost(() => panelWindow);
+    await withTimeout(
+      Promise.all([
+        runHost.handleRpc({
+          runtime_key: ownerA.runtimeKey,
+          method: 'configure_proxy',
+          params: {
+            profile_dir: profileA,
+            proxy_url: policyProxyURL,
+            proxy_username: proxyUsername,
+            proxy_password: proxyPassword,
+          },
+        }),
+        runHost.handleRpc({
+          runtime_key: ownerB.runtimeKey,
+          method: 'configure_proxy',
+          params: {
+            profile_dir: profileB,
+            proxy_url: policyProxyURL,
+            proxy_username: proxyUsername,
+            proxy_password: proxyPassword,
+          },
+        }),
+      ]),
+      15_000,
+    );
     try {
       const createOwnerTab = async (
         owner: typeof ownerA,
@@ -3472,7 +3536,7 @@ app.whenReady().then(async () => {
     } finally {
       await runHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -3495,7 +3559,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const lifecycleHost = new BrowserHost(() => panelWindow);
+    const lifecycleHost = await managedHost(() => panelWindow, runtimeKey, profile);
     try {
       const created = await lifecycleHost.handleRpc({
         runtime_key: runtimeKey,
@@ -3619,7 +3683,7 @@ app.whenReady().then(async () => {
     } finally {
       await lifecycleHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -3643,7 +3707,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const findHost = new BrowserHost(() => panelWindow);
+    const findHost = await managedHost(() => panelWindow, runtimeKey, profile);
     try {
       const created = await findHost.handleRpc({
         runtime_key: runtimeKey,
@@ -3779,7 +3843,7 @@ app.whenReady().then(async () => {
     } finally {
       await findHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -3804,7 +3868,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const popupHost = new BrowserHost(() => panelWindow);
+    const popupHost = await managedHost(() => panelWindow, runtimeKey, profile);
     try {
       const created = await popupHost.handleRpc({
         runtime_key: runtimeKey,
@@ -3925,7 +3989,7 @@ app.whenReady().then(async () => {
     } finally {
       await popupHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -4481,7 +4545,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const dialogHost = new BrowserHost(() => panelWindow);
+    const dialogHost = await managedHost(() => panelWindow, runtimeKey, profile);
     try {
       const created = await dialogHost.handleRpc({
         runtime_key: runtimeKey,
@@ -4566,7 +4630,7 @@ app.whenReady().then(async () => {
         );
       } finally {
         if (!panelWindow.isDestroyed()) panelWindow.destroy();
-        await rm(tempRoot, { recursive: true, force: true });
+        await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
       }
     }
   };
@@ -4954,8 +5018,16 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const recorderHost = new BrowserHost(() => recorderWindow);
-    const replayHost = new BrowserHost(() => replayWindow);
+    const recorderHost = await managedHost(
+      () => recorderWindow,
+      recorderRuntimeKey,
+      recorderProfile,
+    );
+    const replayHost = await managedHost(
+      () => replayWindow,
+      replayRuntimeKey,
+      replayProfile,
+    );
     const rows: Array<Record<string, unknown>> = [];
     recorderHost.on('recording', (event: unknown) => {
       if (event && typeof event === 'object' && !Array.isArray(event)) {
@@ -5195,7 +5267,7 @@ app.whenReady().then(async () => {
       ]);
       if (!recorderWindow.isDestroyed()) recorderWindow.destroy();
       if (!replayWindow.isDestroyed()) replayWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
       if (previousV11Gate === undefined) {
         delete process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
       } else {
@@ -5235,7 +5307,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const host = new BrowserHost(() => panelWindow);
+    const host = await managedHost(() => panelWindow, runtimeKey, profile);
     const rows: Array<Record<string, unknown>> = [];
     host.on('recording', (event: unknown) => {
       if (event && typeof event === 'object' && !Array.isArray(event)) {
@@ -5580,7 +5652,7 @@ app.whenReady().then(async () => {
     } finally {
       await host.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
       if (previousV11Gate === undefined) {
         delete process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
       } else {
@@ -5616,7 +5688,7 @@ app.whenReady().then(async () => {
       height: 800,
       webPreferences: { sandbox: true },
     });
-    const recorderHost = new BrowserHost(() => panelWindow);
+    const recorderHost = await managedHost(() => panelWindow, runtimeKey, profile);
     const recorded: Array<Record<string, unknown>> = [];
     recorderHost.on('recording', (event: unknown) => {
       if (!event || typeof event !== 'object' || Array.isArray(event)) return;
@@ -6598,7 +6670,7 @@ app.whenReady().then(async () => {
       clipboard.writeText(clipboardBeforeContract);
       await recorderHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
   });
 
@@ -6619,5 +6691,11 @@ app.whenReady().then(async () => {
   await new Promise<void>((resolve) => crossOriginServer.close(() => resolve()));
   policyProxyServer.closeAllConnections();
   await new Promise<void>((resolve) => policyProxyServer.close(() => resolve()));
+  await rm(contractUserData, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 250,
+  }).catch(() => undefined);
   app.exit(failed.length ? 1 : 0);
 });

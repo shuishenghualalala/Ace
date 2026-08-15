@@ -29,6 +29,20 @@ def isolated_skill_env(tmp_path, monkeypatch):
     skills._invalidate_cache()
 
 
+@pytest.fixture
+def requires_directory_symlink(tmp_path):
+    """Skip link-specific tests when Windows developer-mode privilege is unavailable."""
+    source = tmp_path / "symlink-probe-source"
+    target = tmp_path / "symlink-probe-target"
+    source.mkdir()
+    try:
+        os.symlink(source, target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    else:
+        os.unlink(target)
+
+
 def _make_skill(parent: Path, slug: str, *, name: str | None = None, desc: str = "test") -> Path:
     """在 parent 下建一个 skill 目录 + SKILL.md，返回 skill 目录。"""
     skill_dir = Path(parent) / slug
@@ -53,7 +67,7 @@ def test_list_local_skills_discovers_local(isolated_skill_env):
     assert local[0]["skill_dir"]
 
 
-def test_list_local_skills_excludes_installed(isolated_skill_env):
+def test_list_local_skills_excludes_installed(isolated_skill_env, requires_directory_symlink):
     """已安装（软链进 user dir）的 skill 不再出现在 local 列表。"""
     _make_skill(isolated_skill_env.local_dir, "lark-doc")
     assert skills.install_skill("lark-doc", operator_account_id="test", source="test")
@@ -63,7 +77,7 @@ def test_list_local_skills_excludes_installed(isolated_skill_env):
     assert not any(s["slug"] == "lark-doc" for s in local)
 
 
-def test_install_local_skill_creates_symlink(isolated_skill_env):
+def test_install_local_skill_creates_symlink(isolated_skill_env, requires_directory_symlink):
     """install 在 user dir 建软链指向本地源目录。"""
     src = _make_skill(isolated_skill_env.local_dir, "lark-doc")
     user_dir = skills.get_user_skills_dir()
@@ -74,7 +88,7 @@ def test_install_local_skill_creates_symlink(isolated_skill_env):
     assert dst.resolve() == src.resolve()
 
 
-def test_scan_loads_symlink_skill(isolated_skill_env):
+def test_scan_loads_symlink_skill(isolated_skill_env, requires_directory_symlink):
     """安装后 scan_skills 能加载软链 skill，对话中可 resolve。"""
     _make_skill(isolated_skill_env.local_dir, "lark-doc")
     assert skills.install_skill("lark-doc", operator_account_id="test", source="test")
@@ -85,7 +99,7 @@ def test_scan_loads_symlink_skill(isolated_skill_env):
     assert skills.resolve_skill("lark-doc") == "/lark-doc"
 
 
-def test_list_skills_source_user_not_builtin(isolated_skill_env):
+def test_list_skills_source_user_not_builtin(isolated_skill_env, requires_directory_symlink):
     """软链 skill 在 list_skills 中 source=user，不误判 builtin。"""
     _make_skill(isolated_skill_env.local_dir, "lark-doc")
     assert skills.install_skill("lark-doc", operator_account_id="test", source="test")
@@ -96,7 +110,7 @@ def test_list_skills_source_user_not_builtin(isolated_skill_env):
     assert item["source"] == "user"
 
 
-def test_uninstall_removes_symlink_keeps_source(isolated_skill_env):
+def test_uninstall_removes_symlink_keeps_source(isolated_skill_env, requires_directory_symlink):
     """uninstall 删软链本身，源目录完好。"""
     src = _make_skill(isolated_skill_env.local_dir, "lark-doc")
     user_dir = skills.get_user_skills_dir()
@@ -108,7 +122,11 @@ def test_uninstall_removes_symlink_keeps_source(isolated_skill_env):
     assert src.exists(), "源目录应完好"
 
 
-def test_untrusted_symlink_rejected(isolated_skill_env, tmp_path):
+def test_untrusted_symlink_rejected(
+    isolated_skill_env,
+    tmp_path,
+    requires_directory_symlink,
+):
     """软链到受信任根（~/.agents/skills）外的目录被拒（安全边界不破）。"""
     user_dir = skills.get_user_skills_dir()
     user_dir.mkdir(parents=True, exist_ok=True)

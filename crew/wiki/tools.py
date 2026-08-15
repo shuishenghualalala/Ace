@@ -18,7 +18,17 @@ from crew.core.runctx import (
     current_session_id,
     emit_tool_progress,
 )
+from crew.security.local_path import LocalPathReference
 from crew.tools.registry import Registry, tool_error, tool_result
+from crew.tools.redact import safe_public_error
+from crew.tools.file_utils import (
+    atomic_replace_bytes,
+    capture_file_identity,
+    decode_local_file_uri,
+    read_verified_bytes,
+    snapshot_file,
+)
+from crew.tools.security_guard import NetworkAuthorization, authorize_network_origin
 
 from .compiler import WikiCompiler
 from .config import WikiConfig
@@ -27,7 +37,7 @@ from .parser import (
     MissingDependencyError,
     fetch_url_to_markdown,
     guess_mime_type,
-    parse_document_from_bytes,
+    parse_document_from_bytes_async,
     validate_parsed_text,
 )
 from .sources import (
@@ -626,6 +636,8 @@ def register_wiki_tools(
     manager: WikiSessionManager,
     config: WikiConfig | None = None,
     session_store: Any = None,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
 ) -> None:
     """把 Wiki 工具注册到 registry（toolset='wiki'）。"""
 
@@ -790,9 +802,13 @@ def register_wiki_tools(
             owner_account_id=_owner(),
         )
 
-    def _capture_bytes(path: str, title: str, kb_id: str) -> str:
+    def _capture_bytes(
+        path_reference: LocalPathReference,
+        title: str,
+        kb_id: str,
+    ) -> str:
         from pathlib import Path
-        import shutil
+        import os
         import time
         import uuid
 
@@ -800,37 +816,75 @@ def register_wiki_tools(
         from crew.wiki.multimodal import is_image_mime, is_video_mime
         from .schemas import RawSource
 
-        candidate = Path(path).expanduser().resolve()
-        uploads_root = _get_upload_dir(_owner()).expanduser().resolve()
+        if not isinstance(path_reference, LocalPathReference):
+            return tool_error("附件路径缺少已验证的本地路径引用")
+        try:
+            if path_reference.kind.value == "file_uri":
+                lexical = Path(decode_local_file_uri(path_reference.raw))
+            else:
+                lexical = Path(path_reference.raw).expanduser()
+            if not lexical.is_absolute():
+                return tool_error("附件路径必须是绝对路径")
+            candidate = Path(os.path.abspath(lexical))
+        except (OSError, RuntimeError, ValueError):
+            return tool_error("附件路径无效或文件不存在")
+        uploads_root = Path(os.path.abspath(_get_upload_dir(_owner()).expanduser()))
         try:
             candidate.relative_to(uploads_root)
         except ValueError:
             return tool_error("附件路径不属于当前用户 uploads 目录")
-        allowed = {Path(item).expanduser().resolve() for item in current_attachment_paths.get()}
+        allowed: set[Path] = set()
+        for item in current_attachment_paths.get():
+            try:
+                allowed.add(Path(os.path.abspath(Path(item).expanduser())))
+            except (OSError, ValueError):
+                continue
         if candidate not in allowed:
             return tool_error("附件不属于当前用户回合，拒绝读取")
-        if not candidate.is_file():
+        try:
+            expected_identity = capture_file_identity(candidate)
+        except (OSError, RuntimeError, ValueError):
+            return tool_error("附件文件类型或路径不安全")
+        if not expected_identity.exists:
             return tool_error("附件文件不存在")
 
-        original_names = {
-            Path(item_path).expanduser().resolve(): item_name.strip()
-            for item_path, item_name in current_attachment_files.get()
-            if item_path.strip() and item_name.strip()
-        }
+        original_names: dict[Path, str] = {}
+        for item_path, item_name in current_attachment_files.get():
+            if not item_path.strip() or not item_name.strip():
+                continue
+            try:
+                original_names[Path(os.path.abspath(Path(item_path).expanduser()))] = item_name.strip()
+            except (OSError, ValueError):
+                continue
         original_name = original_names.get(candidate, "")
         source_id = f"upload_{uuid.uuid4().hex[:12]}"
         filename = title.strip() or original_name or candidate.name
         # MIME 优先来自原始附件名；仅读取小段文件头用于识别被错误命名的 PDF，
         # 避免大文件在 capture 阶段被重复完整读取。
-        with candidate.open("rb") as captured:
-            header = captured.read(16)
+        try:
+            captured = read_verified_bytes(
+                candidate,
+                max_bytes=20 * 1024 * 1024,
+                expected_identity=expected_identity,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return tool_error("附件在读取时已变化或不安全，拒绝捕获")
+        header = captured[:16]
         mime = guess_mime_type(original_name or candidate.name, header)
         source_kind = classify_file(original_name or candidate.name, mime)
         source_dir = store._source_dir(source_kind, _owner(), kb_id)
         suffix = candidate.suffix.lower() or ".bin"
         safe_stem = filename_from_title(Path(original_name or candidate.name).stem)
         original_path = source_dir / f"{source_id}-{safe_stem}{suffix}"
-        shutil.copy2(candidate, original_path)
+        try:
+            atomic_replace_bytes(
+                original_path,
+                captured,
+                snapshot_file(original_path),
+                max_bytes=20 * 1024 * 1024,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return tool_error("附件保存失败，拒绝发布")
         source_type = "image" if is_image_mime(mime) else "video" if is_video_mime(mime) else "upload"
         raw = RawSource(
             id=source_id,
@@ -839,7 +893,7 @@ def register_wiki_tools(
             parsed_path="",
             original_path=str(original_path),
             file_type=mime,
-            size=original_path.stat().st_size,
+            size=len(captured),
             created_at=time.time(),
             session_id=current_session_id.get(),
             source_kind=source_kind,
@@ -855,10 +909,18 @@ def register_wiki_tools(
         )
 
     def _handle_capture_attachment(args: dict[str, Any]) -> str:
-        path = str(args.get("path") or "").strip()
-        if not path:
+        raw_path = args.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
             return tool_error("缺少附件 path")
-        return _capture_bytes(path, str(args.get("title") or ""), _kb_id(args))
+        try:
+            path_reference = LocalPathReference.parse(raw_path)
+        except ValueError:
+            return tool_error("附件 path 不是有效的本地路径引用")
+        return _capture_bytes(
+            path_reference,
+            str(args.get("title") or ""),
+            _kb_id(args),
+        )
 
     def _capture_text(
         title: str,
@@ -1279,7 +1341,7 @@ def register_wiki_tools(
         try:
             description = describe_image(raw.original_path, prompt or None)
         except MediaUnderstandingError as exc:
-            return tool_error(str(exc))
+            return tool_error(safe_public_error(exc, "图片理解失败"))
         try:
             parsed_path, page, duplicate = _save_parsed_source(
                 raw,
@@ -1288,7 +1350,7 @@ def register_wiki_tools(
                 log_message=f"理解图片并发布全文 Source 页面 {source_id}",
             )
         except Exception as exc:  # noqa: BLE001
-            return tool_error(f"图片描述保存失败: {exc}")
+            return tool_error(f"图片描述保存失败: {safe_public_error(exc, '图片描述保存失败')}")
         if duplicate is not None:
             return tool_result(
                 description=description,
@@ -1346,7 +1408,7 @@ def register_wiki_tools(
                         "再次调用 wiki_parse_source(source_id, confirmation_id=...)。"
                     ),
                 )
-            return tool_error(str(exc))
+            return tool_error(safe_public_error(exc, "视频理解失败"))
         try:
             parsed_path, page, duplicate = _save_parsed_source(
                 raw,
@@ -1355,7 +1417,7 @@ def register_wiki_tools(
                 log_message=f"理解视频并发布全文 Source 页面 {source_id}",
             )
         except Exception as exc:  # noqa: BLE001
-            return tool_error(f"视频描述保存失败: {exc}")
+            return tool_error(f"视频描述保存失败: {safe_public_error(exc, '视频描述保存失败')}")
         if duplicate is not None:
             return tool_result(
                 description=description,
@@ -1389,21 +1451,25 @@ def register_wiki_tools(
 
         original_path = Path(raw.original_path)
         if not original_path.is_file():
-            return tool_error(f"原文件不存在: {raw.original_path}")
+            return tool_error("原文件不存在或不可用")
 
         try:
-            content = original_path.read_bytes()
+            content = read_verified_bytes(
+                original_path,
+                expected_digest=getattr(raw, "original_sha256", None) or None,
+            )
             # ``title`` 仅用于展示，格式必须以不可变原文件及其内容为准。
-            text = await asyncio.to_thread(parse_document_from_bytes, content, original_path.name)
+            text = await parse_document_from_bytes_async(content, original_path.name)
         except MissingDependencyError as exc:
             raw.parse_status = "failed"
-            raw.parse_error = f"缺少依赖: {exc}"
+            raw.parse_error = f"缺少依赖: {safe_public_error(exc, '缺少所需依赖')}"
             store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
             return tool_error(
-                f"解析失败（缺少依赖）: {exc}。请安装依赖后重试：{exc.install_command}"
+                f"解析失败（缺少依赖）: {safe_public_error(exc, '缺少所需依赖')}。"
+                f"请安装依赖后重试：{safe_public_error(exc.install_command, '请安装所需依赖')}"
             )
         except Exception as exc:  # noqa: BLE001
-            error_msg = f"解析失败: {exc}"
+            error_msg = f"解析失败: {safe_public_error(exc, '解析失败: 内部错误')}"
             raw.parse_status = "failed"
             raw.parse_error = error_msg
             store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
@@ -1419,7 +1485,7 @@ def register_wiki_tools(
             )
         except Exception as exc:  # noqa: BLE001
             raw.parse_status = "failed"
-            raw.parse_error = f"全文 Source 页面创建失败: {exc}"
+            raw.parse_error = f"全文 Source 页面创建失败: {safe_public_error(exc, '全文 Source 页面创建失败')}"
             store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
             return tool_error(raw.parse_error)
         if duplicate is not None:
@@ -1886,6 +1952,7 @@ def register_wiki_tools(
         kb_id: str,
         *,
         refresh_from: Any | None = None,
+        network_authorizations: tuple[NetworkAuthorization, ...] = (),
     ) -> str:
         import hashlib
         import time
@@ -1958,16 +2025,26 @@ def register_wiki_tools(
         for _attempt in range(2):
             try:
                 if platform == "youtube":
-                    markdown_text, video_id = fetch_youtube_transcript(url)
+                    markdown_text, video_id = fetch_youtube_transcript(
+                        url,
+                        authorizations=network_authorizations,
+                    )
                 else:
-                    markdown_text, final_url = fetch_url_to_markdown(url)
+                    markdown_text, final_url = fetch_url_to_markdown(
+                        url,
+                        authorization=(
+                            network_authorizations[0]
+                            if network_authorizations
+                            else None
+                        ),
+                    )
                 markdown_text = validate_parsed_text(markdown_text, url)
                 last_error = None
                 break
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
         if last_error is not None:
-            detail = f"自动提取失败: {last_error}"
+            detail = f"自动提取失败: {safe_public_error(last_error, '自动提取失败')}"
             return _failed_extraction(
                 "runtime_failed",
                 detail,
@@ -2078,17 +2155,54 @@ def register_wiki_tools(
             message="URL 内容已抓取、通过质量检查并发布为可搜索的全文 Source 页面。",
         )
 
-    def _handle_fetch_url(args: dict[str, Any]) -> str:
+    async def _authorize_url(
+        url: str,
+        tool_name: str,
+    ) -> tuple[NetworkAuthorization, ...]:
+        # Tests and standalone Wiki registries do not have host authority. The
+        # application assembly always injects both dependencies, so only the
+        # production path enters the approval boundary.
+        if workspace_store is None or security_service is None:
+            return ()
+        authorizations = [
+            await authorize_network_origin(
+                url,
+                tool_name=tool_name,
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
+        ]
+        # youtube-transcript-api fetches both the submitted URL's video page and
+        # the fixed YouTube player endpoint. A short URL must not implicitly
+        # authorize that second host without showing it to the owner.
+        if classify_url(url)[1] == "youtube":
+            from urllib.parse import urlsplit
+
+            if (urlsplit(url).hostname or "").lower().rstrip(".") != "www.youtube.com":
+                authorizations.append(
+                    await authorize_network_origin(
+                        "https://www.youtube.com/",
+                        tool_name=tool_name,
+                        workspace_store=workspace_store,
+                        security_service=security_service,
+                    )
+                )
+        return tuple(authorizations)
+
+    async def _handle_fetch_url(args: dict[str, Any]) -> str:
         url = str(args.get("url", "")).strip()
         if not url:
             return tool_error("缺少 url")
-        return _capture_url(
+        authorizations = await _authorize_url(url, "wiki_fetch_url")
+        return await asyncio.to_thread(
+            _capture_url,
             url,
             str(args.get("title", "")).strip(),
             _kb_id(args),
+            network_authorizations=authorizations,
         )
 
-    def _handle_refresh_source(args: dict[str, Any]) -> str:
+    async def _handle_refresh_source(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()
         if not source_id:
             return tool_error("缺少 source_id")
@@ -2098,7 +2212,15 @@ def register_wiki_tools(
             return tool_error(f"Raw source 不存在: {source_id}")
         if raw.source_type != "url" or not raw.source_url:
             return tool_error("只有带 source_url 的 URL RawSource 可以刷新")
-        return _capture_url(raw.source_url, raw.title, kb_id, refresh_from=raw)
+        authorizations = await _authorize_url(raw.source_url, "wiki_refresh_source")
+        return await asyncio.to_thread(
+            _capture_url,
+            raw.source_url,
+            raw.title,
+            kb_id,
+            refresh_from=raw,
+            network_authorizations=authorizations,
+        )
 
     async def _handle_digest(args: dict[str, Any]) -> str:
         topic = str(args.get("topic") or "").strip()
@@ -2136,8 +2258,8 @@ def register_wiki_tools(
         (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {page_id}", "wiki update page edit content tags related aliases"),
         (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {source_id}", "wiki plan ingest preview changes proposed pages"),
         (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {source_id}", "wiki apply ingest write pages confirm plan"),
-        (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, False, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
-        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, False, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
+        (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, True, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
+        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, True, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
         (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {topic}", "wiki digest synthesis comparison multi source"),
         (_WIKI_CAPTURE_ATTACHMENT_SCHEMA, _handle_capture_attachment, False, "📎", "捕获 Wiki 附件", "捕获附件 {path}", "wiki capture attachment file import upload"),
         (_WIKI_CAPTURE_TEXT_SCHEMA, _handle_capture_text, False, "📝", "捕获 Wiki 文本", "捕获文本 {title}", "wiki capture text snippet import note"),

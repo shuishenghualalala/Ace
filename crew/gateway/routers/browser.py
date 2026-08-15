@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
+from collections import deque
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
-from urllib.request import url2pathname
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -22,11 +22,111 @@ from crew.gateway.auth import (
     authenticate_websocket,
 )
 from crew.gateway.instance_auth import verify_gateway_instance_access_token
+from crew.gateway.helpers import safe_public_error
+from crew.security.local_path import LocalPathReference
 from crew.state.home import task_workspace_path
 from crew.state.logging import get_logger
-from crew.tools.redact import redact_sensitive_display_text
 
 log = get_logger("gateway.browser")
+
+_BROWSER_WS_MAX_FRAME_BYTES = 256 * 1024
+_BROWSER_WS_MAX_STRING_CHARS = 64 * 1024
+_BROWSER_WS_IDLE_TIMEOUT_SECONDS = 5 * 60
+_BROWSER_WS_TOTAL_TIMEOUT_SECONDS = 24 * 60 * 60
+_BROWSER_WS_SEND_TIMEOUT_SECONDS = 10
+_BROWSER_WS_RATE_WINDOW_SECONDS = 60
+_BROWSER_WS_MAX_MESSAGES_PER_WINDOW = 600
+
+
+class _BrowserProtocolError(ValueError):
+    def __init__(self, message: str, *, close_code: int | None = None) -> None:
+        super().__init__(message)
+        self.close_code = close_code
+
+
+class _BrowserOwnerRegistration:
+    """Close-only owner registration used by Gateway logout cleanup."""
+
+    def __init__(self, close_callback) -> None:
+        self._close_callback = close_callback
+
+    async def close(self, *, code: int = 4401, reason: str = "") -> None:
+        await self._close_callback(code=code, reason=reason)
+
+    async def send_json(self, _payload: dict) -> None:
+        # Browser stream events already use the route-local send lock. Owner
+        # broadcasts must not introduce a second concurrent sender.
+        return None
+
+
+async def _receive_browser_message(socket: WebSocket) -> dict:
+    """Parse the Browser panel frame before any action dispatch."""
+    # Small test doubles and legacy embedders expose receive_json only; the
+    # production Starlette WebSocket always has receive and takes the strict path.
+    if not callable(getattr(socket, "receive", None)):
+        message = await socket.receive_json()
+        if not isinstance(message, dict):
+            raise _BrowserProtocolError("浏览器消息必须是对象")
+        return message
+
+    event = await socket.receive()
+    if event.get("type") == "websocket.disconnect":
+        raise WebSocketDisconnect(
+            code=int(event.get("code") or 1000),
+            reason=str(event.get("reason") or ""),
+        )
+    if event.get("type") != "websocket.receive":
+        raise _BrowserProtocolError("浏览器消息类型无效")
+    if event.get("bytes") is not None:
+        raise _BrowserProtocolError("浏览器仅支持文本消息", close_code=1003)
+    text = event.get("text")
+    if not isinstance(text, str):
+        raise _BrowserProtocolError("浏览器消息必须是文本", close_code=1003)
+    try:
+        encoded_size = len(text.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise _BrowserProtocolError("浏览器消息编码无效") from exc
+    if encoded_size > _BROWSER_WS_MAX_FRAME_BYTES:
+        raise _BrowserProtocolError("浏览器消息超过大小上限", close_code=1009)
+
+    def strict_object(pairs: list[tuple[str, object]]) -> dict:
+        result: dict = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        message = json.loads(
+            text,
+            object_pairs_hook=strict_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("constant")),
+        )
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise _BrowserProtocolError("浏览器消息格式无效") from exc
+    if not isinstance(message, dict):
+        raise _BrowserProtocolError("浏览器消息必须是对象")
+    message_type = message.get("type")
+    if message_type == "ping":
+        if set(message) != {"type"}:
+            raise _BrowserProtocolError("ping 字段无效")
+        return message
+    if message_type != "control":
+        raise _BrowserProtocolError("不支持的浏览器消息类型")
+    if set(message) - {"type", "action", "value"}:
+        raise _BrowserProtocolError("浏览器 control 含未知字段")
+    action = message.get("action")
+    value = message.get("value", "")
+    if (
+        not isinstance(action, str)
+        or not action
+        or len(action) > 256
+        or not isinstance(value, str)
+        or len(value) > _BROWSER_WS_MAX_STRING_CHARS
+    ):
+        raise _BrowserProtocolError("浏览器 control 参数无效")
+    return message
 
 
 def _opaque(value: str) -> str:
@@ -102,7 +202,7 @@ def _browser_tool_allowed(registry, policy: dict, tool_name: str) -> bool:
 
 
 def _safe_error(exc: BaseException) -> str:
-    return redact_sensitive_display_text(str(exc))[:500]
+    return safe_public_error(exc, "浏览器操作失败")
 
 
 def create_browser_router(crew) -> APIRouter:
@@ -262,14 +362,19 @@ def create_browser_router(crew) -> APIRouter:
             return JSONResponse({"ok": False, "error": "Browser Use 未启用"}, status_code=503)
         if not tools_allowed(session_id, owner, ("browser_use",)):
             return JSONResponse({"ok": False, "error": "本地 HTML 预览能力未开放"}, status_code=403)
-        raw_path = str(payload.get("path") or "").strip()
+        raw_path = payload.get("path")
         new_tab = payload.get("new_tab") is True
-        if not raw_path or len(raw_path) > 4096:
+        if (
+            not isinstance(raw_path, str)
+            or not raw_path
+            or len(raw_path) > 4096
+        ):
             return JSONResponse({"ok": False, "error": "HTML 文件路径无效"}, status_code=400)
         workspace_id = crew.session_store.get_workspace_id(session_id, owner_account_id=owner)
         if not workspace_id:
             return JSONResponse({"ok": False, "error": "会话工作区不存在"}, status_code=404)
         try:
+            path_reference = LocalPathReference.parse(raw_path)
             workspace = crew.workspace_store.get(workspace_id, owner_account_id=owner)
             configured_root = str(workspace.get("root_path") or "").strip()
             root = (
@@ -277,18 +382,11 @@ def create_browser_router(crew) -> APIRouter:
                 if configured_root
                 else task_workspace_path(workspace_id, owner_account_id=owner, create=False).resolve(strict=True)
             )
-            if raw_path.lower().startswith("file:"):
-                parsed = urlsplit(raw_path)
-                raw_path = url2pathname(unquote(parsed.path))
-            candidate = Path(raw_path).expanduser()
-            if not candidate.is_absolute():
-                candidate = root / candidate
-            candidate = candidate.resolve(strict=True)
             state = await mgr.open_for_user(
                 owner,
                 session_id,
-                artifact_path=str(candidate),
-                artifact_root=str(root),
+                artifact_path=path_reference,
+                artifact_root=root,
                 new_tab=new_tab,
             )
             return JSONResponse({"ok": True, "state": state})
@@ -426,15 +524,59 @@ def create_browser_router(crew) -> APIRouter:
             return
         await socket.accept()
         send_lock = asyncio.Lock()
+        owner_close_requested = asyncio.Event()
+
+        async def close_from_owner(*, code: int = 4401, reason: str = "") -> None:
+            if owner_close_requested.is_set():
+                return
+            owner_close_requested.set()
+            with suppress(Exception):
+                await socket.close(code=code, reason=reason)
+
+        owner_registration = _BrowserOwnerRegistration(close_from_owner)
+        connections = getattr(crew, "connections", None)
+        register_owner = getattr(connections, "register_owner", None)
+        unregister_all = getattr(connections, "unregister_all", None)
+        registered_owner = False
+        if callable(register_owner):
+            register_owner(owner, owner_registration)
+            registered_owner = True
 
         async def send_json(event: dict) -> None:
             # Starlette's ASGI websocket sender is not concurrency-safe. State,
             # debug, command-error and pong events share one serialized path.
+            try:
+                encoded = json.dumps(
+                    event,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise WebSocketDisconnect(code=1003) from exc
+            if len(encoded) > _BROWSER_WS_MAX_FRAME_BYTES:
+                with suppress(Exception):
+                    await socket.close(code=1009)
+                raise WebSocketDisconnect(code=1009)
             async with send_lock:
-                await socket.send_json(event)
+                try:
+                    await asyncio.wait_for(
+                        socket.send_json(event),
+                        timeout=_BROWSER_WS_SEND_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError as exc:
+                    with suppress(Exception):
+                        await socket.close(code=1013)
+                    raise WebSocketDisconnect(code=1013) from exc
 
         async def state_producer() -> None:
             async for event in mgr.subscribe(owner, session_id):
+                if event.get("type") == "owner_revoked":
+                    await close_from_owner(
+                        code=int(event.get("code") or 4401),
+                        reason=str(event.get("reason") or ""),
+                    )
+                    return
                 if event.get("type") == "frame":
                     continue
                 if (
@@ -445,9 +587,30 @@ def create_browser_router(crew) -> APIRouter:
                 await send_json(event)
 
         async def consumer() -> None:
+            deadline = asyncio.get_running_loop().time() + _BROWSER_WS_TOTAL_TIMEOUT_SECONDS
+            message_times: deque[float] = deque()
             while True:
                 try:
-                    message = await socket.receive_json()
+                    now = asyncio.get_running_loop().time()
+                    while message_times and now - message_times[0] >= _BROWSER_WS_RATE_WINDOW_SECONDS:
+                        message_times.popleft()
+                    if len(message_times) >= _BROWSER_WS_MAX_MESSAGES_PER_WINDOW:
+                        with suppress(Exception):
+                            await socket.close(code=1013)
+                        return
+                    message_times.append(now)
+                    remaining = min(
+                        _BROWSER_WS_IDLE_TIMEOUT_SECONDS,
+                        deadline - asyncio.get_running_loop().time(),
+                    )
+                    if remaining <= 0:
+                        with suppress(Exception):
+                            await socket.close(code=1000)
+                        return
+                    message = await asyncio.wait_for(
+                        _receive_browser_message(socket),
+                        timeout=remaining,
+                    )
                     if not isinstance(message, dict):
                         raise ValueError("浏览器消息必须是对象")
                     message_type = str(message.get("type") or "")
@@ -469,14 +632,27 @@ def create_browser_router(crew) -> APIRouter:
                         await send_json({"type": "pong"})
                     else:
                         raise ValueError("不支持的浏览器消息类型")
+                except asyncio.TimeoutError:
+                    with suppress(Exception):
+                        await socket.close(code=1001)
+                    return
+                except _BrowserProtocolError as exc:
+                    if exc.close_code is not None:
+                        await socket.close(code=exc.close_code)
+                        return
+                    await send_json({"type": "command_error", "error": _safe_error(exc)})
                 except (BrowserDriverError, ValueError) as exc:
                     # A malformed/unsupported control is local to that message;
                     # keep the state/debug channel connected.
                     await send_json({"type": "command_error", "error": _safe_error(exc)})
 
+        async def owner_closer() -> None:
+            await owner_close_requested.wait()
+
         tasks = {
             asyncio.create_task(state_producer()),
             asyncio.create_task(consumer()),
+            asyncio.create_task(owner_closer()),
         }
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -494,5 +670,11 @@ def create_browser_router(crew) -> APIRouter:
         finally:
             for task in tasks:
                 task.cancel()
+            if registered_owner and callable(unregister_all):
+                unregister_all(
+                    owner_registration,
+                    set(),
+                    owner_account_id=owner,
+                )
 
     return router

@@ -51,6 +51,10 @@ class LogoutCoordinator:
         team_manager: Any | None = None,
         interaction_bridge: Any | None = None,
         security_service: Any | None = None,
+        process_registry: Any | None = None,
+        runtime_tool_registry: Any | None = None,
+        agent_manager: Any | None = None,
+        credential_provider_manager: Any | None = None,
         logout_timeout_seconds: float = 10.0,
     ) -> None:
         self._active_owner = active_owner
@@ -63,6 +67,10 @@ class LogoutCoordinator:
         self._team_manager = team_manager
         self._interaction_bridge = interaction_bridge
         self._security_service = security_service
+        self._process_registry = process_registry
+        self._runtime_tool_registry = runtime_tool_registry
+        self._agent_manager = agent_manager
+        self._credential_provider_manager = credential_provider_manager
         self._logout_timeout_seconds = max(0.001, float(logout_timeout_seconds))
         self._lock = asyncio.Lock()
         self._draining_owner = ""
@@ -86,13 +94,29 @@ class LogoutCoordinator:
         lease = self._active_owner.current()
         return lease is not None and lease.owner_account_id == owner
 
-    def activate_owner(self, owner_account_id: str) -> None:
+    def activate_owner(
+        self,
+        owner_account_id: str,
+        *,
+        process_authorization_generation: str = "",
+        process_authorization_expires_at: float = 0.0,
+    ) -> None:
         """Open local admission and connect channels without delaying the HTTP response."""
         owner = str(owner_account_id or "").strip()
         if not owner or self._draining_owner:
             return
         token = current_owner_account_id.set(owner)
         try:
+            if (
+                self._process_registry is not None
+                and process_authorization_generation
+                and process_authorization_expires_at > 0
+            ):
+                self._process_registry.activate_owner(
+                    owner,
+                    authorization_generation=process_authorization_generation,
+                    authorization_expires_at=process_authorization_expires_at,
+                )
             if self._cron_service is not None and self._cron_service.is_running:
                 self._cron_service.mount_owner(owner)
             self._dispatcher.activate_owner(owner)
@@ -129,6 +153,21 @@ class LogoutCoordinator:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
+    async def _revoke_runtime_tool_owner(self, owner: str) -> None:
+        revoke = getattr(
+            self._runtime_tool_registry,
+            "revoke_runtime_tool_owner",
+            None,
+        )
+        if not callable(revoke):
+            return
+        revoke_task = asyncio.create_task(revoke(owner))
+        try:
+            await asyncio.shield(revoke_task)
+        except asyncio.CancelledError:
+            revoke_task.add_done_callback(self._consume_cleanup_result)
+            raise
+
     async def logout(self, owner_account_id: str) -> LogoutResult:
         """Drain one owner within one deadline, or retain the lease for restart."""
         owner = str(owner_account_id or "").strip()
@@ -153,10 +192,25 @@ class LogoutCoordinator:
             self._restart_fenced_owners.add(owner)
             self._draining_owner = owner
             self._task_runtime.block_owner(owner)
+            runtime_cleanup = asyncio.create_task(
+                self._revoke_runtime_tool_owner(owner)
+            )
+            runtime_cleanup.add_done_callback(self._consume_cleanup_result)
             if self._interaction_bridge is not None:
                 self._interaction_bridge.remove_owner(owner)
             if self._security_service is not None:
                 self._security_service.revoke_owner(owner)
+            if self._process_registry is not None:
+                try:
+                    self._process_registry.revoke_owner(
+                        owner,
+                        reason="OWNER_LOGOUT",
+                    )
+                except Exception:
+                    log.exception(
+                        "Logout 超时后后台进程仍由持久 fence 接管 owner=%s",
+                        owner,
+                    )
             if not self._active_owner.prepare_restart_logout(owner):
                 raise LogoutCleanupError("Logout 超时且无法持久化 Gateway 重启退出意图")
             self._channel_owner = ""
@@ -211,11 +265,27 @@ class LogoutCoordinator:
 
             self._draining_owner = owner
             self._task_runtime.block_owner(owner)
+            errors: list[str] = []
+            try:
+                await self._revoke_runtime_tool_owner(owner)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - retain lease on failed process cleanup
+                log.exception("Logout 运行期工具清理失败 owner=%s", owner)
+                errors.append(f"runtime_tools: {exc}")
             if self._interaction_bridge is not None:
                 self._interaction_bridge.remove_owner(owner)
             if self._security_service is not None:
                 self._security_service.revoke_owner(owner)
-            errors: list[str] = []
+            if self._process_registry is not None:
+                try:
+                    self._process_registry.revoke_owner(
+                        owner,
+                        reason="OWNER_LOGOUT",
+                    )
+                except Exception as exc:
+                    log.exception("Logout 后台进程清理失败 owner=%s", owner)
+                    errors.append(f"processes: {exc}")
             stopped_dispatches = 0
             cancelled_tasks: list[str] = []
             closed_sockets = 0
@@ -233,12 +303,29 @@ class LogoutCoordinator:
             except Exception as exc:  # noqa: BLE001 - continue remaining cleanup, keep lease
                 log.exception("Logout 停止调度失败 owner=%s", owner)
                 errors.append(f"dispatcher: {exc}")
+            if self._agent_manager is not None:
+                try:
+                    await self._agent_manager.drop_owner_and_wait(
+                        owner,
+                        timeout=min(5.0, self._logout_timeout_seconds),
+                    )
+                except Exception as exc:  # noqa: BLE001 - credential clients must close
+                    log.exception("Logout 关闭 Owner 凭据客户端失败 owner=%s", owner)
+                    errors.append(f"credential_clients: {exc}")
             if self._team_manager is not None:
                 try:
                     await self._team_manager.cancel_owner(owner)
                 except Exception as exc:  # noqa: BLE001 - detached Team 未停则不能释放租约
                     log.exception("Logout 停止 Team 失败 owner=%s", owner)
                     errors.append(f"team: {exc}")
+            if self._credential_provider_manager is not None:
+                try:
+                    await self._credential_provider_manager.close_owner_credential_providers(
+                        owner
+                    )
+                except Exception as exc:  # noqa: BLE001 - owner key clients must close
+                    log.exception("Logout 关闭 Owner Provider 失败 owner=%s", owner)
+                    errors.append(f"credential_providers: {exc}")
             try:
                 cancelled_tasks = await self._task_runtime.cancel_owner(owner)
             except Exception as exc:  # noqa: BLE001 - continue remaining cleanup, keep lease

@@ -16,7 +16,9 @@ import httpx
 from crew.core.errors import ProviderError
 from crew.core.interfaces import LLMProvider
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
+from crew.security.provider_proxy import provider_policy_proxy
 from crew.state.logging import llm_trace
+from crew.tools.redact import redact_secret_values, redact_sensitive_text
 
 
 _PARTIAL_STRING_KEYS = ("path", "file_path", "command", "query", "url", "name")
@@ -306,14 +308,27 @@ class OpenAIProvider(LLMProvider):
         # 拖慢启动（叠加安全软件扫描可卡 40s）。详见 crew.providers.ssl_context。
         from crew.providers.ssl_context import get_shared_ssl_context
 
+        proxy_config = provider_policy_proxy(
+            base_url or "https://api.openai.com/v1",
+            allow_private=base_url is not None,
+        )
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
-            http_client=httpx.AsyncClient(verify=get_shared_ssl_context(), timeout=timeout),
+            http_client=httpx.AsyncClient(
+                verify=get_shared_ssl_context(),
+                timeout=timeout,
+                trust_env=False,
+                follow_redirects=False,
+                transport=proxy_config.httpx_transport(
+                    verify=get_shared_ssl_context(),
+                ),
+            ),
         )
         self._close_lock = asyncio.Lock()
         self._closed = False
+        self._secret_values = (api_key, proxy_config.password)
         self.base_url = base_url or ""
         self.model = model
         self.temperature = temperature
@@ -328,7 +343,16 @@ class OpenAIProvider(LLMProvider):
             # Mark before awaiting so a failed SDK close is not retried unpredictably by
             # another owner; the caller logs the failure and continues closing siblings.
             self._closed = True
-            await self._client.close()
+            client = self._client
+            try:
+                await client.close()
+            finally:
+                self._client = None  # type: ignore[assignment]
+                self._secret_values = ()
+
+    def _safe_error(self, exc: BaseException) -> str:
+        text = redact_secret_values(str(exc), self._secret_values) or ""
+        return redact_sensitive_text(text, force=True)
 
     async def chat(
         self,
@@ -359,9 +383,10 @@ class OpenAIProvider(LLMProvider):
         try:
             resp = await self._client.chat.completions.create(**payload)
         except Exception as exc:  # noqa: BLE001 - 统一包装成 ProviderError
-            llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
+            safe_error = self._safe_error(exc)
+            llm_trace("error", {"session_id": session, "model": self.model, "error": safe_error})
             raise ProviderError(
-                f"LLM 调用失败: {exc}",
+                f"LLM 调用失败: {safe_error}",
                 retryable=_is_retryable(exc),
                 category=_error_category(exc),
             ) from exc
@@ -448,9 +473,10 @@ class OpenAIProvider(LLMProvider):
         try:
             stream = await self._client.chat.completions.create(**payload)
         except Exception as exc:
-            llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
+            safe_error = self._safe_error(exc)
+            llm_trace("error", {"session_id": session, "model": self.model, "error": safe_error})
             raise ProviderError(
-                f"LLM 流式调用失败: {exc}",
+                f"LLM 流式调用失败: {safe_error}",
                 retryable=_is_retryable(exc),
                 category=_error_category(exc),
             ) from exc
@@ -662,10 +688,11 @@ class OpenAIProvider(LLMProvider):
         except Exception as exc:
             # 流式中途中断：保留上层 builtin 的续写判定（retryable/category），
             # 仅补全类型名让 WARNING 日志可读。未 emit 任何 chunk 时上层按普通失败重试。
+            safe_error = self._safe_error(exc)
             llm_trace("error", {
                 "session_id": session, "model": self.model, "stream": True,
                 "error_type": type(exc).__name__,
-                "error": str(exc),
+                "error": safe_error,
             })
             # 采用 PARTIAL_STREAM_STUB：流式中断若发生在 tool_call 生成阶段
             # （accumulators 非空且文本极少，说明模型在产工具参数而非正文），不丢半截
@@ -699,7 +726,7 @@ class OpenAIProvider(LLMProvider):
                 )
                 return
             raise ProviderError(
-                f"LLM 流式中断: {type(exc).__name__}: {str(exc) or '<无消息>'}",
+                f"LLM 流式中断: {type(exc).__name__}: {safe_error or '<无消息>'}",
                 retryable=_is_retryable(exc),
                 category=_error_category(exc),
             ) from exc

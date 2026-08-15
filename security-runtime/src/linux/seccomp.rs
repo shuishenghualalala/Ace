@@ -37,20 +37,35 @@ pub fn exec_inner(arguments: Vec<String>) -> ! {
         eprintln!("inner stage received an empty command");
         std::process::exit(INNER_SETUP_FAILURE_EXIT);
     }
-    if let Some(ref socket) = proxy_socket {
-        if let Err(error) = super::proxy_routing::start_inner_bridge(std::path::Path::new(&socket))
-        {
-            eprintln!("failed to start inner proxy bridge: {error}");
-            std::process::exit(INNER_SETUP_FAILURE_EXIT);
+    let mut inner_bridge = if let Some(ref socket) = proxy_socket {
+        match super::proxy_routing::start_inner_bridge(std::path::Path::new(&socket)) {
+            Ok(bridge) => Some(bridge),
+            Err(error) => {
+                eprintln!("failed to start inner proxy bridge: {error}");
+                std::process::exit(INNER_SETUP_FAILURE_EXIT);
+            }
         }
-    }
+    } else {
+        None
+    };
     if let Err(error) = install(proxy_socket.is_some(), allow_local_binding) {
+        if let Some(bridge) = inner_bridge.as_mut() {
+            bridge.stop();
+        }
         eprintln!("failed to install no_new_privs/seccomp: {error}");
+        std::process::exit(INNER_SETUP_FAILURE_EXIT);
+    }
+    if let Err(error) = verify_active_hardening() {
+        if let Some(bridge) = inner_bridge.as_mut() {
+            bridge.stop();
+        }
+        eprintln!("failed to verify no_new_privs/seccomp/proc: {error}");
         std::process::exit(INNER_SETUP_FAILURE_EXIT);
     }
     for (name, value) in env_overrides {
         std::env::set_var(name, value);
     }
+    std::env::set_var("ACE_SANDBOX", "linux-bwrap");
     if proxy_socket.is_some() {
         let proxy = super::proxy_routing::proxy_url();
         for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
@@ -60,6 +75,9 @@ pub fn exec_inner(arguments: Vec<String>) -> ! {
     }
     eprint!("{}", String::from_utf8_lossy(INNER_READY_MARKER));
     let error = Command::new(&command[0]).args(&command[1..]).exec();
+    if let Some(bridge) = inner_bridge.as_mut() {
+        bridge.stop();
+    }
     eprintln!("failed to exec sandbox command: {error}");
     std::process::exit(127);
 }
@@ -95,6 +113,12 @@ fn install(network_proxy: bool, allow_local_binding: bool) -> Result<(), String>
         libc::SYS_mount,
         libc::SYS_umount2,
         libc::SYS_pivot_root,
+        libc::SYS_open_tree,
+        libc::SYS_move_mount,
+        libc::SYS_fsopen,
+        libc::SYS_fsconfig,
+        libc::SYS_fsmount,
+        libc::SYS_mount_setattr,
     ] {
         rules.insert(syscall, vec![]);
     }
@@ -164,6 +188,39 @@ fn install(network_proxy: bool, allow_local_binding: bool) -> Result<(), String>
         .try_into()
         .map_err(|error: seccompiler::BackendError| error.to_string())?;
     apply_filter(&program).map_err(|error| error.to_string())
+}
+
+fn verify_active_hardening() -> Result<(), String> {
+    let no_new_privs = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+    if no_new_privs != 1 {
+        return Err(format!(
+            "PR_GET_NO_NEW_PRIVS returned {no_new_privs}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let seccomp_mode = unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) };
+    if seccomp_mode != 2 {
+        return Err(format!("PR_GET_SECCOMP returned mode {seccomp_mode}"));
+    }
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|error| format!("cannot read fresh /proc status: {error}"))?;
+    if !status.lines().any(|line| {
+        line.strip_prefix("NoNewPrivs:")
+            .is_some_and(|value| value.trim() == "1")
+    }) {
+        return Err("/proc status does not confirm NoNewPrivs=1".to_string());
+    }
+    if !status.lines().any(|line| {
+        line.strip_prefix("Seccomp:")
+            .is_some_and(|value| value.trim() == "2")
+    }) {
+        return Err("/proc status does not confirm seccomp filter mode".to_string());
+    }
+    for namespace in ["user", "pid", "net", "mnt", "ipc", "uts"] {
+        std::fs::read_link(format!("/proc/self/ns/{namespace}"))
+            .map_err(|error| format!("cannot inspect {namespace} namespace: {error}"))?;
+    }
+    Ok(())
 }
 
 fn parse_arguments(arguments: Vec<String>) -> Result<InnerArguments, String> {

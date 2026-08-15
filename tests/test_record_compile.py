@@ -2156,7 +2156,8 @@ async def test_draft_is_owner_private_immutable_and_deterministic(compile_env):
     assert first == second
     assert path == second_path
     assert payload == second_payload
-    assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600
 
 
 async def test_strict_trace_shape_remains_but_values_are_not_size_rejected(
