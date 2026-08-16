@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 from crew.browser.driver import BrowserDriver, BrowserDriverError, BrowserOperationCancelled
 from crew.browser.electron_driver import ElectronBrowserDriver
 from crew.browser.security import BrowserNetworkPolicy, LoopbackPolicyProxy, path_is_within
+from crew.browser.tab_reading import PAGE_TEXT_LIMIT, PAGE_TEXT_SCRIPT, parse_page_text_result
 from crew.browser.types import BATCH_STEP_TOOLS, BrowserConfig, BrowserPageState, BrowserRef
 from crew.core.types import MediaPart, ToolOutput, ToolPermissionDecision
 from crew.state.home import get_owner_runtime_home
@@ -10518,6 +10519,47 @@ class BrowserManager:
                 )
             return state.public_dict()
         return self._page_state(owner, session).public_dict()
+
+    async def read_tab_content(
+        self,
+        owner_id: str,
+        session_id: str,
+        tab_id: str,
+        *,
+        max_chars: int = PAGE_TEXT_LIMIT,
+    ) -> dict[str, str]:
+        """读取指定标签页的 {title, url, text}（只读 eval）；任何失败抛 BrowserDriverError。
+
+        只读观察：不加 owner.lock（Host 按 owner 串行执行 RPC，读不与其他动作互相
+        破坏），不触碰 session 观察状态。与 state() 一致：只 peek 已存在的 owner，
+        不为一次只读访问创建 owner / 启动 policy proxy。
+        """
+        limit = max(1, min(int(max_chars), PAGE_TEXT_LIMIT))
+        owner = self._owners.get(str(owner_id or ""))
+        if owner is None:
+            raise BrowserDriverError("当前账号没有浏览器会话")
+        session = owner.sessions.get(str(session_id or ""))
+        if session is None:
+            raise BrowserDriverError("当前会话没有浏览器标签页")
+        tab = session.tabs.get(str(tab_id or ""))
+        if tab is None:
+            raise BrowserDriverError("标签页不存在或已关闭")
+        if session.mode != "ai":
+            # Host 同样拒绝（control_mode_blocked）；这里提前给出面向用户的明确原因。
+            raise BrowserDriverError("人工接管或暂停期间不可读取标签页内容；请先交还 AI")
+        if not tab.target_id:
+            raise BrowserDriverError("标签页尚未就绪，缺少不可伪造的 targetId")
+        result = await self.driver.execute_targeted(
+            owner.runtime_key,
+            owner.profile_dir,
+            "eval",
+            [PAGE_TEXT_SCRIPT],
+            target_id=tab.target_id,
+            timeout=float(self.config.command_timeout_seconds),
+            proxy_url=owner.proxy.url if owner.proxy else "",
+            mutating=False,
+        )
+        return parse_page_text_result(result, limit)
 
     def _page_state(self, owner: _Owner, session: _Session) -> BrowserPageState:
         tab = session.tabs.get(session.active_label) or _Tab("", "")

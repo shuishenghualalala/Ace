@@ -2,52 +2,16 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from types import SimpleNamespace
-
 from crew.agent.runtime import _format_browser_tab_references
 from crew.gateway.context import (
     _BROWSER_TAB_TEXT_LIMIT,
     resolve_browser_tab_references,
 )
-
-
-class _FakeDriver:
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
-
-    async def execute_targeted(self, *_args, **_kwargs):
-        return {
-            "success": True,
-            "data": {
-                "value": self._payload,
-                "serialized": json.dumps(self._payload, ensure_ascii=False),
-            },
-        }
-
-
-def _fake_manager(payload: dict, *, tabs: tuple[str, ...] = ("s0123-1",)) -> SimpleNamespace:
-    tab_objs = {
-        tab_id: SimpleNamespace(target_id=f"target-{tab_id}", url="", title="")
-        for tab_id in tabs
-    }
-    session = SimpleNamespace(tabs=tab_objs, mode="ai")
-    owner = SimpleNamespace(
-        sessions={"session": session},
-        runtime_key="crew_0123456789ab",
-        profile_dir=Path("/tmp/profile"),
-        proxy=None,
-    )
-    return SimpleNamespace(
-        _owners={"dev:dev": owner},
-        driver=_FakeDriver(payload),
-        config=SimpleNamespace(command_timeout_seconds=5),
-    )
+from tests.gateway.conftest import make_browser_manager
 
 
 async def test_resolve_injects_title_url_and_text():
-    manager = _fake_manager({"title": "文档", "url": "https://example.com/a", "text": "正文"})
+    manager = make_browser_manager({"title": "文档", "url": "https://example.com/a", "text": "正文"})
 
     refs = await resolve_browser_tab_references(
         "总结一下 @browser_tab:s0123-1 的内容",
@@ -65,7 +29,7 @@ async def test_resolve_injects_title_url_and_text():
 
 
 async def test_resolve_truncates_long_text():
-    manager = _fake_manager({"title": "", "url": "", "text": "x" * 9000})
+    manager = make_browser_manager({"title": "", "url": "", "text": "x" * 9000})
 
     refs = await resolve_browser_tab_references(
         "@browser_tab:s0123-1",
@@ -78,7 +42,7 @@ async def test_resolve_truncates_long_text():
 
 
 async def test_resolve_missing_tab_returns_placeholder_without_raising():
-    manager = _fake_manager({}, tabs=())
+    manager = make_browser_manager({}, tabs=())
 
     refs = await resolve_browser_tab_references(
         "看看 @browser_tab:s0123-1",
@@ -119,7 +83,7 @@ async def test_resolve_without_token_returns_empty():
 
 
 async def test_resolve_dedupes_repeated_tab_ids():
-    manager = _fake_manager({"title": "", "url": "", "text": "正文"})
+    manager = make_browser_manager({"title": "", "url": "", "text": "正文"})
 
     refs = await resolve_browser_tab_references(
         "@browser_tab:s0123-1 再看 @browser_tab:s0123-1",

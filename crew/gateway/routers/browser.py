@@ -16,7 +16,6 @@ from fastapi.responses import JSONResponse
 from crew.browser.driver import BrowserDriverError
 from crew.browser.electron_bridge import electron_browser_bridge
 from crew.browser.electron_driver import runtime_doctor
-from crew.browser.tab_reading import read_tab_content
 from crew.gateway.auth import (
     AuthenticationError,
     account_from_request,
@@ -204,7 +203,7 @@ def create_browser_router(crew) -> APIRouter:
         if not tab_id:
             return JSONResponse({"ok": False, "error": "缺少 tab_id"}, status_code=400)
         try:
-            result = await read_tab_content(mgr, owner, session_id, tab_id)
+            result = await mgr.read_tab_content(owner, session_id, tab_id)
         except BrowserDriverError as exc:
             return JSONResponse({"ok": False, "error": _safe_error(exc)}, status_code=409)
         return JSONResponse({"ok": True, **result})

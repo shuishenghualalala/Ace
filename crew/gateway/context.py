@@ -15,7 +15,6 @@ from uuid import uuid4
 from crew.state.logging import get_logger
 from crew.state.home import get_owner_runtime_home, task_workspace_path
 from crew.browser.driver import BrowserDriverError
-from crew.browser.tab_reading import read_tab_content
 
 log = get_logger("context")
 
@@ -167,8 +166,7 @@ async def resolve_browser_tab_references(
             refs.append({"tab_id": tab_id, "error": "Browser Use 未启用"})
             continue
         try:
-            content = await read_tab_content(
-                manager,
+            content = await manager.read_tab_content(
                 owner_account_id,
                 session_id,
                 tab_id,
