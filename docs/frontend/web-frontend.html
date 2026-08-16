@@ -814,9 +814,6 @@ cd web && npm run build
     <li><b>合并一致：</b>Web 实时 Team 气泡与历史恢复气泡按同一子会话、事件和通信关联字段合并，不产生重复回答。</li>
   </ul>
   <p>验证：并发重复请求、同 request_id 恢复、新 request_id 重试、取消状态和实时/历史合并回归通过。</p>
-</div>
-</body>
-</html>
   <h2>74. 用户 Agent mention 重试与取消（2026-08-16）</h2>
   <ul>
     <li><b>运行态：</b>直接 mention 先展示“等待回答”，沿用 ChatPanel 现有 stop；取消后当前气泡即时变为“已取消”，不新增前端通信协议。</li>
@@ -825,3 +822,12 @@ cd web && npm run build
     <li><b>边界：</b>Web 只扩展既有 <code>TeamAgentTurnBubble</code>、<code>MessageList</code>、<code>ChatPanel</code>、<code>useChat</code> 与历史字段，不创建 DAG、Task、产物或新模块。</li>
   </ul>
   <p>验证：Web Team 气泡/历史回归 25 passed，Web TypeScript typecheck 通过。</p>
+  <h2>75. 用户 Agent mention 端到端验收（2026-08-16）</h2>
+  <ul>
+    <li><b>完整链路：</b>成员联想选择、结构化发送、Team 内部通信、实时回答、历史映射和刷新恢复均通过验证。</li>
+    <li><b>边界回归：</b>未知成员、重复 request_id、失败/超时/取消、重试生成新 request_id，以及等待态与终态合并均通过；不创建 DAG、Task 或产物。</li>
+    <li><b>结果：</b>Web Team/历史测试 25 passed，TypeScript typecheck 通过；与后端、Desktop 的通信字段保持一致。</li>
+  </ul>
+</div>
+</body>
+</html>

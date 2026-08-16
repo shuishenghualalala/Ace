@@ -447,4 +447,12 @@ graph TD
   <li><b>验证：</b>用户 mention 后端定向回归 5 passed；Web Team/历史回归 25 passed，Desktop 历史/渲染回归 72 passed；Web/Desktop TypeScript typecheck 通过。</li>
 </ul>
 
+<h2>151. 2026-08-16 用户 Agent mention 端到端验收阶段七</h2>
+<ul>
+  <li><b>验收链路：</b>结构化成员选择、Envelope 投递、Team Bus/AskCoordinator 路由、子会话回答、实时 team_internal 帧、历史投影和刷新恢复均通过回归。</li>
+  <li><b>边界场景：</b>覆盖未知成员、重复 request_id、失败/超时/取消、生成新 request_id 重试，以及等待态与终态合并；未发现重复唤醒、重复气泡或错误回退 Leader。</li>
+  <li><b>模块边界：</b>直接 mention 仍是独立通信回合，不进入 TeamSpec、DAG、Task、Runtime staffing 或产物链路；本阶段未新增模块、表或接口。</li>
+  <li><b>验证结果：</b><code>tests/test_team_tasks.py tests/test_state_memory.py</code> 为 225 passed、1 skipped；mention/Team internal 定向回归 10 passed；Web 25 passed、Desktop 72 passed；Web/Desktop TypeScript typecheck 通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

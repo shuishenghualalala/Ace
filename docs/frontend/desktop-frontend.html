@@ -612,9 +612,6 @@
     </ul>
     <p>验证：并发重复请求、同 request_id 恢复、新 request_id 重试、取消状态和历史合并回归通过。</p>
   </section>
-</div>
-</body>
-</html>
   <section>
     <h2>用户 Agent mention 重试与取消（2026-08-16）</h2>
     <ul>
@@ -625,3 +622,14 @@
     </ul>
     <p>验证：Desktop history mapping/渲染回归 72 passed，Desktop TypeScript typecheck 通过。</p>
   </section>
+  <section>
+    <h2>用户 Agent mention 端到端验收（2026-08-16）</h2>
+    <ul>
+      <li><b>完整链路：</b>Desktop 结构化成员选择、Team 内部消息接收、实时气泡、历史映射和重连恢复均通过验证。</li>
+      <li><b>边界回归：</b>重复 request_id、失败/超时/取消、重试新 request_id，以及等待态与终态合并均通过；不新增 Desktop 专用通信接口。</li>
+      <li><b>结果：</b>Desktop 历史/渲染测试 72 passed，TypeScript typecheck 通过；与 Web 使用同一通信元数据和状态语义。</li>
+    </ul>
+  </section>
+</div>
+</body>
+</html>
