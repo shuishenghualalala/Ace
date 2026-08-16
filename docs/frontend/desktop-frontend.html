@@ -603,6 +603,15 @@
     </ul>
     <p>验证：会话存储 round-trip、用户 mention、超时、历史 API 投影和通信去重回归通过。</p>
   </section>
+  <section>
+    <h2>用户 Agent mention 幂等与状态闭环（2026-08-16）</h2>
+    <ul>
+      <li><code>request_id</code> 是一次直接 mention 的幂等键；并发、重连或重复发送同一请求不会重复唤醒成员。</li>
+      <li>失败、超时、取消均可从子会话恢复；新的 <code>request_id</code> 才会触发真正重试。</li>
+      <li>复用现有 session stop/interrupt 和 Desktop history mapping，实时消息与历史消息按通信关联字段合并。</li>
+    </ul>
+    <p>验证：并发重复请求、同 request_id 恢复、新 request_id 重试、取消状态和历史合并回归通过。</p>
+  </section>
 </div>
 </body>
 </html>

@@ -805,6 +805,15 @@ cd web && npm run build
     <li><b>去重边界：</b>历史去重保留通信 request_id，两个请求得到相同文本时仍分别展示，避免刷新后丢掉一次回答。</li>
   </ul>
   <p>验证：会话存储元数据 round-trip、用户 mention、超时状态、历史 API 投影和同文案通信去重回归通过。</p>
+
+  <h2>73. 用户 Agent mention 幂等与状态闭环（2026-08-16）</h2>
+  <ul>
+    <li><b>请求幂等：</b><code>request_id</code> 作为一次直接 mention 的幂等键；并发或重连重复到达时复用已有回答，不重复发送 Team Bus 请求或唤醒成员。</li>
+    <li><b>重试边界：</b>失败、超时、取消结果也会被恢复；用户真正重试时生成新的 <code>request_id</code>，不会把旧回合误判为新回合。</li>
+    <li><b>取消闭环：</b>沿用现有 session stop/interrupt，Team ask 会将子会话和 Team Bus 请求统一落为 <code>cancelled</code>，历史刷新后仍能看到终态。</li>
+    <li><b>合并一致：</b>Web 实时 Team 气泡与历史恢复气泡按同一子会话、事件和通信关联字段合并，不产生重复回答。</li>
+  </ul>
+  <p>验证：并发重复请求、同 request_id 恢复、新 request_id 重试、取消状态和实时/历史合并回归通过。</p>
 </div>
 </body>
 </html>

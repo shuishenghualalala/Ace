@@ -3496,6 +3496,53 @@ async def test_team_ask_timeout_returns_expired_and_replies():
 
 
 @pytest.mark.asyncio
+async def test_team_ask_cancellation_persists_cancelled_status():
+    class SlowAskProvider(RoleProvider):
+        async def chat(self, messages, tools=None):
+            last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+            if "这是一次团队内部通信回合" in last_user:
+                await asyncio.sleep(1)
+                return ChatResponse(text="不会返回")
+            return await super().chat(messages, tools)
+
+    tm, _tasks = _team(provider=SlowAskProvider())
+    team = tm._build_team("communication_cancel_s1")
+    member_token = current_agent_id.set("coder")
+    task = asyncio.create_task(
+        team.teammates["coder"].registry.execute(
+            ToolCall(
+                "mention-ask-cancel",
+                "team_mention",
+                {"to": ["leader"], "intent": "ask", "content": "请回答后取消"},
+            )
+        )
+    )
+    try:
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        current_agent_id.reset(member_token)
+
+    messages = team.bus.list_messages("communication_cancel_s1")
+    request = next(item for item in messages if item["message_type"] == "decision_request")
+    assert request["status"] == "cancelled"
+    cancelled_messages = tm.session_store.load(
+        f"communication_cancel_s1::turn::{request['request_id']}::leader",
+        owner_account_id="local",
+    )
+    cancelled_answer = next(
+        message for message in reversed(cancelled_messages)
+        if message.role == "assistant" and message.content
+    )
+    assert cancelled_answer.communication_kind == "ask_answer"
+    assert cancelled_answer.communication_status == "cancelled"
+    assert cancelled_answer.request_id == request["request_id"]
+    assert cancelled_answer.reply_to == request["message_id"]
+
+
+@pytest.mark.asyncio
 async def test_team_ask_history_projects_request_status_and_reply_without_new_node_or_artifact(tmp_path):
     class AskAnswerProvider(RoleProvider):
         async def chat(self, messages, tools=None):
@@ -3612,6 +3659,56 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     assert child_answer.communication_status == "answered"
     assert child_answer.request_id == envelope.request_id
     assert child_answer.reply_to == request["message_id"]
+
+
+@pytest.mark.asyncio
+async def test_user_agent_mention_request_id_is_idempotent_and_new_id_retries():
+    calls: list[str] = []
+
+    class UserMentionProvider(RoleProvider):
+        async def chat(self, messages, tools=None):
+            last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+            if "这是一次团队内部通信回合" in last_user:
+                calls.append(last_user)
+                await asyncio.sleep(0.02)
+                return ChatResponse(text="当前使用 K3 模型。")
+            return await super().chat(messages, tools)
+
+    tm, _tasks = _team(provider=UserMentionProvider())
+    base_params = {
+        "user_mentions": [{"kind": "team_member", "member_id": "coder"}],
+    }
+
+    async def run(request_id: str):
+        envelope = Envelope.of(
+            "你使用的是什么模型？",
+            session_id="user_mention_idempotent_s1",
+            request_id=request_id,
+            mode="team",
+            user_id="local",
+            params=base_params,
+        )
+        return [chunk async for chunk in tm.interact(envelope)]
+
+    first, duplicate = await asyncio.gather(
+        run("user_mention_once"),
+        run("user_mention_once"),
+    )
+    assert [chunk.kind for chunk in first] == ["status", "team_internal", "final"]
+    assert [chunk.kind for chunk in duplicate] == ["status", "team_internal", "final"]
+    assert len(calls) == 1
+
+    team = tm._get_or_create("user_mention_idempotent_s1", owner_account_id="local")
+    messages = team.bus.list_messages("user_mention_idempotent_s1")
+    assert len([item for item in messages if item["message_type"] == "decision_request"]) == 1
+    assert len([item for item in messages if item["message_type"] == "answer"]) == 1
+
+    retried = await run("user_mention_retry")
+    assert [chunk.kind for chunk in retried] == ["status", "team_internal", "final"]
+    assert len(calls) == 2
+    messages = team.bus.list_messages("user_mention_idempotent_s1")
+    assert len([item for item in messages if item["message_type"] == "decision_request"]) == 2
+    assert len([item for item in messages if item["message_type"] == "answer"]) == 2
 
 
 @pytest.mark.asyncio

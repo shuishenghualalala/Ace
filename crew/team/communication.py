@@ -101,6 +101,8 @@ class TeamCommunicationRouter:
         self.member_names = list(member_names)
         self.on_mention = on_mention
         self.ask_coordinator = ask_coordinator
+        self._user_mention_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._user_mention_lock_users: dict[tuple[str, str], int] = {}
 
     async def route(
         self,
@@ -196,25 +198,49 @@ class TeamCommunicationRouter:
         question = str(content or "").strip()
         if not question:
             raise ValueError("用户 Agent mention 的消息不能为空")
+        normalized_request_id = str(request_id or "").strip() or new_id("user_mention")
+        lock_key = (normalized_request_id, target)
+        lock = self._user_mention_locks.setdefault(lock_key, asyncio.Lock())
+        self._user_mention_lock_users[lock_key] = self._user_mention_lock_users.get(lock_key, 0) + 1
         event = {
             "from": "user",
             "to": [target],
             "intent": "ask",
             "content": question,
-            "request_id": str(request_id or "").strip(),
+            "request_id": normalized_request_id,
             "owner_account_id": owner_account_id,
             "workspace_id": workspace_id,
             "communication_kind": "user_mention_request",
             "communication_path": ["user"],
         }
-        result = await self.route(event)
-        if not isinstance(result, dict):
-            raise RuntimeError("用户 Agent mention 未返回结构化结果")
-        return {
-            **result,
-            "target": target,
-            "communication_kind": "user_mention",
-        }
+        try:
+            async with lock:
+                recovered = self.ask_coordinator.recover_user_mention_result(
+                    request_id=normalized_request_id,
+                    target=target,
+                    owner_account_id=owner_account_id,
+                )
+                if recovered is not None:
+                    return {
+                        **recovered,
+                        "target": target,
+                        "communication_kind": "user_mention",
+                    }
+                result = await self.route(event)
+                if not isinstance(result, dict):
+                    raise RuntimeError("用户 Agent mention 未返回结构化结果")
+                return {
+                    **result,
+                    "target": target,
+                    "communication_kind": "user_mention",
+                }
+        finally:
+            remaining = self._user_mention_lock_users.get(lock_key, 1) - 1
+            if remaining <= 0:
+                self._user_mention_lock_users.pop(lock_key, None)
+                self._user_mention_locks.pop(lock_key, None)
+            else:
+                self._user_mention_lock_users[lock_key] = remaining
 
 
 class TeamAskCoordinator:
@@ -245,6 +271,51 @@ class TeamAskCoordinator:
 
     def active_path_for(self, member_id: str) -> list[str]:
         return list(self._active_paths.get(str(member_id or "").strip(), ()))
+
+    def recover_user_mention_result(
+        self,
+        *,
+        request_id: str,
+        target: str,
+        owner_account_id: str,
+    ) -> dict[str, Any] | None:
+        """恢复已完成的直接 mention，作为 request_id 的幂等结果。
+
+        直接 mention 不创建 Team workflow，历史子会话是它唯一需要的持久化边界。
+        只恢复已经落库的终态；运行中或异常中断且没有终态记录的请求允许重新执行。
+        """
+
+        if self.session_store is None:
+            return None
+        normalized_request_id = str(request_id or "").strip()
+        normalized_target = str(target or "").strip()
+        if not normalized_request_id or not normalized_target:
+            return None
+        turn_session_id = self._turn_session_id(normalized_request_id, normalized_target)
+        try:
+            messages = self.session_store.load(
+                turn_session_id,
+                owner_account_id=str(owner_account_id or self.owner_account_id or "local"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("读取 Team mention 幂等历史失败 session=%s err=%s", turn_session_id, exc)
+            return None
+        terminal_statuses = {"answered", "failed", "expired", "cancelled"}
+        for message in reversed(messages):
+            if (
+                message.role == "assistant"
+                and not message.is_meta
+                and message.communication_kind == "user_mention_answer"
+                and message.request_id == normalized_request_id
+                and message.communication_status in terminal_statuses
+            ):
+                return {
+                    "status": message.communication_status,
+                    "request_id": normalized_request_id,
+                    "answer": str(message.content or ""),
+                    "reply_to": str(message.reply_to or ""),
+                }
+        return None
 
     async def answer(self, event: dict[str, Any]) -> dict[str, Any]:
         targets = [

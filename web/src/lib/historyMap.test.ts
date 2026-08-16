@@ -522,4 +522,28 @@ describe("mergeHistoryWithLiveMessages", () => {
     expect(message.requestId).toBe("mention_req_1");
     expect(message.replyTo).toBe("bus_msg_1");
   });
+
+  it("deduplicates a live user mention answer already restored from history", () => {
+    const item = teamItem({
+      content: "我当前使用 K3 模型。",
+      event_type: "team_communication",
+      node_id: undefined,
+      source_session_id: "web_demo::turn::mention_req_2::coder",
+      communication_kind: "user_mention_answer",
+      communication_status: "answered",
+      request_id: "mention_req_2",
+      reply_to: "bus_msg_2",
+    });
+    const [historyMessage] = mapHistoryItems([item]);
+    const liveMessage: UiMessage = {
+      ...historyMessage,
+      id: "live-mention-answer",
+    };
+
+    const merged = mergeHistoryWithLiveMessages([historyMessage], [liveMessage]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].requestId).toBe("mention_req_2");
+    expect(merged[0].communicationStatus).toBe("answered");
+  });
 });

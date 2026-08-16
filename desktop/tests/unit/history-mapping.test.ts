@@ -340,6 +340,27 @@ describe('Team Session history mapping', () => {
       collapsedTitle: '核心逻辑的执行过程',
     });
   });
+
+  it('deduplicates a live user mention answer already restored from history', () => {
+    const history = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '我当前使用 K3 模型。',
+      event_type: 'team_communication',
+      source_session_id: 'desktop_demo::turn::mention_req_2::coder',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'answered',
+      request_id: 'mention_req_2',
+      reply_to: 'bus_msg_2',
+    });
+    const live = { ...history, id: 'live-mention-answer' };
+
+    const merged = mergeTeamInternalMessage([history], live);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].requestId).toBe('mention_req_2');
+    expect(merged[0].communicationStatus).toBe('answered');
+  });
 });
 
 describe('inferTurnFileChangesFromToolCalls', () => {
