@@ -47,6 +47,7 @@ from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.wiki.attachments import get_wiki_agent_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
+from crew.gateway.context import REFERENCE_INJECTORS
 from crew.gateway.session_context import (
     SessionContext,
     SessionSource,
@@ -526,10 +527,13 @@ class SingleAgent(Agent):
         task_block = _format_task_notifications(envelope.params.get("task_notifications"))
         if task_block:
             reminder_parts.append(task_block)
-        # 对话 @浏览器标签页：发送时解析注入的正文快照（含失败占位）
-        tab_block = _format_browser_tab_references(envelope.params.get("browser_tab_references"))
-        if tab_block:
-            reminder_parts.append(tab_block)
+        # 对话 @引用：发送时解析注入的正文快照块（含失败占位），按注册表顺序拼接
+        for injector in REFERENCE_INJECTORS:
+            if injector.formatter is None:
+                continue
+            ref_block = injector.formatter(envelope.params.get(injector.params_key))
+            if ref_block:
+                reminder_parts.append(ref_block)
         client_intent_block = _format_client_intent(envelope)
         if client_intent_block:
             reminder_parts.append(client_intent_block)
