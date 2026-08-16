@@ -6031,6 +6031,9 @@ class InProcessTeamManager(TeamManager):
         mention_from: str = "",
         mention_to: list[str] | None = None,
         mention_intent: str = "",
+        communication_kind: str = "",
+        communication_status: str = "",
+        reply_to: str = "",
     ) -> ResponseChunk:
         body: dict[str, Any] = {
             "text": text,
@@ -6069,6 +6072,14 @@ class InProcessTeamManager(TeamManager):
             body["mention_to"] = list(mention_to)
         if mention_intent:
             body["mention_intent"] = mention_intent
+        if communication_kind:
+            body["communication_kind"] = communication_kind
+        if communication_status:
+            body["communication_status"] = communication_status
+        if reply_to:
+            body["reply_to"] = reply_to
+        if communication_kind:
+            body["request_id"] = request_id
         if append:
             body["append"] = True
         if tone is not None:
@@ -6101,6 +6112,9 @@ class InProcessTeamManager(TeamManager):
         mention_from: str = "",
         mention_to: list[str] | None = None,
         mention_intent: str = "",
+        communication_kind: str = "",
+        communication_status: str = "",
+        reply_to: str = "",
     ) -> ResponseChunk:
         chunk = self._team_internal_chunk(
             envelope.request_id,
@@ -6126,6 +6140,9 @@ class InProcessTeamManager(TeamManager):
             mention_from=mention_from,
             mention_to=mention_to,
             mention_intent=mention_intent,
+            communication_kind=communication_kind,
+            communication_status=communication_status,
+            reply_to=reply_to,
         )
         if node_id:
             chunk.body["node_id"] = node_id
@@ -6212,6 +6229,9 @@ class InProcessTeamManager(TeamManager):
             mention_from=target,
             mention_to=["user"],
             mention_intent="answer",
+            communication_kind="user_mention_answer",
+            communication_status="answered",
+            reply_to=str(result.get("reply_to") or ""),
         )
         yield ResponseChunk.final(envelope.request_id, answer)
 

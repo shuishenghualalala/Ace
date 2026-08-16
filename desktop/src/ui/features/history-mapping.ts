@@ -238,6 +238,8 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     mentionIntent: item.mention_intent,
     communicationKind: item.communication_kind,
     communicationStatus: item.communication_status,
+    requestId: item.request_id,
+    replyTo: item.reply_to,
     displayMode: item.display_mode,
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,

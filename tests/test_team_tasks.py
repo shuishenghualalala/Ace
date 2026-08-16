@@ -3570,6 +3570,9 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     assert [chunk.kind for chunk in chunks] == ["status", "team_internal", "final"]
     assert chunks[-2].body["agent_id"] == "coder"
     assert chunks[-2].body["mention_intent"] == "answer"
+    assert chunks[-2].body["communication_kind"] == "user_mention_answer"
+    assert chunks[-2].body["communication_status"] == "answered"
+    assert chunks[-2].body["request_id"] == envelope.request_id
     assert chunks[-1].body["text"] == "coder 当前使用 K3 模型。"
     assert tasks.list("user_mention_s1") == []
     assert ("local", "user_mention_s1") not in tm._plans
@@ -3584,6 +3587,7 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     assert reply["reply_to"] == request["message_id"]
     assert reply["sender_member_id"] == "coder"
     assert reply["recipient_member_ids"] == ["user"]
+    assert chunks[-2].body["reply_to"] == request["message_id"]
 
 
 @pytest.mark.asyncio

@@ -118,6 +118,8 @@ export interface ChatMessage {
   mentionIntent?: string | undefined;
   communicationKind?: string | undefined;
   communicationStatus?: string | undefined;
+  requestId?: string | undefined;
+  replyTo?: string | undefined;
   displayMode?: string | undefined;
   collapsedTitle?: string | undefined;
   processText?: string | undefined;
@@ -1324,6 +1326,17 @@ function teamCommunicationStatusLabel(status?: string): string {
   } as Record<string, string>)[String(status || '').trim()] || '';
 }
 
+const COMMUNICATION_MESSAGE_KINDS = new Set([
+  'ask_request',
+  'ask_answer',
+  'user_mention_request',
+  'user_mention_answer',
+]);
+
+function isCommunicationMessage(kind?: string): boolean {
+  return COMMUNICATION_MESSAGE_KINDS.has(String(kind || '').trim());
+}
+
 export function renderTeamInternalMessage(message: ChatMessage, isStreaming = false): HTMLElement {
   const isPlanning = message.eventType === 'team_planning_progress';
   const isCrew = String(message.agentId || '').trim() === CREW_BUILTIN_AGENT_ID;
@@ -1406,7 +1419,7 @@ export function renderTeamInternalMessage(message: ChatMessage, isStreaming = fa
       em.textContent = role;
       nameEl.appendChild(em);
     }
-    if (message.communicationKind === 'ask_request') {
+    if (isCommunicationMessage(message.communicationKind)) {
       const status = teamCommunicationStatusLabel(message.communicationStatus);
       if (status) {
         const badge = document.createElement('span');

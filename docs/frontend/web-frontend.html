@@ -787,6 +787,15 @@ cd web && npm run build
     <li><b>实现边界：</b>只扩展既有 <code>Composer</code>、<code>ChatPanel</code>、<code>useChat</code> 与共享类型，复用当前 Team 成员视图和 <code>api.complete</code> 文件补全，没有新增前端模块。</li>
   </ul>
   <p>验证：Web Composer 定向测试 <code>5 passed</code>，Web/Desktop TypeScript typecheck 通过；Desktop 结构化 mention 单测 <code>45 passed</code>。</p>
+
+  <h2>71. 用户 Agent mention 通信闭环（2026-08-16）</h2>
+  <ul>
+    <li><b>实时协议：</b>用户 mention 的回答通过既有 <code>team_internal</code> 帧透传 <code>communication_kind=user_mention_answer</code>、<code>communication_status=answered</code>、<code>request_id</code> 和 <code>reply_to</code>，前端不再把它当作普通成员消息。</li>
+    <li><b>展示一致：</b>Web Team 气泡沿用既有 ask 状态徽标，统一支持用户 mention 与 Agent 间 ask 的回答状态；不会新增一套用户 mention 专属 UI。</li>
+    <li><b>历史契约：</b>历史映射补齐 <code>request_id/reply_to</code>，与后端既有 <code>team_communication</code> 投影保持一致；用户 mention 仍不创建 TeamPlan、任务、DAG 或产物。</li>
+    <li><b>实现边界：</b>只扩展既有 Team 消息 chunk、<code>useChat</code>、<code>historyMap</code> 和 <code>TeamAgentTurnBubble</code>，不改变 Composer 选择协议。</li>
+  </ul>
+  <p>验证：用户 mention 后端定向回归、Web history mapping 回归、Web TypeScript typecheck 与 production build 通过。</p>
 </div>
 </body>
 </html>

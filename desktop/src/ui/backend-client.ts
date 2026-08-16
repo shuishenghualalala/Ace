@@ -367,6 +367,8 @@ export interface BackendHistoryItem {
   mention_intent?: string;
   communication_kind?: string;
   communication_status?: string;
+  request_id?: string;
+  reply_to?: string;
   display_mode?: string;
   collapsed_title?: string;
   process_text?: string;

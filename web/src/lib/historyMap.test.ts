@@ -505,4 +505,21 @@ describe("mergeHistoryWithLiveMessages", () => {
     expect(merged[0].role).toBe("team_internal");
     expect(merged[0].eventType).toBe("team_summary");
   });
+
+  it("preserves direct user mention correlation fields from Team history", () => {
+    const [message] = mapHistoryItems([{
+      role: "team_internal",
+      content: "我当前使用 K3 模型。",
+      agent_id: "coder",
+      communication_kind: "user_mention_answer",
+      communication_status: "answered",
+      request_id: "mention_req_1",
+      reply_to: "bus_msg_1",
+    }]);
+
+    expect(message.communicationKind).toBe("user_mention_answer");
+    expect(message.communicationStatus).toBe("answered");
+    expect(message.requestId).toBe("mention_req_1");
+    expect(message.replyTo).toBe("bus_msg_1");
+  });
 });

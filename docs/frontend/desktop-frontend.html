@@ -584,6 +584,16 @@
     </ul>
     <p>验证：Desktop <code>composer-mention.test.ts 45 passed</code>，Desktop/Web TypeScript typecheck 通过；Web Composer 定向测试 <code>5 passed</code>。</p>
   </section>
+  <section>
+    <h2>用户 Agent mention 通信闭环（2026-08-16）</h2>
+    <ul>
+      <li><b>实时协议：</b>Desktop Team 内部消息接收并保留 <code>communication_kind</code>、<code>communication_status</code>、<code>request_id</code> 与 <code>reply_to</code>，用户 @ 成员的回答可与 Team Bus 原请求准确关联。</li>
+      <li><b>展示一致：</b>Desktop Team 气泡复用既有 ask 状态徽标，用户 mention 与 Agent 间 ask 共用“已发送 / 等待回答 / 回答中 / 已回答 / 失败”等状态文案。</li>
+      <li><b>历史映射：</b>Desktop history mapping 与 Web 使用相同字段契约，兼容既有 Team communication event；用户 mention 不新增任务、DAG 或产物。</li>
+      <li><b>实现边界：</b>复用既有 <code>TeamInternalChunk</code>、<code>ChatMessage</code>、<code>chat-controller</code> 与 <code>chat-render</code>，没有新增前端模块或资源。</li>
+    </ul>
+    <p>验证：用户 mention 后端定向回归、Desktop history mapping、Desktop TypeScript typecheck 与相关渲染回归通过。</p>
+  </section>
 </div>
 </body>
 </html>

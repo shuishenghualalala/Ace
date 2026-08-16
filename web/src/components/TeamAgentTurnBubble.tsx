@@ -99,6 +99,17 @@ function communicationStatusLabel(status?: string): string {
   } as Record<string, string>)[String(status || "").trim()] || "";
 }
 
+const COMMUNICATION_MESSAGE_KINDS = new Set([
+  "ask_request",
+  "ask_answer",
+  "user_mention_request",
+  "user_mention_answer",
+]);
+
+function isCommunicationMessage(kind?: string): boolean {
+  return COMMUNICATION_MESSAGE_KINDS.has(String(kind || "").trim());
+}
+
 export default function TeamAgentTurnBubble({ message, isStreaming = false, teamMembers }: Props) {
   const identity = resolveIdentity(message, teamMembers);
   const state = buildAgentTurnState([{
@@ -106,7 +117,7 @@ export default function TeamAgentTurnBubble({ message, isStreaming = false, team
     text: highlightMentionMarkdown(message.text),
   }], isStreaming);
   const processText = (message.processText || "").trim();
-  const communicationStatus = message.communicationKind === "ask_request"
+  const communicationStatus = isCommunicationMessage(message.communicationKind)
     ? communicationStatusLabel(message.communicationStatus)
     : "";
   const isCollapsible = message.displayMode === "collapsible";
