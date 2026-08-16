@@ -426,4 +426,15 @@ graph TD
   <li><b>验证：</b>新增 Kanban 历史投影回归，覆盖请求状态最终回填、answer 关联、无新增节点和无产物；Team ask 定向回归 5 passed，Web history/message 回归 24 passed，Web typecheck 通过。</li>
 </ul>
 
+<h2>149. 2026-08-16 用户 Agent mention 通信阶段一</h2>
+<ul>
+  <li><b>协议：</b>用户从前端 Agent 候选列表选择成员后，通过 Envelope 参数 <code>user_mentions=[{kind:"team_member", member_id:"..."}]</code> 表达一次直接沟通；后端不解析 <code>@name</code> 文本，也不信任 display name。</li>
+  <li><b>路由：</b><code>TeamManager.interact()</code> 在 TeamSpec/DAG 判断之前识别结构化用户 mention，调用 <code>TeamCommunicationRouter.route_user_mention()</code>，复用现有 Team Bus、AskCoordinator、Envelope 和 ResponseChunk。</li>
+  <li><b>边界：</b>用户 mention 只唤醒一个已存在的 Team 成员，创建通信 sidechain，不创建 TeamPlan、TaskManager 任务、运行时补员或 TeamArtifact；普通 Team Prompt 路径保持不变。</li>
+  <li><b>安全：</b>后端按当前 Team roster 重新校验 <code>member_id</code>，拒绝 <code>all</code>、<code>user</code>、不存在成员和非结构化 mention；失败不会静默转交 Leader。</li>
+  <li><b>回复：</b>目标 Agent 的回答通过 <code>team_internal</code> 与最终 ResponseChunk 返回，Team Bus answer 使用同一 <code>request_id</code> 和 <code>reply_to</code> 关联原请求；用户 mention 的历史通信类型区分为 <code>user_mention_request</code>/<code>user_mention_answer</code>。</li>
+  <li><b>下一阶段：</b>在现有 Composer <code>composer-mention</code> 下拉列表中增加 Agent 分类和结构化 chip，发送时只在用户确实选择 Agent 后携带 <code>user_mentions</code>。</li>
+  <li><b>验证：</b><code>tests/test_team_tasks.py</code> 新增用户直接唤醒成员、无工作流/任务/产物、未知成员拒绝和不回退 Leader 覆盖。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

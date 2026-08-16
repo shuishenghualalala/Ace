@@ -2177,6 +2177,12 @@ class InProcessTeamManager(TeamManager):
         if not status:
             return
         answer_text = str(result.get("answer") or answer_message.get("content") or "").strip()
+        source_kind = str(event.get("communication_kind") or "").strip()
+        answer_kind = (
+            "user_mention_answer"
+            if source_kind == "user_mention_request"
+            else "ask_answer"
+        )
         payload = {
             "text": answer_text,
             "agent_id": CREW_BUILTIN_AGENT_ID if is_crew_builtin_display_id(target) else target,
@@ -2198,7 +2204,7 @@ class InProcessTeamManager(TeamManager):
             "task_id": str(event.get("task_id") or request_message.get("task_id") or ""),
             "thread_id": str(event.get("thread_id") or request_message.get("thread_id") or ""),
             "communication_status": status,
-            "communication_kind": "ask_answer" if answer_text else "ask_lifecycle",
+            "communication_kind": answer_kind if answer_text else "ask_lifecycle",
             "communication_request_text": str(
                 event.get("content") or event.get("text") or request_message.get("content") or ""
             ).strip(),
@@ -2269,7 +2275,10 @@ class InProcessTeamManager(TeamManager):
             "task_id": str(event.get("task_id") or (event.get("message") or {}).get("task_id") or ""),
             "thread_id": str(event.get("thread_id") or (event.get("message") or {}).get("thread_id") or ""),
             "communication_status": str(event.get("communication_status") or ""),
-            "communication_kind": "ask_request" if intent == "ask" else "",
+            "communication_kind": str(
+                event.get("communication_kind")
+                or ("ask_request" if intent == "ask" else "")
+            ),
         }
         self._record_team_event(
             session_id,
@@ -6134,6 +6143,78 @@ class InProcessTeamManager(TeamManager):
             )
         return chunk
 
+    async def _interact_user_mention(
+        self,
+        envelope: Envelope,
+        *,
+        team: Team,
+    ) -> AsyncIterator[ResponseChunk]:
+        """Execute one user-selected Team member mention without a workflow."""
+
+        mentions = envelope.params.get("user_mentions")
+        if not isinstance(mentions, list) or len(mentions) != 1:
+            yield ResponseChunk.error(
+                envelope.request_id,
+                "一次只能直接 @ 一个团队成员，请从候选列表中选择 Agent。",
+            )
+            return
+        mention = mentions[0]
+        target_hint = (
+            str(mention.get("member_id") or "").strip()
+            if isinstance(mention, dict)
+            else ""
+        )
+        target_spec = (
+            team.leader_spec
+            if target_hint == "leader"
+            else team.members.get(target_hint)
+        )
+        target_label = str(
+            (target_spec.name if target_spec is not None else target_hint)
+            or target_hint
+            or "团队成员"
+        ).strip()
+        yield ResponseChunk.status_event(
+            envelope.request_id,
+            f"正在直接询问 {target_label}…",
+        )
+        try:
+            result = await team.communication_router.route_user_mention(
+                mention=mention,
+                content=str(envelope.query or ""),
+                request_id=envelope.request_id,
+                owner_account_id=envelope.user_id,
+                workspace_id=envelope.workspace_id,
+            )
+        except (RuntimeError, ValueError) as exc:
+            yield ResponseChunk.error(envelope.request_id, str(exc))
+            return
+
+        target = str(result.get("target") or target_hint).strip()
+        status = str(result.get("status") or "failed").strip()
+        answer = str(result.get("answer") or "").strip()
+        if status != "answered" or not answer:
+            yield ResponseChunk.error(
+                envelope.request_id,
+                answer or f"{target_label} 暂时无法回答。",
+            )
+            return
+
+        yield self._team_internal_chunk(
+            envelope.request_id,
+            agent_id=target,
+            role=(target_spec.role if target_spec is not None else ""),
+            is_leader=target == "leader",
+            source_session_id=f"{envelope.session_id}::turn::{envelope.request_id}::{target}",
+            text=answer,
+            event_type="team_communication",
+            display_mode="chat",
+            mention_from=target,
+            mention_to=["user"],
+            mention_intent="answer",
+        )
+        yield ResponseChunk.final(envelope.request_id, answer)
+
     async def _run_leader_node(
         self,
         envelope: Envelope,
@@ -8184,6 +8265,10 @@ class InProcessTeamManager(TeamManager):
             )
         except ToolError as exc:
             yield ResponseChunk.error(envelope.request_id, str(exc))
+            return
+        if "user_mentions" in envelope.params:
+            async for chunk in self._interact_user_mention(envelope, team=team):
+                yield chunk
             return
         status_chunks = await self._try_team_status_query(envelope, team=team)
         if status_chunks is not None:

@@ -3543,6 +3543,72 @@ async def test_team_ask_history_projects_request_status_and_reply_without_new_no
     assert team.bus.list_artifacts("communication_history_s1") == []
 
 
+@pytest.mark.asyncio
+async def test_user_agent_mention_wakes_selected_member_without_workflow_or_artifact():
+    class UserMentionProvider(RoleProvider):
+        async def chat(self, messages, tools=None):
+            last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+            if "这是一次团队内部通信回合" in last_user:
+                assert "发起成员：user" in last_user
+                return ChatResponse(text="coder 当前使用 K3 模型。")
+            return await super().chat(messages, tools)
+
+    tm, tasks = _team(provider=UserMentionProvider())
+    envelope = Envelope.of(
+        "你使用的是什么模型？",
+        session_id="user_mention_s1",
+        request_id="user_mention_req",
+        mode="team",
+        user_id="local",
+        params={
+            "user_mentions": [{"kind": "team_member", "member_id": "coder"}],
+        },
+    )
+
+    chunks = [chunk async for chunk in tm.interact(envelope)]
+
+    assert [chunk.kind for chunk in chunks] == ["status", "team_internal", "final"]
+    assert chunks[-2].body["agent_id"] == "coder"
+    assert chunks[-2].body["mention_intent"] == "answer"
+    assert chunks[-1].body["text"] == "coder 当前使用 K3 模型。"
+    assert tasks.list("user_mention_s1") == []
+    assert ("local", "user_mention_s1") not in tm._plans
+
+    team = tm._get_or_create("user_mention_s1", owner_account_id="local")
+    messages = team.bus.list_messages("user_mention_s1")
+    request = next(item for item in messages if item["message_type"] == "decision_request")
+    reply = next(item for item in messages if item["message_type"] == "answer")
+    assert request["sender_member_id"] == "user"
+    assert request["recipient_member_ids"] == ["coder"]
+    assert request["intent"] == "ask"
+    assert reply["reply_to"] == request["message_id"]
+    assert reply["sender_member_id"] == "coder"
+    assert reply["recipient_member_ids"] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_user_agent_mention_rejects_unselected_or_unknown_target_without_fallback():
+    tm, tasks = _team()
+    envelope = Envelope.of(
+        "请直接回答",
+        session_id="user_mention_invalid_s1",
+        request_id="user_mention_invalid_req",
+        mode="team",
+        user_id="local",
+        params={
+            "user_mentions": [{"kind": "team_member", "member_id": "not_in_team"}],
+        },
+    )
+
+    chunks = [chunk async for chunk in tm.interact(envelope)]
+
+    assert chunks[-1].kind == "error"
+    assert "不是当前团队成员" in chunks[-1].body["message"]
+    assert tasks.list("user_mention_invalid_s1") == []
+    team = tm._get_or_create("user_mention_invalid_s1", owner_account_id="local")
+    assert team.bus.list_messages("user_mention_invalid_s1") == []
+
+
 async def test_external_team_mention_propagates_current_active_skill(monkeypatch):
     tm, _tasks = _team()
     tm._get_or_create("external_skill_team")

@@ -27,6 +27,29 @@ MENTION_MESSAGE_TYPES: dict[str, MessageType] = {
     "user_followup": "decision_request",
 }
 
+USER_MENTION_KIND = "team_member"
+
+
+def normalize_user_mention_target(raw: Any, *, member_names: list[str]) -> str:
+    """Resolve one structured user mention against the current Team roster.
+
+    The frontend selects a roster item and sends its stable ``member_id``. This
+    helper validates that structured value; it deliberately does not parse
+    ``@name`` text and never trusts a display name as an identity.
+    """
+
+    if not isinstance(raw, dict):
+        raise ValueError("用户 Agent mention 必须是结构化对象")
+    if str(raw.get("kind") or "").strip() != USER_MENTION_KIND:
+        raise ValueError(f"不支持的用户 mention 类型：{raw.get('kind') or ''}")
+    member_id = str(raw.get("member_id") or "").strip()
+    if not member_id:
+        raise ValueError("用户 Agent mention 缺少 member_id")
+    targets = normalize_mention_targets(member_id, member_names=member_names)
+    if len(targets) != 1 or targets[0] in {"all", "user"}:
+        raise ValueError(f"用户 Agent mention 目标不是当前团队成员：{member_id}")
+    return targets[0]
+
 
 def normalize_mention_targets(raw: Any, *, member_names: list[str]) -> list[str]:
     """Normalize mention targets against the server-side team roster."""
@@ -148,6 +171,48 @@ class TeamCommunicationRouter:
                 return {**result, "answer": answer}
             return answer
         return result
+
+    async def route_user_mention(
+        self,
+        *,
+        mention: Any,
+        content: str,
+        request_id: str = "",
+        owner_account_id: str = "",
+        workspace_id: str = "default",
+    ) -> dict[str, Any]:
+        """Route a user-selected Agent mention as one direct ask.
+
+        This is intentionally a thin entry point over the existing ask path:
+        it publishes a Team Bus request, invokes ``TeamAskCoordinator`` and
+        returns the correlated answer without creating a TeamPlan or task.
+        """
+
+        if self.ask_coordinator is None:
+            raise RuntimeError("Team ask 通信未装配")
+        target = normalize_user_mention_target(mention, member_names=self.member_names)
+        question = str(content or "").strip()
+        if not question:
+            raise ValueError("用户 Agent mention 的消息不能为空")
+        event = {
+            "from": "user",
+            "to": [target],
+            "intent": "ask",
+            "content": question,
+            "request_id": str(request_id or "").strip(),
+            "owner_account_id": owner_account_id,
+            "workspace_id": workspace_id,
+            "communication_kind": "user_mention_request",
+            "communication_path": ["user"],
+        }
+        result = await self.route(event)
+        if not isinstance(result, dict):
+            raise RuntimeError("用户 Agent mention 未返回结构化结果")
+        return {
+            **result,
+            "target": target,
+            "communication_kind": "user_mention",
+        }
 
 
 class TeamAskCoordinator:
@@ -423,7 +488,9 @@ class TeamAskCoordinator:
 
 __all__ = [
     "MENTION_MESSAGE_TYPES",
+    "USER_MENTION_KIND",
     "TeamCommunicationRouter",
     "expand_mention_targets",
+    "normalize_user_mention_target",
     "normalize_mention_targets",
 ]
