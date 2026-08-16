@@ -13,7 +13,7 @@ import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
 import { api } from "./api";
 import { externalAgentsAvailable } from "./lib/featureFlags";
-import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, Workspace } from "./types";
+import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, UserAgentMention, Workspace } from "./types";
 
 const genId = () => `web_${Math.random().toString(36).slice(2, 8)}`;
 const CREW_BUILTIN_AGENT_ID = "crew::builtin";
@@ -391,7 +391,7 @@ export default function App() {
     if (wsId === currentWorkspaceId) newSession("default");
   };
 
-  const handleSend = (text: string, sendAttachments: Attachment[], subScenario?: string) => {
+  const handleSend = (text: string, sendAttachments: Attachment[], subScenario?: string, userMentions?: UserAgentMention[]) => {
     const cmd = text.trim().toLowerCase();
     // 与 CLI 一致：/plan 进入 Plan 模式（不发给模型）
     if (!editDraft && cmd === "/plan") {
@@ -409,6 +409,7 @@ export default function App() {
       subScenario,
       externalTeamId: effectiveMode === "team" ? sessionExternalTeams[currentSessionId] : undefined,
       teamExecutionTier,
+      userMentions: effectiveMode === "team" ? userMentions : undefined,
     });
     setEditDraft(null);
   };

@@ -779,6 +779,14 @@ cd web && npm run build
     <li>“我的外援”、Composer 外援 Agent、session 列表和 ACP 对话头像共用相同的 provider 首字母与稳定纹样槽位；纹样以约 10% 主题墨色平铺完整头像表面，解决只在右上角出现一小块的问题。</li>
     <li>“发现外援”的 runtime 卡片统一显示 Sidebar 外援入口同款 <code>external-agent.png</code>；runtime 集成图标与 provider 身份头像保持清晰分工。</li>
   </ul>
+  <h2>70. Team Composer @ 成员联想与结构化发送（2026-08-16）</h2>
+  <ul>
+    <li><b>候选分类：</b>Team 会话输入 <code>@</code> 时，Composer 将当前 Team 成员与既有文件补全合并展示，并用“团队成员 / 文件”分组；非 Team 会话保持原有文件补全行为。</li>
+    <li><b>选择语义：</b>选择成员后输入框保留 <code>@agent_id</code>，发送时额外携带 <code>user_mentions</code> 结构化数组；成员不会被误识别为文件附件。</li>
+    <li><b>队列语义：</b>WebSocket 直接发送、本地待发队列和“立即发送”均透传 <code>user_mentions</code>，编辑或删除文本后只发送仍存在的 mention token。</li>
+    <li><b>实现边界：</b>只扩展既有 <code>Composer</code>、<code>ChatPanel</code>、<code>useChat</code> 与共享类型，复用当前 Team 成员视图和 <code>api.complete</code> 文件补全，没有新增前端模块。</li>
+  </ul>
+  <p>验证：Web Composer 定向测试 <code>5 passed</code>，Web/Desktop TypeScript typecheck 通过；Desktop 结构化 mention 单测 <code>45 passed</code>。</p>
 </div>
 </body>
 </html>

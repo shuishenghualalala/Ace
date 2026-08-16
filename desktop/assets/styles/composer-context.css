@@ -875,6 +875,13 @@
   box-shadow: var(--mw-shadow-overlay);
 }
 
+.mention-pop__section {
+  padding: var(--mw-space-1) var(--mw-space-2) 0;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  font-weight: var(--mw-type-label-weight);
+}
+
 .mention-pop__item {
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);

@@ -6,7 +6,7 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from 'vitest';
-import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput } from '../../src/ui/features/composer-mention';
+import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, getUserAgentMentions, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput } from '../../src/ui/features/composer-mention';
 
 describe('detectTrigger', () => {
   it('行首 @ 触发', () => {
@@ -231,6 +231,26 @@ describe('mentionTextForSkill', () => {
     ];
     expect(mentionTextForSkill(skills[0]!, skills)).toBe('/review');
     expect(mentionTextForSkill(skills[1]!, skills)).toBe('/tdd');
+  });
+});
+
+describe('Team agent mentions', () => {
+  it('keeps the selected member as a structured mention and removes it when the token is deleted', () => {
+    const token = compactMentionText({
+      text: '@team-kk',
+      display: 'kk',
+      meta: '全栈开发',
+      sig: 'agent',
+      userMention: { kind: 'team_member', member_id: 'team-kk' },
+    });
+
+    expect(getUserAgentMentions(`请 @team-kk 写方案`)).toEqual([
+      { kind: 'team_member', member_id: 'team-kk' },
+    ]);
+    expect(getUserAgentMentions(`请 ${token} 写方案`)).toEqual([
+      { kind: 'team_member', member_id: 'team-kk' },
+    ]);
+    expect(getUserAgentMentions('请写方案')).toEqual([]);
   });
 });
 

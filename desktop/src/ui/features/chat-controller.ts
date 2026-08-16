@@ -128,7 +128,7 @@ import { messageStore, sessionStore } from '../stores/stores';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
-import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds } from './composer-mention';
+import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds, type UserAgentMention } from './composer-mention';
 import { productModeStore } from '../stores/product-mode-store';
 
 // ---------- registry: 由 index.ts 在 init 时注入的回调（破循环） ----------
@@ -145,6 +145,7 @@ interface DispatchOptions {
   optimisticUserMessageId?: string;
   wikiConfirmationId?: string;
   workDisabledPreferenceIds?: string[];
+  userMentions?: UserAgentMention[];
 }
 /**
  * index.ts init 时调用，把 openSession / setTab 等顶层入口注入本模块。
@@ -1368,6 +1369,7 @@ export function consumePending(sessionId: string): void {
   if (head.clientIntent) dispatchOptions.clientIntent = head.clientIntent;
   if (head.optimisticUserMessageId) dispatchOptions.optimisticUserMessageId = head.optimisticUserMessageId;
   if (head.workDisabledPreferenceIds) dispatchOptions.workDisabledPreferenceIds = head.workDisabledPreferenceIds;
+  if (head.userMentions) dispatchOptions.userMentions = head.userMentions;
   void dispatchWs(sessionId, head.query, head.attachments ?? [], dispatchOptions);
 }
 
@@ -1384,6 +1386,7 @@ export function sendQueueItemNow(sessionId: string, id: string): void {
     ...(item.workDisabledPreferenceIds
       ? { workDisabledPreferenceIds: item.workDisabledPreferenceIds }
       : {}),
+    ...(item.userMentions?.length ? { userMentions: item.userMentions } : {}),
   });
 }
 
@@ -1491,6 +1494,7 @@ export async function dispatchWs(
     ...(wikiExtras ? { wiki_kb_id: wikiExtras.wikiKbId } : {}),
     ...(dispatchOptions.wikiConfirmationId ? { wiki_confirmation_id: dispatchOptions.wikiConfirmationId } : {}),
     ...(workDisabledPreferenceIds.length > 0 ? { work_disabled_preference_ids: workDisabledPreferenceIds } : {}),
+    ...(dispatchOptions.userMentions?.length ? { user_mentions: dispatchOptions.userMentions } : {}),
   });
   if (!ok) {
     logStream('dispatch', 'send-ws-failed', { sessionId, requestId });
@@ -1509,7 +1513,7 @@ export async function dispatchWs(
   return true;
 }
 
-export async function sendMessage(text: string): Promise<void> {
+export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<void> {
   if (!requireRendererLogin()) return;
   const plainContent = text.trim();
   const attachments = state.attachments;
@@ -1537,6 +1541,7 @@ export async function sendMessage(text: string): Promise<void> {
       workDisabledPreferenceIds: productModeStore.get().productMode === 'work'
         ? takeDisabledWorkPreferenceIds()
         : [],
+      ...(userMentions.length > 0 ? { userMentions } : {}),
     };
     if (queueEditDraft?.sessionId === sessionId) {
       queueEditDraft = null;
@@ -1565,7 +1570,10 @@ export async function sendMessage(text: string): Promise<void> {
     queueEditDraft = null;
   }
 
-  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), takeArmedSubScenario());
+  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), {
+    subScenario: takeArmedSubScenario(),
+    ...(userMentions.length > 0 ? { userMentions } : {}),
+  });
   if (sent) {
     clearSiteAnnotationDraft(sessionId);
     clearBlueprintAnnotationDraft(sessionId);

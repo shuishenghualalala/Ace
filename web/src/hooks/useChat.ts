@@ -6,7 +6,7 @@ import { mergeTeamInternalMessage } from "../lib/teamMessageMerge";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { backendDurationToMs, backendSecondsToMs } from "../lib/backendTime";
 import { ChatSocket } from "../ws";
-import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, WikiIngestProgress, WikiPage } from "../types";
+import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, UserAgentMention, WikiIngestProgress, WikiPage } from "../types";
 
 let _seq = 0;
 const newId = () => `m${Date.now()}_${_seq++}`;
@@ -152,6 +152,7 @@ interface SendOptions {
   externalTeamId?: string;
   wikiKbId?: string;
   teamExecutionTier?: TeamExecutionTier;
+  userMentions?: UserAgentMention[];
 }
 
 /** 单会话的聚合记账（不直接驱动渲染，放 ref）。 */
@@ -987,6 +988,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             externalTeamId: options.externalTeamId,
             wikiKbId: options.wikiKbId,
             teamExecutionTier: options.teamExecutionTier,
+            userMentions: options.userMentions,
           },
         ]);
         setQueue(sessionId, "正在排队…");
@@ -1011,6 +1013,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
       }
       if (options.wikiKbId) {
         payload.wiki_kb_id = options.wikiKbId;
+      }
+      if (options.userMentions?.length) {
+        payload.user_mentions = options.userMentions;
       }
       if (mode === "team" && options.teamExecutionTier) {
         payload.team_execution_profile = {
@@ -1059,6 +1064,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     }
     if (next.wikiKbId) {
       payload.wiki_kb_id = next.wikiKbId;
+    }
+    if (next.userMentions?.length) {
+      payload.user_mentions = next.userMentions;
     }
     if (next.mode === "team" && next.teamExecutionTier) {
       payload.team_execution_profile = {
@@ -1229,6 +1237,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     send(item.query, sessionId, item.mode, item.workspaceId, item.attachments, {
       subScenario: item.subScenario,
       externalTeamId: item.externalTeamId,
+      wikiKbId: item.wikiKbId,
+      teamExecutionTier: item.teamExecutionTier,
+      userMentions: item.userMentions,
     });
   }, [send]);
 

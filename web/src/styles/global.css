@@ -3488,6 +3488,13 @@ button { font-family: inherit; cursor: pointer; }
   max-height: 200px; overflow-y: auto;
   box-shadow: 0 4px 16px rgba(0,0,0,.1);
 }
+.at-popover__section {
+  padding: 5px 8px 3px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+}
 .at-popover__item {
   display: flex; align-items: center; gap: 8px;
   width: 100%; border: none; background: transparent;
@@ -3497,6 +3504,7 @@ button { font-family: inherit; cursor: pointer; }
 }
 .at-popover__item:hover { background: var(--bg-hover); }
 .at-popover__icon { font-size: 13px; font-style: normal; width: 16px; text-align: center; }
+.at-popover__icon--agent { color: var(--accent); }
 .at-popover__display { font-weight: 500; color: var(--text); }
 .at-popover__meta {
   flex: 1; font-family: var(--mono); font-size: 11px; color: var(--text-3);

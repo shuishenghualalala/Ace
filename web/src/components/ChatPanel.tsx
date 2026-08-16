@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AppConfig, Attachment, ExternalAgent, FollowupQuestion, PendingMessage, Session, Skill, TeamExecutionTier, TeamMemberView, TodoItem, UiMessage } from "../types";
+import type { AppConfig, Attachment, ExternalAgent, FollowupQuestion, PendingMessage, Session, Skill, TeamExecutionTier, TeamMemberView, TodoItem, UiMessage, UserAgentMention } from "../types";
 import { api } from "../api";
 import MessageList from "./MessageList";
 import Composer from "./Composer";
@@ -17,7 +17,7 @@ export interface Props {
   pendingQueue: PendingMessage[];
   config: AppConfig | null;
   attachments: Attachment[];
-  onSend: (text: string, attachments: Attachment[], subScenario?: string) => void;
+  onSend: (text: string, attachments: Attachment[], subScenario?: string, userMentions?: UserAgentMention[]) => void;
   onStop?: () => void;
   onSteer?: (text: string) => void;
   onRemoveFromQueue?: (index: number) => void;
@@ -315,6 +315,7 @@ export default function ChatPanel({
             onModelChange={onModelChange}
             currentAgentLabel={currentAgentLabel}
             isTeamSession={isTeamSession}
+            teamMembers={teamMembers}
             teamExecutionTier={teamExecutionTier}
             onTeamExecutionTierChange={onTeamExecutionTierChange}
             canSelectAgent={canSelectAgent}

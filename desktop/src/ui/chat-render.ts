@@ -161,6 +161,8 @@ export interface PendingMessage {
   clientIntent?: 'revision';
   /** 已乐观渲染成 user 气泡的消息 id；队列面板隐藏，发送时复用避免重复气泡。 */
   optimisticUserMessageId?: string;
+  /** 用户在 Team Composer 中选择的成员 mention。 */
+  userMentions?: { kind: 'team_member'; member_id: string }[];
 }
 
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'error';

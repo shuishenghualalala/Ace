@@ -574,6 +574,16 @@
     </ul>
     <p>验证：新增模型隔离、Tray 光学比例和响应式样式回归测试；定向 4 个测试文件共 <code>36 passed</code>，TypeScript、CSS lint 与 production build 通过。真实 Renderer 在 1280px 和 900px 两种视口测得黄助手、图片画布与 Agent 头像均为 38px，中心线分别同为 439px 和 347px；Electron <code>nativeImage</code> 实际导出的默认/完成态均为非空 44×44 位图，完成态主体与默认态光学尺寸一致且庆祝星光保留。</p>
   </section>
+  <section>
+    <h2>Team Composer @ 成员联想与结构化发送（2026-08-16）</h2>
+    <ul>
+      <li><b>候选分类：</b>Team 会话输入 <code>@</code> 时复用现有 Composer 补全，在同一浮层先展示当前团队成员，再展示文件/工作区引用；普通单 Agent 会话仍只展示原有文件候选。</li>
+      <li><b>协议边界：</b>选择成员后保留可读的 <code>@agent_id</code> 文本，同时通过 <code>user_mentions</code> 发送 <code>{kind: "team_member", member_id}</code>；成员 mention 不创建附件，也不进入 TeamSpec/DAG。</li>
+      <li><b>排队一致性：</b>忙碌会话的本地待发队列、立即发送和自动消费均保留结构化 mention，避免消息排队后退化为普通文本。</li>
+      <li><b>复用范围：</b>复用现有 <code>composer-mention.ts</code>、Team 目录、队列和 WebSocket dispatch，不新增业务模块；Wiki Composer 不主动生成 Team 成员候选。</li>
+    </ul>
+    <p>验证：Desktop <code>composer-mention.test.ts 45 passed</code>，Desktop/Web TypeScript typecheck 通过；Web Composer 定向测试 <code>5 passed</code>。</p>
+  </section>
 </div>
 </body>
 </html>

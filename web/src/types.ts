@@ -678,6 +678,12 @@ export interface TeamMemberView {
   tone?: number;
 }
 
+/** 用户在 Team Composer 中通过 @ 选择的成员，发送时随 WebSocket 请求传递。 */
+export interface UserAgentMention {
+  kind: "team_member";
+  member_id: string;
+}
+
 /** 前端本地待发送队列项 */
 export interface PendingMessage {
   id: string;
@@ -690,4 +696,5 @@ export interface PendingMessage {
   externalTeamId?: string;
   wikiKbId?: string;
   teamExecutionTier?: TeamExecutionTier;
+  userMentions?: UserAgentMention[];
 }

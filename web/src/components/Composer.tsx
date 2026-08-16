@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import type { AppConfig, Attachment, ExternalAgent, Session, Skill, TeamExecutionTier } from "../types";
+import { Fragment, useEffect, useRef, useState } from "react";
+import type { AppConfig, Attachment, ExternalAgent, Session, Skill, TeamExecutionTier, TeamMemberView, UserAgentMention } from "../types";
 import { api } from "../api";
 import { externalAgentsAvailable } from "../lib/featureFlags";
 import AttachmentList from "./AttachmentList";
@@ -9,7 +9,7 @@ interface Props {
   config: AppConfig | null;
   busy: boolean;
   attachments: Attachment[];
-  onSend: (text: string, attachments: Attachment[], subScenario?: string) => void;
+  onSend: (text: string, attachments: Attachment[], subScenario?: string, userMentions?: UserAgentMention[]) => void;
   onStop?: () => void;
   onSteer?: (text: string) => void;
   onAttachmentsChange: (attachments: Attachment[]) => void;
@@ -18,6 +18,7 @@ interface Props {
   activeModelId?: string;
   activeModelLabel?: string;
   isTeamSession?: boolean;
+  teamMembers?: TeamMemberView[];
   teamExecutionTier?: TeamExecutionTier;
   onTeamExecutionTierChange?: (tier: TeamExecutionTier) => void;
   currentAgentLabel?: Session["agent_label"];
@@ -50,6 +51,7 @@ export default function Composer({
   activeModelId,
   activeModelLabel,
   isTeamSession = false,
+  teamMembers,
   teamExecutionTier = "auto",
   onTeamExecutionTierChange,
   currentAgentLabel,
@@ -73,7 +75,7 @@ export default function Composer({
   const [atOpen, setAtOpen] = useState(false);
   const [, setAtQuery] = useState("");
   const [atResults, setAtResults] = useState<
-    { text: string; display: string; meta: string; type: string }[]
+    { text: string; display: string; meta: string; type: string; agentMention?: UserAgentMention }[]
   >([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -88,6 +90,7 @@ export default function Composer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const atIndexRef = useRef(-1);
+  const agentMentionsRef = useRef<Record<string, UserAgentMention>>({});
   const craftRef = useRef<HTMLDivElement>(null);
   const skillsRef = useRef<HTMLDivElement>(null);
   const agentsRef = useRef<HTMLDivElement>(null);
@@ -211,8 +214,12 @@ export default function Composer({
     const t = text.trim();
     // 忙时也允许发送：后端会按会话排队，前端显示「正在队列中」卡片
     if (!t && attachments.length === 0) return;
-    onSend(t, attachments, subScenario);
+    const userMentions = Object.entries(agentMentionsRef.current)
+      .filter(([token]) => new RegExp(`(^|\\s)${token.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}(?=\\s|$)`).test(t))
+      .map(([, mention]) => mention);
+    onSend(t, attachments, subScenario, userMentions.length > 0 ? userMentions : undefined);
     setText("");
+    agentMentionsRef.current = {};
     onCancelEdit?.();
     onAttachmentsChange([]);
   };
@@ -300,14 +307,14 @@ export default function Composer({
     // 此时 isComposing=false 且 keyCode!=229，需用 justComposedRef 捕获确认选字的 Enter
     if (justComposedRef.current && e.key === "Enter") return;
 
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      submit();
-      return;
-    }
     if (atOpen && atResults.length > 0 && (e.key === "Tab" || (e.key === "Enter" && atOpen))) {
       e.preventDefault();
       selectAtItem(atResults[0]);
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
       return;
     }
     if (e.key === "Escape" && atOpen) {
@@ -322,25 +329,50 @@ export default function Composer({
 
     const cursorPos = e.target.selectionStart;
     const textBeforeCursor = val.slice(0, cursorPos);
-    const atMatch = textBeforeCursor.match(/@(\w*)$/);
+    const atMatch = textBeforeCursor.match(/@([^\s]*)$/);
     if (atMatch) {
       atIndexRef.current = cursorPos - atMatch[0].length;
       const query = atMatch[1];
       setAtQuery(query);
       setAtOpen(true);
-      api.complete(query).then(setAtResults).catch(() => setAtResults([]));
+      const teamResults = isTeamSession
+        ? (teamMembers ?? [])
+          .filter((member) => member.agentId)
+          .filter((member) => {
+            const needle = query.trim().toLowerCase();
+            if (!needle) return true;
+            return [member.agentId, member.name, member.role]
+              .filter(Boolean)
+              .some((value) => value!.toLowerCase().includes(needle));
+          })
+          .map((member) => ({
+            text: `@${member.agentId}`,
+            display: member.name,
+            meta: member.isLeader ? `Leader · ${member.role}` : member.role,
+            type: "agent",
+            agentMention: { kind: "team_member" as const, member_id: member.agentId! },
+          }))
+        : [];
+      api.complete(query)
+        .then((files) => setAtResults([...teamResults, ...files]))
+        .catch(() => setAtResults(teamResults));
     } else {
       setAtOpen(false);
     }
   };
 
-  const selectAtItem = (item: { text: string; display: string; meta: string; type: string }) => {
+  const selectAtItem = (item: { text: string; display: string; meta: string; type: string; agentMention?: UserAgentMention }) => {
     const before = text.slice(0, atIndexRef.current);
-    const atMatchLen = text.slice(before.length).match(/@\w*$/)?.[0].length || 0;
+    const atMatchLen = text.slice(before.length).match(/^@[^\s]*/)?.[0].length || 0;
     const after = text.slice(before.length + atMatchLen);
     const newText = `${before}${item.text} `;
     setText(newText + after);
     setAtOpen(false);
+
+    if (item.type === "agent" && item.agentMention) {
+      agentMentionsRef.current[item.text] = item.agentMention;
+      return;
+    }
 
     if (item.type === "file" || item.type === "image") {
       const pathMeta = item.meta;
@@ -430,20 +462,29 @@ export default function Composer({
         </div>
         {atOpen && atResults.length > 0 && (
           <div className="at-popover">
-            {atResults.map((r, i) => (
-              <button
-                key={i}
-                className="at-popover__item"
-                onClick={() => selectAtItem(r)}
-                type="button"
-              >
-                <span className="at-popover__icon">
-                  {r.type === "folder" ? "📁" : r.type === "image" ? "🖼️" : "📄"}
-                </span>
-                <span className="at-popover__display">{r.display}</span>
-                <span className="at-popover__meta">{r.meta}</span>
-              </button>
-            ))}
+            {atResults.map((r, i) => {
+              const category = r.type === "agent" ? "团队成员" : "文件";
+              const previous = atResults[i - 1];
+              const previousCategory = previous?.type === "agent" ? "团队成员" : "文件";
+              return (
+                <Fragment key={`${r.type}-${r.text}-${i}`}>
+                  {category !== previousCategory && (
+                    <div className="at-popover__section">{category}</div>
+                  )}
+                  <button
+                    className="at-popover__item"
+                    onClick={() => selectAtItem(r)}
+                    type="button"
+                  >
+                    <span className={`at-popover__icon${r.type === "agent" ? " at-popover__icon--agent" : ""}`}>
+                      {r.type === "agent" ? "◉" : r.type === "folder" ? "📁" : r.type === "image" ? "🖼️" : "📄"}
+                    </span>
+                    <span className="at-popover__display">{r.display}</span>
+                    <span className="at-popover__meta">{r.meta}</span>
+                  </button>
+                </Fragment>
+              );
+            })}
           </div>
         )}
         <div className="composer__toolbar">
