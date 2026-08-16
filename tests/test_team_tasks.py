@@ -3626,12 +3626,17 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
 
     chunks = [chunk async for chunk in tm.interact(envelope)]
 
-    assert [chunk.kind for chunk in chunks] == ["status", "team_internal", "final"]
-    assert chunks[-2].body["agent_id"] == "coder"
-    assert chunks[-2].body["mention_intent"] == "answer"
-    assert chunks[-2].body["communication_kind"] == "user_mention_answer"
-    assert chunks[-2].body["communication_status"] == "answered"
-    assert chunks[-2].body["request_id"] == envelope.request_id
+    assert [chunk.kind for chunk in chunks] == ["status", "team_internal", "team_internal", "final"]
+    waiting = chunks[1]
+    answer = chunks[2]
+    assert waiting.body["communication_status"] == "waiting_reply"
+    assert waiting.body["communication_request_text"] == envelope.query
+    assert answer.body["agent_id"] == "coder"
+    assert answer.body["mention_intent"] == "answer"
+    assert answer.body["communication_kind"] == "user_mention_answer"
+    assert answer.body["communication_status"] == "answered"
+    assert answer.body["request_id"] == envelope.request_id
+    assert answer.body["communication_request_text"] == envelope.query
     assert chunks[-1].body["text"] == "coder 当前使用 K3 模型。"
     assert tasks.list("user_mention_s1") == []
     assert ("local", "user_mention_s1") not in tm._plans
@@ -3646,7 +3651,7 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     assert reply["reply_to"] == request["message_id"]
     assert reply["sender_member_id"] == "coder"
     assert reply["recipient_member_ids"] == ["user"]
-    assert chunks[-2].body["reply_to"] == request["message_id"]
+    assert answer.body["reply_to"] == request["message_id"]
     child_messages = tm.session_store.load(
         f"user_mention_s1::turn::{envelope.request_id}::coder",
         owner_account_id="local",
@@ -3694,8 +3699,8 @@ async def test_user_agent_mention_request_id_is_idempotent_and_new_id_retries():
         run("user_mention_once"),
         run("user_mention_once"),
     )
-    assert [chunk.kind for chunk in first] == ["status", "team_internal", "final"]
-    assert [chunk.kind for chunk in duplicate] == ["status", "team_internal", "final"]
+    assert [chunk.kind for chunk in first] == ["status", "team_internal", "team_internal", "final"]
+    assert [chunk.kind for chunk in duplicate] == ["status", "team_internal", "team_internal", "final"]
     assert len(calls) == 1
 
     team = tm._get_or_create("user_mention_idempotent_s1", owner_account_id="local")
@@ -3704,7 +3709,7 @@ async def test_user_agent_mention_request_id_is_idempotent_and_new_id_retries():
     assert len([item for item in messages if item["message_type"] == "answer"]) == 1
 
     retried = await run("user_mention_retry")
-    assert [chunk.kind for chunk in retried] == ["status", "team_internal", "final"]
+    assert [chunk.kind for chunk in retried] == ["status", "team_internal", "team_internal", "final"]
     assert len(calls) == 2
     messages = team.bus.list_messages("user_mention_idempotent_s1")
     assert len([item for item in messages if item["message_type"] == "decision_request"]) == 2

@@ -24,6 +24,7 @@ export interface BackendHistoryItem {
   communication_status?: string;
   request_id?: string;
   reply_to?: string;
+  communication_request_text?: string;
   display_mode?: string;
   collapsed_title?: string;
   process_text?: string;
@@ -116,6 +117,7 @@ export function mapHistoryItem(item: BackendHistoryItem): UiMessage {
     communicationStatus: item.communication_status,
     requestId: item.request_id,
     replyTo: item.reply_to,
+    communicationRequestText: item.communication_request_text,
     displayMode: item.display_mode,
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,

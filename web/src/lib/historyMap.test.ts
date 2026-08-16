@@ -515,12 +515,40 @@ describe("mergeHistoryWithLiveMessages", () => {
       communication_status: "answered",
       request_id: "mention_req_1",
       reply_to: "bus_msg_1",
+      communication_request_text: "你使用的是什么模型？",
     }]);
 
     expect(message.communicationKind).toBe("user_mention_answer");
     expect(message.communicationStatus).toBe("answered");
     expect(message.requestId).toBe("mention_req_1");
     expect(message.replyTo).toBe("bus_msg_1");
+    expect(message.communicationRequestText).toBe("你使用的是什么模型？");
+  });
+
+  it("replaces a waiting direct mention with the terminal answer by request id", () => {
+    const waiting: UiMessage = {
+      id: "waiting",
+      role: "team_internal",
+      text: "正在询问 coder…",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "waiting_reply",
+      requestId: "mention_req_waiting",
+      communicationRequestText: "你使用的是什么模型？",
+    };
+    const answered: UiMessage = {
+      ...waiting,
+      id: "answered",
+      text: "当前使用 K3 模型。",
+      communicationStatus: "answered",
+      replyTo: "bus_msg_waiting",
+    };
+
+    const merged = mergeTeamInternalMessage([waiting], answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].text).toBe("当前使用 K3 模型。");
+    expect(merged[0].communicationStatus).toBe("answered");
   });
 
   it("deduplicates a live user mention answer already restored from history", () => {

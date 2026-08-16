@@ -414,6 +414,17 @@ export default function App() {
     setEditDraft(null);
   };
 
+  const retryMention = (message: UiMessage) => {
+    const query = String(message.communicationRequestText || "").trim();
+    const memberId = String(message.agentId || (message.isLeader ? "leader" : "")).trim();
+    if (!query || !memberId) return;
+    handleSend(query, [], undefined, [{ kind: "team_member", member_id: memberId }]);
+  };
+
+  const cancelMention = (message: UiMessage) => {
+    chat.cancelMention(currentSessionId, message.requestId);
+  };
+
   const editMessage = (message: UiMessage) => {
     if (chat.busy || message.role !== "user" || !message.text.trim()) return;
     setEditDraft({ messageId: message.id, text: message.text });
@@ -692,6 +703,8 @@ export default function App() {
               onDismissFollowup={() => chat.dismissFollowup(currentSessionId)}
               editDraft={editDraft}
               onEditMessage={editMessage}
+              onRetryMention={retryMention}
+              onCancelMention={cancelMention}
               onCancelEdit={() => setEditDraft(null)}
               onRemoveFromQueue={(i) => chat.removeFromQueue(currentSessionId, i)}
               onEditQueueItem={(i, q) => chat.editQueueItem(currentSessionId, i, q)}

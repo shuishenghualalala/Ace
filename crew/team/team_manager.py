@@ -6034,6 +6034,7 @@ class InProcessTeamManager(TeamManager):
         communication_kind: str = "",
         communication_status: str = "",
         reply_to: str = "",
+        communication_request_text: str = "",
     ) -> ResponseChunk:
         body: dict[str, Any] = {
             "text": text,
@@ -6078,6 +6079,8 @@ class InProcessTeamManager(TeamManager):
             body["communication_status"] = communication_status
         if reply_to:
             body["reply_to"] = reply_to
+        if communication_request_text:
+            body["communication_request_text"] = communication_request_text
         if communication_kind:
             body["request_id"] = request_id
         if append:
@@ -6115,6 +6118,7 @@ class InProcessTeamManager(TeamManager):
         communication_kind: str = "",
         communication_status: str = "",
         reply_to: str = "",
+        communication_request_text: str = "",
     ) -> ResponseChunk:
         chunk = self._team_internal_chunk(
             envelope.request_id,
@@ -6143,6 +6147,7 @@ class InProcessTeamManager(TeamManager):
             communication_kind=communication_kind,
             communication_status=communication_status,
             reply_to=reply_to,
+            communication_request_text=communication_request_text,
         )
         if node_id:
             chunk.body["node_id"] = node_id
@@ -6186,6 +6191,7 @@ class InProcessTeamManager(TeamManager):
             if target_hint == "leader"
             else team.members.get(target_hint)
         )
+        target = target_hint
         target_label = str(
             (target_spec.name if target_spec is not None else target_hint)
             or target_hint
@@ -6195,6 +6201,23 @@ class InProcessTeamManager(TeamManager):
             envelope.request_id,
             f"正在直接询问 {target_label}…",
         )
+        if target_spec is not None:
+            yield self._team_internal_chunk(
+                envelope.request_id,
+                agent_id=target,
+                role=target_spec.role,
+                is_leader=target == "leader",
+                source_session_id=f"{envelope.session_id}::turn::{envelope.request_id}::{target}",
+                text=f"正在询问 {target_label}…",
+                event_type="team_communication",
+                display_mode="chat",
+                mention_from=target,
+                mention_to=["user"],
+                mention_intent="answer",
+                communication_kind="user_mention_answer",
+                communication_status="waiting_reply",
+                communication_request_text=str(envelope.query or ""),
+            )
         try:
             result = await team.communication_router.route_user_mention(
                 mention=mention,
@@ -6232,6 +6255,7 @@ class InProcessTeamManager(TeamManager):
             communication_kind="user_mention_answer",
             communication_status="answered",
             reply_to=str(result.get("reply_to") or ""),
+            communication_request_text=str(envelope.query or ""),
         )
         yield ResponseChunk.final(envelope.request_id, answer)
 

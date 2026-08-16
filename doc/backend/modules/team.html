@@ -437,4 +437,14 @@ graph TD
   <li><b>验证：</b><code>tests/test_team_tasks.py</code> 新增用户直接唤醒成员、无工作流/任务/产物、未知成员拒绝和不回退 Leader 覆盖。</li>
 </ul>
 
+<h2>150. 2026-08-16 用户 Agent mention 重试与取消阶段六</h2>
+<ul>
+  <li><b>结果元数据：</b>直接 mention 的子会话回答在既有 <code>Message</code> 上保存 <code>communication_request_text</code>，与 <code>request_id</code>、目标成员和终态一起进入历史投影；旧消息缺失该字段时保持只读兼容。</li>
+  <li><b>运行态：</b>请求开始先通过既有 <code>team_internal</code> 帧展示 <code>waiting_reply</code>，用户可复用当前 session stop/interrupt 取消；取消后前端立即显示 <code>cancelled</code>，后端子会话和 Team Bus 继续落 canonical 终态。</li>
+  <li><b>重试：</b>失败、超时或取消且存在原始 prompt 时，Web/Desktop 展示“重试”；重试复用目标成员和 prompt，但由既有 dispatch 生成新的 <code>request_id</code>，不会重复唤醒旧请求。</li>
+  <li><b>通信边界：</b>运行态等待帧与最终 answer 按同一 <code>request_id</code> 合并；仍不创建 TeamSpec、TeamPlan、TaskManager 任务、DAG、Runtime staffing 或产物。</li>
+  <li><b>复用与范围：</b>复用 <code>Message</code>、SessionStore、history projection、TeamInternalChunk、Web/Desktop history mapping、现有 stop/dispatch；没有新增模块、表、接口或 mention 协议。</li>
+  <li><b>验证：</b>用户 mention 后端定向回归 5 passed；Web Team/历史回归 25 passed，Desktop 历史/渲染回归 72 passed；Web/Desktop TypeScript typecheck 通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

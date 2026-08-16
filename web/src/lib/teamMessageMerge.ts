@@ -37,6 +37,10 @@ function isTeamPlanningProgress(message: UiMessage): boolean {
   return message.eventType === "team_planning_progress";
 }
 
+function isUserMentionAnswer(message: UiMessage): boolean {
+  return message.communicationKind === "user_mention_answer" && Boolean(message.requestId);
+}
+
 function isDuplicateTeamEvent(existing: UiMessage, incoming: UiMessage): boolean {
   return existing.role === "team_internal"
     && incoming.role === "team_internal"
@@ -107,6 +111,20 @@ export function mergeTeamInternalMessage(
     : messages;
   if (withoutDuplicateAssistant.some((message) => isDuplicateTeamEvent(message, incoming))) {
     return withoutDuplicateAssistant;
+  }
+  if (isUserMentionAnswer(incoming)) {
+    const communicationIndex = withoutDuplicateAssistant.findIndex((message) =>
+      isUserMentionAnswer(message)
+      && message.requestId === incoming.requestId
+      && message.agentId === incoming.agentId,
+    );
+    if (communicationIndex >= 0) {
+      return [
+        ...withoutDuplicateAssistant.slice(0, communicationIndex),
+        { ...withoutDuplicateAssistant[communicationIndex], ...incoming },
+        ...withoutDuplicateAssistant.slice(communicationIndex + 1),
+      ];
+    }
   }
   const matchingIndex = findMatchingTeamNode(withoutDuplicateAssistant, incoming);
 

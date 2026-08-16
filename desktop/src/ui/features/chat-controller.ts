@@ -622,6 +622,19 @@ export function renderChat(): void {
         renderChat();
       },
     },
+    teamCommunicationHandlers: {
+      onRetry: (message) => {
+        const query = String(message.communicationRequestText || '').trim();
+        const memberId = String(message.agentId || (message.isLeader ? 'leader' : '')).trim();
+        if (!sessionId || !query || !memberId) return;
+        void dispatchWs(sessionId, query, [], {
+          userMentions: [{ kind: 'team_member', member_id: memberId }],
+        });
+      },
+      onCancel: () => {
+        if (sessionId) stopGeneration(sessionId);
+      },
+    },
     afterRender: (renderedSessionId) => {
       renderTodoSlot();
       updateComposerControls();
@@ -944,6 +957,7 @@ function applyTeamInternalChunk(sessionId: string, chunk: TeamInternalChunk): vo
     ...(typeof body.communication_status === 'string' ? { communicationStatus: body.communication_status } : {}),
     ...(typeof body.request_id === 'string' ? { requestId: body.request_id } : {}),
     ...(typeof body.reply_to === 'string' ? { replyTo: body.reply_to } : {}),
+    ...(typeof body.communication_request_text === 'string' ? { communicationRequestText: body.communication_request_text } : {}),
     ...(typeof body.display_mode === 'string' ? { displayMode: body.display_mode } : {}),
     ...(typeof body.collapsed_title === 'string' ? { collapsedTitle: body.collapsed_title } : {}),
     ...(typeof body.process_text === 'string' ? { processText: body.process_text } : {}),
@@ -1623,6 +1637,11 @@ export function finalizeStreamingTurn(sessionId: string): void {
       turnDurationMs: startedAt != null ? Date.now() - startedAt : 0,
       timestamp: Date.now(),
     });
+  }
+  for (const message of list) {
+    if (message.role !== 'team_internal' || message.communicationKind !== 'user_mention_answer') continue;
+    if (!['published', 'waiting_reply', 'queued', 'delivered'].includes(message.communicationStatus || '')) continue;
+    patchMessage(sessionId, message.id, { communicationStatus: 'cancelled' });
   }
 }
 

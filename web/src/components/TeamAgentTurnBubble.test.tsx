@@ -14,12 +14,23 @@ function renderMessage(overrides: Partial<UiMessage> = {}): string {
     communicationStatus: "answered",
     ...overrides,
   };
-  return renderToStaticMarkup(<TeamAgentTurnBubble message={message} />);
+  return renderToStaticMarkup(
+    <TeamAgentTurnBubble message={message} onRetryMention={() => {}} onCancelMention={() => {}} />,
+  );
 }
 
 describe("TeamAgentTurnBubble communication status", () => {
   it("shows the answered status for a direct user Agent mention", () => {
     expect(renderMessage()).toContain("已回答");
+  });
+
+  it("shows retry for a terminal direct mention when the original prompt is persisted", () => {
+    expect(renderMessage({ communicationStatus: "failed", communicationRequestText: "你使用的是什么模型？" }))
+      .toContain(">重试<");
+  });
+
+  it("does not show retry without the persisted prompt", () => {
+    expect(renderMessage({ communicationStatus: "failed" })).not.toContain("重试");
   });
 
   it("does not show a communication badge for ordinary Team messages", () => {

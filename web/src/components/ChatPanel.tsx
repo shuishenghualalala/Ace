@@ -50,6 +50,8 @@ export interface Props {
   todos?: TodoItem[];
   editDraft?: { messageId: string; text: string } | null;
   onEditMessage?: (message: UiMessage) => void;
+  onRetryMention?: (message: UiMessage) => void;
+  onCancelMention?: (message: UiMessage) => void;
   onCancelEdit?: () => void;
 }
 
@@ -95,6 +97,8 @@ export default function ChatPanel({
   onDismissFollowup,
   editDraft,
   onEditMessage,
+  onRetryMention,
+  onCancelMention,
   onCancelEdit,
   todos = [],
 }: Props) {
@@ -276,6 +280,8 @@ export default function ChatPanel({
             onAnswerFollowup={onAnswerFollowup}
             onDismissFollowup={onDismissFollowup}
             onEditMessage={onEditMessage}
+            onRetryMention={onRetryMention}
+            onCancelMention={onCancelMention}
             teamMembers={teamMembers}
             showEmptyState={!isTeamSession}
             currentAgentLabel={currentAgentLabel}

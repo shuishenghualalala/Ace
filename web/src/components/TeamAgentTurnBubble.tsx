@@ -8,6 +8,8 @@ interface Props {
   message: UiMessage;
   isStreaming?: boolean;
   teamMembers?: TeamMemberView[];
+  onRetryMention?: (message: UiMessage) => void;
+  onCancelMention?: (message: UiMessage) => void;
 }
 
 function isCrewAgent(message: UiMessage): boolean {
@@ -110,7 +112,16 @@ function isCommunicationMessage(kind?: string): boolean {
   return COMMUNICATION_MESSAGE_KINDS.has(String(kind || "").trim());
 }
 
-export default function TeamAgentTurnBubble({ message, isStreaming = false, teamMembers }: Props) {
+const RETRYABLE_MENTION_STATUSES = new Set(["failed", "expired", "cancelled"]);
+const ACTIVE_MENTION_STATUSES = new Set(["published", "waiting_reply", "queued", "delivered"]);
+
+export default function TeamAgentTurnBubble({
+  message,
+  isStreaming = false,
+  teamMembers,
+  onRetryMention,
+  onCancelMention,
+}: Props) {
   const identity = resolveIdentity(message, teamMembers);
   const state = buildAgentTurnState([{
     ...message,
@@ -120,6 +131,14 @@ export default function TeamAgentTurnBubble({ message, isStreaming = false, team
   const communicationStatus = isCommunicationMessage(message.communicationKind)
     ? communicationStatusLabel(message.communicationStatus)
     : "";
+  const isUserMentionAnswer = message.communicationKind === "user_mention_answer";
+  const canRetryMention = isUserMentionAnswer
+    && RETRYABLE_MENTION_STATUSES.has(String(message.communicationStatus || "").trim())
+    && Boolean(message.communicationRequestText)
+    && Boolean(onRetryMention);
+  const canCancelMention = isUserMentionAnswer
+    && ACTIVE_MENTION_STATUSES.has(String(message.communicationStatus || "").trim())
+    && Boolean(onCancelMention);
   const isCollapsible = message.displayMode === "collapsible";
   const isPlanningProgress = message.eventType === "team_planning_progress";
   const afterContent = (
@@ -132,6 +151,32 @@ export default function TeamAgentTurnBubble({ message, isStreaming = false, team
             <MarkdownContent content={processText} />
           </div>
         </details>
+      )}
+      {(canRetryMention || canCancelMention) && (
+        <div className="team-internal__communication-actions">
+          {canRetryMention && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.currentTarget.disabled = true;
+                onRetryMention?.(message);
+              }}
+            >
+              重试
+            </button>
+          )}
+          {canCancelMention && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.currentTarget.disabled = true;
+                onCancelMention?.(message);
+              }}
+            >
+              取消
+            </button>
+          )}
+        </div>
       )}
     </>
   );

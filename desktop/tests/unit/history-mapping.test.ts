@@ -361,6 +361,31 @@ describe('Team Session history mapping', () => {
     expect(merged[0].requestId).toBe('mention_req_2');
     expect(merged[0].communicationStatus).toBe('answered');
   });
+
+  it('replaces a waiting direct mention with the terminal answer by request id', () => {
+    const waiting = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '正在询问 coder…',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'waiting_reply',
+      request_id: 'mention_req_waiting',
+      communication_request_text: '你使用的是什么模型？',
+    });
+    const answered = {
+      ...waiting,
+      id: 'answered',
+      content: '当前使用 K3 模型。',
+      communicationStatus: 'answered',
+      replyTo: 'bus_msg_waiting',
+    };
+
+    const merged = mergeTeamInternalMessage([waiting], answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].content).toBe('当前使用 K3 模型。');
+    expect(merged[0].communicationStatus).toBe('answered');
+  });
 });
 
 describe('inferTurnFileChangesFromToolCalls', () => {

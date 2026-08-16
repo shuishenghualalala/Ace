@@ -314,6 +314,7 @@ class TeamAskCoordinator:
                     "request_id": normalized_request_id,
                     "answer": str(message.content or ""),
                     "reply_to": str(message.reply_to or ""),
+                    "communication_request_text": str(message.communication_request_text or ""),
                 }
         return None
 
@@ -469,6 +470,7 @@ class TeamAskCoordinator:
                     communication_status="cancelled",
                     request_id=request_id,
                     reply_to=request_message_id,
+                    communication_request_text=question,
                 )
                 await self._emit_lifecycle(event, "cancelled")
                 raise
@@ -508,6 +510,7 @@ class TeamAskCoordinator:
                 communication_status="answered",
                 request_id=request_id,
                 reply_to=request_message_id,
+                communication_request_text=question,
             )
             result = {
                 "status": "answered",
@@ -545,6 +548,7 @@ class TeamAskCoordinator:
             communication_status=status,
             request_id=request_id,
             reply_to=request_message_id,
+            communication_request_text=str(event.get("content") or event.get("text") or "").strip(),
         )
         answer_message = self.bus.send(
             team_session_id=self.session_id,
@@ -579,6 +583,7 @@ class TeamAskCoordinator:
         communication_status: str,
         request_id: str,
         reply_to: str,
+        communication_request_text: str = "",
     ) -> None:
         """把通信状态写回已有的 Agent 子会话。
 
@@ -615,6 +620,7 @@ class TeamAskCoordinator:
             answer.communication_status = communication_status
             answer.request_id = request_id
             answer.reply_to = reply_to
+            answer.communication_request_text = communication_request_text.strip() or None
             self.session_store.save(
                 turn_session_id,
                 messages,

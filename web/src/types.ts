@@ -652,6 +652,7 @@ export interface UiMessage {
   communicationStatus?: string;
   requestId?: string;
   replyTo?: string;
+  communicationRequestText?: string;
   displayMode?: "chat" | "collapsible" | string;
   collapsedTitle?: string;
   processText?: string;

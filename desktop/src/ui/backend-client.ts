@@ -369,6 +369,7 @@ export interface BackendHistoryItem {
   communication_status?: string;
   request_id?: string;
   reply_to?: string;
+  communication_request_text?: string;
   display_mode?: string;
   collapsed_title?: string;
   process_text?: string;

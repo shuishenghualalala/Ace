@@ -615,3 +615,13 @@
 </div>
 </body>
 </html>
+  <section>
+    <h2>用户 Agent mention 重试与取消（2026-08-16）</h2>
+    <ul>
+      <li><b>运行态：</b>直接 mention 先渲染“等待回答”气泡；操作入口通过既有 <code>conversation-renderer</code> 事件委托接线，取消复用 <code>stopGeneration()</code>，不新增 Desktop 专用后端接口。</li>
+      <li><b>重试：</b>失败、超时、取消且存在 <code>communicationRequestText</code> 时显示“重试”；回调复用 <code>dispatchWs()</code> 和原成员，自动生成新的 <code>request_id</code>。</li>
+      <li><b>状态一致：</b>Desktop history mapping、实时 reducer 和 DOM renderer 使用同一通信字段；等待帧与终态 answer 按 request_id 合并，刷新后仍可恢复终态。</li>
+      <li><b>范围：</b>只复用 <code>ChatMessage</code>、<code>TeamInternalChunk</code>、<code>chat-controller</code>、<code>conversation-renderer</code> 和既有样式；不新增模块、任务、DAG 或产物。</li>
+    </ul>
+    <p>验证：Desktop history mapping/渲染回归 72 passed，Desktop TypeScript typecheck 通过。</p>
+  </section>

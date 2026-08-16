@@ -166,6 +166,36 @@ describe('renderAgentTurn', () => {
       .toHaveProperty('disabled', true);
   });
 
+  it('直接 mention 失败可重试，运行中可取消', () => {
+    const failed = renderTeamInternalMessage({
+      id: 'mention-failed',
+      role: 'team_internal',
+      content: '回答失败',
+      timestamp: 1_700_000_000_000,
+      agentId: 'coder',
+      agentName: 'coder',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'failed',
+      requestId: 'mention-1',
+      communicationRequestText: '你使用的是什么模型？',
+    });
+    expect(failed.querySelector('[data-team-communication-action="retry"]')?.textContent).toBe('重试');
+
+    const waiting = renderTeamInternalMessage({
+      id: 'mention-waiting',
+      role: 'team_internal',
+      content: '正在询问 coder…',
+      timestamp: 1_700_000_000_000,
+      agentId: 'coder',
+      agentName: 'coder',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'waiting_reply',
+      requestId: 'mention-2',
+      communicationRequestText: '你使用的是什么模型？',
+    });
+    expect(waiting.querySelector('[data-team-communication-action="cancel"]')?.textContent).toBe('取消');
+  });
+
   it('Team 规划运行中复用 Agent Turn 实时计时，以团队名称和 Team Logo 展示', () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_700_000_003_400);

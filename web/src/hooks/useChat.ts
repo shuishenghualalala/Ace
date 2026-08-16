@@ -734,6 +734,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             communicationStatus: c.body.communication_status,
             requestId: c.body.request_id,
             replyTo: c.body.reply_to,
+            communicationRequestText: c.body.communication_request_text,
             displayMode: c.body.display_mode,
             collapsedTitle: c.body.collapsed_title,
             thinking: normalizeTeamText(c.body.thinking),
@@ -1119,6 +1120,18 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     }
   }, []);
 
+  const cancelMention = useCallback((sessionId: string, requestId?: string) => {
+    stop(sessionId);
+    const normalizedRequestId = String(requestId || "").trim();
+    if (!normalizedRequestId) return;
+    setMessagesMap((prev) => ({
+      ...prev,
+      [sessionId]: (prev[sessionId] ?? []).map((message) => message.requestId === normalizedRequestId
+        ? { ...message, communicationStatus: "cancelled" }
+        : message),
+    }));
+  }, [stop]);
+
   /** 向运行中的回复注入补充指令（不打断；后端回 status 帧确认）。
    *  本地把这句作为 user 气泡显示，让用户看见自己注入了什么。 */
   const steer = useCallback((sessionId: string, text: string) => {
@@ -1475,6 +1488,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     }),
     send,
     stop,
+    cancelMention,
     steer,
     enterPlan,
     exitPlan,

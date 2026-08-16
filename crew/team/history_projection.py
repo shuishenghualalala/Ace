@@ -242,6 +242,7 @@ def team_internal_history_items(
                 **({"communication_status": message.communication_status} if message.communication_status else {}),
                 **({"request_id": message.request_id} if message.request_id else {}),
                 **({"reply_to": message.reply_to} if message.reply_to else {}),
+                **({"communication_request_text": message.communication_request_text} if message.communication_request_text else {}),
             })
     try:
         tasks = crew.tasks.list_tasks(limit=1000, owner_account_id=owner_account_id)

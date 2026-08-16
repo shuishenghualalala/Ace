@@ -218,6 +218,7 @@ class Message:
     communication_status: str | None = None
     request_id: str | None = None
     reply_to: str | None = None
+    communication_request_text: str | None = None
 
     def to_openai(self) -> dict[str, Any]:
         """转换为 OpenAI Chat Completions 的 message 字典。

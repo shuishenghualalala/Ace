@@ -248,6 +248,7 @@ class SQLiteSessionStore(SessionStore):
                     communication_status=d.get("communication_status"),
                     request_id=d.get("request_id"),
                     reply_to=d.get("reply_to"),
+                    communication_request_text=d.get("communication_request_text"),
                 )
             )
         return out

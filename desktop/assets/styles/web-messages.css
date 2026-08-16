@@ -741,6 +741,25 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   line-height: 1;
   padding: 3px 7px;
 }
+.chat-messages.web-flow .team-internal__communication-actions {
+  display: flex;
+  gap: var(--mw-space-2);
+  margin-top: var(--mw-space-2);
+}
+.chat-messages.web-flow .team-internal__communication-actions button {
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: 999px;
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--mw-type-caption-size);
+  line-height: 1.2;
+  padding: 4px 10px;
+}
+.chat-messages.web-flow .team-internal__communication-actions button:hover {
+  border-color: var(--mw-border-strong);
+}
 
 .chat-messages.web-flow .team-internal__bubble {
   display: inline-block;

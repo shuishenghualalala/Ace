@@ -817,3 +817,11 @@ cd web && npm run build
 </div>
 </body>
 </html>
+  <h2>74. 用户 Agent mention 重试与取消（2026-08-16）</h2>
+  <ul>
+    <li><b>运行态：</b>直接 mention 先展示“等待回答”，沿用 ChatPanel 现有 stop；取消后当前气泡即时变为“已取消”，不新增前端通信协议。</li>
+    <li><b>重试：</b>失败、超时、取消且历史保存原始 prompt 时显示“重试”；重试复用目标 Agent 和 prompt，由 <code>useChat.send()</code> 生成新的 <code>request_id</code>。</li>
+    <li><b>合并：</b>等待帧与最终 answer 按 <code>request_id + agent_id</code> 更新同一个气泡；历史恢复继续使用 <code>communication_request_text</code>，缺失时不展示不可执行的重试按钮。</li>
+    <li><b>边界：</b>Web 只扩展既有 <code>TeamAgentTurnBubble</code>、<code>MessageList</code>、<code>ChatPanel</code>、<code>useChat</code> 与历史字段，不创建 DAG、Task、产物或新模块。</li>
+  </ul>
+  <p>验证：Web Team 气泡/历史回归 25 passed，Web TypeScript typecheck 通过。</p>

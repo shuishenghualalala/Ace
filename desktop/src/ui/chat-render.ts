@@ -120,6 +120,7 @@ export interface ChatMessage {
   communicationStatus?: string | undefined;
   requestId?: string | undefined;
   replyTo?: string | undefined;
+  communicationRequestText?: string | undefined;
   displayMode?: string | undefined;
   collapsedTitle?: string | undefined;
   processText?: string | undefined;
@@ -1337,7 +1338,14 @@ function isCommunicationMessage(kind?: string): boolean {
   return COMMUNICATION_MESSAGE_KINDS.has(String(kind || '').trim());
 }
 
-export function renderTeamInternalMessage(message: ChatMessage, isStreaming = false): HTMLElement {
+const RETRYABLE_MENTION_STATUSES = new Set(['failed', 'expired', 'cancelled']);
+const ACTIVE_MENTION_STATUSES = new Set(['published', 'waiting_reply', 'queued', 'delivered']);
+
+export function renderTeamInternalMessage(
+  message: ChatMessage,
+  isStreaming = false,
+  actionState: { canRetry?: boolean; canCancel?: boolean } = {},
+): HTMLElement {
   const isPlanning = message.eventType === 'team_planning_progress';
   const isCrew = String(message.agentId || '').trim() === CREW_BUILTIN_AGENT_ID;
   const name = isPlanning
@@ -1438,6 +1446,27 @@ export function renderTeamInternalMessage(message: ChatMessage, isStreaming = fa
 
   const artifacts = renderTeamArtifacts(message.artifacts);
   if (artifacts) bubble.appendChild(artifacts);
+
+  const mentionStatus = String(message.communicationStatus || '').trim();
+  if (message.communicationKind === 'user_mention_answer') {
+    const actions = document.createElement('div');
+    actions.className = 'team-internal__communication-actions';
+    if (actionState.canRetry !== false && RETRYABLE_MENTION_STATUSES.has(mentionStatus) && message.communicationRequestText) {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = '重试';
+      retry.dataset.teamCommunicationAction = 'retry';
+      actions.appendChild(retry);
+    }
+    if (actionState.canCancel !== false && ACTIVE_MENTION_STATUSES.has(mentionStatus)) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = '取消';
+      cancel.dataset.teamCommunicationAction = 'cancel';
+      actions.appendChild(cancel);
+    }
+    if (actions.childElementCount > 0) bubble.appendChild(actions);
+  }
 
   if (isPlanning) {
     const label = bubble.querySelector<HTMLElement>('.msg__fold-label');

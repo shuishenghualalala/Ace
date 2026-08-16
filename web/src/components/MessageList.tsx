@@ -23,6 +23,8 @@ interface Props {
   ) => boolean | void;
   onDismissFollowup?: () => void;
   onEditMessage?: (message: UiMessage) => void;
+  onRetryMention?: (message: UiMessage) => void;
+  onCancelMention?: (message: UiMessage) => void;
   teamMembers?: TeamMemberView[];
   showEmptyState?: boolean;
   currentAgentLabel?: Session["agent_label"];
@@ -39,6 +41,8 @@ export default function MessageList({
   onAnswerFollowup,
   onDismissFollowup,
   onEditMessage,
+  onRetryMention,
+  onCancelMention,
   teamMembers,
   showEmptyState = true,
   currentAgentLabel,
@@ -128,6 +132,8 @@ export default function MessageList({
               canEdit={turn.message.id === latestUserMessageId}
               onEdit={onEditMessage}
               teamMembers={teamMembers}
+              onRetryMention={busy ? undefined : onRetryMention}
+              onCancelMention={busy ? onCancelMention : undefined}
             />
           ) : isAcpSession ? (
             <AgentTurnBubble

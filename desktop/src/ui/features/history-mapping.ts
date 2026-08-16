@@ -240,6 +240,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     communicationStatus: item.communication_status,
     requestId: item.request_id,
     replyTo: item.reply_to,
+    communicationRequestText: item.communication_request_text,
     displayMode: item.display_mode,
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,
@@ -363,6 +364,10 @@ function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boo
     && existing.content.trim() === incoming.content.trim();
 }
 
+function isUserMentionAnswer(message: ChatMessage): boolean {
+  return message.communicationKind === 'user_mention_answer' && Boolean(message.requestId);
+}
+
 function shouldSuppressApproveDecision(existing: ChatMessage, incoming: ChatMessage): boolean {
   const approved = incoming.eventType === 'team_decision'
     && (incoming.mentionIntent === 'approve' || ['审阅通过，继续后续流程。', '审阅通过，开始后续流程。'].includes(incoming.content.trim()));
@@ -392,6 +397,20 @@ export function mergeTeamInternalMessage(
     ? messages.filter((message) => !isDuplicateAssistantOfTeamResult(message, incoming))
     : messages;
   if (next.some((message) => isDuplicateTeamEvent(message, incoming))) return next;
+  if (isUserMentionAnswer(incoming)) {
+    const communicationIndex = next.findIndex((message) =>
+      isUserMentionAnswer(message)
+      && message.requestId === incoming.requestId
+      && message.agentId === incoming.agentId,
+    );
+    if (communicationIndex >= 0) {
+      return [
+        ...next.slice(0, communicationIndex),
+        { ...next[communicationIndex], ...incoming },
+        ...next.slice(communicationIndex + 1),
+      ];
+    }
+  }
   let matchingIndex = -1;
   for (let index = next.length - 1; index >= 0; index -= 1) {
     if (matchesTeamNode(next[index], incoming)) {
