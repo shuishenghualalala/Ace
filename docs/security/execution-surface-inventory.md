@@ -55,6 +55,7 @@
 | `crew/wiki/parser.py` | broker | 旧 Office 转换已使用 `execute_captured_sync`；Gateway 的 `asyncio.to_thread` 会继承可信 `ProcessLaunch`，managed runtime 缺失或上下文丢失时失败关闭。 |
 | `scripts/audit_runtime_npm.py` | dev-only | CI/发布期遍历源码锁文件并以固定 npm audit argv 审计生产依赖；不进入用户安装包。 |
 | `scripts/check_release_readiness.py` | dev-only | CI/发布期以固定 git argv 绑定验收证据到当前提交；不执行用户输入命令，不进入用户安装包。 |
+| `scripts/run_e2e_batch.py` | dev-only | 本地/CI 的 E2E 批量 runner：以固定 argv 为每个场景启动独立 Python 子进程并产出报告；不执行用户输入命令，不进入用户安装包。 |
 | `desktop/src/main/index.ts` | host-fixed | Gateway 启停、更新器和 OS 生命周期；固定产品 argv。严格模式要求初始及重定向后最终地址均为 HTTPS、Ed25519 detached signature，并在下载和安装前后校验；兼容模式保留旧更新源能力。 |
 | `desktop/src/main/open-with-service.ts` | host-fixed | 仅响应 Desktop 用户“使用其他应用打开”；应用来自当前 OS 已登记清单，命令固定、argv 分离，并限制探测输出与超时；超时或输出超限会终止完整探测进程树。 |
 | `desktop/src/main/uninstall.ts` | host-fixed | 卸载清理；仅签名安装包的用户发起卸载流程可达。 |
