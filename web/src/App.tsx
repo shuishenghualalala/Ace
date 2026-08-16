@@ -390,6 +390,9 @@ export default function App() {
   };
 
   const deleteSession = async (id: string) => {
+    const title = sessions.find((s) => s.session_id === id)?.title || "新会话";
+    // 与其他删除入口（Wiki 页面/外援/团队/Wiki 对话）一致用原生 confirm 二次确认
+    if (!window.confirm(`确定删除会话「${title}」吗？该操作不可撤销。`)) return;
     await api.deleteSession(id);
     chat.clearSession(id);
     await refreshSessions();
