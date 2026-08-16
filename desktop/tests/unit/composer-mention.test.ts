@@ -5,7 +5,8 @@
  */
 // @vitest-environment happy-dom
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { BrowserPageState } from '../../src/ui/backend-client';
 import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, fetchBrowserTabMentions, filterBrowserTabs, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, workMentionText } from '../../src/ui/features/composer-mention';
 
 describe('detectTrigger', () => {
@@ -291,5 +292,76 @@ describe('browser_tab 提及', () => {
   it('无浏览器会话时 provider 静默返回空数组', async () => {
     // 测试环境 state.activeSessionId 为 null，不应发起任何请求
     await expect(fetchBrowserTabMentions('')).resolves.toEqual([]);
+  });
+});
+
+describe('fetchBrowserTabMentions 标签页缓存（击键只本地过滤）', () => {
+  const tabs = [
+    { id: 'tab-1', label: '标签 1', url: 'https://example.com/a', title: '示例页面' },
+    { id: 'tab-2', label: '标签 2', url: 'https://foo.bar/b', title: '' },
+  ];
+
+  // 缓存是模块级状态：每个用例重置模块注册表，拿到全新的 composer-mention / backend-client / sessionStore
+  async function setup() {
+    vi.resetModules();
+    const [{ sessionStore }, { backendApi }, mod] = await Promise.all([
+      import('../../src/ui/stores/session-store'),
+      import('../../src/ui/backend-client'),
+      import('../../src/ui/features/composer-mention'),
+    ]);
+    sessionStore.set({ activeSessionId: 'sess-1' });
+    const spy = vi.spyOn(backendApi, 'browserState').mockResolvedValue({
+      ok: true,
+      state: { tabs } as unknown as BrowserPageState,
+    });
+    return { sessionStore, spy, fetchMentions: mod.fetchBrowserTabMentions };
+  }
+
+  it('同一 session 的连续击键只拉取一次，query 过滤在本地', async () => {
+    const { spy, fetchMentions } = await setup();
+    const first = await fetchMentions('示例');
+    const second = await fetchMentions('FOO.BAR');
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(first.map((r) => r.id)).toEqual(['tab-1']);
+    expect(second.map((r) => r.id)).toEqual(['tab-2']);
+  });
+
+  it('并发击键共享进行中的同一次拉取', async () => {
+    const { spy, fetchMentions } = await setup();
+    const [a, b] = await Promise.all([fetchMentions('示例'), fetchMentions('FOO.BAR')]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(a.map((r) => r.id)).toEqual(['tab-1']);
+    expect(b.map((r) => r.id)).toEqual(['tab-2']);
+  });
+
+  it('TTL（2s）过期后重新拉取', async () => {
+    vi.useFakeTimers();
+    try {
+      const { spy, fetchMentions } = await setup();
+      await fetchMentions('');
+      expect(spy).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(2100);
+      await fetchMentions('');
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('切换 session 后缓存不命中，按新 session 重新拉取', async () => {
+    const { sessionStore, spy, fetchMentions } = await setup();
+    await fetchMentions('');
+    sessionStore.set({ activeSessionId: 'sess-2' });
+    await fetchMentions('');
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenLastCalledWith('sess-2');
+  });
+
+  it('接口失败不写缓存，下次击键自然重试', async () => {
+    const { spy, fetchMentions } = await setup();
+    spy.mockRejectedValueOnce(new Error('gateway down'));
+    await expect(fetchMentions('')).resolves.toEqual([]);
+    await expect(fetchMentions('')).resolves.toHaveLength(2);
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });
