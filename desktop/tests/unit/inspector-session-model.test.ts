@@ -38,6 +38,7 @@ import {
   defaultInspectorTabForSession,
   openInspectorToTab,
   refreshInspectorChrome,
+  bindInspectorUi,
 } from '../../src/ui/features/inspector';
 import {
   createSessionInWorkspace,
@@ -402,5 +403,26 @@ describe('Inspector「上下文」页随会话模型变化', () => {
     const text = document.getElementById('chat-inspector-body')?.textContent ?? '';
     expect(text).toContain('Global-Default');
     expect(text).toContain('128.0k');
+  });
+
+  it('非活跃会话的 session:model-changed 不重拉（wiki 内嵌会话等）', () => {
+    bindInspectorUi();
+    backendMocks.sessionContext.mockClear();
+
+    applySessionModelBinding('other-sess', {
+      model_profile_id: 'session-model-x',
+      model_label: 'Session Model X',
+      has_pending: false,
+      pending: false,
+    });
+    expect(backendMocks.sessionContext).not.toHaveBeenCalled();
+
+    applySessionModelBinding('sess-a', {
+      model_profile_id: 'session-model-x',
+      model_label: 'Session Model X',
+      has_pending: false,
+      pending: false,
+    });
+    expect(backendMocks.sessionContext).toHaveBeenCalledWith('sess-a');
   });
 });
