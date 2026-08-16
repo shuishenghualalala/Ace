@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 from crew.browser.driver import BrowserDriver, BrowserDriverError, BrowserOperationCancelled
 from crew.browser.electron_driver import ElectronBrowserDriver
 from crew.browser.security import BrowserNetworkPolicy, LoopbackPolicyProxy, path_is_within
-from crew.browser.types import BrowserConfig, BrowserPageState, BrowserRef
+from crew.browser.types import BATCH_STEP_TOOLS, BrowserConfig, BrowserPageState, BrowserRef
 from crew.core.types import MediaPart, ToolOutput, ToolPermissionDecision
 from crew.state.home import get_owner_runtime_home
 from crew.state.logging import get_logger
@@ -427,24 +427,6 @@ _GOVERNANCE_WRITES = frozenset(
         "browser_drop",
     }
 )
-
-# batch 步骤 action → 逻辑工具名。与 plugins/browser 的 _BATCHABLE_ACTIONS
-# 同一词表；manager 不反向 import 插件（Crew 定规范、插件适配 Crew）。
-_GOVERNANCE_BATCH_STEPS = {
-    "click": "browser_click",
-    "drag": "browser_drag",
-    "type": "browser_type",
-    "fill_form": "browser_fill_form",
-    "select": "browser_select",
-    "check": "browser_check",
-    "hover": "browser_hover",
-    "scroll": "browser_scroll",
-    "press": "browser_press",
-    "keydown": "browser_keydown",
-    "keyup": "browser_keyup",
-    "wait": "browser_wait",
-    "find": "browser_find",
-}
 
 # 页面内执行代码：ask 时禁止「本次对话允许」复用，每次都必须单独确认。
 _GOVERNANCE_NO_ALLOW_ALWAYS = frozenset({"browser_evaluate", "browser_run_code_unsafe"})
@@ -10255,13 +10237,14 @@ class BrowserManager:
         if tool_name == "browser_run_code_unsafe":
             return "将执行任意 Playwright 自动化代码（最高危动作）"
         if tool_name == "browser_batch":
-            # 整批取最高危级别：任一敏感步骤则整批 ask。
+            # 整批取最高危级别：任一敏感步骤则整批 ask。未登记的 action 不影响
+            # 敏感判定（执行时插件会拒绝），但写判定按 fail-closed 处理。
             steps = args.get("steps")
             if isinstance(steps, list):
                 for step in steps:
                     if not isinstance(step, dict):
                         continue
-                    sub_name = _GOVERNANCE_BATCH_STEPS.get(str(step.get("action") or ""))
+                    sub_name = BATCH_STEP_TOOLS.get(str(step.get("action") or ""))
                     if not sub_name:
                         continue
                     reason = self._sensitive_reason(sub_name, step, owner_id, session_id)
@@ -10274,12 +10257,15 @@ class BrowserManager:
         steps = args.get("steps")
         if not isinstance(steps, list):
             return False
-        return any(
-            isinstance(step, dict)
-            and _GOVERNANCE_BATCH_STEPS.get(str(step.get("action") or ""))
-            in _GOVERNANCE_WRITES
-            for step in steps
-        )
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            sub_name = BATCH_STEP_TOOLS.get(str(step.get("action") or ""))
+            # 未登记的 action 按写操作保守处理（fail-closed）：它本会被插件执行侧
+            # 拒绝，治理侧绝不能静默放行（read_only 档的底线）。
+            if sub_name is None or sub_name in _GOVERNANCE_WRITES:
+                return True
+        return False
 
     @staticmethod
     def _approval_digest(tool_name: str, args: dict[str, Any]) -> str:
@@ -10314,7 +10300,7 @@ class BrowserManager:
         self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
     ) -> ToolPermissionDecision | None:
         """动作治理：各分支参数/ref 校验通过后，按 governance_mode 决定放行/审批/拒绝。"""
-        mode = str(getattr(self.config, "governance_mode", "") or "confirm_sensitive")
+        mode = self.config.governance_mode or "confirm_sensitive"
         if mode == "off":
             return None
         sensitive = self._sensitive_reason(tool_name, args, owner_id, session_id)
@@ -10379,8 +10365,7 @@ class BrowserManager:
             # fill_form never submits. Strict schema, latest-generation refs
             # and Host-side per-field exact-Locator checks are sufficient for
             # ordinary form completion; confirm_sensitive 档不额外审批，
-            # confirm_writes/read_only 档由治理层统一处理。
-            return self._governance_gate(tool_name, args, owner_id, session_id)
+            # confirm_writes/read_only 档由末尾治理门统一处理。
         elif tool_name in {
             "browser_select",
             "browser_check",
@@ -10394,25 +10379,17 @@ class BrowserManager:
                 return ToolPermissionDecision(
                     "deny", "表单目标的 ref 不属于当前页面或已失效"
                 )
-            if tool_name in {"browser_hover", "browser_drop"}:
-                return self._governance_gate(tool_name, args, owner_id, session_id)
             if tool_name == "browser_select":
                 try:
                     self._validated_select_values(args.get("values"))
                 except BrowserDriverError as exc:
                     return ToolPermissionDecision("deny", str(exc))
-                return self._governance_gate(tool_name, args, owner_id, session_id)
-            if type(args.get("checked")) is not bool:
+            elif tool_name == "browser_check" and type(args.get("checked")) is not bool:
                 return ToolPermissionDecision("deny", "check checked 必须是 boolean")
-            return self._governance_gate(tool_name, args, owner_id, session_id)
-        elif tool_name in {"browser_upload", "browser_download"}:
-            # 路径、大小、ref 与目标标签页都在真正执行路径中重新验证；此处按
-            # 治理档位决定是否加一次性审批（confirm_sensitive 起默认 ask）。
-            return self._governance_gate(tool_name, args, owner_id, session_id)
-        elif tool_name == "browser_dialog":
-            return self._governance_gate(tool_name, args, owner_id, session_id)
+        # browser_upload / browser_download / browser_dialog 无参数级校验
+        # （路径、大小、ref 在真正执行路径中重新验证），直接落到末尾治理门。
         elif tool_name == "browser_click" and args.get("screenshot_id"):
-            return self._governance_gate(tool_name, args, owner_id, session_id)
+            pass  # 截图坐标点击无 ref，跳过 ref 校验；治理在末尾统一判定
         elif tool_name == "browser_click":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10433,7 +10410,6 @@ class BrowserManager:
             # Element clicks always dispatch the real Playwright Locator action.
             # There is no href-direct-open substitution; 提交型点击由治理层
             # 按需加一次性审批。
-            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_drag":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10447,7 +10423,6 @@ class BrowserManager:
                 return ToolPermissionDecision(
                     "deny", "drag 的 start_ref/end_ref 不属于当前页面或已失效"
                 )
-            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_type":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10463,7 +10438,6 @@ class BrowserManager:
                 or type(args.get("slowly", False)) is not bool
             ):
                 return ToolPermissionDecision("deny", "type 参数无效")
-            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name in {"browser_press", "browser_keydown", "browser_keyup"}:
             key = args.get("key")
             ref = str(args.get("ref") or "")
@@ -10482,7 +10456,6 @@ class BrowserManager:
                     return ToolPermissionDecision(
                         "deny", "press 的 ref 不属于当前页面或已失效"
                     )
-            return self._governance_gate(tool_name, args, owner_id, session_id)
         elif tool_name == "browser_wait":
             try:
                 self._validated_wait(
@@ -10492,13 +10465,9 @@ class BrowserManager:
                 )
             except BrowserDriverError as exc:
                 return ToolPermissionDecision("deny", str(exc))
-            return None
-        elif tool_name == "browser_navigate":
-            return None
-        elif tool_name == "browser_tabs" and args.get("action") == "new":
-            return None
-        # 其余动作（evaluate/run_code_unsafe/batch/screenshot/mouse_*/network 等）
-        # 无参数级校验，直接进治理档判定。
+        # 所有工具统一过治理门：上面的分支只做参数/ref 校验，治理不再是各分支
+        # 自觉调用的可选项（新增分支忘了 return 也不会绕过档位）。wait/navigate/
+        # tabs:new 等无写无敏感语义的动作经门判定后照常放行。
         return self._governance_gate(tool_name, args, owner_id, session_id)
 
     @staticmethod

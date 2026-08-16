@@ -252,8 +252,51 @@ async def test_read_only_denies_writes_and_sensitive_actions(browser):
         ("browser_snapshot", {}),
         ("browser_hover", {"ref": PLAIN_REF}),
         ("browser_batch", {"steps": [{"action": "find", "text": "search"}]}),
+        # 无写无敏感语义的动作经末尾统一治理门判定后照常放行
+        ("browser_wait", {"time_seconds": 0.1}),
+        ("browser_tabs", {"action": "new"}),
     ):
         assert manager.permission_for(tool_name, args, OWNER, SESSION) is None
+
+
+async def test_read_only_fail_closed_on_unregistered_batch_action(browser):
+    """batch 步骤含词表未登记的 action 时，read_only 档必须 fail-closed 拒绝，
+    不能因「表里查不到」而静默放行（该调用在执行侧本也会被插件拒绝）。"""
+    manager, _driver = browser
+    manager.config.governance_mode = "read_only"
+    await manager.navigate(OWNER, SESSION, "https://example.com")
+
+    decision = manager.permission_for(
+        "browser_batch",
+        {"steps": [{"action": "paste", "ref": PLAIN_REF}]},
+        OWNER,
+        SESSION,
+    )
+    assert decision is not None and decision.behavior == "deny"
+    assert "read_only" in decision.reason
+
+    # confirm_sensitive 档不打扰：未登记步骤没有敏感语义，执行侧会给出明确错误
+    manager.config.governance_mode = "confirm_sensitive"
+    assert (
+        manager.permission_for(
+            "browser_batch",
+            {"steps": [{"action": "paste", "ref": PLAIN_REF}]},
+            OWNER,
+            SESSION,
+        )
+        is None
+    )
+
+
+def test_batch_step_vocabulary_has_single_source():
+    """可批量动作的词表唯一来源是 types.BATCH_STEP_TOOLS：插件两张表都由它派生，
+    新增可批量动作只改 types.py 一处，治理分类不可能漏登记。"""
+    from crew.browser.types import BATCH_STEP_TOOLS
+    from plugins.browser.tool import _ACTION_LOGICAL, _BATCHABLE_ACTIONS
+
+    assert _BATCHABLE_ACTIONS == frozenset(BATCH_STEP_TOOLS)
+    for action, tool in BATCH_STEP_TOOLS.items():
+        assert _ACTION_LOGICAL[action] == (tool, None)
 
 
 async def test_governance_off_allows_everything(browser):

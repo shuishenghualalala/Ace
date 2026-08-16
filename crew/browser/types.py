@@ -17,6 +17,25 @@ BrowserControlMode = Literal["ai", "human", "paused"]
 # - read_only：写交互与高危动作直接拒绝
 GOVERNANCE_MODES = frozenset({"off", "confirm_sensitive", "confirm_writes", "read_only"})
 
+# batch 步骤 action → 逻辑工具名。**词表唯一来源**：plugins/browser 的
+# _ACTION_LOGICAL / _BATCHABLE_ACTIONS 与 manager 的治理分类都从这里取，
+# 新增可批量动作只改这一处——治理档位不可能漏登记（fail-open 静默放行）。
+BATCH_STEP_TOOLS: dict[str, str] = {
+    "click": "browser_click",
+    "drag": "browser_drag",
+    "type": "browser_type",
+    "fill_form": "browser_fill_form",
+    "select": "browser_select",
+    "check": "browser_check",
+    "hover": "browser_hover",
+    "scroll": "browser_scroll",
+    "press": "browser_press",
+    "keydown": "browser_keydown",
+    "keyup": "browser_keyup",
+    "wait": "browser_wait",
+    "find": "browser_find",
+}
+
 
 @dataclass
 class BrowserConfig:

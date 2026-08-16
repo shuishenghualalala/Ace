@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from crew.browser.driver import BrowserDriverError
 from crew.browser.manager import DEFERRED_OBSERVATION_NOTE, BrowserManager
+from crew.browser.types import BATCH_STEP_TOOLS
 from crew.core.runctx import (
     current_agent_workdir,
     current_model_capabilities,
@@ -79,11 +80,11 @@ _ACTIONS_WITH_POST_SNAPSHOT = frozenset(
 
 # action -> (逻辑工具名, 子 action)。tabs/dialog/takeover 三个逻辑工具按子 action 展开。
 _ACTION_LOGICAL: dict[str, tuple[str, str | None]] = {
+    # 可批量步骤的词表唯一来源是 crew.browser.types.BATCH_STEP_TOOLS（治理层
+    # 共用同一份），这里并入，不在本文件重复登记。
+    **{action: (tool, None) for action, tool in BATCH_STEP_TOOLS.items()},
     "navigate": ("browser_navigate", None),
     "snapshot": ("browser_snapshot", None),
-    "find": ("browser_find", None),
-    "click": ("browser_click", None),
-    "drag": ("browser_drag", None),
     "mouse_move": ("browser_mouse_move_xy", None),
     "mouse_down": ("browser_mouse_down", None),
     "mouse_up": ("browser_mouse_up", None),
@@ -93,19 +94,9 @@ _ACTION_LOGICAL: dict[str, tuple[str, str | None]] = {
     "resize": ("browser_resize", None),
     "drop": ("browser_drop", None),
     "locate": ("browser_locate", None),
-    "type": ("browser_type", None),
-    "fill_form": ("browser_fill_form", None),
-    "select": ("browser_select", None),
-    "check": ("browser_check", None),
-    "hover": ("browser_hover", None),
-    "scroll": ("browser_scroll", None),
     "back": ("browser_back", None),
     "forward": ("browser_forward", None),
     "reload": ("browser_reload", None),
-    "press": ("browser_press", None),
-    "keydown": ("browser_keydown", None),
-    "keyup": ("browser_keyup", None),
-    "wait": ("browser_wait", None),
     "screenshot": ("browser_screenshot", None),
     "get_images": ("browser_get_images", None),
     "vision": ("browser_vision", None),
@@ -131,23 +122,8 @@ _ACTION_LOGICAL: dict[str, tuple[str, str | None]] = {
 # batch 步骤只允许「同一页面内的元素级动作」：它们的 ref 全部来自当前最新
 # snapshot，执行中间不重新观察（每次 snapshot 换代会重铸 ref），末步统一观察。
 # 跨页导航/标签页/上传下载/坐标鼠标/截图观察类动作各有独立语义，不放进来。
-_BATCHABLE_ACTIONS = frozenset(
-    {
-        "click",
-        "drag",
-        "type",
-        "fill_form",
-        "select",
-        "check",
-        "hover",
-        "scroll",
-        "press",
-        "keydown",
-        "keyup",
-        "wait",
-        "find",
-    }
-)
+# 词表唯一来源见 crew.browser.types.BATCH_STEP_TOOLS。
+_BATCHABLE_ACTIONS = frozenset(BATCH_STEP_TOOLS)
 # 单批步数上限：够覆盖表单+多步操作流，又不至于让一次调用变成失控脚本。
 _BATCH_MAX_STEPS = 20
 # 中间步骤结果压缩到这个长度以内（find 的命中上下文等小结果保留原文）。
