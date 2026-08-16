@@ -238,6 +238,10 @@ def team_internal_history_items(
                 **({"thinking": message.thinking} if message.thinking else {}),
                 **({"tool_calls": tool_calls} if tool_calls else {}),
                 **({"turn_file_changes": message.turn_file_changes} if message.turn_file_changes else {}),
+                **({"communication_kind": message.communication_kind} if message.communication_kind else {}),
+                **({"communication_status": message.communication_status} if message.communication_status else {}),
+                **({"request_id": message.request_id} if message.request_id else {}),
+                **({"reply_to": message.reply_to} if message.reply_to else {}),
             })
     try:
         tasks = crew.tasks.list_tasks(limit=1000, owner_account_id=owner_account_id)
@@ -266,9 +270,15 @@ def team_internal_history_items(
             "timestamp": float(task.get("updated_at") or task.get("finished_at") or task.get("created_at") or 0),
         })
     deduped: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     for item in sorted(items, key=lambda value: float(value.get("timestamp") or 0)):
-        key = (str(item.get("agent_name") or ""), str(item.get("content") or "")[:160])
+        key = (
+            str(item.get("agent_name") or ""),
+            str(item.get("content") or "")[:160],
+            str(item.get("communication_kind") or ""),
+            str(item.get("communication_status") or ""),
+            str(item.get("request_id") or item.get("reply_to") or ""),
+        )
         if key in seen:
             continue
         seen.add(key)

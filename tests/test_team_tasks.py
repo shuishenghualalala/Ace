@@ -3481,6 +3481,18 @@ async def test_team_ask_timeout_returns_expired_and_replies():
     reply = next(item for item in messages if item["message_type"] == "answer")
     assert request["status"] == "expired"
     assert reply["reply_to"] == request["message_id"]
+    expired_messages = tm.session_store.load(
+        f"communication_timeout_s1::turn::{request['request_id']}::leader",
+        owner_account_id="local",
+    )
+    expired_answer = next(
+        message for message in reversed(expired_messages)
+        if message.role == "assistant" and message.content
+    )
+    assert expired_answer.communication_kind == "ask_answer"
+    assert expired_answer.communication_status == "expired"
+    assert expired_answer.request_id == request["request_id"]
+    assert expired_answer.reply_to == request["message_id"]
 
 
 @pytest.mark.asyncio
@@ -3588,6 +3600,18 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     assert reply["sender_member_id"] == "coder"
     assert reply["recipient_member_ids"] == ["user"]
     assert chunks[-2].body["reply_to"] == request["message_id"]
+    child_messages = tm.session_store.load(
+        f"user_mention_s1::turn::{envelope.request_id}::coder",
+        owner_account_id="local",
+    )
+    child_answer = next(
+        message for message in reversed(child_messages)
+        if message.role == "assistant" and message.content
+    )
+    assert child_answer.communication_kind == "user_mention_answer"
+    assert child_answer.communication_status == "answered"
+    assert child_answer.request_id == envelope.request_id
+    assert child_answer.reply_to == request["message_id"]
 
 
 @pytest.mark.asyncio
@@ -8520,7 +8544,15 @@ def test_team_parent_session_history_aggregates_child_sessions(auth_headers):
                 ]),
                 ("team_parent::turn::r1::kk", [
                     Message(role="user", content="请输出架构设计", timestamp=1.5),
-                    Message(role="assistant", content="架构设计已完成。", timestamp=2.5),
+                    Message(
+                        role="assistant",
+                        content="架构设计已完成。",
+                        timestamp=2.5,
+                        communication_kind="user_mention_answer",
+                        communication_status="answered",
+                        request_id="mention_req",
+                        reply_to="bus_msg",
+                    ),
                 ]),
                 ("team_parent::turn::r1::tool_member", [
                     Message(
@@ -8563,6 +8595,10 @@ def test_team_parent_session_history_aggregates_child_sessions(auth_headers):
         "team_parent::turn::r1::kk",
     ]
     assert [item["role"] for item in response.json()] == ["team_internal", "team_internal"]
+    assert response.json()[1]["communication_kind"] == "user_mention_answer"
+    assert response.json()[1]["communication_status"] == "answered"
+    assert response.json()[1]["request_id"] == "mention_req"
+    assert response.json()[1]["reply_to"] == "bus_msg"
 
 
 def test_team_recovery_gateway_routes_node_action_to_team_manager(auth_headers):
@@ -8691,6 +8727,51 @@ def test_team_history_maps_legacy_crew_child_session_to_builtin_identity():
     assert items[0]["agent_id"] == CREW_BUILTIN_AGENT_ID
     assert items[0]["agent_name"] == "Crew"
     assert items[0]["source_session_id"] == "team_parent::turn::req_1::crew"
+
+
+def test_team_history_keeps_distinct_communication_replies_with_same_text():
+    class Crew:
+        class tasks:
+            @staticmethod
+            def list_tasks(*args, **kwargs):
+                return []
+
+    items = team_internal_history_items(
+        Crew(),
+        "team_parent",
+        [
+            (
+                "team_parent::turn::req_1::coder",
+                [Message(
+                    role="assistant",
+                    content="当前使用 K3 模型。",
+                    timestamp=1,
+                    communication_kind="user_mention_answer",
+                    communication_status="answered",
+                    request_id="req_1",
+                    reply_to="bus_1",
+                )],
+            ),
+            (
+                "team_parent::turn::req_2::coder",
+                [Message(
+                    role="assistant",
+                    content="当前使用 K3 模型。",
+                    timestamp=2,
+                    communication_kind="user_mention_answer",
+                    communication_status="answered",
+                    request_id="req_2",
+                    reply_to="bus_2",
+                )],
+            ),
+        ],
+    )
+
+    assert len(items) == 2
+    assert [item["request_id"] for item in items] == ["req_1", "req_2"]
+    assert items[0]["communication_kind"] == "user_mention_answer"
+    assert items[0]["communication_status"] == "answered"
+    assert items[0]["reply_to"] == "bus_1"
 
 
 def test_team_parent_direct_reply_history_uses_leader_identity(auth_headers):

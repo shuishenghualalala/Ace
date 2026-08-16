@@ -796,6 +796,15 @@ cd web && npm run build
     <li><b>实现边界：</b>只扩展既有 Team 消息 chunk、<code>useChat</code>、<code>historyMap</code> 和 <code>TeamAgentTurnBubble</code>，不改变 Composer 选择协议。</li>
   </ul>
   <p>验证：用户 mention 后端定向回归、Web history mapping 回归、Web TypeScript typecheck 与 production build 通过。</p>
+
+  <h2>72. 用户 Agent mention 历史恢复与失败状态（2026-08-16）</h2>
+  <ul>
+    <li><b>复用子会话：</b>直接 @Agent 的回答和失败结果继续写入已有 <code>{session}::turn::{request_id}::{agent}</code> 子会话，不创建 TeamPlan、Task、DAG 或产物。</li>
+    <li><b>统一通信元数据：</b>在既有 <code>Message</code> 上持久化 <code>communication_kind</code>、<code>communication_status</code>、<code>request_id</code> 和 <code>reply_to</code>；SQLite 对旧消息按缺省值兼容。</li>
+    <li><b>刷新/重连：</b>无 Team workflow 时，历史投影直接从子会话恢复用户 mention 的回答、超时、失败或取消状态，前端沿用现有 Team 气泡和状态徽标。</li>
+    <li><b>去重边界：</b>历史去重保留通信 request_id，两个请求得到相同文本时仍分别展示，避免刷新后丢掉一次回答。</li>
+  </ul>
+  <p>验证：会话存储元数据 round-trip、用户 mention、超时状态、历史 API 投影和同文案通信去重回归通过。</p>
 </div>
 </body>
 </html>

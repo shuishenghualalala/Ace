@@ -7841,6 +7841,7 @@ class InProcessTeamManager(TeamManager):
             session_id=session_id,
             resolve_agent=lambda member: team_agents.get(member),
             owner_account_id=owner_account_id,
+            session_store=self.session_store,
             on_lifecycle=lambda event: self._record_team_communication_lifecycle(
                 session_id,
                 owner_account_id,

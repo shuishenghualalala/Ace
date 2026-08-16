@@ -244,6 +244,10 @@ class SQLiteSessionStore(SessionStore):
                     content_parts=d.get("content_parts"),
                     attachment_type=d.get("attachment_type"),
                     attachment_data=d.get("attachment_data"),
+                    communication_kind=d.get("communication_kind"),
+                    communication_status=d.get("communication_status"),
+                    request_id=d.get("request_id"),
+                    reply_to=d.get("reply_to"),
                 )
             )
         return out

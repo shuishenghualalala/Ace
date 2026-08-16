@@ -10,10 +10,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.types import Message
 from crew.team.bus import TeamBus
 from crew.team.models import MessageType, new_id
 
@@ -225,6 +227,7 @@ class TeamAskCoordinator:
         session_id: str,
         resolve_agent: Callable[[str], Any | None],
         owner_account_id: str = "",
+        session_store: Any | None = None,
         on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
         on_lifecycle: Callable[[dict[str, Any]], Any] | None = None,
         timeout_seconds: float = 30.0,
@@ -233,6 +236,7 @@ class TeamAskCoordinator:
         self.session_id = session_id
         self.resolve_agent = resolve_agent
         self.owner_account_id = owner_account_id
+        self.session_store = session_store
         self.on_chunk = on_chunk
         self.on_lifecycle = on_lifecycle
         self.timeout_seconds = max(0.1, float(timeout_seconds))
@@ -290,7 +294,7 @@ class TeamAskCoordinator:
                 reason=f"目标成员不可用：{target}",
             )
 
-        turn_session_id = f"{self.session_id}::turn::{request_id}::{target}"
+        turn_session_id = self._turn_session_id(request_id, target)
         member_session_id = f"{self.session_id}::{target}"
         owner = str(event.get("owner_account_id") or self.owner_account_id or "local")
         workspace_id = str(event.get("workspace_id") or "default")
@@ -385,6 +389,16 @@ class TeamAskCoordinator:
                 )
             except asyncio.CancelledError:
                 self.bus.update_status(request_message_id, "cancelled")
+                self._persist_communication_history(
+                    turn_session_id,
+                    owner_account_id=owner,
+                    workspace_id=workspace_id,
+                    content="通信回合已取消",
+                    communication_kind=self._answer_kind(event),
+                    communication_status="cancelled",
+                    request_id=request_id,
+                    reply_to=request_message_id,
+                )
                 await self._emit_lifecycle(event, "cancelled")
                 raise
 
@@ -414,6 +428,16 @@ class TeamAskCoordinator:
                 reply_to=request_message_id,
             )
             self.bus.update_status(request_message_id, "answered")
+            self._persist_communication_history(
+                turn_session_id,
+                owner_account_id=owner,
+                workspace_id=workspace_id,
+                content=answer_text,
+                communication_kind=self._answer_kind(event),
+                communication_status="answered",
+                request_id=request_id,
+                reply_to=request_message_id,
+            )
             result = {
                 "status": "answered",
                 "request_id": request_id,
@@ -440,6 +464,17 @@ class TeamAskCoordinator:
         status: str = "failed",
     ) -> dict[str, Any]:
         self.bus.update_status(request_message_id, status)
+        turn_session_id = self._turn_session_id(request_id, target)
+        self._persist_communication_history(
+            turn_session_id,
+            owner_account_id=str(event.get("owner_account_id") or self.owner_account_id or "local"),
+            workspace_id=str(event.get("workspace_id") or "default"),
+            content=reason,
+            communication_kind=self._answer_kind(event),
+            communication_status=status,
+            request_id=request_id,
+            reply_to=request_message_id,
+        )
         answer_message = self.bus.send(
             team_session_id=self.session_id,
             sender_member_id=target,
@@ -461,6 +496,72 @@ class TeamAskCoordinator:
         }
         await self._emit_lifecycle(event, status, result=result)
         return result
+
+    def _persist_communication_history(
+        self,
+        turn_session_id: str,
+        *,
+        owner_account_id: str,
+        workspace_id: str,
+        content: str,
+        communication_kind: str,
+        communication_status: str,
+        request_id: str,
+        reply_to: str,
+    ) -> None:
+        """把通信状态写回已有的 Agent 子会话。
+
+        直接 mention 不创建 TeamPlan，因此不能依赖 Team workflow event projection。
+        子会话本来就是 Agent 回答的 canonical transcript；这里只补充可恢复的
+        通信关联字段，刷新/重连时由通用历史投影读取。
+        """
+
+        if self.session_store is None:
+            return
+        try:
+            messages = list(
+                self.session_store.load(
+                    turn_session_id,
+                    owner_account_id=owner_account_id,
+                )
+            )
+            answer = next(
+                (
+                    message
+                    for message in reversed(messages)
+                    if message.role == "assistant" and not message.is_meta and message.content
+                ),
+                None,
+            )
+            if answer is None:
+                answer = Message(
+                    role="assistant",
+                    content=content,
+                    timestamp=time.time(),
+                )
+                messages.append(answer)
+            answer.communication_kind = communication_kind
+            answer.communication_status = communication_status
+            answer.request_id = request_id
+            answer.reply_to = reply_to
+            self.session_store.save(
+                turn_session_id,
+                messages,
+                workspace_id=workspace_id,
+                owner_account_id=owner_account_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 历史增强失败不能影响当前通信结果；主链路仍由 Team Bus 返回。
+            log.warning("保存 Team 通信历史元数据失败 session=%s err=%s", turn_session_id, exc)
+
+    def _turn_session_id(self, request_id: str, target: str) -> str:
+        return f"{self.session_id}::turn::{request_id}::{target}"
+
+    @staticmethod
+    def _answer_kind(event: dict[str, Any]) -> str:
+        if str(event.get("communication_kind") or "").strip() == "user_mention_request":
+            return "user_mention_answer"
+        return "ask_answer"
 
     async def _emit_lifecycle(
         self,

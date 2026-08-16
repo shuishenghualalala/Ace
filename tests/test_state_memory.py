@@ -34,6 +34,10 @@ def test_session_store_roundtrip(tmp_path):
     assistant.turn_started_at = 10.0
     assistant.turn_duration = 2.0
     assistant.thinking = "先列出目录再执行命令"
+    assistant.communication_kind = "user_mention_answer"
+    assistant.communication_status = "answered"
+    assistant.request_id = "mention_req"
+    assistant.reply_to = "bus_msg"
     assistant.turn_file_changes = [
         {
             "path": "/tmp/snake_game.html",
@@ -56,6 +60,10 @@ def test_session_store_roundtrip(tmp_path):
     assert loaded[1].turn_started_at == 10.0
     assert loaded[1].turn_duration == 2.0
     assert loaded[1].thinking == "先列出目录再执行命令"
+    assert loaded[1].communication_kind == "user_mention_answer"
+    assert loaded[1].communication_status == "answered"
+    assert loaded[1].request_id == "mention_req"
+    assert loaded[1].reply_to == "bus_msg"
     assert loaded[1].turn_file_changes == [
         {
             "path": "/tmp/snake_game.html",

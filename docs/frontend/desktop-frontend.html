@@ -594,6 +594,15 @@
     </ul>
     <p>验证：用户 mention 后端定向回归、Desktop history mapping、Desktop TypeScript typecheck 与相关渲染回归通过。</p>
   </section>
+  <section>
+    <h2>用户 Agent mention 历史恢复与失败状态（2026-08-16）</h2>
+    <ul>
+      <li>直接 @Agent 的回答、超时、失败和取消状态复用已有 Agent 子会话保存，不新增 TeamPlan、Task、DAG 或产物。</li>
+      <li>Desktop history mapping 读取统一的 <code>communication_kind</code>、<code>communication_status</code>、<code>request_id</code> 和 <code>reply_to</code>，刷新或重连后仍能显示通信状态。</li>
+      <li>通信去重按 request_id 保留，同样文本的多次用户 mention 不会在历史恢复时被折叠。</li>
+    </ul>
+    <p>验证：会话存储 round-trip、用户 mention、超时、历史 API 投影和通信去重回归通过。</p>
+  </section>
 </div>
 </body>
 </html>
