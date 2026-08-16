@@ -14,6 +14,11 @@ export interface SessionModelBinding {
   pending_label?: string | null;
   has_pending?: boolean;
   pending?: boolean;
+  /**
+   * 服务端算好的「生效 Provider = FakeProvider 演示模式」标记
+   * （GET/PUT /api/session/{id}/model 下发）；未加载/草稿会话为 undefined。
+   */
+  demo_mode?: boolean;
   models?: RuntimeModelProfile[];
   model_switchable?: boolean;
   runtime_id?: string;
@@ -155,6 +160,16 @@ export function resolveComposerModelLabel(): string {
   return sessionDisplayModelLabel(state.activeSessionId);
 }
 
+/**
+ * 会话生效 Provider 是否为 FakeProvider 演示模式（服务端判定，随绑定下发）。
+ * 绑定未加载 / 草稿会话返回 null——调用方按「不显示」处理，宁缺毋误报。
+ */
+export function sessionDemoMode(sessionId: string | null | undefined = state.activeSessionId): boolean | null {
+  if (!sessionId) return null;
+  const value = bindingsBySession.get(sessionId)?.demo_mode;
+  return typeof value === 'boolean' ? value : null;
+}
+
 export function applySessionModelBinding(sessionId: string, binding: SessionModelBinding): void {
   bindingsBySession.set(sessionId, binding);
   if (sessionId === state.activeSessionId) {
@@ -175,7 +190,8 @@ export function mergeSessionModelsFromBackend(
     if (!row.session_id || !row.model_profile_id) continue;
     // /api/sessions 中的 model_profile_id 是 Crew 会话模型摘要，不能覆盖
     // 已由 /api/session/{id}/model 加载的外部 Agent Runtime 模型目录。
-    if (bindingsBySession.get(row.session_id)?.source === 'external') continue;
+    const existing = bindingsBySession.get(row.session_id);
+    if (existing?.source === 'external') continue;
     bindingsBySession.set(row.session_id, {
       model_profile_id: row.model_profile_id,
       ...(row.pending_model_profile_id !== undefined ? { pending_model_profile_id: row.pending_model_profile_id } : {}),
@@ -184,6 +200,9 @@ export function mergeSessionModelsFromBackend(
         ? modelLabelForId(row.pending_model_profile_id)
         : null,
       has_pending: Boolean(row.pending_model_profile_id),
+      // /api/sessions 不携带 demo_mode：保留 GET /model 已加载的服务端判定，
+      // 避免会话列表刷新把演示模式横幅状态打丢。
+      ...(existing?.demo_mode !== undefined ? { demo_mode: existing.demo_mode } : {}),
     });
   }
 }

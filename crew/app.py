@@ -746,6 +746,107 @@ class CrewApp:
             user_type=user_type,
         )
 
+    def _resolve_session_provider_profile(
+        self,
+        owner: str,
+        session_model: str,
+    ) -> tuple[ModelProfile | None, bool, str | None]:
+        """解析会话生效的模型 profile，返回 (provider_profile, owns_provider, model_fallback_notice)。
+
+        回退链：owner 默认模型（有 Key）→ 会话绑定模型（有 Key）→ 全局 active。
+        owns_provider=False 时生效 Provider 即 App 全局 self.provider（无 Key 时为
+        FakeProvider 演示模式）。_make_agent 装配与 read/set_session_model_binding
+        的 demo_mode 判定共用本方法，避免读写两处各自重推导致误报/漏报。
+        """
+        cfg = self.config
+        owner_profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
+        provider_profile: ModelProfile | None = None
+        build_dynamic_provider = False
+        # 装配期回退说明：写入 agent，供 run 开头以 status 帧推到 UI（避免只打日志用户无感）
+        model_fallback_notice: str | None = None
+        # owner 默认激活模型；仅 owner 非空时赋值，末尾用于静默降级判定（见缺口 1a）
+        active: ModelProfile | None = None
+        if owner:
+            active = self.config.owner_default_model_profile(owner)
+            if active is not None and active.has_key:
+                provider_profile = active
+                build_dynamic_provider = True
+            else:
+                # The owner overlay can retain a deleted/unloaded model id, or
+                # point at a profile whose owner-local key disappeared.  In
+                # both cases self.provider is the global active provider, so
+                # capability gating must use that same profile too.
+                provider_profile = cfg.active_model
+        else:
+            provider_profile = cfg.active_model
+        if session_model and session_model != "inherit":
+            profile = owner_profiles.get(session_model)
+            if profile and profile.has_key:
+                provider_profile = profile
+                build_dynamic_provider = True
+            else:
+                fallback_label = (
+                    provider_profile.label
+                    if provider_profile is not None and provider_profile.has_key
+                    else "FakeProvider 演示模式"
+                )
+                model_fallback_notice = (
+                    f"会话绑定模型「{session_model}」不可用（不存在或无 API Key），"
+                    f"已回退到「{fallback_label}」。"
+                    "请前往“设置 → 模型”配置 API Key 后切换到真实模型。"
+                )
+                log.warning("会话绑定模型 %s 不存在或无 API Key，回退全局 provider", session_model)
+        # 静默降级提示（缺口 1a）：仅当最终 provider 真的落回全局 active 模型、且 owner
+        # 默认激活的内置模型本身缺 key（典型 = 登录未下发 modelkey）时才提示。session
+        # 若已用自己的有 key 模型救回（provider_profile 不再是全局 active），或已产生更具体的
+        # 会话绑定提示（model_fallback_notice 已设），都不重复打扰——避免「用户自带可用模型却
+        # 误报降级」的假阳性。
+        if (
+            active is not None
+            and not active.has_key
+            and provider_profile is cfg.active_model
+            and not model_fallback_notice
+        ):
+            if cfg.active_model.has_key:
+                model_fallback_notice = (
+                    f"内置模型「{active.label}」未配置 API Key（登录可能未下发），"
+                    f"已临时回退到「{cfg.active_model.label}」。"
+                )
+            else:
+                model_fallback_notice = (
+                    f"模型「{active.label}」未配置 API Key，"
+                    "当前使用 FakeProvider 演示模式，不会调用真实模型。"
+                    "请前往“设置 → 模型”完成配置。"
+                )
+            log.warning(
+                "owner active 模型 %s 无 API Key，回退全局 provider %s",
+                active.id,
+                cfg.active_model.id,
+            )
+        owns_provider = (
+            build_dynamic_provider
+            and provider_profile is not None
+            and provider_profile.has_key
+        )
+        return provider_profile, owns_provider, model_fallback_notice
+
+    def _session_demo_mode(self, owner_account_id: str, agent_config: dict | None) -> bool:
+        """会话当前生效 Provider 是否为 FakeProvider 演示模式。
+
+        与 _make_agent 装配共用同一条回退链（_resolve_session_provider_profile），
+        前端「演示模式」横幅直接消费该结果，不再自行推导。外部 Agent/Team 会话不走
+        builtin provider 链，恒为 False。
+        """
+        from crew.core.mocks import FakeProvider
+
+        config = agent_config if isinstance(agent_config, dict) else {}
+        executor = str(config.get("executor") or "").strip().lower()
+        if executor in {"external", "acp", "team"}:
+            return False
+        session_model = str(config.get("model_profile_id") or "").strip()
+        _, owns_provider, _ = self._resolve_session_provider_profile(owner_account_id, session_model)
+        return not owns_provider and isinstance(self.provider, FakeProvider)
+
     def _make_agent(
         self,
         agent_config: dict | None = None,
@@ -805,77 +906,11 @@ class CrewApp:
         if user_type not in ("external", "internal"):
             user_type = cfg.access_control.user_type
         ac = cfg.access_control.resolve_for(user_type)
-        owner_profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         # 先选出最终 profile 再创建客户端，避免 Owner 默认模型随后被 session
         # 覆盖时遗留一个无人持有的连接池。没有动态 profile 才借用 App 全局 Provider。
-        provider_profile: ModelProfile | None = None
-        build_dynamic_provider = False
-        # 装配期回退说明：写入 agent，供 run 开头以 status 帧推到 UI（避免只打日志用户无感）
-        model_fallback_notice: str | None = None
-        # owner 默认激活模型；仅 owner 非空时赋值，末尾用于静默降级判定（见缺口 1a）
-        active: ModelProfile | None = None
-        if owner:
-            active = self.config.owner_default_model_profile(owner)
-            if active is not None and active.has_key:
-                provider_profile = active
-                build_dynamic_provider = True
-            else:
-                # The owner overlay can retain a deleted/unloaded model id, or
-                # point at a profile whose owner-local key disappeared.  In
-                # both cases self.provider is the global active provider, so
-                # capability gating must use that same profile too.
-                provider_profile = cfg.active_model
-        else:
-            provider_profile = cfg.active_model
         session_model = str(resolved.get("model_profile_id") or "").strip()
-        if session_model and session_model != "inherit":
-            profile = owner_profiles.get(session_model)
-            if profile and profile.has_key:
-                provider_profile = profile
-                build_dynamic_provider = True
-            else:
-                fallback_label = (
-                    provider_profile.label
-                    if provider_profile is not None and provider_profile.has_key
-                    else "FakeProvider 演示模式"
-                )
-                model_fallback_notice = (
-                    f"会话绑定模型「{session_model}」不可用（不存在或无 API Key），"
-                    f"已回退到「{fallback_label}」。"
-                    "请前往“设置 → 模型”配置 API Key 后切换到真实模型。"
-                )
-                log.warning("会话绑定模型 %s 不存在或无 API Key，回退全局 provider", session_model)
-        # 静默降级提示（缺口 1a）：仅当最终 provider 真的落回全局 active 模型、且 owner
-        # 默认激活的内置模型本身缺 key（典型 = 登录未下发 modelkey）时才提示。session
-        # 若已用自己的有 key 模型救回（provider_profile 不再是全局 active），或已产生更具体的
-        # 会话绑定提示（model_fallback_notice 已设），都不重复打扰——避免「用户自带可用模型却
-        # 误报降级」的假阳性。
-        if (
-            active is not None
-            and not active.has_key
-            and provider_profile is cfg.active_model
-            and not model_fallback_notice
-        ):
-            if cfg.active_model.has_key:
-                model_fallback_notice = (
-                    f"内置模型「{active.label}」未配置 API Key（登录可能未下发），"
-                    f"已临时回退到「{cfg.active_model.label}」。"
-                )
-            else:
-                model_fallback_notice = (
-                    f"模型「{active.label}」未配置 API Key，"
-                    "当前使用 FakeProvider 演示模式，不会调用真实模型。"
-                    "请前往“设置 → 模型”完成配置。"
-                )
-            log.warning(
-                "owner active 模型 %s 无 API Key，回退全局 provider %s",
-                active.id,
-                cfg.active_model.id,
-            )
-        owns_provider = (
-            build_dynamic_provider
-            and provider_profile is not None
-            and provider_profile.has_key
+        provider_profile, owns_provider, model_fallback_notice = (
+            self._resolve_session_provider_profile(owner, session_model)
         )
         provider = (
             build_provider_for_profile(provider_profile, cfg.stream_read_timeout)
@@ -2331,6 +2366,7 @@ class CrewApp:
             "ok": True,
             "pending": busy or binding.get("has_pending"),
             **binding,
+            "demo_mode": self._session_demo_mode(owner_account_id, stored),
         }
 
     def read_session_model_binding(
@@ -2348,7 +2384,9 @@ class CrewApp:
             self.owner_model_profiles(owner_account_id),
             fallback_model_id=self.config.owner_default_model_id(owner_account_id),
         )
-        return {"ok": True, **binding}
+        # demo_mode：服务端算好的「生效 Provider = FakeProvider」标记，前端演示模式
+        # 横幅直接消费，不再从 config 重推（前端看不到 per-owner overlay 等因素）。
+        return {"ok": True, **binding, "demo_mode": self._session_demo_mode(owner_account_id, stored)}
 
     def _enrich_workspace(self, envelope: Envelope) -> str | None:
         """把工作空间的 instructions 注入到 envelope.params，供内核构建 system prompt。

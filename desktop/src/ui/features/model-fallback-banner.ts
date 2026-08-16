@@ -5,53 +5,35 @@
  * 在回合开头提示一次，回合结束即消失——用户会误以为模型在正常回复。本 banner 把
  * 这个状态做成持久可见，并给出「去配置模型」入口。
  *
- * 判定与后端 crew/app.py 的回退逻辑对齐：
- *   会话绑定模型有 Key            → 真实 provider，隐藏
- *   会话模型无 Key、全局 active 有 Key → 回退到 active，隐藏
- *   两者都无 Key                  → FakeProvider，显示
- * 外部 Runtime / Team 会话的模型不在 config 列表里（自行管理），无法判定时不显示，
- * 宁缺毋误报。
+ * 判定在后端完成：crew/app.py 装配用的回退链（owner 默认模型 → 会话绑定 → 全局
+ * active → FakeProvider）经 _resolve_session_provider_profile 抽出共用，结果以
+ * demo_mode 字段随 GET/PUT /api/session/{id}/model 下发。前端只消费该字段，不再
+ * 从 state.config 重推——前端看不到 per-owner overlay 等因素，自行推导会误报/漏报。
+ * 绑定未加载（如草稿会话）时按不显示处理，宁缺毋误报。
  *
- * 数据全部来自内存中的 state.config / 会话模型绑定，无额外请求；由
+ * 数据全部来自内存中的会话模型绑定，无额外请求；由
  * chat-controller.updateComposerControls 每次 renderChat 时调用，幂等。
  */
 
-import { state } from '../state';
-import type { BackendConfig } from '../backend-client';
-import { activeComposerModelId, isExternalTeamSession } from './session-model';
+import { isExternalTeamSession, sessionDemoMode } from './session-model';
 import { openModelPane } from './model-tour';
 
 const BANNER_ID = 'model-fallback-banner';
 
 /** 纯判定函数，导出供单元测试。 */
 export function deriveModelFallbackVisible(
-  config: Pick<BackendConfig, 'has_key' | 'active_model_id'> & {
-    models?: Array<{ id: string; has_key: boolean }>;
-    model_profiles?: Array<{ id: string; has_key: boolean }>;
-  } | null | undefined,
-  sessionModelId: string,
+  demoMode: boolean | null | undefined,
   isExternal: boolean,
 ): boolean {
-  if (!config || isExternal) return false;
-  if (config.has_key) return false;
-  const activeId = config.active_model_id || '';
-  if (!sessionModelId || sessionModelId === activeId) return true;
-  const profiles = [...(config.models ?? []), ...(config.model_profiles ?? [])];
-  const sessionProfile = profiles.find((m) => m.id === sessionModelId);
-  // 找不到的模型 id（外部 Runtime 自带模型）无法判定，不显示；
-  // 找得到且有 Key → 真实 provider；无 Key → 回退全局，全局也无 Key → 演示模式。
-  return sessionProfile ? !sessionProfile.has_key : false;
+  if (isExternal) return false;
+  return demoMode === true;
 }
 
 /** 幂等渲染：每次 renderChat 经 updateComposerControls 调用。 */
 export function renderModelFallbackBanner(): void {
   const container = document.querySelector('.chat-composer');
   if (!container) return;
-  const visible = deriveModelFallbackVisible(
-    state.config,
-    activeComposerModelId(),
-    isExternalTeamSession(),
-  );
+  const visible = deriveModelFallbackVisible(sessionDemoMode(), isExternalTeamSession());
   let banner = document.getElementById(BANNER_ID);
   if (!visible) {
     banner?.remove();
@@ -59,6 +41,14 @@ export function renderModelFallbackBanner(): void {
   }
   if (!banner) banner = createBanner(container);
   banner.classList.add('show');
+}
+
+// 绑定（重）加载 / 切换模型后 demo_mode 才可能变化；renderChat 之外的时机靠事件补齐，
+// 与 composer-context-ring / inspector 监听同一事件的模式保持一致。
+if (typeof window !== 'undefined') {
+  window.addEventListener('session:model-changed', () => {
+    renderModelFallbackBanner();
+  });
 }
 
 function createBanner(container: Element): HTMLElement {

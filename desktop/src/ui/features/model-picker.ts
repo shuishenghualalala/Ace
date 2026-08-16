@@ -9,12 +9,14 @@ import { $, $$, escapeHtml, state } from '../state';
 import {
   activeComposerModelId,
   composerModelOptions,
+  loadSessionModel,
   resolveComposerModelLabel,
   sessionDisplayModelLabel,
   setSessionModel,
   syncSessionModelUi,
   type ComposerModelOption,
 } from './session-model';
+import { isDraftSession } from './workspaces';
 import { syncExternalAgentsFeatureUi } from './external-agents-feature';
 import { maybeStartModelTourOnce } from './model-tour';
 import { syncSecurityModuleFeatureUi } from './security-mode';
@@ -322,6 +324,10 @@ export async function loadConfig(): Promise<void> {
     syncExternalAgentsFeatureUi();
     syncSecurityModuleFeatureUi();
     maybeStartModelTourOnce(state.config);
+    // 模型 CRUD / Key 变化会改变服务端 demo_mode 判定；刷新当前会话绑定，
+    // 让演示模式横幅不必等下次会话切换才更新（草稿会话无服务端绑定，跳过）。
+    const sid = state.activeSessionId;
+    if (sid && !isDraftSession(sid)) void loadSessionModel(sid);
     return;
   } catch {
     state.config = null;

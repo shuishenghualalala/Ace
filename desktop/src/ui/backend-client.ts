@@ -1608,6 +1608,8 @@ export const backendApi = {
       model_label?: string;
       pending_label?: string | null;
       has_pending?: boolean;
+      /** 服务端判定：会话生效 Provider 为 FakeProvider 演示模式 */
+      demo_mode?: boolean;
       models?: RuntimeModelProfile[];
       model_switchable?: boolean;
       runtime_id?: string;
@@ -1628,6 +1630,8 @@ export const backendApi = {
       pending_label?: string | null;
       has_pending?: boolean;
       pending?: boolean;
+      /** 服务端判定：会话生效 Provider 为 FakeProvider 演示模式 */
+      demo_mode?: boolean;
       models?: RuntimeModelProfile[];
       model_switchable?: boolean;
       runtime_id?: string;
