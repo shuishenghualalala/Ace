@@ -3851,6 +3851,52 @@
       "covered_routes": []
     },
     {
+      "id": "ACE-SURF-PROC-DIRECT-DESKTOP-PW-CONTRACT",
+      "categories": [
+        "process-direct",
+        "dev-only"
+      ],
+      "path": "desktop/scripts/pw-contract.ts",
+      "symbol_or_route": "deferred Electron contract profile cleanup helper",
+      "owner": "Desktop Browser build maintainers",
+      "trust_source": "Fixed Node runtime and contract-owned temporary root",
+      "final_enforcement_point": "pw-contract.ts deferTempRootCleanup fixed detached cleanup command",
+      "fail_closed_behavior": "Missing fixed runtime or cleanup target failure leaves the contract run failed and never broadens the cleanup root",
+      "tests": [
+        {
+          "id": "PROCESS-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        },
+        {
+          "id": "PW-CONTRACT",
+          "path": "desktop/scripts/pw-contract.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        },
+        {
+          "type": "source-contract",
+          "path": "desktop/scripts/pw-contract.ts"
+        }
+      ],
+      "lifecycle_revocation_owner": "Electron contract process and temporary profile cleanup",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "static-analysis",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Contract cleanup runtime, fixed argv, temporary root, or Electron harness lifecycle changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
       "id": "ACE-SURF-PROC-DIRECT-DESKTOP-GATEWAY-AUTH",
       "categories": [
         "process-direct",

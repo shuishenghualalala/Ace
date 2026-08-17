@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import stat
+import sys
+import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-import sys
 
 from crew.security.actions import NormalizedAction
 from crew.security.context import SecurityContext
+from crew.security.local_path import LocalPathReference, LocalPathReferenceError
 from crew.security.models import (
     AdditionalPermissionProfile,
     ConversationPermissionMode,
@@ -42,7 +45,11 @@ def assess_file_action(
     additional: AdditionalPermissionProfile = AdditionalPermissionProfile(),
 ) -> FilePolicyAssessment:
     """Classify one canonical path with immutable protected entries."""
-    target = Path(action.path).expanduser().resolve(strict=False)
+    try:
+        target = _resolve_policy_target(action.path)
+        _validate_policy_target(target, operation=action.operation)
+    except (LocalPathReferenceError, OSError, RuntimeError, ValueError):
+        return FilePolicyAssessment(FilePolicyResult.DENY, "文件目标无法安全验证")
     operation = (
         FilesystemOperation.READ if action.operation == "read" else FilesystemOperation.WRITE
     )
@@ -56,7 +63,10 @@ def assess_file_action(
             "目标属于不可升级的环境或凭据文件",
         )
 
-    protected = _protected_entries(context, db_path)
+    try:
+        protected = _protected_entries(context, db_path)
+    except (OSError, RuntimeError, ValueError):
+        return FilePolicyAssessment(FilePolicyResult.DENY, "受保护路径清单不可用")
     matching = [entry for entry in protected if _contains(entry.root, target)]
     if any(entry.access is FilesystemAccess.DENY and not entry.escalatable for entry in matching):
         return FilePolicyAssessment(FilePolicyResult.DENY, "目标属于不可升级的运行时或凭据路径")
@@ -116,12 +126,16 @@ def _protected_entries(
                     break
                 if _is_sensitive_workspace_path(child, workspace_root):
                     dynamic_sensitive.append(child)
-        except OSError:
-            dynamic_sensitive = []
+        except OSError as exc:
+            raise RuntimeError("sensitive workspace path discovery failed") from exc
         denied.extend(
             FilesystemEntry(path, FilesystemAccess.DENY, escalatable=False)
             for path in dynamic_sensitive
         )
+        if not sys.platform.startswith("linux"):
+            # Windows/macOS do not have the Linux deny-read glob contract.  Bind
+            # the exact discovered paths into the same immutable protected set.
+            denied.extend(_discovered_sensitive_entries(context))
     return tuple(denied)
 
 
@@ -183,7 +197,9 @@ def _discovered_sensitive_entries(
     """Enumerate exact secret paths for platforms without deny-read glob support."""
     if context.workspace_root is None or sys.platform.startswith("linux"):
         return ()
-    root = context.workspace_root.resolve(strict=True)
+    root = LocalPathReference.from_host_path(context.workspace_root).resolve_at_boundary(
+        strict=True
+    )
     queue: list[tuple[Path, int]] = [(root, 0)]
     protected: list[FilesystemEntry] = []
     seen_entries = 0
@@ -208,18 +224,27 @@ def _discovered_sensitive_entries(
                     protected.append(
                         FilesystemEntry(child, FilesystemAccess.DENY, escalatable=False)
                     )
+                try:
+                    child_info = child.lstat()
+                except OSError as exc:
+                    raise RuntimeError("sensitive workspace path discovery failed") from exc
+                reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
                 if (
-                    not child.is_symlink()
-                    and not getattr(child, "is_junction", lambda: False)()
-                    and child.is_dir()
+                    not stat.S_ISLNK(child_info.st_mode)
+                    and not getattr(child_info, "st_file_attributes", 0) & reparse_flag
+                    and stat.S_ISDIR(child_info.st_mode)
                 ):
                     if depth >= max_depth:
                         raise RuntimeError(
                             "sensitive workspace path discovery exceeded depth budget"
                         )
                     queue.append((child, depth + 1))
-        except OSError as exc:
-            raise RuntimeError("sensitive workspace path discovery failed") from exc
+        except OSError:
+            # If a directory cannot be inspected, deny that whole subtree rather than
+            # guessing that it contains no credentials.
+            protected.append(
+                FilesystemEntry(directory, FilesystemAccess.DENY, escalatable=False)
+            )
     return tuple(protected)
 
 
@@ -228,7 +253,7 @@ def _is_sensitive_workspace_path(target: Path, workspace_root: Path) -> bool:
         relative = target.relative_to(workspace_root.resolve(strict=False))
     except ValueError:
         return False
-    parts = [part.casefold() for part in relative.parts]
+    parts = [_portable_component(part) for part in relative.parts]
     if any(part in _SENSITIVE_DIRECTORY_NAMES for part in parts):
         return True
     if not parts:
@@ -239,6 +264,43 @@ def _is_sensitive_workspace_path(target: Path, workspace_root: Path) -> bool:
         or name.startswith(".env.")
         or name.endswith(_SENSITIVE_FILE_SUFFIXES)
     )
+
+
+def is_protected_workspace_path(target: Path, workspace_root: Path) -> bool:
+    """Share the metadata deny predicate with bounded search callers."""
+
+    return _is_sensitive_workspace_path(target, workspace_root)
+
+
+def _resolve_policy_target(raw_path: str | Path) -> Path:
+    reference = LocalPathReference.parse(str(raw_path))
+    if reference.kind.value != "plain_path":
+        raise LocalPathReferenceError("file policy accepts only a local path")
+    return reference.resolve_at_boundary(strict=False)
+
+
+def _validate_policy_target(target: Path, *, operation: str) -> None:
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        raise LocalPathReferenceError("文件目标是符号链接")
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if getattr(info, "st_file_attributes", 0) & reparse_flag:
+        raise LocalPathReferenceError("文件目标是 reparse point")
+    if stat.S_ISDIR(info.st_mode):
+        if operation != "read":
+            raise LocalPathReferenceError("写入目标不是普通文件")
+        return
+    if not stat.S_ISREG(info.st_mode):
+        raise LocalPathReferenceError("文件目标不是普通文件")
+    if info.st_nlink > 1:
+        raise LocalPathReferenceError("文件目标存在多个硬链接")
+
+
+def _portable_component(value: str) -> str:
+    return unicodedata.normalize("NFC", value).casefold()
 
 
 def _is_filesystem_root(path: Path) -> bool:

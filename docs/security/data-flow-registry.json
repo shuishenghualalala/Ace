@@ -1,0 +1,187 @@
+{
+  "schema": "ace.data-flow-registry.v1",
+  "prohibited_master_switch": true,
+  "scope": "Implemented Ace local persistence, diagnostics, attachments, feedback, and explicitly absent telemetry flows. Values and credentials are never included in this registry.",
+  "flows": [
+    {
+      "id": "session_history",
+      "status": "active",
+      "switch": "session deletion and follow-up record_history; no global history-disable switch",
+      "destination": "local SQLite sessions table at Config.db_path (config/config.yaml defaults to crew_data/crew.db)",
+      "fields": [
+        "owner_account_id, session_id, and workspace_id",
+        "serialized Message role, user/assistant/tool content, tool-call metadata, timestamps, and optional content parts",
+        "derived title, message_count, token_count, and last run status",
+        "owner-scoped attachment references that may occur in message content or structured attachments"
+      ],
+      "retention": "Rows remain local until explicit session/workspace deletion or the idle-session expiry loop removes an eligible session; no remote retention is used by this flow.",
+      "deletion": "DELETE /api/session/{session_id} and workspace deletion clear owner-scoped session rows; expire_idle_sessions removes idle top-level sessions. Referenced upload files are separately considered by delete_session_uploads.",
+      "redaction": "Tool arguments use tool_arguments_for_history; this registry records only field classes, and user-provided message content is treated as potentially sensitive.",
+      "evidence": [
+        {"path": "crew/agent/runtime.py", "references": ["AgentRuntime.run", "session_store.load", "session_store.save"]},
+        {"path": "crew/state/session_store.py", "references": ["SQLiteSessionStore.load", "SQLiteSessionStore.save", "SQLiteSessionStore.clear", "SQLiteSessionStore.expire_idle_sessions"]},
+        {"path": "crew/core/followup.py", "references": ["FollowupWaiter.record_history"]},
+        {"path": "crew/gateway/routers/sessions.py", "references": ["delete_session", "delete_workspace"]},
+        {"path": "tests/test_gateway_plan.py", "references": ["session deletion cleanup"]},
+        {"path": "tests/test_tools.py", "references": ["follow-up record_history behavior"]}
+      ]
+    },
+    {
+      "id": "semantic_memory",
+      "status": "active",
+      "switch": "application wiring selects SQLiteMemory; no independent runtime disable switch is present",
+      "destination": "local SQLite memory table at Config.memory_db_path (default crew_data/memory.db)",
+      "fields": [
+        "owner_account_id and stable session_id",
+        "latest non-empty user message text",
+        "write timestamp"
+      ],
+      "retention": "Rows persist in the local memory database until MemoryProvider.delete is called; the current session deletion route has no observed call to that method.",
+      "deletion": "SQLiteMemory.delete can remove rows for one owner and session, but no session-delete caller is registered here; this is an explicit retention gap rather than an assumed deletion guarantee.",
+      "redaction": "Only user-role message text is selected; no credentials or secret values are placed in this registry.",
+      "evidence": [
+        {"path": "crew/app.py", "references": ["SQLiteMemory construction"]},
+        {"path": "crew/memory/simple.py", "references": ["SQLiteMemory.prefetch", "SQLiteMemory.write", "SQLiteMemory.delete"]},
+        {"path": "crew/agent/runtime.py", "references": ["memory.prefetch", "memory.write"]}
+      ]
+    },
+    {
+      "id": "security_audit",
+      "status": "active",
+      "switch": "security authorization and audit lifecycle; no user-content export switch",
+      "destination": "owner-scoped security_audit_events and security_audit_archives in Config.db_path, plus the private audit integrity key file",
+      "fields": [
+        "owner, workspace, session, task, request, turn, and actor identity hash",
+        "normalized action digest, rule and permission profile identifiers, decision, outcome, and stable error code",
+        "policy/build/model provenance and bounded action/resource summaries"
+      ],
+      "retention": "Live audit rows older than 30 days are eligible for authenticated archive rotation; archives remain local until separately removed.",
+      "deletion": "purge_expired rotates an authenticated contiguous prefix into security-audit-archives; ordinary session deletion does not erase security audit history.",
+      "redaction": "AuditEvent formatting and persistence redact sensitive action, CLI, header, diagnostic, and structured fields before HMAC coverage.",
+      "evidence": [
+        {"path": "crew/security/audit.py", "references": ["AuditEvent", "SQLiteSecurityAudit", "purge_expired", "_archive_rows"]},
+        {"path": "crew/app.py", "references": ["SQLiteSecurityAudit(config.db_path)"]},
+        {"path": "tests/security/test_security_audit.py", "references": ["owner scoping", "structured redaction", "retention rotation", "integrity verification"]}
+      ]
+    },
+    {
+      "id": "application_logs",
+      "status": "active",
+      "switch": "runtime.log_file controls file persistence; the in-process ring buffer remains available to system log routes",
+      "destination": "optional local log_file plus the process-local RingBufferHandler",
+      "fields": [
+        "timestamp, level, logger name, and owner_account_id",
+        "redacted application log message and bounded exception text"
+      ],
+      "retention": "The process-local ring is bounded to 2000 entries; a configured log file remains until local operator cleanup.",
+      "deletion": "DELETE /api/system/logs clears the process-local ring; file deletion is an operator/filesystem action and is not claimed as an API behavior.",
+      "redaction": "SensitiveLogFilter and redact helpers run before handlers persist messages; owner filtering applies to non-admin log queries.",
+      "evidence": [
+        {"path": "crew/state/logging.py", "references": ["SensitiveLogFilter", "RingBufferHandler", "setup_logging", "query_logs", "clear_logs"]},
+        {"path": "crew/gateway/routers/system.py", "references": ["GET /api/system/logs", "DELETE /api/system/logs"]},
+        {"path": "tests/gateway/test_system_routes.py", "references": ["owner filtering", "admin ring clear"]}
+      ]
+    },
+    {
+      "id": "llm_trace",
+      "status": "opt-in",
+      "switch": "runtime.llm_trace / Config.llm_trace (default false in Config and config/config.yaml)",
+      "destination": "local .crew/logs/llm.jsonl, derived from log_file or the configured Crew home",
+      "fields": [
+        "session_id, owner_account_id, model, direction, stream state, and bounded error or milestone metadata",
+        "sanitized provider request messages, tool names, response text, tool-call arguments, reasoning, and usage when tracing is enabled"
+      ],
+      "retention": "The trace is a local JSONL file with no repository-defined expiry; it is absent when llm_trace is false.",
+      "deletion": "No dedicated trace-delete route is present; local operator cleanup of llm.jsonl is required.",
+      "redaction": "_sanitize_llm_trace redacts sensitive keys, browser content, image data, and log-sensitive values before serialization; trace remains opt-in because payload text can still be user-sensitive.",
+      "evidence": [
+        {"path": "crew/state/config.py", "references": ["Config.llm_trace default false", "runtime.llm_trace loading"]},
+        {"path": "config/config.yaml", "references": ["runtime.llm_trace: false"]},
+        {"path": "crew/state/logging.py", "references": ["setup_logging", "llm_trace", "_sanitize_llm_trace"]},
+        {"path": "crew/providers/openai_provider.py", "references": ["request/response/error trace calls"]},
+        {"path": "crew/providers/anthropic_provider.py", "references": ["request/response/error trace calls"]},
+        {"path": "tests/gateway/test_debug_log.py", "references": ["trace owner filtering"]}
+      ]
+    },
+    {
+      "id": "attachment_upload",
+      "status": "active",
+      "switch": "local owner upload is part of attachment handling; wiki.capture_attachments independently controls the optional Wiki copy",
+      "destination": "owner-scoped local uploads directory, with optional default-Wiki capture",
+      "fields": [
+        "authenticated owner account, original filename, file type, byte size, and content digest for deduplication",
+        "uploaded bytes in the private owner uploads store",
+        "owner-scoped path reference and attachment metadata passed to the agent"
+      ],
+      "retention": "Uploads remain in the owner uploads store until referenced session cleanup; an optional Wiki copy follows the Wiki store lifecycle. No broader automatic retention is claimed.",
+      "deletion": "Session deletion collects only upload paths resolved under the owner uploads root and unlinks them; path escape, links, non-regular files, and unreferenced files are not deleted by that routine.",
+      "redaction": "The registry contains no filenames, paths, or bytes from a run. Upload and attachment handling enforces owner roots, regular-file checks, byte/count limits, and bounded atomic writes.",
+      "evidence": [
+        {"path": "crew/gateway/context.py", "references": ["save_upload", "normalize_agent_attachments", "collect_upload_paths_from_messages", "delete_session_uploads"]},
+        {"path": "crew/gateway/routers/misc.py", "references": ["POST /api/upload", "capture_upload_to_wiki scheduling"]},
+        {"path": "crew/agent/runtime.py", "references": ["_build_user_text attachment read path"]},
+        {"path": "tests/security/test_attachment_security.py", "references": ["owner root", "link rejection", "atomic private write", "byte and count budgets"]},
+        {"path": "tests/gateway/test_upload.py", "references": ["upload, deduplication, and optional Wiki capture"]}
+      ]
+    },
+    {
+      "id": "feedback",
+      "status": "opt-in",
+      "switch": "valid CREW_FEEDBACK_BASE_URL plus consent authority; ACE_ENTERPRISE_DISABLE_FEEDBACK or CREW_FEEDBACK_DISABLED disables it",
+      "destination": "configured HTTPS feedback service; local main-process preview, one-time authority, and bounded diagnostic trace",
+      "fields": [
+        "redacted and bounded title and description",
+        "bounded image attachment bytes and SHA-256 digests",
+        "owner/context/payload digests, status codes, and bounded remote response text"
+      ],
+      "retention": "Preview and authority state is in-process and expires; the local feedback trace is bounded. Remote service retention and deletion policy are not specified by this repository.",
+      "deletion": "Preview/authority cancellation and local trace clearing are implemented; no remote feedback-delete endpoint is implemented or claimed.",
+      "redaction": "Feedback input, remote response text, URLs, errors, and image metadata pass through bounded redaction; raw attachment buffers are zeroed after preparation/submission.",
+      "evidence": [
+        {"path": "desktop/src/main/feedback-service.ts", "references": ["FeedbackService.createPreview", "submitFeedback", "getFeedbackList", "getFeedbackImage"]},
+        {"path": "desktop/src/main/feedback-security.ts", "references": ["feedbackDisabledByEnterprisePolicy", "prepareFeedbackPayload", "FeedbackConsentAuthority"]},
+        {"path": "desktop/src/main/index.ts", "references": ["feedback:preview", "feedback:submit", "feedback:cancel", "feedback:list", "feedback:image"]},
+        {"path": "desktop/tests/unit/feedback-security.test.ts", "references": ["consent, redaction, attachment cleanup, and IPC boundary"]}
+      ]
+    },
+    {
+      "id": "analytics_upload",
+      "status": "absent",
+      "switch": "absent: no Ace analytics emitter or upload switch is implemented",
+      "destination": "none implemented",
+      "fields": ["no analytics payload is emitted by the implemented Ace paths"],
+      "retention": "not applicable because this flow creates no data",
+      "deletion": "not applicable because this flow creates no data",
+      "evidence": [
+        {"path": "docs/security/codex-security-na-inventory.json", "references": ["Ace product-boundary treatment of analytics"]},
+        {"path": "tests/security/test_product_boundary_absent.py", "references": ["absent product capability checks"]}
+      ]
+    },
+    {
+      "id": "otel_export",
+      "status": "absent",
+      "switch": "absent: no Ace OTEL exporter or export switch is implemented",
+      "destination": "none implemented",
+      "fields": ["no OTEL span or metric payload is emitted by the implemented Ace paths"],
+      "retention": "not applicable because this flow creates no data",
+      "deletion": "not applicable because this flow creates no data",
+      "evidence": [
+        {"path": "docs/security/codex-security-na-inventory.json", "references": ["Ace product-boundary treatment of telemetry"]},
+        {"path": "tests/security/test_product_boundary_absent.py", "references": ["absent product capability checks"]}
+      ]
+    },
+    {
+      "id": "rollout_telemetry",
+      "status": "absent",
+      "switch": "absent: no rollout telemetry collector or upload switch is implemented",
+      "destination": "none implemented",
+      "fields": ["no rollout telemetry payload is emitted by the implemented Ace paths"],
+      "retention": "not applicable because this flow creates no data",
+      "deletion": "not applicable because this flow creates no data",
+      "evidence": [
+        {"path": "docs/security/codex-security-na-inventory.json", "references": ["Ace product-boundary treatment of rollout telemetry"]},
+        {"path": "tests/security/test_product_boundary_absent.py", "references": ["absent product capability checks"]}
+      ]
+    }
+  ]
+}

@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from crew.security.actions import normalize_exec_action
+from crew.security.actions import ActionScope, normalize_exec_action
 from crew.security.approvals import (
     ApprovalDecision,
     ApprovalError,
@@ -663,3 +663,29 @@ def test_state_stays_bounded_after_massive_expiry(tmp_path: Path) -> None:
 
     assert len(manager._requests) == 1
     assert len(manager._handled) == 0
+
+
+def test_action_scope_is_bound_and_approval_failures_are_classified(tmp_path: Path) -> None:
+    clock = _Clock()
+    manager = _manager(clock)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["git", "status"], tmp_path)
+    scope = ActionScope(action, filesystem=(str(tmp_path),), turn_digest="a" * 64)
+    request = manager.create(context, action, "terminal", action_scope=scope)
+
+    assert request.action_scope_digest == scope.digest
+    with pytest.raises(ApprovalError) as mismatch:
+        manager.decide(request.request_id, request.nonce, ApprovalDecision.ONCE, context)
+    assert mismatch.value.status.value == "scope_context_mismatch"
+
+    outcome = manager.decide(
+        request.request_id,
+        request.nonce,
+        ApprovalDecision.ONCE,
+        context,
+        action_scope=scope,
+    )
+    assert outcome.status.value == "approved"
+    with pytest.raises(ApprovalError) as replay:
+        manager.decide(request.request_id, request.nonce, ApprovalDecision.ONCE, context, action_scope=scope)
+    assert replay.value.status.value == "replay"

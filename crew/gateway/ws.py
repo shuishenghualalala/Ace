@@ -145,6 +145,8 @@ def _require_string(
         raise _protocol_error()
     if "\x00" in value or any(ord(char) < 0x20 and char not in "\t\r\n" for char in value):
         raise _protocol_error()
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        raise _protocol_error()
     if strip_stable and value != value.strip():
         raise _protocol_error()
     return value
@@ -565,7 +567,7 @@ def create_ws_router(
         connections.register_owner(owner, socket)
         log.info("WebSocket 已连接")
         registered_sessions: set[str] = set()
-        runners: set[asyncio.Task] = set()
+        runners: dict[asyncio.Task, str] = {}
         disconnected = asyncio.Event()
 
         def _session_owned(session_id: str) -> bool:
@@ -577,10 +579,13 @@ def create_ws_router(
                 socket,
                 {
                     "kind": "error",
-                    "body": {"message": f"会话不存在: {session_id}"},
+                    "body": {
+                        "message": "会话不存在",
+                        "code": "SESSION_NOT_FOUND",
+                        "category": "protocol",
+                    },
                     "is_final": True,
                     "sequence": 0,
-                    "session_id": session_id,
                 },
             )
 
@@ -738,8 +743,8 @@ def create_ws_router(
         def _spawn(env: Envelope) -> None:
             """并发派发：接收循环立即继续读下一条，实现忙时排队。"""
             task = asyncio.create_task(_run(env))
-            runners.add(task)
-            task.add_done_callback(runners.discard)
+            runners[task] = env.session_id
+            task.add_done_callback(runners.pop)
 
         def _request_id_kw(data: dict) -> dict[str, str]:
             request_id = str(data.get("request_id") or "").strip()
@@ -1272,6 +1277,15 @@ def create_ws_router(
                 )
                 or set()
             )
+            orphaned_runners = [
+                task
+                for task, session_id in list(runners.items())
+                if session_id in orphaned_sessions and not task.done()
+            ]
+            for task in orphaned_runners:
+                task.cancel()
+            if orphaned_runners:
+                await asyncio.gather(*orphaned_runners, return_exceptions=True)
             # A disconnected last observer must not leave pending approvals or
             # session-scoped grants usable by an orphaned turn. Conversation
             # history remains intact and can be resumed after re-authentication.

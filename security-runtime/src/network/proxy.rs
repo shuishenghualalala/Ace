@@ -203,17 +203,32 @@ fn serve(
             "invalid HTTP proxy request line",
         ));
     }
+    if !valid_method(fields[0]) {
+        return Err(NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "invalid HTTP method",
+        ));
+    }
+    if !matches!(fields[2], "HTTP/1.0" | "HTTP/1.1") {
+        return Err(NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "invalid HTTP version",
+        ));
+    }
     if fields[0].eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_authority(fields[1], 443)?;
         validate_proxy_host(&header, &host, port, 443)?;
+        let mut upstream = connector::connect(policy, &host, port, "https", IO_TIMEOUT)?;
+        register_upstream(connections, connection_id, &upstream, stopped)?;
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .map_err(|error| {
                 NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
             })?;
+        // A standard CONNECT client sends TLS only after receiving 200. The
+        // target was already authorized and connected above; do not forward
+        // application bytes until the ClientHello SNI matches that target.
         let client_hello = read_validated_tls_client_hello(&mut client, &host, request_deadline)?;
-        let mut upstream = connector::connect(policy, &host, port, "https", IO_TIMEOUT)?;
-        register_upstream(connections, connection_id, &upstream, stopped)?;
         upstream.write_all(&client_hello).map_err(|error| {
             NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
         })?;
@@ -221,17 +236,38 @@ fn serve(
     }
     let (host, port, path) = parse_absolute_http_target(fields[1])?;
     validate_proxy_host(&header, &host, port, 80)?;
+    let websocket = websocket_request(&header, fields[0])?;
     let body_length = request_body_length(&header)?;
+    if websocket && body_length != 0 {
+        return Err(NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "WebSocket upgrade request must not have a body",
+        ));
+    }
     let mut upstream = connector::connect(policy, &host, port, "http", IO_TIMEOUT)?;
     register_upstream(connections, connection_id, &upstream, stopped)?;
-    let rewritten = rewrite_request_line(&header, fields[0], &path, fields[2])?;
+    let rewritten = if websocket {
+        rewrite_websocket_request_line(&header, fields[0], &path, fields[2])?
+    } else {
+        rewrite_request_line(&header, fields[0], &path, fields[2])?
+    };
     upstream.write_all(&rewritten).map_err(|error| {
         NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
     })?;
     copy_request_body(&mut client, &mut upstream, body_length, request_deadline)?;
-    upstream.shutdown(Shutdown::Write).map_err(|error| {
-        NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
-    })?;
+    if !websocket {
+        upstream.shutdown(Shutdown::Write).map_err(|error| {
+            NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
+        })?;
+    }
+    if websocket {
+        let response = read_header(&mut upstream, request_deadline)?;
+        validate_websocket_response(&response)?;
+        client.write_all(&response).map_err(|error| {
+            NetworkError::new(NetworkErrorCode::NetworkUnavailable, error.to_string())
+        })?;
+        return tunnel(client, upstream);
+    }
     relay_http_response(&mut upstream, &mut client, request_deadline)
 }
 
@@ -465,12 +501,24 @@ fn split_authority(value: &str, default_port: u16) -> Result<(String, u16), Netw
         let (host, tail) = host.split_once(']').ok_or_else(|| {
             NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid IPv6 authority")
         })?;
-        let port = tail
-            .strip_prefix(':')
-            .map(str::parse)
-            .transpose()
-            .map_err(|_| NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid proxy port"))?
-            .unwrap_or(default_port);
+        let port = if tail.is_empty() {
+            default_port
+        } else {
+            tail.strip_prefix(':')
+                .ok_or_else(|| {
+                    NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid IPv6 authority")
+                })?
+                .parse()
+                .map_err(|_| {
+                    NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid proxy port")
+                })?
+        };
+        if port == 0 {
+            return Err(NetworkError::new(
+                NetworkErrorCode::SandboxDenied,
+                "proxy port must be between 1 and 65535",
+            ));
+        }
         return Ok((host.to_string(), port));
     }
     let (host, port) = value.rsplit_once(':').ok_or_else(|| {
@@ -479,12 +527,16 @@ fn split_authority(value: &str, default_port: u16) -> Result<(String, u16), Netw
             "proxy target must include a port",
         )
     })?;
-    Ok((
-        host.to_string(),
-        port.parse().map_err(|_| {
-            NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid proxy port")
-        })?,
-    ))
+    let port = port
+        .parse()
+        .map_err(|_| NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid proxy port"))?;
+    if port == 0 {
+        return Err(NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "proxy port must be between 1 and 65535",
+        ));
+    }
+    Ok((host.to_string(), port))
 }
 
 fn validate_proxy_host(
@@ -603,6 +655,54 @@ fn request_body_length(header: &[u8]) -> Result<usize, NetworkError> {
     Ok(length)
 }
 
+fn valid_method(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+fn websocket_request(header: &[u8], method: &str) -> Result<bool, NetworkError> {
+    let text = std::str::from_utf8(header).map_err(|_| {
+        NetworkError::new(NetworkErrorCode::SandboxDenied, "proxy header is not UTF-8")
+    })?;
+    let mut upgrades = Vec::new();
+    let mut connections = Vec::new();
+    for line in text.split("\r\n").skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line.split_once(':').ok_or_else(|| {
+            NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid proxy header")
+        })?;
+        if name.eq_ignore_ascii_case("upgrade") {
+            upgrades.push(value.trim());
+        } else if name.eq_ignore_ascii_case("connection") {
+            connections.extend(value.split(',').map(str::trim));
+        }
+    }
+    let has_connection_upgrade = connections
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case("upgrade"));
+    if upgrades.is_empty() && !has_connection_upgrade {
+        return Ok(false);
+    }
+    if !method.eq_ignore_ascii_case("GET")
+        || upgrades.len() != 1
+        || !upgrades[0].eq_ignore_ascii_case("websocket")
+        || !connections
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("upgrade"))
+    {
+        return Err(NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "invalid WebSocket upgrade request",
+        ));
+    }
+    Ok(true)
+}
+
 fn split_host_header_authority(
     value: &str,
     default_port: u16,
@@ -629,6 +729,12 @@ fn split_host_header_authority(
         let port = raw_port.parse().map_err(|_| {
             NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid proxy Host port")
         })?;
+        if port == 0 {
+            return Err(NetworkError::new(
+                NetworkErrorCode::SandboxDenied,
+                "proxy port must be between 1 and 65535",
+            ));
+        }
         return Ok((host.to_string(), port));
     }
     Ok((value.to_string(), default_port))
@@ -885,6 +991,113 @@ fn rewrite_request_line(
     }
     result.extend_from_slice(b"Connection: close\r\n\r\n");
     Ok(result)
+}
+
+fn rewrite_websocket_request_line(
+    header: &[u8],
+    method: &str,
+    path: &str,
+    version: &str,
+) -> Result<Vec<u8>, NetworkError> {
+    let text = std::str::from_utf8(header).map_err(|_| {
+        NetworkError::new(NetworkErrorCode::SandboxDenied, "proxy header is not UTF-8")
+    })?;
+    let mut lines = text.split("\r\n");
+    lines.next().ok_or_else(|| {
+        NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "missing request-line boundary",
+        )
+    })?;
+    let mut result = format!("{method} {path} {version}\r\n").into_bytes();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if line.starts_with([' ', '\t']) {
+            return Err(NetworkError::new(
+                NetworkErrorCode::SandboxDenied,
+                "folded proxy headers are forbidden",
+            ));
+        }
+        let (name, _value) = line.split_once(':').ok_or_else(|| {
+            NetworkError::new(NetworkErrorCode::SandboxDenied, "invalid proxy header")
+        })?;
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "proxy-connection"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+        ) {
+            continue;
+        }
+        result.extend_from_slice(line.as_bytes());
+        result.extend_from_slice(b"\r\n");
+    }
+    result.extend_from_slice(b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+    Ok(result)
+}
+
+fn validate_websocket_response(header: &[u8]) -> Result<(), NetworkError> {
+    let text = std::str::from_utf8(header).map_err(|_| {
+        NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "WebSocket response is not UTF-8",
+        )
+    })?;
+    let mut lines = text.split("\r\n");
+    let status = lines.next().ok_or_else(|| {
+        NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "WebSocket response is empty",
+        )
+    })?;
+    let fields = status.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 2 || fields[1] != "101" {
+        return Err(NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "upstream did not complete the WebSocket upgrade",
+        ));
+    }
+    let mut upgrades = 0;
+    let mut connection_upgrade = false;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line.split_once(':').ok_or_else(|| {
+            NetworkError::new(
+                NetworkErrorCode::SandboxDenied,
+                "invalid WebSocket response",
+            )
+        })?;
+        if name.eq_ignore_ascii_case("upgrade") {
+            upgrades += 1;
+            if !value.trim().eq_ignore_ascii_case("websocket") {
+                return Err(NetworkError::new(
+                    NetworkErrorCode::SandboxDenied,
+                    "invalid WebSocket upgrade response",
+                ));
+            }
+        } else if name.eq_ignore_ascii_case("connection") {
+            connection_upgrade = value
+                .split(',')
+                .any(|item| item.trim().eq_ignore_ascii_case("upgrade"));
+        }
+    }
+    if upgrades != 1 || !connection_upgrade {
+        return Err(NetworkError::new(
+            NetworkErrorCode::SandboxDenied,
+            "invalid WebSocket upgrade response",
+        ));
+    }
+    Ok(())
 }
 
 /// Bounded bidirectional copy for CONNECT tunnels (N6).
@@ -1192,5 +1405,42 @@ mod tests {
             HTTP_MAX_REQUEST_BYTES + 1
         );
         assert!(request_body_length(oversized.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn websocket_upgrade_is_forwarded_only_as_a_valid_upgrade() {
+        let header = b"GET http://allowed.example/socket HTTP/1.1\r\n\
+                       Host: allowed.example\r\n\
+                       Connection: keep-alive, Upgrade\r\n\
+                       Upgrade: websocket\r\n\
+                       Sec-WebSocket-Key: key\r\n\r\n";
+        assert!(websocket_request(header, "GET").unwrap());
+        let rewritten =
+            rewrite_websocket_request_line(header, "GET", "/socket", "HTTP/1.1").unwrap();
+        let text = String::from_utf8(rewritten).unwrap().to_ascii_lowercase();
+        assert!(text.contains("upgrade: websocket\r\n"));
+        assert!(text.contains("connection: upgrade\r\n"));
+        assert!(!text.contains("proxy-authorization"));
+    }
+
+    #[test]
+    fn websocket_upgrade_rejects_incomplete_request_or_response() {
+        let invalid_request =
+            b"POST http://allowed.example/socket HTTP/1.1\r\nConnection: Upgrade\r\n\
+              Upgrade: websocket\r\n\r\n";
+        assert!(websocket_request(invalid_request, "POST").is_err());
+
+        let invalid_response = b"HTTP/1.1 200 OK\r\n\r\n";
+        assert!(validate_websocket_response(invalid_response).is_err());
+        let valid_response = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+              Connection: Upgrade\r\n\r\n";
+        validate_websocket_response(valid_response).unwrap();
+    }
+
+    #[test]
+    fn proxy_authority_rejects_zero_port() {
+        assert!(split_authority("allowed.example:0", 443).is_err());
+        assert!(split_host_header_authority("allowed.example:0", 443).is_err());
+        assert!(split_authority("[::1]suffix", 443).is_err());
     }
 }

@@ -929,7 +929,107 @@ async def test_tool_runner_rejects_execution_middleware_argument_change_after_pe
     assert "changed after permission" in messages[-1].content
 
 
-def test_terminal_generated_files_merge_into_existing_file_changes(tmp_path):
+async def test_terminal_workspace_snapshot_does_not_starve_event_loop(tmp_path, monkeypatch):
+    """terminal 全工作区快照必须在 worker 线程执行，不能阻塞 Gateway 事件循环。"""
+    import time
+
+    from crew.core.runctx import current_agent_workdir
+    from crew.core.types import ToolResult
+
+    runner = _runner(Registry())
+    in_snapshot = False
+    ticks_during_snapshot = 0
+
+    def slow_snapshot(_root, _stop_event=None):
+        nonlocal in_snapshot
+        in_snapshot = True
+        try:
+            time.sleep(0.15)
+            return {}
+        finally:
+            in_snapshot = False
+
+    async def heartbeat():
+        nonlocal ticks_during_snapshot
+        while True:
+            await asyncio.sleep(0.01)
+            if in_snapshot:
+                ticks_during_snapshot += 1
+
+    async def resolve(_tc):
+        return ToolResult("term-1", "terminal", '{"success": true}')
+
+    monkeypatch.setattr(runner, "_workspace_snapshot", slow_snapshot)
+    monkeypatch.setattr(runner, "_resolve", resolve)
+    token = current_agent_workdir.set(str(tmp_path))
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        messages: list[Message] = []
+        _ = [
+            chunk
+            async for chunk in runner._run_sequential_segment(
+                [ToolCall("term-1", "terminal", {"command": "echo ok"})],
+                messages,
+                "rid",
+                _seq_counter(),
+                set(),
+            )
+        ]
+    finally:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        current_agent_workdir.reset(token)
+
+    assert ticks_during_snapshot >= 2
+
+
+async def test_terminal_workspace_snapshot_timeout_does_not_delay_terminal(tmp_path, monkeypatch):
+    """慢速快照超时后，terminal 必须继续进入执行边界。"""
+    import time
+
+    import crew.agent.loop.tool_runner as tool_runner_module
+    from crew.core.runctx import current_agent_workdir
+    from crew.core.types import ToolResult
+
+    runner = _runner(Registry())
+    resolve_started = asyncio.Event()
+
+    def slow_snapshot(_root, _stop_event=None):
+        time.sleep(0.20)
+        return {}
+
+    async def resolve(_tc):
+        resolve_started.set()
+        return ToolResult("term-1", "terminal", '{"success": true}')
+
+    monkeypatch.setattr(runner, "_workspace_snapshot", slow_snapshot)
+    monkeypatch.setattr(
+        tool_runner_module,
+        "TERMINAL_WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(runner, "_resolve", resolve)
+    token = current_agent_workdir.set(str(tmp_path))
+    started = time.monotonic()
+    try:
+        _ = [
+            chunk
+            async for chunk in runner._run_sequential_segment(
+                [ToolCall("term-1", "terminal", {"command": "echo ok"})],
+                [],
+                "rid",
+                _seq_counter(),
+                set(),
+            )
+        ]
+    finally:
+        current_agent_workdir.reset(token)
+
+    assert resolve_started.is_set()
+    assert time.monotonic() - started < 0.15
+
+
+async def test_terminal_generated_files_merge_into_existing_file_changes(tmp_path):
     """terminal 间接生成的过程文件和最终二进制结果应进入同一 file_changes 列表。"""
     from crew.agent.plan import PlanModeManager
     from crew.core.types import ToolResult
@@ -944,7 +1044,7 @@ def test_terminal_generated_files_merge_into_existing_file_changes(tmp_path):
     result_file = tmp_path / "最终结果.pptx"
     result_file.write_bytes(b"PK\x03\x04pptx")
 
-    event = runner._terminal_file_change_event(
+    event = await runner._terminal_file_change_event(
         ToolCall("term-1", "terminal", {"command": "node build.js"}),
         (tmp_path, before),
         ToolResult("term-1", "terminal", '{"success": true, "exit_code": 0}'),

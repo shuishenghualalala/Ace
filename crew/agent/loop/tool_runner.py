@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import mimetypes
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
@@ -21,6 +22,7 @@ from typing import Any
 
 from crew.agent.file_changes import (
     FILE_CHANGE_MAX_BYTES,
+    WORKSPACE_FILE_CHANGE_MAX_ITEMS,
     FileMetadataSnapshot,
     metadata_change,
     resolve_file_path,
@@ -70,6 +72,7 @@ from crew.tools.tool_search import (
 log = get_logger("agent.tool_runner")
 
 _PERMISSION_AUDITOR: Callable[[ToolCall, str, str], None] | None = None
+TERMINAL_WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS = 1.0
 
 
 def set_permission_auditor(
@@ -117,7 +120,10 @@ class ToolRunner:
         self.plugins = plugins
         self.guardrails = guardrails
         self.parallel_enabled = parallel_enabled
-        self.max_parallel_tool_calls = max(1, int(max_parallel_tool_calls or _MAX_TOOL_WORKERS))
+        self.max_parallel_tool_calls = min(
+            _MAX_TOOL_WORKERS,
+            max(1, int(max_parallel_tool_calls or _MAX_TOOL_WORKERS)),
+        )
         self.session_id = session_id
         self.control = control
         self.plan_manager = plan_manager
@@ -319,7 +325,7 @@ class ToolRunner:
 
     def _record_bridge_discovery(self, bridge_name: str, result: ToolResult) -> None:
         """Record schemas made callable by tool_search."""
-        if result.is_error or result.is_untrusted or bridge_name != "tool_search":
+        if result.is_error or bridge_name != "tool_search":
             return
         try:
             payload = json.loads(result.content)
@@ -328,10 +334,18 @@ class ToolRunner:
         if not isinstance(payload, dict) or payload.get("error"):
             return
 
+        # The bridge result is produced locally from the immutable, already
+        # authorized schema list. Keep the normal untrusted result marker for
+        # model-facing output, but only activate names present in that list so
+        # parsing the result cannot widen the execution surface.
+        allowed_names = {
+            str((schema.get("function") or {}).get("name") or "")
+            for schema in self.tool_search_schemas
+        }
         names: set[str] = set()
         for item in payload.get("matches") or []:
             name = item.get("name") if isinstance(item, dict) else item
-            if str(name or ""):
+            if str(name or "") in allowed_names:
                 names.add(str(name))
 
         if not names:
@@ -362,7 +376,7 @@ class ToolRunner:
             if tc.id not in started_tool_call_ids:
                 yield self._start_event(tc, rid, next_seq)
             before = self._read_file_before(tc) if tc.name == "file_write" else None
-            terminal_before = self._terminal_workspace_snapshot(tc)
+            terminal_before = await self._terminal_workspace_snapshot(tc)
             result = await self._resolve(tc)
             status = "cancelled" if self._interrupted else ("error" if result.is_error else "ok")
             yield self._result_event(tc, result, rid, next_seq, status=status)
@@ -377,7 +391,7 @@ class ToolRunner:
                 if file_event is not None:
                     yield file_event
             elif tc.name == "terminal":
-                terminal_event = self._terminal_file_change_event(
+                terminal_event = await self._terminal_file_change_event(
                     tc, terminal_before, result, rid, next_seq,
                 )
                 if terminal_event is not None:
@@ -1268,11 +1282,37 @@ class ToolRunner:
         )
 
     @staticmethod
-    def _workspace_snapshot(root: Path) -> FileMetadataSnapshot | None:
+    def _workspace_snapshot(
+        root: Path,
+        stop_event: threading.Event | None = None,
+    ) -> FileMetadataSnapshot | None:
         """读取工作区文件元数据，用于识别 terminal 间接生成的结果文件。"""
-        return workspace_snapshot(root)
+        return workspace_snapshot(root, stop_event=stop_event)
 
-    def _terminal_workspace_snapshot(self, tc) -> tuple[Path, FileMetadataSnapshot] | None:
+    async def _workspace_snapshot_async(
+        self, root: Path
+    ) -> FileMetadataSnapshot | None:
+        """在 worker 线程限时扫描，不能阻塞 terminal 的安全执行。"""
+
+        stop_event = threading.Event()
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._workspace_snapshot, root, stop_event),
+                timeout=max(0.01, TERMINAL_WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS),
+            )
+        except asyncio.TimeoutError:
+            stop_event.set()
+            log.warning(
+                "terminal 工作区快照超时，跳过文件变化归因 root=%s timeout=%.3fs",
+                root,
+                TERMINAL_WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS,
+            )
+            return None
+        except asyncio.CancelledError:
+            stop_event.set()
+            raise
+
+    async def _terminal_workspace_snapshot(self, tc) -> tuple[Path, FileMetadataSnapshot] | None:
         """仅为可能写盘的前台 terminal 建快照；只读命令与后台任务不增加扫描开销。"""
         if tc.name != "terminal" or is_tool_parallel_safe(tc) or bool((tc.arguments or {}).get("background")):
             return None
@@ -1282,7 +1322,7 @@ class ToolRunner:
         if not raw:
             return None
         root = Path(raw).expanduser().resolve()
-        snapshot = self._workspace_snapshot(root)
+        snapshot = await self._workspace_snapshot_async(root)
         return (root, snapshot) if snapshot is not None else None
 
     @staticmethod
@@ -1293,7 +1333,7 @@ class ToolRunner:
             change["created_in_session"] = True
         return change
 
-    def _terminal_file_change_event(
+    async def _terminal_file_change_event(
         self,
         tc,
         before_state: tuple[Path, FileMetadataSnapshot] | None,
@@ -1312,7 +1352,7 @@ class ToolRunner:
             return None
 
         root, before = before_state
-        after = self._workspace_snapshot(root)
+        after = await self._workspace_snapshot_async(root)
         if after is None:
             return None
         changed_paths = sorted(
@@ -1325,9 +1365,13 @@ class ToolRunner:
 
         changes = [
             self._terminal_change(path, "added" if path not in before else "modified")
-            for path in changed_paths
+            for path in changed_paths[:WORKSPACE_FILE_CHANGE_MAX_ITEMS]
         ]
-        changes.extend(self._terminal_change(path, "deleted") for path in deleted_paths)
+        remaining = WORKSPACE_FILE_CHANGE_MAX_ITEMS - len(changes)
+        changes.extend(
+            self._terminal_change(path, "deleted")
+            for path in deleted_paths[:max(0, remaining)]
+        )
 
         items = list(changes)
         if self.plan_manager is not None:
@@ -1350,7 +1394,7 @@ class ToolRunner:
                         change,
                         owner_account_id=owner,
                     )
-                items = list(store)
+                items = list(store)[-WORKSPACE_FILE_CHANGE_MAX_ITEMS:]
             except Exception:  # noqa: BLE001 — 采集失败不影响 terminal 主结果
                 log.warning("terminal 文件变更合并失败 session=%s", self.session_id, exc_info=True)
 

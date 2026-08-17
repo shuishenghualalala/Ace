@@ -1,5 +1,43 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const nativeImageMock = vi.hoisted(() => ({
+  created: [] as Array<{ bitmap: Buffer; width: number; height: number }>,
+  createFromBitmap(bitmap: Buffer, options: { width: number; height: number }) {
+    const makeImage = (width: number, height: number, pixels: Buffer): any => ({
+      isEmpty: () => pixels.length === 0,
+      getSize: () => ({ width, height }),
+      toBitmap: () => pixels,
+      toPNG: () => {
+        const png = Buffer.alloc(25);
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
+        png.writeUInt32BE(width, 16);
+        png.writeUInt32BE(height, 20);
+        return png;
+      },
+      toJPEG: () => {
+        const jpeg = Buffer.from([
+          0xff, 0xd8,
+          0xff, 0xc0, 0x00, 0x0b, 0x08,
+          height >> 8, height & 0xff,
+          width >> 8, width & 0xff,
+          0x01, 0x01, 0x11, 0x00,
+          0xff, 0xd9,
+        ]);
+        return jpeg;
+      },
+      resize: ({ width: nextWidth, height: nextHeight }: { width: number; height: number }) => (
+        makeImage(nextWidth, nextHeight, Buffer.alloc(nextWidth * nextHeight * 4))
+      ),
+    });
+    nativeImageMock.created.push({ bitmap: Buffer.from(bitmap), ...options });
+    return makeImage(options.width, options.height, bitmap);
+  },
+}));
+
+vi.mock('electron', () => ({
+  nativeImage: { createFromBitmap: nativeImageMock.createFromBitmap },
+}));
 
 import {
   ELECTRON_CDP_CAPABILITIES,
@@ -12,6 +50,10 @@ class FakeDebugger extends EventEmitter {
   detachCount = 0;
   readonly sent: Array<{ method: string; params?: unknown; sessionId?: string }> = [];
   targetId: string;
+  frameId = 'frame-1';
+  loaderId = 'loader-1';
+  viewport = { x: 0, y: 0, width: 1024, height: 720, scale: 1 };
+  contentSize = { x: 0, y: 0, width: 1024, height: 720 };
   /** 允许单条命令抛错，验错误如何回到 Playwright。 */
   failOn = '';
   targetInfoGate: Promise<void> | null = null;
@@ -52,8 +94,89 @@ class FakeDebugger extends EventEmitter {
       await this.targetInfoGate;
       return { targetInfo: { targetId: this.targetId, type: 'page', url: 'https://example.test/' } };
     }
+    if (method === 'Page.getFrameTree') {
+      return { frameTree: { frame: { id: this.frameId, loaderId: this.loaderId } } };
+    }
+    if (method === 'Page.getLayoutMetrics') {
+      const { x, y, width, height, scale } = this.viewport;
+      return {
+        cssContentSize: this.contentSize,
+        visualViewport: {
+          pageX: x,
+          pageY: y,
+          clientWidth: width,
+          clientHeight: height,
+          scale,
+        },
+        cssVisualViewport: {
+          pageX: x,
+          pageY: y,
+          clientWidth: width,
+          clientHeight: height,
+          scale,
+        },
+        cssLayoutViewport: {
+          pageX: x,
+          pageY: y,
+          clientWidth: width,
+          clientHeight: height,
+        },
+      };
+    }
+    if (method === 'Runtime.evaluate') {
+      const expression = String((params as { expression?: unknown } | undefined)?.expression ?? '');
+      const scroll = /window\.scrollTo\(([-\d.]+),\s*([-\d.]+)\)/.exec(expression);
+      if (scroll) {
+        this.viewport.x = Math.max(0, Math.min(Number(scroll[1]), this.contentSize.width - this.viewport.width));
+        this.viewport.y = Math.max(0, Math.min(Number(scroll[2]), this.contentSize.height - this.viewport.height));
+      }
+      return { result: { value: { x: this.viewport.x, y: this.viewport.y } } };
+    }
     return { ok: method };
   }
+}
+
+function fakePng(width = 1024, height = 720): Buffer {
+  const png = Buffer.alloc(25);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
+  png.writeUInt32BE(width, 16);
+  png.writeUInt32BE(height, 20);
+  return png;
+}
+
+function fakeNativeImage(
+  width = 1024,
+  height = 720,
+  empty = false,
+): { isEmpty(): boolean; getSize(): { width: number; height: number }; toPNG(): Buffer; toJPEG(quality: number): Buffer } {
+  return {
+    isEmpty: () => empty,
+    getSize: () => ({ width, height }),
+    toPNG: () => fakePng(width, height),
+    toJPEG: () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+  };
+}
+
+function fakeBitmapNativeImage(width: number, height: number, pageY: number): any {
+  const bitmap = Buffer.alloc(width * height * 4);
+  for (let row = 0; row < height; row += 1) {
+    bitmap.fill((pageY + row) % 251, row * width * 4, (row + 1) * width * 4);
+  }
+  return {
+    isEmpty: () => false,
+    getSize: () => ({ width, height }),
+    toBitmap: () => bitmap,
+    toPNG: () => fakePng(width, height),
+    toJPEG: () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+  };
+}
+
+function jpegSize(bytes: Buffer): { width: number; height: number } {
+  const marker = bytes.indexOf(Buffer.from([0xff, 0xc0]));
+  return {
+    height: bytes.readUInt16BE(marker + 5),
+    width: bytes.readUInt16BE(marker + 7),
+  };
 }
 
 class FakeDownloadItem extends EventEmitter {
@@ -1427,6 +1550,249 @@ describe('ElectronCdpTransport', () => {
     await flush();
 
     expect(sink.reply(2).error.message).toMatch(/boom: Page.navigate/);
+  });
+
+  it('顶层 viewport 截图走 hidden Electron capturePage 并返回 CDP data', async () => {
+    const transport = new ElectronCdpTransport();
+    const { view, debug } = fakeView('T-native-screenshot');
+    const calls: unknown[] = [];
+    view.webContents.capturePage = async (...args: unknown[]) => {
+      calls.push(args);
+      return {
+        isEmpty: () => false,
+        getSize: () => ({ width: 1024, height: 720 }),
+        toPNG: () => fakePng(),
+      };
+    };
+    transport.addView(view);
+    const sink = collect(transport);
+    transport.send({ id: 1, method: 'Target.setAutoAttach', params: {} });
+    await flush();
+    const session = sink.events('Target.attachedToTarget')[0].params.sessionId;
+
+    transport.send({
+      id: 2,
+      method: 'Page.captureScreenshot',
+      params: {
+        format: 'png',
+        clip: { x: 0, y: 0, width: 1024, height: 720, scale: 1 },
+        captureBeyondViewport: false,
+      },
+      sessionId: session,
+    });
+    await flush();
+
+    expect(sink.reply(2).result).toEqual({ data: fakePng().toString('base64') });
+    expect(calls).toEqual([[{ x: 0, y: 0, width: 1024, height: 720 }, { stayHidden: true }]]);
+    expect(debug.sent.some((command) => command.method === 'Page.captureScreenshot')).toBe(false);
+  });
+
+  it('顶层 fullPage JPEG 在 hidden Electron 中分段合成真实完整高度并恢复滚动', async () => {
+    const transport = new ElectronCdpTransport();
+    const { view, debug } = fakeView('T-native-full-page-jpeg');
+    debug.viewport = { x: 0, y: 123, width: 1024, height: 700, scale: 1 };
+    debug.contentSize = { x: 0, y: 0, width: 1024, height: 1900 };
+    const calls: unknown[][] = [];
+    view.webContents.capturePage = async (...args: unknown[]) => {
+      calls.push(args);
+      return fakeBitmapNativeImage(1024, 700, debug.viewport.y);
+    };
+    nativeImageMock.created.length = 0;
+    transport.addView(view);
+    const sink = collect(transport);
+    transport.send({ id: 1, method: 'Target.setAutoAttach', params: {} });
+    await flush();
+    const session = sink.events('Target.attachedToTarget')[0].params.sessionId;
+
+    transport.send({
+      id: 2,
+      method: 'Page.captureScreenshot',
+      params: {
+        format: 'jpeg',
+        quality: 71,
+        clip: { x: 0, y: 0, width: 1024, height: 1900, scale: 1 },
+        captureBeyondViewport: true,
+      },
+      sessionId: session,
+    });
+    await flush();
+
+    const jpeg = Buffer.from(sink.reply(2).result.data, 'base64');
+    expect(jpeg.subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));
+    expect(jpeg.subarray(-2)).toEqual(Buffer.from([0xff, 0xd9]));
+    expect(jpegSize(jpeg)).toEqual({ width: 1024, height: 1900 });
+    const stitched = nativeImageMock.created.at(-1)!;
+    expect({ width: stitched.width, height: stitched.height }).toEqual({ width: 1024, height: 1900 });
+    for (const row of [0, 699, 700, 1399, 1400, 1899]) {
+      expect(stitched.bitmap[row * 1024 * 4]).toBe(row % 251);
+    }
+    expect(calls[0]).toEqual([
+      { x: 0, y: 0, width: 1024, height: 1900 },
+      { stayHidden: true },
+    ]);
+    expect(calls.slice(1)).toHaveLength(3);
+    expect(debug.viewport.y).toBe(123);
+    expect(debug.sent.some((command) => command.method === 'Page.captureScreenshot')).toBe(false);
+  });
+
+  it('fullPage、真实 clip、透明背景与 locator/ref 截图继续走 Playwright CDP', async () => {
+    const cases: Array<Record<string, unknown>> = [
+      { fullPage: true },
+      { captureBeyondViewport: true },
+      { omitBackground: true },
+      { clip: { x: 0, y: 0, width: 100, height: 100, scale: 1 } },
+      { ref: '@e1', clip: { x: 0, y: 0, width: 1024, height: 720, scale: 1 } },
+    ];
+
+    for (const params of cases) {
+      const transport = new ElectronCdpTransport();
+      const { view, debug } = fakeView(`T-fallback-${Object.keys(params)[0]}`);
+      let captureCount = 0;
+      view.webContents.capturePage = async () => {
+        captureCount += 1;
+        return fakeNativeImage();
+      };
+      transport.addView(view);
+      const sink = collect(transport);
+      transport.send({ id: 1, method: 'Target.setAutoAttach', params: {} });
+      await flush();
+      const session = sink.events('Target.attachedToTarget')[0].params.sessionId;
+
+      transport.send({
+        id: 2,
+        method: 'Page.captureScreenshot',
+        params: { format: 'png', captureBeyondViewport: false, ...params },
+        sessionId: session,
+      });
+      await flush();
+
+      expect(sink.reply(2).result).toEqual({ ok: 'Page.captureScreenshot' });
+      expect(captureCount).toBe(0);
+      expect(debug.sent.some((command) => command.method === 'Page.captureScreenshot')).toBe(true);
+    }
+  });
+
+  it('子 frame screenshot 继续路由到对应 CDP child session', async () => {
+    const transport = new ElectronCdpTransport();
+    const { view, debug } = fakeView('T-child-screenshot');
+    let captureCount = 0;
+    view.webContents.capturePage = async () => {
+      captureCount += 1;
+      return fakeNativeImage();
+    };
+    transport.addView(view);
+    const sink = collect(transport);
+    transport.send({ id: 1, method: 'Target.setAutoAttach', params: {} });
+    await flush();
+    debug.emit('message', {}, 'Target.attachedToTarget', {
+      sessionId: 'child-screenshot',
+      targetInfo: { targetId: 'F-child-screenshot', type: 'iframe' },
+    }, undefined);
+    await flush();
+
+    transport.send({
+      id: 2,
+      method: 'Page.captureScreenshot',
+      params: { format: 'png', captureBeyondViewport: false },
+      sessionId: 'child-screenshot',
+    });
+    await flush();
+
+    expect(sink.reply(2).result).toEqual({ ok: 'Page.captureScreenshot' });
+    expect(captureCount).toBe(0);
+    expect(debug.sent).toContainEqual({
+      method: 'Page.captureScreenshot',
+      params: { format: 'png', captureBeyondViewport: false },
+      sessionId: 'child-screenshot',
+    });
+  });
+
+  it('合法 JPEG quality 使用 native encoder', async () => {
+    const transport = new ElectronCdpTransport();
+    const { view } = fakeView('T-jpeg-screenshot');
+    let quality = -1;
+    view.webContents.capturePage = async () => ({
+      isEmpty: () => false,
+      getSize: () => ({ width: 1024, height: 720 }),
+      toPNG: () => fakePng(),
+      toJPEG: (nextQuality: number) => {
+        quality = nextQuality;
+        return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+      },
+    });
+    transport.addView(view);
+    const sink = collect(transport);
+    transport.send({ id: 1, method: 'Target.setAutoAttach', params: {} });
+    await flush();
+    const session = sink.events('Target.attachedToTarget')[0].params.sessionId;
+
+    transport.send({
+      id: 2,
+      method: 'Page.captureScreenshot',
+      params: {
+        format: 'jpeg',
+        quality: 65,
+        clip: { x: 0, y: 0, width: 1024, height: 720, scale: 1 },
+        captureBeyondViewport: false,
+      },
+      sessionId: session,
+    });
+    await flush();
+
+    expect(sink.reply(2).result).toEqual({ data: '/9j/2Q==' });
+    expect(quality).toBe(65);
+  });
+
+  it('native screenshot 在 capturePage 前后检查 frame/loader identity', async () => {
+    const transport = new ElectronCdpTransport();
+    const { view, debug } = fakeView('T-changing-screenshot');
+    view.webContents.capturePage = async () => {
+      debug.loaderId = 'loader-after-capture';
+      return fakeNativeImage();
+    };
+    transport.addView(view);
+    const sink = collect(transport);
+    transport.send({ id: 1, method: 'Target.setAutoAttach', params: {} });
+    await flush();
+    const session = sink.events('Target.attachedToTarget')[0].params.sessionId;
+
+    transport.send({
+      id: 2,
+      method: 'Page.captureScreenshot',
+      params: { format: 'png', captureBeyondViewport: false },
+      sessionId: session,
+    });
+    await flush();
+
+    expect(sink.reply(2).error.message).toMatch(/页面在截图期间已变化/);
+  });
+
+  it('拒绝空图与超过尺寸/像素上限的 native screenshot', async () => {
+    const cases = [
+      { id: 'T-empty-screenshot', image: fakeNativeImage(1024, 720, true), message: /截图为空/ },
+      { id: 'T-oversized-screenshot', image: fakeNativeImage(10_000, 10_000), message: /尺寸无效或过大/ },
+    ];
+
+    for (const item of cases) {
+      const transport = new ElectronCdpTransport();
+      const { view } = fakeView(item.id);
+      view.webContents.capturePage = async () => item.image;
+      transport.addView(view);
+      const sink = collect(transport);
+      transport.send({ id: 1, method: 'Target.setAutoAttach', params: {} });
+      await flush();
+      const session = sink.events('Target.attachedToTarget')[0].params.sessionId;
+
+      transport.send({
+        id: 2,
+        method: 'Page.captureScreenshot',
+        params: { format: 'png', captureBeyondViewport: false },
+        sessionId: session,
+      });
+      await flush();
+
+      expect(sink.reply(2).error.message).toMatch(item.message);
+    }
   });
 
   it('close() 后不再向 Playwright 投递消息', async () => {

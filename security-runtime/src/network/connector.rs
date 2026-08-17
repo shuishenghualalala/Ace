@@ -42,9 +42,40 @@ pub fn connect(
 fn connect_pinned(address: SocketAddr, timeout: Duration) -> Result<TcpStream, String> {
     let stream = TcpStream::connect_timeout(&address, timeout)
         .map_err(|error| format!("connect {address} failed: {error}"))?;
+    let peer = stream
+        .peer_addr()
+        .map_err(|error| format!("read connected peer for {address} failed: {error}"))?;
+    if !peer_matches(address, peer) {
+        return Err(format!(
+            "connected peer {peer} does not match pinned endpoint {address}"
+        ));
+    }
     stream
         .set_read_timeout(Some(timeout))
         .and_then(|_| stream.set_write_timeout(Some(timeout)))
         .map_err(|error| format!("cannot set connector timeout: {error}"))?;
     Ok(stream)
+}
+
+fn peer_matches(expected: SocketAddr, actual: SocketAddr) -> bool {
+    actual == expected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_peer_check_rejects_address_or_port_changes() {
+        let expected = SocketAddr::from(([127, 0, 0, 1], 443));
+        assert!(peer_matches(expected, expected));
+        assert!(!peer_matches(
+            expected,
+            SocketAddr::from(([127, 0, 0, 2], 443)),
+        ));
+        assert!(!peer_matches(
+            expected,
+            SocketAddr::from(([127, 0, 0, 1], 8443)),
+        ));
+    }
 }

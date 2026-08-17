@@ -40,7 +40,64 @@ class ProviderProxyConfig:
     endpoint_url: str
     username: str
     password: str = field(repr=False)
+    origin: tuple[str, str, int] | None = field(default=None, repr=False, compare=False)
     _credential_issuer: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        try:
+            parsed, target = _CANONICALIZER.canonicalize_url(
+                self.endpoint_url,
+                allowed_schemes=frozenset({"http"}),
+            )
+            address = ipaddress.ip_address(target.host)
+        except (OutboundDenied, ValueError) as exc:
+            raise ProviderProxyUnavailable("provider proxy endpoint is invalid") from exc
+        if (
+            not address.is_loopback
+            or target.path != "/"
+            or target.query
+            or parsed.fragment
+            or target.method != "GET"
+            or not isinstance(self.username, str)
+            or not isinstance(self.password, str)
+            or not self.username
+            or not self.password
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in self.username + self.password)
+        ):
+            raise ProviderProxyUnavailable("provider proxy endpoint is invalid")
+        if self.origin is None:
+            raise ProviderProxyUnavailable("provider proxy origin is unavailable")
+        scheme, host, port = self.origin
+        if (
+            not isinstance(scheme, str)
+            or not isinstance(host, str)
+            or isinstance(port, bool)
+            or not isinstance(port, int)
+            or not 1 <= port <= 65535
+        ):
+            raise ProviderProxyUnavailable("provider origin is invalid")
+        origin_host = f"[{host}]" if ":" in host else host
+        try:
+            canonical_origin = _CANONICALIZER.canonicalize_url(
+                f"{scheme}://{origin_host}:{port}/",
+                allowed_schemes=frozenset({"http", "https"}),
+            )[1]
+        except OutboundDenied as exc:
+            raise ProviderProxyUnavailable("provider origin is invalid") from exc
+        if (canonical_origin.scheme, canonical_origin.host, canonical_origin.port) != self.origin:
+            raise ProviderProxyUnavailable("provider origin is invalid")
+
+    def validate_request(self, url: str, *, method: str) -> None:
+        try:
+            _parsed, target = _CANONICALIZER.canonicalize_url(
+                url,
+                method=method,
+                allowed_schemes=frozenset({"http", "https"}),
+            )
+        except OutboundDenied as exc:
+            raise ProviderProxyUnavailable("provider request is invalid") from exc
+        if (target.scheme, target.host, target.port) != self.origin:
+            raise ProviderProxyUnavailable("provider request origin mismatch")
 
     @property
     def credentials(self) -> tuple[str, str]:
@@ -98,6 +155,7 @@ class _ContextBoundAsyncTransport(httpx.AsyncBaseTransport):
             context.require_complete()
         except OutboundDenied as exc:
             raise ProviderProxyUnavailable("provider context required") from exc
+        self._config.validate_request(str(request.url), method=str(request.method))
         proxy = self._config.httpx_proxy(context=context)
         transport = httpx.AsyncHTTPTransport(
             verify=self._verify,
@@ -178,6 +236,7 @@ class _ProviderProxyRuntime:
                 endpoint_url=proxy.endpoint_url,
                 username=username,
                 password=password,
+                origin=self.origin,
                 _credential_issuer=proxy.credentials_for,
             )
         except BaseException as exc:

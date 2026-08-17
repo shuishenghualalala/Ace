@@ -44,7 +44,7 @@ def test_dotenv_cannot_override_process_security_or_loader_state(
     monkeypatch.setenv("SAFE_VALUE", "old")
     monkeypatch.setenv("PROVIDER_API_KEY", "old-key")
 
-    _load_env_file(env_file)
+    secure_values = _load_env_file(env_file)
 
     assert os.environ["ACE_STRICT_SECURITY"] == "1"
     assert "ACE_SECURITY_RUNTIME" not in os.environ
@@ -53,7 +53,11 @@ def test_dotenv_cannot_override_process_security_or_loader_state(
     assert os.environ["CREW_RIPGREP_INSTALLER"] == "managed"
     assert os.environ["PATH"] == "trusted-path"
     assert os.environ["SAFE_VALUE"] == "allowed"
-    assert os.environ["PROVIDER_API_KEY"] == "${ACE_STRICT_SECURITY}"
+    assert "PROVIDER_API_KEY" not in os.environ
+    assert secure_values["PROVIDER_API_KEY"] == "${ACE_STRICT_SECURITY}"
+    persisted = env_file.read_text(encoding="utf-8")
+    assert "${ACE_STRICT_SECURITY}" not in persisted
+    assert "PROVIDER_API_KEY=@ace-secret:v1:" in persisted
 
 
 def test_owner_dotenv_excludes_protected_names_and_interpolation(
@@ -89,6 +93,13 @@ def test_runtime_config_api_cannot_write_protected_environment_names(
 ) -> None:
     with pytest.raises(ValueError, match="not writable"):
         write_env_key(tmp_path / ".env", name, "attacker")
+
+
+def test_runtime_config_api_cannot_write_sensitive_environment_values(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="platform secret storage"):
+        write_env_key(tmp_path / ".env", "PROVIDER_API_KEY", "plaintext")
 
 
 def test_env_write_rejects_symlink_target(tmp_path: Path) -> None:

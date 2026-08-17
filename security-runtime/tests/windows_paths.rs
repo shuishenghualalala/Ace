@@ -106,6 +106,10 @@ fn unsupported_windows_path_namespaces_fail_closed() {
     ] {
         assert!(path::validate_local_absolute(&path).is_err());
     }
+    assert!(
+        path::validate_local_absolute(&PathBuf::from(r"C:\workspace\state.json:alternate",))
+            .is_err()
+    );
 }
 
 #[test]

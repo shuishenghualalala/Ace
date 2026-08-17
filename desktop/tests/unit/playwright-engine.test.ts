@@ -37,6 +37,7 @@ class FakeDebugger extends EventEmitter {
 
   detach(): void {
     this.attached = false;
+    this.emit('detach', {}, 'test detach');
   }
 
   async sendCommand(method: string): Promise<unknown> {
@@ -224,6 +225,52 @@ describe('PlaywrightEngine', () => {
 
     expect(page.on).toHaveBeenCalledWith('dialog', expect.any(Function));
     expect(page.on).toHaveBeenCalledWith('close', expect.any(Function));
+    await engine.dispose();
+  });
+
+  it('已绑定 Page 的重复读取复用同一 Page 生命周期', async () => {
+    const { context, makePage, setPages } = fakeContext('engine-target');
+    const page = makePage();
+    setPages([page]);
+    const engine = new PlaywrightEngine();
+    const { view } = fakeView();
+    engine.registerTab(view);
+
+    await expect(engine.pageForView(view)).resolves.toBe(page);
+    setPages([]);
+    await expect(engine.pageForView(view, 20)).resolves.toBe(page);
+
+    expect(context.newCDPSession).toHaveBeenCalledOnce();
+    await engine.dispose();
+  });
+
+  it('native detach 后 close 事件到达前不复用 stale Page', async () => {
+    const { context, makePage, setPages } = fakeContext('engine-target');
+    const oldPage = makePage();
+    const newPage = makePage();
+    setPages([oldPage]);
+    const engine = new PlaywrightEngine();
+    const { view, debug } = fakeView();
+    engine.registerTab(view);
+
+    await expect(engine.pageForView(view)).resolves.toBe(oldPage);
+    await engine.setAutomationMode(view, false);
+    mocks.setFocusEmulation.mockClear();
+    debug.detach();
+    // Playwright may retain the old Page until its delayed Target detach is
+    // processed, while the replacement Page is already visible to the
+    // context. Matching targetId alone must not select the retired object.
+    setPages([oldPage, newPage]);
+
+    await expect(engine.pageForView(view)).resolves.toBe(newPage);
+    expect(mocks.setFocusEmulation).toHaveBeenCalledWith(context, newPage, false);
+
+    await engine.setAutomationMode(view, true);
+    const chooser = { setFiles: vi.fn(), isMultiple: () => false };
+    newPage.emit('filechooser', chooser);
+    expect(engine.takePendingFileChooser(view)).toBe(chooser);
+    oldPage.emit('close');
+    await expect(engine.pageForView(view)).resolves.toBe(newPage);
     await engine.dispose();
   });
 

@@ -46,6 +46,24 @@ session/interaction MCP 的精确白名单。
 
 因此：**符合项必须极少**。Ace 已有 native runtime 或 allowlist，只能说明“不是零实现”，不能升级为安全等价。
 
+## T15 release closure note (2026-08-17)
+
+T15 本地 Windows 收口证据：`x86_64-pc-windows-msvc` runtime 已真实构建；source hash 为
+`f332d2ab080f2753ed4c923b695896d16ce1e64043e671f840a854bbcbb0f7f5`，binary SHA-256 为
+`dc55074e7225bbcb7dce5943231eb16e17e901f0804fbee95570f11c389a8f81`，manifest SHA-256 为
+`ff0f010e813f9e5ce860a51a9d76837e33e79c8545e7b82f2183d54ec9441a4e`，Desktop staging binary
+与 binary digest 对齐，`security:verify` 和 source-drift 检查通过。Electron process callsite
+inventory 已补齐并通过 15 项 inventory tests；Gateway 与 Desktop 独立启动 smoke 均通过。
+当前 Windows 本地复验为 Python security `935 passed, 20 skipped`、Desktop Vitest
+`157 files / 1754 passed`、Rust release tests 通过、release gate `61 passed, 1 warning`、
+typecheck 和 `npm audit` 均通过。
+
+本次没有把任何基线行批量更新为 `符合`，也没有改动 T01 的 `N/A`/`ACE_EQUIV`/`APPLICABLE`
+处置。T15 覆盖的 32 个 ID 全部保持 `不全面`：当前工作树在提交前仍 dirty，且缺少同一
+clean commit 的 Linux/macOS/安装后 Windows runner、受信包签名、package attestation 和
+实际 signing policy；release gate 因此按设计保持阻断。Windows 安装矩阵已实际尝试，因当前
+PowerShell 未提升而被 runtime 明确拒绝，未把该结果伪装成 installed-runner 证据。
+
 ## 1. 审计口径、威胁模型和信任边界
 
 把不可信输入、执行面清单和默认拒绝写成可验收项。Codex 对应列只表示有无可比对象，不表示 Ace 已等价。
@@ -61,7 +79,7 @@ session/interaction MCP 的精确白名单。
 | GOV-007 | 高风险/全权限模式必须显式选择，并记录来源 | 信任边界与默认拒绝：高风险/全权限模式必须显式选择，并记录来源 | PROD | `core/src/config/permissions.rs`；profile/approval | 无法落实「高风险/全权限模式必须显式选择，并记录来源」则拒绝对应操作；依赖缺失、解析失败或不支持时不得无隔离继续 | `SecurityService.set_mode()` 在发布新 mode 前持久审计 old/new/source/reason，并原子撤销旧 pending/grant；Desktop 对 `FULL_ACCESS` 显式确认且新会话不继承；`test_audit_grant_race.py`、Desktop security unit tests 覆盖 | 符合 | 无已知模式切换代码缺口；继续禁止环境变量/恢复状态静默进入 `FULL_ACCESS` | 从 UI、Gateway、重连和新会话切换模式，核对审计 provenance、旧 grant 失效和当前 turn 冻结 |
 | GOV-008 | 最小权限优先，权限只向具体 action 或明确范围扩大 | 信任边界与默认拒绝：最小权限优先，权限只向具体 action 或明确范围扩大 | PROD | `resolved_permission_profile.rs`、additional permissions、sandbox transform | 无法落实「最小权限优先，权限只向具体 action 或明确范围扩大」则拒绝对应操作；依赖缺失、解析失败或不支持时不得无隔离继续 | `actions.py` 生成 canonical action digest；`approvals.py`/`grants.py` 将 once/session authority 绑定 owner/workspace/session/task；`policy.py` 对 additional permission 做交集且 deny 不可覆盖；最终 snapshot 冻结精确范围 | 符合 | 无已知 action/grant 扩权缺口；平台实际隔离证据仍按平台行记账 | 运行 `test_additional_permissions.py` 与 `test_security_approvals.py` 的超集、跨 owner/session/turn、过期和并发消费负测 |
 | GOV-009 | 将策略决策、原生强制和应用工具分层 | 信任边界与默认拒绝：将策略决策、原生强制和应用工具分层 | PROD | core → exec-server → sandboxing/network-proxy | 无法落实「将策略决策、原生强制和应用工具分层」则拒绝对应操作；依赖缺失、解析失败或不支持时不得无隔离继续 | 应用工具提交 normalized action，`SecurityService` 决策，`snapshot.py` 签发一次性 authority，`runtime_client.py`/native runtime 强制；结构化文件工具在最终 I/O handle 再复核；伪造 launch/snapshot 测试在 spawn 前拒绝 | 符合 | 分层本身无已知代码缺口；“符合”不宣称未运行的平台内核 gate 已通过 | 直接调用工具、伪造 `ProcessLaunch`、重放 snapshot、替换 helper；任何路径都不得绕过决策层到达最终副作用 |
-| GOV-010 | 安全 invariant 有自动化回归门禁 | 信任边界与默认拒绝：安全 invariant 有自动化回归门禁 | PROD | 各 crate 单测、集成测试、平台测试和 release workflow | 无法落实「安全 invariant 有自动化回归门禁」则拒绝对应操作；依赖缺失、解析失败或不支持时不得无隔离继续 | `tests/security/`、Rust `--all-targets`、Desktop security tests 与三平台 workflow/release-evidence gate 已定义；本次工作树复验为 `tests/security` `829 passed, 18 skipped`（含 archive ratio/depth、plugin zip bomb、office zip 预算、proxy userinfo/query canary、MCP schema 语义 fuzz、MCP 输出跨工具链 corpus、MCP 密钥轮换 replay、审计 turn/model/policy/build 字段与迁移封链、browser 权限审计契约），MCP/lifecycle 等配套切片与 `tests/test_browser_plugin.py` 170 passed，Gateway `464 passed, 1 skipped`；Desktop 全量单元 `1741 passed`，Desktop typecheck 通过 | 不全面 | 本地回归现已通过；但工作树未提交，仍无绑定同一 commit 的 Linux/macOS/安装后 Windows artifact，两个 Windows installed-fixture test 也被 ignored，不能声称外部门禁闭环 | 提交后在同一 SHA 跑三平台 workflow，产出并由 release gate 验证 commit/source/binary hash、SBOM、签名和 runner identity |
+| GOV-010 | 安全 invariant 有自动化回归门禁 | 信任边界与默认拒绝：安全 invariant 有自动化回归门禁 | PROD | 各 crate 单测、集成测试、平台测试和 release workflow | 无法落实「安全 invariant 有自动化回归门禁」则拒绝对应操作；依赖缺失、解析失败或不支持时不得无隔离继续 | `tests/security/`、Rust `--all-targets`、Desktop security tests 与三平台 workflow/release-evidence gate 已定义；当前 Windows 工作树复验为 Python security `935 passed, 20 skipped`、Rust release tests 通过、Desktop 全量 `157 files / 1754 passed`、typecheck 通过；发布路径 `61 passed, 1 warning`，inventory `15 passed` | 不全面 | 本地回归已通过；但提交前工作树仍 dirty，且无绑定同一 commit 的 Linux/macOS/安装后 Windows artifact、受信包签名和 attestation，不能声称外部门禁闭环 | 提交后在同一 SHA 跑三平台 workflow，产出并由 release gate 验证 commit/source/binary hash、SBOM、签名和 runner identity |
 | GOV-011 | 明确本地攻击者、恶意插件、远程客户端、供应链和资源耗尽边界 | 信任边界与默认拒绝：明确本地攻击者、恶意插件、远程客户端、供应链和资源耗尽边界 | PROD | Codex 的 sandbox、exec-server、MCP、release tests 分域 | 无法落实「明确本地攻击者、恶意插件、远程客户端、供应链和资源耗尽边界」则拒绝对应操作；依赖缺失、解析失败或不支持时不得无隔离继续 | `threat-model-and-responsibility-matrix.md` 的 TA/TB 行现在显式绑定 Security owner、生产源码入口、负测路径、fail-closed 行为、剩余风险与 `reviewed-automated` 状态；schema 测试验证 actor/boundary 闭合、owner 来自责任矩阵、源码与测试路径存在于当前 checkout，且明确 automated review 不等于人工签核或平台证据。 | 不全面 | 行级机器闭合已补；仍缺责任人间人工签核、按 TB 行关联真实运行产物/平台 runner，以及部署 residual risk 的定期审查记录。 | `pytest -q -p no:cacheprovider tests/security/test_threat_model_contract.py tests/security/test_security_threat_model.py`；临时篡改 owner、源码路径、测试路径或 review state 任一字段必须失败。 |
 | GOV-012 | 记录“Codex 无直接业务对应”的 Ace 专属执行面 | 信任边界与默认拒绝：记录“Codex 无直接业务对应”的 Ace 专属执行面 | 无直接对应 | Codex 没有 Ace Gateway/Browser/CUA 等相同业务 | 未登记的 Ace 专属面不得当作 Codex 已覆盖；清单缺失时阻断对应业务面进入生产 | `execution-surface-inventory.md` 明确登记 Gateway、Browser/CUA、external agent、MCP、Desktop system surface 及其 owner/强制层；`test_execution_surface_inventory.py` 与 `test_product_boundary_absent.py` 对新增源和 436-ID 处置失败关闭 | 符合 | 清单能力无已知缺口；登记不等于对应业务面的安全状态“符合”，各业务面仍看其专属 ID | 新增一个 Ace-only process/network surface 而不登记，相关静态门禁必须失败；登记后核对 owner、强制层和测试均非空 |
 
@@ -624,7 +642,7 @@ Ace 专属面不伪造 Codex 对照。PROD-* 来自官方产品文档，本地�
 ### 20.1 统计
 
 - 唯一原子项：**436**（ID 无重复）。
-- Ace 状态：`符合 96`（22.0%），`不全面 280`（64.2%），`欠缺 60`（13.8%）。WIN-019/WIN-020 已从“欠缺”改为“有实现但缺真实平台证据”的“不全面”；PROTO-003 已补齐 Gateway JSON 结构预算，PROTO-010 已补齐 agent_turn 持久化幂等切片，但后者仍因其它危险入口未统一而保持“不全面”。
+- Ace 状态：`符合 102`（23.4%），`不全面 274`（62.8%），`欠缺 60`（13.8%）。WIN-019/WIN-020 已从“欠缺”改为“有实现但缺真实平台证据”的“不全面”；PROTO-003 已补齐 Gateway JSON 结构预算，PROTO-010 已补齐 agent_turn 持久化幂等切片，但后者仍因其它危险入口未统一而保持“不全面”。
 - Codex 接入分布：`DOC 12`，`LIB 6`，`PROD 369`，`TEST 16`，`无直接对应 33`。
 - 产品适用性派生：`APPLICABLE 366`、`N/A 49`、`ACE_EQUIV 21`；后两者不改变上一行三态，也不构成符合证据。
 - `符合` 只表示该原子项当前可证明安全等价，不表示所在模块整体安全。
@@ -678,7 +696,7 @@ Ace 专属面不伪造 Codex 对照。PROD-* 来自官方产品文档，本地�
 
 ### 20.5 已知未在本机复跑的验证
 
-- 本轮已用 Windows 系统 TEMP 重跑完整 `pytest tests/security`（832 passed, 18 skipped）和受影响套件；Desktop Vitest 全量 157 个文件/1741 个测试通过，无 `ECONNREFUSED`；不再保留此前 20 个文件/49 个 UI/Gateway 未启动噪声失败。Desktop `test:pw-contract`（真实 Electron/Playwright）的 BrowserHost 17 个检查已在契约脚本中补上受管 `configure_proxy` RPC（`crew` 实例凭据）、临时 profile 清理带 `maxRetries/retryDelay`、每次运行独立 `userData` 与 15s 操作上限，不再因未注入代理凭据或 Windows EBUSY 假失败；隐藏窗口截图检查在本机仍超时，属环境性未通过、未虚报。生产 `npm run build` 在提供合法 `ACE_DOWNLOAD_BASE_URL` 与 Ed25519 `ACE_UPDATE_PUBLIC_KEY` 时已实测产出 dist；无真实 release 环境时仍由前置校验阻断，`check_release_readiness.py --security-release` 同样因缺 clean checkout、三平台 runner、签名/attested package evidence 阻断，未将配置或发布证据缺失误判为代码通过。
+- 本轮已用外部 basetemp 重跑完整 `pytest -p no:cacheprovider tests/security`（935 passed, 20 skipped）；Desktop Vitest 全量 157 个文件/1754 个测试通过，无 `ECONNREFUSED`；Desktop `test:pw-contract` 仍为 `71/71`，真实 Electron/Playwright 的 BrowserHost 截图、生命周期、网络和受控 fixture 回归通过。Rust Windows release tests 通过但保留 2 个需要 installed fixture 的 ignored tests；非提升 PowerShell 运行安装矩阵被 native helper 正确拒绝。生产 `npm run build` 在提供合法 `ACE_DOWNLOAD_BASE_URL` 与 Ed25519 `ACE_UPDATE_PUBLIC_KEY` 时已实测产出 dist；无真实 release 环境时仍由前置校验阻断，`check_release_readiness.py --security-release` 同样因缺 clean checkout、三平台 runner、签名/attested package evidence 阻断，未将配置或发布证据缺失误判为代码通过。
 - 2026-08-15 附件预算切片：在工作区专用 TEMP 下 `pytest -q -p no:cacheprovider --basetemp=D:/MobileWork/ace-upload-budget-temp/pytest tests/security/test_attachment_security.py tests/test_context.py tests/gateway/test_upload.py tests/gateway/test_protocol_security.py` 通过（56 passed, 1 skipped, 1 warning）；另用 4 个真实并发进程验证 10B owner 配额下 7B 上传仅接受 1 个。
 - 2026-08-15 Gateway 授权审计切片：在工作区专用 TEMP 下 `pytest -q -p no:cacheprovider --basetemp=D:/MobileWork/ace-route-audit-temp/pytest4 tests/gateway/test_ipc_boundary_hardening.py tests/gateway/test_auth_contract.py tests/gateway/test_account_isolation.py` 通过（46 passed, 1 warning）；洪泛上限单测单独通过。ACE-001 仅收窄缺口，未因静态清单升级为符合。
 - 2026-08-15 威胁模型切片：`pytest -q -p no:cacheprovider --basetemp=D:/MobileWork/ace-threat-temp/pytest2 tests/security/test_threat_model_contract.py tests/security/test_security_threat_model.py` 通过（5 passed）。GOV-011 仅收窄为人工签核/真实平台产物缺口，未虚标符合。
@@ -690,10 +708,10 @@ Ace 专属面不伪造 Codex 对照。PROD-* 来自官方产品文档，本地�
 ### 20.6 文档自检
 
 - 唯一 ID 数量：436；重复 ID：0。
-- 状态计数：`符合 99`、`不全面 277`、`欠缺 60`；WIN-019/WIN-020 已从“欠缺”迁移为“不全面”。
+- 状态计数：`符合 102`、`不全面 274`、`欠缺 60`；WIN-019/WIN-020 已从“欠缺”迁移为“不全面”。
 - 状态值仅 `符合`/`不全面`/`欠缺`。
 - 章节覆盖规格 1–20。
 - 未把 `LIB`/`DOC` 项标成 `符合`。
 - Codex 证据中可解析到文件的路径：当前 checkout **0 个缺失**。
 - 保护目标不再使用“见能力列”；强制边界不再使用统一套话。
-- `符合` 计数为 99：仅把已有实现、调用链和可执行负测补齐的项升级；依赖真实 runner、全入口或发布 attestation 的项仍保持 `不全面`。当前 `欠缺` 项全部由产品边界台账处置为 `N/A` 或 `ACE_EQUIV`，无 `APPLICABLE` 的未实现项。
+- `符合` 计数为 102：仅把已有实现、调用链和可执行负测补齐的项升级；依赖真实 runner、全入口或发布 attestation 的项仍保持 `不全面`。当前 `欠缺` 项全部由产品边界台账处置为 `N/A` 或 `ACE_EQUIV`，无 `APPLICABLE` 的未实现项。

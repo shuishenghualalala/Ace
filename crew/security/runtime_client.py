@@ -9,19 +9,17 @@ import hashlib
 import hmac
 import json
 import logging
-import os
+import math
 import re
 import secrets
 import shutil
-import signal
-import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
+from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
 from crew.security.snapshot import SignedAuthorizationSnapshot
 
 RUNTIME_PROTOCOL_VERSION = 2
@@ -33,6 +31,7 @@ _MAX_STDIO_INPUT_BYTES = 16 * 1024 * 1024
 _MAX_STDIO_OUTPUT_BYTES = 64 * 1024 * 1024
 _MAX_ENV_BYTES = 256 * 1024
 _MAX_HELPER_STDERR = 64 * 1024
+_MAX_RUNTIME_TIMEOUT_SECONDS = 24 * 60 * 60
 _ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _RESERVED_ENV_NAMES = frozenset(
     {
@@ -224,6 +223,7 @@ class NativeRuntimeStdioProcess:
         token: str,
         nonce: str,
         deadline: float,
+        inactivity_timeout: float | None,
         max_input_bytes: int,
         max_output_bytes: int,
         capabilities: RuntimeCapabilities,
@@ -234,6 +234,8 @@ class NativeRuntimeStdioProcess:
         self._token = token
         self._nonce = nonce
         self._deadline = deadline
+        self._inactivity_timeout = inactivity_timeout
+        self._last_activity = asyncio.get_running_loop().time()
         self._max_input_bytes = max_input_bytes
         self._max_output_bytes = max_output_bytes
         self._input_bytes = 0
@@ -268,6 +270,7 @@ class NativeRuntimeStdioProcess:
             encoded = base64.b64encode(data).decode("ascii")
             await self._write_input_frame("stdin", encoded)
             self._input_bytes += len(data)
+            self._last_activity = asyncio.get_running_loop().time()
 
     async def close_stdin(self) -> None:
         async with self._write_lock:
@@ -281,6 +284,7 @@ class NativeRuntimeStdioProcess:
             finally:
                 if self._process.stdin is not None:
                     self._process.stdin.close()
+                self._last_activity = asyncio.get_running_loop().time()
 
     async def receive(self) -> tuple[str, bytes | int]:
         if self._terminal or self._terminated:
@@ -288,10 +292,25 @@ class NativeRuntimeStdioProcess:
                 RuntimeErrorCode.RUNTIME_CRASHED,
                 "native stdio output is closed",
             )
-        frame = await self._client._read_frame(
-            self._process,
-            _remaining(self._deadline),
-        )
+        try:
+            frame = await self._client._read_frame(
+                self._process,
+                _activity_timeout(
+                    self._deadline,
+                    self._last_activity,
+                    self._inactivity_timeout,
+                ),
+            )
+        except asyncio.CancelledError:
+            await self.terminate()
+            raise
+        except TimeoutError as exc:
+            await self.terminate()
+            raise NativeRuntimeError(
+                RuntimeErrorCode.TIMEOUT,
+                "native stdio runtime timed out",
+            ) from exc
+        self._last_activity = asyncio.get_running_loop().time()
         if (
             frame.get("version") != RUNTIME_PROTOCOL_VERSION
             or frame.get("nonce") != self._nonce
@@ -418,7 +437,10 @@ class NativeRuntimeClient:
         if not argv:
             raise ValueError("helper_argv cannot be empty")
         self._helper_argv = argv
-        self._startup_timeout = startup_timeout
+        self._startup_timeout = _validate_timeout(
+            startup_timeout,
+            "native runtime startup timeout",
+        )
 
     async def classify_shell(
         self,
@@ -429,6 +451,7 @@ class NativeRuntimeClient:
         timeout: float = 5.0,
     ) -> ShellClassification:
         """Classify without executing; helper failures conservatively become ASK."""
+        timeout = _validate_timeout(timeout, "classification timeout")
         executable_path, executable_digest = _executable_identity(executable)
         if not executable_path or not executable_digest:
             return _ask_classification(
@@ -538,6 +561,7 @@ class NativeRuntimeClient:
         authorization: SignedAuthorizationSnapshot,
         env_overrides: Mapping[str, str],
         timeout: float = 30.0,
+        inactivity_timeout: float | None = None,
         max_output_bytes: int = 2 * 1024 * 1024,
         stdin: bytes | None = None,
         on_started: Callable[[int | None], None] | None = None,
@@ -556,6 +580,17 @@ class NativeRuntimeClient:
                 RuntimeErrorCode.SANDBOX_DENIED,
                 "native runtime authorization snapshot is missing",
             )
+        timeout = _validate_timeout(timeout, "native runtime timeout")
+        inactivity_timeout = _validate_optional_timeout(
+            inactivity_timeout,
+            "native runtime inactivity timeout",
+        )
+        if (
+            not isinstance(max_output_bytes, int)
+            or isinstance(max_output_bytes, bool)
+            or not 0 < max_output_bytes <= _MAX_STDIO_OUTPUT_BYTES
+        ):
+            raise ValueError("native runtime output budget is invalid")
         try:
             frozen_environment = dict(env_overrides)
             snapshot = consume_authorization_snapshot(
@@ -617,6 +652,7 @@ class NativeRuntimeClient:
             network_rules=network_rules,
             allow_local_binding=snapshot.allow_local_binding,
             timeout=timeout,
+            inactivity_timeout=inactivity_timeout,
             max_output_bytes=max_output_bytes,
             stdin=stdin,
             env_overrides=frozen_environment,
@@ -634,6 +670,7 @@ class NativeRuntimeClient:
         max_lifetime_seconds: float,
         max_input_bytes: int,
         max_output_bytes: int,
+        inactivity_timeout_seconds: float | None = None,
         verification_key: bytes | None = None,
     ) -> NativeRuntimeStdioProcess:
         """Open one capability-negotiated duplex process without host fallback."""
@@ -655,6 +692,10 @@ class NativeRuntimeClient:
             or not 0 < float(max_lifetime_seconds) <= 24 * 60 * 60
         ):
             raise ValueError("native stdio budgets are invalid")
+        inactivity_timeout_seconds = _validate_optional_timeout(
+            inactivity_timeout_seconds,
+            "native stdio inactivity timeout",
+        )
         if not isinstance(authorization, SignedAuthorizationSnapshot):
             raise NativeRuntimeError(
                 RuntimeErrorCode.SANDBOX_DENIED,
@@ -810,6 +851,7 @@ class NativeRuntimeClient:
                 token=token,
                 nonce=nonce,
                 deadline=deadline,
+                inactivity_timeout=inactivity_timeout_seconds,
                 max_input_bytes=max_input_bytes,
                 max_output_bytes=max_output_bytes,
                 capabilities=runtime_capabilities,
@@ -859,6 +901,7 @@ class NativeRuntimeClient:
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
         timeout: float = 30.0,
+        inactivity_timeout: float | None = None,
         max_output_bytes: int = 2 * 1024 * 1024,
         stdin: bytes | None = None,
         env_overrides: Mapping[str, str] | None = None,
@@ -870,6 +913,17 @@ class NativeRuntimeClient:
         """Execute a command through the helper; never fall back to a host spawn."""
         if not command:
             raise ValueError("command cannot be empty")
+        timeout = _validate_timeout(timeout, "native runtime timeout")
+        inactivity_timeout = _validate_optional_timeout(
+            inactivity_timeout,
+            "native runtime inactivity timeout",
+        )
+        if (
+            not isinstance(max_output_bytes, int)
+            or isinstance(max_output_bytes, bool)
+            or not 0 < max_output_bytes <= _MAX_STDIO_OUTPUT_BYTES
+        ):
+            raise ValueError("native runtime output budget is invalid")
         validated_env = _validate_request_inputs(stdin, env_overrides)
         validated_filesystem_globs = _validate_filesystem_globs(
             filesystem_globs,
@@ -964,6 +1018,7 @@ class NativeRuntimeClient:
                 allow_local_binding=allow_local_binding,
                 on_started=on_started,
                 on_output=on_output,
+                inactivity_timeout=inactivity_timeout,
             )
             await asyncio.wait_for(process.wait(), timeout=_remaining(deadline))
         except TimeoutError as exc:
@@ -1014,15 +1069,20 @@ class NativeRuntimeClient:
         allow_local_binding: bool,
         on_started: Callable[[int | None], None] | None,
         on_output: Callable[[Literal["stdout", "stderr"]], None] | None,
+        inactivity_timeout: float | None,
     ) -> RuntimeCommandResult:
         stdout = bytearray()
         stderr = bytearray()
         active_streams: set[str] = set()
         capabilities: RuntimeCapabilities | None = None
         expected_seq = 0
+        last_activity = asyncio.get_running_loop().time()
         while True:
             try:
-                frame = await self._read_frame(process, _remaining(deadline))
+                frame = await self._read_frame(
+                    process,
+                    _activity_timeout(deadline, last_activity, inactivity_timeout),
+                )
             except NativeRuntimeError as exc:
                 if (
                     exc.code is RuntimeErrorCode.RUNTIME_CRASHED
@@ -1043,6 +1103,7 @@ class NativeRuntimeClient:
                     "native runtime response mismatch",
                 )
             expected_seq += 1
+            last_activity = asyncio.get_running_loop().time()
             frame_type = frame.get("type")
             if frame_type == "error":
                 code = _runtime_error_code(frame.get("code"))
@@ -1190,11 +1251,7 @@ class NativeRuntimeClient:
                 f"native security runtime artifact verification failed: {exc}",
             ) from exc
         env["ACE_SECURITY_RUNTIME_TOKEN"] = token
-        kwargs: dict[str, Any] = {}
-        if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            kwargs["start_new_session"] = True
+        kwargs = isolated_process_kwargs()
         try:
             return await asyncio.create_subprocess_exec(
                 *self._helper_argv,
@@ -1290,26 +1347,7 @@ class NativeRuntimeClient:
 
     @staticmethod
     async def _terminate_tree(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        if sys.platform == "darwin":
-            try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=0.5)
-                return
-            except (TimeoutError, ProcessLookupError):
-                pass
-        try:
-            if os.name == "nt":
-                process.kill()
-            else:
-                os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2.0)
-        except TimeoutError:
-            pass
+        await terminate_process_tree(process)
 
 
 def _ask_classification(
@@ -1559,6 +1597,38 @@ def _remaining(deadline: float) -> float:
     if remaining <= 0:
         raise TimeoutError
     return remaining
+
+
+def _validate_timeout(value: float, label: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{label} is invalid")
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{label} is invalid") from exc
+    if not math.isfinite(normalized) or not 0 < normalized <= _MAX_RUNTIME_TIMEOUT_SECONDS:
+        raise ValueError(f"{label} is invalid")
+    return normalized
+
+
+def _validate_optional_timeout(value: float | None, label: str) -> float | None:
+    if value is None:
+        return None
+    return _validate_timeout(value, label)
+
+
+def _activity_timeout(
+    deadline: float,
+    last_activity: float,
+    inactivity_timeout: float | None,
+) -> float:
+    remaining = _remaining(deadline)
+    if inactivity_timeout is None:
+        return remaining
+    idle_remaining = last_activity + inactivity_timeout - asyncio.get_running_loop().time()
+    if idle_remaining <= 0:
+        raise TimeoutError
+    return min(remaining, idle_remaining)
 
 
 def _runtime_error_code(value: Any) -> RuntimeErrorCode:

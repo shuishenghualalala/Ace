@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 
 
 class JSONStructureBudgetExceeded(ValueError):
@@ -30,6 +31,7 @@ class _Container:
     state: str
     keys: int = 0
     items: int = 0
+    key_names: set[str] = field(default_factory=set)
 
 
 _NUMBER_RE = re.compile(
@@ -54,6 +56,7 @@ class JSONStructureBudget:
         self._mode = "normal"
         self._string_kind = ""
         self._string_bytes = 0
+        self._string_token = bytearray()
         self._escaped = False
         self._unicode_remaining = 0
         self._token = bytearray()
@@ -112,6 +115,7 @@ class JSONStructureBudget:
             self._budget()
         self._string_kind = "key"
         self._string_bytes = 0
+        self._string_token = bytearray()
         self._escaped = False
         self._unicode_remaining = 0
         self._mode = "string"
@@ -120,6 +124,7 @@ class JSONStructureBudget:
         self._start_value()
         self._string_kind = "value"
         self._string_bytes = 0
+        self._string_token = bytearray()
         self._escaped = False
         self._unicode_remaining = 0
         self._mode = "string"
@@ -173,6 +178,16 @@ class JSONStructureBudget:
         if byte == ord('"'):
             self._mode = "normal"
             if self._string_kind == "key":
+                try:
+                    key = json.loads(b'"' + bytes(self._string_token) + b'"')
+                except (ValueError, UnicodeError):
+                    self._invalid()
+                if not isinstance(key, str):
+                    self._invalid()
+                container = self._stack[-1]
+                if key in container.key_names:
+                    self._invalid()
+                container.key_names.add(key)
                 self._stack[-1].state = "colon"
             else:
                 self._finish_value()
@@ -181,6 +196,8 @@ class JSONStructureBudget:
             self._escaped = True
         elif byte < 0x20:
             self._invalid()
+        if self._string_kind == "key":
+            self._string_token.append(byte)
         self._string_bytes += 1
         if self._string_bytes > self.limits.max_string_bytes:
             self._budget()

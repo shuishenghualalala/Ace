@@ -17,6 +17,7 @@ from typing import Any
 
 from crew.core.errors import ToolError
 from crew.core.runctx import emit_tool_progress
+from crew.state.logging import get_logger
 from crew.tools.file_utils import (
     _DEFAULT_MAX_FILE_BYTES,
     FileIdentity,
@@ -40,6 +41,8 @@ from crew.tools.redact import redact_sensitive_text, safe_public_error
 from crew.tools.registry import Registry
 from crew.tools.security_guard import AuthorizedFileTarget, authorize_file_tool
 from crew.tools.terminal_guard import detect_dangerous_command, detect_hardline_command
+
+log = get_logger("tools.builtin")
 
 FILE_READ_SCHEMA = {
     "name": "file_read",
@@ -275,6 +278,7 @@ async def handle_terminal(
             launch = explicit_launch
             final_argv = direct_argv or shell_argv(command)
         except Exception:  # noqa: BLE001 - any boundary failure must deny execution
+            log.exception("terminal 安全启动边界初始化失败")
             return json.dumps(
                 {
                     "success": False,
@@ -408,6 +412,7 @@ async def handle_terminal(
                 ),
             )
         except Exception:  # noqa: BLE001 - any boundary failure must deny execution
+            log.exception("terminal 安全执行边界初始化失败")
             return json.dumps(
                 {
                     "success": False,
@@ -435,10 +440,6 @@ async def handle_terminal(
                 ensure_ascii=False,
             )
 
-    # Every terminal process crosses one explicit ProcessLaunch. The registry alone
-    # may translate an explicitly disabled launch into the audited host path.
-    launch_options = {"launch": launch, "launch_argv": final_argv}
-
     from crew.core.runctx import (
         current_owner_account_id,
         current_parent_task_id,
@@ -450,7 +451,28 @@ async def handle_terminal(
     from crew.state.home import get_owner_runtime_home
     from crew.tools.process_registry import process_registry
 
+    # Every terminal process crosses one explicit ProcessLaunch. The registry alone
+    # may translate an explicitly disabled launch into the audited host path.
+    # An explicitly requested timeout is also carried to the registry so the
+    # process remains bounded when TaskRuntime is unavailable.
+    process_timeout = effective_timeout if timeout_explicit else None
+    process_inactivity_timeout: float | None = None
     runtime = getattr(process_registry, "_task_runtime", None)
+    if runtime is not None:
+        defaults = getattr(runtime, "defaults", {})
+        try:
+            configured_idle = float(defaults.get("shell_inactivity", 600.0))
+        except (AttributeError, TypeError, ValueError):
+            configured_idle = 600.0
+        if configured_idle > 0:
+            process_inactivity_timeout = configured_idle
+    launch_options = {
+        "launch": launch,
+        "launch_argv": final_argv,
+        "timeout": process_timeout,
+        "inactivity_timeout": process_inactivity_timeout,
+    }
+
     task_id = ""
     output_ref = ""
     if runtime is not None:

@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import math
 import os
+import threading
+import time
 import weakref
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -31,6 +34,8 @@ from crew.tools.redact import redact_sensitive_text
 log = get_logger("agent.file_changes")
 
 WORKSPACE_SNAPSHOT_MAX_FILES = 20_000
+WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS = 1.0
+WORKSPACE_FILE_CHANGE_MAX_ITEMS = 2_000
 FILE_CHANGE_MAX_BYTES = 128 * 1024
 SENSITIVE_FILE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 SENSITIVE_FILE_NAMES = frozenset({
@@ -119,18 +124,59 @@ def workspace_snapshot(
     root: str | Path,
     *,
     max_files: int = WORKSPACE_SNAPSHOT_MAX_FILES,
+    timeout_seconds: float = WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS,
+    stop_event: threading.Event | None = None,
 ) -> FileMetadataSnapshot | None:
-    """Return deterministic workspace metadata, or ``None`` when too large."""
+    """Return bounded workspace metadata, or ``None`` when it is too expensive.
+
+    Terminal file-change attribution is diagnostic metadata.  A large or slow
+    workspace must never delay command execution long enough to starve Gateway
+    transports, so the scan has both a file-count and wall-clock budget.
+    """
 
     base = Path(root).expanduser()
     snapshot: FileMetadataSnapshot = {}
     if not base.is_dir():
         return snapshot
+    if (
+        isinstance(max_files, bool)
+        or not isinstance(max_files, int)
+        or max_files <= 0
+        or isinstance(timeout_seconds, bool)
+    ):
+        raise ValueError("workspace snapshot budget is invalid")
+    try:
+        timeout = float(timeout_seconds)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("workspace snapshot timeout is invalid") from exc
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("workspace snapshot timeout is invalid")
+    file_budget = min(max_files, WORKSPACE_SNAPSHOT_MAX_FILES)
+    timeout = min(timeout, WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + timeout
     for dirpath, dirnames, filenames in os.walk(base):
+        if stop_event is not None and stop_event.is_set():
+            return None
+        if time.monotonic() >= deadline:
+            log.warning(
+                "文件快照达到时间上限 root=%s timeout=%.3fs",
+                base,
+                timeout,
+            )
+            return None
         dirnames[:] = sorted(
             name for name in dirnames if name not in WORKSPACE_SNAPSHOT_SKIP_DIRS
         )
         for filename in sorted(filenames):
+            if stop_event is not None and stop_event.is_set():
+                return None
+            if time.monotonic() >= deadline:
+                log.warning(
+                    "文件快照达到时间上限 root=%s timeout=%.3fs",
+                    base,
+                    timeout,
+                )
+                return None
             path = Path(dirpath) / filename
             try:
                 if path.is_symlink() or not path.is_file():
@@ -139,8 +185,8 @@ def workspace_snapshot(
             except (FileConflictError, OSError):
                 continue
             snapshot[str(path.resolve())] = (stat.st_mtime_ns, stat.st_size)
-            if len(snapshot) >= max_files:
-                log.warning("文件快照达到上限 root=%s limit=%s", base, max_files)
+            if len(snapshot) >= file_budget:
+                log.warning("文件快照达到上限 root=%s limit=%s", base, file_budget)
                 return None
     return snapshot
 
@@ -237,7 +283,15 @@ def metadata_change(path_text: str, status: str) -> dict[str, Any]:
 def changes_between_snapshots(
     before: FileMetadataSnapshot,
     after: FileMetadataSnapshot,
+    *,
+    max_items: int = WORKSPACE_FILE_CHANGE_MAX_ITEMS,
 ) -> list[dict[str, Any]]:
+    if (
+        isinstance(max_items, bool)
+        or not isinstance(max_items, int)
+        or max_items <= 0
+    ):
+        raise ValueError("file-change item budget is invalid")
     changed = sorted(
         path for path, metadata in after.items()
         if path not in before or before[path] != metadata
@@ -245,25 +299,41 @@ def changes_between_snapshots(
     deleted = sorted(path for path in before if path not in after)
     changes: list[dict[str, Any]] = []
     for path in changed:
+        if len(changes) >= max_items:
+            break
         change = metadata_change(path, "added" if path not in before else "modified")
         change["revision"] = f"{after[path][0]}:{after[path][1]}"
         changes.append(change)
     for path in deleted:
+        if len(changes) >= max_items:
+            break
         change = metadata_change(path, "deleted")
         change["revision"] = f"deleted:{before[path][0]}:{before[path][1]}"
         changes.append(change)
     return changes
 
 
-def merge_changes(existing: Iterable[dict[str, Any]], incoming: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def merge_changes(
+    existing: Iterable[dict[str, Any]],
+    incoming: Iterable[dict[str, Any]],
+    *,
+    max_items: int = WORKSPACE_FILE_CHANGE_MAX_ITEMS,
+) -> list[dict[str, Any]]:
     """Merge by absolute path while preserving deterministic insertion order."""
+
+    if (
+        isinstance(max_items, bool)
+        or not isinstance(max_items, int)
+        or max_items <= 0
+    ):
+        raise ValueError("file-change item budget is invalid")
 
     merged: dict[str, dict[str, Any]] = {}
     for item in [*existing, *incoming]:
         path = str(item.get("path") or "").strip()
         if path:
             merged[path] = dict(item)
-    return list(merged.values())
+    return list(merged.values())[:max_items]
 
 
 def persist_file_changes(
@@ -275,7 +345,11 @@ def persist_file_changes(
 ) -> list[dict[str, Any]]:
     """Merge changes into Crew's existing cumulative and per-turn stores."""
 
-    items = [dict(item) for item in changes if str(item.get("path") or "").strip()]
+    items = [
+        dict(item)
+        for item in changes
+        if str(item.get("path") or "").strip()
+    ][:WORKSPACE_FILE_CHANGE_MAX_ITEMS]
     if plan_manager is None:
         return items
     store = plan_manager.file_change_store(

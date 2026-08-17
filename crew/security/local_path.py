@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
@@ -26,6 +27,7 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     }
 )
 _MAX_PERCENT_DECODE_DEPTH = 4
+_POSIX_SPECIAL_ROOTS = ("/dev", "/proc", "/sys")
 
 
 class LocalPathReferenceError(ValueError):
@@ -118,7 +120,7 @@ class LocalPathReference:
 
         if not isinstance(strict, bool):
             raise TypeError("strict path resolution flag must be boolean")
-        candidate = self._native_path()
+        candidate = Path(os.path.expanduser(str(self._native_path())))
         if not candidate.is_absolute():
             if base is None:
                 raise LocalPathReferenceError(
@@ -127,18 +129,26 @@ class LocalPathReference:
             if not isinstance(base, Path):
                 raise TypeError("local path base must be a pathlib.Path")
             try:
-                canonical_base = base.expanduser().resolve(strict=True)
+                canonical_base = Path(os.path.abspath(os.path.expanduser(str(base))))
+                _reject_link_components(canonical_base)
+                base_info = canonical_base.lstat()
             except (OSError, RuntimeError, ValueError) as exc:
                 raise LocalPathReferenceError(
                     "host local path base is unavailable"
                 ) from exc
-            if not canonical_base.is_dir():
+            if not stat.S_ISDIR(base_info.st_mode):
                 raise LocalPathReferenceError(
                     "host local path base is not a directory"
                 )
             candidate = canonical_base / candidate
+        _reject_link_components(candidate)
         try:
-            return candidate.expanduser().resolve(strict=strict)
+            canonical = Path(os.path.abspath(os.path.expanduser(str(candidate))))
+            if strict:
+                canonical.lstat()
+            if os.name != "nt" and _is_posix_special_path(str(canonical)):
+                raise LocalPathReferenceError("device and protected kernel paths are forbidden")
+            return canonical
         except (OSError, RuntimeError, ValueError) as exc:
             raise LocalPathReferenceError(
                 "local path could not be canonically resolved"
@@ -208,6 +218,8 @@ def _validate_plain_path(value: str) -> None:
         raise LocalPathReferenceError(
             "Windows separators are not local to this host"
         )
+    elif os.name != "nt" and _is_posix_special_path(normalized):
+        raise LocalPathReferenceError("device and protected kernel paths are forbidden")
 
     if os.name == "nt":
         _validate_windows_components(value, has_drive=drive is not None)
@@ -281,6 +293,8 @@ def _validate_file_uri(value: str) -> None:
         raise LocalPathReferenceError(
             "Windows file URI is not local to this host"
         )
+    if os.name != "nt" and _is_posix_special_path(decoded):
+        raise LocalPathReferenceError("device and protected kernel paths are forbidden")
     if os.name == "nt":
         if drive_uri is None:
             raise LocalPathReferenceError(
@@ -334,3 +348,40 @@ def _validate_percent_encoding(value: str) -> str:
                 "local file URI percent encoding is nested too deeply"
             )
     return probe
+
+
+def _is_posix_special_path(value: str) -> bool:
+    normalized = value.replace("\\", "/").casefold().rstrip("/")
+    return any(
+        normalized == root or normalized.startswith(root + "/")
+        for root in _POSIX_SPECIAL_ROOTS
+    )
+
+
+def _reject_link_components(path: Path) -> None:
+    """Reject symlink/reparse components before lexical normalization."""
+
+    raw = os.path.expanduser(str(path))
+    if not os.path.isabs(raw):
+        raw = os.path.join(os.getcwd(), raw)
+    expanded = Path(raw)
+    anchor = expanded.anchor
+    if not anchor:
+        raise LocalPathReferenceError("local path is not absolute")
+    current = Path(anchor)
+    for component in expanded.parts[1:]:
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            current = current.parent
+            continue
+        current /= component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise LocalPathReferenceError("local path component cannot be verified") from exc
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & reparse_flag:
+            raise LocalPathReferenceError("local path contains a link or reparse component")

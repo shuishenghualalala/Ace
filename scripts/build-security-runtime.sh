@@ -11,8 +11,8 @@ crate="$repo_root/security-runtime"
 bin_dir="$crate/bin"
 target="ace-security-runtime"
 
-echo "[1/3] cargo build --release (本机默认 target)..."
-( cd "$crate" && cargo build --release )
+echo "[1/3] cargo build --release --locked (本机默认 target)..."
+( cd "$crate" && cargo build --release --locked )
 built="$crate/target/release/$target"
 [ -f "$built" ] || { echo "build 产物未找到：$built" >&2; exit 1; }
 mkdir -p "$bin_dir"
@@ -28,16 +28,23 @@ h = hashlib.sha256()
 for p in files:
     h.update(p.relative_to(crate).as_posix().encode()); h.update(b"\0")
     h.update(p.read_bytes()); h.update(b"\0")
+binary_hash = hashlib.sha256(exe.read_bytes()).hexdigest()
+platform_name = {"linux": "linux", "darwin": "darwin"}.get(sys.platform, sys.platform)
+arch = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine(), platform.machine())
 manifest = {
     "schema": 2,
-    "source_hash": h.hexdigest(),
-    "binary_sha256": hashlib.sha256(exe.read_bytes()).hexdigest(),
+    "runtime_version": "0.1.0",
+    "platform": platform_name,
+    "arch": arch,
+    "generated_by": "scripts/build-security-runtime.sh",
     "binary_name": exe.name,
+    "binary_sha256": binary_hash,
+    "files": [{"name": exe.name, "sha256": binary_hash, "size": exe.stat().st_size}],
+    "source_hash": h.hexdigest(),
     "source_files": len(files),
-    "built_for": f"{platform.system().lower()}-{platform.machine().lower()}",
     "note": "由 scripts/build-security-runtime.{ps1,sh} 重新生成；勿手改。source_hash 用于检测源码漂移，binary_sha256 用于 Python/Desktop 启动时校验二进制完整性。",
 }
-(bin_dir / "runtime-manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+(bin_dir / "runtime-manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 print(f"    source_hash: {manifest['source_hash'][:16]}... binary_sha256: {manifest['binary_sha256'][:16]}... over {len(files)} files")
 PY
 echo "done. 请 git add security-runtime/bin/ 后提交。"

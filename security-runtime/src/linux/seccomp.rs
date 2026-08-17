@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -19,6 +20,20 @@ struct InnerArguments {
     env_overrides: BTreeMap<String, String>,
 }
 
+pub(crate) fn set_parent_death_signal() -> io::Result<()> {
+    let expected_parent = unsafe { libc::getppid() };
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::getppid() } != expected_parent {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "parent exited during PDEATHSIG setup",
+        ));
+    }
+    Ok(())
+}
+
 /// Inner bwrap stage: tighten the actual command after mount setup has completed.
 pub fn exec_inner(arguments: Vec<String>) -> ! {
     let InnerArguments {
@@ -35,6 +50,10 @@ pub fn exec_inner(arguments: Vec<String>) -> ! {
     };
     if command.is_empty() {
         eprintln!("inner stage received an empty command");
+        std::process::exit(INNER_SETUP_FAILURE_EXIT);
+    }
+    if let Err(error) = set_parent_death_signal() {
+        eprintln!("failed to install parent-death signal: {error}");
         std::process::exit(INNER_SETUP_FAILURE_EXIT);
     }
     let mut inner_bridge = if let Some(ref socket) = proxy_socket {

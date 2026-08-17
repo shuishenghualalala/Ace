@@ -232,6 +232,23 @@ def test_json_structure_scanner_preserves_chunk_state_and_rejects_trailing_comma
         invalid.feed(b'{"a":1,}')
 
 
+def test_json_structure_scanner_rejects_duplicate_object_keys():
+    scanner = JSONStructureBudget()
+
+    with pytest.raises(JSONStructureInvalid):
+        scanner.feed(b'{"a":1,"a":2}')
+
+
+def test_ws_rejects_escaped_surrogate_text_before_dispatch():
+    with pytest.raises(WebSocketProtocolError, match="PROTOCOL_INVALID"):
+        from crew.gateway.ws import decode_ws_text_frame
+
+        decode_ws_text_frame(
+            '{"query":"\\ud800","session_id":"s1","request_id":"r1",'
+            '"protocol_version":1,"client_sequence":1,"nonce":"nonce-surrogate-0001"}'
+        )
+
+
 def test_ws_rejects_unknown_fields_before_dispatch():
     client, _crew, connections = _client()
 
@@ -243,6 +260,27 @@ def test_ws_rejects_unknown_fields_before_dispatch():
     assert error["body"]["code"] == "PROTOCOL_INVALID"
     assert "owner_account_id" not in str(error)
     assert connections._conns == {}
+
+
+def test_ws_missing_session_error_does_not_echo_session_reference():
+    client, _crew, _connections = _client()
+
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json(
+            {
+                "action": "stop",
+                "session_id": "sensitive-session-reference",
+                "protocol_version": 1,
+                "client_sequence": 1,
+                "nonce": "nonce-missing-session-0001",
+            }
+        )
+        error = ws.receive_json()
+
+    assert error["kind"] == "error"
+    assert error["body"]["code"] == "SESSION_NOT_FOUND"
+    assert error["body"]["message"] == "会话不存在"
+    assert "sensitive-session-reference" not in str(error)
 
 
 def test_ws_requires_protocol_identity_on_every_frame() -> None:

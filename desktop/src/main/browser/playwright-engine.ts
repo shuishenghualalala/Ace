@@ -56,6 +56,8 @@ export class PlaywrightEngine {
   private readonly desiredFocus = new WeakMap<object, boolean>();
   /** view → Playwright Page；仅在 pageForView 成功解析后登记。 */
   private readonly pages = new WeakMap<object, Page>();
+  /** Page 已脱离当前 debugger 生命周期；close 事件可能晚于 reattach 到达。 */
+  private readonly stalePages = new WeakSet<object>();
   /** Page → view；Page.close 只能清理仍指向自己的映射。 */
   private readonly pageViews = new WeakMap<object, WebContentsView>();
   /** Page 上最后一次成功下发的状态。 */
@@ -148,6 +150,10 @@ export class PlaywrightEngine {
     this.transport.setDialogForwarding(view, enabled);
     const page = this.pages.get(view);
     if (!page) return;
+    if (!this.isPageBindingCurrent(view, page)) {
+      this.retirePageBinding(view, page);
+      return;
+    }
     this.updateFileChooserCapture(page, enabled);
     try {
       await this.queueFocusUpdate(view, page);
@@ -206,16 +212,7 @@ export class PlaywrightEngine {
       (this.registrationGenerations.get(view) ?? 0) + 1,
     );
     const page = this.pages.get(view);
-    const chooserListener = page ? this.fileChooserListeners.get(page) : undefined;
-    if (page) {
-      this.pendingFileChoosers.delete(page);
-      this.pendingFileChooserCollisions.delete(page);
-      this.pageViews.delete(page);
-    }
-    if (page && chooserListener) {
-      page.off('filechooser', chooserListener);
-      this.fileChooserListeners.delete(page);
-    }
+    if (page) this.retirePageBinding(view, page);
     this.pages.delete(view);
     this.transport.removeView(view);
     if (!options.keepMounted) this.host.unmount(view);
@@ -247,12 +244,22 @@ export class PlaywrightEngine {
   /** True when the most recent action opened an intercepted native file chooser. */
   hasPendingFileChooser(view: WebContentsView): boolean {
     const page = this.pages.get(view);
-    return Boolean(page && this.pendingFileChoosers.has(page));
+    if (!page) return false;
+    if (!this.isPageBindingCurrent(view, page)) {
+      this.retirePageBinding(view, page);
+      return false;
+    }
+    return this.pendingFileChoosers.has(page);
   }
 
   pendingFileChooserCount(view: WebContentsView): number {
     const page = this.pages.get(view);
-    if (!page || !this.pendingFileChoosers.has(page)) return 0;
+    if (!page) return 0;
+    if (!this.isPageBindingCurrent(view, page)) {
+      this.retirePageBinding(view, page);
+      return 0;
+    }
+    if (!this.pendingFileChoosers.has(page)) return 0;
     return 1 + (this.pendingFileChooserCollisions.get(page) ?? 0);
   }
 
@@ -266,6 +273,10 @@ export class PlaywrightEngine {
   takePendingFileChooser(view: WebContentsView): FileChooser | null {
     const page = this.pages.get(view);
     if (!page) return null;
+    if (!this.isPageBindingCurrent(view, page)) {
+      this.retirePageBinding(view, page);
+      return null;
+    }
     const chooser = this.pendingFileChoosers.get(page) ?? null;
     if (chooser) {
       this.pendingFileChoosers.delete(page);
@@ -282,18 +293,26 @@ export class PlaywrightEngine {
    */
   async pageForView(view: WebContentsView, timeoutMs = 0): Promise<Page> {
     const generation = this.registrationGeneration(view);
-    // 顺序不能反：Target.setAutoAttach 是 connectOverCDP 握手的一部分，targetId 只有
-    // 握手开始后才会产生。旧实现先读 targetId，导致第一次调用永远无法自启动。
-    const browser = await this.ensureBrowser();
-    this.assertRegistration(view, generation);
-    const targetId = await this.transport.waitForViewTarget(view, timeoutMs);
-    this.assertRegistration(view, generation);
-    const [context] = browser.contexts();
-    if (!context) throw new Error('Playwright 未发现默认 BrowserContext');
-    const page = await this.waitForPage(context, targetId, timeoutMs);
-    this.assertRegistration(view, generation);
-    await this.bindPage(view, page, generation);
-    return page;
+    while (true) {
+      const boundPage = this.pages.get(view);
+      if (boundPage && this.isPageBindingCurrent(view, boundPage)) {
+        this.assertRegistration(view, generation);
+        return boundPage;
+      }
+      if (boundPage) this.retirePageBinding(view, boundPage);
+
+      // 顺序不能反：Target.setAutoAttach 是 connectOverCDP 握手的一部分，targetId 只有
+      // 握手开始后才会产生。旧实现先读 targetId，导致第一次调用永远无法自启动。
+      const browser = await this.ensureBrowser();
+      this.assertRegistration(view, generation);
+      const nextTargetId = await this.transport.waitForViewTarget(view, timeoutMs);
+      this.assertRegistration(view, generation);
+      const [context] = browser.contexts();
+      if (!context) throw new Error('Playwright 未发现默认 BrowserContext');
+      const page = await this.waitForPage(context, nextTargetId, timeoutMs);
+      this.assertRegistration(view, generation);
+      if (await this.bindPage(view, page, generation)) return page;
+    }
   }
 
   /**
@@ -409,8 +428,9 @@ export class PlaywrightEngine {
   }
 
   private async bindDiscoveredPage(context: BrowserContext, page: Page): Promise<void> {
+    if (this.stalePages.has(page) || page.isClosed()) return;
     const targetId = await this.targetIdOf(context, page);
-    if (!targetId || this.disposed) return;
+    if (!targetId || this.disposed || this.stalePages.has(page) || page.isClosed()) return;
     const view = [...this.registeredViews].find(
       (candidate) => this.transport.targetIdForView(candidate) === targetId,
     );
@@ -431,8 +451,15 @@ export class PlaywrightEngine {
     const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : Number.POSITIVE_INFINITY;
     while (true) {
       for (const page of context.pages()) {
+        if (this.stalePages.has(page) || page.isClosed()) continue;
         try {
-          if ((await this.targetIdOf(context, page)) === targetId) return page;
+          if (
+            !this.stalePages.has(page)
+            && !page.isClosed()
+            && (await this.targetIdOf(context, page)) === targetId
+          ) {
+            return page;
+          }
         } catch (error) {
           // An unrelated popup can close between context.pages() and
           // newCDPSession(page). It must not make lookup of this view fail.
@@ -482,6 +509,7 @@ export class PlaywrightEngine {
         this.pendingDialogs.set(page, queue);
       });
       page.on('close', () => {
+        this.stalePages.add(page);
         this.pendingFileChoosers.delete(page);
         this.pendingFileChooserCollisions.delete(page);
         this.fileChooserListeners.delete(page);
@@ -584,19 +612,13 @@ export class PlaywrightEngine {
     view: WebContentsView,
     page: Page,
     generation: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.assertRegistration(view, generation);
+    if (this.stalePages.has(page) || page.isClosed()) return false;
     this.preparePageEvents(page);
     const previous = this.pages.get(view);
     if (previous && previous !== page) {
-      this.pendingFileChoosers.delete(previous);
-      this.pendingFileChooserCollisions.delete(previous);
-      const previousListener = this.fileChooserListeners.get(previous);
-      if (previousListener) {
-        previous.off('filechooser', previousListener);
-        this.fileChooserListeners.delete(previous);
-      }
-      this.pageViews.delete(previous);
+      this.retirePageBinding(view, previous);
     }
     this.pages.set(view, page);
     this.pageViews.set(page, view);
@@ -606,6 +628,35 @@ export class PlaywrightEngine {
     this.transport.markPageEventsReady(view);
     await this.queueFocusUpdate(view, page);
     this.assertRegistration(view, generation);
+    return true;
+  }
+
+  private isPageBindingCurrent(view: WebContentsView, page: Page): boolean {
+    if (this.stalePages.has(page) || page.isClosed()) return false;
+    const targetId = this.transport.targetIdForView(view);
+    const pageTargetId = this.targetIds.get(page);
+    return Boolean(targetId) && (!pageTargetId || pageTargetId === targetId);
+  }
+
+  /**
+   * Retire every Engine-owned association for a Page without changing the
+   * view registration generation. A debugger detach is a new Page lifecycle,
+   * not an unregister/register operation; desired focus and ownership remain
+   * on the view and are reapplied by bindPage to its replacement.
+   */
+  private retirePageBinding(view: WebContentsView, page: Page): void {
+    this.stalePages.add(page);
+    this.pendingFileChoosers.delete(page);
+    this.pendingFileChooserCollisions.delete(page);
+    const chooserListener = this.fileChooserListeners.get(page);
+    if (chooserListener) page.off('filechooser', chooserListener);
+    this.fileChooserListeners.delete(page);
+    this.pendingDialogs.delete(page);
+    this.dialogWaiters.delete(page);
+    this.pageViews.delete(page);
+    this.appliedFocus.delete(page);
+    this.targetIds.delete(page);
+    if (this.pages.get(view) === page) this.pages.delete(view);
   }
 
   /**

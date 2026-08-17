@@ -187,9 +187,18 @@ _SENSITIVE_CLI_TEXT_RE = re.compile(
     r"password|passwd|proxy[-_]?password|secret|token))(?:\s+|=)"
     r"(?:\"[^\"]+\"|'[^']+'|[^\s]+)"
 )
+_DISPLAY_CLI_SECRET_RE = re.compile(
+    r"(?i)(--?(?:api[-_]?key|auth(?:orization)?|client[-_]?secret|credential|"
+    r"password|passwd|proxy[-_]?password|proxy[-_]?user|secret|token|u|user))(\s+|=)"
+    r"(\"[^\"]*\"|'[^']*'|[^\s]+)"
+)
 _SENSITIVE_HEADER_TEXT_RE = re.compile(
     r"(?i)(?:authorization|cookie|proxy-authorization|x-api-key|x-auth-token)"
     r"\s*:\s*\S+"
+)
+_DISPLAY_HEADER_SECRET_RE = re.compile(
+    r"(?i)((?:authorization|cookie|proxy-authorization|set-cookie|"
+    r"x-api-key|x-auth-token)\s*:\s*)([^\s'\"]+)"
 )
 
 # 已知前缀合并成一个 alternation。
@@ -243,7 +252,7 @@ def _redact_query_string(query: str) -> str:
         if "=" not in pair:
             parts.append(pair)
             continue
-        key, _, value = pair.partition("=")
+        key, _, _value = pair.partition("=")
         if key.lower() in _SENSITIVE_QUERY_PARAMS:
             parts.append(f"{key}=***")
         else:
@@ -308,7 +317,15 @@ def redact_sensitive_display_text(value: str) -> str:
     also masks exact sensitive URL query parameters and URL userinfo.  It must
     not be used on a URL that still needs to be navigated to or requested.
     """
-    text = redact_sensitive_text(value, force=True)
+    text = str(value or "")
+    # Display output must not retain a recognizable credential prefix. Keep the
+    # less destructive head/tail masking for ordinary logs, but replace known
+    # credential-shaped tokens completely at this final public boundary.
+    if _has_known_prefix_substring(text):
+        text = _PREFIX_RE.sub("[REDACTED]", text)
+    text = redact_sensitive_text(text, force=True)
+    text = _DISPLAY_CLI_SECRET_RE.sub(r"\1\2[REDACTED]", text)
+    text = _DISPLAY_HEADER_SECRET_RE.sub(r"\1[REDACTED]", text)
     if "://" in text:
         text = _redact_url_userinfo(text)
         text = _redact_url_query_params(text)
@@ -330,9 +347,12 @@ def safe_public_error(
     limit: int = 500,
 ) -> str:
     """Bound a user-visible diagnostic without exposing secrets or host paths."""
+    safe_fallback = redact_sensitive_display_text(str(fallback or "请求失败")).strip()
+    if not safe_fallback or _DISPLAY_HOST_PATH_RE.search(safe_fallback):
+        safe_fallback = "请求失败"
     text = redact_sensitive_display_text(str(value or "")).strip()
     if not text or _DISPLAY_HOST_PATH_RE.search(text):
-        return fallback
+        return safe_fallback
     return text[: max(1, limit)]
 
 

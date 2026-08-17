@@ -163,6 +163,12 @@ fn validate_rule(rule: &NetworkRule) -> Result<(), String> {
     if normalize_host(&rule.host)? != rule.host {
         return Err("network host is not canonical".to_string());
     }
+    if rule.port == 0 {
+        return Err("network port must be between 1 and 65535".to_string());
+    }
+    if rule.protocol != rule.protocol.to_ascii_lowercase() {
+        return Err("network protocol is not canonical".to_string());
+    }
     if !matches!(rule.protocol.as_str(), "http" | "https" | "tcp") {
         return Err("managed proxy supports only http, https, or tcp".to_string());
     }
@@ -239,7 +245,9 @@ fn is_metadata(ip: IpAddr) -> bool {
         IpAddr::V4(value) => {
             value.octets() == [169, 254, 169, 254]
                 || value.octets() == [169, 254, 170, 2]
+                || value.octets() == [168, 63, 129, 16]
                 || value.octets() == [100, 100, 100, 200]
+                || value.octets() == [192, 0, 0, 192]
         }
         // AWS IPv6 元数据端点 fd00:ec2::254 属 ULA（fc00::/7），is_local_or_private 会判为私网；
         // 这里显式拒绝，保证"元数据不可升级 deny"在任何 allow_private 放行下仍成立。
@@ -257,6 +265,7 @@ fn is_metadata_host(host: &str) -> bool {
             | "metadata.google.internal"
     ) || host.ends_with(".metadata.google.internal")
         || host.ends_with(".metadata.azure.internal")
+        || host.ends_with(".metadata.aws.internal")
 }
 
 fn is_local_or_private(ip: IpAddr) -> bool {
@@ -437,6 +446,36 @@ mod tests {
     fn invalid_rule_surfaces_policy_denied_code() {
         let mut invalid = rule("example.com", true, false);
         invalid.protocol = "udp".to_string();
+        let err = NetworkPolicy::new(vec![invalid]).unwrap_err();
+        assert_eq!(err.code, NetworkErrorCode::PolicyDenied);
+    }
+
+    #[test]
+    fn cloud_metadata_aliases_are_denied_before_dns() {
+        for host in [
+            "metadata.aws.internal",
+            "node.metadata.aws.internal",
+            "168.63.129.16",
+            "192.0.0.192",
+        ] {
+            let metadata = NetworkPolicy::new(vec![rule(host, true, true)]).unwrap();
+            let err = metadata.resolve_allowed(host, 8080, "http").unwrap_err();
+            assert_eq!(err.code, NetworkErrorCode::PolicyDenied, "{host}");
+        }
+    }
+
+    #[test]
+    fn zero_port_rule_is_rejected_before_resolution() {
+        let mut invalid = rule("example.com", true, false);
+        invalid.port = 0;
+        let err = NetworkPolicy::new(vec![invalid]).unwrap_err();
+        assert_eq!(err.code, NetworkErrorCode::PolicyDenied);
+    }
+
+    #[test]
+    fn protocol_rule_must_be_canonical_lowercase() {
+        let mut invalid = rule("example.com", true, false);
+        invalid.protocol = "HTTP".to_string();
         let err = NetworkPolicy::new(vec![invalid]).unwrap_err();
         assert_eq!(err.code, NetworkErrorCode::PolicyDenied);
     }

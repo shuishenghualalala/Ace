@@ -15,9 +15,11 @@ context 包含 platform、session_id 等元信息，供过滤器根据平台/会
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from crew.state.logging import get_logger
+from crew.tools.redact import redact_sensitive_display_text
 
 log = get_logger("gateway.response_filters")
 
@@ -120,12 +122,6 @@ def normalize_line_breaks(text: str, context: dict[str, Any]) -> str:
 # 安全基线过滤器（P0 A1）与静默回复检测（P0 A2，业务层调用）
 # ---------------------------------------------------------------------------
 
-_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"), "[REDACTED]"),
-    (re.compile(r"\bBearer\s+[A-Za-z0-9._\-+/=]{8,}\b", re.I), "Bearer [REDACTED]"),
-    (re.compile(r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*['\"]?([^\s'\",]{8,})"), r"\1=[REDACTED]"),
-]
-
 _SILENCE_NARRATION = re.compile(
     r"^[\s*_~`]*\(?\s*(silent|silence|no\s+response|no\s+reply)\s*\.?\)?[\s*_~`]*$"
     r"|^[\s*_~`]*[\U0001F507\.\u2026]+[\s*_~`]*$",
@@ -136,11 +132,8 @@ _NO_REPLY_MARKERS = frozenset({"NO_REPLY", "NOREPLY", "NO REPLY"})
 
 
 def redact_secrets(text: str, context: dict[str, Any]) -> str:
-    """移除常见密钥/Token 模式，防止模型输出泄露凭证。"""
-    current = text
-    for pattern, replacement in _SECRET_PATTERNS:
-        current = pattern.sub(replacement, current)
-    return current
+    """Apply the shared display-boundary redactor to model output."""
+    return redact_sensitive_display_text(text)
 
 
 def is_silent_reply(text: str | None) -> bool:
@@ -152,9 +145,7 @@ def is_silent_reply(text: str | None) -> bool:
         return True
     if stripped.upper() in _NO_REPLY_MARKERS:
         return True
-    if len(stripped) <= 64 and _SILENCE_NARRATION.match(stripped):
-        return True
-    return False
+    return len(stripped) <= 64 and bool(_SILENCE_NARRATION.match(stripped))
 
 
 def apply_text_filters(text: str, context: dict[str, Any] | None = None) -> str:

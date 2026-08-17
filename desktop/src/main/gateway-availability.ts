@@ -2,7 +2,11 @@ import type { GatewayInstanceProbe } from './gateway-instance-auth';
 
 export type StandaloneGatewayAction = 'reuse' | 'wait' | 'reject' | 'start-managed';
 
-/** Decide ownership before Desktop is allowed to spawn a managed fallback. */
+/** Identity verification decides Gateway ownership; component readiness is separate. */
+export function standaloneGatewayUsable(probe: GatewayInstanceProbe): boolean {
+  return probe.verified;
+}
+
 export function chooseStandaloneGatewayAction(
   probe: GatewayInstanceProbe,
   candidatePresent: boolean,
@@ -15,12 +19,15 @@ export function chooseStandaloneGatewayAction(
 export type GatewayCandidateWaitResult =
   | { status: 'ready'; probe: GatewayInstanceProbe }
   | { status: 'untrusted'; probe: GatewayInstanceProbe }
-  | { status: 'gone' };
+  | { status: 'gone' }
+  | { status: 'timeout' };
 
 export interface GatewayCandidateWaitOptions {
   probe: () => Promise<GatewayInstanceProbe>;
   shouldContinue: () => boolean | Promise<boolean>;
   retryDelayMs?: number;
+  maxWaitMs?: number;
+  now?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
 }
 
@@ -30,19 +37,26 @@ const defaultSleep = (delayMs: number): Promise<void> => new Promise((resolve) =
 
 /**
  * Wait for one known Gateway candidate without replacing it on a transient timeout.
- * A reachable listener with an invalid proof is rejected immediately; an unreachable
- * but still-present candidate keeps ownership of its port and is allowed to recover.
+ * A reachable listener with an invalid proof is rejected immediately. An unreachable
+ * candidate gets a short recovery window; after that the caller may start a managed
+ * Gateway on a different port instead of waiting forever on a stale listener.
  */
 export async function waitForGatewayCandidate(
   options: GatewayCandidateWaitOptions,
 ): Promise<GatewayCandidateWaitResult> {
   const sleep = options.sleep ?? defaultSleep;
   const retryDelayMs = Math.max(0, options.retryDelayMs ?? 200);
+  const now = options.now ?? Date.now;
+  const maxWaitMs = Math.max(0, options.maxWaitMs ?? 10_000);
+  const deadline = now() + maxWaitMs;
   while (await options.shouldContinue()) {
+    if (now() >= deadline) return { status: 'timeout' };
     const probe = await options.probe();
     if (probe.verified) return { status: 'ready', probe };
     if (probe.status === 'untrusted') return { status: 'untrusted', probe };
-    await sleep(retryDelayMs);
+    const remaining = deadline - now();
+    if (remaining <= 0) return { status: 'timeout' };
+    await sleep(Math.min(retryDelayMs, remaining));
   }
   return { status: 'gone' };
 }

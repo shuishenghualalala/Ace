@@ -13,14 +13,22 @@
 from __future__ import annotations
 
 if __name__ == "__main__":
+    from pathlib import Path
+
+    import os
+
     from crew.process_hardening import harden_main_process
 
+    # Match Desktop local mode before imports/config loading can observe the checkout home.
+    os.environ.setdefault("CREW_HOME", str(Path.home() / ".Crew"))
     harden_main_process("gateway")
 
 from crew.gateway.app import create_app, run
+from crew.security.launch import configure_default_security_state_dir
 
 __all__ = ["create_app", "run"]
 
 
 if __name__ == "__main__":
+    configure_default_security_state_dir()
     run()

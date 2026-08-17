@@ -7,6 +7,7 @@ import os
 import socket
 import stat
 import subprocess
+import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -305,6 +306,33 @@ def test_missing_file_authorization_identity_cannot_move_to_another_path(tmp_pat
         snapshot_file(other, expected_identity=identity)
 
 
+def test_missing_file_identity_rejects_parent_directory_replacement(tmp_path):
+    parent = tmp_path / "authorized"
+    replacement = tmp_path / "replacement"
+    parent.mkdir()
+    replacement.mkdir()
+    target = parent / "new.txt"
+    identity = file_utils.capture_file_identity(target)
+
+    parent.rename(tmp_path / "authorized-original")
+    (tmp_path / "authorized").mkdir()
+
+    with pytest.raises(FileConflictError, match="父目录|身份|授权"):
+        snapshot_file(target, expected_identity=identity)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unicode normalization identity is host-specific")
+def test_missing_file_identity_does_not_alias_distinct_posix_unicode_names(tmp_path):
+    composed = tmp_path / unicodedata.normalize("NFC", "café.txt")
+    decomposed = tmp_path / unicodedata.normalize("NFD", "café.txt")
+    if composed == decomposed:
+        pytest.skip("filesystem normalizes Unicode names")
+    identity = file_utils.capture_file_identity(composed)
+
+    with pytest.raises(FileConflictError, match="路径|身份"):
+        snapshot_file(decomposed, expected_identity=identity)
+
+
 def test_atomic_replace_rejects_target_replaced_by_symlink(tmp_path):
     target = tmp_path / "target.txt"
     other = tmp_path / "other.txt"
@@ -514,6 +542,35 @@ def test_verified_read_enforces_byte_limit_on_the_checked_handle(tmp_path):
         file_utils.read_verified_bytes(target, max_bytes=3)
 
     assert file_utils.read_verified_bytes(target, max_bytes=4) == b"1234"
+
+
+def test_verified_read_rejects_oversized_stat_before_open(tmp_path):
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"1234")
+    before = target.stat()
+    opened = False
+
+    def forbidden_open(_flags):
+        nonlocal opened
+        opened = True
+        raise AssertionError("oversized file was opened before the size check")
+
+    with pytest.raises(ValueError, match="读取上限"):
+        file_utils._read_verified_open(before, forbidden_open, max_bytes=3)
+
+    assert not opened
+
+
+@pytest.mark.skipif(os.name != "nt", reason="case-alias identity is Windows-specific")
+def test_verified_read_rejects_case_alias_for_bound_identity(tmp_path):
+    target = tmp_path / "CaseBound.txt"
+    target.write_bytes(b"bound")
+    identity = file_utils.capture_file_identity(target)
+    alias = target.with_name("casebound.txt")
+    assert str(alias) != str(target)
+
+    with pytest.raises(FileConflictError, match="路径|身份"):
+        file_utils.read_verified_bytes(alias, expected_identity=identity)
 
 
 def test_snapshot_file_has_default_read_budget(tmp_path, monkeypatch):

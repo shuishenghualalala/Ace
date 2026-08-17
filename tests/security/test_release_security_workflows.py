@@ -195,7 +195,8 @@ def _release_evidence_bundle(
     runtime_bindings: dict[str, dict[str, str]] = {}
     evidence_hashes: dict[str, str] = {}
     for platform, target in targets.items():
-        artifact_hash = hashlib.sha256(f"{platform}-runtime".encode()).hexdigest()
+        artifact_bytes = f"{platform}-runtime".encode()
+        artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
         platform_dir = evidence_dir / platform
         platform_dir.mkdir()
         artifact_filename = (
@@ -203,6 +204,7 @@ def _release_evidence_bundle(
             if platform == "windows"
             else "ace-security-runtime"
         )
+        (platform_dir / artifact_filename).write_bytes(artifact_bytes)
         manifest_files = [
             {
                 "name": artifact_filename,
@@ -715,6 +717,7 @@ def test_security_release_gate_rejects_a_forged_runner_origin(
         ("missing-platform", "macos"),
         ("missing-native-attestation", "linux"),
         ("missing-runtime-manifest", "linux"),
+        ("missing-runtime-artifact", "linux"),
         ("tampered-runtime-manifest", "linux"),
         ("missing-sbom", "linux"),
         ("tampered-sbom", "linux"),
@@ -755,6 +758,8 @@ def test_security_release_gate_rejects_incomplete_or_tampered_evidence(
         evidence_paths["linux"].with_name("security-linux-sbom.cdx.json").unlink()
     elif tamper == "missing-runtime-manifest":
         evidence_paths["linux"].with_name("runtime-manifest.json").unlink()
+    elif tamper == "missing-runtime-artifact":
+        evidence_paths["linux"].with_name("ace-security-runtime").unlink()
     elif tamper == "tampered-runtime-manifest":
         evidence_paths["linux"].with_name("runtime-manifest.json").write_text(
             '{"schema":2,"files":[]}\n',
@@ -959,6 +964,10 @@ def test_native_security_workflows_bind_release_artifact_evidence() -> None:
             encoding="utf-8"
         )
 
+        assert "git config --global core.autocrlf false" in source
+        assert source.index("git config --global core.autocrlf false") < source.index(
+            "actions/checkout@"
+        )
         assert "target/debug" not in source
         assert "cargo build" in source and "--release" in source and "--locked" in source
         assert "uv sync --extra dev --frozen" in source
@@ -973,10 +982,120 @@ def test_native_security_workflows_bind_release_artifact_evidence() -> None:
         assert "--source-root security-runtime" in desktop_staging
         assert "actions/attest-build-provenance@" in source
         assert f"security-{platform}-evidence.sigstore.json" in source
+        assert "runtime artifact evidence" in source
+        artifact_filename = (
+            "ace-security-runtime.exe"
+            if platform == "windows"
+            else "ace-security-runtime"
+        )
+        assert source.count(artifact_filename) >= 4
 
         if platform == "macos":
             assert "runs-on: macos-15" in source
             assert "--target-triple aarch64-apple-darwin" in source
+
+
+def test_runtime_build_scripts_are_locked_and_manifest_output_is_canonical() -> None:
+    powershell = (ROOT / "scripts" / "build-security-runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+    shell = (ROOT / "scripts" / "build-security-runtime.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "cargo build --release --locked" in powershell
+    assert "cargo build --release --locked" in shell
+    manifest_write = (
+        'write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\\n", '
+        "encoding=\"utf-8\")"
+    )
+    assert manifest_write in powershell
+    assert manifest_write in shell
+
+
+def test_desktop_runtime_verifier_rejects_manifest_path_escape(tmp_path: Path) -> None:
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    runtime = staged / "ace-security-runtime.exe"
+    runtime.write_bytes(b"runtime")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+    outside_digest = hashlib.sha256(outside.read_bytes()).hexdigest()
+    (staged / "runtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "platform": "win32",
+                "arch": "x64",
+                "binary_name": runtime.name,
+                "binary_sha256": digest,
+                "files": [
+                    {"name": runtime.name, "sha256": digest, "size": runtime.stat().st_size},
+                    {"name": "../outside", "sha256": outside_digest, "size": outside.stat().st_size},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "node",
+            str(ROOT / "desktop" / "scripts" / "verify-security-runtime.mjs"),
+            str(staged),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "invalid security runtime manifest file metadata" in result.stderr.lower()
+
+
+def test_desktop_runtime_verifier_requires_source_hash_when_source_is_present(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    staged = root / "desktop" / "security-runtime-bin"
+    crate = root / "security-runtime"
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text("[package]\nname = 'fixture'\n", encoding="utf-8")
+    (crate / "Cargo.lock").write_text("# lock\n", encoding="utf-8")
+    staged.mkdir(parents=True)
+    runtime = staged / "ace-security-runtime.exe"
+    runtime.write_bytes(b"runtime")
+    digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+    (staged / "runtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "platform": "win32",
+                "arch": "x64",
+                "binary_name": runtime.name,
+                "binary_sha256": digest,
+                "files": [{"name": runtime.name, "sha256": digest, "size": runtime.stat().st_size}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "node",
+            str(ROOT / "desktop" / "scripts" / "verify-security-runtime.mjs"),
+            str(staged),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "source hash" in result.stderr.lower()
 
 
 def test_release_evidence_schemas_require_artifact_sbom_and_trust_bindings(
@@ -1373,6 +1492,7 @@ def test_runtime_npm_audit_discovers_every_committed_lockfile() -> None:
         ".",
         "web",
         "desktop",
+        "crew/skills/html-to-pdf",
     }
 
 

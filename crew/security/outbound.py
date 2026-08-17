@@ -51,6 +51,7 @@ _METADATA_HOSTS = frozenset(
     }
 )
 _METADATA_SUFFIXES = (
+    ".metadata.aws.internal",
     ".metadata.google.internal",
     ".metadata.azure.internal",
 )
@@ -68,6 +69,19 @@ _METADATA_NETWORKS = tuple(
 _NAT64_NETWORKS = (
     ipaddress.ip_network("64:ff9b::/96"),
     ipaddress.ip_network("64:ff9b:1::/48"),
+)
+_SPECIAL_USE_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in (
+        "0.0.0.0/8",
+        "100.64.0.0/10",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "240.0.0.0/4",
+    )
 )
 _METHOD_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Z-]{1,32}")
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}")
@@ -422,15 +436,84 @@ class OutboundPolicy:
         target: OutboundTarget | None,
         context: OutboundContext | None,
         exc: OutboundDenied,
+        *,
+        phase: str = "policy",
     ) -> None:
         source = context.source if context is not None else "unspecified"
         if source not in _AUDIT_SOURCES:
             source = "redacted"
+        if target is None:
+            summary = "unparsed"
+            host = "unparsed"
+            port = 0
+            protocol = ""
+            method = ""
+        else:
+            try:
+                host = canonicalize_host(target.host)
+                port = target.port if isinstance(target.port, int) else 0
+                protocol = target.scheme if target.scheme in _SCHEME_DEFAULT_PORTS else ""
+                method = (
+                    target.method
+                    if isinstance(target.method, str)
+                    and _METHOD_RE.fullmatch(target.method)
+                    else "redacted"
+                )
+                summary = (
+                    f"{protocol}://"
+                    f"{f'[{host}]' if ':' in host else host}"
+                    f"{f':{port}' if port and port != _SCHEME_DEFAULT_PORTS.get(protocol) else ''}"
+                )
+            except (OutboundDenied, TypeError):
+                summary = "redacted"
+                host = "redacted"
+                port = 0
+                protocol = ""
+                method = ""
         log.warning(
             "outbound_denied target=%s reason=%s source=%s",
-            target.audit_summary if target is not None else "unparsed",
+            summary,
             exc.code,
             source,
+            extra={
+                "outbound_event": "network_decision",
+                "outbound_decision": "deny",
+                "outbound_phase": phase,
+                "outbound_host": host,
+                "outbound_port": port,
+                "outbound_protocol": protocol,
+                "outbound_method": method,
+                "outbound_reason": exc.code,
+                "outbound_source": source,
+            },
+        )
+
+    @staticmethod
+    def _audit_allow(
+        target: OutboundTarget,
+        context: OutboundContext | None,
+        *,
+        phase: str,
+    ) -> None:
+        source = context.source if context is not None else "unspecified"
+        if source not in _AUDIT_SOURCES:
+            source = "redacted"
+        log.info(
+            "outbound_allowed target=%s phase=%s source=%s",
+            target.audit_summary,
+            phase,
+            source,
+            extra={
+                "outbound_event": "network_decision",
+                "outbound_decision": "allow",
+                "outbound_phase": phase,
+                "outbound_host": target.host,
+                "outbound_port": target.port,
+                "outbound_protocol": target.scheme,
+                "outbound_method": target.method,
+                "outbound_reason": "approved",
+                "outbound_source": source,
+            },
         )
 
     def plan_url(
@@ -442,20 +525,21 @@ class OutboundPolicy:
         context: OutboundContext | None = None,
         private_grant: str = "",
     ) -> ConnectionPlan:
-        parsed, target = self.canonicalize_url(
-            url,
-            method=method,
-            allowed_schemes=allowed_schemes,
-        )
-        del parsed
+        target: OutboundTarget | None = None
         try:
+            parsed, target = self._canonicalize_url(
+                url,
+                method=method,
+                allowed_schemes=allowed_schemes,
+            )
+            del parsed
             allow_private = self._validate_private_grant(
                 private_grant,
                 context,
                 target,
                 consume=False,
             )
-            return ConnectionPlan(
+            plan = ConnectionPlan(
                 target=target,
                 endpoints=self._resolve(
                     target,
@@ -466,6 +550,8 @@ class OutboundPolicy:
                 private_grant=str(private_grant),
                 expires_monotonic=self._clock() + self._plan_ttl_seconds,
             )
+            self._audit_allow(target, context, phase="plan")
+            return plan
         except OutboundDenied as exc:
             self._audit_denial(target, context, exc)
             raise
@@ -585,7 +671,7 @@ class OutboundPolicy:
                 target,
                 consume=False,
             )
-            return ConnectionPlan(
+            plan = ConnectionPlan(
                 target=target,
                 endpoints=self._resolve(
                     target,
@@ -596,6 +682,8 @@ class OutboundPolicy:
                 private_grant=str(private_grant),
                 expires_monotonic=self._clock() + self._plan_ttl_seconds,
             )
+            self._audit_allow(target, context, phase="plan")
+            return plan
         except OutboundDenied as exc:
             self._audit_denial(target, context, exc)
             raise
@@ -614,7 +702,7 @@ class OutboundPolicy:
                 timeout=timeout,
             )
         except OutboundDenied as exc:
-            self._audit_denial(plan.target, context, exc)
+            self._audit_denial(plan.target, context, exc, phase="connect")
             raise
 
     def _connect_socket(
@@ -647,6 +735,11 @@ class OutboundPolicy:
             plan.target,
             consume=True,
         )
+        self._validate_plan_endpoints(
+            plan,
+            allow_private=allow_private,
+            grantable=context is not None,
+        )
         deadline = self._clock() + connect_budget
         last_error: OSError | None = None
         for endpoint in plan.endpoints:
@@ -664,14 +757,18 @@ class OutboundPolicy:
                     raise OutboundDenied("connect_timeout")
                 sock.settimeout(remaining)
                 sock.connect(endpoint.sockaddr)
-                peer = ipaddress.ip_address(str(sock.getpeername()[0]).split("%", 1)[0])
+                peer_info = sock.getpeername()
+                peer = ipaddress.ip_address(str(peer_info[0]).split("%", 1)[0])
                 if peer.compressed != endpoint.address:
                     raise OutboundDenied("peer_address_mismatch")
+                if int(peer_info[1]) != plan.target.port:
+                    raise OutboundDenied("peer_port_mismatch")
                 self._validate_address(
                     peer,
                     allow_private=allow_private,
                     grantable=context is not None,
                 )
+                self._audit_allow(plan.target, context, phase="connect")
                 return sock
             except OutboundDenied:
                 sock.close()
@@ -682,6 +779,64 @@ class OutboundPolicy:
         if self._clock() >= deadline:
             raise OutboundDenied("connect_timeout") from last_error
         raise OutboundDenied("connect_failed") from last_error
+
+    def _validate_plan_endpoints(
+        self,
+        plan: ConnectionPlan,
+        *,
+        allow_private: bool,
+        grantable: bool,
+    ) -> None:
+        """Recheck the immutable plan immediately before its final socket."""
+        target = plan.target
+        if not isinstance(target.scheme, str) or target.scheme not in _SCHEME_DEFAULT_PORTS:
+            raise OutboundDenied("scheme_forbidden")
+        if canonicalize_host(target.host) != target.host:
+            raise OutboundDenied("plan_target_not_canonical")
+        if (
+            isinstance(target.port, bool)
+            or not isinstance(target.port, int)
+            or not 1 <= target.port <= 65535
+        ):
+            raise OutboundDenied("invalid_port")
+        if not isinstance(target.method, str) or _METHOD_RE.fullmatch(target.method) is None:
+            raise OutboundDenied("invalid_method")
+        if not is_safe_authorization_path(target.path or "/"):
+            raise OutboundDenied("ambiguous_path")
+        self._reject_metadata_name(target.host)
+        if not plan.endpoints:
+            raise OutboundDenied("dns_no_answers")
+        for endpoint in plan.endpoints:
+            try:
+                sockaddr = endpoint.sockaddr
+                address = ipaddress.ip_address(
+                    str(endpoint.address).split("%", 1)[0]
+                )
+                sockaddr_address = ipaddress.ip_address(
+                    str(sockaddr[0]).split("%", 1)[0]
+                )
+                sockaddr_port = sockaddr[1]
+            except (IndexError, TypeError, ValueError) as exc:
+                raise OutboundDenied("endpoint_invalid") from exc
+            expected_family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+            if (
+                endpoint.family != expected_family
+                or sockaddr_address != address
+                or isinstance(sockaddr_port, bool)
+                or not isinstance(sockaddr_port, int)
+                or sockaddr_port != target.port
+                or len(sockaddr) != (4 if address.version == 6 else 2)
+            ):
+                raise OutboundDenied("endpoint_invalid")
+            if address.version == 6 and (sockaddr[2] != 0 or sockaddr[3] != 0):
+                raise OutboundDenied("endpoint_invalid")
+            if address.compressed != str(endpoint.address).lower():
+                raise OutboundDenied("endpoint_invalid")
+            self._validate_address(
+                address,
+                allow_private=allow_private,
+                grantable=grantable,
+            )
 
     def validate_resolved_address(
         self,
@@ -803,9 +958,12 @@ class OutboundPolicy:
         allow_private: bool,
         grantable: bool,
     ) -> None:
-        if any(address in network for network in _METADATA_NETWORKS):
-            raise OutboundDenied("metadata_target")
         embedded = _embedded_ipv4(address)
+        if any(address in network for network in _METADATA_NETWORKS) or (
+            embedded is not None
+            and any(embedded in network for network in _METADATA_NETWORKS)
+        ):
+            raise OutboundDenied("metadata_target")
         sensitive = (
             embedded is not None and _address_is_non_public(embedded)
         ) or _address_is_non_public(address)
@@ -861,6 +1019,7 @@ class OutboundHttpClient:
         return_redirect_response: bool = False,
         context: OutboundContext | None = None,
         private_grant: str = "",
+        redirect_authorizer: Callable[[OutboundTarget, OutboundTarget], bool] | None = None,
     ) -> OutboundHttpResponse:
         if (
             isinstance(max_bytes, bool)
@@ -876,7 +1035,7 @@ class OutboundHttpClient:
         current_body = body
         current_headers = self._request_headers(headers)
         first_grant = str(private_grant)
-        previous_origin = ""
+        previous_target: OutboundTarget | None = None
 
         for hop in range(max_redirects + 1):
             plan = self.policy.plan_url(
@@ -885,13 +1044,54 @@ class OutboundHttpClient:
                 context=context,
                 private_grant=first_grant if hop == 0 else "",
             )
-            if previous_origin and previous_origin != plan.target.audit_summary:
+            if previous_target is not None and previous_target.audit_summary != plan.target.audit_summary:
                 current_headers = {
                     name: value
                     for name, value in current_headers.items()
                     if name.lower() not in self._SENSITIVE_HEADERS
                 }
-            previous_origin = plan.target.audit_summary
+                try:
+                    authorized = (
+                        redirect_authorizer(previous_target, plan.target)
+                        if redirect_authorizer is not None
+                        else False
+                    )
+                except Exception as exc:
+                    denied = OutboundDenied("redirect_reauthorization_failed")
+                    self.policy._audit_denial(
+                        plan.target,
+                        context,
+                        denied,
+                        phase="redirect",
+                    )
+                    raise denied from exc
+                if not authorized:
+                    denied = OutboundDenied("redirect_reauthorization_required")
+                    self.policy._audit_denial(
+                        plan.target,
+                        context,
+                        denied,
+                        phase="redirect",
+                    )
+                    raise denied
+                log.info(
+                    "outbound_redirect from=%s to=%s decision=allow",
+                    previous_target.audit_summary,
+                    plan.target.audit_summary,
+                    extra={
+                        "outbound_event": "network_redirect",
+                        "outbound_decision": "allow",
+                        "outbound_phase": "redirect",
+                        "outbound_from": previous_target.audit_summary,
+                        "outbound_to": plan.target.audit_summary,
+                        "outbound_source": (
+                            context.source
+                            if context is not None and context.source in _AUDIT_SOURCES
+                            else "redacted"
+                        ),
+                    },
+                )
+            previous_target = plan.target
             response = self.fetch_plan(
                 plan,
                 method=current_method,
@@ -906,12 +1106,26 @@ class OutboundHttpClient:
                 if return_redirect_response:
                     return response
                 if hop >= max_redirects:
-                    raise OutboundDenied(
+                    denied = OutboundDenied(
                         "redirect_forbidden" if max_redirects == 0 else "redirect_limit"
                     )
+                    self.policy._audit_denial(
+                        plan.target,
+                        context,
+                        denied,
+                        phase="redirect",
+                    )
+                    raise denied
                 location = response.headers.get("location", "")
                 if not location:
-                    raise OutboundDenied("redirect_location_missing")
+                    denied = OutboundDenied("redirect_location_missing")
+                    self.policy._audit_denial(
+                        plan.target,
+                        context,
+                        denied,
+                        phase="redirect",
+                    )
+                    raise denied
                 current_url = urljoin(plan.target.canonical_url, location)
                 if response.status == 303 or (
                     response.status in {301, 302} and current_method == "POST"
@@ -1330,6 +1544,7 @@ def _address_is_non_public(
         or address.is_multicast
         or address.is_reserved
         or address.is_unspecified
+        or any(address in network for network in _SPECIAL_USE_NETWORKS)
         or (
             isinstance(address, ipaddress.IPv6Address)
             and (address.is_site_local or address.sixtofour is not None or address.teredo is not None)

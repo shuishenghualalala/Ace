@@ -101,6 +101,33 @@ def test_local_path_reference_resolves_only_at_explicit_boundary(
         relative.resolve_at_boundary(strict=True)
 
 
+def test_local_path_reference_rejects_symlink_components_at_boundary(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    link = root / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+
+    reference = LocalPathReference.parse("linked/secret.txt")
+    with pytest.raises(LocalPathReferenceError, match="链接|reparse"):
+        reference.resolve_at_boundary(base=root, strict=False)
+
+    bypass_shape = LocalPathReference.parse("missing/../linked/secret.txt")
+    with pytest.raises(LocalPathReferenceError, match="链接|reparse"):
+        bypass_shape.resolve_at_boundary(base=root, strict=False)
+
+    hidden_link_shape = LocalPathReference.parse("linked/../secret.txt")
+    with pytest.raises(LocalPathReferenceError, match="链接|reparse"):
+        hidden_link_shape.resolve_at_boundary(base=root, strict=False)
+
+
 def test_windows_specific_ambiguous_names_are_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

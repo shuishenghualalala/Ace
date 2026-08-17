@@ -32,6 +32,35 @@ def test_external_tool_paths_stay_inside_tracker_root(tmp_path):
     assert tracker.finalize() == []
 
 
+def test_workspace_snapshot_has_time_budget(tmp_path, monkeypatch):
+    """慢速工作区必须快速放弃全量快照，不能让 terminal 等待数分钟。"""
+    import time
+    import os
+
+    import crew.agent.file_changes as module
+
+    for index in range(6):
+        (tmp_path / f"f-{index}.txt").write_text(str(index), encoding="utf-8")
+    calls = 0
+
+    def slow_stat(path):
+        nonlocal calls
+        calls += 1
+        time.sleep(0.02)
+        return os.stat(path)
+
+    monkeypatch.setattr(module, "stat_verified_file", slow_stat)
+
+    snapshot = module.workspace_snapshot(
+        tmp_path,
+        max_files=100,
+        timeout_seconds=0.05,
+    )
+
+    assert snapshot is None
+    assert calls < 6
+
+
 def test_oversized_files_are_metadata_only_not_text_diffs(tmp_path):
     target = tmp_path / "large.txt"
     target.write_bytes(b"x" * (FILE_CHANGE_MAX_BYTES + 1))

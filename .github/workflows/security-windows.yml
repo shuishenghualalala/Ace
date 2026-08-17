@@ -10,6 +10,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Configure canonical source line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -79,6 +82,9 @@ jobs:
       - name: Stage Windows runtime manifest evidence
         shell: pwsh
         run: Copy-Item -LiteralPath desktop/security-runtime-bin/runtime-manifest.json -Destination runtime-manifest.json
+      - name: Stage Windows runtime artifact evidence
+        shell: pwsh
+        run: Copy-Item -LiteralPath desktop/security-runtime-bin/ace-security-runtime.exe -Destination ace-security-runtime.exe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: security-windows-unsigned-evidence
@@ -87,6 +93,7 @@ jobs:
             security-windows-evidence.json
             security-windows-sbom.cdx.json
             runtime-manifest.json
+            ace-security-runtime.exe
       - name: Remove Windows sandbox fixture
         if: always()
         shell: pwsh
@@ -113,6 +120,7 @@ jobs:
             security-windows-evidence.json
             security-windows-sbom.cdx.json
             runtime-manifest.json
+            ace-security-runtime.exe
       - name: Stage Windows provenance bundle
         env:
           ATTESTATION_BUNDLE: ${{ steps.native-attestation.outputs.bundle-path }}
@@ -126,3 +134,4 @@ jobs:
             security-windows-evidence.sigstore.json
             security-windows-sbom.cdx.json
             runtime-manifest.json
+            ace-security-runtime.exe

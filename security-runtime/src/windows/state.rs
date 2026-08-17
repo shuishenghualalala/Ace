@@ -208,6 +208,20 @@ fn reject_multiple_links(path: &Path) -> Result<(), String> {
 }
 
 fn remove_stale_file(path: &Path, label: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+            return Err(format!(
+                "cannot clear stale security state {label}: reparse point"
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect stale security state {label}: {error}"
+            ));
+        }
+    }
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

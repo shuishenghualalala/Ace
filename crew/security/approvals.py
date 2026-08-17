@@ -7,13 +7,13 @@ import math
 import secrets
 import threading
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable, Sequence
 from uuid import uuid4
 
-from crew.security.actions import ActionKind, NormalizedAction
+from crew.security.actions import ActionKind, ActionScope, NormalizedAction, security_context_digest
 from crew.security.context import SecurityContext
 from crew.security.grants import ExecutionGrant, GrantRegistry
 from crew.security.models import AdditionalPermissionProfile, PermissionProfile
@@ -37,9 +37,10 @@ _MAX_ACTION_PAYLOAD_BYTES = 65_536
 class ApprovalError(RuntimeError):
     """Approval failure classified by whether the pending request reached a terminal state."""
 
-    def __init__(self, message: str, *, terminal: bool = False) -> None:
+    def __init__(self, message: str, *, terminal: bool = False, status: ApprovalStatus | None = None) -> None:
         super().__init__(message)
         self.terminal = terminal
+        self.status = status or ApprovalStatus.REPLAY
 
 
 class ApprovalDecision(StrEnum):
@@ -47,6 +48,14 @@ class ApprovalDecision(StrEnum):
     SESSION = "session"
     ALWAYS = "always"
     REJECT = "reject"
+
+
+class ApprovalStatus(StrEnum):
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+    SCOPE_CONTEXT_MISMATCH = "scope_context_mismatch"
+    REPLAY = "replay"
 
 
 @dataclass(frozen=True)
@@ -69,6 +78,12 @@ class ApprovalRequest:
     expires_monotonic: float
     additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile()
     effective_profile: PermissionProfile | None = None
+    action_scope_digest: str = ""
+    context_digest: str = ""
+
+    @property
+    def scope_digest(self) -> str:
+        return self.action_scope_digest
 
 
 @dataclass(frozen=True)
@@ -77,6 +92,10 @@ class ApprovalOutcome:
     decision: ApprovalDecision
     grant: ExecutionGrant | None = None
     persistent_rule: ActionRule | None = None
+
+    @property
+    def status(self) -> ApprovalStatus:
+        return ApprovalStatus.DENIED if self.decision is ApprovalDecision.REJECT else ApprovalStatus.APPROVED
 
 
 class ApprovalManager:
@@ -107,6 +126,7 @@ class ApprovalManager:
         ttl_seconds: float = 300.0,
         additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
         effective_profile: PermissionProfile | None = None,
+        action_scope: ActionScope | None = None,
     ) -> ApprovalRequest:
         now = self._clock()
         request = _new_request(
@@ -119,6 +139,7 @@ class ApprovalManager:
             ttl_seconds=ttl_seconds,
             additional_permissions=additional_permissions,
             effective_profile=effective_profile,
+            action_scope=action_scope,
             now=now,
         )
         with self._lock:
@@ -139,6 +160,7 @@ class ApprovalManager:
         ttl_seconds: float = 300.0,
         additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
         effective_profile: PermissionProfile | None = None,
+        action_scope: ActionScope | None = None,
     ) -> tuple[ApprovalRequest, bool]:
         """Atomically reuse one live session/tool/action request or create it."""
         now = self._clock()
@@ -152,6 +174,7 @@ class ApprovalManager:
             ttl_seconds=ttl_seconds,
             additional_permissions=additional_permissions,
             effective_profile=effective_profile,
+            action_scope=action_scope,
             now=now,
         )
         with self._lock:
@@ -168,6 +191,7 @@ class ApprovalManager:
                     and request.base_profile_hash == candidate.base_profile_hash
                     and request.risk_class == candidate.risk_class
                     and request.preview == candidate.preview
+                    and request.action_scope_digest == candidate.action_scope_digest
                     and _request_context_matches(request, context)
                 ),
                 None,
@@ -209,30 +233,39 @@ class ApprovalManager:
         context: SecurityContext,
         *,
         always_argv_prefix: Sequence[str] | None = None,
+        action_scope: ActionScope | None = None,
     ) -> ApprovalOutcome:
         if not isinstance(decision, ApprovalDecision):
             raise ApprovalError(f"未知批准决定: {decision!r}")
         with self._lock:
             request = self._requests.get(request_id)
             if request is None:
-                raise ApprovalError("批准请求不存在", terminal=True)
+                raise ApprovalError("批准请求不存在", terminal=True, status=ApprovalStatus.REPLAY)
             if request_id in self._handled:
-                raise ApprovalError("批准请求已处理", terminal=True)
+                raise ApprovalError("批准请求已处理", terminal=True, status=ApprovalStatus.REPLAY)
             if not secrets.compare_digest(request.nonce, str(nonce)):
-                raise ApprovalError("批准请求 nonce 不匹配")
+                raise ApprovalError("批准请求 nonce 不匹配", status=ApprovalStatus.REPLAY)
             if self._clock() >= request.expires_monotonic:
                 self._handled.add(request_id)
-                raise ApprovalError("批准请求已过期", terminal=True)
+                raise ApprovalError("批准请求已过期", terminal=True, status=ApprovalStatus.EXPIRED)
             if not _request_context_matches(request, context):
-                raise ApprovalError("批准请求上下文不匹配")
+                raise ApprovalError("批准请求上下文不匹配", status=ApprovalStatus.SCOPE_CONTEXT_MISMATCH)
+            if request.context_digest != security_context_digest(context):
+                raise ApprovalError("批准请求上下文 digest 不匹配", status=ApprovalStatus.SCOPE_CONTEXT_MISMATCH)
+            if request.action_scope_digest and (
+                action_scope is None
+                or not isinstance(action_scope, ActionScope)
+                or action_scope.digest != request.action_scope_digest
+            ):
+                raise ApprovalError("批准请求 action scope 不匹配", status=ApprovalStatus.SCOPE_CONTEXT_MISMATCH)
             if request.action.digest != request.action_digest:
-                raise ApprovalError("批准请求动作完整性校验失败")
+                raise ApprovalError("批准请求动作完整性校验失败", status=ApprovalStatus.SCOPE_CONTEXT_MISMATCH)
             if decision is ApprovalDecision.ALWAYS and (
                 request.additional_permissions.filesystem
                 or request.additional_permissions.network
                 or request.additional_permissions.allow_local_binding
             ):
-                raise ApprovalError("带额外权限的请求只能批准一次或本次对话")
+                raise ApprovalError("带额外权限的请求只能批准一次或本次对话", status=ApprovalStatus.DENIED)
             persistent_rule = (
                 _always_rule(request.action, always_argv_prefix)
                 if decision is ApprovalDecision.ALWAYS
@@ -445,6 +478,7 @@ def _new_request(
     additional_permissions: AdditionalPermissionProfile,
     effective_profile: PermissionProfile | None,
     now: float,
+    action_scope: ActionScope | None = None,
 ) -> ApprovalRequest:
     if (
         isinstance(ttl_seconds, bool)
@@ -455,6 +489,10 @@ def _new_request(
         raise ValueError("approval TTL 必须大于 0")
     if not isinstance(action, NormalizedAction):
         raise ValueError("approval action 必须是规范化 action")
+    if action_scope is not None and (
+        not isinstance(action_scope, ActionScope) or action_scope.action.digest != action.digest
+    ):
+        raise ValueError("approval action scope 与 action 不匹配")
     for field in (
         "os_user",
         "owner_account_id",
@@ -524,6 +562,8 @@ def _new_request(
         expires_monotonic=now + ttl_seconds,
         additional_permissions=normalized_permissions,
         effective_profile=effective_profile,
+        action_scope_digest=action_scope.digest if action_scope is not None else "",
+        context_digest=security_context_digest(context),
     )
 
 

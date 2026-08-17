@@ -214,11 +214,14 @@ async def _probe_runtime(
         host_secret.write_text("probe", encoding="ascii")
         marker = workspace / "probe-marker"
         if system == "windows":
+            # Keep both operands relative to the sandbox cwd.  Absolute quoted
+            # paths are misparsed by cmd.exe after the Windows runner's argv
+            # marshalling, while this form still proves write-inside/read-outside.
             command = (
                 "cmd.exe",
                 "/d",
                 "/c",
-                f'echo ok>"{marker}" & type "{host_secret}"',
+                "echo ok>probe-marker & type ..\\host-secret",
             )
         elif system == "linux":
             command = (
@@ -254,9 +257,12 @@ async def _probe_runtime(
         # The marker proves the child actually started and could write inside the declared
         # workspace. A Seatbelt/bwrap startup failure also returns non-zero, but leaves no
         # marker; treating that as a passing denial would produce a false "sandbox ready" state.
+        # The sandbox account owns the marker and its lease may intentionally
+        # leave the host without read access.  Directory visibility is enough:
+        # only the sandboxed ``echo`` could have created this fixed name.
         try:
-            marker_ready = marker.is_file() and marker.read_text(encoding="ascii").startswith("ok")
-        except (OSError, UnicodeError):
+            marker_ready = marker.is_file()
+        except OSError:
             marker_ready = False
         return result.capabilities if marker_ready and result.exit_code != 0 else None
 

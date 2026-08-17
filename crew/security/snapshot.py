@@ -15,7 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from crew.security.actions import NormalizedAction, serialize_normalized_action
+from crew.security.actions import (
+    ActionScope,
+    NormalizedAction,
+    security_context_digest,
+    serialize_normalized_action,
+)
 from crew.security.context import SecurityContext
 from crew.security.models import (
     AdditionalPermissionProfile,
@@ -119,9 +124,12 @@ class AuthorizationSnapshot:
     denied_roots: tuple[str, ...]
     network_rules: tuple[SnapshotNetworkRule, ...]
     allow_local_binding: bool
+    action_scope_digest: str = ""
+    turn_digest: str = ""
+    context_digest: str = ""
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "action_digest": self.action_digest,
             "action_payload": self.action_payload,
             "additional_permissions_payload": self.additional_permissions_payload,
@@ -148,6 +156,13 @@ class AuthorizationSnapshot:
             "workspace_id": self.workspace_id,
             "writable_roots": list(self.writable_roots),
         }
+        if self.action_scope_digest:
+            payload["action_scope_digest"] = self.action_scope_digest
+        if self.turn_digest:
+            payload["turn_digest"] = self.turn_digest
+        if self.context_digest:
+            payload["context_digest"] = self.context_digest
+        return payload
 
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes(self.to_payload())
@@ -156,6 +171,7 @@ class AuthorizationSnapshot:
     def from_payload(cls, value: object) -> AuthorizationSnapshot:
         expected = {
             "action_digest",
+            "action_scope_digest",
             "action_payload",
             "additional_permissions_payload",
             "allow_local_binding",
@@ -177,11 +193,18 @@ class AuthorizationSnapshot:
             "sandboxed",
             "session_id",
             "task_id",
+            "turn_digest",
             "version",
             "workspace_id",
             "writable_roots",
+            "context_digest",
         }
-        payload = _strict_mapping(value, expected, "authorization snapshot")
+        payload = _strict_mapping(
+            value,
+            expected,
+            "authorization snapshot",
+            optional={"action_scope_digest", "turn_digest", "context_digest"},
+        )
         version = payload.get("version")
         if version != AUTHORIZATION_SNAPSHOT_VERSION:
             raise AuthorizationSnapshotError("authorization snapshot version is unsupported")
@@ -210,6 +233,7 @@ class AuthorizationSnapshot:
             version=version,
             nonce=_required_text(payload.get("nonce"), "snapshot nonce"),
             action_digest=_required_text(payload.get("action_digest"), "action digest"),
+            action_scope_digest=_text(payload.get("action_scope_digest", ""), "action scope digest"),
             action_payload=_required_text(payload.get("action_payload"), "action payload"),
             profile_kind=_required_text(payload.get("profile_kind"), "profile kind"),
             profile_payload=_required_text(payload.get("profile_payload"), "profile payload"),
@@ -227,6 +251,7 @@ class AuthorizationSnapshot:
             workspace_id=_required_text(payload.get("workspace_id"), "workspace"),
             session_id=_text(payload.get("session_id"), "session"),
             task_id=_text(payload.get("task_id"), "task"),
+            turn_digest=_text(payload.get("turn_digest", ""), "turn digest"),
             argv=_string_tuple(payload.get("argv"), "argv", allow_empty=False),
             cwd=_required_text(payload.get("cwd"), "cwd"),
             environment_digest=_required_text(
@@ -243,6 +268,7 @@ class AuthorizationSnapshot:
                 SnapshotNetworkRule.from_payload(rule) for rule in raw_network
             ),
             allow_local_binding=allow_local_binding,
+            context_digest=_text(payload.get("context_digest", ""), "context digest"),
         )
 
 
@@ -309,6 +335,9 @@ def issue_authorization_snapshot(
     sandboxed: bool | None = None,
     sandbox_system_surface: str = "",
     additional_permissions: AdditionalPermissionProfile,
+    action_scope: ActionScope | None = None,
+    turn_digest: str = "",
+    context_digest: str = "",
     argv: Sequence[str],
     cwd: str | Path,
     environment: Mapping[str, str],
@@ -340,6 +369,10 @@ def issue_authorization_snapshot(
         )
     if not isinstance(additional_permissions, AdditionalPermissionProfile):
         raise AuthorizationSnapshotError("additional permissions are invalid")
+    if action_scope is not None and (
+        not isinstance(action_scope, ActionScope) or action_scope.action.digest != action.digest
+    ):
+        raise AuthorizationSnapshotError("authorization action scope does not match action")
     owner = str(context.owner_account_id).strip()
     if not owner:
         raise AuthorizationSnapshotError("authorization owner is missing")
@@ -393,6 +426,7 @@ def issue_authorization_snapshot(
         version=AUTHORIZATION_SNAPSHOT_VERSION,
         nonce=nonce,
         action_digest=action.digest,
+        action_scope_digest=action_scope.digest if action_scope is not None else "",
         action_payload=action_payload,
         profile_kind=profile.kind.value,
         profile_payload=profile_payload,
@@ -404,6 +438,7 @@ def issue_authorization_snapshot(
         workspace_id=workspace,
         session_id=str(context.session_id),
         task_id=str(context.task_id),
+        turn_digest=turn_digest or (action_scope.turn_digest if action_scope is not None else ""),
         argv=normalized_argv,
         cwd=normalized_cwd,
         environment_digest=environment_digest(environment),
@@ -417,6 +452,7 @@ def issue_authorization_snapshot(
         allow_local_binding=(
             profile.allow_local_binding or additional_permissions.allow_local_binding
         ),
+        context_digest=context_digest or security_context_digest(context),
     )
     digest = hashlib.sha256(snapshot.canonical_bytes()).hexdigest()
     mac = _snapshot_mac(digest)
@@ -432,6 +468,9 @@ def verify_authorization_snapshot(
     expected_session_id: str | None = None,
     expected_task_id: str | None = None,
     expected_nonce: str | None = None,
+    expected_action_scope_digest: str | None = None,
+    expected_turn_digest: str | None = None,
+    expected_context_digest: str | None = None,
     verification_key: bytes | None = None,
 ) -> AuthorizationSnapshot:
     """Verify HMAC, identity, helper identity, and optional final environment."""
@@ -459,6 +498,9 @@ def verify_authorization_snapshot(
         (snapshot.workspace_id, expected_workspace_id, "workspace"),
         (snapshot.session_id, expected_session_id, "session"),
         (snapshot.task_id, expected_task_id, "task"),
+        (snapshot.action_scope_digest, expected_action_scope_digest, "action scope"),
+        (snapshot.turn_digest, expected_turn_digest, "turn"),
+        (snapshot.context_digest, expected_context_digest, "context"),
     ):
         if expected is not None and actual != str(expected):
             raise AuthorizationSnapshotError(f"authorization snapshot {label} mismatch")
@@ -481,6 +523,9 @@ def consume_authorization_snapshot(
     expected_session_id: str | None = None,
     expected_task_id: str | None = None,
     expected_nonce: str | None = None,
+    expected_action_scope_digest: str | None = None,
+    expected_turn_digest: str | None = None,
+    expected_context_digest: str | None = None,
     verification_key: bytes | None = None,
 ) -> AuthorizationSnapshot:
     """Atomically verify and consume a one-shot process authorization."""
@@ -492,6 +537,9 @@ def consume_authorization_snapshot(
         expected_session_id=expected_session_id,
         expected_task_id=expected_task_id,
         expected_nonce=expected_nonce,
+        expected_action_scope_digest=expected_action_scope_digest,
+        expected_turn_digest=expected_turn_digest,
+        expected_context_digest=expected_context_digest,
         verification_key=verification_key,
     )
     try:
@@ -537,11 +585,26 @@ def delegate_authorization_snapshot(
     )
 
 
+# Shared T02 contract names; launch callers keep their existing API.
+PermissionSnapshot = AuthorizationSnapshot
+SignedPermissionSnapshot = SignedAuthorizationSnapshot
+issue_permission_snapshot = issue_authorization_snapshot
+verify_permission_snapshot = verify_authorization_snapshot
+consume_permission_snapshot = consume_authorization_snapshot
+
+
 def _verify_internal_consistency(snapshot: AuthorizationSnapshot) -> None:
     if not _HEX_256.fullmatch(snapshot.action_digest):
         raise AuthorizationSnapshotError("authorization action digest is invalid")
     if not _HEX_256.fullmatch(snapshot.environment_digest):
         raise AuthorizationSnapshotError("authorization environment digest is invalid")
+    for value, label in (
+        (snapshot.action_scope_digest, "action scope digest"),
+        (snapshot.turn_digest, "turn digest"),
+        (snapshot.context_digest, "context digest"),
+    ):
+        if value and not _HEX_256.fullmatch(value):
+            raise AuthorizationSnapshotError(f"authorization {label} is invalid")
     try:
         action = json.loads(snapshot.action_payload)
         profile = json.loads(snapshot.profile_payload)
@@ -879,11 +942,18 @@ def _serialize_additional_permissions(
     }
 
 
-def _strict_mapping(value: object, expected: set[str], label: str) -> Mapping[str, Any]:
+def _strict_mapping(
+    value: object,
+    expected: set[str],
+    label: str,
+    *,
+    optional: set[str] | None = None,
+) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise AuthorizationSnapshotError(f"{label} must be an object")
+    optional = optional or set()
     unknown = set(value) - expected
-    missing = expected - set(value)
+    missing = (expected - optional) - set(value)
     if unknown:
         raise AuthorizationSnapshotError(f"{label} contains unknown fields: {sorted(unknown)}")
     if missing:

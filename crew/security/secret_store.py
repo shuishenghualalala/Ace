@@ -11,8 +11,10 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -20,6 +22,8 @@ _SERVICE_NAME = "Ace.SecuritySecrets.v1"
 _MARKER_PREFIX = "@ace-secret:v1:"
 _MAX_SECRET_CHARS = 16_384
 _COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")
+_MAX_BINDING_TEXT = 256
+_MAX_BINDING_TTL_SECONDS = 365 * 24 * 60 * 60
 _APPROVED_BACKENDS = frozenset(
     {
         "keyring.backends.SecretService.Keyring",
@@ -39,6 +43,96 @@ class SecretStoreUnavailable(SecretStoreError):
 
 class SecretNotFound(SecretStoreError):
     """A required secret is absent from the platform backend."""
+
+
+@dataclass(frozen=True, slots=True)
+class SecretBinding:
+    """Non-secret access facts authenticated with a platform secret record."""
+
+    owner: str
+    task: str
+    host: str
+    purpose: str
+    ttl_seconds: float
+    issued_at: float = field(default_factory=time.time)
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("owner", self.owner),
+            ("task", self.task),
+            ("host", self.host),
+            ("purpose", self.purpose),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > _MAX_BINDING_TEXT
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+            ):
+                raise ValueError(f"invalid secret binding {label}")
+        if (
+            not isinstance(self.ttl_seconds, (int, float))
+            or not math.isfinite(float(self.ttl_seconds))
+            or float(self.ttl_seconds) <= 0
+            or float(self.ttl_seconds) > _MAX_BINDING_TTL_SECONDS
+        ):
+            raise ValueError("invalid secret binding TTL")
+        if (
+            not isinstance(self.issued_at, (int, float))
+            or not math.isfinite(float(self.issued_at))
+            or float(self.issued_at) <= 0
+        ):
+            raise ValueError("invalid secret binding issue time")
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "host": self.host,
+                "issued_at": float(self.issued_at),
+                "owner": self.owner,
+                "purpose": self.purpose,
+                "task": self.task,
+                "ttl_seconds": float(self.ttl_seconds),
+                "version": 1,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+
+    def is_valid(self, now: float | None = None) -> bool:
+        current = time.time() if now is None else float(now)
+        return current <= float(self.issued_at) + float(self.ttl_seconds)
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "host": self.host,
+            "issued_at": float(self.issued_at),
+            "owner": self.owner,
+            "purpose": self.purpose,
+            "task": self.task,
+            "ttl_seconds": float(self.ttl_seconds),
+        }
+
+    @classmethod
+    def from_record(cls, raw: object) -> SecretBinding:
+        if not isinstance(raw, dict) or set(raw) != {
+            "host",
+            "issued_at",
+            "owner",
+            "purpose",
+            "task",
+            "ttl_seconds",
+        }:
+            raise ValueError("secret binding schema is invalid")
+        return cls(
+            owner=raw["owner"],
+            task=raw["task"],
+            host=raw["host"],
+            purpose=raw["purpose"],
+            ttl_seconds=raw["ttl_seconds"],
+            issued_at=raw["issued_at"],
+        )
 
 
 class _CredentialBackend(Protocol):
@@ -107,10 +201,10 @@ class PlatformSecretStore:
     def platform(cls) -> PlatformSecretStore:
         try:
             backend = cls._load_platform_backend()
-        except Exception as exc:
+        except Exception:
             raise SecretStoreUnavailable(
                 "approved platform secret backend is unavailable"
-            ) from exc
+            ) from None
         return cls(backend)
 
     @classmethod
@@ -122,10 +216,10 @@ class PlatformSecretStore:
     def _load_platform_backend() -> _CredentialBackend:
         try:
             import keyring
-        except ImportError as exc:
+        except ImportError:
             raise SecretStoreUnavailable(
                 "platform keyring support is not installed"
-            ) from exc
+            ) from None
 
         backend = keyring.get_keyring()
         backend_name = f"{type(backend).__module__}.{type(backend).__qualname__}"
@@ -139,28 +233,35 @@ class PlatformSecretStore:
         return f"v1:{identifier.namespace}:{scope_digest}:{identifier.name}"
 
     @staticmethod
-    def _encode_record(value: str) -> str:
+    def _encode_record(value: str, binding: SecretBinding | None = None) -> str:
         marker_key = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
+        record: dict[str, object] = {
+            "marker_key": marker_key,
+            "secret": value,
+            "version": 2 if binding is not None else 1,
+        }
+        if binding is not None:
+            record["binding"] = binding.to_record()
         return json.dumps(
-            {
-                "marker_key": marker_key,
-                "secret": value,
-                "version": 1,
-            },
+            record,
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
         )
 
     @staticmethod
-    def _decode_record(encoded_record: str) -> tuple[str, bytes]:
+    def _decode_record(
+        encoded_record: str,
+    ) -> tuple[str, bytes, SecretBinding | None]:
         try:
             record = json.loads(encoded_record)
-            if (
-                not isinstance(record, dict)
-                or record.get("version") != 1
-                or set(record) != {"marker_key", "secret", "version"}
-            ):
+            version = record.get("version") if isinstance(record, dict) else None
+            if type(version) is not int or version not in {1, 2}:
+                raise ValueError("secret record schema is invalid")
+            expected_keys = {"marker_key", "secret", "version"}
+            if version == 2:
+                expected_keys.add("binding")
+            if set(record) != expected_keys:
                 raise ValueError("secret record schema is invalid")
             value = record["secret"]
             encoded_key = record["marker_key"]
@@ -179,18 +280,26 @@ class PlatformSecretStore:
             )
             if len(key) != 32:
                 raise ValueError("secret record marker key has invalid length")
-            return value, key
-        except Exception as exc:
-            raise SecretStoreUnavailable("platform secret record is invalid") from exc
+            binding = (
+                SecretBinding.from_record(record["binding"])
+                if version == 2
+                else None
+            )
+            return value, key, binding
+        except Exception:
+            raise SecretStoreUnavailable("platform secret record is invalid") from None
 
-    def _read_record(self, identifier: SecretIdentifier) -> tuple[str, bytes]:
+    def _read_record(
+        self,
+        identifier: SecretIdentifier,
+    ) -> tuple[str, bytes, SecretBinding | None]:
         try:
             encoded_record = self._backend.get_password(
                 _SERVICE_NAME,
                 self._account(identifier),
             )
-        except Exception as exc:
-            raise SecretStoreUnavailable("platform secret read failed") from exc
+        except Exception:
+            raise SecretStoreUnavailable("platform secret read failed") from None
         if encoded_record is None:
             raise SecretNotFound("required platform secret is absent")
         return self._decode_record(encoded_record)
@@ -200,38 +309,86 @@ class PlatformSecretStore:
         cls,
         identifier: SecretIdentifier,
         marker_key: bytes,
+        binding: SecretBinding | None = None,
     ) -> str:
         account = cls._account(identifier)
-        binding = hmac.new(
-            marker_key,
+        binding_digest = (
+            hmac.new(marker_key, binding.canonical_bytes(), hashlib.sha256)
+            .hexdigest()
+            .encode("ascii")
+            if binding is not None
+            else b""
+        )
+        marker_input = (
             _SERVICE_NAME.encode("ascii")
             + b"\0"
             + account.encode("ascii")
             + b"\0"
-            + identifier.canonical_bytes(),
-            hashlib.sha256,
-        ).hexdigest()
-        return f"{_MARKER_PREFIX}{binding}"
+            + identifier.canonical_bytes()
+            + b"\0"
+            + binding_digest
+        )
+        return f"{_MARKER_PREFIX}{hmac.new(marker_key, marker_input, hashlib.sha256).hexdigest()}"
 
-    def marker(self, identifier: SecretIdentifier) -> str:
-        _value, marker_key = self._read_record(identifier)
-        return self._marker_for_key(identifier, marker_key)
+    @staticmethod
+    def _require_binding(
+        stored: SecretBinding | None,
+        requested: SecretBinding | None,
+        *,
+        check_expiry: bool = True,
+    ) -> None:
+        if stored is None:
+            if requested is not None:
+                raise SecretStoreUnavailable("secret binding is missing")
+            return
+        if requested is None or any(
+            getattr(stored, field_name) != getattr(requested, field_name)
+            for field_name in ("owner", "task", "host", "purpose")
+        ):
+            raise SecretStoreUnavailable("secret binding does not match")
+        if float(requested.ttl_seconds) > float(stored.ttl_seconds):
+            raise SecretStoreUnavailable("secret binding TTL exceeds stored lease")
+        if check_expiry and not stored.is_valid():
+            raise SecretStoreUnavailable("secret binding has expired")
+
+    def marker(
+        self,
+        identifier: SecretIdentifier,
+        *,
+        binding: SecretBinding | None = None,
+    ) -> str:
+        _value, marker_key, stored_binding = self._read_record(identifier)
+        if binding is not None:
+            self._require_binding(stored_binding, binding)
+        return self._marker_for_key(identifier, marker_key, stored_binding)
 
     def marker_for_mutation(
         self,
         identifier: SecretIdentifier,
         mutation: SecretMutation,
+        *,
+        binding: SecretBinding | None = None,
     ) -> str:
         if mutation.account != self._account(identifier):
             raise SecretStoreUnavailable("secret mutation belongs to another identifier")
-        _value, marker_key = self._decode_record(mutation.replacement_record)
-        return self._marker_for_key(identifier, marker_key)
+        _value, marker_key, stored_binding = self._decode_record(
+            mutation.replacement_record
+        )
+        if binding is not None:
+            self._require_binding(stored_binding, binding)
+        return self._marker_for_key(identifier, marker_key, stored_binding)
 
     @staticmethod
     def is_marker(value: object) -> bool:
         return isinstance(value, str) and value.startswith(_MARKER_PREFIX)
 
-    def set(self, identifier: SecretIdentifier, value: str) -> None:
+    def set(
+        self,
+        identifier: SecretIdentifier,
+        value: str,
+        *,
+        binding: SecretBinding | None = None,
+    ) -> None:
         if (
             not isinstance(value, str)
             or not value
@@ -240,15 +397,32 @@ class PlatformSecretStore:
         ):
             raise ValueError("secret value is empty, invalid, or too large")
         try:
+            account = self._account(identifier)
+            if binding is not None:
+                previous = self._backend.get_password(_SERVICE_NAME, account)
+                if previous is not None:
+                    _old_value, _old_key, old_binding = self._decode_record(previous)
+                    if old_binding is not None:
+                        self._require_binding(
+                            old_binding,
+                            binding,
+                            check_expiry=False,
+                        )
             self._backend.set_password(
                 _SERVICE_NAME,
-                self._account(identifier),
-                self._encode_record(value),
+                account,
+                self._encode_record(value, binding),
             )
-        except Exception as exc:
-            raise SecretStoreUnavailable("platform secret write failed") from exc
+        except Exception:
+            raise SecretStoreUnavailable("platform secret write failed") from None
 
-    def replace(self, identifier: SecretIdentifier, value: str) -> SecretMutation:
+    def replace(
+        self,
+        identifier: SecretIdentifier,
+        value: str,
+        *,
+        binding: SecretBinding | None = None,
+    ) -> SecretMutation:
         """Replace a record and retain exact rollback state for marker persistence."""
         if (
             not isinstance(value, str)
@@ -258,16 +432,34 @@ class PlatformSecretStore:
         ):
             raise ValueError("secret value is empty, invalid, or too large")
         account = self._account(identifier)
-        replacement = self._encode_record(value)
+        previous: str | None = None
         try:
             previous = self._backend.get_password(_SERVICE_NAME, account)
             if previous is not None:
-                self._decode_record(previous)
+                _old_value, _old_key, old_binding = self._decode_record(previous)
+                if old_binding is not None:
+                    self._require_binding(
+                        old_binding,
+                        binding,
+                        check_expiry=False,
+                    )
+            replacement = self._encode_record(value, binding)
             self._backend.set_password(_SERVICE_NAME, account, replacement)
         except SecretStoreUnavailable:
             raise
-        except Exception as exc:
-            raise SecretStoreUnavailable("platform secret replacement failed") from exc
+        except Exception:
+            try:
+                current = self._backend.get_password(_SERVICE_NAME, account)
+                if previous is None:
+                    if current is not None:
+                        self._backend.delete_password(_SERVICE_NAME, account)
+                elif current != previous:
+                    self._backend.set_password(_SERVICE_NAME, account, previous)
+            except Exception:
+                raise SecretStoreUnavailable(
+                    "platform secret replacement cleanup failed"
+                ) from None
+            raise SecretStoreUnavailable("platform secret replacement failed") from None
         return SecretMutation(
             account=account,
             previous_record=previous,
@@ -303,14 +495,25 @@ class PlatformSecretStore:
                 )
         except SecretStoreUnavailable:
             raise
-        except Exception as exc:
-            raise SecretStoreUnavailable("platform secret rollback failed") from exc
+        except Exception:
+            raise SecretStoreUnavailable("platform secret rollback failed") from None
 
-    def get(self, identifier: SecretIdentifier) -> str:
-        value, _marker_key = self._read_record(identifier)
+    def get(
+        self,
+        identifier: SecretIdentifier,
+        *,
+        binding: SecretBinding | None = None,
+    ) -> str:
+        value, _marker_key, stored_binding = self._read_record(identifier)
+        self._require_binding(stored_binding, binding)
         return value
 
-    def delete(self, identifier: SecretIdentifier) -> None:
+    def delete(
+        self,
+        identifier: SecretIdentifier,
+        *,
+        binding: SecretBinding | None = None,
+    ) -> None:
         try:
             existing = self._backend.get_password(
                 _SERVICE_NAME,
@@ -318,25 +521,60 @@ class PlatformSecretStore:
             )
             if existing is None:
                 return
+            _value, _key, stored_binding = self._decode_record(existing)
+            if stored_binding is not None:
+                self._require_binding(
+                    stored_binding,
+                    binding,
+                    check_expiry=False,
+                )
             self._backend.delete_password(
                 _SERVICE_NAME,
                 self._account(identifier),
             )
-        except Exception as exc:
-            raise SecretStoreUnavailable("platform secret deletion failed") from exc
+        except Exception:
+            raise SecretStoreUnavailable("platform secret deletion failed") from None
 
-    def delete_transactional(self, identifier: SecretIdentifier) -> SecretDeletion:
+    def delete_transactional(
+        self,
+        identifier: SecretIdentifier,
+        *,
+        binding: SecretBinding | None = None,
+    ) -> SecretDeletion:
         """Delete a record while retaining exact rollback state."""
         account = self._account(identifier)
         try:
             previous = self._backend.get_password(_SERVICE_NAME, account)
             if previous is not None:
-                self._decode_record(previous)
-                self._backend.delete_password(_SERVICE_NAME, account)
+                _value, _key, stored_binding = self._decode_record(previous)
+                if stored_binding is not None:
+                    self._require_binding(
+                        stored_binding,
+                        binding,
+                        check_expiry=False,
+                    )
+                try:
+                    self._backend.delete_password(_SERVICE_NAME, account)
+                except Exception:
+                    try:
+                        current = self._backend.get_password(_SERVICE_NAME, account)
+                        if current is None:
+                            self._backend.set_password(
+                                _SERVICE_NAME,
+                                account,
+                                previous,
+                            )
+                    except Exception:
+                        raise SecretStoreUnavailable(
+                            "platform secret deletion cleanup failed"
+                        ) from None
+                    raise SecretStoreUnavailable(
+                        "platform secret deletion failed"
+                    ) from None
         except SecretStoreUnavailable:
             raise
-        except Exception as exc:
-            raise SecretStoreUnavailable("platform secret deletion failed") from exc
+        except Exception:
+            raise SecretStoreUnavailable("platform secret deletion failed") from None
         return SecretDeletion(account=account, previous_record=previous)
 
     def rollback_deletion(self, deletion: SecretDeletion) -> None:
@@ -360,19 +598,31 @@ class PlatformSecretStore:
             )
         except SecretStoreUnavailable:
             raise
-        except Exception as exc:
+        except Exception:
             raise SecretStoreUnavailable(
                 "platform secret deletion rollback failed"
-            ) from exc
+            ) from None
 
-    def resolve_marker(self, identifier: SecretIdentifier, marker: str) -> str:
+    def resolve_marker(
+        self,
+        identifier: SecretIdentifier,
+        marker: str,
+        *,
+        binding: SecretBinding | None = None,
+    ) -> str:
         try:
-            value, marker_key = self._read_record(identifier)
-        except SecretNotFound as exc:
+            value, marker_key, stored_binding = self._read_record(identifier)
+        except SecretNotFound:
             raise SecretStoreUnavailable(
                 "secret marker is invalid or belongs to another scope"
-            ) from exc
-        expected = self._marker_for_key(identifier, marker_key)
+            ) from None
+        try:
+            self._require_binding(stored_binding, binding)
+        except SecretStoreUnavailable:
+            raise SecretStoreUnavailable(
+                "secret marker is invalid or belongs to another scope"
+            ) from None
+        expected = self._marker_for_key(identifier, marker_key, stored_binding)
         if (
             not isinstance(marker, str)
             or not hmac.compare_digest(marker, expected)

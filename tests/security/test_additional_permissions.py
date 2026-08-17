@@ -6,6 +6,7 @@ import threading
 import pytest
 
 from crew.security.actions import (
+    ActionScope,
     normalize_exec_action,
     normalize_file_action,
     normalize_network_action,
@@ -378,6 +379,7 @@ def test_service_approval_request_carries_literal_delete_root_into_grant(tmp_pat
 
 def test_network_approval_is_exact_and_rechecked_after_decision(tmp_path: Path) -> None:
     context = _context(tmp_path)
+    context.workspace_root.mkdir()
     grants = GrantRegistry()
     approvals = ApprovalManager(grants)
     rules = SQLiteRuleStore(tmp_path / "rules.db")
@@ -708,3 +710,28 @@ def test_permission_approval_rejects_always(tmp_path: Path) -> None:
             ApprovalDecision.ALWAYS,
             context,
         )
+
+
+def test_execution_grant_scope_ttl_and_revoke_are_fail_closed(tmp_path: Path) -> None:
+    now = [100.0]
+    grants = GrantRegistry(clock=lambda: now[0])
+    context = _context(tmp_path)
+    action = normalize_exec_action(("python", "-V"), context.cwd)
+    scope = ActionScope(action, command="python -V", turn_digest="c" * 64)
+    grant = grants.issue(
+        context,
+        action,
+        RuleScope.SESSION,
+        action_scope=scope,
+        ttl_seconds=5,
+    )
+
+    grants.authorize(grant.grant_id, context, action, action_scope=scope)
+    assert grants.revoke(grant.grant_id)
+    with pytest.raises(GrantError, match="不存在"):
+        grants.authorize(grant.grant_id, context, action, action_scope=scope)
+
+    expired = grants.issue(context, action, RuleScope.SESSION, action_scope=scope, ttl_seconds=5)
+    now[0] = 105.0
+    with pytest.raises(GrantError, match="过期"):
+        grants.authorize(expired.grant_id, context, action, action_scope=scope)

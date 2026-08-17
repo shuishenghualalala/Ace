@@ -27,6 +27,7 @@ from crew.security.mcp_secrets import (
 )
 from crew.security.secret_store import (
     PlatformSecretStore,
+    SecretBinding,
     SecretIdentifier,
     SecretNotFound,
     SecretStoreUnavailable,
@@ -51,6 +52,8 @@ _CONFIG_WRITE_LOCK = threading.Lock()
 _MAX_CONFIG_FILE_BYTES = 4 * 1024 * 1024
 _LEGACY_CRON_TICK_WARNING_EMITTED = False
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_FAILED_SECRET_MARKERS: set[tuple[Path, str]] = set()
+_SECRET_BINDING_TTL_SECONDS = 30 * 24 * 60 * 60
 _SENSITIVE_ENV_NAME_RE = re.compile(
     r"(?:API_?KEY|KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH)$",
     re.IGNORECASE,
@@ -708,15 +711,15 @@ class Config:
     #    但保证结构稳定、字段顺序可读。引入 ruamel.yaml 仅为此功能会破坏最小依赖原则。
     # 2. yaml 中只写非敏感字段（name/api_key_env/base_url/model/temperature/max_tokens/
     #    context_window/timeout）。API Key 明文不会进入 yaml，只会被写入 .env。
-    # 3. .env 写入：单独函数处理（_write_env_key），按"已存在则替换该行，否则追加"策略，
-    #    写完同步 os.environ 让当前进程立即可用。
+    # 3. .env 写入：非敏感配置按行原子写回；敏感值由
+    #    write_secret_env_key() 先写平台 backend，再写绑定 marker。
     # 4. 边界：删除最后一个模型禁止（409）；删除激活模型由调用方负责切换激活。
     def add_model(self, profile_data: dict[str, Any]) -> ModelProfile:
         """新增一个模型 profile。
 
         Args:
             profile_data: 必须含 id；其它字段缺省时取 ModelProfile 默认值。
-                          可选 api_key（明文）：若提供则写入 .env（按 api_key_env 名）。
+                          可选 api_key（明文）：若提供则写入平台 backend，.env 只留 marker。
 
         Returns:
             新建的 ModelProfile。
@@ -730,7 +733,7 @@ class Config:
         if model_id in self.model_profiles:
             raise ValueError(f"模型 id 已存在: {model_id}")
 
-        # 构建 profile（不含 api_key；key 由调用方处理 env 写入）
+        # 构建 profile；若已有 owner marker，则从平台 backend 注入到内存。
         profile = _build_profile_from_payload(model_id, profile_data)
         self.model_profiles[model_id] = profile
         return profile
@@ -767,11 +770,11 @@ class Config:
             "builtin": profile_data.get("builtin", current.builtin),
             "capabilities": profile_data.get("capabilities", list(current.capabilities)),
         }
-        # _build_profile_from_payload 会从 os.environ[api_key_env] 取 key：
-        # - 调用方先 _apply_api_key_to_env 写入了 env → 取到新 key
-        # - api_key_env 改到不存在的变量 → 取到空串，has_key=False（反映真实状态）
-        # - 什么都不改 → 取到原值（os.environ 在 load_config 时已设置）
+        # _build_profile_from_payload 从 owner-scoped platform marker 取 key；
+        # 同一 env 引用且没有重新提交 key 时，保留当前已注入的内存值。
         profile = _build_profile_from_payload(model_id, merged)
+        if not profile.api_key and merged["api_key_env"] == current.api_key_env:
+            profile.api_key = current.api_key
         self.model_profiles[model_id] = profile
         return profile
 
@@ -1076,9 +1079,18 @@ def _credential_free_endpoint_path(value: Any) -> str:
     return path
 
 
-def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
+def _build_model_profile(
+    model_id: str,
+    raw: dict[str, Any],
+    env_map: dict[str, str] | None = None,
+) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
-    api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
+    api_key = _lookup_api_key(
+        api_key_env,
+        env_map,
+        fallback_global=True,
+        process_env=env_map is None,
+    )
 
     return ModelProfile(
         id=model_id,
@@ -1125,14 +1137,18 @@ def _build_owner_model_profile(
 
 
 def _build_profile_from_payload(model_id: str, payload: dict[str, Any]) -> ModelProfile:
-    """从 CRUD payload 构建 ModelProfile（不解析 env，由调用方决定 key 来源）。
-
-    与 _build_model_profile 的区别：后者从 yaml+env 加载；前者从用户输入构建。
-    api_key 默认空串，若调用方需要从 env 注入，自行在构建后赋值。
-    """
+    """从 CRUD payload 构建 ModelProfile，并从 owner marker 注入 API key。"""
     api_key_env = str(payload.get("api_key_env") or "CREW_API_KEY").strip() or "CREW_API_KEY"
-    # 已存在的 env 变量沿用其值，让 update 场景保留 has_key 状态
-    api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
+    try:
+        secure_values = _load_env_map(resolve_writable_env_path())
+    except (OSError, RuntimeError, ValueError, SecretStoreUnavailable):
+        secure_values = {}
+    api_key = _lookup_api_key(
+        api_key_env,
+        secure_values,
+        fallback_global=True,
+        process_env=False,
+    )
     return ModelProfile(
         id=model_id,
         name=str(payload.get("name") or model_id),
@@ -1183,6 +1199,7 @@ def _lookup_api_key(
     env_map: dict[str, str] | None,
     *,
     fallback_global: bool,
+    process_env: bool = True,
 ) -> str:
     env_name = str(api_key_env or "CREW_API_KEY").strip() or "CREW_API_KEY"
     if env_map is not None:
@@ -1193,8 +1210,10 @@ def _lookup_api_key(
             fallback = str(env_map.get("CREW_API_KEY", "") or "")
             if fallback:
                 return fallback
-        if not fallback_global:
+        if not fallback_global or not process_env:
             return ""
+    if not process_env:
+        return ""
     value = os.getenv(env_name, "") or ""
     if not value and env_name != "CREW_API_KEY" and fallback_global:
         value = os.getenv("CREW_API_KEY", "") or ""
@@ -1221,6 +1240,8 @@ def _load_env_map(env_path: Path) -> dict[str, str]:
             log.warning("ignored protected dotenv variable %s", name)
             continue
         value = str(raw_value)
+        if _SENSITIVE_ENV_NAME_RE.search(name) is not None:
+            os.environ.pop(name, None)
         if not PlatformSecretStore.is_marker(value):
             if _SENSITIVE_ENV_NAME_RE.search(name) is not None:
                 try:
@@ -1231,6 +1252,7 @@ def _load_env_map(env_path: Path) -> dict[str, str]:
                         sync_process_env=False,
                     )
                 except (OSError, ValueError, SecretStoreUnavailable):
+                    _scrub_plaintext_env_key(env_path, name)
                     log.error(
                         "plaintext owner credential was not loaded because secure migration "
                         "failed for variable %s",
@@ -1243,9 +1265,30 @@ def _load_env_map(env_path: Path) -> dict[str, str]:
             if store is None:
                 store = PlatformSecretStore.platform()
             identifier = _runtime_env_secret_identifier(env_path, name)
-            values[name] = store.resolve_marker(identifier, value)
+            binding = _runtime_env_secret_binding(env_path, name)
+        except (SecretStoreUnavailable, ValueError):
+            log.error(
+                "owner credential marker validation failed for variable %s; "
+                "请在桌面模型设置中重新保存该凭据以重建绑定",
+                name,
+            )
+            continue
+        marker_key = (
+            env_path.expanduser().resolve(strict=False),
+            name,
+        )
+        if marker_key in _FAILED_SECRET_MARKERS:
+            continue
+        try:
+            values[name] = store.resolve_marker(identifier, value, binding=binding)
+            _FAILED_SECRET_MARKERS.discard(marker_key)
         except (SecretNotFound, SecretStoreUnavailable, ValueError):
-            log.error("owner credential marker validation failed for variable %s", name)
+            _FAILED_SECRET_MARKERS.add(marker_key)
+            log.error(
+                "owner credential marker validation failed for variable %s; "
+                "请在桌面模型设置中重新保存该凭据以重建绑定",
+                name,
+            )
     return values
 
 
@@ -1321,24 +1364,41 @@ def _replace_text_file(
     )
 
 
-def write_env_key(
-    env_path: Path, var_name: str, value: str, *, sync_process_env: bool = True
-) -> None:
-    """把 key=value 写入指定 .env 文件（按行匹配：已存在则替换，否则追加）。
+def _dotenv_assignment_match(line: str, var_name: str) -> re.Match[str] | None:
+    stripped = line.lstrip()
+    if stripped.startswith("#"):
+        return None
+    return re.match(rf"(?:export\s+)?{re.escape(var_name)}\s*=", stripped)
 
-    写入后同步到 os.environ，让当前进程立即可用。
+
+def write_env_key(
+    env_path: Path,
+    var_name: str,
+    value: str,
+    *,
+    sync_process_env: bool = True,
+    _allow_secret_marker: bool = False,
+) -> None:
+    """Write a non-sensitive key=value entry to .env.
+
+    Sensitive variable names must use ``write_secret_env_key``; this helper
+    only publishes ordinary configuration values to the process environment.
 
     Args:
         env_path: 目标 .env 文件路径（不存在会创建）。
         var_name: 环境变量名（必须是合法标识符，由调用方保证）。
-        value: 变量值（明文，写入文件时不再转义）。
+        value: 非敏感变量值（写入文件时不再转义）。
     """
     if _ENV_NAME_RE.fullmatch(var_name) is None or _is_protected_dotenv_name(var_name):
         raise ValueError("environment variable name is not writable")
+    if _SENSITIVE_ENV_NAME_RE.search(var_name) is not None and not (
+        _allow_secret_marker and PlatformSecretStore.is_marker(value)
+    ):
+        raise ValueError("secret environment variables require platform secret storage")
     with _CONFIG_WRITE_LOCK:
         lines: list[str] = []
-        prefix = f"{var_name}="
         replaced = False
+        duplicate_indices: list[int] = []
         expected = snapshot_file(
             env_path,
             max_bytes=_MAX_ENV_FILE_BYTES,
@@ -1353,13 +1413,15 @@ def write_env_key(
 
             for i, line in enumerate(lines):
                 # 跳过注释行；匹配以 `var=` 开头的非注释行
-                stripped = line.lstrip()
-                if stripped.startswith("#"):
-                    continue
-                if stripped.startswith(prefix):
-                    lines[i] = f"{var_name}={value}"
-                    replaced = True
-                    break
+                if _dotenv_assignment_match(line, var_name) is not None:
+                    if replaced and _allow_secret_marker:
+                        duplicate_indices.append(i)
+                    else:
+                        lines[i] = f"{var_name}={value}"
+                        replaced = True
+
+            for i in reversed(duplicate_indices):
+                lines.pop(i)
 
         if not replaced:
             # 文件末尾保证有空行分隔
@@ -1394,6 +1456,41 @@ def _runtime_env_secret_identifier(
     )
 
 
+def _runtime_env_secret_binding(
+    env_path: Path,
+    var_name: str,
+) -> SecretBinding:
+    canonical_path = str(env_path.expanduser().resolve(strict=False))
+    path_digest = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
+    return SecretBinding(
+        owner=f"path-{path_digest}",
+        task="runtime-config",
+        host=f"path-{path_digest}",
+        purpose=f"provider-env:{var_name}",
+        ttl_seconds=_SECRET_BINDING_TTL_SECONDS,
+    )
+
+
+def _env_file_has_plaintext_value(env_path: Path, var_name: str) -> bool:
+    """Detect any plaintext duplicate before replacing a sensitive dotenv entry."""
+    try:
+        content = read_verified_bytes(
+            env_path,
+            max_bytes=_MAX_ENV_FILE_BYTES,
+        ).decode("utf-8")
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return False
+    for line in content.splitlines():
+        stripped = line.lstrip()
+        assignment = _dotenv_assignment_match(line, var_name)
+        if assignment is None:
+            continue
+        candidate = stripped[assignment.end():].strip()
+        if candidate and not PlatformSecretStore.is_marker(candidate.strip('"\'')):
+            return True
+    return False
+
+
 def write_secret_env_key(
     env_path: Path,
     var_name: str,
@@ -1403,25 +1500,46 @@ def write_secret_env_key(
 ) -> None:
     """Persist a runtime credential in the OS keyring and only a bound marker on disk."""
     identifier = _runtime_env_secret_identifier(env_path, var_name)
-    store = PlatformSecretStore.platform()
-    mutation = store.replace(identifier, value)
+    binding = _runtime_env_secret_binding(env_path, var_name)
+    os.environ.pop(var_name, None)
     try:
+        previous_value = dotenv_values(env_path, interpolate=False).get(var_name)
+    except (OSError, ValueError):
+        previous_value = None
+    previous_plaintext = isinstance(previous_value, str) and bool(
+        previous_value and not PlatformSecretStore.is_marker(previous_value)
+    ) or _env_file_has_plaintext_value(env_path, var_name)
+    store = None
+    mutation = None
+    try:
+        store = PlatformSecretStore.platform()
+        mutation = store.replace(identifier, value, binding=binding)
         write_env_key(
             env_path,
             var_name,
-            store.marker_for_mutation(identifier, mutation),
+            store.marker_for_mutation(identifier, mutation, binding=binding),
             sync_process_env=False,
+            _allow_secret_marker=True,
         )
     except Exception:
-        try:
-            store.rollback(mutation)
-        except SecretStoreUnavailable as rollback_exc:
-            raise SecretStoreUnavailable(
-                "secret marker write and keyring rollback failed"
-            ) from rollback_exc
+        if mutation is not None and store is not None:
+            try:
+                store.rollback(mutation)
+            except SecretStoreUnavailable as rollback_exc:
+                if previous_plaintext:
+                    _scrub_plaintext_env_key(env_path, var_name)
+                raise SecretStoreUnavailable(
+                    "secret marker write and keyring rollback failed"
+                ) from rollback_exc
+        if previous_plaintext:
+            _scrub_plaintext_env_key(env_path, var_name)
         raise
-    if sync_process_env:
-        os.environ[var_name] = value
+    _FAILED_SECRET_MARKERS.discard(
+        (env_path.expanduser().resolve(strict=False), var_name)
+    )
+    os.environ.pop(var_name, None)
+    # Secret values are deliberately never published through the host process
+    # environment. Consumers must resolve the owner-bound marker from the store.
 
 
 def remove_secret_env_key(
@@ -1432,8 +1550,10 @@ def remove_secret_env_key(
 ) -> None:
     """Delete a runtime credential before removing its non-secret disk marker."""
     identifier = _runtime_env_secret_identifier(env_path, var_name)
+    binding = _runtime_env_secret_binding(env_path, var_name)
+    os.environ.pop(var_name, None)
     store = PlatformSecretStore.platform()
-    deletion = store.delete_transactional(identifier)
+    deletion = store.delete_transactional(identifier, binding=binding)
     try:
         remove_env_key(
             env_path,
@@ -1448,6 +1568,10 @@ def remove_secret_env_key(
                 "secret marker removal and keyring rollback failed"
             ) from rollback_exc
         raise
+    _FAILED_SECRET_MARKERS.discard(
+        (env_path.expanduser().resolve(strict=False), var_name)
+    )
+    os.environ.pop(var_name, None)
 
 
 def remove_env_key(env_path: Path, var_name: str, *, sync_process_env: bool = True) -> None:
@@ -1456,7 +1580,6 @@ def remove_env_key(env_path: Path, var_name: str, *, sync_process_env: bool = Tr
         raise ValueError("environment variable name is not removable")
     with _CONFIG_WRITE_LOCK:
         lines: list[str] = []
-        prefix = f"{var_name}="
         changed = False
         expected = snapshot_file(
             env_path,
@@ -1465,8 +1588,7 @@ def remove_env_key(env_path: Path, var_name: str, *, sync_process_env: bool = Tr
         if expected.exists:
             try:
                 for line in expected.data.decode("utf-8").splitlines():
-                    stripped = line.lstrip()
-                    if not stripped.startswith("#") and stripped.startswith(prefix):
+                    if _dotenv_assignment_match(line, var_name) is not None:
                         changed = True
                         continue
                     lines.append(line)
@@ -1482,38 +1604,64 @@ def remove_env_key(env_path: Path, var_name: str, *, sync_process_env: bool = Tr
         os.environ.pop(var_name, None)
 
 
-def _resolve_secret_env_markers(path: Path) -> None:
+def _resolve_secret_env_markers(
+    path: Path,
+    *,
+    publish_to_process_env: bool = False,
+) -> dict[str, str]:
+    resolved_values: dict[str, str] = {}
     try:
         values = dotenv_values(path, interpolate=False)
     except (OSError, ValueError):
-        return
+        return resolved_values
     marker_entries = {
         str(name): value
         for name, value in values.items()
         if PlatformSecretStore.is_marker(value) and not _is_protected_dotenv_name(str(name))
     }
     if not marker_entries:
-        return
+        return resolved_values
     try:
         store = PlatformSecretStore.platform()
     except SecretStoreUnavailable:
         for name, marker in marker_entries.items():
-            if os.environ.get(name) == marker:
-                os.environ.pop(name, None)
+            os.environ.pop(name, None)
         log.error("platform secret backend unavailable; runtime credentials not loaded")
-        return
+        return resolved_values
     for name, marker in marker_entries.items():
         try:
             identifier = _runtime_env_secret_identifier(path, name)
-            os.environ[name] = store.resolve_marker(identifier, str(marker))
+            binding = _runtime_env_secret_binding(path, name)
+            value = store.resolve_marker(
+                identifier,
+                str(marker),
+                binding=binding,
+            )
+            os.environ.pop(name, None)
+            resolved_values[name] = value
         except (SecretNotFound, SecretStoreUnavailable, ValueError):
-            if os.environ.get(name) == marker:
-                os.environ.pop(name, None)
+            os.environ.pop(name, None)
             log.error("runtime credential marker validation failed for variable %s", name)
+    return resolved_values
 
 
-def _load_env_file(path: Path, *, secure_persisted_secrets: bool = False) -> None:
+def _scrub_plaintext_env_key(path: Path, name: str) -> None:
+    """Remove an un-migrated credential instead of leaving a disk fallback."""
+    try:
+        remove_env_key(path, name, sync_process_env=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SecretStoreUnavailable(
+            "plaintext runtime credential cleanup failed"
+        ) from exc
+
+
+def _load_env_file(
+    path: Path,
+    *,
+    secure_persisted_secrets: bool = False,
+) -> dict[str, str]:
     blocked: dict[str, object] = {}
+    secure_values: dict[str, str] = {}
     try:
         content = read_verified_bytes(path, max_bytes=_MAX_ENV_FILE_BYTES).decode("utf-8")
         persisted = dotenv_values(stream=StringIO(content), interpolate=False)
@@ -1525,36 +1673,45 @@ def _load_env_file(path: Path, *, secure_persisted_secrets: bool = False) -> Non
         if name and _is_protected_dotenv_name(name):
             blocked[name] = os.environ.get(name, _MISSING_ENV)
             log.warning("ignored protected dotenv variable %s", name)
-    if secure_persisted_secrets:
-        for raw_name, raw_value in persisted.items():
-            name = str(raw_name or "")
-            value = str(raw_value or "")
-            if (
-                not name
-                or not value
-                or _is_protected_dotenv_name(name)
-                or PlatformSecretStore.is_marker(value)
-                or _SENSITIVE_ENV_NAME_RE.search(name) is None
-            ):
-                continue
-            previous = os.environ.get(name, _MISSING_ENV)
-            try:
-                write_secret_env_key(
-                    path,
-                    name,
+    for raw_name, raw_value in persisted.items():
+        name = str(raw_name or "")
+        value = str(raw_value or "")
+        if (
+            not name
+            or not value
+            or _is_protected_dotenv_name(name)
+            or _SENSITIVE_ENV_NAME_RE.search(name) is None
+        ):
+            continue
+        is_marker = PlatformSecretStore.is_marker(value)
+        try:
+            if is_marker:
+                store = PlatformSecretStore.platform()
+                identifier = _runtime_env_secret_identifier(path, name)
+                binding = _runtime_env_secret_binding(path, name)
+                secure_values[name] = store.resolve_marker(
+                    identifier,
                     value,
-                    sync_process_env=False,
+                    binding=binding,
                 )
-            except (OSError, ValueError, SecretStoreUnavailable):
-                blocked[name] = previous
-                log.error(
-                    "plaintext runtime credential was not loaded because secure migration failed "
-                    "for variable %s",
-                    name,
-                )
+            else:
+                write_secret_env_key(path, name, value, sync_process_env=False)
+                secure_values[name] = value
+        except (OSError, ValueError, SecretStoreUnavailable):
+            secure_values.pop(name, None)
+            if not is_marker:
+                _scrub_plaintext_env_key(path, name)
+            log.error(
+                "runtime credential was not loaded because secure migration failed "
+                "for variable %s",
+                name,
+            )
     for raw_name, raw_value in persisted.items():
         name = str(raw_name or "")
         if not name or raw_value is None or _is_protected_dotenv_name(name):
+            continue
+        if _SENSITIVE_ENV_NAME_RE.search(name) is not None:
+            os.environ.pop(name, None)
             continue
         os.environ[name] = str(raw_value)
     for name, previous in blocked.items():
@@ -1562,10 +1719,10 @@ def _load_env_file(path: Path, *, secure_persisted_secrets: bool = False) -> Non
             os.environ.pop(name, None)
         else:
             os.environ[name] = str(previous)
-    _resolve_secret_env_markers(path)
+    return secure_values
 
 
-def _load_env_files() -> None:
+def _load_env_files() -> dict[str, str]:
     """按优先级顺序加载 .env 文件，后者覆盖前者。
 
     关键场景：PyInstaller --onedir 打包后，源码里的 .env 不会自动进入 _internal/。
@@ -1574,8 +1731,8 @@ def _load_env_files() -> None:
     当前工作目录属于任务输入，不作为进程级 dotenv 来源。
     """
     candidates: list[tuple[Path, bool]] = [
-        (ROOT / "config" / ".env", False),
-        (ROOT / ".env", False),
+        (ROOT / "config" / ".env", True),
+        (ROOT / ".env", True),
         (ROOT / ".crew" / ".env", True),
     ]
     # 用户配置目录（冻结态 ~/.crew，开发态 ROOT/config）
@@ -1594,6 +1751,7 @@ def _load_env_files() -> None:
         candidates.append((Path(env_home).expanduser() / ".env", True))
 
     seen: set[Path] = set()
+    secure_values: dict[str, str] = {}
     for path, secure_persisted_secrets in candidates:
         lexical = path.expanduser().absolute()
         try:
@@ -1611,27 +1769,39 @@ def _load_env_files() -> None:
         if resolved in seen:
             continue
         seen.add(resolved)
-        _load_env_file(
+        secure_values.update(_load_env_file(
             lexical,
             secure_persisted_secrets=secure_persisted_secrets,
-        )
+        ))
+    return secure_values
 
 
-def _load_crew_home_env_file(crew_home: str | Path | None) -> None:
+def _load_crew_home_env_file(crew_home: str | Path | None) -> dict[str, str]:
     """加载 config.yaml runtime.crew_home 指向的 .env。"""
     if not crew_home:
-        return
+        return {}
     path = Path(crew_home).expanduser() / ".env"
     if path.is_file():
-        _load_env_file(path, secure_persisted_secrets=True)
+        return _load_env_file(path, secure_persisted_secrets=True)
+    return {}
 
 
-def _refresh_model_profile_keys(cfg: Config) -> None:
+def _refresh_model_profile_keys(
+    cfg: Config,
+    secure_values: dict[str, str] | None = None,
+) -> None:
     """在额外加载 .env 后刷新已构建 ModelProfile 的 api_key。"""
     for profile in cfg.model_profiles.values():
-        api_key = os.getenv(profile.api_key_env, "") or ""
-        if not api_key and profile.api_key_env != "CREW_API_KEY":
-            api_key = os.getenv("CREW_API_KEY", "") or ""
+        if secure_values is None:
+            api_key = _lookup_api_key(
+                profile.api_key_env,
+                None,
+                fallback_global=True,
+            )
+        else:
+            api_key = secure_values.get(profile.api_key_env, "")
+            if not api_key and profile.api_key_env != "CREW_API_KEY":
+                api_key = secure_values.get("CREW_API_KEY", "")
         profile.api_key = api_key
 
 
@@ -1659,7 +1829,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
 
     .env 查找顺序由 _load_env_files() 决定；后者覆盖前者。
     """
-    _load_env_files()
+    secure_env_values = _load_env_files() or {}
 
     cfg = Config()
 
@@ -1690,7 +1860,11 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if isinstance(models, dict) and models:
             for model_id, raw in models.items():
                 if isinstance(raw, dict):
-                    cfg.model_profiles[str(model_id)] = _build_model_profile(str(model_id), raw)
+                    cfg.model_profiles[str(model_id)] = _build_model_profile(
+                        str(model_id),
+                        raw,
+                        secure_env_values if secure_env_values else None,
+                    )
         else:
             cfg.api_key_env = llm.get("api_key_env", cfg.api_key_env)
             cfg.provider = str(llm.get("provider", cfg.provider) or cfg.provider).strip().lower()
@@ -1991,8 +2165,11 @@ def load_config(config_path: str | Path | None = None) -> Config:
     # config.yaml 里的 runtime.crew_home 需要等 yaml 解析后才知道；
     # 加载 {crew_home}/.env 后刷新已构建的模型 profile key。
     if cfg.crew_home and not os.getenv("CREW_HOME"):
-        _load_crew_home_env_file(cfg.crew_home)
-        _refresh_model_profile_keys(cfg)
+        secure_env_values.update(_load_crew_home_env_file(cfg.crew_home))
+        _refresh_model_profile_keys(
+            cfg,
+            secure_env_values if secure_env_values else None,
+        )
 
     # 2) 环境变量覆盖（敏感信息只从 env 取）
     if not cfg.model_profiles:
@@ -2010,6 +2187,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 "timeout": cfg.timeout,
                 "vision": cfg.vision,
             },
+            secure_env_values if secure_env_values else None,
         )
 
     if os.getenv("CREW_MODEL_PROFILE"):
@@ -2023,8 +2201,8 @@ def load_config(config_path: str | Path | None = None) -> Config:
     # 旧式单模型配置保留 CREW_* 全局覆盖；多模型 profile 只读取自己的 api_key_env，
     # 避免 .env 里的 CREW_MODEL/CREW_BASE_URL 误覆盖已选择的命名模型。
     if profile.id == "default" and profile.api_key_env == "CREW_API_KEY":
-        if os.getenv("CREW_API_KEY"):
-            profile.api_key = os.environ["CREW_API_KEY"]
+        if secure_env_values.get("CREW_API_KEY"):
+            profile.api_key = secure_env_values["CREW_API_KEY"]
         if os.getenv("CREW_BASE_URL"):
             profile.base_url = _credential_free_endpoint_url(os.environ["CREW_BASE_URL"])
         if os.getenv("CREW_MODEL"):
@@ -2037,9 +2215,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
             profile.context_window = _as_int_or_none(os.environ["CREW_CONTEXT_WINDOW"])
         if os.getenv("CREW_TIMEOUT"):
             profile.timeout = _as_float(os.environ["CREW_TIMEOUT"], profile.timeout)
-    elif os.getenv("CREW_API_KEY") and not profile.api_key:
+    elif secure_env_values.get("CREW_API_KEY") and not profile.api_key:
         # 命名模型缺少专属 key 时，允许回退到全局 key。
-        profile.api_key = os.environ["CREW_API_KEY"]
+        profile.api_key = secure_env_values["CREW_API_KEY"]
     cfg.activate_model(profile.id)
     if os.getenv("CREW_LOG_LEVEL"):
         cfg.log_level = os.environ["CREW_LOG_LEVEL"]

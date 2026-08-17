@@ -132,3 +132,6 @@ Thumbs.db
 !/docs/security/execution-surface-inventory.json
 !/docs/security/execution-surface-inventory.schema.json
 !/docs/security/execution-surface-inventory.md
+!/docs/security/codex-security-capability-task-plan.md
+!/docs/security/electron-process-callsites.json
+!/docs/security/data-flow-registry.json

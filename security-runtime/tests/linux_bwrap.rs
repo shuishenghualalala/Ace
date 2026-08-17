@@ -242,6 +242,28 @@ fn started_capabilities_follow_verified_kernel_boundaries() {
 }
 
 #[test]
+fn sandbox_command_inherits_parent_death_signal() {
+    let workspace = tempfile::tempdir().unwrap();
+    let events = run_request(
+        workspace.path(),
+        serde_json::json!({
+            "op": "run",
+            "command": [
+                "/usr/bin/python3",
+                "-c",
+                "import ctypes,sys; libc=ctypes.CDLL(None); value=ctypes.c_int(); libc.prctl(2,ctypes.byref(value),0,0,0); sys.exit(0 if value.value==9 else 1)"
+            ],
+            "cwd": workspace.path(),
+            "writable_roots": [workspace.path()],
+            "max_output_bytes": 1024
+        }),
+    );
+    assert_eq!(events.first().unwrap()["type"], "started", "{events:?}");
+    assert_eq!(events.last().unwrap()["type"], "completed", "{events:?}");
+    assert_eq!(events.last().unwrap()["exit_code"], 0, "{events:?}");
+}
+
+#[test]
 fn seccomp_blocks_namespace_and_mount_management_syscalls() {
     let workspace = tempfile::tempdir().unwrap();
     let events = run_request(

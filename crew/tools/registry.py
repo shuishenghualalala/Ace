@@ -10,7 +10,8 @@ import asyncio
 import inspect
 import json
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from crew.core.errors import ToolError, ToolNotFoundError
 from crew.core.interfaces import Tool, ToolRegistry
@@ -106,13 +107,21 @@ def _tool_result(
     media: list[Any] | None = None,
 ) -> ToolResult:
     trust, source = _tool_result_provenance(tool) if tool is not None else ("trusted", "tool")
+    if trust == "trusted":
+        return ToolResult.host_trusted(
+            tool_call_id,
+            name,
+            content,
+            is_error=is_error,
+            media=list(media or []),
+            content_source=source,
+        )
     return ToolResult(
         tool_call_id,
         name,
         content,
         is_error=is_error,
         media=list(media or []),
-        content_trust=trust,
         content_source=source,
     )
 

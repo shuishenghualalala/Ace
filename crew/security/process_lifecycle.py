@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import signal
 import subprocess
@@ -60,14 +61,20 @@ async def terminate_process_tree(
     timeout: float = 2.0,
 ) -> None:
     """Best-effort termination for a process and every descendant it spawned."""
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        raise TypeError("process termination timeout is invalid")
+    timeout = float(timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("process termination timeout is invalid")
+    if process.returncode is not None:
+        return
+    process_group_id: int | None = None
     try:
         if os.name == "nt":
-            if process.returncode is not None:
-                return
             taskkill = windows_system_executable("taskkill.exe")
             if taskkill is None:
                 raise OSError("trusted taskkill executable is unavailable")
-            from crew.security.launch import minimal_inherited_environment
+            from crew.security.launch import minimal_native_helper_environment
 
             killer = await asyncio.create_subprocess_exec(
                 taskkill,
@@ -75,7 +82,7 @@ async def terminate_process_tree(
                 str(process.pid),
                 "/T",
                 "/F",
-                env=minimal_inherited_environment(),
+                env=minimal_native_helper_environment(),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
@@ -83,7 +90,8 @@ async def terminate_process_tree(
             )
             await asyncio.wait_for(killer.wait(), timeout=max(1.0, timeout))
         else:
-            os.killpg(process.pid, signal.SIGTERM)
+            process_group_id = os.getpgid(process.pid)
+            os.killpg(process_group_id, signal.SIGTERM)
     except (TimeoutError, ProcessLookupError, PermissionError, OSError):
         pass
 
@@ -92,9 +100,14 @@ async def terminate_process_tree(
     except TimeoutError:
         try:
             if os.name != "nt":
-                os.killpg(process.pid, signal.SIGKILL)
+                if process_group_id is None:
+                    process_group_id = os.getpgid(process.pid)
+                os.killpg(process_group_id, signal.SIGKILL)
             elif process.returncode is None:
                 process.kill()
         except (ProcessLookupError, PermissionError, OSError):
             pass
-        await process.wait()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=max(1.0, timeout))
+        except (TimeoutError, ProcessLookupError, OSError):
+            pass

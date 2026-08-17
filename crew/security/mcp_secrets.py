@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from crew.security.secret_store import (
     PlatformSecretStore,
+    SecretBinding,
     SecretDeletion,
     SecretIdentifier,
     SecretMutation,
@@ -23,14 +24,16 @@ _SENSITIVE_NAME_RE = re.compile(
     r"(?:AUTHORIZATION|COOKIE|API[-_]?KEY|KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)$",
     re.IGNORECASE,
 )
+_MCP_SECRET_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 def mcp_field_is_sensitive(section: str, name: str) -> bool:
     normalized_section = str(section).lower()
     normalized_name = str(name)
-    return normalized_section in {"env", "headers"} and (
+    return normalized_section in {"env", "headers", "oauth"} and (
         _SENSITIVE_NAME_RE.search(normalized_name) is not None
-        or normalized_name.lower() in {"authorization", "cookie", "x-api-key"}
+        or normalized_name.lower()
+        in {"authorization", "cookie", "x-api-key", "access_token", "refresh_token"}
     )
 
 
@@ -72,7 +75,7 @@ def mcp_secret_identifier(
     if (
         not server
         or not field
-        or group not in {"env", "headers"}
+        or group not in {"env", "headers", "oauth"}
         or "\x00" in server
         or "\x00" in field
     ):
@@ -86,6 +89,30 @@ def mcp_secret_identifier(
         namespace="mcp-config",
         scope="gateway-global",
         name=f"{group}-{digest}",
+    )
+
+
+def mcp_secret_binding(
+    server_name: str,
+    section: str,
+    field_name: str,
+    config: dict[str, Any],
+) -> SecretBinding:
+    """Bind an MCP credential to its owner scope, audience, purpose and lease."""
+    group = str(section).lower()
+    field = str(field_name)
+    ttl = config.get("secret_ttl_seconds", _MCP_SECRET_TTL_SECONDS)
+    try:
+        ttl_seconds = float(ttl)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid MCP secret TTL") from exc
+    canonical_field = field.casefold() if group == "headers" else field
+    return SecretBinding(
+        owner="gateway-global",
+        task="mcp-config",
+        host=_credential_audience(config),
+        purpose=f"mcp:{group}:{canonical_field}",
+        ttl_seconds=ttl_seconds,
     )
 
 
@@ -144,7 +171,7 @@ def _sensitive_positions(
         server = str(raw_server)
         if not isinstance(raw_config, dict):
             continue
-        for section in ("env", "headers"):
+        for section in ("env", "headers", "oauth"):
             values = raw_config.get(section)
             if not isinstance(values, dict):
                 continue
@@ -269,14 +296,19 @@ def prepare_mcp_server_secrets(
         for identifier, (server, section, name, value) in current.items():
             if not value or value == "***" or "\x00" in value:
                 raise ValueError("MCP secret value is invalid")
+            config = protected[server]
+            binding = mcp_secret_binding(server, section, name, config)
             if PlatformSecretStore.is_marker(value):
-                store.resolve_marker(identifier, value)
+                store.resolve_marker(identifier, value, binding=binding)
                 marker = value
             else:
-                mutation = store.replace(identifier, value)
+                mutation = store.replace(identifier, value, binding=binding)
                 mutations.append(mutation)
-                marker = store.marker_for_mutation(identifier, mutation)
-            config = protected[server]
+                marker = store.marker_for_mutation(
+                    identifier,
+                    mutation,
+                    binding=binding,
+                )
             values = dict(config.get(section) or {})
             values[name] = _replace_secret_config_value(
                 section,
@@ -289,7 +321,21 @@ def prepare_mcp_server_secrets(
             if identifier in current or not PlatformSecretStore.is_marker(old_value):
                 continue
             try:
-                deletions.append(store.delete_transactional(identifier))
+                old_server, old_section, old_name, _old_value = previous[identifier]
+                old_config = (previous_servers or {}).get(old_server)
+                if not isinstance(old_config, dict):
+                    raise SecretStoreUnavailable("MCP secret owner configuration is invalid")
+                deletions.append(
+                    store.delete_transactional(
+                        identifier,
+                        binding=mcp_secret_binding(
+                            old_server,
+                            old_section,
+                            old_name,
+                            old_config,
+                        ),
+                    )
+                )
             except SecretNotFound:
                 continue
     except Exception:
@@ -322,7 +368,9 @@ def resolve_mcp_server_secrets(
             "MCP credentials in URL or argv are forbidden"
         )
     store: PlatformSecretStore | None = None
-    if not sections or any(section not in {"env", "headers"} for section in sections):
+    if not sections or any(
+        section not in {"env", "headers", "oauth"} for section in sections
+    ):
         raise ValueError("invalid MCP secret sections")
     for section in sections:
         raw_values = config.get(section)
@@ -345,6 +393,7 @@ def resolve_mcp_server_secrets(
                 value = store.resolve_marker(
                     mcp_secret_identifier(server_name, section, name, config),
                     value,
+                    binding=mcp_secret_binding(server_name, section, name, config),
                 )
                 values[name] = _replace_secret_config_value(
                     section,

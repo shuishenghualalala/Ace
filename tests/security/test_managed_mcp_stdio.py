@@ -305,6 +305,7 @@ def _native_process(
         token=token,
         nonce=nonce,
         deadline=asyncio.get_running_loop().time() + 2,
+        inactivity_timeout=None,
         max_input_bytes=max_input_bytes,
         max_output_bytes=max_output_bytes,
         capabilities=RuntimeCapabilities(

@@ -27,6 +27,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ProviderError, ToolError
@@ -69,8 +70,16 @@ def _action_digest(envelope: Envelope) -> str:
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
+        default=_json_default,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _json_default(value: Any) -> Any:
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 class _AdmissionRejected(RuntimeError):

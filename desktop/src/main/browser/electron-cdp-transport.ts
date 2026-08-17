@@ -22,6 +22,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { copyFile, link, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
+import { nativeImage } from 'electron';
 import type {
   Cookie,
   DownloadItem,
@@ -352,10 +353,58 @@ export const ELECTRON_CDP_CAPABILITIES = Object.freeze({
 });
 
 const PDF_STREAM_PREFIX = 'pw-pdf-stream-';
+const MAX_SCREENSHOT_DIMENSION = 32_768;
+const MAX_SCREENSHOT_PIXELS = 80_000_000;
+const MAX_SCREENSHOT_SEGMENTS = 256;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const nativeElementScreenshotDepth = new WeakMap<object, number>();
+
+interface NativeScreenshotImage {
+  isEmpty(): boolean;
+  getSize(): { width: number; height: number };
+  toBitmap?(): Buffer;
+  toPNG(): Buffer;
+  toJPEG(quality: number): Buffer;
+  resize?(options: {
+    width: number;
+    height: number;
+    quality?: 'best' | 'good' | 'fast';
+  }): NativeScreenshotImage;
+}
+
+/** BrowserHost locator/ref screenshot 的短生命周期 native 分流标记。 */
+export async function withNativeElementScreenshot<T>(
+  view: WebContentsView,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = view as object;
+  nativeElementScreenshotDepth.set(key, (nativeElementScreenshotDepth.get(key) ?? 0) + 1);
+  try {
+    return await operation();
+  } finally {
+    const depth = nativeElementScreenshotDepth.get(key) ?? 1;
+    if (depth <= 1) nativeElementScreenshotDepth.delete(key);
+    else nativeElementScreenshotDepth.set(key, depth - 1);
+  }
+}
+
+function nativeElementScreenshotActive(view: WebContentsView): boolean {
+  return (nativeElementScreenshotDepth.get(view as object) ?? 0) > 0;
+}
 
 function asError(error: unknown, prefix = ''): Error {
   const detail = error instanceof Error ? error.message : String(error);
   return new Error(prefix ? `${prefix}: ${detail}` : detail);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function fallbackPlatformToken(): string {
@@ -941,6 +990,10 @@ export class ElectronCdpTransport implements CdpTransport {
         }
         return await this.dispatchPrintToPDF(tab, sessionId, params);
       }
+      if (method === 'Page.captureScreenshot' && !childSessionId) {
+        const captured = await this.captureViewportScreenshot(tab, params);
+        if (captured) return captured;
+      }
       if (method === 'IO.read' || method === 'IO.close') {
         const handle = typeof params?.handle === 'string' ? params.handle : '';
         if (handle.startsWith(PDF_STREAM_PREFIX)) {
@@ -1131,6 +1184,557 @@ export class ElectronCdpTransport implements CdpTransport {
       }
     }
     return null;
+  }
+
+  private async captureViewportScreenshot(
+    tab: TabSession,
+    params: Record<string, unknown> | undefined,
+  ): Promise<Record<string, unknown> | undefined> {
+    const capturePage = tab.view.webContents.capturePage;
+    if (typeof capturePage !== 'function') return undefined;
+
+    const format = params?.format === undefined ? 'png' : params.format;
+    if (format !== 'png' && format !== 'jpeg') return undefined;
+    const quality = params?.quality;
+    if (format === 'png' && quality !== undefined) return undefined;
+    const jpegQuality = format === 'jpeg'
+      ? quality === undefined
+        ? 80
+        : typeof quality === 'number'
+          && Number.isInteger(quality)
+          && quality >= 0
+          && quality <= 100
+          ? quality
+          : null
+      : null;
+    if (format === 'jpeg' && jpegQuality === null) return undefined;
+
+    if (params?.fullPage === true || params?.captureBeyondViewport === true) {
+      return this.captureFullPageScreenshot(
+        tab,
+        params,
+        format,
+        jpegQuality,
+      );
+    }
+    if (
+      params?.omitBackground === true
+      || params?.fromSurface === false
+      || params?.optimizeForSpeed === true
+      || params && ('locator' in params || 'ref' in params)
+    ) return undefined;
+
+    let nativeRect: { x: number; y: number; width: number; height: number } | undefined;
+    let nativeOutputSize: { width: number; height: number } | undefined;
+    if (params?.clip !== undefined) {
+      const clip = asRecord(params.clip);
+      if (!clip) return undefined;
+      const resolved = await this.nativeClipRect(
+        tab,
+        clip,
+        nativeElementScreenshotActive(tab.view),
+      );
+      if (!resolved) return undefined;
+      nativeRect = resolved.rect;
+      nativeOutputSize = resolved.outputSize;
+    } else {
+      const metrics = await this.screenshotLayoutMetrics(tab);
+      if (!metrics) return undefined;
+      const width = Math.ceil(metrics.viewport.clientWidth);
+      const height = Math.ceil(metrics.viewport.clientHeight);
+      this.validateScreenshotSize(width, height);
+      nativeRect = { x: 0, y: 0, width, height };
+    }
+
+    const before = await this.pageDocumentIdentity(tab);
+    const image = await capturePage.call(
+      tab.view.webContents,
+      nativeRect,
+      { stayHidden: true },
+    );
+    const after = await this.pageDocumentIdentity(tab);
+    if (after !== before) throw new Error('页面在截图期间已变化，请重新截图');
+    if (image.isEmpty()) throw new Error('浏览器截图为空');
+
+    const size = image.getSize();
+    if (
+      !Number.isSafeInteger(size.width)
+      || !Number.isSafeInteger(size.height)
+      || size.width <= 0
+      || size.height <= 0
+      || size.width > MAX_SCREENSHOT_DIMENSION
+      || size.height > MAX_SCREENSHOT_DIMENSION
+      || size.width * size.height > MAX_SCREENSHOT_PIXELS
+    ) throw new Error('浏览器截图尺寸无效或过大');
+
+    const outputImage = nativeOutputSize
+      && (size.width !== nativeOutputSize.width || size.height !== nativeOutputSize.height)
+      && typeof image.resize === 'function'
+      ? image.resize({
+          width: nativeOutputSize.width,
+          height: nativeOutputSize.height,
+          quality: 'best',
+        })
+      : image;
+    const bytes = format === 'png'
+      ? outputImage.toPNG()
+      : outputImage.toJPEG(jpegQuality as number);
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+      throw new Error('浏览器截图数据为空');
+    }
+    if (format === 'png' && !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+      throw new Error('浏览器截图不是有效 PNG');
+    }
+    if (
+      format === 'jpeg'
+      && (
+        bytes.length < 4
+        || bytes[0] !== 0xff
+        || bytes[1] !== 0xd8
+        || bytes[bytes.length - 2] !== 0xff
+        || bytes[bytes.length - 1] !== 0xd9
+      )
+    ) throw new Error('浏览器截图不是有效 JPEG');
+    return { data: bytes.toString('base64') };
+  }
+
+  private async captureFullPageScreenshot(
+    tab: TabSession,
+    params: Record<string, unknown>,
+    format: 'png' | 'jpeg',
+    jpegQuality: number | null,
+  ): Promise<Record<string, unknown> | undefined> {
+    const clip = asRecord(params.clip);
+    if (params.captureBeyondViewport === true && !clip) return undefined;
+    const initial = await this.screenshotLayoutMetrics(tab);
+    if (!initial) return undefined;
+
+    const x = clip ? finiteNumber(clip.x) : initial.content.x;
+    const y = clip ? finiteNumber(clip.y) : initial.content.y;
+    const width = clip ? finiteNumber(clip.width) : initial.content.width;
+    const height = clip ? finiteNumber(clip.height) : initial.content.height;
+    const scale = clip?.scale === undefined ? 1 : finiteNumber(clip.scale);
+    if (
+      x === null
+      || y === null
+      || width === null
+      || height === null
+      || scale === null
+      || scale <= 0
+      || width <= 0
+      || height <= 0
+      || x < initial.content.x
+      || y < initial.content.y
+      || x + width > initial.content.x + initial.content.width
+      || y + height > initial.content.y + initial.content.height
+    ) return undefined;
+
+    // A same-size fullPage request is still a normal viewport screenshot. Keep
+    // it on the existing CDP path so this native fallback only owns the case
+    // that Electron's hidden CDP cannot complete.
+    if (
+      width <= initial.viewport.clientWidth
+      && height <= initial.viewport.clientHeight
+    ) return undefined;
+
+    const outputWidth = Math.round(width * scale);
+    const outputHeight = Math.round(height * scale);
+    this.validateScreenshotSize(outputWidth, outputHeight);
+    const capturePage = tab.view.webContents.capturePage;
+    if (typeof capturePage !== 'function') return undefined;
+
+    const before = await this.pageDocumentIdentity(tab);
+    const originalScroll = {
+      x: initial.viewport.pageX,
+      y: initial.viewport.pageY,
+    };
+    try {
+      // Electron can capture a large rect directly on some platforms. Probe it
+      // first; otherwise fall back to bounded viewport captures below.
+      let probe: NativeScreenshotImage | undefined;
+      try {
+        probe = await capturePage.call(
+          tab.view.webContents,
+          { x, y, width, height },
+          { stayHidden: true },
+        ) as unknown as NativeScreenshotImage;
+      } catch {
+        probe = undefined;
+      }
+      if (probe && !probe.isEmpty()) {
+        const probeSize = this.validateNativeScreenshot(probe);
+        const targetRatio = width / height;
+        const probeRatio = probeSize.width / probeSize.height;
+        const aspectMatches = Math.abs(probeRatio - targetRatio)
+          <= 0.01 * Math.max(1, targetRatio);
+        const exceedsViewport = (
+          probeSize.width > initial.viewport.clientWidth
+          || probeSize.height > initial.viewport.clientHeight
+        );
+        if (aspectMatches && exceedsViewport) {
+          const output = this.resizeNativeScreenshot(
+            probe,
+            probeSize,
+            outputWidth,
+            outputHeight,
+          );
+          const after = await this.pageDocumentIdentity(tab);
+          if (after !== before) throw new Error('页面在截图期间已变化，请重新截图');
+          return this.encodeNativeScreenshot(output, format, jpegQuality);
+        }
+      }
+
+      const segmentColumns = Math.ceil(width / initial.viewport.clientWidth);
+      const segmentRows = Math.ceil(height / initial.viewport.clientHeight);
+      if (segmentColumns * segmentRows > MAX_SCREENSHOT_SEGMENTS) {
+        throw new Error('浏览器截图分段数过多');
+      }
+
+      let sourceScaleX = 0;
+      let sourceScaleY = 0;
+      let compositeWidth = 0;
+      let compositeHeight = 0;
+      let composite: Buffer | undefined;
+      const right = x + width;
+      const bottom = y + height;
+
+      for (let segmentY = y; segmentY < bottom; segmentY += initial.viewport.clientHeight) {
+        for (let segmentX = x; segmentX < right; segmentX += initial.viewport.clientWidth) {
+          await this.setScreenshotScroll(tab, segmentX, segmentY);
+          const current = await this.screenshotLayoutMetrics(tab);
+          if (!current) throw new Error('无法读取截图视口');
+          const image = await capturePage.call(
+            tab.view.webContents,
+            undefined,
+            { stayHidden: true },
+          ) as unknown as NativeScreenshotImage;
+          const imageSize = this.validateNativeScreenshot(image);
+          const bitmap = image.toBitmap?.();
+          if (!Buffer.isBuffer(bitmap)) {
+            throw new Error('浏览器截图不支持 bitmap 合成');
+          }
+
+          const currentScaleX = imageSize.width / current.viewport.clientWidth;
+          const currentScaleY = imageSize.height / current.viewport.clientHeight;
+          if (!sourceScaleX) {
+            sourceScaleX = currentScaleX;
+            sourceScaleY = currentScaleY;
+            compositeWidth = Math.round(width * sourceScaleX);
+            compositeHeight = Math.round(height * sourceScaleY);
+            this.validateScreenshotSize(compositeWidth, compositeHeight);
+            composite = Buffer.alloc(compositeWidth * compositeHeight * 4);
+          } else if (
+            Math.abs(currentScaleX - sourceScaleX) > 0.01
+            || Math.abs(currentScaleY - sourceScaleY) > 0.01
+          ) {
+            throw new Error('浏览器截图缩放在分段之间变化');
+          }
+
+          const segmentWidth = Math.round(
+            Math.min(initial.viewport.clientWidth, right - segmentX) * sourceScaleX,
+          );
+          const segmentHeight = Math.round(
+            Math.min(initial.viewport.clientHeight, bottom - segmentY) * sourceScaleY,
+          );
+          const sourceLeft = Math.round(
+            (segmentX - current.viewport.pageX) * sourceScaleX,
+          );
+          const sourceTop = Math.round(
+            (segmentY - current.viewport.pageY) * sourceScaleY,
+          );
+          const destinationLeft = Math.round((segmentX - x) * sourceScaleX);
+          const destinationTop = Math.round((segmentY - y) * sourceScaleY);
+          if (
+            sourceLeft < 0
+            || sourceTop < 0
+            || sourceLeft + segmentWidth > imageSize.width
+            || sourceTop + segmentHeight > imageSize.height
+            || destinationLeft < 0
+            || destinationTop < 0
+            || destinationLeft + segmentWidth > compositeWidth
+            || destinationTop + segmentHeight > compositeHeight
+            || bitmap.length < imageSize.width * imageSize.height * 4
+          ) throw new Error('浏览器截图分段尺寸无效');
+
+          const sourceRowBytes = imageSize.width * 4;
+          const copyRowBytes = segmentWidth * 4;
+          for (let row = 0; row < segmentHeight; row += 1) {
+            const sourceStart = (sourceTop + row) * sourceRowBytes + sourceLeft * 4;
+            const destinationStart = (
+              (destinationTop + row) * compositeWidth + destinationLeft
+            ) * 4;
+            bitmap.copy(
+              composite!,
+              destinationStart,
+              sourceStart,
+              sourceStart + copyRowBytes,
+            );
+          }
+        }
+      }
+
+      if (!composite) throw new Error('浏览器截图为空');
+      const stitched = nativeImage.createFromBitmap(composite, {
+        width: compositeWidth,
+        height: compositeHeight,
+      }) as unknown as NativeScreenshotImage;
+      const output = this.resizeNativeScreenshot(
+        stitched,
+        { width: compositeWidth, height: compositeHeight },
+        outputWidth,
+        outputHeight,
+      );
+      const after = await this.pageDocumentIdentity(tab);
+      if (after !== before) throw new Error('页面在截图期间已变化，请重新截图');
+      return this.encodeNativeScreenshot(output, format, jpegQuality);
+    } finally {
+      await this.setScreenshotScroll(tab, originalScroll.x, originalScroll.y)
+        .catch(() => undefined);
+    }
+  }
+
+  private async screenshotLayoutMetrics(tab: TabSession): Promise<{
+    content: { x: number; y: number; width: number; height: number };
+    viewport: {
+      pageX: number;
+      pageY: number;
+      clientWidth: number;
+      clientHeight: number;
+      scale: number;
+    };
+  } | null> {
+    const metrics = asRecord(
+      await tab.view.webContents.debugger.sendCommand('Page.getLayoutMetrics'),
+    );
+    const content = asRecord(metrics?.cssContentSize ?? metrics?.contentSize);
+    const viewport = asRecord(
+      metrics?.cssVisualViewport
+        ?? metrics?.visualViewport
+        ?? metrics?.cssLayoutViewport,
+    );
+    if (!content || !viewport) return null;
+    const values = {
+      content: {
+        x: finiteNumber(content.x) ?? 0,
+        y: finiteNumber(content.y) ?? 0,
+        width: finiteNumber(content.width),
+        height: finiteNumber(content.height),
+      },
+      viewport: {
+        pageX: finiteNumber(viewport.pageX) ?? 0,
+        pageY: finiteNumber(viewport.pageY) ?? 0,
+        clientWidth: finiteNumber(viewport.clientWidth),
+        clientHeight: finiteNumber(viewport.clientHeight),
+        scale: finiteNumber(
+          asRecord(metrics?.visualViewport)?.scale
+            ?? asRecord(metrics?.cssVisualViewport)?.scale,
+        ) ?? 1,
+      },
+    };
+    if (
+      values.content.width === null
+      || values.content.height === null
+      || values.viewport.clientWidth === null
+      || values.viewport.clientHeight === null
+      || values.content.width <= 0
+      || values.content.height <= 0
+      || values.viewport.clientWidth <= 0
+      || values.viewport.clientHeight <= 0
+      || values.viewport.scale <= 0
+    ) return null;
+    return values as {
+      content: { x: number; y: number; width: number; height: number };
+      viewport: {
+        pageX: number;
+        pageY: number;
+        clientWidth: number;
+        clientHeight: number;
+        scale: number;
+      };
+    };
+  }
+
+  private async setScreenshotScroll(
+    tab: TabSession,
+    x: number,
+    y: number,
+  ): Promise<void> {
+    await tab.view.webContents.debugger.sendCommand('Runtime.evaluate', {
+      expression: `window.scrollTo(${x}, ${y})`,
+      returnByValue: true,
+    });
+  }
+
+  private validateNativeScreenshot(image: NativeScreenshotImage): {
+    width: number;
+    height: number;
+  } {
+    if (image.isEmpty()) throw new Error('浏览器截图为空');
+    const size = image.getSize();
+    this.validateScreenshotSize(size.width, size.height);
+    return size;
+  }
+
+  private validateScreenshotSize(width: number, height: number): void {
+    if (
+      !Number.isSafeInteger(width)
+      || !Number.isSafeInteger(height)
+      || width <= 0
+      || height <= 0
+      || width > MAX_SCREENSHOT_DIMENSION
+      || height > MAX_SCREENSHOT_DIMENSION
+      || width * height > MAX_SCREENSHOT_PIXELS
+    ) throw new Error('浏览器截图尺寸无效或过大');
+  }
+
+  private resizeNativeScreenshot(
+    image: NativeScreenshotImage,
+    size: { width: number; height: number },
+    width: number,
+    height: number,
+  ): NativeScreenshotImage {
+    if (size.width === width && size.height === height) return image;
+    if (typeof image.resize !== 'function') {
+      throw new Error('浏览器截图无法调整输出尺寸');
+    }
+    return image.resize({ width, height, quality: 'best' });
+  }
+
+  private encodeNativeScreenshot(
+    image: NativeScreenshotImage,
+    format: 'png' | 'jpeg',
+    jpegQuality: number | null,
+  ): Record<string, unknown> {
+    const bytes = format === 'png'
+      ? image.toPNG()
+      : image.toJPEG(jpegQuality ?? 80);
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+      throw new Error('浏览器截图数据为空');
+    }
+    if (
+      format === 'png'
+      && !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+    ) throw new Error('浏览器截图不是有效 PNG');
+    if (
+      format === 'jpeg'
+      && (
+        bytes.length < 4
+        || bytes[0] !== 0xff
+        || bytes[1] !== 0xd8
+        || bytes[bytes.length - 2] !== 0xff
+        || bytes[bytes.length - 1] !== 0xd9
+      )
+    ) throw new Error('浏览器截图不是有效 JPEG');
+    return { data: bytes.toString('base64') };
+  }
+
+  private async nativeClipRect(
+    tab: TabSession,
+    clip: Record<string, unknown>,
+    allowElementClip: boolean,
+  ): Promise<{
+    rect: { x: number; y: number; width: number; height: number } | undefined;
+    outputSize: { width: number; height: number } | undefined;
+  } | null> {
+    const metrics = asRecord(await tab.view.webContents.debugger.sendCommand('Page.getLayoutMetrics'));
+    const viewport = asRecord(metrics?.cssVisualViewport ?? metrics?.cssLayoutViewport);
+    if (!viewport) return null;
+    const x = finiteNumber(clip.x);
+    const y = finiteNumber(clip.y);
+    const width = finiteNumber(clip.width);
+    const height = finiteNumber(clip.height);
+    const clipScale = clip.scale === undefined ? 1 : finiteNumber(clip.scale);
+    const pageX = finiteNumber(viewport.pageX) ?? 0;
+    const pageY = finiteNumber(viewport.pageY) ?? 0;
+    const viewportWidth = finiteNumber(viewport.clientWidth);
+    const viewportHeight = finiteNumber(viewport.clientHeight);
+    const viewportScale = finiteNumber(
+      asRecord(metrics?.visualViewport)?.scale
+        ?? asRecord(metrics?.cssVisualViewport)?.scale,
+    ) ?? 1;
+    const isViewportClip = (
+      x !== null
+      && y !== null
+      && width !== null
+      && height !== null
+      && clipScale !== null
+      && x === pageX
+      && y === pageY
+      && clipScale === viewportScale
+      && viewportWidth !== null
+      && viewportHeight !== null
+      && Math.abs(width - viewportWidth) <= 64
+      && Math.abs(height - viewportHeight) <= 64
+    );
+    if (
+      x === null
+      || y === null
+      || width === null
+      || height === null
+      || clipScale === null
+      || !Number.isFinite(clipScale)
+      || clipScale <= 0
+      || width <= 0
+      || height <= 0
+      || viewportWidth === null
+      || viewportHeight === null
+      || !allowElementClip && !isViewportClip
+      || !isViewportClip && (
+        x < pageX
+        || y < pageY
+        || x + width > pageX + viewportWidth
+        || y + height > pageY + viewportHeight
+      )
+    ) return null;
+
+    const left = Math.floor(x - pageX);
+    const top = Math.floor(y - pageY);
+    const right = Math.ceil(x - pageX + width);
+    const bottom = Math.ceil(y - pageY + height);
+    const rectWidth = right - left;
+    const rectHeight = bottom - top;
+    const outputWidth = Math.round(width * clipScale);
+    const outputHeight = Math.round(height * clipScale);
+    if (
+      !Number.isSafeInteger(left)
+      || !Number.isSafeInteger(top)
+      || !Number.isSafeInteger(rectWidth)
+      || !Number.isSafeInteger(rectHeight)
+      || !Number.isSafeInteger(outputWidth)
+      || !Number.isSafeInteger(outputHeight)
+      || rectWidth <= 0
+      || rectHeight <= 0
+      || outputWidth <= 0
+      || outputHeight <= 0
+      || outputWidth > MAX_SCREENSHOT_DIMENSION
+      || outputHeight > MAX_SCREENSHOT_DIMENSION
+      || outputWidth * outputHeight > MAX_SCREENSHOT_PIXELS
+    ) return null;
+    return {
+      rect: isViewportClip
+        ? {
+            x: 0,
+            y: 0,
+            width: Math.ceil(viewportWidth),
+            height: Math.ceil(viewportHeight),
+          }
+        : { x: left, y: top, width: rectWidth, height: rectHeight },
+      outputSize: { width: outputWidth, height: outputHeight },
+    };
+  }
+
+  private async pageDocumentIdentity(tab: TabSession): Promise<string> {
+    const result = asRecord(
+      await tab.view.webContents.debugger.sendCommand('Page.getFrameTree'),
+    );
+    const frameTree = asRecord(result?.frameTree);
+    const frame = asRecord(frameTree?.frame);
+    const frameId = typeof frame?.id === 'string' ? frame.id : '';
+    if (!frameId) throw new Error('Page.getFrameTree 未返回根 frameId');
+    const loaderId = typeof frame?.loaderId === 'string' ? frame.loaderId : '';
+    return loaderId
+      ? `${frameId}\0${loaderId}`
+      : `${frameId}\0url:${tab.view.webContents.getURL() || 'about:blank'}`;
   }
 
   private firstTab(): TabSession | undefined {

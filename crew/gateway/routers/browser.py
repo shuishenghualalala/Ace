@@ -21,8 +21,8 @@ from crew.gateway.auth import (
     account_from_request,
     authenticate_websocket,
 )
-from crew.gateway.instance_auth import verify_gateway_instance_access_token
 from crew.gateway.helpers import safe_public_error
+from crew.gateway.instance_auth import verify_gateway_instance_access_token
 from crew.security.local_path import LocalPathReference
 from crew.state.home import task_workspace_path
 from crew.state.logging import get_logger
@@ -182,6 +182,22 @@ def _browser_access_allowed(registry, policy: dict) -> bool:
     return any(schema.get("_crew_toolset") == "browser" for schema in schemas)
 
 
+def _browser_owner_access_allowed(
+    registry,
+    access_control,
+    plugin_checker,
+    owner: str,
+) -> bool:
+    """Apply the owner-wide Browser gate to routes without a session id."""
+    user_type = str(getattr(access_control, "user_type", "") or "")
+    if callable(plugin_checker) and not plugin_checker(owner, user_type):
+        return False
+    resolver = getattr(access_control, "resolve_for", None)
+    if not callable(resolver):
+        return False
+    return _browser_access_allowed(registry, resolver(user_type))
+
+
 def _browser_tool_allowed(registry, policy: dict, tool_name: str) -> bool:
     """Return whether one concrete Browser capability survived policy filters."""
     list_schemas = getattr(registry, "list_schemas", None)
@@ -203,6 +219,22 @@ def _browser_tool_allowed(registry, policy: dict, tool_name: str) -> bool:
 
 def _safe_error(exc: BaseException) -> str:
     return safe_public_error(exc, "浏览器操作失败")
+
+
+def _parse_browser_control_payload(payload: object) -> tuple[str, str]:
+    if not isinstance(payload, dict) or set(payload) - {"action", "value"}:
+        raise ValueError("浏览器 control 字段无效")
+    action = payload.get("action")
+    value = payload.get("value", "")
+    if (
+        not isinstance(action, str)
+        or not action
+        or len(action) > 256
+        or not isinstance(value, str)
+        or len(value) > _BROWSER_WS_MAX_STRING_CHARS
+    ):
+        raise ValueError("浏览器 control 参数无效")
+    return action, value
 
 
 def create_browser_router(crew) -> APIRouter:
@@ -239,7 +271,18 @@ def create_browser_router(crew) -> APIRouter:
             policy_for(session_id, owner),
         )
 
+    def owner_allowed(owner: str) -> bool:
+        return _browser_owner_access_allowed(
+            getattr(crew, "registry", None),
+            getattr(crew.config, "access_control", None),
+            getattr(crew, "_browser_plugin_effective", None),
+            owner,
+        )
+
     def tool_allowed(session_id: str, owner: str, tool_name: str) -> bool:
+        checker = getattr(crew, "_browser_plugin_effective", None)
+        if callable(checker) and not checker(owner, user_type_for(session_id, owner)):
+            return False
         return _browser_tool_allowed(
             getattr(crew, "registry", None),
             policy_for(session_id, owner),
@@ -247,6 +290,9 @@ def create_browser_router(crew) -> APIRouter:
         )
 
     def tools_allowed(session_id: str, owner: str, tool_names: tuple[str, ...]) -> bool:
+        checker = getattr(crew, "_browser_plugin_effective", None)
+        if callable(checker) and not checker(owner, user_type_for(session_id, owner)):
+            return False
         policy = policy_for(session_id, owner)
         registry = getattr(crew, "registry", None)
         return all(_browser_tool_allowed(registry, policy, name) for name in tool_names)
@@ -284,6 +330,8 @@ def create_browser_router(crew) -> APIRouter:
         owner = account_from_request(request).owner_account_id
         if not _browser_instance_token_matches(request.headers):
             return JSONResponse({"ok": False, "error": "实例校验失败"}, status_code=401)
+        if not owner_allowed(owner):
+            return JSONResponse({"ok": False, "error": "该会话未开放 Browser Use"}, status_code=403)
         mgr = manager()
         if mgr is None:
             return JSONResponse({"ok": False, "error": "Browser Use 未启用"}, status_code=503)
@@ -304,8 +352,10 @@ def create_browser_router(crew) -> APIRouter:
         mgr = manager()
         if mgr is None:
             return JSONResponse({"ok": False, "error": "Browser Use 未启用"}, status_code=503)
-        action = str(payload.get("action") or "")
-        value = str(payload.get("value") or "")
+        try:
+            action, value = _parse_browser_control_payload(payload)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         if not tools_allowed(session_id, owner, control_tools(action, value)):
             return JSONResponse({"ok": False, "error": "该浏览器操作未开放"}, status_code=403)
         try:
@@ -498,7 +548,7 @@ def create_browser_router(crew) -> APIRouter:
             )
         except WebSocketDisconnect:
             pass
-        except Exception:
+        except Exception:  # noqa: BLE001 - host disconnect must not escape the route
             log.info("electron browser host disconnected owner=%s", _opaque(account.owner_account_id))
 
     @router.websocket("/ws/browser/{session_id}")
@@ -564,7 +614,7 @@ def create_browser_router(crew) -> APIRouter:
                         socket.send_json(event),
                         timeout=_BROWSER_WS_SEND_TIMEOUT_SECONDS,
                     )
-                except asyncio.TimeoutError as exc:
+                except TimeoutError as exc:
                     with suppress(Exception):
                         await socket.close(code=1013)
                     raise WebSocketDisconnect(code=1013) from exc
@@ -612,7 +662,7 @@ def create_browser_router(crew) -> APIRouter:
                         timeout=remaining,
                     )
                     if not isinstance(message, dict):
-                        raise ValueError("浏览器消息必须是对象")
+                        raise ValueError("浏览器消息必须是对象")  # noqa: TRY004
                     message_type = str(message.get("type") or "")
                     if message_type == "control":
                         action = str(message.get("action") or "")
@@ -632,7 +682,7 @@ def create_browser_router(crew) -> APIRouter:
                         await send_json({"type": "pong"})
                     else:
                         raise ValueError("不支持的浏览器消息类型")
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     with suppress(Exception):
                         await socket.close(code=1001)
                     return
@@ -665,7 +715,7 @@ def create_browser_router(crew) -> APIRouter:
                 await asyncio.gather(*pending, return_exceptions=True)
         except WebSocketDisconnect:
             pass
-        except Exception:
+        except Exception:  # noqa: BLE001 - websocket cleanup is fail-closed
             log.info("browser websocket closed owner=%s session=%s", _opaque(owner), _opaque(session_id))
         finally:
             for task in tasks:

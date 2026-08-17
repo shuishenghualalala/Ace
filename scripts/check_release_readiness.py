@@ -364,6 +364,14 @@ def _validate_native_evidence(
         errors.append("Windows evidence does not name a Windows runtime")
     elif platform != "windows" and filename.endswith(".exe"):
         errors.append("non-Windows evidence names a Windows runtime")
+    artifact_path: Path | None = None
+    if evidence_path is not None and filename and Path(filename).name == filename:
+        artifact_path = evidence_path.parent / filename
+    if artifact_path is not None:
+        if artifact_path.is_symlink() or not artifact_path.is_file():
+            errors.append("attested runtime artifact is missing")
+        elif _sha256(artifact_path) != payload.get("artifact_sha256"):
+            errors.append("attested runtime artifact digest does not match evidence")
     manifest_payload: dict[str, Any] = {}
     if manifest_path is not None:
         if manifest_path.is_symlink() or not manifest_path.is_file():

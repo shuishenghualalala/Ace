@@ -79,6 +79,7 @@ INDIRECT_SURFACES = {
 }
 DESKTOP_PROCESS_FILES = {
     "desktop/scripts/check-security.mjs",
+    "desktop/scripts/pw-contract.ts",
     "desktop/scripts/resolve-playwright-candidates.mjs",
     "desktop/src/main/gateway-instance-auth.ts",
     "desktop/src/main/index.ts",
@@ -258,6 +259,10 @@ def _javascript_process_files() -> set[str]:
                     "tests" in path.parts
                     or "node_modules" in path.parts
                     or path.name.endswith(".d.ts")
+                    # The contract bundle is a gitignored derivative of the
+                    # reviewed TypeScript source and must not become a second
+                    # inventory record after the Electron contract runs.
+                    or path.relative_to(ROOT).as_posix() == "desktop/scripts/pw-contract.mjs"
                 ):
                     continue
                 text = path.read_text(encoding="utf-8-sig")
@@ -272,7 +277,7 @@ def _desktop_process_files() -> set[str]:
 
 ELECTRON_PROCESS_LEDGER = ROOT / "docs" / "security" / "electron-process-callsites.json"
 _JS_PROCESS_CALL_RE = re.compile(
-    r"\b(spawn|spawnSync|exec|execFile|execFileSync|execSync|fork)\s*\("
+    r"(?<![.\w])\b(spawn|spawnSync|exec|execFile|execFileSync|execSync|fork)\s*\("
 )
 
 

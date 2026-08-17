@@ -65,6 +65,106 @@ class NormalizedAction:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class ActionScope:
+    """One immutable authorization scope shared by approval and execution."""
+
+    action: NormalizedAction
+    command: str = ""
+    cwd: str = ""
+    filesystem: tuple[str, ...] = ()
+    network: tuple[str, ...] = ()
+    mcp: tuple[str, ...] = ()
+    turn_digest: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.action, NormalizedAction):
+            raise TypeError("action scope action must be NormalizedAction")
+        command = self.command
+        if isinstance(command, (tuple, list)):
+            command = "\x00".join(_scope_text(item, "command") for item in command)
+        if not isinstance(command, str) or "\x00" in command:
+            raise ValueError("action scope command is invalid")
+        command = command or self.action.raw_command or " ".join(self.action.argv)
+        cwd = self.cwd or self.action.cwd
+        normalized_cwd = str(Path(cwd).expanduser().resolve(strict=False))
+        if normalized_cwd != self.action.cwd:
+            raise ValueError("action scope cwd does not match action")
+        object.__setattr__(self, "command", command)
+        object.__setattr__(self, "cwd", normalized_cwd)
+        for field_name in ("filesystem", "network", "mcp"):
+            values = getattr(self, field_name)
+            if isinstance(values, str):
+                values = (values,)
+            normalized = tuple(sorted({_scope_text(value, field_name) for value in values}))
+            object.__setattr__(self, field_name, normalized)
+        if self.turn_digest and not _is_sha256(self.turn_digest):
+            raise ValueError("action scope turn_digest must be SHA-256 hex")
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "action": serialize_normalized_action(self.action),
+            "command": self.command,
+            "cwd": self.cwd,
+            "filesystem": list(self.filesystem),
+            "network": list(self.network),
+            "mcp": list(self.mcp),
+            "turn_digest": self.turn_digest,
+        }
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                self.canonical_payload(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @property
+    def canonical_digest(self) -> str:
+        return self.digest
+
+    @property
+    def action_digest(self) -> str:
+        return self.action.digest
+
+    @property
+    def context_digest(self) -> str:
+        return self.digest
+
+    def matches(self, other: object) -> bool:
+        return isinstance(other, ActionScope) and self.digest == other.digest
+
+
+ActionContext = ActionScope
+
+
+def security_context_digest(context: object) -> str:
+    """Hash host-owned identity facts without importing the context module."""
+    fields = ("os_user", "owner_account_id", "workspace_id", "workspace_root", "session_id", "task_id")
+    payload = {name: str(getattr(context, name, "") or "") for name in fields}
+    if any("\x00" in value for value in payload.values()):
+        raise ValueError("security context contains NUL")
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _scope_text(value: object, field: str) -> str:
+    if isinstance(value, Path):
+        value = str(value.expanduser().resolve(strict=False))
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError(f"action scope {field} contains invalid text")
+    return value
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdefABCDEF" for char in value)
+
+
 def serialize_normalized_action(action: NormalizedAction) -> dict[str, object]:
     """Return the complete, deterministic action representation used by snapshots."""
     if not isinstance(action, NormalizedAction):

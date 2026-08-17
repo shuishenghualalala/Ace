@@ -16,7 +16,9 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
 use windows_sys::Win32::Security::Authorization::{
-    BuildExplicitAccessWithNameW, BuildSecurityDescriptorW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+    BuildExplicitAccessWithNameW, BuildSecurityDescriptorW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+    SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
@@ -35,6 +37,7 @@ const ONLINE_BLOCK_V6: GUID = GUID::from_u128(0xd07399a9_a34e_4858_84ed_dd9f323f
 pub fn install(offline_account: &str, online_account: &str) -> Result<(), String> {
     let engine = Engine::open()?;
     let mut transaction = engine.transaction()?;
+    let readable_sd = ReadableSecurityDescriptor::create()?;
     for key in filter_keys() {
         delete_filter(engine.handle, &key)?;
     }
@@ -46,26 +49,50 @@ pub fn install(offline_account: &str, online_account: &str) -> Result<(), String
         unsafe { FwpmProviderDeleteByKey0(engine.handle, &PROVIDER_KEY) },
         "FwpmProviderDeleteByKey0",
     )?;
-    ensure_provider(engine.handle)?;
-    ensure_sublayer(engine.handle)?;
+    ensure_provider(engine.handle, readable_sd.descriptor)?;
+    ensure_sublayer(engine.handle, readable_sd.descriptor)?;
     let offline = UserCondition::new(offline_account)?;
     let online = UserCondition::new(online_account)?;
     for (key, layer) in [
         (OFFLINE_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
         (OFFLINE_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
     ] {
-        replace_filter(engine.handle, key, layer, &offline, false, false)?;
+        replace_filter(
+            engine.handle,
+            key,
+            layer,
+            &offline,
+            false,
+            false,
+            readable_sd.descriptor,
+        )?;
     }
     // The managed proxy binds 127.0.0.1 only. Never permit ::1:43119: a
     // different host process could own that endpoint and become a WFP bypass.
     for (key, layer) in [(ONLINE_PERMIT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4)] {
-        replace_filter(engine.handle, key, layer, &online, true, true)?;
+        replace_filter(
+            engine.handle,
+            key,
+            layer,
+            &online,
+            true,
+            true,
+            readable_sd.descriptor,
+        )?;
     }
     for (key, layer) in [
         (ONLINE_BLOCK_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
         (ONLINE_BLOCK_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
     ] {
-        replace_filter(engine.handle, key, layer, &online, false, false)?;
+        replace_filter(
+            engine.handle,
+            key,
+            layer,
+            &online,
+            false,
+            false,
+            readable_sd.descriptor,
+        )?;
     }
     transaction.commit()?;
     drop(transaction);
@@ -82,7 +109,39 @@ pub fn uninstall() -> Result<(), String> {
     allow_missing(sublayer, "FwpmSubLayerDeleteByKey0")?;
     let provider = unsafe { FwpmProviderDeleteByKey0(engine.handle, &PROVIDER_KEY) };
     allow_missing(provider, "FwpmProviderDeleteByKey0")?;
-    transaction.commit()
+    transaction.commit()?;
+    drop(transaction);
+    verify_uninstalled()
+}
+
+fn verify_uninstalled() -> Result<(), String> {
+    let engine = Engine::open()?;
+    for key in filter_keys() {
+        verify_filter_absent(engine.handle, &key)?;
+    }
+    let mut provider: *mut FWPM_PROVIDER0 = null_mut();
+    let status = unsafe { FwpmProviderGetByKey0(engine.handle, &PROVIDER_KEY, &mut provider) };
+    if status == 0 {
+        if !provider.is_null() {
+            unsafe { FwpmFreeMemory0((&mut provider as *mut *mut FWPM_PROVIDER0).cast()) };
+        }
+        return Err("Ace WFP provider remained after uninstall".to_string());
+    }
+    if status != FWP_E_PROVIDER_NOT_FOUND as u32 && status != FWP_E_NOT_FOUND as u32 {
+        return check(status, "FwpmProviderGetByKey0(after uninstall)");
+    }
+    let mut sublayer: *mut FWPM_SUBLAYER0 = null_mut();
+    let status = unsafe { FwpmSubLayerGetByKey0(engine.handle, &SUBLAYER_KEY, &mut sublayer) };
+    if status == 0 {
+        if !sublayer.is_null() {
+            unsafe { FwpmFreeMemory0((&mut sublayer as *mut *mut FWPM_SUBLAYER0).cast()) };
+        }
+        return Err("Ace WFP sublayer remained after uninstall".to_string());
+    }
+    if status != FWP_E_SUBLAYER_NOT_FOUND as u32 && status != FWP_E_NOT_FOUND as u32 {
+        return check(status, "FwpmSubLayerGetByKey0(after uninstall)");
+    }
+    Ok(())
 }
 
 /// Verify every persistent WFP object, including the account security
@@ -194,14 +253,32 @@ fn verify_provider_and_sublayer(engine: HANDLE) -> Result<(), String> {
     let sublayer_result = unsafe {
         let sublayer = &*sublayer;
         if guid_eq(&sublayer.subLayerKey, &SUBLAYER_KEY)
+            // Windows can add the provider-owned sublayer's SHARED bit on
+            // return; only PERSISTENT is a security property we must pin.
             && sublayer.flags & FWPM_SUBLAYER_FLAG_PERSISTENT != 0
-            && sublayer.weight == 0x8000
+            // BFE may add low internal weight bits after persistence; the
+            // required high-weight placement remains pinned.
+            && sublayer.weight & 0x8000 == 0x8000
             && !sublayer.providerKey.is_null()
             && guid_eq(&*sublayer.providerKey, &PROVIDER_KEY)
         {
             Ok(())
         } else {
-            Err("Ace WFP sublayer does not match its persistent provider".to_string())
+            Err(format!(
+                "Ace WFP sublayer does not match its persistent provider: flags={}, weight={}, provider={}",
+                sublayer.flags,
+                sublayer.weight,
+                if sublayer.providerKey.is_null() {
+                    "null".to_string()
+                } else {
+                    format!("{:?}", (
+                        (*sublayer.providerKey).data1,
+                        (*sublayer.providerKey).data2,
+                        (*sublayer.providerKey).data3,
+                        (*sublayer.providerKey).data4,
+                    ))
+                },
+            ))
         }
     };
     unsafe { FwpmFreeMemory0((&mut sublayer as *mut *mut FWPM_SUBLAYER0).cast()) };
@@ -433,7 +510,39 @@ impl Drop for UserCondition {
     }
 }
 
-fn ensure_provider(engine: HANDLE) -> Result<(), String> {
+/// Installer-owned WFP object DACL: Administrators retain full control while
+/// every local principal can read the immutable policy facts.  Daily runtime
+/// verification then works from the unelevated Desktop/Gateway process without
+/// granting it permission to modify WFP.
+struct ReadableSecurityDescriptor {
+    descriptor: PSECURITY_DESCRIPTOR,
+}
+impl ReadableSecurityDescriptor {
+    #[cfg(windows)]
+    fn create() -> Result<Self, String> {
+        let sddl = wide("D:P(A;;GA;;;BA)(A;;GR;;;WD)");
+        let mut descriptor = std::ptr::null_mut();
+        let result = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if result == 0 || descriptor.is_null() {
+            return Err("failed to create readable WFP security descriptor".to_string());
+        }
+        Ok(Self { descriptor })
+    }
+}
+impl Drop for ReadableSecurityDescriptor {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.descriptor as HLOCAL) };
+    }
+}
+
+fn ensure_provider(engine: HANDLE, sd: PSECURITY_DESCRIPTOR) -> Result<(), String> {
     let name = wide("Ace sandbox WFP");
     let provider = FWPM_PROVIDER0 {
         providerKey: PROVIDER_KEY,
@@ -446,12 +555,12 @@ fn ensure_provider(engine: HANDLE) -> Result<(), String> {
         serviceName: null_mut(),
     };
     allow_exists(
-        unsafe { FwpmProviderAdd0(engine, &provider, null_mut()) },
+        unsafe { FwpmProviderAdd0(engine, &provider, sd) },
         "FwpmProviderAdd0",
     )
 }
 
-fn ensure_sublayer(engine: HANDLE) -> Result<(), String> {
+fn ensure_sublayer(engine: HANDLE, sd: PSECURITY_DESCRIPTOR) -> Result<(), String> {
     let name = wide("Ace sandbox WFP");
     let provider = PROVIDER_KEY;
     let sublayer = FWPM_SUBLAYER0 {
@@ -466,7 +575,7 @@ fn ensure_sublayer(engine: HANDLE) -> Result<(), String> {
         weight: 0x8000,
     };
     allow_exists(
-        unsafe { FwpmSubLayerAdd0(engine, &sublayer, null_mut()) },
+        unsafe { FwpmSubLayerAdd0(engine, &sublayer, sd) },
         "FwpmSubLayerAdd0",
     )
 }
@@ -478,6 +587,7 @@ fn replace_filter(
     user: &UserCondition,
     permit_proxy: bool,
     high_weight: bool,
+    sd: PSECURITY_DESCRIPTOR,
 ) -> Result<(), String> {
     delete_filter(engine, &key)?;
     let mut conditions = vec![FWPM_FILTER_CONDITION0 {
@@ -555,7 +665,7 @@ fn replace_filter(
     };
     let mut id = 0;
     check(
-        unsafe { FwpmFilterAdd0(engine, &filter, null_mut(), &mut id) },
+        unsafe { FwpmFilterAdd0(engine, &filter, sd, &mut id) },
         "FwpmFilterAdd0",
     )
 }
@@ -640,6 +750,12 @@ mod tests {
             assert!(!dup, "duplicate WFP filter key at index {index}");
         }
     }
+    #[test]
+    fn readable_security_descriptor_is_created_for_daily_verification() {
+        let descriptor = ReadableSecurityDescriptor::create().expect("valid SDDL");
+        assert!(!descriptor.descriptor.is_null());
+    }
+
     #[test]
     fn account_identity_not_desktop_session_is_filter_boundary() {
         assert_eq!(PROXY_PORT, 43119);

@@ -13,8 +13,8 @@ complete network or callsite discovery.
 
 - Schema version: `1`
 - Inventory ID: `ACE-EXECUTION-SURFACES`
-- Surface records: `63`
-- Category counts: `browser`=8, `cdp`=2, `cua`=3, `dev-only`=7, `download`=13, `gateway-ipc`=6, `gateway-route`=1, `installer`=6, `mcp`=5, `network`=10, `plugin`=6, `process-direct`=36, `process-indirect`=12, `runtime-boundary`=14, `skill`=15, `structured-file-read`=13, `structured-file-write`=14, `updater`=6, `upload`=7
+- Surface records: `64`
+- Category counts: `browser`=8, `cdp`=2, `cua`=3, `dev-only`=8, `download`=13, `gateway-ipc`=6, `gateway-route`=1, `installer`=6, `mcp`=5, `network`=10, `plugin`=6, `process-direct`=37, `process-indirect`=12, `runtime-boundary`=14, `skill`=15, `structured-file-read`=13, `structured-file-write`=14, `updater`=6, `upload`=7
 
 | ID | Categories | Locator | Owner | Status | Final enforcement |
 |---|---|---|---|---|---|
@@ -36,6 +36,7 @@ complete network or callsite discovery.
 | `ACE-SURF-PROC-DIRECT-DESKTOP-MAIN` | `process-direct`, `gateway-ipc`, `updater`, `browser` | `desktop/src/main/index.ts::Gateway spawn/restart, Desktop lifecycle, Browser bridge, and update orchestration` | Desktop Host maintainers | `host-fixed` | Desktop trustedHandle, process environment allowlist, Gateway instance proof, BrowserHost, and update installer boundary |
 | `ACE-SURF-PROC-DIRECT-DESKTOP-OPEN-WITH` | `process-direct`, `structured-file-read` | `desktop/src/main/open-with-service.ts::user-directed registered-application discovery and open` | Desktop Host maintainers | `host-fixed` | open-with-service.ts application allowlist, argv separation, bounded discovery, and tree cleanup |
 | `ACE-SURF-PROC-DIRECT-DESKTOP-PLAYWRIGHT-PROBE` | `process-direct`, `dev-only`, `browser` | `desktop/scripts/resolve-playwright-candidates.mjs::build/test Playwright browser candidate probe` | Desktop Browser build maintainers | `dev-only` | resolve-playwright-candidates.mjs fixed executable probes and bounded output |
+| `ACE-SURF-PROC-DIRECT-DESKTOP-PW-CONTRACT` | `process-direct`, `dev-only` | `desktop/scripts/pw-contract.ts::deferred Electron contract profile cleanup helper` | Desktop Browser build maintainers | `dev-only` | pw-contract.ts deferTempRootCleanup fixed detached cleanup command |
 | `ACE-SURF-PROC-DIRECT-DESKTOP-SECURITY-SETUP` | `process-direct`, `installer` | `desktop/src/main/security-setup.ts::Windows one-time elevated native runtime security setup` | Desktop Installer maintainers | `host-fixed` | security-setup.ts fixed absolute runtime argv and encoded RunAs PowerShell request |
 | `ACE-SURF-PROC-DIRECT-DESKTOP-UNINSTALL` | `process-direct`, `installer`, `structured-file-write` | `desktop/src/main/uninstall.ts::signed product uninstall cleanup` | Desktop Installer maintainers | `host-fixed` | uninstall.ts fixed cleanup scripts, product-root validation, and OS-specific uninstall lifecycle |
 | `ACE-SURF-PROC-DIRECT-DESKTOP-UPDATE-INSTALLER` | `process-direct`, `updater`, `installer` | `desktop/src/main/update/update-installer.ts::verified package installer launch` | Desktop Update maintainers | `host-fixed` | update-installer.ts descriptor revalidation and fixed platform installer helper or verified Windows EXE launch |
@@ -353,6 +354,21 @@ complete network or callsite discovery.
 - Exception expiry: `none`
 - Review deadline: `2027-12-31`
 - Review trigger: Candidate root, browser executable, probe argv, output parsing, or packaging changes
+
+### ACE-SURF-PROC-DIRECT-DESKTOP-PW-CONTRACT
+
+- Locator: `desktop/scripts/pw-contract.ts::deferred Electron contract profile cleanup helper`
+- Trust source: Fixed Node runtime and contract-owned temporary root
+- Fail closed: Missing fixed runtime or cleanup target failure leaves the contract run failed and never broadens the cleanup root
+- Lifecycle/revocation owner: Electron contract process and temporary profile cleanup
+- Tests: `PROCESS-INVENTORY` — `tests/security/test_execution_surface_inventory.py`<br>`PW-CONTRACT` — `desktop/scripts/pw-contract.ts`
+- Evidence: `static-analysis` — `tests/security/test_execution_surface_inventory.py`<br>`source-contract` — `desktop/scripts/pw-contract.ts`
+- Artifact references: `static-analysis` — `tests/security/test_execution_surface_inventory.py`
+- Reviewed primitive references: none
+- Covered routes/channels: none
+- Exception expiry: `none`
+- Review deadline: `2027-12-31`
+- Review trigger: Contract cleanup runtime, fixed argv, temporary root, or Electron harness lifecycle changes
 
 ### ACE-SURF-PROC-DIRECT-DESKTOP-SECURITY-SETUP
 

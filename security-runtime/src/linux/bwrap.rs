@@ -168,6 +168,10 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         "NPROC".to_string(),
         "256".to_string(),
         "--unshare-user".to_string(),
+        "--uid".to_string(),
+        "1000".to_string(),
+        "--gid".to_string(),
+        "1000".to_string(),
         "--unshare-pid".to_string(),
         "--unshare-ipc".to_string(),
         "--unshare-uts".to_string(),
@@ -791,6 +795,14 @@ mod tests {
         };
         let plan = build_args(&request).unwrap();
         assert!(plan.args.iter().any(|arg| arg == "--unshare-net"));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|window| window == ["--uid", "1000"]));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|window| window == ["--gid", "1000"]));
         assert!(plan.args.iter().any(|arg| arg == "--die-with-parent"));
         assert!(plan.args.iter().any(|arg| arg.ends_with(".git")));
         assert!(plan

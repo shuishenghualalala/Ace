@@ -9,6 +9,51 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn missing_bwrap_without_a_pinned_bundle_is_unavailable_before_started() {
+    let workspace = tempfile::tempdir().unwrap();
+    let token = "linux-missing-bwrap-token-longer-than-thirty-two";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ace-security-runtime"))
+        .env("ACE_SECURITY_RUNTIME_TOKEN", token)
+        .env("PATH", "/nonexistent")
+        .env_remove("ACE_BUNDLED_BWRAP")
+        .env_remove("ACE_BUNDLED_BWRAP_SHA256")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    assert!(line.contains("\"type\":\"ready\""), "{line}");
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "version": 2,
+            "token": token,
+            "nonce": "linux-missing-bwrap",
+            "request": {
+                "op": "run",
+                "command": ["/bin/true"],
+                "cwd": workspace.path(),
+                "writable_roots": [workspace.path()]
+            }
+        })
+    )
+    .unwrap();
+    drop(stdin);
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+
+    assert!(line.contains("\"type\":\"error\""), "{line}");
+    assert!(line.contains("\"code\":\"sandbox_unavailable\""), "{line}");
+    assert!(!line.contains("\"type\":\"started\""), "{line}");
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn hung_bwrap_setup_is_rejected_and_reaped_before_started() {
     let workspace = tempfile::tempdir().unwrap();
     let bundle = tempfile::tempdir().unwrap();

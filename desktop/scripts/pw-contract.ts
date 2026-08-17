@@ -20,8 +20,9 @@
  */
 
 import { app, BrowserWindow, clipboard, WebContentsView } from 'electron';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -101,6 +102,24 @@ async function contractDeadline<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function deferTempRootCleanup(tempRoot: string): void {
+  const node = process.env.npm_node_execpath || process.env.NODE || 'node';
+  const helper = [
+    "const fs=require('node:fs/promises');",
+    'const target=process.argv[1];',
+    'setTimeout(async()=>{',
+    'try{await fs.rm(target,{recursive:true,force:true,maxRetries:20,retryDelay:250});}',
+    'finally{process.exit(0);}',
+    '},1500);',
+  ].join('');
+  const child = spawn(node, ['-e', helper, tempRoot], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
 }
 
 function modalPrivateProbe(engine: PlaywrightEngine, page: Page): string {
@@ -251,6 +270,16 @@ app.whenReady().then(async () => {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
     });
+    if (request.url?.startsWith('/host-console')) {
+      const requestURL = new URL(request.url, 'http://localhost');
+      const afterNavigation = requestURL.searchParams.get('phase') === 'after';
+      response.end(
+        '<!doctype html><meta charset="utf-8">'
+        + `<title>${afterNavigation ? 'crew-console-after-navigation' : 'crew-console'}</title>`
+        + `<main>${afterNavigation ? 'after' : 'console'}</main>`,
+      );
+      return;
+    }
     if (request.url?.startsWith('/pw-sw-scope-')) {
       response.end(
         '<!doctype html><meta charset="utf-8"><title>Controlled SW client</title>'
@@ -286,6 +315,10 @@ app.whenReady().then(async () => {
         + '<button id="parity-target" type="button">Parity target</button>'
         + '<div style="height:2400px">full-page-tail</div>',
       );
+      return;
+    }
+    if (request.url?.startsWith('/host-active-to-close')) {
+      response.end('<!doctype html><title>active-to-close</title>');
       return;
     }
     if (request.url?.startsWith('/host-run-code-timeout')) {
@@ -956,7 +989,7 @@ app.whenReady().then(async () => {
         pdfContents.close({ waitForBeforeUnload: false });
       }
       pdfHost.dispose();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -2523,6 +2556,11 @@ app.whenReady().then(async () => {
       webPreferences: { sandbox: true },
     });
     const consoleHost = await managedHost(() => panelWindow, runtimeKey, profile);
+    const consoleURL = new URL('/host-console?phase=initial', topOriginURL).href;
+    const consoleAfterNavigationURL = new URL(
+      '/host-console?phase=after',
+      topOriginURL,
+    ).href;
     try {
       const created = await consoleHost.handleRpc({
         runtime_key: runtimeKey,
@@ -2535,7 +2573,7 @@ app.whenReady().then(async () => {
             'new',
             '--label',
             `s${sessionHash}-1`,
-            'data:text/html,<title>crew-console</title><main>console</main>',
+            consoleURL,
           ],
           mutating: true,
           command_timeout_ms: 15_000,
@@ -2624,7 +2662,7 @@ app.whenReady().then(async () => {
 
       await execute('run_code_unsafe', [`async page => {
         await page.goto(
-          'data:text/html,<title>crew-console-after-navigation</title><main>after</main>',
+          ${JSON.stringify(consoleAfterNavigationURL)},
         );
         await page.evaluate(() => console.info('crew-console-after-navigation'));
         return true;
@@ -2672,7 +2710,7 @@ app.whenReady().then(async () => {
     } finally {
       await consoleHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -3005,7 +3043,7 @@ app.whenReady().then(async () => {
     } finally {
       await downloadHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -3178,7 +3216,7 @@ app.whenReady().then(async () => {
             'new',
             '--label',
             `s${sessionHash}-2`,
-            'data:text/html,<title>active-to-close</title>',
+            new URL('/host-active-to-close', topOriginURL).href,
           ],
           mutating: true,
           command_timeout_ms: 15_000,
@@ -3223,7 +3261,7 @@ app.whenReady().then(async () => {
     } finally {
       await outputHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -3536,7 +3574,7 @@ app.whenReady().then(async () => {
     } finally {
       await runHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -3553,6 +3591,9 @@ app.whenReady().then(async () => {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-page-lifecycle-'));
     const profile = path.join(tempRoot, 'accounts', accountDir, 'browser', 'profile');
     await mkdir(profile, { recursive: true });
+    const lifecycleSourceURL = new URL('/host-record-nav-a', topOriginURL).href;
+    const lifecycleOtherURL = new URL('/host-record-nav-b', topOriginURL).href;
+    const lifecycleSurvivorURL = new URL('/host-record-nav-c', topOriginURL).href;
     const panelWindow = new BrowserWindow({
       show: false,
       width: 1100,
@@ -3572,7 +3613,7 @@ app.whenReady().then(async () => {
             'new',
             '--label',
             `s${sessionHash}-1`,
-            'data:text/html,<title>crew-lifecycle-source</title><main>source</main>',
+            lifecycleSourceURL,
           ],
           mutating: true,
           command_timeout_ms: 15_000,
@@ -3604,7 +3645,7 @@ app.whenReady().then(async () => {
         const context = page.context();
         const before = context.pages().length;
         const other = await context.newPage();
-        await other.goto('data:text/html,<title>crew-lifecycle-other</title><main>other</main>');
+        await other.goto(${JSON.stringify(lifecycleOtherURL)});
         const during = context.pages().length;
         const title = await other.title();
         await other.close();
@@ -3620,7 +3661,7 @@ app.whenReady().then(async () => {
         ordinary.before !== 1
         || ordinary.during !== 2
         || ordinary.after !== 1
-        || ordinary.title !== 'crew-lifecycle-other'
+        || ordinary.title !== 'Host record navigation B'
         || ordinary.otherClosed !== true
       ) {
         throw new Error(`newPage → goto → close 结果异常: ${JSON.stringify(ordinary)}`);
@@ -3631,9 +3672,7 @@ app.whenReady().then(async () => {
         await page.close();
         const pagesAfterClose = context.pages().length;
         const survivor = await context.newPage();
-        await survivor.goto(
-          'data:text/html,<title>crew-lifecycle-survivor</title><main>survivor</main>',
-        );
+        await survivor.goto(${JSON.stringify(lifecycleSurvivorURL)});
         return {
           sourceClosed: page.isClosed(),
           pagesAfterClose,
@@ -3645,7 +3684,7 @@ app.whenReady().then(async () => {
         closeCurrent.sourceClosed !== true
         || closeCurrent.pagesAfterClose !== 0
         || closeCurrent.pages !== 1
-        || closeCurrent.title !== 'crew-lifecycle-survivor'
+        || closeCurrent.title !== 'Host record navigation C'
       ) {
         throw new Error(`关闭 current Page 后拓扑异常: ${JSON.stringify(closeCurrent)}`);
       }
@@ -3675,7 +3714,7 @@ app.whenReady().then(async () => {
         || tabs[0]?.targetId === sourceTargetId
         || tabs[0]?.sessionHash !== sessionHash
         || tabs[0]?.active !== true
-        || tabs[0]?.title !== 'crew-lifecycle-survivor'
+        || tabs[0]?.title !== 'Host record navigation C'
       ) {
         throw new Error(`Host current-close fallback 异常: ${JSON.stringify(tabs)}`);
       }
@@ -3683,7 +3722,7 @@ app.whenReady().then(async () => {
     } finally {
       await lifecycleHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -3843,7 +3882,7 @@ app.whenReady().then(async () => {
     } finally {
       await findHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -3989,7 +4028,7 @@ app.whenReady().then(async () => {
     } finally {
       await popupHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -4630,7 +4669,7 @@ app.whenReady().then(async () => {
         );
       } finally {
         if (!panelWindow.isDestroyed()) panelWindow.destroy();
-        await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+        deferTempRootCleanup(tempRoot);
       }
     }
   };
@@ -5267,7 +5306,7 @@ app.whenReady().then(async () => {
       ]);
       if (!recorderWindow.isDestroyed()) recorderWindow.destroy();
       if (!replayWindow.isDestroyed()) replayWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
       if (previousV11Gate === undefined) {
         delete process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
       } else {
@@ -5652,7 +5691,7 @@ app.whenReady().then(async () => {
     } finally {
       await host.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
       if (previousV11Gate === undefined) {
         delete process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
       } else {
@@ -5677,8 +5716,10 @@ app.whenReady().then(async () => {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-recorder-'));
     const profile = path.join(tempRoot, 'accounts', accountDir, 'browser', 'profile');
     await mkdir(profile, { recursive: true });
-    const uploadOne = path.join(tempRoot, 'contract-one.pdf');
-    const uploadTwo = path.join(tempRoot, 'contract-two.png');
+    const approvedUploadRoot = path.join(path.dirname(profile), 'approved-uploads');
+    await mkdir(approvedUploadRoot, { recursive: true });
+    const uploadOne = path.join(approvedUploadRoot, 'contract-one.pdf');
+    const uploadTwo = path.join(approvedUploadRoot, 'contract-two.png');
     await writeFile(uploadOne, 'first recorder upload fixture', 'utf8');
     await writeFile(uploadTwo, 'second recorder upload fixture', 'utf8');
     const clipboardBeforeContract = clipboard.readText();
@@ -6670,7 +6711,7 @@ app.whenReady().then(async () => {
       clipboard.writeText(clipboardBeforeContract);
       await recorderHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      deferTempRootCleanup(tempRoot);
     }
   });
 
@@ -6691,11 +6732,6 @@ app.whenReady().then(async () => {
   await new Promise<void>((resolve) => crossOriginServer.close(() => resolve()));
   policyProxyServer.closeAllConnections();
   await new Promise<void>((resolve) => policyProxyServer.close(() => resolve()));
-  await rm(contractUserData, {
-    recursive: true,
-    force: true,
-    maxRetries: 10,
-    retryDelay: 250,
-  }).catch(() => undefined);
+  deferTempRootCleanup(contractUserData);
   app.exit(failed.length ? 1 : 0);
 });

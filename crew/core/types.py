@@ -360,8 +360,38 @@ class ToolResult:
     media: list[MediaPart] = field(default_factory=list)
     # Handler output is data.  The Registry supplies these fields from the
     # registered tool boundary; payload text cannot upgrade them.
-    content_trust: ContentTrust = "trusted"
+    content_trust: ContentTrust = "untrusted"
     content_source: str = "tool"
+
+    def __post_init__(self) -> None:
+        if self.content_trust not in ("trusted", "untrusted"):
+            raise ValueError("invalid tool result trust")
+        # A caller-supplied dataclass field is data, not host authority.  The
+        # registry uses host_trusted() for the sole explicit trusted path.
+        if self.content_trust == "trusted":
+            self.content_trust = "untrusted"
+
+    @classmethod
+    def host_trusted(
+        cls,
+        tool_call_id: str,
+        name: str,
+        content: str,
+        *,
+        is_error: bool = False,
+        media: list[MediaPart] | None = None,
+        content_source: str = "tool",
+    ) -> ToolResult:
+        result = cls(
+            tool_call_id,
+            name,
+            content,
+            is_error=is_error,
+            media=list(media or []),
+            content_source=content_source,
+        )
+        result.content_trust = "trusted"
+        return result
 
     @property
     def is_untrusted(self) -> bool:

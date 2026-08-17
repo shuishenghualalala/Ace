@@ -95,6 +95,57 @@ def test_runtime_diagnostic_factory_records_sanitized_fields(tmp_path: Path) -> 
     audit.close()
 
 
+def test_audit_event_exposes_structured_security_provenance(tmp_path: Path) -> None:
+    event = AuditEvent.for_action(
+        _context(tmp_path),
+        normalize_exec_action(["echo", "ok"], tmp_path),
+        action_type="execution",
+        decision="deny",
+        decision_source="policy",
+        stable_error_code="approval_required",
+        tool_name="terminal",
+    )
+
+    assert event.actor["owner_account_id"] == "owner-a"
+    assert event.action["type"] == "execution"
+    assert event.action["digest"] == event.normalized_action_hash
+    assert event.resource["workspace_id"] == "project-a"
+    assert event.outcome == {
+        "decision": "deny",
+        "exit_code": None,
+        "stable_error_code": "approval_required",
+    }
+    assert event.provenance["decision_source"] == "policy"
+    assert event.provenance["policy_version"] == "ace.security.profile.v1"
+
+
+def test_structured_audit_fields_are_redacted_before_persistence(tmp_path: Path) -> None:
+    secret = "sk-structured-audit-canary-123456"
+    event = replace(
+        _event(tmp_path),
+        actor={"owner_account_id": secret, "note": "Authorization: Bearer " + secret},
+        action={"type": "execution", "command": "--token " + secret},
+        resource={"path": "C:\\Users\\alice\\secret.txt", "url": "https://u:p@example.test/?token=" + secret},
+        outcome={"decision": "deny", "error": secret},
+        provenance={"source": "https://u:p@example.test/?token=" + secret},
+    )
+    audit = SQLiteSecurityAudit(
+        tmp_path / "crew.db",
+        integrity_key=b"audit-test-key-material-that-is-32-bytes",
+    )
+
+    audit.record(event)
+
+    row = audit.query(owner_account_id="owner-a")[0]
+    assert row.outcome["decision"] == "deny"
+    assert "source" in row.provenance
+    exported = audit.export_jsonl(owner_account_id="owner-a")
+    assert secret not in exported
+    assert "C:\\Users\\alice\\secret.txt" not in exported
+    audit.verify_integrity()
+    audit.close()
+
+
 def test_audit_is_owner_scoped_and_redacts_action_details(tmp_path: Path) -> None:
     audit = SQLiteSecurityAudit(tmp_path / "crew.db")
     audit.record(_event(tmp_path, "owner-a"))
@@ -418,6 +469,59 @@ def test_audit_identity_fields_are_consistent_across_decision_chain(tmp_path: Pa
     assert {row.request_id for row in rows} == {"request-a"}
     audit.verify_integrity()
     audit.close()
+
+
+def test_legacy_unchained_audit_events_migrate_to_hmac_chain(tmp_path: Path) -> None:
+    database = tmp_path / "crew.db"
+    key = b"audit-test-key-material-that-is-32-bytes"
+    audit = SQLiteSecurityAudit(database, integrity_key=key)
+    audit.record(_event(tmp_path, action_type="approval_requested"), timestamp=1_000)
+    audit.record(_event(tmp_path, action_type="approval_decision"), timestamp=2_000)
+    audit.close()
+
+    with sqlite3.connect(database) as legacy:
+        legacy.execute("DROP INDEX idx_security_audit_sequence")
+        for column in (
+            "sequence",
+            "previous_mac",
+            "event_mac",
+            "integrity_key_id",
+        ):
+            legacy.execute(f"ALTER TABLE security_audit_events DROP COLUMN {column}")
+        legacy.execute("DROP TABLE security_audit_chain_state")
+        legacy.commit()
+
+    migrated = SQLiteSecurityAudit(database, integrity_key=key)
+    rows, _total = migrated.query_page(owner_account_id="owner-a", sort="oldest")
+
+    assert [row.sequence for row in rows] == [1, 2]
+    assert rows[0].previous_mac == "0" * 64
+    assert rows[1].previous_mac == rows[0].event_mac
+    assert {row.integrity_key_id for row in rows} == {migrated._integrity_key_id}
+    migrated.verify_integrity()
+    migrated.close()
+
+
+def test_failed_prechain_migration_is_recovered_once(tmp_path: Path) -> None:
+    database = tmp_path / "crew.db"
+    key = b"audit-test-key-material-that-is-32-bytes"
+    audit = SQLiteSecurityAudit(database, integrity_key=key)
+    audit.record(_event(tmp_path), timestamp=1_000)
+    audit.record(_event(tmp_path), timestamp=2_000)
+    audit.close()
+
+    with sqlite3.connect(database) as partial:
+        partial.execute("DROP INDEX idx_security_audit_sequence")
+        partial.execute("DELETE FROM security_audit_chain_state")
+        partial.execute(
+            "UPDATE security_audit_events "
+            "SET sequence = 0, integrity_key_id = ''"
+        )
+        partial.commit()
+
+    recovered = SQLiteSecurityAudit(database, integrity_key=key)
+    recovered.verify_integrity()
+    recovered.close()
 
 
 def test_audit_migration_adds_identity_columns_and_reseals_chain(tmp_path: Path) -> None:

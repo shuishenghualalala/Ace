@@ -349,8 +349,12 @@ def create_remote_session_token(
 def account_from_remote_session_token(token: str, config: Any | None) -> AccountContext:
     try:
         encoded, signature = str(token or "").split(".", 1)
+        try:
+            session_key = _load_or_create_session_key()
+        except AuthenticationError as exc:
+            raise AuthenticationError("登录会话无效") from exc
         expected = hmac.new(
-            _load_or_create_session_key(),
+            session_key,
             encoded.encode("ascii"),
             hashlib.sha256,
         ).hexdigest()
@@ -383,10 +387,13 @@ def account_from_remote_session_token(token: str, config: Any | None) -> Account
             raise AuthenticationError("登录会话无效")
         if int(payload.get("exp") or 0) <= int(time.time()):
             raise AuthenticationError("登录会话无效")
-        provider, user = _validated_identity(
-            str(payload.get("providerId") or ""),
-            str(payload.get("userId") or ""),
-        )
+        try:
+            provider, user = _validated_identity(
+                str(payload.get("providerId") or ""),
+                str(payload.get("userId") or ""),
+            )
+        except AuthenticationError as exc:
+            raise AuthenticationError("登录会话无效") from exc
         configured_provider = (
             "email"
             if _effective_auth_mode(config) == "email"
@@ -413,7 +420,7 @@ def account_from_remote_session_token(token: str, config: Any | None) -> Account
         )
     except AuthenticationError:
         raise
-    except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OverflowError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
         raise AuthenticationError("登录会话无效") from exc
 
 

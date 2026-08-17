@@ -45,6 +45,7 @@ from crew.security.launch import (
     ProcessLaunch,
     finalize_process_launch,
     minimal_inherited_environment,
+    minimal_native_helper_environment,
     shell_argv,
     validate_process_launch,
 )
@@ -89,6 +90,8 @@ MAX_PROCESSES = 64              # 最大并发跟踪进程数（超出按最旧 
 MAX_PENDING_PER_SESSION = 20    # 每 session 待注入通知上限，防无限堆积
 MAX_RUNNING_PROCESSES_PER_OWNER = 8
 MAX_RUNNING_PROCESSES_GLOBAL = 32
+MAX_PROCESS_TIMEOUT_SECONDS = 24 * 60 * 60
+MAX_PROCESS_OUTPUT_BYTES = 2 * 1024 * 1024
 PROCESS_CHECKPOINT_VERSION = 5
 PROCESS_CHECKPOINT_SCHEMA = "ace.process-checkpoint.v5"
 _CHECKPOINT_MAC_CONTEXT = b"ace-process-checkpoint-v5\x00"
@@ -99,6 +102,30 @@ _CHECKPOINT_WRITE_LOCK = threading.RLock()
 _HEX_256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_RECOVERY_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 _RECOVERY_STATES = frozenset({"live", "cleanup_pending"})
+
+
+def _validate_process_budget(
+    value: float | None,
+    label: str,
+    *,
+    allow_zero: bool = False,
+) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, bool):
+        raise TypeError(f"{label} is invalid")
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{label} is invalid") from exc
+    if (
+        not math.isfinite(normalized)
+        or normalized < 0
+        or (normalized == 0 and not allow_zero)
+        or normalized > MAX_PROCESS_TIMEOUT_SECONDS
+    ):
+        raise ValueError(f"{label} is invalid")
+    return normalized
 
 
 class ProcessCheckpointError(RuntimeError):
@@ -243,6 +270,12 @@ def terminate_process_tree(pid: int) -> None:
     """
     if pid <= 0:
         return
+    descendants: list[psutil.Process] = []
+    try:
+        root = psutil.Process(pid)
+        descendants = root.children(recursive=True)
+    except (psutil.Error, OSError):
+        pass
     try:
         if _IS_WINDOWS:
             taskkill = windows_system_executable("taskkill.exe")
@@ -250,7 +283,7 @@ def terminate_process_tree(pid: int) -> None:
                 raise OSError("trusted taskkill executable is unavailable")
             subprocess.run(
                 [taskkill, "/PID", str(pid), "/T", "/F"],
-                env=minimal_inherited_environment(),
+                env=minimal_native_helper_environment(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
@@ -260,7 +293,34 @@ def terminate_process_tree(pid: int) -> None:
         else:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
-        return
+        pass
+    # A child that daemonizes or changes process group is outside the normal
+    # group kill.  Kill only the descendants observed before signalling the
+    # verified root; this remains scoped to the launch tree, not an arbitrary
+    # PID search.
+    for child in descendants:
+        try:
+            child.terminate()
+        except (psutil.Error, OSError):
+            pass
+    deadline = time.monotonic() + 2.0
+    while descendants and time.monotonic() < deadline:
+        alive = []
+        for child in descendants:
+            try:
+                if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    alive.append(child)
+            except (psutil.Error, OSError):
+                continue
+        if not alive:
+            break
+        descendants = alive
+        time.sleep(0.05)
+    for child in descendants:
+        try:
+            child.kill()
+        except (psutil.Error, OSError):
+            pass
 
 
 def _terminate_verified_process_tree(
@@ -715,6 +775,11 @@ class ProcessSession:
     cleanup_reason: str = ""
     cleanup_attempts: int = 0
     frozen: bool = False
+    execution_timeout: float = field(default=0.0, repr=False)
+    inactivity_timeout: float = field(default=0.0, repr=False)
+    started_monotonic: float = field(default_factory=time.monotonic, repr=False)
+    last_activity_monotonic: float = field(default_factory=time.monotonic, repr=False)
+    _watchdog_thread: threading.Thread | None = field(default=None, repr=False)
 
 
 class ProcessRegistry:
@@ -1119,12 +1184,27 @@ class ProcessRegistry:
         task_id: str = "",
         output_ref: str = "",
         explicit_environment: dict[str, str] | None = None,
+        timeout: float | None = None,
+        inactivity_timeout: float | None = None,
+        max_output_chars: int = MAX_OUTPUT_CHARS,
     ) -> ProcessSession:
         """本地后台启动一条命令，立即返回（非阻塞）。
 
         输出由 daemon reader 线程读入滚动缓冲，可经 poll/log/wait 取回。
         """
         validate_process_launch(launch)
+        execution_timeout = _validate_process_budget(timeout, "process timeout")
+        idle_timeout = _validate_process_budget(
+            inactivity_timeout,
+            "process inactivity timeout",
+            allow_zero=True,
+        )
+        if (
+            not isinstance(max_output_chars, int)
+            or isinstance(max_output_chars, bool)
+            or not 0 < max_output_chars <= MAX_OUTPUT_CHARS
+        ):
+            raise ValueError("process output budget is invalid")
         if (
             launch is None
             or launch.sandboxed
@@ -1205,6 +1285,9 @@ class ProcessRegistry:
             sandbox_preference=launch.sandbox_preference.value,
             sandboxed=launch.sandboxed,
             sandbox_system_surface=launch.sandbox_system_surface,
+            max_output_chars=max_output_chars,
+            execution_timeout=execution_timeout,
+            inactivity_timeout=idle_timeout,
         )
 
         popen_args = tuple(launch_argv or shell_argv(command))
@@ -1302,6 +1385,7 @@ class ProcessRegistry:
             )
             session._heartbeat_thread = heartbeat
             heartbeat.start()
+        self._start_watchdog(session)
 
         return session
 
@@ -1312,6 +1396,9 @@ class ProcessRegistry:
         launch: ProcessLaunch | None = None,
         cwd: str | None = None,
         launch_argv: tuple[str, ...] | None = None,
+        timeout: float | None = None,
+        inactivity_timeout: float | None = None,
+        max_output_bytes: int = MAX_PROCESS_OUTPUT_BYTES,
         **session_options: Any,
     ) -> ProcessSession:
         """Start through the host-owned security decision; managed never uses a user argv."""
@@ -1322,6 +1409,9 @@ class ProcessRegistry:
                 launch=launch,
                 launch_argv=launch_argv,
                 cwd=cwd,
+                timeout=timeout,
+                inactivity_timeout=inactivity_timeout,
+                max_output_chars=min(MAX_OUTPUT_CHARS, max_output_bytes),
                 **session_options,
             )
         owner_account_id = (
@@ -1340,6 +1430,21 @@ class ProcessRegistry:
             owner_account_id,
             managed=True,
         )
+        bridge_timeout = _validate_process_budget(
+            timeout if timeout is not None else MAX_PROCESS_TIMEOUT_SECONDS,
+            "managed process timeout",
+        )
+        bridge_idle_timeout = _validate_process_budget(
+            inactivity_timeout,
+            "managed process inactivity timeout",
+            allow_zero=True,
+        )
+        if (
+            not isinstance(max_output_bytes, int)
+            or isinstance(max_output_bytes, bool)
+            or not 0 < max_output_bytes <= MAX_PROCESS_OUTPUT_BYTES
+        ):
+            raise ValueError("managed process output budget is invalid")
         command_argv = tuple(launch_argv or shell_argv(command))
         signed_snapshot = finalize_process_launch(
             launch,
@@ -1356,8 +1461,8 @@ class ProcessRegistry:
             **signed_snapshot.to_payload(),
             "snapshot_nonce": signed_snapshot.snapshot.nonce,
             "env_overrides": child_env,
-            "timeout": 86400,
-            "max_output_bytes": 2 * 1024 * 1024,
+            "timeout": bridge_timeout,
+            "max_output_bytes": max_output_bytes,
         }
         return self._spawn_managed_bridge(
             command,
@@ -1367,6 +1472,8 @@ class ProcessRegistry:
             secret_values=secret_values,
             authorization_snapshot=signed_snapshot,
             workspace_id=launch.workspace_id,
+            execution_timeout=bridge_timeout,
+            inactivity_timeout=bridge_idle_timeout or None,
             **session_options,
         )
 
@@ -1386,6 +1493,8 @@ class ProcessRegistry:
         output_ref: str = "",
         secret_values: tuple[str, ...] = (),
         authorization_snapshot: Any = None,
+        execution_timeout: float = MAX_PROCESS_TIMEOUT_SECONDS,
+        inactivity_timeout: float | None = None,
     ) -> ProcessSession:
         """Launch only the fixed Ace bridge; command is sent through stdin."""
         environment = payload.get("env_overrides")
@@ -1445,12 +1554,21 @@ class ProcessRegistry:
             sandbox_preference=launch.sandbox_preference.value,
             sandboxed=launch.sandboxed,
             sandbox_system_surface=launch.sandbox_system_surface,
+            execution_timeout=_validate_process_budget(
+                execution_timeout,
+                "managed process timeout",
+            ),
+            inactivity_timeout=_validate_process_budget(
+                inactivity_timeout,
+                "managed process inactivity timeout",
+                allow_zero=True,
+            ),
         )
         flags = _WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0
         from crew.security.background_runner import BRIDGE_BOOTSTRAP_VERSION
         from crew.security.snapshot import delegate_authorization_snapshot
 
-        bridge_env = {**minimal_inherited_environment(), "PYTHONUNBUFFERED": "1"}
+        bridge_env = {**minimal_native_helper_environment(), "PYTHONUNBUFFERED": "1"}
         bridge_key = secrets.token_bytes(32)
         delegated = delegate_authorization_snapshot(
             authorization_snapshot,
@@ -1523,7 +1641,50 @@ class ProcessRegistry:
         reader = threading.Thread(target=self._reader_loop, args=(session,), daemon=True, name=f"proc-reader-{session.id}")
         session._reader_thread = reader
         reader.start()
+        self._start_watchdog(session)
         return session
+
+    def _start_watchdog(self, session: ProcessSession) -> None:
+        """Enforce registry-owned deadlines even when TaskRuntime is absent."""
+        if session.execution_timeout <= 0 and session.inactivity_timeout <= 0:
+            return
+
+        def watch() -> None:
+            while not session.exited:
+                now = time.monotonic()
+                if (
+                    session.execution_timeout > 0
+                    and now - session.started_monotonic >= session.execution_timeout
+                ):
+                    self._attempt_cleanup(session, "TIMEOUT", expose_finished=True)
+                    return
+                if (
+                    session.inactivity_timeout > 0
+                    and now - session.last_activity_monotonic >= session.inactivity_timeout
+                ):
+                    self._attempt_cleanup(session, "INACTIVITY_TIMEOUT", expose_finished=True)
+                    return
+                waits = [
+                    value
+                    for value in (
+                        session.execution_timeout - (now - session.started_monotonic)
+                        if session.execution_timeout > 0
+                        else 0,
+                        session.inactivity_timeout - (now - session.last_activity_monotonic)
+                        if session.inactivity_timeout > 0
+                        else 0,
+                    )
+                    if value > 0
+                ]
+                time.sleep(min(0.25, max(0.05, min(waits) if waits else 0.25)))
+
+        watchdog = threading.Thread(
+            target=watch,
+            daemon=True,
+            name=f"proc-watchdog-{session.id}",
+        )
+        session._watchdog_thread = watchdog
+        watchdog.start()
 
     def _heartbeat_loop(self, session: ProcessSession) -> None:
         interval = float(getattr(self._task_runtime, "heartbeat_interval", 10.0))
@@ -1583,6 +1744,7 @@ class ProcessRegistry:
     def _publish_output(self, session: ProcessSession, chunk: str) -> None:
         """Publish already-safe output to every observer of a process session."""
         with session._lock:
+            session.last_activity_monotonic = time.monotonic()
             session.output_buffer += chunk
             if len(session.output_buffer) > session.max_output_chars:
                 session.output_buffer = session.output_buffer[-session.max_output_chars:]

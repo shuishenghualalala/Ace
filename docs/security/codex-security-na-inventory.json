@@ -8,6 +8,95 @@
     "na_id_count": 49,
     "ace_equiv_id_count": 21
   },
+  "task_scopes": {
+    "T01": {
+      "baseline_status_counts": {
+        "欠缺": 60,
+        "不全面": 8
+      },
+      "expected_dispositions": {
+        "N/A": [
+          "ARCH-013",
+          "ARG0-001",
+          "MCFG-001",
+          "MCFG-002",
+          "MCFG-003",
+          "MCFG-004",
+          "MCFG-005",
+          "ESCAL-001",
+          "EXEC-015",
+          "EXEC-016",
+          "PROC-006",
+          "NET-026",
+          "NET-030",
+          "AGID-003",
+          "AWS-001",
+          "CHAT-001",
+          "RAP-001",
+          "WID-001",
+          "WID-002",
+          "WID-003",
+          "WID-004",
+          "CMODE-001",
+          "CMODE-002",
+          "CMODE-003",
+          "CMODE-004",
+          "CMODE-005",
+          "CMODE-006",
+          "CMODE-007",
+          "CMODE-008",
+          "CMODE-009",
+          "CMODE-010",
+          "MCP-019",
+          "MSRV-001",
+          "MSRV-002",
+          "MSRV-003",
+          "MSRV-004",
+          "MSRV-005",
+          "IPC-002",
+          "IPC-012",
+          "IPC-015",
+          "REMOTE-001",
+          "REMOTE-002",
+          "REMOTE-005",
+          "REMOTE-006",
+          "UDS-002",
+          "PROD-001",
+          "PROD-002",
+          "PROD-009",
+          "PROD-010"
+        ],
+        "ACE_EQUIV": [
+          "AGID-001",
+          "AGID-002",
+          "AGID-004",
+          "AGID-005",
+          "REMOTE-003",
+          "REMOTE-004",
+          "UDS-001",
+          "UPD-001",
+          "UPD-003",
+          "DATA-002",
+          "PROD-003",
+          "PROD-004",
+          "PROD-005",
+          "PROD-006",
+          "PROD-007",
+          "PROD-008",
+          "PROD-011",
+          "PROD-012"
+        ],
+        "APPLICABLE": [
+          "CLOUD-001"
+        ]
+      },
+      "notes": [
+        "The 60 欠缺 IDs are all explicitly N/A or ACE_EQUIV; none fall back to the default APPLICABLE disposition.",
+        "CLOUD-001 remains APPLICABLE because its authentication-failure fail-open risk is transferable even without an Ace cloud-tasks product.",
+        "Other disposition groups already present in this global ledger belong to later tasks and are preserved here without changing their baseline state."
+      ]
+    }
+  },
   "disposition_groups": [
     {
       "name": "external_sandbox_semantics_absent",

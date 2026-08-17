@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from crew.security.mcp_secrets import (
+    mcp_secret_binding,
     mcp_secret_identifier,
     resolve_mcp_server_secrets,
 )
@@ -63,6 +64,40 @@ def test_mcp_credentials_persist_only_as_bound_keyring_markers(tmp_path: Path) -
     )
     assert network_only["env"]["MCP_TOKEN"].startswith("@ace-secret:v1:")
     assert network_only["headers"]["Authorization"] == "Bearer header-secret"
+
+
+def test_mcp_oauth_credentials_persist_only_as_bound_keyring_markers(
+    tmp_path: Path,
+) -> None:
+    config, path = _config(tmp_path)
+    config.mcp_servers = {
+        "remote": {
+            "url": "https://mcp.example.test/rpc",
+            "oauth": {
+                "access_token": "oauth-access-secret",
+                "refresh_token": "oauth-refresh-secret",
+                "scope": "tools",
+            },
+        }
+    }
+
+    config.persist_mcp_servers()
+
+    text = path.read_text(encoding="utf-8")
+    persisted = yaml.safe_load(text)["mcp_servers"]["remote"]
+    assert "oauth-access-secret" not in text
+    assert "oauth-refresh-secret" not in text
+    assert persisted["oauth"]["access_token"].startswith("@ace-secret:v1:")
+    assert persisted["oauth"]["refresh_token"].startswith("@ace-secret:v1:")
+    assert persisted["oauth"]["scope"] == "tools"
+    assert resolve_mcp_server_secrets("remote", persisted, sections=("oauth",)) == {
+        "url": "https://mcp.example.test/rpc",
+        "oauth": {
+            "access_token": "oauth-access-secret",
+            "refresh_token": "oauth-refresh-secret",
+            "scope": "tools",
+        },
+    }
 
 
 def test_mcp_marker_cannot_be_replayed_for_another_server(tmp_path: Path) -> None:
@@ -240,7 +275,16 @@ def test_failed_yaml_rewrite_rolls_back_mcp_secret_rotation(
         "Authorization",
         config.mcp_servers["remote"],
     )
-    assert store.resolve_marker(identifier, old_marker) == "Bearer old-secret"
+    assert store.resolve_marker(
+        identifier,
+        old_marker,
+        binding=mcp_secret_binding(
+            "remote",
+            "headers",
+            "Authorization",
+            config.mcp_servers["remote"],
+        ),
+    ) == "Bearer old-secret"
     assert "new-secret" not in path.read_text(encoding="utf-8")
 
 

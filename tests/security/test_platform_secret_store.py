@@ -8,6 +8,7 @@ import pytest
 
 from crew.security.secret_store import (
     PlatformSecretStore,
+    SecretBinding,
     SecretIdentifier,
     SecretNotFound,
     SecretStoreUnavailable,
@@ -28,6 +29,23 @@ class _MemoryBackend:
 
     def delete_password(self, service: str, account: str) -> None:
         self.values.pop((service, account), None)
+
+
+class _FailAfterWriteBackend(_MemoryBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail = False
+
+    def set_password(self, service: str, account: str, value: str) -> None:
+        super().set_password(service, account, value)
+        if self.fail:
+            self.fail = False
+            raise RuntimeError("simulated backend write failure")
+
+
+class _FailingReadBackend(_MemoryBackend):
+    def get_password(self, service: str, account: str) -> str | None:
+        raise RuntimeError("secret-backend-canary")
 
 
 @pytest.mark.parametrize(
@@ -110,6 +128,91 @@ def test_secret_rotation_invalidates_the_previous_authenticated_marker() -> None
     assert store.resolve_marker(identifier, store.marker(identifier)) == "rotated-secret"
 
 
+def test_bound_secret_requires_matching_context_and_expires() -> None:
+    store = PlatformSecretStore.for_backend(_MemoryBackend())
+    identifier = SecretIdentifier("provider", "owner", "API_KEY")
+    binding = SecretBinding(
+        owner="owner-a",
+        task="task-a",
+        host="api.example.test",
+        purpose="provider-api",
+        ttl_seconds=60,
+    )
+    store.set(identifier, "bound-secret", binding=binding)
+    marker = store.marker(identifier)
+
+    assert store.resolve_marker(identifier, marker, binding=binding) == "bound-secret"
+    with pytest.raises(SecretStoreUnavailable):
+        store.resolve_marker(
+            identifier,
+            marker,
+            binding=SecretBinding(
+                owner="owner-b",
+                task="task-a",
+                host="api.example.test",
+                purpose="provider-api",
+                ttl_seconds=60,
+            ),
+        )
+    with pytest.raises(SecretStoreUnavailable):
+        expired_binding = SecretBinding(
+            owner="owner-a",
+            task="task-a",
+            host="api.example.test",
+            purpose="provider-api",
+            ttl_seconds=60,
+            issued_at=binding.issued_at - 120,
+        )
+        expired_store = PlatformSecretStore.for_backend(_MemoryBackend())
+        expired_store.set(identifier, "expired-secret", binding=expired_binding)
+        expired_store.resolve_marker(
+            identifier,
+            expired_store.marker(identifier),
+            binding=expired_binding,
+        )
+
+
+def test_rotation_upgrades_legacy_record_to_a_bound_record() -> None:
+    backend = _MemoryBackend()
+    store = PlatformSecretStore.for_backend(backend)
+    identifier = SecretIdentifier("provider", "owner", "API_KEY")
+    binding = SecretBinding(
+        owner="owner-a",
+        task="task-a",
+        host="api.example.test",
+        purpose="provider-api",
+        ttl_seconds=60,
+    )
+
+    store.set(identifier, "legacy-secret")
+    old_marker = store.marker(identifier)
+    mutation = store.replace(identifier, "rotated-secret", binding=binding)
+    new_marker = store.marker_for_mutation(identifier, mutation, binding=binding)
+
+    with pytest.raises(SecretStoreUnavailable):
+        store.resolve_marker(identifier, old_marker, binding=binding)
+    assert store.resolve_marker(identifier, new_marker, binding=binding) == "rotated-secret"
+
+
+def test_secure_secret_writer_does_not_publish_secret_to_process_environment(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from crew.state.config import write_secret_env_key
+
+    backend = _MemoryBackend()
+    monkeypatch.setattr(
+        PlatformSecretStore,
+        "_load_platform_backend",
+        staticmethod(lambda: backend),
+    )
+    monkeypatch.delenv("PROVIDER_API_KEY", raising=False)
+
+    write_secret_env_key(tmp_path / ".env", "PROVIDER_API_KEY", "process-secret")
+
+    assert "PROVIDER_API_KEY" not in os.environ
+
+
 def test_secret_rollback_restores_exact_record_and_refuses_concurrent_change() -> None:
     store = PlatformSecretStore.for_backend(_MemoryBackend())
     identifier = SecretIdentifier("provider", "owner", "API_KEY")
@@ -125,6 +228,20 @@ def test_secret_rollback_restores_exact_record_and_refuses_concurrent_change() -
     with pytest.raises(SecretStoreUnavailable, match="concurrently"):
         store.rollback(mutation)
     assert store.get(identifier) == "concurrent-secret"
+
+
+def test_partial_platform_write_is_cleaned_before_failure_is_returned() -> None:
+    backend = _FailAfterWriteBackend()
+    store = PlatformSecretStore.for_backend(backend)
+    identifier = SecretIdentifier("provider", "owner", "API_KEY")
+    store.set(identifier, "old-secret")
+    original = dict(backend.values)
+    backend.fail = True
+
+    with pytest.raises(SecretStoreUnavailable):
+        store.replace(identifier, "new-secret")
+
+    assert backend.values == original
 
 
 def test_missing_or_failed_backend_never_falls_back_to_plaintext(monkeypatch) -> None:
@@ -166,7 +283,7 @@ def test_runtime_env_persists_only_bound_marker_and_resolves_from_keyring(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from crew.state.config import _load_crew_home_env_file, write_secret_env_key
+    from crew.state.config import _load_crew_home_env_file, _load_env_map, write_secret_env_key
 
     backend = _MemoryBackend()
     monkeypatch.setattr(
@@ -184,7 +301,8 @@ def test_runtime_env_persists_only_bound_marker_and_resolves_from_keyring(
     assert "@ace-secret:v1:" in persisted
     monkeypatch.delenv("PROVIDER_API_KEY", raising=False)
     _load_crew_home_env_file(tmp_path)
-    assert os.environ["PROVIDER_API_KEY"] == secret
+    assert "PROVIDER_API_KEY" not in os.environ
+    assert _load_env_map(env_path)["PROVIDER_API_KEY"] == secret
 
 
 def test_tampered_or_cross_path_marker_is_not_loaded(tmp_path, monkeypatch) -> None:
@@ -228,6 +346,17 @@ def test_secret_env_write_fails_closed_without_keyring(tmp_path, monkeypatch) ->
     assert not env_path.exists()
 
 
+def test_backend_errors_do_not_echo_secret_details() -> None:
+    store = PlatformSecretStore.for_backend(_FailingReadBackend())
+    identifier = SecretIdentifier("provider", "owner", "API_KEY")
+
+    with pytest.raises(SecretStoreUnavailable) as caught:
+        store.get(identifier)
+
+    assert "secret-backend-canary" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
 def test_failed_marker_rewrite_restores_previous_authenticated_record(
     tmp_path,
     monkeypatch,
@@ -268,6 +397,71 @@ def test_failed_marker_rewrite_restores_previous_authenticated_record(
     assert config_module._load_env_map(env_path)["PROVIDER_API_KEY"] == "first-secret"
 
 
+def test_failed_marker_write_scrubs_legacy_plaintext_line(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from crew.state import config as config_module
+
+    backend = _MemoryBackend()
+    monkeypatch.setattr(
+        PlatformSecretStore,
+        "_load_platform_backend",
+        staticmethod(lambda: backend),
+    )
+    env_path = tmp_path / ".env"
+    env_path.write_text("PROVIDER_API_KEY=legacy-secret\n", encoding="utf-8")
+    monkeypatch.setattr(
+        config_module,
+        "write_env_key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("marker write failed")
+        ),
+    )
+
+    with pytest.raises(OSError, match="marker write failed"):
+        config_module.write_secret_env_key(
+            env_path,
+            "PROVIDER_API_KEY",
+            "replacement-secret",
+            sync_process_env=False,
+        )
+
+    assert "legacy-secret" not in env_path.read_text(encoding="utf-8")
+    assert "replacement-secret" not in env_path.read_text(encoding="utf-8")
+
+
+def test_secret_marker_rewrite_removes_duplicate_plaintext_entries(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from crew.state import config as config_module
+
+    backend = _MemoryBackend()
+    monkeypatch.setattr(
+        PlatformSecretStore,
+        "_load_platform_backend",
+        staticmethod(lambda: backend),
+    )
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "PROVIDER_API_KEY = first-legacy\nexport PROVIDER_API_KEY=second-legacy\n",
+        encoding="utf-8",
+    )
+
+    config_module.write_secret_env_key(
+        env_path,
+        "PROVIDER_API_KEY",
+        "replacement-secret",
+        sync_process_env=False,
+    )
+
+    persisted = env_path.read_text(encoding="utf-8")
+    assert "first-legacy" not in persisted
+    assert "second-legacy" not in persisted
+    assert persisted.count("PROVIDER_API_KEY=@ace-secret:v1:") == 1
+
+
 def test_failed_marker_removal_restores_deleted_keyring_record(
     tmp_path,
     monkeypatch,
@@ -305,6 +499,44 @@ def test_failed_marker_removal_restores_deleted_keyring_record(
 
     assert env_path.read_text(encoding="utf-8") == original_marker
     assert config_module._load_env_map(env_path)["PROVIDER_API_KEY"] == "first-secret"
+
+
+def test_orphan_owner_marker_failure_is_logged_once_until_replaced(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    from crew.state import config as config_module
+    from crew.state.config import _load_env_map
+
+    backend = _MemoryBackend()
+    monkeypatch.setattr(
+        PlatformSecretStore,
+        "_load_platform_backend",
+        staticmethod(lambda: backend),
+    )
+    env_path = tmp_path / ".env"
+    config_module.write_secret_env_key(
+        env_path,
+        "PROVIDER_API_KEY",
+        "first-secret",
+        sync_process_env=False,
+    )
+    backend.values.clear()
+    backend.reads = 0
+
+    with caplog.at_level("ERROR", logger="crew.state.config"):
+        assert _load_env_map(env_path) == {}
+        assert _load_env_map(env_path) == {}
+
+    failures = [
+        record
+        for record in caplog.records
+        if "owner credential marker validation failed" in record.message
+    ]
+    assert len(failures) == 1
+    assert "重新保存" in failures[0].message
+    assert backend.reads == 1
 
 
 def test_legacy_owner_plaintext_secret_is_migrated_before_use(tmp_path, monkeypatch) -> None:
@@ -353,3 +585,4 @@ def test_legacy_plaintext_secret_is_not_loaded_when_migration_fails(
     values = _load_env_map(env_path)
 
     assert values == {"PUBLIC_URL": "https://example.test"}
+    assert "legacy-secret" not in env_path.read_text(encoding="utf-8")

@@ -81,6 +81,7 @@ INHERITED_ENV_NAMES = frozenset(
 
 NATIVE_HELPER_ENV_NAMES = frozenset(
     {
+        "ACE_SECURITY_STATE_DIR",
         "COMSPEC",
         "LANG",
         "LC_ALL",
@@ -92,6 +93,49 @@ NATIVE_HELPER_ENV_NAMES = frozenset(
         "WINDIR",
     }
 )
+
+
+def _initialized_windows_security_state_dir(home: Path) -> Path | None:
+    candidates = [
+        home / "AppData" / "Roaming" / application / "security"
+        for application in ("crew-desktop", "crew-desktop-ui")
+    ]
+    candidates = [
+        directory
+        for directory in candidates
+        if (directory / "windows-sandbox-identity.json").is_file()
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (
+            (item / "windows-sandbox-identity.json").stat().st_mtime_ns,
+            item.parent.name == "crew-desktop-ui",
+        ),
+    )
+
+
+def default_windows_security_state_dir(
+    home: Path | None = None,
+) -> Path | None:
+    """Return an initialized Desktop security state directory without ambient overrides."""
+    if os.name != "nt":
+        return None
+    return _initialized_windows_security_state_dir(home or Path.home())
+
+
+def configure_default_security_state_dir() -> bool:
+    """Bind standalone Windows Gateway startup to an existing Desktop state directory."""
+    if os.name != "nt":
+        return True
+    if os.environ.get("ACE_SECURITY_STATE_DIR", "").strip():
+        return True
+    directory = default_windows_security_state_dir()
+    if directory is None:
+        return False
+    os.environ["ACE_SECURITY_STATE_DIR"] = str(directory)
+    return True
 
 
 def minimal_inherited_environment() -> dict[str, str]:
@@ -786,10 +830,31 @@ def compile_process_launch(
     )
 
 
+def _windows_shell_executable() -> Path | None:
+    for name in ("pwsh", "powershell"):
+        executable = shutil.which(name)
+        if not executable:
+            continue
+        try:
+            candidate = Path(executable)
+            candidate_info = candidate.lstat()
+            if not stat.S_ISREG(candidate_info.st_mode):
+                continue
+            resolved = candidate.resolve(strict=True)
+            resolved_info = resolved.stat()
+            if stat.S_ISREG(resolved_info.st_mode):
+                return resolved
+        except (OSError, RuntimeError):
+            # WindowsApps aliases and broken PATH entries can resolve to an
+            # inaccessible reparse point. Try the next real PowerShell.
+            continue
+    return None
+
+
 def shell_argv(command: str) -> tuple[str, ...]:
     """Represent one terminal string as an explicit platform shell argv."""
     if os.name == "nt":
-        executable = shutil.which("pwsh") or shutil.which("powershell")
+        executable = _windows_shell_executable()
         if not executable:
             raise RuntimeError("PowerShell is unavailable")
         script = (
@@ -802,7 +867,7 @@ def shell_argv(command: str) -> tuple[str, ...]:
             f"{command}"
         )
         return (
-            str(Path(executable).resolve()),
+            str(executable),
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -976,6 +1041,12 @@ def _manifest_for(helper_path: Path) -> dict:
     as authority to run an unmanifested helper.
     """
     manifest_path = helper_path.with_name("runtime-manifest.json")
+    try:
+        manifest_stat = manifest_path.lstat()
+    except OSError as exc:
+        raise HelperIntegrityError("native security runtime manifest is missing") from exc
+    if stat.S_ISLNK(manifest_stat.st_mode) or not stat.S_ISREG(manifest_stat.st_mode):
+        raise HelperIntegrityError("native security runtime manifest is not a regular file")
     if not manifest_path.is_file():
         raise HelperIntegrityError("native security runtime manifest is missing")
     try:
@@ -1032,7 +1103,9 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
     if expected_name != path.name:
         raise HelperIntegrityError("native security runtime manifest names a different binary")
     expected = str(manifest.get("binary_sha256", "")).strip()
-    if not expected:
+    if not expected or len(expected) != 64 or any(
+        char not in "0123456789abcdefABCDEF" for char in expected
+    ):
         raise HelperIntegrityError("native security runtime manifest is missing binary digest")
     digest = _verified_file_digest(path)
     if digest != expected:
@@ -1043,8 +1116,23 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         raise HelperIntegrityError(
             "native security runtime binary differs from the Desktop trust root"
         )
-    if runtime_source_stale(path) is True:
+    source_hash = str(manifest.get("source_hash", "")).strip()
+    if source_hash and (
+        len(source_hash) != 64
+        or any(char not in "0123456789abcdefABCDEF" for char in source_hash)
+    ):
+        raise HelperIntegrityError("native security runtime manifest source digest is invalid")
+    source_state = runtime_source_stale(path) if source_hash else None
+    if source_state is True:
         raise HelperIntegrityError("native security runtime source is stale")
+    if (
+        source_state is None
+        and _runtime_requires_hardened_directory(path)
+        and desktop_binding is None
+    ):
+        raise HelperIntegrityError(
+            "native security runtime manifest lacks verifiable source provenance"
+        )
 
 
 def trusted_helper_environment(helper_path: str | Path) -> dict[str, str]:

@@ -13,7 +13,7 @@
     "build": "node esbuild.config.mjs",
     "build:dev": "node esbuild.config.mjs --dev",
     "release:preflight": "node esbuild.config.mjs --preflight",
-    "start": "npm run build && electron .",
+    "start": "npm run build:dev && electron .",
     "dev": "npm run build:dev && electron . --dev",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests",
@@ -44,15 +44,15 @@
     "@tiptap/markdown": "^3.29.2",
     "@tiptap/starter-kit": "^3.29.2",
     "docx-preview": "^0.4.0",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.13",
     "jszip": "3.10.1",
     "katex": "^0.17.0",
-    "mermaid": "^11.15.0",
+    "mermaid": "^11.16.1",
     "micromark": "^4.0.2",
     "micromark-extension-gfm": "^3.0.0",
     "micromark-extension-math": "^3.1.0",
     "pinyin-pro": "^3.28.1",
-    "playwright-core": "^1.62.0",
+    "playwright-core": "1.62.0",
     "pptx-svg": "0.6.4",
     "ws": "^8.18.0"
   },
@@ -76,5 +76,6 @@
   "overrides": {
     "@noble/hashes": "1.8.0",
     "brace-expansion@^5.0.0": "5.0.9"
-  }
+  },
+  "allowScripts": {}
 }

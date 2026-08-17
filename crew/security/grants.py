@@ -5,12 +5,12 @@ from __future__ import annotations
 import threading
 import time
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 from uuid import uuid4
 
-from crew.security.actions import ActionKind, NormalizedAction
+from crew.security.actions import ActionKind, ActionScope, NormalizedAction, security_context_digest
 from crew.security.context import SecurityContext
 from crew.security.models import (
     AdditionalPermissionProfile,
@@ -39,6 +39,12 @@ class ExecutionGrant:
     expires_monotonic: float | None
     additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile()
     permission_grant_id: str | None = None
+    action_scope_digest: str = ""
+    context_digest: str = ""
+
+    @property
+    def scope_digest(self) -> str:
+        return self.action_scope_digest
 
 
 @dataclass(frozen=True)
@@ -70,17 +76,35 @@ class GrantRegistry:
         action: NormalizedAction,
         scope: RuleScope,
         *,
-        expires_monotonic: float | None,
+        expires_monotonic: float | None = None,
         additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
+        action_scope: ActionScope | None = None,
+        ttl_seconds: float | None = None,
     ) -> ExecutionGrant:
         if scope not in {RuleScope.ONCE, RuleScope.SESSION}:
             raise ValueError("execution grant 只支持 once/session")
+        if ttl_seconds is not None and (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or not math.isfinite(ttl_seconds)
+            or ttl_seconds <= 0
+        ):
+            raise GrantError("grant TTL 必须大于 0")
+        if ttl_seconds is not None and expires_monotonic is not None:
+            raise GrantError("grant 不能同时指定 TTL 和 expiry")
         if expires_monotonic is not None and (
             isinstance(expires_monotonic, bool)
             or not isinstance(expires_monotonic, (int, float))
             or not math.isfinite(expires_monotonic)
         ):
             raise ValueError("grant expiry 必须是有限单调时钟值")
+        _validate_bound_context(context, require_task=scope is RuleScope.ONCE)
+        if action_scope is not None and (
+            not isinstance(action_scope, ActionScope) or action_scope.action.digest != action.digest
+        ):
+            raise GrantError("grant action scope 不匹配")
+        if ttl_seconds is not None:
+            expires_monotonic = self._clock() + float(ttl_seconds)
         additional_permissions = normalize_additional_permissions(additional_permissions)
         grant_id = uuid4().hex
         permission_grant_id = None
@@ -106,6 +130,8 @@ class GrantRegistry:
             expires_monotonic=expires_monotonic,
             additional_permissions=additional_permissions,
             permission_grant_id=permission_grant_id,
+            action_scope_digest=action_scope.digest if action_scope is not None else "",
+            context_digest=security_context_digest(context),
         )
         with self._lock:
             self._grants[grant.grant_id] = grant
@@ -238,6 +264,8 @@ class GrantRegistry:
         grant_id: str,
         context: SecurityContext,
         action: NormalizedAction,
+        *,
+        action_scope: ActionScope | None = None,
     ) -> ExecutionGrant:
         """Validate an exact action and consume a once grant only after success."""
         with self._lock:
@@ -251,6 +279,14 @@ class GrantRegistry:
                 raise GrantError("grant 上下文不匹配")
             if action.digest != grant.action_digest:
                 raise GrantError("grant 动作不匹配")
+            if grant.context_digest != security_context_digest(context):
+                raise GrantError("grant 上下文 digest 不匹配")
+            if grant.action_scope_digest and (
+                action_scope is None
+                or not isinstance(action_scope, ActionScope)
+                or action_scope.digest != grant.action_scope_digest
+            ):
+                raise GrantError("grant action scope 不匹配")
             if grant.scope is RuleScope.ONCE:
                 self._remove_execution_grant_locked(grant_id)
             return grant
@@ -322,6 +358,8 @@ class GrantRegistry:
         self,
         context: SecurityContext,
         action: NormalizedAction,
+        *,
+        action_scope: ActionScope | None = None,
     ) -> ExecutionGrant | None:
         """Authorize by exact action when a tool retry does not carry a grant ID."""
         with self._lock:
@@ -331,6 +369,12 @@ class GrantRegistry:
                     self._remove_execution_grant_locked(grant_id)
                     continue
                 if grant.action_digest != action.digest or not _context_matches(grant, context):
+                    continue
+                if grant.context_digest != security_context_digest(context):
+                    continue
+                if grant.action_scope_digest and (
+                    action_scope is None or action_scope.digest != grant.action_scope_digest
+                ):
                     continue
                 if grant.scope is RuleScope.ONCE:
                     self._remove_execution_grant_locked(grant_id)
@@ -390,3 +434,16 @@ def _same_permission_session(grant: PermissionGrant, context: SecurityContext) -
         and grant.workspace_root == context.workspace_root
         and grant.session_id == context.session_id
     )
+
+
+def _validate_bound_context(context: SecurityContext, *, require_task: bool) -> None:
+    for field in ("owner_account_id", "workspace_id", "session_id"):
+        if not isinstance(getattr(context, field, None), str) or not getattr(context, field).strip():
+            raise GrantError(f"grant context {field} is required")
+    if require_task and (
+        not isinstance(getattr(context, "task_id", None), str) or not context.task_id.strip()
+    ):
+        raise GrantError("grant context task_id is required")
+
+
+Grant = ExecutionGrant

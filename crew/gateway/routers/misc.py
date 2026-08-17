@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+import platform
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -17,13 +20,14 @@ from crew.agent.skills import (
 )
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
 from crew.gateway.context import complete_path, save_upload
+from crew.gateway.helpers import safe_public_error
 from crew.gateway.instance_auth import (
     GATEWAY_INSTANCE_CHALLENGE_HEADER,
     GATEWAY_INSTANCE_PROOF_FIELD,
     create_gateway_instance_proof,
     is_valid_gateway_instance_challenge,
 )
-from crew.gateway.helpers import safe_public_error
+from crew.security.launch import packaged_runtime_argv
 from crew.state.logging import get_logger
 from crew.wiki.capture import capture_upload_to_wiki
 
@@ -67,6 +71,21 @@ def create_misc_router(crew) -> APIRouter:
         _wiki_capture_tasks.add(task)
         task.add_done_callback(_on_wiki_capture_done)
 
+    def _security_state_component() -> dict:
+        try:
+            helper_present = Path(packaged_runtime_argv()[0]).is_file()
+        except (OSError, ValueError, IndexError):
+            helper_present = False
+        requires_state_dir = platform.system().lower() == "windows" and helper_present
+        if not requires_state_dir:
+            return {"status": "ready"}
+        if os.environ.get("ACE_SECURITY_STATE_DIR", "").strip():
+            return {"status": "ready"}
+        return {
+            "status": "failed",
+            "message": "Gateway 未加载 Desktop 安全状态目录",
+        }
+
     def _components(request: Request) -> dict:
         startup_status = str(
             getattr(request.app.state, "deferred_startup_status", "starting") or "starting"
@@ -86,7 +105,11 @@ def create_misc_router(crew) -> APIRouter:
             }
         else:
             cron_status = {"status": "starting"}
-        return {"startup": startup, "cron": cron_status}
+        return {
+            "startup": startup,
+            "cron": cron_status,
+            "security_state": _security_state_component(),
+        }
 
     @router.get("/api/health")
     async def health(request: Request) -> JSONResponse:

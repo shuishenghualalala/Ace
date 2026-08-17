@@ -12,7 +12,9 @@ import os
 import secrets
 import shutil
 import stat
+import sys
 import threading
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from crew.core.runctx import (
 )
 from crew.security.local_path import (
     LocalPathReference,
+    LocalPathReferenceError,
     LocalPathReferenceKind,
     decode_file_uri_path,
 )
@@ -139,6 +142,9 @@ class FileIdentity:
     size: int = 0
     mtime_ns: int = 0
     ctime_ns: int = 0
+    parent_path: Path | None = None
+    parent_device: int = 0
+    parent_inode: int = 0
 
 
 @dataclass(frozen=True)
@@ -153,15 +159,27 @@ class FileVersion:
     digest: str = ""
     mode: int = 0
     data: bytes = b""
+    parent_path: Path | None = None
+    parent_device: int = 0
+    parent_inode: int = 0
 
 
 def capture_file_identity(path: Path) -> FileIdentity:
     """Capture a regular leaf without following a leaf link or reading content."""
     canonical = _lexical_absolute(path)
+    if _is_blocked_device(str(canonical)):
+        raise FileConflictError("授权文件目标是设备或受保护伪文件")
+    parent = _capture_parent_identity(canonical)
     try:
         info = canonical.lstat()
     except FileNotFoundError:
-        return FileIdentity(path=canonical, exists=False)
+        return FileIdentity(
+            path=canonical,
+            exists=False,
+            parent_path=parent[0],
+            parent_device=parent[1].st_dev,
+            parent_inode=parent[1].st_ino,
+        )
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     if stat.S_ISLNK(info.st_mode):
         raise FileConflictError("授权文件目标是符号链接")
@@ -181,6 +199,9 @@ def capture_file_identity(path: Path) -> FileIdentity:
         size=info.st_size,
         mtime_ns=info.st_mtime_ns,
         ctime_ns=info.st_ctime_ns,
+        parent_path=parent[0],
+        parent_device=parent[1].st_dev,
+        parent_inode=parent[1].st_ino,
     )
 
 
@@ -192,7 +213,9 @@ def snapshot_file(
 ) -> FileVersion:
     """Capture identity and content hash, rejecting ambiguous hard-link writes."""
     canonical = _lexical_absolute(path)
-    if expected_identity is not None and expected_identity.path != canonical:
+    if _is_blocked_device(str(canonical)):
+        raise FileConflictError("结构化文件目标是设备或受保护伪文件")
+    if expected_identity is not None and not _exact_path(expected_identity.path, canonical):
         raise FileConflictError("文件路径与授权身份不一致")
     byte_limit = _DEFAULT_MAX_FILE_BYTES if max_bytes is None else max_bytes
     if byte_limit < 0:
@@ -204,13 +227,33 @@ def snapshot_file(
         except FileNotFoundError:
             if expected_identity is not None and expected_identity.exists:
                 raise FileConflictError("文件在授权后已被修改或替换") from None
-            return FileVersion(path=canonical, exists=False)
+            parent_path, parent_info = _capture_parent_identity(canonical)
+            if expected_identity is not None and not _identity_parent_matches(
+                expected_identity,
+                parent_path,
+                parent_info,
+            ):
+                raise FileConflictError("文件授权父目录身份已变化")
+            return FileVersion(
+                path=canonical,
+                exists=False,
+                parent_path=parent_path,
+                parent_device=parent_info.st_dev,
+                parent_inode=parent_info.st_ino,
+            )
         if expected_identity is not None and not _identity_matches_info(
             expected_identity,
             canonical,
             info,
         ):
             raise FileConflictError("文件在授权后身份已变化")
+        parent_path, parent_info = _capture_parent_identity(canonical)
+        if expected_identity is not None and not _identity_parent_matches(
+            expected_identity,
+            parent_path,
+            parent_info,
+        ):
+            raise FileConflictError("文件授权父目录身份已变化")
         return FileVersion(
             path=canonical,
             exists=True,
@@ -222,6 +265,9 @@ def snapshot_file(
             digest=hashlib.sha256(data).hexdigest(),
             mode=info.st_mode,
             data=data,
+            parent_path=parent_path,
+            parent_device=parent_info.st_dev,
+            parent_inode=parent_info.st_ino,
         )
     finally:
         if budget_lease is not None:
@@ -239,6 +285,8 @@ def atomic_replace_bytes(
     byte_limit = _DEFAULT_MAX_WRITE_BYTES if max_bytes is None else max_bytes
     if byte_limit < 0:
         raise ValueError("写入上限不能为负数")
+    if _is_blocked_device(str(path)):
+        raise FileConflictError("结构化文件目标是设备或受保护伪文件")
     if len(data) > byte_limit:
         raise ValueError(f"文件大小 {len(data)} 字节超过写入上限 {byte_limit} 字节")
     budget_lease = _WRITE_BUDGET.reserve(_current_write_budget_key(), len(data))
@@ -248,7 +296,7 @@ def atomic_replace_bytes(
             raise FileConflictError("并发写入数量超过安全上限")
         try:
             canonical = _lexical_absolute(path)
-            if canonical != expected.path:
+            if not _exact_path(canonical, expected.path):
                 raise FileConflictError("文件在写入前已被修改或替换")
             _ensure_private_directory(canonical.parent)
             free_bytes = shutil.disk_usage(canonical.parent).free
@@ -504,6 +552,8 @@ def _atomic_replace_posix(
 
 
 def _file_version_matches(expected: FileVersion, parent_descriptor: int | None = None) -> bool:
+    if not _version_parent_matches(expected, parent_descriptor):
+        return False
     try:
         info, data = (
             _read_verified_path(expected.path, max_bytes=expected.size)
@@ -545,9 +595,11 @@ def read_verified_bytes(
     if byte_limit < 0:
         raise ValueError("文件读取上限不能为负数")
     budget_lease = _READ_BUDGET.reserve(_current_owner_task_key(), byte_limit)
-    canonical = _lexical_absolute(path)
     try:
-        if expected_identity is not None and expected_identity.path != canonical:
+        canonical = _lexical_absolute(path)
+        if _is_blocked_device(str(canonical)):
+            raise FileConflictError("结构化文件目标是设备或受保护伪文件")
+        if expected_identity is not None and not _exact_path(expected_identity.path, canonical):
             raise FileConflictError("文件路径与授权身份不一致")
         info, data = _read_verified_file(
             canonical,
@@ -560,6 +612,13 @@ def read_verified_bytes(
             info,
         ):
             raise FileConflictError("文件在授权后身份已变化")
+        parent_path, parent_info = _capture_parent_identity(canonical)
+        if expected_identity is not None and not _identity_parent_matches(
+            expected_identity,
+            parent_path,
+            parent_info,
+        ):
+            raise FileConflictError("文件授权父目录身份已变化")
         if expected_digest is not None:
             if not isinstance(expected_digest, str):
                 raise ValueError("预期内容摘要格式无效")
@@ -582,7 +641,7 @@ def _identity_matches_info(
     canonical: Path,
     actual: os.stat_result,
 ) -> bool:
-    if not expected.exists or expected.path != canonical:
+    if not expected.exists or not _exact_path(expected.path, canonical):
         return False
     stable_identity = (
         actual.st_dev,
@@ -603,10 +662,97 @@ def _identity_matches_info(
     return os.name == "nt" or actual.st_ctime_ns == expected.ctime_ns
 
 
+def _same_path(left: Path, right: Path) -> bool:
+    """Compare paths using the host namespace's case/Unicode rules."""
+
+    def key(path: Path) -> str:
+        value = os.path.normpath(os.path.abspath(os.fspath(path)))
+        if os.name == "nt" or sys.platform == "darwin":
+            value = unicodedata.normalize("NFC", value).casefold()
+        return os.path.normcase(value)
+
+    return key(left) == key(right)
+
+
+def _exact_path(left: Path, right: Path) -> bool:
+    """Compare the authorized spelling, while normalizing separators only."""
+
+    def key(path: Path) -> str:
+        value = os.path.normpath(os.path.abspath(os.fspath(path)))
+        if os.name == "nt" or sys.platform == "darwin":
+            value = unicodedata.normalize("NFC", value)
+        return value
+
+    return key(left) == key(right)
+
+
+def _capture_parent_identity(path: Path) -> tuple[Path, os.stat_result]:
+    """Find and pin the nearest existing safe ancestor of a leaf path."""
+
+    candidate = _lexical_absolute(path).parent
+    while True:
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            parent = candidate.parent
+            if parent == candidate:
+                raise FileConflictError("无法找到可安全授权的父目录")
+            candidate = parent
+            continue
+        _validate_directory_metadata(metadata)
+        with _pinned_parent(candidate / ".ace-parent-probe") as descriptor:
+            if os.name != "nt":
+                metadata = os.fstat(descriptor)
+            else:
+                metadata = candidate.stat()
+        return candidate, metadata
+
+
+def _identity_parent_matches(
+    expected: FileIdentity,
+    actual_path: Path,
+    actual: os.stat_result,
+) -> bool:
+    if expected.parent_path is None:
+        return True
+    return (
+        _same_path(expected.parent_path, actual_path)
+        and expected.parent_device == actual.st_dev
+        and expected.parent_inode == actual.st_ino
+    )
+
+
+def _version_parent_matches(
+    expected: FileVersion,
+    parent_descriptor: int | None,
+) -> bool:
+    if expected.parent_path is None:
+        return True
+    try:
+        if (
+            parent_descriptor is not None
+            and _same_path(expected.parent_path, expected.path.parent)
+        ):
+            actual = os.fstat(parent_descriptor) if os.name != "nt" else expected.parent_path.stat()
+            actual_path = expected.path.parent
+        else:
+            actual_path, actual = _capture_parent_identity(expected.parent_path / ".ace-leaf")
+    except (FileConflictError, OSError):
+        return False
+    return (
+        _same_path(expected.parent_path, actual_path)
+        and expected.parent_device == actual.st_dev
+        and expected.parent_inode == actual.st_ino
+    )
+
+
 def stat_verified_file(path: Path) -> os.stat_result:
     """Stat one regular, single-link file through an identity-checked handle."""
 
-    return _stat_verified_file(_lexical_absolute(path))
+    canonical = _lexical_absolute(path)
+    if _is_blocked_device(str(canonical)):
+        raise FileConflictError("结构化文件目标是设备或受保护伪文件")
+    return _stat_verified_file(canonical)
 
 
 def _read_verified_file(
@@ -689,6 +835,8 @@ def _read_verified_open(
     max_bytes: int | None = None,
     reject_hard_links: bool = True,
 ) -> tuple[os.stat_result, bytes]:
+    if max_bytes is not None and before.st_size > max_bytes:
+        raise ValueError("文件超过读取上限")
     descriptor, opened = _open_verified(
         before,
         opener,
@@ -783,7 +931,16 @@ def _is_sparse_file(info: os.stat_result) -> bool:
 
 
 def _lexical_absolute(path: Path) -> Path:
-    return Path(os.path.abspath(path.expanduser()))
+    if not isinstance(path, Path):
+        raise TypeError("文件路径必须是 pathlib.Path")
+    try:
+        candidate = path.expanduser()
+        reference = LocalPathReference.from_host_path(candidate)
+        if candidate.is_absolute():
+            return reference.resolve_at_boundary(strict=False)
+        return reference.resolve_at_boundary(base=Path.cwd(), strict=False)
+    except (LocalPathReferenceError, OSError, TypeError, ValueError) as exc:
+        raise FileConflictError("文件路径语法不安全") from exc
 
 
 def decode_local_file_uri(raw_uri: str) -> str:

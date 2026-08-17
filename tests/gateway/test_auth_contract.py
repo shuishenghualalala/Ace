@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +17,8 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
+from crew.gateway import auth as gateway_auth
+from crew.gateway.auth import AuthenticationError
 from crew.gateway.channel_manager import ChannelManager
 from crew.gateway.platform_registry import platform_registry
 from crew.gateway.routers.channels import create_channels_router
@@ -106,6 +111,59 @@ def test_legacy_gateway_auth_config_is_ignored(tmp_path, monkeypatch):
     # 旧 gateway.auth_base_url 与 GATEWAY_AUTH_TOKEN 仍被忽略；新的认证地址
     # 只从顶层 auth.remote 或 CREW_AUTH_BASE_URL 读取。
     assert config.auth_base_url == ""
+
+
+def test_remote_session_validation_normalizes_storage_and_numeric_failures(
+    tmp_path,
+    monkeypatch,
+):
+    key = b"gateway-test-key".ljust(32, b"0")
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    payload = {
+        "aud": "ace-gateway-remote-session",
+        "exp": float("inf"),
+        "instance": gateway_auth._session_instance_id(),
+        "providerId": "email",
+        "purpose": "owner-authentication",
+        "sid": "s" * 24,
+        "userId": "user@example.com",
+        "v": 2,
+    }
+    encoded = gateway_auth._b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    )
+    token = f"{encoded}.{hmac.new(key, encoded.encode(), hashlib.sha256).hexdigest()}"
+    monkeypatch.setattr(gateway_auth, "_load_or_create_session_key", lambda: key)
+
+    with pytest.raises(AuthenticationError, match="登录会话无效"):
+        gateway_auth.account_from_remote_session_token(
+            token,
+            SimpleNamespace(auth_mode="email", auth_provider_id="email"),
+        )
+
+    payload["exp"] = int(time.time()) + 600
+    payload["userId"] = "invalid identity"
+    encoded = gateway_auth._b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    )
+    token = f"{encoded}.{hmac.new(key, encoded.encode(), hashlib.sha256).hexdigest()}"
+    with pytest.raises(AuthenticationError, match="登录会话无效"):
+        gateway_auth.account_from_remote_session_token(
+            token,
+            SimpleNamespace(auth_mode="email", auth_provider_id="email"),
+        )
+
+    monkeypatch.setattr(
+        gateway_auth,
+        "_load_or_create_session_key",
+        lambda: (_ for _ in ()).throw(AuthenticationError("秘密存储路径泄露")),
+    )
+    with pytest.raises(AuthenticationError, match="登录会话无效") as exc:
+        gateway_auth.account_from_remote_session_token(
+            "invalid.token",
+            SimpleNamespace(auth_mode="email", auth_provider_id="email"),
+        )
+    assert "秘密存储路径" not in str(exc.value)
 
 
 @pytest.mark.asyncio

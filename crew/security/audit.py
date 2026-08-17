@@ -13,9 +13,9 @@ import secrets
 import stat
 import threading
 import time
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Callable
 from uuid import uuid4
 
 from crew.security.actions import ActionKind, NormalizedAction
@@ -100,6 +100,63 @@ class AuditEvent:
     policy_version: str = ""
     build_version: str = ""
     model_id: str = ""
+    actor: dict[str, object] = field(default_factory=dict)
+    action: dict[str, object] = field(default_factory=dict)
+    resource: dict[str, object] = field(default_factory=dict)
+    outcome: dict[str, object] = field(default_factory=dict)
+    provenance: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Give every event one stable, secret-free evidence shape."""
+        if not self.actor:
+            object.__setattr__(
+                self,
+                "actor",
+                {
+                    "owner_account_id": self.owner_account_id,
+                    "os_user_hash": self.os_user_hash,
+                },
+            )
+        if not self.action:
+            object.__setattr__(
+                self,
+                "action",
+                {"type": self.action_type, "digest": self.normalized_action_hash},
+            )
+        if not self.resource:
+            object.__setattr__(
+                self,
+                "resource",
+                {
+                    "workspace_id": self.workspace_id,
+                    "session_id": self.session_id,
+                    "task_id": self.task_id,
+                    "tool_name": self.tool_name,
+                },
+            )
+        if not self.outcome:
+            object.__setattr__(
+                self,
+                "outcome",
+                {
+                    "decision": self.decision,
+                    "exit_code": self.exit_code,
+                    "stable_error_code": self.stable_error_code,
+                },
+            )
+        if not self.provenance:
+            object.__setattr__(
+                self,
+                "provenance",
+                {
+                    "decision_source": self.decision_source,
+                    "rule_id": self.rule_id,
+                    "policy_version": self.policy_version,
+                    "build_version": self.build_version,
+                    "turn_id": self.turn_id,
+                    "model_id": self.model_id,
+                },
+            )
 
     @classmethod
     def for_action(
@@ -523,8 +580,14 @@ class SQLiteSecurityAudit:
         )
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         missing_audit_columns = self._missing_audit_columns()
+        chain_state_existed = self._chain_state_table_exists()
         self._writer.execute(self._init_schema)
-        if missing_audit_columns and self._audit_event_count():
+        needs_schema_reseal = bool(missing_audit_columns) and self._audit_event_count() > 0
+        needs_partial_reseal = self._needs_legacy_reseal(
+            chain_state_existed,
+            missing_audit_columns,
+        )
+        if needs_schema_reseal or needs_partial_reseal:
             self._writer.execute(self._reseal_audit_chain)
         self._writer.execute(self._initialize_chain)
 
@@ -538,7 +601,22 @@ class SQLiteSecurityAudit:
             }
         except Exception:  # noqa: BLE001 - table absent means nothing to migrate
             return set()
-        return {"turn_id", "policy_version", "build_version", "model_id"} - existing
+        required = {
+            "sequence",
+            "previous_mac",
+            "event_mac",
+            "integrity_key_id",
+            "turn_id",
+            "policy_version",
+            "build_version",
+            "model_id",
+            "actor_json",
+            "action_json",
+            "resource_json",
+            "outcome_json",
+            "provenance_json",
+        }
+        return required - existing
 
     def _audit_event_count(self) -> int:
         row = self._conn.execute(
@@ -546,14 +624,60 @@ class SQLiteSecurityAudit:
         ).fetchone()
         return int(row["count"]) if row is not None else 0
 
+    def _chain_state_table_exists(self) -> bool:
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'security_audit_chain_state'"
+            ).fetchone()
+            is not None
+        )
+
+    def _needs_legacy_reseal(
+        self,
+        chain_state_existed: bool,
+        missing_audit_columns: set[str],
+    ) -> bool:
+        chain_columns = {"sequence", "previous_mac", "event_mac", "integrity_key_id"}
+        if not chain_state_existed and chain_columns <= missing_audit_columns:
+            return self._audit_event_count() > 0
+
+        # A failed pre-chain migration created the state table but no state row,
+        # added no sequence index, and left every row at the schema defaults.
+        if not chain_state_existed:
+            return False
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM security_audit_chain_state WHERE singleton = 1"
+            ).fetchone()
+            is not None
+            or self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'idx_security_audit_sequence'"
+            ).fetchone()
+            is not None
+            or self._conn.execute(
+                "SELECT 1 FROM security_audit_archives LIMIT 1"
+            ).fetchone()
+            is not None
+            or self._audit_event_count() == 0
+        ):
+            return False
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN sequence = 0 AND integrity_key_id = '' "
+            "THEN 1 ELSE 0 END) AS unchained "
+            "FROM security_audit_events"
+        ).fetchone()
+        return int(row["total"]) == int(row["unchained"]) > 0
+
     def _reseal_audit_chain(self, conn) -> None:
         """Recompute the MAC chain after adding MAC-covered audit columns."""
         rows = conn.execute(
             "SELECT rowid FROM security_audit_events ORDER BY rowid ASC"
         ).fetchall()
         previous_mac = "0" * 64
-        last_sequence = 0
-        for row in rows:
+        for sequence, row in enumerate(rows, start=1):
             record = conn.execute(
                 "SELECT * FROM security_audit_events WHERE rowid = ?",
                 (row["rowid"],),
@@ -561,25 +685,35 @@ class SQLiteSecurityAudit:
             event_mac = self._event_mac(
                 _row_to_event(record),
                 timestamp=float(record["timestamp"]),
-                sequence=int(record["sequence"]),
+                sequence=sequence,
                 previous_mac=previous_mac,
             )
             conn.execute(
                 "UPDATE security_audit_events "
-                "SET previous_mac = ?, event_mac = ? WHERE rowid = ?",
-                (previous_mac, event_mac, row["rowid"]),
+                "SET sequence = ?, previous_mac = ?, event_mac = ?, "
+                "integrity_key_id = ? WHERE rowid = ?",
+                (
+                    sequence,
+                    previous_mac,
+                    event_mac,
+                    self._integrity_key_id,
+                    row["rowid"],
+                ),
             )
             previous_mac = event_mac
-            last_sequence = int(record["sequence"])
         conn.execute(
-            "UPDATE security_audit_chain_state "
-            "SET last_sequence = ?, last_mac = ?, integrity_key_id = ?, state_mac = ? "
-            "WHERE singleton = 1",
+            "INSERT INTO security_audit_chain_state "
+            "(singleton, last_sequence, last_mac, integrity_key_id, state_mac) "
+            "VALUES (1, ?, ?, ?, ?) "
+            "ON CONFLICT(singleton) DO UPDATE SET "
+            "last_sequence = excluded.last_sequence, last_mac = excluded.last_mac, "
+            "integrity_key_id = excluded.integrity_key_id, "
+            "state_mac = excluded.state_mac",
             (
-                last_sequence,
+                len(rows),
                 previous_mac,
                 self._integrity_key_id,
-                self._state_mac(last_sequence, previous_mac),
+                self._state_mac(len(rows), previous_mac),
             ),
         )
 
@@ -620,7 +754,12 @@ class SQLiteSecurityAudit:
                 turn_id TEXT NOT NULL DEFAULT '',
                 policy_version TEXT NOT NULL DEFAULT '',
                 build_version TEXT NOT NULL DEFAULT '',
-                model_id TEXT NOT NULL DEFAULT ''
+                model_id TEXT NOT NULL DEFAULT '',
+                actor_json TEXT NOT NULL DEFAULT '{}',
+                action_json TEXT NOT NULL DEFAULT '{}',
+                resource_json TEXT NOT NULL DEFAULT '{}',
+                outcome_json TEXT NOT NULL DEFAULT '{}',
+                provenance_json TEXT NOT NULL DEFAULT '{}'
             )
             """
         )
@@ -641,6 +780,11 @@ class SQLiteSecurityAudit:
             "policy_version": "TEXT NOT NULL DEFAULT ''",
             "build_version": "TEXT NOT NULL DEFAULT ''",
             "model_id": "TEXT NOT NULL DEFAULT ''",
+            "actor_json": "TEXT NOT NULL DEFAULT '{}'",
+            "action_json": "TEXT NOT NULL DEFAULT '{}'",
+            "resource_json": "TEXT NOT NULL DEFAULT '{}'",
+            "outcome_json": "TEXT NOT NULL DEFAULT '{}'",
+            "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
         }
         for column, definition in migrations.items():
             if column not in columns:
@@ -870,7 +1014,7 @@ class SQLiteSecurityAudit:
             return
         try:
             listener(event)
-        except Exception:  # noqa: BLE001 - alerting must never break the audit chain
+        except Exception:
             _LOGGER.exception("security audit event listener failed")
 
     def record_permission(
@@ -1297,7 +1441,7 @@ class SQLiteSecurityAudit:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     hashlib.sha256(
-                        f"{first.sequence}:{last.sequence}:{archive_mac}".encode("utf-8")
+                        f"{first.sequence}:{last.sequence}:{archive_mac}".encode()
                     ).hexdigest(),
                     first.sequence,
                     last.sequence,
@@ -1372,11 +1516,52 @@ def _sanitize_event(event: AuditEvent) -> AuditEvent:
         policy_version=_sanitize_field(event.policy_version, 256),
         build_version=_sanitize_field(event.build_version, 256),
         model_id=_sanitize_field(event.model_id, 256),
+        actor=_sanitize_structured(event.actor),
+        action=_sanitize_structured(event.action),
+        resource=_sanitize_structured(event.resource),
+        outcome=_sanitize_structured(event.outcome),
+        provenance=_sanitize_structured(event.provenance),
     )
 
 
 def _sanitize_field(value: object, limit: int) -> str:
     return redact_sensitive_display_text(str(value)[:limit])
+
+
+def _sanitize_structured(value: object, *, depth: int = 0) -> dict[str, object]:
+    """Keep evidence JSON-shaped, bounded, and safe before it reaches the MAC."""
+    if not isinstance(value, Mapping):
+        return {}
+    if depth >= 3:
+        return {"value": _sanitize_field(value, 512)}
+    sanitized: dict[str, object] = {}
+    for raw_key, raw_value in list(value.items())[:32]:
+        key = _sanitize_field(raw_key, 128)
+        if isinstance(raw_value, Mapping):
+            sanitized[key] = _sanitize_structured(raw_value, depth=depth + 1)
+        elif isinstance(raw_value, (list, tuple)):
+            sanitized[key] = [
+                _sanitize_structured_value(item)
+                if not isinstance(item, Mapping)
+                else _sanitize_structured(item, depth=depth + 1)
+                for item in list(raw_value)[:32]
+            ]
+        elif isinstance(raw_value, (bool, int, float)) or raw_value is None:
+            sanitized[key] = raw_value
+        else:
+            sanitized[key] = _sanitize_structured_value(raw_value)
+    return sanitized
+
+
+_HOST_PATH_IN_EVIDENCE_RE = re.compile(
+    r"(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s\"'<>]+|"
+    r"(?<![A-Za-z0-9])/(?:private|tmp|home|Users|var|workspace|AppData|Windows)/[^\s\"'<>]+)"
+)
+
+
+def _sanitize_structured_value(value: object) -> str:
+    text = _sanitize_field(value, 512)
+    return _HOST_PATH_IN_EVIDENCE_RE.sub("[HOST_PATH_REDACTED]", text)
 
 
 def _sanitize_identity(value: object) -> str:
@@ -1568,9 +1753,10 @@ def _insert_event(
         "decision, decision_source, sandbox_backend, capabilities_json, "
         "network_target_summary, exit_code, stable_error_code, tool_name, "
         "action_summary, action_detail, approval_mode, turn_id, policy_version, "
-        "build_version, model_id) VALUES "
+        "build_version, model_id, actor_json, action_json, resource_json, "
+        "outcome_json, provenance_json) VALUES "
         "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-        "?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             event.event_id,
             timestamp,
@@ -1605,6 +1791,11 @@ def _insert_event(
             event.policy_version,
             event.build_version,
             event.model_id,
+            json.dumps(event.actor, ensure_ascii=False, sort_keys=True),
+            json.dumps(event.action, ensure_ascii=False, sort_keys=True),
+            json.dumps(event.resource, ensure_ascii=False, sort_keys=True),
+            json.dumps(event.outcome, ensure_ascii=False, sort_keys=True),
+            json.dumps(event.provenance, ensure_ascii=False, sort_keys=True),
         ),
     )
 
@@ -1639,7 +1830,20 @@ def _row_to_event(row) -> AuditEvent:
         policy_version=str(row["policy_version"]),
         build_version=str(row["build_version"]),
         model_id=str(row["model_id"]),
+        actor=_load_structured(row["actor_json"]),
+        action=_load_structured(row["action_json"]),
+        resource=_load_structured(row["resource_json"]),
+        outcome=_load_structured(row["outcome_json"]),
+        provenance=_load_structured(row["provenance_json"]),
     )
+
+
+def _load_structured(value: object) -> dict[str, object]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
 def _mapping_to_event(value: dict[str, object]) -> AuditEvent:
@@ -1673,7 +1877,16 @@ def _mapping_to_event(value: dict[str, object]) -> AuditEvent:
         policy_version=str(value.get("policy_version", "")),
         build_version=str(value.get("build_version", "")),
         model_id=str(value.get("model_id", "")),
+        actor=_mapping_structured(value.get("actor", {})),
+        action=_mapping_structured(value.get("action", {})),
+        resource=_mapping_structured(value.get("resource", {})),
+        outcome=_mapping_structured(value.get("outcome", {})),
+        provenance=_mapping_structured(value.get("provenance", {})),
     )
+
+
+def _mapping_structured(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _row_to_record(row) -> AuditRecord:

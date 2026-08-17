@@ -54,6 +54,7 @@ import {
   locatorFromRef,
   officialInjectedScriptSource,
 } from './browser/playwright-compat';
+import { withNativeElementScreenshot } from './browser/electron-cdp-transport';
 import {
   captureSnapshot,
   captureSnapshotForFind,
@@ -8404,7 +8405,10 @@ export class BrowserHost extends EventEmitter {
           const locator = record.playwrightRef
             ? locatorFromRef(page, record.playwrightRef)
             : page.locator(record.selector);
-          return locator.screenshot(commonOptions);
+          return withNativeElementScreenshot(
+            tab.view,
+            () => locator.screenshot(commonOptions),
+          );
         })()
       : await page.screenshot({
           ...commonOptions,

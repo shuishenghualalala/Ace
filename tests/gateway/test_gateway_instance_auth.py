@@ -61,6 +61,31 @@ async def test_health_without_challenge_remains_public_readiness(health_app):
 
 
 @pytest.mark.asyncio
+async def test_health_reports_missing_windows_security_state(
+    health_app,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from crew.gateway.routers import misc
+
+    helper = health_app[1].parent / "ace-security-runtime.exe"
+    helper.write_bytes(b"helper")
+    monkeypatch.setattr(misc, "packaged_runtime_argv", lambda: [str(helper)])
+    monkeypatch.setattr(misc.platform, "system", lambda: "Windows")
+    monkeypatch.delenv("ACE_SECURITY_STATE_DIR", raising=False)
+
+    async with AsyncClient(transport=ASGITransport(app=health_app[0]), base_url="http://test") as client:
+        response = await client.get("/api/health")
+
+    assert response.json()["components"]["security_state"]["status"] == "failed"
+
+    monkeypatch.setenv("ACE_SECURITY_STATE_DIR", str(health_app[1] / "security"))
+    async with AsyncClient(transport=ASGITransport(app=health_app[0]), base_url="http://test") as client:
+        response = await client.get("/api/health")
+
+    assert response.json()["components"]["security_state"]["status"] == "ready"
+
+
+@pytest.mark.asyncio
 async def test_health_returns_domain_separated_instance_proof(health_app):
     app, crew_home = health_app
     encoded_key = b"23" * 32

@@ -58,3 +58,36 @@ def test_host_security_helpers_use_minimal_environment(monkeypatch) -> None:
     assert "OPENAI_API_KEY" not in env
     assert "ACE_BUNDLED_BWRAP" not in env
     assert "ACE_BUNDLED_BWRAP_SHA256" not in env
+
+
+def test_browser_control_payload_and_owner_scope_are_strict() -> None:
+    from crew.gateway.routers.browser import (
+        _browser_owner_access_allowed,
+        _parse_browser_control_payload,
+    )
+
+    with pytest.raises(ValueError):
+        _parse_browser_control_payload({"action": "open", "unexpected": True})
+    with pytest.raises(ValueError):
+        _parse_browser_control_payload({"action": "open", "value": 1})
+
+    assert _parse_browser_control_payload({"action": "open"}) == ("open", "")
+
+    class AccessControl:
+        user_type = "default"
+
+        @staticmethod
+        def resolve_for(_user_type: str) -> dict:
+            return {}
+
+    class Registry:
+        @staticmethod
+        def list_schemas(**_kwargs):
+            return [{"_crew_toolset": "browser"}]
+
+    assert not _browser_owner_access_allowed(
+        Registry(), AccessControl(), lambda _owner, _user_type: False, "owner"
+    )
+    assert _browser_owner_access_allowed(
+        Registry(), AccessControl(), lambda _owner, _user_type: True, "owner"
+    )

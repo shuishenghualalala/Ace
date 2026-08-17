@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from crew.security.actions import normalize_exec_action, normalize_file_action, serialize_normalized_action
+from crew.security.actions import ActionScope, normalize_exec_action, normalize_file_action, serialize_normalized_action
 from crew.security.context import SecurityContext
 from crew.security.models import (
     AdditionalPermissionProfile,
@@ -468,3 +468,31 @@ def test_host_snapshot_key_state_failure_is_closed(
             environment={},
             helper_argv=(),
         )
+
+
+def test_permission_snapshot_binds_action_scope_turn_and_context(tmp_path: Path) -> None:
+    from crew.security import snapshot as snapshot_module
+
+    action = normalize_exec_action(("python", "-V"), tmp_path)
+    scope = ActionScope(action, command="python -V", turn_digest="b" * 64)
+    signed = snapshot_module.issue_permission_snapshot(
+        context=_context(tmp_path),
+        action=action,
+        action_scope=scope,
+        profile=PermissionProfile(PermissionProfileKind.DISABLED),
+        additional_permissions=AdditionalPermissionProfile(),
+        argv=action.argv,
+        cwd=tmp_path,
+        environment={},
+        helper_argv=(),
+    )
+
+    assert signed.snapshot.action_scope_digest == scope.digest
+    assert signed.snapshot.turn_digest == scope.turn_digest
+    assert len(signed.snapshot.context_digest) == 64
+    assert snapshot_module.verify_permission_snapshot(
+        signed,
+        expected_action_scope_digest=scope.digest,
+        expected_turn_digest=scope.turn_digest,
+        expected_context_digest=signed.snapshot.context_digest,
+    ) is signed.snapshot

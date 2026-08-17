@@ -34,6 +34,19 @@ def _env(sid: str, q: str = "hi") -> Envelope:
     return Envelope.of(q, session_id=sid, user_id=OWNER)
 
 
+def test_action_digest_accepts_gateway_session_context() -> None:
+    from crew.gateway.session_context import SessionContext, SessionSource
+
+    envelope = _env("s-session-context")
+    envelope.params["session_context"] = SessionContext(
+        source=SessionSource(platform="web", chat_id="s-session-context"),
+        connected_platforms=["web"],
+        session_id=envelope.session_id,
+    )
+
+    assert len(_action_digest(envelope)) == 64
+
+
 async def _drain(gen) -> list[ResponseChunk]:
     return [ch async for ch in gen]
 

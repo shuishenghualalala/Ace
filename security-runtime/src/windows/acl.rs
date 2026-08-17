@@ -968,6 +968,7 @@ fn cleanup_paths(paths: &[CleanupPath], failures: &mut Vec<String>) {
 }
 
 fn remove_optional_directory(path: &Path, recursive: bool) -> Result<(), String> {
+    reject_reparse_point(path)?;
     let result = if recursive {
         fs::remove_dir_all(path)
     } else {
@@ -981,6 +982,7 @@ fn remove_optional_directory(path: &Path, recursive: bool) -> Result<(), String>
 }
 
 fn remove_optional_file(path: &Path) -> Result<(), String> {
+    reject_reparse_point(path)?;
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1079,15 +1081,20 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 fn reject_reparse_point(path: &Path) -> Result<(), String> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(format!(
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+            Err(format!(
                 "protected metadata cannot be a reparse point: {}",
                 path.display()
-            ));
+            ))
         }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot inspect protected metadata {}: {error}",
+            path.display()
+        )),
     }
-    Ok(())
 }
 
 fn acquire_mutex() -> Result<AclMutex, String> {

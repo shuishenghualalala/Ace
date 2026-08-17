@@ -23,9 +23,10 @@ use std::thread;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use protocol::{
-    validate_process_inputs, validate_stdio_input_frame, ReadyFrame, RequestEnvelope, RuntimeEvent,
-    RuntimeMessage, RuntimeRequest, StdioInputFrame, StdioInputMessage, MAX_REQUEST_FRAME_BYTES,
-    MAX_RESPONSE_FRAME_BYTES, MAX_STDIO_INPUT_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
+    validate_process_inputs, validate_request_limits, validate_stdio_input_frame, ReadyFrame,
+    RequestEnvelope, RuntimeEvent, RuntimeMessage, RuntimeRequest, StdioInputFrame,
+    StdioInputMessage, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES, MAX_STDIO_INPUT_BYTES,
+    PROTOCOL_VERSION, READY_CAPABILITIES,
 };
 use subtle::ConstantTimeEq;
 
@@ -267,6 +268,10 @@ fn handle_request(
     sender: &SyncSender<RuntimeMessage>,
     stdin_stream: Option<Receiver<StdioInputMessage>>,
 ) -> Result<(), RuntimeFailure> {
+    validate_request_limits(&request).map_err(|error| RuntimeFailure {
+        code: error.code,
+        message: error.message.to_string(),
+    })?;
     match request {
         RuntimeRequest::ClassifyShell {
             shell_kind,

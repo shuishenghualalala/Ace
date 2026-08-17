@@ -19,9 +19,21 @@ describe('chooseStandaloneGatewayAction', () => {
     )).toBe('reject');
   });
 
-  it('reuses a verified Gateway and starts managed only when no listener exists', () => {
+  it('reuses a verified Gateway even when its security state is not ready', () => {
     expect(chooseStandaloneGatewayAction(
-      { status: 'verified', verified: true },
+      {
+        status: 'verified',
+        verified: true,
+        components: { security_state: { status: 'ready' } },
+      },
+      true,
+    )).toBe('reuse');
+    expect(chooseStandaloneGatewayAction(
+      {
+        status: 'verified',
+        verified: true,
+        components: { security_state: { status: 'failed' } },
+      },
       true,
     )).toBe('reuse');
     expect(chooseStandaloneGatewayAction(
@@ -62,6 +74,25 @@ describe('waitForGatewayCandidate', () => {
 
     expect(result.status).toBe('untrusted');
     expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('stops waiting for an unreachable candidate after a bounded timeout', async () => {
+    let now = 0;
+    const sleep = vi.fn(async (delayMs: number) => {
+      now += delayMs;
+    });
+
+    const result = await waitForGatewayCandidate({
+      probe: async () => ({ status: 'unreachable', verified: false }),
+      shouldContinue: async () => true,
+      sleep,
+      retryDelayMs: 10,
+      maxWaitMs: 25,
+      now: () => now,
+    });
+
+    expect(result.status).toBe('timeout');
+    expect(sleep).toHaveBeenCalled();
   });
 });
 

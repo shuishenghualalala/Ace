@@ -1,11 +1,14 @@
+use std::ffi::OsString;
 use std::fs;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+    GetFileInformationByHandle, GetLongPathNameW, BY_HANDLE_FILE_INFORMATION,
+    FILE_ATTRIBUTE_REPARSE_POINT,
 };
 
 #[derive(Debug)]
@@ -110,7 +113,7 @@ fn optional_canonical_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 reject_parent_components(&path)?;
-                path
+                normalize_missing_path(&path)?
             }
             Err(error) => {
                 return Err(format!(
@@ -136,7 +139,9 @@ fn lexical_local_absolute(path: &Path) -> Result<PathBuf, String> {
         },
         _ => unreachable!("validate_local_absolute requires a prefix"),
     };
-    debug_assert!(matches!(components.next(), Some(Component::RootDir)));
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        unreachable!("validate_local_absolute requires a root component");
+    }
     let mut suffix = Vec::new();
     for component in components {
         match component {
@@ -149,7 +154,16 @@ fn lexical_local_absolute(path: &Path) -> Result<PathBuf, String> {
                     ));
                 }
             }
-            Component::Normal(value) => suffix.push(value.to_os_string()),
+            Component::Normal(value) => {
+                let value = value.to_string_lossy();
+                if value.contains(':') || value.contains('*') || value.contains('?') {
+                    return Err(format!(
+                        "Windows sandbox rejects alternate streams and wildcard names: {}",
+                        path.display()
+                    ));
+                }
+                suffix.push(OsString::from(value.as_ref()));
+            }
             _ => {
                 return Err(format!(
                     "Windows sandbox path has an unsupported component: {}",
@@ -181,7 +195,7 @@ fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
 }
 
 fn canonical_local(path: &Path) -> Result<PathBuf, std::io::Error> {
-    let canonical = path.canonicalize()?;
+    let canonical = long_path(&path.canonicalize()?)?;
     let rendered = canonical.as_os_str().to_string_lossy();
     if let Some(local) = rendered.strip_prefix(r"\\?\") {
         if local.as_bytes().get(1) == Some(&b':') {
@@ -189,6 +203,35 @@ fn canonical_local(path: &Path) -> Result<PathBuf, std::io::Error> {
         }
     }
     Ok(canonical)
+}
+
+fn long_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let input: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut capacity = 260_u32;
+    loop {
+        let mut output = vec![0_u16; capacity as usize];
+        let length = unsafe { GetLongPathNameW(input.as_ptr(), output.as_mut_ptr(), capacity) };
+        if length == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if length < capacity {
+            return Ok(PathBuf::from(OsString::from_wide(
+                &output[..length as usize],
+            )));
+        }
+        let next = length.saturating_add(1);
+        if next <= capacity {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Windows long path length overflow",
+            ));
+        }
+        capacity = next;
+    }
 }
 
 pub(crate) fn validate_local_absolute(path: &Path) -> Result<(), String> {
@@ -211,6 +254,17 @@ pub(crate) fn validate_local_absolute(path: &Path) -> Result<(), String> {
             "Windows sandbox rejects drive-relative, UNC, and device paths: {}",
             path.display()
         ));
+    }
+    for component in components {
+        if let Component::Normal(value) = component {
+            let value = value.to_string_lossy();
+            if value.contains(':') || value.contains('*') || value.contains('?') {
+                return Err(format!(
+                    "Windows sandbox rejects alternate streams and wildcard names: {}",
+                    path.display()
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -257,6 +311,48 @@ fn reject_parent_components(path: &Path) -> Result<(), String> {
         "denied root has no inspectable parent: {}",
         path.display()
     ))
+}
+
+fn normalize_missing_path(path: &Path) -> Result<PathBuf, String> {
+    let mut existing = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(metadata) => {
+                if !metadata.is_dir() {
+                    return Err(format!(
+                        "denied-root parent is not a directory: {}",
+                        existing.display()
+                    ));
+                }
+                reject_reparse_components(&existing)?;
+                let mut normalized = canonical_local(&existing)
+                    .map_err(|error| format!("cannot resolve denied-root parent: {error}"))?;
+                for component in missing.iter().rev() {
+                    normalized.push(component);
+                }
+                return Ok(normalized);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing.file_name().ok_or_else(|| {
+                    format!("denied root has no inspectable parent: {}", path.display())
+                })?;
+                missing.push(name.to_os_string());
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| {
+                        format!("denied root has no inspectable parent: {}", path.display())
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect denied-root parent {}: {error}",
+                    existing.display()
+                ));
+            }
+        }
+    }
 }
 
 fn inspect_tree(path: &Path) -> Result<(), String> {

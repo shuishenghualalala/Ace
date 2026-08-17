@@ -21,6 +21,7 @@ import stat
 import subprocess
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -29,12 +30,16 @@ from typing import Any
 import wcmatch.glob as wcglob
 
 from crew.core.errors import ToolError
+from crew.security.file_policy import is_protected_workspace_path
 from crew.tools.file_utils import (
     _DEFAULT_MAX_FILE_BYTES,
     FileConflictError,
+    FileIdentity,
     _check_sensitive_path,
+    capture_file_identity,
     _detect_line_ending,
     _has_binary_extension,
+    _lexical_absolute,
     _normalize_line_endings,
     _strip_bom,
     _truncate,
@@ -73,6 +78,8 @@ _MAX_RG_STDOUT_BYTES = 2 * 1024 * 1024
 _MAX_RG_STDERR_BYTES = 64 * 1024
 
 _WCGLOB_FLAGS = wcglob.BRACE | wcglob.GLOBSTAR
+
+DirectoryIdentity = tuple[str, int, int, int]
 
 # rg --type 的兜底扩展名映射（仅 Python 兜底用；rg 路径直接 --type）
 _RG_TYPE_MAP: dict[str, list[str]] = {
@@ -246,10 +253,29 @@ def _prune_linked_directories(dirpath: str, dirnames: list[str]) -> None:
     dirnames[:] = kept
 
 
-def _directory_identity(path: Path) -> tuple[int, int, int]:
+def _directory_identity(path: Path) -> DirectoryIdentity:
     """Capture the directory object used by a bounded search walk."""
     try:
-        metadata = os.lstat(path)
+        absolute = _lexical_absolute(path)
+    except (FileConflictError, OSError, TypeError, ValueError) as exc:
+        raise ToolError("搜索目录不可用") from exc
+    current = Path(absolute.anchor) if absolute.anchor else Path()
+    for component in absolute.parts[1:] if absolute.anchor else absolute.parts:
+        current /= component
+        try:
+            component_info = os.lstat(current)
+        except OSError as exc:
+            raise ToolError("搜索目录不可用") from exc
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if stat.S_ISLNK(component_info.st_mode) or (
+            reparse_flag
+            and getattr(component_info, "st_file_attributes", 0) & reparse_flag
+        ):
+            raise ToolError("搜索目录包含不安全的链接组件")
+        if not stat.S_ISDIR(component_info.st_mode):
+            raise ToolError("搜索目录不是安全的普通目录")
+    try:
+        metadata = os.lstat(absolute)
     except OSError as exc:
         raise ToolError("搜索根目录不可用") from exc
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
@@ -259,12 +285,62 @@ def _directory_identity(path: Path) -> tuple[int, int, int]:
         or not stat.S_ISDIR(metadata.st_mode)
     ):
         raise ToolError("搜索根目录不是安全的普通目录")
-    return (int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_ctime_ns))
+    spelling = unicodedata.normalize("NFC", os.path.normpath(os.fspath(absolute)))
+    return (
+        spelling,
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_ctime_ns),
+    )
 
 
-def _assert_directory_identity(path: Path, expected: tuple[int, int, int]) -> None:
+def _assert_directory_identity(path: Path, expected: DirectoryIdentity) -> None:
     if _directory_identity(path) != expected:
         raise ToolError("搜索目录在操作期间发生变化")
+
+
+def _prepare_walk_directory(
+    root: Path,
+    dirpath: str,
+    dirnames: list[str],
+    expected_directories: dict[str, DirectoryIdentity],
+) -> bool:
+    """Bind each yielded directory before walking into its children."""
+
+    current = Path(dirpath)
+    key = os.path.normcase(os.path.abspath(os.fspath(current)))
+    expected = expected_directories.pop(key, None)
+    if expected is None:
+        dirnames[:] = []
+        return False
+    if current == root:
+        _assert_directory_identity(current, expected)
+    else:
+        try:
+            _assert_directory_identity(current, expected)
+        except ToolError:
+            dirnames[:] = []
+            return False
+
+    child_identities: dict[str, DirectoryIdentity] = {}
+    for name in tuple(dirnames):
+        child = current / name
+        child_key = os.path.normcase(os.path.abspath(os.fspath(child)))
+        try:
+            child_identities[child_key] = _directory_identity(child)
+        except ToolError:
+            continue
+
+    dirnames[:] = [name for name in dirnames if name not in _NOISE_DIRS]
+    _prune_linked_directories(dirpath, dirnames)
+    retained: list[str] = []
+    for name in dirnames:
+        child_key = os.path.normcase(os.path.abspath(os.fspath(current / name)))
+        if child_key in child_identities:
+            retained.append(name)
+            expected_directories[child_key] = child_identities[child_key]
+    dirnames[:] = retained
+    return True
 
 
 def _enforce_walk_budget(
@@ -296,12 +372,14 @@ def _preflight_search_tree(root: Path, *, timeout: int) -> None:
     """Bound metadata traversal before delegating content search to ripgrep."""
 
     root_identity = _directory_identity(root)
+    expected_directories = {
+        os.path.normcase(os.path.abspath(os.fspath(root))): root_identity
+    }
     deadline = time.monotonic() + timeout
     files_seen = 0
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        _assert_directory_identity(root, root_identity)
-        dirnames[:] = [name for name in dirnames if name not in _NOISE_DIRS]
-        _prune_linked_directories(dirpath, dirnames)
+        if not _prepare_walk_directory(root, dirpath, dirnames, expected_directories):
+            continue
         files_seen = _enforce_walk_budget(
             root,
             dirpath,
@@ -394,8 +472,9 @@ async def handle_glob(
         workspace_store=workspace_store,
         security_service=security_service,
     )
-    if not root.exists() or not root.is_dir():
-        raise ToolError(f"搜索目录不存在或不是目录: {root}")
+    if not isinstance(root, Path):
+        raise ToolError("搜索授权目标无效")
+    root_identity = _directory_identity(root)
     limit = min(_MAX_SEARCH_RESULTS, max(1, _int_arg(args, "limit", 100)))
 
     # The authorized path is only a pathname.  A native rg process cannot keep
@@ -407,6 +486,7 @@ async def handle_glob(
         pattern,
         root,
         max_results=limit,
+        expected_root_identity=root_identity,
     )
 
     page, output_truncated = _bound_string_items(files[:limit])
@@ -457,18 +537,21 @@ def _glob_via_python(
     root: Path,
     *,
     max_results: int = _MAX_SEARCH_RESULTS,
+    expected_root_identity: DirectoryIdentity | None = None,
 ) -> list[str]:
     """纯 Python glob：os.walk + wcmatch 匹配 + 噪音剪枝 + mtime 倒序。"""
     matcher = _compile_glob_pattern(pattern)
-    root_identity = _directory_identity(root)
+    root_identity = expected_root_identity or _directory_identity(root)
+    expected_directories = {
+        os.path.normcase(os.path.abspath(os.fspath(root))): root_identity
+    }
     deadline = time.monotonic() + _GLOB_DEADLINE_SECONDS
     found: list[tuple[float, str]] = []
     files_seen = 0
     collect = min(max(1, max_results), _MAX_SEARCH_RESULTS) + 1
     for dirpath, dirnames, filenames in os.walk(root):
-        _assert_directory_identity(root, root_identity)
-        dirnames[:] = [d for d in dirnames if d not in _NOISE_DIRS]
-        _prune_linked_directories(dirpath, dirnames)
+        if not _prepare_walk_directory(root, dirpath, dirnames, expected_directories):
+            continue
         files_seen = _enforce_walk_budget(
             root,
             dirpath,
@@ -488,6 +571,8 @@ def _glob_via_python(
             except ValueError:
                 continue
             if not matcher(rel):
+                continue
+            if is_protected_workspace_path(full, root):
                 continue
             try:
                 mtime = stat_verified_file(full).st_mtime
@@ -558,16 +643,39 @@ async def handle_grep(
         workspace_store=workspace_store,
         security_service=security_service,
     )
-    if not target.exists():
-        raise ToolError(f"搜索路径不存在: {target}")
+    if not isinstance(target, Path):
+        raise ToolError("搜索授权目标无效")
     output_mode = str(args.get("output_mode") or "files_with_matches")
     if output_mode not in ("content", "files_with_matches", "count"):
         raise ToolError(f"output_mode 必须是 content/files_with_matches/count，得到 {output_mode!r}")
 
+    try:
+        target_is_dir = True
+        root = target
+        root_identity = _directory_identity(target)
+        target_identity = None
+    except ToolError:
+        target_is_dir = False
+        try:
+            target_identity = capture_file_identity(target)
+            if not target_identity.exists:
+                raise FileConflictError("搜索目标不存在")
+            root = target.parent
+            root_identity = _directory_identity(root)
+        except (FileConflictError, OSError, ValueError, ToolError) as exc:
+            raise ToolError("搜索路径不存在或不可用") from exc
+
     # See handle_glob: an unpinned native process cannot safely consume the
     # model-authorized pathname.  The Python walker checks the root identity
     # and each opened regular file instead.
-    return await asyncio.to_thread(_grep_via_python, args, target, output_mode)
+    return await asyncio.to_thread(
+        _grep_via_python,
+        args,
+        target,
+        output_mode,
+        expected_root_identity=root_identity,
+        expected_file_identity=target_identity if not target_is_dir else None,
+    )
 
 
 def _grep_context_params(args: dict[str, Any]) -> tuple[int, int]:
@@ -703,7 +811,14 @@ def _grep_via_rg(rg: str, args: dict[str, Any], target: Path, output_mode: str) 
     return tool_result(**payload)
 
 
-def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> str:
+def _grep_via_python(
+    args: dict[str, Any],
+    target: Path,
+    output_mode: str,
+    *,
+    expected_root_identity: DirectoryIdentity | None = None,
+    expected_file_identity: FileIdentity | None = None,
+) -> str:
     """纯 Python grep 兜底：os.walk + wcmatch 过滤 + re.search。"""
     pattern = str(args.get("pattern", ""))
     case_insensitive = _bool_arg(args, "-i", False)
@@ -734,7 +849,7 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
 
     target_is_dir = target.is_dir()
     root = target if target_is_dir else target.parent
-    root_identity = _directory_identity(root)
+    root_identity = expected_root_identity or _directory_identity(root)
     deadline = time.monotonic() + _GREP_DEADLINE_SECONDS
     file_matches: dict[str, list[tuple[int, str]]] = {}  # rel -> [(line_num, line)]
     file_lines: dict[str, list[str]] = {}  # 只有有匹配的文件存全部行（content 上下文用）
@@ -744,6 +859,9 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
     collection_saturated = False
     files_seen = 0
     total_bytes_read = 0
+    expected_directories = {
+        os.path.normcase(os.path.abspath(os.fspath(root))): root_identity
+    }
 
     def search_file(full: Path, *, follow_symlink: bool = False) -> None:
         nonlocal collected_matches, collection_saturated, total_bytes_read
@@ -756,6 +874,8 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
             return
         if _has_binary_extension(full):
             return
+        if is_protected_workspace_path(full, root):
+            return
         # 拒绝遍历到的符号链接：工作区内的文件 symlink 可能指向授权根外，跟随它读取
         # 会绕过文件读取审批与 native sandbox（H-4）。os.walk 已 followlinks=False
         # 不递归目录 symlink；这里在 open 前按 lstat 拒绝文件 symlink。单文件 target
@@ -767,7 +887,13 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
             except OSError:
                 return
         try:
-            content = read_verified_bytes(full, max_bytes=_DEFAULT_MAX_FILE_BYTES)
+            content = read_verified_bytes(
+                full,
+                max_bytes=_DEFAULT_MAX_FILE_BYTES,
+                expected_identity=(
+                    expected_file_identity if expected_file_identity is not None else None
+                ),
+            )
             total_bytes_read += len(content)
             if total_bytes_read > _MAX_SEARCH_TOTAL_BYTES:
                 raise ToolError(
@@ -813,12 +939,11 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
             file_matches.setdefault(rel, [])
 
     if not target_is_dir:
-        search_file(target, follow_symlink=True)
+        search_file(target, follow_symlink=False)
     else:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            _assert_directory_identity(root, root_identity)
-            dirnames[:] = [d for d in dirnames if d not in _NOISE_DIRS]
-            _prune_linked_directories(dirpath, dirnames)
+            if not _prepare_walk_directory(root, dirpath, dirnames, expected_directories):
+                continue
             files_seen = _enforce_walk_budget(
                 root,
                 dirpath,
@@ -970,10 +1095,8 @@ async def handle_patch(
 
     sensitive = _check_sensitive_path(str(args.get("path", "")))
     if sensitive:
-        raise ToolError(sensitive)
+        raise ToolError("补丁目标不允许写入")
 
-    if not path.is_file():
-        raise ToolError(f"文件不存在: {path}")
     if not old:
         raise ToolError("old 不能为空")
 
@@ -984,6 +1107,8 @@ async def handle_patch(
         )
     except (FileConflictError, OSError, ValueError) as exc:
         raise ToolError(safe_public_error(exc, "补丁目标身份校验失败")) from exc
+    if not version.exists:
+        raise ToolError("文件不存在或不可用")
     text_bytes = version.data
     text = text_bytes.decode("utf-8", errors="replace")
     text, had_bom = _strip_bom(text)

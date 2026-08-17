@@ -49,6 +49,64 @@ async def test_authorized_search_does_not_delegate_unpinned_tree_to_host_rg(
     assert "safe.txt" in result
 
 
+@pytest.mark.asyncio
+async def test_authorized_search_rejects_root_replacement_before_walker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "safe.txt").write_text("safe\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("SECRET_CANARY\n", encoding="utf-8")
+    original = tmp_path / "ws-original"
+
+    async def authorize(*_args, **_kwargs):
+        return workspace
+
+    real_glob = file_tools._glob_via_python
+    swapped = False
+
+    def swap_before_walk(*args, **kwargs):
+        nonlocal swapped
+        workspace.rename(original)
+        outside.rename(workspace)
+        swapped = True
+        return real_glob(*args, **kwargs)
+
+    monkeypatch.setattr(file_tools, "authorize_file_tool", authorize)
+    monkeypatch.setattr(file_tools, "_glob_via_python", swap_before_walk)
+    try:
+        with pytest.raises(ToolError, match="搜索目录|变化|链接"):
+            await file_tools.handle_glob({"pattern": "*.txt", "path": str(workspace)})
+    finally:
+        if workspace.exists():
+            workspace.rename(outside)
+        if original.exists():
+            original.rename(workspace)
+
+    assert swapped
+
+
+@pytest.mark.asyncio
+async def test_search_missing_root_error_does_not_echo_authorized_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing = tmp_path / "secret-name-that-must-not-leak"
+
+    async def authorize(*_args, **_kwargs):
+        return missing
+
+    monkeypatch.setattr(file_tools, "authorize_file_tool", authorize)
+
+    with pytest.raises(ToolError) as error:
+        await file_tools.handle_glob({"pattern": "*.txt", "path": str(missing)})
+
+    assert str(missing) not in str(error.value)
+
+
 def _can_make_symlink(link: Path, target: Path) -> bool:
     try:
         link.symlink_to(target)

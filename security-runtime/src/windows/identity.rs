@@ -170,9 +170,12 @@ pub fn uninstall(state_dir: &Path) -> Result<(), String> {
         }
     }
     let username_refs = usernames.iter().map(String::as_str).collect::<Vec<_>>();
+    // Remove the kernel network boundary before deleting or un-hiding the
+    // accounts it names. If WFP teardown fails, leave the identity and users
+    // intact so a later elevated recovery can retry with the same principals.
+    super::wfp::uninstall()?;
     super::users::unhide_sandbox_users(&username_refs)?;
     cleanup_accounts(&username_refs)?;
-    super::wfp::uninstall()?;
     if !usernames.is_empty() {
         fs::remove_file(path)
             .map_err(|error| format!("cannot remove sandbox identity: {error}"))?;

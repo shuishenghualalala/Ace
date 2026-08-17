@@ -57,6 +57,7 @@ import {
 import {
   chooseStandaloneGatewayAction,
   nextGatewayConnectionState,
+  standaloneGatewayUsable,
   waitForGatewayCandidate,
 } from './gateway-availability';
 import { GatewayRestartController } from './gateway-restart-controller';
@@ -258,6 +259,7 @@ let rendererReadyFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 const RENDERER_READY_FALLBACK_MS = 15_000;
 
 let isQuitting = false;
+let gatewayQuitCleanup: Promise<void> | null = null;
 // Gateway 重建代际：每次主动重试/重建递增。在途 ensureGateway 流程启动时记下
 // 自己的代际，health wait 每轮校验——代际变了说明用户点了重试，立即中止让位，
 // 避免「旧 wait 无超时挂着、新重建又被排队」的假死。
@@ -299,8 +301,10 @@ function clearManagedGatewayInstanceKey(): void {
   managedGatewayInstanceKey = null;
 }
 
-function activeGatewayInstanceKey(): Buffer | undefined {
-  return managedGateway && managedGatewayInstanceKey
+function activeGatewayInstanceKey(baseUrl = resolvedGatewayBaseUrl): Buffer | undefined {
+  return managedGateway
+    && managedGatewayInstanceKey
+    && baseUrl === resolvedGatewayBaseUrl
     ? Buffer.from(managedGatewayInstanceKey)
     : undefined;
 }
@@ -1541,7 +1545,7 @@ loginNewServiceInstance.setGatewayProofProvider((method, pathname, body) => (
 ));
 
 async function probeHealthApi(baseUrl: string) {
-  const instanceKey = activeGatewayInstanceKey();
+  const instanceKey = activeGatewayInstanceKey(baseUrl);
   return probeGatewayInstance(baseUrl, {
     crewHome: activeGatewayCrewHome(),
     ...(instanceKey === undefined ? {} : { instanceKey }),
@@ -2110,7 +2114,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     // candidate while its process/listener exists; this prevents expensive tools or deferred
     // startup from being mistaken for an identity change and recycled in a loop.
     const firstProbe = await probeHealthApi(cached.baseUrl);
-    if (firstProbe.verified) return cached;
+    if (standaloneGatewayUsable(firstProbe)) return cached;
 
     const waitGeneration = gatewayGeneration;
     const ownedChild = cached.managed ? managedGateway : null;
@@ -2143,11 +2147,17 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
           return gatewayCandidatePresent(cached.baseUrl);
         },
       });
-      if (waited.status === 'ready') return cached;
+      if (waited.status === 'ready' && standaloneGatewayUsable(waited.probe)) return cached;
       if (waited.status === 'untrusted') {
         if (cached.managed) await stopManagedGateway('identity-rejected');
         if (ensureGatewayPromise === cachedPromise) ensureGatewayPromise = null;
         throw new Error(`Gateway instance verification rejected ${cached.baseUrl}`);
+      }
+      if (waited.status === 'timeout') {
+        logSupervisorDecision('wait-existing-instance-timeout', {
+          baseUrl: cached.baseUrl,
+          managed: cached.managed,
+        });
       }
     }
 
@@ -2217,6 +2227,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
         : await gatewayCandidatePresent(DEFAULT_GATEWAY_URL);
       const externalAction = chooseStandaloneGatewayAction(firstProbe, externalPresent);
       if (externalAction === 'reuse') {
+        if (managedGateway) await stopManagedGateway('switch-to-external');
         resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
         return { baseUrl: DEFAULT_GATEWAY_URL, managed: false };
       }
@@ -2236,7 +2247,8 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
             return gatewayCandidatePresent(DEFAULT_GATEWAY_URL);
           },
         });
-        if (waited.status === 'ready') {
+        if (waited.status === 'ready' && standaloneGatewayUsable(waited.probe)) {
+          if (managedGateway) await stopManagedGateway('switch-to-external');
           resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
           return { baseUrl: DEFAULT_GATEWAY_URL, managed: false };
         }
@@ -2245,6 +2257,11 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
             `Existing service at ${DEFAULT_GATEWAY_URL} failed Gateway instance verification; `
             + 'ensure the standalone Gateway and Desktop use the same CREW_HOME',
           );
+        }
+        if (waited.status === 'timeout') {
+          logSupervisorDecision('wait-external-instance-timeout', {
+            baseUrl: DEFAULT_GATEWAY_URL,
+          });
         }
         if (generation !== gatewayGeneration) throw new GatewaySupersededError();
       }
@@ -4338,7 +4355,7 @@ app.on('window-all-closed', () => {
 });
 
 // 优雅关闭：包含网络释放以及后台猎杀
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   isQuitting = true;
   feedbackServiceInstance.cancelAll();
   for (const win of inspirationWindows.values()) {
@@ -4356,13 +4373,23 @@ app.on('before-quit', () => {
   } catch (err) {
     console.warn('[main] disposeUpdateDownload failed:', (err as Error).message);
   }
-  // 🌟 新增：彻底猎杀 Electron 托管的 Python 后台进程，防止驻留
-  if (managedGateway) {
-    console.log('[main] Closing managed gateway parent-liveness lease before quit...');
-    try { managedGateway.stdin.end(); } catch { managedGateway.kill(); }
-    managedGateway = null;
+  // Wait for the parent-liveness shutdown, then use stopManagedGateway's exact-child
+  // timeout fallback before allowing Electron to exit.
+  if (gatewayQuitCleanup) {
+    event.preventDefault();
+  } else if (managedGateway) {
+    event.preventDefault();
+    console.log('[main] Closing managed gateway before quit...');
+    gatewayQuitCleanup = stopManagedGateway('app-quit')
+      .catch((error) => {
+        console.error('[main] managed gateway cleanup failed:', error);
+      })
+      .finally(() => {
+        gatewayQuitCleanup = null;
+        app.quit();
+      });
   }
-  clearManagedGatewayInstanceKey();
+  if (!gatewayQuitCleanup) clearManagedGatewayInstanceKey();
 });
 
 const gotLock = app.requestSingleInstanceLock();

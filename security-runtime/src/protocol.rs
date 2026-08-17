@@ -14,6 +14,7 @@ pub const MAX_ENV_BYTES: usize = 256 * 1024;
 pub const MAX_RESPONSE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_STDIO_INPUT_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_STDIO_INPUT_BYTES: usize = 16 * 1024 * 1024;
 pub const READY_CAPABILITIES: [&str; 4] = [
@@ -78,6 +79,7 @@ pub struct FilesystemGlobRule {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequestEnvelope {
     pub version: u16,
     pub token: String,
@@ -87,6 +89,7 @@ pub struct RequestEnvelope {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum RuntimeRequest {
     ClassifyShell {
         shell_kind: String,
@@ -336,6 +339,137 @@ pub fn validate_process_inputs(
     })
 }
 
+/// Validate request-wide resource budgets before any platform backend starts.
+/// Platform modules enforce OS policy; this boundary owns the protocol-level
+/// memory and output limits so malformed requests cannot reach them with an
+/// unbounded command, path list, or capture budget.
+pub fn validate_request_limits(request: &RuntimeRequest) -> Result<(), InputValidationError> {
+    let (
+        command,
+        cwd,
+        writable_roots,
+        readable_roots,
+        denied_roots,
+        filesystem_globs,
+        network_rules,
+        max_output_bytes,
+        max_input_bytes,
+        _stdin_b64,
+        _env_overrides,
+    ) = match request {
+        RuntimeRequest::ClassifyShell {
+            shell_kind,
+            executable,
+            raw_command,
+        } => {
+            if shell_kind.len() > 64
+                || executable.len() > 16 * 1024
+                || raw_command.len() > MAX_REQUEST_FRAME_BYTES
+                || shell_kind.contains('\0')
+                || executable.contains('\0')
+                || raw_command.contains('\0')
+            {
+                return Err(InputValidationError {
+                    code: "sandbox_denied",
+                    message: "classification request exceeds the size limit",
+                });
+            }
+            return Ok(());
+        }
+        RuntimeRequest::Run {
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            denied_roots,
+            filesystem_globs,
+            network_rules,
+            max_output_bytes,
+            stdin_b64,
+            env_overrides,
+            ..
+        } => (
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            denied_roots,
+            filesystem_globs,
+            network_rules,
+            max_output_bytes,
+            &0,
+            stdin_b64,
+            env_overrides,
+        ),
+        RuntimeRequest::RunStdio {
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            denied_roots,
+            filesystem_globs,
+            network_rules,
+            max_output_bytes,
+            max_input_bytes,
+            env_overrides,
+            ..
+        } => (
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            denied_roots,
+            filesystem_globs,
+            network_rules,
+            max_output_bytes,
+            max_input_bytes,
+            &None,
+            env_overrides,
+        ),
+    };
+
+    let command_bytes = command
+        .iter()
+        .try_fold(0usize, |total, value| total.checked_add(value.len()));
+    let bounded_path_list = |values: &[String]| {
+        values
+            .iter()
+            .all(|value| !value.is_empty() && value.len() <= 16 * 1024 && !value.contains('\0'))
+    };
+    if command.len() > 256
+        || command
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 16 * 1024 || value.contains('\0'))
+        || !matches!(command_bytes, Some(total) if total <= MAX_REQUEST_FRAME_BYTES)
+        || cwd.is_empty()
+        || cwd.len() > 16 * 1024
+        || cwd.contains('\0')
+        || *max_output_bytes == 0
+        || *max_output_bytes > MAX_OUTPUT_BYTES
+        || *max_input_bytes > MAX_STDIO_INPUT_BYTES
+        || writable_roots.len() + readable_roots.len() + denied_roots.len() > 256
+        || !bounded_path_list(writable_roots)
+        || !bounded_path_list(readable_roots)
+        || !bounded_path_list(denied_roots)
+        || filesystem_globs.len() > 256
+        || filesystem_globs.iter().any(|rule| {
+            rule.root.is_empty()
+                || rule.root.len() > 16 * 1024
+                || rule.root.contains('\0')
+                || rule.pattern.is_empty()
+                || rule.pattern.len() > 16 * 1024
+                || rule.pattern.contains('\0')
+        })
+        || network_rules.len() > 256
+    {
+        return Err(InputValidationError {
+            code: "sandbox_denied",
+            message: "runtime request exceeds a resource limit",
+        });
+    }
+    Ok(())
+}
+
 fn disallowed_environment_name(normalized: &str) -> bool {
     matches!(
         normalized,
@@ -479,10 +613,12 @@ fn valid_environment_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_process_inputs, validate_stdio_input_frame, FilesystemGlobAccess, RequestEnvelope,
-        RuntimeCapabilities, RuntimeEvent, RuntimeRequest, StdioInputFrame, StdioInputMessage,
-        MAX_ENV_BYTES, MAX_OUTPUT_CHUNK_BYTES, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
-        MAX_STDIN_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES, STDIO_MAC_CONTEXT,
+        validate_process_inputs, validate_request_limits, validate_stdio_input_frame,
+        FilesystemGlobAccess, RequestEnvelope, RuntimeCapabilities, RuntimeEvent, RuntimeRequest,
+        StdioInputFrame, StdioInputMessage, DEFAULT_MAX_OUTPUT_BYTES, MAX_ENV_BYTES,
+        MAX_OUTPUT_BYTES, MAX_OUTPUT_CHUNK_BYTES, MAX_REQUEST_FRAME_BYTES,
+        MAX_RESPONSE_FRAME_BYTES, MAX_STDIN_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
+        STDIO_MAC_CONTEXT,
     };
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
@@ -552,6 +688,32 @@ mod tests {
         let mut invalid = value;
         invalid["request"]["filesystem_globs"][0]["access"] = serde_json::json!("allow_read");
         assert!(serde_json::from_value::<RequestEnvelope>(invalid).is_err());
+    }
+
+    #[test]
+    fn request_budget_and_unknown_fields_fail_closed() {
+        let value = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "token": "token",
+            "nonce": "nonce",
+            "request": {
+                "op": "run",
+                "command": ["true"],
+                "cwd": "/workspace",
+                "max_output_bytes": DEFAULT_MAX_OUTPUT_BYTES
+            }
+        });
+        let envelope: RequestEnvelope = serde_json::from_value(value.clone()).unwrap();
+        assert!(validate_request_limits(&envelope.request).is_ok());
+
+        let mut oversized = value.clone();
+        oversized["request"]["max_output_bytes"] = serde_json::json!(MAX_OUTPUT_BYTES + 1);
+        let parsed: RequestEnvelope = serde_json::from_value(oversized).unwrap();
+        assert!(validate_request_limits(&parsed.request).is_err());
+
+        let mut unknown = value;
+        unknown["request"]["untrusted_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<RequestEnvelope>(unknown).is_err());
     }
 
     #[test]

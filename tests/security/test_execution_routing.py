@@ -12,11 +12,13 @@ from crew.security.context import SecurityContext
 from crew.security.launch import (
     HelperIntegrityError,
     ProcessLaunch,
+    _initialized_windows_security_state_dir,
     current_process_launch,
     execute_captured,
     host_stream_launch_block_reason,
     issue_process_launch,
     minimal_inherited_environment,
+    minimal_native_helper_environment,
     packaged_runtime_argv,
     packaged_runtime_candidates,
     runtime_platform_key,
@@ -216,6 +218,7 @@ def test_production_helper_rejects_system_temp_directory(tmp_path, monkeypatch):
         "crew.security.launch._runtime_requires_hardened_directory",
         lambda _path: True,
     )
+    monkeypatch.setattr("crew.security.launch.tempfile.gettempdir", lambda: str(tmp_path))
 
     with pytest.raises(HelperIntegrityError, match="temp directory"):
         verify_helper_integrity(runtime)
@@ -305,6 +308,47 @@ def test_packaged_desktop_binding_rejects_replaced_runtime_and_manifest(tmp_path
     )
     with pytest.raises(HelperIntegrityError, match="Desktop trust root"):
         verify_helper_integrity(runtime)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="committed Windows runtime artifact")
+def test_committed_windows_runtime_artifact_matches_source():
+    root = Path(__file__).resolve().parents[2]
+    helper = root / "security-runtime" / "bin" / "ace-security-runtime.exe"
+
+    assert runtime_source_stale(helper) is False
+    verify_helper_integrity(helper)
+
+
+def test_windows_security_state_default_only_accepts_initialized_crew_desktop(tmp_path):
+    old_dir = tmp_path / "AppData" / "Roaming" / "crew-desktop" / "security"
+    new_dir = tmp_path / "AppData" / "Roaming" / "crew-desktop-ui" / "security"
+    old_dir.mkdir(parents=True)
+    old_marker = old_dir / "windows-sandbox-identity.json"
+    old_marker.write_text("old", encoding="utf-8")
+    new_dir.mkdir(parents=True)
+    marker = new_dir / "windows-sandbox-identity.json"
+    marker.write_text("new", encoding="utf-8")
+    same_mtime_ns = marker.stat().st_mtime_ns
+    os.utime(old_marker, ns=(same_mtime_ns, same_mtime_ns))
+    os.utime(marker, ns=(same_mtime_ns, same_mtime_ns))
+    os.utime(old_dir, ns=(same_mtime_ns, same_mtime_ns))
+    os.utime(new_dir, ns=(same_mtime_ns, same_mtime_ns))
+
+    assert _initialized_windows_security_state_dir(tmp_path) == new_dir
+
+    marker.unlink()
+    assert _initialized_windows_security_state_dir(tmp_path) == old_dir
+
+    old_marker.unlink()
+    assert _initialized_windows_security_state_dir(tmp_path) is None
+
+
+def test_native_helper_environment_carries_security_state_dir(monkeypatch):
+    monkeypatch.setenv("ACE_SECURITY_STATE_DIR", r"C:\ProgramData\does-not-exist")
+
+    assert minimal_native_helper_environment()[
+        "ACE_SECURITY_STATE_DIR"
+    ] == r"C:\ProgramData\does-not-exist"
 
 
 def test_runtime_source_stale_uses_manifest_next_to_selected_helper(tmp_path):

@@ -163,7 +163,10 @@ pub fn run(
     // The limits apply to bubblewrap and are inherited by every process in its
     // PID namespace, preventing an MCP child from escaping host process budgets.
     unsafe {
-        command.pre_exec(set_child_resource_limits);
+        command.pre_exec(|| {
+            set_child_resource_limits()?;
+            seccomp::set_parent_death_signal()
+        });
     }
     let mut child = command
         .spawn()
