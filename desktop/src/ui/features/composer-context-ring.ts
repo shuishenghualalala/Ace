@@ -162,11 +162,6 @@ export function createContextRingController(
 /** 主对话圆环实例（bindComposerContextRing 创建；元素由 composer-context-view 生成）。 */
 let mainRingController: ContextRingController | null = null;
 
-/** 拉取并刷新主对话上下文圆环。 */
-export function refreshComposerContextRing(): void {
-  mainRingController?.refresh();
-}
-
 export function bindComposerContextRing(): void {
   const btn = $('#chat-context-ring-btn') as HTMLButtonElement | null;
   const pctEl = document.getElementById('chat-context-ring-pct');

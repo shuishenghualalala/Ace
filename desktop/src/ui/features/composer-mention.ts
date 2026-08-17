@@ -30,6 +30,7 @@ import { sessionStore } from '../stores/session-store';
 import { workStore } from '../stores/work-store';
 import { composerWorkspaceId } from './workspaces';
 import { queryPrimaryComposer } from './composer-scope';
+import { tabTitle } from './browser-inspector';
 import {
   MENTION_KINDS,
   removeMentionTag,
@@ -326,10 +327,6 @@ function activeWorkspaceId(): string {
     : composerWorkspaceId();
 }
 
-/** 标签页候选标题：页面标题优先，其次 URL，再次标签序号。 */
-function browserTabTitle(tab: BrowserPageState['tabs'][number]): string {
-  return tab.title.trim() || tab.url.trim() || tab.label.trim() || tab.id;
-}
 
 /** 按 query 过滤浏览器标签页并映射为提及候选（title/url 子串匹配）。纯函数，可单测。 */
 export function filterBrowserTabs(tabs: BrowserPageState['tabs'], query: string): MentionResult[] {
@@ -339,7 +336,7 @@ export function filterBrowserTabs(tabs: BrowserPageState['tabs'], query: string)
     .map((tab) => ({
       entity_type: 'browser_tab' as const,
       id: tab.id,
-      title: browserTabTitle(tab),
+      title: tabTitle(tab),
       source_link: tab.url,
     }));
 }

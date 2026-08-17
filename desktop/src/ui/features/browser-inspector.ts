@@ -1,12 +1,14 @@
 import type { BrowserPageState } from '../backend-client';
 import { createIcon, type IconId } from '../components/icon';
 
-function isBlankUrl(value: string): boolean {
+export function isBlankUrl(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return normalized === '' || normalized === 'about:blank';
 }
 
-function tabTitle(tab: BrowserPageState['tabs'][number]): string {
+/** 标签页显示标题：about:blank/空 URL 归「新标签页」，否则标题优先、URL 兜底。
+ *  @ 提及候选（composer-mention）共用此兜底链，保证 about:blank 不显示成一坨 URL。 */
+export function tabTitle(tab: BrowserPageState['tabs'][number]): string {
   if (isBlankUrl(tab.url)) return '新标签页';
   return tab.title.trim() || tab.url.trim() || '新标签页';
 }

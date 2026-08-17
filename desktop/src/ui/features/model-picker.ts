@@ -100,16 +100,9 @@ export interface ModelSelectPopoverOptions {
 
 const MODEL_CHECK_ICON = `<svg class="composer-select-item__check" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
 
-/** config 里的 Crew 模型 → 浮层条目（与 composerModelOptions 的 Crew 分支同一口径）。 */
+/** config 里的 Crew 模型 → 浮层条目：直接复用 composerModelOptions 的 Crew 分支（null 会话无绑定）。 */
 function defaultModelOptions(): ComposerModelOption[] {
-  return (state.config?.models || []).map((model) => ({
-    id: model.id,
-    label: model.name || model.model || model.id,
-    description: model.has_key ? (model.model || model.id) : '未配置 API Key',
-    // 保持 Crew 原行为：无 Key 模型仍可点击，由既有后端校验负责反馈。
-    selectable: true,
-    warning: !model.has_key,
-  }));
+  return composerModelOptions(null);
 }
 
 /**

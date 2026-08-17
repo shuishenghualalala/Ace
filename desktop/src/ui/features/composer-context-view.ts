@@ -1,17 +1,10 @@
 import { createIcon, MONOCHROME_ICON_CLASS, type IconId } from '../components/icon';
+import type { ContextRingElements } from './composer-context-ring';
 
-export interface ComposerContextRingElements {
-  btn: HTMLButtonElement;
-  pct: HTMLElement;
-  progress: SVGCircleElement;
-}
-
-/** 工厂创建的关键控件句柄：供实例级控制器（模型 chip / 上下文环 / 附件）接线。 */
+/** 工厂创建的关键控件句柄：供实例级控制器（模型 chip / 上下文环）接线。 */
 export interface ComposerContextControls {
-  attachBtn: HTMLButtonElement;
   modelChip: HTMLButtonElement;
-  modelLabel: HTMLElement;
-  ring: ComposerContextRingElements;
+  ring: ContextRingElements;
 }
 
 export interface ComposerContextView {
@@ -235,7 +228,7 @@ function createLeftControls(withIds: boolean, surface: 'main' | 'wiki'): Documen
   return fragment;
 }
 
-function createContextRing(withIds: boolean): ComposerContextRingElements {
+function createContextRing(withIds: boolean): ContextRingElements {
   const button = document.createElement('button');
   const percentage = document.createElement('span');
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -272,7 +265,7 @@ function createContextRing(withIds: boolean): ComposerContextRingElements {
 
 function createRightControls(
   withIds: boolean,
-): { fragment: DocumentFragment; modelChip: HTMLButtonElement; modelLabel: HTMLElement; ring: ComposerContextRingElements } {
+): { fragment: DocumentFragment; modelChip: HTMLButtonElement; ring: ContextRingElements } {
   const fragment = document.createDocumentFragment();
   const model = document.createElement('div');
   if (withIds) model.id = 'chat-model-picker-inline';
@@ -282,11 +275,10 @@ function createRightControls(
     null,
     withIds ? 'chat-model-picker-inline-label' : null,
   );
-  const modelLabel = modelChip.querySelector<HTMLElement>('.mw-context-chip__label')!;
   model.append(modelChip);
   const ring = createContextRing(withIds);
   fragment.append(model, ring.btn);
-  return { fragment, modelChip, modelLabel, ring };
+  return { fragment, modelChip, ring };
 }
 
 /**
@@ -327,9 +319,7 @@ export function createComposerContextView(
 
   return {
     controls: {
-      attachBtn,
       modelChip: right.modelChip,
-      modelLabel: right.modelLabel,
       ring: right.ring,
     },
     dispose() {
