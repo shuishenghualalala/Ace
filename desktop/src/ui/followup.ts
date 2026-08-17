@@ -1,7 +1,7 @@
 /**
  * 追问选择框（ask_followup_question）— desktop 端渲染与事件绑定。
  *
- * 普通追问对齐 web 端 FollowupQuestionCard；权限请求使用居中阻断式对话框。
+ * 普通追问对齐 web 端 FollowupQuestionCard；权限请求使用不阻断页面的浮层。
  * 取消时通知后端（followup_cancel），与 web 行为一致。
  */
 
@@ -280,7 +280,7 @@ function permissionDialogHtml(question: PendingFollowup): string {
   const actions = orderedOptions.map((option) => `
       <button type="button" class="permission-dialog__button${permissionButtonClass(option.label, option.value)}" data-permission-qid="${escapeHtml(firstQuestion?.id ?? '')}" data-permission-value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</button>`).join('');
   return `
-    <div class="followup-card followup-card--permission" data-followup-id="${escapeHtml(question.questionId)}" role="alertdialog" aria-modal="true" aria-labelledby="${dialogId}-title" aria-describedby="${dialogId}-description" tabindex="-1">
+    <div class="followup-card followup-card--permission" data-followup-id="${escapeHtml(question.questionId)}" role="dialog" aria-modal="false" aria-labelledby="${dialogId}-title" aria-describedby="${dialogId}-description" tabindex="-1">
       ${followupSourceHtml(question)}
       <div class="followup-card__header">
         <span class="followup-card__header-icon">${PERMISSION_ICON}</span>
@@ -461,22 +461,9 @@ export function bindFollowupCard(root: HTMLElement, bindings: FollowupBindings):
         resolved = true;
         buttons.forEach((item) => { item.disabled = true; });
         bindings.onCancel(questionId);
-        return;
-      }
-      if (event.key !== 'Tab' || buttons.length === 0) return;
-      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      if (event.shiftKey && index <= 0) {
-        event.preventDefault();
-        buttons.at(-1)?.focus();
-      } else if (!event.shiftKey && index === buttons.length - 1) {
-        event.preventDefault();
-        buttons[0]?.focus();
       }
     });
-    const safestAction = buttons.find((button) => /deny|拒绝/i.test(
-      `${button.textContent ?? ''} ${button.dataset.permissionValue ?? ''}`,
-    ));
-    (safestAction ?? buttons[0] ?? card).focus({ preventScroll: true });
+    // 这是非模态浮层：不抢占当前页面焦点，也不把 Tab 键限制在浮层内。
     return;
   }
 

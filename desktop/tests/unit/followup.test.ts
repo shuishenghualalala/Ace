@@ -89,8 +89,8 @@ describe('follow-up permission presentation', () => {
     expect(html).not.toContain('{&quot;action&quot;');
     expect(html).not.toContain('为什么需要确认');
     expect(html).not.toContain('role="radiogroup"');
-    expect(html).toContain('role="alertdialog"');
-    expect(html).toContain('aria-modal="true"');
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('aria-modal="false"');
     expect(html).not.toContain('其他（自定义输入）');
     expect(html).not.toContain('__free_text__');
   });
@@ -103,7 +103,7 @@ describe('follow-up permission presentation', () => {
     bindFollowupCard(root, { onSubmit, onCancel: () => undefined });
 
     const deny = root.querySelector<HTMLButtonElement>('[data-permission-value="deny"]')!;
-    expect(document.activeElement).toBe(deny);
+    expect(document.activeElement).not.toBe(deny);
     deny.click();
     deny.click();
 
@@ -114,7 +114,7 @@ describe('follow-up permission presentation', () => {
     root.remove();
   });
 
-  it('translates browser type arguments into readable copy and centers through the modal wrapper', () => {
+  it('translates browser type arguments into readable copy and renders through the floating wrapper', () => {
     const question = permissionQuestion();
     question.questions[0]!.question = '即将执行：{"action":"type","ref":"p1:e27","submit":true,"text":"云南旅游视频"}\n\n原因：填写后按 Enter 可能提交表单，需要一次性确认';
 
@@ -268,7 +268,7 @@ function wikiConfirmQuestion(): PendingFollowup {
 }
 
 describe('wiki confirmation presentation', () => {
-  it('renders as a blocking permission dialog with wiki copy', () => {
+  it('renders as a permission dialog with wiki copy', () => {
     const html = renderFollowupCard(wikiConfirmQuestion());
     expect(html).toContain('followup-card--permission');
     expect(html).toContain('允许执行 Wiki 操作？');
