@@ -749,7 +749,7 @@ pytest -q -p no:cacheprovider tests/security
 
 | 证据 | 结果 |
 |---|---|
-| source / commit | `HEAD 5e022afe5e6e8dd3b8ac9bb6eb0969974c7a4a82`; final checkout clean，满足本地 clean commit-bound 条件 |
+| source / commit | implementation commit `5e022afe5e6e8dd3b8ac9bb6eb0969974c7a4a82`; documentation closure is committed and final checkout clean，满足本地 clean commit-bound 条件 |
 | Windows target | `x86_64-pc-windows-msvc`; `cargo build --release --target x86_64-pc-windows-msvc` passed |
 | binary | `security-runtime/bin/ace-security-runtime.exe`; SHA-256 `dc55074e7225bbcb7dce5943231eb16e17e901f0804fbee95570f11c389a8f81`; Desktop staged digest identical |
 | manifest | `security-runtime/bin/runtime-manifest.json`; schema 2, `win32/x64`, source hash `f332d2ab080f2753ed4c923b695896d16ce1e64043e671f840a854bbcbb0f7f5`, binary digest matches |

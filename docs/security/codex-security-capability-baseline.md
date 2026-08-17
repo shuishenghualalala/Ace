@@ -3,7 +3,7 @@
 > 基线日期：2026-08-14（原始基线）
 > 最后复核：2026-08-17
 > Codex：`D:/MobileWork/codex`，`main`，`4ef836f883c38ba6d39e6920f335ce6452b7de33`
-> Ace：`D:/MobileWork/Ace`，`feat/ui-security-foundation`，HEAD `5e022afe5e6e8dd3b8ac9bb6eb0969974c7a4a82`，安全整改已提交且当前工作树 clean
+> Ace：`D:/MobileWork/Ace`，`feat/ui-security-foundation`，安全整改实现提交 `5e022afe5e6e8dd3b8ac9bb6eb0969974c7a4a82`，文档收口已提交且当前工作树 clean
 > 规格：`docs/security/codex-security-capability-baseline-spec.md`
 > 本文是按规格一次写成的完整对照矩阵，不是分次修订附录的汇编。
 
