@@ -20,6 +20,12 @@ if TYPE_CHECKING:
     from crew.cron.scheduler import CronService
 
 
+# origin 投递只对「已注册外部 sender 的渠道」有效（见 gateway 装配的 DeliveryRouter）。
+# 创建期与运行期共用这一份白名单：新增外部渠道（如 weixin）时在此加平台名，
+# 并同步在 DeliveryRouter 注册对应 sender。
+EXTERNAL_ORIGIN_PLATFORMS = frozenset({"feishu"})
+
+
 def _describe_interval(seconds: int) -> str:
     if seconds % 86400 == 0:
         days = seconds // 86400
@@ -210,12 +216,13 @@ def register_cron_tools(
         origin_source = current_session_source.get() or {}
         deliver = str(args.get("deliver") or "").strip()
         deliver_note = ""
+        origin_platform = str(origin_source.get("platform") or "")
         if not deliver:
-            if str(origin_source.get("platform") or "") == "feishu":
+            if origin_platform in EXTERNAL_ORIGIN_PLATFORMS:
                 deliver = "origin"
             else:
                 deliver = "new_session"
-        elif deliver == "origin" and str(origin_source.get("platform") or "") != "feishu":
+        elif deliver == "origin" and origin_platform not in EXTERNAL_ORIGIN_PLATFORMS:
             # origin 兜底（_cron_runner 在运行期也会做）提前到创建期显式化：
             # 本地会话没有外部 sender，存成 new_session 并在返回里说明，
             # 让模型读到真实投递目标，避免向用户误承诺「投递到当前会话」。

@@ -161,11 +161,10 @@ async def resolve_browser_tab_references(
             tab_ids.append(tab_id)
     if not tab_ids:
         return []
+    if manager is None:
+        return [{"tab_id": tab_id, "error": "Browser Use 未启用"} for tab_id in tab_ids]
     refs: list[dict[str, str]] = []
     for tab_id in tab_ids:
-        if manager is None:
-            refs.append({"tab_id": tab_id, "error": "Browser Use 未启用"})
-            continue
         try:
             content = await manager.read_tab_content(
                 owner_account_id,

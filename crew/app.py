@@ -2913,6 +2913,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     # cron：任务存储 + 引擎 + 暴露给 agent 的工具
     from crew.cron import CronJobStore, CronService
+    from crew.cron.tools import EXTERNAL_ORIGIN_PLATFORMS
     from crew.tools.cron_tools import register_cron_tools
 
     cron_store = CronJobStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
@@ -2963,9 +2964,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
             # origin 只对当前 DeliveryRouter 支持的外部渠道有效。Web/local/missing
             # 必须回退新会话，否则会把本地来源误当作外部 sender 并在执行后失败。
-            external_origin_platforms = {"feishu"}
             if deliver_target.lower() == "origin" and (
-                origin is None or origin.platform not in external_origin_platforms
+                origin is None or origin.platform not in EXTERNAL_ORIGIN_PLATFORMS
             ):
                 log.debug("cron deliver origin 无外部 sender，fallback 为新建会话")
                 deliver_target = "new_session"
