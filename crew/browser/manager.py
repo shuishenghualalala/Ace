@@ -383,12 +383,62 @@ class _Session:
     downloads: list[dict[str, Any]] = field(default_factory=list)
 
 
+class _OwnerOperationLock(asyncio.Lock):
+    """Owner lock with bounded queue waiting and low-cost runtime metrics."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queue_timeout_seconds = 30.0
+        self.queue_depth = 0
+        self.last_queue_wait_ms = 0.0
+        self.last_operation_ms = 0.0
+        self.queue_timeouts = 0
+        self._acquired_at = 0.0
+
+    async def acquire(self) -> bool:
+        queued = self.locked()
+        started = time.monotonic()
+        if queued:
+            self.queue_depth += 1
+        try:
+            timeout = float(self.queue_timeout_seconds or 0)
+            if timeout > 0:
+                acquired = await asyncio.wait_for(super().acquire(), timeout)
+            else:
+                acquired = await super().acquire()
+        except asyncio.TimeoutError:
+            if queued:
+                self.queue_depth = max(0, self.queue_depth - 1)
+            self.queue_timeouts += 1
+            raise BrowserDriverError(
+                f"浏览器动作排队超过 {timeout:g} 秒，请稍后重试",
+                code="browser_queue_timeout",
+            ) from None
+        except BaseException:
+            if queued:
+                self.queue_depth = max(0, self.queue_depth - 1)
+            raise
+        if queued:
+            self.queue_depth = max(0, self.queue_depth - 1)
+        self.last_queue_wait_ms = max(0.0, (time.monotonic() - started) * 1000)
+        self._acquired_at = time.monotonic()
+        return acquired
+
+    def release(self) -> None:
+        if self._acquired_at:
+            self.last_operation_ms = max(
+                0.0, (time.monotonic() - self._acquired_at) * 1000
+            )
+            self._acquired_at = 0.0
+        super().release()
+
+
 @dataclass
 class _Owner:
     owner: str
     runtime_key: str
     profile_dir: Path
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    lock: "_OwnerOperationLock" = field(default_factory=lambda: _OwnerOperationLock())
     control_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     sessions: dict[str, _Session] = field(default_factory=dict)
@@ -476,6 +526,12 @@ class BrowserManager:
 
     def available(self) -> bool:
         return bool(self.config.enabled and self.driver.available())
+
+    def _configure_owner_lock(self, owner: _Owner) -> None:
+        owner.lock.queue_timeout_seconds = max(
+            0.0,
+            float(getattr(self.config, "queue_timeout_seconds", 30.0) or 0.0),
+        )
 
     def _transfer_limit_bytes(self) -> int:
         configured = int(getattr(self.config, "max_transfer_bytes", 0) or 0)
@@ -879,6 +935,7 @@ class BrowserManager:
                             runtime_key=f"crew_{_hash(owner_id)}",
                             profile_dir=home / "browser" / "profile",
                         )
+                        self._configure_owner_lock(current)
                         self._owners[owner_id] = current
                     # Claiming an owner cancels a not-yet-started idle retire
                     # before the caller waits on its per-account lock.
@@ -9905,6 +9962,7 @@ class BrowserManager:
                             runtime_key=f"crew_{_hash(owner_key)}",
                             profile_dir=home / "browser" / "profile",
                         )
+                        self._configure_owner_lock(owner)
                         self._owners[owner_key] = owner
                     # Leave this owner as a tombstone until Session clear,
                     # Host close and artifact cleanup finish; other accounts do
@@ -10620,6 +10678,10 @@ class BrowserManager:
             viewport_height=session.viewport_height,
             can_go_back=session.can_go_back,
             can_go_forward=session.can_go_forward,
+            queue_depth=owner.lock.queue_depth,
+            last_queue_wait_ms=round(owner.lock.last_queue_wait_ms, 2),
+            last_operation_ms=round(owner.lock.last_operation_ms, 2),
+            queue_timeouts=owner.lock.queue_timeouts,
             tabs=[self._public_tab(value) for value in session.tabs.values()],
             downloads=_safe_public_value(list(session.downloads)),
         )

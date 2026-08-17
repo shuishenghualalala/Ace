@@ -124,6 +124,7 @@ tools:
     idle_timeout_seconds: 600
     command_timeout_seconds: 30
     navigation_timeout_seconds: 60
+    queue_timeout_seconds: 30
     max_output_chars: 30000
     max_transfer_bytes: 104857600
     artifact_ttl_hours: 24

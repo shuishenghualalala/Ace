@@ -503,6 +503,27 @@ async def test_vision_returns_media_and_page_bound_metadata(browser):
     assert "--settled" not in screenshot
 
 
+async def test_owner_action_queue_exposes_metrics_and_times_out(browser):
+    _unused_manager, _unused_driver = browser
+    driver = FakeBrowserDriver()
+    manager = BrowserManager(BrowserConfig(queue_timeout_seconds=0.01), driver)
+    try:
+        await manager.navigate("owner", "session", "https://example.com")
+        owner = manager._owners["owner"]
+        await owner.lock.acquire()
+        try:
+            with pytest.raises(BrowserDriverError, match="排队超过"):
+                await manager.snapshot("owner", "session")
+        finally:
+            owner.lock.release()
+        state = manager.state("owner", "session")
+        assert state["queue_timeouts"] == 1
+        assert state["queue_depth"] == 0
+        assert state["last_queue_wait_ms"] >= 0
+    finally:
+        await manager.aclose()
+
+
 def test_snapshot_compatibility_shim_never_truncates_content_or_refs():
     """Configured output limits are legacy inputs; snapshots remain complete."""
     body = "\n".join(f'- button "b{i}" [ref=p1:e{i}]' for i in range(200))

@@ -54,6 +54,8 @@ class BrowserConfig:
     idle_timeout_seconds: int = 600
     command_timeout_seconds: int = 30
     navigation_timeout_seconds: int = 60
+    # 同一账号动作串行时，后续动作最多排队多久；0 表示不设排队超时。
+    queue_timeout_seconds: float = 30.0
     # 单次输出的期望规模。**不是硬截断**：真实内网页面的完整快照经常超过它，
     # 按它截断会让模型基于半张页面下结论。只有远超它（见 manager 的护栏倍数）
     # 才按行截断并如实报出。
@@ -88,6 +90,10 @@ class BrowserConfig:
         ):
             if name in values:
                 values[name] = max(0, int(values[name]))
+        if "queue_timeout_seconds" in values:
+            values["queue_timeout_seconds"] = max(
+                0.0, float(values["queue_timeout_seconds"])
+            )
         for name in ("blocked_hosts", "allowed_private_hosts", "allowed_private_cidrs"):
             if name in values:
                 value = values[name]
@@ -148,6 +154,10 @@ class BrowserPageState:
     viewport_height: int = 0
     can_go_back: bool = False
     can_go_forward: bool = False
+    queue_depth: int = 0
+    last_queue_wait_ms: float = 0.0
+    last_operation_ms: float = 0.0
+    queue_timeouts: int = 0
     tabs: list[dict[str, str]] = field(default_factory=list)
     console_count: int = 0
     network_count: int = 0

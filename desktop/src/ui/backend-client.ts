@@ -403,6 +403,10 @@ export interface BrowserPageState {
   viewport_height: number;
   can_go_back: boolean;
   can_go_forward: boolean;
+  queue_depth?: number;
+  last_queue_wait_ms?: number;
+  last_operation_ms?: number;
+  queue_timeouts?: number;
   tabs: Array<{ id: string; label: string; url: string; title: string }>;
   downloads: Array<{
     id?: string;
