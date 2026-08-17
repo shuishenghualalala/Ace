@@ -38,7 +38,6 @@ from crew.gateway.helpers import (
 from crew.gateway.broadcast import stream_and_broadcast
 from crew.gateway.session_context import session_context_from_envelope
 from crew.state.logging import get_logger
-from crew.state.active_owner import ActiveOwnerConflict
 from crew.core.followup import get_followup_waiter
 
 log = get_logger("gateway.ws")
@@ -130,14 +129,10 @@ def create_ws_router(
             await socket.close(code=1013, reason="Gateway startup failed")
             return
         owner = account.owner_account_id
-        if logout_coordinator is not None and logout_coordinator.is_draining():
+        if logout_coordinator is not None and logout_coordinator.is_draining(owner):
             await socket.close(code=4423, reason="Logout in progress")
             return
-        try:
-            crew.active_owner.claim(owner)
-        except ActiveOwnerConflict:
-            await socket.close(code=4423, reason="Active owner conflict")
-            return
+        crew.active_owner.claim(owner)
         if logout_coordinator is not None:
             logout_coordinator.activate_owner(owner)
 
@@ -767,7 +762,7 @@ def create_ws_router(
                     envelope.params["team_confirm_execution_mode"] = True
                 envelope.attachments = attachments
                 envelope.params["session_context"] = session_context_from_envelope(
-                    envelope, connected_platforms(channel_manager)
+                    envelope, connected_platforms(channel_manager, owner)
                 )
                 if active_packages_added:
                     envelope.params["active_skill_packages"] = active_packages_added

@@ -169,10 +169,12 @@ def prepare_inbound_channel_envelope(crew: Any, envelope: Any) -> None:
     if bindings is None:
         return
     bindings_store = bindings
-    binder = bindings_store.get_binding(platform)
+    params = getattr(envelope, "params", None) or {}
+    binder = str(params.get("gateway_owner_account_id") or "").strip()
+    if not binder:
+        binder = str(bindings_store.get_binding(platform) or "").strip()
     if not binder:
         return
-    params = getattr(envelope, "params", None) or {}
     platform_uid = str(params.get("platform_uid") or getattr(envelope, "user_id", "") or "")
     if platform_uid:
         params.setdefault("platform_uid", platform_uid)
@@ -315,7 +317,12 @@ async def deliver_channel_session_reply(crew: Any, session_id: str, owner: str, 
     chat_id = source.chat_id or str(source.user_id or "")
     if not chat_id:
         return False
-    result = await router.deliver(f"{platform}:{chat_id}", body, origin=source)
+    result = await router.deliver(
+        f"{platform}:{chat_id}",
+        body,
+        origin=source,
+        owner_account_id=owner,
+    )
     return bool(result.get("ok"))
 
 

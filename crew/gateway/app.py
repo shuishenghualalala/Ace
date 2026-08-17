@@ -58,7 +58,6 @@ from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.routers.wiki import create_wiki_router
 from crew.gateway.routers.work import create_work_router
 from crew.gateway.ws import create_ws_router
-from crew.state.active_owner import ActiveOwnerConflict
 from crew.state.logging import get_logger
 
 log = get_logger("gateway")
@@ -77,7 +76,7 @@ def _register_platform_channel(
         pconfig = entry.build_config(raw, include_env=not bool(owner))
     except Exception as exc:  # noqa: BLE001 - 单个平台配置异常不应阻断其它渠道启动
         log.warning("平台 %s 配置解析失败，跳过启动: %s", entry.name, exc)
-        channel_manager.record_error(entry.name, "platform config invalid")
+        channel_manager.record_error(entry.name, "platform config invalid", owner)
         return False
 
     if not pconfig.enabled:
@@ -93,13 +92,13 @@ def _register_platform_channel(
             )
         else:
             log.warning("平台 %s 已启用但配置不完整，跳过启动（%s）", entry.name, hint)
-        channel_manager.record_error(entry.name, "platform config incomplete")
+            channel_manager.record_error(entry.name, "platform config incomplete", owner)
         return False
     try:
         channel = platform_registry.create_channel(entry.name, pconfig)
     except Exception as exc:  # noqa: BLE001 - 单个平台构造失败按渠道隔离
         log.exception("平台通道创建失败: %s", entry.name)
-        channel_manager.record_error(entry.name, str(exc))
+        channel_manager.record_error(entry.name, str(exc), owner)
         return False
     # 注入 CrewApp：供需要调用后端能力的渠道插件使用。
     if hasattr(channel, "bind_app"):
@@ -113,21 +112,29 @@ def _register_platform_channel(
 def _register_enabled_platform_channels(crew: CrewApp, channel_manager: ChannelManager) -> None:
     entries = platform_registry.all_entries()
     bindings = getattr(crew, "channel_bindings", None)
-    bound_owners: dict[str, str] = {}
+    bound_owners: dict[str, list[str]] = {}
     if bindings is not None:
         for entry in entries:
             try:
-                bound_owner = str(bindings.get_binding(entry.name) or "").strip()
+                list_for_platform = getattr(bindings, "list_for_platform", None)
+                if callable(list_for_platform):
+                    owners = [
+                        str(row.get("owner_account_id") or "").strip()
+                        for row in list_for_platform(entry.name)
+                    ]
+                else:
+                    bound_owner = str(bindings.get_binding(entry.name) or "").strip()
+                    owners = [bound_owner] if bound_owner else []
             except Exception as exc:  # noqa: BLE001 - 绑定存储异常不能影响其它渠道启动
                 log.warning("读取平台绑定失败: %s: %s", entry.name, exc)
                 continue
-            if bound_owner:
-                bound_owners[entry.name] = bound_owner
+            bound_owners[entry.name] = [owner for owner in owners if owner]
 
     for entry in entries:
-        bound_owner = bound_owners.get(entry.name, "")
-        if bound_owner:
-            _register_platform_channel(crew, channel_manager, entry, owner_account_id=bound_owner)
+        owners = bound_owners.get(entry.name, [])
+        if owners:
+            for owner in owners:
+                _register_platform_channel(crew, channel_manager, entry, owner_account_id=owner)
             continue
         _register_platform_channel(crew, channel_manager, entry)
 
@@ -140,10 +147,10 @@ def _wire_delivery_senders(
     cron 投递经 app._cron_runner 读 crew.delivery_router.deliver()，不需要再把
     router 挂到 cron_service 上。
     """
-    for name, channel in channel_manager.channels.items():
+    for name, owner, channel in channel_manager.iter_channels():
         sender = getattr(channel, "send_to_target", None)
         if callable(sender):
-            delivery_router.register(name, sender)
+            delivery_router.register(name, sender, owner_account_id=owner)
 
 
 def create_app(crew: CrewApp | None = None) -> FastAPI:
@@ -176,6 +183,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         crew.team.interaction_bridge = interaction_bridge
     channel_manager = ChannelManager()
     delivery_router = DeliveryRouter()
+    crew.channel_manager = channel_manager
     crew.delivery_router = delivery_router
 
     _register_enabled_platform_channels(crew, channel_manager)
@@ -230,7 +238,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         # local 的排他租约。该租约没有可恢复的登录凭据，却会阻止新账号接管，
         # 因此在所有渠道已断开、业务请求尚未放行的启动边界安全释放它。
         auth_mode = str(getattr(crew.config, "auth_mode", "local") or "local").strip().lower()
-        legacy_lease = crew.active_owner.current()
+        legacy_lease = crew.active_owner.get("local")
         if (
             auth_mode in {"email", "remote"}
             and legacy_lease is not None
@@ -249,11 +257,12 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
                     "gateway_port": crew.config.gateway_port,
                 })
                 await crew.startup()   # 连接 MCP server、启动 cron 引擎
-                lease = crew.active_owner.current()
-                if lease is not None:
-                    # Cron must be running before this call; otherwise its
+                leases = crew.active_owner.list()
+                if leases:
+                    # Cron must be running before these calls; otherwise an
                     # Owner mount can be skipped permanently.
-                    logout_coordinator.activate_owner(lease.owner_account_id)
+                    for lease in leases:
+                        logout_coordinator.activate_owner(lease.owner_account_id)
                 else:
                     await channel_manager.stop_all(reason="login_required")
                 cron_error = str(getattr(crew.cron_service, "start_error", "") or "")
@@ -327,10 +336,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             except AuthenticationError as exc:
                 return JSONResponse({"ok": False, "error": str(exc)}, status_code=401)
             is_logout = path == "/api/auth/logout"
-            retrying_logout = is_logout and logout_coordinator.is_draining(
-                account.owner_account_id
-            )
-            if logout_coordinator.is_draining() and not retrying_logout:
+            if logout_coordinator.is_draining(account.owner_account_id) and not is_logout:
                 return JSONResponse(
                     {
                         "ok": False,
@@ -339,29 +345,8 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
                     },
                     status_code=423,
                 )
-            if is_logout:
-                lease = crew.active_owner.current()
-                if lease is not None and lease.owner_account_id != account.owner_account_id:
-                    return JSONResponse(
-                        {
-                            "ok": False,
-                            "error": "Gateway 已由其他账号登录",
-                            "code": "ACTIVE_OWNER_CONFLICT",
-                        },
-                        status_code=423,
-                    )
-            else:
-                try:
-                    crew.active_owner.claim(account.owner_account_id)
-                except ActiveOwnerConflict:
-                    return JSONResponse(
-                        {
-                            "ok": False,
-                            "error": "Gateway 已由其他账号登录",
-                            "code": "ACTIVE_OWNER_CONFLICT",
-                        },
-                        status_code=423,
-                    )
+            if not is_logout:
+                crew.active_owner.claim(account.owner_account_id)
                 logout_coordinator.activate_owner(account.owner_account_id)
             request.state.account = account
         return await call_next(request)

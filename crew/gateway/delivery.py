@@ -48,17 +48,19 @@ class DeliveryTarget:
 
 
 class DeliveryRouter:
-    """按平台名路由 outbound 文本到已注册 sender。"""
+    """按平台与 Owner 路由 outbound 文本到已注册 sender。"""
 
     def __init__(self) -> None:
-        self._senders: dict[str, SenderFn] = {}
+        self._senders: dict[tuple[str, str], SenderFn] = {}
 
-    def register(self, platform: str, sender: SenderFn) -> None:
-        self._senders[platform] = sender
+    def register(self, platform: str, sender: SenderFn, *, owner_account_id: str = "") -> None:
+        key = (str(platform or "").strip().lower(), str(owner_account_id or "").strip())
+        self._senders[key] = sender
 
-    def unregister(self, platform: str) -> None:
-        """移除一个平台 sender，供渠道禁用或热重连失败后收敛状态。"""
-        self._senders.pop(platform, None)
+    def unregister(self, platform: str, *, owner_account_id: str = "") -> None:
+        """移除一个 Owner 的平台 sender。"""
+        key = (str(platform or "").strip().lower(), str(owner_account_id or "").strip())
+        self._senders.pop(key, None)
 
     async def deliver(
         self,
@@ -66,6 +68,7 @@ class DeliveryRouter:
         text: str,
         *,
         origin: SessionSource | None = None,
+        owner_account_id: str = "",
     ) -> dict[str, Any]:
         """投递文本到目标，返回 {ok, platform, error?}。"""
         if not text.strip():
@@ -76,9 +79,16 @@ class DeliveryRouter:
             return {"ok": True, "platform": "local"}
         platform = parsed.platform
         chat_id = parsed.chat_id or (origin.chat_id if origin else None)
-        sender = self._senders.get(platform)
+        owner = str(owner_account_id or "").strip()
+        sender = self._senders.get((platform, owner))
+        if sender is None and owner in {"", "local", "dev:dev"}:
+            sender = self._senders.get((platform, ""))
         if sender is None:
-            return {"ok": False, "platform": platform, "error": f"unsupported platform: {platform}"}
+            return {
+                "ok": False,
+                "platform": platform,
+                "error": f"unsupported platform for owner: {platform}:{owner}",
+            }
         # IM 出站统一过滤边界：cron 主动下发 / 桌面续聊都汇聚到此，按平台跑出站过滤链
         # （IM 渠道剥离 <thinking> + 全渠道密钥脱敏），避免思考过程/密钥原样发到外部平台。
         text = apply_text_filters(text, {"channel": platform})

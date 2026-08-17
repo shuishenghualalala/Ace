@@ -1436,8 +1436,11 @@ class CrewApp:
         return interrupted
 
     def _current_active_owner_id(self) -> str | None:
-        """当前 Active Owner 账号；未登录时返回 None（供后台快照刷新跳过本轮）。"""
-        lease = self.active_owner.current()
+        """返回当前运行上下文的 Owner；无上下文时仅兼容单租约快照。"""
+        from crew.core.runctx import current_owner_account_id
+
+        owner = str(current_owner_account_id.get() or "").strip()
+        lease = self.active_owner.get(owner) if owner else self.active_owner.current()
         return lease.owner_account_id if lease is not None else None
 
     async def start_cron(self) -> None:
@@ -2904,7 +2907,12 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                 if reply:
                     if app.delivery_router is None:
                         raise RuntimeError("cron deliver 需要 gateway delivery router")
-                    result = await app.delivery_router.deliver(deliver_target, reply, origin=origin)
+                    result = await app.delivery_router.deliver(
+                        deliver_target,
+                        reply,
+                        origin=origin,
+                        owner_account_id=env.user_id,
+                    )
                     if not result.get("ok"):
                         log.warning("cron deliver 失败 target=%s err=%s",
                                     deliver_target, result.get("error"))

@@ -219,17 +219,16 @@ async def test_team_cleanup_failure_keeps_active_owner_lease():
 
 
 @pytest.mark.asyncio
-async def test_restart_required_logout_persists_intent_before_retaining_lease():
+async def test_owner_channel_logout_does_not_require_gateway_restart():
     events: list[str] = []
     coordinator, lease = _coordinator(events, requires_restart=True)
 
     result = await coordinator.logout("A:uid-a")
 
-    assert result.requires_gateway_restart is True
-    assert result.released is False
-    assert lease.current().owner_account_id == "A:uid-a"
-    assert events[-1] == "prepare-restart-logout"
-    assert "release" not in events
+    assert result.requires_gateway_restart is False
+    assert result.released is True
+    assert lease.current() is None
+    assert events[-1] == "release"
 
 
 @pytest.mark.asyncio

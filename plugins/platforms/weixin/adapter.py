@@ -260,19 +260,45 @@ class WeixinChannel(Channel):
         }
 
     # -- Owner 门禁（与其它渠道一致）--------------------------------------- #
+    def _gateway_owner(self) -> str:
+        return str(getattr(self, "_gateway_owner_account_id", "") or "").strip()
+
+    def _owner_lease(self, owner: str):
+        active_owner = self._app.active_owner
+        getter = getattr(active_owner, "get", None)
+        return getter(owner) if owner and callable(getter) else active_owner.current()
+
+    def _owner_is_draining(self, owner: str) -> bool:
+        coordinator = getattr(self._app, "logout_coordinator", None)
+        if coordinator is None:
+            return False
+        try:
+            return bool(coordinator.is_draining(owner))
+        except TypeError:
+            return bool(coordinator.is_draining())
+
+    def _owner_binding(self, owner: str) -> str:
+        bindings = getattr(self._app, "channel_bindings", None)
+        if bindings is None:
+            return ""
+        try:
+            return str(bindings.get_binding(self.name, owner) or "")
+        except TypeError:
+            return str(bindings.get_binding(self.name) or "")
+
     def _owner_may_connect(self) -> bool:
         if self._app is None:
             return True
         try:
-            lease = self._app.active_owner.current()
+            owner = self._gateway_owner()
+            lease = self._owner_lease(owner)
             if lease is None:
                 return False
-            coordinator = getattr(self._app, "logout_coordinator", None)
-            if coordinator is not None and coordinator.is_draining():
+            active_owner = str(lease.owner_account_id or "")
+            if self._owner_is_draining(active_owner):
                 return False
-            bindings = getattr(self._app, "channel_bindings", None)
-            bound_owner = str(bindings.get_binding(self.name) or "") if bindings is not None else ""
-            return not bound_owner or bound_owner == str(lease.owner_account_id or "")
+            bound_owner = self._owner_binding(active_owner)
+            return not bound_owner or bound_owner == active_owner
         except Exception as exc:  # noqa: BLE001 - 身份事实源异常必须 fail closed
             log.warning("Weixin 连接 Owner 门禁读取失败: %s", exc)
             return False
@@ -281,16 +307,17 @@ class WeixinChannel(Channel):
         if self._app is None:
             return True
         try:
-            lease = self._app.active_owner.current()
+            owner = self._gateway_owner()
+            lease = self._owner_lease(owner)
             if lease is None:
                 return False
-            coordinator = getattr(self._app, "logout_coordinator", None)
-            if coordinator is not None and coordinator.is_draining():
+            active_owner = str(lease.owner_account_id or "")
+            if self._owner_is_draining(active_owner):
                 return False
-            bindings = getattr(self._app, "channel_bindings", None)
-            return bindings is not None and str(bindings.get_binding(self.name) or "") == str(
-                lease.owner_account_id or ""
-            )
+            bound_owner = self._owner_binding(active_owner)
+            if not bound_owner:
+                return True
+            return bound_owner == active_owner
         except Exception as exc:  # noqa: BLE001 - 身份事实源异常必须 fail closed
             log.warning("Weixin Active Owner 门禁读取失败: %s", exc)
             return False

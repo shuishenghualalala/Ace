@@ -427,11 +427,28 @@ def _channel_manager(app: Any) -> ChannelManager:
     return manager
 
 
+def _channel_context(ctx: CliContext, platform: str) -> tuple[Any, str]:
+    """Load the app before looking up plugin-provided platform entries."""
+    app = ctx.app
+    name = platform.strip().lower()
+    if not platform_registry.is_registered(name):
+        raise CliError(f"未知平台: {name}", exit_code=404)
+    return app, name
+
+
 def _channel_row(app: Any, name: str, manager: ChannelManager, owner: str) -> dict[str, Any]:
     raw = resolved_channel_raw(app.config, name, owner)
     entry = platform_registry.get(name)
     cfg = entry.build_config(raw, include_env=not bool(owner))
-    state = next((item for item in manager.status() if item.get("name") == name), {})
+    state = next(
+        (
+            item
+            for item in manager.status(owner)
+            if item.get("name") == name
+            and item.get("owner_account_id", "") in {owner, ""}
+        ),
+        {},
+    )
     row = {
         "name": name,
         "label": entry.label,
@@ -442,7 +459,7 @@ def _channel_row(app: Any, name: str, manager: ChannelManager, owner: str) -> di
         "reason": str(state.get("reason") or ""),
         "has_account": _has_channel_account(name, raw, owner_account_id=owner),
     }
-    return _enrich_platform_row(name, row, manager, secret_values=())
+    return _enrich_platform_row(name, row, manager, owner_account_id=owner, secret_values=())
 
 
 def _channel_list(args: Any, ctx: CliContext) -> CliResult:
@@ -458,23 +475,18 @@ def _channel_list(args: Any, ctx: CliContext) -> CliResult:
 
 
 def _channel_config_show(args: Any, ctx: CliContext) -> CliResult:
-    name = args.platform.strip().lower()
-    if not platform_registry.is_registered(name):
-        raise CliError(f"未知平台: {name}", exit_code=404)
+    app, name = _channel_context(ctx, args.platform)
     data = _public_channel_config(
         name,
-        resolved_channel_raw(ctx.app.config, name, ctx.owner),
-        crew_config=ctx.app.config,
+        resolved_channel_raw(app.config, name, ctx.owner),
+        crew_config=app.config,
         owner_account_id=ctx.owner,
     )
     return CliResult(data={"ok": True, **data})
 
 
 def _channel_config_save(args: Any, ctx: CliContext) -> CliResult:
-    app = ctx.app
-    name = args.platform.strip().lower()
-    if not platform_registry.is_registered(name):
-        raise CliError(f"未知平台: {name}", exit_code=404)
+    app, name = _channel_context(ctx, args.platform)
     manager = _channel_manager(app)
     payload = parse_json(args.json_payload, name="渠道配置")
     enabled, config, secrets, environment = _normalize_config_payload(payload)
@@ -488,7 +500,7 @@ def _channel_config_save(args: Any, ctx: CliContext) -> CliResult:
         _write_env_fields(name, config, secrets, owner_account_id=ctx.owner)
     except (ValueError, RuntimeError) as exc:
         raise CliError(str(exc)) from exc
-    channel = manager.channels.get(name)
+    channel = manager.get(name, ctx.owner)
     apply = getattr(channel, "apply_config", None)
     if channel is not None and callable(apply):
         try:
@@ -508,18 +520,18 @@ def _channel_config_save(args: Any, ctx: CliContext) -> CliResult:
 
 
 async def _restart_channel(app: Any, manager: ChannelManager, name: str, owner: str) -> tuple[bool, dict[str, Any]]:
-    if manager.is_busy(name):
+    if manager.is_busy(name, owner):
         raise CliError("渠道正在重连，请稍后再操作", exit_code=409)
     entry = platform_registry.get(name)
     raw = resolved_channel_raw(app.config, name, owner)
     cfg = entry.build_config(raw, include_env=not bool(owner))
     if not cfg.enabled:
-        await manager.stop_one(name)
+        await manager.stop_one(name, owner)
         return True, _channel_row(app, name, manager, owner)
     try:
         channel = platform_registry.create_channel(name, cfg)
     except Exception as exc:  # noqa: BLE001
-        manager.record_error(name, str(exc))
+        manager.record_error(name, str(exc), owner)
         return False, _channel_row(app, name, manager, owner)
     if hasattr(channel, "bind_app"):
         channel.bind_app(app)
@@ -527,19 +539,16 @@ async def _restart_channel(app: Any, manager: ChannelManager, name: str, owner: 
     state = await manager.restart_one(name, channel, handler, owner_account_id=owner)
     if not state.running:
         return False, _channel_row(app, name, manager, owner)
-    live_ok, live_err = await _wait_for_live_connected(manager, name)
+    live_ok, live_err = await _wait_for_live_connected(manager, name, owner)
     if not live_ok:
-        await manager.stop_one(name)
-        manager.record_error(name, live_err)
+        await manager.stop_one(name, owner)
+        manager.record_error(name, live_err, owner)
         return False, _channel_row(app, name, manager, owner)
     return True, _channel_row(app, name, manager, owner)
 
 
 async def _channel_connect(args: Any, ctx: CliContext) -> CliResult:
-    name = args.platform.strip().lower()
-    if not platform_registry.is_registered(name):
-        raise CliError(f"未知平台: {name}", exit_code=404)
-    app = ctx.app
+    app, name = _channel_context(ctx, args.platform)
     manager = _channel_manager(app)
     app.config.persist_channel_config(name, {"enabled": True}, owner_account_id=ctx.owner)
     try:
@@ -555,13 +564,10 @@ async def _channel_connect(args: Any, ctx: CliContext) -> CliResult:
 
 
 async def _channel_disconnect(args: Any, ctx: CliContext) -> CliResult:
-    name = args.platform.strip().lower()
-    if not platform_registry.is_registered(name):
-        raise CliError(f"未知平台: {name}", exit_code=404)
-    app = ctx.app
+    app, name = _channel_context(ctx, args.platform)
     manager = _channel_manager(app)
     app.config.persist_channel_config(name, {"enabled": False}, owner_account_id=ctx.owner)
-    state = await manager.stop_one(name)
+    state = await manager.stop_one(name, ctx.owner)
     return CliResult(
         data={"ok": not bool(state.error), "status": _channel_row(app, name, manager, ctx.owner), "error": str(state.error or "")},
         text=f"渠道 {name} 已断开",
@@ -569,10 +575,7 @@ async def _channel_disconnect(args: Any, ctx: CliContext) -> CliResult:
 
 
 async def _channel_reconnect(args: Any, ctx: CliContext) -> CliResult:
-    name = args.platform.strip().lower()
-    if not platform_registry.is_registered(name):
-        raise CliError(f"未知平台: {name}", exit_code=404)
-    app = ctx.app
+    app, name = _channel_context(ctx, args.platform)
     manager = _channel_manager(app)
     try:
         ok, status = await _restart_channel(app, manager, name, ctx.owner)
@@ -585,12 +588,9 @@ async def _channel_reconnect(args: Any, ctx: CliContext) -> CliResult:
 
 
 async def _channel_account_delete(args: Any, ctx: CliContext) -> CliResult:
-    name = args.platform.strip().lower()
-    if not platform_registry.is_registered(name):
-        raise CliError(f"未知平台: {name}", exit_code=404)
-    app = ctx.app
+    app, name = _channel_context(ctx, args.platform)
     manager = _channel_manager(app)
-    state = await manager.stop_one(name)
+    state = await manager.stop_one(name, ctx.owner)
     raw = resolved_channel_raw(app.config, name, ctx.owner)
     remove_keys = _account_remove_keys(name, raw)
     app.config.persist_channel_config(
@@ -601,7 +601,7 @@ async def _channel_account_delete(args: Any, ctx: CliContext) -> CliResult:
     _remove_secret_envs(name, owner_account_id=ctx.owner)
     bindings = getattr(app, "channel_bindings", None)
     if bindings is not None:
-        bindings.unbind(name)
+        bindings.unbind(name, ctx.owner)
     return CliResult(
         data={
             "ok": not bool(state.error),

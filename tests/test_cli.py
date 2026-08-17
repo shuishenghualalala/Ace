@@ -160,6 +160,21 @@ def test_cron_flow(capsys, cli_home):
     assert run_cli(capsys, "cron", "delete", "--id", job["id"])[0] == 0
 
 
+def test_channel_config_show_loads_builtin_platforms(capsys, cli_home):
+    code, out = run_cli(
+        capsys,
+        "channel",
+        "config",
+        "show",
+        "--platform",
+        "feishu",
+        "--json",
+    )
+    assert code == 0
+    data = json_out(out)
+    assert data is not None and data["ok"] is True and data["name"] == "feishu"
+
+
 def test_wiki_kbs_list(capsys, cli_home):
     code, out = run_cli(capsys, "wiki", "kbs", "list", "--json")
     assert code == 0

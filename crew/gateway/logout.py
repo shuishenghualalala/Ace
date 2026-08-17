@@ -1,9 +1,7 @@
-"""Owner-wide Gateway logout coordination.
+"""Owner-scoped Gateway logout coordination.
 
-Logout is an ordered safety boundary: fence new work, invalidate and cancel the
-old execution generation, stop external channels, detach sockets, then release
-the persistent Active Owner lease.  A failed critical cleanup keeps the lease
-and admission fence in place so another account cannot overlap old work.
+Logout fences and cleans one authenticated Owner at a time.  A slow channel SDK
+or a running task for one account must not turn into a Gateway-wide login lock.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ class LogoutResult:
 
 
 class LogoutCoordinator:
-    """Serialize owner activation/logout around the single Active Owner lease."""
+    """Serialize cleanup per Owner while allowing other Owners to continue."""
 
     def __init__(
         self,
@@ -65,31 +63,35 @@ class LogoutCoordinator:
         self._security_service = security_service
         self._logout_timeout_seconds = max(0.001, float(logout_timeout_seconds))
         self._lock = asyncio.Lock()
-        self._draining_owner = ""
-        self._channel_owner = ""
-        self._activation_task: asyncio.Task[Any] | None = None
+        self._draining_owners: set[str] = set()
+        self._channel_owners: set[str] = set()
+        self._activation_tasks: dict[str, asyncio.Task[Any]] = {}
         self._restart_fenced_owners: set[str] = set()
 
     @property
     def draining_owner(self) -> str:
-        return self._draining_owner
+        """Compatibility view for diagnostics when exactly one Owner drains."""
+
+        return next(iter(self._draining_owners), "")
 
     def is_draining(self, owner_account_id: str = "") -> bool:
         owner = str(owner_account_id or "").strip()
-        return bool(self._draining_owner and (not owner or self._draining_owner == owner))
+        return bool(self._draining_owners if not owner else owner in self._draining_owners)
 
     def allows_work(self, owner_account_id: str) -> bool:
-        """Check both the in-memory drain fence and persistent lease owner."""
+        """Check the in-memory drain fence and this Owner's session lease."""
+
         owner = str(owner_account_id or "").strip()
-        if not owner or self._draining_owner:
+        if not owner or owner in self._draining_owners:
             return False
-        lease = self._active_owner.current()
+        lease = self._owner_lease(owner)
         return lease is not None and lease.owner_account_id == owner
 
     def activate_owner(self, owner_account_id: str) -> None:
-        """Open local admission and connect channels without delaying the HTTP response."""
+        """Open local admission and start only this Owner's resources."""
+
         owner = str(owner_account_id or "").strip()
-        if not owner or self._draining_owner:
+        if not owner or owner in self._draining_owners:
             return
         token = current_owner_account_id.set(owner)
         try:
@@ -97,11 +99,14 @@ class LogoutCoordinator:
                 self._cron_service.mount_owner(owner)
             self._dispatcher.activate_owner(owner)
             self._task_runtime.activate_owner(owner)
-            if self._channel_owner == owner:
+            task = self._activation_tasks.get(owner)
+            if owner in self._channel_owners or (task is not None and not task.done()):
                 return
-            if self._activation_task is not None and not self._activation_task.done():
-                return
-            self._activation_task = asyncio.create_task(self._activate_channels(owner))
+            task = asyncio.create_task(
+                self._activate_channels(owner),
+                name=f"activate-channels:{owner}",
+            )
+            self._activation_tasks[owner] = task
         finally:
             current_owner_account_id.reset(token)
 
@@ -112,25 +117,28 @@ class LogoutCoordinator:
                 self._channel_handler,
                 owner_account_id=owner,
             )
-            if not self._draining_owner:
-                self._channel_owner = owner
+            if owner not in self._draining_owners:
+                self._channel_owners.add(owner)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - channel errors remain visible in channel state
             log.exception("Owner 渠道激活失败 owner=%s", owner)
         finally:
+            self._activation_tasks.pop(owner, None)
             current_owner_account_id.reset(token)
 
-    async def _cancel_activation(self) -> None:
-        task = self._activation_task
-        self._activation_task = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    async def _cancel_activation(self, owner: str | None = None) -> None:
+        owners = [owner] if owner else list(self._activation_tasks)
+        tasks = [self._activation_tasks.pop(item, None) for item in owners]
+        pending = [task for task in tasks if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def logout(self, owner_account_id: str) -> LogoutResult:
-        """Drain one owner within one deadline, or retain the lease for restart."""
+        """Drain one Owner within one deadline, or retain only its lease."""
+
         owner = str(owner_account_id or "").strip()
         if not owner:
             raise LogoutCleanupError("缺少退出账号")
@@ -147,19 +155,17 @@ class LogoutCoordinator:
             if cleanup in done:
                 return cleanup.result()
 
-            # Do not wait indefinitely for a cancellation-resistant SDK.  The
-            # retained lease and drain fence prevent overlap until Desktop
-            # performs the controlled process restart.
             self._restart_fenced_owners.add(owner)
-            self._draining_owner = owner
+            self._draining_owners.add(owner)
             self._task_runtime.block_owner(owner)
             if self._interaction_bridge is not None:
                 self._interaction_bridge.remove_owner(owner)
             if self._security_service is not None:
                 self._security_service.revoke_owner(owner)
             if not self._active_owner.prepare_restart_logout(owner):
-                raise LogoutCleanupError("Logout 超时且无法持久化 Gateway 重启退出意图")
-            self._channel_owner = ""
+                raise LogoutCleanupError("Logout 超时且无法持久化 Owner 重启退出意图")
+            self._channel_owners.discard(owner)
+            await self._cancel_activation(owner)
             cleanup.cancel()
             await asyncio.sleep(0)
             if cleanup.done() and not cleanup.cancelled():
@@ -167,7 +173,7 @@ class LogoutCoordinator:
             if not cleanup.done():
                 cleanup.add_done_callback(self._consume_cleanup_result)
             log.warning(
-                "Logout 超过 %.3fs 总预算，保留租约并请求受控重启 owner=%s",
+                "Logout 超过 %.3fs 总预算，保留 Owner 会话并请求受控重启 owner=%s",
                 self._logout_timeout_seconds,
                 owner,
             )
@@ -185,6 +191,7 @@ class LogoutCoordinator:
     @staticmethod
     def _consume_cleanup_result(task: asyncio.Task[Any]) -> None:
         """Consume a late cleanup outcome after the restart response is fixed."""
+
         if task.cancelled():
             return
         try:
@@ -192,12 +199,32 @@ class LogoutCoordinator:
         except Exception:  # noqa: BLE001 - late cleanup cannot change the fixed response
             log.exception("Logout 超时后的清理任务异常")
 
+    def _owner_lease(self, owner: str) -> Any:
+        getter = getattr(self._active_owner, "get", None)
+        if callable(getter):
+            return getter(owner)
+        try:
+            lease = self._active_owner.current(owner)
+        except TypeError:
+            lease = self._active_owner.current()
+        return lease if lease is not None and lease.owner_account_id == owner else None
+
+    async def _stop_owner_channels(self, owner: str) -> list[str]:
+        stop_owner = getattr(self._channel_manager, "stop_owner", None)
+        if callable(stop_owner):
+            return list(await stop_owner(owner, reason="login_required"))
+        # Old injected managers have no owner-aware lifecycle. Production
+        # ChannelManager always supplies stop_owner; this fallback is only for
+        # integrations that have not adopted the new interface yet.
+        return list(await self._channel_manager.stop_all(reason="login_required"))
+
     async def _logout_owned(self, owner: str) -> LogoutResult:
         """Perform ordered cleanup after the logout Owner has been validated."""
+
         async with self._lock:
-            lease = self._active_owner.current()
+            lease = self._owner_lease(owner)
             if lease is None:
-                self._draining_owner = ""
+                self._draining_owners.discard(owner)
                 return LogoutResult(
                     owner_account_id=owner,
                     stopped_dispatches=0,
@@ -206,10 +233,8 @@ class LogoutCoordinator:
                     released=True,
                     requires_gateway_restart=False,
                 )
-            if lease.owner_account_id != owner:
-                raise LogoutCleanupError("当前账号不是 Active Owner")
 
-            self._draining_owner = owner
+            self._draining_owners.add(owner)
             self._task_runtime.block_owner(owner)
             if self._interaction_bridge is not None:
                 self._interaction_bridge.remove_owner(owner)
@@ -219,9 +244,9 @@ class LogoutCoordinator:
             stopped_dispatches = 0
             cancelled_tasks: list[str] = []
             closed_sockets = 0
-            requires_gateway_restart = "feishu" in self._channel_manager.channels
+            requires_gateway_restart = False
 
-            await self._cancel_activation()
+            await self._cancel_activation(owner)
             if self._cron_service is not None:
                 try:
                     await self._cron_service.unmount_owner(owner)
@@ -245,11 +270,11 @@ class LogoutCoordinator:
                 log.exception("Logout 取消运行任务失败 owner=%s", owner)
                 errors.append(f"tasks: {exc}")
             try:
-                failed_channels = await self._channel_manager.stop_all(reason="login_required")
+                failed_channels = await self._stop_owner_channels(owner)
                 if failed_channels:
                     errors.append(f"channels: {','.join(sorted(failed_channels))}")
             except Exception as exc:  # noqa: BLE001 - continue socket cleanup, keep lease
-                log.exception("Logout 停止渠道失败 owner=%s", owner)
+                log.exception("Logout 停止 Owner 渠道失败 owner=%s", owner)
                 errors.append(f"channels: {exc}")
             try:
                 closed_sockets = await self._connections.close_owner(owner)
@@ -260,22 +285,6 @@ class LogoutCoordinator:
             if errors:
                 raise LogoutCleanupError("; ".join(errors))
             if owner in self._restart_fenced_owners:
-                # A fixed timeout response has already committed this Owner to
-                # process restart.  Late cleanup may finish resource work, but
-                # must never release the lease or reopen admission.
-                self._channel_owner = ""
-                return LogoutResult(
-                    owner_account_id=owner,
-                    stopped_dispatches=stopped_dispatches,
-                    cancelled_tasks=len(cancelled_tasks),
-                    closed_sockets=closed_sockets,
-                    released=False,
-                    requires_gateway_restart=True,
-                )
-            if requires_gateway_restart:
-                if not self._active_owner.prepare_restart_logout(owner):
-                    raise LogoutCleanupError("无法持久化 Gateway 重启退出意图")
-                self._channel_owner = ""
                 return LogoutResult(
                     owner_account_id=owner,
                     stopped_dispatches=stopped_dispatches,
@@ -285,10 +294,10 @@ class LogoutCoordinator:
                     requires_gateway_restart=True,
                 )
             if not self._active_owner.release(owner):
-                raise LogoutCleanupError("Active Owner 租约释放失败")
+                raise LogoutCleanupError("Owner 会话租约释放失败")
 
-            self._channel_owner = ""
-            self._draining_owner = ""
+            self._channel_owners.discard(owner)
+            self._draining_owners.discard(owner)
             return LogoutResult(
                 owner_account_id=owner,
                 stopped_dispatches=stopped_dispatches,
@@ -299,5 +308,6 @@ class LogoutCoordinator:
             )
 
     async def shutdown(self) -> None:
-        """Cancel a background channel activation during Gateway shutdown."""
+        """Cancel all background channel activations during Gateway shutdown."""
+
         await self._cancel_activation()

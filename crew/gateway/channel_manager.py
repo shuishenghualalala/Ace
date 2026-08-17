@@ -1,8 +1,4 @@
-"""渠道管理器：注册并启动多个接入渠道。
-
-当前内置 WebSocket 渠道（在 ws.py）。新增渠道（飞书/钉钉等）= 实现 core.Channel
-并在此注册，统一通过同一个 MessageHandler 进内核 —— 对照 Jiuwen ChannelManager。
-"""
+"""按平台与 Owner 管理接入渠道实例、状态和生命周期。"""
 
 from __future__ import annotations
 
@@ -16,6 +12,7 @@ from crew.gateway.hooks import hook_registry
 from crew.state.logging import get_logger
 
 log = get_logger("gateway")
+ChannelKey = tuple[str, str]
 
 
 @dataclass
@@ -27,77 +24,140 @@ class ChannelState:
 
 
 class ChannelManager:
+    """同一平台可以拥有多个 Owner 独立实例。"""
+
     def __init__(self) -> None:
-        self._channels: dict[str, Channel] = {}
-        self._owners: dict[str, str] = {}
-        self._states: dict[str, ChannelState] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._channels: dict[ChannelKey, Channel] = {}
+        self._states: dict[ChannelKey, ChannelState] = {}
+        self._locks: dict[ChannelKey, asyncio.Lock] = {}
+
+    @staticmethod
+    def _key(name: str, owner_account_id: str = "") -> ChannelKey:
+        return str(name or "").strip().lower(), str(owner_account_id or "").strip()
 
     @property
     def channels(self) -> MappingProxyType[str, Channel]:
-        """已注册渠道的只读视图（投递接线/事件分发按名查找用，禁止外部改字典）。"""
-        return MappingProxyType(self._channels)
+        """兼容旧调用；新代码应使用 ``get`` 或 ``iter_channels`` 指定 Owner。"""
+
+        view: dict[str, Channel] = {}
+        for (name, owner), channel in self._channels.items():
+            if owner == "" or name not in view:
+                view[name] = channel
+        return MappingProxyType(view)
+
+    def get(self, name: str, owner_account_id: str = "") -> Channel | None:
+        return self._channels.get(self._key(name, owner_account_id))
+
+    def iter_channels(self, owner_account_id: str | None = None) -> list[tuple[str, str, Channel]]:
+        owner = None if owner_account_id is None else str(owner_account_id or "").strip()
+        return [
+            (name, channel_owner, channel)
+            for (name, channel_owner), channel in self._channels.items()
+            if owner is None
+            or channel_owner == owner
+            or (channel_owner == "" and owner in {"local", "dev:dev"})
+        ]
 
     def register(self, channel: Channel, *, owner_account_id: str = "") -> None:
-        """Register a channel and its optional owning Gateway account."""
-        self._channels[channel.name] = channel
-        self._owners[channel.name] = str(owner_account_id or "").strip()
-        self._states.setdefault(channel.name, ChannelState())
-        log.info("注册渠道: %s", channel.name)
+        name, owner = self._key(channel.name, owner_account_id)
+        try:
+            setattr(channel, "_gateway_owner_account_id", owner)
+        except Exception:
+            pass
+        self._channels[(name, owner)] = channel
+        self._states.setdefault((name, owner), ChannelState())
+        log.info("注册渠道: %s owner=%s", name, owner or "global")
 
-    def unregister(self, name: str) -> None:
-        """移除一个渠道及其运行态，供禁用/热替换失败回滚使用。"""
-        self._channels.pop(name, None)
-        self._owners.pop(name, None)
-        self._states.pop(name, None)
+    def unregister(self, name: str, owner_account_id: str = "") -> None:
+        key = self._key(name, owner_account_id)
+        self._channels.pop(key, None)
+        self._states.pop(key, None)
 
-    def record_error(self, name: str, error: str) -> None:
-        self._states[name] = ChannelState(running=False, error=error, reason="error")
+    def record_error(self, name: str, error: str, owner_account_id: str = "") -> None:
+        key = self._key(name, owner_account_id)
+        self._states[key] = ChannelState(running=False, error=error, reason="error")
         try:
             asyncio.get_running_loop().create_task(
-                self._emit_state_change(name, running=False, error=error)
+                self._emit_state_change(name, owner_account_id, running=False, error=error)
             )
         except RuntimeError:
             pass
 
-    def is_busy(self, name: str) -> bool:
-        """返回渠道是否正在执行 connect/reconnect/disconnect/delete 等互斥操作。"""
-        lock = self._locks.get(name)
-        return bool(lock and lock.locked())
+    def is_busy(self, name: str, owner_account_id: str = "") -> bool:
+        """返回指定渠道实例是否正在执行互斥生命周期操作。"""
 
-    def lock_for(self, name: str) -> asyncio.Lock:
-        """返回指定渠道的互斥锁，供配置写入与生命周期操作共享同一串行边界。"""
-        return self._locks.setdefault(name, asyncio.Lock())
+        if str(owner_account_id or "").strip():
+            lock = self._locks.get(self._key(name, owner_account_id))
+            return bool(lock and lock.locked())
+        return any(
+            lock.locked()
+            for (platform, _owner), lock in self._locks.items()
+            if platform == str(name or "").strip().lower()
+        )
 
-    async def _emit_state_change(self, name: str, *, running: bool, error: str = "") -> None:
-        await hook_registry.emit("channel:state_change", {
-            "name": name,
-            "running": running,
-            "error": error,
-        })
+    def lock_for(self, name: str, owner_account_id: str = "") -> asyncio.Lock:
+        """返回指定 ``(platform, owner)`` 的互斥锁。"""
+
+        return self._locks.setdefault(self._key(name, owner_account_id), asyncio.Lock())
+
+    async def _emit_state_change(
+        self,
+        name: str,
+        owner_account_id: str,
+        *,
+        running: bool,
+        error: str = "",
+    ) -> None:
+        await hook_registry.emit(
+            "channel:state_change",
+            {
+                "name": name,
+                "owner_account_id": str(owner_account_id or "").strip(),
+                "running": running,
+                "error": error,
+            },
+        )
+
+    @staticmethod
+    def _owner_handler(handler: MessageHandler, owner_account_id: str) -> MessageHandler:
+        owner = str(owner_account_id or "").strip()
+
+        def bound(envelope):
+            if owner:
+                params = dict(getattr(envelope, "params", {}) or {})
+                params["gateway_owner_account_id"] = owner
+                envelope.params = params
+            return handler(envelope)
+
+        return bound
 
     async def start_all(self, handler: MessageHandler, *, owner_account_id: str = "") -> None:
-        """Start global channels plus channels owned by the Active Owner."""
-        active_owner = str(owner_account_id or "").strip()
-        for ch in self._channels.values():
-            channel_owner = self._owners.get(ch.name, "")
-            if channel_owner and channel_owner != active_owner:
+        """启动全局渠道和指定 Owner 的渠道，已运行实例保持不变。"""
+
+        owner = str(owner_account_id or "").strip()
+        for name, channel_owner, channel in list(self.iter_channels()):
+            if channel_owner not in {"", owner}:
                 continue
-            state = self._states.setdefault(ch.name, ChannelState())
+            if channel_owner == "" and owner not in {"", "local", "dev:dev"}:
+                continue
+            key = (name, channel_owner)
+            state = self._states.setdefault(key, ChannelState())
+            if state.running:
+                continue
             state.operation = "connecting"
             state.reason = ""
             try:
-                await ch.start(handler)
+                await channel.start(self._owner_handler(handler, channel_owner))
                 state.running = True
                 state.error = ""
-                log.info("渠道已启动: %s", ch.name)
-                await self._emit_state_change(ch.name, running=True, error="")
-            except Exception as exc:  # noqa: BLE001 — 渠道 start 为平台网络连接，失败面未知；启动循环按渠道隔离
+                log.info("渠道已启动: %s owner=%s", name, channel_owner or "global")
+                await self._emit_state_change(name, channel_owner, running=True, error="")
+            except Exception as exc:  # noqa: BLE001 - 每个平台实例独立收敛
                 state.running = False
                 state.error = str(exc)
                 state.reason = "error"
-                log.exception("渠道启动失败: %s", ch.name)
-                await self._emit_state_change(ch.name, running=False, error=str(exc))
+                log.exception("渠道启动失败: %s owner=%s", name, channel_owner or "global")
+                await self._emit_state_change(name, channel_owner, running=False, error=str(exc))
             finally:
                 state.operation = ""
 
@@ -109,63 +169,69 @@ class ChannelManager:
         *,
         owner_account_id: str = "",
     ) -> ChannelState:
-        """停止并替换单个渠道，然后启动新实例。
+        """只替换指定 Owner 的渠道实例。"""
 
-        该方法只影响指定渠道，不触碰 CrewApp、dispatcher 或其它渠道。旧渠道先停止再
-        替换，避免同一外部身份在新旧连接间短暂双占用。
-        """
-        lock = self.lock_for(name)
+        platform, owner = self._key(name, owner_account_id)
+        key = (platform, owner)
+        lock = self.lock_for(platform, owner)
         async with lock:
-            state = self._states.setdefault(name, ChannelState())
+            state = self._states.setdefault(key, ChannelState())
             state.operation = "reconnecting"
-            old = self._channels.get(name)
-            old_owner = self._owners.get(name, "")
-            old_state = self._states.get(name, ChannelState())
+            old = self._channels.get(key)
+            old_state = self._states.get(key, ChannelState())
             if old is not None:
                 stop = getattr(old, "stop", None)
                 try:
                     if callable(stop):
                         await stop()
-                except Exception as exc:  # noqa: BLE001 — 旧渠道停止失败仍继续尝试新配置，避免配置无法修复坏连接
-                    log.warning("渠道热重连时停止旧实例失败: %s: %s", name, exc)
+                except Exception as exc:  # noqa: BLE001 - 新配置仍有机会修复旧连接
+                    log.warning("渠道热重连时停止旧实例失败: %s owner=%s: %s", platform, owner, exc)
 
-            self._channels[name] = channel
-            self._owners[name] = str(owner_account_id or "").strip()
             try:
-                await channel.start(handler)
+                setattr(channel, "_gateway_owner_account_id", owner)
+            except Exception:
+                pass
+            self._channels[key] = channel
+            try:
+                await channel.start(self._owner_handler(handler, owner))
                 state.running = True
                 state.error = ""
                 state.operation = ""
                 state.reason = ""
-                log.info("渠道已热重连: %s", name)
-                await self._emit_state_change(name, running=True, error="")
-            except Exception as exc:  # noqa: BLE001 — 新渠道启动失败需保留错误状态并回滚旧实例引用
-                self._channels.pop(name, None)
-                self._owners.pop(name, None)
+                log.info("渠道已热重连: %s owner=%s", platform, owner or "global")
+                await self._emit_state_change(platform, owner, running=True, error="")
+            except Exception as exc:  # noqa: BLE001 - 仅回滚当前 Owner 实例
+                self._channels.pop(key, None)
                 if old is not None:
-                    self._channels[name] = old
-                    self._owners[name] = old_owner
+                    self._channels[key] = old
                     old_state.running = False
                     old_state.error = str(exc)
                     old_state.operation = ""
                     old_state.reason = "error"
-                    self._states[name] = old_state
+                    self._states[key] = old_state
                 else:
                     state.running = False
                     state.error = str(exc)
                     state.operation = ""
                     state.reason = "error"
-                log.exception("渠道热重连失败: %s", name)
-                await self._emit_state_change(name, running=False, error=str(exc))
-                return self._states[name]
-            return state
+                log.exception("渠道热重连失败: %s owner=%s", platform, owner or "global")
+                await self._emit_state_change(platform, owner, running=False, error=str(exc))
+            return self._states[key]
 
-    async def stop_one_locked(self, name: str, *, operation: str = "disconnecting") -> ChannelState:
-        """停止并移除单个渠道；调用方必须已经持有 ``lock_for(name)``。"""
-        state = self._states.setdefault(name, ChannelState())
+    async def stop_one_locked(
+        self,
+        name: str,
+        owner_account_id: str = "",
+        *,
+        operation: str = "disconnecting",
+    ) -> ChannelState:
+        """停止并移除一个 Owner 的渠道；调用方必须持有同一资源锁。"""
+
+        platform, owner = self._key(name, owner_account_id)
+        key = (platform, owner)
+        state = self._states.setdefault(key, ChannelState())
         state.operation = operation
-        channel = self._channels.pop(name, None)
-        self._owners.pop(name, None)
+        channel = self._channels.pop(key, None)
         stop = getattr(channel, "stop", None)
         try:
             if callable(stop):
@@ -177,61 +243,85 @@ class ChannelManager:
             state.running = False
             state.error = str(exc)
             state.reason = "error"
-            log.exception("渠道停止失败: %s", name)
+            log.exception("渠道停止失败: %s owner=%s", platform, owner or "global")
         finally:
             state.operation = ""
-        await self._emit_state_change(name, running=False, error=state.error)
+        await self._emit_state_change(platform, owner, running=False, error=state.error)
         return state
 
-    async def stop_one(self, name: str) -> ChannelState:
-        """停止并移除单个渠道，主要用于运行时禁用平台。"""
-        lock = self.lock_for(name)
+    async def stop_one(self, name: str, owner_account_id: str = "") -> ChannelState:
+        lock = self.lock_for(name, owner_account_id)
         async with lock:
-            return await self.stop_one_locked(name)
+            return await self.stop_one_locked(name, owner_account_id)
+
+    async def stop_owner(self, owner_account_id: str, *, reason: str = "disconnected") -> list[str]:
+        """停止指定 Owner 的全部渠道，不影响全局渠道或其它 Owner。"""
+
+        owner = str(owner_account_id or "").strip()
+        failed: list[str] = []
+        for name, channel_owner, _channel in list(self.iter_channels()):
+            if channel_owner != owner:
+                continue
+            state = await self.stop_one(name, owner)
+            # 退出只断开连接，保留已加载的 Owner 配置实例；该账号重新登录
+            # 时可以直接由 start_all 重启，不需要重新构造渠道对象。
+            self._channels.setdefault((name, owner), _channel)
+            if not state.error:
+                state.reason = reason
+            else:
+                failed.append(name)
+        return failed
 
     async def stop_all(self, *, reason: str = "disconnected") -> list[str]:
-        """Stop every registered channel and return names that failed to stop."""
+        """停止所有已注册渠道实例。"""
+
         failed: list[str] = []
-        for ch in reversed(list(self._channels.values())):
-            state = self._states.setdefault(ch.name, ChannelState())
-            # core.Channel 只约定 start()；stop() 是渠道可选实现，鸭子类型按需调用，
-            # 避免为生命周期停止去改动已冻结的 core 接口层。
-            stop = getattr(ch, "stop", None)
+        for name, owner, channel in reversed(list(self.iter_channels())):
+            key = (name, owner)
+            state = self._states.setdefault(key, ChannelState())
+            stop = getattr(channel, "stop", None)
             try:
                 if callable(stop):
                     await stop()
                 state.error = ""
-            except Exception as exc:  # noqa: BLE001 — 渠道 stop 为可选平台生命周期方法，失败面未知；停止循环按渠道隔离
+            except Exception as exc:  # noqa: BLE001 - 停止循环按实例隔离
                 state.error = str(exc)
                 state.reason = "error"
-                failed.append(ch.name)
-                log.exception("渠道停止失败: %s", ch.name)
+                failed.append(f"{name}:{owner}" if owner else name)
+                log.exception("渠道停止失败: %s owner=%s", name, owner or "global")
             finally:
                 state.running = False
                 if not state.error:
                     state.reason = reason
-                await self._emit_state_change(ch.name, running=False, error=state.error)
+                await self._emit_state_change(name, owner, running=False, error=state.error)
         return failed
 
-    def status(self) -> list[dict[str, Any]]:
-        names = list(dict.fromkeys([*self._channels.keys(), *self._states.keys()]))
+    def status(self, owner_account_id: str | None = None) -> list[dict[str, Any]]:
+        owner = None if owner_account_id is None else str(owner_account_id or "").strip()
+        keys = list(dict.fromkeys([*self._channels.keys(), *self._states.keys()]))
         rows: list[dict[str, Any]] = []
-        for name in names:
-            state = self._states.get(name, ChannelState())
+        for name, channel_owner in keys:
+            if (
+                owner is not None
+                and channel_owner != owner
+                and not (channel_owner == "" and owner in {"local", "dev:dev"})
+            ):
+                continue
+            state = self._states.get((name, channel_owner), ChannelState())
             row: dict[str, Any] = {
                 "name": name,
+                "owner_account_id": channel_owner,
                 "running": state.running,
                 "error": state.error,
                 "operation": state.operation,
                 "reason": state.reason,
             }
-            # 渠道可选提供 status_detail() 连接快照，鸭子类型取用，不改 core.Channel。
-            channel = self._channels.get(name)
+            channel = self._channels.get((name, channel_owner))
             detail_fn = getattr(channel, "status_detail", None)
             if callable(detail_fn):
                 try:
                     row["detail"] = detail_fn()
-                except Exception as exc:  # noqa: BLE001 — status_detail 为渠道鸭子类型可选方法，失败面未知；状态展示不应阻断
-                    log.warning("渠道 %s status_detail 失败: %s", name, exc)
+                except Exception as exc:  # noqa: BLE001 - 状态展示不应阻断请求
+                    log.warning("渠道 %s owner=%s status_detail 失败: %s", name, channel_owner, exc)
             rows.append(row)
         return rows

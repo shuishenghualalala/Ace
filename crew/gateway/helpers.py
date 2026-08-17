@@ -95,9 +95,13 @@ def resolve_session_id(data: dict[str, Any], *, platform: str = "web") -> str:
     return build_session_key(source)
 
 
-def connected_platforms(channel_manager: ChannelManager) -> list[str]:
+def connected_platforms(channel_manager: ChannelManager, owner_account_id: str = "") -> list[str]:
     names = ["local", "web"]
-    for row in channel_manager.status():
+    try:
+        rows = channel_manager.status(owner_account_id)
+    except TypeError:
+        rows = channel_manager.status()
+    for row in rows:
         if row.get("running"):
             names.append(str(row["name"]))
     return list(dict.fromkeys(names))

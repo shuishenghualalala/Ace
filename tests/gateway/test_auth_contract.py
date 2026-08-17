@@ -29,7 +29,7 @@ def _restore_platform_entries(entries):
 
 def _feishu_webhook_app(channel, *, dev_mode: bool = False) -> FastAPI:
     manager = ChannelManager()
-    manager.register(channel)
+    manager.register(channel, owner_account_id="A:uid-a")
     crew = SimpleNamespace(
         active_owner=SimpleNamespace(
             current=lambda: SimpleNamespace(owner_account_id="A:uid-a"),
