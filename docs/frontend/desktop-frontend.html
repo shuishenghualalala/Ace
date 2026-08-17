@@ -646,7 +646,7 @@
     <h2>Team @Agent 显示名称与路由 ID 分离（2026-08-17）</h2>
     <ul>
       <li><b>用户界面：</b>选择团队成员后，输入框显示成员名称，例如 <code>@kk</code> 或 <code>@Crew 内置智能体</code>，不再显示 <code>agent_...</code> 内部编码。</li>
-      <li><b>通信协议：</b>Composer 保存可读显示 token，发送前还原为 canonical <code>@member_id</code>，并继续通过结构化 <code>user_mentions</code> 路由成员。</li>
+      <li><b>通信协议：</b>Composer 保存可读显示 token；文件引用才会还原为 canonical <code>@file:</code> / <code>@folder:</code> / <code>@image:</code>，成员身份通过结构化 <code>user_mentions.member_id</code> 路由。</li>
       <li><b>范围：</b>复用既有 <code>composer-mention</code> 的显示 token/canonical token 机制，不新增接口、模块或持久化字段。</li>
     </ul>
     <p>验证：Desktop composer mention 测试 46 passed，Desktop typecheck 通过。</p>
@@ -668,6 +668,15 @@
       <li>通信标题优先使用结构化 <code>mention_to</code> 修正方向；例如成员提交给 Leader 时显示“向 leader”，不再把节点标题中的旧目标当成当前收件人。</li>
     </ul>
     <p>验证：相关 Desktop/Web 渲染、session model 与样式回归测试，以及 Desktop/Web typecheck、CSS lint、production build 通过。</p>
+  </section>
+  <section>
+    <h2>Team @Agent 直达路由第一阶段（2026-08-17）</h2>
+    <ul>
+      <li><b>可读正文：</b>Composer 发送后保留用户选择的 <code>@kk</code> 或显示名；文件引用仍按既有规则还原为 <code>@file:</code> / <code>@folder:</code> / <code>@image:</code>。</li>
+      <li><b>结构化身份：</b>成员的稳定 <code>member_id</code> 只放在 <code>user_mentions</code>，由 Gateway 透传给 TeamManager，不再写入用户消息正文。</li>
+      <li><b>执行边界：</b>带结构化 mention 的回合在 TeamSpec/DAG 之前进入既有 Team ask 直达通道；没有 mention 的普通 Team prompt 保持原有工作流。</li>
+    </ul>
+    <p>验证：composer mention 与 Gateway mention 结构回归通过；未新增前端模块、接口或持久化字段。</p>
   </section>
 </div>
 </body>

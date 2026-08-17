@@ -446,11 +446,16 @@ function syncCompactMentions(value: string): void {
   compactMentions = compactMentions.filter((mention) => hasMentionToken(value, mention.visible));
 }
 
-/** 将输入框里的短显示 token 还原为 Gateway 识别的 @file/@folder/@image token。 */
+/** 将文件引用的短显示 token 还原为 Gateway 识别的 @file/@folder/@image token。
+ *
+ * Team Agent mention 的稳定 member_id 通过结构化 user_mentions 发送；
+ * 输入框和用户消息始终保留可读的 @成员名，不把内部身份编码写回正文。
+ */
 export function serializeMentionInput(value: string): string {
   syncCompactMentions(value);
   let result = value;
   for (const mention of [...compactMentions].sort((a, b) => b.visible.length - a.visible.length)) {
+    if (mention.kind === 'agent') continue;
     const escaped = mention.visible.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     result = result.replace(new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, 'g'), (_match, lead: string) => `${lead}${mention.canonical}`);
   }

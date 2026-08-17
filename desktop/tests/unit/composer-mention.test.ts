@@ -248,7 +248,7 @@ describe('Team agent mentions', () => {
     expect(getUserAgentMentions(`请 ${token} 写方案`)).toEqual([
       { kind: 'team_member', member_id: 'team-kk' },
     ]);
-    expect(serializeMentionInput(`请 ${token} 写方案`)).toBe('请 @team-kk 写方案');
+    expect(serializeMentionInput(`请 ${token} 写方案`)).toBe('请 @kk 写方案');
     expect(getUserAgentMentions('请写方案')).toEqual([]);
   });
 
@@ -262,7 +262,7 @@ describe('Team agent mentions', () => {
     });
 
     expect(token).toBe('@Crew 内置智能体');
-    expect(serializeMentionInput(`询问 ${token}`)).toBe('询问 @crew-builtin');
+    expect(serializeMentionInput(`询问 ${token}`)).toBe('询问 @Crew 内置智能体');
   });
 });
 

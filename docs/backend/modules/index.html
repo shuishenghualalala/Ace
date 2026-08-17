@@ -65,6 +65,14 @@
   <h2>3. 与 Crew 的差异</h2>
   <p>本索引对应 Ace（Crew 开源版）实际代码。Ace 的 <code>sites</code> 模块对外提供“灵感”统一 App 库；内部继续保留网站 Release 与 Canvas/Widget 运行时。Ace 移除了 <code>api</code> 模块（开源版脱敏移除）。</p>
 
+  <h2>4. Team @Agent 直达入口第一阶段（2026-08-17）</h2>
+  <ul>
+    <li>WebSocket Gateway 只校验并透传结构化 <code>user_mentions</code>；它不解析用户输入中的 <code>@名称</code>，稳定 <code>member_id</code> 仍由 TeamManager 对当前团队名册校验。</li>
+    <li>带有合法结构化 mention 的 Team 回合在 TeamTurnRouter、TeamSpec 和 DAG 之前进入既有 <code>route_user_mention</code> / <code>TeamAskCoordinator</code> 直达链路；普通 Team prompt 的工作流路径不变。</li>
+    <li>Gateway 不接受非法 mention 结构并回送状态提示，避免错误数据静默回退成普通 DAG。</li>
+  </ul>
+  <p>验证：Gateway mention 结构回归与 Desktop composer mention 回归通过；本阶段没有新增后端模块或 Team 数据源。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

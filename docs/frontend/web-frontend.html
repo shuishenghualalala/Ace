@@ -847,5 +847,14 @@ cd web && npm run build
   </ul>
   <p>验证：Web Team 气泡定向测试 5 passed、Web TypeScript typecheck 与 production build 通过。</p>
 </div>
+<div>
+  <h2>77. Team @Agent 直达路由第一阶段（2026-08-17）</h2>
+  <ul>
+    <li>Web Composer 保留可读的 <code>@成员名</code> 作为用户消息正文，同时继续把结构化 <code>user_mentions.member_id</code> 放入 WS payload。</li>
+    <li>Gateway 透传并校验 <code>user_mentions</code>；TeamManager 因此在 TeamSpec/DAG 之前进入既有 Team ask 直达链路。</li>
+    <li>普通 Team prompt 不携带结构化 mention 时，仍按原 Team workflow 执行；本阶段不新增模块或持久化字段。</li>
+  </ul>
+  <p>验证：Gateway mention 结构与 Desktop composer mention 回归通过。</p>
+</div>
 </body>
 </html>
