@@ -8,6 +8,7 @@ const layoutCss = readFileSync(resolve(stylesDir, 'layouts.css'), 'utf8');
 const chatCss = readFileSync(resolve(stylesDir, 'chat.css'), 'utf8');
 const webMessagesCss = readFileSync(resolve(stylesDir, 'web-messages.css'), 'utf8');
 const composerCss = readFileSync(resolve(stylesDir, 'composer.css'), 'utf8');
+const processTimelineCss = readFileSync(resolve(stylesDir, 'process-timeline.css'), 'utf8');
 const streamChatCss = readFileSync(resolve(stylesDir, 'stream-chat.css'), 'utf8');
 const uiPreviewCss = readFileSync(resolve(stylesDir, 'ui-preview.css'), 'utf8');
 const securityCenterCss = readFileSync(resolve(stylesDir, 'security-center.css'), 'utf8');
@@ -76,6 +77,15 @@ describe('shared chat chrome styles', () => {
     expect(runningImage).toContain('height: 38px');
     expect(runningImage).not.toContain('translate(');
     expect(uiPreviewCss).not.toMatch(/(?:^|\n)\s*\.chat-composer\s*\{/);
+  });
+
+  it('keeps Request/Response code readable on light process surfaces', () => {
+    expect(ruleBody(processTimelineCss, '.mw-process-timeline .process-code-block pre')).toContain(
+      'color: var(--mw-text-primary)',
+    );
+    expect(ruleBody(streamChatCss, '.process-code-block pre')).toContain(
+      'color: var(--mw-text-primary)',
+    );
   });
 });
 

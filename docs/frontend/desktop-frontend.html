@@ -630,6 +630,15 @@
       <li><b>结果：</b>Desktop 历史/渲染测试 72 passed，TypeScript typecheck 通过；与 Web 使用同一通信元数据和状态语义。</li>
     </ul>
   </section>
+  <section>
+    <h2>Team Request/Response 可读性修复（2026-08-17）</h2>
+    <ul>
+      <li><b>问题：</b>浅色主题的过程代码块使用近白色 <code>--mw-code-text-light</code>，但 <code>Request</code>/<code>Response</code> 背景是浅色表面，导致 JSON 内容几乎不可见。</li>
+      <li><b>修复：</b>过程时间线和流式对话的代码内容改用 <code>--mw-text-primary</code>；保留现有代码块布局、字体、滚动和深色主题语义，不修改通用代码令牌。</li>
+      <li><b>范围：</b>仅更新 <code>process-timeline.css</code>、<code>stream-chat.css</code> 及样式回归测试，没有新增模块或接口。</li>
+    </ul>
+    <p>验证：Desktop 样式回归 12 passed、Team 渲染回归 53 passed、TypeScript typecheck 和 CSS lint 通过。</p>
+  </section>
 </div>
 </body>
 </html>

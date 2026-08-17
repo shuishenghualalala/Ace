@@ -275,7 +275,7 @@
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--mw-code-text);
+  color: var(--mw-text-primary);
   font-family: var(--mw-font-mono);
   font-size: var(--mw-type-caption-size);
   line-height: 1.65;
