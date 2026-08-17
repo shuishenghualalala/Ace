@@ -112,6 +112,14 @@ export function createBrowserInspector(
   reload.dataset.browserAction = 'reload';
   reload.disabled = !hasPage || blankPage;
   navigation.append(back, forward, reload);
+  const returnToAi = document.createElement('button');
+  returnToAi.type = 'button';
+  returnToAi.className = 'browser-control-btn';
+  returnToAi.dataset.browserReturnAi = '';
+  returnToAi.textContent = '交还 AI';
+  returnToAi.title = '停止人工控制，把浏览器交还给 AI';
+  returnToAi.setAttribute('aria-label', '交还 AI');
+  returnToAi.hidden = value.mode !== 'human';
   const address = document.createElement('input');
   address.className = 'browser-url';
   address.dataset.browserUrl = '';
@@ -156,7 +164,7 @@ export function createBrowserInspector(
   const recordingControls = document.createElement('span');
   recordingControls.className = 'browser-rec-slot';
   recordingControls.dataset.browserRecControls = '';
-  toolbar.append(navigation, address, note, recordingStatus, recordingControls);
+  toolbar.append(navigation, address, returnToAi, note, recordingStatus, recordingControls);
 
   const takeover = document.createElement('div');
   takeover.className = 'browser-takeover';

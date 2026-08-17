@@ -61,6 +61,30 @@
   font-family: var(--mw-font-sans);
 }
 
+.mw-browser-inspector .browser-control-btn {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-secondary);
+  font: inherit;
+  font-size: var(--mw-type-caption-size);
+  cursor: pointer;
+}
+
+.mw-browser-inspector .browser-control-btn:hover {
+  border-color: var(--mw-action-primary);
+  color: var(--mw-action-primary);
+  background: var(--mw-bg-selected);
+}
+
+.mw-browser-inspector .browser-control-btn:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: 2px;
+}
+
 .mw-browser-inspector .browser-stage {
   min-width: 0;
   min-height: 0;

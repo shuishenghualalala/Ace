@@ -33,6 +33,9 @@ type BrowserEvent =
   | { type: 'command_error' | 'error'; error: string };
 
 let pageState: BrowserPageState | null = null;
+/** Wiki 页面没有 activeSessionId，允许固定工作区显式绑定一个会话。 */
+let sessionOverride: string | null = null;
+let panelRoot: ParentNode = document;
 let socketSession = '';
 let socketConnectingSession = '';
 let socketOpen = false;
@@ -60,7 +63,15 @@ const NOTE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9
 const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4v16M14 4v16"/></svg>';
 const RESUME_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8z" fill="currentColor" stroke="none"/></svg>';
 const STOP_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></svg>';
-function currentSession(): string { return state.activeSessionId || ''; }
+function currentSession(): string { return sessionOverride || state.activeSessionId || ''; }
+
+function panelQuery<T extends Element>(selector: string): T | null {
+  return panelRoot.querySelector<T>(selector);
+}
+
+function panelQueryAll<T extends Element>(selector: string): NodeListOf<T> {
+  return panelRoot.querySelectorAll<T>(selector);
+}
 
 function defaultState(): BrowserPageState {
   return {
@@ -111,7 +122,7 @@ function detachNativeView(force = false): void {
   nativeViewMounted = false;
   lastNativeLayoutKey = '';
   pendingNativeLayoutKey = '';
-  const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
+  const empty = panelQuery<HTMLElement>('[data-browser-empty]');
   if (empty && pageState?.tab_id && !loadFailureVisible()) empty.hidden = false;
   void window.Crew?.browserViewHide?.();
 }
@@ -143,7 +154,7 @@ function isValidBrowserSessionId(value: string): boolean {
 }
 
 export function syncBrowserPanelSession(sessionId: string | null): void {
-  const next = sessionId || '';
+  const next = sessionOverride || sessionId || '';
   if (next && socketSession === next) return;
   hideBrowserPanelView();
   socketSession = '';
@@ -166,6 +177,12 @@ export function syncBrowserPanelSession(sessionId: string | null): void {
   // the toolbar status without mounting or exposing the remote page view.
   // Skip ids that the main process would reject (e.g. agent sessions containing '@').
   if (next && isValidBrowserSessionId(next)) void ensureConnection(next);
+}
+
+/** 切换 Browser 面板所属会话；清空后恢复主对话的 activeSessionId。 */
+export function setBrowserPanelSession(sessionId: string | null): void {
+  sessionOverride = sessionId?.trim() || null;
+  syncBrowserPanelSession(sessionId);
 }
 
 async function ensureConnection(sessionId: string): Promise<void> {
@@ -249,7 +266,7 @@ function bindGlobalListener(): void {
 
 /** 确认条只挂在 chrome 区：stage 上的任何 HTML 浮层都会被原生 WebContentsView 盖住。 */
 function renderTakeoverPrompt(): void {
-  const banner = document.querySelector<HTMLElement>('[data-browser-takeover]');
+  const banner = panelQuery<HTMLElement>('[data-browser-takeover]');
   if (!banner) return;
   banner.hidden = !(
     takeoverPromptTab
@@ -263,7 +280,7 @@ function loadFailureVisible(): boolean {
 }
 
 function renderLoadFailure(): void {
-  const overlay = document.querySelector<HTMLElement>('[data-browser-load-error]');
+  const overlay = panelQuery<HTMLElement>('[data-browser-load-error]');
   if (!overlay) return;
   const visible = loadFailureVisible();
   overlay.hidden = !visible;
@@ -445,7 +462,8 @@ function bindRecordingControls(): void {
   });
 }
 
-export function bindBrowserPanel(): void {
+export function bindBrowserPanel(root?: HTMLElement): void {
+  panelRoot = root ?? document;
   const sessionId = currentSession();
   if (!sessionId) return;
   bindGlobalListener();
@@ -468,10 +486,10 @@ export function bindBrowserPanel(): void {
     if (!/会话不存在/.test(message)) updateStatus(message);
   });
 
-  document.querySelectorAll<HTMLButtonElement>('[data-browser-action]').forEach((button) => {
+  panelQueryAll<HTMLButtonElement>('[data-browser-action]').forEach((button) => {
     button.addEventListener('click', () => void sendHumanControl(button.dataset.browserAction || ''));
   });
-  document.querySelectorAll<HTMLButtonElement>('[data-browser-takeover-action]').forEach((button) => {
+  panelQueryAll<HTMLButtonElement>('[data-browser-takeover-action]').forEach((button) => {
     button.addEventListener('click', () => {
       const confirmed = button.dataset.browserTakeoverAction === 'confirm';
       takeoverPromptTab = '';
@@ -479,7 +497,7 @@ export function bindBrowserPanel(): void {
       if (confirmed) void ensureHumanControl('page');
     });
   });
-  document.querySelector<HTMLButtonElement>('[data-browser-load-retry]')?.addEventListener('click', () => {
+  panelQuery<HTMLButtonElement>('[data-browser-load-retry]')?.addEventListener('click', () => {
     // 「重试」是显式 chrome 动作：与工具栏刷新同语义，先接管再重新加载。
     loadFailure = null;
     patchChrome();
@@ -488,17 +506,20 @@ export function bindBrowserPanel(): void {
   bindRecordingControls();
 
   renderBrowserRecordingBar();
-  document.querySelector<HTMLButtonElement>('[data-browser-new-tab]')?.addEventListener('click', () => {
+  panelQuery<HTMLButtonElement>('[data-browser-new-tab]')?.addEventListener('click', () => {
     void openUserBrowser('', true);
   });
-  document.querySelectorAll<HTMLButtonElement>('[data-browser-shell]').forEach((button) => {
+  panelQuery<HTMLButtonElement>('[data-browser-return-ai]')?.addEventListener('click', () => {
+    void sendControl('return');
+  });
+  panelQueryAll<HTMLButtonElement>('[data-browser-shell]').forEach((button) => {
     button.addEventListener('click', () => {
       window.dispatchEvent(new CustomEvent('browser-workbench:command', {
         detail: { action: button.dataset.browserShell || '' },
       }));
     });
   });
-  const urlInput = document.querySelector<HTMLInputElement>('[data-browser-url]');
+  const urlInput = panelQuery<HTMLInputElement>('[data-browser-url]');
   urlInput?.addEventListener('pointerdown', (event) => {
     if (!pageState?.tab_id || pageState.mode === 'human') return;
     event.preventDefault();
@@ -515,7 +536,7 @@ export function bindBrowserPanel(): void {
     if (!pageState?.tab_id) void openUserBrowser(urlInput.value);
     else void sendHumanControl('navigate', normalizeUserUrl(urlInput.value));
   });
-  const tabStrip = document.querySelector<HTMLElement>('[data-browser-tab-strip]');
+  const tabStrip = panelQuery<HTMLElement>('[data-browser-tab-strip]');
   tabStrip?.addEventListener('click', (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-browser-tab]');
     const close = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-browser-close-tab]');
@@ -770,7 +791,7 @@ export async function sendRecordingControl(
     armedBySession.add(sessionId);
     renderBrowserRecordingBar();
     updateStatus('已预备录制：打开一个网页后自动开始');
-    document.querySelector<HTMLInputElement>('[data-browser-url]')?.focus();
+    panelQuery<HTMLInputElement>('[data-browser-url]')?.focus();
     return;
   }
   if (action === 'start' && !(await ensureHumanControl('chrome'))) return;
@@ -1010,7 +1031,7 @@ function recordingControlsMarkup(): string {
 let recordingControlsKey = '';
 
 function renderRecordingControls(): void {
-  const host = document.querySelector<HTMLElement>('[data-browser-rec-controls]');
+  const host = panelQuery<HTMLElement>('[data-browser-rec-controls]');
   if (!host) {
     recordingControlsKey = '';
     return;
@@ -1040,7 +1061,7 @@ export function openRecordingNoteComposer(): void {
   if (!sessionId || !recordingStateFor(sessionId).recording) return;
   noteComposerSession = sessionId;
   renderBrowserRecordingBar();
-  const input = document.querySelector<HTMLInputElement>('[data-browser-note-input]');
+  const input = panelQuery<HTMLInputElement>('[data-browser-note-input]');
   input?.focus();
 }
 
@@ -1073,7 +1094,7 @@ export function renderBrowserRecordingBar(): void {
   const lastRecording = recordingState.recording
     ? undefined
     : lastRecordingBySession.get(sessionId);
-  const host = document.querySelector<HTMLElement>('[data-browser-recording]');
+  const host = panelQuery<HTMLElement>('[data-browser-recording]');
   if (host) {
     if (lastRecording && !composing) {
       // 录完了但还没生成技能：留一个入口，别让用户找不到刚录的东西。
@@ -1097,9 +1118,9 @@ export function renderBrowserRecordingBar(): void {
       host.innerHTML = '';
     }
   }
-  const noteForm = document.querySelector<HTMLElement>('[data-browser-note]');
+  const noteForm = panelQuery<HTMLElement>('[data-browser-note]');
   if (noteForm) noteForm.hidden = !composing;
-  const urlInput = document.querySelector<HTMLElement>('[data-browser-url]');
+  const urlInput = panelQuery<HTMLElement>('[data-browser-url]');
   if (urlInput) urlInput.hidden = composing || Boolean(lastRecording);
 }
 
@@ -1193,7 +1214,7 @@ export async function openBrowserArtifact(
 function bindNativeViewLayout(): void {
   resizeObserver?.disconnect();
   layoutMutationObserver?.disconnect();
-  const stage = document.querySelector<HTMLElement>('[data-browser-stage]');
+  const stage = panelQuery<HTMLElement>('[data-browser-stage]');
   if (!stage) return;
   resizeObserver = new ResizeObserver(scheduleNativeViewLayout);
   resizeObserver.observe(stage);
@@ -1277,7 +1298,7 @@ function clippedStageBounds(stage: HTMLElement): { x: number; y: number; width: 
 
 function syncNativeViewLayout(): void {
   const sessionId = currentSession();
-  const stage = document.querySelector<HTMLElement>('[data-browser-stage]');
+  const stage = panelQuery<HTMLElement>('[data-browser-stage]');
   if (
     !sessionId
     || !stage
@@ -1315,7 +1336,7 @@ function syncNativeViewLayout(): void {
     if (result?.ok) {
       nativeViewMounted = true;
       lastNativeLayoutKey = layoutKey;
-      const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
+      const empty = panelQuery<HTMLElement>('[data-browser-empty]');
       if (empty) empty.hidden = true;
       updateStatus('');
       return;
@@ -1323,7 +1344,7 @@ function syncNativeViewLayout(): void {
     nativeViewMounted = false;
     lastNativeLayoutKey = '';
     void window.Crew?.browserViewHide?.();
-    const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
+    const empty = panelQuery<HTMLElement>('[data-browser-empty]');
     if (empty) empty.hidden = false;
     updateStatus(result?.error || '无法挂载浏览器页面');
   }).catch(() => {
@@ -1332,7 +1353,7 @@ function syncNativeViewLayout(): void {
     lastNativeLayoutKey = '';
     pendingNativeLayoutKey = '';
     void window.Crew?.browserViewHide?.();
-    const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
+    const empty = panelQuery<HTMLElement>('[data-browser-empty]');
     if (empty) empty.hidden = false;
     updateStatus('无法挂载浏览器页面');
   });
@@ -1375,6 +1396,7 @@ function applyPageState(nextState: BrowserPageState): void {
     && nextState.running
     && !pageState?.tab_id
     && !document.body.classList.contains('browser-workbench-open')
+    && !sessionOverride
   );
   if (pageState?.tab_label !== nextState.tab_label || pageState?.mode !== nextState.mode) {
     detachNativeView();
@@ -1416,9 +1438,11 @@ function maybeStartArmedRecording(): void {
 
 function patchChrome(): void {
   const value = pageState || defaultState();
-  const url = document.querySelector<HTMLInputElement>('[data-browser-url]');
+  const url = panelQuery<HTMLInputElement>('[data-browser-url]');
   if (url && document.activeElement !== url) url.value = displayUrl(value.url);
   if (url) url.readOnly = Boolean(value.tab_id && value.mode !== 'human');
+  const returnToAi = panelQuery<HTMLButtonElement>('[data-browser-return-ai]');
+  if (returnToAi) returnToAi.hidden = value.mode !== 'human';
   const statusDot = document.getElementById('ins-browser-status');
   statusDot?.classList.toggle('is-running', value.running);
   statusDot?.setAttribute('aria-label', value.running ? '浏览器运行中' : '浏览器未运行');
@@ -1432,10 +1456,10 @@ function patchChrome(): void {
       `${action}浏览器，${value.running ? '运行中' : '未运行'}`,
     );
   }
-  document.querySelector<HTMLElement>('[data-browser-stage]')?.classList.toggle('is-interactive', value.mode === 'human');
+  panelQuery<HTMLElement>('[data-browser-stage]')?.classList.toggle('is-interactive', value.mode === 'human');
   renderTakeoverPrompt();
   renderLoadFailure();
-  const empty = document.querySelector<HTMLElement>('[data-browser-empty]');
+  const empty = panelQuery<HTMLElement>('[data-browser-empty]');
   // 加载失败时白屏的原生视图已被收起（syncNativeViewLayout 不再挂载），
   // 空态提示也不能露出来——那一屏只能有错误遮罩。
   if (empty) {
@@ -1443,15 +1467,15 @@ function patchChrome(): void {
       || Boolean(value.tab_id && !isBlankBrowserUrl(value.url) && nativeViewMounted);
   }
   const blankPage = !value.tab_id || isBlankBrowserUrl(value.url);
-  const emptyTitle = document.querySelector<HTMLElement>('[data-browser-empty-title]');
+  const emptyTitle = panelQuery<HTMLElement>('[data-browser-empty-title]');
   if (emptyTitle) emptyTitle.textContent = blankPage ? '开始浏览' : '正在打开页面…';
-  const emptyDescription = document.querySelector<HTMLElement>('[data-browser-empty-description]');
+  const emptyDescription = panelQuery<HTMLElement>('[data-browser-empty-description]');
   if (emptyDescription) {
     emptyDescription.textContent = blankPage ? '输入 URL 以打开页面' : '页面加载后将在此显示';
   }
-  const strip = document.querySelector<HTMLElement>('[data-browser-tab-strip]');
+  const strip = panelQuery<HTMLElement>('[data-browser-tab-strip]');
   if (strip) replaceBrowserTabs(strip, value);
-  document.querySelectorAll<HTMLButtonElement>('[data-browser-action]').forEach((button) => {
+  panelQueryAll<HTMLButtonElement>('[data-browser-action]').forEach((button) => {
     const action = button.dataset.browserAction || '';
     const canUseNavigation = Boolean(value.tab_id);
     if (action === 'back') button.disabled = !canUseNavigation || !value.can_go_back;
@@ -1472,6 +1496,6 @@ function patchChrome(): void {
 }
 
 function updateStatus(message: string): void {
-  const element = document.querySelector<HTMLElement>('[data-browser-status]');
+  const element = panelQuery<HTMLElement>('[data-browser-status]');
   if (element && element.textContent !== message) element.textContent = message;
 }

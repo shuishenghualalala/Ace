@@ -65,6 +65,22 @@
   border-left: 1px solid var(--mw-border-subtle);
 }
 
+/* Wiki Agent 的浏览器沿用右侧固定工作区，不使用浮层。知识库面板打开时由该工作区替换。 */
+.wiki-browser-pane--surface {
+  min-width: 340px;
+  overflow: hidden;
+}
+
+.wiki-browser-surface {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.wiki-browser-surface > .browser-panel {
+  min-width: 0;
+}
+
 /* 收起知识库面板：DOM 保留（编辑器/详情保活不受影响），仅 CSS 隐藏 */
 .page-shell--wiki.wiki-browser-collapsed .wiki-browser-pane,
 .page-shell--wiki.wiki-browser-collapsed .wiki-sash[data-wiki-browser-sash] {

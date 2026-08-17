@@ -81,10 +81,19 @@ import {
 } from './chat-controller';
 import { ensureFileChangesDelegation } from './conversation-renderer';
 import { openInspectorToTab } from './inspector';
+import {
+  bindBrowserPanel,
+  hideBrowserPanelView,
+  renderBrowserPanel,
+  setBrowserPanelSession,
+} from './browser-panel';
 import { resumeSessionGeneration } from './session-busy';
 import { loadBackendHistory } from './session-controller';
 import {
   openWikiPageInHub,
+  closeWikiBrowserSurface,
+  openWikiBrowserSurface,
+  setWikiBrowserSurfaceRenderer,
   setWikiAgentPanelRenderer,
   toggleWikiBrowser,
   type WikiAgentEntryRequest,
@@ -513,6 +522,7 @@ const WIKI_VOID_ICON = `<svg viewBox="0 0 24 24" width="34" height="34" fill="no
 const WIKI_EXPAND_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>`;
 const WIKI_NEW_CHAT_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h6"/><path d="M18 2v6"/><path d="M15 5h6"/></svg>`;
 const WIKI_HISTORY_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>`;
+const WIKI_BROWSER_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>`;
 const WIKI_HISTORY_DELETE_ICON = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
 
 function formatWikiHistoryTime(value: number): string {
@@ -623,6 +633,9 @@ async function switchEmbeddedConversation(root: HTMLElement, req: WikiAgentEntry
   notifyEmbeddedAttachmentsChanged();
   embeddedDrafts.set(req.kbId, '');
   await activateEmbeddedSession(req.kbId, sessionId, req.kbName || req.kbId);
+  if (document.querySelector('[data-wiki-browser-surface]')) {
+    setBrowserPanelSession(sessionId);
+  }
   const input = root.querySelector<HTMLTextAreaElement>('[data-composer-input]');
   if (input) {
     input.value = '';
@@ -653,6 +666,28 @@ async function createEmbeddedConversation(root: HTMLElement, req: WikiAgentEntry
   }
 }
 
+function mountWikiBrowserSurface(root: HTMLElement, sessionId: string): void {
+  setBrowserPanelSession(sessionId);
+  root.innerHTML = renderBrowserPanel();
+  bindBrowserPanel(root);
+}
+
+function toggleEmbeddedBrowser(kbId: string): void {
+  const current = embeddedByKb.get(kbId);
+  if (!current) {
+    void embeddedState(kbId).then(({ sessionId }) => openWikiBrowserSurface(sessionId));
+    return;
+  }
+  if (document.querySelector('[data-wiki-browser-surface]')) {
+    hideBrowserPanelView();
+    setBrowserPanelSession(null);
+    closeWikiBrowserSurface();
+  } else {
+    setBrowserPanelSession(current.sessionId);
+    openWikiBrowserSurface(current.sessionId);
+  }
+}
+
 /** 把指定知识库的持久化 Wiki Agent 会话挂到 Wiki 右栏。 */
 export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryRequest): void {
   // 面板 DOM 随 wiki 页 renderShell 整体重建：收回旧实例的控制器（模型 chip 浮层 / 上下文环）。
@@ -674,6 +709,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     <header class="wiki-agent-pane__header">
       <span class="wiki-agent-pane__title" title="${escapeHtml(kbName)}">Wiki 问答 · ${escapeHtml(kbName)}</span>
       <div class="wiki-agent-pane__header-actions">
+        <button type="button" class="wiki-agent-pane__icon-btn" data-wiki-agent-browser title="打开内置浏览器" aria-label="打开或关闭 Wiki 内置浏览器">${WIKI_BROWSER_ICON}</button>
         <button type="button" class="wiki-agent-pane__icon-btn" data-wiki-agent-new title="新建对话" aria-label="新建 Wiki 对话">${WIKI_NEW_CHAT_ICON}</button>
         <button type="button" class="wiki-agent-pane__icon-btn" data-wiki-agent-history title="查看历史" aria-label="查看 Wiki 对话历史" aria-haspopup="dialog" aria-expanded="false">${WIKI_HISTORY_ICON}</button>
         <button type="button" class="wiki-agent-pane__icon-btn${expanded ? ' is-active' : ''}" data-wiki-agent-expand title="展开 / 收窄对话栏" aria-label="展开或收窄对话栏">${WIKI_EXPAND_ICON}</button>
@@ -772,6 +808,9 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   });
   root.querySelector('[data-wiki-agent-history]')?.addEventListener('click', () => {
     void openWikiHistory(root, req.kbId);
+  });
+  root.querySelector('[data-wiki-agent-browser]')?.addEventListener('click', () => {
+    toggleEmbeddedBrowser(req.kbId);
   });
   // 附件「+」→ file input 的触发由 composer-context-view 工厂内聚；这里只管选中后的上传。
   fileInput?.addEventListener('change', () => {
@@ -942,6 +981,7 @@ export function initWikiAgent(): void {
     return { wikiKbId: session.kbId };
   });
   setWikiAgentPanelRenderer(mountWikiAgentPanel);
+  setWikiBrowserSurfaceRenderer(mountWikiBrowserSurface);
 
   if (listenersBound) return;
   listenersBound = true;
@@ -967,7 +1007,18 @@ export function initWikiAgent(): void {
   // 登录态变化：重置专用 Wiki Agent 会话状态。
   window.addEventListener('user:login-changed', () => {
     wikiAgentSessions.clear();
+    hideBrowserPanelView();
+    setBrowserPanelSession(null);
+    closeWikiBrowserSurface();
     clearEmbeddedPanelState();
+  });
+
+  window.addEventListener('browser-workbench:command', (event) => {
+    const action = (event as CustomEvent<{ action?: string }>).detail?.action;
+    if (action !== 'close' || !document.querySelector('[data-wiki-browser-surface]')) return;
+    hideBrowserPanelView();
+    setBrowserPanelSession(null);
+    closeWikiBrowserSurface();
   });
 
   window.addEventListener('messages:changed', (event) => {
@@ -1012,4 +1063,5 @@ export function __resetWikiAgentForTest(): void {
   clearEmbeddedPanelState();
   setWikiSendExtrasResolver(null);
   setWikiAgentPanelRenderer(null);
+  setWikiBrowserSurfaceRenderer(null);
 }

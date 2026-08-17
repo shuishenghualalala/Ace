@@ -72,6 +72,9 @@ export interface WikiAgentEntryRequest {
 let wikiAgentEntryHandler: ((req: WikiAgentEntryRequest) => void) | null = null;
 let wikiAgentPanelRenderer: ((root: HTMLElement, req: WikiAgentEntryRequest) => void) | null = null;
 let wikiAgentKbDeletedHandler: ((kbId: string) => void) | null = null;
+let wikiBrowserSurfaceRenderer: ((root: HTMLElement, sessionId: string) => void) | null = null;
+let wikiBrowserSurfaceOpen = false;
+let wikiBrowserSurfaceSession = '';
 
 export function setWikiAgentEntryHandler(fn: ((req: WikiAgentEntryRequest) => void) | null): void {
   wikiAgentEntryHandler = fn;
@@ -81,6 +84,27 @@ export function setWikiAgentPanelRenderer(
   fn: ((root: HTMLElement, req: WikiAgentEntryRequest) => void) | null,
 ): void {
   wikiAgentPanelRenderer = fn;
+}
+
+export function setWikiBrowserSurfaceRenderer(
+  fn: ((root: HTMLElement, sessionId: string) => void) | null,
+): void {
+  wikiBrowserSurfaceRenderer = fn;
+}
+
+export function openWikiBrowserSurface(sessionId: string): void {
+  const normalized = sessionId.trim();
+  if (!normalized) return;
+  wikiBrowserSurfaceSession = normalized;
+  wikiBrowserSurfaceOpen = true;
+  renderShell();
+}
+
+export function closeWikiBrowserSurface(): void {
+  if (!wikiBrowserSurfaceOpen) return;
+  wikiBrowserSurfaceOpen = false;
+  wikiBrowserSurfaceSession = '';
+  renderShell();
 }
 
 export function setWikiAgentKbDeletedHandler(
@@ -1441,11 +1465,11 @@ function renderShell(): void {
           </section>`;
       })
       .join(groupSashHtml);
-    body = `
-      <div class="wiki-body">
-        <aside class="wiki-agent-pane" data-wiki-agent-panel aria-label="Wiki Agent 对话"></aside>
-        <div class="wiki-sash" data-wiki-browser-sash role="separator" aria-orientation="vertical" title="拖拽调整知识库面板宽度，双击复位"></div>
-        <div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
+    const browserPaneMarkup = wikiBrowserSurfaceOpen
+      ? `<div class="wiki-browser-pane wiki-browser-pane--surface" style="width: ${browserWidth}px">
+          <div class="wiki-browser-surface" data-wiki-browser-surface data-session-id="${escapeHtml(wikiBrowserSurfaceSession)}"></div>
+        </div>`
+      : `<div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
           <div class="wiki-list-pane"${catalogPaneStyleAttr()}>
             ${batchBarHtml()}
             <nav class="hub-segment wiki-view-tabs" aria-label="列表视图">${tabs}</nav>
@@ -1457,7 +1481,12 @@ function renderShell(): void {
           <div class="wiki-detail-pane">
             <div class="wiki-detail-groups" data-orientation="${view.groupOrientation}">${detailGroupsHtml}</div>
           </div>
-        </div>
+        </div>`;
+    body = `
+      <div class="wiki-body">
+        <aside class="wiki-agent-pane" data-wiki-agent-panel aria-label="Wiki Agent 对话"></aside>
+        ${wikiBrowserSurfaceOpen ? '' : '<div class="wiki-sash" data-wiki-browser-sash role="separator" aria-orientation="vertical" title="拖拽调整知识库面板宽度，双击复位"></div>'}
+        ${browserPaneMarkup}
       </div>`;
   }
 
@@ -1471,6 +1500,9 @@ function renderShell(): void {
   // 已解析正文）、图谱画布（SVG 全量重建 + 逐节点重绑事件，wiki-graph 内部另有签名比对）。
   const liveAgentPanel = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
   const keepAgentPanel = view.kbId && liveAgentPanel?.dataset.kbId === view.kbId ? liveAgentPanel : null;
+  const liveBrowserSurface = wikiBrowserSurfaceOpen
+    ? root.querySelector<HTMLElement>('[data-wiki-browser-surface]')
+    : null;
   // 面板节点虽被保留，但 innerHTML 重建会把它短暂 detach，浏览器把内部滚动位置
   // 重置为 0（对话跳回最早消息）。与 listScrollMemory 同理：先记后恢复。
   const agentMessagesScrollTop =
@@ -1494,7 +1526,7 @@ function renderShell(): void {
   const liveListScroll = root.querySelector<HTMLElement>('.wiki-list-scroll');
   if (liveListScroll && listScrollMemory) listScrollMemory.top = liveListScroll.scrollTop;
   root.innerHTML = `
-    <div class="page-shell page-shell--wiki${wikiBrowserOpen ? '' : ' wiki-browser-collapsed'}">
+    <div class="page-shell page-shell--wiki${wikiBrowserOpen || wikiBrowserSurfaceOpen ? '' : ' wiki-browser-collapsed'}">
       <header class="page-header page-header--hub">
         <div class="page-header__copy">
           <h1 class="page-header__title">Wiki <span class="accent">知识库</span></h1>
@@ -1523,6 +1555,14 @@ function renderShell(): void {
       agentPanelKept = true;
       const messagesEl = keepAgentPanel.querySelector<HTMLElement>('[data-wiki-agent-messages]');
       if (messagesEl && agentMessagesScrollTop > 0) messagesEl.scrollTop = agentMessagesScrollTop;
+    }
+  }
+  let browserSurfaceKept = false;
+  if (liveBrowserSurface && wikiBrowserSurfaceOpen) {
+    const placeholder = root.querySelector<HTMLElement>('[data-wiki-browser-surface]');
+    if (placeholder) {
+      placeholder.replaceWith(liveBrowserSurface);
+      browserSurfaceKept = true;
     }
   }
   // 各组占位节点随 innerHTML 重新生成，签名未变的组子树换回复用。
@@ -1594,6 +1634,10 @@ function renderShell(): void {
     if (panel) {
       wikiAgentPanelRenderer?.(panel, { kbId: view.kbId, kbName: currentKbName() });
     }
+  }
+  if (view.kbId && wikiBrowserSurfaceOpen && !browserSurfaceKept) {
+    const surface = root.querySelector<HTMLElement>('[data-wiki-browser-surface]');
+    if (surface) wikiBrowserSurfaceRenderer?.(surface, wikiBrowserSurfaceSession);
   }
   // 图谱视图：renderShell 重建 DOM 后重新挂载（图谱模块自管数据/布局/视口状态，重挂载不丢；
   // 画布节点被保留且状态未变时 mountWikiGraph 内部 no-op）。
