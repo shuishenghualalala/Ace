@@ -35,7 +35,7 @@ type BrowserEvent =
 let pageState: BrowserPageState | null = null;
 /** Wiki 页面没有 activeSessionId，允许固定工作区显式绑定一个会话。 */
 let sessionOverride: string | null = null;
-let panelRoot: ParentNode = document;
+let panelRoot: ParentNode | null = typeof document !== 'undefined' ? document : null;
 let socketSession = '';
 let socketConnectingSession = '';
 let socketOpen = false;
@@ -66,11 +66,11 @@ const STOP_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6"
 function currentSession(): string { return sessionOverride || state.activeSessionId || ''; }
 
 function panelQuery<T extends Element>(selector: string): T | null {
-  return panelRoot.querySelector<T>(selector);
+  return panelRoot?.querySelector<T>(selector) ?? null;
 }
 
-function panelQueryAll<T extends Element>(selector: string): NodeListOf<T> {
-  return panelRoot.querySelectorAll<T>(selector);
+function panelQueryAll<T extends Element>(selector: string): NodeListOf<T> | T[] {
+  return panelRoot?.querySelectorAll<T>(selector) ?? [];
 }
 
 function defaultState(): BrowserPageState {
@@ -154,8 +154,31 @@ function isValidBrowserSessionId(value: string): boolean {
 }
 
 export function syncBrowserPanelSession(sessionId: string | null): void {
+  const previous = currentSession();
   const next = sessionOverride || sessionId || '';
+  switchBrowserPanelSession(next, previous, false);
+}
+
+/**
+ * Bind the browser surface to an explicit session (used by Wiki Agent).
+ * Browser state is session-scoped; this layer intentionally does not know KB ids.
+ */
+export function setBrowserPanelSession(sessionId: string | null): void {
+  const previous = currentSession();
+  sessionOverride = sessionId?.trim() || null;
+  const next = sessionOverride || sessionId || state.activeSessionId || '';
+  switchBrowserPanelSession(next, previous, true);
+}
+
+function switchBrowserPanelSession(
+  next: string,
+  previous: string,
+  releaseHumanControl: boolean,
+): void {
   if (next && socketSession === next) return;
+  if (releaseHumanControl && previous && pageState?.mode === 'human') {
+    void releaseHumanBrowserControl(previous);
+  }
   hideBrowserPanelView();
   socketSession = '';
   socketConnectingSession = '';
@@ -177,12 +200,6 @@ export function syncBrowserPanelSession(sessionId: string | null): void {
   // the toolbar status without mounting or exposing the remote page view.
   // Skip ids that the main process would reject (e.g. agent sessions containing '@').
   if (next && isValidBrowserSessionId(next)) void ensureConnection(next);
-}
-
-/** 切换 Browser 面板所属会话；清空后恢复主对话的 activeSessionId。 */
-export function setBrowserPanelSession(sessionId: string | null): void {
-  sessionOverride = sessionId?.trim() || null;
-  syncBrowserPanelSession(sessionId);
 }
 
 async function ensureConnection(sessionId: string): Promise<void> {
@@ -1177,15 +1194,20 @@ export async function discardLastRecording(): Promise<void> {
 }
 
 /** Close-time privacy handoff: keep control modes internal instead of exposing UI toggles. */
-export function releaseUserBrowserControl(): void {
-  const sessionId = currentSession();
-  if (!sessionId || pageState?.mode !== 'human') return;
-  void backendApi.browserControl(sessionId, 'return').then((result) => {
+function releaseHumanBrowserControl(sessionId: string): Promise<void> {
+  if (!sessionId) return Promise.resolve();
+  return backendApi.browserControl(sessionId, 'return').then((result) => {
     if (currentSession() !== sessionId || !isBrowserPageState(result.state)) return;
     applyPageState(result.state);
   }).catch(() => {
-    // Closing the panel must remain immediate even if the gateway is restarting.
+    // Closing or switching the panel must remain immediate if the gateway is restarting.
   });
+}
+
+export function releaseUserBrowserControl(): void {
+  const sessionId = currentSession();
+  if (!sessionId || pageState?.mode !== 'human') return;
+  void releaseHumanBrowserControl(sessionId);
 }
 
 export async function openBrowserArtifact(

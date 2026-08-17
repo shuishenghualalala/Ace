@@ -100,6 +100,14 @@ export function openWikiBrowserSurface(sessionId: string): void {
   renderShell();
 }
 
+/** Rebind the existing Wiki browser surface without making it depend on kbId. */
+export function setWikiBrowserSurfaceSession(sessionId: string): void {
+  const normalized = sessionId.trim();
+  if (!normalized || !wikiBrowserSurfaceOpen || normalized === wikiBrowserSurfaceSession) return;
+  wikiBrowserSurfaceSession = normalized;
+  renderShell();
+}
+
 export function closeWikiBrowserSurface(): void {
   if (!wikiBrowserSurfaceOpen) return;
   wikiBrowserSurfaceOpen = false;

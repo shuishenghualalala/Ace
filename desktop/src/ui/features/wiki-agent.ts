@@ -93,6 +93,7 @@ import {
   openWikiPageInHub,
   closeWikiBrowserSurface,
   openWikiBrowserSurface,
+  setWikiBrowserSurfaceSession,
   setWikiBrowserSurfaceRenderer,
   setWikiAgentPanelRenderer,
   toggleWikiBrowser,
@@ -635,6 +636,7 @@ async function switchEmbeddedConversation(root: HTMLElement, req: WikiAgentEntry
   await activateEmbeddedSession(req.kbId, sessionId, req.kbName || req.kbId);
   if (document.querySelector('[data-wiki-browser-surface]')) {
     setBrowserPanelSession(sessionId);
+    setWikiBrowserSurfaceSession(sessionId);
   }
   const input = root.querySelector<HTMLTextAreaElement>('[data-composer-input]');
   if (input) {
@@ -919,6 +921,10 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
       || root.dataset.kbId !== req.kbId
     ) return;
     loaded.kbName = req.kbName || req.kbId;
+    if (document.querySelector('[data-wiki-browser-surface]')) {
+      setBrowserPanelSession(loaded.sessionId);
+      setWikiBrowserSurfaceSession(loaded.sessionId);
+    }
     scheduleEmbeddedRender();
     // 缓存路径（会话已激活）不再过 activateEmbeddedSession，这里兜底确保模型绑定已加载。
     void loadSessionModel(loaded.sessionId).then(() => {
