@@ -87,9 +87,9 @@ def _shell_exit_code(code: int) -> int:
 def main(argv: list[str] | None = None) -> int:
     # CLI 进程默认只保留 WARNING+ 日志：INFO 级的运行时装配/PERF 噪音对命令行
     # 没有价值（REPL 里还会穿插进提示符行）。gateway 进程不受影响；
-    # 显式设置 CREW_LOG_LEVEL 可覆盖（在 setup_logging 里生效）。
+    # 显式设置 CREW_LOG_LEVEL 可覆盖（经 load_config → cfg.log_level 生效）。
     # 用 set/restore 而不是 setdefault：测试同进程多次调 main() 时不能把
-    # CREW_LOG_LEVEL 泄漏给后续用例（setup_logging 会读到它）。
+    # CREW_LOG_LEVEL 泄漏给后续用例（load_config 会读到它）。
     prev_log_level = os.environ.get("CREW_LOG_LEVEL")
     if prev_log_level is None:
         os.environ["CREW_LOG_LEVEL"] = "WARNING"

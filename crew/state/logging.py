@@ -213,8 +213,9 @@ def setup_logging(level: str = "INFO", log_file: str = "", llm_trace: bool = Fal
     global _CONFIGURED, _RING
     if _CONFIGURED:
         return
-    # CREW_LOG_LEVEL 环境变量优先（CLI 用它把默认压到 WARNING；gateway 不设则不变）
-    level = os.environ.get("CREW_LOG_LEVEL", "").strip() or level
+    # 注意：CREW_LOG_LEVEL 不在这里读。它唯一入口是 config.py 的 load_config
+    # （env → cfg.log_level），再由 build_app 把 cfg.log_level 传给本函数。这里
+    # 不再重复读 env，否则 setup_logging(level) 的显式参数会被泄漏的进程环境静默覆盖。
     # Windows 默认 GBK：先切 UTF-8，再挂 RichHandler，避免 emoji/中文刷屏 Logging error。
     _ensure_utf8_stdio()
     log_level = getattr(logging, level.upper(), logging.INFO)

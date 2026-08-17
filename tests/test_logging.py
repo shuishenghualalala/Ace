@@ -139,26 +139,6 @@ def test_ring_buffer_filters_by_causal_owner_and_keeps_raw_thread_logs_system_on
     ] == ""
 
 
-def test_setup_logging_honors_crew_log_level_env(monkeypatch):
-    """CREW_LOG_LEVEL 环境变量优先于传入 level（CLI 用它把默认压到 WARNING）。"""
-    root = logging.getLogger()
-    old_handlers, old_filters, old_level = root.handlers[:], root.filters[:], root.level
-    old_configured, old_ring = clog._CONFIGURED, clog._RING
-    monkeypatch.setenv("CREW_LOG_LEVEL", "ERROR")
-    clog._CONFIGURED = False
-    try:
-        clog.setup_logging("INFO")
-        assert root.level == logging.ERROR
-    finally:
-        for h in root.handlers[:]:
-            if h not in old_handlers:
-                root.removeHandler(h)
-        root.filters[:] = old_filters
-        root.setLevel(old_level)
-        clog._CONFIGURED = old_configured
-        clog._RING = old_ring
-
-
 def test_setup_logging_without_env_keeps_passed_level(monkeypatch):
     """未设置 CREW_LOG_LEVEL 时保持调用方传入的级别（gateway 行为不变）。"""
     root = logging.getLogger()
