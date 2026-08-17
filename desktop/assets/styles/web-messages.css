@@ -861,14 +861,15 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   border-radius: var(--mw-radius-4);
 }
 
-.chat-messages.web-flow .agent-avatar--message.agent-tone-1 { color: var(--mw-text-primary); background: var(--mw-bg-surface); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-0 { color: var(--mw-status-success); background: var(--mw-status-success-bg); border-color: var(--mw-status-success); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-1 { color: var(--mw-status-info); background: var(--mw-status-info-bg); border-color: var(--mw-status-info); }
 .chat-messages.web-flow .agent-avatar--message.agent-tone-2 { color: var(--mw-status-success); background: var(--mw-bg-subtle); border-color: var(--mw-status-success); }
 .chat-messages.web-flow .agent-avatar--message.agent-tone-3 { color: var(--mw-status-warning); background: var(--mw-status-warning-bg); border-color: var(--mw-status-warning); }
 .chat-messages.web-flow .agent-avatar--message.agent-tone-4 { color: var(--mw-status-info); background: var(--mw-bg-subtle); border-color: var(--mw-status-info); }
 .chat-messages.web-flow .agent-avatar--message.agent-tone-5 { color: var(--mw-status-info); background: var(--mw-bg-subtle); border-color: var(--mw-status-info); }
 
-.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 4%, transparent); border-color: var(--mw-border-strong); }
-.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 28%, transparent); border-color: color-mix(in srgb, var(--mw-status-warning) 9%, transparent); }
+.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew) { background: color-mix(in srgb, var(--mw-status-success) 12%, var(--mw-bg-surface)); border-color: color-mix(in srgb, var(--mw-status-success) 28%, transparent); }
+.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew) { background: color-mix(in srgb, var(--mw-status-info) 12%, var(--mw-bg-surface)); border-color: color-mix(in srgb, var(--mw-status-info) 28%, transparent); }
 .chat-messages.web-flow .team-internal__bubble--tone-2:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 26%, transparent); border-color: color-mix(in srgb, var(--mw-status-success) 10%, transparent); }
 .chat-messages.web-flow .team-internal__bubble--tone-3:not(.is-crew) { background: color-mix(in srgb, var(--mw-status-warning) 24%, transparent); border-color: color-mix(in srgb, var(--mw-status-warning) 10%, transparent); }
 .chat-messages.web-flow .team-internal__bubble--tone-4:not(.is-crew) { background: color-mix(in srgb, var(--mw-text-primary) 26%, transparent); border-color: color-mix(in srgb, var(--mw-status-info) 10%, transparent); }

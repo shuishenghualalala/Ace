@@ -166,6 +166,24 @@ describe('renderAgentTurn', () => {
       .toHaveProperty('disabled', true);
   });
 
+  it('Team 成员通信标题优先展示结构化收件人', () => {
+    const root = renderTeamInternalMessage({
+      id: 'team-submit-to-leader',
+      role: 'team_internal',
+      content: '@leader 汇报当前执行状态',
+      timestamp: 1_700_000_000_000,
+      agentId: 'kk',
+      agentName: 'kk',
+      agentRole: '向 kk 征询执行意见与状态',
+      mentionFrom: 'kk',
+      mentionTo: ['leader'],
+      mentionIntent: 'submit',
+      eventType: 'team_submit',
+    });
+    expect(root.querySelector('.team-internal__name em')?.textContent)
+      .toBe('向 leader 征询执行意见与状态');
+  });
+
   it('直接 mention 失败可重试，运行中可取消', () => {
     const failed = renderTeamInternalMessage({
       id: 'mention-failed',

@@ -1596,8 +1596,8 @@ body.inspector-open .task-board-toggle {
   line-height: 1;
 }
 
-.team-collaboration-board .agent-tone-0 { border-color: var(--mw-border-strong); background: var(--mw-bg-selected); color: var(--mw-text-muted); }
-.team-collaboration-board .agent-tone-1 { border-color: var(--mw-border-strong); background: var(--mw-bg-surface); color: var(--mw-text-primary); }
+.team-collaboration-board .agent-tone-0 { border-color: var(--mw-status-success); background: var(--mw-status-success-bg); color: var(--mw-status-success); }
+.team-collaboration-board .agent-tone-1 { border-color: var(--mw-status-info); background: var(--mw-status-info-bg); color: var(--mw-status-info); }
 .team-collaboration-board .agent-tone-2 { border-color: var(--mw-status-success); background: var(--mw-bg-subtle); color: var(--mw-status-success); }
 .team-collaboration-board .agent-tone-3 { border-color: var(--mw-status-warning); background: var(--mw-status-warning-bg); color: var(--mw-status-warning); }
 .team-collaboration-board .agent-tone-4 { border-color: var(--mw-status-info); background: var(--mw-bg-subtle); color: var(--mw-status-info); }

@@ -7,6 +7,7 @@ const studioCss = readFileSync(resolve(stylesDir, 'studio.css'), 'utf8');
 const layoutCss = readFileSync(resolve(stylesDir, 'layouts.css'), 'utf8');
 const chatCss = readFileSync(resolve(stylesDir, 'chat.css'), 'utf8');
 const webMessagesCss = readFileSync(resolve(stylesDir, 'web-messages.css'), 'utf8');
+const kanbanCss = readFileSync(resolve(stylesDir, 'kanban-board.css'), 'utf8');
 const composerCss = readFileSync(resolve(stylesDir, 'composer.css'), 'utf8');
 const composerContextCss = readFileSync(resolve(stylesDir, 'composer-context.css'), 'utf8');
 const processTimelineCss = readFileSync(resolve(stylesDir, 'process-timeline.css'), 'utf8');
@@ -101,6 +102,21 @@ describe('shared chat chrome styles', () => {
     expect(selection).toContain('color: transparent');
     expect(selection).toContain('-webkit-text-fill-color: transparent');
     expect(overlay).toContain('pointer-events: none');
+  });
+
+  it('keeps Team member avatars and bubbles visibly colored for the first tones', () => {
+    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-0'))
+      .toContain('background: var(--mw-status-success-bg)');
+    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-1'))
+      .toContain('background: var(--mw-status-info-bg)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-0'))
+      .toContain('border-color: var(--mw-status-success)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-1'))
+      .toContain('border-color: var(--mw-status-info)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew)'))
+      .toContain('var(--mw-status-success)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew)'))
+      .toContain('var(--mw-status-info)');
   });
 });
 

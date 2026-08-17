@@ -660,6 +660,15 @@
     </ul>
     <p>验证：样式回归测试、Desktop typecheck、CSS lint、production build 与 <code>git diff --check</code> 通过。</p>
   </section>
+  <section>
+    <h2>历史 Team mention 恢复与通信身份视觉修复（2026-08-17）</h2>
+    <ul>
+      <li>历史打开 Team Session 时，从持久化 session model 的 <code>external_team_id</code> 恢复到 mention 状态，@ 候选成员与新建 Team 会话一致。</li>
+      <li>Team 成员 tone 0/1 改用状态色，确保看板头像和内部消息气泡不会落成无色灰阶。</li>
+      <li>通信标题优先使用结构化 <code>mention_to</code> 修正方向；例如成员提交给 Leader 时显示“向 leader”，不再把节点标题中的旧目标当成当前收件人。</li>
+    </ul>
+    <p>验证：相关 Desktop/Web 渲染、session model 与样式回归测试，以及 Desktop/Web typecheck、CSS lint、production build 通过。</p>
+  </section>
 </div>
 </body>
 </html>

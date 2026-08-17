@@ -37,4 +37,13 @@ describe("TeamAgentTurnBubble communication status", () => {
     expect(renderMessage({ communicationKind: "team_submit", communicationStatus: "answered" }))
       .not.toContain("已回答");
   });
+
+  it("shows the structured recipient in a Team communication title", () => {
+    expect(renderMessage({
+      agentRole: "向 kk 征询执行意见与状态",
+      mentionFrom: "kk",
+      mentionTo: ["leader"],
+      mentionIntent: "submit",
+    })).toContain("向 leader 征询执行意见与状态");
+  });
 });

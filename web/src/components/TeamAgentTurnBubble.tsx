@@ -16,6 +16,16 @@ function isCrewAgent(message: UiMessage): boolean {
   return String(message.agentId || "").trim() === "crew::builtin";
 }
 
+function resolveTeamCommunicationRole(message: UiMessage, fallback: string): string {
+  const role = String(fallback || "").trim();
+  const target = (message.mentionTo || [])
+    .map((item) => String(item || "").trim())
+    .find(Boolean);
+  if (!target || !/^向\s+\S+/.test(role)) return role;
+  const label = target === "crew::builtin" ? "Crew" : target;
+  return role.replace(/^向\s+\S+/, `向 ${label}`);
+}
+
 function resolveIdentity(message: UiMessage, teamMembers: TeamMemberView[] = []) {
   const member = (message.agentId ? teamMembers.find((item) => item.agentId === message.agentId) : undefined)
     || (message.agentName ? teamMembers.find((item) => item.name === message.agentName) : undefined)
@@ -24,7 +34,10 @@ function resolveIdentity(message: UiMessage, teamMembers: TeamMemberView[] = [])
   return {
     name: crewLogo ? "Crew" : (member?.name || message.agentName || "Agent"),
     badge: member?.displayBadge || "?",
-    role: member?.isLeader ? "leader" : (message.isLeader ? "leader" : (message.agentRole || member?.role || "").trim()),
+    role: resolveTeamCommunicationRole(
+      message,
+      member?.isLeader ? "leader" : (message.isLeader ? "leader" : (message.agentRole || member?.role || "").trim()),
+    ),
     tone: member?.tone ?? message.agentTone ?? 0,
     crewLogo,
   };

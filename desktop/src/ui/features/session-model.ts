@@ -3,11 +3,11 @@
  */
 
 import { backendApi, type ModelOption, type RuntimeModelProfile } from '../backend-client';
-import { isBusySession, notify, state } from '../state';
+import { isBusySession, notify, setActiveExternalTeamForSession, state } from '../state';
 import { composerWorkspaceId, ensureComposerDraftSession, getDraftSessionModelId, getSessionAgentDisplay, isDraftSession, setDraftSessionModelId } from './workspaces';
 
 export interface SessionModelBinding {
-  source?: 'crew' | 'external';
+  source?: 'crew' | 'external' | 'team';
   model_profile_id: string;
   pending_model_profile_id?: string | null;
   model_label?: string;
@@ -18,6 +18,7 @@ export interface SessionModelBinding {
   model_switchable?: boolean;
   runtime_id?: string;
   external_agent_id?: string;
+  external_team_id?: string;
 }
 
 export interface ComposerModelOption {
@@ -151,6 +152,13 @@ export function resolveComposerModelLabel(): string {
 }
 
 export function applySessionModelBinding(sessionId: string, binding: SessionModelBinding): void {
+  // Team identity is persisted with the session model binding. Restore it at
+  // the same boundary that restores the model so historical sessions can
+  // populate the mention palette before the composer is opened.
+  setActiveExternalTeamForSession(
+    sessionId,
+    binding.source === 'team' ? String(binding.external_team_id || '').trim() : '',
+  );
   bindingsBySession.set(sessionId, binding);
   if (sessionId === state.activeSessionId) {
     syncSessionModelUi();

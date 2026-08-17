@@ -838,5 +838,14 @@ cd web && npm run build
   </ul>
   <p>验证：Web Composer 测试 7 passed，Web TypeScript typecheck 通过。</p>
 </div>
+<div>
+  <h2>历史 Team mention 恢复与通信身份视觉修复（2026-08-17）</h2>
+  <ul>
+    <li>Team 通信标题优先使用结构化 <code>mention_to</code> 修正展示方向；成员提交给 Leader 时显示“向 leader”，不把节点标题中的旧目标误当成收件人。</li>
+    <li>Team 成员身份的前两个 tone 使用明确状态色，内部消息气泡不再回退到无色灰阶。</li>
+    <li>与 Desktop 共用同一通信字段语义，不改变 Team Bus 路由或 mention 协议。</li>
+  </ul>
+  <p>验证：Web Team 气泡定向测试 5 passed、Web TypeScript typecheck 与 production build 通过。</p>
+</div>
 </body>
 </html>

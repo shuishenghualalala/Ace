@@ -106,6 +106,19 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
     expect(resolveSessionModelWindow()).toBe(256000);
   });
 
+  it('加载历史 Team Session 时恢复持久化的 Team identity 供 mention 使用', async () => {
+    backendMocks.getSessionModel.mockResolvedValue({
+      source: 'team',
+      external_team_id: 'team-pixel',
+      model_profile_id: 'team-model',
+      model_label: 'Team Model',
+    });
+
+    expect((await loadSessionModel('sess-a'))?.external_team_id).toBe('team-pixel');
+    expect((await import('../../src/ui/state')).state.activeExternalTeamIdBySession['sess-a'])
+      .toBe('team-pixel');
+  });
+
   it('pending（下条消息生效）时优先返回将生效的模型', () => {
     applySessionModelBinding('sess-a', {
       model_profile_id: 'global-default',

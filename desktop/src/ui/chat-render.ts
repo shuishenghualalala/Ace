@@ -1338,6 +1338,16 @@ function isCommunicationMessage(kind?: string): boolean {
   return COMMUNICATION_MESSAGE_KINDS.has(String(kind || '').trim());
 }
 
+function resolveTeamCommunicationRole(message: ChatMessage, fallback: string): string {
+  const role = String(fallback || '').trim();
+  const target = (message.mentionTo || [])
+    .map((item) => String(item || '').trim())
+    .find(Boolean);
+  if (!target || !/^向\s+\S+/.test(role)) return role;
+  const label = target === CREW_BUILTIN_AGENT_ID ? 'Crew' : target;
+  return role.replace(/^向\s+\S+/, `向 ${label}`);
+}
+
 const RETRYABLE_MENTION_STATUSES = new Set(['failed', 'expired', 'cancelled']);
 const ACTIVE_MENTION_STATUSES = new Set(['published', 'waiting_reply', 'queued', 'delivered']);
 
@@ -1351,7 +1361,10 @@ export function renderTeamInternalMessage(
   const name = isPlanning
     ? String(message.agentName || '团队').trim()
     : isCrew ? 'Crew' : String(message.agentName || message.agentId || 'Agent').trim();
-  const role = isPlanning ? '' : message.isLeader ? 'leader' : String(message.agentRole || '').trim();
+  const role = isPlanning ? '' : resolveTeamCommunicationRole(
+    message,
+    message.isLeader ? 'leader' : String(message.agentRole || '').trim(),
+  );
   const tone = Number.isFinite(message.agentTone) ? Number(message.agentTone) % 6 : 0;
   const processMessage: ChatMessage = {
     ...message,
