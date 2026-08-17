@@ -33,6 +33,16 @@ describe("TeamAgentTurnBubble communication status", () => {
     expect(renderMessage({ communicationStatus: "failed" })).not.toContain("重试");
   });
 
+  it("keeps a terminal expired mention actionable and visible", () => {
+    const html = renderMessage({
+      text: "coder 的回答已超时。",
+      communicationStatus: "expired",
+      communicationRequestText: "@coder 你现在用什么模型？",
+    });
+    expect(html).toContain("已超时");
+    expect(html).toContain(">重试<");
+  });
+
   it("does not show a communication badge for ordinary Team messages", () => {
     expect(renderMessage({ communicationKind: "team_submit", communicationStatus: "answered" }))
       .not.toContain("已回答");

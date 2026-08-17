@@ -73,6 +73,14 @@
   </ul>
   <p>验证：Gateway mention 结构回归与 Desktop composer mention 回归通过；本阶段没有新增后端模块或 Team 数据源。</p>
 
+  <h2>5. Team @Agent 直达生命周期第二阶段（2026-08-17）</h2>
+  <ul>
+    <li>直达回合统一使用 <code>user_mention_answer</code> 搭配 <code>waiting_reply</code>、<code>answered</code>、<code>failed</code>、<code>expired</code>、<code>cancelled</code> 状态。</li>
+    <li>失败、超时或取消先发带 <code>request_id</code>、<code>reply_to</code> 和原始请求文本的终态通信帧，再发错误帧，实时 UI 不会停留在“等待回答”。</li>
+    <li>历史仍复用直接 Agent 子会话作为 canonical transcript；终态通信元数据随子会话恢复，不创建 TeamPlan、DAG 或额外持久化模块。</li>
+  </ul>
+  <p>验证：成功与终态失败回合、历史通信字段和前端状态展示回归通过。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

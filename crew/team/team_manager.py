@@ -6197,26 +6197,46 @@ class InProcessTeamManager(TeamManager):
             or target_hint
             or "团队成员"
         ).strip()
+
+        def _mention_chunk(
+            text: str,
+            *,
+            status: str,
+            target_id: str = target_hint,
+            reply_to: str = "",
+        ) -> ResponseChunk:
+            resolved_spec = (
+                team.leader_spec
+                if target_id == "leader"
+                else team.members.get(target_id)
+            )
+            return self._team_internal_chunk(
+                envelope.request_id,
+                agent_id=target_id,
+                role=(resolved_spec.role if resolved_spec is not None else ""),
+                is_leader=target_id == "leader",
+                source_session_id=f"{envelope.session_id}::turn::{envelope.request_id}::{target_id}",
+                text=text,
+                event_type="team_communication",
+                display_mode="chat",
+                mention_from=target_id,
+                mention_to=["user"],
+                mention_intent="answer",
+                communication_kind="user_mention_answer",
+                communication_status=status,
+                reply_to=reply_to,
+                communication_request_text=str(envelope.query or ""),
+            )
+
         yield ResponseChunk.status_event(
             envelope.request_id,
             f"正在直接询问 {target_label}…",
         )
         if target_spec is not None:
-            yield self._team_internal_chunk(
-                envelope.request_id,
-                agent_id=target,
-                role=target_spec.role,
-                is_leader=target == "leader",
-                source_session_id=f"{envelope.session_id}::turn::{envelope.request_id}::{target}",
-                text=f"正在询问 {target_label}…",
-                event_type="team_communication",
-                display_mode="chat",
-                mention_from=target,
-                mention_to=["user"],
-                mention_intent="answer",
-                communication_kind="user_mention_answer",
-                communication_status="waiting_reply",
-                communication_request_text=str(envelope.query or ""),
+            yield _mention_chunk(
+                f"正在询问 {target_label}…",
+                status="waiting_reply",
+                target_id=target,
             )
         try:
             result = await team.communication_router.route_user_mention(
@@ -6227,6 +6247,8 @@ class InProcessTeamManager(TeamManager):
                 workspace_id=envelope.workspace_id,
             )
         except (RuntimeError, ValueError) as exc:
+            if target_hint:
+                yield _mention_chunk(str(exc), status="failed")
             yield ResponseChunk.error(envelope.request_id, str(exc))
             return
 
@@ -6234,28 +6256,24 @@ class InProcessTeamManager(TeamManager):
         status = str(result.get("status") or "failed").strip()
         answer = str(result.get("answer") or "").strip()
         if status != "answered" or not answer:
+            terminal_status = status if status in {"failed", "expired", "cancelled"} else "failed"
+            yield _mention_chunk(
+                answer or f"{target_label} 暂时无法回答。",
+                status=terminal_status,
+                target_id=target,
+                reply_to=str(result.get("reply_to") or ""),
+            )
             yield ResponseChunk.error(
                 envelope.request_id,
                 answer or f"{target_label} 暂时无法回答。",
             )
             return
 
-        yield self._team_internal_chunk(
-            envelope.request_id,
-            agent_id=target,
-            role=(target_spec.role if target_spec is not None else ""),
-            is_leader=target == "leader",
-            source_session_id=f"{envelope.session_id}::turn::{envelope.request_id}::{target}",
-            text=answer,
-            event_type="team_communication",
-            display_mode="chat",
-            mention_from=target,
-            mention_to=["user"],
-            mention_intent="answer",
-            communication_kind="user_mention_answer",
-            communication_status="answered",
+        yield _mention_chunk(
+            answer,
+            status="answered",
+            target_id=target,
             reply_to=str(result.get("reply_to") or ""),
-            communication_request_text=str(envelope.query or ""),
         )
         yield ResponseChunk.final(envelope.request_id, answer)
 

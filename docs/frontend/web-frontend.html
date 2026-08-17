@@ -856,5 +856,14 @@ cd web && npm run build
   </ul>
   <p>验证：Gateway mention 结构与 Desktop composer mention 回归通过。</p>
 </div>
+<div>
+  <h2>78. Team @Agent 直达生命周期第二阶段（2026-08-17）</h2>
+  <ul>
+    <li>等待、回答、失败、超时和取消都更新同一个 <code>user_mention_answer</code> 气泡，并使用 <code>request_id</code> 合并实时帧与历史帧。</li>
+    <li>终态通信帧携带原始请求文本，因此失败/超时/取消时可正确显示“重试”；没有请求文本时仍不展示不可执行的按钮。</li>
+    <li>本阶段不创建 DAG、Task、产物或新的 Web 通信接口。</li>
+  </ul>
+  <p>验证：TeamAgentTurnBubble 终态状态与重试展示回归通过。</p>
+</div>
 </body>
 </html>

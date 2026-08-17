@@ -3739,6 +3739,49 @@ async def test_user_agent_mention_rejects_unselected_or_unknown_target_without_f
     assert team.bus.list_messages("user_mention_invalid_s1") == []
 
 
+@pytest.mark.asyncio
+async def test_user_agent_mention_exposes_terminal_failure_state_before_error_frame():
+    tm, tasks = _team()
+    envelope = Envelope.of(
+        "@coder 你现在用什么模型？",
+        session_id="user_mention_failed_s1",
+        request_id="user_mention_failed_req",
+        mode="team",
+        user_id="local",
+        params={
+            "user_mentions": [{"kind": "team_member", "member_id": "coder"}],
+        },
+    )
+    team = tm._get_or_create("user_mention_failed_s1", owner_account_id="local")
+
+    async def failed_route_user_mention(**_kwargs):
+        return {
+            "status": "expired",
+            "target": "coder",
+            "answer": "coder 的回答已超时。",
+            "reply_to": "bus_failed",
+        }
+
+    team.communication_router.route_user_mention = failed_route_user_mention
+    chunks = [chunk async for chunk in tm.interact(envelope)]
+
+    assert [chunk.kind for chunk in chunks] == [
+        "status",
+        "team_internal",
+        "team_internal",
+        "error",
+    ]
+    terminal = chunks[2]
+    assert terminal.body["communication_kind"] == "user_mention_answer"
+    assert terminal.body["communication_status"] == "expired"
+    assert terminal.body["request_id"] == envelope.request_id
+    assert terminal.body["reply_to"] == "bus_failed"
+    assert terminal.body["communication_request_text"] == envelope.query
+    assert chunks[-1].body["message"] == "coder 的回答已超时。"
+    assert tasks.list("user_mention_failed_s1") == []
+    assert ("local", "user_mention_failed_s1") not in tm._plans
+
+
 async def test_external_team_mention_propagates_current_active_skill(monkeypatch):
     tm, _tasks = _team()
     tm._get_or_create("external_skill_team")
@@ -8874,6 +8917,51 @@ def test_team_history_keeps_distinct_communication_replies_with_same_text():
     assert items[0]["communication_kind"] == "user_mention_answer"
     assert items[0]["communication_status"] == "answered"
     assert items[0]["reply_to"] == "bus_1"
+
+
+def test_team_history_preserves_terminal_user_mention_state_for_retry():
+    class Crew:
+        class tasks:
+            @staticmethod
+            def list_tasks(*args, **kwargs):
+                return []
+
+    items = team_internal_history_items(
+        Crew(),
+        "team_parent",
+        [
+            (
+                "team_parent::turn::req_expired::coder",
+                [Message(
+                    role="assistant",
+                    content="coder 的回答已超时。",
+                    timestamp=3,
+                    communication_kind="user_mention_answer",
+                    communication_status="expired",
+                    request_id="req_expired",
+                    reply_to="bus_expired",
+                    communication_request_text="@coder 你现在用什么模型？",
+                )],
+            )
+        ],
+    )
+
+    assert items == [{
+        "role": "team_internal",
+        "content": "coder 的回答已超时。",
+        "agent_id": "coder",
+        "agent_name": "coder",
+        "agent_role": "",
+        "is_leader": False,
+        "agent_tone": 0,
+        "source_session_id": "team_parent::turn::req_expired::coder",
+        "timestamp": 3,
+        "communication_kind": "user_mention_answer",
+        "communication_status": "expired",
+        "request_id": "req_expired",
+        "reply_to": "bus_expired",
+        "communication_request_text": "@coder 你现在用什么模型？",
+    }]
 
 
 def test_team_parent_direct_reply_history_uses_leader_identity(auth_headers):

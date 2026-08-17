@@ -678,6 +678,15 @@
     </ul>
     <p>验证：composer mention 与 Gateway mention 结构回归通过；未新增前端模块、接口或持久化字段。</p>
   </section>
+  <section>
+    <h2>Team @Agent 直达生命周期第二阶段（2026-08-17）</h2>
+    <ul>
+      <li>直接 @Agent 的等待、回答、失败、超时和取消统一映射到同一个通信气泡，不再让错误帧留下“等待回答”的旧状态。</li>
+      <li>终态帧保留 <code>request_id</code>、<code>reply_to</code> 和 <code>communication_request_text</code>，历史恢复与实时消息使用同一字段。</li>
+      <li>失败/超时/取消继续复用既有“重试”入口；本阶段只补状态闭环，不新增 Desktop 通信接口或模块。</li>
+    </ul>
+    <p>验证：Desktop mention、Team 看板/消息回归和 typecheck 通过。</p>
+  </section>
 </div>
 </body>
 </html>
