@@ -443,10 +443,6 @@ body.welcome-active .tab-pane#chat-tab.active.chat-mode .chat-disclaimer {
   }
 
   /* 短窗不再把 Welcome 内容压进固定三行网格，面板本身负责纵向滚动。 */
-  body.welcome-active #chat-tab.tab-pane.active.chat-mode {
-    grid-template-rows: minmax(0, 1fr) auto auto;
-  }
-
   body.welcome-active #welcome-panel {
     display: block;
     min-width: 0;
