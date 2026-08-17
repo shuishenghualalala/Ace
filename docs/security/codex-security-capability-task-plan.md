@@ -23,7 +23,7 @@ ID 是验收粒度，不是开发粒度。每个任务按共享类型、强制�
 - `T01` 已完成实现并通过 `python -m pytest -q tests/security/test_product_boundary_absent.py`（4 passed）。68 个 ID 已写入机器可验证的 `N/A`、`ACE_EQUIV` 或 `APPLICABLE` 处置；执行面库存的完整联跑已由 T15 补齐 `electron-process-callsites.json` artifact。
 - `T02` 已完成实现并通过主智能体复跑的四组 focused tests（101 passed）；`git diff --check` 通过。当前仍未更新基线状态，后续需要业务调用链接入和全量回归。
 - `T03` 已完成并通过主智能体验收：专属文件测试 `80 passed, 11 skipped`，附件/归档/文件面测试 `33 passed, 3 skipped`，相关 `compileall` 通过。
-- `T04` 遗留 resource assertion 已修正，T04 相关回归 `235 passed, 1 skipped`；artifact refresh 后 source-stale 已为 false。`T05` 已通过主验收：Python 网络测试 `149 passed`，`cargo test --all-targets` 通过（installed-fixture 条件跳过项保留）。`T06` 已通过主验收：Secrets/MCP focused tests `58 passed, 1 skipped`，`git diff --check` 通过。`T07` 已完成：focused `75 passed`，logging `15 passed`，lifecycle/checkpoint `2 passed`，runtime diagnostics `7 passed`；`T08` 已完成：Gateway focused `64 passed, 1 skipped`，compile/Ruff/diff check 通过；`T09` 已完成：Gateway focused `122 passed`，Desktop availability `7 passed`，typecheck/build:dev 通过；`T10` 已完成：focused `46 passed, 1 skipped`，compile/diff check 通过；`T11` 已完成 Linux owner 改动并通过 `linux_bwrap_plan`（19 passed），真实 Linux runner 证据保留给 T15；`T13` 已完成 Windows owner 改动，native release `150 passed, 2 ignored`，真实 elevated/install runner 证据保留给 T15；`T12` 已核对现有 macOS Seatbelt 实现覆盖 MAC-001~MAC-012，本轮无代码变更，真实 macOS runner 证据保留给 T15；`T14` 的 Browser/compat/updater 既有 focused 回归保持通过，本轮补齐了截图、reattach 和受控契约夹具，T14 相关 Electron contract 已 `71/71 passed`；最终本地复验为 Desktop Vitest `157 files / 1754 passed`、Python security `935 passed, 20 skipped`、Rust release tests 通过、typecheck/Playwright boundary/runtime verifier/npm audit 通过，Windows 安装矩阵在未提升 PowerShell 下被 native helper 正确拒绝；`T15` 的 32 个 ID 保持 `不全面`，发布闭环仍 `BLOCKED`（待 clean commit-bound checkout、真实三平台 runner、签名/attestation/SBOM 和 package signing policy）。各任务不得回滚或覆盖现有 dirty 文件。
+- `T04` 的资源边界实现已进入全量 security 回归；artifact refresh 后 source-stale 已为 false。`T05` 网络策略切片 `142 passed`，`cargo test --all-targets` 通过（installed-fixture 条件跳过项保留）。`T06` Secrets/MCP focused tests `58 passed, 1 skipped`，`git diff --check` 通过。`T07` 展示/日志脱敏切片 `30 passed`，全量 security 回归通过；`T08` Gateway 出站/脱敏切片 `30 passed`，Gateway contract `97 passed, 1 skipped`；`T09` Gateway focused `122 passed`，Desktop availability `7 passed`，typecheck/build:dev 通过；`T10` focused `46 passed, 1 skipped`，compile/diff check 通过；`T11` 已完成 Linux owner 改动并通过 `linux_bwrap_plan`（19 passed），真实 Linux runner 证据保留给 T15；`T13` 已完成 Windows owner 改动，native release `150 passed, 2 ignored`，真实 elevated/install runner 证据保留给 T15；`T12` 已核对现有 macOS Seatbelt 实现覆盖 MAC-001~MAC-012，本轮无代码变更，真实 macOS runner 证据保留给 T15；`T14` 的 Browser/compat/updater 既有 focused 回归保持通过，本轮补齐了截图、reattach 和受控契约夹具，T14 相关 Electron contract 已 `71/71 passed`；最终本地复验为 Desktop Vitest `157 files / 1754 passed`、Python security `936 passed, 20 skipped`、Rust release tests 通过、release workflow tests `62 passed, 1 warning`、typecheck/Playwright boundary/runtime verifier/npm audit 通过，Windows 安装矩阵在未提升 PowerShell 下被 native helper 正确拒绝；`T15` 的 32 个 ID 保持 `不全面`，发布闭环仍 `BLOCKED`（clean commit-bound checkout 已在本地满足，仍待真实三平台 runner、签名/attestation/SBOM 和 package signing policy）。各任务不得回滚或覆盖已提交工作树。
 
 ### Final local closure audit (2026-08-17)
 
@@ -34,7 +34,7 @@ ID 是验收粒度，不是开发粒度。每个任务按共享类型、强制�
 | T12 | macOS Seatbelt 代码与契约测试通过 | 缺真实 macOS runner |
 | T13 | Windows native release/path tests通过 | 2 个 installed-fixture tests ignored；本机非管理员，无法完成 elevated/install 证据 |
 | T14 | T14-A/B/C 完成，Electron contract `71/71` | 8 个 T14 ID 仍需逐项真实 Browser/updater/CUA/PDF/Wiki 证据，不能整体升级 |
-| T15 | 本地 release/security/verifier 通过 | 缺 clean checkout、三平台 evidence、受信 package signing policy、签名/attestation/SBOM；保持 `BLOCKED` |
+| T15 | 本地 release/security/verifier 通过 | clean commit-bound checkout 已满足；缺三平台 evidence、受信 package signing policy、签名/attestation/SBOM；保持 `BLOCKED` |
 
 ## Architecture and ownership decisions
 
@@ -48,10 +48,10 @@ ID 是验收粒度，不是开发粒度。每个任务按共享类型、强制�
 
 ## Preflight: freeze the current worktree
 
-当前 Ace 工作树已有未提交安全整改，且存在未跟踪的
-`security-runtime/security-runtime-bin/`。在派发任何子智能体前，先把当前工作树固定成一个可引用 checkpoint（提交、补丁包或其他可恢复方式均可）。
+历史 preflight 记录：Ace 工作树曾有未提交安全整改，且曾存在未跟踪的
+`security-runtime/security-runtime-bin/`；该目录已移至 `D:/MobileWork/AceTemp/security-runtime-bin-backup-20260817`，安全整改现已提交为最终 checkpoint。
 
-当前 dirty 文件的任务归属：
+原 dirty 文件的任务归属（历史记录）：
 
 | 当前改动 | 后续 owner |
 |---|---|
@@ -661,7 +661,7 @@ npm --prefix desktop run test:pw-contract
 
 **Estimated scope:** L；Ace 独有执行面集中处理。
 
-### T14 execution evidence (2026-08-17, current worktree)
+### T14 execution evidence (2026-08-17, final committed checkout)
 
 T14 当前状态：`READY_FOR_T15_REVIEW`。Electron 合同已经能够完整跑完并正常退出；此前由持久化 Electron profile 锁导致的 Windows 临时目录清理挂起已在合同 harness 中处理，不把“没有跑完”误判成通过。
 
@@ -743,13 +743,13 @@ pytest -q -p no:cacheprovider tests/security
 
 **Estimated scope:** L；只做发布/证据/基线收口，不重新实现业务逻辑。
 
-### T15 execution evidence (2026-08-17, current worktree)
+### T15 execution evidence (2026-08-17, final committed checkout)
 
-发布结论：`BLOCKED`。以下矩阵只证明本地 Windows 目标与源码/manifest 的一致性，不把 dirty worktree 当成 release checkout，也不替代真实三平台或签名证据。
+发布结论：`BLOCKED`。最终 checkout 已 clean 且 commit-bound；以下矩阵只证明本地 Windows 目标与源码/manifest 的一致性，不替代真实三平台或签名证据。
 
 | 证据 | 结果 |
 |---|---|
-| source / commit | `HEAD 491c914643eb857c7de421465b3417f1920a4727`; worktree dirty，故不满足 clean commit-bound release |
+| source / commit | `HEAD 5e022afe5e6e8dd3b8ac9bb6eb0969974c7a4a82`; final checkout clean，满足本地 clean commit-bound 条件 |
 | Windows target | `x86_64-pc-windows-msvc`; `cargo build --release --target x86_64-pc-windows-msvc` passed |
 | binary | `security-runtime/bin/ace-security-runtime.exe`; SHA-256 `dc55074e7225bbcb7dce5943231eb16e17e901f0804fbee95570f11c389a8f81`; Desktop staged digest identical |
 | manifest | `security-runtime/bin/runtime-manifest.json`; schema 2, `win32/x64`, source hash `f332d2ab080f2753ed4c923b695896d16ce1e64043e671f840a854bbcbb0f7f5`, binary digest matches |
@@ -757,10 +757,10 @@ pytest -q -p no:cacheprovider tests/security
 | Desktop dependency audit | `npm audit` full and production scopes both report `0` vulnerabilities after `dompurify 3.4.13`, `mermaid 11.16.1`, `nanoid 3.3.18` refresh |
 | inventory | `tests/security/test_execution_surface_inventory.py`: `15 passed`; `docs/security/electron-process-callsites.json` contains 18 registered callsites with owner, enforcement, identity, test and review metadata |
 | data-flow registry | `docs/security/data-flow-registry.json` contains 10 real/explicitly absent flows; registry contract `2 passed`; exact `.gitignore` exception added |
-| release workflow/path gate | release tests: `61 passed, 1 warning` using an explicit external basetemp; all 4 committed lockfiles are discovered and audited, including `crew/skills/html-to-pdf/package-lock.json`; exact Desktop Playwright `1.62.0` boundary and `npm ci` verification passed |
+| release workflow/path gate | release tests: `62 passed, 1 warning` using an explicit external basetemp; all 4 committed lockfiles are discovered and audited, including `crew/skills/html-to-pdf/package-lock.json`; native runtime bytes are now included in each platform evidence/attestation subject and checked against `artifact_sha256`; exact Desktop Playwright `1.62.0` boundary and `npm ci` verification passed |
 | Desktop typecheck / whitespace | `npm --prefix desktop run typecheck` passed; `git diff --check` passed (CRLF warnings only) |
 | native Rust | `cargo fmt --check` passed; Windows-target `cargo test --tests --release --locked`: `150 passed, 2 ignored`; Windows path release tests `6/6` |
-| Python security full run | `935 passed, 20 skipped` using an explicit external basetemp and `--no-cacheprovider`; process inventory now includes the dev-only contract cleanup callsite |
+| Python security full run | `936 passed, 20 skipped` using an explicit external basetemp and `--no-cacheprovider`; process inventory now includes the dev-only contract cleanup callsite |
 | Gateway smoke | `python -m crew.gateway.server`, bounded local smoke: `/health` HTTP 200, startup/ready logs present, exact spawned PID stopped |
 | Desktop smoke | `npm start` in `desktop`, bounded run: `build:dev` and Electron passed, managed Gateway `28180/api/health` returned 200 with `startup/cron/security_state=ready`; exact Electron/Gateway child PIDs stopped |
 | current startup recheck | Separate `python -m crew.gateway.server` smoke on `GATEWAY_PORT=28180` returned `/health` 200; separate `npm start` rebuilt and Electron connected to the existing loopback Gateway via `wait-existing-instance`; both were stopped by their owning smoke session |
