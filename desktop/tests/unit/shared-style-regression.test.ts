@@ -8,6 +8,7 @@ const layoutCss = readFileSync(resolve(stylesDir, 'layouts.css'), 'utf8');
 const chatCss = readFileSync(resolve(stylesDir, 'chat.css'), 'utf8');
 const webMessagesCss = readFileSync(resolve(stylesDir, 'web-messages.css'), 'utf8');
 const composerCss = readFileSync(resolve(stylesDir, 'composer.css'), 'utf8');
+const composerContextCss = readFileSync(resolve(stylesDir, 'composer-context.css'), 'utf8');
 const processTimelineCss = readFileSync(resolve(stylesDir, 'process-timeline.css'), 'utf8');
 const streamChatCss = readFileSync(resolve(stylesDir, 'stream-chat.css'), 'utf8');
 const uiPreviewCss = readFileSync(resolve(stylesDir, 'ui-preview.css'), 'utf8');
@@ -86,6 +87,20 @@ describe('shared chat chrome styles', () => {
     expect(ruleBody(streamChatCss, '.process-code-block pre')).toContain(
       'color: var(--mw-text-primary)',
     );
+  });
+
+  it('keeps selected mention input text from duplicating the overlay copy', () => {
+    const source = ruleBody(chatCss, '.chat-input-container textarea.chat-input-overlay-source');
+    const selection = ruleBody(
+      chatCss,
+      '.chat-input-container textarea.chat-input-overlay-source::selection',
+    );
+    const overlay = ruleBody(composerContextCss, '.chat-input-overlay');
+
+    expect(source).toContain('color: transparent');
+    expect(selection).toContain('color: transparent');
+    expect(selection).toContain('-webkit-text-fill-color: transparent');
+    expect(overlay).toContain('pointer-events: none');
   });
 });
 

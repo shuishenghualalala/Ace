@@ -651,6 +651,15 @@
     </ul>
     <p>验证：Desktop composer mention 测试 46 passed，Desktop typecheck 通过。</p>
   </section>
+  <section>
+    <h2>Team @Agent 输入选区重影修复（2026-08-17）</h2>
+    <ul>
+      <li><b>问题：</b>Composer 使用透明 textarea 承载光标/选区、覆盖层绘制正文；选中文字时浏览器又绘制 textarea 字形，导致文字重影并产生拥挤感。</li>
+      <li><b>修复：</b>在最终生效的 chat features 样式层为 mention source textarea 增加透明选区字形规则，保留原生选择、复制与光标行为，正文只由覆盖层显示。</li>
+      <li><b>范围：</b>仅更新既有 Composer 样式回归和 Desktop 前端文档，没有新增模块、接口或资源。</li>
+    </ul>
+    <p>验证：样式回归测试、Desktop typecheck、CSS lint、production build 与 <code>git diff --check</code> 通过。</p>
+  </section>
 </div>
 </body>
 </html>
