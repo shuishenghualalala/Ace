@@ -440,16 +440,47 @@ body.welcome-active .tab-pane#chat-tab.active.chat-mode .chat-disclaimer {
   .welcome-view__mascot {
     width: 156px;
     height: 156px;
-    margin-bottom: var(--mw-space-4);
   }
 
-  /* 短窗中项目条的上沿空间不足：装饰爪收进灰条内部，避免跨层压住边界。 */
-  .mw-composer__welcome-paw--left {
-    transform: translate(-50%, 0) rotate(-8deg);
+  /* 短窗不再把 Welcome 内容压进固定三行网格，面板本身负责纵向滚动。 */
+  body.welcome-active #chat-tab.tab-pane.active.chat-mode {
+    grid-template-rows: minmax(0, 1fr) auto auto;
   }
 
-  .mw-composer__welcome-paw--right {
-    transform: translate(50%, 0) rotate(8deg);
+  body.welcome-active #welcome-panel {
+    display: block;
+    min-width: 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block: var(--mw-space-4);
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  body.welcome-active #welcome-panel .welcome-view {
+    display: grid;
+    min-height: 100%;
+    align-content: start;
+    padding: var(--mw-space-4) var(--mw-space-4) var(--mw-space-8);
+  }
+
+  body.welcome-active #welcome-panel .welcome-view__header {
+    position: static;
+    z-index: auto;
+    width: 100%;
+    align-self: auto;
+    justify-self: stretch;
+    grid-column: auto;
+    grid-row: auto;
+    padding: 0;
+  }
+
+  body.welcome-active #welcome-panel .welcome-scenarios {
+    align-self: stretch;
+    grid-column: auto;
+    grid-row: auto;
   }
 
   .welcome-view__identity {

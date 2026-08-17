@@ -130,13 +130,19 @@ describe('Crew shell and Welcome identity', () => {
     expect(welcomeCss).toContain('@media (prefers-reduced-motion: reduce)');
   });
 
-  it('keeps compact Welcome decoration inside the project strip boundary', () => {
+  it('lets compact Welcome content scroll instead of clipping its text', () => {
     const compactHeightStart = welcomeCss.indexOf('@media (max-height: 680px)');
     const reducedMotionStart = welcomeCss.indexOf('@media (prefers-reduced-motion: reduce)');
     const compactHeightCss = welcomeCss.slice(compactHeightStart, reducedMotionStart);
 
-    expect(compactHeightCss).toContain('margin-bottom: var(--mw-space-4)');
-    expect(compactHeightCss).toContain('transform: translate(-50%, 0) rotate(-8deg)');
-    expect(compactHeightCss).toContain('transform: translate(50%, 0) rotate(8deg)');
+    expect(compactHeightCss).toContain(
+      'grid-template-rows: minmax(0, 1fr) auto auto',
+    );
+    expect(compactHeightCss).toContain('overflow-y: auto');
+    expect(compactHeightCss).toContain('scroll-padding-block: var(--mw-space-4)');
+    expect(compactHeightCss).toContain('grid-row: 1');
+    expect(compactHeightCss).toContain('grid-row: auto');
+    expect(compactHeightCss).not.toContain('translate(-50%, 0) rotate(-8deg)');
+    expect(compactHeightCss).not.toContain('translate(50%, 0) rotate(8deg)');
   });
 });
