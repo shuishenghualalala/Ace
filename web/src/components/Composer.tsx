@@ -39,6 +39,11 @@ interface Props {
   onCancelEdit?: () => void;
 }
 
+export function formatTeamMentionToken(member: Pick<TeamMemberView, "agentId" | "name">): string {
+  const label = member.name.trim().replace(/\s+/g, " ");
+  return `@${label || member.agentId || "Agent"}`;
+}
+
 export default function Composer({
   config,
   busy,
@@ -346,7 +351,7 @@ export default function Composer({
               .some((value) => value!.toLowerCase().includes(needle));
           })
           .map((member) => ({
-            text: `@${member.agentId}`,
+            text: formatTeamMentionToken(member),
             display: member.name,
             meta: member.isLeader ? `Leader · ${member.role}` : member.role,
             type: "agent",

@@ -235,7 +235,7 @@ describe('mentionTextForSkill', () => {
 });
 
 describe('Team agent mentions', () => {
-  it('keeps the selected member as a structured mention and removes it when the token is deleted', () => {
+  it('shows the member name while preserving the canonical member id for sending', () => {
     const token = compactMentionText({
       text: '@team-kk',
       display: 'kk',
@@ -244,13 +244,25 @@ describe('Team agent mentions', () => {
       userMention: { kind: 'team_member', member_id: 'team-kk' },
     });
 
-    expect(getUserAgentMentions(`请 @team-kk 写方案`)).toEqual([
-      { kind: 'team_member', member_id: 'team-kk' },
-    ]);
+    expect(token).toBe('@kk');
     expect(getUserAgentMentions(`请 ${token} 写方案`)).toEqual([
       { kind: 'team_member', member_id: 'team-kk' },
     ]);
+    expect(serializeMentionInput(`请 ${token} 写方案`)).toBe('请 @team-kk 写方案');
     expect(getUserAgentMentions('请写方案')).toEqual([]);
+  });
+
+  it('keeps a spaced display name readable without changing the member id', () => {
+    const token = compactMentionText({
+      text: '@crew-builtin',
+      display: 'Crew 内置智能体',
+      meta: 'Leader',
+      sig: 'agent',
+      userMention: { kind: 'team_member', member_id: 'crew-builtin' },
+    });
+
+    expect(token).toBe('@Crew 内置智能体');
+    expect(serializeMentionInput(`询问 ${token}`)).toBe('询问 @crew-builtin');
   });
 });
 

@@ -95,7 +95,7 @@ let active: ActiveTrigger | null = null;
 let selectedIndex = 0;
 let workTags: MentionTag[] = [];
 let workTagsHost: HTMLElement | null = null;
-/** 选中后的短显示 token，发送时还原成后端识别的结构化 token。 */
+/** 选中后的用户可读显示 token，发送时还原成后端识别的 canonical token。 */
 let compactMentions: CompactMention[] = [];
 const disabledWorkPreferenceIds = new Set<string>();
 
@@ -405,15 +405,19 @@ async function fetchAgentItems(token: string): Promise<MentionItem[]> {
 
 export function compactMentionText(item: MentionItem): string {
   if (item.sig === 'agent' && item.userMention) {
-    if (!compactMentions.some((mention) => mention.visible === item.text && mention.userMention?.member_id === item.userMention?.member_id)) {
-      compactMentions.push({
-        visible: item.text,
-        canonical: item.text,
-        kind: 'agent',
-        userMention: item.userMention,
-      });
-    }
-    return item.text;
+    const existing = compactMentions.find(
+      (mention) => mention.kind === 'agent' && mention.userMention?.member_id === item.userMention?.member_id,
+    );
+    if (existing) return existing.visible;
+    const display = item.display.trim().replace(/\s+/g, ' ');
+    const visible = display ? `@${display}` : item.text;
+    compactMentions.push({
+      visible,
+      canonical: `@${item.userMention.member_id}`,
+      kind: 'agent',
+      userMention: item.userMention,
+    });
+    return visible;
   }
   if (!['folder', 'image', 'file'].includes(item.sig)) return item.text;
   const prefix = `@${item.sig}:`;

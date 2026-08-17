@@ -829,5 +829,14 @@ cd web && npm run build
     <li><b>结果：</b>Web Team/历史测试 25 passed，TypeScript typecheck 通过；与后端、Desktop 的通信字段保持一致。</li>
   </ul>
 </div>
+<div>
+  <h2>76. Team @Agent 显示名称与路由 ID 分离（2026-08-17）</h2>
+  <ul>
+    <li><b>用户界面：</b>选择团队成员后，输入框显示成员名称，例如 <code>@kk</code> 或 <code>@Crew 内置智能体</code>，不再显示 <code>agent_...</code> 内部编码。</li>
+    <li><b>通信协议：</b>显示文本只负责可读性，发送时仍通过 <code>user_mentions[{kind:"team_member", member_id}]</code> 携带稳定成员 ID，后端路由语义不变。</li>
+    <li><b>范围：</b>复用既有 Composer 联想和结构化 mention，不新增接口、字段或模块。</li>
+  </ul>
+  <p>验证：Web Composer 测试 7 passed，Web TypeScript typecheck 通过。</p>
+</div>
 </body>
 </html>
