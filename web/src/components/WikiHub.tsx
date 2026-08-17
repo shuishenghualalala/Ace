@@ -968,9 +968,17 @@ export default function WikiHub({
    * 点击正文 [[Wiki 双链]]：先按标题/别名在已加载页面里精确匹配，
    * 找不到再走搜索接口兜底（对齐桌面端 resolveAndOpenWikiPage）。
    * 当前知识库未命中时依次搜索其他知识库——主对话等场景的链接可能指向别的 KB。
+   *
+   * 回调身份稳定（空依赖），点击时从 ref 读最新状态：否则 pages/kbs/kbId 每次
+   * 变化都让回调换身份，击穿 AgentTurn / MarkdownContent 的 memo，导致整个
+   * Wiki 聊天随无关的页面列表更新而全量重算。
    */
+  const latestWikiLinkRef = useRef({ pages, kbs, kbId, onKbChange });
+  latestWikiLinkRef.current = { pages, kbs, kbId, onKbChange };
+
   const handleWikiLink = useCallback(
     async (title: string) => {
+      const { pages, kbs, kbId, onKbChange } = latestWikiLinkRef.current;
       const local = findPageByTitle(pages, title);
       if (local) {
         openPageTab(local.id);
@@ -1007,7 +1015,7 @@ export default function WikiHub({
         setMessage(`打开 Wiki 页面失败：${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    [pages, kbs, kbId, openPageTab, onKbChange],
+    [],
   );
 
   // 跨知识库跳转落地：目标 KB 初始化完成后，把目标页并入列表并打开 Tab
