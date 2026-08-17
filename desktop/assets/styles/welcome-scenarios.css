@@ -440,6 +440,16 @@ body.welcome-active .tab-pane#chat-tab.active.chat-mode .chat-disclaimer {
   .welcome-view__mascot {
     width: 156px;
     height: 156px;
+    margin-bottom: var(--mw-space-4);
+  }
+
+  /* 短窗中项目条的上沿空间不足：装饰爪收进灰条内部，避免跨层压住边界。 */
+  .mw-composer__welcome-paw--left {
+    transform: translate(-50%, 0) rotate(-8deg);
+  }
+
+  .mw-composer__welcome-paw--right {
+    transform: translate(50%, 0) rotate(8deg);
   }
 
   .welcome-view__identity {
