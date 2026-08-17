@@ -43,11 +43,8 @@ _SNAPSHOT_REF_TOKEN = re.compile(r"(?<!\S)\[ref=(@?e[1-9]\d*)\](?=$|\s)")
 _REF_TAIL_PATTERN = re.compile(r"\[ref=p?\d*:?e?\d*$")
 _INVALID_KEY_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 # Product-level action caps used to reject otherwise valid Playwright inputs
-# before Chromium saw them.  The Python layer now validates only wire shape and
-# numeric sanity; actionability and browser-specific constraints belong to
-# Playwright.  The download RPC is still encoded as a signed 32-bit byte budget
-# by the current Electron protocol, so use its protocol ceiling rather than the
-# old configurable product quota.
+# before Chromium saw them. The download RPC is encoded as a signed 32-bit byte
+# budget, so configured limits are clamped to this transport ceiling.
 _WIRE_MAX_TRANSFER_BYTES = 2_147_483_647
 _CLICK_BUTTONS = frozenset({"left", "right", "middle"})
 _CLICK_MODIFIERS = frozenset(
@@ -77,6 +74,9 @@ _PAGE_TRANSITION_POLL_SECONDS = 0.04
 # BrowserManager 的兼容代码不设置 lease，保持原 API 兼容。
 _EXPECTED_CAPABILITY: ContextVar[tuple[str, int] | None] = ContextVar(
     "browser_expected_capability", default=None
+)
+_POST_OBSERVATION_DEFERRED: ContextVar[bool] = ContextVar(
+    "browser_post_observation_deferred", default=False
 )
 _ACTIVE_REPLAY_CONTEXT: ContextVar[
     tuple[str, str, str, str, str, int, str] | None
@@ -180,13 +180,23 @@ def _escape_wrapper_markers(text: str) -> str:
 _OUTPUT_GUARD_MULTIPLIER = 20
 # 护栏的绝对下限：不论调用方传什么，低于这个量都不截断。
 _OUTPUT_GUARD_FLOOR = 600_000
+# `snapshot(full=true)` is an explicit request for a larger observation. Keep
+# an absolute ceiling so a pathological document still cannot consume the
+# whole model context.
+_FULL_SNAPSHOT_GUARD = 4_000_000
 
 # 批量模式（browser_use batch）中间步骤跳过后置观察时的占位结果文本。
 # 批量调用方只用它拼每步一行的简报；最终观察由末步或显式 snapshot 提供。
 DEFERRED_OBSERVATION_NOTE = "已执行（批量中间步骤，跳过中间观察）"
+DEFERRED_SINGLE_OBSERVATION_NOTE = "已执行（按请求跳过后置观察；如需页面状态请调用 snapshot）"
 
 
-def _truncate_snapshot_at_line(text: str, limit: int) -> tuple[str, str]:
+def _truncate_snapshot_at_line(
+    text: str,
+    limit: int,
+    *,
+    full: bool = False,
+) -> tuple[str, str]:
     """只在远超期望规模时按行截断，并如实报出截断原因。
 
     截断必须**按行**：快照是一行一个元素，从中间切断会产出一个残缺的
@@ -196,7 +206,11 @@ def _truncate_snapshot_at_line(text: str, limit: int) -> tuple[str, str]:
     #
     # 旧的 `limit` 是"期望规模"，历史调用点会传各种值（甚至 0）。按 limit × 倍数
     # 直接算，limit=0 时护栏退化成 0，正常快照全被截断——实测踩过。
-    guard = max(_OUTPUT_GUARD_FLOOR, max(0, int(limit)) * _OUTPUT_GUARD_MULTIPLIER)
+    guard = (
+        _FULL_SNAPSHOT_GUARD
+        if full
+        else max(_OUTPUT_GUARD_FLOOR, max(0, int(limit)) * _OUTPUT_GUARD_MULTIPLIER)
+    )
     if len(text) <= guard:
         return text, ""
     cut = text.rfind("\n", 0, guard)
@@ -463,6 +477,12 @@ class BrowserManager:
     def available(self) -> bool:
         return bool(self.config.enabled and self.driver.available())
 
+    def _transfer_limit_bytes(self) -> int:
+        configured = int(getattr(self.config, "max_transfer_bytes", 0) or 0)
+        if configured <= 0:
+            return _WIRE_MAX_TRANSFER_BYTES
+        return min(configured, _WIRE_MAX_TRANSFER_BYTES)
+
     async def startup(self) -> None:
         if self._idle_task is None and self.config.enabled:
             self._idle_task = asyncio.create_task(self._idle_loop())
@@ -534,6 +554,20 @@ class BrowserManager:
         async with owner.lock:
             session = self._session(owner, session_id)
             session.defer_post_observation = deferred
+
+    @contextmanager
+    def defer_post_observation(self) -> Iterator[None]:
+        """Skip one action's automatic snapshot without changing session state.
+
+        Batch already uses the session flag because all of its steps share one
+        observation boundary.  Individual calls use this task-local switch so
+        concurrent sessions and callers cannot inherit a performance choice.
+        """
+        token = _POST_OBSERVATION_DEFERRED.set(True)
+        try:
+            yield
+        finally:
+            _POST_OBSERVATION_DEFERRED.reset(token)
 
     def _bump_capability_generation(self, owner_account_id: str) -> int:
         owner_id = str(owner_account_id or "")
@@ -1252,7 +1286,7 @@ class BrowserManager:
                     str(args[0]),
                     Path(str(args[1])),
                     target_id=self._active_tab(session).target_id,
-                    max_bytes=_WIRE_MAX_TRANSFER_BYTES,
+                    max_bytes=self._transfer_limit_bytes(),
                     timeout=timeout,
                     proxy_url=proxy_url,
                     download_dir=quarantine,
@@ -3227,13 +3261,17 @@ class BrowserManager:
         *,
         workdir: str,
     ) -> str:
-        if session.defer_post_observation:
+        if session.defer_post_observation or _POST_OBSERVATION_DEFERRED.get():
             # 批量中间步骤：不重新 snapshot（换代会让后续预规划 ref 全部失效）。
             # 仍做一次 _select 对齐弹窗/活动标签页；坐标截图随页面变化失效照旧。
             # 对话框等待等异常会推迟到下一个动作或末步观察时暴露，不会丢。
             await self._select(owner, session)
             self._clear_screenshot(session)
-            return DEFERRED_OBSERVATION_NOTE
+            return (
+                DEFERRED_OBSERVATION_NOTE
+                if session.defer_post_observation
+                else DEFERRED_SINGLE_OBSERVATION_NOTE
+            )
         try:
             # Navigation/click/input events can synchronously open and activate
             # an unlabeled popup. Reconcile against native tab state before any
@@ -6989,7 +7027,9 @@ class BrowserManager:
         title = _escape_wrapper_markers(self._active_tab(session).title)
         url = _escape_tag_markers(_public_url(self._active_tab(session).url))
         boundary_safe, truncation = _truncate_snapshot_at_line(
-            _escape_wrapper_markers(bounded), self.config.max_output_chars
+            _escape_wrapper_markers(bounded),
+            self.config.max_output_chars,
+            full=full,
         )
         # 截断说明走 Crew 独占的头部位置（与 page_generation 同级），不混进正文——
         # 混进正文页面就能用元素名伪造同样的句子来制造「什么都没看全」的假象。

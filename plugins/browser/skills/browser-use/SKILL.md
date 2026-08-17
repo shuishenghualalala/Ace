@@ -22,7 +22,7 @@ metadata:
 
 # 内置浏览器 Browser Use
 
-Crew 自带一个**应用内浏览器**（Electron WebContentsView，显示在 Crew 面板中，用户看得见、可随时接管）。它的能力通过单一工具 **`browser_use`** 暴露，是网页任务的**唯一正确入口**——不要拉起系统外部浏览器，也不要用桌面自动化去开浏览器。
+Crew 自带一个**应用内浏览器**（Electron WebContentsView，显示在 Crew 面板中，用户看得见、可随时接管）。常用能力通过 **`browser_use`** 暴露；坐标鼠标、截图/视觉、诊断和代码执行等低频能力按需从 deferred 的 **`browser_use_advanced`** 加载。两者都是网页任务入口——不要拉起系统外部浏览器，也不要用桌面自动化去开浏览器。
 
 ## 一、先停一下：选对入口，再动手
 
@@ -32,7 +32,7 @@ Crew 自带一个**应用内浏览器**（Electron WebContentsView，显示在 C
 - **不要用 terminal `open -a "Google Chrome"` 之类命令拉起系统浏览器。** 内置浏览器可用时，网页任务只走 `browser_use`。在说“浏览器不可用”或退回任何其他方案之前，必须先按本 skill 试过内置浏览器。
 - **浏览器能力被关闭时（BROWSER_CAPABILITY_DISABLED）**：如实告诉用户“内置浏览器能力已被关闭，需要在设置里重新开启”，**不要**偷偷降级到 terminal、普通网页搜索或其它自动化机制去完成明确的浏览器请求。
 
-## 二、调用方式：单一工具 browser_use
+## 二、调用方式：常用工具 browser_use
 
 浏览器插件开启时只注入一个直接工具（非 deferred）`browser_use`。所有操作都通过 `action` 参数分发：
 
@@ -54,6 +54,13 @@ browser_use(action="check", ref="p1:e20", checked=true)
 browser_use(action="press", key="ControlOrMeta+A")
 browser_use(action="wait", text_gone="加载中", text="完成")
 ```
+
+如果任务确实需要坐标鼠标、截图/视觉、console/network、evaluate 或
+run_code_unsafe，先用 `tool_search` 搜索并加载 `browser_use_advanced`，再调用它。
+这只是 schema 的渐进式加载，不会关闭这些能力。
+
+对 mutation 可选 `observation="none"` 跳过本次自动后置 snapshot，以减少一次往返；
+此时动作仍然执行，但使用任何旧 ref 前必须先调用 `snapshot`。
 
 ## 三、核心工作流：用动作返回的新观察继续
 
@@ -137,7 +144,7 @@ click(ref) / drag(start_ref, end_ref) / type(ref, text) / fill_form(fields)
 | action | 用途 | 必填参数 |
 |--------|------|----------|
 | `navigate` | 导航到 URL，返回带代次 ref 的紧凑 snapshot | `url` |
-| `snapshot` | 重新观察当前页面（旧 ref 立即失效；`full=true` 取完整快照） | — |
+| `snapshot` | 重新观察当前页面（旧 ref 立即失效；`full=true` 使用更大的输出护栏，仍受宿主/绝对安全上限限制） | — |
 | `click` | 在唯一 Locator 上执行真实点击；支持 `button`、`click_count`、`modifiers`、`delay_ms`；无节点时可用坐标模式（坐标模式不接受这些元素选项） | `ref`（或 `screenshot_id`+坐标） |
 | `drag` | 顺序确认两个 exact ref Locator 唯一，然后执行一次 `Locator.dragTo` | `start_ref`, `end_ref` |
 | `type` | 默认清空并 `fill` 完整值；`slowly=true` 改用 `pressSequentially`（不先清空）；`submit=true` 在同一 Locator 上按 Enter | `ref`, `text` |

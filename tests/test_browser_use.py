@@ -516,6 +516,16 @@ def test_snapshot_compatibility_shim_never_truncates_content_or_refs():
         assert _truncate_snapshot_at_line(text, legacy_limit) == (text, "")
 
 
+def test_full_snapshot_uses_a_larger_but_bounded_output_guard():
+    body = "\n".join(f"- button \"b{i}\"" for i in range(250_000))
+    compact, compact_reason = _truncate_snapshot_at_line(body, 30_000)
+    full, full_reason = _truncate_snapshot_at_line(body, 30_000, full=True)
+
+    assert len(compact) < len(full) < len(body)
+    assert "护栏" in compact_reason
+    assert "护栏" in full_reason
+
+
 async def test_all_drivers_use_the_same_functional_ref_dispatch_path(tmp_path, monkeypatch):
     """普通 ref 动作不再因驱动类型分叉到 Python 指纹复核。
 
