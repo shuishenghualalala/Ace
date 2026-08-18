@@ -2063,18 +2063,6 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text-3);
   font-weight: 400;
 }
-.team-internal__communication-status {
-  color: #8b877f;
-  border: 1px solid rgba(139, 135, 127, .24);
-  border-radius: 999px;
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 500;
-  line-height: 1;
-  padding: 3px 7px;
-  flex-shrink: 0;
-  white-space: nowrap;
-}
 .team-internal__communication-actions {
   display: flex;
   gap: 8px;

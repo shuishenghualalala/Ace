@@ -742,6 +742,15 @@
     </ul>
     <p>验证：Desktop Team 通信渲染回归、TypeScript typecheck 与 production build 通过。</p>
   </section>
+  <section>
+    <h2>Team 通信状态样式收口（2026-08-18）</h2>
+    <ul>
+      <li>删除已不再渲染的成员名称行通信状态徽标样式，避免保留无法触达的 Desktop CSS。</li>
+      <li><code>communication_status</code> 仍作为通信生命周期字段使用，继续驱动历史恢复、重试和取消判断；状态不再承担名称行视觉展示职责。</li>
+      <li>本阶段不新增组件、接口、持久化字段或 Team DAG 逻辑。</li>
+    </ul>
+    <p>验证：Desktop Team 回合渲染回归、CSS 引用扫描、TypeScript typecheck 与 production build 通过。</p>
+  </section>
 </div>
 </body>
 </html>

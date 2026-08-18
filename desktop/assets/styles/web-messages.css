@@ -738,18 +738,6 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.chat-messages.web-flow .team-internal__communication-status {
-  flex-shrink: 0;
-  color: var(--mw-text-secondary);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: 999px;
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 500;
-  line-height: 1;
-  padding: 3px 7px;
-  white-space: nowrap;
-}
 .chat-messages.web-flow .team-internal__communication-actions {
   display: flex;
   gap: var(--mw-space-2);
