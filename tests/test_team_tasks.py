@@ -3638,11 +3638,15 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
 
     chunks = [chunk async for chunk in tm.interact(envelope)]
 
-    assert [chunk.kind for chunk in chunks] == ["status", "team_internal", "team_internal", "final"]
+    assert chunks[0].kind == "status"
+    assert chunks[1].kind == "team_internal"
     waiting = chunks[1]
-    answer = chunks[2]
     assert waiting.body["communication_status"] == "waiting_reply"
     assert waiting.body["communication_request_text"] == envelope.query
+    answer = next(
+        chunk for chunk in chunks
+        if chunk.kind == "team_internal" and chunk.body.get("communication_status") == "answered"
+    )
     assert answer.body["agent_id"] == "coder"
     assert answer.body["mention_intent"] == "answer"
     assert answer.body["communication_kind"] == "user_mention_answer"
@@ -3650,6 +3654,10 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     assert answer.body["request_id"] == envelope.request_id
     assert answer.body["communication_request_text"] == envelope.query
     assert chunks[-1].body["text"] == "coder 当前使用 K3 模型。"
+    assert any(
+        chunk.kind == "team_internal" and chunk.body.get("event_type") == "team_stream"
+        for chunk in chunks
+    )
     assert seen_launch == [process_launch]
     assert tasks.list("user_mention_s1") == []
     assert ("local", "user_mention_s1") not in tm._plans
@@ -3712,8 +3720,14 @@ async def test_user_agent_mention_request_id_is_idempotent_and_new_id_retries():
         run("user_mention_once"),
         run("user_mention_once"),
     )
-    assert [chunk.kind for chunk in first] == ["status", "team_internal", "team_internal", "final"]
-    assert [chunk.kind for chunk in duplicate] == ["status", "team_internal", "team_internal", "final"]
+    for result in (first, duplicate):
+        assert result[0].kind == "status"
+        assert result[1].body["communication_status"] == "waiting_reply"
+        assert any(
+            chunk.kind == "team_internal" and chunk.body.get("communication_status") == "answered"
+            for chunk in result
+        )
+        assert result[-1].kind == "final"
     assert len(calls) == 1
 
     team = tm._get_or_create("user_mention_idempotent_s1", owner_account_id="local")
@@ -3722,11 +3736,72 @@ async def test_user_agent_mention_request_id_is_idempotent_and_new_id_retries():
     assert len([item for item in messages if item["message_type"] == "answer"]) == 1
 
     retried = await run("user_mention_retry")
-    assert [chunk.kind for chunk in retried] == ["status", "team_internal", "team_internal", "final"]
+    assert retried[0].kind == "status"
+    assert retried[1].body["communication_status"] == "waiting_reply"
+    assert any(
+        chunk.kind == "team_internal" and chunk.body.get("communication_status") == "answered"
+        for chunk in retried
+    )
+    assert retried[-1].kind == "final"
     assert len(calls) == 2
     messages = team.bus.list_messages("user_mention_idempotent_s1")
     assert len([item for item in messages if item["message_type"] == "decision_request"]) == 2
     assert len([item for item in messages if item["message_type"] == "answer"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_user_agent_mention_streams_thinking_and_tools_without_workflow():
+    tm, tasks = _team()
+    team = tm._get_or_create("user_mention_stream_s1", owner_account_id="local")
+
+    async def streaming_run(member_envelope):
+        yield ResponseChunk.thinking_event(member_envelope.request_id, "先确认模型配置。", sequence=1)
+        yield ResponseChunk.tool_event(
+            member_envelope.request_id,
+            "runtime_info",
+            "start",
+            sequence=2,
+            tool_call_id="runtime-info-1",
+        )
+        yield ResponseChunk.delta(member_envelope.request_id, "coder 当前使用 ", sequence=3)
+        yield ResponseChunk.tool_event(
+            member_envelope.request_id,
+            "runtime_info",
+            "result",
+            detail="provider=kimi model=kimi-code/k3",
+            sequence=4,
+            tool_call_id="runtime-info-1",
+        )
+        yield ResponseChunk.final(member_envelope.request_id, "coder 当前使用 Kimi Code/K3。", sequence=5)
+
+    team.teammates["coder"].run = streaming_run
+    envelope = Envelope.of(
+        "你现在使用什么模型？",
+        session_id="user_mention_stream_s1",
+        request_id="user_mention_stream_req",
+        mode="team",
+        user_id="local",
+        params={
+            "user_mentions": [{"kind": "team_member", "member_id": "coder"}],
+        },
+    )
+
+    chunks = [chunk async for chunk in tm.interact(envelope)]
+    stream_chunks = [
+        chunk for chunk in chunks
+        if chunk.kind == "team_internal" and chunk.body.get("event_type") == "team_stream"
+    ]
+    assert any(chunk.body.get("thinking") == "先确认模型配置。" for chunk in stream_chunks)
+    assert any(chunk.body.get("tool_calls") for chunk in stream_chunks)
+    assert any(chunk.body.get("text") == "coder 当前使用 " for chunk in stream_chunks)
+    terminal = next(
+        chunk for chunk in chunks
+        if chunk.kind == "team_internal" and chunk.body.get("communication_status") == "answered"
+    )
+    assert terminal.body["text"] == "coder 当前使用 Kimi Code/K3。"
+    assert chunks[-1].kind == "final"
+    assert tasks.list("user_mention_stream_s1") == []
+    assert ("local", "user_mention_stream_s1") not in tm._plans
 
 
 @pytest.mark.asyncio

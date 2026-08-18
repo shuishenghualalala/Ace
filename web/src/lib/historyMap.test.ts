@@ -551,6 +551,59 @@ describe("mergeHistoryWithLiveMessages", () => {
     expect(merged[0].communicationStatus).toBe("answered");
   });
 
+  it("merges direct mention streaming frames into one answer timeline", () => {
+    const waiting: UiMessage = {
+      id: "waiting-stream",
+      role: "team_internal",
+      text: "正在询问 coder…",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "waiting_reply",
+      requestId: "mention_req_stream",
+    };
+    const stream: UiMessage = {
+      id: "stream",
+      role: "team_internal",
+      text: "当前使用 ",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "delivered",
+      requestId: "mention_req_stream",
+      eventType: "team_stream",
+      displayMode: "stream",
+      collapsedTitle: "coder 的回答过程",
+      thinking: "先确认模型配置。",
+      toolCalls: [{
+        toolCallId: "runtime-info-1",
+        name: "runtime_info",
+        args: "{}",
+        status: "running",
+        startedAt: 0,
+      }],
+    };
+    const answered: UiMessage = {
+      ...stream,
+      id: "answered-stream",
+      text: "当前使用 Kimi Code/K3。",
+      eventType: "team_communication",
+      displayMode: "chat",
+      communicationStatus: "answered",
+    };
+
+    const streaming = mergeTeamInternalMessage([waiting], stream, { append: true });
+    const merged = mergeTeamInternalMessage(streaming, answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      text: "当前使用 Kimi Code/K3。",
+      communicationStatus: "answered",
+      eventType: "team_communication",
+      processText: "当前使用 ",
+    });
+    expect(merged[0].thinking).toBe("先确认模型配置。");
+    expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: "runtime-info-1", status: "running" });
+  });
+
   it("deduplicates a live user mention answer already restored from history", () => {
     const item = teamItem({
       content: "我当前使用 K3 模型。",

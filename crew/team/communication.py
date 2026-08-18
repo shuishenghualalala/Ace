@@ -110,6 +110,7 @@ class TeamCommunicationRouter:
         *,
         expanded_targets: list[str] | None = None,
         security_process_launch: Any | None = None,
+        on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
     ) -> Any:
         """投递一次 mention，并交给现有 TeamManager 处理业务语义。"""
 
@@ -173,6 +174,7 @@ class TeamCommunicationRouter:
             answer = await self.ask_coordinator.answer(
                 event,
                 security_process_launch=security_process_launch,
+                on_chunk=on_chunk,
             )
             event["answer"] = answer
             if isinstance(result, dict) and result:
@@ -189,6 +191,7 @@ class TeamCommunicationRouter:
         owner_account_id: str = "",
         workspace_id: str = "default",
         security_process_launch: Any | None = None,
+        on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
     ) -> dict[str, Any]:
         """Route a user-selected Agent mention as one direct ask.
 
@@ -234,6 +237,7 @@ class TeamCommunicationRouter:
                 result = await self.route(
                     event,
                     security_process_launch=security_process_launch,
+                    on_chunk=on_chunk,
                 )
                 if not isinstance(result, dict):
                     raise RuntimeError("用户 Agent mention 未返回结构化结果")
@@ -331,6 +335,7 @@ class TeamAskCoordinator:
         event: dict[str, Any],
         *,
         security_process_launch: Any | None = None,
+        on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
     ) -> dict[str, Any]:
         targets = [
             str(target or "").strip()
@@ -454,12 +459,13 @@ class TeamAskCoordinator:
             final_text = ""
             delta_text: list[str] = []
             error_text = ""
+            chunk_callback = on_chunk or self.on_chunk
 
             async def _run() -> None:
                 nonlocal final_text, error_text
                 async for chunk in agent.run(envelope):
-                    if self.on_chunk is not None:
-                        maybe = self.on_chunk(target, chunk)
+                    if chunk_callback is not None:
+                        maybe = chunk_callback(target, chunk)
                         if inspect.isawaitable(maybe):
                             await cast(Awaitable[Any], maybe)
                     if chunk.kind == "delta":

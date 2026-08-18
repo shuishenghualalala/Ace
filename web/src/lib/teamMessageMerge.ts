@@ -119,11 +119,35 @@ export function mergeTeamInternalMessage(
       && message.agentId === incoming.agentId,
     );
     if (communicationIndex >= 0) {
-      return [
-        ...withoutDuplicateAssistant.slice(0, communicationIndex),
-        { ...withoutDuplicateAssistant[communicationIndex], ...incoming },
-        ...withoutDuplicateAssistant.slice(communicationIndex + 1),
-      ];
+      const matched = withoutDuplicateAssistant[communicationIndex];
+      if (isTeamStream(incoming) && !isTeamStream(matched)) {
+        return [
+          ...withoutDuplicateAssistant.slice(0, communicationIndex),
+          { ...matched, ...incoming },
+          ...withoutDuplicateAssistant.slice(communicationIndex + 1),
+        ];
+      }
+      if (!isTeamStream(incoming)) {
+        const matchedProcessText = isTeamStream(matched)
+          && (matched.text || '').trim()
+          && (matched.text || '').trim() !== (incoming.text || '').trim()
+          ? matched.processText || matched.text
+          : incoming.processText;
+        return [
+          ...withoutDuplicateAssistant.slice(0, communicationIndex),
+          {
+            ...matched,
+            ...incoming,
+            displayMode: incoming.displayMode || matched.displayMode,
+            collapsedTitle: matched.collapsedTitle || incoming.collapsedTitle,
+            processText: matchedProcessText,
+            thinking: mergeThinking(matched.thinking, incoming.thinking),
+            toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+          },
+          ...withoutDuplicateAssistant.slice(communicationIndex + 1),
+        ];
+      }
+      // 流式 direct mention 继续进入下面的 append 合并，不覆盖已有过程。
     }
   }
   const matchingIndex = findMatchingTeamNode(withoutDuplicateAssistant, incoming);

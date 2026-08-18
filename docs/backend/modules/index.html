@@ -97,6 +97,14 @@
   </ul>
   <p>验证：Team 用户 mention、幂等/失败状态与 WebSocket 结构化 mention 回归通过。</p>
 
+  <h2>8. Team @Agent 直接通信流式 timeline（2026-08-18）</h2>
+  <ul>
+    <li>单独用户 mention 继续走 <code>TeamAskCoordinator</code> 的直达回答，不创建 TeamPlan、DAG、任务或产物；但现在通过 per-request callback 将 Agent 的 <code>delta</code>、<code>thinking</code> 和 <code>tool</code> 帧透传到 Team 内部消息协议。</li>
+    <li>流式帧使用既有 <code>team_internal</code> + <code>event_type=team_stream</code> + <code>communication_kind=user_mention_answer</code>，终态仍使用同一请求的 <code>answered/failed/expired/cancelled</code> 状态。</li>
+    <li>安全边界和 direct ask 的只读回答提示保持不变；一致的是 Agent 回答过程，不是把 direct mention 伪装成团队节点。</li>
+  </ul>
+  <p>验证：用户 mention 流式/思考/工具回归、Team Bus 状态与无 DAG 断言通过。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

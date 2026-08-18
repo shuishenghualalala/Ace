@@ -715,6 +715,15 @@
     </ul>
     <p>验证：Desktop Team 渲染回归 55 passed，TypeScript typecheck、CSS lint、production build 与 <code>git diff --check</code> 通过。</p>
   </section>
+  <section>
+    <h2>Team @Agent 直接通信流式 timeline（2026-08-18）</h2>
+    <ul>
+      <li><b>实时体验：</b>单独 @成员与团队节点回复共用文本增量、思考和工具 timeline；等待帧、过程帧和终态帧按同一个 <code>request_id</code> 合并为一个 Team 成员气泡。</li>
+      <li><b>语义边界：</b>direct mention 仍不创建 DAG、任务、依赖或产物；只复用 Agent 回答过程，不显示团队派发/验收节点。</li>
+      <li><b>实现：</b>Desktop history mapping 对 <code>user_mention_answer + team_stream</code> 复用现有流式合并、思考合并和工具调用合并逻辑，终态保留过程区。</li>
+    </ul>
+    <p>验证：Desktop history mapping 与 Team 渲染回归 75 passed，后端 direct mention 回归 6 passed。</p>
+  </section>
 </div>
 </body>
 </html>

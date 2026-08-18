@@ -6197,6 +6197,8 @@ class InProcessTeamManager(TeamManager):
             or target_hint
             or "团队成员"
         ).strip()
+        mention_started_at = time.time()
+        stream_queue: asyncio.Queue[tuple[str, ResponseChunk]] = asyncio.Queue()
 
         def _mention_chunk(
             text: str,
@@ -6226,7 +6228,67 @@ class InProcessTeamManager(TeamManager):
                 communication_status=status,
                 reply_to=reply_to,
                 communication_request_text=str(envelope.query or ""),
+                turn_started_at=mention_started_at,
+                turn_duration=(
+                    max(0.0, time.time() - mention_started_at)
+                    if status in {"answered", "failed", "expired", "cancelled"}
+                    else None
+                ),
             )
+
+        def _mention_stream_chunk(member: str, chunk: ResponseChunk) -> ResponseChunk | None:
+            common = {
+                "agent_id": member,
+                "role": target_spec.role if target_spec is not None else "",
+                "is_leader": member == "leader",
+                "source_session_id": f"{envelope.session_id}::turn::{envelope.request_id}::{member}",
+                "node_id": "",
+                "event_type": "team_stream",
+                "display_mode": "stream",
+                "collapsed_title": f"{target_label} 的回答过程",
+                "append": True,
+                "mention_from": member,
+                "mention_to": ["user"],
+                "mention_intent": "answer",
+                "communication_kind": "user_mention_answer",
+                "communication_status": "delivered",
+                "communication_request_text": str(envelope.query or ""),
+                "turn_started_at": mention_started_at,
+                "turn_duration": max(0.0, time.time() - mention_started_at),
+            }
+            if chunk.kind == "delta":
+                text = str(chunk.body.get("text") or "")
+                return self._team_internal_chunk(
+                    envelope.request_id,
+                    text=text,
+                    **common,
+                ) if text else None
+            if chunk.kind == "thinking":
+                text = str(chunk.body.get("text") or "")
+                return self._team_internal_chunk(
+                    envelope.request_id,
+                    text="",
+                    thinking=text,
+                    **common,
+                ) if text.strip() else None
+            if chunk.kind == "tool":
+                phase = str(chunk.body.get("phase") or "")
+                tool_call = {
+                    "id": str(chunk.body.get("tool_call_id") or chunk.sequence or "mention_tool"),
+                    "name": str(chunk.body.get("name") or "unknown"),
+                    "ui_label": str(chunk.body.get("ui_label") or chunk.body.get("name") or "工具调用"),
+                    "arguments": chunk.body.get("arguments") or chunk.body.get("args") or {},
+                    "result": chunk.body.get("result") or chunk.body.get("detail") or "",
+                    "status": "running" if phase in {"generating", "start"}
+                    else "error" if phase == "error" else "done",
+                }
+                return self._team_internal_chunk(
+                    envelope.request_id,
+                    text="",
+                    tool_calls=[tool_call],
+                    **common,
+                )
+            return None
 
         yield ResponseChunk.status_event(
             envelope.request_id,
@@ -6238,20 +6300,41 @@ class InProcessTeamManager(TeamManager):
                 status="waiting_reply",
                 target_id=target,
             )
+        route_task = asyncio.create_task(team.communication_router.route_user_mention(
+            mention=mention,
+            content=str(envelope.query or ""),
+            request_id=envelope.request_id,
+            owner_account_id=envelope.user_id,
+            workspace_id=envelope.workspace_id,
+            security_process_launch=envelope.params.get("_security_process_launch"),
+            on_chunk=lambda member, chunk: stream_queue.put_nowait((member, chunk)),
+        ))
         try:
-            result = await team.communication_router.route_user_mention(
-                mention=mention,
-                content=str(envelope.query or ""),
-                request_id=envelope.request_id,
-                owner_account_id=envelope.user_id,
-                workspace_id=envelope.workspace_id,
-                security_process_launch=envelope.params.get("_security_process_launch"),
-            )
+            while True:
+                if route_task.done() and stream_queue.empty():
+                    break
+                queue_task = asyncio.create_task(stream_queue.get())
+                done, _ = await asyncio.wait(
+                    {route_task, queue_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if queue_task in done:
+                    member, agent_chunk = queue_task.result()
+                    stream_chunk = _mention_stream_chunk(member, agent_chunk)
+                    if stream_chunk is not None:
+                        yield stream_chunk
+                else:
+                    queue_task.cancel()
+            result = route_task.result()
         except (RuntimeError, ValueError) as exc:
             if target_hint:
                 yield _mention_chunk(str(exc), status="failed")
             yield ResponseChunk.error(envelope.request_id, str(exc))
             return
+        finally:
+            if not route_task.done():
+                route_task.cancel()
+                await asyncio.gather(route_task, return_exceptions=True)
 
         target = str(result.get("target") or target_hint).strip()
         status = str(result.get("status") or "failed").strip()

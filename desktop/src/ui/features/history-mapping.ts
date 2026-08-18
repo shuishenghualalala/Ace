@@ -404,11 +404,38 @@ export function mergeTeamInternalMessage(
       && message.agentId === incoming.agentId,
     );
     if (communicationIndex >= 0) {
-      return [
-        ...next.slice(0, communicationIndex),
-        { ...next[communicationIndex], ...incoming },
-        ...next.slice(communicationIndex + 1),
-      ];
+      const matched = next[communicationIndex];
+      if (isTeamStream(incoming) && !isTeamStream(matched)) {
+        return [
+          ...next.slice(0, communicationIndex),
+          { ...matched, ...incoming },
+          ...next.slice(communicationIndex + 1),
+        ];
+      }
+      if (isTeamStream(incoming)) {
+        // 流式 direct mention 继续走下面的 append 合并，不能被 waiting 帧直接覆盖。
+        // 终态则保留已收集的思考与工具过程，统一收口到同一个回答气泡。
+      } else {
+        const processText = isTeamStream(matched)
+          && matched.content.trim()
+          && matched.content.trim() !== incoming.content.trim()
+          ? (matched.processText || matched.content)
+          : incoming.processText;
+        return [
+          ...next.slice(0, communicationIndex),
+          {
+            ...matched,
+            ...incoming,
+            displayMode: incoming.displayMode || matched.displayMode,
+            collapsedTitle: matched.collapsedTitle || incoming.collapsedTitle,
+            processText,
+            thinking: mergeStreamingText(matched.thinking, incoming.thinking),
+            toolCalls: mergeToolCalls(matched.toolCalls, incoming.toolCalls),
+            ...mergedTeamTurnTiming(matched, incoming),
+          },
+          ...next.slice(communicationIndex + 1),
+        ];
+      }
     }
   }
   let matchingIndex = -1;
