@@ -29,6 +29,7 @@ from crew.state.team_member_model import (
     set_team_member_model_binding,
 )
 from crew.team.history_projection import (
+    direct_mention_request_ids,
     is_duplicate_team_parent_final,
     team_internal_history_items,
     team_tasks_with_plan_projection,
@@ -507,19 +508,20 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         if child_sessions:
             should_aggregate = should_aggregate or any("::turn::" in child_id for child_id, _ in child_sessions)
         if should_aggregate:
-            visible = team_visible_history_items(
-                crew,
-                session_id,
-                owner_account_id=owner,
-                config=config,
-                has_child_team_sessions=any("::turn::" in child_id for child_id, _ in child_sessions),
-            )
             internal = team_internal_history_items(
                 crew,
                 session_id,
                 child_sessions,
                 owner_account_id=owner,
                 config=config,
+            )
+            visible = team_visible_history_items(
+                crew,
+                session_id,
+                owner_account_id=owner,
+                config=config,
+                has_child_team_sessions=any("::turn::" in child_id for child_id, _ in child_sessions),
+                suppressed_request_ids=direct_mention_request_ids(internal),
             )
             if internal:
                 visible = [

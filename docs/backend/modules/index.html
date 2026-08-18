@@ -113,6 +113,15 @@
   </ul>
   <p>验证：旧事件身份恢复、Crew 子会话身份映射与重复通信回归通过。</p>
 
+  <h2>10. Team direct mention 历史消息所有权（2026-08-18）</h2>
+  <ul>
+    <li><b>通信语义：</b>普通用户 Prompt 仍由 Leader 进入 TeamSpec / DAG；用户 <code>@Agent</code> 走“用户 → 目标 Agent → 用户”的直接通信；成员之间的 mention 只回复给发起成员。</li>
+    <li><b>唯一可见回复：</b>direct mention 的成员子回合是 canonical 对话消息；Dispatcher 创建的父 <code>agent_turn</code> 只作为运行时记录，不再被历史投影成第二条 Crew / Leader 回复。</li>
+    <li><b>关联方式：</b>历史投影使用 <code>request_id</code> 和 <code>communication_kind=user_mention_answer</code> 识别 direct mention，不解析 Prompt 文本，也不依赖关键词。</li>
+    <li><b>影响边界：</b>普通 Team workflow 的父任务结果和 <code>team_summary</code> 去重规则保持不变；本阶段不新增数据库表、迁移脚本或前端渲染模块。</li>
+  </ul>
+  <p>验证：新增 direct mention 父任务与成员 canonical 回答的历史投影回归，确认用户消息和 kk 回复保留且不再生成 Crew 重复气泡。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

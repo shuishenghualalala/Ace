@@ -9035,6 +9035,128 @@ def test_team_history_restores_direct_mention_sender_identity_for_old_events():
     assert items[0]["agent_id"] != CREW_BUILTIN_AGENT_ID
 
 
+def test_team_session_history_does_not_project_direct_mention_parent_as_crew(auth_headers):
+    class Store:
+        @staticmethod
+        def session_belongs_to(session_id: str, owner_account_id: str):
+            return session_id == "team_parent" and owner_account_id == "A:uid-a"
+
+        @staticmethod
+        def load(session_id: str, owner_account_id: str = ""):
+            return []
+
+        @staticmethod
+        def load_child_sessions(session_id: str, owner_account_id: str = ""):
+            return [
+                (
+                    "team_parent::turn::mention_1::kk",
+                    [
+                        Message(role="user", content="你现在用什么模型？", timestamp=1.0),
+                        Message(
+                            role="assistant",
+                            content="我当前使用 kimi-code/k3。",
+                            timestamp=2.0,
+                            communication_kind="user_mention_answer",
+                            communication_status="answered",
+                            request_id="mention_1",
+                            reply_to="bus_1",
+                        ),
+                    ],
+                )
+            ]
+
+        @staticmethod
+        def get_agent_config(session_id: str, owner_account_id: str = ""):
+            return {"executor": "team"}
+
+    class Team:
+        @staticmethod
+        def event_history_for_session(session_id: str, owner_account_id: str = ""):
+            return []
+
+    class Crew:
+        session_store = Store()
+        team = Team()
+
+        class tasks:
+            @staticmethod
+            def list_tasks(*args, **kwargs):
+                return [{
+                    "kind": "agent_turn",
+                    "session_id": "team_parent",
+                    "request_id": "mention_1",
+                    "detail": "你现在用什么模型？",
+                    "result": "我当前使用 kimi-code/k3。",
+                    "created_at": 1.0,
+                    "updated_at": 2.0,
+                }]
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def attach_test_account(request, call_next):
+        request.state.account = AccountContext(owner_account_id="A:uid-a")
+        return await call_next(request)
+
+    app.include_router(create_sessions_router(Crew(), dispatcher=None))
+    response = TestClient(app).get("/api/session/team_parent", headers=auth_headers)
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [item["content"] for item in items] == [
+        "你现在用什么模型？",
+        "我当前使用 kimi-code/k3。",
+    ]
+    assert [item["role"] for item in items] == ["user", "team_internal"]
+    assert items[1]["agent_id"] == "kk"
+    assert all(item.get("agent_name") != "Crew" for item in items if item["role"] == "team_internal")
+
+
+def test_team_history_keeps_direct_mention_child_with_existing_workflow_events():
+    class Team:
+        @staticmethod
+        def event_history_for_session(session_id: str, owner_account_id: str = ""):
+            return [{
+                "role": "team_internal",
+                "content": "Leader 已完成拆解。",
+                "event_type": "team_assign",
+                "agent_id": "leader",
+                "agent_name": "Leader",
+                "source_session_id": "team_parent::turn::workflow_1::leader",
+                "timestamp": 1.0,
+            }]
+
+    class Crew:
+        team = Team()
+
+        class tasks:
+            @staticmethod
+            def list_tasks(*args, **kwargs):
+                return []
+
+    items = team_internal_history_items(
+        Crew(),
+        "team_parent",
+        [(
+            "team_parent::turn::mention_1::kk",
+            [Message(
+                role="assistant",
+                content="我当前使用 kimi-code/k3。",
+                timestamp=2.0,
+                communication_kind="user_mention_answer",
+                communication_status="answered",
+                request_id="mention_1",
+            )],
+        )],
+    )
+
+    assert [item["content"] for item in items] == [
+        "Leader 已完成拆解。",
+        "我当前使用 kimi-code/k3。",
+    ]
+    assert items[1]["agent_id"] == "kk"
+
+
 def test_team_history_maps_legacy_crew_child_session_to_builtin_identity():
     class Crew:
         class tasks:
