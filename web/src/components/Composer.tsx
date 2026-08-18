@@ -39,9 +39,15 @@ interface Props {
   onCancelEdit?: () => void;
 }
 
-export function formatTeamMentionToken(member: Pick<TeamMemberView, "agentId" | "name">): string {
+export function teamMemberMentionId(
+  member: Pick<TeamMemberView, "agentId" | "mentionId" | "isLeader">,
+): string {
+  return member.mentionId?.trim() || (member.isLeader ? "leader" : member.agentId?.trim() || "");
+}
+
+export function formatTeamMentionToken(member: Pick<TeamMemberView, "agentId" | "mentionId" | "name">): string {
   const label = member.name.trim().replace(/\s+/g, " ");
-  return `@${label || member.agentId || "Agent"}`;
+  return `@${label || member.mentionId || member.agentId || "Agent"}`;
 }
 
 export default function Composer({
@@ -342,11 +348,11 @@ export default function Composer({
       setAtOpen(true);
       const teamResults = isTeamSession
         ? (teamMembers ?? [])
-          .filter((member) => member.agentId)
+          .filter((member) => teamMemberMentionId(member))
           .filter((member) => {
             const needle = query.trim().toLowerCase();
             if (!needle) return true;
-            return [member.agentId, member.name, member.role]
+            return [teamMemberMentionId(member), member.agentId, member.name, member.role]
               .filter(Boolean)
               .some((value) => value!.toLowerCase().includes(needle));
           })
@@ -355,7 +361,10 @@ export default function Composer({
             display: member.name,
             meta: member.isLeader ? `Leader · ${member.role}` : member.role,
             type: "agent",
-            agentMention: { kind: "team_member" as const, member_id: member.agentId! },
+            agentMention: {
+              kind: "team_member" as const,
+              member_id: teamMemberMentionId(member),
+            },
           }))
         : [];
       api.complete(query)

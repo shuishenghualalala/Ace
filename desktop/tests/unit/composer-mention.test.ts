@@ -6,7 +6,7 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from 'vitest';
-import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, getUserAgentMentions, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput } from '../../src/ui/features/composer-mention';
+import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, getUserAgentMentions, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, teamMemberMentionId } from '../../src/ui/features/composer-mention';
 
 describe('detectTrigger', () => {
   it('行首 @ 触发', () => {
@@ -235,6 +235,11 @@ describe('mentionTextForSkill', () => {
 });
 
 describe('Team agent mentions', () => {
+  it('routes an external roster entry by Team member id, not external Agent id', () => {
+    expect(teamMemberMentionId({ agent_id: 'agent_c6f06632e6a4', agent_name: 'kk' }, 'agent_leader')).toBe('kk');
+    expect(teamMemberMentionId({ agent_id: 'agent_leader', agent_name: 'Crew Leader' }, 'agent_leader')).toBe('leader');
+  });
+
   it('shows the member name while preserving the canonical member id for sending', () => {
     const token = compactMentionText({
       text: '@team-kk',

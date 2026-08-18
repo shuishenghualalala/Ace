@@ -21,7 +21,7 @@
  *  - **发送守卫**：popup 打开时，index.ts 的 Enter→发送 必须让位（见 isMentionOpen）。
  */
 
-import { backendApi, type CompleteItem, type ExternalTeam, type Skill, type WorkPreference } from '../backend-client';
+import { backendApi, type CompleteItem, type ExternalTeam, type ExternalTeamMember, type Skill, type WorkPreference } from '../backend-client';
 import { createIcon, type IconId } from '../components/icon';
 import { setRuntimeStyle, clearRuntimeStyle } from '../components/runtime-style';
 import { $, state } from '../state';
@@ -71,6 +71,15 @@ interface CompactMention {
 export interface UserAgentMention {
   kind: 'team_member';
   member_id: string;
+}
+
+/** External Agent id 用于配置；Team mention 必须使用 Team Runtime 成员 id。 */
+export function teamMemberMentionId(
+  member: Pick<ExternalTeamMember, 'agent_id' | 'agent_name'>,
+  leaderAgentId?: string,
+): string {
+  if (member.agent_id === leaderAgentId) return 'leader';
+  return member.agent_name?.trim() || member.agent_id;
 }
 
 interface ChipToken {
@@ -392,14 +401,17 @@ async function fetchAgentItems(token: string): Promise<MentionItem[]> {
     })
     .slice(0, 30)
     .map((member) => ({
-      text: `@${member.agent_id}`,
+      text: `@${teamMemberMentionId(member, team.leader_agent_id)}`,
       display: member.agent_name || member.agent_id,
       meta: member.agent_id === team.leader_agent_id
         ? `Leader${member.role ? ` · ${member.role}` : ''}`
         : (member.role || member.role_label || '团队成员'),
       sig: 'agent' as const,
       section: '团队成员' as const,
-      userMention: { kind: 'team_member' as const, member_id: member.agent_id },
+      userMention: {
+        kind: 'team_member' as const,
+        member_id: teamMemberMentionId(member, team.leader_agent_id),
+      },
     }));
 }
 

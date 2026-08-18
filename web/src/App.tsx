@@ -8,6 +8,7 @@ import SkillsHub from "./components/SkillsHub";
 import WikiHub from "./components/WikiHub";
 import TaskBoard from "./components/TaskBoard";
 import WorkspaceModal from "./components/WorkspaceModal";
+import { teamMemberMentionId } from "./components/Composer";
 import { useSessions } from "./hooks/useSessions";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
@@ -129,6 +130,7 @@ function teamMembersForBoard(team?: ExternalTeam) {
     : leaderMember?.agent_name || team.leader_agent_id || "Leader";
   const leader = {
     agentId: team.leader_agent_id,
+    mentionId: "leader",
     name: leaderName,
     displayBadge: leaderMember?.display_badge || (team.leader_agent_id === CREW_BUILTIN_AGENT_ID ? "M" : "?"),
     role: summarizeLeaderRole(leaderMember?.role || ""),
@@ -139,6 +141,7 @@ function teamMembersForBoard(team?: ExternalTeam) {
     .filter((member) => member.agent_id !== team.leader_agent_id)
     .map((member, index) => ({
       agentId: member.agent_id,
+      mentionId: member.agent_name?.trim() || member.agent_id,
       name: member.agent_name || member.agent_id,
       displayBadge: member.display_badge || "?",
       role: `负责${summarizeBusinessDuty(member.role || "", "协作执行", { max: 80 })}`,
@@ -191,6 +194,8 @@ export default function App() {
   }, [refreshSessions, refreshTasks]);
 
   const chat = useChat(currentSessionId, onAfterFinal);
+  const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
+  const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
 
   // 进入 Wiki 视图或切换 KB 时，创建/复用该 KB 自己的 Wiki Agent 会话。
   useEffect(() => {
@@ -416,7 +421,15 @@ export default function App() {
 
   const retryMention = (message: UiMessage) => {
     const query = String(message.communicationRequestText || "").trim();
-    const memberId = String(message.agentId || (message.isLeader ? "leader" : "")).trim();
+    const rawMemberId = String(message.agentId || (message.isLeader ? "leader" : "")).trim();
+    const rosterMember = currentTeamMembers?.find((member) => (
+      member.agentId === rawMemberId
+      || member.mentionId === rawMemberId
+      || member.name === rawMemberId
+    ));
+    const memberId = rosterMember
+      ? teamMemberMentionId(rosterMember)
+      : rawMemberId;
     if (!query || !memberId) return;
     handleSend(query, [], undefined, [{ kind: "team_member", member_id: memberId }]);
   };
@@ -457,8 +470,6 @@ export default function App() {
   }, [currentSession, externalAgentsEnabled]);
   const title = currentSession?.title || "新会话";
   const currentAgentLabel = currentSession?.agent_label;
-  const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
-  const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
   const isCurrentTeamSession = mode === "team" && Boolean(sessionExternalTeams[currentSessionId]);
   const toolsMenuChrome = boardOpen;
   const toolCollapseLevel = !boardOpen ? 0 : boardWidth >= 520 ? 3 : boardWidth >= 420 ? 2 : 1;

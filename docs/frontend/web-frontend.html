@@ -875,5 +875,15 @@ cd web && npm run build
   </ul>
   <p>验证：Web hook/Team 气泡测试 29 passed，Web/Desktop TypeScript typecheck 通过；直接 mention 后端定向回归通过。</p>
 </div>
+<div>
+  <h2>Team @成员路由 ID 修复（2026-08-18）</h2>
+  <ul>
+    <li><b>问题：</b>外部 Agent 的配置 ID（例如 <code>agent_c6f06632e6a4</code>）与 Team Runtime 成员 ID（例如 <code>kk</code>）被混用；候选展示为 <code>@kk</code>，发送却携带外部 Agent ID，服务端会按当前团队成员校验并拒绝。</li>
+    <li><b>修复：</b>Team 成员视图新增独立的 <code>mentionId</code>；外部成员使用运行时成员名，Leader 固定使用 <code>leader</code>，<code>agentId</code> 继续保留给外部 Agent 配置和身份展示。</li>
+    <li><b>重试：</b>历史失败回合重试前会把旧的外部 Agent ID 映射回当前 Team 成员 ID，避免修复前产生的失败气泡继续重试失败。</li>
+    <li><b>范围：</b>只更新既有 Web Composer、Team 成员视图和重试入口，不新增接口或持久化字段。</li>
+  </ul>
+  <p>验证：Composer 相关测试 8 passed，Web TypeScript typecheck 通过。</p>
+</div>
 </body>
 </html>

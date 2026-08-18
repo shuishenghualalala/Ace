@@ -696,6 +696,15 @@
     </ul>
     <p>验证：Desktop TypeScript typecheck 通过；Web/后端直接 mention 并发、失败和取消竞态回归通过。</p>
   </section>
+  <section>
+    <h2>Team @成员路由 ID 修复（2026-08-18）</h2>
+    <ul>
+      <li><b>问题：</b>外部 Agent 配置 ID 与 Team Runtime 成员 ID 被混用，导致候选显示为成员名但发送的是外部 Agent ID。</li>
+      <li><b>修复：</b>Desktop Composer 选择团队成员时，外部成员使用 <code>agent_name</code> 作为 Team mention ID，Leader 统一使用 <code>leader</code>；外部 Agent ID 继续只用于配置和模型切换。</li>
+      <li><b>范围：</b>复用既有 <code>composer-mention</code> 和 <code>user_mentions</code> 协议，不新增接口、模块或持久化字段。</li>
+    </ul>
+    <p>验证：Desktop Composer mention 测试 47 passed，Desktop TypeScript typecheck 通过。</p>
+  </section>
 </div>
 </body>
 </html>

@@ -676,6 +676,8 @@ export interface UiMessage {
 
 export interface TeamMemberView {
   agentId?: string;
+  /** Team Runtime 的成员路由 ID；外部 Agent 成员通常是 agent_name，Leader 固定为 leader。 */
+  mentionId?: string;
   name: string;
   displayBadge?: string;
   role: string;
