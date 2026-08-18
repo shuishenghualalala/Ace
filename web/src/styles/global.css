@@ -2039,8 +2039,10 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text-2);
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 6px;
   font-weight: 500;
+  min-width: 0;
 }
 .team-internal__name strong {
   color: #3f342a;
@@ -2052,6 +2054,10 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 12px;
   font-style: normal;
   font-weight: 500;
+  max-width: min(52ch, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .team-internal__name span {
   color: var(--text-3);
@@ -2066,6 +2072,8 @@ button { font-family: inherit; cursor: pointer; }
   font-weight: 500;
   line-height: 1;
   padding: 3px 7px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .team-internal__communication-actions {
   display: flex;

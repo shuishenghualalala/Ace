@@ -885,5 +885,14 @@ cd web && npm run build
   </ul>
   <p>验证：Composer 相关测试 8 passed，Web TypeScript typecheck 通过。</p>
 </div>
+<div>
+  <h2>Team 成员职责展示降噪（2026-08-18）</h2>
+  <ul>
+    <li>Team 对话成员头部不再直接展示外部 Agent 的完整 Markdown 角色提示；仅保留短职责摘要，隐藏工作原则、团队协作关系、输出格式等内部配置段落。</li>
+    <li>用户 @成员直达回答继续复用 TeamAgentTurnBubble 与团队回合相同的头像、职责、状态和正文气泡结构。</li>
+    <li>通信状态徽标固定不压缩为竖排；职责过长时只做单行省略，不影响回答正文。</li>
+  </ul>
+  <p>验证：TeamAgentTurnBubble 与 MessageItem 测试 13 passed，Web TypeScript typecheck 与 production build 通过。</p>
+</div>
 </body>
 </html>

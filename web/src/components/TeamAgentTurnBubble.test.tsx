@@ -24,6 +24,15 @@ describe("TeamAgentTurnBubble communication status", () => {
     expect(renderMessage()).toContain("已回答");
   });
 
+  it("does not expose the full Markdown role prompt in the member header", () => {
+    const html = renderMessage({
+      agentRole: "### 全栈开发 - kk ##### 工作原则 - 先确认目标、输入和输出。 ##### 团队协作关系 - 向 Leader 汇报。",
+    });
+    expect(html).toContain("全栈开发 - kk");
+    expect(html).not.toContain("工作原则");
+    expect(html).not.toContain("团队协作关系");
+  });
+
   it("shows retry for a terminal direct mention when the original prompt is persisted", () => {
     expect(renderMessage({ communicationStatus: "failed", communicationRequestText: "你使用的是什么模型？" }))
       .toContain(">重试<");

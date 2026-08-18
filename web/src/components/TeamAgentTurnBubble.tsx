@@ -26,6 +26,21 @@ function resolveTeamCommunicationRole(message: UiMessage, fallback: string): str
   return role.replace(/^向\s+\S+/, `向 ${label}`);
 }
 
+function compactTeamRole(role: string): string {
+  const normalized = String(role || "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[`*_#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  const beforeInternalSections = normalized.split(/(?:工作原则|团队协作关系|输出格式|工作安排|边界)\s*[-:：]?/i)[0]
+    .replace(/^(职责|角色|职能)\s*[-:：]?\s*/i, "")
+    .replace(/^[-*\d.、)\s]+/, "")
+    .trim();
+  const compact = beforeInternalSections || normalized;
+  return compact.length > 48 ? `${compact.slice(0, 48).trimEnd()}…` : compact;
+}
+
 function resolveIdentity(message: UiMessage, teamMembers: TeamMemberView[] = []) {
   const member = (message.agentId ? teamMembers.find((item) => item.agentId === message.agentId) : undefined)
     || (message.agentName ? teamMembers.find((item) => item.name === message.agentName) : undefined)
@@ -34,10 +49,10 @@ function resolveIdentity(message: UiMessage, teamMembers: TeamMemberView[] = [])
   return {
     name: crewLogo ? "Crew" : (member?.name || message.agentName || "Agent"),
     badge: member?.displayBadge || "?",
-    role: resolveTeamCommunicationRole(
+    role: compactTeamRole(resolveTeamCommunicationRole(
       message,
       member?.isLeader ? "leader" : (message.isLeader ? "leader" : (message.agentRole || member?.role || "").trim()),
-    ),
+    )),
     tone: member?.tone ?? message.agentTone ?? 0,
     crewLogo,
   };
@@ -199,8 +214,8 @@ export default function TeamAgentTurnBubble({
     + " md-body";
 
   return (
-    <AgentTurnBubble
-      identity={identity}
+      <AgentTurnBubble
+      identity={{ ...identity, teamLogo: isPlanningProgress }}
       state={state}
       isStreaming={isStreaming}
       id={`message-${message.id}`}
