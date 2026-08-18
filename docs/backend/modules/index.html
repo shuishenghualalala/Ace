@@ -89,6 +89,14 @@
   </ul>
   <p>验证：直接 mention 异常终态、幂等重放、取消/重试旧帧隔离、Web/ Desktop typecheck 与相关回归通过。本阶段没有新增后端模块或通信协议。</p>
 
+  <h2>7. Team mention 运行时安全启动上下文修复（2026-08-18）</h2>
+  <ul>
+    <li>问题：单 Agent 通过 Dispatcher 进入 <code>Agent.run</code> 时会携带已编译的 <code>ProcessLaunch</code>；Team 用户 @成员直接进入 <code>TeamAskCoordinator</code>，原链路绕过 Dispatcher，外部 ACP/Kimi 无法取得启动上下文。</li>
+    <li>修复：复用当前 Team 回合已经生成的不可变 <code>_security_process_launch</code>，由 <code>TeamManager → TeamCommunicationRouter → TeamAskCoordinator</code> 显式传入回答成员的子 Envelope。</li>
+    <li>边界：不放宽安全策略、不新增进程启动逻辑；若 Team 回合没有明确的 <code>ProcessLaunch</code>，ACP 仍按既有 fail-closed 规则拒绝启动。</li>
+  </ul>
+  <p>验证：Team 用户 mention、幂等/失败状态与 WebSocket 结构化 mention 回归通过。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

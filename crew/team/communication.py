@@ -109,6 +109,7 @@ class TeamCommunicationRouter:
         event: dict[str, Any],
         *,
         expanded_targets: list[str] | None = None,
+        security_process_launch: Any | None = None,
     ) -> Any:
         """投递一次 mention，并交给现有 TeamManager 处理业务语义。"""
 
@@ -169,7 +170,10 @@ class TeamCommunicationRouter:
         if inspect.isawaitable(result):
             result = await cast(Awaitable[Any], result)
         if intent == "ask" and self.ask_coordinator is not None:
-            answer = await self.ask_coordinator.answer(event)
+            answer = await self.ask_coordinator.answer(
+                event,
+                security_process_launch=security_process_launch,
+            )
             event["answer"] = answer
             if isinstance(result, dict) and result:
                 return {**result, "answer": answer}
@@ -184,6 +188,7 @@ class TeamCommunicationRouter:
         request_id: str = "",
         owner_account_id: str = "",
         workspace_id: str = "default",
+        security_process_launch: Any | None = None,
     ) -> dict[str, Any]:
         """Route a user-selected Agent mention as one direct ask.
 
@@ -226,7 +231,10 @@ class TeamCommunicationRouter:
                         "target": target,
                         "communication_kind": "user_mention",
                     }
-                result = await self.route(event)
+                result = await self.route(
+                    event,
+                    security_process_launch=security_process_launch,
+                )
                 if not isinstance(result, dict):
                     raise RuntimeError("用户 Agent mention 未返回结构化结果")
                 return {
@@ -318,7 +326,12 @@ class TeamAskCoordinator:
                 }
         return None
 
-    async def answer(self, event: dict[str, Any]) -> dict[str, Any]:
+    async def answer(
+        self,
+        event: dict[str, Any],
+        *,
+        security_process_launch: Any | None = None,
+    ) -> dict[str, Any]:
         targets = [
             str(target or "").strip()
             for target in list(event.get("expanded_to") or [])
@@ -380,6 +393,30 @@ class TeamAskCoordinator:
             f"问题：{question}",
             "请直接回答问题；不要派发任务、修改 TeamPlan、创建产物，也不要继续调用 team_mention。",
         ])
+        from crew.security.launch import current_process_launch
+
+        inherited_launch = security_process_launch or current_process_launch.get()
+        answer_params = {
+            "task_session_id": self.session_id,
+            "team_session_id": self.session_id,
+            "member_session_id": member_session_id,
+            "agent_id": target,
+            "communication_kind": "ask_answer",
+            "communication_request_id": request_id,
+            "reply_to": request_message_id,
+            "team_node_id": node_id,
+            "task_id": task_id,
+            "communication_path": [*path, target],
+            "workspace_instructions": (
+                "当前是只读的 Team ask 回答回合。只回答发起成员的问题，"
+                "不要把它当作新的 DAG 节点或正式任务。"
+            ),
+        }
+        if inherited_launch is not None:
+            # Team ask 直接调用 member.run，不经过 Dispatcher；沿用父回合
+            # 已编译的不可变启动决策，确保 ACP/CLI 不丢失安全边界。
+            answer_params["_security_process_launch"] = inherited_launch
+
         envelope = Envelope.of(
             prompt,
             session_id=turn_session_id,
@@ -388,22 +425,7 @@ class TeamAskCoordinator:
             user_id=owner,
             workspace_id=workspace_id,
             mode="agent",
-            params={
-                "task_session_id": self.session_id,
-                "team_session_id": self.session_id,
-                "member_session_id": member_session_id,
-                "agent_id": target,
-                "communication_kind": "ask_answer",
-                "communication_request_id": request_id,
-                "reply_to": request_message_id,
-                "team_node_id": node_id,
-                "task_id": task_id,
-                "communication_path": [*path, target],
-                "workspace_instructions": (
-                    "当前是只读的 Team ask 回答回合。只回答发起成员的问题，"
-                    "不要把它当作新的 DAG 节点或正式任务。"
-                ),
-            },
+            params=answer_params,
         )
         lock = self._locks.setdefault(target, asyncio.Lock())
         queued = lock.locked()

@@ -3613,6 +3613,17 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
             return await super().chat(messages, tools)
 
     tm, tasks = _team(provider=UserMentionProvider())
+    process_launch = ProcessLaunch(PermissionProfile(PermissionProfileKind.DISABLED))
+    team = tm._get_or_create("user_mention_s1", owner_account_id="local")
+    original_run = team.teammates["coder"].run
+    seen_launch: list[object] = []
+
+    async def capture_launch(member_envelope):
+        seen_launch.append(member_envelope.params.get("_security_process_launch"))
+        async for chunk in original_run(member_envelope):
+            yield chunk
+
+    team.teammates["coder"].run = capture_launch
     envelope = Envelope.of(
         "你使用的是什么模型？",
         session_id="user_mention_s1",
@@ -3621,6 +3632,7 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
         user_id="local",
         params={
             "user_mentions": [{"kind": "team_member", "member_id": "coder"}],
+            "_security_process_launch": process_launch,
         },
     )
 
@@ -3638,6 +3650,7 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     assert answer.body["request_id"] == envelope.request_id
     assert answer.body["communication_request_text"] == envelope.query
     assert chunks[-1].body["text"] == "coder 当前使用 K3 模型。"
+    assert seen_launch == [process_launch]
     assert tasks.list("user_mention_s1") == []
     assert ("local", "user_mention_s1") not in tm._plans
 

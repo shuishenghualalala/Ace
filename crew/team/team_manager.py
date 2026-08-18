@@ -6245,6 +6245,7 @@ class InProcessTeamManager(TeamManager):
                 request_id=envelope.request_id,
                 owner_account_id=envelope.user_id,
                 workspace_id=envelope.workspace_id,
+                security_process_launch=envelope.params.get("_security_process_launch"),
             )
         except (RuntimeError, ValueError) as exc:
             if target_hint:
