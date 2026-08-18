@@ -184,6 +184,26 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.team-internal__communication-status')).toBeNull();
   });
 
+  it('Team 通信回合不在成员名称行展示等待或进行中标签', () => {
+    for (const communicationStatus of ['waiting_reply', 'delivered']) {
+      const root = renderTeamInternalMessage({
+        id: `team-mention-${communicationStatus}`,
+        role: 'team_internal',
+        content: '正在处理请求',
+        timestamp: 1_700_000_000_000,
+        agentId: 'kk',
+        agentName: 'kk',
+        agentRole: '全栈开发 - kk',
+        communicationKind: 'user_mention_answer',
+        communicationStatus,
+      });
+
+      expect(root.querySelector('.team-internal__communication-status')).toBeNull();
+      expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('等待回答');
+      expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('回答中');
+    }
+  });
+
   it('Team 成员通信标题优先展示结构化收件人', () => {
     const root = renderTeamInternalMessage({
       id: 'team-submit-to-leader',

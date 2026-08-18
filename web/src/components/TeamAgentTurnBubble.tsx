@@ -116,29 +116,6 @@ function highlightMentionMarkdown(text: string): string {
   );
 }
 
-function communicationStatusLabel(status?: string): string {
-  return ({
-    published: "已发送",
-    waiting_reply: "等待回答",
-    queued: "排队中",
-    delivered: "回答中",
-    failed: "回答失败",
-    expired: "已超时",
-    cancelled: "已取消",
-  } as Record<string, string>)[String(status || "").trim()] || "";
-}
-
-const COMMUNICATION_MESSAGE_KINDS = new Set([
-  "ask_request",
-  "ask_answer",
-  "user_mention_request",
-  "user_mention_answer",
-]);
-
-function isCommunicationMessage(kind?: string): boolean {
-  return COMMUNICATION_MESSAGE_KINDS.has(String(kind || "").trim());
-}
-
 const RETRYABLE_MENTION_STATUSES = new Set(["failed", "expired", "cancelled"]);
 const ACTIVE_MENTION_STATUSES = new Set(["published", "waiting_reply", "queued", "delivered"]);
 
@@ -155,9 +132,6 @@ export default function TeamAgentTurnBubble({
     text: highlightMentionMarkdown(message.text),
   }], isStreaming);
   const processText = (message.processText || "").trim();
-  const communicationStatus = isCommunicationMessage(message.communicationKind)
-    ? communicationStatusLabel(message.communicationStatus)
-    : "";
   const isUserMentionAnswer = message.communicationKind === "user_mention_answer";
   const canRetryMention = isUserMentionAnswer
     && RETRYABLE_MENTION_STATUSES.has(String(message.communicationStatus || "").trim())
@@ -223,9 +197,6 @@ export default function TeamAgentTurnBubble({
       processClassName="team-internal__agent-process"
       collapsibleTitle={isCollapsible ? (message.collapsedTitle || "执行过程") : undefined}
       afterContent={afterContent}
-      nameSuffix={communicationStatus ? (
-        <span className="team-internal__communication-status">{communicationStatus}</span>
-      ) : undefined}
     />
   );
 }

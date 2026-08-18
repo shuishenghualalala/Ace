@@ -19,9 +19,10 @@ function renderMessage(overrides: Partial<UiMessage> = {}): string {
   );
 }
 
-describe("TeamAgentTurnBubble communication status", () => {
-  it("does not show a redundant answered badge for a direct user Agent mention", () => {
-    expect(renderMessage()).not.toContain("已回答");
+describe("TeamAgentTurnBubble communication actions", () => {
+  it("does not show a communication status badge for a direct user Agent mention", () => {
+    expect(renderMessage({ communicationStatus: "waiting_reply" })).not.toContain("等待回答");
+    expect(renderMessage({ communicationStatus: "delivered" })).not.toContain("回答中");
   });
 
   it("does not expose the full Markdown role prompt in the member header", () => {
@@ -48,7 +49,7 @@ describe("TeamAgentTurnBubble communication status", () => {
       communicationStatus: "expired",
       communicationRequestText: "@coder 你现在用什么模型？",
     });
-    expect(html).toContain("已超时");
+    expect(html).not.toContain("team-internal__communication-status");
     expect(html).toContain(">重试<");
   });
 

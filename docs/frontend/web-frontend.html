@@ -912,5 +912,14 @@ cd web && npm run build
   </ul>
   <p>验证：直接 mention 成功态渲染回归、Web TypeScript typecheck 与 production build 通过。</p>
 </div>
+<div>
+  <h2>Team 通信回合展示统一（2026-08-18）</h2>
+  <ul>
+    <li>成员名称行不再追加“已发送”“等待回答”“回答中”“已超时”等通信状态标签，避免与团队成员普通回复的标题结构不一致。</li>
+    <li>处理中、思考和工具调用继续由既有 Agent Turn timeline 展示；失败、超时和取消继续保留正文及既有重试/取消操作。</li>
+    <li>用户直接 @成员、成员间 ask、Leader 通信与普通 Team 成员回合统一复用 <code>TeamAgentTurnBubble</code> 和 <code>AgentTurnBubble</code>，不新增通信组件或协议字段。</li>
+  </ul>
+  <p>验证：Web Team 通信渲染回归、TypeScript typecheck 与 production build 通过。</p>
+</div>
 </body>
 </html>

@@ -1313,30 +1313,6 @@ function renderTeamArtifacts(artifacts: TeamArtifactCard[] | undefined): HTMLEle
   return wrap;
 }
 
-/** Web TeamAgentTurnBubble 的 Desktop TypeScript DOM 等价实现。 */
-function teamCommunicationStatusLabel(status?: string): string {
-  return ({
-    published: '已发送',
-    waiting_reply: '等待回答',
-    queued: '排队中',
-    delivered: '回答中',
-    failed: '回答失败',
-    expired: '已超时',
-    cancelled: '已取消',
-  } as Record<string, string>)[String(status || '').trim()] || '';
-}
-
-const COMMUNICATION_MESSAGE_KINDS = new Set([
-  'ask_request',
-  'ask_answer',
-  'user_mention_request',
-  'user_mention_answer',
-]);
-
-function isCommunicationMessage(kind?: string): boolean {
-  return COMMUNICATION_MESSAGE_KINDS.has(String(kind || '').trim());
-}
-
 function resolveTeamCommunicationRole(message: ChatMessage, fallback: string): string {
   const role = String(fallback || '').trim();
   const target = (message.mentionTo || [])
@@ -1459,15 +1435,6 @@ export function renderTeamInternalMessage(
       const em = document.createElement('em');
       em.textContent = role;
       nameEl.appendChild(em);
-    }
-    if (isCommunicationMessage(message.communicationKind)) {
-      const status = teamCommunicationStatusLabel(message.communicationStatus);
-      if (status) {
-        const badge = document.createElement('span');
-        badge.className = 'team-internal__communication-status';
-        badge.textContent = status;
-        nameEl.appendChild(badge);
-      }
     }
   }
 
