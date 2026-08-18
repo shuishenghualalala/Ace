@@ -105,6 +105,14 @@
   </ul>
   <p>验证：用户 mention 流式/思考/工具回归、Team Bus 状态与无 DAG 断言通过。</p>
 
+  <h2>9. Team 历史 mention 成员身份恢复（2026-08-18）</h2>
+  <ul>
+    <li>历史投影对 <code>user_mention_answer</code> / <code>ask_answer</code> 优先使用持久化的 <code>mention_from</code> 解析成员画像，而不是直接沿用旧事件里的 <code>agent_id</code>。</li>
+    <li>兼容旧事件中 <code>agent_id=crew::builtin</code> 但实际回答成员为 kk 的情况；历史回放恢复 kk 的成员名称、职责、色调和头像身份，Crew 头像只保留给真正的 Crew 成员或规划回合。</li>
+    <li>修复集中在既有 <code>team/history_projection.py</code>，不新增历史字段、迁移脚本或通信模块。</li>
+  </ul>
+  <p>验证：旧事件身份恢复、Crew 子会话身份映射与重复通信回归通过。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

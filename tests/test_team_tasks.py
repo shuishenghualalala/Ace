@@ -8987,6 +8987,54 @@ def test_team_parent_session_history_prefers_kanban_events_over_child_sessions(a
     assert [item["content"] for item in response.json()] == ["Leader 已完成最终总结。"]
 
 
+def test_team_history_restores_direct_mention_sender_identity_for_old_events():
+    class ExternalAgents:
+        @staticmethod
+        def get_team(team_id: str, *, owner_account_id: str = ""):
+            assert team_id == "team_1"
+            assert owner_account_id == "local"
+            return {
+                "leader_agent_id": CREW_BUILTIN_AGENT_ID,
+                "members": [
+                    {"agent_id": CREW_BUILTIN_AGENT_ID, "agent_name": "Crew", "role": "leader"},
+                    {"agent_id": "agent_kk", "agent_name": "kk", "role": "负责全栈开发"},
+                ],
+            }
+
+    class Team:
+        @staticmethod
+        def event_history_for_session(session_id: str, owner_account_id: str = ""):
+            return [{
+                "role": "team_internal",
+                "content": "我是 kk，当前使用的模型是 kimi-code/k3。",
+                "agent_id": CREW_BUILTIN_AGENT_ID,
+                "agent_name": "Crew",
+                "communication_kind": "user_mention_answer",
+                "communication_status": "answered",
+                "mention_from": "kk",
+                "mention_to": ["user"],
+                "request_id": "mention_1",
+                "timestamp": 1,
+            }]
+
+    class Crew:
+        external_agents = ExternalAgents()
+        team = Team()
+
+    items = team_internal_history_items(
+        Crew(),
+        "team_parent",
+        [],
+        owner_account_id="local",
+        config={"team": {"external_team_id": "team_1"}},
+    )
+
+    assert len(items) == 1
+    assert items[0]["agent_id"] == "agent_kk"
+    assert items[0]["agent_name"] == "kk"
+    assert items[0]["agent_id"] != CREW_BUILTIN_AGENT_ID
+
+
 def test_team_history_maps_legacy_crew_child_session_to_builtin_identity():
     class Crew:
         class tasks:

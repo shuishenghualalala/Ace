@@ -189,6 +189,33 @@ def _team_internal_agent_identity(
     }
 
 
+def _normalize_communication_identity(
+    item: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Use the persisted communication sender to restore a member identity.
+
+    Older Team communication events could persist ``agent_id=crew::builtin``
+    while the direct mention sender remained in ``mention_from``.  The answer
+    text is still correct in that case, but history replay would render the
+    member with Crew's avatar.  Communication sender metadata is the canonical
+    identity for answer events; the display name is only a fallback for older
+    events that lack ``mention_from``.
+    """
+
+    kind = str(item.get("communication_kind") or "").strip()
+    if kind not in {"user_mention_answer", "ask_answer"}:
+        return item
+    raw_member_id = str(item.get("mention_from") or "").strip()
+    if not raw_member_id:
+        raw_member_id = str(item.get("agent_name") or item.get("agent_id") or "").strip()
+    if not raw_member_id:
+        return item
+    normalized = dict(item)
+    normalized.update(_team_internal_agent_identity(raw_member_id, profiles))
+    return normalized
+
+
 def team_internal_history_items(
     crew,
     session_id: str,
@@ -209,7 +236,11 @@ def team_internal_history_items(
         except Exception:  # noqa: BLE001
             pass
     if items:
-        return sorted(items, key=lambda value: float(value.get("timestamp") or 0))
+        normalized_items = [
+            _normalize_communication_identity(item, profiles)
+            for item in items
+        ]
+        return sorted(normalized_items, key=lambda value: float(value.get("timestamp") or 0))
     has_team_workflow_fn = getattr(getattr(crew, "team", None), "has_team_workflow_for_session", None)
     if callable(has_team_workflow_fn):
         try:
