@@ -1348,6 +1348,27 @@ function resolveTeamCommunicationRole(message: ChatMessage, fallback: string): s
   return role.replace(/^向\s+\S+/, `向 ${label}`);
 }
 
+/**
+ * Team 消息标题只展示可读的职责摘要；完整的 Team 配置属于执行上下文，
+ * 不应把工作原则、协作关系等内部提示词直接铺在聊天标题里。
+ */
+function compactTeamRole(role: string): string {
+  const normalized = String(role || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[`*_#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return '';
+
+  const summary = normalized
+    .split(/(?:工作原则|团队协作关系|输出格式|工作安排|边界)\s*[-:：]?/i)[0]
+    .replace(/^(职责|角色|职能)\s*[-:：]?\s*/i, '')
+    .replace(/^[-*\d.、)\s]+/, '')
+    .trim();
+  const compact = summary || normalized;
+  return compact.length > 48 ? `${compact.slice(0, 48).trimEnd()}…` : compact;
+}
+
 const RETRYABLE_MENTION_STATUSES = new Set(['failed', 'expired', 'cancelled']);
 const ACTIVE_MENTION_STATUSES = new Set(['published', 'waiting_reply', 'queued', 'delivered']);
 
@@ -1361,10 +1382,10 @@ export function renderTeamInternalMessage(
   const name = isPlanning
     ? String(message.agentName || '团队').trim()
     : isCrew ? 'Crew' : String(message.agentName || message.agentId || 'Agent').trim();
-  const role = isPlanning ? '' : resolveTeamCommunicationRole(
+  const role = isPlanning ? '' : compactTeamRole(resolveTeamCommunicationRole(
     message,
     message.isLeader ? 'leader' : String(message.agentRole || '').trim(),
-  );
+  ));
   const tone = Number.isFinite(message.agentTone) ? Number(message.agentTone) % 6 : 0;
   const processMessage: ChatMessage = {
     ...message,

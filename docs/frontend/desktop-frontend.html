@@ -705,6 +705,16 @@
     </ul>
     <p>验证：Desktop Composer mention 测试 47 passed，Desktop TypeScript typecheck 通过。</p>
   </section>
+  <section>
+    <h2>Team 实时成员职责展示降噪（2026-08-18）</h2>
+    <ul>
+      <li><b>问题：</b>Desktop 实时 Team 回合把成员完整 Markdown 角色提示直接展示在聊天标题，工作原则、协作关系和输出格式会挤占正文区域。</li>
+      <li><b>修复：</b>在实时 <code>renderTeamInternalMessage</code> 入口统一压缩成员职责，只保留可读的职责摘要；完整配置仍属于执行上下文，不进入用户消息标题。</li>
+      <li><b>布局：</b>职责摘要支持省略，通信状态徽标保持不换行，避免小窗口下被挤成竖排。</li>
+      <li><b>范围：</b>复用现有 Team 内部消息渲染、通信元数据和 CSS，不新增模块、接口、持久化字段或 DAG。</li>
+    </ul>
+    <p>验证：Desktop Team 渲染回归 55 passed，TypeScript typecheck、CSS lint、production build 与 <code>git diff --check</code> 通过。</p>
+  </section>
 </div>
 </body>
 </html>

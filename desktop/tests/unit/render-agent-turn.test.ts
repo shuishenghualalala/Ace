@@ -166,6 +166,24 @@ describe('renderAgentTurn', () => {
       .toHaveProperty('disabled', true);
   });
 
+  it('Team 外部成员标题压缩完整 Markdown 职责提示', () => {
+    const root = renderTeamInternalMessage({
+      id: 'team-mention-role',
+      role: 'team_internal',
+      content: '我现在使用 Kimi Code。',
+      timestamp: 1_700_000_000_000,
+      agentId: 'kk',
+      agentName: 'kk',
+      agentRole: '### 全栈开发 - kk ##### 工作原则 - 先确认目标、输入、输出和验收标准，再执行。 - 团队协作关系 - 向 Leader 汇报。',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'answered',
+    });
+
+    expect(root.querySelector('.team-internal__name em')?.textContent).toBe('全栈开发 - kk');
+    expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('工作原则');
+    expect(root.querySelector('.team-internal__communication-status')?.textContent).toBe('已回答');
+  });
+
   it('Team 成员通信标题优先展示结构化收件人', () => {
     const root = renderTeamInternalMessage({
       id: 'team-submit-to-leader',

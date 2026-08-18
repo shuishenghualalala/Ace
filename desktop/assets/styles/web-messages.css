@@ -713,6 +713,8 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 
 .chat-messages.web-flow .team-internal__name {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   gap: var(--mw-space-1);
   align-items: baseline;
   color: var(--mw-text-secondary);
@@ -726,12 +728,18 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 }
 
 .chat-messages.web-flow .team-internal__name em {
+  min-width: 0;
+  max-width: min(52ch, 100%);
+  overflow: hidden;
   color: var(--mw-status-warning);
   font-size: var(--mw-type-caption-size);
   font-style: normal;
   font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat-messages.web-flow .team-internal__communication-status {
+  flex-shrink: 0;
   color: var(--mw-text-secondary);
   border: 1px solid var(--mw-border-subtle);
   border-radius: 999px;
@@ -740,6 +748,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   font-weight: 500;
   line-height: 1;
   padding: 3px 7px;
+  white-space: nowrap;
 }
 .chat-messages.web-flow .team-internal__communication-actions {
   display: flex;
