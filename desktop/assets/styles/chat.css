@@ -2954,10 +2954,12 @@ button.chat-message-file:hover {
 }
 .followup-card-wrap--permission {
   position: fixed;
-  right: clamp(var(--mw-space-4), 3vw, var(--mw-space-7));
-  bottom: clamp(var(--mw-space-4), 3vw, var(--mw-space-7));
+  left: var(--permission-card-left, auto);
+  right: var(--permission-card-right, clamp(var(--mw-space-4), 3vw, var(--mw-space-7)));
+  bottom: var(--permission-card-bottom, clamp(var(--mw-space-4), 3vw, var(--mw-space-7)));
   z-index: var(--mw-z-dialog);
-  width: min(440px, calc(100vw - 32px));
+  width: var(--permission-card-width, min(440px, calc(100vw - 32px)));
+  max-width: calc(100vw - 32px);
   pointer-events: none;
   animation: permission-floating-in 160ms cubic-bezier(.2, .8, .2, 1) both;
 }

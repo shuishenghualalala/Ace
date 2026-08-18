@@ -7,6 +7,7 @@
 
 import type { FollowupAnswer } from './backend-client';
 import type { PendingFollowup } from './state';
+import { getPrimaryComposerRoot } from './features/composer-scope';
 
 const FREE_TEXT_OPTION = '__free_text__';
 
@@ -18,6 +19,87 @@ const PERMISSION_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" fill="n
 const PERMISSION_NOTICE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>`;
 const STAFFING_ICON = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 20a6 6 0 0 0-12 0"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M16 11h6"/></svg>`;
 const STAFFING_CHECK_ICON = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
+
+const PERMISSION_CARD_GAP = 12;
+const PERMISSION_CARD_MIN_MARGIN = 16;
+const PERMISSION_CARD_MAX_WIDTH = 440;
+const permissionCardRoots = new Set<HTMLElement>();
+const permissionCardObservers = new WeakMap<HTMLElement, ResizeObserver>();
+let permissionCardSyncScheduled = false;
+let permissionCardResizeBound = false;
+
+function permissionCardComposer(root: HTMLElement): HTMLElement | null {
+  // Wiki Agent 有自己的 Composer，不能误锚到主对话输入框。
+  const wikiPanel = root.closest<HTMLElement>('[data-wiki-agent-panel]');
+  return wikiPanel?.querySelector<HTMLElement>('[data-composer-view]')
+    ?? getPrimaryComposerRoot()
+    ?? document.querySelector<HTMLElement>('[data-composer-view]');
+}
+
+function positionPermissionCard(root: HTMLElement): void {
+  const composer = permissionCardComposer(root);
+  if (!composer) return;
+  const rect = composer.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  if (!rect.width || !rect.height || !viewportWidth || !viewportHeight) return;
+
+  const width = Math.min(
+    PERMISSION_CARD_MAX_WIDTH,
+    Math.max(280, rect.width),
+    viewportWidth - PERMISSION_CARD_MIN_MARGIN * 2,
+  );
+  const left = Math.max(
+    PERMISSION_CARD_MIN_MARGIN,
+    Math.min(rect.right - width, viewportWidth - width - PERMISSION_CARD_MIN_MARGIN),
+  );
+  const bottom = Math.max(
+    PERMISSION_CARD_MIN_MARGIN,
+    viewportHeight - rect.top + PERMISSION_CARD_GAP,
+  );
+
+  root.style.setProperty('--permission-card-left', `${left}px`);
+  root.style.setProperty('--permission-card-right', 'auto');
+  root.style.setProperty('--permission-card-width', `${width}px`);
+  root.style.setProperty('--permission-card-bottom', `${bottom}px`);
+}
+
+function schedulePermissionCardSync(): void {
+  if (permissionCardSyncScheduled) return;
+  permissionCardSyncScheduled = true;
+  requestAnimationFrame(() => {
+    permissionCardSyncScheduled = false;
+    for (const root of permissionCardRoots) {
+      if (!root.isConnected) {
+        permissionCardObservers.get(root)?.disconnect();
+        permissionCardRoots.delete(root);
+        continue;
+      }
+      positionPermissionCard(root);
+    }
+  });
+}
+
+function observePermissionCardLayout(root: HTMLElement): void {
+  permissionCardRoots.add(root);
+  if (!permissionCardResizeBound) {
+    permissionCardResizeBound = true;
+    window.addEventListener('resize', schedulePermissionCardSync, { passive: true });
+    window.visualViewport?.addEventListener('resize', schedulePermissionCardSync, { passive: true });
+  }
+  const composer = permissionCardComposer(root);
+  if (composer && typeof ResizeObserver !== 'undefined' && !permissionCardObservers.has(root)) {
+    const observer = new ResizeObserver(schedulePermissionCardSync);
+    observer.observe(composer);
+    permissionCardObservers.set(root, observer);
+  }
+  positionPermissionCard(root);
+}
+
+/** 将权限卡锚定到所属对话的 Composer 上方；普通追问和 staffing 弹窗不参与。 */
+export function syncPermissionCardPositions(container: ParentNode = document): void {
+  container.querySelectorAll<HTMLElement>('.followup-card-wrap--permission').forEach(observePermissionCardLayout);
+}
 
 interface PermissionPromptParts {
   action: string;
