@@ -34,6 +34,7 @@ import { formatFollowupAnswerMessage } from '../followup';
 import {
   escapeHtml,
   enqueuePending,
+  getBookFileChanges,
   newMessageId,
   notify,
   patchBook,
@@ -80,7 +81,8 @@ import {
   stopGeneration,
 } from './chat-controller';
 import { ensureFileChangesDelegation } from './conversation-renderer';
-import { openInspectorToTab } from './inspector';
+import { renderDiffPanelHtml } from '../diff-lines';
+import { showFileOpenMenu } from './file-open-menu';
 import {
   bindBrowserPanel,
   hideBrowserPanelView,
@@ -668,6 +670,134 @@ async function createEmbeddedConversation(root: HTMLElement, req: WikiAgentEntry
   }
 }
 
+interface WikiFileChangeSummary {
+  path: string;
+  name: string;
+  added: number;
+  removed: number;
+  status: 'modified' | 'added' | 'deleted';
+  binary?: boolean;
+}
+
+function wikiFileChangeSummaries(button: HTMLElement): WikiFileChangeSummary[] {
+  try {
+    const parsed = JSON.parse(button.getAttribute('data-file-changes-summaries') || '[]') as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && typeof item.path === 'string')
+        .map((item) => ({
+          path: String(item.path),
+          name: typeof item.name === 'string' ? item.name : String(item.path).split(/[\\/]/).pop() || String(item.path),
+          added: typeof item.added === 'number' ? item.added : 0,
+          removed: typeof item.removed === 'number' ? item.removed : 0,
+          status: item.status === 'added' || item.status === 'deleted' ? item.status : 'modified',
+          ...(typeof item.binary === 'boolean' ? { binary: item.binary } : {}),
+        }));
+    }
+  } catch {
+    // Fall back to the single path below when older cards have no summary payload.
+  }
+  const path = button.getAttribute('data-file-changes-path')?.trim() || '';
+  return path ? [{ path, name: path.split(/[\\/]/).pop() || path, added: 0, removed: 0, status: 'modified' }] : [];
+}
+
+function openWikiFileChangesDialog(root: HTMLElement, sessionId: string, button: HTMLElement): void {
+  const summaries = wikiFileChangeSummaries(button);
+  if (summaries.length === 0) return;
+  root.querySelector('[data-wiki-file-changes-dialog]')?.remove();
+
+  const dialog = document.createElement('section');
+  dialog.className = 'wiki-file-changes-dialog';
+  dialog.setAttribute('data-wiki-file-changes-dialog', '');
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-label', '本轮文件改动');
+  const title = document.createElement('h2');
+  title.className = 'wiki-file-changes-dialog__title';
+  title.textContent = `本轮文件改动（${summaries.length}）`;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'wiki-file-changes-dialog__close';
+  close.setAttribute('aria-label', '关闭文件改动');
+  close.textContent = '×';
+  close.addEventListener('click', () => dialog.remove());
+  const header = document.createElement('header');
+  header.className = 'wiki-file-changes-dialog__header';
+  header.append(title, close);
+
+  const list = document.createElement('div');
+  list.className = 'wiki-file-changes-dialog__list';
+  const detail = document.createElement('div');
+  detail.className = 'wiki-file-changes-dialog__detail';
+  const liveFiles = new Map(getBookFileChanges(sessionId).map((file) => [file.path, file]));
+
+  const renderDetail = (summary: WikiFileChangeSummary): void => {
+    detail.replaceChildren();
+    const live = liveFiles.get(summary.path);
+    const heading = document.createElement('div');
+    heading.className = 'wiki-file-changes-dialog__file-heading';
+    const name = document.createElement('strong');
+    name.textContent = summary.name;
+    const path = document.createElement('code');
+    path.textContent = summary.path;
+    heading.append(name, path);
+    const meta = document.createElement('div');
+    meta.className = 'wiki-file-changes-dialog__meta';
+    meta.textContent = `${summary.status === 'added' ? '新增' : summary.status === 'deleted' ? '删除' : '修改'} · +${summary.added} / -${summary.removed}`;
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'wiki-file-changes-dialog__open';
+    open.textContent = '打开方式';
+    open.disabled = summary.status === 'deleted';
+    open.addEventListener('click', () => showFileOpenMenu(open, summary.path));
+    detail.append(heading, meta, open);
+    if (summary.status === 'deleted') {
+      const empty = document.createElement('p');
+      empty.className = 'wiki-file-changes-dialog__empty';
+      empty.textContent = '文件已删除，无法在本地预览。';
+      detail.appendChild(empty);
+    } else if (summary.binary) {
+      const empty = document.createElement('p');
+      empty.className = 'wiki-file-changes-dialog__empty';
+      empty.textContent = '这是二进制文件，暂不显示逐行 diff。';
+      detail.appendChild(empty);
+    } else if (live?.diff?.length) {
+      const diff = document.createElement('div');
+      diff.className = 'wiki-file-changes-dialog__diff';
+      diff.innerHTML = renderDiffPanelHtml(live.diff, { escapeHtml, filename: summary.name });
+      detail.appendChild(diff);
+    } else {
+      const empty = document.createElement('p');
+      empty.className = 'wiki-file-changes-dialog__empty';
+      empty.textContent = '当前会话没有保留逐行 diff，可通过“打开方式”查看文件。';
+      detail.appendChild(empty);
+    }
+  };
+
+  summaries.forEach((summary, index) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'wiki-file-changes-dialog__item';
+    item.textContent = summary.name;
+    item.title = summary.path;
+    item.addEventListener('click', () => {
+      list.querySelectorAll('.wiki-file-changes-dialog__item').forEach((node) => node.classList.remove('is-active'));
+      item.classList.add('is-active');
+      renderDetail(summary);
+    });
+    list.appendChild(item);
+    if (index === 0) queueMicrotask(() => {
+      item.classList.add('is-active');
+      renderDetail(summary);
+    });
+  });
+
+  const body = document.createElement('div');
+  body.className = 'wiki-file-changes-dialog__body';
+  body.append(list, detail);
+  dialog.append(header, body);
+  root.appendChild(dialog);
+}
+
 function mountWikiBrowserSurface(root: HTMLElement, sessionId: string): void {
   setBrowserPanelSession(sessionId);
   root.innerHTML = renderBrowserPanel();
@@ -726,8 +856,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   // 「已编辑文件」卡 / 链接 / 浏览器产物点击委托：消息区由增量 diff 复用/重建节点，
   // 委托绑在面板 root 上（每次重挂载的新 root 各绑一次，WeakSet 不持有旧 DOM）。
   ensureFileChangesDelegation(root);
-  // 「查看」/文件行点击：Wiki 页没有看板（openInspectorToTab 仅限 chat 页，点了会静默无效），
-  // 这里捕获阶段截获，跳到主聊天区打开同一 Wiki 会话，再展开 Files 看板定位到该文件。
+  // 「查看」/文件行点击：在当前 Wiki Agent 面板内打开文件改动查看器，不跳转主聊天。
   root.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
     const openBtn = target?.closest<HTMLElement>('[data-file-changes-open]');
@@ -736,11 +865,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     if (!sessionId) return;
     event.preventDefault();
     event.stopPropagation();
-    const expandFilePath = openBtn.getAttribute('data-file-changes-path');
-    ensureWikiSessionRow(sessionId);
-    void openSessionInChat(sessionId).then(() => {
-      openInspectorToTab('files', { expandFilePath });
-    });
+    openWikiFileChangesDialog(root, sessionId, openBtn);
   }, true);
   // ── 对话面板本体：与主对话同一个 mountConversationPanel ──
   // wiki 扩展经槽位注入：文件选择 + 附件预览 → before-input；工具栏控件（附件「+」/

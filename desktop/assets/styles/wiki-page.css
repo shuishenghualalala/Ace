@@ -537,6 +537,142 @@
   background: transparent;
 }
 
+/* Wiki 对话栏没有撤回编辑流程；通用消息渲染器生成的按钮在这里不提供操作。 */
+.wiki-agent-pane__messages .chat-edit-btn {
+  display: none;
+}
+
+.wiki-file-changes-dialog {
+  position: absolute;
+  inset: var(--mw-space-4);
+  z-index: var(--mw-z-overlay);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-4);
+  background: var(--mw-bg-surface);
+  box-shadow: var(--mw-shadow-lg);
+}
+
+.wiki-file-changes-dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mw-space-3);
+  padding: var(--mw-space-3) var(--mw-space-4);
+  border-bottom: 1px solid var(--mw-border-subtle);
+}
+
+.wiki-file-changes-dialog__title {
+  margin: 0;
+  font-size: var(--mw-type-body-size);
+}
+
+.wiki-file-changes-dialog__close {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  color: var(--mw-text-muted);
+  background: transparent;
+  font-size: 22px;
+  cursor: pointer;
+}
+
+.wiki-file-changes-dialog__close:hover {
+  color: var(--mw-text-primary);
+  background: var(--mw-bg-subtle);
+}
+
+.wiki-file-changes-dialog__body {
+  display: grid;
+  grid-template-columns: minmax(140px, .32fr) minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+}
+
+.wiki-file-changes-dialog__list {
+  min-height: 0;
+  overflow: auto;
+  padding: var(--mw-space-2);
+  border-right: 1px solid var(--mw-border-subtle);
+}
+
+.wiki-file-changes-dialog__item {
+  display: block;
+  width: 100%;
+  padding: var(--mw-space-2) var(--mw-space-3);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  color: var(--mw-text-primary);
+  background: transparent;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.wiki-file-changes-dialog__item:hover,
+.wiki-file-changes-dialog__item.is-active {
+  background: var(--mw-bg-subtle);
+}
+
+.wiki-file-changes-dialog__detail {
+  min-width: 0;
+  overflow: auto;
+  padding: var(--mw-space-4);
+}
+
+.wiki-file-changes-dialog__file-heading {
+  display: grid;
+  gap: var(--mw-space-1);
+}
+
+.wiki-file-changes-dialog__file-heading code {
+  overflow-wrap: anywhere;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+}
+
+.wiki-file-changes-dialog__meta,
+.wiki-file-changes-dialog__empty {
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+}
+
+.wiki-file-changes-dialog__meta {
+  margin-top: var(--mw-space-2);
+}
+
+.wiki-file-changes-dialog__open {
+  margin-top: var(--mw-space-3);
+  padding: var(--mw-space-1) var(--mw-space-2);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-surface);
+  cursor: pointer;
+}
+
+.wiki-file-changes-dialog__diff {
+  margin-top: var(--mw-space-4);
+}
+
+@media (max-width: 640px) {
+  .wiki-file-changes-dialog__body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .wiki-file-changes-dialog__list {
+    max-height: 140px;
+    border-right: 0;
+    border-bottom: 1px solid var(--mw-border-subtle);
+  }
+}
+
 /* 对话面板本体（conversation-panel）：消息区 + Composer 竖向撑满对话栏当前宽度 */
 .wiki-agent-pane__conversation {
   flex: 1 1 auto;

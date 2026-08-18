@@ -652,7 +652,7 @@ describe('wiki-page 入口挂点', () => {
       .toBe('已选择：全部内容');
   });
 
-  it('右栏「已编辑文件」卡「查看」：跳主聊天区同一会话并展开 Files 看板定位文件', async () => {
+  it('右栏「已编辑文件」卡「查看」：留在 Wiki 页面并打开文件改动详情', async () => {
     const mockSetTab = vi.fn();
     setChatCallbacks({ openSession: mockOpenSession, setTab: mockSetTab });
     uiStore.set({ activeTab: 'wiki' });
@@ -668,11 +668,11 @@ describe('wiki-page 入口挂点', () => {
     });
     document.querySelector<HTMLButtonElement>('.msg__file-changes__review')!.click();
 
-    await vi.waitFor(() => {
-      expect(mockOpenSession).toHaveBeenCalledWith(WIKI_SID);
-      expect(mockSetTab).toHaveBeenCalledWith('chat');
-      expect(vi.mocked(openInspectorToTab)).toHaveBeenCalledWith('files', { expandFilePath: '/tmp/wiki-out.md' });
-    });
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-file-changes-dialog]')).not.toBeNull());
+    expect(document.querySelector('[data-wiki-file-changes-dialog]')?.textContent).toContain('wiki-out.md');
+    expect(mockOpenSession).not.toHaveBeenCalled();
+    expect(mockSetTab).not.toHaveBeenCalled();
+    expect(vi.mocked(openInspectorToTab)).not.toHaveBeenCalled();
   });
 
   it('新建对话创建独立 Wiki session，保留旧会话并切到空白输入', async () => {
