@@ -181,7 +181,7 @@ describe('renderAgentTurn', () => {
 
     expect(root.querySelector('.team-internal__name em')?.textContent).toBe('全栈开发 - kk');
     expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('工作原则');
-    expect(root.querySelector('.team-internal__communication-status')?.textContent).toBe('已回答');
+    expect(root.querySelector('.team-internal__communication-status')).toBeNull();
   });
 
   it('Team 成员通信标题优先展示结构化收件人', () => {

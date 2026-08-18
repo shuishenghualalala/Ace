@@ -724,6 +724,15 @@
     </ul>
     <p>验证：Desktop history mapping 与 Team 渲染回归 75 passed，后端 direct mention 回归 6 passed。</p>
   </section>
+  <section>
+    <h2>Team @Agent 成功态标签降噪（2026-08-18）</h2>
+    <ul>
+      <li>用户直接 @成员成功回答时不再显示“已回答”徽标，避免在正文气泡旁重复表达完成态，并与团队成员普通回复保持一致。</li>
+      <li>等待回答、排队中、回答中、失败、超时和取消仍保留状态提示；失败、超时和取消继续提供已有的重试入口。</li>
+      <li>只调整既有 Desktop Team 内部消息状态文案映射，不新增模块、接口、持久化字段或 DAG。</li>
+    </ul>
+    <p>验证：直接 mention 成功态渲染回归、Desktop TypeScript typecheck 与 production build 通过。</p>
+  </section>
 </div>
 </body>
 </html>

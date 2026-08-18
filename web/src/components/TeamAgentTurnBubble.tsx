@@ -122,7 +122,6 @@ function communicationStatusLabel(status?: string): string {
     waiting_reply: "等待回答",
     queued: "排队中",
     delivered: "回答中",
-    answered: "已回答",
     failed: "回答失败",
     expired: "已超时",
     cancelled: "已取消",

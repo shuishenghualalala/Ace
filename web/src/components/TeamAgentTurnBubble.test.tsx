@@ -20,8 +20,8 @@ function renderMessage(overrides: Partial<UiMessage> = {}): string {
 }
 
 describe("TeamAgentTurnBubble communication status", () => {
-  it("shows the answered status for a direct user Agent mention", () => {
-    expect(renderMessage()).toContain("已回答");
+  it("does not show a redundant answered badge for a direct user Agent mention", () => {
+    expect(renderMessage()).not.toContain("已回答");
   });
 
   it("does not expose the full Markdown role prompt in the member header", () => {
