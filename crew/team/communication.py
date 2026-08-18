@@ -474,6 +474,23 @@ class TeamAskCoordinator:
                 )
                 await self._emit_lifecycle(event, "cancelled")
                 raise
+            except Exception:  # noqa: BLE001
+                # Agent/Provider 的未结构化异常也必须收口到通信终态，
+                # 否则前端只能收到网关通用错误，Team Bus 与历史都停在 delivered。
+                log.exception(
+                    "Team 通信回合执行异常 target=%s request=%s",
+                    target,
+                    request_id,
+                )
+                return await self._publish_failure(
+                    event,
+                    target=target,
+                    sender=sender,
+                    request_id=request_id,
+                    request_message_id=request_message_id,
+                    reason=f"{target} 的通信回合执行失败，请稍后重试。",
+                    status="failed",
+                )
 
             answer_text = final_text or "".join(delta_text).strip()
             if error_text or not answer_text:

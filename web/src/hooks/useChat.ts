@@ -105,6 +105,16 @@ export function isTeamRuntimeStatus(message: string): boolean {
   );
 }
 
+/** 取消后的旧请求即使迟到，也不能污染重试产生的新回合。 */
+export function isSuppressedRequest(requestId: unknown, suppressed: ReadonlySet<string>): boolean {
+  const normalized = String(requestId || "").trim();
+  return Boolean(normalized && suppressed.has(normalized));
+}
+
+function suppressedRequestKey(sessionId: string, requestId: string): string {
+  return `${sessionId}\u0000${requestId}`;
+}
+
 export function normalizeWikiCardPages(body: Record<string, unknown>): WikiPage[] {
   const raw = Array.isArray(body.pages) ? body.pages : Array.isArray(body.cards) ? body.cards : [];
   return raw as WikiPage[];
@@ -412,6 +422,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
   const wikiProgressRef = useRef<Record<string, WikiIngestProgress>>({});
   const subscribedSessionsRef = useRef<Set<string>>(new Set());
   const suppressChunksRef = useRef<Set<string>>(new Set());
+  const suppressedRequestIdsRef = useRef<Set<string>>(new Set());
   const loadedSessionsRef = useRef<Set<string>>(new Set());
   // 各会话最后收到的 Gateway sequence（断线重连后回放定位用）
   const lastGatewaySequenceRef = useRef<Map<string, number>>(new Map());
@@ -625,6 +636,12 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
         }
       }
       if (suppressChunksRef.current.has(sid)) return;
+      const chunkRequestId = String(
+        c.request_id || c.body?.request_id || (c.body?.message && typeof c.body.message === "object"
+          ? c.body.message.request_id
+          : "") || "",
+      ).trim();
+      if (isSuppressedRequest(suppressedRequestKey(sid, chunkRequestId), suppressedRequestIdsRef.current)) return;
       const book = bookFor(sid);
 
       if (c.kind === "delta") {
@@ -1121,8 +1138,17 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
   }, []);
 
   const cancelMention = useCallback((sessionId: string, requestId?: string) => {
-    stop(sessionId);
     const normalizedRequestId = String(requestId || "").trim();
+    if (normalizedRequestId) {
+      suppressedRequestIdsRef.current.add(suppressedRequestKey(sessionId, normalizedRequestId));
+      // 只保留最近的取消请求，避免长时间打开页面后集合无限增长。
+      while (suppressedRequestIdsRef.current.size > 200) {
+        const oldest = suppressedRequestIdsRef.current.values().next().value;
+        if (oldest == null) break;
+        suppressedRequestIdsRef.current.delete(oldest);
+      }
+    }
+    stop(sessionId);
     if (!normalizedRequestId) return;
     setMessagesMap((prev) => ({
       ...prev,

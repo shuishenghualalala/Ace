@@ -122,6 +122,8 @@ export interface ToolCallInfo {
 export interface Chunk {
   kind: ChunkKind;
   body: Record<string, any>;
+  /** Gateway frames carry the originating request identity at the top level. */
+  request_id?: string;
   is_final: boolean;
   sequence: number;
   /** Gateway 内部单调序列号，用于断线重连后回放定位 */

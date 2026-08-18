@@ -81,6 +81,14 @@
   </ul>
   <p>验证：成功与终态失败回合、历史通信字段和前端状态展示回归通过。</p>
 
+  <h2>6. Team @Agent 并发与取消竞态第三阶段（2026-08-18）</h2>
+  <ul>
+    <li>同一 <code>request_id</code> 继续复用既有幂等锁与终态历史，不重复发送 Team Bus 请求或唤醒成员；显式重试必须使用新的 <code>request_id</code>。</li>
+    <li>Agent/Provider 抛出未结构化异常时，通信层统一转换为 <code>failed</code> 终态，写回 Team Bus 与 Agent 子会话，避免只留下网关通用错误。</li>
+    <li>取消后迟到的旧请求帧由 Web 按 <code>request_id</code> 丢弃；重试回合仍走既有发送链路并使用全新的请求身份。</li>
+  </ul>
+  <p>验证：直接 mention 异常终态、幂等重放、取消/重试旧帧隔离、Web/ Desktop typecheck 与相关回归通过。本阶段没有新增后端模块或通信协议。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

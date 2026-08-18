@@ -865,5 +865,15 @@ cd web && npm run build
   </ul>
   <p>验证：TeamAgentTurnBubble 终态状态与重试展示回归通过。</p>
 </div>
+<div>
+  <h2>79. Team @Agent 并发与取消竞态第三阶段（2026-08-18）</h2>
+  <ul>
+    <li><b>旧帧隔离：</b>取消直接 mention 时记录该回合的 <code>request_id</code>；即使旧回合的迟到 <code>team_internal</code> 帧在重试后到达，也不会污染新回合气泡。</li>
+    <li><b>重试边界：</b>重试沿用现有 <code>useChat.send()</code>，生成新的请求身份；旧请求身份不会因发送新消息而解除抑制。</li>
+    <li><b>失败一致：</b>后端将 Agent/Provider 未结构化异常转成可恢复的 <code>failed</code> 终态，Web 继续使用既有失败提示和重试入口。</li>
+    <li><b>范围：</b>只扩展既有 <code>useChat</code> 请求帧过滤与 Team 通信错误收口，不新增 Web 模块、接口或持久化字段。</li>
+  </ul>
+  <p>验证：Web hook/Team 气泡测试 29 passed，Web/Desktop TypeScript typecheck 通过；直接 mention 后端定向回归通过。</p>
+</div>
 </body>
 </html>

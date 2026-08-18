@@ -3717,6 +3717,55 @@ async def test_user_agent_mention_request_id_is_idempotent_and_new_id_retries():
 
 
 @pytest.mark.asyncio
+async def test_user_agent_mention_converts_agent_exception_to_failed_terminal_state():
+    tm, tasks = _team()
+    envelope = Envelope.of(
+        "@coder 你现在用什么模型？",
+        session_id="user_mention_exception_s1",
+        request_id="user_mention_exception_req",
+        mode="team",
+        user_id="local",
+        params={
+            "user_mentions": [{"kind": "team_member", "member_id": "coder"}],
+        },
+    )
+    team = tm._get_or_create("user_mention_exception_s1", owner_account_id="local")
+    calls = 0
+
+    async def broken_run(_envelope):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("provider exploded")
+        yield  # pragma: no cover - keep this function an async generator
+
+    team.teammates["coder"].run = broken_run
+
+    first = [chunk async for chunk in tm.interact(envelope)]
+    duplicate = [chunk async for chunk in tm.interact(envelope)]
+
+    assert [chunk.kind for chunk in first] == ["status", "team_internal", "team_internal", "error"]
+    assert first[2].body["communication_status"] == "failed"
+    assert "稍后重试" in first[2].body["text"]
+    assert first[-1].body["message"] == first[2].body["text"]
+    assert [chunk.kind for chunk in duplicate] == ["status", "team_internal", "team_internal", "error"]
+    assert calls == 1
+
+    messages = team.bus.list_messages("user_mention_exception_s1")
+    assert len([item for item in messages if item["message_type"] == "decision_request"]) == 1
+    assert len([item for item in messages if item["message_type"] == "answer"]) == 1
+    child_messages = tm.session_store.load(
+        f"user_mention_exception_s1::turn::{envelope.request_id}::coder",
+        owner_account_id="local",
+    )
+    child_answer = next(
+        message for message in reversed(child_messages)
+        if message.role == "assistant" and message.content
+    )
+    assert child_answer.communication_status == "failed"
+    assert tasks.list("user_mention_exception_s1") == []
+
+
+@pytest.mark.asyncio
 async def test_user_agent_mention_rejects_unselected_or_unknown_target_without_fallback():
     tm, tasks = _team()
     envelope = Envelope.of(

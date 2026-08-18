@@ -687,6 +687,15 @@
     </ul>
     <p>验证：Desktop mention、Team 看板/消息回归和 typecheck 通过。</p>
   </section>
+  <section>
+    <h2>Team @Agent 并发与取消竞态第三阶段（2026-08-18）</h2>
+    <ul>
+      <li><b>请求门控：</b>Desktop 继续复用既有 reducer turn gate，按 <code>request_id</code> 丢弃取消回合的迟到帧；新回合由既有 <code>dispatchWs()</code> 生成新的请求身份。</li>
+      <li><b>跨端一致：</b>后端 Agent/Provider 异常统一落成 <code>failed</code> 通信终态，Desktop 与 Web 共用已有状态字段和重试语义。</li>
+      <li><b>范围：</b>本阶段 Desktop 不新增模块或协议，保留现有 request-scoped turn gate，并补齐跨端通信契约文档。</li>
+    </ul>
+    <p>验证：Desktop TypeScript typecheck 通过；Web/后端直接 mention 并发、失败和取消竞态回归通过。</p>
+  </section>
 </div>
 </body>
 </html>
