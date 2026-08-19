@@ -5266,7 +5266,7 @@ def test_runtime_blocking_marks_only_dependency_chain_and_clears_assignee():
     assert blocked.status == "blocked"
     assert blocked.assignee == ""
     assert blocked.metadata["previous_assignee"] == "kk"
-    assert plan.status == "blocked"
+    assert plan.status == "active"
     feasibility = blocked.metadata["runtime_blocking"]["feasibility"]
     assert feasibility["blocking_nodes"] == ["build"]
     assert feasibility["blocked_dependency_nodes"] == ["verify"]
@@ -5338,6 +5338,47 @@ def test_blocked_workflow_result_does_not_claim_completion():
 
     assert result.startswith("团队工作流已阻塞")
     assert "团队工作流完成" not in result
+    assert "主责：待分配" in result
+
+
+def test_partial_blocked_workflow_result_reports_progress_and_runnable_branch():
+    tm, _ = _team()
+    plan = TeamPlan(team_session_id="partial-blocked-result", goal="完成开发和说明")
+    plan.nodes = {
+        "build": TeamPlanNode(
+            node_id="build",
+            title="实现",
+            assignee="kk",
+            status="completed",
+            result_summary="实现已完成。",
+        ),
+        "verify": TeamPlanNode(
+            node_id="verify",
+            title="验证",
+            assignee="",
+            status="blocked",
+            result_summary="用户拒绝补员，当前节点没有可执行主责。",
+            metadata={"runtime_blocking": {"status": "blocked"}},
+        ),
+        "summary": TeamPlanNode(
+            node_id="summary",
+            title="汇总",
+            assignee="leader",
+            metadata={"blocked_by_nodes": ["verify"]},
+        ),
+        "docs": TeamPlanNode(node_id="docs", title="整理说明", assignee="hh"),
+    }
+    plan.edges = [
+        TeamPlanEdge(parent_id="verify", child_id="summary"),
+    ]
+
+    result = tm._format_workflow_result(plan)
+
+    assert result.startswith("团队工作流部分完成，仍有阻塞")
+    assert "已完成：1 个节点" in result
+    assert "当前阻塞：1 个节点" in result
+    assert "受影响依赖节点：1 个节点" in result
+    assert "仍可继续：整理说明" in result
     assert "主责：待分配" in result
 
 
@@ -5652,7 +5693,7 @@ def test_abandon_recovery_keeps_dependent_node_blocked_but_preserves_independent
     )
 
     assert result["node"]["metadata"]["runtime_blocking"]["reason"] == "node_abandoned"
-    assert plan.status == "blocked"
+    assert plan.status == "active"
     assert plan.nodes["summary"].metadata["blocked_by_nodes"] == ["verify"]
     assert "blocked_by_nodes" not in plan.nodes["docs"].metadata
 

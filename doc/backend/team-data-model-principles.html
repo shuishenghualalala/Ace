@@ -765,6 +765,15 @@ flowchart LR
     <li><b>边界：</b>ask 生命周期不会创建 TaskManager 任务、TeamPlan 节点、DAG revision 或 TeamArtifact；<code>assign</code> 的正式工作流链路保持不变。</li>
   </ul>
 
+  <h2>23E. Runtime 补员局部阻塞状态收口（2026-08-19）</h2>
+  <p>Runtime 补员的能力来源和缺口判断保持既有统一入口；本次只定义阻塞后的数据投影，不新增第二套能力模型。</p>
+  <ul>
+    <li><b>节点事实：</b>补员拒绝或不可用仍由当前 <code>TeamPlanNode.status=blocked</code> 与 <code>metadata.runtime_blocking</code> 表达，原负责人清空并保留 <code>previous_assignee</code>，供既有恢复入口使用。</li>
+    <li><b>计划状态：</b>计划状态反映“是否还有合法执行路径”：存在独立 runnable 节点时为 <code>active</code>；阻塞节点及其依赖链之外没有 runnable 节点时才为 <code>blocked</code>；全部节点完成时为 <code>completed</code>。</li>
+    <li><b>结果摘要：</b>混合状态按完成、当前阻塞、受影响依赖和仍可继续四类事实输出；不把局部节点阻塞夸大为整个工作流立即终止。</li>
+    <li><b>边界：</b>不新增状态枚举、能力表、补员请求表或 TeamSpec 字段；看板继续展示节点级 blocked 和现有恢复操作，TeamPlan 只承担聚合状态。</li>
+  </ul>
+
   <h2>24. 后续 TODO 边界</h2>
   <p class="warn">以下是 2026-07-12 确认后的后续开发清单。当前阶段不引入 TeamManifest；Dynamic Kanban 五表边界成立，后续动态工作流继续复用现有存储，不另起一套 Workflow 表。</p>
   <table><thead><tr><th>优先级</th><th>方向</th><th>目标与边界</th></tr></thead><tbody>

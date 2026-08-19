@@ -1619,11 +1619,19 @@ class InProcessTeamManager(TeamManager):
         if all(node.status == "completed" for node in plan.nodes.values()):
             plan.status = "completed"
             return
-        if any(
+        has_blocked_nodes = any(
             str((node.metadata or {}).get("runtime_blocking", {}).get("status") or "") == "blocked"
             for node in plan.nodes.values()
-        ):
-            plan.status = "blocked"
+        ) or any(node.status == "blocked" for node in plan.nodes.values())
+        if has_blocked_nodes:
+            # A rejected staffing request blocks the current node and its
+            # dependency chain, but must not freeze unrelated runnable work.
+            # Keep the durable workflow status active while there is still a
+            # legal execution path; it becomes blocked only when no runnable
+            # branch remains. The node-level runtime_blocking metadata remains
+            # the source of truth for the local failure and recovery actions.
+            feasibility = InProcessTeamManager._workflow_feasibility(plan)
+            plan.status = "active" if feasibility["runnable_nodes"] else "blocked"
             return
         plan.status = "active"
 
@@ -5454,13 +5462,36 @@ class InProcessTeamManager(TeamManager):
     def _format_workflow_result(self, plan: TeamPlan | None) -> str:
         if plan is None:
             return "团队工作流未能创建可执行计划。"
-        if plan.status == "blocked":
-            blocked_nodes = [
-                node for node in plan.nodes.values()
-                if node.status == "blocked"
-                or str((node.metadata or {}).get("runtime_blocking", {}).get("status") or "") == "blocked"
+        blocked_nodes = [
+            node for node in plan.nodes.values()
+            if node.status == "blocked"
+            or str((node.metadata or {}).get("runtime_blocking", {}).get("status") or "") == "blocked"
+        ]
+        if blocked_nodes:
+            feasibility = self._workflow_feasibility(plan)
+            completed_nodes = [node for node in plan.nodes.values() if node.status == "completed"]
+            dependent_blocked = [
+                plan.nodes[node_id]
+                for node_id in feasibility["blocked_dependency_nodes"]
+                if node_id in plan.nodes and plan.nodes[node_id] not in blocked_nodes
             ]
-            lines = [f"团队工作流已阻塞：{plan.goal}"]
+            runnable_nodes = [
+                plan.nodes[node_id]
+                for node_id in feasibility["runnable_nodes"]
+                if node_id in plan.nodes
+            ]
+            partial = bool(completed_nodes or runnable_nodes)
+            heading = "团队工作流部分完成，仍有阻塞" if partial else "团队工作流已阻塞"
+            lines = [f"{heading}：{plan.goal}"]
+            if completed_nodes:
+                lines.append(f"- 已完成：{len(completed_nodes)} 个节点")
+            lines.append(f"- 当前阻塞：{len(blocked_nodes)} 个节点")
+            if dependent_blocked:
+                lines.append(f"- 受影响依赖节点：{len(dependent_blocked)} 个节点")
+            if runnable_nodes:
+                titles = "、".join(node.title for node in runnable_nodes[:3])
+                suffix = "等" if len(runnable_nodes) > 3 else ""
+                lines.append(f"- 仍可继续：{titles}{suffix}")
             for node in blocked_nodes:
                 owner = node.assignee or "待分配"
                 reason = node.result_summary or node.last_error or "当前节点没有可执行成员"

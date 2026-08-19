@@ -455,4 +455,13 @@ graph TD
   <li><b>验证结果：</b><code>tests/test_team_tasks.py tests/test_state_memory.py</code> 为 225 passed、1 skipped；mention/Team internal 定向回归 10 passed；Web 25 passed、Desktop 72 passed；Web/Desktop TypeScript typecheck 通过。</li>
 </ul>
 
+<h2>152. 2026-08-19 Runtime 补员局部阻塞状态收口</h2>
+<ul>
+  <li><b>范围：</b>不改变能力缺口计算、补员画像、用户拒绝语义、TeamSpec 或 DAG；只收口节点阻塞后的 TeamPlan 状态和最终摘要。</li>
+  <li><b>状态：</b>当前节点因补员拒绝/不可用进入 <code>blocked</code>，其依赖链继续保留阻塞；只要仍存在合法可运行的独立分支，TeamPlan 保持 <code>active</code>，所有可运行分支结束后才进入 <code>blocked</code>。</li>
+  <li><b>摘要：</b>混合结果不再直接宣称整个工作流阻塞，而是明确展示已完成节点、当前阻塞节点、受影响依赖节点和仍可继续的分支；没有任何可运行路径时仍展示全局阻塞。</li>
+  <li><b>恢复：</b>继续复用既有节点级重试、重分配和放弃恢复入口；本阶段没有增加新的恢复接口、状态枚举、数据库表或模块。</li>
+  <li><b>验证：</b>补员/恢复定向回归 14 passed，覆盖局部阻塞、全局阻塞、拒绝补员、已有成员改派、恢复和独立分支保留。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
