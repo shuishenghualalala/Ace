@@ -10,8 +10,8 @@
     "npm": ">=10"
   },
   "scripts": {
-    "build": "node esbuild.config.mjs",
-    "build:dev": "node esbuild.config.mjs --dev",
+    "build": "node scripts/build-nearby.mjs --release && node esbuild.config.mjs",
+    "build:dev": "node scripts/build-nearby.mjs && node esbuild.config.mjs --dev",
     "start": "npm run build && electron .",
     "dev": "npm run build:dev && electron . --dev",
     "typecheck": "tsc --noEmit",

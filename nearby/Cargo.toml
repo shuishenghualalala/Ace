@@ -1,0 +1,20 @@
+[package]
+name = "crew-nearby"
+version = "0.1.0"
+edition = "2021"
+description = "Crew Nearby BLE dual-device proof of concept"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+ble-peripheral-rust = "0.2.0"
+btleplug = "0.12.0"
+directories = "6.0"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.42", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1.11", features = ["serde", "v4"] }

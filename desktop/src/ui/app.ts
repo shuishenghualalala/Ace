@@ -39,6 +39,7 @@ import { openWorkItemDrawer } from './features/work/item-space';
 import type { WorkItem } from './backend-client';
 import { setNotificationClickHandler } from './features/work/notifications';
 import { initSystemTrayStatus } from './features/system-tray';
+import { mountNearbyPage, type NearbyPage } from './features/nearby-page';
 import { refreshKanbanBoard, renderKanbanBoard } from './features/kanban-board';
 import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview } from './features/system-page';
 import { initUsagePage } from './features/usage-panel';
@@ -151,6 +152,8 @@ import {
   type WorkLocation,
 } from './features/sidebar-nav';
 
+let nearbyPageController: NearbyPage | null = null;
+
 function setTab(tab: TabKey): boolean {
   // 后端服务未就绪时阻断页面切换，遮罩已由 backend-status-guard 展示。
   // init 阶段旁路：允许构建 UI 骨架（遮罩覆盖下用户看不到）。
@@ -187,6 +190,7 @@ function setTab(tab: TabKey): boolean {
 function activateTab(tab: TabKey): boolean {
   if (!setTab(tab)) return false;
   if (tab === 'agents') activateAgentsPage();
+  else if (tab === 'nearby') nearbyPageController?.activate();
   else if (tab === 'skills') activateSkillsPage();
   else if (tab === 'security') activateSecurityPage();
   else if (tab === 'wiki') void refreshWikiData();
@@ -701,6 +705,8 @@ function mountApplicationShell(
   adapter: RendererAdapter,
 ): MountedApplicationShell {
   const legacyOutlet = rendererRoot.legacyOutlet;
+  const nearbyRoot = legacyOutlet.querySelector<HTMLElement>('#nearby-page-root');
+  nearbyPageController = nearbyRoot ? mountNearbyPage(nearbyRoot, adapter.bridge) : null;
   const contextSource =
     legacyOutlet.querySelector<HTMLElement>('#legacy-context-content') ??
     document.createElement('div');
@@ -862,6 +868,10 @@ function mountApplicationShell(
     },
     onProductModeChange: syncProductMode,
   });
+  const disposeNearbyOpen = adapter.bridge?.onNearbyOpen?.(() => {
+    shell.setProductMode('assistant');
+    activateTab('nearby');
+  }) ?? (() => undefined);
 
   const assistantContext = document.createElement('div');
   const workContext = document.createElement('aside');
@@ -945,6 +955,9 @@ function mountApplicationShell(
       rendererRoot.element.insertBefore(legacyOutlet, rendererRoot.overlayHost);
       disposeExternalAgentsFeature();
       disposeSecurityModuleFeature();
+      disposeNearbyOpen();
+      nearbyPageController?.dispose();
+      nearbyPageController = null;
       setNotificationClickHandler(null);
       shell.dispose();
       shell.element.remove();

@@ -33,6 +33,7 @@ export function trayIconOpticalScale(status: TrayStatus): number {
 export interface TrayServiceOptions {
   assetsDir: string;
   onActivate: () => void;
+  onNearby: () => void;
   onUninstall: () => void;
   onQuit: () => void;
 }
@@ -53,6 +54,7 @@ export class TrayService {
     this.tray.setToolTip(STATUS_LABELS[this.status]);
     this.tray.setContextMenu(Menu.buildFromTemplate([
       { label: '打开 Crew', click: () => this.options.onActivate() },
+      { label: '同伴', click: () => this.options.onNearby() },
       { label: '卸载', click: () => this.options.onUninstall() },
       { type: 'separator' },
       { label: '退出', click: () => this.options.onQuit() },

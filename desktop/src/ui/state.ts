@@ -47,6 +47,7 @@ import { resetSession as resetReassembly } from './stream-reassembly';
 
 export type TabKey =
   | 'chat'
+  | 'nearby'
   | 'agents'
   | 'skills'
   | 'wiki'

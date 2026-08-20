@@ -29,6 +29,10 @@ files:
 # （main 移除 Playwright-managed Chromium 的意图已天然满足：此处只打包
 #   security-runtime-bin，不再打包任何独立 Chromium。）
 extraResources:
+  - from: nearby-bin
+    to: crew-nearby
+    filter:
+      - crew-nearby*
   - from: security-runtime-bin
     to: .
     filter:

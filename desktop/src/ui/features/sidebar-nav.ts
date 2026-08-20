@@ -40,7 +40,11 @@ const ASSISTANT_NAVIGATION: ReadonlyArray<ShellNavigationDefinition> = [
   { id: 'agents', label: '外援', icon: 'icon-external-agent' },
   { id: 'skills', label: '技能', icon: 'process-skill' },
   { id: 'sites', label: '灵感', icon: 'icon-inspiration' },
-  ...SHARED_NAVIGATION,
+  { id: 'wiki', label: 'Wiki', icon: 'icon-wiki' },
+  { id: 'nearby', label: '同伴', icon: 'icon-team' },
+  { id: 'cron', label: '任务', icon: 'process-clock' },
+  { id: 'security', label: '安全', icon: 'icon-security' },
+  { id: 'system', label: '系统', icon: 'icon-folder' },
 ];
 
 const WORK_NAVIGATION: ReadonlyArray<ShellNavigationDefinition> = [

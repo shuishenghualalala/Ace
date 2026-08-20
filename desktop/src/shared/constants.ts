@@ -8,6 +8,9 @@
 /** 单文件上传 / 选择对话框的最大字节数（20 MB）。 */
 export const MAX_DIALOG_FILE_BYTES = 20 * 1024 * 1024;
 
+/** Nearby BLE 单文件上限；BLE 分片传输不适合无界文件。 */
+export const MAX_NEARBY_FILE_BYTES = 4 * 1024 * 1024;
+
 /** gateway:fetch 白名单协议 + hostname。 */
 export const GATEWAY_FETCH_ALLOWED_HOSTNAMES: ReadonlySet<string> = new Set([
   '127.0.0.1',

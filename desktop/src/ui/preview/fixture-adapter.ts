@@ -86,7 +86,14 @@ function createFixtureBridge(fixture: VisualFixture): Window['Crew'] {
     getAutoLaunchEnabled: async () => ({ enabled: false }),
     getCloseBehavior: async () => ({ closeBehavior: 'tray' as const }),
     traySetStatus: async () => ({ ok: true as const }),
+    nearbySelectFile: async () => null,
+    nearbySaveFile: async () => ({ ok: false, canceled: true }),
     onTrayActivated: () => () => undefined,
+    nearbyStart: async () => ({ ok: true as const }),
+    nearbyStop: async () => ({ ok: true as const }),
+    nearbyCommand: async () => ({ ok: true as const }),
+    onNearbyEvent: () => () => undefined,
+    onNearbyOpen: () => () => undefined,
     getFeedbackList: async () => ({
       success: true,
       list: [{

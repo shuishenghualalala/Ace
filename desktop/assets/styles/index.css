@@ -52,6 +52,7 @@
 @import './browser-inspector.css' layer(features);
 @import './expert-hub.css' layer(features);
 @import './agent-hub.css' layer(features);
+@import './nearby.css' layer(features);
 @import './capability-hub.css' layer(features);
 @import './wiki-workspace.css' layer(features);
 @import './security-center.css' layer(features);

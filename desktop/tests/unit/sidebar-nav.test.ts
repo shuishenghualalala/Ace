@@ -20,6 +20,11 @@ describe('resolveShellNavigation', () => {
     expect(ids).not.toContain('audit');
   });
 
+  it('places 同伴 directly below Wiki', () => {
+    const ids = resolveShellNavigation('assistant').map((item) => item.id);
+    expect(ids.indexOf('nearby')).toBe(ids.indexOf('wiki') + 1);
+  });
+
   it('places the Crew brand above the centered horizontal navigation rail', () => {
     localStorage.clear();
     const shell = createApplicationShell({

@@ -79,10 +79,54 @@ const api = {
   getCloseBehavior: () => ipcRenderer.invoke('app:get-close-behavior'),
   setCloseBehavior: (behavior: 'tray' | 'quit' | 'ask') => ipcRenderer.invoke('app:set-close-behavior', behavior),
   traySetStatus: (status: TrayStatus) => ipcRenderer.invoke('tray:set-status', status) as Promise<{ ok: true }>,
+  nearbySelectFile: () => ipcRenderer.invoke('nearby:select-file') as Promise<{
+    file_id: string;
+    name: string;
+    mime_type: string;
+    size: number;
+    sha256: string;
+    data_base64: string;
+  } | null>,
+  nearbySaveFile: (file: {
+    name: string;
+    mime_type: string;
+    size: number;
+    sha256: string;
+    data_base64: string;
+  }) =>
+    ipcRenderer.invoke('nearby:save-file', file) as Promise<{ ok: boolean; canceled: boolean; path?: string }>,
   onTrayActivated: (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on('tray:activated', listener);
     return () => ipcRenderer.removeListener('tray:activated', listener);
+  },
+  nearbyStart: () => ipcRenderer.invoke('nearby:start') as Promise<{ ok: true }>,
+  nearbyStop: () => ipcRenderer.invoke('nearby:stop') as Promise<{ ok: true }>,
+  nearbyCommand: (command: {
+    type: 'start_discovery' | 'stop_discovery' | 'set_discoverable' | 'create_room' | 'send_room_message' | 'send_room_file' | 'leave_room' | 'shutdown';
+    enabled?: boolean;
+    room_id?: string;
+    room_name?: string;
+    peer_ids?: string[];
+    text?: string;
+    mentions?: string[];
+    reply_to?: { message_id: string; sender: string; text: string };
+    file_id?: string;
+    name?: string;
+    mime_type?: string;
+    size?: number;
+    sha256?: string;
+    data_base64?: string;
+  }) => ipcRenderer.invoke('nearby:command', command) as Promise<{ ok: true }>,
+  onNearbyEvent: (cb: (event: { type: string; [key: string]: unknown }) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, event: { type: string; [key: string]: unknown }) => cb(event);
+    ipcRenderer.on('nearby:event', listener);
+    return () => ipcRenderer.removeListener('nearby:event', listener);
+  },
+  onNearbyOpen: (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on('nearby:open', listener);
+    return () => ipcRenderer.removeListener('nearby:open', listener);
   },
   getSystemLocale: () => ipcRenderer.invoke('app:get-system-locale') as Promise<string>,
   rendererInitialStateReady: (): Promise<{ ok: true }> =>

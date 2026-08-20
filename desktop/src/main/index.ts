@@ -14,7 +14,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as net from 'net';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import WebSocket from 'ws';
 import { BrowserHost, BrowserHostError } from './browser-host';
@@ -102,6 +102,7 @@ import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
   IPC_ARG_VALIDATION_FAILED,
   MAX_DIALOG_FILE_BYTES,
+  MAX_NEARBY_FILE_BYTES,
 } from '../shared/constants';
 import { listOpenWithApplications, openFileWithApplication } from './open-with-service';
 import { handleUninstall, setUninstallDeps } from './uninstall';
@@ -135,6 +136,12 @@ import {
 import { evaluateVersionUpdate } from './version-compare';
 import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
+import {
+  NearbyService,
+  type NearbyCommand,
+  type NearbyEvent,
+  type NearbyReplyReference,
+} from './nearby-service';
 
 // 必须早于 app.whenReady()/BrowserWindow 创建；该开关随同一安装包跨 Windows、macOS、Linux 生效。
 configurePptxWasmRuntime(app.commandLine);
@@ -178,6 +185,7 @@ const gatewaySocketGenerations = new Map<number, number>();
 const browserSockets = new Map<number, WebSocket>();
 const browserSocketGenerations = new Map<number, number>();
 let browserHost: BrowserHost | null = null;
+let nearbyService: NearbyService | null = null;
 let browserHostSocket: WebSocket | null = null;
 let browserHostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let browserHostConnectionGeneration = 0;
@@ -920,6 +928,10 @@ function createTray(): void {
       showMainWindow();
       mainWindow?.webContents.send('tray:activated');
     },
+    onNearby: () => {
+      showMainWindow();
+      mainWindow?.webContents.send('nearby:open');
+    },
     onUninstall: () => { void handleUninstall(); },
     onQuit: () => {
       isQuitting = true;
@@ -927,6 +939,163 @@ function createTray(): void {
     },
   });
   trayService.create();
+}
+
+function ensureNearbyService(): NearbyService {
+  if (nearbyService) return nearbyService;
+  nearbyService = new NearbyService({
+    repoRoot: repoRoot(),
+    resourcesPath: process.resourcesPath,
+    isPackaged: app.isPackaged,
+    crewHome: activeGatewayCrewHome(),
+    onEvent: (event: NearbyEvent) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('nearby:event', event);
+    },
+  });
+  return nearbyService;
+}
+
+function parseNearbyCommand(raw: unknown): NearbyCommand {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby command must be an object`);
+  }
+  const value = raw as Record<string, unknown>;
+  const type = value.type;
+  if (type === 'start_discovery' || type === 'stop_discovery' || type === 'shutdown') return { type };
+  if (type === 'set_discoverable') {
+    if (typeof value.enabled !== 'boolean') {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby discoverability expected boolean`);
+    }
+    return { type, enabled: value.enabled };
+  }
+  if (type === 'create_room') {
+    if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);
+    }
+    if (typeof value.room_name !== 'string' || value.room_name.trim().length === 0 || value.room_name.length > 120) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_name`);
+    }
+    if (!Array.isArray(value.peer_ids) || value.peer_ids.length === 0 || value.peer_ids.length > 32) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer_ids`);
+    }
+    const peerIds = value.peer_ids.filter((peerId): peerId is string => typeof peerId === 'string');
+    if (peerIds.length !== value.peer_ids.length || peerIds.some((peerId) => !/^[A-Za-z0-9_.:-]{1,128}$/.test(peerId))) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer id`);
+    }
+    return { type, room_id: value.room_id, room_name: value.room_name.trim(), peer_ids: peerIds };
+  }
+  if (type === 'send_room_message') {
+    if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);
+    }
+    if (typeof value.text !== 'string' || value.text.trim().length === 0 || value.text.length > 8_000) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby message`);
+    }
+    const mentions = parseNearbyMentions(value.mentions);
+    const replyTo = parseNearbyReply(value.reply_to);
+    return {
+      type,
+      room_id: value.room_id,
+      text: value.text,
+      ...(mentions !== undefined ? { mentions } : {}),
+      ...(replyTo !== undefined ? { reply_to: replyTo } : {}),
+    };
+  }
+  if (type === 'send_room_file') {
+    if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);
+    }
+    if (typeof value.file_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.file_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file_id`);
+    }
+    if (
+      typeof value.name !== 'string'
+      || value.name.trim().length === 0
+      || value.name.length > 255
+      || value.name.includes('/')
+      || value.name.includes('\\')
+    ) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file name`);
+    }
+    if (typeof value.mime_type !== 'string' || value.mime_type.length === 0 || value.mime_type.length > 200) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby MIME type`);
+    }
+    if (
+      typeof value.size !== 'number'
+      || !Number.isSafeInteger(value.size)
+      || value.size < 0
+      || value.size > MAX_NEARBY_FILE_BYTES
+    ) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby file is too large or invalid`);
+    }
+    if (typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(value.sha256)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file SHA-256`);
+    }
+    if (
+      typeof value.data_base64 !== 'string'
+      || value.data_base64.length > MAX_NEARBY_FILE_BYTES * 2
+      || !/^[A-Za-z0-9+/]*={0,2}$/.test(value.data_base64)
+    ) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file data`);
+    }
+    const mentions = parseNearbyMentions(value.mentions);
+    const replyTo = parseNearbyReply(value.reply_to);
+    return {
+      type,
+      room_id: value.room_id,
+      file_id: value.file_id,
+      name: value.name.trim(),
+      mime_type: value.mime_type,
+      size: value.size,
+      sha256: value.sha256.toLowerCase(),
+      data_base64: value.data_base64,
+      ...(mentions !== undefined ? { mentions } : {}),
+      ...(replyTo !== undefined ? { reply_to: replyTo } : {}),
+    };
+  }
+  if (type === 'leave_room') {
+    if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);
+    }
+    return { type, room_id: value.room_id };
+  }
+  throw new Error(`${IPC_ARG_VALIDATION_FAILED}: unsupported nearby command`);
+}
+
+function parseNearbyMentions(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > 32) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby mentions`);
+  }
+  const mentions = raw.filter((value): value is string => typeof value === 'string');
+  if (mentions.length !== raw.length || mentions.some((value) => !/^[A-Za-z0-9_.:-]{1,128}$/.test(value))) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby mention peer id`);
+  }
+  return [...new Set(mentions)];
+}
+
+function parseNearbyReply(raw: unknown): NearbyReplyReference | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby reply`);
+  }
+  const value = raw as Record<string, unknown>;
+  if (
+    typeof value.message_id !== 'string'
+    || value.message_id.length === 0
+    || value.message_id.length > 128
+    || typeof value.sender !== 'string'
+    || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.sender)
+    || typeof value.text !== 'string'
+    || value.text.length > 500
+  ) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby reply`);
+  }
+  return {
+    message_id: value.message_id,
+    sender: value.sender,
+    text: value.text,
+  };
 }
 
 function setTrayStatus(status: TrayStatus): void {
@@ -2821,6 +2990,95 @@ function registerIpc() {
     setTrayStatus(status);
     return { ok: true };
   });
+  trustedHandle('nearby:select-file', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: '选择要发送的文件',
+      properties: ['openFile'],
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const filePath = result.filePaths[0];
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) throw new Error('选择的 Nearby 文件不是普通文件');
+    if (stat.size > MAX_NEARBY_FILE_BYTES) {
+      throw new Error(`Nearby 文件不能超过 ${MAX_NEARBY_FILE_BYTES / 1024 / 1024} MiB`);
+    }
+    const buffer = await fs.promises.readFile(filePath);
+    return {
+      file_id: randomUUID(),
+      name: path.basename(filePath),
+      mime_type: mimeFromExt(path.extname(filePath).slice(1).toLowerCase()),
+      size: buffer.byteLength,
+      sha256: createHash('sha256').update(buffer).digest('hex'),
+      data_base64: buffer.toString('base64'),
+    };
+  });
+  trustedHandle('nearby:save-file', async (_e, raw: unknown) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby save file must be an object`);
+    }
+    const value = raw as Record<string, unknown>;
+    const name = value.name;
+    const mimeType = value.mime_type;
+    const size = value.size;
+    const sha256 = value.sha256;
+    const data = value.data_base64;
+    if (
+      typeof name !== 'string'
+      || name.trim().length === 0
+      || name.length > 255
+      || name.includes('/')
+      || name.includes('\\')
+      || typeof mimeType !== 'string'
+      || mimeType.length === 0
+      || mimeType.length > 200
+      || typeof size !== 'number'
+      || !Number.isSafeInteger(size)
+      || size < 0
+      || size > MAX_NEARBY_FILE_BYTES
+      || typeof sha256 !== 'string'
+      || !/^[a-f0-9]{64}$/i.test(sha256)
+      || typeof data !== 'string'
+      || data.length % 4 !== 0
+      || data.length > MAX_NEARBY_FILE_BYTES * 2
+      || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)
+    ) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby saved file`);
+    }
+    const buffer = Buffer.from(data, 'base64');
+    if (buffer.byteLength !== size) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby saved file size does not match`);
+    }
+    if (buffer.byteLength > MAX_NEARBY_FILE_BYTES) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby saved file is too large`);
+    }
+    if (createHash('sha256').update(buffer).digest('hex') !== sha256.toLowerCase()) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby saved file SHA-256 does not match`);
+    }
+    const saveOptions: Electron.SaveDialogOptions = {
+      title: '保存同伴文件',
+      defaultPath: path.join(app.getPath('downloads'), name),
+    };
+    if (mimeType !== 'application/octet-stream') {
+      saveOptions.filters = [{ name: mimeType, extensions: [path.extname(name).slice(1) || '*'] }];
+    }
+    const result = await dialog.showSaveDialog(mainWindow!, saveOptions);
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    await fs.promises.writeFile(result.filePath, buffer);
+    return { ok: true, canceled: false, path: result.filePath };
+  });
+  trustedHandle('nearby:start', async () => {
+    await ensureNearbyService().start();
+    return { ok: true };
+  });
+  trustedHandle('nearby:stop', async () => {
+    await nearbyService?.stop();
+    return { ok: true };
+  });
+  trustedHandle('nearby:command', async (_e, raw: unknown) => {
+    const command = parseNearbyCommand(raw);
+    await ensureNearbyService().send(command);
+    return { ok: true };
+  });
   trustedHandle('app:get-system-locale', () => {
     return app.getLocale();
   });
@@ -3821,6 +4079,7 @@ app.on('before-quit', () => {
     managedGateway.kill();
     managedGateway = null;
   }
+  void nearbyService?.stop();
 });
 
 const gotLock = app.requestSingleInstanceLock();

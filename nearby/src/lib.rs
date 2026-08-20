@@ -1,0 +1,17 @@
+//! Crew Nearby BLE transport proof of concept.
+
+pub mod identity;
+pub mod ipc;
+pub mod protocol;
+pub mod runtime;
+
+pub use identity::{
+    default_agent_name, default_display_name, load_nearby_settings, load_or_create_peer_id,
+    resolve_state_dir, save_nearby_settings, NearbySettings,
+};
+pub use protocol::{
+    should_initiate, FileChunk, Frame, FrameCodec, FrameError, Message, PeerInfo, Reassembler,
+    ReplyReference, UuidSet, INCOMING_MESSAGE_UUID, OUTGOING_MESSAGE_UUID, PEER_INFO_UUID,
+    PROTOCOL_VERSION, SERVICE_UUID,
+};
+pub use runtime::{BleAdapter, NearbyConfig, PeerSession};
