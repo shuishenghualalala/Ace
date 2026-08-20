@@ -8,12 +8,13 @@ import SkillsHub from "./components/SkillsHub";
 import WikiHub from "./components/WikiHub";
 import TaskBoard from "./components/TaskBoard";
 import WorkspaceModal from "./components/WorkspaceModal";
+import { teamMemberMentionId } from "./components/Composer";
 import { useSessions } from "./hooks/useSessions";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
 import { api, ApiError } from "./api";
 import { externalAgentsAvailable } from "./lib/featureFlags";
-import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, Workspace } from "./types";
+import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, UserAgentMention, Workspace } from "./types";
 
 const genId = () => `web_${Math.random().toString(36).slice(2, 8)}`;
 const CREW_BUILTIN_AGENT_ID = "crew::builtin";
@@ -131,6 +132,7 @@ function teamMembersForBoard(team?: ExternalTeam) {
     : leaderMember?.agent_name || team.leader_agent_id || "Leader";
   const leader = {
     agentId: team.leader_agent_id,
+    mentionId: "leader",
     name: leaderName,
     displayBadge: leaderMember?.display_badge || (team.leader_agent_id === CREW_BUILTIN_AGENT_ID ? "M" : "?"),
     role: summarizeLeaderRole(leaderMember?.role || ""),
@@ -141,6 +143,7 @@ function teamMembersForBoard(team?: ExternalTeam) {
     .filter((member) => member.agent_id !== team.leader_agent_id)
     .map((member, index) => ({
       agentId: member.agent_id,
+      mentionId: member.agent_name?.trim() || member.agent_id,
       name: member.agent_name || member.agent_id,
       displayBadge: member.display_badge || "?",
       role: `负责${summarizeBusinessDuty(member.role || "", "协作执行", { max: 80 })}`,
@@ -199,6 +202,8 @@ export default function App() {
   }, [refreshSessions, refreshTasks]);
 
   const chat = useChat(currentSessionId, onAfterFinal);
+  const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
+  const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
 
   // 主对话里点击 [[Wiki 页面名]]：跳到 Wiki 视图并打开对应页面（WikiHub 挂载后消费）。
   const openWikiLinkFromChat = useCallback((title: string) => {
@@ -420,7 +425,7 @@ export default function App() {
     if (wsId === currentWorkspaceId) newSession("default");
   };
 
-  const handleSend = (text: string, sendAttachments: Attachment[], subScenario?: string) => {
+  const handleSend = (text: string, sendAttachments: Attachment[], subScenario?: string, userMentions?: UserAgentMention[]) => {
     const cmd = text.trim().toLowerCase();
     // 与 CLI 一致：/plan 进入 Plan 模式（不发给模型）
     if (!editDraft && cmd === "/plan") {
@@ -438,8 +443,28 @@ export default function App() {
       subScenario,
       externalTeamId: effectiveMode === "team" ? sessionExternalTeams[currentSessionId] : undefined,
       teamExecutionTier,
+      userMentions: effectiveMode === "team" ? userMentions : undefined,
     });
     setEditDraft(null);
+  };
+
+  const retryMention = (message: UiMessage) => {
+    const query = String(message.communicationRequestText || "").trim();
+    const rawMemberId = String(message.agentId || (message.isLeader ? "leader" : "")).trim();
+    const rosterMember = currentTeamMembers?.find((member) => (
+      member.agentId === rawMemberId
+      || member.mentionId === rawMemberId
+      || member.name === rawMemberId
+    ));
+    const memberId = rosterMember
+      ? teamMemberMentionId(rosterMember)
+      : rawMemberId;
+    if (!query || !memberId) return;
+    handleSend(query, [], undefined, [{ kind: "team_member", member_id: memberId }]);
+  };
+
+  const cancelMention = (message: UiMessage) => {
+    chat.cancelMention(currentSessionId, message.requestId);
   };
 
   const editMessage = (message: UiMessage) => {
@@ -474,8 +499,6 @@ export default function App() {
   }, [currentSession, externalAgentsEnabled]);
   const title = currentSession?.title || "新会话";
   const currentAgentLabel = currentSession?.agent_label;
-  const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
-  const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
   const isCurrentTeamSession = mode === "team" && Boolean(sessionExternalTeams[currentSessionId]);
   const toolsMenuChrome = boardOpen;
   const toolCollapseLevel = !boardOpen ? 0 : boardWidth >= 520 ? 3 : boardWidth >= 420 ? 2 : 1;
@@ -725,6 +748,8 @@ export default function App() {
               onDismissFollowup={() => chat.dismissFollowup(currentSessionId)}
               editDraft={editDraft}
               onEditMessage={editMessage}
+              onRetryMention={retryMention}
+              onCancelMention={cancelMention}
               onCancelEdit={() => setEditDraft(null)}
               onRemoveFromQueue={(i) => chat.removeFromQueue(currentSessionId, i)}
               onEditQueueItem={(i, q) => chat.editQueueItem(currentSessionId, i, q)}
@@ -761,6 +786,16 @@ export default function App() {
           onClose={() => setBoardOpen(false)}
           onCancel={async (taskId) => {
             await api.cancelTask(taskId);
+            await refreshTasks();
+          }}
+          onRecover={async (nodeId, action, replacementAssignee) => {
+            const result = await api.recoverTeamNode(
+              currentSessionId,
+              nodeId,
+              action,
+              replacementAssignee,
+            );
+            if (!result.ok) throw new Error(result.error || "节点恢复失败");
             await refreshTasks();
           }}
         />

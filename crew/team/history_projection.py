@@ -35,12 +35,34 @@ def is_duplicate_team_parent_final(
     return False
 
 
+def direct_mention_request_ids(
+    internal_items: list[dict[str, Any]],
+) -> set[str]:
+    """Return direct user-mention request ids represented by Team history.
+
+    A direct user mention still runs inside the generic dispatcher and may
+    therefore leave a parent ``agent_turn`` runtime record.  That record is
+    operational state, not a second conversational reply.  The member
+    ``team_internal`` item is the canonical visible answer; the request id is
+    the stable correlation key between the two projections.
+    """
+
+    return {
+        str(item.get("request_id") or "").strip()
+        for item in internal_items
+        if item.get("role") == "team_internal"
+        and item.get("communication_kind") == "user_mention_answer"
+        and str(item.get("request_id") or "").strip()
+    }
+
+
 def team_visible_history_items(
     crew,
     session_id: str,
     owner_account_id: str = "",
     config: dict[str, Any] | None = None,
     has_child_team_sessions: bool = False,
+    suppressed_request_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     try:
         tasks = crew.tasks.list_tasks(limit=1000, owner_account_id=owner_account_id)
@@ -64,6 +86,7 @@ def team_visible_history_items(
         owner_account_id=owner_account_id,
     )
     leader_identity = _team_internal_agent_identity("leader", profiles)
+    suppressed = {str(item or "").strip() for item in (suppressed_request_ids or set())}
     for task in sorted(parent_turns, key=lambda item: float(item.get("created_at") or 0)):
         prompt = str(task.get("detail") or task.get("title") or "").strip()
         if prompt:
@@ -75,6 +98,11 @@ def team_visible_history_items(
             })
         result = str(task.get("result") or "").strip()
         error = str(task.get("error") or "").strip()
+        request_id = str(task.get("request_id") or "").strip()
+        # Direct @Agent 的父 agent_turn 只用于运行时保活/收口；成员子回合
+        # 已经提供 canonical 回复，不能再把父结果投影成 Crew/Leader 消息。
+        if request_id and request_id in suppressed:
+            continue
         if result or error:
             role = "assistant" if has_child_team_tasks or has_child_team_sessions else "team_internal"
             items.append({
@@ -189,6 +217,74 @@ def _team_internal_agent_identity(
     }
 
 
+def _normalize_communication_identity(
+    item: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Use the persisted communication sender to restore a member identity.
+
+    Older Team communication events could persist ``agent_id=crew::builtin``
+    while the direct mention sender remained in ``mention_from``.  The answer
+    text is still correct in that case, but history replay would render the
+    member with Crew's avatar.  Communication sender metadata is the canonical
+    identity for answer events; the display name is only a fallback for older
+    events that lack ``mention_from``.
+    """
+
+    kind = str(item.get("communication_kind") or "").strip()
+    if kind not in {"user_mention_answer", "ask_answer"}:
+        return item
+    raw_member_id = str(item.get("mention_from") or "").strip()
+    if not raw_member_id:
+        raw_member_id = str(item.get("agent_name") or item.get("agent_id") or "").strip()
+    if not raw_member_id:
+        return item
+    normalized = dict(item)
+    normalized.update(_team_internal_agent_identity(raw_member_id, profiles))
+    return normalized
+
+
+def _child_session_history_items(
+    child_sessions: list[tuple[str, list[Message]]],
+    profiles: dict[str, dict[str, Any]],
+    *,
+    communication_kind: str | None = None,
+) -> list[dict[str, Any]]:
+    """Project child Agent turns, optionally selecting one communication kind."""
+
+    items: list[dict[str, Any]] = []
+    for child_session_id, child_messages in child_sessions:
+        child_id = str(child_session_id)
+        if "::turn::" not in child_id:
+            continue
+        identity = _team_internal_agent_identity(child_id.rsplit("::", 1)[-1], profiles)
+        for message in child_messages:
+            if message.is_meta or message.role != "assistant":
+                continue
+            if communication_kind and message.communication_kind != communication_kind:
+                continue
+            content = str(message.content or "").strip()
+            if is_team_chat_noise(content):
+                continue
+            tool_calls = _message_tool_calls(message)
+            items.append({
+                "role": "team_internal",
+                "content": content[:1200],
+                **identity,
+                "source_session_id": child_id,
+                "timestamp": message.timestamp,
+                **({"thinking": message.thinking} if message.thinking else {}),
+                **({"tool_calls": tool_calls} if tool_calls else {}),
+                **({"turn_file_changes": message.turn_file_changes} if message.turn_file_changes else {}),
+                **({"communication_kind": message.communication_kind} if message.communication_kind else {}),
+                **({"communication_status": message.communication_status} if message.communication_status else {}),
+                **({"request_id": message.request_id} if message.request_id else {}),
+                **({"reply_to": message.reply_to} if message.reply_to else {}),
+                **({"communication_request_text": message.communication_request_text} if message.communication_request_text else {}),
+            })
+    return items
+
+
 def team_internal_history_items(
     crew,
     session_id: str,
@@ -209,36 +305,49 @@ def team_internal_history_items(
         except Exception:  # noqa: BLE001
             pass
     if items:
-        return sorted(items, key=lambda value: float(value.get("timestamp") or 0))
+        normalized_items = [
+            _normalize_communication_identity(item, profiles)
+            for item in items
+        ]
+        # Team workflow events remain the primary source.  Direct mention
+        # answers are persisted in their member child sessions as the
+        # canonical transcript, however, and must survive alongside older
+        # workflow events in the same parent session.
+        event_request_ids = {
+            str(item.get("request_id") or "").strip()
+            for item in normalized_items
+            if item.get("communication_kind") == "user_mention_answer"
+            and str(item.get("request_id") or "").strip()
+        }
+        direct_child_items = _child_session_history_items(
+            child_sessions,
+            profiles,
+            communication_kind="user_mention_answer",
+        )
+        normalized_items.extend(
+            item for item in direct_child_items
+            if str(item.get("request_id") or "").strip() not in event_request_ids
+        )
+        return sorted(normalized_items, key=lambda value: float(value.get("timestamp") or 0))
     has_team_workflow_fn = getattr(getattr(crew, "team", None), "has_team_workflow_for_session", None)
     if callable(has_team_workflow_fn):
         try:
             if has_team_workflow_fn(session_id, owner_account_id=owner_account_id):
-                return []
+                # A Team workflow may coexist with a direct user mention.
+                # The workflow has no event for the child answer in some
+                # older/runtime-isolated sessions, so retain that canonical
+                # communication transcript instead of dropping it wholesale.
+                return sorted(
+                    _child_session_history_items(
+                        child_sessions,
+                        profiles,
+                        communication_kind="user_mention_answer",
+                    ),
+                    key=lambda value: float(value.get("timestamp") or 0),
+                )
         except Exception:  # noqa: BLE001
             pass
-    for child_session_id, child_messages in child_sessions:
-        child_id = str(child_session_id)
-        if "::turn::" not in child_id:
-            continue
-        identity = _team_internal_agent_identity(child_id.rsplit("::", 1)[-1], profiles)
-        for message in child_messages:
-            if message.is_meta or message.role != "assistant":
-                continue
-            content = str(message.content or "").strip()
-            if is_team_chat_noise(content):
-                continue
-            tool_calls = _message_tool_calls(message)
-            items.append({
-                "role": "team_internal",
-                "content": content[:1200],
-                **identity,
-                "source_session_id": child_id,
-                "timestamp": message.timestamp,
-                **({"thinking": message.thinking} if message.thinking else {}),
-                **({"tool_calls": tool_calls} if tool_calls else {}),
-                **({"turn_file_changes": message.turn_file_changes} if message.turn_file_changes else {}),
-            })
+    items.extend(_child_session_history_items(child_sessions, profiles))
     try:
         tasks = crew.tasks.list_tasks(limit=1000, owner_account_id=owner_account_id)
     except Exception:  # noqa: BLE001
@@ -266,9 +375,15 @@ def team_internal_history_items(
             "timestamp": float(task.get("updated_at") or task.get("finished_at") or task.get("created_at") or 0),
         })
     deduped: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     for item in sorted(items, key=lambda value: float(value.get("timestamp") or 0)):
-        key = (str(item.get("agent_name") or ""), str(item.get("content") or "")[:160])
+        key = (
+            str(item.get("agent_name") or ""),
+            str(item.get("content") or "")[:160],
+            str(item.get("communication_kind") or ""),
+            str(item.get("communication_status") or ""),
+            str(item.get("request_id") or item.get("reply_to") or ""),
+        )
         if key in seen:
             continue
         seen.add(key)

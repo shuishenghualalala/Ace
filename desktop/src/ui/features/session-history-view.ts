@@ -102,9 +102,17 @@ function sessionIcon(session: SessionRow): IconId | null {
   if (session.channelPlatform) return 'icon-task';
   const provider = String(session.agentLabel?.provider || '').toLocaleLowerCase();
   if (provider === 'sites') return 'icon-inspiration';
-  if (provider === 'team') return 'icon-team';
+  if (provider === 'team') return null;
   if (provider && !['crew', 'builtin', 'client'].includes(provider)) return null;
   return 'icon-task';
+}
+
+function createTeamLogo(): HTMLElement {
+  const logo = document.createElement('span');
+  logo.className = 'session__team-logo';
+  logo.setAttribute('aria-hidden', 'true');
+  logo.append(document.createElement('i'), document.createElement('i'));
+  return logo;
 }
 
 function hasVisibleIdentity(session: SessionRow): boolean {
@@ -312,14 +320,19 @@ export function createSessionHistoryView(
     const identityIcon = open.querySelector<HTMLElement>('[data-session-identity-icon]')!;
     const desiredIcon = sessionIcon(session);
     const provider = String(session.agentLabel?.provider || '').trim();
+    const isTeamSession = provider.toLocaleLowerCase() === 'team';
     const providerInitial = externalAgentInitial(provider, session.agentLabel?.display_badge);
-    const desiredIdentity = desiredIcon
+    const desiredIdentity = isTeamSession
+      ? 'team-logo'
+      : desiredIcon
       ? `icon:${desiredIcon}`
       : `provider:${provider.toLocaleLowerCase()}:${providerInitial}`;
     if (identityIcon.dataset.icon !== desiredIdentity) {
       identityIcon.dataset.icon = desiredIdentity;
       identityIcon.className = 'mw-session-history__identity-icon';
-      if (desiredIcon) {
+      if (isTeamSession) {
+        identityIcon.replaceChildren(createTeamLogo());
+      } else if (desiredIcon) {
         identityIcon.replaceChildren(createIcon(desiredIcon, { size: 16 }));
       } else {
         identityIcon.classList.add(

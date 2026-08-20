@@ -590,6 +590,7 @@ describe('composer 外援入口', () => {
 
     const card = document.querySelector<HTMLElement>('[data-team-id="team-product"]');
     expect(card?.getAttribute('role')).toBe('button');
+    expect(card?.querySelectorAll('.session__team-logo i')).toHaveLength(2);
     card?.click();
 
     const modal = document.querySelector<HTMLElement>('[data-team-detail-backdrop]');
@@ -600,6 +601,7 @@ describe('composer 外援入口', () => {
     expect(modal?.textContent).toContain('Claude Reviewer');
     expect(modal?.textContent).toContain('负责复核交付质量');
     expect(modal?.querySelector('.team-modal-member.is-leader')).not.toBeNull();
+    expect(modal?.querySelectorAll('.session__team-logo i')).toHaveLength(2);
 
     modal?.querySelector<HTMLElement>('[data-team-detail-close]')?.click();
     expect(document.querySelector('[data-team-detail-backdrop]')).toBeNull();

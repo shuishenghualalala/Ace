@@ -73,6 +73,24 @@ describe("nodeTitle", () => {
   });
 });
 
+describe("blocked Team node ownership", () => {
+  it("shows an unassigned blocked node as waiting for assignment", () => {
+    const nodes = makeNodes([task({
+      kind: "team",
+      assignee: "",
+      status: "blocked",
+      progress: {
+        source: "team_kanban",
+        plan_node_id: "verify",
+        runtime_blocking: { status: "blocked" },
+        previous_assignee: "kk",
+      },
+    })]);
+
+    expect(nodes[0].owner).toBe("待分配");
+  });
+});
+
 describe("currentTurnNodesForBoard", () => {
   it("uses the latest Team turn for DAG metadata instead of mixing old fallback turns", () => {
     const nodes = makeNodes([
@@ -195,6 +213,12 @@ describe("nodeLogs", () => {
 });
 
 describe("collectSessionFileItems", () => {
+  it("does not expose the internal agent_turn task JSON as a user artifact", () => {
+    expect(collectSessionFileItems([
+      task({ output_ref: "/owner/.crew/tasks/task_internal.json" }),
+    ], [])).toEqual([]);
+  });
+
   it("collects node artifact paths and message artifacts into one session file list", () => {
     const tasks: Task[] = [
       task({

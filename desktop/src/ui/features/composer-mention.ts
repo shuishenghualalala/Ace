@@ -21,10 +21,10 @@
  *  - **发送守卫**：popup 打开时，index.ts 的 Enter→发送 必须让位（见 isMentionOpen）。
  */
 
-import { backendApi, type BrowserPageState, type CompleteItem, type Skill, type WorkPreference } from '../backend-client';
+import { backendApi, type BrowserPageState, type CompleteItem, type ExternalTeam, type ExternalTeamMember, type Skill, type WorkPreference } from '../backend-client';
 import { createIcon, type IconId } from '../components/icon';
 import { setRuntimeStyle, clearRuntimeStyle } from '../components/runtime-style';
-import { $, state } from '../state';
+import { state } from '../state';
 import { productModeStore } from '../stores/product-mode-store';
 import { sessionStore } from '../stores/session-store';
 import { workStore } from '../stores/work-store';
@@ -56,17 +56,34 @@ interface MentionItem {
   text: string;
   display: string;
   meta: string;
-  /** 图标类型：slash / folder / image / file / tab（浏览器标签页）。 */
-  sig: 'slash' | 'folder' | 'image' | 'file' | 'tab';
-  /** 弹窗候选左侧图标。 */
-  icon: IconId;
+  /** 图标类型：slash / folder / image / file / agent / tab。 */
+  sig: 'slash' | 'folder' | 'image' | 'file' | 'agent' | 'tab';
+  /** 弹窗候选左侧图标；未指定时由 sig 推导。 */
+  icon?: IconId;
+  section?: '团队成员' | '文件';
+  userMention?: UserAgentMention;
   workResult?: MentionResult;
 }
 
 interface CompactMention {
   visible: string;
   canonical: string;
-  kind: 'folder' | 'image' | 'file';
+  kind: 'folder' | 'image' | 'file' | 'agent';
+  userMention?: UserAgentMention;
+}
+
+export interface UserAgentMention {
+  kind: 'team_member';
+  member_id: string;
+}
+
+/** External Agent id 用于配置；Team mention 必须使用 Team Runtime 成员 id。 */
+export function teamMemberMentionId(
+  member: Pick<ExternalTeamMember, 'agent_id' | 'agent_name'>,
+  leaderAgentId?: string,
+): string {
+  if (member.agent_id === leaderAgentId) return 'leader';
+  return member.agent_name?.trim() || member.agent_id;
 }
 
 interface ChipToken {
@@ -91,12 +108,14 @@ let active: ActiveTrigger | null = null;
 let selectedIndex = 0;
 let workTags: MentionTag[] = [];
 let workTagsHost: HTMLElement | null = null;
-/** 选中后的短显示 token，发送时还原成后端识别的结构化 token。 */
+/** 选中后的用户可读显示 token，发送时还原成后端识别的 canonical token。 */
 let compactMentions: CompactMention[] = [];
 const disabledWorkPreferenceIds = new Set<string>();
 
 let skillsCache: Skill[] | null = null;
 let skillsCachePromise: Promise<Skill[]> | null = null;
+let externalTeamsCache: ExternalTeam[] | null = null;
+let externalTeamsCachePromise: Promise<ExternalTeam[]> | null = null;
 /** slug → 拼音索引，skills 载入时预计算。 */
 const pinyinCache = new Map<string, SkillPinyin>();
 
@@ -402,7 +421,7 @@ async function fetchFileItems(token: string): Promise<MentionItem[]> {
   const [rows, workResults, browserResults] = await Promise.all([rowsPromise, workPromise, browserPromise]);
   return (rows as CompleteItem[]).map<MentionItem>((r) => {
     const sig = r.type === 'folder' ? 'folder' as const : r.type === 'image' ? 'image' as const : 'file' as const;
-    return { text: r.text, display: r.display, meta: r.meta, sig, icon: FILE_ROW_ICON[sig] };
+    return { text: r.text, display: r.display, meta: r.meta, sig, icon: FILE_ROW_ICON[sig], section: '文件' as const };
   }).concat(workResults.concat(browserResults).map((result) => {
     const kind = MENTION_KINDS[result.entity_type];
     return {
@@ -411,12 +430,80 @@ async function fetchFileItems(token: string): Promise<MentionItem[]> {
       meta: kind.meta,
       sig: kind.sig,
       icon: kind.icon,
+      section: '文件' as const,
       workResult: result,
     };
   }));
 }
 
+async function ensureExternalTeams(): Promise<ExternalTeam[]> {
+  if (externalTeamsCache) return externalTeamsCache;
+  if (!externalTeamsCachePromise) {
+    externalTeamsCachePromise = backendApi.externalTeams()
+      .then((teams) => {
+        externalTeamsCache = teams;
+        return teams;
+      })
+      .catch(() => {
+        externalTeamsCachePromise = null;
+        return [] as ExternalTeam[];
+      });
+  }
+  return externalTeamsCachePromise;
+}
+
+async function fetchAgentItems(token: string): Promise<MentionItem[]> {
+  const teamId = state.activeSessionId
+    ? state.activeExternalTeamIdBySession[state.activeSessionId]
+    : '';
+  if (!teamId) return [];
+  const team = (await ensureExternalTeams()).find((candidate) => candidate.id === teamId);
+  if (!team) return [];
+  const members = [...(team.members ?? [])];
+  if (team.leader_agent_id && !members.some((member) => member.agent_id === team.leader_agent_id)) {
+    members.unshift({ agent_id: team.leader_agent_id, agent_name: 'Crew Leader', role: 'Leader' });
+  }
+  const query = token.trim().toLowerCase();
+  return members
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    .filter((member) => {
+      if (!query) return true;
+      return [member.agent_id, member.agent_name, member.role_label, member.role]
+        .filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(query));
+    })
+    .slice(0, 30)
+    .map((member) => ({
+      text: `@${teamMemberMentionId(member, team.leader_agent_id)}`,
+      display: member.agent_name || member.agent_id,
+      meta: member.agent_id === team.leader_agent_id
+        ? `Leader${member.role ? ` · ${member.role}` : ''}`
+        : (member.role || member.role_label || '团队成员'),
+      sig: 'agent' as const,
+      section: '团队成员' as const,
+      userMention: {
+        kind: 'team_member' as const,
+        member_id: teamMemberMentionId(member, team.leader_agent_id),
+      },
+    }));
+}
+
 export function compactMentionText(item: MentionItem): string {
+  if (item.sig === 'agent' && item.userMention) {
+    const existing = compactMentions.find(
+      (mention) => mention.kind === 'agent' && mention.userMention?.member_id === item.userMention?.member_id,
+    );
+    if (existing) return existing.visible;
+    const display = item.display.trim().replace(/\s+/g, ' ');
+    const visible = display ? `@${display}` : item.text;
+    compactMentions.push({
+      visible,
+      canonical: `@${item.userMention.member_id}`,
+      kind: 'agent',
+      userMention: item.userMention,
+    });
+    return visible;
+  }
   if (!['folder', 'image', 'file'].includes(item.sig)) return item.text;
   const prefix = `@${item.sig}:`;
   if (!item.text.startsWith(prefix)) return item.text;
@@ -444,15 +531,33 @@ function syncCompactMentions(value: string): void {
   compactMentions = compactMentions.filter((mention) => hasMentionToken(value, mention.visible));
 }
 
-/** 将输入框里的短显示 token 还原为 Gateway 识别的 @file/@folder/@image token。 */
+/** 将文件引用的短显示 token 还原为 Gateway 识别的 @file/@folder/@image token。
+ *
+ * Team Agent mention 的稳定 member_id 通过结构化 user_mentions 发送；
+ * 输入框和用户消息始终保留可读的 @成员名，不把内部身份编码写回正文。
+ */
 export function serializeMentionInput(value: string): string {
   syncCompactMentions(value);
   let result = value;
   for (const mention of [...compactMentions].sort((a, b) => b.visible.length - a.visible.length)) {
+    if (mention.kind === 'agent') continue;
     const escaped = mention.visible.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     result = result.replace(new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, 'g'), (_match, lead: string) => `${lead}${mention.canonical}`);
   }
   return result;
+}
+
+/** 提取输入框中仍然存在的结构化 Team 成员 mention；文件 mention 不会进入此协议。 */
+export function getUserAgentMentions(value: string): UserAgentMention[] {
+  syncCompactMentions(value);
+  const seen = new Set<string>();
+  return compactMentions
+    .filter((mention) => mention.kind === 'agent' && mention.userMention && !seen.has(mention.userMention.member_id))
+    .map((mention) => {
+      const userMention = mention.userMention!;
+      seen.add(userMention.member_id);
+      return userMention;
+    });
 }
 
 /** Return preferences that can be known to apply before a Work turn is sent. */
@@ -636,7 +741,7 @@ export function buildChippedNodes(text: string, slashTokens?: Set<string>): Node
     const rawToken = text.slice(t.start, t.end);
     const compact = t.kind === 'at' ? compactMentions.find((mention) => mention.visible === rawToken) : undefined;
     const { mark, body } = compact
-      ? { mark: `@${compact.kind}:`, body: rawToken.slice(1) }
+      ? { mark: compact.kind === 'agent' ? '@' : `@${compact.kind}:`, body: rawToken.slice(1) }
       : renderChip(rawToken, t.kind);
     const chip = document.createElement('span');
     chip.className = `mention-chip mention-chip--${t.kind}`;
@@ -668,9 +773,17 @@ export function buildChippedNodes(text: string, slashTokens?: Set<string>): Node
 // ---------------- 浮层渲染 ----------------
 
 function createSig(item: MentionItem): HTMLElement {
+  const iconBySig: Record<MentionItem['sig'], IconId> = {
+    slash: 'skill-badge',
+    folder: 'icon-folder',
+    image: 'icon-image',
+    file: 'icon-file',
+    agent: 'icon-team',
+    tab: 'process-web',
+  };
   const element = document.createElement('span');
   element.className = `mention-pop__sig mention-pop__sig--${item.sig}`;
-  element.append(createIcon(item.icon, { size: 20 }));
+  element.append(createIcon(item.icon ?? iconBySig[item.sig], { size: 20 }));
   return element;
 }
 
@@ -684,7 +797,15 @@ function renderPopup(): void {
   popup.id = 'mention-popup';
   popup.className = 'mention-pop';
   popup.setAttribute('role', 'listbox');
+  let previousSection: MentionItem['section'] | undefined;
   items.forEach((item, index) => {
+    if (item.section && item.section !== previousSection) {
+      const section = document.createElement('div');
+      section.className = 'mention-pop__section';
+      section.textContent = item.section;
+      popup?.append(section);
+      previousSection = item.section;
+    }
     const button = document.createElement('button');
     const body = document.createElement('span');
     const display = document.createElement('span');
@@ -763,7 +884,11 @@ function schedule(trigger: Trigger, token: string): void {
 async function run(trigger: Trigger, token: string, mySeq: number): Promise<void> {
   let result: MentionItem[];
   if (trigger === '@') {
-    result = await fetchFileItems(token).catch(() => []);
+    const [agentItems, fileItems] = await Promise.all([
+      fetchAgentItems(token.slice(1)).catch(() => []),
+      fetchFileItems(token).catch(() => []),
+    ]);
+    result = [...agentItems, ...fileItems];
   } else {
     await ensureSkills();
     result = filterSkills(token.slice(1));

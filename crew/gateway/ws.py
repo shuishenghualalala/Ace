@@ -56,6 +56,30 @@ def normalize_team_execution_profile(raw: object) -> dict[str, object] | None:
     }
 
 
+def normalize_user_mentions(raw: object) -> list[dict[str, str]] | None:
+    """Validate structured Team member mentions before building an Envelope.
+
+    The display text is intentionally not parsed here. The Composer already
+    selected a roster item and sends its stable ``member_id`` separately;
+    Gateway only validates the transport shape and lets TeamManager validate
+    the member against the current Team roster.
+    """
+
+    if not isinstance(raw, list):
+        return None
+    normalized: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        if str(item.get("kind") or "").strip() != "team_member":
+            return None
+        member_id = str(item.get("member_id") or "").strip()
+        if not member_id:
+            return None
+        normalized.append({"kind": "team_member", "member_id": member_id})
+    return normalized
+
+
 def _apply_browser_skill_policy(crew, skill_key: str, owner: str, session_id: str) -> None:
     """技能激活时校验它声明的浏览器策略形状。
 
@@ -738,6 +762,16 @@ def create_ws_router(
                 )
                 if external_team_id:
                     envelope.params["external_team_id"] = external_team_id
+                raw_user_mentions = data.get("user_mentions")
+                if raw_user_mentions is not None:
+                    user_mentions = normalize_user_mentions(raw_user_mentions)
+                    if user_mentions is None:
+                        await _send_status(
+                            session_id,
+                            "用户 Agent mention 格式无效，请重新从候选列表中选择成员",
+                        )
+                        continue
+                    envelope.params["user_mentions"] = user_mentions
                 intent = str(data.get("intent") or "").strip()
                 if intent:
                     envelope.params["intent"] = intent

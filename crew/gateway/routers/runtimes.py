@@ -175,7 +175,11 @@ def _external_agent_payloads(
 
 
 def _managed_temporary_agent_ids(store: Any, *, owner_account_id: str) -> set[str]:
-    """Return managed Agents that must stay out of the user's normal catalog."""
+    """Return IDs hidden from durable user-facing Agent catalogs.
+
+    This includes active Formation temporary members and Runtime staffing managed
+    Agents; neither is a durable user-created Formation candidate.
+    """
 
     hidden = {
         str(member.get("agent_id") or "")
@@ -196,6 +200,27 @@ def _managed_temporary_agent_ids(store: Any, *, owner_account_id: str) -> set[st
         and str(agent.get("id") or "")
     )
     return hidden
+
+
+def _formation_agent_catalog(store: Any, *, owner_account_id: str) -> list[dict[str, Any]]:
+    """Return only durable user-managed Agents for create-time Formation.
+
+    Runtime staffing Agents are intentionally retained in the External Agent store so
+    their profiles can learn across runs, but they are not part of a new Team's
+    Formation catalog. Formation-confirmed temporary members are also excluded while
+    their owning Team is active. Runtime staffing uses its own catalog and may include
+    managed Agents.
+    """
+
+    hidden_ids = _managed_temporary_agent_ids(store, owner_account_id=owner_account_id)
+    return [
+        agent
+        for agent in store.list_agents(
+            owner_account_id=owner_account_id,
+            include_managed=False,
+        )
+        if str(agent.get("id") or "") not in hidden_ids
+    ]
 
 
 
@@ -803,7 +828,7 @@ def create_runtimes_router(crew) -> APIRouter:
             )
         owner = account_from_request(request).owner_account_id
         store = _external_store()
-        agents = store.list_agents(owner_account_id=owner)
+        agents = _formation_agent_catalog(store, owner_account_id=owner)
 
         if requested_mode == "auto":
             async def stream():
@@ -961,7 +986,7 @@ def create_runtimes_router(crew) -> APIRouter:
     @router.post("/api/external-teams/draft/description")
     async def draft_external_team_description(request: Request, payload: dict) -> StreamingResponse:
         owner = account_from_request(request).owner_account_id
-        agents = _external_store().list_agents(owner_account_id=owner)
+        agents = _formation_agent_catalog(_external_store(), owner_account_id=owner)
         description_payload = {"name": str(payload.get("name") or "").strip()}
         initial = build_team_draft(description_payload, agents)
         cache_key = _draft_cache_key(
@@ -1081,7 +1106,7 @@ def create_runtimes_router(crew) -> APIRouter:
     @router.post("/api/external-teams/draft/formation")
     async def draft_external_team_formation(request: Request, payload: dict) -> StreamingResponse:
         owner = account_from_request(request).owner_account_id
-        agents = _external_store().list_agents(owner_account_id=owner)
+        agents = _formation_agent_catalog(_external_store(), owner_account_id=owner)
         formation_payload = {
             "name": str(payload.get("name") or "").strip(),
             "description": str(payload.get("description") or "").strip(),

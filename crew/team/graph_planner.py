@@ -15,11 +15,17 @@ from crew.core.types import ChatResponse, Message
 from crew.dynamickanban.models import PlanEdge, PlanNode, PlanResult
 from crew.dynamickanban.plan_graph import PlanGraph
 from crew.team import flow_builder
+from crew.team.agent_profile import AgentProfile, evaluate_capability_coverage, is_agent_profile_available
 from crew.team.capabilities import normalize_capabilities, normalize_capability
 from crew.team.models import TeamMemberSpec
 from crew.team.policy_checker import TeamPolicyReport, analyze_team_policy
 from crew.team.result_presenter import workflow_lane_order
-from crew.team.team_spec import TeamSpec, build_team_spec
+from crew.team.team_spec import (
+    TeamSpec,
+    TeamSpecInput,
+    build_team_spec,
+    team_spec_from_planning_decision,
+)
 from crew.team.workflow_plan import (
     PlanningDecision,
     PlanningMode,
@@ -90,18 +96,17 @@ def _merged_execution_profile(spec: TeamSpec, execution_profile: dict[str, Any] 
     allowed_keys = {
         "requested_mode",
         "selected_mode",
-        "intent",
-        "complexity",
-        "deliverable_shape",
-        "needs_build",
-        "needs_verification",
-        "needs_docs",
-        "required_lanes",
         "budget",
         "turn_kind",
         "turn_decision_source",
         "profile_source",
     }
+    unknown = sorted(set(incoming) - allowed_keys)
+    if unknown:
+        raise ValueError(
+            "TeamGraphPlanner.execution_profile 只允许运行控制字段，非法字段："
+            + ", ".join(unknown)
+        )
     for key, value in incoming.items():
         if value is None:
             continue
@@ -113,12 +118,20 @@ def _merged_execution_profile(spec: TeamSpec, execution_profile: dict[str, Any] 
             profile[key] = value
     requested_mode = normalize_planning_mode(incoming.get("requested_mode") or "auto")
     profile["requested_mode"] = requested_mode
-    if requested_mode == "fast" and "needs_verification" not in incoming:
-        profile["needs_verification"] = False
-        lanes = [lane for lane in list(profile.get("required_lanes") or []) if lane != "verify"]
-        profile["required_lanes"] = lanes
     profile.setdefault("budget", {})
     return profile
+
+
+def _runtime_execution_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    runtime_keys = {
+        "requested_mode",
+        "selected_mode",
+        "budget",
+        "turn_kind",
+        "turn_decision_source",
+        "profile_source",
+    }
+    return {key: value for key, value in profile.items() if key in runtime_keys}
 
 
 FastPrimary = TeamMemberSpec | str
@@ -139,12 +152,17 @@ def _member_priority(candidate: FastPrimary, preferred_lanes: tuple[str, ...], i
     return lane_score, index
 
 
-def _select_fast_primary(members: list[TeamMemberSpec], profile: dict[str, Any]) -> FastPrimary | None:
+def _select_fast_primary(
+    members: list[TeamMemberSpec],
+    profile: dict[str, Any],
+    task_profile: dict[str, Any] | None = None,
+) -> FastPrimary | None:
     candidates: list[FastPrimary] = list(members)
     if not candidates:
         return None
-    intent = str(profile.get("intent") or "").strip().lower()
-    shape = str(profile.get("deliverable_shape") or "").strip().lower()
+    task_profile = task_profile if isinstance(task_profile, dict) else {}
+    intent = str(task_profile.get("intent") or profile.get("task_intent") or "").strip().lower()
+    shape = str(task_profile.get("deliverable_shape") or profile.get("deliverable_shape") or "").strip().lower()
     if intent in {"question", "inquiry", "chat"}:
         preferred = ("docs", "plan", "lead", "build", "verify", "design", "release", "other")
     elif shape in {"review", "verification", "qa"}:
@@ -162,9 +180,9 @@ def _select_fast_verifier(
     members: list[TeamMemberSpec],
     *,
     primary_id: str,
-    profile: dict[str, Any],
+    required_lanes: set[str],
 ) -> TeamMemberSpec | None:
-    if not bool(profile.get("needs_verification")):
+    if "verify" not in required_lanes:
         return None
     verifiers = [
         member
@@ -180,10 +198,12 @@ def _build_fast_workflow_nodes(
     profile: dict[str, Any],
     *,
     required_capabilities: list[str] | None = None,
+    required_lanes: set[str] | None = None,
     capability_source: str = "team_spec",
+    task_profile: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[Any]]:
     members = list((getattr(team, "members", {}) or {}).values())
-    primary = _select_fast_primary(members, profile)
+    primary = _select_fast_primary(members, profile, task_profile)
     if primary is None:
         return [], []
     task_title = flow_builder.goal_title(goal)
@@ -225,7 +245,11 @@ def _build_fast_workflow_nodes(
     for parent in execute_parents:
         edges.append([parent, "fast_execute"])
     summary_parent = "fast_execute"
-    verifier = _select_fast_verifier(members, primary_id=primary_id, profile=profile)
+    verifier = _select_fast_verifier(
+        members,
+        primary_id=primary_id,
+        required_lanes=set(required_lanes or []),
+    )
     if verifier is not None:
         verifier_metadata = flow_builder.member_node_metadata(verifier, "verify")
         verifier_metadata.update({
@@ -254,6 +278,49 @@ def _build_fast_workflow_nodes(
 
 def _member_by_id(team: Any) -> dict[str, TeamMemberSpec]:
     return dict((getattr(team, "members", {}) or {}))
+
+
+def _member_capability_sets(team: Any) -> dict[str, list[str]]:
+    """Return the current model-backed capability set for DAG admission.
+
+    External Team members carry their resolved ``AgentProfile`` on the in-memory
+    Team assembled from the Session binding.  Formation capabilities remain the
+    fallback for built-in members and legacy teams without a resolved profile.
+    """
+
+    result: dict[str, list[str]] = {}
+    profiles = getattr(team, "member_profiles", {})
+    leader = getattr(team, "leader_spec", None)
+    members = [leader] if isinstance(leader, TeamMemberSpec) else []
+    members.extend((getattr(team, "members", {}) or {}).values())
+    for member in members:
+        if not member.member_id:
+            continue
+        profile = profiles.get(member.member_id) if isinstance(profiles, dict) else None
+        if isinstance(profile, AgentProfile):
+            result[member.member_id] = [
+                capability
+                for capability, assessment in profile.capabilities.items()
+                if is_agent_profile_available(profile) and assessment.score >= 0.5
+            ]
+            continue
+        capabilities = normalize_capabilities(member.capabilities or [])
+        if not capabilities:
+            capabilities = normalize_capabilities(
+                flow_builder.member_node_metadata(member).get("required_capabilities") or []
+            )
+        result[member.member_id] = capabilities
+    return result
+
+
+def _member_metadata_sets(team: Any) -> dict[str, dict[str, Any]]:
+    """Return member identity metadata used when admission changes assignees."""
+
+    return {
+        member.member_id: flow_builder.member_node_metadata(member)
+        for member in (getattr(team, "members", {}) or {}).values()
+        if member.member_id
+    }
 
 
 def _member_lane_for_assignee(member_map: dict[str, TeamMemberSpec], assignee: str, fallback: str = "other") -> str:
@@ -449,18 +516,14 @@ def _budget_max_nodes(profile: dict[str, Any]) -> int | None:
     return max_nodes if max_nodes > 0 else None
 
 
-def _standard_node_required(raw: dict[str, Any], profile: dict[str, Any]) -> bool:
+def _standard_node_required(raw: dict[str, Any], required_lanes: set[str]) -> bool:
     node_id = _node_id(raw)
     if node_id in {"leader_plan", "leader_summary"}:
         return True
     lane = _node_lane(raw)
     if lane in {"lead", "summary"}:
         return True
-    if lane == "build" and profile.get("needs_build") is True:
-        return True
-    if lane == "verify" and profile.get("needs_verification") is True:
-        return True
-    if lane in {"docs", "release"} and profile.get("needs_docs") is True:
+    if lane in required_lanes or (lane == "release" and "docs" in required_lanes):
         return True
     return False
 
@@ -508,6 +571,7 @@ def _apply_standard_budget(
     raw_nodes: list[dict[str, Any]],
     raw_edges: list[Any],
     profile: dict[str, Any],
+    required_lanes: set[str],
 ) -> tuple[list[dict[str, Any]], list[Any], list[str]]:
     max_nodes = _budget_max_nodes(profile)
     if max_nodes is None or len(raw_nodes) <= max_nodes:
@@ -527,7 +591,7 @@ def _apply_standard_budget(
     candidates = [
         (removable_priority.get(_node_lane(node), 5), -index, _node_id(node))
         for index, node in enumerate(raw_nodes)
-        if _node_id(node) and not _standard_node_required(node, profile)
+        if _node_id(node) and not _standard_node_required(node, required_lanes)
     ]
     removed_ids: list[str] = []
     for _, _, node_id in sorted(candidates):
@@ -555,9 +619,13 @@ def _build_standard_workflow_nodes(
     team: Any,
     goal: str,
     profile: dict[str, Any],
+    team_spec: TeamSpec,
 ) -> tuple[list[dict[str, Any]], list[Any], list[str]]:
-    raw_nodes, raw_edges = flow_builder.build_default_workflow_nodes(team, goal)
-    trimmed_nodes, trimmed_edges, notes = _apply_standard_budget(raw_nodes, raw_edges, profile)
+    raw_nodes, raw_edges = flow_builder.build_default_workflow_nodes(team, goal, team_spec=team_spec)
+    required_lanes = set(team_spec.team_requirements.get("workflow_lanes") or [])
+    trimmed_nodes, trimmed_edges, notes = _apply_standard_budget(
+        raw_nodes, raw_edges, profile, required_lanes
+    )
     return trimmed_nodes, trimmed_edges, notes
 
 
@@ -579,7 +647,12 @@ def _semantic_lane(unit: WorkUnit) -> str:
     return "other"
 
 
-def _member_capabilities(member: TeamMemberSpec) -> set[str]:
+def _member_capabilities(
+    member: TeamMemberSpec,
+    capability_sets: dict[str, list[str]] | None = None,
+) -> set[str]:
+    if capability_sets is not None and member.member_id in capability_sets:
+        return set(capability_sets[member.member_id])
     return set(normalize_capabilities(member.capabilities or []))
 
 
@@ -587,26 +660,35 @@ def _work_unit_member_score(
     unit: WorkUnit,
     member: TeamMemberSpec,
     index: int,
+    capability_sets: dict[str, list[str]] | None = None,
 ) -> tuple[int, int, int]:
     required = set(unit.required_capabilities)
     target_lane = _semantic_lane(unit)
-    capabilities = _member_capabilities(member)
+    capabilities = _member_capabilities(member, capability_sets)
     overlap = len(required & capabilities)
     covers_all = int(bool(required) and required <= capabilities)
     lane_match = int(flow_builder.workflow_lane(member) == target_lane)
     return covers_all, overlap * 2 + lane_match, -index
 
 
-def _rank_work_unit_members(unit: WorkUnit, members: list[TeamMemberSpec]) -> list[tuple[TeamMemberSpec, tuple[int, int, int], int]]:
+def _rank_work_unit_members(
+    unit: WorkUnit,
+    members: list[TeamMemberSpec],
+    capability_sets: dict[str, list[str]] | None = None,
+) -> list[tuple[TeamMemberSpec, tuple[int, int, int], int]]:
     ranked = [
-        (member, _work_unit_member_score(unit, member, index), index)
+        (member, _work_unit_member_score(unit, member, index, capability_sets), index)
         for index, member in enumerate(members)
     ]
     return sorted(ranked, key=lambda item: item[1], reverse=True)
 
 
-def _assign_work_unit(unit: WorkUnit, members: list[TeamMemberSpec]) -> TeamMemberSpec | None:
-    ranked = _rank_work_unit_members(unit, members)
+def _assign_work_unit(
+    unit: WorkUnit,
+    members: list[TeamMemberSpec],
+    capability_sets: dict[str, list[str]] | None = None,
+) -> TeamMemberSpec | None:
+    ranked = _rank_work_unit_members(unit, members, capability_sets)
     return ranked[0][0] if ranked else None
 
 
@@ -634,6 +716,7 @@ def _work_unit_depths(units: list[WorkUnit]) -> dict[str, int]:
 def _assign_work_units_balanced(
     units: list[WorkUnit],
     members: list[TeamMemberSpec],
+    capability_sets: dict[str, list[str]] | None = None,
 ) -> tuple[dict[str, TeamMemberSpec | None], dict[str, dict[str, Any]]]:
     if not members:
         return {unit.id: None for unit in units}, {}
@@ -648,7 +731,7 @@ def _assign_work_units_balanced(
         usage: dict[str, int] = {}
         group_id = f"depth_{depth}:{lane}"
         for unit in group_units:
-            ranked = _rank_work_unit_members(unit, members)
+            ranked = _rank_work_unit_members(unit, members, capability_sets)
             if not ranked:
                 assignments[unit.id] = None
                 continue
@@ -681,6 +764,7 @@ def _semantic_standard_workflow_nodes(
     goal: str,
     decision: PlanningDecision,
     profile: dict[str, Any],
+    required_lanes: set[str],
 ) -> tuple[list[dict[str, Any]], list[Any], list[str], float]:
     members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
     task_title = flow_builder.goal_title(goal)
@@ -715,7 +799,8 @@ def _semantic_standard_workflow_nodes(
             for index, unit in enumerate(units)
         ]
 
-    assignments, assignment_meta = _assign_work_units_balanced(units, members)
+    capability_sets = _member_capability_sets(team)
+    assignments, assignment_meta = _assign_work_units_balanced(units, members, capability_sets)
     unit_ids = {unit.id for unit in units}
     assigned_coverage: list[float] = []
     for unit in units:
@@ -740,7 +825,7 @@ def _semantic_standard_workflow_nodes(
             "assignee": assignee,
             "metadata": metadata,
         })
-        member_caps = _member_capabilities(member) if member is not None else set()
+        member_caps = _member_capabilities(member, capability_sets) if member is not None else set()
         required = set(unit.required_capabilities)
         assigned_coverage.append(len(required & member_caps) / len(required) if required else 1.0)
         valid_parents = [parent_id for parent_id in unit.depends_on if parent_id in unit_ids]
@@ -769,7 +854,7 @@ def _semantic_standard_workflow_nodes(
             required_capabilities=["review", "verification"],
             expected_output="审阅结论、缺陷和是否可交付的判断",
         )
-        reviewer = _assign_work_unit(review_unit, members)
+        reviewer = _assign_work_unit(review_unit, members, capability_sets)
         reviewer_id = reviewer.member_id if reviewer is not None else "leader"
         review_meta = _member_metadata_for_assignee(_member_by_id(team), reviewer_id, "verify")
         review_meta.update({
@@ -796,7 +881,12 @@ def _semantic_standard_workflow_nodes(
         "metadata": flow_builder.node_metadata("summary", label="汇总结论、验收反馈", key="team_lead"),
     })
     edges.extend([[parent_id, "leader_summary"] for parent_id in summary_parents])
-    nodes, edges, budget_notes = _apply_standard_budget(nodes, edges, profile)
+    nodes, edges, budget_notes = _apply_standard_budget(
+        nodes,
+        edges,
+        profile,
+        required_lanes,
+    )
     coverage = min(assigned_coverage) if assigned_coverage else 0.0
     notes = [
         "Standard Team 使用 PlanningDecision 语义工作单元编译通用 DAG。",
@@ -826,12 +916,12 @@ def _planning_team_spec_summary(spec: TeamSpec, profile: dict[str, Any]) -> dict
     requirements = spec.team_requirements if isinstance(spec.team_requirements, dict) else {}
     planning = spec.planning if isinstance(spec.planning, dict) else {}
     return {
-        "intent": str(profile.get("intent") or spec.execution_profile.get("intent") or "mixed"),
-        "complexity": str(profile.get("complexity") or spec.execution_profile.get("complexity") or "focused"),
+        "intent": str(spec.task_profile.get("intent") or "mixed"),
+        "complexity": str(spec.task_profile.get("complexity") or "focused"),
         "required_capabilities": normalize_capabilities(requirements.get("capabilities") or []),
-        "required_lanes": [
+        "workflow_lanes": [
             str(item)
-            for item in (profile.get("required_lanes") or requirements.get("workflow_lanes") or [])
+            for item in (requirements.get("workflow_lanes") or [])
             if str(item).strip()
         ][:8],
         "deliverables": [
@@ -1702,6 +1792,8 @@ def _normalize_nodes_with_graph(
     valid_roles: list[str],
     execution_profile: dict[str, Any] | None = None,
     plan_strategy: str = "rule_dag_with_plan_graph",
+    member_capabilities: dict[str, list[str]] | None = None,
+    member_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[list[str]], list[str]]:
     raw_nodes, normalized_raw_edges, id_notes = _normalize_raw_graph_ids(raw_nodes, raw_edges)
     plan_nodes: list[PlanNode] = []
@@ -1732,6 +1824,12 @@ def _normalize_nodes_with_graph(
     graph_notes = _ensure_leader_summary_terminal(graph)
 
     normalized_nodes: list[dict[str, Any]] = []
+    capability_notes: list[str] = []
+    capability_sets = {
+        str(member_id): normalize_capabilities(capabilities)
+        for member_id, capabilities in (member_capabilities or {}).items()
+        if str(member_id).strip()
+    }
     ordered_nodes = [
         graph.nodes[node.id]
         for node in plan_nodes
@@ -1767,6 +1865,58 @@ def _normalize_nodes_with_graph(
             )
         if not is_control_node and not is_leader_direct and not required_capabilities:
             raise ValueError(f"execution node {node.id} missing required_capabilities")
+        coverage = None
+        assignment_reason = ""
+        previous_assignee = node.assignee or "leader"
+        if required_capabilities and not is_control_node and not is_leader_direct:
+            coverage = evaluate_capability_coverage(
+                required_capabilities,
+                capability_sets=capability_sets,
+                assigned_agent_ids=[previous_assignee],
+            )
+            if coverage.status != "covered":
+                replacement = next(
+                    (
+                        member_id
+                        for member_id, capabilities in capability_sets.items()
+                        if member_id != previous_assignee
+                        and evaluate_capability_coverage(
+                            required_capabilities,
+                            capability_sets={member_id: capabilities},
+                            assigned_agent_ids=[member_id],
+                        ).status == "covered"
+                    ),
+                    "",
+                )
+                if replacement:
+                    node.assignee = replacement
+                    assignment_reason = "已有成员完整覆盖节点能力，规划阶段确定性修正负责人。"
+                    replacement_metadata = dict((member_metadata or {}).get(replacement) or {})
+                    for key in (
+                        "role_label",
+                        "role_key",
+                        "formation_plan_version",
+                        "formation_scope_key",
+                        "responsibility_mission",
+                        "expected_outputs",
+                    ):
+                        if key in replacement_metadata:
+                            metadata[key] = replacement_metadata[key]
+                        else:
+                            metadata.pop(key, None)
+                    coverage = evaluate_capability_coverage(
+                        required_capabilities,
+                        capability_sets=capability_sets,
+                        assigned_agent_ids=[replacement],
+                    )
+                    capability_notes.append(
+                        f"节点 {node.id} 已从 {previous_assignee} 改派给 {replacement}：{assignment_reason}"
+                    )
+                else:
+                    capability_notes.append(
+                        f"节点 {node.id} 生成时未找到能完整覆盖 "
+                        f"{'、'.join(required_capabilities)} 的现有成员；保留计划缺口，运行前不得伪装为已覆盖。"
+                    )
         metadata.update({
             "workflow_lane": lane,
             "required_capabilities": required_capabilities,
@@ -1788,6 +1938,17 @@ def _normalize_nodes_with_graph(
             "execution_events": list(metadata.get("execution_events") or []),
             "execution_contract": _node_contract(goal, node, metadata),
         })
+        if coverage is not None:
+            metadata["capability_coverage"] = coverage.to_dict()
+            metadata["capability_status"] = coverage.status
+            if assignment_reason:
+                metadata.update({
+                    "assignment_source": "existing_member_reassignment",
+                    "previous_assignee": previous_assignee,
+                    "assignment_reason": assignment_reason,
+                })
+            elif coverage.status != "covered":
+                metadata["capability_gap_source"] = "dag_admission"
         normalized_nodes.append({
             "id": node.id,
             "title": node.title,
@@ -1799,9 +1960,10 @@ def _normalize_nodes_with_graph(
     normalized_edges = [[edge.parent_id, edge.child_id] for edge in graph.edges]
     notes = [
         "复用 Dynamic Kanban PlanGraph 完成 Team DAG 校验。",
-        "当前版本尊重用户团队配置，仅输出补员/角色风险建议，不自动换人。",
+        "当前版本尊重用户团队配置；仅在现有成员完整覆盖时做本轮确定性改派，不新增成员。",
         *id_notes,
         *graph_notes,
+        *capability_notes,
     ]
     if plan_strategy == "fast_minimal_path":
         notes.insert(0, "Fast Team 使用 workflow_lane 极简协作 DAG：leader_plan -> fast_execute -> leader_summary，必要时插入 fast_verify。")
@@ -1940,14 +2102,18 @@ class TeamGraphPlanner:
         team: Any,
         goal: str,
         execution_profile: dict[str, Any] | None = None,
+        team_spec: TeamSpecInput = None,
     ) -> TeamGraphPlan:
-        base_spec = build_team_spec(goal)
+        spec_source = team_spec if team_spec is not None else {"goal": goal}
+        if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
+            spec_source = {"goal": goal, **spec_source}
+        base_spec = build_team_spec(spec_source)
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         selected_mode: PlanningMode = "fast" if requested_mode == "fast" else "standard"
         fallback_from = "ai" if requested_mode == "ai" else None
         profile.update({"requested_mode": requested_mode, "selected_mode": selected_mode})
-        spec = replace(base_spec, execution_profile=profile)
+        spec = replace(base_spec, execution_profile=_runtime_execution_profile(profile))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
         policy_report = analyze_team_policy(spec=spec, members=members)
         budget_notes: list[str] = []
@@ -1957,10 +2123,12 @@ class TeamGraphPlanner:
                 goal,
                 profile,
                 required_capabilities=normalize_capabilities(spec.team_requirements.get("capabilities") or []),
+                required_lanes=set(spec.team_requirements.get("workflow_lanes") or []),
+                task_profile=spec.task_profile,
             )
             plan_strategy = "fast_minimal_path"
         else:
-            raw_nodes, raw_edges, budget_notes = _build_standard_workflow_nodes(team, goal, profile)
+            raw_nodes, raw_edges, budget_notes = _build_standard_workflow_nodes(team, goal, profile, spec)
             plan_strategy = "standard_role_dag"
         nodes, edges, notes = _normalize_nodes_with_graph(
             goal=goal,
@@ -1969,6 +2137,8 @@ class TeamGraphPlanner:
             valid_roles=_valid_member_ids(team),
             execution_profile=profile,
             plan_strategy=plan_strategy,
+            member_capabilities=_member_capability_sets(team),
+            member_metadata=_member_metadata_sets(team),
         )
         if plan_strategy == "standard_role_dag" and budget_notes:
             notes = [*budget_notes, *notes]
@@ -1996,15 +2166,19 @@ class TeamGraphPlanner:
         goal: str,
         execution_profile: dict[str, Any] | None = None,
         *,
+        team_spec: TeamSpecInput = None,
         provider: Any | None = None,
         planning_progress: PlanningProgressCallback | None = None,
     ) -> TeamGraphPlan:
-        base_spec = build_team_spec(goal)
+        spec_source = team_spec if team_spec is not None else {"goal": goal}
+        if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
+            spec_source = {"goal": goal, **spec_source}
+        base_spec = build_team_spec(spec_source)
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
         if provider is None or requested_mode == "fast":
-            return self.plan(team, goal, execution_profile=profile)
+            return self.plan(team, goal, execution_profile=execution_profile, team_spec=base_spec)
 
         decision: PlanningDecision | None = None
         decision_error = ""
@@ -2050,7 +2224,12 @@ class TeamGraphPlanner:
         elif requested_mode == "ai":
             selected_mode = "ai"
         else:
-            fallback = self.plan(team, goal, execution_profile={**profile, "requested_mode": "standard"})
+            fallback = self.plan(
+                team,
+                goal,
+                execution_profile={**profile, "requested_mode": "standard"},
+                team_spec=base_spec,
+            )
             await _notify_planning_progress(
                 planning_progress,
                 phase="fallback",
@@ -2095,8 +2274,10 @@ class TeamGraphPlanner:
                 workflow_plan=fallback_plan,
             )
 
+        if decision is not None:
+            base_spec = team_spec_from_planning_decision(base_spec, decision)
         profile.update({"requested_mode": requested_mode, "selected_mode": selected_mode})
-        spec = replace(base_spec, execution_profile=profile)
+        spec = replace(base_spec, execution_profile=_runtime_execution_profile(profile))
         policy_report = analyze_team_policy(spec=spec, members=members)
 
         if selected_mode == "fast":
@@ -2114,7 +2295,9 @@ class TeamGraphPlanner:
                 goal,
                 profile,
                 required_capabilities=fast_required_capabilities,
+                required_lanes=set(spec.team_requirements.get("workflow_lanes") or []),
                 capability_source="work_unit_summary" if decision is not None else "team_spec",
+                task_profile=spec.task_profile,
             )
             nodes, edges, notes = _normalize_nodes_with_graph(
                 goal=goal,
@@ -2123,6 +2306,8 @@ class TeamGraphPlanner:
                 valid_roles=_valid_member_ids(team),
                 execution_profile=profile,
                 plan_strategy="fast_minimal_path",
+                member_capabilities=_member_capability_sets(team),
+                member_metadata=_member_metadata_sets(team),
             )
             confidence = confidence_dimensions(decision, capability_coverage=1.0) if decision else {
                 "requirement": 0.68, "topology": 1.0, "capability": 1.0, "overall": 0.68,
@@ -2155,7 +2340,11 @@ class TeamGraphPlanner:
 
         if selected_mode == "standard" and decision is not None:
             raw_nodes, raw_edges, semantic_notes, coverage = _semantic_standard_workflow_nodes(
-                team, goal, decision, profile
+                team,
+                goal,
+                decision,
+                profile,
+                set(spec.team_requirements.get("workflow_lanes") or []),
             )
             nodes, edges, normalize_notes = _normalize_nodes_with_graph(
                 goal=goal,
@@ -2164,6 +2353,8 @@ class TeamGraphPlanner:
                 valid_roles=_valid_member_ids(team),
                 execution_profile=profile,
                 plan_strategy="standard_semantic_dag",
+                member_capabilities=_member_capability_sets(team),
+                member_metadata=_member_metadata_sets(team),
             )
             confidence = confidence_dimensions(decision, capability_coverage=coverage)
             await _notify_planning_progress(
@@ -2215,12 +2406,19 @@ class TeamGraphPlanner:
                 valid_roles=_valid_member_ids(team),
                 execution_profile=profile,
                 plan_strategy="ai_single_dag",
+                member_capabilities=_member_capability_sets(team),
+                member_metadata=_member_metadata_sets(team),
             )
             _annotate_planner_metrics(nodes, status="success", elapsed_ms=elapsed_ms)
             notes = [f"AI Planner LLM DAG 耗时 {elapsed_ms}ms。", *llm_notes, *notes]
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else None
-            fallback = self.plan(team, goal, execution_profile={**profile, "requested_mode": "standard"})
+            fallback = self.plan(
+                team,
+                goal,
+                execution_profile={**profile, "requested_mode": "standard"},
+                team_spec=spec,
+            )
             _annotate_planner_metrics(
                 fallback.nodes,
                 status="fallback",

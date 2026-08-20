@@ -19,14 +19,14 @@ import {
   resetTextareaHeight,
   shouldComposerSend,
 } from './composer-input';
-import { serializeMentionInput } from './composer-mention';
+import { getUserAgentMentions, serializeMentionInput, type UserAgentMention } from './composer-mention';
 import { registerPrimaryComposerRoot } from './composer-scope';
 import type { PanelAttachments } from './attachments';
 
 const MAX_INPUT_HEIGHT = 180;
 
 export interface ComposerViewOptions {
-  submit(text: string): void | Promise<void>;
+  submit(text: string, userMentions?: UserAgentMention[]): void | Promise<void>;
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -347,7 +347,10 @@ export function createComposerView(
     submitError = '';
     refresh();
     try {
-      await options.submit(serializeMentionInput(input.value));
+      await options.submit(
+        serializeMentionInput(input.value),
+        getUserAgentMentions(input.value),
+      );
       input.value = '';
       resetTextareaHeight(input);
       input.dispatchEvent(new Event('input', { bubbles: true }));

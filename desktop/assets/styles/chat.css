@@ -2060,6 +2060,16 @@ button.chat-message-file:hover {
     caret-color: var(--mw-text-primary);
 }
 
+/*
+ * 选区仍由 textarea 原生承载，但正文由 .chat-input-overlay 绘制。
+ * 选中时显式隐藏 textarea 的字形，避免原生选区文字与覆盖层重影。
+ */
+.chat-input-container textarea.chat-input-overlay-source::selection {
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    background: var(--mw-bg-selected);
+}
+
 .input-container textarea::placeholder {
     color: var(--mw-text-muted);
 }

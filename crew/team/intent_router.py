@@ -39,6 +39,19 @@ class RuleBasedTeamIntentRouter:
     """
 
     def route(self, goal: str) -> TeamIntentDecision:
-        spec = build_team_spec(goal)
-        reason = spec.reasons[0] if spec.reasons else spec.task_kind
-        return TeamIntentDecision(spec.route, reason, spec.to_dict())
+        spec = build_team_spec({"goal": goal})
+        profile = spec.task_profile if isinstance(spec.task_profile, dict) else {}
+        intent = str(profile.get("intent") or "mixed").strip().lower()
+        complexity = str(profile.get("complexity") or "focused").strip().lower()
+        if not str(spec.goal or "").strip():
+            action: TeamIntentAction = "ask_followup"
+        elif intent == "chat" and complexity == "simple":
+            action = "direct_leader"
+        else:
+            action = "team_plan"
+        reason = (
+            spec.planner_notes[0]
+            if spec.planner_notes
+            else "TeamSpec 已规范化显式任务字段，交由 Team 规划阶段理解目标。"
+        )
+        return TeamIntentDecision(action, reason, spec.to_dict())

@@ -123,6 +123,8 @@ export interface ToolCallInfo {
 export interface Chunk {
   kind: ChunkKind;
   body: Record<string, any>;
+  /** Gateway frames carry the originating request identity at the top level. */
+  request_id?: string;
   is_final: boolean;
   sequence: number;
   /** Gateway 内部单调序列号，用于断线重连后回放定位 */
@@ -640,6 +642,11 @@ export interface UiMessage {
   mentionFrom?: string;
   mentionTo?: string[];
   mentionIntent?: string;
+  communicationKind?: string;
+  communicationStatus?: string;
+  requestId?: string;
+  replyTo?: string;
+  communicationRequestText?: string;
   displayMode?: "chat" | "collapsible" | string;
   collapsedTitle?: string;
   processText?: string;
@@ -661,11 +668,19 @@ export interface UiMessage {
 
 export interface TeamMemberView {
   agentId?: string;
+  /** Team Runtime 的成员路由 ID；外部 Agent 成员通常是 agent_name，Leader 固定为 leader。 */
+  mentionId?: string;
   name: string;
   displayBadge?: string;
   role: string;
   isLeader?: boolean;
   tone?: number;
+}
+
+/** 用户在 Team Composer 中通过 @ 选择的成员，发送时随 WebSocket 请求传递。 */
+export interface UserAgentMention {
+  kind: "team_member";
+  member_id: string;
 }
 
 /** 前端本地待发送队列项 */
@@ -680,4 +695,5 @@ export interface PendingMessage {
   externalTeamId?: string;
   wikiKbId?: string;
   teamExecutionTier?: TeamExecutionTier;
+  userMentions?: UserAgentMention[];
 }

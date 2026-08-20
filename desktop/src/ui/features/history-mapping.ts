@@ -236,6 +236,11 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     mentionFrom: item.mention_from,
     mentionTo: item.mention_to,
     mentionIntent: item.mention_intent,
+    communicationKind: item.communication_kind,
+    communicationStatus: item.communication_status,
+    requestId: item.request_id,
+    replyTo: item.reply_to,
+    communicationRequestText: item.communication_request_text,
     displayMode: item.display_mode,
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,
@@ -359,6 +364,10 @@ function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boo
     && existing.content.trim() === incoming.content.trim();
 }
 
+function isUserMentionAnswer(message: ChatMessage): boolean {
+  return message.communicationKind === 'user_mention_answer' && Boolean(message.requestId);
+}
+
 function shouldSuppressApproveDecision(existing: ChatMessage, incoming: ChatMessage): boolean {
   const approved = incoming.eventType === 'team_decision'
     && (incoming.mentionIntent === 'approve' || ['审阅通过，继续后续流程。', '审阅通过，开始后续流程。'].includes(incoming.content.trim()));
@@ -388,6 +397,47 @@ export function mergeTeamInternalMessage(
     ? messages.filter((message) => !isDuplicateAssistantOfTeamResult(message, incoming))
     : messages;
   if (next.some((message) => isDuplicateTeamEvent(message, incoming))) return next;
+  if (isUserMentionAnswer(incoming)) {
+    const communicationIndex = next.findIndex((message) =>
+      isUserMentionAnswer(message)
+      && message.requestId === incoming.requestId
+      && message.agentId === incoming.agentId,
+    );
+    if (communicationIndex >= 0) {
+      const matched = next[communicationIndex];
+      if (isTeamStream(incoming) && !isTeamStream(matched)) {
+        return [
+          ...next.slice(0, communicationIndex),
+          { ...matched, ...incoming },
+          ...next.slice(communicationIndex + 1),
+        ];
+      }
+      if (isTeamStream(incoming)) {
+        // 流式 direct mention 继续走下面的 append 合并，不能被 waiting 帧直接覆盖。
+        // 终态则保留已收集的思考与工具过程，统一收口到同一个回答气泡。
+      } else {
+        const processText = isTeamStream(matched)
+          && matched.content.trim()
+          && matched.content.trim() !== incoming.content.trim()
+          ? (matched.processText || matched.content)
+          : incoming.processText;
+        return [
+          ...next.slice(0, communicationIndex),
+          {
+            ...matched,
+            ...incoming,
+            displayMode: incoming.displayMode || matched.displayMode,
+            collapsedTitle: matched.collapsedTitle || incoming.collapsedTitle,
+            processText,
+            thinking: mergeStreamingText(matched.thinking, incoming.thinking),
+            toolCalls: mergeToolCalls(matched.toolCalls, incoming.toolCalls),
+            ...mergedTeamTurnTiming(matched, incoming),
+          },
+          ...next.slice(communicationIndex + 1),
+        ];
+      }
+    }
+  }
   let matchingIndex = -1;
   for (let index = next.length - 1; index >= 0; index -= 1) {
     if (matchesTeamNode(next[index], incoming)) {

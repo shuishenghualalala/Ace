@@ -118,6 +118,11 @@ export interface ChatMessage {
   mentionFrom?: string | undefined;
   mentionTo?: string[] | undefined;
   mentionIntent?: string | undefined;
+  communicationKind?: string | undefined;
+  communicationStatus?: string | undefined;
+  requestId?: string | undefined;
+  replyTo?: string | undefined;
+  communicationRequestText?: string | undefined;
   displayMode?: string | undefined;
   collapsedTitle?: string | undefined;
   processText?: string | undefined;
@@ -161,6 +166,8 @@ export interface PendingMessage {
   clientIntent?: 'revision';
   /** 已乐观渲染成 user 气泡的消息 id；队列面板隐藏，发送时复用避免重复气泡。 */
   optimisticUserMessageId?: string;
+  /** 用户在 Team Composer 中选择的成员 mention。 */
+  userMentions?: { kind: 'team_member'; member_id: string }[];
 }
 
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'error';
@@ -1324,14 +1331,54 @@ function renderTeamArtifacts(artifacts: TeamArtifactCard[] | undefined): HTMLEle
   return wrap;
 }
 
-/** Web TeamAgentTurnBubble 的 Desktop TypeScript DOM 等价实现。 */
-export function renderTeamInternalMessage(message: ChatMessage, isStreaming = false): HTMLElement {
+function resolveTeamCommunicationRole(message: ChatMessage, fallback: string): string {
+  const role = String(fallback || '').trim();
+  const target = (message.mentionTo || [])
+    .map((item) => String(item || '').trim())
+    .find(Boolean);
+  if (!target || !/^向\s+\S+/.test(role)) return role;
+  const label = target === CREW_BUILTIN_AGENT_ID ? 'Crew' : target;
+  return role.replace(/^向\s+\S+/, `向 ${label}`);
+}
+
+/**
+ * Team 消息标题只展示可读的职责摘要；完整的 Team 配置属于执行上下文，
+ * 不应把工作原则、协作关系等内部提示词直接铺在聊天标题里。
+ */
+function compactTeamRole(role: string): string {
+  const normalized = String(role || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[`*_#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return '';
+
+  const summary = normalized
+    .split(/(?:工作原则|团队协作关系|输出格式|工作安排|边界)\s*[-:：]?/i)[0]
+    .replace(/^(职责|角色|职能)\s*[-:：]?\s*/i, '')
+    .replace(/^[-*\d.、)\s]+/, '')
+    .trim();
+  const compact = summary || normalized;
+  return compact.length > 48 ? `${compact.slice(0, 48).trimEnd()}…` : compact;
+}
+
+const RETRYABLE_MENTION_STATUSES = new Set(['failed', 'expired', 'cancelled']);
+const ACTIVE_MENTION_STATUSES = new Set(['published', 'waiting_reply', 'queued', 'delivered']);
+
+export function renderTeamInternalMessage(
+  message: ChatMessage,
+  isStreaming = false,
+  actionState: { canRetry?: boolean; canCancel?: boolean } = {},
+): HTMLElement {
   const isPlanning = message.eventType === 'team_planning_progress';
   const isCrew = String(message.agentId || '').trim() === CREW_BUILTIN_AGENT_ID;
   const name = isPlanning
     ? String(message.agentName || '团队').trim()
     : isCrew ? 'Crew' : String(message.agentName || message.agentId || 'Agent').trim();
-  const role = isPlanning ? '' : message.isLeader ? 'leader' : String(message.agentRole || '').trim();
+  const role = isPlanning ? '' : compactTeamRole(resolveTeamCommunicationRole(
+    message,
+    message.isLeader ? 'leader' : String(message.agentRole || '').trim(),
+  ));
   const tone = Number.isFinite(message.agentTone) ? Number(message.agentTone) % 6 : 0;
   const processMessage: ChatMessage = {
     ...message,
@@ -1383,7 +1430,9 @@ export function renderTeamInternalMessage(message: ChatMessage, isStreaming = fa
 
   const currentAvatar = root.querySelector<HTMLElement>(':scope > .msg__avatar');
   if (!isPlanning) {
-    const avatar = isCrew ? createChatAvatar() : document.createElement('span');
+    const avatar = isCrew
+      ? createChatAvatar()
+      : document.createElement('span');
     if (isCrew) {
       avatar.classList.add('team-internal__avatar');
     } else {
@@ -1417,6 +1466,27 @@ export function renderTeamInternalMessage(message: ChatMessage, isStreaming = fa
 
   const artifacts = renderTeamArtifacts(message.artifacts);
   if (artifacts) bubble.appendChild(artifacts);
+
+  const mentionStatus = String(message.communicationStatus || '').trim();
+  if (message.communicationKind === 'user_mention_answer') {
+    const actions = document.createElement('div');
+    actions.className = 'team-internal__communication-actions';
+    if (actionState.canRetry !== false && RETRYABLE_MENTION_STATUSES.has(mentionStatus) && message.communicationRequestText) {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = '重试';
+      retry.dataset.teamCommunicationAction = 'retry';
+      actions.appendChild(retry);
+    }
+    if (actionState.canCancel !== false && ACTIVE_MENTION_STATUSES.has(mentionStatus)) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = '取消';
+      cancel.dataset.teamCommunicationAction = 'cancel';
+      actions.appendChild(cancel);
+    }
+    if (actions.childElementCount > 0) bubble.appendChild(actions);
+  }
 
   if (isPlanning) {
     const label = bubble.querySelector<HTMLElement>('.msg__fold-label');

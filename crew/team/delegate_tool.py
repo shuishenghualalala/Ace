@@ -23,6 +23,11 @@ from crew.core.runctx import (
 from crew.state.logging import get_logger
 from crew.team.bus import TeamBus
 from crew.team.capabilities import CAPABILITIES
+from crew.team.communication import (
+    TeamCommunicationRouter,
+    expand_mention_targets,
+    normalize_mention_targets,
+)
 from crew.tools.registry import Registry, tool_result
 
 log = get_logger("team")
@@ -189,6 +194,7 @@ def build_mention_schema(member_names: list[str], *, allow_user: bool = True) ->
                 },
                 "content": {"type": "string", "description": "mention 正文"},
                 "node_id": {"type": "string", "description": "可选：关联 TeamPlan 节点 ID"},
+                "task_id": {"type": "string", "description": "可选：关联正式任务 ID"},
                 "result_status": {
                     "type": "string",
                     "enum": list(TEAM_RESULT_STATUSES),
@@ -212,17 +218,7 @@ def build_mention_schema(member_names: list[str], *, allow_user: bool = True) ->
 
 
 def _normalize_mention_targets(raw: Any, *, member_names: list[str]) -> list[str]:
-    if isinstance(raw, str):
-        targets = [raw]
-    else:
-        targets = list(raw or [])
-    allowed = {"leader", "user", "all", *member_names}
-    normalized: list[str] = []
-    for item in targets:
-        target = str(item or "").strip().lstrip("@")
-        if target and target in allowed and target not in normalized:
-            normalized.append(target)
-    return normalized
+    return normalize_mention_targets(raw, member_names=member_names)
 
 
 def _mention_text(targets: list[str], content: str) -> str:
@@ -321,6 +317,7 @@ def make_mention_handler(
     member_id: str,
     member_names: list[str],
     on_mention: Callable[[dict[str, Any]], Any] | None = None,
+    communication_router: TeamCommunicationRouter | None = None,
 ):
     async def handle_mention(args: dict[str, Any]) -> str:
         sender = current_agent_id.get() or member_id
@@ -336,19 +333,19 @@ def make_mention_handler(
             raise ToolError("只有 leader 可以 @user；成员需要用户信息时请先 @leader")
         if "user" in targets and intent != "user_followup":
             intent = "user_followup"
-        expanded_targets = [
-            target
-            for target in targets
-            if target != "user"
-            for target in (["leader", *member_names] if target == "all" else [target])
-        ]
-        expanded_targets = list(dict.fromkeys(expanded_targets))
+        expanded_targets = expand_mention_targets(targets, member_names=member_names)
         event = {
             "from": sender,
             "to": targets,
             "intent": intent,
             "result_status": result_status,
             "node_id": str(args.get("node_id") or ""),
+            "task_id": str(args.get("task_id") or ""),
+            "thread_id": str(args.get("thread_id") or ""),
+            "workflow_run_id": str(args.get("workflow_run_id") or ""),
+            "request_id": str(args.get("request_id") or ""),
+            "owner_account_id": current_owner_account_id.get(),
+            "workspace_id": current_workspace_id.get(),
             "text": _mention_text(targets, content),
             "content": content,
             "artifacts": list(args.get("artifacts") or []),
@@ -356,41 +353,18 @@ def make_mention_handler(
             "title": str(args.get("title") or ""),
             "message": None,
         }
-        result: Any = None
-        if on_mention is not None:
-            maybe = on_mention(event) if intent == "assign" else None
-            if asyncio.iscoroutine(maybe):
-                result = await maybe
-            elif maybe is not None:
-                result = maybe
-        if intent != "assign" and expanded_targets:
-            message = bus.send(
-                team_session_id=session_id,
-                sender_member_id=sender,
-                recipient_member_ids=expanded_targets,
-                content=content,
-                message_type={
-                    "submit": "result",
-                    "ask": "decision_request",
-                    "review": "answer",
-                    "handoff": "handoff",
-                    "user_followup": "decision_request",
-                }.get(intent, "progress"),  # type: ignore[arg-type]
-                task_id=str(args.get("task_id") or ""),
-                thread_id=str(args.get("node_id") or args.get("thread_id") or ""),
-                artifact_refs=[
-                    str(item.get("path") or item.get("artifact_id") or item.get("id") or "")
-                    for item in list(args.get("artifacts") or [])
-                    if isinstance(item, dict)
-                ],
-            )
-            event["message"] = message.to_dict()
-            if on_mention is not None:
-                maybe = on_mention(event)
-                if asyncio.iscoroutine(maybe):
-                    result = await maybe
-                elif maybe is not None:
-                    result = maybe
+        event["artifact_refs"] = [
+            str(item.get("path") or item.get("artifact_id") or item.get("id") or "")
+            for item in list(args.get("artifacts") or [])
+            if isinstance(item, dict)
+        ]
+        router = communication_router or TeamCommunicationRouter(
+            bus=bus,
+            session_id=session_id,
+            member_names=member_names,
+            on_mention=on_mention,
+        )
+        result = await router.route(event, expanded_targets=expanded_targets)
         return tool_result({"ok": True, "mention": event, "result": result or {}})
 
     return handle_mention
@@ -433,6 +407,9 @@ async def run_delegate_to_teammate(
         "plan_node_id": plan_node_id,
         "requester_member_id": requester_member_id,
         "member": member,
+        "execution_snapshot": dict(task_payload_meta.get("execution_snapshot") or {})
+        if isinstance(task_payload_meta, dict) and isinstance(task_payload_meta.get("execution_snapshot"), dict)
+        else {},
     }
     touch_activity = getattr(tasks, "touch_activity", None)
     if callable(touch_activity):
@@ -447,6 +424,8 @@ async def run_delegate_to_teammate(
     from crew.security.launch import current_process_launch
 
     child_payload_meta = dict(task_payload_meta or {})
+    if isinstance(child_payload_meta.get("execution_snapshot"), dict):
+        child_payload_meta["execution_snapshot"] = dict(child_payload_meta["execution_snapshot"])
     if not str(child_payload_meta.get("workspace_root_path") or "").strip():
         inherited_root = _inherited_workspace_root()
         if inherited_root:
@@ -496,10 +475,12 @@ async def run_delegate_to_teammate(
             "session_id": child_session_id,
             "member": member,
             "task_id": task["id"],
+            "plan_node_id": plan_node_id,
             "instruction": instruction,
             "started_at": time.time(),
             "agent": teammate,
             "owner_account_id": owner,
+            "execution_snapshot": dict(child_payload_meta.get("execution_snapshot") or {}),
         })
     try:
         async for chunk in teammate.run(sub_env):
@@ -628,6 +609,7 @@ def register_team_mention_tool(
     member_names: list[str],
     allow_user: bool = True,
     on_mention: Callable[[dict[str, Any]], Any] | None = None,
+    communication_router: TeamCommunicationRouter | None = None,
 ) -> None:
     registry.register(
         name="team_mention",
@@ -639,6 +621,7 @@ def register_team_mention_tool(
             member_id=member_id,
             member_names=member_names,
             on_mention=on_mention,
+            communication_router=communication_router,
         ),
         is_async=True,
     )

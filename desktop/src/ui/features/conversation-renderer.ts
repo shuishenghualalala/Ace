@@ -206,6 +206,51 @@ export function ensureFileChangesDelegation(container: HTMLElement): void {
   });
 }
 
+type TeamCommunicationActionHandlers = {
+  onRetry: (message: ChatMessage) => void;
+  onCancel: (message: ChatMessage) => void;
+};
+
+const teamCommunicationBoundContainers = new WeakMap<HTMLElement, {
+  handlers: TeamCommunicationActionHandlers;
+  messages: () => ChatMessage[];
+}>();
+
+function ensureTeamCommunicationDelegation(
+  container: HTMLElement,
+  handlers: TeamCommunicationActionHandlers | undefined,
+  messages: () => ChatMessage[],
+): void {
+  const existing = teamCommunicationBoundContainers.get(container);
+  if (existing) {
+    existing.handlers = handlers ?? { onRetry: () => {}, onCancel: () => {} };
+    existing.messages = messages;
+    return;
+  }
+  const binding = {
+    handlers: handlers ?? { onRetry: () => {}, onCancel: () => {} },
+    messages,
+  };
+  teamCommunicationBoundContainers.set(container, binding);
+  container.addEventListener('click', (event) => {
+    const target = event.target instanceof Element
+      ? event.target.closest<HTMLElement>('[data-team-communication-action]')
+      : null;
+    if (!target || !container.contains(target)) return;
+    const root = target.closest<HTMLElement>('.msg[data-message-id]');
+    const messageId = root?.dataset.messageId;
+    const message = messageId
+      ? binding.messages().find((item) => item.id === messageId)
+      : undefined;
+    if (!message) return;
+    event.preventDefault();
+    event.stopPropagation();
+    target.setAttribute('disabled', 'true');
+    if (target.dataset.teamCommunicationAction === 'retry') binding.handlers.onRetry(message);
+    if (target.dataset.teamCommunicationAction === 'cancel') binding.handlers.onCancel(message);
+  });
+}
+
 /** 一次性事件委托：在消息容器上 capture 监听 toggle（toggle 不冒泡）。
  *  工作室与对话页各有一个容器，分别绑定一次。
  *  覆盖两类折叠：
@@ -398,7 +443,7 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
   const files = (msg.turnFileChanges || []).map((file) =>
     `${file.path}|${file.status}|${file.added}|${file.removed}|${file.binary ? '1' : '0'}`,
   ).join(';');
-  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
+  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${msg.communicationKind || ''}|${msg.communicationStatus || ''}|${msg.requestId || ''}|${msg.replyTo || ''}|${msg.communicationRequestText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
 }
 
 /** 一段 batch（同一回合的连续 agent 消息）的 sig。
@@ -480,6 +525,7 @@ export interface ConversationRenderHooks {
     onSubmit: (questionId: string, answers: FollowupAnswer[]) => void;
     onCancel: (questionId: string) => void;
   };
+  teamCommunicationHandlers?: TeamCommunicationActionHandlers;
   /** DOM apply 之后、软钉底之前的渲染后钩子（todo 槽位 / running intro / composer 刷新等）。 */
   afterRender?: (sessionId: string | null) => void;
 }
@@ -591,9 +637,12 @@ export function renderConversation(
           // Team Turn 使用自身 streaming 生命周期，不借用 Session 全局 busy。
           // 这样新节点启动时不会“复活”已完成的成员回合。
           const isStreaming = msg.streaming === true;
-          sig = sigTeamInternal(displayed, isStreaming);
+          sig = `${sigTeamInternal(displayed, isStreaming)}|actions:${busy ? 'busy' : 'idle'}`;
           const captured = displayed;
-          pushPlan(msg.id, sig, () => renderTeamInternalMessage(captured, isStreaming));
+          pushPlan(msg.id, sig, () => renderTeamInternalMessage(captured, isStreaming, {
+            canRetry: !busy,
+            canCancel: busy,
+          }));
           i += 1;
           continue;
         } else if (msg.role === 'status' && msg.workflowProgress) {
@@ -765,6 +814,7 @@ export function renderConversation(
   // ---- 副作用：全部与主对话 renderChat 保持一致 ----
   ensureFoldDelegation(container, getSessionId);
   ensureFileChangesDelegation(container);
+  ensureTeamCommunicationDelegation(container, hooks.teamCommunicationHandlers, () => allMessages);
   // 代码块复制按钮：patch/append 后新节点需重新绑定（幂等，旧节点跳过）。
   attachCopyButtons(container);
   // Mermaid 图表：懒加载 mermaid.js 渲染 [data-mermaid] 占位。幂等，已渲染的跳过。

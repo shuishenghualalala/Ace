@@ -505,4 +505,126 @@ describe("mergeHistoryWithLiveMessages", () => {
     expect(merged[0].role).toBe("team_internal");
     expect(merged[0].eventType).toBe("team_summary");
   });
+
+  it("preserves direct user mention correlation fields from Team history", () => {
+    const [message] = mapHistoryItems([{
+      role: "team_internal",
+      content: "我当前使用 K3 模型。",
+      agent_id: "coder",
+      communication_kind: "user_mention_answer",
+      communication_status: "answered",
+      request_id: "mention_req_1",
+      reply_to: "bus_msg_1",
+      communication_request_text: "你使用的是什么模型？",
+    }]);
+
+    expect(message.communicationKind).toBe("user_mention_answer");
+    expect(message.communicationStatus).toBe("answered");
+    expect(message.requestId).toBe("mention_req_1");
+    expect(message.replyTo).toBe("bus_msg_1");
+    expect(message.communicationRequestText).toBe("你使用的是什么模型？");
+  });
+
+  it("replaces a waiting direct mention with the terminal answer by request id", () => {
+    const waiting: UiMessage = {
+      id: "waiting",
+      role: "team_internal",
+      text: "正在询问 coder…",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "waiting_reply",
+      requestId: "mention_req_waiting",
+      communicationRequestText: "你使用的是什么模型？",
+    };
+    const answered: UiMessage = {
+      ...waiting,
+      id: "answered",
+      text: "当前使用 K3 模型。",
+      communicationStatus: "answered",
+      replyTo: "bus_msg_waiting",
+    };
+
+    const merged = mergeTeamInternalMessage([waiting], answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].text).toBe("当前使用 K3 模型。");
+    expect(merged[0].communicationStatus).toBe("answered");
+  });
+
+  it("merges direct mention streaming frames into one answer timeline", () => {
+    const waiting: UiMessage = {
+      id: "waiting-stream",
+      role: "team_internal",
+      text: "正在询问 coder…",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "waiting_reply",
+      requestId: "mention_req_stream",
+    };
+    const stream: UiMessage = {
+      id: "stream",
+      role: "team_internal",
+      text: "当前使用 ",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "delivered",
+      requestId: "mention_req_stream",
+      eventType: "team_stream",
+      displayMode: "stream",
+      collapsedTitle: "coder 的回答过程",
+      thinking: "先确认模型配置。",
+      toolCalls: [{
+        toolCallId: "runtime-info-1",
+        name: "runtime_info",
+        args: "{}",
+        status: "running",
+        startedAt: 0,
+      }],
+    };
+    const answered: UiMessage = {
+      ...stream,
+      id: "answered-stream",
+      text: "当前使用 Kimi Code/K3。",
+      eventType: "team_communication",
+      displayMode: "chat",
+      communicationStatus: "answered",
+    };
+
+    const streaming = mergeTeamInternalMessage([waiting], stream, { append: true });
+    const merged = mergeTeamInternalMessage(streaming, answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      text: "当前使用 Kimi Code/K3。",
+      communicationStatus: "answered",
+      eventType: "team_communication",
+      processText: "当前使用 ",
+    });
+    expect(merged[0].thinking).toBe("先确认模型配置。");
+    expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: "runtime-info-1", status: "running" });
+  });
+
+  it("deduplicates a live user mention answer already restored from history", () => {
+    const item = teamItem({
+      content: "我当前使用 K3 模型。",
+      event_type: "team_communication",
+      node_id: undefined,
+      source_session_id: "web_demo::turn::mention_req_2::coder",
+      communication_kind: "user_mention_answer",
+      communication_status: "answered",
+      request_id: "mention_req_2",
+      reply_to: "bus_msg_2",
+    });
+    const [historyMessage] = mapHistoryItems([item]);
+    const liveMessage: UiMessage = {
+      ...historyMessage,
+      id: "live-mention-answer",
+    };
+
+    const merged = mergeHistoryWithLiveMessages([historyMessage], [liveMessage]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].requestId).toBe("mention_req_2");
+    expect(merged[0].communicationStatus).toBe("answered");
+  });
 });

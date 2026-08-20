@@ -7,7 +7,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { BrowserPageState } from '../../src/ui/backend-client';
-import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, fetchBrowserTabMentions, filterBrowserTabs, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, workMentionText } from '../../src/ui/features/composer-mention';
+import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, fetchBrowserTabMentions, filterBrowserTabs, getUserAgentMentions, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, teamMemberMentionId, workMentionText } from '../../src/ui/features/composer-mention';
 
 describe('detectTrigger', () => {
   it('行首 @ 触发', () => {
@@ -232,6 +232,43 @@ describe('mentionTextForSkill', () => {
     ];
     expect(mentionTextForSkill(skills[0]!, skills)).toBe('/review');
     expect(mentionTextForSkill(skills[1]!, skills)).toBe('/tdd');
+  });
+});
+
+describe('Team agent mentions', () => {
+  it('routes an external roster entry by Team member id, not external Agent id', () => {
+    expect(teamMemberMentionId({ agent_id: 'agent_c6f06632e6a4', agent_name: 'kk' }, 'agent_leader')).toBe('kk');
+    expect(teamMemberMentionId({ agent_id: 'agent_leader', agent_name: 'Crew Leader' }, 'agent_leader')).toBe('leader');
+  });
+
+  it('shows the member name while preserving the canonical member id for sending', () => {
+    const token = compactMentionText({
+      text: '@team-kk',
+      display: 'kk',
+      meta: '全栈开发',
+      sig: 'agent',
+      userMention: { kind: 'team_member', member_id: 'team-kk' },
+    });
+
+    expect(token).toBe('@kk');
+    expect(getUserAgentMentions(`请 ${token} 写方案`)).toEqual([
+      { kind: 'team_member', member_id: 'team-kk' },
+    ]);
+    expect(serializeMentionInput(`请 ${token} 写方案`)).toBe('请 @kk 写方案');
+    expect(getUserAgentMentions('请写方案')).toEqual([]);
+  });
+
+  it('keeps a spaced display name readable without changing the member id', () => {
+    const token = compactMentionText({
+      text: '@crew-builtin',
+      display: 'Crew 内置智能体',
+      meta: 'Leader',
+      sig: 'agent',
+      userMention: { kind: 'team_member', member_id: 'crew-builtin' },
+    });
+
+    expect(token).toBe('@Crew 内置智能体');
+    expect(serializeMentionInput(`询问 ${token}`)).toBe('询问 @Crew 内置智能体');
   });
 });
 

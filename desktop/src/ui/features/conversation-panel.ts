@@ -32,6 +32,7 @@ import {
   stopGeneration,
 } from './chat-controller';
 import { createComposerView, type ComposerView } from './composer-view';
+import type { UserAgentMention } from './composer-mention';
 import {
   disposeConversationRenderer,
   renderConversation,
@@ -41,7 +42,7 @@ import { getToolFold, setToolFold } from './fold-state';
 
 /** Composer 动作组：submit/stop/edit/queue（app.ts 主对话原接线逻辑的参数化形态）。 */
 export interface ConversationPanelActions {
-  submit(text: string): void | Promise<void>;
+  submit(text: string, userMentions?: UserAgentMention[]): void | Promise<void>;
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -96,7 +97,7 @@ export function createMainComposerActions(
   isCompletionOpen?: () => boolean,
 ): ConversationPanelActions {
   return {
-    submit: async (text) => {
+    submit: async (text, userMentions) => {
       if (!requireRendererLogin()) return;
       const sessionId = state.activeSessionId;
       if (sessionId && state.editFromIdx[sessionId] != null) {
@@ -107,7 +108,7 @@ export function createMainComposerActions(
           state.userUnfoldedTurns.delete(message.id);
         }
       }
-      await sendMessage(text);
+      await sendMessage(text, userMentions);
     },
     stop: () => stopGeneration(),
     cancelEdit,
@@ -136,7 +137,7 @@ export function mountConversationPanel(
   if (messagesEl) host.append(messagesEl, composerHost);
   else if (ownComposerHost) host.append(composerHost);
   const composer: ComposerView = createComposerView(composerHost, {
-    submit: (text) => opts.actions.submit(text),
+    submit: (text, userMentions) => opts.actions.submit(text, userMentions),
     stop: () => opts.actions.stop(),
     cancelEdit: () => opts.actions.cancelEdit(),
     editQueueItem: opts.actions.editQueueItem,

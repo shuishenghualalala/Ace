@@ -116,7 +116,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.msg__avatar-media')).toBeNull();
   });
 
-  it('Team 内置成员使用新版 Crew SVG 头像并显示 leader 身份', () => {
+  it('Team 内置 Crew Leader 使用 Crew 自有头像并显示 leader 身份', () => {
     const root = renderTeamInternalMessage({
       id: 'team-leader',
       role: 'team_internal',
@@ -131,8 +131,9 @@ describe('renderAgentTurn', () => {
     expect(root.classList.contains('team-internal')).toBe(true);
     expect(root.querySelector('.team-internal__name strong')?.textContent).toBe('Crew');
     expect(root.querySelector('.team-internal__name em')?.textContent).toBe('leader');
-    expect(root.querySelector<SVGUseElement>('.team-internal__avatar .msg__avatar-symbol use')?.getAttribute('href'))
+    expect(root.querySelector('.team-internal__avatar .msg__avatar-symbol use')?.getAttribute('href'))
       .toBe('./crew-ui-symbols.svg#avatar-headphones');
+    expect(root.querySelector('.team-internal__avatar .session__team-logo')).toBeNull();
   });
 
   it('Team 外部成员展示成员气泡、执行过程和产物卡', () => {
@@ -164,6 +165,92 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.msg__file-changes')?.textContent).toContain('已编辑 2 个文件');
     expect(root.querySelector('[data-file-status="deleted"] .msg__file-changes__reveal'))
       .toHaveProperty('disabled', true);
+  });
+
+  it('Team 外部成员标题压缩完整 Markdown 职责提示', () => {
+    const root = renderTeamInternalMessage({
+      id: 'team-mention-role',
+      role: 'team_internal',
+      content: '我现在使用 Kimi Code。',
+      timestamp: 1_700_000_000_000,
+      agentId: 'kk',
+      agentName: 'kk',
+      agentRole: '### 全栈开发 - kk ##### 工作原则 - 先确认目标、输入、输出和验收标准，再执行。 - 团队协作关系 - 向 Leader 汇报。',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'answered',
+    });
+
+    expect(root.querySelector('.team-internal__name em')?.textContent).toBe('全栈开发 - kk');
+    expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('工作原则');
+    expect(root.querySelector('.team-internal__communication-status')).toBeNull();
+  });
+
+  it('Team 通信回合不在成员名称行展示等待或进行中标签', () => {
+    for (const communicationStatus of ['waiting_reply', 'delivered']) {
+      const root = renderTeamInternalMessage({
+        id: `team-mention-${communicationStatus}`,
+        role: 'team_internal',
+        content: '正在处理请求',
+        timestamp: 1_700_000_000_000,
+        agentId: 'kk',
+        agentName: 'kk',
+        agentRole: '全栈开发 - kk',
+        communicationKind: 'user_mention_answer',
+        communicationStatus,
+      });
+
+      expect(root.querySelector('.team-internal__communication-status')).toBeNull();
+      expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('等待回答');
+      expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('回答中');
+    }
+  });
+
+  it('Team 成员通信标题优先展示结构化收件人', () => {
+    const root = renderTeamInternalMessage({
+      id: 'team-submit-to-leader',
+      role: 'team_internal',
+      content: '@leader 汇报当前执行状态',
+      timestamp: 1_700_000_000_000,
+      agentId: 'kk',
+      agentName: 'kk',
+      agentRole: '向 kk 征询执行意见与状态',
+      mentionFrom: 'kk',
+      mentionTo: ['leader'],
+      mentionIntent: 'submit',
+      eventType: 'team_submit',
+    });
+    expect(root.querySelector('.team-internal__name em')?.textContent)
+      .toBe('向 leader 征询执行意见与状态');
+  });
+
+  it('直接 mention 失败可重试，运行中可取消', () => {
+    const failed = renderTeamInternalMessage({
+      id: 'mention-failed',
+      role: 'team_internal',
+      content: '回答失败',
+      timestamp: 1_700_000_000_000,
+      agentId: 'coder',
+      agentName: 'coder',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'failed',
+      requestId: 'mention-1',
+      communicationRequestText: '你使用的是什么模型？',
+    });
+    expect(failed.querySelector('[data-team-communication-action="retry"]')?.textContent).toBe('重试');
+
+    const waiting = renderTeamInternalMessage({
+      id: 'mention-waiting',
+      role: 'team_internal',
+      content: '正在询问 coder…',
+      timestamp: 1_700_000_000_000,
+      agentId: 'coder',
+      agentName: 'coder',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'waiting_reply',
+      requestId: 'mention-2',
+      communicationRequestText: '你使用的是什么模型？',
+    });
+    expect(waiting.querySelector('[data-team-communication-action="cancel"]')?.textContent).toBe('取消');
   });
 
   it('Team 规划运行中复用 Agent Turn 实时计时，以团队名称和 Team Logo 展示', () => {

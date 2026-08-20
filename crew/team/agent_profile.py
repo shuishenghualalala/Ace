@@ -12,7 +12,7 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from crew.agent.external.runtime_profile import (
     canonical_runtime_model_id,
@@ -120,6 +120,157 @@ class AgentProfile:
             model=dict(data.get("model") or {}) if isinstance(data.get("model"), dict) else {},
             capabilities=capabilities,
         )
+
+
+@dataclass(frozen=True)
+class CapabilityCoverage:
+    """One deterministic capability check for a team or workflow node.
+
+    ``AgentProfile`` remains the capability source for Formation and Runtime.
+    The planner may pass the persisted member capability assignment through
+    ``capability_sets`` because planning does not own the external-agent
+    store.  Both paths produce this same result model and use the same
+    normalized capability keys and threshold.
+    """
+
+    required: list[str]
+    covered: list[str]
+    missing: list[str]
+    unavailable: list[str]
+    unknown: list[str]
+    covered_by: dict[str, list[str]] = field(default_factory=dict)
+    assigned_agent_ids: list[str] = field(default_factory=list)
+    min_score: float = 0.5
+
+    @property
+    def status(self) -> str:
+        if not self.missing and not self.unavailable and not self.unknown:
+            return "covered"
+        if self.unknown and not self.missing and not self.unavailable:
+            return "unknown"
+        if self.unavailable and not self.missing and not self.unknown:
+            return "unavailable"
+        if self.covered:
+            return "partial"
+        return "missing"
+
+    @property
+    def ratio(self) -> float:
+        return round(len(self.covered) / len(self.required), 4) if self.required else 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "required": list(self.required),
+            "covered": list(self.covered),
+            "missing": list(self.missing),
+            "unavailable": list(self.unavailable),
+            "unknown": list(self.unknown),
+            "covered_by": {key: list(value) for key, value in self.covered_by.items()},
+            "assigned_agent_ids": list(self.assigned_agent_ids),
+            "min_score": self.min_score,
+            "status": self.status,
+            "ratio": self.ratio,
+        }
+
+
+def is_agent_profile_available(profile: AgentProfile) -> bool:
+    """Return whether a resolved profile can be used for execution/selection."""
+
+    return (
+        profile.availability == "ready"
+        and str(profile.model.get("binding_status") or "") != "missing"
+    )
+
+
+def evaluate_capability_coverage(
+    required_capabilities: Iterable[object],
+    profiles: Mapping[str, AgentProfile] | Iterable[AgentProfile] | None = None,
+    *,
+    capability_sets: Mapping[str, Iterable[object]] | None = None,
+    assigned_agent_ids: Iterable[object] | None = None,
+    min_score: float = 0.5,
+) -> CapabilityCoverage:
+    """Evaluate one capability requirement against the supplied members.
+
+    Formation and Runtime pass resolved ``AgentProfile`` objects.  The DAG
+    compiler passes the confirmed ``TeamMemberSpec.capabilities`` snapshot via
+    ``capability_sets``; it is an assignment contract, not a second profile.
+    The function deliberately does not inspect candidates outside the supplied
+    members and never performs I/O or LLM calls.
+    """
+
+    required = normalize_capabilities(required_capabilities)
+    threshold = max(0.0, min(float(min_score), 1.0))
+    profile_map: dict[str, AgentProfile] = {}
+    if isinstance(profiles, Mapping):
+        profile_map = {
+            str(agent_id).strip(): profile
+            for agent_id, profile in profiles.items()
+            if str(agent_id).strip() and isinstance(profile, AgentProfile)
+        }
+    else:
+        profile_map = {
+            str(profile.agent_id).strip(): profile
+            for profile in (profiles or ())
+            if isinstance(profile, AgentProfile) and str(profile.agent_id).strip()
+        }
+    assigned = list(dict.fromkeys(
+        str(agent_id).strip()
+        for agent_id in (assigned_agent_ids if assigned_agent_ids is not None else profile_map.keys())
+        if str(agent_id).strip()
+    ))
+    if capability_sets and assigned_agent_ids is None:
+        for agent_id in capability_sets:
+            normalized_id = str(agent_id).strip()
+            if normalized_id and normalized_id not in assigned:
+                assigned.append(normalized_id)
+
+    covered: list[str] = []
+    missing: list[str] = []
+    unavailable: list[str] = []
+    unknown: list[str] = []
+    covered_by: dict[str, list[str]] = {}
+
+    for capability in required:
+        capability_members: list[str] = []
+        unavailable_members: list[str] = []
+        unknown_members: list[str] = []
+        for agent_id in assigned:
+            if capability_sets is not None and agent_id in capability_sets:
+                assigned_caps = normalize_capabilities(capability_sets.get(agent_id) or [])
+                if capability in assigned_caps:
+                    capability_members.append(agent_id)
+                continue
+            profile = profile_map.get(agent_id)
+            if profile is None:
+                unknown_members.append(agent_id)
+                continue
+            if not is_agent_profile_available(profile):
+                unavailable_members.append(agent_id)
+                continue
+            if profile.score(capability) >= threshold:
+                capability_members.append(agent_id)
+
+        if capability_members:
+            covered.append(capability)
+            covered_by[capability] = capability_members
+        elif unavailable_members:
+            unavailable.append(capability)
+        elif unknown_members:
+            unknown.append(capability)
+        else:
+            missing.append(capability)
+
+    return CapabilityCoverage(
+        required=required,
+        covered=covered,
+        missing=missing,
+        unavailable=unavailable,
+        unknown=unknown,
+        covered_by=covered_by,
+        assigned_agent_ids=assigned,
+        min_score=threshold,
+    )
 
 
 # Compatibility name for callers that imported the original transient model.

@@ -218,6 +218,12 @@ class Message:
     # 该字段只用于历史扫描与节流，不暴露给 provider。
     attachment_type: str | None = None
     attachment_data: dict[str, Any] | None = None
+    # Team 通信回合的历史关联元数据。仅用于回放、刷新和重连，不进入 provider 消息。
+    communication_kind: str | None = None
+    communication_status: str | None = None
+    request_id: str | None = None
+    reply_to: str | None = None
+    communication_request_text: str | None = None
 
     def to_openai(self) -> dict[str, Any]:
         """转换为 OpenAI Chat Completions 的 message 字典。

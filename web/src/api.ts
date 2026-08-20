@@ -280,6 +280,23 @@ export const api = {
       method: "POST",
       ...jsonBody({ reason }),
     }),
+  recoverTeamNode: (
+    sessionId: string,
+    nodeId: string,
+    action: "reassign" | "retry" | "abandon",
+    replacementAssignee = "",
+  ) =>
+    getJSON<{ ok: boolean; node?: Task; error?: string }>(
+      `/api/session/${encodeURIComponent(sessionId)}/team/recover`,
+      {
+        method: "POST",
+        ...jsonBody({
+          node_id: nodeId,
+          action,
+          replacement_assignee: replacementAssignee,
+        }),
+      },
+    ),
   waitTask: (id: string, timeout = 30) =>
     getJSON<Task>(`/api/tasks/${encodeURIComponent(id)}/wait`, {
       method: "POST",

@@ -7,7 +7,10 @@ const studioCss = readFileSync(resolve(stylesDir, 'studio.css'), 'utf8');
 const layoutCss = readFileSync(resolve(stylesDir, 'layouts.css'), 'utf8');
 const chatCss = readFileSync(resolve(stylesDir, 'chat.css'), 'utf8');
 const webMessagesCss = readFileSync(resolve(stylesDir, 'web-messages.css'), 'utf8');
+const kanbanCss = readFileSync(resolve(stylesDir, 'kanban-board.css'), 'utf8');
 const composerCss = readFileSync(resolve(stylesDir, 'composer.css'), 'utf8');
+const composerContextCss = readFileSync(resolve(stylesDir, 'composer-context.css'), 'utf8');
+const processTimelineCss = readFileSync(resolve(stylesDir, 'process-timeline.css'), 'utf8');
 const streamChatCss = readFileSync(resolve(stylesDir, 'stream-chat.css'), 'utf8');
 const uiPreviewCss = readFileSync(resolve(stylesDir, 'ui-preview.css'), 'utf8');
 const securityCenterCss = readFileSync(resolve(stylesDir, 'security-center.css'), 'utf8');
@@ -77,6 +80,44 @@ describe('shared chat chrome styles', () => {
     expect(runningImage).not.toContain('translate(');
     expect(uiPreviewCss).not.toMatch(/(?:^|\n)\s*\.chat-composer\s*\{/);
   });
+
+  it('keeps Request/Response code readable on light process surfaces', () => {
+    expect(ruleBody(processTimelineCss, '.mw-process-timeline .process-code-block pre')).toContain(
+      'color: var(--mw-text-primary)',
+    );
+    expect(ruleBody(streamChatCss, '.process-code-block pre')).toContain(
+      'color: var(--mw-text-primary)',
+    );
+  });
+
+  it('keeps selected mention input text from duplicating the overlay copy', () => {
+    const source = ruleBody(chatCss, '.chat-input-container textarea.chat-input-overlay-source');
+    const selection = ruleBody(
+      chatCss,
+      '.chat-input-container textarea.chat-input-overlay-source::selection',
+    );
+    const overlay = ruleBody(composerContextCss, '.chat-input-overlay');
+
+    expect(source).toContain('color: transparent');
+    expect(selection).toContain('color: transparent');
+    expect(selection).toContain('-webkit-text-fill-color: transparent');
+    expect(overlay).toContain('pointer-events: none');
+  });
+
+  it('keeps Team member avatars and bubbles visibly colored for the first tones', () => {
+    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-0'))
+      .toContain('background: var(--mw-status-success-bg)');
+    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-1'))
+      .toContain('background: var(--mw-status-info-bg)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-0'))
+      .toContain('border-color: var(--mw-status-success)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-1'))
+      .toContain('border-color: var(--mw-status-info)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew)'))
+      .toContain('var(--mw-status-success)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew)'))
+      .toContain('var(--mw-status-info)');
+  });
 });
 
 describe('security center scroll contract', () => {
@@ -118,5 +159,54 @@ describe('Crew shell and Welcome identity', () => {
       'position: relative',
     );
     expect(welcomeCss).toContain('@media (prefers-reduced-motion: reduce)');
+  });
+
+  it('lifts the mascot clear of the Composer in minimum-height windows', () => {
+    const compactHeightStart = welcomeCss.indexOf('@media (max-height: 680px)');
+    const reducedMotionStart = welcomeCss.indexOf('@media (prefers-reduced-motion: reduce)');
+    const compactHeightCss = welcomeCss.slice(compactHeightStart, reducedMotionStart);
+
+    expect(compactHeightStart).toBeGreaterThanOrEqual(0);
+    expect(reducedMotionStart).toBeGreaterThan(compactHeightStart);
+    expect(compactHeightCss).toContain(
+      'padding: var(--mw-space-2) var(--mw-space-4) var(--mw-space-4)',
+    );
+    expect(compactHeightCss).toContain('width: 140px');
+    expect(compactHeightCss).toContain('height: 140px');
+    expect(compactHeightCss).not.toContain('.mw-composer__welcome-paws');
+  });
+
+  it('keeps the mention canvas above the Welcome mascot without lifting the project strip', () => {
+    expect(welcomeCss).toContain(
+      'body.welcome-active #chat-composer-root:has(.mention-pop)',
+    );
+    expect(welcomeCss).toContain(
+      '#chat-composer-root:has(.mention-pop) .mw-composer',
+    );
+    expect(
+      ruleBody(
+        welcomeCss,
+        'body.welcome-active\n  #chat-composer-root\n  .mw-composer__panel:has(.mention-pop)',
+      ),
+    ).toContain('z-index: 3');
+  });
+
+  it('lets compact Welcome content scroll instead of clipping its text', () => {
+    const compactHeightStart = welcomeCss.indexOf('@media (max-height: 680px)');
+    const reducedMotionStart = welcomeCss.indexOf('@media (prefers-reduced-motion: reduce)');
+    const compactHeightCss = welcomeCss.slice(compactHeightStart, reducedMotionStart);
+
+    expect(compactHeightCss).toContain('overflow-y: auto');
+    expect(compactHeightCss).toContain('scroll-padding-block: var(--mw-space-4)');
+    expect(compactHeightCss).toContain('grid-row: 1');
+    expect(compactHeightCss).toContain('grid-row: auto');
+    expect(welcomeCss).toContain(
+      'grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr)',
+    );
+    expect(compactHeightCss).not.toContain(
+      'grid-template-rows: minmax(0, 1fr) auto auto',
+    );
+    expect(compactHeightCss).not.toContain('translate(-50%, 0) rotate(-8deg)');
+    expect(compactHeightCss).not.toContain('translate(50%, 0) rotate(8deg)');
   });
 });

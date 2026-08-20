@@ -34,6 +34,15 @@ type FormationUiStatus =
   | "ready_unchanged"
   | "ready_partial";
 
+function TeamLogo({ className = "" }: { className?: string }) {
+  return (
+    <span className={`session__team-logo${className ? ` ${className}` : ""}`} aria-hidden="true">
+      <i />
+      <i />
+    </span>
+  );
+}
+
 const TEAM_DRAFT_DEBOUNCE_MS = 600;
 export const TEAM_REQUIRED_CAPABILITIES = [
   { key: "information_retrieval", label: "检索", prompt: "必须包含信息检索能力。" },
@@ -1953,7 +1962,6 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
       ) : (
         <div className="team-tile-grid">
           {teams.map((team) => {
-            const leader = agentById.get(team.leader_agent_id);
             return (
               <article
                 key={team.id}
@@ -1992,9 +2000,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                   </button>
                 </div>
                 <div className="team-tile__top">
-                  <div className="pixel-avatar pixel-avatar--leader" aria-hidden="true">
-                    <span>{leader?.display_badge || "?"}</span>
-                  </div>
+                  <TeamLogo />
                   <div>
                     <strong>{team.name}</strong>
                     <p>Leader: {leaderName(team)}</p>
@@ -2020,7 +2026,6 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
     </div>
   );
 
-  const leaderInActiveTeam = activeTeam ? agentById.get(activeTeam.leader_agent_id) : null;
   const agentsGuidePortal = typeof document === "undefined" || guideMode === "hidden"
     ? null
     : createPortal(
@@ -2145,13 +2150,11 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
           <div className="team-modal" onClick={(event) => event.stopPropagation()}>
             <div className="team-modal__head">
               <div className="team-modal__title">
-                <div className="pixel-avatar pixel-avatar--leader" aria-hidden="true">
-                  <span>{leaderInActiveTeam?.display_badge || "?"}</span>
-                </div>
+                <TeamLogo className="team-modal__team-logo" />
                 <div>
                   <span>团队</span>
                   <strong>{activeTeam.name}</strong>
-                  <p>Leader: {leaderInActiveTeam?.name || leaderName(activeTeam)}</p>
+                  <p>Leader: {agentById.get(activeTeam.leader_agent_id)?.name || leaderName(activeTeam)}</p>
                 </div>
               </div>
               <button

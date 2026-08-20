@@ -779,6 +779,173 @@ cd web && npm run build
     <li>“我的外援”、Composer 外援 Agent、session 列表和 ACP 对话头像共用相同的 provider 首字母与稳定纹样槽位；纹样以约 10% 主题墨色平铺完整头像表面，解决只在右上角出现一小块的问题。</li>
     <li>“发现外援”的 runtime 卡片统一显示 Sidebar 外援入口同款 <code>external-agent.png</code>；runtime 集成图标与 provider 身份头像保持清晰分工。</li>
   </ul>
+
+  <h2>68. Team 工作流看板文案与产物降噪（2026-08-11）</h2>
+  <ul>
+    <li>Team TaskBoard 标题统一从“团队 DAG 工作流”改为“团队工作流”，保留节点阶段、负责人和运行态信息，不向用户暴露实现层 DAG 术语。</li>
+    <li>节点展开详情继续使用既有浅色主题表面；产物清单过滤 Gateway 为每次 <code>agent_turn</code> 生成的内部 <code>.crew/tasks/task_*.json</code> 运行记录，只展示真实用户文件或显式 Team artifact。</li>
+    <li>Desktop 协作看板同步采用同一文案和产物过滤规则；模型切换入口属于 Desktop 成员卡片，按成员调用会话模型接口，Web TaskBoard 不新增第二套模型协议。</li>
+    <li>Web 团队成员卡恢复像素小旗帜 Leader 标识并放大成员头像；Kimi ACP 通过本地 provider catalog 补回模型后同步标记可切换能力。</li>
+  </ul>
+  <p>验证：TaskBoard 定向测试 <code>11 passed</code>，Web TypeScript typecheck 通过。</p>
+
+  <h2>69. Team Logo 统一到外援阵容与对话（2026-08-11）</h2>
+  <ul>
+    <li>“我的阵容 → 我的团队”的团队卡片和详情弹窗头部直接复用 Team Session 的基础 <code>session__team-logo</code>，移除卡片专用 Logo 变体，保证两处使用完全相同的黑白双 Agent 图形。</li>
+    <li>Team 规划回合使用黑白双 Agent Logo；内置 Crew Leader 回合使用 Crew 自有头像，外部成员回合继续显示成员自己的头像，不把团队身份误当成员身份。</li>
+    <li>Desktop 会话历史中的 Team 会话同步使用同一 Logo，避免回退为通用三人群组图标；没有新增资源或顶层模块。</li>
+  </ul>
+  <p>验证：Web Team 消息回归、TypeScript typecheck 与 production build 通过。</p>
+  <h2>70. Team Composer @ 成员联想与结构化发送（2026-08-16）</h2>
+  <ul>
+    <li><b>候选分类：</b>Team 会话输入 <code>@</code> 时，Composer 将当前 Team 成员与既有文件补全合并展示，并用“团队成员 / 文件”分组；非 Team 会话保持原有文件补全行为。</li>
+    <li><b>选择语义：</b>选择成员后输入框保留 <code>@agent_id</code>，发送时额外携带 <code>user_mentions</code> 结构化数组；成员不会被误识别为文件附件。</li>
+    <li><b>队列语义：</b>WebSocket 直接发送、本地待发队列和“立即发送”均透传 <code>user_mentions</code>，编辑或删除文本后只发送仍存在的 mention token。</li>
+    <li><b>实现边界：</b>只扩展既有 <code>Composer</code>、<code>ChatPanel</code>、<code>useChat</code> 与共享类型，复用当前 Team 成员视图和 <code>api.complete</code> 文件补全，没有新增前端模块。</li>
+  </ul>
+  <p>验证：Web Composer 定向测试 <code>5 passed</code>，Web/Desktop TypeScript typecheck 通过；Desktop 结构化 mention 单测 <code>45 passed</code>。</p>
+
+  <h2>71. 用户 Agent mention 通信闭环（2026-08-16）</h2>
+  <ul>
+    <li><b>实时协议：</b>用户 mention 的回答通过既有 <code>team_internal</code> 帧透传 <code>communication_kind=user_mention_answer</code>、<code>communication_status=answered</code>、<code>request_id</code> 和 <code>reply_to</code>，前端不再把它当作普通成员消息。</li>
+    <li><b>展示一致：</b>Web Team 气泡沿用既有 ask 状态徽标，统一支持用户 mention 与 Agent 间 ask 的回答状态；不会新增一套用户 mention 专属 UI。</li>
+    <li><b>历史契约：</b>历史映射补齐 <code>request_id/reply_to</code>，与后端既有 <code>team_communication</code> 投影保持一致；用户 mention 仍不创建 TeamPlan、任务、DAG 或产物。</li>
+    <li><b>实现边界：</b>只扩展既有 Team 消息 chunk、<code>useChat</code>、<code>historyMap</code> 和 <code>TeamAgentTurnBubble</code>，不改变 Composer 选择协议。</li>
+  </ul>
+  <p>验证：用户 mention 后端定向回归、Web history mapping 回归、Web TypeScript typecheck 与 production build 通过。</p>
+
+  <h2>72. 用户 Agent mention 历史恢复与失败状态（2026-08-16）</h2>
+  <ul>
+    <li><b>复用子会话：</b>直接 @Agent 的回答和失败结果继续写入已有 <code>{session}::turn::{request_id}::{agent}</code> 子会话，不创建 TeamPlan、Task、DAG 或产物。</li>
+    <li><b>统一通信元数据：</b>在既有 <code>Message</code> 上持久化 <code>communication_kind</code>、<code>communication_status</code>、<code>request_id</code> 和 <code>reply_to</code>；SQLite 对旧消息按缺省值兼容。</li>
+    <li><b>刷新/重连：</b>无 Team workflow 时，历史投影直接从子会话恢复用户 mention 的回答、超时、失败或取消状态，前端沿用现有 Team 气泡和状态徽标。</li>
+    <li><b>去重边界：</b>历史去重保留通信 request_id，两个请求得到相同文本时仍分别展示，避免刷新后丢掉一次回答。</li>
+  </ul>
+  <p>验证：会话存储元数据 round-trip、用户 mention、超时状态、历史 API 投影和同文案通信去重回归通过。</p>
+
+  <h2>73. 用户 Agent mention 幂等与状态闭环（2026-08-16）</h2>
+  <ul>
+    <li><b>请求幂等：</b><code>request_id</code> 作为一次直接 mention 的幂等键；并发或重连重复到达时复用已有回答，不重复发送 Team Bus 请求或唤醒成员。</li>
+    <li><b>重试边界：</b>失败、超时、取消结果也会被恢复；用户真正重试时生成新的 <code>request_id</code>，不会把旧回合误判为新回合。</li>
+    <li><b>取消闭环：</b>沿用现有 session stop/interrupt，Team ask 会将子会话和 Team Bus 请求统一落为 <code>cancelled</code>，历史刷新后仍能看到终态。</li>
+    <li><b>合并一致：</b>Web 实时 Team 气泡与历史恢复气泡按同一子会话、事件和通信关联字段合并，不产生重复回答。</li>
+  </ul>
+  <p>验证：并发重复请求、同 request_id 恢复、新 request_id 重试、取消状态和实时/历史合并回归通过。</p>
+  <h2>74. 用户 Agent mention 重试与取消（2026-08-16）</h2>
+  <ul>
+    <li><b>运行态：</b>直接 mention 先展示“等待回答”，沿用 ChatPanel 现有 stop；取消后当前气泡即时变为“已取消”，不新增前端通信协议。</li>
+    <li><b>重试：</b>失败、超时、取消且历史保存原始 prompt 时显示“重试”；重试复用目标 Agent 和 prompt，由 <code>useChat.send()</code> 生成新的 <code>request_id</code>。</li>
+    <li><b>合并：</b>等待帧与最终 answer 按 <code>request_id + agent_id</code> 更新同一个气泡；历史恢复继续使用 <code>communication_request_text</code>，缺失时不展示不可执行的重试按钮。</li>
+    <li><b>边界：</b>Web 只扩展既有 <code>TeamAgentTurnBubble</code>、<code>MessageList</code>、<code>ChatPanel</code>、<code>useChat</code> 与历史字段，不创建 DAG、Task、产物或新模块。</li>
+  </ul>
+  <p>验证：Web Team 气泡/历史回归 25 passed，Web TypeScript typecheck 通过。</p>
+  <h2>75. 用户 Agent mention 端到端验收（2026-08-16）</h2>
+  <ul>
+    <li><b>完整链路：</b>成员联想选择、结构化发送、Team 内部通信、实时回答、历史映射和刷新恢复均通过验证。</li>
+    <li><b>边界回归：</b>未知成员、重复 request_id、失败/超时/取消、重试生成新 request_id，以及等待态与终态合并均通过；不创建 DAG、Task 或产物。</li>
+    <li><b>结果：</b>Web Team/历史测试 25 passed，TypeScript typecheck 通过；与后端、Desktop 的通信字段保持一致。</li>
+  </ul>
+</div>
+<div>
+  <h2>76. Team @Agent 显示名称与路由 ID 分离（2026-08-17）</h2>
+  <ul>
+    <li><b>用户界面：</b>选择团队成员后，输入框显示成员名称，例如 <code>@kk</code> 或 <code>@Crew 内置智能体</code>，不再显示 <code>agent_...</code> 内部编码。</li>
+    <li><b>通信协议：</b>显示文本只负责可读性，发送时仍通过 <code>user_mentions[{kind:"team_member", member_id}]</code> 携带稳定成员 ID，后端路由语义不变。</li>
+    <li><b>范围：</b>复用既有 Composer 联想和结构化 mention，不新增接口、字段或模块。</li>
+  </ul>
+  <p>验证：Web Composer 测试 7 passed，Web TypeScript typecheck 通过。</p>
+</div>
+<div>
+  <h2>历史 Team mention 恢复与通信身份视觉修复（2026-08-17）</h2>
+  <ul>
+    <li>Team 通信标题优先使用结构化 <code>mention_to</code> 修正展示方向；成员提交给 Leader 时显示“向 leader”，不把节点标题中的旧目标误当成收件人。</li>
+    <li>Team 成员身份的前两个 tone 使用明确状态色，内部消息气泡不再回退到无色灰阶。</li>
+    <li>与 Desktop 共用同一通信字段语义，不改变 Team Bus 路由或 mention 协议。</li>
+  </ul>
+  <p>验证：Web Team 气泡定向测试 5 passed、Web TypeScript typecheck 与 production build 通过。</p>
+</div>
+<div>
+  <h2>77. Team @Agent 直达路由第一阶段（2026-08-17）</h2>
+  <ul>
+    <li>Web Composer 保留可读的 <code>@成员名</code> 作为用户消息正文，同时继续把结构化 <code>user_mentions.member_id</code> 放入 WS payload。</li>
+    <li>Gateway 透传并校验 <code>user_mentions</code>；TeamManager 因此在 TeamSpec/DAG 之前进入既有 Team ask 直达链路。</li>
+    <li>普通 Team prompt 不携带结构化 mention 时，仍按原 Team workflow 执行；本阶段不新增模块或持久化字段。</li>
+  </ul>
+  <p>验证：Gateway mention 结构与 Desktop composer mention 回归通过。</p>
+</div>
+<div>
+  <h2>78. Team @Agent 直达生命周期第二阶段（2026-08-17）</h2>
+  <ul>
+    <li>等待、回答、失败、超时和取消都更新同一个 <code>user_mention_answer</code> 气泡，并使用 <code>request_id</code> 合并实时帧与历史帧。</li>
+    <li>终态通信帧携带原始请求文本，因此失败/超时/取消时可正确显示“重试”；没有请求文本时仍不展示不可执行的按钮。</li>
+    <li>本阶段不创建 DAG、Task、产物或新的 Web 通信接口。</li>
+  </ul>
+  <p>验证：TeamAgentTurnBubble 终态状态与重试展示回归通过。</p>
+</div>
+<div>
+  <h2>79. Team @Agent 并发与取消竞态第三阶段（2026-08-18）</h2>
+  <ul>
+    <li><b>旧帧隔离：</b>取消直接 mention 时记录该回合的 <code>request_id</code>；即使旧回合的迟到 <code>team_internal</code> 帧在重试后到达，也不会污染新回合气泡。</li>
+    <li><b>重试边界：</b>重试沿用现有 <code>useChat.send()</code>，生成新的请求身份；旧请求身份不会因发送新消息而解除抑制。</li>
+    <li><b>失败一致：</b>后端将 Agent/Provider 未结构化异常转成可恢复的 <code>failed</code> 终态，Web 继续使用既有失败提示和重试入口。</li>
+    <li><b>范围：</b>只扩展既有 <code>useChat</code> 请求帧过滤与 Team 通信错误收口，不新增 Web 模块、接口或持久化字段。</li>
+  </ul>
+  <p>验证：Web hook/Team 气泡测试 29 passed，Web/Desktop TypeScript typecheck 通过；直接 mention 后端定向回归通过。</p>
+</div>
+<div>
+  <h2>80. Team @成员路由 ID 修复（2026-08-18）</h2>
+  <ul>
+    <li><b>问题：</b>外部 Agent 的配置 ID（例如 <code>agent_c6f06632e6a4</code>）与 Team Runtime 成员 ID（例如 <code>kk</code>）被混用；候选展示为 <code>@kk</code>，发送却携带外部 Agent ID，服务端会按当前团队成员校验并拒绝。</li>
+    <li><b>修复：</b>Team 成员视图新增独立的 <code>mentionId</code>；外部成员使用运行时成员名，Leader 固定使用 <code>leader</code>，<code>agentId</code> 继续保留给外部 Agent 配置和身份展示。</li>
+    <li><b>重试：</b>历史失败回合重试前会把旧的外部 Agent ID 映射回当前 Team 成员 ID，避免修复前产生的失败气泡继续重试失败。</li>
+    <li><b>范围：</b>只更新既有 Web Composer、Team 成员视图和重试入口，不新增接口或持久化字段。</li>
+  </ul>
+  <p>验证：Composer 相关测试 8 passed，Web TypeScript typecheck 通过。</p>
+</div>
+<div>
+  <h2>Team 成员职责展示降噪（2026-08-18）</h2>
+  <ul>
+    <li>Team 对话成员头部不再直接展示外部 Agent 的完整 Markdown 角色提示；仅保留短职责摘要，隐藏工作原则、团队协作关系、输出格式等内部配置段落。</li>
+    <li>用户 @成员直达回答继续复用 TeamAgentTurnBubble 与团队回合相同的头像、职责、状态和正文气泡结构。</li>
+    <li>通信状态徽标固定不压缩为竖排；职责过长时只做单行省略，不影响回答正文。</li>
+  </ul>
+  <p>验证：TeamAgentTurnBubble 与 MessageItem 测试 13 passed，Web TypeScript typecheck 与 production build 通过。</p>
+</div>
+<div>
+  <h2>Team @Agent 直接通信流式 timeline（2026-08-18）</h2>
+  <ul>
+    <li><b>实时体验：</b>单独 @成员与团队节点回复共用文本增量、思考和工具 timeline；等待帧、过程帧和终态帧按同一个 <code>request_id</code> 合并为一个 Team 成员气泡。</li>
+    <li><b>语义边界：</b>direct mention 仍不创建 DAG、任务、依赖或产物；只复用 Agent 回答过程，不显示团队派发/验收节点。</li>
+    <li><b>实现：</b>Web team message merge 对 <code>user_mention_answer + team_stream</code> 复用现有流式文本、thinking 和 toolCalls 合并逻辑，终态保留过程区。</li>
+  </ul>
+  <p>验证：Web history mapping 回归 22 passed，后端 direct mention 回归 6 passed。</p>
+</div>
+<div>
+  <h2>Team @Agent 成功态标签降噪（2026-08-18）</h2>
+  <ul>
+    <li>用户直接 @成员成功回答时不再显示“已回答”徽标，成功正文气泡与团队成员普通回复保持一致。</li>
+    <li>等待回答、排队中、回答中、失败、超时和取消仍保留状态提示；失败、超时和取消继续提供已有的重试入口。</li>
+    <li>只调整既有 <code>TeamAgentTurnBubble</code> 状态文案映射，不新增 Web 模块、接口、持久化字段或 DAG。</li>
+  </ul>
+  <p>验证：直接 mention 成功态渲染回归、Web TypeScript typecheck 与 production build 通过。</p>
+</div>
+<div>
+  <h2>Team 通信回合展示统一（2026-08-18）</h2>
+  <ul>
+    <li>成员名称行不再追加“已发送”“等待回答”“回答中”“已超时”等通信状态标签，避免与团队成员普通回复的标题结构不一致。</li>
+    <li>处理中、思考和工具调用继续由既有 Agent Turn timeline 展示；失败、超时和取消继续保留正文及既有重试/取消操作。</li>
+    <li>用户直接 @成员、成员间 ask、Leader 通信与普通 Team 成员回合统一复用 <code>TeamAgentTurnBubble</code> 和 <code>AgentTurnBubble</code>，不新增通信组件或协议字段。</li>
+  </ul>
+  <p>验证：Web Team 通信渲染回归、TypeScript typecheck 与 production build 通过。</p>
+</div>
+<div>
+  <h2>Team 通信状态样式收口（2026-08-18）</h2>
+  <ul>
+    <li>删除已不再渲染的成员名称行通信状态徽标样式，避免保留无法触达的 Web CSS。</li>
+    <li><code>communication_status</code> 仍作为通信生命周期字段使用，继续驱动历史恢复、重试和取消判断；状态不再承担名称行视觉展示职责。</li>
+    <li>本阶段不新增组件、接口、持久化字段或 Team DAG 逻辑。</li>
+  </ul>
+  <p>验证：Web Team 回合渲染回归、CSS 引用扫描、TypeScript typecheck 与 production build 通过。</p>
 </div>
 </body>
 </html>

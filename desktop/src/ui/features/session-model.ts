@@ -2,13 +2,13 @@
  * 会话级模型：Composer 切换走 PUT /api/session/{id}/model，不再调用全局 switchModel。
  */
 
-import { backendApi, type ModelOption, type RuntimeModelProfile } from '../backend-client';
-import { isBusySession, notify, state } from '../state';
+import { backendApi, type ModelOption, type RuntimeModelProfile, type TeamMemberModelBinding } from '../backend-client';
+import { isBusySession, notify, setActiveExternalTeamForSession, state } from '../state';
 import { composerWorkspaceId, ensureComposerDraftSession, getDraftSessionModelId, getSessionAgentDisplay, isDraftSession, setDraftSessionModelId } from './workspaces';
 
 export interface SessionModelBinding {
-  source?: 'crew' | 'external';
-  model_profile_id: string;
+  source?: 'crew' | 'external' | 'team';
+  model_profile_id?: string;
   pending_model_profile_id?: string | null;
   model_label?: string;
   pending_label?: string | null;
@@ -23,6 +23,8 @@ export interface SessionModelBinding {
   model_switchable?: boolean;
   runtime_id?: string;
   external_agent_id?: string;
+  external_team_id?: string;
+  members?: TeamMemberModelBinding[];
 }
 
 export interface ComposerModelOption {
@@ -171,6 +173,13 @@ export function sessionDemoMode(sessionId: string | null | undefined = state.act
 }
 
 export function applySessionModelBinding(sessionId: string, binding: SessionModelBinding): void {
+  // Team identity is persisted with the session model binding. Restore it at
+  // the same boundary that restores the model so historical sessions can
+  // populate the mention palette before the composer is opened.
+  setActiveExternalTeamForSession(
+    sessionId,
+    binding.source === 'team' ? String(binding.external_team_id || '').trim() : '',
+  );
   bindingsBySession.set(sessionId, binding);
   if (sessionId === state.activeSessionId) {
     syncSessionModelUi();
@@ -210,7 +219,7 @@ export function mergeSessionModelsFromBackend(
 export async function loadSessionModel(sessionId: string): Promise<SessionModelBinding | null> {
   try {
     const binding = await backendApi.getSessionModel(sessionId);
-    if (binding.source === 'external' && isDraftSession(sessionId)) {
+    if (binding.source === 'external' && isDraftSession(sessionId) && binding.model_profile_id) {
       setDraftSessionModelId(binding.model_profile_id);
     }
     applySessionModelBinding(sessionId, binding);
@@ -246,7 +255,7 @@ export async function setSessionModel(modelId: string, sessionId?: string, works
       const binding = await backendApi.setSessionModel(sid, modelId, {
         workspace_id: targetWorkspaceId,
       });
-      if (isDraftSession(sid)) setDraftSessionModelId(binding.model_profile_id);
+      if (isDraftSession(sid) && binding.model_profile_id) setDraftSessionModelId(binding.model_profile_id);
       applySessionModelBinding(sid, binding);
       notify(`已切换模型：${binding.model_label || modelId}`);
       return;

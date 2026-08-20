@@ -6,7 +6,7 @@ import { mergeTeamInternalMessage } from "../lib/teamMessageMerge";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { backendDurationToMs, backendSecondsToMs } from "../lib/backendTime";
 import { ChatSocket } from "../ws";
-import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, WikiIngestProgress, WikiPage } from "../types";
+import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, UserAgentMention, WikiIngestProgress, WikiPage } from "../types";
 
 let _seq = 0;
 const newId = () => `m${Date.now()}_${_seq++}`;
@@ -105,6 +105,16 @@ export function isTeamRuntimeStatus(message: string): boolean {
   );
 }
 
+/** 取消后的旧请求即使迟到，也不能污染重试产生的新回合。 */
+export function isSuppressedRequest(requestId: unknown, suppressed: ReadonlySet<string>): boolean {
+  const normalized = String(requestId || "").trim();
+  return Boolean(normalized && suppressed.has(normalized));
+}
+
+function suppressedRequestKey(sessionId: string, requestId: string): string {
+  return `${sessionId}\u0000${requestId}`;
+}
+
 export function normalizeWikiCardPages(body: Record<string, unknown>): WikiPage[] {
   const raw = Array.isArray(body.pages) ? body.pages : Array.isArray(body.cards) ? body.cards : [];
   return raw as WikiPage[];
@@ -152,6 +162,7 @@ interface SendOptions {
   externalTeamId?: string;
   wikiKbId?: string;
   teamExecutionTier?: TeamExecutionTier;
+  userMentions?: UserAgentMention[];
 }
 
 /** 单会话的聚合记账（不直接驱动渲染，放 ref）。 */
@@ -434,6 +445,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
   const wikiProgressRef = useRef<Record<string, WikiIngestProgress>>({});
   const subscribedSessionsRef = useRef<Set<string>>(new Set());
   const suppressChunksRef = useRef<Set<string>>(new Set());
+  const suppressedRequestIdsRef = useRef<Set<string>>(new Set());
   const loadedSessionsRef = useRef<Set<string>>(new Set());
   // 各会话最后收到的 Gateway sequence（断线重连后回放定位用）
   const lastGatewaySequenceRef = useRef<Map<string, number>>(new Map());
@@ -647,6 +659,12 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
         }
       }
       if (suppressChunksRef.current.has(sid)) return;
+      const chunkRequestId = String(
+        c.request_id || c.body?.request_id || (c.body?.message && typeof c.body.message === "object"
+          ? c.body.message.request_id
+          : "") || "",
+      ).trim();
+      if (isSuppressedRequest(suppressedRequestKey(sid, chunkRequestId), suppressedRequestIdsRef.current)) return;
       const book = bookFor(sid);
 
       if (c.kind === "delta") {
@@ -752,6 +770,11 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             mentionFrom: c.body.mention_from,
             mentionTo: c.body.mention_to,
             mentionIntent,
+            communicationKind: c.body.communication_kind,
+            communicationStatus: c.body.communication_status,
+            requestId: c.body.request_id,
+            replyTo: c.body.reply_to,
+            communicationRequestText: c.body.communication_request_text,
             displayMode: c.body.display_mode,
             collapsedTitle: c.body.collapsed_title,
             thinking: normalizeTeamText(c.body.thinking),
@@ -1016,6 +1039,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             externalTeamId: options.externalTeamId,
             wikiKbId: options.wikiKbId,
             teamExecutionTier: options.teamExecutionTier,
+            userMentions: options.userMentions,
           },
         ]);
         setQueue(sessionId, "正在排队…");
@@ -1040,6 +1064,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
       }
       if (options.wikiKbId) {
         payload.wiki_kb_id = options.wikiKbId;
+      }
+      if (options.userMentions?.length) {
+        payload.user_mentions = options.userMentions;
       }
       if (mode === "team" && options.teamExecutionTier) {
         payload.team_execution_profile = {
@@ -1089,6 +1116,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     if (next.wikiKbId) {
       payload.wiki_kb_id = next.wikiKbId;
     }
+    if (next.userMentions?.length) {
+      payload.user_mentions = next.userMentions;
+    }
     if (next.mode === "team" && next.teamExecutionTier) {
       payload.team_execution_profile = {
         requested_mode: next.teamExecutionTier,
@@ -1135,6 +1165,27 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
       );
     }
   }, []);
+
+  const cancelMention = useCallback((sessionId: string, requestId?: string) => {
+    const normalizedRequestId = String(requestId || "").trim();
+    if (normalizedRequestId) {
+      suppressedRequestIdsRef.current.add(suppressedRequestKey(sessionId, normalizedRequestId));
+      // 只保留最近的取消请求，避免长时间打开页面后集合无限增长。
+      while (suppressedRequestIdsRef.current.size > 200) {
+        const oldest = suppressedRequestIdsRef.current.values().next().value;
+        if (oldest == null) break;
+        suppressedRequestIdsRef.current.delete(oldest);
+      }
+    }
+    stop(sessionId);
+    if (!normalizedRequestId) return;
+    setMessagesMap((prev) => ({
+      ...prev,
+      [sessionId]: (prev[sessionId] ?? []).map((message) => message.requestId === normalizedRequestId
+        ? { ...message, communicationStatus: "cancelled" }
+        : message),
+    }));
+  }, [stop]);
 
   /** 向运行中的回复注入补充指令（不打断；后端回 status 帧确认）。
    *  本地把这句作为 user 气泡显示，让用户看见自己注入了什么。 */
@@ -1258,6 +1309,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     send(item.query, sessionId, item.mode, item.workspaceId, item.attachments, {
       subScenario: item.subScenario,
       externalTeamId: item.externalTeamId,
+      wikiKbId: item.wikiKbId,
+      teamExecutionTier: item.teamExecutionTier,
+      userMentions: item.userMentions,
     });
   }, [send]);
 
@@ -1489,6 +1543,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     }),
     send,
     stop,
+    cancelMention,
     steer,
     enterPlan,
     exitPlan,

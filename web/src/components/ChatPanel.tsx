@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AppConfig, Attachment, ExternalAgent, FollowupQuestion, PendingMessage, Session, Skill, TeamExecutionTier, TeamMemberView, TodoItem, UiMessage } from "../types";
+import type { AppConfig, Attachment, ExternalAgent, FollowupQuestion, PendingMessage, Session, Skill, TeamExecutionTier, TeamMemberView, TodoItem, UiMessage, UserAgentMention } from "../types";
 import { api } from "../api";
 import MessageList from "./MessageList";
 import Composer from "./Composer";
@@ -17,7 +17,7 @@ export interface Props {
   pendingQueue: PendingMessage[];
   config: AppConfig | null;
   attachments: Attachment[];
-  onSend: (text: string, attachments: Attachment[], subScenario?: string) => void;
+  onSend: (text: string, attachments: Attachment[], subScenario?: string, userMentions?: UserAgentMention[]) => void;
   onStop?: () => void;
   onSteer?: (text: string) => void;
   onRemoveFromQueue?: (index: number) => void;
@@ -50,6 +50,8 @@ export interface Props {
   todos?: TodoItem[];
   editDraft?: { messageId: string; text: string } | null;
   onEditMessage?: (message: UiMessage) => void;
+  onRetryMention?: (message: UiMessage) => void;
+  onCancelMention?: (message: UiMessage) => void;
   onCancelEdit?: () => void;
   /** 附件上传归属（wiki 会话时传入）：透传给 Composer 的上传调用 */
   uploadContext?: { sessionId?: string; kbId?: string };
@@ -99,6 +101,8 @@ export default function ChatPanel({
   onDismissFollowup,
   editDraft,
   onEditMessage,
+  onRetryMention,
+  onCancelMention,
   onCancelEdit,
   todos = [],
   uploadContext,
@@ -283,6 +287,8 @@ export default function ChatPanel({
             onAnswerFollowup={onAnswerFollowup}
             onDismissFollowup={onDismissFollowup}
             onEditMessage={onEditMessage}
+            onRetryMention={onRetryMention}
+            onCancelMention={onCancelMention}
             teamMembers={teamMembers}
             showEmptyState={!isTeamSession}
             currentAgentLabel={currentAgentLabel}
@@ -323,6 +329,7 @@ export default function ChatPanel({
             onModelChange={onModelChange}
             currentAgentLabel={currentAgentLabel}
             isTeamSession={isTeamSession}
+            teamMembers={teamMembers}
             teamExecutionTier={teamExecutionTier}
             onTeamExecutionTierChange={onTeamExecutionTierChange}
             canSelectAgent={canSelectAgent}

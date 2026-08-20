@@ -389,6 +389,20 @@ body.welcome-active #chat-composer-root {
   grid-row: 2;
 }
 
+/* 文件 / 技能补全画布打开时，解除 Composer 的两层局部 stacking context：
+   只把承载 mention-pop 的输入面板抬到 Welcome Header 之上，项目灰条仍留在
+   mascot 下方，避免整块 Composer 反过来遮住 Crew。 */
+body.welcome-active #chat-composer-root:has(.mention-pop),
+body.welcome-active #chat-composer-root:has(.mention-pop) .mw-composer {
+  z-index: auto;
+}
+
+body.welcome-active
+  #chat-composer-root
+  .mw-composer__panel:has(.mention-pop) {
+  z-index: 3;
+}
+
 body.welcome-active .welcome-scenarios {
   align-self: start;
   grid-column: 1;
@@ -434,16 +448,49 @@ body.welcome-active .tab-pane#chat-tab.active.chat-mode .chat-disclaimer {
 
 @media (max-height: 680px) {
   body.welcome-active .welcome-view__header {
-    padding: var(--mw-space-2) var(--mw-space-4) 0;
+    padding: var(--mw-space-2) var(--mw-space-4) var(--mw-space-4);
   }
 
   .welcome-view__mascot {
-    width: 156px;
-    height: 156px;
+    width: 140px;
+    height: 140px;
   }
 
-  .welcome-view__identity {
-    gap: var(--mw-space-1);
+  /* 短窗不再把 Welcome 内容压进固定三行网格，面板本身负责纵向滚动。 */
+  body.welcome-active #welcome-panel {
+    display: block;
+    min-width: 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block: var(--mw-space-4);
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  body.welcome-active #welcome-panel .welcome-view {
+    display: grid;
+    min-height: 100%;
+    align-content: start;
+    padding: var(--mw-space-4) var(--mw-space-4) var(--mw-space-8);
+  }
+
+  body.welcome-active #welcome-panel .welcome-view__header {
+    position: static;
+    z-index: auto;
+    width: 100%;
+    align-self: auto;
+    justify-self: stretch;
+    grid-column: auto;
+    grid-row: auto;
+    padding: 0;
+  }
+
+  body.welcome-active #welcome-panel .welcome-scenarios {
+    align-self: stretch;
+    grid-column: auto;
+    grid-row: auto;
   }
 }
 

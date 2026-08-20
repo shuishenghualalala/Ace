@@ -12,6 +12,10 @@ from typing import Any
 
 from crew.team import agent_profile as _agent_profile
 from crew.team.agent_profile import AgentProfile, build_agent_profile
+from crew.team.agent_profile import (
+    evaluate_capability_coverage,
+    is_agent_profile_available,
+)
 from crew.team.capabilities import (
     CAPABILITIES,
     CAPABILITY_LABELS,
@@ -322,11 +326,16 @@ def rank_staffing_candidates(
         if not agent_id or agent_id in excluded or is_crew_builtin_agent(agent_id):
             continue
         profile = build_agent_profile(agent)
-        if not _profile_available_for_formation(profile):
+        if not is_agent_profile_available(profile):
             continue
-        covered = [capability for capability in required if profile.score(capability) >= 0.5]
-        if len(covered) != len(required):
+        coverage = evaluate_capability_coverage(
+            required,
+            {agent_id: profile},
+            assigned_agent_ids=[agent_id],
+        )
+        if coverage.status != "covered":
             continue
+        covered = list(coverage.covered)
         capability_evidence = {
             capability: {
                 "score": round(profile.score(capability), 4),
@@ -368,16 +377,48 @@ def role_key_for_capabilities(capabilities: list[str]) -> str:
 
 def _required_capabilities(_text: str, team_spec: Any) -> list[str]:
     required = normalize_capabilities(team_spec.team_requirements.get("capabilities") or [])
-    profile = team_spec.execution_profile
-    if bool(profile.get("needs_build")) and not {
+    workflow_lanes = set(team_spec.team_requirements.get("workflow_lanes") or [])
+    if "build" in workflow_lanes and not {
         "frontend", "backend", "implementation",
     }.intersection(required):
         required.append("implementation")
-    if bool(profile.get("needs_verification")):
+    if "verify" in workflow_lanes:
         required.append("verification")
-    if bool(profile.get("needs_docs")):
+    if "docs" in workflow_lanes or "release" in workflow_lanes:
         required.append("documentation")
     return [capability for capability in normalize_capabilities(required) if capability != "planning"]
+
+
+def _formation_team_spec_input(payload: dict[str, Any], goal: str) -> dict[str, Any]:
+    """Build the canonical TeamSpec envelope from the formation request."""
+
+    requirements = dict(payload.get("team_requirements") or {})
+    requested_capabilities = payload.get("required_capabilities")
+    if requested_capabilities is not None and "capabilities" not in requirements:
+        requirements["capabilities"] = requested_capabilities
+    requested_roles = payload.get("required_roles")
+    if requested_roles is not None and "roles" not in requirements:
+        requirements["roles"] = requested_roles
+    task_profile = payload.get("task_profile")
+    return {
+        "goal": goal,
+        "task_profile": dict(task_profile) if isinstance(task_profile, dict) else {},
+        "team_requirements": requirements,
+        **{
+            key: payload[key]
+            for key in (
+                "collaboration_mode",
+                "planning",
+                "policy",
+                "deliverables",
+                "success_criteria",
+                "risk_level",
+                "uncertainty",
+                "planner_notes",
+            )
+            if key in payload
+        },
+    }
 
 
 def _role_key_for_capabilities(capabilities: list[str]) -> str:
@@ -573,14 +614,14 @@ def _choose_minimal_team(
             capability in uncovered
             and agent_id not in constraints.excluded_agent_ids
             and profile is not None
-            and _profile_available_for_formation(profile)
+            and is_agent_profile_available(profile)
         ):
             assignment.setdefault(agent_id, []).append(capability)
             uncovered.remove(capability)
     for agent_id in constraints.required_agent_ids:
         if agent_id != leader_id and agent_id not in constraints.excluded_agent_ids:
             profile = profiles.get(agent_id)
-            if profile is None or not _profile_available_for_formation(profile):
+            if profile is None or not is_agent_profile_available(profile):
                 continue
             assigned = assignment.setdefault(agent_id, [])
             if not assigned and uncovered:
@@ -599,9 +640,14 @@ def _choose_minimal_team(
             if not agent_id or agent_id == leader_id or agent_id in constraints.excluded_agent_ids:
                 continue
             profile = profiles[agent_id]
-            if not _profile_available_for_formation(profile):
+            if not is_agent_profile_available(profile):
                 continue
-            cover = [cap for cap in uncovered if profile.score(cap) >= 0.5]
+            coverage = evaluate_capability_coverage(
+                uncovered,
+                {agent_id: profile},
+                assigned_agent_ids=[agent_id],
+            )
+            cover = list(coverage.covered)
             if not cover:
                 continue
             score = sum(profile.score(cap) for cap in cover)
@@ -615,9 +661,14 @@ def _choose_minimal_team(
                 if not agent_id or agent_id == leader_id or agent_id in constraints.excluded_agent_ids:
                     continue
                 profile = profiles[agent_id]
-                if not _profile_available_for_formation(profile):
+                if not is_agent_profile_available(profile):
                     continue
-                cover = list(uncovered)
+                coverage = evaluate_capability_coverage(
+                    uncovered,
+                    {agent_id: profile},
+                    assigned_agent_ids=[agent_id],
+                )
+                cover = list(coverage.covered)
                 score = sum(profile.score(cap) for cap in cover)
                 if score > best_score:
                     best_agent = agent
@@ -632,7 +683,7 @@ def _choose_minimal_team(
 
 
 def _profile_available_for_formation(profile: AgentProfile) -> bool:
-    return profile.availability == "ready" and profile.model.get("binding_status") != "missing"
+    return is_agent_profile_available(profile)
 
 
 def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) -> dict[str, Any]:
@@ -642,7 +693,11 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
     slots = [slot for slot in raw_slots if isinstance(slot, dict)] if has_slots else []
     text = _goal_text(payload, include_workflow=not has_slots)
     description = str(payload.get("description") or "").strip()
-    team_spec = build_team_spec(_goal_text(payload, include_workflow=True))
+    team_spec_input = _formation_team_spec_input(
+        payload,
+        _goal_text(payload, include_workflow=True),
+    )
+    team_spec = build_team_spec(team_spec_input)
     constraints = FormationConstraints() if has_slots else _extract_constraints(text, all_agents)
 
     agent_by_id = {str(agent.get("id") or ""): agent for agent in all_agents}
@@ -689,12 +744,10 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
 
     required_capabilities = _required_capabilities(text, team_spec)
     requested_capabilities = normalize_capabilities(payload.get("required_capabilities") or [])
-    custom_capability_text = " ".join(
-        str(item).strip()
-        for item in (payload.get("custom_capabilities") or [])
-        if str(item).strip()
-    )
-    custom_requested_capabilities = capabilities_from_text(custom_capability_text) if custom_capability_text else []
+    # Custom capabilities are now an explicit capability-key list.  Natural
+    # language descriptions belong in the PlanningDecision input boundary and
+    # must not be reinterpreted here by a second keyword table.
+    custom_requested_capabilities = normalize_capabilities(payload.get("custom_capabilities") or [])
     required_capabilities = list(dict.fromkeys([
         *required_capabilities,
         *requested_capabilities,
@@ -855,16 +908,25 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         )
         member["responsibility_markdown"] = member["role"]
 
-    covered_capabilities = list(dict.fromkeys(
-        capability
-        for member in members
-        for capability in member.get("assigned_capabilities") or []
-        if capability in required_capabilities
-    ))
-    uncovered_capabilities = [
-        capability for capability in required_capabilities
-        if capability not in covered_capabilities
-    ]
+    formation_profiles = {
+        agent_id: profiles[agent_id]
+        for agent_id in (
+            str(member.get("agent_id") or "")
+            for member in members
+        )
+        if agent_id in profiles
+    }
+    formation_coverage = evaluate_capability_coverage(
+        required_capabilities,
+        formation_profiles,
+        assigned_agent_ids=formation_profiles.keys(),
+    )
+    covered_capabilities = list(formation_coverage.covered)
+    uncovered_capabilities = list(dict.fromkeys([
+        *formation_coverage.missing,
+        *formation_coverage.unavailable,
+        *formation_coverage.unknown,
+    ]))
     assessment_confidences = [
         profiles[member["agent_id"]].confidence(capability)
         for member in members
@@ -876,9 +938,12 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         sum(assessment_confidences) / len(assessment_confidences)
         if assessment_confidences else 0.15
     )
+    # No explicit requirement is not proof of full coverage.  Keep the Fast
+    # baseline conservative so an underspecified TeamSpec cannot skip the
+    # Formation review path by reporting a false 100% match.
     coverage_confidence = (
         len(covered_capabilities) / len(required_capabilities)
-        if required_capabilities else 1.0
+        if required_capabilities else 0.0
     )
     requirement_confidence = 0.85 if description or text else 0.4
     if constraints.conflicts:
@@ -964,9 +1029,9 @@ def formation_auto_decision(
     coverage = plan.get("coverage") if isinstance(plan.get("coverage"), dict) else {}
     confidence = plan.get("confidence") if isinstance(plan.get("confidence"), dict) else {}
     team_spec = baseline.get("team_spec") if isinstance(baseline.get("team_spec"), dict) else {}
-    execution_profile = (
-        team_spec.get("execution_profile")
-        if isinstance(team_spec.get("execution_profile"), dict)
+    task_profile = (
+        team_spec.get("task_profile")
+        if isinstance(team_spec.get("task_profile"), dict)
         else {}
     )
     policy = team_spec.get("policy") if isinstance(team_spec.get("policy"), dict) else {}
@@ -985,7 +1050,7 @@ def formation_auto_decision(
         reasons.append("capability_evidence_below_0.75")
     if str(team_spec.get("uncertainty") or "high") != "low":
         reasons.append("team_spec_uncertainty")
-    if str(execution_profile.get("complexity") or "multi_role") not in {"simple", "focused"}:
+    if str(task_profile.get("complexity") or "multi_role") not in {"simple", "focused"}:
         reasons.append("structured_multi_role_task")
     if list(plan.get("warnings") or []):
         reasons.append("formation_warnings")
@@ -1766,7 +1831,8 @@ def build_team_draft(payload: dict[str, Any], agents: list[dict[str, Any]]) -> d
     if leader_id not in agent_by_id:
         leader_id = ""
     goal = "\n".join(item for item in (name, description) if item).strip()
-    spec = build_team_spec(goal)
+    team_spec_input = _formation_team_spec_input(payload, goal)
+    spec = build_team_spec(team_spec_input)
     required_capabilities = _required_capabilities(goal, spec)
     draft_slots = payload.get("draft_slots")
     requested_slots = [slot for slot in draft_slots if isinstance(slot, dict)] if isinstance(draft_slots, list) else []
