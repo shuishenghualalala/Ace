@@ -48,8 +48,10 @@ export interface ToolCallInfo {
   status: 'generating' | 'running' | 'done' | 'error';
   startedAt: number;
   duration?: number | undefined;
-  /** 运行中的阶段进度文案（phase=progress 帧），完成/失败后为空。 */
+  /** 最近一条阶段进度文案（兼容旧数据与运行态摘要）。 */
   progressText?: string | undefined;
+  /** 按到达顺序保留的阶段进度行，供过程时间线逐行渲染。 */
+  progressHistory?: string[] | undefined;
 }
 
 /** 同回合内 assistant 段的语义角色：过程（进折叠区）vs 最终答案（折叠外可见）。 */
@@ -575,6 +577,26 @@ function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement 
   return renderTimelineItem(PROCESS_SUBAGENT_ICON_SVG, iconClass, details);
 }
 
+/** 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。 */
+function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void {
+  const lines = tool.progressHistory?.length
+    ? tool.progressHistory
+    : tool.progressText
+      ? [tool.progressText]
+      : [];
+  if (lines.length === 0) return;
+
+  const progress = document.createElement('div');
+  progress.className = 'process-timeline__progress';
+  for (const line of lines) {
+    const item = document.createElement('div');
+    item.className = 'process-timeline__stage';
+    item.textContent = line;
+    progress.appendChild(item);
+  }
+  parent.appendChild(progress);
+}
+
 function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   if (SUBAGENT_CARD_TOOLS.has(tool.name)) return renderSubagentCard(tool, messageId);
   const isActive = tool.status === 'running' || tool.status === 'generating';
@@ -623,13 +645,6 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
     details.setAttribute('data-fold-key', foldKey);
     const titleEl = details.querySelector<HTMLElement>('.process-timeline__title')!;
     titleEl.textContent = title;
-    // 长耗时工具的阶段进度（phase=progress）：折叠状态也可见，跟随标题行。
-    if (isActive && tool.progressText) {
-      const stage = document.createElement('span');
-      stage.className = 'process-timeline__stage';
-      stage.textContent = tool.progressText;
-      titleEl.after(stage);
-    }
     const durSpan = details.querySelector<HTMLElement>('.process-timeline__duration')!;
     if (!initialDuration && !isActive) durSpan.remove();
     const argsSection = details.querySelector<HTMLElement>('[data-section="args"]')!;
@@ -646,10 +661,15 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
       const contentWrap = document.createElement('div');
       contentWrap.className = 'process-timeline__tool-media';
       contentWrap.appendChild(details);
+      appendToolProgressLines(contentWrap, tool);
       contentWrap.appendChild(buildInlineImage(shotPath, '页面截图', shotPath, 'tool'));
       return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
     }
-    return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, details);
+    const contentWrap = document.createElement('div');
+    contentWrap.className = 'process-timeline__tool';
+    contentWrap.appendChild(details);
+    appendToolProgressLines(contentWrap, tool);
+    return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
   }
 
   const content = createTrustedElement<HTMLElement>(
@@ -662,15 +682,13 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   );
   const titleEl = content.querySelector<HTMLElement>('.process-timeline__title')!;
   titleEl.textContent = title;
-  if (isActive && tool.progressText) {
-    const stage = document.createElement('span');
-    stage.className = 'process-timeline__stage';
-    stage.textContent = tool.progressText;
-    titleEl.after(stage);
-  }
   const durSpan = content.querySelector<HTMLElement>('.process-timeline__duration')!;
   if (!initialDuration && !isActive) durSpan.remove();
-  return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, content);
+  const contentWrap = document.createElement('div');
+  contentWrap.className = 'process-timeline__tool';
+  contentWrap.appendChild(content);
+  appendToolProgressLines(contentWrap, tool);
+  return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
 }
 
 interface WikiConfirmationResult {

@@ -451,6 +451,27 @@ describe('renderAgentTurn', () => {
     expect(staticRow?.querySelector('.process-timeline__title')?.textContent).toBe('查看技能');
   });
 
+  it('工具阶段进度按产生顺序渲染为独立过程行', () => {
+    const root = renderAgentTurn(
+      makeMessages({
+        thinking: undefined,
+        toolCalls: [{
+          toolCallId: 'wiki-1',
+          name: 'wiki_plan_ingest',
+          args: '{}',
+          status: 'running',
+          startedAt: 1_700_000_000_000,
+          progressText: '正在通读素材（2/2 段）…',
+          progressHistory: ['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…'],
+        }],
+      }),
+      { isStreaming: true, userPinnedOpen: null, turnDurationMs: 5_000 },
+    );
+    const lines = Array.from(root.querySelectorAll('.process-timeline__stage')).map((node) => node.textContent);
+    expect(lines).toEqual(['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…']);
+    expect(root.querySelector('.process-timeline__title')?.textContent).not.toContain('正在通读素材');
+  });
+
   it('run_agent 渲染 subagent 专用卡片：中文标题 + 任务描述 + 执行摘要', () => {
     const root = renderAgentTurn(
       makeMessages({

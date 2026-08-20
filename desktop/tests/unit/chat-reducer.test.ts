@@ -534,7 +534,23 @@ describe('toolReducer', () => {
     // 进度帧不得把工具行提前标成完成
     expect(updated?.status).toBe('running');
     expect(updated?.progressText).toBe('正在通读素材（2/5 段）…');
+    expect(updated?.progressHistory).toEqual(['正在通读素材（2/5 段）…']);
     expect(updated?.duration).toBeUndefined();
+  });
+
+  it('按到达顺序累积多条阶段进度，而不是覆盖上一条', () => {
+    const first = toolReducer(
+      { kind: 'tool', body: { tool_call_id: 't1', phase: 'progress', text: '读取文档…' }, sequence: 2 },
+      makeSnapshot(),
+    );
+    const second = toolReducer(
+      { kind: 'tool', body: { tool_call_id: 't1', phase: 'progress', text: '正在通读素材（1/2 段）…' }, sequence: 3 },
+      { ...makeSnapshot({ now: 300 }), book: first.replaceBook! },
+    );
+    expect(second.replaceBook?.toolMap.get('t1')?.progressHistory).toEqual([
+      '读取文档…',
+      '正在通读素材（1/2 段）…',
+    ]);
   });
 
   it('clears stage text when the tool completes', () => {
