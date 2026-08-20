@@ -62,6 +62,7 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       wikiAgentSession: vi.fn(),
       wikiAgentSessions: vi.fn(),
       wikiPage: vi.fn(),
+      wikiSearch: vi.fn(),
       wikiKBs: vi.fn(),
       wikiInit: vi.fn(),
       wikiPages: vi.fn(),
@@ -123,6 +124,7 @@ const api = backendApi as unknown as {
   wikiAgentSession: ReturnType<typeof vi.fn>;
   wikiAgentSessions: ReturnType<typeof vi.fn>;
   wikiPage: ReturnType<typeof vi.fn>;
+  wikiSearch: ReturnType<typeof vi.fn>;
   wikiKBs: ReturnType<typeof vi.fn>;
   wikiInit: ReturnType<typeof vi.fn>;
   wikiPages: ReturnType<typeof vi.fn>;
@@ -157,6 +159,10 @@ function makePage(partial: Partial<WikiPage>): WikiPage {
     aliases: [],
     ...partial,
   };
+}
+
+function pagesResult(pages: WikiPage[]) {
+  return { ok: true, pages, source_titles: {}, source_files: {} };
 }
 
 type MockSocket = {
@@ -355,6 +361,31 @@ describe('wiki_cards 渲染', () => {
     // renderShell 重建时短暂 detach 会重置浏览器滚动位置,修复后应恢复为记住的值
     expect(scrollWrites).toContain(456);
     expect(scrollValue).toBe(456);
+  });
+
+  it('消息正文里的 [[WikiLink]] 点击后按标题解析并打开页面', async () => {
+    api.wikiSearch.mockResolvedValueOnce(
+      pagesResult([makePage({ id: 'target-1', title: '目标页', content: '目标正文' })]),
+    );
+
+    await enterWiki();
+    const rid = await sendAndGetRequestId('查一下');
+    applyChunk({
+      kind: 'final',
+      body: { text: '参见 [[目标页]]' },
+      session_id: WIKI_SID,
+      request_id: rid,
+      sequence: 2,
+      is_final: true,
+    } as ChatChunk);
+
+    await vi.waitFor(() => expect(document.querySelector('[data-rel-title="目标页"]')).not.toBeNull());
+    (document.querySelector('[data-rel-title="目标页"]') as HTMLElement).click();
+
+    await vi.waitFor(() => {
+      expect(api.wikiSearch).toHaveBeenCalledWith('目标页', 'default', 8);
+      expect(document.querySelector<HTMLInputElement>('[data-wiki-title]')?.value).toBe('目标页');
+    });
   });
 
   it('旧 request_id 的迟到 wiki_cards 被 turn gate 丢弃', async () => {

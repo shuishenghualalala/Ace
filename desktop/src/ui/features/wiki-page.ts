@@ -1303,7 +1303,7 @@ function flushGroupDirty(group: WikiDetailGroup): void {
   void saveWikiPageDraft(group.id, group.selectedId);
 }
 
-async function resolveAndOpenWikiPage(title: string): Promise<boolean> {
+export async function openWikiPageByTitle(title: string): Promise<boolean> {
   const normalized = title.trim().toLocaleLowerCase();
   const local = view.pages.find((page) =>
     [page.title, ...page.aliases].some((value) => value.trim().toLocaleLowerCase() === normalized),
@@ -1600,7 +1600,7 @@ function renderShell(): void {
       element: target,
       markdown: page.content || '',
       onChange: () => scheduleWikiPageSave(group.id, page.id),
-      onWikiLink: (title) => void resolveAndOpenWikiPage(title),
+      onWikiLink: (title) => void openWikiPageByTitle(title),
     });
   };
   for (const group of view.detailGroups) {
@@ -2628,7 +2628,7 @@ function bindEvents(): void {
       const btn = (e.target as HTMLElement).closest('[data-rel-title]') as HTMLElement | null;
       if (!btn) return;
       const title = btn.getAttribute('data-rel-title') ?? '';
-      void resolveAndOpenWikiPage(title);
+      void openWikiPageByTitle(title);
     });
   }
 }
