@@ -1550,6 +1550,9 @@ export async function dispatchWs(
   const requestId = newTurnRequestId();
   openTurnForRequest(sessionId, requestId);
   // 乐观置 running + 立刻渲染「正在思考」：覆盖后续 await socket.send 与长 TTFT 空白。
+  window.dispatchEvent(new CustomEvent('context:usage-cleared', {
+    detail: { sessionId },
+  }));
   setBusyWithUi(sessionId, true);
   setStatusWithUi(sessionId, 'running');
   renderChat();

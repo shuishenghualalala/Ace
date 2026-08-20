@@ -129,7 +129,7 @@ describe('createComposerModelControl', () => {
 
 describe('createContextRingController', () => {
   it('按注入的 getSessionId 拉取用量并渲染百分比', async () => {
-    mockSessionContext.mockResolvedValue({ used_tokens: 50000 });
+    mockSessionContext.mockResolvedValue({ available: true, used_tokens: 50000, max_tokens: 100000, ratio: 0.5, source: 'provider' });
     const els = mountRing();
     const ring = createContextRingController(els, {
       getSessionId: () => 'sid-b',
@@ -168,7 +168,7 @@ describe('createContextRingController 事件过滤与节流', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    mockSessionContext.mockResolvedValue({ used_tokens: 50000 });
+    mockSessionContext.mockResolvedValue({ available: true, used_tokens: 50000, max_tokens: 100000, ratio: 0.5, source: 'provider' });
   });
 
   afterEach(() => {

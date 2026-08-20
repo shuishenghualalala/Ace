@@ -53,6 +53,7 @@ import {
   notify,
   state,
 } from '../state';
+import { openWikiPageByTitle } from './wiki-page';
 
 // ---------- scroll anchor：按容器多实例（原 chat-controller 单例的多实例化） ----------
 
@@ -157,6 +158,13 @@ export function ensureFileChangesDelegation(container: HTMLElement): void {
           });
         }
       }
+    }
+    const wikiLink = target.closest<HTMLElement>('[data-rel-title]');
+    if (wikiLink && container.contains(wikiLink)) {
+      event.preventDefault();
+      const title = wikiLink.getAttribute('data-rel-title') || '';
+      if (title) void openWikiPageByTitle(title);
+      return;
     }
     const openBtn = target.closest<HTMLElement>('[data-file-changes-open]');
     if (openBtn && container.contains(openBtn)) {

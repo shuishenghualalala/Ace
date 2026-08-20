@@ -51,7 +51,10 @@ function positionPermissionCard(root: HTMLElement): void {
   );
   const left = Math.max(
     PERMISSION_CARD_MIN_MARGIN,
-    Math.min(rect.right - width, viewportWidth - width - PERMISSION_CARD_MIN_MARGIN),
+    Math.min(
+      rect.left + (rect.width - width) / 2,
+      viewportWidth - width - PERMISSION_CARD_MIN_MARGIN,
+    ),
   );
   const bottom = Math.max(
     PERMISSION_CARD_MIN_MARGIN,

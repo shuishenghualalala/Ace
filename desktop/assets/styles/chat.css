@@ -1046,7 +1046,7 @@ button.chat-message-file:hover {
 }
 
 .chat-assistant-turn {
-  max-width: min(920px, 100%);
+  max-width: 100%;
   gap: var(--mw-space-3);
 }
 
