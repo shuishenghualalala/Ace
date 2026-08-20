@@ -66,6 +66,8 @@ class SQLiteSessionStore(SessionStore):
                 title         TEXT NOT NULL DEFAULT '',
                 message_count INTEGER NOT NULL DEFAULT 0,
                 token_count   INTEGER NOT NULL DEFAULT 0,
+                last_prompt_tokens INTEGER,
+                last_prompt_tokens_source TEXT,
                 last_status   TEXT NOT NULL DEFAULT '',
                 last_error    TEXT NOT NULL DEFAULT '',
                 archived      INTEGER NOT NULL DEFAULT 0,
@@ -103,6 +105,8 @@ class SQLiteSessionStore(SessionStore):
             "created_at": "ALTER TABLE sessions ADD COLUMN created_at REAL NOT NULL DEFAULT 0",
             "message_count": "ALTER TABLE sessions ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0",
             "token_count": "ALTER TABLE sessions ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0",
+            "last_prompt_tokens": "ALTER TABLE sessions ADD COLUMN last_prompt_tokens INTEGER",
+            "last_prompt_tokens_source": "ALTER TABLE sessions ADD COLUMN last_prompt_tokens_source TEXT",
             "last_status": "ALTER TABLE sessions ADD COLUMN last_status TEXT NOT NULL DEFAULT ''",
             "last_error": "ALTER TABLE sessions ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
             "archived": "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
@@ -142,6 +146,8 @@ class SQLiteSessionStore(SessionStore):
                     title         TEXT NOT NULL DEFAULT '',
                     message_count INTEGER NOT NULL DEFAULT 0,
                     token_count   INTEGER NOT NULL DEFAULT 0,
+                    last_prompt_tokens INTEGER,
+                    last_prompt_tokens_source TEXT,
                     last_status   TEXT NOT NULL DEFAULT '',
                     last_error    TEXT NOT NULL DEFAULT '',
                     archived      INTEGER NOT NULL DEFAULT 0,
@@ -152,12 +158,12 @@ class SQLiteSessionStore(SessionStore):
             copy_sql="""
                 INSERT OR IGNORE INTO sessions_new (
                     session_id, owner_account_id, messages, updated_at, created_at,
-                    workspace_id, title, message_count, token_count, last_status, last_error,
+                    workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
                     archived, pinned
                 )
                 SELECT
                     session_id, owner_account_id, messages, updated_at, created_at,
-                    workspace_id, title, message_count, token_count, last_status, last_error,
+                    workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
                     COALESCE(archived, 0), COALESCE(pinned, 0)
                 FROM sessions
             """,
@@ -294,6 +300,8 @@ class SQLiteSessionStore(SessionStore):
         owner_account_id: str = "",
         *,
         title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
     ) -> None:
         now = time.time()
         # title_fallback=None 保持旧行为（首条 user 消息截断），兼容未传该参数的调用方；
@@ -305,8 +313,8 @@ class SQLiteSessionStore(SessionStore):
         def _write(conn):
             conn.execute(
                 "INSERT INTO sessions "
-                "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, title, message_count, token_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(owner_account_id, session_id) DO UPDATE SET "
                 "  messages = excluded.messages, "
                 "  updated_at = excluded.updated_at, "
@@ -315,6 +323,9 @@ class SQLiteSessionStore(SessionStore):
                 # 归属，导致「test 工作空间会话刷新后漂到 default」。
                 "  message_count = excluded.message_count, "
                 "  token_count = excluded.token_count, "
+                "  last_prompt_tokens = COALESCE(excluded.last_prompt_tokens, sessions.last_prompt_tokens), "
+                "  last_prompt_tokens_source = CASE WHEN excluded.last_prompt_tokens IS NOT NULL "
+                "THEN excluded.last_prompt_tokens_source ELSE sessions.last_prompt_tokens_source END, "
                 "  title = CASE "
                 "WHEN sessions.title IS NULL OR TRIM(sessions.title) = '' "
                 "OR sessions.title IN ('新会话', '新对话') "
@@ -331,8 +342,21 @@ class SQLiteSessionStore(SessionStore):
                     fallback_title,
                     len(messages),
                     self._estimate_tokens(messages),
+                    last_prompt_tokens,
+                    last_prompt_tokens_source,
                 ),
             )
+        self._writer.execute(_write)
+
+    def clear_prompt_usage(self, session_id: str, owner_account_id: str = "") -> None:
+        """清除上一轮 Provider usage，避免新回合暂未返回 usage 时显示旧值。"""
+        def _write(conn):
+            conn.execute(
+                "UPDATE sessions SET last_prompt_tokens = NULL, last_prompt_tokens_source = NULL "
+                "WHERE session_id = ? AND owner_account_id = ?",
+                (session_id, owner_account_id),
+            )
+
         self._writer.execute(_write)
 
     def ensure_session(
@@ -520,13 +544,46 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         context_window: int | None,
         owner_account_id: str = "",
-    ) -> dict[str, float | int]:
-        """返回会话上下文 token 用量与占比。"""
-        msgs = self.load(session_id, owner_account_id=owner_account_id)
-        used = self._estimate_tokens(msgs)
+    ) -> dict[str, float | int | str | None]:
+        """返回 Provider 最近一次真实 prompt 用量；没有真实 usage 时明确不可用。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT messages, last_prompt_tokens, last_prompt_tokens_source FROM sessions "
+                "WHERE session_id = ? AND owner_account_id = ?",
+                (session_id, owner_account_id),
+            ).fetchone()
+        if row is None:
+            return {
+                "available": False,
+                "used_tokens": None,
+                "max_tokens": int(context_window or 128000),
+                "ratio": None,
+                "source": "unavailable",
+                "warning": "会话不存在或尚未产生 Provider usage",
+            }
         max_tokens = int(context_window or 128000)
-        ratio = round(used / max_tokens, 4) if max_tokens > 0 else 0.0
-        return {"used_tokens": used, "max_tokens": max_tokens, "ratio": ratio}
+        actual = int(row[1]) if row[1] is not None else None
+        if actual is None:
+            return {
+                "available": False,
+                "used_tokens": None,
+                "max_tokens": max_tokens,
+                "ratio": None,
+                "source": "unavailable",
+                "warning": "尚未计算本次实际请求视图的上下文用量",
+            }
+        source = str(row[2] or "provider")
+        ratio = round(actual / max_tokens, 4) if max_tokens > 0 else None
+        return {
+            "available": True,
+            "used_tokens": actual,
+            "max_tokens": max_tokens,
+            "ratio": ratio,
+            "source": source,
+            **({
+                "warning": "Provider 未返回 prompt_tokens，当前为按本次实际请求视图计算值",
+            } if source == "request_view" else {}),
+        }
 
     def list_sessions(
         self,

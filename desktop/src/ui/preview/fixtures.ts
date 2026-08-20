@@ -340,9 +340,11 @@ function sessionResponses(
       model_switchable: true,
     }),
     [`/api/session/${SESSION_ID}/context`]: ok({
+      available: true,
       used_tokens: 4_096,
       max_tokens: 32_768,
       ratio: 0.125,
+      source: 'provider',
     }),
     [`/api/session/${SESSION_ID}/plan`]: ok({
       active: Boolean(extras.plan),

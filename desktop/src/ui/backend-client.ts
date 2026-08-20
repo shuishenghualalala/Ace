@@ -1747,7 +1747,14 @@ export const backendApi = {
   // 用量统计
   usage: () => getJSON<{ total_tokens?: number; prompt_tokens?: number; completion_tokens?: number; total_cost?: number; sessions?: number }>('/api/usage'),
   sessionContext: (sessionId: string) =>
-    getJSON<{ used_tokens: number; max_tokens: number; ratio: number }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
+    getJSON<{
+      available: boolean;
+      used_tokens: number | null;
+      max_tokens: number;
+      ratio: number | null;
+      source: 'provider' | 'request_view' | 'unavailable';
+      warning?: string;
+    }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
   browserState: (sessionId: string) =>
     getJSON<{ ok: boolean; state: BrowserPageState }>(`/api/browser/${encodeURIComponent(sessionId)}/state`),
   /** 读取指定标签页的正文（@ 提及标签页、存入 Wiki 共用）。ok:false 时带 error。 */

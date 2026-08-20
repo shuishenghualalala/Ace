@@ -746,6 +746,11 @@ class SingleAgent(Agent):
         t = time.perf_counter()
         owner = envelope.user_id
         history = self.session_store.load(sid, owner_account_id=owner)
+        # usage 只代表最近一次 Provider 请求；新回合开始时先清掉旧值，
+        # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
+        clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
+        if callable(clear_prompt_usage):
+            clear_prompt_usage(sid, owner_account_id=owner)
         log.info("[PERF] history_load       %.3fs  (msgs=%d)", time.perf_counter() - t, len(history))
         is_new = not history
         if is_new:
@@ -885,11 +890,23 @@ class SingleAgent(Agent):
         interrupted = False
         terminal_outcome: TerminalOutcome = "failed"
         terminal_error_summary = "Executor ended without a terminal response"
+        last_prompt_tokens: int | None = None
+        last_prompt_tokens_source: str | None = None
         # 拦截 final 帧：进化 visible 模式下需在 final 之前 yield evolution_footer，
         # 因此先把 final 暂存，等进化流程跑完再投递。
         _held_final = None
         try:
             async for chunk in self.executor.execute(ctx):
+                usage = chunk.body.get("usage") if isinstance(chunk.body, dict) else None
+                if isinstance(usage, dict):
+                    raw_prompt_tokens = usage.get("prompt_tokens")
+                    if isinstance(raw_prompt_tokens, (int, float)) and raw_prompt_tokens >= 0:
+                        last_prompt_tokens = int(raw_prompt_tokens)
+                        last_prompt_tokens_source = (
+                            "request_view"
+                            if usage.get("prompt_tokens_source") == "request_view"
+                            else "provider"
+                        )
                 if chunk.kind == "error" or chunk.status == "failed":
                     terminal_outcome = "failed"
                     terminal_error_summary = str(
@@ -925,7 +942,10 @@ class SingleAgent(Agent):
             try:
                 await self._persist_turn(
                     envelope, history, ctx, prefix_len, turn_started_at,
-                    interrupted=interrupted, task_sid=task_sid
+                    interrupted=interrupted,
+                    task_sid=task_sid,
+                    last_prompt_tokens=last_prompt_tokens,
+                    last_prompt_tokens_source=last_prompt_tokens_source,
                 )
                 persisted = True
             finally:
@@ -1320,6 +1340,8 @@ class SingleAgent(Agent):
         *,
         interrupted: bool,
         task_sid: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
     ) -> None:
         """把 executor 本轮新增消息回灌 canonical 历史并持久化。
 
@@ -1399,6 +1421,8 @@ class SingleAgent(Agent):
                     workspace_id=envelope.workspace_id,
                     owner_account_id=envelope.user_id,
                     title_fallback="" if self.enable_title else None,
+                    last_prompt_tokens=last_prompt_tokens,
+                    last_prompt_tokens_source=last_prompt_tokens_source,
                 )
             except Exception:  # noqa: BLE001
                 log.exception("会话落库失败 session=%s", sid)

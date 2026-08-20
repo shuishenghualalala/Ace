@@ -56,6 +56,9 @@ export function createContextRingController(
   let inflight: Promise<void> | null = null;
   let lastFetchAt = 0;
   let trailingTimer: number | null = null;
+  // 最近一次最终请求视图的 prompt token 数；来源可能是 Provider 或本地请求视图计数。
+  let latestPromptTokens: number | null = null;
+  let latestPromptSource: 'provider' | 'request_view' = 'provider';
 
   const setRingProgress = (ratio: number): void => {
     const clamped = Math.max(0, Math.min(1, ratio));
@@ -68,9 +71,24 @@ export function createContextRingController(
     else if (clamped >= 0.7) els.btn.classList.add('is-warn');
   };
 
-  const setRingTooltip = (used: number, max: number, ratio: number): void => {
+  const setRingTooltip = (used: number, max: number, ratio: number, source: 'provider' | 'request_view'): void => {
     const pct = (ratio * 100).toFixed(1);
-    els.btn.title = `${pct}% · ${formatTokenCount(used)} / ${formatTokenCount(max)} 上下文已使用`;
+    const sourceLabel = source === 'provider' ? '实际用量' : '本地计算';
+    els.btn.title = `${pct}% · ${formatTokenCount(used)} / ${formatTokenCount(max)} 上下文 · ${sourceLabel}`;
+    els.btn.setAttribute('aria-label', els.btn.title);
+  };
+
+  const setRingUsage = (used: number, max: number, source: 'provider' | 'request_view'): void => {
+    const ratio = max > 0 ? used / max : 0;
+    setRingProgress(ratio);
+    setRingTooltip(used, max, ratio, source);
+  };
+
+  const setRingUnavailable = (max: number, warning?: string): void => {
+    setRingProgress(0);
+    els.pct.textContent = '?';
+    els.btn.classList.remove('is-warn', 'is-critical');
+    els.btn.title = warning || `上下文用量不可用 · 窗口 ${formatTokenCount(max)}`;
     els.btn.setAttribute('aria-label', els.btn.title);
   };
 
@@ -101,9 +119,15 @@ export function createContextRingController(
         lastSessionId = sid;
         // 分母用会话绑定模型的窗口；网关返回的 max_tokens 是全局窗口，直接用会与 Inspector 口径不一致。
         const max = opts.resolveWindow();
-        const ratio = max > 0 ? ctx.used_tokens / max : 0;
-        setRingProgress(ratio);
-        setRingTooltip(ctx.used_tokens, max, ratio);
+        // Provider 实际 prompt_tokens 优先；否则使用后端按最终请求视图计算的值。
+        if (latestPromptTokens !== null) {
+          setRingUsage(latestPromptTokens, max, latestPromptSource);
+        } else if (ctx.available && typeof ctx.used_tokens === 'number') {
+          const source = ctx.source === 'request_view' ? 'request_view' : 'provider';
+          setRingUsage(ctx.used_tokens, max, source);
+        } else {
+          setRingUnavailable(max, ctx.warning);
+        }
       } catch {
         if (opts.getSessionId() !== sid) return;
         setRingProgress(0);
@@ -137,6 +161,8 @@ export function createContextRingController(
   };
 
   window.addEventListener('session:changed', () => {
+    latestPromptTokens = null;
+    latestPromptSource = 'provider';
     lastSessionId = null;
     refresh();
   }, { signal });
@@ -146,8 +172,28 @@ export function createContextRingController(
   }, { signal });
   window.addEventListener('session:model-changed', (event) => {
     if (!isOwnSessionEvent(event)) return;
+    latestPromptTokens = null;
+    latestPromptSource = 'provider';
     lastSessionId = null;
     refresh();
+  }, { signal });
+  window.addEventListener('context:usage', (event) => {
+    const detail = (event as CustomEvent<{
+      sessionId?: string;
+      promptTokens?: number;
+      promptTokensSource?: 'provider' | 'request_view';
+    }>).detail;
+    if (detail?.sessionId !== opts.getSessionId()) return;
+    if (typeof detail.promptTokens !== 'number' || !Number.isFinite(detail.promptTokens)) return;
+    latestPromptTokens = Math.max(0, Math.round(detail.promptTokens));
+    latestPromptSource = detail.promptTokensSource === 'request_view' ? 'request_view' : 'provider';
+    setRingUsage(latestPromptTokens, opts.resolveWindow(), latestPromptSource);
+  }, { signal });
+  window.addEventListener('context:usage-cleared', (event) => {
+    if (!isOwnSessionEvent(event)) return;
+    latestPromptTokens = null;
+    latestPromptSource = 'provider';
+    setRingUnavailable(opts.resolveWindow(), '本轮尚未收到 Provider prompt_tokens，当前上下文用量不可用');
   }, { signal });
 
   return {

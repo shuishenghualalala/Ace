@@ -21,6 +21,7 @@ from dataclasses import replace
 from typing import Any, AsyncIterator
 
 from crew.agent.executor.base import AgentExecutor, ExecutionContext
+from crew.agent.compact.tokens import estimate_prompt_tokens
 from crew.agent.loop import (
     CONTINUATION_PROMPT,
     EMPTY_RETRY_NUDGE,
@@ -471,8 +472,11 @@ class BuiltinExecutor(AgentExecutor):
                 max_tokens=max_output_tokens_override,
             ):
                 yield ev
-            # 估算 prompt 固定开销（系统/技能·上下文/工具定义），并入 usage 透传到前端 breakdown
-            result.setdefault("usage", {})["prompt_breakdown"] = _estimate_prompt_overhead(ctx, view, tools)
+            usage = result.get("usage")
+            if not isinstance(usage, dict):
+                usage = {}
+                result["usage"] = usage
+            usage["prompt_breakdown"] = _estimate_prompt_overhead(ctx, view, tools)
             unsupported_capability = str(result.get("unsupported_capability") or "")
             if unsupported_capability:
                 if unsupported_capability == "vision" and not vision_downgraded:
@@ -858,6 +862,10 @@ class BuiltinExecutor(AgentExecutor):
                     base_url=_prov_base_url,
                 )
                 effective_request = mw.payload if isinstance(mw.payload, dict) else request
+                request_view_tokens = estimate_prompt_tokens(
+                    effective_request.get("messages") or api_messages,
+                    effective_request.get("tools") if "tools" in effective_request else tools,
+                )
 
                 def _stream(req, active_provider=provider):
                     messages_arg = req["messages"] if "messages" in req else api_messages
@@ -1009,6 +1017,16 @@ class BuiltinExecutor(AgentExecutor):
                     started_tool_call_ids=started_tool_call_ids,
                     model=str(getattr(provider, "model", "") or ""),
                 )
+                usage = result.get("usage")
+                if not isinstance(usage, dict):
+                    usage = {}
+                    result["usage"] = usage
+                usage["request_view_tokens"] = request_view_tokens
+                if not isinstance(usage.get("prompt_tokens"), (int, float)):
+                    usage["prompt_tokens"] = request_view_tokens
+                    usage["prompt_tokens_source"] = "request_view"
+                else:
+                    usage["prompt_tokens_source"] = "provider"
                 await self.plugins.post_api_request(
                     session_id=session_id,
                     model=getattr(provider, "model", ""),

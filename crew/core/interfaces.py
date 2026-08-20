@@ -168,6 +168,8 @@ class SessionStore(ABC):
         owner_account_id: str = "",
         *,
         title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
     ) -> None:
         """整体覆盖保存。
 
@@ -179,7 +181,16 @@ class SessionStore(ABC):
           - ""：显式留空占位，等 set_title 写入摘要标题（enable_title=True 时使用，
                 避免截断的用户原话抢占摘要标题）。
           - 其它字符串：用该值作为 fallback。
+
+        last_prompt_tokens：本轮 Provider 返回的真实 prompt token 数；None 表示
+          Provider 没有返回可用 usage。last_prompt_tokens_source 可为 provider 或
+          request_view，后者表示按本次实际发送视图（system/message/tools）计算。
         """
+        ...
+
+    @abstractmethod
+    def clear_prompt_usage(self, session_id: str, owner_account_id: str = "") -> None:
+        """清除会话上一轮的 Provider prompt usage。"""
         ...
 
     @abstractmethod
