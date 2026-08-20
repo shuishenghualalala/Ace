@@ -702,7 +702,7 @@
 
 .wiki-agent-pane__messages.chat-messages.web-flow .messages__inner {
   gap: var(--mw-space-4);
-  padding: 0 var(--mw-space-4);
+  padding: 0 var(--mw-space-2);
 }
 
 .wiki-agent-pane__empty {
