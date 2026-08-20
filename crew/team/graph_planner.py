@@ -15,7 +15,7 @@ from crew.core.types import ChatResponse, Message
 from crew.dynamickanban.models import PlanEdge, PlanNode, PlanResult
 from crew.dynamickanban.plan_graph import PlanGraph
 from crew.team import flow_builder
-from crew.team.agent_profile import evaluate_capability_coverage
+from crew.team.agent_profile import AgentProfile, evaluate_capability_coverage, is_agent_profile_available
 from crew.team.capabilities import normalize_capabilities, normalize_capability
 from crew.team.models import TeamMemberSpec
 from crew.team.policy_checker import TeamPolicyReport, analyze_team_policy
@@ -281,11 +281,28 @@ def _member_by_id(team: Any) -> dict[str, TeamMemberSpec]:
 
 
 def _member_capability_sets(team: Any) -> dict[str, list[str]]:
-    """Return the confirmed Formation capability assignment for DAG admission."""
+    """Return the current model-backed capability set for DAG admission.
+
+    External Team members carry their resolved ``AgentProfile`` on the in-memory
+    Team assembled from the Session binding.  Formation capabilities remain the
+    fallback for built-in members and legacy teams without a resolved profile.
+    """
 
     result: dict[str, list[str]] = {}
-    for member in (getattr(team, "members", {}) or {}).values():
+    profiles = getattr(team, "member_profiles", {})
+    leader = getattr(team, "leader_spec", None)
+    members = [leader] if isinstance(leader, TeamMemberSpec) else []
+    members.extend((getattr(team, "members", {}) or {}).values())
+    for member in members:
         if not member.member_id:
+            continue
+        profile = profiles.get(member.member_id) if isinstance(profiles, dict) else None
+        if isinstance(profile, AgentProfile):
+            result[member.member_id] = [
+                capability
+                for capability, assessment in profile.capabilities.items()
+                if is_agent_profile_available(profile) and assessment.score >= 0.5
+            ]
             continue
         capabilities = normalize_capabilities(member.capabilities or [])
         if not capabilities:
@@ -630,7 +647,12 @@ def _semantic_lane(unit: WorkUnit) -> str:
     return "other"
 
 
-def _member_capabilities(member: TeamMemberSpec) -> set[str]:
+def _member_capabilities(
+    member: TeamMemberSpec,
+    capability_sets: dict[str, list[str]] | None = None,
+) -> set[str]:
+    if capability_sets is not None and member.member_id in capability_sets:
+        return set(capability_sets[member.member_id])
     return set(normalize_capabilities(member.capabilities or []))
 
 
@@ -638,26 +660,35 @@ def _work_unit_member_score(
     unit: WorkUnit,
     member: TeamMemberSpec,
     index: int,
+    capability_sets: dict[str, list[str]] | None = None,
 ) -> tuple[int, int, int]:
     required = set(unit.required_capabilities)
     target_lane = _semantic_lane(unit)
-    capabilities = _member_capabilities(member)
+    capabilities = _member_capabilities(member, capability_sets)
     overlap = len(required & capabilities)
     covers_all = int(bool(required) and required <= capabilities)
     lane_match = int(flow_builder.workflow_lane(member) == target_lane)
     return covers_all, overlap * 2 + lane_match, -index
 
 
-def _rank_work_unit_members(unit: WorkUnit, members: list[TeamMemberSpec]) -> list[tuple[TeamMemberSpec, tuple[int, int, int], int]]:
+def _rank_work_unit_members(
+    unit: WorkUnit,
+    members: list[TeamMemberSpec],
+    capability_sets: dict[str, list[str]] | None = None,
+) -> list[tuple[TeamMemberSpec, tuple[int, int, int], int]]:
     ranked = [
-        (member, _work_unit_member_score(unit, member, index), index)
+        (member, _work_unit_member_score(unit, member, index, capability_sets), index)
         for index, member in enumerate(members)
     ]
     return sorted(ranked, key=lambda item: item[1], reverse=True)
 
 
-def _assign_work_unit(unit: WorkUnit, members: list[TeamMemberSpec]) -> TeamMemberSpec | None:
-    ranked = _rank_work_unit_members(unit, members)
+def _assign_work_unit(
+    unit: WorkUnit,
+    members: list[TeamMemberSpec],
+    capability_sets: dict[str, list[str]] | None = None,
+) -> TeamMemberSpec | None:
+    ranked = _rank_work_unit_members(unit, members, capability_sets)
     return ranked[0][0] if ranked else None
 
 
@@ -685,6 +716,7 @@ def _work_unit_depths(units: list[WorkUnit]) -> dict[str, int]:
 def _assign_work_units_balanced(
     units: list[WorkUnit],
     members: list[TeamMemberSpec],
+    capability_sets: dict[str, list[str]] | None = None,
 ) -> tuple[dict[str, TeamMemberSpec | None], dict[str, dict[str, Any]]]:
     if not members:
         return {unit.id: None for unit in units}, {}
@@ -699,7 +731,7 @@ def _assign_work_units_balanced(
         usage: dict[str, int] = {}
         group_id = f"depth_{depth}:{lane}"
         for unit in group_units:
-            ranked = _rank_work_unit_members(unit, members)
+            ranked = _rank_work_unit_members(unit, members, capability_sets)
             if not ranked:
                 assignments[unit.id] = None
                 continue
@@ -767,7 +799,8 @@ def _semantic_standard_workflow_nodes(
             for index, unit in enumerate(units)
         ]
 
-    assignments, assignment_meta = _assign_work_units_balanced(units, members)
+    capability_sets = _member_capability_sets(team)
+    assignments, assignment_meta = _assign_work_units_balanced(units, members, capability_sets)
     unit_ids = {unit.id for unit in units}
     assigned_coverage: list[float] = []
     for unit in units:
@@ -792,7 +825,7 @@ def _semantic_standard_workflow_nodes(
             "assignee": assignee,
             "metadata": metadata,
         })
-        member_caps = _member_capabilities(member) if member is not None else set()
+        member_caps = _member_capabilities(member, capability_sets) if member is not None else set()
         required = set(unit.required_capabilities)
         assigned_coverage.append(len(required & member_caps) / len(required) if required else 1.0)
         valid_parents = [parent_id for parent_id in unit.depends_on if parent_id in unit_ids]
@@ -821,7 +854,7 @@ def _semantic_standard_workflow_nodes(
             required_capabilities=["review", "verification"],
             expected_output="审阅结论、缺陷和是否可交付的判断",
         )
-        reviewer = _assign_work_unit(review_unit, members)
+        reviewer = _assign_work_unit(review_unit, members, capability_sets)
         reviewer_id = reviewer.member_id if reviewer is not None else "leader"
         review_meta = _member_metadata_for_assignee(_member_by_id(team), reviewer_id, "verify")
         review_meta.update({

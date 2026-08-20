@@ -60,6 +60,38 @@ describe('shouldSkipHistoryReloadOnReconnect', () => {
     view.dispose();
   });
 
+  it('renders Team sessions with the shared black-white dual Agent logo', () => {
+    configStore.set({
+      config: { external_agents: { enabled: true } } as never,
+    });
+    sessionStore.set({
+      sessions: [{
+        id: 'sid-team', title: 'Team session', updatedAt: 1, preview: '', badge: '', workspaceId: 'default',
+        agentLabel: { provider: 'team', display_badge: 'T', name: '研发团队' },
+      }],
+    });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const view = createSessionHistoryView(host, {
+      openSession: vi.fn(),
+      createSession: vi.fn(),
+      createWorkspace: vi.fn(),
+      manageHistory: vi.fn(),
+      openWorkspace: vi.fn(),
+      refreshSessions: async () => undefined,
+      retrySessions: async () => undefined,
+      retryWorkspaces: async () => undefined,
+      getLoadErrors: () => ({ sessions: null, workspaces: null }),
+    });
+
+    const identityIcon = host.querySelector('[data-session-open="sid-team"] [data-session-identity-icon]');
+    expect(identityIcon?.querySelector('.session__team-logo')).not.toBeNull();
+    expect(identityIcon?.querySelectorAll('.session__team-logo i')).toHaveLength(2);
+    expect(identityIcon?.querySelector('svg')).toBeNull();
+
+    view.dispose();
+  });
+
   it('returns true when session is busy with an active request', () => {
     ensureSessionBook('sid-1');
     patchBook('sid-1', { activeRequestId: 'req-1', turnSealed: false, acceptingNewRequest: false });

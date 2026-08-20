@@ -1499,6 +1499,9 @@ def test_kimi_acp_falls_back_to_local_cli_model_catalog(tmp_path, monkeypatch):
     ]
     assert profile.models[1].default is True
     assert profile.models[1].thinking_levels == ("max",)
+    # provider/list only supplies a catalog; it does not prove that a resumed
+    # native session can apply a new model without losing context.
+    assert profile.capabilities.model_switch is False
     assert profile.probe is not None
     assert profile.probe.source == "acp_session_new+kimi_provider_list"
 

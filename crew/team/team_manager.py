@@ -23,6 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from crew.agent.executor import create_executor
+from crew.agent.external.runtime_profile import (
+    canonical_runtime_model_id,
+    runtime_execution_features,
+    runtime_model_fingerprint,
+)
 from crew.agent.file_changes import (
     FileMetadataSnapshot,
     changes_between_snapshots,
@@ -55,7 +60,7 @@ from crew.state.team_member_model import materialize_team_member_model_bindings
 from crew.team import flow_builder
 from crew.team import result_presenter as team_presenter
 from crew.team.bus import TeamBus, register_team_bus_tools
-from crew.team.agent_profile import build_agent_profile, evaluate_capability_coverage
+from crew.team.agent_profile import AgentProfile, build_agent_profile, evaluate_capability_coverage
 from crew.team.capabilities import normalize_capabilities
 from crew.team.communication import TeamAskCoordinator, TeamCommunicationRouter
 from crew.team.delegate_tool import (
@@ -164,6 +169,7 @@ class Team:
     communication_router: TeamCommunicationRouter
     external_team_id: str = ""
     runtime_members: dict[str, TeamMemberSpec] = field(default_factory=dict)
+    member_profiles: dict[str, AgentProfile] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -227,8 +233,11 @@ class InProcessTeamManager(TeamManager):
         self._plan_workflows: dict[TeamKey, str] = {}
         self._plan_node_tasks: dict[tuple[str, str, str], str] = {}
         self._planning_missing_info: dict[TeamKey, list[str]] = {}
-        self._runtime_profile_cache: dict[tuple[str, str, str, str], Any] = {}
+        self._runtime_profile_cache: dict[tuple[str, str, str, str, str], AgentProfile] = {}
         self._active_lock = threading.Lock()
+        self._member_locks_guard = threading.Lock()
+        self._member_locks: dict[tuple[str, str, str], threading.RLock] = {}
+        self._planning_sessions: set[TeamKey] = set()
         self._active_children: dict[TeamKey, dict[str, dict[str, Any]]] = {}
         # 所有成员委派协程的唯一注册表。既持有 detached task 的强引用，
         # 也覆盖 DAG 并行节点；按 (owner, session) 索引同时服务 stop 与 logout。
@@ -259,6 +268,234 @@ class InProcessTeamManager(TeamManager):
             if resolved is not None:
                 return resolved
         return self._provider_for_owner(owner_account_id)
+
+    def _resolve_external_agent_profile(
+        self,
+        agent_id: str,
+        *,
+        owner_account_id: str,
+        model_id: str = "",
+        agent: dict[str, Any] | None = None,
+        runtime: dict[str, Any] | None = None,
+    ) -> AgentProfile:
+        """Resolve one model-aware profile from the current Runtime snapshot."""
+
+        if self.external_store is None:
+            raise KeyError(agent_id)
+        resolved_agent, resolved_runtime = (
+            (agent, runtime)
+            if isinstance(agent, dict) and isinstance(runtime, dict)
+            else self.external_store.agent_with_runtime(
+                agent_id,
+                owner_account_id=owner_account_id,
+            )
+        )
+        profile_payload = resolved_agent.get("profile") if isinstance(resolved_agent, dict) else {}
+        profile_version = str(
+            resolved_agent.get("profile_version")
+            or (profile_payload.get("version") if isinstance(profile_payload, dict) else "")
+            or ""
+        )
+        runtime_id = str(resolved_runtime.get("id") or resolved_agent.get("runtime_id") or "")
+        cache_key = (
+            str(owner_account_id or ""),
+            str(agent_id or ""),
+            runtime_id,
+            str(model_id or "").strip(),
+            profile_version,
+        )
+        profile = self._runtime_profile_cache.get(cache_key)
+        if profile is None:
+            profile = build_agent_profile(
+                resolved_agent,
+                runtime=resolved_runtime,
+                model_id=str(model_id or "").strip() or None,
+            )
+            self._runtime_profile_cache[cache_key] = profile
+        return profile
+
+    def _resolve_team_member_profiles(
+        self,
+        members: list[TeamMemberSpec],
+        leader_spec: TeamMemberSpec | None,
+        *,
+        owner_account_id: str,
+    ) -> dict[str, AgentProfile]:
+        profiles: dict[str, AgentProfile] = {}
+        candidates = [leader_spec] if leader_spec is not None else []
+        for member in [*candidates, *members]:
+            if member.executor != "external" or not member.external_agent_id:
+                continue
+            try:
+                profiles[member.member_id] = self._resolve_external_agent_profile(
+                    member.external_agent_id,
+                    owner_account_id=owner_account_id,
+                    model_id=member.model,
+                )
+            except Exception as exc:  # noqa: BLE001 - static Formation remains a safe fallback
+                log.debug(
+                    "无法解析 Team 成员当前模型画像 agent=%s model=%s err=%s",
+                    member.external_agent_id,
+                    member.model,
+                    exc,
+                )
+        return profiles
+
+    def member_model_lock(
+        self,
+        session_id: str,
+        member_id: str,
+        owner_account_id: str = "",
+    ) -> threading.RLock:
+        """Return the single lock shared by switching and member dispatch."""
+
+        key = (
+            str(owner_account_id or ""),
+            _visible_session_id(str(session_id or "")),
+            str(member_id or "").strip(),
+        )
+        with self._member_locks_guard:
+            return self._member_locks.setdefault(key, threading.RLock())
+
+    def team_is_planning(self, session_id: str, owner_account_id: str = "") -> bool:
+        with self._active_lock:
+            return self._key(_visible_session_id(session_id), owner_account_id) in self._planning_sessions
+
+    def _begin_team_planning(self, session_id: str, owner_account_id: str = "") -> bool:
+        key = self._key(_visible_session_id(session_id), owner_account_id)
+        with self._active_lock:
+            if key in self._planning_sessions:
+                return False
+            self._planning_sessions.add(key)
+            return True
+
+    def _end_team_planning(self, session_id: str, owner_account_id: str = "") -> None:
+        with self._active_lock:
+            self._planning_sessions.discard(self._key(_visible_session_id(session_id), owner_account_id))
+
+    def execution_snapshot(
+        self,
+        session_id: str,
+        member_id: str,
+        *,
+        owner_account_id: str = "",
+        plan_node_id: str = "",
+    ) -> dict[str, Any]:
+        """Capture immutable model facts for a member execution attempt."""
+
+        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        spec = None
+        if team is not None:
+            if member_id == "leader":
+                spec = getattr(team, "leader_spec", None)
+            else:
+                spec = (getattr(team, "members", {}) or {}).get(member_id)
+        agent_id = str(spec.external_agent_id if spec is not None else "")
+        model_id = str(spec.model if spec is not None else "").strip()
+        runtime_id = "builtin"
+        model_fingerprint = ""
+        profile_version = 0
+        member_profiles = getattr(team, "member_profiles", {}) if team is not None else {}
+        if spec is not None and spec.member_id in member_profiles:
+            profile = member_profiles[spec.member_id]
+            profile_version = int(profile.version)
+        if agent_id and self.external_store is not None:
+            try:
+                agent, runtime = self.external_store.agent_with_runtime(
+                    agent_id,
+                    owner_account_id=owner_account_id,
+                )
+                runtime_id = str(runtime.get("id") or agent.get("runtime_id") or "")
+                model_id = canonical_runtime_model_id(runtime, model_id or str(agent.get("model") or ""))
+                model_fingerprint = runtime_model_fingerprint(runtime, model_id)
+            except Exception:  # noqa: BLE001 - keep historical attribution if Runtime disappeared
+                runtime_id = "unavailable"
+                encoded = json.dumps(
+                    {"runtime_id": runtime_id, "model_id": model_id},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                model_fingerprint = "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        else:
+            model_id = model_id or self.config.owner_default_model_id(owner_account_id)
+            encoded = json.dumps({"runtime_id": runtime_id, "model_id": model_id}, sort_keys=True)
+            model_fingerprint = "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        binding_revision = 0
+        getter = getattr(self.session_store, "get_agent_config", None)
+        if callable(getter):
+            config = getter(_visible_session_id(session_id), owner_account_id=owner_account_id) or {}
+            team_config = config.get("team") if isinstance(config.get("team"), dict) else {}
+            bindings = team_config.get("member_model_bindings") if isinstance(
+                team_config.get("member_model_bindings"), dict
+            ) else {}
+            binding = bindings.get(agent_id) if agent_id else bindings.get(member_id)
+            if isinstance(binding, dict):
+                binding_revision = int(binding.get("revision") or 0)
+        return {
+            "agent_id": agent_id or str(member_id or ""),
+            "member_id": str(member_id or ""),
+            "executor": str(spec.executor if spec is not None else ""),
+            "plan_node_id": str(plan_node_id or ""),
+            "runtime_id": runtime_id,
+            "model_id": model_id,
+            "model_fingerprint": model_fingerprint,
+            "profile_version": profile_version or 4,
+            "binding_revision": binding_revision,
+        }
+
+    def pending_model_switch_incompatibilities(
+        self,
+        session_id: str,
+        member_id: str,
+        runtime: dict[str, Any],
+        model_id: str,
+        *,
+        owner_account_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Check pending nodes against the candidate model's hard execution facts."""
+
+        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        if plan is None or team is None:
+            return []
+        spec = next(
+            (
+                candidate
+                for candidate in [team.leader_spec, *team.members.values()]
+                if candidate.external_agent_id == member_id
+                or candidate.member_id == member_id
+            ),
+            None,
+        )
+        runtime_member_id = spec.member_id if spec is not None else str(member_id or "")
+        features = runtime_execution_features(runtime, model_id)
+        incompatible: list[dict[str, Any]] = []
+        for node in plan.nodes.values():
+            if node.assignee != runtime_member_id or node.status not in {
+                "pending", "failed", "blocked", "needs_info",
+            }:
+                continue
+            requirements = node.metadata.get("execution_requirements") if isinstance(node.metadata, dict) else {}
+            if not isinstance(requirements, dict):
+                continue
+            missing: list[str] = []
+            if bool(requirements.get("tools")) and not features.get("tools"):
+                missing.append("tools")
+            if bool(requirements.get("images")) and not features.get("images"):
+                missing.append("images")
+            try:
+                minimum_context = int(requirements.get("min_context_window") or 0)
+            except (TypeError, ValueError):
+                minimum_context = 0
+            if minimum_context and int(features.get("context_window") or 0) < minimum_context:
+                missing.append("min_context_window")
+            if missing:
+                incompatible.append({
+                    "node_id": node.node_id,
+                    "title": node.title,
+                    "missing": missing,
+                })
+        return incompatible
 
     @staticmethod
     def _key(session_id: str, owner_account_id: str = "") -> TeamKey:
@@ -512,8 +749,37 @@ class InProcessTeamManager(TeamManager):
         child_id = str(record.get("child_id") or "")
         if not parent_session_id or not child_id:
             return
-        with self._active_lock:
-            self._active_children.setdefault(self._key(parent_session_id, owner_account_id), {})[child_id] = record
+        member_id = str(record.get("member") or "").strip()
+        lock = self.member_model_lock(parent_session_id, member_id, owner_account_id)
+        with lock:
+            active_record = dict(record)
+            active_record["execution_snapshot"] = self.execution_snapshot(
+                parent_session_id,
+                member_id,
+                owner_account_id=owner_account_id,
+                plan_node_id=str(record.get("plan_node_id") or ""),
+            )
+            touch_activity = getattr(self.tasks, "touch_activity", None)
+            if callable(touch_activity) and str(record.get("task_id") or "").strip():
+                progress: dict[str, Any] = {}
+                task_getter = getattr(self.tasks, "get", None)
+                if callable(task_getter):
+                    try:
+                        task = task_getter(str(record["task_id"]))
+                        stored_progress = task.get("progress") if isinstance(task, dict) else {}
+                        if isinstance(stored_progress, dict):
+                            progress = dict(stored_progress)
+                    except Exception:  # noqa: BLE001 - activity attribution must not block execution
+                        pass
+                progress["execution_snapshot"] = dict(active_record["execution_snapshot"])
+                touch_activity(
+                    str(record["task_id"]),
+                    progress,
+                )
+            with self._active_lock:
+                self._active_children.setdefault(self._key(parent_session_id, owner_account_id), {})[
+                    child_id
+                ] = active_record
 
     def _mark_child_done(self, parent_session_id: str, child_id: str, owner_account_id: str = "") -> None:
         with self._active_lock:
@@ -1829,18 +2095,13 @@ class InProcessTeamManager(TeamManager):
                         owner_account_id=owner_account_id,
                     )
                     model_id = str(member.model or "").strip()
-                    profile_payload = agent.get("profile") if isinstance(agent, dict) else {}
-                    profile_version = str(
-                        agent.get("profile_version")
-                        or (profile_payload.get("version") if isinstance(profile_payload, dict) else "")
-                        or ""
+                    profiles[agent_id] = self._resolve_external_agent_profile(
+                        agent_id,
+                        owner_account_id=owner_account_id,
+                        model_id=model_id,
+                        agent=agent,
+                        runtime=self.external_store.get_runtime(str(agent.get("runtime_id") or "")),
                     )
-                    cache_key = (owner_account_id, agent_id, model_id, profile_version)
-                    profile = self._runtime_profile_cache.get(cache_key)
-                    if profile is None:
-                        profile = build_agent_profile(agent, model_id=model_id or None)
-                        self._runtime_profile_cache[cache_key] = profile
-                    profiles[agent_id] = profile
                 except Exception as exc:  # noqa: BLE001 - unknown profile is a real runtime fact
                     log.debug("无法解析 Team 成员 AgentProfile agent=%s err=%s", agent_id, exc)
             return evaluate_capability_coverage(
@@ -2184,6 +2445,19 @@ class InProcessTeamManager(TeamManager):
         status = str(event.get("communication_status") or result.get("status") or "").strip()
         if not status:
             return
+        request_id = str(event.get("request_id") or request_message.get("request_id") or "").strip()
+        ask_child_id = f"ask::{request_id}::{target}" if request_id and target else ""
+        if status == "delivered" and ask_child_id:
+            self._mark_child_active({
+                "child_id": ask_child_id,
+                "parent_session_id": session_id,
+                "session_id": f"{session_id}::{target}",
+                "member": target,
+                "plan_node_id": str(event.get("node_id") or request_message.get("node_id") or ""),
+                "started_at": time.time(),
+                "owner_account_id": owner_account_id,
+                "execution_snapshot": dict(event.get("execution_snapshot") or {}),
+            })
         answer_text = str(result.get("answer") or answer_message.get("content") or "").strip()
         source_kind = str(event.get("communication_kind") or "").strip()
         answer_kind = (
@@ -2225,6 +2499,8 @@ class InProcessTeamManager(TeamManager):
             node_id=payload["node_id"],
             payload=payload,
         )
+        if status in {"answered", "failed", "expired", "cancelled"} and ask_child_id:
+            self._mark_child_done(session_id, ask_child_id, owner_account_id)
 
     async def _handle_team_mention(
         self,
@@ -2421,6 +2697,15 @@ class InProcessTeamManager(TeamManager):
         if plan is None:
             if require_plan:
                 raise ToolError("当前 Team session 尚未创建 TeamPlan，不能通过 mention assign 任意派活。")
+            delegate_payload_meta = {
+                **dict(task_payload_meta or {}),
+                "execution_snapshot": self.execution_snapshot(
+                    session_id,
+                    member,
+                    owner_account_id=owner_account_id,
+                    plan_node_id=node_id,
+                ),
+            }
             final_text = await run_delegate_to_teammate(
                 teammates,
                 self.tasks,
@@ -2435,7 +2720,7 @@ class InProcessTeamManager(TeamManager):
                 on_task_created=on_task_created,
                 on_task_finished=on_task_finished,
                 owner_account_id=owner_account_id,
-                task_payload_meta=task_payload_meta,
+                task_payload_meta=delegate_payload_meta,
             )
             return {"result": final_text, "node_id": node_id, "member": member, "legacy": True}
 
@@ -2491,7 +2776,15 @@ class InProcessTeamManager(TeamManager):
             on_task_created=on_task_created,
             on_task_finished=on_task_finished,
             owner_account_id=owner_account_id,
-            task_payload_meta=task_payload_meta,
+            task_payload_meta={
+                **dict(task_payload_meta or {}),
+                "execution_snapshot": self.execution_snapshot(
+                    session_id,
+                    member,
+                    owner_account_id=owner_account_id,
+                    plan_node_id=node_id,
+                ),
+            },
         )
         submit_payload = {
             "text": f"@leader {final_text}".strip(),
@@ -3167,6 +3460,34 @@ class InProcessTeamManager(TeamManager):
                 return result_status
         return ""
 
+    def _execution_snapshot_for_attempt(
+        self,
+        plan: TeamPlan,
+        node: TeamPlanNode,
+        *,
+        owner_account_id: str,
+        source_attempt_id: str,
+    ) -> dict[str, Any]:
+        getter = getattr(self.tasks, "get", None)
+        if callable(getter) and str(source_attempt_id or "").strip():
+            try:
+                task = getter(str(source_attempt_id))
+                progress = task.get("progress") if isinstance(task, dict) else {}
+                snapshot = progress.get("execution_snapshot") if isinstance(progress, dict) else None
+                if isinstance(snapshot, dict) and snapshot.get("model_id"):
+                    return dict(snapshot)
+            except Exception:  # noqa: BLE001 - historical task records may have expired
+                pass
+        stored_snapshot = (node.metadata or {}).get("execution_snapshot")
+        if isinstance(stored_snapshot, dict) and stored_snapshot.get("model_id"):
+            return dict(stored_snapshot)
+        return self.execution_snapshot(
+            plan.team_session_id,
+            node.assignee,
+            owner_account_id=owner_account_id,
+            plan_node_id=node.node_id,
+        )
+
     def _record_external_agent_profile_observation(
         self,
         plan: TeamPlan,
@@ -3183,11 +3504,21 @@ class InProcessTeamManager(TeamManager):
 
         if self.external_store is None or node.assignee == "leader":
             return False
+        attempt_id = str(source_attempt_id or node.delegate_task_id or "").strip()
+        snapshot = self._execution_snapshot_for_attempt(
+            plan,
+            node,
+            owner_account_id=owner_account_id,
+            source_attempt_id=attempt_id,
+        )
         team = self._teams.get(self._existing_team_key(plan.team_session_id, owner_account_id))
         spec = team.members.get(node.assignee) if team is not None else None
-        external_agent_id = str(spec.external_agent_id or "").strip() if spec is not None else ""
+        external_agent_id = str(
+            spec.external_agent_id
+            if spec is not None
+            else snapshot.get("agent_id") if snapshot.get("executor") == "external" else ""
+        ).strip()
         capabilities = normalize_capabilities((node.metadata or {}).get("required_capabilities") or [])
-        attempt_id = str(source_attempt_id or node.delegate_task_id or "").strip()
         if not external_agent_id or is_crew_builtin_agent(external_agent_id):
             return False
         if not capabilities or not attempt_id:
@@ -3204,6 +3535,10 @@ class InProcessTeamManager(TeamManager):
                 outcome=outcome,
                 quality_weight=quality_weight,
                 failure_kind=failure_kind,
+                runtime_id=str(snapshot.get("runtime_id") or ""),
+                model_id=str(snapshot.get("model_id") or ""),
+                model_fingerprint=str(snapshot.get("model_fingerprint") or ""),
+                model_binding_source="execution_snapshot",
             )
             return bool(result.get("inserted"))
         except Exception as exc:  # noqa: BLE001 - 画像派生失败不能改变用户任务结果
@@ -3305,21 +3640,13 @@ class InProcessTeamManager(TeamManager):
                     owner_account_id=owner_account_id,
                 )
                 model_id = str(assigned.model or "").strip()
-                profile_payload = assigned_agent.get("profile") if isinstance(assigned_agent, dict) else {}
-                profile_version = str(
-                    assigned_agent.get("profile_version")
-                    or (profile_payload.get("version") if isinstance(profile_payload, dict) else "")
-                    or ""
+                profiles[assigned_agent_id] = self._resolve_external_agent_profile(
+                    assigned_agent_id,
+                    owner_account_id=owner_account_id,
+                    model_id=model_id,
+                    agent=assigned_agent,
+                    runtime=self.external_store.get_runtime(str(assigned_agent.get("runtime_id") or "")),
                 )
-                cache_key = (owner_account_id, assigned_agent_id, model_id, profile_version)
-                profile = self._runtime_profile_cache.get(cache_key)
-                if profile is None:
-                    profile = build_agent_profile(
-                        assigned_agent,
-                        model_id=model_id or None,
-                    )
-                    self._runtime_profile_cache[cache_key] = profile
-                profiles[assigned_agent_id] = profile
             except Exception as exc:  # noqa: BLE001 - 不可读取本身就是运行时不可用事实
                 log.debug(
                     "无法解析当前节点成员 AgentProfile agent=%s err=%s",
@@ -5370,12 +5697,17 @@ class InProcessTeamManager(TeamManager):
         existing = self._plans.get(plan_key)
         if existing is not None:
             return existing
-        graph_plan = self.graph_planner.plan(
-            team,
-            goal,
-            execution_profile=execution_profile,
-            team_spec=team_spec,
-        )
+        if not self._begin_team_planning(session_id, owner_account_id):
+            raise ToolError("Team 正在规划中，请稍后重试。")
+        try:
+            graph_plan = self.graph_planner.plan(
+                team,
+                goal,
+                execution_profile=execution_profile,
+                team_spec=team_spec,
+            )
+        finally:
+            self._end_team_planning(session_id, owner_account_id)
         nodes, edges = graph_plan.nodes, graph_plan.edges
         if not nodes:
             return None
@@ -5413,14 +5745,19 @@ class InProcessTeamManager(TeamManager):
         existing = self._plans.get(plan_key)
         if existing is not None:
             return existing
-        graph_plan = await self.graph_planner.plan_async(
-            team,
-            goal,
-            execution_profile=execution_profile,
-            team_spec=team_spec,
-            provider=self._provider_for_owner(owner_account_id),
-            planning_progress=planning_progress,
-        )
+        if not self._begin_team_planning(session_id, owner_account_id):
+            raise ToolError("Team 正在规划中，请稍后重试。")
+        try:
+            graph_plan = await self.graph_planner.plan_async(
+                team,
+                goal,
+                execution_profile=execution_profile,
+                team_spec=team_spec,
+                provider=self._provider_for_owner(owner_account_id),
+                planning_progress=planning_progress,
+            )
+        finally:
+            self._end_team_planning(session_id, owner_account_id)
         blocking_missing = self._blocking_planning_missing_info(goal, list(graph_plan.critical_missing_info))
         if blocking_missing:
             self._planning_missing_info[plan_key] = blocking_missing
@@ -7315,6 +7652,12 @@ class InProcessTeamManager(TeamManager):
                     **dict(node.metadata or {}),
                     "execution_started_at": time.time(),
                     "execution_attempt": attempt,
+                    "execution_snapshot": self.execution_snapshot(
+                        envelope.session_id,
+                        node.assignee,
+                        owner_account_id=envelope.user_id,
+                        plan_node_id=node.node_id,
+                    ),
                 }
                 self._mark_plan_node(
                     envelope.session_id,
@@ -7385,6 +7728,12 @@ class InProcessTeamManager(TeamManager):
                         "team_workspace_scope": workspace_scope,
                         "external_output_contract": self._delegate_output_contract(workspace_scope),
                         "workspace_instructions": self._team_roster_summary(dispatch_team),
+                        "execution_snapshot": self.execution_snapshot(
+                            envelope.session_id,
+                            node.assignee,
+                            owner_account_id=envelope.user_id,
+                            plan_node_id=node.node_id,
+                        ),
                     }
                     if envelope.params.get("active_skills"):
                         task_payload_meta["active_skills"] = list(
@@ -7705,6 +8054,12 @@ class InProcessTeamManager(TeamManager):
                         node_meta["full_result_bytes"] = full_result_bytes
                     node_meta["result_contract"] = result_contract
                     node_meta["execution_assessment"] = assessment.to_dict()
+                    node_meta["execution_snapshot"] = self._execution_snapshot_for_attempt(
+                        plan,
+                        node,
+                        owner_account_id=envelope.user_id,
+                        source_attempt_id=task_id,
+                    )
                     node.metadata = node_meta
                     if assessment.execution_status != "completed":
                         outcome, quality_weight, failure_kind = self._profile_outcome_from_execution(assessment)
@@ -8004,6 +8359,12 @@ class InProcessTeamManager(TeamManager):
                 owner_account_id,
                 event,
             ),
+            execution_snapshot=lambda member, owner, node_id: self.execution_snapshot(
+                session_id,
+                member,
+                owner_account_id=owner,
+                plan_node_id=node_id,
+            ),
         )
         communication_router = TeamCommunicationRouter(
             bus=bus,
@@ -8181,6 +8542,11 @@ class InProcessTeamManager(TeamManager):
             team_session_id=session_id,
             owner_account_id=owner_account_id,
         )
+        member_profiles = self._resolve_team_member_profiles(
+            members,
+            leader_spec,
+            owner_account_id=owner_account_id,
+        )
         log.info(
             "[Team] 已组建团队 session=%s leader=%s 成员=%s",
             session_id,
@@ -8199,6 +8565,7 @@ class InProcessTeamManager(TeamManager):
             communication_router=communication_router,
             external_team_id=external_team_id,
             runtime_members=runtime_member_map,
+            member_profiles=member_profiles,
         )
 
     def _get_or_create(self, session_id: str, *, external_team_id: str = "", owner_account_id: str = "") -> Team:
@@ -8277,6 +8644,15 @@ class InProcessTeamManager(TeamManager):
         与 Team Bus。
         """
         team = self._get_or_create(session_id, external_team_id=external_team_id, owner_account_id=owner_account_id)
+        delegate_payload_meta = {
+            **dict(task_payload_meta or {}),
+            "execution_snapshot": self.execution_snapshot(
+                session_id,
+                member,
+                owner_account_id=owner_account_id,
+                plan_node_id=plan_node_id,
+            ),
+        }
         if plan_node_id:
             self.update_plan_node(
                 session_id,
@@ -8333,7 +8709,7 @@ class InProcessTeamManager(TeamManager):
                     on_task_created=_on_task_created,
                     on_task_finished=_on_task_finished,
                     owner_account_id=owner_account_id,
-                    task_payload_meta=task_payload_meta,
+                    task_payload_meta=delegate_payload_meta,
                     attachments=attachments,
                 )
             except asyncio.CancelledError:
@@ -8382,7 +8758,7 @@ class InProcessTeamManager(TeamManager):
                     on_task_created=_on_task_created,
                     on_task_finished=_on_task_finished,
                     owner_account_id=owner_account_id,
-                    task_payload_meta=task_payload_meta,
+                    task_payload_meta=delegate_payload_meta,
                     attachments=attachments,
                 )
             except asyncio.CancelledError:

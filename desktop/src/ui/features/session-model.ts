@@ -2,13 +2,13 @@
  * 会话级模型：Composer 切换走 PUT /api/session/{id}/model，不再调用全局 switchModel。
  */
 
-import { backendApi, type ModelOption, type RuntimeModelProfile } from '../backend-client';
+import { backendApi, type ModelOption, type RuntimeModelProfile, type TeamMemberModelBinding } from '../backend-client';
 import { isBusySession, notify, setActiveExternalTeamForSession, state } from '../state';
 import { composerWorkspaceId, ensureComposerDraftSession, getDraftSessionModelId, getSessionAgentDisplay, isDraftSession, setDraftSessionModelId } from './workspaces';
 
 export interface SessionModelBinding {
   source?: 'crew' | 'external' | 'team';
-  model_profile_id: string;
+  model_profile_id?: string;
   pending_model_profile_id?: string | null;
   model_label?: string;
   pending_label?: string | null;
@@ -19,6 +19,7 @@ export interface SessionModelBinding {
   runtime_id?: string;
   external_agent_id?: string;
   external_team_id?: string;
+  members?: TeamMemberModelBinding[];
 }
 
 export interface ComposerModelOption {
@@ -193,7 +194,7 @@ export function mergeSessionModelsFromBackend(
 export async function loadSessionModel(sessionId: string): Promise<SessionModelBinding | null> {
   try {
     const binding = await backendApi.getSessionModel(sessionId);
-    if (binding.source === 'external' && isDraftSession(sessionId)) {
+    if (binding.source === 'external' && isDraftSession(sessionId) && binding.model_profile_id) {
       setDraftSessionModelId(binding.model_profile_id);
     }
     applySessionModelBinding(sessionId, binding);
@@ -224,7 +225,7 @@ export async function setSessionModel(modelId: string): Promise<void> {
       const binding = await backendApi.setSessionModel(sid, modelId, {
         workspace_id: composerWorkspaceId(),
       });
-      if (isDraftSession(sid)) setDraftSessionModelId(binding.model_profile_id);
+      if (isDraftSession(sid) && binding.model_profile_id) setDraftSessionModelId(binding.model_profile_id);
       applySessionModelBinding(sid, binding);
       notify(`已切换模型：${binding.model_label || modelId}`);
       return;

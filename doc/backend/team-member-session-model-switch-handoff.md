@@ -2,7 +2,13 @@
 
 > 更新时间：2026-08-19
 > 交接范围：Team Session 内按成员切换模型
-> 当前阶段：已有基础实现，尚未完成完整闭环
+> 当前阶段：核心闭环已落地，保留真实 Runtime smoke 作为持续验收项
+
+## 当前实现状态（2026-08-19）
+
+本次修复已完成 Session/成员级模型切换的后端闭环：模型画像按当前 binding 解析；DAG 使用当前模型画像；切换复用成员并发保护并检查 planning、busy 和待执行节点硬能力；委派、ask/mention、TeamPlan 节点和 AgentProfile observation 保存不可变 `execution_snapshot`。Kimi provider/list 目录只作为模型目录，不再自动证明 Runtime 支持保留上下文的模型切换。
+
+已验证：模型切换成功与 CAS、Kimi 探测、DAG/Team ask/mention/画像归因定向回归，以及 Python 编译检查。未修改 Desktop/Web 协议或新增模块、表、接口；真实 Kimi/ACP/Claude/Codex Runtime smoke 仍按第 8 节持续执行。
 
 ## 1. 接手须知
 
@@ -415,3 +421,14 @@ git add -f doc/backend/team-member-session-model-switch-handoff.md
 7. Executor 实际使用的模型与 binding 一致。
 8. NodeAttempt、历史和 Observation 都使用不可变 execution snapshot。
 9. 重启、并发、模型删除、Runtime 不可用和跨 Owner 场景均通过验收。
+
+## 12. 本次开发与测试记录
+
+- 代码模块：`crew/gateway/routers/sessions.py`、`crew/agent/external/acp_adapter.py`、`crew/team/team_manager.py`、`crew/team/graph_planner.py`、`crew/team/communication.py`、`crew/team/delegate_tool.py`。
+- 测试文档位置：本节；模块行为记录同步到 `doc/backend/modules/team.html` 和 `doc/backend/team-data-model-principles.html`。
+- 已执行：
+  - `python -m py_compile`（涉及的 Runtime、Gateway、Team 文件）；
+  - Gateway/Runtime 定向回归：`36 passed, 1 skipped`；
+  - Team ask/mention、画像 observation 定向回归：`8 passed`；
+  - 相关后端完整回归（`tests/gateway/test_gateway_api.py tests/test_external_agents.py tests/test_team_tasks.py`）：`364 passed, 1 skipped`。
+- 关键结果：切换失败不会写入 binding；切换成功只淘汰后续 Team 缓存；已运行对象继续使用原模型；历史节点与 observation 使用执行时 snapshot，不回读当前模型。

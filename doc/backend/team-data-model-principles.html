@@ -17,7 +17,7 @@
   <div class="crumb">Crew / Backend / Team / Design Principle</div>
   <h1>Team 数据模型原则边界</h1>
   <div class="sub">冻结 TeamSpec、AgentProfile、FormationConstraints、FormationPlan、WorkflowPlan、WorkflowRun、WorkflowEvent 与 TeamPortrait 的语义边界，作为 Team Formation 和每轮任务执行的共同开发契约。</div>
-  <p><span class="status">状态：稳定开发原则</span><span class="status">Formation 第一阶段已落地：2026-07-11</span><span class="status">Workflow V1 原则确认：2026-07-12</span><span class="status">External Runtime 边界冻结：2026-07-23</span><span class="status">External Executor 与 Interaction 边界确认：2026-07-24</span></p>
+  <p><span class="status">状态：稳定开发原则</span><span class="status">Formation 第一阶段已落地：2026-07-11</span><span class="status">Workflow V1 原则确认：2026-07-12</span><span class="status">External Runtime 边界冻结：2026-07-23</span><span class="status">External Executor 与 Interaction 边界确认：2026-07-24</span><span class="status">Team Session 模型切换闭环：2026-08-19</span></p>
   <div class="note">本文档是 Team 模块后续开发的稳定参考，不是当前实现快照。代码与本文原则冲突时，应先确认是实现债务还是原则需要修订；不得通过新增同义模型绕开边界。</div>
 
   <h2>1. 核心数据关系</h2>
@@ -772,6 +772,15 @@ flowchart LR
     <li><b>计划状态：</b>计划状态反映“是否还有合法执行路径”：存在独立 runnable 节点时为 <code>active</code>；阻塞节点及其依赖链之外没有 runnable 节点时才为 <code>blocked</code>；全部节点完成时为 <code>completed</code>。</li>
     <li><b>结果摘要：</b>混合状态按完成、当前阻塞、受影响依赖和仍可继续四类事实输出；不把局部节点阻塞夸大为整个工作流立即终止。</li>
     <li><b>边界：</b>不新增状态枚举、能力表、补员请求表或 TeamSpec 字段；看板继续展示节点级 blocked 和现有恢复操作，TeamPlan 只承担聚合状态。</li>
+  </ul>
+
+  <h2>23F. Team Session 成员模型切换的数据边界（2026-08-19）</h2>
+  <p>成员模型切换只改变当前 Team Session 的后续执行绑定，不改变外部 Agent 默认模型、Team 模板、其他 Session 或既有 DAG。系统不新增 EffectiveAgentProfile；当前模型通过既有 <code>AgentProfile</code> 的 model overlay 表达。</p>
+  <ul>
+    <li><b>绑定：</b><code>member_model_bindings</code> 是 Session 级、成员级事实，使用 CAS revision 和 Owner 隔离；Team 缓存淘汰后，下一次 Team 构建从该 binding 解析模型画像。</li>
+    <li><b>能力：</b>Formation 的长期职责与当前执行能力分开；DAG admission、工作单元分配和 Runtime staffing 对当前 Team 成员使用绑定模型解析出的 AgentProfile。</li>
+    <li><b>执行事实：</b><code>execution_snapshot</code> 记录 agent/member/runtime/model/fingerprint/profile version/binding revision，写入既有 Task progress、TeamPlanNode metadata 和 AgentProfile observation；不新增 NodeAttempt 或 Observation 表。</li>
+    <li><b>切换校验：</b>Runtime 只有明确的 <code>RuntimeCapabilities.model_switch</code> 才可切换；规划中的 Team、运行中的目标成员、以及待执行节点的 <code>execution_requirements</code> 硬缺口分别返回 <code>team_planning</code>、<code>member_busy</code>、<code>pending_work_incompatible</code>，不静默改 DAG。</li>
   </ul>
 
   <h2>24. 后续 TODO 边界</h2>

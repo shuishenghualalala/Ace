@@ -268,6 +268,7 @@ class TeamAskCoordinator:
         session_store: Any | None = None,
         on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
         on_lifecycle: Callable[[dict[str, Any]], Any] | None = None,
+        execution_snapshot: Callable[[str, str, str], dict[str, Any]] | None = None,
         timeout_seconds: float = 30.0,
     ) -> None:
         self.bus = bus
@@ -277,6 +278,7 @@ class TeamAskCoordinator:
         self.session_store = session_store
         self.on_chunk = on_chunk
         self.on_lifecycle = on_lifecycle
+        self.execution_snapshot = execution_snapshot
         self.timeout_seconds = max(0.1, float(timeout_seconds))
         self._locks: dict[str, asyncio.Lock] = {}
         self._active_paths: dict[str, tuple[str, ...]] = {}
@@ -412,6 +414,11 @@ class TeamAskCoordinator:
             "team_node_id": node_id,
             "task_id": task_id,
             "communication_path": [*path, target],
+            "execution_snapshot": (
+                self.execution_snapshot(target, owner, node_id)
+                if self.execution_snapshot is not None
+                else {}
+            ),
             "workspace_instructions": (
                 "当前是只读的 Team ask 回答回合。只回答发起成员的问题，"
                 "不要把它当作新的 DAG 节点或正式任务。"

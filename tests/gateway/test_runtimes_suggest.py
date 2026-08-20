@@ -17,10 +17,11 @@ from crew.core.mocks import FakeProvider
 from crew.core.types import ChatResponse
 from crew.gateway.helpers import build_team_draft, fallback_team_suggestion, fast_team_suggestion
 from crew.gateway.routers.runtimes import (
-    _draft_cache_key,
-    _runtime_availability,
     SUGGEST_FIELD_CHAR_CAP,
     SUGGEST_PROMPT_CHAR_CAP,
+    _draft_cache_key,
+    _formation_agent_catalog,
+    _runtime_availability,
     _truncate_user_payload,
 )
 from crew.gateway.server import create_app
@@ -29,8 +30,8 @@ from crew.team.formation import (
     FORMATION_AI_MAX_AGENT_CANDIDATES,
     FORMATION_AI_MAX_EVIDENCE_PER_AGENT,
     build_agent_profile,
-    formation_auto_decision,
     formation_ai_context,
+    formation_auto_decision,
 )
 
 OWNER_A = "A:uid-a"
@@ -755,6 +756,37 @@ async def test_create_team_normalizes_manual_roster_into_formation_plan(tmp_path
     assert team["members"][0]["assigned_capabilities"] == ["planning"]
 
 
+def test_formation_catalog_excludes_runtime_managed_agents(tmp_path, monkeypatch):
+    """Runtime 补员的托管 Agent 只留在运行时池，不进入新团队 Formation。"""
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    permanent_agents = _seed_agents(crew)
+    crew.external_agents.upsert_runtime({
+        "id": "rt-managed",
+        "type": "acp",
+        "provider": "generic",
+        "executable_path": "/bin/sh",
+        "metadata": {
+            "availability_status": "ready",
+            "models": [{"id": "model-managed", "label": "Managed Model", "default": True}],
+            "default_model_id": "model-managed",
+        },
+    })
+    managed_agent = crew.external_agents.get_or_create_managed_agent(
+        owner_account_id=OWNER_A,
+        managed_kind="runtime_staffing",
+        managed_key="rt-managed\x1fmodel-managed\x1fqa_engineer",
+        name="Runtime 托管测试外援",
+        runtime_id="rt-managed",
+        model="model-managed",
+    )
+
+    catalog = _formation_agent_catalog(crew.external_agents, owner_account_id=OWNER_A)
+
+    assert {agent["id"] for agent in catalog} == {agent["id"] for agent in permanent_agents}
+    assert managed_agent["id"] not in {agent["id"] for agent in catalog}
+
+
 @pytest.mark.asyncio
 async def test_confirmed_temporary_member_is_owner_private_hidden_and_cleaned_up(
     tmp_path, monkeypatch, auth_headers,
@@ -1002,7 +1034,7 @@ async def test_valid_formation_ai_gap_is_returned_for_user_confirmation(
     monkeypatch.setattr(
         crew.external_agents,
         "list_agents",
-        lambda *, owner_account_id="": profiled_agents if owner_account_id == OWNER_A else [],
+        lambda *, owner_account_id="", include_managed=True: profiled_agents if owner_account_id == OWNER_A else [],
     )
     formation_payload = {
         "name": "质量团队",
@@ -1093,7 +1125,7 @@ async def test_ai_suggestion_pauses_for_required_agent_capability_decision(
     monkeypatch.setattr(
         crew.external_agents,
         "list_agents",
-        lambda *, owner_account_id="": profiled_agents if owner_account_id == OWNER_A else [],
+        lambda *, owner_account_id="", include_managed=True: profiled_agents if owner_account_id == OWNER_A else [],
     )
     fake = FakeProvider()
     crew.provider = fake

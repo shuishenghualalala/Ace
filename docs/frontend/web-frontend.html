@@ -779,6 +779,23 @@ cd web && npm run build
     <li>“我的外援”、Composer 外援 Agent、session 列表和 ACP 对话头像共用相同的 provider 首字母与稳定纹样槽位；纹样以约 10% 主题墨色平铺完整头像表面，解决只在右上角出现一小块的问题。</li>
     <li>“发现外援”的 runtime 卡片统一显示 Sidebar 外援入口同款 <code>external-agent.png</code>；runtime 集成图标与 provider 身份头像保持清晰分工。</li>
   </ul>
+
+  <h2>68. Team 工作流看板文案与产物降噪（2026-08-11）</h2>
+  <ul>
+    <li>Team TaskBoard 标题统一从“团队 DAG 工作流”改为“团队工作流”，保留节点阶段、负责人和运行态信息，不向用户暴露实现层 DAG 术语。</li>
+    <li>节点展开详情继续使用既有浅色主题表面；产物清单过滤 Gateway 为每次 <code>agent_turn</code> 生成的内部 <code>.crew/tasks/task_*.json</code> 运行记录，只展示真实用户文件或显式 Team artifact。</li>
+    <li>Desktop 协作看板同步采用同一文案和产物过滤规则；模型切换入口属于 Desktop 成员卡片，按成员调用会话模型接口，Web TaskBoard 不新增第二套模型协议。</li>
+    <li>Web 团队成员卡恢复像素小旗帜 Leader 标识并放大成员头像；Kimi ACP 通过本地 provider catalog 补回模型后同步标记可切换能力。</li>
+  </ul>
+  <p>验证：TaskBoard 定向测试 <code>11 passed</code>，Web TypeScript typecheck 通过。</p>
+
+  <h2>69. Team Logo 统一到外援阵容与对话（2026-08-11）</h2>
+  <ul>
+    <li>“我的阵容 → 我的团队”的团队卡片和详情弹窗头部直接复用 Team Session 的基础 <code>session__team-logo</code>，移除卡片专用 Logo 变体，保证两处使用完全相同的黑白双 Agent 图形。</li>
+    <li>Team 规划回合使用黑白双 Agent Logo；内置 Crew Leader 回合使用 Crew 自有头像，外部成员回合继续显示成员自己的头像，不把团队身份误当成员身份。</li>
+    <li>Desktop 会话历史中的 Team 会话同步使用同一 Logo，避免回退为通用三人群组图标；没有新增资源或顶层模块。</li>
+  </ul>
+  <p>验证：Web Team 消息回归、TypeScript typecheck 与 production build 通过。</p>
   <h2>70. Team Composer @ 成员联想与结构化发送（2026-08-16）</h2>
   <ul>
     <li><b>候选分类：</b>Team 会话输入 <code>@</code> 时，Composer 将当前 Team 成员与既有文件补全合并展示，并用“团队成员 / 文件”分组；非 Team 会话保持原有文件补全行为。</li>
@@ -876,7 +893,7 @@ cd web && npm run build
   <p>验证：Web hook/Team 气泡测试 29 passed，Web/Desktop TypeScript typecheck 通过；直接 mention 后端定向回归通过。</p>
 </div>
 <div>
-  <h2>Team @成员路由 ID 修复（2026-08-18）</h2>
+  <h2>80. Team @成员路由 ID 修复（2026-08-18）</h2>
   <ul>
     <li><b>问题：</b>外部 Agent 的配置 ID（例如 <code>agent_c6f06632e6a4</code>）与 Team Runtime 成员 ID（例如 <code>kk</code>）被混用；候选展示为 <code>@kk</code>，发送却携带外部 Agent ID，服务端会按当前团队成员校验并拒绝。</li>
     <li><b>修复：</b>Team 成员视图新增独立的 <code>mentionId</code>；外部成员使用运行时成员名，Leader 固定使用 <code>leader</code>，<code>agentId</code> 继续保留给外部 Agent 配置和身份展示。</li>

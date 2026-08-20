@@ -116,7 +116,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.msg__avatar-media')).toBeNull();
   });
 
-  it('Team 内置成员使用新版 Crew SVG 头像并显示 leader 身份', () => {
+  it('Team 内置 Crew Leader 使用 Crew 自有头像并显示 leader 身份', () => {
     const root = renderTeamInternalMessage({
       id: 'team-leader',
       role: 'team_internal',
@@ -131,8 +131,9 @@ describe('renderAgentTurn', () => {
     expect(root.classList.contains('team-internal')).toBe(true);
     expect(root.querySelector('.team-internal__name strong')?.textContent).toBe('Crew');
     expect(root.querySelector('.team-internal__name em')?.textContent).toBe('leader');
-    expect(root.querySelector<SVGUseElement>('.team-internal__avatar .msg__avatar-symbol use')?.getAttribute('href'))
+    expect(root.querySelector('.team-internal__avatar .msg__avatar-symbol use')?.getAttribute('href'))
       .toBe('./crew-ui-symbols.svg#avatar-headphones');
+    expect(root.querySelector('.team-internal__avatar .session__team-logo')).toBeNull();
   });
 
   it('Team 外部成员展示成员气泡、执行过程和产物卡', () => {

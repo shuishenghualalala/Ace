@@ -300,8 +300,8 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
   it('Inspector「协作」Tab 仅在 Team Session 显示', () => {
     document.body.innerHTML = `
       <button id="task-board-toggle"></button>
-      <button id="ins-collaboration-tab" class="chat-inspector__tab is-hidden" data-inspector-tab="collaboration" hidden></button>
-      <span id="ins-collaboration-count"></span>
+      <div id="chat-inspector-tabs"></div>
+      <div id="inspector-tab-menu"></div>
     `;
     sessionStore.set({
       sessions: [{
@@ -315,16 +315,14 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
       }],
     });
     refreshInspectorChrome();
-    const collaborationTab = document.getElementById('ins-collaboration-tab') as HTMLButtonElement;
-    expect(collaborationTab.hidden).toBe(false);
-    expect(collaborationTab.classList.contains('is-hidden')).toBe(false);
+    const collaborationTab = document.querySelector('[data-workspace-tab="core:collaboration"]');
+    expect(collaborationTab).not.toBeNull();
 
     sessionStore.set({
       sessions: [{ id: 'sess-a', title: '普通会话', workspaceId: 'default', updatedAt: 1, preview: '', badge: '' }],
     });
     refreshInspectorChrome();
-    expect(collaborationTab.hidden).toBe(true);
-    expect(collaborationTab.classList.contains('is-hidden')).toBe(true);
+    expect(document.querySelector('[data-workspace-tab="core:collaboration"]')).toBeNull();
   });
 
   it('会话列表刷新不会用 Crew 摘要覆盖外部 Runtime 模型目录', () => {

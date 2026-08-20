@@ -161,6 +161,36 @@ describe('Crew shell and Welcome identity', () => {
     expect(welcomeCss).toContain('@media (prefers-reduced-motion: reduce)');
   });
 
+  it('lifts the mascot clear of the Composer in minimum-height windows', () => {
+    const compactHeightStart = welcomeCss.indexOf('@media (max-height: 680px)');
+    const reducedMotionStart = welcomeCss.indexOf('@media (prefers-reduced-motion: reduce)');
+    const compactHeightCss = welcomeCss.slice(compactHeightStart, reducedMotionStart);
+
+    expect(compactHeightStart).toBeGreaterThanOrEqual(0);
+    expect(reducedMotionStart).toBeGreaterThan(compactHeightStart);
+    expect(compactHeightCss).toContain(
+      'padding: var(--mw-space-2) var(--mw-space-4) var(--mw-space-4)',
+    );
+    expect(compactHeightCss).toContain('width: 140px');
+    expect(compactHeightCss).toContain('height: 140px');
+    expect(compactHeightCss).not.toContain('.mw-composer__welcome-paws');
+  });
+
+  it('keeps the mention canvas above the Welcome mascot without lifting the project strip', () => {
+    expect(welcomeCss).toContain(
+      'body.welcome-active #chat-composer-root:has(.mention-pop)',
+    );
+    expect(welcomeCss).toContain(
+      '#chat-composer-root:has(.mention-pop) .mw-composer',
+    );
+    expect(
+      ruleBody(
+        welcomeCss,
+        'body.welcome-active\n  #chat-composer-root\n  .mw-composer__panel:has(.mention-pop)',
+      ),
+    ).toContain('z-index: 3');
+  });
+
   it('lets compact Welcome content scroll instead of clipping its text', () => {
     const compactHeightStart = welcomeCss.indexOf('@media (max-height: 680px)');
     const reducedMotionStart = welcomeCss.indexOf('@media (prefers-reduced-motion: reduce)');
@@ -172,6 +202,9 @@ describe('Crew shell and Welcome identity', () => {
     expect(compactHeightCss).toContain('grid-row: auto');
     expect(welcomeCss).toContain(
       'grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr)',
+    );
+    expect(compactHeightCss).not.toContain(
+      'grid-template-rows: minmax(0, 1fr) auto auto',
     );
     expect(compactHeightCss).not.toContain('translate(-50%, 0) rotate(-8deg)');
     expect(compactHeightCss).not.toContain('translate(50%, 0) rotate(8deg)');

@@ -14,6 +14,7 @@ export interface AgentTurnIdentity {
   role?: string;
   tone?: number;
   crewLogo?: boolean;
+  teamLogo?: boolean;
   external?: boolean;
 }
 
@@ -105,7 +106,11 @@ export default function AgentTurnBubble({
       id={id}
       data-message-id={id?.replace(/^message-/, "")}
     >
-      {identity.crewLogo ? (
+      {identity.teamLogo ? (
+        <div className="msg__avatar msg__avatar--team team-internal__avatar">
+          <span className="session__team-logo" aria-hidden="true"><i /><i /></span>
+        </div>
+      ) : identity.crewLogo ? (
         <div className="msg__avatar bot team-internal__avatar">
           <AgentAvatarLogo />
         </div>

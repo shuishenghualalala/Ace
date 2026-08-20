@@ -1412,7 +1412,9 @@ export function renderTeamInternalMessage(
 
   const currentAvatar = root.querySelector<HTMLElement>(':scope > .msg__avatar');
   if (!isPlanning) {
-    const avatar = isCrew ? createChatAvatar() : document.createElement('span');
+    const avatar = isCrew
+      ? createChatAvatar()
+      : document.createElement('span');
     if (isCrew) {
       avatar.classList.add('team-internal__avatar');
     } else {

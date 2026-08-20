@@ -11,6 +11,7 @@ from crew.app import build_app
 from crew.core.types import Message
 from crew.gateway.server import create_app
 from crew.state.config import Config, ModelProfile
+from crew.team.models import TeamPlan, TeamPlanNode
 from crew.team.roles import CREW_BUILTIN_AGENT_ID
 
 
@@ -347,6 +348,12 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
                 "expected_revision": 1,
             },
         )
+        switched_team = crew.team._get_or_create(
+            "team-model",
+            external_team_id=team["id"],
+            owner_account_id=OWNER_A,
+        )
+        switched_profile = switched_team.member_profiles["leader"]
         selected = await client.get(
             f"/api/session/team-model/model?member_id={leader['id']}"
         )
@@ -419,6 +426,7 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
     assert switched.status_code == 200
     assert switched.json()["scope"] == "team_member"
     assert switched.json()["model_profile_id"] == "model-a"
+    assert switched_profile.model["id"] == "model-a"
     assert switched.json()["model_binding_revision"] == 2
     assert selected.json()["model_profile_id"] == "model-a"
     assert other_session.json()["model_profile_id"] == "model-b"
@@ -529,6 +537,87 @@ async def test_team_builtin_member_model_switch_uses_bound_profile(tmp_path, aut
         owner_account_id=OWNER_A,
     )
     assert rebuilt.leader.executor.provider.model == "builtin-a-model"
+
+
+@pytest.mark.asyncio
+async def test_team_model_switch_rejects_pending_hard_execution_requirement(tmp_path, auth_headers):
+    crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=True)
+    runtime = crew.external_agents.upsert_runtime({
+        "id": "team-hard-requirement-runtime",
+        "provider": "custom",
+        "name": "Hard Requirement Runtime",
+        "executable_path": "/bin/sh",
+        "protocol": "cli",
+        "metadata": {
+            "availability_status": "ready",
+            "default_model_id": "model-a",
+            "runtime_capabilities": {"model_switch": True, "session_resume": True},
+            "models": [
+                {"id": "model-a", "label": "Model A", "capabilities": ["tools"]},
+                {"id": "model-b", "label": "Model B", "capabilities": ["text"]},
+            ],
+        },
+    })
+    leader = crew.external_agents.create_agent(
+        owner_account_id=OWNER_A,
+        name="Hard Requirement Leader",
+        runtime_id=runtime["id"],
+        model="model-a",
+    )
+    team = crew.external_agents.create_team(
+        owner_account_id=OWNER_A,
+        name="Hard Requirement Team",
+        leader_agent_id=leader["id"],
+        members=[{"agent_id": leader["id"], "role": "Leader"}],
+    )
+    crew.session_store.ensure_session("team-hard", owner_account_id=OWNER_A)
+    crew.session_store.set_agent_config(
+        "team-hard",
+        {"executor": "team", "team": {"external_team_id": team["id"]}},
+        owner_account_id=OWNER_A,
+    )
+    app = create_app(crew)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        initial = await client.get("/api/session/team-hard/model")
+        crew.team._get_or_create(
+            "team-hard",
+            external_team_id=team["id"],
+            owner_account_id=OWNER_A,
+        )
+        crew.team._plans[(OWNER_A, "team-hard")] = TeamPlan(
+            team_session_id="team-hard",
+            goal="完成需要工具的节点",
+            nodes={
+                "build": TeamPlanNode(
+                    node_id="build",
+                    title="工具执行",
+                    assignee="leader",
+                    metadata={"execution_requirements": {"tools": True}},
+                ),
+            },
+        )
+        switched = await client.put(
+            "/api/session/team-hard/model",
+            json={
+                "member_id": leader["id"],
+                "model_profile_id": "model-b",
+                "expected_revision": 1,
+            },
+        )
+
+    assert initial.status_code == 200
+    assert switched.status_code == 409
+    assert switched.json()["code"] == "pending_work_incompatible"
+    assert switched.json()["incompatible_nodes"] == [{
+        "node_id": "build",
+        "title": "工具执行",
+        "missing": ["tools"],
+    }]
 
 
 @pytest.mark.asyncio

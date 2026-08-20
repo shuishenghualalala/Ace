@@ -86,6 +86,14 @@ function createExternalAgentAvatar(provider: string, displayBadge?: string): HTM
   return avatar;
 }
 
+function createTeamLogo(): HTMLElement {
+  const logo = document.createElement('span');
+  logo.className = 'session__team-logo';
+  logo.setAttribute('aria-hidden', 'true');
+  logo.append(document.createElement('i'), document.createElement('i'));
+  return logo;
+}
+
 function action(
   label: string,
   dataName: string,
@@ -215,7 +223,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
         action('派活', 'useTeam', team.id, (id) => options.onUseTeam?.(id), 'primary', !team.available),
         action('删除', 'deleteTeam', team.id, (id) => options.onDeleteTeam?.(id), 'danger'),
       );
-      card.append(createIcon('icon-team', { size: 40 }), copy, cardActions);
+      card.append(createTeamLogo(), copy, cardActions);
       teamGrid.append(card);
     }
     if (!current.teams.length) teamGrid.append(textElement('p', 'mw-hub-state', '还没有小队'));

@@ -407,6 +407,9 @@ async def run_delegate_to_teammate(
         "plan_node_id": plan_node_id,
         "requester_member_id": requester_member_id,
         "member": member,
+        "execution_snapshot": dict(task_payload_meta.get("execution_snapshot") or {})
+        if isinstance(task_payload_meta, dict) and isinstance(task_payload_meta.get("execution_snapshot"), dict)
+        else {},
     }
     touch_activity = getattr(tasks, "touch_activity", None)
     if callable(touch_activity):
@@ -421,6 +424,8 @@ async def run_delegate_to_teammate(
     from crew.security.launch import current_process_launch
 
     child_payload_meta = dict(task_payload_meta or {})
+    if isinstance(child_payload_meta.get("execution_snapshot"), dict):
+        child_payload_meta["execution_snapshot"] = dict(child_payload_meta["execution_snapshot"])
     if not str(child_payload_meta.get("workspace_root_path") or "").strip():
         inherited_root = _inherited_workspace_root()
         if inherited_root:
@@ -470,10 +475,12 @@ async def run_delegate_to_teammate(
             "session_id": child_session_id,
             "member": member,
             "task_id": task["id"],
+            "plan_node_id": plan_node_id,
             "instruction": instruction,
             "started_at": time.time(),
             "agent": teammate,
             "owner_account_id": owner,
+            "execution_snapshot": dict(child_payload_meta.get("execution_snapshot") or {}),
         })
     try:
         async for chunk in teammate.run(sub_env):
