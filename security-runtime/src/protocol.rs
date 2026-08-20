@@ -4,7 +4,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_STDIN_BYTES: usize = 1024 * 1024;
 pub const MAX_ENV_BYTES: usize = 256 * 1024;
@@ -14,7 +14,13 @@ pub const MAX_HOME_FILES: usize = 64;
 pub const MAX_RESPONSE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
-pub const READY_CAPABILITIES: [&str; 3] = ["stdin_once", "stream_output", "stdin_bidirectional"];
+pub const READY_CAPABILITIES: [&str; 5] = [
+    "stdin_once",
+    "stream_output",
+    "stdin_bidirectional",
+    "readonly_roots",
+    "full_disk_read",
+];
 
 /// Stable error codes for the managed-network layer (spec §13).
 ///
@@ -79,7 +85,11 @@ pub enum RuntimeRequest {
         #[serde(default)]
         readable_roots: Vec<String>,
         #[serde(default)]
+        readonly_roots: Vec<String>,
+        #[serde(default)]
         denied_roots: Vec<String>,
+        #[serde(default)]
+        full_disk_read: bool,
         #[serde(default)]
         network_enabled: bool,
         #[serde(default)]
@@ -103,7 +113,11 @@ pub enum RuntimeRequest {
         #[serde(default)]
         readable_roots: Vec<String>,
         #[serde(default)]
+        readonly_roots: Vec<String>,
+        #[serde(default)]
         denied_roots: Vec<String>,
+        #[serde(default)]
+        full_disk_read: bool,
         #[serde(default)]
         network_enabled: bool,
         #[serde(default)]
@@ -134,7 +148,7 @@ pub struct ReadyFrame {
     #[serde(rename = "type")]
     pub frame_type: &'static str,
     pub version: u16,
-    pub capabilities: [&'static str; 3],
+    pub capabilities: [&'static str; 5],
 }
 
 #[derive(Debug, Serialize)]
@@ -215,6 +229,7 @@ pub struct RuntimeCapabilities {
     pub filesystem_sandbox: bool,
     pub process_tree_cleanup: bool,
     pub managed_network: bool,
+    pub full_disk_read: bool,
     pub system_bwrap: bool,
     pub bundled_bwrap: bool,
     pub wsl_version: Option<u8>,
@@ -238,6 +253,7 @@ fn default_escalatable() -> bool {
     true
 }
 
+#[cfg(test)]
 pub fn validate_process_inputs(
     stdin_b64: Option<&str>,
     env_overrides: &BTreeMap<String, String>,
@@ -385,6 +401,7 @@ mod tests {
             filesystem_sandbox: true,
             process_tree_cleanup: true,
             managed_network: false,
+            full_disk_read: false,
             system_bwrap: false,
             bundled_bwrap: false,
             wsl_version: None,
@@ -399,7 +416,7 @@ mod tests {
 
     #[test]
     fn protocol_limits_match_the_public_contract() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
         assert_eq!(MAX_REQUEST_FRAME_BYTES, 2 * 1024 * 1024);
         assert_eq!(MAX_STDIN_BYTES, 1024 * 1024);
         assert_eq!(MAX_ENV_BYTES, 256 * 1024);
@@ -441,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn events_serialize_to_the_v2_ndjson_shape() {
+    fn events_serialize_to_the_v3_ndjson_shape() {
         let started = RuntimeEvent::Started {
             version: PROTOCOL_VERSION,
             nonce: "nonce".to_string(),

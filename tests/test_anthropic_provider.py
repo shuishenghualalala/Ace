@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from crew.agent.executor import BuiltinExecutor, ExecutionContext
+from crew.core.errors import ProviderError
 from crew.core.types import Message
 from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
@@ -16,8 +17,13 @@ from crew.tools.registry import Registry, tool_result
 pytestmark = pytest.mark.asyncio
 
 
-def _provider(handler) -> AnthropicProvider:
-    provider = AnthropicProvider(api_key="sk-ant", base_url="https://anthropic.test", model="claude-test")
+def _provider(handler, *, vision: bool = True) -> AnthropicProvider:
+    provider = AnthropicProvider(
+        api_key="sk-ant",
+        base_url="https://anthropic.test",
+        model="claude-test",
+        vision=vision,
+    )
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return provider
 
@@ -227,3 +233,57 @@ async def test_multimodal_message_after_tool_result_uses_anthropic_image_block()
         "type": "image",
         "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
     }
+
+
+async def test_text_only_anthropic_provider_replaces_image_with_notice():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "继续"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    provider = _provider(handler, vision=False)
+    image = Message(
+        role="user",
+        content="浏览器截图",
+        content_parts=[
+            {"type": "text", "text": "浏览器截图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    )
+    await provider.chat([image])
+    await provider.aclose()
+
+    blocks = seen["body"]["messages"][0]["content"]
+    assert not any(block.get("type") == "image" for block in blocks)
+    assert any("当前模型不支持视觉输入" in block.get("text", "") for block in blocks)
+
+
+async def test_anthropic_image_rejection_has_structured_capability_error():
+    provider = _provider(
+        lambda _request: httpx.Response(
+            400,
+            text="Model does not support image input: image_url",
+        )
+    )
+    image = Message(
+        role="user",
+        content="",
+        content_parts=[
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        await provider.chat([image])
+    await provider.aclose()
+
+    assert raised.value.category == "unsupported_capability"
+    assert raised.value.capability == "vision"

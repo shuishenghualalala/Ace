@@ -1373,6 +1373,17 @@ async function snapshot(host: BrowserHost): Promise<void> {
   });
 }
 
+async function approvedUpload(name: string, contents = 'approved upload'): Promise<string> {
+  const target = path.join(path.dirname(PROFILE), 'approved-uploads', 'test-stage', name);
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, contents);
+  return realpath(target);
+}
+
+async function approvedUploads(names: string[]): Promise<string[]> {
+  return Promise.all(names.map((name) => approvedUpload(name)));
+}
+
 async function setMode(host: BrowserHost, targetId: string, mode: 'ai' | 'human' | 'paused'): Promise<void> {
   await host.handleRpc({
     runtime_key: RUNTIME_KEY,
@@ -2625,6 +2636,7 @@ describe('BrowserHost', () => {
       action: { name: 'openPage', url: 'https://example.com/drop' },
     });
     const targetId = String(opened.pageBindings[0].targetId);
+    const files = await approvedUploads(['外部-a.txt', '外部-b.txt']);
     playwright.calls = [];
 
     await executeAtomic(host, {
@@ -2634,7 +2646,7 @@ describe('BrowserHost', () => {
       action: {
         name: 'x-crew-drop',
         selector: '#drop-zone',
-        files: ['/private/tmp/外部-a.txt', '/private/tmp/外部-b.txt'],
+        files,
         data: {
           'text/plain': 'exact text',
           'text/uri-list': 'https://example.test/a?token=exact#fragment',
@@ -2646,7 +2658,7 @@ describe('BrowserHost', () => {
     expect(playwright.calls).toContainEqual(expect.objectContaining({
       method: 'drop',
       args: [{
-        files: ['/private/tmp/外部-a.txt', '/private/tmp/外部-b.txt'],
+        files,
         data: {
           'text/plain': 'exact text',
           'text/uri-list': 'https://example.test/a?token=exact#fragment',
@@ -2922,8 +2934,11 @@ describe('BrowserHost', () => {
       runtime_key: RUNTIME_KEY,
       method: 'execute',
       params: { profile_dir: PROFILE, command: 'tab', args: ['list'], proxy_url: '' },
-    })).resolves.toMatchObject({ success: true });
-    expect(electron.sessions[0].proxy).toEqual({ mode: 'direct' });
+    })).rejects.toMatchObject({ code: 'proxy_required' });
+    expect(electron.sessions[0].proxy).toMatchObject({
+      mode: 'fixed_servers',
+      proxyRules: PROXY_URL,
+    });
 
     await host.dispose();
   });
@@ -3793,6 +3808,7 @@ describe('BrowserHost', () => {
     const created: any = await createTab(host);
     const targetId = created.data.targetId;
     await snapshot(host);
+    const dropFiles = await approvedUploads(['--literal-path', 'two.txt']);
 
     const execute = (command: string, args: string[] = [], extra: Record<string, unknown> = {}) =>
       host.handleRpc({
@@ -3846,8 +3862,8 @@ describe('BrowserHost', () => {
     await execute('resize', ['963.5', '707.25']);
     await execute('drop', [
       '@e1',
-      '--path', '--literal-path',
-      '--path', '/tmp/two.txt',
+      '--path', dropFiles[0],
+      '--path', dropFiles[1],
       '--data', 'text/plain', '--literal-value',
       '--data', 'text/uri-list', 'https://example.test/',
     ]);
@@ -3973,7 +3989,7 @@ describe('BrowserHost', () => {
         method: 'drop',
         ref: 'e1',
         args: [{
-          files: ['--literal-path', '/tmp/two.txt'],
+          files: dropFiles,
           data: {
             'text/plain': '--literal-value',
             'text/uri-list': 'https://example.test/',
@@ -4179,7 +4195,7 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
-  it('does not treat mouse wheel over a mounted AI page as a takeover gesture', async () => {
+  it('allows mouse wheel over a mounted AI page without treating it as takeover', async () => {
     const host = new BrowserHost(() => fakeWindow());
     await createTab(host);
     host.setPanel({
@@ -4196,8 +4212,8 @@ describe('BrowserHost', () => {
 
     electron.views[0].webContents.emit('before-mouse-event', blocked, { type: 'mouseWheel' });
 
-    // 输入仍被拦截（页面不应响应），但不发起接管请求。
-    expect(blocked.preventDefault).toHaveBeenCalledOnce();
+    // 滚轮只供用户阅读页面：放行但不改变控制权。
+    expect(blocked.preventDefault).not.toHaveBeenCalled();
     expect(requested).not.toHaveBeenCalled();
     await host.dispose();
   });
@@ -4698,11 +4714,12 @@ describe('BrowserHost', () => {
       isMultiple: () => false,
       setFiles,
     });
-    await expect(executeOnOpener('file_upload', ['/tmp/popup.txt'])).resolves.toMatchObject({
+    const popupFile = await approvedUpload('popup.txt');
+    await expect(executeOnOpener('file_upload', [popupFile])).resolves.toMatchObject({
       data: { canceled: false, uploaded: 1, multiple: false },
     });
     expect(setFiles).toHaveBeenCalledWith(
-      ['/tmp/popup.txt'],
+      [popupFile],
       { timeout: expect.any(Number) },
     );
     expect(setFiles.mock.calls[0][1]?.timeout).toBeGreaterThan(0);
@@ -4750,21 +4767,24 @@ describe('BrowserHost', () => {
       },
     });
 
+    const openerFile = await approvedUpload('opener.txt');
+    const popupFile = await approvedUpload('popup.txt');
+
     await expect(executeOnOpener('upload_with_trigger', [], {
       trigger_selector: '#opener-trigger',
       input_selector: '#opener-input',
-      files: ['/tmp/opener.txt'],
+      files: [openerFile],
     })).rejects.toMatchObject({
       code: 'file_chooser_pending',
     });
     expect(popupSetFiles).not.toHaveBeenCalled();
 
-    await expect(executeOnOpener('file_upload', ['/tmp/popup.txt']))
+    await expect(executeOnOpener('file_upload', [popupFile]))
       .resolves.toMatchObject({
         data: { canceled: false, uploaded: 1, multiple: false },
       });
     expect(popupSetFiles).toHaveBeenCalledOnce();
-    expect(popupSetFiles.mock.calls[0]?.[0]).toEqual(['/tmp/popup.txt']);
+    expect(popupSetFiles.mock.calls[0]?.[0]).toEqual([popupFile]);
     expect(popupSetFiles.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
     expect(popupSetFiles.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(15_000);
     await host.dispose();
@@ -4797,6 +4817,8 @@ describe('BrowserHost', () => {
       },
     });
 
+    const uploadFile = await approvedUpload('from-action.txt');
+
     await expect(execute('click', ['@e1'])).rejects.toMatchObject({
       code: 'file_chooser_pending',
       phase: 'dispatching',
@@ -4804,11 +4826,11 @@ describe('BrowserHost', () => {
     await expect(execute('snapshot')).rejects.toMatchObject({
       code: 'file_chooser_pending',
     });
-    await expect(execute('file_upload', ['/tmp/from-action.txt'])).resolves.toMatchObject({
+    await expect(execute('file_upload', [uploadFile])).resolves.toMatchObject({
       data: { canceled: false, uploaded: 1, multiple: false },
     });
     expect(setFiles).toHaveBeenCalledOnce();
-    expect(setFiles.mock.calls[0]?.[0]).toEqual(['/tmp/from-action.txt']);
+    expect(setFiles.mock.calls[0]?.[0]).toEqual([uploadFile]);
     expect(setFiles.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
     expect(setFiles.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(15_000);
     await expect(execute('snapshot')).resolves.toMatchObject({ success: true });
@@ -4991,7 +5013,8 @@ describe('BrowserHost', () => {
     await expect(execute('click', ['@e1'])).rejects.toMatchObject({
       code: 'file_chooser_pending',
     });
-    await expect(execute('file_upload', ['/tmp/ambiguous.txt'])).rejects.toMatchObject({
+    const ambiguousFile = await approvedUpload('ambiguous.txt');
+    await expect(execute('file_upload', [ambiguousFile])).rejects.toMatchObject({
       code: 'file_chooser_race',
       uncertain: true,
       partial: true,
@@ -5417,13 +5440,21 @@ describe('BrowserHost', () => {
       },
     });
 
-    await expect(execute('file_upload', ['/tmp/a.txt', '/tmp/b.txt']))
+    const [fileA, fileB, lateFile, compatibilityFile, expiredFile] = await approvedUploads([
+      'a.txt',
+      'b.txt',
+      'late.txt',
+      'compat.txt',
+      'expired.txt',
+    ]);
+
+    await expect(execute('file_upload', [fileA, fileB]))
       .resolves.toMatchObject({
         success: true,
         data: { canceled: false, uploaded: 2, multiple: true },
       });
     expect(firstSetFiles).toHaveBeenCalledOnce();
-    expect(firstSetFiles.mock.calls[0]?.[0]).toEqual(['/tmp/a.txt', '/tmp/b.txt']);
+    expect(firstSetFiles.mock.calls[0]?.[0]).toEqual([fileA, fileB]);
     expect(firstSetFiles.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
     expect(firstSetFiles.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(15_000);
     expect(engine.pendingFileChooser).toBeNull();
@@ -5438,7 +5469,7 @@ describe('BrowserHost', () => {
     });
     expect(canceledSetFiles).not.toHaveBeenCalled();
 
-    await expect(execute('file_upload', ['/tmp/late.txt'])).rejects.toMatchObject({
+    await expect(execute('file_upload', [lateFile])).rejects.toMatchObject({
       code: 'no_file_chooser',
       uncertain: false,
     });
@@ -5451,12 +5482,12 @@ describe('BrowserHost', () => {
       isMultiple: () => false,
       setFiles: compatibilitySetFiles,
     };
-    await expect(execute('upload', ['--chooser', '/tmp/compat.txt']))
+    await expect(execute('upload', ['--chooser', compatibilityFile]))
       .resolves.toMatchObject({
         data: { canceled: false, uploaded: 1, multiple: false },
       });
     expect(compatibilitySetFiles).toHaveBeenCalledOnce();
-    expect(compatibilitySetFiles.mock.calls[0]?.[0]).toEqual(['/tmp/compat.txt']);
+    expect(compatibilitySetFiles.mock.calls[0]?.[0]).toEqual([compatibilityFile]);
     expect(compatibilitySetFiles.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
     expect(compatibilitySetFiles.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(15_000);
 
@@ -5473,7 +5504,7 @@ describe('BrowserHost', () => {
         proxy_url: PROXY_URL,
         target_id: created.data.targetId,
         command: 'file_upload',
-        args: ['/tmp/expired.txt'],
+        args: [expiredFile],
         command_timeout_ms: 15_000,
         command_deadline_ms: Date.now() - 1,
         mutating: true,
@@ -5506,6 +5537,7 @@ describe('BrowserHost', () => {
         });
       }, 750);
     };
+    const currentFiles = await approvedUploads(['current-a.txt', 'current-b.txt']);
 
     const result: any = await host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -5518,7 +5550,7 @@ describe('BrowserHost', () => {
         args: [],
         trigger_selector: '#delayed-upload-trigger',
         input_selector: '#exact-file-input',
-        files: ['/tmp/current-a.txt', '/tmp/current-b.txt'],
+        files: currentFiles,
         mutating: true,
       },
     });
@@ -5531,7 +5563,7 @@ describe('BrowserHost', () => {
     expect(staleSetFiles).not.toHaveBeenCalled();
     expect(currentSetFiles).toHaveBeenCalledOnce();
     expect(currentSetFiles).toHaveBeenCalledWith(
-      ['/tmp/current-a.txt', '/tmp/current-b.txt'],
+      currentFiles,
       { timeout: expect.any(Number) },
     );
     expect(currentSetFiles.mock.calls[0][1]?.timeout).toBeGreaterThan(0);
@@ -5549,9 +5581,8 @@ describe('BrowserHost', () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
     playwright.selectorCounts.set('#missing-trigger', 0);
-    const files = Array.from(
-      { length: 256 },
-      (_, index) => `/tmp/file-${index}.txt`,
+    const files = await approvedUploads(
+      Array.from({ length: 256 }, (_, index) => `file-${index}.txt`),
     );
 
     const result: any = await host.handleRpc({
@@ -5606,9 +5637,8 @@ describe('BrowserHost', () => {
       ).at(-1)?.args,
     ).toEqual([[]]);
 
-    const unboundedFiles = Array.from(
-      { length: 1_025 },
-      (_, index) => `/tmp/unbounded-${index}.txt`,
+    const unboundedFiles = await approvedUploads(
+      Array.from({ length: 1_025 }, (_, index) => `unbounded-${index}.txt`),
     );
     await expect(host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -5643,6 +5673,7 @@ describe('BrowserHost', () => {
       method: 'Input.dispatchMouseEvent',
       message: 'transport failed after click dispatch began',
     };
+    const uploadFile = await approvedUpload('must-not-upload.txt');
 
     await expect(host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -5655,7 +5686,7 @@ describe('BrowserHost', () => {
         args: [],
         trigger_selector: '#uncertain-trigger',
         input_selector: '#exact-file-input',
-        files: ['/tmp/must-not-upload.txt'],
+        files: [uploadFile],
         mutating: true,
       },
     })).rejects.toMatchObject({
@@ -5688,6 +5719,7 @@ describe('BrowserHost', () => {
         setFiles: secondSetFiles,
       });
     };
+    const ambiguousFile = await approvedUpload('ambiguous.txt');
 
     await expect(host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -5700,7 +5732,7 @@ describe('BrowserHost', () => {
         args: [],
         trigger_selector: '#double-chooser-trigger',
         input_selector: '#exact-file-input',
-        files: ['/tmp/ambiguous.txt'],
+        files: [ambiguousFile],
         mutating: true,
       },
     })).rejects.toMatchObject({
@@ -5726,6 +5758,7 @@ describe('BrowserHost', () => {
         },
       });
     };
+    const uploadFile = await approvedUpload('disappeared.txt');
 
     await expect(host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -5738,7 +5771,7 @@ describe('BrowserHost', () => {
         args: [],
         trigger_selector: '#chooser-trigger',
         input_selector: '#exact-file-input',
-        files: ['/tmp/disappeared.txt'],
+        files: [uploadFile],
         mutating: true,
       },
     })).rejects.toMatchObject({

@@ -62,7 +62,11 @@ def api(tmp_path, monkeypatch):
     key_file.chmod(0o600)
     monkeypatch.setenv("CREW_HOME", str(crew_home))
     crew = build_app(
-        config=Config(db_path=str(tmp_path / "crew.db"), plugins_enabled=[]),
+        config=Config(
+            db_path=str(tmp_path / "crew.db"),
+            plugins_enabled=[],
+            security_enabled=True,
+        ),
         enable_team=False,
     )
     app = create_app(crew)
@@ -122,9 +126,7 @@ async def test_gateway_security_headers_cover_authentication_failures(api):
 @pytest.mark.asyncio
 async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
     api,
-    monkeypatch,
 ):
-    monkeypatch.setenv("ACE_STRICT_SECURITY", "0")
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await _put_json(
@@ -137,7 +139,48 @@ async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
 
 
 @pytest.mark.asyncio
-async def test_strict_auto_review_requires_live_native_runtime(api):
+async def test_disabled_security_forces_full_access(tmp_path, monkeypatch):
+    crew_home = tmp_path / ".crew"
+    key_dir = crew_home / ".gateway-instance"
+    key_dir.mkdir(parents=True, mode=0o700)
+    key_file = key_dir / "gateway-instance.key"
+    key_file.write_text(_KEY.hex(), encoding="ascii")
+    key_file.chmod(0o600)
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    crew = build_app(
+        config=Config(
+            db_path=str(tmp_path / "disabled-security.db"),
+            plugins_enabled=[],
+            security_enabled=False,
+        ),
+        enable_team=False,
+    )
+    app = create_app(crew)
+    transport = ASGITransport(app=app, client=("127.0.0.1", 12345))
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await _put_json(
+                client,
+                "/api/security/mode",
+                {"workspace_id": "default", "session_id": "s1", "mode": "request_approval"},
+            )
+        assert response.status_code == 200
+        assert response.json() == {"mode": "full_access"}
+    finally:
+        crew.security_rules.close()
+        crew.security_audit.close()
+        crew.active_owner.close()
+
+
+@pytest.mark.asyncio
+async def test_strict_auto_review_requires_live_native_runtime(api, monkeypatch):
+    async def unavailable_runtime():
+        return None, False, False, "darwin"
+
+    monkeypatch.setattr(
+        "crew.gateway.routers.security._live_filesystem_runtime",
+        unavailable_runtime,
+    )
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await _put_json(
@@ -148,6 +191,68 @@ async def test_strict_auto_review_requires_live_native_runtime(api):
 
     assert response.status_code == 409
     assert "live probe" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_live_probe_checks_broad_read_and_narrow_write_boundaries(monkeypatch):
+    from crew.gateway.routers import security as security_router
+
+    captured: dict[str, object] = {}
+    capabilities = RuntimeCapabilities(
+        backend="test",
+        filesystem_sandbox=True,
+        process_tree_cleanup=True,
+        managed_network=False,
+        full_disk_read=True,
+    )
+
+    class FakeRuntimeClient:
+        def __init__(self, helper_argv):
+            captured["helper_argv"] = helper_argv
+
+        async def execute(self, **kwargs):
+            captured.update(kwargs)
+            workspace = Path(kwargs["cwd"])
+            (workspace / "probe-marker").write_text("ok", encoding="ascii")
+            return SimpleNamespace(
+                exit_code=0,
+                stdout="probe",
+                stderr="",
+                capabilities=capabilities,
+            )
+
+    monkeypatch.setattr(security_router, "NativeRuntimeClient", FakeRuntimeClient)
+
+    result = await security_router._probe_runtime(
+        ("runtime",),
+        system="darwin",
+        network_enabled=False,
+    )
+
+    assert result is capabilities
+    assert captured["full_disk_read"] is True
+    assert captured["writable_roots"] == (captured["cwd"],)
+
+
+@pytest.mark.asyncio
+async def test_full_access_selection_does_not_depend_on_native_runtime(api, monkeypatch):
+    async def unavailable_runtime():
+        raise AssertionError("full access must not probe the managed runtime")
+
+    monkeypatch.setattr(
+        "crew.gateway.routers.security._live_filesystem_runtime",
+        unavailable_runtime,
+    )
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await _put_json(
+            client,
+            "/api/security/mode",
+            {"workspace_id": "default", "session_id": "s1", "mode": "full_access"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"mode": "full_access"}
 
 
 @pytest.mark.asyncio
@@ -428,14 +533,18 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         async def execute(self, **kwargs):
             network_enabled = kwargs["network_enabled"]
             calls.append(network_enabled)
+            assert kwargs["readonly_roots"] == (Path(kwargs["cwd"]) / ".git",)
+            assert kwargs["readable_roots"] == (readable_root,)
             Path(kwargs["cwd"]).joinpath("probe-marker").write_text("ok", encoding="ascii")
             return SimpleNamespace(
-                exit_code=1,
+                exit_code=0,
+                stdout="probe",
                 capabilities=RuntimeCapabilities(
                     backend="windows_sandbox_account",
                     filesystem_sandbox=True,
                     process_tree_cleanup=True,
                     managed_network=network_enabled,
+                    full_disk_read=True,
                     explicit_handle_inheritance=True,
                     windows_restricted_token=True,
                     windows_acl=True,
@@ -450,6 +559,12 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         lambda: (str(helper),),
     )
     monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
+    readable_root = tmp_path / "readable"
+    readable_root.mkdir()
+    monkeypatch.setattr(
+        "crew.security.launch._windows_full_disk_read_roots",
+        lambda: (readable_root,),
+    )
     monkeypatch.setattr("crew.gateway.routers.security.NativeRuntimeClient", FakeRuntimeClient)
 
     path = "/api/security/capabilities"
@@ -480,16 +595,20 @@ async def test_capabilities_probe_macos_runtime(api, tmp_path, monkeypatch):
             assert command[:3] == (
                 "/bin/sh",
                 "-c",
-                'printf ok > "$1"; cat "$2" >/dev/null',
+                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; '
+                'printf changed > "$3" 2>/dev/null || true; cat "$4"',
             )
+            assert kwargs["readonly_roots"] == (Path(command[5]).parent,)
             Path(command[4]).write_text("ok", encoding="ascii")
             return SimpleNamespace(
-                exit_code=1,
+                exit_code=0,
+                stdout="probe",
                 capabilities=RuntimeCapabilities(
                     backend="macos_seatbelt",
                     filesystem_sandbox=True,
                     process_tree_cleanup=True,
                     managed_network=network_enabled,
+                    full_disk_read=True,
                     local_binding_control=True,
                 ),
             )

@@ -15,9 +15,8 @@ import inspect
 import re
 import sys
 import time
-import uuid
 from collections import OrderedDict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.compact import ContextCompactor, SummaryStore
@@ -36,7 +35,8 @@ from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
 from crew.security.approvals import ApprovalManager
-from crew.security.audit import SQLiteSecurityAudit
+from crew.security.audit import AuditEvent, SQLiteSecurityAudit
+from crew.security.context import SecurityContext
 from crew.security.grants import GrantRegistry
 from crew.security.rule_store import SQLiteRuleStore
 from crew.security.service import SecurityApprovalService
@@ -358,7 +358,15 @@ class AgentManager:
         await self.wait_closed()
 
 
+# 存活的 CrewApp 实例注册表：测试中存在不走 ASGI lifespan 的用法（直接
+# ASGITransport 调 app），shutdown 不会被触发；tests/conftest.py 的兜底 fixture
+# 在每个用例后统一关闭，避免 SQLite/WAL 句柄跨用例累积耗尽 fd。
+# 正常 shutdown() 会把自己从表中移除，生产单实例场景开销可忽略。
+_LIVE_APPS: list["CrewApp"] = []
+
+
 class CrewApp:
+
     def __init__(
         self,
         config: Config,
@@ -380,12 +388,33 @@ class CrewApp:
         self.security_approvals = ApprovalManager(self.security_grants)
         self.security_rules = SQLiteRuleStore(config.db_path, wal_enabled=config.sqlite_wal)
         self.security_audit = SQLiteSecurityAudit(config.db_path, wal_enabled=config.sqlite_wal)
+        for rule_id, os_user, owner_account_id, workspace_id in (
+            self.security_rules.migrated_legacy_rules
+        ):
+            self.security_audit.record(
+                AuditEvent.for_rule(
+                    SecurityContext(
+                        os_user=os_user,
+                        owner_account_id=owner_account_id,
+                        workspace_id=workspace_id,
+                        workspace_root=None,
+                        session_id="security-migration",
+                        request_id="security-migration",
+                        task_id="",
+                        cwd=None,
+                    ),
+                    rule_id=rule_id,
+                    action_type="rule_disabled",
+                    decision="migration_disabled_legacy_unscoped_allow",
+                )
+            )
         self.security_service = SecurityApprovalService(
             self.security_approvals,
             self.security_grants,
             self.security_rules,
             self.security_audit,
             db_path=config.db_path,
+            security_enabled=config.security_enabled,
         )
         # Gateway 级单活登录事实源；HTTP/WS、Cron 与渠道只消费这一份租约。
         self.active_owner = ActiveOwnerLeaseStore(
@@ -489,6 +518,7 @@ class CrewApp:
             active_children_fn=self._active_children_snapshot,
             task_runtime=self.tasks,
         )
+        _LIVE_APPS.append(self)
 
     def _on_task_event(self, task: dict[str, Any]) -> None:
         """Push normalized task events to connected clients."""
@@ -716,6 +746,107 @@ class CrewApp:
             user_type=user_type,
         )
 
+    def _resolve_session_provider_profile(
+        self,
+        owner: str,
+        session_model: str,
+    ) -> tuple[ModelProfile | None, bool, str | None]:
+        """解析会话生效的模型 profile，返回 (provider_profile, owns_provider, model_fallback_notice)。
+
+        回退链：owner 默认模型（有 Key）→ 会话绑定模型（有 Key）→ 全局 active。
+        owns_provider=False 时生效 Provider 即 App 全局 self.provider（无 Key 时为
+        FakeProvider 演示模式）。_make_agent 装配与 read/set_session_model_binding
+        的 demo_mode 判定共用本方法，避免读写两处各自重推导致误报/漏报。
+        """
+        cfg = self.config
+        owner_profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
+        provider_profile: ModelProfile | None = None
+        build_dynamic_provider = False
+        # 装配期回退说明：写入 agent，供 run 开头以 status 帧推到 UI（避免只打日志用户无感）
+        model_fallback_notice: str | None = None
+        # owner 默认激活模型；仅 owner 非空时赋值，末尾用于静默降级判定（见缺口 1a）
+        active: ModelProfile | None = None
+        if owner:
+            active = self.config.owner_default_model_profile(owner)
+            if active is not None and active.has_key:
+                provider_profile = active
+                build_dynamic_provider = True
+            else:
+                # The owner overlay can retain a deleted/unloaded model id, or
+                # point at a profile whose owner-local key disappeared.  In
+                # both cases self.provider is the global active provider, so
+                # capability gating must use that same profile too.
+                provider_profile = cfg.active_model
+        else:
+            provider_profile = cfg.active_model
+        if session_model and session_model != "inherit":
+            profile = owner_profiles.get(session_model)
+            if profile and profile.has_key:
+                provider_profile = profile
+                build_dynamic_provider = True
+            else:
+                fallback_label = (
+                    provider_profile.label
+                    if provider_profile is not None and provider_profile.has_key
+                    else "FakeProvider 演示模式"
+                )
+                model_fallback_notice = (
+                    f"会话绑定模型「{session_model}」不可用（不存在或无 API Key），"
+                    f"已回退到「{fallback_label}」。"
+                    "请前往“设置 → 模型”配置 API Key 后切换到真实模型。"
+                )
+                log.warning("会话绑定模型 %s 不存在或无 API Key，回退全局 provider", session_model)
+        # 静默降级提示（缺口 1a）：仅当最终 provider 真的落回全局 active 模型、且 owner
+        # 默认激活的内置模型本身缺 key（典型 = 登录未下发 modelkey）时才提示。session
+        # 若已用自己的有 key 模型救回（provider_profile 不再是全局 active），或已产生更具体的
+        # 会话绑定提示（model_fallback_notice 已设），都不重复打扰——避免「用户自带可用模型却
+        # 误报降级」的假阳性。
+        if (
+            active is not None
+            and not active.has_key
+            and provider_profile is cfg.active_model
+            and not model_fallback_notice
+        ):
+            if cfg.active_model.has_key:
+                model_fallback_notice = (
+                    f"内置模型「{active.label}」未配置 API Key（登录可能未下发），"
+                    f"已临时回退到「{cfg.active_model.label}」。"
+                )
+            else:
+                model_fallback_notice = (
+                    f"模型「{active.label}」未配置 API Key，"
+                    "当前使用 FakeProvider 演示模式，不会调用真实模型。"
+                    "请前往“设置 → 模型”完成配置。"
+                )
+            log.warning(
+                "owner active 模型 %s 无 API Key，回退全局 provider %s",
+                active.id,
+                cfg.active_model.id,
+            )
+        owns_provider = (
+            build_dynamic_provider
+            and provider_profile is not None
+            and provider_profile.has_key
+        )
+        return provider_profile, owns_provider, model_fallback_notice
+
+    def _session_demo_mode(self, owner_account_id: str, agent_config: dict | None) -> bool:
+        """会话当前生效 Provider 是否为 FakeProvider 演示模式。
+
+        与 _make_agent 装配共用同一条回退链（_resolve_session_provider_profile），
+        前端「演示模式」横幅直接消费该结果，不再自行推导。外部 Agent/Team 会话不走
+        builtin provider 链，恒为 False。
+        """
+        from crew.core.mocks import FakeProvider
+
+        config = agent_config if isinstance(agent_config, dict) else {}
+        executor = str(config.get("executor") or "").strip().lower()
+        if executor in {"external", "acp", "team"}:
+            return False
+        session_model = str(config.get("model_profile_id") or "").strip()
+        _, owns_provider, _ = self._resolve_session_provider_profile(owner_account_id, session_model)
+        return not owns_provider and isinstance(self.provider, FakeProvider)
+
     def _make_agent(
         self,
         agent_config: dict | None = None,
@@ -775,77 +906,11 @@ class CrewApp:
         if user_type not in ("external", "internal"):
             user_type = cfg.access_control.user_type
         ac = cfg.access_control.resolve_for(user_type)
-        owner_profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         # 先选出最终 profile 再创建客户端，避免 Owner 默认模型随后被 session
         # 覆盖时遗留一个无人持有的连接池。没有动态 profile 才借用 App 全局 Provider。
-        provider_profile: ModelProfile | None = None
-        build_dynamic_provider = False
-        # 装配期回退说明：写入 agent，供 run 开头以 status 帧推到 UI（避免只打日志用户无感）
-        model_fallback_notice: str | None = None
-        # owner 默认激活模型；仅 owner 非空时赋值，末尾用于静默降级判定（见缺口 1a）
-        active: ModelProfile | None = None
-        if owner:
-            active = self.config.owner_default_model_profile(owner)
-            if active is not None and active.has_key:
-                provider_profile = active
-                build_dynamic_provider = True
-            else:
-                # The owner overlay can retain a deleted/unloaded model id, or
-                # point at a profile whose owner-local key disappeared.  In
-                # both cases self.provider is the global active provider, so
-                # capability gating must use that same profile too.
-                provider_profile = cfg.active_model
-        else:
-            provider_profile = cfg.active_model
         session_model = str(resolved.get("model_profile_id") or "").strip()
-        if session_model and session_model != "inherit":
-            profile = owner_profiles.get(session_model)
-            if profile and profile.has_key:
-                provider_profile = profile
-                build_dynamic_provider = True
-            else:
-                fallback_label = (
-                    provider_profile.label
-                    if provider_profile is not None and provider_profile.has_key
-                    else "FakeProvider 演示模式"
-                )
-                model_fallback_notice = (
-                    f"会话绑定模型「{session_model}」不可用（不存在或无 API Key），"
-                    f"已回退到「{fallback_label}」。"
-                    "请前往“设置 → 模型”配置 API Key 后切换到真实模型。"
-                )
-                log.warning("会话绑定模型 %s 不存在或无 API Key，回退全局 provider", session_model)
-        # 静默降级提示（缺口 1a）：仅当最终 provider 真的落回全局 active 模型、且 owner
-        # 默认激活的内置模型本身缺 key（典型 = 登录未下发 modelkey）时才提示。session
-        # 若已用自己的有 key 模型救回（provider_profile 不再是全局 active），或已产生更具体的
-        # 会话绑定提示（model_fallback_notice 已设），都不重复打扰——避免「用户自带可用模型却
-        # 误报降级」的假阳性。
-        if (
-            active is not None
-            and not active.has_key
-            and provider_profile is cfg.active_model
-            and not model_fallback_notice
-        ):
-            if cfg.active_model.has_key:
-                model_fallback_notice = (
-                    f"内置模型「{active.label}」未配置 API Key（登录可能未下发），"
-                    f"已临时回退到「{cfg.active_model.label}」。"
-                )
-            else:
-                model_fallback_notice = (
-                    f"模型「{active.label}」未配置 API Key，"
-                    "当前使用 FakeProvider 演示模式，不会调用真实模型。"
-                    "请前往“设置 → 模型”完成配置。"
-                )
-            log.warning(
-                "owner active 模型 %s 无 API Key，回退全局 provider %s",
-                active.id,
-                cfg.active_model.id,
-            )
-        owns_provider = (
-            build_dynamic_provider
-            and provider_profile is not None
-            and provider_profile.has_key
+        provider_profile, owns_provider, model_fallback_notice = (
+            self._resolve_session_provider_profile(owner, session_model)
         )
         provider = (
             build_provider_for_profile(provider_profile, cfg.stream_read_timeout)
@@ -1164,6 +1229,13 @@ class CrewApp:
         provider = self.provider
         sub_profile: ModelProfile | None = None
         inherited_capabilities = current_model_capabilities.get()
+        # model=inherit 时优先继承父 Agent 运行时实际生效的 Provider（经 contextvar）；
+        # 仅在无父上下文（如测试直接构造）时回退 app 级 self.provider。
+        from crew.core.runctx import current_provider
+
+        parent_provider = current_provider.get()
+        if parent_provider is not None:
+            provider = parent_provider
         effective_capabilities: list[str] | None = (
             list(inherited_capabilities) if inherited_capabilities is not None else None
         )
@@ -1629,9 +1701,17 @@ class CrewApp:
                 return
             await self._shutdown_resources(provider_timeout=timeout)
             self._shutdown_complete = True
+        with suppress(ValueError):
+            _LIVE_APPS.remove(self)
 
     async def _shutdown_resources(self, *, provider_timeout: float) -> None:
         """Execute the ordered App shutdown sequence."""
+        from crew.gateway.hooks import hook_registry
+
+        promote_hook = getattr(self, "_promote_session_model_hook", None)
+        if promote_hook is not None:
+            hook_registry.unregister("agent:end", promote_hook)
+            self._promote_session_model_hook = None
         if self._expiry_task is not None:
             self._expiry_task.cancel()
             try:
@@ -1685,6 +1765,37 @@ class CrewApp:
             self.work_service.close()
         self.security_rules.close()
         self.security_audit.close()
+        self._close_persistent_stores()
+
+    def _close_persistent_stores(self) -> None:
+        """关闭 App 持有的全部 SQLite Store 连接。
+
+        每个 Store 一个连接，WAL 模式下每库占多个 fd；不关闭会在测试批量构建
+        App、Gateway 重启等场景持续累积句柄（Errno 24）。尽力关闭，互不影响。
+        """
+        stores = [
+            self.session_store,
+            self.workspace_store,
+            self.memory,
+            self.plugin_prefs,
+            self.summary_store,
+            self.tasks,
+            self.security_rules,
+            self.security_audit,
+            self.channel_bindings,
+            self.active_owner,
+            getattr(self, "cron_store", None),
+            getattr(getattr(self, "dynamic_kanban", None), "store", None),
+            getattr(getattr(self, "sites", None), "store", None),
+            self.work_service,
+        ]
+        for store in stores:
+            close = getattr(store, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - 继续释放其他 Store
+                    log.exception("关闭 Store 失败: %s", type(store).__name__)
 
     async def reload_mcp_manager(self) -> None:
         """热重载 MCPClientManager：关闭现有连接并用当前 config.mcp_servers 重新启动。
@@ -2255,6 +2366,7 @@ class CrewApp:
             "ok": True,
             "pending": busy or binding.get("has_pending"),
             **binding,
+            "demo_mode": self._session_demo_mode(owner_account_id, stored),
         }
 
     def read_session_model_binding(
@@ -2272,10 +2384,16 @@ class CrewApp:
             self.owner_model_profiles(owner_account_id),
             fallback_model_id=self.config.owner_default_model_id(owner_account_id),
         )
-        return {"ok": True, **binding}
+        # demo_mode：服务端算好的「生效 Provider = FakeProvider」标记，前端演示模式
+        # 横幅直接消费，不再从 config 重推（前端看不到 per-owner overlay 等因素）。
+        return {"ok": True, **binding, "demo_mode": self._session_demo_mode(owner_account_id, stored)}
 
-    def _enrich_workspace(self, envelope: Envelope) -> None:
-        """把工作空间的 instructions 注入到 envelope.params，供内核构建 system prompt。"""
+    def _enrich_workspace(self, envelope: Envelope) -> str | None:
+        """把工作空间的 instructions 注入到 envelope.params，供内核构建 system prompt。
+
+        返回供 @路径引用 解析的工作区根；空间不存在等失败时返回 None
+        （此时跳过路径引用解析，与原先解析同处一个 try 的语义一致）。
+        """
         try:
             if (
                 "workspace_instructions" not in envelope.params
@@ -2299,16 +2417,37 @@ class CrewApp:
                 # Keep the workdir selected by SingleAgent and the root used to
                 # compile ProcessLaunch identical for the default workspace.
                 envelope.params["workspace_root_path"] = workspace_root
-            from crew.gateway.context import resolve_structured_path_references
-
-            referenced_paths = resolve_structured_path_references(
-                envelope.query,
-                workspace_root=workspace_root,
-            )
-            if referenced_paths:
-                envelope.params["referenced_paths"] = referenced_paths
+            return workspace_root
         except Exception:  # noqa: BLE001 - 空间不存在则忽略
             envelope.params["workspace_instructions"] = ""
+            return None
+
+    async def _inject_at_references(self, envelope: Envelope, *, workspace_root: str | None) -> None:
+        """遍历 @引用 注册表，把解析结果并入 envelope.params。
+
+        注入点集中在发送时（与 workspace enrichment 同层）；单条引用的解析/
+        读取失败只记录日志并跳过，**不阻断发送**。消费方为 runtime 的
+        user_reminder 块及 external executor / team 的读取授权。
+        """
+        from crew.gateway.context import REFERENCE_INJECTORS, ReferenceResolveContext
+
+        ctx = ReferenceResolveContext(
+            query=str(envelope.query or ""),
+            owner_account_id=envelope.user_id,
+            session_id=envelope.session_id,
+            workspace_root=str(workspace_root or "").strip(),
+            browser_manager=getattr(self, "browser_manager", None),
+        )
+        for injector in REFERENCE_INJECTORS:
+            if not injector.token_re.search(ctx.query):
+                continue
+            try:
+                refs = await injector.resolver(ctx)
+            except Exception:  # noqa: BLE001 - 单条引用解析失败不阻断发送
+                log.exception("解析 @%s 引用失败", injector.name)
+                continue
+            if refs:
+                envelope.params[injector.params_key] = refs
 
     def _on_subagent_background_done(self, session_id: str, result: dict) -> None:
         """后台子 agent 完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
@@ -2386,7 +2525,9 @@ class CrewApp:
 
             token = current_push_fn.set(_push_for_owner)
         try:
-            self._enrich_workspace(envelope)
+            workspace_root = self._enrich_workspace(envelope)
+            await self._inject_at_references(envelope, workspace_root=workspace_root)
+            from crew.agent.skills import trusted_skill_roots_from_params
             from crew.security.context import build_gateway_security_context
             from crew.security.launch import compile_process_launch
 
@@ -2408,6 +2549,9 @@ class CrewApp:
                     "external_security_enabled",
                     False,
                 ),
+                audit=self.security_service.audit,
+                approval_service=self.security_service,
+                trusted_readable_roots=trusted_skill_roots_from_params(envelope.params),
             )
             config_session_id = str(envelope.params.get("task_session_id") or envelope.session_id)
             if not getattr(self.config, "external_agents_enabled", True):
@@ -2474,7 +2618,7 @@ def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float
         temperature=profile.temperature,
         max_tokens=profile.max_tokens,
         timeout=stream_read_timeout if stream_read_timeout is not None else profile.timeout,
-        vision=profile.vision,
+        vision=profile.supports_vision,
     )
 
 
@@ -2489,7 +2633,7 @@ def build_provider(cfg: Config) -> LLMProvider:
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
             timeout=cfg.stream_read_timeout,
-            vision=cfg.vision,
+            vision=cfg.active_model.supports_vision,
         )
         log.info("使用 %s Provider，profile=%s model=%s base_url=%s", cfg.provider, cfg.active_model_id, cfg.model, cfg.base_url or "默认")
         return provider
@@ -2525,6 +2669,9 @@ def _browser_manager_from_plugins(plugins: PluginManager):
 def build_app(config: Config | None = None, *, enable_team: bool = True) -> CrewApp:
     """工厂：从配置构建一个 CrewApp。"""
     cfg = config or load_config()
+    from crew.security.settings import configure_security
+
+    configure_security(enabled=cfg.security_enabled)
     setup_logging(cfg.log_level, cfg.log_file, llm_trace=cfg.llm_trace)
     if cfg.gateway_dev_mode:
         log.warning(
@@ -2577,6 +2724,15 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     cfg.apply_platform_config_bridges(platform_registry.all_entries())
 
     app = CrewApp(cfg, provider, registry, session_store, workspace_store, memory, plugins)
+    # Plugins are discovered before CrewApp constructs the security service.
+    # Publish these live dependencies afterward; plugin tools retain the shared
+    # services mapping and therefore see the production authorization boundary.
+    plugins.services.update(
+        {
+            "workspace_store": workspace_store,
+            "security_service": app.security_service,
+        }
+    )
     register_builtin_tools(
         registry,
         workspace_store=workspace_store,
@@ -2587,8 +2743,18 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.tools.site_tools import register_site_tools
 
     app.sites = SiteManager(SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal))
-    register_site_tools(registry, app.sites)
-    register_blueprint_tools(registry, app.sites)
+    register_site_tools(
+        registry,
+        app.sites,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
+    register_blueprint_tools(
+        registry,
+        app.sites,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
+    )
     # Browser 能力由 plugins/browser 插件装配（创建 BrowserManager、注册 browser_use）。
     # 系统级禁用/未加载时保持 None，面板路由与 startup/aclose 已有 None 兜底。
     app.browser_manager = _browser_manager_from_plugins(plugins)
@@ -2663,6 +2829,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         app.wiki_manager,
         config=cfg.wiki,
         session_store=session_store,
+        workspace_store=workspace_store,
+        security_service=app.security_service,
     )
 
     from crew.work.briefs import WorkBriefStore
@@ -2745,6 +2913,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     # cron：任务存储 + 引擎 + 暴露给 agent 的工具
     from crew.cron import CronJobStore, CronService
+    from crew.cron.tools import EXTERNAL_ORIGIN_PLATFORMS
     from crew.tools.cron_tools import register_cron_tools
 
     cron_store = CronJobStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
@@ -2795,18 +2964,20 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
             # origin 只对当前 DeliveryRouter 支持的外部渠道有效。Web/local/missing
             # 必须回退新会话，否则会把本地来源误当作外部 sender 并在执行后失败。
-            external_origin_platforms = {"feishu"}
             if deliver_target.lower() == "origin" and (
-                origin is None or origin.platform not in external_origin_platforms
+                origin is None or origin.platform not in EXTERNAL_ORIGIN_PLATFORMS
             ):
                 log.debug("cron deliver origin 无外部 sender，fallback 为新建会话")
                 deliver_target = "new_session"
 
-            # 默认/新会话投递：每次触发都新建一个本地会话，便于前端通过未读绿点感知。
-            # "local" 表示显式投递回原绑定会话，保持原行为不新建。
+            # 默认/新会话投递：每个任务一个固定的投递会话（首次触发创建、后续触发追加），
+            # 分钟级任务不再每次触发刷一个同名新会话。"local" 表示显式投递回原绑定会话。
             if deliver_target in {"", "new_session"}:
                 job_name = str(env.params.get("cron_job_name") or "").strip()
-                new_sid = f"cron_{uuid.uuid4().hex[:12]}"
+                new_sid = f"{str(env.params.get('cron_job_id') or 'job')}_feed"
+                already_exists = app.session_store.session_belongs_to(
+                    new_sid, owner_account_id=env.user_id
+                )
                 app.session_store.ensure_session(
                     new_sid,
                     workspace_id=env.workspace_id,
@@ -2814,7 +2985,11 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                     owner_account_id=env.user_id,
                 )
                 env.session_id = new_sid
-                await _notify_cron_session("cron_session_created", env, new_sid)
+                await _notify_cron_session(
+                    "cron_session_updated" if already_exists else "cron_session_created",
+                    env,
+                    new_sid,
+                )
                 deliver_target = "new_session"
 
             if origin is not None and "session_context" not in env.params:
@@ -2915,6 +3090,9 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
             running_depth=int(ctx.get("running_depth") or 0),
         )
 
+    # 挂到 app 上，shutdown 时反注册：hook_registry 是全局单例，
+    # 不注销会跨实例累积（Gateway 重启 / 测试批量建 App 时 emit 会扇出到所有失效闭包）
+    app._promote_session_model_hook = _promote_session_model_on_agent_end
     hook_registry.register("agent:end", _promote_session_model_on_agent_end)
 
     return app

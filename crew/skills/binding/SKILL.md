@@ -1,8 +1,17 @@
 ---
 name: binding
-description: Use when creating, reading, validating, repairing, deleting, or troubleshooting Daimon Blueprint automation_widget Bindings between Automation artifact results and Widget data slots and submit events.
+description: Use when creating, reading, validating, repairing, deleting, or troubleshooting
+  Daimon Blueprint automation_widget Bindings between Automation artifact results
+  and Widget data slots and submit events.
+metadata:
+  zh_name: "绑定管理"
+  zh_description: "创建、读取、验证、修复、删除或排查 Daimon Blueprint 自动化与 Widget 之间的绑定，连接自动化产物结果与 Widget 数据槽及提交事件。"
+  query_examples:
+    - "把自动化结果绑定到 Widget 的数据槽"
+    - "检查这个绑定是否正常"
+    - "修复 Widget 与自动化的绑定关系"
+  skillCategoryName: 通用办公
 ---
-
 # Binding
 
 Binding is the durable connection between an Automation and a Widget:

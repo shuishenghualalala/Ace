@@ -14,6 +14,8 @@ interface Props {
   teamMembers?: TeamMemberView[];
   onRetryMention?: (msg: UiMessage) => void;
   onCancelMention?: (msg: UiMessage) => void;
+  /** 传入后消息正文中的 [[Wiki 页面名]] 渲染为可点击引用链接（Wiki 问答场景）。 */
+  onWikiLink?: (title: string) => void;
 }
 
 export default function MessageItem({
@@ -24,6 +26,7 @@ export default function MessageItem({
   teamMembers,
   onRetryMention,
   onCancelMention,
+  onWikiLink,
 }: Props) {
   switch (msg.role) {
     case "user": {
@@ -79,7 +82,7 @@ export default function MessageItem({
             )}
             {msg.text && (
               <div className="msg__text md-body">
-                <MarkdownContent content={msg.text} />
+                <MarkdownContent content={msg.text} onWikiLink={onWikiLink} />
               </div>
             )}
           </div>

@@ -40,7 +40,7 @@ impl Drop for BwrapPlan {
     }
 }
 
-/// Build a Codex-shaped bwrap profile: empty root, explicit reads/writes, protected metadata.
+/// Build a bwrap profile with either an empty root or a host-wide read-only root.
 pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
     let cwd = canonical_directory(&request.cwd)?;
     let executable = env::current_exe()
@@ -51,6 +51,7 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         return Err("sandbox cwd must be inside an explicit writable root".to_string());
     }
     let readable = canonical_roots(&request.readable_roots)?;
+    let readonly = protected_roots(&writable, &request.readonly_roots)?;
     let denied = canonical_or_missing_roots(&request.denied_roots)?;
     reject_overlapping_roots(&writable, &readable)?;
 
@@ -60,13 +61,23 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
     } else {
         Some(stage_home_files(&request.home_files)?)
     };
+    let execution_home = if request.full_disk_read && home_staging.is_none() {
+        host_home().unwrap_or_else(|| PathBuf::from("/tmp/ace-home"))
+    } else {
+        PathBuf::from("/tmp/ace-home")
+    };
     let mut args = vec![
         "--new-session".to_string(),
         "--die-with-parent".to_string(),
         "--unshare-user".to_string(),
         "--unshare-pid".to_string(),
-        "--tmpfs".to_string(),
-        "/".to_string(),
+    ];
+    if request.full_disk_read {
+        args.extend(["--ro-bind".to_string(), "/".to_string(), "/".to_string()]);
+    } else {
+        args.extend(["--tmpfs".to_string(), "/".to_string()]);
+    }
+    args.extend([
         "--dev".to_string(),
         "/dev".to_string(),
         "--tmpfs".to_string(),
@@ -75,7 +86,7 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         "/run".to_string(),
         "--dir".to_string(),
         "/tmp/ace-home".to_string(),
-    ];
+    ]);
     // Network is always namespaced. Approved traffic reaches only the host proxy
     // through a private Unix socket bridge mounted below the masked /run.
     args.push("--unshare-net".to_string());
@@ -87,11 +98,15 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         PathBuf::from("/run"),
         PathBuf::from("/tmp"),
     ]);
-    let mut visible_roots = Vec::new();
+    let mut visible_roots = if request.full_disk_read {
+        vec![PathBuf::from("/")]
+    } else {
+        Vec::new()
+    };
     for root in PLATFORM_READ_ROOTS
         .iter()
         .map(PathBuf::from)
-        .filter(|path| path.exists())
+        .filter(|path| path.exists() && !request.full_disk_read)
     {
         append_bind(&mut args, &mut created_target_dirs, "--ro-bind", &root)?;
         visible_roots.push(root);
@@ -139,37 +154,23 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         }
     }
 
-    // Re-apply immutable project metadata after writable roots, so the narrow rule wins.
-    for root in &writable {
-        for name in PROTECTED_NAMES {
-            let protected = root.join(name);
-            let metadata = std::fs::symlink_metadata(&protected);
-            if metadata
-                .as_ref()
-                .is_ok_and(|value| value.file_type().is_symlink())
-            {
-                return Err(format!(
-                    "protected metadata path cannot be a symlink: {}",
-                    protected.display()
-                ));
-            }
-            if protected.exists() {
-                let value = path_string(&protected)?;
-                args.extend(["--ro-bind".to_string(), value.clone(), value]);
-            } else {
-                // Match Codex's missing-protected-entry shape: a read-only
-                // synthetic directory prevents creation through a writable root.
-                let value = path_string(&protected)?;
-                args.extend([
-                    "--perms".to_string(),
-                    "555".to_string(),
-                    "--tmpfs".to_string(),
-                    value.clone(),
-                    "--remount-ro".to_string(),
-                    value,
-                ]);
-                synthetic_targets.push(protected);
-            }
+    // Re-apply immutable paths after writable roots, so the narrow rule wins.
+    for protected in readonly {
+        if protected.exists() {
+            let value = path_string(&protected)?;
+            args.extend(["--ro-bind".to_string(), value.clone(), value]);
+        } else {
+            // A read-only synthetic directory prevents creation through a writable root.
+            let value = path_string(&protected)?;
+            args.extend([
+                "--perms".to_string(),
+                "555".to_string(),
+                "--tmpfs".to_string(),
+                value.clone(),
+                "--remount-ro".to_string(),
+                value,
+            ]);
+            synthetic_targets.push(protected);
         }
     }
     // Deny entries are applied last and therefore cannot be upgraded by an
@@ -207,7 +208,7 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         "/usr/local/bin:/usr/bin:/bin".to_string(),
         "--setenv".to_string(),
         "HOME".to_string(),
-        "/tmp/ace-home".to_string(),
+        path_string(&execution_home)?,
         "--setenv".to_string(),
         "TMPDIR".to_string(),
         "/tmp".to_string(),
@@ -239,6 +240,11 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         synthetic_targets,
         home_staging,
     })
+}
+
+fn host_home() -> Option<PathBuf> {
+    let path = env::var_os("HOME").map(PathBuf::from)?;
+    path.is_absolute().then_some(path)
 }
 
 fn stage_home_files(files: &BTreeMap<String, Vec<u8>>) -> Result<PathBuf, String> {
@@ -308,16 +314,91 @@ fn canonical_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 fn canonical_or_missing_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut result = Vec::new();
     for path in paths {
-        let value = if path.exists() {
-            path.canonicalize()
-                .map_err(|error| format!("cannot resolve deny root {}: {error}", path.display()))?
-        } else if path.is_absolute() {
-            path.clone()
-        } else {
+        if !path.is_absolute() {
             return Err(format!("deny root must be absolute: {}", path.display()));
-        };
+        }
+        if path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "permission root cannot contain '..': {}",
+                path.display()
+            ));
+        }
+        let value = canonicalize_allow_missing(path)?;
         if !result.contains(&value) {
             result.push(value);
+        }
+    }
+    Ok(result)
+}
+
+fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    if path.symlink_metadata().is_ok() {
+        return path.canonicalize().map_err(|error| {
+            format!("cannot resolve permission root {}: {error}", path.display())
+        });
+    }
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while ancestor.symlink_metadata().is_err() {
+        let name = ancestor.file_name().ok_or_else(|| {
+            format!(
+                "cannot resolve permission root ancestor: {}",
+                path.display()
+            )
+        })?;
+        suffix.push(name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            format!(
+                "cannot resolve permission root ancestor: {}",
+                path.display()
+            )
+        })?;
+    }
+    let mut canonical = ancestor
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve permission root {}: {error}", path.display()))?;
+    for name in suffix.iter().rev() {
+        canonical.push(name);
+    }
+    Ok(canonical)
+}
+
+fn protected_roots(
+    writable: &[PathBuf],
+    explicit: &[PathBuf],
+) -> Result<BTreeSet<PathBuf>, String> {
+    let mut result = BTreeSet::new();
+    for root in writable {
+        for name in PROTECTED_NAMES {
+            result.insert(root.join(name));
+        }
+    }
+    for path in explicit {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "protected metadata path cannot be a symlink: {}",
+                path.display()
+            ));
+        }
+    }
+    for root in canonical_or_missing_roots(explicit)? {
+        if !writable.iter().any(|candidate| root.starts_with(candidate)) {
+            return Err(format!(
+                "read-only root must be inside an explicit writable root: {}",
+                root.display()
+            ));
+        }
+        result.insert(root);
+    }
+    for path in &result {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "protected metadata path cannot be a symlink: {}",
+                path.display()
+            ));
         }
     }
     Ok(result)
@@ -388,7 +469,9 @@ mod tests {
             cwd: temp.path().to_path_buf(),
             writable_roots: vec![temp.path().to_path_buf()],
             readable_roots: vec![],
+            readonly_roots: vec![temp.path().join(".git")],
             denied_roots: vec![],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
@@ -416,7 +499,9 @@ mod tests {
             cwd: workspace.clone(),
             writable_roots: vec![workspace],
             readable_roots: vec![],
+            readonly_roots: vec![],
             denied_roots: vec![],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
@@ -451,7 +536,9 @@ mod tests {
             cwd: workspace.path().to_path_buf(),
             writable_roots: vec![],
             readable_roots: vec![],
+            readonly_roots: vec![],
             denied_roots: vec![],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
@@ -467,5 +554,97 @@ mod tests {
             .expect("cwd must not auto-expand policy");
 
         assert!(error.contains("writable root"), "{error}");
+    }
+
+    #[test]
+    fn full_disk_read_mounts_host_root_read_only_before_writable_and_denied_roots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let denied = tempfile::tempdir().unwrap();
+        let request = LinuxRunRequest {
+            command: vec!["/bin/true".to_string()],
+            cwd: workspace.path().to_path_buf(),
+            writable_roots: vec![workspace.path().to_path_buf()],
+            readable_roots: vec![],
+            readonly_roots: vec![],
+            denied_roots: vec![denied.path().to_path_buf()],
+            full_disk_read: true,
+            network_enabled: false,
+            network_rules: vec![],
+            allow_local_binding: false,
+            proxy_socket_dir: None,
+            max_output_bytes: 1024,
+            stdin: None,
+            env_overrides: Default::default(),
+            home_files: Default::default(),
+        };
+
+        let plan = build_args(&request).unwrap();
+        let workspace_path = workspace.path().canonicalize().unwrap();
+        let denied_path = denied.path().canonicalize().unwrap();
+        let root_read = plan
+            .args
+            .windows(3)
+            .position(|window| window == ["--ro-bind", "/", "/"])
+            .unwrap();
+        let workspace_write = plan
+            .args
+            .windows(3)
+            .position(|window| {
+                window[0] == "--bind"
+                    && window[1] == workspace_path.to_string_lossy()
+                    && window[2] == workspace_path.to_string_lossy()
+            })
+            .unwrap();
+        let denied_mask = plan
+            .args
+            .iter()
+            .rposition(|value| value == denied_path.to_string_lossy().as_ref())
+            .unwrap();
+
+        assert!(root_read < workspace_write);
+        assert!(workspace_write < denied_mask);
+        assert!(!plan
+            .args
+            .windows(2)
+            .any(|window| window == ["--tmpfs", "/"]));
+        let home_index = plan
+            .args
+            .windows(3)
+            .position(|window| window[0] == "--setenv" && window[1] == "HOME")
+            .unwrap();
+        assert_eq!(
+            plan.args[home_index + 2],
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp/ace-home".to_string())
+        );
+    }
+
+    #[test]
+    fn projected_home_stays_private_even_with_full_disk_read() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut home_files = std::collections::BTreeMap::new();
+        home_files.insert(".config/provider.json".to_string(), b"{}".to_vec());
+        let request = LinuxRunRequest {
+            command: vec!["/bin/true".to_string()],
+            cwd: workspace.path().to_path_buf(),
+            writable_roots: vec![workspace.path().to_path_buf()],
+            readable_roots: vec![],
+            readonly_roots: vec![],
+            denied_roots: vec![],
+            full_disk_read: true,
+            network_enabled: false,
+            network_rules: vec![],
+            allow_local_binding: false,
+            proxy_socket_dir: None,
+            max_output_bytes: 1024,
+            stdin: None,
+            env_overrides: Default::default(),
+            home_files,
+        };
+
+        let plan = build_args(&request).unwrap();
+        assert!(plan
+            .args
+            .windows(3)
+            .any(|window| { window == ["--setenv", "HOME", "/tmp/ace-home"] }));
     }
 }

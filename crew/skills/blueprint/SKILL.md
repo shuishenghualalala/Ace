@@ -1,8 +1,16 @@
 ---
 name: blueprint
-description: Use when choosing between Daimon Blueprint Automation, Widget, Binding, and Canvas tools or routing a request to the correct Blueprint domain skill.
+description: Use when choosing between Daimon Blueprint Automation, Widget, Binding,
+  and Canvas tools or routing a request to the correct Blueprint domain skill.
+metadata:
+  zh_name: "蓝图路由"
+  zh_description: "在 Daimon Blueprint 的自动化、Widget、绑定和画布工具之间做选择，或将请求路由到正确的 Blueprint 领域技能。"
+  query_examples:
+    - "这个需求应该用 Blueprint 的哪个能力？"
+    - "帮我路由到对应的蓝图技能"
+    - "Blueprint 的自动化、Widget、绑定、画布怎么选"
+  skillCategoryName: 通用办公
 ---
-
 # Blueprint
 
 Blueprint has four assets:

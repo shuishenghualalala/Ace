@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, Protocol
 
 from crew.agent.external.process_lifecycle import (
     finish_process_after_terminal,
@@ -25,7 +26,6 @@ from crew.agent.external.runtime_adapter import (
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
-
 
 CODEX_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 
@@ -639,6 +639,27 @@ async def _stream_codex_app_server(
 async def stream_codex_events(
     request: RuntimeExecutionRequest,
 ) -> AsyncIterator[ExternalStreamEvent]:
+    from crew.security.launch import current_process_launch
+
+    launch = current_process_launch.get()
+    if launch is not None and launch.managed:
+        from crew.agent.external.cli_adapter import ExternalCliConfig, run_external_cli
+
+        output = await run_external_cli(
+            ExternalCliConfig(
+                provider="codex",
+                executable_path=request.executable_path,
+                prompt=request.prompt,
+                model=request.model if request.model != "default" else "",
+                cwd=request.cwd,
+                system_prompt=request.system_prompt,
+                custom_env=request.custom_env,
+                timeout=request.timeout,
+            )
+        )
+        if output:
+            yield ExternalStreamEvent(kind="text", text=output)
+        return
     try:
         async for event in _stream_codex_app_server(request):
             yield event

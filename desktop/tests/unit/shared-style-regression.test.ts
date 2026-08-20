@@ -132,7 +132,7 @@ describe('security center scroll contract', () => {
 describe('Crew shell and Welcome identity', () => {
   it('keeps the responsive full-height rail with a compact icon-only mode', () => {
     const tokens = ruleBody(tokensCss, ':root');
-    expect(tokens).toContain('--mw-app-rail-width: 128px');
+    expect(tokens).toContain('--mw-app-rail-width: 96px');
     expect(tokens).toContain('--mw-app-rail-width-compact: 56px');
     const brand = ruleBody(shellCss, '.mw-sidebar-brand');
     expect(brand).toContain('flex-direction: column');

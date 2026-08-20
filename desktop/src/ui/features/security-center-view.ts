@@ -498,7 +498,7 @@ export function createSecurityCenterView(
   refresh.prepend(createIcon('icon-refresh', { size: 16 }));
   headerCopy.append(
     text('h1', 'page-header__title', '安全中心'),
-    text('p', 'page-header__desc', '查看安全模式、沙箱能力、授权范围和可追溯审计。'),
+    text('p', 'page-header__desc', '安全+不影响使用才是真安全～'),
   );
   headerActions.append(refresh);
   header.append(headerCopy, headerActions);

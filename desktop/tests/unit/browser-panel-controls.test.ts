@@ -8,6 +8,7 @@ import {
   openBrowserArtifact,
   openUserBrowser,
   renderBrowserPanel,
+  setBrowserPanelSession,
   sendRecordingControl,
   syncBrowserPanelSession,
 } from '../../src/ui/features/browser-panel';
@@ -103,6 +104,25 @@ describe('browser panel control recovery', () => {
     await opening;
 
     expect(control).not.toHaveBeenCalled();
+  });
+
+  it('switches an explicit Wiki session and restores the main session when cleared', async () => {
+    const connect = vi.fn().mockResolvedValue({ ok: true });
+    const close = vi.fn().mockResolvedValue({ ok: true });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: { browserWsConnect: connect, browserWsClose: close },
+    });
+    setActiveSessionId('main-session');
+
+    setBrowserPanelSession('wiki-session-a');
+    await Promise.resolve();
+    setBrowserPanelSession(null);
+    await Promise.resolve();
+
+    expect(connect).toHaveBeenNthCalledWith(1, 'wiki-session-a');
+    expect(connect).toHaveBeenNthCalledWith(2, 'main-session');
+    expect(close).toHaveBeenCalled();
   });
 
   it('opens an explicit chat link in a new user tab', async () => {

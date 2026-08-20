@@ -2,7 +2,6 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { backendApi } from '../../src/ui/backend-client';
 import { renderConfigModels } from '../../src/ui/features/config-panes';
 import { __resetAllStoresForTest, configStore } from '../../src/ui/stores/stores';
 
@@ -15,8 +14,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   __resetAllStoresForTest();
   document.body.innerHTML = `
-    <div id="cfg-model-list"></div>
-    <span id="cfg-stat-active"></span>
+    <section id="settings-pane-model"></section>
   `;
   configStore.set({
     config: {
@@ -29,25 +27,14 @@ beforeEach(() => {
   });
 });
 
-describe('设置页默认模型切换', () => {
-  it('调用全局模型接口并刷新默认模型状态', async () => {
-    const switchSpy = vi.spyOn(backendApi, 'switchModel').mockResolvedValue({
-      model: 'deepseek-chat',
-      has_key: true,
-      base_url: '',
-      active_model_id: 'deepseek',
-      models,
-    });
-
+describe('设置页默认模型展示', () => {
+  it('按当前设置页契约展示默认模型和可选模型', async () => {
     await renderConfigModels();
-    expect(document.getElementById('cfg-stat-active')?.textContent).toBe('Craft');
-
-    document.querySelector<HTMLButtonElement>('[data-model-activate="deepseek"]')?.click();
-
-    await vi.waitFor(() => {
-      expect(switchSpy).toHaveBeenCalledWith('deepseek');
-      expect(document.getElementById('cfg-stat-active')?.textContent).toBe('DeepSeek');
-      expect(document.querySelector<HTMLButtonElement>('[data-model-activate="deepseek"]')?.disabled).toBe(true);
-    });
+    const active = document.querySelector<HTMLElement>('[data-integration-id="craft"]');
+    const selectable = document.querySelector<HTMLButtonElement>('[data-integration-id="deepseek"] [data-integration-select]');
+    expect(active?.dataset.active).toBe('true');
+    expect(active?.textContent).toContain('默认模型');
+    expect(selectable).not.toBeNull();
+    expect(selectable?.textContent).toContain('DeepSeek');
   });
 });

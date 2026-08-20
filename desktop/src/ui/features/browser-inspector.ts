@@ -1,12 +1,14 @@
 import type { BrowserPageState } from '../backend-client';
 import { createIcon, type IconId } from '../components/icon';
 
-function isBlankUrl(value: string): boolean {
+export function isBlankUrl(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return normalized === '' || normalized === 'about:blank';
 }
 
-function tabTitle(tab: BrowserPageState['tabs'][number]): string {
+/** 标签页显示标题：about:blank/空 URL 归「新标签页」，否则标题优先、URL 兜底。
+ *  @ 提及候选（composer-mention）共用此兜底链，保证 about:blank 不显示成一坨 URL。 */
+export function tabTitle(tab: BrowserPageState['tabs'][number]): string {
   if (isBlankUrl(tab.url)) return '新标签页';
   return tab.title.trim() || tab.url.trim() || '新标签页';
 }
@@ -52,9 +54,11 @@ export function replaceBrowserTabs(
     const label = document.createElement('span');
     label.textContent = tabTitle(tab);
     select.appendChild(label);
+    const saveWiki = iconButton('存入知识库', 'icon-wiki', 'browser-tab__wiki');
+    saveWiki.dataset.browserSaveWiki = tab.id;
     const close = iconButton('关闭标签页', 'icon-close', 'browser-tab__close');
     close.dataset.browserCloseTab = tab.id;
-    item.append(select, close);
+    item.append(select, saveWiki, close);
     strip.appendChild(item);
   }
 }
@@ -108,6 +112,14 @@ export function createBrowserInspector(
   reload.dataset.browserAction = 'reload';
   reload.disabled = !hasPage || blankPage;
   navigation.append(back, forward, reload);
+  const returnToAi = document.createElement('button');
+  returnToAi.type = 'button';
+  returnToAi.className = 'browser-control-btn';
+  returnToAi.dataset.browserReturnAi = '';
+  returnToAi.textContent = '交还 AI';
+  returnToAi.title = '停止人工控制，把浏览器交还给 AI';
+  returnToAi.setAttribute('aria-label', '交还 AI');
+  returnToAi.hidden = value.mode !== 'human';
   const address = document.createElement('input');
   address.className = 'browser-url';
   address.dataset.browserUrl = '';
@@ -152,7 +164,7 @@ export function createBrowserInspector(
   const recordingControls = document.createElement('span');
   recordingControls.className = 'browser-rec-slot';
   recordingControls.dataset.browserRecControls = '';
-  toolbar.append(navigation, address, note, recordingStatus, recordingControls);
+  toolbar.append(navigation, address, returnToAi, note, recordingStatus, recordingControls);
 
   const takeover = document.createElement('div');
   takeover.className = 'browser-takeover';

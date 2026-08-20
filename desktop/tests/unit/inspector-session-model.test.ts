@@ -38,6 +38,7 @@ import {
   defaultInspectorTabForSession,
   openInspectorToTab,
   refreshInspectorChrome,
+  bindInspectorUi,
 } from '../../src/ui/features/inspector';
 import {
   createSessionInWorkspace,
@@ -298,10 +299,13 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
   });
 
   it('Inspector「协作」Tab 仅在 Team Session 显示', () => {
+    // 协作 Tab 不再是静态元素，由 workspace tab strip 按 teamSession 动态渲染
     document.body.innerHTML = `
       <button id="task-board-toggle"></button>
-      <div id="chat-inspector-tabs"></div>
-      <div id="inspector-tab-menu"></div>
+      <aside id="chat-inspector">
+        <div id="chat-inspector-tabs"></div>
+        <div id="chat-inspector-body"></div>
+      </aside>
     `;
     sessionStore.set({
       sessions: [{
@@ -315,14 +319,15 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
       }],
     });
     refreshInspectorChrome();
-    const collaborationTab = document.querySelector('[data-workspace-tab="core:collaboration"]');
-    expect(collaborationTab).not.toBeNull();
+    expect(document.querySelector('[data-workspace-tab="core:collaboration"]')).toBeTruthy();
+    expect(document.getElementById('chat-inspector-tabs')?.textContent).toContain('协作');
 
     sessionStore.set({
       sessions: [{ id: 'sess-a', title: '普通会话', workspaceId: 'default', updatedAt: 1, preview: '', badge: '' }],
     });
     refreshInspectorChrome();
     expect(document.querySelector('[data-workspace-tab="core:collaboration"]')).toBeNull();
+    expect(document.getElementById('chat-inspector-tabs')?.textContent).not.toContain('协作');
   });
 
   it('会话列表刷新不会用 Crew 摘要覆盖外部 Runtime 模型目录', () => {
@@ -360,7 +365,7 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
     window.removeEventListener('session:model-changed', handler);
   });
 
-  it('非当前会话的绑定变化不派发事件', () => {
+  it('非当前会话的绑定变化也派发事件（detail 带 sessionId，监听方自行过滤）', () => {
     const handler = vi.fn();
     window.addEventListener('session:model-changed', handler);
     applySessionModelBinding('other-sess', {
@@ -369,7 +374,9 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
       has_pending: false,
       pending: false,
     });
-    expect(handler).not.toHaveBeenCalled();
+    // Wiki 内嵌会话等非活跃会话的 chip/上下文环靠这个事件刷新；Inspector 仍只按活跃会话重拉。
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect((handler.mock.calls[0]?.[0] as CustomEvent).detail?.sessionId).toBe('other-sess');
     window.removeEventListener('session:model-changed', handler);
   });
 });
@@ -409,5 +416,26 @@ describe('Inspector「上下文」页随会话模型变化', () => {
     const text = document.getElementById('chat-inspector-body')?.textContent ?? '';
     expect(text).toContain('Global-Default');
     expect(text).toContain('128.0k');
+  });
+
+  it('非活跃会话的 session:model-changed 不重拉（wiki 内嵌会话等）', () => {
+    bindInspectorUi();
+    backendMocks.sessionContext.mockClear();
+
+    applySessionModelBinding('other-sess', {
+      model_profile_id: 'session-model-x',
+      model_label: 'Session Model X',
+      has_pending: false,
+      pending: false,
+    });
+    expect(backendMocks.sessionContext).not.toHaveBeenCalled();
+
+    applySessionModelBinding('sess-a', {
+      model_profile_id: 'session-model-x',
+      model_label: 'Session Model X',
+      has_pending: false,
+      pending: false,
+    });
+    expect(backendMocks.sessionContext).toHaveBeenCalledWith('sess-a');
   });
 });

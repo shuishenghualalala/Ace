@@ -149,6 +149,14 @@ def config_body(
         "external_agents": {
             "enabled": bool(getattr(crew.config, "external_agents_enabled", True)),
         },
+        "security": {
+            "enabled": bool(getattr(crew.config, "security_enabled", False)),
+            "default_mode": (
+                "request_approval"
+                if getattr(crew.config, "security_enabled", False)
+                else "full_access"
+            ),
+        },
     }
 
 

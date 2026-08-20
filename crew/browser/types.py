@@ -8,17 +8,38 @@ from typing import Any, Literal
 
 BrowserControlMode = Literal["ai", "human", "paused"]
 
+# 动作治理档位（governance_mode）的合法取值：
+# - off：全部放行，不弹任何审批（兼容旧行为）
+# - confirm_sensitive：默认。提交表单/回车/上传/下载/接受弹窗/页面内执行代码等
+#   传「或高危」动作弹一次性审批卡；普通读写动作不打扰
+# - confirm_writes：所有写交互（click/type/press/select/check/drag/fill_form/drop）
+#   也弹审批
+# - read_only：写交互与高危动作直接拒绝
+GOVERNANCE_MODES = frozenset({"off", "confirm_sensitive", "confirm_writes", "read_only"})
+
+# batch 步骤 action → 逻辑工具名。**词表唯一来源**：plugins/browser 的
+# _ACTION_LOGICAL / _BATCHABLE_ACTIONS 与 manager 的治理分类都从这里取，
+# 新增可批量动作只改这一处——治理档位不可能漏登记（fail-open 静默放行）。
+BATCH_STEP_TOOLS: dict[str, str] = {
+    "click": "browser_click",
+    "drag": "browser_drag",
+    "type": "browser_type",
+    "fill_form": "browser_fill_form",
+    "select": "browser_select",
+    "check": "browser_check",
+    "hover": "browser_hover",
+    "scroll": "browser_scroll",
+    "press": "browser_press",
+    "keydown": "browser_keydown",
+    "keyup": "browser_keyup",
+    "wait": "browser_wait",
+    "find": "browser_find",
+}
+
 
 @dataclass
 class BrowserConfig:
-    # ── 已移除的配置项（不要再加回来，除非同时接上执行路径） ────────────
-    #
-    # `allowed_private_hosts` / `allowed_private_cidrs` / `allow_file_urls`
-    # 曾经存在，但对应的执行路径（私网/元数据地址拦截、URL scheme 白名单）
-    # 已按产品决定整体移除。它们在配置里留了一段时间**却没有任何消费方**——
-    # 运维照着文档配上，以为限制生效了，实际不执行。
-    #
-    # `max_tabs_per_session` 同样移除：标签页护栏在 Electron 宿主里
+    # `max_tabs_per_session` 不在这里暴露：标签页护栏在 Electron 宿主里
     # （browser-host.ts 的 MAX_TABS_PER_SESSION），而 Python 配置**到不了宿主**
     # ——没有这条通道。真正的保护在宿主那边；在这里留一个到不了执行点的数字，
     # 就是又一个骗人的旋钮。
@@ -33,6 +54,8 @@ class BrowserConfig:
     idle_timeout_seconds: int = 600
     command_timeout_seconds: int = 30
     navigation_timeout_seconds: int = 60
+    # 同一账号动作串行时，后续动作最多排队多久；0 表示不设排队超时。
+    queue_timeout_seconds: float = 30.0
     # 单次输出的期望规模。**不是硬截断**：真实内网页面的完整快照经常超过它，
     # 按它截断会让模型基于半张页面下结论。只有远超它（见 manager 的护栏倍数）
     # 才按行截断并如实报出。
@@ -41,6 +64,12 @@ class BrowserConfig:
     max_transfer_bytes: int = 104_857_600
     artifact_ttl_hours: int = 24
     blocked_hosts: list[str] = field(default_factory=list)
+    # 私网、loopback、link-local 和云元数据地址默认拒绝。这里的例外会进入
+    # LoopbackPolicyProxy 的实际 DNS/连接路径，不是只做展示的配置项。
+    allowed_private_hosts: list[str] = field(default_factory=list)
+    allowed_private_cidrs: list[str] = field(default_factory=list)
+    # 浏览器动作治理档位，取值见 GOVERNANCE_MODES。非法值回落默认档。
+    governance_mode: str = "confirm_sensitive"
 
     @classmethod
     def from_raw(cls, raw: Any) -> "BrowserConfig":
@@ -61,13 +90,22 @@ class BrowserConfig:
         ):
             if name in values:
                 values[name] = max(0, int(values[name]))
-        for name in ("blocked_hosts",):
+        if "queue_timeout_seconds" in values:
+            values["queue_timeout_seconds"] = max(
+                0.0, float(values["queue_timeout_seconds"])
+            )
+        for name in ("blocked_hosts", "allowed_private_hosts", "allowed_private_cidrs"):
             if name in values:
                 value = values[name]
                 values[name] = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
         for name in ("enabled", "headed"):
             if name in values:
                 values[name] = bool(values[name])
+        if "governance_mode" in values:
+            mode = str(values["governance_mode"]).strip()
+            values["governance_mode"] = (
+                mode if mode in GOVERNANCE_MODES else defaults.governance_mode
+            )
         return cls(**values)
 
     def public_dict(self) -> dict[str, Any]:
@@ -116,6 +154,10 @@ class BrowserPageState:
     viewport_height: int = 0
     can_go_back: bool = False
     can_go_forward: bool = False
+    queue_depth: int = 0
+    last_queue_wait_ms: float = 0.0
+    last_operation_ms: float = 0.0
+    queue_timeouts: int = 0
     tabs: list[dict[str, str]] = field(default_factory=list)
     console_count: int = 0
     network_count: int = 0

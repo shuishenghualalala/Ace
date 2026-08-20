@@ -3,7 +3,9 @@ import { constants as fsConstants, existsSync, realpathSync } from 'node:fs';
 import {
   chmod,
   copyFile,
+  lstat,
   open,
+  readdir,
   rename,
   stat,
   unlink,
@@ -481,6 +483,8 @@ interface BrowserTab {
   network: NetworkRecord[];
   /** Task-local destination inherited by popups and public context.newPage(). */
   downloadDir: string;
+  /** Task-local download cap inherited by popups. Zero means unlimited. */
+  downloadMaxBytes: number;
   mouseX: number;
   mouseY: number;
   /** 至多 keyboard/pointer/scroll 各一个、按事件类型一次性消费的真人输入证明。 */
@@ -953,6 +957,17 @@ function asPositiveInteger(value: unknown, label: string, maximum: number): numb
   const parsed = typeof value === 'number' ? value : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > maximum) {
     throw new BrowserHostError(`${label}无效`, { code: 'invalid_request' });
+  }
+  return parsed;
+}
+
+function transferLimit(value: unknown): number {
+  if (value === undefined || value === null || value === '') {
+    return DEFAULT_MAX_TRANSFER_BYTES;
+  }
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new BrowserHostError('max_transfer_bytes无效', { code: 'invalid_request' });
   }
   return parsed;
 }
@@ -2438,6 +2453,9 @@ const MAX_RING_ENTRIES = 20_000;
  */
 const MAX_TABS_PER_SESSION = 512;
 
+/** Mirrors BrowserConfig's default for callers using an older RPC shape. */
+const DEFAULT_MAX_TRANSFER_BYTES = 100 * 1024 * 1024;
+
 /** 本地 HTML 预览的字节上限。无上限时一个大报表就能让主进程 OOM。 */
 const MAX_ARTIFACT_BYTES = 20 * 1024 * 1024;
 
@@ -3169,7 +3187,11 @@ export class BrowserHost extends EventEmitter {
   }
 
   private parseProxy(proxyUrl: string): ProxyAuthState | null {
-    if (!proxyUrl) return null;
+    if (!proxyUrl) {
+      throw new BrowserHostError('浏览器网络策略代理不可用', {
+        code: 'proxy_required',
+      });
+    }
     let parsed: URL;
     try {
       parsed = new URL(proxyUrl);
@@ -4039,7 +4061,7 @@ export class BrowserHost extends EventEmitter {
       'expectedEffects',
       'timeoutMs',
     ];
-    if (!exactKeys(params, required)) {
+    if (!exactKeys(params, required, ['max_transfer_bytes'])) {
       throw new BrowserHostError('execute_transaction params 形状无效', {
         code: 'invalid_transaction',
       });
@@ -4068,6 +4090,7 @@ export class BrowserHost extends EventEmitter {
       true,
     );
     const downloadDir = downloadDirRaw ? canonicalPath(downloadDirRaw) : '';
+    const maxTransferBytes = transferLimit(params.max_transfer_bytes);
     if (downloadDirRaw && !path.isAbsolute(downloadDirRaw)) {
       throw new BrowserHostError('download_dir 必须是绝对路径', {
         code: 'invalid_transaction',
@@ -4137,6 +4160,8 @@ export class BrowserHost extends EventEmitter {
         throw new BrowserHostError('knownPages 引用了已停止页面', {
           code: 'tab_stopped',
         });
+      } else {
+        tab.downloadMaxBytes = maxTransferBytes;
       }
     }
     if (sourceTargetId) {
@@ -4221,6 +4246,7 @@ export class BrowserHost extends EventEmitter {
         'ai',
       );
       await this.initializeNewTab(anchor, deadlineAt);
+      anchor.downloadMaxBytes = maxTransferBytes;
       sourceTab = anchor;
     }
     const atomicSessionHash = anchor?.sessionHash ?? tombstoneEpoch?.sessionHash ?? '';
@@ -4475,6 +4501,7 @@ export class BrowserHost extends EventEmitter {
     const owner = await this.ensureOwner(key, profile, proxy);
     const command = asString(params.command, 'browser command', 80).trim();
     const requestedDownloadDir = taskDownloadDirectory(params.download_dir);
+    const requestedTransferLimit = transferLimit(params.max_transfer_bytes);
     const rawArgs = params.args ?? [];
     if (!Array.isArray(rawArgs)) {
       throw new BrowserHostError('浏览器命令参数无效', { code: 'invalid_request' });
@@ -4498,6 +4525,7 @@ export class BrowserHost extends EventEmitter {
           if (requestedDownloadDir) {
             this.setTabDownloadDir(tab, requestedDownloadDir);
           }
+          tab.downloadMaxBytes = requestedTransferLimit;
           // execute_transaction is the only producer of a live replay epoch.
           // A later ordinary execute proves replay ownership has ended; clear
           // its journal before a normal page download can be claimed as atomic.
@@ -4617,6 +4645,7 @@ export class BrowserHost extends EventEmitter {
         args,
         commandDeadlineAt,
         taskDownloadDirectory(params.download_dir),
+        transferLimit(params.max_transfer_bytes),
       );
     }
     const requestedTarget = typeof params.target_id === 'string'
@@ -5221,6 +5250,7 @@ export class BrowserHost extends EventEmitter {
     args: string[],
     commandDeadlineAt: number,
     downloadDir = '',
+    downloadMaxBytes = DEFAULT_MAX_TRANSFER_BYTES,
   ): Promise<Record<string, unknown>> {
     if (args.length === 1 && args[0] === 'list') {
       return {
@@ -5277,6 +5307,7 @@ export class BrowserHost extends EventEmitter {
         : null;
       const tab = this.createTab(owner, label, match[1], '', userCreated ? 'human' : 'ai');
       if (downloadDir) this.setTabDownloadDir(tab, downloadDir);
+      tab.downloadMaxBytes = downloadMaxBytes;
       owner.activeTabId = tab.tabId;
       let navigation: Record<string, unknown> = {};
       try {
@@ -5353,6 +5384,7 @@ export class BrowserHost extends EventEmitter {
         );
       }
       if (downloadDir) this.setTabDownloadDir(tab, downloadDir);
+      tab.downloadMaxBytes = downloadMaxBytes;
       if (!owner.atomicTransactions.has(tab.sessionHash)) {
         owner.atomicReplayEpochs.delete(tab.sessionHash);
       }
@@ -5454,6 +5486,9 @@ export class BrowserHost extends EventEmitter {
       downloadDir: openerEntry?.owner === owner
         ? openerEntry.tab.downloadDir
         : '',
+      downloadMaxBytes: openerEntry?.owner === owner
+        ? openerEntry.tab.downloadMaxBytes
+        : DEFAULT_MAX_TRANSFER_BYTES,
       mouseX: DEFAULT_VIEWPORT.width / 2,
       mouseY: DEFAULT_VIEWPORT.height / 2,
       nativeInputProofs: [],
@@ -7498,7 +7533,6 @@ export class BrowserHost extends EventEmitter {
   ): Promise<string[]> {
     if (
       !Array.isArray(files)
-      || files.length > 256
       || files.some((file) => typeof file !== 'string' || !path.isAbsolute(file))
     ) {
       throw new BrowserHostError('上传文件列表无效', { code: 'invalid_upload' });
@@ -7509,17 +7543,25 @@ export class BrowserHost extends EventEmitter {
     try {
       const root = realpathSync.native(rawRoot);
       if (!samePath(root, path.resolve(rawRoot))) throw new Error('linked upload root');
-      return await Promise.all(files.map(async (file) => {
-        const resolved = realpathSync.native(file);
-        const info = await stat(resolved);
+      const validateEntry = async (entry: string): Promise<string> => {
+        const resolved = realpathSync.native(entry);
+        const info = await lstat(entry);
         if (
-          !samePath(resolved, path.resolve(file))
+          info.isSymbolicLink()
+          || !samePath(resolved, path.resolve(entry))
           || !ensureWithin(resolved, root)
-          || !info.isFile()
+          || (!info.isFile() && !info.isDirectory())
         ) {
-          throw new Error('invalid upload file');
+          throw new Error('invalid upload entry');
+        }
+        if (info.isDirectory()) {
+          const children = await readdir(entry);
+          await Promise.all(children.map((child) => validateEntry(path.join(entry, child))));
         }
         return resolved;
+      };
+      return await Promise.all(files.map(async (file) => {
+        return validateEntry(file);
       }));
     } catch {
       throw new BrowserHostError('上传文件不属于账号审批暂存目录', {
@@ -11825,6 +11867,10 @@ export class BrowserHost extends EventEmitter {
       completedAt: 0,
       error: '',
     };
+    const maxBytes = tab.downloadMaxBytes;
+    let transferLimitExceeded = Boolean(
+      maxBytes > 0 && totalBytes > maxBytes,
+    );
     // Host RPCs are serialized per owner, but nested public Page lifecycles
     // and future transport changes must not turn capture bookkeeping into a
     // cross-session `download_busy` failure.  Attribute to the newest matching
@@ -11851,6 +11897,19 @@ export class BrowserHost extends EventEmitter {
       }
       return;
     }
+    if (transferLimitExceeded) {
+      result.state = 'interrupted';
+      result.completedAt = Date.now();
+      result.error = `下载超过 ${maxBytes} 字节传输上限`;
+      this.emitGenericDownload(owner, result);
+      try {
+        item.cancel();
+      } catch {
+        // The public result already exposes the rejected download.
+      }
+      void unlink(target).catch(() => undefined);
+      return;
+    }
     const refreshBytes = (): void => {
       try {
         result.receivedBytes = Math.max(0, item.getReceivedBytes());
@@ -11861,6 +11920,17 @@ export class BrowserHost extends EventEmitter {
         result.totalBytes = Math.max(0, item.getTotalBytes());
       } catch {
         // Keep the last known total when Electron temporarily detaches state.
+      }
+      if (!transferLimitExceeded && maxBytes > 0 && result.receivedBytes > maxBytes) {
+        transferLimitExceeded = true;
+        result.state = 'interrupted';
+        result.error = `下载超过 ${maxBytes} 字节传输上限`;
+        try {
+          item.cancel();
+        } catch {
+          // The terminal event below still reports the interrupted state.
+        }
+        void unlink(target).catch(() => undefined);
       }
     };
     let lastProgressKey = [
@@ -11893,7 +11963,11 @@ export class BrowserHost extends EventEmitter {
       result.state = state;
       refreshBytes();
       result.completedAt = Date.now();
-      if (state !== 'completed') {
+      if (transferLimitExceeded) {
+        result.state = 'interrupted';
+        result.error = `下载超过 ${maxBytes} 字节传输上限`;
+        void unlink(target).catch(() => undefined);
+      } else if (state !== 'completed') {
         result.error = `浏览器下载状态：${state}`;
       }
       this.emitGenericDownload(owner, result);

@@ -13,9 +13,19 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from crew.core.errors import ProviderError
+from crew.core.errors import (
+    ProviderError,
+    contains_image_input,
+    is_unsupported_image_input_error,
+)
 from crew.core.interfaces import LLMProvider
-from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
+from crew.core.types import (
+    IMAGE_INPUT_UNAVAILABLE_NOTICE,
+    ChatResponse,
+    Message,
+    StreamChunk,
+    ToolCall,
+)
 from crew.state.logging import llm_trace
 
 
@@ -138,7 +148,11 @@ def _best_effort_tool_args(tool_name: str, raw_arguments: str) -> dict[str, Any]
     except json.JSONDecodeError:
         pass
 
-    keys = ("path", "file_path") if tool_name in {"file_write", "file_read", "patch"} else _PARTIAL_STRING_KEYS
+    keys = (
+        ("path", "file_path")
+        if tool_name in {"file_write", "file_delete", "file_read", "patch"}
+        else _PARTIAL_STRING_KEYS
+    )
     out: dict[str, Any] = {}
     for key in keys:
         value = _extract_partial_json_string(raw_arguments, key)
@@ -183,13 +197,19 @@ def _messages_for_openai(messages: list[Message], *, vision: bool = True) -> lis
         msg = m.to_openai()
         if not vision and m.content_parts:
             # 过滤 image_url，只保留 text；无 text 时补一个占位说明，避免空 content。
+            removed_image = any(
+                p.get("type") in {"image", "image_url", "input_image"}
+                for p in m.content_parts
+            )
             text_parts = [
                 p.get("text", "")
                 for p in m.content_parts
                 if p.get("type") == "text" and p.get("text")
             ]
+            if removed_image:
+                text_parts.append(IMAGE_INPUT_UNAVAILABLE_NOTICE)
             if not text_parts:
-                text_parts = ["[图片：当前纯文本模型不支持多模态输入]"]
+                text_parts = [IMAGE_INPUT_UNAVAILABLE_NOTICE]
             msg["content"] = "\n".join(text_parts)
         out.append(msg)
     return out
@@ -260,6 +280,24 @@ def _is_retryable(exc: Exception) -> bool:
     if any(s in msg for s in ("read timed out", "timed out", "peer closed", "incomplete chunked read", "read error", "remote protocol")):
         return True
     return False
+
+
+def _provider_error(
+    prefix: str,
+    exc: Exception,
+    request_messages: list[dict[str, Any]],
+) -> ProviderError:
+    unsupported_image = is_unsupported_image_input_error(
+        exc,
+        request_has_images=contains_image_input(request_messages),
+    )
+    detail = str(exc) or "<无消息>"
+    return ProviderError(
+        f"{prefix}: {detail}",
+        retryable=False if unsupported_image else _is_retryable(exc),
+        category="unsupported_capability" if unsupported_image else _error_category(exc),
+        capability="vision" if unsupported_image else None,
+    )
 
 
 def _is_valid_openai_message(msg: dict[str, Any]) -> bool:
@@ -360,11 +398,7 @@ class OpenAIProvider(LLMProvider):
             resp = await self._client.chat.completions.create(**payload)
         except Exception as exc:  # noqa: BLE001 - 统一包装成 ProviderError
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
-            raise ProviderError(
-                f"LLM 调用失败: {exc}",
-                retryable=_is_retryable(exc),
-                category=_error_category(exc),
-            ) from exc
+            raise _provider_error("LLM 调用失败", exc, payload["messages"]) from exc
 
         choice = resp.choices[0]
         msg = choice.message
@@ -449,11 +483,7 @@ class OpenAIProvider(LLMProvider):
             stream = await self._client.chat.completions.create(**payload)
         except Exception as exc:
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
-            raise ProviderError(
-                f"LLM 流式调用失败: {exc}",
-                retryable=_is_retryable(exc),
-                category=_error_category(exc),
-            ) from exc
+            raise _provider_error("LLM 流式调用失败", exc, payload["messages"]) from exc
 
         # 累积 tool_calls（流式中 tool_calls 是分段到达的）
         tool_call_accumulators: dict[int, dict[str, Any]] = {}
@@ -698,10 +728,10 @@ class OpenAIProvider(LLMProvider):
                     reasoning_content=reasoning_content,
                 )
                 return
-            raise ProviderError(
-                f"LLM 流式中断: {type(exc).__name__}: {str(exc) or '<无消息>'}",
-                retryable=_is_retryable(exc),
-                category=_error_category(exc),
+            raise _provider_error(
+                f"LLM 流式中断: {type(exc).__name__}",
+                exc,
+                payload["messages"],
             ) from exc
 
         # 流结束，组装完整 tool_calls 并发送最终 chunk

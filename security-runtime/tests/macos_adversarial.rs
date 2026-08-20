@@ -28,9 +28,10 @@ fn managed_profile_blocks_outside_reads_and_writes() {
     let workspace = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::create_dir(workspace.path().join(".git")).unwrap();
+    std::fs::write(workspace.path().join(".git/config"), "original").unwrap();
     std::fs::write(outside.path().join("host-secret"), "secret").unwrap();
     let script = format!(
-        "printf allowed > allowed.txt; cat '{}/host-secret' >/dev/null 2>&1 && exit 31; printf denied > '{}/denied.txt' 2>/dev/null && exit 32; printf denied > .git/config 2>/dev/null && exit 33; exit 0",
+        "printf allowed > allowed.txt; test \"$(cat .git/config)\" = original || exit 34; cat '{}/host-secret' >/dev/null 2>&1 && exit 31; printf denied > '{}/denied.txt' 2>/dev/null && exit 32; printf denied > .git/config 2>/dev/null && exit 33; exit 0",
         outside.path().display(),
         outside.path().display(),
     );
@@ -39,7 +40,8 @@ fn managed_profile_blocks_outside_reads_and_writes() {
         "command": ["/bin/sh", "-c", script],
         "cwd": workspace.path(),
         "writable_roots": [workspace.path()],
-        "denied_roots": [outside.path(), workspace.path().join(".git")],
+        "readonly_roots": [workspace.path().join(".git")],
+        "denied_roots": [outside.path()],
         "network_enabled": false,
         "max_output_bytes": 65536
     }));
@@ -51,7 +53,10 @@ fn managed_profile_blocks_outside_reads_and_writes() {
         "allowed"
     );
     assert!(!outside.path().join("denied.txt").exists());
-    assert!(!workspace.path().join(".git/config").exists());
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join(".git/config")).unwrap(),
+        "original"
+    );
 }
 
 fn run_request(request: serde_json::Value) -> Vec<serde_json::Value> {
@@ -70,7 +75,7 @@ fn run_request(request: serde_json::Value) -> Vec<serde_json::Value> {
     stdout.read_line(&mut line).unwrap();
     assert!(line.contains("\"stdin_once\""));
     let envelope = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": token,
         "nonce": format!("macos-adversarial-{}", std::process::id()),
         "request": request,

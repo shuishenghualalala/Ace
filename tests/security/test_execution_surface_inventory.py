@@ -34,13 +34,19 @@ PROCESS_CALLS = {
 INDIRECT_SURFACES = {
     "crew/browser/manager.py",
     "crew/cron/scheduler.py",
+    "crew/sites/manager.py",
     "crew/skills/html-to-pdf/scripts/convert.cjs",
     "crew/team/team_manager.py",
     "crew/tools/builtin.py",
     "crew/tools/mcp_client.py",
+    "crew/tools/skills_tools.py",
+    "crew/tools/web_tools.py",
+    "crew/wiki/parser.py",
+    "crew/wiki/tools.py",
 }
 DESKTOP_PROCESS_FILES = {
     "desktop/scripts/check-security.mjs",
+    "desktop/scripts/resolve-playwright-candidates.mjs",
     "desktop/src/main/index.ts",
     "desktop/src/main/open-with-service.ts",
     "desktop/src/main/security-setup.ts",

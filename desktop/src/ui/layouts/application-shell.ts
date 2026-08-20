@@ -247,8 +247,10 @@ export function createApplicationShell(
       button.dataset.shellLocation = item.id;
       button.dataset.featureState = item.featureState;
       button.disabled = item.featureState === 'unavailable';
-      button.title =
-        item.featureState === 'unavailable' ? `${item.label}（暂不可用）` : item.label;
+      const unavailableTitle = item.id === 'security'
+        ? '功能正在开发中，敬请期待'
+        : `${item.label}（暂不可用）`;
+      button.title = item.featureState === 'unavailable' ? unavailableTitle : item.label;
       if (item.id === modeView.lastPosition) button.setAttribute('aria-current', 'page');
       label.className = 'mw-shell-nav-item__label';
       label.textContent = item.label;
@@ -258,10 +260,12 @@ export function createApplicationShell(
           : 'mw-shell-nav-item__icon',
       }), label);
       if (item.featureState === 'unavailable') {
-        const availability = document.createElement('span');
-        availability.className = 'mw-shell-nav-item__availability';
-        availability.textContent = '暂不可用';
-        button.append(availability);
+        if (item.id !== 'security') {
+          const availability = document.createElement('span');
+          availability.className = 'mw-shell-nav-item__availability';
+          availability.textContent = '暂不可用';
+          button.append(availability);
+        }
       }
       navigationList.append(button);
     }

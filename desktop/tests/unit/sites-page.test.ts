@@ -136,6 +136,8 @@ describe('sites page annotation handoff', () => {
     expect(protocolSource).toContain('/api/sites/${resolved.siteId}/preview/');
     expect(protocolSource).toContain('headers: gateway.headers(endpoint.pathname)');
     expect(protocolSource).toContain('previewErrorDocument');
+    expect(protocolSource).toContain("connect-src 'none'");
+    expect(protocolSource).toContain("'Content-Security-Policy': SITE_PREVIEW_CSP");
     expect(shell).toContain("frame-src 'self' file: ace-site:");
   });
 
@@ -229,7 +231,10 @@ describe('sites page annotation handoff', () => {
     expect(surface).toContain("mode: 'widget' | 'canvas'");
     expect(surface).toContain('ace-blueprint-annotation-mode');
     expect(surface).toContain('ace-blueprint-element-selected');
+    expect(surface).toContain('批注整体');
+    expect(surface).toContain('批注元素');
     expect(surface).toContain('data-blueprint-target-note');
+    expect(surface).not.toContain('data-site-surface-mode="use"');
     expect(surface).toContain("targetKind: 'canvas'");
     expect(surface).toContain("targetKind: 'widget'");
     expect(surface).toContain("targetKind: 'widget_dom'");

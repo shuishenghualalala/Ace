@@ -409,8 +409,8 @@ export function createCapabilityHubView(options: CapabilityHubOptions): Capabili
     tabs.setValue(current.tab);
     title.textContent = isPlugin ? '插件' : '技能市场';
     description.textContent = isPlugin
-      ? '管理扩展工具、Hook 与平台通道，并查看账号与策略可用性。'
-      : '浏览已安装能力或从技能市场补充新的工作方式。';
+      ? '统筹扩展插件、Hook 和平台通道，一眼看清账号/策略可用情况。'
+      : '瞧瞧有啥能力，或去技能市场补点新玩法。';
     searchInput.placeholder = isPlugin ? '搜索插件' : current.subview === 'market' ? '搜索技能市场' : '搜索已安装技能';
     searchInput.setAttribute('aria-label', searchInput.placeholder);
     if (searchInput.value !== current.query) searchInput.value = current.query;

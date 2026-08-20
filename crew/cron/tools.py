@@ -20,6 +20,12 @@ if TYPE_CHECKING:
     from crew.cron.scheduler import CronService
 
 
+# origin 投递只对「已注册外部 sender 的渠道」有效（见 gateway 装配的 DeliveryRouter）。
+# 创建期与运行期共用这一份白名单：新增外部渠道（如 weixin）时在此加平台名，
+# 并同步在 DeliveryRouter 注册对应 sender。
+EXTERNAL_ORIGIN_PLATFORMS = frozenset({"feishu"})
+
+
 def _describe_interval(seconds: int) -> str:
     if seconds % 86400 == 0:
         days = seconds // 86400
@@ -96,11 +102,15 @@ CRON_CREATE_SCHEMA = {
         "'下午3点' 表示 15:00。不要混入当前时刻的分钟数。"
         "如果用户只说了 '明天提醒我开会' 而没给时间，应追问具体几点；"
         "不要擅自补成当前时间。"
-        "deliver 控制结果投到哪里：不传或 'new_session' 表示每次触发新建一个本地会话（推荐，会有未读通知）；"
+        "deliver 控制结果投到哪里：不传或 'new_session' 表示投递到该任务的专属会话"
+        "（首次触发时创建，后续触发追加其中，会有未读通知）；"
         "'local' 表示投递到 session_id 指定的当前会话；"
-        "'origin' 表示回到原始渠道；若原始渠道是本地会话（web/桌面），则 fallback 为新建会话，不会静默；"
+        "'origin' 表示回到原始渠道，仅飞书等外部渠道有效；来源是本地会话（web/桌面）时"
+        "会在创建时自动改写为 new_session，不会真的投回当前会话；"
         "'feishu:chat_id' 投递到飞书。"
         "从飞书渠道创建且不传 deliver 时默认回到 origin。"
+        "向用户说明投递行为时，以工具返回的 deliver 字段为准；除非 deliver 是 'local'，"
+        "不要承诺「投递到当前会话」。"
         "注意：query 必须是未来触发时要直接执行的内容，不是当前这轮的确认回复。"
         "例如用户说“5分钟后提醒我开会”，应提取 schedule='5分钟后'，"
         "name='开会提醒'，query='提醒我开会'。"
@@ -125,7 +135,7 @@ CRON_CREATE_SCHEMA = {
             "session_id": {"type": "string", "description": "任务归属会话；省略则用当前会话，仅用于权限与归属"},
             "deliver": {
                 "type": "string",
-                "description": "可选投递目标：new_session（默认新建会话）/ local（当前会话）/ origin / feishu:chat_id",
+                "description": "可选投递目标：new_session（默认，任务的专属会话）/ local（当前会话）/ origin（仅外部渠道）/ feishu:chat_id",
             },
         },
         "required": ["name", "schedule", "query"],
@@ -205,11 +215,19 @@ def register_cron_tools(
         owner = current_owner_account_id.get()
         origin_source = current_session_source.get() or {}
         deliver = str(args.get("deliver") or "").strip()
+        deliver_note = ""
+        origin_platform = str(origin_source.get("platform") or "")
         if not deliver:
-            if str(origin_source.get("platform") or "") == "feishu":
+            if origin_platform in EXTERNAL_ORIGIN_PLATFORMS:
                 deliver = "origin"
             else:
                 deliver = "new_session"
+        elif deliver == "origin" and origin_platform not in EXTERNAL_ORIGIN_PLATFORMS:
+            # origin 兜底（_cron_runner 在运行期也会做）提前到创建期显式化：
+            # 本地会话没有外部 sender，存成 new_session 并在返回里说明，
+            # 让模型读到真实投递目标，避免向用户误承诺「投递到当前会话」。
+            deliver = "new_session"
+            deliver_note = "来源是本地会话，origin 不可用，投递目标已改为 new_session（任务专属会话）。"
         try:
             job = store.create(
                 name=name,
@@ -240,6 +258,7 @@ def register_cron_tools(
             next_run_at=job["next_run_at"],
             next_run_at_bj=format_bj_timestamp(job.get("next_run_at")),
             timezone="Asia/Shanghai",
+            **({"note": deliver_note} if deliver_note else {}),
         )
 
     async def handle_list(args: dict[str, Any]) -> str:

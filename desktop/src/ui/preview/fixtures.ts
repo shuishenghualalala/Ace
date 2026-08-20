@@ -205,12 +205,6 @@ const commonResponses = {
     source_titles: {},
     source_files: {},
   }),
-  '/api/wiki/summary': ok({
-    ok: true,
-    kb_id: 'default',
-    status: 'ready',
-    summary: '产品知识库收录设计规范、功能说明与迭代记录。',
-  }),
   '/api/wiki/agent-session': ok({
     ok: true,
     session_id: 'fixture-wiki-agent',

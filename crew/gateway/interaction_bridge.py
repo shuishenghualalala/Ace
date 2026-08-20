@@ -24,7 +24,12 @@ from crew.core.followup import CANCELLED_MARKER, send_followup_question_to, wait
 from crew.core.runctx import PushFn, current_owner_account_id
 from crew.state.logging import get_logger
 from crew.team.delegate_tool import TEAM_RESULT_STATUSES, require_team_result_status
-from crew.security.models import AdditionalPermissionProfile, NetworkAccess, NetworkEntry
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    NetworkAccess,
+    NetworkEntry,
+    SandboxPermissions,
+)
 
 log = get_logger("interaction_bridge")
 
@@ -207,7 +212,8 @@ class InteractionBridge:
                     allow_private=True,
                     escalatable=False,
                 ),
-            )
+            ),
+            sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
         )
 
     @classmethod

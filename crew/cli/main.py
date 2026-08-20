@@ -1,267 +1,131 @@
-"""CLI 交互入口（REPL）。用于 CLI。
-
-用法：
-    python -m crew.cli          # 启动交互
-slash 命令：
-    /help  /new  /team  /agent  /quit
-"""
+"""CLI 入口：全局参数提取、子命令树与统一分发。"""
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
-import uuid
+import sys
+from collections.abc import Callable
+from typing import Any
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.patch_stdout import patch_stdout
-from rich.console import Console
+from crew.cli import chat, content, integration, knowledge, management, security
+from crew.cli.app import DEFAULT_CLI_OWNER, CliContext, CliError, emit
 
-from crew.app import build_app
-from crew.core.envelope import Envelope
+CREW_VERSION = "0.1.0"
 
-console = Console()
-DEFAULT_CLI_OWNER = os.getenv("CREW_CLI_ACCOUNT", "local")
-
-
-BANNER = """[bold cyan]Crew[/bold cyan] 多智能体调用平台 · CLI
-输入消息开始对话；/help 查看命令，/quit 退出。
-"""
-
-HELP = """[bold]命令[/bold]
-  /help    显示帮助
-  /new     新建会话（清空上下文）
-  /team    切换到 Team 多智能体模式
-  /agent   切换到单 Agent 模式
-  /plan    进入 Plan 模式（只读探索→写计划→审批后执行）
-  /todo    查看当前任务清单
-  /quit    退出
-"""
+_VALUE_FLAGS = {
+    "--owner": "owner",
+    "-o": "owner",
+    "--workspace-id": "workspace_id",
+    "--config": "config_path",
+}
+_BOOL_FLAGS = {
+    "--json": "json_output",
+    "--quiet": "quiet",
+}
 
 
-async def _run() -> None:
-    app = build_app()
-    await app.startup()  # 连接 MCP server、启动 cron（失败静默降级）
-    session = PromptSession()
-    session_id = f"cli_{uuid.uuid4().hex[:8]}"
-    mode = "agent"
-
-    console.print(BANNER)
-    if not app.config.has_llm_key:
-        console.print(
-            "[yellow]提示：未配置模型 API Key，当前为 FakeProvider 演示模式，"
-            "不会调用真实模型。请在 .env 和 config/config.yaml 中完成模型配置。[/yellow]\n"
-        )
-
-    try:
-        await _repl(app, session, session_id, mode, DEFAULT_CLI_OWNER)
-    finally:
-        await app.shutdown()
-
-
-async def _repl(app, session, session_id: str, mode: str, owner_account_id: str) -> None:
-    while True:
-        try:
-            with patch_stdout():
-                text = await session.prompt_async(f"[{mode}] › ")
-        except (EOFError, KeyboardInterrupt):
-            break
-
-        text = text.strip()
-        if not text:
-            continue
-
-        # slash 命令
-        if text.startswith("/"):
-            cmd = text.lower()
-            if cmd in ("/quit", "/exit"):
+def extract_global_flags(argv: list[str]) -> tuple[dict[str, Any], list[str]]:
+    """从任意位置提取全局参数，剩余参数交给子命令解析。"""
+    flags: dict[str, Any] = {}
+    rest: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        consumed = False
+        for name, dest in _VALUE_FLAGS.items():
+            if token == name:
+                if index + 1 >= len(argv):
+                    raise CliError(f"{name} 缺少参数值")
+                flags[dest] = argv[index + 1]
+                index += 2
+                consumed = True
                 break
-            if cmd == "/help":
-                console.print(HELP)
-            elif cmd == "/new":
-                if app.plan_manager is not None:
-                    app.plan_manager.reset(session_id, owner_account_id=owner_account_id)
-                session_id = f"cli_{uuid.uuid4().hex[:8]}"
-                console.print("[green]已新建会话。[/green]")
-            elif cmd == "/team":
-                mode = "team"
-                console.print("[magenta]已切换到 Team 模式。[/magenta]")
-            elif cmd == "/agent":
-                mode = "agent"
-                console.print("[cyan]已切换到单 Agent 模式。[/cyan]")
-            elif cmd == "/plan":
-                if app.plan_manager is None:
-                    console.print("[red]Plan 模式不可用（未装配 plan_manager）。[/red]")
-                else:
-                    app.plan_manager.enter(session_id, owner_account_id=owner_account_id)
-                    console.print(
-                        "[bold yellow]已进入 Plan 模式（只读）。[/bold yellow] "
-                        "描述你的需求，我会探索代码、写出计划，再请你确认后执行。"
-                    )
-            elif cmd == "/todo":
-                _print_todos(app, session_id, owner_account_id)
-            else:
-                result = await app.plugins.run_plugin_command(
-                    text,
-                    session_id=session_id,
-                    owner_account_id=owner_account_id,
-                    channel="cli",
-                )
-                if result is None:
-                    console.print(f"[red]未知命令: {text}[/red]")
-                elif result:
-                    console.print(f"{result}\n")
+            if token.startswith(f"{name}="):
+                flags[dest] = token.split("=", 1)[1]
+                index += 1
+                consumed = True
+                break
+        if consumed:
             continue
-
-        envelope = Envelope.of(text, session_id=session_id, channel="cli", mode=mode, user_id=owner_account_id)
-        await _render(app, envelope)
-        # Plan 模式：本轮若模型调用了 exit_plan_mode，则在此请用户审批
-        if app.plan_manager is not None and app.plan_manager.is_awaiting_approval(session_id, owner_account_id=owner_account_id):
-            await _handle_plan_approval(app, session, session_id, mode, owner_account_id)
-
-
-def _print_todos(app, session_id: str, owner_account_id: str) -> None:
-    """打印当前会话的任务清单。"""
-    if app.plan_manager is None:
-        console.print("[dim]无任务清单。[/dim]")
-        return
-    items = app.plan_manager.todo_store(session_id, owner_account_id=owner_account_id).read()
-    if not items:
-        console.print("[dim]任务清单为空。[/dim]")
-        return
-    markers = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
-    console.print("[bold]任务清单[/bold]")
-    for it in items:
-        console.print(f"  {markers.get(it['status'], '[?]')} {it['id']}. {it['content']} ([dim]{it['status']}[/dim])")
+        if token in _BOOL_FLAGS:
+            flags[_BOOL_FLAGS[token]] = True
+            index += 1
+            continue
+        rest.append(token)
+        index += 1
+    return flags, rest
 
 
-async def _handle_plan_approval(app, session, session_id: str, mode: str, owner_account_id: str) -> None:
-    """展示计划并请用户审批：y 批准并执行 / n 留在 plan 模式继续完善。"""
-    from crew.agent.plan import read_plan
-
-    plan_text = read_plan(session_id, owner_account_id=owner_account_id) or "(计划文件为空)"
-    console.print("\n[bold cyan]──── 待审批的计划 ────[/bold cyan]")
-    console.print(plan_text)
-    console.print("[bold cyan]─────────────────────[/bold cyan]")
-    try:
-        with patch_stdout():
-            ans = await session.prompt_async("批准计划并开始执行？[y/N] ")
-    except (EOFError, KeyboardInterrupt):
-        ans = ""
-    if ans.strip().lower() in ("y", "yes", "是", "ok"):
-        app.plan_manager.approve(session_id, owner_account_id=owner_account_id)
-        console.print("[green]计划已批准，开始执行……[/green]\n")
-        kickoff = Envelope.of(
-            "计划已批准，请按上述计划开始执行。",
-            session_id=session_id,
-            channel="cli",
-            mode=mode,
-            user_id=owner_account_id,
-        )
-        await _render(app, kickoff)
-    else:
-        app.plan_manager.reject(session_id, owner_account_id=owner_account_id)
-        console.print("[yellow]已保留 Plan 模式，请继续告诉我如何完善计划。[/yellow]")
-
-
-async def _render(app, envelope: Envelope) -> None:
-    async for chunk in app.handle(envelope):
-        if chunk.kind == "tool":
-            phase = chunk.body.get("phase")
-            name = chunk.body.get("name")
-            detail = chunk.body.get("detail", "")
-            if phase == "generating":
-                label = chunk.body.get("ui_label") or name
-                console.print(f"  [dim]… {label}[/dim]")
-            elif phase == "start":
-                console.print(f"  [dim]→ 调用工具 {name}({detail})[/dim]")
-            else:
-                console.print(f"  [dim]← {name} 返回: {detail}[/dim]")
-        elif chunk.kind == "status":
-            console.print(f"  [blue]{chunk.body.get('message')}[/blue]")
-        elif chunk.kind == "final":
-            console.print(f"[bold green]{chunk.body.get('text')}[/bold green]\n")
-        elif chunk.kind == "error":
-            console.print(f"[bold red]错误: {chunk.body.get('message')}[/bold red]\n")
-
-
-def main() -> None:
-    import sys
-
-    # 子命令：crew mcp serve → 启动 MCP Server（stdio）
-    if sys.argv[1:2] == ["mcp"] and sys.argv[2:3] == ["serve"]:
-        from crew.gateway.mcp_server import serve
-        serve()
-        return
-    if sys.argv[1:2] == ["mcp"] and sys.argv[2:3] == ["interaction-proxy"]:
-        from crew.gateway.mcp_server import serve_interaction_proxy
-        serve_interaction_proxy()
-        return
-    if sys.argv[1:3] == ["migrate", "claim-legacy"]:
-        _claim_legacy(sys.argv[3:])
-        return
-    if sys.argv[1:2] == ["weixin-login"]:
-        from crew.cli.weixin_login import main as weixin_login_main
-        weixin_login_main()
-        return
-
-    try:
-        asyncio.run(_run())
-    except KeyboardInterrupt:
-        pass
-    console.print("\n[dim]再见。[/dim]")
-
-
-def _claim_legacy(argv: list[str]) -> None:
-    """CLI wrapper for claiming pre-account rows."""
-
-    import argparse
-
-    from crew.state._migration import OWNER_TABLE_LABELS, claim_legacy_owner_database
-    from crew.state.config import load_config
-
-    parser = argparse.ArgumentParser(prog="python -m crew.cli migrate claim-legacy")
-    parser.add_argument("--account", required=True, help="目标 owner_account_id，例如 owner:user-a")
-    parser.add_argument("--dry-run", action="store_true", help="只统计，不写入")
-    args = parser.parse_args(argv)
-
-    owner = args.account.strip()
-    if not owner:
-        parser.error("--account 不能为空")
-
-    cfg = load_config()
-    _prepare_state_schema(cfg)
-    changed, remaining = claim_legacy_owner_database(
-        cfg.db_path,
-        owner,
-        dry_run=bool(args.dry_run),
-        wal_enabled=cfg.sqlite_wal,
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="crew",
+        description="Crew 多智能体工作台 CLI（进程内直调，不依赖 Gateway）",
     )
-    verb = "将认领" if args.dry_run else "已认领"
-    for table, count in changed.items():
-        if count:
-            console.print(f"{verb} {count} 条{OWNER_TABLE_LABELS.get(table, table)}")
-    if not any(changed.values()):
-        console.print("[dim]没有未归属数据。[/dim]")
-    if not args.dry_run:
-        left = {table: count for table, count in remaining.items() if count}
-        if left:
-            console.print(f"[yellow]仍有未归属数据: {left}[/yellow]")
+    parser.add_argument("--version", action="version", version=f"crew {CREW_VERSION}")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+    for module in (chat, management, knowledge, integration, security, content):
+        module.register(subparsers, {})
+    return parser
 
 
-def _prepare_state_schema(cfg) -> None:
-    """Initialize state schemas before running raw migration SQL."""
+def _invoke(handler: Callable, args: argparse.Namespace, ctx: CliContext) -> Any:
+    result = handler(args, ctx)
+    if asyncio.iscoroutine(result):
+        return asyncio.run(result)
+    return result
 
-    from crew.cron import CronJobStore
-    from crew.state.session_store import SQLiteSessionStore
-    from crew.state.workspace_store import SQLiteWorkspaceStore
-    from crew.tasks import TaskRuntime
 
-    SQLiteSessionStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    SQLiteWorkspaceStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    CronJobStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    tasks = TaskRuntime(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    tasks.close()
+def _shell_exit_code(code: int) -> int:
+    """CliError 允许带 HTTP 风格语义码（404/409…），但进程退出码只有 0-255，
+    且 >125 带「信号/保留」语义——404 会被 shell 截断成 148，看起来像被信号杀死。
+    越界的统一收敛为通用业务失败码 1。"""
+    return code if 0 < code < 126 else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    # CLI 进程默认只保留 WARNING+ 日志：INFO 级的运行时装配/PERF 噪音对命令行
+    # 没有价值（REPL 里还会穿插进提示符行）。gateway 进程不受影响；
+    # 显式设置 CREW_LOG_LEVEL 可覆盖（经 load_config → cfg.log_level 生效）。
+    # 用 set/restore 而不是 setdefault：测试同进程多次调 main() 时不能把
+    # CREW_LOG_LEVEL 泄漏给后续用例（load_config 会读到它）。
+    prev_log_level = os.environ.get("CREW_LOG_LEVEL")
+    if prev_log_level is None:
+        os.environ["CREW_LOG_LEVEL"] = "WARNING"
+    raw = list(sys.argv[1:] if argv is None else argv)
+    try:
+        flags, rest = extract_global_flags(raw)
+        if not rest:
+            rest = ["chat"]
+        parser = build_parser()
+        args = parser.parse_args(rest)
+        handler = getattr(args, "handler", None)
+        if handler is None:
+            parser.print_help()
+            return 0
+        ctx = CliContext(
+            owner=str(flags.get("owner") or DEFAULT_CLI_OWNER),
+            workspace_id=str(flags.get("workspace_id") or "default"),
+            config_path=flags.get("config_path"),
+            json_output=bool(flags.get("json_output")),
+            quiet=bool(flags.get("quiet")),
+        )
+        result = _invoke(handler, args, ctx)
+        emit(result, json_output=ctx.json_output, quiet=ctx.quiet)
+        return 0
+    except CliError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return _shell_exit_code(exc.exit_code)
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        if prev_log_level is None:
+            os.environ.pop("CREW_LOG_LEVEL", None)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+
+
+__all__ = ["extract_global_flags", "main"]

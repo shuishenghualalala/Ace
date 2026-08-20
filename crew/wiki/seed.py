@@ -8,7 +8,7 @@
 特性：
 - 一次复制：通过标记文件 ``<owner_home>/.tutorial_kb_seeded`` 保证只导入一次。
 - 可编辑：复制后的页面属于用户知识库存储，可正常修改。
-- 预置概览：``SUMMARY.md`` / ``INTRO.md`` 是手写的知识库概览与 Home 导读，
+- 预置导读：``INTRO.md`` 是手写的 Home 导读，
   初始化时直接写入 KB 元数据（status=ready），新用户无需 LLM 调用即可看到。
 - 懒加载：仅在读取知识库列表时执行，不进入 Crew 启动链路。
 - 容错：任何失败只记日志，绝不影响 Wiki 列表接口。
@@ -80,7 +80,7 @@ def _ensure(store: Any, owner_account_id: str) -> bool:
 
     _write_schema(kb_dir)
     _write_index(kb_dir, pages)
-    _seed_summary(store, pages, owner_account_id)
+    _seed_home_intro(store, owner_account_id)
     store.update_home(owner_account_id, TUTORIAL_KB_ID)
     _append_log(kb_dir, len(pages))
     _write_marker(marker)
@@ -88,52 +88,35 @@ def _ensure(store: Any, owner_account_id: str) -> bool:
     return True
 
 
-def _seed_summary(store: Any, pages: list[Any], owner_account_id: str) -> None:
-    """把手写的知识库概览与 Home 导读写入 KB 元数据，无需 LLM 即可展示。
+def _seed_home_intro(store: Any, owner_account_id: str) -> None:
+    """把手写的 Home 导读写入 KB 元数据，无需 LLM 即可展示。
 
     content_hash 按教程页面内容计算，与 WikiSummarizer 的刷新判定一致：
     教程页面未被修改时不会触发重生成，用户改动内容后才由后台刷新接管。
     """
-    summary_file = _SEED_DIR / "SUMMARY.md"
-    if not summary_file.exists():
+    intro_file = _SEED_DIR / "INTRO.md"
+    if not intro_file.exists():
         return
-    from crew.wiki.schemas import HomeIntro, KBSummary
-    from crew.wiki.summary import WikiSummarizer
+    from crew.wiki.schemas import HomeIntro
+    from crew.wiki.summary import WikiSummarizer, _split_home_intro
 
     # 落盘后的页面内容经 serde 规范化，hash 必须按读回的页面计算，
     # 与 WikiSummarizer 刷新时看到的内容保持一致。
     stored_pages = store.list_all(owner_account_id=owner_account_id, kb_id=TUTORIAL_KB_ID, limit=10000)
     content_hash = WikiSummarizer._compute_content_hash(stored_pages, [])
-    now = time.time()
-    store.set_kb_summary(
-        KBSummary(
-            summary=summary_file.read_text(encoding="utf-8").strip(),
-            page_count=len(pages),
-            source_count=0,
+    # INTRO.md 与 LLM 输出同构（导读 + ---推荐问题--- + 问题列表），复用同一解析。
+    intro_text, questions = _split_home_intro(intro_file.read_text(encoding="utf-8"))
+    store.set_home_intro(
+        HomeIntro(
+            text=intro_text,
+            questions=questions,
             content_hash=content_hash,
-            generated_at=now,
+            generated_at=time.time(),
             status="ready",
         ),
         owner_account_id,
         TUTORIAL_KB_ID,
     )
-    intro_file = _SEED_DIR / "INTRO.md"
-    if intro_file.exists():
-        from crew.wiki.summary import _split_home_intro
-
-        # INTRO.md 与 LLM 输出同构（导读 + ---推荐问题--- + 问题列表），复用同一解析。
-        intro_text, questions = _split_home_intro(intro_file.read_text(encoding="utf-8"))
-        store.set_home_intro(
-            HomeIntro(
-                text=intro_text,
-                questions=questions,
-                content_hash=content_hash,
-                generated_at=now,
-                status="ready",
-            ),
-            owner_account_id,
-            TUTORIAL_KB_ID,
-        )
 
 
 def _write_marker(marker: Path) -> None:

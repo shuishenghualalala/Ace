@@ -29,7 +29,6 @@ import type {
   WikiSourceFiles,
   WikiSourceTitles,
   WikiUploadResult,
-  WikiSummary,
   Workspace,
 } from "./types";
 
@@ -411,8 +410,15 @@ export const api = {
     getJSON<Workspace>(`/api/workspace/${id}`, { method: "PUT", ...jsonBody(w) }),
   deleteWorkspace: (id: string) => getJSON(`/api/workspace/${id}`, { method: "DELETE" }),
   // 附件与上下文
-  upload: (filename: string, contentBase64: string) =>
-    getJSON<Attachment>("/api/upload", { method: "POST", ...jsonBody({ filename, content: contentBase64 }) }),
+  upload: (filename: string, contentBase64: string, opts?: { sessionId?: string; kbId?: string }) => {
+    const body: { filename: string; content: string; session_id?: string; kb_id?: string } = {
+      filename,
+      content: contentBase64,
+    };
+    if (opts?.sessionId) body.session_id = opts.sessionId;
+    if (opts?.kbId) body.kb_id = opts.kbId;
+    return getJSON<Attachment>("/api/upload", { method: "POST", ...jsonBody(body) });
+  },
   complete: (query: string) =>
     getJSON<{ text: string; display: string; meta: string; type: string }[]>(`/api/complete?query=${encodeURIComponent(query)}`),
   skills: () => getJSON<Skill[]>("/api/skills"),
@@ -519,10 +525,6 @@ export const api = {
       method: "POST",
       ...jsonBody({ source_id }),
     }),
-  wikiSummary: (kbId?: string, force?: boolean) =>
-    getJSON<{ ok: boolean } & WikiSummary>(
-      withKb(`/api/wiki/summary${force ? "?force=true" : ""}`, kbId),
-    ),
   wikiSourceFileUrl: (sourceId: string, kbId?: string) =>
     withKb(`/api/wiki/sources/${encodeURIComponent(sourceId)}/file`, kbId),
 };

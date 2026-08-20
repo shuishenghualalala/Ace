@@ -61,16 +61,37 @@ def test_context_uses_owner_scoped_store_root(tmp_path: Path) -> None:
     assert not path_is_in_workspace(context, attacker_root)
 
 
-def test_normal_conversation_has_no_implicit_workspace_or_cwd() -> None:
+def test_normal_conversation_uses_owner_task_workspace_as_security_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "crew-home"))
     store = _WorkspaceStore({("acct-a", "default"): None})
     _set_runtime_context(owner="acct-a", workspace="default")
 
     context = build_security_context(store)
 
-    assert context.workspace_root is None
+    from crew.state.home import task_workspace_path
+
+    assert context.workspace_root == task_workspace_path(
+        "default",
+        owner_account_id="acct-a",
+    ).resolve()
     assert context.cwd is None
-    with pytest.raises(SecurityContextError, match="没有可信工作目录"):
-        resolve_requested_path(context, "relative.txt")
+
+
+def test_runtime_cwd_must_stay_inside_effective_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "crew-home"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    store = _WorkspaceStore({("acct-a", "default"): None})
+    _set_runtime_context(owner="acct-a", workspace="default", cwd=outside)
+
+    with pytest.raises(SecurityContextError, match="不属于已认证工作空间"):
+        build_security_context(store)
 
 
 def test_gateway_context_gives_unbound_workspace_an_explicit_task_root(tmp_path, monkeypatch) -> None:

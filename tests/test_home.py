@@ -20,6 +20,8 @@ from crew.state.home import (
     load_soul_md,
     load_user_md,
     owner_path_segment,
+    managed_runtime_env_overrides,
+    managed_runtime_read_roots,
     refresh_owner_runtime_env,
     runtime_env_overrides,
     task_workspace_path,
@@ -301,7 +303,194 @@ def test_runtime_env_overrides_sets_python_utf8_io(tmp_path, monkeypatch):
   if sys.platform == "win32":
     assert values["PYTHONUTF8"] == "1"
   else:
-    assert "PYTHONUTF8" not in values
+      assert "PYTHONUTF8" not in values
+
+
+def test_managed_runtime_keeps_system_commands_and_development_runtime_visible(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "crew-home"))
+    node_bin = tmp_path / "node-prefix" / "bin"
+    node_bin.mkdir(parents=True)
+    node_root = node_bin.parent
+    py_bin = tmp_path / "venv" / "bin"
+    py_bin.mkdir(parents=True)
+    py_root = py_bin.parent
+    monkeypatch.setattr(home_module, "_bundled_runtime_paths", lambda: [])
+    monkeypatch.setattr(
+        home_module,
+        "_development_runtime_toolchain",
+        lambda: ([str(py_bin), str(node_bin)], (py_root, node_root)),
+    )
+    monkeypatch.setattr(home_module, "_managed_system_path_dirs", lambda: ["/usr/bin", "/bin"])
+
+    values = managed_runtime_env_overrides(owner_account_id="owner:user-a")
+
+    assert values["PATH"].split(os.pathsep) == [
+        str(py_bin),
+        str(node_bin),
+        "/usr/bin",
+        "/bin",
+    ]
+    assert managed_runtime_read_roots() == (
+        py_root.resolve(),
+        node_root.resolve(),
+    )
+
+
+def test_development_python_toolchain_exposes_venv_root(tmp_path, monkeypatch):
+    """开发态 venv 解释器：venv 根目录可读，模拟打包态 runtimes/python。"""
+    venv_root = tmp_path / ".venv"
+    venv_bin = venv_root / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").write_text("", encoding="utf-8")
+    (venv_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    monkeypatch.setattr(home_module.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(
+        home_module.sys, "executable", str(venv_bin / "python3")
+    )
+
+    path_dirs, roots = home_module._development_python_toolchain()
+
+    assert path_dirs == [str(venv_bin.resolve())]
+    # venv 根目录必须放行（含 site-packages）；真实解释器根若与 venv 同根则去重后唯一。
+    assert venv_root.resolve() in roots
+
+
+def test_development_python_toolchain_falls_back_to_bin_for_system_python(
+    tmp_path, monkeypatch
+):
+    """非 venv 的系统 python：只放行 bin 目录，不放大到 /usr。"""
+    usr_bin = tmp_path / "usr" / "bin"
+    usr_bin.mkdir(parents=True)
+    (usr_bin / "python3").write_text("", encoding="utf-8")
+    monkeypatch.setattr(home_module.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(home_module.sys, "executable", str(usr_bin / "python3"))
+
+    path_dirs, roots = home_module._development_python_toolchain()
+
+    assert path_dirs == [str(usr_bin.resolve())]
+    assert roots == (usr_bin.resolve(),)
+    assert roots != (tmp_path / "usr").resolve()
+
+
+def test_development_python_toolchain_exposes_symlinked_interpreter_root(
+    tmp_path, monkeypatch
+):
+    """uv/pyenv 场景：.venv/bin/python 是指向全局解释器的符号链接，
+    venv 根与真实解释器根（含 lib/ 动态库）两个目录都要放行。"""
+    # 真实解释器树：uv python，bin/python3 + lib/
+    real_root = tmp_path / "uv-python"
+    real_bin = real_root / "bin"
+    real_lib = real_root / "lib"
+    real_bin.mkdir(parents=True)
+    real_lib.mkdir(parents=True)
+    (real_bin / "python3.11").write_text("", encoding="utf-8")
+    # venv 树：.venv/bin/python3 -> 真实解释器，含 pyvenv.cfg
+    venv_root = tmp_path / ".venv"
+    venv_bin = venv_root / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").symlink_to(real_bin / "python3.11")
+    (venv_root / "pyvenv.cfg").write_text("home = /uv-python/bin\n", encoding="utf-8")
+    monkeypatch.setattr(home_module.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(
+        home_module.sys, "executable", str(venv_bin / "python3")
+    )
+
+    path_dirs, roots = home_module._development_python_toolchain()
+
+    assert path_dirs == [str(venv_bin.resolve())]
+    assert venv_root.resolve() in roots
+    assert real_root.resolve() in roots
+
+
+def test_development_runtime_toolchain_merges_python_and_node(tmp_path, monkeypatch):
+    """合并 toolchain 把 python 与 node 的 PATH/readable_roots 保序去重合并。"""
+    venv_root = tmp_path / ".venv"
+    venv_bin = venv_root / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").write_text("", encoding="utf-8")
+    (venv_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    monkeypatch.setattr(home_module.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(
+        home_module.sys, "executable", str(venv_bin / "python3")
+    )
+    node_bin = tmp_path / "node-prefix" / "bin"
+    node_bin.mkdir(parents=True)
+    (node_bin / "node").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        home_module.shutil,
+        "which",
+        lambda name: str(node_bin / name) if name == "node" else None,
+    )
+
+    path_dirs, roots = home_module._development_runtime_toolchain()
+
+    assert path_dirs == [str(venv_bin.resolve()), str(node_bin.resolve())]
+    assert venv_root.resolve() in roots
+    assert node_bin.resolve() in roots
+
+
+def test_development_node_toolchain_does_not_expose_complete_install_prefix(
+    tmp_path, monkeypatch
+):
+    prefix = tmp_path / "toolchain"
+    bin_dir = prefix / "bin"
+    node_root = prefix / "versions" / "node-v22"
+    node_bin = node_root / "bin"
+    npm_root = prefix / "packages" / "npm"
+    npm_bin = npm_root / "bin"
+    bin_dir.mkdir(parents=True)
+    node_bin.mkdir(parents=True)
+    npm_bin.mkdir(parents=True)
+    (node_bin / "node").write_text("", encoding="utf-8")
+    (npm_bin / "npm-cli.js").write_text("", encoding="utf-8")
+    (npm_bin / "npx-cli.js").write_text("", encoding="utf-8")
+    (bin_dir / "node").symlink_to(node_bin / "node")
+    (bin_dir / "npm").symlink_to(npm_bin / "npm-cli.js")
+    (bin_dir / "npx").symlink_to(npm_bin / "npx-cli.js")
+    monkeypatch.setattr(
+        home_module.shutil,
+        "which",
+        lambda name: str(bin_dir / name),
+    )
+    monkeypatch.setattr(home_module.sys, "frozen", False, raising=False)
+
+    path_dirs, roots = home_module._development_node_toolchain()
+
+    assert path_dirs == [str(bin_dir.resolve())]
+    assert bin_dir.resolve() in roots
+    assert node_root.resolve() in roots
+    assert npm_root.resolve() in roots
+    assert prefix.resolve() not in roots
+
+
+def test_packaged_node_npm_runtime_stays_first_on_managed_path(tmp_path, monkeypatch):
+    gateway = tmp_path / "crew-gateway"
+    runtimes = gateway / "_internal" / "runtimes"
+    python_bin = runtimes / "python" / "bin"
+    node_bin = runtimes / "node" / "bin"
+    python_bin.mkdir(parents=True)
+    node_bin.mkdir(parents=True)
+    (python_bin / "python3").write_text("", encoding="utf-8")
+    (node_bin / "node").write_text("", encoding="utf-8")
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "crew-home"))
+    monkeypatch.setattr(home_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(home_module.sys, "executable", str(gateway / "crew-gateway"))
+    monkeypatch.setattr(home_module, "_managed_system_path_dirs", lambda: ["/usr/bin", "/bin"])
+
+    values = managed_runtime_env_overrides(owner_account_id="owner:user-a")
+
+    assert values["PATH"].split(os.pathsep) == [
+        str(python_bin),
+        str(node_bin),
+        "/usr/bin",
+        "/bin",
+    ]
+    assert managed_runtime_read_roots() == (
+        (runtimes / "python").resolve(),
+        (runtimes / "node").resolve(),
+    )
 
 
 def test_owner_runtime_env_does_not_nest_accounts_on_reload(tmp_path, monkeypatch):

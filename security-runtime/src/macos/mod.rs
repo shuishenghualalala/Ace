@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -19,6 +19,7 @@ use crate::protocol::{
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const SEATBELT_PREFLIGHT_PROFILE: &str =
     "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process*)\n";
+const PROTECTED_NAMES: &[&str] = &[".git", ".agents", ".crew"];
 static ACTIVE_PROCESS_GROUP: AtomicI32 = AtomicI32::new(0);
 const PLATFORM_READ_ROOTS: &[&str] = &[
     "/System",
@@ -28,6 +29,7 @@ const PLATFORM_READ_ROOTS: &[&str] = &[
     "/sbin",
     "/private/etc",
     "/private/var/db",
+    "/private/var/select",
     "/dev",
 ];
 
@@ -36,7 +38,9 @@ pub struct MacOsRunRequest {
     pub cwd: PathBuf,
     pub writable_roots: Vec<PathBuf>,
     pub readable_roots: Vec<PathBuf>,
+    pub readonly_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
+    pub full_disk_read: bool,
     pub network_enabled: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,
     pub allow_local_binding: bool,
@@ -140,6 +144,7 @@ fn run_with_control(
                 filesystem_sandbox: true,
                 process_tree_cleanup: true,
                 managed_network: request.network_enabled,
+                full_disk_read: request.full_disk_read,
                 system_bwrap: false,
                 bundled_bwrap: false,
                 wsl_version: None,
@@ -311,6 +316,7 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         return Err("sandbox cwd must be inside an explicit writable root".to_string());
     }
     let readable = canonical_roots(&request.readable_roots)?;
+    let readonly = canonical_readonly_roots(&request.readonly_roots, &writable)?;
     let denied = canonical_or_missing_roots(&request.denied_roots)?;
     let private_home = create_private_home()?;
     if let Err(error) = stage_home_files(&private_home, &request.home_files) {
@@ -318,13 +324,17 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         return Err(error);
     }
     let home = select_execution_home(
-        &writable,
+        request.full_disk_read,
+        request.home_files.is_empty(),
         &private_home,
         std::env::var_os("HOME").map(PathBuf::from),
     );
 
     let mut parameters = Vec::new();
     let mut read_rules = Vec::new();
+    if request.full_disk_read {
+        read_rules.push("(allow file-read*)".to_string());
+    }
     for (index, root) in PLATFORM_READ_ROOTS.iter().enumerate() {
         push_subpath_rule(
             &mut parameters,
@@ -381,6 +391,10 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
         &path_string(&private_home)?,
         "allow file-write*",
     );
+    let mut traversal_roots = readable.clone();
+    traversal_roots.extend(writable.iter().cloned());
+    traversal_roots.push(home.clone());
+    push_ancestor_metadata_rules(&mut parameters, &mut read_rules, &traversal_roots)?;
 
     if let Some(executable) = request.command.first().map(PathBuf::from) {
         if executable.is_absolute() {
@@ -398,11 +412,34 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
     }
 
     let mut deny_rules = Vec::new();
+    for (index, root) in readonly.iter().enumerate() {
+        push_path_rule(
+            &mut parameters,
+            &mut deny_rules,
+            "READONLY_ROOT",
+            index,
+            &path_string(root)?,
+            "deny file-write*",
+        );
+    }
     for (index, root) in denied.iter().enumerate() {
-        let name = format!("DENIED_ROOT_{index}");
-        parameters.push((name.clone(), path_string(root)?));
-        deny_rules.push(format!("(deny file-read* (subpath (param \"{name}\")))"));
-        deny_rules.push(format!("(deny file-write* (subpath (param \"{name}\")))"));
+        let value = path_string(root)?;
+        push_path_rule(
+            &mut parameters,
+            &mut deny_rules,
+            "DENIED_READ_ROOT",
+            index,
+            &value,
+            "deny file-read*",
+        );
+        push_path_rule(
+            &mut parameters,
+            &mut deny_rules,
+            "DENIED_WRITE_ROOT",
+            index,
+            &value,
+            "deny file-write*",
+        );
     }
 
     let network_rule = match proxy_port {
@@ -439,18 +476,19 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
 }
 
 fn select_execution_home(
-    writable: &[PathBuf],
+    full_disk_read: bool,
+    use_host_home: bool,
     private_home: &Path,
     host_home: Option<PathBuf>,
 ) -> PathBuf {
+    if !full_disk_read || !use_host_home {
+        return private_home.to_path_buf();
+    }
     let Some(host_home) = host_home else {
         return private_home.to_path_buf();
     };
     let host_home = host_home.canonicalize().unwrap_or(host_home);
-    if writable
-        .iter()
-        .any(|root| host_home == *root || host_home.starts_with(root))
-    {
+    if host_home.is_absolute() {
         host_home
     } else {
         private_home.to_path_buf()
@@ -467,6 +505,45 @@ fn push_subpath_rule(
 ) {
     let name = format!("{prefix}_{index}");
     parameters.push((name.clone(), value.to_string()));
+    rules.push(format!("({operation} (subpath (param \"{name}\")))"));
+}
+
+fn push_ancestor_metadata_rules(
+    parameters: &mut Vec<(String, String)>,
+    rules: &mut Vec<String>,
+    roots: &[PathBuf],
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for root in roots {
+        for ancestor in root
+            .ancestors()
+            .skip(1)
+            .filter(|value| value.parent().is_some())
+        {
+            if !seen.insert(ancestor.to_path_buf()) {
+                continue;
+            }
+            let name = format!("READABLE_ANCESTOR_{}", seen.len() - 1);
+            parameters.push((name.clone(), path_string(ancestor)?));
+            rules.push(format!(
+                "(allow file-read-metadata (literal (param \"{name}\")))"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn push_path_rule(
+    parameters: &mut Vec<(String, String)>,
+    rules: &mut Vec<String>,
+    prefix: &str,
+    index: usize,
+    value: &str,
+    operation: &str,
+) {
+    let name = format!("{prefix}_{index}");
+    parameters.push((name.clone(), value.to_string()));
+    rules.push(format!("({operation} (literal (param \"{name}\")))"));
     rules.push(format!("({operation} (subpath (param \"{name}\")))"));
 }
 
@@ -553,12 +630,84 @@ fn canonical_or_missing_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String>
                 path.display()
             ));
         }
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let canonical = canonicalize_allow_missing(path)?;
         if !result.contains(&canonical) {
             result.push(canonical);
         }
     }
     Ok(result)
+}
+
+fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    if path.symlink_metadata().is_ok() {
+        return path.canonicalize().map_err(|error| {
+            format!("cannot resolve permission root {}: {error}", path.display())
+        });
+    }
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while ancestor.symlink_metadata().is_err() {
+        let name = ancestor.file_name().ok_or_else(|| {
+            format!(
+                "cannot resolve permission root ancestor: {}",
+                path.display()
+            )
+        })?;
+        suffix.push(name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            format!(
+                "cannot resolve permission root ancestor: {}",
+                path.display()
+            )
+        })?;
+    }
+    let mut canonical = ancestor
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve permission root {}: {error}", path.display()))?;
+    for name in suffix.iter().rev() {
+        canonical.push(name);
+    }
+    Ok(canonical)
+}
+
+fn canonical_readonly_roots(
+    paths: &[PathBuf],
+    writable: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for root in writable {
+        for name in PROTECTED_NAMES {
+            roots.push(root.join(name));
+        }
+    }
+    for path in paths {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "read-only root cannot be a symlink: {}",
+                path.display()
+            ));
+        }
+    }
+    for root in canonical_or_missing_roots(paths)? {
+        if !writable.iter().any(|candidate| root.starts_with(candidate)) {
+            return Err(format!(
+                "read-only root must be inside an explicit writable root: {}",
+                root.display()
+            ));
+        }
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    for root in &roots {
+        if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "read-only root cannot be a symlink: {}",
+                root.display()
+            ));
+        }
+    }
+    Ok(roots)
 }
 
 fn path_string(path: &Path) -> Result<String, String> {
@@ -668,7 +817,9 @@ mod tests {
             cwd: workspace.to_path_buf(),
             writable_roots: vec![workspace.to_path_buf()],
             readable_roots: vec![],
+            readonly_roots: vec![workspace.join(".agents")],
             denied_roots: vec![workspace.join(".git")],
+            full_disk_read: false,
             network_enabled: false,
             network_rules: vec![],
             allow_local_binding: false,
@@ -684,14 +835,71 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let plan = build_plan(&request(workspace.path()), None).unwrap();
         assert!(!plan.profile.contains(workspace.path().to_str().unwrap()));
-        assert!(plan.profile.contains("DENIED_ROOT_0"));
+        assert!(plan.profile.contains("READONLY_ROOT_0"));
+        assert!(plan.profile.contains("DENIED_READ_ROOT_0"));
+        assert!(plan.profile.contains("DENIED_WRITE_ROOT_0"));
         assert!(plan.profile.contains("deny file-read*"));
         assert!(plan.profile.contains("deny file-write*"));
         assert!(plan
             .profile
             .contains("(allow mach-lookup (global-name \"com.apple.FSEvents\"))"));
         assert!(!plan.profile.contains("(allow mach-lookup)"));
+        assert!(plan
+            .profile
+            .contains("deny file-write* (literal (param \"READONLY_ROOT_0\"))"));
+        assert!(!plan
+            .profile
+            .contains("deny file-read* (literal (param \"READONLY_ROOT_0\"))"));
         assert!(!plan.profile.contains("allow network-outbound"));
+    }
+
+    #[test]
+    fn full_disk_read_keeps_explicit_denies_and_write_boundaries() {
+        let workspace = tempfile::tempdir().unwrap();
+        let denied = tempfile::tempdir().unwrap();
+        let mut value = request(workspace.path());
+        value.full_disk_read = true;
+        value.denied_roots = vec![denied.path().to_path_buf()];
+
+        let plan = build_plan(&value, None).unwrap();
+
+        assert!(plan.profile.contains("(allow file-read*)"));
+        assert!(plan.profile.contains("DENIED_READ_ROOT_0"));
+        assert!(plan.profile.contains("DENIED_WRITE_ROOT_0"));
+        assert!(plan.profile.contains("deny file-write*"));
+    }
+
+    #[test]
+    fn readable_roots_allow_only_ancestor_metadata_for_path_traversal() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let nested = runtime.path().join("node/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        let mut value = request(workspace.path());
+        value.readable_roots = vec![nested];
+
+        let plan = build_plan(&value, None).unwrap();
+
+        assert!(plan
+            .profile
+            .contains("allow file-read-metadata (literal (param \"READABLE_ANCESTOR_0\"))"));
+        assert!(!plan
+            .profile
+            .contains("allow file-read* (subpath (param \"READABLE_ANCESTOR_0\"))"));
+    }
+
+    #[test]
+    fn readonly_root_must_be_inside_a_writable_root() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut value = request(workspace.path());
+        value.readonly_roots = vec![outside.path().to_path_buf()];
+
+        let error = build_plan(&value, None)
+            .err()
+            .expect("read-only root outside writable roots must fail");
+
+        assert!(error.contains("read-only root must be inside"), "{error}");
     }
 
     #[test]
@@ -715,23 +923,19 @@ mod tests {
     }
 
     #[test]
-    fn host_home_is_used_only_when_an_explicit_writable_root_covers_it() {
+    fn managed_full_disk_read_uses_host_home_without_making_it_writable() {
         let private_home = std::path::Path::new("/private/tmp/ace-private-home");
         let host_home = std::path::Path::new("/Users/yun");
         assert_eq!(
-            select_execution_home(
-                &[host_home.to_path_buf()],
-                private_home,
-                Some(host_home.to_path_buf()),
-            ),
+            select_execution_home(true, true, private_home, Some(host_home.to_path_buf()),),
             host_home
         );
         assert_eq!(
-            select_execution_home(
-                &[std::path::PathBuf::from("/Users/yun/workspace")],
-                private_home,
-                Some(host_home.to_path_buf()),
-            ),
+            select_execution_home(false, true, private_home, Some(host_home.to_path_buf()),),
+            private_home
+        );
+        assert_eq!(
+            select_execution_home(true, false, private_home, Some(host_home.to_path_buf())),
             private_home
         );
     }

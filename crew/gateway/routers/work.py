@@ -260,6 +260,7 @@ def create_work_router(crew) -> APIRouter:
                 source_id=str(payload.get("source_id") or ""),
                 target_item_id=payload.get("target_item_id"),
                 source_link=str(payload.get("source_link") or ""),
+                snapshot_summary=str(payload.get("snapshot_summary") or ""),
             )
         except (KeyError, RuntimeError, TypeError, ValueError, PermissionError) as exc:
             return _error(exc)

@@ -133,27 +133,6 @@ def test_wiki_page_detail_returns_outgoing_and_incoming_relations(tmp_path, auth
     }
 
 
-def test_wiki_summary_read_does_not_implicitly_call_llm(tmp_path, auth_headers):
-    from crew.wiki.schemas import KBSummary
-
-    client, app = _client(tmp_path)
-    summarizer = app._wiki_summarizer
-    summarizer.get_summary = MagicMock(
-        return_value=KBSummary(summary="缓存摘要", status="stale")
-    )
-    summarizer.generate_kb_summary = AsyncMock(
-        side_effect=AssertionError("普通 summary GET 不得调用 LLM")
-    )
-
-    res = client.get("/api/wiki/summary", headers=auth_headers)
-
-    assert res.status_code == 200
-    assert res.json()["summary"] == "缓存摘要"
-    assert res.json()["status"] == "stale"
-    summarizer.get_summary.assert_called_once_with(OWNER, "default")
-    summarizer.generate_kb_summary.assert_not_awaited()
-
-
 def test_wiki_agent_session_is_preset_and_isolated_per_kb(tmp_path, auth_headers):
     client, app = _client(tmp_path)
 
@@ -1217,4 +1196,83 @@ def test_wiki_delete_source_not_found(tmp_path, auth_headers):
     client, _app = _client(tmp_path)
     res = client.delete("/api/wiki/sources/not_exist", headers=auth_headers)
     assert res.status_code == 404
+    assert res.json()["ok"] is False
+
+
+def test_wiki_capture_text_persists_source_url_and_publishes_page(tmp_path, auth_headers):
+    """POST /api/wiki/capture：source_url 落库为 article，返回发布出的 Source 页面。"""
+    client, app = _client(tmp_path)
+    client.post("/api/wiki/init", headers=auth_headers)
+
+    res = client.post(
+        "/api/wiki/capture",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={
+            "title": "示例标签页",
+            "content": "这是浏览器标签页的正文内容。",
+            "source_url": "https://example.com/article",
+        },
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["source_id"].startswith("paste_")
+    assert len(body["pages"]) == 1
+    assert body["pages"][0]["page_type"] == "source"
+    assert body["pages"][0]["title"] == "示例标签页"
+
+    store = app._wiki_store
+    raw = store.load_raw(body["source_id"], OWNER, "default")
+    assert raw is not None
+    assert raw.source_url == "https://example.com/article"
+    assert raw.source_kind == "article"
+    assert raw.source_platform == "web"
+    assert raw.parse_status == "parsed"
+
+
+def test_wiki_capture_text_duplicate_skips_page(tmp_path, auth_headers):
+    """相同内容重复 capture：仍 ok，但不发布重复 Source 页面。"""
+    client, _app = _client(tmp_path)
+    client.post("/api/wiki/init", headers=auth_headers)
+    payload = {"title": "标签页", "content": "完全相同的正文内容。"}
+
+    first = client.post(
+        "/api/wiki/capture",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json=payload,
+    )
+    assert first.status_code == 200
+    assert len(first.json()["pages"]) == 1
+
+    second = client.post(
+        "/api/wiki/capture",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json=payload,
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["ok"] is True
+    assert body["pages"] == []
+    assert body["duplicate"] is True
+
+
+def test_wiki_capture_text_validates_required_fields(tmp_path, auth_headers):
+    client, _app = _client(tmp_path)
+    client.post("/api/wiki/init", headers=auth_headers)
+
+    res = client.post(
+        "/api/wiki/capture",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={"title": "", "content": ""},
+    )
+    assert res.status_code == 400
+    assert res.json()["ok"] is False
+
+    res = client.post(
+        "/api/wiki/capture",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={"title": "x", "content": "y", "kb_id": "bad kb/id"},
+    )
+    assert res.status_code == 400
     assert res.json()["ok"] is False

@@ -425,8 +425,7 @@ class WikiGraph:
 class HomeIntro:
     """Home.md「内容导读」的缓存元数据。
 
-    与 KBSummary（前端摘要卡片）相互独立：导读专为 Home.md 首页撰写，
-    只在页面/来源内容 hash 变化时重新生成。
+    导读专为 Home.md 首页撰写，只在页面/来源内容 hash 变化时重新生成。
     """
 
     text: str = ""
@@ -463,42 +462,6 @@ class HomeIntro:
 
 
 @dataclass
-class KBSummary:
-    """知识库摘要元数据。"""
-
-    summary: str = ""
-    page_count: int = 0
-    source_count: int = 0
-    content_hash: str = ""
-    generated_at: float = 0.0
-    status: Literal["ready", "generating", "empty", "stale"] = "empty"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "summary": self.summary,
-            "page_count": self.page_count,
-            "source_count": self.source_count,
-            "content_hash": self.content_hash,
-            "generated_at": self.generated_at,
-            "status": self.status,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "KBSummary":
-        status = data.get("status", "empty")
-        if status not in ("ready", "generating", "empty", "stale"):
-            status = "empty"
-        return cls(
-            summary=str(data.get("summary", "")),
-            page_count=int(data.get("page_count", 0)),
-            source_count=int(data.get("source_count", 0)),
-            content_hash=str(data.get("content_hash", "")),
-            generated_at=float(data.get("generated_at", 0.0)),
-            status=status,  # type: ignore[arg-type]
-        )
-
-
-@dataclass
 class KnowledgeBase:
     """知识库元数据。"""
 
@@ -506,7 +469,6 @@ class KnowledgeBase:
     name: str
     created_at: float = 0.0
     updated_at: float = 0.0
-    summary: KBSummary = field(default_factory=KBSummary)
     vault_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -515,20 +477,16 @@ class KnowledgeBase:
             "name": self.name,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "summary": self.summary.to_dict(),
             "vault_path": self.vault_path,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "KnowledgeBase":
-        summary_data = data.get("summary")
-        summary = KBSummary.from_dict(summary_data) if isinstance(summary_data, dict) else KBSummary()
         return cls(
             id=str(data.get("id", "")),
             name=str(data.get("name", "")),
             created_at=float(data.get("created_at", 0.0)),
             updated_at=float(data.get("updated_at", 0.0)),
-            summary=summary,
             vault_path=str(data.get("vault_path", "")),
         )
 

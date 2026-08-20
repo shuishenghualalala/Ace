@@ -47,6 +47,7 @@ from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.wiki.attachments import get_wiki_agent_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
+from crew.gateway.context import REFERENCE_INJECTORS
 from crew.gateway.session_context import (
     SessionContext,
     SessionSource,
@@ -137,6 +138,32 @@ def _read_attachment(path: str) -> str:
     # xlsx/docx 等二进制文件：返回摘要（含完整路径，方便 Agent 用工具进一步读取）
     size = p.stat().st_size
     return f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
+
+
+def _format_browser_tab_references(refs: object) -> str:
+    """把 @browser_tab 引用的标签页正文格式化为可注入上下文的块。"""
+    if not isinstance(refs, list) or not refs:
+        return ""
+    lines = [
+        "# 用户引用的浏览器标签页",
+        "用户在消息中通过 @browser_tab 显式引用了以下标签页，正文为发送时的只读快照：",
+    ]
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        tab_id = str(ref.get("tab_id") or "")
+        error = str(ref.get("error") or "").strip()
+        if error:
+            lines.append(f"\n## 标签页 {tab_id}\n（浏览器标签页内容不可用：{error}）")
+            continue
+        title = str(ref.get("title") or "").strip() or "(无标题)"
+        url = str(ref.get("url") or "").strip()
+        text = str(ref.get("text") or "").strip() or "(页面正文为空)"
+        header = f"\n## {title}"
+        if url:
+            header += f"\nURL: {url}"
+        lines.append(f"{header}\n{text}")
+    return "\n".join(lines)
 
 
 def _format_subagent_notifications(pending: object) -> str:
@@ -500,6 +527,13 @@ class SingleAgent(Agent):
         task_block = _format_task_notifications(envelope.params.get("task_notifications"))
         if task_block:
             reminder_parts.append(task_block)
+        # 对话 @引用：发送时解析注入的正文快照块（含失败占位），按注册表顺序拼接
+        for injector in REFERENCE_INJECTORS:
+            if injector.formatter is None:
+                continue
+            ref_block = injector.formatter(envelope.params.get(injector.params_key))
+            if ref_block:
+                reminder_parts.append(ref_block)
         client_intent_block = _format_client_intent(envelope)
         if client_intent_block:
             reminder_parts.append(client_intent_block)
@@ -675,6 +709,11 @@ class SingleAgent(Agent):
         # 子 Agent 的 ``model=inherit`` 读取父 Agent 实际生效能力；会话绑定模型、
         # owner 模型与全局模型因此走同一条能力约束链。
         current_model_capabilities.set(self.model_capabilities)
+        # 同理继承父 Agent 实际生效的 Provider：父会话可能绑定 owner 级模型，
+        # 此时 app 级 provider 是无 Key 的 FakeProvider，不能让子 Agent 继承它。
+        from crew.core.runctx import current_provider
+
+        current_provider.set(self.provider)
         # 暴露当前生效 skill 范围，供 delegate_task 子 agent 继承父（含 expert）的技能
         current_skill_scope.set((self.enabled_skills, self.disabled_skills))
         # 同步当前已展开的 skill packages，供 build_skills_index_prompt 展开内部 skills
@@ -733,6 +772,8 @@ class SingleAgent(Agent):
         history.append(user_message)
 
         if is_new and self.enable_title and not self.lightweight:
+            # 只落占位标题，让会话立刻出现在列表里；标题生成延后到主响应结束后
+            # 由 finally 块调度（见下方 _spawn_title_task 调用），不抢占主推理窗口。
             if not self._session_needs_title(task_sid, owner):
                 try:
                     self.session_store.save(
@@ -744,16 +785,6 @@ class SingleAgent(Agent):
                     )
                 except Exception:  # noqa: BLE001
                     log.debug("创建会话标题占位失败 session=%s", task_sid)
-            from crew.core.runctx import current_push_fn
-
-            if self._session_needs_title(task_sid, owner):
-                self._spawn_title_task(
-                    task_sid,
-                    owner,
-                    history,
-                    current_push_fn.get(),
-                    user_only=True,
-                )
 
         # Skill 展开内容写入 canonical history（is_meta=True，前端不渲染但模型可见）
         skill_meta = envelope.params.get("skill_meta")
@@ -812,7 +843,12 @@ class SingleAgent(Agent):
 
         prefix_len = len(llm_messages)  # 记录执行前长度，用于回收本轮新增
 
-        log.info("[PERF] pre_llm_setup      %.3fs  total", time.perf_counter() - t0)
+        log.info(
+            "[PERF] pre_llm_setup      %.3fs  total request_id=%s session=%s",
+            time.perf_counter() - t0,
+            envelope.request_id,
+            sid,
+        )
 
         # 4. 组执行上下文，委托 executor（executor 把本轮新消息追加到 llm_messages）
         effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
@@ -1220,13 +1256,11 @@ class SingleAgent(Agent):
         owner: str,
         history: list[Message],
         push_fn,
-        *,
-        user_only: bool = False,
     ) -> None:
         """后台生成会话标题并推送，不阻塞主推理或 final 帧发送。
 
-        首轮开始时使用 ``user_only`` 与主回答并发；回合结束后的兜底调用可携带
-        assistant snippet。同一 (owner, title_sid) 在途任务去重，避免重复 LLM 调用。
+        仅在主响应结束后调度（见 run 的 finally 块），history 已含本轮 assistant
+        内容。同一 (owner, title_sid) 在途任务去重，避免重复 LLM 调用。
         """
         inflight_key = (owner, title_sid)
         if inflight_key in self._title_inflight:
@@ -1238,13 +1272,11 @@ class SingleAgent(Agent):
                 title = await generate_session_title(
                     self.provider,
                     history,
-                    user_only=user_only,
                 )
                 if not title and self._session_needs_title(title_sid, owner):
                     title = await generate_session_title(
                         self.provider,
                         history,
-                        user_only=user_only,
                     )
                 if not title:
                     return

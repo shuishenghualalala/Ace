@@ -32,7 +32,12 @@ import {
 } from './team-collaboration-board';
 import { applyFoldState } from '../render-utils';
 import { setToolFold, setTurnFold } from './fold-state';
-import { bindFollowupCard, isRuntimeStaffingFollowup, renderFollowupCardElement } from '../followup';
+import {
+  bindFollowupCard,
+  isRuntimeStaffingFollowup,
+  renderFollowupCardElement,
+  syncPermissionCardPositions,
+} from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import { attachCopyButtons } from './copy-button';
 import { renderMermaidBlocks } from './mermaid-render';
@@ -807,6 +812,7 @@ export function renderConversation(
   // Mermaid 图表：懒加载 mermaid.js 渲染 [data-mermaid] 占位。幂等，已渲染的跳过。
   // 不 await：渲染是异步的，不阻塞 DOM 布局；失败时保留源码占位，下次 patch 重试。
   void renderMermaidBlocks(container);
+  syncPermissionCardPositions(container);
   bindFollowupCard(container, hooks.followupHandlers ?? noopFollowupHandlers);
   hooks.afterRender?.(sessionId);
   // 软钉底：用户停在底部时才追底（与主对话 scrollChatToBottom 同一 rAF 节奏）。

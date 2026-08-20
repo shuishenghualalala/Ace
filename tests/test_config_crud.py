@@ -126,6 +126,24 @@ def test_load_config_defaults_external_security_to_disabled(tmp_path: Path):
     assert loaded.external_security_enabled is False
 
 
+def test_load_config_defaults_security_to_disabled(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert loaded.security_enabled is False
+
+
+def test_load_config_reads_enabled_security(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("security:\n  enabled: true\n", encoding="utf-8")
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert loaded.security_enabled is True
+
+
 def test_add_model_rejects_empty_id(cfg: Config):
     with pytest.raises(ValueError, match="不能为空"):
         cfg.add_model({"id": "", "name": "x"})
@@ -383,3 +401,52 @@ def test_resolve_writable_env_path_owner_scoped(monkeypatch, tmp_path):
     monkeypatch.setenv("CREW_HOME", str(home))
     p = resolve_writable_env_path("owner:user-a")
     assert p == home / "accounts" / owner_path_segment("owner:user-a") / ".env"
+
+
+# ----------------------- Config.activate_model: vision 同步 -----------------------
+
+
+def test_activate_model_syncs_vision_flag(cfg: Config):
+    """capabilities 是视觉能力的唯一运行时来源，legacy vision 仅负责兼容读取。"""
+    # 加一个显式关闭 vision 的 profile 并激活
+    cfg.add_model({
+        "id": "textonly",
+        "name": "Text Only",
+        "api_key_env": "ALPHA_KEY",
+        "model": "text-1",
+        "vision": False,
+    })
+    assert cfg.model_profiles["textonly"].vision is False
+
+    profile = cfg.activate_model("textonly")
+    assert profile.vision is False
+    # 关键：Config 顶层 vision 必须跟随激活模型，而非保持默认 True
+    assert cfg.vision is False
+
+    # 切回 vision=True 的模型，顶层标志应同步回升
+    cfg.activate_model("alpha")
+    assert cfg.vision is True
+
+
+def test_capabilities_override_conflicting_legacy_vision(cfg: Config):
+    profile = cfg.add_model({
+        "id": "capability-text-only",
+        "model": "text-only",
+        "vision": True,
+        "capabilities": ["text", "tools"],
+    })
+
+    assert profile.vision is False
+    assert profile.supports_vision is False
+    assert profile.public_dict()["vision"] is False
+
+
+def test_legacy_vision_migrates_when_capabilities_are_absent(cfg: Config):
+    profile = cfg.add_model({
+        "id": "legacy-vision",
+        "model": "legacy-vision-model",
+        "vision": True,
+    })
+
+    assert profile.supports_vision is True
+    assert "vision" in profile.capabilities

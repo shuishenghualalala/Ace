@@ -102,6 +102,7 @@ describe('security approval always-confirm (U2)', () => {
     await vi.advanceTimersByTimeAsync(0);
     const mw = (window as unknown as { Crew: MockCrew }).Crew;
     expect(mw.securityDecide).toHaveBeenCalledWith(expect.objectContaining({ decision: 'always' }));
+    expect(mw.securityDecide.mock.calls[0]?.[0]).not.toHaveProperty('alwaysArgvPrefix');
     cleanup();
   });
 
@@ -196,6 +197,55 @@ describe('security approval always-confirm (U2)', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(mw.securityPending).toHaveBeenCalledOnce();
+    cleanup();
+  });
+
+  it('surfaces wiki-session approvals as a global overlay and decides on the wiki session', async () => {
+    // 回归：Wiki 会话在独立 tab 对话，activeSessionId 指向主聊天会话；只看活跃会话时
+    // wiki 回合的审批请求永远等不到用户，工具挂满 300s 按拒绝处理。
+    const { state } = await import('../../src/ui/state');
+    state.sessions.push({ id: 'wiki-1', workspaceId: 'wiki' } as never);
+    const mw = (window as unknown as { Crew: MockCrew }).Crew;
+    mw.securityPending.mockImplementation(({ sessionId }: { sessionId: string }) => {
+      if (sessionId !== 'wiki-1') return Promise.resolve({ ok: true, status: 200, body: { requests: [] } });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        body: {
+          requests: [{
+            request_id: 'rw',
+            task_id: 'tw',
+            workspace_id: 'wiki',
+            session_id: 'wiki-1',
+            action: { kind: 'file', path: '/tmp/w.pdf', operation: 'write' },
+          }],
+        },
+      });
+    });
+    const cleanup = bindSecurityApprovalUi();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // 轮询覆盖 wiki 会话，面板脱离主聊天 composer 浮动展示（否则随隐藏 tab 不可见）。
+    expect(mw.securityPending).toHaveBeenCalledWith({ workspaceId: 'wiki', sessionId: 'wiki-1' });
+    const panel = document.querySelector('#composer-approval-panel') as HTMLElement;
+    expect(panel.getAttribute('aria-hidden')).toBe('false');
+    expect(panel.classList.contains('composer-approval-panel--global')).toBe(true);
+    expect(panel.parentElement).toBe(document.body);
+
+    // 决策回传 wiki 会话自己的 session/workspace，而不是主聊天活跃会话。
+    const onceBtn = document.querySelector('[data-security-decision="once"]') as HTMLButtonElement;
+    onceBtn.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mw.securityDecide).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'wiki',
+      sessionId: 'wiki-1',
+      requestId: 'rw',
+      decision: 'once',
+    }));
+    // 决策完成后面板归位、隐藏。
+    expect(panel.getAttribute('aria-hidden')).toBe('true');
+    expect(panel.classList.contains('composer-approval-panel--global')).toBe(false);
+    state.sessions.pop();
     cleanup();
   });
 });

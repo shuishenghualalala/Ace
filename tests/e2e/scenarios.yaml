@@ -1,0 +1,194 @@
+# Ace E2E 场景清单。
+#
+# 每个 case 由 tests/e2e/_run_case.py 在独立子进程和临时目录中执行，
+# 会保留 crew.log、llm.jsonl、transcript.jsonl 和工作区前后快照。
+#
+# 字段说明：
+# - mode: agent | team | dynamic_kanban | external（external 表示外援直接对话）
+# - workspace.instructions / workspace.files: 进入 agent 前的工作区初始状态
+# - session_config: 写入会话的 agent config（Wiki 预设、外援绑定等）
+# - expected_tools: 期望至少调用其中一个工具
+# - expected_files: 期望工作区最终出现/包含指定内容的文件
+# - expected_final_keywords: 期望最终回复包含的关键词
+# - timeout_seconds: 单个 case 的执行超时
+
+complex_tasks:
+  write_file:
+    title: 主 Agent 在工作区写入文件
+    mode: agent
+    workspace:
+      instructions: |
+        这是一个 E2E 玩具工作区。只能读取和修改当前工作区内的文件，不要运行 git 命令。
+      files:
+        "toy_project/cli.py": |
+          VERSION = "9.9.9"
+
+          def repl():
+              while True:
+                  cmd = input("> ").strip()
+                  if cmd == "/quit":
+                      break
+                  print(cmd)
+    prompt: |
+      请先读取 toy_project/cli.py，然后用 file_write 在当前工作区新建
+      toy_project/version.md，内容包含 VERSION 的值。最后回复文件路径和版本号。
+    expected_tools: [file_read, file_write]
+    expected_files:
+      - path: "toy_project/version.md"
+        contains: ["9.9.9"]
+    expected_final_keywords: ["version.md"]
+    timeout_seconds: 240
+
+  delegate_task_batch:
+    title: 主 Agent 批量委派两个子任务
+    mode: agent
+    workspace:
+      instructions: 只读 toy_project 下的两个文件，不要修改它们。
+      files:
+        "toy_project/a.txt": "AlphaDoc: 项目代号是桉树。\n"
+        "toy_project/b.txt": "BetaDoc: 默认端口是 8741。\n"
+    prompt: |
+      使用 delegate_task 一次性并行委派两个子任务：
+      1) 读取 toy_project/a.txt 并总结项目代号；
+      2) 读取 toy_project/b.txt 并总结默认端口。
+      两个任务都要做，最后汇总成一句话。
+    expected_tools: [delegate_task]
+    expected_final_keywords: ["桉树", "8741"]
+    timeout_seconds: 360
+
+  team_workflow:
+    title: Team 模式在工作区产出文件
+    mode: team
+    config:
+      team_config:
+        required_workflow: false
+    workspace:
+      instructions: |
+        这是一个 E2E 玩具工作区。team 成员只能在当前工作区内操作。
+      files:
+        "toy_project/input.txt": "输入值: 42\n"
+    prompt: |
+      请以团队模式完成一个简单任务：让团队成员读取 toy_project/input.txt，
+      并在 toy_project/result.txt 写入"结果: 42"。
+      优先使用 delegate_to_teammate 把任务派给 coder；如果 coder 不响应，
+      Leader 可以直接使用 file_read/file_write 完成。不要反复
+      team_read_messages/team_mention/sleep 等待，也不要请求添加节点。完成后汇总文件路径。
+    expected_tools: [delegate_to_teammate, file_write]
+    expected_files:
+      - path: "toy_project/result.txt"
+        contains: ["42"]
+    expected_final_keywords: ["result.txt"]
+    timeout_seconds: 180
+
+  dynamic_kanban:
+    title: Dynamic Kanban 执行三步工作流
+    mode: dynamic_kanban
+    workspace:
+      instructions: 这是 E2E 玩具工作区，只允许在当前工作区内操作。
+      files:
+        "toy_project/input.txt": "数字: 7\n"
+    prompt: |
+      在当前工作区创建一个三步工作流：先创建 toy_project 目录，
+      在 toy_project/kanban.txt 中写入数字 7，最后检查文件存在。
+    expected_files:
+      - path: "kanban.txt"
+        contains: ["7"]
+        search: true
+    timeout_seconds: 600
+
+wiki:
+  wiki_retrieve:
+    title: Wiki Agent 从知识库检索并回答
+    mode: agent
+    workspace_id: wiki
+    session_config:
+      preset_agent_type: Wiki
+      wiki_agent_session: true
+      wiki_kb_id: e2e
+    setup: wiki_seed
+    wiki_seed:
+      kb_id: e2e
+      pages:
+        - title: Ace E2E 测试规范
+          page_type: topic
+          content: |
+            唯一标识：桉树协议-8741。
+            所有 E2E 用例必须使用隔离的临时工作区，并且保留 transcript 日志。
+    prompt: |
+      请先使用 wiki_search 检索知识库，再回答：Ace E2E 测试的"唯一标识"是什么？
+      回答里必须包含这个唯一标识。
+    expected_tools: [wiki_search, wiki_read]
+    expected_final_keywords: ["桉树协议-8741"]
+    timeout_seconds: 300
+
+  wiki_ingest:
+    title: Wiki Agent 把附件整理进知识库
+    mode: agent
+    workspace_id: wiki
+    session_config:
+      preset_agent_type: Wiki
+      wiki_agent_session: true
+      wiki_kb_id: e2e
+    attachments:
+      - name: E2E 笔记.md
+        content: |
+          # E2E 笔记
+          唯一标识：桉树协议-2026。
+          这条内容需要通过 Wiki 入库流程整理成页面。
+    prompt: |
+      请把附件《E2E 笔记.md》收录进当前知识库并完成整理，流程包括
+      capture、parse、plan 和 apply。最后告诉我生成了什么页面。
+    expected_tools: [wiki_capture_attachment, wiki_plan_ingest, wiki_apply_ingest]
+    expect_wiki_sources: true
+    expect_wiki_pages: true
+    expected_final_keywords: ["页面"]
+    timeout_seconds: 420
+
+external:
+  external_codex:
+    title: Codex 外援在工作区写入文件
+    mode: external
+    runtime_provider: codex
+    workspace:
+      instructions: 这是 E2E 玩具工作区，请只操作当前工作区内的文件。
+      files:
+        "toy_project/input.txt": "1\n"
+    prompt: |
+      请读取 toy_project/input.txt，然后在 toy_project/codex_output.txt 写入数字加 1 的结果。
+    expected_files:
+      - path: "toy_project/codex_output.txt"
+        contains: ["2"]
+    expected_final_keywords: ["codex_output.txt"]
+    timeout_seconds: 360
+
+  external_claude:
+    title: Claude Code 外援写入文件
+    mode: external
+    runtime_provider: claude-code
+    workspace:
+      instructions: 这是 E2E 玩具工作区，请只操作当前工作区内的文件。
+      files:
+        "toy_project/input.txt": "10\n"
+    prompt: |
+      请读取 toy_project/input.txt，然后在 toy_project/claude_output.txt 写入数字加 1 的结果。
+    expected_files:
+      - path: "toy_project/claude_output.txt"
+        contains: ["11"]
+    expected_final_keywords: ["claude_output.txt"]
+    timeout_seconds: 360
+
+  external_kimi:
+    title: Kimi 外援写入文件
+    mode: external
+    runtime_provider: kimi
+    workspace:
+      instructions: 这是 E2E 玩具工作区，请只操作当前工作区内的文件。
+      files:
+        "toy_project/input.txt": "100\n"
+    prompt: |
+      请读取 toy_project/input.txt，然后在 toy_project/kimi_output.txt 写入数字加 1 的结果。
+    expected_files:
+      - path: "toy_project/kimi_output.txt"
+        contains: ["101"]
+    expected_final_keywords: ["kimi_output.txt"]
+    timeout_seconds: 360

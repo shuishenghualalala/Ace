@@ -28,6 +28,9 @@ class ElectronBrowserDriver(BrowserDriver):
     def __init__(self, config: BrowserConfig) -> None:
         self.config = config
 
+    def requires_policy_proxy(self) -> bool:
+        return True
+
     @staticmethod
     def _raise(exc: ElectronBridgeError) -> None:
         code = str(getattr(exc, "code", "") or "")
@@ -201,7 +204,12 @@ class ElectronBrowserDriver(BrowserDriver):
         if (
             not isinstance(transaction, dict)
             or any(
-                key in {"profile_dir", "proxy_url", "download_dir"}
+                key in {
+                    "profile_dir",
+                    "proxy_url",
+                    "download_dir",
+                    "max_transfer_bytes",
+                }
                 for key in transaction
             )
         ):
@@ -224,6 +232,7 @@ class ElectronBrowserDriver(BrowserDriver):
                 "download_dir": (
                     str(download_dir.resolve()) if download_dir else ""
                 ),
+                "max_transfer_bytes": int(self.config.max_transfer_bytes),
             },
             timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
             mutating=True,
@@ -273,6 +282,7 @@ class ElectronBrowserDriver(BrowserDriver):
                 "command_deadline_ms": deadline_ms,
                 "proxy_url": proxy_url,
                 "download_dir": str(download_dir.resolve()) if download_dir else "",
+                "max_transfer_bytes": int(self.config.max_transfer_bytes),
                 "mutating": effective_mutating,
             },
             timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
@@ -312,6 +322,7 @@ class ElectronBrowserDriver(BrowserDriver):
                 "command_deadline_ms",
                 "proxy_url",
                 "download_dir",
+                "max_transfer_bytes",
                 "mutating",
             }
             for key in structured
@@ -344,6 +355,7 @@ class ElectronBrowserDriver(BrowserDriver):
                 **structured,
                 "proxy_url": proxy_url,
                 "download_dir": str(download_dir.resolve()) if download_dir else "",
+                "max_transfer_bytes": int(self.config.max_transfer_bytes),
                 "mutating": True,
             },
             timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
@@ -388,6 +400,7 @@ class ElectronBrowserDriver(BrowserDriver):
                 ),
                 "proxy_url": proxy_url,
                 "download_dir": str(download_dir.resolve()) if download_dir else "",
+                "max_transfer_bytes": int(self.config.max_transfer_bytes),
                 "mutating": True,
             },
             timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,
@@ -431,6 +444,7 @@ class ElectronBrowserDriver(BrowserDriver):
                 ),
                 "proxy_url": proxy_url,
                 "download_dir": str(download_dir.resolve()) if download_dir else "",
+                "max_transfer_bytes": int(self.config.max_transfer_bytes),
                 "mutating": True,
             },
             timeout=operation_timeout + _HOST_RESPONSE_GRACE_SECONDS,

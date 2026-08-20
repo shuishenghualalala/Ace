@@ -35,6 +35,7 @@ class ReferenceType(str, Enum):
     PERSONAL_KNOWLEDGE = "personal_knowledge"
     ORGANIZATION_KNOWLEDGE = "organization_knowledge"
     SOURCE_RECORD = "source_record"
+    BROWSER_TAB = "browser_tab"
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +240,7 @@ class WorkReferenceStore:
         source_id: str,
         target_item_id: str | None = None,
         source_link: str = "",
+        snapshot_summary: str = "",
     ) -> WorkReference:
         """Create a non-Agent context pointer without reading its target."""
         ref_type = _reference_type(reference_type)
@@ -251,6 +253,7 @@ class WorkReferenceStore:
             source_id=source_id,
             target_item_id=target_item_id,
             source_link=source_link,
+            snapshot_summary=snapshot_summary,
         )
 
     def _insert_reference(

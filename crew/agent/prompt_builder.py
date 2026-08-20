@@ -50,6 +50,7 @@ DEFAULT_TOOL_GUIDELINE = (
     "  - 读取文件：用 file_read（不要用 cat/head/tail）\n"
     "  - 编辑文件：用 patch（不要用 sed/awk）\n"
     "  - 写入文件：用 file_write（不要用 echo > 或 cat <<EOF）\n"
+    "  - 删除单个文件：用 file_delete（不要用 rm/Remove-Item）；必须传实际目标路径\n"
     "  - 输出信息：直接输出文本（不要用 echo/printf）\n"
     "- 可以在同一条消息中并行调用多个无依赖关系的工具，提高效率。\n"
     "- 有依赖关系的工具调用必须按顺序执行。"
@@ -184,6 +185,24 @@ def build_prompt_parts(
 
     # ── User Reminder 层（每轮可能变） ──
     reminder_parts = []
+    if cwd:
+        trusted_cwd = str(Path(cwd).expanduser().resolve())
+        reminder_parts.append(
+            "# 当前工作空间（可信）\n"
+            f"- 当前工作目录：`{trusted_cwd}`\n"
+            "- terminal、文件和搜索工具都以这个目录为起点；直接使用相对路径，不要再次 cd 到该目录。\n"
+            "- 该目录由宿主运行时提供；不要用它推导、验证或重建当前工作空间路径。\n"
+            f"- 宿主用户目录：`{Path.home().expanduser().resolve(strict=False)}`。内置 terminal 的 "
+            "`$HOME`/`%USERPROFILE%` 指向此宿主目录，但受管模式仍由沙箱分别限制读写。\n"
+            "- 受管模式可广泛只读；工作区和临时目录可写。工作区外写入必须使用宿主绝对路径申请 "
+            "`with_additional_permissions`；它会在沙箱内生效，不需要 `require_escalated`。\n"
+            "- 删除单个文件优先使用 file_delete。terminal 删除命令必须使用宿主绝对路径；"
+            "不要把相对文件名与额外路径权限组合，也不要把文件工具称为绕过沙箱。\n"
+            "- 列目录、查找和读取文件时优先使用 glob、grep、file_read；这些工具与 terminal "
+            "服从同一文件策略。用户拒绝任一安全审批后，必须立即停止本轮操作，不得换用其他工具重试。\n"
+            "- runtime_crashed、runtime_protocol_mismatch 和 sandbox_unavailable 表示安全运行时故障，"
+            "不表示目标路径在沙箱外；不得据此改用其他文件工具。"
+        )
     # 子 agent（lightweight）：跳过全局 workspace/上下文文件/skills/记忆/用户画像注入，
     # 只保留日期，保持聚焦（用于 skip_memory / skip_context_files）。
     if not lightweight:

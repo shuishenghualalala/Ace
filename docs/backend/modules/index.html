@@ -38,7 +38,7 @@
       <tr><td>7</td><td><code>plugins</code><span class="muted">待补充 · crew/plugins/</span></td><td>Plugins 插件：LLM/工具调用生命周期钩子。</td></tr>
       <tr><td>8</td><td><code>app.py</code><span class="muted">待补充 · crew/app.py</span></td><td>App 装配：依赖注入、Agent 缓存、agent/team 路由。</td></tr>
       <tr><td>9</td><td><code>gateway</code><span class="muted">待补充 · crew/gateway/</span></td><td>Gateway 网关：Web/API/WS 入口（含 routers），统一进入 app.handle。Runtime 路由提供列表、扫描、管理员注册与管理员删除；扫描为固定内置探测命令建立显式 host ProcessLaunch。删除仍被 Agent 引用的 Runtime 返回 409；只有历史原生会话续接绑定时由存储层安全清理后完成删除。</td></tr>
-      <tr><td>10</td><td><code>cli</code><span class="muted">待补充 · crew/cli/</span></td><td>CLI 入口：本地 REPL、slash 命令、响应帧渲染。</td></tr>
+      <tr><td>10</td><td><a href="cli.html"><code>cli</code></a> <span class="ok">✅</span></td><td>CLI 入口：进程内命令树、非交互 run、管理子命令、JSON 输出与安全命令。</td></tr>
       <tr><td>11</td><td><a href="../../../doc/backend/heterogeneous-agent-team-architecture.html"><code>team</code></a> <span class="ok">✅</span></td><td>Team 多智能体：Formation 负责创建期长期组队，Runtime staffing 负责 WorkflowRun 期间的确认式临时补员；两者候选池和持久化边界分离，复用 Agent 内核。</td></tr>
       <tr><td>12</td><td><code>tasks</code><span class="muted">待补充 · crew/tasks/</span></td><td>Tasks 任务：委派任务的状态流转和任务看板。</td></tr>
       <tr><td>13</td><td><code>cron</code><span class="muted">待补充 · crew/cron/</span></td><td>Cron 计划任务：定时自动化入口。</td></tr>

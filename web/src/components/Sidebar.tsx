@@ -186,11 +186,11 @@ export default function Sidebar(props: Props) {
           return (
             <div className="ws" key={ws.id}>
               <div className="ws__head" onClick={() => onToggleExpand(ws.id)}>
-                <span className="ws__caret">{open ? (
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-                ) : (
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-                )}</span>
+                <span className="ws__caret">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <path d={open ? "m6 9 6 6 6-6" : "m9 18 6-6-6-6"} />
+                  </svg>
+                </span>
                 <span className="ws__name" title={ws.description || ws.name}>
                   {ws.name}
                 </span>

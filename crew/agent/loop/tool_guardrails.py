@@ -60,6 +60,7 @@ MUTATING_TOOL_NAMES = frozenset(
         # —— 内置写类工具 ——
         "terminal",
         "file_write",
+        "file_delete",
         # —— 可选写类工具别名 ——
         "execute_code",
         "write_file",

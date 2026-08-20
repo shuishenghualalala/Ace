@@ -8,8 +8,9 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import zipfile
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,14 @@ from crew.state.home import get_owner_runtime_home, safe_path_segment
 
 class SiteBuildError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SiteBuildPlan:
+    stored_argv: tuple[str, ...]
+    runtime_argv: tuple[str, ...]
+    trusted_readable_roots: tuple[Path, ...] = ()
+    runtime_path: str = ""
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -81,6 +90,87 @@ class SiteManager:
         return argv, output or "dist"
 
     @staticmethod
+    def _build_plan(argv: list[str]) -> SiteBuildPlan:
+        if not argv:
+            return SiteBuildPlan((), ())
+        manager = argv[0]
+        executable = shutil.which(manager)
+        if not executable:
+            raise SiteBuildError(f"找不到构建工具 {manager}")
+        resolved = Path(executable).resolve(strict=True)
+        stored = tuple(argv)
+        if manager == "bun" or resolved.suffix.lower() == ".exe":
+            return SiteBuildPlan(stored, (str(resolved), *argv[1:]))
+
+        if resolved.suffix.lower() in {".cmd", ".bat", ".ps1"}:
+            candidates = {
+                "npm": ("node_modules/npm/bin/npm-cli.js",),
+                "pnpm": (
+                    "node_modules/pnpm/bin/pnpm.cjs",
+                    "node_modules/pnpm/bin/pnpm.mjs",
+                    "node_modules/corepack/dist/pnpm.js",
+                ),
+                "yarn": (
+                    "node_modules/yarn/bin/yarn.js",
+                    "node_modules/corepack/dist/yarn.js",
+                ),
+            }[manager]
+            script = next(
+                (resolved.parent / relative for relative in candidates if (resolved.parent / relative).is_file()),
+                None,
+            )
+            if script is None:
+                raise SiteBuildError(f"无法定位 {manager} 的 Node.js 入口")
+            resolved = script.resolve(strict=True)
+
+        try:
+            prefix = resolved.read_bytes()[:4]
+        except OSError as exc:
+            raise SiteBuildError(f"构建工具无法读取: {exc}") from exc
+        if prefix.startswith((b"\x7fELF", b"\xcf\xfa", b"\xca\xfe", b"MZ")):
+            return SiteBuildPlan(stored, (str(resolved), *argv[1:]))
+
+        node = shutil.which("node")
+        if not node:
+            raise SiteBuildError(f"{manager} 需要 Node.js，但当前运行环境未找到 node")
+        node_path = Path(node).resolve(strict=True)
+        roots = [
+            *SiteManager._runtime_install_roots(node_path),
+            SiteManager._package_root(resolved, manager),
+        ]
+        return SiteBuildPlan(
+            stored,
+            (str(node_path), str(resolved), *argv[1:]),
+            tuple(dict.fromkeys(root for root in roots if root is not None)),
+            SiteManager._runtime_path(node_path),
+        )
+
+    @staticmethod
+    def _runtime_install_roots(executable: Path) -> tuple[Path, ...]:
+        for parent in executable.parents:
+            if parent.name == "Cellar":
+                opt = parent.parent / "opt"
+                return (parent, opt.resolve(strict=True)) if opt.is_dir() else (parent,)
+        root = executable.parent.parent if executable.parent.name == "bin" else executable.parent
+        return (root,)
+
+    @staticmethod
+    def _package_root(script: Path, _manager: str) -> Path:
+        for parent in script.parents:
+            if parent.parent.name == "node_modules":
+                return parent
+        return script.parent
+
+    @staticmethod
+    def _runtime_path(node: Path) -> str:
+        if os.name == "nt":
+            system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+            entries = (node.parent, system_root / "System32", system_root)
+        else:
+            entries = (node.parent, Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin"))
+        return os.pathsep.join(str(entry) for entry in dict.fromkeys(entries))
+
+    @staticmethod
     def _copy_release(source_dir: Path, release_dir: Path) -> dict[str, Any]:
         if not source_dir.is_dir() or not (source_dir / "index.html").is_file():
             raise SiteBuildError("构建输出目录缺少 index.html")
@@ -127,26 +217,52 @@ class SiteManager:
             files.append({"path": path.relative_to(release_dir).as_posix(), "sha256": digest, "size": path.stat().st_size})
         return {"entry": "index.html", "files": files, "portable": True}
 
-    def publish(
+    async def publish(
         self, *, owner: str, workspace_id: str, session_id: str, workspace_root: str,
         source_path: str, name: str, build_command: str = "", output_directory: str = "",
         site_id: str = "", description: str = "",
+        build_authorizer: Callable[[tuple[str, ...], Path, str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         source = self._resolve_source(source_path, workspace_root)
         argv, output = self._defaults(source, build_command, output_directory)
+        plan = self._build_plan(argv)
+        if plan.runtime_argv and build_authorizer is not None:
+            await build_authorizer(plan.runtime_argv, source, " ".join(plan.stored_argv))
         is_new = not site_id.strip()
         site = self.store.upsert_site(
             owner=owner, workspace_id=workspace_id, session_id=session_id,
             name=name.strip() or source.name, description=description.strip(), source_path=str(source),
-            build_command=" ".join(argv), output_directory=output, site_id=site_id,
+            build_command=" ".join(plan.stored_argv), output_directory=output, site_id=site_id,
         )
         release = self.store.create_release(owner, site["id"])
         try:
-            if argv:
-                result = subprocess.run(
-                    argv, cwd=source, capture_output=True, text=True, timeout=180,
-                    env={**os.environ, "CI": "1"}, check=False,
+            if plan.runtime_argv:
+                from crew.security.launch import (
+                    current_process_launch,
+                    execute_captured,
+                    use_process_launch,
                 )
+
+                launch = current_process_launch.get()
+                scoped_launch = launch
+                if launch is not None and launch.managed and plan.trusted_readable_roots:
+                    scoped_launch = replace(
+                        launch,
+                        trusted_readable_roots=tuple(dict.fromkeys(
+                            (*launch.trusted_readable_roots, *plan.trusted_readable_roots)
+                        )),
+                    )
+                with use_process_launch(scoped_launch):
+                    env_overrides = {"CI": "1", "OPENSSL_CONF": os.devnull}
+                    if plan.runtime_path:
+                        env_overrides["PATH"] = plan.runtime_path
+                    result = await execute_captured(
+                        plan.runtime_argv,
+                        cwd=source,
+                        timeout=180,
+                        env_overrides=env_overrides,
+                        tool_name="publish_site",
+                    )
                 if result.returncode != 0:
                     detail = (result.stderr or result.stdout or "构建失败")[-6000:]
                     raise SiteBuildError(detail)

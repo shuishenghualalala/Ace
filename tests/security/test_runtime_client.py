@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from crew.security.runtime_client import (
     RuntimeCapabilities,
     RuntimeErrorCode,
     ShellVerdict,
+    is_likely_sandbox_denied,
 )
 from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
 from crew.security.models import (
@@ -30,8 +32,8 @@ from crew.security.models import (
 _FAKE_HELPER = r'''
 import base64, json, os, sys, time
 mode = sys.argv[1]
-version = 999 if mode == "bad-ready" else 2
-ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output"]}
+version = 999 if mode == "bad-ready" else 3
+ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output", "readonly_roots", "full_disk_read"]}
 if mode == "missing-ready-capability":
     ready["capabilities"] = ["stdin_once"]
 print(json.dumps(ready), flush=True)
@@ -54,7 +56,7 @@ if request["request"].get("op") == "classify_shell":
         "reason": "test",
     }
     print(json.dumps({
-        "version": 2, "nonce": request["nonce"], "seq": 0,
+        "version": 3, "nonce": request["nonce"], "seq": 0,
         "type": "classified", "classification": classification,
     }), flush=True)
     raise SystemExit
@@ -66,6 +68,8 @@ if mode == "assert-request":
         raise SystemExit(5)
     if payload["env_overrides"] != {"CODEX_API_KEY": "secret"}:
         raise SystemExit(6)
+    if payload["readonly_roots"] != [os.path.join(payload["cwd"], ".agents")]:
+        raise SystemExit(9)
 if mode == "assert-home-files":
     if payload["home_files"] != {".agent/auth": base64.b64encode(b"token").decode()}:
         raise SystemExit(9)
@@ -82,6 +86,7 @@ capabilities = {
     "filesystem_sandbox": mode != "missing-capability",
     "process_tree_cleanup": True,
     "managed_network": mode in {"network-ok", "windows-network-ok"},
+    "full_disk_read": bool(payload.get("full_disk_read")),
     "local_binding_control": mode == "local-binding-ok",
     "explicit_handle_inheritance": mode in {"windows-ok", "windows-network-ok"},
     "windows_restricted_token": mode in {"windows-ok", "windows-network-ok"},
@@ -91,7 +96,7 @@ capabilities = {
 }
 frames = [
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 0,
         "type": "started",
@@ -99,21 +104,21 @@ frames = [
         "capabilities": capabilities,
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 1,
         "type": "stdout",
         "data_b64": base64.b64encode(b"sandboxed").decode(),
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 2,
         "type": "stderr",
         "data_b64": base64.b64encode(b"notice").decode(),
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 3,
         "type": "completed",
@@ -138,7 +143,7 @@ elif mode == "premature-eof":
     frames = frames[:1]
 elif mode == "extra-after-terminal":
     frames.append({
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 4,
         "type": "completed",
@@ -146,7 +151,7 @@ elif mode == "extra-after-terminal":
     })
 elif mode == "error-before-start":
     frames = [{
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 0,
         "type": "error",
@@ -155,7 +160,7 @@ elif mode == "error-before-start":
     }]
 elif mode == "repeated-output":
     frames.insert(2, {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 2,
         "type": "stdout",
@@ -170,17 +175,45 @@ for frame in frames:
 '''
 
 
+@pytest.mark.parametrize(
+    ("exit_code", "output", "backend", "expected"),
+    [
+        (1, "Permission denied", "macos_seatbelt", True),
+        (101, "Read-only file system", "linux_bwrap", True),
+        (159, "", "linux_bwrap", True),
+        (127, "command not found", "linux_bwrap", False),
+        (1, "Permission denied", "host_unconfined", False),
+        (0, "Permission denied", "windows_sandbox_account", False),
+    ],
+)
+def test_sandbox_denial_detection_is_conservative(
+    exit_code: int,
+    output: str,
+    backend: str,
+    expected: bool,
+) -> None:
+    assert (
+        is_likely_sandbox_denied(
+            exit_code,
+            "",
+            output,
+            backend=backend,
+        )
+        is expected
+    )
+
+
 _INTERACTIVE_HELPER = r'''
 import base64, json, sys
 
 print(json.dumps({
     "type": "ready",
-    "version": 2,
-    "capabilities": ["stdin_once", "stream_output", "stdin_bidirectional"],
+    "version": 3,
+    "capabilities": ["stdin_once", "stream_output", "stdin_bidirectional", "readonly_roots", "full_disk_read"],
 }), flush=True)
 open_request = json.loads(sys.stdin.readline())
 print(json.dumps({
-    "version": 2,
+    "version": 3,
     "nonce": open_request["nonce"],
     "seq": 0,
     "type": "started",
@@ -190,6 +223,7 @@ print(json.dumps({
         "filesystem_sandbox": True,
         "process_tree_cleanup": True,
         "managed_network": False,
+        "full_disk_read": bool(open_request["request"].get("full_disk_read")),
     },
 }), flush=True)
 seq = 1
@@ -198,7 +232,7 @@ for line in sys.stdin:
     if request["op"] == "interactive_write":
         data = base64.b64decode(request["data_b64"])
         print(json.dumps({
-            "version": 2,
+            "version": 3,
             "nonce": open_request["nonce"],
             "seq": seq,
             "type": "stdout",
@@ -207,7 +241,7 @@ for line in sys.stdin:
         seq += 1
     elif request["op"] == "interactive_close":
         print(json.dumps({
-            "version": 2,
+            "version": 3,
             "nonce": open_request["nonce"],
             "seq": seq,
             "type": "completed",
@@ -420,6 +454,7 @@ async def test_request_carries_binary_stdin_and_environment_overrides(tmp_path):
     result = await _helper(tmp_path, "assert-request").execute(
         command=("ignored",),
         cwd=tmp_path,
+        readonly_roots=(tmp_path / ".agents",),
         stdin=b"\x00prompt\xff",
         env_overrides={"CODEX_API_KEY": "secret"},
         timeout=1,
@@ -512,6 +547,18 @@ async def test_invalid_stdin_or_environment_is_rejected_before_spawn(
             cwd=tmp_path,
             stdin=stdin,
             env_overrides=env_overrides,
+            timeout=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_host_trusted_path_has_a_separate_validated_channel(tmp_path, monkeypatch):
+    client = NativeRuntimeClient((str(tmp_path / "must-not-spawn"),))
+    with pytest.raises(ValueError, match="absolute directories"):
+        await client.execute(
+            command=("ignored",),
+            cwd=tmp_path,
+            trusted_path=f"relative{os.pathsep}{tmp_path}",
             timeout=1,
         )
 
@@ -623,6 +670,8 @@ async def test_broker_preserves_read_write_deny_and_network_semantics(tmp_path):
         tmp_path / "read",
     ]
     assert runtime.kwargs["denied_roots"] == [tmp_path / "deny"]
+    assert runtime.kwargs["readonly_roots"] == []
+    assert runtime.kwargs["full_disk_read"] is False
     assert runtime.kwargs["network_enabled"] is False
 
 
@@ -722,6 +771,36 @@ async def test_broker_does_not_forward_runtime_owned_protected_read_roots(tmp_pa
         kind=PermissionProfileKind.MANAGED,
         filesystem=(
             FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),
+            FilesystemEntry(tmp_path / ".agents", FilesystemAccess.READ, escalatable=False),
+        ),
+    )
+    await broker.execute(
+        ExecutionRequest(
+            command=("test",),
+            cwd=tmp_path,
+            permission_profile=profile,
+            trusted_readable_roots=(tmp_path / "runtime-skills",),
+        )
+    )
+    assert runtime.kwargs["writable_roots"] == [tmp_path]
+    assert runtime.kwargs["readable_roots"] == []
+
+
+@pytest.mark.asyncio
+async def test_broker_forwards_immutable_read_roots_to_the_native_runtime(tmp_path):
+    """Missing metadata guards use the native read-only carve-out contract."""
+
+    class RecordingRuntime:
+        async def execute(self, **kwargs):
+            self.kwargs = kwargs
+            return "result"
+
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(
+            FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),
             FilesystemEntry(
                 tmp_path / ".agents",
                 FilesystemAccess.READ,
@@ -741,6 +820,37 @@ async def test_broker_does_not_forward_runtime_owned_protected_read_roots(tmp_pa
 
     assert runtime.kwargs["writable_roots"] == [tmp_path]
     assert runtime.kwargs["readable_roots"] == []
+    assert runtime.kwargs["readonly_roots"] == [tmp_path / ".agents"]
+
+
+@pytest.mark.asyncio
+async def test_broker_carves_workspace_from_protected_runtime_home(tmp_path):
+    class RecordingRuntime:
+        async def execute(self, **kwargs):
+            self.kwargs = kwargs
+            return "result"
+
+    runtime_home = tmp_path / "runtime-home"
+    workspace = runtime_home / "accounts" / "owner" / "task_workspaces" / "default"
+    workspace.mkdir(parents=True)
+    database = runtime_home / "crew.db"
+    database.write_text("protected", encoding="utf-8")
+    runtime = RecordingRuntime()
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(
+            FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),
+            FilesystemEntry(runtime_home, FilesystemAccess.DENY, escalatable=False),
+            FilesystemEntry(database, FilesystemAccess.DENY, escalatable=False),
+        ),
+    )
+
+    await SecurityExecutionBroker(runtime).execute(  # type: ignore[arg-type]
+        ExecutionRequest(command=("test",), cwd=workspace, permission_profile=profile)
+    )
+
+    assert runtime.kwargs["writable_roots"] == [workspace]
+    assert runtime.kwargs["denied_roots"] == [database]
 
 
 @pytest.mark.asyncio

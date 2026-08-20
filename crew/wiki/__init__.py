@@ -32,7 +32,7 @@ from .schemas import (
 )
 from .parser import guess_mime_type, parse_document_from_bytes, parse_document_to_markdown
 from .query import WikiQuerier
-from .schemas import HomeIntro, KBSummary
+from .schemas import HomeIntro
 from .search import SQLiteFTS5SearchIndex, WikiSearchIndex
 from .store import FileSystemWikiStore, WikiStore
 from .summary import WikiSummarizer
@@ -44,7 +44,6 @@ __all__ = [
     "WikiCompiler",
     "WikiQuerier",
     "WikiSummarizer",
-    "KBSummary",
     "HomeIntro",
     "KnowledgeBase",
     "WikiSessionManager",

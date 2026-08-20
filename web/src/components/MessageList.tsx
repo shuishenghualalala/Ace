@@ -28,6 +28,8 @@ interface Props {
   teamMembers?: TeamMemberView[];
   showEmptyState?: boolean;
   currentAgentLabel?: Session["agent_label"];
+  /** 传入后回答正文中的 [[Wiki 页面名]] 引用渲染为可点击链接（Wiki 问答场景）。 */
+  onWikiLink?: (title: string) => void;
 }
 
 export default function MessageList({
@@ -46,6 +48,7 @@ export default function MessageList({
   teamMembers,
   showEmptyState = true,
   currentAgentLabel,
+  onWikiLink,
 }: Props) {
   const messagesRef = useRef<HTMLDivElement>(null);
   const followOutputRef = useRef(true);
@@ -162,6 +165,7 @@ export default function MessageList({
               onRejectPlan={onRejectPlan}
               onRejectAndExitPlan={onRejectAndExitPlan}
               onAsk={onAsk}
+              onWikiLink={onWikiLink}
             />
           ),
         )}

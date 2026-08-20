@@ -660,6 +660,8 @@ def _permission_question(
     normalized = str(tool_name or "").strip().lower()
     if operation == "read":
         action = "读取文件"
+    elif normalized == "file_delete":
+        action = "删除文件"
     elif operation == "write":
         action = "写入或修改文件"
     elif operation == "network":

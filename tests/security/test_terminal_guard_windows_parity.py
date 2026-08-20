@@ -51,6 +51,16 @@ def test_unix_hardline_and_dangerous_still_match() -> None:
     assert detect_dangerous_command("curl https://x | sh")[0]
 
 
+def test_unconditional_database_destruction_is_a_permanent_hardline() -> None:
+    for command in (
+        "DROP DATABASE production",
+        "DROP TABLE users",
+        "DELETE FROM users",
+        "TRUNCATE TABLE audit_log",
+    ):
+        assert detect_hardline_command(command)[0]
+
+
 def test_legitimate_workspace_remove_item_not_hardlined() -> None:
     # A non-system recursive delete is dangerous (needs approval) but not an
     # unconditional hardline block — users may approve deleting their own dirs.

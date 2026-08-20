@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 from uuid import uuid4
 
 from crew.state.logging import get_logger
 from crew.state.home import get_owner_runtime_home, task_workspace_path
+from crew.browser.driver import BrowserDriverError
 
 log = get_logger("context")
 
@@ -22,6 +24,13 @@ _ATTACHMENT_MARKER_RE = re.compile(r"^附件「([^」]+)」位于[：:]\s*(.+)$"
 _STRUCTURED_PATH_REFERENCE_RE = re.compile(
     r"(?:^|\s)@(?P<kind>file|folder|image):(?P<path>[^\s@]+)"
 )
+# 桌面端 Composer 的 @浏览器标签页 token：id 为字母数字/中划线/下划线。
+_BROWSER_TAB_REFERENCE_RE = re.compile(
+    r"(?:^|\s)@browser_tab:(?P<tab_id>[A-Za-z0-9_-]+)"
+)
+# 单个标签页注入上限：正文在 read_tab_content 内已截到 8000，注入上下文再收紧，
+# 防止一个长页面挤占整轮对话。
+_BROWSER_TAB_TEXT_LIMIT = 4000
 
 
 def _get_upload_dir(owner_account_id: str | None = None) -> Path:
@@ -129,6 +138,127 @@ def resolve_structured_path_references(
         seen.add(key)
         refs.append({"path": key, "resource_type": resource_type})
     return refs
+
+
+async def resolve_browser_tab_references(
+    query: str,
+    *,
+    manager: Any,
+    owner_account_id: str,
+    session_id: str,
+) -> list[dict[str, str]]:
+    """解析消息里的 ``@browser_tab:<id>`` 引用，发送时取回标签页正文。
+
+    与 @file: 的授权语义不同：浏览器标签页没有可授予的文件路径，只能在发送时
+    把正文快照并入上下文（消费方为 runtime 的 browser_tab_references 块）。
+    标签页已关闭/无浏览器会话/人工接管中等情况返回带原因的占位条目，
+    **不阻断发送**。
+    """
+    tab_ids: list[str] = []
+    for match in _BROWSER_TAB_REFERENCE_RE.finditer(str(query or "")):
+        tab_id = match.group("tab_id")
+        if tab_id not in tab_ids:
+            tab_ids.append(tab_id)
+    if not tab_ids:
+        return []
+    if manager is None:
+        return [{"tab_id": tab_id, "error": "Browser Use 未启用"} for tab_id in tab_ids]
+    refs: list[dict[str, str]] = []
+    for tab_id in tab_ids:
+        try:
+            content = await manager.read_tab_content(
+                owner_account_id,
+                session_id,
+                tab_id,
+                max_chars=_BROWSER_TAB_TEXT_LIMIT,
+            )
+        except BrowserDriverError as exc:
+            refs.append({"tab_id": tab_id, "error": str(exc)[:200]})
+            continue
+        except Exception as exc:  # noqa: BLE001 - 单条引用失败不阻断发送
+            log.warning("读取浏览器标签页引用失败 tab=%s: %s", tab_id, exc)
+            refs.append({"tab_id": tab_id, "error": f"读取失败: {exc}"[:200]})
+            continue
+        refs.append({"tab_id": tab_id, **content})
+    return refs
+
+
+# ---------------------------------------------------------------------------
+# @引用 注入注册表
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class ReferenceResolveContext:
+    """发送时 @引用 解析的统一输入（由 app 从 Envelope 与应用单例提取）。"""
+
+    query: str
+    owner_account_id: str
+    session_id: str
+    # 工作区 enrichment 算出的根；None/空表示 enrichment 失败，跳过路径引用解析
+    workspace_root: str
+    browser_manager: Any  # None 表示 Browser Use 未启用
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceInjector:
+    """一种 @引用 的发送时注入描述。
+
+    - ``token_re``：识别 query 中该类型 token 的正则（兼作解析前的快速判存）；
+    - ``resolver``：把 query 解析为引用条目列表，失败须自行降级、不阻断发送；
+    - ``formatter``：把引用条目格式化为注入模型上下文的 reminder 块；
+      ``None`` 表示该类型不产出文本块（如 @file 路径引用，消费方是读取授权）。
+    """
+
+    name: str
+    params_key: str
+    token_re: re.Pattern[str]
+    resolver: Callable[[ReferenceResolveContext], Awaitable[list[dict[str, str]]]]
+    formatter: Callable[[object], str] | None
+
+
+async def _resolve_structured_path_entry(ctx: ReferenceResolveContext) -> list[dict[str, str]]:
+    """@file:/@folder:/@image: 路径引用：在绑定工作区内解析为授权路径。"""
+    if not ctx.workspace_root:
+        return []
+    return resolve_structured_path_references(ctx.query, workspace_root=ctx.workspace_root)
+
+
+async def _resolve_browser_tab_entry(ctx: ReferenceResolveContext) -> list[dict[str, str]]:
+    """@browser_tab:<id> 引用：发送时取回标签页正文快照（含失败占位）。"""
+    return await resolve_browser_tab_references(
+        ctx.query,
+        manager=ctx.browser_manager,
+        owner_account_id=ctx.owner_account_id,
+        session_id=ctx.session_id,
+    )
+
+
+def _format_browser_tab_entry(refs: object) -> str:
+    """委托 runtime 的现有格式化器（延迟 import：runtime 依赖本模块注册表，避免循环）。"""
+    from crew.agent.runtime import _format_browser_tab_references
+
+    return _format_browser_tab_references(refs)
+
+
+# 发送时 @引用 注册表：app.handle 按序解析注入 envelope.params，runtime 按序拼接
+# reminder 块。新增一种 @引用 类型时在此登记一项即可。
+REFERENCE_INJECTORS: tuple[ReferenceInjector, ...] = (
+    ReferenceInjector(
+        name="structured_path",
+        params_key="referenced_paths",
+        token_re=_STRUCTURED_PATH_REFERENCE_RE,
+        resolver=_resolve_structured_path_entry,
+        # 路径引用不产生 reminder 文本：消费方为 external executor / team 的读取授权
+        formatter=None,
+    ),
+    ReferenceInjector(
+        name="browser_tab",
+        params_key="browser_tab_references",
+        token_re=_BROWSER_TAB_REFERENCE_RE,
+        resolver=_resolve_browser_tab_entry,
+        formatter=_format_browser_tab_entry,
+    ),
+)
 
 
 def _safe_unlink_under_uploads(path: Path, uploads_root: Path) -> bool:

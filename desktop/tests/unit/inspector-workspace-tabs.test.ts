@@ -110,7 +110,6 @@ describe('Inspector browser-style workspace tabs', () => {
       .toEqual(['上下文']);
     expect(document.querySelectorAll('[data-workspace-tab-close]').length).toBe(1);
     expect((document.getElementById('inspector-tab-picker-toggle') as HTMLButtonElement).hidden).toBe(true);
-    expect(document.getElementById('inspector-tab-picker-toggle')?.classList.contains('is-hidden')).toBe(true);
 
     expect(document.getElementById('chat-inspector-sidebar')).toBeNull();
     const tabStrip = document.getElementById('chat-inspector-tabs') as HTMLElement;
@@ -118,7 +117,6 @@ describe('Inspector browser-style workspace tabs', () => {
     Object.defineProperty(tabStrip, 'scrollWidth', { value: 480, configurable: true });
     window.dispatchEvent(new Event('resize'));
     expect((document.getElementById('inspector-tab-picker-toggle') as HTMLButtonElement).hidden).toBe(false);
-    expect(document.getElementById('inspector-tab-picker-toggle')?.classList.contains('is-hidden')).toBe(false);
 
     document.getElementById('inspector-new-browser-tab')?.click();
     expect(document.getElementById('inspector-tab-menu')?.hidden).toBe(false);
@@ -131,10 +129,10 @@ describe('Inspector browser-style workspace tabs', () => {
       .toEqual(expect.arrayContaining(['上下文', '文件']));
 
     (document.querySelector('[data-file-toggle]') as HTMLButtonElement).click();
-    expect(document.querySelector('[data-workspace-tab^="file:"]')?.textContent).toContain('result.html');
-    expect(document.querySelector('.inspector-file-tab-view')).toBeTruthy();
-    expect(document.querySelector('.inspector-file-tab-view .inspector-file')).toBeNull();
-    expect(document.querySelector('.inspector-file-tab-view [data-file-toggle]')).toBeNull();
+    const fileCard = document.querySelector<HTMLElement>('.inspector-file[data-file-path="/tmp/demo/result.html"]');
+    expect(fileCard?.classList.contains('is-active')).toBe(true);
+    expect(fileCard?.querySelector('.inspector-file__diff')).toBeTruthy();
+    expect(document.querySelector('.inspector-file-tab-view')).toBeNull();
 
     document.getElementById('inspector-maximize')?.click();
     expect(document.body.classList.contains('inspector-workspace-maximized')).toBe(true);
@@ -143,8 +141,8 @@ describe('Inspector browser-style workspace tabs', () => {
     document.getElementById('inspector-new-browser-tab')?.click();
     expect(document.getElementById('inspector-tab-menu')?.hidden).toBe(false);
     (document.querySelector('[data-workspace-entry="browser:new"]') as HTMLButtonElement).click();
-    expect(document.getElementById('chat-inspector-tabs')?.textContent).toContain('新标签页');
     expect(document.querySelector('[data-browser-panel]')).toBeTruthy();
+    expect(document.querySelector('[data-browser-tab-strip]')?.textContent).toContain('新标签页');
     await vi.waitFor(() => {
       expect(backendApi.browserControl).toHaveBeenCalledWith('sess-workspace', 'new_tab', '');
     });
@@ -161,7 +159,7 @@ describe('Inspector browser-style workspace tabs', () => {
     expect(document.getElementById('inspector-tab-menu')?.textContent).toContain('已打开');
     expect(document.querySelector('[data-workspace-tab="core:context"]')).toBeTruthy();
     expect(document.querySelector('[data-workspace-tab="core:files"]')).toBeTruthy();
-    expect(document.querySelector('[data-workspace-tab^="file:"]')).toBeTruthy();
+    expect(document.querySelector('[data-workspace-tab^="file:"]')).toBeNull();
     expect(document.getElementById('inspector-tab-menu')?.textContent).not.toContain('任务');
 
     await vi.waitFor(() => {
@@ -174,11 +172,11 @@ describe('Inspector browser-style workspace tabs', () => {
     bindInspectorUi();
     enableInspectorSurfaceAutoWidth();
     expect(document.body.classList.contains('inspector-surface-auto-width')).toBe(true);
-    expect(document.documentElement.style.getPropertyValue('--inspector-width')).toBe('832px');
+    expect(document.documentElement.style.getPropertyValue('--mw-inspector-width')).toBe('832px');
 
     Object.defineProperty(window, 'innerWidth', { value: 1000, configurable: true });
     window.dispatchEvent(new Event('resize'));
-    expect(document.documentElement.style.getPropertyValue('--inspector-width')).toBe('560px');
+    expect(document.documentElement.style.getPropertyValue('--mw-inspector-width')).toBe('560px');
 
     const handle = document.getElementById('chat-inspector-resize-handle') as HTMLElement;
     handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));

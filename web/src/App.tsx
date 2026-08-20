@@ -12,7 +12,7 @@ import { teamMemberMentionId } from "./components/Composer";
 import { useSessions } from "./hooks/useSessions";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { externalAgentsAvailable } from "./lib/featureFlags";
 import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, UserAgentMention, Workspace } from "./types";
 
@@ -28,6 +28,8 @@ export function resolveWikiAgentSessionId(
 }
 
 const CONFIG_RETRY_INTERVAL_MS = 3000;
+const TASKS_POLL_INTERVAL_MS = 2000;
+const TASKS_POLL_MAX_INTERVAL_MS = 60_000;
 
 export function isExternalAgentSession(session: Session | undefined): boolean {
   const kind = session?.agent_binding?.kind;
@@ -176,15 +178,21 @@ export default function App() {
   const [wikiKbId, setWikiKbId] = useState("default");
   const [wikiAgentSession, setWikiAgentSession] = useState<WikiAgentSessionBinding | null>(null);
   const wikiAgentSessionId = resolveWikiAgentSessionId(wikiAgentSession, wikiKbId);
+  /** 主对话里点击 [[Wiki 页面名]] 时待打开的页面标题（跳转 Wiki 视图后由 WikiHub 消费）。 */
+  const [pendingWikiLinkTitle, setPendingWikiLinkTitle] = useState<string | null>(null);
 
   const { sessions, refresh: refreshSessions } = useSessions();
   const { workspaces, refresh: refreshWorkspaces } = useWorkspaces();
 
-  const refreshTasks = useCallback(async () => {
+  const refreshTasks = useCallback(async (): Promise<"ok" | "retry" | "stop"> => {
     try {
       setTasks(await api.tasks(currentSessionId));
-    } catch {
+      return "ok";
+    } catch (err) {
       setTasks([]);
+      // 会话不存在/不属于当前账户（404）：继续轮询无意义，停止直到切换会话
+      if (err instanceof ApiError && err.status === 404) return "stop";
+      return "retry";
     }
   }, [currentSessionId]);
 
@@ -196,6 +204,12 @@ export default function App() {
   const chat = useChat(currentSessionId, onAfterFinal);
   const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
   const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
+
+  // 主对话里点击 [[Wiki 页面名]]：跳到 Wiki 视图并打开对应页面（WikiHub 挂载后消费）。
+  const openWikiLinkFromChat = useCallback((title: string) => {
+    setPendingWikiLinkTitle(title);
+    setView("wiki");
+  }, []);
 
   // 进入 Wiki 视图或切换 KB 时，创建/复用该 KB 自己的 Wiki Agent 会话。
   useEffect(() => {
@@ -289,9 +303,21 @@ export default function App() {
 
   useEffect(() => {
     if (!boardOpen) return;
-    void refreshTasks();
-    const timer = window.setInterval(() => void refreshTasks(), 2000);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let timer: number | undefined;
+    let delay = TASKS_POLL_INTERVAL_MS;
+    const tick = async () => {
+      const result = await refreshTasks();
+      if (cancelled || result === "stop") return;
+      // 可恢复错误（网络/5xx）指数退避，成功即重置；切换会话时 effect 随 refreshTasks 重建，退避同步重置
+      delay = result === "ok" ? TASKS_POLL_INTERVAL_MS : Math.min(delay * 2, TASKS_POLL_MAX_INTERVAL_MS);
+      timer = window.setTimeout(() => void tick(), delay);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [boardOpen, refreshTasks]);
 
   useEffect(() => {
@@ -369,6 +395,9 @@ export default function App() {
   };
 
   const deleteSession = async (id: string) => {
+    const title = sessions.find((s) => s.session_id === id)?.title || "新会话";
+    // 与其他删除入口（Wiki 页面/外援/团队/Wiki 对话）一致用原生 confirm 二次确认
+    if (!window.confirm(`确定删除会话「${title}」吗？该操作不可撤销。`)) return;
     await api.deleteSession(id);
     chat.clearSession(id);
     await refreshSessions();
@@ -540,6 +569,8 @@ export default function App() {
   const wikiChatProps: ChatPanelProps = useMemo(() => ({
     ...chatProps,
     ...chat.forSession(wikiSid),
+    // wiki 会话上传的附件落入当前知识库（sessionId 为空时后端按 kbId 解析）
+    uploadContext: { sessionId: wikiSid, kbId: wikiKbId },
     onStop: () => chat.stop(wikiSid),
     onSteer: (text) => chat.steer(wikiSid, text),
     onRemoveFromQueue: (i) => chat.removeFromQueue(wikiSid, i),
@@ -552,7 +583,7 @@ export default function App() {
     onRejectAndExitPlan: () => chat.rejectAndExitPlan(wikiSid),
     onAnswerFollowup: (questionId, answers) => chat.answerFollowup(wikiSid, questionId, answers),
     onDismissFollowup: () => chat.dismissFollowup(wikiSid),
-  }), [chatProps, wikiSid, mode, currentWorkspaceId, chat]);
+  }), [chatProps, wikiSid, wikiKbId, mode, currentWorkspaceId, chat]);
 
   return (
     <div
@@ -673,6 +704,8 @@ export default function App() {
             onNewSession={newWikiSession}
             onSelectSession={selectWikiSession}
             onDeleteSession={deleteWikiSession}
+            pendingWikiLinkTitle={pendingWikiLinkTitle}
+            onPendingWikiLinkHandled={() => setPendingWikiLinkTitle(null)}
           />
         ) : (
           <>
@@ -701,6 +734,7 @@ export default function App() {
               attachments={attachments}
               onSend={handleSend}
               onAsk={(text) => handleSend(text, [])}
+              onWikiLink={openWikiLinkFromChat}
               onStop={() => chat.stop(currentSessionId)}
               onSteer={(text) => chat.steer(currentSessionId, text)}
               planActive={chat.planActive}

@@ -1077,9 +1077,6 @@ class WikiCompiler:
 
         await _notify_progress(progress, "done", {"source_id": source_id, "page_count": len(pages)})
 
-        # 页面变化后台刷新知识库摘要（内容 hash 未变时不触发 LLM）
-        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
-
         # 追加操作日志
         try:
             titles = [p.title for p in pages]
@@ -1176,7 +1173,7 @@ class WikiCompiler:
             )
         if progress is not None:
             try:
-                await progress("正在生成页面变更计划…")
+                await progress("正在盘算要改哪些页面…")
             except Exception:  # noqa: BLE001
                 pass
         analysis_stats = {
@@ -1401,9 +1398,6 @@ class WikiCompiler:
             self._update_index(owner_account_id, kb_id)
 
         await _notify_progress(progress, "done", {"source_id": source_id, "page_count": len(applied_pages)})
-
-        # 页面变化后台刷新知识库摘要（内容 hash 未变时不触发 LLM）
-        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
 
         # 追加操作日志
         try:
@@ -1767,11 +1761,10 @@ class WikiCompiler:
         owner_account_id: str = "",
         kb_id: str = "default",
     ) -> None:
-        """统一完成写入后的 index、log、全文索引与摘要状态维护。"""
+        """统一完成写入后的 index、log、全文索引与导读状态维护。"""
         self._update_index(owner_account_id, kb_id)
         self.store.append_log([message], owner_account_id=owner_account_id, kb_id=kb_id)
         self.store.update_home(owner_account_id=owner_account_id, kb_id=kb_id)
-        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
         self._schedule_home_intro_refresh(owner_account_id, kb_id)
 
     def _schedule_home_intro_refresh(
@@ -1807,43 +1800,6 @@ class WikiCompiler:
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "Home 导读后台刷新失败 %s:%s: %s",
-                owner_account_id,
-                kb_id,
-                exc,
-            )
-
-    def _schedule_kb_summary_refresh(
-        self,
-        owner_account_id: str,
-        kb_id: str,
-    ) -> None:
-        """后台 fire-and-forget 刷新知识库摘要；无事件循环的环境直接跳过。
-
-        摘要只在内容 hash 变化时重新生成（见 generate_kb_summary），
-        不阻塞当前写入流程。
-        """
-        if self.summarizer is None:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self._refresh_kb_summary(owner_account_id, kb_id))
-
-    async def _refresh_kb_summary(
-        self,
-        owner_account_id: str,
-        kb_id: str,
-    ) -> None:
-        try:
-            await self.summarizer.generate_kb_summary(
-                owner_account_id,
-                kb_id,
-                force=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "知识库摘要后台刷新失败 %s:%s: %s",
                 owner_account_id,
                 kb_id,
                 exc,
@@ -1988,7 +1944,6 @@ class WikiCompiler:
             next_cursor = None
         if apply and selected:
             self._update_index(owner_account_id, kb_id)
-            self._schedule_kb_summary_refresh(owner_account_id, kb_id)
             self.store.append_log(
                 [
                     "批量 ingest 完成："
@@ -2247,9 +2202,9 @@ class WikiCompiler:
                 pass
 
         if len(chunks) > 1:
-            await _emit(f"正在分析来源内容（共 {len(chunks)} 块）…")
+            await _emit(f"正在通读素材（共 {len(chunks)} 段）…")
         else:
-            await _emit("正在分析来源内容…")
+            await _emit("正在通读素材…")
 
         semaphore = asyncio.Semaphore(_ANALYZE_CHUNK_CONCURRENCY)
         cached_chunks = _load_analysis_cache(cache_path)
@@ -2300,7 +2255,7 @@ class WikiCompiler:
             except Exception as exc:  # noqa: BLE001
                 log.warning("Wiki 分块分析异常，跳过该块: %s", exc)
             if len(chunks) > 1:
-                await _emit(f"正在分析来源内容（{len(results_by_index)}/{len(chunks)} 块）…")
+                await _emit(f"正在通读素材（{len(results_by_index)}/{len(chunks)} 段）…")
 
         results = [
             results_by_index.get(

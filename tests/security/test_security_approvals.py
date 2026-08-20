@@ -1,10 +1,10 @@
-from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from crew.security.actions import normalize_exec_action
+from crew.security.actions import normalize_exec_action, normalize_file_action
 from crew.security.approvals import (
     ApprovalDecision,
     ApprovalError,
@@ -12,6 +12,12 @@ from crew.security.approvals import (
 )
 from crew.security.context import SecurityContext
 from crew.security.grants import GrantError, GrantRegistry
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    FilesystemAccess,
+    FilesystemEntry,
+    SandboxPermissions,
+)
 from crew.security.rules import RuleScope
 
 
@@ -86,6 +92,43 @@ def test_create_or_get_does_not_share_pending_authority_across_tasks(tmp_path: P
     )
 
     assert first.request_id != second.request_id
+
+
+def test_pending_and_grant_bind_exact_additional_permissions(tmp_path: Path) -> None:
+    clock = _Clock()
+    grants = GrantRegistry(clock=clock)
+    manager = ApprovalManager(grants, clock=clock)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["tool", "write"], tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    additional = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),)
+    )
+
+    plain, _ = manager.create_or_get(context, action, "terminal")
+    expanded, _ = manager.create_or_get(
+        context,
+        action,
+        "terminal",
+        additional_permissions=additional,
+    )
+    assert plain.request_id != expanded.request_id
+
+    outcome = manager.decide(
+        expanded.request_id,
+        expanded.nonce,
+        ApprovalDecision.SESSION,
+        context,
+    )
+    assert outcome.grant is not None
+    assert outcome.grant.additional_permissions == additional
+    assert grants.authorize_action(context, action) is None
+    assert grants.authorize_action(
+        context,
+        action,
+        additional_permissions=additional,
+    ) == outcome.grant
 
 
 def test_pending_requests_have_a_hard_per_session_limit(tmp_path: Path) -> None:
@@ -200,6 +243,72 @@ def test_session_grant_survives_pending_revocation_until_session_end(tmp_path: P
         grants.authorize(grant.grant_id, context, action)
 
 
+def test_session_filesystem_grant_covers_descendants_without_write_upgrade(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    grants = GrantRegistry(clock=clock)
+    manager = ApprovalManager(grants, clock=clock)
+    context = _context(tmp_path)
+    root = tmp_path / "approved"
+    root.mkdir()
+    action = normalize_file_action(root, "read")
+    permissions = AdditionalPermissionProfile(
+        filesystem=(FilesystemEntry(root, FilesystemAccess.READ),)
+    )
+    request = manager.create(
+        context,
+        action,
+        "file_read",
+        additional_permissions=permissions,
+    )
+    manager.decide(request.request_id, request.nonce, ApprovalDecision.SESSION, context)
+
+    assert grants.authorize_action(
+        context,
+        normalize_file_action(root / "nested.txt", "read"),
+        additional_permissions=AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(root / "nested.txt", FilesystemAccess.READ),)
+        ),
+    ) is not None
+    assert grants.authorize_action(
+        context,
+        normalize_file_action(root / "nested.txt", "write"),
+        additional_permissions=AdditionalPermissionProfile(
+            filesystem=(FilesystemEntry(root / "nested.txt", FilesystemAccess.READ_WRITE),)
+        ),
+    ) is None
+
+
+def test_session_escalated_grant_stays_bound_to_exact_command(tmp_path: Path) -> None:
+    clock = _Clock()
+    grants = GrantRegistry(clock=clock)
+    manager = ApprovalManager(grants, clock=clock)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["tool", "one"], tmp_path)
+    permissions = AdditionalPermissionProfile(
+        sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED
+    )
+    request = manager.create(
+        context,
+        action,
+        "terminal",
+        additional_permissions=permissions,
+    )
+    manager.decide(request.request_id, request.nonce, ApprovalDecision.SESSION, context)
+
+    assert grants.authorize_action(
+        context,
+        action,
+        additional_permissions=permissions,
+    ) is not None
+    assert grants.authorize_action(
+        context,
+        normalize_exec_action(["tool", "two"], tmp_path),
+        additional_permissions=permissions,
+    ) is None
+
+
 def test_pending_revocation_does_not_revoke_session_grant(tmp_path: Path) -> None:
     clock = _Clock()
     grants = GrantRegistry(clock=clock)
@@ -228,8 +337,22 @@ def test_always_returns_persistent_rule_but_immediate_grant_stays_exact(tmp_path
     clock = _Clock()
     manager = _manager(clock)
     context = _context(tmp_path)
-    action = normalize_exec_action(["git", "status", "--short"], tmp_path)
-    request = manager.create(context, action, "terminal")
+    action = normalize_exec_action(
+        ["bash", "-lc", "git status --short"],
+        tmp_path,
+        raw_command="git status --short",
+        shell_kind="bash",
+        parsed_commands=(("git", "status", "--short"),),
+    )
+    request = manager.create(
+        context,
+        action,
+        "terminal",
+        additional_permissions=AdditionalPermissionProfile(
+            sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+        ),
+        proposed_argv_prefix=["git", "status"],
+    )
 
     outcome = manager.decide(
         request.request_id,
@@ -242,7 +365,10 @@ def test_always_returns_persistent_rule_but_immediate_grant_stays_exact(tmp_path
     assert outcome.grant is not None
     assert outcome.persistent_rule is not None
     assert outcome.persistent_rule.scope is RuleScope.ALWAYS
+    assert outcome.persistent_rule.exact_digest == ""
     assert outcome.persistent_rule.argv_prefix == ("git", "status")
+    assert outcome.persistent_rule.allow_prefix_authority
+    assert outcome.persistent_rule.matches(action)
 
 
 def test_shell_digest_is_stable_across_classifier_evidence(tmp_path: Path) -> None:
@@ -262,7 +388,7 @@ def test_shell_digest_is_stable_across_classifier_evidence(tmp_path: Path) -> No
     assert base.digest == classified.digest
 
 
-def test_shell_always_uses_exact_action_not_wrapper_prefix(tmp_path: Path) -> None:
+def test_shell_wrapper_cannot_be_saved_as_prefix(tmp_path: Path) -> None:
     clock = _Clock()
     manager = _manager(clock)
     context = _context(tmp_path)
@@ -273,26 +399,17 @@ def test_shell_always_uses_exact_action_not_wrapper_prefix(tmp_path: Path) -> No
     )
     request = manager.create(context, action, "terminal")
 
-    outcome = manager.decide(
-        request.request_id,
-        request.nonce,
-        ApprovalDecision.ALWAYS,
-        context,
-        always_argv_prefix=["pwsh", "-NoProfile", "-Command"],
-    )
-
-    assert outcome.persistent_rule is not None
-    assert outcome.persistent_rule.exact_digest == action.digest
-    assert outcome.persistent_rule.argv_prefix == ()
-    changed = normalize_exec_action(
-        ["pwsh", "-NoProfile", "-Command", "Remove-Item -Recurse C:\\"],
-        tmp_path,
-        raw_command="Remove-Item -Recurse C:\\",
-    )
-    assert not outcome.persistent_rule.matches(changed)
+    with pytest.raises(ApprovalError, match="审批时展示"):
+        manager.decide(
+            request.request_id,
+            request.nonce,
+            ApprovalDecision.ALWAYS,
+            context,
+            always_argv_prefix=["pwsh", "-NoProfile", "-Command"],
+        )
 
 
-def test_invalid_always_prefix_does_not_consume_request(tmp_path: Path) -> None:
+def test_unshown_always_prefix_is_rejected(tmp_path: Path) -> None:
     clock = _Clock()
     manager = _manager(clock)
     context = _context(tmp_path)
@@ -302,7 +419,7 @@ def test_invalid_always_prefix_does_not_consume_request(tmp_path: Path) -> None:
         "terminal",
     )
 
-    with pytest.raises(ApprovalError, match="token prefix"):
+    with pytest.raises(ApprovalError, match="审批时展示"):
         manager.decide(
             request.request_id,
             request.nonce,
@@ -310,12 +427,33 @@ def test_invalid_always_prefix_does_not_consume_request(tmp_path: Path) -> None:
             context,
             always_argv_prefix=["git", "diff"],
         )
-    assert manager.decide(
-        request.request_id,
-        request.nonce,
-        ApprovalDecision.ONCE,
-        context,
-    ).grant is not None
+
+
+def test_non_terminal_tool_cannot_propose_exec_prefix(tmp_path: Path) -> None:
+    manager = _manager(_Clock())
+
+    with pytest.raises(ValueError, match="terminal"):
+        manager.create(
+            _context(tmp_path),
+            normalize_exec_action(["tool", "publish"], tmp_path),
+            "publish_site",
+            additional_permissions=AdditionalPermissionProfile(
+                sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+            ),
+            proposed_argv_prefix=["tool", "publish"],
+        )
+
+
+def test_terminal_prefix_requires_escalated_permissions(tmp_path: Path) -> None:
+    manager = _manager(_Clock())
+
+    with pytest.raises(ValueError, match="require_escalated"):
+        manager.create(
+            _context(tmp_path),
+            normalize_exec_action(["tool", "publish"], tmp_path),
+            "terminal",
+            proposed_argv_prefix=["tool", "publish"],
+        )
 
 
 def test_reject_creates_no_grant_or_persistent_deny(tmp_path: Path) -> None:

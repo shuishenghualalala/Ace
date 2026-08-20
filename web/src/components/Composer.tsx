@@ -37,6 +37,8 @@ interface Props {
   subScenario?: string;
   editDraft?: { messageId: string; text: string } | null;
   onCancelEdit?: () => void;
+  /** 附件上传归属（wiki 会话时传入）：后端把附件收入对应知识库 */
+  uploadContext?: { sessionId?: string; kbId?: string };
 }
 
 export function teamMemberMentionId(
@@ -80,11 +82,11 @@ export default function Composer({
   subScenario,
   editDraft,
   onCancelEdit,
+  uploadContext,
 }: Props) {
   const externalAgentsEnabled = externalAgentsAvailable(config);
   const [text, setText] = useState("");
   const [atOpen, setAtOpen] = useState(false);
-  const [, setAtQuery] = useState("");
   const [atResults, setAtResults] = useState<
     { text: string; display: string; meta: string; type: string; agentMention?: UserAgentMention }[]
   >([]);
@@ -244,22 +246,27 @@ export default function Composer({
     onCancelEdit?.();
   };
 
-  /** 上传 File 列表并追加到 attachments（复用：文件选择 / 粘贴 / 拖拽） */
+  /** 上传 File 列表并追加到 attachments（复用：文件选择 / 粘贴 / 拖拽）。并行上传。 */
   const uploadFiles = async (files: File[]) => {
-    const newAtts: Attachment[] = [...attachments];
-    for (const file of files) {
-      try {
+    const results = await Promise.allSettled(
+      files.map(async (file) => {
         const content = await readFileAsBase64(file);
-        const result = await api.upload(file.name, content);
-        newAtts.push({
+        const result = await api.upload(file.name, content, uploadContext);
+        return {
           id: result.id,
           name: result.name,
           path: result.path,
           type: result.type as Attachment["type"],
           previewUrl: result.previewUrl,
-        });
-      } catch (err) {
-        console.error("上传失败:", err);
+        };
+      }),
+    );
+    const newAtts: Attachment[] = [...attachments];
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        newAtts.push(r.value);
+      } else {
+        console.error("上传失败:", r.reason);
       }
     }
     onAttachmentsChange(newAtts);
@@ -343,9 +350,8 @@ export default function Composer({
     const atMatch = textBeforeCursor.match(/@([^\s]*)$/);
     if (atMatch) {
       atIndexRef.current = cursorPos - atMatch[0].length;
-      const query = atMatch[1];
-      setAtQuery(query);
       setAtOpen(true);
+      const query = atMatch[1];
       const teamResults = isTeamSession
         ? (teamMembers ?? [])
           .filter((member) => teamMemberMentionId(member))

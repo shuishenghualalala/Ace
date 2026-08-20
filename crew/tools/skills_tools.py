@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from crew.agent.skills import (
-    get_skill_packages,
     audit_skills,
     get_package_members,
     get_skill_packages,
@@ -22,6 +22,7 @@ from crew.agent.skills import (
 from crew.core.errors import ToolError
 from crew.core.runctx import current_active_skill_packages, current_skill_scope
 from crew.tools.registry import Registry, tool_result
+from crew.tools.security_guard import authorize_file_tool
 
 
 SKILLS_LIST_SCHEMA = {
@@ -168,8 +169,11 @@ def handle_skill_view(args: dict[str, Any]) -> str:
     # 1. 先尝试作为 package 读取
     pkg = resolve_package(name)
     if pkg is not None:
-        pkg_md_path = Path(pkg["package_md_path"])
-        content = pkg_md_path.read_text(encoding="utf-8", errors="replace")
+        from crew.agent.skills import _registered_skill_dir, read_skill_text, resolve_skill_path
+
+        package_dir = _registered_skill_dir(Path(pkg["package_dir"]))
+        pkg_md_path = resolve_skill_path(Path(pkg["package_md_path"]), package_dir)
+        content = read_skill_text(pkg_md_path, package_dir, errors="replace")
         return tool_result(
             success=True,
             name=pkg["name"],
@@ -308,7 +312,33 @@ def handle_skills_audit(args: dict[str, Any]) -> str:
     return tool_result(success=True, **result)
 
 
-async def handle_skills_repair(args: dict[str, Any]) -> str:
+async def handle_skills_repair(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
+    if not bool(args.get("dry_run", False)):
+        from crew.agent.skills import _is_metadata_finding
+
+        pending = audit_skills(
+            include_optional=bool(args.get("include_optional", False)),
+            only=str(args.get("only") or "").strip() or None,
+        )
+        for item in pending.get("skills") or []:
+            findings = item.get("findings") if isinstance(item, dict) else None
+            if not isinstance(findings, list) or not any(
+                isinstance(finding, dict) and _is_metadata_finding(finding)
+                for finding in findings
+            ):
+                continue
+            await authorize_file_tool(
+                {"path": str(item.get("skill_dir") or "")},
+                operation="write",
+                tool_name="skills_repair",
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
     result = await repair_skills(
         include_optional=bool(args.get("include_optional", False)),
         only=str(args.get("only") or "").strip() or None,
@@ -317,7 +347,12 @@ async def handle_skills_repair(args: dict[str, Any]) -> str:
     return tool_result(success=True, **result)
 
 
-def register_skills_tools(registry: Registry) -> None:
+def register_skills_tools(
+    registry: Registry,
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> None:
     registry.register(
         name="skills_list",
         toolset="skills",
@@ -366,7 +401,11 @@ def register_skills_tools(registry: Registry) -> None:
         name="skills_repair",
         toolset="skills",
         schema=SKILLS_REPAIR_SCHEMA,
-        handler=handle_skills_repair,
+        handler=partial(
+            handle_skills_repair,
+            workspace_store=workspace_store,
+            security_service=security_service,
+        ),
         is_async=True,
         display_name="修复技能",
         ui_label_template="修复技能",

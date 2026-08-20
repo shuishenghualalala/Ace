@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from crew.security.context import SecurityContext
 from crew.security.launch import ProcessLaunch, current_process_launch
 from crew.security.models import (
     AdditionalPermissionProfile,
@@ -28,6 +29,7 @@ from crew.security.models import (
     PermissionProfileKind,
 )
 from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
+from crew.security.service import ExecAuthorization
 
 
 @pytest.mark.asyncio
@@ -99,82 +101,17 @@ class _BrokenManagedAcpSession(_FakeManagedAcpSession):
         )
 
 
-class _FakeManagedLineSession:
-    def __init__(self) -> None:
-        self.process = SimpleNamespace(pid=5252, returncode=None)
-        self.stderr_lines: list[str] = []
-        self._frames: asyncio.Queue[bytes | None] = asyncio.Queue()
-        self.writes: list[bytes] = []
-        self._closed = False
+class _AllowNetworkApprovalService:
+    """测试桩：外部智能体联网审批一律放行（本文件的用例只验证传输层，不覆盖审批决策）。"""
 
-    async def write(self, data: bytes) -> None:
-        self.writes.append(data)
-        for raw_line in data.splitlines():
-            message = json.loads(raw_line)
-            if message.get("method") == "initialize":
-                await self._put({"id": message["id"], "result": {}})
-                continue
-            if message.get("method") == "thread/start":
-                await self._put({
-                    "id": message["id"],
-                    "result": {"thread": {"id": "managed-thread"}},
-                })
-                continue
-            if message.get("method") == "turn/start":
-                await self._put({
-                    "id": message["id"],
-                    "result": {"turn": {"id": "managed-turn"}},
-                })
-                await self._put({
-                    "method": "item/agentMessage/delta",
-                    "params": {
-                        "threadId": "managed-thread",
-                        "turnId": "managed-turn",
-                        "delta": "codex managed",
-                    },
-                })
-                await self._put({
-                    "method": "turn/completed",
-                    "params": {
-                        "threadId": "managed-thread",
-                        "turnId": "managed-turn",
-                        "turn": {"status": "completed"},
-                    },
-                })
-                continue
-            if message.get("type") == "user":
-                await self._put({"type": "system", "session_id": "managed-session"})
-                await self._put({
-                    "type": "stream_event",
-                    "session_id": "managed-session",
-                    "event": {
-                        "delta": {"type": "text_delta", "text": "claude managed"},
-                    },
-                })
-                await self._put({
-                    "type": "result",
-                    "session_id": "managed-session",
-                    "subtype": "success",
-                    "is_error": False,
-                })
-
-    async def _put(self, payload: dict) -> None:
-        await self._frames.put(json.dumps(payload).encode() + b"\n")
-
-    async def read_chunk(self) -> bytes | None:
-        return await self._frames.get()
-
-    async def close(self) -> None:
-        if not self._closed:
-            self._closed = True
-            self.process.returncode = 0
-            await self._frames.put(None)
-
-    async def abort(self) -> None:
-        await self.close()
+    @staticmethod
+    def authorize_exec_action(*_args, **_kwargs) -> ExecAuthorization:
+        return ExecAuthorization(True)
 
 
 def _managed_launch(tmp_path: Path) -> ProcessLaunch:
+    # 外部智能体联网需要审批上下文（provider 网段 overlay 经 approval_service 授权），
+    # 缺 security_context / approval_service 时 cli_adapter 直接抛 SANDBOX_UNAVAILABLE。
     return ProcessLaunch(
         PermissionProfile(
             PermissionProfileKind.MANAGED,
@@ -182,6 +119,17 @@ def _managed_launch(tmp_path: Path) -> ProcessLaunch:
         ),
         ("native-runtime",),
         external_security_enabled=True,
+        security_context=SecurityContext(
+            os_user="os-acp",
+            owner_account_id="owner-acp",
+            workspace_id="workspace-acp",
+            workspace_root=tmp_path,
+            session_id="session-acp",
+            request_id="request-acp",
+            task_id="task-acp",
+            cwd=tmp_path,
+        ),
+        approval_service=_AllowNetworkApprovalService(),
     )
 
 
@@ -246,22 +194,26 @@ async def test_managed_external_interactive_compiles_scoped_projection(
 
 
 @pytest.mark.asyncio
-async def test_managed_codex_app_server_uses_native_interactive_transport(
+async def test_managed_codex_app_server_routes_to_brokered_one_shot(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from crew.agent.external import codex_adapter
+    """managed 启动决策下 Codex 走 broker 一次性执行（含联网审批 overlay），
+    不再使用交互式 app-server 传输（f3aca1b 起的新契约）。"""
+    from crew.agent.external import cli_adapter, codex_adapter
     from crew.agent.external.codex_adapter import stream_codex_events
     from crew.agent.external.runtime_adapter import RuntimeExecutionRequest
 
-    session = _FakeManagedLineSession()
     captured = {}
 
-    async def open_managed(request, command):
-        captured["request"] = request
-        captured["command"] = command
-        return session
+    async def fake_run_external_cli(config):
+        captured["config"] = config
+        return "codex managed"
 
+    async def open_managed(*_args, **_kwargs):
+        raise AssertionError("managed 路径不应再使用交互式传输")
+
+    monkeypatch.setattr(cli_adapter, "run_external_cli", fake_run_external_cli)
     monkeypatch.setattr(codex_adapter, "open_managed_external_interactive", open_managed)
     token = current_process_launch.set(_managed_launch(tmp_path))
     try:
@@ -279,27 +231,31 @@ async def test_managed_codex_app_server_uses_native_interactive_transport(
         current_process_launch.reset(token)
 
     assert [event.text for event in events if event.kind == "text"] == ["codex managed"]
-    assert captured["command"][1:] == ("app-server", "--listen", "stdio://")
-    assert session.writes, "Codex must send protocol frames through the native session"
+    assert captured["config"].provider == "codex"
+    assert captured["config"].prompt == "work"
 
 
 @pytest.mark.asyncio
-async def test_managed_claude_stream_json_uses_native_interactive_transport(
+async def test_managed_claude_stream_json_routes_to_brokered_one_shot(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """managed 启动决策下 Claude 回合走 broker 一次性执行（含联网审批 overlay），
+    不再使用交互式 stream-json 传输（f3aca1b 起的新契约）。"""
     from crew.agent.external import cli_adapter
     from crew.agent.external.cli_adapter import stream_claude_events
     from crew.agent.external.runtime_adapter import RuntimeExecutionRequest
 
-    session = _FakeManagedLineSession()
     captured = {}
 
-    async def open_managed(request, command):
-        captured["request"] = request
-        captured["command"] = command
-        return session
+    async def fake_run_external_cli(config):
+        captured["config"] = config
+        return "claude managed"
 
+    async def open_managed(*_args, **_kwargs):
+        raise AssertionError("managed 路径不应再使用交互式传输")
+
+    monkeypatch.setattr(cli_adapter, "run_external_cli", fake_run_external_cli)
     monkeypatch.setattr(cli_adapter, "open_managed_external_interactive", open_managed)
     token = current_process_launch.set(_managed_launch(tmp_path))
     try:
@@ -317,13 +273,8 @@ async def test_managed_claude_stream_json_uses_native_interactive_transport(
         current_process_launch.reset(token)
 
     assert [event.text for event in events if event.kind == "text"] == ["claude managed"]
-    assert captured["command"][1:5] == (
-        "-p",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-    )
-    assert session.writes, "Claude must send stream-json frames through the native session"
+    assert captured["config"].provider == "claude"
+    assert captured["config"].prompt == "work"
 
 
 @pytest.mark.asyncio

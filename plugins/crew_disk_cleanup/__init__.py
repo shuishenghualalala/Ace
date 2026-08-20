@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from crew.state.home import get_crew_home
+from crew.core.types import ToolPermissionDecision
 
 _ACTIONS = ["status", "dry_run", "quick"]
 
@@ -125,6 +126,17 @@ def handle_cleanup(args: dict[str, Any], **_: Any) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def cleanup_permission(args: dict[str, Any]) -> ToolPermissionDecision:
+    action = str(args.get("action") or "status")
+    if action in {"status", "dry_run"}:
+        return ToolPermissionDecision("allow")
+    return ToolPermissionDecision(
+        "ask",
+        reason="将删除 Ace 管理的临时文件；审批仅覆盖本次清理参数",
+        allow_always=False,
+    )
+
+
 def register(ctx) -> None:
     ctx.register_tool(
         name="crew_disk_cleanup",
@@ -132,4 +144,5 @@ def register(ctx) -> None:
         schema=SCHEMA,
         handler=handle_cleanup,
         description="Show or clean Crew temp files.",
+        permission_resolver=cleanup_permission,
     )

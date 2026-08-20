@@ -8,6 +8,10 @@ import time
 from pathlib import Path
 
 from crew.security.actions import ActionKind
+from crew.security.models import (
+    deserialize_additional_permissions,
+    serialize_additional_permissions,
+)
 from crew.security.rules import ActionRule, RuleDecision, RuleScope
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
@@ -28,6 +32,9 @@ class SQLiteRuleStore:
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        self.migrated_legacy_rules = tuple(
+            self._writer.execute(self._disable_legacy_unscoped_allow_rules)
+        )
 
     @staticmethod
     def _init_schema(conn) -> None:
@@ -49,6 +56,45 @@ class SQLiteRuleStore:
             "CREATE INDEX IF NOT EXISTS idx_security_rules_scope "
             "ON security_rules(os_user, owner_account_id, workspace_id, enabled)"
         )
+
+    @staticmethod
+    def _disable_legacy_unscoped_allow_rules(conn) -> list[tuple[str, str, str, str]]:
+        """Disable allow rules that predate host-validated Ace tool scoping."""
+        rows = conn.execute(
+            "SELECT rule_id, os_user, owner_account_id, workspace_id, payload_json "
+            "FROM security_rules WHERE enabled = 1"
+        ).fetchall()
+        disabled: list[tuple[str, str, str, str]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (
+                payload.get("decision") == RuleDecision.ALLOW.value
+                and (
+                    not str(payload.get("tool_name", "")).strip()
+                    or (
+                        payload.get("argv_prefix")
+                        and not str(payload.get("exact_digest", "")).strip()
+                        and payload.get("allow_prefix_authority") is not True
+                    )
+                )
+            ):
+                disabled.append(
+                    (
+                        str(row["rule_id"]),
+                        str(row["os_user"]),
+                        str(row["owner_account_id"]),
+                        str(row["workspace_id"]),
+                    )
+                )
+        if disabled:
+            conn.executemany(
+                "UPDATE security_rules SET enabled = 0 WHERE rule_id = ?",
+                ((rule_id,) for rule_id, _os, _owner, _workspace in disabled),
+            )
+        return disabled
 
     def create(
         self,
@@ -80,6 +126,11 @@ class SQLiteRuleStore:
                     "action_detail",
                     _MAX_ACTION_DETAIL_LENGTH,
                 ),
+                "additional_permissions": serialize_additional_permissions(
+                    rule.additional_permissions
+                ),
+                "allow_prefix_authority": rule.allow_prefix_authority,
+                "tool_name": rule.tool_name,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -209,6 +260,11 @@ def _decode_rule(row) -> ActionRule:
                 "action_detail",
                 _MAX_ACTION_DETAIL_LENGTH,
             ),
+            additional_permissions=deserialize_additional_permissions(
+                payload.get("additional_permissions")
+            ),
+            allow_prefix_authority=payload.get("allow_prefix_authority") is True,
+            tool_name=str(payload.get("tool_name", "")).strip(),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RuleStoreCorruptError(f"规则 {rule_id} payload 损坏") from exc

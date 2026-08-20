@@ -84,6 +84,7 @@ import { makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } 
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
+import { renderModelFallbackBanner } from './model-fallback-banner';
 import {
   chunkRequestId,
   isPlanControlStatus,
@@ -137,6 +138,9 @@ let openSessionFn: OpenSessionFn = async () => {};
 let setTabFn: (tab: TabKey) => void = () => {};
 let queueEditDraft: { sessionId: string } | null = null;
 let teamIdentityRefreshBound = false;
+const ttftVisibleLoggedRequests = new Set<string>();
+const ttftRenderLoggedRequests = new Set<string>();
+const ttftRequestStartedAt = new Map<string, number>();
 
 interface DispatchOptions {
   subScenario?: string;
@@ -245,6 +249,7 @@ export function updateGatewayDot(): void {
 export function updateComposerControls(): void {
   // ComposerView subscribes to stores and owns the execution controls.
   renderSecurityBanner();
+  renderModelFallbackBanner();
 }
 
 export function scrollChatToBottom(): void {
@@ -510,6 +515,18 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
   const target = resolveStreamingTurnTarget(sid, assistantId);
   if (!target) return false;
   const { turnEl, msg } = target;
+  const book = bookFor(sid);
+  const requestId = book.activeRequestId;
+  if (requestId && msg.content && !ttftRenderLoggedRequests.has(requestId)) {
+    ttftRenderLoggedRequests.add(requestId);
+    logStream('render', 'ttft-first-dom-patch', {
+      sid,
+      request_id: requestId,
+      assistantId,
+      contentLen: msg.content.length,
+      elapsedMs: msg.turnStartedAt != null ? Math.max(0, Date.now() - msg.turnStartedAt) : undefined,
+    });
+  }
   const textEl = turnEl.querySelector<HTMLElement>(`[data-text-for="${assistantId}"]`);
   if (textEl) {
     textEl.classList.remove('typing-inline');
@@ -517,7 +534,11 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
   }
   const thinkingEl = turnEl.querySelector<HTMLElement>(`[data-thinking-for="${assistantId}"] .process-timeline__thinking`);
   if (thinkingEl && msg.thinking != null) {
+    const followThinkingOutput = (
+      thinkingEl.scrollHeight - thinkingEl.scrollTop - thinkingEl.clientHeight
+    ) <= 24;
     thinkingEl.textContent = msg.thinking;
+    if (followThinkingOutput) thinkingEl.scrollTop = thinkingEl.scrollHeight;
   }
   // 实时计时：以整回合 batch 为准（工具阶段可能无正文 data-text-for，但仍需刷新 label）。
   patchStreamingTurnLabel(sid, assistantId);
@@ -1001,10 +1022,31 @@ export function applyChunk(chunk: ChatChunk): void {
     return;
   }
   if (chunk.kind === 'channel_session_updated') {
-    const body = (chunk.body ?? {}) as { platform?: string };
+    const body = (chunk.body ?? {}) as { platform?: string; event?: string; query?: string };
     // 渠道会话开始/结束时都确保前端已订阅：开始订阅后才能收到实时 delta，
     // 结束订阅后也能通过 replay 补到可能错过的帧。
     subscribeSessions([sid]);
+    if (body.event === 'agent:start') {
+      // 渠道入站的用户消息不作为 WS 帧广播，先把原文补插到本地，
+      // 否则实时流出的回答会直接接在上一轮尾部，看起来像「串轮」。
+      // 去重：桌面本地发送的渠道会话消息已有乐观用户消息，不重复补插。
+      // 注意本地发送时尾部是乐观 assistant 占位，要向前找最后一条 user 消息比较。
+      const query = typeof body.query === 'string' ? body.query.trim() : '';
+      if (query) {
+        const msgs = getMessages(sid);
+        const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+        const alreadyLocal = !!lastUser
+          && (lastUser.content === query || lastUser.content.startsWith(query));
+        if (!alreadyLocal) {
+          appendSessionMessage(sid, {
+            id: newMessageId('user'),
+            role: 'user',
+            content: query,
+            timestamp: Date.now(),
+          });
+        }
+      }
+    }
     void import('./channel-sessions').then(({ refreshChannelSessionsOnEvent }) =>
       refreshChannelSessionsOnEvent(body.platform, sid).then(() => renderWorkspaceHistory(openSessionFn)),
     );
@@ -1075,6 +1117,25 @@ export function applyChunk(chunk: ChatChunk): void {
   if (!parsed) {
     logStream('apply-chunk', 'drop-unrecognized', { sid, kind: chunk.kind });
     return;
+  }
+
+  const requestIdForPerf = chunk.request_id || bookFor(sid).activeRequestId;
+  if (
+    requestIdForPerf
+    && parsed.kind === 'delta'
+    && typeof parsed.body.text === 'string'
+    && parsed.body.text.length > 0
+    && !ttftVisibleLoggedRequests.has(requestIdForPerf)
+  ) {
+    ttftVisibleLoggedRequests.add(requestIdForPerf);
+    logStream('apply-chunk', 'ttft-first-visible-text', {
+      sid,
+      request_id: requestIdForPerf,
+      textLen: parsed.body.text.length,
+      elapsedMs: ttftRequestStartedAt.has(requestIdForPerf)
+        ? Math.max(0, Date.now() - (ttftRequestStartedAt.get(requestIdForPerf) as number))
+        : undefined,
+    });
   }
 
   const book = bookFor(sid);
@@ -1271,6 +1332,11 @@ export function applyChunk(chunk: ChatChunk): void {
   // final / error：触发 finalize + usage + 全量重渲染
   if (result.finalize) {
     logStream('apply-chunk', 'finalize-turn', { sid, kind: parsed.kind });
+    if (reqId) {
+      ttftVisibleLoggedRequests.delete(reqId);
+      ttftRenderLoggedRequests.delete(reqId);
+      ttftRequestStartedAt.delete(reqId);
+    }
     streamingPatchCoalescer.clear();
     if (result.turn) {
       recordUsageTurn(
@@ -1489,12 +1555,15 @@ export async function dispatchWs(
   renderChat();
   syncTurnDurationTicker();
   jumpChatToBottom();
+  const clientTs = Date.now();
+  ttftRequestStartedAt.set(requestId, clientTs);
   logStream('dispatch', 'send-ws', {
     sessionId,
     requestId,
     mode,
     queryLen: query.length,
     backendConnected: state.backendConnected,
+    clientTs,
   });
   // 专用 Wiki Agent 经注册口提供本会话的 wiki_kb_id。
   const wikiExtras = wikiSendExtrasResolver?.(sessionId) ?? null;
@@ -1516,6 +1585,7 @@ export async function dispatchWs(
   });
   if (!ok) {
     logStream('dispatch', 'send-ws-failed', { sessionId, requestId });
+    ttftRequestStartedAt.delete(requestId);
     discardEmptyOptimisticAssistant(sessionId);
     appendMessage(sessionId, 'error', '服务未连接，请稍后重试。');
     setBusyWithUi(sessionId, false);

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 
-RUNTIME_PROTOCOL_VERSION = 2
+RUNTIME_PROTOCOL_VERSION = 3
 _MAX_REQUEST_FRAME = 2 * 1024 * 1024
 _MAX_PROTOCOL_FRAME = 128 * 1024
 _MAX_OUTPUT_CHUNK = 64 * 1024
@@ -47,7 +47,9 @@ _RESERVED_ENV_NAMES = frozenset(
     }
 )
 _RESERVED_ENV_PREFIXES = ("ACE_SECURITY_", "ACE_BUNDLED_")
-_REQUIRED_READY_CAPABILITIES = frozenset({"stdin_once", "stream_output"})
+_REQUIRED_READY_CAPABILITIES = frozenset(
+    {"stdin_once", "stream_output", "readonly_roots", "full_disk_read"}
+)
 _INTERACTIVE_READY_CAPABILITIES = _REQUIRED_READY_CAPABILITIES | {"stdin_bidirectional"}
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,9 +61,37 @@ class RuntimeErrorCode(StrEnum):
     RUNTIME_PROTOCOL_MISMATCH = "runtime_protocol_mismatch"
     RUNTIME_CRASHED = "runtime_crashed"
     SANDBOX_DENIED = "sandbox_denied"
+    POLICY_DENIED = "policy_denied"
     NETWORK_UNAVAILABLE = "network_unavailable"
     TIMEOUT = "timeout"
     OUTPUT_TRUNCATED = "output_truncated"
+
+
+_SANDBOX_DENIAL_KEYWORDS = (
+    "operation not permitted",
+    "permission denied",
+    "read-only file system",
+    "seccomp",
+    "sandbox",
+    "landlock",
+    "failed to write file",
+)
+
+
+def is_likely_sandbox_denied(
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    *,
+    backend: str,
+) -> bool:
+    """Conservatively identify a failed command caused by a managed boundary."""
+    if not backend or backend == "host_unconfined" or exit_code == 0:
+        return False
+    combined = f"{stderr}\n{stdout}".lower()
+    if any(keyword in combined for keyword in _SANDBOX_DENIAL_KEYWORDS):
+        return True
+    return backend == "linux_bwrap" and exit_code == 159
 
 
 class NativeRuntimeError(RuntimeError):
@@ -89,6 +119,7 @@ class RuntimeCapabilities:
     filesystem_sandbox: bool
     process_tree_cleanup: bool
     managed_network: bool
+    full_disk_read: bool = False
     system_bwrap: bool = False
     bundled_bwrap: bool = False
     wsl_version: int | None = None
@@ -111,6 +142,7 @@ class RuntimeCapabilities:
             filesystem_sandbox=value.get("filesystem_sandbox") is True,
             process_tree_cleanup=value.get("process_tree_cleanup") is True,
             managed_network=value.get("managed_network") is True,
+            full_disk_read=value.get("full_disk_read") is True,
             system_bwrap=value.get("system_bwrap") is True,
             bundled_bwrap=value.get("bundled_bwrap") is True,
             wsl_version=_optional_int(value.get("wsl_version")),
@@ -162,6 +194,7 @@ class NativeInteractiveSession:
         stderr_task: asyncio.Task[bytes],
         timeout: float,
         max_output_bytes: int,
+        full_disk_read: bool,
     ) -> None:
         self._client = client
         self.process = process
@@ -169,6 +202,7 @@ class NativeInteractiveSession:
         self._stderr_task = stderr_task
         self._timeout = max(0.1, float(timeout or 0.0))
         self._max_output_bytes = max_output_bytes
+        self._full_disk_read = full_disk_read
         self._next_seq = 0
         self._output_bytes = 0
         self._write_lock = asyncio.Lock()
@@ -218,6 +252,11 @@ class NativeInteractiveSession:
                     raise NativeRuntimeError(
                         RuntimeErrorCode.SANDBOX_UNAVAILABLE,
                         "native runtime lacks required managed capabilities",
+                    )
+                if capabilities.full_disk_read is not self._full_disk_read:
+                    raise NativeRuntimeError(
+                        RuntimeErrorCode.SANDBOX_UNAVAILABLE,
+                        "native runtime did not apply the requested read boundary",
                     )
                 continue
             if frame_type == "stdout" and nonce == self._open_nonce:
@@ -387,7 +426,9 @@ class NativeRuntimeClient:
         cwd: Path,
         writable_roots: Sequence[Path] = (),
         readable_roots: Sequence[Path] = (),
+        readonly_roots: Sequence[Path] = (),
         denied_roots: Sequence[Path] = (),
+        full_disk_read: bool = False,
         network_enabled: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
@@ -396,6 +437,7 @@ class NativeRuntimeClient:
         stdin: bytes | None = None,
         home_files: Mapping[str, bytes] | None = None,
         env_overrides: Mapping[str, str] | None = None,
+        trusted_path: str | None = None,
         on_started: Callable[[int | None], None] | None = None,
         on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
     ) -> RuntimeCommandResult:
@@ -405,6 +447,8 @@ class NativeRuntimeClient:
         validated_env, encoded_home_files = _validate_request_inputs(
             stdin, env_overrides, home_files
         )
+        if trusted_path is not None:
+            validated_env["PATH"] = _validate_trusted_path(trusted_path)
         token = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(24)
         payload = {
@@ -413,7 +457,9 @@ class NativeRuntimeClient:
             "cwd": str(cwd.resolve(strict=True)),
             "writable_roots": [str(path.resolve(strict=True)) for path in writable_roots],
             "readable_roots": [str(path.resolve(strict=True)) for path in readable_roots],
+            "readonly_roots": [str(path.resolve(strict=False)) for path in readonly_roots],
             "denied_roots": [str(path.resolve(strict=False)) for path in denied_roots],
+            "full_disk_read": bool(full_disk_read),
             "network_enabled": network_enabled,
             "network_rules": [dict(rule) for rule in network_rules],
             "allow_local_binding": allow_local_binding,
@@ -453,6 +499,7 @@ class NativeRuntimeClient:
                 max_output_bytes=max_output_bytes,
                 network_enabled=network_enabled,
                 allow_local_binding=allow_local_binding,
+                full_disk_read=full_disk_read,
                 on_started=on_started,
                 on_output=on_output,
             )
@@ -483,7 +530,9 @@ class NativeRuntimeClient:
         cwd: Path,
         writable_roots: Sequence[Path] = (),
         readable_roots: Sequence[Path] = (),
+        readonly_roots: Sequence[Path] = (),
         denied_roots: Sequence[Path] = (),
+        full_disk_read: bool = False,
         network_enabled: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
@@ -506,7 +555,9 @@ class NativeRuntimeClient:
             "cwd": str(cwd.resolve(strict=True)),
             "writable_roots": [str(path.resolve(strict=True)) for path in writable_roots],
             "readable_roots": [str(path.resolve(strict=True)) for path in readable_roots],
+            "readonly_roots": [str(path.resolve(strict=False)) for path in readonly_roots],
             "denied_roots": [str(path.resolve(strict=False)) for path in denied_roots],
+            "full_disk_read": bool(full_disk_read),
             "network_enabled": network_enabled,
             "network_rules": [dict(rule) for rule in network_rules],
             "allow_local_binding": allow_local_binding,
@@ -545,6 +596,7 @@ class NativeRuntimeClient:
                 stderr_task=stderr_task,
                 timeout=timeout,
                 max_output_bytes=max_output_bytes,
+                full_disk_read=full_disk_read,
             )
             assert process.stdin is not None
             process.stdin.write(request_frame)
@@ -568,6 +620,7 @@ class NativeRuntimeClient:
         max_output_bytes: int,
         network_enabled: bool,
         allow_local_binding: bool,
+        full_disk_read: bool,
         on_started: Callable[[int | None], None] | None,
         on_output: Callable[[Literal["stdout", "stderr"]], None] | None,
     ) -> RuntimeCommandResult:
@@ -618,6 +671,11 @@ class NativeRuntimeClient:
                     raise NativeRuntimeError(
                         RuntimeErrorCode.SANDBOX_UNAVAILABLE,
                         "native runtime lacks required managed capabilities",
+                    )
+                if capabilities.full_disk_read is not full_disk_read:
+                    raise NativeRuntimeError(
+                        RuntimeErrorCode.SANDBOX_UNAVAILABLE,
+                        "native runtime did not apply the requested read boundary",
                     )
                 if capabilities.is_windows_backend and not all(
                     (
@@ -923,6 +981,23 @@ def _validate_request_inputs(
             raise ValueError("native runtime projected HOME exceeds the size limit")
         encoded_home_files[relative_path] = base64.b64encode(content).decode("ascii")
     return validated, encoded_home_files
+
+
+def _validate_trusted_path(value: str) -> str:
+    """Validate the host-assembled executable search path.
+
+    PATH stays forbidden in generic ``env_overrides``.  This separate channel
+    is reserved for the host launcher after it has assembled the bundled and
+    system tool directories needed by managed commands.
+    """
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("native runtime trusted PATH is invalid")
+    if len(value.encode("utf-8")) > _MAX_ENV_BYTES:
+        raise ValueError("native runtime trusted PATH exceeds the size limit")
+    for item in value.split(os.pathsep):
+        if not item or not Path(item).expanduser().is_absolute():
+            raise ValueError("native runtime trusted PATH must contain absolute directories")
+    return value
 
 
 def _safe_callback(callback: Callable[[Any], None] | None, value: Any) -> None:

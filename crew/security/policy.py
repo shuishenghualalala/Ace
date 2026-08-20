@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
-
-from crew.state.home import get_crew_home
 
 from crew.security.models import (
     AdditionalPermissionProfile,
@@ -33,28 +33,36 @@ def settings_for_mode(
         ConversationPermissionMode.FULL_ACCESS,
     }:
         raise ValueError(f"未知对话安全模式: {mode!r}")
-    filesystem = (
-        (FilesystemEntry(workspace_root, FilesystemAccess.READ_WRITE),) if workspace_root else ()
+    writable_roots: list[Path] = []
+    if workspace_root is not None:
+        writable_roots.append(workspace_root)
+    temp_candidates = [Path(tempfile.gettempdir())]
+    if os.name != "nt":
+        temp_candidates.append(Path("/tmp"))
+    for candidate in temp_candidates:
+        try:
+            resolved = candidate.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved not in writable_roots:
+            writable_roots.append(resolved)
+    filesystem = tuple(
+        FilesystemEntry(root, FilesystemAccess.READ_WRITE) for root in writable_roots
     )
     if mode is ConversationPermissionMode.FULL_ACCESS:
-        # “完全访问”是宽权限受管模式，不再等同宿主裸跑。开放 workspace 与
-        # 当前用户 home，随后由更具体、不可升级的 deny_entries 覆盖 Ace
-        # DB/proof/identity/审计和 protected metadata；home 外仍需精确批准。
-        user_home = Path.home().resolve(strict=False)
-        broad_roots = {entry.root for entry in filesystem}
-        if user_home != get_crew_home().resolve(strict=False) and user_home not in broad_roots:
-            filesystem = (*filesystem, FilesystemEntry(user_home, FilesystemAccess.READ_WRITE))
+        # 完全访问权限明确选择宿主用户权限，不再编译文件或网络沙箱。
+        # 不可逾越的破坏性红线仍由终端 hardline 与结构化文件根目录检查负责。
         return SecurityModeSettings(
             profile=PermissionProfile(
-                kind=PermissionProfileKind.MANAGED,
-                filesystem=(*filesystem, *deny_entries),
-                network=NetworkPolicy.RESTRICTED,
+                kind=PermissionProfileKind.DISABLED,
+                network=NetworkPolicy.UNRESTRICTED,
             ),
-            approval_policy=ApprovalPolicy.REQUEST,
+            approval_policy=ApprovalPolicy.NEVER,
         )
 
     profile = PermissionProfile(
         kind=PermissionProfileKind.MANAGED,
+        full_disk_read=True,
         filesystem=(*filesystem, *deny_entries),
         network=NetworkPolicy.RESTRICTED,
     )
@@ -78,8 +86,24 @@ def filesystem_operation_allowed(
 
     resolved = target.expanduser().resolve(strict=False)
     base_matches = [entry for entry in profile.filesystem if _contains(entry.root, resolved)]
-    if any(entry.access is FilesystemAccess.DENY and not entry.escalatable for entry in base_matches):
-        return False
+    if base_matches:
+        base_specificity = max(len(entry.root.parts) for entry in base_matches)
+        selected_base = [
+            entry for entry in base_matches if len(entry.root.parts) == base_specificity
+        ]
+        # Immutable denies/read-only entries cannot be overridden by an
+        # approval overlay.  A more-specific host-owned base entry can still
+        # carve the task workspace out of a broad runtime-home deny.
+        if any(
+            entry.access is FilesystemAccess.DENY and not entry.escalatable
+            for entry in selected_base
+        ):
+            return False
+        if operation is FilesystemOperation.WRITE and any(
+            entry.access is FilesystemAccess.READ and not entry.escalatable
+            for entry in selected_base
+        ):
+            return False
 
     matches = [
         entry
@@ -87,7 +111,7 @@ def filesystem_operation_allowed(
         if _contains(entry.root, resolved)
     ]
     if not matches:
-        return False
+        return operation is FilesystemOperation.READ and profile.full_disk_read
     specificity = max(len(entry.root.parts) for entry in matches)
     selected = [entry for entry in matches if len(entry.root.parts) == specificity]
     if any(entry.access is FilesystemAccess.DENY for entry in selected):

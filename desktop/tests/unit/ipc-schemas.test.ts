@@ -21,6 +21,7 @@ import {
   FeedbackListArgs,
   DialogSelectFileArgs,
   InspirationWindowArgs,
+  SecurityAuditArgs,
   UpdateStartDownloadArgs,
 } from '../../src/shared/ipc-schemas';
 import { MAX_DIALOG_FILE_BYTES } from '../../src/shared/constants';
@@ -73,6 +74,20 @@ describe('GatewayFetchArgs', () => {
       init: { headers: { bad: 123 as unknown as string } },
     });
     expect(r.ok).toBe(false);
+  });
+});
+
+describe('SecurityAuditArgs', () => {
+  it('accepts every emitted execution and lifecycle filter', () => {
+    expect(SecurityAuditArgs.parse({ actionType: 'network_decision', decision: 'allow' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'exec_result', decision: 'completed' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'rule_disabled', decision: 'disabled' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'audit_purged', decision: 'deleted' }).ok).toBe(true);
+  });
+
+  it('rejects unknown audit filters', () => {
+    expect(SecurityAuditArgs.parse({ actionType: 'unknown' }).ok).toBe(false);
+    expect(SecurityAuditArgs.parse({ decision: 'unknown' }).ok).toBe(false);
   });
 });
 

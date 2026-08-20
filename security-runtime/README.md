@@ -18,19 +18,19 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 | 受限身份执行 | 沙箱账户 + restricted token | 非 root + seccomp | 当前用户 + `deny default` Seatbelt profile |
 | 进程树回收 | Kill-On-Close Job Object | 进程组 + bwrap | 独立进程组 + helper 整树终止 |
 | 托管网络 | WFP 仅放行 loopback 代理 | 网络命名空间 + 用户态代理 | 仅放行本次随机 loopback 代理端口 |
-| 保护元数据 | `.git` / `.agents` / `.crew` 强制 Deny | bwrap 只读覆盖 | Seatbelt deny 覆盖宽写根 |
+| 保护元数据 | 读取 ACE + deny-write ACE | bwrap 只读覆盖 | Seatbelt 写拒绝覆盖宽写根 |
 | 身份持久化 | DPAPI 加密凭证 | 不需要 | 不需要 |
-| 输出、stdin、协议鉴权 | 统一 v2 契约 | 同 | 同 |
+| 输出、stdin、协议鉴权 | 统一 v3 契约 | 同 | 同 |
 
 ### 1.1 Windows 后端要点
 
 - **两个技术账户**（`identity::setup` 创建）：
   - **offline 账户**：WFP 全断网，仅做无网文件操作。
   - **online 账户**：WFP 仅放行固定 loopback 代理端口（`PROXY_PORT = 43119`），其余阻断。
-- **ACL lease**（`acl::AclLease`）：每次命令前，按 `writable_roots` / `readable_roots` / `denied_roots` 精确下发 ACL；命令结束 `Drop` 里回收，跨进程 mutex 防账户间 ACL 串味。
+- **ACL lease**（`acl::AclLease`）：每次命令前，按 `writable_roots` / `readable_roots` / `readonly_roots` / `denied_roots` 精确下发 ACL；命令结束 `Drop` 里回收，跨进程 mutex 防账户间 ACL 串味。
 - **restricted token**（`token::create_restricted_token`）：禁用最大特权 + LUA_TOKEN + WRITE_RESTRICTED，只保留 capability SID。
 - **WFP 是安装期产物**：稳定 GUID，`install/uninstall/verify_installed` 幂等；过滤器 `FWPM_FILTER_FLAG_PERSISTENT`，重启仍在。
-- **保护子目录**：可写根下的 `.git` / `.agents` / `.crew` 自动建目录并 Deny（含 capability SID），防模型篡改仓库元数据。
+- **保护子目录**：可写根下的 `.git` / `.agents` / `.crew` 自动进入只读 carve-out；账户与 capability SID 可以读取，但写入和删除被显式拒绝。
 
 ### 1.2 Linux 后端要点
 
@@ -42,7 +42,8 @@ Ace 的**原生安全运行时**（Rust，包名 `ace-security-runtime`）。
 ### 1.3 macOS 后端要点
 
 - **Seatbelt**（`macos/mod.rs`）：每次执行生成独立 profile，用户路径只通过 `-D` 参数传入。
-- **最小环境**：从空环境重建 PATH、私有 HOME/TMPDIR 和已验证覆盖，避免继承宿主秘密。
+- **只读 carve-out**：对每个只读目标的 literal 与 subpath 拒绝写入；不存在的 `.git` / `.agents` / `.crew` 也不能借父级写权限创建。
+- **受控环境**：从空环境重建 PATH 与 TMPDIR。内置终端在广泛只读基线中使用宿主 HOME 解析用户路径，但不因此获得额外写权限；携带凭据投影的外援仍使用私有 HOME。
 - **托管网络**：离线 profile 没有 outbound allow；在线 profile 只能访问本次代理的精确 loopback 端口。
 - **无安装步骤**：不创建技术账号、不写系统防火墙 state，也不需要管理员授权。
 
@@ -52,13 +53,13 @@ NDJSON over stdio，**版本化 + 鉴权 + 防重放**：
 
 ```
 runtime 启动 → 读 ACE_SECURITY_RUNTIME_TOKEN（≥32 字节）
-            → stdout 写 {type:"ready", version:2,
-                          capabilities:["stdin_once","stream_output"]}
+            → stdout 写 {type:"ready", version:3,
+                          capabilities:["stdin_once","stream_output","readonly_roots","full_disk_read"]}
 host 每行一个请求：
-  {version:2, token, nonce,
+  {version:3, token, nonce,
    request:{op:"run", command, cwd, writable_roots, ...,
             stdin_b64?, env_overrides?}}
-  → token 不符 → sandbox_denied
+  → token 不符 → runtime_protocol_mismatch
   → nonce 重复或过短 → sandbox_denied
   → 版本不符 → runtime_protocol_mismatch
 runtime 每请求回连续事件：
@@ -96,10 +97,10 @@ Runtime 另外接收一个由 Gateway 生成的精确 loopback `host:port` 网�
 
 macOS Seatbelt 不会默认把宿主用户的 `HOME` 暴露给外援。Native Runtime
 为每个子进程创建私有临时 HOME，避免外援顺着 `~` 读取宿主配置、密钥和登录态。
-当用户明确选择包含用户 Home 的 managed 权限模式（当前 `full_access`）时，
-runtime 才把真实 HOME 作为子进程 HOME；此时它仍运行在 Seatbelt profile 内，
-`.git`、`.agents`、`.crew` 等不可升级的保护目录继续由 deny 规则覆盖。
-`TMPDIR` 始终使用独立临时目录，不会因为复用 HOME 而改变临时文件边界。
+受管 profile 启用 `full_disk_read` 且请求没有 `home_files` 时，runtime 把宿主 HOME 作为
+子进程 HOME，使 `~/Desktop` 与结构化文件工具指向同一宿主路径；文件仍只按 profile/overlay
+获得读写能力，HOME 本身不会变成可写根。携带 `home_files` 的外援始终使用私有 HOME。
+`TMPDIR` 继续由平台沙箱控制，不会因为复用 HOME 而改变临时文件边界。
 
 Crew Home 内的数据库、认证密钥、配置凭据和日志仍由不可升级的精确 deny 根保护；
 任务 workspace 不再被其父目录 deny 覆盖。受控模式下，运行时 descriptor 可以声明宿主 HOME
@@ -115,7 +116,7 @@ HOME 的通用读取权。`external_agents.security_enabled` 默认是 `false` �
 protocol stream`。
 
 `run` 请求字段：`command[]`, `cwd`, `writable_roots[]`, `readable_roots[]`,
-`denied_roots[]`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
+`readonly_roots[]`, `denied_roots[]`, `full_disk_read`, `network_enabled`, `network_rules[]`, `allow_local_binding`,
 `max_output_bytes`, `stdin_b64?`, `env_overrides?`。
 
 固定边界：请求帧 2 MiB、响应帧 128 KiB、单输出 chunk 64 KiB、stdin 1 MiB、
@@ -165,7 +166,7 @@ runtime/runner；`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`、
 ```
 
 脚本做三件事：`cargo build --release` → 复制到 `security-runtime/bin/` → 重算
-`runtime-manifest.json` 的 `source_hash`。协议 v2 不兼容 v1，Python 源码、runtime
+`runtime-manifest.json` 的 `source_hash`。协议 v3 增加全局只读能力标记，不兼容旧版协议；Python 源码、runtime
 二进制和 manifest 必须作为同一发布单元更新；不允许协议降级或 managed 失败后回退 host。
 
 ### 3.2 手动
@@ -182,8 +183,8 @@ Windows 显式三元组：`cargo build --release --target x86_64-pc-windows-msvc
 
 #### Intel Mac（x86_64）首次编译
 
-仓库目前提交了 Apple Silicon（`darwin-arm64`）预编译文件。Intel Mac 会拒绝加载该文件，
-需要在 Intel Mac 上本机编译一次：
+仓库目前提交了 Apple Silicon（`darwin-arm64`）预编译文件。若尚未从 GitHub 的
+`security-prebuilt` workflow/Release 取得 `darwin-x64` 产物，Intel Mac 需要本机编译一次：
 
 ```bash
 # 确认输出为 x86_64
@@ -244,12 +245,24 @@ security-runtime/prebuilt/
 └── linux-x64/                     # Linux 可按相同结构扩展
 ```
 
-旧版 `security-runtime/bin/` 仍作为 Windows 等既有开发流程的兼容回退。正式安装包不直接复用开发态预编译文件，而是在对应平台的发布 runner 上重新构建、测试和签名。
+旧版 `security-runtime/bin/` 不再进入运行时候选，避免过期的跨平台二进制被误加载。开发态只使用当前平台的 `prebuilt/<platform>-<arch>` 或本机 staging；正式产物在对应平台的发布 runner 上重新构建和测试，配置证书时再签名。
+
+`.github/workflows/security-prebuilt.yml` 是四平台统一产物入口：`darwin-arm64`、`darwin-x64`、
+`linux-x64`、`win32-x64` 都在对应原生 runner 构建和测试，再生成 tar.gz、SHA-256 manifest 与
+GitHub artifact attestation。`v*` tag 会把四份产物和 `SHA256SUMS` 上传到 GitHub Release。
+Apple/Windows 证书 secrets 未配置时流程仍正常完成；配置后才会给 helper 增加 Developer ID
+或 Authenticode 签名。证书私钥只能放 GitHub Actions secrets，不能提交到仓库。
+
+这两类证书都不要求把应用发布到应用商店。只通过 GitHub 分发源码或未签名开发包时，
+维护者现在不必申请证书；代价是首次下载后 macOS Gatekeeper 或 Windows SmartScreen 可能显示
+未知发布者警告。如果希望普通用户双击即用，再申请 Apple Developer Program 的 Developer ID
+并完成公证，或为 Windows 配置受信任的 Authenticode 签名。当前 workflow 只实现 helper 的
+可选签名；完整桌面应用的 macOS 公证仍属于正式发行流程。
 
 ### 4.1 gateway / desktop 如何找到它
 
 - **Python gateway**（`crew/security/launch.py:packaged_runtime_argv`）：
-  优先 `ACE_SECURITY_RUNTIME` 环境变量和 Desktop staging，否则选择 `<repo>/security-runtime/prebuilt/<platform>-<arch>/<name>`，最后兼容回落到 `bin/`。
+  优先 `ACE_SECURITY_RUNTIME` 环境变量和 Desktop staging，否则只选择 `<repo>/security-runtime/prebuilt/<platform>-<arch>/<name>`；不会跨平台回落到旧版 `bin/`。
 - **桌面 dev**（`desktop/src/main/index.ts`）：使用相同的平台/架构选择规则，并在启动 Gateway 前校验 manifest。
 - **打包态**：从 `process.resourcesPath/` 取随包 exe + 打包 manifest 哈希校验（`packagedSecurityRuntimeEnv`）。
 
@@ -295,7 +308,7 @@ ace-security-runtime --inner-seccomp ...              # Linux seccomp 内层（�
 
 ### 5.3 协议调用方
 
-`crew/security/runtime_client.py:NativeRuntimeClient.execute`：spawn runtime → 校验 v2
+`crew/security/runtime_client.py:NativeRuntimeClient.execute`：spawn runtime → 校验 v3
 `ready` 能力 → 发一个 `run` 请求 → 严格收集 `started/output/terminal/EOF` → 返回最终
 结果。一个 monotonic deadline 覆盖完整交换；timeout、cancel、协议错误和输出超限均回收
 helper/沙箱进程树。host 侧不直接碰沙箱账户/WFP/bwrap。
@@ -312,18 +325,18 @@ cargo test                                    # macOS（包含 Seatbelt 对抗�
 ```
 
 契约测试（`tests/`）覆盖：
-- `protocol.rs` — v2 事件形状、输入/帧限制、token/nonce 防重放。
+- `protocol.rs` — v3 事件形状、输入/帧限制、token/nonce 防重放。
 - `windows_acl.rs` — ACL lease 仅合并/回收 Ace 自己的 principal。
 - `windows_job.rs` — Job Object kill-on-close，Resume 前已 assign。
 - `windows_readiness.rs` — native gate 要求已安装 identity fixture。
-- `windows_sandbox.rs` — 专用账户写工作区、不写 denied/protected，以及 runner
+- `windows_sandbox.rs` — 专用账户写工作区、读取但不修改 readonly、不访问 denied，以及 runner
   stdin/environment/流式协议；真实账户测试需配置
   `ACE_WINDOWS_NATIVE_STATE_DIR`。
 - `windows_token.rs` — restricted token 与 handle 契约。
 - `linux_bwrap.rs` / `linux_adversarial.rs` — bwrap 隔离、一次性 stdin、环境变量、
   实时 stdout/stderr、共享输出上限与对抗用例；必须在 Linux 运行，Windows 交叉编译
   不能替代运行证据。
-- `macos_adversarial.rs` — Seatbelt 工作区写入、外部读取/写入和受保护目录拒绝；
+- `macos_adversarial.rs` — Seatbelt 工作区写入、显式 denied 外部路径拒绝和元数据可读不可写；
   `tests/security/security_matrix.py --platform macos` 另测离线直连与规则代理。
 
 ---
@@ -334,7 +347,7 @@ cargo test                                    # macOS（包含 Seatbelt 对抗�
 security-runtime/
 ├── Cargo.toml                 # windows-sys = "0.52"，勿随意升
 ├── prebuilt/                  # 按 platform-arch 分隔的预编译产物 + manifest
-├── bin/                       # 旧版预编译目录（兼容回退）
+├── bin/                       # 旧版预编译目录（仅保留历史文件，不再参与运行时发现）
 ├── src/
 │   ├── main.rs                # CLI 分发 + 协议主循环
 │   ├── protocol.rs            # NDJSON 协议、鉴权、防重放
@@ -353,13 +366,15 @@ security-runtime/
 2. **改源码必须重 build**：否则 prebuilt runtime 与源码漂移，漂移检测会让对应平台的 banner 报 stale。
 3. **WFP GUID 稳定**：`wfp.rs` 里 7 个 GUID 是安装期锚点，**不可改**（改了会导致旧过滤器残留）。
 4. **Windows runtime 以 UAC 运行**：code review 时改本目录的 PR 必须走严格审查——这是供应链信任的落点。
-5. **协议与产物原子升级**：v2 不提供 v1 兼容或 host fallback；修改帧语义必须提升
+5. **协议与产物原子升级**：v3 不提供旧版兼容或 host fallback；修改帧语义必须提升
    `PROTOCOL_VERSION`，同时更新 Python、Rust、测试、预编译产物和 manifest。
 
 ---
 
 ## 变更记录
 
+- **2026-08-10**：新增跨平台 `readonly_roots` 协议能力；Linux、Windows、macOS 统一实现
+  可写根内的只读 carve-out，live probe 与真实平台矩阵验证项目元数据可读不可写。
 - **2026-08-10**：新增 `prebuilt/<platform>-<arch>` 分发结构和 Apple Silicon 预编译 runtime；
   Desktop/Gateway 自动选择当前架构并校验平台、架构、二进制摘要与源码摘要，补充 Intel Mac
   本机编译与 staging 流程。

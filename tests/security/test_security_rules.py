@@ -7,6 +7,7 @@ from crew.security.actions import (
     normalize_file_action,
     normalize_network_action,
 )
+from crew.security.models import AdditionalPermissionProfile, SandboxPermissions
 from crew.security.rules import ActionRule, RuleDecision, RuleScope, choose_rule
 
 
@@ -29,14 +30,36 @@ def test_exact_file_rule_changes_when_path_or_operation_changes(tmp_path: Path) 
     assert not rule.matches(normalize_file_action(tmp_path / "one.txt", "write"))
 
 
-def test_always_exec_rule_matches_only_displayed_token_prefix(tmp_path: Path) -> None:
+def test_legacy_always_allow_prefix_is_disabled(tmp_path: Path) -> None:
     rule = ActionRule.exec_prefix(["git", "status"], cwd=tmp_path)
 
-    assert rule.matches(normalize_exec_action(["git", "status"], tmp_path))
-    assert rule.matches(normalize_exec_action(["git", "status", "--short"], tmp_path))
+    assert not rule.matches(normalize_exec_action(["git", "status"], tmp_path))
+    assert not rule.matches(normalize_exec_action(["git", "status", "--short"], tmp_path))
     assert not rule.matches(normalize_exec_action(["git", "status-all"], tmp_path))
     assert not rule.matches(normalize_exec_action(["git", "diff"], tmp_path))
     assert not rule.matches(normalize_exec_action(["git", "status"], tmp_path / "other"))
+
+
+def test_validated_always_allow_prefix_matches_parsed_command(tmp_path: Path) -> None:
+    rule = ActionRule.exec_prefix(
+        ["git", "status"],
+        cwd=tmp_path,
+        additional_permissions=AdditionalPermissionProfile(
+            sandbox_permissions=SandboxPermissions.REQUIRE_ESCALATED,
+        ),
+        allow_authority=True,
+        tool_name="terminal",
+    )
+    action = normalize_exec_action(
+        ["bash", "-lc", "git status --short"],
+        tmp_path,
+        raw_command="git status --short",
+        shell_kind="bash",
+        parsed_commands=(("git", "status", "--short"),),
+    )
+
+    assert rule.matches(action)
+    assert not rule.matches(normalize_exec_action(["git", "diff"], tmp_path))
 
 
 @pytest.mark.parametrize("host", ["*", "*.example.com", "https://example.com", "example.com/path"])

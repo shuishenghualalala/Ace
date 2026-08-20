@@ -34,7 +34,6 @@ export type ChunkKind =
   | 'work_event'
   | 'wiki_ingest_progress'
   | 'wiki_cards'
-  | 'wiki_summary'
   | 'wiki_changed'
   | 'ping'
   | 'pong';
@@ -114,6 +113,8 @@ export interface SessionModelBindingResponse {
   pending_label?: string | null;
   has_pending?: boolean;
   pending?: boolean;
+  /** 服务端判定：会话生效 Provider 为 FakeProvider 演示模式 */
+  demo_mode?: boolean;
   models?: RuntimeModelProfile[];
   model_switchable?: boolean;
   runtime_id?: string;
@@ -451,6 +452,10 @@ export interface BrowserPageState {
   viewport_height: number;
   can_go_back: boolean;
   can_go_forward: boolean;
+  queue_depth?: number;
+  last_queue_wait_ms?: number;
+  last_operation_ms?: number;
+  queue_timeouts?: number;
   tabs: Array<{ id: string; label: string; url: string; title: string }>;
   downloads: Array<{
     id?: string;
@@ -475,6 +480,10 @@ export interface BackendConfig {
   is_gateway_admin?: boolean;
   external_agents?: {
     enabled?: boolean;
+  };
+  security?: {
+    enabled?: boolean;
+    default_mode?: 'request_approval' | 'auto_review' | 'full_access';
   };
 }
 
@@ -1540,12 +1549,6 @@ export interface WikiCardsChunk extends Omit<ChatChunk, 'kind' | 'body'> {
   body: { pages?: WikiPage[]; cards?: WikiPage[] };
 }
 
-/** wiki_summary 帧：进入 Wiki 模式时后端推送的 KB 概览卡（body 为 WikiSummary）。 */
-export interface WikiSummaryChunk extends Omit<ChatChunk, 'kind' | 'body'> {
-  kind: 'wiki_summary';
-  body: WikiSummary;
-}
-
 export interface WikiUploadResult {
   ok: boolean;
   source_id: string;
@@ -1559,15 +1562,6 @@ export interface WikiUploadResult {
   message?: string;
   pages?: WikiPage[];
   issues?: string[];
-}
-
-export interface WikiSummary {
-  summary: string;
-  kb_id: string;
-  page_count?: number;
-  source_count?: number;
-  generated_at?: number;
-  status: 'ready' | 'generating' | 'empty' | 'stale';
 }
 
 export const backendApi = {
@@ -1795,6 +1789,12 @@ export const backendApi = {
     getJSON<{ used_tokens: number; max_tokens: number; ratio: number }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
   browserState: (sessionId: string) =>
     getJSON<{ ok: boolean; state: BrowserPageState }>(`/api/browser/${encodeURIComponent(sessionId)}/state`),
+  /** 读取指定标签页的正文（@ 提及标签页、存入 Wiki 共用）。ok:false 时带 error。 */
+  browserReadTab: (sessionId: string, tabId: string) =>
+    getJSON<{ ok: boolean; title: string; url: string; text: string; error?: string }>(
+      `/api/browser/${encodeURIComponent(sessionId)}/read-tab`,
+      { method: 'POST', ...jsonBody({ tab_id: tabId }) },
+    ),
   // record_* 动作返回 `recording` 而不是 `state`：录制态与页面控制态是正交的
   // 两件事，录制不改变 ControlMode，所以不复用 state 字段。
   browserControl: (sessionId: string, action: string, value = '') =>
@@ -1943,8 +1943,15 @@ export const backendApi = {
     return getJSON<{ items: LogEntry[]; total: number }>(`/api/system/logs${qs ? `?${qs}` : ''}`);
   },
 
-  upload: (filename: string, contentBase64: string) =>
-    getJSON<Attachment>('/api/upload', { method: 'POST', ...jsonBody({ filename, content: contentBase64 }) }),
+  upload: (filename: string, contentBase64: string, opts?: { sessionId?: string | undefined; kbId?: string | undefined }) => {
+    const body: { filename: string; content: string; session_id?: string; kb_id?: string } = {
+      filename,
+      content: contentBase64,
+    };
+    if (opts?.sessionId) body.session_id = opts.sessionId;
+    if (opts?.kbId) body.kb_id = opts.kbId;
+    return getJSON<Attachment>('/api/upload', { method: 'POST', ...jsonBody(body) });
+  },
   complete: (query: string, opts?: { cwd?: string; workspaceId?: string }) => {
     const params = new URLSearchParams({ query });
     if (opts?.cwd) params.set('cwd', opts.cwd);
@@ -2147,8 +2154,7 @@ export const backendApi = {
     }>(withKb('/api/wiki/pages', kbId), { method: 'POST', ...jsonBody(payload) }),
   wikiUpdatePage: (
     id: string,
-    payload: Pick<WikiPage, 'title' | 'content'> &
-      Partial<Pick<WikiPage, 'tags' | 'sources' | 'relations'>>,
+    payload: Partial<Pick<WikiPage, 'title' | 'content' | 'tags' | 'sources' | 'relations'>>,
     kbId?: string,
   ) =>
     getJSON<{
@@ -2169,8 +2175,6 @@ export const backendApi = {
       source_titles: WikiSourceTitles;
       source_files: WikiSourceFiles;
     }>(withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId)),
-  wikiSummary: (kbId?: string, force?: boolean) =>
-    getJSON<{ ok: boolean } & WikiSummary>(withKb(`/api/wiki/summary${force ? '?force=true' : ''}`, kbId)),
   /** 知识图谱（Phase 3）：全量节点 + 关系边，不走分页。 */
   wikiGraph: (kbId?: string) =>
     getJSON<{ ok: boolean; graph: WikiGraph }>(withKb('/api/wiki/graph', kbId)),
@@ -2183,6 +2187,12 @@ export const backendApi = {
       withKb('/api/wiki/ingest', kbId),
       { method: 'POST', ...jsonBody({ source_id: sourceId, session_id: sessionId ?? '' }) },
     ),
+  /** 把一段正文直接存进 Wiki（如浏览器标签页）；kb_id 缺省时后端回落默认 KB。 */
+  wikiCaptureText: (payload: { title: string; content: string; source_url?: string; kb_id?: string }) =>
+    getJSON<{ ok: boolean; source_id: string; pages: WikiPage[] }>('/api/wiki/capture', {
+      method: 'POST',
+      ...jsonBody(payload),
+    }),
   wikiCancelIngest: (sourceId: string, kbId?: string) =>
     getJSON<{ ok: boolean; cancelled?: boolean }>(withKb('/api/wiki/ingest/cancel', kbId), {
       method: 'POST',
@@ -2753,7 +2763,7 @@ export const workApi = {
   // 引用
   listReferences: (targetSessionId: string) =>
     getJSON<{ items: WorkReference[]; count: number }>(`/api/work/references?target_session_id=${encodeURIComponent(targetSessionId)}`),
-  createReference: (payload: { target_session_id: string; reference_type: string; source_id: string; source_link?: string }) =>
+  createReference: (payload: { target_session_id: string; reference_type: string; source_id: string; source_link?: string; snapshot_summary?: string }) =>
     getJSON<WorkReference>('/api/work/references', { method: 'POST', ...jsonBody(payload) }),
   deleteReference: (referenceId: string) =>
     getJSON<{ ok: boolean }>(`/api/work/references/${encodeURIComponent(referenceId)}`, { method: 'DELETE' }),

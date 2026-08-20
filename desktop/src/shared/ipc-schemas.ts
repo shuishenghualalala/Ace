@@ -252,8 +252,12 @@ export const SecurityRuleMutationArgs = {
 export interface SecurityAuditArgs {
   offset?: number;
   limit?: number;
-  actionType?: '' | 'approval_requested' | 'approval_decision' | 'exec_decision' | 'file_decision';
-  decision?: '' | 'allow' | 'deny' | 'pending' | 'ask' | 'once' | 'session' | 'always' | 'reject';
+  actionType?: '' | 'approval_requested' | 'approval_decision' | 'exec_decision'
+    | 'file_decision' | 'network_decision' | 'exec_result' | 'rule_created'
+    | 'rule_disabled' | 'rule_deleted' | 'audit_purged';
+  decision?: '' | 'allow' | 'deny' | 'pending' | 'ask' | 'once' | 'session'
+    | 'always' | 'reject' | 'completed' | 'failed' | 'cancelled' | 'error'
+    | 'enabled' | 'disabled' | 'deleted';
   sessionId?: string;
   sort?: 'newest' | 'oldest';
 }
@@ -268,7 +272,11 @@ export const SecurityAuditArgs = {
       if (item !== undefined) value[key] = Number(item);
     }
     const actionType = raw['actionType'];
-    const actionTypes = ['', 'approval_requested', 'approval_decision', 'exec_decision', 'file_decision'];
+    const actionTypes = [
+      '', 'approval_requested', 'approval_decision', 'exec_decision', 'file_decision',
+      'network_decision', 'exec_result', 'rule_created', 'rule_disabled', 'rule_deleted',
+      'audit_purged',
+    ];
     if (actionType !== undefined && !actionTypes.includes(String(actionType))) {
       return fail('actionType', 'unexpected audit action type');
     }
@@ -276,7 +284,10 @@ export const SecurityAuditArgs = {
       value.actionType = String(actionType) as NonNullable<SecurityAuditArgs['actionType']>;
     }
     const decision = raw['decision'];
-    const decisions = ['', 'allow', 'deny', 'pending', 'ask', 'once', 'session', 'always', 'reject'];
+    const decisions = [
+      '', 'allow', 'deny', 'pending', 'ask', 'once', 'session', 'always', 'reject',
+      'completed', 'failed', 'cancelled', 'error', 'enabled', 'disabled', 'deleted',
+    ];
     if (decision !== undefined && !decisions.includes(String(decision))) {
       return fail('decision', 'unexpected audit decision');
     }

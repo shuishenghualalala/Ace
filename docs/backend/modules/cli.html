@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CLI 子系统 · 后端模块文档</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:26px;font-weight:800;letter-spacing:-.5px;margin:0 0 6px}
+  .sub{color:var(--t3);margin-bottom:40px}
+  h2{font-size:20px;font-weight:700;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;font-weight:700;margin:22px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;border:none;padding:0}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  ul{padding-left:20px}
+  .warn{border-left:3px solid #d97706;background:#fffbeb;padding:12px 16px;margin:14px 0;border-radius:4px}
+  .ok{border-left:3px solid #16a34a;background:#f0fdf4;padding:12px 16px;margin:14px 0;border-radius:4px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+  .nav{margin-top:44px;color:var(--t3);font-size:13px;padding-top:16px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CLI 子系统</h1>
+  <div class="sub">crew/cli/ · 进程内命令树、非交互自动化、结构化输出 · 2026-08-13 重构</div>
+
+  <h2>1. 定位</h2>
+  <p>CLI 是 Crew 的本地自动化入口：默认交互式 REPL（<code>chat</code>），同时提供一次性对话（<code>run</code>）和覆盖全部后端模块的管理子命令。CLI 进程内直调 <code>build_app()</code> 装配的 service/store，不依赖 Gateway 或桌面端；与 occ 默认 CLI 的进程内架构一致。</p>
+  <div class="ok">
+    <b>自动化目标</b>：所有命令支持 <code>--json</code> 结构化输出，失败返回非零退出码，可直接接入 pytest、shell 脚本与 CI。
+  </div>
+
+  <h2>2. 架构</h2>
+  <h3>2.1 文件布局</h3>
+  <table>
+    <thead><tr><th>文件</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>crew/cli/main.py</code></td><td>全局参数提取（任意位置）、argparse 子命令树、统一分发与退出码。</td></tr>
+      <tr><td><code>crew/cli/app.py</code></td><td><code>CliContext</code> 懒加载 App、<code>running_app()</code> 生命周期、<code>CliResult</code>/<code>emit</code> 输出。</td></tr>
+      <tr><td><code>crew/cli/chat.py</code></td><td>交互 REPL 与一次性 <code>run</code>（text/json/stream-json）。</td></tr>
+      <tr><td><code>crew/cli/management.py</code></td><td>config / session / workspace / task / cron / system / migrate。</td></tr>
+      <tr><td><code>crew/cli/knowledge.py</code></td><td>wiki / skill。</td></tr>
+      <tr><td><code>crew/cli/integration.py</code></td><td>mcp / plugin / channel / runtime / browser / weixin-login。</td></tr>
+      <tr><td><code>crew/cli/security.py</code></td><td>security：审批模式、请求决策、规则、审计、capabilities。</td></tr>
+      <tr><td><code>crew/cli/content.py</code></td><td>site / work。</td></tr>
+      <tr><td><code>crew/cli/weixin_login.py</code></td><td>微信扫码登录（保留旧入口）。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.2 全局参数</h3>
+  <table>
+    <thead><tr><th>参数</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>--owner / -o</code></td><td>owner_account_id，默认 <code>CREW_CLI_ACCOUNT</code> 或 <code>local</code>。</td></tr>
+      <tr><td><code>--workspace-id</code></td><td>默认工作空间，默认 <code>default</code>。</td></tr>
+      <tr><td><code>--config</code></td><td>指定 config.yaml 路径。</td></tr>
+      <tr><td><code>--json</code></td><td>所有命令输出结构化 JSON。</td></tr>
+      <tr><td><code>--quiet</code></td><td>文本模式下抑制人类可读输出。</td></tr>
+    </tbody>
+  </table>
+  <p>全局参数可从命令行任意位置提取（例如 <code>crew --json cron list</code> 与 <code>crew cron list --json</code> 等价）。</p>
+
+  <h2>3. 命令组</h2>
+  <table>
+    <thead><tr><th>命令</th><th>覆盖能力</th></tr></thead>
+    <tbody>
+      <tr><td><code>chat</code> / <code>run</code></td><td>交互 REPL；一次性对话（<code>--mode</code>、<code>--session-id</code>、<code>--output-format</code>、<code>--permission-mode</code>、<code>--yes</code>）。</td></tr>
+      <tr><td><code>config</code></td><td>配置查看、模型 profile 增删改查与默认模型切换。</td></tr>
+      <tr><td><code>session</code></td><td>会话列表/历史/标题/归档/置顶/待办/计划/模型/Agent 配置/状态/上下文/删除/用量。</td></tr>
+      <tr><td><code>workspace</code></td><td>工作空间增删改查（删除级联会话清理）。</td></tr>
+      <tr><td><code>task</code></td><td>后台任务列表/详情/取消/等待/并发状态。</td></tr>
+      <tr><td><code>cron</code></td><td>定时任务列表/统计/创建/暂停/恢复/删除/立即执行/失败重试。</td></tr>
+      <tr><td><code>system</code></td><td>健康、资源指标、进程内日志查询、工具与工具集目录。</td></tr>
+      <tr><td><code>kanban</code></td><td>Dynamic Kanban 看板状态/暂停/恢复。</td></tr>
+      <tr><td><code>scenario</code></td><td>场景推荐、介绍话术与加载语。</td></tr>
+      <tr><td><code>wiki</code></td><td>知识库、页面、搜索、数据源、上传、入库、编译、图谱、问答、摘要、lint、Agent 会话。</td></tr>
+      <tr><td><code>skill</code></td><td>技能列表/安装/卸载/自进化配置。</td></tr>
+      <tr><td><code>mcp</code></td><td>serve / interaction-proxy、服务器配置增删改查与热重载、CUA Driver 安装管理。</td></tr>
+      <tr><td><code>plugin</code></td><td>插件状态与 per-owner 启用/禁用（含浏览器能力代次切换）。</td></tr>
+      <tr><td><code>channel</code></td><td>渠道列表、配置查看/保存、连接/断开/重连、账号删除、微信扫码登录。</td></tr>
+      <tr><td><code>runtime</code></td><td>外部 Runtime 扫描/注册/删除，外部 Agent/Team 增删查。</td></tr>
+      <tr><td><code>browser</code></td><td>doctor、会话状态、控制、本地 HTML 产物预览、清数据。</td></tr>
+      <tr><td><code>security</code></td><td>审批模式查看/切换、待审批列表、请求决策、规则启停/删除、审计列表/导出/清理、能力探针、fake-execution。</td></tr>
+      <tr><td><code>site</code></td><td>站点列表/详情/发布/导出/删除，灵感、看板、组件、自动化。</td></tr>
+      <tr><td><code>work</code></td><td>工作会话、工作项、引用、偏好、数据源、看板/报表、设置、模板、知识、索引。</td></tr>
+      <tr><td><code>migrate claim-legacy</code></td><td>认领未归属历史数据。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 安全命令</h2>
+  <p>安全命令直接调用 <code>crew.security_service</code> / <code>security_rules</code> / <code>security_audit</code>，等价于本机宿主身份，不需要桌面端 proof。安全写操作全部是显式子命令，不提供隐式一键放行开关。</p>
+  <table>
+    <thead><tr><th>命令</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>security check-terminal --command</code></td><td>终端守卫判定：hardline / dangerous / classify_command，输出 allow/ask/blocked。</td></tr>
+      <tr><td><code>security check-file --path --operation</code></td><td>文件读/写/删除/补丁策略判定，输出 base 策略/规则/审批结果。</td></tr>
+      <tr><td><code>security check-network --url</code></td><td>公网目标解析与联网授权判定。</td></tr>
+      <tr><td><code>security fake-file-actions / fake-network-actions</code></td><td>制造文件/网络审批请求，支持 <code>--decision</code> 同进程决策。</td></tr>
+      <tr><td><code>security sandbox-run</code></td><td>通过原生安全运行时执行命令，验证文件/网络沙箱边界。</td></tr>
+    </tbody>
+  </table>
+  <div class="warn">
+    <b>进程内审批状态</b>：审批请求保存在当前进程内存中。跨 CLI 进程无法看到另一进程创建的 pending 请求；测试完整决策链路时用 <code>security fake-executions --decision &lt;once|session|always|reject&gt;</code> 在同一进程内创建并立即决策。
+  </div>
+
+  <h2>5. 测试</h2>
+  <p>自动化测试在 <code>tests/test_cli.py</code>：命令树、配置、工作空间/会话 CRUD、cron、wiki、安全模式与决策、非交互 run、只读内容命令。运行：</p>
+  <pre><code>pytest tests/test_cli.py -q
+ruff check crew/cli tests/test_cli.py</code></pre>
+
+  <div class="nav">返回：<a href="index.html">后端模块索引</a></div>
+</div>
+</body>
+</html>

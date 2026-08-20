@@ -20,6 +20,7 @@ from crew.security.models import (
     AdditionalPermissionProfile,
     NetworkAccess,
     NetworkEntry,
+    SandboxPermissions,
 )
 
 
@@ -207,7 +208,10 @@ def build_external_runtime_network_permissions(
         seen.add(key)
         if len(entries) >= _MAX_RUNTIME_CONFIG_ENDPOINTS:
             break
-    return AdditionalPermissionProfile(network=tuple(entries))
+    return AdditionalPermissionProfile(
+        network=tuple(entries),
+        sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+    )
 
 
 def merge_additional_permission_profiles(
@@ -215,6 +219,14 @@ def merge_additional_permission_profiles(
 ) -> AdditionalPermissionProfile:
     """Combine independent host-owned grants without broadening their scope."""
 
+    sandbox_permissions = next(
+        (
+            profile.sandbox_permissions
+            for profile in profiles
+            if profile.sandbox_permissions is not SandboxPermissions.USE_DEFAULT
+        ),
+        SandboxPermissions.USE_DEFAULT,
+    )
     return AdditionalPermissionProfile(
         filesystem=tuple(dict.fromkeys(
             entry for profile in profiles for entry in profile.filesystem
@@ -223,6 +235,7 @@ def merge_additional_permission_profiles(
             entry for profile in profiles for entry in profile.network
         )),
         allow_local_binding=any(profile.allow_local_binding for profile in profiles),
+        sandbox_permissions=sandbox_permissions,
     )
 
 

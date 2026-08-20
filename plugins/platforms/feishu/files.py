@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from crew.state.logging import get_logger
+from crew.tools.file_utils import read_verified_bytes
 
 log = get_logger("platform.feishu")
 
@@ -86,7 +87,7 @@ def _file_type_for(filename: str) -> str:
 def _upload_image_sync(client: Any, path: str) -> str:
     from lark_oapi.api.im.v1 import CreateImageRequest, CreateImageRequestBody
 
-    with open(path, "rb") as fh:
+    with io.BytesIO(read_verified_bytes(Path(path), max_bytes=30 * 1024 * 1024)) as fh:
         body = CreateImageRequestBody.builder().image_type("message").image(fh).build()
         request = CreateImageRequest.builder().request_body(body).build()
         resp = client.im.v1.image.create(request)
@@ -102,7 +103,7 @@ def _upload_file_sync(client: Any, path: str) -> str:
     from lark_oapi.api.im.v1 import CreateFileRequest, CreateFileRequestBody
 
     filename = os.path.basename(path)
-    with open(path, "rb") as fh:
+    with io.BytesIO(read_verified_bytes(Path(path), max_bytes=30 * 1024 * 1024)) as fh:
         body = (
             CreateFileRequestBody.builder()
             .file_type(_file_type_for(filename)).file_name(filename).file(fh).build()

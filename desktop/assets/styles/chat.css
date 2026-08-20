@@ -2951,7 +2951,6 @@ button.chat-message-file:hover {
 }
 
 /* ===== 追问选择框（ask_followup_question）— 对齐 web FollowupQuestionCard ===== */
-.followup-card-wrap--permission,
 .followup-card-wrap--staffing {
   position: fixed;
   inset: 0;
@@ -2962,6 +2961,17 @@ button.chat-message-file:hover {
   background: var(--mw-status-info-bg);
   overscroll-behavior: contain;
   animation: permission-backdrop-in 140ms ease-out both;
+}
+.followup-card-wrap--permission {
+  position: fixed;
+  left: var(--permission-card-left, auto);
+  right: var(--permission-card-right, clamp(var(--mw-space-4), 3vw, var(--mw-space-7)));
+  bottom: var(--permission-card-bottom, clamp(var(--mw-space-4), 3vw, var(--mw-space-7)));
+  z-index: var(--mw-z-dialog);
+  width: var(--permission-card-width, min(440px, calc(100vw - 32px)));
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+  animation: permission-floating-in 160ms cubic-bezier(.2, .8, .2, 1) both;
 }
 .followup-card {
   width: min(100%, 720px);
@@ -2975,7 +2985,7 @@ button.chat-message-file:hover {
   scroll-margin-bottom: 120px;
 }
 .followup-card--permission {
-  width: min(520px, calc(100vw - 32px));
+  width: 100%;
   max-height: min(680px, calc(100vh - 48px));
   margin: 0;
   padding: 0;
@@ -2984,7 +2994,7 @@ button.chat-message-file:hover {
   border-radius: var(--mw-radius-4);
   background: var(--mw-bg-surface);
   box-shadow: 0 24px 80px color-mix(in srgb, var(--mw-black) 24%, transparent), 0 2px 8px color-mix(in srgb, var(--mw-black) 18%, transparent);
-  animation: permission-dialog-in 160ms cubic-bezier(.2, .8, .2, 1) both;
+  pointer-events: auto;
 }
 .followup-card--staffing {
   width: min(560px, calc(100vw - 32px));
@@ -3410,7 +3420,6 @@ button.chat-message-file:hover {
   outline-offset: 2px;
 }
 @media (max-width: 640px) {
-  .followup-card-wrap--permission,
   .followup-card-wrap--staffing {
     padding: var(--mw-space-4);
   }
@@ -3453,6 +3462,11 @@ button.chat-message-file:hover {
 
 @keyframes permission-dialog-in {
   from { opacity: 0; transform: translateY(5px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes permission-floating-in {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 

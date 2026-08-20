@@ -2591,7 +2591,10 @@ function bindInspector(): void {
     if (!canOpenInspector() && !(activeTab === 'browser' && state.activeSessionId) && inspectorOpen) closeInspector();
   });
   // 会话级模型切换 → 重拉网关用量并刷新「上下文」页（供应商/模型/上下文限制随会话模型变化）
-  window.addEventListener('session:model-changed', () => {
+  window.addEventListener('session:model-changed', (ev) => {
+    // 只响应当前活跃会话：wiki 内嵌等会话的模型事件与本面板无关，不白白重拉。
+    const sid = (ev as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+    if (sid && sid !== state.activeSessionId) return;
     void loadInspectorContext(state.activeSessionId);
   });
   // 设置中心里的「检查器开关」改了 —— 同步 UI 状态
