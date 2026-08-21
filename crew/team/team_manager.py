@@ -51,6 +51,7 @@ from crew.core.interfaces import (
     TaskManager,
     TeamManager,
 )
+from crew.core.text_parsing import extract_json_object
 from crew.core.types import Message
 from crew.plugins.manager import PluginManager
 from crew.state.config import Config
@@ -4737,16 +4738,7 @@ class InProcessTeamManager(TeamManager):
     @staticmethod
     def _parse_leader_review_decision(text: str) -> dict[str, str]:
         body = str(text or "").strip()
-        data: dict[str, Any] = {}
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", body, flags=re.DOTALL)
-        candidate = fenced.group(1) if fenced else body
-        if "{" in candidate and "}" in candidate:
-            try:
-                parsed = json.loads(candidate[candidate.find("{"):candidate.rfind("}") + 1])
-                if isinstance(parsed, dict):
-                    data = parsed
-            except (TypeError, ValueError, json.JSONDecodeError):
-                data = {}
+        data = extract_json_object(body) or {}
 
         allowed_actions = {"approve", "revise", "ask_user", "block"}
         action = str(data.get("action") or "").strip().lower()
@@ -4776,18 +4768,7 @@ class InProcessTeamManager(TeamManager):
 
     @staticmethod
     def _json_object_from_text(text: str) -> dict[str, Any]:
-        body = str(text or "").strip()
-        if not body:
-            return {}
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", body, flags=re.DOTALL)
-        candidate = fenced.group(1) if fenced else body
-        if "{" not in candidate or "}" not in candidate:
-            return {}
-        try:
-            parsed = json.loads(candidate[candidate.find("{"):candidate.rfind("}") + 1])
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+        return extract_json_object(text) or {}
 
     @staticmethod
     def _clean_display_patch_value(value: Any, *, limit: int = 24) -> str:

@@ -18,6 +18,7 @@ from crew.core.errors import ToolError
 from crew.core.interfaces import LLMProvider
 from crew.core.mocks import InMemorySessionStore, NullMemory
 from crew.core.runctx import current_agent_id, current_agent_workdir
+from crew.core.text_parsing import extract_json_object
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
 from crew.dynamickanban.store import SQLiteKanbanStore
 from crew.gateway.auth import AccountContext
@@ -834,6 +835,17 @@ def test_team_result_projection_builds_structured_contract():
         "风险：未发现阻断问题",
         "建议：进入交付",
     ]
+
+
+def test_team_json_parser_handles_nested_objects_inside_model_fences():
+    parsed = extract_json_object(
+        '模型说明\n```json\n{"action":"revise","metadata":{"required":["tests"]}}\n```\n'
+    )
+
+    assert parsed == {
+        "action": "revise",
+        "metadata": {"required": ["tests"]},
+    }
 
 
 def test_team_result_projection_keeps_useful_command_evidence_untruncated():

@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +22,7 @@ from crew.team.formation import (
     fast_team_suggestion as fast_team_suggestion,
     suggest_role_description as suggest_role_description,
 )
+from crew.core.text_parsing import extract_json_object
 
 if TYPE_CHECKING:
     from crew.app import CrewApp
@@ -200,24 +200,6 @@ def role_markdown(role_name: str, agent: dict, workflow: str, description: str, 
         "- 执行：按角色完成子任务，并保留可复核的过程信息。",
         "- 汇总：由 Leader 对齐口径、检查遗漏并形成最终输出。",
     ])
-
-
-def extract_json_object(text: str) -> dict | None:
-    """从可能含前后噪声的文本中抽取首个 JSON 对象。"""
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        value = json.loads(text[start : end + 1])
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        return None
 
 
 # ---------------------------------------------------------------------------

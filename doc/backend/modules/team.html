@@ -508,4 +508,13 @@ graph TD
   <li><b>验证：</b>补充 Team 内部事件 request_id 和父 final/Leader summary 稳定关联测试；本次未新增模块、表或接口。</li>
 </ul>
 
+<h2>158. 2026-08-21 Team 结构化响应解析收敛</h2>
+<ul>
+  <li><b>公共能力：</b>新增一个底层 <code>crew/core/text_parsing.py</code>，统一 Team 与 Gateway 从模型说明文字/代码围栏中提取 JSON 对象。</li>
+  <li><b>解析方式：</b>使用 <code>json.JSONDecoder.raw_decode</code> 处理嵌套对象，不再通过 <code>\{.*?\}</code> 或首尾大括号猜测 JSON 边界。</li>
+  <li><b>职责边界：</b>公共解析器只负责提取 JSON；TeamTurnDecision、GraphPlanner、Leader Review 仍分别负责自己的字段和 schema 校验。</li>
+  <li><b>兼容：</b>旧的 Gateway 公共函数保留原导出位置，但实现统一转向底层解析器；本次未新增业务模块、表或接口。</li>
+  <li><b>验证：</b>新增嵌套 JSON 代码围栏测试，并覆盖 Team 规划、Leader Review 和 Gateway 原有解析调用。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

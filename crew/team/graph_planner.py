@@ -6,12 +6,12 @@ import asyncio
 import hashlib
 import inspect
 import json
-import re
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from crew.core.types import ChatResponse, Message
+from crew.core.text_parsing import extract_json_object
 from crew.dynamickanban.models import PlanEdge, PlanNode, PlanResult
 from crew.dynamickanban.plan_graph import PlanGraph
 from crew.team import flow_builder
@@ -1222,7 +1222,7 @@ async def _race_provider_text(
             try:
                 _json_from_text("".join(stream_chunks))
                 return "".join(stream_chunks)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 pass
         return "".join(stream_chunks)
 
@@ -1526,9 +1526,6 @@ async def _planning_decision_with_llm(
         raise PlanningDecisionFailure("provider_error", str(exc) or exc.__class__.__name__, diagnostics) from exc
     try:
         data = _json_from_text(text)
-    except json.JSONDecodeError as exc:
-        diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure("invalid_json", str(exc), diagnostics) from exc
     except ValueError as exc:
         diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         error_type = (
@@ -1563,16 +1560,10 @@ async def _planning_decision_with_llm(
 
 def _json_from_text(text: str) -> dict[str, Any]:
     body = str(text or "").strip()
-    if not body:
-        raise ValueError("empty LLM graph response")
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", body, flags=re.DOTALL)
-    if fenced:
-        body = fenced.group(1)
-    elif "{" in body and "}" in body:
-        body = body[body.find("{"):body.rfind("}") + 1]
-    parsed = json.loads(body)
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM graph response must be a JSON object")
+    parsed = extract_json_object(text)
+    if parsed is None:
+        message = "empty LLM graph response" if not body else "invalid LLM graph JSON"
+        raise ValueError(message)
     return parsed
 
 
