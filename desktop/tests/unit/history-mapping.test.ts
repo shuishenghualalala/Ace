@@ -287,6 +287,29 @@ describe('Team Session history mapping', () => {
     expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: 'tool-1', status: 'done', result: 'ok' });
   });
 
+  it('does not merge same-node frames when explicit requests conflict', () => {
+    const first = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '第一回合',
+      event_type: 'team_stream',
+      display_mode: 'stream',
+      node_id: 'implement_core',
+      source_session_id: 'parent::turn::shared::coder',
+      request_id: 'request_1',
+    });
+    const second = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '第二回合',
+      event_type: 'team_stream',
+      display_mode: 'stream',
+      node_id: 'implement_core',
+      source_session_id: 'parent::turn::shared::coder',
+      request_id: 'request_2',
+    });
+
+    expect(mergeTeamInternalMessage([first], second, { append: true })).toHaveLength(2);
+  });
+
   it('uses the single-agent overlap merge for cumulative Team thinking frames', () => {
     const first = mapBackendHistoryItem({
       role: 'team_internal',

@@ -220,6 +220,21 @@ describe("mapHistoryItems", () => {
     expect(messages[0].processText).toBeUndefined();
   });
 
+  it("does not merge same-node frames when explicit requests conflict", () => {
+    const first = mapHistoryItems([teamItem({
+      content: "第一回合",
+      source_session_id: "web_demo::turn::shared::coder",
+      request_id: "request_1",
+    })])[0];
+    const second = mapHistoryItems([teamItem({
+      content: "第二回合",
+      source_session_id: "web_demo::turn::shared::coder",
+      request_id: "request_2",
+    })])[0];
+
+    expect(mergeTeamInternalMessage([first], second, { append: true })).toHaveLength(2);
+  });
+
   it("does not let completion without source session overwrite an existing node", () => {
     const items: BackendHistoryItem[] = [
       teamItem({

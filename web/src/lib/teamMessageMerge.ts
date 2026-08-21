@@ -77,6 +77,12 @@ function sameTeamRequest(existing: UiMessage, incoming: UiMessage): boolean {
   );
 }
 
+function hasDifferentTeamRequests(existing: UiMessage, incoming: UiMessage): boolean {
+  const existingRequestId = String(existing.requestId || "").trim();
+  const incomingRequestId = String(incoming.requestId || "").trim();
+  return Boolean(existingRequestId && incomingRequestId && existingRequestId !== incomingRequestId);
+}
+
 function isDuplicateTeamEvent(existing: UiMessage, incoming: UiMessage): boolean {
   return existing.role === "team_internal"
     && incoming.role === "team_internal"
@@ -115,6 +121,7 @@ function teamTurnKey(message: UiMessage): string {
 function matchesTeamNode(existing: UiMessage, incoming: UiMessage): boolean {
   if (existing.role !== "team_internal") return false;
   if (!isTeamStream(existing) && !isTeamNodeResult(existing) && !isTeamPlanningProgress(existing)) return false;
+  if (hasDifferentTeamRequests(existing, incoming)) return false;
   if (incoming.nodeId && existing.nodeId === incoming.nodeId) {
     const existingTurn = teamTurnKey(existing);
     const incomingTurn = teamTurnKey(incoming);

@@ -346,6 +346,7 @@ function teamTurnKey(message: ChatMessage): string {
 function matchesTeamNode(existing: ChatMessage, incoming: ChatMessage): boolean {
   if (existing.role !== 'team_internal') return false;
   if (!isTeamStream(existing) && !isTeamNodeResult(existing) && !isTeamPlanningProgress(existing)) return false;
+  if (hasDifferentTeamRequests(existing, incoming)) return false;
   if (incoming.nodeId && existing.nodeId === incoming.nodeId) {
     const existingTurn = teamTurnKey(existing);
     const incomingTurn = teamTurnKey(incoming);
@@ -371,6 +372,12 @@ function sameTeamRequest(existing: ChatMessage, incoming: ChatMessage): boolean 
     && incoming.sourceSessionId
     && existing.sourceSessionId === incoming.sourceSessionId,
   );
+}
+
+function hasDifferentTeamRequests(existing: ChatMessage, incoming: ChatMessage): boolean {
+  const existingRequestId = String(existing.requestId || '').trim();
+  const incomingRequestId = String(incoming.requestId || '').trim();
+  return Boolean(existingRequestId && incomingRequestId && existingRequestId !== incomingRequestId);
 }
 
 function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boolean {

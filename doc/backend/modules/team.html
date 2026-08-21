@@ -606,4 +606,12 @@ graph TD
   <li><b>验证：</b>新增不同 request 同标题的任务投影回归，并运行 Team 全量测试和 Python 编译检查。</li>
 </ul>
 
+<h2>170. 2026-08-21 Web/Desktop Team 流式帧请求冲突隔离</h2>
+<ul>
+  <li><b>合并条件：</b>同节点流式帧继续按 node/source 兼容旧历史，但当双方都有不同 <code>requestId</code> 时立即视为不同回合，不再合并正文、thinking 或工具过程。</li>
+  <li><b>兼容边界：</b>只有一侧缺少 requestId 时仍允许历史 sourceSessionId 回退；新数据的显式请求关联优先级更高。</li>
+  <li><b>范围：</b>Web 与 Desktop 合并器保持同一语义，不改变后端事件协议、节点执行和同 request 的累计帧合并。</li>
+  <li><b>验证：</b>新增同 node/source、不同 request 的流式帧回归；两端历史/消息/看板测试与 typecheck 均通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
