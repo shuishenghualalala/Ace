@@ -574,4 +574,12 @@ graph TD
   <li><b>验证：</b>Web 历史/消息/看板测试为 <code>42 passed</code>，Desktop 历史映射测试为 <code>22 passed</code>，两端 typecheck 通过。</li>
 </ul>
 
+<h2>166. 2026-08-21 Team thinking 归一化职责收敛</h2>
+<ul>
+  <li><b>职责：</b>旧版按段落持久化 thinking 的修复逻辑归入现有 <code>result_presenter.py</code>，与结果清洗、摘要和展示文本处理放在同一职责边界。</li>
+  <li><b>管理器瘦身：</b><code>team_manager.py</code> 删除重复实现，仅保留历史模块级名称的兼容别名，不新增文件或调用层。</li>
+  <li><b>兼容：</b>旧数据仍按原规则合并标点、括号和短 token；不足以判断为旧分段格式时原样返回。</li>
+  <li><b>验证：</b>复用既有 legacy thinking 回归，并运行 Team 全量测试和 Python 编译检查。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

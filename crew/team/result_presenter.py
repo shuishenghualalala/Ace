@@ -134,6 +134,28 @@ def is_team_chat_noise(text: str) -> bool:
     return stripped.startswith(noise_prefixes)
 
 
+def normalize_legacy_chunked_thinking(value: str) -> str:
+    """Repair thinking persisted by the old one-delta-per-paragraph writer."""
+
+    text = str(value or "")
+    blocks = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
+    if len(blocks) < 6:
+        return text
+    token_like = sum(bool(re.fullmatch(r"\S{1,28}", part)) for part in blocks)
+    if token_like / len(blocks) < 0.8:
+        return text
+
+    joined = blocks[0]
+    for block in blocks[1:]:
+        if re.fullmatch(r"[.,!?;:%)\]}，。！？；：、]+", block) or block.startswith(("'", "’")):
+            joined += block
+        elif joined.endswith(("(", "[", "{", "'", "’")):
+            joined += block
+        else:
+            joined += f" {block}"
+    return joined
+
+
 def _node_dict_metadata(node: dict[str, Any]) -> dict[str, Any]:
     metadata = node.get("metadata")
     if isinstance(metadata, dict):

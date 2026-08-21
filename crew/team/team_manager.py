@@ -108,6 +108,8 @@ from crew.tools.registry import Registry
 
 log = get_logger("team")
 TeamKey = tuple[str, str]
+# Keep the historical module-level name for callers importing this compatibility helper.
+_normalize_legacy_chunked_thinking = team_presenter.normalize_legacy_chunked_thinking
 _TEAM_PLAN_TO_KANBAN_STATUS = {
     "pending": "pending",
     "in_progress": "running",
@@ -148,28 +150,6 @@ def _join_stream_fragments(parts: list[str]) -> str:
     """Join raw model deltas without changing their token boundaries."""
 
     return "".join(str(part or "") for part in parts).strip()
-
-
-def _normalize_legacy_chunked_thinking(value: str) -> str:
-    """Repair Team thinking persisted by the old one-delta-per-paragraph writer."""
-
-    text = str(value or "")
-    blocks = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
-    if len(blocks) < 6:
-        return text
-    token_like = sum(bool(re.fullmatch(r"\S{1,28}", part)) for part in blocks)
-    if token_like / len(blocks) < 0.8:
-        return text
-
-    joined = blocks[0]
-    for block in blocks[1:]:
-        if re.fullmatch(r"[.,!?;:%)\]}，。！？；：、]+", block) or block.startswith(("'", "’")):
-            joined += block
-        elif joined.endswith(("(", "[", "{", "'", "’")):
-            joined += block
-        else:
-            joined += f" {block}"
-    return joined
 
 
 def _visible_session_id(session_id: str) -> str:
