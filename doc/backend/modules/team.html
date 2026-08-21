@@ -483,4 +483,12 @@ graph TD
   <li><b>验证：</b>新增实时节点事件持久化、字段关联和同事件更新幂等测试；本次未新增模块、表或前端协议。</li>
 </ul>
 
+<h2>155. 2026-08-21 Team 看板节点日志单一来源</h2>
+<ul>
+  <li><b>节点日志来源：</b>Web 与 Desktop 的 TaskBoard 只读取 Team task projection 中的结构化 <code>execution_events</code> 和节点错误，不再从聊天消息、成员名称、task id 或 delegate task id 反推执行过程。</li>
+  <li><b>语义边界：</b>聊天负责群聊叙事，看板负责节点运行事实；同一条成员过程不会因聊天消息和看板投影各自命中而重复展示。</li>
+  <li><b>兼容处理：</b>仅保留结构化事件标题 <code>节点承接</code> 的明确占位事件过滤，不再用“将按 DAG 节点”之类的自然语言正则控制 UI。</li>
+  <li><b>验证：</b>Web TaskBoard 节点日志测试改为验证结构化事件入口；Desktop/Web 不再保留按消息文本匹配节点日志的重复逻辑。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

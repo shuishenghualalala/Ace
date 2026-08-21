@@ -152,7 +152,7 @@ describe("nodeLogs", () => {
       }),
     };
 
-    expect(nodeLogs(node, [])).toEqual([]);
+    expect(nodeLogs(node)).toEqual([]);
   });
 
   it("filters legacy handoff execution events from node logs", () => {
@@ -177,7 +177,7 @@ describe("nodeLogs", () => {
       }),
     };
 
-    expect(nodeLogs(node, [])).toEqual([]);
+    expect(nodeLogs(node)).toEqual([]);
   });
 
   it("keeps structured execution events as log entries", () => {
@@ -202,7 +202,7 @@ describe("nodeLogs", () => {
       }),
     };
 
-    expect(nodeLogs(node, [])).toEqual([
+    expect(nodeLogs(node)).toEqual([
       expect.objectContaining({
         kind: "tool",
         title: "运行测试",

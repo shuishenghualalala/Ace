@@ -567,10 +567,7 @@ function logText(value: unknown): string {
   return text.length > 1_600 ? `${text.slice(0, 1_600)}\n...` : text;
 }
 
-function nodeLogs(node: TeamFlowNode, messages: ChatMessage[]): NodeLogEntry[] {
-  const owner = cleanAgentName(node.owner).toLowerCase();
-  const taskId = String(node.raw.task_id || node.raw.id || '').toLowerCase();
-  const delegateTaskId = String(node.raw.progress?.delegate_task_id || '').toLowerCase();
+function nodeLogs(node: TeamFlowNode): NodeLogEntry[] {
   const entries: NodeLogEntry[] = [];
   const seen = new Set<string>();
   const add = (entry: NodeLogEntry): void => {
@@ -587,28 +584,9 @@ function nodeLogs(node: TeamFlowNode, messages: ChatMessage[]): NodeLogEntry[] {
     const rawKind = String(event.kind || event.event_type || 'status');
     const title = String(event.event_title || event.title || '执行事件');
     const body = logText(event.event_text || event.body || event.message);
-    if (title === '节点承接' || /将按\s*DAG\s*节点/.test(body)) continue;
+    if (title === '节点承接') continue;
     const kind: NodeLogEntry['kind'] = rawKind === 'tool' || rawKind === 'thinking' || rawKind === 'assistant' ? rawKind : 'status';
     add({ id: String(event.id || `${node.id}_event_${entries.length}`), kind, title, body, icon: String(event.event_icon || rawKind) });
-  }
-  const relevant = messages.filter((message) => {
-    if (message.role !== 'assistant' && message.role !== 'status') return false;
-    const agent = cleanAgentName(message.agentName).toLowerCase();
-    const text = plainText(message.content).toLowerCase();
-    return Boolean(owner && agent === owner) || Boolean(taskId && text.includes(taskId)) || Boolean(delegateTaskId && text.includes(delegateTaskId));
-  });
-  for (const message of relevant.slice(-4)) {
-    if (message.thinking) add({ id: `${message.id}_thinking`, kind: 'thinking', title: '思考过程', body: logText(message.thinking), icon: 'thinking' });
-    for (const tool of message.toolCalls || []) {
-      add({
-        id: `${message.id}_${tool.toolCallId}`,
-        kind: 'tool',
-        title: `工具调用：${tool.name}`,
-        body: logText([tool.args, tool.result].filter(Boolean).join('\n')) || '工具调用已记录。',
-        icon: 'tool',
-      });
-    }
-    if (message.content) add({ id: `${message.id}_assistant`, kind: 'assistant', title: '执行输出', body: logText(message.content), icon: 'assistant' });
   }
   if (!entries.length && node.raw.error) add({ id: `${node.id}_error`, kind: 'tool', title: '错误日志', body: logText(node.raw.error), icon: 'tool' });
   return entries.slice(-8);
@@ -923,7 +901,7 @@ function renderNode(
   if (!isExpanded) {
     return `<article class="flow-node is-${node.status}"><div class="flow-node__card"><button class="flow-node__summary-btn" type="button" data-team-node="${htmlAttr(node.id)}" aria-expanded="false"><div class="flow-node__top"><span class="agent-chip">主责：${escapeHtml(displayAgent)}</span><span class="flow-status is-${node.status}">${statusLabel[node.status]}</span></div><strong class="flow-node__title" title="${htmlAttr(node.fullTitle || node.title)}">${escapeHtml(node.title)}</strong>${dependency ? `<span class="flow-node__dependency">依赖：${escapeHtml(dependency)}</span>` : ''}<span class="flow-node__hint">点击展开详情</span></button></div></article>`;
   }
-  const logs = nodeLogs(node, messages);
+  const logs = nodeLogs(node);
   const paths = artifactPaths(node.raw);
   const duration = durationLabel(node.raw);
   const toolCount = logs.filter((entry) => entry.kind === 'tool').length;

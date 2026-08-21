@@ -664,22 +664,7 @@ function dependencyLabel(node: FlowNode, nodes: FlowNode[]): string {
   return parents.map((parentId) => compactText(byId.get(parentId) || parentId, 18)).join("、");
 }
 
-export function nodeLogs(node: FlowNode, messages: UiMessage[]): NodeLogEntry[] {
-  const owner = cleanAgentName(node.owner).toLowerCase();
-  const taskId = String(node.raw.task_id || node.raw.id || "");
-  const delegateTaskId = String(node.raw.progress?.delegate_task_id || "");
-  const workflowLane = progressText(node.raw, "workflow_lane");
-  const isLeaderNode = owner === "leader" || workflowLane === "lead" || workflowLane === "summary";
-  const relevant = messages.filter((message) => {
-    if (message.role !== "assistant" && message.role !== "tool") return false;
-    const source = String(message.sourceSessionId || "").toLowerCase();
-    const text = plainTaskText(message.text).toLowerCase();
-    const sourceMatches = owner && (source.endsWith(`::${owner}`) || source.includes(`::${owner}::`));
-    const sourceFitsNode = isLeaderNode ? sourceMatches || !source.includes("::turn::") : sourceMatches;
-    const textMatches = Boolean(taskId && text.includes(taskId.toLowerCase()))
-      || Boolean(delegateTaskId && text.includes(delegateTaskId.toLowerCase()));
-    return sourceFitsNode || textMatches;
-  });
+export function nodeLogs(node: FlowNode): NodeLogEntry[] {
   const entries: NodeLogEntry[] = [];
   const seen = new Set<string>();
   const pushEntry = (entry: NodeLogEntry) => {
@@ -695,7 +680,7 @@ export function nodeLogs(node: FlowNode, messages: UiMessage[]): NodeLogEntry[] 
     const kind = String(event.kind || event.event_type || "status");
     const title = String(event.event_title || event.title || "执行事件");
     const body = logText(String(event.event_text || event.body || event.message || ""));
-    if (title === "节点承接" || /将按\s*DAG\s*节点/.test(body)) continue;
+    if (title === "节点承接") continue;
     pushEntry({
       id: String(event.id || `${node.id}_event_${entries.length}`),
       kind: kind === "tool" ? "tool" : kind === "thinking" ? "thinking" : kind === "assistant" ? "assistant" : "status",
@@ -703,35 +688,6 @@ export function nodeLogs(node: FlowNode, messages: UiMessage[]): NodeLogEntry[] 
       body,
       icon: String(event.event_icon || kind || "status"),
     });
-  }
-  for (const message of relevant.slice(-4)) {
-    if (message.thinking) {
-      pushEntry({
-        id: `${message.id}_thinking`,
-        kind: "thinking",
-        title: "思考过程",
-        body: logText(message.thinking),
-        icon: "thinking",
-      });
-    }
-    for (const tool of message.toolCalls || []) {
-      pushEntry({
-        id: `${message.id}_${tool.toolCallId}`,
-        kind: "tool",
-        title: `工具调用：${tool.name}`,
-        body: logText([tool.args, tool.result].filter(Boolean).join("\n")) || "工具调用已记录。",
-        icon: "tool",
-      });
-    }
-    if (message.text) {
-      pushEntry({
-        id: `${message.id}_assistant`,
-        kind: "assistant",
-        title: "执行输出",
-        body: logText(message.text),
-        icon: "assistant",
-      });
-    }
   }
   if (entries.length === 0 && node.raw.error) {
     entries.push({
@@ -1212,7 +1168,7 @@ export default function TaskBoard({
                           {expandedNodes.has(node.id) && (
                             <div className="flow-node__detail">
                               {(() => {
-                                const logs = nodeLogs(node, messages);
+                                const logs = nodeLogs(node);
                                 const paths = artifactPaths(node.raw);
                                 const duration = durationLabel(node.raw);
                                 const toolCount = logs.filter((entry) => entry.kind === "tool").length;
