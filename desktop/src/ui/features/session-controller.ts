@@ -214,7 +214,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
     // todoSnapshot 挂到最后一条 assistant（最新进度）。两者可能不是同一条消息，分开挂载。
     const wantPlan = Boolean(planState?.has_plan && planState.plan);
     const rawTodos = Array.isArray(todoState?.todos) ? todoState.todos : [];
-    const todos: TodoItem[] = rawTodos.map((t: any) => ({
+    const todos: TodoItem[] = rawTodos.map((t) => ({
       id: typeof t.id === 'string' ? t.id : '?',
       content: typeof t.content === 'string' ? t.content : '',
       status:

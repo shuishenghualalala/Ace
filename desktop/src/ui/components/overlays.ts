@@ -205,7 +205,6 @@ export function openMenu(options: MenuOptions): OverlayHandle<HTMLDivElement> {
     menu.append(button);
   }
 
-  let handle: OverlayHandle<HTMLDivElement>;
   const enabledItems = (): HTMLButtonElement[] => [
     ...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'),
   ];
@@ -234,7 +233,7 @@ export function openMenu(options: MenuOptions): OverlayHandle<HTMLDivElement> {
   };
   menu.addEventListener('click', handleClick);
   menu.addEventListener('keydown', handleKeydown);
-  handle = mountOverlay({
+  const handle = mountOverlay({
     root: menu,
     panel: menu,
     trigger: options.anchor,
@@ -316,8 +315,6 @@ function openModal(
   const controls: Array<{ dispose(): void }> = [];
   const titleId = `mw-${kind}-title-${++dialogId}`;
   const dismissible = options.dismissible ?? true;
-  let handle: OverlayHandle<HTMLDivElement>;
-
   layer.className =
     kind === 'drawer' ? 'mw-overlay-layer mw-overlay-layer--drawer' : 'mw-overlay-layer';
   panel.className = kind === 'drawer' ? 'mw-drawer' : 'mw-dialog';
@@ -364,7 +361,7 @@ function openModal(
   layer.append(panel);
   const contentFocus = focusableElements(body)[0];
   const actionFocus = footer.querySelector<HTMLElement>('.mw-button:not(:disabled)') ?? undefined;
-  handle = mountOverlay({
+  const handle = mountOverlay({
     root: layer,
     panel,
     trigger: options.trigger,

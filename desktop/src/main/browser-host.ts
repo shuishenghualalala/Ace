@@ -5562,8 +5562,13 @@ export class BrowserHost extends EventEmitter {
       }
     });
     // Electron 43 类型定义未包含 before-mouse-event，但运行时与单测均依赖它。
-    // 用 any 绕过类型检查，保留原有行为。
-    (contents as any).on('before-mouse-event', (event: Electron.Event, input: { type?: string }) => {
+    const contentsWithMouseEvents = contents as Electron.WebContents & {
+      on(
+        event: 'before-mouse-event',
+        listener: (event: Electron.Event, input: { type?: string }) => void,
+      ): Electron.WebContents;
+    };
+    contentsWithMouseEvents.on('before-mouse-event', (event: Electron.Event, input: { type?: string }) => {
       const type = String(input.type || '');
       if (tab.mode === 'human' && tab.automationDepth === 0) {
         if (type === 'mouseDown') {
@@ -6835,13 +6840,12 @@ export class BrowserHost extends EventEmitter {
 
   // Flattened OOPIF object/context ids are scoped to their real child session.
   // Omitting this third argument silently sends the command to the main frame.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async sendInSession(
     tab: BrowserTab,
     childSessionId: string,
     method: string,
     params?: Record<string, unknown>,
-  ): Promise<any> {
+  ): Promise<any> { // eslint-disable-line @typescript-eslint/no-explicit-any
     await this.ensureDebugger(tab);
     return tab.view.webContents.debugger.sendCommand(
       method,
