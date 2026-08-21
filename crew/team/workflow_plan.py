@@ -28,6 +28,45 @@ def normalize_planning_mode(value: object, *, default: PlanningMode = "auto") ->
     return mode if mode in {"auto", "fast", "standard", "ai"} else default  # type: ignore[return-value]
 
 
+def normalize_plan_node_refs(raw: Any) -> list[str]:
+    """Normalize a plan-change dependency field into unique node ids."""
+
+    items = [raw] if isinstance(raw, str) else list(raw or [])
+    refs: list[str] = []
+    for item in items:
+        value = str(item or "").strip()
+        if value and value not in refs:
+            refs.append(value)
+    return refs
+
+
+def plan_edges_have_cycle(node_ids: set[str], edges: list[Any]) -> bool:
+    """Return whether the supplied plan edges contain a cycle."""
+
+    outgoing: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
+    indegree: dict[str, int] = {node_id: 0 for node_id in node_ids}
+    for edge in edges:
+        if edge.parent_id not in node_ids or edge.child_id not in node_ids:
+            continue
+        outgoing.setdefault(edge.parent_id, []).append(edge.child_id)
+        indegree[edge.child_id] = indegree.get(edge.child_id, 0) + 1
+    ready = [node_id for node_id, degree in indegree.items() if degree == 0]
+    visited = 0
+    while ready:
+        node_id = ready.pop()
+        visited += 1
+        for child_id in outgoing.get(node_id, []):
+            indegree[child_id] -= 1
+            if indegree[child_id] == 0:
+                ready.append(child_id)
+    return visited != len(node_ids)
+
+
+def safe_plan_node_id(value: str, *, fallback: str = "node") -> str:
+    text = re.sub(r"[^0-9A-Za-z_]+", "_", str(value or "").strip().lower()).strip("_")
+    return text[:48] or fallback
+
+
 @dataclass(frozen=True)
 class WorkUnit:
     id: str

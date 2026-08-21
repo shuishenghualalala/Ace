@@ -60,6 +60,7 @@ from crew.state.logging import get_logger
 from crew.state.team_member_model import materialize_team_member_model_bindings
 from crew.team import flow_builder
 from crew.team import result_presenter as team_presenter
+from crew.team import workflow_plan
 from crew.team.bus import TeamBus, register_team_bus_tools
 from crew.team.agent_profile import AgentProfile, build_agent_profile, evaluate_capability_coverage
 from crew.team.capabilities import normalize_capabilities
@@ -2895,46 +2896,8 @@ class InProcessTeamManager(TeamManager):
                 "如需重跑或追加工作，请先变更 DAG。"
             )
 
-    @staticmethod
-    def _normalize_plan_node_refs(raw: Any) -> list[str]:
-        if isinstance(raw, str):
-            items = [raw]
-        else:
-            items = list(raw or [])
-        refs: list[str] = []
-        for item in items:
-            value = str(item or "").strip()
-            if value and value not in refs:
-                refs.append(value)
-        return refs
-
-    @staticmethod
-    def _plan_edges_have_cycle(node_ids: set[str], edges: list[TeamPlanEdge]) -> bool:
-        outgoing: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
-        indegree: dict[str, int] = {node_id: 0 for node_id in node_ids}
-        for edge in edges:
-            if edge.parent_id not in node_ids or edge.child_id not in node_ids:
-                continue
-            outgoing.setdefault(edge.parent_id, []).append(edge.child_id)
-            indegree[edge.child_id] = indegree.get(edge.child_id, 0) + 1
-        ready = [node_id for node_id, degree in indegree.items() if degree == 0]
-        visited = 0
-        while ready:
-            node_id = ready.pop()
-            visited += 1
-            for child_id in outgoing.get(node_id, []):
-                indegree[child_id] -= 1
-                if indegree[child_id] == 0:
-                    ready.append(child_id)
-        return visited != len(node_ids)
-
-    @staticmethod
-    def _safe_plan_node_id(value: str, *, fallback: str = "node") -> str:
-        text = re.sub(r"[^0-9A-Za-z_]+", "_", str(value or "").strip().lower()).strip("_")
-        return text[:48] or fallback
-
     def _unique_plan_node_id(self, plan: TeamPlan, *, raw_node_id: str, assignee: str, title: str) -> str:
-        base = self._safe_plan_node_id(raw_node_id) if raw_node_id else self._safe_plan_node_id(f"{assignee}_{title}")
+        base = workflow_plan.safe_plan_node_id(raw_node_id) if raw_node_id else workflow_plan.safe_plan_node_id(f"{assignee}_{title}")
         candidate = base
         index = 2
         while candidate in plan.nodes:
@@ -2978,8 +2941,8 @@ class InProcessTeamManager(TeamManager):
         if not required_capabilities:
             raise ToolError("新增节点 required_capabilities 必须包含标准能力 key")
 
-        parent_ids = self._normalize_plan_node_refs(change.get("depends_on"))
-        before_ids = self._normalize_plan_node_refs(change.get("before"))
+        parent_ids = workflow_plan.normalize_plan_node_refs(change.get("depends_on"))
+        before_ids = workflow_plan.normalize_plan_node_refs(change.get("before"))
         if not parent_ids and "leader_plan" in plan.nodes:
             parent_ids = ["leader_plan"]
         if not before_ids and "leader_summary" in plan.nodes:
@@ -3018,7 +2981,7 @@ class InProcessTeamManager(TeamManager):
             if pair not in existing_pairs:
                 new_edges.append(TeamPlanEdge(parent_id=node_id, child_id=before_id))
                 existing_pairs.add(pair)
-        if self._plan_edges_have_cycle({*plan.nodes.keys(), node_id}, new_edges):
+        if workflow_plan.plan_edges_have_cycle({*plan.nodes.keys(), node_id}, new_edges):
             raise ToolError("计划变更会形成 DAG 环，已拒绝。")
 
         member = member_specs.get(assignee)

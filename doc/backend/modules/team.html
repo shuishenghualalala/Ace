@@ -638,4 +638,12 @@ graph TD
   <li><b>验证：</b>Team 全量测试为 <code>227 passed, 1 skipped</code>，Gateway Team 测试为 <code>10 passed</code>，Python 编译检查通过。</li>
 </ul>
 
+<h2>174. 2026-08-21 Team 计划变更纯函数归位</h2>
+<ul>
+  <li><b>计划职责：</b>节点引用归一化、DAG 环检测和安全节点 ID 清洗移入现有 <code>workflow_plan.py</code>，与 WorkflowPlan 的稳定计划契约放在同一边界。</li>
+  <li><b>管理器职责：</b><code>team_manager.py</code> 只保留结合当前 TeamPlan 生成唯一节点 ID、校验成员和持久化计划变更的运行时编排。</li>
+  <li><b>行为兼容：</b>依赖去重、环检测和节点 ID 清洗规则保持原实现，不改变 Leader 受控加节点流程。</li>
+  <li><b>验证：</b>运行 Team 全量测试和 Python 编译检查。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
