@@ -911,6 +911,44 @@ def test_team_decision_presenter_uses_same_rules_for_dict_and_plan_nodes():
     assert should_show_assignment(plan, verify_node) is True
     assert node_dict_should_show_assignment(raw_verify_node, raw_edges) is True
 
+    leader_node = TeamPlanNode(
+        node_id="leader_summary",
+        title="Leader 汇总",
+        assignee="leader",
+    )
+    raw_leader_node = {
+        "node_id": leader_node.node_id,
+        "title": leader_node.title,
+        "assignee": leader_node.assignee,
+    }
+    assert should_show_assignment(plan, leader_node) is False
+    assert node_dict_should_show_assignment(raw_leader_node, raw_edges) is False
+
+
+def test_leader_plan_control_text_describes_planning_not_ownership():
+    plan = TeamPlan(
+        team_session_id="leader-plan-copy",
+        goal="写一份贪吃蛇开发方案",
+        nodes={
+            "leader_plan": TeamPlanNode(
+                node_id="leader_plan",
+                title="Leader 拆解任务",
+                assignee="leader",
+            ),
+            "build": TeamPlanNode(
+                node_id="build",
+                title="编写开发方案",
+                assignee="kk",
+            ),
+        },
+    )
+
+    text = InProcessTeamManager._leader_control_text(plan, plan.nodes["leader_plan"])
+
+    assert "团队执行计划已生成" in text
+    assert "按节点推进" in text
+    assert "我来处理" not in text
+
 
 def test_leader_review_decision_parser_supports_structured_and_plain_results():
     structured = InProcessTeamManager._parse_leader_review_decision(

@@ -6311,8 +6311,8 @@ class InProcessTeamManager(TeamManager):
             member_nodes = [item for item in plan.nodes.values() if item.assignee != "leader"]
             if member_nodes:
                 flow = "、".join(item.title for item in member_nodes[:4])
-                return f"收到，我会按团队流程推进：{flow}，最后由我汇总给你。"
-            return f"收到，我来处理：{goal}"
+                return f"团队执行计划已生成，将按节点推进：{flow}。完成后由 Leader 汇总。"
+            return f"团队执行计划已生成：{goal}。当前没有成员节点，将由 Leader 完成。"
         if node.node_id == "leader_review" or node.node_id.startswith("leader_review_"):
             parent_ids = {
                 edge.parent_id
@@ -7422,7 +7422,8 @@ class InProcessTeamManager(TeamManager):
                                 final_summary=result,
                             )
                 leader_event_type = (
-                    "team_summary" if node.node_id == "leader_summary"
+                    "team_planning_progress" if node.node_id == "leader_plan"
+                    else "team_summary" if node.node_id == "leader_summary"
                     and not leader_node_requeued
                     else "team_review" if is_review
                     else "team_decision"

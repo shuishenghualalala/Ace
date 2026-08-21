@@ -172,7 +172,9 @@ def node_dict_assignment_text(node: dict[str, Any]) -> str:
 
 
 def node_dict_should_show_assignment(node: dict[str, Any], edges: list[dict[str, Any]]) -> bool:
-    return True
+    del edges
+    assignee = str(node.get("assignee") or "").strip().lower()
+    return bool(assignee and assignee != "leader")
 
 
 def node_result_digest(text: str, limit: int = 260) -> str:
@@ -412,7 +414,9 @@ def assignment_text(node: TeamPlanNode) -> str:
 
 
 def should_show_assignment(plan: TeamPlan, node: TeamPlanNode) -> bool:
-    return True
+    del plan
+    assignee = str(node.assignee or "").strip().lower()
+    return bool(assignee and assignee != "leader")
 
 
 def artifact_title_head(title: str) -> str:

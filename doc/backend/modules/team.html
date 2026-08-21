@@ -491,4 +491,13 @@ graph TD
   <li><b>验证：</b>Web TaskBoard 节点日志测试改为验证结构化事件入口；Desktop/Web 不再保留按消息文本匹配节点日志的重复逻辑。</li>
 </ul>
 
+<h2>156. 2026-08-21 Team Leader 规划事件语义收口</h2>
+<ul>
+  <li><b>规划文案：</b><code>leader_plan</code> 只表示 TeamPlan 已生成和即将按 DAG 派发，不再使用“收到，我来处理”这类会让用户误以为 Leader 亲自承担成员任务的文案。</li>
+  <li><b>事件类型：</b><code>leader_plan</code> 归类为 <code>team_planning_progress</code>；<code>team_assign</code> 只用于真实成员节点分派；<code>leader_review</code>、<code>leader_summary</code> 继续使用各自的控制事件。</li>
+  <li><b>分派规则：</b>分派展示策略显式排除 Leader 控制节点，避免通过“始终返回 true”的隐式规则判断是否应产生成员 @mention。</li>
+  <li><b>兼容边界：</b>本次未删除旧 delegate 入口；普通 required workflow 继续由 Runtime 产生成员分派事件，旧入口后续单独收敛。</li>
+  <li><b>验证：</b>新增 Leader 规划文案和控制节点分派策略测试；本次未新增模块、表或接口。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
