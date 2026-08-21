@@ -242,8 +242,11 @@ impl BleAdapter {
         Ok(())
     }
 
-    pub async fn configure_server(server: &Arc<Mutex<ServerPeripheral>>) -> Result<()> {
-        let service = nearby_service();
+    pub async fn configure_server(
+        server: &Arc<Mutex<ServerPeripheral>>,
+        peer: &PeerInfo,
+    ) -> Result<()> {
+        let service = nearby_service(peer)?;
         let mut server = server.lock().await;
         let mut powered = false;
         for attempt in 1..=50 {
@@ -298,8 +301,12 @@ impl BleAdapter {
         Ok(())
     }
 
-    pub async fn advertise(server: &Arc<Mutex<ServerPeripheral>>, name: &str) -> Result<()> {
-        Self::configure_server(server).await?;
+    pub async fn advertise(
+        server: &Arc<Mutex<ServerPeripheral>>,
+        name: &str,
+        peer: &PeerInfo,
+    ) -> Result<()> {
+        Self::configure_server(server, peer).await?;
         Self::set_discoverable(server, name, true).await
     }
 }
@@ -332,7 +339,7 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
         .await
         .context("failed to initialize BLE peripheral")?;
     let server = Arc::new(Mutex::new(server));
-    BleAdapter::configure_server(&server).await?;
+    BleAdapter::configure_server(&server, &peer).await?;
     BleAdapter::set_discoverable(&server, &peer.display_name, discoverable).await?;
     let adapter = BleAdapter::new(server.clone()).await?;
 
@@ -342,8 +349,11 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
     adapter.run(peer, server_event_rx).await
 }
 
-fn nearby_service() -> Service {
-    Service {
+fn nearby_service(peer: &PeerInfo) -> Result<Service> {
+    let peer_info = peer
+        .encode()
+        .context("failed to encode static Nearby PeerInfo")?;
+    Ok(Service {
         uuid: SERVICE_UUID,
         primary: true,
         characteristics: vec![
@@ -351,7 +361,7 @@ fn nearby_service() -> Service {
                 uuid: PEER_INFO_UUID,
                 properties: vec![CharacteristicProperty::Read],
                 permissions: vec![AttributePermission::Readable],
-                value: None,
+                value: Some(peer_info),
                 descriptors: vec![],
             },
             ServerCharacteristic {
@@ -369,7 +379,7 @@ fn nearby_service() -> Service {
                 descriptors: vec![],
             },
         ],
-    }
+    })
 }
 
 async fn connect_to_peer(
@@ -414,13 +424,16 @@ async fn connect_to_peer(
         .context("remote OutgoingMessage characteristic was not found")?
         .clone();
 
-    let remote_peer = PeerInfo::decode(
-        &peripheral
-            .read(&peer_info_characteristic)
-            .await
-            .context("failed to read remote PeerInfo")?,
+    eprintln!("[nearby][session] device={device} stage=peer_info_read_started");
+    let peer_info_bytes = tokio::time::timeout(
+        Duration::from_secs(8),
+        peripheral.read(&peer_info_characteristic),
     )
-    .context("remote PeerInfo is not valid JSON")?;
+    .await
+    .context("timed out reading remote PeerInfo")?
+    .context("failed to read remote PeerInfo")?;
+    let remote_peer =
+        PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
     eprintln!(
         "[nearby][session] device={device} stage=peer_info_read remote_peer_id={} remote_display_name={}",
         remote_peer.peer_id, remote_peer.display_name
@@ -766,13 +779,23 @@ mod tests {
 
     #[test]
     fn server_service_contains_the_three_poc_characteristics() {
-        let service = nearby_service();
+        let peer = PeerInfo {
+            protocol_version: PROTOCOL_VERSION,
+            peer_id: "crew_local".to_owned(),
+            peer_token: "token_local".to_owned(),
+            display_name: "Local".to_owned(),
+            agent_name: "Crew Agent".to_owned(),
+            capabilities: vec!["chat".to_owned()],
+        };
+        let service = nearby_service(&peer).unwrap();
         assert_eq!(service.uuid, SERVICE_UUID);
         assert_eq!(service.characteristics.len(), 3);
-        assert!(service
+        let peer_info = service
             .characteristics
             .iter()
-            .any(|characteristic| characteristic.uuid == PEER_INFO_UUID));
+            .find(|characteristic| characteristic.uuid == PEER_INFO_UUID)
+            .expect("PeerInfo characteristic should exist");
+        assert_eq!(peer_info.value, Some(peer.encode().unwrap()));
         assert!(service
             .characteristics
             .iter()

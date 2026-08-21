@@ -130,6 +130,7 @@ cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agen
     <li><a href="https://github.com/rohitsangwan01/ble-peripheral-rust">ble-peripheral-rust</a>：Peripheral 广播和 GATT Server。</li>
     <li>未将 AGPL 项目加入依赖；当前实现保持独立 Rust CLI，未引入 Swift/CoreBluetooth 原生桥接。</li>
     <li>运行时依赖各平台 BLE 后端和系统权限：macOS 需要蓝牙授权，Linux 需要 BlueZ/DBus，Windows 需要系统蓝牙权限。Linux 的多成员路径使用 Central→GATT Write 双向传输，避开当前 Peripheral 单 writer 限制。</li>
+    <li>PeerInfo 特征使用静态 GATT 值直接提供完整身份 JSON；消息写入和通知仍由运行时事件处理，以兼容 Windows GATT Server 的读请求时序。</li>
     <li>桌面构建会按当前目标运行 <code>scripts/build-nearby.mjs</code>，并把 <code>crew-nearby</code> 放入 Electron extraResources。</li>
   </ul>
 
@@ -141,10 +142,11 @@ cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agen
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>当前 macOS 主机目标编译通过。</td></tr>
       <tr><td><code>cargo clippy --manifest-path nearby/Cargo.toml --all-targets -- -D warnings</code></td><td class="pass">通过</td><td>无 Clippy 警告。</td></tr>
       <tr><td>macOS BLE 权限段检查</td><td class="pass">通过</td><td>生成的 <code>crew-nearby</code> 包含 <code>__TEXT,__info_plist</code>，并包含 <code>NSBluetoothAlwaysUsageDescription</code>。</td></tr>
-      <tr><td>BLE 分阶段诊断日志</td><td class="pending">待双机采集</td><td>已加入 Rust Peripheral/Central、GATT 会话和 Electron 子进程生命周期日志；需要在 Mac 与 Windows 各启动一次后根据最后出现的阶段定位阻塞点。</td></tr>
+      <tr><td>BLE 分阶段诊断日志</td><td class="pass">已定位并修复读阶段</td><td>Mac CLI 已实测连接 Windows 设备并完成服务发现；旧版 Windows 端卡在动态 PeerInfo 读取。现改为静态 GATT 值，并为远端读取增加 8 秒超时；待 Windows 拉取更新后完成群聊双机验收。</td></tr>
       <tr><td>完整 Nearby CLI</td><td class="pass">通过</td><td>CLI 复用 IPC 运行时，覆盖发现、广播开关、同伴列表、房间创建/加入/退出、群消息、@ 提及、回复、文件发送、文件分片接收和校验保存。</td></tr>
       <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 21 个测试、CLI 2 个测试全部通过，包含发现开关持久化、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传和平台连接策略测试。</td></tr>
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pass">通过</td><td>Windows 目标编译检查通过。</td></tr>
+      <tr><td><code>cargo build --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pending">本机链接环境阻塞</td><td>源码检查通过，但 macOS 环境没有 Windows <code>link.exe</code>；需在 Windows 端拉取后构建实际可执行文件。</td></tr>
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-unknown-linux-gnu</code></td><td class="pending">环境阻塞</td><td>当前 macOS 环境缺少 Linux sysroot/DBus 开发库，阻塞在 <code>libdbus-sys</code> 构建阶段；本机 Docker CLI 存在但 Docker daemon 未运行，暂不能用 Linux 容器补检。</td></tr>
       <tr><td>macOS BLE 启动烟测</td><td class="pass">通过</td><td>当前 Mac 已实际启动 Peripheral 广播与 Central 扫描并输出 <code>Advertising...</code>、<code>Scanning...</code>；随后手动停止进程。</td></tr>
       <tr><td><code>npm run typecheck</code></td><td class="pass">通过</td><td>Electron 主进程、Preload 和 Renderer 类型检查通过。</td></tr>

@@ -213,7 +213,7 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
         .await
         .context("failed to initialize BLE peripheral")?;
     let server = Arc::new(Mutex::new(server));
-    configure_server(&server).await?;
+    configure_server(&server, &peer).await?;
     set_discoverable(&server, &peer.display_name, discoverable).await?;
 
     let manager = Manager::new()
@@ -530,8 +530,8 @@ fn create_peer(config: &NearbyConfig) -> Result<PeerInfo> {
     })
 }
 
-async fn configure_server(server: &Arc<Mutex<ServerPeripheral>>) -> Result<()> {
-    let service = nearby_service();
+async fn configure_server(server: &Arc<Mutex<ServerPeripheral>>, peer: &PeerInfo) -> Result<()> {
+    let service = nearby_service(peer)?;
     let mut server = server.lock().await;
     let mut powered = false;
     for attempt in 1..=50 {
@@ -584,8 +584,11 @@ async fn set_discoverable(
     Ok(())
 }
 
-fn nearby_service() -> Service {
-    Service {
+fn nearby_service(peer: &PeerInfo) -> Result<Service> {
+    let peer_info = peer
+        .encode()
+        .context("failed to encode static Nearby PeerInfo")?;
+    Ok(Service {
         uuid: SERVICE_UUID,
         primary: true,
         characteristics: vec![
@@ -593,7 +596,7 @@ fn nearby_service() -> Service {
                 uuid: PEER_INFO_UUID,
                 properties: vec![CharacteristicProperty::Read],
                 permissions: vec![AttributePermission::Readable],
-                value: None,
+                value: Some(peer_info),
                 descriptors: vec![],
             },
             ServerCharacteristic {
@@ -611,7 +614,7 @@ fn nearby_service() -> Service {
                 descriptors: vec![],
             },
         ],
-    }
+    })
 }
 
 async fn connect_to_peer(
@@ -653,13 +656,15 @@ async fn connect_to_peer(
         .find(|characteristic| characteristic.uuid == OUTGOING_MESSAGE_UUID)
         .context("remote OutgoingMessage characteristic was not found")?
         .clone();
-    let remote = PeerInfo::decode(
-        &peripheral
-            .read(&peer_info_characteristic)
-            .await
-            .context("failed to read remote PeerInfo")?,
+    eprintln!("[nearby][session] device={device} stage=peer_info_read_started");
+    let peer_info_bytes = tokio::time::timeout(
+        Duration::from_secs(8),
+        peripheral.read(&peer_info_characteristic),
     )
-    .context("remote PeerInfo is not valid JSON")?;
+    .await
+    .context("timed out reading remote PeerInfo")?
+    .context("failed to read remote PeerInfo")?;
+    let remote = PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
     eprintln!(
         "[nearby][session] device={device} stage=peer_info_read remote_peer_id={} remote_display_name={}",
         remote.peer_id, remote.display_name
