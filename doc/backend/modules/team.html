@@ -598,4 +598,12 @@ graph TD
   <li><b>验证：</b>新增跨 request 父 final、跨子会话同文案历史回归；Team 全量测试和 Python 编译检查通过。</li>
 </ul>
 
+<h2>169. 2026-08-21 Team 看板任务按 request_id 投影</h2>
+<ul>
+  <li><b>匹配优先级：</b>任务投影有 <code>request_id</code> 时，只按对应的 <code>turn_session_id</code> 判断是否已被 TeamPlan 表示；不再用相同标题跨回合匹配。</li>
+  <li><b>旧数据兼容：</b>仅没有 request_id 的旧父任务继续使用规范化标题兜底，保留历史数据的可见性。</li>
+  <li><b>用户可见行为：</b>不同请求即使使用同一任务标题，也不会互相隐藏；同一请求仍避免父 task 与 TeamPlan 节点重复展示。</li>
+  <li><b>验证：</b>新增不同 request 同标题的任务投影回归，并运行 Team 全量测试和 Python 编译检查。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

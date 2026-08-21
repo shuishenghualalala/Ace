@@ -49,7 +49,11 @@ from crew.team.agent_profile import (
     CapabilityAssessment,
     evaluate_capability_coverage,
 )
-from crew.team.history_projection import is_duplicate_team_parent_final, team_internal_history_items
+from crew.team.history_projection import (
+    is_duplicate_team_parent_final,
+    team_internal_history_items,
+    team_tasks_with_plan_projection,
+)
 from crew.team.models import RuntimeStaffingRequest, TeamPlan, TeamPlanEdge, TeamPlanNode
 from crew.team.result_presenter import (
     assignment_text,
@@ -9663,6 +9667,49 @@ def test_team_parent_final_with_request_id_only_matches_same_request_summary():
 
     assert not is_duplicate_team_parent_final(parent, summaries[:1])
     assert is_duplicate_team_parent_final(parent, summaries)
+
+
+def test_team_task_projection_does_not_match_different_requests_by_title():
+    class Crew:
+        class tasks:
+            @staticmethod
+            def list_tasks(*args, **kwargs):
+                return [
+                    {
+                        "task_id": "parent-req-2",
+                        "kind": "agent_turn",
+                        "session_id": "team_parent",
+                        "request_id": "req_2",
+                        "title": "同一个任务标题",
+                        "detail": "同一个任务标题",
+                    },
+                    {
+                        "task_id": "team-req-1",
+                        "kind": "team",
+                        "session_id": "team_parent::turn::req_1",
+                        "title": "同一个任务标题",
+                    },
+                ]
+
+        class team:
+            @staticmethod
+            def task_projection_for_session(*args, **kwargs):
+                return [{
+                    "task_id": "plan-node-req-1",
+                    "kind": "team",
+                    "session_id": "team_parent::turn::req_1",
+                    "title": "同一个任务标题",
+                    "progress": {
+                        "turn_session_id": "team_parent::turn::req_1",
+                        "turn_title": "同一个任务标题",
+                        "plan_node_id": "node_req_1",
+                        "delegate_task_id": "team-req-1",
+                    },
+                }]
+
+    rows = team_tasks_with_plan_projection(Crew(), "team_parent", None, 200)
+
+    assert {row["task_id"] for row in rows} == {"plan-node-req-1", "parent-req-2"}
 
 
 def test_team_parent_session_history_suppresses_child_fallback_when_team_workflow_exists(auth_headers):

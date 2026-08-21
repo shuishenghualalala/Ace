@@ -471,6 +471,8 @@ def team_tasks_with_plan_projection(
             request_id = str(task.get("request_id") or "").strip()
             if request_id and f"{session_id}::turn::{request_id}" in represented_turns:
                 return False
+            if request_id:
+                return True
             title = str(task.get("detail") or task.get("title") or "").strip()
             if compact_history_content(title) in represented_turn_titles:
                 return False
