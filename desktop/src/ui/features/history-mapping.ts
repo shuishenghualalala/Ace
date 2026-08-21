@@ -322,6 +322,9 @@ function isDuplicateAssistantOfTeamResult(existing: ChatMessage, incoming: ChatM
   const assistant = existing.role === 'assistant' ? existing : incoming.role === 'assistant' ? incoming : null;
   const team = existing.role === 'team_internal' ? existing : incoming.role === 'team_internal' ? incoming : null;
   if (!assistant || !team || !isTeamNodeResult(team)) return false;
+  if (assistant.requestId && team.requestId && assistant.requestId === team.requestId) {
+    return team.eventType === 'team_summary';
+  }
   const assistantText = compactText(assistant.content);
   const teamText = compactText(team.content);
   return Boolean(assistantText && teamText && (assistantText === teamText || assistantText.includes(teamText) || teamText.includes(assistantText)));

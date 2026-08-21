@@ -500,4 +500,12 @@ graph TD
   <li><b>验证：</b>新增 Leader 规划文案和控制节点分派策略测试；本次未新增模块、表或接口。</li>
 </ul>
 
+<h2>157. 2026-08-21 Team 事件关联与终局去重</h2>
+<ul>
+  <li><b>关联字段：</b>所有 <code>team_internal</code> 事件都携带当前回合 <code>request_id</code>，不再只给用户 mention 事件写入，保证规划、分派、成员提交和 Leader 汇总可以关联到同一回合。</li>
+  <li><b>去重优先级：</b>实时和历史投影优先使用 <code>request_id</code> 与 <code>team_summary</code> 关联去重；旧数据缺少关联字段时才保留文本相似度兼容逻辑。</li>
+  <li><b>终局边界：</b>父 <code>agent_turn</code> 的 final 只负责回合结束，Team 聊天最终展示以同 request 的 <code>team_summary</code> 为准，避免 Leader 汇总重复出现。</li>
+  <li><b>验证：</b>补充 Team 内部事件 request_id 和父 final/Leader summary 稳定关联测试；本次未新增模块、表或接口。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

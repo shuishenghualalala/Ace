@@ -2719,6 +2719,7 @@ async def test_team_direct_leader_reply_renders_once_as_team_internal():
     assert stream.body["source_session_id"] == result.body["source_session_id"]
     assert result.body["agent_id"] == "leader"
     assert result.body["is_leader"] is True
+    assert result.body["request_id"] == result.request_id
     assert "你好，我是 hh" in result.body["text"]
     assert "process_text" not in result.body
     assert any(ch.kind == "final" for ch in chunks)
@@ -9099,6 +9100,7 @@ def test_team_parent_session_history_prefers_kanban_events_over_child_sessions(a
                 "agent_role": "leader",
                 "is_leader": True,
                 "source_session_id": "team_parent::turn::r1::leader",
+                "request_id": "r1",
                 "timestamp": 4,
             }]
 
@@ -9531,6 +9533,7 @@ def test_team_parent_session_history_dedupes_parent_final_against_leader_summary
                     "kind": "agent_turn",
                     "session_id": "team_parent",
                     "detail": "测试一下之前开发的贪吃蛇是否可验收",
+                    "request_id": "r1",
                     "result": "本次团队任务完成。测试结论：可以验收。",
                     "created_at": 1,
                     "updated_at": 5,

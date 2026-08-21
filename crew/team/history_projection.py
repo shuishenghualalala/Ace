@@ -22,6 +22,14 @@ def is_duplicate_team_parent_final(
     content = compact_history_content(item.get("content"))
     if not content:
         return False
+    request_id = str(item.get("request_id") or "").strip()
+    if request_id:
+        for internal in internal_items:
+            if (
+                str(internal.get("event_type") or "") == "team_summary"
+                and str(internal.get("request_id") or "").strip() == request_id
+            ):
+                return True
     content_head = content[:240]
     for internal in internal_items:
         if str(internal.get("event_type") or "") != "team_summary":

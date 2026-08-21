@@ -6468,8 +6468,7 @@ class InProcessTeamManager(TeamManager):
             body["reply_to"] = reply_to
         if communication_request_text:
             body["communication_request_text"] = communication_request_text
-        if communication_kind:
-            body["request_id"] = request_id
+        body["request_id"] = request_id
         if append:
             body["append"] = True
         if tone is not None:
