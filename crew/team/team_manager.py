@@ -108,6 +108,27 @@ from crew.tools.registry import Registry
 
 log = get_logger("team")
 TeamKey = tuple[str, str]
+_TEAM_PLAN_TO_KANBAN_STATUS = {
+    "pending": "pending",
+    "in_progress": "running",
+    "completed": "done",
+    "failed": "failed",
+    "blocked": "blocked",
+    "needs_info": "blocked",
+    "cancelled": "cancelled",
+}
+_KANBAN_TO_TEAM_PLAN_STATUS = {
+    "pending": "pending",
+    "ready": "pending",
+    "running": "in_progress",
+    "in_progress": "in_progress",
+    "done": "completed",
+    "completed": "completed",
+    "failed": "failed",
+    "blocked": "blocked",
+    "needs_info": "blocked",
+    "cancelled": "cancelled",
+}
 _RESULT_PATH_RE = re.compile(r"(?P<path>(?:/[^\s`'\"，。；、)\]]+)+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))")
 _RESULT_RELATIVE_PATH_RE = re.compile(
     r"(?<![\w/.-])(?P<path>(?:\.?/)?(?:[\w.-]+/)*[\w.-]+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))(?![\w/.-])"
@@ -1172,27 +1193,11 @@ class InProcessTeamManager(TeamManager):
 
     @staticmethod
     def _kanban_status(status: str) -> str:
-        return {
-            "pending": "pending",
-            "in_progress": "running",
-            "completed": "done",
-            "failed": "failed",
-            "blocked": "blocked",
-            "needs_info": "blocked",
-            "cancelled": "cancelled",
-        }.get(str(status or "").strip(), "pending")
+        return _TEAM_PLAN_TO_KANBAN_STATUS.get(str(status or "").strip().lower(), "pending")
 
     @staticmethod
     def _taskboard_status(status: str) -> str:
-        return {
-            "pending": "pending",
-            "ready": "pending",
-            "running": "running",
-            "done": "completed",
-            "failed": "failed",
-            "blocked": "blocked",
-            "cancelled": "cancelled",
-        }.get(str(status or "").strip().lower(), "pending")
+        return _KANBAN_TO_TEAM_PLAN_STATUS.get(str(status or "").strip().lower(), "pending")
 
     @staticmethod
     def _team_turn_group_id(session_id: str) -> str:

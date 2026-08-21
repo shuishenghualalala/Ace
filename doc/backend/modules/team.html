@@ -533,4 +533,12 @@ graph TD
   <li><b>验证：</b>新增累计帧、过程文本和回合计时回归；Web MessageList/TaskBoard/history 回归为 <code>39 passed</code>，Web typecheck 通过。</li>
 </ul>
 
+<h2>161. 2026-08-21 Team 状态投影协议收敛</h2>
+<ul>
+  <li><b>单一转换表：</b>TeamPlan 状态到 Kanban 状态、Kanban 状态回读为 TeamPlan 状态分别由模块级转换表维护，删除散落在方法内部的重复字典。</li>
+  <li><b>兼容别名：</b>回读同时兼容 <code>running</code>/<code>in_progress</code>、<code>done</code>/<code>completed</code> 和 <code>needs_info</code>，未知值仍安全降级为 <code>pending</code>。</li>
+  <li><b>边界：</b>不改变 TeamPlan 的内部状态命名，也不把 Kanban 的展示状态直接暴露给 Team Runtime；仅统一持久化和恢复投影的转换规则。</li>
+  <li><b>验证：</b>新增状态别名和未知状态回归；Team 全量测试需保持通过，本原子不新增模块或接口。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

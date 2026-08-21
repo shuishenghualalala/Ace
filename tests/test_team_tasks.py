@@ -2759,6 +2759,15 @@ def test_team_plans_are_scoped_by_owner_for_same_session_id():
     assert [plan["goal"] for plan in tm.plans_for_session("same-team", owner_account_id="A:uid-a")] == ["A 的任务"]
 
 
+def test_team_status_projection_normalizes_plan_and_kanban_aliases():
+    assert InProcessTeamManager._kanban_status("in_progress") == "running"
+    assert InProcessTeamManager._kanban_status("needs_info") == "blocked"
+    assert InProcessTeamManager._taskboard_status("in_progress") == "in_progress"
+    assert InProcessTeamManager._taskboard_status("done") == "completed"
+    assert InProcessTeamManager._taskboard_status("needs_info") == "blocked"
+    assert InProcessTeamManager._taskboard_status("unknown") == "pending"
+
+
 def test_team_missing_owner_does_not_fall_back_to_another_owner():
     tm, _ = _team()
     tm.create_plan(
