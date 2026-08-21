@@ -72,10 +72,16 @@ export class NearbyService {
       try {
         command = this.resolveCommand();
       } catch (error) {
+        console.error('[nearby] failed to resolve runtime:', error);
         reject(error);
         return;
       }
 
+      console.warn(
+        '[nearby] starting runtime command=' + command.command
+          + ' args=' + command.args.join(' ')
+          + ' packaged=' + this.options.isPackaged,
+      );
       const child = spawn(command.command, command.args, {
         cwd: command.cwd,
         env: {
@@ -88,6 +94,7 @@ export class NearbyService {
       });
       this.child = child;
       this.stopping = false;
+      console.warn('[nearby] runtime spawned pid=' + (child.pid ?? 'unknown'));
 
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
@@ -100,14 +107,17 @@ export class NearbyService {
           if (settled) return;
           settled = true;
           this.ready = true;
+          console.warn('[nearby] runtime reported ready');
           resolve();
         });
       });
       child.stderr.on('data', (chunk: string) => {
-        const text = String(chunk).trim();
-        if (text) console.warn('[nearby]', text);
+        for (const text of String(chunk).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
+          console.warn('[nearby][runtime]', text);
+        }
       });
       child.once('error', (error) => {
+        console.error('[nearby] runtime process error:', error);
         if (!settled) {
           settled = true;
           reject(error);
@@ -115,6 +125,9 @@ export class NearbyService {
         this.finish(child);
       });
       child.once('exit', (code, signal) => {
+        console.warn(
+          '[nearby] runtime exited code=' + (code ?? 'none') + ' signal=' + (signal ?? 'none'),
+        );
         if (!settled) {
           settled = true;
           reject(new Error(`Nearby process exited before ready (code=${code}, signal=${signal ?? 'none'})`));
@@ -133,12 +146,14 @@ export class NearbyService {
   public async send(command: NearbyCommand): Promise<void> {
     await this.start();
     if (!this.child?.stdin.writable) throw new Error('Nearby process is not available');
+    console.warn('[nearby] sending command type=' + command.type);
     this.child.stdin.write(`${JSON.stringify(command)}\n`);
   }
 
   public async stop(): Promise<void> {
     const child = this.child;
     if (!child) return;
+    console.warn('[nearby] stopping runtime');
     this.stopping = true;
     this.ready = false;
     try {
@@ -161,7 +176,11 @@ export class NearbyService {
 
   private handleLine(line: string, onReady: () => void): void {
     const trimmed = line.trim();
-    if (!trimmed.startsWith('{')) return;
+    if (!trimmed) return;
+    if (!trimmed.startsWith('{')) {
+      console.warn('[nearby][runtime-stdout]', trimmed);
+      return;
+    }
     try {
       const event = JSON.parse(trimmed) as NearbyEvent;
       if (!event || typeof event.type !== 'string') return;

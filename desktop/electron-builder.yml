@@ -87,6 +87,9 @@ win:
 mac:
   icon: assets/icon.png
   category: public.app-category.productivity
+  extendInfo:
+    NSBluetoothAlwaysUsageDescription: Crew uses Bluetooth to discover nearby agents and exchange peer messages.
+    NSBluetoothPeripheralUsageDescription: Crew uses Bluetooth to discover nearby agents and exchange peer messages.
   hardenedRuntime: true
   gatekeeperAssess: false
   target:

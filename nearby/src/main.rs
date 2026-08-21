@@ -1,3 +1,5 @@
+mod cli;
+
 use anyhow::{bail, Result};
 use crew_nearby::ipc::run as run_ipc;
 use crew_nearby::runtime::{run, NearbyConfig};
@@ -27,7 +29,12 @@ async fn main() -> Result<()> {
         state_dir: arguments.state_dir,
         discoverable: arguments.discoverable,
     };
-    if arguments.ipc {
+    if arguments.cli {
+        if arguments.ipc {
+            bail!("--cli and --ipc cannot be used together");
+        }
+        cli::run(config)
+    } else if arguments.ipc {
         run_ipc(config).await
     } else {
         run(config).await
@@ -44,6 +51,7 @@ struct Arguments {
     discoverable: Option<bool>,
     help_requested: bool,
     ipc: bool,
+    cli: bool,
 }
 
 impl Arguments {
@@ -67,6 +75,7 @@ impl Arguments {
                 "--no-discoverable" => arguments.discoverable = Some(false),
                 "--help" | "-h" => arguments.help_requested = true,
                 "--ipc" => arguments.ipc = true,
+                "--cli" => arguments.cli = true,
                 unknown => bail!("unknown argument: {unknown}"),
             }
         }
@@ -82,7 +91,7 @@ fn next_value(values: &mut impl Iterator<Item = String>, argument: &str) -> Resu
 
 fn print_help() {
     println!(
-        "Crew Nearby BLE PoC\n\nUsage:\n  cargo run --manifest-path nearby/Cargo.toml -- [options]\n\nOptions:\n  --display-name <name>    Local display name\n  --agent-name <name>      Local agent name\n  --capability <name>      Add a capability; may be repeated\n  --peer-id <id>           Override the persisted peer ID\n  --state-dir <path>       Override the nearby state directory\n  --discoverable           Enable BLE advertising\n  --no-discoverable        Disable BLE advertising\n  --ipc                    Use JSONL IPC mode for the desktop client\n  -h, --help               Show this help"
+        "Crew Nearby BLE PoC\n\nUsage:\n  cargo run --manifest-path nearby/Cargo.toml -- [options]\n\nOptions:\n  --display-name <name>    Local display name\n  --agent-name <name>      Local agent name\n  --capability <name>      Add a capability; may be repeated\n  --peer-id <id>           Override the persisted peer ID\n  --state-dir <path>       Override the nearby state directory\n  --discoverable           Enable BLE advertising\n  --no-discoverable        Disable BLE advertising\n  --ipc                    Use JSONL IPC mode for the desktop client\n  --cli                    Use the interactive Nearby CLI\n  -h, --help               Show this help"
     );
 }
 
@@ -122,5 +131,12 @@ mod tests {
         let disabled =
             Arguments::parse(["--no-discoverable"].into_iter().map(str::to_owned)).unwrap();
         assert_eq!(disabled.discoverable, Some(false));
+    }
+
+    #[test]
+    fn parses_cli_mode() {
+        let arguments = Arguments::parse(["--cli"].into_iter().map(str::to_owned)).unwrap();
+        assert!(arguments.cli);
+        assert!(!arguments.ipc);
     }
 }

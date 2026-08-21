@@ -27,6 +27,7 @@ use btleplug::{
 use futures::StreamExt;
 use std::{
     collections::{HashMap, HashSet},
+    env,
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -71,6 +72,21 @@ pub struct PeerSession {
     outbound: mpsc::Sender<Message>,
 }
 
+fn diagnostic_device_id(value: &str) -> String {
+    let suffix = value.chars().rev().take(8).collect::<String>();
+    format!("…{}", suffix.chars().rev().collect::<String>())
+}
+
+fn diagnostic_characteristics(peripheral: &Peripheral) -> String {
+    let mut uuids = peripheral
+        .characteristics()
+        .into_iter()
+        .map(|characteristic| characteristic.uuid.to_string())
+        .collect::<Vec<_>>();
+    uuids.sort_unstable();
+    uuids.join(",")
+}
+
 impl PeerSession {
     pub fn peer_info(&self) -> &PeerInfo {
         &self.peer
@@ -96,13 +112,20 @@ impl BleAdapter {
         let manager = Manager::new()
             .await
             .context("failed to initialize BLE manager")?;
-        let adapter = manager
+        let adapters = manager
             .adapters()
             .await
-            .context("failed to enumerate BLE adapters")?
+            .context("failed to enumerate BLE adapters")?;
+        eprintln!("[nearby][central] adapters_found={}", adapters.len());
+        let adapter = adapters
             .into_iter()
             .next()
             .context("no BLE adapter was found")?;
+        let adapter_info = adapter
+            .adapter_info()
+            .await
+            .unwrap_or_else(|error| format!("unavailable: {error}"));
+        eprintln!("[nearby][central] adapter_selected={adapter_info}");
         Ok(Self { adapter, server })
     }
 
@@ -122,6 +145,7 @@ impl BleAdapter {
             })
             .await
             .context("failed to start BLE scanning")?;
+        eprintln!("[nearby][central] scanning_started service_uuid={SERVICE_UUID}");
         println!("Scanning...");
 
         let (session_event_tx, mut session_event_rx) = mpsc::channel(32);
@@ -161,13 +185,16 @@ impl BleAdapter {
                     };
                     let key = format!("{id:?}");
                     if connected_candidates.insert(key.clone()) {
+                        let device = diagnostic_device_id(&key);
                         let peripheral = self.adapter.peripheral(&id).await
                             .with_context(|| format!("failed to get BLE peripheral {key}"))?;
-                        println!("Found peer: {key}");
+                        eprintln!("[nearby][scan] candidate device={device} action=connect_attempt");
+                        println!("Found peer: {device}");
                         let local_peer = peer.clone();
                         let event_tx = session_event_tx.clone();
                         tokio::spawn(async move {
-                            if let Err(error) = connect_to_peer(peripheral, local_peer, event_tx.clone()).await {
+                            if let Err(error) = connect_to_peer(peripheral, local_peer, device.clone(), event_tx.clone()).await {
+                                eprintln!("[nearby][session] device={device} result=failed error={error}");
                                 let _ = event_tx.send(SessionEvent::Failed(error.to_string())).await;
                             }
                         });
@@ -187,6 +214,10 @@ impl BleAdapter {
                 Some(event) = session_event_rx.recv() => {
                     match event {
                         SessionEvent::Ready(new_session) => {
+                            eprintln!(
+                                "[nearby][session] peer_connected peer_id={}",
+                                new_session.peer_info().peer_id
+                            );
                             println!("Connected to: {}", new_session.peer_info().peer_id);
                             let hello = Message::hello(&peer);
                             new_session.send(hello).await?;
@@ -194,10 +225,14 @@ impl BleAdapter {
                         }
                         SessionEvent::Received(message) => print_peer_message(&message),
                         SessionEvent::Closed(peer_id) => {
+                            eprintln!("[nearby][session] peer_disconnected peer_id={peer_id}");
                             println!("Disconnected from: {peer_id}");
                             session = None;
                         }
-                        SessionEvent::Failed(error) => eprintln!("BLE session failed: {error}"),
+                        SessionEvent::Failed(error) => {
+                            eprintln!("[nearby][session] failed error={error}");
+                            eprintln!("BLE session failed: {error}");
+                        }
                     }
                 }
             }
@@ -211,21 +246,27 @@ impl BleAdapter {
         let service = nearby_service();
         let mut server = server.lock().await;
         let mut powered = false;
-        for _ in 0..50 {
+        for attempt in 1..=50 {
             powered = server
                 .is_powered()
                 .await
                 .context("failed to query BLE power state")?;
             if powered {
+                eprintln!("[nearby][peripheral] powered=true poll_attempt={attempt}");
                 break;
+            }
+            if attempt == 1 || attempt == 50 {
+                eprintln!("[nearby][peripheral] powered=false poll_attempt={attempt}");
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         anyhow::ensure!(powered, "BLE adapter is powered off or unavailable");
+        eprintln!("[nearby][peripheral] adding_service uuid={SERVICE_UUID}");
         server
             .add_service(&service)
             .await
             .context("failed to add Nearby GATT service")?;
+        eprintln!("[nearby][peripheral] service_added characteristics=3");
         Ok(())
     }
 
@@ -235,17 +276,23 @@ impl BleAdapter {
         enabled: bool,
     ) -> Result<()> {
         let mut server = server.lock().await;
+        eprintln!(
+            "[nearby][peripheral] advertising_request enabled={} service_uuid={SERVICE_UUID}",
+            enabled
+        );
         if enabled {
             server
                 .start_advertising(name, &[SERVICE_UUID])
                 .await
                 .context("failed to start BLE advertising")?;
+            eprintln!("[nearby][peripheral] advertising_started");
             println!("Advertising...");
         } else {
             server
                 .stop_advertising()
                 .await
                 .context("failed to stop BLE advertising")?;
+            eprintln!("[nearby][peripheral] advertising_stopped");
             println!("Advertising stopped.");
         }
         Ok(())
@@ -271,7 +318,16 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
         agent_name: config.agent_name,
         capabilities: config.capabilities,
     };
+    eprintln!(
+        "[nearby][startup] mode=cli os={} arch={} peer_id={} discoverable={} service_uuid={}",
+        env::consts::OS,
+        env::consts::ARCH,
+        peer.peer_id,
+        discoverable,
+        SERVICE_UUID
+    );
     let (server_event_tx, server_event_rx) = mpsc::channel(256);
+    eprintln!("[nearby][peripheral] initializing GATT server");
     let server = ServerPeripheral::new(server_event_tx)
         .await
         .context("failed to initialize BLE peripheral")?;
@@ -319,17 +375,27 @@ fn nearby_service() -> Service {
 async fn connect_to_peer(
     peripheral: Peripheral,
     local_peer: PeerInfo,
+    device: String,
     event_tx: mpsc::Sender<SessionEvent>,
 ) -> Result<()> {
+    eprintln!(
+        "[nearby][session] device={device} stage=connect_started local_peer_id={}",
+        local_peer.peer_id
+    );
     peripheral
         .connect_with_timeout(Duration::from_secs(15))
         .await
         .context("failed to connect")?;
+    eprintln!("[nearby][session] device={device} stage=connect_succeeded");
     println!("Connected to BLE peripheral; discovering services...");
     peripheral
         .discover_services()
         .await
         .context("failed to discover GATT services")?;
+    eprintln!(
+        "[nearby][session] device={device} stage=services_discovered characteristics={}",
+        diagnostic_characteristics(&peripheral)
+    );
 
     let characteristics = peripheral.characteristics();
     let peer_info_characteristic = characteristics
@@ -355,7 +421,17 @@ async fn connect_to_peer(
             .context("failed to read remote PeerInfo")?,
     )
     .context("remote PeerInfo is not valid JSON")?;
-    if !should_initiate(&local_peer.peer_id, &remote_peer.peer_id) {
+    eprintln!(
+        "[nearby][session] device={device} stage=peer_info_read remote_peer_id={} remote_display_name={}",
+        remote_peer.peer_id, remote_peer.display_name
+    );
+    let should_initiate = should_initiate(&local_peer.peer_id, &remote_peer.peer_id);
+    eprintln!(
+        "[nearby][session] device={device} stage=connection_policy should_initiate={} local_peer_id={} remote_peer_id={}",
+        should_initiate, local_peer.peer_id, remote_peer.peer_id
+    );
+    if !should_initiate {
+        eprintln!("[nearby][session] device={device} stage=duplicate_connection_close");
         println!(
             "Peer {} has connection priority; closing duplicate",
             remote_peer.peer_id
@@ -368,6 +444,7 @@ async fn connect_to_peer(
         .subscribe(&outgoing_characteristic)
         .await
         .context("failed to subscribe to remote OutgoingMessage")?;
+    eprintln!("[nearby][session] device={device} stage=notifications_subscribed");
     let mut notifications = peripheral
         .notifications()
         .await
@@ -380,6 +457,7 @@ async fn connect_to_peer(
         }))
         .await
         .context("failed to publish ready BLE session")?;
+    eprintln!("[nearby][session] device={device} stage=ready");
 
     let mtu = peripheral.mtu();
     let max_payload = FrameCodec::frame_payload_capacity(mtu);
@@ -391,6 +469,7 @@ async fn connect_to_peer(
             Some(message) = outbound_rx.recv() => {
                 let encoded = message.encode().context("failed to encode BLE message")?;
                 let frames = FrameCodec::fragment(&encoded, max_payload, transfer_id)?;
+                eprintln!("[nearby][session] device={device} stage=message_write message_type={} frame_count={}", message.message_type, frames.len());
                 transfer_id = transfer_id.wrapping_add(1);
                 for frame in frames {
                     peripheral.write(&incoming_characteristic, &frame, WriteType::WithResponse)
@@ -411,6 +490,7 @@ async fn connect_to_peer(
                 };
                 if let crate::protocol::ReassemblyResult::Complete(bytes) = reassembler.accept(frame) {
                     let message = Message::decode(&bytes).context("received invalid BLE message JSON")?;
+                    eprintln!("[nearby][session] device={device} stage=message_received message_type={} sender={}", message.message_type, message.sender);
                     event_tx.send(SessionEvent::Received(message)).await.ok();
                 }
             }
@@ -419,6 +499,10 @@ async fn connect_to_peer(
     }
 
     peripheral.disconnect().await.ok();
+    eprintln!(
+        "[nearby][session] device={device} stage=disconnected remote_peer_id={}",
+        remote_peer.peer_id
+    );
     event_tx
         .send(SessionEvent::Closed(remote_peer.peer_id))
         .await
@@ -437,6 +521,7 @@ async fn handle_peripheral_event(
 ) -> Result<()> {
     match event {
         PeripheralEvent::StateUpdate { is_powered } => {
+            eprintln!("[nearby][peripheral] state_update powered={is_powered}");
             if !is_powered {
                 eprintln!("BLE peripheral is powered off");
             }
@@ -445,6 +530,11 @@ async fn handle_peripheral_event(
             request,
             subscribed,
         } => {
+            eprintln!(
+                "[nearby][peripheral] subscription_update client={} characteristic={} subscribed={subscribed}",
+                diagnostic_device_id(&request.client),
+                request.characteristic
+            );
             if request.characteristic == OUTGOING_MESSAGE_UUID {
                 if subscribed {
                     subscriptions.insert(request.client);
@@ -462,6 +552,11 @@ async fn handle_peripheral_event(
             offset,
             responder,
         } => {
+            eprintln!(
+                "[nearby][peripheral] read_request client={} characteristic={} offset={offset}",
+                diagnostic_device_id(&request.client),
+                request.characteristic
+            );
             let response = if request.characteristic == PEER_INFO_UUID {
                 let bytes = peer
                     .encode()
@@ -493,6 +588,12 @@ async fn handle_peripheral_event(
             responder,
         } => {
             let accepted = request.characteristic == INCOMING_MESSAGE_UUID && offset == 0;
+            eprintln!(
+                "[nearby][peripheral] write_request client={} characteristic={} offset={offset} bytes={} accepted={accepted}",
+                diagnostic_device_id(&request.client),
+                request.characteristic,
+                value.len()
+            );
             let response = if accepted {
                 RequestResponse::Success
             } else {
@@ -515,8 +616,16 @@ async fn handle_peripheral_event(
             if let crate::protocol::ReassemblyResult::Complete(bytes) = reassembler.accept(frame) {
                 let message =
                     Message::decode(&bytes).context("received invalid BLE message JSON")?;
+                eprintln!(
+                    "[nearby][peripheral] message_received sender={} message_type={}",
+                    message.sender, message.message_type
+                );
                 if message.message_type == "peer.hello" {
                     if let Some(remote) = peer_info_from_hello(&message) {
+                        eprintln!(
+                            "[nearby][peripheral] passive_session_ready peer_id={}",
+                            remote.peer_id
+                        );
                         let (outbound, outbound_rx) = mpsc::channel(32);
                         server_clients.insert(client, remote.peer_id.clone());
                         spawn_server_writer(Arc::clone(server), outbound_rx);
@@ -527,6 +636,8 @@ async fn handle_peripheral_event(
                             }))
                             .await
                             .ok();
+                    } else {
+                        eprintln!("[nearby][peripheral] peer_hello_rejected reason=invalid_protocol_or_identity");
                     }
                 } else {
                     event_tx.send(SessionEvent::Received(message)).await.ok();
