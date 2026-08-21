@@ -471,7 +471,7 @@
   padding: 14px 16px;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
-  background: var(--bg2);
+  background: var(--mw-bg-subtle);
 }
 
 .channel-connect-qr__image-wrap {

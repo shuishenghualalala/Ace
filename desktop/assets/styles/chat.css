@@ -2965,8 +2965,8 @@ button.chat-message-file:hover {
 .followup-card-wrap--permission {
   position: fixed;
   left: var(--permission-card-left, auto);
-  right: var(--permission-card-right, clamp(var(--mw-space-4), 3vw, var(--mw-space-7)));
-  bottom: var(--permission-card-bottom, clamp(var(--mw-space-4), 3vw, var(--mw-space-7)));
+  right: var(--permission-card-right, clamp(var(--mw-space-4), 3vw, var(--mw-space-8)));
+  bottom: var(--permission-card-bottom, clamp(var(--mw-space-4), 3vw, var(--mw-space-8)));
   z-index: var(--mw-z-dialog);
   width: var(--permission-card-width, min(440px, calc(100vw - 32px)));
   max-width: calc(100vw - 32px);

@@ -15,13 +15,11 @@ import type {
   Attachment,
   BackendConfig,
   BackendSession,
-  CronJob,
   Mode,
   Task,
   Workspace,
 } from './backend-client';
-import type { ChatMessage, PendingMessage, PlanReviewStatus, SessionStatus, ToolCallInfo } from './chat-render';
-import type { BackendChatSocket } from './backend-client';
+import type { ChatMessage, PendingMessage, PlanReviewStatus, SessionStatus } from './chat-render';
 import {
   sessionStore,
   messageStore,

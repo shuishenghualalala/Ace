@@ -17,7 +17,7 @@ import {
   type Workspace,
 } from '../backend-client';
 import { openDialog, type OverlayHandle } from '../components/overlays';
-import { isChannelSessionId, type ChannelSessionGroup } from './channel-sessions';
+import { isChannelSessionId } from './channel-sessions';
 import { isSessionVisibleWithExternalAgentsFlag } from './external-agents-feature';
 import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
 import { applySessionModelBinding, mergeSessionModelsFromBackend, modelIdForNewCrewSession, modelLabelForId, syncSessionModelUi } from './session-model';

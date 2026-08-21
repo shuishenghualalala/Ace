@@ -14,11 +14,11 @@ import { renderWorkspaceHistory } from './workspaces';
 import { refreshKanbanBoard } from './kanban-board';
 import { refreshCronJobs } from './cron-page';
 import { findChannelSession, loadChannelSessions } from './channel-sessions';
-import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate, syncSessionsFromBackend } from './workspaces';
+import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate } from './workspaces';
 import { loadConfig } from './model-picker';
 import { externalAgentsEnabled, isExternalAgentOrTeamSession } from './external-agents-feature';
 import { resetToAgentMode } from './session-mode';
-import { loadSessionModel, mergeSessionModelsFromBackend, syncSessionModelUi } from './session-model';
+import { loadSessionModel, syncSessionModelUi } from './session-model';
 import { loadInspectorContext, refreshInspector } from './inspector';
 import { syncCraftLabel } from './composer-toolbar';
 import {

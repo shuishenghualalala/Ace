@@ -2516,32 +2516,6 @@ export function describeHitNode(node: DomDescription): string {
   return description.slice(0, 160);
 }
 
-function isActionableAxNode(node: AxNode, role: string): boolean {
-  if (!node.backendDOMNodeId || node.ignored) return false;
-  if (axProperty(node, 'disabled') === true) return false;
-  if (axProperty(node, 'focusable') === true || axProperty(node, 'editable') === true) return true;
-  return new Set([
-    'button',
-    'checkbox',
-    'combobox',
-    'gridcell',
-    'link',
-    'listbox',
-    'menuitem',
-    'menuitemcheckbox',
-    'menuitemradio',
-    'option',
-    'radio',
-    'searchbox',
-    'slider',
-    'spinbutton',
-    'switch',
-    'tab',
-    'textbox',
-    'treeitem',
-  ]).has(role.toLocaleLowerCase());
-}
-
 function ensureWithin(child: string, parent: string): boolean {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
@@ -10960,7 +10934,7 @@ export class BrowserHost extends EventEmitter {
     // normalization while the frame redirects again, causing several distinct
     // navigation/input rows to collapse onto the final URL.
     const documentUrl = event.url;
-    let backendNodeId = 0;
+    const backendNodeId = 0;
     const fileAction = event.type === 'upload' || event.type === 'drop';
     let filePaths: string[] | null = fileAction && event.fileCount === 0
       ? []

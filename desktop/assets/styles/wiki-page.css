@@ -553,7 +553,7 @@
   border: 1px solid var(--mw-border-default);
   border-radius: var(--mw-radius-4);
   background: var(--mw-bg-surface);
-  box-shadow: var(--mw-shadow-lg);
+  box-shadow: var(--mw-shadow-overlay);
 }
 
 .wiki-file-changes-dialog__header {

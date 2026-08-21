@@ -4,7 +4,7 @@
  * cron-page 单测。
  * 覆盖 formatDuration / formatTimestamp / filteredJobs，以及任务页点击任务行后的滚动保持。
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   formatDuration,
   formatTimestamp,
@@ -22,7 +22,7 @@ import {
   isRecurringSchedule,
   type FilterKey,
 } from '../../src/ui/features/cron-page';
-import { backendApi, type CronJob } from '../../src/ui/backend-client';
+import type { CronJob } from '../../src/ui/backend-client';
 
 vi.mock('../../src/ui/backend-client', () => ({
   backendApi: {
@@ -31,12 +31,6 @@ vi.mock('../../src/ui/backend-client', () => ({
     cronDeliveryTargets: vi.fn(async () => ({ targets: [] })),
   },
 }));
-
-const api = backendApi as unknown as {
-  cronJobs: ReturnType<typeof vi.fn>;
-  cronJobDetail: ReturnType<typeof vi.fn>;
-  cronDeliveryTargets: ReturnType<typeof vi.fn>;
-};
 
 function makeJob(partial: Partial<CronJob>): CronJob {
   return {
