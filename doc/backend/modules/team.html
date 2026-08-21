@@ -646,4 +646,14 @@ graph TD
   <li><b>验证：</b>运行 Team 全量测试和 Python 编译检查。</li>
 </ul>
 
+<h2>175. 2026-08-21 Team 第五阶段回归验收</h2>
+<ul>
+  <li><b>边界修复：</b><code>_choose_minimal_team</code> 在能力画像没有任何有效覆盖时只执行一次候选成员兜底，随后结束本轮选择；不再重复选择空覆盖成员导致无限循环。</li>
+  <li><b>数据语义：</b>兜底成员仍保留用户可见的组队建议，但 Formation coverage 会继续标记真实未覆盖能力；provider/name 不再被测试当作能力证据，能力覆盖回归改用显式 profile。</li>
+  <li><b>后端专项：</b>Team 相关测试 <code>291 passed, 1 skipped</code>；<code>crew/team</code> Python 编译检查通过。</li>
+  <li><b>Web：</b><code>26</code> 个测试文件、<code>177 passed</code>，TypeScript typecheck 通过。</li>
+  <li><b>Desktop：</b><code>149</code> 个测试文件、<code>1726 passed</code>，TypeScript typecheck 通过。</li>
+  <li><b>全量边界：</b>后端全量共 <code>3430 passed</code>、<code>37 skipped</code>、<code>25 failed</code>、<code>17 errors</code>；失败集中在沙箱禁止本地端口监听/连接、可选微信依赖和安全运行时，不属于 Team 回归，已用 Team 专项测试隔离确认。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

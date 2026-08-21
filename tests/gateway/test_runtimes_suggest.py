@@ -1424,9 +1424,32 @@ def test_fallback_team_suggestion_still_works():
 
 def test_fast_team_suggestion_uses_minimal_capability_cover_not_provider_brand():
     agents = [
-        {"id": "agent_a", "name": "A", "provider": "kimi", "model": "moonshot"},
-        {"id": "agent_b", "name": "B", "provider": "codex", "model": "code"},
-        {"id": "agent_c", "name": "C", "provider": "hermes", "model": "code"},
+        {
+            "id": "agent_a",
+            "name": "A",
+            "provider": "kimi",
+            "model": "moonshot",
+            "capabilities": {
+                "frontend": 0.9,
+                "backend": 0.9,
+                "implementation": 0.9,
+                "documentation": 0.9,
+            },
+        },
+        {
+            "id": "agent_b",
+            "name": "B",
+            "provider": "codex",
+            "model": "code",
+            "capabilities": {"frontend": 0.8},
+        },
+        {
+            "id": "agent_c",
+            "name": "C",
+            "provider": "hermes",
+            "model": "code",
+            "capabilities": {"documentation": 0.8},
+        },
     ]
     result = fast_team_suggestion(
         {
@@ -1477,6 +1500,25 @@ def test_fast_team_suggestion_does_not_infer_capabilities_from_custom_text():
 
     assert result["formation_plan"]["coverage"]["required"] == []
     assert len(result["members"]) == 1
+
+
+def test_fast_team_suggestion_keeps_uncovered_capability_fallback_finite():
+    result = fast_team_suggestion(
+        {
+            "name": "能力缺口测试",
+            "required_capabilities": ["implementation"],
+        },
+        [{
+            "id": "researcher",
+            "name": "Researcher",
+            "provider": "acp",
+            "capabilities": {"research": 0.9},
+        }],
+    )
+
+    assert len(result["members"]) == 2
+    assert result["members"][1]["agent_id"] == "researcher"
+    assert result["formation_plan"]["coverage"]["uncovered"] == ["implementation"]
 
 
 def test_fast_team_suggestion_skips_unavailable_agent_profiles():
