@@ -2759,6 +2759,20 @@ def test_team_plans_are_scoped_by_owner_for_same_session_id():
     assert [plan["goal"] for plan in tm.plans_for_session("same-team", owner_account_id="A:uid-a")] == ["A 的任务"]
 
 
+def test_team_missing_owner_does_not_fall_back_to_another_owner():
+    tm, _ = _team()
+    tm.create_plan(
+        "owner-isolation",
+        goal="仅属于 A",
+        nodes=[{"id": "a", "title": "A 节点", "assignee": "coder"}],
+        owner_account_id="A:uid-a",
+    )
+    tm._build_team("owner-isolation", owner_account_id="A:uid-a")
+
+    assert tm.read_plan("owner-isolation")["plan"] is None
+    assert tm._teams.get(tm._existing_team_key("owner-isolation")) is None
+
+
 async def test_team_required_workflow_dispatches_when_leader_does_not_delegate():
     class PassiveLeaderProvider(RoleProvider):
         async def chat(self, messages, tools=None):

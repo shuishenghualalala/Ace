@@ -5,6 +5,7 @@ export type ChatTurn =
   | { kind: "agent"; messages: UiMessage[]; turnId: string };
 
 export function isAgentRole(role: MsgRole): boolean {
+  // Team 内部消息由 MessageItem → TeamAgentTurnBubble 单独渲染，保留成员身份与过程卡片。
   return role === "assistant" || role === "status" || role === "error";
 }
 

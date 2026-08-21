@@ -517,4 +517,12 @@ graph TD
   <li><b>验证：</b>新增嵌套 JSON 代码围栏测试，并覆盖 Team 规划、Leader Review 和 Gateway 原有解析调用。</li>
 </ul>
 
+<h2>159. 2026-08-21 Team owner 读取边界与成员气泡契约</h2>
+<ul>
+  <li><b>读取边界：</b>TeamPlan 与 Team 的 key 始终由 <code>(owner_account_id, session_id)</code> 精确决定，不再遍历同 session 的任意 owner；owner 缺失时仅保留既有本地 <code>local</code> 兼容键。</li>
+  <li><b>安全语义：</b>带 owner 的调用不会回退到其他 owner；缺失 owner 也不会读到 A/B 等账户的数据。跨账户同 session 的计划和成员状态继续相互隔离。</li>
+  <li><b>前端契约：</b>Web 的 <code>team_internal</code> 不并入通用 Agent turn，而是继续经 <code>TeamAgentTurnBubble</code> 单独渲染，保留成员身份、过程详情和通信操作；与 Desktop 的成员消息渲染边界保持一致。</li>
+  <li><b>验证：</b>新增缺失 owner 不跨账户读取的后端回归；Team 测试为 <code>222 passed, 1 skipped</code>，Web MessageList/TaskBoard/history 回归为 <code>38 passed</code>，Web typecheck 通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

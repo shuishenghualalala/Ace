@@ -519,21 +519,17 @@ class InProcessTeamManager(TeamManager):
 
     def _existing_plan_key(self, session_id: str, owner_account_id: str = "") -> TeamKey:
         key = self._key(session_id, owner_account_id)
-        if key in self._plans or owner_account_id:
+        if owner_account_id:
             return key
-        for candidate in self._plans:
-            if candidate[1] == session_id:
-                return candidate
-        return key
+        local_key = self._key(session_id, "local")
+        return local_key if local_key in self._plans else key
 
     def _existing_team_key(self, session_id: str, owner_account_id: str = "") -> TeamKey:
         key = self._key(session_id, owner_account_id)
-        if key in self._teams or owner_account_id:
+        if owner_account_id:
             return key
-        for candidate in self._teams:
-            if candidate[1] == session_id:
-                return candidate
-        return key
+        local_key = self._key(session_id, "local")
+        return local_key if local_key in self._teams else key
 
     def _session_external_team_id(self, session_id: str, owner_account_id: str = "") -> str:
         getter = getattr(self.session_store, "get_agent_config", None)
