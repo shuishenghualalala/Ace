@@ -630,4 +630,12 @@ graph TD
   <li><b>验证：</b>运行 Team 全量测试和 Python 编译检查，确认旧工作流节点、共享 workspace 和历史投影行为不变。</li>
 </ul>
 
+<h2>173. 2026-08-21 Team 事件历史投影职责分离</h2>
+<ul>
+  <li><b>管理器职责：</b><code>team_manager.py</code> 只解析 session、owner 并选择 Team Kanban workflow；不再直接遍历事件、拼装聊天字段。</li>
+  <li><b>投影职责：</b>现有 <code>history_projection.py</code> 新增 <code>project_team_event_history</code>，统一处理可见事件筛选、聊天噪声、thinking 兼容、通信状态补全和历史字段映射。</li>
+  <li><b>边界：</b>不改变事件类型白名单、ask 生命周期隐藏规则、request 状态补全和排序；不新增数据库表或 API。</li>
+  <li><b>验证：</b>Team 全量测试为 <code>227 passed, 1 skipped</code>，Gateway Team 测试为 <code>10 passed</code>，Python 编译检查通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

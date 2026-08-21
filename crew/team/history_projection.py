@@ -5,12 +5,94 @@ from __future__ import annotations
 from typing import Any
 
 from crew.core.types import Message
-from crew.team.result_presenter import is_team_chat_noise, node_display_progress, result_projection
+from crew.team.result_presenter import (
+    is_team_chat_noise,
+    node_display_progress,
+    normalize_legacy_chunked_thinking,
+    result_projection,
+)
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, LEGACY_CREW_BUILTIN_AGENT_ID, is_crew_builtin_display_id
 
 
 def compact_history_content(value: Any) -> str:
     return " ".join(str(value or "").split())
+
+
+def project_team_event_history(store: Any, workflow_ids: list[str]) -> list[dict[str, Any]]:
+    """Project persisted Team events into the canonical internal chat shape."""
+
+    items: list[dict[str, Any]] = []
+    communication_status_by_request: dict[str, str] = {}
+    visible_event_types = {
+        "team_assign",
+        "team_stream",
+        "team_submit",
+        "team_ack",
+        "team_review",
+        "team_decision",
+        "team_summary",
+        "team_communication",
+    }
+    for workflow_id in workflow_ids:
+        try:
+            events = store.list_events(workflow_id, limit=500)
+        except Exception:  # noqa: BLE001
+            continue
+        for event in sorted(events, key=lambda item: float(item.ts or 0)):
+            payload = dict(event.payload or {})
+            if event.event_type not in visible_event_types:
+                continue
+            if event.event_type == "team_communication":
+                request_id = str(payload.get("request_id") or "").strip()
+                communication_kind = str(payload.get("communication_kind") or "").strip()
+                if request_id and communication_kind in {"ask_lifecycle", "ask_answer"}:
+                    communication_status_by_request[request_id] = str(
+                        payload.get("communication_status") or ""
+                    ).strip()
+                if communication_kind == "ask_lifecycle":
+                    continue
+            text = str(payload.get("text") or "").strip()
+            if is_team_chat_noise(text):
+                continue
+            items.append({
+                "role": "team_internal",
+                "content": text[:1200],
+                "agent_id": str(payload.get("agent_id") or event.actor or "agent"),
+                "agent_name": str(payload.get("agent_name") or payload.get("agent_id") or event.actor or "Agent"),
+                "agent_role": str(payload.get("agent_role") or ""),
+                "agent_tone": payload.get("agent_tone"),
+                "is_leader": bool(payload.get("is_leader")),
+                "source_session_id": str(payload.get("source_session_id") or ""),
+                "node_id": str(payload.get("node_id") or ""),
+                "event_type": str(payload.get("event_type") or event.event_type),
+                "display_mode": str(payload.get("display_mode") or "chat"),
+                "collapsed_title": str(payload.get("collapsed_title") or ""),
+                "process_text": str(payload.get("process_text") or ""),
+                "thinking": normalize_legacy_chunked_thinking(str(payload.get("thinking") or "")),
+                "tool_calls": list(payload.get("tool_calls") or []),
+                "artifacts": list(payload.get("artifacts") or []),
+                "turn_file_changes": list(payload.get("turn_file_changes") or []),
+                "mention_from": str(payload.get("mention_from") or ""),
+                "mention_to": list(payload.get("mention_to") or []),
+                "mention_intent": str(payload.get("mention_intent") or ""),
+                "request_id": str(payload.get("request_id") or ""),
+                "reply_to": str(payload.get("reply_to") or ""),
+                "communication_kind": str(payload.get("communication_kind") or ""),
+                "communication_status": str(payload.get("communication_status") or ""),
+                "timestamp": float(event.ts or 0),
+                **({"turn_started_at": payload.get("turn_started_at")} if payload.get("turn_started_at") is not None else {}),
+                **({"turn_duration": payload.get("turn_duration")} if payload.get("turn_duration") is not None else {}),
+            })
+    for item in items:
+        request_id = str(item.get("request_id") or "").strip()
+        if (
+            request_id
+            and item.get("communication_kind") == "ask_request"
+            and request_id in communication_status_by_request
+        ):
+            item["communication_status"] = communication_status_by_request[request_id]
+    items.sort(key=lambda item: float(item.get("timestamp") or 0))
+    return items
 
 
 def is_duplicate_team_parent_final(
