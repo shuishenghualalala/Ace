@@ -1791,7 +1791,7 @@ export const backendApi = {
       used_tokens: number | null;
       max_tokens: number;
       ratio: number | null;
-      source: 'provider' | 'request_view' | 'unavailable';
+      source: 'provider' | 'request_view' | 'preview' | 'unavailable';
       warning?: string;
     }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
   browserState: (sessionId: string) =>

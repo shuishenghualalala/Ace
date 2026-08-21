@@ -724,7 +724,6 @@ def test_todo_snapshot_event_not_plan_dependent():
 
 def test_executor_appends_internal_todo_reminder_after_approval():
     from crew.agent.executor.builtin import BuiltinExecutor
-    from crew.core.types import Message
 
     mgr = PlanModeManager()
     sid = "sess-exec-reminder"
@@ -732,15 +731,16 @@ def test_executor_appends_internal_todo_reminder_after_approval():
     mgr.request_approval(sid)
     mgr.approve(sid)
 
-    class _Stub:
-        plan_manager = mgr
-
-    base = [Message.system("s")]
-    messages = BuiltinExecutor._maybe_append_todo_reminder(_Stub(), base, sid)
+    executor = BuiltinExecutor(
+        FakeProvider(), Registry(), PluginManager(), plan_manager=mgr,
+    )
+    view = executor.build_request_view("s", [], [], sid, consume_transient=True)
+    messages = list(view.messages)
     assert len(messages) == 2
     assert "todo_reminder" in messages[-1].content
     assert messages[-1].is_meta is True
-    assert BuiltinExecutor._maybe_append_todo_reminder(_Stub(), base, sid) == base
+    second = executor.build_request_view("s", [], [], sid, consume_transient=True)
+    assert len(second.messages) == 1
 
 
 def test_plan_approved_reminder_injects_plan_file_content(tmp_path, monkeypatch):

@@ -1123,6 +1123,9 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             if not callable(setter):
                 return JSONResponse({"ok": False, "error": "session agent config store 不可用"}, status_code=500)
             setter(session_id, config, owner_account_id=owner)
+            clear_prompt_usage = getattr(crew.session_store, "clear_prompt_usage", None)
+            if callable(clear_prompt_usage):
+                clear_prompt_usage(session_id, owner_account_id=owner)
             crew.agents.drop(session_id, owner_account_id=owner)
             binding.update({"model_profile_id": model_id, "model_label": selected.get("label") or model_id})
             return JSONResponse(binding)
@@ -1311,13 +1314,33 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
-        return JSONResponse(
-            crew.session_store.context_usage(
-                session_id,
-                crew.resolve_session_context_window(session_id, owner),
-                owner_account_id=owner,
-            )
+        context_window = crew.resolve_session_context_window(session_id, owner)
+        usage = crew.session_store.context_usage(
+            session_id,
+            context_window,
+            owner_account_id=owner,
         )
+        if usage.get("available"):
+            return JSONResponse(usage)
+
+        preview_builder = getattr(crew, "preview_session_context", None)
+        if callable(preview_builder):
+            try:
+                preview = await preview_builder(session_id, owner)
+            except Exception as exc:  # noqa: BLE001 - preview must not break context API
+                log.warning("context preview failed session=%s: %s", session_id, exc)
+                preview = None
+            if isinstance(preview, dict) and isinstance(preview.get("used_tokens"), int):
+                used = int(preview["used_tokens"])
+                return JSONResponse({
+                    "available": True,
+                    "used_tokens": used,
+                    "max_tokens": context_window,
+                    "ratio": round(used / context_window, 4) if context_window > 0 else None,
+                    "source": "preview",
+                    "warning": str(preview.get("warning") or "当前为请求视图预估值"),
+                })
+        return JSONResponse(usage)
 
     @router.delete("/api/session/{session_id}")
     async def delete_session(request: Request, session_id: str) -> JSONResponse:

@@ -47,6 +47,109 @@ class ExecutionContext:
     tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE
 
 
+@dataclass(frozen=True)
+class FinalRequestView:
+    """一次模型推理的统一、不可变请求快照。
+
+    Runtime、token 计数、middleware 后的 Provider 调用和调试日志都应消费这个
+    结构，避免各自重新拼装 messages/tools。字段使用 tuple，禁止装配完成后再
+    增删顶层项；下一次 tool-loop step 应生成新的快照。
+    """
+
+    messages: tuple[Message, ...]
+    tools: tuple[dict[str, Any], ...] | None = None
+    max_output_tokens: int | None = None
+    model: str = ""
+    provider: str = ""
+    base_url: str = ""
+    provider_index: int = 0
+
+    @classmethod
+    def create(
+        cls,
+        messages: list[Message] | tuple[Message, ...],
+        tools: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        *,
+        max_output_tokens: int | None = None,
+        model: str = "",
+        provider: str = "",
+        base_url: str = "",
+        provider_index: int = 0,
+    ) -> "FinalRequestView":
+        return cls(
+            messages=tuple(messages),
+            tools=tuple(tools) if tools is not None else None,
+            max_output_tokens=max_output_tokens,
+            model=model,
+            provider=provider,
+            base_url=base_url,
+            provider_index=provider_index,
+        )
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+        fallback: "FinalRequestView",
+        *,
+        model: str | None = None,
+        provider: str | None = None,
+        base_url: str | None = None,
+        provider_index: int | None = None,
+    ) -> "FinalRequestView":
+        raw_messages = payload.get("messages", fallback.messages)
+        messages = (
+            raw_messages
+            if isinstance(raw_messages, (list, tuple))
+            else fallback.messages
+        )
+        raw_tools = payload.get("tools", fallback.tools)
+        tools = (
+            raw_tools
+            if raw_tools is None or isinstance(raw_tools, (list, tuple))
+            else fallback.tools
+        )
+        max_output_tokens = payload.get("max_tokens", fallback.max_output_tokens)
+        return cls.create(
+            list(messages),
+            list(tools) if tools is not None else None,
+            max_output_tokens=max_output_tokens,
+            model=fallback.model if model is None else model,
+            provider=fallback.provider if provider is None else provider,
+            base_url=fallback.base_url if base_url is None else base_url,
+            provider_index=fallback.provider_index if provider_index is None else provider_index,
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "messages": list(self.messages),
+            "tools": list(self.tools) if self.tools is not None else None,
+        }
+        if self.max_output_tokens is not None:
+            payload["max_tokens"] = self.max_output_tokens
+        return payload
+
+    def with_messages(self, messages: list[Message]) -> "FinalRequestView":
+        return FinalRequestView.create(
+            messages,
+            self.tools,
+            max_output_tokens=self.max_output_tokens,
+            model=self.model,
+            provider=self.provider,
+            base_url=self.base_url,
+            provider_index=self.provider_index,
+        )
+
+    def estimated_prompt_tokens(self) -> int:
+        """按统一快照计算本地 prompt token；不再接受旁路 messages/tools。"""
+        from crew.agent.compact.tokens import estimate_prompt_tokens
+
+        return estimate_prompt_tokens(
+            list(self.messages),
+            list(self.tools) if self.tools is not None else None,
+        )
+
+
 class AgentExecutor(ABC):
     """执行内核。消费 ExecutionContext，产出 ResponseChunk 流。"""
 
