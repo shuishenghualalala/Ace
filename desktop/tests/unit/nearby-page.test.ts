@@ -102,6 +102,30 @@ describe('nearby page', () => {
     page.dispose();
   });
 
+  it('renders a WeChat-style room row, member panel, and composer state', () => {
+    const { page, root, emit } = setup();
+    emit({ type: 'ready', peer: { ...peer, peer_id: 'crew_local' } });
+    emit({ type: 'peer_connected', peer });
+    const send = root.querySelector<HTMLButtonElement>('.nearby-room__form [type="submit"]');
+    expect(send?.disabled).toBe(true);
+
+    emit({ type: 'room_joined', room_id: 'room_1', room_name: '项目讨论组', peer_ids: ['crew_local', 'crew_peer_a'] });
+    expect(root.querySelector('.nearby-room-list__item')?.textContent).toContain('项目讨论组');
+    expect(root.querySelector('.nearby-member-panel')?.hidden).toBe(true);
+
+    root.querySelector<HTMLButtonElement>('.nearby-room__header-actions button')!.click();
+    expect(root.querySelector('.nearby-member-panel')?.hidden).toBe(false);
+    expect(root.querySelector('.nearby-member-panel')?.textContent).toContain('Agent A');
+
+    const input = root.querySelector<HTMLInputElement>('.nearby-room__input')!;
+    input.value = '准备发送';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(send?.disabled).toBe(false);
+    emit({ type: 'peer_disconnected', peer_id: 'crew_peer_a' });
+    expect(root.querySelector('.nearby-member-panel')?.textContent).toContain('已断开');
+    page.dispose();
+  });
+
   it('sends mentions and reply references with a room message', () => {
     const { command, page, root, emit } = setup();
     emit({ type: 'ready', peer: { ...peer, peer_id: 'crew_local' } });

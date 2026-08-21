@@ -81,16 +81,115 @@
 }
 
 .nearby-discovery,
-.nearby-room {
+.nearby-chat-shell {
   display: grid;
-  gap: var(--mw-space-4);
-  width: min(100%, 840px);
-  padding: clamp(18px, 3vw, 28px);
+  grid-template-columns: 220px minmax(0, 1fr);
+  width: min(100%, 1020px);
   border: 1px solid color-mix(in srgb, var(--mw-border-strong) 70%, transparent);
   border-radius: 24px;
   background: color-mix(in srgb, var(--mw-bg-surface) 88%, transparent);
   box-shadow: 0 18px 50px color-mix(in srgb, #000 12%, transparent);
   backdrop-filter: blur(22px) saturate(125%);
+}
+
+.nearby-discovery {
+  gap: var(--mw-space-4);
+  padding: clamp(18px, 3vw, 28px);
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--mw-bg-surface) 88%, transparent);
+}
+
+.nearby-room-list-panel {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 210px;
+  padding: 22px 14px;
+  border-right: 1px solid var(--mw-border);
+}
+
+.nearby-room-list-panel__title,
+.nearby-room-list-panel__hint {
+  margin: 0;
+}
+
+.nearby-room-list-panel__title {
+  padding: 0 8px;
+  font-size: 16px;
+}
+
+.nearby-room-list-panel__hint {
+  padding: 0 8px 8px;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  line-height: 1.45;
+}
+
+.nearby-room-list {
+  display: grid;
+  gap: 6px;
+}
+
+.nearby-room-list__empty {
+  margin: 0;
+  padding: 12px 8px;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+}
+
+.nearby-room-list__item {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 8px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--mw-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nearby-room-list__item--active,
+.nearby-room-list__item:hover {
+  background: color-mix(in srgb, var(--mw-accent) 12%, var(--mw-bg-elevated));
+}
+
+.nearby-room-list__avatar,
+.nearby-message__avatar,
+.nearby-member-panel__avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--mw-accent) 22%, var(--mw-bg-elevated));
+  color: var(--mw-accent);
+  font-size: var(--mw-type-caption-size);
+  font-weight: 700;
+}
+
+.nearby-room-list__copy {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nearby-room-list__count {
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+}
+
+.nearby-room {
+  display: grid;
+  align-content: start;
+  gap: var(--mw-space-4);
+  min-width: 0;
+  padding: clamp(18px, 3vw, 28px);
 }
 
 .nearby-section__header,
@@ -99,6 +198,12 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--mw-space-4);
+}
+
+.nearby-room__header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--mw-space-2);
 }
 
 .nearby-section__title,
@@ -192,6 +297,49 @@
   font-size: var(--mw-type-caption-size);
 }
 
+.nearby-member-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--mw-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--mw-bg-elevated) 60%, transparent);
+}
+
+.nearby-member-panel__list {
+  display: grid;
+  gap: 8px;
+}
+
+.nearby-member-panel__item {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.nearby-member-panel__item[data-connection='disconnected'] {
+  opacity: 0.55;
+}
+
+.nearby-member-panel__avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.nearby-member-panel__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nearby-member-panel__status,
+.nearby-message__time {
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+}
+
 .nearby-room__reply-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -281,6 +429,11 @@
   padding: 10px 12px;
 }
 
+.nearby-room__input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .nearby-primary-action,
 .nearby-secondary-action {
   min-height: 40px;
@@ -336,6 +489,20 @@
 .nearby-message__text {
   display: block;
   margin: 0;
+}
+
+.nearby-message__identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.nearby-message__avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-size: 11px;
 }
 
 .nearby-message__sender {
@@ -395,6 +562,8 @@
   .nearby-page { padding: 24px 16px; }
   .nearby-discovery__actions,
   .nearby-room__form { flex-direction: column; }
+  .nearby-chat-shell { grid-template-columns: 1fr; }
+  .nearby-room-list-panel { border-right: 0; border-bottom: 1px solid var(--mw-border); }
   .nearby-composer-action,
   .nearby-room__form .nearby-primary-action { width: 100%; }
   .nearby-peer-card { grid-template-columns: auto minmax(0, 1fr); }
@@ -407,5 +576,5 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .nearby-discovery,
-  .nearby-room { background: var(--mw-bg-surface); backdrop-filter: none; }
+  .nearby-chat-shell { background: var(--mw-bg-surface); backdrop-filter: none; }
 }

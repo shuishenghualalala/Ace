@@ -26,7 +26,7 @@
     <li>同时启动 Peripheral 广播和 Central 扫描。</li>
     <li>macOS/Windows 按字典序由较小的 <code>peer_id</code> 主动连接；Linux 因 BlueZ Peripheral 通知 writer 的多客户端限制，由双方建立 Central 会话并在消息层去重。</li>
     <li>消息采用 JSON；BLE 层使用固定大小分片、乱序重组、重复帧抑制和未完成传输清理。</li>
-    <li>桌面端可以发现多个 Agent，选择已连接的 Agent 创建房间，并通过直接 PeerSession 广播群消息。</li>
+    <li>桌面端可以发现多个 Agent，选择已连接的 Agent 创建房间，并通过直接 PeerSession 广播群消息；群聊页面提供会话列表、成员面板、在线状态、消息气泡、回复、提及和文件入口。</li>
     <li>用户可以单独关闭“允许附近设备发现我的 Agent”；关闭只停止本机 BLE 广播，仍可扫描附近 Agent，也不主动断开已建立的群聊会话。</li>
   </ul>
 
@@ -142,15 +142,18 @@ cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agen
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>当前 macOS 主机目标编译通过。</td></tr>
       <tr><td><code>cargo clippy --manifest-path nearby/Cargo.toml --all-targets -- -D warnings</code></td><td class="pass">通过</td><td>无 Clippy 警告。</td></tr>
       <tr><td>macOS BLE 权限段检查</td><td class="pass">通过</td><td>生成的 <code>crew-nearby</code> 包含 <code>__TEXT,__info_plist</code>，并包含 <code>NSBluetoothAlwaysUsageDescription</code>。</td></tr>
-      <tr><td>BLE 分阶段诊断日志</td><td class="pass">已定位并修复读阶段</td><td>Mac CLI 已实测连接 Windows 设备并完成服务发现；旧版 Windows 端卡在动态 PeerInfo 读取。现改为静态 GATT 值，并为远端读取增加 8 秒超时；待 Windows 拉取更新后完成群聊双机验收。</td></tr>
+      <tr><td>BLE 分阶段诊断日志</td><td class="pass">已定位并修复读阶段</td><td>Mac CLI 已实测连接更新后的 Windows 设备并完成服务发现、静态 PeerInfo 读取、通知订阅、Hello 和 ready 会话。</td></tr>
+      <tr><td>Mac → Windows 群聊写入调用</td><td class="pass">调用返回成功</td><td>CLI 已发现 Windows Agent、创建群聊；Mac Central 的 BLE 写入调用返回成功，但 Windows UI 尚未显示房间邀请或消息。</td></tr>
+      <tr><td>跨平台 IncomingMessage 写入</td><td class="pending">待 Windows 更新</td><td>IncomingMessage 现同时声明 Write 与 WriteWithoutResponse，Central 优先采用无响应写；需要 Windows 拉取本次更新后复测 Windows Peripheral 的 WriteRequest 事件。</td></tr>
+      <tr><td>Windows → Mac 群聊消息</td><td class="pending">待 Windows 回执</td><td>Mac 端已保持 CLI 监听并多次请求 Windows 回发消息；当前尚未收到回执，不能据此宣称双向验收完成。</td></tr>
       <tr><td>完整 Nearby CLI</td><td class="pass">通过</td><td>CLI 复用 IPC 运行时，覆盖发现、广播开关、同伴列表、房间创建/加入/退出、群消息、@ 提及、回复、文件发送、文件分片接收和校验保存。</td></tr>
-      <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 21 个测试、CLI 2 个测试全部通过，包含发现开关持久化、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传和平台连接策略测试。</td></tr>
+      <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 21 个测试、CLI 6 个测试全部通过，包含发现开关持久化、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传和平台连接策略测试。</td></tr>
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pass">通过</td><td>Windows 目标编译检查通过。</td></tr>
       <tr><td><code>cargo build --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pending">本机链接环境阻塞</td><td>源码检查通过，但 macOS 环境没有 Windows <code>link.exe</code>；需在 Windows 端拉取后构建实际可执行文件。</td></tr>
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-unknown-linux-gnu</code></td><td class="pending">环境阻塞</td><td>当前 macOS 环境缺少 Linux sysroot/DBus 开发库，阻塞在 <code>libdbus-sys</code> 构建阶段；本机 Docker CLI 存在但 Docker daemon 未运行，暂不能用 Linux 容器补检。</td></tr>
       <tr><td>macOS BLE 启动烟测</td><td class="pass">通过</td><td>当前 Mac 已实际启动 Peripheral 广播与 Central 扫描并输出 <code>Advertising...</code>、<code>Scanning...</code>；随后手动停止进程。</td></tr>
       <tr><td><code>npm run typecheck</code></td><td class="pass">通过</td><td>Electron 主进程、Preload 和 Renderer 类型检查通过。</td></tr>
-      <tr><td>Nearby 定向桌面测试</td><td class="pass">通过</td><td>Nearby 页面、托盘入口、Shell 导航共 11 个测试通过，覆盖发现开关、工作目录隐私提示、提及、回复、文件分片重组和保存动作。</td></tr>
+      <tr><td>Nearby 定向桌面测试</td><td class="pass">通过</td><td>Nearby 页面、托盘入口、Shell 导航共 13 个测试通过，覆盖发现开关、工作目录隐私提示、群聊列表、成员面板、在线状态、输入区状态、提及、回复、文件分片重组和保存动作。</td></tr>
       <tr><td><code>npm run build:dev</code></td><td class="pass">通过</td><td>Nearby debug runtime、Electron 主进程、Preload、Renderer 和 CSS Bundle 构建通过。</td></tr>
       <tr><td><code>npm run build</code></td><td class="pending">本轮未执行</td><td>按当前要求暂不执行 release 构建或打包。</td></tr>
       <tr><td>桌面全量单测</td><td class="pending">存在既有失败</td><td>147 个测试文件中 120 个通过；62 个失败来自当前分支既有未提交改动相关模块，需单独处理。</td></tr>
@@ -164,7 +167,7 @@ cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agen
     <li>扫描候选的连接失败会从抑制集合中清除，后续广播事件可以触发重试；已建立的会话仍保持重复连接抑制。</li>
     <li>Linux 为支持多个 Peripheral 客户端采用双向 Central 会话；这会增加物理连接数量，但通过 Peer ID 逻辑会话和 message_id 去重避免重复消息。</li>
     <li>Peripheral 和 Central 在同一进程内共存的稳定性需要分别在 macOS、Windows、Linux 硬件上验证。</li>
-    <li>当前没有可用的第二台 BLE 测试设备，因此代码与自动化测试通过，三平台真实硬件验收仍待执行。</li>
+    <li>当前已完成 macOS CLI 到 Windows Ace 的真实连接、建群和单向消息验收；Windows 回执仍待人工在群聊页面发送后确认，三平台完整硬件验收仍待执行。</li>
   </ul>
 </body>
 </html>

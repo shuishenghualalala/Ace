@@ -92,6 +92,14 @@ function memberLabel(peer: NearbyPeer | undefined, peerId: string): string {
   return peer?.display_name || peer?.agent_name || peerId;
 }
 
+function memberInitial(peer: NearbyPeer | undefined, peerId: string): string {
+  return memberLabel(peer, peerId).trim().slice(0, 1).toLocaleUpperCase() || '?';
+}
+
+function formatMessageTime(): string {
+  return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(new Date());
+}
+
 function mentionsInText(text: string, members: NearbyPeer[], localPeerId: string): string[] {
   const candidates = members
     .filter((peer) => peer.peer_id !== localPeerId)
@@ -184,18 +192,45 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
   discoveryActions.append(roomName, createRoom);
   discovery.append(discoveryHeader, peerList, discoveryActions);
 
+  const chatShell = document.createElement('section');
+  chatShell.className = 'nearby-chat-shell';
+  chatShell.hidden = true;
+  const roomListPanel = document.createElement('aside');
+  roomListPanel.className = 'nearby-room-list-panel';
+  roomListPanel.append(
+    textElement('h2', 'nearby-room-list-panel__title', '群聊'),
+    textElement('p', 'nearby-room-list-panel__hint', '附近设备创建或邀请的群聊会显示在这里。'),
+  );
+  const roomList = document.createElement('div');
+  roomList.className = 'nearby-room-list';
+  roomListPanel.append(roomList);
+
   const room = document.createElement('section');
   room.className = 'nearby-room';
   room.hidden = true;
   const roomHeader = document.createElement('header');
   roomHeader.className = 'nearby-room__header';
   const roomTitle = textElement('h2', 'nearby-room__title', '同伴群聊');
+  const roomHeaderActions = document.createElement('div');
+  roomHeaderActions.className = 'nearby-room__header-actions';
+  const memberToggle = document.createElement('button');
+  memberToggle.type = 'button';
+  memberToggle.className = 'nearby-secondary-action';
+  memberToggle.textContent = '成员';
+  memberToggle.setAttribute('aria-expanded', 'false');
   const leaveRoom = document.createElement('button');
   leaveRoom.type = 'button';
   leaveRoom.className = 'nearby-secondary-action';
   leaveRoom.textContent = '退出群聊';
-  roomHeader.append(roomTitle, leaveRoom);
+  roomHeaderActions.append(memberToggle, leaveRoom);
+  roomHeader.append(roomTitle, roomHeaderActions);
   const roomMembers = textElement('p', 'nearby-room__members', '');
+  const memberPanel = document.createElement('div');
+  memberPanel.className = 'nearby-member-panel';
+  memberPanel.hidden = true;
+  const memberList = document.createElement('div');
+  memberList.className = 'nearby-member-panel__list';
+  memberPanel.append(memberList);
   const roomMessages = document.createElement('div');
   roomMessages.className = 'nearby-room__messages';
 
@@ -230,12 +265,14 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
   sendMessage.type = 'submit';
   sendMessage.className = 'nearby-primary-action';
   sendMessage.textContent = '发送';
+  sendMessage.disabled = true;
   const mentionMenu = document.createElement('div');
   mentionMenu.className = 'nearby-mention-menu';
   mentionMenu.hidden = true;
   roomForm.append(mentionButton, fileButton, messageInput, sendMessage, mentionMenu);
-  room.append(roomHeader, roomMembers, roomMessages, replyBar, roomForm);
-  page.append(header, privacy, discovery, room);
+  room.append(roomHeader, roomMembers, memberPanel, roomMessages, replyBar, roomForm);
+  chatShell.append(roomListPanel, room);
+  page.append(header, privacy, discovery, chatShell);
   root.replaceChildren(page);
 
   const peers = new Map<string, NearbyPeer>();
@@ -262,6 +299,15 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
   const selectedConnectedPeers = (): NearbyPeer[] => Array.from(selected)
     .map((peerId) => peers.get(peerId))
     .filter((peer): peer is NearbyPeer => Boolean(peer && peer.connection === 'connected'));
+
+  const updateComposer = (): void => {
+    const enabled = Boolean(currentRoom);
+    const hasText = messageInput.value.trim().length > 0;
+    messageInput.disabled = !enabled;
+    mentionButton.disabled = !enabled;
+    fileButton.disabled = !enabled;
+    sendMessage.disabled = !enabled || !hasText;
+  };
 
   const roomPeerList = (): NearbyPeer[] => currentRoom?.peerIds
     .map((peerId) => peers.get(peerId))
@@ -291,22 +337,66 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         textElement('span', 'nearby-peer-card__capabilities', peer.capabilities?.join(' · ') || '可进行群聊'),
         textElement('span', 'nearby-peer-card__workspace', '工作目录：对方本机私有'),
       );
-      const connection = textElement('span', 'nearby-peer-card__connection', peer.connection === 'connected' ? '可选择' : '连接中');
+      const connectionLabel = peer.connection === 'connected' ? '可选择' : peer.connection === 'disconnected' ? '已断开' : '连接中';
+      const connection = textElement('span', 'nearby-peer-card__connection', connectionLabel);
       label.append(checkbox, copy, connection);
       peerList.append(label);
     }
     createRoom.disabled = selectedConnectedPeers().length === 0;
   };
 
+  const renderRoomList = (): void => {
+    roomList.replaceChildren();
+    if (!currentRoom) {
+      roomList.append(textElement('p', 'nearby-room-list__empty', '还没有群聊'));
+      return;
+    }
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'nearby-room-list__item nearby-room-list__item--active';
+    item.append(
+      textElement('span', 'nearby-room-list__avatar', memberInitial(peers.get(currentRoom.peerIds[0]), currentRoom.peerIds[0] || '群')),
+      textElement('span', 'nearby-room-list__copy', currentRoom.roomName),
+      textElement('span', 'nearby-room-list__count', `${currentRoom.peerIds.length}`),
+    );
+    item.setAttribute('aria-label', `打开群聊 ${currentRoom.roomName}`);
+    roomList.append(item);
+  };
+
+  const renderMembers = (): void => {
+    memberList.replaceChildren();
+    for (const peerId of currentRoom?.peerIds ?? []) {
+      const peer = peers.get(peerId);
+      const local = peerId === localPeerId;
+      const statusLabel = local ? '我' : peer?.connection === 'connected' ? '在线' : '已断开';
+      const item = document.createElement('div');
+      item.className = 'nearby-member-panel__item';
+      item.dataset.connection = local || peer?.connection === 'connected' ? 'connected' : 'disconnected';
+      item.append(
+        textElement('span', 'nearby-member-panel__avatar', memberInitial(peer, local ? '我' : peerId)),
+        textElement('span', 'nearby-member-panel__name', local ? '我' : memberLabel(peer, peerId)),
+        textElement('span', 'nearby-member-panel__status', statusLabel),
+      );
+      memberList.append(item);
+    }
+  };
+
   const renderRoom = (): void => {
     const activeRoom = currentRoom;
+    chatShell.hidden = !activeRoom;
     room.hidden = !activeRoom;
     discovery.hidden = Boolean(activeRoom);
-    if (!activeRoom) return;
+    renderRoomList();
+    if (!activeRoom) {
+      updateComposer();
+      return;
+    }
     roomTitle.textContent = activeRoom.roomName;
     const names = activeRoom.peerIds.map((peerId) => peerId === localPeerId ? '我' : memberLabel(peers.get(peerId), peerId));
     roomMembers.textContent = `${activeRoom.peerIds.length} 位成员 · ${names.join('、')}`;
+    renderMembers();
     renderMentionMenu();
+    updateComposer();
   };
 
   const setReplyTarget = (message: NearbyMessage | null): void => {
@@ -332,8 +422,14 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     const own = peerId === localPeerId || message.sender === localPeerId;
     item.className = `nearby-message${own ? ' nearby-message--own' : ''}`;
     item.dataset.messageId = message.message_id;
-    const sender = textElement('span', 'nearby-message__sender', own ? '我' : memberLabel(peers.get(peerId), peerId));
-    item.append(sender);
+    const identity = document.createElement('div');
+    identity.className = 'nearby-message__identity';
+    identity.append(
+      textElement('span', 'nearby-message__avatar', memberInitial(peers.get(peerId), own ? '我' : peerId)),
+      textElement('span', 'nearby-message__sender', own ? '我' : memberLabel(peers.get(peerId), peerId)),
+      textElement('time', 'nearby-message__time', formatMessageTime()),
+    );
+    item.append(identity);
     const reply = message.payload.reply_to;
     if (reply) {
       const quote = textElement('div', 'nearby-message__reply', `回复 ${memberLabel(peers.get(reply.sender), reply.sender)}：${reply.text}`);
@@ -439,6 +535,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         messageInput.selectionStart = messageInput.selectionEnd = start + memberLabel(peer, peer.peer_id).length + 2;
         selectedMentions.add(peer.peer_id);
         mentionMenu.hidden = true;
+        updateComposer();
         messageInput.focus();
       });
       mentionMenu.append(option);
@@ -478,6 +575,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         peers.set(peer.peer_id, { ...peer, connection: nearbyEvent.type === 'peer_connected' ? 'connected' : (peers.get(peer.peer_id)?.connection ?? 'discovered') });
         if (nearbyEvent.type === 'peer_connected') setStatus('已发现可加入群聊的 Agent');
         renderPeers();
+        renderMembers();
         renderMentionMenu();
         break;
       }
@@ -487,6 +585,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         if (peer) peers.set(peerId, { ...peer, connection: 'disconnected' });
         selected.delete(peerId);
         renderPeers();
+        renderMembers();
         renderMentionMenu();
         break;
       }
@@ -548,6 +647,15 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
       });
   });
 
+  memberToggle.addEventListener('click', () => {
+    const expanded = memberPanel.hidden;
+    memberPanel.hidden = !expanded;
+    memberToggle.setAttribute('aria-expanded', String(expanded));
+    if (expanded) renderMembers();
+  });
+
+  messageInput.addEventListener('input', updateComposer);
+
   createRoom.addEventListener('click', () => {
     const selectedPeers = selectedConnectedPeers();
     if (!selectedPeers.length) return;
@@ -580,6 +688,8 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     selectedMentions.clear();
     setReplyTarget(null);
     mentionMenu.hidden = true;
+    updateComposer();
+    setStatus('正在发送…');
     void bridge?.nearbyCommand?.({
       type: 'send_room_message',
       room_id: currentRoom.roomId,
@@ -625,6 +735,8 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     if (!currentRoom) return;
     void bridge?.nearbyCommand?.({ type: 'leave_room', room_id: currentRoom.roomId });
   });
+
+  updateComposer();
 
   return {
     activate(): void {

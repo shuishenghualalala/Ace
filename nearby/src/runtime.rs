@@ -81,10 +81,23 @@ fn diagnostic_characteristics(peripheral: &Peripheral) -> String {
     let mut uuids = peripheral
         .characteristics()
         .into_iter()
-        .map(|characteristic| characteristic.uuid.to_string())
+        .map(|characteristic| format!("{}({:?})", characteristic.uuid, characteristic.properties))
         .collect::<Vec<_>>();
     uuids.sort_unstable();
     uuids.join(",")
+}
+
+fn incoming_write_type(characteristic: &btleplug::api::Characteristic) -> Result<WriteType> {
+    if characteristic
+        .properties
+        .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
+    {
+        Ok(WriteType::WithoutResponse)
+    } else if characteristic.properties.contains(CharPropFlags::WRITE) {
+        Ok(WriteType::WithResponse)
+    } else {
+        anyhow::bail!("remote IncomingMessage characteristic is not writable")
+    }
 }
 
 impl PeerSession {
@@ -366,7 +379,10 @@ fn nearby_service(peer: &PeerInfo) -> Result<Service> {
             },
             ServerCharacteristic {
                 uuid: INCOMING_MESSAGE_UUID,
-                properties: vec![CharacteristicProperty::Write],
+                properties: vec![
+                    CharacteristicProperty::Write,
+                    CharacteristicProperty::WriteWithoutResponse,
+                ],
                 permissions: vec![AttributePermission::Writeable],
                 value: None,
                 descriptors: vec![],
@@ -423,6 +439,8 @@ async fn connect_to_peer(
         .find(|characteristic| characteristic.uuid == OUTGOING_MESSAGE_UUID)
         .context("remote OutgoingMessage characteristic was not found")?
         .clone();
+    let write_type = incoming_write_type(&incoming_characteristic)?;
+    eprintln!("[nearby][session] device={device} incoming_write_type={write_type:?}");
 
     eprintln!("[nearby][session] device={device} stage=peer_info_read_started");
     let peer_info_bytes = tokio::time::timeout(
@@ -485,7 +503,7 @@ async fn connect_to_peer(
                 eprintln!("[nearby][session] device={device} stage=message_write message_type={} frame_count={}", message.message_type, frames.len());
                 transfer_id = transfer_id.wrapping_add(1);
                 for frame in frames {
-                    peripheral.write(&incoming_characteristic, &frame, WriteType::WithResponse)
+                    peripheral.write(&incoming_characteristic, &frame, write_type)
                         .await
                         .context("failed to write BLE message frame")?;
                 }
@@ -768,11 +786,6 @@ fn print_peer_message(message: &Message) {
     );
 }
 
-#[allow(dead_code)]
-fn _central_characteristic_is_writable(flags: CharPropFlags) -> bool {
-    flags.intersects(CharPropFlags::WRITE | CharPropFlags::WRITE_WITHOUT_RESPONSE)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,10 +809,17 @@ mod tests {
             .find(|characteristic| characteristic.uuid == PEER_INFO_UUID)
             .expect("PeerInfo characteristic should exist");
         assert_eq!(peer_info.value, Some(peer.encode().unwrap()));
-        assert!(service
+        let incoming = service
             .characteristics
             .iter()
-            .any(|characteristic| characteristic.uuid == INCOMING_MESSAGE_UUID));
+            .find(|characteristic| characteristic.uuid == INCOMING_MESSAGE_UUID)
+            .expect("IncomingMessage characteristic should exist");
+        assert!(incoming
+            .properties
+            .contains(&CharacteristicProperty::Write));
+        assert!(incoming
+            .properties
+            .contains(&CharacteristicProperty::WriteWithoutResponse));
         assert!(service
             .characteristics
             .iter()
