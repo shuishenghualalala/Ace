@@ -49,7 +49,7 @@ from crew.team.agent_profile import (
     CapabilityAssessment,
     evaluate_capability_coverage,
 )
-from crew.team.history_projection import team_internal_history_items
+from crew.team.history_projection import is_duplicate_team_parent_final, team_internal_history_items
 from crew.team.models import RuntimeStaffingRequest, TeamPlan, TeamPlanEdge, TeamPlanNode
 from crew.team.result_presenter import (
     assignment_text,
@@ -9420,6 +9420,35 @@ def test_team_history_keeps_distinct_communication_replies_with_same_text():
     assert items[0]["reply_to"] == "bus_1"
 
 
+def test_team_history_keeps_legacy_same_text_from_distinct_child_sessions():
+    class Crew:
+        class tasks:
+            @staticmethod
+            def list_tasks(*args, **kwargs):
+                return []
+
+    items = team_internal_history_items(
+        Crew(),
+        "team_parent",
+        [
+            (
+                "team_parent::turn::req_1::coder",
+                [Message(role="assistant", content="节点已完成。", timestamp=1)],
+            ),
+            (
+                "team_parent::turn::req_2::coder",
+                [Message(role="assistant", content="节点已完成。", timestamp=2)],
+            ),
+        ],
+    )
+
+    assert len(items) == 2
+    assert [item["source_session_id"] for item in items] == [
+        "team_parent::turn::req_1::coder",
+        "team_parent::turn::req_2::coder",
+    ]
+
+
 def test_team_history_preserves_terminal_user_mention_state_for_retry():
     class Crew:
         class tasks:
@@ -9609,6 +9638,31 @@ def test_team_parent_session_history_dedupes_parent_final_against_leader_summary
         ("user", "测试一下之前开发的贪吃蛇是否可验收"),
         ("team_internal", "本次团队任务完成。测试结论：可以验收。"),
     ]
+
+
+def test_team_parent_final_with_request_id_only_matches_same_request_summary():
+    parent = {
+        "role": "assistant",
+        "content": "本次团队任务完成。",
+        "request_id": "request_2",
+    }
+    summaries = [
+        {
+            "role": "team_internal",
+            "event_type": "team_summary",
+            "content": parent["content"],
+            "request_id": "request_1",
+        },
+        {
+            "role": "team_internal",
+            "event_type": "team_summary",
+            "content": parent["content"],
+            "request_id": "request_2",
+        },
+    ]
+
+    assert not is_duplicate_team_parent_final(parent, summaries[:1])
+    assert is_duplicate_team_parent_final(parent, summaries)
 
 
 def test_team_parent_session_history_suppresses_child_fallback_when_team_workflow_exists(auth_headers):

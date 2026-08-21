@@ -24,12 +24,11 @@ def is_duplicate_team_parent_final(
         return False
     request_id = str(item.get("request_id") or "").strip()
     if request_id:
-        for internal in internal_items:
-            if (
-                str(internal.get("event_type") or "") == "team_summary"
-                and str(internal.get("request_id") or "").strip() == request_id
-            ):
-                return True
+        return any(
+            str(internal.get("event_type") or "") == "team_summary"
+            and str(internal.get("request_id") or "").strip() == request_id
+            for internal in internal_items
+        )
     content_head = content[:240]
     for internal in internal_items:
         if str(internal.get("event_type") or "") != "team_summary":
@@ -390,7 +389,12 @@ def team_internal_history_items(
             str(item.get("content") or "")[:160],
             str(item.get("communication_kind") or ""),
             str(item.get("communication_status") or ""),
-            str(item.get("request_id") or item.get("reply_to") or ""),
+            str(
+                item.get("request_id")
+                or item.get("reply_to")
+                or item.get("source_session_id")
+                or ""
+            ),
         )
         if key in seen:
             continue

@@ -590,4 +590,12 @@ graph TD
   <li><b>验证：</b>复用 Team 自动产物路径、越界路径和节点文件变更测试，并运行 Team 全量测试及 Python 编译检查。</li>
 </ul>
 
+<h2>168. 2026-08-21 Team 历史投影按请求与子会话隔离</h2>
+<ul>
+  <li><b>父 final：</b>父 <code>agent_turn</code> 带有 <code>request_id</code> 时，只接受同 request 的 <code>team_summary</code> 去重，不再继续使用跨回合正文包含关系。</li>
+  <li><b>旧子会话：</b>历史事件缺少 request_id/reply_to 时，回退去重 key 纳入 <code>source_session_id</code>；不同成员回合即使正文相同也各自保留。</li>
+  <li><b>兼容边界：</b>完全缺少请求关联的旧父 final 仍保留文本兼容逻辑；带关联字段的新事件不再被旧文本启发式覆盖。</li>
+  <li><b>验证：</b>新增跨 request 父 final、跨子会话同文案历史回归；Team 全量测试和 Python 编译检查通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
