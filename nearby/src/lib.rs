@@ -1,4 +1,4 @@
-//! Crew Nearby BLE transport proof of concept.
+//! Ace Nearby cross-platform BLE peer discovery and chat.
 
 pub mod identity;
 pub mod ipc;

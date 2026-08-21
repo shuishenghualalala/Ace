@@ -293,8 +293,10 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
     }
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
     let mut sessions: HashMap<String, mpsc::Sender<Message>> = HashMap::new();
+    let mut discovered = HashMap::new();
     let mut requested_connections = HashSet::new();
-    let mut connected_peers = HashSet::new();
+    let mut active_peers = HashSet::new();
+    let mut pending_peer_connections = HashSet::new();
     let mut seen_messages = HashSet::new();
 
     loop {
@@ -309,6 +311,51 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                     IpcCommand::SetDiscoverable { enabled } => {
                         save_nearby_settings(&state_dir, &NearbySettings { discoverable: enabled })?;
                         sink.send(IpcEvent::DiscoverabilityChanged { discoverable: enabled }).await?;
+                    }
+                    IpcCommand::ConnectPeer { peer_id } => {
+                        let Some(remote) = discovered.get(&peer_id).cloned() else {
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "附近已找不到这台 Ace".to_owned() }).await?;
+                            continue;
+                        };
+                        if active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                            continue;
+                        }
+                        pending_peer_connections.insert(peer_id.clone());
+                        if let Some(session) = sessions.get(&peer_id).cloned() {
+                            session.send(Message::peer_connect(peer.peer_id.clone())).await.ok();
+                            pending_peer_connections.remove(&peer_id);
+                            active_peers.insert(peer_id);
+                            sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                        }
+                    }
+                    IpcCommand::DisconnectPeer { peer_id } => {
+                        pending_peer_connections.remove(&peer_id);
+                        if active_peers.remove(&peer_id) {
+                            if let Some(session) = sessions.get(&peer_id).cloned() {
+                                session.send(Message::peer_disconnect(peer.peer_id.clone())).await.ok();
+                            }
+                            sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                        }
+                    }
+                    IpcCommand::SendMessage { peer_id, text } => {
+                        let text = text.trim();
+                        if text.is_empty() || text.len() > 8_000 {
+                            sink.send(IpcEvent::Error { message: "消息不能为空且不能超过 8000 个字符".to_owned() }).await?;
+                            continue;
+                        }
+                        if !active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "请先连接这台 Ace".to_owned() }).await?;
+                            continue;
+                        }
+                        let Some(session) = sessions.get(&peer_id).cloned() else {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "连接已经断开".to_owned() }).await?;
+                            continue;
+                        };
+                        let message = Message::chat(peer.peer_id.clone(), text);
+                        session.send(message.clone()).await.ok();
+                        sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
                     IpcCommand::CreateRoom { room_id, room_name, peer_ids } => {
                         let selected = peer_ids.into_iter().filter(|peer_id| sessions.contains_key(peer_id)).collect::<Vec<_>>();
@@ -372,6 +419,7 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
             }
             Some(event) = client.events.recv() => match event {
                 BusEvent::PeerDiscovered { peer: remote } => {
+                    discovered.insert(remote.peer_id.clone(), remote.clone());
                     sink.send(IpcEvent::PeerDiscovered { peer: remote.clone() }).await?;
                     if remote.peer_id != peer.peer_id && requested_connections.insert(remote.peer_id.clone()) {
                         client.requests.send(BusRequest::Connect { peer_id: remote.peer_id }).await.ok();
@@ -390,19 +438,51 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         });
                         sessions.insert(remote.peer_id.clone(), outbound);
                     }
-                    if connected_peers.insert(remote.peer_id.clone()) {
+                    if pending_peer_connections.remove(&remote.peer_id) {
+                        if let Some(session) = sessions.get(&remote.peer_id).cloned() {
+                            session.send(Message::peer_connect(peer.peer_id.clone())).await.ok();
+                        }
+                        active_peers.insert(remote.peer_id.clone());
                         sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
                     }
                 }
                 BusEvent::PeerDisconnected { peer_id } => {
                     sessions.remove(&peer_id);
-                    connected_peers.remove(&peer_id);
+                    pending_peer_connections.remove(&peer_id);
                     requested_connections.remove(&peer_id);
-                    sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                    if active_peers.remove(&peer_id) {
+                        sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                    } else if discovered.contains_key(&peer_id) {
+                        sink.send(IpcEvent::PeerUnavailable { peer_id }).await?;
+                    }
                 }
                 BusEvent::Message { peer_id, message } => {
-                    handle_received_message(&peer.peer_id, &sessions, &mut rooms, &mut seen_messages, &sink, peer_id, message).await?;
-                    save_rooms(&state_dir, &rooms)?;
+                    if message.version != crate::protocol::PROTOCOL_VERSION || message.sender != peer_id {
+                        continue;
+                    }
+                    match message.message_type.as_str() {
+                        "peer.connect" => {
+                            if !seen_messages.insert(message.message_id) { continue; }
+                            active_peers.insert(peer_id.clone());
+                            if let Some(remote) = discovered.get(&peer_id).cloned() {
+                                sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                            }
+                        }
+                        "peer.disconnect" => {
+                            if !seen_messages.insert(message.message_id) { continue; }
+                            if active_peers.remove(&peer_id) {
+                                sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                            }
+                        }
+                        "chat.message" => {
+                            if !active_peers.contains(&peer_id) || !seen_messages.insert(message.message_id.clone()) { continue; }
+                            sink.send(IpcEvent::Message { peer_id, message }).await?;
+                        }
+                        _ => {
+                            handle_received_message(&peer.peer_id, &sessions, &mut rooms, &mut seen_messages, &sink, peer_id, message).await?;
+                            save_rooms(&state_dir, &rooms)?;
+                        }
+                    }
                 }
             },
             else => break,

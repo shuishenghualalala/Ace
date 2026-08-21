@@ -2,7 +2,7 @@
 name = "crew-nearby"
 version = "0.1.0"
 edition = "2021"
-description = "Crew Nearby BLE dual-device proof of concept"
+description = "Ace Nearby cross-platform BLE peer discovery and chat"
 license = "Apache-2.0"
 
 [dependencies]

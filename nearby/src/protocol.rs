@@ -88,6 +88,26 @@ impl Message {
         }
     }
 
+    pub fn peer_connect(sender: impl Into<String>) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "peer.connect".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({}),
+        }
+    }
+
+    pub fn peer_disconnect(sender: impl Into<String>) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "peer.disconnect".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({}),
+        }
+    }
+
     pub fn room_invite(
         sender: impl Into<String>,
         room_id: impl Into<String>,
@@ -427,6 +447,19 @@ mod tests {
         let chat = Message::chat("crew_local", "hello");
         assert_eq!(chat.message_type, "chat.message");
         assert_eq!(chat.payload["text"], "hello");
+    }
+
+    #[test]
+    fn direct_session_control_messages_use_stable_types() {
+        let connect = Message::peer_connect("ace_local");
+        assert_eq!(connect.message_type, "peer.connect");
+        assert_eq!(connect.sender, "ace_local");
+        assert_eq!(connect.payload, serde_json::json!({}));
+
+        let disconnect = Message::peer_disconnect("ace_local");
+        assert_eq!(disconnect.message_type, "peer.disconnect");
+        assert_eq!(disconnect.sender, "ace_local");
+        assert_eq!(disconnect.payload, serde_json::json!({}));
     }
 
     #[test]

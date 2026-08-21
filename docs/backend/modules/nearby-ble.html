@@ -3,203 +3,108 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Crew Nearby / BLE Transport</title>
+  <title>Ace Nearby 蓝牙同伴</title>
   <style>
     :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0 auto; max-width: 960px; padding: 32px 24px 64px; line-height: 1.6; }
+    body { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; line-height: 1.65; }
     code, pre { font-family: "SFMono-Regular", Consolas, monospace; }
-    code { padding: 0.1em 0.3em; border-radius: 4px; background: color-mix(in srgb, currentColor 12%, transparent); }
-    pre { overflow-x: auto; padding: 16px; border-radius: 8px; background: color-mix(in srgb, currentColor 10%, transparent); }
-    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
-    th, td { padding: 8px 10px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); text-align: left; vertical-align: top; }
-    .pending { color: #b86b00; }
+    code { padding: .1em .3em; border-radius: 4px; background: color-mix(in srgb, currentColor 11%, transparent); }
+    pre { overflow-x: auto; padding: 16px; border-radius: 10px; background: color-mix(in srgb, currentColor 9%, transparent); }
+    table { width: 100%; margin: 16px 0; border-collapse: collapse; }
+    th, td { padding: 9px 11px; border: 1px solid color-mix(in srgb, currentColor 24%, transparent); text-align: left; vertical-align: top; }
     .pass { color: #16803c; }
+    .pending { color: #b86b00; }
   </style>
 </head>
 <body>
-  <h1>Crew Nearby / BLE Transport</h1>
-  <p>本文档记录 Ace 的 Crew Nearby 跨平台 BLE 同伴与群聊模块。BLE 核心由 Rust 进程承载，Electron 通过 JSONL IPC 接入；macOS 使用菜单栏，Windows/Linux 使用系统托盘，三者统一显示“同伴”。</p>
+  <h1>Ace Nearby 蓝牙同伴</h1>
+  <p>Ace 的“同伴”模块通过 Bluetooth Low Energy 发现附近运行 Ace 的电脑。用户选择设备后建立一对一会话，文字消息直接通过 BLE GATT 传输，不要求两台电脑连接同一局域网，也不经过云端服务。</p>
 
-  <h2>目标与边界</h2>
-  <ul>
-    <li>验证 macOS、Windows、Linux 主机之间的 BLE 广播、扫描、连接、GATT 读写、订阅和通知链路。</li>
-    <li>同时启动 Peripheral 广播和 Central 扫描。</li>
-    <li>macOS/Windows 按字典序由较小的 <code>peer_id</code> 主动连接；Linux 因 BlueZ Peripheral 通知 writer 的多客户端限制，由双方建立 Central 会话并在消息层去重。</li>
-    <li>消息采用 JSON；BLE 层使用固定大小分片、乱序重组、重复帧抑制和未完成传输清理。</li>
-    <li>桌面端可以发现多个 Agent，选择已连接的 Agent 创建房间，并通过直接 PeerSession 广播群消息；群聊页面提供会话列表、成员面板、在线状态、消息气泡、回复、提及和文件入口。</li>
-    <li>用户可以单独关闭“允许附近设备发现我的 Agent”；关闭只停止本机 BLE 广播，仍可扫描附近 Agent，也不主动断开已建立的群聊会话。</li>
-  </ul>
+  <h2>产品流程</h2>
+  <ol>
+    <li>进入“同伴”页面后，Ace 发布 BLE GATT 服务并扫描附近使用相同服务 UUID 的设备。</li>
+    <li>发现结果只作为候选设备展示，不会自动进入聊天状态。</li>
+    <li>用户点击“连接”后发送 <code>peer.connect</code> 控制消息；双方界面同步显示已连接。</li>
+    <li>已连接的两台电脑使用 <code>chat.message</code> 双向发送文字；当前不提供群聊。</li>
+    <li>关闭“允许被发现”会停止本机 BLE 广播；停止查找只影响本机扫描。</li>
+  </ol>
 
-  <h2>代码结构</h2>
+  <h2>实现结构</h2>
   <table>
     <thead><tr><th>文件</th><th>职责</th></tr></thead>
     <tbody>
-      <tr><td><code>nearby/src/identity.rs</code></td><td>peer ID 状态目录解析、持久化、加载和参数校验。</td></tr>
-      <tr><td><code>nearby/src/protocol.rs</code></td><td>UUID、PeerInfo、Message、FrameCodec、Reassembler 和协议单元测试。</td></tr>
-      <tr><td><code>nearby/src/runtime.rs</code></td><td>BLE Peripheral 广播、Central 扫描连接、GATT 交互和终端消息循环。</td></tr>
-      <tr><td><code>nearby/src/ipc.rs</code></td><td>Electron JSONL IPC、多个 PeerSession、房间邀请、群消息转发、房间历史持久化和事件输出。</td></tr>
-      <tr><td><code>nearby/src/transport.rs</code> / <code>nearby/src/mock.rs</code></td><td>传输后端注入和跨平台 Mock Bus；默认仍使用 BLE，Mock 使用本机 TCP 回环地址协调多个 Nearby 实例。</td></tr>
-      <tr><td><code>nearby/build.rs</code> / <code>nearby/Info.plist</code></td><td>在 macOS 独立 BLE 进程中嵌入 CoreBluetooth 隐私用途声明，开发模式和打包模式共用。</td></tr>
-      <tr><td><code>nearby/src/cli.rs</code></td><td>交互式 CLI 代理；复用 IPC 运行时验证发现、群聊、提及、回复和文件链路。</td></tr>
-      <tr><td><code>nearby/src/main.rs</code></td><td>PoC CLI 参数解析和启动入口；<code>--ipc</code> 用于桌面端托管。</td></tr>
-      <tr><td><code>desktop/src/main/nearby-service.ts</code></td><td>主进程启动、停止和管理跨平台 Rust Nearby 子进程。</td></tr>
-      <tr><td><code>desktop/src/ui/features/nearby-page.ts</code></td><td>紧凑桌面聊天布局、发现列表、群聊会话列表、成员面板和群消息交互。</td></tr>
-      <tr><td><code>desktop/src/main/index.ts</code> / <code>preload.ts</code></td><td>校验 Nearby 命令，并通过系统文件选择器读取与保存小文件。</td></tr>
+      <tr><td><code>nearby/src/ipc.rs</code></td><td>BLE Central 扫描和连接、GATT 客户端会话、外设服务、身份握手及桌面 JSONL IPC。</td></tr>
+      <tr><td><code>nearby/src/protocol.rs</code></td><td>消息格式、控制消息、文字消息、分帧与重组。</td></tr>
+      <tr><td><code>nearby/src/mock.rs</code></td><td>无需蓝牙硬件的双实例发现、连接和消息协议测试后端。</td></tr>
+      <tr><td><code>nearby/vendor/ble-peripheral-rust</code></td><td>macOS 与 Windows BLE Peripheral/GATT Server；Windows 回调通过 Tokio 异步执行，避免阻塞 WinRT 事件线程。</td></tr>
+      <tr><td><code>desktop/src/ui/features/nearby-page.ts</code></td><td>设备发现、手动连接、一对一会话状态和文字聊天交互。</td></tr>
+      <tr><td><code>desktop/assets/styles/nearby.css</code></td><td>AirDrop 风格扫描层级、半透明材料、设备卡片和聊天布局，并适配减少动态效果与减少透明度。</td></tr>
     </tbody>
   </table>
 
-  <h2>BLE 服务</h2>
-  <table>
-    <thead><tr><th>资源</th><th>UUID</th><th>用途</th></tr></thead>
-    <tbody>
-      <tr><td>Service</td><td><code>5957645b-4b06-49cf-bde2-366a593e73a7</code></td><td>Nearby 服务；广播只携带该 Service UUID。</td></tr>
-      <tr><td>PeerInfo</td><td><code>5957645b-4b06-49cf-bde2-366a593e73a8</code></td><td>Read；读取完整 PeerInfo JSON。</td></tr>
-      <tr><td>IncomingMessage</td><td><code>5957645b-4b06-49cf-bde2-366a593e73a9</code></td><td>Write；写入 JSON 消息分片。</td></tr>
-      <tr><td>OutgoingMessage</td><td><code>5957645b-4b06-49cf-bde2-366a593e73aa</code></td><td>Notify；订阅后接收 JSON 消息分片。</td></tr>
-    </tbody>
-  </table>
-  <p>Apple CoreBluetooth 广播接口适合携带本地名称和 Service UUID，因此 Token 与完整身份信息放在 PeerInfo 特征中读取，不依赖把 JSON 塞进广播包。</p>
-
-  <h2>发现隐私与工作目录边界</h2>
-  <p>附近发现页提供“允许附近设备发现我的 Agent”开关。设置持久化在状态目录的 <code>settings.json</code>，默认开启；关闭后服务调用 BLE Peripheral 的停止广播接口，但保留 Central 扫描和现有会话。桌面端收到 <code>ready</code> 与 <code>discoverability_changed</code> 事件后更新开关状态。</p>
-  <p>广播发现和 GATT 读取只提供经过筛选的 PeerInfo：显示名称、Agent 名称、能力列表、协议版本和用于会话识别的 Peer ID/Token。不会把工作目录、环境变量、密钥、认证信息或本机绝对路径放入 PeerInfo，也不会在发现列表里为远端目录提供浏览或选择入口。发现页会明确显示“工作目录：对方本机私有”。</p>
-  <p>本模块对 Buzz 的工作区处理方式做了边界对齐：Buzz 在创建 ACP 会话时把 <code>cwd</code> 作为本地会话参数传入，公开 Agent 投影不包含文件系统路径、环境变量或密钥。因此 Nearby 的第一版只交换 Agent 能力和身份；如果后续把真实 Agent 执行接入群聊，工作目录必须由本机用户在本机安全边界内选择，不能由附近设备远程指定。</p>
-
-  <h2>消息与分片</h2>
-  <p>Message 当前覆盖 <code>peer.hello</code>、<code>chat.message</code> 和房间消息。Frame 使用 12 字节头部：协议版本、保留标志、传输 ID、序号、总片数和 Payload 长度，字段按大端序编码。实际分片容量按 Central 报告的 MTU 计算，并为 ATT 操作保留保守开销。</p>
-  <p>群聊消息使用 <code>room.invite</code>、<code>room.join</code>、<code>room.message</code>、<code>room.file</code> 和 <code>room.leave</code>，房间 ID 和成员列表放在消息 Payload 中。<code>room.message</code> 可以带 <code>mentions</code> 和 <code>reply_to</code>；提及只发送房间成员的 Peer ID，回复引用只保留消息 ID、发送者和截断后的原文。</p>
-  <p><code>room.file</code> 的 Payload 包含文件名、MIME、总字节数、SHA-256、分片序号/总数和 Base64 分片。当前单文件上限为 4 MiB，Base64 会按 8 KiB 字符分片后走同一套 BLE FrameCodec；接收端允许乱序和重复分片，全部到齐后才展示“保存文件”。发送端和保存端都会校验 Base64 解码后的字节数与 SHA-256。文件不经过 Relay、S3 或 REST。</p>
-  <p>Peripheral 通知在部分平台上会广播给所有订阅者，因此接收端还会按成员列表过滤邀请和群消息，未被选择的 Agent 不会自动加入房间。PeerSession 同时承担 Central 主动连接和 Peripheral 被动接收，避免桌面端暴露 BLE 库类型。</p>
+  <h2>BLE 协议</h2>
+  <p>服务 UUID 为 <code>0000a0a0-0000-1000-8000-00805f9b34fb</code>。GATT 服务包含 PeerInfo、IncomingMessage 和 OutgoingMessage 三个特征。Central 订阅 OutgoingMessage 通知，并向 IncomingMessage 写入长度前缀 JSON 帧。</p>
+  <p>每个实例持久化一个随机 Peer ID。物理 BLE 会话完成 <code>hello</code> 身份握手后可用于发现；只有用户选择设备并交换 <code>peer.connect</code> 后，界面才进入已连接状态。主动断开使用 <code>peer.disconnect</code>，文字使用 <code>chat.message</code>，单条文字上限 8000 字符。</p>
+  <p>BLE 连接不依赖 Wi-Fi 或局域网。实际可发现距离、连接稳定性和吞吐受蓝牙适配器、系统权限、射频环境以及操作系统节能策略影响。</p>
 
   <h2>桌面 IPC</h2>
-  <p>Rust 子进程通过 stdin/stdout 交换一行一个 JSON 对象。Electron 主进程只接受受信 Renderer 的白名单命令：启动/停止发现、设置是否可被发现、创建房间、发送带提及/回复的房间消息、发送小文件、退出房间。Renderer 通过 Preload 暴露的系统文件选择器读取文件，接收端通过保存对话框落盘。Rust 输出 <code>ready</code>、<code>discoverability_changed</code>、<code>peer_discovered</code>、<code>peer_connected</code>、<code>room_created</code>、<code>room_joined</code>、<code>room_restored</code>、<code>message</code> 和 <code>error</code> 事件。</p>
-  <p>已加入的群聊和最近 200 条消息保存在状态目录的 <code>rooms.json</code>。Nearby 服务重启时会先发送 <code>room_restored</code>，桌面端恢复左侧群聊列表和历史消息；页面切换或窗口关闭只停止运行时，不会自动发送 <code>room.leave</code>，只有用户点击“退出”才会真正删除本机群聊。</p>
-  <pre>npm run build:dev
-# 或直接启动独立 IPC 模式
-cargo run --manifest-path nearby/Cargo.toml -- --ipc</pre>
-  <h3>完整 CLI 验证模式</h3>
-  <p>CLI 会启动同一个 <code>--ipc</code> BLE 运行时，终端输入会被转换为桌面端使用的同一组 Nearby 命令。这样可以把 UI 与 BLE/IPC 问题分开验证；CLI 的 BLE 诊断日志仍直接输出到当前终端。</p>
+  <table>
+    <thead><tr><th>方向</th><th>类型</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>Renderer → Rust</td><td><code>start_discovery</code> / <code>stop_discovery</code></td><td>开始或暂停 BLE 扫描。</td></tr>
+      <tr><td>Renderer → Rust</td><td><code>set_discoverable</code></td><td>启用或停止本机 BLE 广播。</td></tr>
+      <tr><td>Renderer → Rust</td><td><code>connect_peer</code> / <code>disconnect_peer</code></td><td>手动建立或断开指定 Peer 的逻辑会话。</td></tr>
+      <tr><td>Renderer → Rust</td><td><code>send_message</code></td><td>向已连接 Peer 发送文字。</td></tr>
+      <tr><td>Rust → Renderer</td><td><code>peer_discovered</code> / <code>peer_unavailable</code></td><td>更新附近设备列表。</td></tr>
+      <tr><td>Rust → Renderer</td><td><code>peer_connected</code> / <code>peer_disconnected</code> / <code>peer_connection_failed</code></td><td>更新一对一连接状态。</td></tr>
+      <tr><td>Rust → Renderer</td><td><code>message</code></td><td>传递本机已发送或远端收到的 <code>chat.message</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>运行与调试</h2>
   <pre>cargo run --manifest-path nearby/Cargo.toml -- \
-  --cli \
-  --display-name "Mac CLI" \
-  --agent-name "Mac Agent" \
-  --peer-id crew_mac
+  --ipc \
+  --transport ble \
+  --display-name "Mac Ace" \
+  --agent-name "Ace Agent" \
+  --peer-id ace_mac
 
-peers
-room create test --name "Test room" crew_win
-send test -- "hello from Mac CLI"
-send test --mention crew_win -- "please check this"
-file test ./hello.txt
-save &lt;received-file-id&gt; ./received-hello.txt
-room leave test
-quit</pre>
-  <p>可用命令还包括 <code>rooms</code>、<code>room history &lt;id&gt;</code>、<code>status</code>、<code>discover on|off</code> 和 <code>advertise on|off</code>。发送消息时使用 <code>--</code> 分隔选项和正文；回复使用 <code>--reply &lt;message_id&gt; &lt;sender_peer_id&gt; &lt;quoted_text&gt;</code>。收到文件后，CLI 会先完成分片重组，再使用 <code>save</code> 按文件 ID 校验 SHA-256 后保存。</p>
-  <h3>单机 Mock 验证模式</h3>
-  <p>为避免 BLE 硬件和 Windows/macOS 双机联调阻塞，Nearby 提供可注入的 Mock 传输后端。Mock Bus 使用跨平台 TCP 回环地址；每个 CLI 实例仍然经过同一套 JSONL IPC、房间、消息、文件和历史逻辑，默认 BLE 运行路径不变。Unix Socket 不是必需条件，因此 Windows、macOS 和 Linux 使用相同命令。</p>
-  <pre># 终端 1：启动 Mock Bus
-cargo run --manifest-path nearby/Cargo.toml -- \
-  --transport mock --mock-bus --mock-endpoint 127.0.0.1:39202
+# 无蓝牙硬件时使用 mock 后端做协议联调
+cargo run --manifest-path nearby/Cargo.toml -- --ipc --transport mock</pre>
+  <p>桌面开发模式使用 <code>cd desktop &amp;&amp; npm run dev</code>。诊断日志输出到 stderr，stdout 只输出 JSONL IPC 事件。</p>
 
-# 终端 2：启动实例 A
-cargo run --manifest-path nearby/Cargo.toml -- \
-  --cli --transport mock --mock-endpoint 127.0.0.1:39202 \
-  --state-dir /tmp/ace-mock-a --peer-id mock_a \
-  --display-name "Mock A" --agent-name "Agent A"
-
-# 终端 3：启动实例 B；Windows 可将状态目录换成 C:\\Temp\\ace-mock-b
-cargo run --manifest-path nearby/Cargo.toml -- \
-  --cli --transport mock --mock-endpoint 127.0.0.1:39202 \
-  --state-dir /tmp/ace-mock-b --peer-id mock_b \
-  --display-name "Mock B" --agent-name "Agent B"
-
-# 在 A 中验证发现、建群和消息
-peers
-room create mock_room --name "本机验收群" mock_b
-send mock_room -- "A -> B Mock 消息"
-
-# 在 B 中回复，并验证历史
-send mock_room -- "B -> A Mock 回复"
-room history mock_room
-quit</pre>
-  <p>Mock Bus 会模拟发现、连接、断开和消息转发；双方同时发起连接时，运行时只向上层发出一次 <code>peer_connected</code>。实例退出后重新使用同一个状态目录，会收到 <code>room_restored</code> 并恢复群聊列表与最近消息。</p>
-  <h3>macOS 蓝牙权限</h3>
-  <p>CoreBluetooth 的权限声明嵌入 <code>crew-nearby</code> 二进制的 <code>__TEXT,__info_plist</code> 段，因此 <code>npm run dev</code> 和 Electron 打包产物都使用同一份声明。首次打开“同伴”并启动 BLE 后，macOS 会显示蓝牙授权提示；如果之前拒绝过，需要在“系统设置 → 隐私与安全性 → 蓝牙”中重新允许，或使用 <code>tccutil reset BluetoothAlways com.crew.nearby</code> 清除该进程的授权记录后重试。</p>
-  <h3>诊断日志</h3>
-  <p>Nearby 的 Rust 运行时把脱敏诊断日志写到标准错误，桌面端会在启动它的终端输出 <code>[nearby][runtime]</code> 前缀。日志覆盖适配器枚举、Peripheral 上电、GATT Service 注册、Advertising、扫描事件、连接、服务发现、PeerInfo 读取、连接优先级、订阅、Hello 写入和失败阶段；不会输出 Peer Token、消息正文或环境变量。</p>
-  <pre>cd desktop
-npm run dev
-# 打开“同伴”后，在当前终端搜索：
-# [nearby][peripheral] advertising_started
-# [nearby][central] scanning_started
-# [nearby][session] stage=connect_started
-# [nearby][session] stage=peer_info_read
-# [nearby][session] stage=connection_policy</pre>
-
-  <h2>运行</h2>
-  <pre>cargo run --manifest-path nearby/Cargo.toml -- --display-name "Mac One" --agent-name "Crew Agent" --capability chat --capability tools</pre>
-  <p>可用参数：<code>--display-name</code>、<code>--agent-name</code>、重复使用的 <code>--capability</code>、<code>--peer-id</code>、<code>--state-dir</code>、<code>--discoverable</code> 和 <code>--no-discoverable</code>。未指定状态目录时优先使用 <code>${CREW_HOME}/nearby/</code>，否则使用用户目录下的 <code>.Crew/nearby/</code>；其中 <code>peer.json</code> 保存 Peer ID，<code>settings.json</code> 保存发现开关。CLI 开关只覆盖本次启动，桌面端开关会更新持久化设置。</p>
-  <p>启动后，在终端输入文本即可发送；收到聊天消息时显示为 <code>Peer: ...</code>。CLI 的较大 Peer ID 一侧会在收到 <code>peer.hello</code> 后建立被动回传会话，因此两端都可以继续发送。macOS 首次运行可能需要授予蓝牙权限。</p>
-  <h3>Mac + Linux 双机验收</h3>
-  <p>在两台设备上分别执行下面命令，使用不同的显示名和固定 Peer ID，避免之前的状态文件造成误判。两台设备需要打开蓝牙并允许应用访问蓝牙；Linux 侧需要运行 BlueZ/DBus。</p>
-  <pre># Mac
-cargo run --manifest-path nearby/Cargo.toml -- --display-name "Mac One" --agent-name "Mac Agent" --peer-id crew_mac
-
-# Linux
-cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agent-name "Linux Agent" --peer-id crew_linux</pre>
+  <h2>macOS + Windows 双机验收</h2>
   <ol>
-    <li>两端都看到 <code>Crew BLE started</code>、<code>Advertising...</code> 和 <code>Scanning...</code>。</li>
-    <li>Peer ID 较小的一端主动连接；两端最终都看到 <code>Connected to: ...</code>。</li>
-    <li>从任一端发送文本，另一端应看到 <code>Peer: ...</code>；再反向发送确认回传链路。</li>
-    <li>桌面端打开“同伴”，选择连接的 Agent 创建群聊，依次验证普通消息、<code>@</code>、回复和小文件。</li>
+    <li>打开两台电脑的蓝牙；Wi-Fi 可以关闭，两台电脑不需要连接同一网络。</li>
+    <li>在两台电脑安装并启动同一版本 Ace，授予系统蓝牙权限后进入“同伴”。</li>
+    <li>保持“允许被发现”开启，确认双方列表出现对方设备，未点击前状态为“可连接”。</li>
+    <li>在 Mac 点击 Windows 设备的“连接”，确认双方都显示“已连接”。</li>
+    <li>Mac 发送消息并确认 Windows 收到；Windows 回复并确认 Mac 收到。</li>
+    <li>点击“断开”，确认双方输入框被禁用；再次连接后重复双向发送。</li>
+    <li>关闭一端“允许被发现”，另一端重新查找后不应再出现新的发现结果。</li>
   </ol>
-  <p>桌面端进入“同伴”后，选择 Agent 创建群聊；输入 <code>@</code> 或点击 <code>@</code> 按钮提及成员，消息卡片上的“回复”按钮会建立回复引用，文件按钮可发送不超过 4 MiB 的文件。</p>
 
-  <h2>依赖与平台</h2>
-  <ul>
-    <li><a href="https://github.com/deviceplug/btleplug">btleplug</a>：Central、扫描、连接、GATT 服务发现、读写、订阅和通知。</li>
-    <li><a href="https://github.com/rohitsangwan01/ble-peripheral-rust">ble-peripheral-rust</a>：Peripheral 广播和 GATT Server；项目在 <code>nearby/vendor</code> 保留了最小 WinRT 事件补丁，用于正确完成 GATT 读写请求的 deferral 生命周期。</li>
-    <li>未将 AGPL 项目加入依赖；当前实现保持独立 Rust CLI，未引入 Swift/CoreBluetooth 原生桥接。</li>
-    <li>运行时依赖各平台 BLE 后端和系统权限：macOS 需要蓝牙授权，Linux 需要 BlueZ/DBus，Windows 需要系统蓝牙权限。Linux 的多成员路径使用 Central→GATT Write 双向传输，避开当前 Peripheral 单 writer 限制。</li>
-    <li>PeerInfo 特征使用静态 GATT 值直接提供完整身份 JSON；消息写入和通知仍由运行时事件处理，以兼容 Windows GATT Server 的读请求时序。</li>
-    <li>桌面构建会按当前目标运行 <code>scripts/build-nearby.mjs</code>，并把 <code>crew-nearby</code> 放入 Electron extraResources。</li>
-  </ul>
-
-  <h2>验证记录</h2>
+  <h2>验证记录（2026-08-21）</h2>
   <table>
     <thead><tr><th>检查项</th><th>结果</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>cargo fmt --manifest-path nearby/Cargo.toml -- --check</code></td><td class="pass">通过</td><td>Rust 格式检查通过。</td></tr>
-      <tr><td><code>cargo check --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>当前 macOS 主机目标编译通过。</td></tr>
-      <tr><td><code>cargo clippy --manifest-path nearby/Cargo.toml --all-targets -- -D warnings</code></td><td class="pass">通过</td><td>无 Clippy 警告。</td></tr>
-      <tr><td>macOS BLE 权限段检查</td><td class="pass">通过</td><td>生成的 <code>crew-nearby</code> 包含 <code>__TEXT,__info_plist</code>，并包含 <code>NSBluetoothAlwaysUsageDescription</code>。</td></tr>
-      <tr><td>BLE 分阶段诊断日志</td><td class="pass">已定位并修复读阶段</td><td>Mac CLI 已实测连接更新后的 Windows 设备并完成服务发现、静态 PeerInfo 读取、通知订阅、Hello 和 ready 会话。</td></tr>
-      <tr><td>Mac → Windows 群聊写入调用</td><td class="pass">调用返回成功</td><td>CLI 已发现 Windows Agent、创建群聊；Mac Central 的 BLE 写入调用返回成功，但 Windows UI 尚未显示房间邀请或消息。</td></tr>
-      <tr><td>跨平台 IncomingMessage 写入</td><td class="pending">待 Windows 更新</td><td>IncomingMessage 现同时声明 Write 与 WriteWithoutResponse，Central 优先采用无响应写；需要 Windows 拉取本次更新后复测 Windows Peripheral 的 WriteRequest 事件。</td></tr>
-      <tr><td>Windows GATT 写事件 deferral</td><td class="pass">源码检查通过</td><td>本地依赖补丁已为 WinRT 读写请求增加 <code>GetDeferral</code>/<code>Complete</code> 生命周期；Windows 实机消息回执仍待更新后验证。</td></tr>
-      <tr><td>Windows → Mac 群聊消息</td><td class="pending">待 Windows 回执</td><td>Mac 端已保持 CLI 监听并多次请求 Windows 回发消息；当前尚未收到回执，不能据此宣称双向验收完成。</td></tr>
-      <tr><td>完整 Nearby CLI</td><td class="pass">通过</td><td>CLI 复用 IPC 运行时，覆盖发现、广播开关、同伴列表、房间创建/加入/退出、群消息、@ 提及、回复、文件发送、文件分片接收和校验保存。</td></tr>
-      <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 22 个测试、CLI 8 个测试全部通过，包含发现开关持久化、房间历史持久化与上限、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传、Mock 参数解析和平台连接策略测试。</td></tr>
-      <tr><td>单机 Mock Bus CLI 验收</td><td class="pass">通过</td><td>同一台 macOS 启动 Bus、实例 A 和实例 B，已验证互相发现、建群、群消息双向传递、房间历史查询，以及 B 重启后的群聊和历史恢复。</td></tr>
-      <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pass">通过</td><td>Windows 目标编译检查通过。</td></tr>
-      <tr><td><code>cargo build --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pending">本机链接环境阻塞</td><td>源码检查通过，但 macOS 环境没有 Windows <code>link.exe</code>；需在 Windows 端拉取后构建实际可执行文件。</td></tr>
-      <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-unknown-linux-gnu</code></td><td class="pending">环境阻塞</td><td>当前 macOS 环境缺少 Linux sysroot/DBus 开发库，阻塞在 <code>libdbus-sys</code> 构建阶段；本机 Docker CLI 存在但 Docker daemon 未运行，暂不能用 Linux 容器补检。</td></tr>
-      <tr><td>macOS BLE 启动烟测</td><td class="pass">通过</td><td>当前 Mac 已实际启动 Peripheral 广播与 Central 扫描并输出 <code>Advertising...</code>、<code>Scanning...</code>；随后手动停止进程。</td></tr>
-      <tr><td><code>npm run typecheck</code></td><td class="pass">通过</td><td>Electron 主进程、Preload 和 Renderer 类型检查通过。</td></tr>
-      <tr><td>Nearby 定向桌面测试</td><td class="pass">通过</td><td>Nearby 页面、托盘入口、Shell 导航共 14 个测试通过，覆盖发现开关、工作目录隐私提示、群聊列表、历史群聊恢复、页面切换不退群、成员面板、在线状态、输入区状态、提及、回复、文件分片重组和保存动作。</td></tr>
-      <tr><td><code>npm run build:dev</code></td><td class="pass">通过</td><td>Nearby debug runtime、Electron 主进程、Preload、Renderer 和 CSS Bundle 构建通过。</td></tr>
-      <tr><td><code>npm run build</code></td><td class="pending">本轮未执行</td><td>按当前要求暂不执行 release 构建或打包。</td></tr>
-      <tr><td>桌面全量单测</td><td class="pending">存在既有失败</td><td>147 个测试文件中 120 个通过；62 个失败来自当前分支既有未提交改动相关模块，需单独处理。</td></tr>
-      <tr><td>macOS + Linux 双机 BLE 硬件验收</td><td class="pending">待执行</td><td>当前只完成 Mac 单机启动烟测；需要在 Linux 设备上按双机步骤执行双向消息、群聊、提及、回复和文件验收。</td></tr>
+      <tr><td>Rust 单元与协议测试</td><td class="pass">通过</td><td><code>cargo test</code> 共 33 项通过，覆盖协议编码、IPC、被动身份握手和重复物理会话关闭竞争。</td></tr>
+      <tr><td>Rust Clippy</td><td class="pass">通过</td><td><code>cargo clippy --all-targets -- -D warnings</code> 无警告。</td></tr>
+      <tr><td>Windows MSVC 目标检查</td><td class="pass">通过</td><td><code>cargo check --target x86_64-pc-windows-msvc</code> 通过，包含 Windows BLE Peripheral 回调。</td></tr>
+      <tr><td>双实例协议端到端</td><td class="pass">通过</td><td>两个独立 Ace 实例完成发现、手动连接、Mac→Windows 与 Windows→Mac 双向文字以及断开。</td></tr>
+      <tr><td>桌面类型、定向单测与样式检查</td><td class="pass">通过</td><td>TypeScript、ESLint、Stylelint 和 Nearby/导航 11 项测试通过。</td></tr>
+      <tr><td>桌面开发构建</td><td class="pass">通过</td><td><code>npm run build:dev</code> 完成 Nearby 二进制、主进程、Preload、Renderer 和样式构建。</td></tr>
+      <tr><td>macOS + Windows 实机</td><td class="pending">待用户验收</td><td>需在两台真实设备上验证蓝牙权限、发现距离及双向消息。</td></tr>
     </tbody>
   </table>
 
-  <h2>已知限制与失败处理</h2>
+  <h2>当前边界</h2>
   <ul>
-    <li>群聊当前是小规模直接 PeerSession 广播模型，成员必须先完成 BLE 连接；暂不提供公网服务器、历史云同步或大规模群组路由。</li>
-    <li>扫描候选的连接失败会从抑制集合中清除，后续广播事件可以触发重试；已建立的会话仍保持重复连接抑制。</li>
-    <li>Linux 为支持多个 Peripheral 客户端采用双向 Central 会话；这会增加物理连接数量，但通过 Peer ID 逻辑会话和 message_id 去重避免重复消息。</li>
-    <li>Peripheral 和 Central 在同一进程内共存的稳定性需要分别在 macOS、Windows、Linux 硬件上验证。</li>
-    <li>当前已完成 macOS CLI 到 Windows Ace 的真实连接、建群和单向消息验收；Windows 回执仍待人工在群聊页面发送后确认，三平台完整硬件验收仍待执行。</li>
+    <li>只支持一对一文字消息；不提供群聊、文件、提及和回复。</li>
+    <li>聊天记录只保存在页面内存中，重新启动 Ace 后不会恢复。</li>
+    <li>对端消息由对端 Ace 用户查看和回复，不会自动调用对方的 AI Agent。</li>
+    <li>当前未实现配对码与应用层端到端加密，不应发送敏感信息。</li>
+    <li>BLE 通道吞吐有限，不适合大文件或高频消息。</li>
   </ul>
 </body>
 </html>

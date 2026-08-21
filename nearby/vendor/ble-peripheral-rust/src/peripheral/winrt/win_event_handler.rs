@@ -13,6 +13,7 @@ use uuid::Uuid;
 use windows::core::IInspectable;
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
     GattProtocolError, GattServiceProviderAdvertisementStatus, GattSubscribedClient,
+    GattWriteOption,
 };
 use windows::Devices::Radios::{Radio, RadioState};
 use windows::Foundation::Collections::IVectorView;
@@ -163,56 +164,67 @@ impl WinEventHandler {
         service_uuid: Uuid,
     ) -> TypedEventHandler<GattLocalCharacteristic, GattReadRequestedEventArgs> {
         let sender_tx: Sender<PeripheralEvent> = self.sender_tx.clone();
+        let runtime = tokio::runtime::Handle::current();
 
         TypedEventHandler::new(
             move |originator: &Option<GattLocalCharacteristic>,
                   args: &Option<GattReadRequestedEventArgs>| {
-                let event_args: &GattReadRequestedEventArgs = args.as_ref().unwrap();
-                let characteristic = originator.as_ref().unwrap();
-                let deferral = event_args.GetDeferral().unwrap();
+                let Some(event_args) = args.as_ref().cloned() else {
+                    return Ok(());
+                };
+                let Some(characteristic) = originator.as_ref() else {
+                    return Ok(());
+                };
+                let deferral = event_args.GetDeferral()?;
+                let characteristic_uuid = to_uuid(&characteristic.Uuid()?);
+                let client = device_id_from_session(event_args.Session()?);
+                let sender_tx = sender_tx.clone();
 
-                futures::executor::block_on(async {
-                    let request = event_args.GetRequestAsync().unwrap().await;
-                    if let Ok(request) = request {
-                        // let mtu = event_args.Session().unwrap().MaxPduSize().unwrap();
+                runtime.spawn(async move {
+                    let result = async {
+                        let request = event_args
+                            .GetRequestAsync()
+                            .map_err(|error| error.to_string())?
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let offset = request.Offset().map_err(|error| error.to_string())? as u64;
                         let (resp_tx, resp_rx) = oneshot::channel::<ReadRequestResponse>();
-                        if let Err(e) = sender_tx
+                        sender_tx
                             .send(PeripheralEvent::ReadRequest {
                                 request: PeripheralRequest {
-                                    client: device_id_from_session(event_args.Session().unwrap()),
+                                    client,
                                     service: service_uuid,
-                                    characteristic: to_uuid(&characteristic.Uuid().unwrap()),
+                                    characteristic: characteristic_uuid,
                                 },
-                                offset: request.Offset().unwrap() as u64,
+                                offset,
                                 responder: resp_tx,
                             })
                             .await
-                        {
-                            log::error!("Error sending delegate event: {}", e);
-                            return;
-                        }
-
-                        if let Ok(result) = resp_rx.await {
-                            if result.response == RequestResponse::Success {
-                                request
-                                    .RespondWithValue(&vec_to_buffer(result.value))
-                                    .unwrap();
-                                return;
-                            }
+                            .map_err(|error| error.to_string())?;
+                        let response = resp_rx.await.map_err(|error| error.to_string())?;
+                        if response.response == RequestResponse::Success {
                             request
-                                .RespondWithProtocolError(result.response.to_gatt_protocol_error())
-                                .unwrap();
-                            return;
+                                .RespondWithValue(&vec_to_buffer(response.value))
+                                .map_err(|error| error.to_string())?;
+                        } else {
+                            request
+                                .RespondWithProtocolError(
+                                    response.response.to_gatt_protocol_error(),
+                                )
+                                .map_err(|error| error.to_string())?;
                         }
-
-                        request
-                            .RespondWithProtocolError(GattProtocolError::UnlikelyError().unwrap())
-                            .unwrap();
+                        Ok::<(), String>(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        log::error!("Failed to handle GATT read request: {}", error);
+                    }
+                    if let Err(error) = deferral.Complete() {
+                        log::error!("Failed to complete GATT read deferral: {}", error);
                     }
                 });
-                deferral.Complete().unwrap();
 
-                return Ok(());
+                Ok(())
             },
         )
     }
@@ -222,55 +234,75 @@ impl WinEventHandler {
         service_uuid: Uuid,
     ) -> TypedEventHandler<GattLocalCharacteristic, GattWriteRequestedEventArgs> {
         let sender_tx = self.sender_tx.clone();
+        let runtime = tokio::runtime::Handle::current();
 
         TypedEventHandler::new(
             move |originator: &Option<GattLocalCharacteristic>,
                   args: &Option<GattWriteRequestedEventArgs>| {
-                let event_args = args.as_ref().unwrap();
-                let characteristic = originator.as_ref().unwrap();
-                let deferral = event_args.GetDeferral().unwrap();
-                futures::executor::block_on(async {
-                    if let Ok(request) = event_args.GetRequestAsync().unwrap().await {
-                        // let offset = request.Offset().unwrap();
-                        // let mtu = event_args.Session().unwrap().MaxPduSize().unwrap();
+                let Some(event_args) = args.as_ref().cloned() else {
+                    return Ok(());
+                };
+                let Some(characteristic) = originator.as_ref() else {
+                    return Ok(());
+                };
+                let deferral = event_args.GetDeferral()?;
+                let characteristic_uuid = to_uuid(&characteristic.Uuid()?);
+                let client = device_id_from_session(event_args.Session()?);
+                let sender_tx = sender_tx.clone();
+
+                runtime.spawn(async move {
+                    let result = async {
+                        let request = event_args
+                            .GetRequestAsync()
+                            .map_err(|error| error.to_string())?
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let with_response = request
+                            .Option()
+                            .map_err(|error| error.to_string())?
+                            == GattWriteOption::WriteWithResponse;
+                        let value = buffer_to_vec(
+                            &request.Value().map_err(|error| error.to_string())?,
+                        );
+                        let offset = request.Offset().map_err(|error| error.to_string())? as u64;
                         let (resp_tx, resp_rx) = oneshot::channel::<WriteRequestResponse>();
-                        let char_uuid = to_uuid(&characteristic.Uuid().unwrap());
-                        if let Err(e) = sender_tx
+                        sender_tx
                             .send(PeripheralEvent::WriteRequest {
                                 request: PeripheralRequest {
-                                    client: device_id_from_session(event_args.Session().unwrap()),
+                                    client,
                                     service: service_uuid,
-                                    characteristic: char_uuid,
+                                    characteristic: characteristic_uuid,
                                 },
-                                value: buffer_to_vec(&request.Value().unwrap()),
-                                offset: request.Offset().unwrap() as u64,
+                                value,
+                                offset,
                                 responder: resp_tx,
                             })
                             .await
-                        {
-                            log::error!("Error sending delegate event: {}", e);
-                            return;
-                        }
-
-                        if let Ok(result) = resp_rx.await {
-                            if result.response == RequestResponse::Success {
-                                request.Respond().unwrap();
-                                return;
+                            .map_err(|error| error.to_string())?;
+                        let response = resp_rx.await.map_err(|error| error.to_string())?;
+                        if with_response {
+                            if response.response == RequestResponse::Success {
+                                request.Respond().map_err(|error| error.to_string())?;
+                            } else {
+                                request
+                                    .RespondWithProtocolError(
+                                        response.response.to_gatt_protocol_error(),
+                                    )
+                                    .map_err(|error| error.to_string())?;
                             }
-                            request
-                                .RespondWithProtocolError(result.response.to_gatt_protocol_error())
-                                .unwrap();
-                            return;
                         }
-
-                        request
-                            .RespondWithProtocolError(GattProtocolError::UnlikelyError().unwrap())
-                            .unwrap();
+                        Ok::<(), String>(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        log::error!("Failed to handle GATT write request: {}", error);
+                    }
+                    if let Err(error) = deferral.Complete() {
+                        log::error!("Failed to complete GATT write deferral: {}", error);
                     }
                 });
-                deferral.Complete().unwrap();
 
-                return Ok(());
+                Ok(())
             },
         )
     }

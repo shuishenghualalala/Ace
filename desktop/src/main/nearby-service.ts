@@ -6,6 +6,9 @@ export type NearbyCommand =
   | { type: 'start_discovery' }
   | { type: 'stop_discovery' }
   | { type: 'set_discoverable'; enabled: boolean }
+  | { type: 'connect_peer'; peer_id: string }
+  | { type: 'disconnect_peer'; peer_id: string }
+  | { type: 'send_message'; peer_id: string; text: string }
   | { type: 'create_room'; room_id: string; room_name: string; peer_ids: string[] }
   | {
     type: 'send_room_message';

@@ -84,6 +84,16 @@ pub(crate) enum IpcCommand {
     SetDiscoverable {
         enabled: bool,
     },
+    ConnectPeer {
+        peer_id: String,
+    },
+    DisconnectPeer {
+        peer_id: String,
+    },
+    SendMessage {
+        peer_id: String,
+        text: String,
+    },
     CreateRoom {
         room_id: String,
         room_name: String,
@@ -137,6 +147,13 @@ pub(crate) enum IpcEvent {
     PeerDisconnected {
         peer_id: String,
     },
+    PeerUnavailable {
+        peer_id: String,
+    },
+    PeerConnectionFailed {
+        peer_id: String,
+        message: String,
+    },
     RoomCreated {
         room_id: String,
         room_name: String,
@@ -183,13 +200,17 @@ enum SessionEvent {
     Discovered(PeerInfo),
     Ready {
         peer: PeerInfo,
+        session_id: String,
         outbound: mpsc::Sender<Message>,
     },
     Received {
         peer_id: String,
         message: Message,
     },
-    Closed(String),
+    Closed {
+        peer_id: String,
+        session_id: String,
+    },
     Failed {
         peer_id: String,
         error: String,
@@ -343,11 +364,14 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
     let (session_event_tx, mut session_event_rx) = mpsc::channel(128);
     let mut stdin = BufReader::new(io::stdin()).lines();
     let mut sessions: HashMap<String, mpsc::Sender<Message>> = HashMap::new();
+    let mut session_ids: HashMap<String, String> = HashMap::new();
     let mut discovered: HashMap<String, PeerInfo> = HashMap::new();
+    let mut active_peers = HashSet::new();
+    let mut pending_peer_connections = HashSet::new();
     let mut rooms = load_rooms(&state_dir)?;
     let mut connection_candidates = HashSet::new();
     let scan_lock = Arc::new(Mutex::new(()));
-    let mut server_clients: HashMap<String, String> = HashMap::new();
+    let mut server_clients: HashMap<String, (String, String)> = HashMap::new();
     let mut server_reassemblers: HashMap<String, Reassembler> = HashMap::new();
     let mut seen_messages = HashSet::new();
 
@@ -421,6 +445,77 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             discoverable = enabled;
                             sink.send(IpcEvent::DiscoverabilityChanged { discoverable: enabled }).await?;
                         }
+                    }
+                    IpcCommand::ConnectPeer { peer_id } => {
+                        let Some(remote) = discovered.get(&peer_id).cloned() else {
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "附近已找不到这台 Ace".to_owned(),
+                            }).await?;
+                            continue;
+                        };
+                        if active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                            continue;
+                        }
+                        pending_peer_connections.insert(peer_id.clone());
+                        if let Some(outbound) = sessions.get(&peer_id).cloned() {
+                            if outbound.send(Message::peer_connect(peer.peer_id.clone())).await.is_err() {
+                                pending_peer_connections.remove(&peer_id);
+                                sink.send(IpcEvent::PeerConnectionFailed {
+                                    peer_id,
+                                    message: "BLE 会话已经断开，请重新查找".to_owned(),
+                                }).await?;
+                                continue;
+                            }
+                            pending_peer_connections.remove(&peer_id);
+                            active_peers.insert(peer_id);
+                            sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                        }
+                    }
+                    IpcCommand::DisconnectPeer { peer_id } => {
+                        pending_peer_connections.remove(&peer_id);
+                        if active_peers.remove(&peer_id) {
+                            if let Some(outbound) = sessions.get(&peer_id).cloned() {
+                                outbound.send(Message::peer_disconnect(peer.peer_id.clone())).await.ok();
+                            }
+                            sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                        }
+                    }
+                    IpcCommand::SendMessage { peer_id, text } => {
+                        let text = text.trim();
+                        if text.is_empty() || text.len() > 8_000 {
+                            sink.send(IpcEvent::Error { message: "消息不能为空且不能超过 8000 个字符".to_owned() }).await?;
+                            continue;
+                        }
+                        if !active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "请先连接这台 Ace".to_owned(),
+                            }).await?;
+                            continue;
+                        }
+                        let Some(outbound) = sessions.get(&peer_id).cloned() else {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "BLE 会话已经断开，请重新连接".to_owned(),
+                            }).await?;
+                            continue;
+                        };
+                        let message = Message::chat(peer.peer_id.clone(), text);
+                        if outbound.send(message.clone()).await.is_err() {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "消息发送失败，BLE 会话已经断开".to_owned(),
+                            }).await?;
+                            continue;
+                        }
+                        sink.send(IpcEvent::Message {
+                            peer_id,
+                            message,
+                        }).await?;
                     }
                     IpcCommand::CreateRoom { room_id, room_name, peer_ids } => {
                         let selected: Vec<String> = peer_ids.into_iter()
@@ -595,29 +690,81 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         discovered.insert(remote.peer_id.clone(), remote.clone());
                         sink.send(IpcEvent::PeerDiscovered { peer: remote }).await?;
                     }
-                    SessionEvent::Ready { peer: remote, outbound } => {
-                        eprintln!("[nearby][session] peer_connected peer_id={}", remote.peer_id);
+                    SessionEvent::Ready { peer: remote, session_id, outbound } => {
+                        eprintln!("[nearby][session] peer_ready peer_id={}", remote.peer_id);
                         discovered.insert(remote.peer_id.clone(), remote.clone());
-                        sessions.insert(remote.peer_id.clone(), outbound);
-                        sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                        session_ids.insert(remote.peer_id.clone(), session_id);
+                        sessions.insert(remote.peer_id.clone(), outbound.clone());
+                        if pending_peer_connections.remove(&remote.peer_id) {
+                            if outbound.send(Message::peer_connect(peer.peer_id.clone())).await.is_ok() {
+                                active_peers.insert(remote.peer_id.clone());
+                                sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                            } else {
+                                sink.send(IpcEvent::PeerConnectionFailed {
+                                    peer_id: remote.peer_id,
+                                    message: "BLE 会话在连接时断开".to_owned(),
+                                }).await?;
+                            }
+                        }
                     }
                     SessionEvent::Received { peer_id, message } => {
-                        handle_received_message(
-                            &peer.peer_id,
-                            &sessions,
-                            &mut rooms,
-                            &mut seen_messages,
-                            &sink,
-                            peer_id,
-                            message,
-                        ).await?;
-                        save_rooms(&state_dir, &rooms)?;
+                        if message.version != PROTOCOL_VERSION || message.sender != peer_id {
+                            continue;
+                        }
+                        match message.message_type.as_str() {
+                            "peer.connect" => {
+                                if !seen_messages.insert(message.message_id) {
+                                    continue;
+                                }
+                                active_peers.insert(peer_id.clone());
+                                if let Some(remote) = discovered.get(&peer_id).cloned() {
+                                    sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                                }
+                            }
+                            "peer.disconnect" => {
+                                if !seen_messages.insert(message.message_id) {
+                                    continue;
+                                }
+                                if active_peers.remove(&peer_id) {
+                                    sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                                }
+                            }
+                            "chat.message" => {
+                                if !active_peers.contains(&peer_id)
+                                    || !seen_messages.insert(message.message_id.clone())
+                                {
+                                    continue;
+                                }
+                                sink.send(IpcEvent::Message { peer_id, message }).await?;
+                            }
+                            _ => {
+                                handle_received_message(
+                                    &peer.peer_id,
+                                    &sessions,
+                                    &mut rooms,
+                                    &mut seen_messages,
+                                    &sink,
+                                    peer_id,
+                                    message,
+                                ).await?;
+                                save_rooms(&state_dir, &rooms)?;
+                            }
+                        }
                     }
-                    SessionEvent::Closed(peer_id) => {
+                    SessionEvent::Closed { peer_id, session_id } => {
                         eprintln!("[nearby][session] peer_disconnected peer_id={peer_id}");
+                        server_clients.retain(|_, (_, active_session_id)| active_session_id != &session_id);
+                        if !close_current_session(&mut session_ids, &peer_id, &session_id) {
+                            eprintln!("[nearby][session] stale_close_ignored peer_id={peer_id}");
+                            continue;
+                        }
                         sessions.remove(&peer_id);
-                        server_clients.retain(|_, connected_peer_id| connected_peer_id != &peer_id);
-                        sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                        pending_peer_connections.remove(&peer_id);
+                        if active_peers.remove(&peer_id) {
+                            sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                        } else if discovered.contains_key(&peer_id) {
+                            sink.send(IpcEvent::PeerUnavailable { peer_id }).await?;
+                        }
                     }
                     SessionEvent::Failed { peer_id, error } => {
                         eprintln!(
@@ -641,6 +788,9 @@ fn command_name(command: &IpcCommand) -> &'static str {
         IpcCommand::StartDiscovery => "start_discovery",
         IpcCommand::StopDiscovery => "stop_discovery",
         IpcCommand::SetDiscoverable { .. } => "set_discoverable",
+        IpcCommand::ConnectPeer { .. } => "connect_peer",
+        IpcCommand::DisconnectPeer { .. } => "disconnect_peer",
+        IpcCommand::SendMessage { .. } => "send_message",
         IpcCommand::CreateRoom { .. } => "create_room",
         IpcCommand::SendRoomMessage { .. } => "send_room_message",
         IpcCommand::SendRoomFile { .. } => "send_room_file",
@@ -767,6 +917,7 @@ async fn connect_to_peer(
     scan_lock: Arc<Mutex<()>>,
     event_tx: mpsc::Sender<SessionEvent>,
 ) -> Result<()> {
+    let session_id = uuid::Uuid::new_v4().to_string();
     let _scan_lock = scan_lock.lock().await;
     adapter
         .stop_scan()
@@ -808,19 +959,94 @@ async fn connect_to_peer(
         .clone();
     let write_type = incoming_write_type(&incoming_characteristic)?;
     eprintln!("[nearby][session] device={device} incoming_write_type={write_type:?}");
-    eprintln!("[nearby][session] device={device} stage=peer_info_read_started");
-    let peer_info_bytes = tokio::time::timeout(
-        Duration::from_secs(8),
-        peripheral.read(&peer_info_characteristic),
-    )
-    .await
-    .context("timed out reading remote PeerInfo")?
-    .context("failed to read remote PeerInfo")?;
-    let remote = PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
-    eprintln!(
-        "[nearby][session] device={device} stage=peer_info_read remote_peer_id={} remote_display_name={}",
-        remote.peer_id, remote.display_name
-    );
+    let max_payload = FrameCodec::frame_payload_capacity(peripheral.mtu());
+    let mut notifications;
+    let mut reassembler = Reassembler::default();
+    let remote = if USE_PASSIVE_SESSIONS {
+        peripheral
+            .subscribe(&outgoing_characteristic)
+            .await
+            .context("failed to subscribe to remote OutgoingMessage")?;
+        eprintln!("[nearby][session] device={device} stage=notifications_subscribed");
+        notifications = peripheral
+            .notifications()
+            .await
+            .context("failed to open BLE notification stream")?;
+        let hello = Message::hello(&local_peer);
+        let hello_frames = FrameCodec::fragment(&hello.encode()?, max_payload, 1)?;
+        eprintln!(
+            "[nearby][session] device={device} stage=peer_hello_write mtu={} frame_payload={} frame_count={}",
+            peripheral.mtu(),
+            max_payload,
+            hello_frames.len()
+        );
+        for frame in hello_frames {
+            peripheral
+                .write(&incoming_characteristic, &frame, write_type)
+                .await
+                .context("failed to send BLE peer hello")?;
+        }
+        eprintln!("[nearby][session] device={device} stage=peer_hello_read_started");
+        loop {
+            let notification = tokio::time::timeout(Duration::from_secs(8), notifications.next())
+                .await
+                .context("timed out waiting for remote PeerInfo handshake")?
+                .context("BLE notification stream ended during PeerInfo handshake")?;
+            if notification.uuid != OUTGOING_MESSAGE_UUID {
+                continue;
+            }
+            let Ok(frame) = FrameCodec::parse(&notification.value) else {
+                continue;
+            };
+            if let crate::protocol::ReassemblyResult::Complete(bytes) = reassembler.accept(frame) {
+                let message = Message::decode(&bytes)
+                    .context("received invalid BLE PeerInfo handshake JSON")?;
+                if message.message_type != "peer.hello" {
+                    continue;
+                }
+                if let Some(remote) = peer_info_from_hello(&message) {
+                    eprintln!(
+                        "[nearby][session] device={device} stage=peer_hello_received remote_peer_id={} remote_display_name={}",
+                        remote.peer_id, remote.display_name
+                    );
+                    break remote;
+                }
+            }
+        }
+    } else {
+        eprintln!("[nearby][session] device={device} stage=peer_info_read_started");
+        let peer_info_bytes = tokio::time::timeout(
+            Duration::from_secs(8),
+            peripheral.read(&peer_info_characteristic),
+        )
+        .await
+        .context("timed out reading remote PeerInfo")?
+        .context("failed to read remote PeerInfo")?;
+        let remote =
+            PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
+        eprintln!(
+            "[nearby][session] device={device} stage=peer_info_read remote_peer_id={} remote_display_name={}",
+            remote.peer_id, remote.display_name
+        );
+        peripheral
+            .subscribe(&outgoing_characteristic)
+            .await
+            .context("failed to subscribe to remote OutgoingMessage")?;
+        eprintln!("[nearby][session] device={device} stage=notifications_subscribed");
+        notifications = peripheral
+            .notifications()
+            .await
+            .context("failed to open BLE notification stream")?;
+        let hello = Message::hello(&local_peer);
+        let hello_frames = FrameCodec::fragment(&hello.encode()?, max_payload, 1)?;
+        for frame in hello_frames {
+            peripheral
+                .write(&incoming_characteristic, &frame, write_type)
+                .await
+                .context("failed to send BLE peer hello")?;
+        }
+        remote
+    };
     event_tx
         .send(SessionEvent::Discovered(remote.clone()))
         .await
@@ -843,34 +1069,11 @@ async fn connect_to_peer(
         drop(_scan_lock);
         return Ok(());
     }
-    peripheral
-        .subscribe(&outgoing_characteristic)
-        .await
-        .context("failed to subscribe to remote OutgoingMessage")?;
-    eprintln!("[nearby][session] device={device} stage=notifications_subscribed");
-    let mut notifications = peripheral
-        .notifications()
-        .await
-        .context("failed to open BLE notification stream")?;
     let (outbound, mut outbound_rx) = mpsc::channel(64);
-    let max_payload = FrameCodec::frame_payload_capacity(peripheral.mtu());
-    let hello = Message::hello(&local_peer);
-    let hello_frames = FrameCodec::fragment(&hello.encode()?, max_payload, 1)?;
-    eprintln!(
-        "[nearby][session] device={device} stage=hello_write mtu={} frame_payload={} frame_count={}",
-        peripheral.mtu(),
-        max_payload,
-        hello_frames.len()
-    );
-    for frame in hello_frames {
-        peripheral
-            .write(&incoming_characteristic, &frame, write_type)
-            .await
-            .context("failed to send BLE peer hello")?;
-    }
     event_tx
         .send(SessionEvent::Ready {
             peer: remote.clone(),
+            session_id: session_id.clone(),
             outbound,
         })
         .await
@@ -885,7 +1088,6 @@ async fn connect_to_peer(
     drop(_scan_lock);
     eprintln!("[nearby][session] device={device} stage=ready");
     let mut transfer_id = 2_u32;
-    let mut reassembler = Reassembler::default();
     loop {
         tokio::select! {
             Some(message) = outbound_rx.recv() => {
@@ -912,7 +1114,10 @@ async fn connect_to_peer(
         remote.peer_id
     );
     event_tx
-        .send(SessionEvent::Closed(remote.peer_id))
+        .send(SessionEvent::Closed {
+            peer_id: remote.peer_id,
+            session_id,
+        })
         .await
         .ok();
     Ok(())
@@ -923,7 +1128,7 @@ async fn handle_server_event(
     peer: &PeerInfo,
     server: &Arc<Mutex<ServerPeripheral>>,
     event_tx: &mpsc::Sender<SessionEvent>,
-    server_clients: &mut HashMap<String, String>,
+    server_clients: &mut HashMap<String, (String, String)>,
     reassemblers: &mut HashMap<String, Reassembler>,
 ) -> Result<()> {
     match event {
@@ -1003,11 +1208,14 @@ async fn handle_server_event(
                             remote.peer_id
                         );
                         let (outbound, outbound_rx) = mpsc::channel(64);
-                        server_clients.insert(client, remote.peer_id.clone());
+                        let session_id = uuid::Uuid::new_v4().to_string();
+                        server_clients.insert(client, (remote.peer_id.clone(), session_id.clone()));
                         spawn_server_writer(Arc::clone(server), outbound_rx);
+                        outbound.send(Message::hello(peer)).await.ok();
                         event_tx
                             .send(SessionEvent::Ready {
                                 peer: remote,
+                                session_id,
                                 outbound,
                             })
                             .await
@@ -1036,9 +1244,15 @@ async fn handle_server_event(
                 request.characteristic
             );
             if request.characteristic == OUTGOING_MESSAGE_UUID && !subscribed {
-                if let Some(peer_id) = server_clients.remove(&request.client) {
+                if let Some((peer_id, session_id)) = server_clients.remove(&request.client) {
                     reassemblers.remove(&request.client);
-                    event_tx.send(SessionEvent::Closed(peer_id)).await.ok();
+                    event_tx
+                        .send(SessionEvent::Closed {
+                            peer_id,
+                            session_id,
+                        })
+                        .await
+                        .ok();
                 }
             }
         }
@@ -1059,6 +1273,18 @@ fn should_start_central_session(local_peer_id: &str, remote_peer_id: &str) -> bo
     {
         should_initiate(local_peer_id, remote_peer_id)
     }
+}
+
+fn close_current_session(
+    session_ids: &mut HashMap<String, String>,
+    peer_id: &str,
+    session_id: &str,
+) -> bool {
+    if session_ids.get(peer_id).map(String::as_str) != Some(session_id) {
+        return false;
+    }
+    session_ids.remove(peer_id);
+    true
 }
 
 fn peer_info_from_hello(message: &Message) -> Option<PeerInfo> {
@@ -1323,6 +1549,20 @@ mod tests {
             command,
             IpcCommand::SetDiscoverable { enabled: false }
         ));
+        let command: IpcCommand =
+            serde_json::from_str(r#"{"type":"connect_peer","peer_id":"ace_peer"}"#).unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::ConnectPeer { peer_id } if peer_id == "ace_peer"
+        ));
+        let command: IpcCommand =
+            serde_json::from_str(r#"{"type":"send_message","peer_id":"ace_peer","text":"hello"}"#)
+                .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::SendMessage { peer_id, text }
+                if peer_id == "ace_peer" && text == "hello"
+        ));
         let event = serde_json::to_value(IpcEvent::DiscoveryStarted).unwrap();
         assert_eq!(event["type"], "discovery_started");
         let event = serde_json::to_value(IpcEvent::DiscoverabilityChanged {
@@ -1331,6 +1571,12 @@ mod tests {
         .unwrap();
         assert_eq!(event["type"], "discoverability_changed");
         assert_eq!(event["discoverable"], false);
+        let event = serde_json::to_value(IpcEvent::PeerConnectionFailed {
+            peer_id: "ace_peer".to_owned(),
+            message: "timeout".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(event["type"], "peer_connection_failed");
     }
 
     #[test]
@@ -1424,6 +1670,26 @@ mod tests {
             assert!(should_start_central_session("crew_a", "crew_z"));
             assert!(!should_start_central_session("crew_z", "crew_a"));
         }
+    }
+
+    #[test]
+    fn stale_physical_session_close_does_not_remove_current_session() {
+        let mut sessions = HashMap::from([("ace_peer".to_owned(), "session_new".to_owned())]);
+        assert!(!close_current_session(
+            &mut sessions,
+            "ace_peer",
+            "session_old"
+        ));
+        assert_eq!(
+            sessions.get("ace_peer").map(String::as_str),
+            Some("session_new")
+        );
+        assert!(close_current_session(
+            &mut sessions,
+            "ace_peer",
+            "session_new"
+        ));
+        assert!(!sessions.contains_key("ace_peer"));
     }
 
     #[tokio::test]

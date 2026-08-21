@@ -968,6 +968,21 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     }
     return { type, enabled: value.enabled };
   }
+  if (type === 'connect_peer' || type === 'disconnect_peer') {
+    if (typeof value.peer_id !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value.peer_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer id`);
+    }
+    return { type, peer_id: value.peer_id };
+  }
+  if (type === 'send_message') {
+    if (typeof value.peer_id !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value.peer_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer id`);
+    }
+    if (typeof value.text !== 'string' || value.text.trim().length === 0 || value.text.length > 8_000) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby message`);
+    }
+    return { type, peer_id: value.peer_id, text: value.text.trim() };
+  }
   if (type === 'create_room') {
     if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);

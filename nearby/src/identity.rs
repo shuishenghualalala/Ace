@@ -63,7 +63,7 @@ pub fn load_or_create_peer_id(state_dir: &Path, requested: Option<&str>) -> Resu
             })?;
             validate_peer_id(&identity.peer_id)?
         }
-        None => format!("crew_{}", Uuid::new_v4().simple()),
+        None => format!("ace_{}", Uuid::new_v4().simple()),
     };
 
     let identity = PeerIdentityFile {
@@ -121,11 +121,11 @@ pub fn default_display_name() -> String {
     env::var("CREW_DISPLAY_NAME")
         .or_else(|_| env::var("USER"))
         .or_else(|_| env::var("USERNAME"))
-        .unwrap_or_else(|_| "Crew User".to_owned())
+        .unwrap_or_else(|_| "Ace User".to_owned())
 }
 
 pub fn default_agent_name() -> String {
-    env::var("CREW_AGENT_NAME").unwrap_or_else(|_| "Crew Agent".to_owned())
+    env::var("CREW_AGENT_NAME").unwrap_or_else(|_| "Ace Agent".to_owned())
 }
 
 #[cfg(test)]

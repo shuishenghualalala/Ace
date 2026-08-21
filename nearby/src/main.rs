@@ -116,7 +116,7 @@ fn next_value(values: &mut impl Iterator<Item = String>, argument: &str) -> Resu
 
 fn print_help() {
     println!(
-        "Crew Nearby BLE PoC\n\nUsage:\n  cargo run --manifest-path nearby/Cargo.toml -- [options]\n\nOptions:\n  --display-name <name>      Local display name\n  --agent-name <name>        Local agent name\n  --capability <name>        Add a capability; may be repeated\n  --peer-id <id>             Override the persisted peer ID\n  --state-dir <path>         Override the nearby state directory\n  --discoverable             Enable BLE advertising\n  --no-discoverable          Disable BLE advertising\n  --transport <ble|mock>     Select the transport backend\n  --mock-endpoint <addr>     Mock Bus TCP endpoint\n  --mock-bus                 Run the Mock Bus coordinator\n  --ipc                      Use JSONL IPC mode for the desktop client\n  --cli                      Use the interactive Nearby CLI\n  -h, --help                 Show this help"
+        "Ace Nearby BLE\n\nUsage:\n  cargo run --manifest-path nearby/Cargo.toml -- [options]\n\nOptions:\n  --display-name <name>      Local display name\n  --agent-name <name>        Local agent name\n  --capability <name>        Add a capability; may be repeated\n  --peer-id <id>             Override the persisted peer ID\n  --state-dir <path>         Override the nearby state directory\n  --discoverable             Enable BLE advertising\n  --no-discoverable          Disable BLE advertising\n  --transport <ble|mock>     Select the transport backend\n  --mock-endpoint <addr>     Mock Bus TCP endpoint\n  --mock-bus                 Run the Mock Bus coordinator\n  --ipc                      Use JSONL IPC mode for the desktop client\n  --cli                      Use the interactive Nearby CLI\n  -h, --help                 Show this help"
     );
 }
 
@@ -182,5 +182,11 @@ mod tests {
         assert_eq!(arguments.transport, TransportMode::Mock);
         assert_eq!(arguments.mock_endpoint.as_deref(), Some("127.0.0.1:39202"));
         assert!(arguments.mock_bus);
+    }
+
+    #[test]
+    fn defaults_to_ble() {
+        let default = Arguments::parse(std::iter::empty()).unwrap();
+        assert_eq!(default.transport, TransportMode::Ble);
     }
 }
