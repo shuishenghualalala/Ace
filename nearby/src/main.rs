@@ -2,7 +2,9 @@ mod cli;
 
 use anyhow::{bail, Result};
 use crew_nearby::ipc::run as run_ipc;
+use crew_nearby::mock::run_bus;
 use crew_nearby::runtime::{run, NearbyConfig};
+use crew_nearby::transport::TransportMode;
 use std::env;
 
 #[tokio::main]
@@ -28,13 +30,21 @@ async fn main() -> Result<()> {
         peer_id: arguments.peer_id,
         state_dir: arguments.state_dir,
         discoverable: arguments.discoverable,
+        transport: arguments.transport,
+        mock_endpoint: arguments.mock_endpoint.clone(),
     };
+    if arguments.mock_bus {
+        if arguments.transport != TransportMode::Mock {
+            bail!("--mock-bus requires --transport mock");
+        }
+        return run_bus(arguments.mock_endpoint).await;
+    }
     if arguments.cli {
         if arguments.ipc {
             bail!("--cli and --ipc cannot be used together");
         }
         cli::run(config)
-    } else if arguments.ipc {
+    } else if arguments.ipc || arguments.transport == TransportMode::Mock {
         run_ipc(config).await
     } else {
         run(config).await
@@ -49,6 +59,9 @@ struct Arguments {
     peer_id: Option<String>,
     state_dir: Option<std::path::PathBuf>,
     discoverable: Option<bool>,
+    transport: TransportMode,
+    mock_endpoint: Option<String>,
+    mock_bus: bool,
     help_requested: bool,
     ipc: bool,
     cli: bool,
@@ -73,6 +86,18 @@ impl Arguments {
                 }
                 "--discoverable" => arguments.discoverable = Some(true),
                 "--no-discoverable" => arguments.discoverable = Some(false),
+                "--transport" => {
+                    let value = next_value(&mut values, &argument)?;
+                    arguments.transport = match value.as_str() {
+                        "ble" => TransportMode::Ble,
+                        "mock" => TransportMode::Mock,
+                        _ => bail!("unsupported transport: {value}; expected ble or mock"),
+                    };
+                }
+                "--mock-endpoint" => {
+                    arguments.mock_endpoint = Some(next_value(&mut values, &argument)?);
+                }
+                "--mock-bus" => arguments.mock_bus = true,
                 "--help" | "-h" => arguments.help_requested = true,
                 "--ipc" => arguments.ipc = true,
                 "--cli" => arguments.cli = true,
@@ -91,7 +116,7 @@ fn next_value(values: &mut impl Iterator<Item = String>, argument: &str) -> Resu
 
 fn print_help() {
     println!(
-        "Crew Nearby BLE PoC\n\nUsage:\n  cargo run --manifest-path nearby/Cargo.toml -- [options]\n\nOptions:\n  --display-name <name>    Local display name\n  --agent-name <name>      Local agent name\n  --capability <name>      Add a capability; may be repeated\n  --peer-id <id>           Override the persisted peer ID\n  --state-dir <path>       Override the nearby state directory\n  --discoverable           Enable BLE advertising\n  --no-discoverable        Disable BLE advertising\n  --ipc                    Use JSONL IPC mode for the desktop client\n  --cli                    Use the interactive Nearby CLI\n  -h, --help               Show this help"
+        "Crew Nearby BLE PoC\n\nUsage:\n  cargo run --manifest-path nearby/Cargo.toml -- [options]\n\nOptions:\n  --display-name <name>      Local display name\n  --agent-name <name>        Local agent name\n  --capability <name>        Add a capability; may be repeated\n  --peer-id <id>             Override the persisted peer ID\n  --state-dir <path>         Override the nearby state directory\n  --discoverable             Enable BLE advertising\n  --no-discoverable          Disable BLE advertising\n  --transport <ble|mock>     Select the transport backend\n  --mock-endpoint <addr>     Mock Bus TCP endpoint\n  --mock-bus                 Run the Mock Bus coordinator\n  --ipc                      Use JSONL IPC mode for the desktop client\n  --cli                      Use the interactive Nearby CLI\n  -h, --help                 Show this help"
     );
 }
 
@@ -138,5 +163,24 @@ mod tests {
         let arguments = Arguments::parse(["--cli"].into_iter().map(str::to_owned)).unwrap();
         assert!(arguments.cli);
         assert!(!arguments.ipc);
+    }
+
+    #[test]
+    fn parses_mock_transport_options() {
+        let arguments = Arguments::parse(
+            [
+                "--transport",
+                "mock",
+                "--mock-endpoint",
+                "127.0.0.1:39202",
+                "--mock-bus",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(arguments.transport, TransportMode::Mock);
+        assert_eq!(arguments.mock_endpoint.as_deref(), Some("127.0.0.1:39202"));
+        assert!(arguments.mock_bus);
     }
 }

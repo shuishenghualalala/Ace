@@ -78,7 +78,7 @@ fn incoming_write_type(characteristic: &btleplug::api::Characteristic) -> Result
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum IpcCommand {
+pub(crate) enum IpcCommand {
     StartDiscovery,
     StopDiscovery,
     SetDiscoverable {
@@ -118,7 +118,7 @@ enum IpcCommand {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum IpcEvent {
+pub(crate) enum IpcEvent {
     Ready {
         peer: PeerInfo,
         discoverable: bool,
@@ -166,11 +166,11 @@ enum IpcEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RoomState {
-    room_name: String,
-    peer_ids: HashSet<String>,
+pub(crate) struct RoomState {
+    pub(crate) room_name: String,
+    pub(crate) peer_ids: HashSet<String>,
     #[serde(default)]
-    messages: Vec<Message>,
+    pub(crate) messages: Vec<Message>,
 }
 
 #[cfg(target_os = "linux")]
@@ -197,10 +197,14 @@ enum SessionEvent {
 }
 
 #[derive(Clone)]
-struct EventSink(Arc<Mutex<BufWriter<io::Stdout>>>);
+pub(crate) struct EventSink(Arc<Mutex<BufWriter<io::Stdout>>>);
 
 impl EventSink {
-    async fn send(&self, event: IpcEvent) -> Result<()> {
+    pub(crate) fn stdout() -> Self {
+        Self(Arc::new(Mutex::new(BufWriter::new(io::stdout()))))
+    }
+
+    pub(crate) async fn send(&self, event: IpcEvent) -> Result<()> {
         let line = serde_json::to_string(&event).context("failed to encode Nearby IPC event")?;
         let mut output = self.0.lock().await;
         output
@@ -223,7 +227,7 @@ fn rooms_path(state_dir: &Path) -> std::path::PathBuf {
     state_dir.join(ROOMS_FILE_NAME)
 }
 
-fn load_rooms(state_dir: &Path) -> Result<HashMap<String, RoomState>> {
+pub(crate) fn load_rooms(state_dir: &Path) -> Result<HashMap<String, RoomState>> {
     let path = rooms_path(state_dir);
     if !path.exists() {
         return Ok(HashMap::new());
@@ -234,7 +238,7 @@ fn load_rooms(state_dir: &Path) -> Result<HashMap<String, RoomState>> {
         .with_context(|| format!("failed to decode Nearby room history {}", path.display()))
 }
 
-fn save_rooms(state_dir: &Path, rooms: &HashMap<String, RoomState>) -> Result<()> {
+pub(crate) fn save_rooms(state_dir: &Path, rooms: &HashMap<String, RoomState>) -> Result<()> {
     fs::create_dir_all(state_dir).with_context(|| {
         format!(
             "failed to create Nearby state directory {}",
@@ -267,7 +271,7 @@ fn save_rooms(state_dir: &Path, rooms: &HashMap<String, RoomState>) -> Result<()
     Ok(())
 }
 
-fn remember_room_message(room: &mut RoomState, message: &Message) {
+pub(crate) fn remember_room_message(room: &mut RoomState, message: &Message) {
     room.messages.push(message.clone());
     if room.messages.len() > ROOM_HISTORY_LIMIT {
         let excess = room.messages.len() - ROOM_HISTORY_LIMIT;
@@ -276,6 +280,10 @@ fn remember_room_message(room: &mut RoomState, message: &Message) {
 }
 
 pub async fn run(config: NearbyConfig) -> Result<()> {
+    crate::transport::run(config).await
+}
+
+pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
     let state_dir = resolve_state_dir(config.state_dir.as_deref());
     let mut discoverable = config
         .discoverable
@@ -626,7 +634,7 @@ fn command_name(command: &IpcCommand) -> &'static str {
     }
 }
 
-fn create_peer(config: &NearbyConfig) -> Result<PeerInfo> {
+pub(crate) fn create_peer(config: &NearbyConfig) -> Result<PeerInfo> {
     let state_dir = resolve_state_dir(config.state_dir.as_deref());
     Ok(PeerInfo {
         protocol_version: PROTOCOL_VERSION,
@@ -1102,7 +1110,7 @@ async fn send_to_peers(
     }
 }
 
-async fn broadcast_room_message(
+pub(crate) async fn broadcast_room_message(
     sessions: &HashMap<String, mpsc::Sender<Message>>,
     room: &RoomState,
     message: &Message,
@@ -1116,7 +1124,7 @@ async fn broadcast_room_message(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_received_message(
+pub(crate) async fn handle_received_message(
     local_peer_id: &str,
     sessions: &HashMap<String, mpsc::Sender<Message>>,
     rooms: &mut HashMap<String, RoomState>,
@@ -1217,14 +1225,14 @@ fn is_room_member(peer_ids: &[String], local_peer_id: &str) -> bool {
     peer_ids.iter().any(|peer_id| peer_id == local_peer_id)
 }
 
-fn filter_room_mentions(mentions: Vec<String>, room: &RoomState) -> Vec<String> {
+pub(crate) fn filter_room_mentions(mentions: Vec<String>, room: &RoomState) -> Vec<String> {
     mentions
         .into_iter()
         .filter(|peer_id| room.peer_ids.contains(peer_id))
         .collect()
 }
 
-fn validate_file_transfer(
+pub(crate) fn validate_file_transfer(
     file_id: &str,
     name: &str,
     mime_type: &str,

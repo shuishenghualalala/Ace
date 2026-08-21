@@ -1,0 +1,425 @@
+use crate::{
+    identity::{load_nearby_settings, resolve_state_dir, save_nearby_settings, NearbySettings},
+    ipc::{
+        broadcast_room_message, create_peer, filter_room_mentions, handle_received_message,
+        load_rooms, remember_room_message, save_rooms, validate_file_transfer, EventSink,
+        IpcCommand, IpcEvent, RoomState,
+    },
+    protocol::{FileChunk, Message, PeerInfo},
+    runtime::NearbyConfig,
+};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+    sync::{mpsc, Mutex},
+};
+
+pub const DEFAULT_ENDPOINT: &str = "127.0.0.1:39201";
+const FILE_CHUNK_BASE64_BYTES: usize = 8 * 1024;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum BusRequest {
+    Register { peer: PeerInfo, discoverable: bool },
+    Connect { peer_id: String },
+    Send { to: String, message: Message },
+    Unregister,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum BusEvent {
+    PeerDiscovered { peer: PeerInfo },
+    PeerConnected { peer: PeerInfo },
+    PeerDisconnected { peer_id: String },
+    Message { peer_id: String, message: Message },
+}
+
+#[derive(Clone)]
+struct BusPeer {
+    peer: PeerInfo,
+    discoverable: bool,
+    events: mpsc::Sender<BusEvent>,
+}
+
+type BusPeers = Arc<Mutex<HashMap<String, BusPeer>>>;
+
+pub async fn run_bus(endpoint: Option<String>) -> Result<()> {
+    let endpoint = endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned());
+    let address: SocketAddr = endpoint
+        .parse()
+        .with_context(|| format!("invalid Mock Bus endpoint {endpoint}"))?;
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("failed to bind Mock Bus at {endpoint}"))?;
+    eprintln!("[nearby][mock] bus_listening endpoint={endpoint}");
+    let peers: BusPeers = Arc::new(Mutex::new(HashMap::new()));
+    loop {
+        let (stream, _) = listener.accept().await.context("Mock Bus accept failed")?;
+        let peers = Arc::clone(&peers);
+        tokio::spawn(async move {
+            if let Err(error) = handle_bus_connection(stream, peers).await {
+                eprintln!("[nearby][mock] bus_client_error error={error}");
+            }
+        });
+    }
+}
+
+async fn handle_bus_connection(stream: TcpStream, peers: BusPeers) -> Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let (event_tx, mut event_rx) = mpsc::channel::<BusEvent>(128);
+    let writer_task = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            let line = serde_json::to_string(&event).context("failed to encode Mock Bus event")?;
+            writer.write_all(line.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+    let mut lines = BufReader::new(reader).lines();
+    let mut local_peer_id: Option<String> = None;
+
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("failed to read Mock Bus request")?
+    {
+        let request: BusRequest =
+            serde_json::from_str(&line).context("invalid Mock Bus request")?;
+        match request {
+            BusRequest::Register { peer, discoverable } => {
+                let previous = {
+                    let mut peers = peers.lock().await;
+                    let existing = peers
+                        .values()
+                        .filter(|candidate| candidate.discoverable)
+                        .map(|candidate| candidate.peer.clone())
+                        .collect::<Vec<_>>();
+                    peers.insert(
+                        peer.peer_id.clone(),
+                        BusPeer {
+                            peer: peer.clone(),
+                            discoverable,
+                            events: event_tx.clone(),
+                        },
+                    );
+                    existing
+                };
+                local_peer_id = Some(peer.peer_id.clone());
+                for candidate in previous {
+                    event_tx
+                        .send(BusEvent::PeerDiscovered { peer: candidate })
+                        .await
+                        .ok();
+                }
+                if discoverable {
+                    let targets = peers
+                        .lock()
+                        .await
+                        .values()
+                        .filter(|candidate| {
+                            candidate.peer.peer_id != peer.peer_id && candidate.discoverable
+                        })
+                        .map(|candidate| candidate.events.clone())
+                        .collect::<Vec<_>>();
+                    for target in targets {
+                        target
+                            .send(BusEvent::PeerDiscovered { peer: peer.clone() })
+                            .await
+                            .ok();
+                    }
+                }
+            }
+            BusRequest::Connect { peer_id } => {
+                let Some(local_id) = local_peer_id.as_deref() else {
+                    bail!("Mock Bus client must register before connecting");
+                };
+                let (local_events, remote) = {
+                    let peers = peers.lock().await;
+                    (
+                        peers.get(local_id).map(|peer| peer.events.clone()),
+                        peers.get(&peer_id).cloned(),
+                    )
+                };
+                if let Some(remote) = remote {
+                    if let Some(local_events) = local_events {
+                        local_events
+                            .send(BusEvent::PeerConnected {
+                                peer: remote.peer.clone(),
+                            })
+                            .await
+                            .ok();
+                    }
+                    remote
+                        .events
+                        .send(BusEvent::PeerConnected {
+                            peer: peers
+                                .lock()
+                                .await
+                                .get(local_id)
+                                .map(|peer| peer.peer.clone())
+                                .context("Mock Bus local peer disappeared")?,
+                        })
+                        .await
+                        .ok();
+                }
+            }
+            BusRequest::Send { to, message } => {
+                let Some(local_id) = local_peer_id.as_deref() else {
+                    bail!("Mock Bus client must register before sending");
+                };
+                let target = peers.lock().await.get(&to).map(|peer| peer.events.clone());
+                if let Some(target) = target {
+                    target
+                        .send(BusEvent::Message {
+                            peer_id: local_id.to_owned(),
+                            message,
+                        })
+                        .await
+                        .ok();
+                }
+            }
+            BusRequest::Unregister => break,
+        }
+    }
+
+    if let Some(peer_id) = local_peer_id {
+        let targets = {
+            let mut peers = peers.lock().await;
+            peers.remove(&peer_id);
+            peers
+                .values()
+                .map(|peer| peer.events.clone())
+                .collect::<Vec<_>>()
+        };
+        for target in targets {
+            target
+                .send(BusEvent::PeerDisconnected {
+                    peer_id: peer_id.clone(),
+                })
+                .await
+                .ok();
+        }
+    }
+    writer_task.abort();
+    Ok(())
+}
+
+struct MockClient {
+    requests: mpsc::Sender<BusRequest>,
+    events: mpsc::Receiver<BusEvent>,
+}
+
+impl MockClient {
+    async fn connect(endpoint: &str, peer: &PeerInfo, discoverable: bool) -> Result<Self> {
+        let stream = TcpStream::connect(endpoint)
+            .await
+            .with_context(|| format!("failed to connect to Mock Bus {endpoint}"))?;
+        let (reader, mut writer) = stream.into_split();
+        let (request_tx, mut request_rx) = mpsc::channel::<BusRequest>(128);
+        let (event_tx, event_rx) = mpsc::channel::<BusEvent>(128);
+        tokio::spawn(async move {
+            while let Some(request) = request_rx.recv().await {
+                let line = match serde_json::to_string(&request) {
+                    Ok(line) => line,
+                    Err(_) => break,
+                };
+                if writer.write_all(line.as_bytes()).await.is_err()
+                    || writer.write_all(b"\n").await.is_err()
+                    || writer.flush().await.is_err()
+                {
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(reader).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(event) = serde_json::from_str::<BusEvent>(&line) else {
+                    continue;
+                };
+                if event_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        request_tx
+            .send(BusRequest::Register {
+                peer: peer.clone(),
+                discoverable,
+            })
+            .await
+            .context("failed to register with Mock Bus")?;
+        Ok(Self {
+            requests: request_tx,
+            events: event_rx,
+        })
+    }
+}
+
+pub async fn run(config: NearbyConfig) -> Result<()> {
+    let state_dir = resolve_state_dir(config.state_dir.as_deref());
+    let discoverable = config
+        .discoverable
+        .unwrap_or(load_nearby_settings(&state_dir)?.discoverable);
+    let peer = create_peer(&config)?;
+    let endpoint = config.mock_endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT);
+    let mut client = MockClient::connect(endpoint, &peer, discoverable).await?;
+    let sink = EventSink::stdout();
+    sink.send(IpcEvent::Ready {
+        peer: peer.clone(),
+        discoverable,
+    })
+    .await?;
+    sink.send(IpcEvent::DiscoveryStarted).await?;
+
+    let mut rooms = load_rooms(&state_dir)?;
+    for (room_id, room) in rooms.clone() {
+        sink.send(IpcEvent::RoomRestored {
+            room_id,
+            room_name: room.room_name,
+            peer_ids: room.peer_ids.into_iter().collect(),
+            messages: room.messages,
+        })
+        .await?;
+    }
+    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+    let mut sessions: HashMap<String, mpsc::Sender<Message>> = HashMap::new();
+    let mut requested_connections = HashSet::new();
+    let mut connected_peers = HashSet::new();
+    let mut seen_messages = HashSet::new();
+
+    loop {
+        tokio::select! {
+            line = stdin.next_line() => {
+                let Some(line) = line.context("failed to read Mock Nearby command")? else { break; };
+                if line.trim().is_empty() { continue; }
+                let command = serde_json::from_str::<IpcCommand>(&line).context("invalid Nearby IPC command")?;
+                match command {
+                    IpcCommand::StartDiscovery => sink.send(IpcEvent::DiscoveryStarted).await?,
+                    IpcCommand::StopDiscovery => sink.send(IpcEvent::DiscoveryStopped).await?,
+                    IpcCommand::SetDiscoverable { enabled } => {
+                        save_nearby_settings(&state_dir, &NearbySettings { discoverable: enabled })?;
+                        sink.send(IpcEvent::DiscoverabilityChanged { discoverable: enabled }).await?;
+                    }
+                    IpcCommand::CreateRoom { room_id, room_name, peer_ids } => {
+                        let selected = peer_ids.into_iter().filter(|peer_id| sessions.contains_key(peer_id)).collect::<Vec<_>>();
+                        if selected.is_empty() {
+                            sink.send(IpcEvent::Error { message: "没有可用的同伴连接".to_owned() }).await?;
+                            continue;
+                        }
+                        let mut participants = selected.iter().cloned().collect::<HashSet<_>>();
+                        participants.insert(peer.peer_id.clone());
+                        rooms.insert(room_id.clone(), RoomState { room_name: room_name.clone(), peer_ids: participants.clone(), messages: Vec::new() });
+                        save_rooms(&state_dir, &rooms)?;
+                        let invite = Message::room_invite(peer.peer_id.clone(), room_id.clone(), room_name.clone(), participants.iter().cloned().collect());
+                        send_messages(&sessions, &selected, invite).await;
+                        sink.send(IpcEvent::RoomCreated { room_id, room_name, peer_ids: participants.into_iter().collect() }).await?;
+                    }
+                    IpcCommand::SendRoomMessage { room_id, text, mentions, reply_to } => {
+                        if !rooms.contains_key(&room_id) {
+                            sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
+                            continue;
+                        }
+                        let mentions = filter_room_mentions(mentions, rooms.get(&room_id).unwrap());
+                        let message = Message::room_message_with_context(peer.peer_id.clone(), room_id.clone(), text, mentions, reply_to);
+                        remember_room_message(rooms.get_mut(&room_id).unwrap(), &message);
+                        save_rooms(&state_dir, &rooms)?;
+                        if let Some(room) = rooms.get(&room_id) { broadcast_room_message(&sessions, room, &message).await; }
+                        seen_messages.insert(message.message_id.clone());
+                        sink.send(IpcEvent::Message { peer_id: peer.peer_id.clone(), message }).await?;
+                    }
+                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, data_base64, mentions, reply_to } => {
+                        if !rooms.contains_key(&room_id) {
+                            sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
+                            continue;
+                        }
+                        if let Err(error) = validate_file_transfer(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
+                            sink.send(IpcEvent::Error { message: error.to_string() }).await?;
+                            continue;
+                        }
+                        let mentions = filter_room_mentions(mentions, rooms.get(&room_id).unwrap());
+                        let chunks = if data_base64.is_empty() { vec![&[][..]] } else { data_base64.as_bytes().chunks(FILE_CHUNK_BASE64_BYTES).collect::<Vec<_>>() };
+                        let chunk_total = u32::try_from(chunks.len().max(1)).context("file has too many chunks")?;
+                        for (chunk_index, data) in chunks.into_iter().enumerate() {
+                            let file = FileChunk { file_id: file_id.clone(), name: name.clone(), mime_type: mime_type.clone(), size, sha256: sha256.clone(), chunk_index: u32::try_from(chunk_index)?, chunk_total, data_base64: String::from_utf8(data.to_vec())? };
+                            let message = Message::room_file(peer.peer_id.clone(), room_id.clone(), file, mentions.clone(), reply_to.clone());
+                            remember_room_message(rooms.get_mut(&room_id).unwrap(), &message);
+                            if let Some(room) = rooms.get(&room_id) { broadcast_room_message(&sessions, room, &message).await; }
+                            seen_messages.insert(message.message_id.clone());
+                            sink.send(IpcEvent::Message { peer_id: peer.peer_id.clone(), message }).await?;
+                        }
+                        save_rooms(&state_dir, &rooms)?;
+                    }
+                    IpcCommand::LeaveRoom { room_id } => {
+                        if let Some(room) = rooms.remove(&room_id) {
+                            let leave = Message::room_leave(peer.peer_id.clone(), room_id.clone());
+                            send_messages(&sessions, &room.peer_ids.iter().filter(|id| *id != &peer.peer_id).cloned().collect::<Vec<_>>(), leave).await;
+                            save_rooms(&state_dir, &rooms)?;
+                            sink.send(IpcEvent::RoomLeft { room_id }).await?;
+                        }
+                    }
+                    IpcCommand::Shutdown => break,
+                }
+            }
+            Some(event) = client.events.recv() => match event {
+                BusEvent::PeerDiscovered { peer: remote } => {
+                    sink.send(IpcEvent::PeerDiscovered { peer: remote.clone() }).await?;
+                    if remote.peer_id != peer.peer_id && requested_connections.insert(remote.peer_id.clone()) {
+                        client.requests.send(BusRequest::Connect { peer_id: remote.peer_id }).await.ok();
+                    }
+                }
+                BusEvent::PeerConnected { peer: remote } => {
+                    if remote.peer_id == peer.peer_id { continue; }
+                    if !sessions.contains_key(&remote.peer_id) {
+                        let (outbound, mut outbound_rx) = mpsc::channel(64);
+                        let requests = client.requests.clone();
+                        let remote_id = remote.peer_id.clone();
+                        tokio::spawn(async move {
+                            while let Some(message) = outbound_rx.recv().await {
+                                if requests.send(BusRequest::Send { to: remote_id.clone(), message }).await.is_err() { break; }
+                            }
+                        });
+                        sessions.insert(remote.peer_id.clone(), outbound);
+                    }
+                    if connected_peers.insert(remote.peer_id.clone()) {
+                        sink.send(IpcEvent::PeerConnected { peer: remote }).await?;
+                    }
+                }
+                BusEvent::PeerDisconnected { peer_id } => {
+                    sessions.remove(&peer_id);
+                    connected_peers.remove(&peer_id);
+                    requested_connections.remove(&peer_id);
+                    sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
+                }
+                BusEvent::Message { peer_id, message } => {
+                    handle_received_message(&peer.peer_id, &sessions, &mut rooms, &mut seen_messages, &sink, peer_id, message).await?;
+                    save_rooms(&state_dir, &rooms)?;
+                }
+            },
+            else => break,
+        }
+    }
+    client.requests.send(BusRequest::Unregister).await.ok();
+    Ok(())
+}
+
+async fn send_messages(
+    sessions: &HashMap<String, mpsc::Sender<Message>>,
+    peer_ids: &[String],
+    message: Message,
+) {
+    for peer_id in peer_ids {
+        if let Some(session) = sessions.get(peer_id) {
+            session.send(message.clone()).await.ok();
+        }
+    }
+}

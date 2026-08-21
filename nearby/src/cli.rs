@@ -14,6 +14,7 @@ use std::{
 use uuid::Uuid;
 
 use crew_nearby::runtime::NearbyConfig;
+use crew_nearby::transport::TransportMode;
 
 const MAX_NEARBY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -71,6 +72,12 @@ pub fn run(config: NearbyConfig) -> Result<()> {
     }
     if let Some(state_dir) = &config.state_dir {
         child_command.arg("--state-dir").arg(state_dir);
+    }
+    if config.transport == TransportMode::Mock {
+        child_command.arg("--transport").arg("mock");
+        if let Some(endpoint) = &config.mock_endpoint {
+            child_command.arg("--mock-endpoint").arg(endpoint);
+        }
     }
     match config.discoverable {
         Some(true) => {

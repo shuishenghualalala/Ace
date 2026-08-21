@@ -6,6 +6,7 @@ use crate::protocol::{
     should_initiate, FrameCodec, Message, PeerInfo, Reassembler, INCOMING_MESSAGE_UUID,
     OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
 };
+use crate::transport::TransportMode;
 use anyhow::{Context, Result};
 use ble_peripheral_rust::{
     gatt::{
@@ -46,6 +47,8 @@ pub struct NearbyConfig {
     pub state_dir: Option<PathBuf>,
     /// `None` loads the persisted local preference; `Some` is a CLI override.
     pub discoverable: Option<bool>,
+    pub transport: TransportMode,
+    pub mock_endpoint: Option<String>,
 }
 
 impl Default for NearbyConfig {
@@ -57,6 +60,8 @@ impl Default for NearbyConfig {
             peer_id: None,
             state_dir: None,
             discoverable: None,
+            transport: TransportMode::Ble,
+            mock_endpoint: None,
         }
     }
 }

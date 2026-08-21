@@ -38,6 +38,7 @@
       <tr><td><code>nearby/src/protocol.rs</code></td><td>UUID、PeerInfo、Message、FrameCodec、Reassembler 和协议单元测试。</td></tr>
       <tr><td><code>nearby/src/runtime.rs</code></td><td>BLE Peripheral 广播、Central 扫描连接、GATT 交互和终端消息循环。</td></tr>
       <tr><td><code>nearby/src/ipc.rs</code></td><td>Electron JSONL IPC、多个 PeerSession、房间邀请、群消息转发、房间历史持久化和事件输出。</td></tr>
+      <tr><td><code>nearby/src/transport.rs</code> / <code>nearby/src/mock.rs</code></td><td>传输后端注入和跨平台 Mock Bus；默认仍使用 BLE，Mock 使用本机 TCP 回环地址协调多个 Nearby 实例。</td></tr>
       <tr><td><code>nearby/build.rs</code> / <code>nearby/Info.plist</code></td><td>在 macOS 独立 BLE 进程中嵌入 CoreBluetooth 隐私用途声明，开发模式和打包模式共用。</td></tr>
       <tr><td><code>nearby/src/cli.rs</code></td><td>交互式 CLI 代理；复用 IPC 运行时验证发现、群聊、提及、回复和文件链路。</td></tr>
       <tr><td><code>nearby/src/main.rs</code></td><td>PoC CLI 参数解析和启动入口；<code>--ipc</code> 用于桌面端托管。</td></tr>
@@ -93,6 +94,34 @@ save &lt;received-file-id&gt; ./received-hello.txt
 room leave test
 quit</pre>
   <p>可用命令还包括 <code>rooms</code>、<code>room history &lt;id&gt;</code>、<code>status</code>、<code>discover on|off</code> 和 <code>advertise on|off</code>。发送消息时使用 <code>--</code> 分隔选项和正文；回复使用 <code>--reply &lt;message_id&gt; &lt;sender_peer_id&gt; &lt;quoted_text&gt;</code>。收到文件后，CLI 会先完成分片重组，再使用 <code>save</code> 按文件 ID 校验 SHA-256 后保存。</p>
+  <h3>单机 Mock 验证模式</h3>
+  <p>为避免 BLE 硬件和 Windows/macOS 双机联调阻塞，Nearby 提供可注入的 Mock 传输后端。Mock Bus 使用跨平台 TCP 回环地址；每个 CLI 实例仍然经过同一套 JSONL IPC、房间、消息、文件和历史逻辑，默认 BLE 运行路径不变。Unix Socket 不是必需条件，因此 Windows、macOS 和 Linux 使用相同命令。</p>
+  <pre># 终端 1：启动 Mock Bus
+cargo run --manifest-path nearby/Cargo.toml -- \
+  --transport mock --mock-bus --mock-endpoint 127.0.0.1:39202
+
+# 终端 2：启动实例 A
+cargo run --manifest-path nearby/Cargo.toml -- \
+  --cli --transport mock --mock-endpoint 127.0.0.1:39202 \
+  --state-dir /tmp/ace-mock-a --peer-id mock_a \
+  --display-name "Mock A" --agent-name "Agent A"
+
+# 终端 3：启动实例 B；Windows 可将状态目录换成 C:\\Temp\\ace-mock-b
+cargo run --manifest-path nearby/Cargo.toml -- \
+  --cli --transport mock --mock-endpoint 127.0.0.1:39202 \
+  --state-dir /tmp/ace-mock-b --peer-id mock_b \
+  --display-name "Mock B" --agent-name "Agent B"
+
+# 在 A 中验证发现、建群和消息
+peers
+room create mock_room --name "本机验收群" mock_b
+send mock_room -- "A -> B Mock 消息"
+
+# 在 B 中回复，并验证历史
+send mock_room -- "B -> A Mock 回复"
+room history mock_room
+quit</pre>
+  <p>Mock Bus 会模拟发现、连接、断开和消息转发；双方同时发起连接时，运行时只向上层发出一次 <code>peer_connected</code>。实例退出后重新使用同一个状态目录，会收到 <code>room_restored</code> 并恢复群聊列表与最近消息。</p>
   <h3>macOS 蓝牙权限</h3>
   <p>CoreBluetooth 的权限声明嵌入 <code>crew-nearby</code> 二进制的 <code>__TEXT,__info_plist</code> 段，因此 <code>npm run dev</code> 和 Electron 打包产物都使用同一份声明。首次打开“同伴”并启动 BLE 后，macOS 会显示蓝牙授权提示；如果之前拒绝过，需要在“系统设置 → 隐私与安全性 → 蓝牙”中重新允许，或使用 <code>tccutil reset BluetoothAlways com.crew.nearby</code> 清除该进程的授权记录后重试。</p>
   <h3>诊断日志</h3>
@@ -149,7 +178,8 @@ cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agen
       <tr><td>Windows GATT 写事件 deferral</td><td class="pass">源码检查通过</td><td>本地依赖补丁已为 WinRT 读写请求增加 <code>GetDeferral</code>/<code>Complete</code> 生命周期；Windows 实机消息回执仍待更新后验证。</td></tr>
       <tr><td>Windows → Mac 群聊消息</td><td class="pending">待 Windows 回执</td><td>Mac 端已保持 CLI 监听并多次请求 Windows 回发消息；当前尚未收到回执，不能据此宣称双向验收完成。</td></tr>
       <tr><td>完整 Nearby CLI</td><td class="pass">通过</td><td>CLI 复用 IPC 运行时，覆盖发现、广播开关、同伴列表、房间创建/加入/退出、群消息、@ 提及、回复、文件发送、文件分片接收和校验保存。</td></tr>
-      <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 22 个测试、CLI 7 个测试全部通过，包含发现开关持久化、房间历史持久化与上限、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传和平台连接策略测试。</td></tr>
+      <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 22 个测试、CLI 8 个测试全部通过，包含发现开关持久化、房间历史持久化与上限、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传、Mock 参数解析和平台连接策略测试。</td></tr>
+      <tr><td>单机 Mock Bus CLI 验收</td><td class="pass">通过</td><td>同一台 macOS 启动 Bus、实例 A 和实例 B，已验证互相发现、建群、群消息双向传递、房间历史查询，以及 B 重启后的群聊和历史恢复。</td></tr>
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pass">通过</td><td>Windows 目标编译检查通过。</td></tr>
       <tr><td><code>cargo build --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pending">本机链接环境阻塞</td><td>源码检查通过，但 macOS 环境没有 Windows <code>link.exe</code>；需在 Windows 端拉取后构建实际可执行文件。</td></tr>
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-unknown-linux-gnu</code></td><td class="pending">环境阻塞</td><td>当前 macOS 环境缺少 Linux sysroot/DBus 开发库，阻塞在 <code>libdbus-sys</code> 构建阶段；本机 Docker CLI 存在但 Docker daemon 未运行，暂不能用 Linux 容器补检。</td></tr>
