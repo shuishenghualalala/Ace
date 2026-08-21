@@ -525,4 +525,12 @@ graph TD
   <li><b>验证：</b>新增缺失 owner 不跨账户读取的后端回归；Team 测试为 <code>222 passed, 1 skipped</code>，Web MessageList/TaskBoard/history 回归为 <code>38 passed</code>，Web typecheck 通过。</li>
 </ul>
 
+<h2>160. 2026-08-21 Web/Desktop Team 流式合并语义对齐</h2>
+<ul>
+  <li><b>帧合并：</b>Web Team 消息合并器与 Desktop 对齐，支持 delta、累计快照和有重叠前缀的流式帧，不再直接字符串拼接导致重复正文。</li>
+  <li><b>过程保留：</b>流式过程文本、thinking、工具调用、<code>turnStartedAt</code> 和终态耗时统一保留；终态替换过程气泡时继续保留可展开的过程内容。</li>
+  <li><b>边界：</b>只调整 Team 内部消息投影，不改变后端事件协议、TaskBoard 节点事实或普通 Agent 消息合并。</li>
+  <li><b>验证：</b>新增累计帧、过程文本和回合计时回归；Web MessageList/TaskBoard/history 回归为 <code>39 passed</code>，Web typecheck 通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

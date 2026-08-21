@@ -604,6 +604,48 @@ describe("mergeHistoryWithLiveMessages", () => {
     expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: "runtime-info-1", status: "running" });
   });
 
+  it("merges cumulative Team stream frames without duplicating text or losing timing", () => {
+    const base: UiMessage = {
+      id: "stream-base",
+      role: "team_internal",
+      text: "先检查",
+      sourceSessionId: "web_demo::turn::merge_req::coder",
+      agentId: "coder",
+      nodeId: "build_1",
+      eventType: "team_stream",
+      displayMode: "stream",
+      processText: "先检查",
+      turnStartedAt: 100,
+      timestamp: 101,
+    };
+    const cumulative: UiMessage = {
+      ...base,
+      id: "stream-cumulative",
+      text: "先检查模型配置",
+      processText: "先检查\n读取模型配置",
+      timestamp: 103,
+    };
+    const final: UiMessage = {
+      ...cumulative,
+      id: "stream-final",
+      text: "模型配置正常。",
+      processText: "先检查\n读取模型配置",
+      eventType: "team_submit",
+      displayMode: "chat",
+      turnDurationMs: 4200,
+      timestamp: 104,
+    };
+
+    const streaming = mergeTeamInternalMessage([base], cumulative, { append: true });
+    const merged = mergeTeamInternalMessage(streaming, final);
+
+    expect(streaming[0].text).toBe("先检查模型配置");
+    expect(streaming[0].processText).toBe("先检查\n读取模型配置");
+    expect(merged[0].text).toBe("模型配置正常。");
+    expect(merged[0].turnStartedAt).toBe(100);
+    expect(merged[0].turnDurationMs).toBe(4200);
+  });
+
   it("deduplicates a live user mention answer already restored from history", () => {
     const item = teamItem({
       content: "我当前使用 K3 模型。",

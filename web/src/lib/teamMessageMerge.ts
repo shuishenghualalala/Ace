@@ -19,6 +19,21 @@ function compactText(value?: string): string {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function mergedTeamTurnTiming(
+  existing: UiMessage,
+  incoming: UiMessage,
+): Pick<UiMessage, "turnStartedAt" | "turnDurationMs"> {
+  const turnStartedAt = existing.turnStartedAt ?? incoming.turnStartedAt;
+  const persistedDuration = incoming.turnDurationMs ?? existing.turnDurationMs;
+  const turnDurationMs = !isTeamStream(incoming) && turnStartedAt != null
+    ? Math.max(0, persistedDuration ?? (incoming.timestamp || 0) - turnStartedAt)
+    : persistedDuration;
+  return {
+    ...(turnStartedAt != null ? { turnStartedAt } : {}),
+    ...(turnDurationMs != null ? { turnDurationMs } : {}),
+  };
+}
+
 export function isDuplicateAssistantOfTeamResult(existing: UiMessage, incoming: UiMessage): boolean {
   const assistant = existing.role === "assistant" ? existing : incoming.role === "assistant" ? incoming : null;
   const team = existing.role === "team_internal" ? existing : incoming.role === "team_internal" ? incoming : null;
@@ -146,6 +161,7 @@ export function mergeTeamInternalMessage(
             processText: matchedProcessText,
             thinking: mergeThinking(matched.thinking, incoming.thinking),
             toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+            ...mergedTeamTurnTiming(matched, incoming),
           },
           ...withoutDuplicateAssistant.slice(communicationIndex + 1),
         ];
@@ -157,11 +173,12 @@ export function mergeTeamInternalMessage(
 
   if (isTeamPlanningProgress(incoming) && matchingIndex >= 0) {
     return [
-      ...withoutDuplicateAssistant.slice(0, matchingIndex),
-      {
-        ...withoutDuplicateAssistant[matchingIndex],
-        ...incoming,
-      },
+        ...withoutDuplicateAssistant.slice(0, matchingIndex),
+        {
+          ...withoutDuplicateAssistant[matchingIndex],
+          ...incoming,
+          ...mergedTeamTurnTiming(withoutDuplicateAssistant[matchingIndex], incoming),
+        },
       ...withoutDuplicateAssistant.slice(matchingIndex + 1),
     ];
   }
@@ -190,6 +207,7 @@ export function mergeTeamInternalMessage(
           processText: preservedProcessText,
           thinking: mergeThinking(matched.thinking, incoming.thinking),
           toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+          ...mergedTeamTurnTiming(matched, incoming),
         }
       : {
           ...matched,
@@ -197,6 +215,7 @@ export function mergeTeamInternalMessage(
           displayMode,
           thinking: mergeThinking(matched.thinking, incoming.thinking),
           toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+          ...mergedTeamTurnTiming(matched, incoming),
         };
     return [
       ...withoutDuplicateAssistant.slice(0, matchingIndex),
@@ -217,9 +236,12 @@ export function mergeTeamInternalMessage(
       ...withoutDuplicateAssistant.slice(0, matchingIndex),
       {
         ...matched,
-        text: `${matched.text ?? ""}${incoming.text ?? ""}`,
+        text: mergeStreamingText(matched.text, incoming.text),
         thinking: mergeThinking(matched.thinking, incoming.thinking, true),
         toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+        processText: mergeStreamingText(matched.processText, incoming.processText),
+        turnStartedAt: matched.turnStartedAt ?? incoming.turnStartedAt,
+        turnDurationMs: incoming.turnDurationMs ?? matched.turnDurationMs,
         timestamp: incoming.timestamp,
       },
       ...withoutDuplicateAssistant.slice(matchingIndex + 1),
