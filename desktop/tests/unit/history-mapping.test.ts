@@ -341,6 +341,26 @@ describe('Team Session history mapping', () => {
     });
   });
 
+  it('keeps same-looking assistant final and Team summary from different requests', () => {
+    const assistant = {
+      id: 'assistant-final-req-1',
+      role: 'assistant' as const,
+      content: '项目总共用了 11 分钟 21 秒。',
+      requestId: 'req_1',
+    };
+    const summary = {
+      id: 'team-summary-req-2',
+      role: 'team_internal' as const,
+      content: assistant.content,
+      requestId: 'req_2',
+      eventType: 'team_summary' as const,
+      nodeId: 'leader_summary',
+      agentId: 'leader',
+    };
+
+    expect(mergeTeamInternalMessage([assistant], summary)).toHaveLength(2);
+  });
+
   it('deduplicates a live user mention answer already restored from history', () => {
     const history = mapBackendHistoryItem({
       role: 'team_internal',

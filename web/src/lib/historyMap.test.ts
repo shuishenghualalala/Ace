@@ -462,6 +462,26 @@ describe("mapHistoryItems", () => {
     expect(messages[0].role).toBe("team_internal");
     expect(messages[0].eventType).toBe("team_summary");
   });
+
+  it("keeps same-looking final bubbles from different requests", () => {
+    const assistant: UiMessage = {
+      id: "assistant-final-req-1",
+      role: "assistant",
+      text: "项目总共用了 11 分钟 21 秒。",
+      requestId: "req_1",
+    };
+    const summary: UiMessage = {
+      id: "team-summary-req-2",
+      role: "team_internal",
+      text: assistant.text,
+      requestId: "req_2",
+      eventType: "team_summary",
+      nodeId: "leader_summary",
+      agentId: "leader",
+    };
+
+    expect(mergeTeamInternalMessage([assistant], summary)).toHaveLength(2);
+  });
 });
 
 describe("mergeHistoryWithLiveMessages", () => {

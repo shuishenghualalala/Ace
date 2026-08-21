@@ -566,4 +566,12 @@ graph TD
   <li><b>验证：</b>Web 历史/消息/看板测试为 <code>41 passed</code>，Desktop 历史映射测试为 <code>21 passed</code>，两端 typecheck 通过。</li>
 </ul>
 
+<h2>165. 2026-08-21 Team summary 与父 final 按请求隔离</h2>
+<ul>
+  <li><b>问题：</b>父 <code>assistant</code> final 与 <code>team_summary</code> 在旧文本兜底下可能因正文相同而跨回合合并。</li>
+  <li><b>规则：</b>只要任一侧有 <code>requestId</code>，必须双方 requestId 相同且 Team 事件为 <code>team_summary</code> 才去重；双方都没有 requestId 时才保留历史文本兼容。</li>
+  <li><b>行为：</b>同一请求的父 final 仍由 Team summary 替换；不同请求即使正文完全相同，也各自保留，不影响用户查看不同回合的结果。</li>
+  <li><b>验证：</b>Web 历史/消息/看板测试为 <code>42 passed</code>，Desktop 历史映射测试为 <code>22 passed</code>，两端 typecheck 通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
