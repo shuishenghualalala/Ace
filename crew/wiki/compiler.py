@@ -174,9 +174,9 @@ _ANALYZE_SMOOTH_STEP = 1
 _ANALYZE_SMOOTH_INTERVAL = 0.4
 
 # 轻量知识单元协议版本。修改 Prompt 或单元语义时必须升级，以使旧缓存失效。
-_ANALYSIS_PROTOCOL_VERSION = "knowledge-units-v7"
+_ANALYSIS_PROTOCOL_VERSION = "knowledge-units-v8"
 
-# 长文档分块分析阈值。每块输出已被限制为紧凑知识单元，因此可以让模型读取
+# 长文档分块分析阈值。每块输出经过质量筛选并保持为紧凑知识单元，因此可以让模型读取
 # 更完整的章节上下文，减少请求数量和跨块重复。
 _CHUNK_SIZE_CHARS = 48_000
 # 低于此长度直接单轮分析，避免无意义分块
@@ -185,10 +185,6 @@ _SINGLE_PASS_THRESHOLD = 48_000
 # 有界输出。普通错误只重试一次，429/503 容量错误不重试。
 _ANALYZE_CHUNK_CONCURRENCY = 2
 _ANALYZE_CHUNK_MAX_RETRIES = 1
-_SHORT_SOURCE_THRESHOLD = 1_000
-_LONG_SOURCE_ENTITY_LIMIT = 5
-_LONG_SOURCE_TOPIC_LIMIT = 3
-_SHORT_SOURCE_ENTITY_LIMIT = 3
 # 推理型模型（如 deepseek-v4 系列）会先烧掉一笔不可见的推理 token，过小的
 # 上限会让正文一个字都吐不出来（实测空返回）；这里只是上限而非目标，
 # 非推理模型不受影响。
@@ -494,48 +490,6 @@ def _merge_analysis_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def _candidate_rank(item: dict[str, Any]) -> tuple[int, int, int]:
-    """稳定排序知识候选：核心优先，其次证据数量和置信度。"""
-    importance = 1 if item.get("importance") == "core" else 0
-    claim_count = len({
-        normalize_page_key(str(claim.get("statement", "")))
-        for claim in (item.get("claims") or [])
-        if isinstance(claim, dict) and normalize_page_key(str(claim.get("statement", "")))
-    })
-    confidence = _CONFIDENCE_ORDER.get(str(item.get("confidence") or "medium"), 1)
-    return importance, claim_count, confidence
-
-
-def _apply_document_limits(analysis: dict[str, Any], content_length: int) -> None:
-    """按整篇素材限制页面候选，而不是让配额随分块数量增长。"""
-    short_source = content_length <= _SHORT_SOURCE_THRESHOLD
-    entity_limit = (
-        _SHORT_SOURCE_ENTITY_LIMIT if short_source else _LONG_SOURCE_ENTITY_LIMIT
-    )
-    topic_limit = 0 if short_source else _LONG_SOURCE_TOPIC_LIMIT
-    analysis["entities"] = sorted(
-        analysis.get("entities") or [],
-        key=_candidate_rank,
-        reverse=True,
-    )[:entity_limit]
-    analysis["topics"] = sorted(
-        analysis.get("topics") or [],
-        key=_candidate_rank,
-        reverse=True,
-    )[:topic_limit]
-    selected = {
-        normalize_page_key(str(item.get("name", "")))
-        for bucket in ("entities", "topics")
-        for item in analysis.get(bucket) or []
-    }
-    analysis["relationships"] = [
-        relation
-        for relation in analysis.get("relationships") or []
-        if normalize_page_key(str(relation.get("source", ""))) in selected
-        and normalize_page_key(str(relation.get("target", ""))) in selected
-    ]
-
-
 def _pop_analysis_issues(analysis: dict[str, Any]) -> list[str]:
     """提取并移除分块失败标记，避免把失败误报成空分析成功。"""
     warnings = [
@@ -774,7 +728,7 @@ _ANALYSIS_PROMPT = """你负责整理知识库。请阅读下面的信息源片�
 
 请输出一个紧凑 JSON 对象（不要包含 markdown 代码块标记）：
 {{
-  "format": "knowledge-units-v7",
+  "format": "knowledge-units-v8",
   "source_summary": {{
     "one_sentence": "这一片段的核心意思，最多80字",
     "core_points": ["核心观点1", "核心观点2"]
@@ -820,13 +774,14 @@ _ANALYSIS_PROMPT = """你负责整理知识库。请阅读下面的信息源片�
 - 同一个规范 subject 只能出现在一个数组中，禁止跨类型重复。稳定知识对象归 entities，综合导航归 topics。
 - core 表示该 subject 是片段的中心对象，或即使只出现一次也值得成为规范页面；supporting 表示它只是支撑性知识。路过式名称、作者列表、参考文献条目不要输出。
 - source_summary 只概括当前片段；core_points 最多 2 条。
-- 按重要性从高到低排列；每个片段 entities 最多 3 个 unit，topics 最多 2 个 unit。Compiler 会在整篇素材合并后再次硬限制为最多 5 个 Entity 和 3 个 Topic。
+- 按重要性从高到低排列，但不要设置固定数量，也不要为了缩短结果丢弃达到质量标准的独立知识单元。
 - 宁缺毋滥，禁止为了凑数拆出近义、重复或无独立复用价值的主张。
+- 是否输出由知识质量决定：稳定、可复用且有直接证据的对象或主张应保留；路过式名称、重复表述和无法可靠定位的推断应省略。
 - 不要撰写完整 Wiki 页面，不要生成长篇摘要，不要重复原文背景。
 - confidence：多处直接证据为 high；单处直接证据为 medium；间接、模糊或时效存疑为 low。
 - 发现来源内部存在互相不兼容的说法时设置 contested=true，并在 contradictions 中简述冲突。
 - locator/excerpt 用于把主张定位回原文；无法可靠定位时留空，禁止编造。
-- relations 只记录本片段明确支持且两端都有长期复用价值的关系，最多 2 条。
+- relations 只记录本片段明确支持且两端都有长期复用价值的关系，避免装饰性或推断性连边。
 - 使用紧凑 JSON；只输出 JSON，不要任何解释文字。
 """
 
@@ -2273,7 +2228,6 @@ class WikiCompiler:
         failed = sum(1 for r in results if r.get("_chunk_failed"))
         truncated = sum(1 for r in results if r.get("_truncated"))
         merged = _merge_analysis_results(results)
-        _apply_document_limits(merged, len(content))
         merged["_analysis_meta"] = {
             "total_chunks": len(chunks),
             "analyzed_chunks": len(tasks),
